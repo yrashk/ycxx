@@ -9,10 +9,15 @@
 // reaches the table while a request runs stops it before its next translation unit and runs it
 // again at the new revision, behind the progress quantum (§4.1, §4.2), so the client sees one
 // answer. A client that hangs up stops its request (§3.2).
+//
+// An `lsp` connection is an LSP session (§6.4): its documents' buffers are the engine's editor
+// view, and each diagnosis is one more request admitted the same way, checking the document's
+// translation unit with the command line a served `compile` gave it.
 export module ycxx.daemon:server;
 
 import std;
 import ycxx.compile;
+import ycxx.lsp;
 import ycxx.pipeline;
 import ycxx.pp;
 import :posix;
@@ -122,9 +127,12 @@ class Server {
       }
     }
     // Finish the requests in flight (§7.4), then remove the socket while still holding the lock.
+    // An LSP session lasts as long as its editor: it is ended, and its `ycxx lsp` exits.
     listener_.reset();
     remove_file(paths_.socket());
     std::unique_lock g(conn_mu_);
+    lsp_closed_ = true;
+    for (int fd : lsp_fds_) shutdown_both(fd);
     conn_cv_.wait(g, [&] { return connections_ == 0; });
     log("exited");
     return 0;
@@ -229,7 +237,7 @@ class Server {
         send(fd, Kind::bye, Bye{});
         return;
       case Kind::lsp:
-        send(fd, Kind::refused, Refused{"the LSP front is not implemented yet (#99)"});
+        serve_lsp(fd);
         return;
       case Kind::compile:
         if (auto r = decode<compile::Request>(*frame)) serve_compile(fd, *r);
@@ -304,7 +312,148 @@ class Server {
         ++stats_.cancelled;
       }
     }
-    if (done) send(fd, Kind::done, *done);
+    if (done) {
+      remember(r);
+      send(fd, Kind::done, *done);
+    }
+  }
+
+  // A file's real path (its directory's, for a file not on disk yet): the name a build's cells and
+  // the file table know it by, whatever symbolic link the editor reached it through.
+  static std::string canonical(const std::string& path) {
+    if (auto r = real_path(path)) return *r;
+    const std::filesystem::path p(path);
+    if (auto dir = real_path(p.parent_path().native_encoded_string()))
+      return (std::filesystem::path(*dir) / p.filename()).native_encoded_string();
+    return path;
+  }
+
+  // The command line of each source a served request compiled, by its real path: an editor's
+  // document is checked with it (§6.4; `compile_commands.json` is the fallback still to come,
+  // #167). One copy of the request serves all its sources.
+  void remember(const compile::Request& r) {
+    auto shared = std::make_shared<const compile::Request>(r);
+    std::vector<std::pair<std::string, std::string>> sources;
+    for (std::string& s : compile::sources_of(r)) sources.emplace_back(canonical(s), std::move(s));
+    std::lock_guard g(commands_mu_);
+    for (auto& [real, spelled] : sources) commands_.insert_or_assign(std::move(real), Command{shared, std::move(spelled)});
+  }
+
+  // The request that checks the document at `real`: its unit in the last served request that
+  // compiled it, else the file alone in its directory; nothing if it is no translation unit.
+  std::optional<compile::Request> check_request(const std::string& real) {
+    {
+      std::lock_guard g(commands_mu_);
+      if (auto it = commands_.find(real); it != commands_.end()) return compile::check_one(*it->second.request, it->second.source);
+    }
+    compile::Request alone{{"-fsyntax-only", real}, std::filesystem::path(real).parent_path().native_encoded_string(), env_, 0};
+    if (compile::sources_of(alone).empty()) return std::nullopt;
+    return alone;
+  }
+
+  // The editor's end of an LSP session: its bytes in, `LspOut` frames out.
+  class SocketChannel final : public lsp::Channel {
+   public:
+    explicit SocketChannel(int fd) : fd_(fd) {}
+    std::size_t read(std::span<char> out) override { return read_some(fd_, out); }
+    bool pending() override { return wait_readable(fd_, std::chrono::milliseconds(0)); }
+    bool write(std::string_view bytes) override { return send(fd_, Kind::lsp, LspOut{std::string(bytes)}); }
+
+   private:
+    int fd_;
+  };
+
+  void serve_lsp(int fd) {
+    {
+      std::lock_guard g(conn_mu_);
+      if (lsp_closed_) return;  // the daemon is stopping
+      lsp_fds_.insert(fd);
+    }
+    if (send(fd, Kind::lsp, LspRequest{})) {
+      SocketChannel io(fd);
+      log("an LSP session started");
+      const int status = lsp::serve(io, [this](std::span<const std::string> paths, const lsp::Buffers& open) { return diagnose(paths, open); });
+      send(fd, Kind::lsp, LspOut{{}, true, status});
+      log(std::format("an LSP session ended ({})", status));
+    }
+    std::lock_guard g(conn_mu_);
+    lsp_fds_.erase(fd);
+  }
+
+  // The diagnostics of the documents at `paths`, each unit checked in the editor view with `open`
+  // as the editor's buffers (§6.1). One freshness batch and one setting of the buffers serve them
+  // all.
+  std::vector<lsp::Diagnostic> diagnose(std::span<const std::string> paths, const lsp::Buffers& open) {
+    struct Check {
+      const std::string* path;  // the editor's name
+      std::string real;
+      compile::Request request;
+    };
+    std::vector<Check> checks;
+    for (const std::string& path : paths) {
+      std::string real = canonical(path);
+      if (auto r = check_request(real)) checks.push_back({&path, std::move(real), std::move(*r)});
+    }
+    // Each buffer under the editor's name and its real one: the unit's cells read one or the other,
+    // as its command line and includes spell it.
+    lsp::Buffers spelled;
+    for (const auto& [path, text] : open) {
+      spelled.insert_or_assign(canonical(path), text);
+      spelled.insert_or_assign(path, text);
+    }
+    std::unique_lock engine(engine_mu_);
+    catch_up();
+    set_buffers(spelled);
+    overlay_.open = &spelled;
+    struct Reset {
+      Overlay& o;
+      ~Reset() { o.open = nullptr; }
+    } reset{overlay_};
+    std::vector<lsp::Diagnostic> found;
+    for (const Check& c : checks) {
+      table_.set_cwd(c.request.cwd);
+      overlay_.cwd = c.request.cwd;
+      bool stopped = false;
+      const compile::Done d = compile::run(c.request, overlay_, session(), {}, stopped, {pp::View::editor, editor_unit(c.real)});
+      {
+        std::lock_guard g(stats_mu_);
+        ++stats_.diagnoses;
+        stats_.executed += d.report.executed;
+        stats_.validated += d.report.validated;
+        stats_.last_executed = d.report.executed;
+      }
+      for (lsp::Diagnostic& x : lsp::parse_messages(d.err, c.request.cwd)) {
+        // About the unit as a whole, or in it: under the editor's name for it.
+        if (x.path.empty() || x.path == c.real || canonical(x.path) == c.real) x.path = *c.path;
+        found.push_back(std::move(x));
+      }
+    }
+    return found;
+  }
+
+  // The editor's buffers become the `pp::Buffer` inputs (§6.1): an open one set, a closed one
+  // cleared. An unchanged one keeps its value, so nothing that read it turns red. Under engine_mu_.
+  void set_buffers(const lsp::Buffers& open) {
+    engine::Db& db = session().db();
+    for (auto it = buffers_.begin(); it != buffers_.end();) {
+      if (open.contains(*it)) {
+        ++it;
+        continue;
+      }
+      db.set<pp::Buffer>(pp::path_id(*it), std::nullopt);
+      it = buffers_.erase(it);
+    }
+    for (const auto& [path, text] : open) {
+      db.set<pp::Buffer>(pp::path_id(path), text);
+      buffers_.insert(path);
+    }
+  }
+
+  // An editor-view unit's number, one per document for the daemon's life, apart from every
+  // disk-view number (a build numbers its units from 0).
+  std::uint32_t editor_unit(const std::string& path) {
+    auto [it, _] = editor_units_.try_emplace(path, (1u << 31) + static_cast<std::uint32_t>(editor_units_.size()));
+    return it->second;
   }
 
   // One request, admitted into the engine; nothing if the client hung up.
@@ -313,20 +462,8 @@ class Server {
     while (!engine.try_lock_for(std::chrono::milliseconds(50)))
       if (hung_up(fd)) return std::nullopt;
 
-    // Freshness (§5.4): every change made before the request was sent is queued, then applied.
-    bool rescan = false;
-    if (watcher_) {
-      renew_cookie_dir();
-      watcher_->refresh();
-      if (!events_->sync(o_.cookie_timeout)) {
-        rescan = true;
-        std::lock_guard g(stats_mu_);
-        ++stats_.cookie_timeouts;
-      }
-    }
     compile::Report report;
-    report.inputs_changed += apply_batch(rescan);
-    admission_.applied(Clock::now());
+    report.inputs_changed += catch_up();
     table_.set_cwd(r.cwd);
 
     for (;;) {
@@ -374,6 +511,24 @@ class Server {
     }
   }
 
+  // Freshness (§5.4): every change made before the request was sent is queued, then applied as a
+  // batch; the entries it changed. Under engine_mu_.
+  std::size_t catch_up() {
+    bool rescan = false;
+    if (watcher_) {
+      renew_cookie_dir();
+      watcher_->refresh();
+      if (!events_->sync(o_.cookie_timeout)) {
+        rescan = true;
+        std::lock_guard g(stats_mu_);
+        ++stats_.cookie_timeouts;
+      }
+    }
+    const std::size_t changed = apply_batch(rescan);
+    admission_.applied(Clock::now());
+    return changed;
+  }
+
   // The engine session every request runs in (#63), for the daemon's life: its file inputs are
   // provided from the table (§5.1), and a batch sets the ones it changed, so an edit invalidates
   // exactly the cells that read the file and a repeated request executes nothing.
@@ -381,6 +536,7 @@ class Server {
     if (!session_) {
       session_ = std::make_unique<pipeline::Session>();
       provided_.clear();
+      buffers_.clear();
       session_->db().set_provider<pp::FileContent>([this](pp::PathId id) { return provide(id); });
     }
     return *session_;
@@ -429,6 +585,37 @@ class Server {
   std::mutex provided_mu_;
   std::set<std::string> provided_;  // the table keys provided to session_'s FileContent cells
   std::vector<std::string> system_dirs_;
+
+  // The editor view's host outside the engine (the unit's own text, which the driver reads and
+  // renders messages against): an open buffer, else the table (§6.1).
+  class Overlay final : public pp::Host {
+   public:
+    explicit Overlay(FileTable& t) : table_(&t) {}
+    std::optional<std::string> read(const std::string& path) override {
+      if (open) {
+        std::filesystem::path p(path);
+        if (p.is_relative() && !cwd.empty()) p = std::filesystem::path(cwd) / p;
+        if (auto it = open->find(p.lexically_normal().generic_native_encoded_string()); it != open->end()) return it->second;
+      }
+      return table_->read(path);
+    }
+    const lsp::Buffers* open = nullptr;  // during a diagnosis
+    std::string cwd;
+
+   private:
+    FileTable* table_;
+  };
+  Overlay overlay_{table_};                          // under engine_mu_
+  std::set<std::string> buffers_;                    // the paths whose `pp::Buffer` is set; under engine_mu_
+  std::map<std::string, std::uint32_t> editor_units_;  // under engine_mu_
+  struct Command {
+    std::shared_ptr<const compile::Request> request;
+    std::string source;  // as `request` names it, absolute
+  };
+  std::mutex commands_mu_;
+  std::map<std::string, Command> commands_;  // real path -> the last served request compiling it
+  std::set<int> lsp_fds_;    // the LSP sessions' connections; under conn_mu_
+  bool lsp_closed_ = false;  // stopping: no new session; under conn_mu_
 
   std::mutex conn_mu_;
   std::condition_variable conn_cv_;

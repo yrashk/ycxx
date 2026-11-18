@@ -80,8 +80,11 @@ public:
     auto cut = path.rfind("::");
     std::string parent = cut == std::string::npos ? "" : path.substr(0, cut);
     std::string name = cut == std::string::npos ? path : path.substr(cut + 2);
-    EntityId e = w_->entities.entity({sema::EntityKind::namespace_, w_->ins.names.intern(name), {}, LangLinkage::cxx,
-                                      ast::Linkage::external, {}, namespace_entity(parent)});
+    sema::EntityRec r{sema::EntityKind::namespace_, w_->ins.names.intern(name), {}, LangLinkage::cxx,
+                      ast::Linkage::external, {}, namespace_entity(parent)};
+    // Each unit's unnamed namespace is its own ([namespace.unnamed]): named by the unit's main file.
+    if (name == "(anonymous)") r.head = ast::seed("ycxx.sema.unnamed-namespace:" + r_->files.at(0));
+    EntityId e = w_->entities.entity(std::move(r));
     ns_entities_[path] = e;
     ns_paths_[std::to_underlying(e)] = path;
     return e;
@@ -122,6 +125,11 @@ public:
   // own item, analysed at the class's prefix (§4.2). It also fills the world's class table, which
   // member lookup and the layout read until #33 has them.
   const Result<ast::ClassDef>& class_def(u32 item);
+  // This unit's declaration of member `e` in its class, once the class is analysed here.
+  std::optional<DeclId> member_decl(EntityId e) const {
+    auto it = member_decls_.find(std::to_underlying(e));
+    return it == member_decls_.end() ? std::nullopt : std::optional(it->second);
+  }
 
   // Whether class `c` is complete at `item` ([class.mem.general]): its definition is an earlier
   // item that does not enclose `item`.
@@ -381,12 +389,16 @@ public:
     return r;
   }
 
-  // The byte offset in the file of a diagnostic's location (ast.md §8.3, steps 1–3).
-  u32 byte_offset(engine::Loc at) const {
+  // The file and byte offset of a diagnostic's location (ast.md §8.3, steps 1–3); a macro's
+  // token is where it was expanded.
+  pp::TokLoc site(engine::Loc at) const { return r_->site(token(at)); }
+  // The region token of a diagnostic's location.
+  u32 token(engine::Loc at) const {
     const items::Item& it = items_->items[index(ItemId(at.item))];
-    u32 tok = std::min<u32>(it.begin + at.offset, static_cast<u32>(r_->locs.size() - 1));
-    return r_->site(tok).offset;  // a macro's token: where it was expanded
+    return std::min<u32>(it.begin + at.offset, static_cast<u32>(r_->locs.size() - 1));
   }
+  // The byte offset in its file of a diagnostic's location.
+  u32 byte_offset(engine::Loc at) const { return site(at).offset; }
 
   // Spells a diagnostic argument: a name, a type, a string literal or why an evaluation failed.
   std::string spell(char how, u64 raw) const {
@@ -418,6 +430,11 @@ private:
   std::vector<std::optional<Result<ast::ClassDef>>> class_cells_;
   std::map<u32, u32> class_items_;     // by class entity: its defining item
   std::map<u32, EntityId> class_entities_;  // by class item: the class it defines
+  // By member function or static data member entity: its declaration in this unit's class. The
+  // class's record is shared by every unit that defines it, its items are not (#156).
+  std::map<u32, DeclId> member_decls_;
+  // The enumeration whose enumerator list is being analysed, and its record so far.
+  std::pair<EntityId, const sema::EnumRec*> defining_enum_{EntityId::none, nullptr};
   std::map<u32, ast::DeclSema> class_heads_;  // by class item: the class's record, for its members
   std::map<u32, Dmi> dmis_;                       // by field entity
   std::vector<std::string> ns_of_, eff_ns_;       // by item
@@ -501,6 +518,7 @@ private:
   std::pmr::unsynchronized_pool_resource arena_;  // the frames' arena (§9.3)
 
   friend class ItemAnalysis;
+  friend class AtItem;
   friend class BodyAnalysis;
 };
 
@@ -508,6 +526,9 @@ private:
 class AtItem final : public sema::Questions {
 public:
   AtItem(Program& p, u32 item, bool self) : from(p.ns_of(item)), p_(&p), item_(item), self_(self) {}
+  const sema::EnumRec* defining_enum(EntityId e) override {
+    return p_->defining_enum_.first == e ? p_->defining_enum_.second : nullptr;
+  }
   std::vector<DeclId> visible_decls(ast::NameId name, std::span<const EntityId> directives = {}) override {
     std::vector<std::string> paths;
     for (EntityId ns : directives) paths.push_back(p_->namespace_path(ns));
@@ -1005,8 +1026,9 @@ private:
       s_.diag(name_at, Diag::conflicting_declaration, name);
       return bad();
     }
-    sema::EnumRec& er = s_.world().classes.enum_rec(e);
-    er = {scoped, fixed.has_value(), fixed.value_or(s_.builtin(sema::Builtin::int_)), {}};
+    // Built here and published once complete (#156); the list sees it as it grows.
+    sema::EnumRec er{scoped, fixed.has_value(), fixed.value_or(s_.builtin(sema::Builtin::int_)), {}};
+    p_->defining_enum_ = {e, &er};
     ast::DeclSema sem = class_decl(e, true);
     sem.kind = ast::DeclKind::enum_;
     sem.type = t;
@@ -1095,6 +1117,8 @@ private:
       er.enumerators[i].value = s_.world().values.integer(*er.underlying, sema::u64(values[i]));
       p_->set_constant(er.enumerators[i].entity, er.enumerators[i].value, k_);
     }
+    p_->defining_enum_ = {EntityId::none, nullptr};
+    s_.world().classes.publish_enum(e, std::move(er));
     ps_.seek(it_->brace_end);
     if (ps_.accept(Tk::semi)) return;
     DeclSpec spec;
@@ -1256,7 +1280,8 @@ private:
     std::vector<QualType> ps;
     for (const parse::Param& p : fs.params) ps.push_back(p.type);
     QualType type = s_.types().function(s_.builtin(sema::Builtin::void_), ps, fs.variadic, LangLinkage::cxx, fs.cv);
-    const sema::ClassRec* cr = s_.world().classes.find(c);
+    // Complete here: this unit has analysed the class, so it knows the members' declarations.
+    const sema::ClassRec* cr = q_.is_complete(c) ? s_.world().classes.find(c) : nullptr;
     const sema::MemberDeclRec* m = nullptr;
     if (cr)
       for (const sema::MemberDeclRec& r : cr->members)
@@ -1265,7 +1290,8 @@ private:
       s_.diag(name_at, Diag::no_member_declared, p_->world().entities.rec(c).name, cls);
       return bad();
     }
-    auto mem = p_->decl_sema(m->decl);
+    auto md = p_->member_decl(m->entity);
+    auto mem = md ? p_->decl_sema(*md) : std::nullopt;
     if (!mem || it_->kind != ItemKind::function) return bad();
     if (mem->flags & sema::decl_flag::definition) {
       s_.diag(name_at, Diag::redefinition, m->name);
@@ -1376,7 +1402,8 @@ private:
       s_.diag(d.name_at, Diag::no_member_declared, d.name, *t);
       return false;
     }
-    auto mem = p_->decl_sema(m->decl);
+    auto md = p_->member_decl(m->entity);
+    auto mem = md ? p_->decl_sema(*md) : std::nullopt;
     if (!mem) return false;
     // [class.mfct]/1, [class.static.data]/3: outside its class a member is only defined, once.
     if (!definition) {
@@ -1944,22 +1971,24 @@ const Result<ast::ClassDef>& Program::class_def(u32 item) {
                         dmis_.contains(std::to_underlying(d.entity))});
       else if (d.kind == ast::DeclKind::enum_)
         nested.push_back({w_->entities.rec(d.entity).name, d.type});
-      else if (d.kind == ast::DeclKind::function || d.kind == ast::DeclKind::variable)
-        statics.push_back({w_->entities.rec(d.entity).name, d.entity, d.type,
-                           {id(m), ast::make_decl_ord(ast::DeclClass::syntactic, i)}, d.kind == ast::DeclKind::function,
+      else if (d.kind == ast::DeclKind::function || d.kind == ast::DeclKind::variable) {
+        member_decls_[std::to_underlying(d.entity)] = {id(m), ast::make_decl_ord(ast::DeclClass::syntactic, i)};
+        statics.push_back({w_->entities.rec(d.entity).name, d.entity, d.type, d.kind == ast::DeclKind::function,
                            (d.flags & sema::decl_flag::static_) != 0, (d.flags & sema::decl_flag::constructor) != 0,
                            (d.flags & sema::decl_flag::destructor) != 0, (d.flags & sema::decl_flag::deleted) != 0});
+      }
     }
   }
   if (cls && *cls != EntityId::none) {
-    sema::ClassRec& rec = w_->classes.rec(*cls);
-    if (!rec.defined) {
-      rec.fields = std::move(fields);
-      rec.members = std::move(statics);
-      rec.types = std::move(nested);
-      special_members(item, *cls, rec);
-      rec.defined = true;
-    }
+    // Every unit that defines the class builds its record, and synthesizes the special members
+    // its own object needs; the first record published wins (#156).
+    sema::ClassRec rec;
+    rec.fields = std::move(fields);
+    rec.members = std::move(statics);
+    rec.types = std::move(nested);
+    special_members(item, *cls, rec);
+    rec.defined = true;
+    w_->classes.publish(*cls, std::move(rec));
   }
   ast::Builder b(w_->ins, &arena_);
   def.bases = b.seq(std::span<const ast::BaseSpec>{});

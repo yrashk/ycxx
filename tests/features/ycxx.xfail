@@ -618,7 +618,6 @@ own/smoke/exit-status.run.cpp <cstdio> preprocesses; libycxx does not know ycxx 
 own/pp/include-macros.accept.cpp dynamic initialization of a namespace-scope variable is not supported yet (#94)
 own/pp/macro-decls.accept.cpp dynamic initialization of a namespace-scope variable is not supported yet (#94)
 own/pp/cond-decls.accept.cpp dynamic initialization of a namespace-scope variable is not supported yet (#94)
-incremental/smoke/inline-function-body.incr an error inside an included header is reported at the including main file's position (#34)
 own/classes/s1-byvalue-constexpr.run.cpp classes in constant evaluation (#25)
 own/classes/s1-byvalue-params.run.cpp classes by value (#116)
 own/classes/s1-byvalue-return.run.cpp classes by value (#116)

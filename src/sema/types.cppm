@@ -6,6 +6,7 @@ export module ycxx.sema:types;
 
 import std;
 import ycxx.ast;
+import ycxx.ast.store;
 
 export namespace ycxx::sema {
 
@@ -338,6 +339,8 @@ enum class EntityKind : u8 {
 // declaration. `scope` is the enclosing class, or none for the global namespace. A function
 // template's identity also has its template-head (`head`, a fingerprint of the parameters' kinds and
 // types); a specialization's is its template and its canonical template arguments (§B1.5).
+// An unnamed namespace's `head` is its unit's: each unit has its own ([namespace.unnamed]), so its
+// members are distinct from another unit's of the same name.
 struct EntityRec {
   EntityKind kind = EntityKind::function;
   NameId name{};
@@ -346,7 +349,7 @@ struct EntityRec {
   ast::Linkage linkage = ast::Linkage::external;
   DeclId first{};  // internal linkage only
   EntityId scope = EntityId::none;
-  Fp128 head{};                          // a template's
+  Fp128 head{};                          // a template's, or an unnamed namespace's unit
   EntityId templ = EntityId::none;       // a specialization's template
   std::vector<ast::TemplateArg> args{};  // a specialization's template arguments
 };
@@ -364,7 +367,7 @@ public:
     if (r.kind == EntityKind::function || r.kind == EntityKind::constructor || r.kind == EntityKind::destructor ||
         r.kind == EntityKind::function_template)
       f = ast::mix(f, types_->fp(types_->canonical(r.type)));
-    if (r.kind == EntityKind::function_template) f = ast::mix(f, r.head);
+    if (r.kind == EntityKind::function_template || r.kind == EntityKind::namespace_) f = ast::mix(f, r.head);
     if (r.templ != EntityId::none) {
       f = ast::mix(f, ins_->entities.fp(r.templ));
       for (const ast::TemplateArg& a : r.args) {
@@ -378,29 +381,21 @@ public:
       f = ast::mix(ast::mix(f, ins_->items.fp(r.first.item)), std::to_underlying(r.first.ord));
     EntityId e = ins_->entities.add<EntityId>(f);
     // The interner is shared: the back end adds entities of its own (string literal objects), which
-    // have no record here, so records are indexed by handle with gaps.
-    const auto i = std::to_underlying(e);
-    if (i >= recs_.size()) {
-      recs_.resize(i + 1);
-      known_.resize(i + 1);
-    }
-    if (!known_[i]) {
-      recs_[i] = r;
-      known_[i] = true;
-    }
+    // have no record here, so records are indexed by handle with gaps. Equal identities have equal
+    // records, so the first publication is as good as any (#156).
+    recs_.publish(std::to_underlying(e), std::move(r));
     return e;
   }
   const EntityRec& rec(EntityId e) const
-    pre(std::to_underlying(e) < recs_.size() && known_[std::to_underlying(e)])
+    pre(recs_.find(std::to_underlying(e)) != nullptr)
   {
-    return recs_[std::to_underlying(e)];
+    return *recs_.find(std::to_underlying(e));
   }
 
 private:
   ast::Interners* ins_;
   Types* types_;
-  std::deque<EntityRec> recs_;  // a deque: references to records stay valid as entities are added
-  std::vector<bool> known_;     // which handles have a record
+  ast::Published<EntityRec> recs_;
 };
 
 // ---------------------------------------------------------------- classes (stand-in for #33)
@@ -419,13 +414,13 @@ struct FieldRec {
 // What `class_def(C)` (ast.md §3.6) says of a class that member lookup and the layout need, kept
 // by class entity. A class is complete once its definition has been analysed
 // ([class.mem.general]); completeness at a point is the parser's question (`Program`).
-// A member function ([class.mfct]) or static data member ([class.static.data]): its declaration
-// in the class, which a qualified definition outside it redeclares.
+// A member function ([class.mfct]) or static data member ([class.static.data]), which a
+// qualified definition outside the class redeclares. Its declaration is an item of each unit that
+// defines the class, so the unit keeps it (`Program::member_decl`), not the shared record (#156).
 struct MemberDeclRec {
   NameId name{};
   EntityId entity = EntityId::none;
   QualType type{};
-  DeclId decl{};
   bool is_function = false;
   bool is_static = false;
   bool is_ctor = false;
@@ -463,25 +458,29 @@ struct EnumRec {
   std::vector<EnumeratorRec> enumerators;
 };
 
+// Records are built privately by whoever analyses the definition and published once complete
+// (#156): units analysed at once on several workers each build the record of a class their header
+// defines, and the first publication wins. Until then a class has no record.
 class Classes {
 public:
   explicit Classes(ast::Interners& ins, Types& types) : ins_(&ins), types_(&types) {}
 
-  ClassRec& rec(EntityId c) { return recs_[std::to_underlying(c)]; }
-  EnumRec& enum_rec(EntityId e) { return enums_[std::to_underlying(e)]; }
-  const EnumRec* find_enum(EntityId e) const {
-    auto it = enums_.find(std::to_underlying(e));
-    return it == enums_.end() ? nullptr : &it->second;
+  // `r`, a definition's record, unless one is published already; the published one.
+  const ClassRec& publish(EntityId c, ClassRec r) { return recs_.publish(std::to_underlying(c), std::move(r)); }
+  const EnumRec& publish_enum(EntityId e, EnumRec r) { return enums_.publish(std::to_underlying(e), std::move(r)); }
+  // A defined class's record.
+  const ClassRec& rec(EntityId c) const
+    pre(find(c) != nullptr)
+  {
+    return *find(c);
   }
+  const EnumRec* find_enum(EntityId e) const { return enums_.find(std::to_underlying(e)); }
   // An enumeration's underlying type; `int` until it is known.
   QualType underlying(EntityId e) const {
     const EnumRec* r = find_enum(e);
     return r && r->underlying ? *r->underlying : types_->builtin(Builtin::int_);
   }
-  const ClassRec* find(EntityId c) const {
-    auto it = recs_.find(std::to_underlying(c));
-    return it == recs_.end() ? nullptr : &it->second;
-  }
+  const ClassRec* find(EntityId c) const { return recs_.find(std::to_underlying(c)); }
   bool is_defined(EntityId c) const {
     const ClassRec* r = find(c);
     return r && r->defined;
@@ -507,8 +506,8 @@ public:
 private:
   ast::Interners* ins_;
   Types* types_;
-  std::map<u32, ClassRec> recs_;
-  std::map<u32, EnumRec> enums_;
+  ast::Published<ClassRec> recs_;
+  ast::Published<EnumRec> enums_;
 };
 
 // What the front end shares process-wide (§9.1): the AST core's interners, and sema's views.

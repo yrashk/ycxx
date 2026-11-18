@@ -143,6 +143,65 @@ private:
   Chunked c_{sizeof(T)};
 };
 
+// Records by handle, each published once and complete (#156): a writer builds its record
+// privately, then `publish` makes it visible with release; the first publication wins and later
+// ones are dropped. A reader sees a record whole or not at all, without a lock, and a record never
+// moves. Slots are in blocks that never move, as `Chunked`'s.
+template <class T>
+class Published {
+public:
+  Published() = default;
+  Published(const Published&) = delete;
+  Published& operator=(const Published&) = delete;
+  ~Published() {
+    for (std::size_t b = 0; b < blocks; ++b)
+      if (Slot* p = blocks_[b].load(std::memory_order_relaxed)) {
+        for (std::size_t i = 0; i < block_slots(b); ++i) delete p[i].load(std::memory_order_relaxed);
+        delete[] p;
+      }
+  }
+
+  // `v` at `i` unless a record is there already; the record at `i`.
+  const T& publish(u32 i, T v) {
+    Slot& s = slot(i);
+    const T* cur = s.load(std::memory_order_acquire);
+    if (cur) return *cur;
+    auto fresh = std::make_unique<const T>(std::move(v));
+    if (s.compare_exchange_strong(cur, fresh.get(), std::memory_order_acq_rel, std::memory_order_acquire)) return *fresh.release();
+    return *cur;
+  }
+  const T* find(u32 i) const noexcept {
+    const auto [b, off] = locate(i);
+    if (b >= blocks) return nullptr;  // past every handle, as `none` is
+    const Slot* p = blocks_[b].load(std::memory_order_acquire);
+    return p ? p[off].load(std::memory_order_acquire) : nullptr;
+  }
+
+private:
+  using Slot = std::atomic<const T*>;
+  static constexpr unsigned first_bits = 10;
+  static constexpr std::size_t blocks = 22;
+  static constexpr std::size_t block_slots(std::size_t b) noexcept { return std::size_t{1} << (first_bits + b); }
+  static constexpr std::pair<std::size_t, std::size_t> locate(u32 i) noexcept {
+    const std::uint64_t biased = std::uint64_t{i} + block_slots(0);
+    const std::size_t b = static_cast<std::size_t>(std::bit_width(biased)) - 1 - first_bits;
+    return {b, static_cast<std::size_t>(biased - block_slots(b))};
+  }
+  Slot& slot(u32 i) {
+    const auto [b, off] = locate(i);
+    contract_assert(b < blocks);
+    Slot* p = blocks_[b].load(std::memory_order_acquire);
+    if (!p) {
+      auto* fresh = new Slot[block_slots(b)]{};
+      if (blocks_[b].compare_exchange_strong(p, fresh, std::memory_order_acq_rel, std::memory_order_acquire)) p = fresh;
+      else delete[] fresh;
+    }
+    return p[off];
+  }
+
+  std::array<std::atomic<Slot*>, blocks> blocks_{};
+};
+
 // A fingerprint table in shards, each under its own lock (§9.2: identity is the fingerprint).
 template <class V>
 class FpIndex {
