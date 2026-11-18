@@ -27,8 +27,9 @@ in [GitHub issues](https://github.com/yrashk/ycxx/issues) and the
   - Structs and classes with data members (2026-11-18): `.` and `->`, pointers to and arrays of
     structs, aggregate initialization (`S s = {1, 2};`, `S s{…}`, nested braces, brace elision,
     designated initializers, `int a[] = {…}`), constant default member initializers, copies and
-    assignment, and namespace-scope structs with constant initializers. Not yet: member
-    functions, constructors, passing or returning a struct by value.
+    assignment, and namespace-scope structs with constant initializers. Member functions (in and
+    out of the class, `const`, static), `this`, and static data members. Not yet: constructors,
+    passing or returning a struct by value.
   - Constant evaluation, by ycxx's own interpreter of its IR: `constexpr` and `consteval`
     functions and variables, `constinit`, `static_assert` and `if consteval`, with an error that
     says why an expression is not constant (overflow, an uninitialized read, a dangling pointer,
@@ -59,7 +60,7 @@ build/bin/ycxx cxx hello.cpp -o hello && ./hello
 **Not yet:**
 - `#embed`, and the standard library's headers: `<cstdio>` now preprocesses, but libycxx does
   not yet know ycxx (yrashk/libycxx#17), and sema lacks namespaces.
-- Member functions, constructors and destructors, inheritance, enums, namespaces, templates and
+- Constructors and destructors, inheritance, enums, namespaces, templates and
   overloading.
 - `if constexpr`, and taking the address of a variable in a namespace-scope initializer
   (`int* p = &g;` passes the front end but not code generation yet).

@@ -95,11 +95,14 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
     bool fn = r.kind == sema::EntityKind::function;
     std::string id(ins.names.spelling(r.name));
     if (fn && id == "main") tu.main = e;
-    tu.entities.push_back({e, std::move(id), d.type, fn, r.lang, r.linkage, false, at});
+    tu.entities.push_back({e, std::move(id), d.type, fn, r.lang, r.linkage, false, at, r.scope});
   };
   for (std::uint32_t k = 0; k < items.items.size(); ++k) {
     const items::Item& it = items.items[k];
-    if (!program.in_global_scope(k)) continue;
+    // Items of the global namespace, and the members of its classes.
+    bool member = it.parent != items::none && items.items[it.parent].kind == items::ItemKind::class_def &&
+                  program.in_global_scope(it.parent);
+    if (!program.in_global_scope(k) && !member) continue;
     if (it.kind != items::ItemKind::declaration && it.kind != items::ItemKind::function &&
         it.kind != items::ItemKind::class_def)  // its declarators: `struct S { … } s;`
       continue;
@@ -119,7 +122,8 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
     }
     for (std::size_t i = 0; i < decls.size(); ++i) declare(decls[i], at[i]);
     if (it.kind == items::ItemKind::function && it.has_body() && !decls.empty() && decls[0].entity != EntityId::none) {
-      tu.functions.push_back({decls[0].entity, decls[0], program.analyze_body(k).value, program.id(k), it.body_begin - it.begin});
+      tu.functions.push_back({decls[0].entity, decls[0], program.analyze_body(k).value, program.id(k), it.body_begin - it.begin,
+                              program.this_type(decls[0])});
       continue;
     }
     // Variable definitions, with the constants their declarators were initialized with.

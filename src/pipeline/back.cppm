@@ -77,6 +77,7 @@ struct Entity {
   ast::Linkage linkage = ast::Linkage::external;
   bool is_constexpr = false;
   std::optional<ast::Loc> at;  // its first declarator, for diagnostics
+  EntityId scope = EntityId::none;  // the class of a member
 };
 
 // A function definition: what `function_ir(F)` reads (irgen::FunctionInput, without a thunk's
@@ -87,6 +88,7 @@ struct FunctionDef {
   ast::BodySema body{};
   ast::ItemId item{};
   std::uint32_t body_offset = 0;  // the declaration part's length in tokens
+  std::optional<QualType> this_type{};  // a non-static member function's
 };
 
 // A variable definition at namespace scope with its constant initializer, or `ConstId::none` for
@@ -575,7 +577,9 @@ engine::query_task<Generated> FunctionGen::run(engine::Ctx& cx, FnKey k) {
   const FunctionSource& src = co_await cx.fetch<FunctionSourceQ>(k);
   UnitFacts facts(src);
   const FunctionDef& d = src.def;
-  auto f = irgen::function_ir(*universe().in, irgen::FunctionInput{d.entity, d.decl, d.body, d.item, d.body_offset}, facts);
+  irgen::FunctionInput input{d.entity, d.decl, d.body, d.item, d.body_offset};
+  input.this_type = d.this_type;
+  auto f = irgen::function_ir(*universe().in, input, facts);
   if (!f) co_return Generated{std::nullopt, BackError{ast::Loc{d.item, d.body_offset}, f.error()}};
   co_return Generated{std::move(*f), std::nullopt};
 }
@@ -797,10 +801,15 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
   }
   for (const Entity& e : tu.entities) {
     if (!used.contains(ir::raw(e.id))) continue;
-    auto name = symbol_name(in, e.name, e.type, e.is_function, e.lang, [](EntityId c) {
-      const sema::World* w = universe().world;
-      return w ? std::string(w->ins.names.spelling(w->entities.rec(c).name)) : std::string();
-    });
+    std::optional<QualType> scope;
+    if (e.scope != EntityId::none) scope = in.intern_type(ast::TClass{e.scope});
+    auto name = symbol_name(
+        in, e.name, e.type, e.is_function, e.lang,
+        [](EntityId c) {
+          const sema::World* w = universe().world;
+          return w ? std::string(w->ins.names.spelling(w->entities.rec(c).name)) : std::string();
+        },
+        scope);
     if (!name) {
       errors.push_back({e.at, std::format("the name of '{}': {} is not supported yet", e.name, name.error())});
       continue;

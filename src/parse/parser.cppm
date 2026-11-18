@@ -60,6 +60,10 @@ struct Declarator {
   NameId name{};
   bool named = false;
   u32 name_at = 0;
+  // `C::name`: the class named by the nested-name-specifier ([dcl.meaning]).
+  bool qualified = false;
+  NameId qualifier{};
+  u32 qualifier_at = 0;
   u32 begin = 0;
   QualType type{};
   std::vector<Param> params;
@@ -304,6 +308,7 @@ public:
     bool function = false;
     std::vector<Param> params;
     bool variadic = false;
+    sema::Cv cv = sema::Cv::none;  // a member function's cv-qualifier-seq ([dcl.fct])
     u64 bound = 0;
     bool unknown_bound = false;  // `[]`: in a parameter, or the outermost bound of a variable
   };
@@ -313,6 +318,9 @@ public:
     NameId name{};
     bool named = false;
     u32 name_at = 0;
+    bool qualified = false;
+    NameId qualifier{};
+    u32 qualifier_at = 0;
     std::vector<Suffix> suffixes;
   };
 
@@ -348,6 +356,15 @@ public:
       }
       l.pointers.push_back(sema::Cv(cv));
     }
+    if (!abstract && is(Tk::identifier) && kind(1) == Tk::coloncolon && kind(2) == Tk::identifier) {
+      // A qualified declarator-id `C::name`, defining a member of class C ([class.mfct],
+      // [class.static.data]).
+      l.qualified = true;
+      l.qualifier = name_of(tok());
+      l.qualifier_at = pos();
+      bump();
+      bump();
+    }
     if (is(Tk::identifier)) {
       l.name = name_of(tok());
       l.named = true;
@@ -367,10 +384,15 @@ public:
       if (is(Tk::l_paren)) {
         bump();
         l.suffixes.push_back(parameters(ok));
-        // cv-qualifiers, ref-qualifiers, noexcept-specifiers and trailing return types
-        // ([dcl.fct]) are beyond the α subset.
-        if (is(Tk::kw_const) || is(Tk::kw_volatile) || is(Tk::amp) || is(Tk::ampamp) || is(Tk::kw_noexcept) ||
-            is(Tk::kw_throw) || is(Tk::arrow)) {
+        // A member function's cv-qualifier-seq ([dcl.fct]).
+        int cv = 0;
+        while (is(Tk::kw_const) || is(Tk::kw_volatile)) {
+          cv |= is(Tk::kw_const) ? 1 : 2;
+          bump();
+        }
+        l.suffixes.back().cv = sema::Cv(cv);
+        // ref-qualifiers, noexcept-specifiers and trailing return types are not supported yet.
+        if (is(Tk::amp) || is(Tk::ampamp) || is(Tk::kw_noexcept) || is(Tk::kw_throw) || is(Tk::arrow)) {
           s_->diag(pos(), Diag::not_supported, kind());
           ok = false;
           return l;
@@ -423,7 +445,7 @@ public:
         }
         std::vector<QualType> ps;
         for (const Param& p : s->params) ps.push_back(p.type);
-        t = s_->types().function(t, ps, s->variadic, linkage_);
+        t = s_->types().function(t, ps, s->variadic, linkage_, s->cv);
         fn = &*s;
       } else if (s->unknown_bound && in_params_ > 0) {
         // In a parameter, [dcl.fct]/5 adjusts the array to a pointer: build the pointer at once.
@@ -449,6 +471,9 @@ public:
     d.name = l.name;
     d.named = l.named;
     d.name_at = l.name_at;
+    d.qualified = l.qualified;
+    d.qualifier = l.qualifier;
+    d.qualifier_at = l.qualifier_at;
     return t;
   }
 
@@ -806,10 +831,22 @@ public:
     case Tk::identifier: {
       NameId n = name_of(tok());
       bump();
+      if (is(Tk::coloncolon) && kind(1) == Tk::identifier) {
+        // A qualified-id `C::name` ([expr.prim.id.qual]).
+        bump();
+        u32 name_at = pos();
+        NameId m = name_of(tok());
+        bump();
+        if (is(Tk::coloncolon)) {
+          s_->diag(pos(), Diag::not_supported, Tk::coloncolon);
+          return {NodeId::none, begin, pos()};
+        }
+        return s_->qualified_name(n, m, begin, name_at, pos());
+      }
       return s_->name_expr(n, begin, pos());
     }
+    case Tk::kw_this: bump(); return s_->this_expr(begin, pos());
     case Tk::float_lit:
-    case Tk::kw_this:
     case Tk::l_square:
     case Tk::kw_requires:
     case Tk::coloncolon:
@@ -956,6 +993,7 @@ public:
     if (starts_declaration()) return declaration_statement();
     Ex e = expression();
     if (!expect(Tk::semi)) skip_to_semi();
+    e = s_->discarded(e);
     return s_->node(ast::ExprStmt{sema::Sema::at(e, begin)}, begin, pos());
   }
 
