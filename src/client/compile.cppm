@@ -258,12 +258,17 @@ std::vector<std::pair<std::string, std::string>> environment_now() {
 }
 
 Threads threads() {
+  // A value that is not a decimal number is ignored, with a warning: a test that asks for chaos
+  // must not silently run without it.
   auto number = [](const char* name) -> std::optional<std::uint64_t> {
     const char* v = std::getenv(name);
     if (!v || !*v) return std::nullopt;
     std::uint64_t n = 0;
     auto [p, ec] = std::from_chars(v, v + std::strlen(v), n);
-    if (ec != std::errc{} || *p != '\0') return std::nullopt;
+    if (ec != std::errc{} || *p != '\0') {
+      std::println(std::cerr, "ycxx: warning: ignoring {}='{}': not a decimal number", name, v);
+      return std::nullopt;
+    }
     return n;
   };
   Threads t;

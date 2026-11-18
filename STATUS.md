@@ -597,7 +597,8 @@ the same handler in-process.
   - `daemon.compare` (`tests/daemon/compare.py`): `tests/own/slice` and `smoke` whole and a
     fixed eighth of the other suites, by name hash (`--all`: every test), plus the two deepest
     nesting tests, in four actions, through a daemon on 8 threads under a chaos seed and
-    in-process on one, byte for byte; two directories with one argv, two programs defining one
+    in-process on one (so link, `-c` and `-fsyntax-only` also compare 1 and N threads), byte
+    for byte; two directories with one argv, two programs defining one
     class name differently (#185), edits, fallback, and a killed daemon. One daemon (one pid,
     pinned by a first request) must answer until it is killed, so a crash hidden by the
     client's retry fails it. `KNOWN` lists the divergences of the default run that have their

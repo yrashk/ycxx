@@ -13,7 +13,8 @@ Covered:
 - a daemon killed between requests leaves a stale socket; the next client starts a new one.
 
 The in-process side runs on one thread and the daemon on eight under a chaos seed (§8.2), so every
-comparison is also one of 1 and N threads (DECISIONS §4).
+comparison of a link, -c or -fsyntax-only is also one of 1 and N threads (DECISIONS §4); -E runs
+no engine work.
 
 The client restarts a daemon that died and asks again (§7.2), which would hide a crash: until the
 daemon is killed on purpose, one daemon (one pid) must answer every request.
