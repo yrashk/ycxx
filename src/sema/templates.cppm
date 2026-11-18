@@ -468,6 +468,15 @@ public:
                                 std::span<const ast::TemplateParamSema> p2, std::span<const TemplateArg> a2) {
     return at_least_as_specialized(p1, a1, p2, a2) && !at_least_as_specialized(p2, a2, p1, a1);
   }
+  // Whether every parameter of `params` can be deduced from template arguments `args` that name
+  // them, as a partial specialization's must be ([temp.spec.partial.general]): deduced from
+  // `args` with a unique value for each.
+  bool deducible(std::span<const ast::TemplateParamSema> params, std::span<const TemplateArg> args) {
+    if (params.empty()) return false;
+    auto unique = substitute_args(args, unique_bindings(params));
+    std::vector<std::optional<TemplateArg>> out(params.size());
+    return unique && deduce_args(args, *unique, params[0].depth, out) && std::ranges::all_of(out, [](const auto& a) { return a.has_value(); });
+  }
   bool at_least_as_specialized(std::span<const ast::TemplateParamSema> p1, std::span<const TemplateArg> a1,
                                std::span<const ast::TemplateParamSema> p2, std::span<const TemplateArg> a2) {
     if (p1.empty() || p2.empty()) return false;

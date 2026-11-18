@@ -362,11 +362,24 @@ public:
     return Chosen{best->p->item, sema::Bindings::of(best->params[0].depth, best->args), false, best->p->defined};
   }
   // An ambiguous choice of partial specialization, said once for each specialization.
+  // The type of variable template specialization `v` at `point` when it is not its template's:
+  // its explicit specialization's, or that of the partial specialization it is instantiated
+  // from, with that one's arguments.
+  std::optional<QualType> specialization_type(EntityId v, u32 point) {
+    if (explicitly_specialized(v, point)) {
+      auto d = declaration(v, point);
+      return d ? std::optional(d->type) : std::nullopt;
+    }
+    std::optional<Chosen> c = choose_partial(v, point);
+    if (!c || c->ambiguous) return std::nullopt;
+    return sema::Templates(*w_, classes_).substitute(w_->ins.seqs.at(item_sema(c->item).value.decls, 0).type, c->args);
+  }
+  // At the end of the unit, it is said where the demand being instantiated came from.
   void ambiguous_partial(EntityId spec, u32 point) {
     if (!ambiguous_.insert(std::to_underlying(spec)).second) return;
-    u32 at = point < end() ? point : 0;
+    engine::Loc at = point < end() ? engine::Loc{std::to_underlying(id(point)), 0} : end_at_;
     ast::NameId name = w_->entities.rec(spec).name;
-    end_diags_.push_back({engine::Loc{std::to_underlying(id(at)), 0}, sema::diag_id(sema::Diag::ambiguous_partial),
+    end_diags_.push_back({at, sema::diag_id(sema::Diag::ambiguous_partial),
                           {{std::to_underlying(name), w_->ins.names.fp(name)}}});
   }
 
@@ -411,8 +424,9 @@ public:
     auto c = constant_value(v, item);
     return interp::GlobalVar{d->type, c, c.has_value()};
   }
-  bool is_constexpr(EntityId f, u32 item) const {
-    if (EntityId t = w_->entities.rec(f).templ; t != EntityId::none) f = t;
+  bool is_constexpr(EntityId f, u32 item) {
+    // A specialization is as its template is declared, unless explicitly specialized ([temp.expl.spec]/14).
+    if (EntityId t = w_->entities.rec(f).templ; t != EntityId::none && !explicitly_specialized(f, item)) f = t;
     auto d = declaration(f, item);
     return d && (d->flags & (sema::decl_flag::constexpr_ | sema::decl_flag::consteval_));
   }
@@ -481,7 +495,7 @@ public:
   };
   // The instance of a specialization, instantiated on first request; none when its template has
   // no definition, or the instantiations nest too deeply ([temp.inst]/16).
-  const Instance* instance(EntityId spec);
+  const Instance* instance(EntityId spec, u32 point);
   // What instantiating a variable template specialization analyses its template's declaration
   // with: the specialization, and the arguments bound to the template's parameters.
   struct VarInstantiation {
@@ -699,6 +713,13 @@ private:
   u32 spec_scan_ = 0;                            // the items `specializations_before` has analysed
   std::map<u32, std::vector<Partial>> partials_;  // by template entity, in order of declaration
   std::set<u32> ambiguous_;                      // specializations whose choice was diagnosed
+  engine::Loc end_at_{};                         // the END worklist's demand being instantiated
+public:
+  // Where in its item an explicit specialization names its specialization, for diagnostics.
+  void specialization_named_at(EntityId e, u32 offset) { spec_names_.emplace(std::to_underlying(e), offset); }
+private:
+  std::map<u32, u32> spec_names_;
+  std::map<u32, u32> class_patterns_;            // by class specialization: the item it was instantiated from
   std::map<u32, sema::Bindings> class_args_;     // by class specialization: its pattern's arguments
   std::deque<VarInstance> var_instances_;        // a deque: their records are referred to as they are added
   std::map<u32, std::size_t> var_index_;         // by specialization: its slot in `var_instances_`
@@ -770,6 +791,7 @@ public:
   }
   std::optional<ConstId> constant_value(EntityId v) override { return p_->constant_value(v, point()); }
   bool instantiation_gave_up() override { return p_->instantiation_gave_up(); }
+  std::optional<QualType> specialization_type(EntityId v) override { return p_->specialization_type(v, point()); }
   std::optional<ast::DeclSema> earlier_member(ast::NameId name) override {
     const items::Item& it = p_->items().items[item_];
     if (it.parent == items::none || p_->items().items[it.parent].kind != ItemKind::class_def) return std::nullopt;
@@ -822,6 +844,7 @@ public:
   std::optional<ConstId> constant_value(EntityId v) override { return p_->constant_value(v, p_->end()); }
   std::optional<ast::DeclSema> earlier_member(ast::NameId) override { return std::nullopt; }
   bool instantiation_gave_up() override { return p_->instantiation_gave_up(); }
+  std::optional<QualType> specialization_type(EntityId v) override { return p_->specialization_type(v, p_->end()); }
   bool dependent_call(sema::u32 offset) override {
     auto it = p_->dependent_calls_.find(item_);
     return it != p_->dependent_calls_.end() && std::ranges::contains(it->second, offset);
@@ -978,6 +1001,10 @@ private:
       explicit_ = true;
       ps_.template_ids_in_declarators = true;
       // `template<> class-key X<args>;` declares the specialization; it is incomplete until defined.
+      if ((ps_.is(Tk::kw_struct) || ps_.is(Tk::kw_class)) && ps_.kind(1) == Tk::identifier && ps_.kind(2) != Tk::less) {
+        s_.diag(ps_.pos() + 1, Diag::specialization_needs_arguments, ps_.name_of(ps_.tok(1)));
+        return bad();
+      }
       if ((ps_.is(Tk::kw_struct) || ps_.is(Tk::kw_class)) && ps_.kind(1) == Tk::identifier && ps_.kind(2) == Tk::less) {
         ps_.bump();
         NameId name = ps_.name_of(ps_.tok());
@@ -1212,7 +1239,8 @@ private:
       const ast::TemplateArg& a = (*full)[i];
       sema::TypeRec r = s_.types().rec(a.type);
       own = a.kind == ast::TemplateArgKind::type
-                ? r.kind == sema::TypeKind::template_param && r.index == i && head[i].kind == a.kind
+                ? r.kind == sema::TypeKind::template_param && r.index == i && head[i].kind == a.kind &&
+                      sema::Types::cv(s_.types().canonical(a.type)) == sema::Cv::none
                 : values.is<ast::VDepParam>(a.value) && values.get<ast::VDepParam>(a.value).index == i;
     }
     if (own) {
@@ -1233,6 +1261,20 @@ private:
         s_.diag(at, Diag::partial_argument_type, name);
         return std::nullopt;
       }
+    }
+    // Each of its parameters is deduced from its arguments, and it is more specialized than the
+    // primary template ([temp.spec.partial.general]).
+    if (!t.deducible(head, *full)) {
+      s_.diag(at, Diag::partial_not_deducible, name);
+      return std::nullopt;
+    }
+    std::vector<ast::TemplateArg> primary;
+    for (const ast::TemplateParamSema& p : params)
+      primary.push_back(p.kind == ast::TemplateArgKind::type ? t.type_arg(p.type)
+                                                             : t.value_arg(p.type, s_.world().ins.intern_value(ast::VDepParam{p.depth, p.index})));
+    if (!t.more_specialized_partial(head, *full, params, primary)) {
+      s_.diag(at, Diag::partial_not_more_specialized, name);
+      return std::nullopt;
     }
     return full;
   }
@@ -1304,14 +1346,19 @@ private:
   // template X it declares; none, diagnosed, if X is no class template.
   std::optional<EntityId> explicit_class(NameId name, u32 name_at) {
     auto tmpl = s_.class_template(name);
-    if (!tmpl || !ps_.is(Tk::less)) {
+    if (!tmpl) {
       s_.diag(name_at, Diag::not_a_template, name);
+      return std::nullopt;
+    }
+    if (!ps_.is(Tk::less)) {
+      s_.diag(name_at, Diag::specialization_needs_arguments, name);
       return std::nullopt;
     }
     auto args = ps_.template_argument_list();
     if (!args) return std::nullopt;
     auto t = s_.class_template_id(*tmpl, *args, name_at);
     if (!t) return std::nullopt;
+    p_->specialization_named_at(s_.types().class_of(*t), name_at);
     return s_.types().class_of(*t);
   }
   // `template<> class-key X<args> { … }`: the definition of a class template specialization
@@ -1925,7 +1972,22 @@ private:
     auto md = p_->member_decl(m->entity);
     auto mem = md ? p_->decl_sema(*md) : std::nullopt;
     if (!mem) return false;
-    // [class.mfct]/1, [class.static.data]/3: outside its class a member is only defined, once.
+    // [class.mfct]/1, [class.static.data]/3: outside its class a member is only defined, once. An
+    // explicit specialization of a member of a class template specialization may be declared,
+    // and replaces the member the class's instantiation declared or defined ([temp.expl.spec]).
+    if (explicit_) {
+      auto latest = p_->declaration(m->entity, k_);
+      if (definition && latest && (latest->flags & sema::decl_flag::specialization) && (latest->flags & sema::decl_flag::definition)) {
+        s_.diag(d.name_at, Diag::redefinition, d.name);
+        return false;
+      }
+      constexpr u16 kept = sema::decl_flag::member | sema::decl_flag::static_;
+      sem.flags = u16((sem.flags & ~kept) | (mem->flags & kept));
+      sem.entity = m->entity;
+      sem.linkage = mem->linkage;
+      sem.storage = mem->storage;
+      return true;
+    }
     if (!definition) {
       s_.diag(d.name_at, Diag::conflicting_declaration, d.name);
       return false;
@@ -2345,7 +2407,9 @@ private:
     if (fn && p_->world().ins.names.spelling(d.name) == "main") check_main(spec, sem, d, lang);
 
     // The initializer ([dcl.init]); the name is in scope from the end of its declarator.
-    s_.own.push_back({d.name, sem});
+    // An explicit or partial specialization, or an instantiation, declares no name: the
+    // template's name still names the template in its initializer.
+    if (!var_ && !(sem.flags & (sema::decl_flag::specialization | sema::decl_flag::partial))) s_.own.push_back({d.name, sem});
     p_->declared(sem, k_);
     // A variable template's initializer is a pattern ([temp.res]): its specializations' are evaluated.
     const bool pattern = template_ && !var_ && !fn;
@@ -2441,6 +2505,13 @@ private:
         s_.diag(d.qualifier_at, Diag::not_supported, Tk::kw_template);
         return false;
       }
+      // An explicitly specialized class's members are its own, defined without `template<>`
+      // ([temp.expl.spec]).
+      if (p_->explicitly_specialized(s_.types().class_of(*d.scope.type), k_)) {
+        s_.diag(d.qualifier_at, Diag::member_of_explicit_specialization,
+                s_.world().entities.rec(s_.types().class_of(*d.scope.type)).name);
+        return false;
+      }
       if (!define_member(spec, d, sem, fn, definition, has_init)) return false;
       s_.current_class = s_.world().entities.rec(sem.entity).scope;
       return true;
@@ -2475,10 +2546,13 @@ private:
       if (!full) return false;
       sem.entity = s_.variable_specialization(tmpl->entity, *full);
     }
-    if (auto prior = p_->declaration(sem.entity, k_); prior && definition && (prior->flags & sema::decl_flag::definition)) {
+    // An earlier explicit specialization's definition; an instantiation's is diagnosed at the end.
+    if (auto prior = p_->declaration(sem.entity, k_);
+        prior && definition && (prior->flags & sema::decl_flag::definition) && (prior->flags & sema::decl_flag::specialization)) {
       s_.diag(d.name_at, Diag::redefinition, d.name);
       return false;
     }
+    p_->specialization_named_at(sem.entity, d.name_at);
     return true;
   }
 
@@ -2984,7 +3058,9 @@ const sema::ClassRec* Program::instantiate_class(EntityId spec, u32 point) {
   const u32 key = std::to_underlying(spec);
   // This unit's instantiation: its member records, member patterns and diagnostics are the
   // unit's, even when another unit published the class's record first (#156).
-  if (classes_instantiated_.contains(key)) return classes_.find(spec);
+  // Instantiated already: complete at points after its pattern's definition, wherever it was
+  // first needed.
+  if (classes_instantiated_.contains(key)) return point > last_member(class_patterns_.at(key)) ? classes_.find(spec) : nullptr;
   const sema::EntityRec rec = w_->entities.rec(spec);
   if (w_->types.is_dependent(w_->types.class_type(spec)) || classes_instantiating_.contains(key)) return nullptr;
   // Its pattern: the partial specialization that matches it, else the template's definition.
@@ -3014,6 +3090,7 @@ const sema::ClassRec* Program::instantiate_class(EntityId spec, u32 point) {
   std::vector<ast::TemplateParamSema> params = w_->ins.seqs.elements(head.template_params);
   sema::Bindings args = partial ? partial->args : sema::Bindings::of(params.empty() ? 0 : params[0].depth, rec.args);
   class_args_.emplace(key, args);
+  class_patterns_.emplace(key, k);
   classes_instantiating_.insert(key);
   class_points_.emplace(key, point);
   // Each member item's declaration part, again, with the arguments bound: the members of `spec`,
@@ -3060,7 +3137,8 @@ std::optional<u32> Program::out_of_class_definition(EntityId spec, MemberOf of) 
 
 const Program::VarInstance* Program::variable_instance(EntityId v, u32 point) {
   const u32 key = std::to_underlying(v);
-  if (auto it = var_index_.find(key); it != var_index_.end()) return &var_instances_[it->second];
+  if (auto it = var_index_.find(key); it != var_index_.end())
+    return var_instances_[it->second].item < point ? &var_instances_[it->second] : nullptr;
   const sema::EntityRec& rec = w_->entities.rec(v);
   if (rec.kind != sema::EntityKind::variable || rec.templ == EntityId::none || var_instantiating_.contains(key) ||
       explicitly_specialized(v, point))
@@ -3096,11 +3174,11 @@ const Program::VarInstance* Program::variable_instance(EntityId v, u32 point) {
   return &var_instances_.back();
 }
 
-const Program::Instance* Program::instance(EntityId spec) {
+const Program::Instance* Program::instance(EntityId spec, u32 point) {
   const u32 key = std::to_underlying(spec);
   if (auto it = instance_index_.find(key); it != instance_index_.end()) return &instances_[it->second];
   if (instantiating_.contains(key)) return nullptr;  // its own constant evaluation (#88 follow-up)
-  if (explicitly_specialized(spec, end())) return nullptr;  // defined, or not, by its explicit specialization
+  if (explicitly_specialized(spec, point)) return nullptr;  // defined, or not, by its explicit specialization
   const sema::EntityRec& rec = w_->entities.rec(spec);
   // A member function of a class template specialization ([temp.inst]/4): its pattern is its
   // member item, defined in the class.
@@ -3219,15 +3297,19 @@ void Program::instantiate_all() {
   // would instantiate it: before any earlier cell demanded it, or instantiated the class.
   specializations_before(end());
   for (const auto& [e, k] : explicit_specs_) {
+    // Instantiated in a constant evaluation before it: an instance exists, since none is made
+    // once the explicit specialization precedes the point.
     auto c = class_points_.find(e);
-    bool used = c != class_points_.end() && c->second < k;
+    bool used = (c != class_points_.end() && c->second < k) || instance_index_.contains(e) || var_index_.contains(e);
     auto demanded = [&](const auto& cell) {
       return cell && std::ranges::any_of(cell->demands, [&](const sema::Demand& d) { return std::to_underlying(d.spec) == e; });
     };
     for (u32 j = 0; j < k && !used; ++j) used = demanded(item_cells_[j]) || demanded(body_cells_[j]);
     if (!used) continue;
     ast::NameId name = w_->entities.rec(EntityId(e)).name;
-    end_diags_.push_back({engine::Loc{std::to_underlying(id(k)), 0}, sema::diag_id(sema::Diag::specialized_after_use),
+    auto at = spec_names_.find(e);
+    end_diags_.push_back({engine::Loc{std::to_underlying(id(k)), at == spec_names_.end() ? 0 : at->second},
+                          sema::diag_id(sema::Diag::specialized_after_use),
                           {{std::to_underlying(name), w_->ins.names.fp(name)}}});
   }
   // The demands of every cell, in item order, then those of each instance as it is made: the END
@@ -3274,6 +3356,7 @@ void Program::instantiate_all() {
       break;
     }
     // A variable template specialization's initializer, and what it demands ([temp.inst]/7).
+    end_at_ = engine::Loc{std::to_underlying(work[i].at.item), work[i].at.offset};
     if (const VarInstance* v = variable_instance(work[i].spec, end())) {
       if (v->cell.diags.empty())
         for (const sema::Demand& d : v->cell.demands) {
@@ -3282,7 +3365,7 @@ void Program::instantiate_all() {
         }
       continue;
     }
-    const Instance* in = instance(work[i].spec);
+    const Instance* in = instance(work[i].spec, end());
     if (!in || in->failed || !in->body.diags.empty()) continue;  // what an erroneous instance demands is not code
     for (const sema::Demand& d : in->body.demands) {
       work.push_back(d);
@@ -3303,7 +3386,7 @@ interp::Callee Program::function_ir(EntityId f, u32 item) {
     // Its template must be defined before the point, as a function must ([expr.const]).
     auto def = definitions_.find(std::to_underlying(templ));
     if (def == definitions_.end() || def->second >= item) return c;
-    const Instance* in = instance(f);
+    const Instance* in = instance(f, item);
     const u32 key = std::to_underlying(f);
     if (!in || in->failed || !in->body.diags.empty() || in->body.value.tree == NodeId::none) {
       c.unsupported = in != nullptr;  // erroneous: its body cannot be evaluated

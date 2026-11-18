@@ -152,6 +152,10 @@ enum class Diag : std::uint32_t {
   partial_argument [[=message{Severity::error, "a specialized non-type argument of '{0:n}' must be a template parameter or not depend on one"}]],
   partial_argument_type [[=message{Severity::error, "the type of a specialized non-type argument of '{0:n}' depends on a parameter of the partial specialization"}]],
   ambiguous_partial [[=message{Severity::error, "more than one partial specialization of '{0:n}' matches, and none is more specialized"}]],
+  partial_not_more_specialized [[=message{Severity::error, "the partial specialization of '{0:n}' is not more specialized than its primary template"}]],
+  partial_not_deducible [[=message{Severity::error, "a parameter of the partial specialization of '{0:n}' cannot be deduced from its arguments"}]],
+  specialization_needs_arguments [[=message{Severity::error, "the explicit specialization of '{0:n}' needs template arguments"}]],
+  member_of_explicit_specialization [[=message{Severity::error, "a member of the explicit specialization '{0:n}' is defined without 'template<>'"}]],
 };
 
 // A `{N:r}` argument: why an evaluation was not constant. 0 is an expression the front end

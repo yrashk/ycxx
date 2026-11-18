@@ -69,6 +69,10 @@ public:
   // what fails because of it says nothing more.
   virtual bool instantiation_gave_up() { return false; }
   virtual std::vector<ast::DeclSema> members_at_instantiation(EntityId /*ns*/, NameId) { return {}; }
+  // The type of variable template specialization `v` at the current point when it is not the
+  // template's with the arguments substituted: an explicit specialization's, or a partial
+  // specialization's that it is instantiated from ([temp.expl.spec], [temp.spec.partial]).
+  virtual std::optional<QualType> specialization_type(EntityId /*v*/) { return std::nullopt; }
   virtual ~Questions() = default;
 };
 
@@ -263,6 +267,16 @@ public:
     block_types_.push_back({depth, name, type});
   }
 
+  // Whether `name` is a member of the class whose member is being analysed, which hides what
+  // the enclosing namespaces declare ([basic.scope.class], [basic.lookup.unqual]).
+  bool names_member(NameId name) {
+    if (current_class == EntityId::none) return false;
+    if (const ClassRec* r = class_rec(current_class))
+      return std::ranges::any_of(r->fields, [&](const FieldRec& f) { return f.name == name; }) ||
+             std::ranges::any_of(r->members, [&](const MemberDeclRec& m) { return m.name == name; });
+    return q_->earlier_member(name).has_value();
+  }
+
   // The class template unqualified lookup finds for `name`, which a `<` after it begins the
   // arguments of ([temp.names]/3); none if it finds anything else.
   std::optional<ast::DeclSema> class_template(NameId name) { return named_template(name, ast::DeclKind::class_); }
@@ -271,6 +285,7 @@ public:
   // The template of kind `kind` unqualified lookup finds for `name`, with the default arguments of
   // every earlier declaration of it ([temp.param]/12).
   std::optional<ast::DeclSema> named_template(NameId name, ast::DeclKind kind) {
+    if (names_member(name)) return std::nullopt;
     for (auto s = scopes_.rbegin(); s != scopes_.rend(); ++s)
       for (auto p = s->rbegin(); p != s->rend(); ++p)
         if (p->first == name) return std::nullopt;
@@ -345,6 +360,7 @@ public:
       return {NodeId::none, begin, end};
     }
     EntityId spec = variable_specialization(tmpl.entity, *full);
+    if (auto st = q_->specialization_type(spec)) t = *st;
     demands.push_back({spec, ast::Loc{item_, loc_base_ + begin}});
     ExprInfo info{types().referee(*t), ValueCategory::lvalue, 0};
     return node(ast::DeclRef{info, spec}, begin, end, info);
@@ -990,7 +1006,7 @@ public:
     for (auto s = scopes_.rbegin(); s != scopes_.rend(); ++s)
       for (auto p = s->rbegin(); p != s->rend(); ++p)
         if (p->first == name) return false;
-    if (template_param(name)) return false;
+    if (template_param(name) || names_member(name)) return false;
     for (const BlockUsing& u : block_usings_)
       if (u.name == name) return std::ranges::any_of(u.decls, [](const ast::DeclSema& d) { return (d.flags & decl_flag::template_) != 0; });
     for (const OwnDecl& o : own)

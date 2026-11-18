@@ -936,6 +936,44 @@ template's tokens again with the arguments bound.
   qualified names whose nested-name-specifier is a member template, and members found through a
   dependent base.
 
+## Templates, ζ step 3: variable templates and specializations (#88, 2026-11-18)
+
+- **Variable templates** ([temp.pre]): `template<…> [inline] constexpr T v = …;`. The template's
+  initializer is a pattern; `v<args>` and `N::v<args>` name the specialization, an entity
+  (`variable`, with `templ` and the canonical arguments) like a function template
+  specialization. `Program::variable_instance` analyses the template's declaration again with
+  the arguments bound, where the specialization is first needed ([temp.inst]/7): in constant
+  evaluation (`global`, `constant_value`) at that point, or at the END worklist for code. A
+  specialization is emitted as a variable, mangled `_Z1vIiE`, with external linkage even when
+  const ([basic.link]/3).
+- **Explicit specializations** ([temp.expl.spec]): `template<>` declarations and definitions of
+  a class (`template<> struct X<int> {…};`, or only declared, then incomplete), function
+  (`template<> R f<args>(…)`, or arguments deduced from the declared type, [temp.deduct.decl],
+  the most specialized template when several fit), variable, and member of a class template
+  specialization (`template<> R X<int>::f() {…}`). A specialization so declared is never
+  instantiated; calls, constant evaluation, completeness and the END worklist use the explicit
+  one. A use before the explicit specialization that instantiated it is diagnosed at the end
+  ([temp.expl.spec]/7).
+- **Partial specializations** ([temp.spec.partial]) of class and variable templates, declared or
+  defined. `Program::choose_partial` matches a specialization against those declared before its
+  point by deducing their parameters from its arguments ([temp.spec.partial.match]), picks the
+  most specialized ([temp.spec.partial.order], the deduction of the rewritten function
+  templates), and diagnoses an ambiguity. The partial specialization's members are analysed as
+  those of the specialization of its own parameters, and may be defined outside it
+  ([temp.spec.partial.member]). Its arguments are checked against [temp.spec.partial.general]/9.1–9.3.
+- **Determinism:** before a specialization's pattern is chosen, `specializations_before(point)`
+  analyses every explicit and partial specialization item before the point, so the choice does
+  not depend on which cells ran first (§A1).
+- **Items:** `template<>` is no template-head: `template_depth` counts only real heads, and the
+  item and its names carry a `specialization` flag; names of explicit and partial
+  specializations are not found by lookup. A class's member items are scoped by its template-id
+  (`Kind<T*>`), so a specialization's members have ids of their own.
+- Tests: `tests/own/templates/s3-*` (spec-driven, plus ten from the review); 5 more draft examples pass.
+- Not yet (#88): alias templates, packs, concepts, member templates and their specializations,
+  static data members of class templates, non-type template arguments that are dependent
+  expressions other than a parameter (`A<I+5>`), and coalesced definitions of specializations
+  used in two units (#124).
+
 ## Bootstrap workarounds
 
 Places where ycxx's sources avoid or work around a C++26 feature because GCC 16 lacks it or
