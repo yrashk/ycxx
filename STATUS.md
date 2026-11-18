@@ -8,15 +8,45 @@ What is true of the code today. Work in progress and its owners are tracked in
 - Charter written: [README.md](README.md), [DECISIONS.md](DECISIONS.md) (scope, provenance,
   bootstrap, architecture direction, process, coordination), [AGENTS.md](AGENTS.md) (agent guide).
 - libycxx added as a submodule at `deps/libycxx`.
-- No compiler code yet.
+- Build and CI skeleton (#4), described in [docs/BUILDING.md](docs/BUILDING.md):
+  - CMake builds `build/bin/ycxx` with GCC 16.2 against libycxx's `import std;`.
+  - The preprocessor policy is enforced by `tools/check-policy`.
+  - CI runs PR, `main` and nightly tiers on Linux x86_64 and macOS arm64.
+  - `ycxx --version` works. The fronts (`daemon`, `cxx`, `lsp`, `ctl`) are stubs that exit 2.
+- The bootstrap smoke test (`tests/bootstrap`) passes for modules, reflection, contracts,
+  coroutines and the other C++26 features ycxx relies on. `std::execution` is an expected
+  failure (below).
 - Query engine design accepted: [`docs/design/query-engine.md`](docs/design/query-engine.md)
   (#1), summarized in DECISIONS §4. A throwaway prototype is in `spikes/query-engine/`.
-- Next: the AST design (#2) and the optimization architecture (#3).
+- Test driver: `tools/test` ([docs/TESTING.md](docs/TESTING.md), #5). Test kinds accept/reject
+  (error locations), `-E` against an oracle, run, differential against Clang 23 and GCC 16, and
+  incremental (format and hook; the ycxx side waits for #19). Fail-fast state, `--fast`, tiers,
+  failed-first, duration sharding, affected-test hook. A smoke suite of each kind passes with
+  Clang and GCC as the compiler under test; with ycxx every test is UNSUPPORTED
+  (`tests/features/ycxx.txt` lists nothing yet).
+- Optimization design accepted: [`docs/design/optimization.md`](docs/design/optimization.md)
+  (#3), summarized in DECISIONS §4.8. Throwaway spikes are in `spikes/optimization/`: e-graph
+  extraction, and solver builds against libycxx.
+- Next: the AST design (#2).
 
 ## Bootstrap workarounds
 
 Places where ycxx's sources avoid or work around a C++26 feature because GCC 16 lacks it or
-miscompiles it (DECISIONS §3.2). Each is removed once ycxx compiles itself. None yet.
+miscompiles it (DECISIONS §3.2). Each is removed once ycxx compiles itself.
+
+- **`std::execution` through `import std;` does not compile** (GCC 16.2 ICE in `tsubst_expr`).
+  - Cause: a GCC modules bug. An exported concept whose nested requirement uses a
+    requires-parameter inside a template argument crashes the compiler. libycxx's
+    `std::unstoppable_token` has that shape.
+  - Affected: anything that checks `std::unstoppable_token`, including `parallel_scheduler`,
+    `when_all`, `counting_scope` and `task`. This blocks the query engine (DECISIONS §4.3).
+  - Fix: belongs in libycxx (yrashk/libycxx#4, which has a 10-line repro and a tested
+    workaround). Then bump the submodule and drop `_xfail_execution` in
+    `tests/bootstrap/CMakeLists.txt`.
+- **The std module's BMI must be built with `-freflection -fcontracts`.**
+  - `CMakeLists.txt` adds the flags to libycxx's `ycxx_modules` target.
+  - Without them, `std::meta` is empty. An importer whose `-freflection` does not match the
+    BMI's segfaults GCC 16.2.
 
 ## Milestones
 

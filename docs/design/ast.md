@@ -227,6 +227,42 @@ struct BodySema { NodeId tree; SeqId<LocalRec> locals; };                // anal
   hashed IR holds `EntityId`s and no offsets; each instruction's `Loc` goes to the debug side
   table (Part D on #3).
 
+### 3.7 What the IR generator gets
+
+The accepted optimization design asks the AST for nine things as explicit nodes or facts (its
+§11). Each is met as follows; the two the decisions above left implicit, cleanups and
+sequencing, were decided by the session.
+
+1. **Conversions:** every implicit conversion, user-defined conversion call and standard
+   conversion sequence is a width-0 node naming its function (§3.3).
+2. **Temporaries:** materialization is a width-0 node carrying the storage duration, the
+   destructor and the full-expression or reference that ends its lifetime, with lifetime
+   extension resolved ([class.temporary]).
+3. **Cleanups:** every scope-exit edge (normal exit, `return`, `break`, `continue`, `goto`, the
+   exceptional edge) carries its ordered list of destructor calls, partially constructed objects
+   included ([except.ctor]). It is a `SeqId` on the exiting statement node, computed by
+   `analyze_body`.
+4. **Sequencing:** each expression kind declares the sequencing of its operands by an annotation
+   on its members (`[[=sequenced]]`, `[[=indeterminately_sequenced]]`, `[[=unsequenced]]`,
+   [intro.execution]), read by reflection like the rest of the schema. The rule belongs to the
+   kind, so shared nodes need no per-occurrence data, and the IR generator reads it rather than
+   re-deriving it.
+5. **Objects:** value categories and the implicit object parameter are resolved; `this`
+   adjustments and derived-to-base and base-to-derived steps are conversion nodes naming the
+   classes.
+6. **Initialization** is decided in the tree: aggregate element order, default member
+   initializers substituted, zero, value and default initialization explicit, constant versus
+   dynamic initialization per variable ([basic.start.static]), and the erroneous or indeterminate
+   state of each automatic variable ([dcl.init.general]).
+7. **Function facts** are in `DeclSema`: constexpr and consteval, `noexcept` as a fact, the
+   coroutine transformation with its promise calls explicit ([dcl.fct.def.coroutine]); `if
+   consteval` is its own statement kind, and expressions carry a manifestly-constant-evaluated
+   flag.
+8. **Reflections** are `VReflect` constants (§7.1) whose components map to §B7's queries.
+9. **References** are `EntityId`s and canonical `QualType`s (§5.2). String literals are the one
+   exception: they are identified by their `VString` constant, not by an entity, since
+   [lex.string] leaves their distinctness unspecified and content identity is TU-free.
+
 ## 4. Identities
 
 ### 4.1 Declaration ids
@@ -696,11 +732,10 @@ the chain reads "imported from M".
 
 ### 8.4 Debug information
 
-`function_ir`'s value is `{IrId hashed; SeqId<Loc> locs}`. The optimizer (`optimized(ir_fp, …)`,
-keyed by the hashed part) returns each output instruction's *provenance*, `(EntityId function,
-u32 index)` into that function's IR, the function itself or one inlined into it, so `tu(TU)`
-re-attaches the `Loc`s from each function's side table and renders the line
-table. A token produced by a macro is attributed to the **outermost expansion site**, since
+As the accepted optimization design has it (its §2.4): `function_ir`'s value contains no `Loc`, and
+`function_debug(F, ctx)` is a separate value mapping IR node ids to `Loc`s. Every transformation
+carries an origin map to `(function entity, node id)` pairs, so `tu(TU)` composes the maps,
+looks up each origin's `Loc` and renders the line table. A token produced by a macro is attributed to the **outermost expansion site**, since
 debuggers step through the user's file; `is_stmt` marks statement starts. A function from a
 header emitted by several TUs renders to the same file and line in each; instantiations point at
 the template's lines (§6.4); inlined code keeps its own `ItemId`.
@@ -822,7 +857,7 @@ built with GCC 16.2 `-freflection` (`make check`; ASan and UBSan builds run clea
 
 Posted as comments on the issues named.
 
-**On the IR and optimizer (#3):**
+**On the IR and optimizer (#3, accepted; for #23 and #24):**
 
 1. `function_ir(F, ctx)` consumes a tree with no dependent kind and no `VDep*` constant, checked by
    a `contract_assert` on entry. For a specialization the tree is `instantiate_fn(F, ctx).body`. The
@@ -832,9 +867,8 @@ Posted as comments on the issues named.
 3. IR constants are `ConstId`s. A symbolic address is `VLvalue{base, path, offset}` (§5.5). The
    interpreter returns a `ConstId`, including `VNotConstant{notes}`. A `meta_info` value is an IR
    scalar legal only under constant evaluation; code generation meeting one is an internal error.
-4. The hashed IR carries no `Loc`. `function_ir`'s value adds a side table, `SeqId<Loc>`, and the
-   optimizer returns each instruction's provenance as `(EntityId function, u32 index)`, the
-   function or one inlined into it, never a `Loc` (§8.4).
+4. The IR carries no `Loc`; `function_debug(F, ctx)` maps its node ids to `Loc`s, and origin maps
+   compose through every transformation, as the optimization design's §2.4 decides (§8.4).
 5. Contracts: the IR generator reads `PreAssert`, `PostAssert` and `ContractAssert` and the
    configured evaluation semantic; a postcondition's result name binds to the return slot.
 6. Expansion statements, pack indexing, splices and binding packs never reach the IR; it sees only

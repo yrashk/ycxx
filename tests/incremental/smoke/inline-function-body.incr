@@ -1,0 +1,17 @@
+// Editing a header's inline function body: an error appears, then goes away. Each state's
+// incremental result must equal a cold run, and the cold run must match the //! markers.
+--- main.cpp
+#include "a.h"
+int main() { return f(); }
+--- a.h
+inline int f() { return 0; }
+=== edit
+--- a.h
+inline int f() { return missing; } //! error
+=== edit
+--- a.h
+inline int f() { return 1; }
+--- b.h
+// a new file the translation unit does not include
+=== edit
+--- delete b.h

@@ -60,6 +60,14 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
   - Review the assembled document as soon as it is assembled. Seams between separately written
     parts are where most P0s were.
   - Seeded on #1. Revise this entry if it proves wrong.
+- **Run spikes in parallel with the design subagent, and start them first.** On #3 the spikes
+  (a toy e-graph, solver builds) ran on Opus while Fable drafted. Their results changed the
+  draft's numbers (exact ILP extraction stops being practical near 1,000 e-nodes, not 2,000
+  nodes), so the decision subagent should have the results, or be told which claims wait on them.
+  - Do: brief the decision subagent to ask for a decision record (decision, reasons, rejected
+    alternatives), not prose, and to mark claims that wait on a spike. The session writes the
+    prose (DECISIONS §6.5).
+  - Learned on #3.
 
 - **Ask Fable for a terse decision list, and do the writing yourself.** On #2 the first brief asked
   for a 3,000-word drafted part; mid-run it was redirected to "decision, reason, rejected
@@ -89,6 +97,21 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
   - Do: stop reviewing when a round finds no P0 or P1 issues (DECISIONS §8.6).
   - Learned on #1.
 
+## Toolchain
+
+- **Reduce a compiler crash from the build system's exact command, with a script.** A GCC ICE
+  under CMake seemed to vanish when re-run by hand. Two things cost about 20 minutes of
+  bisecting:
+  - The tool shell is zsh, which does not word-split `$CXX file.cpp`. The command never ran, and
+    `grep -c internal` printed 0.
+  - Importing a BMI with a different `-freflection` setting crashes too, but in a different way.
+  - Do: get the command with `ninja -t commands <target>`.
+  - Do: drop flags and source lines one at a time in a Python script (`subprocess` with a list).
+  - Do: check the exit status of the reduced command, not only the absence of an error.
+  - Do: once it reproduces, cut it down to a standalone repro with no libycxx. That repro is the
+    bug report, and it shows where the fix belongs.
+  - Learned on #4.
+
 ## Evidence and tests
 
 - **A `std::tuple` over a long type list is a compile-time trap with GCC 16.** The AST spike stored
@@ -97,6 +120,15 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
   - Do: index per-kind storage by a kind number (an array of untyped pools), and measure
     `-ftime-report` before blaming reflection.
   - Learned on #2's spike.
+
+- **Test a selection's invariant end to end, not just its helper.** The test driver's shard
+  helper was unit-tested and correct, but main.py fed each stage a list that depended on earlier
+  shards' picks, so shards skipped some tests and doubled others: CI could go green without
+  running them. A review found it; a self-test running `tools/test --list --shard i/N` for every
+  i and checking the union equals the unsharded list now guards it.
+  - Do: for partitioning, ordering or filtering code, check the invariant (every item once,
+    nothing lost) through the real entry point, with state that makes the stages interact.
+  - Learned on #5.
 
 - **Run sanitizers on any concurrent code before trusting its results.** The spike's fork-join
   passed its demos while one of them crashed now and then: the joiner freed the join while the
@@ -111,3 +143,12 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
   - Do: compare thread counts on incremental rebuilds after edits, where early cutoff and reuse
     actually happen.
   - Learned on #1's prototype review.
+- **A build script can report PASS for a crash.** In bash, `if run; then` disables `set -e` inside
+  `run`, so a failing step in the middle went unnoticed and a segfaulting smoke test passed.
+  - Do: run the step in a subshell, `if (set -e; run); then`, and check the script once against
+    a deliberately failing step.
+  - Learned on #3's solver spike.
+- **GCC has no ThreadSanitizer on macOS arm64.** A TSan build needs Clang and libc++, and so does
+  every C++ library it links (the e-graph spike needed a second HiGHS build).
+  - Do: plan TSan runs on macOS with Clang from the start, or run them on Linux.
+  - Learned on #3's e-graph spike.
