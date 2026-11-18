@@ -6,6 +6,7 @@ add_subdirectory(hash)
 add_subdirectory(engine)
 add_subdirectory(lex)
 add_subdirectory(pp)
+add_subdirectory(items)
 
 configure_file(version.cppm.in ${CMAKE_CURRENT_BINARY_DIR}/version.cppm @ONLY)
 
