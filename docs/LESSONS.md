@@ -186,6 +186,19 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
 
 ## Evidence and tests
 
+- **Rerun the crash survey after every change, through the real driver.** On #41 a survey of
+  every draft example found no crash; two later changes (placeholder records with an uninterned
+  type, then the switch to #33's checked `array_of`) brought crashes that the earlier survey
+  could not see, and test flags (`-freflection`) brought exit 2s that only the driver passes.
+  - Do: keep the survey a loop over `tools/test core` plus a direct run, and rerun it last.
+  - Do: an expected-failure list must never cover a crash (`Crashed` in tests/driver/kinds.py).
+  - Learned on #41.
+- **A reference into a growing side table dangles.** A `const TypeRec&` held across creating
+  another type pointed into a reallocated `std::vector`, giving a wrong diagnostic that depended
+  on the file's length. Use a `std::deque` for tables whose records are referenced, or return
+  records by value.
+  - Learned on #41.
+
 - **Fuzz incremental == cold on every derived output, diagnostics included.** The engine's
   values, dependency lists and executions matched cold runs from the start, but `diags_of` was
   wrong in 119 of 300 edits: pruning by `has_diags` missed a backdated cell whose subgraph gained
