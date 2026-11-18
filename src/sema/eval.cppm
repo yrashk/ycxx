@@ -38,6 +38,9 @@ struct Evaluated {
   std::optional<ConstId> value;
   u64 reason = reason_unsupported;
   bool constant = false;
+  // The expression is value-dependent ([temp.dep.constexpr]): it is evaluated when the template is
+  // instantiated.
+  bool dependent = false;
 };
 
 class Evaluator {
@@ -48,6 +51,7 @@ public:
   // permitted result of a constant expression ([expr.const]). `e` must be valid.
   Evaluated evaluate(Ex e) {
     if (!e.ok()) return {};
+    if (s_->dependent(e)) return {std::nullopt, reason_unsupported, false, true};
     if (e.glvalue()) e = s_->rvalue(e);
     if (!e.ok()) return {};
     ast::Interners& in = s_->ins();
@@ -59,6 +63,7 @@ public:
     thunk.entity = EntityId::none;
     thunk.type = s_->types().function(Types::unqualified(e.type()), {}, false, LangLinkage::cxx);
     thunk.params = in.intern_seq(std::span<const ast::ParamSema>{});
+    thunk.template_params = in.intern_seq(std::span<const ast::TemplateParamSema>{});
     irgen::FunctionInput input{EntityId::none, thunk,
                                ast::BodySema{ret, in.intern_seq(std::span<const ast::LocalRec>(locals))},
                                s_->item(), 0, true, s_->local_values()};

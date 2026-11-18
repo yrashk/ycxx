@@ -20,6 +20,31 @@ enum class Linkage : u8 { none, internal, module, external };
 enum class Storage : u8 { none, static_, thread_local_, extern_, automatic };
 enum class Access : u8 { none, public_, protected_, private_ };
 
+// A template argument (§5.6): a type, or a value converted to its parameter's type
+// ([temp.arg.nontype]); `type` is canonical, and a value's is the value's type.
+enum class TemplateArgKind : u8 { type, value };
+struct TemplateArg {
+  TemplateArgKind kind;
+  QualType type;
+  ConstId value;  // none for a type
+  constexpr bool operator==(const TemplateArg&) const = default;
+};
+
+// A template-parameter ([temp.param]) of a template-head: its name, its kind and position
+// (`TTemplateParam` and `VDepParam` refer to it by depth and index), a non-type parameter's type,
+// and its default argument if it has one (`has_default`).
+struct TemplateParamSema {
+  NameId name;
+  TemplateArgKind kind;
+  u8 pack;
+  u8 has_default;
+  u16 depth;
+  u16 index;
+  QualType type;     // a type parameter's own `TTemplateParam`; a non-type parameter's type
+  TemplateArg default_;
+  constexpr bool operator==(const TemplateParamSema&) const = default;
+};
+
 struct ParamSema {
   EntityId entity;
   QualType type;
@@ -41,6 +66,8 @@ struct DeclSema {
   NodeId constraint;
   NodeId contracts;  // non-members only, this declaration's own (§7.5)
   SeqId<ParamSema> params;
+  // A template's template-head ([temp.pre]); empty for a declaration that is not a template.
+  SeqId<TemplateParamSema> template_params;
   constexpr bool operator==(const DeclSema&) const = default;
 };
 
@@ -95,7 +122,7 @@ struct BodySema {
 
 // The element types of the `seqs` interner: one pool each, indexed by position in this list.
 using SeqElements = closed_list<NodeId, EntityId, QualType, NameId, ParamSema, DeclSema, BaseSpec,
-                                MemberRec, LocalRec, u8, u32, ConstId>;
+                                MemberRec, LocalRec, u8, u32, ConstId, TemplateArg, TemplateParamSema>;
 
 static_assert(std::ranges::all_of(SeqElements::infos, [](std::meta::info t) {
   if (std::meta::is_class_type(t)) return check_record(t);

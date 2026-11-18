@@ -148,7 +148,8 @@ struct Body {
     std::vector<ast::ParamSema> ps;
     for (auto& [name, t] : params) ps.push_back({EntityId::none, t, w.in.names.intern(name), NodeId::none, 0});
     ast::DeclSema decl{f, type, ast::DeclKind::function, ast::Linkage::external, ast::Storage::none, ast::Access::none,
-                       0, {}, NodeId::none, NodeId::none, w.in.intern_seq(std::span<const ast::ParamSema>(ps))};
+                       0, {}, NodeId::none, NodeId::none, w.in.intern_seq(std::span<const ast::ParamSema>(ps)),
+                       w.in.intern_seq(std::span<const ast::TemplateParamSema>{})};
     auto locs = b.seq(std::span<const ast::LocalRec>(locals));
     ast::BodySema body = b.commit(ast::BodySema{tree, locs});
     w.tu.functions.push_back({f, decl, body, ast::ItemId(1), 0});

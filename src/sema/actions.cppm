@@ -18,6 +18,7 @@ import ycxx.interp;
 import ycxx.lex;
 import :types;
 import :diag;
+import :templates;
 
 export namespace ycxx::sema {
 
@@ -47,6 +48,11 @@ public:
   // In a member declaration of a class being defined: the member named `name` declared before it
   // ([basic.scope.class]; the class's member list is not complete yet).
   virtual std::optional<ast::DeclSema> earlier_member(NameId name) = 0;
+  // In an instantiation: whether the call whose callee begins at `offset` was dependent in the
+  // template's definition, and the declarations argument-dependent lookup finds at the point of
+  // instantiation ([temp.dep.candidate]). Outside one, false and none.
+  virtual bool dependent_call(u32 /*offset*/) { return false; }
+  virtual std::vector<DeclId> visible_at_instantiation(NameId) { return {}; }
   virtual ~Questions() = default;
 };
 
@@ -81,6 +87,13 @@ struct Braced {
   std::vector<Clause> clauses;
 };
 
+// Flags of `ExprInfo::flags`.
+namespace expr_flag {
+// Type- or value-dependent ([temp.dep.expr], [temp.dep.constexpr]): its type or value depends on
+// a template parameter, so it is analysed when the template is instantiated.
+inline constexpr u8 dependent = 1;
+}
+
 // Flags of `LocalRec::flags` and `DeclSema::flags`.
 namespace local_flag {
 inline constexpr u16 parameter = 1;
@@ -98,7 +111,16 @@ inline constexpr u16 deleted = 256;    // a deleted definition ([dcl.fct.def.del
 inline constexpr u16 constructor = 512;
 inline constexpr u16 destructor = 1024;
 inline constexpr u16 implicit = 2048;  // an implicitly declared special member ([special])
+inline constexpr u16 template_ = 4096;  // a template ([temp.pre]); its head is `template_params`
 }
+
+// What a cell demands of the program besides its value (query-engine.md §B1.4): a function
+// template specialization whose definition is required ([temp.inst]/8), instantiated at the end
+// of the translation unit (§B6.2).
+struct Demand {
+  EntityId spec;
+  ast::Loc at;
+};
 
 class Sema {
 public:
@@ -160,6 +182,12 @@ public:
       for (auto s = scopes_.rbegin(); s != scopes_.rend(); ++s)
         for (auto p = s->rbegin(); p != s->rend(); ++p)
           if (p->first == name) return std::nullopt;
+    // A template parameter hides what the enclosing scopes declare ([basic.scope.temp]).
+    if (const ast::TemplateParamSema* p = template_param(name)) {
+      if (elaborated || p->kind != ast::TemplateArgKind::type) return std::nullopt;
+      if (auto a = template_args.at(p->depth, p->index)) return a->type;
+      return p->type;
+    }
     std::optional<ast::DeclSema> found;
     for (auto p = own.rbegin(); p != own.rend() && !found; ++p)
       if (p->name == name) found = p->sema;
@@ -192,6 +220,9 @@ public:
     u32 begin = object.begin;
     Ex fail{NodeId::none, begin, end};
     if (!object.ok()) return fail;
+    // A member of the current instantiation or of an unknown specialization is looked up when the
+    // template is instantiated ([temp.dep.expr]/5).
+    if (dependent(object)) return dependent_node({object}, begin, end, std::nullopt, ValueCategory::lvalue);
     QualType ct = object.type();
     if (arrow) {
       object = rvalue(object);
@@ -285,6 +316,7 @@ public:
   // Value-initialization ([dcl.init.general]) of an object of type `t`. An aggregate whose
   // members have default member initializers gets them (the implicit default constructor's).
   Ex value_init(QualType t, u32 begin, u32 end) {
+    if (types().is_dependent(t)) return dependent_node({}, begin, end);
     if (has_user_ctors(t)) return construct(t, {}, begin, end);  // the default constructor
     if (has_member_inits(t)) return member_inits(t, true, begin, end);
     ExprInfo info{Types::unqualified(t), ValueCategory::prvalue, 0};
@@ -293,6 +325,7 @@ public:
   // Default-initialization ([dcl.init.general]/7): the default member initializers, and no
   // initialization for the rest.
   Ex default_init(QualType t, u32 begin, u32 end) {
+    if (types().is_dependent(t)) return dependent_node({}, begin, end);
     if (has_user_ctors(t)) return construct(t, {}, begin, end);
     if (has_member_inits(t)) return member_inits(t, false, begin, end);
     ExprInfo info{Types::unqualified(t), ValueCategory::prvalue, 0};
@@ -325,6 +358,12 @@ public:
   // List-initialization of an object of type `t` from `b` ([dcl.init.list]/3).
   Ex list_init(QualType t, const Braced& b) {
     Ex fail{NodeId::none, b.begin, b.end};
+    if (types().is_dependent(t) || dependent(b)) {
+      std::vector<Ex> ops;
+      for (const Braced::Clause& c : b.clauses)
+        if (!c.list) ops.push_back(c.expr);
+      return dependent_node(ops, b.begin, b.end, types().is_dependent(t) ? std::nullopt : std::optional(Types::unqualified(t)));
+    }
     if (!require_complete(t, b.begin)) return fail;
     // [dcl.init.general]: an initializer-list or a designated-initializer-list, not a mix.
     if (std::ranges::any_of(b.clauses, &Braced::Clause::designated) &&
@@ -466,7 +505,7 @@ public:
   // [dcl.init.list]/7: an integral conversion to a type that cannot represent every value of the
   // source type, unless the source is a constant whose value fits; a pointer to bool.
   bool narrows(const Ex& from, QualType to) {
-    if (!from.ok()) return false;
+    if (!from.ok() || dependent(from) || types().is_dependent(to)) return false;
     auto a = types().builtin_of(from.type()), b = types().builtin_of(to);
     if (types().is_pointer(from.type()) && b == Builtin::bool_) return true;
     if (!a || !b || !ast::is_integral(*a) || !ast::is_integral(*b) || *a == *b) return false;
@@ -536,6 +575,85 @@ public:
   void put_scopes(Scopes s) { scopes_ = std::move(s); }
 
   NameId no_name() { return ins().names.intern(""); }
+
+  // ------------------------------------------------------------ templates ([temp.param], [temp.res])
+
+  // The template-heads enclosing the current point, outermost first ([basic.scope.temp]), and in
+  // an instantiation the arguments bound to their parameters ([temp.inst]).
+  std::vector<std::vector<ast::TemplateParamSema>> template_scopes;
+  Bindings template_args;
+  const ast::TemplateParamSema* template_param(NameId name) const {
+    for (auto s = template_scopes.rbegin(); s != template_scopes.rend(); ++s)
+      for (const ast::TemplateParamSema& p : *s)
+        if (p.name == name) return &p;  // an unnamed parameter's name is never looked up
+    return nullptr;
+  }
+  // What the cell demands of the program (§B1.4), in program order.
+  std::vector<Demand> demands;
+
+  Templates templates() { return Templates(*w_); }
+  bool dependent(const Ex& e) {
+    return e.ok() && ((e.info.flags & expr_flag::dependent) || types().is_dependent(e.type()));
+  }
+  bool any_dependent(std::span<const Ex> es) {
+    return std::ranges::any_of(es, [&](const Ex& e) { return dependent(e); });
+  }
+  bool dependent(const Braced& b) {
+    return std::ranges::any_of(b.clauses, [&](const Braced::Clause& c) { return c.list ? dependent(*c.list) : dependent(c.expr); });
+  }
+  // A dependent construct over `ops` in [begin, end): of type `t` when only its value depends on
+  // a template parameter, else of the dependent type.
+  Ex dependent_node(std::span<const Ex> ops, u32 begin, u32 end, std::optional<QualType> t = std::nullopt,
+                    ValueCategory cat = ValueCategory::prvalue) {
+    std::vector<Child> cs;
+    for (const Ex& o : ops)
+      if (o.ok()) cs.push_back({o.id, o.begin >= begin ? o.begin - begin : 0});
+    ExprInfo info{t ? *t : builtin(Builtin::dependent), cat, expr_flag::dependent};
+    return node(ast::Dependent{info, b_->list(cs)}, begin, end, info);
+  }
+  Ex dependent_node(std::initializer_list<Ex> ops, u32 begin, u32 end, std::optional<QualType> t = std::nullopt,
+                    ValueCategory cat = ValueCategory::prvalue) {
+    return dependent_node(std::span<const Ex>(ops.begin(), ops.size()), begin, end, t, cat);
+  }
+  // The offsets of the unqualified calls whose candidates depend on the arguments, in a template's
+  // definition ([temp.dep.candidate]); an instantiation adds argument-dependent lookup at its point.
+  std::vector<u32> dependent_calls;
+
+  // The specialization of function template `tmpl` for `args`, whose type is `type` (§B1.5).
+  EntityId specialization(const ast::DeclSema& tmpl, std::span<const TemplateArg> args, QualType type) {
+    const EntityRec& t = w_->entities.rec(tmpl.entity);
+    EntityRec r{EntityKind::function, t.name, type, t.lang, t.linkage, t.first, t.scope};
+    r.templ = tmpl.entity;
+    r.args.assign(args.begin(), args.end());
+    return w_->entities.entity(std::move(r));
+  }
+
+  // Whether unqualified lookup of `name` finds a function template here, so that a `<` after it
+  // begins a template argument list ([temp.names]/3).
+  bool is_template_name(NameId name) {
+    for (auto s = scopes_.rbegin(); s != scopes_.rend(); ++s)
+      for (auto p = s->rbegin(); p != s->rend(); ++p)
+        if (p->first == name) return false;
+    if (template_param(name)) return false;
+    for (const OwnDecl& o : own)
+      if (o.name == name) return (o.sema.flags & decl_flag::template_) != 0;
+    for (DeclId d : q_->visible_decls(name))
+      if (q_->decl_sema(d).flags & decl_flag::template_) return true;
+    return false;
+  }
+
+  // A template-id naming a function template ([temp.names]): the overload set of `name`, with its
+  // explicitly specified template arguments ([temp.arg.explicit]).
+  Ex template_id(NameId name, std::vector<TemplateArg> args, u32 begin, u32 end) {
+    Ex r = name_expr(name, begin, end);
+    if (!r.ok()) return r;
+    if (!types().is(r.type(), Builtin::overload_set)) {
+      diag(begin, Diag::not_a_template, name);
+      return {NodeId::none, begin, end};
+    }
+    explicit_args_[std::to_underlying(r.id)] = std::move(args);
+    return r;
+  }
 
   // ------------------------------------------------------------ the function being defined
 
@@ -723,6 +841,8 @@ public:
     QualType type;
     bool no_object;
     bool deleted;
+    // A function template specialization's template ([over.match.best]/2.4–2.5), else null.
+    const ast::DeclSema* pattern = nullptr;
   };
 
   // An implicit conversion sequence's ranking ([over.ics.rank]): exact match, promotion,
@@ -841,20 +961,29 @@ public:
       report(Diag::no_viable_function, Diag::no_viable_constructor);
       return std::nullopt;
     }
-    // F1 is better than F2 if none of its conversions is worse and one is better.
-    auto better = [](const std::vector<Ics>& x, const std::vector<Ics>& y) {
+    // F1 is better than F2 if none of its conversions is worse, and one is better, or else F1 is
+    // not a template specialization and F2 is, or both are and F1's template is more specialized
+    // ([over.match.best]/2).
+    auto better = [&](std::size_t a, std::size_t b) {
+      const std::vector<Ics>& x = viable[a].second;
+      const std::vector<Ics>& y = viable[b].second;
       bool some = false;
       for (std::size_t k = 0; k < x.size(); ++k) {
         if (y[k] < x[k]) return false;
         some = some || x[k] < y[k];
       }
-      return some;
+      if (some) return true;
+      const Candidate& f1 = cands[viable[a].first];
+      const Candidate& f2 = cands[viable[b].first];
+      if (!f1.pattern && f2.pattern) return true;
+      if (f1.pattern && f2.pattern) return templates().more_specialized(*f1.pattern, *f2.pattern, args.size());
+      return false;
     };
     std::optional<std::size_t> best;
     for (std::size_t i = 0; i < viable.size(); ++i) {
       bool wins = true;
       for (std::size_t j = 0; j < viable.size() && wins; ++j)
-        if (i != j) wins = better(viable[i].second, viable[j].second);
+        if (i != j) wins = better(i, j);
       if (wins) best = i;
     }
     if (!best) {
@@ -885,6 +1014,8 @@ public:
   Ex construct(QualType t, std::vector<Ex> args, u32 begin, u32 end, bool list = false, bool copy_init = false) {
     Ex fail{NodeId::none, begin, end};
     if (std::ranges::any_of(args, [](const Ex& a) { return !a.ok(); })) return fail;
+    if (types().is_dependent(t) || any_dependent(args))
+      return dependent_node(args, begin, end, types().is_dependent(t) ? std::nullopt : std::optional(Types::unqualified(t)));
     if (!require_complete(t, begin)) return fail;
     QualType ut = Types::unqualified(t);
     EntityId c = types().class_of(ut);
@@ -943,6 +1074,7 @@ public:
 
   // `T(args)` and `T{…}` for a class T ([expr.type.conv]): a prvalue.
   Ex functional_cast(QualType t, std::vector<Ex> args, u32 begin, u32 end) {
+    if (types().is_dependent(t) || any_dependent(args)) return construct(t, std::move(args), begin, end);
     if (args.empty()) return value_init(t, begin, end);
     if (!has_user_ctors(t) && args.size() == 1) return convert(args[0], t, begin);
     if (!has_user_ctors(t)) {
@@ -965,6 +1097,11 @@ public:
   // reference when `extend` ([class.temporary]/6).
   Ex bind_reference(Ex e, QualType r, u32 at_, bool extend = false) {
     if (!e.ok()) return e;
+    if (dependent(e) || types().is_dependent(r)) {
+      QualType t = types().referee(r);
+      return dependent_node({e}, e.begin, e.end, types().is_dependent(t) ? std::nullopt : std::optional(t),
+                            types().rec(r).rvalue_ref ? ValueCategory::xvalue : ValueCategory::lvalue);
+    }
     if (is_bound_member(e) || types().is(e.type(), Builtin::overload_set)) return rvalue(e);
     TypeRec rr = types().rec(r);
     QualType t = rr.inner;
@@ -1013,8 +1150,9 @@ public:
   // ------------------------------------------------------------ names ([basic.lookup.unqual])
 
   // An id-expression naming `name`, at `begin`: the innermost block-scope declaration, else the
-  // namespace-scope ones.
-  Ex name_expr(NameId name, u32 begin, u32 end) {
+  // namespace-scope ones. The `callee` of a call that lookup does not find is a `DepName`: the
+  // call decides once it has its arguments ([temp.dep.candidate]).
+  Ex name_expr(NameId name, u32 begin, u32 end, bool callee = false) {
     for (auto s = scopes_.rbegin(); s != scopes_.rend(); ++s)
       for (auto p = s->rbegin(); p != s->rend(); ++p)
         if (p->first == name) {
@@ -1022,6 +1160,19 @@ public:
           ExprInfo info{types().referee(l.type), ValueCategory::lvalue, 0};  // [expr.type]: a reference names its object
           return node(ast::LocalRef{info, p->second}, begin, end, info);
         }
+    // A non-type template parameter is a prvalue whose value depends on the argument
+    // ([temp.param]/8, [temp.dep.constexpr]).
+    if (const ast::TemplateParamSema* p = template_param(name)) {
+      if (p->kind == ast::TemplateArgKind::type) {
+        diag(begin, Diag::expected_expression);
+        return {NodeId::none, begin, end};
+      }
+      if (auto a = template_args.at(p->depth, p->index))
+        return literal(Types::unqualified(a->type), a->value, ValueCategory::prvalue, begin, end);
+      ConstId v = ins().intern_value(ast::VDepParam{p->depth, p->index});
+      ExprInfo info{Types::unqualified(p->type), ValueCategory::prvalue, expr_flag::dependent};
+      return node(ast::Literal{info, v}, begin, end, info);
+    }
     // The class's members, in a member function's body ([basic.scope.class]).
     if (current_class != EntityId::none) {
       if (auto r = class_member(current_class, name, begin, end)) return *r;
@@ -1049,6 +1200,10 @@ public:
     if (std::ranges::any_of(found, [](const ast::DeclSema& d) { return d.kind != ast::DeclKind::class_; }))
       std::erase_if(found, [](const ast::DeclSema& d) { return d.kind == ast::DeclKind::class_; });
     if (found.empty()) {
+      if (!any && callee) {
+        ExprInfo info{builtin(Builtin::dependent), ValueCategory::lvalue, 0};
+        return node(ast::DepName{info, name}, begin, end, info);
+      }
       if (!any) diag(begin, Diag::undeclared, name);
       return {NodeId::none, begin, end};
     }
@@ -1058,7 +1213,8 @@ public:
     std::vector<ast::DeclSema> set;
     for (auto o = found.rbegin(); o != found.rend(); ++o)
       if (!std::ranges::any_of(set, [&](const ast::DeclSema& x) { return x.entity == o->entity; })) set.push_back(*o);
-    if (set.size() > 1) {
+    bool templ = std::ranges::any_of(set, [](const ast::DeclSema& x) { return (x.flags & decl_flag::template_) != 0; });
+    if (set.size() > 1 || templ) {
       if (!std::ranges::all_of(set, [](const ast::DeclSema& x) { return x.kind == ast::DeclKind::function; })) {
         diag(begin, Diag::overload_not_supported, name);
         return {NodeId::none, begin, end};
@@ -1212,7 +1368,7 @@ public:
       diag(e.begin, Diag::bound_member_not_called, w_->entities.rec(as<ast::Member>(e)->member).name);
       return {NodeId::none, e.begin, e.end};
     }
-    if (!e.ok() || !e.glvalue()) return e;
+    if (!e.ok() || !e.glvalue() || dependent(e)) return e;
     QualType t = e.type();
     // A static data member usable in constant expressions is read as its value, which is no
     // odr-use ([basic.def.odr]), so it needs no definition; through an object (`a.x`, the comma
@@ -1271,6 +1427,10 @@ public:
   // initialization of an object of type `to` from `e`. Standard conversions only.
   Ex convert(Ex e, QualType to, u32 at_) {
     if (!e.ok()) return e;
+    if (dependent(e) || types().is_dependent(to)) {
+      if (types().is_reference(to)) return bind_reference(e, to, at_);
+      return dependent_node({e}, e.begin, e.end, types().is_dependent(to) ? std::nullopt : std::optional(Types::unqualified(to)));
+    }
     QualType target = Types::unqualified(to);
     // A class object is copy-initialized from an expression of its own class: a glvalue through
     // the (trivial, implicit) copy constructor, a prvalue directly ([dcl.init.general]/17.6).
@@ -1332,6 +1492,7 @@ public:
   Ex to_bool(Ex e, u32 at_) {
     e = rvalue(e);
     if (!e.ok()) return e;
+    if (dependent(e)) return dependent_node({e}, e.begin, e.end, builtin(Builtin::bool_));
     QualType t = e.type();
     if (types().is(t, Builtin::bool_)) return e;
     if (types().is_arithmetic(t) || types().is_pointer(t) || types().is(t, Builtin::nullptr_t))
@@ -1392,6 +1553,7 @@ public:
   Ex unary(ast::UnaryOp op, Ex e, u32 begin, u32 end, u32 op_at) {
     using enum ast::UnaryOp;
     if (!e.ok()) return {NodeId::none, begin, end};
+    if (dependent(e)) return dependent_node({e}, begin, end);
     auto make = [&](Ex operand, QualType t, ValueCategory cat) {
       ExprInfo info{t, cat, 0};
       return node(ast::Unary{info, op, at(operand, begin)}, begin, end, info);
@@ -1459,6 +1621,7 @@ public:
     using enum BinOp;
     u32 begin = l.begin, end = r.end;
     if (!l.ok() || !r.ok()) return {NodeId::none, begin, end};
+    if (dependent(l) || dependent(r)) return dependent_node({l, r}, begin, end);
     auto bin = [&](ast::BinaryOp k, Ex a, Ex c, QualType t) {
       ExprInfo info{t, ValueCategory::prvalue, 0};
       return node(ast::Binary{info, k, at(a, begin), at(c, begin)}, begin, end, info);
@@ -1566,6 +1729,7 @@ public:
   Ex assign(AsgOp op, Ex l, Ex r, u32 op_at) {
     u32 begin = l.begin, end = r.end;
     if (!l.ok() || !r.ok()) return {NodeId::none, begin, end};
+    if (dependent(l) || dependent(r)) return dependent_node({l, r}, begin, end, std::nullopt, ValueCategory::lvalue);
     if (!check_modifiable(l, op_at) || !check_class_assignable(l, op_at)) return {NodeId::none, begin, end};
     QualType lt = l.type();
     QualType computation = Types::unqualified(lt);
@@ -1607,6 +1771,7 @@ public:
   // [expr.assign]/9: `x = {…}` assigns `T{…}`, list-initialized, to an object of type T.
   Ex assign_list(Ex l, const Braced& b, u32 op_at) {
     u32 begin = l.begin, end = b.end;
+    if (l.ok() && (dependent(l) || dependent(b))) return dependent_node({l}, begin, end, std::nullopt, ValueCategory::lvalue);
     if (!l.ok() || !check_modifiable(l, op_at) || !check_class_assignable(l, op_at)) return {NodeId::none, begin, end};
     Ex c = list_init(Types::unqualified(l.type()), b);
     if (!c.ok()) return {NodeId::none, begin, end};
@@ -1619,6 +1784,7 @@ public:
   Ex conditional(Ex cond, Ex t, Ex f, u32 q_at) {
     u32 begin = cond.begin, end = f.end;
     if (!cond.ok() || !t.ok() || !f.ok()) return {NodeId::none, begin, end};
+    if (dependent(t) || dependent(f)) return dependent_node({cond, t, f}, begin, end);
     Ex c = to_bool(cond, cond.begin);
     if (!c.ok()) return {NodeId::none, begin, end};
     ExprInfo info;
@@ -1662,17 +1828,61 @@ public:
     u32 begin = callee.begin;
     if (!callee.ok() || std::ranges::any_of(args, [](const Ex& a) { return !a.ok(); })) return {NodeId::none, begin, end};
     if (is_bound_member(callee)) return member_call(callee, std::move(args), end, paren_at);
+    // [temp.dep.candidate]: an unqualified call with a type-dependent argument is resolved when the
+    // template is instantiated, among what lookup finds at the definition and argument-dependent
+    // lookup finds at the point of instantiation.
+    std::optional<NameId> unqualified = unqualified_name(callee);
+    std::vector<Ex> all{callee};
+    all.insert(all.end(), args.begin(), args.end());
+    if (unqualified && any_dependent(args)) {
+      dependent_calls.push_back(callee.begin);
+      return dependent_node(all, begin, end);
+    }
+    if (unqualified && q_->dependent_call(callee.begin)) callee = with_adl(callee, *unqualified, args);
+    if (auto d = as<ast::DepName>(callee)) {
+      diag(callee.begin, Diag::undeclared, d->name);
+      return {NodeId::none, begin, end};
+    }
+    if (dependent(callee) || any_dependent(args)) return dependent_node(all, begin, end);
     if (types().is(callee.type(), Builtin::overload_set)) {
       const std::vector<ast::DeclSema>& set = overloads_.at(std::to_underlying(callee.id));
+      auto ex = explicit_args_.find(std::to_underlying(callee.id));
+      std::span<const TemplateArg> explicit_args;
+      if (ex != explicit_args_.end()) explicit_args = ex->second;
+      std::vector<ArgShape> shapes;
+      for (const Ex& a : args)
+        shapes.push_back({a.type(), a.cat() == ValueCategory::lvalue,
+                          !types().is(a.type(), Builtin::overload_set) && !is_bound_member(a)});
       std::vector<Candidate> cands;
-      for (const ast::DeclSema& d : set)
-        cands.push_back({d.entity, d.type, true, (d.flags & decl_flag::deleted) != 0});
+      std::vector<const ast::DeclSema*> decls;
+      for (const ast::DeclSema& d : set) {
+        bool deleted = (d.flags & decl_flag::deleted) != 0;
+        if (!(d.flags & decl_flag::template_)) {
+          // Explicit template arguments name only templates ([temp.arg.explicit]).
+          if (ex != explicit_args_.end()) continue;
+          cands.push_back({d.entity, d.type, true, deleted});
+          decls.push_back(&d);
+          continue;
+        }
+        // A function template contributes the specialization deduction gives ([temp.over]/1),
+        // or nothing when deduction fails ([temp.deduct.general]).
+        Templates t = templates();
+        auto targs = t.deduce_call(d, shapes, explicit_args);
+        if (!targs) continue;
+        auto st = t.specialization_type(d, *targs);
+        if (!st) continue;
+        cands.push_back({specialization(d, *targs, *st), *st, true, deleted, &d});
+        decls.push_back(&d);
+      }
       auto chosen = resolve(cands, args, callee.begin, w_->entities.rec(set.front().entity).name, std::nullopt);
       if (!chosen) return {NodeId::none, begin, end};
-      const ast::DeclSema& d = set[*chosen];
-      if (d.flags & decl_flag::consteval_) consteval_.insert(std::to_underlying(d.entity));
-      ExprInfo ci{d.type, ValueCategory::lvalue, 0};
-      callee = node(ast::DeclRef{ci, d.entity}, callee.begin, callee.end, ci);
+      const ast::DeclSema& d = *decls[*chosen];
+      const Candidate& k = cands[*chosen];
+      if (d.flags & decl_flag::consteval_) consteval_.insert(std::to_underlying(k.entity));
+      // A specialization called is one whose definition the program requires ([temp.inst]/8).
+      if (k.pattern) demands.push_back({k.entity, ast::Loc{item_, loc_base_ + callee.begin}});
+      ExprInfo ci{k.type, ValueCategory::lvalue, 0};
+      callee = node(ast::DeclRef{ci, k.entity}, callee.begin, callee.end, ci);
     } else if (auto d = as<ast::DeclRef>(callee); d && deleted_.contains(std::to_underlying(d->entity))) {
       // One function: still not callable when deleted ([dcl.fct.def.delete]).
       diag(callee.begin, Diag::deleted_function, w_->entities.rec(d->entity).name);
@@ -1696,6 +1906,50 @@ public:
     if (!children) return {NodeId::none, begin, end};
     ExprInfo info = result_info(fr.inner);
     return node(ast::Call{info, function, at(callee, begin), b_->list(*children)}, begin, end, info);
+  }
+
+  // The name of a callee named by an unqualified-id: an undeclared name, an overload set, or a
+  // namespace-scope function ([basic.lookup.argdep]/1: not parenthesized, not qualified).
+  std::optional<NameId> unqualified_name(const Ex& callee) {
+    if (auto d = as<ast::DepName>(callee)) return d->name;
+    auto r = as<ast::DeclRef>(callee);
+    if (!r) return std::nullopt;
+    const EntityRec& e = w_->entities.rec(r->entity);
+    if (e.scope != EntityId::none) return std::nullopt;
+    if (types().is(callee.type(), Builtin::overload_set) || types().is_function(callee.type())) return e.name;
+    return std::nullopt;
+  }
+
+  // A type's associated namespaces ([basic.lookup.argdep]/3) include the global one: a class of
+  // the global namespace, or a pointer to, array of or reference to one. (Namespaces: #86.)
+  bool has_associated_namespace(QualType t) {
+    TypeRec r = types().rec(t);
+    while (r.kind == TypeKind::pointer || r.kind == TypeKind::array || r.kind == TypeKind::reference) r = types().rec(r.inner);
+    return r.kind == TypeKind::class_;
+  }
+
+  // The callee of a call that was dependent in the template's definition, in an instantiation:
+  // the functions named `name` that argument-dependent lookup finds at the point of instantiation,
+  // with those the definition found ([temp.dep.candidate]). Every function the program declares
+  // is in the global namespace, which argument-dependent lookup searches only for an argument
+  // with an associated class.
+  Ex with_adl(Ex callee, NameId name, std::span<const Ex> args) {
+    if (!std::ranges::any_of(args, [&](const Ex& a) { return has_associated_namespace(a.type()); })) return callee;
+    std::vector<ast::DeclSema> found;
+    for (DeclId d : q_->visible_at_instantiation(name)) {
+      ast::DeclSema s = q_->decl_sema(d);
+      if (s.entity != EntityId::none && s.kind == ast::DeclKind::function) found.push_back(s);
+    }
+    std::vector<ast::DeclSema> set;
+    for (auto o = found.rbegin(); o != found.rend(); ++o)
+      if (!std::ranges::any_of(set, [&](const ast::DeclSema& x) { return x.entity == o->entity; })) set.push_back(*o);
+    if (set.empty()) return callee;
+    ExprInfo info{builtin(Builtin::overload_set), ValueCategory::lvalue, 0};
+    Ex r = node(ast::DeclRef{info, set.front().entity}, callee.begin, callee.end, info);
+    if (auto ex = explicit_args_.find(std::to_underlying(callee.id)); ex != explicit_args_.end())
+      explicit_args_[std::to_underlying(r.id)] = ex->second;
+    overloads_[std::to_underlying(r.id)] = std::move(set);
+    return r;
   }
 
   // The arguments of a call to a function of type `fr`, each copy-initializing its parameter.
@@ -1736,6 +1990,7 @@ public:
   Ex subscript(Ex base, Ex index, u32 end, u32 at_) {
     u32 begin = base.begin;
     if (!base.ok() || !index.ok()) return {NodeId::none, begin, end};
+    if (dependent(base) || dependent(index)) return dependent_node({base, index}, begin, end, std::nullopt, ValueCategory::lvalue);
     Ex a = rvalue(base), c = rvalue(index);
     if (!is_object_pointer(a.type()) || !types().is_integral(c.type())) {
       diag(at_, Diag::invalid_operands, base.type(), index.type());
@@ -1763,6 +2018,7 @@ private:
   std::map<u32, Bound> bound_;                        // by draft bound-member Member
   std::set<u32> deleted_;                             // deleted functions named so far
   std::map<u32, std::vector<ast::DeclSema>> overloads_;  // by draft overload-set DeclRef
+  std::map<u32, std::vector<TemplateArg>> explicit_args_;  // by draft overload-set DeclRef
   std::vector<std::vector<std::pair<NameId, u32>>> scopes_;
   std::vector<std::size_t> guarded_;
   QualType return_type_{};

@@ -46,6 +46,7 @@ template <class V>
 struct Result {
   V value{};
   std::vector<engine::Diagnostic> diags;
+  std::vector<sema::Demand> demands;  // in program order (query-engine.md §B1.4)
 };
 
 class Program {
@@ -149,6 +150,7 @@ public:
     return interp::GlobalVar{d->type, c, c.has_value()};
   }
   bool is_constexpr(EntityId f, u32 item) const {
+    if (EntityId t = w_->entities.rec(f).templ; t != EntityId::none) f = t;
     auto d = declaration(f, item);
     return d && (d->flags & (sema::decl_flag::constexpr_ | sema::decl_flag::consteval_));
   }
@@ -189,6 +191,37 @@ public:
     return w_->types.pointer(w_->types.add_cv(w_->types.class_type(c), w_->types.rec(f.type).fn_cv));
   }
 
+  // ------------------------------------------------------------ instantiation (#88)
+
+  // What instantiating a function template specialization analyses its template's body with
+  // (ast.md §6.4 as amended by #88): the specialization's declaration, and the arguments bound to
+  // the template's parameters.
+  struct Instantiation {
+    ast::DeclSema decl;
+    sema::Bindings args;
+  };
+  // `instantiate_fn(spec, END)` (query-engine.md §B6.2): the template's definition item, the
+  // specialization's declaration and its body. `failed` when the template's definition had
+  // errors already: nothing more is said about it.
+  struct Instance {
+    EntityId spec;
+    u32 item;
+    ast::DeclSema decl;
+    Result<ast::BodySema> body;
+    bool failed = false;
+  };
+  // The instance of a specialization, instantiated on first request; none when its template has
+  // no definition, or the instantiations nest too deeply ([temp.inst]/16).
+  const Instance* instance(EntityId spec);
+  // The end of the translation unit (§B6.2): every specialization whose definition a cell
+  // requires is instantiated, in order of first demand, and so are those its instance requires.
+  void instantiate_all();
+  std::span<const Instance* const> instances() const { return instance_order_; }
+  // The calls of a template's body that were dependent at its definition, by the template's item
+  // ([temp.dep.candidate]); its instantiations add argument-dependent lookup to them.
+  std::map<u32, std::vector<u32>> dependent_calls_;
+  u32 end() const { return static_cast<u32>(items_->items.size()); }
+
   // Every item and body analysed, in item order; the diagnostics of each cell in order.
   void analyze_all() {
     for (u32 k = 0; k < items_->items.size(); ++k) {
@@ -203,6 +236,7 @@ public:
       }
       if (items_->items[k].has_body() && items_->items[k].kind == ItemKind::function) analyze_body(k);
     }
+    instantiate_all();
   }
   bool in_global_scope(u32 k) const {
     for (u32 j = items_->items[k].parent; j != items::none; j = items_->items[j].parent)
@@ -216,6 +250,9 @@ public:
       if (class_cells_[k]) r.insert(r.end(), class_cells_[k]->diags.begin(), class_cells_[k]->diags.end());
       if (body_cells_[k]) r.insert(r.end(), body_cells_[k]->diags.begin(), body_cells_[k]->diags.end());
     }
+    // An instantiation's, in the template's tokens (ast.md §6.4), in order of instantiation.
+    for (const Instance* in : instance_order_) r.insert(r.end(), in->body.diags.begin(), in->body.diags.end());
+    r.insert(r.end(), end_diags_.begin(), end_diags_.end());
     std::ranges::stable_sort(r, {}, [&](const engine::Diagnostic& d) {
       return std::pair(index(ItemId(d.at.item)), d.at.offset);
     });
@@ -263,6 +300,13 @@ private:
   std::map<u32, Dmi> dmis_;                       // by field entity
   std::vector<Synthesized> synth_;
   std::map<std::size_t, ast::BodySema> synth_bodies_;
+  std::deque<Instance> instances_;               // a deque: instances are referred to as they are added
+  std::vector<const Instance*> instance_order_;  // the completed ones, in order of instantiation
+  std::map<u32, std::size_t> instance_index_;    // by specialization: its slot in `instances_`
+  std::map<u32, u32> instance_depth_;            // by specialization: how deeply it is nested
+  std::set<u32> instantiating_;                  // specializations whose instantiation is running
+  std::vector<engine::Diagnostic> end_diags_;    // the END phase's own
+  std::map<u32, std::optional<irgen::FunctionIr>> instance_irs_;  // by specialization
 
 public:
   // The class a class item defines, none if its head failed. The class's own declarators ask it
@@ -320,6 +364,42 @@ private:
   Program* p_;
   u32 item_;
   bool self_;
+};
+
+// Sema's questions in an instantiation of the function template that item `item` defines, at
+// the end of the translation unit (§B6.2). Unqualified names are looked up at the template's own
+// item, as its definition was ([temp.res], [temp.nondep]); argument-dependent lookup for the
+// calls that were dependent, completeness and constant evaluation are answered at the end.
+// (Fable's decision on #88 asks non-dependent constructs at the template's context; the end
+// answers the same unless a later declaration changes them, which [temp.res.general]/6 makes
+// ill-formed, no diagnostic required.)
+class AtInstantiation final : public sema::Questions {
+public:
+  AtInstantiation(Program& p, u32 item) : p_(&p), item_(item) {}
+  std::vector<DeclId> visible_decls(ast::NameId name) override {
+    return p_->visible_decls(p_->world().ins.names.spelling(name), item_, true);
+  }
+  ast::DeclSema decl_sema(DeclId d) override {
+    if (auto s = p_->decl_sema(d)) return *s;
+    return invalid_decl();
+  }
+  interp::Callee function_ir(EntityId f) override { return p_->function_ir(f, p_->end()); }
+  std::optional<interp::GlobalVar> global(EntityId v) override { return p_->global(v, p_->end()); }
+  bool is_constexpr(EntityId f) override { return p_->is_constexpr(f, p_->end()); }
+  bool is_complete(EntityId c) override { return p_->is_complete(c, p_->end(), true, true); }
+  std::optional<ConstId> constant_value(EntityId v) override { return p_->constant_value(v, p_->end()); }
+  std::optional<ast::DeclSema> earlier_member(ast::NameId) override { return std::nullopt; }
+  bool dependent_call(sema::u32 offset) override {
+    auto it = p_->dependent_calls_.find(item_);
+    return it != p_->dependent_calls_.end() && std::ranges::contains(it->second, offset);
+  }
+  std::vector<DeclId> visible_at_instantiation(ast::NameId name) override {
+    return p_->visible_decls(p_->world().ins.names.spelling(name), p_->end(), false);
+  }
+
+private:
+  Program* p_;
+  u32 item_;
 };
 
 // ---------------------------------------------------------------- item_sema
@@ -386,6 +466,7 @@ public:
     }
     ast::ItemSema v{root, b_.seq(std::span<const ast::DeclSema>(decls_))};
     out_.value = b_.commit(v);
+    out_.demands = std::move(s_.demands);
     return std::move(out_);
   }
 
@@ -416,6 +497,21 @@ private:
       while (ps_.is(Tk::string_lit) && ps_.tok().has(lex::tok_flag::continued)) ps_.bump();
     }
     ps_.set_linkage(lang);
+    // A template-head ([temp.pre]): what follows declares a function template. Explicit
+    // specializations, class, variable and alias templates, and nested heads are not supported yet.
+    if (ps_.is(Tk::kw_template)) {
+      if (ps_.kind(1) != Tk::less || ps_.kind(2) == Tk::greater) {
+        s_.diag(ps_.pos(), Diag::not_supported, Tk::kw_template);
+        return bad();
+      }
+      if (!ps_.template_head(0)) return bad();
+      if (ps_.is(Tk::kw_template) || ps_.is(Tk::kw_struct) || ps_.is(Tk::kw_class) || ps_.is(Tk::kw_union) ||
+          ps_.is(Tk::kw_using) || ps_.is(Tk::kw_concept) || (it_->kind != ItemKind::function && !ps_.starts_declaration())) {
+        s_.diag(ps_.pos(), Diag::not_supported, ps_.kind());
+        return bad();
+      }
+      template_ = true;
+    }
     if (ps_.is(Tk::semi)) {
       ps_.bump();
       return;
@@ -451,6 +547,13 @@ private:
         if (!is_function_def) ps_.skip_to_semi();
         return;
       }
+      // [temp.pre]/5: a template-declaration declares one name.
+      if (template_ && ps_.is(Tk::comma)) {
+        s_.diag(ps_.pos(), Diag::unexpected_token, Tk::comma);
+        bad();
+        ps_.skip_to_semi();
+        return;
+      }
     } while (!is_function_def && ps_.accept(Tk::comma));
     if (!is_function_def) {
       if (!ps_.expect(Tk::semi)) bad();
@@ -477,6 +580,7 @@ private:
     sem.constraint = NodeId::none;
     sem.contracts = NodeId::none;
     sem.params = b_.seq(std::span<const ast::ParamSema>{});
+    sem.template_params = b_.seq(std::span<const ast::TemplateParamSema>{});
     return sem;
   }
 
@@ -836,6 +940,17 @@ private:
     return false;
   }
 
+  // A template-head's identity ([temp.over.link]): its parameters' kinds and non-type parameters'
+  // types, not their names or defaults.
+  sema::Fp128 head_fp(std::span<const ast::TemplateParamSema> ps) {
+    sema::Fp128 f = ast::seed("ycxx.sema.TemplateHead");
+    for (const ast::TemplateParamSema& p : ps) {
+      f = ast::mix(ast::mix(f, std::to_underlying(p.kind)), p.pack);
+      if (p.kind == ast::TemplateArgKind::value) f = ast::mix(f, s_.types().fp(s_.types().canonical(p.type)));
+    }
+    return f;
+  }
+
   // The rest of the skeleton's names get empty records, so ordinals stay aligned.
   void bad() {
     while (decls_.size() < it_->names.size()) {
@@ -843,6 +958,7 @@ private:
       d.type = s_.builtin(sema::Builtin::void_);  // an interned type, for the record's fingerprint
       d.attributes = b_.seq(std::span<const NodeId>{});
       d.params = b_.seq(std::span<const ast::ParamSema>{});
+      d.template_params = b_.seq(std::span<const ast::TemplateParamSema>{});
       decls_.push_back(d);
     }
   }
@@ -883,6 +999,7 @@ private:
     sem.constraint = NodeId::none;
     sem.contracts = NodeId::none;
     sem.attributes = b_.seq(std::span<const NodeId>{});
+    sem.template_params = b_.seq(std::span<const ast::TemplateParamSema>{});
     u16 flags = 0;
     if (spec.is_inline) flags |= sema::decl_flag::inline_;
     if (spec.is_constexpr) flags |= sema::decl_flag::constexpr_;
@@ -945,12 +1062,25 @@ private:
     } else {
       sem.params = b_.seq(std::span<const ast::ParamSema>{});
     }
+    if (template_) {
+      if (!fn) {
+        s_.diag(d.name_at, Diag::not_supported, Tk::kw_template);  // variable templates
+        return false;
+      }
+      sem.template_params = b_.seq(std::span<const ast::TemplateParamSema>(s_.template_scopes.front()));
+      flags |= sema::decl_flag::template_;
+    }
+    sema::Fp128 head = head_fp(p_->world().ins.seqs.elements(sem.template_params));
     sem.flags = flags;
     // [over.load]: functions whose parameter lists differ are overloads, not redeclarations (C
     // language linkage aside, [dcl.link]).
     if (fn)
       std::erase_if(prior, [&](const ast::DeclSema& p) {
         if (p.kind != ast::DeclKind::function || (p.flags & sema::decl_flag::lang_c) || lang == LangLinkage::c) return false;
+        // A template and a function, or templates whose heads differ, are overloads ([temp.over.link]).
+        if ((p.flags & sema::decl_flag::template_) != (flags & sema::decl_flag::template_) ||
+            head_fp(p_->world().ins.seqs.elements(p.template_params)) != head)
+          return true;
         sema::TypeRec a = types.rec(p.type), c = types.rec(sem.type);
         auto canon = [&](std::vector<QualType> v) {
           for (QualType& q : v) q = types.canonical(q);
@@ -1006,12 +1136,13 @@ private:
       }
       sem.entity = p.entity;
     } else {
-      sema::EntityRec e{fn ? sema::EntityKind::function : sema::EntityKind::variable,
+      sema::EntityRec e{template_ ? sema::EntityKind::function_template : fn ? sema::EntityKind::function : sema::EntityKind::variable,
                         d.name,
                         sem.type,
                         fn ? lang : LangLinkage::cxx,
                         sem.linkage,
                         {p_->id(k_), ast::make_decl_ord(ast::DeclClass::syntactic, ord)}};
+      e.head = head;
       sem.entity = s_.world().entities.entity(e);
     }
 
@@ -1147,6 +1278,7 @@ private:
   std::vector<ast::DeclSema> decls_;
   std::vector<Ex> declarators_;
   NodeId tree_ = NodeId::none;  // the root when it is not a DeclGroup (a static_assert)
+  bool template_ = false;       // the declaration is a template-declaration ([temp.pre])
 };
 
 const Result<ast::ItemSema>& Program::item_sema(u32 item) {
@@ -1246,22 +1378,35 @@ const Result<ast::ClassDef>& Program::class_def(u32 item) {
 
 class BodyAnalysis {
 public:
-  BodyAnalysis(Program& p, u32 item)
-      : p_(&p), k_(item), it_(&p.items().items[item]), b_(p.world().ins, &p.arena_), q_(p, item, true),
-        s_(p.world(), b_, q_, out_.diags, p.id(item), it_->body_begin - it_->begin),
-        ps_(p.region(), it_->body_begin, it_->body_end, s_) {
-    ps_.set_questions(q_);
+  // `inst` analyses the body as an instantiation of the function template the item defines
+  // (ast.md §6.4 as amended by #88): with the specialization's declaration, and the template
+  // arguments bound to the template's parameters.
+  BodyAnalysis(Program& p, u32 item, std::optional<Program::Instantiation> inst = std::nullopt)
+      : p_(&p), k_(item), it_(&p.items().items[item]), b_(p.world().ins, &p.arena_),
+        q_(inst ? std::unique_ptr<sema::Questions>(std::make_unique<AtInstantiation>(p, item))
+                : std::unique_ptr<sema::Questions>(std::make_unique<AtItem>(p, item, true))),
+        s_(p.world(), b_, *q_, out_.diags, p.id(item), it_->body_begin - it_->begin),
+        ps_(p.region(), it_->body_begin, it_->body_end, s_), inst_(std::move(inst)) {
+    ps_.set_questions(*q_);
   }
 
   Result<ast::BodySema> run() {
     const ast::ItemSema& is = p_->item_sema(k_).value;
     std::optional<ast::DeclSema> f;
     if (p_->world().ins.seqs.size(is.decls) > 0) f = p_->world().ins.seqs.at(is.decls, 0);
+    std::optional<ast::DeclSema> pattern = f;
+    if (inst_) f = inst_->decl;
     Ex root;
     if (f && f->entity != EntityId::none && f->kind == ast::DeclKind::function && !(f->flags & sema::decl_flag::deleted)) {
       s_.set_return_type(s_.types().rec(f->type).inner);
       // A consteval function's body is an immediate function context ([expr.const]).
       if (f->flags & sema::decl_flag::consteval_) s_.immediate_context = 1;
+      // A template's body is in the scope of its template-head ([basic.scope.temp]); an
+      // instantiation's, with the arguments bound.
+      if (pattern && (pattern->flags & sema::decl_flag::template_)) {
+        s_.template_scopes.push_back(p_->world().ins.seqs.elements(pattern->template_params));
+        if (inst_) s_.template_args = inst_->args;
+      }
       // A member function's body sees its class's members ([basic.scope.class]) and `this`.
       if (f->flags & sema::decl_flag::member) {
         s_.current_class = p_->world().entities.rec(f->entity).scope;
@@ -1289,6 +1434,10 @@ public:
     std::vector<ast::LocalRec> locals(s_.locals().begin(), s_.locals().end());
     ast::BodySema v{root.id, b_.seq(std::span<const ast::LocalRec>(locals))};
     out_.value = b_.commit(v);
+    // A template's definition demands nothing; its instantiations do. What it keeps for them is
+    // which calls were dependent ([temp.dep.candidate]).
+    if (pattern && (pattern->flags & sema::decl_flag::template_) && !inst_) p_->dependent_calls_[k_] = std::move(s_.dependent_calls);
+    else out_.demands = std::move(s_.demands);
     return std::move(out_);
   }
 
@@ -1383,7 +1532,7 @@ private:
     auto saved = s_.take_scopes();
     auto evaluate = s_.constant_of;
     Parser sub(p_->region(), d.begin, d.end, s_);
-    sub.set_questions(q_);
+    sub.set_questions(*q_);
     Ex init = d.braced ? s_.list_init(f.type, *sub.braced_init_list()) : s_.convert(sub.assignment_expression(), f.type, 0);
     s_.constant_of = evaluate;
     s_.put_scopes(std::move(saved));
@@ -1395,9 +1544,10 @@ private:
   const items::Item* it_;
   Result<ast::BodySema> out_;
   ast::Builder b_;
-  AtItem q_;
+  std::unique_ptr<sema::Questions> q_;
   sema::Sema s_;
   Parser ps_;
+  std::optional<Program::Instantiation> inst_;
 
   friend class Program;
 };
@@ -1449,6 +1599,7 @@ void Program::special_members(u32 item, EntityId cls, sema::ClassRec& rec) {
     d.constraint = NodeId::none;
     d.contracts = NodeId::none;
     d.params = b.seq(std::span<const ast::ParamSema>(params));
+    d.template_params = b.seq(std::span<const ast::TemplateParamSema>{});
     d.entity = w_->entities.entity({copy ? sema::EntityKind::constructor : sema::EntityKind::destructor,
                                     w_->ins.names.intern(copy ? cname : "~" + cname), type, LangLinkage::cxx,
                                     ast::Linkage::external, {}, cls});
@@ -1533,9 +1684,100 @@ const Result<ast::BodySema>& Program::analyze_body(u32 item) {
   return *body_cells_[item];
 }
 
+// ---------------------------------------------------------------- instantiation (#88)
+
+const Program::Instance* Program::instance(EntityId spec) {
+  const u32 key = std::to_underlying(spec);
+  if (auto it = instance_index_.find(key); it != instance_index_.end()) return &instances_[it->second];
+  if (instantiating_.contains(key)) return nullptr;  // its own constant evaluation (#88 follow-up)
+  const sema::EntityRec& rec = w_->entities.rec(spec);
+  auto def = definitions_.find(std::to_underlying(rec.templ));
+  if (def == definitions_.end()) return nullptr;  // declared only: defined in another unit, or nowhere
+  const u32 k = def->second;
+  ast::DeclSema tmpl = w_->ins.seqs.at(item_sema(k).value.decls, 0);
+  std::vector<ast::TemplateParamSema> head = w_->ins.seqs.elements(tmpl.template_params);
+  const sema::u16 depth = head.empty() ? 0 : head[0].depth;
+  sema::Bindings args = sema::Bindings::of(depth, rec.args);
+  // The specialization's declaration: the template's, with the arguments substituted ([temp.inst]).
+  // Every handle in it is interned already.
+  ast::DeclSema decl = tmpl;
+  decl.entity = spec;
+  decl.type = rec.type;
+  decl.flags = sema::u16(decl.flags & ~sema::decl_flag::template_);
+  decl.template_params = w_->ins.intern_seq(std::span<const ast::TemplateParamSema>{});
+  sema::Templates t(*w_);
+  std::vector<ast::ParamSema> params = w_->ins.seqs.elements(tmpl.params);
+  for (ast::ParamSema& p : params) p.type = t.substitute(p.type, args).value_or(p.type);
+  decl.params = w_->ins.intern_seq(std::span<const ast::ParamSema>(params));
+  Instance in{spec, k, decl, {}, false};
+  // A definition with errors was diagnosed; its instantiations say nothing more.
+  if (!analyze_body(k).diags.empty()) {
+    in.failed = true;
+  } else {
+    instantiating_.insert(key);
+    in.body = BodyAnalysis(*this, k, Instantiation{decl, std::move(args)}).run();
+    instantiating_.erase(key);
+  }
+  instance_index_.emplace(key, instances_.size());
+  instances_.push_back(std::move(in));
+  instance_order_.push_back(&instances_.back());
+  return &instances_.back();
+}
+
+void Program::instantiate_all() {
+  // The demands of every cell, in item order, then those of each instance as it is made: the END
+  // worklist of §B6.2, deterministic.
+  std::vector<sema::Demand> work;
+  for (u32 k = 0; k < items_->items.size(); ++k) {
+    if (item_cells_[k]) work.insert(work.end(), item_cells_[k]->demands.begin(), item_cells_[k]->demands.end());
+    if (body_cells_[k]) work.insert(work.end(), body_cells_[k]->demands.begin(), body_cells_[k]->demands.end());
+  }
+  std::vector<u32> depth(work.size(), 1);
+  // [temp.inst]/16: an implementation-defined limit on nested instantiations ([implimits]: 1024).
+  constexpr u32 limit = 900;
+  std::set<u32> seen;
+  for (std::size_t i = 0; i < work.size(); ++i) {
+    if (!seen.insert(std::to_underlying(work[i].spec)).second) continue;
+    if (depth[i] > limit) {
+      end_diags_.push_back({engine::Loc{std::to_underlying(work[i].at.item), work[i].at.offset},
+                            sema::diag_id(sema::Diag::instantiation_depth), {engine::diag_arg(limit)}});
+      break;
+    }
+    const Instance* in = instance(work[i].spec);
+    if (!in) continue;
+    for (const sema::Demand& d : in->body.demands) {
+      work.push_back(d);
+      depth.push_back(depth[i] + 1);
+    }
+  }
+}
+
 interp::Callee Program::function_ir(EntityId f, u32 item) {
   interp::Callee c;
   c.is_constexpr = is_constexpr(f, item);
+  // A function template specialization needed for constant evaluation is instantiated where it
+  // is needed ([temp.inst]/8).
+  if (w_->entities.rec(f).templ != EntityId::none) {
+    const Instance* in = instance(f);
+    const u32 key = std::to_underlying(f);
+    if (!in || in->failed || !in->body.diags.empty() || in->body.value.tree == NodeId::none) {
+      c.unsupported = in == nullptr;
+      return c;
+    }
+    if (!instance_irs_.contains(key)) {
+      const items::Item& it = items_->items[in->item];
+      irgen::FunctionInput input{f, in->decl, in->body.value, id(in->item), it.body_begin - it.begin};
+      AtInstantiation q(*this, in->item);
+      sema::EvalFacts facts(*w_, q);
+      std::optional<irgen::FunctionIr> ir;
+      if (auto r = irgen::function_ir(w_->ins, input, facts)) ir = std::move(*r);
+      instance_irs_.emplace(key, std::move(ir));
+    }
+    const auto& ir = instance_irs_.at(key);
+    if (!ir) c.unsupported = true;
+    else c.body = &ir->body;
+    return c;
+  }
   auto def = definitions_.find(std::to_underlying(f));
   if (def == definitions_.end() || def->second >= item) return c;
   u32 k = def->second;

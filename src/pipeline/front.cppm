@@ -91,7 +91,9 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
     EntityId e = d.entity;
     if (e == EntityId::none || !seen.insert(std::to_underlying(e)).second) return;
     const sema::EntityRec& r = world.entities.rec(e);
-    if (r.kind == sema::EntityKind::class_ || r.kind == sema::EntityKind::data_member) return;  // no symbol
+    if (r.kind == sema::EntityKind::class_ || r.kind == sema::EntityKind::data_member ||
+        r.kind == sema::EntityKind::function_template)
+      return;  // no symbol: a template's specializations have them
     bool fn = r.kind != sema::EntityKind::variable;
     std::string id(ins.names.spelling(r.name));
     if (fn && id == "main") tu.main = e;
@@ -99,6 +101,10 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
                            r.kind == sema::EntityKind::constructor  ? Special::constructor
                            : r.kind == sema::EntityKind::destructor ? Special::destructor
                                                                     : Special::none});
+    if (r.templ != EntityId::none) {
+      tu.entities.back().template_type = world.entities.rec(r.templ).type;
+      tu.entities.back().template_args = r.args;
+    }
   };
   for (std::uint32_t k = 0; k < items.items.size(); ++k) {
     const items::Item& it = items.items[k];
@@ -124,6 +130,8 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
       }
     }
     for (std::size_t i = 0; i < decls.size(); ++i) declare(decls[i], at[i]);
+    // A template's definition is not code; its instances are, below.
+    if (!decls.empty() && (decls[0].flags & sema::decl_flag::template_)) continue;
     if (it.kind == items::ItemKind::function && it.has_body() && !decls.empty() && decls[0].entity != EntityId::none &&
         !(decls[0].flags & sema::decl_flag::deleted)) {
       tu.functions.push_back({decls[0].entity, decls[0], program.analyze_body(k).value, program.id(k), it.body_begin - it.begin,
@@ -138,6 +146,14 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
         continue;
       tu.variables.push_back({d.entity, d.type, declarators[i]->value, at[i]});
     }
+  }
+  // The function template specializations instantiated at the end of the unit ([temp.inst]), in
+  // order of instantiation. A specialization that is only declared here is an external reference.
+  for (const parse::Program::Instance* in : program.instances()) {
+    if (in->failed || in->body.value.tree == ast::NodeId::none) continue;
+    const items::Item& it = items.items[in->item];
+    declare(in->decl, std::nullopt);
+    tu.functions.push_back({in->spec, in->decl, in->body.value, program.id(in->item), it.body_begin - it.begin, std::nullopt});
   }
   // The implicitly defined special members that are not trivial ([class.copy.ctor], [class.dtor]).
   for (std::size_t i = 0; i < program.synthesized().size(); ++i) {

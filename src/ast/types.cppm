@@ -98,6 +98,16 @@ struct TClass {
   EntityId entity;
 };
 
+// A type template parameter ([temp.param]), by position: `depth` counts the enclosing
+// template-heads from the outermost, `index` the parameters of its own head. Parameters are not
+// named in the type, so two declarations of one template whose heads are equivalent have equal
+// types ([temp.over.link]).
+struct TTemplateParam {
+  u16 depth;
+  u16 index;
+  u8 pack;
+};
+
 // ---------------------------------------------------------------- sugar kinds
 
 // A use of a typedef-name or alias-declaration. The alias's template arguments come with alias
@@ -107,7 +117,7 @@ struct STypedef {
   EntityId alias;
 };
 
-using TypeKinds = closed_list<TBuiltin, TPointer, TLRef, TRRef, TArray, TFunction, TClass, STypedef>;
+using TypeKinds = closed_list<TBuiltin, TPointer, TLRef, TRRef, TArray, TFunction, TClass, STypedef, TTemplateParam>;
 
 template <class T>
 constexpr bool is_type_kind = TypeKinds::contains<T>;

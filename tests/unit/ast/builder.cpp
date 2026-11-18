@@ -39,7 +39,7 @@ int main() {
     check(in.seqs.count<ParamSema>() == 0, "in.seqs.count<ParamSema>() == 0");
 
     DeclSema d{f_e, int_t, DeclKind::function, Linkage::external, Storage::none, Access::none, 0,
-               b.seq({attr}), NodeId::none, NodeId::none, params};
+               b.seq({attr}), NodeId::none, NodeId::none, params, b.seq(std::span<const TemplateParamSema>{})};
     check(in.ast.node_count() == 0, "in.ast.node_count() == 0");  // nothing interned before commit
     item = b.commit(ItemSema{call, b.seq({d})});
   }
