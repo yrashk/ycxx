@@ -47,6 +47,11 @@ public:
   // In a member declaration of a class being defined: the member named `name` declared before it
   // ([basic.scope.class]; the class's member list is not complete yet).
   virtual std::optional<ast::DeclSema> earlier_member(NameId name) = 0;
+  // Namespaces ([basic.namespace]), the global one being `EntityId::none`: the namespace (or
+  // alias) unqualified lookup finds for `name`, and qualified lookup of `name` in namespace `ns`
+  // ([namespace.qual]).
+  virtual std::optional<EntityId> namespace_named(NameId name) = 0;
+  virtual std::vector<ast::DeclSema> namespace_members(EntityId ns, NameId name) = 0;
   virtual ~Questions() = default;
 };
 
@@ -190,6 +195,78 @@ public:
     }
     using_enums_.push_back({scopes_.size() - 1, types().enum_of(t)});
   }
+
+  // ------------------------------------------------------------ qualified names ([basic.lookup.qual])
+
+  // What a nested-name-specifier names: a namespace (none for the global one) or a class or
+  // enumeration.
+  struct Scope {
+    std::optional<EntityId> ns;
+    std::optional<QualType> type;
+  };
+  static Scope global_scope() { return {EntityId::none, std::nullopt}; }
+  // The first component of a nested-name-specifier, by unqualified lookup ([basic.lookup.qual]/1:
+  // only namespaces, types and templates).
+  std::optional<Scope> scope_named(NameId n) {
+    for (auto a = block_aliases_.rbegin(); a != block_aliases_.rend(); ++a)
+      if (a->name == n) return Scope{a->ns, std::nullopt};
+    if (auto t = class_name(n, true)) return Scope{std::nullopt, t};
+    if (auto ns = q_->namespace_named(n)) return Scope{ns, std::nullopt};
+    return std::nullopt;
+  }
+  // A later component: a namespace or type member of a namespace, or a type nested in a class.
+  std::optional<Scope> scope_member(const Scope& s, NameId n) {
+    if (s.ns) {
+      for (const ast::DeclSema& d : q_->namespace_members(*s.ns, n)) {
+        if (d.kind == ast::DeclKind::namespace_) return Scope{d.entity, std::nullopt};
+        if (d.kind == ast::DeclKind::class_ || d.kind == ast::DeclKind::enum_) return Scope{std::nullopt, d.type};
+      }
+      return std::nullopt;
+    }
+    if (s.type && types().is_class(*s.type))
+      if (const ClassRec* cr = w_->classes.find(types().class_of(*s.type)))
+        for (const auto& [name, t] : cr->types)
+          if (name == n) return Scope{std::nullopt, t};
+    return std::nullopt;
+  }
+  // `S::n` naming a type.
+  std::optional<QualType> scope_type(const Scope& s, NameId n) {
+    auto m = scope_member(s, n);
+    if (!m || !m->type) return std::nullopt;
+    return m->type;
+  }
+  // `S::n` as an expression ([expr.prim.id.qual]).
+  Ex scope_expr(const Scope& s, NameId n, u32 begin, u32 name_at, u32 end) {
+    if (s.type) {
+      if (types().is_enum(*s.type)) {
+        if (auto r = find_enumerator(types().enum_of(*s.type), n, begin, end)) return *r;
+        diag(name_at, Diag::no_member, n, *s.type);
+        return {NodeId::none, begin, end};
+      }
+      if (!require_complete(*s.type, begin)) return {NodeId::none, begin, end};
+      if (auto r = class_member(types().class_of(*s.type), n, begin, end)) return *r;
+      diag(name_at, Diag::no_member, n, *s.type);
+      return {NodeId::none, begin, end};
+    }
+    std::vector<ast::DeclSema> found = q_->namespace_members(*s.ns, n);
+    if (found.empty()) {
+      diag(name_at, Diag::no_namespace_member, n);
+      return {NodeId::none, begin, end};
+    }
+    return decls_expr(std::move(found), true, n, begin, end);
+  }
+  // Block-scope `using namespace N;`, `using N::x;` and `namespace A = N;` ([namespace.udir],
+  // [namespace.udecl], [namespace.alias]).
+  void using_directive(EntityId ns) { block_directives_.push_back({scopes_.size() - 1, ns}); }
+  void using_declaration(const Scope& s, NameId n, u32 at_) {
+    std::vector<ast::DeclSema> found = s.ns ? q_->namespace_members(*s.ns, n) : std::vector<ast::DeclSema>{};
+    if (found.empty()) {
+      diag(at_, Diag::no_namespace_member, n);
+      return;
+    }
+    block_usings_.push_back({scopes_.size() - 1, n, std::move(found)});
+  }
+  void namespace_alias(NameId n, EntityId ns) { block_aliases_.push_back({scopes_.size() - 1, n, ns}); }
 
   // A type nested in a class: `C::T` ([class.mem], [basic.lookup.qual]).
   std::optional<QualType> nested_type(NameId cls, NameId name) {
@@ -531,6 +608,9 @@ public:
   void push_scope() { scopes_.emplace_back(); }
   void pop_scope() {
     std::erase_if(using_enums_, [&](const auto& u) { return u.first >= scopes_.size(); });
+    std::erase_if(block_usings_, [&](const auto& u) { return u.depth >= scopes_.size(); });
+    std::erase_if(block_directives_, [&](const auto& u) { return u.first >= scopes_.size(); });
+    std::erase_if(block_aliases_, [&](const auto& u) { return u.depth >= scopes_.size(); });
     if (!guarded_.empty() && guarded_.back() == scopes_.size() - 1) guarded_.pop_back();
     scopes_.pop_back();
   }
@@ -1117,6 +1197,12 @@ public:
           return node(ast::DeclRef{info, m->entity}, begin, end, info);
         }
     }
+    // Names a block's using-declaration or using-directive brought in ([namespace.udecl],
+    // [namespace.udir]).
+    for (auto u = block_usings_.rbegin(); u != block_usings_.rend(); ++u)
+      if (u->name == name) return decls_expr(u->decls, true, name, begin, end);
+    for (auto u = block_directives_.rbegin(); u != block_directives_.rend(); ++u)
+      if (auto ds = q_->namespace_members(u->second, name); !ds.empty()) return decls_expr(ds, true, name, begin, end);
     std::vector<ast::DeclSema> found;
     for (auto p = own.rbegin(); p != own.rend(); ++p)
       if (p->name == name) found.push_back(p->sema);
@@ -1127,6 +1213,13 @@ public:
         ast::DeclSema s = q_->decl_sema(d);
         if (s.entity != EntityId::none) found.push_back(s);  // else its item diagnosed it
       }
+    return decls_expr(std::move(found), any, name, begin, end);
+  }
+
+  // The expression naming what lookup found for `name` ([expr.prim.id]): one entity, or an
+  // overload set.
+  Ex decls_expr(std::vector<ast::DeclSema> found, bool any, NameId name, u32 begin, u32 end) {
+    std::erase_if(found, [](const ast::DeclSema& d) { return d.kind == ast::DeclKind::namespace_; });
     // A class hidden by a variable or function of the same name ([basic.scope.hiding]/2).
     if (std::ranges::any_of(found, [](const ast::DeclSema& d) { return d.kind != ast::DeclKind::class_; }))
       std::erase_if(found, [](const ast::DeclSema& d) { return d.kind == ast::DeclKind::class_; });
@@ -1142,7 +1235,7 @@ public:
       if (!std::ranges::any_of(set, [&](const ast::DeclSema& x) { return x.entity == o->entity; })) set.push_back(*o);
     if (set.size() > 1) {
       if (!std::ranges::all_of(set, [](const ast::DeclSema& x) { return x.kind == ast::DeclKind::function; })) {
-        diag(begin, Diag::overload_not_supported, name);
+        diag(begin, Diag::ambiguous_name, name);  // [basic.lookup.general]/1: two entities
         return {NodeId::none, begin, end};
       }
       ExprInfo info{builtin(Builtin::overload_set), ValueCategory::lvalue, 0};
@@ -1154,7 +1247,8 @@ public:
       consteval_.insert(std::to_underlying(d.entity));
     if (d.kind == ast::DeclKind::function && (d.flags & decl_flag::deleted)) deleted_.insert(std::to_underlying(d.entity));
     if (d.kind == ast::DeclKind::enumerator) return enumerator(d.entity, d.type, begin, end);
-    if (d.kind == ast::DeclKind::function && ins().names.spelling(name) == "main") {
+    if (d.kind == ast::DeclKind::function && ins().names.spelling(name) == "main" &&
+        w_->entities.rec(d.entity).scope == EntityId::none) {
       diag(begin, Diag::main_named);  // [basic.start.main]/3: main shall not be used
       return {NodeId::none, begin, end};
     }
@@ -1895,6 +1989,19 @@ private:
   std::map<u32, Bound> bound_;                        // by draft bound-member Member
   std::set<u32> deleted_;                             // deleted functions named so far
   std::vector<std::pair<std::size_t, EntityId>> using_enums_;  // (scope depth, enumeration)
+  struct BlockUsing {
+    std::size_t depth;
+    NameId name;
+    std::vector<ast::DeclSema> decls;
+  };
+  struct BlockAlias {
+    std::size_t depth;
+    NameId name;
+    EntityId ns;
+  };
+  std::vector<BlockUsing> block_usings_;
+  std::vector<std::pair<std::size_t, EntityId>> block_directives_;  // (scope depth, namespace)
+  std::vector<BlockAlias> block_aliases_;
   std::map<u32, std::vector<ast::DeclSema>> overloads_;  // by draft overload-set DeclRef
   std::vector<std::vector<std::pair<NameId, u32>>> scopes_;
   std::vector<std::size_t> guarded_;
