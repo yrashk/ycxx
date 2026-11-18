@@ -28,14 +28,19 @@ class Session {
     db_.set<CostModelIn>(t, {});
     db_.set<OptCacheSnapshot>(t, {});
     db_.set<OptLevel>(t, 0);
+    // Headers are read from the disk unless the owner provides them otherwise (the daemon's file
+    // table, daemon design §5.1).
+    db_.set_provider<pp::FileContent>(pp::read_disk);
   }
   Session(const Session&) = delete;
 
   // A translation unit from a source file: `path` names it (and locates its `#include "..."`),
-  // `object` is the object's name. The driver's file number is the unit's.
-  void set_source(TuId tu, std::string path, std::string text, std::string object) {
+  // `object` is the object's name; relative paths are relative to `cwd`, and `config` is its
+  // preprocessing configuration. The driver's file number is the unit's.
+  void set_source(TuId tu, std::string path, std::string text, std::string object, std::string cwd = {},
+                  pp::Config config = {}) {
     const pp::FileId file{tu.n};
-    pp::name_file(file, std::move(path));
+    db_.set<pp::SourceOf>(file, {std::move(path), std::move(cwd), std::move(config)});
     db_.set<pp::FileText>(file, std::move(text));
     db_.set<TuSourceIn>(tu, {std::move(object), tu.n, {}});
   }
