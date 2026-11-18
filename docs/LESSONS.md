@@ -133,6 +133,9 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
   pruning in prose. A mutation check (drop one recorded dependency) confirmed the fuzz bites.
   - Do: compare every output kind against a fresh `Db`, and check "nothing executes" for every
     cell the cold run executed. Mutate the engine once to see the check fail.
+  - The review then found what the fuzz missed: a cell validated green kept a stale durability,
+    because durability is a derived field outside the fingerprint, so the shortcut served a wrong
+    value. Any cached field that is not in the fingerprint needs its own update rule and test.
   - Learned on #14.
 
 - **A `std::tuple` over a long type list is a compile-time trap with GCC 16.** The AST spike stored

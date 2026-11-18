@@ -51,6 +51,13 @@ struct outer {
   std::optional<std::int32_t> o;
 };
 
+struct base {
+  int x;
+};
+struct derived : base {
+  int y;
+};
+
 // A handle whose number is not its identity provides its own fingerprint.
 struct handle {
   std::uint32_t index;
@@ -106,5 +113,8 @@ int main() {
   static_assert(ycxx::fingerprintable<outer>);
   static_assert(!ycxx::fingerprintable<int*>, "pointers have no structural fingerprint");
   static_assert(!ycxx::fingerprintable<std::vector<void*>>);
+  static_assert(!ycxx::fingerprintable<const char*>, "a pointer is not its content's identity");
+  static_assert(!ycxx::fingerprintable<std::unordered_map<int, int>>, "iteration order depends on the process");
+  static_assert(!ycxx::fingerprintable<derived>, "base members would be left out");
   return ycxx::unit::result("hash");
 }

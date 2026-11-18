@@ -220,6 +220,32 @@ void durability() {
   check(db.get<Mixed>(0) == 23 && db.runs<FromSys>(0) == 2, "a high-durability edit invalidates everything");
 }
 
+// D reads the low input only when the high input says so; P is above D.
+struct GatedLow {
+  using Key = std::uint32_t;
+  using Value = std::int64_t;
+  static query_task<Value> run(Ctx& cx, Key k) {
+    if (cx.fetch<Sys>(k) == 0) co_return 0;
+    co_return cx.fetch<In>(k);
+  }
+};
+struct AboveGated {
+  using Key = std::uint32_t;
+  using Value = std::int64_t;
+  static query_task<Value> run(Ctx& cx, Key k) { co_return 100 + co_await cx.fetch<GatedLow>(k); }
+};
+
+void durability_lowered_by_a_backdated_dependency() {
+  Db db;
+  db.set<Sys>(0, 0);
+  db.set<In>(0, 0);
+  check(db.get<AboveGated>(0) == 100, "cold: high durability");
+  db.set<Sys>(0, 1);
+  check(db.get<AboveGated>(0) == 100, "the dependency now reads a low input but is backdated");
+  db.set<In>(0, 5);
+  check(db.get<AboveGated>(0) == 105, "a cell validated green takes its dependencies' lowered durability");
+}
+
 void recording() {
   Db db;
   db.set<In>(3, 4);
@@ -257,6 +283,32 @@ void diagnostics() {
   db.set<In>(0, 4);
   check(db.diags_of<Parent>(0).empty(), "nothing to say");
   check(db.diags_of<Leaf>(1).empty(), "a cell without diagnostics");
+}
+
+// Always 0, so it is backdated whichever leaf it reads.
+struct Switch {
+  using Key = std::uint32_t;
+  using Value = std::int64_t;
+  static query_task<Value> run(Ctx& cx, Key k) {
+    const std::uint32_t leaf = cx.fetch<In>(k + 10) > 0 ? k : k + 1;
+    (void)co_await cx.fetch<Leaf>(leaf);
+    co_return 0;
+  }
+};
+
+void diagnostics_after_a_backdated_list_change() {
+  Db db;
+  db.set<In>(0, -1);
+  db.set<In>(1, -1);  // both leaves have something to say, so has_diags does not flip
+  db.set<In>(10, 1);
+  check(db.diags_of<Switch>(0).size() == 1 && db.diags_of<Switch>(0)[0].at == Loc{0, 7}, "leaf 0's diagnostic");
+  db.set<In>(10, 0);
+  check(db.get<Switch>(0) == 0 && db.changed_at<Switch>(0) == 1, "backdated, now reading leaf 1; diags_of not asked");
+  db.set<In>(1, -2);
+  (void)db.get<Switch>(0);
+  const auto& d = db.diags_of<Switch>(0);
+  check(d.size() == 1 && d[0].at == Loc{1, 7} && d[0].args[0].raw == static_cast<std::uint64_t>(-2),
+        "leaf 1's current diagnostic, not leaf 0's");
 }
 
 void demands() {
@@ -342,6 +394,13 @@ void serialization() {
   check(deserialize<Diagnostic>(din) == d, "diagnostics serialize");
   static_assert(serializable<std::vector<Diagnostic>>);
   static_assert(!serializable<CellRef>, "a cell id is not storable");
+  enum unscoped { u0, u1 };
+  static_assert(!serializable<unscoped>, "corrupt input could hold an out-of-range value");
+  Sink bad;
+  bad.uint(std::uint8_t{2});
+  Source bin(bad.bytes());
+  (void)deserialize<bool>(bin);
+  check(bin.failed(), "a bool is 0 or 1");
 }
 
 struct KeyA {
@@ -373,6 +432,11 @@ void concepts() {
   static_assert(!QueryKey<std::string>, "keys are structural");
   static_assert(!QueryKey<int*>);
   static_assert(QueryKey<KeyB>);
+  struct WithBase : KeyA {
+    std::uint32_t y;
+    bool operator==(const WithBase&) const = default;
+  };
+  static_assert(!QueryKey<WithBase>, "base members would be left out of the key");
   static_assert(kinds<KindA>::schema_hash != kinds<KindB>::schema_hash, "a key field changes the schema");
   static_assert(kinds<KindA, Echo>::schema_hash != kinds<Echo, KindA>::schema_hash, "kind ids are positions");
   check(kind_name<Echo>().contains("Echo"), "kind names come from reflection");
@@ -386,7 +450,8 @@ struct Node {
   using Value = std::int64_t;
   static query_task<Value> run(Ctx& cx, Key k) {
     const std::uint32_t level = k / layer, index = k % layer;
-    if (level == 0 && index % 4 == 0) co_return cx.fetch<Sys>(index);  // a durable corner
+    // A durable corner whose dependency list depends on a system input (review of #37, P0).
+    if (level == 0 && index % 4 == 0 && cx.fetch<Sys>(index) == 0) co_return 0;
     const auto own = cx.fetch<In>(index);
     if (level == 0) {
       if (own < 0) cx.diag(Loc{index, 0}, negative);
@@ -453,8 +518,10 @@ int main() {
   early_cutoff();
   groups();
   durability();
+  durability_lowered_by_a_backdated_dependency();
   recording();
   diagnostics();
+  diagnostics_after_a_backdated_list_change();
   demands();
   cycles();
   failures();

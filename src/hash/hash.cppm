@@ -147,9 +147,21 @@ inline constexpr bool is_optional = false;
 template <class T>
 inline constexpr bool is_optional<std::optional<T>> = true;
 
+// Unordered containers iterate in an order that depends on the process (§A5.1).
+template <class T>
+concept unordered_container = requires { typename T::hasher; typename T::key_equal; };
+
+// An aggregate with base classes is not taken apart: `nonstatic_data_members_of` does not see
+// the bases' members, so they would be silently left out.
+template <class T>
+consteval bool has_bases() {
+  return !std::meta::bases_of(^^T, std::meta::access_context::unchecked()).empty();
+}
+
 template <class T>
 consteval shape shape_of() {
   if constexpr (custom_hashed<T>) return shape::custom;
+  else if constexpr (std::is_pointer_v<T> || unordered_container<T>) return shape::none;
   else if constexpr (std::same_as<T, Fp128>) return shape::fingerprint;
   else if constexpr (std::same_as<T, bool>) return shape::boolean;
   else if constexpr (std::integral<T>) return shape::integer;
@@ -159,7 +171,7 @@ consteval shape shape_of() {
   else if constexpr (is_optional<T>) return shape::optional;
   else if constexpr (std::ranges::sized_range<const T&>) return shape::range;
   else if constexpr (requires { std::tuple_size<T>::value; }) return shape::tuple;
-  else if constexpr (std::is_aggregate_v<T> && std::is_class_v<T>) return shape::aggregate;
+  else if constexpr (std::is_aggregate_v<T> && std::is_class_v<T> && !has_bases<T>()) return shape::aggregate;
   else return shape::none;
 }
 

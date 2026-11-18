@@ -51,7 +51,8 @@ concept has_trait = std::meta::annotations_of_with_type(^^Q, ^^Trait).size() > 0
 consteval bool structural(std::meta::info t) {
   t = std::meta::remove_cv(t);
   if (std::meta::is_enum_type(t) || std::meta::is_integral_type(t)) return true;
-  if (!std::meta::is_class_type(t) || !std::meta::is_aggregate_type(t) || !std::meta::is_trivially_copyable_type(t)) {
+  if (!std::meta::is_class_type(t) || !std::meta::is_aggregate_type(t) || !std::meta::is_trivially_copyable_type(t) ||
+      !std::meta::bases_of(t, std::meta::access_context::unchecked()).empty()) {
     return false;
   }
   for (auto m : std::meta::nonstatic_data_members_of(t, std::meta::access_context::unchecked())) {
@@ -690,9 +691,10 @@ private:
 // not descending into demanded kinds, pruned by `has_diags`.
 //
 // It depends on the cell, on every dependency of the cell, and on `DiagsOf` of each dependency
-// that has diagnostics. The cell re-executes only when one of its dependencies changed, so
-// `DiagsOf` re-runs whenever the cell's dependency list may have changed, even if the cell itself
-// was backdated. A dependency whose subgraph gains or loses diagnostics changes its fingerprint
+// that has diagnostics. The cell's dependency list changes only when it re-executes, which
+// happens only when one of the dependencies `DiagsOf` recorded changed after the cell was last
+// verified, hence after `DiagsOf` was (the cell is fetched first). So `DiagsOf` re-runs whenever
+// the list may have changed, even if the cell itself was backdated. A dependency whose subgraph gains or loses diagnostics changes its fingerprint
 // through `has_diags`, so pruning never hides a change.
 struct DiagsOf {
   using Key = CellRef;
@@ -830,6 +832,7 @@ void Db::validate(CellId c, std::uint64_t old) {
   active_.push_back(c);
   const Revision since = verified_of(old);
   bool changed = false;
+  Durability durability = Durability::high;
   try {
     // Groups in program order; every member of a group, with no short-circuit (§A1.5). The pool
     // may grow while members execute, so it is indexed, never held.
@@ -838,6 +841,7 @@ void Db::validate(CellId c, std::uint64_t old) {
         const CellId dep = dep_pool_[e.deps_begin + k] & ~group_start;
         refresh(dep);
         changed = changed || cells_[dep].changed_at > since;
+        durability = std::min(durability, cells_[dep].durability);
         ++k;
       } while (k < e.deps_len && !(dep_pool_[e.deps_begin + k] & group_start));
     }
@@ -848,6 +852,12 @@ void Db::validate(CellId c, std::uint64_t old) {
   }
   active_.pop_back();
   if (!changed) {
+    // Durability is not part of the fingerprint: a dependency backdated after re-executing may
+    // have lowered its own, and the shortcut must not trust this cell's old one. Every
+    // dependency was visited, so the minimum is exact; a cell green by the shortcut needs no
+    // update, since lowering a dependency's durability takes a re-execution that also moves
+    // `last_changed_` at this cell's level.
+    e.durability = durability;
     e.word.store(make_word(State::done, 0, revision_), std::memory_order_release);
     ++stats_.validated;
     return;

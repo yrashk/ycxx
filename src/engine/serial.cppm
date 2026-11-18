@@ -83,6 +83,8 @@ consteval bool serializable_type() {
     return true;
   } else if constexpr (s == shape::none || s == shape::custom) {
     return false;  // a custom fingerprint means the bytes are not the identity: say how to store it
+  } else if constexpr (s == shape::enumeration && !std::is_scoped_enum_v<T>) {
+    return false;  // an out-of-range value read from corrupt input would be undefined
   } else if constexpr (s == shape::optional) {
     return serializable_type<typename T::value_type>();
   } else if constexpr (s == shape::range) {
@@ -160,7 +162,9 @@ T deserialize(Source& in) {
     const auto lo = in.uint<std::uint64_t>();
     return Fp128{lo, in.uint<std::uint64_t>()};
   } else if constexpr (s == shape::boolean) {
-    return in.uint<std::uint8_t>() != 0;
+    const auto b = in.uint<std::uint8_t>();
+    if (b > 1) in.fail();  // one encoding per value
+    return b == 1;
   } else if constexpr (s == shape::integer) {
     return static_cast<T>(in.uint<std::make_unsigned_t<T>>());
   } else if constexpr (s == shape::enumeration) {
