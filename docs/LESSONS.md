@@ -3,7 +3,7 @@
 Recipes for situations agents keep running into (DECISIONS §8). Each entry gives the symptom,
 what to do, and where it was learned. Read this file before starting work. Add an entry when you
 recover from a time sink, fix an entry that turned out wrong, and delete one that no longer
-applies. A lesson that becomes a rule moves to DECISIONS or CLAUDE.md and leaves a pointer here.
+applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves a pointer here.
 
 ## Orchestration and sessions
 
