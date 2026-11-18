@@ -49,7 +49,7 @@ constexpr std::string_view spelling(Builtin b) {
 
 // ---------------------------------------------------------------- types
 
-enum class TypeKind : u8 { builtin, pointer, array, function, class_, reference, enum_, other };
+enum class TypeKind : u8 { builtin, pointer, array, function, class_, reference, enum_, template_param, other };
 
 // The canonical form of a type, read out by value.
 struct TypeRec {
@@ -63,6 +63,10 @@ struct TypeRec {
   EntityId entity = EntityId::none;  // a class's or an enumeration's
   Cv fn_cv = Cv::none;               // a member function type's cv-qualifier-seq
   bool rvalue_ref = false;           // a reference's kind; `inner` is what it refers to
+  ConstId bound_value = ConstId::none;  // an array's bound as a constant, possibly dependent
+  u16 depth = 0;                     // a template parameter's position ([temp.param])
+  u16 index = 0;
+  bool pack = false;
 };
 
 class Types {
@@ -71,6 +75,8 @@ public:
 
   QualType builtin(Builtin b) { return ast::builtin(*ins_, b); }
   QualType pointer(QualType pointee) { return ast::pointer_to(*ins_, pointee); }
+  // An array whose bound is value-dependent ([temp.dep.constexpr]).
+  QualType array_dependent(QualType elem, ConstId bound) { return ast::array_of(*ins_, target, elem, bound); }
   QualType array(QualType elem, u64 bound) {
     return ast::array_of(*ins_, target, elem, ast::int_value(*ins_, target, Builtin::unsigned_long, i64(bound)));
   }
@@ -83,6 +89,9 @@ public:
   QualType enum_type(EntityId e) { return ins_->intern_type(ast::TEnum{e}); }
   QualType lvalue_ref(QualType t) { return ast::lvalue_ref_to(*ins_, t); }
   QualType rvalue_ref(QualType t) { return ast::rvalue_ref_to(*ins_, t); }
+  QualType template_param(u16 depth, u16 index, bool pack = false) {
+    return ins_->intern_type(ast::TTemplateParam{depth, index, u8(pack)});
+  }
 
   TypeRec rec(QualType q) const {
     const ast::Types& t = ins_->types;
@@ -98,7 +107,8 @@ public:
       auto a = t.get<ast::TArray>(c);
       r.kind = TypeKind::array;
       r.inner = a.elem;
-      r.bound = a.bound == ConstId::none ? 0 : ast::int_bits(*ins_, a.bound).lo;
+      r.bound = a.bound == ConstId::none || ins_->values.is_dependent(a.bound) ? 0 : ast::int_bits(*ins_, a.bound).lo;
+      r.bound_value = a.bound;
     } else if (t.is<ast::TFunction>(c)) {
       auto f = t.get<ast::TFunction>(c);
       r.kind = TypeKind::function;
@@ -117,8 +127,31 @@ public:
       r.kind = TypeKind::reference;
       r.rvalue_ref = t.is<ast::TRRef>(c);
       r.inner = r.rvalue_ref ? t.get<ast::TRRef>(c).referee : t.get<ast::TLRef>(c).referee;
+    } else if (t.is<ast::TTemplateParam>(c)) {
+      auto p = t.get<ast::TTemplateParam>(c);
+      r.kind = TypeKind::template_param;
+      r.depth = p.depth;
+      r.index = p.index;
+      r.pack = p.pack != 0;
     }
     return r;
+  }
+
+  // A dependent type ([temp.dep.type]): one that names a template parameter, or the type of a
+  // type-dependent expression (`Builtin::dependent`).
+  bool is_dependent(QualType q) const {
+    TypeRec r = rec(q);
+    switch (r.kind) {
+    case TypeKind::template_param: return true;
+    case TypeKind::builtin: return r.builtin == Builtin::dependent;
+    case TypeKind::array:
+      return is_dependent(r.inner) || (r.bound_value != ConstId::none && ins_->values.is_dependent(r.bound_value));
+    case TypeKind::pointer:
+    case TypeKind::reference: return is_dependent(r.inner);
+    case TypeKind::function:
+      return is_dependent(r.inner) || std::ranges::any_of(r.params, [&](QualType p) { return is_dependent(p); });
+    default: return false;
+    }
   }
 
   static Cv cv(QualType q) { return ast::cv_of(q); }
@@ -211,6 +244,9 @@ private:
     case TypeKind::enum_:
     case TypeKind::class_:
       return cvs + (class_name ? class_name(r.entity) : "<class>") + (inner.empty() || inner[0] == '[' ? "" : " ") + inner;
+    case TypeKind::template_param:
+      // Parameters are positional in the type (ast.md §5.1).
+      return cvs + std::format("type-parameter-{}-{}", r.depth, r.index) + (inner.empty() || inner[0] == '[' ? "" : " ") + inner;
     case TypeKind::other: return "<type>";
     }
     return {};
@@ -289,12 +325,18 @@ private:
 // ---------------------------------------------------------------- entities (stand-in for #33)
 
 // `data_member` is a non-static data member ([class.mem]).
-enum class EntityKind : u8 { function, variable, class_, data_member, constructor, destructor, enum_, enumerator, namespace_ };
+// A `function_template` is a function template ([temp.fct]); a specialization of one is a
+// `function` whose `templ` is the template.
+enum class EntityKind : u8 {
+  function, variable, class_, data_member, constructor, destructor, enum_, enumerator, namespace_, function_template
+};
 
 // The structure behind an entity id (§4.3): for a function `(scope, name, canonical type)`, with
 // `::` as the scope of a function with C language linkage ([dcl.link]); for a variable with
 // external linkage `(scope, name)`; for an entity with internal linkage, also its first
-// declaration. `scope` is the enclosing class, or none for the global namespace.
+// declaration. `scope` is the enclosing class, or none for the global namespace. A function
+// template's identity also has its template-head (`head`, a fingerprint of the parameters' kinds and
+// types); a specialization's is its template and its canonical template arguments (§B1.5).
 struct EntityRec {
   EntityKind kind = EntityKind::function;
   NameId name{};
@@ -303,6 +345,9 @@ struct EntityRec {
   ast::Linkage linkage = ast::Linkage::external;
   DeclId first{};  // internal linkage only
   EntityId scope = EntityId::none;
+  Fp128 head{};                          // a template's
+  EntityId templ = EntityId::none;       // a specialization's template
+  std::vector<ast::TemplateArg> args{};  // a specialization's template arguments
 };
 
 class Entities {
@@ -315,8 +360,18 @@ public:
     f = ast::mix(f, ins_->names.fp(r.name));
     if (r.scope != EntityId::none) f = ast::mix(f, ins_->entities.fp(r.scope));
     // A variable's type is not part of its identity; a function's is ([basic.link]).
-    if (r.kind == EntityKind::function || r.kind == EntityKind::constructor || r.kind == EntityKind::destructor)
+    if (r.kind == EntityKind::function || r.kind == EntityKind::constructor || r.kind == EntityKind::destructor ||
+        r.kind == EntityKind::function_template)
       f = ast::mix(f, types_->fp(types_->canonical(r.type)));
+    if (r.kind == EntityKind::function_template) f = ast::mix(f, r.head);
+    if (r.templ != EntityId::none) {
+      f = ast::mix(f, ins_->entities.fp(r.templ));
+      for (const ast::TemplateArg& a : r.args) {
+        f = ast::mix(f, std::to_underlying(a.kind));
+        f = ast::mix(f, types_->fp(types_->canonical(a.type)));
+        if (a.value != ConstId::none) f = ast::mix(f, ins_->values.fp(a.value));
+      }
+    }
     f = ast::mix(f, std::to_underlying(r.linkage));
     if (r.linkage == ast::Linkage::internal)
       f = ast::mix(ast::mix(f, ins_->items.fp(r.first.item)), std::to_underlying(r.first.ord));

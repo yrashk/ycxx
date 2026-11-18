@@ -2107,10 +2107,15 @@ declaration properties); per-expression queries (memory; a body re-run is micros
 
 `analyze_template(item, ctx)` parses and checks the template at its definition point
 ([temp.res.general]). Non-dependent names are looked up and *bound* to entities in the result.
-For each dependent unqualified call, the result stores the definition-context unqualified lookup
-set as a value ([temp.dep.candidate]: candidates are the definition-context lookup plus ADL from
-both contexts). Dependent qualified names and member accesses are left symbolic. This is a
-contextual query like any declaration's; its prefix is the template item's own.
+Dependent qualified names and member accesses are left symbolic. This is a contextual query like
+any declaration's; its prefix is the template item's own.
+
+*Amended by #88 (ast.md §6.4):* an instantiation analyses the pattern's tokens again, so it does
+not read a stored lookup set. It re-asks unqualified lookup at the pattern's context
+(`rel(◇.prefix, I)`, or `rel_after(◇.prefix, K)` for a complete-class part), which gives the
+definition-context set of [temp.dep.candidate], and asks argument-dependent lookup at both
+contexts for the calls the definition found dependent. What the definition keeps for its
+instantiations is which calls those are.
 
 #### B6.2 Instantiation and its context
 
@@ -2330,6 +2335,11 @@ constraint and its arguments is the caching the draft describes; a well-formed p
 one leaf from every point.
 
 #### B6.6 The re-verification technique
+
+*Amended by #88 (ast.md §6.4):* a differing element that is itself a selection cell (the hop into
+the pattern's `analyze_body`) is explained by recursing into that cell's own path, and the
+pattern forms are rendered by place: `rel(◇.prefix, I)` and `rel_after(◇.prefix, K)` as "before
+(after) the definition of … in a.cpp", `◇` as "at the end of a.cpp".
 
 Several rules say "if this gives a different answer at another point, the program is ill-formed,
 no diagnostic required" ([temp.point]/7, [temp.constr.atomic]/3, [temp.spec.partial.general]/1,

@@ -403,8 +403,8 @@ one import `ycxx.ast`; unit tests in `tests/unit/ast` (run by ctest, see docs/TE
   conversions ([expr.arith.conv]), integer constants and their integral conversion
   ([conv.integral], [conv.bool]).
 - Compaction keeps every type and constant, and rewrites the lists they hold.
-- Not yet: classes, enums, member pointers, template arguments, the dependent type kinds and the
-  rest of `VDep*`, floating constants, sugar other than typedefs, `substitute`.
+- Not yet: enums, member pointers, the dependent type kinds other than `TTemplateParam` and the
+  rest of `VDep*`, floating constants, sugar other than typedefs.
 
 ## Parser and sema for the α subset (#41)
 
@@ -615,7 +615,7 @@ in `lsp` frames (`LspOut`), the last of which carries LSP's exit status (1 after
     so a keystroke leaves every disk-view cell green by the durability shortcut.
   - `compile::run` takes `Units{view, first}`: the editor view's units are numbered from 2^31,
     one per document. `compile::sources_of` and `compile::check_one` (one unit of a served
-    request, `-fsyntax-only` with its preprocessing options).
+    request, `-fsyntax-only` with its preprocessing and language options).
 - `ycxx.lsp` (`src/lsp/`): `:json` (a JSON value, parser and printer, and a codec for aggregates
   by reflection), and the session: `Content-Length` framing, `initialize`, `shutdown`, `exit`,
   full-text `didOpen`/`didChange`, `didSave`, `didClose`, and `publishDiagnostics` for every open
@@ -818,6 +818,54 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   were given ([dcl.link]/7); a variable with C language linkage is one in every namespace.
 - Not yet (#153): `using N::f;` at namespace scope, `N::S{…}` as an expression, some clashes
   with namespace names and using-declarations, `std::` abbreviations in linkage names.
+
+## Templates, ζ step 1: function templates (#88, 2026-11-18)
+
+Instantiation follows ast.md §6.4 as amended by #88 (Fable's decision): declarations and
+canonical positions are substituted structurally; bodies are instantiated by analysing the
+template's tokens again with the arguments bound.
+
+- **Types and records:** `TTemplateParam{depth, index, pack}` in `types`; `TemplateArg` and
+  `TemplateParamSema` in `seqs`; `DeclSema::template_params` (a template's head) and
+  `decl_flag::template_`. Sema's stand-in entities gained `function_template` (identity: scope,
+  name, type and the head's kinds) and specializations (`templ` and canonical arguments, §B1.5).
+- **Parsing:** template-heads on namespace-scope function declarations (type parameters,
+  integral, pointer and reference non-type parameters, defaults); template-ids `f<args>` in
+  expressions, with `>` ending the list outside brackets ([temp.names]/4).
+- **Phase one** ([temp.res]): a template's body is analysed with its parameters in scope; a
+  type- or value-dependent construct becomes a `Dependent` node (operands as written), an
+  unqualified callee lookup did not find a `DepName`, and the body records which unqualified
+  calls were dependent ([temp.dep.candidate]). Non-dependent errors are reported here.
+- **`ycxx.sema:templates`:** `substitute` (with the failures of [temp.deduct.general]/11),
+  deduction from a call ([temp.deduct.call], [temp.deduct.type]: decay, forwarding references,
+  the cv and qualification allowances of /4), explicit arguments converted to their parameters'
+  types, default template arguments, and partial ordering ([temp.func.order],
+  [temp.deduct.partial]).
+- **Overload resolution:** a template contributes the specialization deduction gives; a
+  non-template beats an equally good specialization, and the more specialized template wins
+  ([over.match.best]/2.4–2.5).
+- **Instantiation at the end of the unit** (§B6.2), in `parse::Program` until contextual queries
+  (#16): cells carry `Demand`s, and `instantiate_all` walks them in item order, then each
+  instance's, to a nesting limit of 900. The body is re-analysed over the template's tokens
+  (`BodyAnalysis` with an `Instantiation`): unqualified names at the template's item, the
+  dependent calls' argument-dependent lookup, completeness and constant evaluation at the end
+  (`AtInstantiation`). A specialization needed by constant evaluation is instantiated where it is
+  needed ([temp.inst]/8). Diagnostics point into the template.
+- **Mangling:** `<template-args>` (types, integers as `L…E`), `<template-param>`s and the return
+  type in a specialization's name, and function types (`F…E`); checked against Clang's symbols.
+- Dependent array bounds `T (&)[N]` and `int a[N]`, with `N` deduced from an array argument
+  ([temp.deduct.type]/8) and mangled as `A T_ _`; the reference tie-break of
+  [temp.deduct.partial]/9. Reference binding reads an array's cv-qualifiers from its elements
+  ([basic.type.qualifier]/3), for templates and other code.
+- Tests: `tests/own/templates/f1-*` (spec-only, plus ten from the review): 47 of 48 pass; the
+  other calls through a function pointer (#24). 9 more draft examples pass ([temp.over], [temp.deduct.general],
+  [temp.deduct.partial], [temp.arg.general], [temp.deduct.type]).
+- Not yet (#88): class templates, specializations, packs, concepts, member templates, qualified
+  template-ids (`N::f<int>`), a non-type parameter's default or a signature's bound that is a
+  dependent expression other than a parameter (not supported, pending `VDepOp`), dependent
+  qualified names (`typename T::x`, with the `SSubst` sugar of ast.md §6.4), deduction from an
+  overload set argument ([temp.deduct.call]/6), "required from here" notes. Argument-dependent
+  lookup runs for dependent calls in instantiations only (#165). Coalesced (weak) definitions of specializations are #124.
 
 ## Bootstrap workarounds
 

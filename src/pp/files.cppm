@@ -115,6 +115,10 @@ struct Config {
   const ast::Target* target = &ast::aarch64_darwin;
   // The root of every prefix (§6.1): an editor-view region is never a disk-view one's.
   View view = View::disk;
+  // A language option the unit's front end reads: `-ftemplate-depth=N`, the limit on nested
+  // template instantiations ([temp.inst]/16, [implimits]).
+  std::uint32_t template_depth = default_template_depth;
+  static constexpr std::uint32_t default_template_depth = 900;
 
   Fp128 fingerprint() const {
     Hasher h;
@@ -127,6 +131,7 @@ struct Config {
       h.bytes(name).uint(u8(value ? 1 : 0));
       if (value) h.bytes(*value).uint(u8(0));
     }
+    if (template_depth != default_template_depth) h.uint(u8(2)).uint(template_depth);
     return h.finish();
   }
 };

@@ -149,7 +149,8 @@ struct Body {
     for (auto& [name, t] : params) ps.push_back({EntityId::none, t, w.in.names.intern(name), NodeId::none, 0});
     ast::DeclSema decl{f, type, ast::DeclKind::function, ast::Linkage::external, ast::Storage::none, ast::Access::none,
                        0, w.in.intern_seq(std::span<const NodeId>{}), NodeId::none, NodeId::none,
-                       w.in.intern_seq(std::span<const ast::ParamSema>(ps))};
+                       w.in.intern_seq(std::span<const ast::ParamSema>(ps)),
+                       w.in.intern_seq(std::span<const ast::TemplateParamSema>{})};
     auto locs = b.seq(std::span<const ast::LocalRec>(locals));
     ast::BodySema body = b.commit(ast::BodySema{tree, locs});
     w.tu.functions.push_back({f, decl, body, w.in.items.add<ast::ItemId>(ast::seed("test item")), 0});
@@ -181,6 +182,27 @@ void mangling() {
   check(pl::symbol_name(w.in, "count", w.int_t, false, ast::LangLinkage::cxx).value_or("") == "_count",
         "a global-namespace variable is its identifier");
   check(pl::substitution(36) == "SZ_" && pl::substitution(37) == "S10_", "seq-ids are base 36");
+
+  // Function template specializations (Itanium §5.1.5.7–8), checked against Clang's symbols: the
+  // template's signature with <template-param>s, return type first, after the <template-args>.
+  QualType t0 = w.in.intern_type(ast::TTemplateParam{0, 0, 0}), t1 = w.in.intern_type(ast::TTemplateParam{0, 1, 0});
+  auto type_arg = [&](QualType t) { return ast::TemplateArg{ast::TemplateArgKind::type, w.in.canonical(t), ast::ConstId::none}; };
+  auto int_arg = [&](QualType t, std::int64_t v) {
+    return ast::TemplateArg{ast::TemplateArgKind::value, t, ast::int_value(w.in, ast::aarch64_darwin, t, v)};
+  };
+  auto spec = [&](std::string_view n, QualType pattern, std::vector<ast::TemplateArg> args) {
+    pl::TemplateSpec s{pattern, std::move(args)};
+    return pl::symbol_name(w.in, n, pattern, true, ast::LangLinkage::cxx, {}, ast::EntityId::none, false, &s).value_or("<error>");
+  };
+  check(spec("max", w.fn(t0, {t0, t0}), {type_arg(w.int_t)}) == "__Z3maxIiET_S0_S0_", "the name is S_, T_ is S0_");
+  QualType cref_t = ast::lvalue_ref_to(w.in, w.in.qualified(t0, ast::Cv::const_));
+  check(spec("h", w.fn(cref_t, {cref_t, ast::pointer_to(w.in, t0)}), {type_arg(w.int_t)}) == "__Z1hIiERKT_S2_PS0_",
+        "cv-qualified and reference types of a parameter are candidates");
+  check(spec("conv", w.fn(t1, {t0}), {type_arg(w.int_t), type_arg(w.long_t)}) == "__Z4convIilET0_T_", "T0_ is the second parameter");
+  check(spec("g", w.fn(w.int_t, {t0}), {type_arg(w.char_t), int_arg(w.int_t, -2)}) == "__Z1gIcLin2EEiT_",
+        "an integral argument is an <expr-primary>, n for negative");
+  check(spec("p", w.fn(w.void_t, {ast::pointer_to(w.in, w.fn(t0, {t0}))}), {type_arg(w.int_t)}) == "__Z1pIiEvPFT_S0_E",
+        "a function type is F…E");
 }
 
 // ------------------------------------------------------------------ programs
@@ -278,10 +300,10 @@ void unsupported_is_an_error() {
 }
 
 void names_only_when_used() {
-  // int apply(int (*)(int), int); int main() { return 0; }: a declaration nothing uses needs no
-  // linkage name, so its unsupported parameter type is no error. Used, it is one, at its declarator.
+  // int apply(__bf16*, int); int main() { return 0; }: a declaration nothing uses needs no linkage
+  // name, so its unsupported parameter type is no error. Used, it is one, at its declarator.
   World w;
-  QualType fp = ast::pointer_to(w.in, w.fn(w.int_t, {w.int_t}));
+  QualType fp = ast::pointer_to(w.in, ast::builtin(w.in, ast::Builtin::bfloat16));
   QualType fn_apply = w.fn(w.int_t, {fp, w.int_t});
   EntityId apply = w.entity("apply", fn_apply, true);
   ast::Loc at{w.in.items.add<ast::ItemId>(ast::seed("test item 5")), 1};

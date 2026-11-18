@@ -40,6 +40,9 @@ struct Evaluated {
   std::optional<ConstId> value;
   u64 reason = reason_unsupported;
   bool constant = false;
+  // The expression is value-dependent ([temp.dep.constexpr]): it is evaluated when the template is
+  // instantiated. Also set when instantiation gave up at its limit, which was diagnosed already.
+  bool dependent = false;
 };
 
 class Evaluator {
@@ -50,17 +53,24 @@ public:
   // permitted result of a constant expression ([expr.const]). `e` must be valid.
   Evaluated evaluate(Ex e) {
     if (!e.ok()) return {};
+    if (s_->dependent(e)) return {std::nullopt, reason_unsupported, false, true};
     if (e.glvalue()) e = s_->rvalue(e);
     if (!e.ok()) return {};
     ast::Interners& in = s_->ins();
     ast::Child root = s_->builder().commit(ast::Child{e.id, 0});
     NodeId ret = in.intern(ast::Return{root}, e.width());
     std::vector<ast::LocalRec> locals(s_->locals().begin(), s_->locals().end());
-    for (ast::LocalRec& l : locals) l.decl = NodeId::none;  // drafts of the enclosing frame
+    for (ast::LocalRec& l : locals) {
+      l.decl = NodeId::none;  // drafts of the enclosing frame
+      // In a template's definition a local of dependent type has no object yet; a non-dependent
+      // expression cannot name it, so it stands as an `int` outside its lifetime.
+      if (s_->types().is_dependent(l.type)) l.type = s_->builtin(Builtin::int_);
+    }
     ast::DeclSema thunk{};
     thunk.entity = EntityId::none;
     thunk.type = s_->types().function(Types::unqualified(e.type()), {}, false, LangLinkage::cxx);
     thunk.params = in.intern_seq(std::span<const ast::ParamSema>{});
+    thunk.template_params = in.intern_seq(std::span<const ast::TemplateParamSema>{});
     irgen::FunctionInput input{EntityId::none, thunk,
                                ast::BodySema{ret, in.intern_seq(std::span<const ast::LocalRec>(locals))},
                                s_->item(), 0, true, s_->local_values()};
@@ -69,6 +79,8 @@ public:
     if (!body) return {};
     Host host{q_};
     interp::Outcome out = interp::evaluate(host, in, target, body->body, EntityId::none, {}).run();
+    if (out.status != interp::Outcome::Status::value && q_->instantiation_gave_up())
+      return {std::nullopt, reason_unsupported, false, true};
     if (out.status != interp::Outcome::Status::value) {
       // In the thunk's own frame, the only objects outside their lifetime are the enclosing
       // function's locals that are not usable in constant expressions.

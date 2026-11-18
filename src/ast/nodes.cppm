@@ -205,6 +205,23 @@ struct DefaultInit {
   ExprInfo info;
 };
 
+// A type- or value-dependent construct of a template's definition ([temp.dep]), analysed no
+// further: its operands as written. Its type is `Builtin::dependent`, or the type [temp.dep.expr]
+// fixes when the construct is only value-dependent. A template's bodies are instantiated by
+// analysing their tokens again with the template arguments bound (ast.md §6.4 as amended by #88),
+// so this kind needs no payload beyond its operands.
+struct Dependent {
+  ExprInfo info;
+  [[=indeterminately_sequenced]] ChildList operands;
+};
+
+// The name of an unqualified function call that lookup did not find at a template's definition
+// ([temp.dep.candidate]): argument-dependent lookup at the point of instantiation may.
+struct DepName {
+  ExprInfo info;
+  NameId name;
+};
+
 // ---------------------------------------------------------------- structure
 
 struct ExprStmt {
@@ -330,7 +347,8 @@ using Nodes = closed_list<Literal, DeclRef, Paren, Unary, Binary, OrderedBinary,
                           ImplicitConversion, ExprStmt, Return, Compound, If, LocalVar, Attribute, LocalRef,
                           Conditional, While, Do, For, Break, Continue, DeclStmt, Declarator, DeclGroup,
                           IfConsteval, StaticAssert, Member, InitList, ValueInit, DefaultInit, This,
-                          MemberCall, Materialize, CtorCall, MemberInit, Destructor, DestroyMember>;
+                          MemberCall, Materialize, CtorCall, MemberInit, Destructor, DestroyMember, Dependent,
+                          DepName>;
 
 static_assert(Nodes::size < max_node_kinds);
 

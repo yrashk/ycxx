@@ -130,6 +130,7 @@ void serialize_into(engine::Sink& out, const Source& s) {
   engine::serialize(out, s.config.macros);
   engine::serialize(out, std::string(s.config.target->triple));
   engine::serialize(out, static_cast<std::uint64_t>(s.config.view));
+  engine::serialize(out, static_cast<std::uint64_t>(s.config.template_depth));
 }
 Source deserialize_from(engine::Source& in, std::type_identity<Source>) {
   Source s;
@@ -143,6 +144,7 @@ Source deserialize_from(engine::Source& in, std::type_identity<Source>) {
   const auto view = engine::deserialize<std::uint64_t>(in);
   if (view > std::to_underlying(View::editor)) in.fail();
   s.config.view = static_cast<View>(view);
+  s.config.template_depth = static_cast<std::uint32_t>(engine::deserialize<std::uint64_t>(in));
   return s;
 }
 

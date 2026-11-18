@@ -79,9 +79,9 @@ std::optional<std::string> first_input(std::span<const std::string> argv);
 // names for them); none when its command line is malformed.
 std::vector<std::string> sources_of(const Request& r);
 
-// The request that checks one of `r`'s units: `-fsyntax-only` with `r`'s preprocessing options,
-// `source` (absolute, lexically normal) spelled as `r` spells it. Nothing when `r` does not
-// compile `source`.
+// The request that checks one of `r`'s units: `-fsyntax-only` with `r`'s preprocessing and
+// language options, `source` (absolute, lexically normal) spelled as `r` spells it. Nothing when
+// `r` does not compile `source`.
 std::optional<Request> check_one(const Request& r, std::string_view source);
 
 // Writes the outputs and prints stdout and stderr; the exit status. A failed write is reported on
@@ -123,7 +123,14 @@ std::expected<Options, std::string> parse_options(std::span<const std::string_vi
       if (i + 1 == args.size()) return std::unexpected("argument to '-o' is missing");
       o.output = std::string(args[++i]);
     } else if (a.starts_with("-o")) o.output = std::string(a.substr(2));
-    else if (a.starts_with("-std=")) {
+    else if (a.starts_with("-ftemplate-depth=")) {
+      // The limit on nested template instantiations ([temp.inst]/16), as Clang and GCC spell it.
+      std::uint32_t n = 0;
+      auto v = a.substr(17);
+      auto [p, ec] = std::from_chars(v.data(), v.data() + v.size(), n);
+      if (ec != std::errc{} || p != v.data() + v.size() || n == 0) return std::unexpected(std::format("invalid value in '{}'", a));
+      o.pp.template_depth = n;
+    } else if (a.starts_with("-std=")) {
       // The language is the C++26 working draft (DECISIONS §1.1).
       if (a != "-std=c++26" && a != "-std=c++2c") return std::unexpected(std::format("unsupported language standard '{}'; ycxx compiles C++26", a.substr(5)));
     }
@@ -271,7 +278,7 @@ std::optional<Request> check_one(const Request& r, std::string_view source) {
   auto spelled = std::ranges::find_if(opts->sources, [&](const std::string& s) { return absolute_in(r, s) == source; });
   if (spelled == opts->sources.end()) return std::nullopt;
   Request one{{}, r.cwd, r.env, r.build_time};
-  // The preprocessing options and the standard, as given; the action, the output and the other
+  // The preprocessing and language options, as given; the action, the output and the other
   // inputs are this request's own.
   const std::vector<std::string_view> args = views(r.argv);
   pp::Config scratch;
@@ -281,7 +288,7 @@ std::optional<Request> check_one(const Request& r, std::string_view source) {
       for (std::size_t k = from; k <= i; ++k) one.argv.emplace_back(args[k]);
     } else if (args[i] == "-o") {
       ++i;
-    } else if (args[i].starts_with("-std=")) {
+    } else if (args[i].starts_with("-std=") || args[i].starts_with("-ftemplate-depth=")) {
       one.argv.emplace_back(args[i]);
     }
   }

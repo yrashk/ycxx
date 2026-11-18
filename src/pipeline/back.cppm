@@ -81,6 +81,10 @@ struct Entity {
   std::optional<ast::Loc> at;  // its first declarator, for diagnostics
   EntityId scope = EntityId::none;  // the class of a member
   Special special = Special::none;  // a constructor or destructor
+  // A function template specialization: its template's function type and its template arguments,
+  // which its name encodes (Itanium §5.1.5.7–8).
+  std::optional<QualType> template_type{};
+  std::vector<ast::TemplateArg> template_args{};
 };
 
 // A function definition: what `function_ir(F)` reads (irgen::FunctionInput, without a thunk's
@@ -830,6 +834,7 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
     // The complete-object constructor and destructor (C1, D1): with no virtual bases they are the
     // base-object ones too (#136).
     std::string name_ = e.special == Special::constructor ? "C1" : e.special == Special::destructor ? "D1" : e.name;
+    TemplateSpec spec{e.template_type.value_or(e.type), e.template_args};
     auto name = symbol_name(
         in, name_, e.type, e.is_function, e.lang,
         [](EntityId c) {
@@ -837,7 +842,7 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
           return w ? ClassName{std::string(w->ins.names.spelling(w->entities.rec(c).name)), w->entities.rec(c).scope}
                    : ClassName{};
         },
-        e.scope, e.special != Special::none);
+        e.scope, e.special != Special::none, e.template_type ? &spec : nullptr);
     if (!name) {
       errors.push_back({e.at, std::format("the name of '{}': {} is not supported yet", e.name, name.error())});
       continue;

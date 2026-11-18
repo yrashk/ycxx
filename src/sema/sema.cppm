@@ -6,5 +6,6 @@ export module ycxx.sema;
 
 export import :types;
 export import :diag;
+export import :templates;
 export import :actions;
 export import :eval;
