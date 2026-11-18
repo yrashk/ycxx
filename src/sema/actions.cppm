@@ -45,6 +45,9 @@ public:
   // Whether class `c` is complete at the current point ([class.mem.general]): its definition
   // precedes the point and does not enclose it.
   virtual bool is_complete(EntityId c) = 0;
+  // Inside the enumerator list of an enumeration this unit is defining: its record so far, which
+  // is published only after the list (#156).
+  virtual const EnumRec* defining_enum(EntityId) { return nullptr; }
   // The constant a variable usable in constant expressions holds ([expr.const]), if it is known.
   virtual std::optional<ConstId> constant_value(EntityId v) = 0;
   // In a member declaration of a class being defined: the member named `name` declared before it
@@ -201,7 +204,7 @@ public:
     }
     // A type nested in the class whose scope this is ([basic.scope.class]).
     if (current_class != EntityId::none) {
-      if (const ClassRec* cr = w_->classes.find(current_class); cr && cr->defined) {
+      if (const ClassRec* cr = class_rec(current_class); cr && cr->defined) {
         for (const auto& [n, t] : cr->types)
           if (n == name) return t;
       } else if (auto m = q_->earlier_member(name); m && m->kind == ast::DeclKind::enum_) {
@@ -258,7 +261,7 @@ public:
       return std::nullopt;
     }
     if (s.type && types().is_class(*s.type))
-      if (const ClassRec* cr = w_->classes.find(types().class_of(*s.type)))
+      if (const ClassRec* cr = class_rec(types().class_of(*s.type)))
         for (const auto& [name, t] : cr->types)
           if (name == n) return Scope{std::nullopt, t};
     return std::nullopt;
@@ -317,7 +320,7 @@ public:
   std::optional<QualType> nested_type(NameId cls, NameId name) {
     auto t = class_name(cls, true);
     if (!t || !types().is_class(*t)) return std::nullopt;
-    if (const ClassRec* cr = w_->classes.find(types().class_of(*t)))
+    if (const ClassRec* cr = class_rec(types().class_of(*t)))
       for (const auto& [n, nt] : cr->types)
         if (n == name) return nt;
     return std::nullopt;
@@ -394,7 +397,7 @@ public:
   bool is_aggregate(QualType t) {
     if (types().is_array(t)) return true;
     if (!types().is_class(t)) return false;
-    const ClassRec* c = w_->classes.find(types().class_of(t));
+    const ClassRec* c = class_rec(types().class_of(t));
     return !c || !c->user_ctors;  // [dcl.init.aggr]/1: no user-declared constructors
   }
   bool has_user_ctors(QualType t) { return types().is_class(t) && !is_aggregate(t); }
@@ -402,6 +405,15 @@ public:
   // The destructor that ends an object of type `t`, or none if it is trivial ([class.dtor]); for
   // an array, its elements'.
   EntityId destructor_of(QualType t) { return w_->classes.destructor_of(t); }
+  // A class's record where the class is complete ([class.mem.general]). Every unit that defines a
+  // class publishes its record, the first one wins (#156): a unit must not see it before its own
+  // definition, or while it analyses that definition, or what it accepts depends on other units.
+  const ClassRec* class_rec(EntityId c) { return q_->is_complete(c) ? w_->classes.find(c) : nullptr; }
+  // An enumeration's record: in its own enumerator list, this unit's so far.
+  const EnumRec* enum_rec(EntityId e) {
+    if (const EnumRec* r = q_->defining_enum(e)) return r;
+    return w_->classes.find_enum(e);
+  }
 
   // The elements of an aggregate, in order: an array's elements, a class's non-static data
   // members, each with the aggregate's cv added.
@@ -416,7 +428,7 @@ public:
     TypeRec tr = types().rec(t);
     if (tr.kind == TypeKind::array) {
       r.assign(tr.bound, Element{tr.inner, no_name()});
-    } else if (const ClassRec* c = tr.kind == TypeKind::class_ ? w_->classes.find(tr.entity) : nullptr) {
+    } else if (const ClassRec* c = tr.kind == TypeKind::class_ ? class_rec(tr.entity) : nullptr) {
       for (const FieldRec& f : c->fields) r.push_back({types().add_cv(f.type, Types::cv(t)), f.name, f.init, f.dmi});
     }
     return r;
@@ -428,8 +440,8 @@ public:
     TypeRec r = types().rec(t);
     if (r.kind == TypeKind::array) return has_member_inits(r.inner);
     if (r.kind != TypeKind::class_) return false;
-    if (const ClassRec* c = w_->classes.find(r.entity); c && c->user_ctors) return true;
-    if (const ClassRec* c = w_->classes.find(r.entity))
+    if (const ClassRec* c = class_rec(r.entity); c && c->user_ctors) return true;
+    if (const ClassRec* c = class_rec(r.entity))
       for (const FieldRec& f : c->fields)
         if (f.init != ConstId::none || has_member_inits(f.type)) return true;
     return false;
@@ -538,7 +550,7 @@ public:
     // [dcl.init.list]/3.8: an enumeration with a fixed underlying type from one integer, without
     // narrowing.
     if (types().is_enum(t) && c.expr.ok() && !types().is_enum(c.expr.type())) {
-      const EnumRec* er = w_->classes.find_enum(types().enum_of(t));
+      const EnumRec* er = enum_rec(types().enum_of(t));
       if (er && er->fixed) {
         Ex v = list_element(*er->underlying, c.expr);
         if (!v.ok()) return fail;
@@ -846,7 +858,7 @@ public:
     const MemberDeclRec* member = nullptr;
   };
   std::optional<Found> find_member(EntityId c, NameId name) {
-    const ClassRec* cr = w_->classes.find(c);
+    const ClassRec* cr = class_rec(c);
     if (!cr) return std::nullopt;
     for (u32 i = 0; i < cr->fields.size(); ++i)
       if (cr->fields[i].name == name) return Found{&cr->fields[i], i, nullptr};
@@ -857,14 +869,14 @@ public:
   // The member functions of `c` named `name`: an overload set ([over.match.funcs]).
   std::vector<const MemberDeclRec*> member_functions(EntityId c, NameId name) {
     std::vector<const MemberDeclRec*> r;
-    if (const ClassRec* cr = w_->classes.find(c))
+    if (const ClassRec* cr = class_rec(c))
       for (const MemberDeclRec& m : cr->members)
         if (m.name == name && m.is_function && !m.is_ctor && !m.is_dtor) r.push_back(&m);
     return r;
   }
   const MemberDeclRec* member_decl(EntityId f) {
     EntityId c = w_->entities.rec(f).scope;
-    if (const ClassRec* cr = c == EntityId::none ? nullptr : w_->classes.find(c))
+    if (const ClassRec* cr = c == EntityId::none ? nullptr : class_rec(c))
       for (const MemberDeclRec& m : cr->members)
         if (m.entity == f) return &m;
     return nullptr;
@@ -889,7 +901,7 @@ public:
     auto f = find_member(c, name);
     if (!f) {
       // The enumerators of an unscoped enumeration nested in the class are its members.
-      if (const ClassRec* cr = w_->classes.find(c))
+      if (const ClassRec* cr = class_rec(c))
         for (const auto& [n, t] : cr->types)
           if (is_unscoped_enum(t))
             if (auto r = find_enumerator(types().enum_of(t), name, begin, end)) return r;
@@ -928,7 +940,7 @@ public:
   }
   // The enumerator `name` of enumeration `e`, if it has one.
   std::optional<Ex> find_enumerator(EntityId e, NameId name, u32 begin, u32 end) {
-    if (const EnumRec* r = w_->classes.find_enum(e))
+    if (const EnumRec* r = enum_rec(e))
       for (const EnumeratorRec& x : r->enumerators)
         if (x.name == name) return enumerator(x.entity, types().enum_type(e), begin, end);
     return std::nullopt;
@@ -1105,7 +1117,7 @@ public:
       if (types().is(to, Builtin::bool_)) return {true, 2, 0};
       if (!types().is_integral(to)) return {};
       // [conv.prom]/4, [over.ics.rank]/4.2: with a fixed type, to it is the better promotion.
-      if (const EnumRec* er = w_->classes.find_enum(types().enum_of(from)); er && er->fixed) {
+      if (const EnumRec* er = enum_rec(types().enum_of(from)); er && er->fixed) {
         if (types().canonical(*er->underlying) == types().canonical(to)) return {true, 1, 0};
         if (builtin(promoted(*types().builtin_of(*er->underlying))) == to) return {true, 1, 1};
         return {true, 2, 0};
@@ -1217,7 +1229,7 @@ public:
     if (!require_complete(t, begin)) return fail;
     QualType ut = Types::unqualified(t);
     EntityId c = types().class_of(ut);
-    const ClassRec* cr = w_->classes.find(c);
+    const ClassRec* cr = class_rec(c);
     if (!cr) return fail;
     std::vector<Candidate> cands;
     std::vector<EntityId> ents;
@@ -1401,7 +1413,7 @@ public:
     // The class's members, in a member function's body ([basic.scope.class]).
     if (current_class != EntityId::none) {
       if (auto r = class_member(current_class, name, begin, end)) return *r;
-      if (!w_->classes.is_defined(current_class))
+      if (!class_rec(current_class))
         if (auto m = q_->earlier_member(name)) {
           if (m->kind != ast::DeclKind::variable) {
             diag(begin, Diag::member_without_object, name);
@@ -1672,11 +1684,14 @@ public:
   // Enumerations ([dcl.enum]).
   bool is_unscoped_enum(QualType t) {
     if (!types().is_enum(t)) return false;
-    const EnumRec* r = w_->classes.find_enum(types().enum_of(t));
+    const EnumRec* r = enum_rec(types().enum_of(t));
     return !r || !r->scoped;
   }
   bool is_scoped_enum(QualType t) { return types().is_enum(t) && !is_unscoped_enum(t); }
-  QualType underlying_of(QualType t) { return w_->classes.underlying(types().enum_of(t)); }
+  QualType underlying_of(QualType t) {
+    const EnumRec* r = enum_rec(types().enum_of(t));
+    return r && r->underlying ? *r->underlying : builtin(Builtin::int_);
+  }
 
   // [conv.ptr]: an integer literal with value zero, or a prvalue of type std::nullptr_t.
   bool is_null_pointer_constant(const Ex& e) {
@@ -1715,7 +1730,7 @@ public:
     if (types().is_class(target)) {
       if (!require_complete(target, at_)) return {NodeId::none, e.begin, e.end};
       if (initializes(target, e) && !e.glvalue()) return e;  // the prvalue initializes it directly
-      const ClassRec* cr = w_->classes.find(types().class_of(target));
+      const ClassRec* cr = class_rec(types().class_of(target));
       // A copy through a constructor that is not trivial, or one converting another type
       // ([class.conv.ctor]).
       if (cr && (cr->user_ctors || cr->copy_ctor != EntityId::none || cr->copy_deleted))
@@ -1819,7 +1834,7 @@ public:
     TypeRec r = types().rec(t);
     if (r.kind == TypeKind::array) return has_const_member(r.inner);
     if (r.kind != TypeKind::class_) return false;
-    if (const ClassRec* c = w_->classes.find(r.entity))
+    if (const ClassRec* c = class_rec(r.entity))
       for (const FieldRec& f : c->fields)
         if (Types::is_const(types().canonical(f.type)) || has_const_member(f.type)) return true;
     return false;

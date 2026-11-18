@@ -201,8 +201,7 @@ void headers() {
 }
 
 // A session on a pool (#137): every worker is bound to the session's universe, and the program's
-// bytes equal an inline session's, at 2 and 8 threads and under chaos seeds. One unit for now:
-// two units' front ends would race in sema's records until #156.
+// bytes equal an inline session's, at 2 and 8 threads and under chaos seeds.
 void pooled() {
   const std::vector<std::uint8_t> want = cold(v3);
   for (auto [threads, seed] : std::array<std::pair<unsigned, std::optional<std::uint64_t>>, 4>{
@@ -226,6 +225,110 @@ void pooled() {
   }
 }
 
+// Several units on a pool (#156): eight units include one header that defines classes and
+// enumerations, so their front ends define the same records at once on different workers. The
+// program's bytes equal an inline session's at any thread count. The members are defined out of
+// line in one unit: inline functions in several objects collide until #124.
+void pooled_units() {
+  namespace fs = std::filesystem;
+  fs::path dir = fs::temp_directory_path() / std::format("ycxx-incremental-pooled-{}", std::random_device{}());
+  fs::create_directories(dir);
+  std::ofstream(dir / "s.h", std::ios::binary | std::ios::trunc) << R"(enum class Kind : int { a = 1, b = a + 1, c };
+enum Flag { off, on = 4 };
+struct Part {
+  int id;
+  Part();
+  Part(int i);
+  ~Part();
+};
+struct S {
+  int x;
+  Kind k = Kind::b;
+  Part p;
+  Part q;
+  S(int v);
+  ~S();
+  int get() const;
+};
+)";
+  constexpr std::uint32_t units = 8;
+  auto build_units = [&](pl::Session& s, int edit) {
+    std::vector<pl::TuId> tus;
+    for (std::uint32_t i = 0; i < units; ++i) {
+      std::string text = "#include \"s.h\"\n";
+      if (i == 0) {
+        text += R"(Part::Part() : id(9) {}
+Part::Part(int i) : id(i) {}
+Part::~Part() { id = 0; }
+S::S(int v) : x(v), p(v + 1) {}
+S::~S() { x = 0; }
+int S::get() const { return x + p.id + q.id + (k == Kind::b ? 2 : 0) + on; }
+)";
+        for (std::uint32_t j = 1; j < units; ++j) text += std::format("int f{}();\n", j);
+        text += "int main() { int r = 0;";
+        for (std::uint32_t j = 1; j < units; ++j) text += std::format(" r += f{}();", j);
+        text += std::format(" return r % 256 - {}; }}\n", edit);
+      } else {
+        text += std::format("int f{0}() {{ S s({0}); Part t; return s.get() + t.id + {1}; }}\n", i, i == 3 ? edit : 0);
+      }
+      s.set_source({i}, std::format("u{}.cpp", i), text, std::format("u{}.o", i), dir.native_encoded_string());
+      tus.push_back({i});
+    }
+    s.set_program(program, {tus, {}, "pooled"});
+  };
+  auto inline_image = [&](int edit) {
+    pl::Session s;
+    build_units(s, edit);
+    const pl::Linked& l = s.get<pl::Link>(program);
+    check(l.errors.empty() && !l.image.empty(), "several units with one header link inline");
+    return l.image;
+  };
+  const std::vector<std::uint8_t> want = inline_image(0), want_edit = inline_image(5);
+  for (auto [threads, seed] : std::array<std::pair<unsigned, std::optional<std::uint64_t>>, 5>{
+           {{2, std::nullopt}, {8, std::nullopt}, {8, 7}, {4, 1234}, {8, 99}}}) {
+    engine::Pool pool(threads, seed);
+    pl::Session s(pool);
+    build_units(s, 0);
+    const pl::Linked& l = s.get<pl::Link>(program);
+    check(l.errors.empty() && l.image == want,
+          std::format("{} units on {} threads, seed {}: equal to inline", units, threads, seed.value_or(0)));
+    build_units(s, 5);
+    check(s.get<pl::Link>(program).image == want_edit, std::format("{} units on {} threads, after an edit", units, threads));
+  }
+  // A unit does not see a record another unit published before its own definition is complete:
+  // both units diagnose the nested type used before its declaration, at any schedule.
+  std::ofstream(dir / "late.h", std::ios::binary | std::ios::trunc) << "struct T { E f(); enum E { x }; };\n";
+  for (unsigned threads : {1u, 8u}) {
+    engine::Pool pool(threads);
+    pl::Session s(pool);
+    for (std::uint32_t i = 0; i < 2; ++i)
+      s.set_source({i}, std::format("l{}.cpp", i), "#include \"late.h\"\n", std::format("l{}.o", i), dir.native_encoded_string());
+    s.set_program(program, {{{0}, {1}}, {}, "late"});
+    s.get<pl::Link>(program);
+    check(s.get<pl::TuFront>({0}).has_errors() && s.get<pl::TuFront>({1}).has_errors(),
+          std::format("each unit diagnoses its own class, on {} threads", threads));
+  }
+  // An enumerator named by qualified name in its own enumerator list ([dcl.enum]/6), and each
+  // unit's own class in its unnamed namespace ([namespace.unnamed]), whatever unit comes first.
+  std::ofstream(dir / "e.h", std::ios::binary | std::ios::trunc) << "enum E { a, b = E::a + 1 };\nenum class F : int { p, q };\nF g();\n";
+  const std::array<std::string, 2> texts{
+      "#include \"e.h\"\nnamespace { struct S { int x; int y; }; }\nint fa() { S s{1, 2}; return s.x + b; }\n",
+      "#include \"e.h\"\nnamespace { struct S { int z; }; }\nint fa();\nint main() { S s{30}; return s.z + fa(); }\n"};
+  for (bool swapped : {false, true})
+    for (unsigned threads : {1u, 8u}) {
+      engine::Pool pool(threads, 7);
+      pl::Session s(pool);
+      for (std::uint32_t i = 0; i < 2; ++i)
+        s.set_source({i}, std::format("n{}.cpp", i), texts[i ^ swapped], std::format("n{}.o", i), dir.native_encoded_string());
+      s.set_program(program, {{{0}, {1}}, {}, "named"});
+      const pl::Linked& l = s.get<pl::Link>(program);
+      check(!s.get<pl::TuFront>({0}).has_errors() && !s.get<pl::TuFront>({1}).has_errors() && l.errors.empty(),
+            std::format("enumerators in their own list and unnamed namespaces per unit, on {} threads{}", threads,
+                        swapped ? ", swapped" : ""));
+    }
+  fs::remove_all(dir);
+}
+
 }  // namespace
 
 int main() {
@@ -233,5 +336,6 @@ int main() {
   two_units();
   headers();
   pooled();
+  pooled_units();
   return ycxx::unit::result("unit.pipeline_incremental");
 }
