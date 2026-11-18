@@ -58,8 +58,8 @@ session that owns the issue wrote this document and the bookkeeping.
    at the new revision inside the daemon, so the client sees one answer. The quantum grows only
    while restarts make no progress, which rules out livelock. The policy chooses the revision a
    request is answered at, and never a value. (§4)
-5. **Inputs are provided on first fetch from the daemon's file table,** which changes only between
-   epochs. A batch is a set of dirty paths, re-stat'ed and re-hashed; a path no input cell knows is
+5. **Inputs are provided on first fetch from the daemon's file table,** keyed by absolute path
+   and changed only between epochs. A batch is a set of dirty paths, re-stat'ed and re-hashed; a path no input cell knows is
    dropped, which is how the build's own outputs fall out. (§5.1–§5.3)
 6. **A request starts only after every change made before it was sent is applied:** a cookie file
    on the watcher's queue marks the point, with a full rescan as the fallback. (§5.4)
@@ -119,7 +119,10 @@ Rejected:
 - **A Unix domain socket** in a per-user runtime directory created with mode 0700:
   `$XDG_RUNTIME_DIR/ycxx` on Linux, `$TMPDIR/ycxx-<uid>` on macOS, or `YCXX_RUNTIME_DIR`. The
   socket is `<scope-hash>-<build-hash>.sock`, where the scope hash is the hash of the root's real
-  path and the build hash is the hash of the ycxx binary that keys the persistent cache (§A7.1).
+  path and the build hash is the hash of the ycxx binary that keys the persistent cache (§A7.1),
+  each written as 16 hex digits. `sun_path` holds 104 bytes on macOS, and `$TMPDIR` alone is about
+  50: the client checks the length, and a path that does not fit is a fallback (§7.1) whose reason
+  `-v` and `ycxx ctl status` report.
   The daemon checks the peer's uid (`SO_PEERCRED` on Linux, `getpeereid` on macOS) and closes a
   connection from anyone else.
 - **Framing:** each message is a little-endian `u32` length, a `u16` message kind, then the body,
@@ -151,9 +154,14 @@ A connection carries one session, chosen by its first request after the handshak
 `compile` covers every action of the `c++` command line: linking, `-c`, `-fsyntax-only` and `-E`
 are arguments, parsed by the daemon with the code the in-process path uses. `env` is the closed
 list of environment variables the driver reads (`SDKROOT`, `DEVELOPER_DIR`, `CPATH`,
-`CPLUS_INCLUDE_PATH`, `SOURCE_DATE_EPOCH`, …), declared in one table that both paths read, so a
-variable the driver reads cannot be missing from the request. `build_time` is the client's clock,
-or `SOURCE_DATE_EPOCH` (§4.4).
+`CPLUS_INCLUDE_PATH`, `SOURCE_DATE_EPOCH`, and whatever later decides colour or line wrapping,
+such as whether stderr is a terminal), declared in one table that both paths read, so a variable
+the driver reads cannot be missing from the request. `build_time` is the client's clock (§4.4).
+
+**The request is self-contained.** The client expands `@file` response files (relative to its own
+working directory) and reads `-` (standard input, as in `echo | ycxx cxx -E -x c++ -`) before
+sending, and the bytes of `-` travel in the request. At admission the daemon makes every path
+argument absolute against `cwd` (§5.2).
 
 **The client writes the outputs.** The daemon answers with the bytes of every output file, and the
 client writes them with the in-process path's `write_file`, with its own working directory, umask
@@ -185,7 +193,8 @@ Each stopped request is respawned into the new epoch by the daemon. The client s
 - A restart loses only the cells in progress; every finished cell survives (§A4.2), so a restarted
   build continues where it stopped, and re-verifies what the batch could have changed.
 - `make -j` throughput is unaffected by its own outputs: `.o`, `.d` and temporary files never
-  become a batch (§5.3). A generated header is a real change, which a cold build would also see.
+  become a batch (§5.3), and the objects a link reads are not file-table entries (§5.2). A
+  generated header is a real change, which a cold build would also see.
 - An LSP edit applies at once, and its interactive request runs ahead of the restarted background
   build (§A4.4).
 
@@ -204,8 +213,13 @@ stored a single cell since its previous restart, and returns to the floor once e
 stored one.
 
 Continuous keystrokes or a stream of generated headers therefore cannot starve a build or one long
-cell (an optimizer leaf, a large function's code generation): the quantum eventually exceeds the
-cell's duration. With short cells the floor is the only delay. The clock is part of the policy and
+cell (a large function's code generation): the quantum eventually exceeds the cell's duration.
+With short cells the floor is the only delay.
+
+The idle optimizer's roots (§A8.2) neither double the quantum nor hold it up: any batch stops
+them, and they are respawned only when no client request is live and no batch is pending.
+Otherwise one long solver leaf, restarted by each keystroke, would push the quantum to tens of
+seconds and make every LSP edit and every compile wait for it. The clock is part of the policy and
 never of a value: it chooses only the revision a request is answered at, and §A4.3 is untouched.
 
 Rejected: a fixed grace period, which either livelocks a long cell or taxes every LSP edit.
@@ -228,19 +242,28 @@ revision and how many times the request was restarted (§8.1).
 - **Configuration** is not a global input: the command line, the environment table and the target
   are interned into the root of the request's prefixes (§B1.1). Concurrent requests with different
   configurations never touch each other's inputs.
-- **`build_time`** (§A1.1, §B9) stays one global input and never enters a key. When a request's
-  time, at `__TIME__`'s one-second resolution (or its `SOURCE_DATE_EPOCH`), differs from the
-  input's value:
+- **`build_time`** (§A1.1, §B9). A request whose environment sets `SOURCE_DATE_EPOCH` takes
+  `__DATE__` and `__TIME__` from it, and it is already interned in the configuration root:
+  `pp` reads the time through a transparent helper that answers from the configuration when it
+  has the variable, and fetches the global input otherwise. A reproducible build therefore never
+  sees another request's clock.
+
+  Clock-timed requests share one global input, `build_time`, which never enters a key. When such
+  a request's time, at `__TIME__`'s one-second resolution, differs from the input's value:
   - if nothing has fetched the input since it was last set, the daemon resets it in place, with
-    no new revision and no quiescence, through `Db::reset_unobserved<Q>(k, v) -> bool`. The cell
-    word carries an "observed since set" bit; a racing fetch sets it and makes the reset fail,
-    which falls to the next case. No frame and no stored cell depends on a value nobody read, so
-    §A4.3 holds; `changed_at` becomes the current revision, so earlier readers stay red.
+    no new revision and no quiescence, through `Db::reset_unobserved<Q>(k, v) -> bool`. An input
+    cell carries an "observed since set" flag. A fetch sets the flag before it reads the value;
+    a reset succeeds only if it finds the flag clear, and publishes the value and fingerprint
+    under the cell's claim, so a fetch never sees a torn value. A racing fetch makes the reset
+    fail, which falls to the next case. No frame and no stored cell depends on a value nobody
+    read, so §A4.3 holds; `changed_at` becomes the current revision, so earlier readers stay red.
+    Where the flag lives (the state word of §A1.6 has no spare bit) is the engine issue's choice.
   - otherwise the change joins the pending batch, admitted under the quantum (§4.2).
 
   Projects that never use `__DATE__` or `__TIME__` never pay a stop; one that does pays at most
   one per quantum while requests keep arriving. A request may be answered with a slightly later
-  second, which is still a time of translation. The comparison tiers of §8.2 set
+  second, which is still a time of translation. `build_time` has the `ambient` durability (below),
+  so a change walks only the cells that read it. The comparison tiers of §8.2 set
   `SOURCE_DATE_EPOCH`, so they compare exactly.
 
   Rejected: `build_time` in the request's root key (a repeated request of an unchanged TU would no
@@ -250,9 +273,10 @@ revision and how many times the request was restarted (§8.1).
 - **`opt_cache_snapshot`** (§A8.3) advances only inside a batch that is applied anyway, or when no
   client request is live; the idle optimizer's own roots do not count, and are stopped and
   restarted like any root. Between advances, idle results accumulate in the optimization cache,
-  invisible to the engine, so a build sees one stable snapshot. The snapshot has its own
-  durability, `snapshot`, between `editor` and `low`: an advance walks only the cells that read it
-  (the `best_available` chain), and a keystroke walks none of them. Rejected: advancing on every
+  invisible to the engine, so a build sees one stable snapshot. The snapshot has the durability
+  `ambient`, between `editor` and `low`, which it shares with `build_time`: an advance walks only
+  the cells that read one of them (the `best_available` chain, regions that use `__TIME__`), and a
+  keystroke walks none of them. Rejected: advancing on every
   idle result (a stop per result), and `low` durability (every advance after idle time would make
   the next build deep-verify the whole project).
 
@@ -277,12 +301,24 @@ stops in one cold build).
 
 ### 5.2 The file table
 
-Providers read the daemon's **file table**, never the disk directly. An entry maps a spelled path
-to its real path, its stat identity (device, inode, size, modification and change times), its
+Providers read the daemon's **file table**, never the disk directly. Its keys, like the keys of
+the file inputs, are **absolute paths**, lexically normalized but with symlinks kept: at admission
+the daemon makes every path argument and every `-I` directory absolute against the request's
+`cwd`. Two requests with the same argument vector run in different directories (recursive make:
+`cd a && ycxx cxx -c -I. x.cpp`, then the same in `b`) therefore never share a `file_text` or an
+`include_resolution`. The spelling a user wrote, which `__FILE__` and diagnostics show, is carried
+as data in the TU's arguments and in `include_resolution`'s answer, never in a key. An entry maps
+an absolute path to its real path, its stat identity (device, inode, size, modification and change times), its
 content fingerprint and its text handle, or to *absent*. An entry is filled on its first read
 (stat, read, hash) and changes only when a batch applies, between epochs. Every frame of an epoch
 therefore sees the same table. Negative lookups along include search paths are entries too:
 *absent*, with the nearest existing ancestor directory recorded for the watcher.
+
+Only files discovered while compiling get entries. Inputs the command line names that are not
+sources (objects, archives, linker scripts) are stat'ed and hashed at admission and interned by
+fingerprint into the request's root, with no entry and no watch: they can be enumerated up front,
+unlike headers, and otherwise every `.o` a build rewrites after its first link would become a
+batch that stops the world.
 
 The table is persisted with the cache (§7.5). It is the set of "every input file it knows about"
 that §A7.2 re-hashes on a restart.
@@ -290,8 +326,10 @@ that §A7.2 re-hashes on a restart.
 ### 5.3 A batch is a set of dirty paths
 
 Watcher events mark paths dirty; they carry no payload. Applying a batch, for each dirty path and
-its parent directory: re-stat; re-hash if the stat identity changed; `Db::set` only if the
-fingerprint changed (`set` already ignores an equal value). A dirty path is dropped when it has no
+its parent directory: re-stat and re-hash, and `Db::set` only if the fingerprint changed (`set`
+already ignores an equal value). Every dirty path with an entry is re-hashed, whether or not its
+stat identity changed: a same-size rewrite within one modification-time tick leaves the stat
+identity equal, and hashing costs little next to a stop. A dirty path is dropped when it has no
 file entry, and its parent has neither a `dir_entries` cell nor a negative `file_exists` entry.
 
 That one rule is how the build's own `.o`, `.d` and temporary files fall out, with no list of
@@ -308,8 +346,10 @@ daemon when the compile request arrives. When a request arrives, the daemon crea
 file** in its runtime directory, which is on the same FSEvents stream or inotify descriptor as the
 watched roots, and marks the request eligible once the cookie's event is dequeued: every event
 generated before it has been queued by then (Watchman documents this technique). Requests that
-arrive while a cookie is in flight share the next one. A root on another volume gets its own cookie
-in `<root>/.ycxx/`.
+arrive while a cookie is in flight share the next one. A root on another volume than the runtime
+directory gets its own cookies in `<root>/.ycxx-cookies/`, created with a `.gitignore` of `*` so it
+stays out of version control; events inside it never become batches. (`.ycxx` is §2's marker and
+is never written by the daemon.)
 
 The daemon falls back to a **full rescan** (stat every table entry and re-hash the changed ones, the
 §A7.2 procedure) on queue overflow (`IN_Q_OVERFLOW`; FSEvents' `MustScanSubDirs` or
@@ -325,11 +365,13 @@ program per request; it is kept only as the fallback.
   entry (a build directory with generated headers).
 - **Linux:** one inotify descriptor with one watch per directory that holds a table entry,
   positive or negative, plus the nearest existing ancestor of a missing directory; the watch moves
-  down when the directory appears. At `max_user_watches`, unwatched directories are stat-checked per
+  down when the directory appears. Files created in the new directory before its watch was added
+  produced no event (`mkdir inc/sub && cp x.h inc/sub/`, or a checkout), so adding a watch to a
+  directory that appeared marks every table entry beneath it dirty, in the same batch. At `max_user_watches`, unwatched directories are stat-checked per
   request instead, and `status` says so.
 - **Symlinks:** watches are on real directories. A reverse index maps a real path to the spelled
-  paths that reach it, and a change to a link's directory re-resolves its entries. Keys stay the
-  spelled path, as `__FILE__` requires.
+  absolute paths that reach it, and a change to a link's directory re-resolves its entries. Keys
+  stay the absolute path with its symlinks (§5.2).
 
 ## 6. Editor buffers and the LSP front
 
@@ -342,9 +384,16 @@ holds two **views**:
 - the **editor view**: new inputs `buffer(path) -> optional<text>` (absent when the file is not
   open) and `buffers_in(dir) -> sorted paths`.
 
-The preprocessor reads files only through transparent helpers `text(view, path)`, `exists(view,
-path)` and `entries(view, dir)`. In the editor view they fetch `buffer(path)` and fall back to the
-disk input when it is absent; `exists` is "a buffer is open or the disk has it"; `entries` is the
+Files are read only through transparent helpers `text(view, path)`, `exists(view, path)` and
+`entries(view, dir)`, and only from the question cells rooted at a view: `include_resolution` and
+the TU's own source. `pp`'s index is the content identity in `include_resolution`'s answer, so no
+trace-recorded leaf ever records a `buffer` or `buffers_in` dependency; if one did, a disk-view
+cell reusing that leaf would inherit the `editor` durability, and every keystroke would turn the
+build's shared leaves red. Debug builds assert that no such dependency appears under a disk-view
+prefix.
+
+In the editor view the helpers fetch `buffer(path)` and fall back to the disk input when it is
+absent; `exists` is "a buffer is open or the disk has it"; `entries` is the
 disk's entries plus `buffers_in`. Only the root of the prefixes, the configuration, gains a `view`
 field. Every prefix is rooted there, so `include_resolution(…, config)` and every contextual key
 inherit the view without a new dimension on each kind.
@@ -371,7 +420,7 @@ prefixes, and `tu(TU)` of the editor view. The duplicated part is small; the wor
 ### 6.3 The `editor` durability
 
 `buffer` and `buffers_in` get a new lowest durability, `editor`. The order becomes `editor <
-snapshot < low < medium < high` (`snapshot` is §4.4's). A keystroke bumps only
+ambient < low < medium < high` (`ambient` is §4.4's). A keystroke bumps only
 `last_changed[editor]`, so every disk-view cell stays green by the O(1) shortcut (§A1.4), and a
 build restarted by a keystroke pays for the stop and nothing else. A save sets `file_text`, which
 is `low`, as any other file change.
@@ -405,7 +454,8 @@ request needs the engine, so the client would only translate, and a tunnel keeps
 2. On `ENOENT` or `ECONNREFUSED`, take an exclusive `flock` on `<socket>.start` and connect again
    (another client may have started it meanwhile).
 3. Still absent: spawn `ycxx daemon --root <root>` detached (`setsid`, stdio to the daemon's log
-   in the runtime directory), passing the write end of a pipe. The daemon takes its lifetime lock
+   in the runtime directory, every other inherited descriptor closed, so a build tool's pipes and
+   make's jobserver are not held open for the daemon's life), passing the write end of a pipe. The daemon takes its lifetime lock
    (§7.3), binds, listens, writes one byte to the pipe and closes it. The client waits for that
    byte (end-of-file means the daemon failed to start), releases the start lock and connects.
 4. **Fallback:** if any step fails, if `YCXX_NO_DAEMON=1` is set, or under `ycxx cxx --no-daemon`,
@@ -428,7 +478,9 @@ its cost.
 ### 7.3 One daemon per scope
 
 The daemon holds an exclusive `flock` on `<scope-hash>-<build-hash>.lock` for its whole life. A
-second daemon for the same scope fails to take it and exits. The kernel releases the lock however
+second daemon for the same scope waits for it, for a bounded time (10 s), and exits if it does not
+get it. The wait covers a daemon that is exiting and still writing its cache: otherwise every
+compile started in that window would fall back to in-process. The kernel releases the lock however
 the holder dies, so a crash never leaves a stale lock; the next daemon unlinks a stale socket file
 after it takes the lock.
 
@@ -468,7 +520,8 @@ check it.
 
 Every `done` carries the revision it was answered at, the number of restarts, the inputs changed in
 the epochs it ran through, and the engine's `Stats` (executed, backdated, validated, durable, hits)
-as a delta since the last revision bump, per query kind in debug builds. `ycxx ctl status` reports
+counted **per root**: each frame knows its root, so a concurrent client or the idle optimizer
+does not show up in another request's counts. Debug builds break them down per query kind. `ycxx ctl status` reports
 the same totals, plus the watcher's state, the cache size, memory and the longest join latency.
 
 ### 8.2 The tests that prove the slice
@@ -477,11 +530,12 @@ the same totals, plus the watcher's state, the cache size, memory and the longes
   daemon on a private `YCXX_RUNTIME_DIR` and cache directory, writes state 0, runs the action
   through `ycxx cxx`, then writes each edit's files and runs it again. File writes and `ycxx cxx`
   are the whole protocol. The existing comparison with a cold run stands, and two checks are added:
-  an identical repeated request reports `executed == 0`, and an edited state reports fewer
-  executions than the cold run of that state. ycxx then lists the `incremental` feature.
+  an identical repeated request reports `executed == 0`, and an edited state reports no more
+  executions than the cold run of that state (a test may mark that it expects strictly fewer). ycxx then lists the `incremental` feature.
 - **Daemon versus in-process.** A driver tier runs `tests/own/slice` and `tests/own/smoke` twice,
   through a daemon and under `YCXX_NO_DAEMON=1`, and compares stdout, stderr, exit status and the
-  output bytes, at 1 thread and at `P`.
+  output bytes, at 1 thread and at `P`. It includes one case that compiles the same argument
+  vector from two working directories with different local headers.
 - **Process-level tests, a new suite `tests/daemon/`** (outside `tests/own`, which holds the
   spec-only language tests of DECISIONS §5.3):
   - an edit during a build: a slow TU and an edit that changes its output; the answer equals a cold
@@ -501,14 +555,18 @@ the same totals, plus the watcher's state, the cache size, memory and the longes
 
 - **Engine** (§A1, as built in `src/engine`): input providers (`Db::set_provider<Q>`), called
   where a missing input is a contract violation today; per-cell durability for input cells;
-  `durability_levels = 5`, `editor < snapshot < low < medium < high`; `Db::set` returning whether
-  the value changed; `Db::reset_unobserved` with an "observed since set" bit in the cell word
-  (§4.4); `Stats` per kind in debug builds and
-  as a per-epoch snapshot.
+  `durability_levels = 5`, `editor < ambient < low < medium < high`; `Db::set` returning whether
+  the value changed; `Db::reset_unobserved` with an "observed since set" flag on input cells
+  (§4.4); `Stats` counted per root, and per kind in debug builds.
 - **Scheduler** (#15): the epoch strand of §A4.1 with respawn of stopped requests into the new
   epoch, and the admission quantum's hook (a root's "stored a cell since its last restart").
 - **Preprocessor** (§B9): `buffer` and `buffers_in`, the transparent `text`, `exists` and `entries`
-  helpers, and `view` in the configuration root.
+  helpers called only from view-rooted question cells, `pp` indexed by the content identity that
+  `include_resolution` answers, the spelling as data, `view` in the configuration root, and the
+  time helper that prefers the configuration's `SOURCE_DATE_EPOCH` over `build_time`.
+- **Driver** (`client::cxx`, #63): path arguments made absolute against `cwd` at admission,
+  response files and `-` read by the client, and non-source inputs interned into the request's
+  root.
 - **Persistence** (#17): the file table in the cache, and the cache directory per scope.
 - **Harness** (#19): `ycxx ctl verify-table`, and `YCXX_THREADS` and the chaos seed in the daemon.
 
