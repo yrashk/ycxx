@@ -147,7 +147,18 @@ public:
   // ([stmt.ambig]: what can be a declaration is one).
   bool starts_declaration() {
     if (starts_decl_specifier(kind())) return true;
-    return is(Tk::identifier) && kind(1) != Tk::coloncolon && s_->class_name(name_of(tok())).has_value();
+    if (!is(Tk::identifier) || kind(1) == Tk::coloncolon || !s_->class_name(name_of(tok()))) return false;
+    // `T(args).f()` and `T{…}.m` are expressions; `T (x);` declares x ([stmt.ambig]).
+    if (kind(1) == Tk::l_brace) return false;
+    if (kind(1) != Tk::l_paren) return true;
+    u32 j = 1, depth = 0;
+    for (; i_ + j < end_; ++j) {
+      Tk k = kind(j);
+      if (k == Tk::l_paren) ++depth;
+      if (k == Tk::r_paren && --depth == 0) break;
+    }
+    Tk after = kind(j + 1);
+    return after != Tk::period && after != Tk::arrow && after != Tk::l_paren && after != Tk::l_square;
   }
 
   // What an elaborated-type-specifier naming no declared class does: at namespace scope it
@@ -313,7 +324,12 @@ public:
     bool unknown_bound = false;  // `[]`: in a parameter, or the outermost bound of a variable
   };
   struct Level {
-    std::vector<sema::Cv> pointers;
+    // ptr-operators, outermost first ([dcl.ptr], [dcl.ref]): `*` with its cv, `&` or `&&`.
+    struct PtrOp {
+      Tk op;
+      sema::Cv cv;
+    };
+    std::vector<PtrOp> pointers;
     std::unique_ptr<Level> inner;
     NameId name{};
     bool named = false;
@@ -342,19 +358,14 @@ public:
   Level level(bool abstract, bool& ok) {
     Level l;
     while (is(Tk::star) || is(Tk::amp) || is(Tk::ampamp)) {
-      if (!is(Tk::star)) {
-        s_->diag(pos(), Diag::not_supported, kind());
-        ok = false;
-        bump();
-        continue;
-      }
+      Tk op = kind();
       bump();
       int cv = 0;
-      while (is(Tk::kw_const) || is(Tk::kw_volatile)) {
+      while (op == Tk::star && (is(Tk::kw_const) || is(Tk::kw_volatile))) {
         cv |= is(Tk::kw_const) ? 1 : 2;
         bump();
       }
-      l.pointers.push_back(sema::Cv(cv));
+      l.pointers.push_back({op, sema::Cv(cv)});
     }
     if (!abstract && is(Tk::identifier) && kind(1) == Tk::coloncolon && kind(2) == Tk::identifier) {
       // A qualified declarator-id `C::name`, defining a member of class C ([class.mfct],
@@ -381,6 +392,7 @@ public:
       ok = false;
     }
     for (;;) {
+      if (is(Tk::l_paren) && !abstract && in_params_ == 0 && !params_ahead()) break;  // `T x(args)`: an initializer
       if (is(Tk::l_paren)) {
         bump();
         l.suffixes.push_back(parameters(ok));
@@ -431,11 +443,33 @@ public:
     return l;
   }
 
+  // Whether the `(` here begins a parameter-declaration-clause rather than an initializer
+  // ([dcl.ambig.res]: what can be a declaration is one).
+  bool params_ahead() {
+    Tk k = kind(1);
+    if (k == Tk::r_paren || k == Tk::ellipsis || starts_decl_specifier(k)) return true;
+    return k == Tk::identifier && kind(2) != Tk::coloncolon && s_->class_name(name_of(tok(1))).has_value();
+  }
+
   std::int64_t i64_of(sema::ConstId c) { return s_->world().values.as_signed(c); }
 
   // The type a declarator gives its name, built from the base type outwards ([dcl.meaning]).
   QualType build(const Level& l, QualType t, const Suffix*& fn, Declarator& d) {
-    for (sema::Cv cv : l.pointers) t = s_->types().add_cv(s_->types().pointer(t), cv);
+    for (const Level::PtrOp& p : l.pointers) {
+      // [dcl.ref]: no pointer to a reference, no reference to void.
+      if (s_->types().is_reference(t) && p.op == Tk::star) {
+        s_->diag(d.begin, Diag::invalid_array_element, t);
+        d.ok = false;
+        return t;
+      }
+      if (s_->types().is_void(t) && p.op != Tk::star) {
+        s_->diag(d.begin, Diag::void_variable, s_->no_name());
+        d.ok = false;
+        return t;
+      }
+      if (p.op == Tk::star) t = s_->types().add_cv(s_->types().pointer(t), p.cv);
+      else t = p.op == Tk::amp ? s_->types().lvalue_ref(t) : s_->types().rvalue_ref(t);
+    }
     for (auto s = l.suffixes.rbegin(); s != l.suffixes.rend(); ++s) {
       if (s->function) {
         // [dcl.fct]: a function cannot return a function or an array.
@@ -475,6 +509,23 @@ public:
     d.qualifier = l.qualifier;
     d.qualifier_at = l.qualifier_at;
     return t;
+  }
+
+  // `( parameter-declaration-clause ) cv-qualifier-seq` of a constructor or destructor, whose
+  // declarator-id the caller has read ([class.ctor], [class.dtor]).
+  Suffix function_suffix(bool& ok) {
+    if (!expect(Tk::l_paren)) {
+      ok = false;
+      return {};
+    }
+    Suffix s = parameters(ok);
+    int cv = 0;
+    while (is(Tk::kw_const) || is(Tk::kw_volatile)) {
+      cv |= is(Tk::kw_const) ? 1 : 2;
+      bump();
+    }
+    s.cv = sema::Cv(cv);
+    return s;
   }
 
   // parameter-declaration-clause ([dcl.fct]), after its `(`.
@@ -830,6 +881,24 @@ public:
     }
     case Tk::identifier: {
       NameId n = name_of(tok());
+      if ((kind(1) == Tk::l_paren || kind(1) == Tk::l_brace))
+        if (auto t = s_->class_name(n)) {
+          // `T(args)` or `T{…}` ([expr.type.conv]).
+          bump();
+          if (is(Tk::l_brace)) {
+            auto b = braced_init_list();
+            Ex r = s_->list_init(*t, *b);
+            return {r.id, begin, pos(), r.info};
+          }
+          bump();
+          std::vector<Ex> args;
+          if (!is(Tk::r_paren))
+            do args.push_back(assignment_expression());
+            while (accept(Tk::comma));
+          if (!expect(Tk::r_paren)) return {NodeId::none, begin, pos()};
+          Ex r = s_->functional_cast(*t, std::move(args), begin, pos());
+          return {r.id, begin, pos(), r.info};
+        }
       bump();
       if (is(Tk::coloncolon) && kind(1) == Tk::identifier) {
         // A qualified-id `C::name` ([expr.prim.id.qual]).
@@ -927,10 +996,9 @@ public:
     std::vector<ast::Child> cs;
     for (const Ex& st : stmts)
       if (st.ok()) cs.push_back(sema::Sema::at(st, begin));
-    return s_->node(ast::Compound{s_->builder().list(cs), no_cleanups()}, begin, pos());
+    return s_->node(ast::Compound{s_->builder().list(cs)}, begin, pos());
   }
 
-  ast::SeqId<ast::Cleanup> no_cleanups() { return s_->builder().seq(std::span<const ast::Cleanup>{}); }
 
   // A substatement that is not a compound-statement has its own block scope ([stmt.pre]).
   Ex substatement() {
@@ -959,8 +1027,8 @@ public:
         s_->diag(begin, brk ? Diag::break_outside_loop : Diag::continue_outside_loop);
         return {NodeId::none, begin, pos()};
       }
-      if (brk) return s_->node(ast::Break{no_cleanups()}, begin, pos());
-      return s_->node(ast::Continue{no_cleanups()}, begin, pos());
+      if (brk) return s_->node(ast::Break{}, begin, pos());
+      return s_->node(ast::Continue{}, begin, pos());
     }
     case Tk::kw_return: return return_statement();
     case Tk::kw_switch:
@@ -1231,7 +1299,7 @@ public:
       s_->diag(begin, Diag::return_missing_value);
     }
     if (!expect(Tk::semi)) skip_to_semi();
-    return s_->node(ast::Return{sema::Sema::at(value, begin), no_cleanups()}, begin, pos());
+    return s_->node(ast::Return{sema::Sema::at(value, begin)}, begin, pos());
   }
 
   // A block-scope simple-declaration ([stmt.dcl], [dcl.pre]): each declarator is a local
@@ -1296,7 +1364,11 @@ public:
           d.type = s_->types().array(d.type, n);
           s_->set_local_type(local, d.type);
         }
-        init = s_->list_init(d.type, *b);
+        // A reference from one element binds as `= e` does, extending a temporary ([class.temporary]/6).
+        if (s_->types().is_reference(d.type) && b->clauses.size() == 1 && !b->clauses[0].list && !b->clauses[0].designated)
+          init = s_->bind_reference(b->clauses[0].expr, d.type, b->clauses[0].begin, true);
+        else
+          init = s_->list_init(d.type, *b);
         // As for `= e` below: a constexpr local, or a const integral one with a constant
         // initializer, is usable in constant expressions ([expr.const]).
         bool usable_kind = sema::Types::is_const(d.type) && !sema::Types::is_volatile(d.type) &&
@@ -1310,6 +1382,9 @@ public:
         Ex e = assignment_expression();
         if (s_->types().is_array(d.type)) {
           s_->diag(dbegin, Diag::not_supported, Tk::l_square);  // array initialization
+        } else if (s_->types().is_reference(d.type)) {
+          // A temporary bound to the reference lives as long as it ([class.temporary]/6).
+          init = s_->bind_reference(e, d.type, e.begin, true);
         } else {
           init = s_->convert(e, d.type, e.begin);
           // A constexpr variable, or a const integral one with a constant initializer, is usable
@@ -1323,9 +1398,29 @@ public:
           }
         }
       } else if (is(Tk::l_paren)) {
-        s_->diag(pos(), Diag::not_supported, kind());
-        skip_to_semi();
-        return {NodeId::none, begin, pos()};
+        // Direct-initialization ([dcl.init.general]): `T x(args)`.
+        u32 open = pos();
+        bump();
+        std::vector<Ex> args;
+        if (!is(Tk::r_paren))
+          do args.push_back(assignment_expression());
+          while (accept(Tk::comma));
+        if (!expect(Tk::r_paren)) {
+          skip_to_semi();
+          return {NodeId::none, begin, pos()};
+        }
+        if (s_->types().is_class(d.type)) {
+          init = s_->has_user_ctors(d.type) || args.size() != 1 ? s_->construct(d.type, std::move(args), open, pos())
+                                                                 : s_->convert(args[0], d.type, open);
+        } else if (args.size() != 1 || s_->types().is_array(d.type)) {
+          s_->diag(open, Diag::not_supported, Tk::l_paren);  // a parenthesized list for a scalar or array
+        } else if (s_->types().is_reference(d.type)) {
+          init = s_->bind_reference(args[0], d.type, open, true);
+        } else {
+          init = s_->convert(args[0], d.type, open);
+        }
+      } else if (s_->types().is_reference(d.type)) {
+        s_->diag(d.name_at, Diag::reference_uninitialized);  // [dcl.ref]/5
       } else if (!s_->require_complete(d.type, d.name_at)) {
         // Default-initialization needs a complete object type ([dcl.init.general]).
       } else if (s_->has_member_inits(d.type)) {
@@ -1335,7 +1430,9 @@ public:
       } else if (sema::Types::is_const(d.type)) {
         s_->diag(d.name_at, Diag::const_uninitialized, d.name);
       }
-      Ex var = s_->node(ast::LocalVar{local, sema::Sema::at(init, dbegin)}, dbegin, pos());
+      // The destructor that ends the variable at scope exit ([stmt.dcl]); a reference has none.
+      ast::EntityId dtor = s_->types().is_reference(d.type) ? ast::EntityId::none : s_->destructor_of(d.type);
+      Ex var = s_->node(ast::LocalVar{local, sema::Sema::at(init, dbegin), dtor}, dbegin, pos());
       s_->set_local_decl(local, var.id);
       vars.push_back(var);
     } while (accept(Tk::comma));

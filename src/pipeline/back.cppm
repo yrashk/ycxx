@@ -68,6 +68,8 @@ class Constants {
 };
 
 // An entity the translation unit declares (or defines): what its symbol is made of.
+// A constructor or destructor is named by its kind, not an identifier (Itanium §5.1.4.3).
+enum class Special : std::uint8_t { none, constructor, destructor };
 struct Entity {
   EntityId id = EntityId::none;
   std::string name;  // its identifier
@@ -78,6 +80,7 @@ struct Entity {
   bool is_constexpr = false;
   std::optional<ast::Loc> at;  // its first declarator, for diagnostics
   EntityId scope = EntityId::none;  // the class of a member
+  Special special = Special::none;  // a constructor or destructor
 };
 
 // A function definition: what `function_ir(F)` reads (irgen::FunctionInput, without a thunk's
@@ -491,6 +494,10 @@ ir::TypeLayout LayoutType::run(engine::SyncCtx& cx, QualType q) {
     return {array, e.size * n, e.align, false, {}};
   }
   if (in.types.is<ast::TFunction>(c)) return {function, 0, 1, false, {}};
+  // A reference member is held as the address of its object ([dcl.ref]).
+  if (in.types.is<ast::TLRef>(c) || in.types.is<ast::TRRef>(c))
+    return {pointer, target.pointer_size, target.pointer_align, false,
+            in.canonical(in.types.is<ast::TLRef>(c) ? in.types.get<ast::TLRef>(c).referee : in.types.get<ast::TRRef>(c).referee)};
   if (auto r = class_layout(cx, c)) return {record, r->size, r->align, false, {}};
   return {};
 }
@@ -803,13 +810,16 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
     if (!used.contains(ir::raw(e.id))) continue;
     std::optional<QualType> scope;
     if (e.scope != EntityId::none) scope = in.intern_type(ast::TClass{e.scope});
+    // The complete-object constructor and destructor (C1, D1): with no virtual bases they are the
+    // base-object ones too (#136).
+    std::string name_ = e.special == Special::constructor ? "C1" : e.special == Special::destructor ? "D1" : e.name;
     auto name = symbol_name(
-        in, e.name, e.type, e.is_function, e.lang,
+        in, name_, e.type, e.is_function, e.lang,
         [](EntityId c) {
           const sema::World* w = universe().world;
           return w ? std::string(w->ins.names.spelling(w->entities.rec(c).name)) : std::string();
         },
-        scope);
+        scope, e.special != Special::none);
     if (!name) {
       errors.push_back({e.at, std::format("the name of '{}': {} is not supported yet", e.name, name.error())});
       continue;

@@ -59,10 +59,10 @@ Result build(Interners& in, int i) {
   std::array args{Child{sum, 2}};
   NodeId call = in.intern(Call{rv, g, {callee, 0}, {0, 1}}, 6, args);
   NodeId stmt = in.intern(ExprStmt{{call, 0}}, 7);
-  NodeId ret = in.intern(Return{{sum, 1}, in.intern_seq<Cleanup>({})}, 5);
+  NodeId ret = in.intern(Return{{sum, 1}}, 5);
   std::vector<Child> stmts{Child{stmt, 1}, Child{ret, 8}};
   if (long_one) stmts.resize(2600, Child{stmt, 1});
-  NodeId block = in.intern(Compound{{0, static_cast<u32>(stmts.size())}, in.intern_seq<Cleanup>({})}, 14, stmts);
+  NodeId block = in.intern(Compound{{0, static_cast<u32>(stmts.size())}}, 14, stmts);
   NodeId again = in.intern_stored(in.ast.get<Call>(call), 6);
   return {block, in.ast.fp(block), sugar, in.canonical(sugar), name, params, again};
 }

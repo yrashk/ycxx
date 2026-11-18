@@ -35,9 +35,9 @@ Tree build(Interners& in, bool reverse) {
   NodeId call = in.intern(Call{rv, f_e, {f, 0}, {0, 1}}, 6, args);
   NodeId stmt = in.intern(ExprStmt{{call, 0}}, 7);
   NodeId sum2 = in.intern(Binary{rv, BinaryOp::add, {x, 0}, {one, 2}}, 3);
-  NodeId ret = in.intern(Return{{sum2, 1}, in.intern_seq<Cleanup>({})}, 5);
+  NodeId ret = in.intern(Return{{sum2, 1}}, 5);
   std::array stmts{Child{stmt, 1}, Child{ret, 8}};
-  NodeId block = in.intern(Compound{{0, 2}, in.intern_seq<Cleanup>({})}, 14, stmts);
+  NodeId block = in.intern(Compound{{0, 2}}, 14, stmts);
   return {block, sum, sum2, call};
 }
 

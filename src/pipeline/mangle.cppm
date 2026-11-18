@@ -22,7 +22,8 @@ using ClassNames = std::function<std::string(ast::EntityId)>;
 // `scope` is the class type of a member, mangled as a <nested-name> (§5.1.5.3).
 std::expected<std::string, std::string> mangled_function(const ast::Interners& in, std::string_view name,
                                                          ast::QualType type, const ClassNames& classes = {},
-                                                         std::optional<ast::QualType> scope = std::nullopt);
+                                                         std::optional<ast::QualType> scope = std::nullopt,
+                                                         bool special = false);
 
 // <substitution> for the candidate at `index`: `S_`, then `S0_` … `SZ_`, `S10_` … (§5.1.10).
 std::string substitution(std::size_t index);
@@ -31,7 +32,8 @@ std::string substitution(std::size_t index);
 std::expected<std::string, std::string> symbol_name(const ast::Interners& in, std::string_view name, ast::QualType type,
                                                     bool is_function, ast::LangLinkage lang,
                                                     const ClassNames& classes = {},
-                                                    std::optional<ast::QualType> scope = std::nullopt);
+                                                    std::optional<ast::QualType> scope = std::nullopt,
+                                                    bool special = false);
 
 }  // namespace ycxx::pipeline
 
@@ -105,6 +107,15 @@ class Mangler {
         if (!p) return p;
         inner = "P" + *p;
         candidates_.push_back(full_key(bare));
+      } else if (in_.types.is<ast::TLRef>(in_.types.canon(bare)) || in_.types.is<ast::TRRef>(in_.types.canon(bare))) {
+        // <type> ::= R <type> | O <type>, a substitution candidate (§5.1.5.4).
+        if (auto s = find(full_key(bare))) return *s;
+        ast::QualType c = in_.types.canon(bare);
+        bool rv = in_.types.is<ast::TRRef>(c);
+        auto r = type(rv ? in_.types.get<ast::TRRef>(c).referee : in_.types.get<ast::TLRef>(c).referee);
+        if (!r) return r;
+        candidates_.push_back(full_key(bare));
+        return (rv ? "O" : "R") + *r;
       } else if (in_.types.is<ast::TClass>(in_.types.canon(bare))) {
         // <class-enum-type> ::= <name>: a global-namespace class is its <source-name>, a
         // substitution candidate (§5.1.5.3, §5.1.10).
@@ -150,7 +161,7 @@ class Mangler {
 
 std::expected<std::string, std::string> mangled_function(const ast::Interners& in, std::string_view name,
                                                          ast::QualType type, const ClassNames& classes,
-                                                         std::optional<ast::QualType> scope) {
+                                                         std::optional<ast::QualType> scope, bool special) {
   ast::QualType c = in.types.canon(type);
   if (!in.types.is<ast::TFunction>(c)) return std::unexpected("not a function type");
   auto f = in.types.get<ast::TFunction>(c);
@@ -162,7 +173,8 @@ std::expected<std::string, std::string> mangled_function(const ast::Interners& i
     auto prefix = m.class_name(*scope);
     if (!prefix) return prefix;
     std::string cv = std::string(std::to_underlying(f.cv) & 2 ? "V" : "") + (std::to_underlying(f.cv) & 1 ? "K" : "");
-    out = std::format("_ZN{}{}{}{}E", cv, *prefix, name.size(), name);
+    // A <ctor-dtor-name> (`C1`, `D1`) stands as it is; other names are <source-name>s.
+    out = special ? std::format("_ZN{}{}{}E", cv, *prefix, name) : std::format("_ZN{}{}{}{}E", cv, *prefix, name.size(), name);
   }
   auto params = in.seqs.elements(f.params);
   if (params.empty() && !f.variadic) out += "v";
@@ -177,7 +189,8 @@ std::expected<std::string, std::string> mangled_function(const ast::Interners& i
 
 std::expected<std::string, std::string> symbol_name(const ast::Interners& in, std::string_view name, ast::QualType type,
                                                     bool is_function, ast::LangLinkage lang,
-                                                    const ClassNames& classes, std::optional<ast::QualType> scope) {
+                                                    const ClassNames& classes, std::optional<ast::QualType> scope,
+                                                    bool special) {
   if (scope && !is_function) {
     // A static data member: <nested-name> ([class.static.data], §5.1.2).
     std::string n = classes ? classes(in.types.get<ast::TClass>(in.types.canon(*scope)).entity) : "";
@@ -185,7 +198,7 @@ std::expected<std::string, std::string> symbol_name(const ast::Interners& in, st
     return std::format("__ZN{}{}{}{}E", n.size(), n, name.size(), name);
   }
   if (!is_function || name == "main" || lang == ast::LangLinkage::c) return "_" + std::string(name);
-  auto m = mangled_function(in, name, type, classes, scope);
+  auto m = mangled_function(in, name, type, classes, scope, special);
   if (!m) return m;
   return "_" + *m;
 }
