@@ -100,9 +100,22 @@ reasoning; do not leave decisions only in issue threads.
 4. **Self-hosting** is a milestone, not a starting assumption: ycxx compiles libycxx and passes
    its suite first, then compiles itself, and the stage-2 and stage-3 binaries must be identical.
    From then on ycxx is its own bootstrap compiler, and its sources may use all of C++26,
-   including what GCC lacks. **Open until M8:** whether a GCC-buildable stage 0 is kept, so
-   that ycxx can be bootstrapped from scratch.
-5. **libycxx learns about ycxx through its single detection point** (`config.hpp`). Any builtin
+   including what GCC lacks.
+5. **The bootstrap chain.** ycxx can always be built from scratch, starting from GCC:
+   - **The anchor release.** When ycxx first compiles itself (M8), the version that GCC 16 can
+     still build is released and tagged as the bootstrap anchor. Its sources build with GCC, and
+     the ycxx it produces builds the next release.
+   - **Every later release is built by an earlier one.** Each release names the release that
+     builds it (normally its predecessor). The chain from the anchor to the newest release is
+     never broken. A source change that the previous release cannot compile waits for a
+     release that can, or lands with a `// BOOTSTRAP:` workaround (§3.2) until then.
+   - **CI walks the chain.** Each release is checked to build with its named predecessor, and
+     the anchor is checked to still build with the pinned GCC. The full chain from GCC to `main`
+     is rebuilt periodically, and the result must equal a normal build (stage-2 equals stage-3
+     at every link).
+   - **The anchor's GCC is pinned.** The exact GCC version and its flags are recorded with the
+     anchor. If that GCC becomes unbuildable, a new anchor is released instead.
+6. **libycxx learns about ycxx through its single detection point** (`config.hpp`). Any builtin
    libycxx needs from ycxx comes from libycxx's existing list of probes. If a new one is needed,
    it is added to libycxx upstream first.
 
