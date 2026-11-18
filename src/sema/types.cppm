@@ -333,8 +333,10 @@ enum class EntityKind : u8 {
 };
 
 // The structure behind an entity id (§4.3): for a function `(scope, name, canonical type)`, with
-// `::` as the scope of a function with C language linkage ([dcl.link]); for a variable with
-// external linkage `(scope, name)`; for an entity with internal linkage, also its first
+// `::` as the scope of a function with C language linkage ([dcl.link]); for a variable
+// `(scope, name, language linkage)`: redeclarations must agree on the language linkage
+// ([dcl.link]/6), and so its record never holds a stale one (#115); for an entity with internal
+// linkage, also its first
 // declaration. `scope` is the enclosing class, or none for the global namespace. A function
 // template's identity also has its template-head (`head`, a fingerprint of the parameters' kinds and
 // types); a specialization's is its template and its canonical template arguments (§B1.5).
@@ -366,6 +368,7 @@ public:
     if (r.kind == EntityKind::function || r.kind == EntityKind::constructor || r.kind == EntityKind::destructor ||
         r.kind == EntityKind::function_template)
       f = ast::mix(f, types_->fp(types_->canonical(r.type)));
+    if (r.kind == EntityKind::variable) f = ast::mix(f, std::to_underlying(r.lang));
     if (r.kind == EntityKind::function_template || r.kind == EntityKind::namespace_) f = ast::mix(f, r.head);
     if (r.templ != EntityId::none) {
       f = ast::mix(f, ins_->entities.fp(r.templ));
@@ -457,29 +460,50 @@ struct EnumRec {
   std::vector<EnumeratorRec> enumerators;
 };
 
-// Records are built privately by whoever analyses the definition and published once complete
-// (#156): units analysed at once on several workers each build the record of a class their header
-// defines, and the first publication wins. Until then a class has no record.
+// A unit's class and enumeration records (#115). Entities are program-wide (§4.3), but what
+// `class_def` says of one is a question of the unit that asks (query-engine.md §B1.4): units may
+// see different definitions (one session serving several programs, or an edit), so each unit has
+// its own table, built as it analyses the definitions, and gives it to the back end with its
+// definitions (`pipeline::FrontResult::shapes`). A record is built privately and published once
+// complete; until then a class has no record.
 class Classes {
 public:
   explicit Classes(ast::Interners& ins, Types& types) : ins_(&ins), types_(&types) {}
+  Classes(const Classes&) = delete;
 
   // `r`, a definition's record, unless one is published already; the published one.
-  const ClassRec& publish(EntityId c, ClassRec r) { return recs_.publish(std::to_underlying(c), std::move(r)); }
-  const EnumRec& publish_enum(EntityId e, EnumRec r) { return enums_.publish(std::to_underlying(e), std::move(r)); }
+  const ClassRec& publish(EntityId c, ClassRec r) {
+    auto [it, fresh] = recs_.try_emplace(std::to_underlying(c), std::move(r));
+    if (fresh) class_order_.push_back(c);
+    return it->second;
+  }
+  const EnumRec& publish_enum(EntityId e, EnumRec r) {
+    auto [it, fresh] = enums_.try_emplace(std::to_underlying(e), std::move(r));
+    if (fresh) enum_order_.push_back(e);
+    return it->second;
+  }
+  // The classes and enumerations with records, in the order they were published.
+  std::span<const EntityId> classes() const { return class_order_; }
+  std::span<const EntityId> enums() const { return enum_order_; }
   // A defined class's record.
   const ClassRec& rec(EntityId c) const
     pre(find(c) != nullptr)
   {
     return *find(c);
   }
-  const EnumRec* find_enum(EntityId e) const { return enums_.find(std::to_underlying(e)); }
+  const EnumRec* find_enum(EntityId e) const {
+    auto it = enums_.find(std::to_underlying(e));
+    return it == enums_.end() ? nullptr : &it->second;
+  }
   // An enumeration's underlying type; `int` until it is known.
   QualType underlying(EntityId e) const {
     const EnumRec* r = find_enum(e);
     return r && r->underlying ? *r->underlying : types_->builtin(Builtin::int_);
   }
-  const ClassRec* find(EntityId c) const { return recs_.find(std::to_underlying(c)); }
+  const ClassRec* find(EntityId c) const {
+    auto it = recs_.find(std::to_underlying(c));
+    return it == recs_.end() ? nullptr : &it->second;
+  }
   bool is_defined(EntityId c) const {
     const ClassRec* r = find(c);
     return r && r->defined;
@@ -505,17 +529,18 @@ public:
 private:
   ast::Interners* ins_;
   Types* types_;
-  ast::Published<ClassRec> recs_;
-  ast::Published<EnumRec> enums_;
+  std::map<u32, ClassRec> recs_;  // node-based: a published record never moves
+  std::map<u32, EnumRec> enums_;
+  std::vector<EntityId> class_order_, enum_order_;
 };
 
 // What the front end shares process-wide (§9.1): the AST core's interners, and sema's views.
+// Class and enumeration records are each unit's (`Classes`).
 struct World {
   ast::Interners& ins;
   Types types{ins};
   Values values{ins, types};
   Entities entities{ins, types};
-  Classes classes{ins, types};
 
   explicit World(ast::Interners& i) : ins(i) {
     types.class_name = [this](EntityId e) { return std::string(ins.names.spelling(entities.rec(e).name)); };
