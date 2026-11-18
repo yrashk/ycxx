@@ -155,6 +155,17 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
     `-ftime-report` before blaming reflection.
   - Learned on #2's spike.
 
+- **Check generated code against C, not against expectations you wrote.** The back end's first
+  plan widened every narrow argument to 32 bits in `lower`. Apple arm64 does that only for
+  register arguments; on the stack a `char` keeps one byte. That came out of rereading Apple's ABI
+  notes, not out of a test, and the plan's own golden tests would have agreed with the mistake.
+  - Do: link generated functions with a C harness compiled by the bootstrap compiler. The harness
+    computes the expected value with the same C expression and calls across the ABI both ways, with
+    more than 8 arguments and narrow types. One harness covered about 60 functions and thousands
+    of value pairs.
+  - Do: mutate the back end once (swap a pattern's form, flip a calling-convention flag) and see
+    the harness fail.
+  - Learned on #26/#28.
 - **Test a selection's invariant end to end, not just its helper.** The test driver's shard
   helper was unit-tested and correct, but main.py fed each stage a list that depended on earlier
   shards' picks, so shards skipped some tests and doubled others: CI could go green without
