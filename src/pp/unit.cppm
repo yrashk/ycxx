@@ -21,6 +21,7 @@ import ycxx.lex;
 import :spell;
 import :files;
 import :region;
+import :predefined;
 
 export namespace ycxx::pp {
 
@@ -55,7 +56,7 @@ public:
 
   // The predefined macros and the command line's, as the text of `<built-in>` ([cpp.predefined]).
   std::string builtin_text() const {
-    std::string s = "#define __cplusplus 202400L\n";
+    std::string s = predefined_text(*config.target);
     for (const auto& [name, value] : config.macros) {
       if (value) s += std::format("#define {} {}\n", name, *value);
       else s += std::format("#undef {}\n", name);

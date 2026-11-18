@@ -8,7 +8,8 @@
 //   :region  FileRegion (one file occurrence), questions, macros, Region (the TU flattened)
 //   :unit    the preprocessor of one TU and the session's region cache
 //   :tu      flattening, phases 5–6, and `-E` output
-//   :system  the build's system include directories
+//   :system  the build's system include directories and ycxx's version
+//   :predefined  the predefined macros ([cpp.predefined], DECISIONS §1.5)
 //
 // `pp(file)` is an engine query over the main file's text. The files it includes and the
 // configuration are read through the process's session (`session()`) until the engine has inputs
@@ -24,6 +25,7 @@ export import :region;
 export import :unit;
 export import :tu;
 export import :system;
+export import :predefined;
 
 export namespace ycxx::pp {
 
