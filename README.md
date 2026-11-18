@@ -31,8 +31,9 @@ in [GitHub issues](https://github.com/yrashk/ycxx/issues) and the
     out of the class, `const`, static), `this`, and static data members. Constructors and
     destructors (RAII: destructors run at every block exit, `return`, `break` and `continue`),
     temporaries, references, and overloading by exact match, promotion and conversion; scoped and
-    unscoped enumerations. Not yet: passing or returning a class by value, inheritance,
-    namespaces.
+    unscoped enumerations; namespaces (nested, inline and unnamed ones, qualified names,
+    `using namespace`, `using N::x;` in a block, aliases, members defined outside their
+    namespace). Not yet: passing or returning a class by value, inheritance.
   - Constant evaluation, by ycxx's own interpreter of its IR: `constexpr` and `consteval`
     functions and variables, `constinit`, `static_assert` and `if consteval`, with an error that
     says why an expression is not constant (overflow, an uninitialized read, a dangling pointer,
@@ -64,8 +65,8 @@ build/bin/ycxx cxx hello.cpp -o hello && ./hello
 
 **Not yet:**
 - `#embed`, and the standard library's headers: `<cstdio>` now preprocesses, but libycxx does
-  not yet know ycxx (yrashk/libycxx#17), and sema lacks namespaces.
-- Namespaces, inheritance and virtual functions, passing classes by value, and templates.
+  not yet know ycxx (yrashk/libycxx#17).
+- Inheritance and virtual functions, passing classes by value, and templates.
 - `if constexpr`, and taking the address of a variable in a namespace-scope initializer
   (`int* p = &g;` passes the front end but not code generation yet).
 - Exceptions.
