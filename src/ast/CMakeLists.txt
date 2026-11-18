@@ -12,4 +12,4 @@ target_sources(ycxxc_ast PUBLIC FILE_SET CXX_MODULES FILES
   red.cppm
   compact.cppm
   ast.cppm)
-target_link_libraries(ycxxc_ast PUBLIC ycxxc_options)
+target_link_libraries(ycxxc_ast PUBLIC ycxxc_hash ycxxc_options)

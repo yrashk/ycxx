@@ -82,9 +82,11 @@ one import `ycxx.ast`; unit tests in `tests/unit/ast` (run by ctest, see docs/TE
   - `tokens`, `items`, `entities`, `types` and `values` are placeholders that hold only
     fingerprints, until #18 and #33.
   - Single-threaded: sharing between workers is the engine's (#14).
-- **Fingerprint seam** (`fingerprint.cppm`): a stand-in hash. `ycxx.hash` (#14) has landed;
-  switching to it changes only that file plus `hash_into` for the AST handles, a follow-up on #32.
-  Nothing persists these fingerprints yet.
+- **Fingerprints** (`fingerprint.cppm`): a thin adapter over `ycxx.hash` (#14); `Fp128` is
+  `ycxx::Fp128`. Not done yet: ADL `hash_into` for the AST handles. Without it,
+  `ycxx::fingerprint(v)` hashes a handle by its number, so engine keys that hold AST handles must
+  not be fingerprinted that way. `hash_into` needs to reach the process-wide `Interners`, which
+  the engine has to provide.
 - **Frame builder** (`builder.cppm`): drafts in the frame's arena (a `std::pmr` resource).
   `commit(value)` interns what the value reaches, bottom-up, so abandoned drafts leave nothing
   (§9.3). Lists of records that hold nodes are drafts; other lists are interned eagerly.
