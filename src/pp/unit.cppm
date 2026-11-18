@@ -34,6 +34,9 @@ public:
       : files(host), build_time(now()), config(std::move(cfg)), config_fp(config.fingerprint()) {}
   Session(const Session&) = delete;
 
+  // Held by whoever reads or extends the session (`Pp`, rendering a diagnostic, `-E`), so engine
+  // workers can share it (#137). `Pp` runs without suspending, so it is never held across a wait.
+  std::mutex mutex;
   Spellings spellings;
   Files files;
   // `__DATE__` and `__TIME__` ([cpp.predefined]): the session's start, the same for all its TUs.

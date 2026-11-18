@@ -176,7 +176,10 @@ std::optional<obj::object> compile_unit(Done& d, const Request& r, const pp::Con
     return std::nullopt;
   }
   if (stop == Options::Stop::preprocess) {
-    auto [out, messages] = pp::preprocess_to_text(pp::session(), *text, path);
+    pp::Session& ps = pp::session_for(config);
+    std::unique_lock lock(ps.mutex);
+    auto [out, messages] = pp::preprocess_to_text(ps, *text, path);
+    lock.unlock();
     d.out += out;
     bool errors = false;
     for (const pp::Message& m : messages) {
@@ -238,8 +241,12 @@ Done run(const Request& r, pp::Host& host, pipeline::Session& session, const Sto
     return d;
   }
   const pp::Config config = pp::with_system_dirs(opts->pp);
-  pp::configure(config, host);
-  const pp::Session::Stats before = pp::session().stats;
+  pp::Session& ps = pp::configure(config, host);
+  auto stats = [&] {
+    std::lock_guard lock(ps.mutex);
+    return ps.stats;
+  };
+  const pp::Session::Stats before = stats();
   const engine::Stats engine_before = session.db().stats();
   bool failed = false;
   std::vector<pipeline::TuId> tus;
@@ -263,8 +270,9 @@ Done run(const Request& r, pp::Host& host, pipeline::Session& session, const Sto
     }
   }
   auto count = [&] {
-    d.report.regions_computed = pp::session().stats.computed - before.computed;
-    d.report.regions_reused = pp::session().stats.reused - before.reused;
+    const pp::Session::Stats after = stats();
+    d.report.regions_computed = after.computed - before.computed;
+    d.report.regions_reused = after.reused - before.reused;
     const engine::Stats now = session.db().stats();
     d.report.executed = now.executed - engine_before.executed;
     d.report.validated = now.validated - engine_before.validated;
