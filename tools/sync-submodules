@@ -1,0 +1,39 @@
+#!/bin/sh
+# Move every submodule to the commit this checkout pins (tools/build and tools/test run this
+# first). Exits 1 when a submodule with local changes is elsewhere.
+set -eu
+root=$(cd "$(dirname "$0")/.." && pwd)
+# Submodules must be at the commits this checkout pins: `git pull` does not move them, and a
+# stale deps/libycxx builds against the wrong standard library. A clean submodule that is not
+# checked out, or is at another commit, is moved to its pin. One with local changes at another
+# commit (libycxx work in progress) stops the build, unless YCXX_SUBMODULE_DRIFT=allow.
+short() { printf '%.11s' "$1"; }
+status=$(git -C "$root" submodule status --recursive)
+while IFS= read -r line; do
+  [ -n "$line" ] || continue
+  flag=$(printf '%.1s' "$line")
+  path=$(printf '%s\n' "$line" | awk '{print ($1 ~ /^[-+U ]?[0-9a-f]+$/) ? $2 : $1}')
+  pin=$(git -C "$root" ls-tree HEAD "$path" | awk '{print $3}')
+  case $flag in
+    -)
+      echo "build: $path is not checked out; checking out its pin $(short "$pin")" >&2
+      git -C "$root" submodule update --init -- "$path" ;;
+    +)
+      have=$(git -C "$root/$path" rev-parse HEAD)
+      if [ -z "$(git -C "$root/$path" status --porcelain)" ]; then
+        echo "build: $path was at $(short "$have"), not its pin $(short "$pin"); checking out the pin" >&2
+        git -C "$root" submodule update --init -- "$path"
+      elif [ "${YCXX_SUBMODULE_DRIFT:-}" = allow ]; then
+        echo "build: warning: $path is at $(short "$have") with local changes, not its pin $(short "$pin") (YCXX_SUBMODULE_DRIFT=allow)" >&2
+      else
+        echo "build: $path is at $(short "$have") with local changes, not its pin $(short "$pin")." >&2
+        echo "build: commit there and bump the pin, run 'git submodule update -- $path', or set YCXX_SUBMODULE_DRIFT=allow." >&2
+        exit 1
+      fi ;;
+    U)
+      echo "build: $path has a merge conflict in its pin; resolve it first" >&2
+      exit 1 ;;
+  esac
+done <<STATUS
+$status
+STATUS

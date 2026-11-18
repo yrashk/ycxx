@@ -184,6 +184,12 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
     v3 (`src/lex/LICENSE.unicode`), and have the generator check the versions agree.
   - Learned on #40.
 
+- **`git pull` leaves submodules where they were.** After a libycxx bump, a checkout whose
+  `deps/libycxx` was not updated built the old library and hit a GCC ICE that the bump had fixed.
+  - Do: `tools/build` and `tools/test` run `tools/sync-submodules` first, so the pin is enforced
+    rather than remembered.
+  - Learned on the α slice (#39), 2026-11-18.
+
 ## Evidence and tests
 
 - **Fuzz incremental == cold on every derived output, diagnostics included.** The engine's
