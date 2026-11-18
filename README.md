@@ -10,99 +10,65 @@ tool), recompute only what that change can affect.
 
 ## Status
 
-**Pre-0.1: the first end-to-end slice works** (updated 2026-11-18). The plan is in
-[DECISIONS.md](DECISIONS.md), what is true of the code in [STATUS.md](STATUS.md), and the work
-in [GitHub issues](https://github.com/yrashk/ycxx/issues) and the
+**Pre-0.1** (as of 2026-11-18). ycxx compiles a substantial subset of C++ (C-like code, classes,
+templates and constant evaluation) on macOS arm64, from source to a signed, running executable,
+with no external compiler, assembler or linker. It does not compile real programs yet: the
+standard library is out of reach. The plan is in [DECISIONS.md](DECISIONS.md), the details of
+the code in [STATUS.md](STATUS.md), and the work in
+[GitHub issues](https://github.com/yrashk/ycxx/issues) and the
 [roadmap](https://github.com/yrashk/ycxx/issues/12).
 
-**What works**, on macOS arm64 only:
-- `ycxx cxx a.cpp -o a` compiles a small C-like subset of C++ to a signed arm64 Mach-O
-  executable. ycxx's own lexer, parser and semantic analysis, L1 IR, AArch64 code generator and
-  Mach-O linker do the work, with no external compiler, assembler or linker.
-  - The subset: `int`, `long`, `unsigned`, `bool`, `char`, `void` and pointers; functions,
-    recursion and calls; locals and namespace-scope variables with constant initializers;
-    `if`, `while`, `do`, `for`, `break` and `continue`; the arithmetic, bitwise, shift,
-    comparison, logical, conditional and assignment operators; string literals; and
-    `extern "C"` calls into libSystem (`puts`, `putchar`, and `printf` with locals, arrays,
-    globals and more arguments than registers, up to 32).
-  - Structs and classes with data members (2026-11-18): `.` and `->`, pointers to and arrays of
-    structs, aggregate initialization (`S s = {1, 2};`, `S s{…}`, nested braces, brace elision,
-    designated initializers, `int a[] = {…}`), constant default member initializers, copies and
-    assignment, and namespace-scope structs with constant initializers. Member functions (in and
-    out of the class, `const`, static), `this`, and static data members. Constructors and
-    destructors (RAII: destructors run at every block exit, `return`, `break` and `continue`),
-    temporaries, references, and overloading by exact match, promotion and conversion; scoped and
-    unscoped enumerations; namespaces (nested, inline and unnamed ones, qualified names,
-    `using namespace`, `using N::x;` in a block, aliases, members defined outside their
-    namespace). Not yet: passing or returning a class by value, inheritance.
-  - Function and class templates (2026-11-18): templates at namespace scope with type and
-    integral non-type parameters and default arguments, template argument deduction from calls
-    (through class template specializations too), explicitly specified arguments
-    (`f<int>(x)`), overload resolution among templates and functions with partial ordering,
-    two-phase name lookup with argument-dependent lookup at the end of the translation unit, class
-    templates with member functions in and outside the class, constructors and destructors, and
-    instantiation on use, variable templates, explicit and partial specializations, with Itanium
-    names that match Clang's. Not yet: member and alias templates, parameter packs, concepts, and
-    a specialization used in two translation units of one program (its definitions are not coalesced yet,
-    [#124](https://github.com/yrashk/ycxx/issues/124)).
-  - Constant evaluation, by ycxx's own interpreter of its IR: `constexpr` and `consteval`
-    functions and variables, `constinit`, `static_assert` and `if consteval`, with an error that
-    says why an expression is not constant (overflow, an uninitialized read, a dangling pointer,
-    a call to a non-constexpr function, …). Constant array bounds can come from `const` locals.
-  - `-o`, `-c`, `-fsyntax-only` and `-std=c++26` are accepted. Errors are reported as
-    `file:line:col: error: …`, with exit status 1.
-- The preprocessor, in part (updated 2026-11-18):
-  - `#include` of your own headers (`"..."`, `<...>`, `-I`, `-isystem`, `-iquote`,
-    `#include_next`) and `#pragma once`;
-  - object-like and function-like macros (`#define`, `#undef`, `-D`, `-U`), with `#`, `##`,
-    `__VA_ARGS__` and `__VA_OPT__`;
-  - `#if` and the other conditionals, `#line`, `#error`, `#warning`, `_Pragma`, and the
-    predefined macros (`__ycxx__`, the target's, `__LINE__`, `__FILE__`, `__COUNTER__`, …);
-  - `ycxx cxx -E` prints what Clang's `-E` does.
-- A resident daemon, by default: `ycxx cxx` sends its command line to a per-project
-  `ycxx daemon`, starting one if needed (`YCXX_NO_DAEMON=1` or `--no-daemon` runs in-process).
-  The daemon watches the files it has read (FSEvents on macOS, inotify on Linux) and keeps one
-  engine session between commands: a repeated build re-runs nothing, and an edit re-runs only
-  what read the changed file, through code generation and the link (checked against a cold build
-  by the `.incr` tests). It serves concurrent requests at once (`make -j`), on a worker pool
-  sized by the `YCXX_THREADS` of the client that starts it; an edit that lands during a build restarts it where it stopped. Its answers
-  are byte for byte those of an in-process run, at any thread count, and an in-process run is
-  also the fallback on any failure. `ycxx ctl status` and `ycxx ctl shutdown` talk to it.
-- A language server (2026-11-18): an editor that runs `ycxx lsp` gets ycxx's diagnostics for
-  open files on open, change and save, through the daemon. Unsaved text, in the file or in a
-  header it includes, reaches the diagnostics and never a build. A file is checked with the
-  command line of the last `ycxx cxx` that built it through the daemon, else alone in its
-  directory. Not yet: go-to-definition (#170) and `compile_commands.json`
-  (#167).
-- The acceptance tests in `tests/own/slice` run with ycxx as the compiler in CI, and every
-  [draft example](tests/draft) is checked against Clang and GCC.
+### What you can do today
+
+**Compile and run programs.** `ycxx cxx a.cpp -o a` (also `-c`, `-fsyntax-only`, `-E`, `-I`,
+`-D`, `-std=c++26`) builds an executable with ycxx's own front end, IR, AArch64 code generator
+and Mach-O linker. It also links object files from Clang or GCC. Errors are reported as
+`file:line:col: error: …`.
 
 ```sh
 tools/build
 build/bin/ycxx cxx hello.cpp -o hello && ./hello
 ```
 
-**Not yet:**
-- `#embed`, and the standard library's headers: `<cstdio>` now preprocesses, but libycxx does
-  not yet know ycxx (yrashk/libycxx#17).
-- Inheritance and virtual functions, and passing classes by value.
-- `if constexpr`, and taking the address of a variable in a namespace-scope initializer
-  (`int* p = &g;` passes the front end but not code generation yet).
-- Exceptions.
-- The standard library.
-- Optimization (`-O`).
-- Linux and x86-64.
+**Language.** Programs can use:
+- the fundamental integer and character types, pointers, arrays, references and enumerations;
+  all statements and operators; functions, recursion and overloading;
+- classes: data and static members, member functions, constructors and destructors with RAII,
+  aggregate and designated initialization;
+- namespaces, typedefs and alias declarations, `using` declarations and directives;
+- templates: function, class and variable templates, deduction, partial ordering, explicit and
+  partial specializations, two-phase lookup, with Itanium names identical to Clang's;
+- casts, `sizeof`/`alignof` of non-class types, and `decltype`;
+- constant evaluation on ycxx's own interpreter: `constexpr`, `consteval`, `constinit`,
+  `static_assert` and `if consteval`, with errors that explain why something is not constant;
+- `extern "C"` functions from libSystem, including `printf` with integers, characters,
+  pointers and strings as arguments.
 
-Nothing beyond the subset above compiles, so neither real programs nor libycxx do yet.
+**Preprocessing.** All of translation phase 4: includes, object-like and function-like
+macros, conditionals, `_Pragma` and the predefined macros. `ycxx cxx -E` matches Clang's output.
 
-**In progress**, one slice per epic:
-- classes and the object model ([#86](https://github.com/yrashk/ycxx/issues/86));
-- templates and overload resolution: function, class and variable templates and their
-  specializations work; parameter packs and concepts are next
-  ([#88](https://github.com/yrashk/ycxx/issues/88));
-- including the standard headers: libycxx's compiler detection
-  ([yrashk/libycxx#17](https://github.com/yrashk/libycxx/issues/17)), then `<cstdio>`
-  through sema ([#133](https://github.com/yrashk/ycxx/issues/133)).
+**Incremental builds through a resident daemon.** `ycxx cxx` hands its work to a per-project
+`ycxx daemon` (`YCXX_NO_DAEMON=1` runs in-process), which watches the files it has read and keeps
+its analysis between commands. A repeated build re-runs nothing, and an edit re-runs only what
+it affects, through code generation and the link. The daemon serves concurrent requests on a
+thread pool, and its output is byte for byte that of a cold, in-process build.
+
+**Editor diagnostics.** `ycxx lsp` is a language server that reports ycxx's errors as you type,
+through the daemon, without unsaved text ever reaching a build.
+
+### Not yet
+
+- The standard library and its headers. `<cstdio>` preprocesses but does not yet pass sema.
+- Inheritance and virtual functions, passing classes by value, `sizeof` of a class.
+- Parameter packs, concepts, member and alias templates, `if constexpr`.
+- Floating-point arithmetic, exceptions, and optimization (`-O`).
+- Go-to-definition in the language server.
+- Linux and x86-64 output.
+
+### In progress
+
+- Standard headers, starting with `<cstdio>` ([#133](https://github.com/yrashk/ycxx/issues/133)).
+- Templates: parameter packs, then concepts ([#88](https://github.com/yrashk/ycxx/issues/88)).
 
 Next come exceptions ([#89](https://github.com/yrashk/ycxx/issues/89)).
 
