@@ -40,6 +40,7 @@ struct DeclSpec {
   bool is_constexpr = false;
   bool is_consteval = false;
   bool is_constinit = false;
+  bool is_typedef = false;  // [dcl.typedef]: the declarators declare typedef-names
   // An elaborated-type-specifier ([dcl.type.elab]): the class it names, and where its name is.
   bool elaborated = false;
   NameId class_name{};
@@ -259,12 +260,16 @@ public:
       case Tk::kw_constexpr: once(d.is_constexpr, k); break;
       case Tk::kw_consteval: once(d.is_consteval, k); break;
       case Tk::kw_constinit: once(d.is_constinit, k); break;
+      case Tk::kw_typedef: once(d.is_typedef, k); break;
       case Tk::kw_enum:
         if (kind(1) == Tk::identifier && kind(2) != Tk::l_brace && kind(2) != Tk::colon) {
           // An elaborated-type-specifier naming an enumeration ([dcl.type.elab]).
           bump();
-          auto t = s_->class_name(name_of(tok()), true);
-          if (!t || !s_->types().is_enum(*t)) {
+          auto t = s_->class_name(name_of(tok()), true, false);
+          if (!t && s_->class_name(name_of(tok()), true)) {  // [dcl.type.elab]/2
+            s_->diag(pos(), Diag::elaborated_typedef, name_of(tok()));
+            d.ok = false;
+          } else if (!t || !s_->types().is_enum(*t)) {
             s_->diag(pos(), Diag::not_a_type, name_of(tok()));
             d.ok = false;
           } else {
@@ -302,7 +307,12 @@ public:
         bump();
         NameId n = name_of(tok());
         bump();
-        auto t = s_->class_name(n, true);
+        auto t = s_->class_name(n, true, false);
+        if (!t && s_->class_name(n, true)) {  // [dcl.type.elab]/2
+          s_->diag(at + 1, Diag::elaborated_typedef, n);
+          d.ok = false;
+          continue;
+        }
         if (!t && declare_class) t = declare_class(n);
         if (!t) {
           s_->diag(at + 1, Diag::not_a_type, n);
@@ -359,6 +369,11 @@ public:
   done:
     if (d.is_static && d.is_extern) {  // [dcl.stc]/1
       s_->diag(d.begin, Diag::storage_class_conflict);
+      d.ok = false;
+    }
+    // [dcl.typedef]/1: `typedef` is combined only with type-specifiers.
+    if (d.is_typedef && (d.is_static || d.is_extern || d.is_inline || d.is_constexpr || d.is_consteval || d.is_constinit)) {
+      s_->diag(d.begin, Diag::conflicting_specifiers, Tk::kw_typedef);
       d.ok = false;
     }
     if (int(d.is_constexpr) + int(d.is_consteval) + int(d.is_constinit) > 1) {  // [dcl.spec]/2
@@ -1536,6 +1551,21 @@ public:
         expect(Tk::semi);
         return s_->node(ast::ExprStmt{}, begin, pos());
       }
+      if (kind(1) == Tk::identifier && kind(2) == Tk::equal) {
+        // An alias-declaration in a block ([dcl.typedef]/2): `using T = type-id;`.
+        bump();
+        NameId n = name_of(tok());
+        u32 at = pos();
+        bump();
+        bump();
+        if (auto t = type_id()) s_->local_type_alias(n, *t, at);
+        else {
+          skip_to_semi();
+          return {NodeId::none, begin, pos()};
+        }
+        expect(Tk::semi);
+        return s_->node(ast::ExprStmt{}, begin, pos());
+      }
       if (kind(1) == Tk::identifier || kind(1) == Tk::coloncolon) {
         // A using-declaration in a block ([namespace.udecl]): `using N::x;`.
         bump();
@@ -1853,6 +1883,20 @@ public:
       s_->diag(begin, Diag::consteval_not_function);
       skip_to_semi();
       return {NodeId::none, begin, pos()};
+    }
+    if (spec.is_typedef) {
+      // Block-scope typedef-names ([dcl.typedef]).
+      do {
+        Declarator d = declarator(spec.type, false);
+        if (!d.ok || !spec.ok || !d.named || d.unknown_bound) {
+          if (d.ok && d.unknown_bound) s_->diag(d.name_at, Diag::not_supported, Tk::l_square);
+          skip_to_semi();
+          return {NodeId::none, begin, pos()};
+        }
+        s_->local_type_alias(d.name, d.type, d.name_at);
+      } while (accept(Tk::comma));
+      expect(Tk::semi);
+      return s_->node(ast::ExprStmt{}, begin, pos());
     }
     std::vector<Ex> vars;
     do {

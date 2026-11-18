@@ -37,7 +37,6 @@ draft/basic/basic.scope.scope-3.reject.cpp errors elsewhere: '(' not supported y
 draft/basic/basic.scope.scope-4.accept.cpp 'namespace' not supported yet
 draft/basic/basic.splice-1.reject.cpp errors elsewhere: preprocessing directives are not supported yet
 draft/basic/basic.start.term-1.accept.cpp 'struct' not supported yet
-draft/basic/basic.type.qualifier-1.accept.cpp 'typedef' not supported yet
 draft/basic/basic.types.general-1.reject.cpp errors elsewhere: 'class' not supported yet
 draft/basic/class.member.lookup-1.accept.cpp 'struct' not supported yet
 draft/basic/class.member.lookup-2.reject.cpp errors elsewhere: 'struct' not supported yet
@@ -166,7 +165,6 @@ draft/cpp/cpp.module-2.reject.cpp 'export' is not supported yet (modules in sema
 draft/cpp/cpp.module-3.accept.cpp 'export' is not supported yet (modules in sema)
 draft/cpp/cpp.module-4.accept.cpp 'export' is not supported yet (modules in sema)
 draft/cpp/cpp.module-5.accept.cpp 'export' is not supported yet (modules in sema)
-draft/cpp/cpp.pre-2.accept.cpp 'using' not supported yet
 draft/cpp/cpp.replace.general-1.accept.cpp macro redefined with a different replacement list: the example's last four definitions are invalid, as Clang and GCC agree (tests/draft/DISAGREEMENTS.md)
 draft/dcl/basic.namespace.general-1.accept.cpp preprocessing directives are not supported yet
 draft/dcl/dcl.align-1.reject.cpp errors elsewhere: 'struct' not supported yet
@@ -175,7 +173,6 @@ draft/dcl/dcl.ambig.res-1.accept.cpp 'struct' not supported yet
 draft/dcl/dcl.ambig.res-2.reject.cpp errors elsewhere: 'template' not supported yet
 draft/dcl/dcl.ambig.res-3.reject.cpp errors elsewhere: 'class' not supported yet
 draft/dcl/dcl.array-1.accept.cpp 'float' not supported yet
-draft/dcl/dcl.array-2.accept.cpp 'typedef' not supported yet
 draft/dcl/dcl.array-3.reject.cpp errors elsewhere: 'struct' not supported yet
 draft/dcl/dcl.attr.annotation-2.accept.cpp '[' not supported yet
 draft/dcl/dcl.attr.annotation-3.accept.cpp 'template' not supported yet
@@ -201,8 +198,6 @@ draft/dcl/dcl.fct-1.reject.cpp errors elsewhere: preprocessing directives are no
 draft/dcl/dcl.fct-12.accept.cpp 'template' not supported yet
 draft/dcl/dcl.fct-4.reject.cpp errors elsewhere: preprocessing directives are not supported yet
 draft/dcl/dcl.fct-5.reject.cpp errors elsewhere: preprocessing directives are not supported yet
-draft/dcl/dcl.fct-6.accept.cpp 'typedef' not supported yet
-draft/dcl/dcl.fct-8.reject.cpp errors elsewhere: 'typedef' not supported yet
 draft/dcl/dcl.fct.def.coroutine-2.accept.cpp preprocessing directives are not supported yet
 draft/dcl/dcl.fct.def.default-1.reject.cpp errors elsewhere: 'struct' not supported yet
 draft/dcl/dcl.fct.def.default-2.accept.cpp 'struct' not supported yet
@@ -251,7 +246,6 @@ draft/dcl/dcl.init.ref-5.reject.cpp errors elsewhere: 'struct' not supported yet
 draft/dcl/dcl.init.ref-6.reject.cpp errors elsewhere: 'struct' not supported yet
 draft/dcl/dcl.init.string-1.accept.cpp '[' not supported yet
 draft/dcl/dcl.link-2.accept.cpp 'typedef' not supported yet
-draft/dcl/dcl.link-3.accept.cpp 'typedef' not supported yet
 draft/dcl/dcl.link-4.reject.cpp errors elsewhere: 'namespace' not supported yet
 draft/dcl/dcl.link-5.reject.cpp errors elsewhere: 'double' not supported yet
 draft/dcl/dcl.meaning.general-1.reject.cpp errors elsewhere: 'namespace' not supported yet
@@ -260,7 +254,6 @@ draft/dcl/dcl.meaning.general-3.reject.cpp errors elsewhere: 'namespace' not sup
 draft/dcl/dcl.pre-1.accept.cpp '[' not supported yet
 draft/dcl/dcl.pre-3.reject.cpp errors elsewhere: preprocessing directives are not supported yet
 draft/dcl/dcl.pre-6.reject.cpp errors elsewhere: preprocessing directives are not supported yet
-draft/dcl/dcl.ref-1.reject.cpp errors elsewhere: 'typedef' not supported yet
 draft/dcl/dcl.ref-3.accept.cpp '&' not supported yet
 draft/dcl/dcl.ref-4.accept.cpp 'typedef' not supported yet
 draft/dcl/dcl.spec.auto.general-1.reject.cpp errors elsewhere: 'auto' not supported yet
@@ -271,7 +264,6 @@ draft/dcl/dcl.spec.auto.general-5.accept.cpp 'auto' not supported yet
 draft/dcl/dcl.spec.auto.general-6.accept.cpp 'template' not supported yet
 draft/dcl/dcl.spec.auto.general-7.reject.cpp errors elsewhere: 'auto' not supported yet
 draft/dcl/dcl.spec.auto.general-8.accept.cpp 'template' not supported yet
-draft/dcl/dcl.spec.general-1.reject.cpp errors elsewhere: 'typedef' not supported yet
 draft/dcl/dcl.stc-2.reject.cpp errors elsewhere: 'struct' not supported yet
 draft/dcl/dcl.stc-3.reject.cpp errors elsewhere: 'class' not supported yet
 draft/dcl/dcl.struct.bind-1.reject.cpp errors elsewhere: 'struct' not supported yet
@@ -283,7 +275,6 @@ draft/dcl/dcl.type.class.deduct-2.reject.cpp errors elsewhere: preprocessing dir
 draft/dcl/dcl.type.decltype-1.accept.cpp '&&' not supported yet
 draft/dcl/dcl.type.elab-1.accept.cpp 'enum' not supported yet
 draft/dcl/dcl.type.splice-1.reject.cpp errors elsewhere: preprocessing directives are not supported yet
-draft/dcl/dcl.typedef-1.accept.cpp 'typedef' not supported yet
 draft/dcl/dcl.typedef-2.reject.cpp errors elsewhere: 'using' not supported yet
 draft/dcl/dcl.typedef-3.reject.cpp errors elsewhere: 'struct' not supported yet
 draft/dcl/dcl.typedef-4.accept.cpp 'typedef' not supported yet
@@ -391,10 +382,8 @@ draft/expr/expr.ref-1.accept.cpp preprocessing directives are not supported yet
 draft/expr/expr.ref-2.accept.cpp 'struct' not supported yet
 draft/expr/expr.reflect-1.reject.cpp errors elsewhere: preprocessing directives are not supported yet
 draft/expr/expr.reflect-2.reject.cpp errors elsewhere: preprocessing directives are not supported yet
-draft/expr/expr.reflect-3.reject.cpp errors elsewhere: 'namespace' not supported yet
 draft/expr/expr.reflect-4.reject.cpp errors elsewhere: preprocessing directives are not supported yet
 draft/expr/expr.sizeof-1.accept.cpp preprocessing directives are not supported yet
-draft/expr/expr.type-1.accept.cpp 'typedef' not supported yet
 draft/expr/expr.type.conv-1.accept.cpp 'struct' not supported yet
 draft/lex/lex.ext-2.reject.cpp errors elsewhere: preprocessing directives are not supported yet
 draft/lex/lex.ext-3.reject.cpp errors elsewhere: '' not supported yet
@@ -626,7 +615,6 @@ own/classes/s1-elaborated.run.cpp block-scope elaborated type specifier (#117)
 own/classes/s1-locals-scopes.run.cpp local classes (#117)
 own/classes/s2-constexpr-members.run.cpp classes in constant evaluation (#25)
 own/templates/f1-deduce-function.run.cpp function_ir: a call through a pointer to function is not supported yet (#24)
-incremental/smoke/struct-members.incr the daemon keeps a struct's members from before an edit and rejects the edited state (#115)
 own/templates/c2-constexpr-members.run.cpp constexpr constructors (#157) and class objects in constant evaluation (#25)
 own/templates/c2-dependent-members.run.cpp aggregate initialization of a reference member: function_ir rejects the bound glvalue, for any class (#157)
 own/templates/c2-distinct-types.reject.cpp a namespace-scope reference bound to a variable is not a constant initializer yet, for any class (#101)

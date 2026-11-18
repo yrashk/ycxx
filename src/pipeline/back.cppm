@@ -107,6 +107,23 @@ struct Variable {
   std::optional<ast::Loc> at;  // its declarator, for diagnostics
 };
 
+// The classes and enumerations a unit defines, as `layout` reads them: a class's non-static data
+// members' types in declaration order, an enumeration's underlying type. Each unit's own, from
+// its front end (#115): entities are program-wide, but one session may see different definitions
+// of one (several programs, or an edit), and the records follow the unit's source.
+struct ClassShape {
+  EntityId entity = EntityId::none;
+  std::vector<QualType> fields;
+};
+struct EnumShape {
+  EntityId entity = EntityId::none;
+  QualType underlying{};
+};
+struct Shapes {
+  std::vector<ClassShape> classes;  // in order of definition
+  std::vector<EnumShape> enums;
+};
+
 // A translation unit's definitions and declarations, in the order of their items.
 struct TranslationUnit {
   std::string name;  // the object's name, for diagnostics
@@ -270,31 +287,15 @@ struct [[=engine::input{engine::Durability::high}]] OptLevel {
 
 // ---------------------------------------------------------------------------------------------
 // `layout` (AST design Part D) for `lower`: sizes, alignments, subobjects and constant values on
-// the target. Cheap queries over the interners; a string literal object's address is an entity of
-// its own, named by the object's fingerprint.
+// the target. A string literal object's address is an entity of its own, named by the object's
+// fingerprint.
 
-struct [[=engine::cheap]] LayoutType {
-  using Key = QualType;
-  using Value = ir::TypeLayout;
-  static Value run(engine::SyncCtx& cx, QualType q);
-};
-struct LayoutStepKey {
-  QualType type{};
-  ir::PathStep step{};
-  bool operator==(const LayoutStepKey&) const = default;
-};
-struct [[=engine::cheap]] LayoutStep {
-  using Key = LayoutStepKey;
-  using Value = ir::SubObject;
-  static Value run(engine::SyncCtx& cx, LayoutStepKey k);
-};
 // A class's layout: its size and alignment, and its non-static data members' offsets and types.
 struct ClassLayout {
   std::uint64_t size = 0;
   std::uint32_t align = 1;
   std::vector<ir::SubObject> fields;
 };
-std::optional<ClassLayout> class_layout(engine::SyncCtx& cx, QualType c);
 
 struct ConstLayout {
   std::int64_t bits = 0;
@@ -313,13 +314,17 @@ struct StringUse {
   EntityId entity = EntityId::none;
 };
 
-// `layout` as `lower` reads it (ir::layout_source), through the cells above; records the string
-// literal objects whose addresses it gave, in order of first use.
+// `layout` as `lower` reads it (ir::layout_source): types from the interners and the unit's
+// shapes (its classes' members and enumerations' underlying types, #115), constants through the
+// cell above. Records the string literal objects whose addresses it gave, in order of first use.
 class QueryLayout {
  public:
-  explicit QueryLayout(engine::SyncCtx& cx) : cx_(&cx) {}
-  ir::TypeLayout type(QualType q) const { return cx_->fetch<LayoutType>(q); }
-  ir::SubObject step(QualType q, ir::PathStep s) const { return cx_->fetch<LayoutStep>({q, s}); }
+  QueryLayout(engine::SyncCtx& cx, const Shapes& shapes) : cx_(&cx) {
+    for (const ClassShape& c : shapes.classes) classes_.emplace(std::to_underlying(c.entity), &c);
+    for (const EnumShape& e : shapes.enums) enums_.emplace(std::to_underlying(e.entity), e.underlying);
+  }
+  ir::TypeLayout type(QualType q) const;
+  ir::SubObject step(QualType q, ir::PathStep s) const;
   ir::ConstValue constant(ConstId c) const {
     ConstLayout v = cx_->fetch<LayoutConstant>(c);
     if (!v.base) return v.bits;
@@ -329,7 +334,11 @@ class QueryLayout {
   std::span<const StringUse> strings() const { return strings_; }
 
  private:
+  std::optional<ClassLayout> class_layout(QualType c) const;
+
   engine::SyncCtx* cx_;
+  std::map<std::uint32_t, const ClassShape*> classes_;
+  std::map<std::uint32_t, QualType> enums_;
   mutable std::vector<StringUse> strings_;
 };
 
@@ -346,6 +355,12 @@ struct FnKey {
 struct TuUnit {
   using Key = TuId;
   using Value = TranslationUnit;
+  static engine::query_task<Value> run(engine::Ctx& cx, TuId tu);
+};
+// The unit's classes and enumerations alone: an edit elsewhere in the unit stops here.
+struct UnitShapes {
+  using Key = TuId;
+  using Value = Shapes;
   static engine::query_task<Value> run(engine::Ctx& cx, TuId tu);
 };
 
@@ -488,7 +503,7 @@ Bind::~Bind() { bound() = old_; }
 
 // ------------------------------------------------------------------------------------- layout
 
-ir::TypeLayout LayoutType::run(engine::SyncCtx& cx, QualType q) {
+ir::TypeLayout QueryLayout::type(QualType q) const {
   using enum ir::TypeKind;
   ast::Interners& in = *universe().in;
   const ast::Target& target = *universe().target;
@@ -504,7 +519,7 @@ ir::TypeLayout LayoutType::run(engine::SyncCtx& cx, QualType q) {
     return {pointer, target.pointer_size, target.pointer_align, false, in.canonical(ast::pointee_of(in, c))};
   if (in.types.is<ast::TArray>(c)) {
     auto a = in.types.get<ast::TArray>(c);
-    ir::TypeLayout e = cx.fetch<LayoutType>(a.elem);
+    ir::TypeLayout e = type(a.elem);
     std::uint64_t n = a.bound == ConstId::none ? 0 : in.values.get<ast::VInt>(a.bound).bits.lo;
     return {array, e.size * n, e.align, false, {}};
   }
@@ -513,28 +528,27 @@ ir::TypeLayout LayoutType::run(engine::SyncCtx& cx, QualType q) {
   if (in.types.is<ast::TLRef>(c) || in.types.is<ast::TRRef>(c))
     return {pointer, target.pointer_size, target.pointer_align, false,
             in.canonical(in.types.is<ast::TLRef>(c) ? in.types.get<ast::TLRef>(c).referee : in.types.get<ast::TRRef>(c).referee)};
-  if (auto r = class_layout(cx, c)) return {record, r->size, r->align, false, {}};
+  if (auto r = class_layout(c)) return {record, r->size, r->align, false, {}};
   // An enumeration is laid out as its underlying type ([dcl.enum]/8).
-  if (in.types.is<ast::TEnum>(c) && universe().world)
-    return cx.fetch<LayoutType>(universe().world->classes.underlying(in.types.get<ast::TEnum>(c).entity));
+  if (in.types.is<ast::TEnum>(c))
+    if (auto it = enums_.find(std::to_underlying(in.types.get<ast::TEnum>(c).entity)); it != enums_.end()) return type(it->second);
   return {};
 }
 
 // A class's layout (Itanium C++ ABI §2.4, [class.mem]): each non-static data member at the next
 // offset its alignment allows, in declaration order; the size rounded up to the alignment; an
-// empty class has size 1. Its members are what sema's class table says (`class_def`), when units
-// come from source; none otherwise.
-std::optional<ClassLayout> class_layout(engine::SyncCtx& cx, QualType c) {
+// empty class has size 1. Its members are the unit's shape of it, when units come from source;
+// none otherwise.
+std::optional<ClassLayout> QueryLayout::class_layout(QualType c) const {
   ast::Interners& in = *universe().in;
-  const sema::World* w = universe().world;
-  if (!w || !in.types.is<ast::TClass>(c)) return std::nullopt;
-  const sema::ClassRec* r = w->classes.find(in.types.get<ast::TClass>(c).entity);
-  if (!r || !r->defined) return std::nullopt;
+  if (!in.types.is<ast::TClass>(c)) return std::nullopt;
+  auto it = classes_.find(std::to_underlying(in.types.get<ast::TClass>(c).entity));
+  if (it == classes_.end()) return std::nullopt;
   ClassLayout out;
   std::uint64_t at = 0;
-  for (const sema::FieldRec& f : r->fields) {
-    QualType t = in.canonical(f.type);
-    ir::TypeLayout m = cx.fetch<LayoutType>(t);
+  for (QualType f : it->second->fields) {
+    QualType t = in.canonical(f);
+    ir::TypeLayout m = type(t);
     at = (at + m.align - 1) / m.align * m.align;
     out.fields.push_back({at, t});
     at += m.size;
@@ -544,15 +558,15 @@ std::optional<ClassLayout> class_layout(engine::SyncCtx& cx, QualType c) {
   return out;
 }
 
-ir::SubObject LayoutStep::run(engine::SyncCtx& cx, LayoutStepKey k) {
+ir::SubObject QueryLayout::step(QualType q, ir::PathStep s) const {
   ast::Interners& in = *universe().in;
-  QualType c = in.types.canon(k.type);
-  if (k.step.step == ir::Step::elem && in.types.is<ast::TArray>(c)) {
+  QualType c = in.types.canon(q);
+  if (s.step == ir::Step::elem && in.types.is<ast::TArray>(c)) {
     QualType e = in.canonical(in.types.get<ast::TArray>(c).elem);
-    return {k.step.index * cx.fetch<LayoutType>(e).size, e};
+    return {s.index * type(e).size, e};
   }
-  if (k.step.step == ir::Step::field)
-    if (auto r = class_layout(cx, c); r && k.step.index < r->fields.size()) return r->fields[k.step.index];
+  if (s.step == ir::Step::field)
+    if (auto r = class_layout(c); r && s.index < r->fields.size()) return r->fields[s.index];
   return {};
 }
 
@@ -588,10 +602,11 @@ engine::query_task<FunctionSource> FunctionSourceQ::run(engine::Ctx& cx, FnKey k
 // `Constants`, declarations from the function's source.
 class UnitFacts : public irgen::TypeFacts {
  public:
-  UnitFacts(const FunctionSource& src) : TypeFacts(*universe().in, *universe().target), src_(&src) {
-    enum_underlying = [](EntityId e) {
-      const sema::World* w = universe().world;
-      return w ? w->classes.underlying(e) : ast::builtin(*universe().in, ast::Builtin::int_);
+  UnitFacts(const FunctionSource& src, const Shapes& shapes) : TypeFacts(*universe().in, *universe().target), src_(&src) {
+    enum_underlying = [&shapes](EntityId e) {
+      for (const EnumShape& s : shapes.enums)
+        if (s.entity == e) return s.underlying;
+      return ast::builtin(*universe().in, ast::Builtin::int_);
     };
   }
   ConstId string_address(ConstId c) { return universe().consts->address_of(c); }
@@ -605,7 +620,8 @@ static_assert(irgen::Facts<UnitFacts>);
 
 engine::query_task<Generated> FunctionGen::run(engine::Ctx& cx, FnKey k) {
   const FunctionSource& src = co_await cx.fetch<FunctionSourceQ>(k);
-  UnitFacts facts(src);
+  const Shapes& shapes = co_await cx.fetch<UnitShapes>(k.tu);
+  UnitFacts facts(src, shapes);
   const FunctionDef& d = src.def;
   irgen::FunctionInput input{d.entity, d.decl, d.body, d.item, d.body_offset};
   input.this_type = d.this_type;
@@ -628,7 +644,7 @@ engine::query_task<ir::FunctionDebug> FunctionDebug::run(engine::Ctx& cx, FnKey 
 engine::query_task<Lowered> Lower::run(engine::Ctx& cx, FnKey k) {
   const FunctionIrValue& f = co_await cx.fetch<FunctionIr>(k);
   if (!f.body) co_return Lowered{std::nullopt, {}, f.error};
-  QueryLayout layout(cx);
+  QueryLayout layout(cx, co_await cx.fetch<UnitShapes>(k.tu));
   auto l2 = ir::lower(*f.body, k.fn, layout);
   if (!l2) {
     // Only an error needs positions.
@@ -782,8 +798,9 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
 
   // Variables: their initial bytes, by what they hold ([basic.start.static]).
   std::vector<aarch64::DataDef> data;
+  const Shapes& shapes = co_await cx.fetch<UnitShapes>(id);
   for (const Variable& v : tu.variables) {
-    QueryLayout layout(cx);
+    QueryLayout layout(cx, shapes);
     auto b = initial_bytes(in, layout, v.type, v.init);
     use(layout.strings());
     if (!b) {

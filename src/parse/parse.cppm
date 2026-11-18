@@ -122,9 +122,11 @@ public:
   std::optional<ast::DeclSema> decl_sema(DeclId d);
   const Result<ast::BodySema>& analyze_body(u32 item);
   // `class_def(C)` (ast.md §3.6) of the class item `item`: the records of its members, each its
-  // own item, analysed at the class's prefix (§4.2). It also fills the world's class table, which
-  // member lookup and the layout read until #33 has them.
+  // own item, analysed at the class's prefix (§4.2). It also fills this unit's class table
+  // (`classes`), which member lookup and the layout read until #33 has them.
   const Result<ast::ClassDef>& class_def(u32 item);
+  // The records of the classes and enumerations this unit has analysed.
+  const sema::Classes& classes() const { return classes_; }
   // This unit's declaration of member `e` in its class, once the class is analysed here.
   std::optional<DeclId> member_decl(EntityId e) const {
     auto it = member_decls_.find(std::to_underlying(e));
@@ -150,7 +152,7 @@ public:
     bool inside = item > d && item <= last_member(d);
     if ((item < d) || (item == d && !own) || (inside && !body)) return false;
     class_def(d);
-    return w_->classes.is_defined(c);
+    return classes_.is_defined(c);
   }
   // The last item nested in `k`, or `k` (items are in preorder).
   u32 last_member(u32 k) const {
@@ -221,9 +223,11 @@ public:
       const items::Item& it = items_->items[j];
       if (in_class_[j] || (ns_of_[j] != path && eff_ns_[j] != path)) continue;
       for (const items::DeclName& n : it.names)
-        // A scoped enumeration's enumerators are in its own scope ([dcl.enum]/11).
+        // A scoped enumeration's enumerators are in its own scope ([dcl.enum]/11); the declarators
+        // after its braces are not.
         if (n.name == name && !(n.flags & items::name_flag::friend_) &&
-            !(it.kind == ItemKind::enum_def && n.ordinal > 0 && !(n.flags & items::name_flag::enumerator)))
+            !(it.kind == ItemKind::enum_def && n.ordinal > 0 && !(n.flags & items::name_flag::enumerator) &&
+              it.begin + n.offset < it.brace_end))
           r.push_back({ids_[j], ast::make_decl_ord(ast::DeclClass::syntactic, n.ordinal)});
     }
     for (const Directive& d : directives_)
@@ -500,9 +504,10 @@ private:
   std::vector<std::optional<Result<ast::ClassDef>>> class_cells_;
   std::map<u32, u32> class_items_;     // by class entity: its defining item
   std::map<u32, EntityId> class_entities_;  // by class item: the class it defines
-  // By member function or static data member entity: its declaration in this unit's class. The
-  // class's record is shared by every unit that defines it, its items are not (#156).
+  // By member function or static data member entity: its declaration in this unit's class, an
+  // item of this unit (#156).
   std::map<u32, DeclId> member_decls_;
+  sema::Classes classes_{w_->ins, w_->types};  // this unit's class and enumeration records (#115)
   // The enumeration whose enumerator list is being analysed, and its record so far.
   std::pair<EntityId, const sema::EnumRec*> defining_enum_{EntityId::none, nullptr};
   std::map<u32, ast::DeclSema> class_heads_;  // by class item: the class's record, for its members
@@ -603,6 +608,7 @@ private:
 class AtItem final : public sema::Questions {
 public:
   AtItem(Program& p, u32 item, bool self) : from(p.ns_of(item)), p_(&p), item_(item), self_(self) {}
+  const sema::Classes& classes() override { return p_->classes(); }
   const sema::EnumRec* defining_enum(EntityId e) override {
     return p_->defining_enum_.first == e ? p_->defining_enum_.second : nullptr;
   }
@@ -673,6 +679,7 @@ private:
 class AtInstantiation final : public sema::Questions {
 public:
   AtInstantiation(Program& p, u32 item) : p_(&p), item_(item), at_(p, item, true) {}
+  const sema::Classes& classes() override { return p_->classes(); }
   std::vector<DeclId> visible_decls(ast::NameId name, std::span<const EntityId> directives = {}) override {
     return at_.visible_decls(name, directives);
   }
@@ -883,6 +890,18 @@ private:
       if (!ps_.expect(Tk::semi)) bad();
       return;
     }
+    // An alias-declaration ([dcl.typedef]/2): `using T = type-id;`.
+    if (ps_.is(Tk::kw_using) && ps_.kind(1) == Tk::identifier && ps_.kind(2) == Tk::equal) {
+      ps_.bump();
+      NameId n = ps_.name_of(ps_.tok());
+      u32 at = ps_.pos();
+      ps_.bump();
+      ps_.bump();
+      auto t = ps_.type_id();
+      if (!t || !declare_alias(n, at, *t)) return bad();
+      if (!ps_.expect(Tk::semi)) bad();
+      return;
+    }
     if (ps_.qualified_ahead()) {
       u32 next = 0;
       auto sc = ps_.nested_name(0, next);
@@ -934,6 +953,59 @@ private:
     }
   }
 
+  // A typedef-name or alias-declaration at namespace scope ([dcl.typedef]). In its scope it may
+  // only redeclare a typedef-name, class or enumeration as the type it already is (/5, /6).
+  bool declare_alias(NameId name, u32 at, QualType type) {
+    sema::Types& types = s_.types();
+    auto clashes = [&](const ast::DeclSema& o) {
+      bool same_type = (o.kind == ast::DeclKind::type_alias || o.kind == ast::DeclKind::class_ || o.kind == ast::DeclKind::enum_) &&
+                       types.canonical(o.type) == types.canonical(type);
+      return !same_type;
+    };
+    for (DeclId p : q_.visible_decls(name))
+      if (auto ds = p_->decl_sema(p); ds && ds->entity != EntityId::none && same_scope(*ds) && clashes(*ds)) {
+        s_.diag(at, Diag::conflicting_declaration, name);
+        return false;
+      }
+    for (const auto& o : s_.own)
+      if (o.name == name && clashes(o.sema)) {
+        s_.diag(at, Diag::conflicting_declaration, name);
+        return false;
+      }
+    ast::DeclSema sem = class_decl(s_.world().entities.entity({sema::EntityKind::type_alias, name, {}, LangLinkage::cxx,
+                                                                 ast::Linkage::none, {}, ns_entity()}),
+                                   false);
+    sem.kind = ast::DeclKind::type_alias;
+    sem.type = type;
+    sem.linkage = ast::Linkage::none;
+    decls_.push_back(sem);
+    s_.own.push_back({name, sem});
+    p_->declared(sem, k_);
+    return true;
+  }
+
+  // `typedef class-specifier X …;` with an unnamed class or enumeration: X names it for linkage
+  // purposes ([dcl.typedef]/9), and so is its name here; the declarator after the braces.
+  std::optional<std::pair<NameId, u32>> typedef_name_after_braces() {
+    u32 back = it_->begin + ps_.pos();  // `seek` takes a region index, `pos` is in the item
+    ps_.seek(it_->brace_end);
+    std::optional<std::pair<NameId, u32>> r;
+    if (ps_.is(Tk::identifier)) r = std::pair(ps_.name_of(ps_.tok()), ps_.pos());
+    ps_.seek(back);
+    return r;
+  }
+
+  // Whether a typedef-name of this scope names `n` as another type than `t`, which a class or
+  // enumeration named `n` would clash with ([basic.scope.scope]/4, [dcl.typedef]/6).
+  // With no type (a class template's name), any typedef-name of that name clashes ([temp.pre]/7).
+  bool alias_clash(NameId n, std::optional<QualType> t) {
+    for (DeclId p : q_.visible_decls(n))
+      if (auto ds = p_->decl_sema(p); ds && ds->kind == ast::DeclKind::type_alias && same_scope(*ds) &&
+                                      (!t || s_.types().canonical(ds->type) != s_.types().canonical(*t)))
+        return true;
+    return false;
+  }
+
   // The entity of the namespace-scope class named `n` (§4.3: scope, name).
   EntityId class_entity(NameId n) {
     return s_.world().entities.entity({sema::EntityKind::class_, n, {}, LangLinkage::cxx, ast::Linkage::external, {}, ns_entity()});
@@ -961,7 +1033,7 @@ private:
     t.head = head_fp(head);
     EntityId templ = s_.world().entities.entity(t);
     std::vector<ast::TemplateArg> own;
-    sema::Templates tt(s_.world());
+    sema::Templates tt(s_.world(), p_->classes_);
     for (const ast::TemplateParamSema& p : head)
       own.push_back(p.kind == ast::TemplateArgKind::type
                         ? tt.type_arg(p.type)
@@ -1022,19 +1094,21 @@ private:
       template_ = true;
     }
     u32 at = ps_.pos();
+    bool td = ps_.accept(Tk::kw_typedef);  // `typedef class-specifier declarators;` ([dcl.typedef])
     Tk key = ps_.kind();
     if (key == Tk::kw_union || (key != Tk::kw_struct && key != Tk::kw_class)) {
-      s_.diag(at, Diag::not_supported, key);  // unions, and specifiers before the class-key
+      s_.diag(ps_.pos(), Diag::not_supported, key);  // unions, and other specifiers before the class-key
       return bad();
     }
     ps_.bump();
-    if (!ps_.is(Tk::identifier)) {
+    auto named = td ? typedef_name_after_braces() : std::nullopt;
+    if (!ps_.is(Tk::identifier) && !named) {
       s_.diag(ps_.pos(), Diag::not_supported, ps_.kind());  // unnamed classes, attributes
       return bad();
     }
-    NameId name = ps_.name_of(ps_.tok());
-    u32 name_at = ps_.pos();
-    ps_.bump();
+    NameId name = ps_.is(Tk::identifier) ? ps_.name_of(ps_.tok()) : named->first;
+    u32 name_at = ps_.is(Tk::identifier) ? ps_.pos() : named->second;
+    if (ps_.is(Tk::identifier)) ps_.bump();
     if (!ps_.is(Tk::l_brace)) {
       s_.diag(ps_.pos(), Diag::not_supported, ps_.kind());  // base classes, `final`
       return bad();
@@ -1045,6 +1119,10 @@ private:
         s_.diag(name_at, Diag::class_redefinition, name);
         return bad();
       }
+    if (template_ ? alias_clash(name, std::nullopt) : alias_clash(name, s_.types().class_type(class_entity(name)))) {
+      s_.diag(name_at, Diag::conflicting_declaration, name);
+      return bad();
+    }
     ast::DeclSema sem = template_ ? class_template_decl(name) : class_decl(class_entity(name), true);
     decls_.push_back(sem);
     s_.own.push_back({name, sem});
@@ -1058,6 +1136,7 @@ private:
     spec.begin = at;
     spec.type = sem.type;
     spec.has_type = true;
+    spec.is_typedef = td;
     do {
       parse::Declarator d = ps_.declarator(spec.type, false);
       if (!d.ok || !d.named || !declare(spec, d, LangLinkage::cxx, false, false)) {
@@ -1074,15 +1153,21 @@ private:
   void enum_definition(EntityId cls) {
     sema::Types& types = s_.types();
     u32 at = ps_.pos();
+    bool td = cls == EntityId::none && ps_.accept(Tk::kw_typedef);  // `typedef enum … { … } E;`
+    if (!ps_.is(Tk::kw_enum)) {
+      s_.diag(ps_.pos(), Diag::not_supported, ps_.kind());
+      return bad();
+    }
     ps_.bump();
     bool scoped = ps_.accept(Tk::kw_class) || ps_.accept(Tk::kw_struct);
-    if (!ps_.is(Tk::identifier)) {
+    auto named = td ? typedef_name_after_braces() : std::nullopt;
+    if (!ps_.is(Tk::identifier) && !named) {
       s_.diag(ps_.pos(), Diag::not_supported, ps_.kind());  // unnamed enumerations
       return bad();
     }
-    NameId name = ps_.name_of(ps_.tok());
-    u32 name_at = ps_.pos();
-    ps_.bump();
+    NameId name = ps_.is(Tk::identifier) ? ps_.name_of(ps_.tok()) : named->first;
+    u32 name_at = ps_.is(Tk::identifier) ? ps_.pos() : named->second;
+    if (ps_.is(Tk::identifier)) ps_.bump();
     std::optional<QualType> fixed;
     if (ps_.accept(Tk::colon)) {
       // [dcl.enum]/2: a fixed underlying type, an integral type.
@@ -1106,6 +1191,10 @@ private:
     EntityId e = s_.world().entities.entity(
         {sema::EntityKind::enum_, name, {}, LangLinkage::cxx, ast::Linkage::external, {}, cls != EntityId::none ? cls : ns_entity()});
     QualType t = types.enum_type(e);
+    if (cls == EntityId::none && alias_clash(name, t)) {
+      s_.diag(name_at, Diag::conflicting_declaration, name);
+      return bad();
+    }
     // Built here and published once complete (#156); the list sees it as it grows.
     sema::EnumRec er{scoped, fixed.has_value(), fixed.value_or(s_.builtin(sema::Builtin::int_)), {}};
     p_->defining_enum_ = {e, &er};
@@ -1189,18 +1278,23 @@ private:
                                                                                                                  : Builtin::long_;
       er.underlying = s_.builtin(u);
     }
+    // Past the closing brace an enumerator has the enumeration's type ([dcl.enum]/5), in the
+    // declarators that follow too.
+    for (auto& o : s_.own)
+      if (o.sema.kind == ast::DeclKind::enumerator && s_.world().entities.rec(o.sema.entity).scope == e) o.sema.type = t;
     for (std::size_t i = 0; i < er.enumerators.size(); ++i) {
       er.enumerators[i].value = s_.world().values.integer(*er.underlying, sema::u64(values[i]));
       p_->set_constant(er.enumerators[i].entity, er.enumerators[i].value, k_);
     }
     p_->defining_enum_ = {EntityId::none, nullptr};
-    s_.world().classes.publish_enum(e, std::move(er));
+    p_->classes_.publish_enum(e, std::move(er));
     ps_.seek(it_->brace_end);
     if (ps_.accept(Tk::semi)) return;
     DeclSpec spec;
     spec.begin = at;
     spec.type = t;
     spec.has_type = true;
+    spec.is_typedef = td;
     do {
       parse::Declarator d = ps_.declarator(spec.type, false);
       if (!d.ok || !d.named || cls != EntityId::none || !declare(spec, d, LangLinkage::cxx, false, false)) {
@@ -1367,7 +1461,7 @@ private:
     for (const parse::Param& p : fs.params) ps.push_back(p.type);
     QualType type = s_.types().function(s_.builtin(sema::Builtin::void_), ps, fs.variadic, LangLinkage::cxx, fs.cv);
     // Complete here: this unit has analysed the class, so it knows the members' declarations.
-    const sema::ClassRec* cr = q_.is_complete(c) ? s_.world().classes.find(c) : nullptr;
+    const sema::ClassRec* cr = q_.is_complete(c) ? p_->classes_.find(c) : nullptr;
     const sema::MemberDeclRec* m = nullptr;
     if (cr)
       for (const sema::MemberDeclRec& r : cr->members)
@@ -1482,7 +1576,7 @@ private:
       return false;
     }
     if (!s_.require_complete(*t, d.qualifier_at)) return false;
-    const sema::ClassRec* cr = s_.world().classes.find(s_.types().class_of(*t));
+    const sema::ClassRec* cr = p_->classes_.find(s_.types().class_of(*t));
     // A dependent class other than the current instantiation: a partial specialization's
     // member ([temp.spec.partial.member]), not supported yet (#88).
     if (!cr) {
@@ -1659,6 +1753,18 @@ private:
   bool declare(const DeclSpec& spec, parse::Declarator d, LangLinkage lang, bool explicit_lang,
                bool is_function_def) {
     sema::Types& types = s_.types();
+    if (spec.is_typedef) {
+      if (is_function_def) {  // [dcl.typedef]/1: a typedef declares no function definition
+        s_.diag(spec.begin, Diag::typedef_definition);
+        return false;
+      }
+      if (d.qualified || d.unknown_bound) {  // [dcl.typedef]; arrays of unknown bound are not supported yet
+        if (d.qualified) s_.diag(d.name_at, Diag::conflicting_declaration, d.name);
+        else s_.diag(d.name_at, Diag::not_supported, Tk::l_square);
+        return false;
+      }
+      return declare_alias(d.name, d.name_at, d.type);
+    }
     u32 ord = static_cast<u32>(decls_.size());
     // `T a[] = {…}`: the bound from the list ([dcl.array]/8), parsed here and used below.
     std::unique_ptr<sema::Braced> early;
@@ -1839,7 +1945,7 @@ private:
       s_.current_class = s_.world().entities.rec(sem.entity).scope;
     } else if (!prior.empty()) {
       const ast::DeclSema& p = prior.back();
-      if ((p.kind == ast::DeclKind::function) != fn) {
+      if ((p.kind == ast::DeclKind::function) != fn || p.kind == ast::DeclKind::type_alias) {
         s_.diag(d.name_at, Diag::conflicting_declaration, d.name);
         return false;
       }
@@ -2119,15 +2225,15 @@ const Result<ast::ClassDef>& Program::class_def(u32 item) {
   std::vector<sema::MemberDeclRec>& statics = c.statics;
   std::vector<std::pair<NameId, QualType>>& nested = c.nested;
   if (cls && *cls != EntityId::none) {
-    // Every unit that defines the class builds its record, and synthesizes the special members
-    // its own object needs; the first record published wins (#156).
+    // Every unit that defines the class builds its own record (#115), and synthesizes the special
+    // members its own object needs.
     sema::ClassRec rec;
     rec.fields = std::move(fields);
     rec.members = std::move(statics);
     rec.types = std::move(nested);
     special_members(item, *cls, rec);
     rec.defined = true;
-    w_->classes.publish(*cls, std::move(rec));
+    classes_.publish(*cls, std::move(rec));
   }
   ast::Builder b(w_->ins, &arena_);
   def.bases = b.seq(std::span<const ast::BaseSpec>{});
@@ -2217,11 +2323,11 @@ public:
 
   // A destructor's body ([class.dtor]/13): `body`, then its members destroyed, the last first.
   static Ex destructor_body(sema::Sema& s, EntityId cls, Ex body) {
-    const sema::ClassRec& rec = s.world().classes.rec(cls);
+    const sema::ClassRec& rec = s.classes().rec(cls);
     std::vector<ast::Child> members;
     for (u32 i = u32(rec.fields.size()); i-- > 0;) {
       const sema::FieldRec& f = rec.fields[i];
-      EntityId d = s.world().classes.destructor_of(f.type);
+      EntityId d = s.classes().destructor_of(f.type);
       if (d != EntityId::none) members.push_back({s.node(ast::DestroyMember{i, f.type, d}, body.end, body.end).id, 0});
     }
     return s.node(ast::Destructor{sema::Sema::at(body, body.begin), s.builder().list(members)}, body.begin, body.end);
@@ -2232,7 +2338,7 @@ private:
   // its position among the class's members.
   std::map<u32, Ex> mem_initializers() {
     std::map<u32, Ex> r;
-    const sema::ClassRec& rec = p_->world().classes.rec(s_.current_class);
+    const sema::ClassRec& rec = p_->classes_.rec(s_.current_class);
     QualType ct = s_.types().class_type(s_.current_class);
     ps_.bump();
     do {
@@ -2283,7 +2389,7 @@ private:
   // from its mem-initializer, its default member initializer, or default-initialized; then the
   // compound statement.
   Ex constructor_body(std::map<u32, Ex> inits, Ex body) {
-    const sema::ClassRec& rec = p_->world().classes.rec(s_.current_class);
+    const sema::ClassRec& rec = p_->classes_.rec(s_.current_class);
     std::vector<ast::Child> stmts;
     for (u32 i = 0; i < rec.fields.size(); ++i) {
       const sema::FieldRec& f = rec.fields[i];
@@ -2383,7 +2489,7 @@ void Program::special_members(u32 item, EntityId cls, sema::ClassRec& rec) {
   };
   // [class.dtor]/8: the implicit destructor is not trivial when a member's is not.
   if (user_dtor != EntityId::none) rec.destructor = user_dtor;
-  else if (std::ranges::any_of(rec.fields, [&](const sema::FieldRec& f) { return w_->classes.destructor_of(f.type) != EntityId::none; }))
+  else if (std::ranges::any_of(rec.fields, [&](const sema::FieldRec& f) { return classes_.destructor_of(f.type) != EntityId::none; }))
     rec.destructor = synthesize(false);
   // [class.copy.ctor]/10–11: the implicit copy constructor is deleted with a member's, and not
   // trivial when a member's is not.
@@ -2393,7 +2499,7 @@ void Program::special_members(u32 item, EntityId cls, sema::ClassRec& rec) {
     bool nontrivial = false;
     for (const sema::FieldRec& f : rec.fields) {
       if (types.is_reference(f.type)) continue;
-      auto [n, del] = w_->classes.copy_of(f.type);
+      auto [n, del] = classes_.copy_of(f.type);
       rec.copy_deleted = rec.copy_deleted || del;
       nontrivial = nontrivial || n;
     }
@@ -2406,7 +2512,7 @@ void Program::special_members(u32 item, EntityId cls, sema::ClassRec& rec) {
 // element, else as a whole.
 Ex Program::copy_from(sema::Sema& sm, Ex src, QualType t) {
   if (!w_->types.is_array(t)) return sm.convert(src, t, 0);
-  if (!w_->classes.copy_of(t).first) return sm.convert_node(src, ast::ConversionKind::lvalue_to_rvalue, sema::Types::unqualified(t));
+  if (!classes_.copy_of(t).first) return sm.convert_node(src, ast::ConversionKind::lvalue_to_rvalue, sema::Types::unqualified(t));
   sema::TypeRec r = w_->types.rec(t);
   std::vector<Ex> elems;
   QualType index = w_->types.builtin(sema::Builtin::int_);
@@ -2428,7 +2534,7 @@ const ast::BodySema& Program::synthesized_body(std::size_t i) {
   EntityId cls = w_->entities.rec(s.decl.entity).scope;
   sm.current_class = cls;
   sm.this_type = this_type(s.decl);
-  const sema::ClassRec& rec = w_->classes.rec(cls);
+  const sema::ClassRec& rec = classes_.rec(cls);
   Ex root;
   if (s.copy) {
     // [class.copy.ctor]/14: each member copied from the other object's, in declaration order.
@@ -2465,7 +2571,7 @@ const sema::ClassRec* Program::instantiate_class(EntityId spec, u32 point) {
   const u32 key = std::to_underlying(spec);
   // This unit's instantiation: its member records, member patterns and diagnostics are the
   // unit's, even when another unit published the class's record first (#156).
-  if (classes_instantiated_.contains(key)) return w_->classes.find(spec);
+  if (classes_instantiated_.contains(key)) return classes_.find(spec);
   const sema::EntityRec rec = w_->entities.rec(spec);
   auto t = class_templates_.find(std::to_underlying(rec.templ));
   if (t == class_templates_.end() || w_->types.is_dependent(w_->types.class_type(spec)) || classes_instantiating_.contains(key))
@@ -2512,7 +2618,7 @@ const sema::ClassRec* Program::instantiate_class(EntityId spec, u32 point) {
   built.types = std::move(c.nested);
   special_members(k, spec, built);
   built.defined = true;
-  return &w_->classes.publish(spec, std::move(built));
+  return &classes_.publish(spec, std::move(built));
 }
 
 // The item that defines, outside its class, the member of a class template specialization that
@@ -2603,7 +2709,7 @@ const Program::Instance* Program::instance(EntityId spec) {
   decl.type = rec.type;
   decl.flags = sema::u16(decl.flags & ~sema::decl_flag::template_);
   decl.template_params = w_->ins.intern_seq(std::span<const ast::TemplateParamSema>{});
-  sema::Templates t(*w_);
+  sema::Templates t(*w_, classes_);
   std::vector<ast::ParamSema> params = w_->ins.seqs.elements(tmpl.params);
   // A parameter's type is adjusted again after substitution ([dcl.fct]/5): an array or function
   // becomes a pointer; the body's object keeps its cv-qualifiers.

@@ -132,14 +132,17 @@ What is true of the code today. Work in progress and its owners are tracked in
     thread-locals.
   - pp's per-configuration process sessions have a mutex each, held for a whole `Pp` run (which
     never suspends).
-  - sema's records (#156): `Entities` and `Classes` keep records in `ast::Published` tables (by
-    handle, published once, read without a lock). Every unit that defines a class or enumeration
-    builds its record privately and publishes it; the first wins, and the records of equal
-    definitions are equal. A member's declaration is an item of each unit, so `Program` keeps it
-    (`member_decl`), not the record. Sema reads a record through `class_rec`, only where the
-    class is complete in its own unit, and an enumeration's own list sees the unit's record so
-    far, so what a unit accepts does not depend on other units. Each unit's unnamed namespace is
-    its own entity. Records stay first-wins across edits in a long-lived session (#115).
+  - sema's records (#156, #115): `Entities` keeps records in an `ast::Published` table (by
+    handle, published once, read without a lock). Readers use only the fields that are part of
+    the entity's identity, which equal records share; a variable's type, which is not, comes
+    from its declaration. Class and enumeration records are each unit's
+    (`Program::classes`, `sema::Classes`): entities are program-wide, but a session may see
+    different definitions of one (an edit, or several programs in one daemon), and the records
+    follow the unit's source. A member's declaration is an item of the unit (`member_decl`).
+    Sema reads a record through `class_rec`, only where the class is complete, and an
+    enumeration's own list sees its record so far. Each unit's unnamed namespace is its own
+    entity. The back end lays out from the unit's `FrontResult::shapes` (fields' types,
+    enumerations' underlying types) through `UnitShapes`, so a body edit stops at its cutoff.
   - Tests: `unit.pp` runs 48 units on 8 workers. `unit.pipeline_incremental` builds a program on
     2 and 8 threads and under chaos seeds, equal to an inline build, and eight units sharing a
     header of classes and enumerations on up to 8 threads, before and after an edit; two units
@@ -715,8 +718,8 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   (an array's or class's element values) in `values`; `DeclKind::data_member`.
 - **Front end:** a class definition at namespace scope is a `class_def` item whose members are
   their own items (ast.md §4.2); `Program::class_def(item)` reads them into a `ClassDef` and into
-  sema's class table (`World::classes`, the stand-in for `class_def`'s member list, which the
-  layout queries read). A class is complete at an item after its
+  sema's class table (the unit's `Program::classes` since #115, the stand-in for `class_def`'s
+  member list, which the layout reads). A class is complete at an item after its
   definition that it does not enclose (`Questions::is_complete`). Class names as type
   specifiers, elaborated type specifiers and forward declarations, member access (`Member`,
   [expr.ref]), list-initialization of aggregates and scalars (`InitList`, `ValueInit`,
@@ -727,7 +730,7 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
 - **IR:** members through `ptr_member` field steps; aggregates initialized element by element,
   in an object allocated `zero` when some element is value-initialized; trivial copies and copy
   assignment as `copy`, which `lower` turns into chunked loads and stores. Class layouts (Itanium
-  §2.4) are in the `LayoutType` and `LayoutStep` queries, from sema's class table; data with
+  §2.4) are computed by `QueryLayout` from the unit's shapes (`UnitShapes`, #115); data with
   `VAggregate` initializers; Itanium names for global-namespace class types in parameters.
 - Tests: `tests/own/classes/s1-*` (spec-only, plus seven from the review). 21 of 27 pass; the others wait for classes by value
   (#116), local classes (#117), non-constant default member initializers (#118) and records in
@@ -828,6 +831,25 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   were given ([dcl.link]/7); a variable with C language linkage is one in every namespace.
 - Not yet (#153): `using N::f;` at namespace scope, `N::S{…}` as an expression, some clashes
   with namespace names and using-declarations, `std::` abbreviations in linkage names.
+
+## `<cstdio>`, step 1: typedef-names and alias-declarations (#133, 2026-11-18)
+
+- **Declarations:** `typedef` declarators and `using T = type-id;` at namespace and block scope
+  ([dcl.typedef]); `typedef struct S { … } T;`, `typedef struct { … } T;` and the same with
+  enumerations, where an unnamed class or enumeration takes the typedef-name as its name
+  ([dcl.typedef]/9). A typedef-name may be redeclared in its scope as the same type, and may
+  redeclare a class or enumeration of its scope as itself (/5, /6); anything else clashes.
+- **Lookup:** a typedef-name is a type name in decl-specifiers, nested-name-specifiers and
+  qualified type names (`N::L`); not after a class-key ([dcl.type.elab]/2); not an expression
+  ([expr.prim.id]). Block-scope ones hide and are hidden as other block declarations are.
+- Entities: `EntityKind::type_alias`, `(scope, name)`, with no symbol. Lookup gives the aliased
+  type itself: the `STypedef` sugar of ast.md §5.2 is not built yet (#179).
+- Also fixed: a variable declared after an enumeration's braces (`enum E { … } e;`) was not
+  found by lookup and had no symbol.
+- Tests: `tests/own/typedef` (14, three from the review). Eleven more draft examples pass.
+- Not yet (#180): member typedefs and alias-declarations in classes, alias templates (ζ), `typedef`
+  of an array of unknown bound, the [dcl.typedef]/9 restrictions on an unnamed class named for
+  linkage purposes.
 
 ## Templates, ζ step 1: function templates (#88, 2026-11-18)
 

@@ -34,6 +34,7 @@ struct Message {
 struct FrontResult {
   std::vector<Message> messages;  // in order of position in the unit
   TranslationUnit unit;           // meaningful when there are no errors
+  Shapes shapes;                  // its classes and enumerations, for `layout` (#115)
   bool has_errors() const {
     return std::ranges::any_of(messages, [](const Message& m) { return m.error; });
   }
@@ -94,7 +95,8 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
     EntityId e = d.entity;
     if (e == EntityId::none || !seen.insert(std::to_underlying(e)).second) return;
     const sema::EntityRec& r = world.entities.rec(e);
-    if (r.kind == sema::EntityKind::class_ || r.kind == sema::EntityKind::data_member ||
+    if (r.kind == sema::EntityKind::class_ || r.kind == sema::EntityKind::data_member || r.kind == sema::EntityKind::type_alias ||
+        r.kind == sema::EntityKind::enum_ || r.kind == sema::EntityKind::enumerator ||
         r.kind == sema::EntityKind::function_template)
       return;  // no symbol: a template's specializations have them
     bool fn = r.kind != sema::EntityKind::variable;
@@ -118,7 +120,7 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
     // A class template's members are patterns; its specializations' are instances, below.
     if (member && items.items[it.parent].template_depth > 0) continue;
     if (it.kind != items::ItemKind::declaration && it.kind != items::ItemKind::function &&
-        it.kind != items::ItemKind::class_def)  // its declarators: `struct S { … } s;`
+        it.kind != items::ItemKind::class_def && it.kind != items::ItemKind::enum_def)  // its declarators: `struct S { … } s;`
       continue;
     const ast::ItemSema& is = program.item_sema(k).value;
     std::vector<ast::DeclSema> decls = ins.seqs.elements(is.decls);
@@ -255,7 +257,21 @@ engine::query_task<FrontResult> TuFront::run(engine::Ctx& cx, TuId tu) {
   }
   std::ranges::stable_sort(out.messages, {}, &Message::token);
   if (!out.has_errors()) out.unit = unit_of(program, world, items, src.name);
+  // The unit's own records of its classes and enumerations (#115).
+  const sema::Classes& classes = program.classes();
+  for (EntityId c : classes.classes()) {
+    ClassShape& shape = out.shapes.classes.emplace_back(ClassShape{c, {}});
+    for (const sema::FieldRec& f : classes.rec(c).fields) shape.fields.push_back(f.type);
+  }
+  for (EntityId e : classes.enums()) out.shapes.enums.push_back({e, classes.underlying(e)});
   co_return out;
+}
+
+// A unit given as definitions has no classes of its own.
+engine::query_task<Shapes> UnitShapes::run(engine::Ctx& cx, TuId tu) {
+  if (!cx.fetch<TuSourceIn>(tu).file) co_return Shapes{};
+  const FrontResult& u = co_await cx.fetch<TuFront>(tu);
+  co_return u.shapes;
 }
 
 engine::query_task<TranslationUnit> TuUnit::run(engine::Ctx& cx, TuId tu) {

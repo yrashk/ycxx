@@ -48,6 +48,8 @@ public:
   // Inside the enumerator list of an enumeration this unit is defining: its record so far, which
   // is published only after the list (#156).
   virtual const EnumRec* defining_enum(EntityId) { return nullptr; }
+  // This unit's class and enumeration records (#115).
+  virtual const Classes& classes() = 0;
   // The constant a variable usable in constant expressions holds ([expr.const]), if it is known.
   virtual std::optional<ConstId> constant_value(EntityId v) = 0;
   // In a member declaration of a class being defined: the member named `name` declared before it
@@ -191,11 +193,17 @@ public:
   // A type-name naming a class, found by unqualified lookup ([basic.lookup.unqual]): none when
   // the name is not declared, or a variable or function hides it ([basic.scope.hiding]). With
   // `elaborated`, non-type declarations are ignored ([basic.lookup.elab]).
-  std::optional<QualType> class_name(NameId name, bool elaborated = false) {
-    if (!elaborated)
-      for (auto s = scopes_.rbegin(); s != scopes_.rend(); ++s)
-        for (auto p = s->rbegin(); p != s->rend(); ++p)
-          if (p->first == name) return std::nullopt;
+  // A typedef-name too, unless `aliases` is false (after a class-key, [dcl.type.elab]/2).
+  std::optional<QualType> class_name(NameId name, bool elaborated = false, bool aliases = true) {
+    // Innermost block first: a block-scope typedef-name, or a local that hides the type.
+    for (std::size_t d = scopes_.size(); d-- > 0;) {
+      for (auto t = block_types_.rbegin(); t != block_types_.rend(); ++t)
+        if (t->depth == d && t->name == name) {
+          if (aliases) return t->type;
+          break;
+        }
+      if (!elaborated && std::ranges::any_of(scopes_[d], [&](const auto& p) { return p.first == name; })) return std::nullopt;
+    }
     // A template parameter hides what the enclosing scopes declare ([basic.scope.temp]).
     if (const ast::TemplateParamSema* p = template_param(name)) {
       if (elaborated || p->kind != ast::TemplateArgKind::type) return std::nullopt;
@@ -224,12 +232,33 @@ public:
       for (DeclId d : q_->visible_decls(name, directives())) {
         ast::DeclSema s = q_->decl_sema(d);
         if (s.entity == EntityId::none || is_special(s)) continue;
-        if (s.kind == ast::DeclKind::class_ || s.kind == ast::DeclKind::enum_ || !elaborated) found = s;
+        if (is_type(s.kind) || !elaborated) found = s;
       }
-    if (!found || (found->kind != ast::DeclKind::class_ && found->kind != ast::DeclKind::enum_)) return std::nullopt;
+    if (!found || !is_type(found->kind)) return std::nullopt;
+    if (found->kind == ast::DeclKind::type_alias && !aliases) return std::nullopt;
     // A class template's name needs its arguments outside the template ([temp.names]).
     if (found->flags & decl_flag::template_) return std::nullopt;
     return found->type;
+  }
+  static bool is_type(ast::DeclKind k) {
+    return k == ast::DeclKind::class_ || k == ast::DeclKind::enum_ || k == ast::DeclKind::type_alias;
+  }
+  // A block-scope typedef-name or alias-declaration ([dcl.typedef]); it may redeclare one of the
+  // same block to the same type.
+  void local_type_alias(NameId name, QualType type, u32 at_) {
+    std::size_t depth = scopes_.size() - 1;
+    // [basic.scope.block]/2: nor a parameter's, a for-init-statement's or a condition's name in
+    // the outermost block of the guarded substatement.
+    bool guarded = scopes_.size() >= 2 && !guarded_.empty() && guarded_.back() == scopes_.size() - 2 &&
+                   std::ranges::any_of(scopes_[guarded_.back()], [&](const auto& p) { return p.first == name; });
+    if (guarded || std::ranges::any_of(scopes_.back(), [&](const auto& p) { return p.first == name; }) ||
+        std::ranges::any_of(block_types_, [&](const BlockType& t) {
+          return t.depth == depth && t.name == name && types().canonical(t.type) != types().canonical(type);
+        })) {
+      diag(at_, Diag::redeclared_local, name);
+      return;
+    }
+    block_types_.push_back({depth, name, type});
   }
 
   // The class template unqualified lookup finds for `name`, which a `<` after it begins the
@@ -369,7 +398,7 @@ public:
     if (s.ns) {
       for (const ast::DeclSema& d : q_->namespace_members(*s.ns, n)) {
         if (d.kind == ast::DeclKind::namespace_) return Scope{d.entity, std::nullopt};
-        if (d.kind == ast::DeclKind::class_ || d.kind == ast::DeclKind::enum_) return Scope{std::nullopt, d.type};
+        if (is_type(d.kind)) return Scope{std::nullopt, d.type};
       }
       return std::nullopt;
     }
@@ -528,15 +557,16 @@ public:
 
   // The destructor that ends an object of type `t`, or none if it is trivial ([class.dtor]); for
   // an array, its elements'.
-  EntityId destructor_of(QualType t) { return w_->classes.destructor_of(t); }
-  // A class's record where the class is complete ([class.mem.general]). Every unit that defines a
-  // class publishes its record, the first one wins (#156): a unit must not see it before its own
-  // definition, or while it analyses that definition, or what it accepts depends on other units.
-  const ClassRec* class_rec(EntityId c) { return q_->is_complete(c) ? w_->classes.find(c) : nullptr; }
+  EntityId destructor_of(QualType t) { return q_->classes().destructor_of(t); }
+  // This unit's records (#115).
+  const Classes& classes() { return q_->classes(); }
+  // A class's record where the class is complete ([class.mem.general]), not while the unit
+  // analyses its definition (#156).
+  const ClassRec* class_rec(EntityId c) { return q_->is_complete(c) ? q_->classes().find(c) : nullptr; }
   // An enumeration's record: in its own enumerator list, this unit's so far.
   const EnumRec* enum_rec(EntityId e) {
     if (const EnumRec* r = q_->defining_enum(e)) return r;
-    return w_->classes.find_enum(e);
+    return q_->classes().find_enum(e);
   }
 
   // The elements of an aggregate, in order: an array's elements, a class's non-static data
@@ -808,6 +838,7 @@ public:
     std::erase_if(block_usings_, [&](const auto& u) { return u.depth >= inner; });
     std::erase_if(block_directives_, [&](const auto& u) { return u.first >= inner; });
     std::erase_if(block_aliases_, [&](const auto& u) { return u.depth >= inner; });
+    std::erase_if(block_types_, [&](const auto& u) { return u.depth >= inner; });
     if (!guarded_.empty() && guarded_.back() == scopes_.size() - 1) guarded_.pop_back();
     scopes_.pop_back();
   }
@@ -824,7 +855,8 @@ public:
     // (Parameters are checked where the declarator is.)
     if (!(flags & local_flag::parameter) && name != no_name() && template_param(name)) diag(at, Diag::redeclared_local, name);
     if (name != no_name() && check) {
-      bool clash = std::ranges::any_of(scopes_.back(), [&](auto& p) { return p.first == name; });
+      bool clash = std::ranges::any_of(scopes_.back(), [&](auto& p) { return p.first == name; }) ||
+                   std::ranges::any_of(block_types_, [&](auto& t) { return t.depth == scopes_.size() - 1 && t.name == name; });
       if (scopes_.size() >= 2 && !guarded_.empty() && guarded_.back() == scopes_.size() - 2)
         clash = clash || std::ranges::any_of(scopes_[guarded_.back()], [&](auto& p) { return p.first == name; });
       if (clash) diag(at, Diag::redeclared_local, name);
@@ -871,7 +903,7 @@ public:
   // What the cell demands of the program (§B1.4), in program order.
   std::vector<Demand> demands;
 
-  Templates templates() { return Templates(*w_); }
+  Templates templates() { return Templates(*w_, classes()); }
   bool dependent(const Ex& e) {
     return e.ok() && ((e.info.flags & expr_flag::dependent) || types().is_dependent(e.type()));
   }
@@ -1514,6 +1546,10 @@ public:
           ExprInfo info{types().referee(l.type), ValueCategory::lvalue, 0};  // [expr.type]: a reference names its object
           return node(ast::LocalRef{info, p->second}, begin, end, info);
         }
+      if (std::ranges::any_of(block_types_, [&](const BlockType& t) { return t.depth == d && t.name == name; })) {
+        diag(begin, Diag::type_as_expression, name);  // [expr.prim.id]: a type is not an expression
+        return {NodeId::none, begin, end};
+      }
       std::vector<ast::DeclSema> used;
       for (const BlockUsing& u : block_usings_)
         if (u.depth == d && u.name == name) used.insert(used.end(), u.decls.begin(), u.decls.end());
@@ -1606,6 +1642,10 @@ public:
     if (d.kind == ast::DeclKind::function && (d.flags & decl_flag::consteval_))
       consteval_.insert(std::to_underlying(d.entity));
     if (d.kind == ast::DeclKind::function && (d.flags & decl_flag::deleted)) deleted_.insert(std::to_underlying(d.entity));
+    if (is_type(d.kind)) {  // [expr.prim.id]: a type is not an expression
+      diag(begin, Diag::type_as_expression, name);
+      return {NodeId::none, begin, end};
+    }
     if (d.kind == ast::DeclKind::enumerator) return enumerator(d.entity, d.type, begin, end);
     if (d.kind == ast::DeclKind::function && ins().names.spelling(name) == "main" &&
         w_->entities.rec(d.entity).scope == EntityId::none) {
@@ -2493,6 +2533,12 @@ private:
   std::vector<BlockUsing> block_usings_;
   std::vector<std::pair<std::size_t, EntityId>> block_directives_;  // (scope depth, namespace)
   std::vector<BlockAlias> block_aliases_;
+  struct BlockType {
+    std::size_t depth;
+    NameId name;
+    QualType type;
+  };
+  std::vector<BlockType> block_types_;
   std::map<u32, std::vector<ast::DeclSema>> overloads_;  // by draft overload-set DeclRef
   std::map<u32, std::vector<TemplateArg>> explicit_args_;  // by draft overload-set DeclRef
   std::map<u32, std::vector<ast::DeclSema>> unqualified_;  // by draft DeclRef named by an unqualified-id

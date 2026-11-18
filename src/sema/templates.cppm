@@ -53,7 +53,8 @@ struct Allowance {
 
 class Templates {
 public:
-  explicit Templates(World& w) : w_(&w) {}
+  // `classes` is the unit's class records (#115), which a dependent name's lookup reads.
+  Templates(World& w, const Classes& classes) : w_(&w), classes_(&classes) {}
 
   Types& types() { return w_->types; }
   ast::Interners& ins() { return w_->ins; }
@@ -107,7 +108,7 @@ public:
       if (!q) return std::nullopt;
       if (types().is_dependent(*q)) return types().add_cv(types().dep_name(*q, r.name), cv);
       if (!types().is_class(*q)) return std::nullopt;
-      const ClassRec* c = w_->classes.find(types().class_of(*q));
+      const ClassRec* c = classes_->find(types().class_of(*q));
       if (!c) return std::nullopt;
       for (const auto& [n, mt] : c->types)
         if (n == r.name) return types().add_cv(mt, cv);
@@ -486,6 +487,7 @@ private:
   }
 
   World* w_;
+  const Classes* classes_;
 };
 
 }  // namespace ycxx::sema
