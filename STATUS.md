@@ -185,9 +185,16 @@ What is true of the code today. Work in progress and its owners are tracked in
   - `tests/own/slice/a3-local-header.run.cpp`;
   - `unit.pp`: resolution, traces, reuse across TUs, and incremental equals cold over edit
     sequences.
+- Files as engine inputs (#93, 2026-11-18):
+  - `Pp` fetches every file it reads as `pp::FileContent{PathId}`, keyed by an interned absolute
+    path whose fingerprint is its spelling, and relative paths resolve against the unit's working
+    directory. The unit's name, working directory and configuration are `pp::SourceOf`. The
+    process keeps one pp session (region cache) per configuration.
+  - A `Db` provides `FileContent` on first read (`pp::read_disk`; `pipeline::Session` installs it).
+    The daemon provides it from its file table instead.
+  - `unit.pipeline_incremental` checks header edits and two directories.
 - Not yet: conditionals, `#line`, `#error`, `_Pragma`, the
-  predefined macros beyond `__cplusplus`, and module and import lines (#85). The engine cell
-  `Pp(main)` does not depend on headers until #93. Items are cut from the flattened TU, so a
+  predefined macros beyond `__cplusplus`, and module and import lines (#85). Items are cut from the flattened TU, so a
   header's items carry the main file's identity (#85). Sema diagnostics in headers render
   against the main file (#34).
 
@@ -490,10 +497,10 @@ the same handler in-process.
   returns stdout, stderr, the exit status and the output bytes, which the client writes with
   `pipeline::write_file`. Files are read through a `pp::Host`, and the units are built in a
   `pipeline::Session` (#63).
-- The daemon keeps its `Session` only for an identical request (argv and cwd) at an unchanged
-  file-table revision. Such a request executes nothing (`last_executed: 0` in `ycxx ctl status`).
-  Any other request gets a fresh session. The reason: `Pp` records only the main file's text, not
-  its headers, include paths or path (#120, with #95's providers).
+- The daemon keeps one `Session` for its life (#120). Its `pp::FileContent` cells are provided
+  from the file table, with the toolchain and sysroot as `high` durability. A batch sets the
+  provided entries it changed, at quiescence. A repeated request executes nothing
+  (`last_executed: 0` in `ycxx ctl status`), and a header edit re-runs only what read the header.
 - `ycxx.daemon` (`src/daemon/`):
   - `:scope`: the root is `YCXX_ROOT`, or the nearest `.ycxx` (with `root =`) or version-control
     marker; submodules are skipped, worktrees counted, and the fallback is the home scope. The
@@ -526,7 +533,7 @@ the same handler in-process.
   `YCXX_DAEMON=require` or `--daemon=require` makes a failure an error (the tests' hook);
   `YCXX_NO_DAEMON=1` or `--no-daemon` turns the daemon off. `-v` says where the request was
   answered, and `@file` response files are expanded by the client. `ycxx ctl status|shutdown`.
-- `pp::configure(Config, Host&)`: a session with the same host and configuration is kept, so its
+- `pp::configure(Config, Host&)` (for `-E`): a session with the same host and configuration is kept, so its
   region cache is reused between requests.
 - Tests:
   - `unit.daemon`: framing and malformed frames, root discovery, the quantum under simulated
@@ -535,10 +542,14 @@ the same handler in-process.
     through a daemon and in-process, byte for byte. It also covers two directories with one
     argv, edits, fallback, and a killed daemon.
   - Both run on macOS and Linux.
-- Not yet (#120): input providers and per-root engine stats (#95), concurrent requests and
-  cell-level restarts (#15), the daemon as the default, `progress` messages, and `build_time`.
-  Also not yet: the persistent cache handoff and the file table in it (#17), the LSP front
-  (#99), and the rest of the β tests (#98).
+- Not yet:
+  - concurrent requests, cell-level restarts, and the daemon as the default (#139, which needs
+    requests as root keys and a front end on a pool, #107);
+  - `progress` messages and `build_time` (#140);
+  - the persistent cache handoff and the file table in it (#17);
+  - the LSP front (#99), and the rest of the β tests (#98).
+  - The engine counts in a report are the session's `Db::stats()` deltas, which are exact while
+    requests run one at a time; per-request `Counters` come with #139.
 
 ## The L1 interpreter (#25, 2026-11-18)
 
