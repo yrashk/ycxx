@@ -70,6 +70,17 @@ and `#include <...>` of a system header inside a global module fragment. Configu
 the code as values, such as the configured module `ycxx.version`, never as macros.
 `tools/check-preprocessor` enforces this.
 
+## Sanitizer builds
+
+`-DYCXXC_SANITIZE=<list>` (`address`, `undefined`, `thread`, comma-separated) instruments ycxx's
+targets, the std modules and libycxx itself. `tools/tsan [-j N] [--repeat N]` is the
+ThreadSanitizer build: it configures `build-tsan` with `YCXXC_SANITIZE=thread`, runs the unit and
+daemon tests, then repeats the concurrent ones. Any report fails the test; a false positive gets
+an entry with its reason in `tests/tsan.supp`. It needs Linux (GCC has no ThreadSanitizer on macOS
+arm64), a GCC built with its sanitizer runtimes
+(`deps/libycxx/tools/toolchain/provision --with-sanitizers`) and `vm.mmap_rnd_bits` at most 28.
+The nightly `linux-x86_64-tsan` job runs it (#105).
+
 ## Bootstrap smoke test
 
 `tests/bootstrap/` compiles and runs small uses of the features DECISIONS §3.2 relies on, so that

@@ -15,9 +15,10 @@ on:
         type: boolean
         default: false
 
-# Per ref: a run dispatched on a branch neither cancels main's nightly run nor is cancelled by it.
+# Per ref and kind: a tsan-only run, or one dispatched on a branch, neither cancels main's nightly
+# run nor is cancelled by it.
 concurrency:
-  group: nightly-${{ github.ref }}
+  group: nightly-${{ github.ref }}-${{ inputs.tsan-only && 'tsan' || 'all' }}
   cancel-in-progress: true
 
 permissions:
@@ -34,7 +35,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          last=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/nightly.yml/runs?status=success&per_page=1" --jq '.workflow_runs[0].head_sha // ""')
+          last=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/nightly.yml/runs?status=success&branch=main&event=schedule&per_page=1" --jq '.workflow_runs[0].head_sha // ""')
           if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ] || [ "$last" != "$GITHUB_SHA" ]; then
             echo run=true >> "$GITHUB_OUTPUT"
           else

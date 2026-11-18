@@ -122,7 +122,9 @@ What is true of the code today. Work in progress and its owners are tracked in
   is §A9's memo-table comparison against a cold `Db` (#19); both fuzzes use it. `unit.engine_inputs`: providers (once per cell under
   contention, durability, failure), the `editor` and `ambient` shortcuts, `reset_unobserved`
   racing readers over 300 rounds, counts per request and per kind. Clean under
-  ASan and UBSan; ThreadSanitizer needs Linux (#105).
+  ASan and UBSan. ThreadSanitizer runs nightly on Linux (`tools/tsan`, `linux-x86_64-tsan`; #105).
+  The deque stores `bottom_` with release, not a release fence, since ThreadSanitizer does not
+  model fences.
 - Not yet: allocation-free waits, per-worker frame free lists and lock-free index reads
   (#104); the cycle report's program-order path note (#106); contextual queries (#16);
   eviction and persistence (#17).

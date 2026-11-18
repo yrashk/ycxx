@@ -249,9 +249,10 @@ public:
     Array* a = array_.load(std::memory_order_relaxed);
     if (b - t > a->mask) a = grow(a, t, b);
     a->at(b).store(w.bits(), std::memory_order_relaxed);
-    // A release store, where the formulation has a release fence and a relaxed store: the same
-    // order (a thief's acquire load of `bottom_` sees the slot and the frame it names), and one
-    // ThreadSanitizer can see, since it does not model fences (#105).
+    // The formulation has a release fence and a relaxed store. ThreadSanitizer does not model
+    // fences (#105), so every store of `bottom_` is a release instead: the fence also ordered the
+    // slot and its frame before the owner's later stores in take(), which a thief's acquire load
+    // of `bottom_` may read, so those are releases too.
     bottom_.store(b + 1, std::memory_order_release);
   }
 
@@ -259,17 +260,17 @@ public:
   Work take() noexcept {
     const std::int64_t b = bottom_.load(std::memory_order_relaxed) - 1;
     Array* a = array_.load(std::memory_order_relaxed);
-    bottom_.store(b, std::memory_order_relaxed);
+    bottom_.store(b, std::memory_order_release);
     std::atomic_thread_fence(std::memory_order_seq_cst);
     std::int64_t t = top_.load(std::memory_order_relaxed);
     if (t > b) {
-      bottom_.store(b + 1, std::memory_order_relaxed);
+      bottom_.store(b + 1, std::memory_order_release);
       return {};
     }
     std::uintptr_t x = a->at(b).load(std::memory_order_relaxed);
     if (t == b) {
       if (!top_.compare_exchange_strong(t, t + 1, std::memory_order_seq_cst, std::memory_order_relaxed)) x = 0;
-      bottom_.store(b + 1, std::memory_order_relaxed);
+      bottom_.store(b + 1, std::memory_order_release);
     }
     return Work::from_bits(x);
   }
