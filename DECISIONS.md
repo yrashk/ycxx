@@ -22,6 +22,24 @@ reasoning; do not leave decisions only in issue threads.
    (§4.8) is laid out from day one for optimization by search, solvers and measured cost models,
    so that strong optimization arrives later without the front end or IR having to change. The
    goal is to compete with Clang and GCC on generated code, measured (§5.4).
+5. **Predefined macros** (decided on #112). Beyond the draft's ([cpp.predefined]):
+   - **Identity:** `__ycxx__`, `__ycxx_major__`, `__ycxx_minor__` and `__ycxx_patchlevel__`.
+     Neither `__clang__` nor `__GNUC__` is defined, because either one claims a whole dialect.
+     libycxx learns ycxx at its detection point (§3.6, yrashk/libycxx#17).
+   - **Probes:** `__has_feature`, `__has_extension`, `__has_attribute`, `__has_cpp_attribute`
+     and `__has_builtin` answer truthfully from ycxx's own tables, 0 until implemented. Headers
+     take the paths those answers select, and an extension they turn out to need goes to
+     `docs/EXTENSIONS.md` (§1.2).
+     - *Revisit* if the SDK's non-GNU paths prove unusable. The fallback is `__GNUC__` with the
+       GNU extensions the SDK uses.
+   - **Target macros** are generated from `ast::Target`, the source of layout, and checked
+     against Clang's for the same target (`tests/own/pp/predefined-target.pp.cpp`).
+   - **Feature-test macros:** a `__cpp_*` macro is defined only for a feature ycxx implements,
+     from `src/pp/predefined.cppm`'s table. A slice that completes a feature updates the table.
+     `__cplusplus` is `202400L`, as Clang 23 and GCC 16 have it for C++26.
+   - *Reason:* a header that tests for a compiler or a feature must get the truth about ycxx.
+   - *Rejected:* mimicking Clang (its extensions would all be owed at once), and defining every
+     feature-test macro now (libycxx would enable code sema cannot compile).
 
 ## 2. Provenance
 
