@@ -1259,10 +1259,14 @@ public:
           s_->set_local_type(local, d.type);
         }
         init = s_->list_init(d.type, *b);
-        if (init.ok() && spec.is_constexpr) {
+        // As for `= e` below: a constexpr local, or a const integral one with a constant
+        // initializer, is usable in constant expressions ([expr.const]).
+        bool usable_kind = sema::Types::is_const(d.type) && !sema::Types::is_volatile(d.type) &&
+                           s_->types().is_integral(d.type);
+        if (init.ok() && (spec.is_constexpr || usable_kind)) {
           sema::Evaluated v = sema::Evaluator(*s_, questions()).evaluate(init);
           if (v.value) s_->set_local_value(local, *v.value);
-          else s_->diag(b->begin, Diag::not_constant, v.reason);
+          else if (spec.is_constexpr) s_->diag(b->begin, Diag::not_constant, v.reason);
         }
       } else if (accept(Tk::equal)) {
         Ex e = assignment_expression();

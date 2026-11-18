@@ -283,6 +283,12 @@ public:
   Ex list_init(QualType t, const Braced& b) {
     Ex fail{NodeId::none, b.begin, b.end};
     if (!require_complete(t, b.begin)) return fail;
+    // [dcl.init.general]: an initializer-list or a designated-initializer-list, not a mix.
+    if (std::ranges::any_of(b.clauses, &Braced::Clause::designated) &&
+        !std::ranges::all_of(b.clauses, &Braced::Clause::designated)) {
+      diag(b.begin, Diag::mixed_designators);
+      return fail;
+    }
     // [dcl.init.list]/3.2: a class from one element of its own class.
     if (types().is_class(t) && b.clauses.size() == 1 && !b.clauses[0].list && !b.clauses[0].designated &&
         initializes(t, b.clauses[0].expr))
@@ -367,7 +373,11 @@ public:
     while (next < b.clauses.size()) {
       const Braced::Clause& c = b.clauses[next];
       if (c.list || c.designated || !is_aggregate(elem) || initializes(elem, c.expr) || !is_complete(elem)) ++next;
-      else aggregate(elem, b, next, c.begin, c.begin);
+      else {
+        std::size_t before = next;
+        aggregate(elem, b, next, c.begin, c.begin);
+        if (next == before) ++next;  // an element with no elements of its own takes the clause
+      }
       ++n;
     }
     return n;
@@ -503,6 +513,9 @@ public:
         ast::DeclSema s = q_->decl_sema(d);
         if (s.entity != EntityId::none) found.push_back(s);  // else its item diagnosed it
       }
+    // A class hidden by a variable or function of the same name ([basic.scope.hiding]/2).
+    if (std::ranges::any_of(found, [](const ast::DeclSema& d) { return d.kind != ast::DeclKind::class_; }))
+      std::erase_if(found, [](const ast::DeclSema& d) { return d.kind == ast::DeclKind::class_; });
     if (found.empty()) {
       if (!any) diag(begin, Diag::undeclared, name);
       return {NodeId::none, begin, end};
@@ -744,7 +757,27 @@ public:
   // ------------------------------------------------------------ operators ([expr.unary], [expr.compound])
 
   bool is_integral_or_unscoped(QualType t) { return types().is_integral(t); }
-  bool is_object_pointer(QualType t) { return types().is_pointer(t) && types().is_object(types().pointee(t)); }
+  // A pointer to a completely-defined object type, which [expr.add] and [expr.pre.incr] need.
+  bool is_object_pointer(QualType t) {
+    return types().is_pointer(t) && types().is_object(types().pointee(t)) && is_complete(types().pointee(t));
+  }
+
+  // [class.copy.assign]/7: the implicit copy assignment of a class with a const member (or one
+  // whose own is deleted) is deleted.
+  bool has_const_member(QualType t) {
+    TypeRec r = types().rec(t);
+    if (r.kind == TypeKind::array) return has_const_member(r.inner);
+    if (r.kind != TypeKind::class_) return false;
+    if (const ClassRec* c = w_->classes.find(r.entity))
+      for (const FieldRec& f : c->fields)
+        if (Types::is_const(types().canonical(f.type)) || has_const_member(f.type)) return true;
+    return false;
+  }
+  bool check_class_assignable(const Ex& l, u32 at_) {
+    if (!types().is_class(l.type()) || !has_const_member(l.type())) return true;
+    diag(at_, Diag::const_member_assign, Types::unqualified(l.type()));
+    return false;
+  }
 
   // A modifiable lvalue ([basic.lval]): an lvalue of a non-const object type that is not an array.
   bool check_modifiable(const Ex& e, u32 at_) {
@@ -936,7 +969,7 @@ public:
   Ex assign(AsgOp op, Ex l, Ex r, u32 op_at) {
     u32 begin = l.begin, end = r.end;
     if (!l.ok() || !r.ok()) return {NodeId::none, begin, end};
-    if (!check_modifiable(l, op_at)) return {NodeId::none, begin, end};
+    if (!check_modifiable(l, op_at) || !check_class_assignable(l, op_at)) return {NodeId::none, begin, end};
     QualType lt = l.type();
     QualType computation = Types::unqualified(lt);
     Ex c = r;
@@ -977,7 +1010,7 @@ public:
   // [expr.assign]/9: `x = {…}` assigns `T{…}`, list-initialized, to an object of type T.
   Ex assign_list(Ex l, const Braced& b, u32 op_at) {
     u32 begin = l.begin, end = b.end;
-    if (!l.ok() || !check_modifiable(l, op_at)) return {NodeId::none, begin, end};
+    if (!l.ok() || !check_modifiable(l, op_at) || !check_class_assignable(l, op_at)) return {NodeId::none, begin, end};
     Ex c = list_init(Types::unqualified(l.type()), b);
     if (!c.ok()) return {NodeId::none, begin, end};
     ExprInfo info{l.type(), ValueCategory::lvalue, 0};

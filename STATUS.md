@@ -494,7 +494,7 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   assignment as `copy`, which `lower` turns into chunked loads and stores. The pipeline's `Layout`
   asks `Records` (the front end's class table) for class layouts; data with `VAggregate`
   initializers; Itanium names for global-namespace class types in parameters.
-- Tests: `tests/own/classes/s1-*` (spec-only). 14 of 20 pass; the others wait for classes by value
+- Tests: `tests/own/classes/s1-*` (spec-only, plus two from the review). 16 of 22 pass; the others wait for classes by value
   (#116), local classes (#117), non-constant default member initializers (#118) and records in
   the interpreter (#25).
 - Not yet: unions, bit-fields, member functions, constructors, bases, access checking (#119).

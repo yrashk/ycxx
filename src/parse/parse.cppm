@@ -76,11 +76,11 @@ public:
 
   // Whether class `c` is complete at `item` ([class.mem.general]): its definition is an earlier
   // item that does not enclose `item`.
-  bool is_complete(EntityId c, u32 item) {
+  bool is_complete(EntityId c, u32 item, bool own = false) {
     auto it = class_items_.find(std::to_underlying(c));
     if (it == class_items_.end()) return false;
     u32 d = it->second;
-    if (d >= item || item <= last_member(d)) return false;
+    if ((d >= item && !(own && d == item)) || (d < item && item <= last_member(d))) return false;
     class_def(d);
     return w_->classes.is_defined(c);
   }
@@ -112,8 +112,11 @@ public:
     decls_[std::to_underlying(d.entity)].push_back({item, d});
     if (d.kind == ast::DeclKind::function && (d.flags & sema::decl_flag::definition))
       definitions_[std::to_underlying(d.entity)] = item;
-    if (d.kind == ast::DeclKind::class_ && (d.flags & sema::decl_flag::definition))
+    if (d.kind == ast::DeclKind::class_ && (d.flags & sema::decl_flag::definition)) {
       class_items_.emplace(std::to_underlying(d.entity), item);
+      class_entities_.emplace(item, d.entity);
+      class_heads_.emplace(item, d);
+    }
   }
   void set_constant(EntityId e, ConstId c, u32 item) { constants_[std::to_underlying(e)] = {item, c}; }
 
@@ -210,7 +213,20 @@ private:
   std::vector<std::optional<Result<ast::ItemSema>>> item_cells_;
   std::vector<std::optional<Result<ast::BodySema>>> body_cells_;
   std::vector<std::optional<Result<ast::ClassDef>>> class_cells_;
-  std::map<u32, u32> class_items_;  // by class entity: its defining item
+  std::map<u32, u32> class_items_;     // by class entity: its defining item
+  std::map<u32, EntityId> class_entities_;  // by class item: the class it defines
+  std::map<u32, ast::DeclSema> class_heads_;  // by class item: the class's record, for its members
+
+public:
+  // The class a class item defines, none if its head failed. The class's own declarators ask it
+  // while its item is analysed, so it is read from what the item declared before them.
+  EntityId class_entity(u32 item) {
+    if (!class_entities_.contains(item)) item_sema(item);
+    auto it = class_entities_.find(item);
+    return it == class_entities_.end() ? EntityId::none : it->second;
+  }
+
+private:
   std::vector<u32> running_;
   std::map<u32, std::pair<u32, ConstId>> constants_;                // by entity: (item, value)
   std::map<u32, std::vector<std::pair<u32, ast::DeclSema>>> decls_;  // by entity: (item, record)
@@ -236,7 +252,9 @@ public:
   interp::Callee function_ir(EntityId f) override { return p_->function_ir(f, item_); }
   std::optional<interp::GlobalVar> global(EntityId v) override { return p_->global(v, item_); }
   bool is_constexpr(EntityId f) override { return p_->is_constexpr(f, item_); }
-  bool is_complete(EntityId c) override { return p_->is_complete(c, item_); }
+  bool is_complete(EntityId c) override { return p_->is_complete(c, item_, own_class_complete); }
+  // Past the closing brace of the class the item defines, that class is complete.
+  bool own_class_complete = false;
 
 private:
   Program* p_;
@@ -437,8 +455,9 @@ private:
     decls_.push_back(sem);
     s_.own.push_back({name, sem});
     p_->declared(sem, k_);
-    // The declarators after the closing brace: `struct S { … } s, *p;`.
+    // The declarators after the closing brace: `struct S { … } s, *p;`, where S is complete.
     ps_.seek(it_->brace_end);
+    q_.own_class_complete = true;
     if (ps_.accept(Tk::semi)) return;
     DeclSpec spec;
     spec.begin = at;
@@ -458,10 +477,9 @@ private:
   // A member-declaration ([class.mem.general]) of the class item enclosing this one: non-static
   // data members, so far.
   void member_declaration() {
-    const ast::ItemSema& cls = p_->item_sema(it_->parent).value;
-    if (p_->world().ins.seqs.size(cls.decls) == 0) return bad();
-    ast::DeclSema c = p_->world().ins.seqs.at(cls.decls, 0);
-    if (c.entity == EntityId::none || c.kind != ast::DeclKind::class_) return bad();
+    EntityId ce = p_->class_entity(it_->parent);
+    if (ce == EntityId::none) return bad();
+    ast::DeclSema c = class_decl(ce, true);
     if (ps_.accept(Tk::semi)) return;
     if (!Parser::starts_decl_specifier(ps_.kind()) && !ps_.starts_declaration()) {
       s_.diag(ps_.pos(), lex::is_keyword(ps_.kind()) || ps_.is(Tk::l_square) || ps_.is(Tk::coloncolon) || ps_.is(Tk::tilde)
@@ -484,6 +502,10 @@ private:
     do {
       parse::Declarator d = ps_.declarator(spec.type, false);
       if (!d.ok || !d.named) return bad();
+      if (d.unknown_bound) {
+        s_.diag(d.name_at, Diag::unknown_bound_member);  // [class.mem.general]: a complete type
+        return bad();
+      }
       if (types.is_function(d.type) || ps_.is(Tk::colon)) {
         // Member functions and bit-fields come later (#86).
         s_.diag(types.is_function(d.type) ? d.name_at : ps_.pos(), Diag::not_supported,
@@ -569,6 +591,22 @@ private:
                bool is_function_def) {
     sema::Types& types = s_.types();
     u32 ord = static_cast<u32>(decls_.size());
+    // `T a[] = {…}`: the bound from the list ([dcl.array]/8), parsed here and used below.
+    std::unique_ptr<sema::Braced> early;
+    if (d.unknown_bound) {
+      if (!(ps_.is(Tk::l_brace) || (ps_.is(Tk::equal) && ps_.kind(1) == Tk::l_brace))) {
+        s_.diag(d.name_at, Diag::not_supported, Tk::l_square);  // an array of unknown bound
+        return false;
+      }
+      ps_.accept(Tk::equal);
+      early = ps_.braced_init_list();
+      u64 n = s_.deduce_bound(d.type, *early);
+      if (n == 0) {
+        s_.diag(early->begin, Diag::bound_not_constant);
+        return false;
+      }
+      d.type = types.array(d.type, n);
+    }
     bool fn = types.is_function(d.type);
     if (!fn && spec.is_constexpr) d.type = types.add_cv(d.type, sema::Cv::const_);  // [dcl.constexpr]
     ast::DeclSema sem{};
@@ -598,7 +636,7 @@ private:
     if (fn && (spec.is_constexpr || spec.is_consteval)) flags |= sema::decl_flag::inline_;
     if (spec.is_consteval) flags |= sema::decl_flag::consteval_;
 
-    bool has_init = ps_.is(Tk::equal) || ps_.is(Tk::l_brace) || (!fn && ps_.is(Tk::l_paren));
+    bool has_init = early || ps_.is(Tk::equal) || ps_.is(Tk::l_brace) || (!fn && ps_.is(Tk::l_paren));
     bool definition = fn ? is_function_def : !(spec.is_extern && !has_init);
     if (definition) flags |= sema::decl_flag::definition;
     if (!fn && types.is_void(d.type)) {
@@ -612,10 +650,13 @@ private:
 
     // Earlier declarations of the name: in this item, then before it ([basic.link], [dcl.fct]).
     std::vector<ast::DeclSema> prior;
+    // A class and a variable or function may share a name; the class is hidden
+    // ([basic.scope.scope]/4, [basic.scope.hiding]/2), so it is not an earlier declaration.
     for (DeclId p : q_.visible_decls(d.name))
-      if (auto ds = p_->decl_sema(p); ds && ds->entity != EntityId::none) prior.push_back(*ds);
+      if (auto ds = p_->decl_sema(p); ds && ds->entity != EntityId::none && ds->kind != ast::DeclKind::class_)
+        prior.push_back(*ds);
     for (const auto& o : s_.own)
-      if (o.name == d.name) prior.push_back(o.sema);
+      if (o.name == d.name && o.sema.kind != ast::DeclKind::class_) prior.push_back(o.sema);
     if (fn) {
       if (!explicit_lang && !prior.empty() && prior.back().kind == ast::DeclKind::function)
         lang = s_.world().entities.rec(prior.back().entity).lang;  // [dcl.link]/6: inherited
@@ -693,11 +734,11 @@ private:
     if (fn && has_init && !is_function_def) {
       s_.diag(ps_.pos(), Diag::function_initialized, d.name);
       ps_.skip_to_semi();
-    } else if (!fn && (ps_.is(Tk::l_brace) || (ps_.is(Tk::equal) && ps_.kind(1) == Tk::l_brace))) {
+    } else if (!fn && (early || ps_.is(Tk::l_brace) || (ps_.is(Tk::equal) && ps_.kind(1) == Tk::l_brace))) {
       // List-initialization; constant initialization when every element is a constant
       // ([basic.start.static]).
       ps_.accept(Tk::equal);
-      auto b = ps_.braced_init_list();
+      auto b = early ? std::move(early) : ps_.braced_init_list();
       init = s_.list_init(d.type, *b);
       if (init.ok()) {
         if (auto v = constant_initializer(init)) {
@@ -825,6 +866,12 @@ const Result<ast::ItemSema>& Program::item_sema(u32 item) {
 
 std::optional<ast::DeclSema> Program::decl_sema(DeclId d) {
   if (ast::class_of(d.ord) != ast::DeclClass::syntactic) return std::nullopt;
+  // The members of a class whose item is still being analysed (its declarators after the
+  // brace ask for the class's completeness) see its head, which was declared first.
+  if (u32 k = index(d.item); std::ranges::find(running_, k) != running_.end()) {
+    if (ast::number_of(d.ord) == 0 && class_heads_.contains(k)) return class_heads_.at(k);
+    return std::nullopt;
+  }
   const ast::ItemSema& s = item_sema(index(d.item)).value;
   u32 n = ast::number_of(d.ord);
   if (n >= w_->ins.seqs.size(s.decls)) return std::nullopt;
@@ -835,16 +882,14 @@ std::optional<ast::DeclSema> Program::decl_sema(DeclId d) {
 
 const Result<ast::ClassDef>& Program::class_def(u32 item) {
   if (class_cells_[item]) return *class_cells_[item];
-  contract_assert(std::ranges::find(running_, item) == running_.end());
-  running_.push_back(item);
+  u32 key = item | 0x80000000u;  // apart from item_sema(item), which may be running and ask for it
+  contract_assert(std::ranges::find(running_, key) == running_.end());
+  running_.push_back(key);
   Result<ast::ClassDef> out;
   ast::ClassDef def{};
   def.injected_class_name = EntityId::none;
   std::vector<ast::MemberRec> members;
-  std::optional<EntityId> cls;
-  const ast::ItemSema& head = item_sema(item).value;
-  if (w_->ins.seqs.size(head.decls) > 0 && w_->ins.seqs.at(head.decls, 0).kind == ast::DeclKind::class_)
-    cls = w_->ins.seqs.at(head.decls, 0).entity;
+  std::optional<EntityId> cls = class_entity(item);
   const items::Item& it = items_->items[item];
   // [class.access.spec]: members of a class defined with `class` are private by default.
   ast::Access access = r_->tokens[it.begin].kind == lex::Tk::kw_class ? ast::Access::private_ : ast::Access::public_;
