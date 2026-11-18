@@ -373,11 +373,11 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   `.o` inputs are linked as they are. Errors are `path:line:col: error: message` on stderr; exit 0
   on success, 1 on any error in the input or the command line.
 - `tests/features/ycxx.txt` lists `syntax` and `run darwin-arm64`: a feature can be limited to
-  hosts. CI's macOS job runs the slice before its tier.
+  hosts. CI's macOS job runs the slice before its tier, with `--no-unsupported`.
 - `unit.pipeline`: the line table, linkage names, and the back half from hand-built analysed
   bodies, linked and run on arm64 macOS.
 - Not yet: the stages as engine queries and the daemon (#63), `#include` (#65), optimization
-  levels (`-O` is rejected).
+  levels and the other common options (`-O` is rejected, #81).
 
 ## Bootstrap workarounds
 
