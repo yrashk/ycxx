@@ -104,6 +104,7 @@ public:
 
   static Cv cv(QualType q) { return ast::cv_of(q); }
   static bool is_const(QualType q) { return (std::to_underlying(ast::cv_of(q)) & 1) != 0; }
+  static bool is_volatile(QualType q) { return (std::to_underlying(ast::cv_of(q)) & 2) != 0; }
   static QualType unqualified(QualType q) { return ast::without_cv(q); }
   // Adds cv; on an array it goes to the elements ([basic.type.qualifier]).
   QualType add_cv(QualType q, Cv c) { return c == Cv::none ? q : ins_->qualified(q, c); }

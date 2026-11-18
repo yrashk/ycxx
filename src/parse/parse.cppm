@@ -83,38 +83,44 @@ public:
     return r;
   }
 
-  // The constant a variable usable in constant expressions was initialized with ([expr.const]).
-  std::optional<ConstId> constant_value(EntityId e) const {
-    if (auto it = constants_.find(std::to_underlying(e)); it != constants_.end()) return it->second;
-    return std::nullopt;
-  }
-  void set_constant(EntityId e, ConstId c) { constants_[std::to_underlying(e)] = c; }
-
-  // What item_sema learns of each entity's declarations, for constant evaluation: the latest
-  // declaration's record, and for a function its defining item.
+  // What item_sema learns of each entity, for constant evaluation (§B7): its declarations, the
+  // constant a variable usable in constant expressions was initialized with ([expr.const]), and a
+  // function's defining item, each with the item that said it. An answer at `item` sees only what
+  // items up to it said, so it does not depend on which other cells have run (§A1).
   void declared(const ast::DeclSema& d, u32 item) {
-    decls_[std::to_underlying(d.entity)] = d;
+    decls_[std::to_underlying(d.entity)].push_back({item, d});
     if (d.kind == ast::DeclKind::function && (d.flags & sema::decl_flag::definition))
       definitions_[std::to_underlying(d.entity)] = item;
   }
-  std::optional<ast::DeclSema> declaration(EntityId e) const {
-    if (auto it = decls_.find(std::to_underlying(e)); it != decls_.end()) return it->second;
-    return std::nullopt;
+  void set_constant(EntityId e, ConstId c, u32 item) { constants_[std::to_underlying(e)] = {item, c}; }
+
+  std::optional<ast::DeclSema> declaration(EntityId e, u32 item) const {
+    auto it = decls_.find(std::to_underlying(e));
+    if (it == decls_.end()) return std::nullopt;
+    std::optional<ast::DeclSema> r;
+    for (const auto& [k, d] : it->second)
+      if (k <= item) r = d;
+    return r;
+  }
+  std::optional<ConstId> constant_value(EntityId e, u32 item) const {
+    auto it = constants_.find(std::to_underlying(e));
+    if (it == constants_.end() || it->second.first > item) return std::nullopt;
+    return it->second.second;
   }
 
   // `function_ir(F)` for a function defined in an item before `item` ([expr.const]: a function
   // defined later is not defined at the point of evaluation).
   interp::Callee function_ir(EntityId f, u32 item);
-  // A namespace-scope variable as the interpreter sees it: its type and, if it is usable in
-  // constant expressions, its value.
-  std::optional<interp::GlobalVar> global(EntityId v) const {
-    auto d = declaration(v);
+  // A namespace-scope variable as the interpreter sees it at `item`: its type and, if it is usable
+  // in constant expressions, its value.
+  std::optional<interp::GlobalVar> global(EntityId v, u32 item) const {
+    auto d = declaration(v, item);
     if (!d || d->kind != ast::DeclKind::variable) return std::nullopt;
-    auto c = constant_value(v);
+    auto c = constant_value(v, item);
     return interp::GlobalVar{d->type, c, c.has_value()};
   }
-  bool is_constexpr(EntityId f) const {
-    auto d = declaration(f);
+  bool is_constexpr(EntityId f, u32 item) const {
+    auto d = declaration(f, item);
     return d && (d->flags & (sema::decl_flag::constexpr_ | sema::decl_flag::consteval_));
   }
 
@@ -179,8 +185,8 @@ private:
   std::vector<std::optional<Result<ast::ItemSema>>> item_cells_;
   std::vector<std::optional<Result<ast::BodySema>>> body_cells_;
   std::vector<u32> running_;
-  std::map<u32, ConstId> constants_;
-  std::map<u32, ast::DeclSema> decls_;           // by entity: the latest declaration
+  std::map<u32, std::pair<u32, ConstId>> constants_;                // by entity: (item, value)
+  std::map<u32, std::vector<std::pair<u32, ast::DeclSema>>> decls_;  // by entity: (item, record)
   std::map<u32, u32> definitions_;               // by function entity: its defining item
   std::map<u32, std::optional<irgen::FunctionIr>> irs_;  // by item: function_ir, none if it failed
   std::pmr::unsynchronized_pool_resource arena_;  // the frames' arena (§9.3)
@@ -200,10 +206,9 @@ public:
     if (auto s = p_->decl_sema(d)) return *s;
     return invalid_decl();
   }
-  std::optional<ConstId> constant_value(EntityId e) override { return p_->constant_value(e); }
   interp::Callee function_ir(EntityId f) override { return p_->function_ir(f, item_); }
-  std::optional<interp::GlobalVar> global(EntityId v) override { return p_->global(v); }
-  bool is_constexpr(EntityId f) override { return p_->is_constexpr(f); }
+  std::optional<interp::GlobalVar> global(EntityId v) override { return p_->global(v, item_); }
+  bool is_constexpr(EntityId f) override { return p_->is_constexpr(f, item_); }
 
 private:
   Program* p_;
@@ -352,7 +357,7 @@ private:
     if (spec.is_inline) flags |= sema::decl_flag::inline_;
     if (spec.is_constexpr) flags |= sema::decl_flag::constexpr_;
     if (spec.is_constinit && fn) {
-      s_.diag(spec.begin, Diag::constinit_automatic);  // [dcl.constinit]/1
+      s_.diag(spec.begin, Diag::constinit_function);  // [dcl.constinit]/1
       return false;
     }
     if (spec.is_consteval && !fn) {
@@ -473,8 +478,9 @@ private:
           sema::Evaluated v = sema::Evaluator(s_, q_).evaluate(init);
           if (v.value) {
             value = *v.value;
-            if (spec.is_constexpr || (sema::Types::is_const(d.type) && types.is_integral(d.type)))
-              p_->set_constant(sem.entity, *v.value);
+            if (spec.is_constexpr || (sema::Types::is_const(d.type) && !sema::Types::is_volatile(d.type) &&
+                                      types.is_integral(d.type)))
+              p_->set_constant(sem.entity, *v.value, k_);
           } else {
             s_.diag(e.begin, spec.is_constexpr || spec.is_constinit ? Diag::not_constant : Diag::nonconstant_initializer,
                     v.reason);
@@ -601,7 +607,7 @@ const Result<ast::BodySema>& Program::analyze_body(u32 item) {
 
 interp::Callee Program::function_ir(EntityId f, u32 item) {
   interp::Callee c;
-  c.is_constexpr = is_constexpr(f);
+  c.is_constexpr = is_constexpr(f, item);
   auto def = definitions_.find(std::to_underlying(f));
   if (def == definitions_.end() || def->second >= item) return c;
   u32 k = def->second;

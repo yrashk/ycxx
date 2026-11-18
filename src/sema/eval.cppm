@@ -4,8 +4,8 @@
 // expression. Callees' bodies and namespace-scope variables come through `Questions`.
 //
 // The enclosing function's locals usable in constant expressions (constexpr, or const integral
-// with a constant initializer) become const objects of the thunk with their values; naming any
-// other local makes the expression one the front end cannot evaluate.
+// with a constant initializer) become const objects of the thunk with their values; any other
+// local is an object outside its lifetime, so evaluating a use of it is not constant.
 export module ycxx.sema:eval;
 
 import std;
@@ -32,10 +32,12 @@ private:
   Questions* q_;
 };
 
-// A constant evaluation's outcome: the value, or why there is none (a `{N:r}` argument).
+// A constant evaluation's outcome: whether it is constant, its value (none for a void
+// expression), or why it is not (a `{N:r}` argument).
 struct Evaluated {
   std::optional<ConstId> value;
   u64 reason = reason_unsupported;
+  bool constant = false;
 };
 
 class Evaluator {
@@ -59,13 +61,21 @@ public:
     thunk.params = in.intern_seq(std::span<const ast::ParamSema>{});
     irgen::FunctionInput input{EntityId::none, thunk,
                                ast::BodySema{ret, in.intern_seq(std::span<const ast::LocalRec>(locals))},
-                               s_->item(), 0, s_->local_values()};
+                               s_->item(), 0, true, s_->local_values()};
     EvalFacts facts(s_->world(), *q_);
     auto body = irgen::function_ir(in, input, facts);
     if (!body) return {};
     Host host{q_};
     interp::Outcome out = interp::evaluate(host, in, target, body->body, EntityId::none, {}).run();
-    if (out.status != interp::Outcome::Status::value) return {std::nullopt, reason_arg(out.failure)};
+    if (out.status != interp::Outcome::Status::value) {
+      // In the thunk's own frame, the only objects outside their lifetime are the enclosing
+      // function's locals that are not usable in constant expressions.
+      interp::Failure f = out.failure;
+      if (f.reason == interp::Reason::outside_lifetime && !f.stack.empty() && f.stack[0].function == EntityId::none)
+        f.reason = interp::Reason::not_usable;
+      return {std::nullopt, reason_arg(f)};
+    }
+    if (out.values.empty() && s_->types().is_void(e.type())) return {std::nullopt, 0, true};
     if (out.values.size() != 1) return {};
     return constant(out.values[0]);
   }
@@ -84,13 +94,13 @@ private:
     Values& vs = s_->world().values;
     using K = interp::Result::Kind;
     switch (r.kind) {
-    case K::integer: return {vs.integer(r.type, r.bits)};
-    case K::null: return {vs.null_pointer(r.type)};
-    case K::function: return {vs.address(r.type, vs.entity(r.entity), 0)};
+    case K::integer: return {vs.integer(r.type, r.bits), 0, true};
+    case K::null: return {vs.null_pointer(r.type), 0, true};
+    case K::function: return {vs.address(r.type, vs.entity(r.entity), 0), 0, true};
     case K::address:
       switch (r.base) {
-      case interp::Base::literal: return {vs.address(r.type, r.literal, r.offset)};
-      case interp::Base::global: return {vs.address(r.type, vs.entity(r.entity), r.offset)};
+      case interp::Base::literal: return {vs.address(r.type, r.literal, r.offset), 0, true};
+      case interp::Base::global: return {vs.address(r.type, vs.entity(r.entity), r.offset), 0, true};
       case interp::Base::local:
         return {std::nullopt, reason_arg({interp::Reason::local_address, 0, {}})};
       }

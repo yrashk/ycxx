@@ -186,7 +186,47 @@ void control_flow() {
   check(a.ins.seqs.size(a.body(0).locals) == 3, "n, s and i");
 }
 
+// Constant evaluation (#87): the diagnostics a program gets, by kind, in order.
+std::vector<sema::Diag> kinds(std::string_view text) {
+  Analysed a(text);
+  std::vector<sema::Diag> r;
+  for (const engine::Diagnostic& d : a.diags()) r.push_back(*sema::sema_diag_of(d.id));
+  return r;
+}
+
+void constant_evaluation() {
+  using enum sema::Diag;
+  using V = std::vector<sema::Diag>;
+  check(kinds("constexpr int f(int n) { return n <= 1 ? 1 : n * f(n - 1); }\nstatic_assert(f(5) == 120);").empty(),
+        "constexpr recursion in a static_assert");
+  check(kinds("static_assert(1 + 1 == 3, \"no\");") == V{static_assert_failed_message}, "a failed static_assert");
+  // From the review of #87's first commit.
+  check(kinds("constexpr int f() { volatile int x = 1; return x; }\nstatic_assert(f() == 1);") == V{not_constant},
+        "a volatile read is not constant");
+  check(kinds("const volatile int x = 1;\nstatic_assert(x == 1);") == V{not_constant},
+        "a const volatile variable is not usable in constant expressions");
+  check(kinds("int f(int n) { if consteval { return 1; } else { return n; } }").empty(), "if consteval with else");
+  check(kinds("int f(int n) { if consteval { return 1; } else return n; }") == V{expected_token},
+        "the statement after else must be compound ([stmt.if]/4)");
+  check(kinds("consteval void cv() {}\nint main() { cv(); return 0; }").empty(),
+        "an immediate invocation of a void consteval function");
+  check(kinds("int f() { int m = 1; constexpr int x = true ? 1 : m; constexpr int y = false && m; return x + y; }").empty(),
+        "a local that is not usable, named but not evaluated");
+  check(kinds("int f() { int m = 1; constexpr int x = m; return x; }") == V{not_constant},
+        "a local that is not usable, evaluated");
+  check(kinds("int f() { int m = 1; constexpr int x = (m = 2); return x; }") == V{not_constant},
+        "a local that is not usable, modified");
+  check(kinds("int g() { return 1; }\nconstexpr int (*fp)() = g;\nstatic_assert(&g != nullptr);\n"
+              "static_assert(fp == &g);").empty(),
+        "function addresses are constants");
+  check(kinds("static_assert(true, u8\"x\");") == V{unevaluated_string}, "a message with an encoding prefix");
+  check(kinds("static_assert(true, 2);") == V{expected_string_literal}, "a message that is not a string");
+  check(kinds("constinit int f();") == V{constinit_function}, "constinit on a function");
+  check(kinds("bool b = nullptr == nullptr;\nstatic_assert(nullptr == nullptr);").empty(), "nullptr == nullptr");
+}
+
 int main() {
+  constant_evaluation();
   conversions_and_locals();
   redeclarations_and_linkage();
   constants();

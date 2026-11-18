@@ -59,7 +59,8 @@ struct FunctionInput {
   // For the thunk of a constant expression (`{ return e; }`, query-engine.md §B7): the values of
   // the enclosing function's locals usable in constant expressions ([expr.const]), by local
   // index. Each becomes a const object of the thunk, made at its entry; a local without a value
-  // cannot be named.
+  // becomes an object outside its lifetime.
+  bool thunk = false;
   std::span<const std::optional<ast::ConstId>> local_values{};
 };
 
@@ -156,16 +157,21 @@ class Gen {
   ValueId constant(ast::QualType type, ast::ConstId c) { return pure(ir::Op::const_, type, {}, {word(c)}); }
   ValueId int_constant(ast::QualType type, std::int64_t v) { return constant(type, facts_.int_constant(type, v)); }
 
+  // An access through a volatile glvalue is a side effect ([intro.execution]) and never constant.
+  ir::Flags access_flags(ast::QualType t) {
+    bool v = (std::to_underlying(ast::cv_of(in_.canonical(t))) & 2) != 0;
+    return v ? ir::bit(ir::Flag::volatile_) : ir::Flags(0);
+  }
   ValueId load(const Place& p) {
     ir::Ty r[] = {vty(p.type)};
     ValueId ops[] = {state_, p.ptr};
     std::uint64_t imms[] = {word(ty(p.type)), 0};  // the type, then an empty path
-    return b_.result(emit(ir::Op::load, r, ops, imms));
+    return b_.result(emit(ir::Op::load, r, ops, imms, access_flags(p.type)));
   }
   void store(const Place& p, ValueId v) {
     ValueId ops[] = {p.ptr, v};
     std::uint64_t imms[] = {word(ty(p.type)), 0};
-    stateful(ir::Op::store, {}, ops, imms);
+    stateful(ir::Op::store, {}, ops, imms, access_flags(p.type));
   }
 
   // ------------------------------------------------------------------ blocks
@@ -253,12 +259,21 @@ class Gen {
       start_lifetime(p);
       slots_[i] = p;
     }
-    for (uint32_t i = 0; i < fn_.local_values.size() && i < slots_.size(); ++i) {
-      if (!fn_.local_values[i]) continue;
+    // A thunk's locals: those with values are const objects; any other is an object whose
+    // lifetime has ended, so evaluating a use of it fails, while naming it unevaluated does not.
+    for (uint32_t i = 0; fn_.thunk && i < slots_.size(); ++i) {
+      if (slots_[i]) continue;
       ast::QualType t = in_.seqs.at(fn_.body.locals, i).type;
       Place p = begin_object(t, ir::Init::indeterminate);
-      store(p, constant(t, *fn_.local_values[i]));
-      start_lifetime(p);
+      if (i < fn_.local_values.size() && fn_.local_values[i]) {
+        store(p, constant(t, *fn_.local_values[i]));
+        start_lifetime(p);
+      } else {
+        ValueId ops[] = {p.ptr};
+        std::uint64_t imms[] = {word(ty(p.type))};
+        stateful(ir::Op::obj__begin, {}, ops, imms);
+        stateful(ir::Op::obj__end, {}, ops);
+      }
       slots_[i] = p;
     }
     stmt({fn_.body.tree, fn_.body_offset});
@@ -276,6 +291,11 @@ class Gen {
         live_ = false;
       }
     }
+  }
+
+  bool is_literal(At a) {
+    while (is<ast::Paren>(a)) a = child(a, get<ast::Paren>(a).operand);
+    return is<ast::Literal>(a);
   }
 
   ir::NodeId last_node() const { return ir::NodeId(uint32_t(debug_.loc.size() - 1)); }
@@ -558,6 +578,7 @@ class Gen {
     At from = child(a, c.operand);
     switch (c.conversion) {
       case ast::ConversionKind::lvalue_to_rvalue: return load(lvalue(from));
+      case ast::ConversionKind::function_to_pointer: return lvalue(from).ptr;
       case ast::ConversionKind::integral: {
         ValueId v = rvalue(from);
         if (same_type(info(from).type, t)) return v;
@@ -666,14 +687,20 @@ class Gen {
   std::optional<ValueId> binary(At a) {
     auto bn = get<ast::Binary>(a);
     At l = child(a, bn.lhs), r = child(a, bn.rhs);
+    // Two std::nullptr_t values are equal ([expr.eq]/7). Such an operand is a `nullptr` literal
+    // in the α subset, so nothing is evaluated.
+    if (cls(info(l).type) == TypeClass::other && (bn.op == ast::BinaryOp::eq || bn.op == ast::BinaryOp::ne)) {
+      for (At o : {l, r})
+        if (!is_literal(o)) unsupported(o, "of type std::nullptr_t");
+      return int_constant(bn.info.type, bn.op == ast::BinaryOp::eq);
+    }
     ValueId x{}, y{};
     unsequenced(std::array{l, r}, [&](std::size_t i, At o) { (i ? y : x) = rvalue(o); });
     ast::QualType t = bn.info.type, ot = info(l).type;
     using enum ast::BinaryOp;
     switch (bn.op) {
       case lt: case gt: case le: case ge: case eq: case ne: {
-        // Pointers, and std::nullptr_t values (only == and !=, [expr.eq]), compare as pointers.
-        if (cls(ot) == TypeClass::pointer || cls(ot) == TypeClass::other) {
+        if (cls(ot) == TypeClass::pointer) {
           ir::Pred p = bn.op == lt ? ir::Pred::lt : bn.op == gt ? ir::Pred::gt : bn.op == le ? ir::Pred::le
                      : bn.op == ge ? ir::Pred::ge : bn.op == eq ? ir::Pred::eq : ir::Pred::ne;
           return pure(ir::Op::ptr_cmp, t, {x, y}, {std::to_underlying(p)});
@@ -792,7 +819,8 @@ class Gen {
     }
     if (is<ast::DeclRef>(a)) {
       ast::EntityId e = get<ast::DeclRef>(a).entity;
-      if (cls(t) == TypeClass::function) unsupported(a, "naming a function as an object");
+      // A function designator's address is the function's ([conv.func], [expr.unary.op]).
+      if (cls(t) == TypeClass::function) return {pure(ir::Op::func_addr, facts_.pointer_to(t), {}, {word(e)}), t};
       // A namespace-scope variable: its address is a constant of the entity ([basic.stc.static]).
       return {pure(ir::Op::global, facts_.pointer_to(t), {}, {word(e)}), t};
     }

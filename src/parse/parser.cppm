@@ -859,8 +859,8 @@ public:
                     begin, pos());
   }
 
-  // `if !opt consteval compound-statement else statement` ([stmt.if]): both substatements are
-  // compound statements. The branch taken when manifestly constant-evaluated is an immediate
+  // `if !opt consteval compound-statement else statement` ([stmt.if]): the statement after `else`
+  // must be a compound statement too ([stmt.if]/4). The branch taken when manifestly constant-evaluated is an immediate
   // function context ([expr.const]).
   Ex if_consteval(u32 begin) {
     bool negated = accept(Tk::exclaim);
@@ -882,6 +882,12 @@ public:
     return s_->node(ast::IfConsteval{negated, sema::Sema::at(then_, begin), sema::Sema::at(else_, begin)}, begin, pos());
   }
 
+  // After an error inside parentheses: past the `)` and the `;`.
+  void skip_rest() {
+    skip_to_semi();
+    if (accept(Tk::r_paren)) skip_to_semi();
+  }
+
   // `static_assert ( constant-expression , string-literal opt ) ;` ([dcl.pre]): the condition,
   // contextually converted to bool, must be a constant expression whose value is true.
   Ex static_assert_declaration() {
@@ -895,11 +901,22 @@ public:
     Ex cond = s_->to_bool(e, e.begin);
     sema::ConstId message = sema::ConstId::none;
     if (accept(Tk::comma)) {
-      Ex m = is(Tk::string_lit) ? primary_expression() : Ex{};
+      // An unevaluated-string ([lex.string.uneval]): no encoding prefix and no suffix. A message
+      // that is a constant expression needs classes (#102).
+      if (!is(Tk::string_lit)) {
+        s_->diag(pos(), Diag::expected_string_literal);
+        skip_rest();
+        return {NodeId::none, begin, pos()};
+      }
+      if (literal().encoding != lex::Encoding::ordinary || literal().ud_suffix != lex::no_name) {
+        s_->diag(pos(), Diag::unevaluated_string);
+        skip_rest();
+        return {NodeId::none, begin, pos()};
+      }
+      Ex m = primary_expression();
       auto lit = s_->as<ast::Literal>(m);
-      if (!lit || s_->world().values.rec(lit->value).kind != sema::ValueKind::string) {
-        if (m.ok() || !is(Tk::string_lit)) s_->diag(m.ok() ? m.begin : pos(), Diag::not_supported, kind());
-        skip_to_semi();
+      if (!lit) {
+        skip_rest();
         return {NodeId::none, begin, pos()};
       }
       message = lit->value;
@@ -923,10 +940,11 @@ public:
     auto c = s_->as<ast::Call>(call);
     if (!c || c->function == ast::EntityId::none || !s_->is_consteval(c->function) || s_->immediate_context) return call;
     sema::Evaluated v = sema::Evaluator(*s_, questions()).evaluate(call);
-    if (!v.value) {
+    if (!v.constant) {
       s_->diag(call.begin, Diag::not_constant, v.reason);
       return {NodeId::none, call.begin, call.end};
     }
+    if (!v.value) return call;  // a void function: nothing to replace, and no effect at run time
     return s_->literal(call.type(), *v.value, ast::ValueCategory::prvalue, call.begin, call.end);
   }
 
@@ -1095,7 +1113,8 @@ public:
           init = s_->convert(e, d.type, e.begin);
           // A constexpr variable, or a const integral one with a constant initializer, is usable
           // in constant expressions ([expr.const]); a constexpr one must have one ([dcl.constexpr]).
-          bool usable_kind = sema::Types::is_const(d.type) && s_->types().is_integral(d.type);
+          bool usable_kind = sema::Types::is_const(d.type) && !sema::Types::is_volatile(d.type) &&
+                             s_->types().is_integral(d.type);
           if (init.ok() && (spec.is_constexpr || usable_kind)) {
             sema::Evaluated v = sema::Evaluator(*s_, questions()).evaluate(init);
             if (v.value) s_->set_local_value(local, *v.value);

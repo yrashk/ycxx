@@ -59,6 +59,9 @@ enum class Diag : std::uint32_t {
   constexpr_specifiers [[=message{Severity::error, "at most one of 'constexpr', 'consteval' and 'constinit' may appear"}]],
   consteval_not_function [[=message{Severity::error, "'consteval' can only declare a function"}]],
   constinit_automatic [[=message{Severity::error, "'constinit' can only declare a variable with static storage duration"}]],
+  constinit_function [[=message{Severity::error, "'constinit' can only declare a variable"}]],
+  expected_string_literal [[=message{Severity::error, "expected a string literal"}]],
+  unevaluated_string [[=message{Severity::error, "this string cannot have an encoding prefix or a suffix"}]],
   consteval_redeclared [[=message{Severity::error, "'{0:n}' is declared both 'consteval' and not"}]],
   constexpr_redeclared [[=message{Severity::error, "'{0:n}' is declared both 'constexpr' and not"}]],
   // [basic.start.main]

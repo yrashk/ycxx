@@ -34,9 +34,6 @@ public:
   // precede the current item, and, inside a function body, the item's own (§B2, [basic.scope.pdecl]).
   virtual std::vector<DeclId> visible_decls(NameId name) = 0;
   virtual ast::DeclSema decl_sema(DeclId d) = 0;
-  // The value of a variable usable in constant expressions ([expr.const]): a const variable of
-  // integral type with a constant initializer.
-  virtual std::optional<ConstId> constant_value(EntityId e) = 0;
   // What a constant evaluation fetches (§B7): `function_ir` of a function defined before the
   // current point ([expr.const]), and a namespace-scope variable as the interpreter sees it.
   virtual interp::Callee function_ir(EntityId f) = 0;
