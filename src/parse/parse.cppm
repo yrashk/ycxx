@@ -581,6 +581,10 @@ private:
     // The enumerators: each the previous one's value plus one, or its initializer's, a converted
     // constant expression of the underlying type when it is fixed ([dcl.enum]/5).
     std::int64_t next = 0;
+    // Before the closing brace an enumerator has its initializer's type, or the previous one's,
+    // or the fixed underlying type ([dcl.enum]/5); its value is kept until the type is chosen.
+    QualType prev_type = fixed.value_or(s_.builtin(sema::Builtin::int_));
+    std::vector<std::int64_t> values;
     while (!ps_.is(Tk::r_brace) && !ps_.at_end()) {
       if (!ps_.is(Tk::identifier)) {
         s_.diag(ps_.pos(), Diag::expected_unqualified_id);
@@ -590,6 +594,12 @@ private:
       u32 en_at = ps_.pos();
       ps_.bump();
       std::int64_t value = next;
+      if (!ps_.is(Tk::equal) && fixed && !values.empty()) {
+        // An implicit value must fit the fixed type too.
+        QualType ll = s_.builtin(sema::Builtin::long_long);
+        Ex lit = s_.literal(ll, s_.world().values.integer(ll, sema::u64(value)), ast::ValueCategory::prvalue, en_at, en_at);
+        if (s_.narrows(lit, *fixed)) s_.diag(en_at, Diag::narrowing, ll, *fixed);
+      }
       if (ps_.accept(Tk::equal)) {
         Ex x = ps_.constant_expression();
         Ex v = s_.promote(x);
@@ -604,6 +614,8 @@ private:
           if (fixed) {
             Ex lit = s_.literal(v.type(), *c, ast::ValueCategory::prvalue, x.begin, x.end);
             if (s_.narrows(lit, *fixed)) s_.diag(x.begin, Diag::narrowing, v.type(), *fixed);
+          } else {
+            prev_type = sema::Types::unqualified(v.type());
           }
         }
       }
@@ -616,24 +628,32 @@ private:
             s_.diag(en_at, Diag::conflicting_declaration, en);
       EntityId x = s_.world().entities.entity(
           {sema::EntityKind::enumerator, en, {}, LangLinkage::cxx, ast::Linkage::none, {}, e});
-      ConstId cv = s_.world().values.integer(*er.underlying, sema::u64(value));
-      er.enumerators.push_back({en, x, cv});
-      p_->set_constant(x, cv, k_);
+      p_->set_constant(x, s_.world().values.integer(prev_type, sema::u64(value)), k_);
+      er.enumerators.push_back({en, x, ConstId::none});
+      values.push_back(value);
       ast::DeclSema xs = class_decl(e, true);
       xs.kind = ast::DeclKind::enumerator;
       xs.type = t;
       xs.entity = x;
       decls_.push_back(xs);
+      xs.type = prev_type;  // inside the list
       s_.own.push_back({en, xs});
       if (!ps_.accept(Tk::comma)) break;
     }
-    // [dcl.enum]/7: without a fixed type, int holds the values here, or long long.
-    if (!fixed)
-      for (const sema::EnumeratorRec& x : er.enumerators) {
-        std::int64_t v = std::int64_t(s_.world().values.rec(x.value).bits);
-        if (v < std::numeric_limits<std::int32_t>::min() || v > std::numeric_limits<std::int32_t>::max())
-          er.underlying = s_.builtin(sema::Builtin::long_long);
-      }
+    // [dcl.enum]/7: without a fixed type, the type holds every value, and is no larger than int
+    // unless a value fits neither int nor unsigned int.
+    if (!fixed && !values.empty()) {
+      auto [lo, hi] = std::ranges::minmax(values);
+      using sema::Builtin;
+      Builtin u = lo >= std::numeric_limits<std::int32_t>::min() && hi <= std::numeric_limits<std::int32_t>::max() ? Builtin::int_
+                  : lo >= 0 && hi <= std::int64_t(std::numeric_limits<std::uint32_t>::max())                     ? Builtin::unsigned_int
+                                                                                                                 : Builtin::long_;
+      er.underlying = s_.builtin(u);
+    }
+    for (std::size_t i = 0; i < er.enumerators.size(); ++i) {
+      er.enumerators[i].value = s_.world().values.integer(*er.underlying, sema::u64(values[i]));
+      p_->set_constant(er.enumerators[i].entity, er.enumerators[i].value, k_);
+    }
     ps_.seek(it_->brace_end);
     if (ps_.accept(Tk::semi)) return;
     DeclSpec spec;
@@ -1173,7 +1193,9 @@ private:
           // A constexpr or constinit variable must be constant-initialized ([dcl.constexpr],
           // [dcl.constinit]); a constexpr one, and a const integral one that is, are usable in
           // constant expressions ([expr.const]).
-          sema::Evaluated v = sema::Evaluator(s_, q_).evaluate(init);
+          // An enumerator is its own constant; the interpreter has no enumeration objects (#25).
+          auto lit = types.is_enum(d.type) ? s_.as<ast::Literal>(init) : std::nullopt;
+          sema::Evaluated v = lit ? sema::Evaluated{lit->value, 0, true} : sema::Evaluator(s_, q_).evaluate(init);
           if (v.value) {
             value = *v.value;
             if (spec.is_constexpr || (sema::Types::is_const(d.type) && !sema::Types::is_volatile(d.type) &&

@@ -865,6 +865,12 @@ public:
       if (!is_unscoped_enum(from)) return {};
       if (types().is(to, Builtin::bool_)) return {true, 2, 0};
       if (!types().is_integral(to)) return {};
+      // [conv.prom]/4, [over.ics.rank]/4.2: with a fixed type, to it is the better promotion.
+      if (const EnumRec* er = w_->classes.find_enum(types().enum_of(from)); er && er->fixed) {
+        if (types().canonical(*er->underlying) == types().canonical(to)) return {true, 1, 0};
+        if (builtin(promoted(*types().builtin_of(*er->underlying))) == to) return {true, 1, 1};
+        return {true, 2, 0};
+      }
       bool promotion = builtin(promoted(*types().builtin_of(underlying_of(from)))) == to;
       return {true, promotion ? 1 : 2, 0};
     }

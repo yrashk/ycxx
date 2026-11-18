@@ -561,8 +561,10 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   integer's constant, so the interpreter, which has no enumeration objects yet (#25), sees only
   integers. The IR, `lower` and the layout treat an enumeration as its underlying type.
 - Linkage names of enumerations, nested ones included, match Clang's.
-- Tests: `tests/own/classes/s4-*enum*`, `s4-scoped-enum`, `s4-unscoped-enum` (spec-only): 5 of 5.
-- Not yet: opaque enum declarations (`enum E : int;`), unnamed enumerations, `switch`.
+- Tests: `tests/own/classes/s4-*enum*`, `s4-scoped-enum`, `s4-unscoped-enum` (spec-only, plus two
+  from the review): 7 of 7.
+- Not yet: opaque enum declarations (`enum E : int;`), unnamed enumerations, `switch`, `E{}` and
+  `E(v)` as expressions, enumerations in a block (#117), constexpr enumeration objects (#25).
 
 ## Bootstrap workarounds
 
