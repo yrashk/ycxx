@@ -69,12 +69,14 @@ build/bin/ycxx cxx hello.cpp -o hello && ./hello
 Nothing beyond the subset above compiles, so neither real programs nor libycxx do yet.
 
 **In progress**, one slice per epic:
-- the preprocessor ([#85](https://github.com/yrashk/ycxx/issues/85));
-- the resident daemon, with the multithreaded scheduler
-  ([#84](https://github.com/yrashk/ycxx/issues/84)).
+- the resident daemon: concurrent requests, and making it the default
+  ([#84](https://github.com/yrashk/ycxx/issues/84));
+- classes and the object model ([#86](https://github.com/yrashk/ycxx/issues/86));
+- including the standard headers: libycxx's compiler detection
+  ([yrashk/libycxx#17](https://github.com/yrashk/libycxx/issues/17)), then `<cstdio>`
+  through sema ([#133](https://github.com/yrashk/ycxx/issues/133)).
 
-Next come classes ([#86](https://github.com/yrashk/ycxx/issues/86)), then templates
-([#88](https://github.com/yrashk/ycxx/issues/88)) and exceptions
+Next come templates ([#88](https://github.com/yrashk/ycxx/issues/88)) and exceptions
 ([#89](https://github.com/yrashk/ycxx/issues/89)).
 
 ## Goals
