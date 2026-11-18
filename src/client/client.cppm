@@ -7,6 +7,7 @@ export module ycxx.client;
 import std;
 import ycxx.compile;
 import ycxx.daemon;
+import ycxx.pipeline;
 import ycxx.pp;
 
 export namespace ycxx::client {
@@ -140,8 +141,9 @@ int cxx(std::span<const std::string_view> args) {
     if (verbose) std::println(std::cerr, "ycxx: running in-process: {}", d.error());
   }
   pp::DiskHost disk;
+  pipeline::Session session;
   bool stopped = false;
-  compile::Done d = compile::run(r, disk, {}, stopped);
+  compile::Done d = compile::run(r, disk, session, {}, stopped);
   return compile::finish(d);
 }
 

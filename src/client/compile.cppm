@@ -7,6 +7,7 @@ export module ycxx.compile;
 import std;
 import ycxx.obj.macho;
 import ycxx.pipeline;
+import ycxx.engine;
 import ycxx.pp;
 
 export namespace ycxx::compile {
@@ -39,6 +40,8 @@ struct Report {
   std::uint64_t inputs_changed = 0;  // file-table entries changed by the batches it ran through
   std::uint64_t regions_computed = 0;  // pp regions computed and reused (#85's session counters)
   std::uint64_t regions_reused = 0;
+  std::uint64_t executed = 0;   // engine cells executed and validated in this request's session
+  std::uint64_t validated = 0;
 };
 
 struct Done {
@@ -55,8 +58,9 @@ using Stop = std::function<bool()>;
 // The variables of `environment` this process has.
 std::vector<std::pair<std::string, std::string>> environment_now();
 
-// Runs a request, reading files through `host`. `stopped` is set when `stop` stopped it.
-Done run(const Request& r, pp::Host& host, const Stop& stop, bool& stopped);
+// Runs a request in `session` (#63), reading files through `host`. `stopped` is set when `stop`
+// stopped it.
+Done run(const Request& r, pp::Host& host, pipeline::Session& session, const Stop& stop, bool& stopped);
 
 // The path a request's scope is found from (§2): its first source file, else its first input,
 // else nothing (the working directory). Relative to the request's `cwd`.
@@ -161,8 +165,10 @@ std::filesystem::path object_name(const std::string& source) {
   return std::filesystem::path(source).filename().replace_extension(".o");
 }
 
-// Compiles one translation unit; nullopt after reporting its errors.
-std::optional<obj::object> compile_unit(Done& d, pp::Host& host, const std::string& path, Options::Stop stop) {
+// Compiles one translation unit through the session's queries; nullopt after reporting its
+// errors. With `-fsyntax-only` or `-E`, an object with no content.
+std::optional<obj::object> compile_unit(Done& d, pp::Host& host, pipeline::Session& session, pipeline::TuId tu,
+                                        const std::string& path, Options::Stop stop) {
   auto text = host.read(path);
   if (!text) {
     std::format_to(std::back_inserter(d.err), "ycxx: error: cannot read '{}'\n", path);
@@ -180,24 +186,22 @@ std::optional<obj::object> compile_unit(Done& d, pp::Host& host, const std::stri
     if (errors) return std::nullopt;
     return obj::object{};
   }
+  session.set_source(tu, path, *text, object_name(path).native_encoded_string());
   Renderer out(d.err, path, *text);
-  pipeline::Front front(path, *text);
-  for (const pipeline::Message& m : front.messages()) {
+  const pipeline::FrontResult& front = session.get<pipeline::TuFront>(tu);
+  for (const pipeline::Message& m : front.messages) {
     if (m.where.empty()) out.at(m.offset, m.error, m.text);
     else std::format_to(std::back_inserter(d.err), "{}: {}: {}\n", m.where, m.error ? "error" : "warning", m.text);
   }
   if (front.has_errors()) return std::nullopt;
   if (stop == Options::Stop::syntax) return obj::object{};
-  pipeline::TranslationUnit tu = front.unit(object_name(path).native_encoded_string());
-  auto o = pipeline::compile(tu, front.interners(), front.constants());
-  if (!o) {
-    for (const pipeline::BackError& e : o.error()) {
-      if (e.at) out.at(front.byte_offset(*e.at), true, e.message);
-      else out.file_level(e.message);
-    }
-    return std::nullopt;
+  const pipeline::TuValue& v = session.get<pipeline::Tu>(tu);
+  for (const pipeline::BackError& e : v.errors) {
+    if (e.at) out.at(session.byte_offset(tu, *e.at), true, e.message);
+    else out.file_level(e.message);
   }
-  return std::move(*o);
+  if (!v.object) return std::nullopt;
+  return *v.object;
 }
 
 std::int32_t fail(Done& d, std::string_view message) {
@@ -224,7 +228,7 @@ std::optional<std::string> first_input(std::span<const std::string> argv) {
 
 // The c++-compatible front: `[-c|-fsyntax-only|-E] [-o out] [-std=c++26] a.cpp...`. Exits 0 on
 // success and 1 on any error in the input or the command line.
-Done run(const Request& r, pp::Host& host, const Stop& stop, bool& stopped) {
+Done run(const Request& r, pp::Host& host, pipeline::Session& session, const Stop& stop, bool& stopped) {
   Done d;
   stopped = false;
   auto opts = parse_options(views(r.argv));
@@ -234,14 +238,17 @@ Done run(const Request& r, pp::Host& host, const Stop& stop, bool& stopped) {
   }
   pp::configure(pp::with_system_dirs(opts->pp), host);
   const pp::Session::Stats before = pp::session().stats;
+  const engine::Stats engine_before = session.db().stats();
   bool failed = false;
-  std::vector<obj::object> objects;
-  for (const std::string& s : opts->sources) {
+  std::vector<pipeline::TuId> tus;
+  for (std::uint32_t k = 0; k < opts->sources.size(); ++k) {
+    const std::string& s = opts->sources[k];
     if (stop && stop()) {
       stopped = true;
       return d;
     }
-    auto o = compile_unit(d, host, s, opts->stop);
+    const pipeline::TuId tu{k};
+    auto o = compile_unit(d, host, session, tu, s, opts->stop);
     if (!o) {
       failed = true;
       continue;
@@ -250,17 +257,23 @@ Done run(const Request& r, pp::Host& host, const Stop& stop, bool& stopped) {
       std::string out = opts->output ? *opts->output : object_name(s).native_encoded_string();
       d.outputs.push_back({std::move(out), obj::macho::write_object(*o), false});
     } else if (opts->stop == Options::Stop::link) {
-      objects.push_back(std::move(*o));
+      tus.push_back(tu);
     }
   }
-  d.report.regions_computed = pp::session().stats.computed - before.computed;
-  d.report.regions_reused = pp::session().stats.reused - before.reused;
-  if (failed) {
-    d.exit_status = 1;
+  auto count = [&] {
+    d.report.regions_computed = pp::session().stats.computed - before.computed;
+    d.report.regions_reused = pp::session().stats.reused - before.reused;
+    const engine::Stats now = session.db().stats();
+    d.report.executed = now.executed - engine_before.executed;
+    d.report.validated = now.validated - engine_before.validated;
+  };
+  if (failed || opts->stop != Options::Stop::link) {
+    count();
+    if (failed) d.exit_status = 1;
     return d;
   }
-  if (opts->stop != Options::Stop::link) return d;
 
+  std::vector<obj::object> objects;
   // Objects named on the command line are read as they are, never through the file table (§5.2).
   for (const std::string& path : opts->objects) {
     auto text = read_disk(in_cwd(r, path));
@@ -277,13 +290,15 @@ Done run(const Request& r, pp::Host& host, const Stop& stop, bool& stopped) {
     objects.push_back(std::move(*o));
   }
   std::filesystem::path out = opts->output.value_or("a.out");
-  auto image = pipeline::link_executable(objects, out.filename().native_encoded_string());
-  if (!image) {
-    for (const link::error& e : image.error()) std::format_to(std::back_inserter(d.err), "ycxx: error: {}\n", e.message);
+  session.set_program(pipeline::ProgramId{0}, {std::move(tus), std::move(objects), out.filename().native_encoded_string()});
+  const pipeline::Linked& image = session.get<pipeline::Link>(pipeline::ProgramId{0});
+  count();
+  if (!image.errors.empty()) {
+    for (const std::string& e : image.errors) std::format_to(std::back_inserter(d.err), "ycxx: error: {}\n", e);
     d.exit_status = 1;
     return d;
   }
-  d.outputs.push_back({out.native_encoded_string(), std::move(*image), true});
+  d.outputs.push_back({out.native_encoded_string(), image.image, true});
   return d;
 }
 

@@ -13,6 +13,7 @@ export module ycxx.daemon:server;
 
 import std;
 import ycxx.compile;
+import ycxx.pipeline;
 import ycxx.pp;
 import :posix;
 import :os;
@@ -293,6 +294,9 @@ class Server {
         stats_.restarts += done->report.restarts;
         stats_.regions_computed += done->report.regions_computed;
         stats_.regions_reused += done->report.regions_reused;
+        stats_.executed += done->report.executed;
+        stats_.validated += done->report.validated;
+        stats_.last_executed = done->report.executed;
       } else {
         ++stats_.cancelled;
       }
@@ -335,7 +339,7 @@ class Server {
         return false;
       };
       bool stopped = false;
-      compile::Done d = compile::run(r, table_, stop, stopped);
+      compile::Done d = compile::run(r, table_, session_for(r), stop, stopped);
       if (!stopped) {
         // The only live root stored its answer: the quantum returns to the floor (§4.2).
         admission_.progressed();
@@ -367,6 +371,27 @@ class Server {
     }
   }
 
+  // The engine session a request runs in (#63). It is kept only for the same request at the same
+  // revision: `Pp` records only the main file's text, not the headers it includes, the include
+  // paths or the main file's path (they are read through pp's process session), so a session kept
+  // across an edit, another directory or other options could answer from stale cells. Within one
+  // revision no file the table knows has changed, so an identical request is answered from the
+  // session, executing nothing. Input providers (#95, #120) lift the restriction.
+  pipeline::Session& session_for(const compile::Request& r) {
+    std::uint64_t revision;
+    {
+      std::lock_guard g(stats_mu_);
+      revision = stats_.revision;
+    }
+    if (!session_ || session_revision_ != revision || session_argv_ != r.argv || session_cwd_ != r.cwd) {
+      session_ = std::make_unique<pipeline::Session>();
+      session_revision_ = revision;
+      session_argv_ = r.argv;
+      session_cwd_ = r.cwd;
+    }
+    return *session_;
+  }
+
   void requeue(Events::Batch b) {
     for (std::string& p : b.paths) events_->push(std::move(p));
     if (b.overflow) events_->overflow();
@@ -384,6 +409,10 @@ class Server {
   FileTable table_;
   Admission admission_;
   std::timed_mutex engine_mu_;  // one request in the engine at a time (#15 lifts this)
+  std::unique_ptr<pipeline::Session> session_;  // under engine_mu_
+  std::uint64_t session_revision_ = 0;
+  std::vector<std::string> session_argv_;
+  std::string session_cwd_;
 
   std::mutex conn_mu_;
   std::condition_variable conn_cv_;

@@ -6,3 +6,6 @@ if(APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "arm64|aarch64")
 else()
   add_test(NAME unit.pipeline COMMAND unit_pipeline)
 endif()
+
+# The pipeline's cells (#63): what a second build and an edit re-execute, and incremental == cold.
+ycxxc_unit_test(pipeline_incremental incremental_test.cpp ycxxc_pipeline)

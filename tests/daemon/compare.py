@@ -89,13 +89,23 @@ def main():
             (work / sub).mkdir()
             (work / sub / 'v.h').write_text(f'#define V {value}\n')
             (work / sub / 'm.cpp').write_text('#include "v.h"\nint main() { return V; }\n')
+        def build(sub, env, args=('-c', 'm.cpp', '-o', 'm.o')):
+            """The answer and the object it wrote."""
+            r = run(ycxx, list(args), work / sub, env)
+            o = work / sub / 'm.o'
+            data = o.read_bytes() if o.exists() else None
+            if o.exists():
+                o.unlink()
+            return r, data
         for sub in ('a', 'b'):
-            want = run(ycxx, ['-E', 'm.cpp'], work / sub, cold)
-            got = run(ycxx, ['-E', 'm.cpp'], work / sub, daemon)
-            if want != got:
-                fail(f'same argv in {sub}/: {got!r:.300} != cold {want!r:.300}')
+            for args in (['-E', 'm.cpp'], ['-c', 'm.cpp', '-o', 'm.o']):
+                want, got = build(sub, cold, args), build(sub, daemon, args)
+                if want != got:
+                    fail(f'same argv {args} in {sub}/: {got!r:.300} != cold {want!r:.300}')
 
-        # 3. An edit between two requests is seen at once (cookie sync, §5.4).
+        # 3. An edit to a header between two identical requests is seen at once (cookie sync,
+        # §5.4), in -E and in the object: the engine session kept for an identical request must
+        # not answer from cells that recorded only the main file.
         h = work / 'a' / 'v.h'
         for value in (3, 4, 5):
             h.write_text(f'#define V {value}\n')
@@ -103,6 +113,16 @@ def main():
             got = run(ycxx, ['-E', 'm.cpp'], work / 'a', daemon)
             if want != got or f'return {value};'.encode() not in got[1]:
                 fail(f'edit to V={value}: {got!r:.300} != cold {want!r:.300}')
+            want, got = build('a', cold), build('a', daemon)
+            if want != got:
+                fail(f'edit to V={value}, -c: the daemon\'s object differs from a cold compile')
+
+        # An identical request at an unchanged revision executes nothing (#96's example).
+        build('a', daemon)
+        status = subprocess.run([ycxx, 'ctl', 'status'], cwd=work, env=base, capture_output=True, text=True)
+        fields = dict(line.split(': ', 1) for line in status.stdout.splitlines() if ': ' in line)
+        if fields.get('last_executed') != '0':
+            fail(f'a repeated request executed {fields.get("last_executed")} cells')
 
         status = subprocess.run([ycxx, 'ctl', 'status'], cwd=work, env=base, capture_output=True, text=True)
         fields = dict(line.split(': ', 1) for line in status.stdout.splitlines() if ': ' in line)

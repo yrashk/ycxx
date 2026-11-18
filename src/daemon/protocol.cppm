@@ -48,6 +48,9 @@ struct Status {
   std::uint64_t cookie_timeouts = 0;
   std::uint64_t regions_computed = 0;
   std::uint64_t regions_reused = 0;
+  std::uint64_t executed = 0;       // engine cells executed and validated, in all requests
+  std::uint64_t validated = 0;
+  std::uint64_t last_executed = 0;  // in the last request answered
   std::string watcher;           // "fsevents", "inotify", or why there is none
   std::uint64_t unwatched = 0;   // directories stat-checked per request instead (§5.5)
   std::uint64_t quantum_ms = 0;  // the admission quantum now (§4.2)

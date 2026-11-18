@@ -253,6 +253,14 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
 
 ## Evidence and tests
 
+- **Build twice in one session before calling a stage incremental.** On #63 the first warm
+  rebuild crashed in sema: `Entities` assumed it allocated every entity handle, and the back end
+  had interned string literal entities in between. Nothing per-process had shown it.
+  - Do: test a cell graph with a session that builds, edits and builds again, and compare with a
+    cold build. Insert a declaration first too: the warm session then numbers entities
+    differently, which catches output ordered by handle.
+  - Learned on #63.
+
 - **An incremental-equals-cold check also catches values that depend on the session.** On #85,
   `unit.pp` compared a warm session's `Region` with a fresh one's after each edit. Five states
   differed, while every token, location and name matched. The difference was `Region::files`,
