@@ -9,3 +9,6 @@ target_link_libraries(engine_bench PRIVATE ycxxc_engine)
 
 # The scheduler (#15): thread counts, chaos, cancellation, hand-over, cycles across threads.
 ycxxc_unit_test(engine_scheduler scheduler_test.cpp ycxxc_engine)
+
+# The engine's additions for the daemon (#95): providers, durabilities, reset_unobserved, counts.
+ycxxc_unit_test(engine_inputs inputs_test.cpp ycxxc_engine)
