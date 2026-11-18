@@ -149,12 +149,13 @@ class Parts(unittest.TestCase):
         # selection that runs nothing: a CI step that must run its tests cannot go green vacuously.
         pp = 'own/smoke/object-like-macro.pp.cpp'  # ycxx has no "preprocess" (tests/features/ycxx.txt)
         with tempfile.TemporaryDirectory() as d:
-            def status(*extra):
+            def status(stage, what, *flags):
                 return subprocess.run([sys.executable, str(REPO / 'tools' / 'test'), '--cxx', 'ycxx', '--state', d,
-                                       '--no-state', '-q', 'core', *extra], capture_output=True, text=True).returncode
-            self.assertEqual(status(pp), 0)
-            self.assertEqual(status('--no-unsupported', pp), 1)
-            self.assertEqual(status('--no-unsupported', 'own/no-such-test'), 1)
+                                       '--no-state', '-q', *flags, stage, what], capture_output=True, text=True).returncode
+            self.assertEqual(status('core', pp), 0)
+            self.assertEqual(status('core', pp, '--no-unsupported'), 1)
+            self.assertEqual(status('wider', pp), 0)  # the wider stage selects no own/ test
+            self.assertEqual(status('wider', pp, '--no-unsupported'), 1)
 
     def test_affected(self):
         tests = [discover.Test('own/a.run.cpp', Path(), 'own', 'run'), discover.Test('own/b.run.cpp', Path(), 'own', 'run')]
