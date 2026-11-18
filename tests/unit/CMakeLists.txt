@@ -12,3 +12,8 @@ function(ycxxc_unit_test area name)
 endfunction()
 
 ycxxc_unit_test(ast handles ycxxc_ast)
+ycxxc_unit_test(ast schema ycxxc_ast)
+ycxxc_unit_test(ast interner ycxxc_ast)
+ycxxc_unit_test(ast builder ycxxc_ast)
+ycxxc_unit_test(ast red ycxxc_ast)
+ycxxc_unit_test(ast compact ycxxc_ast)
