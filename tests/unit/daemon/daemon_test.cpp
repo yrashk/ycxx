@@ -1,6 +1,7 @@
 // The daemon's parts (daemon design §8.2, unit tests): framing round trips and malformed frames,
 // root discovery (worktrees, submodules, `.ycxx`, home), the admission quantum under simulated
-// time, the file table's batches, and the platform watcher with cookie sync on a real directory.
+// time, the file table's batches, the platform watcher with cookie sync on a real directory, and
+// the requests an LSP session checks documents with.
 import std;
 import ycxx.unit;
 import ycxx.compile;
@@ -300,7 +301,22 @@ void watcher() {
 
 }  // namespace
 
+// What an LSP session checks a document with (§6.4): the unit of a served request, alone, with
+// its preprocessing options and standard, and its other actions and inputs dropped.
+void check_requests() {
+  const compile::Request r{{"-Iinc", "-I", "more", "-DX=1", "-std=c++26", "-o", "prog", "a.cpp", "../b/b.cpp", "lib.o"},
+                           "/w/src", {}, 5};
+  check(compile::sources_of(r) == std::vector<std::string>{"/w/src/a.cpp", "/w/b/b.cpp"}, "a request's sources, absolute");
+  auto one = compile::check_one(r, "/w/b/b.cpp");
+  check(one && one->argv == std::vector<std::string>{"-Iinc", "-I", "more", "-DX=1", "-std=c++26", "-fsyntax-only", "../b/b.cpp"} &&
+            one->cwd == "/w/src" && one->build_time == 5,
+        "one unit checked with the request's options, spelled as the request spells it");
+  check(!compile::check_one(r, "/w/src/c.cpp"), "a source the request does not compile");
+  check(compile::sources_of({{"-c", "-Q"}, "/w", {}, 0}).empty(), "a malformed command line has no sources");
+}
+
 int main() {
+  check_requests();
   framing();
   roots();
   admission();

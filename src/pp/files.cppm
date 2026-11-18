@@ -95,8 +95,12 @@ private:
   std::map<FileId, std::optional<Content>> contents_;
 };
 
-// The configuration of a translation unit's preprocessing (§B1.1's root): search paths and
-// command-line macros. Its fingerprint keys every region a session caches.
+// Which files a configuration reads (daemon design §6.1): the disk's, or the editor's open buffers
+// over them.
+enum class View : u8 { disk, editor };
+
+// The configuration of a translation unit's preprocessing (§B1.1's root): search paths,
+// command-line macros and the view. Its fingerprint keys every region a session caches.
 struct Config {
   // `#include "..."` searches the includer's directory, then `quote_dirs`, then `angle_dirs`;
   // `#include <...>` searches `angle_dirs` only (-I, then -isystem, then the system
@@ -109,10 +113,12 @@ struct Config {
   std::vector<std::pair<std::string, std::optional<std::string>>> macros;
   // The target, whose macros are predefined (:predefined).
   const ast::Target* target = &ast::aarch64_darwin;
+  // The root of every prefix (§6.1): an editor-view region is never a disk-view one's.
+  View view = View::disk;
 
   Fp128 fingerprint() const {
     Hasher h;
-    h.bytes(target->triple).uint(u8(0));
+    h.bytes(target->triple).uint(u8(0)).uint(std::to_underlying(view));
     for (const std::string& d : quote_dirs) h.bytes(d).uint(u8(0));
     h.uint(u8(1));
     for (const std::string& d : angle_dirs) h.bytes(d).uint(u8(0));

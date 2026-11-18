@@ -19,11 +19,6 @@ int control(std::span<const std::string_view> args);
 namespace ycxx::client {
 namespace {
 
-int not_yet(std::string_view front) {
-  std::println(std::cerr, "ycxx: the {} front is not implemented yet", front);
-  return 2;
-}
-
 // Whether `cxx` uses the daemon. Off by default until requests run concurrently in it (#15, #63):
 // a build's parallel compiles would otherwise queue behind one another. `YCXX_DAEMON=1` or
 // `--daemon` turn it on, `YCXX_DAEMON=require` or `--daemon=require` (the tests' hook) make a
@@ -147,7 +142,29 @@ int cxx(std::span<const std::string_view> args) {
   return compile::finish(d);
 }
 
-int lsp(std::span<const std::string_view>) { return not_yet("lsp"); }
+// `ycxx lsp [--root DIR]`: the editor's language server, which runs in the daemon of DIR's scope
+// (default: the working directory's), started if none runs; this process only copies bytes between
+// its stdio and the daemon (daemon design §6.4).
+int lsp(std::span<const std::string_view> args) {
+  std::optional<std::string> root;
+  for (std::size_t i = 0; i < args.size(); ++i) {
+    if (args[i] == "--root" && i + 1 < args.size()) root = std::string(args[++i]);
+    else {
+      std::println(std::cerr, "ycxx: error: unknown argument '{}' (usage: ycxx lsp [--root DIR])", args[i]);
+      return 2;
+    }
+  }
+  auto c = daemon::reach(daemon::root_for(std::nullopt, root ? *root : cwd_now()), true);
+  if (!c) {
+    std::println(std::cerr, "ycxx: error: cannot reach the daemon: {}", c.error());
+    return 1;
+  }
+  if (auto t = daemon::tunnel_lsp(*c, 0, 1); !t) {
+    std::println(std::cerr, "ycxx: error: {}", t.error());
+    return 1;
+  }
+  return 0;
+}
 
 // `ycxx ctl status|shutdown [--root DIR]`: asks the daemon of DIR's scope (default: the working
 // directory's), never starting one.

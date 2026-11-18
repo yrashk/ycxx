@@ -58,13 +58,31 @@ using Stop = std::function<bool()>;
 // The variables of `environment` this process has.
 std::vector<std::pair<std::string, std::string>> environment_now();
 
-// Runs a request in `session` (#63), reading files through `host`. `stopped` is set when `stop`
-// stopped it.
-Done run(const Request& r, pp::Host& host, pipeline::Session& session, const Stop& stop, bool& stopped);
+// Where a request's units are (daemon design §6.1): the view their files are read through, and
+// the number of the first. The editor view's units are numbered apart from the disk view's, so a
+// keystroke never turns a build's unit red.
+struct Units {
+  pp::View view = pp::View::disk;
+  std::uint32_t first = 0;
+};
+
+// Runs a request in `session` (#63), reading files through `host` (which reads the view `units`
+// names). `stopped` is set when `stop` stopped it.
+Done run(const Request& r, pp::Host& host, pipeline::Session& session, const Stop& stop, bool& stopped,
+         Units units = {});
 
 // The path a request's scope is found from (§2): its first source file, else its first input,
 // else nothing (the working directory). Relative to the request's `cwd`.
 std::optional<std::string> first_input(std::span<const std::string> argv);
+
+// The translation units a request compiles, as absolute, lexically normal paths (the editor's
+// names for them); none when its command line is malformed.
+std::vector<std::string> sources_of(const Request& r);
+
+// The request that checks one of `r`'s units: `-fsyntax-only` with `r`'s preprocessing options,
+// `source` (absolute, lexically normal) spelled as `r` spells it. Nothing when `r` does not
+// compile `source`.
+std::optional<Request> check_one(const Request& r, std::string_view source);
 
 // Writes the outputs and prints stdout and stderr; the exit status. A failed write is reported on
 // stderr after the request's own diagnostics, with status 1.
@@ -230,9 +248,52 @@ std::optional<std::string> first_input(std::span<const std::string> argv) {
   return std::nullopt;
 }
 
+namespace {
+
+std::string absolute_in(const Request& r, std::string_view path) {
+  std::filesystem::path p(path);
+  if (p.is_relative() && !r.cwd.empty()) p = std::filesystem::path(r.cwd) / p;
+  return p.lexically_normal().generic_native_encoded_string();
+}
+
+}  // namespace
+
+std::vector<std::string> sources_of(const Request& r) {
+  auto opts = parse_options(views(r.argv));
+  if (!opts) return {};
+  return opts->sources | std::views::transform([&](const std::string& s) { return absolute_in(r, s); }) |
+         std::ranges::to<std::vector>();
+}
+
+std::optional<Request> check_one(const Request& r, std::string_view source) {
+  auto opts = parse_options(views(r.argv));
+  if (!opts) return std::nullopt;
+  auto spelled = std::ranges::find_if(opts->sources, [&](const std::string& s) { return absolute_in(r, s) == source; });
+  if (spelled == opts->sources.end()) return std::nullopt;
+  Request one{{}, r.cwd, r.env, r.build_time};
+  // The preprocessing options and the standard, as given; the action, the output and the other
+  // inputs are this request's own.
+  const std::vector<std::string_view> args = views(r.argv);
+  pp::Config scratch;
+  for (std::size_t i = 0; i < args.size(); ++i) {
+    const std::size_t from = i;
+    if (auto taken = pp::take_option(args, i, scratch); taken && *taken) {
+      for (std::size_t k = from; k <= i; ++k) one.argv.emplace_back(args[k]);
+    } else if (args[i] == "-o") {
+      ++i;
+    } else if (args[i].starts_with("-std=")) {
+      one.argv.emplace_back(args[i]);
+    }
+  }
+  one.argv.emplace_back("-fsyntax-only");
+  one.argv.push_back(*spelled);
+  return one;
+}
+
 // The c++-compatible front: `[-c|-fsyntax-only|-E] [-o out] [-std=c++26] a.cpp...`. Exits 0 on
 // success and 1 on any error in the input or the command line.
-Done run(const Request& r, pp::Host& host, pipeline::Session& session, const Stop& stop, bool& stopped) {
+Done run(const Request& r, pp::Host& host, pipeline::Session& session, const Stop& stop, bool& stopped,
+         Units units) {
   Done d;
   stopped = false;
   auto opts = parse_options(views(r.argv));
@@ -240,7 +301,8 @@ Done run(const Request& r, pp::Host& host, pipeline::Session& session, const Sto
     fail(d, opts.error());
     return d;
   }
-  const pp::Config config = pp::with_system_dirs(opts->pp);
+  pp::Config config = pp::with_system_dirs(opts->pp);
+  config.view = units.view;
   pp::Session& ps = pp::configure(config, host);
   auto stats = [&] {
     std::lock_guard lock(ps.mutex);
@@ -256,7 +318,7 @@ Done run(const Request& r, pp::Host& host, pipeline::Session& session, const Sto
       stopped = true;
       return d;
     }
-    const pipeline::TuId tu{k};
+    const pipeline::TuId tu{units.first + k};
     auto o = compile_unit(d, r, config, host, session, tu, s, opts->stop);
     if (!o) {
       failed = true;

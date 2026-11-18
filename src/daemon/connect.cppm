@@ -31,6 +31,9 @@ struct Failure {
 
 std::expected<compile::Done, Failure> request_compile(Connection& c, const compile::Request& r);
 std::expected<Status, std::string> request_status(Connection& c);
+// Turns the connection into an LSP tunnel (§6.4) and copies bytes between `in`, the socket and
+// `out` until the daemon closes it; why not, if the daemon refused.
+std::expected<void, std::string> tunnel_lsp(Connection& c, int in, int out);
 std::expected<void, std::string> request_shutdown(Connection& c);
 
 }  // namespace ycxx::daemon
@@ -132,6 +135,36 @@ std::expected<Status, std::string> request_status(Connection& c) {
   auto s = decode<Status>(*f);
   if (!s) return std::unexpected("malformed status");
   return std::move(*s);
+}
+
+std::expected<void, std::string> tunnel_lsp(Connection& c, int in, int out) {
+  const int sock = c.fd.get();
+  if (!send(sock, Kind::lsp, LspRequest{})) return std::unexpected("cannot send the request");
+  auto f = receive(sock);
+  if (!f) return std::unexpected("the daemon closed the connection: " + f.error());
+  if (f->kind == Kind::refused) {
+    auto why = decode<Refused>(*f);
+    return std::unexpected("the daemon refused: " + (why ? why->reason : "?"));
+  }
+  if (f->kind != Kind::lsp) return std::unexpected("unexpected answer");
+  // The editor's end of input ends what we send; the session ends when the daemon closes, after
+  // it answered everything it read.
+  std::array<char, 1 << 16> buf;
+  bool input = true;
+  for (;;) {
+    std::vector<int> fds{sock};
+    if (input) fds.push_back(in);
+    for (std::size_t i : wait_any(fds, std::nullopt)) {
+      const int from = fds[i];
+      const std::size_t n = read_some(from, buf);
+      if (from == sock) {
+        if (n == 0 || !write_all(out, std::as_bytes(std::span(buf.data(), n)))) return {};
+      } else if (n == 0 || !write_all(sock, std::as_bytes(std::span(buf.data(), n)))) {
+        input = false;
+        shutdown_write(sock);
+      }
+    }
+  }
 }
 
 std::expected<void, std::string> request_shutdown(Connection& c) {

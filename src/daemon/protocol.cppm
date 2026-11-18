@@ -27,6 +27,7 @@ struct Welcome {
 struct Refused {
   std::string reason;
 };
+struct LspRequest {};  // answered by an empty `lsp`; the connection is then the tunnel (§6.4)
 struct StatusRequest {};
 struct ShutdownRequest {};
 struct Bye {};
@@ -51,6 +52,7 @@ struct Status {
   std::uint64_t executed = 0;       // engine cells executed and validated, in all requests
   std::uint64_t validated = 0;
   std::uint64_t last_executed = 0;  // in the last request answered
+  std::uint64_t diagnoses = 0;      // editor-view checks for LSP sessions (§6.4)
   std::string watcher;           // "fsevents", "inotify", or why there is none
   std::uint64_t unwatched = 0;   // directories stat-checked per request instead (§5.5)
   std::uint64_t quantum_ms = 0;  // the admission quantum now (§4.2)
