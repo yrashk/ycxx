@@ -63,6 +63,8 @@ class Records {
 };
 
 // An entity the translation unit declares (or defines): what its symbol is made of.
+// A constructor or destructor is named by its kind, not an identifier (Itanium §5.1.4.3).
+enum class Special : std::uint8_t { none, constructor, destructor };
 struct Entity {
   EntityId id = EntityId::none;
   std::string name;  // its identifier
@@ -73,6 +75,7 @@ struct Entity {
   bool is_constexpr = false;
   std::optional<ast::Loc> at;  // its first declarator, for diagnostics
   EntityId scope = EntityId::none;  // the class of a member
+  Special special = Special::none;  // a constructor or destructor
 };
 
 // A variable definition at namespace scope with its constant initializer, or `ConstId::none` for
@@ -318,9 +321,12 @@ std::expected<obj::object, std::vector<BackError>> compile(const TranslationUnit
     if (!used.contains(ir::raw(e.id))) continue;
     std::optional<QualType> scope;
     if (e.scope != EntityId::none) scope = in.intern_type(ast::TClass{e.scope});
+    // The complete-object constructor and destructor (C1, D1): with no virtual bases they are the
+    // base-object ones too.
+    std::string name_ = e.special == Special::constructor ? "C1" : e.special == Special::destructor ? "D1" : e.name;
     auto name = symbol_name(
-        in, e.name, e.type, e.is_function, e.lang,
-        [&](EntityId c) { return records ? records->class_name(c) : std::string(); }, scope);
+        in, name_, e.type, e.is_function, e.lang,
+        [&](EntityId c) { return records ? records->class_name(c) : std::string(); }, scope, e.special != Special::none);
     if (!name) {
       errors.push_back({e.at, std::format("the name of '{}': {} is not supported yet", e.name, name.error())});
       continue;

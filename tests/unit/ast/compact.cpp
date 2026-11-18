@@ -28,7 +28,7 @@ int main() {
     NodeId two = b.add(lit("2"), 1);
     NodeId f = b.add(DeclRef{rv, f_e}, 1);
     NodeId call = b.add(Call{rv, f_e, {f, 0}, b.list({{one, 2}, {two, 4}})}, 6);
-    NodeId local = b.add(LocalVar{0, {call, 2}}, 9);
+    NodeId local = b.add(LocalVar{0, {call, 2}, EntityId::none}, 9);
     body = b.commit(BodySema{b.add(Compound{b.list({{local, 1}}), in.intern_seq<Cleanup>({})}, 11),
                              b.seq({LocalRec{in.names.intern("v"), int_t, EntityId::none, local, 0}})});
     DeclSema d{f_e, int_t, DeclKind::function, Linkage::external, Storage::none, Access::none, 0,

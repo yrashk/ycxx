@@ -152,11 +152,14 @@ TranslationUnit Front::unit(std::string name) {
   auto declare = [&](EntityId e, std::optional<ast::Loc> at) {
     if (e == EntityId::none || !seen.insert(std::to_underlying(e)).second) return;
     const sema::EntityRec& r = world_.entities.rec(e);
-    if (r.kind != sema::EntityKind::function && r.kind != sema::EntityKind::variable) return;
-    bool fn = r.kind == sema::EntityKind::function;
+    if (r.kind == sema::EntityKind::class_ || r.kind == sema::EntityKind::data_member) return;
+    bool fn = r.kind != sema::EntityKind::variable;
     std::string id(ins_.names.spelling(r.name));
     if (fn && id == "main") tu.main = e;
-    tu.entities.push_back({e, std::move(id), r.type, fn, r.lang, r.linkage, false, at, r.scope});
+    tu.entities.push_back({e, std::move(id), r.type, fn, r.lang, r.linkage, false, at, r.scope,
+                           r.kind == sema::EntityKind::constructor  ? Special::constructor
+                           : r.kind == sema::EntityKind::destructor ? Special::destructor
+                                                                    : Special::none});
   };
   for (std::uint32_t k = 0; k < items_.items.size(); ++k) {
     const items::Item& it = items_.items[k];
@@ -182,7 +185,8 @@ TranslationUnit Front::unit(std::string name) {
       }
     }
     for (std::size_t i = 0; i < decls.size(); ++i) declare(decls[i].entity, at[i]);
-    if (it.kind == items::ItemKind::function && it.has_body() && !decls.empty() && decls[0].entity != EntityId::none) {
+    if (it.kind == items::ItemKind::function && it.has_body() && !decls.empty() && decls[0].entity != EntityId::none &&
+        !(decls[0].flags & sema::decl_flag::deleted)) {
       tu.functions.push_back({decls[0].entity, decls[0], program_->analyze_body(k).value, program_->id(k),
                               it.body_begin - it.begin});
       tu.functions.back().this_type = program_->this_type(decls[0]);
@@ -196,6 +200,13 @@ TranslationUnit Front::unit(std::string name) {
         continue;
       tu.variables.push_back({d.entity, d.type, declarators[i]->value, at[i]});
     }
+  }
+  // The implicitly defined special members that are not trivial ([class.copy.ctor], [class.dtor]).
+  for (std::size_t i = 0; i < program_->synthesized().size(); ++i) {
+    const parse::Program::Synthesized& s = program_->synthesized()[i];
+    declare(s.decl.entity, std::nullopt);
+    tu.functions.push_back({s.decl.entity, s.decl, program_->synthesized_body(i), program_->id(s.item), 0});
+    tu.functions.back().this_type = program_->this_type(s.decl);
   }
   return tu;
 }

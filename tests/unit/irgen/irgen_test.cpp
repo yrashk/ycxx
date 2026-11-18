@@ -179,7 +179,7 @@ struct Body {
     return std::uint32_t(locals.size() - 1);
   }
   NodeId var(std::uint32_t i, NodeId init = NodeId::none) {
-    NodeId v = add(ast::LocalVar{i, {init, 0}});
+    NodeId v = add(ast::LocalVar{i, {init, 0}, ast::EntityId::none});
     return add(ast::DeclStmt{b.list({{v, 0}})});
   }
   NodeId ret(NodeId v = NodeId::none) { return add(ast::Return{{v, 0}, no_cleanups()}); }

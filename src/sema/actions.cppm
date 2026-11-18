@@ -94,6 +94,10 @@ inline constexpr u16 lang_c = 16;  // declared with C language linkage ([dcl.lin
 inline constexpr u16 consteval_ = 32;  // an immediate function ([dcl.constexpr])
 inline constexpr u16 member = 64;      // a member of a class ([class.mem])
 inline constexpr u16 static_ = 128;    // a static member ([class.static])
+inline constexpr u16 deleted = 256;    // a deleted definition ([dcl.fct.def.delete])
+inline constexpr u16 constructor = 512;
+inline constexpr u16 destructor = 1024;
+inline constexpr u16 implicit = 2048;  // an implicitly declared special member ([special])
 }
 
 class Sema {
@@ -121,6 +125,8 @@ public:
     diags_->push_back({engine::Loc{std::to_underlying(item_), loc_base_ + at}, diag_id(d), {arg(args)...}});
   }
   std::size_t diag_count() const { return diags_->size(); }
+  // Drops the diagnostics after the first `n`: a part analysed again where it was diagnosed already.
+  void truncate_diags(std::size_t n) { diags_->resize(n); }
 
   // ------------------------------------------------------------ building
 
@@ -197,6 +203,8 @@ public:
     } else if (!types().is_class(ct)) {
       diag(op_at, Diag::member_of_non_class, ct);
       return fail;
+    } else if (!object.glvalue()) {
+      object = materialize(object, ct, false);  // [expr.ref]: a class prvalue is materialized
     }
     if (!require_complete(ct, op_at)) return fail;
     EntityId c = types().class_of(ct);
@@ -205,7 +213,7 @@ public:
       diag(name_at, Diag::no_member, name, Types::unqualified(ct));
       return fail;
     }
-    if (found->member && found->member->is_function) return bound_member(*found->member, object, arrow, begin, end);
+    if (found->member && found->member->is_function) return bound_member(c, name, object, arrow, begin, end);
     if (found->member) {
       // A static data member: the object expression is evaluated, then discarded ([expr.ref]).
       const MemberDeclRec& m = *found->member;
@@ -218,24 +226,37 @@ public:
     const FieldRec& f = *found->field;
     // [expr.ref]/7.2: the member's type, with the object's cv-qualifiers added; the result is an
     // lvalue if the object is (or is reached through a pointer), else an xvalue.
-    QualType t = types().add_cv(f.type, Types::cv(ct));
-    ValueCategory cat = arrow || object.cat() == ValueCategory::lvalue ? ValueCategory::lvalue : ValueCategory::xvalue;
+    // A reference member gives the object it refers to, an lvalue.
+    bool ref = types().is_reference(f.type);
+    QualType t = ref ? types().referee(f.type) : types().add_cv(f.type, Types::cv(ct));
+    ValueCategory cat = ref || arrow || object.cat() == ValueCategory::lvalue ? ValueCategory::lvalue : ValueCategory::xvalue;
     ExprInfo info{t, cat, 0};
-    return node(ast::Member{info, f.entity, index, arrow ? 1u : 0u, at(object, begin)}, begin, end, info);
+    return node(ast::Member{info, f.entity, index, arrow ? 1u : 0u, ref ? 1u : 0u, at(object, begin)}, begin, end, info);
   }
 
   // ------------------------------------------------------------ initialization ([dcl.init])
 
   // An aggregate ([dcl.init.aggr]): an array, or a class (every class the front end knows so far
   // is one: no constructors, bases or virtual functions yet).
-  bool is_aggregate(QualType t) { return types().is_array(t) || types().is_class(t); }
+  bool is_aggregate(QualType t) {
+    if (types().is_array(t)) return true;
+    if (!types().is_class(t)) return false;
+    const ClassRec* c = w_->classes.find(types().class_of(t));
+    return !c || !c->user_ctors;  // [dcl.init.aggr]/1: no user-declared constructors
+  }
+  bool has_user_ctors(QualType t) { return types().is_class(t) && !is_aggregate(t); }
+
+  // The destructor that ends an object of type `t`, or none if it is trivial ([class.dtor]); for
+  // an array, its elements'.
+  EntityId destructor_of(QualType t) { return w_->classes.destructor_of(t); }
 
   // The elements of an aggregate, in order: an array's elements, a class's non-static data
   // members, each with the aggregate's cv added.
   struct Element {
     QualType type;
     NameId name;
-    ConstId init = ConstId::none;  // a member's default member initializer
+    ConstId init = ConstId::none;  // a member's default member initializer, if constant
+    bool dmi = false;              // it has one
   };
   std::vector<Element> elements(QualType t) {
     std::vector<Element> r;
@@ -243,16 +264,18 @@ public:
     if (tr.kind == TypeKind::array) {
       r.assign(tr.bound, Element{tr.inner, no_name()});
     } else if (const ClassRec* c = tr.kind == TypeKind::class_ ? w_->classes.find(tr.entity) : nullptr) {
-      for (const FieldRec& f : c->fields) r.push_back({types().add_cv(f.type, Types::cv(t)), f.name, f.init});
+      for (const FieldRec& f : c->fields) r.push_back({types().add_cv(f.type, Types::cv(t)), f.name, f.init, f.dmi});
     }
     return r;
   }
 
   // Whether initializing a `t` runs a default member initializer.
+  // (or a constructor).
   bool has_member_inits(QualType t) {
     TypeRec r = types().rec(t);
     if (r.kind == TypeKind::array) return has_member_inits(r.inner);
     if (r.kind != TypeKind::class_) return false;
+    if (const ClassRec* c = w_->classes.find(r.entity); c && c->user_ctors) return true;
     if (const ClassRec* c = w_->classes.find(r.entity))
       for (const FieldRec& f : c->fields)
         if (f.init != ConstId::none || has_member_inits(f.type)) return true;
@@ -262,6 +285,7 @@ public:
   // Value-initialization ([dcl.init.general]) of an object of type `t`. An aggregate whose
   // members have default member initializers gets them (the implicit default constructor's).
   Ex value_init(QualType t, u32 begin, u32 end) {
+    if (has_user_ctors(t)) return construct(t, {}, begin, end);  // the default constructor
     if (has_member_inits(t)) return member_inits(t, true, begin, end);
     ExprInfo info{Types::unqualified(t), ValueCategory::prvalue, 0};
     return node(ast::ValueInit{info}, begin, end, info);
@@ -269,6 +293,7 @@ public:
   // Default-initialization ([dcl.init.general]/7): the default member initializers, and no
   // initialization for the rest.
   Ex default_init(QualType t, u32 begin, u32 end) {
+    if (has_user_ctors(t)) return construct(t, {}, begin, end);
     if (has_member_inits(t)) return member_inits(t, false, begin, end);
     ExprInfo info{Types::unqualified(t), ValueCategory::prvalue, 0};
     return node(ast::DefaultInit{info}, begin, end, info);
@@ -282,6 +307,10 @@ public:
   }
   Ex element_default(const Element& e, bool value, u32 begin, u32 end) {
     if (e.init != ConstId::none) return literal(Types::unqualified(e.type), e.init, ValueCategory::prvalue, begin, end);
+    if (e.dmi) {
+      diag(begin, Diag::not_supported, lex::Tk::equal);  // a non-constant default member initializer in an aggregate (#118)
+      return {NodeId::none, begin, end};
+    }
     return value ? value_init(e.type, begin, end) : default_init(e.type, begin, end);
   }
   Ex list_of(QualType t, std::vector<Ex> out, u32 begin, u32 end) {
@@ -307,6 +336,23 @@ public:
     if (types().is_class(t) && b.clauses.size() == 1 && !b.clauses[0].list && !b.clauses[0].designated &&
         initializes(t, b.clauses[0].expr))
       return convert(b.clauses[0].expr, t, b.clauses[0].begin);
+    // [dcl.init.list]/3.7: a class with constructors: `{}` value-initializes it, else the clauses
+    // are a constructor's arguments, without narrowing.
+    if (has_user_ctors(t)) {
+      if (b.clauses.empty()) return value_init(t, b.begin, b.end);
+      std::vector<Ex> args;
+      for (const Braced::Clause& c : b.clauses) {
+        if (c.list || c.designated) {
+          diag(c.begin, Diag::not_supported, lex::Tk::l_brace);  // nested lists as constructor arguments
+          return fail;
+        }
+        args.push_back(c.expr);
+      }
+      return construct(t, std::move(args), b.begin, b.end, true);
+    }
+    // A reference from one element ([dcl.init.list]/3.10).
+    if (types().is_reference(t) && b.clauses.size() == 1 && !b.clauses[0].list && !b.clauses[0].designated)
+      return bind_reference(b.clauses[0].expr, t, b.clauses[0].begin);
     if (is_aggregate(t)) {
       std::size_t next = 0;
       Ex r = aggregate(t, b, next, b.begin, b.end);
@@ -483,6 +529,11 @@ public:
   // next one.
   // Marks the innermost scope as guarded (`declare_local`); it stays so until it is popped.
   void guard_scope() { guarded_.push_back(scopes_.size() - 1); }
+  // Hides every block scope, for a part analysed in the class's scope inside a function (a
+  // default member initializer in a constructor), and gives them back.
+  using Scopes = std::vector<std::vector<std::pair<NameId, u32>>>;
+  Scopes take_scopes() { return std::exchange(scopes_, {}); }
+  void put_scopes(Scopes s) { scopes_ = std::move(s); }
 
   NameId no_name() { return ins().names.intern(""); }
 
@@ -534,8 +585,16 @@ public:
     for (u32 i = 0; i < cr->fields.size(); ++i)
       if (cr->fields[i].name == name) return Found{&cr->fields[i], i, nullptr};
     for (const MemberDeclRec& m : cr->members)
-      if (m.name == name) return Found{nullptr, 0, &m};
+      if (m.name == name && !m.is_ctor && !m.is_dtor) return Found{nullptr, 0, &m};
     return std::nullopt;
+  }
+  // The member functions of `c` named `name`: an overload set ([over.match.funcs]).
+  std::vector<const MemberDeclRec*> member_functions(EntityId c, NameId name) {
+    std::vector<const MemberDeclRec*> r;
+    if (const ClassRec* cr = w_->classes.find(c))
+      for (const MemberDeclRec& m : cr->members)
+        if (m.name == name && m.is_function && !m.is_ctor && !m.is_dtor) r.push_back(&m);
+    return r;
   }
   const MemberDeclRec* member_decl(EntityId f) {
     EntityId c = w_->entities.rec(f).scope;
@@ -548,10 +607,12 @@ public:
   // A member function named without a call yet: `a.f`, `p->f`, `f` or `S::f`, bound to its object
   // (none when there is none to bind, as in a static member function). Only a call may follow
   // ([expr.ref]/6.3.2).
-  Ex bound_member(const MemberDeclRec& m, std::optional<Ex> object, bool arrow, u32 begin, u32 end) {
+  Ex bound_member(EntityId c, NameId name, std::optional<Ex> object, bool arrow, u32 begin, u32 end) {
+    auto cands = member_functions(c, name);
     ExprInfo info{builtin(Builtin::bound_member), ValueCategory::prvalue, 0};
-    Ex r = node(ast::Member{info, m.entity, ~u32{0}, arrow ? 1u : 0u, object ? at(*object, begin) : Child{}}, begin, end, info);
-    bound_[std::to_underlying(r.id)] = object;
+    Ex r = node(ast::Member{info, cands.front()->entity, ~u32{0}, arrow ? 1u : 0u, 0, object ? at(*object, begin) : Child{}},
+                begin, end, info);
+    bound_[std::to_underlying(r.id)] = {object, std::move(cands)};
     return r;
   }
   bool is_bound_member(const Ex& e) { return e.ok() && types().is(e.type(), Builtin::bound_member); }
@@ -569,20 +630,21 @@ public:
         return fail;
       }
       Ex self = this_expr(begin, begin);
-      QualType t = types().add_cv(f->field->type, Types::cv(types().pointee(*this_type)));
+      bool ref = types().is_reference(f->field->type);
+      QualType t = ref ? types().referee(f->field->type) : types().add_cv(f->field->type, Types::cv(types().pointee(*this_type)));
       ExprInfo info{t, ValueCategory::lvalue, 0};
-      return node(ast::Member{info, f->field->entity, f->index, 1, at(self, begin)}, begin, end, info);
+      return node(ast::Member{info, f->field->entity, f->index, 1, ref ? 1u : 0u, at(self, begin)}, begin, end, info);
     }
     const MemberDeclRec& m = *f->member;
     // A static member, data or function, is named like a namespace-scope entity
     // ([expr.prim.id.qual]): `S::f` can have its address taken or be called.
-    if (!m.is_function || m.is_static) {
+    if (!m.is_function || (m.is_static && member_functions(c, name).size() == 1)) {
       ExprInfo info{m.type, ValueCategory::lvalue, 0};
       return node(ast::DeclRef{info, m.entity}, begin, end, info);
     }
     std::optional<Ex> object;
     if (has_this) object = this_expr(begin, begin);
-    return bound_member(m, object, true, begin, end);
+    return bound_member(c, name, object, true, begin, end);
   }
 
   // `C::name` ([expr.prim.id.qual]) for a class C.
@@ -606,13 +668,28 @@ public:
     u32 begin = callee.begin;
     Ex fail{NodeId::none, begin, end};
     auto m = *as<ast::Member>(callee);
-    const MemberDeclRec* d = member_decl(m.member);
-    if (!d) return fail;
-    std::optional<Ex> object = bound_.at(std::to_underlying(callee.id));
+    const Bound& bound = bound_.at(std::to_underlying(callee.id));
+    std::optional<Ex> object = bound.object;
+    // The object's cv-qualifiers, which a non-static member function must have ([class.this]).
+    std::optional<Cv> object_cv;
+    if (object) object_cv = Types::cv(m.arrow ? types().pointee(object->type()) : object->type());
+    std::vector<Candidate> cands;
+    for (const MemberDeclRec* c : bound.cands)
+      cands.push_back({c->entity, c->type, c->is_static, c->is_deleted});
+    // [class.this]: a non-static member function needs the object's cv-qualifiers.
+    if (object_cv && std::ranges::none_of(bound.cands, [&](const MemberDeclRec* c) {
+          return c->is_static || cv_within(*object_cv, types().rec(c->type).fn_cv);
+        })) {
+      diag(begin, Diag::const_member_call, bound.cands.front()->name);
+      return fail;
+    }
+    auto chosen = resolve(cands, args, begin, bound.cands.front()->name, object_cv);
+    if (!chosen) return fail;
+    const MemberDeclRec* d = bound.cands[*chosen];
     TypeRec fr = types().rec(d->type);
     auto children = call_args(fr, args, begin, paren_at);
     if (!children) return fail;
-    ExprInfo info{Types::unqualified(fr.inner), ValueCategory::prvalue, 0};
+    ExprInfo info = result_info(fr.inner);
     if (d->is_static) {
       // The object expression is evaluated, then discarded ([expr.ref]).
       Ex call = node(ast::Call{info, d->entity, at(callee, begin), b_->list(*children)}, begin, end, info);
@@ -633,12 +710,258 @@ public:
       ExprInfo pi{types().pointer(o.type()), ValueCategory::prvalue, 0};
       o = node(ast::Unary{pi, ast::UnaryOp::address_of, at(o, o.begin)}, o.begin, o.end, pi);
     }
-    Cv object_cv = Types::cv(types().pointee(o.type()));
-    if ((std::to_underlying(object_cv) & ~std::to_underlying(fr.fn_cv)) != 0) {
-      diag(begin, Diag::const_member_call, d->name);
+    return node(ast::MemberCall{info, d->entity, at(o, begin), b_->list(*children)}, begin, end, info);
+  }
+
+  // ------------------------------------------------------------ overload resolution ([over.match])
+
+  // A candidate function: its entity (none for an implicit trivial special member), its type,
+  // whether it takes no implicit object (a non-member or static function), and whether it is
+  // deleted.
+  struct Candidate {
+    EntityId entity;
+    QualType type;
+    bool no_object;
+    bool deleted;
+  };
+
+  // An implicit conversion sequence's ranking ([over.ics.rank]): exact match, promotion,
+  // conversion, then a tie-break among exact matches (an added qualification, or a reference
+  // to a more cv-qualified type, is worse); `viable` false when there is none.
+  struct Ics {
+    bool viable = false;
+    int rank = 0;
+    int sub = 0;
+    bool operator<(const Ics& o) const { return rank != o.rank ? rank < o.rank : sub < o.sub; }
+  };
+  static int cv_bits(Cv c) { return std::popcount(unsigned(std::to_underlying(c))); }
+  static bool cv_within(Cv a, Cv b) { return (std::to_underlying(a) & ~std::to_underlying(b)) == 0; }
+  bool same_unqualified(QualType a, QualType b) {
+    return types().canonical(Types::unqualified(a)) == types().canonical(Types::unqualified(b));
+  }
+
+  // The type `a` has after the lvalue conversions ([conv.lval], [conv.array], [conv.func]).
+  QualType value_type(const Ex& a) {
+    QualType t = a.type();
+    if (!a.glvalue()) return t;
+    if (types().is_array(t)) return types().pointer(types().rec(t).inner);
+    if (types().is_function(t)) return types().pointer(t);
+    return Types::unqualified(t);
+  }
+
+  Ics ics(const Ex& a, QualType p) {
+    if (!a.ok()) return {};
+    if (types().is_reference(p)) {
+      TypeRec r = types().rec(p);
+      QualType t = r.inner;
+      // [dcl.init.ref]: a direct binding to an lvalue (or, for an rvalue reference, an xvalue)
+      // of the type, no less qualified.
+      bool direct_cat = r.rvalue_ref ? a.cat() == ValueCategory::xvalue : a.cat() == ValueCategory::lvalue;
+      if (direct_cat && same_unqualified(a.type(), t) && cv_within(Types::cv(a.type()), Types::cv(t)))
+        return {true, 0, cv_bits(Types::cv(t)) - cv_bits(Types::cv(a.type()))};
+      bool const_ref = Types::is_const(t) && !Types::is_volatile(t);
+      if (!r.rvalue_ref && !const_ref) return {};
+      if (r.rvalue_ref && a.cat() == ValueCategory::lvalue) return {};
+      Ics v = ics(a, Types::unqualified(t));  // to a temporary
+      v.sub += 2;
+      return v;
+    }
+    QualType to = Types::unqualified(p);
+    if (types().is_class(to)) {
+      if (initializes(to, a)) return {true, 0, 0};
+      return {};
+    }
+    if (types().is_pointer(to) && is_null_pointer_constant(a)) return {true, 2, 0};
+    QualType from = value_type(a);
+    if (types().is_class(from) || types().is_void(from)) return {};
+    if (types().canonical(from) == types().canonical(to)) return {true, 0, 0};
+    if (types().is_pointer(from) && types().is_pointer(to))
+      return qualification_convertible(from, to) ? Ics{true, 0, 1} : Ics{};
+    if (types().is(to, Builtin::bool_) && (types().is_arithmetic(from) || types().is_pointer(from))) return {true, 2, 0};
+    if (types().is_integral(from) && types().is_integral(to)) {
+      bool promotion = builtin(promoted(*types().builtin_of(from))) == to && !types().is(from, *types().builtin_of(to));
+      return {true, promotion ? 1 : 2, 0};
+    }
+    return {};
+  }
+
+  // The best viable candidate for `args` ([over.match.best]), diagnosed at `at` when there is
+  // none or more than one, or when it is deleted. `object_cv` is the implicit object's, for
+  // non-static member functions.
+  std::optional<std::size_t> resolve(std::span<const Candidate> cands, std::span<const Ex> args, u32 at, NameId name,
+                                     std::optional<Cv> object_cv, std::optional<QualType> ctor_of = std::nullopt) {
+    std::vector<std::pair<std::size_t, std::vector<Ics>>> viable;
+    for (std::size_t i = 0; i < cands.size(); ++i) {
+      TypeRec fr = types().rec(cands[i].type);
+      if (args.size() < fr.params.size() || (args.size() > fr.params.size() && !fr.variadic)) continue;
+      std::vector<Ics> seq;
+      // The implicit object parameter, first: the object must not be more cv-qualified.
+      if (!cands[i].no_object && object_cv) {
+        if (!cv_within(*object_cv, fr.fn_cv)) continue;
+        seq.push_back({true, 0, cv_bits(fr.fn_cv) - cv_bits(*object_cv)});
+      } else {
+        seq.push_back({true, 0, 0});
+      }
+      bool ok = true;
+      for (std::size_t k = 0; k < args.size() && ok; ++k) {
+        Ics c = k < fr.params.size() ? ics(args[k], fr.params[k]) : Ics{true, 3, 0};  // the ellipsis
+        ok = c.viable;
+        seq.push_back(c);
+      }
+      if (ok) viable.push_back({i, std::move(seq)});
+    }
+    auto report = [&](Diag fn, Diag ctor) {
+      if (ctor_of) diag(at, ctor, Types::unqualified(*ctor_of));
+      else diag(at, fn, name);
+    };
+    if (viable.empty()) {
+      report(Diag::no_viable_function, Diag::no_viable_constructor);
+      return std::nullopt;
+    }
+    // F1 is better than F2 if none of its conversions is worse and one is better.
+    auto better = [](const std::vector<Ics>& x, const std::vector<Ics>& y) {
+      bool some = false;
+      for (std::size_t k = 0; k < x.size(); ++k) {
+        if (y[k] < x[k]) return false;
+        some = some || x[k] < y[k];
+      }
+      return some;
+    };
+    std::optional<std::size_t> best;
+    for (std::size_t i = 0; i < viable.size(); ++i) {
+      bool wins = true;
+      for (std::size_t j = 0; j < viable.size() && wins; ++j)
+        if (i != j) wins = better(viable[i].second, viable[j].second);
+      if (wins) best = i;
+    }
+    if (!best) {
+      report(Diag::ambiguous_call, Diag::ambiguous_constructor);
+      return std::nullopt;
+    }
+    std::size_t c = viable[*best].first;
+    if (cands[c].deleted) {
+      report(Diag::deleted_function, Diag::deleted_constructor);
+      return std::nullopt;
+    }
+    return c;
+  }
+
+  // What a call to a function returning `r` is ([expr.call]): an lvalue for an lvalue reference,
+  // an xvalue for an rvalue reference, else a prvalue.
+  ExprInfo result_info(QualType r) {
+    if (!types().is_reference(r)) return {Types::unqualified(r), ValueCategory::prvalue, 0};
+    return {types().referee(r), types().rec(r).rvalue_ref ? ValueCategory::xvalue : ValueCategory::lvalue, 0};
+  }
+
+  // ------------------------------------------------------------ constructors and references
+
+  // Initializes a `t` by a constructor from `args` ([over.match.ctor], [dcl.init.general]/17.6):
+  // the class's constructors and, where they are implicit, its default and copy constructors.
+  // A trivial copy is a copy; `list` forbids narrowing ([over.match.list]); `copy_init` takes only
+  // one-argument constructors.
+  Ex construct(QualType t, std::vector<Ex> args, u32 begin, u32 end, bool list = false, bool copy_init = false) {
+    Ex fail{NodeId::none, begin, end};
+    if (std::ranges::any_of(args, [](const Ex& a) { return !a.ok(); })) return fail;
+    if (!require_complete(t, begin)) return fail;
+    QualType ut = Types::unqualified(t);
+    EntityId c = types().class_of(ut);
+    const ClassRec* cr = w_->classes.find(c);
+    if (!cr) return fail;
+    std::vector<Candidate> cands;
+    std::vector<EntityId> ents;
+    bool user_copy = false;
+    for (const MemberDeclRec& m : cr->members)
+      if (m.is_ctor) {
+        TypeRec fr = types().rec(m.type);
+        if (copy_init && fr.params.size() != 1) continue;
+        cands.push_back({m.entity, m.type, true, m.is_deleted});
+        user_copy = user_copy || is_copy_ctor(fr, ut);
+      }
+    QualType void_ = builtin(Builtin::void_);
+    if (!user_copy) {
+      QualType p = types().lvalue_ref(types().add_cv(ut, Cv::const_));
+      cands.push_back({cr->copy_ctor, types().function(void_, std::span(&p, 1), false, LangLinkage::cxx), true, cr->copy_deleted});
+    }
+    if (!cr->user_ctors && !copy_init) cands.push_back({EntityId::none, types().function(void_, {}, false, LangLinkage::cxx), true, false});
+    auto chosen = resolve(cands, args, begin, no_name(), std::nullopt, ut);
+    if (!chosen) return fail;
+    const Candidate& k = cands[*chosen];
+    TypeRec fr = types().rec(k.type);
+    if (k.entity == EntityId::none) {
+      // Trivial: a copy of the argument's object, or nothing to construct.
+      if (fr.params.empty()) return value_init_aggregate(ut, begin, end);
+      Ex a = args[0];
+      return a.glvalue() ? convert_node(a, ast::ConversionKind::lvalue_to_rvalue, ut) : a;
+    }
+    std::vector<Child> cs;
+    for (std::size_t i = 0; i < args.size(); ++i) {
+      Ex a = i < fr.params.size() ? convert(args[i], fr.params[i], args[i].begin) : variadic_argument(args[i]);
+      if (!a.ok()) return fail;
+      if (list && i < fr.params.size() && narrows(rvalue(args[i]), fr.params[i])) {
+        diag(args[i].begin, Diag::narrowing, value_type(args[i]), Types::unqualified(fr.params[i]));
+        return fail;
+      }
+      cs.push_back({a.id, a.begin >= begin ? a.begin - begin : 0});
+    }
+    ExprInfo info{ut, ValueCategory::prvalue, 0};
+    return node(ast::CtorCall{info, k.entity, 0, b_->list(cs)}, begin, end, info);
+  }
+  // [class.copy.ctor]/2: a constructor whose only parameter is `C&` or `cv C&`.
+  bool is_copy_ctor(const TypeRec& fr, QualType c) {
+    return fr.params.size() == 1 && types().is_reference(fr.params[0]) && !types().rec(fr.params[0]).rvalue_ref &&
+           same_unqualified(types().referee(fr.params[0]), c);
+  }
+  // Value-initialization of an aggregate (no constructor to call).
+  Ex value_init_aggregate(QualType t, u32 begin, u32 end) {
+    if (has_member_inits(t)) return member_inits(t, true, begin, end);
+    ExprInfo info{Types::unqualified(t), ValueCategory::prvalue, 0};
+    return node(ast::ValueInit{info}, begin, end, info);
+  }
+
+  // `T(args)` and `T{…}` for a class T ([expr.type.conv]): a prvalue.
+  Ex functional_cast(QualType t, std::vector<Ex> args, u32 begin, u32 end) {
+    if (args.empty()) return value_init(t, begin, end);
+    if (!has_user_ctors(t) && args.size() == 1) return convert(args[0], t, begin);
+    if (!has_user_ctors(t)) {
+      diag(begin, Diag::no_viable_constructor, Types::unqualified(t));  // parenthesized aggregate init is not supported
+      return {NodeId::none, begin, end};
+    }
+    return construct(t, std::move(args), begin, end);
+  }
+
+  // Temporary materialization ([conv.rval]) of the prvalue `v` as an object of type `t`.
+  Ex materialize(Ex v, QualType t, bool extended) {
+    if (!v.ok()) return v;
+    ExprInfo info{t, ValueCategory::xvalue, 0};
+    return node(ast::Materialize{info, destructor_of(t), extended ? 1u : 0u, at(v, v.begin)}, v.begin, v.end, info);
+  }
+
+  // Binds a reference of type `r` to `e` ([dcl.init.ref]): directly to an lvalue (or, for an
+  // rvalue reference, an xvalue) of its type, no less qualified; a const lvalue reference or an
+  // rvalue reference also to a temporary initialized from `e`, which lives as long as the
+  // reference when `extend` ([class.temporary]/6).
+  Ex bind_reference(Ex e, QualType r, u32 at_, bool extend = false) {
+    if (!e.ok()) return e;
+    if (is_bound_member(e) || types().is(e.type(), Builtin::overload_set)) return rvalue(e);
+    TypeRec rr = types().rec(r);
+    QualType t = rr.inner;
+    Ex fail{NodeId::none, e.begin, e.end};
+    bool direct_cat = rr.rvalue_ref ? e.cat() == ValueCategory::xvalue : e.cat() == ValueCategory::lvalue;
+    if (direct_cat && same_unqualified(e.type(), t)) {
+      if (cv_within(Types::cv(e.type()), Types::cv(t))) return e;
+      diag(at_, Diag::bind_drops_qualifiers, e.type(), r);
       return fail;
     }
-    return node(ast::MemberCall{info, d->entity, at(o, begin), b_->list(*children)}, begin, end, info);
+    bool const_ref = Types::is_const(t) && !Types::is_volatile(t);
+    if (!rr.rvalue_ref && !const_ref) {
+      if (e.cat() == ValueCategory::lvalue && same_unqualified(e.type(), t)) diag(at_, Diag::bind_drops_qualifiers, e.type(), r);
+      else diag(at_, Diag::bind_to_rvalue, t);
+      return fail;
+    }
+    if (e.glvalue() && same_unqualified(e.type(), t) && cv_within(Types::cv(e.type()), Types::cv(t))) return e;
+    Ex v = convert(e, Types::unqualified(t), at_);
+    if (!v.ok() || v.glvalue()) return v;
+    return materialize(v, t, extend);
   }
 
   // ------------------------------------------------------------ names ([basic.lookup.unqual])
@@ -650,8 +973,8 @@ public:
       for (auto p = s->rbegin(); p != s->rend(); ++p)
         if (p->first == name) {
           const ast::LocalRec& l = locals_[p->second];
-          return node(ast::LocalRef{{l.type, ValueCategory::lvalue, 0}, p->second}, begin, end,
-                      {l.type, ValueCategory::lvalue, 0});
+          ExprInfo info{types().referee(l.type), ValueCategory::lvalue, 0};  // [expr.type]: a reference names its object
+          return node(ast::LocalRef{info, p->second}, begin, end, info);
         }
     // The class's members, in a member function's body ([basic.scope.class]).
     if (current_class != EntityId::none) {
@@ -683,21 +1006,30 @@ public:
       if (!any) diag(begin, Diag::undeclared, name);
       return {NodeId::none, begin, end};
     }
-    // The α subset has no overloading: every declaration found names one entity; the latest
-    // declaration gives its type.
+    // Several functions: an overload set, resolved by the call ([over.match]); the latest
+    // declaration of each gives its type.
     const ast::DeclSema& d = found.back();
-    for (const ast::DeclSema& o : found)
-      if (o.entity != d.entity) {
+    std::vector<ast::DeclSema> set;
+    for (auto o = found.rbegin(); o != found.rend(); ++o)
+      if (!std::ranges::any_of(set, [&](const ast::DeclSema& x) { return x.entity == o->entity; })) set.push_back(*o);
+    if (set.size() > 1) {
+      if (!std::ranges::all_of(set, [](const ast::DeclSema& x) { return x.kind == ast::DeclKind::function; })) {
         diag(begin, Diag::overload_not_supported, name);
         return {NodeId::none, begin, end};
       }
+      ExprInfo info{builtin(Builtin::overload_set), ValueCategory::lvalue, 0};
+      Ex r = node(ast::DeclRef{info, d.entity}, begin, end, info);
+      overloads_[std::to_underlying(r.id)] = std::move(set);
+      return r;
+    }
     if (d.kind == ast::DeclKind::function && (d.flags & decl_flag::consteval_))
       consteval_.insert(std::to_underlying(d.entity));
+    if (d.kind == ast::DeclKind::function && (d.flags & decl_flag::deleted)) deleted_.insert(std::to_underlying(d.entity));
     if (d.kind == ast::DeclKind::function && ins().names.spelling(name) == "main") {
       diag(begin, Diag::main_named);  // [basic.start.main]/3: main shall not be used
       return {NodeId::none, begin, end};
     }
-    ExprInfo info{d.type, ValueCategory::lvalue, 0};
+    ExprInfo info{types().referee(d.type), ValueCategory::lvalue, 0};
     return node(ast::DeclRef{info, d.entity}, begin, end, info);
   }
 
@@ -826,6 +1158,10 @@ public:
   // The conversions every operand that needs a prvalue gets ([basic.lval], [conv.lval],
   // [conv.array], [conv.func]).
   Ex rvalue(Ex e) {
+    if (e.ok() && types().is(e.type(), Builtin::overload_set)) {
+      diag(e.begin, Diag::overload_address, w_->entities.rec(as<ast::DeclRef>(e)->entity).name);
+      return {NodeId::none, e.begin, e.end};
+    }
     if (is_bound_member(e)) {
       diag(e.begin, Diag::bound_member_not_called, w_->entities.rec(as<ast::Member>(e)->member).name);
       return {NodeId::none, e.begin, e.end};
@@ -892,13 +1228,20 @@ public:
     QualType target = Types::unqualified(to);
     // A class object is copy-initialized from an expression of its own class: a glvalue through
     // the (trivial, implicit) copy constructor, a prvalue directly ([dcl.init.general]/17.6).
+    if (types().is_reference(to)) return bind_reference(e, to, at_);
     if (types().is_class(target)) {
       if (!require_complete(target, at_)) return {NodeId::none, e.begin, e.end};
+      if (initializes(target, e) && !e.glvalue()) return e;  // the prvalue initializes it directly
+      const ClassRec* cr = w_->classes.find(types().class_of(target));
+      // A copy through a constructor that is not trivial, or one converting another type
+      // ([class.conv.ctor]).
+      if (cr && (cr->user_ctors || cr->copy_ctor != EntityId::none || cr->copy_deleted))
+        return construct(target, {e}, e.begin, e.end, false, true);
       if (!initializes(target, e)) {
         diag(at_, Diag::no_conversion, e.type(), to);
         return {NodeId::none, e.begin, e.end};
       }
-      return e.glvalue() ? convert_node(e, ast::ConversionKind::lvalue_to_rvalue, target) : e;
+      return convert_node(e, ast::ConversionKind::lvalue_to_rvalue, target);
     }
     if (types().is_pointer(target) && is_null_pointer_constant(e))
       return convert_node(e, ast::ConversionKind::null_pointer, target);
@@ -1264,6 +1607,22 @@ public:
     u32 begin = callee.begin;
     if (!callee.ok() || std::ranges::any_of(args, [](const Ex& a) { return !a.ok(); })) return {NodeId::none, begin, end};
     if (is_bound_member(callee)) return member_call(callee, std::move(args), end, paren_at);
+    if (types().is(callee.type(), Builtin::overload_set)) {
+      const std::vector<ast::DeclSema>& set = overloads_.at(std::to_underlying(callee.id));
+      std::vector<Candidate> cands;
+      for (const ast::DeclSema& d : set)
+        cands.push_back({d.entity, d.type, true, (d.flags & decl_flag::deleted) != 0});
+      auto chosen = resolve(cands, args, callee.begin, w_->entities.rec(set.front().entity).name, std::nullopt);
+      if (!chosen) return {NodeId::none, begin, end};
+      const ast::DeclSema& d = set[*chosen];
+      if (d.flags & decl_flag::consteval_) consteval_.insert(std::to_underlying(d.entity));
+      ExprInfo ci{d.type, ValueCategory::lvalue, 0};
+      callee = node(ast::DeclRef{ci, d.entity}, callee.begin, callee.end, ci);
+    } else if (auto d = as<ast::DeclRef>(callee); d && deleted_.contains(std::to_underlying(d->entity))) {
+      // One function: still not callable when deleted ([dcl.fct.def.delete]).
+      diag(callee.begin, Diag::deleted_function, w_->entities.rec(d->entity).name);
+      return {NodeId::none, begin, end};
+    }
     EntityId function = EntityId::none;
     QualType ft = callee.type();
     if (auto d = as<ast::DeclRef>(callee); d && types().is_function(ft)) {
@@ -1280,7 +1639,7 @@ public:
     TypeRec fr = types().rec(ft);
     auto children = call_args(fr, args, begin, paren_at);
     if (!children) return {NodeId::none, begin, end};
-    ExprInfo info{Types::unqualified(fr.inner), ValueCategory::prvalue, 0};
+    ExprInfo info = result_info(fr.inner);
     return node(ast::Call{info, function, at(callee, begin), b_->list(*children)}, begin, end, info);
   }
 
@@ -1342,7 +1701,13 @@ private:
   std::vector<std::optional<ConstId>> local_values_;  // by local
   std::set<u32> consteval_;                           // consteval functions named so far
   std::map<u32, std::vector<Ex>> list_elems_;         // by draft InitList
-  std::map<u32, std::optional<Ex>> bound_;            // by draft bound-member Member: its object
+  struct Bound {
+    std::optional<Ex> object;
+    std::vector<const MemberDeclRec*> cands;
+  };
+  std::map<u32, Bound> bound_;                        // by draft bound-member Member
+  std::set<u32> deleted_;                             // deleted functions named so far
+  std::map<u32, std::vector<ast::DeclSema>> overloads_;  // by draft overload-set DeclRef
   std::vector<std::vector<std::pair<NameId, u32>>> scopes_;
   std::vector<std::size_t> guarded_;
   QualType return_type_{};

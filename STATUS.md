@@ -516,7 +516,34 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   checked against Clang's symbols.
 - Tests: `tests/own/classes/s2-*` (spec-only, plus three from the review): 12 of 13 pass; the constexpr one waits for records
   in the interpreter (#25). In-class member functions are not weak definitions yet (#124).
-- Not yet: overloaded member functions, ref-qualifiers, `= default`/`= delete`.
+- Not yet: ref-qualifiers, `= default`.
+
+## Classes, δ step 3: constructors, destructors, references, overloading (#86, 2026-11-18)
+
+- **References** ([dcl.ref], [dcl.init.ref]): `T&` and `T&&` declarators, reference locals,
+  parameters, results and members; direct binding, and binding a const reference to a
+  materialized temporary (`Materialize`), extended for a local reference ([class.temporary]/6).
+  In the IR a reference is the pointer to its object (`TypeFacts` maps reference types to
+  pointers); a reference local or parameter is that pointer, not an object. Itanium `R`/`O`.
+- **Overloading** ([over.match]): namespace-scope and member function overloads, and
+  constructors; implicit conversion sequences ranked as exact match (with qualification and
+  reference-binding tie-breaks), promotion, conversion; ambiguity and deleted functions
+  (`= delete`) diagnosed.
+- **Constructors and destructors**: declarations in the class, mem-initializers and default
+  member initializers (analysed again in each constructor, a complete-class context; #118 stays
+  open for aggregates), `CtorCall` for every initialization form (`T x(a)`, `T x{a}`, `T x = a`,
+  `T(a)`, `T{a}`, value- and default-initialization, copies), `MemberInit` statements in
+  declaration order, `Destructor`/`DestroyMember` for members after the body. Implicit copy
+  constructors and destructors that are not trivial are synthesized (`Program::synthesized`).
+  A class with user-declared constructors is not an aggregate.
+- **Cleanups:** `LocalVar::destructor`; `function_ir` runs destructors on every scope exit from
+  its own scope stack (block end, `return`, `break`, `continue`) and ends a full-expression's
+  temporaries at its end. The `Cleanup` lists of ast.md §3.7.3 stay empty; #135 decides.
+- Linkage names: `C1`/`D1` (#136 for `C2`/`D2`/`D0`), checked against Clang's symbols.
+- Tests: `tests/own/classes/s3-*` (spec-only): 14 of 14 pass. 10 more draft examples pass.
+- Not yet: temporaries with destructors created in a conditional operand, value-initializing a
+  member subobject whose class has an implicit constructor, delegating constructors, `explicit`,
+  `= default`, out-of-class constructor definitions.
 
 ## Bootstrap workarounds
 

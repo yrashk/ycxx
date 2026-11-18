@@ -134,13 +134,36 @@ struct ImplicitConversion {
 
 // Class member access ([expr.ref]): `object.member`, or with `arrow` 1 `object->member`, whose
 // object is then the pointer. `field` is the member's position among its class's non-static data
-// members, the access path step the IR takes.
+// members, the access path step the IR takes. With `reference` 1 the member is a reference, and
+// the result is the object it refers to ([expr.ref]/7.2).
 struct Member {
   ExprInfo info;
   EntityId member;
   u32 field;
   u32 arrow;
+  u32 reference;
   [[=sequenced]] Child object;
+};
+
+// Temporary materialization ([conv.rval], [class.temporary]): a temporary object initialized from
+// the prvalue `operand`, as an xvalue. It is destroyed by `destructor` (none if trivial) at the end
+// of the full-expression, or, with `extended` 1, when the reference it was bound to goes out of
+// scope ([class.temporary]/6).
+struct Materialize {
+  ExprInfo info;
+  EntityId destructor;
+  u32 extended;
+  [[=sequenced]] Child operand;
+};
+
+// A constructor call initializing a prvalue's result object ([class.ctor], [dcl.init.general]):
+// `T(args)`, `T{args}`, or an initialization that resolved to `ctor`. With `zero_first` 1 the
+// object is zero-initialized first (value-initialization, [dcl.init.general]/9).
+struct CtorCall {
+  ExprInfo info;
+  EntityId ctor;
+  u32 zero_first;
+  [[=indeterminately_sequenced]] ChildList args;
 };
 
 // `this` ([expr.prim.this]): a prvalue pointer to the object a non-static member function was
@@ -276,10 +299,34 @@ struct DeclGroup {
   ChildList declarators;
 };
 
-// A block-scope variable: an index into `BodySema::locals` (§4.4) and its initializer.
+// A block-scope variable: an index into `BodySema::locals` (§4.4), its initializer, and the
+// destructor that ends it at scope exit, or none ([stmt.dcl], [class.dtor]). For an array it
+// destroys each element, the last first.
 struct LocalVar {
   u32 local;
   Child init;
+  EntityId destructor;
+};
+
+// A non-static data member's initialization in a constructor ([class.base.init]): from its
+// mem-initializer, its default member initializer, or default-initialized. The statements of a
+// constructor's body come in declaration order before the compound statement.
+struct MemberInit {
+  u32 field;
+  QualType type;  // the member's declared type
+  Child init;
+};
+
+// A destructor's body ([class.dtor]): `body`, then on every way out of it the destruction of the
+// members (`DestroyMember`s, in reverse declaration order).
+struct Destructor {
+  Child body;
+  ChildList members;
+};
+struct DestroyMember {
+  u32 field;
+  QualType type;  // the member's declared type; an array's elements are destroyed last first
+  EntityId destructor;
 };
 
 struct Attribute {
@@ -292,7 +339,7 @@ using Nodes = closed_list<Literal, DeclRef, Paren, Unary, Binary, OrderedBinary,
                           ImplicitConversion, ExprStmt, Return, Compound, If, LocalVar, Attribute, LocalRef,
                           Conditional, While, Do, For, Break, Continue, DeclStmt, Declarator, DeclGroup,
                           IfConsteval, StaticAssert, Member, InitList, ValueInit, DefaultInit, This,
-                          MemberCall>;
+                          MemberCall, Materialize, CtorCall, MemberInit, Destructor, DestroyMember>;
 
 static_assert(Nodes::size < max_node_kinds);
 
