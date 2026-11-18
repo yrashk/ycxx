@@ -903,7 +903,7 @@ private:
         }
         if (j >= b.size()) return std::pair{k, lex::LexDiag::va_opt_malformed};
         if (j > k + 2 && (b[k + 2].kind == Tk::hashhash || b[j - 1].kind == Tk::hashhash))
-          return std::pair{b[k + 2].kind == Tk::hashhash ? k + 2 : j - 1, lex::LexDiag::paste_at_edge};
+          return std::pair{b[k + 2].kind == Tk::hashhash ? k + 2 : j, lex::LexDiag::paste_at_edge};  // a trailing one at `)`
       }
       // [cpp.stringize]/1: in a function-like macro, `#` is followed by a parameter.
       if (def.function_like && t.kind == Tk::hash &&
