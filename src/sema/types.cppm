@@ -328,7 +328,8 @@ private:
 // A `function_template` is a function template ([temp.fct]); a specialization of one is a
 // `function` whose `templ` is the template.
 enum class EntityKind : u8 {
-  function, variable, class_, data_member, constructor, destructor, enum_, enumerator, namespace_, function_template
+  function, variable, class_, data_member, constructor, destructor, enum_, enumerator, namespace_, function_template,
+  type_alias  // a typedef-name or alias-declaration ([dcl.typedef]): `(scope, name)`
 };
 
 // The structure behind an entity id (§4.3): for a function `(scope, name, canonical type)`, with

@@ -776,6 +776,25 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
 - Not yet (#153): `using N::f;` at namespace scope, `N::S{…}` as an expression, some clashes
   with namespace names and using-declarations, `std::` abbreviations in linkage names.
 
+## `<cstdio>`, step 1: typedef-names and alias-declarations (#133, 2026-11-18)
+
+- **Declarations:** `typedef` declarators and `using T = type-id;` at namespace and block scope
+  ([dcl.typedef]); `typedef struct S { … } T;`, `typedef struct { … } T;` and the same with
+  enumerations, where an unnamed class or enumeration takes the typedef-name as its name
+  ([dcl.typedef]/9). A typedef-name may be redeclared in its scope as the same type, and may
+  redeclare a class or enumeration of its scope as itself (/5, /6); anything else clashes.
+- **Lookup:** a typedef-name is a type name in decl-specifiers, nested-name-specifiers and
+  qualified type names (`N::L`); not after a class-key ([dcl.type.elab]/2); not an expression
+  ([expr.prim.id]). Block-scope ones hide and are hidden as other block declarations are.
+- Entities: `EntityKind::type_alias`, `(scope, name)`, with no symbol. Lookup gives the aliased
+  type itself: the `STypedef` sugar of ast.md §5.2 is not built yet (#179).
+- Also fixed: a variable declared after an enumeration's braces (`enum E { … } e;`) was not
+  found by lookup and had no symbol.
+- Tests: `tests/own/typedef` (11). Eleven more draft examples pass.
+- Not yet (#180): member typedefs and alias-declarations in classes, alias templates (ζ), `typedef`
+  of an array of unknown bound, the [dcl.typedef]/9 restrictions on an unnamed class named for
+  linkage purposes.
+
 ## Templates, ζ step 1: function templates (#88, 2026-11-18)
 
 Instantiation follows ast.md §6.4 as amended by #88 (Fable's decision): declarations and

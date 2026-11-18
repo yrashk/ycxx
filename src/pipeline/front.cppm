@@ -91,7 +91,8 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
     EntityId e = d.entity;
     if (e == EntityId::none || !seen.insert(std::to_underlying(e)).second) return;
     const sema::EntityRec& r = world.entities.rec(e);
-    if (r.kind == sema::EntityKind::class_ || r.kind == sema::EntityKind::data_member ||
+    if (r.kind == sema::EntityKind::class_ || r.kind == sema::EntityKind::data_member || r.kind == sema::EntityKind::type_alias ||
+        r.kind == sema::EntityKind::enum_ || r.kind == sema::EntityKind::enumerator ||
         r.kind == sema::EntityKind::function_template)
       return;  // no symbol: a template's specializations have them
     bool fn = r.kind != sema::EntityKind::variable;
@@ -113,7 +114,7 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
                   program.in_global_scope(it.parent);
     if (!program.in_global_scope(k) && !member) continue;
     if (it.kind != items::ItemKind::declaration && it.kind != items::ItemKind::function &&
-        it.kind != items::ItemKind::class_def)  // its declarators: `struct S { … } s;`
+        it.kind != items::ItemKind::class_def && it.kind != items::ItemKind::enum_def)  // its declarators: `struct S { … } s;`
       continue;
     const ast::ItemSema& is = program.item_sema(k).value;
     std::vector<ast::DeclSema> decls = ins.seqs.elements(is.decls);
