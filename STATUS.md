@@ -57,29 +57,59 @@ What is true of the code today. Work in progress and its owners are tracked in
   - The CWG issues list is imported as `tests/draft/cwg-issues.tsv`: 3,240 issues with subclause,
     status and resolution.
 
-## Query engine core (#14, 2026-11-18)
+## Query engine (#14, #15, 2026-11-18)
 
 - `ycxx.hash` (`src/hash/`): MurmurHash3_x64_128 with the fixed seed `hash_seed`, streaming and
   `constexpr`, checked against an independent implementation's vectors. `fingerprint(v)` derives
   a structural fingerprint by reflection; interned handles supply `hash_into`.
-- `ycxx.engine` (`src/engine/`), single-threaded and synchronous:
+- `ycxx.engine` (`src/engine/`):
   - inputs with durability, memoized async kinds (`query_task` coroutines), `cheap` and
     `transparent` kinds, `demanded` kinds with demand lists;
   - red/green validation over ordered groups with no short-circuit inside a group, early cutoff
     by fingerprint, the durability shortcut, one revision per batch of input changes;
-  - the §A1.6 state word, the §A3.6 layout (cell ids, flat dependency pool with group bits),
+  - the §A3.6 layout (cell ids into an append-only arena, a sharded index per kind),
     deterministic recording with deduplication (§A3.7);
   - diagnostics as values and `DiagsOf`, pruned by `has_diags`;
-  - cycles reported sorted by kind name and key fingerprint (`query_cycle`), with cells reverted;
   - concepts, annotations, reflection-derived serialization and the schema hash (§A10).
+- The scheduler (#15, 2026-11-18), in `src/engine/engine.cppm` and `pool.cppm`:
+  - claims are CASes on the §A1.6 state word; waiter lists with the `CLOSED` sentinel; a frame
+    that waits suspends and frees its worker; completions queue continuations, never resume them
+    on their own stack;
+  - `Pool`: Chase–Lev deques per worker and priority, stealing interactive work first, an
+    injection queue, parking; `pool_scheduler` (a `std::execution` scheduler) and `pool_backend`
+    (`parallel_scheduler_replacement`'s backend);
+  - the chaos scheduler: a seeded `Pool` that reverses deques, steals first, migrates tasks and
+    delays fetch misses;
+  - requests as senders (`Db::request`, `cell_sender`); `Db::get` blocks; a request completes
+    only after every frame it started, so finished requests mean quiescence;
+  - cancellation by stop tokens: a stopped fetch never resumes its query, the cell reverts, and
+    waiters look again and claim it; `cx.stop_point()` for long leaves;
+  - cycles found by the wait-for walk (and on the synchronous chain of cheap kinds), reported
+    sorted by kind name and key fingerprint, delivered as `set_error`, cells reverted;
+  - `Epochs`: requests in revision epochs (`counting_scope`), `apply` at quiescence, interrupted
+    requests respawned, the progress quantum's hook (daemon design §4.1–4.2);
+  - a `Db` without a pool runs everything on the calling thread (what the pipeline uses).
+- Where the scheduler differs from query-engine.md (#TODO-design-amendments):
+  - a frame that leaves without publishing reverts its cell and wakes every waiter to look again,
+    instead of handing the claim to the first waiter (§A3.1);
+  - every waiter of a cell that failed gets its error, not only waiters on the cycle: a retry
+    would fail the same way (§A2.3, §A3.1);
+  - children are queued rather than started by symmetric transfer, and a stop is noticed at a
+    fetch miss, not at every fetch;
+  - `query_task` is not a sender; requests are (`cell_sender`).
 - Measured (Release, Apple M-series): a fetch hit inside a query about 40 ns, a root `get` hit
   about 15 ns, fingerprinting a 16- or 32-byte key about 2 ns (`engine_bench`).
 - Tests (`tests/unit/`): red/green, groups, cutoff, durability, recording, diagnostics, demands,
   cycles, failures, serialization, and incremental == cold over 1,000 random edits, which fails
-  when a dependency is dropped.
-- Not yet: the scheduler, `cell_sender` and cancellation (#15; every await completes inline
-  today), contextual queries (#16), eviction and persistence (#17; the dependency and diagnostic
-  pools only grow).
+  when a dependency is dropped (`unit.engine`, single-threaded). `unit.engine_scheduler`: the
+  pool, priorities and backend; outputs, dependency lists and execution counts equal at 1, 2, P
+  and 2P threads with the chaos scheduler; incremental == cold at each; cancellation injected;
+  hand-over from a stopped owner; respawn; cycles and errors from every entry point. Clean under
+  ASan and UBSan; ThreadSanitizer needs Linux (#TODO-tsan).
+- Not yet: allocation-free waits, per-worker frame free lists and lock-free index reads
+  (#TODO-perf); the cycle report's program-order path note (#TODO-cyclepath); interners shared
+  across workers, so pooled `Db`s run only queries that do not intern (#TODO-interners);
+  contextual queries (#16); eviction and persistence (#17).
 
 ## Lexer and directive-free `pp` (#40, 2026-11-18)
 
