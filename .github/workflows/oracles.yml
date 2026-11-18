@@ -6,8 +6,8 @@ name: oracles
 # uses libstdc++, so its header-dependent verdicts differ.
 #   1. tools/draft-examples --oracles must reproduce tests/draft exactly: a diff is a changed
 #      compiler or a nondeterministic extractor.
-#   2. tools/test --cxx clang|gcc on the core stage (the draft and own suites; no ycxx build): an XPASS is a compiler that
-#      changed its mind; a FAIL is a test that is wrong.
+#   2. tools/test --cxx clang|gcc on the core stage (the draft and own suites; no ycxx build):
+#      an XPASS is a compiler that changed its mind; a FAIL is a test that is wrong.
 
 on:
   pull_request:
