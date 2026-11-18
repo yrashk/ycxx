@@ -2336,6 +2336,11 @@ one leaf from every point.
 
 #### B6.6 The re-verification technique
 
+*Amended by #88 (ast.md §6.4):* a differing element that is itself a selection cell (the hop into
+the pattern's `analyze_body`) is explained by recursing into that cell's own path, and the
+pattern forms are rendered by place: `rel(◇.prefix, I)` and `rel_after(◇.prefix, K)` as "before
+(after) the definition of … in a.cpp", `◇` as "at the end of a.cpp".
+
 Several rules say "if this gives a different answer at another point, the program is ill-formed,
 no diagnostic required" ([temp.point]/7, [temp.constr.atomic]/3, [temp.spec.partial.general]/1,
 [temp.expl.spec]/7, [class.member.lookup]/6). Each is implemented by one mechanism: the same
