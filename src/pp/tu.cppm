@@ -189,7 +189,7 @@ Preprocessed to_region(Session& s, const Flat& flat) {
   const std::vector<PTok>& pp = flat.tokens;
   auto report_at = [&](std::size_t i) {
     return [&, i](u32 offset, lex::LexDiag d, u64 a, u64 b) {
-      diags.emplace_back(u64(i) * 2 + 1, Diag{pp[i].loc.file, pp[i].loc.offset + offset, d, {a, b}});
+      diags.emplace_back(u64(i) * 2 + 1, Diag{pp[i].loc.file, pp[i].loc.offset + offset, d, {a, b}, 0, std::nullopt});
     };
   };
   auto literal = [&](u32 id) {
@@ -198,7 +198,7 @@ Preprocessed to_region(Session& s, const Flat& flat) {
     return tables.literal(std::move(l));
   };
   auto emit = [&](Tok t, const PTok& p) {
-    t.flags &= u8(tok_flag::line_start | tok_flag::space_before | tok_flag::alt | tok_flag::continued);
+    t.flags &= u8(tok_flag::line_start | tok_flag::space_before | tok_flag::alt | tok_flag::continued | tok_flag::directive);
     r.tokens.push_back(t);
     r.locs.push_back(p.loc);
   };
@@ -399,11 +399,9 @@ std::string print(Session& s, const Flat& flat) {
     TokLoc at = site(t.loc);
     auto [line, column] = line_of(at.file, at.offset);
     if (directive_start) {
-      move_to(at.file, line);
-      if (!line_empty) {
-        out += '\n';
-        ++cur_line;
-      }
+      // A directive starts its own line; in the middle of one (a _Pragma), as Clang prints it,
+      // after a marker for the same line.
+      if (!line_empty || static_cast<int>(at.file) != cur_file || line != cur_line) marker(at.file, line);
     } else if (static_cast<int>(at.file) == cur_file && line > cur_line && line <= cont_line) {
       // Still on the line of an invocation that ended on a later line, as Clang prints it.
     } else if (static_cast<int>(at.file) != cur_file || line != cur_line) {

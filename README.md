@@ -35,6 +35,8 @@ in [GitHub issues](https://github.com/yrashk/ycxx/issues) and the
     `#include_next`) and `#pragma once`;
   - object-like and function-like macros (`#define`, `#undef`, `-D`, `-U`), with `#`, `##`,
     `__VA_ARGS__` and `__VA_OPT__`;
+  - `#if` and the other conditionals, `#line`, `#error`, `#warning`, `_Pragma`, and the
+    predefined macros (`__ycxx__`, the target's, `__LINE__`, `__FILE__`, `__COUNTER__`, …);
   - `ycxx cxx -E` prints what Clang's `-E` does.
 - A resident daemon, opt-in (2026-11-18): with `YCXX_DAEMON=1`, `ycxx cxx` sends its command
   line to a per-project `ycxx daemon`, starting one if needed. The daemon watches the files it
@@ -50,9 +52,8 @@ build/bin/ycxx cxx hello.cpp -o hello && ./hello
 ```
 
 **Not yet:**
-- The rest of the preprocessor: `#if` and the other conditionals, `#line`, `#error`,
-  `_Pragma`, and the predefined macros. Without conditionals, system headers
-  such as `<cstdio>` cannot be included yet.
+- `#embed`, and the standard library's headers: `<cstdio>` now preprocesses, but libycxx does
+  not yet know ycxx (yrashk/libycxx#17), and sema lacks namespaces.
 - Classes, templates and overloading.
 - `if constexpr`, and taking the address of a variable in a namespace-scope initializer
   (`int* p = &g;` passes the front end but not code generation yet).
@@ -68,12 +69,14 @@ build/bin/ycxx cxx hello.cpp -o hello && ./hello
 Nothing beyond the subset above compiles, so neither real programs nor libycxx do yet.
 
 **In progress**, one slice per epic:
-- the preprocessor ([#85](https://github.com/yrashk/ycxx/issues/85));
-- the resident daemon, with the multithreaded scheduler
-  ([#84](https://github.com/yrashk/ycxx/issues/84)).
+- the resident daemon: concurrent requests, and making it the default
+  ([#84](https://github.com/yrashk/ycxx/issues/84));
+- classes and the object model ([#86](https://github.com/yrashk/ycxx/issues/86));
+- including the standard headers: libycxx's compiler detection
+  ([yrashk/libycxx#17](https://github.com/yrashk/libycxx/issues/17)), then `<cstdio>`
+  through sema ([#133](https://github.com/yrashk/ycxx/issues/133)).
 
-Next come classes ([#86](https://github.com/yrashk/ycxx/issues/86)), then templates
-([#88](https://github.com/yrashk/ycxx/issues/88)) and exceptions
+Next come templates ([#88](https://github.com/yrashk/ycxx/issues/88)) and exceptions
 ([#89](https://github.com/yrashk/ycxx/issues/89)).
 
 ## Goals

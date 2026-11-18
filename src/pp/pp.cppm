@@ -8,7 +8,9 @@
 //   :region  FileRegion (one file occurrence), questions, macros, Region (the TU flattened)
 //   :unit    the preprocessor of one TU and the session's region cache
 //   :tu      flattening, phases 5–6, and `-E` output
-//   :system  the build's system include directories
+//   :system  the build's system include directories and ycxx's version
+//   :predefined  the predefined macros ([cpp.predefined], DECISIONS §1.5)
+//   :cond    #if expressions ([cpp.cond])
 //
 // `pp(file)` is an engine query over the main file's text and its `Source` (its name, working
 // directory and configuration). Every file it includes is read as a `FileContent` input, provided
@@ -26,6 +28,8 @@ export import :region;
 export import :unit;
 export import :tu;
 export import :system;
+export import :predefined;
+export import :cond;
 
 export namespace ycxx::pp {
 
@@ -61,8 +65,12 @@ struct Message {
   std::string text;
 };
 Message message(Session& s, FileId file, std::string_view presumed, const Diag& d);
-// The same, from the text of the file the diagnostic is in.
-Message message(std::string_view text, std::string_view presumed, const Diag& d);
+// The same, from the text of the file the diagnostic is in and the spellings of the session that
+// preprocessed it.
+Message message(const Spellings& sp, std::string_view text, std::string_view presumed, const Diag& d);
+// The process's session for a configuration (the one `Pp` uses for a unit with that `SourceOf`).
+// Sessions live as long as the process: the regions `Pp` returns hold their spellings' numbers.
+Session& session_for(const Config& cfg);
 
 // `-E`: the text Clang's `-E` would print, and the diagnostics.
 std::pair<std::string, std::vector<Message>> preprocess_to_text(Session& s, std::string_view text, std::string_view path);
@@ -100,6 +108,30 @@ struct Source {
   std::string cwd;
   Config config;
 };
+// The configuration's target is a pointer to a known target: a `Source` is fingerprinted by the
+// configuration's fingerprint and stored with the target's triple.
+void hash_into(Hasher& h, const Source& s) { h.bytes(s.path).uint(u8(0)).bytes(s.cwd).uint(u8(0)).fp(s.config.fingerprint()); }
+void serialize_into(engine::Sink& out, const Source& s) {
+  engine::serialize(out, s.path);
+  engine::serialize(out, s.cwd);
+  engine::serialize(out, s.config.quote_dirs);
+  engine::serialize(out, s.config.angle_dirs);
+  engine::serialize(out, static_cast<std::uint64_t>(s.config.system_from));
+  engine::serialize(out, s.config.macros);
+  engine::serialize(out, std::string(s.config.target->triple));
+}
+Source deserialize_from(engine::Source& in, std::type_identity<Source>) {
+  Source s;
+  s.path = engine::deserialize<std::string>(in);
+  s.cwd = engine::deserialize<std::string>(in);
+  s.config.quote_dirs = engine::deserialize<std::vector<std::string>>(in);
+  s.config.angle_dirs = engine::deserialize<std::vector<std::string>>(in);
+  s.config.system_from = static_cast<std::size_t>(engine::deserialize<std::uint64_t>(in));
+  s.config.macros = engine::deserialize<std::vector<std::pair<std::string, std::optional<std::string>>>>(in);
+  if (engine::deserialize<std::string>(in) != ast::aarch64_darwin.triple) in.fail();  // the one target there is
+  return s;
+}
+
 struct [[=engine::input{engine::Durability::low}]] SourceOf {
   using Key = FileId;
   using Value = Source;
@@ -122,25 +154,13 @@ struct Process {
   struct Configured {
     std::unique_ptr<Session> session;
     Host* host = nullptr;
-    std::uint64_t used = 0;
   };
+  // Never dropped: the regions of `Pp` cells hold the session's spelling numbers, so a session
+  // must outlive every engine that read through it (a bound on memory is #17's eviction).
   std::map<Fp128, Configured> sessions;
   Session* current = nullptr;
-  std::uint64_t clock = 0;
-  // A resident process sees one configuration per distinct command line: the least recently used
-  // sessions beyond this are dropped. Their regions are only a cache, which `Pp` recomputes.
-  static constexpr std::size_t max_sessions = 16;
 
-  Configured& slot(const Config& cfg) {
-    auto& c = sessions[cfg.fingerprint()];
-    c.used = ++clock;
-    while (sessions.size() > max_sessions) {
-      auto lru = std::ranges::min_element(sessions, {}, [](const auto& e) { return e.second.used; });
-      if (lru->second.session.get() == current) current = nullptr;
-      sessions.erase(lru);
-    }
-    return c;
-  }
+  Configured& slot(const Config& cfg) { return sessions[cfg.fingerprint()]; }
 };
 Process& process() {
   static Process p;
@@ -262,14 +282,23 @@ Preprocessed preprocess(std::string_view text, std::string_view path) { return p
 
 Message message(Session& s, FileId file, std::string_view presumed, const Diag& d) {
   const Files::Content* c = s.files.content(file);
-  return message(c ? std::string_view(c->text) : std::string_view(), presumed, d);
+  return message(s.spellings, c ? std::string_view(c->text) : std::string_view(), presumed, d);
 }
 
-Message message(std::string_view text, std::string_view presumed, const Diag& d) {
-  std::vector<u32> starts = line_starts(text);
+Message message(const Spellings& s, std::string_view file_text, std::string_view presumed, const Diag& d) {
+  std::vector<u32> starts = line_starts(file_text);
   auto at = std::ranges::upper_bound(starts, d.offset);
-  return Message{std::string(presumed), static_cast<u32>(at - starts.begin()), d.offset - *(at - 1) + 1,
-                 lex::message_of(d.kind).severity == lex::Severity::error, lex::render(d.kind, d.args)};
+  std::string text = lex::render(d.kind, d.args);
+  // #error and #warning say their line's text, a spelling of the session.
+  if (d.kind == lex::LexDiag::error_directive || d.kind == lex::LexDiag::warning_directive)
+    text = s.name(static_cast<u32>(d.args[0]));
+  u32 line = static_cast<u32>(at - starts.begin());
+  std::string name(presumed);
+  // [cpp.line]: the presumed line and name its region resolved.
+  if (d.presumed_line != 0) line = d.presumed_line;
+  if (d.presumed_name) name = s.name(*d.presumed_name);
+  return Message{std::move(name), line, d.offset - *(at - 1) + 1, lex::message_of(d.kind).severity == lex::Severity::error,
+                 std::move(text)};
 }
 
 std::pair<std::string, std::vector<Message>> preprocess_to_text(Session& s, std::string_view text, std::string_view path) {

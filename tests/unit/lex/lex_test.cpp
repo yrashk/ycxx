@@ -353,7 +353,12 @@ void directives() {
   check(diags(pp::preprocess("a # b")) == std::vector{LexDiag::stray_token}, "# inside a line");
   check(diags(pp::preprocess("a ## b")) == std::vector{LexDiag::stray_token}, "##");
   // [cpp.pre]/2's examples.
-  auto is_directive = [](std::string_view s) { return has(pp::preprocess(s), LexDiag::directive_unsupported); };
+  // A module or import directive marks its keywords; a header unit import is diagnosed.
+  auto is_directive = [](std::string_view s) {
+    auto p = pp::preprocess(s);
+    return has(p, LexDiag::header_unit_unsupported) ||
+           std::ranges::any_of(p.region.tokens, [](Tok t) { return t.has(lex::tok_flag::directive); });
+  };
   check(is_directive("module ;"), "module ;");
   check(is_directive("export module leftpad;"), "export module leftpad;");
   check(is_directive("import <string>;"), "import <string>;");
@@ -367,7 +372,9 @@ void directives() {
   check(!is_directive("import ->"), "import ->");
   check(!is_directive("x import foo;"), "import not at the start of a line");
   auto rest = pp::preprocess("export\nimport foo;\nint");
-  check(kinds(rest.region) == std::vector{Tk::kw_export, Tk::kw_int}, "export stays a token");
+  check(kinds(rest.region) == std::vector{Tk::kw_export, Tk::identifier, Tk::identifier, Tk::semi, Tk::kw_int} &&
+            !rest.region.tokens[0].has(lex::tok_flag::directive) && rest.region.tokens[1].has(lex::tok_flag::directive),
+        "export stays a token");
   // A header-name is formed only on `import`'s line: here `import` is a variable ([lex.pptoken]/4).
   auto v = pp::preprocess("int f(int import, int a, int b) { return\nimport\n<a> b; }");
   check(clean(v) && v.region.tokens[15].kind == Tk::less, "no header-name after a line break");

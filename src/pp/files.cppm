@@ -10,6 +10,7 @@ export module ycxx.pp:files;
 import std;
 import ycxx.hash;
 import ycxx.lex;
+import ycxx.ast.target;
 import :spell;
 
 export namespace ycxx::pp {
@@ -106,9 +107,12 @@ struct Config {
   // `-D name[=value]` (value "1" when absent) and `-U name`, in command-line order: a definition
   // has a value, an undefinition none.
   std::vector<std::pair<std::string, std::optional<std::string>>> macros;
+  // The target, whose macros are predefined (:predefined).
+  const ast::Target* target = &ast::aarch64_darwin;
 
   Fp128 fingerprint() const {
     Hasher h;
+    h.bytes(target->triple).uint(u8(0));
     for (const std::string& d : quote_dirs) h.bytes(d).uint(u8(0));
     h.uint(u8(1));
     for (const std::string& d : angle_dirs) h.bytes(d).uint(u8(0));
