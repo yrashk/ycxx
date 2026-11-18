@@ -89,7 +89,7 @@ What is true of the code today. Work in progress and its owners are tracked in
   - `Epochs`: requests in revision epochs (`counting_scope`), `apply` at quiescence, interrupted
     requests respawned, the progress quantum's hook (daemon design §4.1–4.2);
   - a `Db` without a pool runs everything on the calling thread (what the pipeline uses).
-- Where the scheduler differs from query-engine.md (#TODO-design-amendments):
+- Where the scheduler differs from query-engine.md (#108):
   - a frame that leaves without publishing reverts its cell and wakes every waiter to look again,
     instead of handing the claim to the first waiter (§A3.1);
   - every waiter of a cell that failed gets its error, not only waiters on the cycle: a retry
@@ -97,18 +97,19 @@ What is true of the code today. Work in progress and its owners are tracked in
   - children are queued rather than started by symmetric transfer, and a stop is noticed at a
     fetch miss, not at every fetch;
   - `query_task` is not a sender; requests are (`cell_sender`).
-- Measured (Release, Apple M-series): a fetch hit inside a query about 40 ns, a root `get` hit
-  about 15 ns, fingerprinting a 16- or 32-byte key about 2 ns (`engine_bench`).
+- Measured (Release, Apple M-series): a fetch hit inside a query about 50 ns (40 ns before the
+  scheduler; the difference is the shard lock), a root `get` hit about 17 ns, fingerprinting a
+  16- or 32-byte key about 2 ns (`engine_bench`).
 - Tests (`tests/unit/`): red/green, groups, cutoff, durability, recording, diagnostics, demands,
   cycles, failures, serialization, and incremental == cold over 1,000 random edits, which fails
   when a dependency is dropped (`unit.engine`, single-threaded). `unit.engine_scheduler`: the
   pool, priorities and backend; outputs, dependency lists and execution counts equal at 1, 2, P
   and 2P threads with the chaos scheduler; incremental == cold at each; cancellation injected;
   hand-over from a stopped owner; respawn; cycles and errors from every entry point. Clean under
-  ASan and UBSan; ThreadSanitizer needs Linux (#TODO-tsan).
+  ASan and UBSan; ThreadSanitizer needs Linux (#105).
 - Not yet: allocation-free waits, per-worker frame free lists and lock-free index reads
-  (#TODO-perf); the cycle report's program-order path note (#TODO-cyclepath); interners shared
-  across workers, so pooled `Db`s run only queries that do not intern (#TODO-interners);
+  (#104); the cycle report's program-order path note (#106); interners shared
+  across workers, so pooled `Db`s run only queries that do not intern (#107);
   contextual queries (#16); eviction and persistence (#17).
 
 ## Lexer and directive-free `pp` (#40, 2026-11-18)

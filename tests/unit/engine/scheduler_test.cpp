@@ -268,7 +268,6 @@ void deterministic_across_thread_counts() {
   check(cold_mismatches == 0, std::format("incremental == cold at every thread count ({} mismatches)", cold_mismatches));
   check(totals[0].contended == 0 && totals[0].recomputed == 0, "nothing contends without a pool");
   check(totals[3].contended > 0 && totals[4].contended > 0, "frames waited on cells other frames owned");
-  check(totals[3].recomputed + totals[4].recomputed > 0, "cheap cells were computed privately under contention");
   std::println("contended {} {} {} {}, recomputed {} {} {} {}", totals[1].contended, totals[2].contended, totals[3].contended,
                totals[4].contended, totals[1].recomputed, totals[2].recomputed, totals[3].recomputed, totals[4].recomputed);
   for (std::size_t ci = 1; ci < configs.size(); ++ci) {
@@ -417,8 +416,21 @@ void respawned_requests_answer_once() {
       answers[i].count.fetch_add(1);
     }, [](std::exception_ptr) {});
   }
+  // One request certainly in flight across the first epochs: interrupted and respawned each time.
+  slow_release = false;
+  slow_started = false;
+  std::int64_t slow_value = 0;
+  Revision slow_revision = 0;
+  std::atomic<int> slow_answers{0};
+  ep.spawn<Slow>(0, Priority::background, [&](const std::int64_t& v) {
+    slow_value = v;
+    slow_revision = inc.revision();
+    slow_answers.fetch_add(1);
+  }, [](std::exception_ptr) {});
+  while (!slow_started.load()) std::this_thread::yield();
   std::size_t respawned = 0;
   for (int e = 0; e < 40; ++e) {
+    if (e == 5) slow_release = true;
     for (auto spin = rng() % 5000; spin > 0; --spin) {
       if (spin % 1000 == 0) std::this_thread::yield();
     }
@@ -436,7 +448,8 @@ void respawned_requests_answer_once() {
   }
   check(counts == 0, "every request answered exactly once");
   check(wrong == 0, std::format("every answer is the cold value at its revision ({} wrong)", wrong));
-  check(respawned > 0, "requests were interrupted and respawned");
+  check(respawned >= 5, "requests were interrupted and respawned");
+  check(slow_answers == 1 && slow_value == 10 * at[slow_revision].in[0], "the held request answered once, at its revision");
 }
 
 struct WorkThenSlow {
@@ -473,6 +486,42 @@ void restarts_and_cancel() {
   const auto third = ep.apply([](Db&) {});
   check(third.respawned == 0, "and is not respawned");
   slow_release = true;
+}
+
+std::atomic<int> gate_arrivals{0};
+// Holds its first run until a second run of the same cell has started: the second is a private
+// computation by another frame (§A3.3).
+struct [[=cheap]] Gate {
+  using Key = std::uint32_t;
+  using Value = std::int64_t;
+  static Value run(SyncCtx& cx, Key k) {
+    if (gate_arrivals.fetch_add(1) == 0) {
+      while (gate_arrivals.load() < 2) std::this_thread::yield();
+    }
+    return cx.fetch<In>(k) + 1;
+  }
+};
+struct OverGate {
+  using Key = std::uint32_t;
+  using Value = std::int64_t;
+  static query_task<Value> run(Ctx& cx, Key k) { co_return cx.fetch<Gate>(k / 2) * 2; }
+};
+
+void private_recomputation() {
+  Pool pool(2);
+  Db db(pool);
+  db.set<In>(0, 20);
+  std::vector<std::string> got(2);
+  ex::counting_scope scope;
+  for (std::uint32_t k = 0; k < 2; ++k) {
+    ex::spawn(db.request<OverGate>(k) | ex::then([&got, k](const std::int64_t& v) noexcept { got[k] = std::to_string(v); }) |
+                  ex::upon_error([](std::exception_ptr) noexcept {}),
+              scope.get_token());
+  }
+  std::this_thread::sync_wait(scope.join());
+  check(got[0] == "42" && got[1] == "42", "both frames got the cheap value");
+  check(gate_arrivals == 2 && db.stats().recomputed == 1 && db.runs<Gate>(0) == 1,
+        "the second fetch computed it privately; only the owner stored it");
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -607,5 +656,6 @@ int main() {
   cancellation_injected();
   respawned_requests_answer_once();
   restarts_and_cancel();
+  private_recomputation();
   return ycxx::unit::result("engine_scheduler");
 }
