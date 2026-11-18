@@ -140,6 +140,7 @@ class Parser {
           while (!eat('}')) {
             if (p_ >= s_.size()) return fail(f);
             Stmt st;
+            skip();
             st.rel_line = line_ - base_;
             if (word("return")) st.is_return = true;
             else if (word("let")) {
@@ -449,7 +450,7 @@ inline void define_queries(qe::Engine& e, const Options& opt) {
     return box(set);
   });
 
-  e.define(RESOLVE, [&opt](Ctx& c, const Key& k) {
+  e.define(RESOLVE, [opt](Ctx& c, const Key& k) {
     auto bar = k.b.find('|');
     std::string fname = k.b.substr(0, bar);
     std::vector<Ty> args;
@@ -492,7 +493,7 @@ inline void define_queries(qe::Engine& e, const Options& opt) {
     return box(Resolution{true, *viable[best], {}});
   });
 
-  e.define(CHECK, [&opt](Ctx& c, const Key& k) {
+  e.define(CHECK, [opt](Ctx& c, const Key& k) {
     auto& head = unbox<ItemHead>(c.fetch(key(ITEM_HEAD, k.a, k.b)));
     auto& body = unbox<ItemBody>(c.fetch(key(ITEM_BODY, k.a, k.b)));
     Checked out;
@@ -558,7 +559,7 @@ inline void define_queries(qe::Engine& e, const Options& opt) {
     return box(out);
   });
 
-  e.define(LOWER, [&opt](Ctx& c, const Key& k) {
+  e.define(LOWER, [opt](Ctx& c, const Key& k) {
     auto& ch = unbox<Checked>(c.fetch(key(CHECK, k.a, k.b)));
     burn(opt.work, k.b);
     std::string s = k.b + ":\n";

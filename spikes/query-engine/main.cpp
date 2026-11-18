@@ -6,7 +6,7 @@
 // catches a deliberately missed dependency.
 //
 //   spike demo            (a) and (b), with the executed-query logs
-//   spike threads N       (c): cold builds at 1..N threads, compared, with timings
+//   spike threads N EDITS (c): builds at 1..N threads, cold then after each edit, compared
 //   spike fuzz STEPS N    random edits; incremental at 1 and N threads vs cold, every step
 //   spike fuzz-bug STEPS  the same with an untracked read injected; must fail
 
@@ -29,11 +29,13 @@ void check(bool ok, const std::string& what) {
 
 struct World {
   std::map<std::string, std::string> files;
+  std::set<std::string> deleted;  // files that existed once; their input becomes "no such file"
   std::vector<std::string> tus;
 };
 
 void load(qe::Engine& e, const World& w) {
   for (auto& [f, text] : w.files) e.set_input(key(SOURCE, f), qe::box(SourceText{text}));
+  for (auto& f : w.deleted) e.set_input(key(SOURCE, f), qe::box(SourceText{}));
   e.set_input(key(TUS), qe::box(w.tus));
 }
 
@@ -184,6 +186,7 @@ struct GenSource {
 };
 struct Program {
   std::vector<std::vector<std::string>> headers;  // declaration lines
+  std::vector<bool> header_deleted;
   std::vector<GenSource> sources;
   int next_fn = 0;
 };
@@ -226,6 +229,7 @@ struct Gen {
   Program program(int headers, int sources, int fns_per_source, int decls_per_header) {
     Program p;
     p.headers.resize(headers);
+    p.header_deleted.resize(headers);
     for (auto& h : p.headers)
       for (int i = 0; i < decls_per_header; ++i) h.push_back(decl());
     p.sources.resize(sources);
@@ -241,7 +245,12 @@ struct Gen {
   std::string edit(Program& p) {
     auto& s = p.sources[pick(static_cast<int>(p.sources.size()))];
     auto& h = p.headers[pick(static_cast<int>(p.headers.size()))];
-    switch (pick(7)) {
+    switch (pick(8)) {
+      case 7: {
+        int hi = pick(static_cast<int>(p.headers.size()));
+        p.header_deleted[hi] = !p.header_deleted[hi];
+        return (p.header_deleted[hi] ? "delete h" : "restore h") + std::to_string(hi) + ".hdr";
+      }
       case 0:
       case 1: {
         if (s.fns.empty()) return "noop";
@@ -286,7 +295,9 @@ World render(const Program& p) {
   for (std::size_t i = 0; i < p.headers.size(); ++i) {
     std::string t;
     for (auto& d : p.headers[i]) t += d + "\n";
-    w.files["h" + std::to_string(i) + ".hdr"] = t;
+    auto n = "h" + std::to_string(i) + ".hdr";
+    if (p.header_deleted[i]) w.deleted.insert(n);
+    else w.files[n] = t;
   }
   for (std::size_t i = 0; i < p.sources.size(); ++i) {
     auto& s = p.sources[i];
@@ -312,35 +323,56 @@ double seconds_since(std::chrono::steady_clock::time_point t0) {
   return std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
 }
 
-int threads_demo(unsigned max_threads) {
-  Gen g(42);
-  Program p = g.program(8, 40, 50, 20);
-  World w = render(p);
+// A cold build can only differ across thread counts in what runs and in dependency order (every
+// entry is new, so changed_at and cutoffs are trivially equal). The incremental builds that
+// follow are where validation and cutoff could depend on scheduling, so they are compared too.
+int threads_demo(unsigned max_threads, int edits) {
+  struct Run {
+    std::vector<std::string> outs;
+    std::vector<std::vector<qe::LogEntry>> logs;
+    std::vector<std::string> graphs;
+  };
   Options opt;
   opt.work = 200000;
-  std::string ref_out, ref_graph;
-  std::vector<qe::LogEntry> ref_log;
+  Run ref;
   for (unsigned n = 1; n <= max_threads; n *= 2) {
+    Gen g(42);
+    Program p = g.program(8, 40, 50, 20);
+    World w = render(p);
     qe::Engine e(n);
     define_queries(e, opt);
     load(e, w);
     auto t0 = std::chrono::steady_clock::now();
-    auto out = build(e);
+    Run r;
+    r.outs.push_back(build(e));
     double dt = seconds_since(t0);
-    auto log = e.take_log();
-    auto graph = e.graph_digest();
-    std::printf("threads %2u: cold build %.3fs, %zu queries executed, output %zu bytes\n", n, dt, log.size(), out.size());
+    r.logs.push_back(e.take_log());
+    r.graphs.push_back(e.graph_digest());
+    std::size_t reexecuted = 0;
+    for (int i = 0; i < edits; ++i) {
+      g.edit(p);
+      load(e, render(p));
+      r.outs.push_back(build(e));
+      r.logs.push_back(e.take_log());
+      r.graphs.push_back(e.graph_digest());
+      reexecuted += r.logs.back().size();
+    }
+    std::printf("threads %2u: cold build %.3fs, %zu queries; then %d edits re-executing %zu queries\n", n, dt,
+                r.logs[0].size(), edits, reexecuted);
     if (n == 1) {
-      ref_out = out, ref_graph = graph, ref_log = log;
+      ref = std::move(r);
       continue;
     }
-    check(out == ref_out, "output identical to 1 thread");
-    check(log == ref_log, "same queries executed, same cutoffs");
-    check(graph == ref_graph, "memo graph (revisions, dependency lists, execution counts) identical");
+    check(r.outs[0] == ref.outs[0] && r.logs[0] == ref.logs[0] && r.graphs[0] == ref.graphs[0],
+          "cold: same output, same queries executed, same dependency lists");
+    check(r.outs == ref.outs, "after each edit: output identical to 1 thread");
+    check(r.logs == ref.logs, "after each edit: same queries re-executed, same cutoffs");
+    check(r.graphs == ref.graphs, "after each edit: memo graph (revisions, dependencies, execution counts) identical");
   }
   return failures;
 }
 
+// Exit codes: 0 ok, 3 incremental differs from cold, 4 the 1- and N-thread engines disagree.
 int fuzz(int steps, unsigned threads, bool inject_bug) {
   Gen g(7);
   Program p = g.program(4, 12, 12, 12);
@@ -365,13 +397,13 @@ int fuzz(int steps, unsigned threads, bool inject_bug) {
     define_queries(cold, opt);
     load(cold, w);
     auto c = build(cold);
-    bool ok = a == c && b == c && la == lb;
-    if (step % 10 == 0) ok = ok && one.graph_digest() == many.graph_digest();
-    if (!ok) {
-      std::printf("step %d (%s): %s\n", step, what.c_str(),
-                  a != c ? "incremental differs from cold" : b != c ? "N-thread incremental differs from cold"
-                                                                   : "1 and N threads disagree");
-      return 1;
+    if (a != c || b != c) {
+      std::printf("step %d (%s): %s incremental differs from cold\n", step, what.c_str(), a != c ? "1-thread" : "N-thread");
+      return 3;
+    }
+    if (la != lb || (step % 10 == 0 && one.graph_digest() != many.graph_digest())) {
+      std::printf("step %d (%s): 1 and N threads disagree\n", step, what.c_str());
+      return 4;
     }
     if (step % 50 == 0) std::printf("step %d ok (%zu queries re-executed by the last edit: %s)\n", step, la.size(), what.c_str());
   }
@@ -384,13 +416,14 @@ int fuzz(int steps, unsigned threads, bool inject_bug) {
 int main(int argc, char** argv) {
   std::string mode = argc > 1 ? argv[1] : "demo";
   if (mode == "demo") return demo() ? 1 : 0;
-  if (mode == "threads") return threads_demo(argc > 2 ? std::atoi(argv[2]) : 16) ? 1 : 0;
-  if (mode == "fuzz") return fuzz(argc > 2 ? std::atoi(argv[2]) : 300, argc > 3 ? std::atoi(argv[3]) : 8, false);
+  auto arg = [&](int i, int def) { return std::max(1, argc > i ? std::atoi(argv[i]) : def); };
+  if (mode == "threads") return threads_demo(arg(2, 16), arg(3, 10)) ? 1 : 0;
+  if (mode == "fuzz") return fuzz(arg(2, 300), arg(3, 8), false);
   if (mode == "fuzz-bug") {
-    int r = fuzz(argc > 2 ? std::atoi(argv[2]) : 300, argc > 3 ? std::atoi(argv[3]) : 8, true);
-    std::printf(r ? "the missed dependency was caught, as it should be\n" : "MISSED: the injected bug went unnoticed\n");
-    return r ? 0 : 1;
+    int r = fuzz(arg(2, 300), arg(3, 8), true);
+    std::printf(r == 3 ? "the missed dependency was caught, as it should be\n" : "MISSED: the injected bug was not caught as incremental != cold\n");
+    return r == 3 ? 0 : 1;
   }
-  std::fprintf(stderr, "usage: spike [demo | threads N | fuzz STEPS N | fuzz-bug STEPS N]\n");
+  std::fprintf(stderr, "usage: spike [demo | threads N EDITS | fuzz STEPS N | fuzz-bug STEPS N]\n");
   return 2;
 }

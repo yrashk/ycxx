@@ -71,6 +71,10 @@ Value box(T v) {
   return std::make_shared<const Boxed<T>>(std::move(v));
 }
 
+// The reference stays valid while the memo entry holding the value lives and is not replaced,
+// which in this spike is the rest of the current revision: entries are never freed, an entry is
+// re-executed at most once per revision, and inputs change only between requests. A real engine
+// with garbage collection or cancellation must hand out owning handles instead.
 template <class T>
 const T& unbox(const Value& v) {
   return static_cast<const Boxed<T>&>(*v).v;
@@ -87,7 +91,8 @@ struct CycleError : std::runtime_error {
 
 class Pool {
  public:
-  explicit Pool(unsigned n) : deques_(n) {
+  explicit Pool(unsigned n) : deques_(std::max(n, 1u)) {
+    n = size();
     for (unsigned i = 0; i < n; ++i) workers_.emplace_back([this, i] { worker_loop(i); });
   }
   ~Pool() {
@@ -100,14 +105,23 @@ class Pool {
   }
   unsigned size() const { return static_cast<unsigned>(deques_.size()); }
 
-  // Runs fns[0..n) and returns when all are done. Exceptions are rethrown, lowest index first,
-  // so even failure reporting does not depend on scheduling.
+  // Runs all of fns[0..n) and returns when all are done, also when some throw: the lowest-index
+  // exception is rethrown. So the set of functions run, and the failure reported, do not depend
+  // on scheduling.
   void fork_join(std::span<const std::function<void()>> fns) {
     if (fns.empty()) return;
-    if (size() == 1 || fns.size() == 1 || self_ < 0) {
-      // Sequential path: one thread, or a caller that is not a worker.
-      if (self_ < 0) return run_from_outside(fns);
-      for (auto& f : fns) f();
+    const int self = self_pool_ == this ? self_ : -1;
+    if (self < 0) return run_from_outside(fns);
+    if (size() == 1 || fns.size() == 1) {
+      std::exception_ptr first;
+      for (auto& f : fns) {
+        try {
+          f();
+        } catch (...) {
+          if (!first) first = std::current_exception();
+        }
+      }
+      if (first) std::rethrow_exception(first);
       return;
     }
     Join join;
@@ -124,7 +138,7 @@ class Pool {
                       },
                       &join};
     {
-      auto& d = deques_[self_];
+      auto& d = deques_[self];
       std::lock_guard lk(d.m);
       // Push in reverse so the owner pops them in index order (LIFO); thieves take from the front.
       for (std::size_t i = fns.size(); i-- > 1;) d.q.push_back(&tasks[i]);
@@ -134,7 +148,7 @@ class Pool {
     while (join.pending.load() > 0) {
       Task* t = nullptr;
       {
-        auto& d = deques_[self_];
+        auto& d = deques_[self];
         std::lock_guard lk(d.m);
         if (!d.q.empty() && d.q.back()->join == &join) {
           t = d.q.back();
@@ -229,6 +243,7 @@ class Pool {
   }
 
   void worker_loop(unsigned i) {
+    self_pool_ = this;
     self_ = static_cast<int>(i);
     while (!stop_.load()) {
       if (Task* t = steal(i)) {
@@ -240,6 +255,9 @@ class Pool {
     }
   }
 
+  // Which pool, if any, the current thread is a worker of: a worker of another pool is an
+  // outside caller here.
+  static inline thread_local const Pool* self_pool_ = nullptr;
   static inline thread_local int self_ = -1;
   std::vector<Deque> deques_;
   std::mutex inject_m_;
