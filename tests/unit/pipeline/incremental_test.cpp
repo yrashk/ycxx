@@ -135,9 +135,31 @@ void incremental() {
   check(twice1 == twice0, "an insertion leaves the other functions' code green");
 }
 
+// Two units in one session; then one with an error, which keeps the program from linking, and
+// fixed again.
+void two_units() {
+  pl::Session s;
+  const pl::TuId a{0}, b{1};
+  s.set_source(a, "a.cpp", "int f() { return 1; }\n", "a.o");
+  s.set_source(b, "b.cpp", "int f();\nint main() { return f() - 1; }\n", "b.o");
+  s.set_program(program, {{a, b}, {}, "two"});
+  const std::vector<std::uint8_t> image = s.get<pl::Link>(program).image;
+  check(!image.empty() && s.get<pl::Link>(program).errors.empty(), "two units link");
+
+  s.set_source(a, "a.cpp", "int f() { return 1 }\n", "a.o");
+  check(s.get<pl::TuFront>(a).has_errors(), "the front end reports the error");
+  check(!s.get<pl::Tu>(a).object, "a unit with front-end errors has no object");
+  const pl::Linked& broken = s.get<pl::Link>(program);
+  check(broken.image.empty() && !broken.errors.empty(), "a unit with front-end errors keeps the program from linking");
+
+  s.set_source(a, "a.cpp", "int f() { return 1; }\n", "a.o");
+  check(s.get<pl::Link>(program).image == image, "fixed again, the program links as before");
+}
+
 }  // namespace
 
 int main() {
   incremental();
+  two_units();
   return ycxx::unit::result("unit.pipeline_incremental");
 }

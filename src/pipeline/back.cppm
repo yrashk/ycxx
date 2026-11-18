@@ -105,6 +105,7 @@ struct TranslationUnit {
   std::vector<FunctionDef> functions;  // the definitions
   std::vector<Variable> variables;     // the definitions
   EntityId main = EntityId::none;      // the program's `main`, if this unit defines it
+  bool front_failed = false;           // the front end reported errors: nothing to compile
 };
 
 // What failed, at a location in an item when there is one. Every error here is something the α
@@ -507,6 +508,8 @@ static_assert(ir::layout_source<QueryLayout>);
 
 // ------------------------------------------------------------------------------------- functions
 
+// Every function's source re-runs after any edit to the unit and scans it: quadratic in the
+// unit's functions per edit, cheap at α sizes (#121 indexes it).
 engine::query_task<FunctionSource> FunctionSourceQ::run(engine::Ctx& cx, FnKey k) {
   const TranslationUnit& tu = co_await cx.fetch<TuUnit>(k.tu);
   FunctionSource out;
@@ -623,7 +626,7 @@ engine::query_task<Machine> Codegen::run(engine::Ctx& cx, FnKey k) {
   std::uint8_t level = cx.fetch<OptLevel>(target);
   if (level >= 1) {
     for (const SnapshotEntry& e : cx.fetch<OptCacheSnapshot>(target))
-      if (e.unit == *unit.unit && e.level >= level) level = e.level;
+      if (e.unit == *unit.unit) level = std::max(level, e.level);
   }
   co_return co_await cx.fetch<Optimized>({*unit.unit, target, level});
 }
@@ -665,6 +668,11 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
   ast::Interners& in = *universe().in;
   TuValue out;
   std::vector<BackError>& errors = out.errors;
+  if (tu.front_failed) {
+    // Its diagnostics are the front end's (`TuFront`); this only keeps an object out of a link.
+    errors.push_back({std::nullopt, "the translation unit has errors"});
+    co_return out;
+  }
   std::vector<FnKey> fns;
   for (const FunctionDef& f : tu.functions) fns.push_back({id, f.entity});
 

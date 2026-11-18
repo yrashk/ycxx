@@ -85,13 +85,16 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
   TranslationUnit tu;
   tu.name = std::move(name);
   std::set<std::uint32_t> seen;
-  auto declare = [&](EntityId e, std::optional<ast::Loc> at) {
+  // The type from the declaration, not the entity's record: a variable's type is not part of its
+  // identity, so a record made before an edit may hold the old one (#115).
+  auto declare = [&](const ast::DeclSema& d, std::optional<ast::Loc> at) {
+    EntityId e = d.entity;
     if (e == EntityId::none || !seen.insert(std::to_underlying(e)).second) return;
     const sema::EntityRec& r = world.entities.rec(e);
     bool fn = r.kind == sema::EntityKind::function;
     std::string id(ins.names.spelling(r.name));
     if (fn && id == "main") tu.main = e;
-    tu.entities.push_back({e, std::move(id), r.type, fn, r.lang, r.linkage, false, at});
+    tu.entities.push_back({e, std::move(id), d.type, fn, r.lang, r.linkage, false, at});
   };
   for (std::uint32_t k = 0; k < items.items.size(); ++k) {
     const items::Item& it = items.items[k];
@@ -111,7 +114,7 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
         at[dr.decl] = ast::Loc{program.id(k), c.at};
       }
     }
-    for (std::size_t i = 0; i < decls.size(); ++i) declare(decls[i].entity, at[i]);
+    for (std::size_t i = 0; i < decls.size(); ++i) declare(decls[i], at[i]);
     if (it.kind == items::ItemKind::function && it.has_body() && !decls.empty() && decls[0].entity != EntityId::none) {
       tu.functions.push_back({decls[0].entity, decls[0], program.analyze_body(k).value, program.id(k), it.body_begin - it.begin});
       continue;
@@ -172,6 +175,12 @@ engine::query_task<TranslationUnit> TuUnit::run(engine::Ctx& cx, TuId tu) {
   const TuSource& src = cx.fetch<TuSourceIn>(tu);
   if (!src.file) co_return src.given;
   const FrontResult& front = co_await cx.fetch<TuFront>(tu);
+  if (front.has_errors()) {
+    TranslationUnit failed;
+    failed.name = src.name;
+    failed.front_failed = true;
+    co_return failed;
+  }
   co_return front.unit;
 }
 
