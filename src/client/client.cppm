@@ -1,11 +1,12 @@
-// The daemon's clients (DECISIONS §4.7): a c++-compatible command line, an LSP server and a
-// control interface. Each will connect to the daemon, starting it if needed; until the daemon
-// exists (#63), `cxx` runs the pipeline in-process (ycxx.pipeline, #43).
+// The daemon's clients (DECISIONS §4.7, daemon design §7.1): a c++-compatible command line, an
+// LSP server and a control interface. `cxx` sends its request to the scope's daemon, starting it if
+// needed, and runs the same request in-process on any failure; both paths run `compile::run`, so
+// stdout, stderr, the exit status and the outputs are the same.
 export module ycxx.client;
 
 import std;
-import ycxx.obj.macho;
-import ycxx.pipeline;
+import ycxx.compile;
+import ycxx.daemon;
 import ycxx.pp;
 
 export namespace ycxx::client {
@@ -22,183 +23,165 @@ int not_yet(std::string_view front) {
   return 2;
 }
 
-// What the c++-compatible command line asks for.
-struct Options {
-  enum class Stop { link, object, syntax, preprocess } stop = Stop::link;
-  pp::Config pp;  // -I, -isystem, -iquote, -D, -U
-  std::optional<std::string> output;
-  std::vector<std::string> sources;  // translation units
-  std::vector<std::string> objects;  // Mach-O objects, linked as they are
-};
+// Whether `cxx` uses the daemon. Off by default until requests run concurrently in it (#15, #63):
+// a build's parallel compiles would otherwise queue behind one another. `YCXX_DAEMON=1` or
+// `--daemon` turn it on, `YCXX_DAEMON=require` or `--daemon=require` (the tests' hook) make a
+// failure to use it an error instead of an in-process run, and `YCXX_NO_DAEMON=1` or `--no-daemon`
+// turn it off whatever else says.
+enum class Use { off, on, require };
 
-bool is_source(std::string_view f) {
-  for (std::string_view ext : {".cpp", ".cc", ".cxx", ".c++", ".C", ".cppm", ".ixx"})
-    if (f.ends_with(ext)) return true;
-  return false;
+Use use_from_environment() {
+  if (const char* e = std::getenv("YCXX_NO_DAEMON"); e && std::string_view(e) == "1") return Use::off;
+  const char* e = std::getenv("YCXX_DAEMON");
+  std::string_view v = e ? e : "";
+  if (v == "require") return Use::require;
+  if (v == "1" || v == "on") return Use::on;
+  return Use::off;
 }
 
-// Parses the arguments, or says why it cannot.
-std::expected<Options, std::string> parse_options(std::span<const std::string_view> args) {
-  Options o;
-  for (std::size_t i = 0; i < args.size(); ++i) {
-    std::string_view a = args[i];
-    auto pp_option = pp::take_option(args, i, o.pp);
-    if (!pp_option) return std::unexpected(pp_option.error());
-    if (*pp_option) continue;
-    if (a == "-c") o.stop = Options::Stop::object;
-    else if (a == "-fsyntax-only") o.stop = Options::Stop::syntax;
-    else if (a == "-E") o.stop = Options::Stop::preprocess;
-    else if (a == "-o") {
-      if (i + 1 == args.size()) return std::unexpected("argument to '-o' is missing");
-      o.output = std::string(args[++i]);
-    } else if (a.starts_with("-o")) o.output = std::string(a.substr(2));
-    else if (a.starts_with("-std=")) {
-      // The language is the C++26 working draft (DECISIONS §1.1).
-      if (a != "-std=c++26" && a != "-std=c++2c") return std::unexpected(std::format("unsupported language standard '{}'; ycxx compiles C++26", a.substr(5)));
+// Splits a response file's text into arguments: whitespace separates them, and quotes and
+// backslashes escape as in a shell's words.
+std::vector<std::string> split_words(std::string_view text) {
+  std::vector<std::string> out;
+  std::string cur;
+  bool in_word = false;
+  char quote = 0;
+  for (std::size_t i = 0; i < text.size(); ++i) {
+    char c = text[i];
+    if (quote) {
+      if (c == quote) quote = 0;
+      else if (c == '\\' && quote == '"' && i + 1 < text.size()) cur += text[++i];
+      else cur += c;
+    } else if (c == '\'' || c == '"') {
+      quote = c;
+      in_word = true;
+    } else if (c == '\\' && i + 1 < text.size()) {
+      cur += text[++i];
+      in_word = true;
+    } else if (std::isspace(static_cast<unsigned char>(c))) {
+      if (in_word) out.push_back(std::exchange(cur, {}));
+      in_word = false;
+    } else {
+      cur += c;
+      in_word = true;
     }
-    // Reflection and contracts are part of C++26, and ycxx's diagnostics are always plain:
-    // what other compilers need these flags for is always on here.
-    else if (a == "-pedantic-errors" || a == "-freflection" || a == "-fcontracts" || a == "-fdiagnostics-plain-output" ||
-             a == "-fno-color-diagnostics")
-      continue;
-    else if (a.starts_with("-") && a != "-") return std::unexpected(std::format("unsupported option '{}'", a));
-    else if (a.ends_with(".o")) o.objects.emplace_back(a);
-    else o.sources.emplace_back(a);
   }
-  if (o.sources.empty() && o.objects.empty()) return std::unexpected("no input files");
-  if (o.output && o.stop == Options::Stop::object && o.sources.size() > 1)
-    return std::unexpected("cannot specify '-o' with '-c' and several input files");
-  for (const std::string& s : o.sources)
-    if (!is_source(s)) return std::unexpected(std::format("'{}': unknown kind of input file", s));
-  return o;
+  if (in_word) out.push_back(cur);
+  return out;
 }
 
-std::optional<std::string> read_file(const std::string& path) {
-  std::ifstream in(path, std::ios::binary);
-  if (!in) return std::nullopt;
-  return std::string{std::istreambuf_iterator<char>(in), {}};
-}
-
-// Renders diagnostics as `path:line:col: error: message` (DECISIONS §4.7; the form tools/test
-// reads).
-class Renderer {
- public:
-  Renderer(std::string_view path, std::string_view text) : path_(path), lines_(text) {}
-  void at(std::uint32_t offset, bool error, std::string_view message) {
-    pipeline::LineColumn lc = lines_.line_column(offset);
-    std::println(std::cerr, "{}:{}:{}: {}: {}", path_, lc.line, lc.column, error ? "error" : "warning", message);
-  }
-  void file_level(std::string_view message) {
-    std::println(std::cerr, "{}: error: {}", path_, message);
-  }
-
- private:
-  std::string_view path_;
-  pipeline::LineTable lines_;
-};
-
-// The object a `-c` without `-o` writes: the source's file name with `.o`.
-std::filesystem::path object_name(const std::string& source) {
-  return std::filesystem::path(source).filename().replace_extension(".o");
-}
-
-// Compiles one translation unit; nullopt after reporting its errors.
-std::optional<obj::object> compile(const std::string& path, Options::Stop stop) {
-  auto text = read_file(path);
-  if (!text) {
-    std::println(std::cerr, "ycxx: error: cannot read '{}'", path);
-    return std::nullopt;
-  }
-  if (stop == Options::Stop::preprocess) {
-    auto [out, messages] = pp::preprocess_to_text(pp::session(), *text, path);
-    std::print("{}", out);
-    bool errors = false;
-    for (const pp::Message& m : messages) {
-      std::println(std::cerr, "{}:{}:{}: {}: {}", m.file, m.line, m.column, m.error ? "error" : "warning", m.text);
-      errors = errors || m.error;
+// Expands `@file` arguments, relative to the client's working directory (§3.2). A file that
+// cannot be read stays an argument, as other compilers keep it.
+void expand(std::string_view a, std::vector<std::string>& out, int depth) {
+  if (a.size() > 1 && a.starts_with('@') && depth < 16) {
+    std::ifstream in(std::string(a.substr(1)), std::ios::binary);
+    if (in) {
+      std::string text{std::istreambuf_iterator<char>(in), {}};
+      for (const std::string& w : split_words(text)) expand(w, out, depth + 1);
+      return;
     }
-    if (errors) return std::nullopt;
-    return obj::object{};
   }
-  Renderer out(path, *text);
-  pipeline::Front front(path, *text);
-  for (const pipeline::Message& m : front.messages()) {
-    if (m.where.empty()) out.at(m.offset, m.error, m.text);
-    else std::println(std::cerr, "{}: {}: {}", m.where, m.error ? "error" : "warning", m.text);
-  }
-  if (front.has_errors()) return std::nullopt;
-  if (stop == Options::Stop::syntax) return obj::object{};
-  pipeline::TranslationUnit tu = front.unit(object_name(path).native_encoded_string());
-  auto o = pipeline::compile(tu, front.interners(), front.constants());
-  if (!o) {
-    for (const pipeline::BackError& e : o.error()) {
-      if (e.at) out.at(front.byte_offset(*e.at), true, e.message);
-      else out.file_level(e.message);
+  out.emplace_back(a);
+}
+
+std::string cwd_now() {
+  std::error_code ec;
+  return std::filesystem::current_path(ec).native_encoded_string();
+}
+
+// The request through the daemon; why not, if it could not be answered there. A daemon that
+// closed the connection without an answer is started again and asked once more (§7.2).
+std::expected<compile::Done, std::string> through_daemon(const compile::Request& r, bool verbose) {
+  std::string root = daemon::root_for(compile::first_input(r.argv), r.cwd);
+  std::string why;
+  for (int attempt = 0; attempt < 2; ++attempt) {
+    auto c = daemon::reach(root, true);
+    if (!c) return std::unexpected(c.error());
+    auto d = daemon::request_compile(*c, r);
+    if (d) {
+      if (verbose)
+        std::println(std::cerr, "ycxx: answered by daemon {} for {} at revision {} ({} restarts, {} pp regions reused)",
+                     c->welcome.daemon_pid, c->welcome.root, d->report.revision, d->report.restarts, d->report.regions_reused);
+      return std::move(*d);
     }
-    return std::nullopt;
+    why = d.error().why;
+    if (!d.error().lost) break;
   }
-  return std::move(*o);
+  return std::unexpected(why);
 }
 
 }  // namespace
 
-// The c++-compatible front: `ycxx cxx [-c|-fsyntax-only] [-o out] [-std=c++26] a.cpp...`. Exits
-// 0 on success and 1 on any error in the input or the command line.
+// The c++-compatible front (compile.cppm has the options). Hidden options for the daemon:
+// `--daemon`, `--daemon=require`, `--no-daemon`; `-v` says whether and where the daemon answered.
 int cxx(std::span<const std::string_view> args) {
-  auto opts = parse_options(args);
-  if (!opts) {
-    std::println(std::cerr, "ycxx: error: {}", opts.error());
-    return 1;
+  Use use = use_from_environment();
+  bool forced_off = use == Use::off && std::getenv("YCXX_NO_DAEMON") != nullptr;
+  bool verbose = false;
+  std::vector<std::string> argv;
+  for (std::string_view a : args) {
+    if (a == "--no-daemon") forced_off = true;
+    else if (a == "--daemon") use = use == Use::require ? use : Use::on;
+    else if (a == "--daemon=require") use = Use::require;
+    else if (a == "-v") verbose = true;
+    else expand(a, argv, 0);
   }
-  pp::configure(pp::with_system_dirs(opts->pp));
-  bool failed = false;
-  std::vector<obj::object> objects;
-  for (const std::string& s : opts->sources) {
-    auto o = compile(s, opts->stop);
-    if (!o) {
-      failed = true;
-      continue;
-    }
-    if (opts->stop == Options::Stop::object) {
-      std::filesystem::path out = opts->output ? std::filesystem::path(*opts->output) : object_name(s);
-      if (auto err = pipeline::write_file(out, obj::macho::write_object(*o), false)) {
-        std::println(std::cerr, "ycxx: error: {}", *err);
-        failed = true;
-      }
-    } else if (opts->stop == Options::Stop::link) {
-      objects.push_back(std::move(*o));
-    }
-  }
-  if (failed) return 1;
-  if (opts->stop != Options::Stop::link) return 0;
+  if (forced_off) use = Use::off;
 
-  for (const std::string& path : opts->objects) {
-    auto text = read_file(path);
-    if (!text) {
-      std::println(std::cerr, "ycxx: error: cannot read '{}'", path);
-      return 1;
+  compile::Request r{std::move(argv), cwd_now(), compile::environment_now(),
+                     std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count()};
+  if (use != Use::off) {
+    auto d = through_daemon(r, verbose);
+    if (d) return compile::finish(*d);
+    if (use == Use::require) {
+      std::println(std::cerr, "ycxx: error: the daemon is required (YCXX_DAEMON=require) but failed: {}", d.error());
+      return 2;
     }
-    std::vector<std::uint8_t> bytes(text->begin(), text->end());
-    auto o = obj::macho::read_object(bytes, path);
-    if (!o) {
-      std::println(std::cerr, "ycxx: error: {}", o.error());
-      return 1;
-    }
-    objects.push_back(std::move(*o));
+    if (verbose) std::println(std::cerr, "ycxx: running in-process: {}", d.error());
   }
-  std::filesystem::path out = opts->output.value_or("a.out");
-  auto image = pipeline::link_executable(objects, out.filename().native_encoded_string());
-  if (!image) {
-    for (const link::error& e : image.error()) std::println(std::cerr, "ycxx: error: {}", e.message);
+  pp::DiskHost disk;
+  bool stopped = false;
+  compile::Done d = compile::run(r, disk, {}, stopped);
+  return compile::finish(d);
+}
+
+int lsp(std::span<const std::string_view>) { return not_yet("lsp"); }
+
+// `ycxx ctl status|shutdown [--root DIR]`: asks the daemon of DIR's scope (default: the working
+// directory's), never starting one.
+int control(std::span<const std::string_view> args) {
+  std::optional<std::string> command, root;
+  for (std::size_t i = 0; i < args.size(); ++i) {
+    if (args[i] == "--root" && i + 1 < args.size()) root = std::string(args[++i]);
+    else if (!command) command = std::string(args[i]);
+    else command.reset(), i = args.size();
+  }
+  if (!command || (*command != "status" && *command != "shutdown")) {
+    std::println(std::cerr, "usage: ycxx ctl status|shutdown [--root DIR]");
+    return 2;
+  }
+  std::string scope = root ? daemon::real_path(*root).value_or(*root) : daemon::root_for(std::nullopt, cwd_now());
+  auto c = daemon::reach(scope, false);
+  if (!c) {
+    std::println(std::cerr, "ycxx: no daemon for {}: {}", scope, c.error());
     return 1;
   }
-  if (auto err = pipeline::write_file(out, *image, true)) {
-    std::println(std::cerr, "ycxx: error: {}", *err);
+  if (*command == "shutdown") {
+    auto ok = daemon::request_shutdown(*c);
+    if (!ok) std::println(std::cerr, "ycxx: {}", ok.error());
+    return ok ? 0 : 1;
+  }
+  auto s = daemon::request_status(*c);
+  if (!s) {
+    std::println(std::cerr, "ycxx: {}", s.error());
     return 1;
+  }
+  // One `name: value` line per field of the status, by reflection.
+  template for (constexpr auto m : std::define_static_array(std::meta::nonstatic_data_members_of(^^daemon::Status,
+                                                                                                  std::meta::access_context::unchecked()))) {
+    std::println("{}: {}", std::meta::identifier_of(m), s->[:m:]);
   }
   return 0;
 }
 
-int lsp(std::span<const std::string_view>) { return not_yet("lsp"); }
-int control(std::span<const std::string_view>) { return not_yet("ctl"); }
 }  // namespace ycxx::client

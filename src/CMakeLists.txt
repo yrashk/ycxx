@@ -17,6 +17,8 @@ add_subdirectory(sema)
 add_subdirectory(parse)
 add_subdirectory(target/aarch64)
 add_subdirectory(pipeline)
+add_subdirectory(client)
+add_subdirectory(daemon)
 
 configure_file(version.cppm.in ${CMAKE_CURRENT_BINARY_DIR}/version.cppm @ONLY)
 
@@ -26,9 +28,8 @@ target_sources(ycxxc_lib PUBLIC FILE_SET CXX_MODULES
   FILES
     ${CMAKE_CURRENT_BINARY_DIR}/version.cppm
     driver/driver.cppm
-    daemon/daemon.cppm
     client/client.cppm)
-target_link_libraries(ycxxc_lib PUBLIC ycxxc_options ycxxc_pipeline)
+target_link_libraries(ycxxc_lib PUBLIC ycxxc_options ycxxc_daemon)
 
 add_executable(ycxxc main.cpp)
 set_target_properties(ycxxc PROPERTIES OUTPUT_NAME ycxx RUNTIME_OUTPUT_DIRECTORY ${PROJECT_BINARY_DIR}/bin)
