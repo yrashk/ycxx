@@ -50,6 +50,15 @@ in [GitHub issues](https://github.com/yrashk/ycxx/issues) and the
     objects. `sizeof` of a class type is not yet supported
     ([#194](https://github.com/yrashk/ycxx/issues/194)); other cast gaps are
     [#199](https://github.com/yrashk/ycxx/issues/199).
+  - What C and system headers declare (2026-11-18, toward `#include <cstdio>`,
+    [#133](https://github.com/yrashk/ycxx/issues/133)): `typedef` and `using T = …`, including
+    `typedef struct { … } T;`; `using N::x;` at namespace scope; unions (named, typedef'd and
+    template unions; not yet anonymous ones or members with non-trivial special members,
+    [#203](https://github.com/yrashk/ycxx/issues/203)); `float`, `double` and `long double` as
+    types, though not yet their values ([#201](https://github.com/yrashk/ycxx/issues/201));
+    `char s[] = "…"` and `extern T a[];`; `[[…]]` attributes, and the GNU `__attribute__((…))`
+    and `__asm("…")` labels the macOS SDK uses ([docs/EXTENSIONS.md](docs/EXTENSIONS.md)). Errors
+    inside a header are reported at the header's file and line.
   - Constant evaluation, by ycxx's own interpreter of its IR: `constexpr` and `consteval`
     functions and variables, `constinit`, `static_assert` and `if consteval`, with an error that
     says why an expression is not constant (overflow, an uninitialized read, a dangling pointer,
