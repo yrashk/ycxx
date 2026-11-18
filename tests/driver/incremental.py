@@ -18,8 +18,9 @@ The format (`*.incr`): a header of `//` directives, then the base state's files,
     ...
 
 For each state, the incremental result (the compiler having seen the previous states) must equal
-a cold run on a fresh copy of that state, and the cold result must match the `//!` error markers
-in the state's files (no markers: accepted). The generators of edit sequences (random, mined from
+a cold run on a fresh copy of that state. With ACTION: syntax the cold result must match the `//!`
+error markers in the state's files (no markers: accepted); with run or preprocess every state
+must build. The generators of edit sequences (random, mined from
 git history, minimized; DECISIONS §4.2) produce states in the same shape: a list of
 {path: text}.
 

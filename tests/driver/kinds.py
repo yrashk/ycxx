@@ -174,7 +174,8 @@ def build_and_run(c, src, ctx, tr, flags, timeout, work, tag='', label=''):
     exe = work / f'{c.name}{tag}.out'
     r = run(tr, f'{label}build', c.build(src, exe, flags), timeout, cwd=src.parent)
     if crashed(r.status):
-        raise Failed(f'{c.name} crashed building {src.name} (exit {r.status})')
+        why = f'{c.name} crashed building {src.name} (exit {r.status})'
+        raise Unresolved(why) if c.name in toolchain.ORACLES and c is not ctx.cut else Failed(why)
     if r.status != 0:
         return False, r.status, ''
     r = run(tr, f'{label}run', [exe], timeout, cwd=work)

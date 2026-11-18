@@ -131,7 +131,8 @@ int g();
 --- delete b.h
 ```
 
-Each state's cold result must also match the markers in its files. Clang and GCC have no
+With `ACTION: syntax` each state's cold result must also match the markers in its files; with
+`run` or `preprocess` every state must build. Clang and GCC have no
 incremental mode: for them the incremental side edits one directory in place and compiles it
 cold, which exercises the format and the comparison.
 

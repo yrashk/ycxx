@@ -14,7 +14,9 @@ from dataclasses import dataclass
 
 # The process groups of the commands running now. Each command gets its own, so that a timeout
 # kills the whole tree (g++ runs cc1plus and as); Ctrl-C reaches them through kill_all().
+# After kill_all() no new command starts.
 _live, _lock = set(), threading.Lock()
+_stopping = False
 
 
 def _killpg(pid):
@@ -25,7 +27,9 @@ def _killpg(pid):
 
 
 def kill_all():
+    global _stopping
     with _lock:
+        _stopping = True
         for pid in list(_live):
             _killpg(pid)
 
@@ -55,6 +59,9 @@ class Transcript:
         t0 = time.monotonic()
         loc = f'(cd {shlex.quote(str(cwd))} && ' if cwd else ''
         self.note(f'$ {loc}{shlex.join(str(c) for c in cmd)}{")" if cwd else ""}')
+        if _stopping:
+            self.note(f'[{step}: not run: interrupted]')
+            return Run(None, '', '', 0.0)
         try:
             proc = subprocess.Popen([str(c) for c in cmd], cwd=cwd, stdout=subprocess.PIPE,
                                     stderr=subprocess.PIPE, text=True, errors='replace', env=env,
@@ -65,6 +72,8 @@ class Transcript:
             return Run(127, '', str(e), 0.0)
         with _lock:
             _live.add(proc.pid)
+            if _stopping:  # interrupted between the check and Popen
+                _killpg(proc.pid)
         try:
             stdout, stderr = proc.communicate(timeout=timeout)
         except subprocess.TimeoutExpired:
