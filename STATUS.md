@@ -104,7 +104,7 @@ What is true of the code today. Work in progress and its owners are tracked in
 - Not yet: `long double` and the extended floating types' values (left to the
   target), the type of an integer literal (sema, #33).
 
-## Preprocessor: includes and macros (#85, 2026-11-18)
+## Preprocessor (#85, 2026-11-18)
 
 - `ycxx.pp` (`src/pp/`): phase 4 as query-engine.md §B9's contextual query, with a local stand-in
   for the engine parts that do not exist yet (#16, #93).
@@ -112,12 +112,15 @@ What is true of the code today. Work in progress and its owners are tracked in
     regions, its macro delta and `#pragma once` marks, its `TokLoc` and `Expansion` tables
     (ast.md §8.1), its diagnostics, and its *trace*. The trace lists the questions its entry state
     answered: `macro(name)` for every identifier tested that the region had not defined itself,
-    `once(file)`, include resolutions and file contents.
+    `defined(name)`, `once(file)`, `__COUNTER__`'s value, the build time, include resolutions
+    and file contents.
   - A `Session` (`:unit`) caches regions by file occurrence and reuses one wherever its trace
     verifies. A header is reused across TUs and within one, and only a header whose answers
     changed is recomputed.
   - Macro answers are location-free. A region refers to a definition it did not make through a
     binding that its includer resolves.
+  - A file that is one `#ifndef X` group records its guard. Included again where X is defined, it
+    is an empty region whose one question is X's, so it is not read (§B9).
   - `Region` is the TU flattened after phases 5–6, which the item splitter and the parser read.
     Its `files` are paths with presumed names, so its value does not depend on the session.
     `Region::site(tok)` gives a macro token's expansion site.
@@ -132,9 +135,22 @@ What is true of the code today. Work in progress and its owners are tracked in
     `__VA_ARGS__`, `__VA_OPT__`, and the constraints on replacement lists. Arguments are
     replaced in a barrier context. Their tokens sit in expansions of kind argument, and pasted
     tokens in kind paste, so `Region::site` leads to the invocation;
-  - `#pragma once` (other pragmas pass through to `-E`), and the null directive.
-  - Every other directive is diagnosed as unsupported. Conditionals and the rest come in the
-    third part of #85.
+  - conditional inclusion (`#if`/`#ifdef`/`#ifndef`/`#elif`/`#elifdef`/`#elifndef`/`#else`/
+    `#endif`). Lexer diagnostics on skipped lines are dropped. `#if` expressions are evaluated
+    in `intmax_t`/`uintmax_t` (`:cond`), with `defined`, `__has_include`,
+    `__has_include_next`, `__has_embed` (`limit` only), and the `__has_*` probes answering 0;
+  - `#line` (presumed lines and names), `#error`, `#warning`, `_Pragma`, `#pragma once`
+    (other pragmas pass through to `-E`), and the null directive;
+  - module and import lines go on to phase 7, their keywords flagged `tok_flag::directive`.
+    Header-unit imports and `#embed` are diagnosed as unsupported.
+- Predefined macros (`:predefined`, DECISIONS §1.5):
+  - `__ycxx__` and its version, and the draft's macros;
+  - a feature-test table, with lexer features only;
+  - the target's macros, generated from `ast::Target` and checked against Clang
+    (`tests/own/pp/predefined-target.pp.cpp`);
+  - `__LINE__`, `__FILE__`, `__COUNTER__`, `__DATE__` and `__TIME__`.
+- `#include <cstdio>` preprocesses until libycxx's `#error` for unknown compilers
+  (yrashk/libycxx#17).
 - `ycxx cxx -E` prints what Clang's `-E` would, by Clang's line and spacing rules. `preprocess`
   is in `tests/features/ycxx.txt`. Diagnostics in included files name their file.
 - Tests:
@@ -143,11 +159,11 @@ What is true of the code today. Work in progress and its owners are tracked in
   - `tests/own/slice/a3-local-header.run.cpp`;
   - `unit.pp`: resolution, traces, reuse across TUs, and incremental equals cold over edit
     sequences.
-- Not yet: conditionals, `#line`, `#error`, `_Pragma`, the
-  predefined macros beyond `__cplusplus`, and module and import lines (#85). The engine cell
-  `Pp(main)` does not depend on headers until #93. Items are cut from the flattened TU, so a
-  header's items carry the main file's identity (#85). Sema diagnostics in headers render
-  against the main file (#34).
+- Not yet:
+  - `#embed` (#125);
+  - the engine cell `Pp(main)` depending on headers (#93);
+  - items cut per region; a header's items carry the main file's identity (#126);
+  - sema diagnostics in headers, and presumed `#line` locations outside phase 4 (#34).
 
 ## Item splitter (#18, 2026-11-18)
 
