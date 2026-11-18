@@ -10,4 +10,4 @@ target_sources(ycxxc_ir PUBLIC FILE_SET CXX_MODULES FILES
   debug.cppm
   text.cppm
   ir.cppm)
-target_link_libraries(ycxxc_ir PUBLIC ycxxc_hash)
+target_link_libraries(ycxxc_ir PUBLIC ycxxc_ast ycxxc_hash)
