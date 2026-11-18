@@ -119,9 +119,10 @@ What is true of the code today. Work in progress and its owners are tracked in
   racing readers over 300 rounds, counts per request and per kind. Clean under
   ASan and UBSan; ThreadSanitizer needs Linux (#105).
 - Not yet: allocation-free waits, per-worker frame free lists and lock-free index reads
-  (#104); the cycle report's program-order path note (#106); interners shared
-  across workers, so pooled `Db`s run only queries that do not intern (#107);
-  contextual queries (#16); eviction and persistence (#17).
+  (#104); the cycle report's program-order path note (#106); the pipeline's other
+  single-threaded state (pp's process session, `sema::Entities`, the back end's stores), so a
+  `pipeline::Session` does not run on a pool yet (#137); contextual queries (#16); eviction and
+  persistence (#17).
 
 ## Lexer and directive-free `pp` (#40, 2026-11-18)
 
@@ -319,7 +320,11 @@ one import `ycxx.ast`; unit tests in `tests/unit/ast` (run by ctest, see docs/TE
   - Interners: `names` and `seqs` (one pool per element type) and `ast`.
   - `tokens`, `items` and `entities` are placeholders that hold only fingerprints, until #18
     and #33.
-  - Single-threaded: sharing between workers is the engine's (#14).
+  - Shared by the engine's workers (#107): pools are append-only chunked storage that readers
+    use without a lock, and each interner's fingerprint index is 64 locked shards, so equal
+    content interns to one handle whichever worker is first (`ycxx.ast.store`). Handle numbers
+    may differ between runs; fingerprints never do. `unit.ast_concurrent` interns 400 trees
+    from 8 threads in shuffled orders and compares with a single-threaded run.
 - **Fingerprints** (`fingerprint.cppm`): a thin adapter over `ycxx.hash` (#14); `Fp128` is
   `ycxx::Fp128`. Not done yet: ADL `hash_into` for the AST handles. Without it,
   `ycxx::fingerprint(v)` hashes a handle by its number, so engine keys that hold AST handles must
