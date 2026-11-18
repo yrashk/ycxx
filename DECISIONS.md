@@ -29,7 +29,8 @@ reasoning; do not leave decisions only in issue threads.
    WG21 papers, cppreference.com, the Itanium C++ ABI, AAPCS64 and Apple's arm64 ABI notes, the
    System V psABI, the Arm ARM and Intel SDM, the ELF, Mach-O and DWARF specifications, POSIX,
    and libycxx (our own).
-2. **Forbidden sources:** the source code, headers and generated code of other compilers,
+2. **Forbidden sources:** the source code, headers and build-generated sources (such as
+   generated tables) of other compilers,
    assemblers and linkers: Clang/LLVM, GCC and binutils, MSVC, EDG, lld, mold, ld64 and
    ld-prime, Zig's compiler, Cranelift, and compiler research tools built on any of them
    (superoptimizers, translation validators, combinatorial code generators). Not their design
@@ -41,13 +42,16 @@ reasoning; do not leave decisions only in issue threads.
    program outputs are oracles. Disassembling *our own* objects with any tool is allowed.
    **Competitive analysis** is allowed: building a benchmark corpus with Clang and GCC at any
    optimization level and comparing run time, code size and compile time with ycxx's (§5.4).
-   **Open:** whether agents may read the *machine code Clang or GCC emit*, which is their output,
-   not their source, to diagnose a measured performance gap.
-   - Recommendation: allowed only for a specific benchmark function with a measured gap, never
-     by browsing. Each reading is logged on the issue (function, compilers, flags), and what was
-     learned is restated in our own terms, as a cost-model fact or a transformation described
-     from first principles or a paper.
-   - Until this is decided, agents compare numbers only.
+   **Reading competitors' emitted machine code is gated and logged** (decided in #11). Clang's
+   and GCC's output, not their source, may be read only under these conditions:
+   - Only to diagnose a *measured* performance gap on a specific function of the benchmark corpus
+     (§5.4), never by browsing or "to see how it's done" in general.
+   - Each reading is logged on the issue working on that gap: the function, compilers, versions
+     and flags, and a short note of what was observed.
+   - What was learned enters ycxx only restated in our own terms: a cost-model fact, or a
+     transformation justified from first principles or a published paper and cited as such. No
+     instruction sequence is copied into code, tests or comments, and assembly listings from
+     other compilers are never committed.
 4. **Borrowed test suites:** Clang's and GCC's language test suites may be run unmodified as
    external oracles, fetched into a cache outside the repository. Their *test* files may be read
    to triage a failure. They are used for accept/reject and run results only, never for
