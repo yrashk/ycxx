@@ -31,6 +31,30 @@ What is true of the code today. Work in progress and its owners are tracked in
   §4.9. A throwaway spike is in `spikes/ast/`: a reflection-derived node schema, hash-consing,
   the red view and type canonicalization.
 
+## Query engine core (#14, 2026-11-18)
+
+- `ycxx.hash` (`src/hash/`): MurmurHash3_x64_128 with the fixed seed `hash_seed`, streaming and
+  `constexpr`, checked against an independent implementation's vectors. `fingerprint(v)` derives
+  a structural fingerprint by reflection; interned handles supply `hash_into`.
+- `ycxx.engine` (`src/engine/`), single-threaded and synchronous:
+  - inputs with durability, memoized async kinds (`query_task` coroutines), `cheap` and
+    `transparent` kinds, `demanded` kinds with demand lists;
+  - red/green validation over ordered groups with no short-circuit inside a group, early cutoff
+    by fingerprint, the durability shortcut, one revision per batch of input changes;
+  - the §A1.6 state word, the §A3.6 layout (cell ids, flat dependency pool with group bits),
+    deterministic recording with deduplication (§A3.7);
+  - diagnostics as values and `DiagsOf`, pruned by `has_diags`;
+  - cycles reported sorted by kind name and key fingerprint (`query_cycle`), with cells reverted;
+  - concepts, annotations, reflection-derived serialization and the schema hash (§A10).
+- Measured (Release, Apple M-series): a fetch hit inside a query about 40 ns, a root `get` hit
+  about 15 ns, fingerprinting a 16- or 32-byte key about 2 ns (`engine_bench`).
+- Tests (`tests/unit/`): red/green, groups, cutoff, durability, recording, diagnostics, demands,
+  cycles, failures, serialization, and incremental == cold over 1,000 random edits, which fails
+  when a dependency is dropped.
+- Not yet: the scheduler, `cell_sender` and cancellation (#15; every await completes inline
+  today), contextual queries (#16), eviction and persistence (#17; the dependency and diagnostic
+  pools only grow).
+
 ## AST core (#32)
 
 `src/ast/`, from the [AST design](docs/design/ast.md) §2, §3, §9 and §10. Modules `ycxx.ast.*`,
@@ -58,8 +82,9 @@ one import `ycxx.ast`; unit tests in `tests/unit/ast` (run by ctest, see docs/TE
   - `tokens`, `items`, `entities`, `types` and `values` are placeholders that hold only
     fingerprints, until #18 and #33.
   - Single-threaded: sharing between workers is the engine's (#14).
-- **Fingerprint seam** (`fingerprint.cppm`): a stand-in hash until #14 exposes the engine's.
-  Swapping it changes only that file. Nothing persists these fingerprints yet.
+- **Fingerprint seam** (`fingerprint.cppm`): a stand-in hash. `ycxx.hash` (#14) has landed;
+  switching to it changes only that file plus `hash_into` for the AST handles, a follow-up on #32.
+  Nothing persists these fingerprints yet.
 - **Frame builder** (`builder.cppm`): drafts in the frame's arena (a `std::pmr` resource).
   `commit(value)` interns what the value reaches, bottom-up, so abandoned drafts leave nothing
   (§9.3). Lists of records that hold nodes are drafts; other lists are interned eagerly.
@@ -83,9 +108,10 @@ miscompiles it (DECISIONS §3.2). Each is removed once ycxx compiles itself.
   - Fix: belongs in libycxx (yrashk/libycxx#4, which has a 10-line repro and a tested
     workaround). Then bump the submodule and drop `_xfail_execution` in
     `tests/bootstrap/CMakeLists.txt`.
-- **Defaulted comparisons are members, not hidden friends** (`src/ast`).
-  - Cause: GCC 16.2 crashes in an importer that compares two values of an exported struct whose
-    defaulted `operator==` is a friend (also found by #14 and #23).
+- **Defaulted comparisons are members, not hidden friends** (`src/ast`, `ycxx.hash`'s `Fp128`).
+  - Cause: GCC 16.2 crashes (segfault) in an importer that compares two values of an exported
+    struct whose defaulted `operator==` is a friend, with or without `-freflection` (found by
+    #14, #23 and #32).
   - Fix: belongs in GCC. Restore the friend form when ycxx compiles itself.
 - **Checked `constexpr` constructors of handles are not `constexpr`** (`make_node`,
   `make_qual_type`, `make_decl_ord` in `src/ast/handles.cppm`).
@@ -106,6 +132,9 @@ miscompiles it (DECISIONS §3.2). Each is removed once ycxx compiles itself.
         int main() { S{}.f(); }
 
   - Fix: belongs in GCC. Restore the plain form when ycxx compiles itself.
+- **`pre` on a function template is dropped when it is instantiated through an import** (GCC
+  16.2; non-template functions keep theirs). `Db::set` asserts its precondition with
+  `contract_assert` in the body instead.
 - **The std module's BMI must be built with `-freflection -fcontracts`.**
   - `CMakeLists.txt` adds the flags to libycxx's `ycxx_modules` target.
   - Without them, `std::meta` is empty. An importer whose `-freflection` does not match the

@@ -48,9 +48,9 @@ set(CMAKE_CXX_SCAN_FOR_MODULES ON)
 
 include(cmake/ycxx-policy.cmake)
 
-enable_testing()
 add_subdirectory(src)
-add_subdirectory(tests/unit)
+enable_testing()
 if(YCXXC_BOOTSTRAP_SMOKE)
   add_subdirectory(tests/bootstrap)
 endif()
+add_subdirectory(tests/unit)
