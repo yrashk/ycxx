@@ -132,14 +132,16 @@ What is true of the code today. Work in progress and its owners are tracked in
     thread-locals.
   - pp's per-configuration process sessions have a mutex each, held for a whole `Pp` run (which
     never suspends).
-  - sema's records (#156): `Entities` and `Classes` keep records in `ast::Published` tables (by
-    handle, published once, read without a lock). Every unit that defines a class or enumeration
-    builds its record privately and publishes it; the first wins, and the records of equal
-    definitions are equal. A member's declaration is an item of each unit, so `Program` keeps it
-    (`member_decl`), not the record. Sema reads a record through `class_rec`, only where the
-    class is complete in its own unit, and an enumeration's own list sees the unit's record so
-    far, so what a unit accepts does not depend on other units. Each unit's unnamed namespace is
-    its own entity. Records stay first-wins across edits in a long-lived session (#115).
+  - sema's records (#156, #115): `Entities` keeps records in an `ast::Published` table (by
+    handle, published once, read without a lock); a record holds only the entity's identity, so
+    the first is as good as any. Class and enumeration records are each unit's
+    (`Program::classes`, `sema::Classes`): entities are program-wide, but a session may see
+    different definitions of one (an edit, or several programs in one daemon), and the records
+    follow the unit's source. A member's declaration is an item of the unit (`member_decl`).
+    Sema reads a record through `class_rec`, only where the class is complete, and an
+    enumeration's own list sees its record so far. Each unit's unnamed namespace is its own
+    entity. The back end lays out from the unit's `FrontResult::shapes` (fields' types,
+    enumerations' underlying types) through `UnitShapes`, so a body edit stops at its cutoff.
   - Tests: `unit.pp` runs 48 units on 8 workers. `unit.pipeline_incremental` builds a program on
     2 and 8 threads and under chaos seeds, equal to an inline build, and eight units sharing a
     header of classes and enumerations on up to 8 threads, before and after an edit; two units

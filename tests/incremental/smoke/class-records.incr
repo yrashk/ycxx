@@ -1,0 +1,53 @@
+// ACTION: run
+// Class and enumeration records follow each edit (#115): a member class's members and their
+// types, the order of the members, a class that disappears and comes back with others, and an
+// enumeration's underlying type and enumerators. Values that fit only the edited types show a
+// record kept from before the edit.
+--- main.cpp
+#include "s.h"
+int main() {
+  Outer o{{1, 2}, 3};
+  if (o.in.y + o.z != 5) return 1;
+  return E::b != E::a ? 0 : 2;
+}
+--- s.h
+struct Inner { int x; int y; };
+struct Outer { Inner in; int z; };
+enum class E : int { a, b };
+=== edit
+--- s.h
+struct Inner { char x; long long y; };
+struct Outer { int z; Inner in; };
+enum Big : long long { big = 1099511627776 };
+enum class E : long long { a = 4, b = 1 };
+--- main.cpp
+#include "s.h"
+int main() {
+  Outer o{3, {1, 1099511627776}};
+  if (o.in.y / 1024 != 1073741824) return 1;
+  long long v = big;
+  if (v / 1024 != 1073741824) return 2;
+  return o.z == 3 && E::b != E::a ? 0 : 3;
+}
+=== edit
+--- s.h
+struct Outer { int z; int w; };
+enum E : unsigned char { a, b };
+--- main.cpp
+#include "s.h"
+int main() {
+  Outer o{3, 4};
+  return o.z + o.w == 7 && b == 1 ? 0 : 2;
+}
+=== edit
+--- s.h
+struct Inner { int x; int y; };
+struct Outer { Inner in; int z; };
+enum class E : int { a, b };
+--- main.cpp
+#include "s.h"
+int main() {
+  Outer o{{1, 2}, 3};
+  if (o.in.y + o.z != 5) return 1;
+  return E::b != E::a ? 0 : 2;
+}

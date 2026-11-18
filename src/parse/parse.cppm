@@ -125,6 +125,8 @@ public:
   // own item, analysed at the class's prefix (§4.2). It also fills the world's class table, which
   // member lookup and the layout read until #33 has them.
   const Result<ast::ClassDef>& class_def(u32 item);
+  // The records of the classes and enumerations this unit has analysed.
+  const sema::Classes& classes() const { return classes_; }
   // This unit's declaration of member `e` in its class, once the class is analysed here.
   std::optional<DeclId> member_decl(EntityId e) const {
     auto it = member_decls_.find(std::to_underlying(e));
@@ -142,7 +144,7 @@ public:
     bool inside = item > d && item <= last_member(d);
     if ((item < d) || (item == d && !own) || (inside && !body)) return false;
     class_def(d);
-    return w_->classes.is_defined(c);
+    return classes_.is_defined(c);
   }
   // The last item nested in `k`, or `k` (items are in preorder).
   u32 last_member(u32 k) const {
@@ -431,6 +433,7 @@ private:
   // By member function or static data member entity: its declaration in this unit's class. The
   // class's record is shared by every unit that defines it, its items are not (#156).
   std::map<u32, DeclId> member_decls_;
+  sema::Classes classes_{w_->ins, w_->types};  // this unit's class and enumeration records (#115)
   // The enumeration whose enumerator list is being analysed, and its record so far.
   std::pair<EntityId, const sema::EnumRec*> defining_enum_{EntityId::none, nullptr};
   std::map<u32, ast::DeclSema> class_heads_;  // by class item: the class's record, for its members
@@ -524,6 +527,7 @@ private:
 class AtItem final : public sema::Questions {
 public:
   AtItem(Program& p, u32 item, bool self) : from(p.ns_of(item)), p_(&p), item_(item), self_(self) {}
+  const sema::Classes& classes() override { return p_->classes(); }
   const sema::EnumRec* defining_enum(EntityId e) override {
     return p_->defining_enum_.first == e ? p_->defining_enum_.second : nullptr;
   }
@@ -588,6 +592,7 @@ private:
 class AtInstantiation final : public sema::Questions {
 public:
   AtInstantiation(Program& p, u32 item) : p_(&p), item_(item), at_(p, item, true) {}
+  const sema::Classes& classes() override { return p_->classes(); }
   std::vector<DeclId> visible_decls(ast::NameId name, std::span<const EntityId> directives = {}) override {
     return at_.visible_decls(name, directives);
   }
@@ -1031,7 +1036,7 @@ private:
       p_->set_constant(er.enumerators[i].entity, er.enumerators[i].value, k_);
     }
     p_->defining_enum_ = {EntityId::none, nullptr};
-    s_.world().classes.publish_enum(e, std::move(er));
+    p_->classes_.publish_enum(e, std::move(er));
     ps_.seek(it_->brace_end);
     if (ps_.accept(Tk::semi)) return;
     DeclSpec spec;
@@ -1193,7 +1198,7 @@ private:
     for (const parse::Param& p : fs.params) ps.push_back(p.type);
     QualType type = s_.types().function(s_.builtin(sema::Builtin::void_), ps, fs.variadic, LangLinkage::cxx, fs.cv);
     // Complete here: this unit has analysed the class, so it knows the members' declarations.
-    const sema::ClassRec* cr = q_.is_complete(c) ? s_.world().classes.find(c) : nullptr;
+    const sema::ClassRec* cr = q_.is_complete(c) ? p_->classes_.find(c) : nullptr;
     const sema::MemberDeclRec* m = nullptr;
     if (cr)
       for (const sema::MemberDeclRec& r : cr->members)
@@ -1306,7 +1311,7 @@ private:
       return false;
     }
     if (!s_.require_complete(*t, d.qualifier_at)) return false;
-    const sema::ClassRec* cr = s_.world().classes.find(s_.types().class_of(*t));
+    const sema::ClassRec* cr = p_->classes_.find(s_.types().class_of(*t));
     const sema::MemberDeclRec* m = nullptr;
     for (const sema::MemberDeclRec& r : cr->members)
       if (r.name == d.name && r.is_function == fn && s_.types().canonical(r.type) == s_.types().canonical(sem.type)) m = &r;
@@ -1888,7 +1893,7 @@ const Result<ast::ClassDef>& Program::class_def(u32 item) {
     rec.types = std::move(nested);
     special_members(item, *cls, rec);
     rec.defined = true;
-    w_->classes.publish(*cls, std::move(rec));
+    classes_.publish(*cls, std::move(rec));
   }
   ast::Builder b(w_->ins, &arena_);
   def.bases = b.seq(std::span<const ast::BaseSpec>{});
@@ -1977,11 +1982,11 @@ public:
 
   // A destructor's body ([class.dtor]/13): `body`, then its members destroyed, the last first.
   static Ex destructor_body(sema::Sema& s, EntityId cls, Ex body) {
-    const sema::ClassRec& rec = s.world().classes.rec(cls);
+    const sema::ClassRec& rec = s.classes().rec(cls);
     std::vector<ast::Child> members;
     for (u32 i = u32(rec.fields.size()); i-- > 0;) {
       const sema::FieldRec& f = rec.fields[i];
-      EntityId d = s.world().classes.destructor_of(f.type);
+      EntityId d = s.classes().destructor_of(f.type);
       if (d != EntityId::none) members.push_back({s.node(ast::DestroyMember{i, f.type, d}, body.end, body.end).id, 0});
     }
     return s.node(ast::Destructor{sema::Sema::at(body, body.begin), s.builder().list(members)}, body.begin, body.end);
@@ -1992,7 +1997,7 @@ private:
   // its position among the class's members.
   std::map<u32, Ex> mem_initializers() {
     std::map<u32, Ex> r;
-    const sema::ClassRec& rec = p_->world().classes.rec(s_.current_class);
+    const sema::ClassRec& rec = p_->classes_.rec(s_.current_class);
     QualType ct = s_.types().class_type(s_.current_class);
     ps_.bump();
     do {
@@ -2043,7 +2048,7 @@ private:
   // from its mem-initializer, its default member initializer, or default-initialized; then the
   // compound statement.
   Ex constructor_body(std::map<u32, Ex> inits, Ex body) {
-    const sema::ClassRec& rec = p_->world().classes.rec(s_.current_class);
+    const sema::ClassRec& rec = p_->classes_.rec(s_.current_class);
     std::vector<ast::Child> stmts;
     for (u32 i = 0; i < rec.fields.size(); ++i) {
       const sema::FieldRec& f = rec.fields[i];
@@ -2143,7 +2148,7 @@ void Program::special_members(u32 item, EntityId cls, sema::ClassRec& rec) {
   };
   // [class.dtor]/8: the implicit destructor is not trivial when a member's is not.
   if (user_dtor != EntityId::none) rec.destructor = user_dtor;
-  else if (std::ranges::any_of(rec.fields, [&](const sema::FieldRec& f) { return w_->classes.destructor_of(f.type) != EntityId::none; }))
+  else if (std::ranges::any_of(rec.fields, [&](const sema::FieldRec& f) { return classes_.destructor_of(f.type) != EntityId::none; }))
     rec.destructor = synthesize(false);
   // [class.copy.ctor]/10–11: the implicit copy constructor is deleted with a member's, and not
   // trivial when a member's is not.
@@ -2153,7 +2158,7 @@ void Program::special_members(u32 item, EntityId cls, sema::ClassRec& rec) {
     bool nontrivial = false;
     for (const sema::FieldRec& f : rec.fields) {
       if (types.is_reference(f.type)) continue;
-      auto [n, del] = w_->classes.copy_of(f.type);
+      auto [n, del] = classes_.copy_of(f.type);
       rec.copy_deleted = rec.copy_deleted || del;
       nontrivial = nontrivial || n;
     }
@@ -2166,7 +2171,7 @@ void Program::special_members(u32 item, EntityId cls, sema::ClassRec& rec) {
 // element, else as a whole.
 Ex Program::copy_from(sema::Sema& sm, Ex src, QualType t) {
   if (!w_->types.is_array(t)) return sm.convert(src, t, 0);
-  if (!w_->classes.copy_of(t).first) return sm.convert_node(src, ast::ConversionKind::lvalue_to_rvalue, sema::Types::unqualified(t));
+  if (!classes_.copy_of(t).first) return sm.convert_node(src, ast::ConversionKind::lvalue_to_rvalue, sema::Types::unqualified(t));
   sema::TypeRec r = w_->types.rec(t);
   std::vector<Ex> elems;
   QualType index = w_->types.builtin(sema::Builtin::int_);
@@ -2188,7 +2193,7 @@ const ast::BodySema& Program::synthesized_body(std::size_t i) {
   EntityId cls = w_->entities.rec(s.decl.entity).scope;
   sm.current_class = cls;
   sm.this_type = this_type(s.decl);
-  const sema::ClassRec& rec = w_->classes.rec(cls);
+  const sema::ClassRec& rec = classes_.rec(cls);
   Ex root;
   if (s.copy) {
     // [class.copy.ctor]/14: each member copied from the other object's, in declaration order.

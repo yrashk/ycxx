@@ -329,6 +329,23 @@ int S::get() const { return x + p.id + q.id + (k == Kind::b ? 2 : 0) + on; }
   fs::remove_all(dir);
 }
 
+// Class and enumeration records follow an edit (#115): the members' order and types, and an
+// enumeration's underlying type, each state equal to a cold build of it.
+void records() {
+  const std::array<std::string, 4> states{
+      "struct S { int x; int y; };\nenum E : int { a, b };\nint main() { S s{1, 2}; return s.x; }\n",
+      "struct S { int y; int x; };\nenum E : int { a, b };\nint main() { S s{1, 2}; return s.x; }\n",
+      "struct S { char c; long long y; int x; };\nenum E : long long { a = 1099511627776, b };\n"
+      "int main() { S s{1, 1099511627776, 3}; long long v = a; return s.y / 1024 == v / 1024 ? s.x : 0; }\n",
+      "struct S { int x; int y; };\nenum E : int { a, b };\nint main() { S s{1, 2}; return s.x; }\n"};
+  pl::Session s;
+  for (const std::string& text : states) {
+    build(s, text);
+    const pl::Linked& l = s.get<pl::Link>(program);
+    check(l.errors.empty() && l.image == cold(text), "an edited class or enumeration: equal to a cold build");
+  }
+}
+
 }  // namespace
 
 int main() {
@@ -337,5 +354,6 @@ int main() {
   headers();
   pooled();
   pooled_units();
+  records();
   return ycxx::unit::result("unit.pipeline_incremental");
 }
