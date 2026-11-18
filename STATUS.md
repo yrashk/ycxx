@@ -159,6 +159,7 @@ stay open for the rest.
   its runtime edge, `bool` is `i1` as a value and a byte in memory, and narrow results are returned
   extended to 32 bits. Anything outside the subset (aggregates, `copy`, `switch`, EH, coroutines,
   dynamic storage, virtual calls) is an error naming the node.
+  An address constant (a string literal's, as function_ir gives it) becomes `symbol` plus an offset.
 - `ycxx.target.aarch64` (`src/target/aarch64/`): the target description is data.
   - `isa.cppm`: instruction forms with their fixed bits, width rule and operand fields, read by one
     encoder.
@@ -168,7 +169,8 @@ stay open for the rest.
     of stack arguments and 32-bit extension of narrow register arguments).
   - `select.cppm`: maximal munch per block, trees cut at shared nodes, loads folded only within a
     state epoch, leaves rematerialized, edge copies for block arguments.
-  - `emit.cppm`: every virtual register in a stack slot, frame layout with a frame record,
+  - `emit.cppm`: every virtual register in a stack slot, frame layout with a frame record and
+    stack probing for frames over a page,
     pseudo-form expansion, and encoding into `ycxx.obj` with BRANCH26, PAGE21/PAGEOFF12 and GOT
     relocations.
   - `codegen(unit)` turns functions and data (cstring, rodata, data_const, data, bss) into one
