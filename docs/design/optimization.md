@@ -163,8 +163,8 @@ runtime edge in `runtime` mode. Whole-program runs and the optimizer's call fold
   L2 IR, the L2 IR of each callee in its *inline candidate set* (callees under a size threshold
   from `options`, taken transitively to a fixed depth, outside the function's SCC), and the
   `ipo_summary` of every other callee. Only definitions the link is sure to use are candidates:
-same TU, internal linkage, or `inline`/COMDAT definitions under the ODR (whole-program mode
-aside). `unit(F, ctx, inline_opts)` is a query; its fingerprint is a Merkle hash over
+  same TU, internal linkage, or `inline`/COMDAT definitions under the ODR (whole-program mode
+  aside). `unit(F, ctx, inline_opts)` is a query; its fingerprint is a Merkle hash over
   that closure, so the optimization-cache key is honest about everything inlining can see, while a
   change to a large callee's body changes only its summary fingerprint, and then only if the
   summary changed.
@@ -213,8 +213,9 @@ boundary: no rule needed, and the result is as trusted as the interpreter alread
 QF_ABV for memory rules) at widths 1, 8, 16, 32 and 64, under its side condition, and asks for a
 counterexample to *equivalence* (not refinement, §3.4). Two sides are equivalent when, on every
 input where neither side's pinned operations have immediate UB, their values and output states
-are equal, and their UB conditions are equal except for UB raised by a state operand both sides
-share (the store in `store_load_fwd` stays in the program as `?s2`); `ptr` values must agree in
+are equal, and their UB conditions are equal except for UB already implied by the UB of a state
+operand appearing on either side (such an operand is a pinned node that stays in the program, as
+the store `?s2` in `store_load_fwd` does); `ptr` values must agree in
 provenance too (§6.1). A rule that fails this goes to the directed pre-pass. The output is `opt/rules/PROOFS`: the rule
 set's fingerprint, the solver build, and per rule `proven`, `trusted(reason)` or `rejected`. The
 rule set fingerprint plus the PROOFS fingerprint is a component of `optimizer_version`; CI
@@ -331,7 +332,7 @@ struct Model {
 struct Budget { std::uint64_t units; };                     // conflicts, nodes, iterations: back end's unit
 struct Outcome { Status status;                             // optimal | feasible | infeasible | budget_exhausted | stopped
                  std::vector<std::int64_t> values; Stats stats; };
-template<class B> concept Backend = requires(B b, const Model& m, Budget bu, Seed s, std::stop_token st) {
+template<class B> concept Backend = requires(B b, const Model& m, Budget bu, Seed s, std::inplace_stop_token st) {
   { b.solve(m, bu, s, st) } -> std::same_as<Outcome>;       // synchronous leaf, no threads, no clock
   { B::supports(m) } -> std::same_as<bool>;                 // which constraint kinds it takes natively
 };
@@ -414,7 +415,7 @@ instruction except through this table.
   as an initial bound.
 
 Both paths end in the same two **validators** (§6.3), which is the point: a solver's answer is as
-trusted as the heuristic's, because neither is trusted.
+trusted as the heuristic's, because in debug and CI builds neither is trusted.
 
 ## 6. The verification boundary
 
@@ -603,7 +604,7 @@ back end's shape changing. Nothing below requires an e-graph, a rule, a solver o
 | `lower(ir)` L1 → L2 as §2.1 describes, coroutine splitting (ramp, resume and destroy pieces get entity ids from their origin and an ordinal, and their own units) and EH lowering included, alias tags on memory operations | The optimizer sits on L2; the pipeline's shape is final on day one |
 | `unit(F, ctx, inline_opts)` with an empty inline candidate set, `optimized(unit, …, level 0)` = `lower` + heuristic codegen, `codegen(F)` reading `best_available(key, B, S)` with `S` the empty `opt_cache_snapshot` input | The plumbing of §A8 runs from the first build, so anytime work later only adds cells |
 | The target description as data: pattern table in the §3.2 language (read by the maximal-munch selector), register classes, calling convention, encodings | The covering selector reads the same table; nothing emits instructions outside it |
-| Stack-slot allocation with a block-local allocator, then SSA linear scan; the allocation validator and the dependence checker, run on every function in debug and CI builds | The validators are the verification boundary for all later allocators and schedulers |
+| Stack-slot allocation with a block-local allocator, then SSA linear scan and list scheduling; the allocation validator and the dependence checker, run on every function in debug and CI builds | The validators are the verification boundary for all later allocators and schedulers |
 | L3 with an origin map; DWARF and unwind tables rendered late by `tu(TU)` from `function_debug` composed with origin maps | Debug info survives optimization by construction |
 | `cost_model(aarch64)` as an input kind reading a stub `generic.costs` with the schema header | The key shape and the input exist; the numbers come with #9 |
 | Deterministic symbol, section and function order from entity ids (§A5.3) | Part D |
