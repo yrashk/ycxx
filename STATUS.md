@@ -124,10 +124,17 @@ What is true of the code today. Work in progress and its owners are tracked in
   racing readers over 300 rounds, counts per request and per kind. Clean under
   ASan and UBSan; ThreadSanitizer needs Linux (#105).
 - Not yet: allocation-free waits, per-worker frame free lists and lock-free index reads
-  (#104); the cycle report's program-order path note (#106); the pipeline's other
-  single-threaded state (pp's process session, `sema::Entities`, the back end's stores), so a
-  `pipeline::Session` does not run on a pool yet (#137); contextual queries (#16); eviction and
-  persistence (#17).
+  (#104); the cycle report's program-order path note (#106); sema's records (`Entities`,
+  `Classes`), so a `pipeline::Session` on a pool compiles one unit at a time only (#156);
+  contextual queries (#16); eviction and persistence (#17).
+- A session on a pool (#137):
+  - `Pool::set_scope` makes each worker enter a scope before it runs work. A
+    `pipeline::Session(Pool&)` uses it to bind its universe and interners on the worker's
+    thread-locals.
+  - pp's per-configuration process sessions have a mutex each, held for a whole `Pp` run (which
+    never suspends).
+  - Tests: `unit.pp` runs 48 units on 8 workers. `unit.pipeline_incremental` builds a program on
+    2 and 8 threads and under chaos seeds, equal to an inline build. Both are mutation-checked.
 
 ## Lexer and directive-free `pp` (#40, 2026-11-18)
 
@@ -267,8 +274,9 @@ What is true of the code today. Work in progress and its owners are tracked in
     merging, branch islands beyond ±128 MiB, other dylibs' re-exports, incremental relinking, and
     import addends outside 0..255 (`DYLD_CHAINED_IMPORT_ADDEND`). `__LLVM` (embedded bitcode),
     `__LD` and debug sections are dropped.
-- `build/bin/ycxx-ld a.o b.o -o out`: links objects from the command line, for tests. It reads
-  libSystem's exports from the SDK (`--sdk`, `$SDKROOT` or the Command Line Tools' SDK).
+- Objects from ycxx, Clang or GCC are linked by `ycxx cxx a.o b.o -o out`, with libSystem's
+  exports read from the SDK (`$SDKROOT`, else `xcrun --show-sdk-path`). There is no separate
+  linker binary (DECISIONS §4.7: one binary, many fronts).
 - `unit.link`: SHA-256 vectors, object round trips, `.tbd` parsing, diagnostics, the exports trie
   and determinism on both hosts. On arm64 macOS it also runs hand-encoded programs (exit code,
   calls between objects, data, GOT and pointer relocations, `puts` from libSystem), checks
