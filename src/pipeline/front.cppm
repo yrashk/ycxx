@@ -94,7 +94,7 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
     if (r.kind == sema::EntityKind::class_ || r.kind == sema::EntityKind::data_member) return;  // no symbol
     bool fn = r.kind != sema::EntityKind::variable;
     std::string id(ins.names.spelling(r.name));
-    if (fn && id == "main") tu.main = e;
+    if (fn && id == "main" && r.scope == EntityId::none) tu.main = e;  // [basic.start.main]: the global one
     tu.entities.push_back({e, std::move(id), d.type, fn, r.lang, r.linkage, false, at, r.scope,
                            r.kind == sema::EntityKind::constructor  ? Special::constructor
                            : r.kind == sema::EntityKind::destructor ? Special::destructor

@@ -113,9 +113,10 @@ HOST = '{}-{}'.format({'darwin': 'darwin', 'linux': 'linux'}.get(sys.platform, s
 
 
 def ycxx_features(repo, host=HOST):
-    """tests/features/ycxx.txt: one feature per line, optionally followed by the hosts it is
-    limited to (`run darwin-arm64`: ycxx builds executables only for the target it has)."""
-    path = repo / 'tests' / 'features' / 'ycxx.txt'
+    """tests/features/ycxx.txt (or $YCXX_FEATURES, for the driver's self-test): one feature per
+    line, optionally followed by the hosts it is limited to (`run darwin-arm64`: ycxx builds
+    executables only for the target it has)."""
+    path = Path(os.environ['YCXX_FEATURES']) if os.environ.get('YCXX_FEATURES') else repo / 'tests' / 'features' / 'ycxx.txt'
     feats = set()
     for line in path.read_text().splitlines() if path.is_file() else ():
         words = line.split('#', 1)[0].split()

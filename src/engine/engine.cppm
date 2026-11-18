@@ -579,6 +579,11 @@ private:
   std::exception_ptr error_;
 };
 
+// A fingerprint as a hash table key: already uniform, never `std::hash` (§A5.1).
+struct FpHash {
+  std::size_t operator()(const Fp128& f) const noexcept { return static_cast<std::size_t>(f.lo); }
+};
+
 // A kind's part of the memo table: a sharded index from key to cell (§A3.6) and the keys and
 // values by slot.
 struct KindTableBase {
@@ -686,8 +691,10 @@ class cell_sender;
 // requests are made with `get` (blocking) or `request` (a sender), each the root of a demand.
 class Db {
 public:
-  // Requests run on the thread that makes them, one at a time. Everything, stop requests
-  // included, comes from the thread that created the Db.
+  // Requests run on the thread that makes them, one at a time. Any thread may make one, but never
+  // two at once, and nothing else runs while one does: its stop comes from the thread that runs
+  // it, and `set` and `reset_unobserved` wait for it to end (a daemon serving one request per
+  // connection thread, behind its own lock, is fine).
   Db();
   // Requests run on the pool's workers. The pool outlives the Db.
   explicit Db(Pool& pool);
@@ -718,7 +725,8 @@ public:
   // Changes an input in place, with no new revision and no quiescence, if nothing has read it
   // since it was last set, reset or provided; returns whether it did (daemon design §4.4). A
   // fetch that races with it either makes it fail or waits for it and reads the new value.
-  // `changed_at` becomes the current revision. Callable while requests run.
+  // `changed_at` becomes the current revision. Callable while requests run on a Db with a pool;
+  // without one, only between requests.
   template <InputKind Q>
   bool reset_unobserved(const typename Q::Key& k, typename Q::Value v);
 
@@ -764,6 +772,21 @@ public:
   // A cell's demand list (§A1.7).
   template <MemoQuery Q>
   std::vector<Demand> demands(const typename Q::Key& k) const;
+
+  // The memo-table comparison of incremental == cold (§A9): every cell `cold` executed and still
+  // holds valid at its last revision, found here by its key's fingerprint and brought up to date,
+  // has the same fingerprint and dependency list, and none of it executes; an input has the same
+  // fingerprint. A cell `cold` has and this Db never computed is reported, not computed.
+  // Preconditions: both Dbs are quiescent and in this process, and their keys mean the same:
+  // keys holding interner handles need one set of interners shared by both, until handles are
+  // fingerprinted by content (§A7.1, #68).
+  struct TableCheck {
+    std::uint64_t checked = 0;
+    std::uint64_t executed = 0;           // executions here while checking: 0 when it holds
+    std::vector<std::string> mismatches;  // "kind key-fingerprint: what differs", at most 20
+    bool ok() const noexcept { return executed == 0 && mismatches.empty(); }
+  };
+  TableCheck verify_table(const Db& cold);
 
 private:
   friend class SyncCtx;
@@ -868,7 +891,7 @@ private:
   std::atomic<std::size_t> live_{0};
   Pool* pool_ = nullptr;
   std::vector<Work> local_;  // the queue when there is no pool
-  std::thread::id owner_;    // the only thread that uses a Db without a pool
+  std::atomic<std::thread::id> driver_{};  // without a pool, the thread running a request now
   std::mutex wait_mutex_;
   Arena<Registered> registry_;
   std::mutex ids_mutex_;
@@ -1222,8 +1245,16 @@ struct Request : Root, Settle {
     // At start, not when the sender was made: a `set` between the two must not leave the revision
     // this request reads at unmarked (review of #95, P0).
     d.observe();
+    // Without a pool, the request owns the Db until it has drained: one request at a time.
+    std::thread::id before{};
+    if (!d.pool_) {
+      before = d.driver_.exchange(std::this_thread::get_id(), std::memory_order_relaxed);
+      const bool one_at_a_time = before == std::thread::id{} || before == std::this_thread::get_id();
+      contract_assert(one_at_a_time);
+    }
     (void)start(std::span<const CellId>(&cell, 1));
     d.drain();
+    if (!d.pool_) d.driver_.store(before, std::memory_order_relaxed);
   }
 
   std::exception_ptr error;
@@ -2085,8 +2116,8 @@ void Db::push(Work w, Priority p) noexcept {
     pool_->push(w, p);
     return;
   }
-  // A stop requested from another thread would push here while the owner drains.
-  contract_assert(std::this_thread::get_id() == owner_);
+  // A stop requested from another thread would push here while the request's thread drains.
+  contract_assert(std::this_thread::get_id() == driver_.load(std::memory_order_relaxed));
   local_.push_back(w);
 }
 
@@ -2106,7 +2137,7 @@ void Db::count(Counter what, const Root* root, CellId c, std::uint64_t n) noexce
   if (per_kind_.load(std::memory_order_relaxed)) tables_[cells_[c].kind].load(std::memory_order_acquire)->counters.add(what, n, stripe);
 }
 
-Db::Db() : owner_(std::this_thread::get_id()) { (void)registry_.emplace(); }  // id 0 is never an owner that waits
+Db::Db() { (void)registry_.emplace(); }  // id 0 is never an owner that waits
 
 Db::Db(Pool& pool) : Db() { pool_ = &pool; }
 
@@ -2234,6 +2265,59 @@ struct Blocking final : Request {
     d->notify_all();
   }
 };
+
+Db::TableCheck Db::verify_table(const Db& cold) {
+  contract_assert(live_frames() == 0 && cold.live_frames() == 0);
+  TableCheck r;
+  const auto note = [&](CellId c, std::string_view what) {
+    if (r.mismatches.size() < 20) {
+      r.mismatches.push_back(std::format("{} {:016x}{:016x}: {}", cold.kind_name_of(c), cold.cells_[c].key_fp.hi, cold.cells_[c].key_fp.lo, what));
+    }
+  };
+  std::unordered_map<Fp128, CellId, FpHash> ids;
+  std::unordered_set<Fp128, FpHash> shared;  // key fingerprints of two cells here
+  for (CellId c = 0; c < cells_.size(); ++c) {
+    if (!ids.emplace(cells_[c].key_fp, c).second) shared.insert(cells_[c].key_fp);
+  }
+  const auto keys_of = [](const Db& db, const Cell& e) {
+    std::vector<Fp128> out;
+    for (std::uint32_t d : e.deps) out.push_back(db.cells_[d & ~group_start].key_fp);
+    return out;
+  };
+  const std::uint64_t before = stats().executed;
+  for (CellId c = 0; c < cold.cells_.size(); ++c) {
+    const Cell& want = cold.cells_[c];
+    if (want.input ? !want.has_value : want.runs == 0) continue;
+    const std::uint64_t w = want.word.load(std::memory_order_acquire);
+    if (!want.input && !(state_of(w) == State::done && verified_of(w) == cold.revision())) continue;  // stale in `cold`
+    ++r.checked;
+    if (shared.contains(want.key_fp)) {
+      note(c, "two cells here share its key fingerprint");
+      continue;
+    }
+    const auto it = ids.find(want.key_fp);
+    if (it == ids.end()) {
+      note(c, "never computed here");
+      continue;
+    }
+    const CellId here = it->second;
+    if (!want.input) {
+      Blocking b(*this, here, Priority::background);
+      const auto done = b.done;
+      b.begin();
+      done->wait(false, std::memory_order_acquire);
+      if (b.error) {
+        note(c, "an internal error bringing it up to date");
+        continue;
+      }
+    }
+    const Cell& got = cells_[here];
+    if (!got.has_value || got.fp != want.fp) note(c, "a different value (fingerprint)");
+    else if (!want.input && keys_of(*this, got) != keys_of(cold, want)) note(c, "a different dependency list");
+  }
+  r.executed = stats().executed - before;
+  return r;
+}
 
 template <InputKind Q>
 bool Db::set(const typename Q::Key& k, typename Q::Value v) {

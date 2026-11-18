@@ -57,7 +57,6 @@ draft/basic/intro.object-2.accept.cpp preprocessing directives are not supported
 draft/basic/intro.object-3.reject.cpp errors elsewhere: preprocessing directives are not supported yet
 draft/basic/intro.object-4.accept.cpp preprocessing directives are not supported yet
 draft/basic/namespace.qual-2.accept.cpp 'namespace' not supported yet
-draft/basic/namespace.qual-3.accept.cpp 'namespace' not supported yet
 draft/basic/namespace.qual-4.reject.cpp errors elsewhere: 'namespace' not supported yet
 draft/class/class.abstract-1.accept.cpp 'class' not supported yet
 draft/class/class.abstract-3.accept.cpp 'class' not supported yet
@@ -104,7 +103,6 @@ draft/class/class.copy.ctor-2.accept.cpp 'struct' not supported yet
 draft/class/class.copy.ctor-5.accept.cpp 'struct' not supported yet
 draft/class/class.copy.elision-1.reject.cpp errors elsewhere: 'class' not supported yet
 draft/class/class.copy.elision-2.reject.cpp errors elsewhere: 'class' not supported yet
-draft/class/class.ctor.general-1.accept.cpp 'struct' not supported yet
 draft/class/class.derived.general-1.accept.cpp 'struct' not supported yet
 draft/class/class.dtor-1.accept.cpp 'struct' not supported yet
 draft/class/class.dtor-2.accept.cpp preprocessing directives are not supported yet
@@ -192,7 +190,6 @@ draft/dcl/dcl.attr.nodiscard-1.accept.cpp 'struct' not supported yet
 draft/dcl/dcl.attr.noreturn-1.accept.cpp '[' not supported yet
 draft/dcl/dcl.constexpr-1.reject.cpp errors elsewhere: '&' not supported yet
 draft/dcl/dcl.constexpr-2.reject.cpp errors elsewhere: 'static' is not supported yet
-draft/dcl/dcl.constexpr-4.reject.cpp errors elsewhere: 'struct' not supported yet
 draft/dcl/dcl.contract.func-2.reject.cpp errors elsewhere: expected ';'
 draft/dcl/dcl.contract.func-3.reject.cpp errors elsewhere: 'template' not supported yet
 draft/dcl/dcl.contract.res-1.accept.cpp unexpected identifier 'post'
@@ -295,7 +292,6 @@ draft/dcl/dcl.typedef-5.reject.cpp errors elsewhere: 'typedef' not supported yet
 draft/dcl/enum.udecl-1.accept.cpp 'enum' not supported yet
 draft/dcl/enum.udecl-2.accept.cpp 'enum' not supported yet
 draft/dcl/enum.udecl-3.reject.cpp errors elsewhere: 'enum' not supported yet
-draft/dcl/namespace.def.general-1.accept.cpp 'namespace' not supported yet
 draft/dcl/namespace.def.general-2.accept.cpp 'namespace' not supported yet
 draft/dcl/namespace.udecl-1.accept.cpp 'enum' not supported yet
 draft/dcl/namespace.udecl-10.reject.cpp errors elsewhere: 'struct' not supported yet
@@ -306,10 +302,7 @@ draft/dcl/namespace.udecl-5.reject.cpp errors elsewhere: 'struct' not supported 
 draft/dcl/namespace.udecl-6.accept.cpp 'namespace' not supported yet
 draft/dcl/namespace.udecl-8.reject.cpp errors elsewhere: 'namespace' not supported yet
 draft/dcl/namespace.udecl-9.reject.cpp errors elsewhere: 'struct' not supported yet
-draft/dcl/namespace.udir-1.reject.cpp errors elsewhere: 'namespace' not supported yet
 draft/dcl/namespace.udir-2.reject.cpp errors elsewhere: 'namespace' not supported yet
-draft/dcl/namespace.udir-3.reject.cpp errors elsewhere: 'namespace' not supported yet
-draft/dcl/namespace.unnamed-1.reject.cpp errors elsewhere: 'namespace' not supported yet
 draft/except/except.ctor-1.accept.cpp 'struct' not supported yet
 draft/except/except.handle-2.accept.cpp 'noexcept' not supported yet
 draft/except/except.pre-1.reject.cpp errors elsewhere: 'goto' not supported yet
@@ -645,6 +638,7 @@ own/smoke/exit-status.run.cpp <cstdio> preprocesses; libycxx does not know ycxx 
 own/pp/include-macros.accept.cpp dynamic initialization of a namespace-scope variable is not supported yet (#94)
 own/pp/macro-decls.accept.cpp dynamic initialization of a namespace-scope variable is not supported yet (#94)
 own/pp/cond-decls.accept.cpp dynamic initialization of a namespace-scope variable is not supported yet (#94)
+incremental/smoke/inline-function-body.incr an error inside an included header is reported at the including main file's position (#34)
 own/classes/s1-byvalue-constexpr.run.cpp classes in constant evaluation (#25)
 own/classes/s1-byvalue-params.run.cpp classes by value (#116)
 own/classes/s1-byvalue-return.run.cpp classes by value (#116)

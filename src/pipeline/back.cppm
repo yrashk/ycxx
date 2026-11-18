@@ -827,8 +827,6 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
   }
   for (const Entity& e : tu.entities) {
     if (!used.contains(ir::raw(e.id))) continue;
-    std::optional<QualType> scope;
-    if (e.scope != EntityId::none) scope = in.intern_type(ast::TClass{e.scope});
     // The complete-object constructor and destructor (C1, D1): with no virtual bases they are the
     // base-object ones too (#136).
     std::string name_ = e.special == Special::constructor ? "C1" : e.special == Special::destructor ? "D1" : e.name;
@@ -839,7 +837,7 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
           return w ? ClassName{std::string(w->ins.names.spelling(w->entities.rec(c).name)), w->entities.rec(c).scope}
                    : ClassName{};
         },
-        scope, e.special != Special::none);
+        e.scope, e.special != Special::none);
     if (!name) {
       errors.push_back({e.at, std::format("the name of '{}': {} is not supported yet", e.name, name.error())});
       continue;

@@ -1,6 +1,8 @@
 ycxxc_unit_test(engine engine_test.cpp ycxxc_engine)
 ycxxc_unit_test(engine_contract contract_test.cpp ycxxc_engine)
 set_tests_properties(unit.engine_contract PROPERTIES PASS_REGULAR_EXPRESSION "^violated: live_frames\\(\\) == 0\n$")
+ycxxc_unit_test(engine_contract_concurrent contract_concurrent_test.cpp ycxxc_engine)
+set_tests_properties(unit.engine_contract_concurrent PROPERTIES PASS_REGULAR_EXPRESSION "^violated: one_at_a_time\n$")
 
 # The fetch-hit and hashing costs against the ~100 ns budget (§A3.3). Not a test: run it from an
 # optimized build (YCXX_BUILD_TYPE=Release) and compare.
