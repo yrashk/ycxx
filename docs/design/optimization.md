@@ -711,7 +711,8 @@ optimum and HiGHS's explicit settings; §4.2's solver facts), the editing and th
 done by the Opus session that owns the issue. One independent review by a second Fable subagent
 found 2 P0 (path-dependent facts used as function-wide e-class facts; the interpreter answering
 `if consteval` as constant evaluation in whole-program runs), 13 P1 and 10 P2; the session
-applied the smallest fix for each, and the reviewer checked the diff.
+applied the smallest fix for each. The reviewer's check of that diff found one P1 and two P2 in
+the fix text, each fixed as it proposed; that last fix was not re-verified.
 
 Sources, per DECISIONS §2: the C++26 working draft (cited by stable clause name), P2795
 (erroneous behaviour), ISO/IEC TS 6010 (pointer provenance), the accepted query-engine design,
