@@ -28,6 +28,13 @@ struct DeclRef {
   EntityId entity;
 };
 
+// A name that resolved to a block-scope variable or a parameter: an index into
+// `BodySema::locals`, whose first entries are the function's parameters (§4.4).
+struct LocalRef {
+  ExprInfo info;
+  u32 local;
+};
+
 // Parentheses change meaning (`decltype((x))`, `(f)(x)`), so they are a kind (§3.4).
 struct Paren {
   ExprInfo info;
@@ -68,11 +75,28 @@ struct OrderedBinary {
 // ([expr.assign]).
 enum class AssignOp : u8 { assign, mul, div, rem, add, sub, shl, shr, bit_and, bit_xor, bit_or };
 
+// For a compound assignment `E1 op= E2` ([expr.assign]), `computation` is the type `E1 op E2`
+// is computed in: the common type of the usual arithmetic conversions, the promoted type of `E1`
+// for a shift, or `E1`'s pointer type for pointer `+=` and `-=`. `rhs` is already converted to
+// it (or, for a shift, promoted; for a pointer, an integer), and the result is converted back to
+// `E1`'s type. A simple assignment's `rhs` is converted to `E1`'s type, and `computation` is
+// `E1`'s type too.
 struct Assign {
   ExprInfo info;
   AssignOp op;
   [[=sequenced(1)]] Child lhs;
   [[=sequenced(0)]] Child rhs;
+  QualType computation;
+};
+
+// `c ? a : b` ([expr.cond]): the condition is sequenced before the operand that is evaluated,
+// and only one of `then_` and `else_` is evaluated. The condition is converted to bool; the two
+// operands are converted to the result type.
+struct Conditional {
+  ExprInfo info;
+  [[=sequenced(0)]] Child condition;
+  [[=sequenced(1)]] Child then_;
+  [[=sequenced(2)]] Child else_;
 };
 
 // `a[b]`: `a` is sequenced before `b` ([expr.sub]).
@@ -91,7 +115,13 @@ struct Call {
   [[=indeterminately_sequenced(1)]] ChildList args;
 };
 
-enum class ConversionKind : u8 { lvalue_to_rvalue, integral, floating_integral, user_defined, derived_to_base };
+// The standard conversions ([conv]) and the others an implicit conversion sequence is made of.
+// `integral` covers integral promotions ([conv.prom]) and conversions ([conv.integral]), told
+// apart by the types; `to_void` is a discarded-value expression's conversion ([expr.context]).
+enum class ConversionKind : u8 {
+  lvalue_to_rvalue, integral, floating_integral, user_defined, derived_to_base,
+  array_to_pointer, function_to_pointer, qualification, boolean, null_pointer, to_void,
+};
 
 // An implicit conversion: a node of width zero beyond its operand (§3.3), naming its function for
 // a user-defined conversion.
@@ -132,6 +162,56 @@ struct If {
   Child else_;
 };
 
+// [stmt.while]: the condition is converted to bool.
+struct While {
+  Child condition;
+  Child body;
+};
+
+// [stmt.do]
+struct Do {
+  Child body;
+  Child condition;
+};
+
+// [stmt.for]: `init` is a statement; `condition` and `increment` may be absent.
+struct For {
+  Child init;
+  Child condition;
+  Child increment;
+  Child body;
+};
+
+// [stmt.break], [stmt.cont]: the destructor calls on the exit edge, in order (§3.7.3).
+struct Break {
+  SeqId<Cleanup> cleanups;
+};
+struct Continue {
+  SeqId<Cleanup> cleanups;
+};
+
+// A block-scope simple-declaration ([stmt.dcl]): its `LocalVar`s, in order.
+struct DeclStmt {
+  ChildList decls;
+};
+
+// ---------------------------------------------------------------- declarations (item trees)
+
+// One declarator of an item ([dcl.decl]): the ordinal of its record in `ItemSema::decls`, its
+// initializer, and, for a variable with static storage duration whose initializer is a constant
+// expression, the constant it is initialized with ([basic.start.static]); `ConstId::none` means
+// zero-initialization when there is no initializer.
+struct Declarator {
+  u32 decl;
+  Child init;
+  ConstId value;
+};
+
+// The root of a declaration's item tree: its declarators in order.
+struct DeclGroup {
+  ChildList declarators;
+};
+
 // A block-scope variable: an index into `BodySema::locals` (§4.4) and its initializer.
 struct LocalVar {
   u32 local;
@@ -145,7 +225,8 @@ struct Attribute {
 };
 
 using Nodes = closed_list<Literal, DeclRef, Paren, Unary, Binary, OrderedBinary, Assign, Subscript, Call,
-                          ImplicitConversion, ExprStmt, Return, Compound, If, LocalVar, Attribute>;
+                          ImplicitConversion, ExprStmt, Return, Compound, If, LocalVar, Attribute, LocalRef,
+                          Conditional, While, Do, For, Break, Continue, DeclStmt, Declarator, DeclGroup>;
 
 static_assert(Nodes::size < max_node_kinds);
 

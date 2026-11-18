@@ -276,6 +276,46 @@ one import `ycxx.ast`; unit tests in `tests/unit/ast` (run by ctest, see docs/TE
 - Not yet: classes, enums, member pointers, template arguments, the dependent type kinds and the
   rest of `VDep*`, floating constants, sugar other than typedefs, `substitute`.
 
+## IR generation, α subset (#24, 2026-11-18)
+
+- `ycxx.irgen` (`src/irgen/`): `function_ir(interners, FunctionInput, facts)` builds a function's
+  L1 body from its analysed AST, with `FunctionDebug` beside it (a `Loc` per node, and the
+  `alloc` holding each local and parameter). It covers #39's α1 and α2:
+  - parameters and locals as `alloc [T, automatic, erroneous | indeterminate]`; the initializing
+    store comes before `obj.begin`, and every scope exit (block end, `return`, `break`,
+    `continue`) emits `obj.end` and `dealloc` in reverse order of declaration;
+  - loads and stores of scalars through empty access paths; namespace-scope variables through
+    `global`, and string literals as `const_` of the literal object's address, decayed by
+    `ptr_member [/e0]`;
+  - integer arithmetic (`nsw` on signed `+ - *` and negation, none on `<<`, `ashr` or `lshr` by
+    signedness), `++`/`--` and compound assignment done in the promoted type, `iconv`, `tobool`,
+    integer and pointer compares, pointer arithmetic;
+  - `if`, `while`, `do`, `for`, `break` and `continue` as blocks that thread the state; `&&`,
+    `||` and `?:` (prvalue and glvalue) join on a block argument;
+  - calls to named functions as `call` (`not_constexpr` unless the callee is constexpr);
+    falling off the end returns 0 from `main` and is `unreachable` elsewhere;
+  - `useq.begin/next/end` around unsequenced operands when one writes and another touches
+    memory.
+  The conventions lower relies on are listed at the top of `src/irgen/gen.cppm`.
+- Types, constants and declaration facts come through the `Facts` concept
+  (`src/irgen/facts.cppm`). `TypeFacts` (`src/irgen/types.cppm`) answers the type and constant
+  half from #33's interners and a `Target`. The declaration half (`is_constexpr`, `is_main`) and
+  string literals' addresses are composed on top by the caller; the tests stand them in, since
+  the interners do not hold entities or strings yet.
+- `ycxx.ast.nodes` gained the kinds it reads beyond the AST core, in #41's shapes, taken verbatim
+  from #41's branch (draft PR #52): `LocalRef`, `Conditional`, `While`, `Do`, `For`, `Break`,
+  `Continue`, `DeclStmt`, `Declarator`, `DeclGroup`, `Assign::computation` and six conversion kinds.
+  Parameters are the body's first locals.
+- `unit.irgen` builds bodies with the AST builder, generates, runs `verify`, and compares the
+  text form (handles named) with the expected text. It also checks that positions do not reach
+  the fingerprint.
+- Not yet:
+  - the `function_ir` and `function_debug` engine queries (they wait for `analyze_body` and
+    `decl_sema`, #41);
+  - `string_address`, `is_constexpr` and `is_main` over real entities and `VString`s;
+  - classes, arrays as objects, cleanups, EH (`invoke`), coroutines, static locals, calls
+    through pointers, floating point, `switch` and `goto`.
+
 ## Bootstrap workarounds
 
 Places where ycxx's sources avoid or work around a C++26 feature because GCC 16 lacks it or
