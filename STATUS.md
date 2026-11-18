@@ -859,7 +859,7 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   scope, either first, unless they are one entity, both functions, or a type and a variable or
   function. A using-declaration may not name a namespace (/3) or, at namespace scope, a class
   member (/8).
-- Tests: `tests/own/using` (8). Two more draft examples pass.
+- Tests: `tests/own/using` (10, two from the review). Two more draft examples pass.
 - Not yet (#153): enumerators through `using E::e;` (/7), a function target with the same
   parameter types as a function of the scope (/14), `typename` with dependent names (ζ).
 
