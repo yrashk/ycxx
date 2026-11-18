@@ -11,3 +11,4 @@ function(ycxxc_unit_test name source)
 endfunction()
 
 add_subdirectory(hash)
+add_subdirectory(engine)
