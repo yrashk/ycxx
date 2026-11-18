@@ -369,6 +369,11 @@ public:
     if (!fits) return std::nullopt;
     return w_->values.rec(lit->value).units;
   }
+  // An aggregate's element of character array type from string literal `e`, if it is one.
+  std::optional<Ex> string_element(QualType et, Ex e) {
+    if (!types().is_array(et) || !string_units(Types::unqualified(types().rec(et).inner), e)) return std::nullopt;
+    return string_init(et, e);
+  }
   // A character array initialized by a string literal ([dcl.init.string]): its elements are the
   // literal's code units and the rest zero (/3); there must be room for the null (/2).
   std::optional<Ex> string_init(QualType t, Ex e) {
@@ -508,7 +513,7 @@ public:
     if (const ClassRec* c = class_rec(r.entity); c && c->user_ctors) return true;
     if (const ClassRec* c = class_rec(r.entity))
       for (const FieldRec& f : c->fields)
-        if (f.init != ConstId::none || has_member_inits(f.type)) return true;
+        if (f.init != ConstId::none || f.dmi || has_member_inits(f.type)) return true;
     return false;
   }
 
@@ -657,6 +662,10 @@ public:
       if (c.list) {
         ++next;
         out.push_back(list_init(et, *c.list));
+      } else if (auto str = string_element(et, c.expr)) {
+        // [dcl.init.string]: a character array element from a string literal, not elided into.
+        ++next;
+        out.push_back(*str);
       } else if (is_aggregate(et) && !c.designated && !initializes(et, c.expr)) {
         // Brace elision: the clause begins the sub-aggregate's own elements.
         if (!require_complete(et, c.begin)) return fail;
@@ -686,7 +695,9 @@ public:
     std::size_t next = 0;
     while (next < b.clauses.size()) {
       const Braced::Clause& c = b.clauses[next];
-      if (c.list || c.designated || !is_aggregate(elem) || initializes(elem, c.expr) || !is_complete(elem)) ++next;
+      if (c.list || c.designated || !is_aggregate(elem) || initializes(elem, c.expr) || !is_complete(elem) ||
+          (types().is_array(elem) && string_units(types().rec(elem).inner, c.expr)))
+        ++next;
       else {
         std::size_t before = next;
         aggregate(elem, b, next, c.begin, c.begin);

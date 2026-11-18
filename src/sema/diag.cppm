@@ -31,6 +31,8 @@ enum class Diag : std::uint32_t {
   using_class_member [[=message{Severity::error, "a using-declaration at namespace scope names the class member '{0:n}'"}]],
   attributes_not_allowed [[=message{Severity::error, "an attribute-specifier cannot appear here"}]],
   array_initializer [[=message{Severity::error, "an array is initialized by a braced list or, for characters, a string literal"}]],
+  asm_label_conflict [[=message{Severity::error, "'{0:n}' is given another asm label"}]],
+  asm_label_string [[=message{Severity::error, "an asm label is an ordinary string literal"}]],
   expected_statement [[=message{Severity::error, "expected a statement"}]],
   expected_declaration [[=message{Severity::error, "expected a declaration"}]],
   expected_type_specifier [[=message{Severity::error, "expected a type specifier"}]],

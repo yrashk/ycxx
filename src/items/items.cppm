@@ -205,7 +205,7 @@ private:
     bool named = false;
     for (u32 n = key + 1; n < open; ++n) {
       Tk t = kind(n);
-      if (t == Tk::l_square || (t == Tk::kw_alignas && kind(n + 1) == Tk::l_paren)) {
+      if (t == Tk::l_square || ((t == Tk::kw_alignas || is_name(n, "__attribute__")) && kind(n + 1) == Tk::l_paren)) {
         n = match(t == Tk::l_square ? n : n + 1) - 1;
       } else if (t == Tk::kw_class && kind(key) == Tk::kw_enum && n == key + 1) {
         // `enum class`
@@ -377,7 +377,9 @@ void Splitter::general(u32 k) {
       if (!initializer && prev != Tk::kw_decltype && prev != Tk::kw_noexcept && prev != Tk::kw_alignas &&
           prev != Tk::kw_sizeof && prev != Tk::kw_alignof && prev != Tk::kw_explicit && prev != Tk::kw_typeid &&
           prev != Tk::kw_static_assert && prev != Tk::kw_asm && prev != Tk::kw_requires &&
-          !(prev == Tk::kw_operator)) {
+          !(prev == Tk::kw_operator) &&
+          // a GNU attribute or asm label (docs/EXTENSIONS.md)
+          !(j > at(k).begin && (is_name(j - 1, "__attribute__") || is_name(j - 1, "__asm") || is_name(j - 1, "__asm__")))) {
         params = true;
       }
       j = match(j);

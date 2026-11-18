@@ -406,10 +406,12 @@ public:
       d.params = fn->params;
       d.variadic = fn->variadic;
     }
-    if (!abstract && d.ok) {
+    if (d.ok) {
       skip_attributes();
-      d.asm_label = asm_label(d.ok);
-      skip_attributes();
+      if (!abstract) {
+        d.asm_label = asm_label(d.ok);
+        skip_attributes();
+      }
     }
     return d;
   }
@@ -417,13 +419,15 @@ public:
   // Attribute-specifiers ([dcl.attr.grammar]), and the GNU `__attribute__((…))` the SDK's
   // headers use (docs/EXTENSIONS.md): skipped, as no attribute ycxx knows changes what it does
   // yet ([dcl.attr.grammar]/6 lets an implementation ignore one it does not know). Whether any
-  // was there.
-  bool skip_attributes() {
-    bool any = false;
+  // was there: `attr_std` for an attribute-specifier, `attr_gnu` for a GNU attribute.
+  static constexpr int attr_std = 1, attr_gnu = 2;
+  int skip_attributes() {
+    int any = 0;
     for (;;) {
       bool std_attr = is(Tk::l_square) && kind(1) == Tk::l_square;
       bool gnu = is(Tk::identifier) && name_spelling() == "__attribute__" && kind(1) == Tk::l_paren;
       if (!std_attr && !gnu) return any;
+      any |= std_attr ? attr_std : attr_gnu;
       if (gnu) bump();
       Tk open = kind(), close = open == Tk::l_square ? Tk::r_square : Tk::r_paren;
       u32 depth = 0;
@@ -432,7 +436,22 @@ public:
         else if (is(close)) --depth;
         bump();
       } while (depth > 0 && !at_end());
-      any = true;
+    }
+  }
+  // The token index `ahead` moves to past any attributes that start there.
+  u32 past_attributes(u32 ahead) const {
+    for (;;) {
+      bool std_attr = kind(ahead) == Tk::l_square && kind(ahead + 1) == Tk::l_square;
+      bool gnu = kind(ahead) == Tk::identifier && r_->name(tok(ahead)) == "__attribute__" && kind(ahead + 1) == Tk::l_paren;
+      if (!std_attr && !gnu) return ahead;
+      if (gnu) ++ahead;
+      Tk open = kind(ahead), close = open == Tk::l_square ? Tk::r_square : Tk::r_paren;
+      u32 depth = 0;
+      do {
+        if (kind(ahead) == open) ++depth;
+        else if (kind(ahead) == close) --depth;
+        ++ahead;
+      } while (depth > 0 && i_ + ahead < end_);
     }
   }
   // A GNU asm label after a declarator, `asm("…")`, `__asm("…")` or `__asm__("…")`: the
@@ -443,8 +462,8 @@ public:
     bump();
     bump();
     std::string label;
-    if (!is(Tk::string_lit)) {
-      s_->diag(pos(), Diag::expected_token, Tk::string_lit);
+    if (!is(Tk::string_lit) || literal().encoding != lex::Encoding::ordinary) {  // an ordinary string literal
+      s_->diag(pos(), Diag::asm_label_string);
       ok = false;
       return {};
     }
@@ -491,6 +510,7 @@ public:
       l.named = true;
       l.name_at = pos();
       bump();
+      skip_attributes();  // appertaining to the declarator-id ([dcl.meaning.general]/1)
     } else if (is(Tk::l_paren) && (kind(1) == Tk::star || kind(1) == Tk::amp || kind(1) == Tk::ampamp ||
                                    kind(1) == Tk::l_paren || kind(1) == Tk::identifier)) {
       // [dcl.ambig.res]: `(` begins a nested declarator when a parameter list cannot start here.
@@ -601,6 +621,7 @@ public:
   // Whether the `(` here begins a parameter-declaration-clause rather than an initializer
   // ([dcl.ambig.res]: what can be a declaration is one).
   bool params_ahead() {
+    if (past_attributes(1) != 1) return true;  // a parameter's attributes ([dcl.fct]/3)
     Tk k = kind(1);
     if (k == Tk::r_paren || k == Tk::ellipsis || starts_decl_specifier(k)) return true;
     if ((k == Tk::identifier && kind(2) == Tk::coloncolon) || k == Tk::coloncolon)
@@ -1454,12 +1475,13 @@ public:
         expect(Tk::semi);
         return s_->node(ast::ExprStmt{}, begin, pos());
       }
-      if (kind(1) == Tk::identifier && kind(2) == Tk::equal) {
-        // An alias-declaration in a block ([dcl.typedef]/2): `using T = type-id;`.
+      if (kind(1) == Tk::identifier && kind(past_attributes(2)) == Tk::equal) {
+        // An alias-declaration in a block ([dcl.typedef]/2): `using T [[…]] = type-id;`.
         bump();
         NameId n = name_of(tok());
         u32 at = pos();
         bump();
+        skip_attributes();
         bump();
         if (auto t = type_id()) s_->local_type_alias(n, *t, at);
         else {
@@ -1510,8 +1532,9 @@ public:
       return {NodeId::none, begin, pos()};
     default: break;
     }
-    if (is(Tk::l_square) && kind(1) == Tk::l_square) {
-      // An attribute-specifier-seq appertaining to the statement ([stmt.pre]/1).
+    if (past_attributes(0) != 0) {
+      // An attribute-specifier-seq appertaining to the statement ([stmt.pre]/1), or GNU
+      // attributes (docs/EXTENSIONS.md).
       skip_attributes();
       return statement();
     }

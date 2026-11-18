@@ -762,7 +762,8 @@ private:
     bool explicit_lang = lang != LangLinkage::cxx;
     u32 attrs_at = ps_.pos();
     // [dcl.link]: a linkage-specification has no attribute-specifier-seq.
-    if (ps_.skip_attributes() && ps_.is(Tk::kw_extern) && ps_.kind(1) == Tk::string_lit) {
+    // (GNU attributes there are accepted, as GCC and Clang do.)
+    if ((ps_.skip_attributes() & parse::Parser::attr_std) && ps_.is(Tk::kw_extern) && ps_.kind(1) == Tk::string_lit) {
       s_.diag(attrs_at, Diag::attributes_not_allowed);
       return bad();
     }
@@ -787,6 +788,7 @@ private:
         return bad();
       }
       if (!ps_.template_head(0)) return bad();
+      ps_.skip_attributes();
       if (ps_.is(Tk::kw_template) || ps_.is(Tk::kw_struct) || ps_.is(Tk::kw_class) || ps_.is(Tk::kw_union) ||
           ps_.is(Tk::kw_using) || ps_.is(Tk::kw_concept) || (it_->kind != ItemKind::function && !ps_.starts_declaration())) {
         s_.diag(ps_.pos(), Diag::not_supported, ps_.kind());
@@ -830,7 +832,7 @@ private:
     // A using-declaration ([namespace.udecl]): `using N::x, ::y;`, each declarator introducing
     // what qualified lookup finds at this point.
     if (ps_.is(Tk::kw_using) && ps_.kind(1) != Tk::kw_namespace && ps_.kind(1) != Tk::kw_enum &&
-        !(ps_.kind(1) == Tk::identifier && ps_.kind(2) == Tk::equal)) {
+        !(ps_.kind(1) == Tk::identifier && ps_.kind(ps_.past_attributes(2)) == Tk::equal)) {
       ps_.bump();
       do {
         if (!using_declarator()) {
@@ -843,11 +845,12 @@ private:
       return;
     }
     // An alias-declaration ([dcl.typedef]/2): `using T = type-id;`.
-    if (ps_.is(Tk::kw_using) && ps_.kind(1) == Tk::identifier && ps_.kind(2) == Tk::equal) {
+    if (ps_.is(Tk::kw_using) && ps_.kind(1) == Tk::identifier && ps_.kind(ps_.past_attributes(2)) == Tk::equal) {
       ps_.bump();
       NameId n = ps_.name_of(ps_.tok());
       u32 at = ps_.pos();
       ps_.bump();
+      ps_.skip_attributes();  // appertaining to the alias ([dcl.pre]/1)
       ps_.bump();
       auto t = ps_.type_id();
       if (!t || !declare_alias(n, at, *t)) return bad();
@@ -1324,6 +1327,10 @@ private:
     do {
       parse::Declarator d = ps_.declarator(spec.type, false);
       if (!d.ok || !d.named) return bad();
+      if (!d.asm_label.empty()) {
+        s_.diag(d.name_at, Diag::not_supported, Tk::kw_asm);  // a member's asm label
+        return bad();
+      }
       if (d.unknown_bound) {
         s_.diag(d.name_at, Diag::unknown_bound_member);  // [class.mem.general]: a complete type
         return bad();
@@ -2005,7 +2012,15 @@ private:
     }
     declarators_.push_back(s_.node(ast::Declarator{ord, sema::Sema::at(init, d.begin), value}, d.begin, ps_.pos()));
     decls_.push_back(sem);
-    if (!d.asm_label.empty()) p_->asm_labels_[std::to_underlying(sem.entity)] = d.asm_label;
+    if (!d.asm_label.empty()) {
+      // Every labelled declaration of an entity gives it one label (docs/EXTENSIONS.md).
+      std::string earlier = p_->asm_label(sem.entity);
+      if (!earlier.empty() && earlier != d.asm_label) {
+        s_.diag(d.name_at, Diag::asm_label_conflict, d.name);
+        return false;
+      }
+      p_->asm_labels_[std::to_underlying(sem.entity)] = d.asm_label;
+    }
     return true;
   }
 

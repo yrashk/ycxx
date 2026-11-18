@@ -879,9 +879,15 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   (`Types::array_unknown`), completed by a later declaration with a bound ([basic.link]/11);
   arrays of pointers of unknown bound.
 - `__FLT_EVAL_METHOD__` is predefined (0), as Clang has it for the target.
-- Tests: `tests/own/decls` (8). Three more draft examples pass.
+- Attributes are also accepted after a declarator-id, on parameters, alias-declarations and
+  statements, and in the GNU form on class heads and after template-heads. A string literal
+  initializes a character-array element of an aggregate. A default member initializer that is
+  not a scalar constant, in a class without constructors, is now diagnosed (#118) instead of
+  being dropped.
+- Tests: `tests/own/decls` (11, three from the review). Five more draft examples pass.
 - Not yet: `sizeof`, `alignof`, `decltype`, `static_cast` and other casts, operator functions,
-  unions (the next steps of #133); a reference or pointer to an array of unknown bound.
+  unions (the next steps of #133); a reference or pointer to an array of unknown bound; asm labels
+  on class members and the other gaps of #190.
 
 ## Templates, ζ step 1: function templates (#88, 2026-11-18)
 
