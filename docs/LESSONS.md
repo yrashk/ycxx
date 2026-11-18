@@ -264,6 +264,16 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
 
 ## Evidence and tests
 
+- **Test a long-lived connection's lifetime before the review.** Both P0s of #99 were in the
+  LSP tunnel, and the functional tests could not have shown either:
+  - a one-thread copy loop deadlocked once a large answer and a large edit crossed;
+  - an open session kept the daemon from ever shutting down.
+  The review's probes found both in minutes.
+  - Do: for any connection that outlives a request (a tunnel, a watch, a subscription), write
+    two tests first. One sends messages larger than the socket buffers both ways at once. The
+    other stops the server while the connection is open and checks that both ends exit.
+  - Learned on #99.
+
 - **Build twice in one session before calling a stage incremental.** On #63 the first warm
   rebuild crashed in sema: `Entities` assumed it allocated every entity handle, and the back end
   had interned string literal entities in between. Nothing per-process had shown it.
