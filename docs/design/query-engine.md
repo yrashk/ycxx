@@ -520,7 +520,8 @@ execute(sel(index, ctx)):                       # ctx = (prefix, pins, chain)
 The **trace** is the computation's complete dependency list in program order, groups included:
 the question cells it asked at its prefix *and* its context-free dependencies, which have stable
 ids: `item_tokens(item)`, `body_tokens(body)` (the body handle is content-addressed key data,
-§B1.3), pure matchers, other selection cells. A trace never
+§B1.3), pure matchers, other selection cells, whose contexts are written relative to the
+placeholder (below). A trace never
 names a content-hashed syntactic index (§B1.3); those are reached only inside question cells, and
 what the trace records is the question's answer. Each element is `(key pattern, answer fingerprint)`, where a key pattern is
 the dependency's key with every prefix that was *derived from the cell's own* abstracted:
@@ -610,7 +611,8 @@ from the claimed edge downwards, branches at the first element whose answer diff
 computations that agree up to the edge may still diverge below it), and only when the whole path
 already exists does it compare result fingerprints, which must then be equal. A claimant that is stopped or fails without inserting hands the claim to
 one waiter and re-enqueues the rest to re-walk, exactly as a cell owner does (§A3.1), so no edge
-wait is ever lost.
+wait is ever lost. Edge claims follow the same reset-on-claim rule as cells: right after its
+claim, a claimant CASes the edge's waiter list from `CLOSED` to empty (§A3.1).
 
 **Divergence is a query, not a hook.** Two leaves under one index with different results is the
 IFNDR/ODR situation the C++ layer wants diagnosed. The trie must not be the thing that reports it:
@@ -646,8 +648,8 @@ grace of `k` revisions that values get, so that undoing an edit finds its old le
 may be evicted with its fingerprint kept (§A6.2 step 1); a selection cell that then needs the value
 re-runs the computation at its prefix and asserts the fingerprint. On disk a leaf is one record
 `(index fp, index bytes, path as (pattern bytes, pattern fp, answer fp) groups, result fp, result
-bytes, diags)`. Pattern bytes are the structural key bytes of §A7.1 with `◇.prefix`, `◇.pins` and
-`rel(◇.prefix, I)` markers in the context members; they are what a walk instantiates at the current prefix, so a
+bytes, diags)`. Pattern bytes are the structural key bytes of §A7.1 with `◇.prefix`, `◇.pins`,
+`rel(◇.prefix, I)` and `ext(◇.prefix, h)` markers in the context members; they are what a walk instantiates at the current prefix, so a
 loaded trie is usable, and their fingerprints are stable because placeholders and item ids are. Question cells are **not**
 persisted: they are O(1) to recompute, and a loaded selection cell is stored with no dependencies
 and marked red, so its first fetch is a trie walk that recreates exactly the question cells it
@@ -808,7 +810,7 @@ Three `std::execution` entities make this concrete:
 - **`cell_sender(cell, priority)`** is the future of a memo cell: a sender that completes with
   `const Value&`, on the pool (`get_completion_scheduler<set_value_t>` is `pool_scheduler`).
   `connect` yields an intrusive operation state that lives in the awaiting frame, so waiting
-  allocates nothing. `start` is `ensure_green`: a `Done` cell completes at once; a `Running` or
+  allocates nothing. `start` is `ensure_green`: a `Done` cell verified at the current revision completes at once; a `Running` or
   `Validating` cell links the operation state into the cell's waiter list; an `Empty` cell is
   claimed and its execution started. On completion the owning frame publishes `Done` and
   **enqueues** every waiter's continuation onto its own deque at the waiter's priority; it never
@@ -819,8 +821,10 @@ Three `std::execution` entities make this concrete:
   the start. "Anything else" covers a list taken by an abort (below) and an old `Done` that was
   reverted to without validation. So no late linker is lost, and none completes against an
   unpublished or unvalidated value. Every successful claim (from `Empty`, or from `Done` with
-  `verified_at < R` into `Validating`) resets `waiters` from `CLOSED` to empty right after its
-  CAS, before execution or validation starts. A cell that was published in an earlier revision
+  `verified_at < R` into `Validating`) CASes `waiters` from `CLOSED` to empty right after its
+  claim CAS (a failed CAS means the list is already linkable and is left alone), before execution
+  or validation starts. A linker that pushes in the window between the two CASes sees `CLOSED`,
+  retries, and finds the list linkable; the window is two instructions, so the retry is bounded. A cell that was published in an earlier revision
   therefore never leaves linkers retrying against a stale `CLOSED`. Each operation state has one atomic
   `{waiting, completed, cancelled}`; the completer and a stop callback both CAS from `waiting`,
   and exactly one wins; a cancelled state stays in the list and is skipped, so nothing is ever
@@ -1550,7 +1554,7 @@ if (auto r = co_await cx.fetch<Substitute>({tmpl, args}); r.failed()) { /* SFINA
 // The daemon's edge: std::execution::task, one counting_scope per revision epoch, stop sources
 // owned by the request table (inplace_stop_source is immovable and must outlive the root).
 std::execution::task<void> Daemon::on_build(BuildRequest r) {        // runs on the same strand as apply_edits
-  Request& req = requests_.add(r);                                       // owns req.stop; removed on completion
+  Request& req = requests_.add(r);                                       // owns req.stop; removed on the strand
   auto root = db.request<BuildReport>(r.build, Priority::Background);    // a query_task: sender + awaitable
   std::execution::spawn(std::move(root) | std::execution::then([&](const BuildReport& b) { reply(req, b); }),
                         epoch_.scope, gated_env(req.stop.get_token(), epoch_.gate));   // start waits for the gate
@@ -1566,8 +1570,12 @@ std::execution::task<void> Daemon::apply_edits(EditBatch b) {           // runs 
   epoch_.gate.open();                                                     // epoch_ is still `mine`: the strand guarantees it
 }
 // gated_env's gate wait is a sender that completes set_stopped when the request's stop is requested.
-// on_build and apply_edits share one strand, so a request is always spawned into the current, open
-// epoch and never into a scope that apply_edits has already closed.
+// A completed request is removed by a continuation scheduled onto the same strand (or records live
+// until their epoch's join returns), so requests_ is touched only on the strand.
+// on_build and apply_edits share one strand, so a request is always spawned into the epoch whose
+// scope is still open (its gate may be closed, in which case start waits), never into a scope
+// apply_edits has closed. The strand serializes whole coroutines: on_build and apply_edits each run
+// to completion, across their co_awaits, before the strand starts the next.
 ```
 
 `Ctx` offers exactly what the listing shows and nothing else; there is no way to read an input
@@ -1779,7 +1787,8 @@ a pure cache and may be emptied without changing any output.
 **What changes where.** A computation asks questions only in its own context, or in a prefix
 derived from it with `cx.prefix_of(I)` (backward, recorded `rel(◇.prefix, I)`) or
 `cx.prefix_after(h)` (forward, recorded `ext(◇.prefix, h)`; only `pp` needs it, §B9). Of the context it
-passes to the cells it fetches, `pins` never changes; `chain` grows only along a
+passes to the cells it fetches, `pins` never changes except in `reuse`, whose key is the literal
+answer of `pin_of`; `chain` grows only along a
 constant-evaluation or return-type-deduction chain (§B7); `prefix` changes only on a **hop**: an
 entity-keyed query asked at prefix `Q` (`class_def(C, ctx)`, `function_ir(F, ctx)`) locates the
 defining item with the question `syntactic_definition(scope, name, Q)` (matching the candidate
@@ -1807,14 +1816,14 @@ mention nothing context-specific, and a cell id would make the fingerprint depen
 order): `instantiated(k, loc)` for a class or variable template specialization, a satisfaction
 check, a constant value or a constant-evaluation-required function instantiation it demanded in
 its own context, where `k` is the position of that fetch in the cell's dependency list (program
-order, deterministic by §A3.4); `nested(k)` for a fetched contextual cell (`resolve`, `deduce`,
+order, deterministic by §A3.7); `nested(k)` for a fetched contextual cell (`resolve`, `deduce`,
 `implicit_conversion`, a `class_def` hop) whose own demand list is non-empty, so that demands made
 inside merely fetched cells are reached; and `definition_required(spec, loc)` for a function
 template specialization (or member function of a class template specialization) whose definition
-the program requires, with no position, since the instantiation happens at END (§B6.2). The
+the program requires, with no dependency position `k`, since the instantiation happens at END (§B6.2). The
 visitor (`tu(TU)`), holding the selection cell at its own context, resolves `k` to the dependency
 as instantiated in that context from its relative pattern (§A1.9), reads the selected fingerprint
-from it, and for `nested(k)` reads that cell's list in turn; a cell is visited once, at its first
+from it, and for `instantiated(k, …)` and `nested(k)` reads that cell's list in turn; a cell is visited once, at its first
 reach, and the context it was reached in is the context `tu(TU)` records for it (the pin target
 of §B6.2). The list is a value like any other (fingerprinted, persisted with the leaf), so it is
 what "required from here" chains, emission sets, `odr_report` and the first-demand table of §B6.2
@@ -2155,12 +2164,16 @@ The rule has three parts.
    fingerprint differs from the table's, `tu(TU)` extends the TU's **pin table** with `S → c`,
    where `c` is the context of the cell that first instantiated `S`, and re-fetches `J`'s root
    cells with the extended table. Before traversing them again it discards every first-demand
-   entry and visited mark first made under `J`'s superseded traversal, so a specialization that
+   entry, every `definition_required` entry on the END worklist, and every visited mark first
+   made under `J`'s superseded traversal, so a specialization that
    only the unpinned analysis demanded is neither emitted nor diagnosed; from then on every cell `tu(TU)` fetches (later items, the END
    phase) carries the extended table, and so does every cell those reach, because `pins` is part
    of the context every fetch passes on. `instantiate_class(S, ctx)` and `instantiate_var(S, ctx)`
    begin by asking `pin_of(S)`; if the answer is a context `c`, the cell fetches the same index at
-   `c` with `reuse` (§A10.1) and returns its result without computing. Re-fetched later items
+   `c` with `reuse` (§A10.1) and returns its result without computing. When `K` is reached from an
+   END cell `E` rather than an item, `tu(TU)` re-demands `E` with the extended table, discards
+   `E`'s entries and marks the same way, and the remaining worklist carries the extended table;
+   `summary.final_cells()` names the re-demanded `E`. Re-fetched later items
    re-walk their tries; their
    walks differ from the earlier ones only at `pin_of` answers for pinned specializations, so they
    land on their old leaves except where `S` matters.
