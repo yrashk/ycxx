@@ -1,0 +1,5 @@
+# The sources tests/draft is generated from (tools/draft-examples --pin-draft/--pin-cwg).
+# draft: github.com/cplusplus/draft (branch main), source/*.tex.
+# cwg: github.com/cplusplus/CWG (branch gh-pages), issues/cwg_toc.html.
+draft = 65890fab817ca1dfe7898f481c4fd088bbe2bbce 2026-11-17
+cwg = 01bf332b30175520691c8f8a6ebeb13482a85f3e 2026-11-17
