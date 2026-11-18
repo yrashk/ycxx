@@ -585,6 +585,40 @@ func @main {
 )");
 }
 
+void ellipsis() {
+  // extern "C" int printf(const char*, ...); struct S { int m(int, ...); };
+  // int main() { printf("hi", 1, 2L); p->m(3, 4); }  (the object here is a null pointer)
+  // The call records how many arguments the ellipsis matches; a member call's object is not one.
+  World w;
+  Body b{w};
+  EntityId main_e = w.f.entity("main"), printf_e = w.f.entity("printf"), m_e = w.f.entity("m");
+  w.f.main_fn = main_e;
+  w.f.variadic_fns[std::to_underlying(printf_e)] = 1;
+  w.f.variadic_fns[std::to_underlying(m_e)] = 1;
+  auto fmt = b.conv(ast::ConversionKind::array_to_pointer, w.cchar_p, b.str("hi"));
+  auto object = b.conv(ast::ConversionKind::null_pointer, w.cchar_p, b.lit(w.int_t, "0"));
+  std::vector<Child> margs{{b.lit(w.int_t, "3"), 0}, {b.lit(w.int_t, "4"), 0}};
+  auto member = b.add(ast::MemberCall{b.pr(w.int_t), m_e, {object, 0}, b.b.list(margs)});
+  auto body = b.finish(b.block({b.expr(b.call(printf_e, w.int_t, {fmt, b.lit(w.int_t, "1"), b.lit(w.long_t, "2")})),
+                                b.expr(member)}));
+  expect(w, {main_e, w.fn_i, {}}, body, R"(
+func @main {
+^0(%0: !state):
+  %1: const_char[6]* = const [#&"hi"]
+  %2: const_char* = ptr_member %1 [char, /e0]
+  %3: int = const [#1]
+  %4: long = const [#2]
+  %5: !state, %6: int = call not_constexpr %0, %2, %3, %4 [@printf, 2]
+  %7: const_char* = const [#null]
+  %8: int = const [#3]
+  %9: int = const [#4]
+  %10: !state, %11: int = call not_constexpr %5, %7, %8, %9 [@m, 1]
+  %12: int = const [#0]
+  ret %10, %12
+}
+)");
+}
+
 void globals_and_pointers() {
   // int counter = 3;  int next() { counter++; return counter; }
   {
@@ -904,6 +938,7 @@ int main() {
   short_circuit_and_conditional();
   recursion_and_promotions();
   hello_world();
+  ellipsis();
   globals_and_pointers();
   more_expressions();
   unsequenced();

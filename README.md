@@ -24,7 +24,7 @@ in [GitHub issues](https://github.com/yrashk/ycxx/issues) and the
     `if`, `while`, `do`, `for`, `break` and `continue`; the arithmetic, bitwise, shift,
     comparison, logical, conditional and assignment operators; string literals; and
     `extern "C"` calls into libSystem (`puts`, `putchar`, and `printf` with locals, arrays,
-    globals and any number of arguments).
+    globals and more arguments than registers, up to 32).
   - Structs and classes with data members (2026-11-18): `.` and `->`, pointers to and arrays of
     structs, aggregate initialization (`S s = {1, 2};`, `S s{…}`, nested braces, brace elision,
     designated initializers, `int a[] = {…}`), constant default member initializers, copies and
