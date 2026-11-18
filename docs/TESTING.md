@@ -81,9 +81,10 @@ Later: coarse source-area maps, then ycxx's own query engine (§9.2.3).
 ## Writing tests
 
 **Unit tests** of ycxx's own components live in `tests/unit/<area>/`, one executable per file,
-registered with `ycxxc_unit_test(<area> <name> <libraries>)` in `tests/unit/CMakeLists.txt` and run
-by ctest, so `tools/build` (the driver's build stage, and CI) runs them. They import
-`ycxx.test.check`: `check(cond)` reports each failing line, `failures()` is the exit status.
+registered with `ycxxc_unit_test(<name> <source> <libraries>...)` in the area's `CMakeLists.txt`
+and run by ctest, so `tools/build` (the driver's build stage, and CI) runs them. They import
+`ycxx.unit`: `check(cond, what)` reports each failure with its location, `result(suite)` is the
+exit status.
 Compile-time properties are `static_assert`s in the same file. The rest of this section is about
 the language tests the driver itself runs.
 

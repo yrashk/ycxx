@@ -2,10 +2,10 @@
 // width as identity, lists, names, and handles of placeholder interners.
 import std;
 import ycxx.ast;
-import ycxx.test.check;
+import ycxx.unit;
 
 using namespace ycxx::ast;
-using ycxx::test::check;
+using ycxx::unit::check;
 
 namespace {
 
@@ -49,51 +49,51 @@ int main() {
   Tree tb = build(b, true);
 
   // Equal subtrees are one node.
-  check(ta.sum == ta.sum2);
+  check(ta.sum == ta.sum2, "ta.sum == ta.sum2");
   // Fingerprints are Merkle and independent of interning order; handles are not.
-  check(a.ast.fp(ta.block) == b.ast.fp(tb.block));
-  check(a.ast.fp(ta.block) != a.ast.fp(ta.sum));
+  check(a.ast.fp(ta.block) == b.ast.fp(tb.block), "a.ast.fp(ta.block) == b.ast.fp(tb.block)");
+  check(a.ast.fp(ta.block) != a.ast.fp(ta.sum), "a.ast.fp(ta.block) != a.ast.fp(ta.sum)");
 
   // Re-interning the same tree adds nothing.
   u32 nodes = a.ast.node_count(), edges = a.ast.edge_count();
   Tree again = build(a, true);
-  check(again.block == ta.block && a.ast.node_count() == nodes && a.ast.edge_count() == edges);
+  check(again.block == ta.block && a.ast.node_count() == nodes && a.ast.edge_count() == edges, "again.block == ta.block && a.ast.node_count() == nodes && a.ast.edge_count() == edges");
 
   // Reading back: payload, width, children.
   Call c = a.ast.get<Call>(ta.call);
-  check(a.ast.width(ta.call) == 6 && a.ast.children(c.args).size() == 1 && a.ast.children(c.args)[0].id == ta.sum);
-  check(a.ast.is<Call>(ta.call) && !a.ast.is<Binary>(ta.call));
+  check(a.ast.width(ta.call) == 6 && a.ast.children(c.args).size() == 1 && a.ast.children(c.args)[0].id == ta.sum, "a.ast.width(ta.call) == 6 && a.ast.children(c.args).size() == 1 && a.ast.children(c.args)[0].id == ta.sum");
+  check(a.ast.is<Call>(ta.call) && !a.ast.is<Binary>(ta.call), "a.ast.is<Call>(ta.call) && !a.ast.is<Binary>(ta.call)");
 
   // Width is identity: the same content over a different extent is another node.
   Binary s = a.ast.get<Binary>(ta.sum);
   NodeId wider = a.intern(s, 4);
-  check(wider != ta.sum && a.ast.fp(wider) != a.ast.fp(ta.sum));
+  check(wider != ta.sum && a.ast.fp(wider) != a.ast.fp(ta.sum), "wider != ta.sum && a.ast.fp(wider) != a.ast.fp(ta.sum)");
 
   // An edge offset is identity too: `x+1` and `x + 1` differ.
   NodeId tight = a.intern(Binary{s.info, s.op, s.lhs, {s.rhs.id, 1}}, 3);
-  check(tight != ta.sum);
+  check(tight != ta.sum, "tight != ta.sum");
 
   // Lists: hash-consed, ordered, fingerprinted through their elements.
   EntityId e1 = a.entities.add<EntityId>(seed("e1"));
   EntityId e2 = a.entities.add<EntityId>(seed("e2"));
   SeqId<EntityId> l12 = a.intern_seq({e1, e2});
-  check(a.intern_seq({e1, e2}) == l12 && !(a.intern_seq({e2, e1}) == l12));
-  check(a.seqs.size(l12) == 2 && a.seqs.at(l12, 1) == e2);
-  check(a.intern_seq<EntityId>({}) == a.intern_seq<EntityId>({}));
+  check(a.intern_seq({e1, e2}) == l12 && !(a.intern_seq({e2, e1}) == l12), "a.intern_seq({e1, e2}) == l12 && !(a.intern_seq({e2, e1}) == l12)");
+  check(a.seqs.size(l12) == 2 && a.seqs.at(l12, 1) == e2, "a.seqs.size(l12) == 2 && a.seqs.at(l12, 1) == e2");
+  check(a.intern_seq<EntityId>({}) == a.intern_seq<EntityId>({}), "a.intern_seq<EntityId>({}) == a.intern_seq<EntityId>({})");
   // Lists of different element types never share an identity.
-  check(a.fp(a.intern_seq<EntityId>({})) != a.fp(a.intern_seq<QualType>({})));
+  check(a.fp(a.intern_seq<EntityId>({})) != a.fp(a.intern_seq<QualType>({})), "a.fp(a.intern_seq<EntityId>({})) != a.fp(a.intern_seq<QualType>({}))");
 
   // Records in lists, fingerprinted member by member.
   NameId n = a.names.intern("value");
-  check(a.names.intern("value") == n && a.names.spelling(n) == "value" && a.names.intern("other") != n);
+  check(a.names.intern("value") == n && a.names.spelling(n) == "value" && a.names.intern("other") != n, "a.names.intern(\"value\") == n && a.names.spelling(n) == \"value\" && a.names.intern(\"other\") != n");
   SeqId<MemberRec> ms = a.intern_seq({MemberRec{{a.items.add<ItemId>(seed("item")), make_decl_ord(DeclClass::syntactic, 1)}, e1, Access::public_}});
-  check(a.seqs.at(ms, 0).entity == e1 && a.seqs.at(ms, 0).access == Access::public_);
+  check(a.seqs.at(ms, 0).entity == e1 && a.seqs.at(ms, 0).access == Access::public_, "a.seqs.at(ms, 0).entity == e1 && a.seqs.at(ms, 0).access == Access::public_");
   SeqId<MemberRec> ms2 = a.intern_seq({MemberRec{{a.items.add<ItemId>(seed("item")), make_decl_ord(DeclClass::syntactic, 1)}, e1, Access::private_}});
-  check(!(ms2 == ms) && a.fp(ms2) != a.fp(ms));
+  check(!(ms2 == ms) && a.fp(ms2) != a.fp(ms), "!(ms2 == ms) && a.fp(ms2) != a.fp(ms)");
 
   // A handle's fingerprint is its interner's, with cv in a QualType's.
   QualType t = a.types.add<QualType>(seed("T"));
-  check(a.fp(t) != a.fp(with_cv(t, Cv::const_)));
-  check(a.fp(NodeId::none) == a.fp(EntityId::none));
-  return ycxx::test::failures();
+  check(a.fp(t) != a.fp(with_cv(t, Cv::const_)), "a.fp(t) != a.fp(with_cv(t, Cv::const_))");
+  check(a.fp(NodeId::none) == a.fp(EntityId::none), "a.fp(NodeId::none) == a.fp(EntityId::none)");
+  return ycxx::unit::result("ast.interner");
 }

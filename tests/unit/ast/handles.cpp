@@ -2,10 +2,10 @@
 // enum names in its annotation (§12's probe of annotations on enumeration types).
 import std;
 import ycxx.ast.handles;
-import ycxx.test.check;
+import ycxx.unit;
 
 using namespace ycxx::ast;
-using ycxx::test::check;
+using ycxx::unit::check;
 
 static_assert(interner_of(^^NameId) == interner::names);
 static_assert(interner_of(^^BodyId) == interner::tokens);
@@ -19,15 +19,15 @@ static_assert(sizeof(DeclId) == 8 && sizeof(Loc) == 8 && sizeof(NodeId) == 4 && 
 
 int main() {
   NodeId n = make_node(17, 12345);
-  check(kind_of(n) == 17 && index_of(n) == 12345);
-  check(kind_of(make_node(0, max_node_index)) == 0 && index_of(make_node(0, max_node_index)) == max_node_index);
+  check(kind_of(n) == 17 && index_of(n) == 12345, "kind_of(n) == 17 && index_of(n) == 12345");
+  check(kind_of(make_node(0, max_node_index)) == 0 && index_of(make_node(0, max_node_index)) == max_node_index, "kind_of(make_node(0, max_node_index)) == 0 && index_of(make_node(0, max_node_index)) == max_node_index");
 
   QualType q = make_qual_type(1000, Cv::const_);
-  check(type_node_of(q) == 1000 && cv_of(q) == Cv::const_);
-  check(cv_of(with_cv(q, Cv::volatile_)) == Cv::const_volatile && type_node_of(with_cv(q, Cv::volatile_)) == 1000);
+  check(type_node_of(q) == 1000 && cv_of(q) == Cv::const_, "type_node_of(q) == 1000 && cv_of(q) == Cv::const_");
+  check(cv_of(with_cv(q, Cv::volatile_)) == Cv::const_volatile && type_node_of(with_cv(q, Cv::volatile_)) == 1000, "cv_of(with_cv(q, Cv::volatile_)) == Cv::const_volatile && type_node_of(with_cv(q, Cv::volatile_)) == 1000");
 
   DeclOrd o = make_decl_ord(DeclClass::synthesized, 5);
-  check(class_of(o) == DeclClass::synthesized && number_of(o) == 5);
-  check((DeclId{ItemId{3}, o} == DeclId{ItemId{3}, o}) && !(DeclId{ItemId{3}, o} == DeclId{ItemId{4}, o}));
-  return ycxx::test::failures();
+  check(class_of(o) == DeclClass::synthesized && number_of(o) == 5, "class_of(o) == DeclClass::synthesized && number_of(o) == 5");
+  check((DeclId{ItemId{3}, o} == DeclId{ItemId{3}, o}) && !(DeclId{ItemId{3}, o} == DeclId{ItemId{4}, o}), "(DeclId{ItemId{3}, o} == DeclId{ItemId{3}, o}) && !(DeclId{ItemId{3}, o} == DeclId{ItemId{4}, o})");
+  return ycxx::unit::result("ast.handles");
 }

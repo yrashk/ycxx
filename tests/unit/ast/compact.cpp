@@ -3,10 +3,10 @@
 // find the survivors again.
 import std;
 import ycxx.ast;
-import ycxx.test.check;
+import ycxx.unit;
 
 using namespace ycxx::ast;
-using ycxx::test::check;
+using ycxx::unit::check;
 
 int main() {
   Interners in;
@@ -44,23 +44,23 @@ int main() {
     c.mark(body);
     c.mark(item);
   });
-  check(!m.live(garbage));
+  check(!m.live(garbage), "!m.live(garbage)");
   m.rewrite(body);
   item = m(item);
 
   // Survivors keep their fingerprints and content; garbage is gone.
-  check(in.ast.node_count() == before - 2);  // the 7 and the 7 * 7
-  check(in.seqs.count<ParamSema>() == 1);
-  check(in.ast.fp(body.tree) == body_fp && in.ast.fp(item.tree) == call_fp);
-  check(in.fp(body.locals) == locals_fp && in.fp(item.decls) == decls_fp);
+  check(in.ast.node_count() == before - 2, "in.ast.node_count() == before - 2");  // the 7 and the 7 * 7
+  check(in.seqs.count<ParamSema>() == 1, "in.seqs.count<ParamSema>() == 1");
+  check(in.ast.fp(body.tree) == body_fp && in.ast.fp(item.tree) == call_fp, "in.ast.fp(body.tree) == body_fp && in.ast.fp(item.tree) == call_fp");
+  check(in.fp(body.locals) == locals_fp && in.fp(item.decls) == decls_fp, "in.fp(body.locals) == locals_fp && in.fp(item.decls) == decls_fp");
   LocalRec v = in.seqs.at(body.locals, 0);
-  check(in.ast.is<LocalVar>(v.decl) && in.ast.get<LocalVar>(v.decl).init.id == item.tree);
+  check(in.ast.is<LocalVar>(v.decl) && in.ast.get<LocalVar>(v.decl).init.id == item.tree, "in.ast.is<LocalVar>(v.decl) && in.ast.get<LocalVar>(v.decl).init.id == item.tree");
   Call c = in.ast.get<Call>(item.tree);
-  check(in.ast.children(c.args).size() == 2 && in.ast.children(c.args)[1].at == 4);
-  check(in.seqs.at(in.seqs.at(item.decls, 0).params, 0).default_arg == in.ast.children(c.args)[1].id);
+  check(in.ast.children(c.args).size() == 2 && in.ast.children(c.args)[1].at == 4, "in.ast.children(c.args).size() == 2 && in.ast.children(c.args)[1].at == 4");
+  check(in.seqs.at(in.seqs.at(item.decls, 0).params, 0).default_arg == in.ast.children(c.args)[1].id, "in.seqs.at(in.seqs.at(item.decls, 0).params, 0).default_arg == in.ast.children(c.args)[1].id");
 
   // The rebuilt tables find the survivors: re-interning gives the compacted handle.
-  check(in.intern(in.ast.get<Call>(item.tree), 6, in.ast.edges()) == item.tree);
-  check(in.ast.node_count() == before - 2);
-  return ycxx::test::failures();
+  check(in.intern(in.ast.get<Call>(item.tree), 6, in.ast.edges()) == item.tree, "in.intern(in.ast.get<Call>(item.tree), 6, in.ast.edges()) == item.tree");
+  check(in.ast.node_count() == before - 2, "in.ast.node_count() == before - 2");
+  return ycxx::unit::result("ast.compact");
 }

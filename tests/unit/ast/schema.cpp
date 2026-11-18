@@ -2,10 +2,10 @@
 // checks that keep the invariants (each probed to reject what it must), seeds and holds_nodes.
 import std;
 import ycxx.ast;
-import ycxx.test.check;
+import ycxx.unit;
 
 using namespace ycxx::ast;
-using ycxx::test::check;
+using ycxx::unit::check;
 
 namespace {
 
@@ -85,7 +85,7 @@ static_assert(seed_of_shape_a_renamed() != schema_seed_v<SameShapeA>);
 
 int main() {
   // The operand table is usable at run time, as the IR generator reads it.
-  check(operands<Assign>[0].seq.rank == 1 && operands<Assign>[1].seq.rank == 0);
-  check(operands<Call>[1].seq.order == Order::indeterminately_sequenced);
-  return ycxx::test::failures();
+  check(operands<Assign>[0].seq.rank == 1 && operands<Assign>[1].seq.rank == 0, "operands<Assign>[0].seq.rank == 1 && operands<Assign>[1].seq.rank == 0");
+  check(operands<Call>[1].seq.order == Order::indeterminately_sequenced, "operands<Call>[1].seq.order == Order::indeterminately_sequenced");
+  return ycxx::unit::result("ast.schema");
 }

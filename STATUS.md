@@ -84,8 +84,8 @@ miscompiles it (DECISIONS §3.2). Each is removed once ycxx compiles itself.
     workaround). Then bump the submodule and drop `_xfail_execution` in
     `tests/bootstrap/CMakeLists.txt`.
 - **Defaulted comparisons are members, not hidden friends** (`src/ast`).
-  - Cause: with `-freflection`, GCC 16.2 crashes in an importer that compares two values of an
-    exported struct whose defaulted `operator==` is a friend.
+  - Cause: GCC 16.2 crashes in an importer that compares two values of an exported struct whose
+    defaulted `operator==` is a friend (also found by #14 and #23).
   - Fix: belongs in GCC. Restore the friend form when ycxx compiles itself.
 - **Checked `constexpr` constructors of handles are not `constexpr`** (`make_node`,
   `make_qual_type`, `make_decl_ord` in `src/ast/handles.cppm`).

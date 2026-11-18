@@ -1,19 +1,13 @@
-# Unit tests of ycxx's own components, one directory per area. Each test is an executable run by
-# ctest, so tools/build (and with it tools/test's build stage and CI) runs them.
-add_library(ycxxc_test_check STATIC)
-target_sources(ycxxc_test_check PUBLIC FILE_SET CXX_MODULES FILES check.cppm)
-target_link_libraries(ycxxc_test_check PUBLIC ycxxc_options)
+# Unit tests: one CTest program per area, run by tools/build (and so by tools/test's build stage).
+add_library(ycxxc_unit STATIC)
+target_sources(ycxxc_unit PUBLIC FILE_SET CXX_MODULES FILES support/check.cppm)
+target_link_libraries(ycxxc_unit PUBLIC ycxxc_options)
 
-# ycxxc_unit_test(<area> <name>): <area>/<name>.cpp, linked with `libs`, run as unit.<area>.<name>.
-function(ycxxc_unit_test area name)
-  add_executable(unit_${area}_${name} ${area}/${name}.cpp)
-  target_link_libraries(unit_${area}_${name} PRIVATE ycxxc_test_check ${ARGN})
-  add_test(NAME unit.${area}.${name} COMMAND unit_${area}_${name})
+# ycxxc_unit_test(<name> <source> <libraries>...): builds unit.<name> and registers it.
+function(ycxxc_unit_test name source)
+  add_executable(unit_${name} ${source})
+  target_link_libraries(unit_${name} PRIVATE ycxxc_unit ${ARGN})
+  add_test(NAME unit.${name} COMMAND unit_${name})
 endfunction()
 
-ycxxc_unit_test(ast handles ycxxc_ast)
-ycxxc_unit_test(ast schema ycxxc_ast)
-ycxxc_unit_test(ast interner ycxxc_ast)
-ycxxc_unit_test(ast builder ycxxc_ast)
-ycxxc_unit_test(ast red ycxxc_ast)
-ycxxc_unit_test(ast compact ycxxc_ast)
+add_subdirectory(ast)

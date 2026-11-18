@@ -2,10 +2,10 @@
 // parent chain of the current walk, and descent to the node at an offset.
 import std;
 import ycxx.ast;
-import ycxx.test.check;
+import ycxx.unit;
 
 using namespace ycxx::ast;
-using ycxx::test::check;
+using ycxx::unit::check;
 
 int main() {
   Interners in;
@@ -38,25 +38,25 @@ int main() {
     r.for_each_child(self);
   };
   walk(Red(in.ast, root));
-  check(sums.size() == 2 && sums[0].first == sums[1].first);
-  check(sums[0].second == 3 && sums[1].second == 9);
-  check((literal_offsets == std::vector<u32>{5, 11}));
+  check(sums.size() == 2 && sums[0].first == sums[1].first, "sums.size() == 2 && sums[0].first == sums[1].first");
+  check(sums[0].second == 3 && sums[1].second == 9, "sums[0].second == 3 && sums[1].second == 9");
+  check((literal_offsets == std::vector<u32>{5, 11}), "(literal_offsets == std::vector<u32>{5, 11})");
 
   // A body placed after a declaration part shifts every offset (§3.4).
   literal_offsets.clear();
   walk(Red(in.ast, root, 100));
-  check((literal_offsets == std::vector<u32>{105, 111}));
+  check((literal_offsets == std::vector<u32>{105, 111}), "(literal_offsets == std::vector<u32>{105, 111})");
 
   // Descent to an offset: token 11 is the second `1`, under return, under the block.
   bool found = Red(in.ast, root).find(11, [&](const Red& r) {
-    check(r.is<Literal>() && r.offset() == 11 && r.width() == 1);
-    check(r.parent() && r.parent()->is<Binary>() && r.parent()->offset() == 9);
-    check(r.parent()->parent()->is<Return>() && r.parent()->parent()->parent()->is<Compound>());
-    check(r.parent()->parent()->parent()->parent() == nullptr);
+    check(r.is<Literal>() && r.offset() == 11 && r.width() == 1, "r.is<Literal>() && r.offset() == 11 && r.width() == 1");
+    check(r.parent() && r.parent()->is<Binary>() && r.parent()->offset() == 9, "r.parent() && r.parent()->is<Binary>() && r.parent()->offset() == 9");
+    check(r.parent()->parent()->is<Return>() && r.parent()->parent()->parent()->is<Compound>(), "r.parent()->parent()->is<Return>() && r.parent()->parent()->parent()->is<Compound>()");
+    check(r.parent()->parent()->parent()->parent() == nullptr, "r.parent()->parent()->parent()->parent() == nullptr");
   });
-  check(found);
+  check(found, "found");
   // Token 7 (`;`) belongs to the statement, not to the call.
-  Red(in.ast, root).find(7, [&](const Red& r) { check(r.is<ExprStmt>() && r.offset() == 1); });
-  check(!Red(in.ast, root).find(14, [](const Red&) {}));
-  return ycxx::test::failures();
+  Red(in.ast, root).find(7, [&](const Red& r) { check(r.is<ExprStmt>() && r.offset() == 1, "r.is<ExprStmt>() && r.offset() == 1"); });
+  check(!Red(in.ast, root).find(14, [](const Red&) {}), "!Red(in.ast, root).find(14, [](const Red&) {})");
+  return ycxx::unit::result("ast.red");
 }

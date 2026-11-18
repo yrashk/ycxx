@@ -84,7 +84,7 @@ constexpr QualType with_cv(QualType q, Cv cv) {
 }
 
 // BOOTSTRAP: defaulted comparison: the structs of src/ast declare `operator==` as a defaulted
-// member, not a hidden friend; GCC 16.2 with -freflection crashes in an importer that compares
+// member, not a hidden friend; GCC 16.2 crashes in an importer that compares
 // two values of an exported struct whose defaulted `operator==` is a friend.
 
 // An interned ordered list of `T`s (§2): `DeclListId`, `TypeListId` and the record lists of §3.6.
