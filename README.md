@@ -16,8 +16,8 @@ in [GitHub issues](https://github.com/yrashk/ycxx/issues) and the
 [roadmap](https://github.com/yrashk/ycxx/issues/12).
 
 **What works**, on macOS arm64 only:
-- `ycxx cxx a.cpp -o a` compiles a small C-like subset of C++ to a signed arm64 Mach-O
-  executable. ycxx's own lexer, parser and semantic analysis, L1 IR, AArch64 code generator and
+- `ycxx cxx a.cpp -o a` compiles a growing subset of C++ (C-like code, classes, templates,
+  constant evaluation) to a signed arm64 Mach-O executable. ycxx's own lexer, parser and semantic analysis, L1 IR, AArch64 code generator and
   Mach-O linker do the work, with no external compiler, assembler or linker.
   - The subset: `int`, `long`, `unsigned`, `bool`, `char`, `void` and pointers; functions,
     recursion and calls; locals and namespace-scope variables with constant initializers;
@@ -86,18 +86,19 @@ build/bin/ycxx cxx hello.cpp -o hello && ./hello
 ```
 
 **Not yet:**
-- `#embed`, and the standard library's headers: `<cstdio>` now preprocesses, but libycxx does
-  not yet know ycxx (yrashk/libycxx#17).
+- `#embed`, and the standard library's headers: `<cstdio>` preprocesses and passes libycxx's
+  compiler check, but sema does not yet accept all of it
+  ([#133](https://github.com/yrashk/ycxx/issues/133)).
 - Inheritance and virtual functions, and passing classes by value.
 - `if constexpr`, and taking the address of a variable in a namespace-scope initializer
   (`int* p = &g;` passes the front end but not code generation yet).
 - Exceptions.
 - The standard library.
 - Optimization (`-O`).
-- The resident daemon as the default, with concurrent requests
-  ([#137](https://github.com/yrashk/ycxx/issues/137),
-  [#139](https://github.com/yrashk/ycxx/issues/139)). Without `YCXX_DAEMON=1`, `ycxx cxx` runs
-  in-process, once per invocation, and the daemon serves one request at a time.
+- The resident daemon as the default ([#139](https://github.com/yrashk/ycxx/issues/139), after
+  ThreadSanitizer, [#105](https://github.com/yrashk/ycxx/issues/105)). Without `YCXX_DAEMON=1`,
+  `ycxx cxx` runs in-process, once per invocation; both run on a thread pool (`YCXX_THREADS`),
+  and the daemon serves concurrent requests.
 - Linux and x86-64.
 
 Nothing beyond the subset above compiles, so neither real programs nor libycxx do yet.
