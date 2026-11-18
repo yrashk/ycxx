@@ -155,6 +155,12 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
     declare(in->decl, std::nullopt);
     tu.functions.push_back({in->spec, in->decl, in->body.value, program.id(in->item), it.body_begin - it.begin, std::nullopt});
   }
+  for (EntityId spec : program.required()) {
+    ast::DeclSema d{};
+    d.entity = spec;
+    d.type = world.entities.rec(spec).type;
+    declare(d, std::nullopt);
+  }
   // The implicitly defined special members that are not trivial ([class.copy.ctor], [class.dtor]).
   for (std::size_t i = 0; i < program.synthesized().size(); ++i) {
     const parse::Program::Synthesized& s = program.synthesized()[i];

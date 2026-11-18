@@ -300,9 +300,15 @@ specified by the accepted [optimization design](docs/design/optimization.md) (#3
      *Reason:* O(1) canonicalization that does not depend on interning order, and diagnostics in
      the user's spelling. (§5)
    - **Templates.** Dependent values in canonical positions are `VDep*` constants, so no tree
-     enters a type or a key. Substitution is a function whose lookups are the cells, and
-     instantiation builds a fresh tree that keeps the pattern's offsets. *Reason:* keys stay
-     small and eager; diagnostics point into the template. (§5.5, §6)
+     enters a type or a key. Declarations and canonical positions (signatures, deduction,
+     partial ordering, entity ids) are substituted structurally. Bodies and every other part with
+     tokens of its own (member-specifications, initializers, default arguments) are instantiated
+     by analysing the pattern's tokens again with the arguments bound: non-dependent names at the
+     pattern's own context, dependent ones at the instantiation's. Either way the result is a
+     fresh tree that keeps the pattern's offsets. *Reason:* keys stay small and eager;
+     diagnostics point into the template; one analysis path serves definitions and
+     instantiations, so a construct sema learns works in instantiations at once. (§5.5, §6;
+     amended by #88, decided by Fable)
    - **C++26:** reflections are constants over entity, type, value and positional handles;
      expansion statements store the pattern or the instances; contracts are declaration data.
      (§7)

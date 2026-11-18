@@ -174,6 +174,15 @@ public:
     for (std::size_t i = 0; i < explicit_args.size(); ++i) {
       if (explicit_args[i].kind != params[i].kind) return std::nullopt;
       out[i] = explicit_args[i];
+      // A value is converted to its parameter's type, with the arguments before it substituted
+      // ([temp.arg.nontype]/1, [temp.deduct.general]/2).
+      if (params[i].kind == TemplateArgKind::value) {
+        auto pt = substitute(params[i].type, bindings(depth, out));
+        if (!pt) return std::nullopt;
+        auto v = converted_value(explicit_args[i], *pt);
+        if (!v) return std::nullopt;
+        out[i] = *v;
+      }
     }
     TypeRec f = types().rec(tmpl.type);
     if (args.size() < f.params.size() || (args.size() > f.params.size() && !f.variadic)) return std::nullopt;
@@ -208,6 +217,26 @@ public:
       if (!deduce(p, a, depth, out, allow)) return std::nullopt;
     }
     return complete(tmpl, params, std::move(out));
+  }
+
+  // A template argument's value as a converted constant expression of type `t` ([expr.const]):
+  // an integral conversion that is not narrowing, or a null pointer of type std::nullptr_t to a
+  // pointer. None when it does not convert.
+  std::optional<TemplateArg> converted_value(const TemplateArg& a, QualType t) {
+    t = types().canonical(Types::unqualified(t));
+    if (types().is_dependent(t) || ins().values.is_dependent(a.value)) return TemplateArg{TemplateArgKind::value, t, a.value};
+    if (types().is_integral(t) && ins().values.is<ast::VInt>(a.value)) {
+      ConstId c = ast::convert_integral(ins(), target, a.value, t);
+      ConstId back = ast::convert_integral(ins(), target, c, a.type);
+      auto neg = [&](ConstId v, QualType of) {
+        return ast::is_signed(target, *types().builtin_of(of)) && ast::is_negative(ast::int_bits(ins(), v));
+      };
+      if (back != a.value || neg(c, t) != neg(a.value, a.type)) return std::nullopt;  // narrowing ([dcl.init.list]/7)
+      return TemplateArg{TemplateArgKind::value, t, c};
+    }
+    if (types().is_pointer(t) && ins().values.is<ast::VNullptr>(a.value)) return TemplateArg{TemplateArgKind::value, t, a.value};
+    if (types().canonical(a.type) == t) return TemplateArg{TemplateArgKind::value, t, a.value};
+    return std::nullopt;
   }
 
   // Default template arguments for what deduction left ([temp.deduct.general]/5), then every

@@ -217,6 +217,8 @@ public:
   // requires is instantiated, in order of first demand, and so are those its instance requires.
   void instantiate_all();
   std::span<const Instance* const> instances() const { return instance_order_; }
+  // Every specialization whose definition the unit requires, in order of first demand.
+  std::span<const EntityId> required() const { return required_; }
   // The calls of a template's body that were dependent at its definition, by the template's item
   // ([temp.dep.candidate]); its instantiations add argument-dependent lookup to them.
   std::map<u32, std::vector<u32>> dependent_calls_;
@@ -306,6 +308,7 @@ private:
   std::map<u32, u32> instance_depth_;            // by specialization: how deeply it is nested
   std::set<u32> instantiating_;                  // specializations whose instantiation is running
   std::vector<engine::Diagnostic> end_diags_;    // the END phase's own
+  std::vector<EntityId> required_;
   std::map<u32, std::optional<irgen::FunctionIr>> instance_irs_;  // by specialization
 
 public:
@@ -1738,6 +1741,7 @@ void Program::instantiate_all() {
   std::set<u32> seen;
   for (std::size_t i = 0; i < work.size(); ++i) {
     if (!seen.insert(std::to_underlying(work[i].spec)).second) continue;
+    required_.push_back(work[i].spec);
     if (depth[i] > limit) {
       end_diags_.push_back({engine::Loc{std::to_underlying(work[i].at.item), work[i].at.offset},
                             sema::diag_id(sema::Diag::instantiation_depth), {engine::diag_arg(limit)}});

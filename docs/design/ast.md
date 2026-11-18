@@ -554,6 +554,40 @@ rebuilding, below the granularity of §B0.5. If measurement says otherwise, a
 
 ### 6.4 Instantiation produces a fresh tree with the pattern's offsets
 
+*Amended by #88; the decision is Fable's, the text the session's.* Instantiation is a hybrid:
+
+- **Structural substitution** (`substitute`, `deduce`, `match_partial`, `satisfies`, `VDep*`) for
+  declaration parts and canonical positions: function and variable template signatures, trailing
+  return types, `noexcept`, constraints, alias templates, partial-specialization matching, entity
+  ids and [temp.over.link]. Deduction, partial ordering and redeclaration matching need a value
+  form with free parameters, and substitution failure there is a value (SFINAE,
+  [temp.deduct.general]/8).
+- **Re-analysis of the pattern's tokens** for function bodies, class member-specifications
+  (`instantiate_class` runs `item_sema` on each member item under the bindings), variable and
+  static member initializers, default arguments and default member initializers. The parser and
+  sema run again over the same tokens with each template parameter bound to its argument, so the
+  result is a fresh tree with the pattern's offsets, as below.
+
+Which context a question goes to: unqualified lookup, and every question a non-dependent
+construct asks, at the pattern's own context (`rel(◇.prefix, I)`), exactly as the definition
+asked it, so non-dependent names keep their phase-one bindings ([temp.res], [temp.nondep]); a
+construct that is dependent as written asks at the instantiation's context (END for
+`instantiate_fn`, the demanding site for classes, §B6.2). A call the definition found dependent
+adds argument-dependent lookup at both ([temp.dep.candidate]). Grammar decisions on names that
+are dependent as written (`T::x` as a type or not, `.template`) follow the definition's tree at
+the same offset, never the concrete argument; a bound type parameter is sugar,
+`SSubst{written, [[=canonical]] result}`, so that dependence as written survives.
+
+What the definition keeps (§6.1 is amended accordingly): its tree, whose dependent constructs are
+`Dependent` nodes (operands as written, type `dependent` or the type [temp.dep.expr] fixes) and
+`DepName` for an unqualified callee that lookup did not find, plus which calls were dependent. No
+body kind needs a substitution case. *Rejected:* pure tree substitution (every construct would
+need a dependent shape with its whole syntactic payload and a substitution case, and local
+classes and member-specifications a dependent declaration grammar); pure re-analysis (deduction,
+partial ordering and redeclaration matching cannot be done by re-parsing). The original rejection
+of re-parsing ("loses the phase-one bindings") does not hold when lookup is asked at the
+pattern's context.
+
 `instantiate_fn(spec, ctx)` returns `FnInst{BodySema body; NodeId contracts}`. Default arguments
 are not part of it: `instantiate_fn` runs at END (§B6.2), but a call fills in its default
 arguments at its own prefix. So `default_arg(EntityId spec, u32 index, ctx)` is fetched by the

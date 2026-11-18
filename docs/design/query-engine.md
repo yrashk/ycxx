@@ -2107,10 +2107,15 @@ declaration properties); per-expression queries (memory; a body re-run is micros
 
 `analyze_template(item, ctx)` parses and checks the template at its definition point
 ([temp.res.general]). Non-dependent names are looked up and *bound* to entities in the result.
-For each dependent unqualified call, the result stores the definition-context unqualified lookup
-set as a value ([temp.dep.candidate]: candidates are the definition-context lookup plus ADL from
-both contexts). Dependent qualified names and member accesses are left symbolic. This is a
-contextual query like any declaration's; its prefix is the template item's own.
+Dependent qualified names and member accesses are left symbolic. This is a contextual query like
+any declaration's; its prefix is the template item's own.
+
+*Amended by #88 (ast.md §6.4):* an instantiation analyses the pattern's tokens again, so it does
+not read a stored lookup set. It re-asks unqualified lookup at the pattern's context
+(`rel(◇.prefix, I)`, or `rel_after(◇.prefix, K)` for a complete-class part), which gives the
+definition-context set of [temp.dep.candidate], and asks argument-dependent lookup at both
+contexts for the calls the definition found dependent. What the definition keeps for its
+instantiations is which calls those are.
 
 #### B6.2 Instantiation and its context
 
