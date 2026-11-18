@@ -213,7 +213,8 @@ struct BodySema { NodeId tree; SeqId<LocalRec> locals; };                // anal
   when the frame commits, not eagerly (§9.3).
 - A parameter's default argument is in `ParamSema` for a non-member function; for a member it is
   the separate query `default_arg(p, ctx)` in the complete-class context (§B8). Default arguments
-  of a function template specialization are instantiated with it (§6.4).
+  of a function template specialization come from `default_arg` keyed by the specialization's
+  `EntityId` (§6.4).
 - `class_def(C, ctx)` hops to the class item, reads its head and bases from `ItemSema`, and
   fetches `decl_sema` of each member.
 - **What `function_ir(F, ctx)` reads:** `BodySema.tree` through the hop of §B1.4, `decl_sema(F)`,
@@ -504,10 +505,12 @@ rebuilding, below the granularity of §B0.5. If measurement says otherwise, a
 
 ### 6.4 Instantiation produces a fresh tree with the pattern's offsets
 
-`instantiate_fn(spec, ctx)` returns `FnInst{BodySema body; NodeId contracts; SeqId<NodeId>
-default_args}`: everything of the declaration that a specialization instantiates. `default_arg`
-and `contract_specs` for a member of a class template specialization take the specialization's
-`EntityId` as key data. `instantiate_class(spec, ctx)` returns a
+`instantiate_fn(spec, ctx)` returns `FnInst{BodySema body; NodeId contracts}`. Default arguments
+are not part of it: `instantiate_fn` runs at END (§B6.2), but a call fills in its default
+arguments at its own prefix. So `default_arg(EntityId spec, u32 index, ctx)` is fetched by the
+caller for every function template specialization, and `default_arg` and `contract_specs` for a
+member of a class template specialization likewise take the specialization's `EntityId` as key
+data. `instantiate_class(spec, ctx)` returns a
 `ClassDef` whose members pair the pattern's declaration with the instantiated entity:
 `MemberRec{DeclId pattern; EntityId instantiated; QualType substituted; …}`. A member template of
 a specialization is `(DeclId pattern, TemplateArgs outer)`, and it is instantiated at all levels at
