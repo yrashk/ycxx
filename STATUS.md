@@ -11,6 +11,12 @@ What is true of the code today. Work in progress and its owners are tracked in
 - No compiler code yet.
 - Query engine design accepted: [`docs/design/query-engine.md`](docs/design/query-engine.md)
   (#1), summarized in DECISIONS §4. A throwaway prototype is in `spikes/query-engine/`.
+- Test driver: `tools/test` ([docs/TESTING.md](docs/TESTING.md), #5). Test kinds accept/reject
+  (error locations), `-E` against an oracle, run, differential against Clang 23 and GCC 16, and
+  incremental (format and hook; the ycxx side waits for #19). Fail-fast state, `--fast`, tiers,
+  failed-first, duration sharding, affected-test hook. A smoke suite of each kind passes with
+  Clang and GCC as the compiler under test; with ycxx every test is UNSUPPORTED
+  (`tests/features/ycxx.txt` lists nothing yet).
 - Next: the AST design (#2) and the optimization architecture (#3).
 
 ## Bootstrap workarounds
