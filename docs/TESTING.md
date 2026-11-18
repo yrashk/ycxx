@@ -148,5 +148,9 @@ cold, which exercises the format and the comparison.
 malformed, or the oracles disagree: a differential test whose oracles disagree tests nothing
 until it is fixed). All but PASS, XFAIL and UNSUPPORTED fail the run.
 
+**The draft suite** (`tests/draft`) is generated from the working draft's examples by
+`tools/draft-examples`; it is regenerated, never edited. How, its skips and the oracles'
+disagreements: [`tests/draft/README.md`](../tests/draft/README.md).
+
 The driver's own tests are fixtures in `tests/driver/fixtures/`, each saying in a `// FIXTURE:`
 line which result it must get.
