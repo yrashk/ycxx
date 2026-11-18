@@ -24,6 +24,13 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
   - Do: keep the issue body current, and put conclusions in comments, not only in the session.
   - This confirms DECISIONS §6.1.
 
+- **macOS CI runners are shared by every repository of the account** (five concurrent jobs on
+  the free plan). libycxx's hour-long macOS jobs, run twice per push (on `push` and on
+  `pull_request`), kept ycxx's PR jobs queued for over an hour.
+  - Do: run `push` CI only on `main`, cancel superseded runs with a `concurrency` group, and keep
+    macOS jobs short. Count a libycxx PR as about an hour of every repository's macOS capacity.
+  - Learned on the α slice (#39), 2026-11-18.
+
 ## Working with Fable subagents
 
 - **Agree the contract between parts before splitting a design.** #1's engine part and C++ part
@@ -155,6 +162,17 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
   - Do: use `native_encoded_string()` for file names passed on, `display_string()` for messages.
   - Learned on #42.
 
+- **A contract predicate sees the parameters as `const`** ([dcl.contract.func], P2900's implicit
+  const-ification). A `pre` that called `is_void(Interners&, …)` did not compile.
+  - Do: give predicate helpers `const&` parameters, and answer them from data that is already
+    computed (`types.canon(q)`), not from functions that may intern.
+  - Learned on #33.
+- **A mutation that changes nothing proves nothing.** On #33 the first mutation of
+  `usual_arithmetic` (`>=` to `>` on rank) was equivalent for the standard integer types, and the
+  suite rightly stayed green.
+  - Do: mutate a branch that some test input must take, and check that the suite turns red.
+  - Learned on #33.
+
 ## Data the front end needs
 
 - **Unicode tables from Python, plus one UCD file.** Python's `unicodedata` (Unicode 17.0 in the
@@ -187,6 +205,17 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
     `-ftime-report` before blaming reflection.
   - Learned on #2's spike.
 
+- **Check generated code against C, not against expectations you wrote.** The back end's first
+  plan widened every narrow argument to 32 bits in `lower`. Apple arm64 does that only for
+  register arguments; on the stack a `char` keeps one byte. That came out of rereading Apple's ABI
+  notes, not out of a test, and the plan's own golden tests would have agreed with the mistake.
+  - Do: link generated functions with a C harness compiled by the bootstrap compiler. The harness
+    computes the expected value with the same C expression and calls across the ABI both ways, with
+    more than 8 arguments and narrow types. One harness covered about 60 functions and thousands
+    of value pairs.
+  - Do: mutate the back end once (swap a pattern's form, flip a calling-convention flag) and see
+    the harness fail.
+  - Learned on #26/#28.
 - **Test a selection's invariant end to end, not just its helper.** The test driver's shard
   helper was unit-tested and correct, but main.py fed each stage a list that depended on earlier
   shards' picks, so shards skipped some tests and doubled others: CI could go green without
@@ -195,6 +224,14 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
   - Do: for partitioning, ordering or filtering code, check the invariant (every item once,
     nothing lost) through the real entry point, with state that makes the stages interact.
   - Learned on #5.
+
+- **A verifier's tests need malformed inputs, not only round trips.** #23's round-trip tests passed
+  every op, and the one review still found two P1s in the verifier: a terminator's results accepted
+  on a second path into the normal successor, and an out-of-bounds read on a malformed body. Each
+  showed up with a five-line hand-written body.
+  - Do: for every rule a verifier enforces, write one body that breaks it and check the error. Do
+    the same for every guard the parser relies on.
+  - Learned on #23.
 
 - **Let the oracles' output drive bulk-classification rules.** The draft-example extractor's first
   rules for "OK", "error" and "fragment" were guesses. Counting the oracles' error messages and

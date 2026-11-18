@@ -7,11 +7,13 @@ add_subdirectory(ast)
 add_subdirectory(engine)
 add_subdirectory(lex)
 add_subdirectory(pp)
+add_subdirectory(ir)
 add_subdirectory(items)
 add_subdirectory(obj)
 add_subdirectory(link)
 add_subdirectory(sema)
 add_subdirectory(parse)
+add_subdirectory(target/aarch64)
 
 configure_file(version.cppm.in ${CMAKE_CURRENT_BINARY_DIR}/version.cppm @ONLY)
 
