@@ -620,6 +620,96 @@ void cycles_and_errors() {
   check(db.get<AboveThrows>(0) == 2 && db.runs<Throws>(1) == 1, "nothing was stored; the cell runs again");
 }
 
+std::atomic<bool> a_started{false};
+std::atomic<bool> a_release{false};
+struct SlowA {
+  using Key = std::uint32_t;
+  using Value = std::int64_t;
+  static query_task<Value> run(Ctx& cx, Key) {
+    a_started = true;
+    while (!a_release.load()) {
+      co_await cx.stop_point();
+      std::this_thread::yield();
+    }
+    throw std::runtime_error("A");
+  }
+};
+struct FailB {
+  using Key = std::uint32_t;
+  using Value = std::int64_t;
+  static query_task<Value> run(Ctx&, Key) { throw std::runtime_error("B"); }
+};
+struct PairAB {
+  using Key = std::uint32_t;
+  using Value = std::int64_t;
+  static query_task<Value> run(Ctx& cx, Key k) {
+    const auto [a, b] = co_await cx.par_fetch(q<SlowA>{k}, q<FailB>{k});
+    co_return a + b;
+  }
+};
+
+// Two members of a group fail: the error is the first member's, as single-threaded, even when
+// the second fails first and the first's owner was stopped meanwhile (review of #15).
+void first_error_by_position() {
+  {
+    Db single;
+    a_release = true;
+    check(errors_from_every_entry<PairAB>(single, 1)[0] == "A", "single-threaded: the first member's error");
+  }
+  Pool pool(4);
+  Db db(pool);
+  a_release = false;
+  a_started = false;
+  ex::counting_scope a, b;
+  ex::spawn(db.request<SlowA>(0) | ex::then([](const std::int64_t&) noexcept {}) | ex::upon_error([](std::exception_ptr) noexcept {}),
+            a.get_token());
+  while (!a_started.load()) std::this_thread::yield();
+  std::string message;
+  ex::spawn(db.request<PairAB>(0) | ex::then([](const std::int64_t&) noexcept {}) | ex::upon_error([&](std::exception_ptr e) noexcept {
+              try {
+                std::rethrow_exception(e);
+              } catch (const std::exception& x) {
+                message = x.what();
+              }
+            }),
+            b.get_token());
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));  // B failed; PairAB waits on A's owner
+  a.request_stop();
+  a.close();
+  std::this_thread::sync_wait(a.join());
+  a_release = true;
+  b.close();
+  std::this_thread::sync_wait(b.join());
+  check(message == "A", std::format("the first member's error, not the one that came first (got {})", message));
+}
+
+// `apply` whose write throws: the next epoch opens anyway and interrupted requests come back.
+void apply_that_throws() {
+  Pool pool(2);
+  Db db(pool);
+  Epochs ep(db);
+  ep.apply([](Db& d) { d.set<In>(0, 3); });
+  slow_release = false;
+  slow_started = false;
+  std::atomic<std::int64_t> got{0};
+  ep.spawn<Slow>(0, Priority::background, [&](const std::int64_t& v) { got = v; }, [](std::exception_ptr) {});
+  while (!slow_started.load()) std::this_thread::yield();
+  bool thrown = false;
+  try {
+    ep.apply([](Db& d) {
+      d.set<In>(0, 4);
+      throw std::runtime_error("disk");
+    });
+  } catch (const std::runtime_error&) {
+    thrown = true;
+  }
+  slow_release = true;
+  std::atomic<std::int64_t> later{0};
+  ep.spawn<AboveSlow>(0, Priority::background, [&](const std::int64_t& v) { later = v; }, [](std::exception_ptr) {});
+  ep.join();
+  check(thrown && got == 40 && later == 41, "the write's exception propagates; the epoch and the respawn carry on");
+}
+
 // Many requests for one cell: one execution, every request gets its value (§A3.1).
 void one_execution_for_many_waiters() {
   Pool pool(hw);
@@ -657,5 +747,7 @@ int main() {
   respawned_requests_answer_once();
   restarts_and_cancel();
   private_recomputation();
+  first_error_by_position();
+  apply_that_throws();
   return ycxx::unit::result("engine_scheduler");
 }

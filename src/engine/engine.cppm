@@ -478,7 +478,11 @@ struct Wait final : Task {
 // revision are ready; a cell that needs work and is free is claimed and its frame started; a
 // cell another frame owns is waited for, after the wait-for walk (§A2.2). It ends in `ready()`
 // once every cell is verified at this revision, or in `failed()` when the frame was stopped or
-// a cell it waited for failed. Each returns what to resume next, or nothing.
+// a cell failed. Each returns what to resume next, or nothing.
+//
+// When cells fail, the error reported is the first by position, as in a single-threaded run:
+// an error is held until every cell before it is verified, and an earlier cell's error replaces
+// it, whichever completed first or was interrupted on the way.
 class Settle {
 public:
   explicit Settle(Frame& f) noexcept : frame_(&f) {}
@@ -503,11 +507,20 @@ protected:
 
 private:
   std::coroutine_handle<> step() noexcept;
-  // Takes the wait's outcome and lets it go: whether it was stopped, and the first error by
-  // position (deterministic whichever completion came first).
-  std::pair<bool, std::exception_ptr> consume(Wait& w) noexcept;
+  // Takes the wait's outcome and lets it go: whether it was stopped. Errors it brought are held
+  // by position (`hold`).
+  bool consume(Wait& w) noexcept;
+  void hold(std::uint32_t at, std::exception_ptr e) noexcept {
+    if (at < error_at_) {
+      error_at_ = at;
+      error_ = std::move(e);
+    }
+  }
 
   std::span<const CellId> cells_;
+  std::vector<std::uint32_t> busy_at_;  // the position in `cells_` of each link of the wait
+  std::uint32_t error_at_ = ~0u;        // the held error's position; cells from it on are not settled
+  std::exception_ptr error_;
 };
 
 // A kind's part of the memo table: a sharded index from key to cell (§A3.6) and the keys and
@@ -620,7 +633,8 @@ class cell_sender;
 // requests are made with `get` (blocking) or `request` (a sender), each the root of a demand.
 class Db {
 public:
-  // Requests run on the thread that makes them, one at a time.
+  // Requests run on the thread that makes them, one at a time. Everything, stop requests
+  // included, comes from the thread that created the Db.
   Db();
   // Requests run on the pool's workers. The pool outlives the Db.
   explicit Db(Pool& pool);
@@ -773,6 +787,7 @@ private:
   std::atomic<std::size_t> live_{0};
   Pool* pool_ = nullptr;
   std::vector<Work> local_;  // the queue when there is no pool
+  std::thread::id owner_;    // the only thread that uses a Db without a pool
   std::mutex wait_mutex_;
   Arena<Registered> registry_;
   std::mutex ids_mutex_;
@@ -1268,12 +1283,19 @@ public:
 
   // Stops and joins the current epoch, runs `write(db)` at quiescence (it sets inputs), opens
   // the next epoch and respawns the requests the stop interrupted.
+  // If `write` throws, the next epoch is still opened and the interrupted requests respawned
+  // (on whatever inputs were written), and the exception propagates.
   template <class F>
   Applied apply(F&& write) {
     std::lock_guard lock(m_);
     finish(true);
-    std::forward<F>(write)(*db_);
     scope_ = std::make_unique<std::execution::counting_scope>();
+    std::exception_ptr failure;
+    try {
+      std::forward<F>(write)(*db_);
+    } catch (...) {
+      failure = std::current_exception();
+    }
     std::vector<std::shared_ptr<Ticket>> again;
     {
       std::lock_guard l(stopped_m_);
@@ -1287,6 +1309,7 @@ public:
       t->stored_at_restart_ = stored;
       t->launch_();
     }
+    if (failure) std::rethrow_exception(failure);
     return a;
   }
 
@@ -1339,7 +1362,7 @@ void Wait::go(Task* t) noexcept {
   if (const std::coroutine_handle<> next = w->settle->resume(*w)) next.resume();
 }
 
-std::pair<bool, std::exception_ptr> Settle::consume(Wait& w) noexcept {
+bool Settle::consume(Wait& w) noexcept {
   Db& db = *frame_->db;
   if (frame_->id != 0) {
     std::lock_guard lock(db.wait_mutex_);
@@ -1347,27 +1370,18 @@ std::pair<bool, std::exception_ptr> Settle::consume(Wait& w) noexcept {
   }
   w.on_stop.reset();
   const bool all = w.pending.load(std::memory_order_acquire) == 0;
-  std::exception_ptr error;
   if (all) {
-    for (const auto& e : w.errors) {
-      if (e) {
-        error = e;
-        break;
-      }
+    for (std::size_t i = 0; i < w.errors.size(); ++i) {
+      if (w.errors[i]) hold(busy_at_[i], w.errors[i]);
     }
   }
   w.release();
-  return {!all, error};
+  return !all;
 }
 
 std::coroutine_handle<> Settle::resume(Wait& w) noexcept {
-  const auto [stopped, error] = consume(w);
-  if (stopped) {
+  if (consume(w)) {
     frame_->stopped = true;
-    return failed();
-  }
-  if (error) {
-    frame_->error = error;
     return failed();
   }
   return step();
@@ -1395,13 +1409,18 @@ std::coroutine_handle<> Settle::step() noexcept {
     db.chaos_point();
     children.clear();
     busy.clear();
-    std::exception_ptr error;
-    for (CellId c : cells_) {
+    busy_at_.clear();
+    // Only the cells before a held error are settled: it is reported once they are verified.
+    const auto limit = static_cast<std::uint32_t>(std::min<std::size_t>(cells_.size(), error_at_));
+    for (std::uint32_t i = 0; i < limit; ++i) {
       try {
-        if (db.try_settle(c, *frame_, children) == Db::Settled::busy) busy.push_back(c);
+        if (db.try_settle(cells_[i], *frame_, children) == Db::Settled::busy) {
+          busy.push_back(cells_[i]);
+          busy_at_.push_back(i);
+        }
       } catch (...) {
         // A cheap cell failed on this stack (an exception from its query, or a cycle).
-        error = std::current_exception();
+        hold(i, std::current_exception());
         break;
       }
     }
@@ -1410,7 +1429,11 @@ std::coroutine_handle<> Settle::step() noexcept {
     const auto start_children = [&] {
       for (auto it = children.rbegin(); it != children.rend(); ++it) db.push(*it, prio);
     };
-    if (!error && busy.empty()) return ready();
+    std::exception_ptr error;
+    if (busy.empty()) {
+      if (!error_) return ready();
+      error = error_;
+    }
     if (!error && frame_->id != 0) {
       std::lock_guard lock(db.wait_mutex_);
       if (auto cycle = db.find_cycle(*frame_, busy)) error = db.cycle_error(std::move(*cycle));
@@ -1450,13 +1473,8 @@ std::coroutine_handle<> Settle::step() noexcept {
     std::uint8_t expected = Wait::suspending;
     if (w->phase.compare_exchange_strong(expected, Wait::waiting, std::memory_order_acq_rel, std::memory_order_acquire)) return {};
     // Everything resolved (or a stop arrived) while linking: carry on here.
-    const auto [stopped, failure] = consume(*w);
-    if (stopped) {
+    if (consume(*w)) {
       frame_->stopped = true;
-      return failed();
-    }
-    if (failure) {
-      frame_->error = failure;
       return failed();
     }
     if (unlinked == busy.size()) std::this_thread::yield();  // a claim between its two CASes (§A3.1)
@@ -1781,18 +1799,26 @@ frame_task Db::run_frame(Db& db, CellId c, std::uint32_t id, Root& root, bool va
   }
   {
     Ctx cx(db, f);
-    query_task<typename Q::Value> body = Q::run(cx, db.key_of<Q>(c));
-    co_await run_body<typename Q::Value>{body.h_};
-    // Resumed by the body's return, or by a fetch that was stopped or failed (which leaves the
-    // body suspended; destroying `body` destroys it and every helper it awaits).
-    if (!f.error && !f.stopped) {
-      if (body.h_.promise().error) {
-        f.error = body.h_.promise().error;
-      } else {
-        db.store<Q>(c, std::move(*body.h_.promise().value), f);
-        db.publish(c);
-        db.finish(f);
-        co_return;
+    // `run` that throws before its coroutine exists is an internal error like any other.
+    std::optional<query_task<typename Q::Value>> body;
+    try {
+      body.emplace(Q::run(cx, db.key_of<Q>(c)));
+    } catch (...) {
+      f.error = std::current_exception();
+    }
+    if (body) {
+      co_await run_body<typename Q::Value>{body->h_};
+      // Resumed by the body's return, or by a fetch that was stopped or failed (which leaves the
+      // body suspended; destroying `body` destroys it and every helper it awaits).
+      if (!f.error && !f.stopped) {
+        if (body->h_.promise().error) {
+          f.error = body->h_.promise().error;
+        } else {
+          db.store<Q>(c, std::move(*body->h_.promise().value), f);
+          db.publish(c);
+          db.finish(f);
+          co_return;
+        }
       }
     }
   }
@@ -1921,8 +1947,13 @@ void Db::give_id(std::uint32_t id) noexcept {
 }
 
 void Db::push(Work w, Priority p) noexcept {
-  if (pool_) pool_->push(w, p);
-  else local_.push_back(w);
+  if (pool_) {
+    pool_->push(w, p);
+    return;
+  }
+  // A stop requested from another thread would push here while the owner drains.
+  contract_assert(std::this_thread::get_id() == owner_);
+  local_.push_back(w);
 }
 
 void Db::drain() noexcept {
@@ -1939,7 +1970,7 @@ StatStripe& Db::stripe() noexcept {
   return stats_[pool_->worker_index().value_or(pool_->size()) % stat_stripes];
 }
 
-Db::Db() { (void)registry_.emplace(); }  // id 0 is never an owner that waits
+Db::Db() : owner_(std::this_thread::get_id()) { (void)registry_.emplace(); }  // id 0 is never an owner that waits
 
 Db::Db(Pool& pool) : Db() { pool_ = &pool; }
 
