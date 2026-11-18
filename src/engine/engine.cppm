@@ -694,8 +694,9 @@ private:
 // that has diagnostics. The cell's dependency list changes only when it re-executes, which
 // happens only when one of the dependencies `DiagsOf` recorded changed after the cell was last
 // verified, hence after `DiagsOf` was (the cell is fetched first). So `DiagsOf` re-runs whenever
-// the list may have changed, even if the cell itself was backdated. A dependency whose subgraph gains or loses diagnostics changes its fingerprint
-// through `has_diags`, so pruning never hides a change.
+// the list may have changed, even if the cell itself was backdated. A dependency whose subgraph
+// gains or loses diagnostics changes its fingerprint through `has_diags`, so pruning never hides
+// a change.
 struct DiagsOf {
   using Key = CellRef;
   using Value = std::vector<Diagnostic>;
@@ -855,8 +856,8 @@ void Db::validate(CellId c, std::uint64_t old) {
     // Durability is not part of the fingerprint: a dependency backdated after re-executing may
     // have lowered its own, and the shortcut must not trust this cell's old one. Every
     // dependency was visited, so the minimum is exact; a cell green by the shortcut needs no
-    // update, since lowering a dependency's durability takes a re-execution that also moves
-    // `last_changed_` at this cell's level.
+    // update, since lowering a dependency's durability takes a re-execution somewhere below it,
+    // caused by an input change that also moved `last_changed_` at this cell's level.
     e.durability = durability;
     e.word.store(make_word(State::done, 0, revision_), std::memory_order_release);
     ++stats_.validated;
