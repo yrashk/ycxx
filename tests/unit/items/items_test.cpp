@@ -271,6 +271,7 @@ void robustness() {
 void query() {
   engine::Db db;
   pp::FileId f{3};
+  db.set<pp::SourceOf>(f, {"<file 3>", "", {}});
   db.set<pp::FileText>(f, "int main() { return 42; }");
   const Items& a = db.get<items::RegionItems>(f);
   check(a.top.size() == 1 && a.items[0].kind == ItemKind::function, "region_items");

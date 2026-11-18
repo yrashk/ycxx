@@ -6,11 +6,13 @@ import std;
 import ycxx.ast;
 import ycxx.engine;
 import ycxx.pipeline;
+import ycxx.pp;
 import ycxx.unit;
 
 namespace ast = ycxx::ast;
 namespace engine = ycxx::engine;
 namespace pl = ycxx::pipeline;
+namespace pp = ycxx::pp;
 using ycxx::unit::check;
 
 namespace {
@@ -156,10 +158,53 @@ void two_units() {
   check(s.get<pl::Link>(program).image == image, "fixed again, the program links as before");
 }
 
+// Headers are `FileContent` inputs, provided on first read (#93): an edit to one, set as the
+// daemon sets it, re-runs `pp` and what depends on it, an unedited one leaves everything green,
+// and the same text in another directory reads that directory's header.
+void headers() {
+  namespace fs = std::filesystem;
+  fs::path dir = fs::temp_directory_path() / std::format("ycxx-incremental-headers-{}", std::random_device{}());
+  fs::create_directories(dir / "a");
+  fs::create_directories(dir / "b");
+  auto write = [](const fs::path& f, std::string_view text) { std::ofstream(f, std::ios::binary | std::ios::trunc) << text; };
+  const std::string main_text = "#include \"v.h\"\nint main() { return V; }\n";
+  write(dir / "a" / "v.h", "#define V 1\n");
+  write(dir / "b" / "v.h", "#define V 2\n");
+  auto build_in = [&](pl::Session& s, const fs::path& cwd) {
+    s.set_source(tu, "m.cpp", main_text, "m.o", cwd.native_encoded_string());
+    s.set_program(program, {{tu}, {}, "m"});
+    return s.get<pl::Link>(program).image;
+  };
+  auto cold_in = [&](const fs::path& cwd) {
+    pl::Session s;
+    return build_in(s, cwd);
+  };
+
+  pl::Session s;
+  std::vector<std::uint8_t> a1 = build_in(s, dir / "a");
+  check(a1 == cold_in(dir / "a") && !a1.empty(), "a unit with a header, built");
+  s.db().reset_stats();
+  build_in(s, dir / "a");
+  check(s.db().stats().executed == 0, "rebuilt with no edit: nothing executes");
+
+  const pp::PathId h = pp::path_id((dir / "a" / "v.h").lexically_normal().generic_native_encoded_string());
+  write(dir / "a" / "v.h", "#define V 3\n");
+  check(s.db().set<pp::FileContent>(h, std::string("#define V 3\n")), "the header's input changes");
+  s.db().reset_stats();
+  std::vector<std::uint8_t> a3 = build_in(s, dir / "a");
+  check(s.db().stats().executed > 0 && a3 != a1 && a3 == cold_in(dir / "a"), "a header edit re-runs pp: equal to cold");
+
+  // The same argument vector and text in another directory: its own header.
+  std::vector<std::uint8_t> b = build_in(s, dir / "b");
+  check(b == cold_in(dir / "b") && b != a3, "the same text in another directory reads its own header");
+  fs::remove_all(dir);
+}
+
 }  // namespace
 
 int main() {
   incremental();
   two_units();
+  headers();
   return ycxx::unit::result("unit.pipeline_incremental");
 }
