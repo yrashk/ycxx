@@ -244,12 +244,12 @@ public:
     DeclSpec d;
     d.begin = pos();
     int n_char = 0, n_short = 0, n_int = 0, n_long = 0, n_signed = 0, n_unsigned = 0, n_void = 0, n_bool = 0;
-    int n_char8 = 0, n_char16 = 0, n_char32 = 0, n_wchar = 0;
+    int n_char8 = 0, n_char16 = 0, n_char32 = 0, n_wchar = 0, n_float = 0, n_double = 0;
     bool c = false, v = false;
     std::optional<QualType> cls;  // a class-name or elaborated-type-specifier
     auto any_type = [&] {
       return cls || n_char + n_short + n_int + n_long + n_signed + n_unsigned + n_void + n_bool + n_char8 + n_char16 +
-                        n_char32 + n_wchar > 0;
+                        n_char32 + n_wchar + n_float + n_double > 0;
     };
     auto once = [&](bool& flag, Tk k) {
       if (flag) s_->diag(pos(), Diag::duplicate_specifier, k);
@@ -266,6 +266,8 @@ public:
       case Tk::kw_char16_t: ++n_char16; break;
       case Tk::kw_char32_t: ++n_char32; break;
       case Tk::kw_wchar_t: ++n_wchar; break;
+      case Tk::kw_float: ++n_float; break;  // types only: their values are #201
+      case Tk::kw_double: ++n_double; break;
       case Tk::kw_short: ++n_short; break;
       case Tk::kw_int: ++n_int; break;
       case Tk::kw_long: ++n_long; break;
@@ -337,7 +339,8 @@ public:
         continue;
       }
       case Tk::kw_struct:
-      case Tk::kw_class: {
+      case Tk::kw_class:
+      case Tk::kw_union: {
         u32 at = pos();
         // A class-specifier where a type is named (a local or unnamed class) is not supported yet.
         if (kind(1) != Tk::identifier || kind(2) == Tk::l_brace || kind(2) == Tk::colon || kind(2) == Tk::coloncolon) {
@@ -423,7 +426,7 @@ public:
     }
     // [dcl.type.general]: the combinations of simple-type-specifiers, as in its table.
     int total = n_char + n_short + n_int + n_long + n_signed + n_unsigned + n_void + n_bool + n_char8 + n_char16 +
-                n_char32 + n_wchar;
+                n_char32 + n_wchar + n_float + n_double;
     if (cls) {
       if (total > 0) {
         s_->diag(d.begin, Diag::conflicting_specifiers, Tk::kw_int);
@@ -443,6 +446,10 @@ public:
     int sign = n_signed + n_unsigned;
     int others = n_void + n_bool + n_char8 + n_char16 + n_char32 + n_wchar;
     if (n_signed > 1 || n_unsigned > 1 || sign > 1 || n_long > 2 || n_short > 1 || n_int > 1 || n_char > 1 || others > 1) {
+    } else if (n_float + n_double > 0) {
+      // `float`, `double`, `long double` alone ([dcl.type.general]).
+      if (n_float + n_double == 1 && others + n_char + n_short + n_int + sign == 0 && n_long <= n_double)
+        b = n_float ? Builtin::float_ : n_long ? Builtin::long_double : Builtin::double_;
     } else if (others == 1) {
       if (n_char + n_short + n_int + n_long + sign == 0)
         b = n_void ? Builtin::void_ : n_bool ? Builtin::bool_ : n_char8 ? Builtin::char8_t_ : n_char16 ? Builtin::char16_t_

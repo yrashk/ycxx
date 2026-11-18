@@ -279,6 +279,7 @@ engine::query_task<FrontResult> TuFront::run(engine::Ctx& cx, TuId tu) {
   for (EntityId c : classes.classes()) {
     ClassShape& shape = out.shapes.classes.emplace_back(ClassShape{c, {}});
     for (const sema::FieldRec& f : classes.rec(c).fields) shape.fields.push_back(f.type);
+    shape.union_ = classes.rec(c).union_;
   }
   for (EntityId e : classes.enums()) out.shapes.enums.push_back({e, classes.underlying(e)});
   co_return out;

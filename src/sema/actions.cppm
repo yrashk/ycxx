@@ -680,9 +680,16 @@ public:
     if (tr.kind == TypeKind::array) {
       r.assign(tr.bound, Element{tr.inner, no_name()});
     } else if (const ClassRec* c = tr.kind == TypeKind::class_ ? class_rec(tr.entity) : nullptr) {
-      for (const FieldRec& f : c->fields) r.push_back({types().add_cv(f.type, Types::cv(t)), f.name, f.init, f.dmi});
+      for (const FieldRec& f : c->fields) {
+        r.push_back({types().add_cv(f.type, Types::cv(t)), f.name, f.init, f.dmi});
+        if (c->union_) break;  // [dcl.init.aggr]/16: a union's list initializes its first member
+      }
     }
     return r;
+  }
+  bool is_union(QualType t) {
+    const ClassRec* c = types().is_class(t) ? class_rec(types().class_of(t)) : nullptr;
+    return c && c->union_;
   }
 
   // Whether initializing a `t` runs a default member initializer.
@@ -834,6 +841,10 @@ public:
         // skipped are initialized as if there were no initializer.
         std::size_t j = i;
         while (j < elems.size() && elems[j].name != c.designator) ++j;
+        if (j == elems.size() && is_union(t) && !elided) {
+          diag(c.begin, Diag::not_supported, lex::Tk::period);  // a union's member other than its first
+          return fail;
+        }
         if (elided || !types().is_class(t) || j == elems.size()) {
           diag(c.begin, Diag::bad_designator, c.designator, Types::unqualified(t));
           return fail;

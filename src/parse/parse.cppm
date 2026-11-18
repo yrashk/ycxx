@@ -137,6 +137,14 @@ public:
   // item that does not enclose `item`.
   // A function body inside the class is a complete-class context ([class.mem.general]); past
   // the closing brace of the class an item defines (`own`), that class is complete too.
+  // Whether the class item `item` is a union: its class-head's class-key ([class.union]), the
+  // last one before the brace (a template-head's `class T` comes earlier).
+  bool class_rec_is_union(u32 item) const {
+    for (u32 t = items_->items[item].brace_begin; t-- > items_->items[item].begin;)
+      if (lex::Tk k = r_->tokens[t].kind; k == lex::Tk::kw_union || k == lex::Tk::kw_struct || k == lex::Tk::kw_class)
+        return k == lex::Tk::kw_union;
+    return false;
+  }
   // An entity's GNU asm label: its symbol as written (docs/EXTENSIONS.md); empty if it has none.
   std::string asm_label(EntityId e) const {
     auto it = asm_labels_.find(std::to_underlying(e));
@@ -1620,8 +1628,8 @@ private:
     ps_.skip_attributes();
     bool td = ps_.accept(Tk::kw_typedef);  // `typedef class-specifier declarators;` ([dcl.typedef])
     Tk key = ps_.kind();
-    if (key == Tk::kw_union || (key != Tk::kw_struct && key != Tk::kw_class)) {
-      s_.diag(ps_.pos(), Diag::not_supported, key);  // unions, and other specifiers before the class-key
+    if (key != Tk::kw_struct && key != Tk::kw_class && key != Tk::kw_union) {
+      s_.diag(ps_.pos(), Diag::not_supported, key);  // other specifiers before the class-key
       return bad();
     }
     ps_.bump();
@@ -1911,6 +1919,7 @@ private:
         return bad();
       }
       if (!s_.require_complete(d.type, d.name_at)) return bad();
+      if (p_->class_rec_is_union(it_->parent) && !variant_member(d)) return bad();
       if (member_declared(d.name)) {
         s_.diag(d.name_at, Diag::redeclared_member, d.name);
         return bad();
@@ -2249,6 +2258,36 @@ private:
   // ([class.mem.general]: a member is declared once).
   // A member function `function` (its type) clashes only with a member that is not a function or
   // one of the same type ([class.mem.general]/5, [over.load]).
+  // A union's member ([class.union.general]): no reference (/2). Variant members whose class has
+  // non-trivial special members or default member initializers (which make the union's deleted,
+  // /3), and a default member initializer on a member other than the first, are not supported
+  // yet.
+  bool variant_member(const parse::Declarator& d) {
+    sema::Types& types = s_.types();
+    if (types.is_reference(d.type)) {
+      s_.diag(d.name_at, Diag::union_reference, d.name);
+      return false;
+    }
+    QualType et = d.type;
+    while (types.is_array(et)) et = types.rec(et).inner;
+    if (s_.has_member_inits(et) || s_.destructor_of(et) != EntityId::none || q_.classes().copy_of(et).first) {
+      s_.diag(d.name_at, Diag::not_supported, Tk::kw_union);
+      return false;
+    }
+    bool earlier = std::ranges::any_of(s_.own, [](const auto& o) { return o.sema.kind == ast::DeclKind::data_member; });
+    for (u32 m : p_->items().items[it_->parent].members) {
+      if (m == k_ || earlier) break;
+      for (const ast::DeclSema& o : p_->world().ins.seqs.elements(earlier_sema(m).decls))
+        earlier = earlier || o.kind == ast::DeclKind::data_member;
+    }
+    if (earlier && (ps_.is(Tk::equal) || ps_.is(Tk::l_brace))) {
+      s_.diag(ps_.pos(), Diag::not_supported, Tk::equal);
+      return false;
+    }
+    return true;
+  }
+  const ast::ItemSema& earlier_sema(u32 m) { return earlier(m); }
+
   bool member_declared(NameId n, std::optional<QualType> function = std::nullopt) {
     auto clash = [&](const ast::DeclSema& d) {
       if (!function || d.kind != ast::DeclKind::function) return true;
@@ -2896,6 +2935,7 @@ const Result<ast::ClassDef>& Program::class_def(u32 item) {
     // Every unit that defines the class builds its own record (#115), and synthesizes the special
     // members its own object needs.
     sema::ClassRec rec;
+    rec.union_ = class_rec_is_union(item);
     rec.fields = std::move(fields);
     rec.members = std::move(statics);
     rec.types = std::move(nested);
@@ -3294,6 +3334,7 @@ const sema::ClassRec* Program::instantiate_class(EntityId spec, u32 point) {
       member_patterns_.emplace(std::to_underlying(m.entity), MemberOf{index(m.decl.item), spec});
   // Built whole, then published once (#156); the first publication wins.
   sema::ClassRec built;
+  built.union_ = class_rec_is_union(k);
   built.fields = std::move(c.fields);
   built.members = std::move(c.statics);
   built.types = std::move(c.nested);

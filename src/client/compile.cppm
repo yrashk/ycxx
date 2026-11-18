@@ -339,7 +339,7 @@ Done run(const Request& r, pp::Host& host, pipeline::Session& session, const Sto
     fail(d, opts.error());
     return d;
   }
-  pp::Config config = pp::with_system_dirs(opts->pp);
+  pp::Config config = pp::with_system_dirs(opts->pp, r.cwd);
   config.view = units.view;
   pp::Session& ps = pp::configure(config, host);
   auto stats = [&] {

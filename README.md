@@ -31,11 +31,14 @@ build/bin/ycxx cxx hello.cpp -o hello && ./hello
 ```
 
 **Language.** Programs can use:
-- the fundamental integer and character types, pointers, arrays, references and enumerations;
+- the fundamental integer and character types, pointers, arrays, references and enumerations,
+  and the floating types as types (not yet their values);
   all statements and operators; functions, recursion and overloading;
-- classes: data and static members, member functions, constructors and destructors with RAII,
-  aggregate and designated initialization;
+- classes and unions: data and static members, member functions, constructors and destructors
+  with RAII, aggregate and designated initialization;
 - namespaces, typedefs and alias declarations, `using` declarations and directives;
+- `[[…]]` attributes, and the GNU attributes and `asm` labels the macOS SDK's headers use
+  ([docs/EXTENSIONS.md](docs/EXTENSIONS.md));
 - templates: function, class and variable templates, deduction, partial ordering, explicit and
   partial specializations, two-phase lookup, with Itanium names identical to Clang's;
 - casts, `sizeof`/`alignof` of non-class types, and `decltype`;
