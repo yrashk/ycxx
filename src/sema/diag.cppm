@@ -33,10 +33,12 @@ enum class Diag : std::uint32_t {
   // [dcl.spec], [dcl.type]
   duplicate_specifier [[=message{Severity::error, "duplicate '{0:k}'"}]],
   conflicting_specifiers [[=message{Severity::error, "'{0:k}' cannot be combined with the other type specifiers"}]],
+  storage_class_conflict [[=message{Severity::error, "a declaration has at most one storage class specifier"}]],
   missing_type_specifier [[=message{Severity::error, "a declaration needs a type specifier"}]],
   // [dcl.decl], [dcl.fct], [dcl.init]
   void_variable [[=message{Severity::error, "variable '{0:n}' has incomplete type 'void'"}]],
   void_parameter [[=message{Severity::error, "a parameter cannot have type 'void'"}]],
+  bound_not_constant [[=message{Severity::error, "an array bound must be a positive integral constant expression"}]],
   invalid_array_element [[=message{Severity::error, "an array element cannot have type '{0:t}'"}]],
   function_returns_function [[=message{Severity::error, "a function cannot return a function or an array"}]],
   function_initialized [[=message{Severity::error, "function '{0:n}' cannot have an initializer"}]],
@@ -51,6 +53,8 @@ enum class Diag : std::uint32_t {
   main_return_type [[=message{Severity::error, "'main' must return 'int'"}]],
   main_parameters [[=message{Severity::error, "'main' must have no parameters or (int, char**)"}]],
   main_specifier [[=message{Severity::error, "'main' cannot be declared '{0:k}'"}]],
+  main_not_function [[=message{Severity::error, "'main' at global scope must be a function"}]],
+  main_named [[=message{Severity::error, "'main' cannot be used in an expression"}]],
   main_linkage [[=message{Severity::error, "'main' cannot have C language linkage"}]],
   // [basic.lookup.unqual]
   undeclared [[=message{Severity::error, "use of undeclared identifier '{0:n}'"}]],
@@ -67,6 +71,7 @@ enum class Diag : std::uint32_t {
   too_many_arguments [[=message{Severity::error, "too many arguments in call: expected {0}, have {1}"}]],
   no_conversion [[=message{Severity::error, "cannot convert '{0:t}' to '{1:t}'"}]],
   not_contextually_bool [[=message{Severity::error, "'{0:t}' cannot be converted to bool"}]],
+  integer_literal_too_large [[=message{Severity::error, "integer literal is too large for any of its types"}]],
   void_value [[=message{Severity::error, "a void expression has no value"}]],
   incompatible_operands [[=message{Severity::error, "incompatible operand types ('{0:t}' and '{1:t}')"}]],
   pointer_arithmetic_void [[=message{Severity::error, "arithmetic on a pointer to an incomplete or function type '{0:t}'"}]],

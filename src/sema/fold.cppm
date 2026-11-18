@@ -44,7 +44,9 @@ private:
       }
       if (c->conversion == ConversionKind::array_to_pointer) {
         // The address of a string literal object's first element.
-        auto l = get<ast::Literal>(c->operand.id);
+        NodeId o = c->operand.id;
+        while (auto p = get<ast::Paren>(o)) o = p->operand.id;
+        auto l = get<ast::Literal>(o);
         if (!l || values().rec(l->value).kind != ValueKind::string) return std::nullopt;
         return values().address(c->info.type, l->value, 0);
       }
@@ -125,6 +127,10 @@ private:
     if (!l || !r) return std::nullopt;
     const ValueRec& lr = values().rec(*l);
     const ValueRec& rr = values().rec(*r);
+    // [expr.eq]: two null pointers (or two std::nullptr_t values) compare equal.
+    if (lr.kind == ValueKind::null_pointer && rr.kind == ValueKind::null_pointer &&
+        (b.op == ast::BinaryOp::eq || b.op == ast::BinaryOp::ne))
+      return integer(b.info.type, b.op == ast::BinaryOp::eq);
     if (lr.kind != ValueKind::integer || rr.kind != ValueKind::integer) return std::nullopt;
     QualType ot = lr.type;  // the operands' common type
     bool is_signed = shape(*types().builtin_of(ot)).is_signed;
@@ -142,6 +148,8 @@ private:
       if (uy == 0) return std::nullopt;
       if (!is_signed) return integer(t, b.op == div ? ux / uy : ux % uy);
       if (y == -1 && x == i64_min) return std::nullopt;
+      // [expr.mul]/4: a % b is undefined when a / b is not representable.
+      if (!checked(t, x / y)) return std::nullopt;
       return checked(t, b.op == div ? x / y : x % y);
     case lt: return cmp([](auto a, auto c) { return a < c; });
     case gt: return cmp([](auto a, auto c) { return a > c; });

@@ -250,11 +250,12 @@ private:
     bool is_function_def = it_->kind == ItemKind::function;
     do {
       parse::Declarator d = ps_.declarator(spec.type, false);
-      if (!d.ok || !spec.ok || !d.named) {
+      if (!d.ok || !spec.ok || !d.named || !declare(spec, d, lang, explicit_lang, is_function_def)) {
+        // Later declarators keep their skeleton ordinals with placeholder records.
         bad();
+        if (!is_function_def) ps_.skip_to_semi();
         return;
       }
-      declare(spec, d, lang, explicit_lang, is_function_def);
     } while (!is_function_def && ps_.accept(Tk::comma));
     if (!is_function_def) {
       if (!ps_.expect(Tk::semi)) bad();
@@ -276,7 +277,8 @@ private:
   }
 
   // One init-declarator at namespace scope.
-  void declare(const DeclSpec& spec, const parse::Declarator& d, LangLinkage lang, bool explicit_lang,
+  // One init-declarator at namespace scope; false after an error that leaves no record.
+  bool declare(const DeclSpec& spec, const parse::Declarator& d, LangLinkage lang, bool explicit_lang,
                bool is_function_def) {
     sema::Types& types = s_.types();
     u32 ord = static_cast<u32>(decls_.size());
@@ -304,16 +306,19 @@ private:
     if (definition) flags |= sema::decl_flag::definition;
     if (!fn && types.is_void(d.type)) {
       s_.diag(d.name_at, Diag::void_variable, d.name);
-      return bad();
+      return false;
+    }
+    if (!fn && p_->world().ins.names.spelling(d.name) == "main") {
+      s_.diag(d.name_at, Diag::main_not_function);  // [basic.start.main]/3
+      return false;
     }
 
     // Earlier declarations of the name: in this item, then before it ([basic.link], [dcl.fct]).
     std::vector<ast::DeclSema> prior;
+    for (DeclId p : q_.visible_decls(d.name))
+      if (auto ds = p_->decl_sema(p); ds && ds->entity != EntityId::none) prior.push_back(*ds);
     for (const auto& o : s_.own)
       if (o.name == d.name) prior.push_back(o.sema);
-    if (prior.empty())
-      for (DeclId p : q_.visible_decls(d.name))
-        if (auto ds = p_->decl_sema(p); ds && ds->entity != EntityId::none) prior.push_back(*ds);
     if (fn) {
       if (!explicit_lang && !prior.empty() && prior.back().kind == ast::DeclKind::function)
         lang = s_.world().entities.rec(prior.back().entity).lang;  // [dcl.link]/6: inherited
@@ -334,7 +339,7 @@ private:
       const ast::DeclSema& p = prior.back();
       if ((p.kind == ast::DeclKind::function) != fn) {
         s_.diag(d.name_at, Diag::conflicting_declaration, d.name);
-        return bad();
+        return false;
       }
       if (fn && p.type != sem.type) {
         const sema::TypeRec& a = types.rec(p.type);
@@ -345,21 +350,21 @@ private:
           s_.diag(d.name_at, Diag::conflicting_declaration, d.name);
         else
           s_.diag(d.name_at, Diag::overload_not_supported, d.name);
-        return bad();
+        return false;
       }
-      if (!fn && sema::Types::unqualified(p.type) != sema::Types::unqualified(sem.type)) {
+      if (!fn && p.type != sem.type) {  // [basic.link]/11: the same type, cv included
         s_.diag(d.name_at, Diag::conflicting_declaration, d.name);
-        return bad();
+        return false;
       }
       // [dcl.stc]: a later declaration may not give internal linkage to a name with external.
       if (spec.is_static && p.linkage == ast::Linkage::external) {
         s_.diag(d.name_at, Diag::conflicting_declaration, d.name);
-        return bad();
+        return false;
       }
       sem.linkage = p.linkage;
       if (definition && std::ranges::any_of(prior, [](const ast::DeclSema& o) { return o.flags & sema::decl_flag::definition; })) {
         s_.diag(d.name_at, Diag::redefinition, d.name);
-        return bad();
+        return false;
       }
       sem.entity = p.entity;
     } else {
@@ -406,6 +411,7 @@ private:
     }
     declarators_.push_back(s_.node(ast::Declarator{ord, sema::Sema::at(init, d.begin), value}, d.begin, ps_.pos()));
     decls_.push_back(sem);
+    return true;
   }
 
   // [basic.start.main]
@@ -474,9 +480,9 @@ public:
       s_.set_return_type(s_.types().rec(f->type).inner);
       // The parameters are the first locals, in their own scope ([basic.scope.param]).
       s_.push_scope();
-      s_.mark_params_scope();
+      s_.guard_scope();
       for (const ast::ParamSema& prm : p_->world().ins.seqs.elements(f->params))
-        s_.declare_local(prm.name, prm.type, sema::local_flag::parameter, 0);
+        s_.declare_local(prm.name, prm.type, sema::local_flag::parameter, 0, false);
       if (!ps_.is(lex::Tk::l_brace)) {
         // `= default`, `= delete`, a ctor-initializer or a function-try-block.
         s_.diag(0, sema::Diag::not_supported, ps_.kind());

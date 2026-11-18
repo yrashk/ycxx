@@ -111,17 +111,23 @@ public:
   // ------------------------------------------------------------ scopes and locals (§4.4)
 
   void push_scope() { scopes_.emplace_back(); }
-  void pop_scope() { scopes_.pop_back(); }
+  void pop_scope() {
+    if (!guarded_.empty() && guarded_.back() == scopes_.size() - 1) guarded_.pop_back();
+    scopes_.pop_back();
+  }
   std::size_t scope_depth() const { return scopes_.size(); }
 
   // Declares a block-scope variable or a parameter in the innermost scope ([basic.scope.block]).
   // A name may not be redeclared in its scope, nor in the outermost block of a function body
   // when it names a parameter ([basic.scope.param]).
-  u32 declare_local(NameId name, QualType type, u16 flags, u32 at) {
-    if (name != no_name()) {
+  // A name may not be redeclared in its scope, nor in the outermost block of a substatement whose
+  // enclosing scope is guarded: a function's parameters, a for-init-statement's or a condition's
+  // declarations ([basic.scope.block]/2). Parameters are checked by the parser (`check` false).
+  u32 declare_local(NameId name, QualType type, u16 flags, u32 at, bool check = true) {
+    if (name != no_name() && check) {
       bool clash = std::ranges::any_of(scopes_.back(), [&](auto& p) { return p.first == name; });
-      if (params_scope_ && scopes_.size() == *params_scope_ + 2)
-        clash = clash || std::ranges::any_of(scopes_[*params_scope_], [&](auto& p) { return p.first == name; });
+      if (scopes_.size() >= 2 && !guarded_.empty() && guarded_.back() == scopes_.size() - 2)
+        clash = clash || std::ranges::any_of(scopes_[guarded_.back()], [&](auto& p) { return p.first == name; });
       if (clash) diag(at, Diag::redeclared_local, name);
     }
     u32 index = static_cast<u32>(locals_.size());
@@ -134,7 +140,8 @@ public:
   std::span<const ast::LocalRec> locals() const { return locals_; }
   // The function's parameters are in the scope at this depth; its body's outermost block is the
   // next one.
-  void mark_params_scope() { params_scope_ = scopes_.size() - 1; }
+  // Marks the innermost scope as guarded (`declare_local`); it stays so until it is popped.
+  void guard_scope() { guarded_.push_back(scopes_.size() - 1); }
 
   NameId no_name() { return ins().names.intern(""); }
 
@@ -186,6 +193,10 @@ public:
         diag(begin, Diag::overload_not_supported, name);
         return {NodeId::none, begin, end};
       }
+    if (d.kind == ast::DeclKind::function && ins().names.spelling(name) == "main") {
+      diag(begin, Diag::main_named);  // [basic.start.main]/3: main shall not be used
+      return {NodeId::none, begin, end};
+    }
     ExprInfo info{d.type, ValueCategory::lvalue, 0};
     return node(ast::DeclRef{info, d.entity}, begin, end, info);
   }
@@ -235,7 +246,10 @@ public:
     }
     // A value no listed type holds was diagnosed by the lexer (integer_too_large), or is
     // ill-formed here; `long long` keeps analysis going.
-    if (!fits) chosen = list.back();
+    if (!fits) {
+      if (!lit.overflow) diag(begin, Diag::integer_literal_too_large);  // [lex.icon]/3
+      chosen = list.back();
+    }
     QualType t = builtin(chosen);
     return literal(t, w_->values.integer(t, lit.value), ValueCategory::prvalue, begin, end);
   }
@@ -317,9 +331,22 @@ public:
   bool is_null_pointer_constant(const Ex& e) {
     if (!e.ok() || e.glvalue()) return false;
     if (types().is(e.type(), Builtin::nullptr_t)) return true;
-    auto l = as<ast::Literal>(e);
-    if (!l || !types().is_integral(e.type()) || types().is(e.type(), Builtin::bool_)) return false;
-    return w_->values.rec(l->value).bits == 0;
+    NodeId n = e.id;
+    while (ast::kind_of(n) == ast::Nodes::index_of<ast::Paren>()) n = b_->get<ast::Paren>(n).operand.id;
+    if (ast::kind_of(n) != ast::Nodes::index_of<ast::Literal>()) return false;
+    // An integer-literal's type is a signed or unsigned integer type of rank int or above
+    // ([lex.icon]); a character or bool literal is not an integer-literal.
+    auto b = types().builtin_of(e.type());
+    if (!b || !ast::is_integral(*b) || *b == Builtin::bool_ || rank_below_int(*b) || is_character(*b)) return false;
+    return w_->values.rec(b_->get<ast::Literal>(n).value).bits == 0;
+  }
+  static bool is_character(Builtin b) {
+    return b == Builtin::char_ || b == Builtin::wchar_t_ || b == Builtin::char8_t_ || b == Builtin::char16_t_ ||
+           b == Builtin::char32_t_;
+  }
+  static bool rank_below_int(Builtin b) {
+    return b == Builtin::signed_char || b == Builtin::unsigned_char || b == Builtin::short_ ||
+           b == Builtin::unsigned_short;
   }
 
   // An implicit conversion sequence to `to` ([over.best.ics], [dcl.init.general]): copy-
@@ -557,6 +584,7 @@ public:
         if (tc != composite) c = convert_node(c, ast::ConversionKind::qualification, composite);
         return bin(k, a, c, b);
       }
+      if (equality && types().is(ta, Builtin::nullptr_t) && types().is(tc, Builtin::nullptr_t)) return bin(k, a, c, b);
       if (equality && types().is_pointer(ta) && is_null_pointer_constant(r))
         return bin(k, a, convert_node(c, ast::ConversionKind::null_pointer, ta), b);
       if (equality && types().is_pointer(tc) && is_null_pointer_constant(l))
@@ -624,7 +652,9 @@ public:
     } else {
       Ex a = rvalue(t), b = rvalue(f);
       QualType ta = a.type(), tb = b.type();
-      if (types().is_void(ta) && types().is_void(tb)) {
+      if (ta == tb) {
+        info = {ta, ValueCategory::prvalue, 0};  // [expr.cond]/7.1: the same type, no conversion
+      } else if (types().is_void(ta) && types().is_void(tb)) {
         info = {ta, ValueCategory::prvalue, 0};
       } else if (types().is_arithmetic(ta) && types().is_arithmetic(tb)) {
         info = {arithmetic_conversions(a, b), ValueCategory::prvalue, 0};
@@ -683,12 +713,26 @@ public:
     }
     std::vector<Child> children;
     for (std::size_t i = 0; i < args.size(); ++i) {
-      Ex a = i < params.size() ? convert(args[i], params[i], args[i].begin) : promote(args[i]);
+      Ex a = i < params.size() ? convert(args[i], params[i], args[i].begin) : variadic_argument(args[i]);
       if (!a.ok()) return {NodeId::none, begin, end};
       children.push_back(at(a, begin));
     }
     ExprInfo info{Types::unqualified(ret), ValueCategory::prvalue, 0};
     return node(ast::Call{info, function, at(callee, begin), b_->list(children)}, begin, end, info);
+  }
+
+  // [expr.call]/12: an argument matched by the ellipsis gets the lvalue conversions and the
+  // integral promotions; std::nullptr_t becomes void*; void is no value.
+  Ex variadic_argument(Ex e) {
+    e = promote(e);
+    if (!e.ok()) return e;
+    if (types().is_void(e.type())) {
+      diag(e.begin, Diag::void_value);
+      return {NodeId::none, e.begin, e.end};
+    }
+    if (types().is(e.type(), Builtin::nullptr_t))
+      return convert_node(e, ast::ConversionKind::null_pointer, types().pointer(builtin(Builtin::void_)));
+    return e;
   }
 
   // [expr.sub]: `E1[E2]` is `*(E1 + E2)`. The α subset takes the pointer on the left only.
@@ -713,7 +757,7 @@ private:
   u32 loc_base_;
   std::vector<ast::LocalRec> locals_;
   std::vector<std::vector<std::pair<NameId, u32>>> scopes_;
-  std::optional<std::size_t> params_scope_;
+  std::vector<std::size_t> guarded_;
   QualType return_type_{};
 };
 

@@ -176,6 +176,10 @@ public:
       bump();
     }
   done:
+    if (d.is_static && d.is_extern) {  // [dcl.stc]/1
+      s_->diag(d.begin, Diag::storage_class_conflict);
+      d.ok = false;
+    }
     // [dcl.type.general]: the combinations of simple-type-specifiers, as in its table.
     int total = n_char + n_short + n_int + n_long + n_signed + n_unsigned + n_void + n_bool + n_char8 + n_char16 +
                 n_char32 + n_wchar;
@@ -224,6 +228,7 @@ public:
     std::vector<Param> params;
     bool variadic = false;
     u64 bound = 0;
+    bool unknown_bound = false;  // `[]`, in a parameter only
   };
   struct Level {
     std::vector<sema::Cv> pointers;
@@ -301,9 +306,14 @@ public:
           return l;
         }
         if (is(Tk::r_square)) {
-          s_->diag(at, Diag::not_supported, Tk::l_square);  // an unknown bound
-          ok = false;
           bump();
+          Suffix s;
+          s.unknown_bound = true;
+          if (in_params_ == 0) {
+            s_->diag(at, Diag::not_supported, Tk::l_square);  // an array of unknown bound
+            ok = false;
+          }
+          l.suffixes.push_back(std::move(s));
           continue;
         }
         Suffix s;
@@ -311,7 +321,7 @@ public:
         Ex e = s_->promote(constant_expression());
         auto v = sema::Folder(*s_, questions()).fold(e);
         if (!v || s_->world().values.rec(*v).kind != sema::ValueKind::integer || i64_of(*v) <= 0) {
-          if (e.ok()) s_->diag(at, Diag::not_supported, Tk::l_square);
+          if (e.ok()) s_->diag(at + 1, Diag::bound_not_constant);
           ok = false;
         } else {
           s.bound = s_->world().values.rec(*v).bits;
@@ -341,6 +351,10 @@ public:
         for (const Param& p : s->params) ps.push_back(p.type);
         t = s_->types().function(t, ps, s->variadic, linkage_);
         fn = &*s;
+      } else if (s->unknown_bound) {
+        // Only in a parameter, where [dcl.fct]/5 adjusts the array to a pointer: build the pointer
+        // at once. (An unknown bound below the outermost level is not in the α subset.)
+        t = s_->types().pointer(t);
       } else if (!s_->types().is_object(t) || s->bound == 0) {
         // [dcl.array]: the element type is an object type; an array of functions or of void is
         // ill-formed.
@@ -359,6 +373,17 @@ public:
 
   // parameter-declaration-clause ([dcl.fct]), after its `(`.
   Suffix parameters(bool& ok) {
+    ++in_params_;
+    Suffix s = parameter_list(ok);
+    --in_params_;
+    // [basic.scope.param]: parameter names are distinct.
+    for (std::size_t i = 0; i < s.params.size(); ++i)
+      for (std::size_t j = 0; j < i; ++j)
+        if (s.params[i].name == s.params[j].name && s.params[i].name != s_->no_name())
+          s_->diag(s.params[i].at, Diag::redeclared_local, s.params[i].name);
+    return s;
+  }
+  Suffix parameter_list(bool& ok) {
     Suffix s;
     s.function = true;
     if (is(Tk::kw_void) && kind(1) == Tk::r_paren) {
@@ -387,7 +412,9 @@ public:
         s_->diag(at, Diag::void_parameter);
         ok = false;
       }
-      s.params.push_back({sema::Types::unqualified(t), d.named ? d.name : s_->no_name(), d.named ? d.name_at : at});
+      // The parameter keeps its top-level cv as a variable of the body; the function type drops
+      // it (`function_type` adjusts).
+      s.params.push_back({t, d.named ? d.name : s_->no_name(), d.named ? d.name_at : at});
       if (is(Tk::equal)) {
         s_->diag(pos(), Diag::not_supported, Tk::equal);  // default arguments
         ok = false;
@@ -871,6 +898,7 @@ public:
     bump();
     expect(Tk::l_paren);
     s_->push_scope();
+    s_->guard_scope();  // [basic.scope.block]/2: the for-init's names are not redeclared in the body
     Ex init;
     if (starts_decl_specifier(kind())) {
       init = declaration_statement();
@@ -1004,6 +1032,7 @@ private:
   sema::Sema* s_;
   sema::Questions* q_ = nullptr;
   LangLinkage linkage_ = LangLinkage::cxx;
+  int in_params_ = 0;
 };
 
 }  // namespace ycxx::parse
