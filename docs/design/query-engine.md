@@ -398,7 +398,11 @@ already draws between values and errors.
 **Collection.** `diags_of(cell)` = the entry's own diagnostics followed by, for each dependency in
 program order, `diags_of(dep)`, memoized, pruned by a `has_diags` bit that is the OR over the
 subgraph (the millions of entries with nothing to say cost one bit each), and **not descending
-into `demanded` kinds** (below). `tu_diagnostics(TU)` is a separate kind (§A10.3): it fetches
+into `demanded` kinds** (below). Two rules keep the pruning sound (amended by #14, found by the
+incremental == cold fuzz): `has_diags` is hashed into the cell's fingerprint, so a cell backdated
+while its subgraph gains or loses diagnostics still changes; and `diags_of(cell)` depends on every
+dependency of the cell as well as on `diags_of` of those with diagnostics, so it re-runs whenever
+the cell re-executes, even when the cell is backdated with a different dependency list. `tu_diagnostics(TU)` is a separate kind (§A10.3): it fetches
 `diags_of` of the TU's analysis cell (a cell fetching `diags_of` of itself would be a cycle,
 §A2.1), adds the diagnostics of the cells the TU demanded with their chains, renders and orders
 (§A5.2). A header's error appears in each TU that includes it, which is correct C++, and the
