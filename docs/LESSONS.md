@@ -191,6 +191,11 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
     only that it compiles. Reduce a module ICE to two files with `g++-16 -fmodules` first.
   - Learned on #14.
 
+- **A class defined inside a coroutine template's body breaks the build** when an object of it
+  lives across a `co_await` (an awaitable): GCC 16.2 stores it in the frame type and reports
+  `-Werror=subobject-linkage` ("has a field whose type has no linkage") in every importer.
+  - Do: define awaitables at namespace scope, as class templates if they need the query's types.
+  - Learned on #15.
 - **An executable killed at exec with status 137 says nothing about why.** A linked Mach-O whose
   `ncmds` was one too high passed `codesign -v`, then the kernel killed it before `main`.
   - Do: run `otool -l` on the output first. It reports "malformed load command" and where.
@@ -230,6 +235,14 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
   - Learned on the α slice (#39), 2026-11-18.
 
 ## Evidence and tests
+
+- **Build twice in one session before calling a stage incremental.** On #63 the first warm
+  rebuild crashed in sema: `Entities` assumed it allocated every entity handle, and the back end
+  had interned string literal entities in between. Nothing per-process had shown it.
+  - Do: test a cell graph with a session that builds, edits and builds again, and compare with a
+    cold build. Insert a declaration first too: the warm session then numbers entities
+    differently, which catches output ordered by handle.
+  - Learned on #63.
 
 - **An incremental-equals-cold check also catches values that depend on the session.** On #85,
   `unit.pp` compared a warm session's `Region` with a fresh one's after each edit. Five states
