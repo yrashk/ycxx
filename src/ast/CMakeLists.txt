@@ -4,6 +4,7 @@ add_library(ycxxc_ast STATIC)
 target_sources(ycxxc_ast PUBLIC FILE_SET CXX_MODULES FILES
   fingerprint.cppm
   handles.cppm
+  store.cppm
   schema.cppm
   nodes.cppm
   records.cppm

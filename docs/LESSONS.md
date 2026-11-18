@@ -191,11 +191,33 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
     only that it compiles. Reduce a module ICE to two files with `g++-16 -fmodules` first.
   - Learned on #14.
 
+- **A class defined inside a coroutine template's body breaks the build** when an object of it
+  lives across a `co_await` (an awaitable): GCC 16.2 stores it in the frame type and reports
+  `-Werror=subobject-linkage` ("has a field whose type has no linkage") in every importer.
+  - Do: define awaitables at namespace scope, as class templates if they need the query's types.
+  - Learned on #15.
 - **An executable killed at exec with status 137 says nothing about why.** A linked Mach-O whose
   `ncmds` was one too high passed `codesign -v`, then the kernel killed it before `main`.
   - Do: run `otool -l` on the output first. It reports "malformed load command" and where.
     `dyld_info -fixups -exports -imports` checks chained fixups and the exports trie the same way.
   - Learned on #42.
+- **GCC cannot parse `<CoreServices/CoreServices.h>`**: Apple's headers declare blocks (`^`),
+  which GCC 16 rejects. FSEvents alone is plain C.
+  - Do: `#include <FSEvents/FSEvents.h>` in the global module fragment, with
+    `-F<sdk>/System/Library/Frameworks/CoreServices.framework/Frameworks` on that one file, and
+    link `-framework CoreServices` (src/daemon/CMakeLists.txt). `<dispatch/dispatch.h>` parses.
+  - Do: platform code goes in one module partition per platform, picked by CMake (`:os`,
+    `:watch` in src/daemon); the preprocessor policy rules out `#if`.
+  - Do: check Linux-only code before pushing, with the CI image:
+    `docker run --rm -v "$PWD":/src:ro gcc:16 …`, copying the tree and running cmake and ctest
+    directly (`tools/sync-submodules` cannot see a worktree's `.git` from inside the container).
+  - Learned on #96/#97.
+- **A watcher test that passes at once may not test the race.** The FSEvents test of "an edit
+  between the read and the new stream" passed with the replay removed: a stream created "since
+  now" still saw an event `fseventsd` had not journaled yet.
+  - Do: mutate the code under test, and add the delay that makes the event happen before the race
+    window (here, 1 s before recreating the stream).
+  - Learned on #96/#97.
 - **libycxx deprecates `std::filesystem::path::string()`** (C++26 [depr.fs.path.obs]), and
   `-Werror` turns it into a build failure.
   - Do: use `native_encoded_string()` for file names passed on, `display_string()` for messages.
@@ -231,6 +253,31 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
 
 ## Evidence and tests
 
+- **Build twice in one session before calling a stage incremental.** On #63 the first warm
+  rebuild crashed in sema: `Entities` assumed it allocated every entity handle, and the back end
+  had interned string literal entities in between. Nothing per-process had shown it.
+  - Do: test a cell graph with a session that builds, edits and builds again, and compare with a
+    cold build. Insert a declaration first too: the warm session then numbers entities
+    differently, which catches output ordered by handle.
+  - Learned on #63.
+
+- **Exercise reuse through the real driver, with several translation units.** In each of #85's
+  three parts, the one review found an unsound reuse that `unit.pp` missed:
+  - a main file and a header shared a region;
+  - the include depth was not part of a region's value;
+  - an include guard's empty region dropped directives outside the group.
+  All three showed with `ycxx cxx -E a.cpp b.cpp`, whose TUs share one session. The unit test's
+  edit sequences varied the files, but not the roots, the depths or what lay outside a guard.
+  - Do: for a cache keyed by something less than all the inputs, list what the value also depends
+    on (root or not, depth, text outside a summarized part). Then write one multi-TU repro per
+    item, through the driver, before the review.
+  - Learned on #85.
+- **A spec-only test author keeps the oracles honest.** Asked for "a skipped group may hold an
+  unmatched `'`", #85's test author found that [lex.pptoken]/2 makes it ill-formed. GCC agrees,
+  and Clang, which ycxx had copied, does not.
+  - Do: brief the author with the clauses, not with the expected behaviour, and treat an
+    oracle-versus-draft disagreement it reports as a decision to make, not a test to drop.
+  - Learned on #85.
 - **An incremental-equals-cold check also catches values that depend on the session.** On #85,
   `unit.pp` compared a warm session's `Region` with a fresh one's after each edit. Five states
   differed, while every token, location and name matched. The difference was `Region::files`,
@@ -253,6 +300,12 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
   - Do: say "none" with a flag or `std::optional`, or with the kind's `none` enumerator where the
     handle has one (`ConstId::none`, `NodeId::none`), never with `T{}`.
   - Learned on #25.
+- **Test blocked storage past its first block.** #107's chunked pools passed a concurrency test
+  that never left block 0; the review found that any list longer than the next block aborted,
+  which one 3,000-statement function triggers.
+  - Do: test such storage at the block edges, with a range longer than a block, and at a scale
+    where every column crosses several blocks.
+  - Learned on #107.
 - **A reference into a growing side table dangles.** A `const TypeRec&` held across creating
   another type pointed into a reallocated `std::vector`, giving a wrong diagnostic that depended
   on the file's length. Use a `std::deque` for tables whose records are referenced, or return

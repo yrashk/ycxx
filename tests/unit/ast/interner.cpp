@@ -69,11 +69,11 @@ int main() {
   NodeId wider = a.intern(s, 4);
   check(wider != ta.sum && a.ast.fp(wider) != a.ast.fp(ta.sum), "wider != ta.sum && a.ast.fp(wider) != a.ast.fp(ta.sum)");
 
-  // Re-interning a stored node as a new one, with its lists read from the edge pool itself: the
-  // slice is copied out before the pool grows.
+  // Re-interning a stored node as a new one, with its lists read from the edge pool itself while
+  // the pool grows (it never moves).
   Call stored = a.ast.get<Call>(ta.call);
   for (int i = 0; i < 64; ++i) a.intern(Literal{s.info, a.intern_value(VInt{a.intern_type(TBuiltin{Builtin::int_}), bits_of(std::int64_t{i})})}, 1);
-  NodeId moved = a.intern(stored, 7, a.ast.edges());
+  NodeId moved = a.intern_stored(stored, 7);
   check(moved != ta.call && a.ast.children(a.ast.get<Call>(moved).args).size() == 1 &&
             a.ast.children(a.ast.get<Call>(moved).args)[0].id == ta.sum,
         "a node interned from the pool's own edges keeps its children");

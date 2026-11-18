@@ -288,11 +288,21 @@ public:
     if (r.linkage == ast::Linkage::internal)
       f = ast::mix(ast::mix(f, ins_->items.fp(r.first.item)), std::to_underlying(r.first.ord));
     EntityId e = ins_->entities.add<EntityId>(f);
-    if (std::to_underlying(e) == recs_.size()) recs_.push_back(r);
+    // The interner is shared: the back end adds entities of its own (string literal objects), which
+    // have no record here, so records are indexed by handle with gaps.
+    const auto i = std::to_underlying(e);
+    if (i >= recs_.size()) {
+      recs_.resize(i + 1);
+      known_.resize(i + 1);
+    }
+    if (!known_[i]) {
+      recs_[i] = r;
+      known_[i] = true;
+    }
     return e;
   }
   const EntityRec& rec(EntityId e) const
-    pre(std::to_underlying(e) < recs_.size())
+    pre(std::to_underlying(e) < recs_.size() && known_[std::to_underlying(e)])
   {
     return recs_[std::to_underlying(e)];
   }
@@ -301,6 +311,7 @@ private:
   ast::Interners* ins_;
   Types* types_;
   std::deque<EntityRec> recs_;  // a deque: references to records stay valid as entities are added
+  std::vector<bool> known_;     // which handles have a record
 };
 
 // ---------------------------------------------------------------- classes (stand-in for #33)
