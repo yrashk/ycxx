@@ -381,21 +381,72 @@ void while_break_continue() {
             b.conv(ast::ConversionKind::boolean, w.bool_t, b.read(pn(), w.int_t))),
       b.ret(b.read_local(k)),
   }));
-  FunctionIr r = generate(w, {f, w.fn_ii, {{n, w.int_t}}}, body);
-  std::string got = w.text(f, r.body);
-  // `t` has no initializer: erroneous ([dcl.init.general]). Signed `++` and `--` are `nsw`.
-  check(got.contains("alloc %") && got.contains("[int, automatic, erroneous]"), "an uninitialized local is erroneous:\n" + got);
-  check(got.contains("add nsw") && got.contains("sub nsw"), "signed increment and decrement are nsw:\n" + got);
-  check(got.contains("tobool"), "the conditions convert to bool:\n" + got);
-  // Every `t` ends its lifetime on each of the three ways out of the body: the normal exit,
-  // `break` and `continue`.
-  auto count = [&](std::string_view s) {
-    std::size_t c = 0;
-    for (std::size_t p = got.find(s); p != std::string::npos; p = got.find(s, p + 1)) ++c;
-    return c;
-  };
-  check(count("[int, automatic, erroneous]") == 1 && count("obj.end") == 3 + 2,
-        "obj.end for t on its three exits, for k and n at the return; got:\n" + got);
+  // `t` has no initializer, so it is erroneous ([dcl.init.general]), and it ends its lifetime on
+  // each of the three ways out of the loop body: the normal exit, `break` and `continue`.
+  expect(w, {f, w.fn_ii, {{n, w.int_t}}}, body, R"(
+func @f {
+^0(%0: !state, %1: int):
+  %2: !state, %3: int* = alloc %0 [int, automatic, indeterminate]
+  %4: !state = store %2, %3, %1 [int, /]
+  %5: !state = obj.begin %4, %3 [int]
+  %6: !state, %7: int* = alloc %5 [int, automatic, indeterminate]
+  %8: int = const [#0]
+  %9: !state = store %6, %7, %8 [int, /]
+  %10: !state = obj.begin %9, %7 [int]
+  br ^1(%10)
+^1(%11: !state):
+  %12: int = const [#1]
+  %13: bool = tobool %12
+  cond_br %13 ^2(%11), ^7(%11)
+^2(%14: !state):
+  %15: !state, %16: int* = alloc %14 [int, automatic, erroneous]
+  %17: !state = obj.begin %15, %16 [int]
+  %18: int = load %17, %7 [int, /]
+  %19: int = load %17, %3 [int, /]
+  %20: bool = icmp %18, %19 [sgt]
+  cond_br %20 ^6(%17), ^3(%17)
+^3(%21: !state):
+  %22: int = load %21, %7 [int, /]
+  %23: int = const [#1]
+  %24: int = add nsw %22, %23
+  %25: !state = store %21, %7, %24 [int, /]
+  %26: int = load %25, %7 [int, /]
+  %27: int = const [#3]
+  %28: bool = icmp %26, %27 [eq]
+  cond_br %28 ^5(%25), ^4(%25)
+^4(%29: !state):
+  %30: !state = obj.end %29, %16
+  %31: !state = dealloc %30, %16 [automatic]
+  br ^1(%31)
+^5(%32: !state):
+  %33: !state = obj.end %32, %16
+  %34: !state = dealloc %33, %16 [automatic]
+  br ^1(%34)
+^6(%35: !state):
+  %36: !state = obj.end %35, %16
+  %37: !state = dealloc %36, %16 [automatic]
+  br ^7(%37)
+^7(%38: !state):
+  br ^8(%38)
+^8(%39: !state):
+  %40: int = load %39, %3 [int, /]
+  %41: int = const [#1]
+  %42: int = sub nsw %40, %41
+  %43: !state = store %39, %3, %42 [int, /]
+  br ^9(%43)
+^9(%44: !state):
+  %45: int = load %44, %3 [int, /]
+  %46: bool = tobool %45
+  cond_br %46 ^8(%44), ^10(%44)
+^10(%47: !state):
+  %48: int = load %47, %7 [int, /]
+  %49: !state = obj.end %47, %7
+  %50: !state = dealloc %49, %7 [automatic]
+  %51: !state = obj.end %50, %3
+  %52: !state = dealloc %51, %3 [automatic]
+  ret %52, %48
+}
+)");
 }
 
 void short_circuit_and_conditional() {
@@ -467,9 +518,9 @@ void recursion_and_promotions() {
     check(got.contains("= call %") && got.contains("[@fact]") && !got.contains("not_constexpr"),
           "a call to a constexpr function is not flagged:\n" + got);
     check(got.contains("mul nsw") && got.contains("sub nsw"), "signed arithmetic is nsw:\n" + got);
-    // `n * fact(n - 1)`: the call writes, the read of n touches memory, so the operands are an
-    // unsequenced group.
-    check(got.contains("useq.begin") && got.contains("useq.next") && got.contains("useq.end"), "useq group:\n" + got);
+    // `n * fact(n - 1)`: what `fact` does is indeterminately sequenced with the read of n, not
+    // unsequenced ([intro.execution]), so there is no useq group.
+    check(!got.contains("useq"), "no useq group around a call:\n" + got);
   }
   {
     // int g() { char c = 'a'; ++c; return c + 1; }: `++c` is done in int and wraps back to char.
@@ -569,10 +620,197 @@ func @next {
                  b.expr(b.assign(ast::AssignOp::add, w.int_t, b.local(n), b.lit(w.int_t, "1")))),
         b.ret(b.read_local(n)),
     }));
-    FunctionIr r = generate(w, {f, w.fn_icp, {{s, w.cchar_p}}}, body);
-    std::string got = w.text(f, r.body);
-    check(got.contains("ptr_add %") && got.contains("[char]"), "pointer increment and subscript are ptr_add:\n" + got);
+    // `*s++` reads through the old pointer (%16), and stores the incremented one.
+    expect(w, {f, w.fn_icp, {{s, w.cchar_p}}}, body, R"(
+func @len {
+^0(%0: !state, %1: const_char*):
+  %2: !state, %3: const_char** = alloc %0 [const_char*, automatic, indeterminate]
+  %4: !state = store %2, %3, %1 [const_char*, /]
+  %5: !state = obj.begin %4, %3 [const_char*]
+  %6: !state, %7: int* = alloc %5 [int, automatic, indeterminate]
+  %8: const_char* = load %6, %3 [const_char*, /]
+  %9: int = const [#0]
+  %10: const_char* = ptr_add %8, %9 [char]
+  %11: char = load %6, %10 [char, /]
+  %12: int = iconv %11
+  %13: !state = store %6, %7, %12 [int, /]
+  %14: !state = obj.begin %13, %7 [int]
+  br ^1(%14)
+^1(%15: !state):
+  %16: const_char* = load %15, %3 [const_char*, /]
+  %17: int = const [#1]
+  %18: const_char* = ptr_add %16, %17 [char]
+  %19: !state = store %15, %3, %18 [const_char*, /]
+  %20: char = load %19, %16 [char, /]
+  %21: bool = tobool %20
+  cond_br %21 ^3(%19), ^2(%19)
+^2(%22: !state):
+  %23: int = load %22, %7 [int, /]
+  %24: !state = obj.end %22, %7
+  %25: !state = dealloc %24, %7 [automatic]
+  %26: !state = obj.end %25, %3
+  %27: !state = dealloc %26, %3 [automatic]
+  ret %27, %23
+^3(%28: !state):
+  %29: int = load %28, %7 [int, /]
+  %30: int = const [#1]
+  %31: int = add nsw %29, %30
+  %32: !state = store %28, %7, %31 [int, /]
+  br ^1(%32)
+}
+)");
   }
+}
+
+void unsequenced() {
+  // int u(int x) { return x + (x = 1); }: the read and the write of x are unsequenced, so they
+  // are a useq group, and the interpreter reports the conflict.
+  World w;
+  Body b{w};
+  EntityId u = w.f.entity("u"), x = w.f.entity("x");
+  b.params({{x, w.int_t}});
+  auto px = [&] { return b.param(x, w.int_t); };
+  auto body = b.finish(b.block({b.ret(b.bin(ast::BinaryOp::add, w.int_t, b.read(px(), w.int_t),
+                                            b.read(b.assign(ast::AssignOp::assign, w.int_t, px(), b.lit(w.int_t, "1")), w.int_t)))}));
+  expect(w, {u, w.fn_ii, {{x, w.int_t}}}, body, R"(
+func @u {
+^0(%0: !state, %1: int):
+  %2: !state, %3: int* = alloc %0 [int, automatic, indeterminate]
+  %4: !state = store %2, %3, %1 [int, /]
+  %5: !state = obj.begin %4, %3 [int]
+  %6: !state = useq.begin %5
+  %7: int = load %6, %3 [int, /]
+  %8: !state = useq.next %6
+  %9: int = const [#1]
+  %10: !state = store %8, %3, %9 [int, /]
+  %11: int = load %10, %3 [int, /]
+  %12: !state = useq.end %10
+  %13: !state = obj.end %12, %3
+  %14: !state = dealloc %13, %3 [automatic]
+  %15: int = add nsw %7, %11
+  ret %14, %15
+}
+)");
+}
+
+void division_shifts_and_pointers() {
+  // int d(int a, unsigned u, const char* p, char c) {
+  //   c += 1000;                       // computed in int, narrowed back to char
+  //   a = a / 3; a = a % 3; a = a >> 1;
+  //   u = u / 3u; u = u % 3u; u = u >> 1;
+  //   p = p - u; p -= u;               // an unsigned index is negated in ptrdiff_t
+  //   return *p;
+  // }
+  World w;
+  Body b{w};
+  EntityId d = w.f.entity("d"), a = w.f.entity("a"), u = w.f.entity("u"), p = w.f.entity("p"), c = w.f.entity("c");
+  b.params({{a, w.int_t}, {u, w.unsigned_t}, {p, w.cchar_p}, {c, w.char_t}});
+  auto ref = [&](EntityId e, QualType t) { return b.param(e, t); };
+  auto rd = [&](EntityId e, QualType t) { return b.read(ref(e, t), t); };
+  auto set = [&](EntityId e, QualType t, NodeId v) { return b.expr(b.assign(ast::AssignOp::assign, t, ref(e, t), v)); };
+  using enum ast::BinaryOp;
+  auto c_add = b.add(ast::Assign{b.lv(w.char_t), ast::AssignOp::add, {ref(c, w.char_t), 0}, {b.lit(w.int_t, "1000"), 0}, w.int_t});
+  auto p_sub = b.add(ast::Assign{b.lv(w.cchar_p), ast::AssignOp::sub, {ref(p, w.cchar_p), 0}, {rd(u, w.unsigned_t), 0}, w.cchar_p});
+  QualType fn = w.fn(w.int_t, {w.int_t, w.unsigned_t, w.cchar_p, w.char_t});
+  auto body = b.finish(b.block({
+      b.expr(c_add),
+      set(a, w.int_t, b.bin(div, w.int_t, rd(a, w.int_t), b.lit(w.int_t, "3"))),
+      set(a, w.int_t, b.bin(rem, w.int_t, rd(a, w.int_t), b.lit(w.int_t, "3"))),
+      set(a, w.int_t, b.ord(ast::OrderedOp::shr, w.int_t, rd(a, w.int_t), b.lit(w.int_t, "1"))),
+      set(u, w.unsigned_t, b.bin(div, w.unsigned_t, rd(u, w.unsigned_t), b.lit(w.unsigned_t, "3"))),
+      set(u, w.unsigned_t, b.bin(rem, w.unsigned_t, rd(u, w.unsigned_t), b.lit(w.unsigned_t, "3"))),
+      set(u, w.unsigned_t, b.ord(ast::OrderedOp::shr, w.unsigned_t, rd(u, w.unsigned_t), b.lit(w.int_t, "1"))),
+      set(p, w.cchar_p, b.bin(sub, w.cchar_p, rd(p, w.cchar_p), rd(u, w.unsigned_t))),
+      b.expr(p_sub),
+      b.ret(b.conv(ast::ConversionKind::integral, w.int_t,
+                   b.read(b.un(ast::UnaryOp::deref, b.lv(w.cchar_t), rd(p, w.cchar_p)), w.cchar_t))),
+  }));
+  expect(w, {d, fn, {{a, w.int_t}, {u, w.unsigned_t}, {p, w.cchar_p}, {c, w.char_t}}}, body, R"(
+func @d {
+^0(%0: !state, %1: int, %2: unsigned, %3: const_char*, %4: char):
+  %5: !state, %6: int* = alloc %0 [int, automatic, indeterminate]
+  %7: !state = store %5, %6, %1 [int, /]
+  %8: !state = obj.begin %7, %6 [int]
+  %9: !state, %10: unsigned* = alloc %8 [unsigned, automatic, indeterminate]
+  %11: !state = store %9, %10, %2 [unsigned, /]
+  %12: !state = obj.begin %11, %10 [unsigned]
+  %13: !state, %14: const_char** = alloc %12 [const_char*, automatic, indeterminate]
+  %15: !state = store %13, %14, %3 [const_char*, /]
+  %16: !state = obj.begin %15, %14 [const_char*]
+  %17: !state, %18: char* = alloc %16 [char, automatic, indeterminate]
+  %19: !state = store %17, %18, %4 [char, /]
+  %20: !state = obj.begin %19, %18 [char]
+  %21: char = load %20, %18 [char, /]
+  %22: int = iconv %21
+  %23: int = const [#1000]
+  %24: int = add nsw %22, %23
+  %25: char = iconv %24
+  %26: !state = store %20, %18, %25 [char, /]
+  %27: int = load %26, %6 [int, /]
+  %28: int = const [#3]
+  %29: int = sdiv %27, %28
+  %30: !state = store %26, %6, %29 [int, /]
+  %31: int = load %30, %6 [int, /]
+  %32: int = const [#3]
+  %33: int = srem %31, %32
+  %34: !state = store %30, %6, %33 [int, /]
+  %35: int = load %34, %6 [int, /]
+  %36: int = const [#1]
+  %37: int = ashr %35, %36
+  %38: !state = store %34, %6, %37 [int, /]
+  %39: unsigned = load %38, %10 [unsigned, /]
+  %40: unsigned = const [#3]
+  %41: unsigned = udiv %39, %40
+  %42: !state = store %38, %10, %41 [unsigned, /]
+  %43: unsigned = load %42, %10 [unsigned, /]
+  %44: unsigned = const [#3]
+  %45: unsigned = urem %43, %44
+  %46: !state = store %42, %10, %45 [unsigned, /]
+  %47: unsigned = load %46, %10 [unsigned, /]
+  %48: int = const [#1]
+  %49: unsigned = lshr %47, %48
+  %50: !state = store %46, %10, %49 [unsigned, /]
+  %51: const_char* = load %50, %14 [const_char*, /]
+  %52: unsigned = load %50, %10 [unsigned, /]
+  %53: long = iconv %52
+  %54: long = neg %53
+  %55: const_char* = ptr_add %51, %54 [char]
+  %56: !state = store %50, %14, %55 [const_char*, /]
+  %57: const_char* = load %56, %14 [const_char*, /]
+  %58: unsigned = load %56, %10 [unsigned, /]
+  %59: long = iconv %58
+  %60: long = neg %59
+  %61: const_char* = ptr_add %57, %60 [char]
+  %62: !state = store %56, %14, %61 [const_char*, /]
+  %63: const_char* = load %62, %14 [const_char*, /]
+  %64: char = load %62, %63 [char, /]
+  %65: !state = obj.end %62, %18
+  %66: !state = dealloc %65, %18 [automatic]
+  %67: !state = obj.end %66, %14
+  %68: !state = dealloc %67, %14 [automatic]
+  %69: !state = obj.end %68, %10
+  %70: !state = dealloc %69, %10 [automatic]
+  %71: !state = obj.end %70, %6
+  %72: !state = dealloc %71, %6 [automatic]
+  %73: int = iconv %64
+  ret %72, %73
+}
+)");
+}
+
+void void_return() {
+  // void g(); void h() { return g(); }: [stmt.return] allows a void operand.
+  World w;
+  Body b{w};
+  EntityId g = w.f.entity("g"), h = w.f.entity("h");
+  auto body = b.finish(b.block({b.ret(b.call(g, w.void_t, {}))}));
+  expect(w, {h, w.fn_v, {}}, body, R"(
+func @h {
+^0(%0: !state):
+  %1: !state = call not_constexpr %0 [@g]
+  ret %1
+}
+)");
 }
 
 void more_expressions() {
@@ -663,6 +901,9 @@ int main() {
   hello_world();
   globals_and_pointers();
   more_expressions();
+  unsequenced();
+  division_shifts_and_pointers();
+  void_return();
   debug_and_fingerprint();
   unsupported();
   return ycxx::unit::result("irgen");

@@ -23,6 +23,10 @@
 //   elements of type T.
 // - `global [@v]` is a pointer to the variable; `const_ [#c]` has the constant's type, and a string
 //   literal's address is a `const_` of its VLvalue, of type pointer to the array.
+// - `ptr_add`'s index is an integer of any type, widened by its signedness (lower does this);
+//   `p - j` adds `-j` computed in `ptrdiff_t`.
+// - The operands of an unsequenced operator form a `useq` group only for their own accesses: a
+//   callee's accesses are indeterminately sequenced with them ([intro.execution]).
 // - Shift operands keep their own promoted types; `call` yields the state, then the result unless
 //   it is void.
 //
@@ -314,6 +318,7 @@ class Gen {
     Position here(loc_, a.offset);
     if (is<ast::Compound>(a)) {
       auto s = get<ast::Compound>(a);
+      if (in_.seqs.size(s.cleanups)) unsupported(a, "with cleanups");
       push_scope();
       for (ast::Child c : ast_.children(s.stmts)) stmt(child(a, c));
       pop_scope();
@@ -330,7 +335,8 @@ class Gen {
       auto r = get<ast::Return>(a);
       if (in_.seqs.size(r.cleanups)) unsupported(a, "with cleanups");
       std::optional<ValueId> v;
-      if (r.value.id != NodeId::none) v = rvalue(child(a, r.value));
+      // A void operand is evaluated and the function returns nothing ([stmt.return]).
+      if (r.value.id != NodeId::none) v = rvalue_or_void(child(a, r.value));
       ret_(v);
     } else if (is<ast::If>(a)) {
       if_(a);
@@ -455,10 +461,12 @@ class Gen {
   }
 
   // How much an expression touches memory, for unsequenced operands: 0 not at all, 1 reads, 2
-  // writes or calls.
+  // writes. A call counts by its arguments only: what the callee does is indeterminately sequenced
+  // with the caller's other evaluations, not unsequenced ([intro.execution]), so it is outside
+  // any `useq` group.
   int effects(At a) {
     if (a.id == NodeId::none) return 0;
-    if (is<ast::Assign>(a) || is<ast::Call>(a)) return 2;
+    if (is<ast::Assign>(a)) return 2;
     if (is<ast::Unary>(a)) {
       auto op = get<ast::Unary>(a).op;
       if (op == ast::UnaryOp::pre_inc || op == ast::UnaryOp::pre_dec || op == ast::UnaryOp::post_inc ||
@@ -606,9 +614,16 @@ class Gen {
     if (lp && rp) return pure(ir::Op::ptr_diff, t, {x, y}, {word(ty(facts_.pointee(info(l).type)))});
     ValueId p = lp ? x : y, i = lp ? y : x;
     ast::QualType it = lp ? info(r).type : info(l).type;
-    if (op == ast::BinaryOp::sub)
-      i = pure(ir::Op::neg, it, {i}, {}, is_signed(it) ? ir::bit(ir::Flag::nsw) : 0);
+    if (op == ast::BinaryOp::sub) i = negated_index(it, i);
     return pure(ir::Op::ptr_add, t, {p, i}, {word(ty(facts_.pointee(t)))});
+  }
+  // `-j` for `P - j` ([expr.add]), in `ptrdiff_t`: negating in `j`'s own type would turn an
+  // unsigned `j` into a huge positive index. No `nsw`: [expr.add] defines `P - j` whenever the
+  // result is in the array, and only a `j` that no array can satisfy overflows.
+  ValueId negated_index(ast::QualType it, ValueId i) {
+    ast::QualType d = facts_.ptrdiff_type();
+    if (!same_type(it, d)) i = pure(ir::Op::iconv, d, {i});
+    return pure(ir::Op::neg, d, {i});
   }
 
   std::optional<ValueId> binary(At a) {
@@ -797,8 +812,7 @@ class Gen {
     if (cls(p.type) == TypeClass::pointer) {
       if (s.op != ast::AssignOp::add && s.op != ast::AssignOp::sub) unsupported(a, "on a pointer");
       ast::QualType it = info(rhs).type;  // an integer; `computation` is the pointer type
-      ValueId i = s.op == ast::AssignOp::add ? v
-                : pure(ir::Op::neg, it, {v}, {}, is_signed(it) ? ir::bit(ir::Flag::nsw) : 0);
+      ValueId i = s.op == ast::AssignOp::add ? v : negated_index(it, v);
       r = pure(ir::Op::ptr_add, p.type, {old, i}, {word(ty(facts_.pointee(p.type)))});
     } else {
       bool is_shift = s.op == ast::AssignOp::shl || s.op == ast::AssignOp::shr;

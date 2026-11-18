@@ -49,6 +49,7 @@ class TypeFacts {
     return canonical(in_->types.get<ast::TFunction>(in_->types.canon(q)).ret);
   }
   ast::QualType int_type() { return ast::builtin(*in_, ast::Builtin::int_); }
+  ast::QualType ptrdiff_type() { return ast::builtin(*in_, target_->ptrdiff_type); }
   ast::ConstId int_constant(ast::QualType q, std::int64_t v) { return ast::int_value(*in_, *target_, canonical(q), v); }
   ast::ConstId null_constant(ast::QualType) { return in_->intern_value(ast::VNullptr{}); }
 
