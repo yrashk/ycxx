@@ -51,8 +51,9 @@ struct Result {
 
 class Program {
 public:
-  Program(sema::World& w, const pp::Region& r, const items::Items& its)
-      : w_(&w), r_(&r), items_(&its), item_cells_(its.items.size()), body_cells_(its.items.size()),
+  // `template_depth` is the limit on nested instantiations ([temp.inst]/16), `-ftemplate-depth`.
+  Program(sema::World& w, const pp::Region& r, const items::Items& its, u32 template_depth = pp::Config::default_template_depth)
+      : instantiation_limit(template_depth), w_(&w), r_(&r), items_(&its), item_cells_(its.items.size()), body_cells_(its.items.size()),
         class_cells_(its.items.size()) {
     for (const items::Item& it : its.items) {
       ItemId id = w.ins.items.add<ItemId>(it.id);
@@ -341,6 +342,7 @@ public:
   // ([temp.dep.candidate]); its instantiations add argument-dependent lookup to them.
   std::map<u32, std::vector<u32>> dependent_calls_;
   u32 end() const { return static_cast<u32>(items_->items.size()); }
+  const u32 instantiation_limit;  // [temp.inst]/16 ([implimits]: at least 1024)
   bool instantiation_gave_up() const { return depth_reported_; }
 
   // Every item and body analysed, in item order; the diagnostics of each cell in order.
@@ -473,7 +475,7 @@ private:
   std::vector<const Instance*> instance_order_;  // the completed ones, in order of instantiation
   std::map<u32, std::size_t> instance_index_;    // by specialization: its slot in `instances_`
   std::set<u32> instantiating_;                  // specializations whose instantiation is running
-  static constexpr u32 instantiation_limit = 900;  // [temp.inst]/16 ([implimits]: 1024)
+
   bool depth_reported_ = false;
   std::vector<engine::Diagnostic> end_diags_;    // the END phase's own
   std::vector<EntityId> required_;
@@ -2254,14 +2256,16 @@ void Program::instantiate_all() {
     if (body_cells_[k]) work.insert(work.end(), body_cells_[k]->demands.begin(), body_cells_[k]->demands.end());
   }
   std::vector<u32> depth(work.size(), 1);
-  constexpr u32 limit = instantiation_limit;
+  const u32 limit = instantiation_limit;
   std::set<u32> seen;
   for (std::size_t i = 0; i < work.size(); ++i) {
     if (!seen.insert(std::to_underlying(work[i].spec)).second) continue;
     required_.push_back(work[i].spec);
     if (depth[i] > limit) {
-      end_diags_.push_back({engine::Loc{std::to_underlying(work[i].at.item), work[i].at.offset},
-                            sema::diag_id(sema::Diag::instantiation_depth), {engine::diag_arg(limit)}});
+      if (!depth_reported_)
+        end_diags_.push_back({engine::Loc{std::to_underlying(work[i].at.item), work[i].at.offset},
+                              sema::diag_id(sema::Diag::instantiation_depth), {engine::diag_arg(limit)}});
+      depth_reported_ = true;
       break;
     }
     const Instance* in = instance(work[i].spec);

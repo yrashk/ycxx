@@ -208,7 +208,9 @@ engine::query_task<FrontResult> TuFront::run(engine::Ctx& cx, TuId tu) {
     }
     out.messages.push_back(std::move(m));
   }
-  parse::Program program(world, region, items);
+  // The unit's language options: the instantiation limit (`-ftemplate-depth`).
+  const pp::Source& unit_source = cx.fetch<pp::SourceOf>(file);
+  parse::Program program(world, region, items, unit_source.config.template_depth);
   program.analyze_all();
   for (const engine::Diagnostic& d : program.diagnostics()) {
     auto kind = sema::sema_diag_of(d.id);

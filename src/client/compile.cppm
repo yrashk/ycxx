@@ -105,7 +105,14 @@ std::expected<Options, std::string> parse_options(std::span<const std::string_vi
       if (i + 1 == args.size()) return std::unexpected("argument to '-o' is missing");
       o.output = std::string(args[++i]);
     } else if (a.starts_with("-o")) o.output = std::string(a.substr(2));
-    else if (a.starts_with("-std=")) {
+    else if (a.starts_with("-ftemplate-depth=")) {
+      // The limit on nested template instantiations ([temp.inst]/16), as Clang and GCC spell it.
+      std::uint32_t n = 0;
+      auto v = a.substr(17);
+      auto [p, ec] = std::from_chars(v.data(), v.data() + v.size(), n);
+      if (ec != std::errc{} || p != v.data() + v.size() || n == 0) return std::unexpected(std::format("invalid value in '{}'", a));
+      o.pp.template_depth = n;
+    } else if (a.starts_with("-std=")) {
       // The language is the C++26 working draft (DECISIONS §1.1).
       if (a != "-std=c++26" && a != "-std=c++2c") return std::unexpected(std::format("unsupported language standard '{}'; ycxx compiles C++26", a.substr(5)));
     }
