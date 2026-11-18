@@ -236,6 +236,7 @@ void floating_literals() {
   check(clean(u), "user-defined floating literals are clean");
   check(u.region.names[lit(u, 0).ud_suffix] == "_w", "1.2_w");
   check(u.region.names[lit(u, 1).ud_suffix] == "fl", "1.0fl is user-defined");
+  check(has(pp::preprocess("1_A\u030A"), LexDiag::identifier_not_nfc), "a pp-number's ud-suffix is checked for NFC");
   check(u.region.tokens[2].kind == Tk::int_lit && u.region.names[lit(u, 2).ud_suffix] == "e", "1e is 1 with e");
   check(u.region.tokens[3].kind == Tk::float_lit && u.region.names[lit(u, 3).ud_suffix] == "e", "1.2e is 1.2 with e");
 }
@@ -275,6 +276,7 @@ void character_literals() {
   check(has(pp::preprocess("'\\x'"), LexDiag::empty_escape), "\\x without digits");
   check(has(pp::preprocess("'\\x{}'"), LexDiag::empty_escape), "\\x{} without digits");
   check(has(pp::preprocess("'\\x{41'"), LexDiag::unterminated_escape), "\\x{ without }");
+  check(has(pp::preprocess("'\\o{9}'"), LexDiag::unterminated_escape), "\\o{ with a non-octal digit");
   check(has(pp::preprocess("'\\o7'"), LexDiag::unknown_escape), "\\o without {");
   check(has(pp::preprocess("'\\u12'"), LexDiag::ucn_incomplete), "short \\u");
   // Multicharacter literals ([lex.ccon]/1): conditionally supported, implementation-defined value.
@@ -328,6 +330,9 @@ void string_literals() {
         "17-character delimiter");
   check(clean(pp::preprocess("R\"0123456789abcdef(x)0123456789abcdef\"")), "16-character delimiter");
   check(has(pp::preprocess("R\"a b(x)a b\""), LexDiag::raw_delimiter_bad_character), "space in a delimiter");
+  auto sp = pp::preprocess("R\"a\\\nb(x)a\\\nb\"");
+  check(!sp.diags.empty() && sp.diags[0].kind == LexDiag::raw_delimiter_bad_character && sp.diags[0].offset == 3,
+        "a delimiter's backslash inside a reverted splice is located at itself");
   check(has(pp::preprocess("R\"(abc"), LexDiag::unterminated_raw_string), "unterminated raw string");
   // [lex.pptoken]/5: R"y" is an ill-formed raw string, not R and "y".
   check(has(pp::preprocess("R\"y\";"), LexDiag::raw_delimiter_bad_character), "R\"y\"");
@@ -360,6 +365,10 @@ void directives() {
   check(!is_directive("x import foo;"), "import not at the start of a line");
   auto rest = pp::preprocess("export\nimport foo;\nint");
   check(kinds(rest.region) == std::vector{Tk::kw_export, Tk::kw_int}, "export stays a token");
+  // A header-name is formed only on `import`'s line: here `import` is a variable ([lex.pptoken]/4).
+  auto v = pp::preprocess("int f(int import, int a, int b) { return\nimport\n<a> b; }");
+  check(clean(v) && v.region.tokens[15].kind == Tk::less, "no header-name after a line break");
+  check(clean(pp::preprocess("int f(int import) { return\nimport\n\"x\"[0]; }")), "nor a quoted one");
   // A directive's line ends at the new-line, after a multi-line comment too.
   auto c = pp::preprocess("#x /*\n*/ y\nz");
   check(kinds(c.region) == std::vector{Tk::identifier}, "a comment does not end a directive");

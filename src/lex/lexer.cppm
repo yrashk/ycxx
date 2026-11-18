@@ -227,7 +227,8 @@ PpToken Lexer::next_header_name() {
   u8 flags = skip_whitespace();
   u32 begin = pos_;
   char open = at(pos_);
-  if (open == '<' || open == '"') {
+  // Only immediately after the preceding token, on its logical line ([lex.pptoken]/4).
+  if ((open == '<' || open == '"') && (flags & tok_flag::line_start) == 0) {
     char close = open == '<' ? '>' : '"';
     u32 j = pos_ + 1;
     while (j < text_.size() && text_[j] != close && text_[j] != '\n') ++j;
@@ -244,7 +245,7 @@ PpToken Lexer::next_header_name() {
 }
 
 void Lexer::skip_line() {
-  // Comments still delimit: a `/*` comment that spans lines ends the directive's line after it.
+  // A new-line inside a `/*` comment does not end the line ([cpp.pre]/2): the directive goes on.
   while (pos_ < text_.size()) {
     u8 flags = skip_whitespace();
     if ((flags & tok_flag::line_start) != 0 || pos_ >= text_.size()) {
@@ -437,8 +438,10 @@ Tok Lexer::raw_string(u32 begin, u32 quote, Encoding enc) {
     if (c == '(') break;
     bool basic = static_cast<unsigned char>(c) >= 0x20 && static_cast<unsigned char>(c) < 0x7F;
     if (!basic || c == ' ' || c == ')' || c == '\\' || d == 16) {
-      if (d == 16) report(src_->to_logical(open + d), LexDiag::raw_delimiter_too_long);
-      else report(src_->to_logical(open + d), LexDiag::raw_delimiter_bad_character, static_cast<unsigned char>(c));
+      // Located in phase-1 text: the offending character may be inside a reverted splice.
+      u32 at = src_->physical_of_phase1(std::min<u32>(open + d, static_cast<u32>(p1.size())));
+      if (d == 16) diags_->push_back({at, LexDiag::raw_delimiter_too_long, {}});
+      else diags_->push_back({at, LexDiag::raw_delimiter_bad_character, {static_cast<unsigned char>(c), 0}});
       l.bad = true;
       pos_ = src_->to_logical(open + d);
       l.spelling = text_.substr(begin, pos_ - begin);

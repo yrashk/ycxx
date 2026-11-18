@@ -90,6 +90,20 @@ std::optional<std::string> suffix_identifier(std::string_view s) {
   return out;
 }
 
+// A ud-suffix's name; a ud-suffix is an identifier, so it must be in NFC ([lex.name]/1).
+template <class R>
+u32 suffix_name(const std::string& id, u32 at, Tables& names, R& report) {
+  std::u32string cps;
+  for (std::size_t i = 0; i < id.size();) {
+    auto d = unicode::decode_utf8(std::string_view(id).substr(i));
+    if (!d) break;
+    cps += d->c;
+    i += d->length;
+  }
+  if (!unicode::is_nfc(cps)) report(at, LexDiag::identifier_not_nfc, 0, 0);
+  return names.name(id);
+}
+
 // A digit sequence with optional single-quote separators, each between two digits of `base`.
 // Appends the digits to `digits` and returns the length consumed.
 std::size_t digit_sequence(std::string_view s, std::size_t i, bool (*ok)(char), std::string& digits) {
@@ -226,7 +240,9 @@ Element next_element(std::string_view s, std::size_t& i, u32 base, R& report) {
       return e;
     }
     if (j == first) {
-      report(base + u32(e.begin), LexDiag::empty_escape, 0, 0);
+      // `\o{9}`: digits, but not of the base, end the sequence before its `}`.
+      bool other = delimited && j < s.size() && s[j] != '}';
+      report(base + u32(e.begin), other ? LexDiag::unterminated_escape : LexDiag::empty_escape, 0, 0);
       i = delimited && j < s.size() && s[j] == '}' ? j + 1 : j;
       return e;
     }
@@ -395,7 +411,7 @@ std::optional<Tk> classify_number(Literal& l, Tables& names, R&& report) {
     if (auto fs = float_suffix(rest)) {
       l.float_suffix = *fs;
     } else if (auto id = suffix_identifier(rest); id && !rest.empty()) {
-      l.ud_suffix = names.name(*id);
+      l.ud_suffix = suffix_name(*id, u32(i), names, report);
     } else {
       report(u32(i), LexDiag::invalid_number, u64(static_cast<unsigned char>(s[i])), 0);
       l.bad = true;
@@ -433,7 +449,7 @@ std::optional<Tk> classify_number(Literal& l, Tables& names, R&& report) {
   if (auto is = int_suffix(rest)) {
     l.int_suffix = *is;
   } else if (auto id = suffix_identifier(rest); id && !rest.empty()) {
-    l.ud_suffix = names.name(*id);
+    l.ud_suffix = suffix_name(*id, u32(i), names, report);
   } else {
     report(u32(i), LexDiag::invalid_number, u64(static_cast<unsigned char>(s[i])), 0);
     l.bad = true;
