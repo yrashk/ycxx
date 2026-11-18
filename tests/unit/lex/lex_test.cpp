@@ -433,6 +433,7 @@ struct Count {
 void query() {
   engine::Db db;
   pp::FileId f{7};
+  db.set<pp::SourceOf>(f, {"<file 7>", "", {}});
   db.set<pp::FileText>(f, "int main() { return 42; } @");
   const Region& r = db.get<pp::Pp>(f);
   check(r.size() == 10 && r.files.size() == 1 && r.file_names == std::vector<std::string>{"<file 7>"}, "pp(file)");

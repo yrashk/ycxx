@@ -164,11 +164,23 @@ engine::query_task<FrontResult> TuFront::run(engine::Ctx& cx, TuId tu) {
     std::vector<std::uint64_t> args;
     for (const engine::DiagArg& a : d.args) args.push_back(a.raw);
     Message m{d.at.offset, lex::message_of(*kind).severity == lex::Severity::error, lex::render(*kind, args), {}};
-    // Located in an included file: rendered here (pp::file_loc).
+    // Located in an included file: rendered here (pp::file_loc), from the file's text as a
+    // recorded input, so an edit that moves only its newlines re-renders the position (#93).
     if (d.at.item != lex::file_level) {
       std::uint16_t f = static_cast<std::uint16_t>(lex::file_level - d.at.item);
-      pp::Message pm = pp::message(pp::session(), pp::session().files.id(region.files[f]), region.file_names[f],
-                                   pp::Diag{f, d.at.offset, *kind, {}, 0, std::nullopt});
+      const pp::Diag diag{f, d.at.offset, *kind, {}, 0, std::nullopt};
+      const std::string& name = region.files[f];
+      const pp::Source& source = cx.fetch<pp::SourceOf>(file);
+      pp::Session& ps = pp::session_for(source.config);
+      pp::Message pm;
+      if (name.starts_with('<')) {
+        pm = pp::message(ps, ps.files.id(name), region.file_names[f], diag);  // `<built-in>`
+      } else {
+        std::filesystem::path p(name);
+        if (p.is_relative() && !source.cwd.empty()) p = source.cwd / p;
+        const std::optional<std::string>& text = cx.fetch<pp::FileContent>(pp::path_id(p.lexically_normal().generic_native_encoded_string()));
+        pm = pp::message(ps.spellings, text ? std::string_view(*text) : std::string_view(), region.file_names[f], diag);
+      }
       m.where = std::format("{}:{}:{}", pm.file, pm.line, pm.column);
     }
     out.messages.push_back(std::move(m));
