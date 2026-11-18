@@ -924,17 +924,20 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
 - **Unions** ([class.union]): `union U { … }`, named, unnamed with a typedef-name, as members
   and through `union U` elaborated; every member at offset 0 and the size of the largest
   (`ClassRec::union_`, `ClassShape::union_`, `QueryLayout::class_layout`); a braced initializer
-  initializes the first member ([dcl.init.aggr]/16). A designator naming another member,
-  anonymous unions and variant members with non-trivial special members are not supported yet.
+  initializes the first member ([dcl.init.aggr]/16), with its default member initializer if it has
+  one; class template unions. A reference member is rejected. A designator naming another member,
+  a default member initializer on another member, anonymous unions and variant members with
+  non-trivial special members are diagnosed as not supported (#203).
 - **Floating types as types:** `float`, `double` and `long double` in decl-specifiers, so the
   SDK's `typedef long double max_align_t;` declares; `sizeof`/`alignof` give their sizes. Their
   values (literals, conversions, arithmetic) are #201 and are diagnosed, not miscompiled.
   `__STDCPP_FLOAT16_T__` and the other extended floating-point macros are no longer defined
   until those types work (DECISIONS §1.5; Clang does not define them either).
-- **Include directories:** a built-in system directory that `-I` or `-isystem` already names is
-  not searched twice, so `#include_next` from it goes past both (as GCC and Clang do); before,
+- **Include directories:** a `-I` or `-isystem` directory that is one of the built-in system
+  directories is searched only at the system directory's place, as GCC and Clang do; before,
   `-isystem deps/libycxx/include` made libycxx's `<cstddef>` find its own `<stddef.h>` again.
-- Tests: `tests/own/unions` (4). Six more draft examples pass.
+- A floating local no longer stops constant evaluation in its function (the thunk skips it).
+- Tests: `tests/own/unions` (7, three from the review). Six more draft examples pass.
 
 ## Templates, ζ step 1: function templates (#88, 2026-11-18)
 

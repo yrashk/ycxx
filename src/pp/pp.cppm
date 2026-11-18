@@ -79,9 +79,9 @@ std::pair<std::string, std::vector<Message>> preprocess_to_text(Session& s, std:
 // `-U`), advancing `i` past its argument: true if it was one, an error if its argument is missing.
 std::expected<bool, std::string> take_option(std::span<const std::string_view> args, std::size_t& i, Config& cfg);
 // The configuration with the system directories after those the options gave.
-// The system directories after the command line's; one a `-I` or `-isystem` directory already
-// names (relative to `cwd`) is not searched twice, as GCC and Clang do, so `#include_next` from
-// it goes on past both.
+// The system directories after the command line's. A `-I` or `-isystem` directory that names one
+// of them (relative to `cwd`) is dropped, as GCC and Clang do, so it is searched once, at its
+// system place, and `#include_next` from it goes on past it.
 Config with_system_dirs(Config cfg, std::string_view cwd = {});
 
 // The item of a file-level diagnostic location in the region's file `file` (lex::file_level for
@@ -385,11 +385,22 @@ Config with_system_dirs(Config cfg, std::string_view cwd) {
     while (s.size() > 1 && s.ends_with('/')) s.pop_back();
     return s;
   };
-  std::vector<std::string> given;
-  for (const std::string& d : cfg.angle_dirs) given.push_back(normal(d));
-  // -isystem directories are system directories too.
-  for (std::string& d : system_dirs())
-    if (!std::ranges::contains(given, normal(d))) cfg.angle_dirs.push_back(std::move(d));
+  std::vector<std::string> system;
+  for (const std::string& d : system_dirs()) system.push_back(normal(d));
+  // A `-I` or `-isystem` directory that is a system directory is searched at the system
+  // directory's place only. -isystem directories are system directories too.
+  std::vector<std::string> kept;
+  u32 from = cfg.system_from;
+  for (u32 i = 0; i < cfg.angle_dirs.size(); ++i) {
+    if (std::ranges::contains(system, normal(cfg.angle_dirs[i]))) {
+      if (i < cfg.system_from) --from;
+      continue;
+    }
+    kept.push_back(std::move(cfg.angle_dirs[i]));
+  }
+  cfg.angle_dirs = std::move(kept);
+  cfg.system_from = from;
+  for (std::string& d : system_dirs()) cfg.angle_dirs.push_back(std::move(d));
   return cfg;
 }
 
