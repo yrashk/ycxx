@@ -71,7 +71,8 @@ What is true of the code today. Work in progress and its owners are tracked in
     strings. Ordinary literals are UTF-8 and wide ones UTF-32.
   - `Tk` and the diagnostic table are derived by reflection from annotated enumerators.
   - Unicode 17.0 tables from `tools/unicode/gen-tables` (`unicode_tables.cppm`,
-    `unicode_names.txt`). Name aliases come from Unicode 13 data (Perl's), checked against 17.0.
+    `unicode_names.txt`): Python's `unicodedata` and the vendored UCD `NameAliases.txt`
+    (`tools/unicode/ucd/`). Unicode License v3 in `src/lex/LICENSE.unicode`.
 - `ycxx.pp` (`src/pp/`): `pp(FileId)` over the input `FileText`, valued as a `Region` of tokens,
   `TokLoc`s, names and literals. Every directive (`#…`, and the `module`/`import` lines of
   [cpp.pre]) is diagnosed as unsupported and skipped. Diagnostics are at

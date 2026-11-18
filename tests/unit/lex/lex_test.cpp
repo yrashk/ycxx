@@ -161,6 +161,7 @@ void punctuators() {
   check(kinds(pp::preprocess("[:>").region) == std::vector{Tk::l_square, Tk::r_square}, "[:> is [ :>");
   check(kinds(pp::preprocess("[:x:]").region) == std::vector{Tk::l_splice, Tk::identifier, Tk::r_splice}, "splice");
   // Characters that are no token.
+  check(diags(pp::preprocess("a\x01" "b")) == std::vector{LexDiag::stray_character}, "a control character once");
   for (std::string_view s : {"@", "$", "`", "\\"}) {
     check(diags(pp::preprocess(s)) == std::vector{LexDiag::stray_basic_character}, "stray basic character");
   }
@@ -225,6 +226,8 @@ void floating_literals() {
   check(d("1e-400") == 0.0, "underflow to zero");
   check(std::bit_cast<float>(std::uint32_t(v("0.1f").value)) == 0.1f, "float is rounded once");
   check(has(pp::preprocess("1e309"), LexDiag::float_out_of_range), "double overflow");
+  check(only(pp::preprocess("0x1p128f")).kind == Tk::float_lit, "an out-of-range float stays a float_lit");
+  check(only(pp::preprocess("1.2.3")).kind == Tk::float_lit, "an ill-formed float stays a float_lit");
   check(has(pp::preprocess("3.5e38f"), LexDiag::float_out_of_range), "float overflow");
   check(has(pp::preprocess("1000000000000000000000000000000000000000000000000e-5f"), LexDiag::float_out_of_range),
         "overflow with a negative exponent");
@@ -407,6 +410,9 @@ void unicode_names() {
   check(lookup_name("HANGUL SYLLABLE GAG") == U'\uAC01' && lookup_name("HANGUL SYLLABLE A") == U'\uC544',
         "Hangul syllables");
   check(lookup_name("LINE FEED") == U'\n' && lookup_name("BYTE ORDER MARK") == U'\uFEFF', "aliases");
+  check(lookup_name("EM") == U'\x19' && lookup_name("FVS4") == U'\u180F' &&
+            lookup_name("CUNEIFORM SIGN KALAM") && lookup_name("SUNDANESE LETTER ARCHAIC I"),
+        "aliases added after Unicode 13");
   check(!lookup_name("LATIN SMALL LETTER") && !lookup_name("") && !lookup_name("ZZZZ"), "not names");
 }
 

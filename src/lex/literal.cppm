@@ -23,9 +23,10 @@ export namespace ycxx::lex {
 template <class F>
 concept Reporter = std::invocable<F&, u32, LexDiag, u64, u64>;
 
-// Phase 6 for a pp-number: `int_lit`, `float_lit`, or nothing (ill-formed, reported).
+// Phase 6 for a pp-number: `int_lit` or `float_lit`, the literal it most resembles when it is
+// ill-formed (reported, and `bad` set).
 template <Reporter R>
-std::optional<Tk> classify_number(Literal& l, Tables& names, R&& report);
+Tk classify_number(Literal& l, Tables& names, R&& report);
 
 // [lex.ccon]: fills a character literal's value.
 template <Reporter R>
@@ -319,7 +320,7 @@ void encode(Encoding e, char32_t c, std::vector<u32>& out) {
 }
 
 template <Reporter R>
-std::optional<Tk> classify_number(Literal& l, Tables& names, R&& report) {
+Tk classify_number(Literal& l, Tables& names, R&& report) {
   std::string_view s = l.spelling;
   std::string digits;
   std::size_t i = 0;
@@ -415,7 +416,7 @@ std::optional<Tk> classify_number(Literal& l, Tables& names, R&& report) {
     } else {
       report(u32(i), LexDiag::invalid_number, u64(static_cast<unsigned char>(s[i])), 0);
       l.bad = true;
-      return std::nullopt;
+      return Tk::float_lit;
     }
     if (l.ud_suffix == no_name && (l.float_suffix == FloatSuffix::none || l.float_suffix == FloatSuffix::f)) {
       std::string text = digits;
@@ -440,7 +441,7 @@ std::optional<Tk> classify_number(Literal& l, Tables& names, R&& report) {
       if (overflow) {
         report(0, LexDiag::float_out_of_range, 0, 0);
         l.bad = true;
-        return std::nullopt;
+        return Tk::float_lit;
       }
       l.value = bits.value_or(0);
     }
@@ -453,7 +454,7 @@ std::optional<Tk> classify_number(Literal& l, Tables& names, R&& report) {
   } else {
     report(u32(i), LexDiag::invalid_number, u64(static_cast<unsigned char>(s[i])), 0);
     l.bad = true;
-    return std::nullopt;
+    return Tk::int_lit;
   }
   u64 v = 0;
   u64 radix = l.base;
@@ -466,7 +467,7 @@ std::optional<Tk> classify_number(Literal& l, Tables& names, R&& report) {
   if (l.overflow && l.ud_suffix == no_name) {
     report(0, LexDiag::integer_too_large, 0, 0);
     l.bad = true;
-    return std::nullopt;
+    return Tk::int_lit;
   }
   return Tk::int_lit;
 }

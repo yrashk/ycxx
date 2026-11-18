@@ -200,8 +200,7 @@ Preprocessed preprocess(std::string_view text, FileId file) {
       emit(tok, t.begin);
       break;
     case Tk::pp_number: {
-      auto k = lex::classify_number(tables.literals[tok.payload], tables, report_at(t.begin));
-      tok.kind = k.value_or(Tk::int_lit);
+      tok.kind = lex::classify_number(tables.literals[tok.payload], tables, report_at(t.begin));
       emit(tok, t.begin);
       break;
     }
@@ -228,8 +227,9 @@ Preprocessed preprocess(std::string_view text, FileId file) {
       break;
     }
     case Tk::pp_other:
-      // [lex.pptoken]/3. Characters outside the basic character set were reported in phase 3.
-      if (tok.payload < 0x80 && tok.payload != '\'' && tok.payload != '"') {
+      // [lex.pptoken]/3. Characters outside the basic character set (controls included) were
+      // reported in phase 3.
+      if (tok.payload >= 0x20 && tok.payload < 0x7F && tok.payload != '\'' && tok.payload != '"') {
         diags.push_back({src.physical(t.begin), LexDiag::stray_basic_character, {tok.payload, 0}});
       }
       break;
