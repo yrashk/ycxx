@@ -75,6 +75,8 @@ struct World {
     type("cint", cint_t);
     type("cchar", cchar_t);
     type("int*", ast::pointer_to(in, int_t));
+    type("void*", ast::pointer_to(in, ast::builtin(in, void_)));
+    type("char*", ast::pointer_to(in, char_t));
     type("cchar*", ast::pointer_to(in, cchar_t));
     type("int**", ast::pointer_to(in, ast::pointer_to(in, int_t)));
     type("int[3]", arr(int_t, 3));
@@ -904,6 +906,21 @@ func {@u} {
 )");
   expect_value(u.runtime(), -1, "int read as unsigned in runtime mode");
   expect_failure(u.go(), Reason::access_type, "int read as unsigned in constant mode");
+
+  // static_cast<int*>(void* to a char) is not constant ([expr.const]); int is QualType 0 here,
+  // which must not read as "no pointee".
+  Run vc(R"(
+func {@vc} {
+^0(%0: !state):
+  %1: !state, %2: {char*} = alloc %0 [{char}, automatic, zero]
+  %3: {void*} = ptr_cast %2 [{void*}]
+  %4: {int*} = ptr_cast %3 [{int*}]
+  %5: {int} = const [{i0}]
+  ret %1, %5
+}
+)");
+  check(std::to_underlying(vc.w.int_t) == 0, "the test's int is QualType 0");
+  expect_failure(vc.go(), Reason::void_cast_type, "void* to a char converted to int*");
 
   // Only the signed or unsigned counterpart: not long through long long, nor int through wchar_t.
   Run w(R"(

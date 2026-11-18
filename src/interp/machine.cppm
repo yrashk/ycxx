@@ -164,7 +164,8 @@ private:
     Kind kind = Kind::other;
     u32 width = 0;  // integer
     bool is_signed = false;
-    QualType inner{};  // pointee or element
+    QualType inner{};  // pointee or element; none for std::nullptr_t
+    bool is_nullptr = false;
     u64 bound = 0;     // array
     u64 leaves = 0;    // cells of an object of this type
     u64 size = 0;      // bytes ([basic.types.general]); 0 for a function type
@@ -291,6 +292,7 @@ const Machine::Shape& Machine::shape(QualType q) {
       s.size = (*target_)[*b].size;
     } else if (*b == ast::Builtin::nullptr_t) {
       s.kind = Kind::pointer;
+      s.is_nullptr = true;
       s.leaves = 1;
       s.size = (*target_)[*b].size;
     }
@@ -321,7 +323,7 @@ bool Machine::similar(QualType a, QualType b) {
   if (ca == cb) return true;
   const Shape sa = shape(ca), sb = shape(cb);
   if (sa.kind != sb.kind) return false;
-  if (sa.kind == Kind::pointer) return sa.inner != QualType{} && sb.inner != QualType{} && similar(sa.inner, sb.inner);
+  if (sa.kind == Kind::pointer) return !sa.is_nullptr && !sb.is_nullptr && similar(sa.inner, sb.inner);
   if (sa.kind == Kind::array) return sa.bound == sb.bound && similar(sa.inner, sb.inner);
   return false;
 }
@@ -501,7 +503,7 @@ std::optional<Value> Machine::constant(ConstId c, QualType type) {
     if (!in_->seqs.elements(l.path).empty()) return std::nullopt;
     auto o = literal_object(l.base);
     const Shape& s = shape(type);
-    if (!o || s.kind != Kind::pointer || s.inner == QualType{}) return std::nullopt;
+    if (!o || s.kind != Kind::pointer || s.is_nullptr) return std::nullopt;
     QualType array = objects_[*o].type;
     if (similar(s.inner, array)) {
       if (l.offset != 0) return std::nullopt;

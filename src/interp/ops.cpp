@@ -241,8 +241,9 @@ struct Ops {
   static Flow ptr_cast(M& m, Frame& f, N n) {
     Value p = m.operand(f, n, 0);
     if (p.kind == VKind::object && constant(m)) {
-      QualType to = m.shape(m.result_type(f, n)).inner;
-      if (to != QualType{} && !ast::is_void(*m.in_, to)) {
+      const M::Shape& rs = m.shape(m.result_type(f, n));
+      QualType to = rs.inner;
+      if (!rs.is_nullptr && !ast::is_void(*m.in_, to)) {
         bool past = false;
         Value whole = p;
         whole.past = false;
