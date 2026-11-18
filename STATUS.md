@@ -133,8 +133,9 @@ What is true of the code today. Work in progress and its owners are tracked in
   - pp's per-configuration process sessions have a mutex each, held for a whole `Pp` run (which
     never suspends).
   - sema's records (#156, #115): `Entities` keeps records in an `ast::Published` table (by
-    handle, published once, read without a lock); a record holds only the entity's identity, so
-    the first is as good as any. Class and enumeration records are each unit's
+    handle, published once, read without a lock). Readers use only the fields that are part of
+    the entity's identity, which equal records share; a variable's type, which is not, comes
+    from its declaration. Class and enumeration records are each unit's
     (`Program::classes`, `sema::Classes`): entities are program-wide, but a session may see
     different definitions of one (an edit, or several programs in one daemon), and the records
     follow the unit's source. A member's declaration is an item of the unit (`member_decl`).
@@ -674,8 +675,8 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   (an array's or class's element values) in `values`; `DeclKind::data_member`.
 - **Front end:** a class definition at namespace scope is a `class_def` item whose members are
   their own items (ast.md §4.2); `Program::class_def(item)` reads them into a `ClassDef` and into
-  sema's class table (`World::classes`, the stand-in for `class_def`'s member list, which the
-  layout queries read). A class is complete at an item after its
+  sema's class table (the unit's `Program::classes` since #115, the stand-in for `class_def`'s
+  member list, which the layout reads). A class is complete at an item after its
   definition that it does not enclose (`Questions::is_complete`). Class names as type
   specifiers, elaborated type specifiers and forward declarations, member access (`Member`,
   [expr.ref]), list-initialization of aggregates and scalars (`InitList`, `ValueInit`,
@@ -686,7 +687,7 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
 - **IR:** members through `ptr_member` field steps; aggregates initialized element by element,
   in an object allocated `zero` when some element is value-initialized; trivial copies and copy
   assignment as `copy`, which `lower` turns into chunked loads and stores. Class layouts (Itanium
-  §2.4) are in the `LayoutType` and `LayoutStep` queries, from sema's class table; data with
+  §2.4) are computed by `QueryLayout` from the unit's shapes (`UnitShapes`, #115); data with
   `VAggregate` initializers; Itanium names for global-namespace class types in parameters.
 - Tests: `tests/own/classes/s1-*` (spec-only, plus seven from the review). 21 of 27 pass; the others wait for classes by value
   (#116), local classes (#117), non-constant default member initializers (#118) and records in

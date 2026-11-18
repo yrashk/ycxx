@@ -344,6 +344,16 @@ void records() {
     const pl::Linked& l = s.get<pl::Link>(program);
     check(l.errors.empty() && l.image == cold(text), "an edited class or enumeration: equal to a cold build");
   }
+  // Only the class and the enumeration change, not one function body: the functions' layouts
+  // and enumerations come from the unit's shapes, a dependency of their cells.
+  const std::string body = "S g{};\nE ge = a;\nint f(S* p) { return p->y; }\nint main() { S s{}; return f(&s) + g.y + ge; }\n";
+  for (const std::string head : {"struct S { int x; int y; };\nenum E { a, b };\n",
+                                 "struct S { long long x; int y; };\nenum E { a, b = 1099511627776 };\n",
+                                 "struct S { char c; int y; };\nenum E : unsigned char { a, b };\n"}) {
+    build(s, head + body);
+    const pl::Linked& l = s.get<pl::Link>(program);
+    check(l.errors.empty() && l.image == cold(head + body), "only a class and an enumeration edited: equal to a cold build");
+  }
 }
 
 }  // namespace

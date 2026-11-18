@@ -333,9 +333,10 @@ enum class EntityKind : u8 {
 };
 
 // The structure behind an entity id (§4.3): for a function `(scope, name, canonical type)`, with
-// `::` as the scope of a function with C language linkage ([dcl.link]); for a variable with
-// external linkage `(scope, name, language linkage)`, whose redeclarations must agree on the
-// language linkage ([dcl.link]/6), so its record never holds a stale one (#115); for an entity with internal linkage, also its first
+// `::` as the scope of a function with C language linkage ([dcl.link]); for a variable
+// `(scope, name, language linkage)`: redeclarations must agree on the language linkage
+// ([dcl.link]/6), and so its record never holds a stale one (#115); for an entity with internal
+// linkage, also its first
 // declaration. `scope` is the enclosing class, or none for the global namespace. A function
 // template's identity also has its template-head (`head`, a fingerprint of the parameters' kinds and
 // types); a specialization's is its template and its canonical template arguments (§B1.5).
@@ -463,7 +464,7 @@ struct EnumRec {
 // `class_def` says of one is a question of the unit that asks (query-engine.md §B1.4): units may
 // see different definitions (one session serving several programs, or an edit), so each unit has
 // its own table, built as it analyses the definitions, and gives it to the back end with its
-// definitions (`TranslationUnit::classes`). A record is built privately and published once
+// definitions (`pipeline::FrontResult::shapes`). A record is built privately and published once
 // complete; until then a class has no record.
 class Classes {
 public:

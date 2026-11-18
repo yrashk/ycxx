@@ -51,3 +51,8 @@ int main() {
   if (o.in.y + o.z != 5) return 1;
   return E::b != E::a ? 0 : 2;
 }
+=== edit
+--- s.h
+struct Inner { long long x; int y; };
+struct Outer { Inner in; int z; };
+enum class E : long long { a, b };

@@ -122,8 +122,8 @@ public:
   std::optional<ast::DeclSema> decl_sema(DeclId d);
   const Result<ast::BodySema>& analyze_body(u32 item);
   // `class_def(C)` (ast.md §3.6) of the class item `item`: the records of its members, each its
-  // own item, analysed at the class's prefix (§4.2). It also fills the world's class table, which
-  // member lookup and the layout read until #33 has them.
+  // own item, analysed at the class's prefix (§4.2). It also fills this unit's class table
+  // (`classes`), which member lookup and the layout read until #33 has them.
   const Result<ast::ClassDef>& class_def(u32 item);
   // The records of the classes and enumerations this unit has analysed.
   const sema::Classes& classes() const { return classes_; }
@@ -430,8 +430,8 @@ private:
   std::vector<std::optional<Result<ast::ClassDef>>> class_cells_;
   std::map<u32, u32> class_items_;     // by class entity: its defining item
   std::map<u32, EntityId> class_entities_;  // by class item: the class it defines
-  // By member function or static data member entity: its declaration in this unit's class. The
-  // class's record is shared by every unit that defines it, its items are not (#156).
+  // By member function or static data member entity: its declaration in this unit's class, an
+  // item of this unit (#156).
   std::map<u32, DeclId> member_decls_;
   sema::Classes classes_{w_->ins, w_->types};  // this unit's class and enumeration records (#115)
   // The enumeration whose enumerator list is being analysed, and its record so far.
@@ -1885,8 +1885,8 @@ const Result<ast::ClassDef>& Program::class_def(u32 item) {
     }
   }
   if (cls && *cls != EntityId::none) {
-    // Every unit that defines the class builds its record, and synthesizes the special members
-    // its own object needs; the first record published wins (#156).
+    // Every unit that defines the class builds its own record (#115), and synthesizes the special
+    // members its own object needs.
     sema::ClassRec rec;
     rec.fields = std::move(fields);
     rec.members = std::move(statics);
