@@ -9,9 +9,15 @@ on:
   schedule:
     - cron: '41 4 * * *'
   workflow_dispatch:
+    inputs:
+      tsan-only:
+        description: run only the ThreadSanitizer job (a branch's check before its PR, #105)
+        type: boolean
+        default: false
 
+# Per ref: a run dispatched on a branch neither cancels main's nightly run nor is cancelled by it.
 concurrency:
-  group: nightly
+  group: nightly-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -38,7 +44,7 @@ jobs:
 
   test:
     needs: changed
-    if: needs.changed.outputs.run == 'true'
+    if: needs.changed.outputs.run == 'true' && !inputs.tsan-only
     name: ${{ matrix.host.name }}
     strategy:
       fail-fast: false
@@ -90,8 +96,26 @@ jobs:
           path: build/test-logs/
           if-no-files-found: ignore
 
+  # ThreadSanitizer (#105): ycxx and libycxx instrumented, the unit tests once and the concurrent
+  # ones repeated (tools/tsan). On the bare runner with a GCC built with libtsan (the action's
+  # comment says why not the container); building that GCC takes about an hour on a cache miss.
+  tsan:
+    needs: changed
+    if: needs.changed.outputs.run == 'true'
+    name: linux-x86_64-tsan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - name: Toolchain for ThreadSanitizer (GCC 16.2 with libsanitizer, cached)
+        uses: ./.github/actions/setup-linux-tsan
+      - name: ThreadSanitizer build and tests (tools/tsan)
+        run: tools/tsan -j 4 --repeat 20
+
   wall-time:
-    needs: test
+    needs: [test, tsan]
     if: always() && needs.test.result != 'skipped'
     runs-on: ubuntu-24.04
     steps:

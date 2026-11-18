@@ -1,0 +1,37 @@
+#!/bin/sh
+# A ThreadSanitizer build of ycxx (#105; the nightly tier, DECISIONS §9.3): ycxx, the std modules
+# and libycxx instrumented (YCXXC_SANITIZE=thread), in build-tsan; then the unit tests, and the
+# concurrent ones again N times. Linux only: GCC has no ThreadSanitizer on macOS arm64
+# (docs/LESSONS.md), and its GCC needs libtsan (libycxx's provision --with-sanitizers).
+#
+#   tools/tsan [-j N] [--repeat N]
+#
+# A report fails the test (halt_on_error). A false positive is suppressed with its reason in
+# tests/tsan.supp; a race is fixed.
+set -eu
+root=$(cd "$(dirname "$0")/.." && pwd)
+dir=${YCXX_TSAN_BUILD_DIR:-$root/build-tsan}
+jobs=
+repeat=10
+while [ $# -gt 0 ]; do
+  case $1 in
+    -j) jobs=$2; shift ;;
+    -j*) jobs=${1#-j} ;;
+    --repeat) repeat=$2; shift ;;
+    -h|--help) sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *) echo "tsan: unknown argument $1" >&2; exit 2 ;;
+  esac
+  shift
+done
+
+"$root/tools/sync-submodules"
+if [ ! -f "$dir/build.ninja" ]; then
+  cmake -S "$root" -B "$dir" -G Ninja -DCMAKE_BUILD_TYPE=Debug -DYCXXC_SANITIZE=thread -DYCXXC_BOOTSTRAP_SMOKE=OFF
+fi
+cmake --build "$dir" ${jobs:+-j "$jobs"}
+TSAN_OPTIONS="halt_on_error=1 second_deadlock_stack=1 suppressions=$root/tests/tsan.supp${TSAN_OPTIONS:+ $TSAN_OPTIONS}"
+export TSAN_OPTIONS
+ctest --test-dir "$dir" --output-on-failure ${jobs:+-j "$jobs"} -R '^unit\.'
+# What runs on pools, again: the scheduler, the engine, the interners, the pipeline's sessions.
+ctest --test-dir "$dir" --output-on-failure ${jobs:+-j "$jobs"} --repeat until-fail:"$repeat" \
+  -R '^unit\.(engine|ast_concurrent|pipeline_incremental)'

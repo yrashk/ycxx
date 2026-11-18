@@ -24,10 +24,15 @@ endif()
 # Our options are YCXXC_*: libycxx owns the YCXX_* cache variables.
 option(YCXXC_WERROR "Build ycxx with -Werror" ON)
 option(YCXXC_BOOTSTRAP_SMOKE "Build the bootstrap-compiler smoke test (tests/bootstrap)" ON)
+# A sanitizer build (the nightly tier, DECISIONS §9.3; #105): ycxx's targets, the std modules and
+# libycxx itself instrumented, so that ThreadSanitizer sees the library's synchronization too.
+set(YCXXC_SANITIZE "" CACHE STRING
+    "Instrument ycxx and libycxx with -fsanitize=<list> (address, undefined, thread; comma-separated)")
 
 # libycxx: the static library and the std modules. Its own tests and install rules are not ours.
 set(YCXX_MODULES ON CACHE BOOL "" FORCE)
 set(YCXX_WERROR OFF CACHE BOOL "" FORCE)
+set(YCXX_SANITIZE "${YCXXC_SANITIZE}" CACHE STRING "" FORCE)
 add_subdirectory(deps/libycxx EXCLUDE_FROM_ALL SYSTEM)
 # BOOTSTRAP: modules: the std module's interface is compiled with ycxx::modules' own flags, not
 # the importer's. Without -freflection its std::meta is empty, and GCC 16.2 segfaults importing
@@ -43,6 +48,18 @@ target_compile_options(ycxxc_options INTERFACE
   -freflection -fcontracts
   -Wall -Wextra -Wpedantic
   $<$<BOOL:${YCXXC_WERROR}>:-Werror>)
+if(YCXXC_SANITIZE)
+  set(_ycxxc_sanitize -fsanitize=${YCXXC_SANITIZE} -fno-sanitize-recover=all -fno-omit-frame-pointer)
+  # GCC warns that ThreadSanitizer does not model atomic_thread_fence (-Wtsan). The engine's
+  # seq_cst fences order a store before a later load (the observed flag and a reset's claim, a
+  # Dekker pair); happens-before for plain data comes from the atomic operations themselves.
+  if(YCXXC_SANITIZE MATCHES "thread")
+    list(APPEND _ycxxc_sanitize -Wno-tsan)
+  endif()
+  target_compile_options(ycxxc_options INTERFACE ${_ycxxc_sanitize})
+  target_link_options(ycxxc_options INTERFACE -fsanitize=${YCXXC_SANITIZE})
+  target_compile_options(ycxx_modules PRIVATE ${_ycxxc_sanitize})
+endif()
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_CXX_SCAN_FOR_MODULES ON)
 
