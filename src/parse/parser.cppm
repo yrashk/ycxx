@@ -73,6 +73,8 @@ struct Declarator {
   // `T x[] = {…}`: the outermost array bound is left to the initializer ([dcl.array]/8); `type`
   // is then the element type.
   bool unknown_bound = false;
+  // A GNU asm label, `__asm("_fopen")`: the symbol as written (docs/EXTENSIONS.md); empty if none.
+  std::string asm_label;
   bool ok = true;
 };
 
@@ -112,6 +114,7 @@ public:
   // Moves to the region's token `i`, inside the part (past a class's member-specification).
   void seek(u32 i) { i_ = std::min(i, end_); }
   const lex::Literal& literal() const { return r_->literal(tok()); }
+  const lex::Literal& literal_at(u32 ahead) const { return r_->literal(tok(ahead)); }
 
   // Skips to just after the next `;` at bracket depth 0, or to a `}` that closes the enclosing
   // block (not consumed).
@@ -189,6 +192,7 @@ public:
       flag = true;
     };
     for (;;) {
+      if (skip_attributes()) continue;
       Tk k = kind();
       switch (k) {
       case Tk::kw_void: ++n_void; break;
@@ -402,8 +406,55 @@ public:
       d.params = fn->params;
       d.variadic = fn->variadic;
     }
+    if (!abstract && d.ok) {
+      skip_attributes();
+      d.asm_label = asm_label(d.ok);
+      skip_attributes();
+    }
     return d;
   }
+
+  // Attribute-specifiers ([dcl.attr.grammar]), and the GNU `__attribute__((…))` the SDK's
+  // headers use (docs/EXTENSIONS.md): skipped, as no attribute ycxx knows changes what it does
+  // yet ([dcl.attr.grammar]/6 lets an implementation ignore one it does not know). Whether any
+  // was there.
+  bool skip_attributes() {
+    bool any = false;
+    for (;;) {
+      bool std_attr = is(Tk::l_square) && kind(1) == Tk::l_square;
+      bool gnu = is(Tk::identifier) && name_spelling() == "__attribute__" && kind(1) == Tk::l_paren;
+      if (!std_attr && !gnu) return any;
+      if (gnu) bump();
+      Tk open = kind(), close = open == Tk::l_square ? Tk::r_square : Tk::r_paren;
+      u32 depth = 0;
+      do {
+        if (is(open)) ++depth;
+        else if (is(close)) --depth;
+        bump();
+      } while (depth > 0 && !at_end());
+      any = true;
+    }
+  }
+  // A GNU asm label after a declarator, `asm("…")`, `__asm("…")` or `__asm__("…")`: the
+  // string, the symbol's name as the assembler sees it.
+  std::string asm_label(bool& ok) {
+    bool keyword = is(Tk::kw_asm) || (is(Tk::identifier) && (name_spelling() == "__asm" || name_spelling() == "__asm__"));
+    if (!keyword || kind(1) != Tk::l_paren) return {};
+    bump();
+    bump();
+    std::string label;
+    if (!is(Tk::string_lit)) {
+      s_->diag(pos(), Diag::expected_token, Tk::string_lit);
+      ok = false;
+      return {};
+    }
+    for (u32 u : literal().units) label.push_back(static_cast<char>(u));
+    bump();
+    while (is(Tk::string_lit) && tok().has(lex::tok_flag::continued)) bump();  // phase 5 joined them
+    ok = expect(Tk::r_paren) && ok;
+    return label;
+  }
+  std::string_view name_spelling() const { return r_->name(tok()); }
 
   Level level(bool abstract, bool& ok) {
     Level l;
@@ -591,9 +642,10 @@ public:
         // In a parameter, [dcl.fct]/5 adjusts the array to a pointer: build the pointer at once.
         t = s_->types().pointer(t);
       } else if (s->unknown_bound) {
-        // The outermost bound of a variable, which its initializer gives; any other is not
+        // The outermost bound of a variable, which its initializer gives or which stays unknown
+        // (`extern T* a[];`: this level's pointers are the element's); any other is not
         // supported yet.
-        if (&*s != &l.suffixes.front() || !l.pointers.empty() || d.unknown_bound || &l != top_) {
+        if (&*s != &l.suffixes.front() || d.unknown_bound || &l != top_ || l.inner) {  // `(&r)[]`, `(*p)[]`
           s_->diag(d.begin, Diag::not_supported, Tk::l_square);
           d.ok = false;
         }
@@ -1459,9 +1511,9 @@ public:
     default: break;
     }
     if (is(Tk::l_square) && kind(1) == Tk::l_square) {
-      s_->diag(begin, Diag::not_supported, Tk::l_square);  // attributes
-      skip_statement();
-      return {NodeId::none, begin, pos()};
+      // An attribute-specifier-seq appertaining to the statement ([stmt.pre]/1).
+      skip_attributes();
+      return statement();
     }
     if (is(Tk::identifier) && kind(1) == Tk::colon) {
       s_->diag(begin, Diag::not_supported, Tk::colon);  // labels
@@ -1769,6 +1821,11 @@ public:
       }
       // [dcl.constexpr]: a constexpr variable is const.
       if (spec.is_constexpr) d.type = s_->types().add_cv(d.type, sema::Cv::const_);
+      // `char s[] = "…"`: the bound from the literal, null included ([dcl.init.string]/1).
+      if (d.unknown_bound && is(Tk::equal) && kind(1) == Tk::string_lit) {
+        d.type = s_->types().array(d.type, literal_at(1).units.size() + 1);
+        d.unknown_bound = false;
+      }
       u32 local = s_->declare_local(d.name, d.type, 0, d.name_at);
       Ex init;
       bool list = is(Tk::l_brace) || (is(Tk::equal) && kind(1) == Tk::l_brace);
@@ -1807,7 +1864,7 @@ public:
       } else if (accept(Tk::equal)) {
         Ex e = assignment_expression();
         if (s_->types().is_array(d.type)) {
-          s_->diag(dbegin, Diag::not_supported, Tk::l_square);  // array initialization
+          init = s_->convert(e, d.type, e.begin);  // from a string literal ([dcl.init.string])
         } else if (s_->types().is_reference(d.type)) {
           // A temporary bound to the reference lives as long as it ([class.temporary]/6).
           init = s_->bind_reference(e, d.type, e.begin, true);

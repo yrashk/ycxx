@@ -159,7 +159,6 @@ draft/class/class.virtual-9.accept.cpp 'struct' not supported yet
 draft/class/special-1.accept.cpp 'struct' not supported yet
 draft/cpp/cpp.concat-3.accept.cpp '[' is not supported yet (arrays, #111); the example also redefines j, which Clang and GCC reject
 draft/cpp/cpp.cond-1.accept.cpp libycxx's config.hpp stops at #error until it knows ycxx (yrashk/libycxx#17); then 'namespace' is not supported yet
-draft/cpp/cpp.cond-2.accept.cpp '[' is not supported yet (attributes)
 draft/cpp/cpp.embed.param.if.empty-2.accept.cpp #error: the resource does not exist, as Clang and GCC agree (tests/draft/DISAGREEMENTS.md)
 draft/cpp/cpp.module-2.reject.cpp 'export' is not supported yet (modules in sema)
 draft/cpp/cpp.module-3.accept.cpp 'export' is not supported yet (modules in sema)
@@ -177,7 +176,6 @@ draft/dcl/dcl.array-3.reject.cpp errors elsewhere: 'struct' not supported yet
 draft/dcl/dcl.attr.annotation-2.accept.cpp '[' not supported yet
 draft/dcl/dcl.attr.annotation-3.accept.cpp 'template' not supported yet
 draft/dcl/dcl.attr.annotation-4.reject.cpp errors elsewhere: 'template' not supported yet
-draft/dcl/dcl.attr.assume-1.accept.cpp '[' not supported yet
 draft/dcl/dcl.attr.fallthrough-1.reject.cpp errors elsewhere: '(' not supported yet
 draft/dcl/dcl.attr.grammar-1.reject.cpp errors elsewhere: '[' not supported yet
 draft/dcl/dcl.attr.grammar-2.reject.cpp errors elsewhere: '[' not supported yet
@@ -244,7 +242,6 @@ draft/dcl/dcl.init.ref-2.reject.cpp errors elsewhere: '&' not supported yet
 draft/dcl/dcl.init.ref-3.accept.cpp 'double' not supported yet
 draft/dcl/dcl.init.ref-5.reject.cpp errors elsewhere: 'struct' not supported yet
 draft/dcl/dcl.init.ref-6.reject.cpp errors elsewhere: 'struct' not supported yet
-draft/dcl/dcl.init.string-1.accept.cpp '[' not supported yet
 draft/dcl/dcl.link-2.accept.cpp 'typedef' not supported yet
 draft/dcl/dcl.link-4.reject.cpp errors elsewhere: 'namespace' not supported yet
 draft/dcl/dcl.link-5.reject.cpp errors elsewhere: 'double' not supported yet

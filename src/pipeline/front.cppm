@@ -106,6 +106,7 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
                            r.kind == sema::EntityKind::constructor  ? Special::constructor
                            : r.kind == sema::EntityKind::destructor ? Special::destructor
                                                                     : Special::none});
+    tu.entities.back().asm_label = program.asm_label(e);
     if (r.templ != EntityId::none) {
       tu.entities.back().template_type = world.entities.rec(r.templ).type;
       tu.entities.back().template_args = r.args;
