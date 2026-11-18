@@ -16,6 +16,16 @@
 // - The operands of an unsequenced operator are bracketed by `useq.begin/next/end` when one of
 //   them writes memory and another touches it ([intro.execution]).
 //
+// Immediates and result types, as lower (#26) reads them:
+// - `alloc [T, …]` allocates a T and yields a pointer to T; `load`/`store [T, path]` access a T at
+//   `path` below the pointer's pointee; `ptr_member [T, path]` yields a pointer to the subobject,
+//   of type T (array-to-pointer is `ptr_member [elem, /e0]`); `ptr_add`/`ptr_diff [T]` step by
+//   elements of type T.
+// - `global [@v]` is a pointer to the variable; `const_ [#c]` has the constant's type, and a string
+//   literal's address is a `const_` of its VLvalue, of type pointer to the array.
+// - Shift operands keep their own promoted types; `call` yields the state, then the result unless
+//   it is void.
+//
 // The emission order is the tree's evaluation order; `ir::Builder::finish` puts the body in
 // canonical order (§2.4), so the fingerprint does not depend on it.
 //
