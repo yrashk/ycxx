@@ -103,5 +103,8 @@ int main() {
   constexpr Fp128 at_compile_time = ycxx::fingerprint(inner{7, color::red});
   check(at_compile_time == ycxx::fingerprint(inner{7, color::red}), "constant evaluation agrees");
   check(ycxx::fingerprint(handle{3}) == ycxx::Hasher().fp(Fp128{22, 99}).finish(), "hash_into is used");
+  static_assert(ycxx::fingerprintable<outer>);
+  static_assert(!ycxx::fingerprintable<int*>, "pointers have no structural fingerprint");
+  static_assert(!ycxx::fingerprintable<std::vector<void*>>);
   return ycxx::unit::result("hash");
 }

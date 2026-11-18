@@ -138,22 +138,9 @@ constexpr Fp128 fingerprint128(std::string_view s, std::uint32_t seed = hash_see
 template <class T>
 concept custom_hashed = requires(Hasher& h, const T& v) { hash_into(h, v); };
 
-// Appends the structural fingerprint of `v`, derived by reflection where the type has no
-// `hash_into` of its own. Sizes are appended before elements, so concatenations do not collide.
-template <class T>
-constexpr void hash_append(Hasher& h, const T& v) noexcept;
-
-// The structural fingerprint of a value.
-template <class T>
-constexpr Fp128 fingerprint(const T& v) noexcept {
-  Hasher h;
-  hash_append(h, v);
-  return h.finish();
-}
-
-}  // namespace ycxx
-
-namespace ycxx {
+// How a value is taken apart structurally, for fingerprints here and for serialization in the
+// engine: one classification, so the two cannot disagree on what a type is made of.
+enum class shape { custom, fingerprint, boolean, integer, enumeration, floating, string, optional, range, tuple, aggregate, none };
 
 template <class T>
 inline constexpr bool is_optional = false;
@@ -161,40 +148,95 @@ template <class T>
 inline constexpr bool is_optional<std::optional<T>> = true;
 
 template <class T>
+consteval shape shape_of() {
+  if constexpr (custom_hashed<T>) return shape::custom;
+  else if constexpr (std::same_as<T, Fp128>) return shape::fingerprint;
+  else if constexpr (std::same_as<T, bool>) return shape::boolean;
+  else if constexpr (std::integral<T>) return shape::integer;
+  else if constexpr (std::is_enum_v<T>) return shape::enumeration;
+  else if constexpr (std::floating_point<T> && (sizeof(T) == 4 || sizeof(T) == 8)) return shape::floating;
+  else if constexpr (std::convertible_to<const T&, std::string_view>) return shape::string;
+  else if constexpr (is_optional<T>) return shape::optional;
+  else if constexpr (std::ranges::sized_range<const T&>) return shape::range;
+  else if constexpr (requires { std::tuple_size<T>::value; }) return shape::tuple;
+  else if constexpr (std::is_aggregate_v<T> && std::is_class_v<T>) return shape::aggregate;
+  else return shape::none;
+}
+
+// The non-static data members of an aggregate, as a static array `template for` can expand.
+template <class T>
+consteval auto members_of() {
+  return std::define_static_array(std::meta::nonstatic_data_members_of(^^T, std::meta::access_context::unchecked()));
+}
+
+template <class T>
+consteval bool fingerprintable_type() {
+  constexpr shape s = shape_of<T>();
+  if constexpr (s == shape::none) {
+    return false;
+  } else if constexpr (s == shape::optional || s == shape::range) {
+    return fingerprintable_type<std::remove_cvref_t<std::ranges::range_value_t<
+        std::conditional_t<s == shape::optional, std::array<typename T::value_type, 1>, T>>>>();
+  } else if constexpr (s == shape::tuple) {
+    return []<std::size_t... I>(std::index_sequence<I...>) {
+      return (fingerprintable_type<std::remove_cvref_t<std::tuple_element_t<I, T>>>() && ...);
+    }(std::make_index_sequence<std::tuple_size_v<T>>());
+  } else if constexpr (s == shape::aggregate) {
+    bool ok = true;
+    template for (constexpr auto m : members_of<T>()) {
+      ok = ok && fingerprintable_type<std::remove_cv_t<typename[:std::meta::type_of(m):]>>();
+    }
+    return ok;
+  } else {
+    return true;
+  }
+}
+
+// Whether `fingerprint` and `hash_append` derive a fingerprint for T.
+template <class T>
+concept fingerprintable = fingerprintable_type<std::remove_cvref_t<T>>();
+
+// Appends the structural fingerprint of `v`, derived by reflection where the type has no
+// `hash_into` of its own. Sizes are appended before elements, so concatenations do not collide.
+template <fingerprintable T>
 constexpr void hash_append(Hasher& h, const T& v) noexcept {
-  if constexpr (custom_hashed<T>) {
+  constexpr shape s = shape_of<T>();
+  if constexpr (s == shape::custom) {
     hash_into(h, v);
-  } else if constexpr (std::same_as<T, Fp128>) {
+  } else if constexpr (s == shape::fingerprint) {
     h.fp(v);
-  } else if constexpr (std::same_as<T, bool>) {
+  } else if constexpr (s == shape::boolean) {
     h.uint(static_cast<std::uint8_t>(v));
-  } else if constexpr (std::integral<T>) {
+  } else if constexpr (s == shape::integer) {
     h.uint(static_cast<std::make_unsigned_t<T>>(v));
-  } else if constexpr (std::is_enum_v<T>) {
+  } else if constexpr (s == shape::enumeration) {
     hash_append(h, std::to_underlying(v));
-  } else if constexpr (std::floating_point<T>) {
+  } else if constexpr (s == shape::floating) {
     if constexpr (sizeof(T) == 4) h.uint(std::bit_cast<std::uint32_t>(v));
     else h.uint(std::bit_cast<std::uint64_t>(v));
-  } else if constexpr (std::convertible_to<const T&, std::string_view>) {
-    const std::string_view s = v;
-    h.uint(static_cast<std::uint64_t>(s.size()));
-    h.bytes(s);
-  } else if constexpr (is_optional<T>) {
+  } else if constexpr (s == shape::string) {
+    const std::string_view str = v;
+    h.uint(static_cast<std::uint64_t>(str.size()));
+    h.bytes(str);
+  } else if constexpr (s == shape::optional) {
     h.uint(static_cast<std::uint8_t>(v.has_value()));
     if (v) hash_append(h, *v);
-  } else if constexpr (std::ranges::sized_range<const T&>) {
+  } else if constexpr (s == shape::range) {
     h.uint(static_cast<std::uint64_t>(std::ranges::size(v)));
     for (const auto& e : v) hash_append(h, e);
-  } else if constexpr (requires { std::tuple_size<T>::value; }) {
+  } else if constexpr (s == shape::tuple) {
     std::apply([&](const auto&... e) { (hash_append(h, e), ...); }, v);
-  } else if constexpr (std::is_aggregate_v<T>) {
-    constexpr auto ctx = std::meta::access_context::unchecked();
-    template for (constexpr auto m : std::define_static_array(std::meta::nonstatic_data_members_of(^^T, ctx))) {
-      hash_append(h, v.[:m:]);
-    }
   } else {
-    static_assert(false, "ycxx::hash_append: no fingerprint for this type; provide hash_into(Hasher&, const T&)");
+    template for (constexpr auto m : members_of<T>()) hash_append(h, v.[:m:]);
   }
+}
+
+// The structural fingerprint of a value.
+template <fingerprintable T>
+constexpr Fp128 fingerprint(const T& v) noexcept {
+  Hasher h;
+  hash_append(h, v);
+  return h.finish();
 }
 
 }  // namespace ycxx
