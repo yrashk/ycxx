@@ -790,7 +790,7 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   type itself: the `STypedef` sugar of ast.md §5.2 is not built yet (#179).
 - Also fixed: a variable declared after an enumeration's braces (`enum E { … } e;`) was not
   found by lookup and had no symbol.
-- Tests: `tests/own/typedef` (11). Eleven more draft examples pass.
+- Tests: `tests/own/typedef` (14, three from the review). Eleven more draft examples pass.
 - Not yet (#180): member typedefs and alias-declarations in classes, alias templates (ζ), `typedef`
   of an array of unknown bound, the [dcl.typedef]/9 restrictions on an unnamed class named for
   linkage purposes.

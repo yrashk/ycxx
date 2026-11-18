@@ -864,6 +864,16 @@ private:
     return r;
   }
 
+  // Whether a typedef-name of this scope names `n` as another type than `t`, which a class or
+  // enumeration named `n` would clash with ([basic.scope.scope]/4, [dcl.typedef]/6).
+  bool alias_clash(NameId n, QualType t) {
+    for (DeclId p : q_.visible_decls(n))
+      if (auto ds = p_->decl_sema(p); ds && ds->kind == ast::DeclKind::type_alias && same_scope(*ds) &&
+                                      s_.types().canonical(ds->type) != s_.types().canonical(t))
+        return true;
+    return false;
+  }
+
   // The entity of the namespace-scope class named `n` (§4.3: scope, name).
   EntityId class_entity(NameId n) {
     return s_.world().entities.entity({sema::EntityKind::class_, n, {}, LangLinkage::cxx, ast::Linkage::external, {}, ns_entity()});
@@ -920,6 +930,10 @@ private:
         s_.diag(name_at, Diag::class_redefinition, name);
         return bad();
       }
+    if (alias_clash(name, s_.types().class_type(class_entity(name)))) {
+      s_.diag(name_at, Diag::conflicting_declaration, name);
+      return bad();
+    }
     ast::DeclSema sem = class_decl(class_entity(name), true);
     decls_.push_back(sem);
     s_.own.push_back({name, sem});
@@ -987,6 +1001,10 @@ private:
     EntityId e = s_.world().entities.entity(
         {sema::EntityKind::enum_, name, {}, LangLinkage::cxx, ast::Linkage::external, {}, cls != EntityId::none ? cls : ns_entity()});
     QualType t = types.enum_type(e);
+    if (cls == EntityId::none && alias_clash(name, t)) {
+      s_.diag(name_at, Diag::conflicting_declaration, name);
+      return bad();
+    }
     sema::EnumRec& er = s_.world().classes.enum_rec(e);
     er = {scoped, fixed.has_value(), fixed.value_or(s_.builtin(sema::Builtin::int_)), {}};
     ast::DeclSema sem = class_decl(e, true);
@@ -1069,6 +1087,10 @@ private:
                                                                                                                  : Builtin::long_;
       er.underlying = s_.builtin(u);
     }
+    // Past the closing brace an enumerator has the enumeration's type ([dcl.enum]/5), in the
+    // declarators that follow too.
+    for (auto& o : s_.own)
+      if (o.sema.kind == ast::DeclKind::enumerator && s_.world().entities.rec(o.sema.entity).scope == e) o.sema.type = t;
     for (std::size_t i = 0; i < er.enumerators.size(); ++i) {
       er.enumerators[i].value = s_.world().values.integer(*er.underlying, sema::u64(values[i]));
       p_->set_constant(er.enumerators[i].entity, er.enumerators[i].value, k_);
@@ -1510,6 +1532,10 @@ private:
                bool is_function_def) {
     sema::Types& types = s_.types();
     if (spec.is_typedef) {
+      if (is_function_def) {  // [dcl.typedef]/1: a typedef declares no function definition
+        s_.diag(spec.begin, Diag::typedef_definition);
+        return false;
+      }
       if (d.qualified || d.unknown_bound) {  // [dcl.typedef]; arrays of unknown bound are not supported yet
         if (d.qualified) s_.diag(d.name_at, Diag::conflicting_declaration, d.name);
         else s_.diag(d.name_at, Diag::not_supported, Tk::l_square);

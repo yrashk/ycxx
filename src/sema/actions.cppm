@@ -234,7 +234,11 @@ public:
   // same block to the same type.
   void local_type_alias(NameId name, QualType type, u32 at_) {
     std::size_t depth = scopes_.size() - 1;
-    if (std::ranges::any_of(scopes_.back(), [&](const auto& p) { return p.first == name; }) ||
+    // [basic.scope.block]/2: nor a parameter's, a for-init-statement's or a condition's name in
+    // the outermost block of the guarded substatement.
+    bool guarded = scopes_.size() >= 2 && !guarded_.empty() && guarded_.back() == scopes_.size() - 2 &&
+                   std::ranges::any_of(scopes_[guarded_.back()], [&](const auto& p) { return p.first == name; });
+    if (guarded || std::ranges::any_of(scopes_.back(), [&](const auto& p) { return p.first == name; }) ||
         std::ranges::any_of(block_types_, [&](const BlockType& t) {
           return t.depth == depth && t.name == name && types().canonical(t.type) != types().canonical(type);
         })) {
