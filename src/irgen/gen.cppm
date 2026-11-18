@@ -827,6 +827,9 @@ class Gen {
 
 template <Facts F>
 std::expected<FunctionIr, std::string> function_ir(const ast::Interners& in, const FunctionInput& fn, F& facts) {
+  // BOOTSTRAP: contracts: `pre` on a function template is dropped when it is instantiated through
+  // an import (STATUS), so the precondition is asserted here. A dependent tree cannot reach IR
+  // generation (ast.md §3.7); the check joins this one once #33 has dependent kinds.
   contract_assert(in.ast.contains(fn.body.tree));
   return Gen<F>(in, fn, facts).run();
 }
