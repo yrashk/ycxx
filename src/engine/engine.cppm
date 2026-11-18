@@ -579,6 +579,11 @@ private:
   std::exception_ptr error_;
 };
 
+// A fingerprint as a hash table key: already uniform, never `std::hash` (§A5.1).
+struct FpHash {
+  std::size_t operator()(const Fp128& f) const noexcept { return static_cast<std::size_t>(f.lo); }
+};
+
 // A kind's part of the memo table: a sharded index from key to cell (§A3.6) and the keys and
 // values by slot.
 struct KindTableBase {
@@ -590,6 +595,9 @@ struct KindTableBase {
   virtual void execute_sync(Db& db, CellId c, std::uint64_t restore, const Frame* chain) = 0;
   // Gives a claimed input cell without a value its provider's value, and publishes it.
   virtual void provide(Db& db, CellId c) = 0;
+  // The cell of `inc` with the key of `cold`'s cell `c` (`ids` maps key fingerprints to `inc`'s
+  // cells, for keys that name a cell).
+  virtual CellId counterpart(Db& inc, const Db& cold, CellId c, const std::unordered_map<Fp128, CellId, FpHash>& ids) = 0;
   std::string_view name;
   Fp128 seed;
   Counters counters;
@@ -622,6 +630,7 @@ struct KindTable final : KindTableBase {
   std::coroutine_handle<> make_frame(Db& db, CellId c, std::uint32_t id, Root& root, bool validate, std::uint64_t old) override;
   void execute_sync(Db& db, CellId c, std::uint64_t restore, const Frame* chain) override;
   void provide(Db& db, CellId c) override;
+  CellId counterpart(Db& inc, const Db& cold, CellId c, const std::unordered_map<Fp128, CellId, FpHash>& ids) override;
   // Set at quiescence, called by any worker (daemon design §5.1).
   [[no_unique_address]] std::conditional_t<InputKind<Q>, std::function<provided<Value>(const Key&)>, std::monostate> provider;
 };
@@ -763,6 +772,17 @@ public:
   // A cell's demand list (§A1.7).
   template <MemoQuery Q>
   std::vector<Demand> demands(const typename Q::Key& k) const;
+
+  // The memo-table comparison of incremental == cold (§A9): every cell `cold` executed, brought
+  // up to date here, has the same fingerprint and dependency list, and none of it executes; an
+  // input has the same fingerprint. Both Dbs are quiescent and in this process.
+  struct TableCheck {
+    std::uint64_t checked = 0;
+    std::uint64_t executed = 0;           // executions here while checking: 0 when it holds
+    std::vector<std::string> mismatches;  // "kind key-fingerprint: what differs", at most 20
+    bool ok() const noexcept { return executed == 0 && mismatches.empty(); }
+  };
+  TableCheck verify_table(const Db& cold);
 
 private:
   friend class SyncCtx;
@@ -1970,6 +1990,18 @@ void KindTable<Q>::execute_sync(Db& db, CellId c, std::uint64_t restore, const F
 }
 
 template <MemoQuery Q>
+CellId KindTable<Q>::counterpart(Db& inc, const Db& cold, CellId c, const std::unordered_map<Fp128, CellId, FpHash>& ids) {
+  Key k = cold.key_of<Q>(c);
+  if constexpr (std::is_same_v<Key, CellRef>) {
+    // A key naming a cell (`DiagsOf`) names `inc`'s cell of the same key.
+    const auto it = ids.find(k.key);
+    if (it == ids.end()) return no_cell;
+    k.id = it->second;
+  }
+  return inc.cell_for<Q>(k);
+}
+
+template <MemoQuery Q>
 void KindTable<Q>::provide(Db& db, CellId c) {
   if constexpr (InputKind<Q>) db.provide<Q>(c);
   else contract_assert(false);  // only inputs are provided
@@ -2233,6 +2265,49 @@ struct Blocking final : Request {
     d->notify_all();
   }
 };
+
+Db::TableCheck Db::verify_table(const Db& cold) {
+  contract_assert(live_frames() == 0 && cold.live_frames() == 0);
+  TableCheck r;
+  const auto note = [&](CellId c, std::string_view what) {
+    if (r.mismatches.size() < 20) {
+      r.mismatches.push_back(std::format("{} {:016x}{:016x}: {}", cold.kind_name_of(c), cold.cells_[c].key_fp.hi, cold.cells_[c].key_fp.lo, what));
+    }
+  };
+  std::unordered_map<Fp128, CellId, FpHash> ids;
+  for (CellId c = 0; c < cells_.size(); ++c) ids.emplace(cells_[c].key_fp, c);
+  const auto keys_of = [](const Db& db, const Cell& e) {
+    std::vector<Fp128> out;
+    for (std::uint32_t d : e.deps) out.push_back(db.cells_[d & ~group_start].key_fp);
+    return out;
+  };
+  const std::uint64_t before = stats().executed;
+  for (CellId c = 0; c < cold.cells_.size(); ++c) {
+    const Cell& want = cold.cells_[c];
+    if (want.input ? !want.has_value : want.runs == 0) continue;
+    ++r.checked;
+    const CellId here = cold.tables_[want.kind].load(std::memory_order_acquire)->counterpart(*this, cold, c, ids);
+    if (here == no_cell) {
+      note(c, "the cell it names does not exist here");
+      continue;
+    }
+    if (!want.input) {
+      Blocking b(*this, here, Priority::background);
+      const auto done = b.done;
+      b.begin();
+      done->wait(false, std::memory_order_acquire);
+      if (b.error) {
+        note(c, "an internal error bringing it up to date");
+        continue;
+      }
+    }
+    const Cell& got = cells_[here];
+    if (!got.has_value || got.fp != want.fp) note(c, "a different value (fingerprint)");
+    else if (!want.input && keys_of(*this, got) != keys_of(cold, want)) note(c, "a different dependency list");
+  }
+  r.executed = stats().executed - before;
+  return r;
+}
 
 template <InputKind Q>
 bool Db::set(const typename Q::Key& k, typename Q::Value v) {

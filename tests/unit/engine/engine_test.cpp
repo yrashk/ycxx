@@ -505,10 +505,49 @@ void incremental_equals_cold() {
       if (keys(inc.dependencies<Node>(k)) != keys(cold.dependencies<Node>(k))) ++mismatches;
     }
     if (inc.stats().executed != before.executed) ++mismatches;
+    // The engine's own comparison (§A9) agrees.
+    const auto t = inc.verify_table(cold);
+    if (!t.ok() || t.checked == 0) ++mismatches;
   }
   check(mismatches == 0, std::format("incremental == cold over 1000 edits ({} mismatches)", mismatches));
   check(inc.stats().backdated > 0 && inc.stats().durable > 0 && inc.stats().validated > 0,
         "the edits exercised cutoff, the durability shortcut and validation");
+}
+
+// A query that reads the world behind the engine's back: the missed dependency §A9's table
+// comparison exists to catch.
+std::int64_t hidden = 0;
+struct Impure {
+  using Key = std::uint32_t;
+  using Value = std::int64_t;
+  static query_task<Value> run(Ctx& cx, Key k) { co_return cx.fetch<In>(k) + hidden; }
+};
+
+void verify_table_catches_a_missed_dependency() {
+  Db inc;
+  inc.set<In>(0, 1);
+  hidden = 10;
+  (void)inc.get<Impure>(0);
+  (void)inc.diags_of<Impure>(0);
+  hidden = 20;
+  inc.set<In>(1, 5);  // a new revision; Impure stays green
+  Db cold;
+  cold.set<In>(0, 1);
+  cold.set<In>(1, 5);
+  (void)cold.get<Impure>(0);
+  (void)cold.diags_of<Impure>(0);
+  const auto t = inc.verify_table(cold);
+  check(!t.ok() && t.executed == 0 && t.mismatches.size() == 1 && t.mismatches[0].contains("Impure") &&
+            t.mismatches[0].contains("different value"),
+        "the stale cell is named, nothing executed");
+  hidden = 10;
+  Db fresh;
+  fresh.set<In>(0, 1);
+  fresh.set<In>(1, 5);
+  (void)fresh.get<Impure>(0);
+  (void)fresh.diags_of<Impure>(0);
+  const auto ok = inc.verify_table(fresh);
+  check(ok.ok() && ok.checked >= 3, std::format("with the world as the cell saw it, the tables agree ({} checked)", ok.checked));
 }
 
 }  // namespace
@@ -528,5 +567,6 @@ int main() {
   serialization();
   concepts();
   incremental_equals_cold();
+  verify_table_catches_a_missed_dependency();
   return ycxx::unit::result("engine");
 }
