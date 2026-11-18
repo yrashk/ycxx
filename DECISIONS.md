@@ -270,3 +270,67 @@ Candidates for the solver layer, to be evaluated in the optimization design:
 - SMT, for translation validation: Bitwuzla, Z3.
 - Google OR-Tools' CP-SAT is the strongest CP solver, but it pulls in Abseil and Protocol Buffers.
   It is a later candidate, used through the FlatZinc-style export first.
+
+## 8. Self-improvement
+
+The way agents work on ycxx is itself something to improve. A session that wasted effort and found
+its way out has learned something the next session should not have to rediscover.
+
+1. **Notice inefficiency.** Signs include:
+   - repeated retries of the same failing approach;
+   - review rounds that keep finding the same class of problem;
+   - waiting on something that was never going to arrive;
+   - a tool or permission dead end;
+   - work redone because a decision was not written down;
+   - a subagent brief that came back off-target.
+2. **Record the recovery.** When a session recovers from one of these, it writes down the
+   symptom, what worked and the rule to follow next time.
+   - A rule about *how to work* (process, coordination, models, review) goes into this file or
+     `CLAUDE.md`.
+   - A *recipe* for a recurring situation goes into [`docs/LESSONS.md`](docs/LESSONS.md), the
+     list of common solutions.
+3. **Every handover and closing comment answers one question:** *what would have made this
+   faster?* If the answer is not trivial, it becomes an entry in `docs/LESSONS.md`, in the same
+   PR or as a direct commit to `main`.
+4. **Read before starting.** Sessions read `docs/LESSONS.md` along with this file. A situation it
+   covers is handled its way, or the entry is corrected if it turned out to be wrong.
+5. **Consolidate.** A lesson that recurs is promoted to a rule here or in `CLAUDE.md`, and its
+   entry points at the rule. Entries that stop applying are deleted. Keep the list short enough to
+   read in full.
+
+## 9. Continuous integration: fail fast
+
+CI time is expensive when agents push often, and a slow red signal wastes every session waiting
+on it. CI is built to report the most important failure as early as possible, and never to be
+where a bug is first found.
+
+1. **Local first.** A session runs `tools/test --fast` (the same first tiers CI runs) before
+   pushing. CI confirms; it does not debug.
+2. **A pyramid, most important first.** Within a run, stages are ordered by importance and
+   cheapness, and a failed required stage cancels the stages after it:
+   1. build and policy checks (preprocessor policy, provenance leak check, formatting);
+   2. **tests that failed in the previous run** of this branch, and of `main` for a new branch;
+   3. tests affected by the change, chosen from the dependency information, and eventually from
+      ycxx's own query engine;
+   4. the core oracles: the draft's examples and the own suite;
+   5. the wider suites: differential runs and incremental-versus-cold checks;
+   6. everything else in the tier.
+3. **Tiers:**
+   - **Pull request:** fast, targeted, first failure within about 5 minutes and the whole tier
+     within about 15.
+   - **Merge to `main`:** the full own and oracle suites on both hosts.
+   - **Nightly:** sanitizers, the borrowed Clang and GCC suites in full, edit-sequence fuzzing,
+     the benchmark corpus, and the bootstrap chain (§3.5).
+4. **Parallel by default.**
+   - Hosts and configurations run as a matrix.
+   - Suites are sharded by recorded test durations, so shards finish together.
+   - Toolchains and build outputs are cached, and later ycxx's own persistent query cache too.
+5. **Don't run what cannot have changed.**
+   - Path filters skip builds for changes to documentation only.
+   - A newer push to the same branch cancels the older run.
+6. **The test driver keeps the state CI needs:** per-test durations, the last failures per
+   branch, and a stable test identity. That makes "failures first", sharding and selection of
+   affected tests possible.
+7. **Flaky tests are quarantined at once** with an issue, never silently retried until green.
+8. **Speed is a tracked property.** CI wall time per tier is recorded like benchmark results, and
+   a tier that drifts past its budget gets an issue.

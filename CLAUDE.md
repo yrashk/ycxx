@@ -1,7 +1,8 @@
 # Working on ycxx
 
-Read [DECISIONS.md](DECISIONS.md) before changing anything. Read [STATUS.md](STATUS.md) for what
-exists. Work is coordinated through [GitHub issues](https://github.com/yrashk/ycxx/issues).
+Read [DECISIONS.md](DECISIONS.md) and [docs/LESSONS.md](docs/LESSONS.md) before changing
+anything. Read [STATUS.md](STATUS.md) for what exists. Work is coordinated through
+[GitHub issues](https://github.com/yrashk/ycxx/issues).
 
 ## Never read
 
@@ -30,6 +31,10 @@ in our own terms. Never copy sequences or commit their listings (DECISIONS §2.3
   modules, reflection instead of generators and boilerplate, contracts, coroutines and
   `std::execution`, `constexpr`. A bootstrap-compiler limitation gets the smallest workaround,
   marked `// BOOTSTRAP: <feature>: <reason>` and listed in STATUS.
+- Run `tools/test --fast` before pushing; CI confirms, it does not debug (DECISIONS §9).
+- If you burn time (retries, review rounds that don't converge, a dead end, a brief that came back
+  off-target) and then find the way out, record it in `docs/LESSONS.md`, or as a rule in
+  DECISIONS or here (DECISIONS §8).
 - Keep the issue body current: done, next, blocked. Comment on decisions and surprises.
 - Small commits, reviewed P0–P2 (DECISIONS §5). Cite draft clauses by stable name (`[temp.deduct]`).
 - A design question beyond your issue goes to a new issue labelled `status:needs-decision`,
@@ -46,6 +51,8 @@ in our own terms. Never copy sequences or commit their listings (DECISIONS §2.3
 
 ## When you stop
 
+- Every handover or closing comment answers: *what would have made this faster?* Add a lesson
+  if the answer is not trivial.
 - Finished: update `STATUS.md` if what is true of the code changed, close the issue with a summary,
   and remove `status:claimed`.
 - Not finished: post a handover comment (state, branch, what you learned, the next concrete step)
