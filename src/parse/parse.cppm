@@ -207,18 +207,42 @@ public:
   }
   // The declarations of `name` that are members of namespace `path` ([namespace.memdef]) before
   // the point: of its own definitions, and of its inline and unnamed members.
-  std::vector<DeclId> declared_in(std::string_view name, const std::string& path, u32 item, bool self) const {
+  // What the using-declarations of namespace `path` before `item` introduce under `name`.
+  std::vector<DeclId> used_in(std::string_view name, const std::string& path, u32 item) {
+    std::vector<DeclId> r;
+    for (u32 j = 0; j < item; ++j) {
+      const items::Item& it = items_->items[j];
+      if (in_class_[j] || (ns_of_[j] != path && eff_ns_[j] != path)) continue;
+      for (const items::DeclName& n : it.names)
+        if (n.name == name && (n.flags & items::name_flag::unknown) && std::ranges::find(running_, j) == running_.end()) {
+          item_sema(j);
+          if (auto t = using_targets_.find({j, n.ordinal}); t != using_targets_.end())
+            r.insert(r.end(), t->second.begin(), t->second.end());
+        }
+    }
+    return r;
+  }
+  // A using-declaration's name stands for what it introduces (query-engine.md, "Using-declarations").
+  std::vector<DeclId> declared_in(std::string_view name, const std::string& path, u32 item, bool self) {
     std::vector<DeclId> r;
     for (u32 j = 0; j < item + (self ? 1 : 0); ++j) {
       const items::Item& it = items_->items[j];
       if (in_class_[j] || (ns_of_[j] != path && eff_ns_[j] != path)) continue;
-      for (const items::DeclName& n : it.names)
+      for (const items::DeclName& n : it.names) {
+        if (n.name == name && (n.flags & items::name_flag::unknown)) {
+          if (std::ranges::find(running_, j) != running_.end()) continue;
+          item_sema(j);  // resolves its targets
+          if (auto t = using_targets_.find({j, n.ordinal}); t != using_targets_.end())
+            r.insert(r.end(), t->second.begin(), t->second.end());
+          continue;
+        }
         // A scoped enumeration's enumerators are in its own scope ([dcl.enum]/11); the declarators
         // after its braces are not.
         if (n.name == name && !(n.flags & items::name_flag::friend_) &&
             !(it.kind == ItemKind::enum_def && n.ordinal > 0 && !(n.flags & items::name_flag::enumerator) &&
               it.begin + n.offset < it.brace_end))
           r.push_back({ids_[j], ast::make_decl_ord(ast::DeclClass::syntactic, n.ordinal)});
+      }
     }
     for (const Directive& d : directives_)
       if (d.alias && d.item < item + (self ? 1 : 0) && d.at == path && w_->ins.names.spelling(*d.alias) == name)
@@ -435,6 +459,9 @@ private:
   std::map<u32, DeclId> member_decls_;
   // The enumeration whose enumerator list is being analysed, and its record so far.
   std::pair<EntityId, const sema::EnumRec*> defining_enum_{EntityId::none, nullptr};
+  // What each namespace-scope using-declaration introduces, by (item, name ordinal): the
+  // declarations qualified lookup found at it ([namespace.udecl]/1).
+  std::map<std::pair<u32, u32>, std::vector<DeclId>> using_targets_;
   std::map<u32, ast::DeclSema> class_heads_;  // by class item: the class's record, for its members
   std::map<u32, Dmi> dmis_;                       // by field entity
   std::vector<std::string> ns_of_, eff_ns_;       // by item
@@ -780,6 +807,21 @@ private:
       if (!ps_.expect(Tk::semi)) bad();
       return;
     }
+    // A using-declaration ([namespace.udecl]): `using N::x, ::y;`, each declarator introducing
+    // what qualified lookup finds at this point.
+    if (ps_.is(Tk::kw_using) && ps_.kind(1) != Tk::kw_namespace && ps_.kind(1) != Tk::kw_enum &&
+        !(ps_.kind(1) == Tk::identifier && ps_.kind(2) == Tk::equal)) {
+      ps_.bump();
+      do {
+        if (!using_declarator()) {
+          bad();
+          ps_.skip_to_semi();
+          return;
+        }
+      } while (ps_.accept(Tk::comma));
+      if (!ps_.expect(Tk::semi)) bad();
+      return;
+    }
     // An alias-declaration ([dcl.typedef]/2): `using T = type-id;`.
     if (ps_.is(Tk::kw_using) && ps_.kind(1) == Tk::identifier && ps_.kind(2) == Tk::equal) {
       ps_.bump();
@@ -843,6 +885,82 @@ private:
     }
   }
 
+  // One using-declarator at namespace scope: `N::x` or `::x` ([namespace.udecl]).
+  bool using_declarator() {
+    ps_.accept(Tk::kw_typename);
+    u32 next = 0;
+    auto sc = ps_.nested_name(0, next);
+    if (!sc || ps_.kind(next) != Tk::identifier) {
+      s_.diag(ps_.pos(), Diag::not_a_namespace, ps_.is(Tk::identifier) ? ps_.name_of(ps_.tok()) : s_.no_name());
+      return false;
+    }
+    for (u32 j = 0; j < next; ++j) ps_.bump();
+    NameId n = ps_.name_of(ps_.tok());
+    u32 at = ps_.pos();
+    ps_.bump();
+    if (!sc->ns) {
+      // [namespace.udecl]/8: a class member's only as a member-declaration; an enumerator's
+      // (/7) is not supported yet.
+      if (sc->type && s_.types().is_class(*sc->type)) s_.diag(at, Diag::using_class_member, n);
+      else s_.diag(at, Diag::not_supported, Tk::kw_using);
+      return false;
+    }
+    std::vector<DeclId> found;
+    ast::DeclSema first{};
+    for (DeclId d : p_->qualified_decls(p_->world().ins.names.spelling(n), p_->namespace_path(*sc->ns), k_, false))
+      if (auto ds = p_->decl_sema(d); ds && ds->entity != EntityId::none) {
+        if (ds->kind == ast::DeclKind::namespace_) {  // [namespace.udecl]/3: it names no namespace
+          s_.diag(at, Diag::using_namespace_name, n);
+          return false;
+        }
+        if (found.empty()) first = *ds;
+        found.push_back(d);
+      }
+    if (found.empty()) {
+      s_.diag(at, Diag::no_namespace_member, n);
+      return false;
+    }
+    // [namespace.udecl]/10: a target may not conflict with a declaration of its name in this scope.
+    for (DeclId p : p_->declared_in(p_->world().ins.names.spelling(n), p_->ns_of(k_), k_, false))
+      if (auto ds = p_->decl_sema(p); ds && ds->entity != EntityId::none)
+        for (DeclId f : found)
+          if (auto t = p_->decl_sema(f); t && conflict(*ds, *t)) {
+            s_.diag(at, Diag::conflicting_declaration, n);
+            return false;
+          }
+    // Its own record stands for the first of them; lookup takes them all from `using_targets_`.
+    p_->using_targets_[{k_, static_cast<u32>(decls_.size())}] = std::move(found);
+    ast::DeclSema own = class_decl(EntityId::none, false);  // built in this item's frame
+    own.kind = first.kind;
+    own.type = first.type;
+    decls_.push_back(own);
+    return true;
+  }
+
+  // Whether two declarations of one name in one scope conflict ([basic.scope.scope]/4): not the
+  // same entity, not both functions (overloads), and not a class or enumeration and a variable or
+  // function, which hides it.
+  static bool conflict(const ast::DeclSema& a, const ast::DeclSema& b) {
+    using K = ast::DeclKind;
+    auto type = [](K k) { return k == K::class_ || k == K::enum_; };
+    auto object = [](K k) { return k == K::variable || k == K::function; };
+    if (a.entity == b.entity || (a.kind == K::function && b.kind == K::function)) return false;
+    return !((type(a.kind) && object(b.kind)) || (object(a.kind) && type(b.kind)));
+  }
+  // Whether a declaration `d` of `n` here conflicts with what an earlier using-declaration of this
+  // scope introduced ([namespace.udecl]/10).
+  bool clashes_with_using(NameId n, u32 at, ast::DeclKind kind) {
+    ast::DeclSema d{};
+    d.kind = kind;
+    d.entity = EntityId::none;
+    for (DeclId u : p_->used_in(p_->world().ins.names.spelling(n), p_->ns_of(k_), k_))
+      if (auto t = p_->decl_sema(u); t && conflict(d, *t)) {
+        s_.diag(at, Diag::conflicting_declaration, n);
+        return true;
+      }
+    return false;
+  }
+
   // A typedef-name or alias-declaration at namespace scope ([dcl.typedef]). In its scope it may
   // only redeclare a typedef-name, class or enumeration as the type it already is (/5, /6).
   bool declare_alias(NameId name, u32 at, QualType type) {
@@ -862,6 +980,7 @@ private:
         s_.diag(at, Diag::conflicting_declaration, name);
         return false;
       }
+    if (clashes_with_using(name, at, ast::DeclKind::type_alias)) return false;
     ast::DeclSema sem = class_decl(s_.world().entities.entity({sema::EntityKind::type_alias, name, {}, LangLinkage::cxx,
                                                                  ast::Linkage::none, {}, ns_entity()}),
                                    false);
@@ -955,6 +1074,7 @@ private:
       s_.diag(name_at, Diag::conflicting_declaration, name);
       return bad();
     }
+    if (clashes_with_using(name, name_at, ast::DeclKind::class_)) return bad();
     ast::DeclSema sem = class_decl(class_entity(name), true);
     decls_.push_back(sem);
     s_.own.push_back({name, sem});
@@ -1026,6 +1146,7 @@ private:
       s_.diag(name_at, Diag::conflicting_declaration, name);
       return bad();
     }
+    if (cls == EntityId::none && clashes_with_using(name, name_at, ast::DeclKind::enum_)) return bad();
     // Built here and published once complete (#156); the list sees it as it grows.
     sema::EnumRec er{scoped, fixed.has_value(), fixed.value_or(s_.builtin(sema::Builtin::int_)), {}};
     p_->defining_enum_ = {e, &er};
@@ -1648,6 +1769,7 @@ private:
           prior.push_back(*ds);
       for (const auto& o : s_.own)
         if (o.name == d.name && o.sema.kind != ast::DeclKind::class_) prior.push_back(o.sema);
+      if (clashes_with_using(d.name, d.name_at, fn ? ast::DeclKind::function : ast::DeclKind::variable)) return false;
     }
     if (fn) {
       if (!explicit_lang && !prior.empty() && prior.back().kind == ast::DeclKind::function)
