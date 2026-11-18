@@ -474,6 +474,31 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   messages that are constant expressions, notes along the call chain, block-scope static constexpr
   variables.
 
+## Classes, δ step 1: structs and aggregates (#86, 2026-11-18)
+
+- **Types and values:** `TClass{entity}` in `types` (complete or not, one type); `VAggregate`
+  (an array's or class's element values) in `values`; `DeclKind::data_member`.
+- **Front end:** a class definition at namespace scope is a `class_def` item whose members are
+  their own items (ast.md §4.2); `Program::class_def(item)` reads them into a `ClassDef` and into
+  sema's class table (`World::classes`, the stand-in for `class_def`'s member list and the
+  `layout` query: Itanium layout of data members). A class is complete at an item after its
+  definition that it does not enclose (`Questions::is_complete`). Class names as type
+  specifiers, elaborated type specifiers and forward declarations, member access (`Member`,
+  [expr.ref]), list-initialization of aggregates and scalars (`InitList`, `ValueInit`,
+  `DefaultInit`: brace elision, designators, narrowing, [dcl.init.list]/3.2), arrays whose bound
+  comes from their initializer, class copies as `lvalue_to_rvalue` of a class glvalue, `x = {…}`.
+  Default member initializers are kept as their values, constants of scalar type only (#118).
+  Namespace-scope aggregates with constant elements are folded to a `VAggregate`.
+- **IR:** members through `ptr_member` field steps; aggregates initialized element by element,
+  in an object allocated `zero` when some element is value-initialized; trivial copies and copy
+  assignment as `copy`, which `lower` turns into chunked loads and stores. The pipeline's `Layout`
+  asks `Records` (the front end's class table) for class layouts; data with `VAggregate`
+  initializers; Itanium names for global-namespace class types in parameters.
+- Tests: `tests/own/classes/s1-*` (spec-only). 14 of 20 pass; the others wait for classes by value
+  (#116), local classes (#117), non-constant default member initializers (#118) and records in
+  the interpreter (#25).
+- Not yet: unions, bit-fields, member functions, constructors, bases, access checking (#119).
+
 ## Bootstrap workarounds
 
 Places where ycxx's sources avoid or work around a C++26 feature because GCC 16 lacks it or

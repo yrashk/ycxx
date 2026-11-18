@@ -24,6 +24,11 @@ in [GitHub issues](https://github.com/yrashk/ycxx/issues) and the
     `if`, `while`, `do`, `for`, `break` and `continue`; the arithmetic, bitwise, shift,
     comparison, logical, conditional and assignment operators; string literals; and
     `extern "C"` calls into libSystem (`puts`, `putchar`).
+  - Structs and classes with data members (2026-11-18): `.` and `->`, pointers to and arrays of
+    structs, aggregate initialization (`S s = {1, 2};`, `S s{…}`, nested braces, brace elision,
+    designated initializers, `int a[] = {…}`), constant default member initializers, copies and
+    assignment, and namespace-scope structs with constant initializers. Not yet: member
+    functions, constructors, passing or returning a struct by value.
   - Constant evaluation, by ycxx's own interpreter of its IR: `constexpr` and `consteval`
     functions and variables, `constinit`, `static_assert` and `if consteval`, with an error that
     says why an expression is not constant (overflow, an uninitialized read, a dangling pointer,
@@ -45,7 +50,8 @@ build/bin/ycxx cxx hello.cpp -o hello && ./hello
 - The rest of the preprocessor: function-like macros, `#if` and the other conditionals,
   `#line`, `#error`, `_Pragma`, and the predefined macros. Without conditionals, system headers
   such as `<cstdio>` cannot be included yet.
-- Classes, templates and overloading.
+- Member functions, constructors and destructors, inheritance, enums, namespaces, templates and
+  overloading.
 - `if constexpr`, and taking the address of a variable in a namespace-scope initializer
   (`int* p = &g;` passes the front end but not code generation yet).
 - Exceptions.
@@ -57,11 +63,12 @@ build/bin/ycxx cxx hello.cpp -o hello && ./hello
 Nothing beyond the subset above compiles, so neither real programs nor libycxx do yet.
 
 **In progress**, one slice per epic:
+- classes and the object model ([#86](https://github.com/yrashk/ycxx/issues/86));
 - the preprocessor ([#85](https://github.com/yrashk/ycxx/issues/85));
 - the resident daemon, with the multithreaded scheduler
   ([#84](https://github.com/yrashk/ycxx/issues/84)).
 
-Next come classes ([#86](https://github.com/yrashk/ycxx/issues/86)), then templates
+Next come templates
 ([#88](https://github.com/yrashk/ycxx/issues/88)) and exceptions
 ([#89](https://github.com/yrashk/ycxx/issues/89)).
 
