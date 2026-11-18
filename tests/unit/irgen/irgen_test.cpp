@@ -154,7 +154,12 @@ struct Body {
 
   NodeId lit(QualType t, std::string spelling) { return add(ast::Literal{pr(t), w.f.constant(spelling)}); }
   NodeId str(std::string s) { return add(ast::Literal{lv(w.char5_t), w.f.constant("\"" + s + "\"")}); }
-  NodeId param(EntityId e, QualType t) { return add(ast::DeclRef{lv(t), e}); }
+  // The parameters are the first locals (#41): declare them before anything else.
+  std::map<EntityId, std::uint32_t> param_locals;
+  void params(std::initializer_list<std::pair<EntityId, QualType>> ps) {
+    for (auto [e, t] : ps) param_locals[e] = declare(w.f.entities.at(std::to_underlying(e)), t);
+  }
+  NodeId param(EntityId e, QualType) { return local(param_locals.at(e)); }
   NodeId global(EntityId e, QualType t) { return add(ast::DeclRef{lv(t), e}); }
   NodeId local(std::uint32_t i) { return add(ast::LocalRef{lv(locals[i].type), i}); }
   NodeId conv(ast::ConversionKind k, QualType to, NodeId from) {
@@ -165,7 +170,7 @@ struct Body {
   NodeId bin(ast::BinaryOp op, QualType t, NodeId l, NodeId r) { return add(ast::Binary{pr(t), op, {l, 0}, {r, 0}}); }
   NodeId ord(ast::OrderedOp op, QualType t, NodeId l, NodeId r) { return add(ast::OrderedBinary{pr(t), op, {l, 0}, {r, 0}}); }
   NodeId un(ast::UnaryOp op, ast::ExprInfo i, NodeId o) { return add(ast::Unary{i, op, {o, 0}}); }
-  NodeId assign(ast::AssignOp op, QualType t, NodeId l, NodeId r) { return add(ast::Assign{lv(t), op, {l, 0}, {r, 0}}); }
+  NodeId assign(ast::AssignOp op, QualType t, NodeId l, NodeId r) { return add(ast::Assign{lv(t), op, {l, 0}, {r, 0}, t}); }
   NodeId call(EntityId f, QualType t, std::initializer_list<NodeId> args) {
     std::vector<Child> cs;
     for (NodeId a : args) cs.push_back({a, 0});
@@ -180,7 +185,10 @@ struct Body {
     locals.push_back({w.in.names.intern(name), t, EntityId::none, NodeId::none, 0});
     return std::uint32_t(locals.size() - 1);
   }
-  NodeId var(std::uint32_t i, NodeId init = NodeId::none) { return add(ast::LocalVar{i, {init, 0}}); }
+  NodeId var(std::uint32_t i, NodeId init = NodeId::none) {
+    NodeId v = add(ast::LocalVar{i, {init, 0}});
+    return add(ast::DeclStmt{b.list({{v, 0}})});
+  }
   NodeId ret(NodeId v = NodeId::none) { return add(ast::Return{{v, 0}, no_cleanups()}); }
   NodeId expr(NodeId e) { return add(ast::ExprStmt{{e, 0}}); }
   NodeId block(std::initializer_list<NodeId> stmts, std::initializer_list<std::uint32_t> offsets = {}) {
@@ -268,6 +276,7 @@ void params_and_if() {
   World w;
   Body b{w};
   EntityId f = w.f.entity("max"), a = w.f.entity("a"), bb = w.f.entity("b");
+  b.params({{a, w.int_t}, {bb, w.int_t}});
   auto rd = [&](EntityId e) { return b.read(b.param(e, w.int_t), w.int_t); };
   auto body = b.finish(b.block({b.if_(b.bin(ast::BinaryOp::lt, w.bool_t, rd(a), rd(bb)), b.ret(rd(bb)), b.ret(rd(a)))}));
   expect(w, {f, w.fn_iii, {{a, w.int_t}, {bb, w.int_t}}}, body, R"(
@@ -306,6 +315,7 @@ void for_loop_unsigned() {
   World w;
   Body b{w};
   EntityId f = w.f.entity("sum"), n = w.f.entity("n");
+  b.params({{n, w.unsigned_t}});
   auto s = b.declare("s", w.unsigned_t), i = b.declare("i", w.unsigned_t);
   auto body = b.finish(b.block({
       b.var(s, b.lit(w.unsigned_t, "0")),
@@ -365,6 +375,7 @@ void while_break_continue() {
   World w;
   Body b{w};
   EntityId f = w.f.entity("f"), n = w.f.entity("n");
+  b.params({{n, w.int_t}});
   auto k = b.declare("k", w.int_t), t = b.declare("t", w.int_t);
   auto pn = [&] { return b.param(n, w.int_t); };
   auto body = b.finish(b.block({
@@ -399,6 +410,7 @@ void short_circuit_and_conditional() {
   World w;
   Body b{w};
   EntityId f = w.f.entity("f"), a = w.f.entity("a"), bb = w.f.entity("b");
+  b.params({{a, w.int_t}, {bb, w.int_t}});
   auto rd = [&](EntityId e) { return b.read(b.param(e, w.int_t), w.int_t); };
   auto tb = [&](NodeId x) { return b.conv(ast::ConversionKind::boolean, w.bool_t, x); };
   auto both = b.ord(ast::OrderedOp::logical_and, w.bool_t, tb(rd(a)), tb(rd(bb)));
@@ -451,6 +463,7 @@ void recursion_and_promotions() {
     World w;
     Body b{w};
     EntityId f = w.f.entity("fact"), n = w.f.entity("n");
+    b.params({{n, w.int_t}});
     w.f.constexpr_fns.insert(std::to_underlying(f));
     auto rn = [&] { return b.read(b.param(n, w.int_t), w.int_t); };
     auto body = b.finish(b.block({b.ret(b.cond(
@@ -552,6 +565,7 @@ func @next {
     World w;
     Body b{w};
     EntityId f = w.f.entity("len"), s = w.f.entity("s");
+    b.params({{s, w.cchar_p}});
     auto n = b.declare("n", w.int_t);
     auto ps = [&] { return b.param(s, w.cchar_p); };
     auto deref_post = b.un(ast::UnaryOp::deref, b.lv(w.cchar_t), b.un(ast::UnaryOp::post_inc, b.pr(w.cchar_p), ps()));
@@ -580,6 +594,7 @@ void more_expressions() {
   World w;
   Body b{w};
   EntityId h = w.f.entity("h"), a = w.f.entity("a"), p = w.f.entity("p");
+  b.params({{a, w.int_t}, {p, w.cchar_p}});
   auto x = b.declare("x", w.int_t), y = b.declare("y", w.int_t);
   auto ra = [&] { return b.read(b.param(a, w.int_t), w.int_t); };
   auto tb = [&](NodeId v) { return b.conv(ast::ConversionKind::boolean, w.bool_t, v); };

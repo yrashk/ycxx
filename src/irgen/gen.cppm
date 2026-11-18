@@ -54,10 +54,6 @@ struct FunctionInput {
   std::uint32_t body_offset = 0;  // the declaration part's length in tokens
 };
 
-// A parameter's id in `FunctionDebug::vars`: parameters are not body locals, so they are numbered
-// from here, in declaration order.
-constexpr std::uint32_t param_debug_base = 1u << 31;
-
 struct FunctionIr {
   ir::Function body;
   ir::FunctionDebug debug;  // keyed by `body`'s node ids
@@ -238,14 +234,16 @@ class Gen {
     enter(b_.add_block(entry));
     loc_ = fn_.body_offset;
     push_scope();
+    // The parameters are the first body locals (#41), named by `LocalRef` like the others.
+    slots_.assign(in_.seqs.size(fn_.body.locals), std::nullopt);
+    if (slots_.size() < params.size()) throw Unsupported{"a body whose locals do not start with the parameters"};
     for (uint32_t i = 0; i < params.size(); ++i) {
       Place p = begin_object(params[i].type, ir::Init::indeterminate);
-      debug_.vars.push_back({ir::LocalId(param_debug_base + i), {last_node()}});
+      debug_.vars.push_back({ir::LocalId(i), {last_node()}});
       store(p, b_.param(block_, i + 1));
       start_lifetime(p);
-      if (params[i].entity != ast::EntityId::none) params_.emplace_back(params[i].entity, p);
+      slots_[i] = p;
     }
-    slots_.assign(in_.seqs.size(fn_.body.locals), std::nullopt);
     stmt({fn_.body.tree, fn_.body_offset});
     if (live_) {
       // Flowing off the end ([stmt.return]): `main` returns 0 ([basic.start.main]); any other
@@ -321,9 +319,13 @@ class Gen {
       pop_scope();
     } else if (is<ast::ExprStmt>(a)) {
       discard(child(a, get<ast::ExprStmt>(a).expr));
-    } else if (is<ast::Null>(a)) {
-    } else if (is<ast::LocalVar>(a)) {
-      local_var(a);
+    } else if (is<ast::DeclStmt>(a)) {
+      for (ast::Child c : ast_.children(get<ast::DeclStmt>(a).decls)) {
+        At v = child(a, c);
+        Position at(loc_, v.offset);
+        if (!is<ast::LocalVar>(v)) unsupported(v, "in a declaration statement");
+        local_var(v);
+      }
     } else if (is<ast::Return>(a)) {
       auto r = get<ast::Return>(a);
       if (in_.seqs.size(r.cleanups)) unsupported(a, "with cleanups");
@@ -528,6 +530,9 @@ class Gen {
         if (same_type(info(from).type, t)) return v;
         return pure(ir::Op::ptr_cast, t, {v}, {word(ty(t))});
       }
+      case ast::ConversionKind::to_void:
+        discard(from);
+        return std::nullopt;
       case ast::ConversionKind::null_pointer:
         if (effects(from)) discard(from);  // a null pointer constant has no value to compute ([conv.ptr])
         return constant(t, facts_.null_constant(t));
@@ -734,8 +739,6 @@ class Gen {
     }
     if (is<ast::DeclRef>(a)) {
       ast::EntityId e = get<ast::DeclRef>(a).entity;
-      for (auto& [pe, p] : params_)
-        if (pe == e) return p;
       if (cls(t) == TypeClass::function) unsupported(a, "naming a function as an object");
       // A namespace-scope variable: its address is a constant of the entity ([basic.stc.static]).
       return {pure(ir::Op::global, facts_.pointer_to(t), {}, {word(e)}), t};
@@ -793,13 +796,14 @@ class Gen {
     ValueId r{};
     if (cls(p.type) == TypeClass::pointer) {
       if (s.op != ast::AssignOp::add && s.op != ast::AssignOp::sub) unsupported(a, "on a pointer");
-      ast::QualType it = info(rhs).type;
+      ast::QualType it = info(rhs).type;  // an integer; `computation` is the pointer type
       ValueId i = s.op == ast::AssignOp::add ? v
                 : pure(ir::Op::neg, it, {v}, {}, is_signed(it) ? ir::bit(ir::Flag::nsw) : 0);
       r = pure(ir::Op::ptr_add, p.type, {old, i}, {word(ty(facts_.pointee(p.type)))});
     } else {
       bool is_shift = s.op == ast::AssignOp::shl || s.op == ast::AssignOp::shr;
-      ast::QualType ct = is_shift ? facts_.promoted(p.type) : info(rhs).type;
+      // The left operand is converted to the computation type and the result back ([expr.assign]).
+      ast::QualType ct = s.computation;
       ValueId x = same_type(ct, p.type) ? old : pure(ir::Op::iconv, ct, {old});
       if (is_shift) {
         r = shift(s.op == ast::AssignOp::shl, ct, x, v);
@@ -832,7 +836,6 @@ class Gen {
   std::vector<std::vector<Place>> scopes_;
   std::vector<Loop> loops_;
   std::vector<std::optional<Place>> slots_;  // by local index
-  std::vector<std::pair<ast::EntityId, Place>> params_;
 };
 
 template <Facts F>
