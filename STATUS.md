@@ -568,11 +568,13 @@ the same handler in-process.
 - Tests:
   - `unit.daemon`: framing and malformed frames, root discovery, the quantum under simulated
     time, file-table batches, and the real watcher with cookie sync.
-  - `daemon.compare` (`tests/daemon/compare.py`): `tests/own/slice` and `smoke` whole and every
-    8th test of the other suites (`--all`: every test), in four actions, through a daemon and
-    in-process, byte for byte; two directories with one argv, edits, fallback, and a killed
-    daemon. One daemon (one pid) must answer until it is killed, so a crash hidden by the
-    client's retry fails it. Divergences with their own issue are listed (`KNOWN`, #115).
+  - `daemon.compare` (`tests/daemon/compare.py`): `tests/own/slice` and `smoke` whole and a
+    fixed eighth of the other suites, by name hash (`--all`: every test), in four actions,
+    through a daemon and in-process, byte for byte; two directories with one argv, edits,
+    fallback, and a killed daemon. One daemon (one pid, pinned by a first request) must answer
+    until it is killed, so a crash hidden by the client's retry fails it. `--all` shows 12
+    `classes/` tests diverging after earlier tests' structs (#115); `KNOWN` lists the
+    divergences of the default run that have their own issue (none today).
   - `daemon.process` (`tests/daemon/process.py`, #98): an edit landing mid-build (restarted,
     answered as the final state, counted in `ctl status`), a killed client (cancelled), a killed
     daemon mid-request (the client retries), a restart, and concurrent clients.

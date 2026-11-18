@@ -16,9 +16,9 @@ Covered, each answer compared with a cold (in-process) compile of the same files
 Not yet: the cache across a restart (`executed` below a cold run, `durable + validated > 0`,
 #17), and every answer at 1 and P threads (#139).
 
-A slow translation unit (tens of thousands of statements, a few seconds) opens the window in
-which an edit or a kill lands. Each variant changes its constant, so the daemon cannot answer it
-from cells it already holds.
+A slow translation unit (tens of thousands of statements: 1.5-3 s in the Debug build CI uses;
+a Release build would need more) opens the window in which an edit or a kill lands. Each variant
+changes its constant, so the daemon cannot answer it from cells it already holds.
 """
 import os, signal, subprocess, sys, tempfile, threading, time, shutil
 from pathlib import Path
@@ -44,7 +44,10 @@ class Env:
         base = {k: v for k, v in os.environ.items() if k not in ('YCXX_DAEMON', 'YCXX_NO_DAEMON', 'YCXX_ROOT', 'YCXX_NO_WATCH')}
         base['YCXX_RUNTIME_DIR'] = self.runtime
         base['YCXX_DAEMON_IDLE_EXIT'] = '300'
+        base['XDG_CACHE_HOME'] = str(self.scope / '.cache')  # the persistent cache, once #17 has one
         self.base = base
+        self.clients = []  # every client started, killed on close
+        self.pids = set()  # every daemon seen, killed on close
         self.daemon = dict(base, YCXX_DAEMON='require')
         self.cold = dict(base, YCXX_NO_DAEMON='1')
 
@@ -53,18 +56,31 @@ class Env:
         return p.returncode, p.stdout, p.stderr
 
     def start(self, args, cwd):
-        return subprocess.Popen([self.ycxx, 'cxx', '-v', *args], cwd=cwd, env=self.daemon, stdout=subprocess.PIPE,
-                                stderr=subprocess.PIPE)
+        c = subprocess.Popen([self.ycxx, 'cxx', '-v', *args], cwd=cwd, env=self.daemon, stdout=subprocess.PIPE,
+                             stderr=subprocess.PIPE)
+        self.clients.append(c)
+        return c
 
     def status(self):
         p = subprocess.run([self.ycxx, 'ctl', 'status'], cwd=self.scope, env=self.base, capture_output=True, text=True,
                            timeout=60)
         if p.returncode != 0:
             return {}
-        return {k: v for k, v in (line.split(': ', 1) for line in p.stdout.splitlines() if ': ' in line)}
+        st = {k: v for k, v in (line.split(': ', 1) for line in p.stdout.splitlines() if ': ' in line)}
+        if int(st.get('pid', 0)) > 1:
+            self.pids.add(int(st['pid']))
+        return st
 
     def number(self, field):
         return int(self.status().get(field, -1))
+
+    def pid(self):
+        """The daemon's pid; None (and a failure) when no daemon answers `ctl status`."""
+        pid = self.number('pid')
+        if pid <= 1:
+            fail('no daemon answers `ctl status`')
+            return None
+        return pid
 
     def same_daemon(self, test, pid):
         """A client restarts a daemon that died and asks again, which would hide a crash: the
@@ -74,16 +90,33 @@ class Env:
             fail(f'{test}: the daemon changed (pid {pid} before, {now} after): it died and a client restarted it')
 
     def close(self):
-        pid = self.status().get('pid')
-        subprocess.run([self.ycxx, 'ctl', 'shutdown'], cwd=self.scope, env=self.base, capture_output=True, timeout=60)
-        if pid:
-            gone(int(pid), 5)
+        """Every step survives a failure of the one before: clients killed (so none retries into
+        a new daemon), the daemon asked to shut down, every daemon seen killed if it lingers,
+        the log's tail printed after a failure, and the directories removed last."""
+        for c in self.clients:
+            if c.poll() is None:
+                c.kill()
+                c.wait()
+        try:
+            self.status()
+            subprocess.run([self.ycxx, 'ctl', 'shutdown'], cwd=self.scope, env=self.base, capture_output=True, timeout=30)
+        except subprocess.TimeoutExpired:
+            pass
+        for pid in self.pids:
+            gone(pid, 5)
+        if failures:
+            for log in Path(self.runtime).glob('*.log'):
+                print(f'--- the daemon\'s log ({log.name}), last lines:', file=sys.stderr)
+                print('\n'.join(log.read_text(errors='replace').splitlines()[-40:]), file=sys.stderr)
         shutil.rmtree(self.scope, ignore_errors=True)
         shutil.rmtree(self.runtime, ignore_errors=True)
 
 
 def gone(pid, seconds):
-    """Waits for `pid` to exit; kills it after `seconds`."""
+    """Waits for `pid` to exit; kills it after `seconds`. Never signals a pid of 1 or less (-1 is
+    every process of the user)."""
+    if pid is None or pid <= 1:
+        return
     for _ in range(int(seconds * 20)):
         try:
             os.kill(pid, 0)
@@ -145,6 +178,10 @@ def edit_during_build(env):
         files['mid.cpp'] = 'int mid() { return 2; }\n'
         for name, text in files.items():
             (d / name).write_text(text)
+        # Cheap requests that read every file first: they apply the setup's own batch and give
+        # mid.cpp a table entry, so the counters below move only for the edit made mid-build.
+        for name in files:
+            env.cxx(['-E', name], d, env.daemon)
         restarts_before = env.number('restarts')
         revision_before, changed_before = env.number('revision'), env.number('inputs_changed')
         client = env.start(args, d)
@@ -211,7 +248,11 @@ def killed_daemon(env):
     client = env.start(args, d)
     if not wait_until(lambda: env.number('live') >= 1, 30):
         fail('killed daemon: the request never showed as live')
-    pid = env.number('pid')
+    pid = env.pid()
+    if pid is None:
+        client.kill()
+        client.wait()
+        return
     os.kill(pid, signal.SIGKILL)
     out, err = client.communicate(timeout=300)
     want_code, want_bytes = cold_build(env, files, args, 'prog')
@@ -229,7 +270,9 @@ def restart(env):
     (d / 'r.cpp').write_text('int main() { return 6; }\n')
     args = ['-c', 'r.cpp', '-o', 'r.o']
     env.cxx(args, d, env.daemon)
-    pid = env.number('pid')
+    pid = env.pid()
+    if pid is None:
+        return
     subprocess.run([env.ycxx, 'ctl', 'shutdown'], cwd=env.scope, env=env.base, capture_output=True, timeout=60)
     gone(pid, 10)
     code, _, _ = env.cxx(args, d, env.daemon)
@@ -276,10 +319,14 @@ def main():
         # A first request starts the daemon; every test but the two that replace it on purpose
         # must leave the same daemon answering.
         (env.scope / 'first.cpp').write_text('int main() { return 0; }\n')
-        env.cxx(['-c', 'first.cpp', '-o', 'first.o'], env.scope, env.daemon)
+        if env.cxx(['-c', 'first.cpp', '-o', 'first.o'], env.scope, env.daemon)[0] != 0 or env.pid() is None:
+            fail('the first request through the daemon failed: no test can run')
+            return 1
         for test in (edit_during_build, killed_client, killed_daemon, restart, concurrent_clients):
             t0 = time.monotonic()
-            pid = env.number('pid')
+            pid = env.pid()
+            if pid is None:
+                break
             test(env)
             if test not in (killed_daemon, restart):
                 env.same_daemon(test.__name__, pid)
