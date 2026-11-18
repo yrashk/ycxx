@@ -47,15 +47,16 @@ class State:
     def secs(self, test_id):
         return self.durations.get(self.cxx, {}).get(test_id, DEFAULT_SECS)
 
-    def update(self, results, commit):
-        """results: {test id: (code, seconds)}. Bad codes become failing; good ones clear."""
+    def update(self, results, commit, last_run=True):
+        """results: {test id: (code, seconds)}. Bad codes become failing, PASS and XFAIL clear;
+        UNSUPPORTED says nothing (a missing oracle must not forget a failure)."""
         d = self.durations.setdefault(self.cxx, {})
         for tid, (code, secs) in results.items():
             if code != 'UNSUPPORTED':
                 d[tid] = round(secs, 3)
-            if code in ('PASS', 'XFAIL', 'UNSUPPORTED'):
+            if code in ('PASS', 'XFAIL'):
                 self.failing.discard(tid)
-            else:
+            elif code != 'UNSUPPORTED':
                 self.failing.add(tid)
         _write(self.dir / 'durations.json', self.durations)
         bf = branch_file(self.dir, self.branch)
@@ -63,8 +64,9 @@ class State:
         data[self.cxx] = {'failing': sorted(self.failing), 'commit': commit,
                           'updated': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}
         _write(bf, data)
-        _write(self.dir / 'last-run.json', {'branch': self.branch, 'cxx': self.cxx, 'commit': commit,
-                                            'results': {k: list(v) for k, v in results.items()}})
+        if last_run:
+            _write(self.dir / 'last-run.json', {'branch': self.branch, 'cxx': self.cxx, 'commit': commit,
+                                                'results': {k: list(v) for k, v in results.items()}})
 
 
 def merge(target, sources):
@@ -74,7 +76,7 @@ def merge(target, sources):
         last = _read(Path(s) / 'last-run.json')
         if last:
             State(target, last['branch'], last['cxx']).update(
-                {tid: tuple(v) for tid, v in last['results'].items()}, last['commit'])
+                {tid: tuple(v) for tid, v in last['results'].items()}, last['commit'], last_run=False)
 
 
 def shard(tests, secs, index, count, loads=None):

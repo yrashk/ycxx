@@ -3,7 +3,7 @@ import argparse, concurrent.futures as cf, os, platform, re, shlex, shutil, subp
 import traceback
 from pathlib import Path
 
-from . import discover, kinds, report, state, toolchain
+from . import discover, kinds, report, state, toolchain, transcript
 
 REPO = Path(__file__).resolve().parents[2]
 TESTS = REPO / 'tests'
@@ -236,14 +236,16 @@ def run_tests(ui, args, stage, tests, ctx, results, shown_failures, interrupted)
             pace = min(4.0, max(0.25, el / max(done_exp / max(1, args.jobs), 0.01))) if done_exp else 1.0
             left = (expected - done_exp) / max(1, args.jobs) * pace
             now = time.monotonic()
-            slow = max(running.items(), key=lambda kv: now - kv[1], default=None)
+            slow = max(list(running.items()), key=lambda kv: now - kv[1], default=None)
             ui.status(f'  {ui.cyan}{stage}{ui.reset} {done}/{total} ' +
                       ' '.join(f'{c.lower()} {n}' for c, n in counts.items()) +
                       f' · {dur(el)} · ETA ~{dur(left)}' +
                       (f' · running {slow[0]} ({dur(now - slow[1])})' if slow else ''))
     except KeyboardInterrupt:
         interrupted[0] = True
-        pool.shutdown(wait=True, cancel_futures=True)
+        pool.shutdown(wait=False, cancel_futures=True)
+        transcript.kill_all()  # the commands run in their own process groups
+        pool.shutdown(wait=True)
         ui.clear()
         ui.warn('interrupted (Ctrl-C)', f'{done} of {total} tests finished in this stage')
         return False
@@ -284,7 +286,12 @@ def _main(argv):
         return EXIT_OK
 
     stages = [w for w in args.what if w in STAGES]
-    filters = [w.removeprefix('tests/').rstrip('/') for w in args.what if w not in STAGES]
+    filters = []
+    for w in (w for w in args.what if w not in STAGES):
+        p = Path(w)
+        if p.is_absolute() or p.exists():  # a path: relative to tests/
+            p = Path(os.path.relpath(p.resolve(), TESTS))
+        filters.append(p.as_posix().removeprefix('tests/').rstrip('/').removeprefix('./'))
     stop_on_fail = args.fail_fast
     tier = 'fast' if args.fast else args.tier
     if tier:
@@ -325,8 +332,14 @@ def _main(argv):
     alltests = discover.discover(TESTS)
     for t in alltests:
         t.expected = st.secs(t.id)
-    sel = [t for t in alltests if not filters or any(
-        t.id == f or t.id.startswith(f + '/') or t.id.startswith(f) for f in filters)]
+    for f in filters:
+        if f == '.':
+            continue
+        if not any(t.id == f or t.id.startswith(f) for t in alltests):
+            print(f'tools/test: "{f}" is neither a stage ({" ".join(STAGES)}) nor a prefix of a test', file=sys.stderr)
+            return EXIT_USAGE
+    filters = [f for f in filters if f != '.']
+    sel = [t for t in alltests if not filters or any(t.id == f or t.id.startswith(f) for f in filters)]
     if tier != 'nightly':
         sel = [t for t in sel if t.one('TIER') != 'nightly']
     picked, plan, notes = set(), {}, {}
@@ -344,11 +357,11 @@ def _main(argv):
         else:
             continue
         ts = [t for t in ts if t.id not in picked]
+        picked |= {t.id for t in ts}  # before sharding: every shard must see the same stage lists
         if shard:
             ts, _ = state.shard(ts, st.secs, *shard, loads)
             notes[s] = (notes.get(s, '') + f'; shard {shard[0]}/{shard[1]}').lstrip('; ')
         ts.sort(key=lambda t: (-t.expected, t.id))  # longest first: the pool finishes together
-        picked |= {t.id for t in ts}
         plan[s] = ts
 
     if args.list:
@@ -375,6 +388,9 @@ def _main(argv):
     if args.require_oracles and not all(compilers[o].available for o in toolchain.ORACLES):
         print('tools/test: --require-oracles: an oracle is missing', file=sys.stderr)
         return EXIT_USAGE
+    if args.cxx != 'ycxx' and not cut.available:
+        print(f'tools/test: the compiler under test, {args.cxx}, is not found ({cut.why_missing})', file=sys.stderr)
+        return EXIT_USAGE
     if args.cxx == 'ycxx' and cut.features and not cut.available:
         print(f'tools/test: tests/features/ycxx.txt lists features but ycxx is not built ({cut.why_missing})',
               file=sys.stderr)
@@ -383,6 +399,8 @@ def _main(argv):
         meta['shard'] = f'{shard[0]}/{shard[1]}'
     ui.info('state', f'{args.state}' + (' (no failures recorded for this branch: using main\'s)' if st.inherited else ''))
 
+    if not args.no_state:  # what this run alone learned, for --merge-state; none yet
+        (Path(args.state) / 'last-run.json').unlink(missing_ok=True)
     logs = REPO / 'build' / 'test-logs'
     logs.mkdir(parents=True, exist_ok=True)
     ctx = kinds.Ctx(REPO, cut, compilers, args.oracle, REPO / 'build' / 'test-work' / args.cxx, args.timeout)

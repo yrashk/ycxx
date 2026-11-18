@@ -9,8 +9,25 @@ Every command a test runs is recorded, whether the test passes or not, as
 and every check the driver makes as `[check: ...]` lines, so that a passing test shows exactly
 how it was run and what it was compared with, and a failing one can be rerun by hand.
 """
-import os, shlex, subprocess, time
+import os, shlex, signal, subprocess, threading, time
 from dataclasses import dataclass
+
+# The process groups of the commands running now. Each command gets its own, so that a timeout
+# kills the whole tree (g++ runs cc1plus and as); Ctrl-C reaches them through kill_all().
+_live, _lock = set(), threading.Lock()
+
+
+def _killpg(pid):
+    try:
+        os.killpg(pid, signal.SIGKILL)
+    except OSError:
+        pass
+
+
+def kill_all():
+    with _lock:
+        for pid in list(_live):
+            _killpg(pid)
 
 
 @dataclass
@@ -39,18 +56,27 @@ class Transcript:
         loc = f'(cd {shlex.quote(str(cwd))} && ' if cwd else ''
         self.note(f'$ {loc}{shlex.join(str(c) for c in cmd)}{")" if cwd else ""}')
         try:
-            p = subprocess.run([str(c) for c in cmd], cwd=cwd, capture_output=True, text=True,
-                               errors='replace', timeout=timeout, env=env)
-        except subprocess.TimeoutExpired as e:
-            secs = time.monotonic() - t0
-            self.note(f'[{step}: TIMEOUT after {timeout}s]')
-            self.steps.append(f'{step} TIMEOUT')
-            out = e.stdout.decode(errors='replace') if isinstance(e.stdout, bytes) else (e.stdout or '')
-            return Run(None, out, '', secs)
+            proc = subprocess.Popen([str(c) for c in cmd], cwd=cwd, stdout=subprocess.PIPE,
+                                    stderr=subprocess.PIPE, text=True, errors='replace', env=env,
+                                    start_new_session=True)
         except OSError as e:  # not found, not executable
             self.note(f'[{step}: exit 127, 0.00s]\n{e}')
             self.steps.append(f'{step} exit 127')
             return Run(127, '', str(e), 0.0)
+        with _lock:
+            _live.add(proc.pid)
+        try:
+            stdout, stderr = proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            _killpg(proc.pid)
+            stdout, _ = proc.communicate()
+            self.note(f'[{step}: TIMEOUT after {timeout}s]')
+            self.steps.append(f'{step} TIMEOUT')
+            return Run(None, stdout or '', '', time.monotonic() - t0)
+        finally:
+            with _lock:
+                _live.discard(proc.pid)
+        p = subprocess.CompletedProcess(proc.args, proc.returncode, stdout, stderr)
         secs = time.monotonic() - t0
         self.note(f'[{step}: exit {p.returncode}, {secs:.2f}s]')
         self.steps.append(f'{step} exit {p.returncode} {secs:.2f}s')

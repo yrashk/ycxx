@@ -66,7 +66,7 @@ tests marked `// TIER: nightly`.
 
 **State** (`build/test-state/`, `--state`): `durations.json` (each test's last duration, per
 compiler) and `failures/<branch>.json` (the tests failing on that branch). A run updates only the
-tests it ran, so a test stays failing until it passes. The branch comes from `--branch`, else
+tests it ran, so a test stays failing until it passes (UNSUPPORTED leaves it as it was). The branch comes from `--branch`, else
 `$GITHUB_HEAD_REF`/`$GITHUB_REF_NAME`, else git.
 
 **Sharding** (`--shard I/N`): longest-processing-time-first over the recorded durations, balanced
@@ -95,7 +95,7 @@ reports key on it. Its kind comes from its suffix:
 **Error markers:** `//! error` expects an error on its own line, `//! error@+1` / `@-2` on a
 relative line, `@12` on line 12; `:5` adds a column (`//! error@+1:5`). Every expected location
 must get an error and every error must be expected. Locations are parsed from
-`file:line:col: error:` lines. Leave the column out where Clang and GCC disagree on it.
+`file:line:col: error:` lines. A crash (a signal, or an exit status above 1) is never a rejection. Leave the column out where Clang and GCC disagree on it.
 
 **Directives** (`// KEY: value` lines):
 

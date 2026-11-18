@@ -49,6 +49,11 @@ def run(tr, step, cmd, timeout, **kw):
     return r
 
 
+def crashed(status):
+    """A signal or an exit status other than 0 and 1: an internal error, never a verdict."""
+    return status is not None and (status < 0 or status > 1)
+
+
 def need(compiler, feature):
     why = compiler.lacks(feature)
     if why:
@@ -73,6 +78,8 @@ def verdict_problems(ctx, r, expected, cwd):
     actual = toolchain.errors_in(r.stdout + r.stderr, cwd)
     show = lambda f, l, c: f'{rel(ctx, f)}:{l}' + (f':{c}' if c else '')
     problems = []
+    if crashed(r.status):
+        problems.append(f'crashed (exit {r.status}): a rejection is exit 1 with diagnostics')
     for f, l, c in sorted(expected, key=lambda e: (e[0], e[1], e[2] or 0)):
         if not any(af == f and al == l and (c is None or ac == c) for af, al, ac in actual):
             problems.append(f'expected an error at {show(f, l, c)}: none reported')
@@ -166,6 +173,8 @@ def build_and_run(c, src, ctx, tr, flags, timeout, work, tag='', label=''):
     """(compiled, exit status, stdout) of src built by c and run."""
     exe = work / f'{c.name}{tag}.out'
     r = run(tr, f'{label}build', c.build(src, exe, flags), timeout, cwd=src.parent)
+    if crashed(r.status):
+        raise Failed(f'{c.name} crashed building {src.name} (exit {r.status})')
     if r.status != 0:
         return False, r.status, ''
     r = run(tr, f'{label}run', [exe], timeout, cwd=work)
@@ -196,7 +205,7 @@ def observe(c, mode, test, ctx, tr, flags, timeout, work):
     """What compiler c makes of the test, as a comparable value."""
     if mode == 'verdict':
         r = run(tr, f'{c.name} syntax', c.syntax(test.path, flags), timeout, cwd=test.path.parent)
-        return ('accept',) if r.status == 0 else ('reject',)
+        return ('crash', r.status) if crashed(r.status) else ('accept',) if r.status == 0 else ('reject',)
     if mode == 'preprocess':
         st, lines = preprocessed(c, test, ctx, tr, flags, timeout, work, False)
         return ('exit', st, tuple(lines) if st == 0 else ())
@@ -205,6 +214,8 @@ def observe(c, mode, test, ctx, tr, flags, timeout, work):
 
 
 def show(v):
+    if v[0] == 'crash':
+        return f'crashed (exit {v[1]})'
     if v[0] == 'reject' or v == ('accept',):
         return v[0] + 'ed'
     if v[0] == 'exit':

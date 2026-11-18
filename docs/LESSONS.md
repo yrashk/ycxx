@@ -73,6 +73,15 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
 
 ## Evidence and tests
 
+- **Test a selection's invariant end to end, not just its helper.** The test driver's shard
+  helper was unit-tested and correct, but main.py fed each stage a list that depended on earlier
+  shards' picks, so shards skipped some tests and doubled others: CI could go green without
+  running them. A review found it; a self-test running `tools/test --list --shard i/N` for every
+  i and checking the union equals the unsharded list now guards it.
+  - Do: for partitioning, ordering or filtering code, check the invariant (every item once,
+    nothing lost) through the real entry point, with state that makes the stages interact.
+  - Learned on #5.
+
 - **Run sanitizers on any concurrent code before trusting its results.** The spike's fork-join
   passed its demos while one of them crashed now and then: the joiner freed the join while the
   last finisher was still notifying it. ASan found the bug at once; TSan and repeated fuzzing

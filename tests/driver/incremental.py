@@ -60,7 +60,9 @@ def parse(text):
             if words[:1] == ['delete'] and len(words) == 2:
                 if not states:
                     raise ValueError('"--- delete" in the base state')
-                files.pop(words[1], None)
+                if words[1] not in files:
+                    raise ValueError(f'"--- delete {words[1]}": no such file in the state')
+                files.pop(words[1])
                 cur = None
             elif len(words) == 1:
                 if Path(words[0]).is_absolute() or '..' in Path(words[0]).parts:
@@ -97,6 +99,8 @@ def observe(c, action, main, d, ctx, tr, flags, timeout, label):
     src = d / main
     if action == 'syntax':
         r = kinds.run(tr, f'{label} syntax', c.syntax(src, flags), timeout, cwd=d)
+        if kinds.crashed(r.status):
+            raise kinds.Failed(f'{label}: {c.name} crashed (exit {r.status})')
         errs = sorted((os.path.relpath(f, os.path.realpath(d)), l, col)
                       for f, l, col in kinds.toolchain.errors_in(r.stdout + r.stderr, d))
         return ('accept' if r.status == 0 else 'reject', tuple(errs)), r
@@ -113,7 +117,8 @@ def incremental_results(c, states, action, main, ctx, tr, flags, timeout, work):
     if c.name == 'ycxx':
         # #19 replaces this with the daemon's protocol: load states[0], apply each edit as a
         # file change, ask for the action's result after each.
-        raise kinds.Unsupported('the ycxx incremental protocol is not wired yet (#19)')
+        raise kinds.Unresolved('tests/features/ycxx.txt lists "incremental", but its protocol is not '
+                               'wired here yet (#19)')
     tr.note(f'# incremental side: {c.name} has no incremental mode; one directory edited in place, '
             'compiled cold after each edit')
     d = work / 'incremental'
@@ -150,6 +155,9 @@ def run_test(test, ctx, tr, flags, timeout, work):
             problems, _ = kinds.verdict_problems(ctx, r, expected, d)
             if problems:
                 raise kinds.Failed(f'state {i} (cold): ' + '; '.join(problems))
+        elif cold[0] == 'reject' or (action == 'preprocess' and cold[0] != 0):
+            raise kinds.Failed(f'state {i} (cold): did not {"build" if action == "run" else "preprocess"}; '
+                               f'a {action} action needs every state to')
         if inc[i] != cold:
             tr.note(f'incremental: {inc[i]!r:.300}\ncold:        {cold!r:.300}')
             raise kinds.Failed(f'state {i}: the incremental result differs from the cold run')

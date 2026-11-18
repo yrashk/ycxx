@@ -5,7 +5,7 @@ says which in its `// FIXTURE: <code>` line. They run with Clang (else GCC) as t
 under test, so a driver that passes everything, or fails everything, is caught. The rest checks
 the parts that need no compiler: markers, the incremental format, sharding, state and selection.
 """
-import re, tempfile, unittest
+import json, re, subprocess, sys, tempfile, unittest
 from pathlib import Path
 
 from . import discover, incremental, kinds, state, toolchain
@@ -50,7 +50,8 @@ class Parts(unittest.TestCase):
     def test_incremental_format(self):
         states = incremental.parse('// h\n--- a.cpp\nx\n--- b.h\ny\n=== edit\n--- b.h\nz\n=== edit\n--- delete b.h\n')
         self.assertEqual(states, [{'a.cpp': 'x\n', 'b.h': 'y\n'}, {'a.cpp': 'x\n', 'b.h': 'z\n'}, {'a.cpp': 'x\n'}])
-        for bad in ('--- delete a.h\n', '--- ../x\n', '--- a\n=== frob\n', '=== edit\n'):
+        for bad in ('--- delete a.h\n', '--- ../x\n', '--- a\n=== frob\n', '=== edit\n',
+                    '--- a\nx\n=== edit\n--- delete b\n'):
             with self.assertRaises(ValueError, msg=bad):
                 incremental.parse(bad)
 
@@ -88,6 +89,36 @@ class Parts(unittest.TestCase):
             m = state.State(d, 'main', 'clang')
             self.assertEqual(m.failing, {'d'})
             self.assertEqual(m.secs('d'), 3.0)
+
+    def test_crash_is_not_a_rejection(self):
+        from .transcript import Run
+        ctx = kinds.Ctx(REPO, None, {}, 'clang', Path(), 1)
+        f = str(REPO / 'x.cpp')
+        r = Run(-11, '', f'{f}:1:1: error: boom\n', 0.0)
+        problems, _ = kinds.verdict_problems(ctx, r, {(f, 1, None)}, REPO)
+        self.assertTrue(any('crashed' in p for p in problems))
+
+    def test_unsupported_keeps_a_failure(self):
+        with tempfile.TemporaryDirectory() as d:
+            state.State(d, 'b', 'clang').update({'a': ('FAIL', 1.0)}, 'c1')
+            state.State(d, 'b', 'clang').update({'a': ('UNSUPPORTED', 0.0)}, 'c2')
+            self.assertEqual(state.State(d, 'b', 'clang').failing, {'a'})
+
+    def test_shards_partition_the_whole_plan(self):
+        # With a failing test in the failed stage, the shards of failed, core and wider together
+        # list every test exactly once.
+        with tempfile.TemporaryDirectory() as d:
+            state.State(d, 'b', 'clang').update({'own/smoke/exit-status.run.cpp': ('FAIL', 1.0)}, 'c1')
+            Path(d, 'last-run.json').unlink()
+            def listed(*extra):
+                p = subprocess.run([sys.executable, str(REPO / 'tools' / 'test'), '--list', '--cxx', 'clang',
+                                    '--state', d, '--branch', 'b', 'failed', 'core', 'wider', *extra],
+                                   capture_output=True, text=True, check=True)
+                return [l.split('\t')[0] for l in p.stdout.splitlines() if l and not l.startswith('#')]
+            whole = listed()
+            parts = [t for i in (1, 2, 3) for t in listed('--shard', f'{i}/3')]
+            self.assertEqual(sorted(parts), sorted(whole))
+            self.assertEqual(len(parts), len(set(parts)))
 
     def test_affected(self):
         tests = [discover.Test('own/a.run.cpp', Path(), 'own', 'run'), discover.Test('own/b.run.cpp', Path(), 'own', 'run')]
