@@ -41,7 +41,8 @@ provisioned on its own: `deps/libycxx/tools/toolchain/provision --clang-only`.
 | --- | --- |
 | `src/main.cpp`, `src/driver/` | the one `ycxx` binary and its command line: `ycxx <front>` picks the daemon or a client (DECISIONS §4.7) |
 | `src/daemon/` | the resident daemon (stub) |
-| `src/client/` | the clients: `cxx` (c++-compatible), `lsp`, `ctl` (stubs) |
+| `src/client/` | the clients: `cxx` (c++-compatible, runs the pipeline in-process), `lsp`, `ctl` (stubs) |
+| `src/pipeline/` | `ycxx.pipeline`: one translation unit from source to object, and the link to an executable (#43) |
 | `src/hash/` | `ycxx.hash`: the 128-bit fingerprint (MurmurHash3_x64_128, fixed seed) and reflection-derived structural hashing |
 | `src/engine/` | `ycxx.engine`: the query engine's core (docs/design/query-engine.md) |
 | `src/ir/` | `ycxx.ir`: L1; `ycxx.ir.l2`: L2; `ycxx.ir.lower`: L1 to L2 |

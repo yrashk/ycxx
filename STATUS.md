@@ -204,7 +204,7 @@ stay open for the rest.
     arithmetic and calling convention, over thousands of argument pairs. It covers narrow types,
     stack arguments both ways, function pointers and the GOT. Mutating `sdiv` or the stack packing
     makes it fail.
-- Not yet: the `unit`/`optimized`/`codegen` queries (#43 wires the pipeline), the allocation
+- Not yet: the `unit`/`optimized`/`codegen` queries (#63), the allocation
   validator and dependence checker (#29), SSA linear scan, list scheduling, unwind info and DWARF,
   `cost_model`, variadic calls, more than one result, frame objects aligned above 16 bytes.
 
@@ -349,6 +349,35 @@ one import `ycxx.ast`; unit tests in `tests/unit/ast` (run by ctest, see docs/TE
   - `string_address`, `is_constexpr` and `is_main` over real entities and `VString`s;
   - classes, arrays as objects, cleanups, EH (`invoke`), coroutines, static locals, calls
     through pointers, floating point, `switch` and `goto`.
+
+## The pipeline: `ycxx cxx a.cpp -o a` (#43, 2026-11-18)
+
+The α slice end to end (epic #39): every test in `tests/own/slice` compiles, links and runs, or is
+rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm64 macOS.
+
+- `ycxx.pipeline` (`src/pipeline/`), run in-process by `client::cxx`:
+  - `:front`: the file's text as the engine's `FileText`, `pp` and `RegionItems` as engine queries,
+    then `parse::Program` (item_sema, analyze_body). Its diagnostics by byte offset, and the
+    `TranslationUnit`: entities, function definitions with their analysed bodies, variable
+    definitions with their constants.
+  - `:back`: `function_ir`, `lower` and `codegen` per function, variables and string literals as
+    data, into one object. `Layout` stands in for the `layout` query (#33); string literal
+    objects become local `l_.str.N` entities. Errors (what the α subset does not support yet)
+    point into the item when there is a node.
+  - `:mangle`: Itanium names for global-namespace functions over fundamental, pointer and cv types
+    with substitutions; `main`, `extern "C"` functions and variables are not mangled (#64).
+  - `:executable`: the link with libSystem's exports from `$SDKROOT`, else `xcrun --show-sdk-path`,
+    else the Command Line Tools' SDK, looked up once per process.
+  - `:lines`: a minimal line table for rendering (#34 owns the full one).
+- `ycxx cxx` (also `ycxx -…` with an option first): `-o`, `-c`, `-fsyntax-only`, `-std=c++26`;
+  `.o` inputs are linked as they are. Errors are `path:line:col: error: message` on stderr; exit 0
+  on success, 1 on any error in the input or the command line.
+- `tests/features/ycxx.txt` lists `syntax` and `run darwin-arm64`: a feature can be limited to
+  hosts. CI's macOS job runs the slice before its tier, with `--no-unsupported`.
+- `unit.pipeline`: the line table, linkage names, and the back half from hand-built analysed
+  bodies, linked and run on arm64 macOS.
+- Not yet: the stages as engine queries and the daemon (#63), `#include` (#65), optimization
+  levels and the other common options (`-O` is rejected, #81).
 
 ## The L1 interpreter (#25, 2026-11-18)
 

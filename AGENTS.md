@@ -65,7 +65,8 @@ in our own terms. Never copy sequences or commit their listings (DECISIONS §2.3
   or a new one (`area:*`, `kind:*`, milestone, failing example, clauses), linked both ways. A
   handover, closing comment or PR body is incomplete until each follow-up in it has its issue
   link; PRs without them are not merged.
-- Finished: update `STATUS.md` if what is true of the code changed, close the issue with a summary,
-  and remove `status:claimed`.
+- Finished: update `STATUS.md` if what is true of the code changed, and the README's Status
+  section if what a user can do changed (DECISIONS §6.8). Then close the issue with a summary and
+  remove `status:claimed`.
 - Not finished: post a handover comment (state, branch, what you learned, the next concrete step)
   and remove `status:claimed`.

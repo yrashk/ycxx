@@ -2,15 +2,59 @@
 
 **An independent, resident C++26 compiler.**
 
-ycxx compiles C++26 from source to linked executables by itself: preprocessor, front end,
-constant evaluator, code generator, object writer and linker. It does not run once per
-translation unit and exit. It stays resident, holds the whole program's analysis in memory, and
-when a file changes (reported by a file-system watcher, an editor or a build tool) it recomputes
-only what that change can affect.
+ycxx is being built to compile C++26 from source to linked executables by itself: preprocessor,
+front end, constant evaluator, code generator, object writer and linker. It is designed not to
+run once per translation unit and exit, but to stay resident, hold the whole program's analysis
+in memory, and, when a file changes (reported by a file-system watcher, an editor or a build
+tool), recompute only what that change can affect.
 
-**Status: bootstrapping (pre-0.1).** Nothing compiles yet. The plan is in [DECISIONS.md](DECISIONS.md),
-progress is in [STATUS.md](STATUS.md), and work is tracked and claimed in
-[GitHub issues](https://github.com/yrashk/ycxx/issues).
+## Status
+
+**Pre-0.1: the first end-to-end slice works** (updated 2026-11-18). The plan is in
+[DECISIONS.md](DECISIONS.md), what is true of the code in [STATUS.md](STATUS.md), and the work
+in [GitHub issues](https://github.com/yrashk/ycxx/issues) and the
+[roadmap](https://github.com/yrashk/ycxx/issues/12).
+
+**What works**, on macOS arm64 only:
+- `ycxx cxx a.cpp -o a` compiles a small C-like subset of C++ to a signed arm64 Mach-O
+  executable. ycxx's own lexer, parser and semantic analysis, L1 IR, AArch64 code generator and
+  Mach-O linker do the work, with no external compiler, assembler or linker.
+  - The subset: `int`, `long`, `unsigned`, `bool`, `char`, `void` and pointers; functions,
+    recursion and calls; locals and namespace-scope variables with constant initializers;
+    `if`, `while`, `do`, `for`, `break` and `continue`; the arithmetic, bitwise, shift,
+    comparison, logical, conditional and assignment operators; string literals; and
+    `extern "C"` calls into libSystem (`puts`, `putchar`).
+  - `-o`, `-c`, `-fsyntax-only` and `-std=c++26` are accepted. Errors are reported as
+    `file:line:col: error: …`, with exit status 1.
+- The acceptance tests in `tests/own/slice` run with ycxx as the compiler in CI, and every
+  [draft example](tests/draft) is checked against Clang and GCC.
+
+```sh
+tools/build
+build/bin/ycxx cxx hello.cpp -o hello && ./hello
+```
+
+**Not yet:**
+- Preprocessor directives (`#include`, macros).
+- Classes, templates and overloading.
+- `constexpr` and `static_assert`.
+- Exceptions.
+- The standard library.
+- Optimization (`-O`).
+- The resident daemon: `ycxx cxx` runs the engine in-process, once per invocation.
+- Linux and x86-64.
+
+Nothing beyond the subset above compiles, so neither real programs nor libycxx do yet.
+
+**In progress**, one slice per epic:
+- the preprocessor ([#85](https://github.com/yrashk/ycxx/issues/85));
+- constant evaluation ([#87](https://github.com/yrashk/ycxx/issues/87));
+- the resident daemon, with the multithreaded scheduler
+  ([#84](https://github.com/yrashk/ycxx/issues/84)).
+
+Next come classes ([#86](https://github.com/yrashk/ycxx/issues/86)), then templates
+([#88](https://github.com/yrashk/ycxx/issues/88)) and exceptions
+([#89](https://github.com/yrashk/ycxx/issues/89)).
 
 ## Goals
 

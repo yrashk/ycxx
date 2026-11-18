@@ -11,7 +11,7 @@ is emulated by a cold run on the edited files). ycxx has what tests/features/ycx
 that a test needing what ycxx cannot do yet is UNSUPPORTED with that reason; when ycxx learns
 to do it, the line is added and the tests start counting.
 """
-import os, re, shutil, subprocess, sys
+import os, platform, re, shutil, subprocess, sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -107,15 +107,23 @@ def _find(var, names):
     return None, f'set ${var}, or provision with deps/libycxx/tools/toolchain/provision'
 
 
-def ycxx_features(repo):
+# The host, as tests/features/ycxx.txt names it: `darwin-arm64`, `linux-x86_64`.
+HOST = '{}-{}'.format({'darwin': 'darwin', 'linux': 'linux'}.get(sys.platform, sys.platform),
+                      platform.machine().lower().replace('aarch64', 'arm64'))
+
+
+def ycxx_features(repo, host=HOST):
+    """tests/features/ycxx.txt: one feature per line, optionally followed by the hosts it is
+    limited to (`run darwin-arm64`: ycxx builds executables only for the target it has)."""
     path = repo / 'tests' / 'features' / 'ycxx.txt'
     feats = set()
     for line in path.read_text().splitlines() if path.is_file() else ():
-        line = line.split('#', 1)[0].strip()
-        if line:
-            if line not in FEATURES:
-                raise ValueError(f'{path}: unknown feature "{line}" (known: {", ".join(FEATURES)})')
-            feats.add(line)
+        words = line.split('#', 1)[0].split()
+        if words:
+            if words[0] not in FEATURES:
+                raise ValueError(f'{path}: unknown feature "{words[0]}" (known: {", ".join(FEATURES)})')
+            if len(words) == 1 or host in words[1:]:
+                feats.add(words[0])
     return feats
 
 
