@@ -216,6 +216,45 @@ def edit_during_build(env):
     fail('an edit during a build never restarted it (3 attempts)')
 
 
+def edit_error_during_build(env):
+    """An edit that moves an error, and one that deletes a file, while the slow unit compiles:
+    the diagnostics and the exit status are the final state's, rendered against the text the
+    build compiled (#139)."""
+    d = env.scope / 'edit-error'
+    d.mkdir()
+    base = 'int err() { return missing; }\n'
+    moved = '// one\n// two\n// three\n// four\nint pad = 0;\nint err() {\n  return missing;\n}\n'
+    for attempt, final in enumerate((moved, None)):
+        files = {'slow.cpp': slow_source('slow', attempt + 1), 'err.cpp': base}
+        for name, text in files.items():
+            (d / name).write_text(text)
+        for name in files:
+            env.cxx(['-E', name], d, env.daemon)
+        args = ['-c', 'slow.cpp', 'err.cpp']
+        client = env.start(args, d)
+        if not wait_until(lambda: env.number('live') >= 1, 30):
+            fail('edit of an error during a build: the request never showed as live')
+        time.sleep(0.3)
+        if final is None:
+            (d / 'err.cpp').unlink()
+            del files['err.cpp']
+        else:
+            (d / 'err.cpp').write_text(final)
+            files['err.cpp'] = final
+        out, err = client.communicate(timeout=300)
+        cold = Path(tempfile.mkdtemp(prefix='ycxx-cold-', dir=env.scope.parent))
+        try:
+            for name, text in files.items():
+                (cold / name).write_text(text)
+            want = env.cxx(args, cold, env.cold)
+        finally:
+            shutil.rmtree(cold, ignore_errors=True)
+        got_err = b''.join(l + b'\n' for l in err.splitlines() if not l.startswith(b'ycxx: answered by daemon'))
+        if client.returncode != want[0] or got_err != want[2]:
+            fail(f'edit of an error during a build ({"deleted" if final is None else "moved"}): '
+                 f'{client.returncode} {got_err!r:.300} != cold {want[0]} {want[2]!r:.300}')
+
+
 def killed_client(env):
     """A client killed mid-compile: its request stops and is counted; the next one is right."""
     d = env.scope / 'killed-client'
@@ -332,7 +371,7 @@ def main():
         if env.cxx(['-c', 'first.cpp', '-o', 'first.o'], env.scope, env.daemon)[0] != 0 or env.pid() is None:
             fail('the first request through the daemon failed: no test can run')
             return 1
-        for test in (edit_during_build, killed_client, killed_daemon, restart, concurrent_clients):
+        for test in (edit_during_build, edit_error_during_build, killed_client, killed_daemon, restart, concurrent_clients):
             t0 = time.monotonic()
             pid = env.pid()
             if pid is None:

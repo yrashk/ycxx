@@ -327,23 +327,16 @@ Done run(const Request& r, pp::Host& host, pipeline::Session& session, const Sto
     d.report.regions_reused = after.reused - before.reused;
   };
   bool failed = false;
-  // The sources this request reads, with their text for rendering positions.
-  struct Source {
-    const std::string* path;
-    std::string text;
-  };
-  std::vector<Source> sources;
-  for (const std::string& s : opts->sources) {
-    auto text = host.read(absolute_in(r, s));  // never through a host's working directory: requests run at once
-    if (!text) {
-      std::format_to(std::back_inserter(d.err), "ycxx: error: cannot read '{}'\n", s);
-      failed = true;
-      continue;
-    }
-    sources.push_back({&s, std::move(*text)});
-  }
   if (opts->stop == Options::Stop::preprocess) {
-    for (const Source& s : sources) failed = !preprocess_unit(d, config, *s.path, s.text) || failed;
+    for (const std::string& s : opts->sources) {
+      auto text = host.read(absolute_in(r, s));  // never through a host's working directory: requests run at once
+      if (!text) {
+        std::format_to(std::back_inserter(d.err), "ycxx: error: cannot read '{}'\n", s);
+        failed = true;
+        continue;
+      }
+      failed = !preprocess_unit(d, config, s, *text) || failed;
+    }
     count_regions();
     if (failed) d.exit_status = 1;
     return d;
@@ -354,29 +347,33 @@ Done run(const Request& r, pp::Host& host, pipeline::Session& session, const Sto
   key.until = opts->stop == Options::Stop::syntax ? pipeline::Until::syntax
               : opts->stop == Options::Stop::object ? pipeline::Until::object
                                                     : pipeline::Until::link;
-  for (const Source& s : sources)
-    key.units.push_back(session.unit({*s.path, r.cwd, config, object_name(*s.path).native_encoded_string()}));
+  for (const std::string& s : opts->sources)
+    key.units.push_back(session.unit({s, r.cwd, config, object_name(s).native_encoded_string()}));
   std::filesystem::path out = opts->output.value_or("a.out");
+  // A command-line object that cannot be used is reported after the units' diagnostics, and only
+  // when they compiled; the units are then built without the link.
+  std::optional<std::string> bad_object;
   if (key.until == pipeline::Until::link) {
     std::vector<obj::object> objects;
     // Objects named on the command line are read as they are, never through the file table (§5.2).
     for (const std::string& path : opts->objects) {
       auto text = read_disk(in_cwd(r, path));
       if (!text) {
-        fail(d, std::format("cannot read '{}'", path));
-        return d;
+        bad_object = std::format("cannot read '{}'", path);
+        break;
       }
       std::vector<std::uint8_t> bytes(text->begin(), text->end());
       auto o = obj::macho::read_object(bytes, path);
       if (!o) {
-        fail(d, o.error());
-        return d;
+        bad_object = o.error();
+        break;
       }
       objects.push_back(std::move(*o));
     }
-    key.program = session.program({key.units, std::move(objects), out.filename().native_encoded_string()});
+    if (bad_object) key.until = pipeline::Until::object;
+    else key.program = session.program({key.units, std::move(objects), out.filename().native_encoded_string()});
   }
-  const pipeline::Until until = key.until;
+  const pipeline::Until until = bad_object ? pipeline::Until::link : key.until;
   pipeline::RunStats rs;
   std::optional<pipeline::Built> built = session.run<pipeline::Build>(session.request(std::move(key)), stop, &rs);
   if (!built) {
@@ -388,10 +385,15 @@ Done run(const Request& r, pp::Host& host, pipeline::Session& session, const Sto
   d.report.validated = rs.engine.validated;
   count_regions();
 
-  for (std::size_t i = 0; i < sources.size(); ++i) {
+  for (std::size_t i = 0; i < opts->sources.size(); ++i) {
     const pipeline::UnitBuilt& u = built->units[i];
-    const std::string& path = *sources[i].path;
-    Renderer render(d.err, path, sources[i].text);
+    const std::string& path = opts->sources[i];
+    if (!u.text) {
+      std::format_to(std::back_inserter(d.err), "ycxx: error: cannot read '{}'\n", path);
+      failed = true;
+      continue;
+    }
+    Renderer render(d.err, path, *u.text);
     for (const pipeline::Message& m : u.messages) {
       if (m.where.empty()) render.at(m.offset, m.error, m.text);
       else std::format_to(std::back_inserter(d.err), "{}: {}: {}\n", m.where, m.error ? "error" : "warning", m.text);
@@ -416,6 +418,10 @@ Done run(const Request& r, pp::Host& host, pipeline::Session& session, const Sto
   }
   if (failed || until != pipeline::Until::link) {
     if (failed) d.exit_status = 1;
+    return d;
+  }
+  if (bad_object) {
+    fail(d, *bad_object);
     return d;
   }
   const pipeline::Linked& image = *built->linked;

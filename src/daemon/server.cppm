@@ -263,6 +263,7 @@ class Server {
     s.watcher = watcher_state_;
     s.idle_exit_s = static_cast<std::uint64_t>(o_.idle_exit.count());
     s.threads = threads_.count;
+    s.peak_running = session().peak_requests();  // through the once: `session_` may be being made
     return s;
   }
 
@@ -486,11 +487,11 @@ class Server {
     struct Running {
       Server& s;
       explicit Running(Server& s) : s(s) {
-        std::lock_guard g(s.stats_mu_);
-        s.stats_.peak_running = std::max(s.stats_.peak_running, ++s.running_);
+        std::lock_guard g(s.strand_mu_);
+        ++s.running_;
       }
       ~Running() {
-        std::lock_guard g(s.stats_mu_);
+        std::lock_guard g(s.strand_mu_);
         --s.running_;
       }
     } running{*this};
@@ -514,15 +515,18 @@ class Server {
       log("a client hung up: its request stopped");
       return std::nullopt;
     }
+    std::uint64_t quantum = 0;
     {
-      // A root stored its answer: the quantum returns to the floor (§4.2).
+      // The quantum returns to the floor once every live root has stored its answer (§4.2): when
+      // the last running request completes. One finishing beside a starved one does not.
       std::lock_guard strand(strand_mu_);
-      admission_.progressed();
+      if (running_ == 1) admission_.progressed();
+      quantum = static_cast<std::uint64_t>(admission_.quantum().count());
     }
     std::lock_guard g(stats_mu_);
     d.report.revision = stats_.revision;
     d.report.inputs_changed = report.inputs_changed;
-    stats_.quantum_ms = static_cast<std::uint64_t>(admission_.quantum().count());
+    stats_.quantum_ms = quantum;
     stats_.entries = table_.size();
     return d;
   }
@@ -651,7 +655,7 @@ class Server {
 
   std::mutex stats_mu_;
   Status stats_;
-  std::uint64_t running_ = 0;  // compile requests in the engine now; under stats_mu_
+  std::uint64_t running_ = 0;  // compile requests admitted and not yet answered; on the strand
 };
 
 }  // namespace

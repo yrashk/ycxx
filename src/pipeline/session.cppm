@@ -41,6 +41,9 @@ struct [[=engine::input{engine::Durability::low}]] BuildIn {
   using Value = BuildKey;
 };
 struct UnitBuilt {
+  // The main file's text at the build's revision, which the messages' offsets are in; none when
+  // it could not be read, and then nothing else is.
+  std::optional<std::string> text;
   std::vector<Message> messages;  // the front end's
   bool front_failed = false;
   std::optional<obj::object> object;  // with `object` or `link`, when the back end succeeded
@@ -254,6 +257,15 @@ class Session {
       w->done = true;
       w->cv.notify_all();
     };
+    struct InFlight {
+      Session& s;
+      explicit InFlight(Session& s) : s(s) {
+        const std::size_t now = s.in_flight_.fetch_add(1) + 1;
+        std::size_t peak = s.peak_in_flight_.load();
+        while (now > peak && !s.peak_in_flight_.compare_exchange_weak(peak, now)) {}
+      }
+      ~InFlight() { s.in_flight_.fetch_sub(1); }
+    } in_flight{*this};
     auto ticket = epochs_->spawn<Q>(
         k, engine::Priority::interactive, [finish](const V& v) { finish([&](Wait& x) { x.value.emplace(v); }); },
         [finish](std::exception_ptr e) { finish([&](Wait& x) { x.error = std::move(e); }); });
@@ -272,6 +284,10 @@ class Session {
     if (w->error) std::rethrow_exception(w->error);
     return std::move(w->value);
   }
+
+  // The most requests (`run`) that were in the engine at once, and how many are now.
+  std::size_t peak_requests() const noexcept { return peak_in_flight_.load(); }
+  std::size_t requests_in_flight() const noexcept { return in_flight_.load(); }
 
   // Changes inputs: `write(db)` runs at quiescence. On a pooled session every running request is
   // stopped first and restarted after, keeping its finished cells (daemon design §4.1).
@@ -309,6 +325,7 @@ class Session {
   engine::Pool* pool_ = nullptr;
   engine::Pool::Scope scope_;
   std::unique_ptr<engine::Epochs> epochs_;  // with a pool
+  std::atomic<std::size_t> in_flight_{0}, peak_in_flight_{0};
 
   std::function<std::optional<std::string>(const std::string&)> read_ = [](const std::string& path) {
     return pp::read_disk(pp::path_id(path)).value;
@@ -331,22 +348,41 @@ engine::query_task<Built> Build::run(engine::Ctx& cx, RequestId r) {
   const BuildKey& k = cx.fetch<BuildIn>(r);
   Built out;
   bool all = true;
+  // Each main file as this revision has it (the file table's, in the daemon): a batch that
+  // restarts the build changes it here too.
+  std::vector<TuId> readable;
+  for (TuId tu : k.units) {
+    const pp::Source& src = cx.fetch<pp::SourceOf>(pp::FileId{tu.n});
+    std::filesystem::path p(src.path);
+    if (p.is_relative() && !src.cwd.empty()) p = std::filesystem::path(src.cwd) / p;
+    UnitBuilt& u = out.units.emplace_back();
+    const pp::PathId id = pp::path_id(p.lexically_normal().generic_native_encoded_string());
+    // The editor view reads an open buffer before the file (daemon design §6.1).
+    if (src.config.view == pp::View::editor) u.text = cx.fetch<pp::Buffer>(id);
+    if (!u.text) u.text = cx.fetch<pp::FileContent>(id);
+    if (u.text) readable.push_back(tu);
+    else all = false;
+  }
   {
-    const auto fronts = co_await cx.par_map<TuFront>(k.units);
-    for (const FrontResult& f : fronts) {
-      out.units.push_back({f.messages, f.has_errors(), std::nullopt, {}});
+    const auto fronts = co_await cx.par_map<TuFront>(readable);
+    std::size_t j = 0;
+    for (UnitBuilt& u : out.units) {
+      if (!u.text) continue;
+      const FrontResult& f = fronts[j++];
+      u.messages = f.messages;
+      u.front_failed = f.has_errors();
       all = all && !f.has_errors();
     }
   }
   if (k.until == Until::syntax) co_return out;
   std::vector<TuId> compiled;
   for (std::size_t i = 0; i < k.units.size(); ++i)
-    if (!out.units[i].front_failed) compiled.push_back(k.units[i]);
+    if (out.units[i].text && !out.units[i].front_failed) compiled.push_back(k.units[i]);
   {
     const auto tus = co_await cx.par_map<Tu>(compiled);
     std::size_t j = 0;
     for (std::size_t i = 0; i < k.units.size(); ++i) {
-      if (out.units[i].front_failed) continue;
+      if (!out.units[i].text || out.units[i].front_failed) continue;
       const TuValue& v = tus[j++];
       UnitBuilt& u = out.units[i];
       u.object = v.object;
