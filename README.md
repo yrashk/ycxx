@@ -24,6 +24,10 @@ in [GitHub issues](https://github.com/yrashk/ycxx/issues) and the
     `if`, `while`, `do`, `for`, `break` and `continue`; the arithmetic, bitwise, shift,
     comparison, logical, conditional and assignment operators; string literals; and
     `extern "C"` calls into libSystem (`puts`, `putchar`).
+  - Constant evaluation, by ycxx's own interpreter of its IR: `constexpr` and `consteval`
+    functions and variables, `constinit`, `static_assert` and `if consteval`, with an error that
+    says why an expression is not constant (overflow, an uninitialized read, a dangling pointer,
+    a call to a non-constexpr function, …). Constant array bounds can come from `const` locals.
   - `-o`, `-c`, `-fsyntax-only` and `-std=c++26` are accepted. Errors are reported as
     `file:line:col: error: …`, with exit status 1.
 - The preprocessor, in part (updated 2026-11-18):
@@ -45,7 +49,8 @@ build/bin/ycxx cxx hello.cpp -o hello && ./hello
   `_Pragma`, and the predefined macros. Without conditionals, system headers
   such as `<cstdio>` cannot be included yet.
 - Classes, templates and overloading.
-- `constexpr` and `static_assert`.
+- `if constexpr`, and taking the address of a variable in a namespace-scope initializer
+  (`int* p = &g;` passes the front end but not code generation yet).
 - Exceptions.
 - The standard library.
 - Optimization (`-O`).
@@ -56,7 +61,6 @@ Nothing beyond the subset above compiles, so neither real programs nor libycxx d
 
 **In progress**, one slice per epic:
 - the preprocessor ([#85](https://github.com/yrashk/ycxx/issues/85));
-- constant evaluation ([#87](https://github.com/yrashk/ycxx/issues/87));
 - the resident daemon, with the multithreaded scheduler
   ([#84](https://github.com/yrashk/ycxx/issues/84)).
 

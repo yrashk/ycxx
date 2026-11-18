@@ -33,43 +33,14 @@ struct Ops {
   // ---------------------------------------------------------------- constants and addresses
 
   static Flow const_(M& m, Frame& f, N n) {
-    auto v = m.constant(ConstId(u32(imms(f, n)[0])), m.result_type(f, n));
-    if (!v) return m.unsupported(n);
-    return m.set(f, n, *v);
+    Value v;
+    if (Flow fl = m.constant(ConstId(u32(imms(f, n)[0])), m.result_type(f, n), v); fl != Flow::next) return fl;
+    return m.set(f, n, v);
   }
 
-  // A namespace-scope variable's object, made on first use from what the host says of it.
   static Flow global(M& m, Frame& f, N n) {
-    EntityId e{u32(imms(f, n)[0])};
-    if (auto it = m.globals_.find(std::to_underlying(e)); it != m.globals_.end())
-      return m.set(f, n, Value{VKind::object, false, it->second, 0});
-    auto info = m.global_info_.find(std::to_underlying(e));
-    if (info == m.global_info_.end()) {
-      m.wanted_ = e;
-      m.pending_ = Event::need_global;
-      return Flow::suspend;
-    }
-    if (!info->second) return m.fail(Reason::ill_formed);
-    const GlobalVar g = *info->second;
-    const M::Shape& s = m.shape(g.type);
-    if (s.leaves == 0) return m.unsupported(n);
-    u32 o = m.make_object(g.type, M::Origin::global);
-    M::Object& ob = m.objects_[o];
-    ob.entity = e;
-    ob.outside = true;
-    ob.usable = g.usable;
-    for (u32 c = ob.cell0; c < ob.cell0 + ob.ncells; ++c) m.cells_[c].life = M::Life::alive;
-    if (g.value) {
-      if (s.leaves != 1 || s.kind == M::Kind::array) return m.unsupported(n);
-      auto v = m.constant(*g.value, g.type);
-      if (!v) return m.unsupported(n);
-      M::Cell& c = m.cells_[m.objects_[o].cell0];
-      c.fill = M::Fill::value;
-      c.v = *v;
-    } else if (!constant(m) || !g.usable) {
-      m.fill_zero(g.type, m.objects_[o].cell0);  // static storage is zero-initialized ([basic.start.static])
-    }
-    m.globals_.emplace(std::to_underlying(e), o);
+    u32 o = 0;
+    if (Flow fl = m.global_object(EntityId(u32(imms(f, n)[0])), o); fl != Flow::next) return fl;
     return m.set(f, n, Value{VKind::object, false, o, 0});
   }
 
@@ -241,8 +212,9 @@ struct Ops {
   static Flow ptr_cast(M& m, Frame& f, N n) {
     Value p = m.operand(f, n, 0);
     if (p.kind == VKind::object && constant(m)) {
-      QualType to = m.shape(m.result_type(f, n)).inner;
-      if (to != QualType{} && !ast::is_void(*m.in_, to)) {
+      const M::Shape& rs = m.shape(m.result_type(f, n));
+      QualType to = rs.inner;
+      if (!rs.is_nullptr && !ast::is_void(*m.in_, to)) {
         bool past = false;
         Value whole = p;
         whole.past = false;
@@ -324,14 +296,25 @@ struct Ops {
         fl != Flow::next)
       return fl;
     if (pl.ncells != 1 || m.shape(t).kind == M::Kind::array) return m.unsupported(n);
-    const M::Cell& c = m.cells_[pl.cell0];
+    M::Cell& c = m.cells_[pl.cell0];
+    if (c.fill == M::Fill::constant) {
+      // A global's initial value, decoded on its first read; the node runs again if that needs
+      // another global from the host.
+      Value v;
+      if (Flow fl = m.constant(ConstId(u32(c.v.bits)), t, v); fl != Flow::next) return fl;
+      M::Cell& again = m.cells_[pl.cell0];
+      again.fill = M::Fill::value;
+      again.v = v;
+      return m.set(f, n, v);
+    }
     switch (c.fill) {
     case M::Fill::indeterminate: return m.fail(Reason::read_indeterminate);
     case M::Fill::erroneous:
       // P2795: the erroneous value, zero on every target ycxx has; not constant ([expr.const]).
       if (constant(m)) return m.fail(Reason::read_erroneous);
       return m.set(f, n, m.shape(t).kind == M::Kind::pointer ? Value::null() : Value::integer(0));
-    case M::Fill::value: break;
+    case M::Fill::value:
+    case M::Fill::constant: break;
     }
     return m.set(f, n, c.v);
   }
@@ -373,7 +356,7 @@ struct Ops {
       m.pending_ = Event::need_body;
       return Flow::suspend;
     }
-    if (!it->second.body) return m.fail(Reason::undefined_function);
+    if (!it->second.body) return m.fail(it->second.unsupported ? Reason::callee_unsupported : Reason::undefined_function);
     if (constant(m) && !it->second.is_constexpr) return m.fail(Reason::not_constexpr);
     return m.enter(f, n, it->second.body, e, f.fn->operands_of(n).subspan(first_arg));
   }
@@ -439,9 +422,9 @@ struct Ops {
     QualType t = m.type_of(f, f.fn->operands_of(n)[0]);
     auto cases = imm_path(f, n, 0);
     for (u32 i = 0; i < cases.size(); ++i) {
-      auto c = m.constant(ConstId(u32(cases[i])), t);
-      if (!c) return m.fail(Reason::ill_formed);
-      if (c->bits == v.bits) return m.jump(f, n, i + 1);
+      Value c;
+      if (Flow fl = m.constant(ConstId(u32(cases[i])), t, c); fl != Flow::next) return fl;
+      if (c.bits == v.bits) return m.jump(f, n, i + 1);
     }
     return m.jump(f, n, 0);
   }

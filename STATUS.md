@@ -336,7 +336,8 @@ one import `ycxx.ast`; unit tests in `tests/unit/ast` (run by ctest, see docs/TE
   statements; every C0 operator with its precedence, the usual arithmetic conversions, promotions,
   value categories and lvalue-to-rvalue conversion as explicit nodes; calls; unqualified lookup in
   block and namespace scope; string literals, `const char*`, indirection, subscripts and pointer
-  arithmetic. Namespace-scope initializers and array bounds are folded to constants (`Folder`).
+  arithmetic. Namespace-scope initializers and array bounds are evaluated by the interpreter (ε,
+  below).
 - **Trees:** the node kinds `LocalRef`, `Conditional`, `While`, `Do`, `For`, `Break`, `Continue`,
   `DeclStmt`, `Declarator`, `DeclGroup`, `Assign.computation` and more `ConversionKind`s are in
   `ycxx.ast.nodes`. `VString` and `VLvalue` are in `ycxx.ast.values`.
@@ -450,8 +451,34 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
 - The dispatch table is `ir::eval_table<Ops, …>()` with `complete`: every op has a handler. Ops
   outside the α slice (floating point, aggregates and `copy`, unions, dynamic storage, virtual
   calls, atomics, EH, coroutines, reflection) fail with `Reason::unsupported`, naming the op.
-- Not yet: address constants of variables (`VEntity`, #57), whole-program runs with a host I/O
-  interface, records and the under-construction state of [class.cdtor].
+- Not yet: whole-program runs with a host I/O interface, records and the under-construction state
+  of [class.cdtor] (#25).
+
+## Constant evaluation in the front end (ε slice, #87, 2026-11-18)
+
+`sema::Evaluator` (`src/sema/eval.cppm`) replaces the α folder: an analysed expression becomes the
+L1 thunk `{ return e; }` through `function_ir`, and the interpreter runs it in constant mode inside
+the cell that analyses the expression (query-engine.md §B7). `parse::Program` answers its
+questions: `function_ir` of a function defined in an earlier item (memoized per item), and a
+namespace-scope variable's type and, if usable in constant expressions, its value.
+
+- `constexpr` functions and variables (namespace and block scope; a constexpr variable is const
+  and must be constant-initialized), `consteval` functions with immediate invocations replaced by
+  their value outside an immediate function context, `constinit`, and the redeclaration rules of
+  [dcl.constexpr]/1.
+- `static_assert(e)` and `static_assert(e, "message")` at namespace and block scope (the
+  `StaticAssert` node); `if consteval` and `if !consteval` (`IfConsteval`, lowered to
+  `consteval_br`).
+- Constant array bounds from const integral locals (#58), and address constants of variables and
+  functions (#57) as `VLvalue{VEntity, [], byte offset}` (`VEntity` is new in `ycxx.ast.values`).
+  The pipeline's data relocations for them wait for #101.
+- Errors say why: "not a constant expression: <the interpreter's reason>", located at the
+  evaluated expression.
+- Tests: `tests/own/consteval` (spec-only); the draft's [dcl.constexpr]/5 ex. 3, [dcl.constinit]/3
+  ex. 1 and [stmt.if]/4 ex. 3 pass.
+- Not yet (#102): naming a consteval function outside a call, `if constexpr`, static_assert
+  messages that are constant expressions, notes along the call chain, block-scope static constexpr
+  variables.
 
 ## Bootstrap workarounds
 

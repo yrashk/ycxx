@@ -137,6 +137,14 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
     walk each one through its decisions.
   - Learned on #83.
 
+- **A subagent that writes files must not share your worktree while you switch branches.** On
+  #87 the spec-only test author wrote into the session's worktree while the session parked work
+  in WIP commits and switched to the PR 1 branch for review fixes. Its files were swept into a WIP
+  commit, and a failed `cd` left copies at the root.
+  - Do: give a writing subagent `isolation: "worktree"`, or don't switch branches until it
+    reports. Before a PR, rebuild unpushed history from a soft reset, so stray WIP never ships.
+  - Learned on #87.
+
 ## Bureaucracy loops
 
 - **A design document became a loop.** The query-engine design (#1) grew to 31,500 words over
@@ -238,6 +246,13 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
   - Do: keep the survey a loop over `tools/test core` plus a direct run, and rerun it last.
   - Do: an expected-failure list must never cover a crash (`Crashed` in tests/driver/kinds.py).
   - Learned on #41.
+- **A default-constructed handle is a real handle.** `QualType{}` is type number 0, the first type
+  interned (often `int`). The interpreter used it as "no pointee" for `std::nullptr_t`, and so
+  skipped its `void*` cast check for every `int*`. The unit tests' world happened to intern `int`
+  first, which is how it showed.
+  - Do: say "none" with a flag or `std::optional`, or with the kind's `none` enumerator where the
+    handle has one (`ConstId::none`, `NodeId::none`), never with `T{}`.
+  - Learned on #25.
 - **A reference into a growing side table dangles.** A `const TypeRec&` held across creating
   another type pointed into a reallocated `std::vector`, giving a wrong diagnostic that depended
   on the file's length. Use a `std::deque` for tables whose records are referenced, or return

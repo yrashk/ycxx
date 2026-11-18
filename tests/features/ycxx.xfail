@@ -5,12 +5,12 @@
 diff/smoke/integer-arithmetic.diff.cpp preprocessing directives are not supported yet
 draft/basic/basic.align-1.accept.cpp 'struct' not supported yet
 draft/basic/basic.contract.eval-1.accept.cpp 'struct' not supported yet
-draft/basic/basic.contract.eval-2.accept.cpp 'constexpr' not supported yet
+draft/basic/basic.contract.eval-2.accept.cpp 'contract_assert' is not supported yet
 draft/basic/basic.contract.eval-3.accept.cpp 'contract_assert' not supported yet
 draft/basic/basic.def-1.accept.cpp 'struct' not supported yet
 draft/basic/basic.def.odr-2.reject.cpp errors elsewhere: '&' not supported yet
 draft/basic/basic.def.odr-3.reject.cpp errors elsewhere: '[' not supported yet
-draft/basic/basic.def.odr-4.reject.cpp errors elsewhere: 'constexpr' not supported yet
+draft/basic/basic.def.odr-4.reject.cpp errors elsewhere: 'auto' is not supported yet
 draft/basic/basic.def.odr-5.accept.cpp 'auto' not supported yet
 draft/basic/basic.def.odr-6.accept.cpp 'struct' not supported yet
 draft/basic/basic.def.odr-8.accept.cpp '[' not supported yet
@@ -210,10 +210,8 @@ draft/dcl/dcl.attr.likelihood-1.accept.cpp '[' not supported yet
 draft/dcl/dcl.attr.nodiscard-1.accept.cpp 'struct' not supported yet
 draft/dcl/dcl.attr.noreturn-1.accept.cpp '[' not supported yet
 draft/dcl/dcl.constexpr-1.reject.cpp errors elsewhere: '&' not supported yet
-draft/dcl/dcl.constexpr-2.reject.cpp errors elsewhere: 'constexpr' not supported yet
-draft/dcl/dcl.constexpr-3.reject.cpp errors elsewhere: 'constexpr' not supported yet
+draft/dcl/dcl.constexpr-2.reject.cpp errors elsewhere: 'static' is not supported yet
 draft/dcl/dcl.constexpr-4.reject.cpp errors elsewhere: 'struct' not supported yet
-draft/dcl/dcl.constinit-1.reject.cpp errors elsewhere: 'constexpr' not supported yet
 draft/dcl/dcl.contract.func-2.reject.cpp errors elsewhere: expected ';'
 draft/dcl/dcl.contract.func-3.reject.cpp errors elsewhere: 'template' not supported yet
 draft/dcl/dcl.contract.res-1.accept.cpp unexpected identifier 'post'
@@ -361,10 +359,10 @@ draft/expr/expr.call-4.accept.cpp preprocessing directives are not supported yet
 draft/expr/expr.call-5.accept.cpp 'struct' not supported yet
 draft/expr/expr.cast-1.reject.cpp errors elsewhere: 'struct' not supported yet
 draft/expr/expr.const.cast-1.accept.cpp 'typedef' not supported yet
-draft/expr/expr.const.const-1.reject.cpp errors elsewhere: 'consteval' not supported yet
-draft/expr/expr.const.const-2.reject.cpp errors elsewhere: 'consteval' not supported yet
+draft/expr/expr.const.const-1.reject.cpp errors elsewhere: 'template' is not supported yet
+draft/expr/expr.const.const-2.reject.cpp errors elsewhere: 'auto' is not supported yet
 draft/expr/expr.const.const-3.reject.cpp errors elsewhere: 'struct' not supported yet
-draft/expr/expr.const.core-1.accept.cpp 'constexpr' not supported yet
+draft/expr/expr.const.core-1.accept.cpp 'static' is not supported yet
 draft/expr/expr.const.core-2.reject.cpp errors elsewhere: '[' not supported yet
 draft/expr/expr.const.core-3.accept.cpp 'auto' not supported yet
 draft/expr/expr.const.core-4.reject.cpp errors elsewhere: preprocessing directives are not supported yet
@@ -373,8 +371,8 @@ draft/expr/expr.const.core-6.reject.cpp errors elsewhere: preprocessing directiv
 draft/expr/expr.const.defns-1.reject.cpp errors elsewhere: preprocessing directives are not supported yet
 draft/expr/expr.const.general-1.accept.cpp expected an expression
 draft/expr/expr.const.imm-1.reject.cpp errors elsewhere: preprocessing directives are not supported yet
-draft/expr/expr.const.imm-2.reject.cpp errors elsewhere: 'consteval' not supported yet
-draft/expr/expr.const.imm-3.reject.cpp errors elsewhere: 'consteval' not supported yet
+draft/expr/expr.const.imm-2.reject.cpp errors elsewhere: 'template' is not supported yet
+draft/expr/expr.const.imm-3.reject.cpp errors elsewhere: overloading 'id' is not supported yet
 draft/expr/expr.const.init-1.accept.cpp 'struct' not supported yet
 draft/expr/expr.const.init-2.accept.cpp 'thread_local' not supported yet
 draft/expr/expr.const.init-3.reject.cpp errors elsewhere: 'struct' not supported yet
@@ -408,7 +406,7 @@ draft/expr/expr.prim.lambda.capture-5.accept.cpp 'template' not supported yet
 draft/expr/expr.prim.lambda.capture-6.reject.cpp errors elsewhere: 'auto' not supported yet
 draft/expr/expr.prim.lambda.capture-7.reject.cpp errors elsewhere: '=' not supported yet
 draft/expr/expr.prim.lambda.capture-8.accept.cpp '[' not supported yet
-draft/expr/expr.prim.lambda.capture-9.accept.cpp 'static_assert' not supported yet
+draft/expr/expr.prim.lambda.capture-9.accept.cpp '[' is not supported yet
 draft/expr/expr.prim.lambda.closure-10.accept.cpp 'struct' not supported yet
 draft/expr/expr.prim.lambda.closure-2.reject.cpp errors elsewhere: 'struct' not supported yet
 draft/expr/expr.prim.lambda.closure-3.reject.cpp errors elsewhere: 'auto' not supported yet
@@ -440,7 +438,7 @@ draft/expr/expr.type.conv-1.accept.cpp 'struct' not supported yet
 draft/lex/lex.ext-2.reject.cpp errors elsewhere: preprocessing directives are not supported yet
 draft/lex/lex.ext-3.reject.cpp errors elsewhere: '' not supported yet
 draft/lex/lex.fcon-2.accept.cpp preprocessing directives are not supported yet
-draft/module/module.global.frag-1.accept.cpp 'constexpr' not supported yet
+draft/module/module.global.frag-1.accept.cpp 'template' is not supported yet
 draft/module/module.interface-3.accept.cpp preprocessing directives are not supported yet
 draft/module/module.interface-4.reject.cpp errors elsewhere: preprocessing directives are not supported yet
 draft/module/module.interface-6.reject.cpp errors elsewhere: preprocessing directives are not supported yet
@@ -491,11 +489,10 @@ draft/stmt/stmt.ambig-3.accept.cpp 'struct' not supported yet
 draft/stmt/stmt.ambig-4.accept.cpp 'struct' not supported yet
 draft/stmt/stmt.contract.assert-1.accept.cpp 'contract_assert' not supported yet
 draft/stmt/stmt.dcl-2.accept.cpp 'static' not supported yet
-draft/stmt/stmt.expand-1.accept.cpp 'consteval' not supported yet
+draft/stmt/stmt.expand-1.accept.cpp 'auto' is not supported yet
 draft/stmt/stmt.expand-2.accept.cpp preprocessing directives are not supported yet
 draft/stmt/stmt.expand-3.accept.cpp 'struct' not supported yet
 draft/stmt/stmt.if-2.accept.cpp 'template' not supported yet
-draft/stmt/stmt.if-3.reject.cpp errors elsewhere: 'constexpr' not supported yet
 draft/stmt/stmt.ranged-2.accept.cpp preprocessing directives are not supported yet
 draft/stmt/stmt.return-1.reject.cpp errors elsewhere: 'class' not supported yet
 draft/stmt/stmt.return-2.reject.cpp errors elsewhere: 'auto' not supported yet
