@@ -113,13 +113,13 @@ TranslationUnit Front::unit(std::string name) {
   TranslationUnit tu;
   tu.name = std::move(name);
   std::set<std::uint32_t> seen;
-  auto declare = [&](EntityId e) {
+  auto declare = [&](EntityId e, std::optional<ast::Loc> at) {
     if (e == EntityId::none || !seen.insert(std::to_underlying(e)).second) return;
     const sema::EntityRec& r = world_.entities.rec(e);
     bool fn = r.kind == sema::EntityKind::function;
     std::string id(ins_.names.spelling(r.name));
     if (fn && id == "main") tu.main = e;
-    tu.entities.push_back({e, std::move(id), r.type, fn, r.lang, r.linkage, false});
+    tu.entities.push_back({e, std::move(id), r.type, fn, r.lang, r.linkage, false, at});
   };
   for (std::uint32_t k = 0; k < items_.items.size(); ++k) {
     const items::Item& it = items_.items[k];
@@ -127,21 +127,31 @@ TranslationUnit Front::unit(std::string name) {
     if (it.kind != items::ItemKind::declaration && it.kind != items::ItemKind::function) continue;
     const ast::ItemSema& is = program_->item_sema(k).value;
     std::vector<ast::DeclSema> decls = ins_.seqs.elements(is.decls);
-    for (const ast::DeclSema& d : decls) declare(d.entity);
+    // The declarators, by declaration ordinal: their constants and item-relative locations (the
+    // group is at the item's start).
+    std::vector<std::optional<ast::Declarator>> declarators(decls.size());
+    std::vector<std::optional<ast::Loc>> at(decls.size());
+    if (is.tree != ast::NodeId::none && ins_.ast.is<ast::DeclGroup>(is.tree)) {
+      for (ast::Child c : ins_.ast.children(ins_.ast.get<ast::DeclGroup>(is.tree).declarators)) {
+        auto dr = ins_.ast.get<ast::Declarator>(c.id);
+        if (dr.decl >= decls.size()) continue;
+        declarators[dr.decl] = dr;
+        at[dr.decl] = ast::Loc{program_->id(k), c.at};
+      }
+    }
+    for (std::size_t i = 0; i < decls.size(); ++i) declare(decls[i].entity, at[i]);
     if (it.kind == items::ItemKind::function && it.has_body() && !decls.empty() && decls[0].entity != EntityId::none) {
       tu.functions.push_back({decls[0].entity, decls[0], program_->analyze_body(k).value, program_->id(k),
                               it.body_begin - it.begin});
       continue;
     }
     // Variable definitions, with the constants their declarators were initialized with.
-    if (is.tree == ast::NodeId::none || !ins_.ast.is<ast::DeclGroup>(is.tree)) continue;
-    for (ast::Child c : ins_.ast.children(ins_.ast.get<ast::DeclGroup>(is.tree).declarators)) {
-      auto dr = ins_.ast.get<ast::Declarator>(c.id);
-      if (dr.decl >= decls.size()) continue;
-      const ast::DeclSema& d = decls[dr.decl];
-      if (d.kind != ast::DeclKind::variable || d.entity == EntityId::none || !(d.flags & sema::decl_flag::definition))
+    for (std::size_t i = 0; i < decls.size(); ++i) {
+      const ast::DeclSema& d = decls[i];
+      if (!declarators[i] || d.kind != ast::DeclKind::variable || d.entity == EntityId::none ||
+          !(d.flags & sema::decl_flag::definition))
         continue;
-      tu.variables.push_back({d.entity, d.type, dr.value});
+      tu.variables.push_back({d.entity, d.type, declarators[i]->value, at[i]});
     }
   }
   return tu;

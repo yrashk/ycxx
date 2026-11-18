@@ -95,7 +95,7 @@ struct World {
   }
   EntityId entity(std::string name, QualType type, bool is_function, ast::LangLinkage lang = ast::LangLinkage::cxx) {
     EntityId e = in.entities.add<EntityId>(ast::seed("test entity " + name));
-    tu.entities.push_back({e, name, type, is_function, lang, ast::Linkage::external, false});
+    tu.entities.push_back({e, name, type, is_function, lang, ast::Linkage::external, false, std::nullopt});
     if (name == "main") tu.main = e;
     return e;
   }
@@ -232,7 +232,7 @@ void calls_and_globals() {
   EntityId count = w.entity("count", w.int_t, false);
   EntityId twice = w.entity("twice", fn_ii, true);
   EntityId m = w.entity("main", w.fn(w.int_t, {}), true);
-  w.tu.variables.push_back({count, w.int_t, ast::int_value(w.in, ast::aarch64_darwin, w.int_t, 10)});
+  w.tu.variables.push_back({count, w.int_t, ast::int_value(w.in, ast::aarch64_darwin, w.int_t, 10), std::nullopt});
   {
     Body b{w};
     std::uint32_t n = b.declare("n", w.int_t);
@@ -255,7 +255,7 @@ void hello() {
   EntityId puts = w.entity("puts", fn_puts, true, ast::LangLinkage::c);
   EntityId msg = w.entity("msg", w.cchar_p, false);
   EntityId m = w.entity("main", w.fn(w.int_t, {}), true);
-  w.tu.variables.push_back({msg, w.cchar_p, w.consts.address_of(w.consts.string("bye"))});
+  w.tu.variables.push_back({msg, w.cchar_p, w.consts.address_of(w.consts.string("bye")), std::nullopt});
   Body b{w};
   NodeId lit = b.str("hello, world");
   NodeId decay = b.conv(ast::ConversionKind::array_to_pointer, w.cchar_p, lit);
@@ -270,10 +270,51 @@ void unsupported_is_an_error() {
   World w;
   QualType arr = w.array(w.int_t, 4);
   EntityId v = w.entity("v", arr, false);
-  w.tu.variables.push_back({v, arr, ast::int_value(w.in, ast::aarch64_darwin, w.int_t, 1)});
+  ast::Loc at{ast::ItemId(3), 2};
+  w.tu.variables.push_back({v, arr, ast::int_value(w.in, ast::aarch64_darwin, w.int_t, 1), at});
   auto o = pl::compile(w.tu, w.in, w.consts);
-  check(!o && o.error().size() == 1 && o.error()[0].message.contains("not supported yet"),
-        "an array initialized with an integer is reported");
+  check(!o && o.error().size() == 1 && o.error()[0].message.contains("not supported yet") && o.error()[0].at == at,
+        "an array initialized with an integer is reported at its declarator");
+}
+
+void names_only_when_used() {
+  // int apply(int (*)(int), int); int main() { return 0; }: a declaration nothing uses needs no
+  // linkage name, so its unsupported parameter type is no error. Used, it is one, at its declarator.
+  World w;
+  QualType fp = ast::pointer_to(w.in, w.fn(w.int_t, {w.int_t}));
+  QualType fn_apply = w.fn(w.int_t, {fp, w.int_t});
+  EntityId apply = w.entity("apply", fn_apply, true);
+  ast::Loc at{ast::ItemId(5), 1};
+  w.tu.entities.back().at = at;
+  EntityId m = w.entity("main", w.fn(w.int_t, {}), true);
+  {
+    Body b{w};
+    b.define(m, w.fn(w.int_t, {}), {}, b.block({b.ret(b.lit(w.int_t, 0))}));
+  }
+  check(pl::compile(w.tu, w.in, w.consts).has_value(), "an unused declaration is not mangled");
+  w.tu.functions.clear();
+  {
+    Body b{w};
+    NodeId c = b.call(apply, fn_apply, w.int_t, {b.add(ast::Literal{b.pr(fp), w.in.intern_value(ast::VNullptr{})}), b.lit(w.int_t, 1)});
+    b.define(m, w.fn(w.int_t, {}), {}, b.block({b.ret(c)}));
+  }
+  auto o = pl::compile(w.tu, w.in, w.consts);
+  check(!o && o.error().size() == 1 && o.error()[0].at == at && o.error()[0].message.contains("the name of 'apply'"),
+        "a used declaration's name is mangled, and the error is at its declarator");
+}
+
+void write_file_keeps_directories() {
+  if (!run_dir) return;
+  std::filesystem::path dir = *run_dir / "a-directory";
+  std::filesystem::create_directories(dir);
+  auto err = pl::write_file(dir, std::vector<std::uint8_t>{1, 2, 3}, true);
+  check(err && err->contains("is a directory") && std::filesystem::is_directory(dir), "-o names a directory");
+  std::filesystem::path file = *run_dir / "a-file";
+  check(!pl::write_file(file, std::vector<std::uint8_t>{1}, false) && !pl::write_file(file, std::vector<std::uint8_t>{1, 2}, true) &&
+            std::filesystem::file_size(file) == 2,
+        "a regular file is replaced");
+  check(!pl::write_file("/dev/null", std::vector<std::uint8_t>{1}, true) && std::filesystem::is_character_file("/dev/null"),
+        "a device is written to, not replaced");
 }
 
 }  // namespace
@@ -289,5 +330,7 @@ int main(int argc, char** argv) {
   calls_and_globals();
   hello();
   unsupported_is_an_error();
+  names_only_when_used();
+  write_file_keeps_directories();
   return ycxx::unit::result("unit.pipeline");
 }

@@ -56,6 +56,7 @@ struct Entity {
   ast::LangLinkage lang = ast::LangLinkage::cxx;
   ast::Linkage linkage = ast::Linkage::external;
   bool is_constexpr = false;
+  std::optional<ast::Loc> at;  // its first declarator, for diagnostics
 };
 
 // A variable definition at namespace scope with its constant initializer, or `ConstId::none` for
@@ -64,6 +65,7 @@ struct Variable {
   EntityId entity = EntityId::none;
   QualType type{};
   ConstId init = ConstId::none;
+  std::optional<ast::Loc> at;  // its declarator, for diagnostics
 };
 
 struct TranslationUnit {
@@ -228,7 +230,7 @@ std::expected<obj::object, std::vector<BackError>> compile(const TranslationUnit
   for (const Variable& v : tu.variables) {
     auto b = initial_bytes(in, layout, v.type, v.init);
     if (!b) {
-      errors.push_back({std::nullopt, std::format("{} is not supported yet", b.error())});
+      errors.push_back({v.at, std::format("{} is not supported yet", b.error())});
       continue;
     }
     bool is_const = (std::to_underlying(ast::cv_of(in.canonical(v.type))) & 1) != 0;
@@ -255,10 +257,25 @@ std::expected<obj::object, std::vector<BackError>> compile(const TranslationUnit
     unit.symbols.push_back({entity, std::format("l_.str.{}", n++), obj::binding::local});
   }
 
+  // Symbols for the entities the object defines or refers to; a declaration nothing uses needs
+  // no name.
+  std::set<std::uint32_t> used;
+  for (const aarch64::FunctionDef& f : unit.functions) {
+    used.insert(ir::raw(f.entity));
+    for (std::uint32_t n = 0; n < f.body.nodes.size(); ++n) {
+      l2::Op op = f.body.nodes[n].op;
+      if (op == l2::Op::symbol || op == l2::Op::call) used.insert(std::uint32_t(f.body.imms_of(ir::NodeId(n))[0]));
+    }
+  }
+  for (const aarch64::DataDef& d : unit.data) {
+    used.insert(ir::raw(d.entity));
+    for (const aarch64::DataReloc& r : d.relocs) used.insert(ir::raw(r.target));
+  }
   for (const Entity& e : tu.entities) {
+    if (!used.contains(ir::raw(e.id))) continue;
     auto name = symbol_name(in, e.name, e.type, e.is_function, e.lang);
     if (!name) {
-      errors.push_back({std::nullopt, std::format("the name of '{}': {} is not supported yet", e.name, name.error())});
+      errors.push_back({e.at, std::format("the name of '{}': {} is not supported yet", e.name, name.error())});
       continue;
     }
     unit.symbols.push_back({e.id, std::move(*name), e.linkage == ast::Linkage::internal ? obj::binding::local : obj::binding::global});

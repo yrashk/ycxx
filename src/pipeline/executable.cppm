@@ -22,8 +22,8 @@ const link::dylib& libsystem();
 std::expected<std::vector<std::uint8_t>, std::vector<link::error>> link_executable(std::span<const obj::object> objects,
                                                                                    std::string identifier);
 
-// Writes bytes to `path` (replacing it), executable when `executable` is set; an error message on
-// failure.
+// Writes bytes to `path`, replacing a regular file or a symbolic link, and makes a new file
+// executable when `executable` is set; an error message on failure.
 std::optional<std::string> write_file(const std::filesystem::path& path, std::span<const std::uint8_t> bytes,
                                       bool executable);
 
@@ -81,9 +81,17 @@ std::expected<std::vector<std::uint8_t>, std::vector<link::error>> link_executab
 std::optional<std::string> write_file(const std::filesystem::path& path, std::span<const std::uint8_t> bytes,
                                       bool executable) {
   // A new file, not the old one rewritten: the kernel caches a signed executable's pages by
-  // vnode, and rewriting one in place makes the next run of it fail its signature check.
+  // vnode, and rewriting one in place makes the next run of it fail its signature check. Only a
+  // regular file or a symbolic link is replaced; a directory is an error, and anything else (a
+  // device such as /dev/null, a pipe) is written to as it is.
   std::error_code ec;
-  std::filesystem::remove(path, ec);
+  auto st = std::filesystem::symlink_status(path, ec);
+  if (st.type() == std::filesystem::file_type::directory)
+    return std::format("cannot write '{}': it is a directory", path.display_string());
+  bool regular = st.type() == std::filesystem::file_type::regular || st.type() == std::filesystem::file_type::symlink ||
+                 st.type() == std::filesystem::file_type::not_found;
+  if (st.type() == std::filesystem::file_type::regular || st.type() == std::filesystem::file_type::symlink)
+    std::filesystem::remove(path, ec);
   {
     std::ofstream f(path, std::ios::binary | std::ios::trunc);
     if (!f) return std::format("cannot open '{}' for writing", path.display_string());
@@ -91,7 +99,7 @@ std::optional<std::string> write_file(const std::filesystem::path& path, std::sp
     f.close();
     if (!f) return std::format("cannot write '{}'", path.display_string());
   }
-  if (executable) {
+  if (executable && regular) {
     using enum std::filesystem::perms;
     std::filesystem::permissions(path, owner_exec | group_exec | others_exec, std::filesystem::perm_options::add, ec);
     if (ec) return std::format("cannot make '{}' executable: {}", path.display_string(), ec.message());
