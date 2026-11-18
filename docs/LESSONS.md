@@ -39,6 +39,18 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
     agree any shared file (here `ast/nodes.cppm`) with its owner first. Carry the owner's diff
     verbatim, so whichever branch merges second merges cleanly.
   - Learned on #24.
+- **A worktree-isolated agent's shell refuses commands it cannot prove are not git.** Loops over
+  `$f`, a compiler named by a variable, or several `python3 - <<EOF` steps chained with `&&` were
+  refused whole, which cost a retry each on #43.
+  - Do: put loops and multi-step edits in a script in the scratchpad and run that one file; use
+    `tools/test` with a path filter (`tools/test --cxx ycxx core own/slice`) to compile and run
+    a set of tests.
+  - Learned on #43.
+- **Write the back half against hand-built inputs while its front waits.** #43 needed the parser
+  (#52) for any end-to-end run. The back half (function_ir to a running executable) was written
+  and tested first, from bodies built the way sema builds them. When #52 landed, the front half
+  took one commit, and every slice test passed on the first run.
+  - Learned on #43.
 
 ## Working with Fable subagents
 
