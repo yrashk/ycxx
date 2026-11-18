@@ -61,6 +61,8 @@ struct Message {
   std::string text;
 };
 Message message(Session& s, FileId file, std::string_view presumed, const Diag& d);
+// The same, from the text of the file the diagnostic is in.
+Message message(std::string_view text, std::string_view presumed, const Diag& d);
 
 // `-E`: the text Clang's `-E` would print, and the diagnostics.
 std::pair<std::string, std::vector<Message>> preprocess_to_text(Session& s, std::string_view text, std::string_view path);
@@ -120,9 +122,25 @@ struct Process {
   struct Configured {
     std::unique_ptr<Session> session;
     Host* host = nullptr;
+    std::uint64_t used = 0;
   };
   std::map<Fp128, Configured> sessions;
   Session* current = nullptr;
+  std::uint64_t clock = 0;
+  // A resident process sees one configuration per distinct command line: the least recently used
+  // sessions beyond this are dropped. Their regions are only a cache, which `Pp` recomputes.
+  static constexpr std::size_t max_sessions = 16;
+
+  Configured& slot(const Config& cfg) {
+    auto& c = sessions[cfg.fingerprint()];
+    c.used = ++clock;
+    while (sessions.size() > max_sessions) {
+      auto lru = std::ranges::min_element(sessions, {}, [](const auto& e) { return e.second.used; });
+      if (lru->second.session.get() == current) current = nullptr;
+      sessions.erase(lru);
+    }
+    return c;
+  }
 };
 Process& process() {
   static Process p;
@@ -132,7 +150,7 @@ Process& process() {
 // The session of a configuration, created reading the disk if there is none.
 Session& session_for(const Config& cfg) {
   Process& p = process();
-  auto& c = p.sessions[cfg.fingerprint()];
+  auto& c = p.slot(cfg);
   if (!c.session) {
     c.session = std::make_unique<Session>(p.disk, cfg);
     c.host = &p.disk;
@@ -194,7 +212,7 @@ Session& session() {
 
 void configure(Config cfg) {
   Process& p = process();
-  auto& c = p.sessions[cfg.fingerprint()];
+  auto& c = p.slot(cfg);
   c.session = std::make_unique<Session>(p.disk, std::move(cfg));
   c.host = &p.disk;
   p.current = c.session.get();
@@ -202,7 +220,7 @@ void configure(Config cfg) {
 
 void configure(Config cfg, Host& host) {
   Process& p = process();
-  auto& c = p.sessions[cfg.fingerprint()];
+  auto& c = p.slot(cfg);
   if (c.session && c.host == &host) {
     c.session->files.new_generation();
   } else {
@@ -244,7 +262,11 @@ Preprocessed preprocess(std::string_view text, std::string_view path) { return p
 
 Message message(Session& s, FileId file, std::string_view presumed, const Diag& d) {
   const Files::Content* c = s.files.content(file);
-  std::vector<u32> starts = line_starts(c ? std::string_view(c->text) : std::string_view());
+  return message(c ? std::string_view(c->text) : std::string_view(), presumed, d);
+}
+
+Message message(std::string_view text, std::string_view presumed, const Diag& d) {
+  std::vector<u32> starts = line_starts(text);
   auto at = std::ranges::upper_bound(starts, d.offset);
   return Message{std::string(presumed), static_cast<u32>(at - starts.begin()), d.offset - *(at - 1) + 1,
                  lex::message_of(d.kind).severity == lex::Severity::error, lex::render(d.kind, d.args)};
