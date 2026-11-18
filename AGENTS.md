@@ -60,6 +60,11 @@ in our own terms. Never copy sequences or commit their listings (DECISIONS §2.3
 
 - Every handover or closing comment answers: *what would have made this faster?* Add a lesson
   if the answer is not trivial.
+- **No follow-up is lost** (DECISIONS §6.7). Every follow-up you name (a deferred finding, a
+  "later", a known limitation, a stand-in to replace) goes to an existing issue (comment there)
+  or a new one (`area:*`, `kind:*`, milestone, failing example, clauses), linked both ways. A
+  handover, closing comment or PR body is incomplete until each follow-up in it has its issue
+  link; PRs without them are not merged.
 - Finished: update `STATUS.md` if what is true of the code changed, close the issue with a summary,
   and remove `status:claimed`.
 - Not finished: post a handover comment (state, branch, what you learned, the next concrete step)
