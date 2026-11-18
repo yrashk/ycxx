@@ -376,7 +376,7 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   hosts. CI's macOS job runs the slice before its tier, with `--no-unsupported`.
 - `unit.pipeline`: the line table, linkage names, and the back half from hand-built analysed
   bodies, linked and run on arm64 macOS.
-- Not yet: the stages as engine queries and the daemon (#63), `#include` (#65), optimization
+- Not yet: the stages as engine queries (#63) and the daemon (designed in `docs/design/daemon.md`; #95–#98), `#include` (#65), optimization
   levels and the other common options (`-O` is rejected, #81).
 
 ## The L1 interpreter (#25, 2026-11-18)
