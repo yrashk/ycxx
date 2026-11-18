@@ -55,5 +55,11 @@ tools/draft-examples --oracles            # rerun Clang 23 and GCC 16 too (about
 tools/draft-examples --pin-draft SHA --pin-cwg SHA --oracles   # move the pins
 ```
 
+CI checks both on macOS whenever this suite, the extractor or the driver changes
+(`.github/workflows/oracles.yml`): the regeneration must leave `tests/draft` unchanged, and the
+suite must pass with `--cxx clang` and `--cxx gcc`. A newer Clang or GCC there (a Homebrew GCC
+update) shows up as a diff; rerun `--oracles` locally with the same compilers and commit. Only
+macOS: Clang on Linux uses libstdc++, so its header-dependent verdicts differ from the recorded ones.
+
 Sources are downloaded once into `build/spec-cache`. Moving the draft pin renumbers examples
 whose subclause gained or lost one. The test identities change, and so do their state and history.

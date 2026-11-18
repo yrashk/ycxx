@@ -1,0 +1,73 @@
+name: oracles
+
+# The oracle check of the draft suite (tests/draft/README.md, #6): Clang 23 and GCC 16 as the
+# compilers under test. Runs only when the suite, its extractor or the driver changes. macOS only:
+# the recorded verdicts (tests/draft/oracles.tsv) come from Clang with libc++, and Clang on Linux
+# uses libstdc++, so its header-dependent verdicts differ.
+#   1. tools/draft-examples --oracles must reproduce tests/draft exactly: a diff is a changed
+#      compiler or a nondeterministic extractor.
+#   2. tools/test --cxx clang|gcc on the core stage (the draft and own suites; no ycxx build): an XPASS is a compiler that
+#      changed its mind; a FAIL is a test that is wrong.
+
+on:
+  pull_request:
+    paths: ['tests/draft/**', 'tests/own/**', 'tests/driver/**', 'tools/draft-examples', 'tools/test',
+            '.github/workflows/oracles.yml', '.github/actions/setup/**']
+  push:
+    branches: [main]
+    paths: ['tests/draft/**', 'tests/own/**', 'tests/driver/**', 'tools/draft-examples', 'tools/test',
+            '.github/workflows/oracles.yml', '.github/actions/setup/**']
+  workflow_dispatch:
+
+concurrency:
+  group: oracles-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  oracles:
+    name: macos-arm64 oracles
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Toolchain (GCC 16, and Clang 23 as the oracle)
+        uses: ./.github/actions/setup
+        with:
+          oracle: 'true'
+
+      - name: Pinned draft and CWG sources
+        uses: actions/cache@v4
+        with:
+          path: build/spec-cache
+          key: spec-cache-${{ hashFiles('tests/draft/PINS') }}
+
+      - name: Regenerate tests/draft with the oracles (tools/draft-examples --oracles)
+        run: |
+          python3 -I tools/draft-examples --oracles
+          git add -A tests/draft
+          if ! git diff --cached --exit-code --stat tests/draft; then
+            git diff --cached tests/draft | head -200
+            echo "::error::tools/draft-examples --oracles changed tests/draft: rerun it and commit, or see the diff above"
+            exit 1
+          fi
+
+      - name: Draft and own suites with Clang 23 (tools/test --cxx clang core)
+        run: tools/test --cxx clang --require-oracles -q core
+
+      - name: Draft and own suites with GCC 16 (tools/test --cxx gcc core)
+        if: always()
+        run: tools/test --cxx gcc --require-oracles -q core
+
+      - name: Test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: oracle-test-logs
+          path: build/test-logs/
+          if-no-files-found: ignore
