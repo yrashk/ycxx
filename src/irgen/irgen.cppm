@@ -4,3 +4,4 @@ export module ycxx.irgen;
 
 export import :facts;
 export import :gen;
+export import :types;

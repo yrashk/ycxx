@@ -1,7 +1,6 @@
 // Unit tests of IR generation (#24): analysed bodies built with the AST builder, as sema (#41)
 // will build them, go through `function_ir`; each result must pass `verify`, and its text form,
-// with types, entities and constants named, must equal the expected one. Types and constants
-// come from a stand-in `Facts` until the type and value interners (#33) exist.
+// with types, entities and constants named, must equal the expected one.
 import std;
 import ycxx.ast;
 import ycxx.ir;
@@ -20,98 +19,89 @@ using ycxx::unit::check;
 
 namespace {
 
-// ------------------------------------------------------------------ stand-in types and constants
+// ------------------------------------------------------------------ facts
 
-struct TypeDesc {
-  std::string name;
-  TypeClass cls = TypeClass::other;
-  IntRep rep{};
-  QualType inner{};     // pointee, element or return type
-  QualType promoted{};  // integers only
-};
-
-struct TestFacts {
-  explicit TestFacts(ast::Interners& i) : in(i) {}
-  ast::Interners& in;
-  std::map<std::uint32_t, TypeDesc> types;
-  std::map<std::uint32_t, std::string> consts, entities;
+// Types and integer constants are the real ones (#33), through `TypeFacts`. Entities and string
+// literals are stand-ins until the interners hold them: an entity is a name, and a string
+// literal's constant is a numbered token whose address is another token.
+struct TestFacts : TypeFacts {
+  using TypeFacts::TypeFacts;
+  std::map<std::uint32_t, std::string> tokens, entities;
   std::set<std::uint32_t> constexpr_fns;
   EntityId main_fn = EntityId::none;
 
-  QualType add(TypeDesc d) {
-    QualType q = in.types.add<QualType>(ast::seed("type " + d.name));
-    if (d.cls == TypeClass::integer || d.cls == TypeClass::bool_) {
-      if (d.promoted == QualType{}) d.promoted = q;
-    }
-    types[std::to_underlying(q)] = std::move(d);
-    return q;
-  }
-  const TypeDesc& desc(QualType q) const { return types.at(std::to_underlying(q)); }
   EntityId entity(std::string name) {
-    EntityId e = in.entities.add<EntityId>(ast::seed("entity " + name));
+    EntityId e = interners().entities.add<EntityId>(ast::seed("entity " + name));
     entities[std::to_underlying(e)] = name;
     return e;
   }
-  ConstId constant(std::string spelling) {
-    ConstId c = in.values.add<ConstId>(ast::seed("const " + spelling));
-    consts[std::to_underlying(c)] = spelling;
+  ConstId token(std::string spelling) {
+    std::int64_t n = 1'000'000 + std::int64_t(tokens.size());
+    ConstId c = ast::int_value(interners(), target(), ast::Builtin::unsigned_long_long, n);
+    tokens[std::to_underlying(c)] = spelling;
     return c;
   }
-
-  // The concept's interface.
-  QualType canonical(QualType q) { return q; }
-  TypeClass classify(QualType q) { return desc(q).cls; }
-  IntRep integer(QualType q) { return desc(q).rep; }
-  QualType promoted(QualType q) { return desc(q).promoted; }
-  QualType pointee(QualType q) { return desc(q).inner; }
-  QualType element(QualType q) { return desc(q).inner; }
-  QualType return_type(QualType q) { return desc(q).inner; }
-  QualType int_type() { return int_t; }
-  QualType pointer_to(QualType q) {
-    for (auto& [k, d] : types)
-      if (d.cls == TypeClass::pointer && d.inner == q) return QualType(k);
-    return add({desc(q).name + "*", TypeClass::pointer, {}, q});
-  }
-  ConstId int_constant(QualType, std::int64_t v) { return constant(std::format("{}", v)); }
-  ConstId null_constant(QualType) { return constant("null"); }
-  ConstId string_address(ConstId s) { return constant("&" + consts.at(std::to_underlying(s))); }
+  ConstId string_address(ConstId s) { return token("&" + tokens.at(std::to_underlying(s))); }
   bool is_constexpr(EntityId e) { return constexpr_fns.contains(std::to_underlying(e)); }
   bool is_main(EntityId e) { return e == main_fn; }
-
-  QualType int_t{};
 };
 
 static_assert(Facts<TestFacts>);
 
-// The test's universe: the α slice's types and a few entities.
+// The test's universe: the α slice's types on AArch64 Darwin, and a few entities.
 struct World {
   ast::Interners in;
-  TestFacts f{in};
+  TestFacts f{in, ast::aarch64_darwin};
   QualType void_t, bool_t, char_t, int_t, unsigned_t, long_t, cchar_t, cchar_p, char5_t;
   QualType fn_ii, fn_iii, fn_i, fn_v, fn_uu, fn_icp, fn_ii_b;
+  std::map<std::uint32_t, std::string> names;
+
+  QualType named(QualType q, std::string name) {
+    names[std::to_underlying(q)] = std::move(name);
+    return q;
+  }
+  QualType fn(QualType ret, std::initializer_list<QualType> params) {
+    return ast::function_type(in, ret, std::span(params.begin(), params.size()));
+  }
 
   World() {
-    void_t = f.add({"void", TypeClass::void_});
-    int_t = f.add({"int", TypeClass::integer, {true, 32}});
-    f.int_t = int_t;
-    bool_t = f.add({"bool", TypeClass::bool_, {false, 1}, {}, int_t});
-    char_t = f.add({"char", TypeClass::integer, {true, 8}, {}, int_t});
-    unsigned_t = f.add({"unsigned", TypeClass::integer, {false, 32}});
-    long_t = f.add({"long", TypeClass::integer, {true, 64}});
-    cchar_t = f.add({"const_char", TypeClass::integer, {true, 8}, {}, int_t});
-    cchar_p = f.pointer_to(cchar_t);
-    char5_t = f.add({"const_char[6]", TypeClass::array, {}, cchar_t});
-    fn_ii = f.add({"int(int)", TypeClass::function, {}, int_t});
-    fn_iii = f.add({"int(int,int)", TypeClass::function, {}, int_t});
-    fn_i = f.add({"int()", TypeClass::function, {}, int_t});
-    fn_v = f.add({"void()", TypeClass::function, {}, void_t});
-    fn_uu = f.add({"unsigned(unsigned)", TypeClass::function, {}, unsigned_t});
-    fn_icp = f.add({"int(const_char*)", TypeClass::function, {}, int_t});
-    fn_ii_b = f.add({"bool(int,int)", TypeClass::function, {}, bool_t});
+    using enum ast::Builtin;
+    void_t = named(ast::builtin(in, void_), "void");
+    bool_t = named(ast::builtin(in, bool_), "bool");
+    char_t = named(ast::builtin(in, char_), "char");
+    int_t = named(ast::builtin(in, int_), "int");
+    unsigned_t = named(ast::builtin(in, unsigned_int), "unsigned");
+    long_t = named(ast::builtin(in, long_), "long");
+    cchar_t = named(ast::builtin(in, char_, ast::Cv::const_), "const_char");
+    cchar_p = ast::pointer_to(in, cchar_t);
+    char5_t = ast::array_of(in, ast::aarch64_darwin, cchar_t, ast::int_value(in, ast::aarch64_darwin, unsigned_long, 6));
+    fn_ii = fn(int_t, {int_t});
+    fn_iii = fn(int_t, {int_t, int_t});
+    fn_i = fn(int_t, {});
+    fn_v = fn(void_t, {});
+    fn_uu = fn(unsigned_t, {unsigned_t});
+    fn_icp = fn(int_t, {cchar_p});
+    fn_ii_b = fn(bool_t, {int_t, int_t});
+  }
+
+  std::string type_name(QualType q) {
+    if (auto it = names.find(std::to_underlying(q)); it != names.end()) return it->second;
+    if (ast::is_pointer(in, q)) return type_name(ast::pointee_of(in, q)) + "*";
+    if (ast::is_array(in, q)) {
+      auto a = in.types.get<ast::TArray>(in.types.canon(q));
+      return std::format("{}[{}]", type_name(a.elem), ast::int_bits(in, a.bound).lo);
+    }
+    return std::format("T{}", std::to_underlying(q));
+  }
+  std::string const_name(std::uint32_t n) {
+    if (auto it = f.tokens.find(n); it != f.tokens.end()) return it->second;
+    ConstId c{n};
+    if (in.values.is<ast::VNullptr>(c)) return "null";
+    return std::format("{}", std::int64_t(ast::int_bits(in, c).lo));
   }
 
   // The printed body with handles named: `T<n>` by type name, `@<n>` by entity name and `#<n>` by
-  // constant spelling.
+  // constant value.
   std::string text(EntityId fn, const ir::Function& body) {
     std::string raw = ir::print(fn, body), out;
     for (std::size_t i = 0; i < raw.size();) {
@@ -121,9 +111,9 @@ struct World {
           (i == 0 || !std::isalnum(raw[i - 1]))) {
         while (j < raw.size() && std::isdigit(raw[j])) ++j;
         std::uint32_t n = std::uint32_t(std::stoul(raw.substr(i + 1, j - i - 1)));
-        if (c == 'T') out += f.desc(QualType(n)).name;
+        if (c == 'T') out += type_name(QualType(n));
         else if (c == '@') out += "@" + f.entities.at(n);
-        else out += "#" + f.consts.at(n);
+        else out += "#" + const_name(n);
         i = j;
       } else {
         out += c;
@@ -152,8 +142,11 @@ struct Body {
     return b.add(v, 1);
   }
 
-  NodeId lit(QualType t, std::string spelling) { return add(ast::Literal{pr(t), w.f.constant(spelling)}); }
-  NodeId str(std::string s) { return add(ast::Literal{lv(w.char5_t), w.f.constant("\"" + s + "\"")}); }
+  NodeId lit(QualType t, std::string spelling) {
+    std::int64_t v = spelling.starts_with('\'') ? std::int64_t(spelling[1]) : std::stoll(spelling);
+    return add(ast::Literal{pr(t), w.f.int_constant(t, v)});
+  }
+  NodeId str(std::string s) { return add(ast::Literal{lv(w.char5_t), w.f.token("\"" + s + "\"")}); }
   // The parameters are the first locals (#41): declare them before anything else.
   std::map<EntityId, std::uint32_t> param_locals;
   void params(std::initializer_list<std::pair<EntityId, QualType>> ps) {
@@ -493,7 +486,7 @@ void recursion_and_promotions() {
 func @g {
 ^0(%0: !state):
   %1: !state, %2: char* = alloc %0 [char, automatic, indeterminate]
-  %3: char = const [#'a']
+  %3: char = const [#97]
   %4: !state = store %1, %2, %3 [char, /]
   %5: !state = obj.begin %4, %2 [char]
   %6: char = load %5, %2 [char, /]
@@ -528,7 +521,7 @@ void hello_world() {
 func @main {
 ^0(%0: !state):
   %1: const_char[6]* = const [#&"hello"]
-  %2: const_char* = ptr_member %1 [const_char, /e0]
+  %2: const_char* = ptr_member %1 [char, /e0]
   %3: !state, %4: int = call not_constexpr %0, %2 [@puts]
   %5: int = const [#0]
   ret %3, %5
@@ -578,7 +571,7 @@ func @next {
     }));
     FunctionIr r = generate(w, {f, w.fn_icp, {{s, w.cchar_p}}}, body);
     std::string got = w.text(f, r.body);
-    check(got.contains("ptr_add") && got.contains("[const_char]"), "pointer increment and subscript are ptr_add:\n" + got);
+    check(got.contains("ptr_add %") && got.contains("[char]"), "pointer increment and subscript are ptr_add:\n" + got);
   }
 }
 
