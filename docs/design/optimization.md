@@ -1,7 +1,7 @@
 # Optimization architecture: IR, equality saturation, solvers, verification
 
-Design for [yrashk/ycxx#3](https://github.com/yrashk/ycxx/issues/3). Status: **proposed**. When
-accepted, §1 is summarized into DECISIONS §4.8 and the "Open" line there is removed.
+Design for [yrashk/ycxx#3](https://github.com/yrashk/ycxx/issues/3). Status: **accepted**; §1 is
+summarized in DECISIONS §4.8, which cites this document's sections as §O1–§O14.
 
 This document sits on the accepted [query-engine design](query-engine.md): the optimizer is a
 set of queries (§A8), with the constraints its Part D lists. It is sized to its decisions
@@ -666,19 +666,22 @@ an engine input (§9).
 
 ## 13. Follow-up implementation issues and open items
 
+The first eight rows, what M4 and M5 need, are open as #23–#30. The rest are opened when M5
+lands.
+
 | Issue | Area | Content |
 | --- | --- | --- |
-| L1 IR definition and op table | `area:ir` | Reflected op table, block arguments, state threading, node classes, flags, access paths, lifetime and init ops, printer/parser, canonical order and fingerprint, `function_debug` |
-| `function_ir` generation | `area:ir`, `area:sema-decl` | From the analysed body per §11; EH, coroutines, cleanups, static initializers |
-| Interpreter | `area:interp`, `area:consteval` | Trampolined loop, abstract memory, [expr.const] checks, host interface for whole programs, step budgets |
-| `lower` L1 → L2 | `area:ir` | Byte offsets from `layout`, vptr loads, coroutine splitting, EH lowering, `consteval_br`, erroneous-value stores |
-| L2 flat-memory interpreter and L3 evaluator | `area:interp`, `area:tests` | Differential testing of `lower` and of pattern semantics |
-| AArch64 target description and heuristic codegen | `area:codegen-aarch64` | Pattern table, maximal munch, stack slots then SSA linear scan, list scheduling, encodings |
-| Allocation validator and dependence checker | `area:codegen-aarch64`, `area:tests` | Rideau–Leroy style checker; schedule checker; run in CI |
-| `optimized` level 0, `unit`, `best_available` plumbing | `area:opt`, `area:query-engine` | The §A8 cells over an empty snapshot; `opt_cache_snapshot`, `cost_model` inputs |
+| L1 IR definition and op table (#23) | `area:ir` | Reflected op table, block arguments, state threading, node classes, flags, access paths, lifetime and init ops, printer/parser, canonical order and fingerprint, `function_debug` |
+| `function_ir` generation (#24) | `area:ir`, `area:sema-decl` | From the analysed body per §11; EH, coroutines, cleanups, static initializers |
+| Interpreter (#25) | `area:interp`, `area:consteval` | Trampolined loop, abstract memory, [expr.const] checks, host interface for whole programs, step budgets |
+| `lower` L1 → L2 (#26) | `area:ir` | Byte offsets from `layout`, vptr loads, coroutine splitting, EH lowering, `consteval_br`, erroneous-value stores |
+| L2 flat-memory interpreter and L3 evaluator (#27) | `area:interp`, `area:tests` | Differential testing of `lower` and of pattern semantics |
+| AArch64 target description and heuristic codegen (#28) | `area:codegen-aarch64` | Pattern table, maximal munch, stack slots then SSA linear scan, list scheduling, encodings |
+| Allocation validator and dependence checker (#29) | `area:codegen-aarch64`, `area:tests` | Rideau–Leroy style checker; schedule checker; run in CI |
+| `optimized` level 0, `unit`, `best_available` plumbing (#30) | `area:opt`, `area:query-engine` | The §A8 cells over an empty snapshot; `opt_cache_snapshot`, `cost_model` inputs |
 | Rule language and prover | `area:opt` | `#embed` + consteval parser, SMT translation, `PROOFS`, CI job |
 | E-graph engine | `area:opt` | Deterministic construction, analyses, rebuild, greedy extraction, explanations in `--verify-opt`; informed by S1 |
-| `ycxx::cm` and HiGHS, CaDiCaL back ends | `area:solver` | Interface, decompositions, FlatZinc writer, deterministic builds; HiGHS waits on libycxx B1 and B2 (S2) |
+| `ycxx::cm` and HiGHS, CaDiCaL back ends | `area:solver` | Interface, decompositions, FlatZinc writer, deterministic builds; HiGHS waits on yrashk/libycxx#5 (B1) and yrashk/libycxx#1 (B2) (S2) |
 | Z3 back end and translation validation | `area:solver`, `area:opt` | §6.1 encoding, region selection, evidence, fallback |
 | Structural passes and pass-order search | `area:opt` | mem2reg/SROA, inlining by cost, loop passes, directed pre-pass |
 | Gecode back end and combinatorial codegen | `area:solver`, `area:codegen-aarch64` | Covering selection, joint allocation and scheduling model |

@@ -122,8 +122,8 @@ reasoning; do not leave decisions only in issue threads.
 ## 4. Architecture
 
 These are the commitments. §4.1–4.5 and the query parts of §4.8 are specified by the accepted
-[query-engine design](docs/design/query-engine.md) (#1). References of the form §A1 or §B6 point into that document. The rest is open until its
-design document lands.
+[query-engine design](docs/design/query-engine.md) (#1). References of the form §A1 or §B6 point into that document. The rest of §4.8 is
+specified by the accepted [optimization design](docs/design/optimization.md) (#3), cited as §O1–§O14.
 
 1. **Resident, query-based core.**
    - **Red/green queries with early cutoff by fingerprint.** Every analysis result is a pure,
@@ -188,39 +188,77 @@ design document lands.
 7. **One binary, many fronts.** The `ycxx` binary is the daemon and also its clients: a
    `c++`-compatible command line, an LSP server and a control interface (reload, status, query).
 8. **Optimization is search over verified transformations, and it runs while the compiler is idle.**
-   - **Optimizations are queries too.** `optimized(ir_fp, target, options, optimizer_version,
-     level)` is a pure memoized query, persisted to the on-disk cache. Its budget level is counted
-     in deterministic units. *Reason:* work done once is never redone, on any machine. ([query-engine design](docs/design/query-engine.md)
-     §A8)
+   Specified by the accepted [optimization design](docs/design/optimization.md) (#3); references
+   of the form §O2 point into it.
+   - **Optimizations are queries too.** `optimized(unit_fp, target, options, optimizer_version,
+     level)` is a pure memoized query, persisted to the on-disk cache. The unit is the function's
+     lowered IR with its inline candidates. `target` includes the ISA feature set and the cost
+     model's fingerprint. `optimizer_version` covers the rules, their proofs, the budget ladder,
+     the pattern tables and the hash of every build input. *Reason:* work done once is never
+     redone, on any machine. (§A8, §O2.4, §O7)
+   - **One IR at three levels.**
+     - L1 is semantic. The front end writes it, and the interpreter runs it in `constant` or
+       `runtime` mode. It makes every [expr.const] fact explicit.
+     - L2 is lowered: flat bytes with poison. The optimizer and translation validation work on it.
+     - L3 is the machine level.
+
+     Effects are threaded state values, and pure nodes float, so a function's dataflow is an
+     acyclic DAG. *Reason:* the evaluator needs C++ object semantics, and SMT needs bit vectors.
+     (§O2)
    - **Anytime optimization.** While idle, the daemon improves hot or recently changed functions
      at higher levels into an optimization cache. A build's output is a function of three things:
      its inputs, the requested level, and an optimization-cache snapshot that is an engine input.
-     A development build and a release build differ in level, not in pipeline. *Reason:* builds
-     improve over time and stay reproducible. (§A8.2–A8.3)
-   - **Search, not just fixed pass pipelines.** The mid-level optimizer is expected to use
-     equality saturation (an e-graph of equivalent forms, with extraction by cost). Phase
-     ordering, inlining and unrolling are searched or tuned against cost models, not hard-coded
-     orders. Superoptimization of small hot regions is used where budgets allow.
-   - **Solvers where the problem is combinatorial:** instruction selection as covering, register
-     allocation and instruction scheduling as constraint or integer programs, e-graph extraction
-     as ILP, code layout. Heuristics remain the default fast path. Solvers improve on them as the
-     budget allows, never replace them.
-   - **A constraint-model layer owned by ycxx** stands between the optimizer and any solver. It
-     plays the role FlatZinc plays for MiniZinc. Solvers are back ends of that layer and
-     interchangeable (§7), and the same model can be exported for off-line experiments with
-     MiniZinc's own tool chain.
-   - **Verification:** no search or solver result reaches an object file unless it is correct by
-     construction (a rewrite rule proven once) or validated against its input, by SMT translation
-     validation of the region. On failure or timeout the heuristic result is used.
-   - **Determinism (§4.4) holds:** budgets are counted in deterministic units (solver conflicts
-     or nodes, e-graph iterations), never wall-clock time, and parallel solvers run in their
-     deterministic modes. A stopped solver stores nothing. The part of the cache a build used is
-     exported as a replay manifest, so a release build replays it exactly. (§A8.4)
-   - **Cost models are data, measured per target** (latency and throughput microbenchmarks run on
-     real hardware), not constants guessed in code.
+     `-O0` pins level 0 exactly. The performance oracle's gaps order the daemon's work list, which
+     never reaches a value. *Reason:* builds improve over time and stay reproducible. (§A8.2–A8.3,
+     §O7, §O9)
+   - **Equality saturation at L2, on equivalences only.**
+     - Rules are data. They are proven once per optimizer version by SMT, under a poison-aware
+       semantics with no `undef`.
+     - Facts that hold only on some paths, and rewrites that only refine, go to a directed
+       pre-pass that is translation-validated.
+     - Extraction is greedy everywhere, plus exact ILP on e-graphs of up to a few hundred e-nodes.
+     - Pass orders are searched over a small fixed set.
 
-   **Open: [optimization architecture design]** (IR shape for e-graphs, the constraint layer's
-   interface, the verification boundary).
+     *Reason:* congruence is sound only for equivalences. The spike measured greedy extraction
+     at up to 26% worse than ILP, and ILP stops being practical near 1,000 e-nodes. (§O3, §O6.1)
+   - **Solvers where the problem is combinatorial, behind `ycxx::cm`.**
+     - `ycxx::cm` is ycxx's own flat constraint model, exportable to FlatZinc.
+     - Back ends: HiGHS (MIP), CaDiCaL (SAT), Z3 (SMT) and Gecode (CP). All are MIT-licensed and
+       built from source against libycxx, and all run single-threaded with deterministic limits.
+     - Chuffed and CP-SAT are reached only through the FlatZinc export. Bitwuzla is used offline
+       only, because it needs LGPL GMP.
+     - Heuristics always exist and are the fallback. The heuristic and combinatorial instruction
+       selectors and allocators read one pattern table and end in the same validators.
+
+     *Reason:* solvers improve on heuristics but never replace them, and they stay replaceable.
+     (§O4, §O5)
+   - **Verification boundary.**
+     - Proven rules are correct by construction.
+     - Solver answers are checked: extractions for feasibility, allocations by a Rideau–Leroy
+       validator, schedules by a dependence check.
+     - Other passes are SMT-validated per acyclic region where the level's budget allows.
+       Anything else is trusted and listed.
+     - Evidence is part of the value, and replay re-checks it. A failed re-check under `--replay`
+       is a hard error.
+
+     *Reason:* the same guarantee as validating everything, at a fraction of the cost. (§O6)
+   - **Determinism (§4.4) holds.**
+     - Budgets are levels on a ladder, counted in deterministic units (e-graph iterations and
+       nodes, conflicts, `rlimit`, branch-and-bound nodes), never wall-clock time.
+     - E-graphs are built in id order and are never shared across tasks.
+     - Solver solutions travel in values, so a replay re-checks them and never re-solves.
+     - A stopped solver stores nothing. The part of the cache a build used is exported as a
+       replay manifest, so a release build replays it exactly.
+
+     *Reason:* the spike showed that matching in hash-table order changes results, and that a
+     solver's search path depends on its binary. (§A8.4, §O3.6, §O4.2)
+   - **Cost models are data, measured per target.** There is one table per microarchitecture,
+     measured with latency and throughput microbenchmarks. Each table is a high-durability input
+     whose fingerprint is part of `target`. (§O8)
+   - **The first back end needs none of the search machinery.** M4 builds L1, the interpreter and
+     the reflected op table. M5 builds `lower`, the pattern table, maximal-munch selection, linear
+     scan, the validators and the §A8 plumbing. Neither needs an e-graph, rule, solver or SMT
+     query. *Reason:* M4/M5 are not blocked on optimization work. (§O10)
 
 ## 5. Development process
 

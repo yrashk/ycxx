@@ -63,7 +63,7 @@ issue is the licence, not the build.
 
 ## libycxx bugs found (for upstream issues)
 
-- **B1: `std::set`/`std::map` `end()` changes on the first insertion.** In
+- **B1: `std::set`/`std::map` `end()` changes on the first insertion** (yrashk/libycxx#5). In
   `include/ycxx/core/rb_tree.hpp`, the header is set up lazily: `__hdr_` is `nullptr` "before
   the first insertion". So `end()` of a container that never had an element is `iterator(nullptr)`,
   and it compares unequal to `end()` after an `insert`/`emplace`. That violates
@@ -75,7 +75,7 @@ issue is the licence, not the build.
   HiGHS does exactly this. `HPresolve` fills `eqiters` with `equations.end()` while the set is
   still empty, then compares with `!=` and calls `erase` on the iterator. That leads to a SIGSEGV
   in `__ycxx::__detail::__rb_erase`, called from `HPresolve::markRowDeleted`.
-- **B2: GCC 16.2 ICE triggered by libycxx's `abs` overload set.** The error is
+- **B2: GCC 16.2 ICE triggered by libycxx's `abs` overload set** (the same ICE as yrashk/libycxx#1; this trigger is added there). The error is
   `internal compiler error: in compare_ics, at cp/call.cc:12857`. Repro:
   ```cpp
   #include <vector>
@@ -86,7 +86,7 @@ issue is the licence, not the build.
   `template<class _Tp = double> requires … _Tp abs(type_identity_t<_Tp>)`, re-exported by a global
   `using std::abs;`. This is a GCC bug, but libycxx should probably work around it. HiGHS
   workaround: qualify the calls in `HEkkDebug.cpp` (in `build.sh`).
-- **B3 (robustness/docs): the C wrapper headers are bypassed by a plain `-I` to the C headers.**
+- **B3 (robustness/docs): the C wrapper headers are bypassed by a plain `-I` to the C headers** (yrashk/libycxx#6).
   Chuffed's `find_package(ZLIB)` adds `-I…/MacOSX.sdk/usr/include`. The SDK's `<stdlib.h>` and
   `<string.h>` then win over libycxx's `-isystem` wrappers. libycxx's `<cstdlib>` then fails with
   "declaration of 'int atexit(void (*)()) noexcept' has a different exception specifier", and
