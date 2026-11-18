@@ -15,6 +15,7 @@ import ycxx.items;
 import ycxx.sema;
 import ycxx.parse;
 import :back;
+import :lines;
 
 export namespace ycxx::pipeline {
 
@@ -179,6 +180,30 @@ engine::query_task<FrontResult> TuFront::run(engine::Ctx& cx, TuId tu) {
   const items::Items& items = co_await cx.fetch<items::RegionItems>(file);
   const std::vector<engine::Diagnostic>& lexed = co_await cx.fetch<engine::DiagsOf>(cx.cell_of<items::RegionItems>(file));
   FrontResult out;
+  // `file:line:col` of a byte offset in an included file (region file `f`), rendered from the
+  // file's text as a recorded input, so an edit that moves only its newlines re-renders the
+  // position (#93). Phase 4's diagnostics (`kind`) may have a presumed line ([cpp.line]).
+  auto where_in = [&](std::uint16_t f, std::uint32_t offset, std::optional<lex::LexDiag> kind) {
+    const std::string& name = region.files[f];
+    const pp::Source& source = cx.fetch<pp::SourceOf>(file);
+    pp::Session& ps = pp::session_for(source.config);
+    std::lock_guard lock(ps.mutex);
+    std::string_view text;  // `<built-in>` is the session's
+    if (name.starts_with('<')) {
+      if (const pp::Files::Content* c = ps.files.content(ps.files.id(name))) text = c->text;
+    } else {
+      std::filesystem::path p(name);
+      if (p.is_relative() && !source.cwd.empty()) p = source.cwd / p;
+      const std::optional<std::string>& content = cx.fetch<pp::FileContent>(pp::path_id(p.lexically_normal().generic_native_encoded_string()));
+      if (content) text = *content;
+    }
+    if (!kind) {
+      LineColumn lc = LineTable(text).line_column(offset);
+      return std::format("{}:{}:{}", region.file_names[f], lc.line, lc.column);
+    }
+    pp::Message pm = pp::message(ps.spellings, text, region.file_names[f], pp::Diag{f, offset, *kind, {}, 0, std::nullopt});
+    return std::format("{}:{}:{}", pm.file, pm.line, pm.column);
+  };
   // `pp` reports at byte offsets in the file (`lex::file_level`).
   for (const engine::Diagnostic& d : lexed) {
     auto kind = lex::lex_diag_of(d.id);
@@ -186,26 +211,9 @@ engine::query_task<FrontResult> TuFront::run(engine::Ctx& cx, TuId tu) {
     std::vector<std::uint64_t> args;
     for (const engine::DiagArg& a : d.args) args.push_back(a.raw);
     Message m{d.at.offset, lex::message_of(*kind).severity == lex::Severity::error, lex::render(*kind, args), {}};
-    // Located in an included file: rendered here (pp::file_loc), from the file's text as a
-    // recorded input, so an edit that moves only its newlines re-renders the position (#93).
-    if (d.at.item != lex::file_level) {
-      std::uint16_t f = static_cast<std::uint16_t>(lex::file_level - d.at.item);
-      const pp::Diag diag{f, d.at.offset, *kind, {}, 0, std::nullopt};
-      const std::string& name = region.files[f];
-      const pp::Source& source = cx.fetch<pp::SourceOf>(file);
-      pp::Session& ps = pp::session_for(source.config);
-      std::lock_guard lock(ps.mutex);
-      pp::Message pm;
-      if (name.starts_with('<')) {
-        pm = pp::message(ps, ps.files.id(name), region.file_names[f], diag);  // `<built-in>`
-      } else {
-        std::filesystem::path p(name);
-        if (p.is_relative() && !source.cwd.empty()) p = source.cwd / p;
-        const std::optional<std::string>& text = cx.fetch<pp::FileContent>(pp::path_id(p.lexically_normal().generic_native_encoded_string()));
-        pm = pp::message(ps.spellings, text ? std::string_view(*text) : std::string_view(), region.file_names[f], diag);
-      }
-      m.where = std::format("{}:{}:{}", pm.file, pm.line, pm.column);
-    }
+    // Located in an included file (pp::file_loc).
+    if (d.at.item != lex::file_level)
+      m.where = where_in(static_cast<std::uint16_t>(lex::file_level - d.at.item), d.at.offset, *kind);
     out.messages.push_back(std::move(m));
   }
   // The unit's language options: the instantiation limit (`-ftemplate-depth`).
@@ -217,8 +225,11 @@ engine::query_task<FrontResult> TuFront::run(engine::Ctx& cx, TuId tu) {
     if (!kind) continue;
     std::vector<std::uint64_t> args;
     for (const engine::DiagArg& a : d.args) args.push_back(a.raw);
-    out.messages.push_back({program.byte_offset(d.at), sema::message_of(*kind).severity == lex::Severity::error,
-                            sema::render(*kind, args, [&](char how, std::uint64_t raw) { return program.spell(how, raw); }), {}});
+    const pp::TokLoc at = program.site(d.at);
+    out.messages.push_back({at.offset, sema::message_of(*kind).severity == lex::Severity::error,
+                            sema::render(*kind, args, [&](char how, std::uint64_t raw) { return program.spell(how, raw); }),
+                            // A declaration of an included header: located there.
+                            at.file != 0 ? where_in(at.file, at.offset, std::nullopt) : std::string()});
   }
   std::ranges::stable_sort(out.messages, {}, &Message::offset);
   if (!out.has_errors()) out.unit = unit_of(program, world, items, src.name);

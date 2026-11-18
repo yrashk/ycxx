@@ -13,7 +13,7 @@
 execute() returns (result code, transcript, steps). Codes are lit's: PASS, FAIL, XFAIL, XPASS,
 UNSUPPORTED, UNRESOLVED (the test itself is malformed, or the oracles disagree), TIMEOUT.
 """
-import difflib, os, shutil, sys
+import difflib, os, re, shutil, sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -74,6 +74,20 @@ def expected_errors(files):
             for line, col in markers_in(Path(f).read_text(encoding='utf-8', errors='replace'))}
 
 
+QUOTED_INCLUDE = re.compile(r'^\s*#\s*include\s*"([^"]+)"', re.M)
+
+
+def with_headers(path):
+    """The test file and the existing headers it includes with `#include "..."`, relative to it:
+    their `//!` markers expect errors located in the header."""
+    files = [path]
+    for name in QUOTED_INCLUDE.findall(Path(path).read_text(encoding='utf-8', errors='replace')):
+        h = Path(path).parent / name
+        if h.is_file():
+            files.append(h)
+    return files
+
+
 def verdict_problems(ctx, r, expected, cwd):
     """What is wrong with a syntax run r given the expected error locations ([] when right)."""
     actual = toolchain.errors_in(r.stdout + r.stderr, cwd)
@@ -98,7 +112,7 @@ def verdict_problems(ctx, r, expected, cwd):
 
 def run_verify(test, ctx, tr, flags, timeout):
     need(ctx.cut, 'syntax')
-    expected = expected_errors([test.path])
+    expected = expected_errors(with_headers(test.path))
     if test.kind == 'accept' and expected:
         raise Unresolved('an accept test has //! error markers (make it a .reject.cpp)')
     if test.kind == 'reject' and not expected:

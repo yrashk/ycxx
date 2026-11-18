@@ -107,7 +107,8 @@ reports key on it. Its kind comes from its suffix:
 
 **Error markers:** `//! error` expects an error on its own line, `//! error@+1` / `@-2` on a
 relative line, `@12` on line 12; `:5` adds a column (`//! error@+1:5`). Every expected location
-must get an error and every error must be expected. Locations are parsed from
+must get an error and every error must be expected. Markers in a header the test includes with
+`#include "..."` expect errors in that header. Locations are parsed from
 `file:line:col: error:` lines. A crash (a signal, or an exit status above 1) is never a rejection. Leave the column out where Clang and GCC disagree on it.
 
 **Directives** (`// KEY: value` lines):
