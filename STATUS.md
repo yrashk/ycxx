@@ -19,10 +19,14 @@ What is true of the code today. Work in progress and its owners are tracked in
   (#1), summarized in DECISIONS §4. A throwaway prototype is in `spikes/query-engine/`.
 - Test driver: `tools/test` ([docs/TESTING.md](docs/TESTING.md), #5). Test kinds accept/reject
   (error locations), `-E` against an oracle, run, differential against Clang 23 and GCC 16, and
-  incremental (format and hook; the ycxx side waits for #19). Fail-fast state, `--fast`, tiers,
-  failed-first, duration sharding, affected-test hook. A smoke suite of each kind passes with
-  Clang and GCC as the compiler under test; with ycxx every test is UNSUPPORTED
-  (`tests/features/ycxx.txt` lists nothing yet).
+  incremental (format and hook). Fail-fast state, `--fast`, tiers, failed-first, duration
+  sharding, affected-test hook. A smoke suite of each kind passes with Clang and GCC as the
+  compiler under test; ycxx runs what `tests/features/ycxx.txt` lists.
+- Incremental == cold (#19): ycxx's `.incr` side is a private resident daemon per test, with each
+  request repeated (no engine cell may execute) and each edit costing no more than a fresh
+  daemon; `tools/incr-fuzz` (random token edits, `-fsyntax-only`, delta-minimized `.incr`
+  regressions). Not yet: `ctl verify-table` (#146, after #137), git-history replay, regrouping
+  and nightly fuzzing (#147), `--verify-memo` (#148).
 - Optimization design accepted: [`docs/design/optimization.md`](docs/design/optimization.md)
   (#3), summarized in DECISIONS §4.8. Throwaway spikes are in `spikes/optimization/`: e-graph
   extraction, and solver builds against libycxx.
@@ -114,7 +118,8 @@ What is true of the code today. Work in progress and its owners are tracked in
   when a dependency is dropped (`unit.engine`, single-threaded). `unit.engine_scheduler`: the
   pool, priorities and backend; outputs, dependency lists and execution counts equal at 1, 2, P
   and 2P threads with the chaos scheduler; incremental == cold at each; cancellation injected;
-  hand-over from a stopped owner; respawn; cycles and errors from every entry point. `unit.engine_inputs`: providers (once per cell under
+  hand-over from a stopped owner; respawn; cycles and errors from every entry point. `Db::verify_table`
+  is §A9's memo-table comparison against a cold `Db` (#19); both fuzzes use it. `unit.engine_inputs`: providers (once per cell under
   contention, durability, failure), the `editor` and `ambient` shortcuts, `reset_unobserved`
   racing readers over 300 rounds, counts per request and per kind. Clean under
   ASan and UBSan; ThreadSanitizer needs Linux (#105).

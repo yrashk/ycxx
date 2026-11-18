@@ -1,0 +1,203 @@
+#!/usr/bin/env python3
+"""Random edit sequences through the resident daemon, each state compared with a cold compile
+(query-engine.md §A9: random token edits and delta-minimized regressions; DECISIONS §4.2).
+
+    tools/incr-fuzz [--seed N] [--rounds N] [--edits N] [--out DIR] [--ycxx PATH] SEED...
+
+Each SEED is a `.incr` test (its base state) or a C++ file (a state of that one file). A round
+takes a seed, applies --edits random token edits to its files (change a number, rename an
+identifier to another one in the file, delete or duplicate a token or a line, wrap a line in
+`#if 0`), and runs `-fsyntax-only` on every state twice: through one private daemon, edited in
+place, and in-process on a fresh copy. The verdict and the error locations must agree. A round
+that diverges is delta-minimized (the fewest states that still diverge) and written to
+--out as a `.incr` regression test. The exit status is the number of divergent rounds (at most
+125).
+
+A daemon request that executes engine cells when repeated, or an edited state that executes more
+than a fresh daemon for it, is reported too (the .incr kind checks both; this tool checks the
+first, which is cheap).
+"""
+import argparse, os, random, re, shutil, subprocess, sys, tempfile
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO))
+from tests.driver import incremental  # noqa: E402  (the .incr format)
+
+TOKEN = re.compile(r'[A-Za-z_]\w*|\d+|\S')
+DIAG = re.compile(r'^(?P<file>[^:\n]+):(?P<line>\d+):(?P<col>\d+): (?:fatal )?error: ', re.M)
+
+
+def edit(rng, files):
+    """One random token-level edit of one file; a new state."""
+    out = dict(files)
+    name = rng.choice(sorted(out))
+    text = out[name]
+    toks = [m for m in TOKEN.finditer(text)]
+    lines = text.splitlines(keepends=True)
+    kind = rng.randrange(6)
+    if kind == 0 and (nums := [m for m in toks if m.group().isdigit()]):
+        m = rng.choice(nums)
+        text = text[:m.start()] + str(rng.randrange(0, 50)) + text[m.end():]
+    elif kind == 1 and (ids := [m for m in toks if re.fullmatch(r'[A-Za-z_]\w*', m.group())]):
+        m, other = rng.choice(ids), rng.choice(ids)
+        text = text[:m.start()] + other.group() + text[m.end():]
+    elif kind == 2 and toks:
+        m = rng.choice(toks)
+        text = text[:m.start()] + text[m.end():]
+    elif kind == 3 and toks:
+        m = rng.choice(toks)
+        text = text[:m.start()] + m.group() + ' ' + text[m.start():]
+    elif kind == 4 and lines:
+        i = rng.randrange(len(lines))
+        lines.insert(i, lines[i])
+        text = ''.join(lines)
+    elif lines:
+        i = rng.randrange(len(lines))
+        if not lines[i].lstrip().startswith('#'):
+            lines[i] = '#if 0\n' + lines[i] + ('' if lines[i].endswith('\n') else '\n') + '#endif\n'
+        text = ''.join(lines)
+    out[name] = text
+    return out
+
+
+def syntax(ycxx, d, main, env):
+    """(verdict, error locations relative to d) of `ycxx -fsyntax-only`, or a crash."""
+    p = subprocess.run([ycxx, '-std=c++26', '-fsyntax-only', main], cwd=d, env=env, capture_output=True, text=True,
+                       errors='replace', timeout=120)
+    if p.returncode not in (0, 1):
+        return ('crash', p.returncode)
+    errs = sorted((os.path.relpath(os.path.realpath(Path(d) / m['file']), os.path.realpath(d)), int(m['line']), int(m['col']))
+                  for m in DIAG.finditer(p.stdout + p.stderr))
+    return ('accept' if p.returncode == 0 else 'reject', tuple(errs))
+
+
+class Daemon:
+    def __init__(self, ycxx, scope):
+        self.ycxx = ycxx
+        self.runtime = Path(tempfile.mkdtemp(prefix='yf', dir='/tmp'))
+        os.chmod(self.runtime, 0o700)
+        self.scope = scope
+        scope.mkdir(parents=True, exist_ok=True)
+        (scope / '.ycxx').write_text('')
+        base = {k: v for k, v in os.environ.items() if k not in ('YCXX_DAEMON', 'YCXX_NO_DAEMON', 'YCXX_ROOT', 'YCXX_NO_WATCH')}
+        base['YCXX_RUNTIME_DIR'] = str(self.runtime)
+        self.base, self.env = base, dict(base, YCXX_DAEMON='require')
+
+    def last_executed(self):
+        p = subprocess.run([self.ycxx, 'ctl', 'status'], cwd=self.scope, env=self.base, capture_output=True, text=True, timeout=60)
+        fields = dict(line.split(': ', 1) for line in p.stdout.splitlines() if ': ' in line)
+        return int(fields.get('last_executed', -1))
+
+    def close(self):
+        subprocess.run([self.ycxx, 'ctl', 'shutdown'], cwd=self.scope, env=self.base, capture_output=True, timeout=60)
+        shutil.rmtree(self.runtime, ignore_errors=True)
+
+
+def divergence(ycxx, states, main, work):
+    """The first state where the daemon and a cold compile disagree, as (index, why), or None."""
+    shutil.rmtree(work, ignore_errors=True)
+    dm = Daemon(ycxx, work / 'scope')
+    cold_env = {k: v for k, v in os.environ.items() if k not in ('YCXX_DAEMON',)}
+    cold_env['YCXX_NO_DAEMON'] = '1'
+    d, prev = dm.scope / 'inc', None
+    try:
+        for i, s in enumerate(states):
+            incremental.materialize(s, d, prev)
+            prev = s
+            got = syntax(ycxx, d, main, dm.env)
+            again = syntax(ycxx, d, main, dm.env)
+            if again != got or dm.last_executed() != 0:
+                return i, 'a repeated request answered differently or executed engine cells'
+            c = work / f'cold-{i}'
+            incremental.materialize(s, c)
+            want = syntax(ycxx, c, main, cold_env)
+            if 'crash' in (got[0], want[0]):
+                return i, f'a crash: daemon {got}, cold {want}'
+            if got != want:
+                return i, f'daemon {got!r:.200} != cold {want!r:.200}'
+        return None
+    finally:
+        dm.close()
+
+
+def minimize(ycxx, states, main, work):
+    """The fewest states (the base kept) that still diverge: delta debugging over the edits."""
+    current = list(states)
+    chunk = max(1, (len(current) - 1) // 2)
+    while chunk >= 1:
+        shrunk = False
+        i = 1
+        while i < len(current):
+            trial = current[:i] + current[i + chunk:]
+            if len(trial) >= 2 and divergence(ycxx, trial, main, work):
+                current, shrunk = trial, True
+            else:
+                i += chunk
+        if not shrunk:
+            chunk //= 2
+    return current
+
+
+def write_incr(states, main, why, path):
+    lines = [f'// MAIN: {main}', f'// A regression found by tools/incr-fuzz: {why}']
+    for p in sorted(states[0]):
+        lines += [f'--- {p}', states[0][p].rstrip('\n')]
+    for prev, s in zip(states, states[1:]):
+        lines.append('=== edit')
+        for p in sorted(prev):
+            if p not in s:
+                lines.append(f'--- delete {p}')
+        for p in sorted(s):
+            if prev.get(p) != s[p]:
+                lines += [f'--- {p}', s[p].rstrip('\n')]
+    path.write_text('\n'.join(lines) + '\n')
+
+
+def seed_state(path):
+    path = Path(path)
+    if path.suffix == '.incr':
+        text = path.read_text()
+        main = re.search(r'^// MAIN: (\S+)', text, re.M)
+        return incremental.parse(text)[0], main[1] if main else 'main.cpp'
+    return {path.name: path.read_text()}, path.name
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.split('\n\n')[0], formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument('seeds', nargs='+')
+    ap.add_argument('--seed', type=int, default=19)
+    ap.add_argument('--rounds', type=int, default=10)
+    ap.add_argument('--edits', type=int, default=8)
+    ap.add_argument('--out', default=str(REPO / 'build' / 'incr-fuzz'))
+    ap.add_argument('--ycxx', default=os.environ.get('YCXX') or str(REPO / 'build' / 'bin' / 'ycxx'))
+    a = ap.parse_args()
+    rng = random.Random(a.seed)
+    out = Path(a.out)
+    out.mkdir(parents=True, exist_ok=True)
+    work = Path(tempfile.mkdtemp(prefix='ycxx-incr-fuzz-'))
+    bad = 0
+    try:
+        for r in range(a.rounds):
+            seed = rng.choice(a.seeds)
+            base, main = seed_state(seed)
+            states = [base]
+            for _ in range(a.edits):
+                states.append(edit(rng, states[-1]))
+            found = divergence(a.ycxx, states, main, work / 'run')
+            if not found:
+                print(f'round {r}: {Path(seed).name}, {a.edits} edits: incremental == cold')
+                continue
+            bad += 1
+            small = minimize(a.ycxx, states[:found[0] + 1], main, work / 'min')
+            why = (divergence(a.ycxx, small, main, work / 'min') or found)[1]
+            dest = out / f'fuzz-{a.seed}-{r}.incr'
+            write_incr(small, main, why, dest)
+            print(f'round {r}: {Path(seed).name}: DIVERGES at state {found[0]}: {why}\n  minimized to {len(small)} states: {dest}')
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+    return min(bad, 125)
+
+
+if __name__ == '__main__':
+    sys.exit(main())

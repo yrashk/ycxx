@@ -123,7 +123,7 @@ must get an error and every error must be expected. Locations are parsed from
 - Incremental tests: `ACTION: syntax|preprocess|run`, `MAIN: main.cpp`.
 
 **Incremental tests** hold the base state's files and the edits in one file; the format and the
-hook for ycxx's incremental mode (#19) are in [`tests/driver/incremental.py`](../tests/driver/incremental.py):
+hook for ycxx's incremental mode are in [`tests/driver/incremental.py`](../tests/driver/incremental.py):
 
 ```
 // ACTION: syntax
@@ -147,7 +147,14 @@ int g();
 With `ACTION: syntax` each state's cold result must also match the markers in its files; with
 `run` or `preprocess` every state must build. Clang and GCC have no
 incremental mode: for them the incremental side edits one directory in place and compiles it
-cold, which exercises the format and the comparison.
+cold, which exercises the format and the comparison. ycxx's side is its resident daemon (daemon
+design §8.2): a private daemon per test sees each state as file changes. Each request is also
+repeated and must execute no engine cell, and an edited state may not execute more cells than a
+fresh daemon does for it.
+
+[`tools/incr-fuzz`](../tools/incr-fuzz) generates random token edits over `.incr` tests or C++
+files, compares the daemon with a cold compile on every state (`-fsyntax-only`), and writes each
+divergence, delta-minimized, as a `.incr` regression test.
 
 **Results:** PASS, FAIL, XFAIL, XPASS, UNSUPPORTED, TIMEOUT, and UNRESOLVED (the test is
 malformed, or the oracles disagree: a differential test whose oracles disagree tests nothing
