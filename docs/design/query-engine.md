@@ -532,7 +532,10 @@ prefix the computation obtained with `cx.prefix_of(I)` (the own prefix cut at an
 `I`: the context in which `I` itself is analysed) becomes `rel(◇.prefix, I)`; a prefix it built
 *forward* with `cx.prefix_after(h)` (the own prefix extended by `h`, a hash-consed item list or
 tree id the computation itself produced, which is how `pp` asks `macro(…)` after its own
-`#include` and fetches `pp(child, …)`) becomes `ext(◇.prefix, h)` with `h` literal; `chain` and
+`#include` and fetches `pp(child, …)`) becomes `ext(◇.prefix, h)` with `h` literal; a prefix
+obtained with `cx.prefix_after_item(K)` (the own prefix cut just after an earlier item `K`, the
+context of `K`'s complete-class contexts) becomes `rel_after(◇.prefix, K)` (amended by ast.md
+§4.2); `chain` and
 all other members are literal; context-free keys have no placeholder. The second form is what makes
 the *sub-prefix hop* sound: a computation at `Q` that needs the analysis of a definition item `I`
 it found by lookup fetches `item_analysis(I, cx.prefix_of(I))`, and the trace records the pattern
@@ -651,7 +654,7 @@ may be evicted with its fingerprint kept (§A6.2 step 1); a selection cell that 
 re-runs the computation at its prefix and asserts the fingerprint. On disk a leaf is one record
 `(index fp, index bytes, path as (pattern bytes, pattern fp, answer fp) groups, result fp, result
 bytes, diags)`. Pattern bytes are the structural key bytes of §A7.1 with `◇.prefix`, `◇.pins`,
-`rel(◇.prefix, I)` and `ext(◇.prefix, h)` markers in the context members; they are what a walk instantiates at the current prefix, so a
+`rel(◇.prefix, I)`, `ext(◇.prefix, h)` and `rel_after(◇.prefix, K)` (amended by ast.md §4.2) markers in the context members; they are what a walk instantiates at the current prefix, so a
 loaded trie is usable, and their fingerprints are stable because placeholders and item ids are. Question cells are **not**
 persisted: they are O(1) to recompute, and a loaded selection cell is stored with no dependencies
 and marked red, so its first fetch is a trie walk that recreates exactly the question cells it
@@ -1392,8 +1395,9 @@ contextual kinds and on question cells alike, at any nesting depth (the `CtxKey`
 carries it): in trace patterns the engine replaces every such member that equals the fetching
 frame's own prefix with the placeholder (§A1.9), so the C++ layer never spells out which member is
 the prefix. The `pins` member is marked the same way and abstracted with it (the placeholder covers
-the pair); a prefix obtained with `cx.prefix_of(I)` is abstracted as `rel(◇.prefix, I)` and one obtained
-with `cx.prefix_after(h)` as `ext(◇.prefix, h)` (§A1.9);
+the pair); a prefix obtained with `cx.prefix_of(I)` is abstracted as `rel(◇.prefix, I)`, one obtained
+with `cx.prefix_after(h)` as `ext(◇.prefix, h)`, and one obtained with `cx.prefix_after_item(K)` as
+`rel_after(◇.prefix, K)` (amended by ast.md §4.2) (§A1.9);
 the `chain` member is ordinary key data and is never abstracted. A literal context is accepted in a
 dependency only by `reuse`, whose precondition is that it was the answer of a `pin_of` fetch in
 this frame. A `demanded` kind cannot be fetched with `fetch`, `par_fetch` or `par_map`, all of
@@ -1796,7 +1800,9 @@ a pure cache and may be emptied without changing any output.
 
 **What changes where.** A computation asks questions only in its own context, or in a prefix
 derived from it with `cx.prefix_of(I)` (backward, recorded `rel(◇.prefix, I)`) or
-`cx.prefix_after(h)` (forward, recorded `ext(◇.prefix, h)`; only `pp` needs it, §B9). Of the context it
+`cx.prefix_after(h)` (forward, recorded `ext(◇.prefix, h)`; only `pp` needs it, §B9) or
+`cx.prefix_after_item(K)` (just after an earlier item, recorded `rel_after(◇.prefix, K)`, for
+complete-class contexts; amended by ast.md §4.2). Of the context it
 passes to the cells it fetches, `pins` never changes except in `reuse`, whose key is the literal
 answer of `pin_of`; `chain` grows only along a
 constant-evaluation or return-type-deduction chain (§B7); `prefix` changes only on a **hop**: an
