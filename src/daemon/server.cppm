@@ -134,17 +134,33 @@ class Server {
   }
 
   // The cookie directory is the runtime directory when it is on the root's volume; otherwise
-  // `<root>/.ycxx-cookies`, ignored by version control (§5.4).
+  // `<root>/.ycxx-cookies`, ignored by version control (§5.4). It must be a directory of this user,
+  // closed to others and not a symbolic link, so a repository cannot point the daemon's writes
+  // elsewhere; if it cannot be, the runtime directory serves.
   std::string cookie_dir() {
     auto run_dir = real_path(paths_.dir).value_or(paths_.dir);
     auto a = stat_path(run_dir);
     auto b = stat_path(paths_.root);
     if (!a || !b || a->dev == b->dev) return run_dir;
     std::string dir = paths_.root + "/.ycxx-cookies";
-    std::error_code ec;
-    std::filesystem::create_directory(dir, ec);
-    if (!std::filesystem::exists(dir + "/.gitignore", ec)) std::ofstream(dir + "/.gitignore") << "*\n";
+    if (auto ok = ensure_private_dir(dir); !ok) {
+      log(ok.error() + "; cookies go to the runtime directory");
+      return run_dir;
+    }
+    create_new_file(dir + "/.gitignore", "*\n");  // an existing one is kept
     return real_path(dir).value_or(dir);
+  }
+
+  // A cookie directory removed under the daemon (`git clean -fdx`, a temporary-file cleaner) is
+  // created and watched again, so freshness does not degrade to a rescan per request.
+  void renew_cookie_dir() {
+    const std::string& dir = events_->cookie_dir();
+    if (stat_path(dir)) return;
+    std::error_code ec;
+    std::filesystem::create_directories(dir, ec);
+    ensure_private_dir(dir);
+    if (dir.ends_with("/.ycxx-cookies")) create_new_file(dir + "/.gitignore", "*\n");
+    if (watcher_) watcher_->renew(dir);
   }
 
   void start_watching() {
@@ -161,7 +177,7 @@ class Server {
       for (const std::string& d : pp::system_dirs())
         if (auto r = real_path(d)) dirs.push_back(*r);
     }
-    if (auto err = watcher_->start(std::move(dirs))) {
+    if (auto err = watcher_->start(std::move(dirs), paths_.root)) {
       watcher_state_ = std::format("none ({})", *err);
       watcher_.reset();
       return;
@@ -293,6 +309,7 @@ class Server {
     // Freshness (§5.4): every change made before the request was sent is queued, then applied.
     bool rescan = false;
     if (watcher_) {
+      renew_cookie_dir();
       watcher_->refresh();
       if (!events_->sync(o_.cookie_timeout)) {
         rescan = true;
@@ -307,14 +324,8 @@ class Server {
 
     for (;;) {
       bool cancelled = false;
-      std::size_t units = 0;      // translation units begun in this run
-      bool progressed = false;    // a unit finished since the previous restart
       Events::Batch pending;
       compile::Stop stop = [&] {
-        if (units++ > 0) {
-          progressed = true;
-          admission_.progressed();
-        }
         if (hung_up(fd)) return cancelled = true;
         // A batch that reaches the table stops the request, once the quantum allows (§4.2).
         Events::Batch more = events_->drain();
@@ -326,6 +337,8 @@ class Server {
       bool stopped = false;
       compile::Done d = compile::run(r, table_, stop, stopped);
       if (!stopped) {
+        // The only live root stored its answer: the quantum returns to the floor (§4.2).
+        admission_.progressed();
         requeue(std::move(pending));
         std::lock_guard g(stats_mu_);
         report.revision = stats_.revision;
@@ -344,7 +357,10 @@ class Server {
       // Restart at the new revision: what was not yet applied goes back in the queue and is
       // applied as the next batch.
       requeue(std::move(pending));
-      admission_.restarted(progressed);
+      // A restart runs the request from its first unit, so nothing it finished survives: it never
+      // counts as progress, and the quantum doubles until it outlasts a whole run (§4.2). With
+      // cells that survive restarts (#120) progress becomes "stored a cell".
+      admission_.restarted(false);
       report.inputs_changed += apply_batch(false);
       admission_.applied(Clock::now());
       ++report.restarts;

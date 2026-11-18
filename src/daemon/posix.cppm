@@ -193,10 +193,15 @@ bool read_exact(int fd, std::span<std::byte> out) {
   return true;
 }
 
+// Writes everything. To a socket it never raises SIGPIPE (a peer that went away is a failed
+// write, which a client then treats as a lost daemon); other descriptors are written as they are.
 bool write_all(int fd, std::span<const std::byte> in) {
   std::size_t at = 0;
+  bool socket = true;
   while (at < in.size()) {
-    ssize_t n = ::write(fd, in.data() + at, in.size() - at);
+    ssize_t n = socket ? ::send(fd, in.data() + at, in.size() - at, send_flags) : -1;
+    if (socket && n < 0 && errno == ENOTSOCK) socket = false;
+    if (!socket) n = ::write(fd, in.data() + at, in.size() - at);
     if (n < 0 && errno == EINTR) continue;
     if (n <= 0) return false;
     at += static_cast<std::size_t>(n);
@@ -284,5 +289,12 @@ std::expected<Fd, std::string> termination_pipe() {
 }
 
 bool remove_file(const std::string& path) { return ::unlink(path.c_str()) == 0; }
+
+// Creates a new regular file with `text`, never following a symbolic link and never replacing an
+// existing file: a repository cannot redirect what the daemon writes into it (§5.4's cookies).
+bool create_new_file(const std::string& path, std::string_view text) {
+  Fd fd(::open(path.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600));
+  return fd && write_all(fd.get(), std::as_bytes(std::span(text)));
+}
 
 }  // namespace ycxx::daemon

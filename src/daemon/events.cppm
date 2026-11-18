@@ -25,7 +25,15 @@ class Events {
       cv_.notify_all();
       return;
     }
-    dirty_.push_back(std::move(path));
+    if (overflow_) return;
+    // A queue drained only when a request arrives must not grow without bound while the daemon
+    // is idle (a checkout, `npm install`): past the cap the next epoch rescans instead.
+    if (dirty_.size() >= max_dirty) {
+      dirty_.clear();
+      overflow_ = true;
+      return;
+    }
+    dirty_.insert(std::move(path));
   }
   // Events were lost (inotify's IN_Q_OVERFLOW, FSEvents' MustScanSubDirs or a drop): the next
   // epoch rescans the table.
@@ -40,7 +48,7 @@ class Events {
   };
   Batch drain() {
     std::lock_guard g(mu_);
-    Batch b{std::move(dirty_), overflow_};
+    Batch b{{std::make_move_iterator(dirty_.begin()), std::make_move_iterator(dirty_.end())}, overflow_};
     dirty_.clear();
     overflow_ = false;
     return b;
@@ -84,10 +92,7 @@ class Events {
   // Under mu_: writes the next cookie and removes it at once; either event marks it seen.
   bool issue() {
     std::string path = std::format("{}/{}{}", cookie_dir_, prefix_, issued_ + 1);
-    {
-      std::ofstream f(path);
-      if (!f) return false;
-    }
+    if (!create_new_file(path, "")) return false;
     remove_file(path);
     ++issued_;
     in_flight_ = true;
@@ -98,7 +103,8 @@ class Events {
   std::string prefix_;
   std::mutex mu_;
   std::condition_variable cv_;
-  std::vector<std::string> dirty_;
+  static constexpr std::size_t max_dirty = 100'000;
+  std::set<std::string> dirty_;
   bool overflow_ = false;
   std::uint64_t issued_ = 0;
   std::uint64_t seen_ = 0;

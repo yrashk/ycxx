@@ -189,7 +189,37 @@ void file_table() {
   fs::remove(link_dir / "c.h");
   write(link_dir / "c.h", "replaced");
   check(table.apply(std::vector{s(link_dir / "c.h")}) == 1 && table.read("inc/c.h") == "replaced", "the link replaced by a file");
+
+  // A symbolic link to a directory on the way (`-Iinclude/current`), retargeted: the change
+  // arrives as the link's own name.
+  write(t / "v1" / "d.h", "v1");
+  write(t / "v2" / "d.h", "v2");
+  fs::create_directory_symlink(t / "v1", t / "current");
+  check(table.read("current/d.h") == "v1", "read through a directory link");
+  check(std::ranges::contains(watched, s(t)), "the link's directory is watched");
+  fs::remove(t / "current");
+  fs::create_directory_symlink(t / "v2", t / "current");
+  check(table.apply(std::vector{s(t / "current")}) == 1 && table.read("current/d.h") == "v2", "a retargeted directory link");
+
+  // A directory that cannot be watched: its entries alone are stat-checked.
+  write(t / "v2" / "d.h", "v2 edited");
+  check(table.rescan(std::vector{s(t / "inc")}) == 0, "a rescan of another directory leaves it");
+  check(table.rescan(std::vector{s(t / "v2")}) == 1 && table.read("current/d.h") == "v2 edited", "a rescan of its directory");
   fs::remove_all(t);
+}
+
+// --- the dirty-path queue ---------------------------------------------------------------------
+
+void queue() {
+  Events ev("/nowhere");
+  ev.push("/a/x.h");
+  ev.push("/a/x.h");
+  auto b = ev.drain();
+  check(b.paths == std::vector<std::string>{"/a/x.h"} && !b.overflow, "a path is queued once");
+  for (int i = 0; i <= 100'000; ++i) ev.push(std::format("/a/{}", i));
+  b = ev.drain();
+  check(b.overflow && b.paths.empty(), "past the cap, the queue becomes a rescan");
+  check(!ev.drain().overflow, "and drains back to empty");
 }
 
 // --- the watcher and cookie sync (§5.4, §5.5) ---------------------------------------------------
@@ -206,7 +236,7 @@ void watcher() {
   fs::create_directories(t / "outside");
   Events ev(s(t / "root"));
   Watcher w(ev);
-  check(!w.start({s(t / "root")}), "the watcher starts");
+  check(!w.start({s(t / "root")}, s(t / "root")), "the watcher starts");
   FileTable table([&](const std::string& d) { w.add(d); });
 
   // A change made before sync() is queued when sync() returns.
@@ -243,6 +273,22 @@ void watcher() {
   }
   check(seen, "an edit outside, between the read and the epoch, is not lost");
 
+  // A watched directory replaced by a rename (a generator swapping its output): later edits in the
+  // new directory are still seen.
+  write(t / "root" / "gen" / "x.h", "1");
+  check(table.read(s(t / "root" / "gen" / "x.h")) == "1", "read in gen");
+  fs::rename(t / "root" / "gen", t / "root" / "gen.old");
+  write(t / "root" / "gen" / "x.h", "2");
+  check(ev.sync(5s), "cookie sync");
+  check(table.apply(ev.drain().paths) == 1 && table.read(s(t / "root" / "gen" / "x.h")) == "2", "the swapped directory");
+  write(t / "root" / "gen" / "x.h", "3");
+  check(ev.sync(5s), "cookie sync");
+  check(table.apply(ev.drain().paths) == 1 && table.read(s(t / "root" / "gen" / "x.h")) == "3", "an edit in it afterwards");
+
+  // A directory above the root is too wide for a recursive stream: stat-checked instead.
+  w.add("/");
+  check(os_name != "macos" || std::ranges::contains(w.unwatched(), std::string("/")), "/ is not streamed");
+
   // Several requests share cookies; each returns.
   std::vector<std::thread> ts;
   std::atomic<int> ok = 0;
@@ -259,6 +305,7 @@ int main() {
   roots();
   admission();
   file_table();
+  queue();
   watcher();
   return unit::result("unit.daemon");
 }

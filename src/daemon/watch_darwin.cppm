@@ -22,9 +22,13 @@ class Watcher {
 
   std::string_view name() const { return "fsevents"; }
 
-  // Starts the stream over `dirs` (real paths); why not, on failure.
-  std::optional<std::string> start(std::vector<std::string> dirs) {
+  // Starts the stream over `dirs` (real paths); why not, on failure. `root` is the scope's: a
+  // directory above it (or `/`, the nearest existing ancestor of a missing `-I/nonexistent`) is
+  // never a recursive root, which would stream every write on the volume; the entries there are
+  // stat-checked per request instead (§5.5).
+  std::optional<std::string> start(std::vector<std::string> dirs, const std::string& root) {
     std::lock_guard g(mu_);
+    root_ = root;
     for (std::string& d : dirs) cover(std::move(d));
     queue_ = ::dispatch_queue_create("ycxx.watch", nullptr);
     if (!create(kFSEventStreamEventIdSinceNow)) return "cannot start an FSEvents stream";
@@ -35,6 +39,10 @@ class Watcher {
   void add(const std::string& dir) {
     std::lock_guard g(mu_);
     if (covered(dir)) return;
+    if (dir == "/" || (root_.starts_with(dir) && root_.size() > dir.size() && root_[dir.size()] == '/')) {
+      unwatched_.insert(dir);
+      return;
+    }
     if (!since_) since_ = ::FSEventsGetCurrentEventId();
     cover(dir);
     dirty_roots_ = true;
@@ -44,15 +52,29 @@ class Watcher {
   void refresh() {
     std::lock_guard g(mu_);
     if (!dirty_roots_) return;
-    dirty_roots_ = false;
-    FSEventStreamEventId from = std::min<FSEventStreamEventId>(*since_, last_id_.load());
-    since_.reset();
+    FSEventStreamEventId from = std::min<FSEventStreamEventId>(since_.value_or(last_id_.load()), last_id_.load());
     destroy();
-    if (!create(from)) events_->overflow();
+    // A stream that cannot be created is tried again at the next epoch; meanwhile the cookie
+    // times out and the table is rescanned.
+    if (!create(from)) {
+      events_->overflow();
+      return;
+    }
+    dirty_roots_ = false;
+    since_.reset();
   }
 
-  // Directories checked per request instead of watched (§5.5); FSEvents has no limit.
-  std::vector<std::string> unwatched() const { return {}; }
+  // The cookie directory was created again: recreate the stream from where it was.
+  void renew(const std::string&) {
+    std::lock_guard g(mu_);
+    dirty_roots_ = true;
+  }
+
+  // Directories checked per request instead of watched (§5.5).
+  std::vector<std::string> unwatched() const {
+    std::lock_guard g(mu_);
+    return {unwatched_.begin(), unwatched_.end()};
+  }
 
  private:
   static bool beneath_or_at(std::string_view path, std::string_view dir) {
@@ -118,7 +140,9 @@ class Watcher {
   }
 
   Events* events_;
-  std::mutex mu_;
+  mutable std::mutex mu_;
+  std::string root_;
+  std::set<std::string> unwatched_;
   std::vector<std::string> roots_;
   bool dirty_roots_ = false;
   std::optional<FSEventStreamEventId> since_;

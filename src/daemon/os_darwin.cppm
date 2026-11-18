@@ -14,6 +14,9 @@ import std;
 
 export namespace ycxx::daemon {
 
+// The flags of a send(2) that must not raise SIGPIPE (macOS sets SO_NOSIGPIPE per socket instead).
+inline constexpr int send_flags = 0;
+
 inline constexpr std::string_view os_name = "macos";
 
 std::string executable_path() {

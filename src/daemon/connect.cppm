@@ -38,11 +38,20 @@ std::expected<void, std::string> request_shutdown(Connection& c);
 namespace ycxx::daemon {
 namespace {
 
-std::expected<Connection, std::string> handshake(Fd fd) {
-  if (!send(fd.get(), Kind::hello, Hello{build_hash(), schema_hash, my_uid(), my_pid()})) return std::unexpected("cannot send hello");
+// `closed`: the daemon closed the connection during the handshake (it was exiting, idle or shut
+// down, with this connection still in its backlog), so a new daemon may be started.
+std::expected<Connection, std::string> handshake(Fd fd, bool& closed) {
+  closed = false;
+  if (!send(fd.get(), Kind::hello, Hello{build_hash(), schema_hash, my_uid(), my_pid()})) {
+    closed = true;
+    return std::unexpected("cannot send hello");
+  }
   if (!wait_readable(fd.get(), std::chrono::seconds(10))) return std::unexpected("no welcome from the daemon");
   auto f = receive(fd.get());
-  if (!f) return std::unexpected("handshake: " + f.error());
+  if (!f) {
+    closed = true;
+    return std::unexpected("handshake: " + f.error());
+  }
   if (f->kind == Kind::refused) {
     auto r = decode<Refused>(*f);
     return std::unexpected("the daemon refused: " + (r ? r->reason : "?"));
@@ -53,10 +62,15 @@ std::expected<Connection, std::string> handshake(Fd fd) {
   return Connection{std::move(fd), std::move(*w)};
 }
 
-std::expected<Connection, std::string> try_connect(const Paths& p, bool& absent) {
+// `gone`: nothing listens there, or what listened went away during the handshake.
+std::expected<Connection, std::string> try_connect(const Paths& p, bool& gone) {
+  bool absent = false, closed = false;
   auto fd = connect_unix(p.socket(), absent);
+  gone = absent;
   if (!fd) return std::unexpected(fd.error());
-  return handshake(std::move(*fd));
+  auto c = handshake(std::move(*fd), closed);
+  gone = closed;
+  return c;
 }
 
 // Starts `ycxx daemon --root <root>` and waits for its readiness byte; end of file means it did
@@ -86,6 +100,8 @@ std::expected<Connection, std::string> reach(const std::string& root, bool start
   bool absent = false;
   auto c = try_connect(p, absent);
   if (c || !absent || !start) return c;
+  // A daemon that is exiting removes its socket once its requests finish: give it a moment.
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
   // Another client may be starting it: under the start lock, look again before starting one.
   auto lock = lock_file(p.start_lock(), std::chrono::seconds(40));
   if (!lock) return std::unexpected(lock.error());

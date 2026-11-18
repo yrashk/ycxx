@@ -13,6 +13,9 @@ import std;
 
 export namespace ycxx::daemon {
 
+// The flags of a send(2) that must not raise SIGPIPE.
+inline constexpr int send_flags = MSG_NOSIGNAL;
+
 inline constexpr std::string_view os_name = "linux";
 
 std::string executable_path() {
@@ -28,8 +31,7 @@ std::optional<std::uint32_t> peer_uid(int fd) {
   return cred.uid;
 }
 
-// Linux has no per-socket switch; the daemon ignores SIGPIPE, and a client's only writes to the
-// socket happen before the answer, where a dead daemon is a failed request either way.
+// Linux has no per-socket switch: every write to a socket passes `send_flags` (write_all).
 void no_sigpipe(int) {}
 
 std::int64_t mtime_ns(const struct stat& st) { return std::int64_t(st.st_mtim.tv_sec) * 1'000'000'000 + st.st_mtim.tv_nsec; }

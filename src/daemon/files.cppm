@@ -53,12 +53,13 @@ class FileTable final : public pp::Host {
   }
 
   // The full rescan (§5.4): stat every entry, re-hash those whose stat identity changed. With
-  // `under`, only the entries whose real directory is one of them.
+  // `under`, only the entries that watch one of those directories (the unwatched ones, §5.5).
   std::size_t rescan(std::optional<std::span<const std::string>> under = std::nullopt) {
     std::size_t changed = 0;
     std::vector<std::string> keys;
     for (const auto& [key, e] : entries_) {
-      if (under && !std::ranges::any_of(*under, [&](const std::string& d) { return beneath(e.real, d); })) continue;
+      if (under && !std::ranges::any_of(*under, [&](const std::string& d) { return std::ranges::contains(e.dirs, d); }))
+        continue;
       keys.push_back(key);
     }
     for (const std::string& key : keys) changed += refresh(key, false);
@@ -82,11 +83,8 @@ class FileTable final : public pp::Host {
     std::string text;
     std::string real;  // the real path, or where it would be (§5.5)
     std::vector<std::string> watched;  // the real names that reach it, in the reverse index
+    std::vector<std::string> dirs;     // the real directories watched for it
   };
-
-  static bool beneath(std::string_view path, std::string_view dir) {
-    return path.size() > dir.size() && path.starts_with(dir) && (path[dir.size()] == '/' || dir == "/");
-  }
 
   // The entries a dirty real path reaches: exactly, or as a directory above them.
   void reached(const std::string& d, std::set<std::string>& out) const {
@@ -96,23 +94,27 @@ class FileTable final : public pp::Host {
       out.insert(it->second.begin(), it->second.end());
   }
 
+  void watch(Entry& e, std::string dir) {
+    watch_(dir);
+    if (!std::ranges::contains(e.dirs, dir)) e.dirs.push_back(std::move(dir));
+  }
+
   // Where `key` really is: its real path if it exists, else the real path of its nearest existing
   // ancestor with the rest appended. Watches that ancestor (§5.5: the watch moves down when the
   // directory appears).
-  std::string locate(const std::string& key) {
+  std::string locate(const std::string& key, Entry& e) {
     namespace fs = std::filesystem;
     fs::path p(key);
     fs::path rest;
     for (;;) {
       fs::path parent = p.parent_path();
       if (auto real = real_path(parent.native_encoded_string())) {
-        watch_(*real);
+        watch(e, *real);
         fs::path r = fs::path(*real) / p.filename();
         if (!rest.empty()) r /= rest;
         // A symbolic link to a file is watched where its target is, too.
         if (auto target = real_path(key); target && rest.empty()) {
-          fs::path t(*target);
-          watch_(t.parent_path().native_encoded_string());
+          watch(e, fs::path(*target).parent_path().native_encoded_string());
           return *target;
         }
         return r.lexically_normal().native_encoded_string();
@@ -123,14 +125,32 @@ class FileTable final : public pp::Host {
     }
   }
 
-  void index(const std::string& key, Entry& e) {
+  // The names a change to `key` can arrive under besides its real path: each symbolic link on the
+  // way to it, by its own name in its real directory, which is watched too. Retargeting a link
+  // (`ln -sfn v2 include/current`, or replacing a link to a file) is then seen (§5.5).
+  std::vector<std::string> links_to(const std::string& key, Entry& e) {
     namespace fs = std::filesystem;
-    std::vector<std::string> names{e.real};
-    // The link's own name, so replacing the link is seen as well as editing its target.
-    if (auto dir = real_path(fs::path(key).parent_path().native_encoded_string())) {
-      std::string own = (fs::path(*dir) / fs::path(key).filename()).native_encoded_string();
-      if (own != e.real) names.push_back(own);
+    std::vector<std::string> names;
+    fs::path prefix;
+    for (const fs::path& c : fs::path(key)) {
+      prefix /= c;
+      if (prefix == prefix.root_path()) continue;
+      std::error_code ec;
+      auto st = fs::symlink_status(prefix, ec);
+      if (ec || !fs::exists(st)) break;
+      if (!fs::is_symlink(st)) continue;
+      if (auto dir = real_path(prefix.parent_path().native_encoded_string())) {
+        watch(e, *dir);
+        names.push_back((fs::path(*dir) / prefix.filename()).native_encoded_string());
+      }
     }
+    return names;
+  }
+
+  void index(const std::string& key, Entry& e) {
+    std::vector<std::string> names{e.real};
+    for (std::string& n : links_to(key, e))
+      if (!std::ranges::contains(names, n)) names.push_back(std::move(n));
     if (names == e.watched) return;
     unindex(key, e);
     for (const std::string& n : names) by_real_[n].insert(key);
@@ -148,7 +168,8 @@ class FileTable final : public pp::Host {
 
   // Reads the file as it is now into `e`.
   void load(const std::string& key, Entry& e) {
-    e.real = locate(key);
+    e.dirs.clear();
+    e.real = locate(key, e);
     e.id = stat_path(key);
     e.present = false;
     e.text.clear();
