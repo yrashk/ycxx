@@ -1,10 +1,11 @@
 name: setup
 description: >
-  The bootstrap toolchain, as libycxx's CI provides it (deps/libycxx/.github/actions): on Linux,
-  inside the gcc:16 container, GCC 16 from the image plus ninja, cmake and python3 from apt; on
-  macOS, Homebrew's GCC 16, ninja and cmake. With oracle 'true', also Clang 23, the black-box
-  oracle (DECISIONS §2.3), which never builds ycxx: apt.llvm.org on Linux, and on macOS the LLVM
-  release provisioned by deps/libycxx/tools/toolchain/provision and cached.
+  The toolchains, provisioned by libycxx's own script (deps/libycxx/tools/toolchain/provision)
+  the way libycxx's CI does it (deps/libycxx/.github/actions), with its prefix cached. GCC 16 is
+  the bootstrap compiler: the gcc:16 container's on Linux, Homebrew's on macOS. With oracle
+  'true', also Clang 23, the black-box oracle (DECISIONS §2.3), which never builds ycxx:
+  apt.llvm.org on Linux, the LLVM release on macOS. The build tools come from the system package
+  manager.
 inputs:
   oracle:
     description: also provision Clang 23 (the oracle)
@@ -17,7 +18,6 @@ runs:
       run: |
         apt-get update -qq
         apt-get install -y -qq ninja-build cmake python3 git >/dev/null
-        git config --global --add safe.directory "$GITHUB_WORKSPACE"
     - if: runner.os == 'Linux' && inputs.oracle == 'true'
       shell: bash
       run: |
@@ -29,16 +29,9 @@ runs:
     - if: runner.os == 'macOS'
       shell: bash
       run: brew install gcc ninja cmake
-    - if: runner.os == 'macOS' && inputs.oracle == 'true'
-      uses: actions/cache@v4
+    - uses: actions/cache@v4
       with:
         path: ~/.local/share/ycxx/toolchains
-        key: ycxx-toolchains-${{ runner.os }}-${{ runner.arch }}-llvm-23.1.5
-    - if: inputs.oracle == 'true'
-      shell: bash
-      run: deps/libycxx/tools/toolchain/provision --clang-only
+        key: ycxx-toolchains-${{ runner.os }}-${{ runner.arch }}-gcc-16.2.0${{ inputs.oracle == 'true' && '-llvm-23.1.5' || '' }}-${{ hashFiles('deps/libycxx/tools/toolchain/provision') }}
     - shell: bash
-      run: |
-        g++-16 --version 2>/dev/null | head -1 || g++ --version | head -1
-        cmake --version | head -1
-        python3 --version
+      run: deps/libycxx/tools/toolchain/provision ${{ inputs.oracle == 'true' && ' ' || '--gcc-only' }}

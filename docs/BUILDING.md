@@ -78,8 +78,10 @@ GCC). Each job runs `tools/check-policy`, then `tools/build`, then `tools/test` 
 - A newer push cancels the older run.
 - Changes to Markdown, `docs/` or `LICENSE` alone run nothing.
 - A PR's first failing host cancels the other host.
-- The nightly run also provisions Clang 23 (cached on macOS). It skips itself when `main` has not
-  changed since the last successful run.
+- Toolchains come from libycxx's `tools/toolchain/provision`: `--gcc-only` on the PR and `main`
+  tiers, both compilers nightly. Its prefix (`~/.local/share/ycxx/toolchains`) is cached. ycxx
+  has no provisioning logic of its own.
+- The nightly run skips itself when `main` has not changed since the last successful run.
 - The last job of every run records its wall time with `tools/ci/wall-time`: the job summary,
   plus a `wall-time` artifact with each job and step. It warns when the tier is over budget
   (PR 15 minutes, main 60, nightly 240).
