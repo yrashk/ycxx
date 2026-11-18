@@ -147,6 +147,9 @@ public:
   // ([stmt.ambig]: what can be a declaration is one).
   bool starts_declaration() {
     if (starts_decl_specifier(kind())) return true;
+    if (is(Tk::identifier) && kind(1) == Tk::coloncolon && kind(2) == Tk::identifier && kind(3) != Tk::l_paren &&
+        s_->nested_type(name_of(tok()), name_of(tok(2))))
+      return true;
     if (!is(Tk::identifier) || kind(1) == Tk::coloncolon || !s_->class_name(name_of(tok()))) return false;
     // `T(args).f()` and `T{…}.m` are expressions; `T (x);` declares x ([stmt.ambig]).
     if (kind(1) == Tk::l_brace) return false;
@@ -208,6 +211,22 @@ public:
       case Tk::kw_constexpr: once(d.is_constexpr, k); break;
       case Tk::kw_consteval: once(d.is_consteval, k); break;
       case Tk::kw_constinit: once(d.is_constinit, k); break;
+      case Tk::kw_enum:
+        if (kind(1) == Tk::identifier && kind(2) != Tk::l_brace && kind(2) != Tk::colon) {
+          // An elaborated-type-specifier naming an enumeration ([dcl.type.elab]).
+          bump();
+          auto t = s_->class_name(name_of(tok()), true);
+          if (!t || !s_->types().is_enum(*t)) {
+            s_->diag(pos(), Diag::not_a_type, name_of(tok()));
+            d.ok = false;
+          } else {
+            cls = t;
+          }
+          break;
+        }
+        s_->diag(pos(), Diag::not_supported, k);  // an enum-specifier where a type is named
+        d.ok = false;
+        goto done;
       case Tk::kw_struct:
       case Tk::kw_class: {
         u32 at = pos();
@@ -238,10 +257,18 @@ public:
       }
       case Tk::identifier:
         if (!any_type()) {
-          if (auto t = s_->class_name(name_of(tok()))) {
-            cls = t;
-            break;
-          }
+          if (kind(1) == Tk::coloncolon && kind(2) == Tk::identifier && kind(3) != Tk::l_paren)
+            if (auto t = s_->nested_type(name_of(tok()), name_of(tok(2)))) {
+              cls = t;  // `C::T`
+              bump();
+              bump();
+              break;
+            }
+          if (kind(1) != Tk::coloncolon)
+            if (auto t = s_->class_name(name_of(tok()))) {
+              cls = t;
+              break;
+            }
         }
         goto done;
       default:
@@ -448,6 +475,9 @@ public:
   bool params_ahead() {
     Tk k = kind(1);
     if (k == Tk::r_paren || k == Tk::ellipsis || starts_decl_specifier(k)) return true;
+    if (k == Tk::identifier && kind(2) == Tk::coloncolon && kind(3) == Tk::identifier &&
+        s_->nested_type(name_of(tok(1)), name_of(tok(3))))
+      return true;  // `C::E`
     return k == Tk::identifier && kind(2) != Tk::coloncolon && s_->class_name(name_of(tok(1))).has_value();
   }
 
@@ -882,7 +912,7 @@ public:
     case Tk::identifier: {
       NameId n = name_of(tok());
       if ((kind(1) == Tk::l_paren || kind(1) == Tk::l_brace))
-        if (auto t = s_->class_name(n)) {
+        if (auto t = s_->class_name(n); t && s_->types().is_class(*t)) {
           // `T(args)` or `T{…}` ([expr.type.conv]).
           bump();
           if (is(Tk::l_brace)) {
@@ -1037,8 +1067,24 @@ public:
     case Tk::kw_goto:
     case Tk::kw_try:
     case Tk::kw_static_assert: return static_assert_declaration();
-    case Tk::kw_co_return:
     case Tk::kw_using:
+      if (kind(1) == Tk::kw_enum && kind(2) == Tk::identifier) {
+        // A using-enum-declaration ([enum.udecl]).
+        bump();
+        bump();
+        u32 at = pos();
+        NameId n = name_of(tok());
+        bump();
+        auto t = s_->class_name(n, true);
+        if (!t) s_->diag(at, Diag::not_a_type, n);
+        else s_->using_enum(*t, at);
+        expect(Tk::semi);
+        return s_->node(ast::ExprStmt{}, begin, pos());
+      }
+      s_->diag(begin, Diag::not_supported, kind());
+      skip_statement();
+      return {NodeId::none, begin, pos()};
+    case Tk::kw_co_return:
     case Tk::kw_namespace:
     case Tk::kw_asm:
     case Tk::kw_contract_assert:

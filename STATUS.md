@@ -703,6 +703,27 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   member subobject whose class has an implicit constructor, delegating constructors, `explicit`,
   `= default`, out-of-class constructor definitions.
 
+## Classes, δ step 4a: enumerations (#86, 2026-11-18)
+
+- `TEnum{entity}` in `types`; sema's enumeration table (`Classes::enum_rec`: scoped or not, the
+  underlying type, fixed or chosen to hold the values, the enumerators and their values).
+- Unscoped and scoped enumerations (`enum class`, `enum struct`), fixed underlying types,
+  enumerator values from constant expressions (narrowing into a fixed type diagnosed), unscoped
+  enumerators in the enclosing scope and clashes with other declarations, `E::e`, enumerations
+  nested in classes (`C::E`, `C::e`), `using enum` in a block, `enum E` elaborated specifiers.
+- Conversions: an unscoped enumeration promotes ([conv.prom]/4) and converts to integers and
+  bool; nothing converts implicitly to an enumeration except its own type; a scoped one
+  compares only with its own type; `E e{n}` for a fixed underlying type ([dcl.init.list]/3.8).
+  Overload ranking knows enumeration promotions.
+- An enumerator is a `Literal` of its enumeration; converted to an integer it is folded to that
+  integer's constant, so the interpreter, which has no enumeration objects yet (#25), sees only
+  integers. The IR, `lower` and the layout treat an enumeration as its underlying type.
+- Linkage names of enumerations, nested ones included, match Clang's.
+- Tests: `tests/own/classes/s4-*enum*`, `s4-scoped-enum`, `s4-unscoped-enum` (spec-only, plus two
+  from the review): 7 of 7.
+- Not yet: opaque enum declarations (`enum E : int;`), unnamed enumerations, `switch`, `E{}` and
+  `E(v)` as expressions, enumerations in a block (#117), constexpr enumeration objects (#25).
+
 ## Bootstrap workarounds
 
 Places where ycxx's sources avoid or work around a C++26 feature because GCC 16 lacks it or

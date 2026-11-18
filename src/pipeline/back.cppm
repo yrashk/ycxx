@@ -499,6 +499,9 @@ ir::TypeLayout LayoutType::run(engine::SyncCtx& cx, QualType q) {
     return {pointer, target.pointer_size, target.pointer_align, false,
             in.canonical(in.types.is<ast::TLRef>(c) ? in.types.get<ast::TLRef>(c).referee : in.types.get<ast::TRRef>(c).referee)};
   if (auto r = class_layout(cx, c)) return {record, r->size, r->align, false, {}};
+  // An enumeration is laid out as its underlying type ([dcl.enum]/8).
+  if (in.types.is<ast::TEnum>(c) && universe().world)
+    return cx.fetch<LayoutType>(universe().world->classes.underlying(in.types.get<ast::TEnum>(c).entity));
   return {};
 }
 
@@ -570,7 +573,12 @@ engine::query_task<FunctionSource> FunctionSourceQ::run(engine::Ctx& cx, FnKey k
 // `Constants`, declarations from the function's source.
 class UnitFacts : public irgen::TypeFacts {
  public:
-  UnitFacts(const FunctionSource& src) : TypeFacts(*universe().in, *universe().target), src_(&src) {}
+  UnitFacts(const FunctionSource& src) : TypeFacts(*universe().in, *universe().target), src_(&src) {
+    enum_underlying = [](EntityId e) {
+      const sema::World* w = universe().world;
+      return w ? w->classes.underlying(e) : ast::builtin(*universe().in, ast::Builtin::int_);
+    };
+  }
   ConstId string_address(ConstId c) { return universe().consts->address_of(c); }
   bool is_constexpr(EntityId e) { return std::ranges::binary_search(src_->constexpr_functions, e); }
   bool is_main(EntityId e) { return e != EntityId::none && e == src_->def.entity && src_->is_main; }
@@ -817,7 +825,8 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
         in, name_, e.type, e.is_function, e.lang,
         [](EntityId c) {
           const sema::World* w = universe().world;
-          return w ? std::string(w->ins.names.spelling(w->entities.rec(c).name)) : std::string();
+          return w ? ClassName{std::string(w->ins.names.spelling(w->entities.rec(c).name)), w->entities.rec(c).scope}
+                   : ClassName{};
         },
         scope, e.special != Special::none);
     if (!name) {

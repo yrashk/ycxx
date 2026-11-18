@@ -101,7 +101,9 @@ public:
       const items::Item& it = items_->items[j];
       if (!it.scope.empty()) continue;
       for (const items::DeclName& n : it.names)
-        if (n.name == name && !(n.flags & items::name_flag::friend_))
+        // A scoped enumeration's enumerators are in its own scope ([dcl.enum]/11).
+        if (n.name == name && !(n.flags & items::name_flag::friend_) &&
+            !(it.kind == ItemKind::enum_def && n.ordinal > 0 && !(n.flags & items::name_flag::enumerator)))
           r.push_back({ids_[j], ast::make_decl_ord(ast::DeclClass::syntactic, n.ordinal)});
     }
     return r;
@@ -365,6 +367,7 @@ public:
       if (member) member_declaration();
       else declaration();
       break;
+    case ItemKind::enum_def: enum_definition(member ? p_->class_entity(it_->parent) : EntityId::none); break;
     case ItemKind::class_def:
       if (member) {
         s_.diag(0, Diag::not_supported, p_->region().tokens[it_->begin].kind);  // nested classes
@@ -522,6 +525,144 @@ private:
     do {
       parse::Declarator d = ps_.declarator(spec.type, false);
       if (!d.ok || !d.named || !declare(spec, d, LangLinkage::cxx, false, false)) {
+        bad();
+        ps_.skip_to_semi();
+        return;
+      }
+    } while (ps_.accept(Tk::comma));
+    if (!ps_.expect(Tk::semi)) bad();
+  }
+
+  // An enumeration's definition ([dcl.enum]): `enum [class|struct] E [: T] { e [= c], … }`, then
+  // declarators. In a class (`cls`) it is a member, and so are an unscoped one's enumerators.
+  void enum_definition(EntityId cls) {
+    sema::Types& types = s_.types();
+    u32 at = ps_.pos();
+    ps_.bump();
+    bool scoped = ps_.accept(Tk::kw_class) || ps_.accept(Tk::kw_struct);
+    if (!ps_.is(Tk::identifier)) {
+      s_.diag(ps_.pos(), Diag::not_supported, ps_.kind());  // unnamed enumerations
+      return bad();
+    }
+    NameId name = ps_.name_of(ps_.tok());
+    u32 name_at = ps_.pos();
+    ps_.bump();
+    std::optional<QualType> fixed;
+    if (ps_.accept(Tk::colon)) {
+      // [dcl.enum]/2: a fixed underlying type, an integral type.
+      DeclSpec u = ps_.decl_specifiers();
+      if (!u.ok || !types.is_integral(u.type)) return bad();
+      fixed = sema::Types::unqualified(u.type);
+    } else if (scoped) {
+      fixed = s_.builtin(sema::Builtin::int_);  // [dcl.enum]/5: int unless given
+    }
+    if (!ps_.is(Tk::l_brace)) {
+      s_.diag(ps_.pos(), Diag::not_supported, ps_.kind());  // opaque enum declarations
+      return bad();
+    }
+    if (cls == EntityId::none)
+      for (DeclId p : q_.visible_decls(name))
+        if (auto ds = p_->decl_sema(p); ds && (ds->kind == ast::DeclKind::enum_ || ds->kind == ast::DeclKind::class_)) {
+          s_.diag(name_at, Diag::class_redefinition, name);
+          return bad();
+        }
+    EntityId e = s_.world().entities.entity(
+        {sema::EntityKind::enum_, name, {}, LangLinkage::cxx, ast::Linkage::external, {}, cls});
+    QualType t = types.enum_type(e);
+    sema::EnumRec& er = s_.world().classes.enum_rec(e);
+    er = {scoped, fixed.has_value(), fixed.value_or(s_.builtin(sema::Builtin::int_)), {}};
+    ast::DeclSema sem = class_decl(e, true);
+    sem.kind = ast::DeclKind::enum_;
+    sem.type = t;
+    decls_.push_back(sem);
+    s_.own.push_back({name, sem});
+    p_->declared(sem, k_);
+    ps_.bump();
+    // The enumerators: each the previous one's value plus one, or its initializer's, a converted
+    // constant expression of the underlying type when it is fixed ([dcl.enum]/5).
+    std::int64_t next = 0;
+    // Before the closing brace an enumerator has its initializer's type, or the previous one's,
+    // or the fixed underlying type ([dcl.enum]/5); its value is kept until the type is chosen.
+    QualType prev_type = fixed.value_or(s_.builtin(sema::Builtin::int_));
+    std::vector<std::int64_t> values;
+    while (!ps_.is(Tk::r_brace) && !ps_.at_end()) {
+      if (!ps_.is(Tk::identifier)) {
+        s_.diag(ps_.pos(), Diag::expected_unqualified_id);
+        break;
+      }
+      NameId en = ps_.name_of(ps_.tok());
+      u32 en_at = ps_.pos();
+      ps_.bump();
+      std::int64_t value = next;
+      if (!ps_.is(Tk::equal) && fixed && !values.empty()) {
+        // An implicit value must fit the fixed type too.
+        QualType ll = s_.builtin(sema::Builtin::long_long);
+        Ex lit = s_.literal(ll, s_.world().values.integer(ll, sema::u64(value)), ast::ValueCategory::prvalue, en_at, en_at);
+        if (s_.narrows(lit, *fixed)) s_.diag(en_at, Diag::narrowing, ll, *fixed);
+      }
+      if (ps_.accept(Tk::equal)) {
+        Ex x = ps_.constant_expression();
+        Ex v = s_.promote(x);
+        auto c = v.ok() ? sema::Evaluator(s_, q_).evaluate(v).value : std::nullopt;
+        if (!c || s_.world().values.rec(*c).kind != sema::ValueKind::integer || !types.is_integral(v.type())) {
+          if (x.ok()) s_.diag(x.begin, Diag::bound_not_constant);
+        } else {
+          sema::IntShape sh = sema::shape(*types.builtin_of(v.type()));
+          sema::u64 bits = s_.world().values.rec(*c).bits;
+          value = sh.is_signed && sh.bits < 64 && ((bits >> (sh.bits - 1)) & 1) ? std::int64_t(bits | ~((sema::u64{1} << sh.bits) - 1))
+                                                                               : std::int64_t(bits);
+          if (fixed) {
+            Ex lit = s_.literal(v.type(), *c, ast::ValueCategory::prvalue, x.begin, x.end);
+            if (s_.narrows(lit, *fixed)) s_.diag(x.begin, Diag::narrowing, v.type(), *fixed);
+          } else {
+            prev_type = sema::Types::unqualified(v.type());
+          }
+        }
+      }
+      next = value + 1;
+      // [basic.scope.scope]: an unscoped enumerator is declared in the enclosing scope.
+      if (!scoped && cls == EntityId::none)
+        for (DeclId p : q_.visible_decls(en))
+          if (auto ds = p_->decl_sema(p); ds && ds->entity != EntityId::none && ds->kind != ast::DeclKind::class_ &&
+                                          ds->kind != ast::DeclKind::enum_)
+            s_.diag(en_at, Diag::conflicting_declaration, en);
+      EntityId x = s_.world().entities.entity(
+          {sema::EntityKind::enumerator, en, {}, LangLinkage::cxx, ast::Linkage::none, {}, e});
+      p_->set_constant(x, s_.world().values.integer(prev_type, sema::u64(value)), k_);
+      er.enumerators.push_back({en, x, ConstId::none});
+      values.push_back(value);
+      ast::DeclSema xs = class_decl(e, true);
+      xs.kind = ast::DeclKind::enumerator;
+      xs.type = t;
+      xs.entity = x;
+      decls_.push_back(xs);
+      xs.type = prev_type;  // inside the list
+      s_.own.push_back({en, xs});
+      if (!ps_.accept(Tk::comma)) break;
+    }
+    // [dcl.enum]/7: without a fixed type, the type holds every value, and is no larger than int
+    // unless a value fits neither int nor unsigned int.
+    if (!fixed && !values.empty()) {
+      auto [lo, hi] = std::ranges::minmax(values);
+      using sema::Builtin;
+      Builtin u = lo >= std::numeric_limits<std::int32_t>::min() && hi <= std::numeric_limits<std::int32_t>::max() ? Builtin::int_
+                  : lo >= 0 && hi <= std::int64_t(std::numeric_limits<std::uint32_t>::max())                     ? Builtin::unsigned_int
+                                                                                                                 : Builtin::long_;
+      er.underlying = s_.builtin(u);
+    }
+    for (std::size_t i = 0; i < er.enumerators.size(); ++i) {
+      er.enumerators[i].value = s_.world().values.integer(*er.underlying, sema::u64(values[i]));
+      p_->set_constant(er.enumerators[i].entity, er.enumerators[i].value, k_);
+    }
+    ps_.seek(it_->brace_end);
+    if (ps_.accept(Tk::semi)) return;
+    DeclSpec spec;
+    spec.begin = at;
+    spec.type = t;
+    spec.has_type = true;
+    do {
+      parse::Declarator d = ps_.declarator(spec.type, false);
+      if (!d.ok || !d.named || cls != EntityId::none || !declare(spec, d, LangLinkage::cxx, false, false)) {
         bad();
         ps_.skip_to_semi();
         return;
@@ -1052,7 +1193,9 @@ private:
           // A constexpr or constinit variable must be constant-initialized ([dcl.constexpr],
           // [dcl.constinit]); a constexpr one, and a const integral one that is, are usable in
           // constant expressions ([expr.const]).
-          sema::Evaluated v = sema::Evaluator(s_, q_).evaluate(init);
+          // An enumerator is its own constant; the interpreter has no enumeration objects (#25).
+          auto lit = types.is_enum(d.type) ? s_.as<ast::Literal>(init) : std::nullopt;
+          sema::Evaluated v = lit ? sema::Evaluated{lit->value, 0, true} : sema::Evaluator(s_, q_).evaluate(init);
           if (v.value) {
             value = *v.value;
             if (spec.is_constexpr || (sema::Types::is_const(d.type) && !sema::Types::is_volatile(d.type) &&
@@ -1191,6 +1334,7 @@ const Result<ast::ClassDef>& Program::class_def(u32 item) {
   ast::Access access = r_->tokens[it.begin].kind == lex::Tk::kw_class ? ast::Access::private_ : ast::Access::public_;
   std::vector<sema::FieldRec> fields;
   std::vector<sema::MemberDeclRec> statics;
+  std::vector<std::pair<NameId, QualType>> nested;
   for (u32 m : it.members) {
     const items::Item& mi = items_->items[m];
     if (mi.kind == ItemKind::access_spec) {
@@ -1214,6 +1358,8 @@ const Result<ast::ClassDef>& Program::class_def(u32 item) {
       if (d.kind == ast::DeclKind::data_member)
         fields.push_back({w_->entities.rec(d.entity).name, d.type, d.entity, inits.contains(i) ? inits[i] : ConstId::none,
                         dmis_.contains(std::to_underlying(d.entity))});
+      else if (d.kind == ast::DeclKind::enum_)
+        nested.push_back({w_->entities.rec(d.entity).name, d.type});
       else if (d.kind == ast::DeclKind::function || d.kind == ast::DeclKind::variable)
         statics.push_back({w_->entities.rec(d.entity).name, d.entity, d.type,
                            {id(m), ast::make_decl_ord(ast::DeclClass::syntactic, i)}, d.kind == ast::DeclKind::function,
@@ -1226,6 +1372,7 @@ const Result<ast::ClassDef>& Program::class_def(u32 item) {
     if (!rec.defined) {
       rec.fields = std::move(fields);
       rec.members = std::move(statics);
+      rec.types = std::move(nested);
       special_members(item, *cls, rec);
       rec.defined = true;
     }
