@@ -249,7 +249,8 @@ struct Stats {
   std::uint64_t backdated = 0;    // re-executions whose fingerprint did not change (early cutoff)
   std::uint64_t validated = 0;    // cells found green by walking their dependencies
   std::uint64_t durable = 0;      // cells found green by the durability shortcut alone
-  std::uint64_t hits = 0;         // fetches of a cell already verified at this revision
+  std::uint64_t hits = 0;         // fetches of a cell already verified at this revision (with
+                                  // threads, approximate: a fetch that waited may count again)
   std::uint64_t recomputed = 0;   // cheap cells computed privately while another frame owned them
   std::uint64_t contended = 0;    // fetches that found a cell another frame owned, and waited
   bool operator==(const Stats&) const = default;
@@ -270,25 +271,35 @@ consteval bool counters_match_stats() {
 static_assert(counters_match_stats(), "Counter names Stats's fields in order");
 
 // `Stats` that frames on any thread count into: the Db's, a request's (daemon design §8.1), or a
-// query kind's.
+// query kind's. One stripe per worker, so workers counting at once do not share a cache line.
 class Counters {
 public:
-  void add(Counter c, std::uint64_t n = 1) noexcept { n_[std::to_underlying(c)].fetch_add(n, std::memory_order_relaxed); }
+  static constexpr std::size_t stripes = 16;
+  void add(Counter c, std::uint64_t n = 1, std::size_t stripe = 0) noexcept {
+    stripes_[stripe % stripes].n[std::to_underlying(c)].fetch_add(n, std::memory_order_relaxed);
+  }
   Stats stats() const noexcept {
     Stats s;
     add_to(s);
     return s;
   }
   void add_to(Stats& s) const noexcept {
-    std::size_t i = 0;
-    template for (constexpr auto m : members_of<Stats>()) s.[:m:] += n_[i++].load(std::memory_order_relaxed);
+    for (const Stripe& st : stripes_) {
+      std::size_t i = 0;
+      template for (constexpr auto m : members_of<Stats>()) s.[:m:] += st.n[i++].load(std::memory_order_relaxed);
+    }
   }
   void reset() noexcept {
-    for (auto& n : n_) n.store(0, std::memory_order_relaxed);
+    for (Stripe& st : stripes_) {
+      for (auto& n : st.n) n.store(0, std::memory_order_relaxed);
+    }
   }
 
 private:
-  std::array<std::atomic<std::uint64_t>, members_of<Stats>().size()> n_{};
+  struct alignas(64) Stripe {
+    std::array<std::atomic<std::uint64_t>, members_of<Stats>().size()> n{};
+  };
+  std::array<Stripe, stripes> stripes_{};
 };
 
 }  // namespace ycxx::engine
@@ -657,11 +668,6 @@ struct own_handle {
   std::coroutine_handle<> await_resume() noexcept { return h; }
 };
 
-// The Db's counts, one stripe per worker so hits do not share a cache line.
-struct alignas(64) StatStripe {
-  Counters counters;
-};
-inline constexpr std::size_t stat_stripes = 16;
 
 // The registry entry of a frame id: the cells it waits on, under the wait mutex (§A2.2).
 struct Registered {
@@ -690,16 +696,20 @@ public:
 
   // Sets an input, and returns whether its value changed. A value with the fingerprint it already
   // has changes nothing; otherwise the first change after a request starts a new revision (one
-  // revision per batch, §A1.4). The cell keeps its durability.
+  // revision per batch, §A1.4). The cell keeps its durability; a cell first created by `set`
+  // takes its kind's, not the provider's, so set provided inputs only once they were provided.
+  // It may race with `reset_unobserved` of the same input (whichever claims last wins).
   // Precondition: no request is in flight (revisions advance only at quiescence, §A4.1).
   template <InputKind Q>
   bool set(const typename Q::Key& k, typename Q::Value v);
 
   // An input read before anyone set it gets `fn(key)`'s value and durability, at the revision it
-  // is first read, with no new revision (daemon design §5.1). `fn` is called at most once per
-  // cell, by any worker, so it must be safe to call concurrently for different keys. Without a
-  // provider, reading an input nobody set violates a contract.
-  // Precondition: no request is in flight.
+  // is first read, with no new revision (daemon design §5.1). `fn` runs once per cell that it
+  // provides, on any worker, so it must be safe to call concurrently for different keys. A
+  // throw is an internal error: the readers waiting then get it, and the next reader calls `fn`
+  // again, so a missing file must be a value, not an exception. Without a provider, reading an
+  // input nobody set violates a contract.
+  // Precondition: no request is in flight, and no `reset_unobserved` runs.
   template <InputKind Q, class F>
     requires std::is_invocable_r_v<provided<typename Q::Value>, F&, const typename Q::Key&>
   void set_provider(F fn);
@@ -862,7 +872,7 @@ private:
   Arena<Registered> registry_;
   std::mutex ids_mutex_;
   std::vector<std::uint32_t> free_ids_;
-  std::array<StatStripe, stat_stripes> stats_;
+  Counters stats_;
   std::atomic<bool> per_kind_{false};
 };
 
@@ -1208,6 +1218,9 @@ struct Request : Root, Settle {
   // Starts settling the cell. Without a pool the work runs here, before this returns.
   void begin() noexcept {
     Db& d = *db;
+    // At start, not when the sender was made: a `set` between the two must not leave the revision
+    // this request reads at unmarked (review of #95, P0).
+    d.observe();
     (void)start(std::span<const CellId>(&cell, 1));
     d.drain();
   }
@@ -1662,7 +1675,9 @@ Db::Settled Db::try_settle(CellId c, Frame& requester, std::vector<std::coroutin
 bool Db::ensure_input(CellId c, const Frame* chain) {
   Cell& e = cells_[c];
   const Root* root = chain ? chain->root : nullptr;
-  e.observed.store(true, std::memory_order_seq_cst);
+  // A seq_cst load that finds the mark already set orders this read after it as well as a store
+  // would, without every reader writing the cell's line.
+  if (!e.observed.load(std::memory_order_seq_cst)) e.observed.store(true, std::memory_order_seq_cst);
   std::uint64_t w = e.word.load(std::memory_order_seq_cst);
   while (true) {
     switch (state_of(w)) {
@@ -2084,10 +2099,10 @@ void Db::drain() noexcept {
 }
 
 void Db::count(Counter what, const Root* root, CellId c, std::uint64_t n) noexcept {
-  const std::size_t stripe = pool_ ? pool_->worker_index().value_or(pool_->size()) % stat_stripes : 0;
-  stats_[stripe].counters.add(what, n);
-  if (root && root->counters) root->counters->add(what, n);
-  if (per_kind_.load(std::memory_order_relaxed)) tables_[cells_[c].kind].load(std::memory_order_acquire)->counters.add(what, n);
+  const std::size_t stripe = pool_ ? pool_->worker_index().value_or(pool_->size()) : 0;
+  stats_.add(what, n, stripe);
+  if (root && root->counters) root->counters->add(what, n, stripe);
+  if (per_kind_.load(std::memory_order_relaxed)) tables_[cells_[c].kind].load(std::memory_order_acquire)->counters.add(what, n, stripe);
 }
 
 Db::Db() : owner_(std::this_thread::get_id()) { (void)registry_.emplace(); }  // id 0 is never an owner that waits
@@ -2101,12 +2116,12 @@ Db::~Db() {
 
 Stats Db::stats() const noexcept {
   Stats s;
-  for (const StatStripe& st : stats_) st.counters.add_to(s);
+  stats_.add_to(s);
   return s;
 }
 
 void Db::reset_stats() noexcept {
-  for (StatStripe& st : stats_) st.counters.reset();
+  stats_.reset();
   for (const auto& t : tables_) {
     if (KindTableBase* k = t.load(std::memory_order_acquire)) k->counters.reset();
   }
@@ -2226,8 +2241,20 @@ bool Db::set(const typename Q::Key& k, typename Q::Value v) {
   contract_assert(live_frames() == 0);
   const CellId c = cell_for<Q>(k);
   Cell& e = cells_[c];
+  // Claimed like a reset, which may run on another thread (daemon design §4.4: admission resets
+  // `build_time` while the strand writes a batch).
+  std::uint64_t w = e.word.load(std::memory_order_seq_cst);
+  while (owned(w) || !e.word.compare_exchange_weak(w, make_word(State::running, 0, verified_of(w)), std::memory_order_seq_cst)) {
+    if (owned(w)) {
+      std::this_thread::yield();
+      w = e.word.load(std::memory_order_seq_cst);
+    }
+  }
   const Fp128 fp = fingerprint(v);
-  if (e.has_value && fp == e.fp) return false;
+  if (e.has_value && fp == e.fp) {
+    e.word.store(w, std::memory_order_release);
+    return false;
+  }
   e.observed.store(false, std::memory_order_relaxed);
   Revision r = revision();
   if (observed_.exchange(false, std::memory_order_relaxed)) revision_.store(++r, std::memory_order_relaxed);
@@ -2296,8 +2323,10 @@ template <MemoQuery Q>
 decltype(auto) Db::get(const typename Q::Key& k) {
   observe();
   const CellId c = cell_for<Q>(k);
-  if constexpr (InputKind<Q>) cells_[c].observed.store(true, std::memory_order_seq_cst);  // before the read
-  if (is_current(c)) {
+  if constexpr (InputKind<Q>) {
+    // Marked and read as every input read is, so a racing reset either fails or is waited for.
+    while (!ensure_input(c, nullptr)) std::this_thread::yield();
+  } else if (is_current(c)) {
     count(Counter::hits, nullptr, c);
   } else {
     Blocking b(*this, c, Priority::background);

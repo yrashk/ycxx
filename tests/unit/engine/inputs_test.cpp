@@ -205,6 +205,90 @@ void reset_unobserved() {
   check(succeeded > 0 && failed > 0, std::format("resets both won and lost the race ({} won, {} lost)", succeeded, failed));
 }
 
+// A sender made before a `set` and started after it reads the new revision, and the next `set`
+// still starts a revision (review of #95, P0).
+void sender_across_a_set() {
+  Db db;
+  db.set<BuildTime>(0, "a");
+  auto s = db.request<Stamp>(3);
+  db.set_provider<File>(provide_file);
+  db.set<BuildTime>(0, "bb");
+  check(std::get<0>(*std::this_thread::sync_wait(std::move(s))) == "bbfile3", "the sender reads the revision it started at");
+  db.set<BuildTime>(0, "cccc");
+  check(db.get<Stamp>(3) == "ccccfile3", "and the next set is a new revision");
+}
+
+// Races between readers and writers of inputs on a pool.
+void input_races() {
+  Pool pool(hw, 120);
+  // `get<Input>` against resets: every read whole, one value per round.
+  Db db(pool);
+  const auto value = [](int i, char salt) { return std::string(256, static_cast<char>((salt == 'r' ? 'A' : 'a') + i % 26)); };
+  int mixed = 0;
+  for (int round = 0; round < 200; ++round) {
+    db.set<BuildTime>(0, value(round, 's'));
+    std::vector<std::string> read(4);
+    {
+      std::vector<std::jthread> readers;
+      for (std::size_t j = 0; j < read.size(); ++j) readers.emplace_back([&, j] { read[j] = db.get<BuildTime>(0); });
+      (void)db.reset_unobserved<BuildTime>(0, value(round, 'r'));
+    }
+    const std::string after = db.get<BuildTime>(0);
+    for (const auto& r : read) mixed += r != after;
+  }
+  check(mixed == 0, std::format("get against reset: every read the final value of its round ({} not)", mixed));
+
+  // A reset racing the provider of an empty cell: one of them defines it, and every reader agrees.
+  Db fresh(pool);
+  fresh.set_provider<File>(provide_file);
+  int disagree = 0;
+  for (std::uint32_t k = 0; k < 200; ++k) {
+    std::vector<std::size_t> sizes(6);
+    ex::counting_scope scope;
+    for (std::size_t j = 0; j < sizes.size(); ++j) {
+      ex::spawn(fresh.request<Size>(k) | ex::then([&sizes, j](const std::size_t& v) noexcept { sizes[j] = v; }) |
+                    ex::upon_error([](std::exception_ptr) noexcept {}),
+                scope.get_token());
+    }
+    (void)fresh.reset_unobserved<File>(k, std::string(100 + k, 'x'));
+    std::this_thread::sync_wait(scope.join());
+    const std::size_t want = fresh.get<File>(k).size();
+    for (std::size_t v : sizes) disagree += v != want;
+  }
+  check(disagree == 0, std::format("provider against reset: readers agree with the cell ({} not)", disagree));
+
+  // A provider that always throws: every reader gets the error, none a value.
+  Db failing(pool);
+  failing.set_provider<File>([](const std::uint32_t&) -> provided<std::string> { throw std::runtime_error("unreadable"); });
+  std::atomic<int> values{0}, errors{0};
+  {
+    ex::counting_scope scope;
+    for (int j = 0; j < 8; ++j) {
+      ex::spawn(failing.request<Size>(9) | ex::then([&](const std::size_t&) noexcept { ++values; }) |
+                    ex::upon_error([&](std::exception_ptr) noexcept { ++errors; }),
+                scope.get_token());
+    }
+    std::this_thread::sync_wait(scope.join());
+  }
+  check(values == 0 && errors == 8, "a throwing provider fails every reader");
+}
+
+std::atomic<bool> held{true};
+std::atomic<bool> holding{false};
+struct Held {
+  using Key = std::uint32_t;
+  using Value = std::size_t;
+  static query_task<Value> run(Ctx& cx, Key k) {
+    const std::size_t a = co_await cx.fetch<Size>(k);
+    holding = true;
+    while (held.load()) {
+      co_await cx.stop_point();
+      std::this_thread::yield();
+    }
+    co_return a;
+  }
+};
+
 // Counts per request and per kind (daemon design §8.1).
 void counts() {
   Pool pool(hw);
@@ -245,6 +329,20 @@ void counts() {
   auto t = ep.spawn<Many>(77, Priority::background, [&](const std::size_t&) { ++answered; }, [](std::exception_ptr) {});
   ep.join();
   check(answered == 1 && t->restarts() == 0 && t->stats().executed > 0, "a ticket counts its runs");
+
+  // Restarts: the ticket's counts accumulate over its runs.
+  held = true;
+  holding = false;
+  auto h = ep.spawn<Held>(500, Priority::background, [&](const std::size_t&) { ++answered; }, [](std::exception_ptr) {});
+  while (!holding.load()) std::this_thread::yield();
+  const auto first = h->stats().executed;  // Size(500): its own execution
+  holding = false;
+  (void)ep.apply([](Db&) {});
+  while (!holding.load()) std::this_thread::yield();
+  held = false;
+  ep.join();
+  check(h->restarts() == 1 && first == 1 && h->stats().executed == 2 && answered == 2,
+        "one restart; counts accumulate (Size once, Held once)");
 }
 
 }  // namespace
@@ -253,6 +351,8 @@ int main() {
   providers();
   editor_durability();
   reset_unobserved();
+  sender_across_a_set();
+  input_races();
   counts();
   return ycxx::unit::result("engine_inputs");
 }
