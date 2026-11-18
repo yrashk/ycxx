@@ -60,6 +60,12 @@ jobs:
             test-state-${{ github.head_ref || github.ref_name }}-${{ matrix.host.name }}-
             test-state-main-${{ matrix.host.name }}-
 
+      # The α slice end to end (#39, #43): ycxx compiles, links and runs these programs. It runs
+      # before the tier, so a broken pipeline is the first failure reported (DECISIONS §9.2).
+      - name: α slice (tools/test --cxx ycxx core own/slice)
+        if: matrix.host.name == 'macos-arm64'
+        run: tools/test --cxx ycxx core own/slice -j ${{ matrix.host.jobs }}
+
       - name: Tests (tools/test, ${{ env.TIER }} tier)
         run: |
           if [ "$TIER" = pr ]; then

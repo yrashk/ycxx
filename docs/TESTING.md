@@ -45,7 +45,8 @@ or configuration error; 3 internal driver error; 130 interrupted.
 
 What ycxx can do is listed in [`tests/features/ycxx.txt`](../tests/features/ycxx.txt): `syntax`,
 `preprocess`, `run`, `incremental`. A test that needs a feature ycxx lacks is UNSUPPORTED with
-that reason, and the summary counts the reasons. When ycxx learns to do something, add the line:
+that reason, and the summary counts the reasons. Hosts after a feature limit it to them (`run
+darwin-arm64`). When ycxx learns to do something, add the line:
 the tests start counting. [`tests/features/ycxx.xfail`](../tests/features/ycxx.xfail) lists the
 tests ycxx is expected to fail with the features it has (`<test id> <reason>` per line), outside
 the test files because most are generated. It works like an `XFAIL: ycxx` line: an XPASS fails

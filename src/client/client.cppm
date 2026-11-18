@@ -1,6 +1,6 @@
 // The daemon's clients (DECISIONS §4.7): a c++-compatible command line, an LSP server and a
 // control interface. Each will connect to the daemon, starting it if needed; until the daemon
-// exists, `cxx` runs the pipeline in-process (ycxx.pipeline, #43).
+// exists (#63), `cxx` runs the pipeline in-process (ycxx.pipeline, #43).
 export module ycxx.client;
 
 import std;
