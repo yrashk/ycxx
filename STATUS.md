@@ -146,7 +146,7 @@ What is true of the code today. Work in progress and its owners are tracked in
 - Not yet: `long double` and the extended floating types' values (left to the
   target), the type of an integer literal (sema, #33).
 
-## Preprocessor, includes and object-like macros (#85, 2026-11-18)
+## Preprocessor: includes and macros (#85, 2026-11-18)
 
 - `ycxx.pp` (`src/pp/`): phase 4 as query-engine.md §B9's contextual query, with a local stand-in
   for the engine parts that do not exist yet (#16, #93).
@@ -167,19 +167,25 @@ What is true of the code today. Work in progress and its owners are tracked in
   - `#include` in both forms and the macro-replaced form, and `#include_next`;
   - search directories from `-I`, `-isystem` and `-iquote`, then libycxx's headers and the
     SDK's (`:system`, configured by CMake);
-  - object-like `#define` and `#undef` with the redefinition check, rescanning and painting
+  - `#define` and `#undef` with the redefinition check, rescanning and painting
     ([cpp.rescan]);
+  - function-like macros (`:unit`'s `invocation`, `substitute`, `paste`): arguments across
+    lines, argument counts, omitted variable arguments, `#`, `##` with placemarkers,
+    `__VA_ARGS__`, `__VA_OPT__`, and the constraints on replacement lists. Arguments are
+    replaced in a barrier context. Their tokens sit in expansions of kind argument, and pasted
+    tokens in kind paste, so `Region::site` leads to the invocation;
   - `#pragma once` (other pragmas pass through to `-E`), and the null directive.
-  - Every other directive is diagnosed as unsupported. Function-like macros and conditionals
-    come in the next two parts of #85.
+  - Every other directive is diagnosed as unsupported. Conditionals and the rest come in the
+    third part of #85.
 - `ycxx cxx -E` prints what Clang's `-E` would, by Clang's line and spacing rules. `preprocess`
   is in `tests/features/ycxx.txt`. Diagnostics in included files name their file.
 - Tests:
-  - `tests/own/pp` (by a spec-only author): 16 `-E`, 6 reject and 2 accept tests;
+  - `tests/own/pp` (by spec-only authors): 42 `-E`, 19 reject and 4 accept tests, the draft's
+    [cpp.scope], [cpp.subst], [cpp.stringize] and [cpp.concat] examples among them;
   - `tests/own/slice/a3-local-header.run.cpp`;
   - `unit.pp`: resolution, traces, reuse across TUs, and incremental equals cold over edit
     sequences.
-- Not yet: function-like macros, `#`/`##`, conditionals, `#line`, `#error`, `_Pragma`, the
+- Not yet: conditionals, `#line`, `#error`, `_Pragma`, the
   predefined macros beyond `__cplusplus`, and module and import lines (#85). The engine cell
   `Pp(main)` does not depend on headers until #93. Items are cut from the flattened TU, so a
   header's items carry the main file's identity (#85). Sema diagnostics in headers render
@@ -270,8 +276,9 @@ stay open for the rest.
     stack probing for frames over a page,
     pseudo-form expansion, and encoding into `ycxx.obj` with BRANCH26, PAGE21/PAGEOFF12 and GOT
     relocations.
-  - `codegen(unit)` turns functions and data (cstring, rodata, data_const, data, bss) into one
-    object, in entity-id order.
+  - `compile_function` gives one function's machine code apart from any object (level 0 of
+    `optimized`); `assemble` puts functions and data (cstring, rodata, data_const, data, bss) into
+    one object in the order its caller gives; `codegen(unit)` does both in entity-id order.
 - Tests (`tests/unit/codegen/`):
   - `unit.lower`: golden L2.
   - `unit.aarch64`, on both hosts: encodings against the Arm ARM, the pattern table, selection
@@ -282,9 +289,9 @@ stay open for the rest.
     arithmetic and calling convention, over thousands of argument pairs. It covers narrow types,
     stack arguments both ways, function pointers and the GOT. Mutating `sdiv` or the stack packing
     makes it fail.
-- Not yet: the `unit`/`optimized`/`codegen` queries (#63), the allocation
+- Not yet: the allocation
   validator and dependence checker (#29), SSA linear scan, list scheduling, unwind info and DWARF,
-  `cost_model`, variadic calls, more than one result, frame objects aligned above 16 bytes.
+  a measured `cost_model` (#9), variadic calls, more than one result, frame objects aligned above 16 bytes.
 
 ## AST core (#32)
 
@@ -423,9 +430,8 @@ one import `ycxx.ast`; unit tests in `tests/unit/ast` (run by ctest, see docs/TE
   text form (handles named) with the expected text. It also checks that positions do not reach
   the fingerprint.
 - Not yet:
-  - the `function_ir` and `function_debug` engine queries (they wait for `analyze_body` and
-    `decl_sema`, #41);
-  - `string_address`, `is_constexpr` and `is_main` over real entities and `VString`s;
+  - `function_ir` and `function_debug` keyed by a context (they are keyed by unit and entity, #16);
+  - `is_constexpr` over real entities (the front end reports none yet);
   - classes, arrays as objects, cleanups, EH (`invoke`), coroutines, static locals, calls
     through pointers, floating point, `switch` and `goto`.
 
@@ -434,19 +440,29 @@ one import `ycxx.ast`; unit tests in `tests/unit/ast` (run by ctest, see docs/TE
 The α slice end to end (epic #39): every test in `tests/own/slice` compiles, links and runs, or is
 rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm64 macOS.
 
-- `ycxx.pipeline` (`src/pipeline/`), run in-process by `client::cxx`:
-  - `:front`: the file's text as the engine's `FileText`, `pp` and `RegionItems` as engine queries,
-    then `parse::Program` (item_sema, analyze_body). Its diagnostics by byte offset, and the
-    `TranslationUnit`: entities, function definitions with their analysed bodies, variable
-    definitions with their constants.
-  - `:back`: `function_ir`, `lower` and `codegen` per function, variables and string literals as
-    data, into one object. `Layout` stands in for the `layout` query (#33); string literal
-    objects become local `l_.str.N` entities. Errors (what the α subset does not support yet)
-    point into the item when there is a node.
+- `ycxx.pipeline` (`src/pipeline/`): every stage is an engine query (#63), run by `client::cxx`
+  through a `Session` (the engine, the interners and sema's world, alive together; in-process
+  until the daemon, #96):
+  - `:front`: `TuFront(TU)`: the file's text as the engine's `FileText`, `pp` and `RegionItems`,
+    then `parse::Program` (item_sema, analyze_body) inside the one cell until contextual queries
+    (#16). Its diagnostics by byte offset, and the `TranslationUnit`: entities, function
+    definitions with their analysed bodies, variable definitions with their constants.
+    `tu_unit(TU)` projects the unit, so a whitespace edit stops there.
+  - `:back`, per function `F`: `function_source(TU, F)` (a projection that backdates),
+    `function_gen` with the projections `function_ir` and `function_debug`, `lower`, `unit` (the
+    optimization unit in a content-addressed store, with which references the object defines),
+    `optimized(unit, target, level)` and `codegen(F)` = `best_available` over the
+    `opt_cache_snapshot` input (consulted for B ≥ 1 only); `cost_model` is a stub input. `layout`
+    is three cheap queries (`layout_type`, `layout_step`, `layout_constant`). `tu(TU)` assembles
+    the object in definition order (§A5.3), with string literal objects as local `l_.str.N`
+    entities by first use; its value also holds the first-demand table (empty until #16). Errors
+    (what the α subset does not support yet) are values, pointing into the item when there is a
+    node.
   - `:mangle`: Itanium names for global-namespace functions over fundamental, pointer and cv types
     with substitutions; `main`, `extern "C"` functions and variables are not mangled (#64).
-  - `:executable`: the link with libSystem's exports from `$SDKROOT`, else `xcrun --show-sdk-path`,
-    else the Command Line Tools' SDK, looked up once per process.
+  - `:executable`: `link(P)`, the query over a program's `tu` objects and the `.o` inputs, with
+    libSystem's exports from `$SDKROOT`, else `xcrun --show-sdk-path`, else the Command Line Tools'
+    SDK, looked up once per process outside the engine.
   - `:lines`: a minimal line table for rendering (#34 owns the full one).
 - `ycxx cxx` (also `ycxx -…` with an option first): `-o`, `-c`, `-fsyntax-only`, `-std=c++26`;
   `.o` inputs are linked as they are. Errors are `path:line:col: error: message` on stderr; exit 0
@@ -454,8 +470,13 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
 - `tests/features/ycxx.txt` lists `syntax` and `run darwin-arm64`: a feature can be limited to
   hosts. CI's macOS job runs the slice before its tier, with `--no-unsupported`.
 - `unit.pipeline`: the line table, linkage names, and the back half from hand-built analysed
-  bodies, linked and run on arm64 macOS.
-- Not yet: the stages as engine queries (#63) and the daemon (designed in `docs/design/daemon.md`; #95–#98), `#include` (#65), optimization
+  bodies (`compile`, `tu(TU)` in an engine of its own), linked and run on arm64 macOS.
+- `unit.pipeline_incremental`: a second build executes nothing; a new revision through an
+  unrelated input validates everything and executes nothing; a whitespace edit executes nothing
+  past the front end; a body edit runs that function's cells once each, `tu` and the link, and no
+  other function's; incremental equals cold after each edit, also when the warm session numbers
+  entities differently (mutating `tu` to order by handle makes it fail).
+- Not yet: the daemon (designed in `docs/design/daemon.md`; #95–#98), `#include` (#65), optimization
   levels and the other common options (`-O` is rejected, #81).
 
 ## The L1 interpreter (#25, 2026-11-18)

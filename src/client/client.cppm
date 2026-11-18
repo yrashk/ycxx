@@ -1,6 +1,7 @@
 // The daemon's clients (DECISIONS §4.7): a c++-compatible command line, an LSP server and a
 // control interface. Each will connect to the daemon, starting it if needed; until the daemon
-// exists (#63), `cxx` runs the pipeline in-process (ycxx.pipeline, #43).
+// exists (#96), `cxx` runs the pipeline's queries in-process, in a session of its own
+// (ycxx.pipeline, #43, #63).
 export module ycxx.client;
 
 import std;
@@ -102,42 +103,38 @@ std::filesystem::path object_name(const std::string& source) {
   return std::filesystem::path(source).filename().replace_extension(".o");
 }
 
-// Compiles one translation unit; nullopt after reporting its errors.
-std::optional<obj::object> compile(const std::string& path, Options::Stop stop) {
-  auto text = read_file(path);
-  if (!text) {
-    std::println(std::cerr, "ycxx: error: cannot read '{}'", path);
-    return std::nullopt;
+// `-E`: prints the preprocessed text; false after reporting errors.
+bool preprocess(const std::string& path, const std::string& text) {
+  auto [out, messages] = pp::preprocess_to_text(pp::session(), text, path);
+  std::print("{}", out);
+  bool errors = false;
+  for (const pp::Message& m : messages) {
+    std::println(std::cerr, "{}:{}:{}: {}: {}", m.file, m.line, m.column, m.error ? "error" : "warning", m.text);
+    errors = errors || m.error;
   }
-  if (stop == Options::Stop::preprocess) {
-    auto [out, messages] = pp::preprocess_to_text(pp::session(), *text, path);
-    std::print("{}", out);
-    bool errors = false;
-    for (const pp::Message& m : messages) {
-      std::println(std::cerr, "{}:{}:{}: {}: {}", m.file, m.line, m.column, m.error ? "error" : "warning", m.text);
-      errors = errors || m.error;
-    }
-    if (errors) return std::nullopt;
-    return obj::object{};
-  }
-  Renderer out(path, *text);
-  pipeline::Front front(path, *text);
-  for (const pipeline::Message& m : front.messages()) {
+  return !errors;
+}
+
+// Compiles one translation unit through the session's queries; nullptr after reporting its
+// errors. With `-fsyntax-only`, an object with no content.
+const obj::object* compile(pipeline::Session& session, pipeline::TuId tu, const std::string& path, const std::string& text,
+                           Options::Stop stop) {
+  static const obj::object empty;
+  session.set_source(tu, path, text, object_name(path).native_encoded_string());
+  Renderer out(path, text);
+  const pipeline::FrontResult& front = session.get<pipeline::TuFront>(tu);
+  for (const pipeline::Message& m : front.messages) {
     if (m.where.empty()) out.at(m.offset, m.error, m.text);
     else std::println(std::cerr, "{}: {}: {}", m.where, m.error ? "error" : "warning", m.text);
   }
-  if (front.has_errors()) return std::nullopt;
-  if (stop == Options::Stop::syntax) return obj::object{};
-  pipeline::TranslationUnit tu = front.unit(object_name(path).native_encoded_string());
-  auto o = pipeline::compile(tu, front.interners(), front.constants());
-  if (!o) {
-    for (const pipeline::BackError& e : o.error()) {
-      if (e.at) out.at(front.byte_offset(*e.at), true, e.message);
-      else out.file_level(e.message);
-    }
-    return std::nullopt;
+  if (front.has_errors()) return nullptr;
+  if (stop == Options::Stop::syntax) return &empty;
+  const pipeline::TuValue& v = session.get<pipeline::Tu>(tu);
+  for (const pipeline::BackError& e : v.errors) {
+    if (e.at) out.at(session.byte_offset(tu, *e.at), true, e.message);
+    else out.file_level(e.message);
   }
-  return std::move(*o);
+  return v.object ? &*v.object : nullptr;
 }
 
 }  // namespace
@@ -151,10 +148,23 @@ int cxx(std::span<const std::string_view> args) {
     return 1;
   }
   pp::configure(pp::with_system_dirs(opts->pp));
+  pipeline::Session session;
   bool failed = false;
-  std::vector<obj::object> objects;
-  for (const std::string& s : opts->sources) {
-    auto o = compile(s, opts->stop);
+  std::vector<pipeline::TuId> tus;
+  for (std::uint32_t k = 0; k < opts->sources.size(); ++k) {
+    const std::string& s = opts->sources[k];
+    auto text = read_file(s);
+    if (!text) {
+      std::println(std::cerr, "ycxx: error: cannot read '{}'", s);
+      failed = true;
+      continue;
+    }
+    if (opts->stop == Options::Stop::preprocess) {
+      failed = !preprocess(s, *text) || failed;
+      continue;
+    }
+    const pipeline::TuId tu{k};
+    const obj::object* o = compile(session, tu, s, *text, opts->stop);
     if (!o) {
       failed = true;
       continue;
@@ -166,12 +176,13 @@ int cxx(std::span<const std::string_view> args) {
         failed = true;
       }
     } else if (opts->stop == Options::Stop::link) {
-      objects.push_back(std::move(*o));
+      tus.push_back(tu);
     }
   }
   if (failed) return 1;
   if (opts->stop != Options::Stop::link) return 0;
 
+  std::vector<obj::object> objects;
   for (const std::string& path : opts->objects) {
     auto text = read_file(path);
     if (!text) {
@@ -187,12 +198,13 @@ int cxx(std::span<const std::string_view> args) {
     objects.push_back(std::move(*o));
   }
   std::filesystem::path out = opts->output.value_or("a.out");
-  auto image = pipeline::link_executable(objects, out.filename().native_encoded_string());
-  if (!image) {
-    for (const link::error& e : image.error()) std::println(std::cerr, "ycxx: error: {}", e.message);
+  session.set_program(pipeline::ProgramId{0}, {std::move(tus), std::move(objects), out.filename().native_encoded_string()});
+  const pipeline::Linked& image = session.get<pipeline::Link>(pipeline::ProgramId{0});
+  if (!image.errors.empty()) {
+    for (const std::string& e : image.errors) std::println(std::cerr, "ycxx: error: {}", e);
     return 1;
   }
-  if (auto err = pipeline::write_file(out, *image, true)) {
+  if (auto err = pipeline::write_file(out, image.image, true)) {
     std::println(std::cerr, "ycxx: error: {}", *err);
     return 1;
   }
