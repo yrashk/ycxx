@@ -392,6 +392,10 @@ public:
   };
   std::map<u32, MemberOf> member_patterns_;
   std::optional<u32> out_of_class_definition(EntityId spec, MemberOf of);
+  // A class template specialization's record of its member item `m`, analysed already.
+  const ast::ItemSema& class_member_sema(u32 m, EntityId spec) {
+    return class_member_cells_.at(std::pair(m, std::to_underlying(spec))).value;
+  }
 
   // The end of the translation unit (§B6.2): every specialization whose definition a cell
   // requires is instantiated, in order of first demand, and so are those its instance requires.
@@ -1392,7 +1396,7 @@ private:
     // One declaration of each ([class.mem.general]/5).
     for (u32 m : p_->items().items[it_->parent].members) {
       if (m == k_) break;
-      for (const ast::DeclSema& o : p_->world().ins.seqs.elements(p_->item_sema(m).value.decls))
+      for (const ast::DeclSema& o : p_->world().ins.seqs.elements(earlier(m).decls))
         if (o.entity == sem.entity) {
           s_.diag(name_at, Diag::redeclared_member, name);
           return bad();
@@ -1551,7 +1555,7 @@ private:
       if (o.name == n && clash(o.sema)) return true;
     for (u32 m : p_->items().items[it_->parent].members) {
       if (m == k_) break;
-      const ast::ItemSema& ms = p_->item_sema(m).value;
+      const ast::ItemSema& ms = earlier(m);
       for (const ast::DeclSema& d : p_->world().ins.seqs.elements(ms.decls))
         if (d.entity != EntityId::none && d.kind != ast::DeclKind::class_ && p_->world().entities.rec(d.entity).name == n &&
             clash(d))
@@ -1569,6 +1573,13 @@ private:
       if (p.kind == ast::TemplateArgKind::value) f = ast::mix(f, s_.types().fp(s_.types().canonical(p.type)));
     }
     return f;
+  }
+
+  // An earlier member item of the same class: the class's own record of it, or in an
+  // instantiation the specialization's, which `class_content` analysed first.
+  const ast::ItemSema& earlier(u32 m) {
+    if (inst_) return p_->class_member_sema(m, inst_->spec);
+    return p_->item_sema(m).value;
   }
 
   // The rest of the skeleton's names get empty records, so ordinals stay aligned.
@@ -2375,7 +2386,10 @@ const sema::ClassRec* Program::instantiate_class(EntityId spec) {
     auto cell_key = std::pair(m, key);
     if (!class_member_cells_.contains(cell_key))
     {
-      class_member_cells_.emplace(cell_key, ItemAnalysis(*this, m, ClassInstantiation{spec, args}).run());
+      Result<ast::ItemSema> cell = ItemAnalysis(*this, m, ClassInstantiation{spec, args}).run();
+      // What the definition diagnosed it says once, there.
+      if (!item_sema(m).diags.empty()) cell.diags.clear();
+      class_member_cells_.emplace(cell_key, std::move(cell));
       class_member_order_.push_back(cell_key);
     }
     return class_member_cells_.at(cell_key).value;
