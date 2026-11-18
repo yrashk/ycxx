@@ -139,6 +139,8 @@ struct Ops {
     const M::Shape* s;
     if (Flow fl = m.int_shape(f, m.result_type(f, n), s); fl != Flow::next) return fl;
     if (a.kind != VKind::integer) return m.fail(Reason::ill_formed);
+    // To bool it is the boolean conversion ([conv.integral]/1 defers to [conv.bool]).
+    if (ast::builtin_of(*m.in_, m.result_type(f, n)) == ast::Builtin::bool_) return m.set(f, n, Value::integer(a.bits != 0));
     return m.set(f, n, Value::integer(M::norm(a.bits, s->width, s->is_signed)));
   }
   static Flow fconv(M& m, Frame&, N n) { return m.unsupported(n); }
@@ -181,7 +183,8 @@ struct Ops {
     u64 bound = 0;
     bool single = false;
     if (Flow fl = m.pointer_index(p, imm_type(f, n), base, index, bound, single); fl != Flow::next) return fl;
-    if ((by > 0 && index > i64(bound) - by) || (by < 0 && index < -by)) return m.fail(Reason::pointer_bounds);
+    // `index` is in [0, bound], so negating it cannot overflow, while negating `by` could.
+    if ((by > 0 && index > i64(bound) - by) || (by < 0 && by < -index)) return m.fail(Reason::pointer_bounds);
     i64 at = index + by;
     Value r{VKind::object, false, p.ref, 0};
     if (single) {
@@ -282,9 +285,20 @@ struct Ops {
     return Flow::next;
   }
 
+  // Beginning or ending the lifetime of an object from outside the evaluation is a modification
+  // of it ([expr.const]).
+  static Flow lifetime_change(M& m, const Value& p) {
+    if (p.kind != VKind::object) return Flow::next;
+    const M::Object& ob = m.objects_[p.ref];
+    if (ob.read_only) return m.fail(Reason::modify_const);
+    if (constant(m) && ob.outside) return m.fail(Reason::modify_outside);
+    return Flow::next;
+  }
+
   static Flow obj__begin(M& m, Frame& f, N n) {
     M::Place pl;
     if (Flow fl = m.locate(m.operand(f, n, 1), {}, imm_type(f, n), M::Use::lifetime, false, pl); fl != Flow::next) return fl;
+    if (Flow fl = lifetime_change(m, m.operand(f, n, 1)); fl != Flow::next) return fl;
     for (u32 c = pl.cell0; c < pl.cell0 + pl.ncells; ++c) m.cells_[c].life = M::Life::alive;
     return Flow::next;
   }
@@ -296,6 +310,7 @@ struct Ops {
     bool past = false;
     auto pl = m.resolve(p, {}, past);
     if (!pl || past) return m.fail(Reason::past_end_access);
+    if (Flow fl = lifetime_change(m, p); fl != Flow::next) return fl;
     for (u32 c = pl->cell0; c < pl->cell0 + pl->ncells; ++c) m.cells_[c].life = M::Life::after;
     return Flow::next;
   }
@@ -474,7 +489,7 @@ Event Machine::run() {
   if (failed_) return Event::failed;
   if (frames_.empty()) return Event::done;
   for (;;) {
-    if (since_poll_ >= config_.poll_interval) {
+    if (config_.poll_interval && since_poll_ >= config_.poll_interval) {
       since_poll_ = 0;
       return Event::poll;
     }

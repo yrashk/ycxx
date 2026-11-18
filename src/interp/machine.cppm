@@ -43,7 +43,7 @@ struct Config {
   Mode mode = Mode::constant;
   u64 step_limit = u64{1} << 22;  // nodes executed
   u32 depth_limit = 512;          // nested calls ([implimits]: recursive constexpr calls)
-  u32 poll_interval = 4096;       // steps between cancellation polls
+  u32 poll_interval = 4096;       // steps between cancellation polls; 0: never
 };
 
 // A value in a register or a cell. An integer (bool and the character types included) is held
@@ -167,6 +167,7 @@ private:
     QualType inner{};  // pointee or element
     u64 bound = 0;     // array
     u64 leaves = 0;    // cells of an object of this type
+    u64 size = 0;      // bytes ([basic.types.general]); 0 for a function type
     bool is_const = false;
   };
   struct Frame {
@@ -196,6 +197,7 @@ private:
 
   const Shape& shape(QualType q);
   bool similar(QualType a, QualType b);
+  bool accessible_as(QualType object, QualType glvalue);
 
   // ------------------------------------------------------------ paths
 
@@ -212,6 +214,7 @@ private:
   Flow note_access(const Place& p, bool write);
   std::optional<Value> constant(ConstId c, QualType type);
   std::optional<u32> literal_object(ConstId s);
+  i64 offset_of(const Value& p);
 
   // ------------------------------------------------------------ execution
 
@@ -251,7 +254,7 @@ private:
   std::map<u32, Shape> shapes_;
   std::map<u32, Callee> bodies_;
   std::map<u32, std::optional<GlobalVar>> global_info_;
-  std::map<u32, u32> globals_, literals_;
+  std::map<u32, u32> globals_;
   std::vector<Group> groups_;
 
   EntityId wanted_{};
@@ -284,14 +287,17 @@ const Machine::Shape& Machine::shape(QualType q) {
       s.width = ast::width_of(*target_, *b);
       s.is_signed = ast::is_signed(*target_, *b);
       s.leaves = 1;
+      s.size = (*target_)[*b].size;
     } else if (*b == ast::Builtin::nullptr_t) {
       s.kind = Kind::pointer;
       s.leaves = 1;
+      s.size = (*target_)[*b].size;
     }
   } else if (in_->types.is<ast::TPointer>(c)) {
     s.kind = Kind::pointer;
     s.inner = in_->types.get<ast::TPointer>(c).pointee;
     s.leaves = 1;
+    s.size = target_->pointer_size;
   } else if (in_->types.is<ast::TArray>(c)) {
     auto a = in_->types.get<ast::TArray>(c);
     s.kind = Kind::array;
@@ -301,6 +307,7 @@ const Machine::Shape& Machine::shape(QualType q) {
     Shape e = shape(a.elem);
     s.is_const = e.is_const;
     s.leaves = e.leaves * s.bound;
+    s.size = e.size * s.bound;
   } else if (in_->types.is<ast::TFunction>(c)) {
     s.kind = Kind::function;
   }
@@ -316,6 +323,18 @@ bool Machine::similar(QualType a, QualType b) {
   if (sa.kind == Kind::pointer) return sa.inner != QualType{} && sb.inner != QualType{} && similar(sa.inner, sb.inner);
   if (sa.kind == Kind::array) return sa.bound == sb.bound && similar(sa.inner, sb.inner);
   return false;
+}
+
+// [basic.lval]/11: an object is accessed through a glvalue of a similar type or, outside constant
+// evaluation, of its signed or unsigned counterpart.
+bool Machine::accessible_as(QualType object, QualType glvalue) {
+  if (similar(object, glvalue)) return true;
+  if (config_.mode == Mode::constant) return false;
+  auto a = ast::builtin_of(*in_, object), b = ast::builtin_of(*in_, glvalue);
+  if (!a || !b || *a == ast::Builtin::bool_ || *b == ast::Builtin::bool_) return false;
+  const Shape& sa = shape(object);
+  const Shape& sb = shape(glvalue);
+  return sa.kind == Kind::integer && sb.kind == Kind::integer && sa.width == sb.width;
 }
 
 // ------------------------------------------------------------------ paths
@@ -408,7 +427,7 @@ Machine::Flow Machine::locate(const Value& p, std::span<const u64> extra, QualTy
   auto pl = resolve(p, extra, past);
   if (!pl) return fail(Reason::past_end_access);
   if (past) return fail(Reason::past_end_access);
-  if (!similar(pl->type, t)) return fail(Reason::access_type);
+  if (!accessible_as(pl->type, t)) return fail(Reason::access_type);
   out = *pl;
   if (use == Use::lifetime) return Flow::next;
   for (u32 c = pl->cell0; c < pl->cell0 + pl->ncells; ++c) {
@@ -443,8 +462,9 @@ Machine::Flow Machine::note_access(const Place& p, bool write) {
   return Flow::next;
 }
 
+// Each evaluation of a string literal may give a distinct object ([lex.string]/9), so each gets
+// its own, and comparing two of them is unspecified.
 std::optional<u32> Machine::literal_object(ConstId s) {
-  if (auto it = literals_.find(std::to_underlying(s)); it != literals_.end()) return it->second;
   if (!in_->values.is<ast::VString>(s)) return std::nullopt;
   auto str = in_->values.get<ast::VString>(s);
   const Shape a = shape(str.type);
@@ -461,7 +481,6 @@ std::optional<u32> Machine::literal_object(ConstId s) {
     Cell& c = cells_[objects_[o].cell0 + i];
     c = {Life::alive, Fill::value, Value::integer(norm(units[i], e.width, e.is_signed))};
   }
-  literals_.emplace(std::to_underlying(s), o);
   return o;
 }
 
@@ -650,9 +669,24 @@ Machine::Flow Machine::pointer_index(const Value& p, QualType elem, u32& base_pa
   return Flow::next;
 }
 
-// [expr.eq], [expr.rel]: pointers to the same complete object compare by their paths; pointers
-// to different objects are unequal, unless one is past the end of its object (the result is
-// unspecified), and their order is unspecified.
+// The byte offset of an object pointer from the start of its complete object: its address,
+// relative to the object.
+i64 Machine::offset_of(const Value& p) {
+  QualType cur = objects_[p.ref].type;
+  i64 off = 0;
+  for (PathStep st : steps_of(u32(p.bits))) {
+    const Shape& s = shape(cur);
+    off += i64(st.index * shape(s.inner).size);
+    cur = s.inner;
+  }
+  if (p.past) off += i64(shape(cur).size);
+  return off;
+}
+
+// [expr.eq], [expr.rel]: pointers into the same complete object compare by address ([expr.rel]/4:
+// a later element or subobject compares greater). Pointers to different objects are unequal,
+// unless one is past the end of its complete object, or both point into string literal objects,
+// which may overlap ([lex.string]/9): then the result is unspecified, and so is their order.
 Machine::Flow Machine::compare_pointers(Frame& f, NodeId n, ir::Pred pred, const Value& a, const Value& b) {
   using enum ir::Pred;
   bool equality = pred == eq || pred == ne;
@@ -661,46 +695,33 @@ Machine::Flow Machine::compare_pointers(Frame& f, NodeId n, ir::Pred pred, const
     return v.kind == VKind::null || v.kind == VKind::object || v.kind == VKind::function;
   };
   if (!is_ptr(a) || !is_ptr(b)) return fail(Reason::ill_formed);
-  if (a.kind != VKind::object || b.kind != VKind::object || a.ref != b.ref) {
-    if (!equality) {
-      if (a.kind == VKind::null && b.kind == VKind::null) return result(pred == le || pred == ge);
+  if (a.kind == VKind::object && b.kind == VKind::object && a.ref == b.ref) {
+    auto c = offset_of(a) <=> offset_of(b);
+    switch (pred) {
+    case eq: return result(c == 0);
+    case ne: return result(c != 0);
+    case lt: return result(c < 0);
+    case le: return result(c <= 0);
+    case gt: return result(c > 0);
+    case ge: return result(c >= 0);
+    default: return fail(Reason::ill_formed);
+    }
+  }
+  if (!equality) {
+    if (a.kind == VKind::null && b.kind == VKind::null) return result(pred == le || pred == ge);
+    return fail(Reason::unspecified_comparison);
+  }
+  bool same = a.kind == b.kind && (a.kind == VKind::null || a.ref == b.ref);
+  if (!same && a.kind == VKind::object && b.kind == VKind::object) {
+    auto at_end = [&](const Value& p) {
+      i64 size = i64(shape(objects_[p.ref].type).size);
+      return size != 0 && offset_of(p) == size;
+    };
+    if (at_end(a) || at_end(b)) return fail(Reason::unspecified_comparison);
+    if (objects_[a.ref].origin == Origin::literal && objects_[b.ref].origin == Origin::literal)
       return fail(Reason::unspecified_comparison);
-    }
-    bool same = a.kind == b.kind && (a.kind == VKind::null || a.ref == b.ref);
-    if (!same && a.kind == VKind::object && b.kind == VKind::object) {
-      // One past the end of one object may be the address of another ([expr.eq]/3.1).
-      bool pa = false, pb = false;
-      if (!resolve(a, {}, pa) || !resolve(b, {}, pb)) return fail(Reason::ill_formed);
-      if (pa || pb) return fail(Reason::unspecified_comparison);
-    }
-    return result(same == (pred == eq));
   }
-  // The same object: compare addresses along the paths ([expr.rel]/4). An element step orders by
-  // its index; a missing step is index 0 (an array and its first element share their address);
-  // one past a non-array object is after everything in it.
-  std::vector<PathStep> pa = steps_of(u32(a.bits)), pb = steps_of(u32(b.bits));
-  for (const auto& p : {pa, pb})
-    for (PathStep s : p)
-      if (s.step != ir::Step::elem) return unsupported(n);
-  auto key = [](const std::vector<PathStep>& p, bool past) {
-    std::vector<u64> k;
-    for (PathStep s : p) k.push_back(s.index);
-    if (past) k.push_back(~u64{0});
-    return k;
-  };
-  auto ka = key(pa, a.past), kb = key(pb, b.past);
-  ka.resize(std::max(ka.size(), kb.size()));
-  kb.resize(ka.size());
-  auto c = ka <=> kb;
-  switch (pred) {
-  case eq: return result(c == 0);
-  case ne: return result(c != 0);
-  case lt: return result(c < 0);
-  case le: return result(c <= 0);
-  case gt: return result(c > 0);
-  case ge: return result(c >= 0);
-  default: return fail(Reason::ill_formed);
-  }
+  return result(same == (pred == eq));
 }
 
 // ------------------------------------------------------------------ execution

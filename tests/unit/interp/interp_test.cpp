@@ -799,9 +799,109 @@ func {@f} {
   check(interp::message(u.failure) == "the interpreter does not evaluate 'vtable_addr' yet", interp::message(u.failure));
 }
 
+// Regressions from the review of #25's first commit.
+void review_regressions() {
+  // a + LONG_MIN leaves the array; negating the index must not overflow.
+  Run r(R"(
+func {@f} {
+^0(%0: !state, %1: {long}):
+  %2: !state, %3: {int[3]*} = alloc %0 [{int[3]}, automatic, zero]
+  %4: !state = obj.begin %2, %3 [{int[3]}]
+  %5: {int*} = ptr_member %3 [{int}, /e0]
+  %6: {int*} = ptr_add %5, %1 [{int}]
+  %7: {int} = load %4, %6 [{int}, /]
+  ret %4, %7
+}
+)");
+  expect_failure(r.go({i(std::numeric_limits<std::int64_t>::min())}), Reason::pointer_bounds, "a + LONG_MIN");
+
+  // An integral conversion to bool is the boolean conversion: 2 becomes true.
+  Run b(R"(
+func {@b} {
+^0(%0: !state, %1: {int}):
+  %2: {bool} = iconv %1
+  %3: {int} = iconv %2
+  ret %0, %3
+}
+)");
+  expect_value(b.go({i(2)}), 1, "bool(2)");
+
+  // Pointers compare by address: &m[0][3] == &m[1][0]; &m[0][3] is not past m, so it is unequal
+  // to &x; two string literals may overlap.
+  Run c(R"(
+func {@c} {
+^0(%0: !state, %1: {int}):
+  %2: !state, %3: {int[2][3]*} = alloc %0 [{int[2][3]}, automatic, zero]
+  %4: !state, %5: {int*} = alloc %2 [{int}, automatic, zero]
+  %6: {int*} = ptr_member %3 [{int}, /e0/e0]
+  %7: {int} = const [{i3}]
+  %8: {int*} = ptr_add %6, %7 [{int}]
+  %9: {int*} = ptr_member %3 [{int}, /e1/e0]
+  %10: {int} = const [{i0}]
+  %11: {bool} = icmp %1, %10 [eq]
+  cond_br %11 ^1(%4), ^2(%4)
+^1(%12: !state):
+  %13: {bool} = ptr_cmp %8, %9 [eq]
+  %14: {int} = iconv %13
+  ret %12, %14
+^2(%15: !state):
+  %16: {int} = const [{i1}]
+  %17: {bool} = icmp %1, %16 [eq]
+  cond_br %17 ^3(%15), ^4(%15)
+^3(%18: !state):
+  %19: {bool} = ptr_cmp %8, %5 [eq]
+  %20: {int} = iconv %19
+  ret %18, %20
+^4(%21: !state):
+  %22: {cchar[3]*} = const [{s}]
+  %23: {cchar[3]*} = const [{s}]
+  %24: {bool} = ptr_cmp %22, %23 [eq]
+  %25: {int} = iconv %24
+  ret %21, %25
+}
+)");
+  expect_value(c.go({i(0)}), 1, "&m[0][3] == &m[1][0]");
+  expect_value(c.go({i(1)}), 0, "&m[0][3] == &x");
+  expect_failure(c.go({i(2)}), Reason::unspecified_comparison, "\"hi\" == \"hi\"");
+
+  // Ending the lifetime of a global from a constant evaluation modifies it.
+  Run e(R"(
+func {@e} {
+^0(%0: !state):
+  %1: {int*} = global [{@g}]
+  %2: !state = obj.end %0, %1
+  %3: {int} = const [{i0}]
+  ret %2, %3
+}
+)");
+  e.host.globals[std::to_underlying(e.w.entity("g"))] = {e.w.int_t, std::nullopt, false};
+  expect_failure(e.go(), Reason::modify_outside, "obj.end of a global");
+
+  // A zero poll interval never polls.
+  Run l(sum_loop);
+  expect_value(l.go({i(10)}, {.poll_interval = 0}), 55, "poll_interval 0");
+
+  // Runtime mode reads an int through an unsigned glvalue ([basic.lval]/11); constant mode does not.
+  Run u(R"(
+func {@u} {
+^0(%0: !state):
+  %1: !state, %2: {int*} = alloc %0 [{int}, automatic, indeterminate]
+  %3: {int} = const [{i-1}]
+  %4: !state = store %1, %2, %3 [{int}, /]
+  %5: !state = obj.begin %4, %2 [{int}]
+  %6: {uint} = load %5, %2 [{uint}, /]
+  %7: {int} = iconv %6
+  ret %5, %7
+}
+)");
+  expect_value(u.runtime(), -1, "int read as unsigned in runtime mode");
+  expect_failure(u.go(), Reason::access_type, "int read as unsigned in constant mode");
+}
+
 }  // namespace
 
 int main() {
+  review_regressions();
   arithmetic();
   division_and_shifts();
   loops_and_limits();
