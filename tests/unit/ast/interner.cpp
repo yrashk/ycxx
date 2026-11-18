@@ -16,10 +16,10 @@ struct Tree {
 // `{ f(x + 1); return x + 1; }`, tokens: { f ( x + 1 ) ; return x + 1 ; }, offsets from `{`.
 // `reverse` interns the leaves in the other order; fingerprints must not notice.
 Tree build(Interners& in, bool reverse) {
-  QualType int_t = in.types.add<QualType>(seed("int"));
+  QualType int_t = in.intern_type(TBuiltin{Builtin::int_});
   EntityId f_e = in.entities.add<EntityId>(seed("f"));
   EntityId x_e = in.entities.add<EntityId>(seed("x"));
-  ConstId one_c = in.values.add<ConstId>(seed("1"));
+  ConstId one_c = in.intern_value(VInt{int_t, bits_of(std::int64_t{1})});
   ExprInfo rv{int_t, ValueCategory::prvalue, 0};
   NodeId one, x;
   if (reverse) {
@@ -72,7 +72,7 @@ int main() {
   // Re-interning a stored node as a new one, with its lists read from the edge pool itself: the
   // slice is copied out before the pool grows.
   Call stored = a.ast.get<Call>(ta.call);
-  for (int i = 0; i < 64; ++i) a.intern(Literal{s.info, a.values.add<ConstId>(seed(std::to_string(i)))}, 1);
+  for (int i = 0; i < 64; ++i) a.intern(Literal{s.info, a.intern_value(VInt{a.intern_type(TBuiltin{Builtin::int_}), bits_of(std::int64_t{i})})}, 1);
   NodeId moved = a.intern(stored, 7, a.ast.edges());
   check(moved != ta.call && a.ast.children(a.ast.get<Call>(moved).args).size() == 1 &&
             a.ast.children(a.ast.get<Call>(moved).args)[0].id == ta.sum,
@@ -101,7 +101,7 @@ int main() {
   check(!(ms2 == ms) && a.fp(ms2) != a.fp(ms), "!(ms2 == ms) && a.fp(ms2) != a.fp(ms)");
 
   // A handle's fingerprint is its interner's, with cv in a QualType's.
-  QualType t = a.types.add<QualType>(seed("T"));
+  QualType t = a.intern_type(TBuiltin{Builtin::long_});
   check(a.fp(t) != a.fp(with_cv(t, Cv::const_)), "a.fp(t) != a.fp(with_cv(t, Cv::const_))");
   check(a.fp(NodeId::none) == a.fp(EntityId::none), "a.fp(NodeId::none) == a.fp(EntityId::none)");
   return ycxx::unit::result("ast.interner");

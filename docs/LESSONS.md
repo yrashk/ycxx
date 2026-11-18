@@ -171,6 +171,17 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
   - Do: use `native_encoded_string()` for file names passed on, `display_string()` for messages.
   - Learned on #42.
 
+- **A contract predicate sees the parameters as `const`** ([dcl.contract.func], P2900's implicit
+  const-ification). A `pre` that called `is_void(Interners&, …)` did not compile.
+  - Do: give predicate helpers `const&` parameters, and answer them from data that is already
+    computed (`types.canon(q)`), not from functions that may intern.
+  - Learned on #33.
+- **A mutation that changes nothing proves nothing.** On #33 the first mutation of
+  `usual_arithmetic` (`>=` to `>` on rank) was equivalent for the standard integer types, and the
+  suite rightly stayed green.
+  - Do: mutate a branch that some test input must take, and check that the suite turns red.
+  - Learned on #33.
+
 ## Data the front end needs
 
 - **Unicode tables from Python, plus one UCD file.** Python's `unicodedata` (Unicode 17.0 in the
@@ -203,6 +214,17 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
     `-ftime-report` before blaming reflection.
   - Learned on #2's spike.
 
+- **Check generated code against C, not against expectations you wrote.** The back end's first
+  plan widened every narrow argument to 32 bits in `lower`. Apple arm64 does that only for
+  register arguments; on the stack a `char` keeps one byte. That came out of rereading Apple's ABI
+  notes, not out of a test, and the plan's own golden tests would have agreed with the mistake.
+  - Do: link generated functions with a C harness compiled by the bootstrap compiler. The harness
+    computes the expected value with the same C expression and calls across the ABI both ways, with
+    more than 8 arguments and narrow types. One harness covered about 60 functions and thousands
+    of value pairs.
+  - Do: mutate the back end once (swap a pattern's form, flip a calling-convention flag) and see
+    the harness fail.
+  - Learned on #26/#28.
 - **Test a selection's invariant end to end, not just its helper.** The test driver's shard
   helper was unit-tested and correct, but main.py fed each stage a list that depended on earlier
   shards' picks, so shards skipped some tests and doubled others: CI could go green without

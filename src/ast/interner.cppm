@@ -16,6 +16,8 @@ import ycxx.ast.handles;
 import ycxx.ast.schema;
 import ycxx.ast.nodes;
 import ycxx.ast.records;
+import ycxx.ast.types;
+import ycxx.ast.values;
 
 export namespace ycxx::ast {
 
@@ -83,6 +85,14 @@ public:
   }
 
   template <class T>
+  void store(u32 i, const T& v)
+    pre(sizeof(T) == stride_)
+    pre(i < size())
+  {
+    std::memcpy(bytes_.data() + std::size_t(i) * stride_, &v, sizeof(T));
+  }
+
+  template <class T>
   u32 push(const T& v)
     pre(sizeof(T) == stride_)
   {
@@ -140,9 +150,9 @@ private:
 
 // ---------------------------------------------------------------- placeholder interners
 
-// A stand-in for the interners other issues own: tokens and items (#18), entities and types and
-// values (#33). It records a fingerprint per handle and nothing else, so trees can refer to these
-// handles and be fingerprinted before their owners exist. Each owner replaces its member of
+// A stand-in for the interners other issues own: tokens and items (#18), entities (#33). It
+// records a fingerprint per handle and nothing else, so trees can refer to these handles and be
+// fingerprinted before their owners exist. Each owner replaces its member of
 // `Interners` with the real interner, which keeps this `fp` signature.
 class FpTable {
 public:
@@ -169,6 +179,152 @@ public:
 private:
   std::vector<Fp128> fps_;
   std::unordered_map<Fp128, u32, Fp128Hash> table_;
+};
+
+// ---------------------------------------------------------------- types and values
+
+// Storage for an interner whose handle has no room for a kind: `types` and `values` (§5). Values
+// are numbered densely across kinds; per value, its kind, its slot in the kind's pool and its
+// fingerprint. `Interners::intern_type` and `intern_value` are how values get in.
+template <class List>
+class KindTable {
+public:
+  KindTable() : pools_(make_pools<List>()) {}
+
+  u32 size() const { return static_cast<u32>(kinds_.size()); }
+  bool contains(u32 n) const { return n < size(); }
+  u32 kind(u32 n) const
+    pre(contains(n))
+  {
+    return kinds_[n];
+  }
+
+  template <class T>
+    requires(List::template contains<T>)
+  bool is(u32 n) const { return contains(n) && kinds_[n] == List::template index_of<T>(); }
+
+  template <class T>
+    requires(List::template contains<T>)
+  T get(u32 n) const
+    pre(is<T>(n))
+  {
+    return pools_[kinds_[n]].template load<T>(slots_[n]);
+  }
+
+  Fp128 fp(u32 n) const
+    pre(contains(n))
+  {
+    return fps_[n];
+  }
+
+  std::optional<u32> find(Fp128 f) const {
+    if (auto it = table_.find(f); it != table_.end()) return it->second;
+    return std::nullopt;
+  }
+
+  template <class T>
+    requires(List::template contains<T>)
+  u32 insert(const T& v, Fp128 f)
+    pre(!find(f))
+  {
+    constexpr u32 k = List::template index_of<T>();
+    u32 n = size();
+    slots_.push_back(pools_[k].push(v));
+    kinds_.push_back(static_cast<u8>(k));
+    fps_.push_back(f);
+    table_.emplace(f, n);
+    return n;
+  }
+
+  // Rewrites value `n` in place with content of the same fingerprint (compaction renumbers the
+  // lists a value holds).
+  template <class T>
+    requires(List::template contains<T>)
+  void replace(u32 n, const T& v)
+    pre(is<T>(n))
+  {
+    pools_[kinds_[n]].store(slots_[n], v);
+  }
+
+private:
+  std::array<RawPool, List::size> pools_;
+  std::vector<u8> kinds_;
+  std::vector<u32> slots_;
+  std::vector<Fp128> fps_;
+  std::unordered_map<Fp128, u32, Fp128Hash> table_;
+};
+
+// The `types` interner (§5.1, §5.2): the kind table and `canon[]`, the canonical form of each
+// node, filled when it is interned. Accessors take a `QualType` and ignore its cv.
+class Types {
+public:
+  u32 size() const { return table_.size(); }
+  bool contains(QualType q) const { return table_.contains(type_node_of(q)); }
+  u32 kind(QualType q) const { return table_.kind(type_node_of(q)); }
+  template <class T>
+    requires is_type_kind<T>
+  bool is(QualType q) const { return table_.template is<T>(type_node_of(q)); }
+  template <class T>
+    requires is_type_kind<T>
+  T get(QualType q) const { return table_.template get<T>(type_node_of(q)); }
+
+  Fp128 fp(QualType q) const { return mix(table_.fp(type_node_of(q)), std::to_underlying(cv_of(q))); }
+
+  // The canonical form of `q`'s node, cv included (`typedef const int A;`). `q`'s own cv is not
+  // applied; `Interners::canonical` does that.
+  QualType canon(QualType q) const
+    pre(contains(q))
+  {
+    return canon_[type_node_of(q)];
+  }
+
+  KindTable<TypeKinds>& table() { return table_; }
+  const KindTable<TypeKinds>& table() const { return table_; }
+
+  // `canon` is the node's canonical form, or none for a canonical node, which is its own.
+  template <class T>
+    requires is_type_kind<T>
+  QualType insert(const T& v, Fp128 f, std::optional<QualType> canon) {
+    QualType q = make_qual_type(table_.insert(v, f));
+    canon_.push_back(canon.value_or(q));
+    return q;
+  }
+
+private:
+  KindTable<TypeKinds> table_;
+  std::vector<QualType> canon_;
+};
+
+// The `values` interner (§5.5).
+class Values {
+public:
+  u32 size() const { return table_.size(); }
+  bool contains(ConstId c) const { return c == ConstId::none || table_.contains(std::to_underlying(c)); }
+  u32 kind(ConstId c) const { return table_.kind(std::to_underlying(c)); }
+  template <class T>
+    requires is_value_kind<T>
+  bool is(ConstId c) const { return c != ConstId::none && table_.template is<T>(std::to_underlying(c)); }
+  template <class T>
+    requires is_value_kind<T>
+  T get(ConstId c) const { return table_.template get<T>(std::to_underlying(c)); }
+
+  Fp128 fp(ConstId c) const { return c == ConstId::none ? none_fp : table_.fp(std::to_underlying(c)); }
+
+  // Whether `c` has free template parameters: a `VDep*` value (§5.5).
+  // BOOTSTRAP: contracts: a table, not `dispatch`: GCC 16.2 ICEs (gimplify_expr) on dispatch's
+  // `pre` instantiated from here (STATUS).
+  bool is_dependent(ConstId c) const {
+    static constexpr auto dependent_kinds = []<u32... I>(std::integer_sequence<u32, I...>) {
+      return std::array{is_dependent_kind<typename ValueKinds::template at<I>>...};
+    }(std::make_integer_sequence<u32, ValueKinds::size>{});
+    return c != ConstId::none && dependent_kinds[kind(c)];
+  }
+
+  KindTable<ValueKinds>& table() { return table_; }
+  const KindTable<ValueKinds>& table() const { return table_; }
+
+private:
+  KindTable<ValueKinds> table_;
 };
 
 // ---------------------------------------------------------------- tree nodes
@@ -348,8 +504,8 @@ struct Interners {
   FpTable items;     // placeholder until #18
   FpTable entities;  // placeholder until #33
   Ast ast;
-  FpTable types;   // placeholder until #33
-  FpTable values;  // placeholder until #33
+  Types types;
+  Values values;
   Seqs seqs;
 
   // The fingerprint of any handle: Merkle, through the interner that holds it.
@@ -400,6 +556,86 @@ struct Interners {
     return ast.insert(stored, width, f);
   }
 
+  // ---------------------------------------------------------------- types (§5.1, §5.2)
+
+  // Interns a type node with top-level `cv` (applied by `qualified`). Its handles must be
+  // interned. A new node's canonical form is computed first, interning it if it differs: a sugar
+  // node's is the canonical form of its `[[=canonical]]` member, any other node's is the node with
+  // canonical children, which is the node itself when its children are canonical. This is the raw
+  // constructor: ycxx.ast.typeops builds references, arrays and function types with the
+  // construction-time rules of §5.4.
+  template <class T>
+    requires is_type_kind<T>
+  QualType intern_type(const T& v, Cv cv = Cv::none) {
+    for_each_ref(v, [this]<class H>(const H& h) {
+      // BOOTSTRAP: contracts: in a lambda's contract predicate GCC 16.2 takes `this` to be the
+      // closure, so a predicate naming a member goes through a local (STATUS).
+      bool interned = true;
+      if constexpr (std::is_same_v<H, QualType>) interned = types.contains(h);
+      else if constexpr (std::is_same_v<H, ConstId>) interned = values.contains(h);
+      else if constexpr (is_seq_id<H>) interned = seqs.contains(h);
+      contract_assert(interned);
+    });
+    Fp128 f = fingerprint(v, {});
+    QualType q;
+    if (auto hit = types.table().find(f)) {
+      q = make_qual_type(*hit);
+      bool same_content = types.is<T>(q) && same(types.get<T>(q), {}, v, {});
+      contract_assert(same_content);  // fingerprints are identity (§9.2)
+    } else {
+      std::optional<QualType> c = canonical_form(v);
+      q = types.insert(v, f, c);
+    }
+    return qualified(q, cv);
+  }
+
+  // `q` with `cv` added (§5.2): cv on a reference or function type, directly or through a typedef,
+  // is dropped ([dcl.ref], [dcl.fct]); cv on an array node goes to its elements
+  // ([basic.type.qualifier]). Sugar for an array keeps the cv, and the canonical form, the array
+  // of cv-qualified elements, is interned now, so `canonical` stays a read. A cv-qualified
+  // `QualType` is made here (or by `intern_type`), never by the raw bit operation `with_cv`.
+  QualType qualified(QualType q, Cv cv) {
+    if (cv == Cv::none) return q;
+    QualType c = types.canon(q);
+    if (types.is<TLRef>(c) || types.is<TRRef>(c) || types.is<TFunction>(c)) return q;
+    if (types.is<TArray>(q)) {
+      TArray a = types.get<TArray>(q);
+      a.elem = qualified(a.elem, cv);
+      return intern_type(a);
+    }
+    QualType r = with_cv(q, cv);
+    if (types.is<TArray>(c)) qualified(c, cv_of(r));  // the canonical form, for `canonical`
+    return r;
+  }
+
+  // The canonical form of `q`, in O(1): a read of canon[] and of the cv-qualified array that
+  // `qualified` interned.
+  QualType canonical(QualType q) const { return canonical_qualified(types.canon(q), cv_of(q)); }
+
+  bool same_type(QualType a, QualType b) const { return canonical(a) == canonical(b); }
+
+  // ---------------------------------------------------------------- values (§5.5)
+
+  // Interns a constant. Its handles must be interned; a type in it is canonical.
+  template <class T>
+    requires is_value_kind<T>
+  ConstId intern_value(const T& v) {
+    for_each_ref(v, [this]<class H>(const H& h) {
+      if constexpr (std::is_same_v<H, QualType>) {
+        bool is_canonical = types.contains(h) && types.canon(h) == h;  // BOOTSTRAP: as above
+        contract_assert(is_canonical);
+      }
+    });
+    Fp128 f = fingerprint(v, {});
+    if (auto hit = values.table().find(f)) {
+      ConstId c{*hit};
+      bool same_content = values.is<T>(c) && same(values.get<T>(c), {}, v, {});
+      contract_assert(same_content);
+      return c;
+    }
+    return ConstId{values.table().insert(v, f)};
+  }
+
   // Interns a list. Its elements' handles must be interned.
   template <class T>
     requires is_seq_element<T>
@@ -434,6 +670,41 @@ struct Interners {
   }
 
 private:
+  // `qualified(c, cv)` for a canonical `c`, which construction has already interned.
+  QualType canonical_qualified(QualType c, Cv cv) const {
+    if (cv == Cv::none) return c;
+    if (types.is<TLRef>(c) || types.is<TRRef>(c) || types.is<TFunction>(c)) return c;
+    if (!types.is<TArray>(c)) return with_cv(c, cv);
+    TArray a = types.get<TArray>(c);
+    a.elem = canonical_qualified(a.elem, cv);
+    auto hit = types.table().find(fingerprint(a, {}));
+    contract_assert(hit.has_value());  // interned by `qualified` (§5.2)
+    return make_qual_type(*hit);
+  }
+
+  // The canonical form of a node about to be interned, or none if it is its own (§5.2).
+  template <class T>
+  std::optional<QualType> canonical_form(const T& v) {
+    if constexpr (is_sugar_kind<T>) {
+      constexpr auto m = canonical_member(^^T);
+      return canonical(v.[:m:]);
+    } else {
+      T c = v;
+      for_each_ref(c, [this]<class H>(H& h) {
+        if constexpr (std::is_same_v<H, QualType>) {
+          h = canonical(h);
+        } else if constexpr (std::is_same_v<H, SeqId<QualType>>) {
+          // Parameter types have no top-level cv ([dcl.fct]); a typedef can bring it back.
+          std::vector<QualType> xs = seqs.elements(h);
+          for (QualType& x : xs) x = std::is_same_v<T, TFunction> ? without_cv(canonical(x)) : canonical(x);
+          h = intern_seq(std::span<const QualType>(xs));
+        }
+      });
+      if (same(c, {}, v, {})) return std::nullopt;
+      return intern_type(c);
+    }
+  }
+
   static consteval std::meta::info member_for(std::meta::info h) {
     bool seq = std::meta::has_template_arguments(h) && std::meta::template_of(h) == ^^SeqId;
     interner which = seq ? interner::seqs : interner_of(h);

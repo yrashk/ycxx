@@ -1,0 +1,102 @@
+# The AArch64 pattern table (optimization design section 5, in the rule language of section 3.2; #28).
+# The file is ASCII: it is embedded as `char`s.
+#
+#   pattern NAME : L2-TREE => FORM OPERAND... ; FORM OPERAND...   where PRED(?x), ...   cost N
+#
+# The left side is an L2 tree. `(op ...)` matches a node of that op; its operands follow, `!state`
+# operands left out. For an op with an immediate (const, symbol, alloca, icmp) the first operand
+# binds it: (const ?c) binds the constant, (const -1) matches only -1, (icmp ?p ?a ?b) binds the
+# predicate. `?x` matches any value, which reaches the instruction in a register. A variable bound
+# twice must match the same value.
+#
+# The right side is instructions, by the form names of isa.cppm. Operands: `?d` the result, `?t0`
+# to `?t3` temporaries, a bound variable (a register, immediate, symbol, condition or frame object,
+# as the form's operand wants), `#N` a literal, `-?c` a negated constant, `msb(?x)` the index of
+# the top bit of ?x's type, `zr`, `sp`, a condition name, and `^0`, `^1` the successors.
+#
+# Conditions: uimm12(?c) is 0..4095; nuimm12(?c) is -4095..-1; uoff(?c) is an offset an unsigned
+# scaled load or store of the root's access size reaches; nonneg(?c) is 0..2^24; local(?e) is an
+# entity this unit defines, extern(?e) one it does not; wide(?x) is a type of 32 or 64 bits,
+# narrow(?x) a narrower one; signed(?p) and unsigned(?p) sort predicates (eq and ne are unsigned).
+#
+# The maximal-munch selector takes, at each tree root, the matching pattern that covers the most
+# nodes, then the cheapest (cost defaults to the number of instructions), then the first listed.
+# Calls, returns and parameters are not here: they follow the calling convention (abi.cppm).
+
+# Leaves. They are rematerialized at each use rather than kept in a slot.
+pattern const        : (const ?c)                       => MOVi ?d ?c
+pattern symbol       : (symbol ?e)                      => ADRP ?t0 ?e ; ADDlo ?d ?t0 ?e        where local(?e)
+pattern symbol_got   : (symbol ?e)                      => ADRPgot ?t0 ?e ; LDRgot ?d ?t0 ?e    where extern(?e)
+pattern alloca       : (alloca ?o)                      => ADDfi ?d ?o #0
+
+# Integer arithmetic.
+pattern add_imm      : (add ?a (const ?c))              => ADDri ?d ?a ?c                       where uimm12(?c)
+pattern add_nimm     : (add ?a (const ?c))              => SUBri ?d ?a -?c                      where nuimm12(?c)
+pattern madd         : (add (mul ?a ?b) ?c)             => MADD ?d ?a ?b ?c
+pattern madd_r       : (add ?c (mul ?a ?b))             => MADD ?d ?a ?b ?c
+pattern add          : (add ?a ?b)                      => ADDrr ?d ?a ?b
+pattern sub_imm      : (sub ?a (const ?c))              => SUBri ?d ?a ?c                       where uimm12(?c)
+pattern msub         : (sub ?c (mul ?a ?b))             => MSUB ?d ?a ?b ?c
+pattern neg_sub      : (sub (const 0) ?a)               => SUBrr ?d zr ?a
+pattern sub          : (sub ?a ?b)                      => SUBrr ?d ?a ?b
+pattern neg          : (neg ?a)                         => SUBrr ?d zr ?a
+pattern mul          : (mul ?a ?b)                      => MADD ?d ?a ?b zr
+pattern sdiv         : (sdiv ?a ?b)                     => SDIV ?d ?a ?b                        where wide(?a)
+pattern udiv         : (udiv ?a ?b)                     => UDIV ?d ?a ?b                        where wide(?a)
+pattern srem         : (srem ?a ?b)                     => SDIV ?t0 ?a ?b ; MSUB ?d ?t0 ?b ?a   where wide(?a)
+pattern urem         : (urem ?a ?b)                     => UDIV ?t0 ?a ?b ; MSUB ?d ?t0 ?b ?a   where wide(?a)
+pattern shl          : (shl ?a ?b)                      => LSLV ?d ?a ?b
+pattern lshr         : (lshr ?a ?b)                     => LSRV ?d ?a ?b                        where wide(?a)
+pattern ashr         : (ashr ?a ?b)                     => ASRV ?d ?a ?b                        where wide(?a)
+pattern not          : (xor ?a (const -1))              => ORNrr ?d zr ?a
+pattern and          : (and ?a ?b)                      => ANDrr ?d ?a ?b
+pattern or           : (or ?a ?b)                       => ORRrr ?d ?a ?b
+pattern xor          : (xor ?a ?b)                      => EORrr ?d ?a ?b
+
+# Narrow operands are extended to 32 bits where the upper bits matter (a register holding an
+# i1, i8 or i16 leaves the bits above its width unspecified).
+pattern sdiv_narrow  : (sdiv ?a ?b)  => SBFM ?t0 ?a #0 msb(?a) ; SBFM ?t1 ?b #0 msb(?b) ; SDIV ?d ?t0 ?t1     where narrow(?a)
+pattern udiv_narrow  : (udiv ?a ?b)  => UBFM ?t0 ?a #0 msb(?a) ; UBFM ?t1 ?b #0 msb(?b) ; UDIV ?d ?t0 ?t1     where narrow(?a)
+pattern srem_narrow  : (srem ?a ?b)  => SBFM ?t0 ?a #0 msb(?a) ; SBFM ?t1 ?b #0 msb(?b) ; SDIV ?t2 ?t0 ?t1 ; MSUB ?d ?t2 ?t1 ?t0   where narrow(?a)
+pattern urem_narrow  : (urem ?a ?b)  => UBFM ?t0 ?a #0 msb(?a) ; UBFM ?t1 ?b #0 msb(?b) ; UDIV ?t2 ?t0 ?t1 ; MSUB ?d ?t2 ?t1 ?t0   where narrow(?a)
+pattern lshr_narrow  : (lshr ?a ?b)  => UBFM ?t0 ?a #0 msb(?a) ; LSRV ?d ?t0 ?b                               where narrow(?a)
+pattern ashr_narrow  : (ashr ?a ?b)  => SBFM ?t0 ?a #0 msb(?a) ; ASRV ?d ?t0 ?b                               where narrow(?a)
+
+# Compares and selects.
+pattern icmp_imm     : (icmp ?p ?a (const ?c))          => SUBSri zr ?a ?c ; CSET ?d ?p         where wide(?a), uimm12(?c)
+pattern icmp         : (icmp ?p ?a ?b)                  => SUBSrr zr ?a ?b ; CSET ?d ?p         where wide(?a)
+pattern icmp_snarrow : (icmp ?p ?a ?b)  => SBFM ?t0 ?a #0 msb(?a) ; SBFM ?t1 ?b #0 msb(?b) ; SUBSrr zr ?t0 ?t1 ; CSET ?d ?p   where narrow(?a), signed(?p)
+pattern icmp_unarrow : (icmp ?p ?a ?b)  => UBFM ?t0 ?a #0 msb(?a) ; UBFM ?t1 ?b #0 msb(?b) ; SUBSrr zr ?t0 ?t1 ; CSET ?d ?p   where narrow(?a), unsigned(?p)
+pattern select_cmp   : (select (icmp ?p ?x ?y) ?a ?b)   => SUBSrr zr ?x ?y ; CSEL ?d ?a ?b ?p   where wide(?x)
+pattern select       : (select ?c ?a ?b)                => TST1 ?c ; CSEL ?d ?a ?b ne
+
+# Width changes. A truncation is a copy: the bits above the new width become unspecified.
+pattern zext         : (zext ?a)                        => UBFM ?d ?a #0 msb(?a)
+pattern sext         : (sext ?a)                        => SBFM ?d ?a #0 msb(?a)
+pattern trunc        : (trunc ?a)                       => MOVrr ?d ?a
+
+# Pointers.
+pattern ptradd_imm   : (ptradd ?p (const ?c))           => ADDri ?d ?p ?c                       where uimm12(?c)
+pattern ptradd_frame : (ptradd (alloca ?o) (const ?c))  => ADDfi ?d ?o ?c                       where nonneg(?c)
+pattern ptradd       : (ptradd ?p ?o)                   => ADDrr ?d ?p ?o
+pattern ptr2int      : (ptr2int ?p)                     => MOVrr ?d ?p
+pattern int2ptr      : (int2ptr ?i)                     => MOVrr ?d ?i
+
+# Loads and stores. The access size is the loaded or stored type's.
+pattern load_frame   : (load (alloca ?o))                         => LDRfi ?d ?o #0
+pattern load_frame_c : (load (ptradd (alloca ?o) (const ?c)))     => LDRfi ?d ?o ?c             where nonneg(?c)
+pattern load_sym     : (load (symbol ?e))                         => ADRP ?t0 ?e ; LDRlo ?d ?t0 ?e   where local(?e)
+pattern load_off     : (load (ptradd ?p (const ?c)))              => LDRui ?d ?p ?c             where uoff(?c)
+pattern load         : (load ?p)                                  => LDRui ?d ?p #0
+pattern store_frame  : (store (alloca ?o) ?v)                     => STRfi ?v ?o #0
+pattern store_frame_c: (store (ptradd (alloca ?o) (const ?c)) ?v) => STRfi ?v ?o ?c             where nonneg(?c)
+pattern store_sym    : (store (symbol ?e) ?v)                     => ADRP ?t0 ?e ; STRlo ?v ?t0 ?e   where local(?e)
+pattern store_off    : (store (ptradd ?p (const ?c)) ?v)          => STRui ?v ?p ?c             where uoff(?c)
+pattern store        : (store ?p ?v)                              => STRui ?v ?p #0
+
+# Control. A conditional branch to a successor that takes arguments goes through an edge block.
+pattern br           : (br)                                   => B ^0
+pattern cond_br_cmpi : (cond_br (icmp ?p ?a (const ?c)))      => SUBSri zr ?a ?c ; Bcc ?p ^0 ; B ^1    where wide(?a), uimm12(?c)
+pattern cond_br_cmp  : (cond_br (icmp ?p ?a ?b))              => SUBSrr zr ?a ?b ; Bcc ?p ^0 ; B ^1    where wide(?a)
+pattern cond_br      : (cond_br ?c)                           => TST1 ?c ; Bcc ne ^0 ; B ^1
+pattern unreachable  : (unreachable)                          => BRK #1

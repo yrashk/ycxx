@@ -13,6 +13,8 @@ import ycxx.ast.handles;
 import ycxx.ast.schema;
 import ycxx.ast.nodes;
 import ycxx.ast.records;
+import ycxx.ast.types;
+import ycxx.ast.values;
 import ycxx.ast.interner;
 
 export namespace ycxx::ast {
@@ -68,6 +70,18 @@ public:
     dispatch_each<SeqElements>([&]<class T>(std::type_identity<T>) {
       remap_.seqs_[SeqElements::index_of<T>()].assign(ins.seqs.count<T>(), Remap::dead);
     });
+  }
+
+  // Types and constants are never evicted (§9.6), so the lists they hold are roots.
+  void mark_interned() {
+    for (u32 n = 0; n < ins_->types.size(); ++n)
+      dispatch<TypeKinds>(ins_->types.table().kind(n), [&]<class T>(std::type_identity<T>) {
+        mark(ins_->types.table().get<T>(n));
+      });
+    for (u32 n = 0; n < ins_->values.size(); ++n)
+      dispatch<ValueKinds>(ins_->values.table().kind(n), [&]<class T>(std::type_identity<T>) {
+        mark(ins_->values.table().get<T>(n));
+      });
   }
 
   template <class V>
@@ -137,10 +151,22 @@ public:
     });
     ins.ast = std::move(ast);
     ins.seqs = std::move(seqs);
+    rewrite_in_place<TypeKinds>(ins.types.table());
+    rewrite_in_place<ValueKinds>(ins.values.table());
     return std::move(remap_);
   }
 
 private:
+  template <class List>
+  void rewrite_in_place(KindTable<List>& table) {
+    for (u32 n = 0; n < table.size(); ++n)
+      dispatch<List>(table.kind(n), [&]<class T>(std::type_identity<T>) {
+        T v = table.template get<T>(n);
+        remap_.rewrite(v);
+        table.replace(n, v);
+      });
+  }
+
   template <class List, class F>
   static void dispatch_each(F&& f) {
     [&]<u32... I>(std::integer_sequence<u32, I...>) {
@@ -181,12 +207,14 @@ private:
   std::vector<std::pair<u32, u32>> seqs_;
 };
 
-// Compacts `ins.ast` and `ins.seqs`. `roots(c)` calls `c.mark(v)` for every live value held
+// Compacts `ins.ast` and `ins.seqs`; types and constants are roots, and the lists they hold are
+// rewritten in place. `roots(c)` calls `c.mark(v)` for every live value held
 // outside the interners; afterwards each holder applies the returned `Remap` to those values.
 template <class Roots>
   requires std::invocable<Roots&, Compactor&>
 Remap compact(Interners& ins, Roots&& roots) {
   Compactor c(ins);
+  c.mark_interned();
   roots(c);
   return c.finish(ins);
 }

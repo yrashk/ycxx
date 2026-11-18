@@ -7,9 +7,13 @@ target_sources(ycxxc_ast PUBLIC FILE_SET CXX_MODULES FILES
   schema.cppm
   nodes.cppm
   records.cppm
+  types.cppm
+  values.cppm
+  target.cppm
   interner.cppm
   builder.cppm
   red.cppm
   compact.cppm
+  typeops.cppm
   ast.cppm)
 target_link_libraries(ycxxc_ast PUBLIC ycxxc_hash ycxxc_options)
