@@ -146,8 +146,15 @@ class Expander {
   void prologue() {
     put(Form::STPpre, true, {enc(R::fp), enc(R::lr), enc(R::sp), -std::int64_t(cc_.frame_record)});
     put(Form::ADDri, true, {enc(R::fp), enc(R::sp), 0});
-    std::uint64_t hi = fr_.size >> 12, lo = fr_.size & 0xfff;
-    if (fr_.size >> 24) error = "a frame larger than 16 MiB is not supported";
+    std::uint64_t rest = fr_.size;
+    if (rest >> 24) error = "a frame larger than 16 MiB is not supported";
+    // A page at a time, touching each, so a large frame cannot step over the guard page.
+    while (rest > cc_.page) {
+      put(Form::SUBri12, true, {enc(R::sp), enc(R::sp), std::int64_t(cc_.page >> 12)});
+      put(Form::STRui, true, {enc(R::zr), enc(R::sp), 0}, 3);
+      rest -= cc_.page;
+    }
+    std::uint64_t hi = rest >> 12, lo = rest & 0xfff;
     if (hi) put(Form::SUBri12, true, {enc(R::sp), enc(R::sp), std::int64_t(hi)});
     if (lo) put(Form::SUBri, true, {enc(R::sp), enc(R::sp), std::int64_t(lo)});
   }

@@ -209,9 +209,9 @@ Program hello() {
   return {R"(
 func @6 {
 ^0(%s: !state):
-  %g: T9 = global [@100]
-  %p: T6 = ptr_member %g [T6, /e0]
-  %s1: !state, %r: T1 = call %s, %p [@101]
+  %g: T9 = const [#2130706688]
+  %e: T6 = ptr_member %g [T5, /e0]
+  %s1: !state, %r: T1 = call %s, %e [@101]
   %z: T1 = const [#0]
   ret %s1, %z
 }
@@ -646,11 +646,13 @@ Gen harness() {
          "int t_bump(void)", "t_bump() == 41 && t_bump() == 42 && g_counter == 42");
   custom(g, "addr", "^0(%s: !state):\n  %g: T7 = global [@950]\n  ret %s, %g\n", "int* t_addr(void)",
          "t_addr() == &g_counter");
+  // A frame larger than a page (probed on the way down), and offsets past a scaled imm12.
   custom(g, "far",
-         "^0(%s0: !state, %i: T1):\n  %s1: !state, %p: T7 = alloc %s0 [T8, automatic, zero]\n"
-         "  %s2: !state, %big: T7 = alloc %s1 [T11, automatic, indeterminate]\n"
-         "  %s3: !state = store %s2, %big, %i [T1, /]\n  %v: T1 = load %s3, %big [T1, /]\n  ret %s3, %v\n",
-         "int t_far(int)", "t_far(77) == 77");
+         "^0(%s0: !state, %c: T5):\n  %s1: !state, %p: T7 = alloc %s0 [T8, automatic, zero]\n"
+         "  %s2: !state, %big: T21 = alloc %s1 [T20, automatic, indeterminate]\n"
+         "  %s3: !state = store %s2, %big, %c [T5, /e39999]\n  %v: T5 = load %s3, %big [T5, /e39999]\n"
+         "  %w: T5 = load %s3, %p [T5, /e15]\n  %r: T5 = add %v, %w\n  ret %s3, %r\n",
+         "signed char t_far(signed char)", "t_far(77) == 77 && t_far(-3) == -3");
   return g;
 }
 

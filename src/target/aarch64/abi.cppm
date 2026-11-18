@@ -4,12 +4,15 @@
 //   - x9–x15 are caller-saved temporaries, x16/x17 the intra-procedure-call scratch registers,
 //     x18 is reserved by the platform, x19–x28 are callee-saved, x29 is the frame pointer and x30
 //     the link register;
-//   - the stack pointer stays 16-byte aligned, and the frame record (x29, x30) is kept, so x29
-//     always points at the caller's frame record;
+//   - the stack pointer stays 16-byte aligned, and every function keeps a frame record (x29, x30):
+//     x29 points at this function's record, which holds the caller's x29;
+//   - the stack grows a page at a time: a frame larger than a page touches each page as it goes
+//     down, so it cannot step over the guard page;
 //   - Apple: arguments on the stack take their natural size and alignment, not 8-byte slots;
 //   - Apple: the caller extends an integer argument narrower than 32 bits to 32 bits when it goes
-//     in a register (on the stack it keeps its size), and the callee extends a narrow result
-//     (`lower` makes that explicit, LowerConfig::min_result_bits).
+//     in a register (on the stack it keeps its size). A narrow result is returned extended to 32
+//     bits (`lower`, LowerConfig::min_result_bits), and the caller reads only its own bits, so
+//     either side's rule for results is met.
 // Variadic calls (Apple passes every variadic argument on the stack) are not in the α subset.
 export module ycxx.target.aarch64:abi;
 
@@ -34,6 +37,7 @@ export struct CallingConvention {
   // The allocator's registers: values live in stack slots and pass through these.
   std::array<R, 4> scratch{R::x9, R::x10, R::x11, R::x12};
   R ip0 = R::x16;  // address arithmetic for far frame offsets
+  std::uint32_t page = 16384;  // stack probing step (the arm64 macOS page size)
 };
 
 export constexpr CallingConvention apple_arm64{};

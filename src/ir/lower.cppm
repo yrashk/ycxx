@@ -42,11 +42,20 @@ export struct SubObject {
   QualType type{};
 };
 
+// A constant's value: an integral, bool or null pointer value, or the address of an entity's
+// object (a variable, a string literal) plus a byte offset. An integer converts to one.
+export struct ConstValue {
+  std::int64_t bits = 0;            // the value, or the offset from `base`
+  std::optional<EntityId> base{};   // an address constant
+  constexpr ConstValue(std::int64_t v = 0) : bits(v) {}
+  constexpr ConstValue(EntityId e, std::int64_t offset) : bits(offset), base(e) {}
+};
+
 export template <class L>
 concept layout_source = requires(const L& l, QualType t, PathStep s, ConstId c) {
   { l.type(t) } -> std::convertible_to<TypeLayout>;
   { l.step(t, s) } -> std::convertible_to<SubObject>;     // [class.mem], [dcl.array]
-  { l.constant(c) } -> std::convertible_to<std::int64_t>;  // an integral, bool or null pointer value
+  { l.constant(c) } -> std::convertible_to<ConstValue>;
 };
 
 // Target facts `lower` reads (the `config` query).
@@ -236,7 +245,13 @@ class Lowering {
       case Op::const_: {
         auto t = result_type();
         if (!t) return fail(t.error());
-        out(n, 0, constant(*t, layout_.constant(ConstId(std::uint32_t(imms[0])))));
+        ConstValue c = layout_.constant(ConstId(std::uint32_t(imms[0])));
+        if (c.base) {  // the address of an object, as a string literal's is
+          if (*t != T::ptr) return fail("an address constant must have a pointer type");
+          out(n, 0, add_offset(emit1(Op2::symbol, T::ptr, {}, {raw(*c.base)}), std::uint64_t(c.bits)));
+          return {};
+        }
+        out(n, 0, constant(*t, c.bits));
         return {};
       }
       case Op::global:
@@ -418,7 +433,8 @@ class Lowering {
         out(n, 0, b_.peek().result(c));
         for (std::uint32_t i = 1; i < nd.nres; ++i) {
           ValueId v = b_.peek().result(c, i);
-          if (narrow[i - 1]) v = resize(v, *narrow[i - 1], false);
+          // Only the result's own bits are read: a bool is bit 0, whatever the callee left above it.
+          if (narrow[i - 1]) v = emit1(Op2::trunc, *narrow[i - 1], {v});
           out(n, i, v);
         }
         return {};

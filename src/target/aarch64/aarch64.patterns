@@ -98,5 +98,5 @@ pattern store        : (store ?p ?v)                              => STRui ?v ?p
 pattern br           : (br)                                   => B ^0
 pattern cond_br_cmpi : (cond_br (icmp ?p ?a (const ?c)))      => SUBSri zr ?a ?c ; Bcc ?p ^0 ; B ^1    where wide(?a), uimm12(?c)
 pattern cond_br_cmp  : (cond_br (icmp ?p ?a ?b))              => SUBSrr zr ?a ?b ; Bcc ?p ^0 ; B ^1    where wide(?a)
-pattern cond_br      : (cond_br ?c)                           => TBNZ ?c #0 ^0 ; B ^1
+pattern cond_br      : (cond_br ?c)                           => TST1 ?c ; Bcc ne ^0 ; B ^1
 pattern unreachable  : (unreachable)                          => BRK #1

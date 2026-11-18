@@ -258,8 +258,13 @@ class Selector {
     std::uint32_t stack = 0;
     for (std::size_t i = cc_.int_args.size(); i < args.size(); ++i) {
       std::uint32_t at = stack_slot(stack, args[i].second);
-      emit({Form::STRui, true, log2_bytes(args[i].second), 3,
-            {MOp::vreg(args[i].first), MOp::preg(R::sp), MOp::imm(at)}});
+      std::uint32_t v = args[i].first;
+      if (args[i].second == Type::i1) {  // a bool's byte is 0 or 1; bits above bit 0 are unspecified
+        std::uint32_t x = new_vreg(Type::i8);
+        emit({Form::UBFM, false, 3, 4, {MOp::vreg(x), MOp::vreg(v), MOp::imm(0), MOp::imm(0)}});
+        v = x;
+      }
+      emit({Form::STRui, true, log2_bytes(args[i].second), 3, {MOp::vreg(v), MOp::preg(R::sp), MOp::imm(at)}});
     }
     m_.outgoing = std::max(m_.outgoing, (stack + cc_.stack_align - 1) / cc_.stack_align * cc_.stack_align);
     for (std::size_t i = 0; i < args.size() && i < cc_.int_args.size(); ++i) {
