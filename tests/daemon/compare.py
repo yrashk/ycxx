@@ -34,7 +34,7 @@ known_seen = set()
 
 # Compared in every run, sampled or not: the deepest recursion of tests/own, which a daemon thread
 # with a smaller stack than the in-process main thread's did not survive (#178).
-ALWAYS = {'templates/f1-review-nesting-limit.reject.cpp'}
+ALWAYS = {'templates/f1-review-nesting-limit.reject.cpp', 'templates/c2-review-nesting-limit.reject.cpp'}
 
 
 def sampled(test):

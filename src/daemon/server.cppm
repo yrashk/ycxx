@@ -50,9 +50,10 @@ namespace {
 
 using Clock = std::chrono::steady_clock;
 
-// A request's thread has the stack the client's main thread has in-process: the daemon inherits
-// the client's RLIMIT_STACK (#178).
-const std::size_t request_stack = main_stack_size();
+// A request's thread stack (#178): fixed, so the daemon does not depend on the stack limit of the
+// client that started it, and far above a main thread's default (8 MiB), so a request that fits
+// in-process fits here. Only address space is reserved. Deeper recursion needs a guard (#187).
+constexpr std::size_t request_stack = std::size_t{256} << 20;
 
 void log(std::string_view what) {
   auto now = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch());
