@@ -53,7 +53,7 @@ the tests start counting.
 | stage | runs |
 |---|---|
 | policy | the driver's self-test (`tests/driver/selftest.py`), then `tools/check-policy` if it exists |
-| build | `tools/build -j N` if it exists (#4; it also runs the bootstrap smoke test in `tests/bootstrap`, which is not a suite of the driver) |
+| build | `tools/build -j N` if it exists (#4; it also runs ctest: the bootstrap smoke test in `tests/bootstrap` and the unit tests in `tests/unit`, which are not suites of the driver) |
 | failed | tests that failed in the last run of this branch (of `main` for a new branch) |
 | affected | tests affected by the change since `--base` (default: merge-base with `origin/main`) |
 | core | the core oracles: `tests/draft`, `tests/own` |

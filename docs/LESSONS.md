@@ -203,6 +203,14 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
     nothing lost) through the real entry point, with state that makes the stages interact.
   - Learned on #5.
 
+- **A verifier's tests need malformed inputs, not only round trips.** #23's round-trip tests passed
+  every op, and the one review still found two P1s in the verifier: a terminator's results accepted
+  on a second path into the normal successor, and an out-of-bounds read on a malformed body. Each
+  showed up with a five-line hand-written body.
+  - Do: for every rule a verifier enforces, write one body that breaks it and check the error. Do
+    the same for every guard the parser relies on.
+  - Learned on #23.
+
 - **Let the oracles' output drive bulk-classification rules.** The draft-example extractor's first
   rules for "OK", "error" and "fragment" were guesses. Counting the oracles' error messages and
   the comments on the lines they hit found the real annotation forms ("ambiguous", "access
