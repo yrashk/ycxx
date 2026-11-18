@@ -591,6 +591,19 @@ void verify_table_other_cases() {
   check(!ran.ok() && ran.executed == 1 && ran.mismatches.empty(), "work done while checking fails the check");
 }
 
+// A Db without a pool used by one thread at a time, but not always the same one (a daemon
+// answering each connection on its own thread).
+void one_thread_at_a_time() {
+  Db db;
+  db.set<In>(0, 4);
+  db.set<In>(1, 5);
+  db.set<In>(2, 6);
+  std::int64_t a = 0, b = 0;
+  std::jthread([&] { a = db.get<Echo>(0); }).join();
+  std::jthread([&] { b = db.get<Grouped>(0); }).join();
+  check(a == 4 && b == 4 + 5 + 6, "requests from two threads, one after the other");
+}
+
 }  // namespace
 
 int main() {
@@ -610,5 +623,6 @@ int main() {
   incremental_equals_cold();
   verify_table_catches_a_missed_dependency();
   verify_table_other_cases();
+  one_thread_at_a_time();
   return ycxx::unit::result("engine");
 }
