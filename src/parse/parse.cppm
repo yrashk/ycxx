@@ -215,9 +215,11 @@ public:
       const items::Item& it = items_->items[j];
       if (in_class_[j] || (ns_of_[j] != path && eff_ns_[j] != path)) continue;
       for (const items::DeclName& n : it.names)
-        // A scoped enumeration's enumerators are in its own scope ([dcl.enum]/11).
+        // A scoped enumeration's enumerators are in its own scope ([dcl.enum]/11); the declarators
+        // after its braces are not.
         if (n.name == name && !(n.flags & items::name_flag::friend_) &&
-            !(it.kind == ItemKind::enum_def && n.ordinal > 0 && !(n.flags & items::name_flag::enumerator)))
+            !(it.kind == ItemKind::enum_def && n.ordinal > 0 && !(n.flags & items::name_flag::enumerator) &&
+              it.begin + n.offset < it.brace_end))
           r.push_back({ids_[j], ast::make_decl_ord(ast::DeclClass::syntactic, n.ordinal)});
     }
     for (const Directive& d : directives_)
@@ -783,6 +785,18 @@ private:
       if (!ps_.expect(Tk::semi)) bad();
       return;
     }
+    // An alias-declaration ([dcl.typedef]/2): `using T = type-id;`.
+    if (ps_.is(Tk::kw_using) && ps_.kind(1) == Tk::identifier && ps_.kind(2) == Tk::equal) {
+      ps_.bump();
+      NameId n = ps_.name_of(ps_.tok());
+      u32 at = ps_.pos();
+      ps_.bump();
+      ps_.bump();
+      auto t = ps_.type_id();
+      if (!t || !declare_alias(n, at, *t)) return bad();
+      if (!ps_.expect(Tk::semi)) bad();
+      return;
+    }
     if ((ps_.is(Tk::identifier) && ps_.kind(1) == Tk::coloncolon) || ps_.is(Tk::coloncolon)) {
       u32 next = 0;
       auto sc = ps_.nested_name(0, next);
@@ -834,6 +848,58 @@ private:
     }
   }
 
+  // A typedef-name or alias-declaration at namespace scope ([dcl.typedef]). In its scope it may
+  // only redeclare a typedef-name, class or enumeration as the type it already is (/5, /6).
+  bool declare_alias(NameId name, u32 at, QualType type) {
+    sema::Types& types = s_.types();
+    auto clashes = [&](const ast::DeclSema& o) {
+      bool same_type = (o.kind == ast::DeclKind::type_alias || o.kind == ast::DeclKind::class_ || o.kind == ast::DeclKind::enum_) &&
+                       types.canonical(o.type) == types.canonical(type);
+      return !same_type;
+    };
+    for (DeclId p : q_.visible_decls(name))
+      if (auto ds = p_->decl_sema(p); ds && ds->entity != EntityId::none && same_scope(*ds) && clashes(*ds)) {
+        s_.diag(at, Diag::conflicting_declaration, name);
+        return false;
+      }
+    for (const auto& o : s_.own)
+      if (o.name == name && clashes(o.sema)) {
+        s_.diag(at, Diag::conflicting_declaration, name);
+        return false;
+      }
+    ast::DeclSema sem = class_decl(s_.world().entities.entity({sema::EntityKind::type_alias, name, {}, LangLinkage::cxx,
+                                                                 ast::Linkage::none, {}, ns_entity()}),
+                                   false);
+    sem.kind = ast::DeclKind::type_alias;
+    sem.type = type;
+    sem.linkage = ast::Linkage::none;
+    decls_.push_back(sem);
+    s_.own.push_back({name, sem});
+    p_->declared(sem, k_);
+    return true;
+  }
+
+  // `typedef class-specifier X …;` with an unnamed class or enumeration: X names it for linkage
+  // purposes ([dcl.typedef]/9), and so is its name here; the declarator after the braces.
+  std::optional<std::pair<NameId, u32>> typedef_name_after_braces() {
+    u32 back = it_->begin + ps_.pos();  // `seek` takes a region index, `pos` is in the item
+    ps_.seek(it_->brace_end);
+    std::optional<std::pair<NameId, u32>> r;
+    if (ps_.is(Tk::identifier)) r = std::pair(ps_.name_of(ps_.tok()), ps_.pos());
+    ps_.seek(back);
+    return r;
+  }
+
+  // Whether a typedef-name of this scope names `n` as another type than `t`, which a class or
+  // enumeration named `n` would clash with ([basic.scope.scope]/4, [dcl.typedef]/6).
+  bool alias_clash(NameId n, QualType t) {
+    for (DeclId p : q_.visible_decls(n))
+      if (auto ds = p_->decl_sema(p); ds && ds->kind == ast::DeclKind::type_alias && same_scope(*ds) &&
+                                      s_.types().canonical(ds->type) != s_.types().canonical(t))
+        return true;
+    return false;
+  }
+
   // The entity of the namespace-scope class named `n` (§4.3: scope, name).
   EntityId class_entity(NameId n) {
     return s_.world().entities.entity({sema::EntityKind::class_, n, {}, LangLinkage::cxx, ast::Linkage::external, {}, ns_entity()});
@@ -865,19 +931,21 @@ private:
   // them.
   void class_definition() {
     u32 at = ps_.pos();
+    bool td = ps_.accept(Tk::kw_typedef);  // `typedef class-specifier declarators;` ([dcl.typedef])
     Tk key = ps_.kind();
     if (key == Tk::kw_union || (key != Tk::kw_struct && key != Tk::kw_class)) {
-      s_.diag(at, Diag::not_supported, key);  // unions, and specifiers before the class-key
+      s_.diag(ps_.pos(), Diag::not_supported, key);  // unions, and other specifiers before the class-key
       return bad();
     }
     ps_.bump();
-    if (!ps_.is(Tk::identifier)) {
+    auto named = td ? typedef_name_after_braces() : std::nullopt;
+    if (!ps_.is(Tk::identifier) && !named) {
       s_.diag(ps_.pos(), Diag::not_supported, ps_.kind());  // unnamed classes, attributes
       return bad();
     }
-    NameId name = ps_.name_of(ps_.tok());
-    u32 name_at = ps_.pos();
-    ps_.bump();
+    NameId name = ps_.is(Tk::identifier) ? ps_.name_of(ps_.tok()) : named->first;
+    u32 name_at = ps_.is(Tk::identifier) ? ps_.pos() : named->second;
+    if (ps_.is(Tk::identifier)) ps_.bump();
     if (!ps_.is(Tk::l_brace)) {
       s_.diag(ps_.pos(), Diag::not_supported, ps_.kind());  // base classes, `final`
       return bad();
@@ -888,6 +956,10 @@ private:
         s_.diag(name_at, Diag::class_redefinition, name);
         return bad();
       }
+    if (alias_clash(name, s_.types().class_type(class_entity(name)))) {
+      s_.diag(name_at, Diag::conflicting_declaration, name);
+      return bad();
+    }
     ast::DeclSema sem = class_decl(class_entity(name), true);
     decls_.push_back(sem);
     s_.own.push_back({name, sem});
@@ -900,6 +972,7 @@ private:
     spec.begin = at;
     spec.type = sem.type;
     spec.has_type = true;
+    spec.is_typedef = td;
     do {
       parse::Declarator d = ps_.declarator(spec.type, false);
       if (!d.ok || !d.named || !declare(spec, d, LangLinkage::cxx, false, false)) {
@@ -916,15 +989,21 @@ private:
   void enum_definition(EntityId cls) {
     sema::Types& types = s_.types();
     u32 at = ps_.pos();
+    bool td = cls == EntityId::none && ps_.accept(Tk::kw_typedef);  // `typedef enum … { … } E;`
+    if (!ps_.is(Tk::kw_enum)) {
+      s_.diag(ps_.pos(), Diag::not_supported, ps_.kind());
+      return bad();
+    }
     ps_.bump();
     bool scoped = ps_.accept(Tk::kw_class) || ps_.accept(Tk::kw_struct);
-    if (!ps_.is(Tk::identifier)) {
+    auto named = td ? typedef_name_after_braces() : std::nullopt;
+    if (!ps_.is(Tk::identifier) && !named) {
       s_.diag(ps_.pos(), Diag::not_supported, ps_.kind());  // unnamed enumerations
       return bad();
     }
-    NameId name = ps_.name_of(ps_.tok());
-    u32 name_at = ps_.pos();
-    ps_.bump();
+    NameId name = ps_.is(Tk::identifier) ? ps_.name_of(ps_.tok()) : named->first;
+    u32 name_at = ps_.is(Tk::identifier) ? ps_.pos() : named->second;
+    if (ps_.is(Tk::identifier)) ps_.bump();
     std::optional<QualType> fixed;
     if (ps_.accept(Tk::colon)) {
       // [dcl.enum]/2: a fixed underlying type, an integral type.
@@ -948,6 +1027,10 @@ private:
     EntityId e = s_.world().entities.entity(
         {sema::EntityKind::enum_, name, {}, LangLinkage::cxx, ast::Linkage::external, {}, cls != EntityId::none ? cls : ns_entity()});
     QualType t = types.enum_type(e);
+    if (cls == EntityId::none && alias_clash(name, t)) {
+      s_.diag(name_at, Diag::conflicting_declaration, name);
+      return bad();
+    }
     // Built here and published once complete (#156); the list sees it as it grows.
     sema::EnumRec er{scoped, fixed.has_value(), fixed.value_or(s_.builtin(sema::Builtin::int_)), {}};
     p_->defining_enum_ = {e, &er};
@@ -1031,6 +1114,10 @@ private:
                                                                                                                  : Builtin::long_;
       er.underlying = s_.builtin(u);
     }
+    // Past the closing brace an enumerator has the enumeration's type ([dcl.enum]/5), in the
+    // declarators that follow too.
+    for (auto& o : s_.own)
+      if (o.sema.kind == ast::DeclKind::enumerator && s_.world().entities.rec(o.sema.entity).scope == e) o.sema.type = t;
     for (std::size_t i = 0; i < er.enumerators.size(); ++i) {
       er.enumerators[i].value = s_.world().values.integer(*er.underlying, sema::u64(values[i]));
       p_->set_constant(er.enumerators[i].entity, er.enumerators[i].value, k_);
@@ -1043,6 +1130,7 @@ private:
     spec.begin = at;
     spec.type = t;
     spec.has_type = true;
+    spec.is_typedef = td;
     do {
       parse::Declarator d = ps_.declarator(spec.type, false);
       if (!d.ok || !d.named || cls != EntityId::none || !declare(spec, d, LangLinkage::cxx, false, false)) {
@@ -1475,6 +1563,18 @@ private:
   bool declare(const DeclSpec& spec, parse::Declarator d, LangLinkage lang, bool explicit_lang,
                bool is_function_def) {
     sema::Types& types = s_.types();
+    if (spec.is_typedef) {
+      if (is_function_def) {  // [dcl.typedef]/1: a typedef declares no function definition
+        s_.diag(spec.begin, Diag::typedef_definition);
+        return false;
+      }
+      if (d.qualified || d.unknown_bound) {  // [dcl.typedef]; arrays of unknown bound are not supported yet
+        if (d.qualified) s_.diag(d.name_at, Diag::conflicting_declaration, d.name);
+        else s_.diag(d.name_at, Diag::not_supported, Tk::l_square);
+        return false;
+      }
+      return declare_alias(d.name, d.name_at, d.type);
+    }
     u32 ord = static_cast<u32>(decls_.size());
     // `T a[] = {…}`: the bound from the list ([dcl.array]/8), parsed here and used below.
     std::unique_ptr<sema::Braced> early;
@@ -1618,7 +1718,7 @@ private:
       s_.current_class = s_.world().entities.rec(sem.entity).scope;
     } else if (!prior.empty()) {
       const ast::DeclSema& p = prior.back();
-      if ((p.kind == ast::DeclKind::function) != fn) {
+      if ((p.kind == ast::DeclKind::function) != fn || p.kind == ast::DeclKind::type_alias) {
         s_.diag(d.name_at, Diag::conflicting_declaration, d.name);
         return false;
       }

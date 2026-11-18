@@ -605,10 +605,12 @@ private:
     Item& it = out_.items[k];
     u32 s = start_of(k);
     bool friend_ = false;
+    bool typedef_ = false;  // `typedef struct { … } T;`: the declarators are typedef-names
     u32 key = s;
     while (key < it.brace_begin && kind(key) != Tk::kw_class && kind(key) != Tk::kw_struct &&
            kind(key) != Tk::kw_union && kind(key) != Tk::kw_enum) {
       friend_ = friend_ || kind(key) == Tk::kw_friend;
+      typedef_ = typedef_ || kind(key) == Tk::kw_typedef;
       ++key;
     }
     bool is_enum = kind(key) == Tk::kw_enum;
@@ -630,6 +632,8 @@ private:
         }
       }
     }
+    // `typedef struct { … } T;`: the class has T for its name ([dcl.typedef]/9), as sema names it.
+    if (head == none && typedef_ && kind(it.brace_end) == Tk::identifier) head = it.brace_end;
     if (head != none) {
       if (qual != none) {
         it.qualifier_begin = qual;
@@ -658,7 +662,7 @@ private:
     }
     // Declarators after the body: `struct S { … } s, *p;`.
     if (kind(it.brace_end) != Tk::semi && it.brace_end < it.end) {
-      declarators(k, it.brace_end, it.end, Flags{.definition = true});
+      declarators(k, it.brace_end, it.end, Flags{.type = typedef_, .definition = !typedef_});
     }
   }
 
