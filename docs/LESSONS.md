@@ -117,7 +117,23 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
     bug report, and it shows where the fix belongs.
   - Learned on #4.
 
+- **GCC 16.2 module bugs that fail silently or late.** A defaulted friend `operator==` in an
+  exported class segfaults the importer; `pre` on a function template is silently dropped when
+  the template is instantiated through an import. Both are in STATUS's workaround list.
+  - Do: test that a contract fires (a violation-handler test, as `unit.engine_contract`), not
+    only that it compiles. Reduce a module ICE to two files with `g++-16 -fmodules` first.
+  - Learned on #14.
+
 ## Evidence and tests
+
+- **Fuzz incremental == cold on every derived output, diagnostics included.** The engine's
+  values, dependency lists and executions matched cold runs from the start, but `diags_of` was
+  wrong in 119 of 300 edits: pruning by `has_diags` missed a backdated cell whose subgraph gained
+  diagnostics, and a backdated cell whose dependency list changed. The design had argued the
+  pruning in prose. A mutation check (drop one recorded dependency) confirmed the fuzz bites.
+  - Do: compare every output kind against a fresh `Db`, and check "nothing executes" for every
+    cell the cold run executed. Mutate the engine once to see the check fail.
+  - Learned on #14.
 
 - **A `std::tuple` over a long type list is a compile-time trap with GCC 16.** The AST spike stored
   240 node kinds as `std::tuple<std::vector<Ts>...>`; `std::get` on it cost over 50 s of front-end
