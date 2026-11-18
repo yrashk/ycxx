@@ -167,8 +167,9 @@ std::filesystem::path object_name(const std::string& source) {
 
 // Compiles one translation unit through the session's queries; nullopt after reporting its
 // errors. With `-fsyntax-only` or `-E`, an object with no content.
-std::optional<obj::object> compile_unit(Done& d, pp::Host& host, pipeline::Session& session, pipeline::TuId tu,
-                                        const std::string& path, Options::Stop stop) {
+std::optional<obj::object> compile_unit(Done& d, const Request& r, const pp::Config& config, pp::Host& host,
+                                        pipeline::Session& session, pipeline::TuId tu, const std::string& path,
+                                        Options::Stop stop) {
   auto text = host.read(path);
   if (!text) {
     std::format_to(std::back_inserter(d.err), "ycxx: error: cannot read '{}'\n", path);
@@ -186,7 +187,7 @@ std::optional<obj::object> compile_unit(Done& d, pp::Host& host, pipeline::Sessi
     if (errors) return std::nullopt;
     return obj::object{};
   }
-  session.set_source(tu, path, *text, object_name(path).native_encoded_string());
+  session.set_source(tu, path, *text, object_name(path).native_encoded_string(), r.cwd, config);
   Renderer out(d.err, path, *text);
   const pipeline::FrontResult& front = session.get<pipeline::TuFront>(tu);
   for (const pipeline::Message& m : front.messages) {
@@ -236,7 +237,8 @@ Done run(const Request& r, pp::Host& host, pipeline::Session& session, const Sto
     fail(d, opts.error());
     return d;
   }
-  pp::configure(pp::with_system_dirs(opts->pp), host);
+  const pp::Config config = pp::with_system_dirs(opts->pp);
+  pp::configure(config, host);
   const pp::Session::Stats before = pp::session().stats;
   const engine::Stats engine_before = session.db().stats();
   bool failed = false;
@@ -248,7 +250,7 @@ Done run(const Request& r, pp::Host& host, pipeline::Session& session, const Sto
       return d;
     }
     const pipeline::TuId tu{k};
-    auto o = compile_unit(d, host, session, tu, s, opts->stop);
+    auto o = compile_unit(d, r, config, host, session, tu, s, opts->stop);
     if (!o) {
       failed = true;
       continue;

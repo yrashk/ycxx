@@ -17,9 +17,23 @@ class TypeFacts {
   ast::Interners& interners() const { return *in_; }
   const ast::Target& target() const { return *target_; }
 
-  ast::QualType canonical(ast::QualType q) const { return ast::without_cv(in_->canonical(q)); }
+  // A reference is the pointer that implements it ([dcl.ref]).
+  ast::QualType canonical(ast::QualType q) const {
+    if (is_reference(q)) return ast::without_cv(in_->canonical(ref_pointer(q)));
+    return ast::without_cv(in_->canonical(q));
+  }
+  bool is_reference(ast::QualType q) const { return ast::is_reference(*in_, q); }
+  ast::QualType referee(ast::QualType q) const {
+    ast::QualType c = in_->types.canon(q);
+    return in_->canonical(in_->types.is<ast::TLRef>(c) ? in_->types.get<ast::TLRef>(c).referee : in_->types.get<ast::TRRef>(c).referee);
+  }
+  std::uint64_t bound(ast::QualType q) const {
+    ast::ConstId b = in_->types.get<ast::TArray>(in_->types.canon(q)).bound;
+    return b == ast::ConstId::none ? 0 : in_->values.get<ast::VInt>(b).bits.lo;
+  }
 
   TypeClass classify(ast::QualType q) const {
+    if (is_reference(q)) return TypeClass::pointer;
     ast::QualType c = in_->types.canon(q);
     if (auto b = ast::builtin_of(*in_, c)) {
       if (*b == ast::Builtin::void_) return TypeClass::void_;
@@ -30,6 +44,7 @@ class TypeFacts {
     if (in_->types.is<ast::TPointer>(c)) return TypeClass::pointer;
     if (in_->types.is<ast::TArray>(c)) return TypeClass::array;
     if (in_->types.is<ast::TFunction>(c)) return TypeClass::function;
+    if (in_->types.is<ast::TClass>(c)) return TypeClass::record;
     return TypeClass::other;
   }
 
@@ -44,12 +59,24 @@ class TypeFacts {
   ast::QualType element(ast::QualType q) const {
     return in_->canonical(in_->types.get<ast::TArray>(in_->types.canon(q)).elem);
   }
-  ast::QualType pointer_to(ast::QualType q) { return ast::pointer_to(*in_, in_->canonical(q)); }
+  ast::QualType pointer_to(ast::QualType q) {
+    if (is_reference(q)) return ast::pointer_to(*in_, ref_pointer(q));
+    return ast::pointer_to(*in_, in_->canonical(q));
+  }
   ast::QualType return_type(ast::QualType q) const {
     return canonical(in_->types.get<ast::TFunction>(in_->types.canon(q)).ret);
   }
   ast::QualType int_type() { return ast::builtin(*in_, ast::Builtin::int_); }
   ast::QualType ptrdiff_type() { return ast::builtin(*in_, target_->ptrdiff_type); }
+
+ private:
+  // The pointer type that implements reference type `q`, interned when the reference was: a
+  // reference's referee pointer is interned by whoever made the reference type, or here.
+  ast::QualType ref_pointer(ast::QualType q) const {
+    return ast::pointer_to(*in_, referee(q));
+  }
+
+ public:
   ast::ConstId int_constant(ast::QualType q, std::int64_t v) { return ast::int_value(*in_, *target_, canonical(q), v); }
   ast::ConstId null_constant(ast::QualType) { return in_->intern_value(ast::VNullptr{}); }
 

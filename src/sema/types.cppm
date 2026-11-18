@@ -49,7 +49,7 @@ constexpr std::string_view spelling(Builtin b) {
 
 // ---------------------------------------------------------------- types
 
-enum class TypeKind : u8 { builtin, pointer, array, function, other };
+enum class TypeKind : u8 { builtin, pointer, array, function, class_, reference, other };
 
 // The canonical form of a type, read out by value.
 struct TypeRec {
@@ -60,6 +60,9 @@ struct TypeRec {
   std::vector<QualType> params;
   bool variadic = false;
   LangLinkage linkage = LangLinkage::cxx;
+  EntityId entity = EntityId::none;  // a class's
+  Cv fn_cv = Cv::none;               // a member function type's cv-qualifier-seq
+  bool rvalue_ref = false;           // a reference's kind; `inner` is what it refers to
 };
 
 class Types {
@@ -72,9 +75,13 @@ public:
     return ast::array_of(*ins_, target, elem, ast::int_value(*ins_, target, Builtin::unsigned_long, i64(bound)));
   }
   // The parameters are adjusted by #33's `function_type` ([dcl.fct]).
-  QualType function(QualType ret, std::span<const QualType> params, bool variadic, LangLinkage linkage) {
-    return ast::function_type(*ins_, ret, params, {.variadic = variadic, .linkage = linkage});
+  QualType function(QualType ret, std::span<const QualType> params, bool variadic, LangLinkage linkage,
+                    Cv cv = Cv::none) {
+    return ast::function_type(*ins_, ret, params, {.variadic = variadic, .cv = cv, .linkage = linkage});
   }
+  QualType class_type(EntityId c) { return ins_->intern_type(ast::TClass{c}); }
+  QualType lvalue_ref(QualType t) { return ast::lvalue_ref_to(*ins_, t); }
+  QualType rvalue_ref(QualType t) { return ast::rvalue_ref_to(*ins_, t); }
 
   TypeRec rec(QualType q) const {
     const ast::Types& t = ins_->types;
@@ -98,6 +105,14 @@ public:
       r.params = ins_->seqs.elements(f.params);
       r.variadic = f.variadic != 0;
       r.linkage = f.linkage;
+      r.fn_cv = f.cv;
+    } else if (t.is<ast::TClass>(c)) {
+      r.kind = TypeKind::class_;
+      r.entity = t.get<ast::TClass>(c).entity;
+    } else if (t.is<ast::TLRef>(c) || t.is<ast::TRRef>(c)) {
+      r.kind = TypeKind::reference;
+      r.rvalue_ref = t.is<ast::TRRef>(c);
+      r.inner = r.rvalue_ref ? t.get<ast::TRRef>(c).referee : t.get<ast::TLRef>(c).referee;
     }
     return r;
   }
@@ -122,6 +137,21 @@ public:
   bool is_pointer(QualType q) const { return ast::is_pointer(*ins_, q); }
   bool is_function(QualType q) const { return ast::is_function(*ins_, q); }
   bool is_array(QualType q) const { return ast::is_array(*ins_, q); }
+  bool is_class(QualType q) const { return ins_->types.is<ast::TClass>(ins_->types.canon(q)); }
+  bool is_reference(QualType q) const { return ast::is_reference(*ins_, q); }
+  // The type an expression naming a reference has ([expr.type]): what it refers to.
+  QualType referee(QualType q) const { return is_reference(q) ? rec(q).inner : q; }
+  // The class of a class type.
+  EntityId class_of(QualType q) const
+    pre(is_class(q))
+  {
+    return ins_->types.get<ast::TClass>(ins_->types.canon(q)).entity;
+  }
+  // [basic.types.general]: arithmetic, enumeration, pointer, pointer-to-member and std::nullptr_t
+  // types, cv-qualified or not.
+  bool is_scalar(QualType q) const {
+    return is_arithmetic(q) || is_pointer(q) || is(q, Builtin::nullptr_t);
+  }
   // [basic.types.general]: an object type is not a function, reference or void type.
   bool is_object(QualType q) const { return !is_function(q) && !is_void(q) && !ast::is_reference(*ins_, q); }
   QualType pointee(QualType q) const
@@ -132,6 +162,8 @@ public:
 
   // The type as it would be written, for diagnostics.
   std::string spell(QualType q) const { return spell(q, ""); }
+  // How a class is named in diagnostics; set by the world that knows the entities.
+  std::function<std::string(EntityId)> class_name;
 
   Fp128 fp(QualType q) const { return ins_->fp(q); }
 
@@ -156,8 +188,18 @@ private:
       std::string ps;
       for (std::size_t i = 0; i < r.params.size(); ++i) ps += (i ? ", " : "") + spell(r.params[i]);
       if (r.variadic) ps += r.params.empty() ? "..." : ", ...";
-      return spell(r.inner, inner + "(" + ps + ")");
+      std::string q = (std::to_underlying(r.fn_cv) & 1) ? " const" : "";
+      if (std::to_underlying(r.fn_cv) & 2) q += " volatile";
+      return spell(r.inner, inner + "(" + ps + ")" + q);
     }
+    case TypeKind::reference: {
+      std::string p = std::string(r.rvalue_ref ? "&&" : "&") + inner;
+      TypeKind k = kind(r.inner);
+      if (k == TypeKind::array || k == TypeKind::function) p = "(" + p + ")";
+      return spell(r.inner, p);
+    }
+    case TypeKind::class_:
+      return cvs + (class_name ? class_name(r.entity) : "<class>") + (inner.empty() || inner[0] == '[' ? "" : " ") + inner;
     case TypeKind::other: return "<type>";
     }
     return {};
@@ -199,6 +241,10 @@ public:
   ConstId null_pointer(QualType) { return ins_->intern_value(ast::VNullptr{}); }
   // A declared object or function as the base of an address (§5.5).
   ConstId entity(EntityId e) { return ins_->intern_value(ast::VEntity{e}); }
+  // An array or class object, from its elements' values in order ([dcl.init.aggr]).
+  ConstId aggregate(QualType t, std::span<const ConstId> elems) {
+    return ins_->intern_value(ast::VAggregate{ast::without_cv(ins_->canonical(t)), ins_->intern_seq(elems)});
+  }
 
   ValueRec rec(ConstId c) const {
     const ast::Values& v = ins_->values;
@@ -231,12 +277,13 @@ private:
 
 // ---------------------------------------------------------------- entities (stand-in for #33)
 
-enum class EntityKind : u8 { function, variable };
+// `data_member` is a non-static data member ([class.mem]).
+enum class EntityKind : u8 { function, variable, class_, data_member, constructor, destructor };
 
 // The structure behind an entity id (§4.3): for a function `(scope, name, canonical type)`, with
 // `::` as the scope of a function with C language linkage ([dcl.link]); for a variable with
 // external linkage `(scope, name)`; for an entity with internal linkage, also its first
-// declaration. The α subset has only the global namespace as a scope.
+// declaration. `scope` is the enclosing class, or none for the global namespace.
 struct EntityRec {
   EntityKind kind = EntityKind::function;
   NameId name{};
@@ -244,6 +291,7 @@ struct EntityRec {
   LangLinkage lang = LangLinkage::cxx;
   ast::Linkage linkage = ast::Linkage::external;
   DeclId first{};  // internal linkage only
+  EntityId scope = EntityId::none;
 };
 
 class Entities {
@@ -254,8 +302,10 @@ public:
     Fp128 f = ast::seed("ycxx.sema.Entity");
     f = ast::mix(f, std::to_underlying(r.kind));
     f = ast::mix(f, ins_->names.fp(r.name));
+    if (r.scope != EntityId::none) f = ast::mix(f, ins_->entities.fp(r.scope));
     // A variable's type is not part of its identity; a function's is ([basic.link]).
-    if (r.kind == EntityKind::function) f = ast::mix(f, types_->fp(types_->canonical(r.type)));
+    if (r.kind == EntityKind::function || r.kind == EntityKind::constructor || r.kind == EntityKind::destructor)
+      f = ast::mix(f, types_->fp(types_->canonical(r.type)));
     f = ast::mix(f, std::to_underlying(r.linkage));
     if (r.linkage == ast::Linkage::internal)
       f = ast::mix(ast::mix(f, ins_->items.fp(r.first.item)), std::to_underlying(r.first.ord));
@@ -286,14 +336,97 @@ private:
   std::vector<bool> known_;     // which handles have a record
 };
 
+// ---------------------------------------------------------------- classes (stand-in for #33)
+
+// A non-static data member ([class.mem]).
+struct FieldRec {
+  NameId name{};
+  QualType type{};
+  EntityId entity = EntityId::none;
+  // Its default member initializer's value ([class.mem.general]), or none. The front end keeps
+  // only those that are constants of scalar type so far (#86).
+  ConstId init = ConstId::none;
+  bool dmi = false;  // it has a default member initializer, constant or not
+};
+
+// What `class_def(C)` (ast.md §3.6) says of a class that member lookup and the layout need, kept
+// by class entity. A class is complete once its definition has been analysed
+// ([class.mem.general]); completeness at a point is the parser's question (`Program`).
+// A member function ([class.mfct]) or static data member ([class.static.data]): its declaration
+// in the class, which a qualified definition outside it redeclares.
+struct MemberDeclRec {
+  NameId name{};
+  EntityId entity = EntityId::none;
+  QualType type{};
+  DeclId decl{};
+  bool is_function = false;
+  bool is_static = false;
+  bool is_ctor = false;
+  bool is_dtor = false;
+  bool is_deleted = false;
+};
+
+struct ClassRec {
+  bool defined = false;
+  std::vector<FieldRec> fields;        // in declaration order
+  std::vector<MemberDeclRec> members;  // member functions and static data members
+  // Special members ([special]): whether a constructor is user-declared; the destructor and the
+  // copy constructor when they are not trivial (user-declared, or implicit and synthesized),
+  // else none; whether the copy constructor is deleted.
+  bool user_ctors = false;
+  EntityId destructor = EntityId::none;
+  EntityId copy_ctor = EntityId::none;
+  bool copy_deleted = false;
+};
+
+class Classes {
+public:
+  explicit Classes(ast::Interners& ins, Types& types) : ins_(&ins), types_(&types) {}
+
+  ClassRec& rec(EntityId c) { return recs_[std::to_underlying(c)]; }
+  const ClassRec* find(EntityId c) const {
+    auto it = recs_.find(std::to_underlying(c));
+    return it == recs_.end() ? nullptr : &it->second;
+  }
+  bool is_defined(EntityId c) const {
+    const ClassRec* r = find(c);
+    return r && r->defined;
+  }
+
+  // The destructor that ends a `t`, none if trivial; for an array, its elements' ([class.dtor]).
+  EntityId destructor_of(QualType t) const {
+    TypeRec r = types_->rec(t);
+    if (r.kind == TypeKind::array) return destructor_of(r.inner);
+    const ClassRec* c = r.kind == TypeKind::class_ ? find(r.entity) : nullptr;
+    return c ? c->destructor : EntityId::none;
+  }
+  // Whether a `t`'s copy constructor is not trivial ([class.copy.ctor]/11), and whether it is
+  // deleted.
+  std::pair<bool, bool> copy_of(QualType t) const {
+    TypeRec r = types_->rec(t);
+    if (r.kind == TypeKind::array) return copy_of(r.inner);
+    const ClassRec* c = r.kind == TypeKind::class_ ? find(r.entity) : nullptr;
+    if (!c) return {false, false};
+    return {c->copy_ctor != EntityId::none, c->copy_deleted};
+  }
+
+private:
+  ast::Interners* ins_;
+  Types* types_;
+  std::map<u32, ClassRec> recs_;
+};
+
 // What the front end shares process-wide (§9.1): the AST core's interners, and sema's views.
 struct World {
   ast::Interners& ins;
   Types types{ins};
   Values values{ins, types};
   Entities entities{ins, types};
+  Classes classes{ins, types};
 
-  explicit World(ast::Interners& i) : ins(i) {}
+  explicit World(ast::Interners& i) : ins(i) {
+    types.class_name = [this](EntityId e) { return std::string(ins.names.spelling(entities.rec(e).name)); };
+  }
   World(const World&) = delete;
 };
 

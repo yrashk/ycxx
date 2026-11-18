@@ -24,6 +24,14 @@ in [GitHub issues](https://github.com/yrashk/ycxx/issues) and the
     `if`, `while`, `do`, `for`, `break` and `continue`; the arithmetic, bitwise, shift,
     comparison, logical, conditional and assignment operators; string literals; and
     `extern "C"` calls into libSystem (`puts`, `putchar`).
+  - Structs and classes with data members (2026-11-18): `.` and `->`, pointers to and arrays of
+    structs, aggregate initialization (`S s = {1, 2};`, `S s{…}`, nested braces, brace elision,
+    designated initializers, `int a[] = {…}`), constant default member initializers, copies and
+    assignment, and namespace-scope structs with constant initializers. Member functions (in and
+    out of the class, `const`, static), `this`, and static data members. Constructors and
+    destructors (RAII: destructors run at every block exit, `return`, `break` and `continue`),
+    temporaries, references, and overloading by exact match, promotion and conversion. Not yet:
+    passing or returning a class by value, inheritance.
   - Constant evaluation, by ycxx's own interpreter of its IR: `constexpr` and `consteval`
     functions and variables, `constinit`, `static_assert` and `if consteval`, with an error that
     says why an expression is not constant (overflow, an uninitialized read, a dangling pointer,
@@ -54,7 +62,7 @@ build/bin/ycxx cxx hello.cpp -o hello && ./hello
 **Not yet:**
 - `#embed`, and the standard library's headers: `<cstdio>` now preprocesses, but libycxx does
   not yet know ycxx (yrashk/libycxx#17), and sema lacks namespaces.
-- Classes, templates and overloading.
+- Inheritance and virtual functions, passing classes by value, enums, namespaces, and templates.
 - `if constexpr`, and taking the address of a variable in a namespace-scope initializer
   (`int* p = &g;` passes the front end but not code generation yet).
 - Exceptions.

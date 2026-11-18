@@ -25,8 +25,8 @@ int main() {
   NodeId call = b.add(Call{rv, f_e, {f, 0}, b.list({{sum, 2}})}, 6);
   NodeId stmt = b.add(ExprStmt{{call, 0}}, 7);
   NodeId sum2 = b.add(Binary{rv, BinaryOp::add, {x, 0}, {one, 2}}, 3);
-  NodeId ret = b.add(Return{{sum2, 1}, in.intern_seq<Cleanup>({})}, 5);
-  NodeId block = b.add(Compound{b.list({{stmt, 1}, {ret, 8}}), in.intern_seq<Cleanup>({})}, 14);
+  NodeId ret = b.add(Return{{sum2, 1}}, 5);
+  NodeId block = b.add(Compound{b.list({{stmt, 1}, {ret, 8}})}, 14);
   NodeId root = b.commit(block);
 
   // Both `x + 1`s are one node, at two offsets.
@@ -62,7 +62,7 @@ int main() {
   // An absent child in a list is skipped by the walk and by descent.
   Builder b2(in);
   NodeId lit = b2.add(Literal{rv, in.intern_value(VInt{int_t, bits_of(std::int64_t{1})})}, 1);
-  NodeId gap = b2.commit(b2.add(Compound{b2.list({{NodeId::none, 1}, {lit, 3}}), in.intern_seq<Cleanup>({})}, 5));
+  NodeId gap = b2.commit(b2.add(Compound{b2.list({{NodeId::none, 1}, {lit, 3}})}, 5));
   u32 children = 0;
   Red(in.ast, gap).for_each_child([&](const Red&) { ++children; });
   check(children == 1, "a none in a list is not a child");

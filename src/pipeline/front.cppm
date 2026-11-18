@@ -91,15 +91,24 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
     EntityId e = d.entity;
     if (e == EntityId::none || !seen.insert(std::to_underlying(e)).second) return;
     const sema::EntityRec& r = world.entities.rec(e);
-    bool fn = r.kind == sema::EntityKind::function;
+    if (r.kind == sema::EntityKind::class_ || r.kind == sema::EntityKind::data_member) return;  // no symbol
+    bool fn = r.kind != sema::EntityKind::variable;
     std::string id(ins.names.spelling(r.name));
     if (fn && id == "main") tu.main = e;
-    tu.entities.push_back({e, std::move(id), d.type, fn, r.lang, r.linkage, false, at});
+    tu.entities.push_back({e, std::move(id), d.type, fn, r.lang, r.linkage, false, at, r.scope,
+                           r.kind == sema::EntityKind::constructor  ? Special::constructor
+                           : r.kind == sema::EntityKind::destructor ? Special::destructor
+                                                                    : Special::none});
   };
   for (std::uint32_t k = 0; k < items.items.size(); ++k) {
     const items::Item& it = items.items[k];
-    if (!program.in_global_scope(k)) continue;
-    if (it.kind != items::ItemKind::declaration && it.kind != items::ItemKind::function) continue;
+    // Items of the global namespace, and the members of its classes.
+    bool member = it.parent != items::none && items.items[it.parent].kind == items::ItemKind::class_def &&
+                  program.in_global_scope(it.parent);
+    if (!program.in_global_scope(k) && !member) continue;
+    if (it.kind != items::ItemKind::declaration && it.kind != items::ItemKind::function &&
+        it.kind != items::ItemKind::class_def)  // its declarators: `struct S { … } s;`
+      continue;
     const ast::ItemSema& is = program.item_sema(k).value;
     std::vector<ast::DeclSema> decls = ins.seqs.elements(is.decls);
     // The declarators, by declaration ordinal: their constants and item-relative locations (the
@@ -115,8 +124,10 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
       }
     }
     for (std::size_t i = 0; i < decls.size(); ++i) declare(decls[i], at[i]);
-    if (it.kind == items::ItemKind::function && it.has_body() && !decls.empty() && decls[0].entity != EntityId::none) {
-      tu.functions.push_back({decls[0].entity, decls[0], program.analyze_body(k).value, program.id(k), it.body_begin - it.begin});
+    if (it.kind == items::ItemKind::function && it.has_body() && !decls.empty() && decls[0].entity != EntityId::none &&
+        !(decls[0].flags & sema::decl_flag::deleted)) {
+      tu.functions.push_back({decls[0].entity, decls[0], program.analyze_body(k).value, program.id(k), it.body_begin - it.begin,
+                              program.this_type(decls[0])});
       continue;
     }
     // Variable definitions, with the constants their declarators were initialized with.
@@ -127,6 +138,12 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
         continue;
       tu.variables.push_back({d.entity, d.type, declarators[i]->value, at[i]});
     }
+  }
+  // The implicitly defined special members that are not trivial ([class.copy.ctor], [class.dtor]).
+  for (std::size_t i = 0; i < program.synthesized().size(); ++i) {
+    const parse::Program::Synthesized& s = program.synthesized()[i];
+    declare(s.decl, std::nullopt);
+    tu.functions.push_back({s.decl.entity, s.decl, program.synthesized_body(i), program.id(s.item), 0, program.this_type(s.decl)});
   }
   return tu;
 }
@@ -147,11 +164,23 @@ engine::query_task<FrontResult> TuFront::run(engine::Ctx& cx, TuId tu) {
     std::vector<std::uint64_t> args;
     for (const engine::DiagArg& a : d.args) args.push_back(a.raw);
     Message m{d.at.offset, lex::message_of(*kind).severity == lex::Severity::error, lex::render(*kind, args), {}};
-    // Located in an included file: rendered here (pp::file_loc).
+    // Located in an included file: rendered here (pp::file_loc), from the file's text as a
+    // recorded input, so an edit that moves only its newlines re-renders the position (#93).
     if (d.at.item != lex::file_level) {
       std::uint16_t f = static_cast<std::uint16_t>(lex::file_level - d.at.item);
-      pp::Message pm = pp::message(pp::session(), pp::session().files.id(region.files[f]), region.file_names[f],
-                                   pp::Diag{f, d.at.offset, *kind, {}, 0, std::nullopt});
+      const pp::Diag diag{f, d.at.offset, *kind, {}, 0, std::nullopt};
+      const std::string& name = region.files[f];
+      const pp::Source& source = cx.fetch<pp::SourceOf>(file);
+      pp::Session& ps = pp::session_for(source.config);
+      pp::Message pm;
+      if (name.starts_with('<')) {
+        pm = pp::message(ps, ps.files.id(name), region.file_names[f], diag);  // `<built-in>`
+      } else {
+        std::filesystem::path p(name);
+        if (p.is_relative() && !source.cwd.empty()) p = source.cwd / p;
+        const std::optional<std::string>& text = cx.fetch<pp::FileContent>(pp::path_id(p.lexically_normal().generic_native_encoded_string()));
+        pm = pp::message(ps.spellings, text ? std::string_view(*text) : std::string_view(), region.file_names[f], diag);
+      }
       m.where = std::format("{}:{}:{}", pm.file, pm.line, pm.column);
     }
     out.messages.push_back(std::move(m));

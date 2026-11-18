@@ -40,6 +40,10 @@ struct DeclSpec {
   bool is_constexpr = false;
   bool is_consteval = false;
   bool is_constinit = false;
+  // An elaborated-type-specifier ([dcl.type.elab]): the class it names, and where its name is.
+  bool elaborated = false;
+  NameId class_name{};
+  u32 class_at = 0;
   bool ok = true;
 };
 
@@ -56,10 +60,17 @@ struct Declarator {
   NameId name{};
   bool named = false;
   u32 name_at = 0;
+  // `C::name`: the class named by the nested-name-specifier ([dcl.meaning]).
+  bool qualified = false;
+  NameId qualifier{};
+  u32 qualifier_at = 0;
   u32 begin = 0;
   QualType type{};
   std::vector<Param> params;
   bool variadic = false;
+  // `T x[] = {…}`: the outermost array bound is left to the initializer ([dcl.array]/8); `type`
+  // is then the element type.
+  bool unknown_bound = false;
   bool ok = true;
 };
 
@@ -96,6 +107,8 @@ public:
     return false;
   }
   NameId name_of(const Tok& t) { return s_->ins().names.intern(r_->name(t)); }
+  // Moves to the region's token `i`, inside the part (past a class's member-specification).
+  void seek(u32 i) { i_ = std::min(i, end_); }
   const lex::Literal& literal() const { return r_->literal(tok()); }
 
   // Skips to just after the next `;` at bracket depth 0, or to a `}` that closes the enclosing
@@ -130,15 +143,41 @@ public:
     }
   }
 
-  // decl-specifier-seq ([dcl.spec.general]) with the simple-type-specifiers of [dcl.type.simple]
-  // and the cv-qualifiers. `in_block` forbids `extern` and `static` where the α subset cannot
-  // give them meaning.
+  // Whether a declaration starts here: a decl-specifier keyword, or a name that denotes a class
+  // ([stmt.ambig]: what can be a declaration is one).
+  bool starts_declaration() {
+    if (starts_decl_specifier(kind())) return true;
+    if (!is(Tk::identifier) || kind(1) == Tk::coloncolon || !s_->class_name(name_of(tok()))) return false;
+    // `T(args).f()` and `T{…}.m` are expressions; `T (x);` declares x ([stmt.ambig]).
+    if (kind(1) == Tk::l_brace) return false;
+    if (kind(1) != Tk::l_paren) return true;
+    u32 j = 1, depth = 0;
+    for (; i_ + j < end_; ++j) {
+      Tk k = kind(j);
+      if (k == Tk::l_paren) ++depth;
+      if (k == Tk::r_paren && --depth == 0) break;
+    }
+    Tk after = kind(j + 1);
+    return after != Tk::period && after != Tk::arrow && after != Tk::l_paren && after != Tk::l_square;
+  }
+
+  // What an elaborated-type-specifier naming no declared class does: at namespace scope it
+  // declares the class ([basic.scope.pdecl]); set by the owner where that applies.
+  std::function<std::optional<QualType>(NameId)> declare_class;
+
+  // decl-specifier-seq ([dcl.spec.general]) with the simple-type-specifiers of [dcl.type.simple],
+  // class names and elaborated-type-specifiers ([dcl.type.elab]), and the cv-qualifiers.
   DeclSpec decl_specifiers() {
     DeclSpec d;
     d.begin = pos();
     int n_char = 0, n_short = 0, n_int = 0, n_long = 0, n_signed = 0, n_unsigned = 0, n_void = 0, n_bool = 0;
     int n_char8 = 0, n_char16 = 0, n_char32 = 0, n_wchar = 0;
     bool c = false, v = false;
+    std::optional<QualType> cls;  // a class-name or elaborated-type-specifier
+    auto any_type = [&] {
+      return cls || n_char + n_short + n_int + n_long + n_signed + n_unsigned + n_void + n_bool + n_char8 + n_char16 +
+                        n_char32 + n_wchar > 0;
+    };
     auto once = [&](bool& flag, Tk k) {
       if (flag) s_->diag(pos(), Diag::duplicate_specifier, k);
       flag = true;
@@ -169,6 +208,42 @@ public:
       case Tk::kw_constexpr: once(d.is_constexpr, k); break;
       case Tk::kw_consteval: once(d.is_consteval, k); break;
       case Tk::kw_constinit: once(d.is_constinit, k); break;
+      case Tk::kw_struct:
+      case Tk::kw_class: {
+        u32 at = pos();
+        // A class-specifier where a type is named (a local or unnamed class) is not supported yet.
+        if (kind(1) != Tk::identifier || kind(2) == Tk::l_brace || kind(2) == Tk::colon || kind(2) == Tk::coloncolon) {
+          s_->diag(at, Diag::not_supported, k);
+          d.ok = false;
+          goto done;
+        }
+        bump();
+        NameId n = name_of(tok());
+        bump();
+        auto t = s_->class_name(n, true);
+        if (!t && declare_class) t = declare_class(n);
+        if (!t) {
+          s_->diag(at + 1, Diag::not_a_type, n);
+          d.ok = false;
+        } else if (any_type()) {
+          s_->diag(at, Diag::conflicting_specifiers, k);
+          d.ok = false;
+        } else {
+          cls = t;
+          d.elaborated = true;
+          d.class_name = n;
+          d.class_at = at + 1;
+        }
+        continue;
+      }
+      case Tk::identifier:
+        if (!any_type()) {
+          if (auto t = s_->class_name(name_of(tok()))) {
+            cls = t;
+            break;
+          }
+        }
+        goto done;
       default:
         if (starts_decl_specifier(k)) {
           s_->diag(pos(), Diag::not_supported, k);
@@ -191,6 +266,15 @@ public:
     // [dcl.type.general]: the combinations of simple-type-specifiers, as in its table.
     int total = n_char + n_short + n_int + n_long + n_signed + n_unsigned + n_void + n_bool + n_char8 + n_char16 +
                 n_char32 + n_wchar;
+    if (cls) {
+      if (total > 0) {
+        s_->diag(d.begin, Diag::conflicting_specifiers, Tk::kw_int);
+        d.ok = false;
+      }
+      d.has_type = true;
+      d.type = s_->types().add_cv(*cls, sema::Cv((c ? 1 : 0) | (v ? 2 : 0)));
+      return d;
+    }
     if (total == 0) {
       if (d.ok) s_->diag(d.begin, Diag::missing_type_specifier);
       d.ok = false;
@@ -235,15 +319,24 @@ public:
     bool function = false;
     std::vector<Param> params;
     bool variadic = false;
+    sema::Cv cv = sema::Cv::none;  // a member function's cv-qualifier-seq ([dcl.fct])
     u64 bound = 0;
-    bool unknown_bound = false;  // `[]`, in a parameter only
+    bool unknown_bound = false;  // `[]`: in a parameter, or the outermost bound of a variable
   };
   struct Level {
-    std::vector<sema::Cv> pointers;
+    // ptr-operators, outermost first ([dcl.ptr], [dcl.ref]): `*` with its cv, `&` or `&&`.
+    struct PtrOp {
+      Tk op;
+      sema::Cv cv;
+    };
+    std::vector<PtrOp> pointers;
     std::unique_ptr<Level> inner;
     NameId name{};
     bool named = false;
     u32 name_at = 0;
+    bool qualified = false;
+    NameId qualifier{};
+    u32 qualifier_at = 0;
     std::vector<Suffix> suffixes;
   };
 
@@ -252,6 +345,7 @@ public:
     Declarator d;
     d.begin = pos();
     Level top = level(abstract, d.ok);
+    top_ = &top;
     const Suffix* fn = nullptr;
     d.type = build(top, base, fn, d);
     if (fn) {
@@ -264,19 +358,23 @@ public:
   Level level(bool abstract, bool& ok) {
     Level l;
     while (is(Tk::star) || is(Tk::amp) || is(Tk::ampamp)) {
-      if (!is(Tk::star)) {
-        s_->diag(pos(), Diag::not_supported, kind());
-        ok = false;
-        bump();
-        continue;
-      }
+      Tk op = kind();
       bump();
       int cv = 0;
-      while (is(Tk::kw_const) || is(Tk::kw_volatile)) {
+      while (op == Tk::star && (is(Tk::kw_const) || is(Tk::kw_volatile))) {
         cv |= is(Tk::kw_const) ? 1 : 2;
         bump();
       }
-      l.pointers.push_back(sema::Cv(cv));
+      l.pointers.push_back({op, sema::Cv(cv)});
+    }
+    if (!abstract && is(Tk::identifier) && kind(1) == Tk::coloncolon && kind(2) == Tk::identifier) {
+      // A qualified declarator-id `C::name`, defining a member of class C ([class.mfct],
+      // [class.static.data]).
+      l.qualified = true;
+      l.qualifier = name_of(tok());
+      l.qualifier_at = pos();
+      bump();
+      bump();
     }
     if (is(Tk::identifier)) {
       l.name = name_of(tok());
@@ -294,13 +392,19 @@ public:
       ok = false;
     }
     for (;;) {
+      if (is(Tk::l_paren) && !abstract && in_params_ == 0 && !params_ahead()) break;  // `T x(args)`: an initializer
       if (is(Tk::l_paren)) {
         bump();
         l.suffixes.push_back(parameters(ok));
-        // cv-qualifiers, ref-qualifiers, noexcept-specifiers and trailing return types
-        // ([dcl.fct]) are beyond the α subset.
-        if (is(Tk::kw_const) || is(Tk::kw_volatile) || is(Tk::amp) || is(Tk::ampamp) || is(Tk::kw_noexcept) ||
-            is(Tk::kw_throw) || is(Tk::arrow)) {
+        // A member function's cv-qualifier-seq ([dcl.fct]).
+        int cv = 0;
+        while (is(Tk::kw_const) || is(Tk::kw_volatile)) {
+          cv |= is(Tk::kw_const) ? 1 : 2;
+          bump();
+        }
+        l.suffixes.back().cv = sema::Cv(cv);
+        // ref-qualifiers, noexcept-specifiers and trailing return types are not supported yet.
+        if (is(Tk::amp) || is(Tk::ampamp) || is(Tk::kw_noexcept) || is(Tk::kw_throw) || is(Tk::arrow)) {
           s_->diag(pos(), Diag::not_supported, kind());
           ok = false;
           return l;
@@ -317,10 +421,6 @@ public:
           bump();
           Suffix s;
           s.unknown_bound = true;
-          if (in_params_ == 0) {
-            s_->diag(at, Diag::not_supported, Tk::l_square);  // an array of unknown bound
-            ok = false;
-          }
           l.suffixes.push_back(std::move(s));
           continue;
         }
@@ -343,11 +443,33 @@ public:
     return l;
   }
 
+  // Whether the `(` here begins a parameter-declaration-clause rather than an initializer
+  // ([dcl.ambig.res]: what can be a declaration is one).
+  bool params_ahead() {
+    Tk k = kind(1);
+    if (k == Tk::r_paren || k == Tk::ellipsis || starts_decl_specifier(k)) return true;
+    return k == Tk::identifier && kind(2) != Tk::coloncolon && s_->class_name(name_of(tok(1))).has_value();
+  }
+
   std::int64_t i64_of(sema::ConstId c) { return s_->world().values.as_signed(c); }
 
   // The type a declarator gives its name, built from the base type outwards ([dcl.meaning]).
   QualType build(const Level& l, QualType t, const Suffix*& fn, Declarator& d) {
-    for (sema::Cv cv : l.pointers) t = s_->types().add_cv(s_->types().pointer(t), cv);
+    for (const Level::PtrOp& p : l.pointers) {
+      // [dcl.ref]: no pointer to a reference, no reference to void.
+      if (s_->types().is_reference(t) && p.op == Tk::star) {
+        s_->diag(d.begin, Diag::invalid_array_element, t);
+        d.ok = false;
+        return t;
+      }
+      if (s_->types().is_void(t) && p.op != Tk::star) {
+        s_->diag(d.begin, Diag::void_variable, s_->no_name());
+        d.ok = false;
+        return t;
+      }
+      if (p.op == Tk::star) t = s_->types().add_cv(s_->types().pointer(t), p.cv);
+      else t = p.op == Tk::amp ? s_->types().lvalue_ref(t) : s_->types().rvalue_ref(t);
+    }
     for (auto s = l.suffixes.rbegin(); s != l.suffixes.rend(); ++s) {
       if (s->function) {
         // [dcl.fct]: a function cannot return a function or an array.
@@ -357,12 +479,19 @@ public:
         }
         std::vector<QualType> ps;
         for (const Param& p : s->params) ps.push_back(p.type);
-        t = s_->types().function(t, ps, s->variadic, linkage_);
+        t = s_->types().function(t, ps, s->variadic, linkage_, s->cv);
         fn = &*s;
-      } else if (s->unknown_bound) {
-        // Only in a parameter, where [dcl.fct]/5 adjusts the array to a pointer: build the pointer
-        // at once. (An unknown bound below the outermost level is not in the α subset.)
+      } else if (s->unknown_bound && in_params_ > 0) {
+        // In a parameter, [dcl.fct]/5 adjusts the array to a pointer: build the pointer at once.
         t = s_->types().pointer(t);
+      } else if (s->unknown_bound) {
+        // The outermost bound of a variable, which its initializer gives; any other is not
+        // supported yet.
+        if (&*s != &l.suffixes.front() || !l.pointers.empty() || d.unknown_bound || &l != top_) {
+          s_->diag(d.begin, Diag::not_supported, Tk::l_square);
+          d.ok = false;
+        }
+        d.unknown_bound = true;
       } else if (!s_->types().is_object(t) || s->bound == 0) {
         // [dcl.array]: the element type is an object type; an array of functions or of void is
         // ill-formed.
@@ -376,7 +505,27 @@ public:
     d.name = l.name;
     d.named = l.named;
     d.name_at = l.name_at;
+    d.qualified = l.qualified;
+    d.qualifier = l.qualifier;
+    d.qualifier_at = l.qualifier_at;
     return t;
+  }
+
+  // `( parameter-declaration-clause ) cv-qualifier-seq` of a constructor or destructor, whose
+  // declarator-id the caller has read ([class.ctor], [class.dtor]).
+  Suffix function_suffix(bool& ok) {
+    if (!expect(Tk::l_paren)) {
+      ok = false;
+      return {};
+    }
+    Suffix s = parameters(ok);
+    int cv = 0;
+    while (is(Tk::kw_const) || is(Tk::kw_volatile)) {
+      cv |= is(Tk::kw_const) ? 1 : 2;
+      bump();
+    }
+    s.cv = sema::Cv(cv);
+    return s;
   }
 
   // parameter-declaration-clause ([dcl.fct]), after its `(`.
@@ -495,8 +644,13 @@ public:
       u32 at = pos();
       bump();
       if (is(Tk::l_brace)) {
-        s_->diag(pos(), Diag::not_supported, Tk::l_brace);
-        return {NodeId::none, l.begin, pos()};
+        // [expr.assign]/9: `x = {…}`.
+        if (*op != sema::Sema::AsgOp::assign) {
+          s_->diag(pos(), Diag::not_supported, Tk::l_brace);
+          return {NodeId::none, l.begin, pos()};
+        }
+        auto b = braced_init_list();
+        return s_->assign_list(l, *b, at);
       }
       Ex r = assignment_expression();
       return s_->assign(*op, l, r, at);
@@ -655,12 +809,24 @@ public:
         break;
       }
       case Tk::period:
-      case Tk::arrow:
-        s_->diag(at, Diag::not_supported, kind());
+      case Tk::arrow: {
+        // [expr.ref]: `E1.id-expression` and `E1->id-expression`.
+        bool arrow = is(Tk::arrow);
         bump();
-        accept(Tk::identifier);
-        e = {NodeId::none, e.begin, pos()};
+        if (!is(Tk::identifier)) {
+          if (is(Tk::kw_template) || is(Tk::tilde) || is(Tk::coloncolon) || is(Tk::kw_operator))
+            s_->diag(pos(), Diag::not_supported, kind());
+          else
+            s_->diag(pos(), Diag::expected_unqualified_id);
+          if (!at_end()) bump();
+          return {NodeId::none, e.begin, pos()};
+        }
+        u32 name_at = pos();
+        NameId n = name_of(tok());
+        bump();
+        e = s_->member(e, arrow, n, pos(), at, name_at);
         break;
+      }
       default: return e;
       }
     }
@@ -715,11 +881,41 @@ public:
     }
     case Tk::identifier: {
       NameId n = name_of(tok());
+      if ((kind(1) == Tk::l_paren || kind(1) == Tk::l_brace))
+        if (auto t = s_->class_name(n)) {
+          // `T(args)` or `T{…}` ([expr.type.conv]).
+          bump();
+          if (is(Tk::l_brace)) {
+            auto b = braced_init_list();
+            Ex r = s_->list_init(*t, *b);
+            return {r.id, begin, pos(), r.info};
+          }
+          bump();
+          std::vector<Ex> args;
+          if (!is(Tk::r_paren))
+            do args.push_back(assignment_expression());
+            while (accept(Tk::comma));
+          if (!expect(Tk::r_paren)) return {NodeId::none, begin, pos()};
+          Ex r = s_->functional_cast(*t, std::move(args), begin, pos());
+          return {r.id, begin, pos(), r.info};
+        }
       bump();
+      if (is(Tk::coloncolon) && kind(1) == Tk::identifier) {
+        // A qualified-id `C::name` ([expr.prim.id.qual]).
+        bump();
+        u32 name_at = pos();
+        NameId m = name_of(tok());
+        bump();
+        if (is(Tk::coloncolon)) {
+          s_->diag(pos(), Diag::not_supported, Tk::coloncolon);
+          return {NodeId::none, begin, pos()};
+        }
+        return s_->qualified_name(n, m, begin, name_at, pos());
+      }
       return s_->name_expr(n, begin, pos());
     }
+    case Tk::kw_this: bump(); return s_->this_expr(begin, pos());
     case Tk::float_lit:
-    case Tk::kw_this:
     case Tk::l_square:
     case Tk::kw_requires:
     case Tk::coloncolon:
@@ -740,6 +936,49 @@ public:
     }
   }
 
+  // braced-init-list ([dcl.init.general]): `{ initializer-clause, … }`, or with designators
+  // `{ .m = e, .n{…} }` ([dcl.init.aggr]).
+  std::unique_ptr<sema::Braced> braced_init_list() {
+    auto b = std::make_unique<sema::Braced>();
+    b->begin = pos();
+    expect(Tk::l_brace);
+    while (!is(Tk::r_brace) && !at_end()) {
+      sema::Braced::Clause c;
+      c.begin = pos();
+      if (is(Tk::period) && kind(1) == Tk::identifier) {
+        bump();
+        c.designated = true;
+        c.designator = name_of(tok());
+        bump();
+        if (!is(Tk::l_brace) && !expect(Tk::equal)) {
+          skip_to_brace_end();
+          break;
+        }
+      }
+      if (is(Tk::l_brace)) c.list = braced_init_list();
+      else c.expr = assignment_expression();
+      b->clauses.push_back(std::move(c));
+      if (!accept(Tk::comma)) break;
+    }
+    if (!expect(Tk::r_brace)) skip_to_brace_end();
+    b->end = pos();
+    return b;
+  }
+  // After an error in a braced list: past its closing `}`.
+  void skip_to_brace_end() {
+    int depth = 0;
+    while (!at_end()) {
+      Tk k = kind();
+      if (k == Tk::semi && depth == 0) return;
+      bump();
+      if (k == Tk::l_brace || k == Tk::l_paren || k == Tk::l_square) ++depth;
+      if (k == Tk::r_brace || k == Tk::r_paren || k == Tk::r_square) {
+        if (depth == 0) return;
+        --depth;
+      }
+    }
+  }
+
   // ------------------------------------------------------------ [stmt]
 
   Ex compound_statement() {
@@ -757,10 +996,9 @@ public:
     std::vector<ast::Child> cs;
     for (const Ex& st : stmts)
       if (st.ok()) cs.push_back(sema::Sema::at(st, begin));
-    return s_->node(ast::Compound{s_->builder().list(cs), no_cleanups()}, begin, pos());
+    return s_->node(ast::Compound{s_->builder().list(cs)}, begin, pos());
   }
 
-  ast::SeqId<ast::Cleanup> no_cleanups() { return s_->builder().seq(std::span<const ast::Cleanup>{}); }
 
   // A substatement that is not a compound-statement has its own block scope ([stmt.pre]).
   Ex substatement() {
@@ -789,8 +1027,8 @@ public:
         s_->diag(begin, brk ? Diag::break_outside_loop : Diag::continue_outside_loop);
         return {NodeId::none, begin, pos()};
       }
-      if (brk) return s_->node(ast::Break{no_cleanups()}, begin, pos());
-      return s_->node(ast::Continue{no_cleanups()}, begin, pos());
+      if (brk) return s_->node(ast::Break{}, begin, pos());
+      return s_->node(ast::Continue{}, begin, pos());
     }
     case Tk::kw_return: return return_statement();
     case Tk::kw_switch:
@@ -820,9 +1058,10 @@ public:
       skip_statement();
       return {NodeId::none, begin, pos()};
     }
-    if (starts_decl_specifier(kind())) return declaration_statement();
+    if (starts_declaration()) return declaration_statement();
     Ex e = expression();
     if (!expect(Tk::semi)) skip_to_semi();
+    e = s_->discarded(e);
     return s_->node(ast::ExprStmt{sema::Sema::at(e, begin)}, begin, pos());
   }
 
@@ -958,7 +1197,7 @@ public:
   // beyond the α subset.
   Ex condition() {
     if (!expect(Tk::l_paren)) return {};
-    if (starts_decl_specifier(kind())) {
+    if (starts_declaration()) {
       s_->diag(pos(), Diag::not_supported, kind());
       skip_param();
       expect(Tk::r_paren);
@@ -1004,7 +1243,7 @@ public:
     s_->push_scope();
     s_->guard_scope();  // [basic.scope.block]/2: the for-init's names are not redeclared in the body
     Ex init;
-    if (starts_decl_specifier(kind())) {
+    if (starts_declaration()) {
       init = declaration_statement();
     } else {
       u32 b = pos();
@@ -1060,7 +1299,7 @@ public:
       s_->diag(begin, Diag::return_missing_value);
     }
     if (!expect(Tk::semi)) skip_to_semi();
-    return s_->node(ast::Return{sema::Sema::at(value, begin), no_cleanups()}, begin, pos());
+    return s_->node(ast::Return{sema::Sema::at(value, begin)}, begin, pos());
   }
 
   // A block-scope simple-declaration ([stmt.dcl], [dcl.pre]): each declarator is a local
@@ -1106,15 +1345,46 @@ public:
       if (spec.is_constexpr) d.type = s_->types().add_cv(d.type, sema::Cv::const_);
       u32 local = s_->declare_local(d.name, d.type, 0, d.name_at);
       Ex init;
-      if (accept(Tk::equal)) {
-        if (is(Tk::l_brace)) {
-          s_->diag(pos(), Diag::not_supported, Tk::l_brace);
-          skip_to_semi();
-          return {NodeId::none, begin, pos()};
+      bool list = is(Tk::l_brace) || (is(Tk::equal) && kind(1) == Tk::l_brace);
+      if (d.unknown_bound && !list) {
+        s_->diag(d.name_at, Diag::not_supported, Tk::l_square);  // an array of unknown bound
+        skip_to_semi();
+        return {NodeId::none, begin, pos()};
+      }
+      if (list) {
+        // List-initialization ([dcl.init.list]): `T x{…}` and `T x = {…}`.
+        accept(Tk::equal);
+        auto b = braced_init_list();
+        if (d.unknown_bound) {
+          u64 n = s_->deduce_bound(d.type, *b);
+          if (n == 0) {  // [dcl.init.aggr]/12: an empty list does not give an array a bound
+            s_->diag(b->begin, Diag::bound_not_constant);
+            return {NodeId::none, begin, pos()};
+          }
+          d.type = s_->types().array(d.type, n);
+          s_->set_local_type(local, d.type);
         }
+        // A reference from one element binds as `= e` does, extending a temporary ([class.temporary]/6).
+        if (s_->types().is_reference(d.type) && b->clauses.size() == 1 && !b->clauses[0].list && !b->clauses[0].designated)
+          init = s_->bind_reference(b->clauses[0].expr, d.type, b->clauses[0].begin, true);
+        else
+          init = s_->list_init(d.type, *b);
+        // As for `= e` below: a constexpr local, or a const integral one with a constant
+        // initializer, is usable in constant expressions ([expr.const]).
+        bool usable_kind = sema::Types::is_const(d.type) && !sema::Types::is_volatile(d.type) &&
+                           s_->types().is_integral(d.type);
+        if (init.ok() && (spec.is_constexpr || usable_kind)) {
+          sema::Evaluated v = sema::Evaluator(*s_, questions()).evaluate(init);
+          if (v.value) s_->set_local_value(local, *v.value);
+          else if (spec.is_constexpr) s_->diag(b->begin, Diag::not_constant, v.reason);
+        }
+      } else if (accept(Tk::equal)) {
         Ex e = assignment_expression();
         if (s_->types().is_array(d.type)) {
           s_->diag(dbegin, Diag::not_supported, Tk::l_square);  // array initialization
+        } else if (s_->types().is_reference(d.type)) {
+          // A temporary bound to the reference lives as long as it ([class.temporary]/6).
+          init = s_->bind_reference(e, d.type, e.begin, true);
         } else {
           init = s_->convert(e, d.type, e.begin);
           // A constexpr variable, or a const integral one with a constant initializer, is usable
@@ -1127,16 +1397,42 @@ public:
             else if (spec.is_constexpr) s_->diag(e.begin, Diag::not_constant, v.reason);
           }
         }
-      } else if (is(Tk::l_paren) || is(Tk::l_brace)) {
-        s_->diag(pos(), Diag::not_supported, kind());
-        skip_to_semi();
-        return {NodeId::none, begin, pos()};
+      } else if (is(Tk::l_paren)) {
+        // Direct-initialization ([dcl.init.general]): `T x(args)`.
+        u32 open = pos();
+        bump();
+        std::vector<Ex> args;
+        if (!is(Tk::r_paren))
+          do args.push_back(assignment_expression());
+          while (accept(Tk::comma));
+        if (!expect(Tk::r_paren)) {
+          skip_to_semi();
+          return {NodeId::none, begin, pos()};
+        }
+        if (s_->types().is_class(d.type)) {
+          init = s_->has_user_ctors(d.type) || args.size() != 1 ? s_->construct(d.type, std::move(args), open, pos())
+                                                                 : s_->convert(args[0], d.type, open);
+        } else if (args.size() != 1 || s_->types().is_array(d.type)) {
+          s_->diag(open, Diag::not_supported, Tk::l_paren);  // a parenthesized list for a scalar or array
+        } else if (s_->types().is_reference(d.type)) {
+          init = s_->bind_reference(args[0], d.type, open, true);
+        } else {
+          init = s_->convert(args[0], d.type, open);
+        }
+      } else if (s_->types().is_reference(d.type)) {
+        s_->diag(d.name_at, Diag::reference_uninitialized);  // [dcl.ref]/5
+      } else if (!s_->require_complete(d.type, d.name_at)) {
+        // Default-initialization needs a complete object type ([dcl.init.general]).
+      } else if (s_->has_member_inits(d.type)) {
+        init = s_->default_init(d.type, d.name_at, pos());
       } else if (spec.is_constexpr) {
         s_->diag(d.name_at, Diag::constexpr_uninitialized, d.name);
       } else if (sema::Types::is_const(d.type)) {
         s_->diag(d.name_at, Diag::const_uninitialized, d.name);
       }
-      Ex var = s_->node(ast::LocalVar{local, sema::Sema::at(init, dbegin)}, dbegin, pos());
+      // The destructor that ends the variable at scope exit ([stmt.dcl]); a reference has none.
+      ast::EntityId dtor = s_->types().is_reference(d.type) ? ast::EntityId::none : s_->destructor_of(d.type);
+      Ex var = s_->node(ast::LocalVar{local, sema::Sema::at(init, dbegin), dtor}, dbegin, pos());
       s_->set_local_decl(local, var.id);
       vars.push_back(var);
     } while (accept(Tk::comma));
@@ -1148,7 +1444,10 @@ public:
 
   // The questions constant evaluation asks (array bounds, constexpr, static_assert); set by the
   // owner.
-  void set_questions(sema::Questions& q) { q_ = &q; }
+  void set_questions(sema::Questions& q) {
+    q_ = &q;
+    s_->constant_of = [this](Ex e) { return sema::Evaluator(*s_, questions()).evaluate(e).value; };
+  }
   sema::Questions& questions() { return *q_; }
 
 private:
@@ -1160,6 +1459,7 @@ private:
   sema::Questions* q_ = nullptr;
   LangLinkage linkage_ = LangLinkage::cxx;
   int in_params_ = 0;
+  const Level* top_ = nullptr;  // the declarator being built
 };
 
 }  // namespace ycxx::parse

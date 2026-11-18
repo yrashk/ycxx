@@ -12,9 +12,11 @@
 //   :predefined  the predefined macros ([cpp.predefined], DECISIONS §1.5)
 //   :cond    #if expressions ([cpp.cond])
 //
-// `pp(file)` is an engine query over the main file's text. The files it includes and the
-// configuration are read through the process's session (`session()`) until the engine has inputs
-// read on demand (#93) and contextual queries (#16); the regions' traces carry those dependencies.
+// `pp(file)` is an engine query over the main file's text and its `Source` (its name, working
+// directory and configuration). Every file it includes is read as a `FileContent` input, provided
+// on first read (daemon design §5.1, #93), so editing a header invalidates the `pp` cells that read
+// it. The region cache of the process's session for the configuration still shares regions between
+// units, where their traces verify; contextual queries (#16) will replace it.
 export module ycxx.pp;
 
 import std;
@@ -31,16 +33,23 @@ export import :cond;
 
 export namespace ycxx::pp {
 
-// The session of this process: the disk, and the configuration the driver sets before the first
-// translation unit.
+// The process keeps one session per configuration. `session()` is the one the driver configured
+// last, which `-E` uses.
 Session& session();
+// Selects a new session for `cfg`, reading the disk.
 void configure(Config cfg);
 // The daemon's: files are read through `host` (its file table). A session with the same host and
 // configuration is kept, with its region cache, and starts a new generation of file contents
 // (the traces verify what changed); otherwise a new session starts.
 void configure(Config cfg, Host& host);
-// The path of a file the driver numbered itself (a `FileText` input).
-void name_file(FileId driver_file, std::string path);
+
+// An absolute, lexically normal path, interned for the process. Its fingerprint is its spelling,
+// never its number, so nothing that depends on the order paths were first seen reaches a key's
+// fingerprint.
+enum class PathId : u32 {};
+PathId path_id(std::string_view absolute);
+const std::string& path_of(PathId p);
+void hash_into(Hasher& h, PathId p) { h.bytes(path_of(p)).uint(u8(0)); }
 
 // Phases 1–6 of one translation unit, as a function: `text` is the main file's, `path` its name
 // as given (it locates `#include "..."` and is its presumed name).
@@ -56,6 +65,12 @@ struct Message {
   std::string text;
 };
 Message message(Session& s, FileId file, std::string_view presumed, const Diag& d);
+// The same, from the text of the file the diagnostic is in and the spellings of the session that
+// preprocessed it.
+Message message(const Spellings& sp, std::string_view text, std::string_view presumed, const Diag& d);
+// The process's session for a configuration (the one `Pp` uses for a unit with that `SourceOf`).
+// Sessions live as long as the process: the regions `Pp` returns hold their spellings' numbers.
+Session& session_for(const Config& cfg);
 
 // `-E`: the text Clang's `-E` would print, and the diagnostics.
 std::pair<std::string, std::vector<Message>> preprocess_to_text(Session& s, std::string_view text, std::string_view path);
@@ -76,6 +91,52 @@ struct [[=engine::input{engine::Durability::low}]] FileText {
   using Value = std::string;
 };
 
+// The bytes of the regular file at a path, or nothing: an input read on demand through the
+// provider its `Db` was given (the disk, or the daemon's file table, daemon design §5.1), and set by
+// the daemon when a batch changes the file (§5.3).
+struct [[=engine::input{engine::Durability::low}]] FileContent {
+  using Key = PathId;
+  using Value = std::optional<std::string>;
+};
+// A provider of `FileContent` that reads the disk, for a `Db` with no daemon behind it.
+engine::provided<std::optional<std::string>> read_disk(PathId p);
+
+// How a driver's file is preprocessed: its name as given (its presumed name, and where
+// `#include "..."` starts), the directory relative paths are relative to, and the configuration.
+struct Source {
+  std::string path;
+  std::string cwd;
+  Config config;
+};
+// The configuration's target is a pointer to a known target: a `Source` is fingerprinted by the
+// configuration's fingerprint and stored with the target's triple.
+void hash_into(Hasher& h, const Source& s) { h.bytes(s.path).uint(u8(0)).bytes(s.cwd).uint(u8(0)).fp(s.config.fingerprint()); }
+void serialize_into(engine::Sink& out, const Source& s) {
+  engine::serialize(out, s.path);
+  engine::serialize(out, s.cwd);
+  engine::serialize(out, s.config.quote_dirs);
+  engine::serialize(out, s.config.angle_dirs);
+  engine::serialize(out, static_cast<std::uint64_t>(s.config.system_from));
+  engine::serialize(out, s.config.macros);
+  engine::serialize(out, std::string(s.config.target->triple));
+}
+Source deserialize_from(engine::Source& in, std::type_identity<Source>) {
+  Source s;
+  s.path = engine::deserialize<std::string>(in);
+  s.cwd = engine::deserialize<std::string>(in);
+  s.config.quote_dirs = engine::deserialize<std::vector<std::string>>(in);
+  s.config.angle_dirs = engine::deserialize<std::vector<std::string>>(in);
+  s.config.system_from = static_cast<std::size_t>(engine::deserialize<std::uint64_t>(in));
+  s.config.macros = engine::deserialize<std::vector<std::pair<std::string, std::optional<std::string>>>>(in);
+  if (engine::deserialize<std::string>(in) != ast::aarch64_darwin.triple) in.fail();  // the one target there is
+  return s;
+}
+
+struct [[=engine::input{engine::Durability::low}]] SourceOf {
+  using Key = FileId;
+  using Value = Source;
+};
+
 // `pp(file)` (§B9). Its diagnostics are at `Loc{file_loc(file index), byte offset}`.
 struct Pp {
   using Key = FileId;
@@ -89,23 +150,75 @@ namespace ycxx::pp {
 
 struct Process {
   DiskHost disk;
-  std::unique_ptr<Session> session;
-  Host* host = &disk;  // the session's
-  std::map<FileId, std::string> driver_names;
+  // One session per configuration fingerprint, each with the host it reads through outside `Pp`.
+  struct Configured {
+    std::unique_ptr<Session> session;
+    Host* host = nullptr;
+  };
+  // Never dropped: the regions of `Pp` cells hold the session's spelling numbers, so a session
+  // must outlive every engine that read through it (a bound on memory is #17's eviction).
+  std::map<Fp128, Configured> sessions;
+  Session* current = nullptr;
+
+  Configured& slot(const Config& cfg) { return sessions[cfg.fingerprint()]; }
 };
 Process& process() {
   static Process p;
   return p;
 }
 
-// The driver numbers its own files below this; the session numbers files from 0 too, so a
-// driver's number is translated by name.
-std::pair<FileId, std::string> main_file(Session& s, FileId driver_file) {
-  auto& names = process().driver_names;
-  auto it = names.find(driver_file);
-  std::string path = it == names.end() ? std::format("<file {}>", std::to_underlying(driver_file)) : it->second;
-  return {s.files.id(path), path};
+// The session of a configuration, created reading the disk if there is none.
+Session& session_for(const Config& cfg) {
+  Process& p = process();
+  auto& c = p.slot(cfg);
+  if (!c.session) {
+    c.session = std::make_unique<Session>(p.disk, cfg);
+    c.host = &p.disk;
+  }
+  return *c.session;
 }
+
+struct Paths {
+  std::mutex m;
+  std::deque<std::string> spelled;  // a deque: references stay valid as it grows
+  std::map<std::string, PathId, std::less<>> ids;
+};
+Paths& paths() {
+  static Paths p;
+  return p;
+}
+
+// Inside `Pp`: every file read is a `FileContent` fetch, relative paths against the source's
+// working directory, so the cell records each one (negatives included).
+class EngineHost final : public Host {
+ public:
+  EngineHost(engine::Ctx& cx, std::string_view cwd) : cx_(&cx), cwd_(cwd) {}
+  std::optional<std::string> read(const std::string& path) override {
+    std::filesystem::path p(path);
+    if (p.is_relative() && !cwd_.empty()) p = std::filesystem::path(cwd_) / p;
+    return cx_->fetch<FileContent>(path_id(p.lexically_normal().generic_native_encoded_string()));
+  }
+
+ private:
+  engine::Ctx* cx_;
+  std::string_view cwd_;
+};
+
+// Points a session's files at a host for a scope, starting and ending with a new generation, so
+// no content read through one host is served through the other.
+class HostScope {
+ public:
+  HostScope(Files& f, Host& h) : f_(&f), old_(f.swap_host(h)) { f_->new_generation(); }
+  ~HostScope() {
+    f_->swap_host(*old_);
+    f_->new_generation();
+  }
+  HostScope(const HostScope&) = delete;
+
+ private:
+  Files* f_;
+  Host* old_;
+};
 
 }  // namespace ycxx::pp
 
@@ -113,27 +226,50 @@ export namespace ycxx::pp {
 
 Session& session() {
   Process& p = process();
-  if (!p.session) p.session = std::make_unique<Session>(p.disk);
-  return *p.session;
+  if (!p.current) p.current = &session_for(Config{});
+  return *p.current;
 }
 
 void configure(Config cfg) {
   Process& p = process();
-  p.session = std::make_unique<Session>(p.disk, std::move(cfg));
-  p.host = &p.disk;
+  auto& c = p.slot(cfg);
+  c.session = std::make_unique<Session>(p.disk, std::move(cfg));
+  c.host = &p.disk;
+  p.current = c.session.get();
 }
 
 void configure(Config cfg, Host& host) {
   Process& p = process();
-  if (p.session && p.host == &host && p.session->config_fp == cfg.fingerprint()) {
-    p.session->files.new_generation();
-    return;
+  auto& c = p.slot(cfg);
+  if (c.session && c.host == &host) {
+    c.session->files.new_generation();
+  } else {
+    c.session = std::make_unique<Session>(host, std::move(cfg));
+    c.host = &host;
   }
-  p.session = std::make_unique<Session>(host, std::move(cfg));
-  p.host = &host;
+  p.current = c.session.get();
 }
 
-void name_file(FileId driver_file, std::string path) { process().driver_names.insert_or_assign(driver_file, std::move(path)); }
+PathId path_id(std::string_view absolute) {
+  Paths& p = paths();
+  std::lock_guard g(p.m);
+  if (auto it = p.ids.find(absolute); it != p.ids.end()) return it->second;
+  PathId id{static_cast<u32>(p.spelled.size())};
+  p.spelled.emplace_back(absolute);
+  p.ids.emplace(std::string(absolute), id);
+  return id;
+}
+
+const std::string& path_of(PathId id) {
+  Paths& p = paths();
+  std::lock_guard g(p.m);
+  return p.spelled[std::to_underlying(id)];
+}
+
+engine::provided<std::optional<std::string>> read_disk(PathId p) {
+  DiskHost disk;
+  return {disk.read(path_of(p)), engine::Durability::low};
+}
 
 Preprocessed preprocess(Session& s, std::string_view text, std::string_view path) {
   FileId main = s.files.id(path);
@@ -146,17 +282,21 @@ Preprocessed preprocess(std::string_view text, std::string_view path) { return p
 
 Message message(Session& s, FileId file, std::string_view presumed, const Diag& d) {
   const Files::Content* c = s.files.content(file);
-  std::vector<u32> starts = line_starts(c ? std::string_view(c->text) : std::string_view());
+  return message(s.spellings, c ? std::string_view(c->text) : std::string_view(), presumed, d);
+}
+
+Message message(const Spellings& s, std::string_view file_text, std::string_view presumed, const Diag& d) {
+  std::vector<u32> starts = line_starts(file_text);
   auto at = std::ranges::upper_bound(starts, d.offset);
   std::string text = lex::render(d.kind, d.args);
   // #error and #warning say their line's text, a spelling of the session.
   if (d.kind == lex::LexDiag::error_directive || d.kind == lex::LexDiag::warning_directive)
-    text = s.spellings.name(static_cast<u32>(d.args[0]));
+    text = s.name(static_cast<u32>(d.args[0]));
   u32 line = static_cast<u32>(at - starts.begin());
   std::string name(presumed);
   // [cpp.line]: the presumed line and name its region resolved.
   if (d.presumed_line != 0) line = d.presumed_line;
-  if (d.presumed_name) name = s.spellings.name(*d.presumed_name);
+  if (d.presumed_name) name = s.name(*d.presumed_name);
   return Message{std::move(name), line, d.offset - *(at - 1) + 1, lex::message_of(d.kind).severity == lex::Severity::error,
                  std::move(text)};
 }
@@ -202,9 +342,13 @@ Config with_system_dirs(Config cfg) {
 }
 
 engine::query_task<Region> Pp::run(engine::Ctx& cx, FileId file) {
-  Session& s = session();
-  auto [main, path] = main_file(s, file);
-  Preprocessed p = preprocess(s, cx.fetch<FileText>(file), path);
+  const Source& src = cx.fetch<SourceOf>(file);
+  Session& s = session_for(src.config);
+  EngineHost host(cx, src.cwd);
+  Preprocessed p = [&] {
+    HostScope scope(s.files, host);
+    return preprocess(s, cx.fetch<FileText>(file), src.path);
+  }();
   for (const Diag& d : p.diags) cx.diag(engine::Loc{file_loc(d.file), d.offset}, lex::diag_id(d.kind), d.args[0], d.args[1]);
   co_return std::move(p.region);
 }

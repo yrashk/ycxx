@@ -7,10 +7,14 @@
 // the kinds (§9.4, §10.6). Fingerprint, structural equality and handle walking are written once,
 // generically, by reflection over the node kinds and records.
 //
-// Single-threaded for now: the engine (#14) decides how interners are shared between workers.
+// Shared by the engine's workers (#107): pools are append-only and readable without a lock, and a
+// fingerprint's lookup and insertion happen under one shard lock of the interner's index
+// (ycxx.ast.store), so equal content interns to one handle whichever worker comes first. A
+// handle's number may differ between runs; its fingerprint never does.
 export module ycxx.ast.interner;
 
 import std;
+export import ycxx.ast.store;
 import ycxx.ast.fingerprint;
 import ycxx.ast.handles;
 import ycxx.ast.schema;
@@ -65,46 +69,56 @@ inline constexpr Fp128 none_fp = seed("ycxx.ast.none");
 
 // ---------------------------------------------------------------- untyped pools
 
-// A fixed-stride pool of trivially copyable values, copied in and out.
+// A fixed-stride pool of trivially copyable values, copied in and out. Append-only and readable
+// while other workers append (ycxx.ast.store).
 class RawPool {
 public:
   RawPool() = default;
-  explicit RawPool(u32 stride) : stride_(stride) {}
+  explicit RawPool(u32 stride) : units_(stride) {}
 
-  u32 size() const { return stride_ == 0 ? 0 : static_cast<u32>(bytes_.size() / stride_); }
-  u32 stride() const { return stride_; }
+  // A high-water mark for a pool filled with `append` (ycxx.ast.store); a count with `push` only.
+  u32 size() const { return units_.size(); }
+  u32 stride() const { return units_.unit(); }
 
   template <class T>
   T load(u32 i) const
-    pre(sizeof(T) == stride_)
+    pre(sizeof(T) == stride())
     pre(i < size())
   {
     T v;
-    std::memcpy(&v, bytes_.data() + std::size_t(i) * stride_, sizeof(T));
+    std::memcpy(&v, units_.at(i), sizeof(T));
     return v;
   }
 
   template <class T>
   void store(u32 i, const T& v)
-    pre(sizeof(T) == stride_)
+    pre(sizeof(T) == stride())
     pre(i < size())
   {
-    std::memcpy(bytes_.data() + std::size_t(i) * stride_, &v, sizeof(T));
+    std::memcpy(units_.at(i), &v, sizeof(T));
   }
 
   template <class T>
   u32 push(const T& v)
-    pre(sizeof(T) == stride_)
+    pre(sizeof(T) == stride())
   {
-    u32 i = size();
-    bytes_.resize(bytes_.size() + sizeof(T));
-    std::memcpy(bytes_.data() + std::size_t(i) * stride_, &v, sizeof(T));
+    const u32 i = units_.alloc(1);
+    std::memcpy(units_.at(i), &v, sizeof(T));
     return i;
   }
 
+  // `xs` as one contiguous range; its first index.
+  template <class T>
+  u32 append(std::span<const T> xs)
+    pre(sizeof(T) == stride())
+  {
+    const u32 at = units_.alloc(static_cast<u32>(xs.size()));
+    if (!xs.empty()) std::memcpy(units_.at(at), xs.data(), xs.size_bytes());
+    return at;
+  }
+
 private:
-  std::vector<std::byte> bytes_;
-  u32 stride_ = 0;
+  Chunked units_;
 };
 
 template <class List>
@@ -120,32 +134,38 @@ class Names {
 public:
   NameId intern(std::string_view spelling) {
     Fp128 f = mix_bytes(seed("ycxx.ast.NameId"), spelling);
-    if (auto it = table_.find(f); it != table_.end()) {
-      contract_assert(spellings_[std::to_underlying(it->second)] == spelling);
-      return it->second;
-    }
-    NameId n{static_cast<u32>(spellings_.size())};
-    spellings_.emplace_back(spelling);
-    fps_.push_back(f);
-    table_.emplace(f, n);
+    auto [n, fresh] = table_.find_or_insert(f, [&] {
+      const u32 at = chars_.append(std::span<const char>(spelling.data(), spelling.size()));
+      const u32 i = ranges_.push({at, static_cast<u32>(spelling.size())});
+      fps_.put(i, f);
+      return NameId{i};
+    });
+    if (!fresh) contract_assert(this->spelling(n) == spelling);
     return n;
   }
   std::string_view spelling(NameId n) const
-    pre(std::to_underlying(n) < spellings_.size())
+    pre(std::to_underlying(n) < size())
   {
-    return spellings_[std::to_underlying(n)];
+    const Range r = ranges_.get(std::to_underlying(n));
+    const auto cs = chars_.span(r.offset, r.size);
+    return {cs.data(), cs.size()};
   }
   Fp128 fp(NameId n) const
-    pre(std::to_underlying(n) < fps_.size())
+    pre(std::to_underlying(n) < size())
   {
-    return fps_[std::to_underlying(n)];
+    return fps_.get(std::to_underlying(n));
   }
-  u32 size() const { return static_cast<u32>(fps_.size()); }
+  u32 size() const { return ranges_.size(); }
 
 private:
-  std::deque<std::string> spellings_;
-  std::vector<Fp128> fps_;
-  std::unordered_map<Fp128, NameId, Fp128Hash> table_;
+  struct Range {
+    u32 offset;
+    u32 size;
+  };
+  Column<char> chars_;
+  Column<Range> ranges_;
+  Column<Fp128> fps_;
+  FpIndex<NameId> table_;
 };
 
 // ---------------------------------------------------------------- placeholder interners
@@ -159,26 +179,25 @@ public:
   // The handle of the value with fingerprint `f`; equal fingerprints give equal handles.
   template <class H>
   H add(Fp128 f) {
-    auto [it, fresh] = table_.emplace(f, static_cast<u32>(fps_.size()));
-    if (fresh) fps_.push_back(f);
-    if constexpr (std::is_same_v<H, QualType>) return make_qual_type(it->second);
-    else return H{it->second};
+    const u32 n = table_.find_or_insert(f, [&] { return fps_.push(f); }).first;
+    if constexpr (std::is_same_v<H, QualType>) return make_qual_type(n);
+    else return H{n};
   }
   template <class H>
   Fp128 fp(H h) const {
     if (is_none(h)) return none_fp;
     if constexpr (std::is_same_v<H, QualType>) {
       contract_assert(type_node_of(h) < fps_.size());
-      return mix(fps_[type_node_of(h)], std::to_underlying(cv_of(h)));
+      return mix(fps_.get(type_node_of(h)), std::to_underlying(cv_of(h)));
     } else {
       contract_assert(std::to_underlying(h) < fps_.size());
-      return fps_[std::to_underlying(h)];
+      return fps_.get(std::to_underlying(h));
     }
   }
 
 private:
-  std::vector<Fp128> fps_;
-  std::unordered_map<Fp128, u32, Fp128Hash> table_;
+  Column<Fp128> fps_;
+  FpIndex<u32> table_;
 };
 
 // ---------------------------------------------------------------- types and values
@@ -191,35 +210,49 @@ class KindTable {
 public:
   KindTable() : pools_(make_pools<List>()) {}
 
-  u32 size() const { return static_cast<u32>(kinds_.size()); }
+  u32 size() const { return kinds_.size(); }
   bool contains(u32 n) const { return n < size(); }
   u32 kind(u32 n) const
     pre(contains(n))
   {
-    return kinds_[n];
+    return kinds_.get(n);
   }
 
   template <class T>
     requires(List::template contains<T>)
-  bool is(u32 n) const { return contains(n) && kinds_[n] == List::template index_of<T>(); }
+  bool is(u32 n) const { return contains(n) && kinds_.get(n) == List::template index_of<T>(); }
 
   template <class T>
     requires(List::template contains<T>)
   T get(u32 n) const
     pre(is<T>(n))
   {
-    return pools_[kinds_[n]].template load<T>(slots_[n]);
+    return pools_[kinds_.get(n)].template load<T>(slots_.get(n));
   }
 
   Fp128 fp(u32 n) const
     pre(contains(n))
   {
-    return fps_[n];
+    return fps_.get(n);
   }
 
-  std::optional<u32> find(Fp128 f) const {
-    if (auto it = table_.find(f); it != table_.end()) return it->second;
-    return std::nullopt;
+  std::optional<u32> find(Fp128 f) const { return table_.find(f); }
+
+  // The value with fingerprint `f`, inserting `v` if there is none; whether it was inserted.
+  // `also(n)` runs under the same lock for a new value, before anyone else can find it; like
+  // `make`, it takes no index lock.
+  template <class T, class Also = void (*)(u32)>
+    requires(List::template contains<T>)
+  std::pair<u32, bool> find_or_insert(const T& v, Fp128 f, Also also = [](u32) {}) {
+    return table_.find_or_insert(f, [&] {
+      constexpr u32 k = List::template index_of<T>();
+      const u32 slot = pools_[k].push(v);
+      const u32 n = kinds_.push(static_cast<u8>(k));
+      slots_.put(n, slot);
+      fps_.put(n, f);
+      also(n);
+      return n;
+    });
   }
 
   template <class T>
@@ -227,13 +260,7 @@ public:
   u32 insert(const T& v, Fp128 f)
     pre(!find(f))
   {
-    constexpr u32 k = List::template index_of<T>();
-    u32 n = size();
-    slots_.push_back(pools_[k].push(v));
-    kinds_.push_back(static_cast<u8>(k));
-    fps_.push_back(f);
-    table_.emplace(f, n);
-    return n;
+    return find_or_insert(v, f).first;
   }
 
   // Rewrites value `n` in place with content of the same fingerprint (compaction renumbers the
@@ -243,15 +270,15 @@ public:
   void replace(u32 n, const T& v)
     pre(is<T>(n))
   {
-    pools_[kinds_[n]].store(slots_[n], v);
+    pools_[kinds_.get(n)].store(slots_.get(n), v);
   }
 
 private:
   std::array<RawPool, List::size> pools_;
-  std::vector<u8> kinds_;
-  std::vector<u32> slots_;
-  std::vector<Fp128> fps_;
-  std::unordered_map<Fp128, u32, Fp128Hash> table_;
+  Column<u8> kinds_;
+  Column<u32> slots_;
+  Column<Fp128> fps_;
+  FpIndex<u32> table_;
 };
 
 // The `types` interner (§5.1, §5.2): the kind table and `canon[]`, the canonical form of each
@@ -275,24 +302,23 @@ public:
   QualType canon(QualType q) const
     pre(contains(q))
   {
-    return canon_[type_node_of(q)];
+    return canon_.get(type_node_of(q));
   }
 
   KindTable<TypeKinds>& table() { return table_; }
   const KindTable<TypeKinds>& table() const { return table_; }
 
-  // `canon` is the node's canonical form, or none for a canonical node, which is its own.
+  // `canon` is the node's canonical form, or none for a canonical node, which is its own. A node
+  // another worker interned first keeps its own (equal) canonical form.
   template <class T>
     requires is_type_kind<T>
-  QualType insert(const T& v, Fp128 f, std::optional<QualType> canon) {
-    QualType q = make_qual_type(table_.insert(v, f));
-    canon_.push_back(canon.value_or(q));
-    return q;
+  QualType find_or_insert(const T& v, Fp128 f, std::optional<QualType> canon) {
+    return make_qual_type(table_.find_or_insert(v, f, [&](u32 n) { canon_.put(n, canon.value_or(make_qual_type(n))); }).first);
   }
 
 private:
   KindTable<TypeKinds> table_;
-  std::vector<QualType> canon_;
+  Column<QualType> canon_;
 };
 
 // The `values` interner (§5.5).
@@ -329,7 +355,7 @@ private:
 
 // ---------------------------------------------------------------- tree nodes
 
-// The `ast` interner: per kind, a payload pool and parallel arrays of fingerprints and widths;
+// The `ast` interner: per kind, a payload pool and parallel columns of fingerprints and widths;
 // one edge pool; a table from fingerprint to node. The kind is in the handle, so nodes have no
 // header (§9.4). This is the storage; `Interners::intern` is how nodes get in.
 class Ast {
@@ -342,7 +368,8 @@ public:
     for (const auto& p : pools_) n += p.size();
     return n;
   }
-  u32 edge_count() const { return static_cast<u32>(edges_.size()); }
+  // Edge slots handed out (a block's skipped tail included).
+  u32 edge_count() const { return edges_.size(); }
 
   bool contains(NodeId n) const { return kind_of(n) < Nodes::size && index_of(n) < size(kind_of(n)); }
 
@@ -361,53 +388,54 @@ public:
   Fp128 fp(NodeId n) const
     pre(n == NodeId::none || contains(n))
   {
-    return n == NodeId::none ? none_fp : fps_[kind_of(n)][index_of(n)];
+    return n == NodeId::none ? none_fp : fps_[kind_of(n)].get(index_of(n));
   }
 
   // The node's extent in tokens (§3.4).
   u32 width(NodeId n) const
     pre(contains(n))
   {
-    return widths_[kind_of(n)][index_of(n)];
+    return widths_[kind_of(n)].get(index_of(n));
   }
 
-  std::span<const Child> edges() const { return edges_; }
   std::span<const Child> children(ChildList l) const
-    pre(l.offset + l.size <= edges_.size())
+    pre(l.offset + l.size <= edge_count())
   {
-    return std::span(edges_).subspan(l.offset, l.size);
+    return edges_.span(l.offset, l.size);
   }
 
-  // Low level, for the interning and compaction code: look up a fingerprint, append a node whose
-  // lists are already in this pool, append edges.
-  std::optional<NodeId> find(Fp128 f) const {
-    if (auto it = table_.find(f); it != table_.end()) return it->second;
-    return std::nullopt;
+  // Low level, for the interning and compaction code: look up a fingerprint, insert a node whose
+  // lists `make` copies into this pool (under the fingerprint's lock), append edges.
+  std::optional<NodeId> find(Fp128 f) const { return table_.find(f); }
+  template <class T, class Make>
+    requires is_node_kind<T>
+  std::pair<NodeId, bool> find_or_insert(Fp128 f, u32 width, Make&& make) {
+    return table_.find_or_insert(f, [&] {
+      constexpr u32 k = Nodes::index_of<T>();
+      const T stored = make();
+      const NodeId n = make_node(k, pools_[k].push(stored));
+      fps_[k].put(index_of(n), f);
+      widths_[k].put(index_of(n), width);
+      return n;
+    });
   }
   template <class T>
     requires is_node_kind<T>
   NodeId insert(const T& v, u32 width, Fp128 f)
     pre(!find(f))
   {
-    constexpr u32 k = Nodes::index_of<T>();
-    NodeId n = make_node(k, pools_[k].push(v));
-    fps_[k].push_back(f);
-    widths_[k].push_back(width);
-    table_.emplace(f, n);
-    return n;
+    return find_or_insert<T>(f, width, [&] { return v; }).first;
   }
   ChildList append_edges(std::span<const Child> cs) {
-    ChildList l{static_cast<u32>(edges_.size()), static_cast<u32>(cs.size())};
-    edges_.insert(edges_.end(), cs.begin(), cs.end());
-    return l;
+    return ChildList{edges_.append(cs), static_cast<u32>(cs.size())};
   }
 
 private:
   std::array<RawPool, Nodes::size> pools_;
-  std::array<std::vector<Fp128>, Nodes::size> fps_;
-  std::array<std::vector<u32>, Nodes::size> widths_;
-  std::vector<Child> edges_;
-  std::unordered_map<Fp128, NodeId, Fp128Hash> table_;
+  std::array<Column<Fp128>, Nodes::size> fps_;
+  std::array<Column<u32>, Nodes::size> widths_;
+  Column<Child> edges_;
+  FpIndex<NodeId> table_;
 };
 
 // ---------------------------------------------------------------- interned lists
@@ -443,7 +471,7 @@ public:
 
   template <class T>
     requires is_seq_element<T>
-  Fp128 fp(SeqId<T> s) const { return fps_[SeqElements::index_of<T>()].at(s.index); }
+  Fp128 fp(SeqId<T> s) const { return fps_[SeqElements::index_of<T>()].get(s.index); }
 
   template <class T>
     requires is_seq_element<T>
@@ -451,14 +479,27 @@ public:
 
   template <class T>
     requires is_seq_element<T>
-  u32 count() const { return static_cast<u32>(ranges_[SeqElements::index_of<T>()].size()); }
+  u32 count() const { return ranges_[SeqElements::index_of<T>()].size(); }
 
   template <class T>
     requires is_seq_element<T>
   std::optional<SeqId<T>> find(Fp128 f) const {
-    auto& t = tables_[SeqElements::index_of<T>()];
-    if (auto it = t.find(f); it != t.end()) return SeqId<T>{it->second};
+    if (auto i = tables_[SeqElements::index_of<T>()].find(f)) return SeqId<T>{*i};
     return std::nullopt;
+  }
+
+  // The list with fingerprint `f`, inserting `xs` if there is none; whether it was inserted.
+  template <class T>
+    requires is_seq_element<T>
+  std::pair<SeqId<T>, bool> find_or_insert(std::span<const T> xs, Fp128 f) {
+    constexpr u32 k = SeqElements::index_of<T>();
+    auto [i, fresh] = tables_[k].find_or_insert(f, [&] {
+      const Range r{elements_[k].append(xs), static_cast<u32>(xs.size())};
+      const u32 n = ranges_[k].push(r);
+      fps_[k].put(n, f);
+      return n;
+    });
+    return {SeqId<T>{i}, fresh};
   }
 
   template <class T>
@@ -466,14 +507,7 @@ public:
   SeqId<T> insert(std::span<const T> xs, Fp128 f)
     pre(!find<T>(f))
   {
-    constexpr u32 k = SeqElements::index_of<T>();
-    Range r{elements_[k].size(), static_cast<u32>(xs.size())};
-    for (const T& x : xs) elements_[k].push(x);
-    SeqId<T> s{static_cast<u32>(ranges_[k].size())};
-    ranges_[k].push_back(r);
-    fps_[k].push_back(f);
-    tables_[k].emplace(f, s.index);
-    return s;
+    return find_or_insert<T>(xs, f).first;
   }
 
 private:
@@ -485,13 +519,13 @@ private:
   Range range(SeqId<T> s) const
     pre(contains(s))
   {
-    return ranges_[SeqElements::index_of<T>()][s.index];
+    return ranges_[SeqElements::index_of<T>()].get(s.index);
   }
 
   std::array<RawPool, SeqElements::size> elements_;
-  std::array<std::vector<Range>, SeqElements::size> ranges_;
-  std::array<std::vector<Fp128>, SeqElements::size> fps_;
-  std::array<std::unordered_map<Fp128, u32, Fp128Hash>, SeqElements::size> tables_;
+  std::array<Column<Range>, SeqElements::size> ranges_;
+  std::array<Column<Fp128>, SeqElements::size> fps_;
+  std::array<FpIndex<u32>, SeqElements::size> tables_;
 };
 
 // ---------------------------------------------------------------- the interner set
@@ -520,7 +554,7 @@ struct Interners {
   // fingerprints. `edges` is the pool the value's `ChildList`s index.
   template <class V>
   Fp128 fingerprint(const V& v, std::span<const Child> edges) const {
-    return fp_value(Fp128{}, v, edges);
+    return fp_value(Fp128{}, v, SpanEdges{edges});
   }
 
   // Interns a node. Its children must be interned; its `ChildList`s index `edges`, and are copied
@@ -528,34 +562,54 @@ struct Interners {
   template <class T>
     requires is_node_kind<T>
   NodeId intern(const T& v, u32 width, std::span<const Child> edges = {}) {
+    return intern_with(v, width, SpanEdges{edges});
+  }
+  // Interns a node whose lists are already in the edge pool (a stored node, re-interned).
+  template <class T>
+    requires is_node_kind<T>
+  NodeId intern_stored(const T& v, u32 width) {
+    return intern_with(v, width, PoolEdges{&ast});
+  }
+
+private:
+  // A node's lists, in a span the caller holds or in the edge pool.
+  struct SpanEdges {
+    std::span<const Child> edges;
+    std::span<const Child> operator()(ChildList l) const { return edges.subspan(l.offset, l.size); }
+  };
+  struct PoolEdges {
+    const Ast* ast;
+    std::span<const Child> operator()(ChildList l) const { return ast->children(l); }
+  };
+
+  template <class T, class E>
+    requires is_node_kind<T>
+  NodeId intern_with(const T& v, u32 width, E edges) {
     for_each_ref(v, [this, edges]<class H>(const H& h) {
       if constexpr (std::is_same_v<H, NodeId>) {
         // BOOTSTRAP: contracts: in a lambda's contract predicate GCC 16.2 takes `this` to be the
         // closure, so a predicate naming a member goes through a local (STATUS).
         bool interned = h == NodeId::none || ast.contains(h);
         contract_assert(interned);
-      } else if constexpr (std::is_same_v<H, ChildList>) {
-        contract_assert(h.offset + h.size <= edges.size());
       }
     });
-    Fp128 f = mix(fingerprint(v, edges), width);
-    if (auto hit = ast.find(f)) {
+    Fp128 f = mix(fp_value(Fp128{}, v, edges), width);
+    auto [n, fresh] = ast.find_or_insert<T>(f, width, [&] {
+      T stored = v;
+      for_each_ref(stored, [&]<class H>(H& h) {
+        if constexpr (std::is_same_v<H, ChildList>) h = ast.append_edges(edges(h));
+      });
+      return stored;
+    });
+    if (!fresh) {
       // Fingerprints are identity (§9.2); a collision is a bug, caught here.
-      contract_assert(ast.is<T>(*hit) && ast.width(*hit) == width && same(ast.get<T>(*hit), ast.edges(), v, edges));
-      return *hit;
+      bool same_content = ast.is<T>(n) && ast.width(n) == width && same_as_stored(ast.get<T>(n), v, edges);
+      contract_assert(same_content);
     }
-    T stored = v;
-    for_each_ref(stored, [&]<class H>(H& h) {
-      // `edges` may be the edge pool itself (re-interning a stored node), which appending can
-      // reallocate, so each slice is copied out first.
-      if constexpr (std::is_same_v<H, ChildList>) {
-        std::vector<Child> slice(edges.begin() + h.offset, edges.begin() + h.offset + h.size);
-        h = ast.append_edges(slice);
-      }
-    });
-    return ast.insert(stored, width, f);
+    return n;
   }
 
+public:
   // ---------------------------------------------------------------- types (§5.1, §5.2)
 
   // Interns a type node with top-level `cv` (applied by `qualified`). Its handles must be
@@ -583,8 +637,10 @@ struct Interners {
       bool same_content = types.is<T>(q) && same(types.get<T>(q), {}, v, {});
       contract_assert(same_content);  // fingerprints are identity (§9.2)
     } else {
+      // The canonical form interns other types, so it is computed outside the index's lock; a
+      // worker that inserted the node meanwhile computed the same one.
       std::optional<QualType> c = canonical_form(v);
-      q = types.insert(v, f, c);
+      q = types.find_or_insert(v, f, c);
     }
     return qualified(q, cv);
   }
@@ -627,13 +683,13 @@ struct Interners {
       }
     });
     Fp128 f = fingerprint(v, {});
-    if (auto hit = values.table().find(f)) {
-      ConstId c{*hit};
+    auto [n, fresh] = values.table().find_or_insert(v, f);
+    ConstId c{n};
+    if (!fresh) {
       bool same_content = values.is<T>(c) && same(values.get<T>(c), {}, v, {});
       contract_assert(same_content);
-      return c;
     }
-    return ConstId{values.table().insert(v, f)};
+    return c;
   }
 
   // Interns a list. Its elements' handles must be interned.
@@ -641,12 +697,10 @@ struct Interners {
     requires is_seq_element<T>
   SeqId<T> intern_seq(std::span<const T> xs) {
     Fp128 f = mix(schema_seed_v<SeqId<T>>, xs.size());
-    for (const T& x : xs) f = fp_value(f, x, {});
-    if (auto hit = seqs.find<T>(f)) {
-      contract_assert(std::ranges::equal(seqs.elements(*hit), xs));
-      return *hit;
-    }
-    return seqs.insert<T>(xs, f);
+    for (const T& x : xs) f = fp_value(f, x, SpanEdges{});
+    auto [s, fresh] = seqs.find_or_insert<T>(xs, f);
+    if (!fresh) contract_assert(std::ranges::equal(seqs.elements(s), xs));
+    return s;
   }
   template <class T>
     requires is_seq_element<T>
@@ -670,6 +724,20 @@ struct Interners {
   }
 
 private:
+  // `same` against a stored node, whose lists are in the edge pool.
+  template <class V, class E>
+  bool same_as_stored(const V& stored, const V& v, E ev) const {
+    if constexpr (std::is_same_v<V, ChildList>) {
+      return stored.size == v.size && std::ranges::equal(ast.children(stored), ev(v));
+    } else if constexpr (std::is_class_v<V> && !is_handle<V>) {
+      bool r = true;
+      template for (constexpr auto m : members_of<V>()) r = r && same_as_stored(stored.[:m:], v.[:m:], ev);
+      return r;
+    } else {
+      return stored == v;
+    }
+  }
+
   // `qualified(c, cv)` for a canonical `c`, which construction has already interned.
   QualType canonical_qualified(QualType c, Cv cv) const {
     if (cv == Cv::none) return c;
@@ -715,13 +783,13 @@ private:
     throw std::meta::exception(u8"no member of Interners for this handle's interner", h);
   }
 
-  template <class V>
-  Fp128 fp_value(Fp128 h, const V& v, std::span<const Child> edges) const {
+  template <class V, class E>
+  Fp128 fp_value(Fp128 h, const V& v, E edges) const {
     if constexpr (is_handle<V>) {
       return mix(h, fp(v));
     } else if constexpr (std::is_same_v<V, ChildList>) {
       h = mix(h, v.size);
-      for (const Child& c : edges.subspan(v.offset, v.size)) h = fp_value(h, c, edges);
+      for (const Child& c : edges(v)) h = fp_value(h, c, edges);
       return h;
     } else if constexpr (std::is_enum_v<V> || std::is_integral_v<V>) {
       return mix(h, static_cast<u64>(v));
