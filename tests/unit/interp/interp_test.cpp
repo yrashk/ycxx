@@ -70,6 +70,8 @@ struct World {
     type("bool", bool_t);
     type("char", char_t);
     type("long", long_t);
+    type("llong", ast::builtin(in, long_long));
+    type("long*", ast::pointer_to(in, long_t));
     type("cint", cint_t);
     type("cchar", cchar_t);
     type("int*", ast::pointer_to(in, int_t));
@@ -86,6 +88,12 @@ struct World {
     hi = in.intern_value(ast::VString{hi_t, in.intern_seq(std::span<const std::uint8_t>(units))});
     ConstId addr = in.intern_value(ast::VLvalue{hi, in.intern_seq(std::span<const std::uint32_t>{}), 0});
     keys["{s}"] = std::format("#{}", std::to_underlying(addr));
+    std::array<std::uint8_t, 3> xy{'x', 'y', 0};
+    ConstId xy_s = in.intern_value(ast::VString{hi_t, in.intern_seq(std::span<const std::uint8_t>(xy))});
+    keys["{s2}"] = std::format("#{}", std::to_underlying(in.intern_value(ast::VLvalue{xy_s, in.intern_seq(std::span<const std::uint32_t>{}), 0})));
+    std::array<std::uint8_t, 3> ci{'c', 'i', 0};
+    ConstId ci_s = in.intern_value(ast::VString{hi_t, in.intern_seq(std::span<const std::uint8_t>(ci))});
+    keys["{s3}"] = std::format("#{}", std::to_underlying(in.intern_value(ast::VLvalue{ci_s, in.intern_seq(std::span<const std::uint32_t>{}), 0})));
     keys["{null}"] = std::format("#{}", std::to_underlying(in.intern_value(ast::VNullptr{})));
   }
 
@@ -896,6 +904,49 @@ func {@u} {
 )");
   expect_value(u.runtime(), -1, "int read as unsigned in runtime mode");
   expect_failure(u.go(), Reason::access_type, "int read as unsigned in constant mode");
+
+  // Only the signed or unsigned counterpart: not long through long long, nor int through wchar_t.
+  Run w(R"(
+func {@w} {
+^0(%0: !state):
+  %1: !state, %2: {long*} = alloc %0 [{long}, automatic, zero]
+  %3: !state = obj.begin %1, %2 [{long}]
+  %4: {llong} = load %3, %2 [{llong}, /]
+  %5: {int} = iconv %4
+  ret %3, %5
+}
+)");
+  expect_failure(w.runtime(), Reason::access_type, "long read as long long");
+
+  // Literals that cannot share an offset compare unequal ([expr.const]): "hi" + 1 and "xy" + 1,
+  // and "hi" + 1 and "ci" + 1 too, since 'h' and 'c' precede them. ("hi" == "hi" is unspecified,
+  // above.)
+  Run lit(R"(
+func {@lit} {
+^0(%0: !state, %1: {bool}):
+  %2: {cchar[3]*} = const [{s}]
+  %3: {cchar*} = ptr_member %2 [{cchar}, /e0]
+  %4: {int} = const [{i1}]
+  %5: {cchar*} = ptr_add %3, %4 [{cchar}]
+  cond_br %1 ^1(%0), ^2(%0)
+^1(%6: !state):
+  %7: {cchar[3]*} = const [{s2}]
+  %8: {cchar*} = ptr_member %7 [{cchar}, /e0]
+  %9: {cchar*} = ptr_add %8, %4 [{cchar}]
+  %10: {bool} = ptr_cmp %5, %9 [eq]
+  %11: {int} = iconv %10
+  ret %6, %11
+^2(%12: !state):
+  %13: {cchar[3]*} = const [{s3}]
+  %14: {cchar*} = ptr_member %13 [{cchar}, /e0]
+  %15: {cchar*} = ptr_add %14, %4 [{cchar}]
+  %16: {bool} = ptr_cmp %5, %15 [eq]
+  %17: {int} = iconv %16
+  ret %12, %17
+}
+)");
+  expect_value(lit.go({i(1)}), 0, "\"hi\" + 1 == \"xy\" + 1");
+  expect_value(lit.go({i(0)}), 0, "\"hi\" + 1 == \"ci\" + 1");
 }
 
 }  // namespace

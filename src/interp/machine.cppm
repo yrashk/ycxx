@@ -215,6 +215,7 @@ private:
   std::optional<Value> constant(ConstId c, QualType type);
   std::optional<u32> literal_object(ConstId s);
   i64 offset_of(const Value& p);
+  bool may_overlap(const Value& a, const Value& b);
 
   // ------------------------------------------------------------ execution
 
@@ -332,9 +333,10 @@ bool Machine::accessible_as(QualType object, QualType glvalue) {
   if (config_.mode == Mode::constant) return false;
   auto a = ast::builtin_of(*in_, object), b = ast::builtin_of(*in_, glvalue);
   if (!a || !b || *a == ast::Builtin::bool_ || *b == ast::Builtin::bool_) return false;
-  const Shape& sa = shape(object);
-  const Shape& sb = shape(glvalue);
-  return sa.kind == Kind::integer && sb.kind == Kind::integer && sa.width == sb.width;
+  if (!ast::is_integral(*a) || !ast::is_integral(*b)) return false;
+  auto standard = [](ast::Builtin x) { return ast::is_standard_signed(x) || ast::is_standard_unsigned(x); };
+  if (!standard(*a) || !standard(*b)) return false;
+  return ast::unsigned_counterpart(*a) == ast::unsigned_counterpart(*b);
 }
 
 // ------------------------------------------------------------------ paths
@@ -683,10 +685,25 @@ i64 Machine::offset_of(const Value& p) {
   return off;
 }
 
+// Whether two pointers into string literal objects could point to the same offset of one object
+// ([intro.object]: potentially non-unique objects may overlap): the code units around the two
+// positions agree wherever both literals have one ([expr.const]).
+bool Machine::may_overlap(const Value& a, const Value& b) {
+  const Object& oa = objects_[a.ref];
+  const Object& ob = objects_[b.ref];
+  u64 es = shape(shape(oa.type).inner).size;
+  if (es == 0 || shape(shape(ob.type).inner).size != es) return false;
+  i64 ia = offset_of(a) / i64(es), ib = offset_of(b) / i64(es);
+  i64 na = oa.ncells, nb = ob.ncells;
+  for (i64 d = -std::min(ia, ib); ia + d < na && ib + d < nb; ++d)
+    if (cells_[oa.cell0 + u32(ia + d)].v.bits != cells_[ob.cell0 + u32(ib + d)].v.bits) return false;
+  return true;
+}
+
 // [expr.eq], [expr.rel]: pointers into the same complete object compare by address ([expr.rel]/4:
 // a later element or subobject compares greater). Pointers to different objects are unequal,
-// unless one is past the end of its complete object, or both point into string literal objects,
-// which may overlap ([lex.string]/9): then the result is unspecified, and so is their order.
+// unless one is past the end of its complete object, or both point into string literal objects
+// that may overlap there: then the result is unspecified, and so is their order.
 Machine::Flow Machine::compare_pointers(Frame& f, NodeId n, ir::Pred pred, const Value& a, const Value& b) {
   using enum ir::Pred;
   bool equality = pred == eq || pred == ne;
@@ -718,7 +735,8 @@ Machine::Flow Machine::compare_pointers(Frame& f, NodeId n, ir::Pred pred, const
       return size != 0 && offset_of(p) == size;
     };
     if (at_end(a) || at_end(b)) return fail(Reason::unspecified_comparison);
-    if (objects_[a.ref].origin == Origin::literal && objects_[b.ref].origin == Origin::literal)
+    if (objects_[a.ref].origin == Origin::literal && objects_[b.ref].origin == Origin::literal &&
+        may_overlap(a, b))
       return fail(Reason::unspecified_comparison);
   }
   return result(same == (pred == eq));
