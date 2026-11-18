@@ -104,7 +104,7 @@ What is true of the code today. Work in progress and its owners are tracked in
 - Not yet: `long double` and the extended floating types' values (left to the
   target), the type of an integer literal (sema, #33).
 
-## Preprocessor, includes and object-like macros (#85, 2026-11-18)
+## Preprocessor: includes and macros (#85, 2026-11-18)
 
 - `ycxx.pp` (`src/pp/`): phase 4 as query-engine.md §B9's contextual query, with a local stand-in
   for the engine parts that do not exist yet (#16, #93).
@@ -125,11 +125,16 @@ What is true of the code today. Work in progress and its owners are tracked in
   - `#include` in both forms and the macro-replaced form, and `#include_next`;
   - search directories from `-I`, `-isystem` and `-iquote`, then libycxx's headers and the
     SDK's (`:system`, configured by CMake);
-  - object-like `#define` and `#undef` with the redefinition check, rescanning and painting
+  - `#define` and `#undef` with the redefinition check, rescanning and painting
     ([cpp.rescan]);
+  - function-like macros (`:unit`'s `invocation`, `substitute`, `paste`): arguments across
+    lines, argument counts, omitted variable arguments, `#`, `##` with placemarkers,
+    `__VA_ARGS__`, `__VA_OPT__`, and the constraints on replacement lists. Arguments are
+    replaced in a barrier context. Their tokens sit in expansions of kind argument, and pasted
+    tokens in kind paste, so `Region::site` leads to the invocation;
   - `#pragma once` (other pragmas pass through to `-E`), and the null directive.
-  - Every other directive is diagnosed as unsupported. Function-like macros and conditionals
-    come in the next two parts of #85.
+  - Every other directive is diagnosed as unsupported. Conditionals and the rest come in the
+    third part of #85.
 - `ycxx cxx -E` prints what Clang's `-E` would, by Clang's line and spacing rules. `preprocess`
   is in `tests/features/ycxx.txt`. Diagnostics in included files name their file.
 - Tests:
@@ -137,7 +142,7 @@ What is true of the code today. Work in progress and its owners are tracked in
   - `tests/own/slice/a3-local-header.run.cpp`;
   - `unit.pp`: resolution, traces, reuse across TUs, and incremental equals cold over edit
     sequences.
-- Not yet: function-like macros, `#`/`##`, conditionals, `#line`, `#error`, `_Pragma`, the
+- Not yet: conditionals, `#line`, `#error`, `_Pragma`, the
   predefined macros beyond `__cplusplus`, and module and import lines (#85). The engine cell
   `Pp(main)` does not depend on headers until #93. Items are cut from the flattened TU, so a
   header's items carry the main file's identity (#85). Sema diagnostics in headers render
