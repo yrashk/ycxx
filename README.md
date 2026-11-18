@@ -32,6 +32,14 @@ in [GitHub issues](https://github.com/yrashk/ycxx/issues) and the
     destructors (RAII: destructors run at every block exit, `return`, `break` and `continue`),
     temporaries, references, and overloading by exact match, promotion and conversion. Not yet:
     passing or returning a class by value, inheritance.
+  - Function templates (2026-11-18): templates at namespace scope with type and integral
+    non-type parameters and default arguments, template argument deduction from calls,
+    explicitly specified arguments (`f<int>(x)`), overload resolution among templates and
+    functions with partial ordering, two-phase name lookup with argument-dependent lookup at the
+    end of the translation unit, and instantiation with Itanium names that match Clang's. Not
+    yet: class templates, specializations, parameter packs, concepts, and a specialization used
+    in two translation units of one program (its definitions are not coalesced yet,
+    [#124](https://github.com/yrashk/ycxx/issues/124)).
   - Constant evaluation, by ycxx's own interpreter of its IR: `constexpr` and `consteval`
     functions and variables, `constinit`, `static_assert` and `if consteval`, with an error that
     says why an expression is not constant (overflow, an uninitialized read, a dangling pointer,
@@ -62,7 +70,8 @@ build/bin/ycxx cxx hello.cpp -o hello && ./hello
 **Not yet:**
 - `#embed`, and the standard library's headers: `<cstdio>` now preprocesses, but libycxx does
   not yet know ycxx (yrashk/libycxx#17), and sema lacks namespaces.
-- Inheritance and virtual functions, passing classes by value, enums, namespaces, and templates.
+- Inheritance and virtual functions, passing classes by value, enums, namespaces, and class
+  templates.
 - `if constexpr`, and taking the address of a variable in a namespace-scope initializer
   (`int* p = &g;` passes the front end but not code generation yet).
 - Exceptions.
@@ -80,12 +89,13 @@ Nothing beyond the subset above compiles, so neither real programs nor libycxx d
 - the resident daemon: concurrent requests, and making it the default
   ([#84](https://github.com/yrashk/ycxx/issues/84));
 - classes and the object model ([#86](https://github.com/yrashk/ycxx/issues/86));
+- templates and overload resolution: function templates work, class templates are next
+  ([#88](https://github.com/yrashk/ycxx/issues/88));
 - including the standard headers: libycxx's compiler detection
   ([yrashk/libycxx#17](https://github.com/yrashk/libycxx/issues/17)), then `<cstdio>`
   through sema ([#133](https://github.com/yrashk/ycxx/issues/133)).
 
-Next come templates ([#88](https://github.com/yrashk/ycxx/issues/88)) and exceptions
-([#89](https://github.com/yrashk/ycxx/issues/89)).
+Next come exceptions ([#89](https://github.com/yrashk/ycxx/issues/89)).
 
 ## Goals
 
