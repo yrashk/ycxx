@@ -597,7 +597,8 @@ struct KindTableBase {
 
 template <class K>
 struct key_hash {
-  std::size_t operator()(const K& k) const noexcept { return static_cast<std::size_t>(fingerprint(k).lo); }
+  // In-memory: handles by number (`local_hash`), so a fetch hit reads no interner (§A3.3, #68).
+  std::size_t operator()(const K& k) const noexcept { return static_cast<std::size_t>(local_hash(k).lo); }
 };
 
 inline constexpr std::size_t shard_count = 64;
@@ -618,7 +619,7 @@ struct KindTable final : KindTableBase {
   std::array<Shard, shard_count> shards;
   Arena<Slot> slots;
 
-  Shard& shard_of(const Key& k) noexcept { return shards[fingerprint(k).hi % shard_count]; }
+  Shard& shard_of(const Key& k) noexcept { return shards[local_hash(k).hi % shard_count]; }
   std::coroutine_handle<> make_frame(Db& db, CellId c, std::uint32_t id, Root& root, bool validate, std::uint64_t old) override;
   void execute_sync(Db& db, CellId c, std::uint64_t restore, const Frame* chain) override;
   void provide(Db& db, CellId c) override;
