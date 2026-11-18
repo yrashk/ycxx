@@ -21,6 +21,9 @@ namespace ast = ycxx::ast;
 struct ClassName {
   std::string name;
   ast::EntityId scope = ast::EntityId::none;
+  // A class template specialization's template and arguments (§5.1.5.7).
+  ast::EntityId templ = ast::EntityId::none;
+  std::vector<ast::TemplateArg> args;
 };
 using ClassNames = std::function<ClassName(ast::EntityId)>;
 
@@ -154,6 +157,15 @@ class Mangler {
         if (!e) return e;
         inner = std::format("A{}_{}", dim, *e);
         candidates_.push_back(full_key(bare));
+      } else if (in_.types.is<ast::TDepName>(in_.types.canon(bare))) {
+        // `typename Q::n`: <nested-name> N <prefix> <source-name> E, a substitution candidate
+        // (§5.1.5.3).
+        if (auto s = find(full_key(bare))) return qualify(qualifiers, *s, q);
+        auto d = in_.types.get<ast::TDepName>(in_.types.canon(bare));
+        auto p = type(d.qualifier);
+        if (!p) return p;
+        inner = "N" + *p + source_name(in_.names.spelling(d.name)) + "E";
+        candidates_.push_back(full_key(bare));
       } else if (in_.types.is<ast::TTemplateParam>(in_.types.canon(bare))) {
         // <template-param> ::= T_ | T <parameter-2 non-negative number> _, a substitution
         // candidate (§5.1.5.8, §5.1.10). Function templates of namespace scope have one level.
@@ -197,6 +209,13 @@ class Mangler {
     if (auto s = find(key)) return *s;
     ClassName n = classes_ ? classes_(e) : ClassName{};
     if (n.name.empty()) return std::unexpected("a class whose name is unknown");
+    if (n.templ != ast::EntityId::none) {
+      // <unscoped-template-name> <template-args>, or inside a namespace a <nested-name> ending in
+      // them: the template's name and the specialization are candidates (§5.1.5.3, §5.1.10).
+      auto r = specialization_prefix(e, n);
+      if (!r) return r;
+      return n.scope != ast::EntityId::none ? "N" + *r + "E" : *r;
+    }
     std::string r = source_name(n.name);
     if (n.scope != ast::EntityId::none) {
       auto p = prefix(n.scope);
@@ -213,6 +232,7 @@ class Mangler {
     if (auto s = find(key)) return *s;
     ClassName n = classes_ ? classes_(e) : ClassName{};
     if (n.name.empty()) return std::unexpected("a scope whose name is unknown");
+    if (n.templ != ast::EntityId::none) return specialization_prefix(e, n);
     std::string r;
     if (n.scope != ast::EntityId::none) {
       auto p = prefix(n.scope);
@@ -254,6 +274,12 @@ class Mangler {
         out += *t;
         continue;
       }
+      // A template parameter as an argument: an <expression>, `X T_ E` (§5.1.5.7, §5.1.6).
+      if (in_.values.is<ast::VDepParam>(a.value) && in_.values.get<ast::VDepParam>(a.value).depth == 0) {
+        auto i = in_.values.get<ast::VDepParam>(a.value).index;
+        out += i == 0 ? "XT_E" : std::format("XT{}_E", i - 1);
+        continue;
+      }
       auto b = ast::builtin_of(in_, a.type);
       auto code = b ? builtin_code(*b) : std::nullopt;
       if (!code || !in_.values.is<ast::VInt>(a.value)) return std::unexpected("a template argument that is not a type or an integer");
@@ -278,6 +304,29 @@ class Mangler {
     }
     r += source_name(name);
     candidates_.push_back((std::uint64_t{2} << 32) | candidates_.size());
+    return r;
+  }
+
+  // A class template specialization `e` as a <prefix>: its scope's prefix, the template's name (a
+  // candidate, keyed by the template), the <template-args>, and the whole (a candidate).
+  std::expected<std::string, std::string> specialization_prefix(ast::EntityId e, const ClassName& n) {
+    std::string r;
+    std::uint64_t tkey = (std::uint64_t{1} << 32) | std::to_underlying(n.templ);
+    if (auto s = find(tkey)) {
+      r = *s;
+    } else {
+      if (n.scope != ast::EntityId::none) {
+        auto p = prefix(n.scope);
+        if (!p) return p;
+        r = *p;
+      }
+      r += source_name(n.name);
+      candidates_.push_back(tkey);
+    }
+    auto a = template_args(n.args);
+    if (!a) return a;
+    r += *a;
+    candidates_.push_back((std::uint64_t{1} << 32) | std::to_underlying(e));
     return r;
   }
 

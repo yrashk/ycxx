@@ -132,14 +132,17 @@ What is true of the code today. Work in progress and its owners are tracked in
     thread-locals.
   - pp's per-configuration process sessions have a mutex each, held for a whole `Pp` run (which
     never suspends).
-  - sema's records (#156): `Entities` and `Classes` keep records in `ast::Published` tables (by
-    handle, published once, read without a lock). Every unit that defines a class or enumeration
-    builds its record privately and publishes it; the first wins, and the records of equal
-    definitions are equal. A member's declaration is an item of each unit, so `Program` keeps it
-    (`member_decl`), not the record. Sema reads a record through `class_rec`, only where the
-    class is complete in its own unit, and an enumeration's own list sees the unit's record so
-    far, so what a unit accepts does not depend on other units. Each unit's unnamed namespace is
-    its own entity. Records stay first-wins across edits in a long-lived session (#115).
+  - sema's records (#156, #115): `Entities` keeps records in an `ast::Published` table (by
+    handle, published once, read without a lock). Readers use only the fields that are part of
+    the entity's identity, which equal records share; a variable's type, which is not, comes
+    from its declaration. Class and enumeration records are each unit's
+    (`Program::classes`, `sema::Classes`): entities are program-wide, but a session may see
+    different definitions of one (an edit, or several programs in one daemon), and the records
+    follow the unit's source. A member's declaration is an item of the unit (`member_decl`).
+    Sema reads a record through `class_rec`, only where the class is complete, and an
+    enumeration's own list sees its record so far. Each unit's unnamed namespace is its own
+    entity. The back end lays out from the unit's `FrontResult::shapes` (fields' types,
+    enumerations' underlying types) through `UnitShapes`, so a body edit stops at its cutoff.
   - Tests: `unit.pp` runs 48 units on 8 workers. `unit.pipeline_incremental` builds a program on
     2 and 8 threads and under chaos seeds, equal to an inline build, and eight units sharing a
     header of classes and enumerations on up to 8 threads, before and after an edit; two units
@@ -715,8 +718,8 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   (an array's or class's element values) in `values`; `DeclKind::data_member`.
 - **Front end:** a class definition at namespace scope is a `class_def` item whose members are
   their own items (ast.md §4.2); `Program::class_def(item)` reads them into a `ClassDef` and into
-  sema's class table (`World::classes`, the stand-in for `class_def`'s member list, which the
-  layout queries read). A class is complete at an item after its
+  sema's class table (the unit's `Program::classes` since #115, the stand-in for `class_def`'s
+  member list, which the layout reads). A class is complete at an item after its
   definition that it does not enclose (`Questions::is_complete`). Class names as type
   specifiers, elaborated type specifiers and forward declarations, member access (`Member`,
   [expr.ref]), list-initialization of aggregates and scalars (`InitList`, `ValueInit`,
@@ -727,7 +730,7 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
 - **IR:** members through `ptr_member` field steps; aggregates initialized element by element,
   in an object allocated `zero` when some element is value-initialized; trivial copies and copy
   assignment as `copy`, which `lower` turns into chunked loads and stores. Class layouts (Itanium
-  §2.4) are in the `LayoutType` and `LayoutStep` queries, from sema's class table; data with
+  §2.4) are computed by `QueryLayout` from the unit's shapes (`UnitShapes`, #115); data with
   `VAggregate` initializers; Itanium names for global-namespace class types in parameters.
 - Tests: `tests/own/classes/s1-*` (spec-only, plus seven from the review). 21 of 27 pass; the others wait for classes by value
   (#116), local classes (#117), non-constant default member initializers (#118) and records in
@@ -910,6 +913,43 @@ template's tokens again with the arguments bound.
   qualified names (`typename T::x`, with the `SSubst` sugar of ast.md §6.4), deduction from an
   overload set argument ([temp.deduct.call]/6), "required from here" notes. Argument-dependent
   lookup runs for dependent calls in instantiations only (#165). Coalesced (weak) definitions of specializations are #124.
+
+## Templates, ζ step 2: class templates (#88, 2026-11-18)
+
+- **Declarations:** class templates at namespace scope (`template<…> struct X {…};` and
+  forward declarations), with the defaults rule of [temp.param]/14. The template is a
+  `class_template` entity; inside it, `X` and `X<T…>` are the current instantiation, a class
+  specialization with the parameters as arguments ([temp.dep.type], [temp.local]), whose record
+  is the pattern's. Member items are analysed in the template's head's scope.
+- **Template-ids** `X<args>` as types (declarations, parameters, template arguments), in
+  expressions (`X<int>(…)`, `X<int>{…}`) and in nested-name-specifiers (`X<T>::f`,
+  `N::X<int>`); `>>` closes two lists ([temp.names]/4). Arguments are checked and converted
+  against the parameters, with defaults from every declaration ([temp.arg], [temp.param]/12).
+  `typename T::x` is its own dependent type (`TDepName`: substituted to the member type, a
+  non-deduced context, mangled `N T_ 4x E`), and `T::name` is dependent in phase one
+  ([temp.res.general]/5, [temp.dep.type]).
+- **Instantiation** (`Program::instantiate_class`, [temp.inst]/2): where a specialization must
+  be complete, after its template's definition (not inside it), each member item's declaration
+  part is analysed again with the arguments bound and its questions asked at the point of
+  instantiation ([temp.point]), and the class record is built whole, then published (#156).
+  Each unit keeps its own instantiation state, whichever unit published the record. Nesting is
+  limited (`-ftemplate-depth`). Member functions, in the class or defined outside it
+  (`template<class T> R X<T>::f() {…}`, constructors and destructors too), are instantiated only
+  when an emitted body names them ([temp.inst]/4), found by walking the bodies' trees.
+- **Deduction and substitution** through specializations: `const Box<T>&` from `Box<int>`,
+  `Arr<N>` deducing `N` ([temp.deduct.type]/8); `substitute` rebuilds `X<T>` as `X<int>`.
+- **Mangling:** specializations as `<template-name> <template-args>` with both as substitution
+  candidates, inside namespaces too, members as `N…E` (`_ZNK3BoxIiE3getEv`), a value parameter
+  as an argument `XT_E`; checked against Clang's symbols.
+- Tests: `tests/own/templates/c2-*` (spec-only, plus nine from the review): 44 of 47 pass; the other three need things
+  outside templates: constexpr constructors and class objects in constant evaluation (#157,
+  #25), aggregate initialization of reference members (#157), and namespace-scope references
+  (#101). 11 more draft examples pass. In a daemon session that compiles unrelated programs
+  defining one class template differently, the first one's template record wins (#115).
+- Not yet (#88): member templates, nested classes in class templates, static data members of
+  class templates, explicit and partial specializations, alias templates, packs, concepts,
+  qualified names whose nested-name-specifier is a member template, and members found through a
+  dependent base.
 
 ## Bootstrap workarounds
 

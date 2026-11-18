@@ -28,9 +28,7 @@ failures = []
 # differ). Everything else of that test is still compared; a known test whose fields all agree
 # fails the run (remove the entry). The sample and its order are fixed, so these are
 # deterministic.
-KNOWN = {
-    # A daemon session keeps an earlier test's `struct S` (first-wins entity records).
-}
+KNOWN = {}
 known_seen = set()
 
 

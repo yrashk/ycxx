@@ -50,7 +50,7 @@ constexpr std::string_view spelling(Builtin b) {
 
 // ---------------------------------------------------------------- types
 
-enum class TypeKind : u8 { builtin, pointer, array, function, class_, reference, enum_, template_param, other };
+enum class TypeKind : u8 { builtin, pointer, array, function, class_, reference, enum_, template_param, dep_name, other };
 
 // The canonical form of a type, read out by value.
 struct TypeRec {
@@ -65,6 +65,7 @@ struct TypeRec {
   Cv fn_cv = Cv::none;               // a member function type's cv-qualifier-seq
   bool rvalue_ref = false;           // a reference's kind; `inner` is what it refers to
   ConstId bound_value = ConstId::none;  // an array's bound as a constant, possibly dependent
+  NameId name{};                     // a dependent member type's name; `inner` is its qualifier
   u16 depth = 0;                     // a template parameter's position ([temp.param])
   u16 index = 0;
   bool pack = false;
@@ -128,6 +129,10 @@ public:
       r.kind = TypeKind::reference;
       r.rvalue_ref = t.is<ast::TRRef>(c);
       r.inner = r.rvalue_ref ? t.get<ast::TRRef>(c).referee : t.get<ast::TLRef>(c).referee;
+    } else if (t.is<ast::TDepName>(c)) {
+      r.kind = TypeKind::dep_name;
+      r.inner = t.get<ast::TDepName>(c).qualifier;
+      r.name = t.get<ast::TDepName>(c).name;
     } else if (t.is<ast::TTemplateParam>(c)) {
       auto p = t.get<ast::TTemplateParam>(c);
       r.kind = TypeKind::template_param;
@@ -143,7 +148,8 @@ public:
   bool is_dependent(QualType q) const {
     TypeRec r = rec(q);
     switch (r.kind) {
-    case TypeKind::template_param: return true;
+    case TypeKind::template_param:
+    case TypeKind::dep_name: return true;
     case TypeKind::builtin: return r.builtin == Builtin::dependent;
     case TypeKind::array:
       return is_dependent(r.inner) || (r.bound_value != ConstId::none && ins_->values.is_dependent(r.bound_value));
@@ -151,9 +157,15 @@ public:
     case TypeKind::reference: return is_dependent(r.inner);
     case TypeKind::function:
       return is_dependent(r.inner) || std::ranges::any_of(r.params, [&](QualType p) { return is_dependent(p); });
+    case TypeKind::class_: return class_dependent && class_dependent(r.entity);
     default: return false;
     }
   }
+  // Whether a class is a specialization with a dependent argument (`X<T>`); set by the world that
+  // knows the entities.
+  std::function<bool(EntityId)> class_dependent;
+  std::function<std::string(NameId)> dep_name_spelling;
+  QualType dep_name(QualType qualifier, NameId name) { return ins_->intern_type(ast::TDepName{qualifier, name}); }
 
   static Cv cv(QualType q) { return ast::cv_of(q); }
   static bool is_const(QualType q) { return (std::to_underlying(ast::cv_of(q)) & 1) != 0; }
@@ -245,6 +257,9 @@ private:
     case TypeKind::enum_:
     case TypeKind::class_:
       return cvs + (class_name ? class_name(r.entity) : "<class>") + (inner.empty() || inner[0] == '[' ? "" : " ") + inner;
+    case TypeKind::dep_name:
+      return cvs + "typename " + spell(r.inner) + "::" + (dep_name_spelling ? dep_name_spelling(r.name) : "<name>") +
+             (inner.empty() || inner[0] == '[' ? "" : " ") + inner;
     case TypeKind::template_param:
       // Parameters are positional in the type (ast.md §5.1).
       return cvs + std::format("type-parameter-{}-{}", r.depth, r.index) + (inner.empty() || inner[0] == '[' ? "" : " ") + inner;
@@ -327,15 +342,19 @@ private:
 
 // `data_member` is a non-static data member ([class.mem]).
 // A `function_template` is a function template ([temp.fct]); a specialization of one is a
-// `function` whose `templ` is the template.
+// `function` whose `templ` is the template. A `class_template` likewise ([temp.class]); a
+// specialization of it, the current instantiation included ([temp.dep.type]), is a `class_`.
 enum class EntityKind : u8 {
   function, variable, class_, data_member, constructor, destructor, enum_, enumerator, namespace_, function_template,
+  class_template,
   type_alias  // a typedef-name or alias-declaration ([dcl.typedef]): `(scope, name)`
 };
 
 // The structure behind an entity id (§4.3): for a function `(scope, name, canonical type)`, with
-// `::` as the scope of a function with C language linkage ([dcl.link]); for a variable with
-// external linkage `(scope, name)`; for an entity with internal linkage, also its first
+// `::` as the scope of a function with C language linkage ([dcl.link]); for a variable
+// `(scope, name, language linkage)`: redeclarations must agree on the language linkage
+// ([dcl.link]/6), and so its record never holds a stale one (#115); for an entity with internal
+// linkage, also its first
 // declaration. `scope` is the enclosing class, or none for the global namespace. A function
 // template's identity also has its template-head (`head`, a fingerprint of the parameters' kinds and
 // types); a specialization's is its template and its canonical template arguments (§B1.5).
@@ -367,7 +386,9 @@ public:
     if (r.kind == EntityKind::function || r.kind == EntityKind::constructor || r.kind == EntityKind::destructor ||
         r.kind == EntityKind::function_template)
       f = ast::mix(f, types_->fp(types_->canonical(r.type)));
-    if (r.kind == EntityKind::function_template || r.kind == EntityKind::namespace_) f = ast::mix(f, r.head);
+    if (r.kind == EntityKind::variable) f = ast::mix(f, std::to_underlying(r.lang));
+    if (r.kind == EntityKind::function_template || r.kind == EntityKind::class_template ||
+        r.kind == EntityKind::namespace_) f = ast::mix(f, r.head);
     if (r.templ != EntityId::none) {
       f = ast::mix(f, ins_->entities.fp(r.templ));
       for (const ast::TemplateArg& a : r.args) {
@@ -458,29 +479,50 @@ struct EnumRec {
   std::vector<EnumeratorRec> enumerators;
 };
 
-// Records are built privately by whoever analyses the definition and published once complete
-// (#156): units analysed at once on several workers each build the record of a class their header
-// defines, and the first publication wins. Until then a class has no record.
+// A unit's class and enumeration records (#115). Entities are program-wide (§4.3), but what
+// `class_def` says of one is a question of the unit that asks (query-engine.md §B1.4): units may
+// see different definitions (one session serving several programs, or an edit), so each unit has
+// its own table, built as it analyses the definitions, and gives it to the back end with its
+// definitions (`pipeline::FrontResult::shapes`). A record is built privately and published once
+// complete; until then a class has no record.
 class Classes {
 public:
   explicit Classes(ast::Interners& ins, Types& types) : ins_(&ins), types_(&types) {}
+  Classes(const Classes&) = delete;
 
   // `r`, a definition's record, unless one is published already; the published one.
-  const ClassRec& publish(EntityId c, ClassRec r) { return recs_.publish(std::to_underlying(c), std::move(r)); }
-  const EnumRec& publish_enum(EntityId e, EnumRec r) { return enums_.publish(std::to_underlying(e), std::move(r)); }
+  const ClassRec& publish(EntityId c, ClassRec r) {
+    auto [it, fresh] = recs_.try_emplace(std::to_underlying(c), std::move(r));
+    if (fresh) class_order_.push_back(c);
+    return it->second;
+  }
+  const EnumRec& publish_enum(EntityId e, EnumRec r) {
+    auto [it, fresh] = enums_.try_emplace(std::to_underlying(e), std::move(r));
+    if (fresh) enum_order_.push_back(e);
+    return it->second;
+  }
+  // The classes and enumerations with records, in the order they were published.
+  std::span<const EntityId> classes() const { return class_order_; }
+  std::span<const EntityId> enums() const { return enum_order_; }
   // A defined class's record.
   const ClassRec& rec(EntityId c) const
     pre(find(c) != nullptr)
   {
     return *find(c);
   }
-  const EnumRec* find_enum(EntityId e) const { return enums_.find(std::to_underlying(e)); }
+  const EnumRec* find_enum(EntityId e) const {
+    auto it = enums_.find(std::to_underlying(e));
+    return it == enums_.end() ? nullptr : &it->second;
+  }
   // An enumeration's underlying type; `int` until it is known.
   QualType underlying(EntityId e) const {
     const EnumRec* r = find_enum(e);
     return r && r->underlying ? *r->underlying : types_->builtin(Builtin::int_);
   }
-  const ClassRec* find(EntityId c) const { return recs_.find(std::to_underlying(c)); }
+  const ClassRec* find(EntityId c) const {
+    auto it = recs_.find(std::to_underlying(c));
+    return it == recs_.end() ? nullptr : &it->second;
+  }
   bool is_defined(EntityId c) const {
     const ClassRec* r = find(c);
     return r && r->defined;
@@ -506,20 +548,27 @@ public:
 private:
   ast::Interners* ins_;
   Types* types_;
-  ast::Published<ClassRec> recs_;
-  ast::Published<EnumRec> enums_;
+  std::map<u32, ClassRec> recs_;  // node-based: a published record never moves
+  std::map<u32, EnumRec> enums_;
+  std::vector<EntityId> class_order_, enum_order_;
 };
 
 // What the front end shares process-wide (§9.1): the AST core's interners, and sema's views.
+// Class and enumeration records are each unit's (`Classes`).
 struct World {
   ast::Interners& ins;
   Types types{ins};
   Values values{ins, types};
   Entities entities{ins, types};
-  Classes classes{ins, types};
 
   explicit World(ast::Interners& i) : ins(i) {
     types.class_name = [this](EntityId e) { return std::string(ins.names.spelling(entities.rec(e).name)); };
+    types.dep_name_spelling = [this](NameId n) { return std::string(ins.names.spelling(n)); };
+    types.class_dependent = [this](EntityId e) {
+      return std::ranges::any_of(entities.rec(e).args, [&](const ast::TemplateArg& a) {
+        return a.kind == ast::TemplateArgKind::type ? types.is_dependent(a.type) : ins.values.is_dependent(a.value);
+      });
+    };
   }
   World(const World&) = delete;
 };
