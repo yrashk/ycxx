@@ -40,6 +40,8 @@ provisioned on its own: `deps/libycxx/tools/toolchain/provision --clang-only`.
 | `src/client/` | the clients: `cxx` (c++-compatible), `lsp`, `ctl` (stubs) |
 | `src/hash/` | `ycxx.hash`: the 128-bit fingerprint (MurmurHash3_x64_128, fixed seed) and reflection-derived structural hashing |
 | `src/engine/` | `ycxx.engine`: the query engine's core (docs/design/query-engine.md) |
+| `src/obj/` | `ycxx.obj`: the in-memory object file; `ycxx.obj.macho`: the Mach-O object writer and reader |
+| `src/link/` | `ycxx.link`: the linker (signed arm64 macOS executables); `ycxx-ld`, its command line for tests |
 | `tests/bootstrap/` | the bootstrap smoke test: one program per C++26 feature ycxx relies on |
 | `tests/unit/` | unit tests, one CTest program per area (`ycxxc_unit_test`), run by `tools/build` |
 | `tools/check-policy`, `tools/check-preprocessor` | stage-1 policy checks |

@@ -131,6 +131,16 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
     only that it compiles. Reduce a module ICE to two files with `g++-16 -fmodules` first.
   - Learned on #14.
 
+- **An executable killed at exec with status 137 says nothing about why.** A linked Mach-O whose
+  `ncmds` was one too high passed `codesign -v`, then the kernel killed it before `main`.
+  - Do: run `otool -l` on the output first. It reports "malformed load command" and where.
+    `dyld_info -fixups -exports -imports` checks chained fixups and the exports trie the same way.
+  - Learned on #42.
+- **libycxx deprecates `std::filesystem::path::string()`** (C++26 [depr.fs.path.obs]), and
+  `-Werror` turns it into a build failure.
+  - Do: use `native_encoded_string()` for file names passed on, `display_string()` for messages.
+  - Learned on #42.
+
 ## Evidence and tests
 
 - **Fuzz incremental == cold on every derived output, diagnostics included.** The engine's
