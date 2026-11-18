@@ -26,20 +26,50 @@ applies. A lesson that becomes a rule moves to DECISIONS or CLAUDE.md and leaves
 
 ## Working with Fable subagents
 
-- **Two subagents editing one document collide.** Splitting a design into parts with one
-  subagent each works well, but their edits to a shared file don't merge cleanly.
-  - Do: give each part its own file or its own section with clear ownership. Have the session
-    splice the parts in, one at a time, after both are final. Relay decisions that cross parts
-    through the session, explicitly.
+- **Agree the contract between parts before splitting a design.** #1's engine part and C++ part
+  were briefed separately. The C++ part then needed a capability the engine part had never heard
+  of (contextual queries with verifying traces). That cost a full reconciliation round, and later
+  rounds found more P0s at the same seam (what a context is, what a trace holds).
+  - Do: before fanning out, have one subagent write the interface between the parts (shared
+    vocabulary, key shapes, what each part may assume of the other). Give it to both.
+  - Learned on #1.
+- **Two subagents must not edit one file at once.** Splitting a design into parts with one
+  subagent each works well. Parallel edits to the same file are still risky.
+  - Do: give each part its own file. On #1 the second part was extracted to a scratch file,
+    edited there, and spliced back by the session. Splice after both parts are final, and relay
+    decisions that cross parts through the session, explicitly.
+  - Learned on #1.
+- **Point subagents at files, don't paste.** Review findings, the current text of a part, and
+  probe results went to subagents as files in the scratchpad, with a short brief naming which
+  items are theirs. Briefs stayed small, and two agents could share one list of findings.
+  - Learned on #1.
+- **Probe the toolchain before briefing a design question that depends on it.** For the switch to
+  coroutines and `std::execution` (DECISIONS §3.2), five minutes of GCC 16.2 probes went into
+  the brief. They covered reflection-derived hashing, contracts, coroutines, `import std`, and
+  the fact that libstdc++ lacks P2300 senders, which have to come from libycxx. The brief then
+  rested on facts, not guesses.
   - Learned on #1.
 - **Review rounds can go on indefinitely.** The query-engine design went through three review
-  rounds, and each one found a new layer.
+  rounds, and each one found a new layer. Most P0s in rounds 2 and 3 were in text that the
+  previous round's fixes had *added*: each fix brought in new mechanism, which had its own gaps.
   - Do: run another round while a review finds P0 or P1 issues. When a round finds only P2
     issues, fix them in the same commit and stop. Open issues for deeper questions the review
     raises, instead of reopening the design.
+  - Ask for the smallest fix that closes each finding, not a redesign.
+  - Have the verifier check the fixes and the diff, not the whole document again.
+  - Review the assembled document as soon as it is assembled. Seams between separately written
+    parts are where most P0s were.
   - Seeded on #1. Revise this entry if it proves wrong.
 
 ## Evidence and tests
+
+- **Run sanitizers on any concurrent code before trusting its results.** The spike's fork-join
+  passed its demos while one of them crashed now and then: the joiner freed the join while the
+  last finisher was still notifying it. ASan found the bug at once; TSan and repeated fuzzing
+  confirmed the fix.
+  - Do: build `-fsanitize=address,undefined` and `-fsanitize=thread` variants of concurrent
+    code, and run them before quoting any numbers.
+  - Learned on #1's spike.
 
 - **Determinism checked only on cold builds proves little.** In a cold build every result is new,
   so the outcome at 1 and N threads is equal by construction.
