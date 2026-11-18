@@ -965,7 +965,9 @@ public:
     switch (it_->kind) {
     case ItemKind::empty:
     case ItemKind::access_spec:
-    case ItemKind::linkage_block: break;  // its members are items of their own
+    case ItemKind::linkage_block:  // its members are items of their own
+      braces_closed();
+      break;
     case ItemKind::declaration:
       if (member) member_declaration();
       else declaration();
@@ -1470,7 +1472,9 @@ private:
     p_->current_instantiation(pattern, k_, sem);
     ps_.seek(it_->brace_end);
     q_.own_class_complete = true;
-    if (!ps_.accept(Tk::semi)) {
+    if (ps_.at_end()) {
+      ps_.expect(Tk::semi);  // the `;` is missing ([class.pre]/1)
+    } else if (!ps_.accept(Tk::semi)) {
       s_.diag(ps_.pos(), Diag::not_supported, ps_.kind());  // declarators after a partial specialization
       bad();
     }
@@ -1669,6 +1673,10 @@ private:
     ps_.seek(it_->brace_end);
     q_.own_class_complete = true;
     if (ps_.accept(Tk::semi)) return;
+    if (ps_.at_end()) {  // the `;` is missing; the definition stands ([class.pre]/1)
+      ps_.expect(Tk::semi);
+      return;
+    }
     DeclSpec spec;
     spec.begin = at;
     spec.type = sem.type;
@@ -1804,7 +1812,11 @@ private:
       decls_.push_back(xs);
       xs.type = prev_type;  // inside the list
       s_.own.push_back({en, xs});
-      if (!ps_.accept(Tk::comma)) break;
+      if (!ps_.accept(Tk::comma)) {
+        // [dcl.enum]/1: the enumerator-list is comma-separated.
+        if (!ps_.is(Tk::r_brace) && !ps_.at_end()) s_.diag(ps_.pos(), Diag::expected_token, Tk::comma);
+        break;
+      }
     }
     // [dcl.enum]/7: without a fixed type, the type holds every value, and is no larger than int
     // unless a value fits neither int nor unsigned int.
@@ -1828,6 +1840,12 @@ private:
     p_->classes_.publish_enum(e, std::move(er));
     ps_.seek(it_->brace_end);
     if (ps_.accept(Tk::semi)) return;
+    // The item ended at the brace: the `;` is missing, and the definition stands
+    // ([class.pre]/1, [dcl.enum]/1).
+    if (ps_.at_end()) {
+      ps_.expect(Tk::semi);
+      return;
+    }
     DeclSpec spec;
     spec.begin = at;
     spec.type = t;
@@ -2035,7 +2053,24 @@ private:
   }
 
   // `namespace N { … }` ([namespace.def]): the namespace its members belong to.
+  // A namespace's or linkage block's `}` ([namespace.def], [dcl.link]): the splitter cut the item
+  // at the end of the file without one.
+  void braces_closed() {
+    const pp::Region& r = p_->region();
+    if (it_->brace_end <= it_->brace_begin) return;
+    int depth = 0;
+    for (u32 t = it_->brace_begin; t < it_->brace_end; ++t) {
+      Tk k = r.tokens[t].kind;
+      depth += k == Tk::l_brace ? 1 : k == Tk::r_brace ? -1 : 0;
+    }
+    if (depth > 0) {
+      ps_.seek(it_->brace_end);
+      ps_.expect(Tk::r_brace);
+    }
+  }
+
   void namespace_definition() {
+    braces_closed();
     if (it_->names.empty()) return;  // an unnamed namespace declares no name
     // [basic.scope.scope]/4, [namespace.def]: a namespace name names nothing else in its scope.
     NameId name = p_->world().ins.names.intern(it_->names.back().name);

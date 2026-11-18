@@ -2130,7 +2130,10 @@ public:
         return {NodeId::none, begin, pos()};
       }
       if (s_->types().is_function(d.type)) {
-        s_->diag(d.name_at, Diag::not_supported, Tk::l_paren);  // block-scope function declarations
+        // [dcl.fct.def.general]/2: a function is defined only at namespace or class scope; a
+        // block-scope declaration of one is not supported yet.
+        if (is(Tk::l_brace)) s_->diag(d.name_at, Diag::function_definition_in_block);
+        else s_->diag(d.name_at, Diag::not_supported, Tk::l_paren);
         skip_to_semi();
         return {NodeId::none, begin, pos()};
       }
