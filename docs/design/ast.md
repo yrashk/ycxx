@@ -35,6 +35,11 @@ Opus session that owns the issue wrote the spike, this document and the bookkeep
   and locations (§8).
 - **The Opus session** wrote the spike (§10), reviewed both sets of decisions and sent pushback
   where noted, and wrote this text.
+- **Review.** One independent Fable check of the assembled document found no P0, 9 P1 and 15
+  P2, each with a failing example and a smallest fix; all were applied in one commit. A check of
+  that diff alone closed 23 of them and found that one proposed fix (default arguments carried by
+  `instantiate_fn`) would make a call depend on the END instantiation; the session applied the
+  narrow remedy (§6.4) without a further round.
 
 ## 1. Decisions in brief
 
