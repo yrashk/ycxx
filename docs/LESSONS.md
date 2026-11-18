@@ -124,6 +124,16 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
     only that it compiles. Reduce a module ICE to two files with `g++-16 -fmodules` first.
   - Learned on #14.
 
+- **An executable killed at exec with status 137 says nothing about why.** A linked Mach-O whose
+  `ncmds` was one too high passed `codesign -v`, then the kernel killed it before `main`.
+  - Do: run `otool -l` on the output first. It reports "malformed load command" and where.
+    `dyld_info -fixups -exports -imports` checks chained fixups and the exports trie the same way.
+  - Learned on #42.
+- **libycxx deprecates `std::filesystem::path::string()`** (C++26 [depr.fs.path.obs]), and
+  `-Werror` turns it into a build failure.
+  - Do: use `native_encoded_string()` for file names passed on, `display_string()` for messages.
+  - Learned on #42.
+
 ## Evidence and tests
 
 - **Fuzz incremental == cold on every derived output, diagnostics included.** The engine's
@@ -153,6 +163,16 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
   - Do: for partitioning, ordering or filtering code, check the invariant (every item once,
     nothing lost) through the real entry point, with state that makes the stages interact.
   - Learned on #5.
+
+- **Let the oracles' output drive bulk-classification rules.** The draft-example extractor's first
+  rules for "OK", "error" and "fragment" were guesses. Counting the oracles' error messages and
+  the comments on the lines they hit found the real annotation forms ("ambiguous", "access
+  error") and fragment signatures in three rounds, and halved the noise in the disagreement table.
+  Running the generated suite through `tools/test --cxx clang|gcc` then caught 25 tests whose
+  markers the driver did not recognise, which the extractor's own comparison had missed.
+  - Do: write the crudest rules, run the oracles, histogram the messages, then refine. Check the
+    generated tests through the real driver before committing them.
+  - Learned on #6.
 
 - **Run sanitizers on any concurrent code before trusting its results.** The spike's fork-join
   passed its demos while one of them crashed now and then: the joiner freed the join while the
