@@ -1730,9 +1730,10 @@ private:
   }
 
   // An earlier member item of the same class: the class's own record of it, or in an
-  // instantiation the specialization's, which `class_content` analysed first.
+  // instantiation the specialization's, which `class_content` analysed first. An
+  // access-specifier declares nothing, and has no instantiation of its own.
   const ast::ItemSema& earlier(u32 m) {
-    if (inst_) return p_->class_member_sema(m, inst_->spec);
+    if (inst_ && p_->items().items[m].kind != ItemKind::access_spec) return p_->class_member_sema(m, inst_->spec);
     return p_->item_sema(m).value;
   }
 
