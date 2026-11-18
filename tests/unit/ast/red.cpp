@@ -56,7 +56,17 @@ int main() {
   });
   check(found, "found");
   // Token 7 (`;`) belongs to the statement, not to the call.
-  Red(in.ast, root).find(7, [&](const Red& r) { check(r.is<ExprStmt>() && r.offset() == 1, "r.is<ExprStmt>() && r.offset() == 1"); });
+  check(Red(in.ast, root).find(7, [&](const Red& r) { check(r.is<ExprStmt>() && r.offset() == 1, "r.is<ExprStmt>() && r.offset() == 1"); }), "find(7)");
   check(!Red(in.ast, root).find(14, [](const Red&) {}), "!Red(in.ast, root).find(14, [](const Red&) {})");
+
+  // An absent child in a list is skipped by the walk and by descent.
+  Builder b2(in);
+  NodeId lit = b2.add(Literal{rv, in.values.add<ConstId>(seed("1"))}, 1);
+  NodeId gap = b2.commit(b2.add(Compound{b2.list({{NodeId::none, 1}, {lit, 3}}), in.intern_seq<Cleanup>({})}, 5));
+  u32 children = 0;
+  Red(in.ast, gap).for_each_child([&](const Red&) { ++children; });
+  check(children == 1, "a none in a list is not a child");
+  check(Red(in.ast, gap).find(1, [&](const Red& r) { check(r.is<Compound>(), "token 1 is the block's own"); }),
+        "find over a list with a none");
   return ycxx::unit::result("ast.red");
 }

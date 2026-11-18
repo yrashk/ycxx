@@ -96,8 +96,11 @@ struct BodySema {
 using SeqElements = closed_list<NodeId, EntityId, QualType, NameId, Cleanup, ParamSema, DeclSema, BaseSpec,
                                 MemberRec, LocalRec>;
 
-static_assert(std::ranges::all_of(SeqElements::infos,
-                                  [](std::meta::info t) { return std::meta::is_enum_type(t) || check_record(t); }));
+static_assert(std::ranges::all_of(SeqElements::infos, [](std::meta::info t) {
+  if (std::meta::is_class_type(t)) return check_record(t);
+  check_value_type(t, t, false);  // an enum: plain, or a listed handle
+  return true;
+}));
 static_assert(check_record(^^ItemSema) && check_record(^^ClassDef) && check_record(^^BodySema));
 
 }  // namespace ycxx::ast

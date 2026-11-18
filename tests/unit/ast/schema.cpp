@@ -54,6 +54,11 @@ struct AnnotatedNonOperand { ExprInfo info; [[=sequenced]] u32 n; };
 enum class [[=interner::ast]] Unlisted : u32 {};
 struct WithUnlistedHandle { Unlisted h; };
 struct RecordWithEdge { Child c; };
+struct StmtBase { Child hidden; };
+struct Derived : StmtBase { u32 x; };                 // the base's Child would escape every walk
+struct RecordDerived : MemberRec { u32 extra; };
+struct RecordWithLocList { SeqId<Loc> locs; };         // a Loc through a list
+struct RecordWithUnlistedList { SeqId<Unlisted> hs; };  // a handle compaction would not walk
 
 static_assert(node_rejected(^^WithPointer));
 static_assert(node_rejected(^^WithLoc));
@@ -65,6 +70,8 @@ static_assert(node_rejected(^^SequencedStructure));
 static_assert(node_rejected(^^AnnotatedNonOperand));
 static_assert(node_rejected(^^WithUnlistedHandle));  // `handles` is closed
 static_assert(record_rejected(^^RecordWithEdge));    // records hold NodeIds, not edges
+static_assert(node_rejected(^^Derived) && record_rejected(^^RecordDerived));
+static_assert(record_rejected(^^RecordWithLocList) && record_rejected(^^RecordWithUnlistedList));
 static_assert(!node_rejected(^^Call) && !record_rejected(^^DeclSema));
 
 // ---------------------------------------------------------------- holds_nodes and seeds

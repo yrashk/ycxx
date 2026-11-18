@@ -97,6 +97,7 @@ public:
   // commit more than once; a draft is interned at most once.
   template <class V>
   V commit(const V& root) {
+    check_refs(root);
     std::vector<bool> reached(entries_.size());
     std::vector<u32> work;
     auto reach = [&](u32 i) {

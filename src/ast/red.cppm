@@ -37,7 +37,8 @@ public:
   T get() const { return ast_->get<T>(id_); }
 
   // Calls `f(const Red&)` for each child, in member order, then list order; absent children
-  // (`NodeId::none`) are skipped. The child cursors live only during the call.
+  // (`NodeId::none`, in a `Child` or a list) are skipped. The child cursors live only during the
+  // call.
   template <class F>
   void for_each_child(F&& f) const {
     dispatch<Nodes>(kind(), [&]<class T>(std::type_identity<T>) {
@@ -47,7 +48,8 @@ public:
         if constexpr (std::is_same_v<M, Child>) {
           if (v.[:m:].id != NodeId::none) f(child(v.[:m:]));
         } else if constexpr (std::is_same_v<M, ChildList>) {
-          for (const Child& c : ast_->children(v.[:m:])) f(child(c));
+          for (const Child& c : ast_->children(v.[:m:]))
+            if (c.id != NodeId::none) f(child(c));
         }
       }
     });

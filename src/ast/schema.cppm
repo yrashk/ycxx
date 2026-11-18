@@ -135,12 +135,17 @@ consteval void check_value_type(std::meta::info type, std::meta::info where, boo
     if (names_an_interner(type) && !listed) fail(u8"a handle missing from `handles`");
     return;
   }
-  if (std::meta::has_template_arguments(type) && std::meta::template_of(type) == ^^SeqId) return;
+  if (std::meta::has_template_arguments(type) && std::meta::template_of(type) == ^^SeqId) {
+    check_value_type(std::meta::template_arguments_of(type)[0], where, false);  // elements are records
+    return;
+  }
   if (type == ^^Child || type == ^^ChildList) {
     if (!node) fail(u8"a child edge outside a node (records hold a NodeId)");
     return;
   }
   if (std::meta::is_class_type(type) && std::meta::is_aggregate_type(type)) {
+    if (!std::meta::bases_of(type, std::meta::access_context::unchecked()).empty())
+      fail(u8"a base class: reflection walks only direct members");
     for (auto m : std::meta::nonstatic_data_members_of(type, std::meta::access_context::unchecked()))
       check_value_type(std::meta::type_of(m), m, node);
     return;
@@ -154,6 +159,8 @@ consteval void check_value_type(std::meta::info type, std::meta::info where, boo
 consteval bool check_node_kind(std::meta::info kind) {
   if (!std::meta::is_aggregate_type(kind) || !std::meta::is_trivially_copyable_type(kind))
     throw std::meta::exception(u8"a node kind is a trivially copyable aggregate", kind);
+  if (!std::meta::bases_of(kind, std::meta::access_context::unchecked()).empty())
+    throw std::meta::exception(u8"a node kind has no base class: reflection walks only direct members", kind);
   if (std::meta::size_of(kind) > 32)
     throw std::meta::exception(u8"a node payload is at most 32 bytes (ast.md §9.6)", kind);
   bool expr = is_expression(kind);
@@ -179,6 +186,8 @@ consteval bool check_node_kind(std::meta::info kind) {
 consteval bool check_record(std::meta::info type) {
   if (!std::meta::is_aggregate_type(type) || !std::meta::is_trivially_copyable_type(type))
     throw std::meta::exception(u8"a record is a trivially copyable aggregate", type);
+  if (!std::meta::bases_of(type, std::meta::access_context::unchecked()).empty())
+    throw std::meta::exception(u8"a record has no base class: reflection walks only direct members", type);
   for (auto m : std::meta::nonstatic_data_members_of(type, std::meta::access_context::unchecked()))
     check_value_type(std::meta::type_of(m), m, false);
   return true;

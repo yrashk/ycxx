@@ -69,6 +69,15 @@ int main() {
   NodeId wider = a.intern(s, 4);
   check(wider != ta.sum && a.ast.fp(wider) != a.ast.fp(ta.sum), "wider != ta.sum && a.ast.fp(wider) != a.ast.fp(ta.sum)");
 
+  // Re-interning a stored node as a new one, with its lists read from the edge pool itself: the
+  // slice is copied out before the pool grows.
+  Call stored = a.ast.get<Call>(ta.call);
+  for (int i = 0; i < 64; ++i) a.intern(Literal{s.info, a.values.add<ConstId>(seed(std::to_string(i)))}, 1);
+  NodeId moved = a.intern(stored, 7, a.ast.edges());
+  check(moved != ta.call && a.ast.children(a.ast.get<Call>(moved).args).size() == 1 &&
+            a.ast.children(a.ast.get<Call>(moved).args)[0].id == ta.sum,
+        "a node interned from the pool's own edges keeps its children");
+
   // An edge offset is identity too: `x+1` and `x + 1` differ.
   NodeId tight = a.intern(Binary{s.info, s.op, s.lhs, {s.rhs.id, 1}}, 3);
   check(tight != ta.sum, "tight != ta.sum");

@@ -390,7 +390,12 @@ struct Interners {
     }
     T stored = v;
     for_each_ref(stored, [&]<class H>(H& h) {
-      if constexpr (std::is_same_v<H, ChildList>) h = ast.append_edges(edges.subspan(h.offset, h.size));
+      // `edges` may be the edge pool itself (re-interning a stored node), which appending can
+      // reallocate, so each slice is copied out first.
+      if constexpr (std::is_same_v<H, ChildList>) {
+        std::vector<Child> slice(edges.begin() + h.offset, edges.begin() + h.offset + h.size);
+        h = ast.append_edges(slice);
+      }
     });
     return ast.insert(stored, width, f);
   }
