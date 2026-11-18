@@ -80,6 +80,13 @@ Later: coarse source-area maps, then ycxx's own query engine (§9.2.3).
 
 ## Writing tests
 
+**Unit tests** of ycxx's own components live in `tests/unit/<area>/`, one executable per file,
+registered with `ycxxc_unit_test(<area> <name> <libraries>)` in `tests/unit/CMakeLists.txt` and run
+by ctest, so `tools/build` (the driver's build stage, and CI) runs them. They import
+`ycxx.test.check`: `check(cond)` reports each failing line, `failures()` is the exit status.
+Compile-time properties are `static_assert`s in the same file. The rest of this section is about
+the language tests the driver itself runs.
+
 A test's identity is its path under `tests/` (`own/smoke/ok.accept.cpp`): state, sharding and
 reports key on it. Its kind comes from its suffix:
 

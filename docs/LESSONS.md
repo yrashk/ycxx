@@ -117,6 +117,17 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
     bug report, and it shows where the fix belongs.
   - Learned on #4.
 
+- **A contract that fails while its condition holds: suspect the compiler before the code.**
+  On #32, a `contract_assert` inside a lambda in a module template reported false while the same
+  expression, printed or stored in a local, was true. About 30 minutes went into checking the
+  interner before the predicate itself was suspected. Two standalone repros did not reproduce it.
+  - Do: when a contract fails against values that look right, evaluate the predicate into a local
+    `bool` first. If that passes, it is the compiler: apply that as the `// BOOTSTRAP:`
+    workaround and list it in STATUS.
+  - Do: print with `std::println(std::cerr, …)` inside the failing function. lldb on macOS showed
+    only the `__pthread_kill` frame for a contract abort.
+  - Learned on #32.
+
 ## Evidence and tests
 
 - **A `std::tuple` over a long type list is a compile-time trap with GCC 16.** The AST spike stored

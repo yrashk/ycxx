@@ -31,6 +31,44 @@ What is true of the code today. Work in progress and its owners are tracked in
   §4.9. A throwaway spike is in `spikes/ast/`: a reflection-derived node schema, hash-consing,
   the red view and type canonicalization.
 
+## AST core (#32)
+
+`src/ast/`, from the [AST design](docs/design/ast.md) §2, §3, §9 and §10. Modules `ycxx.ast.*`,
+one import `ycxx.ast`; unit tests in `tests/unit/ast` (run by ctest, see docs/TESTING.md).
+
+- **Handles** (`handles.cppm`): the strong enums of §2 and the closed list `handles`. Each
+  handle enum names its interner in an annotation (`[[=interner::names]]`), which the §12 probe
+  confirmed GCC 16.2 supports. `SeqId<T>`, `DeclId`, `DeclOrd`, `Loc`, `Child`, `ChildList`.
+- **Schema** (`schema.cppm`, `nodes.cppm`, `records.cppm`): node kinds are plain aggregates in
+  one closed list, `Nodes`. Reflection checks the §2 invariants on every kind and record (no
+  pointer, no `Loc`, only listed handles, edges only in nodes) and the 32-byte payload budget
+  (§9.6). It also reads the sequencing annotations of §3.7.4, `[[=sequenced(r)]]`,
+  `[[=indeterminately_sequenced(r)]]` and `[[=unsequenced(r)]]`, with ranks ordering operand
+  groups. `operands<T>` and `relation<T>(a, b)` expose them.
+  - The first list of kinds covers expressions with every sequencing shape, statements and
+    attributes. The parser adds the rest.
+  - `ItemSema`, `DeclSema`, `ClassDef` and `BodySema` follow §3.6. `ParamSema`, `BaseSpec`,
+    `MemberRec`, `LocalRec` and the enums are first cuts for sema to fill in.
+- **Interners** (`interner.cppm`):
+  - Per-kind untyped pools indexed by kind number, never a tuple, plus one edge pool.
+  - Identity is the 128-bit Merkle fingerprint. Debug builds compare structurally on a hit.
+  - Fingerprint, equality and the handle walk `for_each_ref` are derived by reflection, and
+    dispatch goes through a generated table.
+  - Interners: `names` and `seqs` (one pool per element type) and `ast`.
+  - `tokens`, `items`, `entities`, `types` and `values` are placeholders that hold only
+    fingerprints, until #18 and #33.
+  - Single-threaded: sharing between workers is the engine's (#14).
+- **Fingerprint seam** (`fingerprint.cppm`): a stand-in hash until #14 exposes the engine's.
+  Swapping it changes only that file. Nothing persists these fingerprints yet.
+- **Frame builder** (`builder.cppm`): drafts in the frame's arena (a `std::pmr` resource).
+  `commit(value)` interns what the value reaches, bottom-up, so abandoned drafts leave nothing
+  (§9.3). Lists of records that hold nodes are drafts; other lists are interned eagerly.
+- **Red view** (`red.cppm`): a stack cursor with item-relative offsets and the parent chain, and
+  `find(offset)` for descent.
+- **Compaction** (`compact.cppm`): holders mark live values, the survivors are renumbered with
+  their fingerprints kept, and holders rewrite their values with the returned `Remap`. Covers
+  `ast` and `seqs`.
+
 ## Bootstrap workarounds
 
 Places where ycxx's sources avoid or work around a C++26 feature because GCC 16 lacks it or
@@ -45,6 +83,22 @@ miscompiles it (DECISIONS §3.2). Each is removed once ycxx compiles itself.
   - Fix: belongs in libycxx (yrashk/libycxx#4, which has a 10-line repro and a tested
     workaround). Then bump the submodule and drop `_xfail_execution` in
     `tests/bootstrap/CMakeLists.txt`.
+- **Defaulted comparisons are members, not hidden friends** (`src/ast`).
+  - Cause: with `-freflection`, GCC 16.2 crashes in an importer that compares two values of an
+    exported struct whose defaulted `operator==` is a friend.
+  - Fix: belongs in GCC. Restore the friend form when ycxx compiles itself.
+- **Checked `constexpr` constructors of handles are not `constexpr`** (`make_node`,
+  `make_qual_type`, `make_decl_ord` in `src/ast/handles.cppm`).
+  - Cause: GCC 16.2 does not emit its TU-local contract-violation helper
+    (`__tu_has_violation`) in an importer that inlines a non-template inline function with a
+    precondition. The importer fails to link unless it has a contract of its own. Templates and
+    in-class member functions are not affected.
+  - Fix: belongs in GCC.
+- **`contract_assert` inside a lambda takes a local `bool`** (`src/ast` interner, builder,
+  compaction).
+  - Cause: GCC 16.2 evaluated such predicates to false, against values that were right when
+    evaluated into a local. It showed up in generic lambdas inside module templates.
+  - Not yet reduced to a standalone repro; two attempts did not reproduce it.
 - **The std module's BMI must be built with `-freflection -fcontracts`.**
   - `CMakeLists.txt` adds the flags to libycxx's `ycxx_modules` target.
   - Without them, `std::meta` is empty. An importer whose `-freflection` does not match the
