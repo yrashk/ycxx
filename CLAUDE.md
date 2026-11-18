@@ -5,11 +5,15 @@ exists. Work is coordinated through [GitHub issues](https://github.com/yrashk/yc
 
 ## Never read
 
-The source code, headers or generated code of other compilers, assemblers or linkers:
+The source code, headers or build-generated sources of other compilers, assemblers or linkers:
 Clang/LLVM, GCC/binutils, MSVC, EDG, lld, mold, ld64, Zig. This includes snippets found in web
 search results, blog posts that quote them, and Stack Overflow answers that paste them. If you
 land on such content, stop reading it, and say so in your issue comment. Running those compilers
 as black-box oracles is allowed (DECISIONS §2.3).
+
+Reading the machine code Clang or GCC *emit* is allowed only to diagnose a measured performance
+gap on a specific benchmark function. Log each reading on your issue, and restate what you learn
+in our own terms. Never copy sequences or commit their listings (DECISIONS §2.3).
 
 ## Before you start
 
@@ -26,6 +30,15 @@ as black-box oracles is allowed (DECISIONS §2.3).
 - Small commits, reviewed P0–P2 (DECISIONS §5). Cite draft clauses by stable name (`[temp.deduct]`).
 - A design question beyond your issue goes to a new issue labelled `status:needs-decision`,
   and `model:fable` if it is hard. Don't decide it silently in code.
+- **Fable through subagents** (DECISIONS §6.5). You are most likely running on Opus.
+  - On a `model:fable` issue, and for any architecture question or hard clause on other issues,
+    use the Agent tool with `model: "fable"`.
+  - Give the subagent a self-contained brief: the question, the clauses by stable name, the
+    relevant DECISIONS sections, and the rule never to read compiler source.
+  - Review its conclusions before using them, and push back with a follow-up when something is
+    unclear or seems wrong.
+  - Say in the document or comment which conclusions came from Fable.
+  - You keep the claim, the writing, the code and the issue updates.
 
 ## When you stop
 
