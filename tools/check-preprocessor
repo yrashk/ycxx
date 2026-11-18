@@ -1,0 +1,91 @@
+#!/usr/bin/env python3
+"""ycxx's preprocessor policy (DECISIONS §3.1; libycxx's DECISIONS.md §1, applied to ycxx).
+
+ycxx's sources are modules that `import std;`, and have no project headers, so the policy is
+stricter than libycxx's: the only directives allowed are
+- `#embed` (data, not code), anywhere;
+- `#include <...>` of a system header inside a global module fragment (between `module;` and the
+  module declaration), for C interfaces the std module does not provide.
+Everything else (#define, #if and friends, #include of a project file, #pragma) is an error.
+Configuration reaches the code as values (a configured module, constexpr), never as macros.
+
+Checked: every .cpp, .cppm and .cppm.in under src/ and tests/bootstrap/.
+  tools/check-preprocessor [FILE...]
+"""
+import pathlib, re, sys
+
+ROOT = pathlib.Path(__file__).resolve().parent.parent
+TREES = ["src", "tests/bootstrap"]
+SUFFIXES = (".cpp", ".cppm", ".cppm.in")
+DIRECTIVE = re.compile(r"^\s*#\s*(\w+)?(.*)$")
+SYSTEM_INCLUDE = re.compile(r"^\s*<[^<>]+>\s*$")
+
+
+def strip_comments(text):
+    """Blank out comments and string literals, keeping line structure."""
+    out, i, n = [], 0, len(text)
+    while i < n:
+        c = text[i]
+        if text.startswith("//", i):
+            j = text.find("\n", i)
+            j = n if j < 0 else j
+            i = j
+        elif text.startswith("/*", i):
+            j = text.find("*/", i + 2)
+            j = n if j < 0 else j + 2
+            out.append("\n" * text.count("\n", i, j))
+            i = j
+        elif c == '"' and not re.search(r'R$', text[max(0, i - 1):i]):
+            j = i + 1
+            while j < n and text[j] != '"' and text[j] != "\n":
+                j += 2 if text[j] == "\\" else 1
+            out.append('""')
+            i = j + 1
+        else:
+            out.append(c)
+            i += 1
+    return "".join(out)
+
+
+def check(path, errors):
+    rel = path.relative_to(ROOT) if path.is_relative_to(ROOT) else path
+    lines = strip_comments(path.read_text(encoding="utf-8")).splitlines()
+    in_gmf = False
+    for n, line in enumerate(lines, 1):
+        stripped = line.strip()
+        if stripped == "module;":
+            in_gmf = True
+            continue
+        if re.match(r"^(export\s+)?module\s+[\w.:]+\s*;", stripped):
+            in_gmf = False
+            continue
+        m = DIRECTIVE.match(line)
+        if not m:
+            continue
+        name, rest = m.group(1) or "", m.group(2)
+        if name == "embed":
+            continue
+        if name == "include" and in_gmf and SYSTEM_INCLUDE.match(rest):
+            continue
+        if name == "include":
+            errors.append(f"{rel}:{n}: #include outside a global module fragment, or of a project "
+                          f"file: use modules and `import std;`")
+        else:
+            errors.append(f"{rel}:{n}: #{name} is not allowed in ycxx's sources (only #embed, and "
+                          f"system #include in a global module fragment)")
+
+
+def main(argv):
+    files = [pathlib.Path(a).resolve() for a in argv] or sorted(
+        p for t in TREES for p in (ROOT / t).rglob("*") if p.name.endswith(SUFFIXES))
+    errors = []
+    for f in files:
+        check(f, errors)
+    for e in errors:
+        print(e, file=sys.stderr)
+    print(f"check-preprocessor: {len(files)} files, {len(errors)} errors")
+    return 1 if errors else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
