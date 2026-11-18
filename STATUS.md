@@ -161,6 +161,53 @@ What is true of the code today. Work in progress and its owners are tracked in
   calls between objects, data, GOT and pointer relocations, `puts` from libSystem), checks
   `codesign -v`, and links a C object compiled by the bootstrap compiler.
 
+## Lowering and AArch64 code generation, α subset (#26, #28, 2026-11-18)
+
+The α-slice subset (epic #39): C-like functions from L1 to running arm64 macOS code. #26 and #28
+stay open for the rest.
+
+- L2 (`src/ir/l2.cppm`, module `ycxx.ir.l2`): values `i1`/`i8`/`i16`/`i32`/`i64`/`ptr`, the
+  `!state` chain, blocks with arguments, an op table built by reflection (constants, `symbol`,
+  `alloca`, integer arithmetic with poison flags, `icmp`, `select`, width changes, `ptradd`,
+  `load`/`store` with an alias tag, `call`/`call_ind` with a mask of signed arguments, `br`,
+  `cond_br`, `ret`, `unreachable`), a verifier, a printer and an L1 origin map per node.
+- `lower` (`src/ir/lower.cppm`, `ycxx.ir.lower`): L1 to L2 over a `layout_source` concept (type
+  sizes, path offsets, constant values), a stand-in for the `layout` query until #33. Access paths
+  and pointer arithmetic become byte offsets, `alloc` becomes `alloca` (erroneous and zero
+  initialization store zero), lifetime and unsequenced markers are dropped, `consteval_br` takes
+  its runtime edge, `bool` is `i1` as a value and a byte in memory, and narrow results are returned
+  extended to 32 bits. Anything outside the subset (aggregates, `copy`, `switch`, EH, coroutines,
+  dynamic storage, virtual calls) is an error naming the node.
+  An address constant (a string literal's, as function_ir gives it) becomes `symbol` plus an offset.
+- `ycxx.target.aarch64` (`src/target/aarch64/`): the target description is data.
+  - `isa.cppm`: instruction forms with their fixed bits, width rule and operand fields, read by one
+    encoder.
+  - `aarch64.patterns`: the pattern table in the rule language, embedded with `#embed`, parsed
+    by a `constexpr` parser and checked by a `static_assert`.
+  - `abi.cppm`: register classes and the calling convention (AAPCS64 with Apple's natural packing
+    of stack arguments and 32-bit extension of narrow register arguments).
+  - `select.cppm`: maximal munch per block, trees cut at shared nodes, loads folded only within a
+    state epoch, leaves rematerialized, edge copies for block arguments.
+  - `emit.cppm`: every virtual register in a stack slot, frame layout with a frame record and
+    stack probing for frames over a page,
+    pseudo-form expansion, and encoding into `ycxx.obj` with BRANCH26, PAGE21/PAGEOFF12 and GOT
+    relocations.
+  - `codegen(unit)` turns functions and data (cstring, rodata, data_const, data, bss) into one
+    object, in entity-id order.
+- Tests (`tests/unit/codegen/`):
+  - `unit.lower`: golden L2.
+  - `unit.aarch64`, on both hosts: encodings against the Arm ARM, the pattern table, selection
+    and determinism.
+  - `unit.aarch64`, on arm64 macOS: generated programs linked by ycxx's linker and run (recursion,
+    loops over locals and block arguments, `puts`/`putchar`, globals, a pointer to a string
+    literal). A C harness compiled by GCC checks about 60 generated functions against C's own
+    arithmetic and calling convention, over thousands of argument pairs. It covers narrow types,
+    stack arguments both ways, function pointers and the GOT. Mutating `sdiv` or the stack packing
+    makes it fail.
+- Not yet: the `unit`/`optimized`/`codegen` queries (#43 wires the pipeline), the allocation
+  validator and dependence checker (#29), SSA linear scan, list scheduling, unwind info and DWARF,
+  `cost_model`, variadic calls, more than one result, frame objects aligned above 16 bytes.
+
 ## AST core (#32)
 
 `src/ast/`, from the [AST design](docs/design/ast.md) §2, §3, §9 and §10. Modules `ycxx.ast.*`,
