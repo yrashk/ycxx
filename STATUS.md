@@ -13,7 +13,6 @@ What is true of the code today. Work in progress and its owners are tracked in
   - The preprocessor policy is enforced by `tools/check-policy`.
   - CI runs PR, `main` and nightly tiers on Linux x86_64 and macOS arm64.
   - `ycxx --version` works. The fronts (`daemon`, `cxx`, `lsp`, `ctl`) are stubs that exit 2.
-  - `tools/test` is a stand-in until the driver (#5) lands.
 - The bootstrap smoke test (`tests/bootstrap`) passes for modules, reflection, contracts,
   coroutines and the other C++26 features ycxx relies on. `std::execution` is an expected
   failure (below).

@@ -391,7 +391,7 @@ def _main(argv):
     if args.cxx != 'ycxx' and not cut.available:
         print(f'tools/test: the compiler under test, {args.cxx}, is not found ({cut.why_missing})', file=sys.stderr)
         return EXIT_USAGE
-    if args.cxx == 'ycxx' and cut.features and not cut.available:
+    if args.cxx == 'ycxx' and cut.features and not cut.available and 'build' not in stages:
         print(f'tools/test: tests/features/ycxx.txt lists features but ycxx is not built ({cut.why_missing})',
               file=sys.stderr)
         return EXIT_USAGE
@@ -421,6 +421,15 @@ def _main(argv):
             elif s == 'build':
                 ui.section('build')
                 ok = build_stage(ui, logs, records, args.jobs)
+                if ok and not cut.available:  # the build has just made it
+                    fresh = toolchain.discover(REPO)[cut.name]
+                    cut.exe, cut.version, cut.why_missing = fresh.exe, fresh.version, fresh.why_missing
+                    if cut.available:
+                        ui.info(f'{cut.name} (under test)', f'{cut.exe}: {cut.version}')
+                        meta[cut.name] = f'{cut.exe}: {cut.version}'
+                    elif cut.features:
+                        ui.fail(f'{cut.name} not found after the build', cut.why_missing)
+                        ok = False
             else:
                 ts = plan[s]
                 ui.section(f'{s}: {len(ts)} tests' + (f' ({notes[s]})' if s in notes else ''))
