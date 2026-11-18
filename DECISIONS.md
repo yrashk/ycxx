@@ -185,6 +185,21 @@ project must survive any session ending.
    - Smaller models: mechanical work (data tables, extraction scripts, bulk test triage).
 
    Issues that need Fable are labelled `model:fable`.
+
+   **How Fable is reached:** sessions run on Opus, because a session cannot be started on a
+   model above its parent's. Fable is used through subagents: the Agent tool with
+   `model: "fable"`.
+   - On a `model:fable` issue, the Opus session owns the claim, the issue bookkeeping, the
+     writing and the code. It gives every decision-bearing question to a Fable subagent.
+   - Each brief is self-contained: the question, the draft clauses by stable name, the relevant
+     DECISIONS sections, and the rule never to read compiler source (§2.2). A subagent sees only
+     its brief.
+   - The session reviews what Fable concludes before using it, and pushes back with a follow-up
+     to the same subagent when something is unclear or seems wrong. It does not silently
+     override.
+   - Design documents and decision comments say which conclusions came from Fable.
+   - On issues without the label, the session calls Fable on its own judgment when it meets a
+     question listed above.
 6. **Design documents** live in `docs/design/` and are written before the code they govern. Once
    accepted, their conclusions are summarized in this file.
 
