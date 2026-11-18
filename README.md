@@ -39,7 +39,8 @@ progress is in [STATUS.md](STATUS.md), and work is tracked and claimed in
 ycxx is written in C++26 against [libycxx](https://github.com/yrashk/libycxx), an independent
 C++26 standard library built the same way. libycxx is a git submodule at
 [`deps/libycxx`](deps/libycxx). It is also the standard library ycxx ships for the programs it
-compiles. Until ycxx can compile itself, it is built with Clang 23 and libycxx.
+compiles. Until ycxx can compile itself, it is built with GCC 16 (with reflection and
+contracts enabled) and libycxx, and uses as much of C++20–26 as that compiler allows.
 
 ## How it is written
 
