@@ -74,8 +74,16 @@ enum class LexDiag : u32 {
   macro_name_not_identifier [[=message{Severity::error, "macro name must be an identifier"}]],
   macro_name_defined [[=message{Severity::error, "'defined' cannot be used as a macro name"}]],
   macro_redefined [[=message{Severity::error, "macro redefined with a different replacement list"}]],
-  function_like_unsupported [[=message{Severity::error, "function-like macros are not supported yet"}]],
-  paste_unsupported [[=message{Severity::error, "'##' is not supported yet"}]],
+  macro_param_expected [[=message{Severity::error, "expected a macro parameter name, '...' or ')'"}]],
+  macro_param_duplicate [[=message{Severity::error, "duplicate macro parameter name"}]],
+  va_outside_variadic [[=message{Severity::error, "__VA_ARGS__ and __VA_OPT__ can appear only in a variadic macro's replacement list"}]],
+  va_opt_malformed [[=message{Severity::error, "__VA_OPT__ must be followed by a parenthesized replacement, not nested"}]],
+  stringize_not_parameter [[=message{Severity::error, "'#' is not followed by a macro parameter"}]],
+  paste_at_edge [[=message{Severity::error, "'##' cannot appear at either end of a replacement list"}]],
+  paste_invalid [[=message{Severity::error, "pasting does not form a valid preprocessing token"}]],
+  invocation_unterminated [[=message{Severity::error, "unterminated function-like macro invocation"}]],
+  too_few_arguments [[=message{Severity::error, "too few arguments in a macro invocation"}]],
+  too_many_arguments [[=message{Severity::error, "too many arguments in a macro invocation"}]],
   // [cpp.pragma]
   pragma_once_in_main [[=message{Severity::warning, "#pragma once in main file"}]],
 };

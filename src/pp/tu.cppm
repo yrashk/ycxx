@@ -337,11 +337,14 @@ std::string print(Session& s, const Flat& flat) {
   std::string prev, prev2;  // the last two tokens printed
   TokLoc prev_loc;
   std::size_t prev_end = 0;
+  // The line of the last `)` of the invocations printed on this line: tokens up to it stay here.
+  u32 cont_line = 0;
   auto marker = [&](u16 file, u32 line) {
     if (!out.empty() && out.back() != '\n') out += '\n';
     out += std::format("# {} \"{}\"\n", line, s.spellings.name(flat.file_names[file]));
     cur_file = file;
     cur_line = line;
+    cont_line = 0;
     line_empty = true;
   };
   auto move_to = [&](u16 file, u32 line) {
@@ -355,6 +358,18 @@ std::string print(Session& s, const Flat& flat) {
       }
     }
   };
+  auto close_line = [&](TokLoc l) {
+    u32 best = 0;
+    while (l.expansion != 0) {
+      const Expansion& e = flat.expansions[l.expansion];
+      if (e.kind == ExpansionKind::function && e.operand_a != 0) {
+        TokLoc outer = site(l);
+        best = std::max(best, line_of(outer.file, e.operand_a - 1).first);
+      }
+      l = TokLoc{e.site_file, e.parent, e.site_offset};
+    }
+    return best;
+  };
   std::size_t pass = 0;
   auto print_tok = [&](const PTok& t, bool directive_start) {
     TokLoc at = site(t.loc);
@@ -365,7 +380,10 @@ std::string print(Session& s, const Flat& flat) {
         out += '\n';
         ++cur_line;
       }
+    } else if (static_cast<int>(at.file) == cur_file && line > cur_line && line <= cont_line) {
+      // Still on the line of an invocation that ended on a later line, as Clang prints it.
     } else if (static_cast<int>(at.file) != cur_file || line != cur_line) {
+      if (static_cast<int>(at.file) == cur_file && line > cont_line && cont_line > cur_line) cur_line = cont_line;
       move_to(at.file, line);
     }
     std::string text = spelling(t.tok, s.spellings);
@@ -383,6 +401,8 @@ std::string print(Session& s, const Flat& flat) {
     prev2 = std::exchange(prev, text);
     prev_loc = t.loc;
     prev_end = t.loc.offset + text.size();
+    if (static_cast<int>(at.file) == cur_file) cont_line = std::max(cont_line, close_line(t.loc));
+    if (cont_line < cur_line) cont_line = 0;
   };
   std::size_t boundary = 0;
   for (std::size_t i = 0; i <= flat.tokens.size(); ++i) {
