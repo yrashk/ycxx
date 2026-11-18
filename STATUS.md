@@ -89,6 +89,15 @@ What is true of the code today. Work in progress and its owners are tracked in
   - `Epochs`: requests in revision epochs (`counting_scope`), `apply` at quiescence, interrupted
     requests respawned, the progress quantum's hook (daemon design §4.1–4.2);
   - a `Db` without a pool runs everything on the calling thread (what the pipeline uses).
+- For the daemon (#95, daemon design §4.4, §5.1, §6.3, §8.1):
+  - durabilities `editor < ambient < low < medium < high`;
+  - input providers (`Db::set_provider`): an input read before anyone set it is provided then,
+    with the provider's durability, at the current revision and with no new one;
+  - `Db::set` returns whether the value changed; `Db::reset_unobserved` changes an input nobody
+    has read since it was set, while requests run (an "observed" flag per input cell, set by
+    every read and validation, paired with the reset's claim);
+  - `Counters` per request (`Db::request(k, p, &counters)`, `Epochs::Ticket::stats`), per worker
+    for the Db, and per query kind when `count_per_kind(true)`.
 - Where the scheduler differs from query-engine.md (#108):
   - a frame that leaves without publishing reverts its cell and wakes every waiter to look again,
     instead of handing the claim to the first waiter (§A3.1);
@@ -105,7 +114,9 @@ What is true of the code today. Work in progress and its owners are tracked in
   when a dependency is dropped (`unit.engine`, single-threaded). `unit.engine_scheduler`: the
   pool, priorities and backend; outputs, dependency lists and execution counts equal at 1, 2, P
   and 2P threads with the chaos scheduler; incremental == cold at each; cancellation injected;
-  hand-over from a stopped owner; respawn; cycles and errors from every entry point. Clean under
+  hand-over from a stopped owner; respawn; cycles and errors from every entry point. `unit.engine_inputs`: providers (once per cell under
+  contention, durability, failure), the `editor` and `ambient` shortcuts, `reset_unobserved`
+  racing readers over 300 rounds, counts per request and per kind. Clean under
   ASan and UBSan; ThreadSanitizer needs Linux (#105).
 - Not yet: allocation-free waits, per-worker frame free lists and lock-free index reads
   (#104); the cycle report's program-order path note (#106); interners shared
