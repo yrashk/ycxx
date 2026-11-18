@@ -530,6 +530,45 @@ public:
     return std::nullopt;
   }
 
+  // [dcl.init.string]/1: the code units, terminating null included, of string literal `e` when it
+  // can initialize an array of `elem`: an ordinary literal one of char, signed char or unsigned
+  // char, a UTF-8 literal one of char8_t, char or unsigned char.
+  std::optional<std::string> string_units(QualType elem, Ex e) {
+    if (!e.ok() || !types().is_array(e.type())) return std::nullopt;
+    auto lit = as<ast::Literal>(e);
+    auto src = types().builtin_of(Types::unqualified(types().rec(e.type()).inner));
+    auto dst = types().builtin_of(Types::unqualified(elem));
+    if (!lit || !src || !dst) return std::nullopt;
+    bool fits = (*src == Builtin::char_ && (*dst == Builtin::char_ || *dst == Builtin::signed_char || *dst == Builtin::unsigned_char)) ||
+                (*src == Builtin::char8_t_ && (*dst == Builtin::char8_t_ || *dst == Builtin::char_ || *dst == Builtin::unsigned_char));
+    if (!fits) return std::nullopt;
+    return w_->values.rec(lit->value).units;
+  }
+  // An aggregate's element of character array type from string literal `e`, if it is one.
+  std::optional<Ex> string_element(QualType et, Ex e) {
+    if (!types().is_array(et) || !string_units(Types::unqualified(types().rec(et).inner), e)) return std::nullopt;
+    return string_init(et, e);
+  }
+  // A character array initialized by a string literal ([dcl.init.string]): its elements are the
+  // literal's code units and the rest zero (/3); there must be room for the null (/2).
+  std::optional<Ex> string_init(QualType t, Ex e) {
+    if (!types().is_array(t)) return std::nullopt;
+    QualType elem = Types::unqualified(types().rec(t).inner);
+    auto units = string_units(elem, e);
+    if (!units) return std::nullopt;
+    if (units->size() > types().rec(t).bound) {
+      diag(e.begin, Diag::too_many_initializers, t);
+      return Ex{NodeId::none, e.begin, e.end};
+    }
+    Braced b;
+    b.begin = e.begin;
+    b.end = e.end;
+    for (char u : *units)
+      b.clauses.push_back({literal(elem, w_->values.integer(elem, static_cast<unsigned char>(u)), ValueCategory::prvalue, e.begin, e.end),
+                           nullptr, {}, false, e.begin});
+    return list_init(t, b);
+  }
+
   // Whether `t` is complete at this point; a class needs its definition before the point.
   bool is_complete(QualType t) {
     // A dependent type is checked when the template is instantiated; the current instantiation's
@@ -539,7 +578,8 @@ public:
       return true;
     }
     if (types().is_void(t)) return false;
-    if (types().is_array(t)) return is_complete(types().rec(t).inner);
+    if (types().is_array(t))
+      return types().rec(t).bound_value != ConstId::none && is_complete(types().rec(t).inner);  // [dcl.array]/6
     if (types().is_class(t)) return q_->is_complete(types().class_of(t));
     return true;
   }
@@ -654,7 +694,7 @@ public:
     if (const ClassRec* c = class_rec(r.entity); c && c->user_ctors) return true;
     if (const ClassRec* c = class_rec(r.entity))
       for (const FieldRec& f : c->fields)
-        if (f.init != ConstId::none || has_member_inits(f.type)) return true;
+        if (f.init != ConstId::none || f.dmi || has_member_inits(f.type)) return true;
     return false;
   }
 
@@ -711,6 +751,9 @@ public:
     }
     if (types().is_void(t) && b.clauses.empty()) return void_prvalue(b.begin, b.end);  // [expr.type.conv]/2
     if (!require_complete(t, b.begin)) return fail;
+    // [dcl.init.string]/1: a character array from a string literal in braces.
+    if (b.clauses.size() == 1 && !b.clauses[0].list && !b.clauses[0].designated)
+      if (auto r = string_init(t, b.clauses[0].expr)) return *r;
     // [dcl.init.general]: an initializer-list or a designated-initializer-list, not a mix.
     if (std::ranges::any_of(b.clauses, &Braced::Clause::designated) &&
         !std::ranges::all_of(b.clauses, &Braced::Clause::designated)) {
@@ -801,6 +844,10 @@ public:
       if (c.list) {
         ++next;
         out.push_back(list_init(et, *c.list));
+      } else if (auto str = string_element(et, c.expr)) {
+        // [dcl.init.string]: a character array element from a string literal, not elided into.
+        ++next;
+        out.push_back(*str);
       } else if (is_aggregate(et) && !c.designated && !initializes(et, c.expr)) {
         // Brace elision: the clause begins the sub-aggregate's own elements.
         if (!require_complete(et, c.begin)) return fail;
@@ -824,11 +871,15 @@ public:
   // The bound of an array of `elem` initialized by `b` ([dcl.array]/8): the number of elements
   // its clauses initialize, brace elision included.
   u64 deduce_bound(QualType elem, const Braced& b) {
+    if (b.clauses.size() == 1 && !b.clauses[0].list && !b.clauses[0].designated)
+      if (auto u = string_units(elem, b.clauses[0].expr)) return u->size();  // [dcl.init.string]/1
     u64 n = 0;
     std::size_t next = 0;
     while (next < b.clauses.size()) {
       const Braced::Clause& c = b.clauses[next];
-      if (c.list || c.designated || !is_aggregate(elem) || initializes(elem, c.expr) || !is_complete(elem)) ++next;
+      if (c.list || c.designated || !is_aggregate(elem) || initializes(elem, c.expr) || !is_complete(elem) ||
+          (types().is_array(elem) && string_units(types().rec(elem).inner, c.expr)))
+        ++next;
       else {
         std::size_t before = next;
         aggregate(elem, b, next, c.begin, c.begin);
@@ -1947,6 +1998,11 @@ public:
       return dependent_node({e}, e.begin, e.end, types().is_dependent(to) ? std::nullopt : std::optional(Types::unqualified(to)));
     }
     QualType target = Types::unqualified(to);
+    if (types().is_array(target)) {
+      if (auto r = string_init(target, e)) return *r;
+      diag(at_, Diag::array_initializer);  // [dcl.init.general]/16.5: a list or a string literal
+      return {NodeId::none, e.begin, e.end};
+    }
     // A class object is copy-initialized from an expression of its own class: a glvalue through
     // the (trivial, implicit) copy constructor, a prvalue directly ([dcl.init.general]/17.6).
     if (types().is_reference(to)) return bind_reference(e, to, at_);

@@ -12,6 +12,10 @@ Covered:
 - fallback: an unusable runtime directory runs in-process with the same output;
 - a daemon killed between requests leaves a stale socket; the next client starts a new one.
 
+The in-process side runs on one thread and the daemon on eight under a chaos seed (§8.2), so every
+comparison of a link, -c or -fsyntax-only is also one of 1 and N threads (DECISIONS §4); -E runs
+no engine work.
+
 The client restarts a daemon that died and asks again (§7.2), which would hide a crash: until the
 daemon is killed on purpose, one daemon (one pid) must answer every request.
 
@@ -30,6 +34,11 @@ failures = []
 # deterministic.
 KNOWN = {}
 known_seen = set()
+
+
+# Compared in every run, sampled or not: the deepest recursion of tests/own, which a daemon thread
+# with a smaller stack than the in-process main thread's did not survive (#178).
+ALWAYS = {'templates/f1-review-nesting-limit.reject.cpp', 'templates/c2-review-nesting-limit.reject.cpp'}
 
 
 def sampled(test):
@@ -82,14 +91,15 @@ def main():
     runtime = tempfile.mkdtemp(prefix='yd', dir='/tmp')  # short: sun_path holds 104 bytes on macOS
     os.chmod(runtime, 0o700)
     base = dict(os.environ)
-    for k in ('YCXX_DAEMON', 'YCXX_NO_DAEMON', 'YCXX_ROOT', 'YCXX_NO_WATCH'):
+    for k in ('YCXX_DAEMON', 'YCXX_NO_DAEMON', 'YCXX_ROOT', 'YCXX_NO_WATCH', 'YCXX_THREADS', 'YCXX_CHAOS_SEED'):
         base.pop(k, None)
     base['YCXX_RUNTIME_DIR'] = runtime
     base['YCXX_DAEMON_IDLE_EXIT'] = '300'
     cache = tempfile.mkdtemp(prefix='ycxx-cache-')
     base['XDG_CACHE_HOME'] = cache  # the persistent cache, once #17 has one
-    cold = dict(base, YCXX_NO_DAEMON='1')
-    daemon = dict(base, YCXX_DAEMON='require')
+    cold = dict(base, YCXX_NO_DAEMON='1', YCXX_THREADS='1')
+    # The daemon takes its pool from the environment of the client that starts it.
+    daemon = dict(base, YCXX_DAEMON='require', YCXX_THREADS='8', YCXX_CHAOS_SEED='7')
     envs = [('in-process', cold), ('daemon', daemon)]
     # Scratch directories are outside any repository: give them one scope, by marker.
     scope = Path(tempfile.mkdtemp(prefix='ycxx-scope-'))
@@ -103,7 +113,10 @@ def main():
             """The client restarts a daemon that died and asks again: the pid must not change."""
             nonlocal pinned
             st = subprocess.run([ycxx, 'ctl', 'status'], cwd=scope, env=base, capture_output=True, text=True, timeout=60)
-            pid = dict(line.split(': ', 1) for line in st.stdout.splitlines() if ': ' in line).get('pid')
+            fields = dict(line.split(': ', 1) for line in st.stdout.splitlines() if ': ' in line)
+            pid = fields.get('pid')
+            if pid is not None and fields.get('threads') != '8':
+                fail(f'{where}: the daemon runs {fields.get("threads")} threads, not the 8 its environment asks')
             if pid is None:
                 fail(f'{where}: no daemon answers `ctl status`')
             elif pinned is None:
@@ -124,7 +137,7 @@ def main():
         for sub in sorted(p for p in own.iterdir() if p.is_dir()):
             ts = sorted(sub.glob('*.cpp'))
             whole = sub.name in ('slice', 'smoke') or '--all' in sys.argv
-            tests += [t for t in ts if whole or sampled(f'{sub.name}/{t.name}')]
+            tests += [t for t in ts if whole or sampled(f'{sub.name}/{t.name}') or f'{sub.name}/{t.name}' in ALWAYS]
         for t in tests:
             def setup(d, t=t):
                 shutil.copy(t, d / t.name)
@@ -156,6 +169,17 @@ def main():
                 want, got = build(sub, cold, args), build(sub, daemon, args)
                 if want != got:
                     fail(f'same argv {args} in {sub}/: {got!r:.300} != cold {want!r:.300}')
+
+        # Two unrelated programs that define one class name differently, alternately through one
+        # daemon: each keeps its own record of the class (#185).
+        for sub, text in (('p', 'struct Pt { int x, y; };\nint main() { Pt p{2, 3}; return p.x + p.y - 5; }\n'),
+                          ('q', 'struct Pt { int x; };\nint main() { Pt p{1}; return p.x - 1; }\n')):
+            (work / sub).mkdir()
+            (work / sub / 'm.cpp').write_text(text)
+        for sub in ('p', 'q', 'p', 'q'):
+            want, got = build(sub, cold), build(sub, daemon)
+            if want != got:
+                fail(f'a class of one name in two programs, {sub}/: the daemon\'s object differs from a cold compile')
 
         same_daemon('two directories')
 

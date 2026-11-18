@@ -125,7 +125,7 @@ What is true of the code today. Work in progress and its owners are tracked in
   ASan and UBSan; ThreadSanitizer needs Linux (#105).
 - Not yet: allocation-free waits, per-worker frame free lists and lock-free index reads
   (#104); the cycle report's program-order path note (#106); contextual queries (#16);
-  eviction and persistence (#17); `ycxx cxx` and the daemon on a pool (#139).
+  eviction and persistence (#17).
 - A session on a pool (#137):
   - `Pool::set_scope` makes each worker enter a scope before it runs work. A
     `pipeline::Session(Pool&)` uses it to bind its universe and interners on the worker's
@@ -548,6 +548,11 @@ the same handler in-process.
   returns stdout, stderr, the exit status and the output bytes, which the client writes with
   `pipeline::write_file`. Files are read through a `pp::Host`, and the units are built in a
   `pipeline::Session` (#63).
+- The session runs on a worker pool, in-process and in the daemon alike (#139):
+  `compile::threads()` reads `YCXX_THREADS` (default: the hardware's concurrency) and
+  `YCXX_CHAOS_SEED`; the daemon takes them from the client that starts it and reports `threads`
+  in `ctl status`. Workers and the daemon's request threads have 256 MiB stacks (address space),
+  above a main thread's 8 MiB (#178, #187).
 - The daemon keeps one `Session` for its life (#120). Its `pp::FileContent` cells are provided
   from the file table, with the toolchain and sysroot as `high` durability. A batch sets the
   provided entries it changed, at quiescence. A repeated request executes nothing
@@ -590,12 +595,14 @@ the same handler in-process.
   - `unit.daemon`: framing and malformed frames, root discovery, the quantum under simulated
     time, file-table batches, and the real watcher with cookie sync.
   - `daemon.compare` (`tests/daemon/compare.py`): `tests/own/slice` and `smoke` whole and a
-    fixed eighth of the other suites, by name hash (`--all`: every test), in four actions,
-    through a daemon and in-process, byte for byte; two directories with one argv, edits,
-    fallback, and a killed daemon. One daemon (one pid, pinned by a first request) must answer
-    until it is killed, so a crash hidden by the client's retry fails it. `--all` shows 12
-    `classes/` tests diverging after earlier tests' structs (#115); `KNOWN` lists the
-    divergences of the default run that have their own issue (none today).
+    fixed eighth of the other suites, by name hash (`--all`: every test), plus the two deepest
+    nesting tests, in four actions, through a daemon on 8 threads under a chaos seed and
+    in-process on one (so link, `-c` and `-fsyntax-only` also compare 1 and N threads), byte
+    for byte; two directories with one argv, two programs defining one
+    class name differently (#185), edits, fallback, and a killed daemon. One daemon (one pid,
+    pinned by a first request) must answer until it is killed, so a crash hidden by the
+    client's retry fails it. `KNOWN` lists the divergences of the default run that have their
+    own issue (none today).
   - `daemon.process` (`tests/daemon/process.py`, #98): an edit landing mid-build (restarted,
     answered as the final state, counted in `ctl status`), a killed client (cancelled), a killed
     daemon mid-request (the client retries), a restart, and concurrent clients.
@@ -851,6 +858,44 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   of an array of unknown bound, the [dcl.typedef]/9 restrictions on an unnamed class named for
   linkage purposes.
 
+## `<cstdio>`, step 2: using-declarations at namespace scope (#133, 2026-11-18)
+
+- `using N::x, ::y;` at namespace scope ([namespace.udecl]): each declarator introduces what
+  qualified lookup finds at its position, as query-engine.md's "Using-declarations" says;
+  `Program::using_targets_` keeps them by (item, name ordinal) and unqualified and qualified
+  lookup that meet the using-declaration's name take them instead. A later overload of the
+  target is not introduced (/11).
+- Conflicts ([namespace.udecl]/10, [basic.scope.scope]/4): a target and a declaration of the
+  scope, either first, unless they are one entity, both functions, or a type and a variable or
+  function. A using-declaration may not name a namespace (/3) or, at namespace scope, a class
+  member (/8).
+- Tests: `tests/own/using` (10, two from the review). Two more draft examples pass.
+- Not yet (#153): enumerators through `using E::e;` (/7), a function target with the same
+  parameter types as a function of the scope (/14), `typename` with dependent names (ζ).
+
+## `<cstdio>`, step 3: attributes, asm labels, string-initialized arrays (#133, 2026-11-18)
+
+- **Attributes:** `[[…]]` attribute-specifiers on declarations, class heads and statements, and
+  GNU `__attribute__((…))` before and after declarators, are parsed and ignored
+  ([dcl.attr.grammar]/6); none before a linkage-specification ([dcl.link]).
+- **Asm labels:** `__asm("…")` after a declarator gives the entity's symbol exactly as written
+  (`Program::asm_label`, `pipeline::Entity::asm_label`), as the SDK's `__DARWIN_ALIAS` needs.
+  Both extensions are listed in `docs/EXTENSIONS.md` (DECISIONS §1.2).
+- **Arrays:** character arrays from string literals, with or without braces ([dcl.init.string]),
+  their bound from the literal when it is left out; `extern T a[];`, an incomplete type
+  (`Types::array_unknown`), completed by a later declaration with a bound ([basic.link]/11);
+  arrays of pointers of unknown bound.
+- `__FLT_EVAL_METHOD__` is predefined (0), as Clang has it for the target.
+- Attributes are also accepted after a declarator-id, on parameters, alias-declarations and
+  statements, and in the GNU form on class heads and after template-heads. A string literal
+  initializes a character-array element of an aggregate. A default member initializer that is
+  not a scalar constant, in a class without constructors, is now diagnosed (#118) instead of
+  being dropped.
+- Tests: `tests/own/decls` (11, three from the review). Five more draft examples pass.
+- Not yet: `sizeof`, `alignof`, `decltype`, `static_cast` and other casts, operator functions,
+  unions (the next steps of #133); a reference or pointer to an array of unknown bound; asm labels
+  on class members and the other gaps of #190.
+
 ## Templates, ζ step 1: function templates (#88, 2026-11-18)
 
 Instantiation follows ast.md §6.4 as amended by #88 (Fable's decision): declarations and
@@ -968,7 +1013,7 @@ template's tokens again with the arguments bound.
   item and its names carry a `specialization` flag; names of explicit and partial
   specializations are not found by lookup. A class's member items are scoped by its template-id
   (`Kind<T*>`), so a specialization's members have ids of their own.
-- Tests: `tests/own/templates/s3-*` (spec-driven, plus ten from the review); 5 more draft examples pass.
+- Tests: `tests/own/templates/s3-*` (spec-driven, plus ten from the review); 8 more draft examples pass.
 - Not yet (#88): alias templates, packs, concepts, member templates and their specializations,
   static data members of class templates, non-type template arguments that are dependent
   expressions other than a parameter (`A<I+5>`), and coalesced definitions of specializations

@@ -17,6 +17,7 @@ export module ycxx.daemon:server;
 
 import std;
 import ycxx.compile;
+import ycxx.engine;
 import ycxx.lsp;
 import ycxx.pipeline;
 import ycxx.pp;
@@ -49,6 +50,11 @@ namespace ycxx::daemon {
 namespace {
 
 using Clock = std::chrono::steady_clock;
+
+// A request's thread stack (#178): fixed, so the daemon does not depend on the stack limit of the
+// client that started it, and far above a main thread's default (8 MiB), so a request that fits
+// in-process fits here. Only address space is reserved. Deeper recursion needs a guard (#187).
+constexpr std::size_t request_stack = std::size_t{256} << 20;
 
 void log(std::string_view what) {
   auto now = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch());
@@ -201,7 +207,8 @@ class Server {
       std::lock_guard g(conn_mu_);
       ++connections_;
     }
-    std::thread([this, c = std::move(c)]() mutable {
+    // A request recurses as deep in the daemon as in-process, on a main thread's stack (#178).
+    std::thread(std::thread::stack_size_hint(request_stack), [this, c = std::move(c)]() mutable {
       serve_connection(c.get());
       c.reset();
       std::lock_guard g(conn_mu_);
@@ -255,6 +262,7 @@ class Server {
     s.socket = paths_.socket();
     s.watcher = watcher_state_;
     s.idle_exit_s = static_cast<std::uint64_t>(o_.idle_exit.count());
+    s.threads = threads_.count;
     return s;
   }
 
@@ -534,7 +542,8 @@ class Server {
   // exactly the cells that read the file and a repeated request executes nothing.
   pipeline::Session& session() {
     if (!session_) {
-      session_ = std::make_unique<pipeline::Session>();
+      if (!pool_) pool_ = std::make_unique<engine::Pool>(threads_.count, threads_.chaos_seed);
+      session_ = std::make_unique<pipeline::Session>(*pool_);
       provided_.clear();
       buffers_.clear();
       session_->db().set_provider<pp::FileContent>([this](pp::PathId id) { return provide(id); });
@@ -581,6 +590,8 @@ class Server {
   FileTable table_;
   Admission admission_;
   std::timed_mutex engine_mu_;  // one request in the engine at a time (#15 lifts this)
+  const compile::Threads threads_ = compile::threads();
+  std::unique_ptr<engine::Pool> pool_;           // under engine_mu_; outlives the session
   std::unique_ptr<pipeline::Session> session_;  // under engine_mu_
   std::mutex provided_mu_;
   std::set<std::string> provided_;  // the table keys provided to session_'s FileContent cells

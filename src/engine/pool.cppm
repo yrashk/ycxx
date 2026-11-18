@@ -60,6 +60,9 @@ class Pool {
 public:
   // `threads` workers; with a seed, the chaos scheduler.
   explicit Pool(unsigned threads, std::optional<std::uint64_t> chaos_seed = std::nullopt);
+  // A worker's stack: queries recurse as deep as on a main thread, whose stack is 8 MiB by
+  // default, and far deeper is reserved, as address space only (#178; a guard is #187).
+  static constexpr std::size_t worker_stack = std::size_t{256} << 20;
   Pool(const Pool&) = delete;
   Pool& operator=(const Pool&) = delete;
   // Precondition: nothing is queued or running.
@@ -321,7 +324,8 @@ Pool::Pool(unsigned threads, std::optional<std::uint64_t> chaos_seed) : chaos_(c
     w->rng = chaos_seed.value_or(0x79637878) ^ (0x9e3779b97f4a7c15ull * (i + 1));
     workers_.push_back(std::move(w));
   }
-  for (unsigned i = 0; i < threads; ++i) workers_[i]->thread = std::jthread([this, i] { loop(i); });
+  for (unsigned i = 0; i < threads; ++i)
+    workers_[i]->thread = std::jthread(std::jthread::stack_size_hint(worker_stack), [this, i] { loop(i); });
 }
 
 Pool::~Pool() {

@@ -78,6 +78,8 @@ struct Declarator {
   // ([temp.expl.spec]/1); `f<>` has none.
   std::optional<std::vector<ast::TemplateArg>> template_args;
   u32 template_args_at = 0;
+  // A GNU asm label, `__asm("_fopen")`: the symbol as written (docs/EXTENSIONS.md); empty if none.
+  std::string asm_label;
   bool ok = true;
 };
 
@@ -121,6 +123,7 @@ public:
   // Moves to the region's token `i`, inside the part (past a class's member-specification).
   void seek(u32 i) { i_ = std::min(i, end_); }
   const lex::Literal& literal() const { return r_->literal(tok()); }
+  const lex::Literal& literal_at(u32 ahead) const { return r_->literal(tok(ahead)); }
 
   // Skips to just after the next `;` at bracket depth 0, or to a `}` that closes the enclosing
   // block (not consumed).
@@ -239,6 +242,7 @@ public:
       flag = true;
     };
     for (;;) {
+      if (skip_attributes()) continue;
       Tk k = kind();
       switch (k) {
       case Tk::kw_void: ++n_void; break;
@@ -479,8 +483,74 @@ public:
       d.params = fn->params;
       d.variadic = fn->variadic;
     }
+    if (d.ok) {
+      skip_attributes();
+      if (!abstract) {
+        d.asm_label = asm_label(d.ok);
+        skip_attributes();
+      }
+    }
     return d;
   }
+
+  // Attribute-specifiers ([dcl.attr.grammar]), and the GNU `__attribute__((…))` the SDK's
+  // headers use (docs/EXTENSIONS.md): skipped, as no attribute ycxx knows changes what it does
+  // yet ([dcl.attr.grammar]/6 lets an implementation ignore one it does not know). Whether any
+  // was there: `attr_std` for an attribute-specifier, `attr_gnu` for a GNU attribute.
+  static constexpr int attr_std = 1, attr_gnu = 2;
+  int skip_attributes() {
+    int any = 0;
+    for (;;) {
+      bool std_attr = is(Tk::l_square) && kind(1) == Tk::l_square;
+      bool gnu = is(Tk::identifier) && name_spelling() == "__attribute__" && kind(1) == Tk::l_paren;
+      if (!std_attr && !gnu) return any;
+      any |= std_attr ? attr_std : attr_gnu;
+      if (gnu) bump();
+      Tk open = kind(), close = open == Tk::l_square ? Tk::r_square : Tk::r_paren;
+      u32 depth = 0;
+      do {
+        if (is(open)) ++depth;
+        else if (is(close)) --depth;
+        bump();
+      } while (depth > 0 && !at_end());
+    }
+  }
+  // The token index `ahead` moves to past any attributes that start there.
+  u32 past_attributes(u32 ahead) const {
+    for (;;) {
+      bool std_attr = kind(ahead) == Tk::l_square && kind(ahead + 1) == Tk::l_square;
+      bool gnu = kind(ahead) == Tk::identifier && r_->name(tok(ahead)) == "__attribute__" && kind(ahead + 1) == Tk::l_paren;
+      if (!std_attr && !gnu) return ahead;
+      if (gnu) ++ahead;
+      Tk open = kind(ahead), close = open == Tk::l_square ? Tk::r_square : Tk::r_paren;
+      u32 depth = 0;
+      do {
+        if (kind(ahead) == open) ++depth;
+        else if (kind(ahead) == close) --depth;
+        ++ahead;
+      } while (depth > 0 && i_ + ahead < end_);
+    }
+  }
+  // A GNU asm label after a declarator, `asm("…")`, `__asm("…")` or `__asm__("…")`: the
+  // string, the symbol's name as the assembler sees it.
+  std::string asm_label(bool& ok) {
+    bool keyword = is(Tk::kw_asm) || (is(Tk::identifier) && (name_spelling() == "__asm" || name_spelling() == "__asm__"));
+    if (!keyword || kind(1) != Tk::l_paren) return {};
+    bump();
+    bump();
+    std::string label;
+    if (!is(Tk::string_lit) || literal().encoding != lex::Encoding::ordinary) {  // an ordinary string literal
+      s_->diag(pos(), Diag::asm_label_string);
+      ok = false;
+      return {};
+    }
+    for (u32 u : literal().units) label.push_back(static_cast<char>(u));
+    bump();
+    while (is(Tk::string_lit) && tok().has(lex::tok_flag::continued)) bump();  // phase 5 joined them
+    ok = expect(Tk::r_paren) && ok;
+    return label;
+  }
+  std::string_view name_spelling() const { return r_->name(tok()); }
 
   Level level(bool abstract, bool& ok) {
     Level l;
@@ -523,6 +593,7 @@ public:
         l.template_args = template_argument_list();
         if (!l.template_args) ok = false;
       }
+      skip_attributes();  // appertaining to the declarator-id ([dcl.meaning.general]/1)
     } else if (is(Tk::l_paren) && (kind(1) == Tk::star || kind(1) == Tk::amp || kind(1) == Tk::ampamp ||
                                    kind(1) == Tk::l_paren || kind(1) == Tk::identifier)) {
       // [dcl.ambig.res]: `(` begins a nested declarator when a parameter list cannot start here.
@@ -688,6 +759,7 @@ public:
   // Whether the `(` here begins a parameter-declaration-clause rather than an initializer
   // ([dcl.ambig.res]: what can be a declaration is one).
   bool params_ahead() {
+    if (past_attributes(1) != 1) return true;  // a parameter's attributes ([dcl.fct]/3)
     Tk k = kind(1);
     if (k == Tk::r_paren || k == Tk::ellipsis || starts_decl_specifier(k)) return true;
     if ((k == Tk::identifier && kind(2) == Tk::coloncolon) || k == Tk::coloncolon)
@@ -730,9 +802,10 @@ public:
         // In a parameter, [dcl.fct]/5 adjusts the array to a pointer: build the pointer at once.
         t = s_->types().pointer(t);
       } else if (s->unknown_bound) {
-        // The outermost bound of a variable, which its initializer gives; any other is not
+        // The outermost bound of a variable, which its initializer gives or which stays unknown
+        // (`extern T* a[];`: this level's pointers are the element's); any other is not
         // supported yet.
-        if (&*s != &l.suffixes.front() || !l.pointers.empty() || d.unknown_bound || &l != top_) {
+        if (&*s != &l.suffixes.front() || d.unknown_bound || &l != top_ || l.inner) {  // `(&r)[]`, `(*p)[]`
           s_->diag(d.begin, Diag::not_supported, Tk::l_square);
           d.ok = false;
         }
@@ -1576,12 +1649,13 @@ public:
         expect(Tk::semi);
         return s_->node(ast::ExprStmt{}, begin, pos());
       }
-      if (kind(1) == Tk::identifier && kind(2) == Tk::equal) {
-        // An alias-declaration in a block ([dcl.typedef]/2): `using T = type-id;`.
+      if (kind(1) == Tk::identifier && kind(past_attributes(2)) == Tk::equal) {
+        // An alias-declaration in a block ([dcl.typedef]/2): `using T [[…]] = type-id;`.
         bump();
         NameId n = name_of(tok());
         u32 at = pos();
         bump();
+        skip_attributes();
         bump();
         if (auto t = type_id()) s_->local_type_alias(n, *t, at);
         else {
@@ -1632,10 +1706,11 @@ public:
       return {NodeId::none, begin, pos()};
     default: break;
     }
-    if (is(Tk::l_square) && kind(1) == Tk::l_square) {
-      s_->diag(begin, Diag::not_supported, Tk::l_square);  // attributes
-      skip_statement();
-      return {NodeId::none, begin, pos()};
+    if (past_attributes(0) != 0) {
+      // An attribute-specifier-seq appertaining to the statement ([stmt.pre]/1), or GNU
+      // attributes (docs/EXTENSIONS.md).
+      skip_attributes();
+      return statement();
     }
     if (is(Tk::identifier) && kind(1) == Tk::colon) {
       s_->diag(begin, Diag::not_supported, Tk::colon);  // labels
@@ -1943,6 +2018,11 @@ public:
       }
       // [dcl.constexpr]: a constexpr variable is const.
       if (spec.is_constexpr) d.type = s_->types().add_cv(d.type, sema::Cv::const_);
+      // `char s[] = "…"`: the bound from the literal, null included ([dcl.init.string]/1).
+      if (d.unknown_bound && is(Tk::equal) && kind(1) == Tk::string_lit) {
+        d.type = s_->types().array(d.type, literal_at(1).units.size() + 1);
+        d.unknown_bound = false;
+      }
       u32 local = s_->declare_local(d.name, d.type, 0, d.name_at);
       Ex init;
       bool list = is(Tk::l_brace) || (is(Tk::equal) && kind(1) == Tk::l_brace);
@@ -1981,7 +2061,7 @@ public:
       } else if (accept(Tk::equal)) {
         Ex e = assignment_expression();
         if (s_->types().is_array(d.type)) {
-          s_->diag(dbegin, Diag::not_supported, Tk::l_square);  // array initialization
+          init = s_->convert(e, d.type, e.begin);  // from a string literal ([dcl.init.string])
         } else if (s_->types().is_reference(d.type)) {
           // A temporary bound to the reference lives as long as it ([class.temporary]/6).
           init = s_->bind_reference(e, d.type, e.begin, true);

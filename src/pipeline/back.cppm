@@ -85,6 +85,8 @@ struct Entity {
   // which its name encodes (Itanium §5.1.5.7–8).
   std::optional<QualType> template_type{};
   std::vector<ast::TemplateArg> template_args{};
+  // A GNU asm label: the symbol exactly as written (docs/EXTENSIONS.md); empty if none.
+  std::string asm_label{};
 };
 
 // A function definition: what `function_ir(F)` reads (irgen::FunctionInput, without a thunk's
@@ -865,6 +867,7 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
       errors.push_back({e.at, std::format("the name of '{}': {} is not supported yet", e.name, name.error())});
       continue;
     }
+    if (!e.asm_label.empty()) name = e.asm_label;
     symbols.push_back({e.id, std::move(*name), e.linkage == ast::Linkage::internal ? obj::binding::local : obj::binding::global});
   }
   if (!errors.empty()) co_return out;

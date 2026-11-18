@@ -65,6 +65,7 @@ struct Status {
   std::uint64_t unwatched = 0;   // directories stat-checked per request instead (§5.5)
   std::uint64_t quantum_ms = 0;  // the admission quantum now (§4.2)
   std::uint64_t idle_exit_s = 0;
+  std::uint64_t threads = 0;     // the session's pool (YCXX_THREADS)
 };
 
 // The schema hash of the messages, derived by reflection (§3.1).
