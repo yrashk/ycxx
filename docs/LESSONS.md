@@ -82,6 +82,11 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
   as its contract. The second brief's findings against the first were all local fixes, and there
   was no reconciliation round.
   - Learned on #2.
+- **Merge `main` just before the final review when sibling designs are running.** #3 was accepted
+  while #2's review ran, and #2's debug-info section then had to be re-aligned after the review.
+  - Do: before the one independent check, merge `main` and read any newly accepted design that
+    shares a boundary, so the check covers the reconciled text.
+  - Learned on #2.
 - **Ask the reviewer for a failing example and the smallest fix per finding.** #2's single
   independent check found 9 P1s; every one came with an example and a local fix, so all 24
   findings were fixed in one commit and the second check covered only the diff.
