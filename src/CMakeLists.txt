@@ -7,6 +7,7 @@ add_subdirectory(ast)
 add_subdirectory(engine)
 add_subdirectory(lex)
 add_subdirectory(pp)
+add_subdirectory(items)
 add_subdirectory(obj)
 add_subdirectory(link)
 

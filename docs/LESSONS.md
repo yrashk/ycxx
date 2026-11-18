@@ -92,6 +92,13 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
   findings were fixed in one commit and the second check covered only the diff.
   - Learned on #2.
 
+- **A reviewer subagent in your own worktree collides with you.** On #40 the reviewer's
+  temporary probe edits showed up in `git status` mid-commit, and switching branches under it
+  changed what `HEAD` meant for its second pass.
+  - Do: give a reviewer a commit SHA, not `HEAD`, and `isolation: "worktree"` when it may edit
+    or build; otherwise don't switch branches until it reports.
+  - Learned on #40.
+
 ## Bureaucracy loops
 
 - **A design document became a loop.** The query-engine design (#1) grew to 31,500 words over
@@ -147,6 +154,17 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
   `-Werror` turns it into a build failure.
   - Do: use `native_encoded_string()` for file names passed on, `display_string()` for messages.
   - Learned on #42.
+
+## Data the front end needs
+
+- **Unicode tables from Python, plus one UCD file.** Python's `unicodedata` (Unicode 17.0 in the
+  pinned Python) gives categories, combining classes, decompositions, normalization and names;
+  `str.isidentifier` implements XID_Start/XID_Continue. It cannot enumerate name aliases. The
+  first version took them from the host's Perl (Unicode 13): 13 were missing, Linux had none,
+  and a review caught it with the missing license notice.
+  - Do: vendor the UCD file of the same version (`tools/unicode/ucd/`) with the Unicode License
+    v3 (`src/lex/LICENSE.unicode`), and have the generator check the versions agree.
+  - Learned on #40.
 
 ## Evidence and tests
 
