@@ -14,8 +14,7 @@ What is true of the code today. Work in progress and its owners are tracked in
   - CI runs PR, `main` and nightly tiers on Linux x86_64 and macOS arm64.
   - `ycxx --version` works. The fronts (`daemon`, `cxx`, `lsp`, `ctl`) are stubs that exit 2.
 - The bootstrap smoke test (`tests/bootstrap`) passes for modules, reflection, contracts,
-  coroutines and the other C++26 features ycxx relies on. `std::execution` is an expected
-  failure (below).
+  coroutines, `std::execution` and the other C++26 features ycxx relies on.
 - Query engine design accepted: [`docs/design/query-engine.md`](docs/design/query-engine.md)
   (#1), summarized in DECISIONS §4. A throwaway prototype is in `spikes/query-engine/`.
 - Test driver: `tools/test` ([docs/TESTING.md](docs/TESTING.md), #5). Test kinds accept/reject
@@ -65,6 +64,52 @@ What is true of the code today. Work in progress and its owners are tracked in
 - Not yet: the scheduler, `cell_sender` and cancellation (#15; every await completes inline
   today), contextual queries (#16), eviction and persistence (#17; the dependency and diagnostic
   pools only grow).
+
+## Lexer and directive-free `pp` (#40, 2026-11-18)
+
+- `ycxx.lex` (`src/lex/`): translation phases 1–3, 5 and 6 as functions.
+  - Phases 1–2: UTF-8 checked, CR LF and CR become LF, a leading BOM is deleted, splices removed,
+    with maps from logical offsets back to phase-1 text (raw strings revert splices) and to
+    physical byte offsets.
+  - Phase 3: every [lex] preprocessing token. UCNs (`\u`, `\U`, `\u{}`, `\N{}` with names and
+    aliases), XID and ID_Compat_Math identifiers with the NFC check, maximal munch with the
+    `<::`, `[::` and `[:>` exceptions, raw strings, digraphs and alternative tokens, header names
+    on request.
+  - Phases 5–6: keywords, integer and floating literals (UDL suffixes per [lex.ext]),
+    character literals, and string-literal concatenation with the common encoding. Values:
+    integers to 64 bits, `double` and `float` correctly rounded, code units for characters and
+    strings. Ordinary literals are UTF-8 and wide ones UTF-32.
+  - `Tk` and the diagnostic table are derived by reflection from annotated enumerators.
+  - Unicode 17.0 tables from `tools/unicode/gen-tables` (`unicode_tables.cppm`,
+    `unicode_names.txt`): Python's `unicodedata` and the vendored UCD `NameAliases.txt`
+    (`tools/unicode/ucd/`). Unicode License v3 in `src/lex/LICENSE.unicode`.
+- `ycxx.pp` (`src/pp/`): `pp(FileId)` over the input `FileText`, valued as a `Region` of tokens,
+  `TokLoc`s, names and literals. Every directive (`#…`, and the `module`/`import` lines of
+  [cpp.pre]) is diagnosed as unsupported and skipped. Diagnostics are at
+  `Loc{file_level, byte offset}`.
+- Measured (Release, Apple M-series, `lex_bench`): about 25 MB/s, 110 ns per token. Not tuned.
+- Not yet: phase 4 (M1), `long double` and the extended floating types' values (left to the
+  target), the type of an integer literal (sema, #33).
+
+## Item splitter (#18, 2026-11-18)
+
+- `ycxx.items` (`src/items/`): `split(region, file)` and the query `RegionItems(FileId)` cut a
+  region into items before parsing (query-engine.md §B1.2), preorder with nested lists for
+  namespaces, linkage and export blocks and class bodies.
+  - Bodies: compound statements, ctor-initializers, function-try-blocks, `= default`,
+    `= delete(…)`; consteval blocks. Template-heads attach to what follows.
+  - Skeletons (ast.md §3.1): kind, declared names in token order with ordinal, offset and flags
+    (type, template, namespace, unknown, definition, friend, enumerator), the first declarator's
+    spelled qualifier, template depth, body range.
+  - Ids: 128-bit fingerprints over the file identity, scope path, declaration-part tokens (kind
+    and content, not whitespace or alternative spelling) and the ordinal among siblings. A
+    namespace's id excludes its members; a class's excludes its members' bodies. Bodies are
+    content-addressed.
+- Token heuristics, not a parse: a few forms are known to be guessed wrong (`S (x);`,
+  `decltype(b){1}` as a mem-initializer, template arguments with commas in an initializer).
+- Not yet: `ItemId`/`BodyId` handles from the `items` and `tokens` interners (fingerprints only
+  until #38's placeholders are replaced), the occurrence salt (needs prefixes, #16), flattening
+  child regions (needs includes, M1), the syntactic indexes of §B1.3.
 
 ## Mach-O objects and the linker (#42, 2026-11-18)
 
@@ -171,15 +216,6 @@ one import `ycxx.ast`; unit tests in `tests/unit/ast` (run by ctest, see docs/TE
 Places where ycxx's sources avoid or work around a C++26 feature because GCC 16 lacks it or
 miscompiles it (DECISIONS §3.2). Each is removed once ycxx compiles itself.
 
-- **`std::execution` through `import std;` does not compile** (GCC 16.2 ICE in `tsubst_expr`).
-  - Cause: a GCC modules bug. An exported concept whose nested requirement uses a
-    requires-parameter inside a template argument crashes the compiler. libycxx's
-    `std::unstoppable_token` has that shape.
-  - Affected: anything that checks `std::unstoppable_token`, including `parallel_scheduler`,
-    `when_all`, `counting_scope` and `task`. This blocks the query engine (DECISIONS §4.3).
-  - Fix: belongs in libycxx (yrashk/libycxx#4, which has a 10-line repro and a tested
-    workaround). Then bump the submodule and drop `_xfail_execution` in
-    `tests/bootstrap/CMakeLists.txt`.
 - **Defaulted comparisons are members, not hidden friends** (`src/ast`, `ycxx.hash`'s `Fp128`).
   - Cause: GCC 16.2 crashes (segfault) in an importer that compares two values of an exported
     struct whose defaulted `operator==` is a friend, with or without `-freflection` (found by

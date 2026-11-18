@@ -150,8 +150,9 @@ private:
 
 // ---------------------------------------------------------------- placeholder interners
 
-// A stand-in for the interners other issues own: tokens and items (#18), entities (#33). It records a fingerprint per handle and nothing else, so trees can refer to these
-// handles and be fingerprinted before their owners exist. Each owner replaces its member of
+// A stand-in for the interners other issues own: tokens and items (#18), entities (#33). It
+// records a fingerprint per handle and nothing else, so trees can refer to these handles and be
+// fingerprinted before their owners exist. Each owner replaces its member of
 // `Interners` with the real interner, which keeps this `fp` signature.
 class FpTable {
 public:
