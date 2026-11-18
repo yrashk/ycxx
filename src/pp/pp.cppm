@@ -98,6 +98,16 @@ struct [[=engine::input{engine::Durability::low}]] FileContent {
   using Key = PathId;
   using Value = std::optional<std::string>;
 };
+
+// The text of an editor's open buffer at a path, or nothing when none is open (daemon design §6.1):
+// an input at the lowest durability, so a keystroke leaves every disk-view cell green by the
+// shortcut (§6.3). Only the editor view reads it; its provider is `no_buffer` unless the owner
+// gives another.
+struct [[=engine::input{engine::Durability::editor}]] Buffer {
+  using Key = PathId;
+  using Value = std::optional<std::string>;
+};
+engine::provided<std::optional<std::string>> no_buffer(PathId);
 // A provider of `FileContent` that reads the disk, for a `Db` with no daemon behind it.
 engine::provided<std::optional<std::string>> read_disk(PathId p);
 
@@ -119,6 +129,7 @@ void serialize_into(engine::Sink& out, const Source& s) {
   engine::serialize(out, static_cast<std::uint64_t>(s.config.system_from));
   engine::serialize(out, s.config.macros);
   engine::serialize(out, std::string(s.config.target->triple));
+  engine::serialize(out, static_cast<std::uint64_t>(s.config.view));
   engine::serialize(out, static_cast<std::uint64_t>(s.config.template_depth));
 }
 Source deserialize_from(engine::Source& in, std::type_identity<Source>) {
@@ -130,6 +141,9 @@ Source deserialize_from(engine::Source& in, std::type_identity<Source>) {
   s.config.system_from = static_cast<std::size_t>(engine::deserialize<std::uint64_t>(in));
   s.config.macros = engine::deserialize<std::vector<std::pair<std::string, std::optional<std::string>>>>(in);
   if (engine::deserialize<std::string>(in) != ast::aarch64_darwin.triple) in.fail();  // the one target there is
+  const auto view = engine::deserialize<std::uint64_t>(in);
+  if (view > std::to_underlying(View::editor)) in.fail();
+  s.config.view = static_cast<View>(view);
   s.config.template_depth = static_cast<std::uint32_t>(engine::deserialize<std::uint64_t>(in));
   return s;
 }
@@ -193,19 +207,25 @@ Paths& paths() {
 }
 
 // Inside `Pp`: every file read is a `FileContent` fetch, relative paths against the source's
-// working directory, so the cell records each one (negatives included).
+// working directory, so the cell records each one (negatives included). In the editor view an
+// open buffer comes first (§6.1); a disk-view read never fetches a `Buffer`, so no disk-view cell
+// takes the `editor` durability.
 class EngineHost final : public Host {
  public:
-  EngineHost(engine::Ctx& cx, std::string_view cwd) : cx_(&cx), cwd_(cwd) {}
+  EngineHost(engine::Ctx& cx, std::string_view cwd, View view) : cx_(&cx), cwd_(cwd), view_(view) {}
   std::optional<std::string> read(const std::string& path) override {
     std::filesystem::path p(path);
     if (p.is_relative() && !cwd_.empty()) p = std::filesystem::path(cwd_) / p;
-    return cx_->fetch<FileContent>(path_id(p.lexically_normal().generic_native_encoded_string()));
+    const PathId id = path_id(p.lexically_normal().generic_native_encoded_string());
+    if (view_ == View::editor)
+      if (const auto& open = cx_->fetch<Buffer>(id)) return *open;
+    return cx_->fetch<FileContent>(id);
   }
 
  private:
   engine::Ctx* cx_;
   std::string_view cwd_;
+  View view_;
 };
 
 // Points a session's files at a host for a scope, starting and ending with a new generation, so
@@ -284,6 +304,8 @@ engine::provided<std::optional<std::string>> read_disk(PathId p) {
   return {disk.read(path_of(p)), engine::Durability::low};
 }
 
+engine::provided<std::optional<std::string>> no_buffer(PathId) { return {std::nullopt, engine::Durability::editor}; }
+
 Preprocessed preprocess(Session& s, std::string_view text, std::string_view path) {
   FileId main = s.files.id(path);
   s.files.set_content(main, std::string(text));
@@ -361,11 +383,16 @@ Config with_system_dirs(Config cfg) {
 engine::query_task<Region> Pp::run(engine::Ctx& cx, FileId file) {
   const Source& src = cx.fetch<SourceOf>(file);
   Session& s = session_for(src.config);
-  EngineHost host(cx, src.cwd);
+  EngineHost host(cx, src.cwd, src.config.view);
+  // The editor view reads the unit's own text through the view too (§6.1), so a keystroke in it
+  // changes an `editor` input, never the `low` `FileText` (which it leaves unset). A unit the view
+  // cannot read is empty: its driver reports that before asking.
+  std::string own;
+  if (src.config.view == View::editor) own = host.read(src.path).value_or(std::string());
   Preprocessed p = [&] {
     std::lock_guard g(s.mutex);
     HostScope scope(s.files, host);
-    return preprocess(s, cx.fetch<FileText>(file), src.path);
+    return preprocess(s, src.config.view == View::editor ? std::string_view(own) : cx.fetch<FileText>(file), src.path);
   }();
   for (const Diag& d : p.diags) cx.diag(engine::Loc{file_loc(d.file), d.offset}, lex::diag_id(d.kind), d.args[0], d.args[1]);
   co_return std::move(p.region);

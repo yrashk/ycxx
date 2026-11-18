@@ -17,6 +17,7 @@ add_subdirectory(sema)
 add_subdirectory(parse)
 add_subdirectory(target/aarch64)
 add_subdirectory(pipeline)
+add_subdirectory(lsp)
 add_subdirectory(client)
 add_subdirectory(daemon)
 
