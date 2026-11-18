@@ -28,4 +28,4 @@ miscompiles it (DECISIONS §3.2). Each is removed once ycxx compiles itself. Non
 | M5 | AArch64 Mach-O | Native objects and our own linker; mixed-ABI tests with Clang pass |
 | M6 | x86-64 ELF | Same on Linux |
 | M7 | libycxx under ycxx | libycxx's suite passes, compiled by ycxx |
-| M8 | Self-hosting | Stage 2 equals stage 3 |
+| M8 | Self-hosting | Stage 2 equals stage 3; the GCC-built bootstrap anchor is released (DECISIONS §3.5) |
