@@ -851,6 +851,21 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   of an array of unknown bound, the [dcl.typedef]/9 restrictions on an unnamed class named for
   linkage purposes.
 
+## `<cstdio>`, step 2: using-declarations at namespace scope (#133, 2026-11-18)
+
+- `using N::x, ::y;` at namespace scope ([namespace.udecl]): each declarator introduces what
+  qualified lookup finds at its position, as query-engine.md's "Using-declarations" says;
+  `Program::using_targets_` keeps them by (item, name ordinal) and unqualified and qualified
+  lookup that meet the using-declaration's name take them instead. A later overload of the
+  target is not introduced (/11).
+- Conflicts ([namespace.udecl]/10, [basic.scope.scope]/4): a target and a declaration of the
+  scope, either first, unless they are one entity, both functions, or a type and a variable or
+  function. A using-declaration may not name a namespace (/3) or, at namespace scope, a class
+  member (/8).
+- Tests: `tests/own/using` (10, two from the review). Two more draft examples pass.
+- Not yet (#153): enumerators through `using E::e;` (/7), a function target with the same
+  parameter types as a function of the scope (/14), `typename` with dependent names (ζ).
+
 ## Templates, ζ step 1: function templates (#88, 2026-11-18)
 
 Instantiation follows ast.md §6.4 as amended by #88 (Fable's decision): declarations and
