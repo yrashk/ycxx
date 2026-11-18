@@ -13,6 +13,7 @@ add_subdirectory(irgen)
 add_subdirectory(obj)
 add_subdirectory(link)
 add_subdirectory(target/aarch64)
+add_subdirectory(pipeline)
 
 configure_file(version.cppm.in ${CMAKE_CURRENT_BINARY_DIR}/version.cppm @ONLY)
 
