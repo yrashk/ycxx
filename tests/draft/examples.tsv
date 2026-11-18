@@ -1,0 +1,895 @@
+id	subclause	pnum	source	result	reason
+lex.phases-1	lex.phases	1	source/lex.tex:156	skip	no code: the example is prose
+lex.phases-2	lex.phases	1	source/lex.tex:258	skip	not C++: uses draft notation (math)
+lex.pptoken-1	lex.pptoken	6	source/lex.tex:672	reject	
+lex.pptoken-2	lex.pptoken	7	source/lex.tex:680	skip	no code: the example is prose
+lex.pptoken-3	lex.pptoken	8	source/lex.tex:693	skip	no code: the example is prose
+lex.icon-1	lex.icon	2	source/lex.tex:1317	skip	no code: the example is prose
+lex.fcon-1	lex.fcon	2	source/lex.tex:1794	skip	no code: the example is prose
+lex.fcon-2	lex.fcon	3	source/lex.tex:1810	accept	
+lex.string-1	lex.string	5	source/lex.tex:1969	skip	fragment: both oracles report errors an incomplete example produces (line 1: expected unqualified-id)
+lex.string-2	lex.string	8	source/lex.tex:2006	skip	fragment: both oracles report errors an incomplete example produces (line 1: expected unqualified-id)
+lex.ext-1	lex.ext	1	source/lex.tex:2235	skip	no code: the example is prose
+lex.ext-2	lex.ext	7	source/lex.tex:2336	reject	
+lex.ext-3	lex.ext	9	source/lex.tex:2361	reject	
+basic.def-1	basic.def	2	source/basic.tex:299	accept	
+basic.def-2	basic.def	3	source/basic.tex:339	skip	not C++: uses draft notation (rlap, textit)
+basic.def.odr-1	basic.def.odr	3	source/basic.tex:450	skip	fragment: both oracles report errors an incomplete example produces (line 3: use of undeclared identifier 'b')
+basic.def.odr-2	basic.def.odr	5	source/basic.tex:541	reject	
+basic.def.odr-3	basic.def.odr	10	source/basic.tex:638	reject	
+basic.def.odr-4	basic.def.odr	11	source/basic.tex:654	reject	
+basic.def.odr-5	basic.def.odr	12	source/basic.tex:682	accept	
+basic.def.odr-6	basic.def.odr	14	source/basic.tex:711	accept	
+basic.def.odr-7	basic.def.odr	17	source/basic.tex:864	skip	several translation units in one code block: needs a multi-unit test
+basic.def.odr-8	basic.def.odr	19	source/basic.tex:927	accept	
+basic.scope.scope-1	basic.scope.scope	4	source/basic.tex:1120	accept	
+basic.scope.scope-2	basic.scope.scope	4	source/basic.tex:1131	reject	
+basic.scope.scope-3	basic.scope.scope	6	source/basic.tex:1202	reject	
+basic.scope.scope-4	basic.scope.scope	7	source/basic.tex:1240	accept	
+basic.scope.pdecl-1	basic.scope.pdecl	1	source/basic.tex:1273	skip	fragment: both oracles report errors an incomplete example produces (line 2: expected unqualified-id)
+basic.scope.pdecl-2	basic.scope.pdecl	2	source/basic.tex:1288	skip	fragment: both oracles report errors an incomplete example produces (line 2: expected unqualified-id)
+basic.scope.pdecl-3	basic.scope.pdecl	5	source/basic.tex:1316	skip	fragment: both oracles report errors an incomplete example produces (line 2: expected unqualified-id)
+basic.scope.pdecl-4	basic.scope.pdecl	6	source/basic.tex:1331	accept	
+basic.scope.pdecl-5	basic.scope.pdecl	12	source/basic.tex:1370	accept	
+basic.scope.block-1	basic.scope.block	1	source/basic.tex:1443	skip	fragment: both oracles report errors an incomplete example produces (line 4: expected unqualified-id)
+basic.scope.block-2	basic.scope.block	2	source/basic.tex:1472	skip	fragment: both oracles report errors an incomplete example produces (line 1: expected unqualified-id)
+basic.scope.namespace-1	basic.scope.namespace	1	source/basic.tex:1547	accept	
+basic.scope.class-1	basic.scope.class	1	source/basic.tex:1575	reject	
+basic.lookup.general-1	basic.lookup.general	2	source/basic.tex:1721	skip	3 translation unit(s) (codeblocktu): needs a multi-unit test
+class.member.lookup-1	class.member.lookup	6	source/basic.tex:1844	accept	
+class.member.lookup-2	class.member.lookup	8	source/basic.tex:1883	reject	
+class.member.lookup-3	class.member.lookup	9	source/basic.tex:1915	reject	
+class.member.lookup-4	class.member.lookup	10	source/basic.tex:1955	reject	
+class.member.lookup-5	class.member.lookup	11	source/basic.tex:1978	reject	
+basic.lookup.unqual-1	basic.lookup.unqual	5	source/basic.tex:2062	accept	
+basic.lookup.unqual-2	basic.lookup.unqual	6	source/basic.tex:2099	reject	
+basic.lookup.argdep-1	basic.lookup.argdep	1	source/basic.tex:2156	reject	
+basic.lookup.argdep-2	basic.lookup.argdep	5	source/basic.tex:2321	skip	3 translation unit(s) (codeblocktu): needs a multi-unit test
+basic.lookup.argdep-3	basic.lookup.argdep	6	source/basic.tex:2367	accept	
+basic.lookup.qual.general-1	basic.lookup.qual.general	1	source/basic.tex:2407	reject	
+basic.lookup.qual.general-2	basic.lookup.qual.general	2	source/basic.tex:2469	skip	fragment: both oracles report errors an incomplete example produces (line 1: use of undeclared identifier 'N')
+basic.lookup.qual.general-3	basic.lookup.qual.general	3	source/basic.tex:2496	reject	
+basic.lookup.qual.general-4	basic.lookup.qual.general	4	source/basic.tex:2548	accept	
+class.qual-1	class.qual	1	source/basic.tex:2596	reject	
+namespace.qual-1	namespace.qual	1	source/basic.tex:2624	skip	an error annotation on a line without code
+namespace.qual-2	namespace.qual	2	source/basic.tex:2682	accept	
+namespace.qual-3	namespace.qual	3	source/basic.tex:2724	accept	
+namespace.qual-4	namespace.qual	4	source/basic.tex:2756	reject	
+basic.lookup.elab-1	basic.lookup.elab	3	source/basic.tex:2804	reject	
+basic.splice-1	basic.splice	3	source/basic.tex:2888	reject	
+basic.link-1	basic.link	6	source/basic.tex:3044	accept	
+basic.link-2	basic.link	10	source/basic.tex:3106	skip	3 translation unit(s) (codeblocktu): needs a multi-unit test
+basic.link-3	basic.link	11	source/basic.tex:3173	reject	
+basic.link-4	basic.link	19	source/basic.tex:3330	skip	2 translation unit(s) (codeblocktu): needs a multi-unit test
+intro.memory-1	intro.memory	5	source/basic.tex:3444	accept	
+intro.object-1	intro.object	3	source/basic.tex:3549	skip	fragment: both oracles report errors an incomplete example produces (line 6: use of undeclared identifier 'max')
+intro.object-2	intro.object	10	source/basic.tex:3680	accept	
+intro.object-3	intro.object	12	source/basic.tex:3726	reject	
+intro.object-4	intro.object	15	source/basic.tex:3797	accept	
+basic.align-1	basic.align	2	source/basic.tex:3855	accept	
+basic.life-1	basic.life	2	source/basic.tex:3967	accept	
+basic.life-2	basic.life	7	source/basic.tex:4051	accept	
+basic.life-3	basic.life	10	source/basic.tex:4139	skip	fragment: both oracles report errors an incomplete example produces (line 19: a type specifier is required for all declarations)
+basic.life-4	basic.life	11	source/basic.tex:4186	accept	
+basic.life-5	basic.life	12	source/basic.tex:4205	accept	
+basic.indet-1	basic.indet	2	source/basic.tex:4318	skip	fragment: both oracles report errors an incomplete example produces (line 13: use of undeclared identifier 'assert')
+class.temporary-1	class.temporary	2	source/basic.tex:4777	accept	
+class.temporary-2	class.temporary	6	source/basic.tex:4953	skip	fragment: both oracles report errors an incomplete example produces (line 6: use of undeclared identifier 'cond')
+class.temporary-3	class.temporary	6	source/basic.tex:4969	accept	
+class.temporary-4	class.temporary	6	source/basic.tex:4978	accept	
+class.temporary-5	class.temporary	6	source/basic.tex:5003	accept	
+class.temporary-6	class.temporary	12	source/basic.tex:5079	accept	
+basic.types.general-1	basic.types.general	4	source/basic.tex:5242	reject	
+basic.types.trivial-1	basic.types.trivial	3	source/basic.tex:5401	skip	fragment: both oracles report errors an incomplete example produces (line 3: use of undeclared identifier 'T')
+basic.types.trivial-2	basic.types.trivial	4	source/basic.tex:5421	skip	fragment: both oracles report errors an incomplete example produces (line 2: unknown type name 'T')
+basic.fundamental-1	basic.fundamental	3	source/basic.tex:5499	skip	no code: the example is prose
+basic.fundamental-2	basic.fundamental	17	source/basic.tex:5774	accept	
+basic.compound-1	basic.compound	3	source/basic.tex:5999	skip	no code: the example is prose
+basic.type.qualifier-1	basic.type.qualifier	3	source/basic.tex:6230	accept	
+basic.type.qualifier-2	basic.type.qualifier	6	source/basic.tex:6273	skip	no code: the example is prose
+intro.execution-1	intro.execution	2	source/basic.tex:6427	accept	
+intro.execution-2	intro.execution	5	source/basic.tex:6509	accept	
+intro.execution-3	intro.execution	10	source/basic.tex:6652	accept	
+intro.execution-4	intro.execution	13	source/basic.tex:6705	skip	no code: the example is prose
+intro.progress-1	intro.progress	4	source/basic.tex:7169	skip	no code: the example is prose
+basic.start.main-1	basic.start.main	3	source/basic.tex:7383	skip	no code: the example is prose
+basic.start.dynamic-1	basic.start.dynamic	5	source/basic.tex:7580	skip	includes a file the example does not provide
+basic.start.term-1	basic.start.term	4	source/basic.tex:7706	accept	
+basic.contract.eval-1	basic.contract.eval	5	source/basic.tex:7888	accept	
+basic.contract.eval-2	basic.contract.eval	8	source/basic.tex:7960	accept	
+basic.contract.eval-3	basic.contract.eval	18	source/basic.tex:8153	accept	
+expr.pre-1	expr.pre	4	source/expressions.tex:92	reject	
+basic.lval-1	basic.lval	4	source/expressions.tex:259	accept	
+expr.type-1	expr.type	3	source/expressions.tex:469	accept	
+conv.lval-1	conv.lval	2	source/expressions.tex:694	accept	
+conv.lval-2	conv.lval	3	source/expressions.tex:729	skip	fragment: both oracles report errors an incomplete example produces (line 4: use of undeclared identifier 'memcpy')
+conv.rval-1	conv.rval	1	source/expressions.tex:804	accept	
+conv.qual-1	conv.qual	1	source/expressions.tex:832	skip	no code: the example is prose
+conv.fctptr-1	conv.fctptr	1	source/expressions.tex:1201	reject	
+expr.prim.this-1	expr.prim.this	4	source/expressions.tex:1373	accept	
+expr.prim.this-2	expr.prim.this	6	source/expressions.tex:1395	reject	
+expr.prim.id.general-1	expr.prim.id.general	2	source/expressions.tex:1476	reject	
+expr.prim.id.general-2	expr.prim.id.general	3	source/expressions.tex:1496	skip	no code: the example is prose
+expr.prim.id.general-3	expr.prim.id.general	3	source/expressions.tex:1507	skip	no code: the example is prose
+expr.prim.id.general-4	expr.prim.id.general	4	source/expressions.tex:1531	accept	
+expr.prim.id.general-5	expr.prim.id.general	6	source/expressions.tex:1556	reject	
+expr.prim.id.unqual-1	expr.prim.id.unqual	4	source/expressions.tex:1657	accept	
+expr.prim.id.unqual-2	expr.prim.id.unqual	8	source/expressions.tex:1733	reject	
+expr.prim.id.qual-1	expr.prim.id.qual	2	source/expressions.tex:1920	reject	
+expr.prim.id.dtor-1	expr.prim.id.dtor	3	source/expressions.tex:2122	reject	
+expr.prim.lambda.general-1	expr.prim.lambda.general	1	source/expressions.tex:2180	accept	
+expr.prim.lambda.general-2	expr.prim.lambda.general	3	source/expressions.tex:2210	accept	
+expr.prim.lambda.general-3	expr.prim.lambda.general	5	source/expressions.tex:2245	reject	
+expr.prim.lambda.general-4	expr.prim.lambda.general	6	source/expressions.tex:2259	accept	
+expr.prim.lambda.closure-1	expr.prim.lambda.closure	5	source/expressions.tex:2329	skip	fragment: both oracles report errors an incomplete example produces (line 18: a type specifier is required for all declarations)
+expr.prim.lambda.closure-2	expr.prim.lambda.closure	6	source/expressions.tex:2369	reject	
+expr.prim.lambda.closure-3	expr.prim.lambda.closure	7	source/expressions.tex:2415	reject	
+expr.prim.lambda.closure-4	expr.prim.lambda.closure	8	source/expressions.tex:2429	skip	fragment: both oracles report errors an incomplete example produces (line 20: a type specifier is required for all declarations)
+expr.prim.lambda.closure-5	expr.prim.lambda.closure	9	source/expressions.tex:2462	skip	fragment: both oracles report errors an incomplete example produces (line 2: expected expression)
+expr.prim.lambda.closure-6	expr.prim.lambda.closure	10	source/expressions.tex:2490	reject	
+expr.prim.lambda.closure-7	expr.prim.lambda.closure	13	source/expressions.tex:2589	reject	
+expr.prim.lambda.closure-8	expr.prim.lambda.closure	14	source/expressions.tex:2628	skip	fragment: both oracles report errors an incomplete example produces (line 4: a type specifier is required for all declarations)
+expr.prim.lambda.closure-9	expr.prim.lambda.closure	15	source/expressions.tex:2640	reject	
+expr.prim.lambda.closure-10	expr.prim.lambda.closure	16	source/expressions.tex:2657	accept	
+expr.prim.lambda.capture-1	expr.prim.lambda.capture	2	source/expressions.tex:2766	reject	
+expr.prim.lambda.capture-2	expr.prim.lambda.capture	5	source/expressions.tex:2815	reject	
+expr.prim.lambda.capture-3	expr.prim.lambda.capture	6	source/expressions.tex:2846	reject	
+expr.prim.lambda.capture-4	expr.prim.lambda.capture	7	source/expressions.tex:2896	accept	
+expr.prim.lambda.capture-5	expr.prim.lambda.capture	7	source/expressions.tex:2928	accept	
+expr.prim.lambda.capture-6	expr.prim.lambda.capture	8	source/expressions.tex:2951	reject	
+expr.prim.lambda.capture-7	expr.prim.lambda.capture	9	source/expressions.tex:3011	reject	
+expr.prim.lambda.capture-8	expr.prim.lambda.capture	11	source/expressions.tex:3060	accept	
+expr.prim.lambda.capture-9	expr.prim.lambda.capture	12	source/expressions.tex:3080	accept	
+expr.prim.lambda.capture-10	expr.prim.lambda.capture	13	source/expressions.tex:3100	accept	
+expr.prim.lambda.capture-11	expr.prim.lambda.capture	14	source/expressions.tex:3125	skip	fragment: both oracles report errors an incomplete example produces (line 11: a type specifier is required for all declarations)
+expr.prim.lambda.capture-12	expr.prim.lambda.capture	16	source/expressions.tex:3167	accept	
+expr.prim.lambda.capture-13	expr.prim.lambda.capture	18	source/expressions.tex:3191	accept	
+expr.prim.fold-1	expr.prim.fold	3	source/expressions.tex:3262	reject	
+expr.prim.req.general-1	expr.prim.req.general	3	source/expressions.tex:3325	accept	
+expr.prim.req.general-2	expr.prim.req.general	4	source/expressions.tex:3360	reject	
+expr.prim.req.general-3	expr.prim.req.general	5	source/expressions.tex:3394	skip	ill-formed, no diagnostic required: no verdict to test
+expr.prim.req.simple-1	expr.prim.req.simple	1	source/expressions.tex:3419	accept	
+expr.prim.req.type-1	expr.prim.req.type	1	source/expressions.tex:3455	accept	
+expr.prim.req.compound-1	expr.prim.req.compound	1	source/expressions.tex:3525	skip	not C++: uses draft notation (cdots, math)
+expr.prim.req.compound-2	expr.prim.req.compound	2	source/expressions.tex:3544	accept	
+expr.prim.req.nested-1	expr.prim.req.nested	1	source/expressions.tex:3595	accept	
+expr.prim.splice-1	expr.prim.splice	1	source/expressions.tex:3622	reject	
+expr.call-1	expr.call	5	source/expressions.tex:3957	skip	fragment: both oracles report errors an incomplete example produces (line 16: expected unqualified-id)
+expr.call-2	expr.call	7	source/expressions.tex:4017	reject	
+expr.call-3	expr.call	7	source/expressions.tex:4052	skip	no code: the example is prose
+expr.call-4	expr.call	8	source/expressions.tex:4090	accept	
+expr.call-5	expr.call	8	source/expressions.tex:4106	accept	
+expr.type.conv-1	expr.type.conv	1	source/expressions.tex:4285	accept	
+expr.ref-1	expr.ref	8	source/expressions.tex:4481	accept	
+expr.ref-2	expr.ref	10	source/expressions.tex:4526	accept	
+expr.dynamic.cast-1	expr.dynamic.cast	4	source/expressions.tex:4630	accept	
+expr.dynamic.cast-2	expr.dynamic.cast	10	source/expressions.tex:4699	reject	
+expr.typeid-1	expr.typeid	7	source/expressions.tex:4809	skip	fragment: both oracles report errors an incomplete example produces (line 6: expected unqualified-id)
+expr.static.cast-1	expr.static.cast	2	source/expressions.tex:4867	skip	fragment: both oracles report errors an incomplete example produces (line 6: expected unqualified-id)
+expr.static.cast-2	expr.static.cast	12	source/expressions.tex:5047	skip	fragment: both oracles report errors an incomplete example produces (line 1: unknown type name 'T')
+expr.const.cast-1	expr.const.cast	4	source/expressions.tex:5293	accept	
+expr.unary.op-1	expr.unary.op	3	source/expressions.tex:5464	skip	fragment: both oracles report errors an incomplete example produces (line 3: a type specifier is required for all declarations)
+expr.await-1	expr.await	6	source/expressions.tex:5756	reject	
+expr.sizeof-1	expr.sizeof	4	source/expressions.tex:5869	accept	
+expr.new-1	expr.new	2	source/expressions.tex:6024	skip	fragment: both oracles report errors an incomplete example produces (line 1: expected unqualified-id)
+expr.new-2	expr.new	3	source/expressions.tex:6041	reject	
+expr.new-3	expr.new	4	source/expressions.tex:6054	skip	fragment: both oracles report errors an incomplete example produces (line 6: expected unqualified-id)
+expr.new-4	expr.new	6	source/expressions.tex:6084	skip	no code: the example is prose
+expr.new-5	expr.new	16	source/expressions.tex:6291	skip	fragment: both oracles report errors an incomplete example produces (line 10: use of undeclared identifier 'g')
+expr.new-6	expr.new	21	source/expressions.tex:6384	accept	
+expr.new-7	expr.new	31	source/expressions.tex:6555	reject	
+expr.new-8	expr.new	31	source/expressions.tex:6570	accept	
+expr.new-9	expr.new	31	source/expressions.tex:6585	accept	
+expr.new-10	expr.new	31	source/expressions.tex:6602	accept	
+expr.reflect-1	expr.reflect	3	source/expressions.tex:6937	reject	
+expr.reflect-2	expr.reflect	5	source/expressions.tex:6971	reject	
+expr.reflect-3	expr.reflect	5	source/expressions.tex:7033	reject	
+expr.reflect-4	expr.reflect	7	source/expressions.tex:7118	reject	
+expr.cast-1	expr.cast	4	source/expressions.tex:7213	reject	
+expr.mptr.oper-1	expr.mptr.oper	6	source/expressions.tex:7329	accept	
+expr.add-1	expr.add	6	source/expressions.tex:7511	accept	
+expr.rel-1	expr.rel	1	source/expressions.tex:7699	skip	no code: the example is prose
+expr.eq-1	expr.eq	5	source/expressions.tex:7887	accept	
+expr.eq-2	expr.eq	5	source/expressions.tex:7909	accept	
+expr.yield-1	expr.yield	1	source/expressions.tex:8286	skip	fragment: both oracles report errors an incomplete example produces (line 19: use of undeclared identifier 'pair'; did you mean 'std::pair'?)
+expr.throw-1	expr.throw	3	source/expressions.tex:8357	skip	fragment: both oracles report errors an incomplete example produces (line 1: expected unqualified-id)
+expr.assign-1	expr.assign	8	source/expressions.tex:8500	skip	fragment: both oracles report errors an incomplete example produces (line 1: no template named 'complex')
+expr.comma-1	expr.comma	2	source/expressions.tex:8546	skip	fragment: both oracles report errors an incomplete example produces (line 1: a type specifier is required for all declarations)
+expr.const.general-1	expr.const.general	2	source/expressions.tex:8587	accept	
+expr.const.core-1	expr.const.core	2	source/expressions.tex:8637	accept	
+expr.const.core-2	expr.const.core	2	source/expressions.tex:8725	reject	
+expr.const.core-3	expr.const.core	2	source/expressions.tex:8744	accept	
+expr.const.core-4	expr.const.core	2	source/expressions.tex:8859	reject	
+expr.const.core-5	expr.const.core	5	source/expressions.tex:8937	reject	
+expr.const.core-6	expr.const.core	8	source/expressions.tex:9010	reject	
+expr.const.core-7	expr.const.core	9	source/expressions.tex:9047	skip	fragment: both oracles report errors an incomplete example produces (line 2: unknown type name 'size_t'; did you mean 'std::size_t'?)
+expr.const.const-1	expr.const.const	3	source/expressions.tex:9139	reject	
+expr.const.const-2	expr.const.const	5	source/expressions.tex:9185	reject	
+expr.const.const-3	expr.const.const	7	source/expressions.tex:9221	reject	
+expr.const.init-1	expr.const.init	2	source/expressions.tex:9319	accept	
+expr.const.init-2	expr.const.init	5	source/expressions.tex:9386	accept	
+expr.const.init-3	expr.const.init	9	source/expressions.tex:9449	reject	
+expr.const.imm-1	expr.const.imm	2	source/expressions.tex:9499	reject	
+expr.const.imm-2	expr.const.imm	2	source/expressions.tex:9509	reject	
+expr.const.imm-3	expr.const.imm	5	source/expressions.tex:9555	reject	
+expr.const.reflect-1	expr.const.reflect	4	source/expressions.tex:9671	skip	an error annotation on a line without code
+expr.const.reflect-2	expr.const.reflect	5	source/expressions.tex:9790	accept	
+expr.const.defns-1	expr.const.defns	1	source/expressions.tex:9843	reject	
+stmt.if-1	stmt.if	2	source/statements.tex:338	skip	fragment: both oracles report errors an incomplete example produces (line 1: expected unqualified-id)
+stmt.if-2	stmt.if	2	source/statements.tex:347	accept	
+stmt.if-3	stmt.if	4	source/statements.tex:400	reject	
+stmt.iter.general-1	stmt.iter.general	2	source/statements.tex:560	skip	fragment: both oracles report errors an incomplete example produces (line 1: while loop outside of a function)
+stmt.while-1	stmt.while	2	source/statements.tex:629	skip	fragment: both oracles report errors an incomplete example produces (line 8: while loop outside of a function)
+stmt.ranged-1	stmt.ranged	1	source/statements.tex:762	skip	fragment: both oracles report errors an incomplete example produces (line 2: expected unqualified-id)
+stmt.ranged-2	stmt.ranged	1	source/statements.tex:773	accept	
+stmt.expand-1	stmt.expand	6	source/statements.tex:952	accept	
+stmt.expand-2	stmt.expand	7	source/statements.tex:968	accept	
+stmt.expand-3	stmt.expand	8	source/statements.tex:983	accept	
+stmt.return-1	stmt.return	3	source/statements.tex:1116	reject	
+stmt.return-2	stmt.return	6	source/statements.tex:1161	reject	
+stmt.contract.assert-1	stmt.contract.assert	3	source/statements.tex:1268	accept	
+stmt.dcl-1	stmt.dcl	2	source/statements.tex:1327	skip	fragment: both oracles report errors an incomplete example produces (line 6: unknown type name 'X')
+stmt.dcl-2	stmt.dcl	3	source/statements.tex:1369	accept	
+stmt.ambig-1	stmt.ambig	2	source/statements.tex:1408	skip	fragment: both oracles report errors an incomplete example produces (line 1: unknown type name 'T')
+stmt.ambig-2	stmt.ambig	2	source/statements.tex:1429	accept	
+stmt.ambig-3	stmt.ambig	3	source/statements.tex:1461	accept	
+stmt.ambig-4	stmt.ambig	4	source/statements.tex:1486	accept	
+dcl.pre-1	dcl.pre	4	source/declarations.tex:169	accept	
+dcl.pre-2	dcl.pre	6	source/declarations.tex:208	reject	
+dcl.pre-3	dcl.pre	7	source/declarations.tex:231	reject	
+dcl.pre-4	dcl.pre	8	source/declarations.tex:268	reject	
+dcl.pre-5	dcl.pre	14	source/declarations.tex:371	skip	fragment: both oracles report errors an incomplete example produces (line 7: use of undeclared identifier 'use')
+dcl.pre-6	dcl.pre	15	source/declarations.tex:404	reject	
+dcl.spec.general-1	dcl.spec.general	3	source/declarations.tex:477	reject	
+dcl.spec.general-2	dcl.spec.general	4	source/declarations.tex:504	accept	
+dcl.stc-1	dcl.stc	6	source/declarations.tex:608	reject	
+dcl.stc-2	dcl.stc	7	source/declarations.tex:649	reject	
+dcl.stc-3	dcl.stc	8	source/declarations.tex:667	reject	
+dcl.fct.spec-1	dcl.fct.spec	4	source/declarations.tex:733	reject	
+dcl.typedef-1	dcl.typedef	1	source/declarations.tex:774	accept	
+dcl.typedef-2	dcl.typedef	2	source/declarations.tex:797	reject	
+dcl.typedef-3	dcl.typedef	3	source/declarations.tex:825	reject	
+dcl.typedef-4	dcl.typedef	4	source/declarations.tex:852	accept	
+dcl.typedef-5	dcl.typedef	5	source/declarations.tex:871	reject	
+dcl.constexpr-1	dcl.constexpr	1	source/declarations.tex:911	reject	
+dcl.constexpr-2	dcl.constexpr	3	source/declarations.tex:958	reject	
+dcl.constexpr-3	dcl.constexpr	5	source/declarations.tex:1016	reject	
+dcl.constexpr-4	dcl.constexpr	6	source/declarations.tex:1036	reject	
+dcl.constinit-1	dcl.constinit	3	source/declarations.tex:1083	reject	
+dcl.type.cv-1	dcl.type.cv	4	source/declarations.tex:1303	skip	fragment: both oracles report errors an incomplete example produces (line 6: a type specifier is required for all declarations)
+dcl.type.elab-1	dcl.type.elab	7	source/declarations.tex:1692	accept	
+dcl.type.decltype-1	dcl.type.decltype	1	source/declarations.tex:1748	accept	
+dcl.type.decltype-2	dcl.type.decltype	2	source/declarations.tex:1794	skip	an error annotation on a line without code
+dcl.spec.auto.general-1	dcl.spec.auto.general	5	source/declarations.tex:1902	reject	
+dcl.spec.auto.general-2	dcl.spec.auto.general	9	source/declarations.tex:1949	reject	
+dcl.spec.auto.general-3	dcl.spec.auto.general	11	source/declarations.tex:1967	reject	
+dcl.spec.auto.general-4	dcl.spec.auto.general	13	source/declarations.tex:1991	reject	
+dcl.spec.auto.general-5	dcl.spec.auto.general	14	source/declarations.tex:2008	accept	
+dcl.spec.auto.general-6	dcl.spec.auto.general	15	source/declarations.tex:2030	accept	
+dcl.spec.auto.general-7	dcl.spec.auto.general	16	source/declarations.tex:2046	reject	
+dcl.spec.auto.general-8	dcl.spec.auto.general	19	source/declarations.tex:2091	accept	
+dcl.type.auto.deduct-1	dcl.type.auto.deduct	3	source/declarations.tex:2210	reject	
+dcl.type.auto.deduct-2	dcl.type.auto.deduct	3	source/declarations.tex:2220	skip	fragment: both oracles report errors an incomplete example produces (line 1: use of undeclared identifier 'expr')
+dcl.type.auto.deduct-3	dcl.type.auto.deduct	4	source/declarations.tex:2239	reject	
+dcl.type.class.deduct-1	dcl.type.class.deduct	1	source/declarations.tex:2277	reject	
+dcl.type.class.deduct-2	dcl.type.class.deduct	3	source/declarations.tex:2310	reject	
+dcl.type.splice-1	dcl.type.splice	1	source/declarations.tex:2344	reject	
+dcl.decl.general-1	dcl.decl.general	5	source/declarations.tex:2496	reject	
+dcl.name-1	dcl.name	1	source/declarations.tex:2668	skip	fragment: both oracles report errors an incomplete example produces (line 3: expected unqualified-id)
+dcl.ambig.res-1	dcl.ambig.res	1	source/declarations.tex:2728	accept	
+dcl.ambig.res-2	dcl.ambig.res	2	source/declarations.tex:2764	reject	
+dcl.ambig.res-3	dcl.ambig.res	3	source/declarations.tex:2805	reject	
+dcl.meaning.general-1	dcl.meaning.general	3	source/declarations.tex:2911	reject	
+dcl.meaning.general-2	dcl.meaning.general	3	source/declarations.tex:2936	reject	
+dcl.meaning.general-3	dcl.meaning.general	3	source/declarations.tex:2960	reject	
+dcl.meaning.general-4	dcl.meaning.general	6	source/declarations.tex:3033	accept	
+dcl.ptr-1	dcl.ptr	2	source/declarations.tex:3109	skip	fragment: both oracles report errors an incomplete example produces (line 4: a type specifier is required for all declarations)
+dcl.ref-1	dcl.ref	1	source/declarations.tex:3211	reject	
+dcl.ref-2	dcl.ref	3	source/declarations.tex:3242	skip	fragment: both oracles report errors an incomplete example produces (line 4: unknown type name 'f')
+dcl.ref-3	dcl.ref	6	source/declarations.tex:3347	accept	
+dcl.ref-4	dcl.ref	7	source/declarations.tex:3373	accept	
+dcl.mptr-1	dcl.mptr	3	source/declarations.tex:3435	skip	fragment: both oracles report errors an incomplete example produces (line 14: unknown type name 'obj')
+dcl.array-1	dcl.array	4	source/declarations.tex:3565	accept	
+dcl.array-2	dcl.array	5	source/declarations.tex:3579	accept	
+dcl.array-3	dcl.array	8	source/declarations.tex:3621	reject	
+dcl.array-4	dcl.array	9	source/declarations.tex:3648	accept	
+dcl.fct-1	dcl.fct	3	source/declarations.tex:3840	reject	
+dcl.fct-2	dcl.fct	4	source/declarations.tex:3877	skip	fragment: both oracles report errors an incomplete example produces (line 3: a type specifier is required for all declarations)
+dcl.fct-3	dcl.fct	5	source/declarations.tex:3925	reject	
+dcl.fct-4	dcl.fct	7	source/declarations.tex:3966	reject	
+dcl.fct-5	dcl.fct	11	source/declarations.tex:4030	reject	
+dcl.fct-6	dcl.fct	12	source/declarations.tex:4052	accept	
+dcl.fct-7	dcl.fct	14	source/declarations.tex:4074	skip	fragment: both oracles report errors an incomplete example produces (line 1: unknown type name 'FILE')
+dcl.fct-8	dcl.fct	19	source/declarations.tex:4110	reject	
+dcl.fct-9	dcl.fct	21	source/declarations.tex:4129	accept	
+dcl.fct-10	dcl.fct	23	source/declarations.tex:4236	skip	fragment: both oracles report errors an incomplete example produces (line 1: expected expression)
+dcl.fct-11	dcl.fct	24	source/declarations.tex:4266	skip	fragment: both oracles report errors an incomplete example produces (line 1: expected expression)
+dcl.fct-12	dcl.fct	26	source/declarations.tex:4301	accept	
+dcl.fct.default-1	dcl.fct.default	2	source/declarations.tex:4346	skip	fragment: both oracles report errors an incomplete example produces (line 3: a type specifier is required for all declarations)
+dcl.fct.default-2	dcl.fct.default	4	source/declarations.tex:4407	reject	
+dcl.fct.default-3	dcl.fct.default	5	source/declarations.tex:4460	accept	
+dcl.fct.default-4	dcl.fct.default	6	source/declarations.tex:4500	reject	
+dcl.fct.default-5	dcl.fct.default	7	source/declarations.tex:4517	reject	
+dcl.fct.default-6	dcl.fct.default	8	source/declarations.tex:4534	reject	
+dcl.fct.default-7	dcl.fct.default	9	source/declarations.tex:4555	reject	
+dcl.fct.default-8	dcl.fct.default	10	source/declarations.tex:4579	reject	
+dcl.fct.default-9	dcl.fct.default	11	source/declarations.tex:4606	reject	
+dcl.fct.default-10	dcl.fct.default	13	source/declarations.tex:4641	reject	
+dcl.contract.func-1	dcl.contract.func	5	source/declarations.tex:4797	skip	ill-formed, no diagnostic required: no verdict to test
+dcl.contract.func-2	dcl.contract.func	7	source/declarations.tex:4838	reject	
+dcl.contract.func-3	dcl.contract.func	9	source/declarations.tex:4870	reject	
+dcl.contract.res-1	dcl.contract.res	1	source/declarations.tex:4920	accept	
+dcl.contract.res-2	dcl.contract.res	1	source/declarations.tex:4931	accept	
+dcl.contract.res-3	dcl.contract.res	2	source/declarations.tex:4962	reject	
+dcl.init.general-1	dcl.init.general	2	source/declarations.tex:5063	accept	
+dcl.init.general-2	dcl.init.general	15	source/declarations.tex:5359	skip	no code: the example is prose
+dcl.init.general-3	dcl.init.general	15	source/declarations.tex:5401	reject	
+dcl.init.aggr-1	dcl.init.aggr	3	source/declarations.tex:5598	accept	
+dcl.init.aggr-2	dcl.init.aggr	4	source/declarations.tex:5677	reject	
+dcl.init.aggr-3	dcl.init.aggr	5	source/declarations.tex:5703	accept	
+dcl.init.aggr-4	dcl.init.aggr	5	source/declarations.tex:5739	accept	
+dcl.init.aggr-5	dcl.init.aggr	5	source/declarations.tex:5769	accept	
+dcl.init.aggr-6	dcl.init.aggr	7	source/declarations.tex:5839	skip	fragment: both oracles report errors an incomplete example produces (line 5: unknown type name 'string')
+dcl.init.aggr-7	dcl.init.aggr	11	source/declarations.tex:5898	accept	
+dcl.init.aggr-8	dcl.init.aggr	11	source/declarations.tex:5907	accept	
+dcl.init.aggr-9	dcl.init.aggr	11	source/declarations.tex:5928	reject	
+dcl.init.aggr-10	dcl.init.aggr	12	source/declarations.tex:5944	accept	
+dcl.init.aggr-11	dcl.init.aggr	13	source/declarations.tex:5968	reject	
+dcl.init.aggr-12	dcl.init.aggr	14	source/declarations.tex:5990	accept	
+dcl.init.aggr-13	dcl.init.aggr	15	source/declarations.tex:6051	accept	
+dcl.init.aggr-14	dcl.init.aggr	15	source/declarations.tex:6078	reject	
+dcl.init.aggr-15	dcl.init.aggr	16	source/declarations.tex:6085	accept	
+dcl.init.aggr-16	dcl.init.aggr	17	source/declarations.tex:6142	accept	
+dcl.init.aggr-17	dcl.init.aggr	18	source/declarations.tex:6163	accept	
+dcl.init.aggr-18	dcl.init.aggr	21	source/declarations.tex:6211	reject	
+dcl.init.string-1	dcl.init.string	1	source/declarations.tex:6265	accept	
+dcl.init.string-2	dcl.init.string	2	source/declarations.tex:6285	reject	
+dcl.init.ref-1	dcl.init.ref	1	source/declarations.tex:6304	accept	
+dcl.init.ref-2	dcl.init.ref	3	source/declarations.tex:6340	reject	
+dcl.init.ref-3	dcl.init.ref	5	source/declarations.tex:6402	accept	
+dcl.init.ref-4	dcl.init.ref	5	source/declarations.tex:6421	reject	
+dcl.init.ref-5	dcl.init.ref	5	source/declarations.tex:6459	reject	
+dcl.init.ref-6	dcl.init.ref	5	source/declarations.tex:6512	reject	
+dcl.init.list-1	dcl.init.list	1	source/declarations.tex:6589	skip	fragment: both oracles report errors an incomplete example produces (line 7: expected unqualified-id)
+dcl.init.list-2	dcl.init.list	3	source/declarations.tex:6637	reject	
+dcl.init.list-3	dcl.init.list	3	source/declarations.tex:6673	reject	
+dcl.init.list-4	dcl.init.list	3	source/declarations.tex:6700	accept	
+dcl.init.list-5	dcl.init.list	3	source/declarations.tex:6716	accept	
+dcl.init.list-6	dcl.init.list	3	source/declarations.tex:6725	reject	
+dcl.init.list-7	dcl.init.list	3	source/declarations.tex:6747	skip	fragment: both oracles report errors an incomplete example produces (line 14: unknown type name 'uint32_t')
+dcl.init.list-8	dcl.init.list	3	source/declarations.tex:6778	reject	
+dcl.init.list-9	dcl.init.list	3	source/declarations.tex:6798	reject	
+dcl.init.list-10	dcl.init.list	3	source/declarations.tex:6824	accept	
+dcl.init.list-11	dcl.init.list	3	source/declarations.tex:6832	reject	
+dcl.init.list-12	dcl.init.list	4	source/declarations.tex:6875	accept	
+dcl.init.list-13	dcl.init.list	6	source/declarations.tex:6917	accept	
+dcl.init.list-14	dcl.init.list	6	source/declarations.tex:6956	reject	
+dcl.init.list-15	dcl.init.list	7	source/declarations.tex:7021	reject	
+dcl.fct.def.general-1	dcl.fct.def.general	3	source/declarations.tex:7107	accept	
+dcl.fct.def.general-2	dcl.fct.def.general	8	source/declarations.tex:7180	reject	
+dcl.fct.def.default-1	dcl.fct.def.default	4	source/declarations.tex:7253	reject	
+dcl.fct.def.default-2	dcl.fct.def.default	6	source/declarations.tex:7312	accept	
+dcl.fct.def.delete-1	dcl.fct.def.delete	3	source/declarations.tex:7367	accept	
+dcl.fct.def.delete-2	dcl.fct.def.delete	3	source/declarations.tex:7380	reject	
+dcl.fct.def.delete-3	dcl.fct.def.delete	3	source/declarations.tex:7394	reject	
+dcl.fct.def.delete-4	dcl.fct.def.delete	4	source/declarations.tex:7423	reject	
+dcl.fct.def.coroutine-1	dcl.fct.def.coroutine	2	source/declarations.tex:7446	skip	fragment: both oracles report errors an incomplete example produces (line 2: no template named 'task')
+dcl.fct.def.coroutine-2	dcl.fct.def.coroutine	10	source/declarations.tex:7631	accept	
+dcl.struct.bind-1	dcl.struct.bind	3	source/declarations.tex:7861	reject	
+dcl.struct.bind-2	dcl.struct.bind	6	source/declarations.tex:7896	skip	fragment: both oracles report errors an incomplete example produces (line 7: unknown type name 'size_t')
+dcl.struct.bind-3	dcl.struct.bind	8	source/declarations.tex:7985	accept	
+dcl.enum-1	dcl.enum	1	source/declarations.tex:8073	reject	
+dcl.enum-2	dcl.enum	2	source/declarations.tex:8117	accept	
+dcl.enum-3	dcl.enum	11	source/declarations.tex:8255	skip	fragment: both oracles report errors an incomplete example produces (line 4: expected unqualified-id)
+dcl.enum-4	dcl.enum	12	source/declarations.tex:8298	reject	
+enum.udecl-1	enum.udecl	1	source/declarations.tex:8344	accept	
+enum.udecl-2	enum.udecl	3	source/declarations.tex:8368	accept	
+enum.udecl-3	enum.udecl	4	source/declarations.tex:8387	reject	
+basic.namespace.general-1	basic.namespace.general	2	source/declarations.tex:8422	accept	
+namespace.def.general-1	namespace.def.general	3	source/declarations.tex:8507	accept	
+namespace.def.general-2	namespace.def.general	8	source/declarations.tex:8567	accept	
+namespace.unnamed-1	namespace.unnamed	1	source/declarations.tex:8605	reject	
+namespace.udir-1	namespace.udir	4	source/declarations.tex:8714	reject	
+namespace.udir-2	namespace.udir	5	source/declarations.tex:8751	reject	
+namespace.udir-3	namespace.udir	8	source/declarations.tex:8850	reject	
+namespace.udecl-1	namespace.udecl	3	source/declarations.tex:8956	accept	
+namespace.udecl-2	namespace.udecl	3	source/declarations.tex:8972	reject	
+namespace.udecl-3	namespace.udecl	5	source/declarations.tex:9017	reject	
+namespace.udecl-4	namespace.udecl	7	source/declarations.tex:9038	reject	
+namespace.udecl-5	namespace.udecl	8	source/declarations.tex:9055	reject	
+namespace.udecl-6	namespace.udecl	9	source/declarations.tex:9082	accept	
+namespace.udecl-7	namespace.udecl	10	source/declarations.tex:9111	reject	
+namespace.udecl-8	namespace.udecl	10	source/declarations.tex:9130	reject	
+namespace.udecl-9	namespace.udecl	11	source/declarations.tex:9179	reject	
+namespace.udecl-10	namespace.udecl	15	source/declarations.tex:9280	reject	
+namespace.udecl-11	namespace.udecl	16	source/declarations.tex:9307	reject	
+dcl.link-1	dcl.link	3	source/declarations.tex:9408	skip	fragment: both oracles report errors an incomplete example produces (line 1: unknown type name 'complex'; did you mean '_Complex'?)
+dcl.link-2	dcl.link	5	source/declarations.tex:9436	accept	
+dcl.link-3	dcl.link	5	source/declarations.tex:9475	accept	
+dcl.link-4	dcl.link	7	source/declarations.tex:9514	reject	
+dcl.link-5	dcl.link	8	source/declarations.tex:9543	reject	
+dcl.attr.grammar-1	dcl.attr.grammar	2	source/declarations.tex:9680	reject	
+dcl.attr.grammar-2	dcl.attr.grammar	9	source/declarations.tex:9786	reject	
+dcl.align-1	dcl.align	5	source/declarations.tex:9842	reject	
+dcl.align-2	dcl.align	6	source/declarations.tex:9863	skip	ill-formed, no diagnostic required: no verdict to test
+dcl.align-3	dcl.align	7	source/declarations.tex:9875	skip	fragment: both oracles report errors an incomplete example produces (line 1: use of undeclared identifier 'T')
+dcl.align-4	dcl.align	8	source/declarations.tex:9888	reject	
+dcl.attr.assume-1	dcl.attr.assume	3	source/declarations.tex:9932	accept	
+dcl.attr.fallthrough-1	dcl.attr.fallthrough	3	source/declarations.tex:10039	reject	
+dcl.attr.likelihood-1	dcl.attr.likelihood	3	source/declarations.tex:10157	accept	
+dcl.attr.unused-1	dcl.attr.unused	5	source/declarations.tex:10224	skip	fragment: both oracles report errors an incomplete example produces (line 4: use of undeclared identifier 'assert')
+dcl.attr.nodiscard-1	dcl.attr.nodiscard	5	source/declarations.tex:10308	accept	
+dcl.attr.noreturn-1	dcl.attr.noreturn	4	source/declarations.tex:10366	accept	
+dcl.attr.nouniqueaddr-1	dcl.attr.nouniqueaddr	2	source/declarations.tex:10406	skip	fragment: both oracles report errors an incomplete example produces (line 7: unknown type name 'Bucket')
+dcl.attr.annotation-1	dcl.attr.annotation	1	source/declarations.tex:10455	skip	fragment: both oracles report errors an incomplete example produces (line 1: expected unqualified-id)
+dcl.attr.annotation-2	dcl.attr.annotation	3	source/declarations.tex:10480	accept	
+dcl.attr.annotation-3	dcl.attr.annotation	3	source/declarations.tex:10491	accept	
+dcl.attr.annotation-4	dcl.attr.annotation	4	source/declarations.tex:10501	reject	
+module.unit-1	module.unit	4	source/modules.tex:79	skip	4 translation unit(s) (codeblocktu): needs a multi-unit test
+module.unit-2	module.unit	8	source/modules.tex:169	skip	5 translation unit(s) (codeblocktu): needs a multi-unit test
+module.interface-1	module.interface	4	source/modules.tex:244	skip	2 translation unit(s) (codeblocktu): needs a multi-unit test
+module.interface-2	module.interface	5	source/modules.tex:272	skip	4 translation unit(s) (codeblocktu): needs a multi-unit test
+module.interface-3	module.interface	5	source/modules.tex:305	accept	
+module.interface-4	module.interface	6	source/modules.tex:320	reject	
+module.interface-5	module.interface	7	source/modules.tex:346	skip	3 translation unit(s) (codeblocktu): needs a multi-unit test
+module.interface-6	module.interface	8	source/modules.tex:393	reject	
+module.import-1	module.import	8	source/modules.tex:539	skip	2 translation unit(s) (codeblocktu): needs a multi-unit test
+module.import-2	module.import	9	source/modules.tex:555	skip	fragment: both oracles report errors an incomplete example produces (line 1: module 'M' not found)
+module.import-3	module.import	10	source/modules.tex:568	skip	3 translation unit(s) (codeblocktu): needs a multi-unit test
+module.global.frag-1	module.global.frag	4	source/modules.tex:733	accept	
+module.global.frag-2	module.global.frag	5	source/modules.tex:753	skip	3 translation unit(s) (codeblocktu): needs a multi-unit test
+module.private.frag-1	module.private.frag	3	source/modules.tex:853	reject	
+module.context-1	module.context	9	source/modules.tex:943	skip	4 translation unit(s) (codeblocktu): needs a multi-unit test
+module.reach-1	module.reach	3	source/modules.tex:1051	reject	
+module.reach-2	module.reach	5	source/modules.tex:1092	skip	5 translation unit(s) (codeblocktu): needs a multi-unit test
+module.reach-3	module.reach	6	source/modules.tex:1132	skip	2 translation unit(s) (codeblocktu): needs a multi-unit test
+class.pre-1	class.pre	3	source/classes.tex:105	accept	
+class.pre-2	class.pre	5	source/classes.tex:134	accept	
+class.prop-1	class.prop	3	source/classes.tex:244	accept	
+class.prop-2	class.prop	6	source/classes.tex:274	accept	
+class.name-1	class.name	1	source/classes.tex:323	reject	
+class.name-2	class.name	2	source/classes.tex:358	accept	
+class.name-3	class.name	2	source/classes.tex:378	accept	
+class.name-4	class.name	2	source/classes.tex:391	accept	
+class.name-5	class.name	3	source/classes.tex:419	accept	
+class.name-6	class.name	4	source/classes.tex:436	accept	
+class.mem.general-1	class.mem.general	13	source/classes.tex:683	accept	
+class.mem.general-2	class.mem.general	14	source/classes.tex:698	reject	
+class.mem.general-3	class.mem.general	23	source/classes.tex:785	accept	
+class.mem.general-4	class.mem.general	27	source/classes.tex:870	accept	
+class.mem.general-5	class.mem.general	30	source/classes.tex:902	accept	
+class.mfct-1	class.mfct	2	source/classes.tex:994	accept	
+class.mfct-2	class.mfct	4	source/classes.tex:1024	accept	
+special-1	special	2	source/classes.tex:1100	accept	
+special-2	special	4	source/classes.tex:1126	skip	no code: the example is prose
+class.ctor.general-1	class.ctor.general	1	source/classes.tex:1198	accept	
+class.ctor.general-2	class.ctor.general	2	source/classes.tex:1218	skip	fragment: both oracles report errors an incomplete example produces (line 1: unknown type name 'complex'; did you mean '_Complex'?)
+class.copy.ctor-1	class.copy.ctor	1	source/classes.tex:1402	accept	
+class.copy.ctor-2	class.copy.ctor	2	source/classes.tex:1425	accept	
+class.copy.ctor-3	class.copy.ctor	3	source/classes.tex:1441	accept	
+class.copy.ctor-4	class.copy.ctor	4	source/classes.tex:1467	reject	
+class.copy.ctor-5	class.copy.ctor	5	source/classes.tex:1488	accept	
+class.copy.assign-1	class.copy.assign	1	source/classes.tex:1742	reject	
+class.copy.assign-2	class.copy.assign	4	source/classes.tex:1829	accept	
+class.copy.assign-3	class.copy.assign	12	source/classes.tex:1975	accept	
+class.dtor-1	class.dtor	16	source/classes.tex:2276	accept	
+class.dtor-2	class.dtor	17	source/classes.tex:2317	accept	
+class.dtor-3	class.dtor	18	source/classes.tex:2340	skip	no code: the example is prose
+class.conv.general-1	class.conv.general	4	source/classes.tex:2396	reject	
+class.conv.ctor-1	class.conv.ctor	1	source/classes.tex:2420	accept	
+class.conv.ctor-2	class.conv.ctor	2	source/classes.tex:2448	reject	
+class.conv.fct-1	class.conv.fct	3	source/classes.tex:2538	reject	
+class.conv.fct-2	class.conv.fct	4	source/classes.tex:2557	skip	fragment: both oracles report errors an incomplete example produces (line 12: unknown type name 'X')
+class.conv.fct-3	class.conv.fct	5	source/classes.tex:2592	reject	
+class.conv.fct-4	class.conv.fct	5	source/classes.tex:2601	reject	
+class.conv.fct-5	class.conv.fct	6	source/classes.tex:2618	reject	
+class.conv.fct-6	class.conv.fct	8	source/classes.tex:2644	reject	
+class.static.general-1	class.static.general	1	source/classes.tex:2665	accept	
+class.static.data-1	class.static.data	3	source/classes.tex:2735	skip	fragment: both oracles report errors an incomplete example produces (line 6: use of undeclared identifier 'get_main')
+class.static.data-2	class.static.data	3	source/classes.tex:2758	skip	no code: the example is prose
+class.bit-1	class.bit	4	source/classes.tex:2874	accept	
+class.free-1	class.free	2	source/classes.tex:2901	reject	
+class.free-2	class.free	3	source/classes.tex:2926	accept	
+class.free-3	class.free	4	source/classes.tex:2952	accept	
+class.free-4	class.free	4	source/classes.tex:2997	accept	
+class.free-5	class.free	5	source/classes.tex:3021	skip	no code: the example is prose
+class.nest-1	class.nest	1	source/classes.tex:3045	reject	
+class.nest-2	class.nest	2	source/classes.tex:3078	accept	
+class.union.general-1	class.union.general	4	source/classes.tex:3166	accept	
+class.union.general-2	class.union.general	5	source/classes.tex:3229	accept	
+class.union.general-3	class.union.general	6	source/classes.tex:3260	skip	fragment: both oracles report errors an incomplete example produces (line 2: unknown type name 'u')
+class.union.anon-1	class.union.anon	1	source/classes.tex:3301	accept	
+class.union.anon-2	class.union.anon	3	source/classes.tex:3327	reject	
+class.union.anon-3	class.union.anon	4	source/classes.tex:3354	reject	
+class.local-1	class.local	1	source/classes.tex:3384	reject	
+class.derived.general-1	class.derived.general	3	source/classes.tex:3545	accept	
+class.mi-1	class.mi	1	source/classes.tex:3620	accept	
+class.mi-2	class.mi	3	source/classes.tex:3651	reject	
+class.virtual-1	class.virtual	2	source/classes.tex:3808	accept	
+class.virtual-2	class.virtual	2	source/classes.tex:3828	accept	
+class.virtual-3	class.virtual	4	source/classes.tex:3866	reject	
+class.virtual-4	class.virtual	5	source/classes.tex:3881	reject	
+class.virtual-5	class.virtual	6	source/classes.tex:3896	reject	
+class.virtual-6	class.virtual	9	source/classes.tex:3942	reject	
+class.virtual-7	class.virtual	13	source/classes.tex:4014	reject	
+class.virtual-8	class.virtual	14	source/classes.tex:4049	reject	
+class.virtual-9	class.virtual	15	source/classes.tex:4079	accept	
+class.virtual-10	class.virtual	16	source/classes.tex:4100	accept	
+class.abstract-1	class.abstract	2	source/classes.tex:4159	accept	
+class.abstract-2	class.abstract	2	source/classes.tex:4176	reject	
+class.abstract-3	class.abstract	4	source/classes.tex:4202	accept	
+class.access.general-1	class.access.general	3	source/classes.tex:4298	accept	
+class.access.general-2	class.access.general	4	source/classes.tex:4321	accept	
+class.access.general-3	class.access.general	4	source/classes.tex:4339	reject	
+class.access.general-4	class.access.general	7	source/classes.tex:4378	accept	
+class.access.general-5	class.access.general	9	source/classes.tex:4437	reject	
+class.access.spec-1	class.access.spec	1	source/classes.tex:4469	accept	
+class.access.spec-2	class.access.spec	2	source/classes.tex:4482	accept	
+class.access.spec-3	class.access.spec	3	source/classes.tex:4500	reject	
+class.access.spec-4	class.access.spec	4	source/classes.tex:4520	reject	
+class.access.base-1	class.access.base	2	source/classes.tex:4577	accept	
+class.access.base-2	class.access.base	3	source/classes.tex:4617	reject	
+class.access.base-3	class.access.base	4	source/classes.tex:4696	accept	
+class.access.base-4	class.access.base	5	source/classes.tex:4813	accept	
+class.friend-1	class.friend	1	source/classes.tex:4853	accept	
+class.friend-2	class.friend	2	source/classes.tex:4883	accept	
+class.friend-3	class.friend	2	source/classes.tex:4898	reject	
+class.friend-4	class.friend	3	source/classes.tex:4928	reject	
+class.friend-5	class.friend	4	source/classes.tex:4973	skip	fragment: both oracles report errors an incomplete example produces (line 2: use of undeclared identifier 'X')
+class.friend-6	class.friend	5	source/classes.tex:4988	accept	
+class.friend-7	class.friend	9	source/classes.tex:5024	reject	
+class.friend-8	class.friend	10	source/classes.tex:5055	reject	
+class.friend-9	class.friend	10	source/classes.tex:5088	reject	
+class.protected-1	class.protected	1	source/classes.tex:5131	reject	
+class.access.virt-1	class.access.virt	1	source/classes.tex:5183	reject	
+class.paths-1	class.paths	1	source/classes.tex:5221	accept	
+class.access.nest-1	class.access.nest	1	source/classes.tex:5248	reject	
+class.expl.init-1	class.expl.init	1	source/classes.tex:5319	accept	
+class.expl.init-2	class.expl.init	2	source/classes.tex:5350	skip	fragment: both oracles report errors an incomplete example produces (line 1: unknown type name 'complex'; did you mean '_Complex'?)
+class.base.init-1	class.base.init	3	source/classes.tex:5475	accept	
+class.base.init-2	class.base.init	4	source/classes.tex:5492	reject	
+class.base.init-3	class.base.init	6	source/classes.tex:5527	reject	
+class.base.init-4	class.base.init	7	source/classes.tex:5549	accept	
+class.base.init-5	class.base.init	8	source/classes.tex:5579	reject	
+class.base.init-6	class.base.init	9	source/classes.tex:5637	reject	
+class.base.init-7	class.base.init	12	source/classes.tex:5674	accept	
+class.base.init-8	class.base.init	13	source/classes.tex:5696	reject	
+class.base.init-9	class.base.init	16	source/classes.tex:5753	accept	
+class.base.init-10	class.base.init	17	source/classes.tex:5794	accept	
+class.base.init-11	class.base.init	18	source/classes.tex:5852	accept	
+class.base.init-12	class.base.init	20	source/classes.tex:5898	accept	
+class.inhctor.init-1	class.inhctor.init	1	source/classes.tex:5931	reject	
+class.inhctor.init-2	class.inhctor.init	1	source/classes.tex:5979	accept	
+class.inhctor.init-3	class.inhctor.init	2	source/classes.tex:5999	reject	
+class.cdtor-1	class.cdtor	1	source/classes.tex:6052	accept	
+class.cdtor-2	class.cdtor	2	source/classes.tex:6092	skip	fragment: both oracles report errors an incomplete example produces (line 14: use of undeclared identifier 'cout')
+class.cdtor-3	class.cdtor	3	source/classes.tex:6145	accept	
+class.cdtor-4	class.cdtor	4	source/classes.tex:6189	accept	
+class.cdtor-5	class.cdtor	6	source/classes.tex:6271	accept	
+class.copy.elision-1	class.copy.elision	2	source/classes.tex:6384	reject	
+class.copy.elision-2	class.copy.elision	3	source/classes.tex:6429	reject	
+class.copy.elision-3	class.copy.elision	4	source/classes.tex:6482	skip	fragment: both oracles report errors an incomplete example produces (line 9: expected expression)
+class.compare.default-1	class.compare.default	1	source/classes.tex:6539	reject	
+class.compare.default-2	class.compare.default	4	source/classes.tex:6604	accept	
+class.eq-1	class.eq	4	source/classes.tex:6666	accept	
+class.compare.secondary-1	class.compare.secondary	3	source/classes.tex:6843	accept	
+over.pre-1	over.pre	2	source/overloading.tex:31	skip	fragment: both oracles report errors an incomplete example produces (line 4: a type specifier is required for all declarations)
+over.match.funcs.general-1	over.match.funcs.general	4	source/overloading.tex:197	skip	no code: the example is prose
+over.match.funcs.general-2	over.match.funcs.general	6	source/overloading.tex:250	reject	
+over.match.funcs.general-3	over.match.funcs.general	9	source/overloading.tex:337	accept	
+over.call.func-1	over.call.func	3	source/overloading.tex:520	reject	
+over.call.object-1	over.call.object	3	source/overloading.tex:649	accept	
+over.match.oper-1	over.match.oper	1	source/overloading.tex:685	reject	
+over.match.oper-2	over.match.oper	4	source/overloading.tex:851	reject	
+over.match.oper-3	over.match.oper	8	source/overloading.tex:909	accept	
+over.match.oper-4	over.match.oper	11	source/overloading.tex:964	reject	
+over.match.class.deduct-1	over.match.class.deduct	2	source/overloading.tex:1386	reject	
+over.match.class.deduct-2	over.match.class.deduct	7	source/overloading.tex:1562	reject	
+over.match.class.deduct-3	over.match.class.deduct	8	source/overloading.tex:1643	reject	
+over.match.class.deduct-4	over.match.class.deduct	9	source/overloading.tex:1708	reject	
+over.match.viable-1	over.match.viable	2	source/overloading.tex:1785	reject	
+over.match.best.general-1	over.match.best.general	2	source/overloading.tex:1888	reject	
+over.match.best.general-2	over.match.best.general	2	source/overloading.tex:1907	accept	
+over.match.best.general-3	over.match.best.general	2	source/overloading.tex:1947	accept	
+over.match.best.general-4	over.match.best.general	2	source/overloading.tex:1968	accept	
+over.match.best.general-5	over.match.best.general	2	source/overloading.tex:1989	accept	
+over.match.best.general-6	over.match.best.general	2	source/overloading.tex:2005	accept	
+over.match.best.general-7	over.match.best.general	2	source/overloading.tex:2040	accept	
+over.match.best.general-8	over.match.best.general	3	source/overloading.tex:2108	reject	
+over.best.ics.general-1	over.best.ics.general	4	source/overloading.tex:2203	reject	
+over.best.ics.general-2	over.best.ics.general	7	source/overloading.tex:2247	skip	no code: the example is prose
+over.best.ics.general-3	over.best.ics.general	12	source/overloading.tex:2292	reject	
+over.ics.ref-1	over.ics.ref	1	source/overloading.tex:2461	accept	
+over.ics.ref-2	over.ics.ref	4	source/overloading.tex:2511	skip	no code: the example is prose
+over.ics.list-1	over.ics.list	2	source/overloading.tex:2551	reject	
+over.ics.list-2	over.ics.list	5	source/overloading.tex:2594	skip	fragment: both oracles report errors an incomplete example produces (line 5: a type specifier is required for all declarations)
+over.ics.list-3	over.ics.list	7	source/overloading.tex:2650	skip	fragment: both oracles report errors an incomplete example produces (line 7: a type specifier is required for all declarations)
+over.ics.list-4	over.ics.list	8	source/overloading.tex:2688	skip	fragment: both oracles report errors an incomplete example produces (line 7: a type specifier is required for all declarations)
+over.ics.list-5	over.ics.list	9	source/overloading.tex:2707	skip	fragment: both oracles report errors an incomplete example produces (line 7: a type specifier is required for all declarations)
+over.ics.list-6	over.ics.list	10	source/overloading.tex:2729	skip	fragment: both oracles report errors an incomplete example produces (line 2: a type specifier is required for all declarations)
+over.ics.list-7	over.ics.list	10	source/overloading.tex:2739	skip	fragment: both oracles report errors an incomplete example produces (line 2: a type specifier is required for all declarations)
+over.ics.rank-1	over.ics.rank	3	source/overloading.tex:2804	accept	
+over.ics.rank-2	over.ics.rank	3	source/overloading.tex:2815	skip	fragment: both oracles report errors an incomplete example produces (line 5: a type specifier is required for all declarations)
+over.ics.rank-3	over.ics.rank	3	source/overloading.tex:2865	skip	fragment: both oracles report errors an incomplete example produces (line 16: expected unqualified-id)
+over.ics.rank-4	over.ics.rank	3	source/overloading.tex:2897	accept	
+over.ics.rank-5	over.ics.rank	3	source/overloading.tex:2915	accept	
+over.ics.rank-6	over.ics.rank	3	source/overloading.tex:2937	reject	
+over.ics.rank-7	over.ics.rank	3	source/overloading.tex:2973	accept	
+over.ics.rank-8	over.ics.rank	3	source/overloading.tex:3007	accept	
+over.ics.rank-9	over.ics.rank	4	source/overloading.tex:3054	reject	
+over.ics.rank-10	over.ics.rank	4	source/overloading.tex:3109	accept	
+over.over-1	over.over	6	source/overloading.tex:3285	reject	
+over.over-2	over.over	6	source/overloading.tex:3308	reject	
+over.over-3	over.over	6	source/overloading.tex:3325	reject	
+over.oper.general-1	over.oper.general	4	source/overloading.tex:3443	skip	fragment: both oracles report errors an incomplete example produces (line 2: unknown type name 'complex'; did you mean '_Complex'?)
+over.assign-1	over.assign	3	source/overloading.tex:3627	accept	
+over.sub-1	over.sub	2	source/overloading.tex:3702	skip	fragment: both oracles report errors an incomplete example produces (line 3: unknown type name 'Z')
+over.inc.general-1	over.inc.general	1	source/overloading.tex:3785	accept	
+over.inc.default-1	over.inc.default	1	source/overloading.tex:3844	reject	
+over.inc.default-2	over.inc.default	4	source/overloading.tex:3893	reject	
+over.literal-1	over.literal	8	source/overloading.tex:4346	skip	ill-formed, no diagnostic required: no verdict to test
+temp.pre-1	temp.pre	3	source/templates.tex:87	skip	fragment: both oracles report errors an incomplete example produces (line 9: no template named 'hermitian_matrix')
+temp.pre-2	temp.pre	5	source/templates.tex:136	reject	
+temp.pre-3	temp.pre	7	source/templates.tex:172	reject	
+temp.pre-4	temp.pre	9	source/templates.tex:234	reject	
+temp.param-1	temp.param	6	source/templates.tex:381	reject	
+temp.param-2	temp.param	7	source/templates.tex:417	accept	
+temp.param-3	temp.param	10	source/templates.tex:475	accept	
+temp.param-4	temp.param	13	source/templates.tex:544	reject	
+temp.param-5	temp.param	14	source/templates.tex:565	reject	
+temp.param-6	temp.param	15	source/templates.tex:580	accept	
+temp.param-7	temp.param	18	source/templates.tex:624	accept	
+temp.param-8	temp.param	19	source/templates.tex:655	reject	
+temp.param-9	temp.param	20	source/templates.tex:672	reject	
+temp.param-10	temp.param	21	source/templates.tex:689	reject	
+temp.param-11	temp.param	21	source/templates.tex:705	reject	
+temp.names-1	temp.names	7	source/templates.tex:840	reject	
+temp.names-2	temp.names	8	source/templates.tex:884	reject	
+temp.names-3	temp.names	10	source/templates.tex:905	reject	
+temp.names-4	temp.names	11	source/templates.tex:937	reject	
+temp.names-5	temp.names	13	source/templates.tex:995	reject	
+temp.names-6	temp.names	14	source/templates.tex:1025	skip	ill-formed, no diagnostic required: no verdict to test
+temp.names-7	temp.names	15	source/templates.tex:1073	accept	
+temp.arg.general-1	temp.arg.general	1	source/templates.tex:1095	accept	
+temp.arg.general-2	temp.arg.general	4	source/templates.tex:1171	accept	
+temp.arg.general-3	temp.arg.general	5	source/templates.tex:1189	reject	
+temp.arg.general-4	temp.arg.general	5	source/templates.tex:1209	reject	
+temp.arg.general-5	temp.arg.general	6	source/templates.tex:1231	reject	
+temp.arg.general-6	temp.arg.general	7	source/templates.tex:1246	accept	
+temp.arg.general-7	temp.arg.general	10	source/templates.tex:1286	accept	
+temp.arg.type-1	temp.arg.type	2	source/templates.tex:1308	accept	
+temp.arg.nontype-1	temp.arg.nontype	7	source/templates.tex:1413	reject	
+temp.arg.nontype-2	temp.arg.nontype	8	source/templates.tex:1426	reject	
+temp.arg.nontype-3	temp.arg.nontype	9	source/templates.tex:1476	reject	
+temp.arg.nontype-4	temp.arg.nontype	10	source/templates.tex:1505	reject	
+temp.arg.template-1	temp.arg.template	2	source/templates.tex:1552	accept	
+temp.arg.template-2	temp.arg.template	4	source/templates.tex:1607	accept	
+temp.arg.template-3	temp.arg.template	4	source/templates.tex:1626	reject	
+temp.arg.template-4	temp.arg.template	4	source/templates.tex:1646	reject	
+temp.constr.op-1	temp.constr.op	4	source/templates.tex:1782	skip	fragment: both oracles report errors an incomplete example produces (line 10: a type specifier is required for all declarations)
+temp.constr.op-2	temp.constr.op	5	source/templates.tex:1811	reject	
+temp.constr.atomic-1	temp.constr.atomic	2	source/templates.tex:1879	accept	
+temp.constr.atomic-2	temp.constr.atomic	2	source/templates.tex:1909	skip	ill-formed, no diagnostic required: no verdict to test
+temp.constr.atomic-3	temp.constr.atomic	3	source/templates.tex:1940	skip	an error annotation on a line without code
+temp.constr.concept-1	temp.constr.concept	4	source/templates.tex:1997	accept	
+temp.constr.decl-1	temp.constr.decl	3	source/templates.tex:2127	accept	
+temp.constr.decl-2	temp.constr.decl	4	source/templates.tex:2172	accept	
+temp.constr.normal-1	temp.constr.normal	1	source/templates.tex:2237	accept	
+temp.constr.normal-2	temp.constr.normal	3	source/templates.tex:2325	accept	
+temp.constr.normal-3	temp.constr.normal	3	source/templates.tex:2344	accept	
+temp.constr.normal-4	temp.constr.normal	3	source/templates.tex:2363	accept	
+temp.constr.normal-5	temp.constr.normal	3	source/templates.tex:2391	reject	
+temp.constr.order-1	temp.constr.order	1	source/templates.tex:2451	skip	no code: the example is prose
+temp.constr.order-2	temp.constr.order	5	source/templates.tex:2502	skip	fragment: both oracles report errors an incomplete example produces (line 9: a type specifier is required for all declarations)
+temp.constr.order-3	temp.constr.order	5	source/templates.tex:2518	skip	fragment: both oracles report errors an incomplete example produces (line 11: a type specifier is required for all declarations)
+temp.type-1	temp.type	3	source/templates.tex:2635	skip	fragment: both oracles report errors an incomplete example produces (line 6: use of undeclared identifier 'error_handler1')
+temp.class.general-1	temp.class.general	2	source/templates.tex:2781	accept	
+temp.class.general-2	temp.class.general	3	source/templates.tex:2822	skip	ill-formed, no diagnostic required: no verdict to test
+temp.mem.func-1	temp.mem.func	1	source/templates.tex:2881	reject	
+temp.mem.func-2	temp.mem.func	2	source/templates.tex:2927	skip	fragment: both oracles report errors an incomplete example produces (line 1: no template named 'Array')
+temp.deduct.guide-1	temp.deduct.guide	2	source/templates.tex:2963	accept	
+temp.static-1	temp.static	1	source/templates.tex:3029	accept	
+temp.static-2	temp.static	2	source/templates.tex:3049	accept	
+temp.mem.enum-1	temp.mem.enum	1	source/templates.tex:3064	accept	
+temp.mem-1	temp.mem	1	source/templates.tex:3087	accept	
+temp.mem-2	temp.mem	1	source/templates.tex:3098	reject	
+temp.mem-3	temp.mem	2	source/templates.tex:3127	accept	
+temp.mem-4	temp.mem	3	source/templates.tex:3148	reject	
+temp.mem-5	temp.mem	4	source/templates.tex:3161	accept	
+temp.mem-6	temp.mem	5	source/templates.tex:3181	accept	
+temp.variadic-1	temp.variadic	1	source/templates.tex:3210	reject	
+temp.variadic-2	temp.variadic	2	source/templates.tex:3224	skip	fragment: both oracles report errors an incomplete example produces (line 3: a type specifier is required for all declarations)
+temp.variadic-3	temp.variadic	3	source/templates.tex:3238	skip	fragment: both oracles report errors an incomplete example produces (line 8: a type specifier is required for all declarations)
+temp.variadic-4	temp.variadic	4	source/templates.tex:3255	accept	
+temp.variadic-5	temp.variadic	6	source/templates.tex:3364	accept	
+temp.variadic-6	temp.variadic	8	source/templates.tex:3389	skip	an error annotation on a line without code
+temp.variadic-7	temp.variadic	15	source/templates.tex:3537	accept	
+temp.variadic-8	temp.variadic	17	source/templates.tex:3577	accept	
+temp.friend-1	temp.friend	1	source/templates.tex:3596	accept	
+temp.friend-2	temp.friend	3	source/templates.tex:3674	accept	
+temp.friend-3	temp.friend	4	source/templates.tex:3688	accept	
+temp.friend-4	temp.friend	5	source/templates.tex:3718	reject	
+temp.friend-5	temp.friend	7	source/templates.tex:3759	reject	
+temp.spec.partial.general-1	temp.spec.partial.general	3	source/templates.tex:3809	accept	
+temp.spec.partial.general-2	temp.spec.partial.general	4	source/templates.tex:3825	accept	
+temp.spec.partial.general-3	temp.spec.partial.general	6	source/templates.tex:3849	accept	
+temp.spec.partial.general-4	temp.spec.partial.general	7	source/templates.tex:3876	accept	
+temp.spec.partial.general-5	temp.spec.partial.general	9	source/templates.tex:3906	reject	
+temp.spec.partial.match-1	temp.spec.partial.match	2	source/templates.tex:3978	reject	
+temp.spec.partial.match-2	temp.spec.partial.match	2	source/templates.tex:3993	accept	
+temp.spec.partial.match-3	temp.spec.partial.match	3	source/templates.tex:4012	reject	
+temp.spec.partial.order-1	temp.spec.partial.order	2	source/templates.tex:4060	accept	
+temp.spec.partial.order-2	temp.spec.partial.order	2	source/templates.tex:4092	accept	
+temp.spec.partial.member-1	temp.spec.partial.member	1	source/templates.tex:4120	reject	
+temp.spec.partial.member-2	temp.spec.partial.member	2	source/templates.tex:4170	accept	
+temp.fct.general-1	temp.fct.general	1	source/templates.tex:4191	accept	
+temp.over.link-1	temp.over.link	1	source/templates.tex:4226	skip	several translation units in one code block: needs a multi-unit test
+temp.over.link-2	temp.over.link	4	source/templates.tex:4284	skip	fragment: both oracles report errors an incomplete example produces (line 1: no template named 'A')
+temp.over.link-3	temp.over.link	5	source/templates.tex:4331	skip	ill-formed, no diagnostic required: no verdict to test
+temp.over.link-4	temp.over.link	5	source/templates.tex:4364	accept	
+temp.func.order-1	temp.func.order	5	source/templates.tex:4547	accept	
+temp.func.order-2	temp.func.order	6	source/templates.tex:4571	reject	
+temp.func.order-3	temp.func.order	7	source/templates.tex:4604	accept	
+temp.func.order-4	temp.func.order	7	source/templates.tex:4620	reject	
+temp.func.order-5	temp.func.order	7	source/templates.tex:4636	accept	
+temp.func.order-6	temp.func.order	8	source/templates.tex:4706	accept	
+temp.alias-1	temp.alias	2	source/templates.tex:4760	skip	fragment: both oracles report errors an incomplete example produces (line 2: no template named 'vector')
+temp.alias-2	temp.alias	3	source/templates.tex:4789	reject	
+temp.alias-3	temp.alias	4	source/templates.tex:4801	reject	
+temp.alias-4	temp.alias	5	source/templates.tex:4817	accept	
+temp.concept-1	temp.concept	2	source/templates.tex:4847	accept	
+temp.res.general-1	temp.res.general	1	source/templates.tex:4914	accept	
+temp.res.general-2	temp.res.general	1	source/templates.tex:4924	skip	fragment: both oracles report errors an incomplete example produces (line 7: use of undeclared identifier 'dd')
+temp.res.general-3	temp.res.general	1	source/templates.tex:4945	accept	
+temp.res.general-4	temp.res.general	3	source/templates.tex:4998	reject	
+temp.res.general-5	temp.res.general	4	source/templates.tex:5075	skip	ill-formed, no diagnostic required: no verdict to test
+temp.res.general-6	temp.res.general	5	source/templates.tex:5107	reject	
+temp.res.general-7	temp.res.general	6	source/templates.tex:5218	skip	fragment: both oracles report errors an incomplete example produces (line 11: expected expression)
+temp.local-1	temp.local	2	source/templates.tex:5280	accept	
+temp.local-2	temp.local	3	source/templates.tex:5300	accept	
+temp.local-3	temp.local	4	source/templates.tex:5325	reject	
+temp.local-4	temp.local	5	source/templates.tex:5341	reject	
+temp.local-5	temp.local	6	source/templates.tex:5358	reject	
+temp.local-6	temp.local	7	source/templates.tex:5383	accept	
+temp.dep.general-1	temp.dep.general	3	source/templates.tex:5475	accept	
+temp.dep.type-1	temp.dep.type	2	source/templates.tex:5551	accept	
+temp.dep.type-2	temp.dep.type	3	source/templates.tex:5595	accept	
+temp.dep.type-3	temp.dep.type	4	source/templates.tex:5624	accept	
+temp.dep.type-4	temp.dep.type	5	source/templates.tex:5669	reject	
+temp.dep.type-5	temp.dep.type	6	source/templates.tex:5691	reject	
+temp.dep.type-6	temp.dep.type	9	source/templates.tex:5737	accept	
+temp.dep.expr-1	temp.dep.expr	3	source/templates.tex:5842	accept	
+temp.dep.splice-1	temp.dep.splice	2	source/templates.tex:6136	accept	
+temp.dep.splice-2	temp.dep.splice	3	source/templates.tex:6155	reject	
+temp.dep.namespace-1	temp.dep.namespace	2	source/templates.tex:6182	accept	
+temp.dep.candidate-1	temp.dep.candidate	2	source/templates.tex:6348	skip	4 translation unit(s) (codeblocktu): needs a multi-unit test
+temp.dep.candidate-2	temp.dep.candidate	3	source/templates.tex:6384	skip	2 translation unit(s) (codeblocktu): needs a multi-unit test
+temp.dep.candidate-3	temp.dep.candidate	4	source/templates.tex:6409	skip	3 translation unit(s) (codeblocktu): needs a multi-unit test
+temp.dep.candidate-4	temp.dep.candidate	5	source/templates.tex:6436	skip	8 translation unit(s) (codeblocktu): needs a multi-unit test
+temp.spec.general-1	temp.spec.general	3	source/templates.tex:6548	accept	
+temp.spec.general-2	temp.spec.general	7	source/templates.tex:6610	accept	
+temp.spec.general-3	temp.spec.general	8	source/templates.tex:6637	reject	
+temp.inst-1	temp.inst	2	source/templates.tex:6689	accept	
+temp.inst-2	temp.inst	2	source/templates.tex:6708	reject	
+temp.inst-3	temp.inst	3	source/templates.tex:6733	reject	
+temp.inst-4	temp.inst	3	source/templates.tex:6748	reject	
+temp.inst-5	temp.inst	6	source/templates.tex:6807	accept	
+temp.inst-6	temp.inst	8	source/templates.tex:6856	reject	
+temp.inst-7	temp.inst	9	source/templates.tex:6878	reject	
+temp.inst-8	temp.inst	10	source/templates.tex:6896	accept	
+temp.inst-9	temp.inst	15	source/templates.tex:6987	skip	fragment: both oracles report errors an incomplete example produces (line 1: use of undeclared identifier 'ydef')
+temp.inst-10	temp.inst	18	source/templates.tex:7025	accept	
+temp.inst-11	temp.inst	19	source/templates.tex:7050	reject	
+temp.inst-12	temp.inst	19	source/templates.tex:7069	skip	ill-formed, no diagnostic required: no verdict to test
+temp.explicit-1	temp.explicit	4	source/templates.tex:7137	accept	
+temp.explicit-2	temp.explicit	6	source/templates.tex:7176	reject	
+temp.explicit-3	temp.explicit	13	source/templates.tex:7267	accept	
+temp.expl.spec-1	temp.expl.spec	1	source/templates.tex:7310	accept	
+temp.expl.spec-2	temp.expl.spec	4	source/templates.tex:7362	reject	
+temp.expl.spec-3	temp.expl.spec	6	source/templates.tex:7404	reject	
+temp.expl.spec-4	temp.expl.spec	7	source/templates.tex:7462	reject	
+temp.expl.spec-5	temp.expl.spec	9	source/templates.tex:7517	reject	
+temp.expl.spec-6	temp.expl.spec	12	source/templates.tex:7553	accept	
+temp.expl.spec-7	temp.expl.spec	14	source/templates.tex:7592	accept	
+temp.expl.spec-8	temp.expl.spec	15	source/templates.tex:7628	accept	
+temp.expl.spec-9	temp.expl.spec	16	source/templates.tex:7660	reject	
+temp.fct.spec.general-1	temp.fct.spec.general	2	source/templates.tex:7723	accept	
+temp.arg.explicit-1	temp.arg.explicit	1	source/templates.tex:7761	skip	fragment: both oracles report errors an incomplete example produces (line 1: no template named 'Array')
+temp.arg.explicit-2	temp.arg.explicit	4	source/templates.tex:7815	reject	
+temp.arg.explicit-3	temp.arg.explicit	6	source/templates.tex:7855	reject	
+temp.arg.explicit-4	temp.arg.explicit	9	source/templates.tex:7905	accept	
+temp.deduct.general-1	temp.deduct.general	1	source/templates.tex:7928	skip	fragment: both oracles report errors an incomplete example produces (line 1: use of undeclared identifier 'dcomplex'; did you mean '_Complex'?)
+temp.deduct.general-2	temp.deduct.general	3	source/templates.tex:7955	skip	no code: the example is prose
+temp.deduct.general-3	temp.deduct.general	3	source/templates.tex:7964	accept	
+temp.deduct.general-4	temp.deduct.general	5	source/templates.tex:8004	reject	
+temp.deduct.general-5	temp.deduct.general	5	source/templates.tex:8047	accept	
+temp.deduct.general-6	temp.deduct.general	7	source/templates.tex:8108	skip	ill-formed, no diagnostic required: no verdict to test
+temp.deduct.general-7	temp.deduct.general	8	source/templates.tex:8140	accept	
+temp.deduct.general-8	temp.deduct.general	9	source/templates.tex:8171	skip	fragment: both oracles report errors an incomplete example produces (line 15: a type specifier is required for all declarations)
+temp.deduct.general-9	temp.deduct.general	10	source/templates.tex:8202	accept	
+temp.deduct.general-10	temp.deduct.general	11	source/templates.tex:8226	reject	
+temp.deduct.general-11	temp.deduct.general	11	source/templates.tex:8235	accept	
+temp.deduct.general-12	temp.deduct.general	11	source/templates.tex:8254	accept	
+temp.deduct.general-13	temp.deduct.general	11	source/templates.tex:8286	accept	
+temp.deduct.general-14	temp.deduct.general	11	source/templates.tex:8294	accept	
+temp.deduct.general-15	temp.deduct.general	11	source/templates.tex:8309	reject	
+temp.deduct.general-16	temp.deduct.general	12	source/templates.tex:8331	reject	
+temp.deduct.call-1	temp.deduct.call	1	source/templates.tex:8372	skip	fragment: both oracles report errors an incomplete example produces (line 3: a type specifier is required for all declarations)
+temp.deduct.call-2	temp.deduct.call	1	source/templates.tex:8418	reject	
+temp.deduct.call-3	temp.deduct.call	3	source/templates.tex:8478	accept	
+temp.deduct.call-4	temp.deduct.call	3	source/templates.tex:8495	reject	
+temp.deduct.call-5	temp.deduct.call	4	source/templates.tex:8579	accept	
+temp.deduct.call-6	temp.deduct.call	7	source/templates.tex:8631	accept	
+temp.deduct.call-7	temp.deduct.call	8	source/templates.tex:8642	skip	an error annotation on a line without code
+temp.deduct.call-8	temp.deduct.call	9	source/templates.tex:8653	accept	
+temp.deduct.call-9	temp.deduct.call	10	source/templates.tex:8664	accept	
+temp.deduct.partial-1	temp.deduct.partial	8	source/templates.tex:8902	skip	fragment: both oracles report errors an incomplete example produces (line 5: a type specifier is required for all declarations)
+temp.deduct.partial-2	temp.deduct.partial	12	source/templates.tex:8968	accept	
+temp.deduct.partial-3	temp.deduct.partial	13	source/templates.tex:8984	skip	fragment: both oracles report errors an incomplete example produces (line 6: a type specifier is required for all declarations)
+temp.deduct.type-1	temp.deduct.type	5	source/templates.tex:9132	reject	
+temp.deduct.type-2	temp.deduct.type	6	source/templates.tex:9147	skip	no code: the example is prose
+temp.deduct.type-3	temp.deduct.type	7	source/templates.tex:9180	skip	fragment: both oracles report errors an incomplete example produces (line 44: unknown template name 'B')
+temp.deduct.type-4	temp.deduct.type	9	source/templates.tex:9351	accept	
+temp.deduct.type-5	temp.deduct.type	10	source/templates.tex:9386	accept	
+temp.deduct.type-6	temp.deduct.type	10	source/templates.tex:9414	accept	
+temp.deduct.type-7	temp.deduct.type	11	source/templates.tex:9426	skip	not C++: uses draft notation (grammarterm, placeholder)
+temp.deduct.type-8	temp.deduct.type	13	source/templates.tex:9457	accept	
+temp.deduct.type-9	temp.deduct.type	14	source/templates.tex:9474	accept	
+temp.deduct.type-10	temp.deduct.type	15	source/templates.tex:9489	accept	
+temp.deduct.type-11	temp.deduct.type	16	source/templates.tex:9502	accept	
+temp.deduct.type-12	temp.deduct.type	18	source/templates.tex:9538	reject	
+temp.deduct.type-13	temp.deduct.type	20	source/templates.tex:9598	reject	
+temp.deduct.type-14	temp.deduct.type	21	source/templates.tex:9662	reject	
+temp.deduct.type-15	temp.deduct.type	22	source/templates.tex:9683	reject	
+temp.deduct.type-16	temp.deduct.type	23	source/templates.tex:9701	skip	fragment: both oracles report errors an incomplete example produces (line 5: unknown type name 'f')
+temp.deduct.type-17	temp.deduct.type	24	source/templates.tex:9717	accept	
+temp.over-1	temp.over	2	source/templates.tex:9805	reject	
+temp.over-2	temp.over	3	source/templates.tex:9832	accept	
+temp.over-3	temp.over	4	source/templates.tex:9848	accept	
+temp.over-4	temp.over	5	source/templates.tex:9870	accept	
+except.pre-1	except.pre	3	source/exceptions.tex:77	reject	
+except.pre-2	except.pre	3	source/exceptions.tex:114	skip	not C++: uses draft notation (grammarterm)
+except.pre-3	except.pre	4	source/exceptions.tex:166	accept	
+except.throw-1	except.throw	1	source/exceptions.tex:206	skip	fragment: both oracles report errors an incomplete example produces (line 1: expected unqualified-id)
+except.throw-2	except.throw	9	source/exceptions.tex:357	accept	
+except.ctor-1	except.ctor	2	source/exceptions.tex:403	accept	
+except.handle-1	except.handle	3	source/exceptions.tex:581	skip	fragment: both oracles report errors an incomplete example produces (line 8: use of undeclared identifier 'g')
+except.handle-2	except.handle	7	source/exceptions.tex:650	accept	
+except.spec-1	except.spec	2	source/exceptions.tex:793	reject	
+except.spec-2	except.spec	5	source/exceptions.tex:834	reject	
+except.spec-3	except.spec	12	source/exceptions.tex:961	accept	
+cpp.pre-1	cpp.pre	2	source/preprocessor.tex:238	skip	fragment: both oracles report errors an incomplete example produces (line 4: header file <string> (aka '~/.local/share/ycxx/toolchains/llvm-23.1.5/bin/../include/c++/v1/string') cannot be imported because it is not known to be a header unit)
+cpp.pre-2	cpp.pre	3	source/preprocessor.tex:266	accept	
+cpp.pre-3	cpp.pre	8	source/preprocessor.tex:318	skip	fragment: both oracles report errors an incomplete example produces (line 2: expected unqualified-id)
+cpp.cond-1	cpp.cond	14	source/preprocessor.tex:646	accept	
+cpp.cond-2	cpp.cond	15	source/preprocessor.tex:670	accept	
+cpp.include-1	cpp.include	12	source/preprocessor.tex:822	skip	fragment: both oracles report errors an incomplete example produces (line 8: 'versN.h' file not found)
+cpp.embed.gen-1	cpp.embed.gen	10	source/preprocessor.tex:941	skip	an error annotation on a line without code
+cpp.embed.gen-2	cpp.embed.gen	13	source/preprocessor.tex:971	skip	fragment: both oracles report errors an incomplete example produces (line 11: 'data.dat' file not found)
+cpp.embed.gen-3	cpp.embed.gen	13	source/preprocessor.tex:1005	skip	fragment: both oracles report errors an incomplete example produces (line 2: 'i.dat' file not found)
+cpp.embed.gen-4	cpp.embed.gen	14	source/preprocessor.tex:1054	skip	fragment: both oracles report errors an incomplete example produces (line 5: 'myfile.rsc' file not found)
+cpp.embed.param.limit-1	cpp.embed.param.limit	2	source/preprocessor.tex:1091	accept	
+cpp.embed.param.limit-2	cpp.embed.param.limit	2	source/preprocessor.tex:1106	skip	an error annotation on a line without code
+cpp.embed.param.limit-3	cpp.embed.param.limit	3	source/preprocessor.tex:1119	skip	fragment: both oracles report errors an incomplete example produces (line 3: 'sdk/jump.wav' file not found)
+cpp.embed.param.offset-1	cpp.embed.param.offset	4	source/preprocessor.tex:1150	skip	fragment: both oracles report errors an incomplete example produces (line 3: 'sdk/jump.wav' file not found)
+cpp.embed.param.suffix-1	cpp.embed.param.suffix	2	source/preprocessor.tex:1201	skip	fragment: both oracles report errors an incomplete example produces (line 2: 'ches.glsl' file not found)
+cpp.embed.param.if.empty-1	cpp.embed.param.if.empty	2	source/preprocessor.tex:1232	skip	fragment: both oracles report errors an incomplete example produces (line 1: '/owo/uwurandom' file not found)
+cpp.embed.param.if.empty-2	cpp.embed.param.if.empty	2	source/preprocessor.tex:1246	accept	
+cpp.embed.param.if.empty-3	cpp.embed.param.if.empty	2	source/preprocessor.tex:1263	skip	fragment: both oracles report errors an incomplete example produces (line 3: expected unqualified-id)
+cpp.module-1	cpp.module	3	source/preprocessor.tex:1332	skip	3 translation unit(s) (codeblocktu): needs a multi-unit test
+cpp.module-2	cpp.module	3	source/preprocessor.tex:1353	reject	
+cpp.module-3	cpp.module	3	source/preprocessor.tex:1360	accept	
+cpp.module-4	cpp.module	3	source/preprocessor.tex:1368	accept	
+cpp.module-5	cpp.module	3	source/preprocessor.tex:1376	accept	
+cpp.import-1	cpp.import	7	source/preprocessor.tex:1504	skip	7 translation unit(s) (codeblocktu): needs a multi-unit test
+cpp.replace.general-1	cpp.replace.general	3	source/preprocessor.tex:1581	accept	
+cpp.replace.general-2	cpp.replace.general	12	source/preprocessor.tex:1687	accept	
+cpp.replace.general-3	cpp.replace.general	15	source/preprocessor.tex:1741	accept	
+cpp.subst-1	cpp.subst	1	source/preprocessor.tex:1803	accept	
+cpp.subst-2	cpp.subst	3	source/preprocessor.tex:1819	skip	fragment: both oracles report errors an incomplete example produces (line 4: a type specifier is required for all declarations)
+cpp.subst-3	cpp.subst	4	source/preprocessor.tex:1866	skip	fragment: both oracles report errors an incomplete example produces (line 6: a type specifier is required for all declarations)
+cpp.concat-1	cpp.concat	4	source/preprocessor.tex:2003	skip	not C++: uses draft notation (textit, textrm)
+cpp.concat-2	cpp.concat	5	source/preprocessor.tex:2045	skip	fragment: both oracles report errors an incomplete example produces (line 7: expected unqualified-id)
+cpp.concat-3	cpp.concat	6	source/preprocessor.tex:2072	accept	
+cpp.rescan-1	cpp.rescan	2	source/preprocessor.tex:2098	skip	fragment: both oracles report errors an incomplete example produces (line 16: a type specifier is required for all declarations)
+cpp.pragma.op-1	cpp.pragma.op	2	source/preprocessor.tex:2606	accept	
