@@ -113,6 +113,15 @@ class Parts(unittest.TestCase):
                 code, output, _ = kinds.execute(test, kinds.Ctx(REPO, cut, {}, 'clang', d / 'work', 5))
                 self.assertEqual(code, want, output)
 
+    def test_features_limited_to_hosts(self):
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            (d / 'tests' / 'features').mkdir(parents=True)
+            (d / 'tests' / 'features' / 'ycxx.txt').write_text('syntax\nrun darwin-arm64  # one target\n')
+            self.assertEqual(toolchain.ycxx_features(d, 'darwin-arm64'), {'syntax', 'run'})
+            self.assertEqual(toolchain.ycxx_features(d, 'linux-x86_64'), {'syntax'})
+            self.assertRegex(toolchain.HOST, r'^\w+-\w+$')
+
     def test_unsupported_keeps_a_failure(self):
         with tempfile.TemporaryDirectory() as d:
             state.State(d, 'b', 'clang').update({'a': ('FAIL', 1.0)}, 'c1')
