@@ -24,6 +24,13 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
   - Do: keep the issue body current, and put conclusions in comments, not only in the session.
   - This confirms DECISIONS §6.1.
 
+- **macOS CI runners are shared by every repository of the account** (five concurrent jobs on
+  the free plan). libycxx's hour-long macOS jobs, run twice per push (on `push` and on
+  `pull_request`), kept ycxx's PR jobs queued for over an hour.
+  - Do: run `push` CI only on `main`, cancel superseded runs with a `concurrency` group, and keep
+    macOS jobs short. Count a libycxx PR as about an hour of every repository's macOS capacity.
+  - Learned on the α slice (#39), 2026-11-18.
+
 ## Working with Fable subagents
 
 - **Agree the contract between parts before splitting a design.** #1's engine part and C++ part
