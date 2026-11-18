@@ -138,35 +138,213 @@ public:
       if (!ret || types().is_array(*ret) || types().is_function(*ret)) return std::nullopt;
       std::vector<QualType> ps;
       for (QualType p : r.params) {
+        // A function parameter pack's type: one parameter for each element ([temp.variadic]/8).
+        if (types().kind(p) == TypeKind::pack_expansion) {
+          auto xs = substitute_expansion(type_arg(p), b);
+          if (!xs) return std::nullopt;
+          for (const TemplateArg& x : *xs) {
+            if (types().is_void(x.type)) return std::nullopt;
+            ps.push_back(x.type);
+          }
+          continue;
+        }
         auto s = substitute(p, b);
         if (!s || types().is_void(*s)) return std::nullopt;
         ps.push_back(*s);
       }
       return types().function(*ret, ps, r.variadic, r.linkage, r.fn_cv);
     }
+    case TypeKind::pack_expansion: return std::nullopt;  // only in a list, by `substitute_expansion`
     }
     return t;
   }
 
-  // Template arguments `args` with the parameters `b` binds replaced by their arguments.
+  // Template arguments `args` with the parameters `b` binds replaced by their arguments; a pack's
+  // expansions expanded in place ([temp.variadic]/8).
   std::optional<std::vector<TemplateArg>> substitute_args(std::span<const TemplateArg> args, const Bindings& b) {
     std::vector<TemplateArg> out;
     for (const TemplateArg& a : args) {
-      if (a.kind == TemplateArgKind::type) {
-        auto s = substitute(a.type, b);
+      if (a.kind != TemplateArgKind::pack) {
+        auto s = substitute_arg(a, b);
         if (!s) return std::nullopt;
-        out.push_back(type_arg(*s));
-      } else if (ins().values.is<ast::VDepParam>(a.value)) {
-        auto p = ins().values.get<ast::VDepParam>(a.value);
-        auto v = b.at(p.depth, p.index);
-        if (!v) out.push_back(a);
-        else if (v->kind != TemplateArgKind::value) return std::nullopt;
-        else out.push_back({TemplateArgKind::value, a.type, v->value});
-      } else {
-        out.push_back(a);
+        out.push_back(*s);
+        continue;
       }
+      std::vector<TemplateArg> elems;
+      for (const TemplateArg& e : ins().seqs.elements(a.elems)) {
+        if (is_expansion(e)) {
+          auto xs = substitute_expansion(e, b);
+          if (!xs) return std::nullopt;
+          elems.insert(elems.end(), xs->begin(), xs->end());
+        } else {
+          auto x = substitute_arg(e, b);
+          if (!x) return std::nullopt;
+          elems.push_back(*x);
+        }
+      }
+      out.push_back(pack(elems));
     }
     return out;
+  }
+  // One type or value argument, substituted.
+  std::optional<TemplateArg> substitute_arg(const TemplateArg& a, const Bindings& b) {
+    if (a.kind == TemplateArgKind::type) {
+      auto s = substitute(a.type, b);
+      if (!s) return std::nullopt;
+      return type_arg(*s);
+    }
+    auto v = substitute_value(a.value, b);
+    if (!v) return std::nullopt;
+    QualType t = a.type;
+    if (types().is_dependent(t))
+      if (auto st = substitute(t, b)) t = types().canonical(Types::unqualified(*st));
+    return TemplateArg{TemplateArgKind::value, t, *v};
+  }
+  // A value with the parameters `b` binds replaced: a non-type parameter by its argument,
+  // `sizeof...` of a bound pack by its length ([expr.sizeof]).
+  std::optional<ConstId> substitute_value(ConstId v, const Bindings& b) {
+    if (ins().values.is<ast::VDepParam>(v)) {
+      auto p = ins().values.get<ast::VDepParam>(v);
+      auto a = b.at(p.depth, p.index);
+      if (!a) return v;
+      if (a->kind != TemplateArgKind::value) return std::nullopt;
+      return a->value;
+    }
+    if (ins().values.is<ast::VDepSizeofPack>(v)) {
+      auto p = ins().values.get<ast::VDepSizeofPack>(v);
+      auto a = b.at(p.depth, p.index);
+      if (!a) return v;
+      if (a->kind != TemplateArgKind::pack) return std::nullopt;
+      return w_->values.integer(types().builtin(Builtin::unsigned_long), ins().seqs.size(a->elems));
+    }
+    return v;
+  }
+
+  // ------------------------------------------------------------ packs ([temp.variadic])
+
+  // A template-head's parameters as arguments, as the current instantiation and the primary
+  // template's own argument list have them ([temp.dep.type]): a pack's is its expansion.
+  std::vector<TemplateArg> own_args(std::span<const ast::TemplateParamSema> params) {
+    std::vector<TemplateArg> r;
+    for (const ast::TemplateParamSema& p : params) {
+      TemplateArg a = p.kind == TemplateArgKind::type ? type_arg(p.type)
+                                                      : value_arg(p.type, ins().intern_value(ast::VDepParam{p.depth, p.index}));
+      if (p.pack) {
+        std::array<TemplateArg, 1> e{expansion_of(a)};
+        a = pack(e);
+      }
+      r.push_back(a);
+    }
+    return r;
+  }
+  TemplateArg pack(std::span<const TemplateArg> elems) {
+    return {TemplateArgKind::pack, QualType{}, ConstId::none, ins().intern_seq(elems)};
+  }
+  std::vector<TemplateArg> elements(const TemplateArg& a) { return ins().seqs.elements(a.elems); }
+  bool is_expansion(const TemplateArg& a) {
+    return a.kind == TemplateArgKind::type ? types().kind(a.type) == TypeKind::pack_expansion
+                                           : a.kind == TemplateArgKind::value && ins().values.is<ast::VDepExpansion>(a.value);
+  }
+  // The expansion of `pattern` as a pack element.
+  TemplateArg expansion_of(const TemplateArg& pattern) {
+    if (pattern.kind == TemplateArgKind::type) return type_arg(types().pack_expansion(pattern.type));
+    return {TemplateArgKind::value, pattern.type, ins().intern_value(ast::VDepExpansion{pattern.value})};
+  }
+  // An expansion's pattern, as an argument of its kind.
+  TemplateArg pattern_of(const TemplateArg& e) {
+    if (e.kind == TemplateArgKind::type) return type_arg(types().rec(e.type).inner);
+    return {TemplateArgKind::value, e.type, ins().values.get<ast::VDepExpansion>(e.value).pattern};
+  }
+  // The template parameters a type or value names, by (depth, index).
+  void params_in(QualType t, std::vector<std::pair<u16, u16>>& out) {
+    TypeRec r = types().rec(t);
+    switch (r.kind) {
+    case TypeKind::template_param: out.push_back({r.depth, r.index}); return;
+    case TypeKind::class_:
+      for (const TemplateArg& a : w_->entities.rec(r.entity).args) params_in(a, out);
+      return;
+    case TypeKind::array:
+      if (r.bound_value != ConstId::none) params_in(r.bound_value, out);
+      params_in(r.inner, out);
+      return;
+    case TypeKind::pointer:
+    case TypeKind::reference:
+    case TypeKind::dep_name:
+    case TypeKind::pack_expansion: params_in(r.inner, out); return;
+    case TypeKind::function:
+      params_in(r.inner, out);
+      for (QualType p : r.params) params_in(p, out);
+      return;
+    default: return;
+    }
+  }
+  void params_in(ConstId v, std::vector<std::pair<u16, u16>>& out) {
+    if (ins().values.is<ast::VDepParam>(v)) out.push_back({ins().values.get<ast::VDepParam>(v).depth, ins().values.get<ast::VDepParam>(v).index});
+    else if (ins().values.is<ast::VDepExpansion>(v)) params_in(ins().values.get<ast::VDepExpansion>(v).pattern, out);
+  }
+  void params_in(const TemplateArg& a, std::vector<std::pair<u16, u16>>& out) {
+    if (a.kind == TemplateArgKind::type) params_in(a.type, out);
+    else if (a.kind == TemplateArgKind::value) params_in(a.value, out);
+    else
+      for (const TemplateArg& e : elements(a)) params_in(e, out);
+  }
+  // The bindings of an expansion's `i`-th element: each pack bound in `b` as its `i`-th element.
+  Bindings element(const Bindings& b, std::size_t i) {
+    Bindings r = b;
+    for (auto& level : r.levels)
+      for (auto& a : level)
+        if (a && a->kind == TemplateArgKind::pack) {
+          std::vector<TemplateArg> es = elements(*a);
+          a = i < es.size() ? std::optional(es[i]) : std::nullopt;
+        }
+    return r;
+  }
+  // The length of the packs an expansion's pattern names that `b` binds: none when it binds none;
+  // a failure when two differ ([temp.variadic]/7).
+  std::optional<std::optional<std::size_t>> expansion_length(const TemplateArg& pattern, const Bindings& b) {
+    std::vector<std::pair<u16, u16>> refs;
+    params_in(pattern, refs);
+    std::optional<std::size_t> n;
+    for (auto [d, i] : refs)
+      if (auto a = b.at(d, i); a && a->kind == TemplateArgKind::pack) {
+        std::size_t m = ins().seqs.size(a->elems);
+        if (n && *n != m) return std::nullopt;
+        n = m;
+      }
+    return n;
+  }
+  // An expansion `pattern...` substituted: one argument for each element of the packs it names,
+  // or, when `b` binds none of them, the expansion with its other parameters substituted.
+  std::optional<std::vector<TemplateArg>> substitute_expansion(const TemplateArg& e, const Bindings& b) {
+    TemplateArg pattern = pattern_of(e);
+    auto n = expansion_length(pattern, b);
+    if (!n) return std::nullopt;
+    if (!*n) {
+      auto s = substitute_arg(pattern, b);
+      if (!s) return std::nullopt;
+      return std::vector<TemplateArg>{expansion_of(*s)};
+    }
+    std::vector<TemplateArg> out;
+    for (std::size_t i = 0; i < **n; ++i) {
+      auto s = substitute_arg(pattern, element(b, i));
+      if (!s) return std::nullopt;
+      out.push_back(*s);
+    }
+    return out;
+  }
+  // A list of arguments with its packs' elements in place, as deduction compares them
+  // ([temp.deduct.type]/9).
+  std::vector<TemplateArg> flatten(std::span<const TemplateArg> args) {
+    std::vector<TemplateArg> r;
+    for (const TemplateArg& a : args) {
+      if (a.kind != TemplateArgKind::pack) {
+        r.push_back(a);
+        continue;
+      }
+      std::vector<TemplateArg> es = elements(a);
+      r.insert(r.end(), es.begin(), es.end());
+    }
+    return r;
   }
 
   // Whether `t` names a parameter of the template-head at `depth`: whether deduction can learn
@@ -175,11 +353,12 @@ public:
     TypeRec r = types().rec(t);
     switch (r.kind) {
     case TypeKind::template_param: return r.depth == depth;
-    case TypeKind::class_:
-      return std::ranges::any_of(w_->entities.rec(r.entity).args, [&](const TemplateArg& a) {
-        if (a.kind == TemplateArgKind::type) return mentions(a.type, depth);
-        return ins().values.is<ast::VDepParam>(a.value) && ins().values.get<ast::VDepParam>(a.value).depth == depth;
-      });
+    case TypeKind::class_: {
+      std::vector<std::pair<u16, u16>> refs;
+      for (const TemplateArg& a : w_->entities.rec(r.entity).args) params_in(a, refs);
+      return std::ranges::any_of(refs, [&](auto ref) { return ref.first == depth; });
+    }
+    case TypeKind::pack_expansion: return mentions(r.inner, depth);
     case TypeKind::array:
       if (r.bound_value != ConstId::none && ins().values.is<ast::VDepParam>(r.bound_value) &&
           ins().values.get<ast::VDepParam>(r.bound_value).depth == depth)
@@ -244,12 +423,15 @@ public:
       // An array's cv-qualifiers are its elements' ([basic.type.qualifier]/3).
       return pr.bound == ar.bound && pr.bound_value == ar.bound_value &&
              deduce(pr.inner, ar.inner, depth, out, {.more_cv = allow.more_cv});
-    case TypeKind::function:
-      if (pr.params.size() != ar.params.size() || pr.variadic != ar.variadic || pr.fn_cv != ar.fn_cv) return false;
+    case TypeKind::function: {
+      if (pr.variadic != ar.variadic || pr.fn_cv != ar.fn_cv) return false;
       if (!deduce(pr.inner, ar.inner, depth, out)) return false;
-      for (std::size_t i = 0; i < pr.params.size(); ++i)
-        if (!deduce(pr.params[i], ar.params[i], depth, out)) return false;
-      return true;
+      std::vector<TemplateArg> ps, as;
+      for (QualType q : pr.params) ps.push_back(type_arg(q));
+      for (QualType q : ar.params) as.push_back(type_arg(q));
+      return deduce_list(ps, as, depth, out);
+    }
+    case TypeKind::pack_expansion: return deduce(pr.inner, ar.inner, depth, out);
     case TypeKind::other: return false;
     }
     return false;
@@ -277,20 +459,101 @@ public:
   // partial specialization matches a specialization ([temp.spec.partial.match]/2).
   bool deduce_args(std::span<const TemplateArg> p, std::span<const TemplateArg> a, u16 depth,
                    std::vector<std::optional<TemplateArg>>& out) {
-    if (p.size() != a.size()) return false;
-    for (std::size_t i = 0; i < p.size(); ++i) {
-      const TemplateArg& x = p[i];
-      const TemplateArg& y = a[i];
-      if (x.kind != y.kind) return false;
-      if (x.kind == TemplateArgKind::type) {
-        if (!deduce(x.type, y.type, depth, out)) return false;
-      } else if (ins().values.is<ast::VDepParam>(x.value) && ins().values.get<ast::VDepParam>(x.value).depth == depth) {
-        if (!bind(out, ins().values.get<ast::VDepParam>(x.value).index, y)) return false;
-      } else if (x.value != y.value) {
-        return false;
+    return deduce_list(flatten(p), flatten(a), depth, out);
+  }
+  // A list of P arguments from a list of A arguments, packs' elements in place: pairwise, then a
+  // trailing expansion of P from the remaining ones; an expansion of P that is not last makes the
+  // list a non-deduced context ([temp.deduct.type]/9, /10).
+  bool deduce_list(std::span<const TemplateArg> p, std::span<const TemplateArg> a, u16 depth,
+                   std::vector<std::optional<TemplateArg>>& out) {
+    auto first = std::ranges::find_if(p, [&](const TemplateArg& x) { return is_expansion(x); });
+    std::size_t fixed = static_cast<std::size_t>(first - p.begin());
+    if (first != p.end() && fixed + 1 != p.size()) return true;
+    if (first == p.end() ? a.size() != p.size() : a.size() < fixed) return false;
+    for (std::size_t i = 0; i < fixed; ++i)
+      if (is_expansion(a[i]) || !deduce_arg(p[i], a[i], depth, out)) return false;
+    if (first == p.end()) return true;
+    return deduce_expansion(pattern_of(*first), a.subspan(fixed), depth, out);
+  }
+  // One argument from one ([temp.deduct.type]/8): a type by `deduce`, a non-type parameter by
+  // binding, another value by equality.
+  bool deduce_arg(const TemplateArg& x, const TemplateArg& y, u16 depth, std::vector<std::optional<TemplateArg>>& out) {
+    if (x.kind != y.kind) return false;
+    if (x.kind == TemplateArgKind::type) return deduce(x.type, y.type, depth, out);
+    if (x.kind == TemplateArgKind::pack) return deduce_list(elements(x), elements(y), depth, out);
+    if (ins().values.is<ast::VDepParam>(x.value) && ins().values.get<ast::VDepParam>(x.value).depth == depth)
+      return bind(out, ins().values.get<ast::VDepParam>(x.value).index, y);
+    if (is_expansion(x) && is_expansion(y)) return deduce_arg(pattern_of(x), pattern_of(y), depth, out);
+    return x.value == y.value;
+  }
+  // The packs an expansion's `pattern` names, each from the arguments `a` in turn: every
+  // element deduced as a parameter of its own, the others agreeing across elements
+  // ([temp.deduct.type]/9). `skip` leading arguments belong to elements already given (an
+  // explicitly specified prefix, [temp.arg.explicit]/9).
+  bool deduce_expansion(const TemplateArg& pattern, std::span<const TemplateArg> a, u16 depth,
+                        std::vector<std::optional<TemplateArg>>& out, std::size_t skip = 0, Allowance allow = {}) {
+    std::vector<std::pair<u16, u16>> refs;
+    params_in(pattern, refs);
+    std::vector<u16> packs;
+    for (auto [d, i] : refs)
+      if (d == depth && i < out.size() && is_pack_ref(pattern, i) && !std::ranges::contains(packs, i)) packs.push_back(i);
+    std::map<u16, std::vector<TemplateArg>> elems;
+    if (skip > 0)
+      for (u16 k : packs)
+        if (out[k] && out[k]->kind == TemplateArgKind::pack) elems[k] = elements(*out[k]);
+    for (std::size_t j = skip; j < a.size(); ++j) {
+      std::vector<std::optional<TemplateArg>> tmp = out;
+      for (u16 k : packs) tmp[k] = std::nullopt;
+      bool ok = is_expansion(a[j]) ? deduce_arg(pattern, pattern_of(a[j]), depth, tmp)
+                                   : (pattern.kind == TemplateArgKind::type && a[j].kind == TemplateArgKind::type
+                                          ? deduce(pattern.type, a[j].type, depth, tmp, allow)
+                                          : deduce_arg(pattern, a[j], depth, tmp));
+      if (!ok) return false;
+      for (std::size_t k = 0; k < out.size(); ++k) {
+        if (std::ranges::contains(packs, k)) continue;
+        if (tmp[k] && !out[k]) out[k] = tmp[k];
+      }
+      for (u16 k : packs) {
+        if (!tmp[k]) return false;
+        elems[k].push_back(is_expansion(a[j]) ? expansion_of(*tmp[k]) : *tmp[k]);
       }
     }
+    for (u16 k : packs) {
+      TemplateArg p = pack(elems[k]);
+      if (out[k] && *out[k] != p && !(out[k]->kind == TemplateArgKind::pack && skip > 0)) return false;
+      out[k] = p;
+    }
     return true;
+  }
+  // Whether parameter `i` is a pack in `pattern`: a type parameter marked so, or a non-type one
+  // (a non-type expansion's pattern names only packs).
+  bool is_pack_ref(const TemplateArg& pattern, u16 i) {
+    if (pattern.kind == TemplateArgKind::value) return true;
+    std::vector<QualType> found;
+    pack_types_in(pattern.type, found);
+    return std::ranges::any_of(found, [&](QualType q) { return types().rec(q).index == i; });
+  }
+  void pack_types_in(QualType t, std::vector<QualType>& out) {
+    TypeRec r = types().rec(t);
+    switch (r.kind) {
+    case TypeKind::template_param:
+      if (r.pack) out.push_back(t);
+      return;
+    case TypeKind::class_:
+      for (const TemplateArg& a : flatten(w_->entities.rec(r.entity).args))
+        if (a.kind == TemplateArgKind::type) pack_types_in(a.type, out);
+      return;
+    case TypeKind::array:
+    case TypeKind::pointer:
+    case TypeKind::reference:
+    case TypeKind::dep_name:
+    case TypeKind::pack_expansion: pack_types_in(r.inner, out); return;
+    case TypeKind::function:
+      pack_types_in(r.inner, out);
+      for (QualType p : r.params) pack_types_in(p, out);
+      return;
+    default: return;
+    }
   }
 
   // ------------------------------------------------------------ calls ([temp.deduct.call])
@@ -303,62 +566,120 @@ public:
     std::vector<ast::TemplateParamSema> params = w_->ins.seqs.elements(tmpl.template_params);
     if (params.empty()) return std::nullopt;
     u16 depth = params[0].depth;
-    if (explicit_args.size() > params.size()) return std::nullopt;
     std::vector<std::optional<TemplateArg>> out(params.size());
-    for (std::size_t i = 0; i < explicit_args.size(); ++i) {
-      if (explicit_args[i].kind != params[i].kind) return std::nullopt;
-      out[i] = explicit_args[i];
-      // A value is converted to its parameter's type, with the arguments before it substituted
-      // ([temp.arg.nontype]/1, [temp.deduct.general]/2).
-      if (params[i].kind == TemplateArgKind::value) {
-        auto pt = substitute(params[i].type, bindings(depth, out));
-        if (!pt) return std::nullopt;
-        auto v = converted_value(explicit_args[i], *pt);
-        if (!v) return std::nullopt;
-        out[i] = *v;
-      }
-    }
+    if (!explicit_into(params, explicit_args, out)) return std::nullopt;
     TypeRec f = types().rec(tmpl.type);
-    if (args.size() < f.params.size() || (args.size() > f.params.size() && !f.variadic)) return std::nullopt;
-    // The explicitly specified arguments are substituted first ([temp.deduct.general]/2).
-    const Bindings given = bindings(depth, out);
-    for (std::size_t i = 0; i < f.params.size(); ++i) {
+    // A trailing function parameter pack takes the remaining arguments ([temp.deduct.call]/1); one
+    // that is not trailing is not supported yet.
+    const std::size_t n = f.params.size();
+    const bool trailing = n > 0 && types().kind(f.params[n - 1]) == TypeKind::pack_expansion;
+    const std::size_t fixed = trailing ? n - 1 : n;
+    for (std::size_t i = 0; i < fixed; ++i)
+      if (types().kind(f.params[i]) == TypeKind::pack_expansion) return std::nullopt;
+    if (args.size() < fixed || (args.size() > n && !trailing && !f.variadic) || (!trailing && args.size() < n))
+      return std::nullopt;
+    // The explicitly specified arguments are substituted first ([temp.deduct.general]/2); packs
+    // stay open, to be extended by deduction ([temp.arg.explicit]/9).
+    Bindings given = bindings(depth, out);
+    for (auto& a : given.levels[depth])
+      if (a && a->kind == TemplateArgKind::pack) a = std::nullopt;
+    for (std::size_t i = 0; i < fixed; ++i) {
       if (!args[i].deducible) continue;
       auto p0 = substitute(tmpl_param_type(tmpl, i), given);
       if (!p0) return std::nullopt;
-      QualType p = *p0;
-      if (!mentions(p, depth)) continue;  // checked by overload resolution as a conversion
-      QualType a = args[i].type;
-      Allowance allow;
-      if (types().is_reference(p)) {
-        // A forwarding reference from an lvalue deduces an lvalue reference ([temp.deduct.call]/3).
-        TypeRec pr = types().rec(p);
-        TypeRec inner = types().rec(pr.inner);
-        if (pr.rvalue_ref && inner.kind == TypeKind::template_param && inner.depth == depth &&
-            Types::cv(types().canonical(pr.inner)) == Cv::none && args[i].lvalue)
-          a = types().lvalue_ref(a);
-        p = pr.inner;
-        allow.more_cv = true;
-      } else {
-        // [temp.deduct.call]/2: A decays, and top-level cv is dropped from both.
-        if (types().is_array(a)) a = types().pointer(types().rec(a).inner);
-        else if (types().is_function(a)) a = types().pointer(a);
-        else a = Types::unqualified(types().canonical(a));
-        p = Types::unqualified(types().canonical(p));
-        allow.qualification = types().is_pointer(p);
-      }
+      if (!mentions(*p0, depth)) continue;  // checked by overload resolution as a conversion
+      auto [p, a, allow] = call_pair(*p0, args[i], depth);
       if (!deduce(p, a, depth, out, allow)) return std::nullopt;
+    }
+    if (trailing) {
+      auto p0 = substitute(types().rec(f.params[n - 1]).inner, given);
+      if (!p0) return std::nullopt;
+      // The elements given explicitly take the first remaining arguments.
+      std::size_t skip = 0;
+      std::vector<std::pair<u16, u16>> refs;
+      params_in(*p0, refs);
+      for (auto [d, k] : refs)
+        if (d == depth && out[k] && out[k]->kind == TemplateArgKind::pack) skip = std::max<std::size_t>(skip, ins().seqs.size(out[k]->elems));
+      std::vector<TemplateArg> as;
+      QualType p = *p0;
+      Allowance allow;
+      for (std::size_t i = fixed; i < args.size(); ++i) {
+        if (i - fixed >= skip && !args[i].deducible) return std::nullopt;
+        auto [pi, a, al] = call_pair(*p0, args[i], depth);
+        p = pi;
+        allow = al;
+        as.push_back(type_arg(a));
+      }
+      if (as.size() < skip) skip = as.size();
+      if (!deduce_expansion(type_arg(p), as, depth, out, skip, allow)) return std::nullopt;
     }
     // A value deduced from an array bound converts to its parameter's type
     // ([temp.deduct.type]/20).
-    for (std::size_t i = explicit_args.size(); i < params.size(); ++i) {
-      if (!out[i] || params[i].kind != TemplateArgKind::value) continue;
+    for (std::size_t i = 0; i < params.size(); ++i) {
+      if (!out[i] || params[i].kind != TemplateArgKind::value || params[i].pack) continue;
       auto pt = substitute(params[i].type, bindings(depth, out));
       auto v = pt ? converted_value(*out[i], *pt) : std::nullopt;
       if (!v) return std::nullopt;
       out[i] = *v;
     }
     return complete(tmpl, params, std::move(out));
+  }
+  // A call argument's P/A pair, adjusted as [temp.deduct.call]/2–4 say: a forwarding reference
+  // from an lvalue deduces an lvalue reference; otherwise A decays and loses its top-level cv.
+  struct CallPair {
+    QualType p;
+    QualType a;
+    Allowance allow;
+  };
+  CallPair call_pair(QualType p, const ArgShape& arg, u16 depth) {
+    QualType a = arg.type;
+    Allowance allow;
+    if (types().is_reference(p)) {
+      TypeRec pr = types().rec(p);
+      TypeRec inner = types().rec(pr.inner);
+      if (pr.rvalue_ref && inner.kind == TypeKind::template_param && inner.depth == depth &&
+          Types::cv(types().canonical(pr.inner)) == Cv::none && arg.lvalue)
+        a = types().lvalue_ref(a);
+      p = pr.inner;
+      allow.more_cv = true;
+    } else {
+      if (types().is_array(a)) a = types().pointer(types().rec(a).inner);
+      else if (types().is_function(a)) a = types().pointer(a);
+      else a = Types::unqualified(types().canonical(a));
+      p = Types::unqualified(types().canonical(p));
+      allow.qualification = types().is_pointer(p);
+    }
+    return {p, a, allow};
+  }
+  // Explicitly specified template arguments, by parameter ([temp.arg.explicit]): one each, and a
+  // pack takes the rest; a value converted to its parameter's type with the arguments before it
+  // substituted ([temp.arg.nontype]/1, [temp.deduct.general]/2). False if they do not fit.
+  bool explicit_into(std::span<const ast::TemplateParamSema> params, std::span<const TemplateArg> written,
+                     std::vector<std::optional<TemplateArg>>& out) {
+    u16 depth = params.empty() ? 0 : params[0].depth;
+    auto one = [&](const ast::TemplateParamSema& p, const TemplateArg& a) -> std::optional<TemplateArg> {
+      if (a.kind != p.kind) return std::nullopt;
+      if (p.kind == TemplateArgKind::type) return a;
+      auto pt = substitute(p.type, bindings(depth, out));
+      return pt ? converted_value(a, *pt) : std::nullopt;
+    };
+    std::size_t j = 0;
+    for (std::size_t i = 0; i < params.size() && j < written.size(); ++i) {
+      if (params[i].pack) {
+        std::vector<TemplateArg> es;
+        for (; j < written.size(); ++j) {
+          auto v = one(params[i], written[j]);
+          if (!v) return false;
+          es.push_back(*v);
+        }
+        out[i] = pack(es);
+        break;
+      }
+      auto v = one(params[i], written[j++]);
+      if (!v) return false;
+      out[i] = *v;
+    }
+    return j == written.size();
   }
 
   // A template argument's value as a converted constant expression of type `t` ([expr.const]):
@@ -389,6 +710,11 @@ public:
     u16 depth = params[0].depth;
     for (std::size_t i = 0; i < params.size(); ++i) {
       if (out[i]) continue;
+      // A pack neither given nor deduced is empty ([temp.arg.explicit]/4).
+      if (params[i].pack) {
+        out[i] = pack({});
+        continue;
+      }
       if (!params[i].has_default) return std::nullopt;
       TemplateArg d = params[i].default_;
       if (d.kind == TemplateArgKind::type) {
@@ -417,19 +743,10 @@ public:
   std::optional<std::vector<TemplateArg>> deduce_declaration(const ast::DeclSema& tmpl, QualType type,
                                                              std::span<const TemplateArg> explicit_args) {
     std::vector<ast::TemplateParamSema> params = w_->ins.seqs.elements(tmpl.template_params);
-    if (params.empty() || explicit_args.size() > params.size()) return std::nullopt;
+    if (params.empty()) return std::nullopt;
     u16 depth = params[0].depth;
     std::vector<std::optional<TemplateArg>> out(params.size());
-    for (std::size_t i = 0; i < explicit_args.size(); ++i) {
-      if (explicit_args[i].kind != params[i].kind) return std::nullopt;
-      out[i] = explicit_args[i];
-      if (params[i].kind == TemplateArgKind::value) {
-        auto pt = substitute(params[i].type, bindings(depth, out));
-        auto v = pt ? converted_value(explicit_args[i], *pt) : std::nullopt;
-        if (!v) return std::nullopt;
-        out[i] = *v;
-      }
-    }
+    if (!explicit_into(params, explicit_args, out)) return std::nullopt;
     if (!deduce(tmpl.type, type, depth, out)) return std::nullopt;
     auto full = complete(tmpl, params, std::move(out));
     if (!full) return std::nullopt;
@@ -497,22 +814,35 @@ public:
     if (p1.empty() || p2.empty()) return {false, false};
     Bindings b1 = unique_bindings(p1), b2 = unique_bindings(p2);
     TypeRec t1 = types().rec(f1.type), t2 = types().rec(f2.type);
-    std::size_t n = std::min({nargs, t1.params.size(), t2.params.size()});
+    // The parameter a call's `i`-th argument meets: a trailing function parameter pack's pattern
+    // for each argument past the others.
+    struct At {
+      QualType type;
+      bool pack;
+    };
+    auto param_at = [&](const TypeRec& t, std::size_t i) -> std::optional<At> {
+      std::size_t n = t.params.size();
+      if (n > 0 && types().kind(t.params[n - 1]) == TypeKind::pack_expansion && i >= n - 1)
+        return At{types().rec(t.params[n - 1]).inner, true};
+      if (i < n) return At{t.params[i], false};
+      return std::nullopt;
+    };
     std::vector<std::optional<TemplateArg>> out12(p2.size()), out21(p1.size());
     bool all12 = true, all21 = true;
-    for (std::size_t i = 0; i < n; ++i) {
-      auto a1 = substitute(t1.params[i], b1);
-      auto a2 = substitute(t2.params[i], b2);
-      // [temp.deduct.partial]/5–7: references are replaced by what they refer to, then top-level
-      // cv-qualifiers are dropped.
-      bool s12 = a1 && deduce(strip(t2.params[i]), strip(*a1), p2[0].depth, out12);
-      bool s21 = a2 && deduce(strip(t1.params[i]), strip(*a2), p1[0].depth, out21);
+    for (std::size_t i = 0; i < nargs; ++i) {
+      auto x1 = param_at(t1, i), x2 = param_at(t2, i);
+      if (!x1 || !x2) break;
+      auto a1 = substitute(x1->type, b1);
+      auto a2 = substitute(x2->type, b2);
+      // [temp.deduct.partial]/8: an A from a function parameter pack deduces no P that is not one.
+      bool s12 = a1 && !(x1->pack && !x2->pack) && deduce(strip(x2->type), strip(*a1), p2[0].depth, out12);
+      bool s21 = a2 && !(x2->pack && !x1->pack) && deduce(strip(x1->type), strip(*a2), p1[0].depth, out21);
       // /9: when both types were references and deduction succeeds both ways, an lvalue
       // reference beats an rvalue one, then the more cv-qualified referred-to type wins.
-      if (s12 && s21 && types().is_reference(t1.params[i]) && types().is_reference(t2.params[i])) {
-        bool l1 = !types().rec(t1.params[i]).rvalue_ref, l2 = !types().rec(t2.params[i]).rvalue_ref;
-        Cv c1 = Types::cv(types().canonical(types().referee(t1.params[i])));
-        Cv c2 = Types::cv(types().canonical(types().referee(t2.params[i])));
+      if (s12 && s21 && types().is_reference(x1->type) && types().is_reference(x2->type)) {
+        bool l1 = !types().rec(x1->type).rvalue_ref, l2 = !types().rec(x2->type).rvalue_ref;
+        Cv c1 = Types::cv(types().canonical(types().referee(x1->type)));
+        Cv c2 = Types::cv(types().canonical(types().referee(x2->type)));
         if (l1 != l2) {
           s21 = s21 && !l1;
           s12 = s12 && !l2;
@@ -523,6 +853,16 @@ public:
       }
       all12 = all12 && s12;
       all21 = all21 && s21;
+      if (x1->pack && x2->pack) break;  // the rest are the same patterns again
+    }
+    // [temp.deduct.partial]/11: otherwise equal, a template without a trailing function parameter
+    // pack is more specialized than one with.
+    if (all12 && all21) {
+      auto trailing = [&](const TypeRec& t) {
+        return !t.params.empty() && types().kind(t.params.back()) == TypeKind::pack_expansion;
+      };
+      if (trailing(t2) && !trailing(t1)) return {true, false};
+      if (trailing(t1) && !trailing(t2)) return {false, true};
     }
     return {all12, all21};
   }
@@ -548,7 +888,7 @@ private:
   Bindings unique_bindings(std::span<const ast::TemplateParamSema> ps) {
     std::vector<TemplateArg> unique;
     for (const ast::TemplateParamSema& p : ps) {
-      if (p.kind == TemplateArgKind::type) unique.push_back(type_arg(types().template_param(unique_depth, p.index)));
+      if (p.kind == TemplateArgKind::type) unique.push_back(type_arg(types().template_param(unique_depth, p.index, p.pack != 0)));
       else unique.push_back(value_arg(p.type, w_->ins.intern_value(ast::VDepParam{unique_depth, p.index})));
     }
     return Bindings::of(ps[0].depth, unique);

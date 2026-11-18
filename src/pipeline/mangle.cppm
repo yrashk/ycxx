@@ -166,6 +166,13 @@ class Mangler {
         if (!p) return p;
         inner = "N" + *p + source_name(in_.names.spelling(d.name)) + "E";
         candidates_.push_back(full_key(bare));
+      } else if (in_.types.is<ast::TPackExpansion>(in_.types.canon(bare))) {
+        // A pack expansion `Dp <type>`, a substitution candidate (§5.1.5).
+        if (auto s = find(full_key(bare))) return qualify(qualifiers, *s, q);
+        auto e = type(in_.types.get<ast::TPackExpansion>(in_.types.canon(bare)).pattern);
+        if (!e) return e;
+        inner = "Dp" + *e;
+        candidates_.push_back(full_key(bare));
       } else if (in_.types.is<ast::TTemplateParam>(in_.types.canon(bare))) {
         // <template-param> ::= T_ | T <parameter-2 non-negative number> _, a substitution
         // candidate (§5.1.5.8, §5.1.10). Function templates of namespace scope have one level.
@@ -268,17 +275,38 @@ class Mangler {
   std::expected<std::string, std::string> template_args(std::span<const ast::TemplateArg> args) {
     std::string out = "I";
     for (const ast::TemplateArg& a : args) {
-      if (a.kind == ast::TemplateArgKind::type) {
-        auto t = type(a.type);
-        if (!t) return t;
-        out += *t;
-        continue;
+      auto m = template_arg(a);
+      if (!m) return m;
+      out += *m;
+    }
+    return out + "E";
+  }
+  // One <template-arg>: a type, an argument pack `J … E`, or a value (§5.1.5.7).
+  std::expected<std::string, std::string> template_arg(const ast::TemplateArg& a) {
+    std::string out;
+    {
+      if (a.kind == ast::TemplateArgKind::pack) {
+        out = "J";
+        for (const ast::TemplateArg& e : in_.seqs.elements(a.elems)) {
+          auto m = template_arg(e);
+          if (!m) return m;
+          out += *m;
+        }
+        return out + "E";
+      }
+      if (a.kind == ast::TemplateArgKind::type) return type(a.type);
+      // A non-type pack expansion: `sp` and its pattern, an <expression> (§5.1.6).
+      if (in_.values.is<ast::VDepExpansion>(a.value)) {
+        ast::ConstId pat = in_.values.get<ast::VDepExpansion>(a.value).pattern;
+        if (!in_.values.is<ast::VDepParam>(pat) || in_.values.get<ast::VDepParam>(pat).depth != 0)
+          return std::unexpected("a pack expansion that is not of a template parameter");
+        auto i = in_.values.get<ast::VDepParam>(pat).index;
+        return i == 0 ? std::string("XspT_E") : std::format("XspT{}_E", i - 1);
       }
       // A template parameter as an argument: an <expression>, `X T_ E` (§5.1.5.7, §5.1.6).
       if (in_.values.is<ast::VDepParam>(a.value) && in_.values.get<ast::VDepParam>(a.value).depth == 0) {
         auto i = in_.values.get<ast::VDepParam>(a.value).index;
-        out += i == 0 ? "XT_E" : std::format("XT{}_E", i - 1);
-        continue;
+        return i == 0 ? std::string("XT_E") : std::format("XT{}_E", i - 1);
       }
       auto b = ast::builtin_of(in_, a.type);
       auto code = b ? builtin_code(*b) : std::nullopt;
@@ -289,7 +317,7 @@ class Mangler {
       std::uint64_t mag = neg ? ~v.lo + 1 : v.lo;
       out += std::format("L{}{}{}E", *code, neg ? "n" : "", mag);
     }
-    return out + "E";
+    return out;
   }
 
   // A function template's name before its <template-args>: an <unscoped-template-name>, or in a

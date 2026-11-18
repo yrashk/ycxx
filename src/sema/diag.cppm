@@ -162,6 +162,12 @@ enum class Diag : std::uint32_t {
   partial_not_deducible [[=message{Severity::error, "a parameter of the partial specialization of '{0:n}' cannot be deduced from its arguments"}]],
   specialization_needs_arguments [[=message{Severity::error, "the explicit specialization of '{0:n}' needs template arguments"}]],
   member_of_explicit_specialization [[=message{Severity::error, "a member of the explicit specialization '{0:n}' is defined without 'template<>'"}]],
+  pack_length_mismatch [[=message{Severity::error, "the packs of an expansion have different lengths"}]],
+  not_a_pack [[=message{Severity::error, "'{0:n}' is not a parameter pack"}]],
+  unexpanded_pack [[=message{Severity::error, "the parameter pack '{0:n}' is used without '...'"}]],
+  expansion_without_pack [[=message{Severity::error, "the pattern of a pack expansion names no parameter pack"}]],
+  empty_fold [[=message{Severity::error, "a fold over an empty pack needs an initial value for this operator"}]],
+  pack_not_last [[=message{Severity::error, "a template parameter pack is followed by a parameter that is neither deduced nor defaulted"}]],
 };
 
 // A `{N:r}` argument: why an evaluation was not constant. 0 is an expression the front end

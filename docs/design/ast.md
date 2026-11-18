@@ -498,8 +498,13 @@ unbound).
 ### 5.6 Template arguments
 
 `TemplateArg{u8 kind; u32 payload}` (8 bytes), with kind type, value, template, template parameter
-or pack expansion. `TemplateArgs = SeqId<TemplateArg>` is one level, with packs flattened and
-values converted ([temp.arg.nontype]) or in `VDep*` form. Conversion canonicalizes every type
+or pack. `TemplateArgs = SeqId<TemplateArg>` has one entry per parameter of the head (*amended by
+#88 step 4, Fable's decision*): a pack parameter's entry is a `pack` argument holding its
+elements, never a pack itself; while dependent an element may be an expansion (a type
+`TPackExpansion` or a value `VDepExpansion`), expanded in place by substitution. Identity and
+Itanium's `J…E` follow the grouping, so `f<{int,char},{long}>` and `f<{int},{char,long}>` are two
+specializations and `count<>` has an empty pack; an expansion written for a non-pack parameter is
+a follow-up. Values are converted ([temp.arg.nontype]) or in `VDep*` form. Conversion canonicalizes every type
 inside a value (a `VReflect` of a type keeps an `STypedef` top node, as §7.1 compares), so
 template-argument-equivalent values ([temp.type]) are one `ConstId`: `X<A(1)>` and `X<1>` are one
 specialization. `ArgLevels = SeqId<TemplateArgs>` holds
@@ -590,6 +595,15 @@ Where both halves produce a member's declaration (a member template `template<cl
 g(U)` of `X<T>`): `MemberRec.substituted` is the re-analysed `item_sema` result, and `deduce`
 and redeclaration matching use `substitute` of the pattern's `decl_sema`; debug builds assert
 that they agree.
+
+Pack expansions in re-analysed parts (*#88 step 4, Fable's decision*) are instantiated as §7.4
+instantiates expansion statements: the pattern's tokens are analysed once per element with the
+packs the expansion names bound to that element (a stack of frames, innermost wins), each element
+tree at the pattern's offsets. Where the pattern's expansions are, and which packs they name, is
+read from the definition's analysis, like its dependent calls; nothing is discovered by
+re-parsing. A function parameter pack is N parameters sharing the pattern's name, each with its
+element index. Folds nest the element trees ([temp.variadic]). Equal diagnostics from the
+elements of one instantiation are reported once.
 
 Default arguments of a function template specialization have several points of instantiation
 ([temp.inst]/13, [temp.point]/7): `default_arg(spec, i, ctx)` is an `instantiated` demand entry,

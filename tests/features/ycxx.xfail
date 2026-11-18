@@ -264,7 +264,6 @@ draft/dcl/dcl.struct.bind-1.reject.cpp errors elsewhere: 'struct' not supported 
 draft/dcl/dcl.struct.bind-3.accept.cpp 'struct' not supported yet
 draft/dcl/dcl.type.auto.deduct-1.reject.cpp errors elsewhere: preprocessing directives are not supported yet
 draft/dcl/dcl.type.auto.deduct-3.reject.cpp errors elsewhere: preprocessing directives are not supported yet
-draft/dcl/dcl.type.class.deduct-1.reject.cpp errors elsewhere: 'template' not supported yet
 draft/dcl/dcl.type.class.deduct-2.reject.cpp errors elsewhere: preprocessing directives are not supported yet
 draft/dcl/dcl.type.decltype-1.accept.cpp '&&' not supported yet
 draft/dcl/dcl.type.elab-1.accept.cpp 'enum' not supported yet
@@ -445,7 +444,6 @@ draft/temp/temp.arg.explicit-4.accept.cpp 'template' not supported yet
 draft/temp/temp.arg.general-1.accept.cpp preprocessing directives are not supported yet
 draft/temp/temp.arg.general-3.reject.cpp errors elsewhere: 'template' not supported yet
 draft/temp/temp.arg.general-4.reject.cpp errors elsewhere: 'template' not supported yet
-draft/temp/temp.arg.general-5.reject.cpp errors elsewhere: 'template' not supported yet
 draft/temp/temp.arg.general-6.accept.cpp 'template' not supported yet
 draft/temp/temp.arg.nontype-1.reject.cpp errors elsewhere: 'template' not supported yet
 draft/temp/temp.arg.nontype-2.reject.cpp errors elsewhere: 'template' not supported yet
@@ -525,7 +523,6 @@ draft/temp/temp.func.order-1.accept.cpp 'struct' not supported yet
 draft/temp/temp.func.order-2.reject.cpp errors elsewhere: 'template' not supported yet
 draft/temp/temp.func.order-3.accept.cpp 'template' not supported yet
 draft/temp/temp.func.order-4.reject.cpp errors elsewhere: 'template' not supported yet
-draft/temp/temp.func.order-5.accept.cpp 'template' not supported yet
 draft/temp/temp.func.order-6.accept.cpp 'template' not supported yet
 draft/temp/temp.inst-1.accept.cpp 'template' not supported yet
 draft/temp/temp.inst-11.reject.cpp errors elsewhere: 'template' not supported yet
@@ -584,7 +581,6 @@ draft/temp/temp.static-1.accept.cpp 'template' not supported yet
 draft/temp/temp.static-2.accept.cpp 'template' not supported yet
 draft/temp/temp.variadic-1.reject.cpp errors elsewhere: 'template' not supported yet
 draft/temp/temp.variadic-4.accept.cpp 'auto' not supported yet
-draft/temp/temp.variadic-5.accept.cpp 'template' not supported yet
 draft/temp/temp.variadic-7.accept.cpp 'template' not supported yet
 draft/temp/temp.variadic-8.accept.cpp 'template' not supported yet
 own/smoke/exit-status.run.cpp <cstdio> preprocesses; libycxx does not know ycxx yet (yrashk/libycxx#17), then sema needs namespaces (#133)

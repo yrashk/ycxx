@@ -119,7 +119,10 @@ consteval Relation relation(u32 a, u32 b) {
 // The types a node or record may hold: integers and plain enums, the listed handles, `SeqId`s,
 // child edges (`nodes` only) and aggregates of these. Never a pointer, a reference, a floating
 // value, a `Loc`, or an enum that names an interner without being in `handles`.
-consteval void check_value_type(std::meta::info type, std::meta::info where, bool node) {
+// `lists` are the element types of the lists being checked, so a record whose list holds its own
+// type (a template argument pack's elements) is checked once.
+consteval void check_value_type(std::meta::info type, std::meta::info where, bool node,
+                                std::vector<std::meta::info>& lists) {
   type = std::meta::dealias(type);
   auto fail = [&](const char8_t* why) { throw std::meta::exception(why, where); };
   if (std::meta::is_pointer_type(type) || std::meta::is_reference_type(type) ||
@@ -136,7 +139,11 @@ consteval void check_value_type(std::meta::info type, std::meta::info where, boo
     return;
   }
   if (std::meta::has_template_arguments(type) && std::meta::template_of(type) == ^^SeqId) {
-    check_value_type(std::meta::template_arguments_of(type)[0], where, false);  // elements are records
+    std::meta::info elem = std::meta::dealias(std::meta::template_arguments_of(type)[0]);
+    if (std::ranges::contains(lists, elem)) return;
+    lists.push_back(elem);
+    check_value_type(elem, where, false, lists);  // elements are records
+    lists.pop_back();
     return;
   }
   if (type == ^^Child || type == ^^ChildList) {
@@ -147,10 +154,14 @@ consteval void check_value_type(std::meta::info type, std::meta::info where, boo
     if (!std::meta::bases_of(type, std::meta::access_context::unchecked()).empty())
       fail(u8"a base class: reflection walks only direct members");
     for (auto m : std::meta::nonstatic_data_members_of(type, std::meta::access_context::unchecked()))
-      check_value_type(std::meta::type_of(m), m, node);
+      check_value_type(std::meta::type_of(m), m, node, lists);
     return;
   }
   fail(u8"a type a node or record may not hold");
+}
+consteval void check_value_type(std::meta::info type, std::meta::info where, bool node) {
+  std::vector<std::meta::info> lists;
+  check_value_type(type, where, node, lists);
 }
 
 // A node kind: an aggregate of permitted members, trivially copyable, at most 32 bytes (§9.6);
@@ -196,15 +207,25 @@ consteval bool check_record(std::meta::info type) {
 // Whether values of `type` refer to tree nodes, directly or through a `SeqId`. Such lists are
 // built with their tree and interned when the frame commits; all others are interned eagerly
 // (§3.6, §9.3).
-consteval bool holds_nodes(std::meta::info type) {
+consteval bool holds_nodes(std::meta::info type, std::vector<std::meta::info>& lists) {
   type = std::meta::dealias(type);
   if (type == ^^NodeId || type == ^^Child || type == ^^ChildList) return true;
-  if (std::meta::has_template_arguments(type) && std::meta::template_of(type) == ^^SeqId)
-    return holds_nodes(std::meta::template_arguments_of(type)[0]);
+  if (std::meta::has_template_arguments(type) && std::meta::template_of(type) == ^^SeqId) {
+    std::meta::info elem = std::meta::dealias(std::meta::template_arguments_of(type)[0]);
+    if (std::ranges::contains(lists, elem)) return false;  // a list of its own record: as that record
+    lists.push_back(elem);
+    bool r = holds_nodes(elem, lists);
+    lists.pop_back();
+    return r;
+  }
   if (std::meta::is_class_type(type))
     for (auto m : std::meta::nonstatic_data_members_of(type, std::meta::access_context::unchecked()))
-      if (holds_nodes(std::meta::type_of(m))) return true;
+      if (holds_nodes(std::meta::type_of(m), lists)) return true;
   return false;
+}
+consteval bool holds_nodes(std::meta::info type) {
+  std::vector<std::meta::info> lists;
+  return holds_nodes(type, lists);
 }
 
 template <class T>

@@ -104,7 +104,19 @@ struct [[=dependent]] VDepFnParam {
   u16 index;
 };
 
-using ValueKinds = closed_list<VInt, VNullptr, VString, VLvalue, VEntity, VAggregate, VDepParam, VDepFnParam>;
+// A non-type pack expansion `pattern...` ([temp.variadic]), an element of a dependent pack argument.
+struct [[=dependent]] VDepExpansion {
+  ConstId pattern;
+};
+
+// `sizeof...(P)` of template parameter pack P ([expr.sizeof]).
+struct [[=dependent]] VDepSizeofPack {
+  u16 depth;
+  u16 index;
+};
+
+using ValueKinds = closed_list<VInt, VNullptr, VString, VLvalue, VEntity, VAggregate, VDepParam, VDepFnParam, VDepExpansion,
+                               VDepSizeofPack>;
 
 template <class T>
 constexpr bool is_value_kind = ValueKinds::contains<T>;

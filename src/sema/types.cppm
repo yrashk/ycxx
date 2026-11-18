@@ -50,7 +50,7 @@ constexpr std::string_view spelling(Builtin b) {
 
 // ---------------------------------------------------------------- types
 
-enum class TypeKind : u8 { builtin, pointer, array, function, class_, reference, enum_, template_param, dep_name, other };
+enum class TypeKind : u8 { builtin, pointer, array, function, class_, reference, enum_, template_param, dep_name, pack_expansion, other };
 
 // The canonical form of a type, read out by value.
 struct TypeRec {
@@ -96,6 +96,8 @@ public:
   QualType template_param(u16 depth, u16 index, bool pack = false) {
     return ins_->intern_type(ast::TTemplateParam{depth, index, u8(pack)});
   }
+  // `pattern...` ([temp.variadic]).
+  QualType pack_expansion(QualType pattern) { return ins_->intern_type(ast::TPackExpansion{pattern}); }
 
   TypeRec rec(QualType q) const {
     const ast::Types& t = ins_->types;
@@ -135,6 +137,9 @@ public:
       r.kind = TypeKind::dep_name;
       r.inner = t.get<ast::TDepName>(c).qualifier;
       r.name = t.get<ast::TDepName>(c).name;
+    } else if (t.is<ast::TPackExpansion>(c)) {
+      r.kind = TypeKind::pack_expansion;
+      r.inner = t.get<ast::TPackExpansion>(c).pattern;
     } else if (t.is<ast::TTemplateParam>(c)) {
       auto p = t.get<ast::TTemplateParam>(c);
       r.kind = TypeKind::template_param;
@@ -151,7 +156,8 @@ public:
     TypeRec r = rec(q);
     switch (r.kind) {
     case TypeKind::template_param:
-    case TypeKind::dep_name: return true;
+    case TypeKind::dep_name:
+    case TypeKind::pack_expansion: return true;
     case TypeKind::builtin: return r.builtin == Builtin::dependent;
     case TypeKind::array:
       return is_dependent(r.inner) || (r.bound_value != ConstId::none && ins_->values.is_dependent(r.bound_value));
@@ -266,6 +272,7 @@ private:
     case TypeKind::template_param:
       // Parameters are positional in the type (ast.md §5.1).
       return cvs + std::format("type-parameter-{}-{}", r.depth, r.index) + (inner.empty() || inner[0] == '[' ? "" : " ") + inner;
+    case TypeKind::pack_expansion: return spell(r.inner) + "..." + (inner.empty() ? "" : " " + inner);
     case TypeKind::other: return "<type>";
     }
     return {};
@@ -379,6 +386,18 @@ struct EntityRec {
 
 class Entities {
 public:
+  // A template argument into an entity's identity: a pack's elements in order ([temp.variadic]).
+  Fp128 mix_arg(Fp128 f, const ast::TemplateArg& a) {
+    f = ast::mix(f, std::to_underlying(a.kind));
+    if (a.kind == ast::TemplateArgKind::pack) {
+      f = ast::mix(f, u64(ins_->seqs.size(a.elems)));
+      for (const ast::TemplateArg& e : ins_->seqs.elements(a.elems)) f = mix_arg(f, e);
+      return f;
+    }
+    f = ast::mix(f, types_->fp(types_->canonical(a.type)));
+    if (a.value != ConstId::none) f = ast::mix(f, ins_->values.fp(a.value));
+    return f;
+  }
   explicit Entities(ast::Interners& ins, Types& types) : ins_(&ins), types_(&types) {}
 
   EntityId entity(EntityRec r) {
@@ -395,11 +414,7 @@ public:
         r.kind == EntityKind::variable_template || r.kind == EntityKind::namespace_) f = ast::mix(f, r.head);
     if (r.templ != EntityId::none) {
       f = ast::mix(f, ins_->entities.fp(r.templ));
-      for (const ast::TemplateArg& a : r.args) {
-        f = ast::mix(f, std::to_underlying(a.kind));
-        f = ast::mix(f, types_->fp(types_->canonical(a.type)));
-        if (a.value != ConstId::none) f = ast::mix(f, ins_->values.fp(a.value));
-      }
+      for (const ast::TemplateArg& a : r.args) f = mix_arg(f, a);
     }
     f = ast::mix(f, std::to_underlying(r.linkage));
     if (r.linkage == ast::Linkage::internal)
@@ -569,12 +584,16 @@ struct World {
     types.class_name = [this](EntityId e) { return std::string(ins.names.spelling(entities.rec(e).name)); };
     types.dep_name_spelling = [this](NameId n) { return std::string(ins.names.spelling(n)); };
     types.class_dependent = [this](EntityId e) {
-      return std::ranges::any_of(entities.rec(e).args, [&](const ast::TemplateArg& a) {
-        return a.kind == ast::TemplateArgKind::type ? types.is_dependent(a.type) : ins.values.is_dependent(a.value);
-      });
+      return std::ranges::any_of(entities.rec(e).args, [&](const ast::TemplateArg& a) { return arg_dependent(a); });
     };
   }
   World(const World&) = delete;
+  // Whether a template argument depends on a template parameter; a pack, whether an element does.
+  bool arg_dependent(const ast::TemplateArg& a) const {
+    if (a.kind == ast::TemplateArgKind::type) return types.is_dependent(a.type);
+    if (a.kind == ast::TemplateArgKind::value) return ins.values.is_dependent(a.value);
+    return std::ranges::any_of(ins.seqs.elements(a.elems), [&](const ast::TemplateArg& x) { return arg_dependent(x); });
+  }
 };
 
 }  // namespace ycxx::sema

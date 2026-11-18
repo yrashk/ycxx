@@ -121,6 +121,12 @@ struct TDepName {
   NameId name;
 };
 
+// A pack expansion `pattern...` ([temp.variadic]), only as an element of a function parameter list
+// or of a pack argument while dependent; substitution expands it in place.
+struct TPackExpansion {
+  QualType pattern;
+};
+
 // ---------------------------------------------------------------- sugar kinds
 
 // A use of a typedef-name or alias-declaration. The alias's template arguments come with alias
@@ -131,7 +137,7 @@ struct STypedef {
 };
 
 using TypeKinds = closed_list<TBuiltin, TPointer, TLRef, TRRef, TArray, TFunction, TClass, TEnum, STypedef, TTemplateParam,
-                              TDepName>;
+                              TDepName, TPackExpansion>;
 
 template <class T>
 constexpr bool is_type_kind = TypeKinds::contains<T>;
