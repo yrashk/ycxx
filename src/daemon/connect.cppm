@@ -31,6 +31,9 @@ struct Failure {
 
 std::expected<compile::Done, Failure> request_compile(Connection& c, const compile::Request& r);
 std::expected<Status, std::string> request_status(Connection& c);
+// Turns the connection into an LSP tunnel (§6.4): copies `in` to the daemon and the daemon's
+// answers to `out` until the session ends; its exit status, or why there is none.
+std::expected<int, std::string> tunnel_lsp(Connection& c, int in, int out);
 std::expected<void, std::string> request_shutdown(Connection& c);
 
 }  // namespace ycxx::daemon
@@ -132,6 +135,38 @@ std::expected<Status, std::string> request_status(Connection& c) {
   auto s = decode<Status>(*f);
   if (!s) return std::unexpected("malformed status");
   return std::move(*s);
+}
+
+std::expected<int, std::string> tunnel_lsp(Connection& c, int in, int out) {
+  const int sock = c.fd.get();
+  if (!send(sock, Kind::lsp, LspRequest{})) return std::unexpected("cannot send the request");
+  auto f = receive(sock);
+  if (!f) return std::unexpected("the daemon closed the connection: " + f.error());
+  if (f->kind == Kind::refused) {
+    auto why = decode<Refused>(*f);
+    return std::unexpected("the daemon refused: " + (why ? why->reason : "?"));
+  }
+  if (f->kind != Kind::lsp) return std::unexpected("unexpected answer");
+  // One thread per direction: a blocking write one way never holds up a read the other way, so a
+  // large answer and a large edit crossing do not wait on each other. The editor's end of input
+  // ends what we send. The input thread is left blocked on `in` when the session ends: the
+  // process exits next.
+  std::thread([sock, in] {
+    std::array<char, 1 << 16> buf;
+    for (;;) {
+      const std::size_t n = read_some(in, buf);
+      if (n == 0 || !write_all(sock, std::as_bytes(std::span(buf.data(), n)))) break;
+    }
+    shutdown_write(sock);
+  }).detach();
+  for (;;) {
+    auto frame = receive(sock);
+    if (!frame) return std::unexpected("the daemon closed the session: " + frame.error());
+    auto o = frame->kind == Kind::lsp ? decode<LspOut>(*frame) : std::nullopt;
+    if (!o) return std::unexpected("unexpected answer");
+    if (o->end) return o->exit_status;
+    if (!write_all(out, std::as_bytes(std::span(o->bytes)))) return std::unexpected("cannot write to the editor");
+  }
 }
 
 std::expected<void, std::string> request_shutdown(Connection& c) {

@@ -200,6 +200,58 @@ void headers() {
   fs::remove_all(dir);
 }
 
+// The editor view (daemon design §6): its unit reads open buffers over the disk, a buffer edit or
+// close reaches it, and no disk-view cell executes or reads a buffer: a build after a keystroke
+// executes nothing, and its bytes are the disk's.
+void editor_view() {
+  namespace fs = std::filesystem;
+  fs::path dir = fs::temp_directory_path() / std::format("ycxx-incremental-editor-{}", std::random_device{}());
+  fs::create_directories(dir);
+  auto write = [](const fs::path& f, std::string_view text) { std::ofstream(f, std::ios::binary | std::ios::trunc) << text; };
+  const std::string main_text = "#include \"v.h\"\nint main() { return V - 1; }\n";
+  write(dir / "m.cpp", main_text);
+  write(dir / "v.h", "#define V 1\n");
+  auto id = [&](std::string_view name) { return pp::path_id((dir / name).lexically_normal().generic_native_encoded_string()); };
+  auto build_in = [&](pl::Session& s) {
+    s.set_source(tu, "m.cpp", main_text, "m.o", dir.native_encoded_string());
+    s.set_program(program, {{tu}, {}, "m"});
+    return s.get<pl::Link>(program).image;
+  };
+  const pl::TuId editor{1u << 31};
+  pp::Config editor_config;
+  editor_config.view = pp::View::editor;
+  auto check_editor = [&](pl::Session& s) {
+    s.set_source(editor, "m.cpp", "", "m.o", dir.native_encoded_string(), editor_config);
+    return !s.get<pl::TuFront>(editor).has_errors();
+  };
+
+  pl::Session s;
+  const std::vector<std::uint8_t> disk = build_in(s);
+  check(!disk.empty() && check_editor(s), "the editor view of an unedited unit is clean");
+  // Opening the editor's unit set its `low` inputs: the next build verifies, once.
+  build_in(s);
+
+  // A keystroke in the header: the editor's unit sees it, the build does not.
+  s.db().set<pp::Buffer>(id("v.h"), std::string("#define W 1\n"));
+  check(!check_editor(s), "an unsaved header reaches the editor view");
+  s.db().reset_stats();
+  // Nothing deep-verified either: a disk-view cell that read a buffer would take its durability
+  // and be validated after every keystroke without executing (§6.3).
+  check(build_in(s) == disk && s.db().stats().executed == 0 && s.db().stats().validated == 0,
+        "a build after a keystroke executes and validates nothing");
+
+  // A keystroke in the unit itself, then the header's buffer closed.
+  s.db().set<pp::Buffer>(id("m.cpp"), std::string("#include \"v.h\"\nint main() { return W; }\n"));
+  check(check_editor(s), "the unit's own buffer is what the editor view reads");
+  s.db().set<pp::Buffer>(id("v.h"), std::nullopt);
+  check(!check_editor(s), "a closed buffer falls back to the disk");
+  s.db().set<pp::Buffer>(id("m.cpp"), std::nullopt);
+  check(check_editor(s), "with every buffer closed the editor view is the disk's");
+  s.db().reset_stats();
+  check(build_in(s) == disk && s.db().stats().executed == 0 && s.db().stats().validated == 0, "the build is still the disk's");
+  fs::remove_all(dir);
+}
+
 // A session on a pool (#137): every worker is bound to the session's universe, and the program's
 // bytes equal an inline session's, at 2 and 8 threads and under chaos seeds.
 void pooled() {
@@ -335,6 +387,7 @@ int main() {
   incremental();
   two_units();
   headers();
+  editor_view();
   pooled();
   pooled_units();
   return ycxx::unit::result("unit.pipeline_incremental");

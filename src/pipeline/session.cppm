@@ -45,6 +45,8 @@ class Session {
     // Headers are read from the disk unless the owner provides them otherwise (the daemon's file
     // table, daemon design §5.1).
     db_.set_provider<pp::FileContent>(pp::read_disk);
+    // No editor buffer is open until the owner sets one (daemon design §6.1).
+    db_.set_provider<pp::Buffer>(pp::no_buffer);
   }
 
  public:
@@ -52,13 +54,15 @@ class Session {
 
   // A translation unit from a source file: `path` names it (and locates its `#include "..."`),
   // `object` is the object's name; relative paths are relative to `cwd`, and `config` is its
-  // preprocessing configuration. The driver's file number is the unit's.
+  // preprocessing configuration. The driver's file number is the unit's. An editor-view unit reads
+  // its text through the view (`pp::Buffer`), so `text` is not set for it.
   void set_source(TuId tu, std::string path, std::string text, std::string object, std::string cwd = {},
                   pp::Config config = {}) {
     Bind bind(universe_);  // input values may hold handles, fingerprinted by their interners
     const pp::FileId file{tu.n};
+    const bool disk = config.view == pp::View::disk;
     db_.set<pp::SourceOf>(file, {std::move(path), std::move(cwd), std::move(config)});
-    db_.set<pp::FileText>(file, std::move(text));
+    if (disk) db_.set<pp::FileText>(file, std::move(text));
     db_.set<TuSourceIn>(tu, {std::move(object), tu.n, {}});
   }
   void set_program(ProgramId p, ProgramInputs in) {

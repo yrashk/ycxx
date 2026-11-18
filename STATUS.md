@@ -561,8 +561,8 @@ the same handler in-process.
   - `:connect`: connect; else take the start lock, connect again, then spawn a detached daemon
     (setsid, double fork, descriptors closed, log in the runtime directory) and wait for its
     readiness byte.
-  - `:server`: one thread per connection, with `compile`, `status`, `shutdown`; `lsp` is refused
-    (#99). It holds a lifetime lock with a 10 s wait and unlinks a stale socket. It exits after
+  - `:server`: one thread per connection, with `compile`, `status`, `shutdown` and `lsp` (an LSP
+    session, below). It holds a lifetime lock with a 10 s wait and unlinks a stale socket. It exits after
     30 minutes idle (`--idle-exit`, `YCXX_DAEMON_IDLE_EXIT`), or on shutdown or SIGTERM once
     requests finish. A hang-up stops the request before its next translation unit. A request
     whose configuration environment differs from the daemon's is refused, and the client runs it
@@ -602,11 +602,54 @@ the same handler in-process.
     requests as root keys and a front end on a pool, #107);
   - `progress` messages and `build_time` (#140);
   - the persistent cache handoff and the file table in it (#17);
-  - the LSP front (#99);
   - the β tests that need those: the cache across a restart (#17), every answer at 1 and P
     threads and requests that overlap (#139).
   - The engine counts in a report are the session's `Db::stats()` deltas, which are exact while
     requests run one at a time; per-request `Counters` come with #139.
+
+## The LSP front and the editor view (#99, 2026-11-18)
+
+`ycxx lsp [--root DIR]` is an editor's language server, per daemon design §6. It reaches the
+daemon of its scope (starting one) and sends `lsp`; the server runs in the daemon. From then on the
+editor's bytes go to the daemon as they are, one thread per direction, and the daemon's come back
+in `lsp` frames (`LspOut`), the last of which carries LSP's exit status (1 after `exit` without
+`shutdown`), which `ycxx lsp` exits with.
+
+- The editor view (§6.1–§6.3):
+  - `pp::Buffer(PathId) -> optional<text>`, an input at `editor` durability, provided as nothing
+    (`pp::no_buffer`) until the daemon sets it;
+  - `pp::View` (`disk`, `editor`) in `pp::Config`, part of its fingerprint, so an editor-view
+    region or session is never a disk-view one's;
+  - in the editor view `EngineHost` reads an open buffer first, then `FileContent`, and the unit's
+    own text is read that way too, never from `FileText`. Only the editor view fetches `Buffer`,
+    so a keystroke leaves every disk-view cell green by the durability shortcut.
+  - `compile::run` takes `Units{view, first}`: the editor view's units are numbered from 2^31,
+    one per document. `compile::sources_of` and `compile::check_one` (one unit of a served
+    request, `-fsyntax-only` with its preprocessing and language options).
+- `ycxx.lsp` (`src/lsp/`): `:json` (a JSON value, parser and printer, and a codec for aggregates
+  by reflection), and the session: `Content-Length` framing, `initialize`, `shutdown`, `exit`,
+  full-text `didOpen`/`didChange`, `didSave`, `didClose`, and `publishDiagnostics` for every open
+  document after each batch of changes (what arrived together is diagnosed once, in one call),
+  to the URI the editor opened, with UTF-16 columns. Requests before `initialize` get -32002,
+  after `shutdown` -32600. `lsp::parse_messages` reads the compiler's `path:line:col: error:` lines.
+- The daemon: a document is checked with the last served `compile` request that compiled it,
+  found by real path (else alone in its directory), in the editor view, under the engine lock.
+  One freshness batch and one setting of the buffers serve a batch of documents; each buffer is
+  set under the editor's name and its real path, and unchanged ones keep their value. Stopping
+  the daemon ends its LSP sessions. `ctl status` counts `diagnoses`.
+- Tests: `unit.lsp` (JSON, URIs, messages, two scripted sessions, framing); `unit.daemon`'s
+  `check_requests`; `unit.pipeline_incremental`'s `editor_view` (an unsaved header and the unit's
+  own buffer reach the editor view, a closed buffer falls back to the disk, and a build after a
+  keystroke executes and validates nothing); `daemon.lsp` (`tests/daemon/lsp.py`): editing (open,
+  an unsaved error at its position, a build after it equal to a cold compile of the disk with
+  nothing executed or validated, an unsaved header breaking its includer and closed again, a
+  save), a unit and header opened through a symbolic link, a build sent during a `didChange`
+  (the saved file's object, the buffer's diagnostics), 600-error answers crossing large edits,
+  the exit status, and `ctl shutdown` with a session open.
+- Not yet: `compile_commands.json` (#167); stopping a diagnosis on a newer edit,
+  `$/cancelRequest`, debouncing and interactive priority (#168); `buffers_in`, the disk-view
+  assertion and one view per session (#169); go-to-definition and diagnostics inside headers
+  (#170, after #34); open documents as eviction roots (#17).
 
 ## The L1 interpreter (#25, 2026-11-18)
 

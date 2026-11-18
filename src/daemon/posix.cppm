@@ -209,6 +209,21 @@ bool write_all(int fd, std::span<const std::byte> in) {
   return true;
 }
 
+// Reads what is readable, at most `out.size()` bytes, waiting for some; 0 at end of file or on an
+// error.
+std::size_t read_some(int fd, std::span<char> out) {
+  for (;;) {
+    ssize_t n = ::read(fd, out.data(), out.size());
+    if (n < 0 && errno == EINTR) continue;
+    return n > 0 ? static_cast<std::size_t>(n) : 0;
+  }
+}
+
+// Ends what this side sends on a socket: the peer reads end of file, and can still answer.
+void shutdown_write(int fd) { ::shutdown(fd, SHUT_WR); }
+// Ends a socket both ways: a thread blocked reading or writing it returns.
+void shutdown_both(int fd) { ::shutdown(fd, SHUT_RDWR); }
+
 // Empties what is readable now from a pipe used only to wake a poll.
 void drain(int fd) {
   char buf[64];
