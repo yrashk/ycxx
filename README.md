@@ -41,10 +41,15 @@ in [GitHub issues](https://github.com/yrashk/ycxx/issues) and the
     (`f<int>(x)`), overload resolution among templates and functions with partial ordering,
     two-phase name lookup with argument-dependent lookup at the end of the translation unit, class
     templates with member functions in and outside the class, constructors and destructors, and
-    instantiation on use, with Itanium names that match Clang's. Not yet: specializations, member
-    and alias templates, parameter packs, concepts, and a specialization used in two translation
-    units of one program (its definitions are not coalesced yet,
+    instantiation on use, variable templates, explicit and partial specializations, with Itanium
+    names that match Clang's. Not yet: member and alias templates, parameter packs, concepts, and
+    a specialization used in two translation units of one program (its definitions are not coalesced yet,
     [#124](https://github.com/yrashk/ycxx/issues/124)).
+  - Casts and type queries (2026-11-18): `static_cast`, functional and C-style casts between the
+    supported types, `sizeof` and `alignof` of non-class types, `decltype`, and `std::nullptr_t`
+    objects. `sizeof` of a class type is not yet supported
+    ([#194](https://github.com/yrashk/ycxx/issues/194)); other cast gaps are
+    [#199](https://github.com/yrashk/ycxx/issues/199).
   - Constant evaluation, by ycxx's own interpreter of its IR: `constexpr` and `consteval`
     functions and variables, `constinit`, `static_assert` and `if consteval`, with an error that
     says why an expression is not constant (overflow, an uninitialized read, a dangling pointer,
@@ -101,7 +106,8 @@ Nothing beyond the subset above compiles, so neither real programs nor libycxx d
 - the resident daemon: concurrent requests, and making it the default
   ([#84](https://github.com/yrashk/ycxx/issues/84));
 - classes and the object model ([#86](https://github.com/yrashk/ycxx/issues/86));
-- templates and overload resolution: function and class templates work, specializations are next
+- templates and overload resolution: function, class and variable templates and their
+  specializations work; parameter packs and concepts are next
   ([#88](https://github.com/yrashk/ycxx/issues/88));
 - including the standard headers: libycxx's compiler detection
   ([yrashk/libycxx#17](https://github.com/yrashk/libycxx/issues/17)), then `<cstdio>`

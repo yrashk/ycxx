@@ -97,7 +97,7 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
     const sema::EntityRec& r = world.entities.rec(e);
     if (r.kind == sema::EntityKind::class_ || r.kind == sema::EntityKind::data_member || r.kind == sema::EntityKind::type_alias ||
         r.kind == sema::EntityKind::enum_ || r.kind == sema::EntityKind::enumerator ||
-        r.kind == sema::EntityKind::function_template)
+        r.kind == sema::EntityKind::function_template || r.kind == sema::EntityKind::variable_template)
       return;  // no symbol: a template's specializations have them
     bool fn = r.kind != sema::EntityKind::variable;
     std::string id(ins.names.spelling(r.name));
@@ -165,6 +165,22 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
     declare(in->decl, ast::Loc{program.id(in->item), 0});  // errors in its name point at the template
     tu.functions.push_back({in->spec, in->decl, in->body.value, program.id(in->item), it.body_begin - it.begin,
                             program.this_type(in->decl)});
+  }
+  // The variable template specializations instantiated ([temp.inst]/7), with their constants.
+  for (const parse::Program::VarInstance& v : program.variable_instances()) {
+    if (!v.cell.diags.empty()) continue;
+    const ast::ItemSema& is = v.cell.value;
+    for (std::size_t i = 0; i < ins.seqs.size(is.decls); ++i) {
+      ast::DeclSema d = ins.seqs.at(is.decls, i);
+      if (d.entity != v.spec) continue;
+      ast::Loc at{program.id(v.item), 0};
+      declare(d, at);
+      ast::ConstId value = ast::ConstId::none;
+      if (is.tree != ast::NodeId::none && ins.ast.is<ast::DeclGroup>(is.tree))
+        for (ast::Child c : ins.ast.children(ins.ast.get<ast::DeclGroup>(is.tree).declarators))
+          if (auto dr = ins.ast.get<ast::Declarator>(c.id); dr.decl == i) value = dr.value;
+      if (d.flags & sema::decl_flag::definition) tu.variables.push_back({d.entity, d.type, value, at});
+    }
   }
   for (EntityId spec : program.required()) {
     ast::DeclSema d{};

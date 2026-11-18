@@ -176,7 +176,8 @@ void initializers_and_templates() {
         "requires requires (T t) { … } is no body");
   check(s.top(6).kind == ItemKind::function && names(s.top(6)) == v({"h"}), "requires (…) clause before a body");
   check(s.top(7).kind == ItemKind::declaration && names(s.top(7)) == v({"C"}), "concept");
-  check(s.top(8).template_depth == 2 && names(s.top(8)) == v({"w"}) &&
+  // `template<>` is no template-head ([temp.expl.spec]): one head, in an explicit specialization.
+  check(s.top(8).template_depth == 1 && s.top(8).specialization && names(s.top(8)) == v({"w"}) &&
             tokens(s, s.top(8).qualifier_begin, s.top(8).qualifier_end) == "V < int > ::",
         "member template of a specialization");
   check(names(s.top(9)) == v({"Q"}) && (s.top(9).names[0].flags & nf::template_), "template-head with (1 > 2)");
