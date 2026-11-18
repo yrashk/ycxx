@@ -26,6 +26,10 @@ in our own terms. Never copy sequences or commit their listings (DECISIONS §2.3
 
 ## While working
 
+- Write C++ the way fully implemented C++26 would have it (DECISIONS §3.2): concepts,
+  modules, reflection instead of generators and boilerplate, contracts, coroutines and
+  `std::execution`, `constexpr`. A bootstrap-compiler limitation gets the smallest workaround,
+  marked `// BOOTSTRAP: <feature>: <reason>` and listed in STATUS.
 - Keep the issue body current: done, next, blocked. Comment on decisions and surprises.
 - Small commits, reviewed P0–P2 (DECISIONS §5). Cite draft clauses by stable name (`[temp.deduct]`).
 - A design question beyond your issue goes to a new issue labelled `status:needs-decision`,

@@ -11,6 +11,11 @@ What is true of the code today. Work in progress and its owners are tracked in
 - No compiler code yet. The query engine design (`docs/design/query-engine.md`) is the first
   piece of work. Everything else waits for it.
 
+## Bootstrap workarounds
+
+Places where ycxx's sources avoid or work around a C++26 feature because GCC 16 lacks it or
+miscompiles it (DECISIONS §3.2). Each is removed once ycxx compiles itself. None yet.
+
 ## Milestones
 
 | | Milestone | Done when |

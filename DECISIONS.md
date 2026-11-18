@@ -66,11 +66,43 @@ reasoning; do not leave decisions only in issue threads.
 1. **C++26 with libycxx.** ycxx is written in C++26 and uses libycxx (submodule
    `deps/libycxx`) as its standard library, with `import std;`. libycxx's preprocessor policy
    (`deps/libycxx/DECISIONS.md` §1) applies to ycxx's own sources too.
-2. **Bootstrap compiler:** Clang 23 (the version libycxx pins). GCC 16 must keep working as a
-   second bootstrap compiler, so that no single host compiler's bugs shape the code.
-3. **Self-hosting** is a milestone, not a starting assumption: ycxx compiles libycxx and passes
+2. **Modern C++, as far as the bootstrap compiler allows.** ycxx exercises C++20–26 as heavily
+   as the bootstrap compiler supports. The test is: *how would this be written in fully
+   implemented C++26?* Write it that way, unless the bootstrap compiler cannot.
+   - **Concepts and constrained templates,** not SFINAE, tag dispatch or `enable_if`.
+   - **Modules** for ycxx's own code; no project headers.
+   - **Reflection (P2996)** in place of code generators, X-macros and hand-written boilerplate:
+     AST and IR node definitions, visitors, hashing and equality of query keys, serialization
+     of the persistent cache, diagnostic tables, option parsing.
+   - **Contracts (P2900)** for preconditions, postconditions and invariants, instead of
+     assertion functions.
+   - **Coroutines and `std::execution`** (senders and receivers) for the query engine's futures
+     and scheduling.
+   - **`constexpr`/`consteval`** for tables and anything computable at compile time, including
+     constexpr exceptions.
+   - Ranges and views, `std::expected`, deducing `this`, pack indexing, structured-binding
+     packs, `#embed`, and whatever else from C++20–26 makes the code clearer.
+
+   Where the bootstrap compiler lacks a feature or miscompiles it, the workaround is the
+   smallest one that works. It is marked `// BOOTSTRAP: <feature>: <reason>` and listed in
+   STATUS ("Bootstrap workarounds"). Each is removed once ycxx compiles itself. Avoiding a
+   feature merely because it is new is not allowed.
+3. **Bootstrap compiler: GCC 16.2 with `-freflection -fcontracts`.** It supports more of C++26
+   than Clang 23, which has neither reflection nor contracts (`deps/libycxx/STATUS.md`). GCC
+   16.2 runs on both development hosts: macOS arm64 and Linux x86_64. Clang 23 is not a
+   bootstrap compiler. It stays a black-box oracle (§2.3) and the default compiler of the
+   *programs* in differential tests.
+   - Either GCC or Clang is an acceptable bootstrap compiler. The one that allows the most of
+     C++26 is chosen, and that is GCC 16 today. Supporting both would limit ycxx to their
+     intersection.
+   - If Clang overtakes GCC (reflection and contracts land, and its support is better
+     overall), switch the bootstrap compiler with a DECISIONS change. Do not add dual support.
+4. **Self-hosting** is a milestone, not a starting assumption: ycxx compiles libycxx and passes
    its suite first, then compiles itself, and the stage-2 and stage-3 binaries must be identical.
-4. **libycxx learns about ycxx through its single detection point** (`config.hpp`). Any builtin
+   From then on ycxx is its own bootstrap compiler, and its sources may use all of C++26,
+   including what GCC lacks. **Open until M8:** whether a GCC-buildable stage 0 is kept, so
+   that ycxx can be bootstrapped from scratch.
+5. **libycxx learns about ycxx through its single detection point** (`config.hpp`). Any builtin
    libycxx needs from ycxx comes from libycxx's existing list of probes. If a new one is needed,
    it is added to libycxx upstream first.
 
