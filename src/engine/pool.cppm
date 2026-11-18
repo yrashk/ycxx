@@ -85,12 +85,25 @@ public:
   // scope it sees. Every work item runs entered, the `pool_scheduler`'s and the
   // `parallel_scheduler` backend's too, which is harmless. The thread that starts a request runs
   // query code as well (`Request::begin`, cheap kinds), and must be bound by its owner.
+  // `exit` undoes `enter` on a worker when the scope is released or replaced; it is copied when
+  // entered, so it runs even after the scope's owner is gone.
   struct Scope {
     void* ctx = nullptr;
     void (*enter)(void*) noexcept = nullptr;
+    void (*exit)() noexcept = nullptr;
   };
-  // Precondition: nothing is queued or running. One scope at a time: a pool serves one session.
-  void set_scope(const Scope* s) noexcept { scope_.store(s, std::memory_order_release); }
+  // One scope at a time: a pool serves one session. Claims the pool for `s`, which must be free.
+  // Precondition: nothing is queued or running.
+  void claim_scope(const Scope* s) noexcept {
+    const Scope* none = nullptr;
+    const bool free = scope_.compare_exchange_strong(none, s, std::memory_order_acq_rel);
+    contract_assert(free);  // another session holds this pool
+  }
+  // Releases the pool if `s` holds it. Precondition: nothing is queued or running.
+  void release_scope(const Scope* s) noexcept {
+    const Scope* held = s;
+    scope_.compare_exchange_strong(held, nullptr, std::memory_order_acq_rel);
+  }
 
 private:
   class Deque;
@@ -410,6 +423,7 @@ void Pool::loop(unsigned index) noexcept {
   current = {this, index};
   Worker& self = *workers_[index];
   const Scope* entered = nullptr;
+  void (*exit_entered)() noexcept = nullptr;
   unsigned idle = 0;
   while (true) {
     if (const Work w = find(self)) {
@@ -426,7 +440,12 @@ void Pool::loop(unsigned index) noexcept {
         continue;
       }
       if (const Scope* sc = scope_.load(std::memory_order_acquire); sc != entered) {
-        if (sc) sc->enter(sc->ctx);
+        if (exit_entered) exit_entered();
+        exit_entered = nullptr;
+        if (sc) {
+          sc->enter(sc->ctx);
+          exit_entered = sc->exit;
+        }
         entered = sc;
       }
       w();

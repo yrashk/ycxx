@@ -26,13 +26,14 @@ class Session {
   // A session whose queries run on `pool`'s workers, each bound to this session's universe (#137).
   // The pool serves this session only, for as long as it lives.
   explicit Session(engine::Pool& pool) : db_(pool), pool_(&pool) {
-    scope_ = {this, [](void* self) noexcept { bind_thread(&static_cast<Session*>(self)->universe_); }};
-    pool.set_scope(&scope_);
+    scope_ = {this, [](void* self) noexcept { bind_thread(&static_cast<Session*>(self)->universe_); },
+              [] noexcept { bind_thread(nullptr); }};
+    pool.claim_scope(&scope_);
     init();
   }
   Session() { init(); }
   ~Session() {
-    if (pool_) pool_->set_scope(nullptr);
+    if (pool_) pool_->release_scope(&scope_);
   }
 
  private:

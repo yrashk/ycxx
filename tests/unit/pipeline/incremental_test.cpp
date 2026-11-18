@@ -216,6 +216,14 @@ void pooled() {
     build(s, v2);
     check(s.get<pl::Link>(program).image == cold(v2), "pooled, after an edit");
   }
+  // One pool, one session after another: the workers leave the first session's universe and
+  // enter the second's.
+  engine::Pool pool(4);
+  for (const std::string* text : {&v3, &v2, &v3}) {
+    pl::Session s(pool);
+    build(s, *text);
+    check(s.get<pl::Link>(program).image == cold(*text), "a pool serving one session after another");
+  }
 }
 
 }  // namespace

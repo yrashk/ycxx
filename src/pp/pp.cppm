@@ -36,7 +36,7 @@ export namespace ycxx::pp {
 // The process keeps one session per configuration, shared by every thread under its `mutex`.
 // `session()` is the one configured last (single-threaded callers and tests).
 Session& session();
-// Selects a new session for `cfg`, reading the disk.
+// The session of `cfg`, reading the disk outside `Pp`.
 Session& configure(Config cfg);
 // The session of `cfg`, reading through `host` outside `Pp` (the daemon's file table): kept with
 // its region cache and spellings, starting a new generation of file contents (the traces verify
@@ -242,15 +242,7 @@ Session& session() {
   return *current;
 }
 
-Session& configure(Config cfg) {
-  Process& p = process();
-  std::lock_guard g(p.m);
-  auto& c = p.slot(cfg);
-  c.session = std::make_unique<Session>(p.disk, std::move(cfg));
-  c.host = &p.disk;
-  p.current = c.session.get();
-  return *c.session;
-}
+Session& configure(Config cfg) { return configure(std::move(cfg), process().disk); }
 
 Session& configure(Config cfg, Host& host) {
   Process& p = process();
@@ -297,7 +289,11 @@ Preprocessed preprocess(Session& s, std::string_view text, std::string_view path
   return to_region(s, flatten(s, t));
 }
 
-Preprocessed preprocess(std::string_view text, std::string_view path) { return preprocess(session(), text, path); }
+Preprocessed preprocess(std::string_view text, std::string_view path) {
+  Session& s = session();
+  std::lock_guard g(s.mutex);
+  return preprocess(s, text, path);
+}
 
 Message message(Session& s, FileId file, std::string_view presumed, const Diag& d) {
   const Files::Content* c = s.files.content(file);
