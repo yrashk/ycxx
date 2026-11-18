@@ -2,18 +2,12 @@
 // fingerprint, debug information, the evaluator hook, and the text form's round trip.
 import std;
 import ycxx.ir;
+import ycxx.unit;
 
 using namespace ycxx::ir;
+using ycxx::unit::check;
 
 namespace {
-
-int failures = 0;
-
-void check(bool ok, std::string_view what, std::source_location at = std::source_location::current()) {
-  if (ok) return;
-  ++failures;
-  std::println(std::cerr, "{}:{}: FAILED: {}", at.file_name(), at.line(), what);
-}
 
 NamedFunction parse_one(std::string_view text, std::source_location at = std::source_location::current()) {
   auto m = parse(text);
@@ -461,7 +455,5 @@ int main() {
   builder_and_debug();
   errors();
   evaluator_hook();
-  if (failures) std::println(std::cerr, "ir: {} check(s) failed", failures);
-  else std::println("ir: all checks passed");
-  return failures ? 1 : 0;
+  return ycxx::unit::result("ir");
 }

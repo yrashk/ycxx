@@ -1,6 +1,9 @@
 # One binary, many fronts (DECISIONS §4.7): the daemon and its clients are modules of one
 # executable. src/driver picks the front from the command line; src/daemon and src/client hold
 # the fronts themselves.
+# Libraries, lowest first.
+add_subdirectory(hash)
+add_subdirectory(engine)
 add_subdirectory(ir)
 
 configure_file(version.cppm.in ${CMAKE_CURRENT_BINARY_DIR}/version.cppm @ONLY)

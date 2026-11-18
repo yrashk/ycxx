@@ -17,8 +17,8 @@ export enum class ConstId : std::uint32_t {};
 // A block-scope variable, by its `LocalRec` index (AST design §7.1); used by function_debug only.
 export enum class LocalId : std::uint32_t {};
 
-// BOOTSTRAP: modules: comparisons in src/ir are defaulted members, not hidden friends. GCC 16.2
-// crashes in an importer that uses a defaulted friend operator== of an exported class (STATUS).
+// BOOTSTRAP: modules: comparisons in src/ir are defaulted members, not hidden friends: a defaulted
+// friend comparison in an exported class ICEs GCC 16.2 in the importer (STATUS).
 export struct Loc {
   std::uint32_t item = 0;    // ItemId
   std::uint32_t offset = 0;  // token offset inside the item

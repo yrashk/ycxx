@@ -24,7 +24,6 @@ endif()
 # Our options are YCXXC_*: libycxx owns the YCXX_* cache variables.
 option(YCXXC_WERROR "Build ycxx with -Werror" ON)
 option(YCXXC_BOOTSTRAP_SMOKE "Build the bootstrap-compiler smoke test (tests/bootstrap)" ON)
-option(YCXXC_UNIT_TESTS "Build the unit tests (tests/unit)" ON)
 
 # libycxx: the static library and the std modules. Its own tests and install rules are not ours.
 set(YCXX_MODULES ON CACHE BOOL "" FORCE)
@@ -50,12 +49,8 @@ set(CMAKE_CXX_SCAN_FOR_MODULES ON)
 include(cmake/ycxx-policy.cmake)
 
 add_subdirectory(src)
-if(YCXXC_BOOTSTRAP_SMOKE OR YCXXC_UNIT_TESTS)
-  enable_testing()
-endif()
+enable_testing()
 if(YCXXC_BOOTSTRAP_SMOKE)
   add_subdirectory(tests/bootstrap)
 endif()
-if(YCXXC_UNIT_TESTS)
-  add_subdirectory(tests/unit)
-endif()
+add_subdirectory(tests/unit)
