@@ -1,8 +1,8 @@
 // Linkage names (Itanium C++ ABI §5.1, "External Names"), as the object file spells them: Mach-O
 // prefixes every C-level name with `_`.
 //
-// α subset (#39): entities of the global namespace whose types are fundamental types, pointers and
-// cv-qualifiers. `main`, functions with C language linkage and variables are not mangled
+// α subset (#39): entities of the global namespace whose types are fundamental types, pointers,
+// cv-qualifiers and global-namespace classes (δ, #86). `main`, functions with C language linkage and variables are not mangled
 // ([dcl.link], Itanium §5.1.2: a global-namespace variable's name is its identifier); other
 // functions are `_Z <source-name> <bare-function-type>`, with substitutions for repeated
 // qualified and pointer types (§5.1.10).
@@ -16,15 +16,19 @@ export namespace ycxx::pipeline {
 namespace ast = ycxx::ast;
 
 // Fails, naming the type, on what the α subset does not mangle yet.
+// How a class is named: its identifier (the global namespace only, so far).
+using ClassNames = std::function<std::string(ast::EntityId)>;
+
 std::expected<std::string, std::string> mangled_function(const ast::Interners& in, std::string_view name,
-                                                         ast::QualType type);
+                                                         ast::QualType type, const ClassNames& classes = {});
 
 // <substitution> for the candidate at `index`: `S_`, then `S0_` … `SZ_`, `S10_` … (§5.1.10).
 std::string substitution(std::size_t index);
 
 // The symbol of an entity: `_` and the mangled name or the identifier.
 std::expected<std::string, std::string> symbol_name(const ast::Interners& in, std::string_view name, ast::QualType type,
-                                                    bool is_function, ast::LangLinkage lang);
+                                                    bool is_function, ast::LangLinkage lang,
+                                                    const ClassNames& classes = {});
 
 }  // namespace ycxx::pipeline
 
@@ -74,7 +78,7 @@ std::string substitution(std::size_t index) {
 
 class Mangler {
  public:
-  explicit Mangler(const ast::Interners& in) : in_(in) {}
+  Mangler(const ast::Interners& in, const ClassNames& classes) : in_(in), classes_(classes) {}
 
   // <type> (§5.1.5), recording substitution candidates as they complete.
   std::expected<std::string, std::string> type(ast::QualType q) {
@@ -98,8 +102,16 @@ class Mangler {
         if (!p) return p;
         inner = "P" + *p;
         candidates_.push_back(full_key(bare));
+      } else if (in_.types.is<ast::TClass>(in_.types.canon(bare))) {
+        // <class-enum-type> ::= <name>: a global-namespace class is its <source-name>, a
+        // substitution candidate (§5.1.5.3, §5.1.10).
+        if (auto s = find(full_key(bare))) return qualify(qualifiers, *s, q);
+        std::string n = classes_ ? classes_(in_.types.get<ast::TClass>(in_.types.canon(bare)).entity) : "";
+        if (n.empty()) return std::unexpected("a class whose name is unknown");
+        inner = std::format("{}{}", n.size(), n);
+        candidates_.push_back(full_key(bare));
       } else {
-        return std::unexpected("a parameter type other than a fundamental or pointer type");
+        return std::unexpected("a parameter type other than a fundamental, pointer or class type");
       }
     }
     return qualify(qualifiers, inner, q);
@@ -121,16 +133,17 @@ class Mangler {
   }
 
   const ast::Interners& in_;
+  const ClassNames& classes_;
   std::vector<std::uint32_t> candidates_;  // canonical types, in order of completion
 };
 
 std::expected<std::string, std::string> mangled_function(const ast::Interners& in, std::string_view name,
-                                                         ast::QualType type) {
+                                                         ast::QualType type, const ClassNames& classes) {
   ast::QualType c = in.types.canon(type);
   if (!in.types.is<ast::TFunction>(c)) return std::unexpected("not a function type");
   auto f = in.types.get<ast::TFunction>(c);
   std::string out = std::format("_Z{}{}", name.size(), name);
-  Mangler m(in);
+  Mangler m(in, classes);
   auto params = in.seqs.elements(f.params);
   if (params.empty() && !f.variadic) out += "v";
   for (ast::QualType p : params) {
@@ -143,9 +156,10 @@ std::expected<std::string, std::string> mangled_function(const ast::Interners& i
 }
 
 std::expected<std::string, std::string> symbol_name(const ast::Interners& in, std::string_view name, ast::QualType type,
-                                                    bool is_function, ast::LangLinkage lang) {
+                                                    bool is_function, ast::LangLinkage lang,
+                                                    const ClassNames& classes) {
   if (!is_function || name == "main" || lang == ast::LangLinkage::c) return "_" + std::string(name);
-  auto m = mangled_function(in, name, type);
+  auto m = mangled_function(in, name, type, classes);
   if (!m) return m;
   return "_" + *m;
 }

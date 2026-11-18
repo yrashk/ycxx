@@ -91,6 +91,7 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
     EntityId e = d.entity;
     if (e == EntityId::none || !seen.insert(std::to_underlying(e)).second) return;
     const sema::EntityRec& r = world.entities.rec(e);
+    if (r.kind != sema::EntityKind::function && r.kind != sema::EntityKind::variable) return;  // classes have no symbol
     bool fn = r.kind == sema::EntityKind::function;
     std::string id(ins.names.spelling(r.name));
     if (fn && id == "main") tu.main = e;
@@ -99,7 +100,9 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
   for (std::uint32_t k = 0; k < items.items.size(); ++k) {
     const items::Item& it = items.items[k];
     if (!program.in_global_scope(k)) continue;
-    if (it.kind != items::ItemKind::declaration && it.kind != items::ItemKind::function) continue;
+    if (it.kind != items::ItemKind::declaration && it.kind != items::ItemKind::function &&
+        it.kind != items::ItemKind::class_def)  // its declarators: `struct S { … } s;`
+      continue;
     const ast::ItemSema& is = program.item_sema(k).value;
     std::vector<ast::DeclSema> decls = ins.seqs.elements(is.decls);
     // The declarators, by declaration ordinal: their constants and item-relative locations (the

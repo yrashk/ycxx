@@ -274,6 +274,14 @@ struct [[=engine::cheap]] LayoutStep {
   using Value = ir::SubObject;
   static Value run(engine::SyncCtx& cx, LayoutStepKey k);
 };
+// A class's layout: its size and alignment, and its non-static data members' offsets and types.
+struct ClassLayout {
+  std::uint64_t size = 0;
+  std::uint32_t align = 1;
+  std::vector<ir::SubObject> fields;
+};
+std::optional<ClassLayout> class_layout(engine::SyncCtx& cx, QualType c);
+
 struct ConstLayout {
   std::int64_t bits = 0;
   std::optional<EntityId> base;    // an address constant
@@ -481,7 +489,32 @@ ir::TypeLayout LayoutType::run(engine::SyncCtx& cx, QualType q) {
     return {array, e.size * n, e.align, false, {}};
   }
   if (in.types.is<ast::TFunction>(c)) return {function, 0, 1, false, {}};
+  if (auto r = class_layout(cx, c)) return {record, r->size, r->align, false, {}};
   return {};
+}
+
+// A class's layout (Itanium C++ ABI §2.4, [class.mem]): each non-static data member at the next
+// offset its alignment allows, in declaration order; the size rounded up to the alignment; an
+// empty class has size 1. Its members are what sema's class table says (`class_def`), when units
+// come from source; none otherwise.
+std::optional<ClassLayout> class_layout(engine::SyncCtx& cx, QualType c) {
+  ast::Interners& in = *universe().in;
+  const sema::World* w = universe().world;
+  if (!w || !in.types.is<ast::TClass>(c)) return std::nullopt;
+  const sema::ClassRec* r = w->classes.find(in.types.get<ast::TClass>(c).entity);
+  if (!r || !r->defined) return std::nullopt;
+  ClassLayout out;
+  std::uint64_t at = 0;
+  for (const sema::FieldRec& f : r->fields) {
+    QualType t = in.canonical(f.type);
+    ir::TypeLayout m = cx.fetch<LayoutType>(t);
+    at = (at + m.align - 1) / m.align * m.align;
+    out.fields.push_back({at, t});
+    at += m.size;
+    out.align = std::max(out.align, m.align);
+  }
+  out.size = at == 0 ? 1 : (at + out.align - 1) / out.align * out.align;
+  return out;
 }
 
 ir::SubObject LayoutStep::run(engine::SyncCtx& cx, LayoutStepKey k) {
@@ -491,7 +524,9 @@ ir::SubObject LayoutStep::run(engine::SyncCtx& cx, LayoutStepKey k) {
     QualType e = in.canonical(in.types.get<ast::TArray>(c).elem);
     return {k.step.index * cx.fetch<LayoutType>(e).size, e};
   }
-  return {};  // classes come with #33's layout
+  if (k.step.step == ir::Step::field)
+    if (auto r = class_layout(cx, c); r && k.step.index < r->fields.size()) return r->fields[k.step.index];
+  return {};
 }
 
 ConstLayout LayoutConstant::run(engine::SyncCtx&, ConstId c) {
@@ -639,25 +674,42 @@ struct Bytes {
   std::vector<aarch64::DataReloc> relocs;
 };
 
-std::expected<Bytes, std::string> initial_bytes(const ast::Interners& in, const QueryLayout& layout, QualType type,
-                                                ConstId init) {
+// Writes the value `init` of an object of `type` at `offset` in `out`.
+std::expected<void, std::string> place_value(const ast::Interners& in, const QueryLayout& layout, QualType type,
+                                             ConstId init, std::uint64_t offset, Bytes& out) {
   ir::TypeLayout l = layout.type(type);
-  Bytes out;
-  out.bytes.assign(l.size, 0);
-  if (init == ConstId::none) return out;
   if (l.kind == ir::TypeKind::pointer) {
     ir::ConstValue v = layout.constant(init);
-    if (v.base) out.relocs.push_back({0, *v.base, v.bits});
+    if (v.base) out.relocs.push_back({std::uint32_t(offset), *v.base, v.bits});
     else if (v.bits != 0) return std::unexpected("a pointer initialized with an integer other than zero");
-    return out;
+    return {};
   }
   if (l.kind == ir::TypeKind::integer || l.kind == ir::TypeKind::boolean) {
     if (!in.values.is<ast::VInt>(init)) return std::unexpected("an integer variable's initializer is not an integer");
     std::uint64_t v = in.values.get<ast::VInt>(init).bits.lo;
-    for (std::uint64_t i = 0; i < l.size; ++i) out.bytes[i] = std::uint8_t(v >> (8 * i));
-    return out;
+    for (std::uint64_t i = 0; i < l.size; ++i) out.bytes[offset + i] = std::uint8_t(v >> (8 * i));
+    return {};
+  }
+  if ((l.kind == ir::TypeKind::array || l.kind == ir::TypeKind::record) && in.values.is<ast::VAggregate>(init)) {
+    // [dcl.init.aggr]: each element at its offset.
+    auto elems = in.seqs.elements(in.values.get<ast::VAggregate>(init).elems);
+    ir::Step step = l.kind == ir::TypeKind::array ? ir::Step::elem : ir::Step::field;
+    for (std::uint32_t i = 0; i < elems.size(); ++i) {
+      ir::SubObject s = layout.step(type, {step, i});
+      if (auto r = place_value(in, layout, s.type, elems[i], offset + s.offset, out); !r) return r;
+    }
+    return {};
   }
   return std::unexpected("a variable of this type");
+}
+
+std::expected<Bytes, std::string> initial_bytes(const ast::Interners& in, const QueryLayout& layout, QualType type,
+                                                ConstId init) {
+  Bytes out;
+  out.bytes.assign(layout.type(type).size, 0);
+  if (init == ConstId::none) return out;
+  if (auto r = place_value(in, layout, type, init, 0, out); !r) return std::unexpected(r.error());
+  return out;
 }
 
 // Functions, variables, string literals and symbols in definition order (§A5.3): functions and
@@ -745,7 +797,10 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
   }
   for (const Entity& e : tu.entities) {
     if (!used.contains(ir::raw(e.id))) continue;
-    auto name = symbol_name(in, e.name, e.type, e.is_function, e.lang);
+    auto name = symbol_name(in, e.name, e.type, e.is_function, e.lang, [](EntityId c) {
+      const sema::World* w = universe().world;
+      return w ? std::string(w->ins.names.spelling(w->entities.rec(c).name)) : std::string();
+    });
     if (!name) {
       errors.push_back({e.at, std::format("the name of '{}': {} is not supported yet", e.name, name.error())});
       continue;

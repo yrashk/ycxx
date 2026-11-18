@@ -33,7 +33,14 @@
 // The emission order is the tree's evaluation order; `ir::Builder::finish` puts the body in
 // canonical order (§2.4), so the fingerprint does not depend on it.
 //
-// α slice (#39): scalars, pointers and string literals, no classes, cleanups or exceptions.
+// - A class or array object is never a value: it is initialized element by element through
+//   `ptr_member` (an `InitList`), or from another object by `copy` (a class glvalue converted to
+//   a prvalue, the trivial copy constructor and copy assignment, [class.copy.ctor]). An object
+//   whose initializer value-initializes some element is allocated `zero`, and those elements are
+//   left as they are ([dcl.init.general]).
+//
+// α slice (#39) and δ's aggregates (#86): scalars, pointers, string literals and aggregates; no
+// cleanups or exceptions, and no class parameters or results yet.
 // Calls are `call`, never `invoke`: with no destructors to run, an exception leaves the function
 // with nothing to do. A call site will choose `invoke` once a scope has cleanups (§3.7.3); every
 // call already goes through `call_fn` for that reason.
@@ -210,9 +217,9 @@ class Gen {
 
   // ------------------------------------------------------------------ objects and scopes
 
-  Place begin_object(ast::QualType type, ir::Init init) {
+  Place begin_object(ast::QualType type, ir::Init init, ir::Storage storage = ir::Storage::automatic) {
     ir::Ty r[] = {vty(facts_.pointer_to(type))};
-    std::uint64_t imms[] = {word(ty(type)), std::to_underlying(ir::Storage::automatic), std::to_underlying(init)};
+    std::uint64_t imms[] = {word(ty(type)), std::to_underlying(storage), std::to_underlying(init)};
     ir::NodeId n = stateful(ir::Op::alloc, r, {}, imms);
     return {b_.result(n, 1), type};
   }
@@ -245,7 +252,11 @@ class Gen {
     ast::QualType fty = fn_.decl.type;
     auto params = in_.seqs.elements(fn_.decl.params);
     std::vector<ir::Ty> entry{ir::Ty::state()};
-    for (const ast::ParamSema& p : params) entry.push_back(vty(p.type));
+    for (const ast::ParamSema& p : params) {
+      if (cls(p.type) == TypeClass::record) throw Unsupported{"a parameter of class type"};
+      entry.push_back(vty(p.type));
+    }
+    if (cls(facts_.return_type(fty)) == TypeClass::record) throw Unsupported{"a function returning a class"};
     enter(b_.add_block(entry));
     loc_ = fn_.body_offset;
     push_scope();
@@ -264,6 +275,9 @@ class Gen {
     for (uint32_t i = 0; fn_.thunk && i < slots_.size(); ++i) {
       if (slots_[i]) continue;
       ast::QualType t = in_.seqs.at(fn_.body.locals, i).type;
+      // A class or array local is never usable in a constant expression: naming it is
+      // unsupported, so it needs no object.
+      if (cls(t) == TypeClass::record || cls(t) == TypeClass::array) continue;
       Place p = begin_object(t, ir::Init::indeterminate);
       if (i < fn_.local_values.size() && fn_.local_values[i]) {
         store(p, constant(t, *fn_.local_values[i]));
@@ -404,18 +418,93 @@ class Gen {
     ast::LocalRec rec = in_.seqs.at(fn_.body.locals, v.local);
     if (rec.entity != ast::EntityId::none) unsupported(a, "with static or thread storage duration");
     bool has_init = v.init.id != NodeId::none;
-    Place p = begin_object(rec.type, has_init ? ir::Init::indeterminate : ir::Init::erroneous);
+    bool zeroed = has_init && value_initializes(child(a, v.init));
+    bool partial = has_init && !zeroed && default_initializes(child(a, v.init));
+    Place p = begin_object(rec.type, zeroed ? ir::Init::zero
+                                     : has_init && !partial ? ir::Init::indeterminate
+                                                            : ir::Init::erroneous);
     debug_.vars.push_back({ir::LocalId(v.local), {last_node()}});
     // The name is in scope in its own initializer ([basic.scope.pdecl]); reading it there reads an
     // object whose lifetime has not begun.
     slots_[v.local] = p;
-    if (has_init) {
-      At init = child(a, v.init);
-      if (cls(rec.type) == TypeClass::array || cls(rec.type) == TypeClass::other)
-        unsupported(a, "of aggregate type");
-      store(p, rvalue(init));
-    }
+    if (has_init) initialize(p, child(a, v.init), zeroed);
     start_lifetime(p);
+  }
+
+  // Whether initializer `e` value-initializes some element (`ValueInit`), so the object is
+  // allocated zero.
+  bool value_initializes(At e) {
+    if (is<ast::ValueInit>(e)) return true;
+    if (is<ast::Paren>(e)) return value_initializes(child(e, get<ast::Paren>(e).operand));
+    if (!is<ast::InitList>(e)) return false;
+    for (ast::Child c : ast_.children(get<ast::InitList>(e).elems))
+      if (value_initializes(child(e, c))) return true;
+    return false;
+  }
+
+  // Whether initializer `e` leaves some element default-initialized (`DefaultInit`): its value
+  // is erroneous ([basic.indet]).
+  bool default_initializes(At e) {
+    if (is<ast::DefaultInit>(e)) return true;
+    if (!is<ast::InitList>(e)) return false;
+    for (ast::Child c : ast_.children(get<ast::InitList>(e).elems))
+      if (default_initializes(child(e, c))) return true;
+    return false;
+  }
+
+  // The subobject `index` of the object `p` points to: an array element or a non-static data
+  // member of type `t` ([intro.object]).
+  Place subobject(const Place& p, ir::Step step, uint32_t index, ast::QualType t) {
+    std::uint64_t path[] = {1, ir::encode({step, index})};
+    return {pure(ir::Op::ptr_member, facts_.pointer_to(t), {p.ptr}, {word(ty(t)), path[0], path[1]}), t};
+  }
+
+  // Initializes the object at `p` from the prvalue `e` ([dcl.init]). In a `zeroed` object, a
+  // value-initialized element is already zero.
+  void initialize(const Place& p, At e, bool zeroed) {
+    Position here(loc_, e.offset);
+    if (is<ast::Paren>(e)) return initialize(p, child(e, get<ast::Paren>(e).operand), zeroed);
+    if (is<ast::InitList>(e)) {
+      bool array = cls(p.type) == TypeClass::array;
+      uint32_t i = 0;
+      for (ast::Child c : ast_.children(get<ast::InitList>(e).elems)) {
+        At x = child(e, c);
+        initialize(subobject(p, array ? ir::Step::elem : ir::Step::field, i++, info(x).type), x, zeroed);
+      }
+      return;
+    }
+    if (is<ast::DefaultInit>(e)) return;
+    if (is<ast::ValueInit>(e)) {
+      if (zeroed) return;
+      if (cls(p.type) == TypeClass::record || cls(p.type) == TypeClass::array) unsupported(e, "of an aggregate");
+      store(p, zero(p.type));
+      return;
+    }
+    if (cls(p.type) == TypeClass::record) {
+      copy(p, class_source(e));
+      return;
+    }
+    store(p, rvalue(e));
+  }
+
+  // The object a class prvalue is copied from: a glvalue of the class converted to a prvalue
+  // ([conv.lval]), whose copy constructor is trivial.
+  Place class_source(At e) {
+    while (is<ast::Paren>(e)) e = child(e, get<ast::Paren>(e).operand);
+    if (is<ast::ImplicitConversion>(e)) {
+      auto c = get<ast::ImplicitConversion>(e);
+      if (c.conversion == ast::ConversionKind::lvalue_to_rvalue) return lvalue(child(e, c.operand));
+    }
+    unsupported(e, "as a class prvalue");
+  }
+  void copy(const Place& dst, const Place& src) {
+    ValueId ops[] = {dst.ptr, src.ptr};
+    std::uint64_t imms[] = {word(ty(dst.type))};
+    stateful(ir::Op::copy, {}, ops, imms);
+  }
+  ValueId zero(ast::QualType t) {
+    if (cls(t) == TypeClass::pointer) return constant(t, facts_.null_constant(t));
+    return int_constant(t, 0);
   }
 
   void if_(At a) {
@@ -569,6 +658,7 @@ class Gen {
     if (is<ast::OrderedBinary>(a)) return ordered(a);
     if (is<ast::Call>(a)) return call(a);
     if (is<ast::Conditional>(a)) return conditional(a, false).value;
+    if (is<ast::ValueInit>(a) && cls(t) != TypeClass::record && cls(t) != TypeClass::array) return zero(t);
     unsupported(a);
   }
 
@@ -851,6 +941,13 @@ class Gen {
       ValueId p = base_is_ptr ? x : y, i = base_is_ptr ? y : x;
       return {pure(ir::Op::ptr_add, facts_.pointer_to(t), {p, i}, {word(ty(t))}), t};
     }
+    if (is<ast::Member>(a)) {
+      // [expr.ref]: the member subobject of the object, or of the object the pointer points to.
+      auto m = get<ast::Member>(a);
+      At o = child(a, m.object);
+      ValueId base = m.arrow ? rvalue(o) : lvalue(o).ptr;
+      return subobject({base, info(o).type}, ir::Step::field, m.field, t);
+    }
     if (is<ast::Assign>(a)) return assign(a);
     if (is<ast::Conditional>(a)) return conditional(a, true).place;
     if (is<ast::OrderedBinary>(a) && get<ast::OrderedBinary>(a).op == ast::OrderedOp::comma) {
@@ -866,6 +963,7 @@ class Gen {
   // promoted type); the left is loaded once, converted to it, and the result converted back.
   Place assign(At a) {
     auto s = get<ast::Assign>(a);
+    if (cls(s.info.type) == TypeClass::record) return assign_class(a);
     ValueId v = rvalue(child(a, s.rhs));
     At rhs = child(a, s.rhs);
     Place p = lvalue(child(a, s.lhs));
@@ -898,6 +996,37 @@ class Gen {
       if (!same_type(ct, p.type)) r = pure(ir::Op::iconv, p.type, {r});
     }
     store(p, r);
+    return p;
+  }
+
+  // Assignment of a class object by its trivial copy assignment operator ([class.copy.assign]):
+  // from a glvalue, a copy of its object; from a braced list, a copy of the temporary the list
+  // initializes ([expr.assign]/9), which ends with the full-expression ([class.temporary]).
+  Place assign_class(At a) {
+    auto s = get<ast::Assign>(a);
+    At rhs = child(a, s.rhs);
+    ast::QualType t = s.computation;
+    std::optional<Place> temp;
+    Place src;
+    if (is<ast::InitList>(rhs) || is<ast::ValueInit>(rhs)) {
+      bool zeroed = value_initializes(rhs);
+      temp = begin_object(t, zeroed ? ir::Init::zero : ir::Init::indeterminate, ir::Storage::temporary);
+      initialize(*temp, rhs, zeroed);
+      ValueId ops[] = {temp->ptr};
+      std::uint64_t imms[] = {word(ty(t))};
+      stateful(ir::Op::obj__begin, {}, ops, imms);
+      src = *temp;
+    } else {
+      src = class_source(rhs);
+    }
+    Place p = lvalue(child(a, s.lhs));
+    copy(p, src);
+    if (temp) {
+      ValueId ops[] = {temp->ptr};
+      stateful(ir::Op::obj__end, {}, ops);
+      std::uint64_t imms[] = {std::to_underlying(ir::Storage::temporary)};
+      stateful(ir::Op::dealloc, {}, ops, imms);
+    }
     return p;
   }
 

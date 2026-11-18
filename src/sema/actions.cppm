@@ -39,6 +39,9 @@ public:
   virtual interp::Callee function_ir(EntityId f) = 0;
   virtual std::optional<interp::GlobalVar> global(EntityId v) = 0;
   virtual bool is_constexpr(EntityId f) = 0;  // a constexpr or consteval function
+  // Whether class `c` is complete at the current point ([class.mem.general]): its definition
+  // precedes the point and does not enclose it.
+  virtual bool is_complete(EntityId c) = 0;
   virtual ~Questions() = default;
 };
 
@@ -55,6 +58,22 @@ struct Ex {
   QualType type() const { return info.type; }
   ValueCategory cat() const { return info.category; }
   bool glvalue() const { return info.category != ValueCategory::prvalue; }
+};
+
+// A braced-init-list as written ([dcl.init.general]): each initializer-clause is an analysed
+// expression or a nested list, with its designator (`.name =`, [dcl.init.aggr]) if it has one.
+// Sema decides what it initializes once it knows the target type.
+struct Braced {
+  struct Clause {
+    Ex expr;
+    std::unique_ptr<Braced> list;
+    NameId designator{};
+    bool designated = false;
+    u32 begin = 0;
+  };
+  u32 begin = 0;
+  u32 end = 0;
+  std::vector<Clause> clauses;
 };
 
 // Flags of `LocalRec::flags` and `DeclSema::flags`.
@@ -114,6 +133,301 @@ public:
 
   QualType builtin(Builtin k) { return types().builtin(k); }
 
+  // What constant evaluation answers for list-initialization's narrowing check ([dcl.init.list]);
+  // set by the parser, which owns the evaluator.
+  std::function<std::optional<ConstId>(Ex)> constant_of;
+
+  // ------------------------------------------------------------ classes ([class], [expr.ref])
+
+  // A type-name naming a class, found by unqualified lookup ([basic.lookup.unqual]): none when
+  // the name is not declared, or a variable or function hides it ([basic.scope.hiding]). With
+  // `elaborated`, non-type declarations are ignored ([basic.lookup.elab]).
+  std::optional<QualType> class_name(NameId name, bool elaborated = false) {
+    if (!elaborated)
+      for (auto s = scopes_.rbegin(); s != scopes_.rend(); ++s)
+        for (auto p = s->rbegin(); p != s->rend(); ++p)
+          if (p->first == name) return std::nullopt;
+    std::optional<ast::DeclSema> found;
+    for (auto p = own.rbegin(); p != own.rend() && !found; ++p)
+      if (p->name == name) found = p->sema;
+    if (!found)
+      for (DeclId d : q_->visible_decls(name)) {
+        ast::DeclSema s = q_->decl_sema(d);
+        if (s.entity == EntityId::none) continue;
+        if (s.kind == ast::DeclKind::class_ || !elaborated) found = s;
+      }
+    if (!found || found->kind != ast::DeclKind::class_) return std::nullopt;
+    return found->type;
+  }
+
+  // Whether `t` is complete at this point; a class needs its definition before the point.
+  bool is_complete(QualType t) {
+    if (types().is_void(t)) return false;
+    if (types().is_array(t)) return is_complete(types().rec(t).inner);
+    if (types().is_class(t)) return q_->is_complete(types().class_of(t));
+    return true;
+  }
+  // Diagnoses an object of incomplete type, at `at`.
+  bool require_complete(QualType t, u32 at) {
+    if (is_complete(t)) return true;
+    diag(at, Diag::incomplete_type, t);
+    return false;
+  }
+
+  // [expr.ref]: `object.name`, or `object->name` with `arrow`.
+  Ex member(Ex object, bool arrow, NameId name, u32 end, u32 op_at, u32 name_at) {
+    u32 begin = object.begin;
+    Ex fail{NodeId::none, begin, end};
+    if (!object.ok()) return fail;
+    QualType ct = object.type();
+    if (arrow) {
+      object = rvalue(object);
+      if (!types().is_pointer(object.type()) || !types().is_class(types().pointee(object.type()))) {
+        diag(op_at, Diag::arrow_of_non_pointer, object.type());
+        return fail;
+      }
+      ct = types().pointee(object.type());
+    } else if (!types().is_class(ct)) {
+      diag(op_at, Diag::member_of_non_class, ct);
+      return fail;
+    }
+    if (!require_complete(ct, op_at)) return fail;
+    EntityId c = types().class_of(ct);
+    const ClassRec* cr = w_->classes.find(c);
+    u32 index = 0;
+    for (; cr && index < cr->fields.size(); ++index)
+      if (cr->fields[index].name == name) break;
+    if (!cr || index == cr->fields.size()) {
+      diag(name_at, Diag::no_member, name, Types::unqualified(ct));
+      return fail;
+    }
+    const FieldRec& f = cr->fields[index];
+    // [expr.ref]/7.2: the member's type, with the object's cv-qualifiers added; the result is an
+    // lvalue if the object is (or is reached through a pointer), else an xvalue.
+    QualType t = types().add_cv(f.type, Types::cv(ct));
+    ValueCategory cat = arrow || object.cat() == ValueCategory::lvalue ? ValueCategory::lvalue : ValueCategory::xvalue;
+    ExprInfo info{t, cat, 0};
+    return node(ast::Member{info, f.entity, index, arrow ? 1u : 0u, at(object, begin)}, begin, end, info);
+  }
+
+  // ------------------------------------------------------------ initialization ([dcl.init])
+
+  // An aggregate ([dcl.init.aggr]): an array, or a class (every class the front end knows so far
+  // is one: no constructors, bases or virtual functions yet).
+  bool is_aggregate(QualType t) { return types().is_array(t) || types().is_class(t); }
+
+  // The elements of an aggregate, in order: an array's elements, a class's non-static data
+  // members, each with the aggregate's cv added.
+  struct Element {
+    QualType type;
+    NameId name;
+    ConstId init = ConstId::none;  // a member's default member initializer
+  };
+  std::vector<Element> elements(QualType t) {
+    std::vector<Element> r;
+    TypeRec tr = types().rec(t);
+    if (tr.kind == TypeKind::array) {
+      r.assign(tr.bound, Element{tr.inner, no_name()});
+    } else if (const ClassRec* c = tr.kind == TypeKind::class_ ? w_->classes.find(tr.entity) : nullptr) {
+      for (const FieldRec& f : c->fields) r.push_back({types().add_cv(f.type, Types::cv(t)), f.name, f.init});
+    }
+    return r;
+  }
+
+  // Whether initializing a `t` runs a default member initializer.
+  bool has_member_inits(QualType t) {
+    TypeRec r = types().rec(t);
+    if (r.kind == TypeKind::array) return has_member_inits(r.inner);
+    if (r.kind != TypeKind::class_) return false;
+    if (const ClassRec* c = w_->classes.find(r.entity))
+      for (const FieldRec& f : c->fields)
+        if (f.init != ConstId::none || has_member_inits(f.type)) return true;
+    return false;
+  }
+
+  // Value-initialization ([dcl.init.general]) of an object of type `t`. An aggregate whose
+  // members have default member initializers gets them (the implicit default constructor's).
+  Ex value_init(QualType t, u32 begin, u32 end) {
+    if (has_member_inits(t)) return member_inits(t, true, begin, end);
+    ExprInfo info{Types::unqualified(t), ValueCategory::prvalue, 0};
+    return node(ast::ValueInit{info}, begin, end, info);
+  }
+  // Default-initialization ([dcl.init.general]/7): the default member initializers, and no
+  // initialization for the rest.
+  Ex default_init(QualType t, u32 begin, u32 end) {
+    if (has_member_inits(t)) return member_inits(t, false, begin, end);
+    ExprInfo info{Types::unqualified(t), ValueCategory::prvalue, 0};
+    return node(ast::DefaultInit{info}, begin, end, info);
+  }
+  // An aggregate's elements each from its default member initializer, else value- or
+  // default-initialized.
+  Ex member_inits(QualType t, bool value, u32 begin, u32 end) {
+    std::vector<Ex> out;
+    for (const Element& e : elements(t)) out.push_back(element_default(e, value, begin, end));
+    return list_of(t, std::move(out), begin, end);
+  }
+  Ex element_default(const Element& e, bool value, u32 begin, u32 end) {
+    if (e.init != ConstId::none) return literal(Types::unqualified(e.type), e.init, ValueCategory::prvalue, begin, end);
+    return value ? value_init(e.type, begin, end) : default_init(e.type, begin, end);
+  }
+  Ex list_of(QualType t, std::vector<Ex> out, u32 begin, u32 end) {
+    std::vector<Child> cs;
+    for (const Ex& e : out) cs.push_back({e.id, e.begin >= begin ? e.begin - begin : 0});
+    ExprInfo info{Types::unqualified(t), ValueCategory::prvalue, 0};
+    Ex r = node(ast::InitList{info, b_->list(cs)}, begin, end, info);
+    list_elems_[std::to_underlying(r.id)] = std::move(out);
+    return r;
+  }
+
+  // List-initialization of an object of type `t` from `b` ([dcl.init.list]/3).
+  Ex list_init(QualType t, const Braced& b) {
+    Ex fail{NodeId::none, b.begin, b.end};
+    if (!require_complete(t, b.begin)) return fail;
+    // [dcl.init.general]: an initializer-list or a designated-initializer-list, not a mix.
+    if (std::ranges::any_of(b.clauses, &Braced::Clause::designated) &&
+        !std::ranges::all_of(b.clauses, &Braced::Clause::designated)) {
+      diag(b.begin, Diag::mixed_designators);
+      return fail;
+    }
+    // [dcl.init.list]/3.2: a class from one element of its own class.
+    if (types().is_class(t) && b.clauses.size() == 1 && !b.clauses[0].list && !b.clauses[0].designated &&
+        initializes(t, b.clauses[0].expr))
+      return convert(b.clauses[0].expr, t, b.clauses[0].begin);
+    if (is_aggregate(t)) {
+      std::size_t next = 0;
+      Ex r = aggregate(t, b, next, b.begin, b.end);
+      if (r.ok() && next < b.clauses.size()) {
+        diag(b.clauses[next].begin, Diag::too_many_initializers, Types::unqualified(t));
+        return fail;
+      }
+      return r;
+    }
+    // A scalar: `{}` value-initializes it, `{e}` copy-initializes it from `e`, without narrowing.
+    if (b.clauses.empty()) return value_init(t, b.begin, b.end);
+    if (b.clauses.size() > 1) {
+      diag(b.clauses[1].begin, Diag::too_many_initializers, Types::unqualified(t));
+      return fail;
+    }
+    const Braced::Clause& c = b.clauses[0];
+    if (c.list || c.designated) {
+      diag(c.begin, Diag::braces_for_scalar, Types::unqualified(t));
+      return fail;
+    }
+    return list_element(t, c.expr);
+  }
+
+  // The elements of aggregate `t` from the clauses of `b` starting at `next`, which advances past
+  // those used. Called for a braced list, and for brace elision ([dcl.init.aggr]/16), where the
+  // sub-aggregate takes as many clauses as it has elements.
+  Ex aggregate(QualType t, const Braced& b, std::size_t& next, u32 begin, u32 end) {
+    Ex fail{NodeId::none, begin, end};
+    std::vector<Element> elems = elements(t);
+    std::vector<Ex> out;
+    bool elided = begin != b.begin || end != b.end;
+    for (std::size_t i = 0; i < elems.size(); ++i) {
+      if (next == b.clauses.size()) {
+        out.push_back(element_default(elems[i], true, end, end));
+        continue;
+      }
+      const Braced::Clause& c = b.clauses[next];
+      if (c.designated) {
+        // [dcl.init.aggr]/3.1: designators name members in declaration order; the members
+        // skipped are initialized as if there were no initializer.
+        std::size_t j = i;
+        while (j < elems.size() && elems[j].name != c.designator) ++j;
+        if (elided || !types().is_class(t) || j == elems.size()) {
+          diag(c.begin, Diag::bad_designator, c.designator, Types::unqualified(t));
+          return fail;
+        }
+        for (; i < j; ++i) out.push_back(element_default(elems[i], true, c.begin, c.begin));
+      }
+      QualType et = elems[i].type;
+      if (c.list) {
+        ++next;
+        out.push_back(list_init(et, *c.list));
+      } else if (is_aggregate(et) && !c.designated && !initializes(et, c.expr)) {
+        // Brace elision: the clause begins the sub-aggregate's own elements.
+        if (!require_complete(et, c.begin)) return fail;
+        out.push_back(aggregate(et, b, next, c.begin, c.begin));
+        out.back().end = next > 0 ? b.clauses[next - 1].expr.end : c.begin;
+      } else {
+        ++next;
+        out.push_back(list_element(et, c.expr));
+      }
+      if (!out.back().ok()) return fail;
+    }
+    return list_of(t, std::move(out), begin, end);
+  }
+  // The elements of an `InitList` this frame built, as analysed.
+  std::span<const Ex> list_elements(const Ex& list) const {
+    auto it = list_elems_.find(std::to_underlying(list.id));
+    if (it == list_elems_.end()) return {};
+    return it->second;
+  }
+
+  // The bound of an array of `elem` initialized by `b` ([dcl.array]/8): the number of elements
+  // its clauses initialize, brace elision included.
+  u64 deduce_bound(QualType elem, const Braced& b) {
+    u64 n = 0;
+    std::size_t next = 0;
+    while (next < b.clauses.size()) {
+      const Braced::Clause& c = b.clauses[next];
+      if (c.list || c.designated || !is_aggregate(elem) || initializes(elem, c.expr) || !is_complete(elem)) ++next;
+      else {
+        std::size_t before = next;
+        aggregate(elem, b, next, c.begin, c.begin);
+        if (next == before) ++next;  // an element with no elements of its own takes the clause
+      }
+      ++n;
+    }
+    return n;
+  }
+
+  // Whether `e` initializes an object of aggregate type `t` by itself rather than starting its
+  // elements: a class object from an expression of its own class ([dcl.init.aggr]/16).
+  bool initializes(QualType t, const Ex& e) {
+    return e.ok() && types().is_class(t) && types().is_class(e.type()) &&
+           types().class_of(t) == types().class_of(e.type());
+  }
+
+  // An element copy-initialized from `e`, where a narrowing conversion is ill-formed
+  // ([dcl.init.list]/7).
+  Ex list_element(QualType t, Ex e) {
+    if (!e.ok()) return e;
+    Ex from = rvalue(e);
+    Ex r = convert(e, t, e.begin);
+    if (r.ok() && narrows(from, t)) {
+      diag(e.begin, Diag::narrowing, from.type(), Types::unqualified(t));
+      return {NodeId::none, e.begin, e.end};
+    }
+    return r;
+  }
+
+  // [dcl.init.list]/7: an integral conversion to a type that cannot represent every value of the
+  // source type, unless the source is a constant whose value fits; a pointer to bool.
+  bool narrows(const Ex& from, QualType to) {
+    if (!from.ok()) return false;
+    auto a = types().builtin_of(from.type()), b = types().builtin_of(to);
+    if (types().is_pointer(from.type()) && b == Builtin::bool_) return true;
+    if (!a || !b || !ast::is_integral(*a) || !ast::is_integral(*b) || *a == *b) return false;
+    IntShape sa = shape(*a), sb = shape(*b);
+    if (*b == Builtin::bool_) sb = {1, false};
+    if (*a == Builtin::bool_) sa = {1, false};
+    if (ast::represents(target, *b, sa.bits, sa.is_signed) || (*b == Builtin::bool_ && *a == Builtin::bool_)) return false;
+    auto v = constant_of ? constant_of(from) : std::nullopt;
+    if (!v || w_->values.rec(*v).kind != ValueKind::integer) return true;
+    // The constant, read in the source type, must lie in the target type's range.
+    u64 mask = sa.bits >= 64 ? ~u64{0} : (u64{1} << sa.bits) - 1;
+    u64 raw = w_->values.rec(*v).bits & mask;
+    bool negative = sa.is_signed && ((raw >> (sa.bits - 1)) & 1);
+    u64 max = sb.is_signed ? (u64{1} << (sb.bits - 1)) - 1 : sb.bits >= 64 ? ~u64{0} : (u64{1} << sb.bits) - 1;
+    if (!negative) return raw > max;
+    if (!sb.is_signed) return true;
+    std::int64_t value = std::int64_t(raw | ~mask);
+    std::int64_t min = sb.bits >= 64 ? std::numeric_limits<std::int64_t>::min() : -(std::int64_t{1} << (sb.bits - 1));
+    return value < min;
+  }
+
   // ------------------------------------------------------------ scopes and locals (§4.4)
 
   void push_scope() { scopes_.emplace_back(); }
@@ -143,6 +457,8 @@ public:
     return index;
   }
   void set_local_decl(u32 local, NodeId decl) { locals_[local].decl = decl; }
+  // An array of unknown bound gets its bound from its initializer ([dcl.array]/8).
+  void set_local_type(u32 local, QualType t) { locals_[local].type = t; }
   // A local usable in constant expressions ([expr.const]): constexpr, or const integral with a
   // constant initializer; its value.
   void set_local_value(u32 local, ConstId v) { local_values_[local] = v; }
@@ -197,6 +513,9 @@ public:
         ast::DeclSema s = q_->decl_sema(d);
         if (s.entity != EntityId::none) found.push_back(s);  // else its item diagnosed it
       }
+    // A class hidden by a variable or function of the same name ([basic.scope.hiding]/2).
+    if (std::ranges::any_of(found, [](const ast::DeclSema& d) { return d.kind != ast::DeclKind::class_; }))
+      std::erase_if(found, [](const ast::DeclSema& d) { return d.kind == ast::DeclKind::class_; });
     if (found.empty()) {
       if (!any) diag(begin, Diag::undeclared, name);
       return {NodeId::none, begin, end};
@@ -372,6 +691,16 @@ public:
   Ex convert(Ex e, QualType to, u32 at_) {
     if (!e.ok()) return e;
     QualType target = Types::unqualified(to);
+    // A class object is copy-initialized from an expression of its own class: a glvalue through
+    // the (trivial, implicit) copy constructor, a prvalue directly ([dcl.init.general]/17.6).
+    if (types().is_class(target)) {
+      if (!require_complete(target, at_)) return {NodeId::none, e.begin, e.end};
+      if (!initializes(target, e)) {
+        diag(at_, Diag::no_conversion, e.type(), to);
+        return {NodeId::none, e.begin, e.end};
+      }
+      return e.glvalue() ? convert_node(e, ast::ConversionKind::lvalue_to_rvalue, target) : e;
+    }
     if (types().is_pointer(target) && is_null_pointer_constant(e))
       return convert_node(e, ast::ConversionKind::null_pointer, target);
     e = rvalue(e);
@@ -428,7 +757,27 @@ public:
   // ------------------------------------------------------------ operators ([expr.unary], [expr.compound])
 
   bool is_integral_or_unscoped(QualType t) { return types().is_integral(t); }
-  bool is_object_pointer(QualType t) { return types().is_pointer(t) && types().is_object(types().pointee(t)); }
+  // A pointer to a completely-defined object type, which [expr.add] and [expr.pre.incr] need.
+  bool is_object_pointer(QualType t) {
+    return types().is_pointer(t) && types().is_object(types().pointee(t)) && is_complete(types().pointee(t));
+  }
+
+  // [class.copy.assign]/7: the implicit copy assignment of a class with a const member (or one
+  // whose own is deleted) is deleted.
+  bool has_const_member(QualType t) {
+    TypeRec r = types().rec(t);
+    if (r.kind == TypeKind::array) return has_const_member(r.inner);
+    if (r.kind != TypeKind::class_) return false;
+    if (const ClassRec* c = w_->classes.find(r.entity))
+      for (const FieldRec& f : c->fields)
+        if (Types::is_const(types().canonical(f.type)) || has_const_member(f.type)) return true;
+    return false;
+  }
+  bool check_class_assignable(const Ex& l, u32 at_) {
+    if (!types().is_class(l.type()) || !has_const_member(l.type())) return true;
+    diag(at_, Diag::const_member_assign, Types::unqualified(l.type()));
+    return false;
+  }
 
   // A modifiable lvalue ([basic.lval]): an lvalue of a non-const object type that is not an array.
   bool check_modifiable(const Ex& e, u32 at_) {
@@ -620,7 +969,7 @@ public:
   Ex assign(AsgOp op, Ex l, Ex r, u32 op_at) {
     u32 begin = l.begin, end = r.end;
     if (!l.ok() || !r.ok()) return {NodeId::none, begin, end};
-    if (!check_modifiable(l, op_at)) return {NodeId::none, begin, end};
+    if (!check_modifiable(l, op_at) || !check_class_assignable(l, op_at)) return {NodeId::none, begin, end};
     QualType lt = l.type();
     QualType computation = Types::unqualified(lt);
     Ex c = r;
@@ -656,6 +1005,17 @@ public:
     ExprInfo info{lt, ValueCategory::lvalue, 0};
     return node(ast::Assign{info, ast::AssignOp(std::to_underlying(op)), at(l, begin), at(c, begin), computation}, begin,
                 end, info);
+  }
+
+  // [expr.assign]/9: `x = {…}` assigns `T{…}`, list-initialized, to an object of type T.
+  Ex assign_list(Ex l, const Braced& b, u32 op_at) {
+    u32 begin = l.begin, end = b.end;
+    if (!l.ok() || !check_modifiable(l, op_at) || !check_class_assignable(l, op_at)) return {NodeId::none, begin, end};
+    Ex c = list_init(Types::unqualified(l.type()), b);
+    if (!c.ok()) return {NodeId::none, begin, end};
+    ExprInfo info{l.type(), ValueCategory::lvalue, 0};
+    return node(ast::Assign{info, ast::AssignOp::assign, at(l, begin), at(c, begin), Types::unqualified(l.type())},
+                begin, end, info);
   }
 
   // [expr.cond]
@@ -776,6 +1136,7 @@ private:
   std::vector<ast::LocalRec> locals_;
   std::vector<std::optional<ConstId>> local_values_;  // by local
   std::set<u32> consteval_;                           // consteval functions named so far
+  std::map<u32, std::vector<Ex>> list_elems_;         // by draft InitList
   std::vector<std::vector<std::pair<NameId, u32>>> scopes_;
   std::vector<std::size_t> guarded_;
   QualType return_type_{};

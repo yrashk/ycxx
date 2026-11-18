@@ -14,7 +14,8 @@ import ycxx.ast.nodes;
 
 export namespace ycxx::ast {
 
-enum class DeclKind : u8 { namespace_, class_, enum_, enumerator, variable, function, parameter, type_alias, concept_, template_ };
+// `data_member` is a non-static data member, which is not a variable ([basic.pre]).
+enum class DeclKind : u8 { namespace_, class_, enum_, enumerator, variable, function, parameter, type_alias, concept_, template_, data_member };
 enum class Linkage : u8 { none, internal, module, external };
 enum class Storage : u8 { none, static_, thread_local_, extern_, automatic };
 enum class Access : u8 { none, public_, protected_, private_ };
@@ -94,7 +95,7 @@ struct BodySema {
 
 // The element types of the `seqs` interner: one pool each, indexed by position in this list.
 using SeqElements = closed_list<NodeId, EntityId, QualType, NameId, Cleanup, ParamSema, DeclSema, BaseSpec,
-                                MemberRec, LocalRec, u8, u32>;
+                                MemberRec, LocalRec, u8, u32, ConstId>;
 
 static_assert(std::ranges::all_of(SeqElements::infos, [](std::meta::info t) {
   if (std::meta::is_class_type(t)) return check_record(t);

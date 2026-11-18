@@ -97,6 +97,21 @@ enum class Diag : std::uint32_t {
   return_value_in_void [[=message{Severity::error, "a void function cannot return a value"}]],
   return_missing_value [[=message{Severity::error, "a non-void function must return a value"}]],
   redeclared_local [[=message{Severity::error, "redefinition of '{0:n}'"}]],
+  // [class], [class.mem], [expr.ref], [dcl.init.aggr], [dcl.init.list]
+  incomplete_type [[=message{Severity::error, "'{0:t}' is an incomplete type"}]],
+  no_member [[=message{Severity::error, "no member named '{0:n}' in '{1:t}'"}]],
+  member_of_non_class [[=message{Severity::error, "member reference base type '{0:t}' is not a class"}]],
+  arrow_of_non_pointer [[=message{Severity::error, "'->' needs a pointer to a class; '{0:t}' is not one"}]],
+  redeclared_member [[=message{Severity::error, "redeclaration of member '{0:n}'"}]],
+  too_many_initializers [[=message{Severity::error, "too many initializers for '{0:t}'"}]],
+  narrowing [[=message{Severity::error, "narrowing conversion from '{0:t}' to '{1:t}' in a braced initializer"}]],
+  braces_for_scalar [[=message{Severity::error, "too many braces around the initializer of '{0:t}'"}]],
+  bad_designator [[=message{Severity::error, "designator '{0:n}' does not name a later member of '{1:t}'"}]],
+  not_a_type [[=message{Severity::error, "'{0:n}' does not name a class"}]],
+  const_member_assign [[=message{Severity::error, "'{0:t}' has a const member, so its copy assignment is deleted"}]],
+  mixed_designators [[=message{Severity::error, "either every initializer clause is designated or none is"}]],
+  unknown_bound_member [[=message{Severity::error, "a non-static data member cannot be an array of unknown bound"}]],
+  class_redefinition [[=message{Severity::error, "redefinition of class '{0:n}'"}]],
 };
 
 // A `{N:r}` argument: why an evaluation was not constant. 0 is an expression the front end
