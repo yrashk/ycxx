@@ -132,6 +132,39 @@ struct ImplicitConversion {
   [[=sequenced]] Child operand;
 };
 
+// Class member access ([expr.ref]): `object.member`, or with `arrow` 1 `object->member`, whose
+// object is then the pointer. `field` is the member's position among its class's non-static data
+// members, the access path step the IR takes.
+struct Member {
+  ExprInfo info;
+  EntityId member;
+  u32 field;
+  u32 arrow;
+  [[=sequenced]] Child object;
+};
+
+// List-initialization of an aggregate ([dcl.init.aggr]), as analysed: one element per array
+// element or non-static data member, in order, with brace elision and designators resolved and the
+// elements without an initializer value-initialized. Each element is already converted to its
+// element type; a sub-aggregate's element is an `InitList` or a prvalue of its type. The
+// initializer-clauses are sequenced in order ([dcl.init.list]).
+struct InitList {
+  ExprInfo info;
+  [[=sequenced]] ChildList elems;
+};
+
+// Value-initialization of an object of the type ([dcl.init.general]): for a scalar, zero; for an
+// aggregate without constructors, every element value-initialized.
+struct ValueInit {
+  ExprInfo info;
+};
+
+// Default-initialization of an object of scalar or aggregate type that performs no
+// initialization ([dcl.init.general]/7.3): its value is erroneous, or indeterminate.
+struct DefaultInit {
+  ExprInfo info;
+};
+
 // ---------------------------------------------------------------- structure
 
 // A destructor call on a scope-exit edge (§3.7.3): the body local and the destructor.
@@ -242,7 +275,7 @@ struct Attribute {
 using Nodes = closed_list<Literal, DeclRef, Paren, Unary, Binary, OrderedBinary, Assign, Subscript, Call,
                           ImplicitConversion, ExprStmt, Return, Compound, If, LocalVar, Attribute, LocalRef,
                           Conditional, While, Do, For, Break, Continue, DeclStmt, Declarator, DeclGroup,
-                          IfConsteval, StaticAssert>;
+                          IfConsteval, StaticAssert, Member, InitList, ValueInit, DefaultInit>;
 
 static_assert(Nodes::size < max_node_kinds);
 

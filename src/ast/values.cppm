@@ -5,7 +5,8 @@
 // This first list is the α slice's (#39): integers (bool and the character types included),
 // `nullptr`, string literal objects and addresses of them and of entities, and the shape of the
 // dependent family: a kind marked `[[=dependent]]` is a `VDep*` value, one with free template
-// parameters. Floating values, aggregates and the rest of the `VDep*` family follow (#33).
+// parameters; aggregates of class and array type (δ, #86). Floating values and the rest of the
+// `VDep*` family follow (#33).
 export module ycxx.ast.values;
 
 import std;
@@ -81,6 +82,13 @@ struct VLvalue {
   std::int64_t offset;
 };
 
+// An object of array or class type ([dcl.init.aggr]): its canonical type and the value of each
+// element, or of each non-static data member in declaration order.
+struct VAggregate {
+  QualType type;
+  SeqId<ConstId> elems;
+};
+
 // ---------------------------------------------------------------- the dependent family
 
 // A non-type template parameter ([temp.param]).
@@ -96,7 +104,7 @@ struct [[=dependent]] VDepFnParam {
   u16 index;
 };
 
-using ValueKinds = closed_list<VInt, VNullptr, VString, VLvalue, VEntity, VDepParam, VDepFnParam>;
+using ValueKinds = closed_list<VInt, VNullptr, VString, VLvalue, VEntity, VAggregate, VDepParam, VDepFnParam>;
 
 template <class T>
 constexpr bool is_value_kind = ValueKinds::contains<T>;
