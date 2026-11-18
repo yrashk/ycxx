@@ -80,8 +80,11 @@ public:
     auto cut = path.rfind("::");
     std::string parent = cut == std::string::npos ? "" : path.substr(0, cut);
     std::string name = cut == std::string::npos ? path : path.substr(cut + 2);
-    EntityId e = w_->entities.entity({sema::EntityKind::namespace_, w_->ins.names.intern(name), {}, LangLinkage::cxx,
-                                      ast::Linkage::external, {}, namespace_entity(parent)});
+    sema::EntityRec r{sema::EntityKind::namespace_, w_->ins.names.intern(name), {}, LangLinkage::cxx,
+                      ast::Linkage::external, {}, namespace_entity(parent)};
+    // Each unit's unnamed namespace is its own ([namespace.unnamed]): named by the unit's main file.
+    if (name == "(anonymous)") r.head = ast::seed("ycxx.sema.unnamed-namespace:" + r_->files.at(0));
+    EntityId e = w_->entities.entity(std::move(r));
     ns_entities_[path] = e;
     ns_paths_[std::to_underlying(e)] = path;
     return e;
@@ -424,6 +427,8 @@ private:
   // By member function or static data member entity: its declaration in this unit's class. The
   // class's record is shared by every unit that defines it, its items are not (#156).
   std::map<u32, DeclId> member_decls_;
+  // The enumeration whose enumerator list is being analysed, and its record so far.
+  std::pair<EntityId, const sema::EnumRec*> defining_enum_{EntityId::none, nullptr};
   std::map<u32, ast::DeclSema> class_heads_;  // by class item: the class's record, for its members
   std::map<u32, Dmi> dmis_;                       // by field entity
   std::vector<std::string> ns_of_, eff_ns_;       // by item
@@ -507,6 +512,7 @@ private:
   std::pmr::unsynchronized_pool_resource arena_;  // the frames' arena (§9.3)
 
   friend class ItemAnalysis;
+  friend class AtItem;
   friend class BodyAnalysis;
 };
 
@@ -514,6 +520,9 @@ private:
 class AtItem final : public sema::Questions {
 public:
   AtItem(Program& p, u32 item, bool self) : from(p.ns_of(item)), p_(&p), item_(item), self_(self) {}
+  const sema::EnumRec* defining_enum(EntityId e) override {
+    return p_->defining_enum_.first == e ? p_->defining_enum_.second : nullptr;
+  }
   std::vector<DeclId> visible_decls(ast::NameId name, std::span<const EntityId> directives = {}) override {
     std::vector<std::string> paths;
     for (EntityId ns : directives) paths.push_back(p_->namespace_path(ns));
@@ -930,8 +939,9 @@ private:
     EntityId e = s_.world().entities.entity(
         {sema::EntityKind::enum_, name, {}, LangLinkage::cxx, ast::Linkage::external, {}, cls != EntityId::none ? cls : ns_entity()});
     QualType t = types.enum_type(e);
-    // Built here and published once complete (#156).
+    // Built here and published once complete (#156); the list sees it as it grows.
     sema::EnumRec er{scoped, fixed.has_value(), fixed.value_or(s_.builtin(sema::Builtin::int_)), {}};
+    p_->defining_enum_ = {e, &er};
     ast::DeclSema sem = class_decl(e, true);
     sem.kind = ast::DeclKind::enum_;
     sem.type = t;
@@ -1016,6 +1026,7 @@ private:
       er.enumerators[i].value = s_.world().values.integer(*er.underlying, sema::u64(values[i]));
       p_->set_constant(er.enumerators[i].entity, er.enumerators[i].value, k_);
     }
+    p_->defining_enum_ = {EntityId::none, nullptr};
     s_.world().classes.publish_enum(e, std::move(er));
     ps_.seek(it_->brace_end);
     if (ps_.accept(Tk::semi)) return;

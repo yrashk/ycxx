@@ -308,6 +308,24 @@ int S::get() const { return x + p.id + q.id + (k == Kind::b ? 2 : 0) + on; }
     check(s.get<pl::TuFront>({0}).has_errors() && s.get<pl::TuFront>({1}).has_errors(),
           std::format("each unit diagnoses its own class, on {} threads", threads));
   }
+  // An enumerator named by qualified name in its own enumerator list ([dcl.enum]/6), and each
+  // unit's own class in its unnamed namespace ([namespace.unnamed]), whatever unit comes first.
+  std::ofstream(dir / "e.h", std::ios::binary | std::ios::trunc) << "enum E { a, b = E::a + 1 };\nenum class F : int { p, q };\nF g();\n";
+  const std::array<std::string, 2> texts{
+      "#include \"e.h\"\nnamespace { struct S { int x; int y; }; }\nint fa() { S s{1, 2}; return s.x + b; }\n",
+      "#include \"e.h\"\nnamespace { struct S { int z; }; }\nint fa();\nint main() { S s{30}; return s.z + fa(); }\n"};
+  for (bool swapped : {false, true})
+    for (unsigned threads : {1u, 8u}) {
+      engine::Pool pool(threads, 7);
+      pl::Session s(pool);
+      for (std::uint32_t i = 0; i < 2; ++i)
+        s.set_source({i}, std::format("n{}.cpp", i), texts[i ^ swapped], std::format("n{}.o", i), dir.native_encoded_string());
+      s.set_program(program, {{{0}, {1}}, {}, "named"});
+      const pl::Linked& l = s.get<pl::Link>(program);
+      check(!s.get<pl::TuFront>({0}).has_errors() && !s.get<pl::TuFront>({1}).has_errors() && l.errors.empty(),
+            std::format("enumerators in their own list and unnamed namespaces per unit, on {} threads{}", threads,
+                        swapped ? ", swapped" : ""));
+    }
   fs::remove_all(dir);
 }
 

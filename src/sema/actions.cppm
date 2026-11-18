@@ -45,6 +45,9 @@ public:
   // Whether class `c` is complete at the current point ([class.mem.general]): its definition
   // precedes the point and does not enclose it.
   virtual bool is_complete(EntityId c) = 0;
+  // Inside the enumerator list of an enumeration this unit is defining: its record so far, which
+  // is published only after the list (#156).
+  virtual const EnumRec* defining_enum(EntityId) { return nullptr; }
   // The constant a variable usable in constant expressions holds ([expr.const]), if it is known.
   virtual std::optional<ConstId> constant_value(EntityId v) = 0;
   // In a member declaration of a class being defined: the member named `name` declared before it
@@ -406,6 +409,11 @@ public:
   // class publishes its record, the first one wins (#156): a unit must not see it before its own
   // definition, or while it analyses that definition, or what it accepts depends on other units.
   const ClassRec* class_rec(EntityId c) { return q_->is_complete(c) ? w_->classes.find(c) : nullptr; }
+  // An enumeration's record: in its own enumerator list, this unit's so far.
+  const EnumRec* enum_rec(EntityId e) {
+    if (const EnumRec* r = q_->defining_enum(e)) return r;
+    return w_->classes.find_enum(e);
+  }
 
   // The elements of an aggregate, in order: an array's elements, a class's non-static data
   // members, each with the aggregate's cv added.
@@ -542,7 +550,7 @@ public:
     // [dcl.init.list]/3.8: an enumeration with a fixed underlying type from one integer, without
     // narrowing.
     if (types().is_enum(t) && c.expr.ok() && !types().is_enum(c.expr.type())) {
-      const EnumRec* er = w_->classes.find_enum(types().enum_of(t));
+      const EnumRec* er = enum_rec(types().enum_of(t));
       if (er && er->fixed) {
         Ex v = list_element(*er->underlying, c.expr);
         if (!v.ok()) return fail;
@@ -932,7 +940,7 @@ public:
   }
   // The enumerator `name` of enumeration `e`, if it has one.
   std::optional<Ex> find_enumerator(EntityId e, NameId name, u32 begin, u32 end) {
-    if (const EnumRec* r = w_->classes.find_enum(e))
+    if (const EnumRec* r = enum_rec(e))
       for (const EnumeratorRec& x : r->enumerators)
         if (x.name == name) return enumerator(x.entity, types().enum_type(e), begin, end);
     return std::nullopt;
@@ -1109,7 +1117,7 @@ public:
       if (types().is(to, Builtin::bool_)) return {true, 2, 0};
       if (!types().is_integral(to)) return {};
       // [conv.prom]/4, [over.ics.rank]/4.2: with a fixed type, to it is the better promotion.
-      if (const EnumRec* er = w_->classes.find_enum(types().enum_of(from)); er && er->fixed) {
+      if (const EnumRec* er = enum_rec(types().enum_of(from)); er && er->fixed) {
         if (types().canonical(*er->underlying) == types().canonical(to)) return {true, 1, 0};
         if (builtin(promoted(*types().builtin_of(*er->underlying))) == to) return {true, 1, 1};
         return {true, 2, 0};
@@ -1676,11 +1684,14 @@ public:
   // Enumerations ([dcl.enum]).
   bool is_unscoped_enum(QualType t) {
     if (!types().is_enum(t)) return false;
-    const EnumRec* r = w_->classes.find_enum(types().enum_of(t));
+    const EnumRec* r = enum_rec(types().enum_of(t));
     return !r || !r->scoped;
   }
   bool is_scoped_enum(QualType t) { return types().is_enum(t) && !is_unscoped_enum(t); }
-  QualType underlying_of(QualType t) { return w_->classes.underlying(types().enum_of(t)); }
+  QualType underlying_of(QualType t) {
+    const EnumRec* r = enum_rec(types().enum_of(t));
+    return r && r->underlying ? *r->underlying : builtin(Builtin::int_);
+  }
 
   // [conv.ptr]: an integer literal with value zero, or a prvalue of type std::nullptr_t.
   bool is_null_pointer_constant(const Ex& e) {

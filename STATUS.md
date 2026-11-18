@@ -137,11 +137,14 @@ What is true of the code today. Work in progress and its owners are tracked in
     builds its record privately and publishes it; the first wins, and the records of equal
     definitions are equal. A member's declaration is an item of each unit, so `Program` keeps it
     (`member_decl`), not the record. Sema reads a record through `class_rec`, only where the
-    class is complete in its own unit, so what a unit accepts does not depend on other units.
+    class is complete in its own unit, and an enumeration's own list sees the unit's record so
+    far, so what a unit accepts does not depend on other units. Each unit's unnamed namespace is
+    its own entity. Records stay first-wins across edits in a long-lived session (#115).
   - Tests: `unit.pp` runs 48 units on 8 workers. `unit.pipeline_incremental` builds a program on
     2 and 8 threads and under chaos seeds, equal to an inline build, and eight units sharing a
     header of classes and enumerations on up to 8 threads, before and after an edit; two units
-    each diagnose their own ill-formed class. All are mutation-checked.
+    each diagnose their own ill-formed class; qualified enumerators in their own list and classes
+    in two units' unnamed namespaces, in either order. All are mutation-checked.
 
 ## Lexer and directive-free `pp` (#40, 2026-11-18)
 

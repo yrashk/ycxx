@@ -172,6 +172,7 @@ public:
   }
   const T* find(u32 i) const noexcept {
     const auto [b, off] = locate(i);
+    if (b >= blocks) return nullptr;  // past every handle, as `none` is
     const Slot* p = blocks_[b].load(std::memory_order_acquire);
     return p ? p[off].load(std::memory_order_acquire) : nullptr;
   }
@@ -188,6 +189,7 @@ private:
   }
   Slot& slot(u32 i) {
     const auto [b, off] = locate(i);
+    contract_assert(b < blocks);
     Slot* p = blocks_[b].load(std::memory_order_acquire);
     if (!p) {
       auto* fresh = new Slot[block_slots(b)]{};

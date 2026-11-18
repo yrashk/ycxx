@@ -338,6 +338,8 @@ enum class EntityKind : u8 {
 // declaration. `scope` is the enclosing class, or none for the global namespace. A function
 // template's identity also has its template-head (`head`, a fingerprint of the parameters' kinds and
 // types); a specialization's is its template and its canonical template arguments (§B1.5).
+// An unnamed namespace's `head` is its unit's: each unit has its own ([namespace.unnamed]), so its
+// members are distinct from another unit's of the same name.
 struct EntityRec {
   EntityKind kind = EntityKind::function;
   NameId name{};
@@ -346,7 +348,7 @@ struct EntityRec {
   ast::Linkage linkage = ast::Linkage::external;
   DeclId first{};  // internal linkage only
   EntityId scope = EntityId::none;
-  Fp128 head{};                          // a template's
+  Fp128 head{};                          // a template's, or an unnamed namespace's unit
   EntityId templ = EntityId::none;       // a specialization's template
   std::vector<ast::TemplateArg> args{};  // a specialization's template arguments
 };
@@ -364,7 +366,7 @@ public:
     if (r.kind == EntityKind::function || r.kind == EntityKind::constructor || r.kind == EntityKind::destructor ||
         r.kind == EntityKind::function_template)
       f = ast::mix(f, types_->fp(types_->canonical(r.type)));
-    if (r.kind == EntityKind::function_template) f = ast::mix(f, r.head);
+    if (r.kind == EntityKind::function_template || r.kind == EntityKind::namespace_) f = ast::mix(f, r.head);
     if (r.templ != EntityId::none) {
       f = ast::mix(f, ins_->entities.fp(r.templ));
       for (const ast::TemplateArg& a : r.args) {
