@@ -429,3 +429,11 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
   - Do: when this message appears after an edit to a module interface, bisect the edit (comment
     out the new member and its uses) instead of rebuilding; move the member to another type.
   - Learned on #115.
+- **Item ids hash the syntactic scope, so two classes of one name share their members' ids.**
+  `Program::index(ItemId)` maps an id back to an item. `struct Kind<T*> { int get() const; }` and
+  the primary `struct Kind { int get() const; }` gave both `get` items one id, and instantiating
+  from the partial specialization used the primary's member, then crashed in `std::map::at`.
+  - Do: when a construct adds another definition of an existing name (specializations, and
+    later redeclarations of anything that has members), check that its member items' scope differs.
+    The splitter now scopes a class's members by its template-id (`class_scope`).
+  - Learned on #88 step 3.
