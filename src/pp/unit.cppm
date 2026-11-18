@@ -21,6 +21,8 @@ import ycxx.lex;
 import :spell;
 import :files;
 import :region;
+import :predefined;
+import :cond;
 
 export namespace ycxx::pp {
 
@@ -28,11 +30,24 @@ export namespace ycxx::pp {
 // the regions computed so far.
 class Session {
 public:
-  explicit Session(Host& host, Config cfg = {}) : files(host), config(std::move(cfg)), config_fp(config.fingerprint()) {}
+  explicit Session(Host& host, Config cfg = {})
+      : files(host), build_time(now()), config(std::move(cfg)), config_fp(config.fingerprint()) {}
   Session(const Session&) = delete;
 
   Spellings spellings;
   Files files;
+  // `__DATE__` and `__TIME__` ([cpp.predefined]): the session's start, the same for all its TUs.
+  const std::pair<std::string, std::string> build_time;
+  static std::pair<std::string, std::string> now() {
+    auto t = std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
+    auto days = std::chrono::floor<std::chrono::days>(t);
+    std::chrono::year_month_day ymd{days};
+    std::chrono::hh_mm_ss hms{t - days};
+    static constexpr std::array<std::string_view, 12> months{"Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                                                             "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
+    return {std::format("\"{} {:>2} {}\"", months[unsigned(ymd.month()) - 1], unsigned(ymd.day()), int(ymd.year())),
+            std::format("\"{:02}:{:02}:{:02}\"", hms.hours().count(), hms.minutes().count(), hms.seconds().count())};
+  }
   const Config config;
   const Fp128 config_fp;
 
@@ -55,7 +70,7 @@ public:
 
   // The predefined macros and the command line's, as the text of `<built-in>` ([cpp.predefined]).
   std::string builtin_text() const {
-    std::string s = "#define __cplusplus 202400L\n";
+    std::string s = predefined_text(*config.target);
     for (const auto& [name, value] : config.macros) {
       if (value) s += std::format("#define {} {}\n", name, *value);
       else s += std::format("#undef {}\n", name);
@@ -77,7 +92,19 @@ inline constexpr std::size_t max_include_depth = 200;
 
 class Unit {
 public:
-  explicit Unit(Session& s) : s_(&s) {}
+  explicit Unit(Session& s) : s_(&s) {
+    using enum MacroDef::Dynamic;
+    for (auto [name, kind] : {std::pair{"__LINE__", line}, {"__FILE__", file}, {"__COUNTER__", counter},
+                              {"__DATE__", date}, {"__TIME__", time}}) {
+      auto d = std::make_shared<MacroDef>();
+      d->name = s_->spellings.name(name);
+      d->dynamic = kind;
+      d->file = s_->files.id("<built-in>");
+      d->file_name = s_->spellings.name("<built-in>");
+      d->fp = Hasher{}.bytes("dynamic").bytes(name).finish();
+      macros_.emplace(d->name, std::move(d));
+    }
+  }
 
   Tree run(FileId main, std::string_view presumed) {
     Tree t;
@@ -102,6 +129,8 @@ private:
     u32 found_dir = includer_dir;
     std::string here;  // the directory of the real path
     std::string presumed;
+    std::string_view text;  // the file's physical text
+    std::vector<u32> line_starts;
     std::unique_ptr<lex::Source> src;
     lex::Tables tables;  // the lexer's scratch tables; tokens are moved to the session's
     std::vector<lex::LexDiagnostic> lex_diags;
@@ -119,6 +148,27 @@ private:
     std::unordered_set<u32> asked_macro;
     std::set<FileId> asked_once;
     std::set<FileId> asked_content;
+    std::unordered_set<u32> asked_defined;
+    bool asked_counter = false, counter_touched = false, asked_time = false;
+    u32 counter_entry = 0;
+    // [cpp.line]: the presumed line is the physical one plus `line_delta`; `presumed_name` replaces
+    // the presumed name.
+    std::int32_t line_delta = 0;
+    std::optional<std::string> presumed_name;
+    // Conditional inclusion ([cpp.cond]): the open groups, and whether a #if's expression is being
+    // replaced (where `defined` and the `__has_*` operators apply).
+    struct Cond {
+      bool taken = false;  // a group of this #if was included
+      bool in_else = false;
+      u32 offset = 0;      // of the #if
+    };
+    std::vector<Cond> conds;
+    bool in_condition = false;
+    u32 replacing_argument = 0;  // arguments being replaced ([cpp.subst]/1)
+    // The include guard: 0 nothing yet; 1 inside `#ifndef guard`'s group; 2 after its #endif; -1
+    // none.
+    int guard_stage = 0;
+    u32 guard = 0;
     std::vector<Question> asked_include;
     // Bindings: by name, and where each is as the includer sees it (the TU, for a root).
     std::unordered_map<u32, u32> binding_index;
@@ -155,12 +205,32 @@ private:
           return r;
         }
       }
+      // §B9: a guarded file included where its guard is defined is empty. That is a region too,
+      // whose one question is the guard's, so it is not read again.
+      for (const std::shared_ptr<const FileRegion>& r : it->second) {
+        // Not when skipping it again would say something (a diagnostic, a pragma).
+        if (!r->guard || !macros_.contains(*r->guard) || !r->diags.empty() || !r->passthrough.empty()) continue;
+        auto empty = std::make_shared<FileRegion>();
+        empty->file = file;
+        empty->presumed = key.presumed;
+        empty->content = c.fp;
+        empty->files = {file};
+        empty->file_names = {key.presumed};
+        empty->trace = {Question{Ask::defined, *r->guard, 0, 0, 0, Fp128{1, 0}}};
+        empty->guard = r->guard;
+        it->second.push_back(empty);
+        reuse(*empty);
+        ++s_->stats.reused;
+        return empty;
+      }
     }
     auto f = std::make_unique<Frame>();
     f->file = file;
     f->found_dir = found_dir;
     f->here = directory_of(s_->files.path(file));
     f->presumed = presumed;
+    f->text = c.text;
+    f->counter_entry = counter_;
     f->src = std::make_unique<lex::Source>(c.text, f->lex_diags);
     f->lexer = std::make_unique<lex::Lexer>(*f->src, f->tables, f->lex_diags);
     f->out.file = file;
@@ -206,6 +276,9 @@ private:
       const Files::Content* c = s_->files.content(FileId{q.a});
       return c ? c->fp : Fp128{};
     }
+    case Ask::defined: return Fp128{macros_.contains(q.a) ? 1u : 0u, 0};
+    case Ask::counter: return Fp128{counter_, 0};
+    case Ask::time: return time_answer();
     }
     std::unreachable();
   }
@@ -225,12 +298,26 @@ private:
       touch(m.name);
     }
     for (FileId f : r.once) mark_once(f);
+    if (r.counter > 0) {
+      counter_ += r.counter;
+      for (auto& fr : frames_) fr->counter_touched = true;
+    }
   }
 
   std::shared_ptr<const FileRegion> finish(Frame& f) {
     FileRegion& r = f.out;
-    for (const lex::LexDiagnostic& d : f.lex_diags) r.diags.push_back({0, d.offset, d.kind, d.args});
+    for (const lex::LexDiagnostic& d : f.lex_diags) r.diags.push_back({0, d.offset, d.kind, d.args, 0, std::nullopt});
     std::ranges::stable_sort(r.diags, {}, &Diag::offset);
+    // The presumed locations of this occurrence ([cpp.line]).
+    if (!r.lines.empty()) {
+      for (Diag& d : r.diags) {
+        auto l = std::ranges::upper_bound(r.lines, d.offset, {}, &FileRegion::Line::at);
+        if (l == r.lines.begin()) continue;
+        --l;
+        d.presumed_line = static_cast<u32>(static_cast<std::int64_t>(physical_line(f, d.offset)) + l->delta);
+        d.presumed_name = l->name;
+      }
+    }
     std::vector<u32> names(f.touched.begin(), f.touched.end());
     std::ranges::sort(names);
     for (u32 n : names) {
@@ -238,6 +325,7 @@ private:
       r.delta.push_back({n, it == macros_.end() ? nullptr : it->second});
     }
     r.once.assign(f.once_touched.begin(), f.once_touched.end());
+    r.counter = counter_ - f.counter_entry;
     r.fatal = fatal_;
     for (const Include& i : r.includes)
       if (i.region) r.depth = std::max(r.depth, i.region->depth + 1);
@@ -262,6 +350,17 @@ private:
         break;
       case Ask::content:
         if (!f.asked_content.insert(FileId{q.a}).second) continue;
+        break;
+      case Ask::defined:
+        if (f.touched.contains(q.a)) return;
+        if (!f.asked_defined.insert(q.a).second) continue;
+        break;
+      case Ask::counter:
+        if (f.counter_touched) return;
+        if (std::exchange(f.asked_counter, true)) continue;
+        break;
+      case Ask::time:
+        if (std::exchange(f.asked_time, true)) continue;
         break;
       case Ask::include:
         if (std::ranges::contains(f.asked_include, q)) continue;
@@ -311,18 +410,21 @@ private:
   // --- reading tokens --------------------------------------------------------------------------
 
   void report(Frame& f, u32 offset, lex::LexDiag kind, u64 a = 0, u64 b = 0) {
-    f.out.diags.push_back({0, offset, kind, {a, b}});
+    f.out.diags.push_back({0, offset, kind, {a, b}, 0, std::nullopt});
   }
   // At a token's site in the file: a replaced token is reported where its expansion began, but a
   // token written in a macro's argument where it is written.
-  void report(Frame& f, const PTok& at, lex::LexDiag kind, u64 a = 0, u64 b = 0) {
-    TokLoc l = at.loc;
+  void report(Frame& f, const PTok& at, lex::LexDiag kind, u64 a = 0, u64 b = 0) { report(f, written(f, at), kind, a, b); }
+  // Where a token is in the file: its site, but for a token written in a macro's argument where
+  // it is written.
+  static u32 written(const Frame& f, const PTok& t) {
+    TokLoc l = t.loc;
     while (l.expansion != 0) {
       const Expansion& e = f.out.expansions[l.expansion];
-      if (e.kind == ExpansionKind::argument && l.file == 0) return report(f, l.offset, kind, a, b);
+      if (e.kind == ExpansionKind::argument && l.file == 0) return l.offset;
       l = TokLoc{e.site_file, e.parent, e.site_offset};
     }
-    report(f, l.offset, kind, a, b);
+    return l.offset;
   }
   static u32 site(const Frame& f, const PTok& t) {
     TokLoc l = t.loc;
@@ -453,8 +555,17 @@ private:
     for (;;) {
       PTok t = read(f);
       if (t.tok.kind != Tk::identifier || t.painted) return t;
+      if (f.in_condition && (s_->spellings.name(t.tok.payload) == "defined" || condition_operator(t.tok.payload) != CondOp::none))
+        return condition(f, t);
+      // _Pragma is carried out on rescanning, not while an argument is replaced ([cpp.pragma.op]).
+      if (s_->spellings.name(t.tok.payload) == "_Pragma" && f.replacing_argument == 0) {
+        if (f.guard_stage != 1) f.guard_stage = -1;
+        pragma_operator(f, t);
+        continue;
+      }
       std::shared_ptr<const MacroDef> def = lookup(t.tok.payload);
       if (!def) return t;
+      if (def->dynamic != MacroDef::Dynamic::none) return dynamic(f, t, *def);
       if (f.active.contains(def->name)) {
         t.painted = true;
         return t;
@@ -469,7 +580,7 @@ private:
           return t;
         }
         args = std::move(*a);
-        replace(f, t, *def, args, site(f, close) + 1);
+        replace(f, t, *def, args, written(f, close) + 1);
         continue;
       }
       replace(f, t, *def, args, 0);
@@ -659,7 +770,9 @@ private:
     if (!a.replaced) {
       std::vector<PTok> toks = a.raw;
       for (PTok& t : toks) t.loc.expansion = ae;
+      ++f.replacing_argument;
       a.replaced = expand_line(f, std::move(toks));
+      --f.replacing_argument;
       a.tag = ae;
       return *a.replaced;
     }
@@ -835,33 +948,40 @@ private:
     for (;;) {
       PTok t = next(f);
       if (t.tok.kind == Tk::eof) break;
+      if (f.guard_stage != 1) f.guard_stage = -1;
       f.out.tokens.push_back(t);
     }
+    // [cpp.cond]/? each #if is matched by an #endif in the same file.
+    if (!fatal_)  // after a missing include, as Clang and GCC do, nothing more is reported
+      for (const Frame::Cond& c : f.conds) report(f, c.offset, lex::LexDiag::cond_unterminated);
+    f.conds.clear();
+    if (f.guard_stage == 2) f.out.guard = f.guard;
   }
 
   // --- directives ([cpp.pre]) ------------------------------------------------------------------
 
   void directive(Frame& f, const PTok& intro) {
-    if (intro.tok.kind != Tk::hash) {
-      // [cpp.module], [cpp.import]: the third part of #85.
-      report(f, intro, lex::LexDiag::directive_unsupported);
-      rest_of_line(f);
-      return;
-    }
+    if (intro.tok.kind != Tk::hash) return module_line(f, intro);
     PTok d = lex_next(f);
     if (!same_line(d)) {  // the null directive
       f.pending.push_front(d);
       return;
     }
     std::string_view word = d.tok.kind == Tk::identifier ? s_->spellings.name(d.tok.payload) : std::string_view();
+    // The include guard: only `#ifndef X` first, and its `#endif` last, at the outermost level;
+    // any other directive there means the file is more than its guarded group.
+    if (f.conds.empty() && !(f.guard_stage == 0 && word == "ifndef") && f.guard_stage != 1) f.guard_stage = -1;
     if (word == "include") return include(f, d, IncludeForm{false, false});
     if (word == "include_next") return include(f, d, IncludeForm{false, true});
     if (word == "define") return define(f, d);
     if (word == "undef") return undef(f, d);
     if (word == "pragma") return pragma(f, intro, d);
-    if (word == "if" || word == "ifdef" || word == "ifndef" || word == "elif" || word == "elifdef" ||
-        word == "elifndef" || word == "else" || word == "endif" || word == "line" || word == "error" ||
-        word == "warning" || word == "embed") {
+    if (word == "if" || word == "ifdef" || word == "ifndef") return cond_if(f, d, word);
+    if (word == "elif" || word == "elifdef" || word == "elifndef" || word == "else" || word == "endif")
+      return cond_else(f, d, word);
+    if (word == "line") return line_directive(f, d);
+    if (word == "error" || word == "warning") return diagnostic_directive(f, d, word == "error");
+    if (word == "embed") {
       report(f, d, lex::LexDiag::directive_unsupported);
       rest_of_line(f);
       return;
@@ -890,6 +1010,516 @@ private:
       return std::nullopt;
     }
     return n;
+  }
+
+  // --- dynamic macros, #line, #error, _Pragma, module lines --------------------------------------
+
+  Fp128 time_answer() const { return Hasher{}.bytes(s_->build_time.first).bytes(s_->build_time.second).finish(); }
+
+  // The physical line of an offset in the frame's file.
+  u32 physical_line(Frame& f, u32 offset) {
+    if (f.line_starts.empty()) f.line_starts = line_starts_of(f.text);
+    return static_cast<u32>(std::ranges::upper_bound(f.line_starts, offset) - f.line_starts.begin());
+  }
+  static std::vector<u32> line_starts_of(std::string_view text) {
+    std::vector<u32> starts{0};
+    for (std::size_t i = 0; i < text.size(); ++i)
+      if (text[i] == '\n' || (text[i] == '\r' && (i + 1 == text.size() || text[i + 1] != '\n')))
+        starts.push_back(static_cast<u32>(i + 1));
+    return starts;
+  }
+  static std::string quoted(std::string_view s) {
+    std::string out = "\"";
+    for (char c : s) {
+      if (c == '"' || c == '\\') out += '\\';
+      out += c;
+    }
+    return out + '"';
+  }
+
+  // [cpp.predefined]: the replacement of a dynamic macro, in an expansion of kind builtin at the
+  // name.
+  PTok dynamic(Frame& f, const PTok& name, const MacroDef& def) {
+    using enum MacroDef::Dynamic;
+    u32 e = static_cast<u32>(f.out.expansions.size());
+    f.out.expansions.push_back(Expansion{ExpansionKind::builtin, def.name, name.loc.expansion, name.loc.file, name.loc.offset,
+                                         name.loc.file, name.loc.offset, 0, 0});
+    std::string text;
+    switch (def.dynamic) {
+    case line: {
+      // The presumed line where the name's replacement ends: its own line, or that of the `)` of
+      // the outermost invocation that produced it, as Clang has it.
+      // Walking out: a token written in an argument is on its own line; one a function-like
+      // macro's replacement produced, on the line of that invocation's `)`.
+      u32 at = site(f, name);
+      for (TokLoc l = name.loc; l.expansion != 0;) {
+        const Expansion& x = f.out.expansions[l.expansion];
+        if (x.kind == ExpansionKind::argument && l.file == 0) {
+          at = l.offset;
+          break;
+        }
+        if (x.kind == ExpansionKind::function && x.operand_a != 0) {
+          at = x.operand_a - 1;
+          break;
+        }
+        l = TokLoc{x.site_file, x.parent, x.site_offset};
+      }
+      text = std::to_string(static_cast<std::int64_t>(physical_line(f, at)) + f.line_delta);
+      break;
+    }
+    case file: text = quoted(f.presumed_name ? *f.presumed_name : f.presumed); break;
+    case counter:
+      ask(Question{Ask::counter, 0, 0, 0, 0, Fp128{counter_, 0}});
+      text = std::to_string(counter_++);
+      for (auto& fr : frames_) fr->counter_touched = true;
+      break;
+    case date:
+    case time:
+      ask(Question{Ask::time, 0, 0, 0, 0, time_answer()});
+      text = def.dynamic == date ? s_->build_time.first : s_->build_time.second;
+      break;
+    case none: std::unreachable();
+    }
+    PTok t = lex_one(text).value();
+    t.tok.flags = u8(name.tok.flags & tok_flag::whitespace);
+    t.loc = TokLoc{name.loc.file, e, name.loc.offset};
+    return t;
+  }
+
+  // [cpp.line]: `#line digit-sequence "s-char-sequence"(opt)`, after macro replacement.
+  void line_directive(Frame& f, const PTok& d) {
+    std::vector<PTok> line = expand_line(f, rest_of_line(f));
+    auto digits = [&](const PTok& t) {
+      if (t.tok.kind != Tk::pp_number) return false;
+      const std::string& sp = s_->spellings.literal(t.tok.payload).spelling;
+      return !sp.empty() && std::ranges::all_of(sp, [](char c) { return c >= '0' && c <= '9'; });
+    };
+    if (line.empty() || !digits(line[0])) {
+      report(f, line.empty() ? d : line[0], lex::LexDiag::line_bad_number);
+      return;
+    }
+    const std::string& sp = s_->spellings.literal(line[0].tok.payload).spelling;
+    // [cpp.line]/3: from 1 to 2147483647.
+    unsigned long long v = 0;
+    auto [ptr, ec] = std::from_chars(sp.data(), sp.data() + sp.size(), v, 10);
+    if (ec != std::errc{} || v == 0 || v > 2147483647ull) {
+      report(f, line[0], lex::LexDiag::line_bad_number);
+      return;
+    }
+    std::optional<std::string> name;
+    std::size_t used = 1;
+    if (line.size() > 1) {
+      const PTok& s = line[1];
+      const std::string* lit = s.tok.kind == Tk::string_lit ? &s_->spellings.literal(s.tok.payload).spelling : nullptr;
+      if (!lit || !lit->starts_with('"') || !lit->ends_with('"')) {
+        report(f, s, lex::LexDiag::line_bad_name);
+        return;
+      }
+      std::string n;
+      for (std::size_t i = 1; i + 1 < lit->size(); ++i) {
+        if ((*lit)[i] == '\\' && i + 2 < lit->size()) ++i;
+        n += (*lit)[i];
+      }
+      name = std::move(n);
+      used = 2;
+    }
+    if (line.size() > used) {
+      report(f, line[used], lex::LexDiag::line_extra);
+      return;
+    }
+    // The line after the directive has the presumed number `v`.
+    u32 next = f.pending.empty() || f.pending.front().tok.kind == Tk::eof ? static_cast<u32>(f.text.size())
+                                                                          : f.pending.front().loc.offset;
+    u32 next_line = physical_line(f, site(f, d)) + 1;
+    f.line_delta = static_cast<std::int32_t>(v) - static_cast<std::int32_t>(next_line);
+    if (name) f.presumed_name = *name;
+    f.out.lines.push_back({next, f.line_delta, f.presumed_name ? std::optional(s_->spellings.name(*f.presumed_name)) : std::nullopt});
+  }
+
+  // [cpp.error]: `#error` is an error, `#warning` a warning; the message is the line's text.
+  void diagnostic_directive(Frame& f, const PTok& d, bool error) {
+    std::vector<PTok> line = rest_of_line(f);
+    std::string text;
+    for (const PTok& t : line) {
+      if (!text.empty() && t.tok.has(tok_flag::whitespace)) text += ' ';
+      text += spelling(t.tok, s_->spellings);
+    }
+    report(f, d, error ? lex::LexDiag::error_directive : lex::LexDiag::warning_directive, s_->spellings.name(text));
+  }
+
+  // [cpp.pragma.op]: `_Pragma ( string-literal )` is destringized and processed as a #pragma.
+  void pragma_operator(Frame& f, const PTok& op) {
+    PTok open = read(f);
+    PTok str = open.tok.kind == Tk::l_paren ? read(f) : open;
+    PTok close = str.tok.kind == Tk::string_lit ? read(f) : str;
+    const std::string* lit = str.tok.kind == Tk::string_lit ? &s_->spellings.literal(str.tok.payload).spelling : nullptr;
+    if (open.tok.kind != Tk::l_paren || !lit || close.tok.kind != Tk::r_paren || !(lit->starts_with('"') || lit->starts_with("L\""))) {
+      report(f, op, lex::LexDiag::pragma_operator_malformed);
+      // What was read but is not the operand is read again.
+      std::vector<PTok> back;
+      if (open.tok.kind != Tk::l_paren) back = {open};
+      else if (!lit) back = {str};
+      else back = {close};
+      f.contexts.push_back(Context{std::move(back), 0, std::nullopt, false});
+      return;
+    }
+    std::string_view body(*lit);
+    body.remove_prefix(body.starts_with('L') ? 2 : 1);
+    body.remove_suffix(1);
+    std::string text;
+    for (std::size_t i = 0; i < body.size(); ++i) {
+      if (body[i] == '\\' && i + 1 < body.size() && (body[i + 1] == '"' || body[i + 1] == '\\')) ++i;
+      text += body[i];
+    }
+    std::vector<PTok> toks = lex_all(text);
+    for (PTok& t : toks) t.loc = op.loc;
+    if (!toks.empty() && toks[0].tok.kind == Tk::identifier && s_->spellings.name(toks[0].tok.payload) == "once") {
+      if (frames_.size() == 1) report(f, op, lex::LexDiag::pragma_once_in_main);
+      else mark_once(f.file);
+      return;
+    }
+    Passthrough p{static_cast<u32>(f.out.tokens.size()), {}};
+    p.tokens.push_back(PTok{Tok{Tk::hash, tok_flag::line_start, 0}, op.loc, false});
+    p.tokens.push_back(PTok{Tok{Tk::identifier, 0, s_->spellings.name("pragma")}, op.loc, false});
+    if (!toks.empty()) toks[0].tok.flags |= tok_flag::space_before;
+    p.tokens.insert(p.tokens.end(), toks.begin(), toks.end());
+    f.out.passthrough.push_back(std::move(p));
+  }
+
+  // The preprocessing tokens of a text, in the session's spellings.
+  std::vector<PTok> lex_all(std::string_view text) {
+    std::vector<lex::LexDiagnostic> diags;
+    lex::Source src(text, diags);
+    lex::Tables tables;
+    lex::Lexer lx(src, tables, diags);
+    std::vector<PTok> out;
+    for (lex::PpToken t = lx.next(); t.tok.kind != Tk::eof; t = lx.next()) {
+      PTok p{t.tok, {}, false};
+      p.tok.flags &= u8(tok_flag::alt | tok_flag::space_before);
+      switch (t.tok.kind) {
+      case Tk::identifier: p.tok.payload = s_->spellings.name(tables.names[t.tok.payload]); break;
+      case Tk::pp_number:
+      case Tk::char_lit:
+      case Tk::string_lit: {
+        Literal l = tables.literals[t.tok.payload];
+        if (l.ud_suffix != lex::no_name) l.ud_suffix = s_->spellings.name(tables.names[l.ud_suffix]);
+        p.tok.payload = s_->spellings.literal(std::move(l));
+        break;
+      }
+      default: break;
+      }
+      out.push_back(p);
+    }
+    return out;
+  }
+
+  // [cpp.module], [cpp.import]: a module or import directive's tokens go on to phase 7. The module
+  // name is not replaced, and must be followed by `;` or `[`; what follows it is replaced. A header
+  // unit import is not supported yet.
+  void module_line(Frame& f, const PTok& intro) {
+    f.guard_stage = -1;
+    std::vector<PTok> line = rest_of_line(f);
+    line.insert(line.begin(), intro);
+    std::size_t i = is_name(line[0], "export") ? 1 : 0;
+    for (std::size_t k = 0; k <= i; ++k) line[k].tok.flags |= tok_flag::directive;
+    std::size_t rest = line.size();
+    if (is_name(line[i], "import")) {
+      if (i + 1 < line.size() && line[i + 1].tok.kind == Tk::header_name) {
+        report(f, line[i + 1], lex::LexDiag::header_unit_unsupported);
+        return;
+      }
+      rest = i + 1;
+    } else {
+      std::size_t k = i + 1;
+      auto name_part = [&] {  // identifier ( . identifier )*
+        for (;;) {
+          if (k >= line.size() || line[k].tok.kind != Tk::identifier) return false;
+          if (auto def = lookup(line[k].tok.payload); def && !def->function_like) report(f, line[k], lex::LexDiag::module_name_macro);
+          ++k;
+          if (k < line.size() && line[k].tok.kind == Tk::period) ++k;
+          else return true;
+        }
+      };
+      if (k < line.size() && line[k].tok.kind == Tk::semi) {
+        rest = k;  // `module ;`
+      } else if (k + 1 < line.size() && line[k].tok.kind == Tk::colon && is_name(line[k + 1], "private")) {
+        rest = k + 2;  // `module : private`
+      } else if (name_part() && (k >= line.size() || line[k].tok.kind != Tk::colon || (++k, name_part()))) {
+        rest = k;
+        // [cpp.module]: the name is followed by `;` or `[`, after replacement, perhaps on a later
+        // line.
+        std::vector<PTok> tail(line.begin() + std::ptrdiff_t(k), line.end());
+        std::vector<PTok> replaced = expand_line(f, tail);
+        const PTok& after = !replaced.empty() ? replaced[0] : peek(f, 0);
+        if (after.tok.kind != Tk::semi && after.tok.kind != Tk::l_square) report(f, after, lex::LexDiag::module_name_end);
+      } else {
+        report(f, k < line.size() ? line[k] : line.back(), lex::LexDiag::module_name_end);
+        rest = std::min(k, line.size());
+      }
+    }
+    for (std::size_t k = 0; k < rest && k < line.size(); ++k) f.out.tokens.push_back(line[k]);
+    std::vector<PTok> tail(line.begin() + std::ptrdiff_t(std::min(rest, line.size())), line.end());
+    for (PTok& t : expand_line(f, std::move(tail))) f.out.tokens.push_back(t);
+  }
+
+  // --- conditional inclusion ([cpp.cond]) -----------------------------------------------------
+
+  // `#if`, `#ifdef`, `#ifndef`: a group, included if its condition holds, else skipped to the
+  // next `#elif`, `#else` or `#endif` of the same level.
+  void cond_if(Frame& f, const PTok& d, std::string_view word) {
+    std::vector<PTok> line = rest_of_line(f);
+    bool v = word == "if" ? evaluate(f, d, std::move(line)) : test_defined(f, d, line, word == "ifndef");
+    if (word == "ifndef" && f.guard_stage == 0 && f.conds.empty() && line.size() == 1 && line[0].tok.kind == Tk::identifier) {
+      f.guard_stage = 1;
+      f.guard = line[0].tok.payload;
+    } else if (f.conds.empty()) {
+      f.guard_stage = -1;
+    }
+    f.conds.push_back({v, false, site(f, d)});
+    if (!v) skip_groups(f);
+  }
+
+  // `#ifdef`, `#ifndef`, `#elifdef`, `#elifndef`: whether the name is (`!negate`) a macro.
+  bool test_defined(Frame& f, const PTok& d, const std::vector<PTok>& line, bool negate) {
+    if (line.empty() || line[0].tok.kind != Tk::identifier) {
+      report(f, line.empty() ? d : line[0], lex::LexDiag::macro_name_missing);
+      return false;
+    }
+    extra_tokens(f, line, 1);
+    return is_defined(line[0].tok.payload) != negate;
+  }
+
+  // `defined X` ([cpp.cond]/? ): the operators `__has_include` and the like count as defined.
+  bool is_defined(u32 name) {
+    if (condition_operator(name) != CondOp::none) return true;
+    bool v = macros_.contains(name);
+    ask(Question{Ask::defined, name, 0, 0, 0, Fp128{v ? 1u : 0u, 0}});
+    return v;
+  }
+
+  // `#elif`, `#elifdef`, `#elifndef`, `#else`, `#endif` reached in an included group: the group
+  // ends, and the rest of the #if is skipped.
+  void cond_else(Frame& f, const PTok& d, std::string_view word) {
+    if (f.conds.empty()) {
+      report(f, d, word == "endif" ? lex::LexDiag::cond_endif_without_if : lex::LexDiag::cond_else_without_if);
+      rest_of_line(f);
+      return;
+    }
+    Frame::Cond& c = f.conds.back();
+    if (word == "endif") {
+      extra_tokens(f, rest_of_line(f), 0);
+      f.conds.pop_back();
+      if (f.conds.empty() && f.guard_stage == 1) f.guard_stage = 2;
+      return;
+    }
+    if (f.conds.size() == 1 && f.guard_stage == 1) f.guard_stage = -1;
+    if (c.in_else) report(f, d, word == "else" ? lex::LexDiag::cond_else_after_else : lex::LexDiag::cond_elif_after_else);
+    if (word == "else") {
+      extra_tokens(f, rest_of_line(f), 0);
+      c.in_else = true;
+    } else {
+      rest_of_line(f);  // not evaluated: a group was taken
+    }
+    skip_groups(f);
+  }
+
+  // Skips the lines of groups not included, up to the group to include or the #if's `#endif`.
+  // Only conditional directives are looked at. Skipped lines are still lexed, and what phase 3
+  // reports there stands ([lex.pptoken]/2: an unmatched ' is ill-formed, skipped or not).
+  void skip_groups(Frame& f) {
+    std::size_t depth = 0;
+    for (;;) {
+      if (fatal_) return;
+      PTok t = lex_next(f);
+      if (t.tok.kind == Tk::eof) {
+        f.pending.push_front(t);
+        return;
+      }
+      auto skip_line = [&] { rest_of_line(f); };
+      if (t.tok.kind != Tk::hash || !t.tok.has(tok_flag::line_start)) {
+        skip_line();
+        continue;
+      }
+      PTok d = lex_next(f);
+      if (!same_line(d)) {
+        f.pending.push_front(d);
+        continue;
+      }
+      std::string_view word = d.tok.kind == Tk::identifier ? s_->spellings.name(d.tok.payload) : std::string_view();
+      if (word == "if" || word == "ifdef" || word == "ifndef") {
+        ++depth;
+        skip_line();
+        continue;
+      }
+      if (depth > 0) {
+        if (word == "endif") --depth;
+        skip_line();
+        continue;
+      }
+      Frame::Cond& c = f.conds.back();
+      if (word == "endif") {
+        extra_tokens(f, rest_of_line(f), 0);
+        f.conds.pop_back();
+        if (f.conds.empty() && f.guard_stage == 1) f.guard_stage = 2;
+        return;
+      }
+      if (word != "else" && word != "elif" && word != "elifdef" && word != "elifndef") {
+        skip_line();
+        continue;
+      }
+      if (f.conds.size() == 1 && f.guard_stage == 1) f.guard_stage = -1;
+      if (c.in_else) report(f, d, word == "else" ? lex::LexDiag::cond_else_after_else : lex::LexDiag::cond_elif_after_else);
+      if (word == "else") {
+        extra_tokens(f, rest_of_line(f), 0);
+        c.in_else = true;
+        if (!c.taken) {
+          c.taken = true;
+          return;
+        }
+        continue;
+      }
+      std::vector<PTok> line = rest_of_line(f);
+      if (c.taken) continue;  // [cpp.cond]/? not evaluated once a group was included
+      bool v = word == "elif" ? evaluate(f, d, std::move(line)) : test_defined(f, d, line, word == "elifndef");
+      if (v) {
+        c.taken = true;
+        return;
+      }
+    }
+  }
+
+  // [cpp.cond]/12–14: the line macro-replaced, with `defined` and the `__has_*` operators
+  // applied where they occur, then evaluated.
+  bool evaluate(Frame& f, const PTok& d, std::vector<PTok> line) {
+    bool saved = std::exchange(f.in_condition, true);
+    std::vector<PTok> toks = expand_line(f, std::move(line));
+    f.in_condition = saved;
+    if (toks.empty()) {
+      report(f, d, lex::LexDiag::cond_empty);
+      return false;
+    }
+    Condition c(toks, s_->spellings, s_->config.target->char_signed, [&](const PTok& at, lex::LexDiag k) { report(f, at, k); });
+    return c.run().value_or(false);
+  }
+
+  // The operators of a #if expression that are not macros ([cpp.cond]/1).
+  enum class CondOp { none, defined, has_include, has_include_next, has_embed, has_attribute };
+  CondOp condition_operator(u32 name) const {
+    std::string_view n = s_->spellings.name(name);
+    if (n == "__has_include") return CondOp::has_include;
+    if (n == "__has_include_next") return CondOp::has_include_next;
+    if (n == "__has_embed") return CondOp::has_embed;
+    // DECISIONS §1.5: ycxx's tables have no attribute, builtin or feature yet.
+    if (n == "__has_cpp_attribute" || n == "__has_attribute" || n == "__has_c_attribute" || n == "__has_builtin" ||
+        n == "__has_feature" || n == "__has_extension")
+      return CondOp::has_attribute;
+    return CondOp::none;
+  }
+
+  // A number for a #if expression.
+  PTok number_token(const PTok& at, u64 v) {
+    Literal l;
+    l.spelling = std::to_string(v);
+    return PTok{Tok{Tk::pp_number, u8(at.tok.flags & tok_flag::whitespace), s_->spellings.literal(std::move(l))}, at.loc, false};
+  }
+
+  // Applies `defined` or a `__has_*` operator whose name `t` was read in a #if expression; its
+  // operand is read unreplaced (or, for a header, replaced if it is not one already).
+  PTok condition(Frame& f, const PTok& t) {
+    std::string_view n = s_->spellings.name(t.tok.payload);
+    if (n == "defined") {
+      PTok a = read(f);
+      bool paren = a.tok.kind == Tk::l_paren;
+      if (paren) a = read(f);
+      if (a.tok.kind != Tk::identifier) {
+        report(f, a.tok.kind == Tk::eof ? t : a, lex::LexDiag::cond_defined_operand);
+        return number_token(t, 0);
+      }
+      if (paren) {
+        PTok close = read(f);
+        if (close.tok.kind != Tk::r_paren) report(f, close.tok.kind == Tk::eof ? a : close, lex::LexDiag::cond_expected_rparen);
+      }
+      return number_token(t, is_defined(a.tok.payload) ? 1 : 0);
+    }
+    // `__has_x ( balanced tokens )`.
+    PTok open = read(f);
+    if (open.tok.kind != Tk::l_paren) {
+      report(f, open.tok.kind == Tk::eof ? t : open, lex::LexDiag::cond_expected_lparen);
+      return number_token(t, 0);
+    }
+    std::vector<PTok> operand;
+    for (std::size_t depth = 0;;) {
+      PTok a = read(f);
+      if (a.tok.kind == Tk::eof) {
+        report(f, t, lex::LexDiag::cond_expected_rparen);
+        return number_token(t, 0);
+      }
+      if (a.tok.kind == Tk::l_paren) ++depth;
+      if (a.tok.kind == Tk::r_paren && depth-- == 0) break;
+      operand.push_back(a);
+    }
+    CondOp op = condition_operator(t.tok.payload);
+    if (op == CondOp::has_attribute) return number_token(t, 0);
+    // [cpp.cond]/? the header, as for #include: a string literal, `<...>`, or tokens that become
+    // one after replacement.
+    if (operand.empty() || (operand[0].tok.kind != Tk::string_lit && operand[0].tok.kind != Tk::less))
+      operand = expand_line(f, std::move(operand));
+    std::size_t used = 0;
+    std::string spelled = header_spelling(operand, used);
+    if (spelled.empty()) {
+      report(f, operand.empty() ? t : operand[0], lex::LexDiag::include_expected);
+      return number_token(t, 0);
+    }
+    IncludeForm form{spelled.starts_with('<'), op == CondOp::has_include_next};
+    std::string_view header = std::string_view(spelled).substr(1, spelled.size() - 2);
+    auto r = resolve(s_->files, s_->config, header, form, f.here, f.found_dir);
+    ask(Question{Ask::include, s_->spellings.name(spelled), u32(form.angled) | u32(form.next) << 1,
+                 std::to_underlying(f.file), f.found_dir, include_answer(r)});
+    if (op != CondOp::has_embed) return number_token(t, r ? 1 : 0);
+    // [cpp.embed]: found (1), or found and empty (2), here with the limit parameter only.
+    if (!r) return number_token(t, 0);
+    const Files::Content* c = s_->files.content(r->file);
+    ask(Question{Ask::content, std::to_underlying(r->file), 0, 0, 0, c ? c->fp : Fp128{}});
+    bool empty = !c || c->text.empty();
+    for (std::size_t i = used; i + 1 < operand.size(); ++i) {
+      if (operand[i].tok.kind != Tk::identifier || s_->spellings.name(operand[i].tok.payload) != "limit" ||
+          operand[i + 1].tok.kind != Tk::l_paren)
+        continue;
+      std::vector<PTok> limit;
+      std::size_t depth = 0, j = i + 2;
+      for (; j < operand.size(); ++j) {
+        if (operand[j].tok.kind == Tk::l_paren) ++depth;
+        if (operand[j].tok.kind == Tk::r_paren && depth-- == 0) break;
+        limit.push_back(operand[j]);
+      }
+      Condition lc(expand_line(f, std::move(limit)), s_->spellings, s_->config.target->char_signed,
+                   [&](const PTok& at, lex::LexDiag k) { report(f, at, k); });
+      if (lc.run() == false) empty = true;
+    }
+    return number_token(t, empty ? 2 : 1);
+  }
+
+  // A header name from tokens: a string literal, or the spellings between `<` and `>` joined
+  // where they were apart ([cpp.include]/4); empty if they form none. `used` counts its tokens.
+  std::string header_spelling(const std::vector<PTok>& line, std::size_t& used) {
+    used = 0;
+    if (line.empty()) return {};
+    if (line[0].tok.kind == Tk::string_lit) {
+      const std::string& sp = s_->spellings.literal(line[0].tok.payload).spelling;
+      if (!sp.starts_with('"')) return {};
+      used = 1;
+      return sp;
+    }
+    if (line[0].tok.kind != Tk::less) return {};
+    std::string spelled = "<";
+    std::size_t i = 1;
+    for (; i < line.size() && line[i].tok.kind != Tk::greater; ++i) {
+      if (i > 1 && line[i].tok.has(tok_flag::space_before)) spelled += ' ';
+      spelled += spelling(line[i].tok, s_->spellings);
+    }
+    if (i == line.size() || i == 1) return {};
+    used = i + 1;
+    return spelled + '>';
   }
 
   // [cpp.replace.general]
@@ -1050,23 +1680,7 @@ private:
       f.pending.push_front(h);
       line = expand_line(f, rest_of_line(f));
       std::size_t used = 0;
-      if (!line.empty() && line[0].tok.kind == Tk::string_lit && s_->spellings.literal(line[0].tok.payload).spelling.starts_with('"')) {
-        spelled = s_->spellings.literal(line[0].tok.payload).spelling;
-        used = 1;
-      } else if (!line.empty() && line[0].tok.kind == Tk::less) {
-        spelled = "<";
-        std::size_t i = 1;
-        for (; i < line.size() && line[i].tok.kind != Tk::greater; ++i) {
-          if (i > 1 && line[i].tok.has(tok_flag::space_before)) spelled += ' ';
-          spelled += spelling(line[i].tok, s_->spellings);
-        }
-        if (i < line.size()) {
-          spelled += '>';
-          used = i + 1;
-        } else {
-          spelled.clear();
-        }
-      }
+      spelled = header_spelling(line, used);
       if (spelled.size() < 3) {
         report(f, line.empty() ? d : line[0], lex::LexDiag::include_expected);
         return;
@@ -1143,6 +1757,7 @@ private:
   }
 
   Session* s_;
+  u32 counter_ = 0;  // `__COUNTER__`
   u32 va_args_ = s_->spellings.name("__VA_ARGS__");
   u32 va_opt_ = s_->spellings.name("__VA_OPT__");
   std::vector<std::unique_ptr<Frame>> frames_;

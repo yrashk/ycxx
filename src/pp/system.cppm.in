@@ -7,6 +7,11 @@ import std;
 
 export namespace ycxx::pp {
 
+// ycxx's version, for `__ycxx_major__` and its siblings.
+inline constexpr int version_major = @PROJECT_VERSION_MAJOR@;
+inline constexpr int version_minor = @PROJECT_VERSION_MINOR@;
+inline constexpr int version_patch = @PROJECT_VERSION_PATCH@;
+
 std::vector<std::string> system_dirs() {
   std::vector<std::string> dirs{"@YCXX_LIBYCXX_INCLUDE@", "@YCXX_LIBYCXX_GENERATED_INCLUDE@"};
   std::string sdk = "@CMAKE_OSX_SYSROOT@";

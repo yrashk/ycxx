@@ -35,6 +35,8 @@ in [GitHub issues](https://github.com/yrashk/ycxx/issues) and the
     `#include_next`) and `#pragma once`;
   - object-like and function-like macros (`#define`, `#undef`, `-D`, `-U`), with `#`, `##`,
     `__VA_ARGS__` and `__VA_OPT__`;
+  - `#if` and the other conditionals, `#line`, `#error`, `#warning`, `_Pragma`, and the
+    predefined macros (`__ycxx__`, the target's, `__LINE__`, `__FILE__`, `__COUNTER__`, …);
   - `ycxx cxx -E` prints what Clang's `-E` does.
 - A resident daemon, opt-in (2026-11-18): with `YCXX_DAEMON=1`, `ycxx cxx` sends its command
   line to a per-project `ycxx daemon`, starting one if needed. The daemon watches the files it
@@ -50,9 +52,8 @@ build/bin/ycxx cxx hello.cpp -o hello && ./hello
 ```
 
 **Not yet:**
-- The rest of the preprocessor: `#if` and the other conditionals, `#line`, `#error`,
-  `_Pragma`, and the predefined macros. Without conditionals, system headers
-  such as `<cstdio>` cannot be included yet.
+- `#embed`, and the standard library's headers: `<cstdio>` now preprocesses, but libycxx does
+  not yet know ycxx (yrashk/libycxx#17), and sema lacks namespaces.
 - Classes, templates and overloading.
 - `if constexpr`, and taking the address of a variable in a namespace-scope initializer
   (`int* p = &g;` passes the front end but not code generation yet).
