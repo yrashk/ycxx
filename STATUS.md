@@ -262,7 +262,7 @@ one import `ycxx.ast`; unit tests in `tests/unit/ast` (run by ctest, see docs/TE
   references and functions, pushed into array elements, the canonical form interned at once) and
   the `const` reads `canonical` and `same_type`.
 - **The `values` interner**: `VInt` (bool, character and integer values as 128-bit two's
-  complement, normalized to the type), `VNullptr`, and the dependent family's shape: kinds marked
+  complement, normalized to the type), `VNullptr`, `VString` and `VLvalue` (added by #41), and the dependent family's shape: kinds marked
   `[[=dependent]]` (`VDepParam`, `VDepFnParam`), `Values::is_dependent`.
 - **Targets** (`target.cppm`): sizes, alignments and floating formats of the fundamental types,
   `char` signedness, the character types' underlying types; `aarch64_darwin` and `x86_64_linux`.
@@ -275,6 +275,40 @@ one import `ycxx.ast`; unit tests in `tests/unit/ast` (run by ctest, see docs/TE
 - Compaction keeps every type and constant, and rewrites the lists they hold.
 - Not yet: classes, enums, member pointers, template arguments, the dependent type kinds and the
   rest of `VDep*`, floating constants, sugar other than typedefs, `substitute`.
+
+## Parser and sema for the α subset (#41)
+
+`src/parse/` (`ycxx.parse`) and `src/sema/` (`ycxx.sema`); unit test `unit.sema`, own tests
+`tests/own/c0`. `ycxx -fsyntax-only a.cpp` checks a file in-process and renders
+`file:line:col: error:` diagnostics; `syntax` is in `tests/features/ycxx.txt`.
+
+- **The parser analyses as it parses** (ast.md §3.2): recursive descent with one function per
+  [gram] production, over one part of one item, calling sema's actions.
+- **Per-item queries** (§3.6): `item_sema(item)` gives an `ItemSema` whose `decls` follow the
+  skeleton's ordinals, so `decl_sema(DeclId)` is `decls[ord]`; `analyze_body(item)` gives a
+  `BodySema` whose first locals are the parameters. `parse::Program` stands in for the engine
+  context until #16: it memoizes the cells for one TU and answers `visible_decls(::, name, at
+  item)` from the skeletons.
+- **The subset:** declarations of functions and variables (`extern "C"` and linkage blocks,
+  `static`, `const`, `extern`, redeclarations sharing an entity, `main`'s rules); the C0
+  statements; every C0 operator with its precedence, the usual arithmetic conversions, promotions,
+  value categories and lvalue-to-rvalue conversion as explicit nodes; calls; unqualified lookup in
+  block and namespace scope; string literals, `const char*`, indirection, subscripts and pointer
+  arithmetic. Namespace-scope initializers and array bounds are folded to constants (`Folder`).
+- **Trees:** the node kinds `LocalRef`, `Conditional`, `While`, `Do`, `For`, `Break`, `Continue`,
+  `DeclStmt`, `Declarator`, `DeclGroup`, `Assign.computation` and more `ConversionKind`s are in
+  `ycxx.ast.nodes`. `VString` and `VLvalue` are in `ycxx.ast.values`.
+- **Diagnostics** are values located at `(item, token offset)`; what lies beyond the subset is
+  diagnosed as "not supported yet" where the grammar meets it, and members of classes and
+  namespaces are not analysed.
+- **Stand-in:** entities are a side table in `ycxx.sema:types` behind the AST core's
+  fingerprint-only `entities` placeholder, until #33 has them.
+- `tests/features/ycxx.xfail` lists the 679 tests ycxx is expected to fail (classes, templates,
+  directives, …), with its first diagnostic as the reason; an XPASS fails the run, and an XFAIL
+  never covers a crash. No draft example crashes or hangs ycxx.
+- Not yet: overloading, classes, namespaces, templates, references, floating types, casts,
+  `sizeof`, `switch`, braced initialization, dynamic initialization at namespace scope, default
+  arguments, block-scope statics.
 
 ## Bootstrap workarounds
 

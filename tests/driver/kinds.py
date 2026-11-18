@@ -25,6 +25,7 @@ from .transcript import Transcript
 class Unsupported(Exception): pass
 class Unresolved(Exception): pass
 class Failed(Exception): pass
+class Crashed(Failed): pass  # never expected: an XFAIL does not cover a crash
 class TimedOut(Exception): pass
 
 
@@ -106,7 +107,7 @@ def run_verify(test, ctx, tr, flags, timeout):
     problems, actual = verdict_problems(ctx, r, expected, test.path.parent)
     tr.check(f'{len(expected)} error location(s) expected, {len(actual)} error(s) reported')
     if problems:
-        raise Failed('; '.join(problems))
+        raise (Crashed if crashed(r.status) else Failed)('; '.join(problems))
 
 
 # --- preprocess -------------------------------------------------------------------------------
@@ -287,6 +288,9 @@ def execute(test, ctx):
     except Unresolved as e:
         code = 'UNRESOLVED'
         tr.note(f'UNRESOLVED: {e}')
+    except Crashed as e:
+        code = 'CRASH'  # becomes FAIL below, never XFAIL
+        tr.note(f'FAIL: {e}')
     except Failed as e:
         code = 'FAIL'
         tr.note(f'FAIL: {e}')
@@ -296,7 +300,9 @@ def execute(test, ctx):
     except (OSError, ValueError) as e:
         code = 'UNRESOLVED'
         tr.note(f'UNRESOLVED: {type(e).__name__}: {e}')
-    why = xfail_reason(test, ctx.cut.name) if code in ('PASS', 'FAIL') else None
+    why = (xfail_reason(test, ctx.cut.name) or ctx.cut.xfail.get(test.id)) if code in ('PASS', 'FAIL') else None
+    if code == 'CRASH':
+        code = 'FAIL'
     if why:
         code = 'XFAIL' if code == 'FAIL' else 'XPASS'
         tr.note(f'{"expected to fail" if code == "XFAIL" else "XPASS: passed but marked XFAIL"}: {why}')

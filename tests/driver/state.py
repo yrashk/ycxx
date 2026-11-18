@@ -129,7 +129,7 @@ def affected(changed, tests):
     by_path = {f'tests/{t.id}': t for t in tests}
     picked, other = {}, []
     for f in changed:
-        if f.startswith('tests/driver/') or f in ('tools/test', 'tests/features/ycxx.txt'):
+        if f.startswith('tests/driver/') or f in ('tools/test', 'tests/features/ycxx.txt', 'tests/features/ycxx.xfail'):
             return list(tests), f'the driver or ycxx\'s features changed ({f})'
         t = by_path.get(f) or by_path.get(f.removesuffix('.stdout'))
         if t:

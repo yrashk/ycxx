@@ -28,6 +28,7 @@ enum class Diag : std::uint32_t {
   expected_declarator [[=message{Severity::error, "expected a declarator"}]],
   expected_unqualified_id [[=message{Severity::error, "expected an identifier"}]],
   unexpected_token [[=message{Severity::error, "unexpected '{0:k}'"}]],
+  unexpected_identifier [[=message{Severity::error, "unexpected identifier '{0:n}'"}]],
   not_supported [[=message{Severity::error, "'{0:k}' is not supported yet"}]],
   // [dcl.spec], [dcl.type]
   duplicate_specifier [[=message{Severity::error, "duplicate '{0:k}'"}]],
@@ -36,6 +37,7 @@ enum class Diag : std::uint32_t {
   // [dcl.decl], [dcl.fct], [dcl.init]
   void_variable [[=message{Severity::error, "variable '{0:n}' has incomplete type 'void'"}]],
   void_parameter [[=message{Severity::error, "a parameter cannot have type 'void'"}]],
+  invalid_array_element [[=message{Severity::error, "an array element cannot have type '{0:t}'"}]],
   function_returns_function [[=message{Severity::error, "a function cannot return a function or an array"}]],
   function_initialized [[=message{Severity::error, "function '{0:n}' cannot have an initializer"}]],
   const_uninitialized [[=message{Severity::error, "const variable '{0:n}' must be initialized"}]],

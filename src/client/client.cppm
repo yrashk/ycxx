@@ -26,7 +26,9 @@ int cxx(std::span<const std::string_view> args) {
   std::vector<std::string_view> files;
   for (std::string_view a : args) {
     if (a == "-fsyntax-only") syntax_only = true;
-    else if (a.starts_with("-std=") || a == "-pedantic-errors") continue;
+    // The language is C++26 with reflection and contracts; what other compilers need flags for
+    // is always on here.
+    else if (a.starts_with("-std=") || a == "-pedantic-errors" || a == "-freflection" || a == "-fcontracts") continue;
     else if (a.starts_with("-")) {
       std::println(std::cerr, "ycxx: unsupported option '{}'", a);
       return 2;

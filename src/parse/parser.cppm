@@ -270,7 +270,8 @@ public:
       l.named = true;
       l.name_at = pos();
       bump();
-    } else if (is(Tk::l_paren) && (kind(1) == Tk::star || kind(1) == Tk::l_paren || kind(1) == Tk::identifier)) {
+    } else if (is(Tk::l_paren) && (kind(1) == Tk::star || kind(1) == Tk::amp || kind(1) == Tk::ampamp ||
+                                   kind(1) == Tk::l_paren || kind(1) == Tk::identifier)) {
       // [dcl.ambig.res]: `(` begins a nested declarator when a parameter list cannot start here.
       bump();
       l.inner = std::make_unique<Level>(level(abstract, ok));
@@ -294,6 +295,11 @@ public:
       } else if (is(Tk::l_square)) {
         u32 at = pos();
         bump();
+        if (is(Tk::l_square)) {
+          s_->diag(at, Diag::not_supported, Tk::l_square);  // an attribute-specifier
+          ok = false;
+          return l;
+        }
         if (is(Tk::r_square)) {
           s_->diag(at, Diag::not_supported, Tk::l_square);  // an unknown bound
           ok = false;
@@ -335,6 +341,11 @@ public:
         for (const Param& p : s->params) ps.push_back(p.type);
         t = s_->types().function(t, ps, s->variadic, linkage_);
         fn = &*s;
+      } else if (!s_->types().is_object(t) || s->bound == 0) {
+        // [dcl.array]: the element type is an object type; an array of functions or of void is
+        // ill-formed.
+        if (s->bound != 0) s_->diag(d.begin, Diag::invalid_array_element, t);
+        d.ok = false;
       } else {
         t = s_->types().array(t, s->bound);
       }

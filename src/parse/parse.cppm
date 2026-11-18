@@ -259,7 +259,8 @@ private:
     if (!is_function_def) {
       if (!ps_.expect(Tk::semi)) bad();
     } else if (!ps_.at_end()) {
-      s_.diag(ps_.pos(), Diag::unexpected_token, ps_.kind());
+      if (ps_.is(Tk::identifier)) s_.diag(ps_.pos(), Diag::unexpected_identifier, ps_.name_of(ps_.tok()));
+      else s_.diag(ps_.pos(), Diag::unexpected_token, ps_.kind());
     }
   }
 
