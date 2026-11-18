@@ -30,6 +30,24 @@ What is true of the code today. Work in progress and its owners are tracked in
 - AST design accepted: [`docs/design/ast.md`](docs/design/ast.md) (#2), summarized in DECISIONS
   §4.9. A throwaway spike is in `spikes/ast/`: a reflection-derived node schema, hash-consing,
   the red view and type canonicalization.
+- L1 IR (#23) in `src/ir/` (module `ycxx.ir`), as [`optimization.md`](docs/design/optimization.md)
+  §2.1–§2.4 define it:
+  - The op table is the enumerators of `ir::Op`, each annotated with an `OpSpec` (node class,
+    operand and result kinds, immediates, successors, accepted flags, traits); `op_table` is built
+    from them by reflection. `eval_table<Impl, F>()` is the L1 evaluator hook: it gathers an
+    evaluator's static members named after the ops, and with `complete` a missing op does not
+    compile.
+  - `Builder::finish` canonicalizes a body (blocks in reverse post-order, nodes in operand order,
+    readers of a state before the node that moves it on, dense ids) and `verify` checks it against
+    the table, dominance and the single state chain. `fingerprint` hashes the canonical body,
+    with handles hashed through their own fingerprints. `FunctionDebug` and `OriginMap`
+    (compose, remap) hold positions apart from the body.
+  - A text printer and parser round-trip every op (`tests/unit/ir`, run by ctest).
+  - Stand-ins until their owners land: `fingerprint128` (`src/ir/fingerprint.cppm`, #14) and the
+    handles `EntityId`, `QualType`, `ConstId`, `LocalId`, `Loc` (`src/ir/handles.cppm`, #32, #33).
+    Types print as `T<n>`.
+- Unit tests live in `tests/unit/` and run under ctest, so `tools/build` and `tools/test`'s build
+  stage run them.
 
 ## Bootstrap workarounds
 
@@ -45,6 +63,10 @@ miscompiles it (DECISIONS §3.2). Each is removed once ycxx compiles itself.
   - Fix: belongs in libycxx (yrashk/libycxx#4, which has a 10-line repro and a tested
     workaround). Then bump the submodule and drop `_xfail_execution` in
     `tests/bootstrap/CMakeLists.txt`.
+- **A defaulted hidden-friend `operator==` of an exported class crashes GCC 16.2** in any importer
+  that uses it (segfault, with or without reflection, partition or not). A defaulted *member*
+  `operator==`/`operator<=>` works. `src/ir` uses the member form (marked in
+  `src/ir/handles.cppm`); go back to hidden friends once ycxx compiles itself.
 - **The std module's BMI must be built with `-freflection -fcontracts`.**
   - `CMakeLists.txt` adds the flags to libycxx's `ycxx_modules` target.
   - Without them, `std::meta` is empty. An importer whose `-freflection` does not match the

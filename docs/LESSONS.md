@@ -117,6 +117,13 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
     bug report, and it shows where the fix belongs.
   - Learned on #4.
 
+- **An ICE in an importer at a defaulted comparison**: GCC 16.2 crashes on a defaulted hidden-friend
+  `operator==` of an exported class (STATUS, "Bootstrap workarounds"). Reducing it took five
+  minutes with the recipe above, once the module, partition and `import std` were taken out of the
+  repro one at a time.
+  - Do: declare defaulted comparisons as members in module code.
+  - Learned on #23.
+
 ## Evidence and tests
 
 - **A `std::tuple` over a long type list is a compile-time trap with GCC 16.** The AST spike stored
