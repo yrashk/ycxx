@@ -58,6 +58,16 @@ using Stop = std::function<bool()>;
 // The variables of `environment` this process has.
 std::vector<std::pair<std::string, std::string>> environment_now();
 
+// The worker pool a session runs on (daemon design §8.2), the same in-process and in the daemon:
+// `YCXX_THREADS` workers (default: the hardware's concurrency) and the chaos seed
+// `YCXX_CHAOS_SEED`, which perturbs the schedule for tests. Outputs do not depend on either
+// (DECISIONS §4).
+struct Threads {
+  unsigned count = 1;
+  std::optional<std::uint64_t> chaos_seed;
+};
+Threads threads();
+
 // Where a request's units are (daemon design §6.1): the view their files are read through, and
 // the number of the first. The editor view's units are numbered apart from the disk view's, so a
 // keystroke never turns a build's unit red.
@@ -245,6 +255,22 @@ std::vector<std::pair<std::string, std::string>> environment_now() {
   for (std::string_view name : environment)
     if (const char* v = std::getenv(std::string(name).c_str())) env.emplace_back(name, v);
   return env;
+}
+
+Threads threads() {
+  auto number = [](const char* name) -> std::optional<std::uint64_t> {
+    const char* v = std::getenv(name);
+    if (!v || !*v) return std::nullopt;
+    std::uint64_t n = 0;
+    auto [p, ec] = std::from_chars(v, v + std::strlen(v), n);
+    if (ec != std::errc{} || *p != '\0') return std::nullopt;
+    return n;
+  };
+  Threads t;
+  t.count = std::max(1u, std::thread::hardware_concurrency());
+  if (auto n = number("YCXX_THREADS"); n && *n > 0) t.count = static_cast<unsigned>(std::min<std::uint64_t>(*n, 256));
+  t.chaos_seed = number("YCXX_CHAOS_SEED");
+  return t;
 }
 
 std::optional<std::string> first_input(std::span<const std::string> argv) {
