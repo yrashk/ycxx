@@ -379,6 +379,38 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
 - Not yet: the stages as engine queries and the daemon (#63), `#include` (#65), optimization
   levels and the other common options (`-O` is rejected, #81).
 
+## The L1 interpreter (#25, 2026-11-18)
+
+`src/interp/` (module `ycxx.interp`), from the [optimization design](docs/design/optimization.md)
+§2.3 and §10; unit test `unit.interp`, on bodies written in L1's text form.
+
+- `evaluate(host, interners, target, entry, name, args, config)` is a `query_task`: the step
+  machine runs until it needs a callee's body (`host.body(e)`, in the engine `function_ir`) or a
+  global (`host.global(e)`, `constant_value`), which it fetches lazily with `co_await`, once per
+  evaluation; it polls `host.stop_requested()` every `poll_interval` steps. Calls push frames on
+  the machine's own stack. Limits: a step budget counted in nodes and a call depth ([implimits]).
+- Modes: `constant` ([expr.const] holds; `is_const_eval` is true and `consteval_br` takes its
+  consteval edge) and `runtime` (non-constexpr calls, globals read and written, the erroneous
+  value is zero).
+- Abstract memory: objects are a type and one cell per scalar leaf, each with its lifetime
+  (before, alive, after), whether it holds an indeterminate, erroneous or real value, and the
+  value. Pointers are `(object, access path)` plus "one past a non-array object"; they never
+  become integers.
+- Checks, each a `Failure` with a `Reason`, an argument and the stack of `(function, node)` sites
+  (innermost first): signed and `nuw` overflow, division by zero and unrepresentable quotients,
+  shift counts, indeterminate and erroneous reads, accesses outside the lifetime or after the
+  storage ended, through null or past the end, through a different type, stores to const objects
+  and string literals, unsequenced conflicts in `useq` groups, pointer arithmetic out of bounds or
+  on the wrong type, differences across arrays, unspecified pointer comparisons, `void*` casts to
+  the wrong type; in constant mode also reads of globals not usable in constant expressions,
+  writes to objects from outside the evaluation, volatile accesses, non-constexpr and undefined
+  callees, `reinterpret_cast`-like ops and `asm`.
+- The dispatch table is `ir::eval_table<Ops, …>()` with `complete`: every op has a handler. Ops
+  outside the α slice (floating point, aggregates and `copy`, unions, dynamic storage, virtual
+  calls, atomics, EH, coroutines, reflection) fail with `Reason::unsupported`, naming the op.
+- Not yet: address constants of variables (`VEntity`, #57), whole-program runs with a host I/O
+  interface, records and the under-construction state of [class.cdtor].
+
 ## Bootstrap workarounds
 
 Places where ycxx's sources avoid or work around a C++26 feature because GCC 16 lacks it or
