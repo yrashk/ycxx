@@ -3,6 +3,7 @@
 # the fronts themselves.
 # Libraries, lowest first.
 add_subdirectory(hash)
+add_subdirectory(ast)
 add_subdirectory(engine)
 add_subdirectory(lex)
 add_subdirectory(pp)
