@@ -119,6 +119,7 @@ void serialize_into(engine::Sink& out, const Source& s) {
   engine::serialize(out, static_cast<std::uint64_t>(s.config.system_from));
   engine::serialize(out, s.config.macros);
   engine::serialize(out, std::string(s.config.target->triple));
+  engine::serialize(out, static_cast<std::uint64_t>(s.config.template_depth));
 }
 Source deserialize_from(engine::Source& in, std::type_identity<Source>) {
   Source s;
@@ -129,6 +130,7 @@ Source deserialize_from(engine::Source& in, std::type_identity<Source>) {
   s.config.system_from = static_cast<std::size_t>(engine::deserialize<std::uint64_t>(in));
   s.config.macros = engine::deserialize<std::vector<std::pair<std::string, std::optional<std::string>>>>(in);
   if (engine::deserialize<std::string>(in) != ast::aarch64_darwin.triple) in.fail();  // the one target there is
+  s.config.template_depth = static_cast<std::uint32_t>(engine::deserialize<std::uint64_t>(in));
   return s;
 }
 

@@ -33,7 +33,8 @@ int main() {
                              b.seq({LocalRec{in.names.intern("v"), int_t, EntityId::none, local, 0}})});
     DeclSema d{f_e, int_t, DeclKind::function, Linkage::external, Storage::none, Access::none, 0,
                b.seq<NodeId>({}), NodeId::none, NodeId::none,
-               b.seq({ParamSema{EntityId::none, int_t, in.names.intern("p"), two, 0}})};
+               b.seq({ParamSema{EntityId::none, int_t, in.names.intern("p"), two, 0}}),
+               b.seq(std::span<const TemplateParamSema>{})};
     item = b.commit(ItemSema{call, b.seq({d})});
   }
   Fp128 body_fp = in.ast.fp(body.tree), call_fp = in.ast.fp(item.tree);

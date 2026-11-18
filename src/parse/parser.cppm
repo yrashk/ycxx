@@ -354,6 +354,8 @@ public:
     sema::Cv cv = sema::Cv::none;  // a member function's cv-qualifier-seq ([dcl.fct])
     u64 bound = 0;
     bool unknown_bound = false;  // `[]`: in a parameter, or the outermost bound of a variable
+    // A value-dependent bound ([temp.dep.constexpr]): a template parameter's `VDepParam`.
+    std::optional<sema::ConstId> dependent_bound;
   };
   struct Level {
     // ptr-operators, outermost first ([dcl.ptr], [dcl.ref]): `*` with its cv, `&` or `&&`.
@@ -469,7 +471,14 @@ public:
         Suffix s;
         // [dcl.array]: a converted constant expression of integral type.
         Ex e = s_->promote(constant_expression());
-        auto v = sema::Evaluator(*s_, questions()).evaluate(e).value;
+        sema::Evaluated ev = sema::Evaluator(*s_, questions()).evaluate(e);
+        auto v = ev.value;
+        if (ev.dependent) {
+          s.dependent_bound = template_value(e, s_->types().canonical(e.type()));
+          ok = expect(Tk::r_square) && ok && s.dependent_bound.has_value();
+          l.suffixes.push_back(std::move(s));
+          continue;
+        }
         if (!v || s_->world().values.rec(*v).kind != sema::ValueKind::integer || i64_of(*v) <= 0) {
           if (e.ok()) s_->diag(at + 1, Diag::bound_not_constant);
           ok = false;
@@ -574,6 +583,8 @@ public:
           d.ok = false;
         }
         d.unknown_bound = true;
+      } else if (s->dependent_bound && s_->types().is_object(t)) {
+        t = s_->types().array_dependent(t, *s->dependent_bound);
       } else if (!s_->types().is_object(t) || s->bound == 0) {
         // [dcl.array]: the element type is an object type; an array of functions or of void is
         // ill-formed.
@@ -679,6 +690,178 @@ public:
       if (k == Tk::r_paren) --depth;
       bump();
     }
+  }
+
+  // ------------------------------------------------------------ [temp]
+
+  // A template-head ([temp.pre]): `template < template-parameter-list >`, whose parameters belong
+  // to the head at `depth`. The head's scope is pushed on sema's template scopes, for the caller
+  // to pop at the end of the declaration; each parameter is in scope from the end of its own
+  // declaration ([basic.scope.pdecl]), so later ones and their defaults may name it. Not yet:
+  // template template parameters, packs and type-constraints.
+  bool template_head(u16 depth) {
+    s_->template_scopes.emplace_back();
+    if (!expect(Tk::kw_template) || !expect(Tk::less)) return false;
+    bool ok = true;
+    ++angle_;
+    if (!is(Tk::greater)) {
+      do {
+        auto p = template_parameter(depth, u16(s_->template_scopes.back().size()), ok);
+        if (!p) break;
+        // [temp.param]: the names of a head's parameters are distinct.
+        for (const ast::TemplateParamSema& q : s_->template_scopes.back())
+          if (q.name == p->name && p->name != s_->no_name()) {
+            s_->diag(pos() - 1, Diag::redeclared_local, p->name);
+            ok = false;
+          }
+        s_->template_scopes.back().push_back(*p);
+      } while (accept(Tk::comma));
+    }
+    --angle_;
+    return expect(Tk::greater) && ok;
+  }
+
+  std::optional<ast::TemplateParamSema> template_parameter(u16 depth, u16 index, bool& ok) {
+    ast::TemplateParamSema p{};
+    p.depth = depth;
+    p.index = index;
+    p.name = s_->no_name();
+    p.default_ = {ast::TemplateArgKind::type, s_->builtin(Builtin::void_), sema::ConstId::none};
+    bool type_param = (is(Tk::kw_class) || is(Tk::kw_typename)) &&
+                      (kind(1) == Tk::comma || kind(1) == Tk::greater || kind(1) == Tk::equal || kind(1) == Tk::ellipsis ||
+                       (kind(1) == Tk::identifier && kind(2) != Tk::coloncolon));
+    if (is(Tk::kw_template) || (type_param && kind(1) == Tk::ellipsis)) {
+      s_->diag(pos() + (is(Tk::kw_template) ? 0 : 1), Diag::not_supported, is(Tk::kw_template) ? Tk::kw_template : Tk::ellipsis);
+      ok = false;
+      return std::nullopt;
+    }
+    if (type_param) {
+      // A type-parameter ([temp.param]/1), with a default type-id.
+      bump();
+      if (is(Tk::identifier)) {
+        p.name = name_of(tok());
+        bump();
+      }
+      p.kind = ast::TemplateArgKind::type;
+      p.type = s_->types().template_param(depth, index);
+      if (accept(Tk::equal)) {
+        auto t = type_id();
+        if (!t) {
+          ok = false;
+          return std::nullopt;
+        }
+        p.has_default = 1;
+        p.default_ = {ast::TemplateArgKind::type, s_->types().canonical(*t), sema::ConstId::none};
+      }
+      return p;
+    }
+    // A non-type template parameter: a parameter-declaration, whose array or function type is
+    // adjusted to a pointer and whose top-level cv-qualifiers are ignored ([temp.param]/10, /6).
+    u32 at = pos();
+    DeclSpec spec = decl_specifiers();
+    Declarator d = declarator(spec.type, true);
+    if (!spec.ok || !d.ok) {
+      ok = false;
+      return std::nullopt;
+    }
+    QualType t = d.type;
+    if (s_->types().is_array(t)) t = s_->types().pointer(s_->types().rec(t).inner);
+    else if (s_->types().is_function(t)) t = s_->types().pointer(t);
+    t = sema::Types::unqualified(t);
+    // [temp.param]/7: a structural type; class types are not supported yet.
+    if (!s_->types().is_integral(t) && !s_->types().is_pointer(t) && !s_->types().is_reference(t) &&
+        !s_->types().is(t, Builtin::nullptr_t) && !s_->types().is_dependent(t)) {
+      bool later = s_->types().is_class(t) || s_->types().kind(t) == sema::TypeKind::enum_;  // structural, not supported yet
+      s_->diag(at, later ? Diag::not_supported : Diag::invalid_template_parameter_type,
+               s_->types().is_class(t) ? Tk::kw_class : Tk::kw_enum);
+      ok = false;
+      return std::nullopt;
+    }
+    if (d.named) p.name = d.name;
+    p.kind = ast::TemplateArgKind::value;
+    p.type = t;
+    if (accept(Tk::equal)) {
+      Ex e = conditional_expression();
+      auto v = template_value(e, t);
+      if (!v) {
+        ok = false;
+        return std::nullopt;
+      }
+      p.has_default = 1;
+      p.default_ = {ast::TemplateArgKind::value, s_->types().canonical(t), *v};
+    }
+    return p;
+  }
+
+  // A type-id ([dcl.name]): a decl-specifier-seq and an abstract declarator.
+  std::optional<QualType> type_id() {
+    DeclSpec spec = decl_specifiers();
+    if (!spec.ok) return std::nullopt;
+    Declarator d = declarator(spec.type, true);
+    if (!d.ok) return std::nullopt;
+    if (d.named) {
+      s_->diag(d.name_at, Diag::unexpected_identifier, d.name);
+      return std::nullopt;
+    }
+    return d.type;
+  }
+
+  // The value of a template argument for a non-type parameter of type `t`: a converted constant
+  // expression ([temp.arg.nontype]/1). One that names a template parameter is value-dependent and
+  // stays a `VDep*` value ([temp.dep.constexpr]).
+  std::optional<sema::ConstId> template_value(Ex e, QualType t) {
+    if (!e.ok()) return std::nullopt;
+    if (auto lit = s_->as<ast::Literal>(e); lit && s_->world().ins.values.is_dependent(lit->value)) return lit->value;
+    // Value-dependent: in a body its value is known when the body is instantiated; in a declaration
+    // it is part of the template's signature, which needs the expression's `VDep*` form (#88).
+    if (s_->dependent(e)) {
+      if (body) return s_->world().ins.intern_value(ast::VDepParam{sema::dependent_depth, 0});
+      s_->diag(e.begin, Diag::not_supported, Tk::kw_template);
+      return std::nullopt;
+    }
+    Ex c = s_->convert(e, t, e.begin);
+    if (!c.ok()) return std::nullopt;
+    sema::Evaluated v = sema::Evaluator(*s_, questions()).evaluate(c);
+    if (!v.value) {
+      s_->diag(e.begin, Diag::not_constant, v.reason);
+      return std::nullopt;
+    }
+    return *v.value;
+  }
+
+  // A template-argument-list ([temp.arg.general]) after a template-name, from its `<`. An argument
+  // that can be a type-id is one ([temp.arg.general]/2).
+  std::optional<std::vector<ast::TemplateArg>> template_argument_list() {
+    if (!expect(Tk::less)) return std::nullopt;
+    std::vector<ast::TemplateArg> args;
+    bool ok = true;
+    ++angle_;
+    if (!is(Tk::greater)) {
+      do {
+        if (starts_type_id()) {
+          auto t = type_id();
+          if (!t) ok = false;
+          else args.push_back({ast::TemplateArgKind::type, s_->types().canonical(*t), sema::ConstId::none});
+          continue;
+        }
+        Ex e = conditional_expression();
+        if (!e.ok()) {
+          ok = false;
+          continue;
+        }
+        // Converted to its parameter's type when the template is known ([temp.arg.nontype]).
+        auto v = template_value(e, sema::Types::unqualified(s_->rvalue(e).type()));
+        if (!v) ok = false;
+        else args.push_back({ast::TemplateArgKind::value, s_->types().canonical(sema::Types::unqualified(s_->rvalue(e).type())), *v});
+      } while (accept(Tk::comma));
+    }
+    --angle_;
+    if (!expect(Tk::greater) || !ok) return std::nullopt;
+    return args;
+  }
+  bool starts_type_id() {
+    if (starts_decl_specifier(kind())) return !is(Tk::kw_static) && !is(Tk::kw_extern);
+    return is(Tk::identifier) && kind(1) != Tk::coloncolon && s_->class_name(name_of(tok())).has_value();
   }
 
   // The language linkage function types get: from an enclosing linkage-specification.
@@ -801,6 +984,8 @@ public:
       }
       auto info = binary_operator(kind());
       if (!info || info->prec < min_prec) return l;
+      // [temp.names]/4: in a template argument list the first `>` outside parentheses ends it.
+      if (angle_ > 0 && (is(Tk::greater) || is(Tk::greatergreater))) return l;
       u32 at = pos();
       bump();
       Ex r = binary_expression(info->prec + 1);
@@ -858,11 +1043,18 @@ public:
   // postfix-expression ([expr.post]).
   Ex postfix_expression() {
     Ex e = primary_expression();
+    // Inside brackets a `>` is an operator again ([temp.names]/4).
+    struct Unangle {
+      int& a;
+      int saved;
+      ~Unangle() { a = saved; }
+    };
     for (;;) {
       u32 at = pos();
       switch (kind()) {
       case Tk::l_paren: {
         bump();
+        Unangle u{angle_, std::exchange(angle_, 0)};
         std::vector<Ex> args;
         if (!is(Tk::r_paren)) {
           do {
@@ -879,6 +1071,7 @@ public:
       }
       case Tk::l_square: {
         bump();
+        Unangle u{angle_, std::exchange(angle_, 0)};
         Ex index = expression();
         if (!expect(Tk::r_square)) return {NodeId::none, e.begin, pos()};
         e = s_->subscript(e, index, pos(), at);
@@ -958,15 +1151,17 @@ public:
     case Tk::kw_nullptr: bump(); return s_->nullptr_literal(begin, pos());
     case Tk::l_paren: {
       bump();
+      int saved = std::exchange(angle_, 0);
       Ex e = expression();
+      angle_ = saved;
       if (!expect(Tk::r_paren)) return {NodeId::none, begin, pos()};
       return s_->paren(e, begin, pos());
     }
     case Tk::identifier: {
       NameId n = name_of(tok());
       if ((kind(1) == Tk::l_paren || kind(1) == Tk::l_brace))
-        if (auto t = s_->class_name(n); t && s_->types().is_class(*t)) {
-          // `T(args)` or `T{…}` ([expr.type.conv]).
+        if (auto t = s_->class_name(n); t && (s_->types().is_class(*t) || s_->template_param(n))) {
+          // `T(args)` or `T{…}` ([expr.type.conv]), T a class or a template parameter.
           bump();
           if (is(Tk::l_brace)) {
             auto b = braced_init_list();
@@ -984,7 +1179,20 @@ public:
         }
       if (kind(1) == Tk::coloncolon) return qualified_id(begin);
       bump();
-      return s_->name_expr(n, begin, pos());
+      if (is(Tk::less) && s_->is_template_name(n)) {
+        // A template-id ([temp.names]): `f<args>`.
+        auto args = template_argument_list();
+        if (!args) return {NodeId::none, begin, pos()};
+        // [temp.dep.expr]/3: a template-id with a dependent argument is type-dependent.
+        if (std::ranges::any_of(*args, [&](const ast::TemplateArg& a) { return s_->dependent(a); })) {
+          // A call of it is a dependent call ([temp.dep.candidate]): its instantiation adds
+          // argument-dependent lookup.
+          if (is(Tk::l_paren)) s_->dependent_calls.push_back(begin);
+          return s_->dependent_node({}, begin, pos());
+        }
+        return s_->template_id(n, std::move(*args), begin, pos());
+      }
+      return s_->name_expr(n, begin, pos(), is(Tk::l_paren));
     }
     case Tk::coloncolon: return qualified_id(begin);
     case Tk::kw_this: bump(); return s_->this_expr(begin, pos());
@@ -1087,6 +1295,14 @@ public:
     u32 name_at = pos();
     NameId n = name_of(tok());
     bump();
+    if (is(Tk::less)) {
+      Ex r = s_->scope_expr(*s, n, begin, name_at, pos());
+      if (r.ok() && s_->types().is(r.type(), Builtin::overload_set)) {
+        s_->diag(pos(), Diag::not_supported, Tk::less);  // qualified template-ids (#88)
+        return {NodeId::none, begin, pos()};
+      }
+      return r;
+    }
     return s_->scope_expr(*s, n, begin, name_at, pos());
   }
 
@@ -1328,7 +1544,9 @@ public:
     if (!expect(Tk::semi)) skip_to_semi();
     if (!cond.ok() || !ok) return {NodeId::none, begin, pos()};
     sema::Evaluated v = sema::Evaluator(*s_, questions()).evaluate(cond);
-    if (!v.value) {
+    if (v.dependent) {
+      // Checked when the template is instantiated ([dcl.pre]/10).
+    } else if (!v.value) {
       s_->diag(e.begin, Diag::not_constant, v.reason);
     } else if (s_->world().values.rec(*v.value).bits == 0) {
       if (message == sema::ConstId::none) s_->diag(begin, Diag::static_assert_failed);
@@ -1454,12 +1672,12 @@ public:
       }
       Ex e = expression();
       if (s_->types().is_void(rt)) {
-        if (e.ok() && !s_->types().is_void(e.type())) s_->diag(begin, Diag::return_value_in_void);
+        if (e.ok() && !s_->types().is_void(e.type()) && !s_->dependent(e)) s_->diag(begin, Diag::return_value_in_void);
         value = e;
       } else {
         value = s_->convert(e, rt, e.begin);
       }
-    } else if (!s_->types().is_void(rt)) {
+    } else if (!s_->types().is_void(rt) && !s_->types().is_dependent(rt)) {
       s_->diag(begin, Diag::return_missing_value);
     }
     if (!expect(Tk::semi)) skip_to_semi();
@@ -1540,7 +1758,7 @@ public:
         if (init.ok() && (spec.is_constexpr || usable_kind)) {
           sema::Evaluated v = sema::Evaluator(*s_, questions()).evaluate(init);
           if (v.value) s_->set_local_value(local, *v.value);
-          else if (spec.is_constexpr) s_->diag(b->begin, Diag::not_constant, v.reason);
+          else if (spec.is_constexpr && !v.dependent) s_->diag(b->begin, Diag::not_constant, v.reason);
         }
       } else if (accept(Tk::equal)) {
         Ex e = assignment_expression();
@@ -1558,7 +1776,7 @@ public:
           if (init.ok() && (spec.is_constexpr || usable_kind)) {
             sema::Evaluated v = sema::Evaluator(*s_, questions()).evaluate(init);
             if (v.value) s_->set_local_value(local, *v.value);
-            else if (spec.is_constexpr) s_->diag(e.begin, Diag::not_constant, v.reason);
+            else if (spec.is_constexpr && !v.dependent) s_->diag(e.begin, Diag::not_constant, v.reason);
           }
         }
       } else if (is(Tk::l_paren)) {
@@ -1573,7 +1791,9 @@ public:
           skip_to_semi();
           return {NodeId::none, begin, pos()};
         }
-        if (s_->types().is_class(d.type)) {
+        if (s_->types().is_dependent(d.type) || s_->any_dependent(args)) {
+          init = s_->construct(d.type, std::move(args), open, pos());
+        } else if (s_->types().is_class(d.type)) {
           init = s_->has_user_ctors(d.type) || args.size() != 1 ? s_->construct(d.type, std::move(args), open, pos())
                                                                  : s_->convert(args[0], d.type, open);
         } else if (args.size() != 1 || s_->types().is_array(d.type)) {
@@ -1585,6 +1805,8 @@ public:
         }
       } else if (s_->types().is_reference(d.type)) {
         s_->diag(d.name_at, Diag::reference_uninitialized);  // [dcl.ref]/5
+      } else if (s_->types().is_dependent(d.type)) {
+        init = s_->default_init(d.type, d.name_at, pos());  // checked when the template is instantiated
       } else if (!s_->require_complete(d.type, d.name_at)) {
         // Default-initialization needs a complete object type ([dcl.init.general]).
       } else if (s_->has_member_inits(d.type)) {
@@ -1623,6 +1845,10 @@ private:
   sema::Questions* q_ = nullptr;
   LangLinkage linkage_ = LangLinkage::cxx;
   int in_params_ = 0;
+  int angle_ = 0;               // inside a template argument or parameter list, outside parentheses
+public:
+  bool body = false;  // the part is a function body, not a declaration part
+private:
   const Level* top_ = nullptr;  // the declarator being built
 };
 
