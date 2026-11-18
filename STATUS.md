@@ -124,17 +124,24 @@ What is true of the code today. Work in progress and its owners are tracked in
   racing readers over 300 rounds, counts per request and per kind. Clean under
   ASan and UBSan; ThreadSanitizer needs Linux (#105).
 - Not yet: allocation-free waits, per-worker frame free lists and lock-free index reads
-  (#104); the cycle report's program-order path note (#106); sema's records (`Entities`,
-  `Classes`), so a `pipeline::Session` on a pool compiles one unit at a time only (#156);
-  contextual queries (#16); eviction and persistence (#17).
+  (#104); the cycle report's program-order path note (#106); contextual queries (#16);
+  eviction and persistence (#17); `ycxx cxx` and the daemon on a pool (#139).
 - A session on a pool (#137):
   - `Pool::set_scope` makes each worker enter a scope before it runs work. A
     `pipeline::Session(Pool&)` uses it to bind its universe and interners on the worker's
     thread-locals.
   - pp's per-configuration process sessions have a mutex each, held for a whole `Pp` run (which
     never suspends).
+  - sema's records (#156): `Entities` and `Classes` keep records in `ast::Published` tables (by
+    handle, published once, read without a lock). Every unit that defines a class or enumeration
+    builds its record privately and publishes it; the first wins, and the records of equal
+    definitions are equal. A member's declaration is an item of each unit, so `Program` keeps it
+    (`member_decl`), not the record. Sema reads a record through `class_rec`, only where the
+    class is complete in its own unit, so what a unit accepts does not depend on other units.
   - Tests: `unit.pp` runs 48 units on 8 workers. `unit.pipeline_incremental` builds a program on
-    2 and 8 threads and under chaos seeds, equal to an inline build. Both are mutation-checked.
+    2 and 8 threads and under chaos seeds, equal to an inline build, and eight units sharing a
+    header of classes and enumerations on up to 8 threads, before and after an edit; two units
+    each diagnose their own ill-formed class. All are mutation-checked.
 
 ## Lexer and directive-free `pp` (#40, 2026-11-18)
 
