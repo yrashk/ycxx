@@ -17,7 +17,7 @@ make CXX=clang++ check
   Validation walks the groups in order, validating each group's members in parallel, and
   re-executes on the first group with a member that changed. An entry is claimed before it is
   validated or executed, so every query runs at most once per revision (unless it throws: a
-failed claim is released and a waiter retries it). Parallel fetches are
+  failed claim is released and a waiter retries it). Parallel fetches are
   fork-join on a work-stealing pool; a joining worker only runs tasks of its own join.
 - `toy.hpp`: a language with `int`/`float`/`bool`, functions, `include`, and C++-like overload
   resolution (exact < promotion < conversion, [over.match.best], ambiguity). Its queries mirror the
