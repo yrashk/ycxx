@@ -27,7 +27,9 @@ What is true of the code today. Work in progress and its owners are tracked in
 - Optimization design accepted: [`docs/design/optimization.md`](docs/design/optimization.md)
   (#3), summarized in DECISIONS §4.8. Throwaway spikes are in `spikes/optimization/`: e-graph
   extraction, and solver builds against libycxx.
-- Next: the AST design (#2).
+- AST design accepted: [`docs/design/ast.md`](docs/design/ast.md) (#2), summarized in DECISIONS
+  §4.9. A throwaway spike is in `spikes/ast/`: a reflection-derived node schema, hash-consing,
+  the red view and type canonicalization.
 
 ## Bootstrap workarounds
 

@@ -1,7 +1,7 @@
 # AST, entity and type representation
 
-Design for [yrashk/ycxx#2](https://github.com/yrashk/ycxx/issues/2). Status: **proposed**. When it
-is accepted, §1 is summarized into DECISIONS §4.
+Design for [yrashk/ycxx#2](https://github.com/yrashk/ycxx/issues/2). Status: **accepted**,
+summarized in DECISIONS §4.9.
 
 This document decides how ycxx represents what it parses and analyses: syntax and semantic trees,
 declarations and entities, types, templates, C++26 constructs, source locations, and the memory

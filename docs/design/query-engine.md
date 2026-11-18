@@ -473,7 +473,8 @@ by the tree id of the tree they bring in; at the leaf level, the items of the it
 to the item. The chain's root is the TU's **configuration fingerprint** (target, language options, predefined
 macros, include paths), so two TUs compiled with different options never share a prefix, and
 `config` is a question answered from the root; nothing in a prefix or a semantic key names the TU
-itself. A prefix node is `(parent prefix, item-list handle up to k)`, hash-consed, so its
+itself. A prefix node is `(parent prefix, item-list handle up to k)` (the handle covers the
+region's `(tokens, TokLoc)` stream up to item `k`; amended by ast.md §8.1), hash-consed, so its
 digest is its fingerprint and two TUs that include the same headers in the same order up to a
 point have the *same* prefix handle for that point, without anyone comparing anything. The END
 context of a TU is the prefix of its whole tree. Positions inside an item are ordinary key data.
@@ -908,7 +909,7 @@ than recursing until the stack overflows. The `cheap` kinds are the closed list 
 `counter_at_entry`, `include_resolution`, `visible_decls`, `using_directives`, `inline_members`,
 `namespace_lookup`, `directive_closure`, `explicit_specs`, `partial_specs`,
 `syntactic_definition`, `has_consteval_blocks`, `pin_of`, `prefix_item_lists`, `item_tokens`,
-`body_tokens`, `item_location` and the `region_*`/`tree_*` indexes; everything else (`member_lookup`, `adl`,
+`body_tokens`, `token_location`, `module_of` (amended by ast.md §8.7, §4.3) and the `region_*`/`tree_*` indexes; everything else (`member_lookup`, `adl`,
 `complete_before`, `class_def`, `select_specialization`, `match_partial`, `deduce`, `resolve`, …)
 is contextual with the full `Ctx` and a coroutine. A `transparent` helper is a coroutine
 when it fetches non-cheap kinds and a plain function otherwise.
@@ -1426,6 +1427,7 @@ public:
   void require_definition(EntityId spec, Loc at) noexcept pre(contextual_);         // definition_required entry, no fetch (§B1.4)
   Prefix prefix_of(ItemId I) const noexcept pre(contextual_) pre(precedes(I, prefix()));  // backward: rel(◇.prefix, I)
   Prefix prefix_after(ExtId h) const noexcept pre(contextual_);                     // forward: ext(◇.prefix, h), h computed here
+  Prefix prefix_after_item(ItemId K) const noexcept pre(contextual_) pre(precedes(K, prefix()));  // rel_after(◇.prefix, K): complete-class contexts (amended by ast.md §4.2)
   stop_point_awaitable stop_point() const noexcept;                                  // set_stopped if requested; else resumes
   template<class... A> void diag(DiagId id, A&&... args);
   Prefix prefix() const noexcept pre(contextual_);                 // only a contextual frame has one
@@ -1657,7 +1659,8 @@ the one capability it needs beyond the salsa model, contextual queries, is speci
 
 Preprocessing a file occurrence yields a **region**: its own token stream (with `#include`
 directives replaced by references to child regions), the macro delta it produced, its `#pragma
-once` effects and its `__COUNTER__` delta. A region and its children form a **tree**; the tree id
+once` effects, its `__COUNTER__` delta and its location table (byte offsets and macro expansions
+per token; amended by ast.md §8.1). A region and its children form a **tree**; the tree id
 is the fingerprint of the *complete* `pp` results of the tree, not of the token streams alone, so
 that two configuration headers whose only difference is what they `#define` have different tree
 ids and different prefixes. A TU is the tree rooted at the main file.
@@ -1668,7 +1671,10 @@ paths, everything from the command line that can change a semantic answer), so t
 configurations in one daemon never share a prefix, a question cell or a leaf; then, for each
 level of the include path, the item list of that region up to the include item that leads down,
 with include items represented by the tree id they bring in; at the leaf level, the items of the
-point's own region up to the item. A prefix node is `(parent prefix, item-list handle)`,
+point's own region up to the item. A prefix node is `(parent prefix, item-list handle)`, where the
+leaf's handle is the hash-consed `(tokens, TokLoc)` prefix of the region up to the item, while
+syntactic indexes and item ids are keyed by the region's location-free `items` sub-handle, so a
+whitespace edit changes no index and no item id (amended by ast.md §8.1). It is
 hash-consed, so two TUs with the same configuration that include the same headers in the same
 order up to a point share the prefix handle without anyone comparing anything. The END prefix of
 a TU is the prefix of its whole tree. Prefixes appear in the keys of question cells and, as part
@@ -1692,9 +1698,10 @@ content handle `body` (the hash of its tokens after preprocessing). The item id 
 
 where the ordinal counts earlier siblings with the same hash (two `void f(int);` redeclarations),
 and the syntactic scope path is the spelling of the enclosing `namespace`/class nesting
-(`std::__1::vector`). When an identical region occurs twice before a point (an X-macro header
-included twice with the same macro state), the second occurrence's items are salted with their
-occurrence count *in the prefix*; the salt is a function of the prefix, so it is TU-free and the
+(`std::__1::vector`). When an item id occurs twice before a point (an X-macro header included
+twice with the same macro state, or an unguarded header whose bodies expand differently), the
+later occurrence is salted with its occurrence count *in the prefix* (counted per item id, not per
+identical region; amended by ast.md §8.3); the salt is a function of the prefix, so it is TU-free and the
 one-leaf property of the trie holds.
 
 Consequences: editing a body does not change the id of the function, so callers keep their recorded
@@ -1752,7 +1759,9 @@ alias, which needs no semantics) and `directive_closure`; `explicit_specs`, `par
 `syntactic_definition(scope path, name, prefix)` → the *candidate* definition items for that name
 in that scope, each with its body handle (the caller, an asynchronous cell, picks the one whose
 signature matches through `decl_sema`; the question itself knows no types); `has_consteval_blocks
-(prefix)`; `pin_of(S, pins)` (§B6.2); `item_tokens`, `body_tokens`, `item_location`; the
+(prefix)`; `pin_of(S, pins)` (§B6.2); `item_tokens`, `body_tokens`, `token_location(item, offset,
+prefix)` (replaces `item_location`; amended by ast.md §8.7), `module_of(prefix)` (the named module
+items at the prefix are attached to; amended by ast.md §4.3); the
 `region_*`/`tree_*` indexes. Everything else named in Part B (`member_lookup`, `adl`,
 `associated`, `complete_before`, `injected_definitions`, `class_def`, `select_specialization`,
 `match_partial`, `deduce`, `resolve`, `implicit_conversion`, `instantiate_*`, `satisfies`,
@@ -2042,7 +2051,9 @@ Resolution is a contextual query keyed by the call's observable inputs:
       kind       = call | member call (object type, cv/ref) | operator(op) | init(target, direct|copy|list)
                  | conversion(target) | deduction guide ([over.match.class.deduct])
       candidates = sorted set of declaration ids found by lookup and ADL (what the point sees,
-                   including redeclarations that add default arguments, [dcl.fct.default])
+                   including redeclarations that add default arguments, [dcl.fct.default]); a
+                   member or friend of a class template specialization is the pair (pattern
+                   declaration id, instantiated entity id) (amended by ast.md §6.5)
       args       = per argument (canonical type, value category, bit-field?, null pointer constant?,
                    braced list → recursive shape), explicit template arguments
       result     = winner (entity + deduced arguments) | ambiguous {set} | none,
