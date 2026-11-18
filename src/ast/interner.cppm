@@ -816,7 +816,19 @@ static_assert([] {
 // restoring the previous binding when it ends.
 class BindInterners {
  public:
-  explicit BindInterners(const Interners& in) : old_(std::exchange(bound_interners, &in)) {
+  explicit BindInterners(const Interners& in) : old_(std::exchange(bound_interners, &in)) { install_all(); }
+  ~BindInterners() { bound_interners = old_; }
+  BindInterners(const BindInterners&) = delete;
+  BindInterners& operator=(const BindInterners&) = delete;
+
+  // Binds `in` on this thread until it is bound again: an engine worker's (#137).
+  static void on_this_thread(const Interners* in) {
+    install_all();
+    bound_interners = in;
+  }
+
+ private:
+  static void install_all() {
     static std::once_flag installed;
     std::call_once(installed, [] {
       [&]<u32... I>(std::integer_sequence<u32, I...>) {
@@ -827,11 +839,6 @@ class BindInterners {
       }(std::make_integer_sequence<u32, SeqElements::size>());
     });
   }
-  ~BindInterners() { bound_interners = old_; }
-  BindInterners(const BindInterners&) = delete;
-  BindInterners& operator=(const BindInterners&) = delete;
-
- private:
   template <class H>
   static void install() {
     interned_fp<H> = [](const void* in, H h) { return static_cast<const Interners*>(in)->fp(h); };

@@ -2362,7 +2362,11 @@ int check_file(std::string_view path, std::string_view text, std::ostream& err) 
   std::vector<pp::Message> pp_messages;
   for (const pp::Diag& d : pre.diags) {
     if (d.file == 0) lines.push_back({d.offset, lex::message_of(d.kind).severity, lex::render(d.kind, d.args)});
-    else pp_messages.push_back(pp::message(pp::session(), pp::session().files.id(pre.region.files[d.file]), pre.region.file_names[d.file], d));
+    else {
+      pp::Session& ps = pp::session();
+      std::lock_guard lock(ps.mutex);
+      pp_messages.push_back(pp::message(ps, ps.files.id(pre.region.files[d.file]), pre.region.file_names[d.file], d));
+    }
   }
   for (const pp::Message& m : pp_messages)
     std::println(err, "{}:{}:{}: {}: {}", m.file, m.line, m.column, m.error ? "error" : "warning", m.text);

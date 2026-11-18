@@ -204,6 +204,8 @@ struct Universe {
   UnitStore* units = nullptr;
 };
 Universe& universe();
+// Binds `u` and its interners on this thread until it is bound again: a pool worker's (#137).
+void bind_thread(Universe* u);
 // Binds a universe on this thread for the queries it runs, and its interners for the
 // fingerprints of the handles they store (#68).
 class Bind {
@@ -474,6 +476,10 @@ Universe*& bound() {
 Universe& universe() {
   contract_assert(bound() != nullptr);  // queries run inside a `Bind`
   return *bound();
+}
+void bind_thread(Universe* u) {
+  bound() = u;
+  ast::BindInterners::on_this_thread(u ? u->in : nullptr);
 }
 Bind::Bind(Universe& u) : old_(std::exchange(bound(), &u)) {
   if (u.in) interners_.emplace(*u.in);

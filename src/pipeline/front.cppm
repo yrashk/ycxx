@@ -194,6 +194,7 @@ engine::query_task<FrontResult> TuFront::run(engine::Ctx& cx, TuId tu) {
       const std::string& name = region.files[f];
       const pp::Source& source = cx.fetch<pp::SourceOf>(file);
       pp::Session& ps = pp::session_for(source.config);
+      std::lock_guard lock(ps.mutex);
       pp::Message pm;
       if (name.starts_with('<')) {
         pm = pp::message(ps, ps.files.id(name), region.file_names[f], diag);  // `<built-in>`
