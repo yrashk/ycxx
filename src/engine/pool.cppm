@@ -80,6 +80,18 @@ public:
 
   pool_scheduler scheduler(Priority p = Priority::background) noexcept;
 
+  // What query code reads besides its keys, entered on a worker before it runs work (#137): the
+  // pipeline's universe and AST interners, bound on thread-locals. A worker calls `enter` once per
+  // scope it sees. Every work item runs entered, the `pool_scheduler`'s and the
+  // `parallel_scheduler` backend's too, which is harmless. The thread that starts a request runs
+  // query code as well (`Request::begin`, cheap kinds), and must be bound by its owner.
+  struct Scope {
+    void* ctx = nullptr;
+    void (*enter)(void*) noexcept = nullptr;
+  };
+  // Precondition: nothing is queued or running. One scope at a time: a pool serves one session.
+  void set_scope(const Scope* s) noexcept { scope_.store(s, std::memory_order_release); }
+
 private:
   class Deque;
   struct Worker;
@@ -103,6 +115,7 @@ private:
   std::atomic<std::uint32_t> sleepers_{0};
   std::atomic<bool> stopping_{false};
   std::optional<std::uint64_t> chaos_;
+  std::atomic<const Scope*> scope_{nullptr};
 };
 
 // `std::execution::scheduler` over the pool: `schedule()` completes on a worker, at the
@@ -396,6 +409,7 @@ Work Pool::find(Worker& w) noexcept {
 void Pool::loop(unsigned index) noexcept {
   current = {this, index};
   Worker& self = *workers_[index];
+  const Scope* entered = nullptr;
   unsigned idle = 0;
   while (true) {
     if (const Work w = find(self)) {
@@ -410,6 +424,10 @@ void Pool::loop(unsigned index) noexcept {
         }
         wake();
         continue;
+      }
+      if (const Scope* sc = scope_.load(std::memory_order_acquire); sc != entered) {
+        if (sc) sc->enter(sc->ctx);
+        entered = sc;
       }
       w();
       continue;

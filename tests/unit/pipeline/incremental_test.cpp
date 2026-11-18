@@ -200,11 +200,30 @@ void headers() {
   fs::remove_all(dir);
 }
 
+// A session on a pool (#137): every worker is bound to the session's universe, and the program's
+// bytes equal an inline session's, at 2 and 8 threads and under chaos seeds. One unit for now:
+// two units' front ends would race in sema's records until #156.
+void pooled() {
+  const std::vector<std::uint8_t> want = cold(v3);
+  for (auto [threads, seed] : std::array<std::pair<unsigned, std::optional<std::uint64_t>>, 4>{
+           {{2, std::nullopt}, {8, std::nullopt}, {2, 7}, {4, 1234}}}) {
+    engine::Pool pool(threads, seed);
+    pl::Session s(pool);
+    build(s, v3);
+    const pl::Linked& l = s.get<pl::Link>(program);
+    check(l.errors.empty() && l.image == want, std::format("pooled at {} threads, seed {}: equal to inline", threads, seed.value_or(0)));
+    // Incremental on the pool too: an edit, then back.
+    build(s, v2);
+    check(s.get<pl::Link>(program).image == cold(v2), "pooled, after an edit");
+  }
+}
+
 }  // namespace
 
 int main() {
   incremental();
   two_units();
   headers();
+  pooled();
   return ycxx::unit::result("unit.pipeline_incremental");
 }

@@ -23,7 +23,20 @@ export namespace ycxx::pipeline {
 
 class Session {
  public:
-  Session() {
+  // A session whose queries run on `pool`'s workers, each bound to this session's universe (#137).
+  // The pool serves this session only, for as long as it lives.
+  explicit Session(engine::Pool& pool) : db_(pool), pool_(&pool) {
+    scope_ = {this, [](void* self) noexcept { bind_thread(&static_cast<Session*>(self)->universe_); }};
+    pool.set_scope(&scope_);
+    init();
+  }
+  Session() { init(); }
+  ~Session() {
+    if (pool_) pool_->set_scope(nullptr);
+  }
+
+ private:
+  void init() {
     constexpr obj::target t = obj::target::aarch64_macos;
     db_.set<CostModelIn>(t, {});
     db_.set<OptCacheSnapshot>(t, {});
@@ -32,6 +45,8 @@ class Session {
     // table, daemon design §5.1).
     db_.set_provider<pp::FileContent>(pp::read_disk);
   }
+
+ public:
   Session(const Session&) = delete;
 
   // A translation unit from a source file: `path` names it (and locates its `#include "..."`),
@@ -73,6 +88,8 @@ class Session {
   UnitStore units_;
   Universe universe_{&ins_, &consts_, &ast::aarch64_darwin, &world_, &units_};
   engine::Db db_;
+  engine::Pool* pool_ = nullptr;
+  engine::Pool::Scope scope_;
 };
 
 }  // namespace ycxx::pipeline
