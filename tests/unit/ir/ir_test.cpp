@@ -317,6 +317,19 @@ func @6 {
         "the load is placed before obj.end:\n" + print(f.name, f.body));
 }
 
+void out_of_range_case_value() {
+  Builder b;
+  BlockId entry = b.add_block({Ty::state(), Ty::of(QualType(1))});
+  BlockId other = b.add_block({});
+  b.emit(other, Op::unreachable, {}, {});
+  std::uint64_t imms[] = {1, 5'000'000'000u};
+  std::vector<SuccRef> succs{{other, {}}, {other, {}}};
+  ValueId v = b.param(entry, 1);
+  b.emit(entry, Op::switch_, 0, {}, std::span(&v, 1), imms, succs);
+  auto built = b.finish();
+  check(built && !verify(built->function), "a case value beyond 32 bits is rejected");
+}
+
 void builder_and_debug() {
   Builder b;
   BlockId entry = b.add_block({Ty::state(), Ty::of(QualType(1))});
@@ -396,6 +409,16 @@ void errors() {
   has("func @1 {\n^0(%s: !state, %p: T1):\n  br ^1\n^1:\n  %a: !state = obj.end %s, %p\n"
       "  %c: T1 = load %a, %p [T1, /]\n  cond_br %c ^1, ^2\n^2:\n  ret %a\n}",
       "moves %0 after node");
+  // Review findings on #23.
+  has("func @1 {\n^0(%s: !state, %c: T1):\n  cond_br %c ^a, ^b\n^a:\n  %s1: !state, %r: T1 = invoke %s [@3] ^n, ^u\n"
+      "^b:\n  br ^n\n^n:\n  ret %s1, %r\n^u(%us: !state, %e: !exn):\n  unreachable\n}",
+      "no other predecessor");
+  has("func @1 {\n^0(%s: !state):\n  %y: T1 = neg %x\n  br ^1\n^1:\n  %x: T1 = unreachable\n}", "node 0");
+  has("func @1 {\n^0(%s: !state):\n  br ^1(%s, %s)\n^1(%a: !state, %b: !state):\n  ret %a\n}", "more than one !state");
+  has("func @1 {\n^0(%s: !state):\n  %t: !state = invoke %s [@3] ^1(%s), ^2\n^1(%a: !state):\n  ret %a\n"
+      "^2(%u: !state, %e: !exn):\n  unreachable\n}",
+      "consumes a state twice");
+  has("func @1 {\n^0(%s: !state):\n  br ^1(%s)\n^1(%a: !state):\n  br ^0(%a)\n}", "entry block");
 }
 
 // --- The evaluator hook -----------------------------------------------------------------------
@@ -434,6 +457,7 @@ int main() {
   hand_written();
   canonical_order();
   readers_first();
+  out_of_range_case_value();
   builder_and_debug();
   errors();
   evaluator_hook();

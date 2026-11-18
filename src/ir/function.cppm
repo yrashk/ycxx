@@ -209,6 +209,8 @@ std::optional<std::string> check_imms(const Function& f, NodeId n) {
         if (w > words.size() - at) return "truncated constant list";
         if (node.op == Op::switch_ && w + 1 != node.nsucc)
           return "switch needs one case value per successor after the default";
+        for (std::uint64_t i = 0; i < w; ++i)
+          if (words[at + i] > 0xffffffffu) return "immediate out of range";
         at += w;
         break;
       case Imm::type:
@@ -276,15 +278,20 @@ std::expected<void, std::string> verify(const Function& f) {
     if (val.param) return dominates(val.def, block);
     const Node& d = f.nodes[val.def];
     if (is_terminator(d.op)) {
+      if (d.nsucc == 0) return false;  // shapes are checked when its own node is visited
       std::uint32_t normal = raw(f.succs[d.succ0].target);
       return dominates(normal, block) && normal != d.block;
     }
     if (d.block == block) return val.def < pos;
     return dominates(d.block, block);
   };
+  std::vector<std::uint32_t> preds(f.blocks.size());  // incoming edges
+  for (const Succ& e : f.succs) ++preds[raw(e.target)];
   for (BlockId b : f.block_ids()) {
     if (raw(b) != 0 && idom[raw(b)] == none)
       return std::unexpected(std::format("block {} is unreachable", raw(b)));
+    if (std::ranges::count_if(f.params_of(b), [&](ValueId p) { return f.value(p).type.kind == TyKind::state; }) > 1)
+      return std::unexpected(std::format("block {} has more than one !state parameter", raw(b)));
     for (NodeId n : f.nodes_of(b)) {
       const Node& node = f.node(n);
       const OpSpec& s = spec_of(node.op);
@@ -299,8 +306,13 @@ std::expected<void, std::string> verify(const Function& f) {
       if (s.var_succ && s.succ == 0 && node.nsucc > 1) return at(n, "at most one unwind successor");
       for (ValueId v : f.operands_of(n))
         if (!defined_before(v, raw(b), raw(n))) return at(n, std::format("%{} does not dominate its use", raw(v)));
+      // A terminator's results are defined on its normal edge, so that edge must be the only way
+      // into the normal successor.
+      if (is_terminator(node.op) && node.nres && node.nsucc && preds[raw(f.succs_of(n)[0].target)] != 1)
+        return at(n, "a terminator's results need a normal successor with no other predecessor");
       for (std::uint32_t i = 0; i < node.nsucc; ++i) {
         const Succ& e = f.succs_of(n)[i];
+        if (raw(e.target) == 0) return at(n, "the entry block cannot be a branch target");
         auto implicit = implicit_params(node.op, i);
         auto params = f.params_of(e.target);
         if (params.size() != implicit.size() + e.nargs)
@@ -332,6 +344,19 @@ std::expected<void, std::string> verify(const Function& f) {
   for (std::uint32_t i = 0; i < f.nodes.size(); ++i) {
     NodeId n{i};
     bool mover = is_terminator(f.node(n).op) || std::ranges::any_of(f.results_of(n), is_state);
+    // A node consumes a state once: not twice among its operands, nor twice on one edge, nor as
+    // an operand and an edge argument.
+    auto ops = f.operands_of(n);
+    auto twice = [&](std::span<const ValueId> a, std::span<const ValueId> b, bool same) {
+      for (std::size_t i = 0; i < a.size(); ++i)
+        for (std::size_t j = same ? i + 1 : 0; j < b.size(); ++j)
+          if (a[i] == b[j] && is_state(a[i])) return true;
+      return false;
+    };
+    if (twice(ops, ops, true)) return at(n, "consumes a state twice");
+    for (const Succ& e : f.succs_of(n))
+      if (twice(f.args_of(e), f.args_of(e), true) || twice(ops, f.args_of(e), false))
+        return at(n, "consumes a state twice");
     for (ValueId v : f.operands_of(n))
       if (is_state(v)) points[raw(v)].push_back({n, -1, mover});
     for (std::uint32_t k = 0; k < f.node(n).nsucc; ++k)

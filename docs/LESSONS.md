@@ -142,6 +142,14 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
     nothing lost) through the real entry point, with state that makes the stages interact.
   - Learned on #5.
 
+- **A verifier's tests need malformed inputs, not only round trips.** #23's round-trip tests passed
+  every op, and the one review still found two P1s in the verifier: a terminator's results accepted
+  on a second path into the normal successor, and an out-of-bounds read on a malformed body. Each
+  showed up with a five-line hand-written body.
+  - Do: for every rule a verifier enforces, write one body that breaks it and check the error. Do
+    the same for every guard the parser relies on.
+  - Learned on #23.
+
 - **Run sanitizers on any concurrent code before trusting its results.** The spike's fork-join
   passed its demos while one of them crashed now and then: the joiner freed the join while the
   last finisher was still notifying it. ASan found the bug at once; TSan and repeated fuzzing
