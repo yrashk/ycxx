@@ -144,6 +144,18 @@ class Parts(unittest.TestCase):
             self.assertEqual(sorted(parts), sorted(whole))
             self.assertEqual(len(parts), len(set(parts)))
 
+    def test_no_unsupported(self):
+        # An UNSUPPORTED test passes a run, but fails it with --no-unsupported, and so does a
+        # selection that runs nothing: a CI step that must run its tests cannot go green vacuously.
+        pp = 'own/smoke/object-like-macro.pp.cpp'  # ycxx has no "preprocess" (tests/features/ycxx.txt)
+        with tempfile.TemporaryDirectory() as d:
+            def status(*extra):
+                return subprocess.run([sys.executable, str(REPO / 'tools' / 'test'), '--cxx', 'ycxx', '--state', d,
+                                       '--no-state', '-q', 'core', *extra], capture_output=True, text=True).returncode
+            self.assertEqual(status(pp), 0)
+            self.assertEqual(status('--no-unsupported', pp), 1)
+            self.assertEqual(status('--no-unsupported', 'own/no-such-test'), 1)
+
     def test_affected(self):
         tests = [discover.Test('own/a.run.cpp', Path(), 'own', 'run'), discover.Test('own/b.run.cpp', Path(), 'own', 'run')]
         self.assertEqual([t.id for t in state.affected(['tests/own/a.run.cpp.stdout', 'README.md'], tests)[0]],

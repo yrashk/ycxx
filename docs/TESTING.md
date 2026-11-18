@@ -41,7 +41,8 @@ or configuration error; 3 internal driver error; 130 interrupted.
 `build/ycxx`), `clang` or `gcc`. The oracles are Clang 23 and GCC 16 (`$YCXX_CLANGXX`,
 `$YCXX_GXX`, else libycxx's `toolchains.env`, else `clang++-23` and `g++-16`), always run with
 `-std=c++26 -pedantic-errors`. A missing oracle makes the tests that need it UNSUPPORTED;
-`--require-oracles` makes it an error (CI uses it).
+`--require-oracles` makes it an error (CI uses it). `--no-unsupported` fails the run on any
+UNSUPPORTED test, or when the selection runs no test (CI's α slice step uses it).
 
 What ycxx can do is listed in [`tests/features/ycxx.txt`](../tests/features/ycxx.txt): `syntax`,
 `preprocess`, `run`, `incremental`. A test that needs a feature ycxx lacks is UNSUPPORTED with
