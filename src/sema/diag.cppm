@@ -36,6 +36,7 @@ enum class Diag : std::uint32_t {
   sizeof_incomplete [[=message{Severity::error, "the size of '{0:t}', which is incomplete or a function type"}]],
   union_reference [[=message{Severity::error, "a union cannot have a reference member '{0:n}'"}]],
   function_definition_in_block [[=message{Severity::error, "a function cannot be defined in a block (is a '}' missing?)"}]],
+  extraneous_brace [[=message{Severity::error, "a '}' that closes nothing"}]],
   expected_statement [[=message{Severity::error, "expected a statement"}]],
   expected_declaration [[=message{Severity::error, "expected a declaration"}]],
   expected_type_specifier [[=message{Severity::error, "expected a type specifier"}]],

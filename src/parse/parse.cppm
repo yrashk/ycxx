@@ -964,7 +964,11 @@ public:
     bool member = it_->parent != items::none && p_->items().items[it_->parent].kind == ItemKind::class_def;
     switch (it_->kind) {
     case ItemKind::empty:
-    case ItemKind::access_spec:
+    case ItemKind::access_spec: break;
+    case ItemKind::stray:  // a `}` that closes nothing ([gram]: no declaration begins with it)
+      s_.diag(0, Diag::extraneous_brace);
+      bad();
+      break;
     case ItemKind::linkage_block:  // its members are items of their own
       braces_closed();
       break;
@@ -1766,6 +1770,7 @@ private:
       NameId en = ps_.name_of(ps_.tok());
       u32 en_at = ps_.pos();
       ps_.bump();
+      ps_.skip_attributes();  // an enumerator's attribute-specifier-seq ([dcl.enum]/1)
       std::int64_t value = next;
       if (!ps_.is(Tk::equal) && fixed && !values.empty()) {
         // An implicit value must fit the fixed type too.
@@ -1870,6 +1875,12 @@ private:
     ast::DeclSema c = class_decl(ce, true);
     s_.current_class = ce;  // names in a member declaration are looked up in the class first
     if (ps_.accept(Tk::semi)) return;
+    // An access-specifier missing its `:` ([class.access.spec]/1).
+    if ((ps_.is(Tk::kw_public) || ps_.is(Tk::kw_protected) || ps_.is(Tk::kw_private)) && ps_.kind(1) != Tk::colon) {
+      ps_.bump();
+      ps_.expect(Tk::colon);
+      return bad();
+    }
     // A constructor or destructor ([class.ctor], [class.dtor]): the class's name, or `~` and it,
     // then a parameter list.
     NameId cname = p_->world().entities.rec(ce).name;
