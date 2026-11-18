@@ -160,6 +160,15 @@ public:
       for (auto s = scopes_.rbegin(); s != scopes_.rend(); ++s)
         for (auto p = s->rbegin(); p != s->rend(); ++p)
           if (p->first == name) return std::nullopt;
+    // A type nested in the class whose scope this is ([basic.scope.class]).
+    if (current_class != EntityId::none) {
+      if (const ClassRec* cr = w_->classes.find(current_class); cr && cr->defined) {
+        for (const auto& [n, t] : cr->types)
+          if (n == name) return t;
+      } else if (auto m = q_->earlier_member(name); m && m->kind == ast::DeclKind::enum_) {
+        return m->type;
+      }
+    }
     std::optional<ast::DeclSema> found;
     for (auto p = own.rbegin(); p != own.rend() && !found; ++p)
       if (p->name == name) found = p->sema;
@@ -167,10 +176,29 @@ public:
       for (DeclId d : q_->visible_decls(name)) {
         ast::DeclSema s = q_->decl_sema(d);
         if (s.entity == EntityId::none) continue;
-        if (s.kind == ast::DeclKind::class_ || !elaborated) found = s;
+        if (s.kind == ast::DeclKind::class_ || s.kind == ast::DeclKind::enum_ || !elaborated) found = s;
       }
-    if (!found || found->kind != ast::DeclKind::class_) return std::nullopt;
+    if (!found || (found->kind != ast::DeclKind::class_ && found->kind != ast::DeclKind::enum_)) return std::nullopt;
     return found->type;
+  }
+
+  // `using enum E;` in a block ([enum.udecl]): E's enumerators are found in this scope.
+  void using_enum(QualType t, u32 at_) {
+    if (!types().is_enum(t)) {
+      diag(at_, Diag::not_a_type, no_name());
+      return;
+    }
+    using_enums_.push_back({scopes_.size() - 1, types().enum_of(t)});
+  }
+
+  // A type nested in a class: `C::T` ([class.mem], [basic.lookup.qual]).
+  std::optional<QualType> nested_type(NameId cls, NameId name) {
+    auto t = class_name(cls, true);
+    if (!t || !types().is_class(*t)) return std::nullopt;
+    if (const ClassRec* cr = w_->classes.find(types().class_of(*t)))
+      for (const auto& [n, nt] : cr->types)
+        if (n == name) return nt;
+    return std::nullopt;
   }
 
   // Whether `t` is complete at this point; a class needs its definition before the point.
@@ -373,6 +401,16 @@ public:
       diag(c.begin, Diag::braces_for_scalar, Types::unqualified(t));
       return fail;
     }
+    // [dcl.init.list]/3.8: an enumeration with a fixed underlying type from one integer, without
+    // narrowing.
+    if (types().is_enum(t) && c.expr.ok() && !types().is_enum(c.expr.type())) {
+      const EnumRec* er = w_->classes.find_enum(types().enum_of(t));
+      if (er && er->fixed) {
+        Ex v = list_element(*er->underlying, c.expr);
+        if (!v.ok()) return fail;
+        return convert_node(v, ast::ConversionKind::integral, Types::unqualified(t));
+      }
+    }
     return list_element(t, c.expr);
   }
 
@@ -492,6 +530,7 @@ public:
 
   void push_scope() { scopes_.emplace_back(); }
   void pop_scope() {
+    std::erase_if(using_enums_, [&](const auto& u) { return u.first >= scopes_.size(); });
     if (!guarded_.empty() && guarded_.back() == scopes_.size() - 1) guarded_.pop_back();
     scopes_.pop_back();
   }
@@ -621,7 +660,14 @@ public:
   // or a qualified name `C::name`: none if `c` has no such member.
   std::optional<Ex> class_member(EntityId c, NameId name, u32 begin, u32 end) {
     auto f = find_member(c, name);
-    if (!f) return std::nullopt;
+    if (!f) {
+      // The enumerators of an unscoped enumeration nested in the class are its members.
+      if (const ClassRec* cr = w_->classes.find(c))
+        for (const auto& [n, t] : cr->types)
+          if (is_unscoped_enum(t))
+            if (auto r = find_enumerator(types().enum_of(t), name, begin, end)) return r;
+      return std::nullopt;
+    }
     Ex fail{NodeId::none, begin, end};
     bool has_this = this_type && current_class == c;
     if (f->field) {
@@ -647,12 +693,31 @@ public:
     return bound_member(c, name, object, true, begin, end);
   }
 
-  // `C::name` ([expr.prim.id.qual]) for a class C.
+  // An enumerator ([dcl.enum]): a prvalue of its enumeration with its value.
+  Ex enumerator(EntityId e, QualType t, u32 begin, u32 end) {
+    auto v = q_->constant_value(e);
+    if (!v) return {NodeId::none, begin, end};  // its enumeration was diagnosed
+    return literal(Types::unqualified(t), *v, ValueCategory::prvalue, begin, end);
+  }
+  // The enumerator `name` of enumeration `e`, if it has one.
+  std::optional<Ex> find_enumerator(EntityId e, NameId name, u32 begin, u32 end) {
+    if (const EnumRec* r = w_->classes.find_enum(e))
+      for (const EnumeratorRec& x : r->enumerators)
+        if (x.name == name) return enumerator(x.entity, types().enum_type(e), begin, end);
+    return std::nullopt;
+  }
+
+  // `C::name` ([expr.prim.id.qual]) for a class or enumeration C.
   Ex qualified_name(NameId cls, NameId name, u32 begin, u32 name_at, u32 end) {
     Ex fail{NodeId::none, begin, end};
     auto t = class_name(cls, true);
     if (!t) {
       diag(begin, Diag::not_a_type, cls);
+      return fail;
+    }
+    if (types().is_enum(*t)) {
+      if (auto r = find_enumerator(types().enum_of(*t), name, begin, end)) return *r;
+      diag(name_at, Diag::no_member, name, *t);
       return fail;
     }
     if (!require_complete(*t, begin)) return fail;
@@ -795,6 +860,14 @@ public:
     QualType from = value_type(a);
     if (types().is_class(from) || types().is_void(from)) return {};
     if (types().canonical(from) == types().canonical(to)) return {true, 0, 0};
+    if (types().is_enum(to)) return {};
+    if (types().is_enum(from)) {
+      if (!is_unscoped_enum(from)) return {};
+      if (types().is(to, Builtin::bool_)) return {true, 2, 0};
+      if (!types().is_integral(to)) return {};
+      bool promotion = builtin(promoted(*types().builtin_of(underlying_of(from)))) == to;
+      return {true, promotion ? 1 : 2, 0};
+    }
     if (types().is_pointer(from) && types().is_pointer(to))
     {
       if (qualification_convertible(from, to)) return {true, 0, 1};
@@ -1022,6 +1095,9 @@ public:
           ExprInfo info{types().referee(l.type), ValueCategory::lvalue, 0};  // [expr.type]: a reference names its object
           return node(ast::LocalRef{info, p->second}, begin, end, info);
         }
+    // Enumerators a `using enum` brought into a block scope ([enum.udecl]).
+    for (auto u = using_enums_.rbegin(); u != using_enums_.rend(); ++u)
+      if (auto r = find_enumerator(u->second, name, begin, end)) return *r;
     // The class's members, in a member function's body ([basic.scope.class]).
     if (current_class != EntityId::none) {
       if (auto r = class_member(current_class, name, begin, end)) return *r;
@@ -1071,6 +1147,7 @@ public:
     if (d.kind == ast::DeclKind::function && (d.flags & decl_flag::consteval_))
       consteval_.insert(std::to_underlying(d.entity));
     if (d.kind == ast::DeclKind::function && (d.flags & decl_flag::deleted)) deleted_.insert(std::to_underlying(d.entity));
+    if (d.kind == ast::DeclKind::enumerator) return enumerator(d.entity, d.type, begin, end);
     if (d.kind == ast::DeclKind::function && ins().names.spelling(name) == "main") {
       diag(begin, Diag::main_named);  // [basic.start.main]/3: main shall not be used
       return {NodeId::none, begin, end};
@@ -1197,6 +1274,14 @@ public:
   // ------------------------------------------------------------ conversions ([conv])
 
   Ex convert_node(Ex e, ast::ConversionKind k, QualType to, ValueCategory cat = ValueCategory::prvalue) {
+    // An enumerator converted to an integer is that integer's constant: enumeration-typed
+    // constants stay out of the IR's arithmetic.
+    if (auto lit = as<ast::Literal>(e); lit && types().is_enum(e.type()) &&
+                                        (k == ast::ConversionKind::integral || k == ast::ConversionKind::boolean)) {
+      u64 bits = w_->values.rec(lit->value).bits;
+      if (k == ast::ConversionKind::boolean) bits = bits != 0;
+      return literal(to, w_->values.integer(to, bits), ValueCategory::prvalue, e.begin, e.end);
+    }
     ExprInfo info{to, cat, 0};
     return node(ast::ImplicitConversion{info, k, EntityId::none, at(e, e.begin)}, e.begin, e.end, info);
   }
@@ -1238,12 +1323,26 @@ public:
   Ex promote(Ex e) {
     e = rvalue(e);
     if (!e.ok()) return e;
+    // [conv.prom]/4: an unscoped enumeration promotes as its underlying type does.
+    if (is_unscoped_enum(e.type())) {
+      QualType u = underlying_of(e.type());
+      return convert_node(e, ast::ConversionKind::integral, builtin(promoted(*types().builtin_of(u))));
+    }
     auto b = types().builtin_of(e.type());
     if (!b || !is_integral(*b)) return e;
     Builtin p = promoted(*b);
     if (p == *b) return e;
     return convert_node(e, ast::ConversionKind::integral, builtin(p));
   }
+
+  // Enumerations ([dcl.enum]).
+  bool is_unscoped_enum(QualType t) {
+    if (!types().is_enum(t)) return false;
+    const EnumRec* r = w_->classes.find_enum(types().enum_of(t));
+    return !r || !r->scoped;
+  }
+  bool is_scoped_enum(QualType t) { return types().is_enum(t) && !is_unscoped_enum(t); }
+  QualType underlying_of(QualType t) { return w_->classes.underlying(types().enum_of(t)); }
 
   // [conv.ptr]: an integer literal with value zero, or a prvalue of type std::nullptr_t.
   bool is_null_pointer_constant(const Ex& e) {
@@ -1293,6 +1392,15 @@ public:
       return convert_node(e, ast::ConversionKind::null_pointer, target);
     e = rvalue(e);
     QualType from = e.type();
+    // [dcl.enum]: an enumeration is initialized only from its own type; an unscoped one converts
+    // to an integer or bool ([conv.integral], [conv.bool]).
+    if (types().is_enum(target)) {
+      if (e.ok() && types().canonical(Types::unqualified(from)) == types().canonical(target)) return e;
+      if (e.ok()) diag(at_, Diag::no_conversion, from, to);
+      return {NodeId::none, e.begin, e.end};
+    }
+    if (e.ok() && is_unscoped_enum(from) && types().is_arithmetic(target))
+      return convert_node(e, types().is(target, Builtin::bool_) ? ast::ConversionKind::boolean : ast::ConversionKind::integral, target);
     if (types().is_void(from)) {
       diag(at_, Diag::void_value);
       return {NodeId::none, e.begin, e.end};
@@ -1334,7 +1442,7 @@ public:
     if (!e.ok()) return e;
     QualType t = e.type();
     if (types().is(t, Builtin::bool_)) return e;
-    if (types().is_arithmetic(t) || types().is_pointer(t) || types().is(t, Builtin::nullptr_t))
+    if (types().is_arithmetic(t) || types().is_pointer(t) || types().is(t, Builtin::nullptr_t) || is_unscoped_enum(t))
       return convert_node(e, ast::ConversionKind::boolean, builtin(Builtin::bool_));
     diag(at_, Diag::not_contextually_bool, t);
     return {NodeId::none, e.begin, e.end};
@@ -1490,6 +1598,24 @@ public:
     }
     Ex a = rvalue(l), c = rvalue(r);
     if (!a.ok() || !c.ok()) return {NodeId::none, begin, end};
+    // [expr.arith.conv]: unscoped enumerations are promoted; a scoped one is compared only with
+    // its own type, by value; enumerations do not otherwise mix.
+    if (types().is_enum(a.type()) || types().is_enum(c.type())) {
+      bool cmp = op == lt || op == gt || op == le || op == ge || op == eq || op == ne;
+      if (is_scoped_enum(a.type()) || is_scoped_enum(c.type())) {
+        if (!cmp || types().canonical(Types::unqualified(a.type())) != types().canonical(Types::unqualified(c.type())))
+          return invalid();
+        QualType u = underlying_of(a.type());
+        a = convert_node(a, ast::ConversionKind::integral, u);
+        c = convert_node(c, ast::ConversionKind::integral, u);
+      } else {
+        if (types().is_enum(a.type()) && types().is_enum(c.type()) &&
+            types().canonical(Types::unqualified(a.type())) != types().canonical(Types::unqualified(c.type())))
+          return invalid();  // P2864: arithmetic between different enumerations is ill-formed
+        if (types().is_enum(a.type())) a = promote(a);
+        if (types().is_enum(c.type())) c = promote(c);
+      }
+    }
     QualType ta = a.type(), tc = c.type();
     bool arith = types().is_arithmetic(ta) && types().is_arithmetic(tc);
     bool integral = types().is_integral(ta) && types().is_integral(tc);
@@ -1575,7 +1701,7 @@ public:
     } else {
       Ex lv = rvalue(l);  // only to read its type; the IR loads the left operand itself
       QualType tl = lv.type();
-      Ex rv = rvalue(r);
+      Ex rv = is_unscoped_enum(r.type()) ? promote(r) : rvalue(r);  // [conv.prom]
       if (!rv.ok()) return {NodeId::none, begin, end};
       QualType tr = rv.type();
       bool shift = op == AsgOp::shl || op == AsgOp::shr;
@@ -1736,7 +1862,7 @@ public:
   Ex subscript(Ex base, Ex index, u32 end, u32 at_) {
     u32 begin = base.begin;
     if (!base.ok() || !index.ok()) return {NodeId::none, begin, end};
-    Ex a = rvalue(base), c = rvalue(index);
+    Ex a = rvalue(base), c = is_unscoped_enum(index.type()) ? promote(index) : rvalue(index);
     if (!is_object_pointer(a.type()) || !types().is_integral(c.type())) {
       diag(at_, Diag::invalid_operands, base.type(), index.type());
       return {NodeId::none, begin, end};
@@ -1762,6 +1888,7 @@ private:
   };
   std::map<u32, Bound> bound_;                        // by draft bound-member Member
   std::set<u32> deleted_;                             // deleted functions named so far
+  std::vector<std::pair<std::size_t, EntityId>> using_enums_;  // (scope depth, enumeration)
   std::map<u32, std::vector<ast::DeclSema>> overloads_;  // by draft overload-set DeclRef
   std::vector<std::vector<std::pair<NameId, u32>>> scopes_;
   std::vector<std::size_t> guarded_;

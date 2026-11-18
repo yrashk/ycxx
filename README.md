@@ -30,8 +30,9 @@ in [GitHub issues](https://github.com/yrashk/ycxx/issues) and the
     assignment, and namespace-scope structs with constant initializers. Member functions (in and
     out of the class, `const`, static), `this`, and static data members. Constructors and
     destructors (RAII: destructors run at every block exit, `return`, `break` and `continue`),
-    temporaries, references, and overloading by exact match, promotion and conversion. Not yet:
-    passing or returning a class by value, inheritance.
+    temporaries, references, and overloading by exact match, promotion and conversion; scoped and
+    unscoped enumerations. Not yet: passing or returning a class by value, inheritance,
+    namespaces.
   - Constant evaluation, by ycxx's own interpreter of its IR: `constexpr` and `consteval`
     functions and variables, `constinit`, `static_assert` and `if consteval`, with an error that
     says why an expression is not constant (overflow, an uninitialized read, a dangling pointer,
@@ -53,7 +54,7 @@ build/bin/ycxx cxx hello.cpp -o hello && ./hello
 - The rest of the preprocessor: function-like macros, `#if` and the other conditionals,
   `#line`, `#error`, `_Pragma`, and the predefined macros. Without conditionals, system headers
   such as `<cstdio>` cannot be included yet.
-- Inheritance and virtual functions, passing classes by value, enums, namespaces, templates and
+- Namespaces, inheritance and virtual functions, passing classes by value, enums, namespaces, templates and
   overloading.
 - `if constexpr`, and taking the address of a variable in a namespace-scope initializer
   (`int* p = &g;` passes the front end but not code generation yet).

@@ -49,7 +49,7 @@ constexpr std::string_view spelling(Builtin b) {
 
 // ---------------------------------------------------------------- types
 
-enum class TypeKind : u8 { builtin, pointer, array, function, class_, reference, other };
+enum class TypeKind : u8 { builtin, pointer, array, function, class_, reference, enum_, other };
 
 // The canonical form of a type, read out by value.
 struct TypeRec {
@@ -60,7 +60,7 @@ struct TypeRec {
   std::vector<QualType> params;
   bool variadic = false;
   LangLinkage linkage = LangLinkage::cxx;
-  EntityId entity = EntityId::none;  // a class's
+  EntityId entity = EntityId::none;  // a class's or an enumeration's
   Cv fn_cv = Cv::none;               // a member function type's cv-qualifier-seq
   bool rvalue_ref = false;           // a reference's kind; `inner` is what it refers to
 };
@@ -80,6 +80,7 @@ public:
     return ast::function_type(*ins_, ret, params, {.variadic = variadic, .cv = cv, .linkage = linkage});
   }
   QualType class_type(EntityId c) { return ins_->intern_type(ast::TClass{c}); }
+  QualType enum_type(EntityId e) { return ins_->intern_type(ast::TEnum{e}); }
   QualType lvalue_ref(QualType t) { return ast::lvalue_ref_to(*ins_, t); }
   QualType rvalue_ref(QualType t) { return ast::rvalue_ref_to(*ins_, t); }
 
@@ -109,6 +110,9 @@ public:
     } else if (t.is<ast::TClass>(c)) {
       r.kind = TypeKind::class_;
       r.entity = t.get<ast::TClass>(c).entity;
+    } else if (t.is<ast::TEnum>(c)) {
+      r.kind = TypeKind::enum_;
+      r.entity = t.get<ast::TEnum>(c).entity;
     } else if (t.is<ast::TLRef>(c) || t.is<ast::TRRef>(c)) {
       r.kind = TypeKind::reference;
       r.rvalue_ref = t.is<ast::TRRef>(c);
@@ -139,6 +143,12 @@ public:
   bool is_array(QualType q) const { return ast::is_array(*ins_, q); }
   bool is_class(QualType q) const { return ins_->types.is<ast::TClass>(ins_->types.canon(q)); }
   bool is_reference(QualType q) const { return ast::is_reference(*ins_, q); }
+  bool is_enum(QualType q) const { return ins_->types.is<ast::TEnum>(ins_->types.canon(q)); }
+  EntityId enum_of(QualType q) const
+    pre(is_enum(q))
+  {
+    return ins_->types.get<ast::TEnum>(ins_->types.canon(q)).entity;
+  }
   // The type an expression naming a reference has ([expr.type]): what it refers to.
   QualType referee(QualType q) const { return is_reference(q) ? rec(q).inner : q; }
   // The class of a class type.
@@ -150,7 +160,7 @@ public:
   // [basic.types.general]: arithmetic, enumeration, pointer, pointer-to-member and std::nullptr_t
   // types, cv-qualified or not.
   bool is_scalar(QualType q) const {
-    return is_arithmetic(q) || is_pointer(q) || is(q, Builtin::nullptr_t);
+    return is_arithmetic(q) || is_pointer(q) || is(q, Builtin::nullptr_t) || is_enum(q);
   }
   // [basic.types.general]: an object type is not a function, reference or void type.
   bool is_object(QualType q) const { return !is_function(q) && !is_void(q) && !ast::is_reference(*ins_, q); }
@@ -198,6 +208,7 @@ private:
       if (k == TypeKind::array || k == TypeKind::function) p = "(" + p + ")";
       return spell(r.inner, p);
     }
+    case TypeKind::enum_:
     case TypeKind::class_:
       return cvs + (class_name ? class_name(r.entity) : "<class>") + (inner.empty() || inner[0] == '[' ? "" : " ") + inner;
     case TypeKind::other: return "<type>";
@@ -278,7 +289,7 @@ private:
 // ---------------------------------------------------------------- entities (stand-in for #33)
 
 // `data_member` is a non-static data member ([class.mem]).
-enum class EntityKind : u8 { function, variable, class_, data_member, constructor, destructor };
+enum class EntityKind : u8 { function, variable, class_, data_member, constructor, destructor, enum_, enumerator };
 
 // The structure behind an entity id (§4.3): for a function `(scope, name, canonical type)`, with
 // `::` as the scope of a function with C language linkage ([dcl.link]); for a variable with
@@ -366,6 +377,23 @@ struct ClassRec {
   EntityId destructor = EntityId::none;
   EntityId copy_ctor = EntityId::none;
   bool copy_deleted = false;
+  // Nested enumerations ([class.mem]): their types by name, and the unscoped ones' enumerators,
+  // which are members of the class.
+  std::vector<std::pair<NameId, QualType>> types;
+};
+
+// An enumeration ([dcl.enum]): scoped or not, its underlying type (fixed, or chosen to hold its
+// values), and its enumerators with their values, in order.
+struct EnumeratorRec {
+  NameId name{};
+  EntityId entity = EntityId::none;
+  ConstId value = ConstId::none;  // of the underlying type
+};
+struct EnumRec {
+  bool scoped = false;
+  bool fixed = false;
+  std::optional<QualType> underlying;
+  std::vector<EnumeratorRec> enumerators;
 };
 
 // The layout of an object type on the target ([basic.align], [class.mem]): its size and alignment
@@ -383,6 +411,16 @@ public:
   explicit Classes(ast::Interners& ins, Types& types) : ins_(&ins), types_(&types) {}
 
   ClassRec& rec(EntityId c) { return recs_[std::to_underlying(c)]; }
+  EnumRec& enum_rec(EntityId e) { return enums_[std::to_underlying(e)]; }
+  const EnumRec* find_enum(EntityId e) const {
+    auto it = enums_.find(std::to_underlying(e));
+    return it == enums_.end() ? nullptr : &it->second;
+  }
+  // An enumeration's underlying type; `int` until it is known.
+  QualType underlying(EntityId e) const {
+    const EnumRec* r = find_enum(e);
+    return r && r->underlying ? *r->underlying : types_->builtin(Builtin::int_);
+  }
   const ClassRec* find(EntityId c) const {
     auto it = recs_.find(std::to_underlying(c));
     return it == recs_.end() ? nullptr : &it->second;
@@ -402,6 +440,7 @@ public:
     }
     case TypeKind::pointer:
     case TypeKind::reference: return {target.pointer_size, target.pointer_align, {}};
+    case TypeKind::enum_: return layout(underlying(r.entity));
     case TypeKind::array: {
       ObjectLayout e = layout(r.inner);
       return {e.size * r.bound, e.align, {}};
@@ -445,6 +484,7 @@ private:
   ast::Interners* ins_;
   Types* types_;
   std::map<u32, ClassRec> recs_;
+  std::map<u32, EnumRec> enums_;
 };
 
 // What the front end shares process-wide (§9.1): the AST core's interners, and sema's views.

@@ -86,6 +86,8 @@ class Front {
         r.fields.push_back({l.offsets[i], w_->ins.canonical(cr->fields[i].type)});
       return r;
     }
+    QualType underlying(EntityId e) const override { return w_->classes.underlying(e); }
+    EntityId scope(EntityId c) const override { return w_->entities.rec(c).scope; }
     std::string class_name(EntityId c) const override {
       return std::string(w_->ins.names.spelling(w_->entities.rec(c).name));
     }

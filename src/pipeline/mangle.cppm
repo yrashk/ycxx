@@ -17,7 +17,12 @@ namespace ast = ycxx::ast;
 
 // Fails, naming the type, on what the α subset does not mangle yet.
 // How a class is named: its identifier (the global namespace only, so far).
-using ClassNames = std::function<std::string(ast::EntityId)>;
+// How a class or enumeration is named: its identifier, and the class it is nested in, or none.
+struct ClassName {
+  std::string name;
+  ast::EntityId scope = ast::EntityId::none;
+};
+using ClassNames = std::function<ClassName(ast::EntityId)>;
 
 // `scope` is the class type of a member, mangled as a <nested-name> (§5.1.5.3).
 std::expected<std::string, std::string> mangled_function(const ast::Interners& in, std::string_view name,
@@ -116,7 +121,7 @@ class Mangler {
         if (!r) return r;
         candidates_.push_back(full_key(bare));
         return (rv ? "O" : "R") + *r;
-      } else if (in_.types.is<ast::TClass>(in_.types.canon(bare))) {
+      } else if (in_.types.is<ast::TClass>(in_.types.canon(bare)) || in_.types.is<ast::TEnum>(in_.types.canon(bare))) {
         // <class-enum-type> ::= <name>: a global-namespace class is its <source-name>, a
         // substitution candidate (§5.1.5.3, §5.1.10).
         auto n = class_name(bare);
@@ -131,11 +136,24 @@ class Mangler {
 
   // A global-namespace class's <source-name>, or its substitution once it has been mangled.
   std::expected<std::string, std::string> class_name(ast::QualType cls) {
-    if (auto s = find(full_key(cls))) return *s;
-    std::string n = classes_ ? classes_(in_.types.get<ast::TClass>(in_.types.canon(cls)).entity) : "";
-    if (n.empty()) return std::unexpected("a class whose name is unknown");
-    candidates_.push_back(full_key(cls));
-    return std::format("{}{}", n.size(), n);
+    ast::QualType c = in_.types.canon(cls);
+    return entity_name(in_.types.is<ast::TEnum>(c) ? in_.types.get<ast::TEnum>(c).entity : in_.types.get<ast::TClass>(c).entity);
+  }
+  // A class's or enumeration's <name>: its <source-name>, or, nested in a class, a
+  // <nested-name> whose prefix is a candidate first (§5.1.5.3). Classes are keyed by entity.
+  std::expected<std::string, std::string> entity_name(ast::EntityId e) {
+    std::uint32_t key = 0x80000000u | std::to_underlying(e);
+    if (auto s = find(key)) return *s;
+    ClassName n = classes_ ? classes_(e) : ClassName{};
+    if (n.name.empty()) return std::unexpected("a class whose name is unknown");
+    std::string r = std::format("{}{}", n.name.size(), n.name);
+    if (n.scope != ast::EntityId::none) {
+      auto prefix = entity_name(n.scope);
+      if (!prefix) return prefix;
+      r = "N" + *prefix + r + "E";
+    }
+    candidates_.push_back(key);
+    return r;
   }
 
  private:
@@ -193,7 +211,7 @@ std::expected<std::string, std::string> symbol_name(const ast::Interners& in, st
                                                     bool special) {
   if (scope && !is_function) {
     // A static data member: <nested-name> ([class.static.data], §5.1.2).
-    std::string n = classes ? classes(in.types.get<ast::TClass>(in.types.canon(*scope)).entity) : "";
+    std::string n = classes ? classes(in.types.get<ast::TClass>(in.types.canon(*scope)).entity).name : "";
     if (n.empty()) return std::unexpected("a class whose name is unknown");
     return std::format("__ZN{}{}{}{}E", n.size(), n, name.size(), name);
   }

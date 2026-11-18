@@ -59,7 +59,9 @@ class Records {
     std::vector<ir::SubObject> fields;  // the non-static data members, in order
   };
   virtual std::optional<Record> record(EntityId c) const = 0;
-  virtual std::string class_name(EntityId c) const = 0;
+  virtual std::string class_name(EntityId c) const = 0;  // or an enumeration's
+  virtual EntityId scope(EntityId c) const = 0;          // the class it is nested in, or none
+  virtual QualType underlying(EntityId e) const = 0;      // an enumeration's ([dcl.enum])
 };
 
 // An entity the translation unit declares (or defines): what its symbol is made of.
@@ -129,6 +131,7 @@ class Layout {
     }
     if (in_->types.is<ast::TFunction>(c)) return {function, 0, 1, false, {}};
     if (auto r = class_record(c)) return {record, r->size, r->align, false, {}};
+    if (records_ && in_->types.is<ast::TEnum>(c)) return type(records_->underlying(in_->types.get<ast::TEnum>(c).entity));
     return {};
   }
 
@@ -187,8 +190,13 @@ namespace ycxx::pipeline {
 // `Constants`, declarations from the unit's entity list.
 class UnitFacts : public irgen::TypeFacts {
  public:
-  UnitFacts(ast::Interners& in, const ast::Target& target, Constants& consts, const TranslationUnit& tu)
-      : TypeFacts(in, target), consts_(&consts), tu_(&tu) {}
+  UnitFacts(ast::Interners& in, const ast::Target& target, Constants& consts, const TranslationUnit& tu,
+            const Records* records = nullptr)
+      : TypeFacts(in, target), consts_(&consts), tu_(&tu) {
+    enum_underlying = [records, &in](EntityId e) {
+      return records ? records->underlying(e) : ast::builtin(in, ast::Builtin::int_);
+    };
+  }
   ConstId string_address(ConstId c) { return consts_->address_of(c); }
   bool is_constexpr(EntityId e) {
     return std::ranges::any_of(tu_->entities, [&](const Entity& x) { return x.id == e && x.is_constexpr; });
@@ -250,7 +258,7 @@ std::expected<obj::object, std::vector<BackError>> compile(const TranslationUnit
                                                            Constants& consts, const ast::Target& target,
                                                            const Records* records) {
   std::vector<BackError> errors;
-  UnitFacts facts(in, target, consts, tu);
+  UnitFacts facts(in, target, consts, tu, records);
   Layout layout(in, target, consts, records);
   aarch64::Unit unit;
   unit.name = tu.name;
@@ -326,7 +334,10 @@ std::expected<obj::object, std::vector<BackError>> compile(const TranslationUnit
     std::string name_ = e.special == Special::constructor ? "C1" : e.special == Special::destructor ? "D1" : e.name;
     auto name = symbol_name(
         in, name_, e.type, e.is_function, e.lang,
-        [&](EntityId c) { return records ? records->class_name(c) : std::string(); }, scope, e.special != Special::none);
+        [&](EntityId c) {
+          return records ? ClassName{records->class_name(c), records->scope(c)} : ClassName{};
+        },
+        scope, e.special != Special::none);
     if (!name) {
       errors.push_back({e.at, std::format("the name of '{}': {} is not supported yet", e.name, name.error())});
       continue;

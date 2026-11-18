@@ -32,9 +32,13 @@ class TypeFacts {
     return b == ast::ConstId::none ? 0 : in_->values.get<ast::VInt>(b).bits.lo;
   }
 
+  // An enumeration's underlying type ([dcl.enum]), from whoever knows the enumerations.
+  std::function<ast::QualType(ast::EntityId)> enum_underlying;
+
   TypeClass classify(ast::QualType q) const {
     if (is_reference(q)) return TypeClass::pointer;
     ast::QualType c = in_->types.canon(q);
+    if (in_->types.is<ast::TEnum>(c)) return TypeClass::integer;
     if (auto b = ast::builtin_of(*in_, c)) {
       if (*b == ast::Builtin::void_) return TypeClass::void_;
       if (*b == ast::Builtin::bool_) return TypeClass::bool_;
@@ -49,6 +53,8 @@ class TypeFacts {
   }
 
   IntRep integer(ast::QualType q) const {
+    ast::QualType c = in_->types.canon(q);
+    if (in_->types.is<ast::TEnum>(c)) return integer(enum_underlying(in_->types.get<ast::TEnum>(c).entity));
     ast::Builtin b = *ast::builtin_of(*in_, q);
     return {ast::is_signed(*target_, b), ast::width_of(*target_, b)};
   }
@@ -77,7 +83,11 @@ class TypeFacts {
   }
 
  public:
-  ast::ConstId int_constant(ast::QualType q, std::int64_t v) { return ast::int_value(*in_, *target_, canonical(q), v); }
+  ast::ConstId int_constant(ast::QualType q, std::int64_t v) {
+    ast::QualType c = in_->types.canon(q);
+    if (in_->types.is<ast::TEnum>(c)) q = enum_underlying(in_->types.get<ast::TEnum>(c).entity);  // its value's type
+    return ast::int_value(*in_, *target_, canonical(q), v);
+  }
   ast::ConstId null_constant(ast::QualType) { return in_->intern_value(ast::VNullptr{}); }
 
  private:
