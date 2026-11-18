@@ -110,6 +110,57 @@ void object_like() {
   check(r.site(1).offset == 20, "its site");
 }
 
+void function_like() {
+  MemHost h;
+  pp::Session s(h);
+  auto pre = [&](std::string src) {
+    h.files["main.cpp"] = std::move(src);
+    return run(s, h);
+  };
+  // [cpp.rescan]/2's example: f(2)(9) is 2*9*g.
+  check(text(pre("#define f(a) a*g\n#define g(a) f(a)\nf(2)(9)\n").region) == "2 * 9 * g", "rescanning");
+  check(text(pre("#define F(...) f(0 __VA_OPT__(,) __VA_ARGS__)\nF(a, b) F()\n").region) == "f ( 0 , a , b ) f ( 0 )",
+        "__VA_OPT__");
+  check(text(pre("#define t(x,y,z) x ## y ## z\nt(1,2,3) t(,4,5) t(,,)\n").region) == "123 45", "placemarkers");
+  check(text(pre("#define S(x) #x\nS( a  \"b\\n\" ) S()\n").region) == "\"a \\\"b\\\\n\\\"\" \"\"", "stringizing");
+  check(text(pre("#define F(a) a\nF\n+ F\n(1)\n").region) == "F + 1", "a name without ( is left alone");
+  // An argument's tokens keep their spelling, in an argument expansion whose site leads to the
+  // invocation's.
+  auto loc = pre("#define ID(x) [x]\nint a = ID(v);\n");
+  const pp::Region& r = loc.region;
+  std::size_t v = 4;  // int a = [ v ] ;
+  check(r.name(r.tokens[v]) == "v" && r.locs[v].offset == 29, "an argument token's spelling");
+  check(r.expansions[r.locs[v].expansion].kind == pp::ExpansionKind::argument && r.site(v).offset == 26,
+        "its expansion and site");
+  check(kinds(pre("#define P(a,b) a##b\nP(/,/)\n")) == std::vector{lex::LexDiag::paste_invalid}, "an invalid paste");
+  check(kinds(pre("#define J(a,b) a b\nJ(1) J(1,2,3)\n")) ==
+            std::vector{lex::LexDiag::too_few_arguments, lex::LexDiag::too_many_arguments},
+        "argument counts");
+  // Found by review: an argument is replaced once, however often it is used ([cpp.subst]/1).
+  check(kinds(pre("#define g(a) a\n#define F(...) __VA_OPT__(x) __VA_ARGS__ __VA_ARGS__\nF(g(1,2))\n")) ==
+            std::vector{lex::LexDiag::too_many_arguments},
+        "an argument replaced once");
+  // A directive ends the search for `(`.
+  check(text(pre("#define f(x) [x]\na f\n#undef f\n(1) b\n").region) == "a f ( 1 ) b", "a directive before (");
+  check(kinds(pre("#define f(x) x\nf(1\n#include \"x.h\"\n)\n")) == std::vector{lex::LexDiag::directive_in_arguments},
+        "#include in arguments");
+  // Stringizing a raw string written across lines, and an invalid result.
+  check(text(pre("#define s(x) #x\ns(R\"(a\nb)\")\n").region) == "\"R\\\"(a\\nb)\\\"\"", "a raw string stringized");
+  check(kinds(pre("#define s(x) #x\ns(\\)\n")) == std::vector{lex::LexDiag::stringize_invalid}, "an invalid stringizing");
+  check(kinds(pre("#define F(__VA_OPT__, ...)\n")) == std::vector{lex::LexDiag::macro_param_expected}, "__VA_OPT__ is no parameter");
+  // A header's invocation of a macro the includer defines is reused where an equal definition is
+  // elsewhere.
+  h.files["use.h"] = "int u = TWICE(3);\n";
+  h.files["a.cpp"] = "#define TWICE(x) ((x) * 2)\n#include \"use.h\"\n";
+  h.files["b.cpp"] = "\n\n#define TWICE(x) ((x) * 2)\n#include \"use.h\"\n";
+  run(s, h, "a.cpp");
+  auto computed = s.stats.computed;
+  auto b = run(s, h, "b.cpp");
+  check(s.stats.computed == computed + 1 && text(b.region) == "int u = ( ( 3 ) * 2 ) ;", "a header reused across TUs");
+  check(b.region.expansions[1].definition_offset == 10 && b.region.file_names[b.region.expansions[1].definition_file] == "b.cpp",
+        "its expansion bound to this TU's definition");
+}
+
 // The questions a region asks of its entry state.
 void traces() {
   MemHost h;
@@ -158,6 +209,56 @@ void reuse() {
   check(text(run(s, h, "five.cpp").region) == "int e = 4 ;", "a reused region's delta applies");
 }
 
+// Conditionals, the guard summary and the counter.
+void conditionals() {
+  MemHost h;
+  pp::Session s(h);
+  auto pre = [&](std::string src) {
+    h.files["main.cpp"] = std::move(src);
+    return run(s, h);
+  };
+  check(text(pre("#if 1 + 1 == 2 && defined(__cplusplus)\na\n#elif 1/0\nb\n#else\nc\n#endif\n").region) == "a", "#if");
+  check(text(pre("#if 0\n#bogus\n#if 1\nno\n#endif\n#elifdef __LINE__\nyes\n#endif\n").region) == "yes", "skipped groups");
+  check(kinds(pre("#if 0\n'x\n#endif\n")) == std::vector{lex::LexDiag::unterminated_char}, "lexed all the same");
+  check(kinds(pre("#if 1\n#else\n#else\n#endif\n#endif\n#if 1\n")) ==
+            std::vector{lex::LexDiag::cond_else_after_else, lex::LexDiag::cond_endif_without_if, lex::LexDiag::cond_unterminated},
+        "mismatched conditionals");
+  check(text(pre("#if -1 < 0u\nno\n#else\nyes\n#endif\n#if 0 && 1/0\n#endif\n").region) == "yes", "unsigned, short-circuit");
+  // A guarded header included again is an empty region with one question.
+  h.files["g.h"] = "// guard\n#ifndef G\n#define G\nint g;\n#endif\n";
+  pre("#include \"g.h\"\n");
+  auto before = s.stats;
+  auto twice = pre("#include \"g.h\"\n#include \"g.h\"\n");
+  check(text(twice.region) == "int g ;" && s.stats.computed == before.computed + 1, "a guarded header, read once");
+  // `#ifdef` asks whether, not what: a different definition of the name does not matter.
+  h.files["d.h"] = "#ifdef D\nint d;\n#endif\n";
+  pre("#define D 1\n#include \"d.h\"\n");
+  auto c = s.stats.computed;
+  check(text(pre("#define D 2\n#include \"d.h\"\n").region) == "int d ;" && s.stats.computed == c + 1, "defined(D) only");
+  // __COUNTER__ continues across a reused region.
+  h.files["c.h"] = "int a = __COUNTER__;\n";
+  check(text(pre("#include \"c.h\"\n#include \"c.h\"\nint b = __COUNTER__;\n").region) == "int a = 0 ; int a = 1 ; int b = 2 ;",
+        "the counter");
+  check(text(pre("int z = __COUNTER__;\n#include \"c.h\"\n").region) == "int z = 0 ; int a = 1 ;", "a region's counter question");
+  // Found by review: a directive outside the guarded group makes the file unguarded, and so does
+  // a diagnostic its skipping would repeat.
+  h.files["g1.h"] = "#ifndef G1\n#define G1\nint g1;\n#endif\n#define AFTER 42\n";
+  check(text(pre("#include \"g1.h\"\n#undef AFTER\n#include \"g1.h\"\nAFTER\n").region) == "int g1 ; 42", "not a guard");
+  h.files["g4.h"] = "#ifndef G4\n#define G4\n#endif extra\n";
+  check(kinds(pre("#include \"g4.h\"\n#include \"g4.h\"\n")) ==
+            std::vector{lex::LexDiag::extra_tokens, lex::LexDiag::extra_tokens},
+        "a guarded file that says something is read again");
+  // __LINE__: an argument's own line, or the `)` of the invocation whose replacement made it.
+  check(text(pre("#define F(x) x\n#define H(x) x __LINE__\nF(\n__LINE__\n) F(H(\n1\n)\n)\n").region) == "4 1 7",
+        "__LINE__ in arguments");
+  check(text(pre("#if (1, 2) == 2\nc\n#endif\n").region) == "c", "a comma in parentheses");
+  // #line
+  auto l = pre("#line 10 \"x.cpp\"\nint a = __LINE__; const char* f = __FILE__;\n#line 1\n#error e\n");
+  check(text(l.region) == "int a = 10 ; const char * f = \"x.cpp\" ;", "#line");
+  pp::Message m = pp::message(s, s.files.id("main.cpp"), "main.cpp", l.diags.at(0));
+  check(l.diags.size() == 1 && m.line == 1 && m.file == "x.cpp", "a diagnostic's presumed location");
+}
+
 // What a region's value depends on beyond its trace: whether it is a main file, and how deep it
 // is nested (both found by review).
 void roots_and_depth() {
@@ -197,6 +298,14 @@ void incremental_equals_cold() {
       {{"main.cpp", "#include \"a.h\"\n#include \"a.h\"\nB\n"}},
       {{"c.h", "int c;\n"}, {"a.h", "#include \"c.h\"\n#include \"missing.h\"\n"}},
       {{"missing.h", "int now_here;\n"}},
+      {{"main.cpp", "#define F(x) [x A]\n#include \"a.h\"\nF(B) G(1)\n"}, {"a.h", "#define G(y) F(y) #y\n#define A a\n"}},
+      {{"a.h", "#define G(y) F(y)##y\n#define A b\n"}},
+      {{"main.cpp", "#define F(...) <__VA_OPT__(x) __VA_ARGS__>\n#include \"a.h\"\nF() F(1) G(2)\n"}},
+      {{"main.cpp", "#include \"g.h\"\n#include \"g.h\"\n#define G2\n#include \"g.h\"\nint m = __COUNTER__;\n"},
+       {"g.h", "#ifndef G2\n#define G2\nint g = __COUNTER__;\n#endif\n"}},
+      {{"g.h", "#ifndef G3\n#define G3\nint g = __COUNTER__ + __LINE__;\n#endif\n#if defined(G2) && __has_include(\"c.h\")\nint c;\n#endif\n"}},
+      {{"c.h", "int c2;\n"}},
+      {{"main.cpp", "#define G3\n#include \"g.h\"\n#undef G3\n#include \"g.h\"\n#line 7 \"n.cpp\"\nconst char* f = __FILE__;\n"}},
   };
   MemHost warm_host;
   pp::Session warm(warm_host);
@@ -227,6 +336,8 @@ void spacing() {
 int main() {
   includes();
   object_like();
+  function_like();
+  conditionals();
   traces();
   reuse();
   roots_and_depth();

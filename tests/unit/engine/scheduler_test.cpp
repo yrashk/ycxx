@@ -1,0 +1,753 @@
+// The scheduler (#15): the pool, its scheduler and `parallel_scheduler` backend; requests as
+// senders; the same values, dependency lists, diagnostics and execution counts at every thread
+// count, with and without the chaos scheduler; incremental == cold across thread counts, with
+// cancellation injected; waiter hand-over when an owner is stopped; cycles and errors reported
+// the same from every entry point.
+import std;
+import ycxx.engine;
+import ycxx.unit;
+
+using namespace ycxx::engine;
+using ycxx::unit::check;
+namespace ex = std::execution;
+
+namespace {
+
+Pool* backend_pool = nullptr;
+
+}  // namespace
+
+namespace std::execution::parallel_scheduler_replacement {
+shared_ptr<parallel_scheduler_backend> query_parallel_scheduler_backend() {
+  static const auto b = ycxx::engine::pool_backend(*backend_pool);
+  return b;
+}
+}  // namespace std::execution::parallel_scheduler_replacement
+
+namespace {
+
+const unsigned hw = std::max(2u, std::thread::hardware_concurrency());
+
+// ---------------------------------------------------------------------------------------------
+// The pool on its own.
+
+void pool_scheduling() {
+  Pool pool(4);
+  std::atomic<int> ran{0}, on_workers{0};
+  {
+    ex::counting_scope scope;
+    for (int i = 0; i < 1000; ++i) {
+      ex::spawn(ex::schedule(pool.scheduler()) | ex::then([&]() noexcept {
+                  ran.fetch_add(1);
+                  if (pool.worker_index()) on_workers.fetch_add(1);
+                }),
+                scope.get_token());
+    }
+    std::this_thread::sync_wait(scope.join());
+  }
+  check(ran == 1000 && on_workers == 1000, "schedule() completes on a worker, once per sender");
+  static_assert(ex::scheduler<pool_scheduler>);
+  check(ex::get_completion_scheduler<ex::set_value_t>(ex::get_env(ex::schedule(pool.scheduler()))) == pool.scheduler(),
+        "the schedule sender's completion scheduler");
+
+  // Interactive work before background work (§A3.5): one worker, which queues a background task
+  // and then an interactive one from inside a task.
+  Pool one(1);
+  std::vector<char> order;
+  std::atomic<bool> done{false};
+  struct T : Task {
+    std::vector<char>* order;
+    char name;
+    std::function<void()> then;
+  };
+  T b2, i1, b1;
+  b2.order = i1.order = b1.order = &order;
+  b2.name = 'b';
+  i1.name = 'i';
+  b1.name = 'B';
+  const auto body = [](Task* t) noexcept {
+    T& me = *static_cast<T*>(t);
+    me.order->push_back(me.name);
+    if (me.then) me.then();
+  };
+  b2.run = i1.run = b1.run = body;
+  b2.then = [&] { done.store(true); done.notify_all(); };
+  b1.then = [&] {
+    one.push(&b2, Priority::background);
+    one.push(&i1, Priority::interactive);
+  };
+  one.push(&b1, Priority::background);
+  done.wait(false);
+  check((order == std::vector<char>{'B', 'i', 'b'}), "an interactive task runs before an older background one");
+
+  // `parallel_scheduler` is the pool once a program installs the backend.
+  Pool p(3);
+  backend_pool = &p;
+  std::atomic<long> sum{0};
+  std::atomic<int> outside{0};
+  auto r = std::this_thread::sync_wait(ex::schedule(ex::get_parallel_scheduler()) | ex::bulk(ex::par, 1000, [&](int i) {
+                                         sum.fetch_add(i);
+                                         if (!p.worker_index()) outside.fetch_add(1);
+                                       }));
+  check(r.has_value() && sum == 999 * 1000 / 2 && outside == 0, "parallel_scheduler's bulk runs on the pool");
+  auto one_shot = std::this_thread::sync_wait(ex::schedule(ex::get_parallel_scheduler()) | ex::then([&] { return p.worker_index().has_value(); }));
+  check(one_shot && std::get<0>(*one_shot), "parallel_scheduler's schedule completes on a worker");
+}
+
+// ---------------------------------------------------------------------------------------------
+// A layered program whose dependencies depend on input values (as the core's fuzz), wider and
+// deeper, with a cheap kind under it and diagnostics at two levels.
+
+constexpr std::uint32_t width = 24;
+constexpr std::uint32_t levels = 6;
+constexpr std::uint32_t top = (levels - 1) * width;
+constexpr DiagId negative{1};
+
+struct [[=input{Durability::low}]] In {
+  using Key = std::uint32_t;
+  using Value = std::int64_t;
+};
+struct [[=input{Durability::high}]] Sys {
+  using Key = std::uint32_t;
+  using Value = std::int64_t;
+};
+// Fetched by many nodes at once, so concurrent fetches compute it privately (§A3.3).
+struct [[=cheap]] Mix {
+  using Key = std::uint32_t;
+  using Value = std::int64_t;
+  static Value run(SyncCtx& cx, Key k) { return cx.fetch<In>(k) * 3 + cx.fetch<In>((k + 1) % width); }
+};
+struct Node {
+  using Key = std::uint32_t;  // level * width + index
+  using Value = std::int64_t;
+  static query_task<Value> run(Ctx& cx, Key k) {
+    const std::uint32_t level = k / width, index = k % width;
+    if (level == 0 && index % 4 == 0 && cx.fetch<Sys>(index) == 0) co_return 0;
+    const auto own = cx.fetch<In>(index);
+    if (level == 0) {
+      if (own < 0) cx.diag(Loc{index, 0}, negative);
+      co_return own + cx.fetch<Mix>(index) % 5;
+    }
+    const std::uint32_t below = (level - 1) * width;
+    const auto a = (index + static_cast<std::uint32_t>(own & 0xff)) % width;
+    if (level == 1 && cx.fetch<Mix>(a) % 4 == 0) co_return 3;
+    if (own % 3 == 0) {
+      const auto [x, y] = co_await cx.par_fetch(q<Node>{below + a}, q<Node>{below + (a + 1) % width});
+      co_return (x + y) % 7;
+    }
+    const auto& xs = co_await cx.par_map<Node>(std::array{below + a, below + index, below + (a + 5) % width});
+    if (xs[0].get() == xs[1].get() && own % 2 == 0) co_return xs[0].get() % 7;
+    if (level == 2 && own < 0) cx.diag(Loc{100 + index, 1}, negative, own);
+    co_return (xs[0].get() + xs[2].get() + co_await cx.fetch<Node>(below + (a + 2) % width)) % 7;
+  }
+};
+
+struct Inputs {
+  std::vector<std::int64_t> in = std::vector<std::int64_t>(width);
+  std::vector<std::int64_t> sys = std::vector<std::int64_t>(width, 1);
+  void write(Db& db) const {
+    for (std::uint32_t i = 0; i < width; ++i) db.set<In>(i, in[i]);
+    for (std::uint32_t i = 0; i < width; ++i) db.set<Sys>(i, sys[i]);
+  }
+  void edit(std::mt19937& rng) {
+    for (int n = 0, edits = 1 + static_cast<int>(rng() % 3); n < edits; ++n) {
+      const auto i = static_cast<std::uint32_t>(rng() % width);
+      if (rng() % 10 == 0) sys[i] = static_cast<std::int64_t>(rng() % 3);
+      else in[i] = static_cast<std::int64_t>(rng() % 9) - 2;
+    }
+  }
+};
+
+// What a build of every top node reports: values and `diags_of`, positionally.
+struct Outputs {
+  std::vector<std::int64_t> values = std::vector<std::int64_t>(width);
+  std::vector<std::vector<Diagnostic>> diags = std::vector<std::vector<Diagnostic>>(width);
+  int errors = 0;
+  bool operator==(const Outputs&) const = default;
+};
+
+// Every top node and its diagnostics requested at once, into one epoch.
+std::vector<std::shared_ptr<Epochs::Ticket>> request_all(Db& db, Epochs& ep, Outputs& out, Priority p = Priority::background) {
+  std::vector<std::shared_ptr<Epochs::Ticket>> tickets;
+  for (std::uint32_t i = 0; i < width; ++i) {
+    tickets.push_back(
+        ep.spawn<Node>(top + i, p, [&out, i](const std::int64_t& v) { out.values[i] = v; }, [&out](std::exception_ptr) { ++out.errors; }));
+    tickets.push_back(ep.spawn<DiagsOf>(db.cell_of<Node>(top + i), p, [&out, i](const std::vector<Diagnostic>& d) { out.diags[i] = d; },
+                                        [&out](std::exception_ptr) { ++out.errors; }));
+  }
+  return tickets;
+}
+
+Outputs cold_outputs(const Inputs& inputs, Db& cold) {
+  inputs.write(cold);
+  Outputs out;
+  for (std::uint32_t i = 0; i < width; ++i) {
+    out.values[i] = cold.get<Node>(top + i);
+    out.diags[i] = cold.diags_of<Node>(top + i);
+  }
+  return out;
+}
+
+std::vector<std::vector<ycxx::Fp128>> keys(const std::vector<std::vector<CellRef>>& groups) {
+  std::vector<std::vector<ycxx::Fp128>> out;
+  for (const auto& g : groups) out.push_back(g | std::views::transform(&CellRef::key) | std::ranges::to<std::vector>());
+  return out;
+}
+
+// Every cell the cold run executed is valid in `inc` with the same value and dependency list, and
+// bringing it up to date executes nothing (§A1.5, §A9).
+int table_mismatches(Db& inc, Db& cold) {
+  int bad = 0;
+  const Stats before = inc.stats();
+  for (std::uint32_t k = 0; k < levels * width; ++k) {
+    if (cold.runs<Node>(k) == 0) continue;
+    if (inc.get<Node>(k) != cold.get<Node>(k)) ++bad;
+    if (keys(inc.dependencies<Node>(k)) != keys(cold.dependencies<Node>(k))) ++bad;
+  }
+  for (std::uint32_t i = 0; i < width; ++i) {
+    if (cold.runs<Mix>(i) != 0 && inc.get<Mix>(i) != cold.get<Mix>(i)) ++bad;
+  }
+  if (inc.stats().executed != before.executed) ++bad;
+  return bad;
+}
+
+// The counts that are a function of the inputs alone: which cells executed, were backdated,
+// were validated or were green by durability (hits and private recomputations depend on timing).
+struct Counts {
+  std::uint64_t executed, backdated, validated, durable;
+  bool operator==(const Counts&) const = default;
+};
+Counts counts(const Stats& s) { return {s.executed, s.backdated, s.validated, s.durable}; }
+
+struct Config {
+  unsigned threads;  // 0: no pool
+  std::optional<std::uint64_t> chaos;
+};
+
+// The same edit sequence at every configuration: outputs, execution counts and the memo table
+// equal the single-threaded run's, and the incremental table equals a cold run's (§A5.5, §A9).
+void deterministic_across_thread_counts() {
+  const std::vector<Config> configs{{0, {}}, {1, {}}, {2, {}}, {hw, 151}, {2 * hw, 1515}};
+  constexpr int edits = 150;
+  std::vector<std::vector<Outputs>> outputs(configs.size());
+  std::vector<std::vector<Counts>> stats(configs.size());
+  std::vector<Stats> totals(configs.size());
+  int cold_mismatches = 0, errors = 0;
+  for (std::size_t ci = 0; ci < configs.size(); ++ci) {
+    std::optional<Pool> pool;
+    if (configs[ci].threads) pool.emplace(configs[ci].threads, configs[ci].chaos);
+    Db inc_storage;
+    std::optional<Db> pooled;
+    if (pool) pooled.emplace(*pool);
+    Db& inc = pool ? *pooled : inc_storage;
+    std::mt19937 rng(15);
+    Inputs inputs;
+    for (std::uint32_t i = 0; i < width; ++i) inputs.in[i] = static_cast<std::int64_t>(rng() % 9) - 2;
+    Epochs ep(inc);
+    ep.apply([&](Db& db) { inputs.write(db); });
+    for (int e = 0; e < edits; ++e) {
+      inc.reset_stats();
+      Outputs out;
+      request_all(inc, ep, out);
+      ep.join();
+      errors += out.errors;
+      outputs[ci].push_back(out);
+      stats[ci].push_back(counts(inc.stats()));
+      totals[ci].contended += inc.stats().contended;
+      totals[ci].recomputed += inc.stats().recomputed;
+      if (e % 10 == 0 || ci == configs.size() - 1) {
+        Db cold;
+        if (cold_outputs(inputs, cold) != out) ++cold_mismatches;
+        cold_mismatches += table_mismatches(inc, cold);
+      }
+      inputs.edit(rng);
+      ep.apply([&](Db& db) { inputs.write(db); });
+    }
+  }
+  check(errors == 0, "no request failed");
+  check(cold_mismatches == 0, std::format("incremental == cold at every thread count ({} mismatches)", cold_mismatches));
+  check(totals[0].contended == 0 && totals[0].recomputed == 0, "nothing contends without a pool");
+  check(totals[3].contended > 0 && totals[4].contended > 0, "frames waited on cells other frames owned");
+  std::println("contended {} {} {} {}, recomputed {} {} {} {}", totals[1].contended, totals[2].contended, totals[3].contended,
+               totals[4].contended, totals[1].recomputed, totals[2].recomputed, totals[3].recomputed, totals[4].recomputed);
+  for (std::size_t ci = 1; ci < configs.size(); ++ci) {
+    check(outputs[ci] == outputs[0], std::format("outputs at {} threads equal the single-threaded run's", configs[ci].threads));
+    check(stats[ci] == stats[0], std::format("execution counts at {} threads equal the single-threaded run's", configs[ci].threads));
+  }
+}
+
+// Requests stopped at random points of random epochs (§A4, §A9): whatever completed survives,
+// nothing half-computed is stored, and the final state equals a cold run.
+void cancellation_injected() {
+  for (const Config cfg : {Config{hw, 77}, Config{2, {}}, Config{2 * hw, 7}}) {
+    Pool pool(cfg.threads, cfg.chaos);
+    Db inc(pool);
+    std::mt19937 rng(77);
+    Inputs inputs;
+    Epochs ep(inc);
+    ep.apply([&](Db& db) { inputs.write(db); });
+    int mismatches = 0, stopped_epochs = 0;
+    std::deque<Outputs> outs;
+    for (int e = 0; e < 200; ++e) {
+      Outputs& out = outs.emplace_back();
+      const auto tickets = request_all(inc, ep, out, e % 2 ? Priority::interactive : Priority::background);
+      if (rng() % 4 != 0) {
+        // Stop the requests mid-flight, after a random delay, and edit.
+        for (auto spin = rng() % 20000; spin > 0; --spin) {
+          if (spin % 1000 == 0) std::this_thread::yield();
+        }
+        for (const auto& t : tickets) t->cancel();
+        inputs.edit(rng);
+        ep.apply([&](Db& db) { inputs.write(db); });
+        ++stopped_epochs;
+        continue;
+      }
+      ep.join();
+      Db cold;
+      if (cold_outputs(inputs, cold) != out) ++mismatches;
+      mismatches += table_mismatches(inc, cold);
+      inputs.edit(rng);
+      ep.apply([&](Db& db) { inputs.write(db); });
+    }
+    Outputs out;
+    request_all(inc, ep, out);
+    ep.join();
+    Db cold;
+    if (cold_outputs(inputs, cold) != out) ++mismatches;
+    mismatches += table_mismatches(inc, cold);
+    check(mismatches == 0, std::format("incremental == cold with cancellation injected at {} threads ({} mismatches)", cfg.threads, mismatches));
+    check(stopped_epochs > 100, "most epochs were stopped mid-flight");
+    check(inc.live_frames() == 0, "quiescent after the last join");
+  }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Requests as senders, stop, and waiter hand-over.
+
+std::atomic<bool> slow_started{false};
+std::atomic<bool> slow_release{false};
+std::atomic<int> slow_runs{0};
+// Spins at stop points until released (§A3.5).
+struct Slow {
+  using Key = std::uint32_t;
+  using Value = std::int64_t;
+  static query_task<Value> run(Ctx& cx, Key k) {
+    slow_runs.fetch_add(1);
+    slow_started.store(true);
+    while (!slow_release.load()) {
+      co_await cx.stop_point();
+      std::this_thread::yield();
+    }
+    co_return 10 * cx.fetch<In>(k);
+  }
+};
+struct AboveSlow {
+  using Key = std::uint32_t;
+  using Value = std::int64_t;
+  static query_task<Value> run(Ctx& cx, Key k) { co_return 1 + co_await cx.fetch<Slow>(k); }
+};
+
+void senders_and_stop() {
+  Pool pool(4);
+  Db db(pool);
+  db.set<In>(0, 4);
+  slow_release = true;
+  auto r = std::this_thread::sync_wait(db.request<AboveSlow>(0));
+  check(r && std::get<0>(*r) == 41, "sync_wait on a request");
+
+  // A request whose stop was requested before it starts completes stopped.
+  std::inplace_stop_source stopped;
+  stopped.request_stop();
+  auto s = std::this_thread::sync_wait(ex::write_env(db.request<AboveSlow>(1), ex::prop(std::get_stop_token, stopped.get_token())));
+  check(!s.has_value(), "a request stopped before it starts completes stopped");
+
+  // The owner of a cell is stopped while another request waits on it: the cell is handed over and
+  // the waiter computes it (§A3.1).
+  slow_release = false;
+  slow_started = false;
+  slow_runs = 0;
+  db.set<In>(2, 5);
+  ex::counting_scope a, b;
+  std::atomic<int> a_values{0}, a_errors{0};
+  std::atomic<std::int64_t> b_value{0};
+  ex::spawn(db.request<AboveSlow>(2) | ex::then([&](const std::int64_t&) { a_values.fetch_add(1); }) |
+                ex::upon_error([&](std::exception_ptr) noexcept { a_errors.fetch_add(1); }),
+            a.get_token());
+  while (!slow_started.load()) std::this_thread::yield();
+  ex::spawn(db.request<Slow>(2, Priority::interactive) | ex::then([&](const std::int64_t& v) { b_value = v; }) |
+                ex::upon_error([&](std::exception_ptr) noexcept {}),
+            b.get_token());
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));  // b links on the cell a owns
+  a.request_stop();
+  a.close();
+  std::this_thread::sync_wait(a.join());
+  slow_release = true;
+  b.close();
+  std::this_thread::sync_wait(b.join());
+  check(a_values == 0 && a_errors == 0, "the stopped request completes stopped");
+  check(b_value == 50, "the waiter computed the cell after its owner left");
+  check(slow_runs == 2 && db.runs<Slow>(2) == 1, "the stopped execution stored nothing; the second did");
+  check(db.live_frames() == 0, "quiescent");
+  check(db.get<AboveSlow>(2) == 51 && db.runs<AboveSlow>(2) == 1, "the stopped request's cell is computed afresh");
+}
+
+// The daemon's strand (daemon design §4.1): a request interrupted by an epoch's stop runs again
+// in the next epoch, so each is answered once, with the cold value at the revision it completed
+// at.
+void respawned_requests_answer_once() {
+  Pool pool(hw, 99);
+  Db inc(pool);
+  Epochs ep(inc);
+  std::mt19937 rng(99);
+  Inputs inputs;
+  std::map<Revision, Inputs> at;
+  ep.apply([&](Db& db) { inputs.write(db); });
+  at[inc.revision()] = inputs;
+  struct Answer {
+    std::int64_t value = 0;
+    Revision revision = 0;
+    std::atomic<int> count{0};
+  };
+  std::vector<Answer> answers(width);
+  for (std::uint32_t i = 0; i < width; ++i) {
+    ep.spawn<Node>(top + i, Priority::background, [&, i](const std::int64_t& v) {
+      answers[i].value = v;
+      answers[i].revision = inc.revision();
+      answers[i].count.fetch_add(1);
+    }, [](std::exception_ptr) {});
+  }
+  // One request certainly in flight across the first epochs: interrupted and respawned each time.
+  slow_release = false;
+  slow_started = false;
+  std::int64_t slow_value = 0;
+  Revision slow_revision = 0;
+  std::atomic<int> slow_answers{0};
+  ep.spawn<Slow>(0, Priority::background, [&](const std::int64_t& v) {
+    slow_value = v;
+    slow_revision = inc.revision();
+    slow_answers.fetch_add(1);
+  }, [](std::exception_ptr) {});
+  while (!slow_started.load()) std::this_thread::yield();
+  std::size_t respawned = 0;
+  for (int e = 0; e < 40; ++e) {
+    if (e == 5) slow_release = true;
+    for (auto spin = rng() % 5000; spin > 0; --spin) {
+      if (spin % 1000 == 0) std::this_thread::yield();
+    }
+    inputs.edit(rng);
+    respawned += ep.apply([&](Db& db) { inputs.write(db); }).respawned;
+    at[inc.revision()] = inputs;
+  }
+  ep.join();
+  int wrong = 0, counts = 0;
+  for (std::uint32_t i = 0; i < width; ++i) {
+    if (answers[i].count != 1) ++counts;
+    Db cold;
+    at[answers[i].revision].write(cold);
+    if (cold.get<Node>(top + i) != answers[i].value) ++wrong;
+  }
+  check(counts == 0, "every request answered exactly once");
+  check(wrong == 0, std::format("every answer is the cold value at its revision ({} wrong)", wrong));
+  check(respawned >= 5, "requests were interrupted and respawned");
+  check(slow_answers == 1 && slow_value == 10 * at[slow_revision].in[0], "the held request answered once, at its revision");
+}
+
+struct WorkThenSlow {
+  using Key = std::uint32_t;
+  using Value = std::int64_t;
+  static query_task<Value> run(Ctx& cx, Key k) {
+    const auto a = co_await cx.fetch<Node>(k);
+    co_return a + co_await cx.fetch<Slow>(k % width);
+  }
+};
+
+// The progress quantum's hook (daemon design §4.2) and cancellation of one request.
+void restarts_and_cancel() {
+  Pool pool(4);
+  Db db(pool);
+  Epochs ep(db);
+  Inputs inputs;
+  ep.apply([&](Db& d) { inputs.write(d); });
+  slow_release = false;
+  slow_started = false;
+  std::atomic<int> answered{0};
+  auto ticket = ep.spawn<WorkThenSlow>(top, Priority::background, [&](const std::int64_t&) { answered.fetch_add(1); },
+                                       [](std::exception_ptr) {});
+  while (!slow_started.load()) std::this_thread::yield();
+  slow_started = false;
+  const auto first = ep.apply([](Db&) {});
+  check(first.respawned == 1 && first.starved == 0, "restarted after storing cells: not starved");
+  while (!slow_started.load()) std::this_thread::yield();
+  const auto second = ep.apply([](Db&) {});
+  check(second.respawned == 1 && second.starved == 1, "restarted without storing a cell since: starved");
+  ticket->cancel();
+  ep.join();
+  check(answered == 0, "a cancelled request completes stopped");
+  const auto third = ep.apply([](Db&) {});
+  check(third.respawned == 0, "and is not respawned");
+  slow_release = true;
+}
+
+std::atomic<int> gate_arrivals{0};
+// Holds its first run until a second run of the same cell has started: the second is a private
+// computation by another frame (§A3.3).
+struct [[=cheap]] Gate {
+  using Key = std::uint32_t;
+  using Value = std::int64_t;
+  static Value run(SyncCtx& cx, Key k) {
+    if (gate_arrivals.fetch_add(1) == 0) {
+      while (gate_arrivals.load() < 2) std::this_thread::yield();
+    }
+    return cx.fetch<In>(k) + 1;
+  }
+};
+struct OverGate {
+  using Key = std::uint32_t;
+  using Value = std::int64_t;
+  static query_task<Value> run(Ctx& cx, Key k) { co_return cx.fetch<Gate>(k / 2) * 2; }
+};
+
+void private_recomputation() {
+  Pool pool(2);
+  Db db(pool);
+  db.set<In>(0, 20);
+  std::vector<std::string> got(2);
+  ex::counting_scope scope;
+  for (std::uint32_t k = 0; k < 2; ++k) {
+    ex::spawn(db.request<OverGate>(k) | ex::then([&got, k](const std::int64_t& v) noexcept { got[k] = std::to_string(v); }) |
+                  ex::upon_error([](std::exception_ptr) noexcept {}),
+              scope.get_token());
+  }
+  std::this_thread::sync_wait(scope.join());
+  check(got[0] == "42" && got[1] == "42", "both frames got the cheap value");
+  check(gate_arrivals == 2 && db.stats().recomputed == 1 && db.runs<Gate>(0) == 1,
+        "the second fetch computed it privately; only the owner stored it");
+}
+
+// ---------------------------------------------------------------------------------------------
+// Cycles and errors from several entry points at once (§A2.3).
+
+struct Cyc {
+  using Key = std::uint32_t;
+  using Value = std::int64_t;
+  static query_task<Value> run(Ctx& cx, Key k) {
+    if (cx.fetch<In>(k) == 0) co_return 0;
+    co_return 1 + co_await cx.fetch<Cyc>((k + 1) % 3);
+  }
+};
+// A cycle among cheap cells: re-entry on the synchronous chain.
+struct [[=cheap]] CheapCyc {
+  using Key = std::uint32_t;
+  using Value = std::int64_t;
+  static Value run(SyncCtx& cx, Key k) {
+    if (cx.fetch<In>(k) == 0) return 0;
+    return 1 + cx.fetch<CheapCyc>((k + 1) % 3);
+  }
+};
+struct OverCheapCyc {
+  using Key = std::uint32_t;
+  using Value = std::int64_t;
+  static query_task<Value> run(Ctx& cx, Key k) { co_return cx.fetch<CheapCyc>(k); }
+};
+struct Throws {
+  using Key = std::uint32_t;
+  using Value = std::int64_t;
+  static query_task<Value> run(Ctx& cx, Key k) {
+    if (cx.fetch<In>(k) < 0) throw std::runtime_error("negative");
+    co_return cx.fetch<In>(k);
+  }
+};
+struct AboveThrows {
+  using Key = std::uint32_t;
+  using Value = std::int64_t;
+  static query_task<Value> run(Ctx& cx, Key k) {
+    const auto [a, b] = co_await cx.par_fetch(q<Throws>{k}, q<Throws>{k + 1});
+    co_return a + b;
+  }
+};
+
+template <class Q>
+std::vector<std::string> errors_from_every_entry(Db& db, std::uint32_t entries) {
+  std::vector<std::string> messages(entries);
+  ex::counting_scope scope;
+  for (std::uint32_t k = 0; k < entries; ++k) {
+    ex::spawn(db.request<Q>(k) | ex::then([&messages, k](const std::int64_t&) { messages[k] = "a value"; }) |
+                  ex::upon_error([&messages, k](std::exception_ptr e) noexcept {
+                    try {
+                      std::rethrow_exception(e);
+                    } catch (const std::exception& x) {
+                      messages[k] = x.what();
+                    }
+                  }),
+              scope.get_token());
+  }
+  std::this_thread::sync_wait(scope.join());
+  return messages;
+}
+
+void cycles_and_errors() {
+  std::string first;
+  for (int round = 0; round < 50; ++round) {
+    Pool pool(round % 2 ? hw : 3, round % 3 ? std::optional<std::uint64_t>(round) : std::nullopt);
+    Db db(pool);
+    for (std::uint32_t k = 0; k < 3; ++k) db.set<In>(k, 1);
+    const auto messages = errors_from_every_entry<Cyc>(db, 3);
+    if (round == 0) first = messages[0];
+    for (const auto& m : messages) check(m == first, "every entry point reports the same cycle");
+    const auto cheap = errors_from_every_entry<OverCheapCyc>(db, 3);
+    for (const auto& m : cheap) check(m.starts_with("internal error: query cycle") && m == cheap[0], "a cheap cycle, the same from every entry");
+    check(db.live_frames() == 0, "every frame finished");
+    db.set<In>(1, 0);
+    check(db.get<Cyc>(0) == 1 && db.get<Cyc>(1) == 0 && db.get<Cyc>(2) == 2, "the cells were reverted and recover once the cycle is gone");
+    check(db.get<OverCheapCyc>(2) == 2, "the cheap cells too");
+  }
+  check(first.starts_with("internal error: query cycle") && std::ranges::count(first, '\n') == 3, "a three-cell report");
+  {
+    Db single;
+    for (std::uint32_t k = 0; k < 3; ++k) single.set<In>(k, 1);
+    check(errors_from_every_entry<Cyc>(single, 3)[1] == first, "the report equals the single-threaded one");
+  }
+
+  Pool pool(hw);
+  Db db(pool);
+  db.set<In>(0, 1);
+  db.set<In>(1, -1);
+  db.set<In>(2, 2);
+  db.set<In>(3, 3);
+  const auto m = errors_from_every_entry<AboveThrows>(db, 3);
+  check(m[0] == "negative" && m[1] == "negative" && m[2] == "a value", "an exception from query code reaches every request above it");
+  db.set<In>(1, 1);
+  check(db.get<AboveThrows>(0) == 2 && db.runs<Throws>(1) == 1, "nothing was stored; the cell runs again");
+}
+
+std::atomic<bool> a_started{false};
+std::atomic<bool> a_release{false};
+struct SlowA {
+  using Key = std::uint32_t;
+  using Value = std::int64_t;
+  static query_task<Value> run(Ctx& cx, Key) {
+    a_started = true;
+    while (!a_release.load()) {
+      co_await cx.stop_point();
+      std::this_thread::yield();
+    }
+    throw std::runtime_error("A");
+  }
+};
+struct FailB {
+  using Key = std::uint32_t;
+  using Value = std::int64_t;
+  static query_task<Value> run(Ctx&, Key) { throw std::runtime_error("B"); }
+};
+struct PairAB {
+  using Key = std::uint32_t;
+  using Value = std::int64_t;
+  static query_task<Value> run(Ctx& cx, Key k) {
+    const auto [a, b] = co_await cx.par_fetch(q<SlowA>{k}, q<FailB>{k});
+    co_return a + b;
+  }
+};
+
+// Two members of a group fail: the error is the first member's, as single-threaded, even when
+// the second fails first and the first's owner was stopped meanwhile (review of #15).
+void first_error_by_position() {
+  {
+    Db single;
+    a_release = true;
+    check(errors_from_every_entry<PairAB>(single, 1)[0] == "A", "single-threaded: the first member's error");
+  }
+  Pool pool(4);
+  Db db(pool);
+  a_release = false;
+  a_started = false;
+  ex::counting_scope a, b;
+  ex::spawn(db.request<SlowA>(0) | ex::then([](const std::int64_t&) noexcept {}) | ex::upon_error([](std::exception_ptr) noexcept {}),
+            a.get_token());
+  while (!a_started.load()) std::this_thread::yield();
+  std::string message;
+  ex::spawn(db.request<PairAB>(0) | ex::then([](const std::int64_t&) noexcept {}) | ex::upon_error([&](std::exception_ptr e) noexcept {
+              try {
+                std::rethrow_exception(e);
+              } catch (const std::exception& x) {
+                message = x.what();
+              }
+            }),
+            b.get_token());
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));  // B failed; PairAB waits on A's owner
+  a.request_stop();
+  a.close();
+  std::this_thread::sync_wait(a.join());
+  a_release = true;
+  b.close();
+  std::this_thread::sync_wait(b.join());
+  check(message == "A", std::format("the first member's error, not the one that came first (got {})", message));
+}
+
+// `apply` whose write throws: the next epoch opens anyway and interrupted requests come back.
+void apply_that_throws() {
+  Pool pool(2);
+  Db db(pool);
+  Epochs ep(db);
+  ep.apply([](Db& d) { d.set<In>(0, 3); });
+  slow_release = false;
+  slow_started = false;
+  std::atomic<std::int64_t> got{0};
+  ep.spawn<Slow>(0, Priority::background, [&](const std::int64_t& v) { got = v; }, [](std::exception_ptr) {});
+  while (!slow_started.load()) std::this_thread::yield();
+  bool thrown = false;
+  try {
+    ep.apply([](Db& d) {
+      d.set<In>(0, 4);
+      throw std::runtime_error("disk");
+    });
+  } catch (const std::runtime_error&) {
+    thrown = true;
+  }
+  slow_release = true;
+  std::atomic<std::int64_t> later{0};
+  ep.spawn<AboveSlow>(0, Priority::background, [&](const std::int64_t& v) { later = v; }, [](std::exception_ptr) {});
+  ep.join();
+  check(thrown && got == 40 && later == 41, "the write's exception propagates; the epoch and the respawn carry on");
+}
+
+// Many requests for one cell: one execution, every request gets its value (§A3.1).
+void one_execution_for_many_waiters() {
+  Pool pool(hw);
+  for (int round = 0; round < 20; ++round) {
+    Db db(pool);
+    for (std::uint32_t i = 0; i < width; ++i) db.set<In>(i, i % 5);
+    for (std::uint32_t i = 0; i < width; ++i) db.set<Sys>(i, 1);
+    std::vector<std::int64_t> got(64);
+    ex::counting_scope scope;
+    for (std::uint32_t r = 0; r < got.size(); ++r) {
+      ex::spawn(db.request<Node>(top + r % 2, r % 3 ? Priority::background : Priority::interactive) |
+                    ex::then([&got, r](const std::int64_t& v) { got[r] = v; }) | ex::upon_error([](std::exception_ptr) noexcept {}),
+                scope.get_token());
+    }
+    std::this_thread::sync_wait(scope.join());
+    Db cold;
+    for (std::uint32_t i = 0; i < width; ++i) cold.set<In>(i, i % 5);
+    for (std::uint32_t i = 0; i < width; ++i) cold.set<Sys>(i, 1);
+    bool same = true;
+    for (std::uint32_t r = 0; r < got.size(); ++r) same = same && got[r] == cold.get<Node>(top + r % 2);
+    check(same, "every request gets the value");
+    check(db.stats().executed == cold.stats().executed, "each cell executed once");
+  }
+}
+
+}  // namespace
+
+int main() {
+  pool_scheduling();
+  senders_and_stop();
+  one_execution_for_many_waiters();
+  cycles_and_errors();
+  deterministic_across_thread_counts();
+  cancellation_injected();
+  respawned_requests_answer_once();
+  restarts_and_cancel();
+  private_recomputation();
+  first_error_by_position();
+  apply_that_throws();
+  return ycxx::unit::result("engine_scheduler");
+}

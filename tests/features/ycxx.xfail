@@ -2,7 +2,7 @@
 # `<test id> <reason>` per line, the reason being ycxx's first diagnostic. Most need what the α
 # subset lacks (classes, templates, the preprocessor's directives). An XPASS fails the run, so a
 # line goes when ycxx starts passing its test (tests/driver/toolchain.py: ycxx_xfails).
-diff/smoke/integer-arithmetic.diff.cpp preprocessing directives are not supported yet
+diff/smoke/integer-arithmetic.diff.cpp <cstdio> preprocesses; libycxx does not know ycxx yet (yrashk/libycxx#17), then sema needs namespaces (#133)
 draft/basic/basic.align-1.accept.cpp 'struct' not supported yet
 draft/basic/basic.contract.eval-1.accept.cpp 'struct' not supported yet
 draft/basic/basic.contract.eval-2.accept.cpp 'contract_assert' is not supported yet
@@ -162,20 +162,16 @@ draft/class/class.virtual-7.reject.cpp errors elsewhere: 'struct' not supported 
 draft/class/class.virtual-8.reject.cpp errors elsewhere: 'struct' not supported yet
 draft/class/class.virtual-9.accept.cpp 'struct' not supported yet
 draft/class/special-1.accept.cpp 'struct' not supported yet
-draft/cpp/cpp.concat-3.accept.cpp function-like macros are not supported yet
-draft/cpp/cpp.cond-1.accept.cpp preprocessing directives are not supported yet (#if)
-draft/cpp/cpp.cond-2.accept.cpp preprocessing directives are not supported yet (#if)
-draft/cpp/cpp.embed.param.if.empty-2.accept.cpp preprocessing directives are not supported yet (#if)
-draft/cpp/cpp.embed.param.limit-1.accept.cpp preprocessing directives are not supported yet (#if)
-draft/cpp/cpp.module-2.reject.cpp errors elsewhere: preprocessing directives are not supported yet
-draft/cpp/cpp.module-3.accept.cpp preprocessing directives are not supported yet
-draft/cpp/cpp.module-4.accept.cpp preprocessing directives are not supported yet
-draft/cpp/cpp.module-5.accept.cpp preprocessing directives are not supported yet
-draft/cpp/cpp.pragma.op-1.accept.cpp expected a declaration (_Pragma)
+draft/cpp/cpp.concat-3.accept.cpp '[' is not supported yet (arrays, #111); the example also redefines j, which Clang and GCC reject
+draft/cpp/cpp.cond-1.accept.cpp libycxx's config.hpp stops at #error until it knows ycxx (yrashk/libycxx#17); then 'namespace' is not supported yet
+draft/cpp/cpp.cond-2.accept.cpp '[' is not supported yet (attributes)
+draft/cpp/cpp.embed.param.if.empty-2.accept.cpp #error: the resource does not exist, as Clang and GCC agree (tests/draft/DISAGREEMENTS.md)
+draft/cpp/cpp.module-2.reject.cpp 'export' is not supported yet (modules in sema)
+draft/cpp/cpp.module-3.accept.cpp 'export' is not supported yet (modules in sema)
+draft/cpp/cpp.module-4.accept.cpp 'export' is not supported yet (modules in sema)
+draft/cpp/cpp.module-5.accept.cpp 'export' is not supported yet (modules in sema)
 draft/cpp/cpp.pre-2.accept.cpp 'using' not supported yet
-draft/cpp/cpp.replace.general-1.accept.cpp function-like macros are not supported yet
-draft/cpp/cpp.replace.general-3.accept.cpp function-like macros are not supported yet
-draft/cpp/cpp.subst-1.accept.cpp function-like macros are not supported yet
+draft/cpp/cpp.replace.general-1.accept.cpp macro redefined with a different replacement list: the example's last four definitions are invalid, as Clang and GCC agree (tests/draft/DISAGREEMENTS.md)
 draft/dcl/basic.namespace.general-1.accept.cpp preprocessing directives are not supported yet
 draft/dcl/dcl.align-1.reject.cpp errors elsewhere: 'struct' not supported yet
 draft/dcl/dcl.align-4.reject.cpp errors elsewhere: 'alignas' not supported yet
@@ -647,10 +643,10 @@ draft/temp/temp.variadic-4.accept.cpp 'auto' not supported yet
 draft/temp/temp.variadic-5.accept.cpp 'template' not supported yet
 draft/temp/temp.variadic-7.accept.cpp 'template' not supported yet
 draft/temp/temp.variadic-8.accept.cpp 'template' not supported yet
-own/smoke/exit-status.run.cpp preprocessing directives are not supported yet
+own/smoke/exit-status.run.cpp <cstdio> preprocesses; libycxx does not know ycxx yet (yrashk/libycxx#17), then sema needs namespaces (#133)
 own/pp/include-macros.accept.cpp dynamic initialization of a namespace-scope variable is not supported yet (#94)
 own/pp/macro-decls.accept.cpp dynamic initialization of a namespace-scope variable is not supported yet (#94)
-own/smoke/object-like-macro.pp.cpp function-like macros are not supported yet
+own/pp/cond-decls.accept.cpp dynamic initialization of a namespace-scope variable is not supported yet (#94)
 own/classes/s1-byvalue-constexpr.run.cpp classes in constant evaluation (#25)
 own/classes/s1-byvalue-params.run.cpp classes by value (#116)
 own/classes/s1-byvalue-return.run.cpp classes by value (#116)

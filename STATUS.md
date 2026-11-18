@@ -57,29 +57,72 @@ What is true of the code today. Work in progress and its owners are tracked in
   - The CWG issues list is imported as `tests/draft/cwg-issues.tsv`: 3,240 issues with subclause,
     status and resolution.
 
-## Query engine core (#14, 2026-11-18)
+## Query engine (#14, #15, 2026-11-18)
 
 - `ycxx.hash` (`src/hash/`): MurmurHash3_x64_128 with the fixed seed `hash_seed`, streaming and
   `constexpr`, checked against an independent implementation's vectors. `fingerprint(v)` derives
   a structural fingerprint by reflection; interned handles supply `hash_into`.
-- `ycxx.engine` (`src/engine/`), single-threaded and synchronous:
+- `ycxx.engine` (`src/engine/`):
   - inputs with durability, memoized async kinds (`query_task` coroutines), `cheap` and
     `transparent` kinds, `demanded` kinds with demand lists;
   - red/green validation over ordered groups with no short-circuit inside a group, early cutoff
     by fingerprint, the durability shortcut, one revision per batch of input changes;
-  - the §A1.6 state word, the §A3.6 layout (cell ids, flat dependency pool with group bits),
+  - the §A3.6 layout (cell ids into an append-only arena, a sharded index per kind),
     deterministic recording with deduplication (§A3.7);
   - diagnostics as values and `DiagsOf`, pruned by `has_diags`;
-  - cycles reported sorted by kind name and key fingerprint (`query_cycle`), with cells reverted;
   - concepts, annotations, reflection-derived serialization and the schema hash (§A10).
-- Measured (Release, Apple M-series): a fetch hit inside a query about 40 ns, a root `get` hit
-  about 15 ns, fingerprinting a 16- or 32-byte key about 2 ns (`engine_bench`).
+- The scheduler (#15, 2026-11-18), in `src/engine/engine.cppm` and `pool.cppm`:
+  - claims are CASes on the §A1.6 state word; waiter lists with the `CLOSED` sentinel; a frame
+    that waits suspends and frees its worker; completions queue continuations, never resume them
+    on their own stack;
+  - `Pool`: Chase–Lev deques per worker and priority, stealing interactive work first, an
+    injection queue, parking; `pool_scheduler` (a `std::execution` scheduler) and `pool_backend`
+    (`parallel_scheduler_replacement`'s backend);
+  - the chaos scheduler: a seeded `Pool` that reverses deques, steals first, migrates tasks and
+    delays fetch misses;
+  - requests as senders (`Db::request`, `cell_sender`); `Db::get` blocks; a request completes
+    only after every frame it started, so finished requests mean quiescence;
+  - cancellation by stop tokens: a stopped fetch never resumes its query, the cell reverts, and
+    waiters look again and claim it; `cx.stop_point()` for long leaves;
+  - cycles found by the wait-for walk (and on the synchronous chain of cheap kinds), reported
+    sorted by kind name and key fingerprint, delivered as `set_error`, cells reverted;
+  - `Epochs`: requests in revision epochs (`counting_scope`), `apply` at quiescence, interrupted
+    requests respawned, the progress quantum's hook (daemon design §4.1–4.2);
+  - a `Db` without a pool runs everything on the calling thread (what the pipeline uses).
+- For the daemon (#95, daemon design §4.4, §5.1, §6.3, §8.1):
+  - durabilities `editor < ambient < low < medium < high`;
+  - input providers (`Db::set_provider`): an input read before anyone set it is provided then,
+    with the provider's durability, at the current revision and with no new one;
+  - `Db::set` returns whether the value changed; `Db::reset_unobserved` changes an input nobody
+    has read since it was set, while requests run (an "observed" flag per input cell, set by
+    every read and validation, paired with the reset's claim);
+  - `Counters` per request (`Db::request(k, p, &counters)`, `Epochs::Ticket::stats`), per worker
+    for the Db, and per query kind when `count_per_kind(true)`.
+- Where the scheduler differs from query-engine.md (#108):
+  - a frame that leaves without publishing reverts its cell and wakes every waiter to look again,
+    instead of handing the claim to the first waiter (§A3.1);
+  - every waiter of a cell that failed gets its error, not only waiters on the cycle: a retry
+    would fail the same way (§A2.3, §A3.1);
+  - children are queued rather than started by symmetric transfer, and a stop is noticed at a
+    fetch miss, not at every fetch;
+  - `query_task` is not a sender; requests are (`cell_sender`).
+- Measured (Release, Apple M-series): a fetch hit inside a query about 50 ns (40 ns before the
+  scheduler; the difference is the shard lock), a root `get` hit about 17 ns, fingerprinting a
+  16- or 32-byte key about 2 ns (`engine_bench`).
 - Tests (`tests/unit/`): red/green, groups, cutoff, durability, recording, diagnostics, demands,
   cycles, failures, serialization, and incremental == cold over 1,000 random edits, which fails
-  when a dependency is dropped.
-- Not yet: the scheduler, `cell_sender` and cancellation (#15; every await completes inline
-  today), contextual queries (#16), eviction and persistence (#17; the dependency and diagnostic
-  pools only grow).
+  when a dependency is dropped (`unit.engine`, single-threaded). `unit.engine_scheduler`: the
+  pool, priorities and backend; outputs, dependency lists and execution counts equal at 1, 2, P
+  and 2P threads with the chaos scheduler; incremental == cold at each; cancellation injected;
+  hand-over from a stopped owner; respawn; cycles and errors from every entry point. `unit.engine_inputs`: providers (once per cell under
+  contention, durability, failure), the `editor` and `ambient` shortcuts, `reset_unobserved`
+  racing readers over 300 rounds, counts per request and per kind. Clean under
+  ASan and UBSan; ThreadSanitizer needs Linux (#105).
+- Not yet: allocation-free waits, per-worker frame free lists and lock-free index reads
+  (#104); the cycle report's program-order path note (#106); the pipeline's other
+  single-threaded state (pp's process session, `sema::Entities`, the back end's stores), so a
+  `pipeline::Session` does not run on a pool yet (#137); contextual queries (#16); eviction and
+  persistence (#17).
 
 ## Lexer and directive-free `pp` (#40, 2026-11-18)
 
@@ -104,7 +147,7 @@ What is true of the code today. Work in progress and its owners are tracked in
 - Not yet: `long double` and the extended floating types' values (left to the
   target), the type of an integer literal (sema, #33).
 
-## Preprocessor, includes and object-like macros (#85, 2026-11-18)
+## Preprocessor (#85, 2026-11-18)
 
 - `ycxx.pp` (`src/pp/`): phase 4 as query-engine.md §B9's contextual query, with a local stand-in
   for the engine parts that do not exist yet (#16, #93).
@@ -112,12 +155,15 @@ What is true of the code today. Work in progress and its owners are tracked in
     regions, its macro delta and `#pragma once` marks, its `TokLoc` and `Expansion` tables
     (ast.md §8.1), its diagnostics, and its *trace*. The trace lists the questions its entry state
     answered: `macro(name)` for every identifier tested that the region had not defined itself,
-    `once(file)`, include resolutions and file contents.
+    `defined(name)`, `once(file)`, `__COUNTER__`'s value, the build time, include resolutions
+    and file contents.
   - A `Session` (`:unit`) caches regions by file occurrence and reuses one wherever its trace
     verifies. A header is reused across TUs and within one, and only a header whose answers
     changed is recomputed.
   - Macro answers are location-free. A region refers to a definition it did not make through a
     binding that its includer resolves.
+  - A file that is one `#ifndef X` group records its guard. Included again where X is defined, it
+    is an empty region whose one question is X's, so it is not read (§B9).
   - `Region` is the TU flattened after phases 5–6, which the item splitter and the parser read.
     Its `files` are paths with presumed names, so its value does not depend on the session.
     `Region::site(tok)` gives a macro token's expansion site.
@@ -125,23 +171,42 @@ What is true of the code today. Work in progress and its owners are tracked in
   - `#include` in both forms and the macro-replaced form, and `#include_next`;
   - search directories from `-I`, `-isystem` and `-iquote`, then libycxx's headers and the
     SDK's (`:system`, configured by CMake);
-  - object-like `#define` and `#undef` with the redefinition check, rescanning and painting
+  - `#define` and `#undef` with the redefinition check, rescanning and painting
     ([cpp.rescan]);
-  - `#pragma once` (other pragmas pass through to `-E`), and the null directive.
-  - Every other directive is diagnosed as unsupported. Function-like macros and conditionals
-    come in the next two parts of #85.
+  - function-like macros (`:unit`'s `invocation`, `substitute`, `paste`): arguments across
+    lines, argument counts, omitted variable arguments, `#`, `##` with placemarkers,
+    `__VA_ARGS__`, `__VA_OPT__`, and the constraints on replacement lists. Arguments are
+    replaced in a barrier context. Their tokens sit in expansions of kind argument, and pasted
+    tokens in kind paste, so `Region::site` leads to the invocation;
+  - conditional inclusion (`#if`/`#ifdef`/`#ifndef`/`#elif`/`#elifdef`/`#elifndef`/`#else`/
+    `#endif`). Lexer diagnostics on skipped lines are dropped. `#if` expressions are evaluated
+    in `intmax_t`/`uintmax_t` (`:cond`), with `defined`, `__has_include`,
+    `__has_include_next`, `__has_embed` (`limit` only), and the `__has_*` probes answering 0;
+  - `#line` (presumed lines and names), `#error`, `#warning`, `_Pragma`, `#pragma once`
+    (other pragmas pass through to `-E`), and the null directive;
+  - module and import lines go on to phase 7, their keywords flagged `tok_flag::directive`.
+    Header-unit imports and `#embed` are diagnosed as unsupported.
+- Predefined macros (`:predefined`, DECISIONS §1.5):
+  - `__ycxx__` and its version, and the draft's macros;
+  - a feature-test table, with lexer features only;
+  - the target's macros, generated from `ast::Target` and checked against Clang
+    (`tests/own/pp/predefined-target.pp.cpp`);
+  - `__LINE__`, `__FILE__`, `__COUNTER__`, `__DATE__` and `__TIME__`.
+- `#include <cstdio>` preprocesses until libycxx's `#error` for unknown compilers
+  (yrashk/libycxx#17).
 - `ycxx cxx -E` prints what Clang's `-E` would, by Clang's line and spacing rules. `preprocess`
   is in `tests/features/ycxx.txt`. Diagnostics in included files name their file.
 - Tests:
-  - `tests/own/pp` (by a spec-only author): 16 `-E`, 6 reject and 2 accept tests;
+  - `tests/own/pp` (by spec-only authors): 103 tests (`-E`, reject and accept), the draft's
+    [cpp.scope], [cpp.subst], [cpp.stringize] and [cpp.concat] examples among them;
   - `tests/own/slice/a3-local-header.run.cpp`;
   - `unit.pp`: resolution, traces, reuse across TUs, and incremental equals cold over edit
     sequences.
-- Not yet: function-like macros, `#`/`##`, conditionals, `#line`, `#error`, `_Pragma`, the
-  predefined macros beyond `__cplusplus`, and module and import lines (#85). The engine cell
-  `Pp(main)` does not depend on headers until #93. Items are cut from the flattened TU, so a
-  header's items carry the main file's identity (#85). Sema diagnostics in headers render
-  against the main file (#34).
+- Not yet:
+  - `#embed` (#125);
+  - the engine cell `Pp(main)` depending on headers (#93);
+  - items cut per region; a header's items carry the main file's identity (#126);
+  - sema diagnostics in headers, and presumed `#line` locations outside phase 4 (#34).
 
 ## Item splitter (#18, 2026-11-18)
 
@@ -228,8 +293,9 @@ stay open for the rest.
     stack probing for frames over a page,
     pseudo-form expansion, and encoding into `ycxx.obj` with BRANCH26, PAGE21/PAGEOFF12 and GOT
     relocations.
-  - `codegen(unit)` turns functions and data (cstring, rodata, data_const, data, bss) into one
-    object, in entity-id order.
+  - `compile_function` gives one function's machine code apart from any object (level 0 of
+    `optimized`); `assemble` puts functions and data (cstring, rodata, data_const, data, bss) into
+    one object in the order its caller gives; `codegen(unit)` does both in entity-id order.
 - Tests (`tests/unit/codegen/`):
   - `unit.lower`: golden L2.
   - `unit.aarch64`, on both hosts: encodings against the Arm ARM, the pattern table, selection
@@ -240,9 +306,9 @@ stay open for the rest.
     arithmetic and calling convention, over thousands of argument pairs. It covers narrow types,
     stack arguments both ways, function pointers and the GOT. Mutating `sdiv` or the stack packing
     makes it fail.
-- Not yet: the `unit`/`optimized`/`codegen` queries (#63), the allocation
+- Not yet: the allocation
   validator and dependence checker (#29), SSA linear scan, list scheduling, unwind info and DWARF,
-  `cost_model`, variadic calls, more than one result, frame objects aligned above 16 bytes.
+  a measured `cost_model` (#9), variadic calls, more than one result, frame objects aligned above 16 bytes.
 
 ## AST core (#32)
 
@@ -270,7 +336,12 @@ one import `ycxx.ast`; unit tests in `tests/unit/ast` (run by ctest, see docs/TE
   - Interners: `names` and `seqs` (one pool per element type) and `ast`.
   - `tokens`, `items` and `entities` are placeholders that hold only fingerprints, until #18
     and #33.
-  - Single-threaded: sharing between workers is the engine's (#14).
+  - Shared by the engine's workers (#107): pools are append-only chunked storage that readers
+    use without a lock, and each interner's fingerprint index is 64 locked shards, so equal
+    content interns to one handle whichever worker is first (`ycxx.ast.store`). Handle numbers
+    may differ between runs; fingerprints never do. `unit.ast_concurrent` interns 3,000 trees
+    (some with lists, names and blocks longer than a storage block) from 8 threads in shuffled
+    orders and compares with a single-threaded run; `unit.ast_store` covers the storage.
 - **Fingerprints** (`fingerprint.cppm`): a thin adapter over `ycxx.hash` (#14); `Fp128` is
   `ycxx::Fp128`. Not done yet: ADL `hash_into` for the AST handles. Without it,
   `ycxx::fingerprint(v)` hashes a handle by its number, so engine keys that hold AST handles must
@@ -381,9 +452,8 @@ one import `ycxx.ast`; unit tests in `tests/unit/ast` (run by ctest, see docs/TE
   text form (handles named) with the expected text. It also checks that positions do not reach
   the fingerprint.
 - Not yet:
-  - the `function_ir` and `function_debug` engine queries (they wait for `analyze_body` and
-    `decl_sema`, #41);
-  - `string_address`, `is_constexpr` and `is_main` over real entities and `VString`s;
+  - `function_ir` and `function_debug` keyed by a context (they are keyed by unit and entity, #16);
+  - `is_constexpr` over real entities (the front end reports none yet);
   - classes, arrays as objects, cleanups, EH (`invoke`), coroutines, static locals, calls
     through pointers, floating point, `switch` and `goto`.
 
@@ -392,19 +462,29 @@ one import `ycxx.ast`; unit tests in `tests/unit/ast` (run by ctest, see docs/TE
 The α slice end to end (epic #39): every test in `tests/own/slice` compiles, links and runs, or is
 rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm64 macOS.
 
-- `ycxx.pipeline` (`src/pipeline/`), run in-process by `client::cxx`:
-  - `:front`: the file's text as the engine's `FileText`, `pp` and `RegionItems` as engine queries,
-    then `parse::Program` (item_sema, analyze_body). Its diagnostics by byte offset, and the
-    `TranslationUnit`: entities, function definitions with their analysed bodies, variable
-    definitions with their constants.
-  - `:back`: `function_ir`, `lower` and `codegen` per function, variables and string literals as
-    data, into one object. `Layout` stands in for the `layout` query (#33); string literal
-    objects become local `l_.str.N` entities. Errors (what the α subset does not support yet)
-    point into the item when there is a node.
+- `ycxx.pipeline` (`src/pipeline/`): every stage is an engine query (#63), run by `client::cxx`
+  through a `Session` (the engine, the interners and sema's world, alive together; in-process
+  until the daemon, #96):
+  - `:front`: `TuFront(TU)`: the file's text as the engine's `FileText`, `pp` and `RegionItems`,
+    then `parse::Program` (item_sema, analyze_body) inside the one cell until contextual queries
+    (#16). Its diagnostics by byte offset, and the `TranslationUnit`: entities, function
+    definitions with their analysed bodies, variable definitions with their constants.
+    `tu_unit(TU)` projects the unit, so a whitespace edit stops there.
+  - `:back`, per function `F`: `function_source(TU, F)` (a projection that backdates),
+    `function_gen` with the projections `function_ir` and `function_debug`, `lower`, `unit` (the
+    optimization unit in a content-addressed store, with which references the object defines),
+    `optimized(unit, target, level)` and `codegen(F)` = `best_available` over the
+    `opt_cache_snapshot` input (consulted for B ≥ 1 only); `cost_model` is a stub input. `layout`
+    is three cheap queries (`layout_type`, `layout_step`, `layout_constant`). `tu(TU)` assembles
+    the object in definition order (§A5.3), with string literal objects as local `l_.str.N`
+    entities by first use; its value also holds the first-demand table (empty until #16). Errors
+    (what the α subset does not support yet) are values, pointing into the item when there is a
+    node.
   - `:mangle`: Itanium names for global-namespace functions over fundamental, pointer and cv types
     with substitutions; `main`, `extern "C"` functions and variables are not mangled (#64).
-  - `:executable`: the link with libSystem's exports from `$SDKROOT`, else `xcrun --show-sdk-path`,
-    else the Command Line Tools' SDK, looked up once per process.
+  - `:executable`: `link(P)`, the query over a program's `tu` objects and the `.o` inputs, with
+    libSystem's exports from `$SDKROOT`, else `xcrun --show-sdk-path`, else the Command Line Tools'
+    SDK, looked up once per process outside the engine.
   - `:lines`: a minimal line table for rendering (#34 owns the full one).
 - `ycxx cxx` (also `ycxx -…` with an option first): `-o`, `-c`, `-fsyntax-only`, `-std=c++26`;
   `.o` inputs are linked as they are. Errors are `path:line:col: error: message` on stderr; exit 0
@@ -412,9 +492,75 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
 - `tests/features/ycxx.txt` lists `syntax` and `run darwin-arm64`: a feature can be limited to
   hosts. CI's macOS job runs the slice before its tier, with `--no-unsupported`.
 - `unit.pipeline`: the line table, linkage names, and the back half from hand-built analysed
-  bodies, linked and run on arm64 macOS.
-- Not yet: the stages as engine queries (#63) and the daemon (designed in `docs/design/daemon.md`; #95–#98), `#include` (#65), optimization
+  bodies (`compile`, `tu(TU)` in an engine of its own), linked and run on arm64 macOS.
+- `unit.pipeline_incremental`: a second build executes nothing; a new revision through an
+  unrelated input validates everything and executes nothing; a whitespace edit executes nothing
+  past the front end; a body edit runs that function's cells once each, `tu` and the link, and no
+  other function's; incremental equals cold after each edit, also when the warm session numbers
+  entities differently (mutating `tu` to order by handle makes it fail).
+- Not yet: `ycxx cxx` through the daemon by default (#120), `#include` (#65), optimization
   levels and the other common options (`-O` is rejected, #81).
+
+## The resident daemon (#96, #97, 2026-11-18)
+
+`ycxx daemon` serves `ycxx cxx`, per `docs/design/daemon.md`. It is opt-in, with `YCXX_DAEMON=1`
+or `--daemon`: requests run one at a time in it until #120 (#15, #95). Without it, `ycxx cxx` runs
+the same handler in-process.
+
+- `ycxx.compile` (`src/client/compile.cppm`): the c++-compatible request handler, which was the
+  body of `client::cxx`. It takes argv, cwd, the environment table and the client's clock. It
+  returns stdout, stderr, the exit status and the output bytes, which the client writes with
+  `pipeline::write_file`. Files are read through a `pp::Host`, and the units are built in a
+  `pipeline::Session` (#63).
+- The daemon keeps its `Session` only for an identical request (argv and cwd) at an unchanged
+  file-table revision. Such a request executes nothing (`last_executed: 0` in `ycxx ctl status`).
+  Any other request gets a fresh session. The reason: `Pp` records only the main file's text, not
+  its headers, include paths or path (#120, with #95's providers).
+- `ycxx.daemon` (`src/daemon/`):
+  - `:scope`: the root is `YCXX_ROOT`, or the nearest `.ycxx` (with `root =`) or version-control
+    marker; submodules are skipped, worktrees counted, and the fallback is the home scope. The
+    runtime directory is per user and 0700 (`YCXX_RUNTIME_DIR`). The socket is
+    `<scope>-<build>.sock`, with its `sun_path` length checked. The build hash is the binary's
+    file identity.
+  - `:protocol`: u32 length, u16 kind, and a body by `ycxx.engine:serial`. The `hello`/`welcome`
+    handshake checks the build hash, the schema hash (by reflection) and the uid. Peer uids are
+    checked; malformed frames close the connection.
+  - `:connect`: connect; else take the start lock, connect again, then spawn a detached daemon
+    (setsid, double fork, descriptors closed, log in the runtime directory) and wait for its
+    readiness byte.
+  - `:server`: one thread per connection, with `compile`, `status`, `shutdown`; `lsp` is refused
+    (#99). It holds a lifetime lock with a 10 s wait and unlinks a stale socket. It exits after
+    30 minutes idle (`--idle-exit`, `YCXX_DAEMON_IDLE_EXIT`), or on shutdown or SIGTERM once
+    requests finish. A hang-up stops the request before its next translation unit. A request
+    whose configuration environment differs from the daemon's is refused, and the client runs it
+    in-process.
+  - `:files`: the file table. Keys are absolute paths (relative ones against the request's cwd),
+    with real paths and a reverse index for symlinks, and negative entries. Entries change only
+    between epochs. A batch re-reads every entry a dirty path reaches, by path or by a directory
+    above it, and drops the rest. The rescan is the fallback.
+  - `:events`, `:watch`: dirty paths and shared cookies. On macOS, one recursive FSEvents stream,
+    recreated from the event id taken before the first read when a directory outside it appears.
+    On Linux, an inotify watch per directory, added before the read, with `max_user_watches`
+    overflow stat-checked. A rescan happens on overflow, cookie timeout, watcher failure, and
+    under `YCXX_NO_WATCH=1`.
+  - `:admission`: the progress quantum (50 ms floor, doubling without progress).
+- `ycxx cxx` falls back to in-process on any failure, and retries a lost daemon once.
+  `YCXX_DAEMON=require` or `--daemon=require` makes a failure an error (the tests' hook);
+  `YCXX_NO_DAEMON=1` or `--no-daemon` turns the daemon off. `-v` says where the request was
+  answered, and `@file` response files are expanded by the client. `ycxx ctl status|shutdown`.
+- `pp::configure(Config, Host&)`: a session with the same host and configuration is kept, so its
+  region cache is reused between requests.
+- Tests:
+  - `unit.daemon`: framing and malformed frames, root discovery, the quantum under simulated
+    time, file-table batches, and the real watcher with cookie sync.
+  - `daemon.compare` (`tests/daemon/compare.py`): `tests/own/slice` and `smoke` in four actions,
+    through a daemon and in-process, byte for byte. It also covers two directories with one
+    argv, edits, fallback, and a killed daemon.
+  - Both run on macOS and Linux.
+- Not yet (#120): input providers and per-root engine stats (#95), concurrent requests and
+  cell-level restarts (#15), the daemon as the default, `progress` messages, and `build_time`.
+  Also not yet: the persistent cache handoff and the file table in it (#17), the LSP front
+  (#99), and the rest of the β tests (#98).
 
 ## The L1 interpreter (#25, 2026-11-18)
 
@@ -480,8 +626,8 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   (an array's or class's element values) in `values`; `DeclKind::data_member`.
 - **Front end:** a class definition at namespace scope is a `class_def` item whose members are
   their own items (ast.md §4.2); `Program::class_def(item)` reads them into a `ClassDef` and into
-  sema's class table (`World::classes`, the stand-in for `class_def`'s member list and the
-  `layout` query: Itanium layout of data members). A class is complete at an item after its
+  sema's class table (`World::classes`, the stand-in for `class_def`'s member list, which the
+  layout queries read). A class is complete at an item after its
   definition that it does not enclose (`Questions::is_complete`). Class names as type
   specifiers, elaborated type specifiers and forward declarations, member access (`Member`,
   [expr.ref]), list-initialization of aggregates and scalars (`InitList`, `ValueInit`,
@@ -491,10 +637,10 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   Namespace-scope aggregates with constant elements are folded to a `VAggregate`.
 - **IR:** members through `ptr_member` field steps; aggregates initialized element by element,
   in an object allocated `zero` when some element is value-initialized; trivial copies and copy
-  assignment as `copy`, which `lower` turns into chunked loads and stores. The pipeline's `Layout`
-  asks `Records` (the front end's class table) for class layouts; data with `VAggregate`
-  initializers; Itanium names for global-namespace class types in parameters.
-- Tests: `tests/own/classes/s1-*` (spec-only, plus two from the review). 16 of 22 pass; the others wait for classes by value
+  assignment as `copy`, which `lower` turns into chunked loads and stores. Class layouts (Itanium
+  §2.4) are in the `LayoutType` and `LayoutStep` queries, from sema's class table; data with
+  `VAggregate` initializers; Itanium names for global-namespace class types in parameters.
+- Tests: `tests/own/classes/s1-*` (spec-only, plus seven from the review). 21 of 27 pass; the others wait for classes by value
   (#116), local classes (#117), non-constant default member initializers (#118) and records in
   the interpreter (#25).
 - Not yet: unions, bit-fields, constructors, bases, access checking (#119).

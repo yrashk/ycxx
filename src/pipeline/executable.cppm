@@ -2,12 +2,18 @@
 // signed arm64 macOS executable. Imports are checked against the export list of the SDK's
 // `usr/lib/libSystem.B.tbd`. The SDK is `$SDKROOT`, else what `xcrun --show-sdk-path` prints,
 // else the Command Line Tools' SDK; it is looked up and its export list read once per process.
+//
+// `link(P)` is the engine query over a program's translation units: their `tu(TU)` objects, in
+// command-line order, then the objects given as files. The SDK is read outside the engine, once
+// per process, as configuration the daemon's file table will provide (#97).
 module;
 #include <stdio.h>
 export module ycxx.pipeline:executable;
 
 import std;
+import ycxx.engine;
 export import ycxx.link;
+import :back;
 
 export namespace ycxx::pipeline {
 
@@ -26,6 +32,33 @@ std::expected<std::vector<std::uint8_t>, std::vector<link::error>> link_executab
 // executable when `executable` is set; an error message on failure.
 std::optional<std::string> write_file(const std::filesystem::path& path, std::span<const std::uint8_t> bytes,
                                       bool executable);
+
+// A program, numbered by the driver.
+struct ProgramId {
+  std::uint32_t n = 0;
+  bool operator==(const ProgramId&) const = default;
+};
+// What a program is linked from: translation units, in command-line order, then objects read from
+// files; `identifier` names the code signature.
+struct ProgramInputs {
+  std::vector<TuId> tus;
+  std::vector<obj::object> objects;
+  std::string identifier;
+};
+struct [[=engine::input{engine::Durability::low}]] ProgramIn {
+  using Key = ProgramId;
+  using Value = ProgramInputs;
+};
+
+struct Linked {
+  std::vector<std::uint8_t> image;  // empty when there are errors
+  std::vector<std::string> errors;
+};
+struct Link {
+  using Key = ProgramId;
+  using Value = Linked;
+  static engine::query_task<Value> run(engine::Ctx& cx, ProgramId p);
+};
 
 }  // namespace ycxx::pipeline
 
@@ -105,6 +138,27 @@ std::optional<std::string> write_file(const std::filesystem::path& path, std::sp
     if (ec) return std::format("cannot make '{}' executable: {}", path.display_string(), ec.message());
   }
   return std::nullopt;
+}
+
+engine::query_task<Linked> Link::run(engine::Ctx& cx, ProgramId p) {
+  const ProgramInputs& in = cx.fetch<ProgramIn>(p);
+  std::vector<obj::object> objects;
+  Linked out;
+  const auto tus = co_await cx.par_map<Tu>(in.tus);
+  for (std::size_t i = 0; i < in.tus.size(); ++i) {
+    const TuValue& t = tus[i];
+    if (!t.object) out.errors.push_back(std::format("translation unit {} did not compile", in.tus[i].n));
+    else objects.push_back(*t.object);
+  }
+  if (!out.errors.empty()) co_return out;
+  objects.append_range(in.objects);
+  auto image = link_executable(objects, in.identifier);
+  if (!image) {
+    for (const link::error& e : image.error()) out.errors.push_back(e.message);
+    co_return out;
+  }
+  out.image = std::move(*image);
+  co_return out;
 }
 
 }  // namespace ycxx::pipeline
