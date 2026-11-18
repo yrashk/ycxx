@@ -196,14 +196,16 @@ one import `ycxx.ast`; unit tests in `tests/unit/ast` (run by ctest, see docs/TE
   language linkage) and the sugar kind `STypedef`, whose spelled type is marked `[[=canonical]]`.
 - **The `types` interner** (`interner.cppm`): a kind table numbered densely across kinds, and
   `canon[]` filled at interning (§5.2). `Interners::intern_type`, `qualified` (cv dropped on
-  references and functions, pushed into array elements), `canonical` and `same_type`.
+  references and functions, pushed into array elements, the canonical form interned at once) and
+  the `const` reads `canonical` and `same_type`.
 - **The `values` interner**: `VInt` (bool, character and integer values as 128-bit two's
   complement, normalized to the type), `VNullptr`, and the dependent family's shape: kinds marked
   `[[=dependent]]` (`VDepParam`, `VDepFnParam`), `Values::is_dependent`.
 - **Targets** (`target.cppm`): sizes, alignments and floating formats of the fundamental types,
   `char` signedness, the character types' underlying types; `aarch64_darwin` and `x86_64_linux`.
 - **What sema calls** (`typeops.cppm`): checked constructors (reference collapsing, parameter
-  adjustment, `function_type`), integer conversion rank and floating-point conversion rank and
+  adjustment, `function_type`, `array_of` with the bound converted to `size_t`), predicates that
+  see through sugar (`is_pointer`, `pointee_of`, …), integer conversion rank and floating-point conversion rank and
   subrank ([conv.rank]), promotions with bit-fields ([conv.prom]), the usual arithmetic
   conversions ([expr.arith.conv]), integer constants and their integral conversion
   ([conv.integral], [conv.bool]).

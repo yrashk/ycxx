@@ -591,7 +591,9 @@ struct Interners {
 
   // `q` with `cv` added (§5.2): cv on a reference or function type, directly or through a typedef,
   // is dropped ([dcl.ref], [dcl.fct]); cv on an array node goes to its elements
-  // ([basic.type.qualifier]). Sugar for an array keeps the cv, and `canonical` pushes it in.
+  // ([basic.type.qualifier]). Sugar for an array keeps the cv, and the canonical form, the array
+  // of cv-qualified elements, is interned now, so `canonical` stays a read. A cv-qualified
+  // `QualType` is made here (or by `intern_type`), never by the raw bit operation `with_cv`.
   QualType qualified(QualType q, Cv cv) {
     if (cv == Cv::none) return q;
     QualType c = types.canon(q);
@@ -601,14 +603,16 @@ struct Interners {
       a.elem = qualified(a.elem, cv);
       return intern_type(a);
     }
-    return with_cv(q, cv);
+    QualType r = with_cv(q, cv);
+    if (types.is<TArray>(c)) qualified(c, cv_of(r));  // the canonical form, for `canonical`
+    return r;
   }
 
-  // The canonical form of `q`: O(1), except that cv on sugar for an array interns the array of
-  // cv-qualified elements.
-  QualType canonical(QualType q) { return qualified(types.canon(q), cv_of(q)); }
+  // The canonical form of `q`, in O(1): a read of canon[] and of the cv-qualified array that
+  // `qualified` interned.
+  QualType canonical(QualType q) const { return canonical_qualified(types.canon(q), cv_of(q)); }
 
-  bool same_type(QualType a, QualType b) { return canonical(a) == canonical(b); }
+  bool same_type(QualType a, QualType b) const { return canonical(a) == canonical(b); }
 
   // ---------------------------------------------------------------- values (§5.5)
 
@@ -666,6 +670,18 @@ struct Interners {
   }
 
 private:
+  // `qualified(c, cv)` for a canonical `c`, which construction has already interned.
+  QualType canonical_qualified(QualType c, Cv cv) const {
+    if (cv == Cv::none) return c;
+    if (types.is<TLRef>(c) || types.is<TRRef>(c) || types.is<TFunction>(c)) return c;
+    if (!types.is<TArray>(c)) return with_cv(c, cv);
+    TArray a = types.get<TArray>(c);
+    a.elem = canonical_qualified(a.elem, cv);
+    auto hit = types.table().find(fingerprint(a, {}));
+    contract_assert(hit.has_value());  // interned by `qualified` (§5.2)
+    return make_qual_type(*hit);
+  }
+
   // The canonical form of a node about to be interned, or none if it is its own (§5.2).
   template <class T>
   std::optional<QualType> canonical_form(const T& v) {

@@ -46,13 +46,13 @@ void canon() {
 
   // cv on an array goes to its elements ([basic.type.qualifier]).
   ConstId three = int_value(in, aarch64_darwin, Builtin::unsigned_long, 3);
-  QualType arr = array_of(in, i, three);
-  check(in.qualified(arr, Cv::const_) == array_of(in, ci, three), "const applied to int[3] is const int[3]");
+  QualType arr = array_of(in, aarch64_darwin, i, three);
+  check(in.qualified(arr, Cv::const_) == array_of(in, aarch64_darwin, ci, three), "const applied to int[3] is const int[3]");
   // ... and through a typedef only when canonicalized.
   QualType arr_t = in.intern_type(STypedef{arr, in.entities.add<EntityId>(seed("Arr"))});
   QualType c_arr_t = in.qualified(arr_t, Cv::const_);
   check(type_node_of(c_arr_t) == type_node_of(arr_t) && cv_of(c_arr_t) == Cv::const_, "const Arr keeps its spelling");
-  check(in.canonical(c_arr_t) == array_of(in, ci, three), "canonical(const Arr) is const int[3]");
+  check(in.canonical(c_arr_t) == array_of(in, aarch64_darwin, ci, three), "canonical(const Arr) is const int[3]");
 
   // cv on a reference or function type through a typedef is dropped ([dcl.ref], §5.4).
   QualType r = lvalue_ref_to(in, i);
@@ -63,8 +63,29 @@ void canon() {
   QualType f = function_type(in, i, {});
   check(in.qualified(f, Cv::volatile_) == f, "cv on a function type is dropped");
 
+  // The bound is converted to size_t ([dcl.array]): `int[3]` is one type however 3 is spelled.
+  check(array_of(in, aarch64_darwin, i, int_value(in, aarch64_darwin, Builtin::int_, 3)) == arr, "int[3] with an int bound");
+  check(in.values.get<VInt>(in.types.get<TArray>(arr).bound).type == builtin(in, Builtin::unsigned_long), "the bound is size_t");
+  // cv on nested array sugar: canonical() is a read of what qualified() interned.
+  QualType arr2_t = in.intern_type(STypedef{array_of(in, aarch64_darwin, arr_t, three), in.entities.add<EntityId>(seed("Arr2"))});
+  const Interners& cin = in;
+  check(cin.canonical(in.qualified(arr2_t, Cv::volatile_)) ==
+            array_of(in, aarch64_darwin, array_of(in, aarch64_darwin, builtin(in, Builtin::int_, Cv::volatile_), three), three),
+        "canonical(volatile Arr2) is volatile int[3][3]");
+  check(cin.same_type(c_arr_t, array_of(in, aarch64_darwin, ci, three)), "same_type on const Interners");
+
   // Arrays of unknown bound are distinct from every bounded array.
-  check(array_of(in, i) != arr && in.types.get<TArray>(array_of(in, i)).bound == ConstId::none, "int[] has no bound");
+  check(array_of(in, aarch64_darwin, i) != arr && in.types.get<TArray>(array_of(in, aarch64_darwin, i)).bound == ConstId::none, "int[] has no bound");
+}
+
+void pointers() {
+  Interners in;
+  QualType i = builtin(in, Builtin::int_);
+  QualType p = pointer_to(in, i);
+  QualType p_t = in.intern_type(STypedef{p, in.entities.add<EntityId>(seed("P"))});
+  // `is<TPointer>` reads the node; is_pointer and pointee_of see through sugar (§5.3).
+  check(!in.types.is<TPointer>(p_t) && is_pointer(in, p_t) && pointee_of(in, p_t) == i, "a typedef of int* is a pointer");
+  check(!is_pointer(in, i) && is_pointer(in, with_cv(p, Cv::const_)), "int is not a pointer; int* const is");
 }
 
 void references() {
@@ -93,7 +114,7 @@ void functions() {
   ConstId four = int_value(in, aarch64_darwin, Builtin::unsigned_long, 4);
 
   // [dcl.fct]: arrays and functions decay, top-level cv is dropped.
-  std::array p1{array_of(in, c, four), builtin(in, Builtin::int_, Cv::const_)};
+  std::array p1{array_of(in, aarch64_darwin, c, four), builtin(in, Builtin::int_, Cv::const_)};
   std::array p2{pointer_to(in, c), i};
   QualType f1 = function_type(in, i, p1);
   QualType f2 = function_type(in, i, p2);
@@ -163,6 +184,9 @@ void ranks() {
         "float64_t on Darwin ranks as double");
   check(float_rank_compare(t, float16, bfloat16) == std::partial_ordering::unordered, "float16_t and bfloat16_t are unordered");
   check(float_rank_compare(t, float16, float_) == std::partial_ordering::less, "float16_t < float");
+  // A type the target lacks orders with nothing ([basic.extended.fp]: float128_t is optional).
+  check(float_rank_compare(t, float128, double_) == std::partial_ordering::unordered && !usual_arithmetic(t, float128, double_),
+        "float128_t is absent on Darwin");
   check(float_rank_compare(x86_64_linux, float128, long_double) == std::partial_ordering::greater,
         "float128_t > x87 long double");
 }
@@ -253,7 +277,7 @@ void constants() {
   check(in.intern_value(VDepParam{0, 1}) == d && in.intern_value(VDepFnParam{0, 1}) != d, "VDep* values are hash-consed by kind");
   check(in.values.is_dependent(d) && !in.values.is_dependent(a) && !in.values.is_dependent(ConstId::none), "is_dependent");
   // An array bound may be dependent.
-  QualType da = array_of(in, builtin(in, int_), d);
+  QualType da = array_of(in, aarch64_darwin, builtin(in, int_), d);
   check(in.canonical(da) == da && in.types.get<TArray>(da).bound == d, "T[N] holds VDepParam");
 }
 
@@ -277,6 +301,7 @@ void compaction() {
 int main() {
   interning();
   canon();
+  pointers();
   references();
   functions();
   layouts();

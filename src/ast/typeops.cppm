@@ -4,7 +4,8 @@
 // conversion of values ([conv.integral]).
 //
 // Types given to the classification and conversion functions may be sugared and cv-qualified;
-// results are canonical and cv-unqualified.
+// results are canonical and cv-unqualified. `in.types.is<K>(q)` and `get<K>(q)` read `q`'s own
+// node, which may be sugar: ask them of `in.canonical(q)`, or use the predicates here.
 export module ycxx.ast.typeops;
 
 import std;
@@ -34,6 +35,15 @@ bool is_reference(const Interners& in, QualType q) {
 bool is_function(const Interners& in, QualType q) { return in.types.is<TFunction>(in.types.canon(q)); }
 bool is_array(const Interners& in, QualType q) { return in.types.is<TArray>(in.types.canon(q)); }
 bool is_void(const Interners& in, QualType q) { return builtin_of(in, q) == Builtin::void_; }
+bool is_pointer(const Interners& in, QualType q) { return in.types.is<TPointer>(in.types.canon(q)); }
+
+// The canonical type `q` points to. Expressions carry sugared types (§5.3), so a pointer is
+// recognized here, through typedefs, not by `in.types.is<TPointer>(q)`, which reads `q`'s own node.
+QualType pointee_of(const Interners& in, QualType q)
+  pre(is_pointer(in, q))
+{
+  return in.types.get<TPointer>(in.types.canon(q)).pointee;
+}
 
 QualType pointer_to(Interners& in, QualType pointee, Cv cv = Cv::none)
   pre(!is_reference(in, pointee))  // [dcl.ptr]
@@ -58,14 +68,6 @@ QualType rvalue_ref_to(Interners& in, QualType referee)
 {
   if (is_reference(in, referee)) return without_cv(referee);
   return in.intern_type(TRRef{referee});
-}
-
-// `bound` is an integer constant or `ConstId::none`. Sema diagnoses an element type that is not
-// a complete object type ([dcl.array]); the precondition rejects only what cannot be represented.
-QualType array_of(Interners& in, QualType elem, ConstId bound = ConstId::none)
-  pre(!is_reference(in, elem) && !is_function(in, elem) && !is_void(in, elem))
-{
-  return in.intern_type(TArray{elem, bound});
 }
 
 // A parameter's type after [dcl.fct]'s adjustments: an array of `T` becomes a pointer to `T`, a
@@ -225,6 +227,7 @@ std::optional<u32> standard_float_rank(const Target& t, Builtin b) {
 std::partial_ordering float_rank_compare(const Target& t, Builtin a, Builtin b)
   pre(is_floating(a) && is_floating(b))
 {
+  if (!t.has(a) || !t.has(b)) return std::partial_ordering::unordered;  // the target lacks one
   auto ra = detail::standard_float_rank(t, a), rb = detail::standard_float_rank(t, b);
   if (ra && rb) return *ra <=> *rb;
   FloatShape x = shape_of(t[a].format), y = shape_of(t[b].format);
@@ -303,6 +306,21 @@ ConstId convert_integral(Interners& in, const Target& t, ConstId c, QualType to)
   pre(in.values.is<VInt>(c))
 {
   return int_value(in, t, to, int_bits(in, c));
+}
+
+// ---------------------------------------------------------------- arrays
+
+// An array of `elem`. The bound is a converted constant expression of type `std::size_t`
+// ([dcl.array]), so an integer bound is converted here and `int[3]` is one type whatever the
+// bound's spelling; `ConstId::none` is an unknown bound, and a dependent bound is kept. Sema
+// diagnoses an element type that is not a complete object type and a bound that is not positive;
+// the precondition rejects only what cannot be represented.
+QualType array_of(Interners& in, const Target& t, QualType elem, ConstId bound = ConstId::none)
+  pre(!is_reference(in, elem) && !is_function(in, elem) && !is_void(in, elem))
+  pre(bound == ConstId::none || in.values.is_dependent(bound) || in.values.is<VInt>(bound))
+{
+  if (in.values.is<VInt>(bound)) bound = convert_integral(in, t, bound, builtin(in, t.size_type));
+  return in.intern_type(TArray{elem, bound});
 }
 
 }  // namespace ycxx::ast
