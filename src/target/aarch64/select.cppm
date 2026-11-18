@@ -247,16 +247,31 @@ class Selector {
     munch(n, d);
   }
 
+  // `v` of type `t` extended to `bits`, by its signedness `s`; `v` itself when it is that wide.
+  std::uint32_t extend(std::uint32_t v, Type t, std::uint32_t bits, bool s) {
+    if (l2::bits(t) >= bits) return v;
+    std::uint32_t x = new_vreg(*l2::int_of_bits(bits));
+    emit({s ? Form::SBFM : Form::UBFM, bits == 64, 3, 4, {MOp::vreg(x), MOp::vreg(v), MOp::imm(0), MOp::imm(l2::bits(t) - 1)}});
+    return x;
+  }
+
   void call(NodeId n) {
     const l2::Node& nd = f_.node(n);
     auto ops = f_.operands_of(n);
+    auto imms = f_.imms_of(n);
     bool ind = nd.op == l2::Op::call_ind;
     std::uint32_t target = ind ? vreg(ops[1]) : nil;
-    std::uint64_t sext = f_.imms_of(n)[ind ? 0 : 1];
+    std::uint64_t sext = imms[ind ? 0 : 1];
     std::vector<std::pair<std::uint32_t, Type>> args;
     for (std::size_t i = ind ? 2 : 1; i < ops.size(); ++i) args.push_back({vreg(ops[i]), f_.type(ops[i])});
+    // The arguments the callee's ellipsis matches are the last ones; the convention may place
+    // them apart from the named ones.
+    std::size_t through_ellipsis = imms[ind ? 1 : 2];
+    if (through_ellipsis > args.size()) return fail("more arguments matching the ellipsis than arguments");
+    std::size_t named = cc_.variadic_slot ? args.size() - through_ellipsis : args.size();
+    auto is_signed = [&](std::size_t i) { return i < 64 && ((sext >> i) & 1); };
     std::uint32_t stack = 0;
-    for (std::size_t i = cc_.int_args.size(); i < args.size(); ++i) {
+    for (std::size_t i = cc_.int_args.size(); i < named; ++i) {
       std::uint32_t at = stack_slot(stack, args[i].second);
       std::uint32_t v = args[i].first;
       if (args[i].second == Type::i1) {  // a bool's byte is 0 or 1; bits above bit 0 are unspecified
@@ -266,17 +281,18 @@ class Selector {
       }
       emit({Form::STRui, true, log2_bytes(args[i].second), 3, {MOp::vreg(v), MOp::preg(R::sp), MOp::imm(at)}});
     }
+    for (std::size_t i = named; i < args.size(); ++i) {  // each in a slot of its own
+      std::uint32_t size = cc_.variadic_slot;
+      stack = (stack + size - 1) / size * size;
+      std::uint32_t v = extend(args[i].first, args[i].second, size * 8, is_signed(i));
+      emit({Form::STRui, true, log2_bytes(*l2::int_of_bits(size * 8)), 3, {MOp::vreg(v), MOp::preg(R::sp), MOp::imm(stack)}});
+      stack += size;
+    }
     m_.outgoing = std::max(m_.outgoing, (stack + cc_.stack_align - 1) / cc_.stack_align * cc_.stack_align);
-    for (std::size_t i = 0; i < args.size() && i < cc_.int_args.size(); ++i) {
+    for (std::size_t i = 0; i < named && i < cc_.int_args.size(); ++i) {
       auto [v, t] = args[i];
-      if (l2::bits(t) < cc_.reg_arg_bits) {  // extended to the register width by signedness
-        std::uint32_t x = new_vreg(*l2::int_of_bits(cc_.reg_arg_bits));
-        bool s = (sext >> i) & 1;
-        emit({s ? Form::SBFM : Form::UBFM, cc_.reg_arg_bits == 64, 3, 4,
-              {MOp::vreg(x), MOp::vreg(v), MOp::imm(0), MOp::imm(l2::bits(t) - 1)}});
-        v = x;
-      }
-      emit(mov(MOp::preg(cc_.int_args[i]), MOp::vreg(v)));
+      // Extended to the register width by signedness.
+      emit(mov(MOp::preg(cc_.int_args[i]), MOp::vreg(extend(v, t, cc_.reg_arg_bits, is_signed(i)))));
     }
     if (ind) emit({Form::BLR, true, 3, 1, {MOp::vreg(target)}});
     else emit({Form::BL, true, 3, 1, {{MK::sym, std::int64_t(f_.imms_of(n)[0])}}});

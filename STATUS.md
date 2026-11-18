@@ -303,7 +303,8 @@ stay open for the rest.
 - L2 (`src/ir/l2.cppm`, module `ycxx.ir.l2`): values `i1`/`i8`/`i16`/`i32`/`i64`/`ptr`, the
   `!state` chain, blocks with arguments, an op table built by reflection (constants, `symbol`,
   `alloca`, integer arithmetic with poison flags, `icmp`, `select`, width changes, `ptradd`,
-  `load`/`store` with an alias tag, `call`/`call_ind` with a mask of signed arguments, `br`,
+  `load`/`store` with an alias tag, `call`/`call_ind` with a mask of signed arguments and the
+  number of arguments the callee's ellipsis matches (L1's `call` carries it too, #189), `br`,
   `cond_br`, `ret`, `unreachable`), a verifier, a printer and an L1 origin map per node.
 - `lower` (`src/ir/lower.cppm`, `ycxx.ir.lower`): L1 to L2 over a `layout_source` concept (type
   sizes, path offsets, constant values), a stand-in for the `layout` query until #33. Access paths
@@ -319,7 +320,8 @@ stay open for the rest.
   - `aarch64.patterns`: the pattern table in the rule language, embedded with `#embed`, parsed
     by a `constexpr` parser and checked by a `static_assert`.
   - `abi.cppm`: register classes and the calling convention (AAPCS64 with Apple's natural packing
-    of stack arguments and 32-bit extension of narrow register arguments).
+    of stack arguments, 32-bit extension of narrow register arguments, and every argument a
+    callee's ellipsis matches on the stack in an 8-byte slot of its own, #189).
   - `select.cppm`: maximal munch per block, trees cut at shared nodes, loads folded only within a
     state epoch, leaves rematerialized, edge copies for block arguments.
   - `emit.cppm`: every virtual register in a stack slot, frame layout with a frame record and
@@ -338,10 +340,11 @@ stay open for the rest.
     literal). A C harness compiled by GCC checks about 60 generated functions against C's own
     arithmetic and calling convention, over thousands of argument pairs. It covers narrow types,
     stack arguments both ways, function pointers and the GOT. Mutating `sdiv` or the stack packing
-    makes it fail.
+    makes it fail. Two variadic C callees read what generated calls pass through their ellipsis
+    with `va_arg`, after named stack arguments and with none.
 - Not yet: the allocation
   validator and dependence checker (#29), SSA linear scan, list scheduling, unwind info and DWARF,
-  a measured `cost_model` (#9), variadic calls, more than one result, frame objects aligned above 16 bytes.
+  a measured `cost_model` (#9), defining a variadic function (`va_start`), more than one result, frame objects aligned above 16 bytes.
 
 ## AST core (#32)
 

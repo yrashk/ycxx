@@ -213,8 +213,10 @@ export enum class Op : std::uint16_t {
   rtti__dyncast [[=state({S, V}, {V}).imms({type})]],
 
   // Calls without an unwind edge: the callee cannot throw, or the exception leaves the function.
-  call [[=state({S, Vs}, {S, Vs}).imms({entity}).accepts({not_constexpr})]],
-  call_ind [[=state({S, V, Vs}, {S, Vs}).accepts({not_constexpr})]],
+  // The u32 is how many of the last arguments the callee's ellipsis matches ([expr.call]/12);
+  // they already have the default argument promotions. A target may pass them differently.
+  call [[=state({S, Vs}, {S, Vs}).imms({entity, u32}).accepts({not_constexpr})]],
+  call_ind [[=state({S, V, Vs}, {S, Vs}).imms({u32}).accepts({not_constexpr})]],
   builtin [[=state({S, Vs}, {S, Vs}).imms({u32})]],
   asm_ [[=state({S, Vs}, {S, Vs}).imms({constant}).with({nonconstant})]],
 

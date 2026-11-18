@@ -215,7 +215,7 @@ func @4 {
 ^0(%s: !state):
   %s1: !state, %h: !coro = coro.begin %s
   %p: T3 = coro.promise %h
-  %s2: !state = call %s1, %p [@20]
+  %s2: !state = call %s1, %p [@20, 0]
   coro.suspend %s2, %h [0] ^resumed, ^destroyed
 ^resumed(%s3: !state):
   coro.suspend %s3, %h [1] ^destroyed, ^destroyed

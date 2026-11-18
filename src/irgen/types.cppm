@@ -1,7 +1,7 @@
 // The type and constant half of `Facts`, over the AST's `types` and `values` interners and a
-// target (#33; ast.md §5). The declaration half (`is_constexpr`, `is_main`) and string literals,
-// which the interners do not hold yet, are added by whoever composes the facts: the driver from
-// `decl_sema`, the tests from their own tables.
+// target (#33; ast.md §5). The declaration half (`is_constexpr`, `is_main`, `ellipsis_after`) and
+// string literals, which the interners do not hold yet, are added by whoever composes the facts:
+// the driver from `decl_sema`, the tests from their own tables.
 export module ycxx.irgen:types;
 
 import std;
@@ -71,6 +71,15 @@ class TypeFacts {
   }
   ast::QualType return_type(ast::QualType q) const {
     return canonical(in_->types.get<ast::TFunction>(in_->types.canon(q)).ret);
+  }
+  // A function type's parameter count when it ends in an ellipsis ([dcl.fct]); nullopt for one
+  // that does not. Whoever composes the facts answers `ellipsis_after` with it.
+  std::optional<std::uint32_t> parameters_before_ellipsis(ast::QualType fn) const {
+    ast::QualType c = in_->types.canon(fn);
+    if (!in_->types.is<ast::TFunction>(c)) return std::nullopt;
+    auto f = in_->types.get<ast::TFunction>(c);
+    if (!f.variadic) return std::nullopt;
+    return std::uint32_t(in_->seqs.elements(f.params).size());
   }
   ast::QualType int_type() { return ast::builtin(*in_, ast::Builtin::int_); }
   ast::QualType ptrdiff_type() { return ast::builtin(*in_, target_->ptrdiff_type); }

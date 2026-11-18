@@ -40,6 +40,9 @@ concept Facts = requires(F& f, ast::QualType q, ast::ConstId c, ast::EntityId e,
   { f.string_address(c) } -> std::same_as<ast::ConstId>;
   { f.is_constexpr(e) } -> std::same_as<bool>;  // a constexpr or consteval function
   { f.is_main(e) } -> std::same_as<bool>;       // the program's `main` ([basic.start.main])
+  // A function declared with an ellipsis ([dcl.fct]): how many parameters precede it; nullopt
+  // for a function without one.
+  { f.ellipsis_after(e) } -> std::same_as<std::optional<std::uint32_t>>;
   // References ([dcl.ref]) are pointers in the IR: `canonical` and `classify` see a pointer.
   { f.is_reference(q) } -> std::same_as<bool>;
   { f.referee(q) } -> std::same_as<ast::QualType>;  // pre: reference

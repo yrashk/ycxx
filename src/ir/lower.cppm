@@ -12,7 +12,9 @@
 //   - a result narrower than `config.min_result_bits` is returned extended to it and truncated by
 //     the caller; arguments and parameters keep their width, and a call records which arguments
 //     are signed, so code generation can extend them as the calling convention places them
-//     (Apple arm64 extends register arguments to 32 bits but packs stack arguments by size).
+//     (Apple arm64 extends register arguments to 32 bits but packs stack arguments by size), and
+//     how many of them the callee's ellipsis matches, which the calling convention may place
+//     apart (Apple arm64 puts them on the stack).
 //
 // This is the α-slice subset (epic #39): what C-like functions need. Any other op is an error
 // naming the node, not a silent miscompile. Aggregates are memory only: `alloc`, access paths and
@@ -437,6 +439,7 @@ class Lowering {
         std::vector<std::uint64_t> im;
         if (!ind) im.push_back(imms[0]);
         im.push_back(sext);
+        im.push_back(imms[ind ? 0 : 1]);  // the arguments the ellipsis matches
         NodeId c = b_.emit(ind ? Op2::call_ind : Op2::call, res, ops, im, 0, {}, o);
         out(n, 0, b_.peek().result(c));
         for (std::uint32_t i = 1; i < nd.nres; ++i) {

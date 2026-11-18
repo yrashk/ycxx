@@ -31,6 +31,7 @@ public:
   ConstId string_address(ConstId s) { return w_->values.address({}, s, 0); }
   bool is_constexpr(EntityId f) { return q_->is_constexpr(f); }
   bool is_main(EntityId) { return false; }  // `main` is never evaluated ([basic.start.main])
+  std::optional<std::uint32_t> ellipsis_after(EntityId f) { return parameters_before_ellipsis(w_->entities.rec(f).type); }
 
 private:
   World* w_;

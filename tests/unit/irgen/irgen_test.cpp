@@ -28,6 +28,7 @@ struct TestFacts : TypeFacts {
   using TypeFacts::TypeFacts;
   std::map<std::uint32_t, std::string> tokens, entities;
   std::set<std::uint32_t> constexpr_fns;
+  std::map<std::uint32_t, std::uint32_t> variadic_fns;  // parameters before the ellipsis
   EntityId main_fn = EntityId::none;
 
   EntityId entity(std::string name) {
@@ -44,6 +45,10 @@ struct TestFacts : TypeFacts {
   ConstId string_address(ConstId s) { return token("&" + tokens.at(std::to_underlying(s))); }
   bool is_constexpr(EntityId e) { return constexpr_fns.contains(std::to_underlying(e)); }
   bool is_main(EntityId e) { return e == main_fn; }
+  std::optional<std::uint32_t> ellipsis_after(EntityId e) {
+    if (auto it = variadic_fns.find(std::to_underlying(e)); it != variadic_fns.end()) return it->second;
+    return std::nullopt;
+  }
 };
 
 static_assert(Facts<TestFacts>);
@@ -515,7 +520,7 @@ void recursion_and_promotions() {
         b.bin(ast::BinaryOp::mul, w.int_t, rn(), b.call(f, w.int_t, {b.bin(ast::BinaryOp::sub, w.int_t, rn(), b.lit(w.int_t, "1"))}))))}));
     FunctionIr r = generate(w, {f, w.fn_ii, {{n, w.int_t}}}, body);
     std::string got = w.text(f, r.body);
-    check(got.contains("= call %") && got.contains("[@fact]") && !got.contains("not_constexpr"),
+    check(got.contains("= call %") && got.contains("[@fact, 0]") && !got.contains("not_constexpr"),
           "a call to a constexpr function is not flagged:\n" + got);
     check(got.contains("mul nsw") && got.contains("sub nsw"), "signed arithmetic is nsw:\n" + got);
     // `n * fact(n - 1)`: what `fact` does is indeterminately sequenced with the read of n, not
@@ -573,7 +578,7 @@ func @main {
 ^0(%0: !state):
   %1: const_char[6]* = const [#&"hello"]
   %2: const_char* = ptr_member %1 [char, /e0]
-  %3: !state, %4: int = call not_constexpr %0, %2 [@puts]
+  %3: !state, %4: int = call not_constexpr %0, %2 [@puts, 0]
   %5: int = const [#0]
   ret %3, %5
 }
@@ -807,7 +812,7 @@ void void_return() {
   expect(w, {h, w.fn_v, {}}, body, R"(
 func @h {
 ^0(%0: !state):
-  %1: !state = call not_constexpr %0 [@g]
+  %1: !state = call not_constexpr %0 [@g, 0]
   ret %1
 }
 )");

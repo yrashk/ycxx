@@ -11,7 +11,7 @@
 //   func @7 {
 //   ^0(%0: !state, %1: i32):
 //     %2: i32 = add nsw %1, %1
-//     %3: !state, %4: i32 = call %0, %2 [@12]
+//     %3: !state, %4: i32 = call %0, %2 [@12, 0, 0]
 //     %5: i1 = icmp %4, %1 [slt]
 //     cond_br %5 ^1(%3), ^2
 //   ...
@@ -148,10 +148,11 @@ export enum class Op : std::uint16_t {
   // Memory: the result's or the stored value's type is the access width.
   load [[=state({S, V}, {V}).imms({alias}).accepts({volatile_})]],
   store [[=state({S, V, V}, {S}).imms({alias}).accepts({volatile_})]],
-  // Calls. The u32 is a mask of the arguments that are signed: an argument narrower than the
-  // calling convention's register width is extended by it, sign-extended where its bit is set.
-  call [[=state({S, Vs}, {S, Vs}).imms({entity, u32})]],
-  call_ind [[=state({S, V, Vs}, {S, Vs}).imms({u32})]],
+  // Calls. The first u32 is a mask of the arguments that are signed: an argument narrower than
+  // the slot the calling convention gives it is extended to it, sign-extended where its bit is
+  // set. The second is how many of the last arguments the callee's ellipsis matches (L1's).
+  call [[=state({S, Vs}, {S, Vs}).imms({entity, u32, u32})]],
+  call_ind [[=state({S, V, Vs}, {S, Vs}).imms({u32, u32})]],
 
   // Terminators.
   br [[=control({}, 1)]],

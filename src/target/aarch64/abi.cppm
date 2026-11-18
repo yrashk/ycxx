@@ -13,7 +13,11 @@
 //     in a register (on the stack it keeps its size). A narrow result is returned extended to 32
 //     bits (`lower`, LowerConfig::min_result_bits), and the caller reads only its own bits, so
 //     either side's rule for results is met.
-// Variadic calls (Apple passes every variadic argument on the stack) are not in the α subset.
+//   - Apple: every argument a callee's ellipsis matches goes on the stack, after the named stack
+//     arguments, each in an 8-byte slot of its own, 8-byte aligned; named arguments are placed as
+//     in any call. (AAPCS64 places them as named ones.) Their default argument promotions
+//     ([expr.call]/12) happened before; the caller extends each to its slot by its signedness.
+// Defining a variadic function (va_start) is not in the α subset.
 export module ycxx.target.aarch64:abi;
 
 import std;
@@ -33,6 +37,9 @@ export struct CallingConvention {
   std::uint32_t stack_align = 16;
   bool natural_stack_args = true;     // Apple: stack arguments packed by their own size
   std::uint32_t reg_arg_bits = 32;    // narrower register arguments are extended to this
+  // Apple: the arguments an ellipsis matches go on the stack in slots of this many bytes; 0
+  // places them as named arguments (AAPCS64).
+  std::uint32_t variadic_slot = 8;
   std::uint32_t frame_record = 16;    // x29, x30 saved at the frame's top
   // The allocator's registers: values live in stack slots and pass through these.
   std::array<R, 4> scratch{R::x9, R::x10, R::x11, R::x12};
