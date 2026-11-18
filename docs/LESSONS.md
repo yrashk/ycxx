@@ -92,6 +92,13 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
   findings were fixed in one commit and the second check covered only the diff.
   - Learned on #2.
 
+- **A reviewer subagent in your own worktree collides with you.** On #40 the reviewer's
+  temporary probe edits showed up in `git status` mid-commit, and switching branches under it
+  changed what `HEAD` meant for its second pass.
+  - Do: give a reviewer a commit SHA, not `HEAD`, and `isolation: "worktree"` when it may edit
+    or build; otherwise don't switch branches until it reports.
+  - Learned on #40.
+
 ## Bureaucracy loops
 
 - **A design document became a loop.** The query-engine design (#1) grew to 31,500 words over
@@ -123,6 +130,15 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
   - Do: test that a contract fires (a violation-handler test, as `unit.engine_contract`), not
     only that it compiles. Reduce a module ICE to two files with `g++-16 -fmodules` first.
   - Learned on #14.
+
+## Data the front end needs
+
+- **Unicode tables without downloading the UCD.** Python's `unicodedata` (Unicode 17.0 in the
+  pinned Python) gives categories, combining classes, decompositions, normalization and names.
+  `str.isidentifier` implements XID_Start/XID_Continue. It cannot enumerate name aliases: macOS
+  Perl's `unicore/Name.pl` (Unicode 13) lists them, checked with `unicodedata.lookup`.
+  - Do: regenerate with `tools/unicode/gen-tables`; add ID_Compat_Math by hand from UAX #31.
+  - Learned on #40.
 
 ## Evidence and tests
 
