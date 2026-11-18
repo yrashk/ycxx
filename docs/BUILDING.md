@@ -1,0 +1,86 @@
+# Building ycxx
+
+ycxx is built by GCC 16.2 (`-freflection -fcontracts`) against libycxx, the submodule at
+`deps/libycxx`, with `import std;` (DECISIONS §3.1, §3.3). You need CMake 3.30 or later, Ninja
+and Python 3.10 or later. Linux x86_64 and macOS arm64 are supported.
+
+```sh
+git submodule update --init deps/libycxx
+tools/build                      # configures build/ on first use, builds, runs the smoke test
+build/bin/ycxx --version
+tools/test --fast                # what the PR tier of CI runs (DECISIONS §9.1)
+```
+
+## The compiler
+
+`CMakeLists.txt` uses libycxx's toolchain file (`deps/libycxx/cmake/ycxx-toolchain.cmake`). It
+finds GCC 16 in this order:
+1. the compiler recorded in libycxx's toolchain cache (`~/.local/share/ycxx/toolchains`, or
+   `$YCXX_TOOLCHAINS`);
+2. `g++-16` or a `g++` reporting 16.x on `PATH`;
+3. Homebrew's `gcc`.
+
+If none is found, provision one with libycxx's script, which builds GCC from source into the
+cache:
+
+```sh
+deps/libycxx/tools/toolchain/provision --gcc-only            # or --use-brew on macOS
+```
+
+Configuring with `-DYCXX_PROVISION=ON` does the same from CMake. GCC is the only bootstrap
+compiler. Clang 23 is a black-box oracle (DECISIONS §2.3). It is never used to build ycxx and is
+provisioned on its own: `deps/libycxx/tools/toolchain/provision --clang-only`.
+
+## Layout
+
+| Path | What |
+| --- | --- |
+| `src/main.cpp`, `src/driver/` | the one `ycxx` binary and its command line: `ycxx <front>` picks the daemon or a client (DECISIONS §4.7) |
+| `src/daemon/` | the resident daemon (stub) |
+| `src/client/` | the clients: `cxx` (c++-compatible), `lsp`, `ctl` (stubs) |
+| `tests/bootstrap/` | the bootstrap smoke test: one program per C++26 feature ycxx relies on |
+| `tools/check-policy`, `tools/check-preprocessor` | stage-1 policy checks |
+| `tools/build` | configure, build and run the smoke test |
+| `tools/test` | the test driver (#5) |
+
+CMake target names are `ycxxc*` and our options are `YCXXC_*`, because libycxx owns `ycxx*` and
+`YCXX_*`.
+
+## Preprocessor policy
+
+libycxx's policy (`deps/libycxx/DECISIONS.md` §1) applies to ycxx in a stricter form, because
+ycxx's sources are modules with no project headers. Only two directives are allowed: `#embed`,
+and `#include <...>` of a system header inside a global module fragment. Configuration reaches
+the code as values, such as the configured module `ycxx.version`, never as macros.
+`tools/check-preprocessor` enforces this.
+
+## Bootstrap smoke test
+
+`tests/bootstrap/` compiles and runs small uses of the features DECISIONS §3.2 relies on, so that
+a gap in the bootstrap compiler shows up on day one:
+- modules with `import std;`;
+- reflection: member-wise hashing, enumerator names, `define_aggregate`;
+- contracts, including the violation handler;
+- coroutines;
+- `std::execution`;
+- deducing `this`, pack indexing, structured-binding packs, constexpr exceptions,
+  `std::expected` and `#embed`.
+
+A feature the toolchain cannot compile yet is an expected failure. It has an `_xfail_<feature>`
+entry with its reason in `tests/bootstrap/CMakeLists.txt` and an entry in STATUS. The entry's
+test passes while the build fails, so a fixed toolchain shows up as a failing test.
+
+## CI
+
+`.github/workflows/ci.yml` is the PR and `main` tier, and `nightly.yml` is the nightly tier
+(DECISIONS §9). Both run on Linux x86_64 (the `gcc:16` container) and macOS arm64 (Homebrew's
+GCC). Each job runs `tools/check-policy`, then `tools/build`, then `tools/test` for its tier.
+- A newer push cancels the older run.
+- Changes to Markdown, `docs/` or `LICENSE` alone run nothing.
+- A PR's first failing host cancels the other host.
+- The nightly run also provisions Clang 23 (cached on macOS). It skips itself when `main` has not
+  changed since the last successful run.
+- The last job of every run records its wall time with `tools/ci/wall-time`: the job summary,
+  plus a `wall-time` artifact with each job and step. It warns when the tier is over budget
+  (PR 15 minutes, main 60, nightly 240).
+- A clean build takes about 20 seconds at `-j4`, so build outputs are not cached yet.
