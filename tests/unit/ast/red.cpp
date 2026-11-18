@@ -9,7 +9,7 @@ using ycxx::unit::check;
 
 int main() {
   Interners in;
-  QualType int_t = in.types.add<QualType>(seed("int"));
+  QualType int_t = in.intern_type(TBuiltin{Builtin::int_});
   ExprInfo rv{int_t, ValueCategory::prvalue, 0};
   ExprInfo lv{int_t, ValueCategory::lvalue, 0};
   EntityId f_e = in.entities.add<EntityId>(seed("f"));
@@ -19,7 +19,7 @@ int main() {
   //                                offsets: 0 1 2 3 4 5 6 7  8     9 10 11 12 13
   Builder b(in);
   NodeId x = b.add(DeclRef{lv, x_e}, 1);
-  NodeId one = b.add(Literal{rv, in.values.add<ConstId>(seed("1"))}, 1);
+  NodeId one = b.add(Literal{rv, in.intern_value(VInt{int_t, bits_of(std::int64_t{1})})}, 1);
   NodeId sum = b.add(Binary{rv, BinaryOp::add, {x, 0}, {one, 2}}, 3);
   NodeId f = b.add(DeclRef{lv, f_e}, 1);
   NodeId call = b.add(Call{rv, f_e, {f, 0}, b.list({{sum, 2}})}, 6);
@@ -61,7 +61,7 @@ int main() {
 
   // An absent child in a list is skipped by the walk and by descent.
   Builder b2(in);
-  NodeId lit = b2.add(Literal{rv, in.values.add<ConstId>(seed("1"))}, 1);
+  NodeId lit = b2.add(Literal{rv, in.intern_value(VInt{int_t, bits_of(std::int64_t{1})})}, 1);
   NodeId gap = b2.commit(b2.add(Compound{b2.list({{NodeId::none, 1}, {lit, 3}}), in.intern_seq<Cleanup>({})}, 5));
   u32 children = 0;
   Red(in.ast, gap).for_each_child([&](const Red&) { ++children; });
