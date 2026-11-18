@@ -44,6 +44,8 @@ public:
 class Files {
 public:
   explicit Files(Host& host) : host_(&host) {}
+  // Reads through another host from now on; the previous one.
+  Host* swap_host(Host& host) { return std::exchange(host_, &host); }
 
   FileId id(std::string_view path) {
     std::string key = normalize(path);

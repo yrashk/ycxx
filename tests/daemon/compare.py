@@ -117,7 +117,19 @@ def main():
             if want != got:
                 fail(f'edit to V={value}, -c: the daemon\'s object differs from a cold compile')
 
+        # A diagnostic in a header, after an edit that moves only its newlines: the same tokens and
+        # offsets, a different line (the position is rendered from the header as an input, #93).
+        (work / 'a' / 'w.h').write_text('/* a b */\n#warning x\n')
+        (work / 'a' / 'w.cpp').write_text('#include "w.h"\nint main() { return 0; }\n')
+        for text in ('/* a b */\n#warning x\n', '/* a\nb */\n#warning x\n', '/* a b */\n#warning x\n'):
+            (work / 'a' / 'w.h').write_text(text)
+            want = run(ycxx, ['-fsyntax-only', 'w.cpp'], work / 'a', cold)
+            got = run(ycxx, ['-fsyntax-only', 'w.cpp'], work / 'a', daemon)
+            if want != got:
+                fail(f'a header diagnostic after a newline-only edit: {got!r:.300} != cold {want!r:.300}')
+
         # An identical request at an unchanged revision executes nothing (#96's example).
+        build('a', daemon)
         build('a', daemon)
         status = subprocess.run([ycxx, 'ctl', 'status'], cwd=work, env=base, capture_output=True, text=True)
         fields = dict(line.split(': ', 1) for line in status.stdout.splitlines() if ': ' in line)
