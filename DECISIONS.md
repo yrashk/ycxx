@@ -378,6 +378,18 @@ project must survive any session ending.
      above, or for an escalation after Opus has demonstrably failed.
 6. **Design documents** live in `docs/design/` and are written before the code they govern. Once
    accepted, their conclusions are summarized in this file.
+7. **No follow-up is lost.** A follow-up is any work named but not done: a deferred review
+   finding, a "later" or "out of scope" note, a known limitation, a stand-in to replace, a bug
+   found in passing. Wherever one is written (a PR body or comment, a review, a handover, an
+   issue comment, a session report), it is routed at once:
+   - to an existing issue, with a comment there that states it and links back to where it came
+     from; or
+   - to a new issue with an `area:*` and a `kind:*` label, its milestone, a failing example where
+     there is one, the clauses by stable name, and a link back to its source.
+
+   Either way the source then links to that issue. A follow-up that lives only in a comment is a
+   defect. A handover, closing comment or PR description is incomplete until every follow-up in
+   it carries its issue link, and the coordinator does not merge a PR until it does.
 
 ## 7. Third-party libraries
 
