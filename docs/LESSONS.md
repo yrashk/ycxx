@@ -261,6 +261,23 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
     differently, which catches output ordered by handle.
   - Learned on #63.
 
+- **Exercise reuse through the real driver, with several translation units.** In each of #85's
+  three parts, the one review found an unsound reuse that `unit.pp` missed:
+  - a main file and a header shared a region;
+  - the include depth was not part of a region's value;
+  - an include guard's empty region dropped directives outside the group.
+  All three showed with `ycxx cxx -E a.cpp b.cpp`, whose TUs share one session. The unit test's
+  edit sequences varied the files, but not the roots, the depths or what lay outside a guard.
+  - Do: for a cache keyed by something less than all the inputs, list what the value also depends
+    on (root or not, depth, text outside a summarized part). Then write one multi-TU repro per
+    item, through the driver, before the review.
+  - Learned on #85.
+- **A spec-only test author keeps the oracles honest.** Asked for "a skipped group may hold an
+  unmatched `'`", #85's test author found that [lex.pptoken]/2 makes it ill-formed. GCC agrees,
+  and Clang, which ycxx had copied, does not.
+  - Do: brief the author with the clauses, not with the expected behaviour, and treat an
+    oracle-versus-draft disagreement it reports as a decision to make, not a test to drop.
+  - Learned on #85.
 - **An incremental-equals-cold check also catches values that depend on the session.** On #85,
   `unit.pp` compared a warm session's `Region` with a fresh one's after each edit. Five states
   differed, while every token, location and name matched. The difference was `Region::files`,

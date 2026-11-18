@@ -81,6 +81,9 @@ struct MacroDef {
   // relative to the name, but not where it is, so a region that uses it is reused wherever an
   // equal definition is in scope (its includer binds the location).
   Fp128 fp;
+  // The macros whose replacement the preprocessor computes ([cpp.predefined]): `__LINE__`,
+  // `__FILE__`, `__COUNTER__`, `__DATE__`, `__TIME__`.
+  enum class Dynamic : u8 { none, line, file, counter, date, time } dynamic = Dynamic::none;
 
   // [cpp.replace.general]/2: the same parameters and replacement list, whitespace separations
   // compared by presence.
@@ -101,6 +104,9 @@ struct MacroDef {
 enum class Ask : u8 {
   macro,    // a: name id; answer: the definition's fp, or zero if undefined
   once,     // a: FileId; answer: 1 if it was marked `#pragma once`
+  defined,  // a: name id; answer: 1 if it is a macro (`#ifdef`, `defined`)
+  counter,  // answer: the value of `__COUNTER__` at entry
+  time,     // answer: the fingerprint of `__DATE__` and `__TIME__`
   include,  // a: header spelling id (delimiters included); b: IncludeForm bits; c: includer FileId;
             // d: the includer's found directory; answer: the resolved file and directory, or zero
   content,  // a: FileId; answer: the content's fingerprint, or zero if missing
@@ -145,6 +151,10 @@ struct Diag {
   u32 offset = 0;
   lex::LexDiag kind{};
   std::array<u64, 2> args{};
+  // After a #line ([cpp.line]): the presumed line, and the presumed name (a `Spellings` id) if
+  // the #line gave one; 0 when there was none.
+  u32 presumed_line = 0;
+  std::optional<u32> presumed_name;
   bool operator==(const Diag&) const = default;
 };
 
@@ -179,8 +189,20 @@ struct FileRegion {
   std::vector<Question> trace;
   std::vector<MacroChange> delta;
   std::vector<FileId> once;  // files this region (or a child) marked `#pragma once`
+  u32 counter = 0;           // how many times it (or a child) used `__COUNTER__`
+  // [cpp.line]: from offset `at` of its file on, the presumed line is the physical one plus
+  // `delta`, and the presumed name `name` (a `Spellings` id) if it has one.
+  struct Line {
+    u32 at = 0;
+    std::int32_t delta = 0;
+    std::optional<u32> name;
+  };
+  std::vector<Line> lines;
   bool fatal = false;        // preprocessing stopped (a missing include)
   u32 depth = 1;             // the deepest nesting of files below it, itself included
+  // The include guard, when the file is one `#ifndef X` ... `#endif` group: included again where
+  // X is defined, it is empty.
+  std::optional<u32> guard;
 };
 
 // Where a root region's binding is in the TU: a file, its presumed name and the definition's

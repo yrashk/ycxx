@@ -8,7 +8,9 @@
 //   :region  FileRegion (one file occurrence), questions, macros, Region (the TU flattened)
 //   :unit    the preprocessor of one TU and the session's region cache
 //   :tu      flattening, phases 5–6, and `-E` output
-//   :system  the build's system include directories
+//   :system  the build's system include directories and ycxx's version
+//   :predefined  the predefined macros ([cpp.predefined], DECISIONS §1.5)
+//   :cond    #if expressions ([cpp.cond])
 //
 // `pp(file)` is an engine query over the main file's text. The files it includes and the
 // configuration are read through the process's session (`session()`) until the engine has inputs
@@ -24,6 +26,8 @@ export import :region;
 export import :unit;
 export import :tu;
 export import :system;
+export import :predefined;
+export import :cond;
 
 export namespace ycxx::pp {
 
@@ -144,8 +148,17 @@ Message message(Session& s, FileId file, std::string_view presumed, const Diag& 
   const Files::Content* c = s.files.content(file);
   std::vector<u32> starts = line_starts(c ? std::string_view(c->text) : std::string_view());
   auto at = std::ranges::upper_bound(starts, d.offset);
-  return Message{std::string(presumed), static_cast<u32>(at - starts.begin()), d.offset - *(at - 1) + 1,
-                 lex::message_of(d.kind).severity == lex::Severity::error, lex::render(d.kind, d.args)};
+  std::string text = lex::render(d.kind, d.args);
+  // #error and #warning say their line's text, a spelling of the session.
+  if (d.kind == lex::LexDiag::error_directive || d.kind == lex::LexDiag::warning_directive)
+    text = s.spellings.name(static_cast<u32>(d.args[0]));
+  u32 line = static_cast<u32>(at - starts.begin());
+  std::string name(presumed);
+  // [cpp.line]: the presumed line and name its region resolved.
+  if (d.presumed_line != 0) line = d.presumed_line;
+  if (d.presumed_name) name = s.spellings.name(*d.presumed_name);
+  return Message{std::move(name), line, d.offset - *(at - 1) + 1, lex::message_of(d.kind).severity == lex::Severity::error,
+                 std::move(text)};
 }
 
 std::pair<std::string, std::vector<Message>> preprocess_to_text(Session& s, std::string_view text, std::string_view path) {

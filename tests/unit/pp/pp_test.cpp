@@ -209,6 +209,56 @@ void reuse() {
   check(text(run(s, h, "five.cpp").region) == "int e = 4 ;", "a reused region's delta applies");
 }
 
+// Conditionals, the guard summary and the counter.
+void conditionals() {
+  MemHost h;
+  pp::Session s(h);
+  auto pre = [&](std::string src) {
+    h.files["main.cpp"] = std::move(src);
+    return run(s, h);
+  };
+  check(text(pre("#if 1 + 1 == 2 && defined(__cplusplus)\na\n#elif 1/0\nb\n#else\nc\n#endif\n").region) == "a", "#if");
+  check(text(pre("#if 0\n#bogus\n#if 1\nno\n#endif\n#elifdef __LINE__\nyes\n#endif\n").region) == "yes", "skipped groups");
+  check(kinds(pre("#if 0\n'x\n#endif\n")) == std::vector{lex::LexDiag::unterminated_char}, "lexed all the same");
+  check(kinds(pre("#if 1\n#else\n#else\n#endif\n#endif\n#if 1\n")) ==
+            std::vector{lex::LexDiag::cond_else_after_else, lex::LexDiag::cond_endif_without_if, lex::LexDiag::cond_unterminated},
+        "mismatched conditionals");
+  check(text(pre("#if -1 < 0u\nno\n#else\nyes\n#endif\n#if 0 && 1/0\n#endif\n").region) == "yes", "unsigned, short-circuit");
+  // A guarded header included again is an empty region with one question.
+  h.files["g.h"] = "// guard\n#ifndef G\n#define G\nint g;\n#endif\n";
+  pre("#include \"g.h\"\n");
+  auto before = s.stats;
+  auto twice = pre("#include \"g.h\"\n#include \"g.h\"\n");
+  check(text(twice.region) == "int g ;" && s.stats.computed == before.computed + 1, "a guarded header, read once");
+  // `#ifdef` asks whether, not what: a different definition of the name does not matter.
+  h.files["d.h"] = "#ifdef D\nint d;\n#endif\n";
+  pre("#define D 1\n#include \"d.h\"\n");
+  auto c = s.stats.computed;
+  check(text(pre("#define D 2\n#include \"d.h\"\n").region) == "int d ;" && s.stats.computed == c + 1, "defined(D) only");
+  // __COUNTER__ continues across a reused region.
+  h.files["c.h"] = "int a = __COUNTER__;\n";
+  check(text(pre("#include \"c.h\"\n#include \"c.h\"\nint b = __COUNTER__;\n").region) == "int a = 0 ; int a = 1 ; int b = 2 ;",
+        "the counter");
+  check(text(pre("int z = __COUNTER__;\n#include \"c.h\"\n").region) == "int z = 0 ; int a = 1 ;", "a region's counter question");
+  // Found by review: a directive outside the guarded group makes the file unguarded, and so does
+  // a diagnostic its skipping would repeat.
+  h.files["g1.h"] = "#ifndef G1\n#define G1\nint g1;\n#endif\n#define AFTER 42\n";
+  check(text(pre("#include \"g1.h\"\n#undef AFTER\n#include \"g1.h\"\nAFTER\n").region) == "int g1 ; 42", "not a guard");
+  h.files["g4.h"] = "#ifndef G4\n#define G4\n#endif extra\n";
+  check(kinds(pre("#include \"g4.h\"\n#include \"g4.h\"\n")) ==
+            std::vector{lex::LexDiag::extra_tokens, lex::LexDiag::extra_tokens},
+        "a guarded file that says something is read again");
+  // __LINE__: an argument's own line, or the `)` of the invocation whose replacement made it.
+  check(text(pre("#define F(x) x\n#define H(x) x __LINE__\nF(\n__LINE__\n) F(H(\n1\n)\n)\n").region) == "4 1 7",
+        "__LINE__ in arguments");
+  check(text(pre("#if (1, 2) == 2\nc\n#endif\n").region) == "c", "a comma in parentheses");
+  // #line
+  auto l = pre("#line 10 \"x.cpp\"\nint a = __LINE__; const char* f = __FILE__;\n#line 1\n#error e\n");
+  check(text(l.region) == "int a = 10 ; const char * f = \"x.cpp\" ;", "#line");
+  pp::Message m = pp::message(s, s.files.id("main.cpp"), "main.cpp", l.diags.at(0));
+  check(l.diags.size() == 1 && m.line == 1 && m.file == "x.cpp", "a diagnostic's presumed location");
+}
+
 // What a region's value depends on beyond its trace: whether it is a main file, and how deep it
 // is nested (both found by review).
 void roots_and_depth() {
@@ -251,6 +301,11 @@ void incremental_equals_cold() {
       {{"main.cpp", "#define F(x) [x A]\n#include \"a.h\"\nF(B) G(1)\n"}, {"a.h", "#define G(y) F(y) #y\n#define A a\n"}},
       {{"a.h", "#define G(y) F(y)##y\n#define A b\n"}},
       {{"main.cpp", "#define F(...) <__VA_OPT__(x) __VA_ARGS__>\n#include \"a.h\"\nF() F(1) G(2)\n"}},
+      {{"main.cpp", "#include \"g.h\"\n#include \"g.h\"\n#define G2\n#include \"g.h\"\nint m = __COUNTER__;\n"},
+       {"g.h", "#ifndef G2\n#define G2\nint g = __COUNTER__;\n#endif\n"}},
+      {{"g.h", "#ifndef G3\n#define G3\nint g = __COUNTER__ + __LINE__;\n#endif\n#if defined(G2) && __has_include(\"c.h\")\nint c;\n#endif\n"}},
+      {{"c.h", "int c2;\n"}},
+      {{"main.cpp", "#define G3\n#include \"g.h\"\n#undef G3\n#include \"g.h\"\n#line 7 \"n.cpp\"\nconst char* f = __FILE__;\n"}},
   };
   MemHost warm_host;
   pp::Session warm(warm_host);
@@ -282,6 +337,7 @@ int main() {
   includes();
   object_like();
   function_like();
+  conditionals();
   traces();
   reuse();
   roots_and_depth();
