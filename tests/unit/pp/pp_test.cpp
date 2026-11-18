@@ -2,6 +2,7 @@
 // reuse of regions whose traces verify, and incremental equals cold over edit sequences
 // (DECISIONS §4.2). `-E` output is compared with Clang's by the preprocess tests (tests/own/pp).
 import std;
+import ycxx.engine;
 import ycxx.pp;
 import ycxx.unit;
 
@@ -331,6 +332,48 @@ void spacing() {
   check(separate("", "1", "+") && separate(".", ".", ".") && !separate("", "1", "'2'"), "Clang's extra rules");
 }
 
+// `pp` on a pool (#137): units of one configuration, preprocessed by several workers at once
+// through one process session, equal the same units preprocessed one at a time.
+using u32 = std::uint32_t;
+struct AllPp {
+  using Key = u32;  // how many units
+  using Value = std::vector<Fp128>;
+  static engine::query_task<Value> run(engine::Ctx& cx, u32 n) {
+    std::vector<pp::FileId> files;
+    for (u32 i = 0; i < n; ++i) files.push_back(pp::FileId{i});
+    const auto& regions = co_await cx.par_map<pp::Pp>(files);
+    Value out;
+    for (const auto& r : regions) out.push_back(fingerprint(r.get()));
+    co_return out;
+  }
+};
+
+void pool() {
+  namespace fs = std::filesystem;
+  fs::path dir = fs::temp_directory_path() / std::format("ycxx-pp-pool-{}", std::random_device{}());
+  fs::create_directories(dir);
+  auto write = [&](std::string_view name, std::string_view text) { std::ofstream(dir / name) << text; };
+  write("shared.h", "#pragma once\n#define TWICE(x) ((x) + (x))\n#define SHARED TWICE(21)\nint shared_fn(int);\n");
+  for (int k = 0; k < 3; ++k) write(std::format("own{}.h", k), std::format("#include \"shared.h\"\n#define OWN{} {}\n", k, k));
+  constexpr u32 n = 48;
+  auto preprocess_all = [&](engine::Db& db) {
+    db.set_provider<pp::FileContent>(pp::read_disk);
+    for (u32 i = 0; i < n; ++i) {
+      db.set<pp::SourceOf>(pp::FileId{i}, {std::format("u{}.cpp", i), dir.native_encoded_string(), {}});
+      db.set<pp::FileText>(pp::FileId{i}, std::format("#include \"own{0}.h\"\n#include \"shared.h\"\nint f{1}() {{ return SHARED + OWN{0} + {1}; }}\n", i % 3, i));
+    }
+    return db.get<AllPp>(n);
+  };
+  engine::Db sequential;
+  const std::vector<Fp128> want = preprocess_all(sequential);
+  for (int round = 0; round < 3; ++round) {
+    engine::Pool workers(8);
+    engine::Db parallel(workers);
+    check(preprocess_all(parallel) == want, "pp on 8 workers equals pp on one");
+  }
+  fs::remove_all(dir);
+}
+
 }  // namespace
 
 int main() {
@@ -343,5 +386,6 @@ int main() {
   roots_and_depth();
   incremental_equals_cold();
   spacing();
+  pool();
   return unit::result("unit.pp");
 }

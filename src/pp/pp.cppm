@@ -33,15 +33,15 @@ export import :cond;
 
 export namespace ycxx::pp {
 
-// The process keeps one session per configuration. `session()` is the one the driver configured
-// last, which `-E` uses.
+// The process keeps one session per configuration, shared by every thread under its `mutex`.
+// `session()` is the one configured last (single-threaded callers and tests).
 Session& session();
-// Selects a new session for `cfg`, reading the disk.
-void configure(Config cfg);
-// The daemon's: files are read through `host` (its file table). A session with the same host and
-// configuration is kept, with its region cache, and starts a new generation of file contents
-// (the traces verify what changed); otherwise a new session starts.
-void configure(Config cfg, Host& host);
+// The session of `cfg`, reading the disk outside `Pp`.
+Session& configure(Config cfg);
+// The session of `cfg`, reading through `host` outside `Pp` (the daemon's file table): kept with
+// its region cache and spellings, starting a new generation of file contents (the traces verify
+// what changed).
+Session& configure(Config cfg, Host& host);
 
 // An absolute, lexically normal path, interned for the process. Its fingerprint is its spelling,
 // never its number, so nothing that depends on the order paths were first seen reaches a key's
@@ -149,6 +149,7 @@ struct Pp {
 namespace ycxx::pp {
 
 struct Process {
+  std::mutex m;  // the map and `current`; each session has its own mutex
   DiskHost disk;
   // One session per configuration fingerprint, each with the host it reads through outside `Pp`.
   struct Configured {
@@ -170,6 +171,7 @@ Process& process() {
 // The session of a configuration, created reading the disk if there is none.
 Session& session_for(const Config& cfg) {
   Process& p = process();
+  std::lock_guard g(p.m);
   auto& c = p.slot(cfg);
   if (!c.session) {
     c.session = std::make_unique<Session>(p.disk, cfg);
@@ -225,29 +227,38 @@ class HostScope {
 export namespace ycxx::pp {
 
 Session& session() {
-  Process& p = process();
-  if (!p.current) p.current = &session_for(Config{});
-  return *p.current;
-}
-
-void configure(Config cfg) {
-  Process& p = process();
-  auto& c = p.slot(cfg);
-  c.session = std::make_unique<Session>(p.disk, std::move(cfg));
-  c.host = &p.disk;
-  p.current = c.session.get();
-}
-
-void configure(Config cfg, Host& host) {
-  Process& p = process();
-  auto& c = p.slot(cfg);
-  if (c.session && c.host == &host) {
-    c.session->files.new_generation();
-  } else {
-    c.session = std::make_unique<Session>(host, std::move(cfg));
-    c.host = &host;
+  Session* current;
+  {
+    Process& p = process();
+    std::lock_guard g(p.m);
+    current = p.current;
   }
+  if (!current) {
+    current = &session_for(Config{});
+    Process& p = process();
+    std::lock_guard g(p.m);
+    if (!p.current) p.current = current;
+  }
+  return *current;
+}
+
+Session& configure(Config cfg) { return configure(std::move(cfg), process().disk); }
+
+Session& configure(Config cfg, Host& host) {
+  Process& p = process();
+  std::lock_guard g(p.m);
+  auto& c = p.slot(cfg);
+  if (!c.session) {
+    c.session = std::make_unique<Session>(host, std::move(cfg));
+  } else {
+    // Never a new session for an existing configuration: `Pp`'s regions hold its spellings.
+    std::lock_guard s(c.session->mutex);
+    if (c.host != &host) c.session->files.swap_host(host);
+    c.session->files.new_generation();
+  }
+  c.host = &host;
   p.current = c.session.get();
+  return *c.session;
 }
 
 PathId path_id(std::string_view absolute) {
@@ -278,7 +289,11 @@ Preprocessed preprocess(Session& s, std::string_view text, std::string_view path
   return to_region(s, flatten(s, t));
 }
 
-Preprocessed preprocess(std::string_view text, std::string_view path) { return preprocess(session(), text, path); }
+Preprocessed preprocess(std::string_view text, std::string_view path) {
+  Session& s = session();
+  std::lock_guard g(s.mutex);
+  return preprocess(s, text, path);
+}
 
 Message message(Session& s, FileId file, std::string_view presumed, const Diag& d) {
   const Files::Content* c = s.files.content(file);
@@ -346,6 +361,7 @@ engine::query_task<Region> Pp::run(engine::Ctx& cx, FileId file) {
   Session& s = session_for(src.config);
   EngineHost host(cx, src.cwd);
   Preprocessed p = [&] {
+    std::lock_guard g(s.mutex);
     HostScope scope(s.files, host);
     return preprocess(s, cx.fetch<FileText>(file), src.path);
   }();
