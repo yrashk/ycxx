@@ -59,18 +59,20 @@ in [GitHub issues](https://github.com/yrashk/ycxx/issues) and the
   - `#if` and the other conditionals, `#line`, `#error`, `#warning`, `_Pragma`, and the
     predefined macros (`__ycxx__`, the target's, `__LINE__`, `__FILE__`, `__COUNTER__`, …);
   - `ycxx cxx -E` prints what Clang's `-E` does.
-- A resident daemon, opt-in (2026-11-18): with `YCXX_DAEMON=1`, `ycxx cxx` sends its command
-  line to a per-project `ycxx daemon`, starting one if needed. The daemon watches the files it
-  has read (FSEvents on macOS, inotify on Linux) and keeps one engine session between commands:
-  a repeated build re-runs nothing, and an edit re-runs only what read the changed file, through
-  code generation and the link (checked against a cold build by the `.incr` tests). Its answers
-  are byte for byte those of an in-process run, which is also the fallback on any failure.
-  `ycxx ctl status` and `ycxx ctl shutdown` talk to it.
+- A resident daemon, by default: `ycxx cxx` sends its command line to a per-project
+  `ycxx daemon`, starting one if needed (`YCXX_NO_DAEMON=1` or `--no-daemon` runs in-process).
+  The daemon watches the files it has read (FSEvents on macOS, inotify on Linux) and keeps one
+  engine session between commands: a repeated build re-runs nothing, and an edit re-runs only
+  what read the changed file, through code generation and the link (checked against a cold build
+  by the `.incr` tests). It serves concurrent requests at once (`make -j`), on a worker pool
+  (`YCXX_THREADS`); an edit that lands during a build restarts it where it stopped. Its answers
+  are byte for byte those of an in-process run, at any thread count, and an in-process run is
+  also the fallback on any failure. `ycxx ctl status` and `ycxx ctl shutdown` talk to it.
 - A language server (2026-11-18): an editor that runs `ycxx lsp` gets ycxx's diagnostics for
   open files on open, change and save, through the daemon. Unsaved text, in the file or in a
   header it includes, reaches the diagnostics and never a build. A file is checked with the
-  command line of the last `ycxx cxx` that built it through the daemon (with `YCXX_DAEMON=1`),
-  else alone in its directory. Not yet: go-to-definition (#170) and `compile_commands.json`
+  command line of the last `ycxx cxx` that built it through the daemon, else alone in its
+  directory. Not yet: go-to-definition (#170) and `compile_commands.json`
   (#167).
 - The acceptance tests in `tests/own/slice` run with ycxx as the compiler in CI, and every
   [draft example](tests/draft) is checked against Clang and GCC.
@@ -89,17 +91,11 @@ build/bin/ycxx cxx hello.cpp -o hello && ./hello
 - Exceptions.
 - The standard library.
 - Optimization (`-O`).
-- The resident daemon as the default, with concurrent requests
-  ([#137](https://github.com/yrashk/ycxx/issues/137),
-  [#139](https://github.com/yrashk/ycxx/issues/139)). Without `YCXX_DAEMON=1`, `ycxx cxx` runs
-  in-process, once per invocation, and the daemon serves one request at a time.
 - Linux and x86-64.
 
 Nothing beyond the subset above compiles, so neither real programs nor libycxx do yet.
 
 **In progress**, one slice per epic:
-- the resident daemon: concurrent requests, and making it the default
-  ([#84](https://github.com/yrashk/ycxx/issues/84));
 - classes and the object model ([#86](https://github.com/yrashk/ycxx/issues/86));
 - templates and overload resolution: function, class and variable templates and their
   specializations work; parameter packs and concepts are next

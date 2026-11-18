@@ -20,11 +20,11 @@ int control(std::span<const std::string_view> args);
 namespace ycxx::client {
 namespace {
 
-// Whether `cxx` uses the daemon. Off by default until requests run concurrently in it (#15, #63):
-// a build's parallel compiles would otherwise queue behind one another. `YCXX_DAEMON=1` or
-// `--daemon` turn it on, `YCXX_DAEMON=require` or `--daemon=require` (the tests' hook) make a
-// failure to use it an error instead of an in-process run, and `YCXX_NO_DAEMON=1` or `--no-daemon`
-// turn it off whatever else says.
+// Whether `cxx` uses the daemon: by default, since requests run concurrently in it (#139), with
+// an in-process run as the fallback on any failure (daemon design §7.2). `YCXX_DAEMON=0` or `off`
+// turn it off, `YCXX_DAEMON=require` or `--daemon=require` (the tests' hook) make a failure to use
+// it an error instead of an in-process run, and `YCXX_NO_DAEMON=1` or `--no-daemon` turn it off
+// whatever else says.
 enum class Use { off, on, require };
 
 Use use_from_environment() {
@@ -32,8 +32,8 @@ Use use_from_environment() {
   const char* e = std::getenv("YCXX_DAEMON");
   std::string_view v = e ? e : "";
   if (v == "require") return Use::require;
-  if (v == "1" || v == "on") return Use::on;
-  return Use::off;
+  if (v == "0" || v == "off") return Use::off;
+  return Use::on;
 }
 
 // Splits a response file's text into arguments: whitespace separates them, and quotes and

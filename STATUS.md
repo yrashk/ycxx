@@ -542,9 +542,11 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
 
 ## The resident daemon (#96, #97, 2026-11-18)
 
-`ycxx daemon` serves `ycxx cxx`, per `docs/design/daemon.md`. It is opt-in, with `YCXX_DAEMON=1`
-or `--daemon`: requests run one at a time in it until #120 (#15, #95). Without it, `ycxx cxx` runs
-the same handler in-process.
+`ycxx daemon` serves `ycxx cxx`, per `docs/design/daemon.md`, by default (#139):
+`YCXX_NO_DAEMON=1`, `--no-daemon` or `YCXX_DAEMON=0` turn it off, and any failure to use it falls
+back to running the same handler in-process. Requests run in it at once. The test driver runs
+ycxx in-process unless `YCXX_TEST_DAEMON=1`; the daemon's own tests and the `.incr` suite start
+private daemons.
 
 - `ycxx.compile` (`src/client/compile.cppm`): the c++-compatible request handler, which was the
   body of `client::cxx`. It takes argv, cwd, the environment table and the client's clock. It
