@@ -96,9 +96,19 @@ miscompiles it (DECISIONS §3.2). Each is removed once ycxx compiles itself.
   - Fix: belongs in GCC.
 - **`contract_assert` inside a lambda takes a local `bool`** (`src/ast` interner, builder,
   compaction).
-  - Cause: GCC 16.2 evaluated such predicates to false, against values that were right when
-    evaluated into a local. It showed up in generic lambdas inside module templates.
-  - Not yet reduced to a standalone repro; two attempts did not reproduce it.
+  - Cause: in a contract predicate inside a lambda, GCC 16.2 evaluates `this` to the closure
+    object's address instead of the captured object pointer. A predicate that names a member reads
+    garbage. A local `bool` evaluated in the lambda body sees the right `this`. Plain TU, any
+    lambda (generic or not, `[this]` or `[&]`), `contract_assert` and the lambda's own `pre`,
+    -O0 and -O2; modules and reflection play no part:
+
+        struct S { int x = 42;
+          void f() { [this] { contract_assert(x == 42); }(); } };  // violated
+        int main() { S{}.f(); }
+
+    `g++-16 -std=c++26 -fcontracts r.cpp && ./a.out` reports a violation and aborts; expected:
+    exits 0.
+  - Fix: belongs in GCC. Restore the plain form when ycxx compiles itself.
 - **The std module's BMI must be built with `-freflection -fcontracts`.**
   - `CMakeLists.txt` adds the flags to libycxx's `ycxx_modules` target.
   - Without them, `std::meta` is empty. An importer whose `-freflection` does not match the
