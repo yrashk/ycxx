@@ -74,6 +74,10 @@ struct Declarator {
   // is then the element type.
   bool unknown_bound = false;
   bool function = false;  // it has a parameter list of its own, not a function type from a name
+  // `f<args>`: a declarator-id that is a template-id, which an explicit specialization declares
+  // ([temp.expl.spec]/1); `f<>` has none.
+  std::optional<std::vector<ast::TemplateArg>> template_args;
+  u32 template_args_at = 0;
   // A GNU asm label, `__asm("_fopen")`: the symbol as written (docs/EXTENSIONS.md); empty if none.
   std::string asm_label;
   bool ok = true;
@@ -461,6 +465,8 @@ public:
     NameId qualifier{};
     u32 qualifier_at = 0;
     sema::Sema::Scope scope{};
+    std::optional<std::vector<ast::TemplateArg>> template_args;
+    u32 template_args_at = 0;
     std::vector<Suffix> suffixes;
   };
 
@@ -581,6 +587,12 @@ public:
       l.named = true;
       l.name_at = pos();
       bump();
+      // A template-id: the declarator of an explicit specialization ([temp.expl.spec]).
+      if (!abstract && is(Tk::less) && template_ids_in_declarators && s_->is_template_name(l.name)) {
+        l.template_args_at = pos();
+        l.template_args = template_argument_list();
+        if (!l.template_args) ok = false;
+      }
       skip_attributes();  // appertaining to the declarator-id ([dcl.meaning.general]/1)
     } else if (is(Tk::l_paren) && (kind(1) == Tk::star || kind(1) == Tk::amp || kind(1) == Tk::ampamp ||
                                    kind(1) == Tk::l_paren || kind(1) == Tk::identifier)) {
@@ -741,6 +753,8 @@ public:
   // Called once a qualified declarator-id is read, before its parameters, so they are looked up
   // in the scope it names ([basic.scope.namespace], [class.mfct]).
   std::function<void(const sema::Sema::Scope&)> qualified_hook;
+  // In an explicit specialization, a declarator-id may be a template-id ([temp.expl.spec]/1).
+  bool template_ids_in_declarators = false;
 
   // Whether the `(` here begins a parameter-declaration-clause rather than an initializer
   // ([dcl.ambig.res]: what can be a declaration is one).
@@ -815,6 +829,8 @@ public:
     d.qualifier = l.qualifier;
     d.qualifier_at = l.qualifier_at;
     d.scope = l.scope;
+    d.template_args = l.template_args;
+    d.template_args_at = l.template_args_at;
     return t;
   }
 
@@ -1533,6 +1549,15 @@ public:
     NameId n = name_of(tok());
     bump();
     if (is(Tk::less)) {
+      // `N::v<args>`: a variable template of the namespace ([temp.names]/3).
+      if (s->ns)
+        if (auto v = s_->namespace_template(*s->ns, n, ast::DeclKind::variable)) {
+          auto args = template_argument_list();
+          if (!args) return {NodeId::none, begin, pos()};
+          if (std::ranges::any_of(*args, [&](const ast::TemplateArg& a) { return s_->dependent(a); }))
+            return s_->dependent_node({}, begin, pos());
+          return s_->variable_template_id(*v, *args, begin, pos());
+        }
       Ex r = s_->scope_expr(*s, n, begin, name_at, pos());
       if (r.ok() && s_->types().is(r.type(), Builtin::overload_set)) {
         s_->diag(pos(), Diag::not_supported, Tk::less);  // qualified template-ids (#88)

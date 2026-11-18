@@ -69,6 +69,10 @@ public:
   // what fails because of it says nothing more.
   virtual bool instantiation_gave_up() { return false; }
   virtual std::vector<ast::DeclSema> members_at_instantiation(EntityId /*ns*/, NameId) { return {}; }
+  // The type of variable template specialization `v` at the current point when it is not the
+  // template's with the arguments substituted: an explicit specialization's, or a partial
+  // specialization's that it is instantiated from ([temp.expl.spec], [temp.spec.partial]).
+  virtual std::optional<QualType> specialization_type(EntityId /*v*/) { return std::nullopt; }
   virtual ~Questions() = default;
 };
 
@@ -128,6 +132,8 @@ inline constexpr u16 constructor = 512;
 inline constexpr u16 destructor = 1024;
 inline constexpr u16 implicit = 2048;  // an implicitly declared special member ([special])
 inline constexpr u16 template_ = 4096;  // a template ([temp.pre]); its head is `template_params`
+inline constexpr u16 specialization = 8192;  // an explicit specialization ([temp.expl.spec])
+inline constexpr u16 partial = 16384;  // a partial specialization ([temp.spec.partial]), with `template_`
 }
 
 // What a cell demands of the program besides its value (query-engine.md §B1.4): a function
@@ -261,9 +267,25 @@ public:
     block_types_.push_back({depth, name, type});
   }
 
+  // Whether `name` is a member of the class whose member is being analysed, which hides what
+  // the enclosing namespaces declare ([basic.scope.class], [basic.lookup.unqual]).
+  bool names_member(NameId name) {
+    if (current_class == EntityId::none) return false;
+    if (const ClassRec* r = class_rec(current_class))
+      return std::ranges::any_of(r->fields, [&](const FieldRec& f) { return f.name == name; }) ||
+             std::ranges::any_of(r->members, [&](const MemberDeclRec& m) { return m.name == name; });
+    return q_->earlier_member(name).has_value();
+  }
+
   // The class template unqualified lookup finds for `name`, which a `<` after it begins the
   // arguments of ([temp.names]/3); none if it finds anything else.
-  std::optional<ast::DeclSema> class_template(NameId name) {
+  std::optional<ast::DeclSema> class_template(NameId name) { return named_template(name, ast::DeclKind::class_); }
+  // The variable template unqualified lookup finds for `name` ([temp.pre]/1), likewise.
+  std::optional<ast::DeclSema> variable_template(NameId name) { return named_template(name, ast::DeclKind::variable); }
+  // The template of kind `kind` unqualified lookup finds for `name`, with the default arguments of
+  // every earlier declaration of it ([temp.param]/12).
+  std::optional<ast::DeclSema> named_template(NameId name, ast::DeclKind kind) {
+    if (names_member(name)) return std::nullopt;
     for (auto s = scopes_.rbegin(); s != scopes_.rend(); ++s)
       for (auto p = s->rbegin(); p != s->rend(); ++p)
         if (p->first == name) return std::nullopt;
@@ -273,7 +295,7 @@ public:
     for (auto u = block_usings_.rbegin(); u != block_usings_.rend() && !found; ++u)
       if (u->name == name)
         for (const ast::DeclSema& d : u->decls)
-          if (d.kind == ast::DeclKind::class_ && (d.flags & decl_flag::template_)) found = d;
+          if (d.kind == kind && (d.flags & decl_flag::template_)) found = d;
     for (auto p = own.rbegin(); p != own.rend() && !found; ++p)
       if (p->name == name) found = p->sema;
     std::vector<ast::DeclSema> decls;
@@ -282,8 +304,7 @@ public:
       if (s.entity != EntityId::none && !is_special(s)) decls.push_back(s);
     }
     if (!found && !decls.empty()) found = decls.back();
-    if (!found || found->kind != ast::DeclKind::class_ || !(found->flags & decl_flag::template_)) return std::nullopt;
-    // Default arguments from every earlier declaration of the template ([temp.param]/12).
+    if (!found || found->kind != kind || !(found->flags & decl_flag::template_)) return std::nullopt;
     std::vector<ast::TemplateParamSema> params = ins().seqs.elements(found->template_params);
     bool merged = false;
     for (const ast::DeclSema& d : decls) {
@@ -302,8 +323,12 @@ public:
 
   // The class template named `name` that is a member of namespace `ns` ([namespace.qual]).
   std::optional<ast::DeclSema> namespace_class_template(EntityId ns, NameId name) {
+    return namespace_template(ns, name, ast::DeclKind::class_);
+  }
+  // The template of kind `kind` named `name` that is a member of namespace `ns`.
+  std::optional<ast::DeclSema> namespace_template(EntityId ns, NameId name, ast::DeclKind kind) {
     for (const ast::DeclSema& d : q_->namespace_members(ns, name))
-      if (d.kind == ast::DeclKind::class_ && (d.flags & decl_flag::template_)) return d;
+      if (d.kind == kind && (d.flags & decl_flag::template_)) return d;
     return std::nullopt;
   }
 
@@ -314,9 +339,44 @@ public:
     return templates().specialize_class(templ, args);
   }
 
-  // `X<args>` naming a class template specialization ([temp.names], [temp.arg]): each argument of
-  // its parameter's kind, values converted to the parameter's type, defaults for the rest.
+  // `X<args>` naming a class template specialization ([temp.names], [temp.arg]).
   std::optional<QualType> class_template_id(const ast::DeclSema& tmpl, std::span<const TemplateArg> args, u32 at) {
+    auto full = template_arguments(tmpl, args, at);
+    if (!full) return std::nullopt;
+    return types().class_type(class_specialization(tmpl.entity, *full));
+  }
+
+  // `v<args>` naming a variable template specialization ([temp.pre], [temp.inst]/7): an lvalue of
+  // the specialization, of the template's type with the arguments substituted. Its entity is the
+  // template and the canonical arguments (§B1.5), as a function template specialization's is.
+  Ex variable_template_id(const ast::DeclSema& tmpl, std::span<const TemplateArg> args, u32 begin, u32 end) {
+    auto full = template_arguments(tmpl, args, begin);
+    if (!full) return {NodeId::none, begin, end};
+    std::vector<ast::TemplateParamSema> params = ins().seqs.elements(tmpl.template_params);
+    auto t = templates().substitute(tmpl.type, Bindings::of(params.empty() ? 0 : params[0].depth, *full));
+    const EntityRec& r = w_->entities.rec(tmpl.entity);
+    if (!t) {
+      diag(begin, Diag::template_args_mismatch, r.name);
+      return {NodeId::none, begin, end};
+    }
+    EntityId spec = variable_specialization(tmpl.entity, *full);
+    if (auto st = q_->specialization_type(spec)) t = *st;
+    demands.push_back({spec, ast::Loc{item_, loc_base_ + begin}});
+    ExprInfo info{types().referee(*t), ValueCategory::lvalue, 0};
+    return node(ast::DeclRef{info, spec}, begin, end, info);
+  }
+  // The specialization of variable template `templ` for `args` ([temp.spec.general]).
+  EntityId variable_specialization(EntityId templ, std::span<const TemplateArg> args) {
+    const EntityRec& t = w_->entities.rec(templ);
+    EntityRec r{EntityKind::variable, t.name, {}, t.lang, t.linkage, t.first, t.scope};
+    r.templ = templ;
+    r.args.assign(args.begin(), args.end());
+    return w_->entities.entity(std::move(r));
+  }
+
+  // The arguments of a template-id for `tmpl` ([temp.arg]): each of its parameter's kind, values
+  // converted to the parameter's type, defaults for the rest; none, diagnosed, if they do not fit.
+  std::optional<std::vector<TemplateArg>> template_arguments(const ast::DeclSema& tmpl, std::span<const TemplateArg> args, u32 at) {
     std::vector<ast::TemplateParamSema> params = ins().seqs.elements(tmpl.template_params);
     NameId name = w_->entities.rec(tmpl.entity).name;
     if (args.size() > params.size()) {
@@ -345,11 +405,8 @@ public:
       }
     }
     auto full = t.complete(tmpl, params, out);
-    if (!full) {
-      diag(at, Diag::template_args_mismatch, name);
-      return std::nullopt;
-    }
-    return types().class_type(class_specialization(tmpl.entity, *full));
+    if (!full) diag(at, Diag::template_args_mismatch, name);
+    return full;
   }
 
   // `using enum E;` in a block ([enum.udecl]): E's enumerators are found in this scope.
@@ -1000,7 +1057,7 @@ public:
     for (auto s = scopes_.rbegin(); s != scopes_.rend(); ++s)
       for (auto p = s->rbegin(); p != s->rend(); ++p)
         if (p->first == name) return false;
-    if (template_param(name)) return false;
+    if (template_param(name) || names_member(name)) return false;
     for (const BlockUsing& u : block_usings_)
       if (u.name == name) return std::ranges::any_of(u.decls, [](const ast::DeclSema& d) { return (d.flags & decl_flag::template_) != 0; });
     for (const OwnDecl& o : own)
@@ -1013,6 +1070,7 @@ public:
   // A template-id naming a function template ([temp.names]): the overload set of `name`, with its
   // explicitly specified template arguments ([temp.arg.explicit]).
   Ex template_id(NameId name, std::vector<TemplateArg> args, u32 begin, u32 end) {
+    if (auto v = variable_template(name)) return variable_template_id(*v, args, begin, end);
     Ex r = name_expr(name, begin, end);
     if (!r.ok()) return r;
     if (!types().is(r.type(), Builtin::overload_set)) {

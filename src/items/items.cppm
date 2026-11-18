@@ -50,6 +50,7 @@ inline constexpr u8 unknown = 8;     // a using-declaration's name: unknown unti
 inline constexpr u8 definition = 16; // the declaration is a definition
 inline constexpr u8 friend_ = 32;    // a friend declaration: indexed apart ([class.friend])
 inline constexpr u8 enumerator = 64; // an unscoped enumerator, declared into the enclosing scope
+inline constexpr u8 specialization = 128;  // an explicit specialization's: no name lookup finds ([temp.expl.spec])
 }  // namespace name_flag
 
 // One name an item declares, in token order; its ordinal is its `DeclOrd` number (ast.md §4.1).
@@ -77,6 +78,7 @@ struct Item {
   u32 brace_begin = 0;
   u32 brace_end = 0;
   u32 template_depth = 0;  // the number of template-heads
+  bool specialization = false;  // `template<>`: an explicit specialization ([temp.expl.spec])
   // The spelled nested-name-specifier of the first declarator (`N::S::` in `void N::S::f()`), as
   // region tokens [qualifier_begin, qualifier_end).
   u32 qualifier_begin = 0;
@@ -228,7 +230,11 @@ private:
   // The name a class-head declares: the last identifier outside template arguments, attributes
   // and `final` ([class.pre]); empty for an unnamed class.
   std::string_view class_name(u32 key, u32 end) const {
-    std::string_view name;
+    u32 at = class_name_token(key, end);
+    return at == 0 ? std::string_view{} : r_.name(r_.tokens[at]);
+  }
+  u32 class_name_token(u32 key, u32 end) const {
+    u32 at = 0;
     int angle = 0;
     for (u32 n = key + 1; n < end; ++n) {
       Tk t = kind(n);
@@ -237,9 +243,19 @@ private:
       else if (t == Tk::greater) --angle;
       else if (t == Tk::greatergreater) angle -= 2;
       else if (t == Tk::colon && angle <= 0) break;
-      else if (t == Tk::identifier && angle <= 0 && !is_name(n, "final")) name = r_.name(r_.tokens[n]);
+      else if (t == Tk::identifier && angle <= 0 && !is_name(n, "final")) at = n;
     }
-    return name;
+    return at;
+  }
+  // The scope a class's members are in: its name, and the template arguments of a specialization
+  // (`X<T*>`), so a partial or explicit specialization's members are not its template's.
+  std::string class_scope(u32 key, u32 end) const {
+    u32 at = class_name_token(key, end);
+    if (at == 0) return "(anonymous)";
+    std::string r(r_.name(r_.tokens[at]));
+    if (kind(at + 1) == Tk::less)
+      for (u32 n = at + 1, close = match_angle(at + 1); n < close && n < end; ++n) r += r_.spelling(r_.tokens[n]);
+    return r;
   }
 
   const pp::Region& r_;
@@ -313,10 +329,12 @@ u32 Splitter::item(u32 parent, const std::string& scope) {
     at(k).end = i_ = j + 2;
     return k;
   }
-  // Template heads.
+  // Template heads; `template<>` begins an explicit specialization, which is no template
+  // ([temp.expl.spec]/1).
   while (kind(j) == Tk::kw_template && kind(j + 1) == Tk::less) {
+    if (kind(j + 2) != Tk::greater) ++at(k).template_depth;
+    else at(k).specialization = true;
     j = match_angle(j + 1);
-    ++at(k).template_depth;
   }
   i_ = j;
   general(k);
@@ -462,9 +480,8 @@ void Splitter::general(u32 k) {
           j = at(k).brace_end = match(j);
         } else {
           std::string inner = at(k).scope;
-          std::string_view name = class_name(class_key, j);
           if (!inner.empty()) inner += "::";
-          inner += name.empty() ? std::string_view("(anonymous)") : name;
+          inner += class_scope(class_key, j);
           j = nested(k, j, inner);
         }
         class_key = none;
@@ -543,6 +560,9 @@ private:
   void add(u32 k, std::string n, u32 at, u8 flags) {
     Item& it = out_.items[k];
     if (it.template_depth > 0 && (flags & name_flag::enumerator) == 0) flags |= name_flag::template_;
+    // `template<…> class-key X<args>`, `template<…> T v<args>`: a partial specialization's name.
+    if (it.specialization || (it.template_depth > 0 && kind(at + 1) == Tk::less && !n.starts_with("operator")))
+      flags |= name_flag::specialization;
     it.names.push_back({std::move(n), at - it.begin, static_cast<u32>(it.names.size()), flags});
   }
 

@@ -508,12 +508,8 @@ draft/temp/temp.dep.type-3.accept.cpp 'template' not supported yet
 draft/temp/temp.dep.type-4.reject.cpp errors elsewhere: 'struct' not supported yet
 draft/temp/temp.dep.type-5.reject.cpp errors elsewhere: 'struct' not supported yet
 draft/temp/temp.dep.type-6.accept.cpp 'template' not supported yet
-draft/temp/temp.expl.spec-1.accept.cpp 'template' not supported yet
-draft/temp/temp.expl.spec-2.reject.cpp errors elsewhere: 'template' not supported yet
 draft/temp/temp.expl.spec-3.reject.cpp errors elsewhere: 'template' not supported yet
 draft/temp/temp.expl.spec-4.reject.cpp errors elsewhere: 'class' not supported yet
-draft/temp/temp.expl.spec-5.reject.cpp errors elsewhere: 'template' not supported yet
-draft/temp/temp.expl.spec-6.accept.cpp 'template' not supported yet
 draft/temp/temp.expl.spec-7.accept.cpp 'template' not supported yet
 draft/temp/temp.expl.spec-8.accept.cpp 'template' not supported yet
 draft/temp/temp.expl.spec-9.reject.cpp errors elsewhere: 'template' not supported yet
@@ -568,7 +564,6 @@ draft/temp/temp.param-3.accept.cpp 'template' not supported yet
 draft/temp/temp.param-4.reject.cpp errors elsewhere: 'using' not supported yet
 draft/temp/temp.param-7.accept.cpp 'template' not supported yet
 draft/temp/temp.pre-2.reject.cpp errors elsewhere: 'template' not supported yet
-draft/temp/temp.pre-3.reject.cpp errors elsewhere: 'class' not supported yet
 draft/temp/temp.pre-4.reject.cpp errors elsewhere: 'template' not supported yet
 draft/temp/temp.res.general-1.accept.cpp 'struct' not supported yet
 draft/temp/temp.res.general-3.accept.cpp 'struct' not supported yet
@@ -577,11 +572,8 @@ draft/temp/temp.res.general-6.reject.cpp errors elsewhere: 'template' not suppor
 draft/temp/temp.spec.general-1.accept.cpp 'template' not supported yet
 draft/temp/temp.spec.general-2.accept.cpp 'template' not supported yet
 draft/temp/temp.spec.general-3.reject.cpp errors elsewhere: 'template' not supported yet
-draft/temp/temp.spec.partial.general-1.accept.cpp 'template' not supported yet
 draft/temp/temp.spec.partial.general-2.accept.cpp 'template' not supported yet
 draft/temp/temp.spec.partial.general-3.accept.cpp 'template' not supported yet
-draft/temp/temp.spec.partial.general-4.accept.cpp 'namespace' not supported yet
-draft/temp/temp.spec.partial.match-1.reject.cpp errors elsewhere: 'template' not supported yet
 draft/temp/temp.spec.partial.match-2.accept.cpp 'template' not supported yet
 draft/temp/temp.spec.partial.match-3.reject.cpp errors elsewhere: 'template' not supported yet
 draft/temp/temp.spec.partial.member-1.reject.cpp errors elsewhere: 'template' not supported yet

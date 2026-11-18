@@ -83,23 +83,9 @@ public:
       // `X<T…>`: the specialization for the substituted arguments ([temp.inst]).
       const EntityRec rec = w_->entities.rec(r.entity);
       if (rec.templ == EntityId::none || !types().is_dependent(t)) return t;
-      std::vector<TemplateArg> args;
-      for (const TemplateArg& a : rec.args) {
-        if (a.kind == TemplateArgKind::type) {
-          auto s = substitute(a.type, b);
-          if (!s) return std::nullopt;
-          args.push_back(type_arg(*s));
-        } else if (ins().values.is<ast::VDepParam>(a.value)) {
-          auto p = ins().values.get<ast::VDepParam>(a.value);
-          auto v = b.at(p.depth, p.index);
-          if (!v) args.push_back(a);
-          else if (v->kind != TemplateArgKind::value) return std::nullopt;
-          else args.push_back({TemplateArgKind::value, a.type, v->value});
-        } else {
-          args.push_back(a);
-        }
-      }
-      return types().add_cv(types().class_type(specialize_class(rec.templ, args)), cv);
+      auto args = substitute_args(rec.args, b);
+      if (!args) return std::nullopt;
+      return types().add_cv(types().class_type(specialize_class(rec.templ, *args)), cv);
     }
     case TypeKind::dep_name: {
       // `typename Q::n`: the member type `n` of the substituted Q, which must be a complete
@@ -160,6 +146,27 @@ public:
     }
     }
     return t;
+  }
+
+  // Template arguments `args` with the parameters `b` binds replaced by their arguments.
+  std::optional<std::vector<TemplateArg>> substitute_args(std::span<const TemplateArg> args, const Bindings& b) {
+    std::vector<TemplateArg> out;
+    for (const TemplateArg& a : args) {
+      if (a.kind == TemplateArgKind::type) {
+        auto s = substitute(a.type, b);
+        if (!s) return std::nullopt;
+        out.push_back(type_arg(*s));
+      } else if (ins().values.is<ast::VDepParam>(a.value)) {
+        auto p = ins().values.get<ast::VDepParam>(a.value);
+        auto v = b.at(p.depth, p.index);
+        if (!v) out.push_back(a);
+        else if (v->kind != TemplateArgKind::value) return std::nullopt;
+        else out.push_back({TemplateArgKind::value, a.type, v->value});
+      } else {
+        out.push_back(a);
+      }
+    }
+    return out;
   }
 
   // Whether `t` names a parameter of the template-head at `depth`: whether deduction can learn
@@ -263,10 +270,17 @@ public:
   bool deduce_specialization(EntityId p, EntityId a, u16 depth, std::vector<std::optional<TemplateArg>>& out) {
     const EntityRec& pr = w_->entities.rec(p);
     const EntityRec& ar = w_->entities.rec(a);
-    if (pr.templ == EntityId::none || pr.templ != ar.templ || pr.args.size() != ar.args.size()) return false;
-    for (std::size_t i = 0; i < pr.args.size(); ++i) {
-      const TemplateArg& x = pr.args[i];
-      const TemplateArg& y = ar.args[i];
+    if (pr.templ == EntityId::none || pr.templ != ar.templ) return false;
+    return deduce_args(pr.args, ar.args, depth, out);
+  }
+  // Template argument list `p` from `a`, argument by argument ([temp.deduct.type]/8): also how a
+  // partial specialization matches a specialization ([temp.spec.partial.match]/2).
+  bool deduce_args(std::span<const TemplateArg> p, std::span<const TemplateArg> a, u16 depth,
+                   std::vector<std::optional<TemplateArg>>& out) {
+    if (p.size() != a.size()) return false;
+    for (std::size_t i = 0; i < p.size(); ++i) {
+      const TemplateArg& x = p[i];
+      const TemplateArg& y = a[i];
       if (x.kind != y.kind) return false;
       if (x.kind == TemplateArgKind::type) {
         if (!deduce(x.type, y.type, depth, out)) return false;
@@ -397,10 +411,78 @@ public:
     return r;
   }
 
+  // The arguments for which function template `tmpl` is the function of type `type`, after the
+  // explicitly specified `explicit_args` ([temp.deduct.decl]): what an explicit specialization
+  // of it specializes; none if there are none.
+  std::optional<std::vector<TemplateArg>> deduce_declaration(const ast::DeclSema& tmpl, QualType type,
+                                                             std::span<const TemplateArg> explicit_args) {
+    std::vector<ast::TemplateParamSema> params = w_->ins.seqs.elements(tmpl.template_params);
+    if (params.empty() || explicit_args.size() > params.size()) return std::nullopt;
+    u16 depth = params[0].depth;
+    std::vector<std::optional<TemplateArg>> out(params.size());
+    for (std::size_t i = 0; i < explicit_args.size(); ++i) {
+      if (explicit_args[i].kind != params[i].kind) return std::nullopt;
+      out[i] = explicit_args[i];
+      if (params[i].kind == TemplateArgKind::value) {
+        auto pt = substitute(params[i].type, bindings(depth, out));
+        auto v = pt ? converted_value(explicit_args[i], *pt) : std::nullopt;
+        if (!v) return std::nullopt;
+        out[i] = *v;
+      }
+    }
+    if (!deduce(tmpl.type, type, depth, out)) return std::nullopt;
+    auto full = complete(tmpl, params, std::move(out));
+    if (!full) return std::nullopt;
+    auto t = specialization_type(tmpl, *full);
+    if (!t || types().canonical(*t) != types().canonical(type)) return std::nullopt;
+    return full;
+  }
+
   // The type of a specialization's declaration: the template's function type with `args`.
   std::optional<QualType> specialization_type(const ast::DeclSema& tmpl, std::span<const TemplateArg> args) {
     std::vector<ast::TemplateParamSema> params = w_->ins.seqs.elements(tmpl.template_params);
     return substitute(tmpl.type, Bindings::of(params.empty() ? 0 : params[0].depth, args));
+  }
+
+  // ------------------------------------------------------------ partial specializations ([temp.spec.partial])
+
+  // The arguments of a partial specialization's parameters `params`, whose template arguments are
+  // `pattern`, for which it matches the specialization with `args` ([temp.spec.partial.match]/2):
+  // deduced from them, and substituting back to them; none if it does not match.
+  std::optional<std::vector<TemplateArg>> match_partial(std::span<const ast::TemplateParamSema> params,
+                                                        std::span<const TemplateArg> pattern, std::span<const TemplateArg> args) {
+    if (params.empty()) return std::nullopt;
+    u16 depth = params[0].depth;
+    std::vector<std::optional<TemplateArg>> out(params.size());
+    if (!deduce_args(pattern, args, depth, out) || std::ranges::any_of(out, [](const auto& a) { return !a; })) return std::nullopt;
+    std::vector<TemplateArg> r;
+    for (const auto& a : out) r.push_back(*a);
+    auto back = substitute_args(pattern, Bindings::of(depth, r));
+    if (!back || !std::ranges::equal(*back, args)) return std::nullopt;
+    return r;
+  }
+  // Whether partial specialization 1 (`p1`, `a1`) is more specialized than 2 ([temp.spec.partial.order]):
+  // as the function templates with one parameter of type `X<a1>` and `X<a2>` order ([temp.func.order]),
+  // 2's arguments deduced from 1's with a unique value for each of 1's parameters, and not the converse.
+  bool more_specialized_partial(std::span<const ast::TemplateParamSema> p1, std::span<const TemplateArg> a1,
+                                std::span<const ast::TemplateParamSema> p2, std::span<const TemplateArg> a2) {
+    return at_least_as_specialized(p1, a1, p2, a2) && !at_least_as_specialized(p2, a2, p1, a1);
+  }
+  // Whether every parameter of `params` can be deduced from template arguments `args` that name
+  // them, as a partial specialization's must be ([temp.spec.partial.general]): deduced from
+  // `args` with a unique value for each.
+  bool deducible(std::span<const ast::TemplateParamSema> params, std::span<const TemplateArg> args) {
+    if (params.empty()) return false;
+    auto unique = substitute_args(args, unique_bindings(params));
+    std::vector<std::optional<TemplateArg>> out(params.size());
+    return unique && deduce_args(args, *unique, params[0].depth, out) && std::ranges::all_of(out, [](const auto& a) { return a.has_value(); });
+  }
+  bool at_least_as_specialized(std::span<const ast::TemplateParamSema> p1, std::span<const TemplateArg> a1,
+                               std::span<const ast::TemplateParamSema> p2, std::span<const TemplateArg> a2) {
+    if (p1.empty() || p2.empty()) return false;
+    auto unique = substitute_args(a1, unique_bindings(p1));
+    std::vector<std::optional<TemplateArg>> out(p2.size());
+    return unique && deduce_args(a2, *unique, p2[0].depth, out);
   }
 
   // ------------------------------------------------------------ partial ordering ([temp.func.order])
