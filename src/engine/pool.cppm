@@ -249,8 +249,10 @@ public:
     Array* a = array_.load(std::memory_order_relaxed);
     if (b - t > a->mask) a = grow(a, t, b);
     a->at(b).store(w.bits(), std::memory_order_relaxed);
-    std::atomic_thread_fence(std::memory_order_release);
-    bottom_.store(b + 1, std::memory_order_relaxed);
+    // A release store, where the formulation has a release fence and a relaxed store: the same
+    // order (a thief's acquire load of `bottom_` sees the slot and the frame it names), and one
+    // ThreadSanitizer can see, since it does not model fences (#105).
+    bottom_.store(b + 1, std::memory_order_release);
   }
 
   // The newest work, by the owner.
