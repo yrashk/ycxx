@@ -626,8 +626,8 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   (an array's or class's element values) in `values`; `DeclKind::data_member`.
 - **Front end:** a class definition at namespace scope is a `class_def` item whose members are
   their own items (ast.md §4.2); `Program::class_def(item)` reads them into a `ClassDef` and into
-  sema's class table (`World::classes`, the stand-in for `class_def`'s member list and the
-  `layout` query: Itanium layout of data members). A class is complete at an item after its
+  sema's class table (`World::classes`, the stand-in for `class_def`'s member list, which the
+  layout queries read). A class is complete at an item after its
   definition that it does not enclose (`Questions::is_complete`). Class names as type
   specifiers, elaborated type specifiers and forward declarations, member access (`Member`,
   [expr.ref]), list-initialization of aggregates and scalars (`InitList`, `ValueInit`,

@@ -334,16 +334,6 @@ struct ClassRec {
   std::vector<FieldRec> fields;  // in declaration order
 };
 
-// The layout of an object type on the target ([basic.align], [class.mem]): its size and alignment
-// and, for a class, its members' offsets. Classes follow the Itanium C++ ABI §2.4: each member at
-// the next offset its alignment allows, in declaration order; the size rounded up to the
-// alignment; an empty class has size 1.
-struct ObjectLayout {
-  u64 size = 0;
-  u32 align = 1;
-  std::vector<u64> offsets;  // a class's members
-};
-
 class Classes {
 public:
   explicit Classes(ast::Interners& ins, Types& types) : ins_(&ins), types_(&types) {}
@@ -356,37 +346,6 @@ public:
   bool is_defined(EntityId c) const {
     const ClassRec* r = find(c);
     return r && r->defined;
-  }
-
-  // The layout of a complete object type: `layout` (AST design Part D) until #33 has it.
-  ObjectLayout layout(QualType q) const {
-    TypeRec r = types_->rec(q);
-    switch (r.kind) {
-    case TypeKind::builtin: {
-      ast::BuiltinLayout l = target[r.builtin];
-      return {l.size, l.align, {}};
-    }
-    case TypeKind::pointer: return {target.pointer_size, target.pointer_align, {}};
-    case TypeKind::array: {
-      ObjectLayout e = layout(r.inner);
-      return {e.size * r.bound, e.align, {}};
-    }
-    case TypeKind::class_: {
-      ObjectLayout out;
-      const ClassRec* c = find(r.entity);
-      if (c)
-        for (const FieldRec& f : c->fields) {
-          ObjectLayout m = layout(f.type);
-          out.size = (out.size + m.align - 1) / m.align * m.align;
-          out.offsets.push_back(out.size);
-          out.size += m.size;
-          out.align = std::max(out.align, m.align);
-        }
-      out.size = out.size == 0 ? 1 : (out.size + out.align - 1) / out.align * out.align;
-      return out;
-    }
-    default: return {};
-    }
   }
 
 private:
