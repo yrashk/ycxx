@@ -140,6 +140,8 @@ enum class Diag : std::uint32_t {
   not_a_template [[=message{Severity::error, "'{0:n}' is not a template"}]],
   instantiation_depth [[=message{Severity::error, "template instantiations nest more than {0} deep"}]],
   default_not_last [[=message{Severity::error, "a template parameter after one with a default argument needs a default argument too"}]],
+  default_redefined [[=message{Severity::error, "a template parameter's default argument is given again"}]],
+  member_of_function_type [[=message{Severity::error, "a data member cannot have function type '{0:t}'"}]],
 };
 
 // A `{N:r}` argument: why an evaluation was not constant. 0 is an expression the front end

@@ -50,7 +50,7 @@ constexpr std::string_view spelling(Builtin b) {
 
 // ---------------------------------------------------------------- types
 
-enum class TypeKind : u8 { builtin, pointer, array, function, class_, reference, enum_, template_param, other };
+enum class TypeKind : u8 { builtin, pointer, array, function, class_, reference, enum_, template_param, dep_name, other };
 
 // The canonical form of a type, read out by value.
 struct TypeRec {
@@ -65,6 +65,7 @@ struct TypeRec {
   Cv fn_cv = Cv::none;               // a member function type's cv-qualifier-seq
   bool rvalue_ref = false;           // a reference's kind; `inner` is what it refers to
   ConstId bound_value = ConstId::none;  // an array's bound as a constant, possibly dependent
+  NameId name{};                     // a dependent member type's name; `inner` is its qualifier
   u16 depth = 0;                     // a template parameter's position ([temp.param])
   u16 index = 0;
   bool pack = false;
@@ -128,6 +129,10 @@ public:
       r.kind = TypeKind::reference;
       r.rvalue_ref = t.is<ast::TRRef>(c);
       r.inner = r.rvalue_ref ? t.get<ast::TRRef>(c).referee : t.get<ast::TLRef>(c).referee;
+    } else if (t.is<ast::TDepName>(c)) {
+      r.kind = TypeKind::dep_name;
+      r.inner = t.get<ast::TDepName>(c).qualifier;
+      r.name = t.get<ast::TDepName>(c).name;
     } else if (t.is<ast::TTemplateParam>(c)) {
       auto p = t.get<ast::TTemplateParam>(c);
       r.kind = TypeKind::template_param;
@@ -143,7 +148,8 @@ public:
   bool is_dependent(QualType q) const {
     TypeRec r = rec(q);
     switch (r.kind) {
-    case TypeKind::template_param: return true;
+    case TypeKind::template_param:
+    case TypeKind::dep_name: return true;
     case TypeKind::builtin: return r.builtin == Builtin::dependent;
     case TypeKind::array:
       return is_dependent(r.inner) || (r.bound_value != ConstId::none && ins_->values.is_dependent(r.bound_value));
@@ -158,6 +164,8 @@ public:
   // Whether a class is a specialization with a dependent argument (`X<T>`); set by the world that
   // knows the entities.
   std::function<bool(EntityId)> class_dependent;
+  std::function<std::string(NameId)> dep_name_spelling;
+  QualType dep_name(QualType qualifier, NameId name) { return ins_->intern_type(ast::TDepName{qualifier, name}); }
 
   static Cv cv(QualType q) { return ast::cv_of(q); }
   static bool is_const(QualType q) { return (std::to_underlying(ast::cv_of(q)) & 1) != 0; }
@@ -249,6 +257,9 @@ private:
     case TypeKind::enum_:
     case TypeKind::class_:
       return cvs + (class_name ? class_name(r.entity) : "<class>") + (inner.empty() || inner[0] == '[' ? "" : " ") + inner;
+    case TypeKind::dep_name:
+      return cvs + "typename " + spell(r.inner) + "::" + (dep_name_spelling ? dep_name_spelling(r.name) : "<name>") +
+             (inner.empty() || inner[0] == '[' ? "" : " ") + inner;
     case TypeKind::template_param:
       // Parameters are positional in the type (ast.md §5.1).
       return cvs + std::format("type-parameter-{}-{}", r.depth, r.index) + (inner.empty() || inner[0] == '[' ? "" : " ") + inner;
@@ -372,7 +383,8 @@ public:
     if (r.kind == EntityKind::function || r.kind == EntityKind::constructor || r.kind == EntityKind::destructor ||
         r.kind == EntityKind::function_template)
       f = ast::mix(f, types_->fp(types_->canonical(r.type)));
-    if (r.kind == EntityKind::function_template || r.kind == EntityKind::namespace_) f = ast::mix(f, r.head);
+    if (r.kind == EntityKind::function_template || r.kind == EntityKind::class_template || r.kind == EntityKind::namespace_)
+      f = ast::mix(f, r.head);
     if (r.templ != EntityId::none) {
       f = ast::mix(f, ins_->entities.fp(r.templ));
       for (const ast::TemplateArg& a : r.args) {
@@ -525,6 +537,7 @@ struct World {
 
   explicit World(ast::Interners& i) : ins(i) {
     types.class_name = [this](EntityId e) { return std::string(ins.names.spelling(entities.rec(e).name)); };
+    types.dep_name_spelling = [this](NameId n) { return std::string(ins.names.spelling(n)); };
     types.class_dependent = [this](EntityId e) {
       return std::ranges::any_of(entities.rec(e).args, [&](const ast::TemplateArg& a) {
         return a.kind == ast::TemplateArgKind::type ? types.is_dependent(a.type) : ins.values.is_dependent(a.value);

@@ -114,6 +114,13 @@ struct TTemplateParam {
   u8 pack;
 };
 
+// A member type of a dependent type, `typename Q::name` ([temp.res.general]/5, [temp.dep.type]):
+// known once `qualifier` is substituted.
+struct TDepName {
+  QualType qualifier;
+  NameId name;
+};
+
 // ---------------------------------------------------------------- sugar kinds
 
 // A use of a typedef-name or alias-declaration. The alias's template arguments come with alias
@@ -123,7 +130,8 @@ struct STypedef {
   EntityId alias;
 };
 
-using TypeKinds = closed_list<TBuiltin, TPointer, TLRef, TRRef, TArray, TFunction, TClass, TEnum, STypedef, TTemplateParam>;
+using TypeKinds = closed_list<TBuiltin, TPointer, TLRef, TRRef, TArray, TFunction, TClass, TEnum, STypedef, TTemplateParam,
+                              TDepName>;
 
 template <class T>
 constexpr bool is_type_kind = TypeKinds::contains<T>;

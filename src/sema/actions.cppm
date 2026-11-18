@@ -247,12 +247,27 @@ public:
           if (d.kind == ast::DeclKind::class_ && (d.flags & decl_flag::template_)) found = d;
     for (auto p = own.rbegin(); p != own.rend() && !found; ++p)
       if (p->name == name) found = p->sema;
-    if (!found)
-      for (DeclId d : q_->visible_decls(name, directives())) {
-        ast::DeclSema s = q_->decl_sema(d);
-        if (s.entity != EntityId::none && !is_special(s)) found = s;
-      }
+    std::vector<ast::DeclSema> decls;
+    for (DeclId d : q_->visible_decls(name, directives())) {
+      ast::DeclSema s = q_->decl_sema(d);
+      if (s.entity != EntityId::none && !is_special(s)) decls.push_back(s);
+    }
+    if (!found && !decls.empty()) found = decls.back();
     if (!found || found->kind != ast::DeclKind::class_ || !(found->flags & decl_flag::template_)) return std::nullopt;
+    // Default arguments from every earlier declaration of the template ([temp.param]/12).
+    std::vector<ast::TemplateParamSema> params = ins().seqs.elements(found->template_params);
+    bool merged = false;
+    for (const ast::DeclSema& d : decls) {
+      if (d.entity != found->entity) continue;
+      std::vector<ast::TemplateParamSema> other = ins().seqs.elements(d.template_params);
+      for (std::size_t i = 0; i < params.size() && i < other.size(); ++i)
+        if (!params[i].has_default && other[i].has_default) {
+          params[i].has_default = 1;
+          params[i].default_ = other[i].default_;
+          merged = true;
+        }
+    }
+    if (merged) found->template_params = ins().intern_seq(std::span<const ast::TemplateParamSema>(params));
     return found;
   }
 
@@ -333,7 +348,11 @@ public:
     // ([temp.dep.type]); in an instantiation, its argument.
     if (const ast::TemplateParamSema* p = template_param(n)) {
       if (p->kind != ast::TemplateArgKind::type) return std::nullopt;
-      if (auto a = template_args.at(p->depth, p->index)) return Scope{std::nullopt, a->type};
+      // Bound to a type that has no members, it names no scope ([basic.lookup.qual]/1).
+      if (auto a = template_args.at(p->depth, p->index)) {
+        if (!types().is_class(a->type) && !types().is_enum(a->type)) return std::nullopt;
+        return Scope{std::nullopt, a->type};
+      }
       return Scope{std::nullopt, p->type};
     }
     for (auto a = block_aliases_.rbegin(); a != block_aliases_.rend(); ++a)
@@ -346,7 +365,7 @@ public:
   std::optional<Scope> scope_member(const Scope& s, NameId n) {
     // A member of a dependent type is looked up when the template is instantiated
     // ([temp.dep.type]/7): a dependent type here.
-    if (s.type && types().is_dependent(*s.type)) return Scope{std::nullopt, builtin(Builtin::dependent)};
+    if (s.type && types().is_dependent(*s.type)) return Scope{std::nullopt, types().dep_name(*s.type, n)};
     if (s.ns) {
       for (const ast::DeclSema& d : q_->namespace_members(*s.ns, n)) {
         if (d.kind == ast::DeclKind::namespace_) return Scope{d.entity, std::nullopt};
@@ -372,6 +391,10 @@ public:
     if (s.type) {
       if (types().is_enum(*s.type)) {
         if (auto r = find_enumerator(types().enum_of(*s.type), n, begin, end)) return *r;
+        diag(name_at, Diag::no_member, n, *s.type);
+        return {NodeId::none, begin, end};
+      }
+      if (!types().is_class(*s.type)) {
         diag(name_at, Diag::no_member, n, *s.type);
         return {NodeId::none, begin, end};
       }
@@ -672,6 +695,7 @@ public:
     for (std::size_t i = 0; i < elems.size(); ++i) {
       if (next == b.clauses.size()) {
         out.push_back(element_default(elems[i], true, end, end));
+        if (!out.back().ok()) return fail;  // diagnosed (a default member initializer not supported yet)
         continue;
       }
       const Braced::Clause& c = b.clauses[next];

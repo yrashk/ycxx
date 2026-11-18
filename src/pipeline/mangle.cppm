@@ -157,6 +157,15 @@ class Mangler {
         if (!e) return e;
         inner = std::format("A{}_{}", dim, *e);
         candidates_.push_back(full_key(bare));
+      } else if (in_.types.is<ast::TDepName>(in_.types.canon(bare))) {
+        // `typename Q::n`: <nested-name> N <prefix> <source-name> E, a substitution candidate
+        // (§5.1.5.3).
+        if (auto s = find(full_key(bare))) return qualify(qualifiers, *s, q);
+        auto d = in_.types.get<ast::TDepName>(in_.types.canon(bare));
+        auto p = type(d.qualifier);
+        if (!p) return p;
+        inner = "N" + *p + source_name(in_.names.spelling(d.name)) + "E";
+        candidates_.push_back(full_key(bare));
       } else if (in_.types.is<ast::TTemplateParam>(in_.types.canon(bare))) {
         // <template-param> ::= T_ | T <parameter-2 non-negative number> _, a substitution
         // candidate (§5.1.5.8, §5.1.10). Function templates of namespace scope have one level.

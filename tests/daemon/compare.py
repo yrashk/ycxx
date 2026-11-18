@@ -29,12 +29,12 @@ failures = []
 # fails the run (remove the entry). The sample and its order are fixed, so these are
 # deterministic.
 KNOWN = {
-    # A daemon session keeps an earlier test's `struct S` (first-wins entity records): here the
-    # class template specializations (`Box<int>`) that earlier tests defined differently.
-    'templates/c2-const-overloads.run.cpp': ('#115', ('exit status', 'stderr', 'outputs')),
+    # A daemon session keeps an earlier test's `struct S` (first-wins entity records): here an
+    # earlier test's class template `Box`, defined differently, whose current instantiation's
+    # record is the one published. The daemon reports a member of the other `Box` missing
+    # ("use of undeclared identifier 'get'", "no member named 'doubled'").
     'templates/c2-constexpr-members.run.cpp': ('#115', ('stderr',)),
     'templates/c2-member-calls-function-template.run.cpp': ('#115', ('exit status', 'stderr', 'outputs')),
-    'templates/c2-member-declaration-instantiated.reject.cpp': ('#115', ('exit status', 'stderr', 'outputs')),
 }
 known_seen = set()
 

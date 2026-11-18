@@ -72,6 +72,7 @@ struct Declarator {
   // `T x[] = {…}`: the outermost array bound is left to the initializer ([dcl.array]/8); `type`
   // is then the element type.
   bool unknown_bound = false;
+  bool function = false;  // it has a parameter list of its own, not a function type from a name
   bool ok = true;
 };
 
@@ -190,7 +191,11 @@ public:
       else if ((k == Tk::r_paren || k == Tk::r_square || k == Tk::r_brace) && parens > 0) --parens;
       else if (parens == 0 && k == Tk::less) ++angles;
       else if (parens == 0 && k == Tk::greater && --angles == 0) return j + 1;
-      else if (parens == 0 && k == Tk::greatergreater && (angles -= 2) <= 0) return j + 1;
+      else if (parens == 0 && k == Tk::greatergreater) {
+        // `>>` closes this list in its first half when only this list is open ([temp.names]/4).
+        if (angles == 1) return j;
+        if ((angles -= 2) == 0) return j + 1;
+      }
       else if (parens == 0 && (k == Tk::semi || k == Tk::l_brace)) return j;
     }
     return j;
@@ -282,7 +287,7 @@ public:
           goto done;
         }
         cls = q->first;
-        for (u32 j = 0; j < q->second; ++j) bump();
+        take_qualified(q->second);
         continue;
       }
       case Tk::kw_struct:
@@ -320,8 +325,8 @@ public:
             // `N::C`, `::C`, `C::E`, `X<T>::E` ([dcl.type.simple]).
             if (auto q = qualified_type(0); q && kind(q->second) != Tk::l_paren) {
               cls = q->first;
-              for (u32 j = 1; j < q->second; ++j) bump();
-              break;
+              take_qualified(q->second);
+              continue;
             }
             goto done;
           }
@@ -449,6 +454,7 @@ public:
     const Suffix* fn = nullptr;
     d.type = build(top, base, fn, d);
     if (fn) {
+      d.function = true;
       d.params = fn->params;
       d.variadic = fn->variadic;
     }
@@ -608,15 +614,27 @@ public:
     i_ += j + 1;
     auto args = template_argument_list();
     u32 after = i_ - saved;
-    bool closed = !half_ && (!scope || kind() == Tk::coloncolon);
+    bool closed = scope ? !half_ && kind() == Tk::coloncolon : true;
+    bool ended_half = half_;  // the list ended in the first half of a `>>`
     std::optional<QualType> t;
     if (args && closed) t = s_->class_template_id(*tmpl, *args, 0);
     i_ = saved;
     half_ = saved_half;
+    if (!scope) qualified_half_ = ended_half;
     s_->truncate_diags(diags);
     if (!t) return std::nullopt;
     j = scope ? after + 1 : after;
     return sema::Sema::Scope{std::nullopt, *t};
+  }
+
+  // Whether the qualified type name `qualified_type` read last ended in the first half of a `>>`:
+  // the tokens it takes then stop at that `>>`, whose second half its taker keeps.
+  bool qualified_half_ = false;
+  // Takes the `n` tokens of a qualified type name `qualified_type` read.
+  void take_qualified(u32 n) {
+    bool half = qualified_half_;
+    for (u32 j = 0; j < n; ++j) bump();
+    if (half) half_ = true;
   }
 
   // A qualified type name at token `start`: its type and the tokens it takes.
@@ -625,6 +643,7 @@ public:
     auto s = nested_name(start, next);
     if (!s || kind(next) != Tk::identifier || kind(next + 1) == Tk::coloncolon) return std::nullopt;
     // `N::X<args>`: a class template specialization named in a namespace ([temp.names]).
+    qualified_half_ = false;
     if (kind(next + 1) == Tk::less && s->ns) {
       u32 j = next;
       if (auto t = template_id_scope(s, j, false)) return std::pair{*t->type, j - start};

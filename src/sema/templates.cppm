@@ -100,6 +100,19 @@ public:
       }
       return types().add_cv(types().class_type(specialize_class(rec.templ, args)), cv);
     }
+    case TypeKind::dep_name: {
+      // `typename Q::n`: the member type `n` of the substituted Q, which must be a complete
+      // class declaring one ([temp.deduct.general]/11).
+      auto q = substitute(r.inner, b);
+      if (!q) return std::nullopt;
+      if (types().is_dependent(*q)) return types().add_cv(types().dep_name(*q, r.name), cv);
+      if (!types().is_class(*q)) return std::nullopt;
+      const ClassRec* c = w_->classes.find(types().class_of(*q));
+      if (!c) return std::nullopt;
+      for (const auto& [n, mt] : c->types)
+        if (n == r.name) return types().add_cv(mt, cv);
+      return std::nullopt;
+    }
     case TypeKind::builtin:
     case TypeKind::enum_:
     case TypeKind::other: return t;
@@ -180,6 +193,8 @@ public:
     QualType pc = types().canonical(p), ac = types().canonical(a);
     Cv cp = Types::cv(pc), ca = Types::cv(ac);
     TypeRec pr = types().rec(pc);
+    // `typename Q::n` is a non-deduced context ([temp.deduct.type]/5.1).
+    if (pr.kind == TypeKind::dep_name) return true;
     if (pr.kind == TypeKind::template_param && pr.depth == depth) {
       // `cv T` from `cv' A`: T is A without cv, or with the cv `cv'` has beyond `cv`.
       if (!within(cp, ca) && !allow.more_cv) return false;
@@ -191,6 +206,7 @@ public:
     if (pr.kind != ar.kind) return false;
     switch (pr.kind) {
     case TypeKind::template_param: return pr.depth == ar.depth && pr.index == ar.index && pr.pack == ar.pack;
+    case TypeKind::dep_name: return types().canonical(pr.inner) == types().canonical(ar.inner) && pr.name == ar.name;
     case TypeKind::builtin: return pr.builtin == ar.builtin;
     case TypeKind::class_:
       if (pr.entity == ar.entity) return true;
