@@ -11,3 +11,8 @@ target_sources(ycxxc_ir PUBLIC FILE_SET CXX_MODULES FILES
   text.cppm
   ir.cppm)
 target_link_libraries(ycxxc_ir PUBLIC ycxxc_hash)
+
+# L2 and `lower` (#26, α subset).
+add_library(ycxxc_lower STATIC)
+target_sources(ycxxc_lower PUBLIC FILE_SET CXX_MODULES FILES l2.cppm lower.cppm)
+target_link_libraries(ycxxc_lower PUBLIC ycxxc_ir)
