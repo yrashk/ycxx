@@ -297,6 +297,32 @@ its way out has learned something the next session should not have to rediscover
 5. **Consolidate.** A lesson that recurs is promoted to a rule here or in `AGENTS.md`, and its
    entry points at the rule. Entries that stop applying are deleted. Keep the list short enough to
    read in full.
+6. **Break bureaucracy loops.** Process exists to catch bugs and to keep work recoverable. A step
+   that does neither is waste, and loops of such steps are the biggest time sink agents have.
+   Signs of a loop:
+   - another review or verification round when the last round found nothing that changes
+     behaviour;
+   - evidence that nobody will act on: restated status, hand-written transcripts, PR bodies
+     that repeat the diff;
+   - documents growing faster than the decisions in them;
+   - relaying and reconciling between agents on the same seam more than once;
+   - waiting for an approval or confirmation that is not actually required;
+   - re-arguing a recorded decision;
+   - the same fact written in several places;
+   - polishing the wording of something not yet accepted.
+
+   To break out, ask: *what bug, decision or unblocked work does this step produce?* If the
+   answer is none, skip the step, say so in one line and move on.
+   - Settle questions with running code where possible. A failing test or a prototype ends an
+     argument that a review round would only prolong.
+   - Bound every ritual: one review per change unless it finds P0 or P1 issues (§5.2), and one
+     place per fact (§6.1: issues for who and what, STATUS for what is true of the code).
+   - Size a design document to its decisions: each decision with its reasons and the
+     alternatives rejected, nothing more.
+   - Reversible steps need no ceremony. Do them, and let the tests and CI catch mistakes.
+   - Evidence produced by tools (test transcripts, reports) is cheap and stays. Evidence
+     produced by hand has to earn its place.
+   - Every loop that is caught goes into `docs/LESSONS.md`.
 
 ## 9. Continuous integration: fail fast
 
