@@ -944,7 +944,13 @@ public:
       s_->diag(call.begin, Diag::not_constant, v.reason);
       return {NodeId::none, call.begin, call.end};
     }
-    if (!v.value) return call;  // a void function: nothing to replace, and no effect at run time
+    if (!v.value) {
+      // A void function: the invocation is replaced by its (empty) result, `(void)0`, so the
+      // consteval function's body never runs at run time.
+      sema::QualType i = s_->builtin(sema::Builtin::int_);
+      Ex zero = s_->literal(i, s_->world().values.integer(i, 0), ast::ValueCategory::prvalue, call.begin, call.end);
+      return s_->convert_node(zero, ast::ConversionKind::to_void, s_->builtin(sema::Builtin::void_));
+    }
     return s_->literal(call.type(), *v.value, ast::ValueCategory::prvalue, call.begin, call.end);
   }
 

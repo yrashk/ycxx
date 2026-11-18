@@ -210,6 +210,14 @@ void constant_evaluation() {
         "the statement after else must be compound ([stmt.if]/4)");
   check(kinds("consteval void cv() {}\nint main() { cv(); return 0; }").empty(),
         "an immediate invocation of a void consteval function");
+  {
+    // From the verification of the review fixes: the void invocation leaves no call behind.
+    Analysed a("int g;\nconsteval void cv() { if !consteval { g = 1; } }\nint main() { cv(); return g; }");
+    check(a.diags().empty(), "a void immediate invocation");
+    auto stmts = a.children(a.get<ast::Compound>(a.body(2).tree).stmts);
+    auto e = a.get<ast::ExprStmt>(stmts[0].id).expr.id;
+    check(!a.is<ast::Call>(e), "the invocation is replaced, so cv's body does not run at run time");
+  }
   check(kinds("int f() { int m = 1; constexpr int x = true ? 1 : m; constexpr int y = false && m; return x + y; }").empty(),
         "a local that is not usable, named but not evaluated");
   check(kinds("int f() { int m = 1; constexpr int x = m; return x; }") == V{not_constant},
