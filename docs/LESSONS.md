@@ -220,6 +220,13 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
   - Do: keep the survey a loop over `tools/test core` plus a direct run, and rerun it last.
   - Do: an expected-failure list must never cover a crash (`Crashed` in tests/driver/kinds.py).
   - Learned on #41.
+- **A default-constructed handle is a real handle.** `QualType{}` is type number 0, the first type
+  interned (often `int`). The interpreter used it as "no pointee" for `std::nullptr_t`, and so
+  skipped its `void*` cast check for every `int*`. The unit tests' world happened to intern `int`
+  first, which is how it showed.
+  - Do: say "none" with a flag or `std::optional`, or with the kind's `none` enumerator where the
+    handle has one (`ConstId::none`, `NodeId::none`), never with `T{}`.
+  - Learned on #25.
 - **A reference into a growing side table dangles.** A `const TypeRec&` held across creating
   another type pointed into a reallocated `std::vector`, giving a wrong diagnostic that depended
   on the file's length. Use a `std::deque` for tables whose records are referenced, or return

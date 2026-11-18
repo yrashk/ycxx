@@ -18,6 +18,9 @@ import ycxx.ast;
 import ycxx.engine;
 import ycxx.pp;
 import ycxx.items;
+import ycxx.ir;
+import ycxx.irgen;
+import ycxx.interp;
 import ycxx.sema;
 export import :parser;
 
@@ -87,6 +90,34 @@ public:
   }
   void set_constant(EntityId e, ConstId c) { constants_[std::to_underlying(e)] = c; }
 
+  // What item_sema learns of each entity's declarations, for constant evaluation: the latest
+  // declaration's record, and for a function its defining item.
+  void declared(const ast::DeclSema& d, u32 item) {
+    decls_[std::to_underlying(d.entity)] = d;
+    if (d.kind == ast::DeclKind::function && (d.flags & sema::decl_flag::definition))
+      definitions_[std::to_underlying(d.entity)] = item;
+  }
+  std::optional<ast::DeclSema> declaration(EntityId e) const {
+    if (auto it = decls_.find(std::to_underlying(e)); it != decls_.end()) return it->second;
+    return std::nullopt;
+  }
+
+  // `function_ir(F)` for a function defined in an item before `item` ([expr.const]: a function
+  // defined later is not defined at the point of evaluation).
+  interp::Callee function_ir(EntityId f, u32 item);
+  // A namespace-scope variable as the interpreter sees it: its type and, if it is usable in
+  // constant expressions, its value.
+  std::optional<interp::GlobalVar> global(EntityId v) const {
+    auto d = declaration(v);
+    if (!d || d->kind != ast::DeclKind::variable) return std::nullopt;
+    auto c = constant_value(v);
+    return interp::GlobalVar{d->type, c, c.has_value()};
+  }
+  bool is_constexpr(EntityId f) const {
+    auto d = declaration(f);
+    return d && (d->flags & (sema::decl_flag::constexpr_ | sema::decl_flag::consteval_));
+  }
+
   // Every item and body analysed, in item order; the diagnostics of each cell in order.
   void analyze_all() {
     for (u32 k = 0; k < items_->items.size(); ++k) {
@@ -120,9 +151,15 @@ public:
     return r_->locs[tok].offset;
   }
 
-  // Spells a diagnostic argument: a name or a type.
+  // Spells a diagnostic argument: a name, a type, a string literal or why an evaluation failed.
   std::string spell(char how, u64 raw) const {
     if (how == 'n') return std::string(w_->ins.names.spelling(ast::NameId(u32(raw))));
+    if (how == 'r') return sema::spell_reason(raw);
+    if (how == 'c') {
+      std::string t = w_->values.rec(ConstId(u32(raw))).units;
+      if (!t.empty() && t.back() == '\0') t.pop_back();  // the terminating null
+      return t;
+    }
     return w_->types.spell(ast::QualType(u32(raw)));
   }
 
@@ -143,6 +180,9 @@ private:
   std::vector<std::optional<Result<ast::BodySema>>> body_cells_;
   std::vector<u32> running_;
   std::map<u32, ConstId> constants_;
+  std::map<u32, ast::DeclSema> decls_;           // by entity: the latest declaration
+  std::map<u32, u32> definitions_;               // by function entity: its defining item
+  std::map<u32, std::optional<irgen::FunctionIr>> irs_;  // by item: function_ir, none if it failed
   std::pmr::unsynchronized_pool_resource arena_;  // the frames' arena (§9.3)
 
   friend class ItemAnalysis;
@@ -161,6 +201,9 @@ public:
     return invalid_decl();
   }
   std::optional<ConstId> constant_value(EntityId e) override { return p_->constant_value(e); }
+  interp::Callee function_ir(EntityId f) override { return p_->function_ir(f, item_); }
+  std::optional<interp::GlobalVar> global(EntityId v) override { return p_->global(v); }
+  bool is_constexpr(EntityId f) override { return p_->is_constexpr(f); }
 
 private:
   Program* p_;
@@ -200,10 +243,13 @@ public:
       bad();
       break;
     }
-    std::vector<ast::Child> cs;
-    for (const Ex& d : declarators_) cs.push_back(sema::Sema::at(d, 0));
-    Ex root = s_.node(ast::DeclGroup{b_.list(cs)}, 0, it_->decl_length());
-    ast::ItemSema v{root.id, b_.seq(std::span<const ast::DeclSema>(decls_))};
+    NodeId root = tree_;
+    if (root == NodeId::none) {
+      std::vector<ast::Child> cs;
+      for (const Ex& d : declarators_) cs.push_back(sema::Sema::at(d, 0));
+      root = s_.node(ast::DeclGroup{b_.list(cs)}, 0, it_->decl_length()).id;
+    }
+    ast::ItemSema v{root, b_.seq(std::span<const ast::DeclSema>(decls_))};
     out_.value = b_.commit(v);
     return std::move(out_);
   }
@@ -237,6 +283,12 @@ private:
     ps_.set_linkage(lang);
     if (ps_.is(Tk::semi)) {
       ps_.bump();
+      return;
+    }
+    if (ps_.is(Tk::kw_static_assert)) {
+      Ex sa = ps_.static_assert_declaration();
+      tree_ = sa.id;
+      if (!ps_.at_end()) s_.diag(ps_.pos(), Diag::unexpected_token, ps_.kind());
       return;
     }
     if (!Parser::starts_decl_specifier(ps_.kind())) {
@@ -278,11 +330,12 @@ private:
 
   // One init-declarator at namespace scope.
   // One init-declarator at namespace scope; false after an error that leaves no record.
-  bool declare(const DeclSpec& spec, const parse::Declarator& d, LangLinkage lang, bool explicit_lang,
+  bool declare(const DeclSpec& spec, parse::Declarator d, LangLinkage lang, bool explicit_lang,
                bool is_function_def) {
     sema::Types& types = s_.types();
     u32 ord = static_cast<u32>(decls_.size());
     bool fn = types.is_function(d.type);
+    if (!fn && spec.is_constexpr) d.type = types.add_cv(d.type, sema::Cv::const_);  // [dcl.constexpr]
     ast::DeclSema sem{};
     sem.kind = fn ? ast::DeclKind::function : ast::DeclKind::variable;
     sem.type = d.type;
@@ -298,9 +351,18 @@ private:
     u16 flags = 0;
     if (spec.is_inline) flags |= sema::decl_flag::inline_;
     if (spec.is_constexpr) flags |= sema::decl_flag::constexpr_;
-    if (spec.is_constexpr) {
-      s_.diag(spec.begin, Diag::not_supported, Tk::kw_constexpr);
+    if (spec.is_constinit && fn) {
+      s_.diag(spec.begin, Diag::constinit_automatic);  // [dcl.constinit]/1
+      return false;
     }
+    if (spec.is_consteval && !fn) {
+      s_.diag(spec.begin, Diag::consteval_not_function);  // [dcl.constexpr]/1
+      return false;
+    }
+    // [dcl.constexpr]/1: a constexpr or consteval function is inline; a constexpr variable const.
+    if (fn && (spec.is_constexpr || spec.is_consteval)) flags |= sema::decl_flag::inline_;
+    if (spec.is_consteval) flags |= sema::decl_flag::consteval_;
+
     bool has_init = ps_.is(Tk::equal) || ps_.is(Tk::l_brace) || (!fn && ps_.is(Tk::l_paren));
     bool definition = fn ? is_function_def : !(spec.is_extern && !has_init);
     if (definition) flags |= sema::decl_flag::definition;
@@ -362,6 +424,15 @@ private:
         return false;
       }
       sem.linkage = p.linkage;
+      // [dcl.constexpr]/1: every declaration of a function says constexpr, or consteval, or neither.
+      if (fn && (p.flags & sema::decl_flag::consteval_) != (flags & sema::decl_flag::consteval_)) {
+        s_.diag(d.name_at, Diag::consteval_redeclared, d.name);
+        return false;
+      }
+      if (fn && (p.flags & sema::decl_flag::constexpr_) != (flags & sema::decl_flag::constexpr_)) {
+        s_.diag(d.name_at, Diag::constexpr_redeclared, d.name);
+        return false;
+      }
       if (definition && std::ranges::any_of(prior, [](const ast::DeclSema& o) { return o.flags & sema::decl_flag::definition; })) {
         s_.diag(d.name_at, Diag::redefinition, d.name);
         return false;
@@ -381,6 +452,7 @@ private:
 
     // The initializer ([dcl.init]); the name is in scope from the end of its declarator.
     s_.own.push_back({d.name, sem});
+    p_->declared(sem, k_);
     Ex init;
     sema::ConstId value = sema::ConstId::none;
     if (fn && has_init && !is_function_def) {
@@ -395,17 +467,25 @@ private:
         init = s_.convert(e, d.type, e.begin);
         if (init.ok()) {
           // [basic.start.static]: constant initialization, or dynamic, which the α subset lacks.
-          if (auto v = sema::Folder(s_, q_).fold(init)) {
-            value = *v;
-            if (sema::Types::is_const(d.type) && types.is_integral(d.type)) p_->set_constant(sem.entity, *v);
+          // A constexpr or constinit variable must be constant-initialized ([dcl.constexpr],
+          // [dcl.constinit]); a constexpr one, and a const integral one that is, are usable in
+          // constant expressions ([expr.const]).
+          sema::Evaluated v = sema::Evaluator(s_, q_).evaluate(init);
+          if (v.value) {
+            value = *v.value;
+            if (spec.is_constexpr || (sema::Types::is_const(d.type) && types.is_integral(d.type)))
+              p_->set_constant(sem.entity, *v.value);
           } else {
-            s_.diag(e.begin, Diag::nonconstant_initializer);
+            s_.diag(e.begin, spec.is_constexpr || spec.is_constinit ? Diag::not_constant : Diag::nonconstant_initializer,
+                    v.reason);
           }
         }
       }
     } else if (!fn && (ps_.is(Tk::l_paren) || ps_.is(Tk::l_brace))) {
       s_.diag(ps_.pos(), Diag::not_supported, ps_.kind());
       ps_.skip_to_semi();
+    } else if (!fn && spec.is_constexpr) {
+      s_.diag(d.name_at, Diag::constexpr_uninitialized, d.name);
     } else if (!fn && sema::Types::is_const(d.type) && !spec.is_extern) {
       s_.diag(d.name_at, Diag::const_uninitialized, d.name);
     }
@@ -426,6 +506,8 @@ private:
     if (!ok) s_.diag(d.name_at, Diag::main_parameters);
     if (spec.is_static) s_.diag(spec.begin, Diag::main_specifier, Tk::kw_static);
     if (spec.is_inline) s_.diag(spec.begin, Diag::main_specifier, Tk::kw_inline);
+    if (spec.is_constexpr) s_.diag(spec.begin, Diag::main_specifier, Tk::kw_constexpr);
+    if (spec.is_consteval) s_.diag(spec.begin, Diag::main_specifier, Tk::kw_consteval);
     if (lang == LangLinkage::c) s_.diag(d.name_at, Diag::main_linkage);
   }
 
@@ -439,6 +521,7 @@ private:
   Parser ps_;
   std::vector<ast::DeclSema> decls_;
   std::vector<Ex> declarators_;
+  NodeId tree_ = NodeId::none;  // the root when it is not a DeclGroup (a static_assert)
 };
 
 const Result<ast::ItemSema>& Program::item_sema(u32 item) {
@@ -478,6 +561,8 @@ public:
     Ex root;
     if (f && f->entity != EntityId::none && f->kind == ast::DeclKind::function) {
       s_.set_return_type(s_.types().rec(f->type).inner);
+      // A consteval function's body is an immediate function context ([expr.const]).
+      if (f->flags & sema::decl_flag::consteval_) s_.immediate_context = 1;
       // The parameters are the first locals, in their own scope ([basic.scope.param]).
       s_.push_scope();
       s_.guard_scope();
@@ -512,6 +597,33 @@ private:
 const Result<ast::BodySema>& Program::analyze_body(u32 item) {
   if (!body_cells_[item]) body_cells_[item] = BodyAnalysis(*this, item).run();
   return *body_cells_[item];
+}
+
+interp::Callee Program::function_ir(EntityId f, u32 item) {
+  interp::Callee c;
+  c.is_constexpr = is_constexpr(f);
+  auto def = definitions_.find(std::to_underlying(f));
+  if (def == definitions_.end() || def->second >= item) return c;
+  u32 k = def->second;
+  if (!irs_.contains(k)) {
+    // A body with errors has no L1: the evaluation stops at the call.
+    const Result<ast::BodySema>& body = analyze_body(k);
+    std::optional<irgen::FunctionIr> ir;
+    const ast::ItemSema& is = item_sema(k).value;
+    if (body.diags.empty() && body.value.tree != NodeId::none && w_->ins.seqs.size(is.decls) > 0) {
+      ast::DeclSema d = w_->ins.seqs.at(is.decls, 0);
+      const items::Item& it = items_->items[k];
+      irgen::FunctionInput input{d.entity, d, body.value, id(k), it.body_begin - it.begin};
+      AtItem q(*this, k, true);
+      sema::EvalFacts facts(*w_, q);
+      if (auto r = irgen::function_ir(w_->ins, input, facts)) ir = std::move(*r);
+    }
+    irs_.emplace(k, std::move(ir));
+  }
+  const auto& ir = irs_.at(k);
+  if (!ir) c.unsupported = true;
+  else c.body = &ir->body;
+  return c;
 }
 
 // ---------------------------------------------------------------- one file, for the driver

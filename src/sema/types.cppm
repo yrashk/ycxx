@@ -170,8 +170,8 @@ private:
 enum class ValueKind : u8 { integer, string, address, null_pointer, other };
 
 // A constant read out by value (§5.5): an integer of an integral type (`VInt`, its low 64 bits),
-// a string literal object's code units (`VString`), the address of one plus an offset
-// (`VLvalue`), or a null pointer (`VNullptr`).
+// a string literal object's code units (`VString`), the address of one or of an entity
+// (`VEntity`) plus an offset (`VLvalue`), or a null pointer (`VNullptr`).
 struct ValueRec {
   ValueKind kind = ValueKind::other;
   QualType type{};
@@ -196,6 +196,8 @@ public:
     return ins_->intern_value(ast::VLvalue{base, ins_->intern_seq(std::span<const u32>{}), offset});
   }
   ConstId null_pointer(QualType) { return ins_->intern_value(ast::VNullptr{}); }
+  // A declared object or function as the base of an address (§5.5).
+  ConstId entity(EntityId e) { return ins_->intern_value(ast::VEntity{e}); }
 
   ValueRec rec(ConstId c) const {
     const ast::Values& v = ins_->values;

@@ -38,6 +38,8 @@ struct DeclSpec {
   bool is_extern = false;
   bool is_inline = false;
   bool is_constexpr = false;
+  bool is_consteval = false;
+  bool is_constinit = false;
   bool ok = true;
 };
 
@@ -165,6 +167,8 @@ public:
         break;
       case Tk::kw_inline: once(d.is_inline, k); break;
       case Tk::kw_constexpr: once(d.is_constexpr, k); break;
+      case Tk::kw_consteval: once(d.is_consteval, k); break;
+      case Tk::kw_constinit: once(d.is_constinit, k); break;
       default:
         if (starts_decl_specifier(k)) {
           s_->diag(pos(), Diag::not_supported, k);
@@ -178,6 +182,10 @@ public:
   done:
     if (d.is_static && d.is_extern) {  // [dcl.stc]/1
       s_->diag(d.begin, Diag::storage_class_conflict);
+      d.ok = false;
+    }
+    if (int(d.is_constexpr) + int(d.is_consteval) + int(d.is_constinit) > 1) {  // [dcl.spec]/2
+      s_->diag(d.begin, Diag::constexpr_specifiers);
       d.ok = false;
     }
     // [dcl.type.general]: the combinations of simple-type-specifiers, as in its table.
@@ -319,7 +327,7 @@ public:
         Suffix s;
         // [dcl.array]: a converted constant expression of integral type.
         Ex e = s_->promote(constant_expression());
-        auto v = sema::Folder(*s_, questions()).fold(e);
+        auto v = sema::Evaluator(*s_, questions()).evaluate(e).value;
         if (!v || s_->world().values.rec(*v).kind != sema::ValueKind::integer || i64_of(*v) <= 0) {
           if (e.ok()) s_->diag(at + 1, Diag::bound_not_constant);
           ok = false;
@@ -629,7 +637,7 @@ public:
           } while (accept(Tk::comma));
         }
         if (!expect(Tk::r_paren)) return {NodeId::none, e.begin, pos()};
-        e = s_->call(e, std::move(args), pos(), at);
+        e = immediate(s_->call(e, std::move(args), pos(), at));
         break;
       }
       case Tk::l_square: {
@@ -790,8 +798,8 @@ public:
     case Tk::kw_default:
     case Tk::kw_goto:
     case Tk::kw_try:
+    case Tk::kw_static_assert: return static_assert_declaration();
     case Tk::kw_co_return:
-    case Tk::kw_static_assert:
     case Tk::kw_using:
     case Tk::kw_namespace:
     case Tk::kw_asm:
@@ -835,7 +843,8 @@ public:
   Ex if_statement() {
     u32 begin = pos();
     bump();
-    if (is(Tk::kw_constexpr) || is(Tk::kw_consteval) || is(Tk::exclaim)) {
+    if (is(Tk::kw_consteval) || (is(Tk::exclaim) && kind(1) == Tk::kw_consteval)) return if_consteval(begin);
+    if (is(Tk::kw_constexpr) || is(Tk::exclaim)) {
       s_->diag(pos(), Diag::not_supported, kind());
       skip_statement();
       return {NodeId::none, begin, pos()};
@@ -848,6 +857,77 @@ public:
     s_->pop_scope();
     return s_->node(ast::If{{}, sema::Sema::at(cond, begin), sema::Sema::at(then_, begin), sema::Sema::at(else_, begin)},
                     begin, pos());
+  }
+
+  // `if !opt consteval compound-statement else statement` ([stmt.if]): both substatements are
+  // compound statements. The branch taken when manifestly constant-evaluated is an immediate
+  // function context ([expr.const]).
+  Ex if_consteval(u32 begin) {
+    bool negated = accept(Tk::exclaim);
+    bump();  // consteval
+    auto branch = [&](bool immediate) -> Ex {
+      if (!is(Tk::l_brace)) {
+        s_->diag(pos(), Diag::expected_token, Tk::l_brace);
+        skip_statement();
+        return {NodeId::none, pos(), pos()};
+      }
+      s_->immediate_context += immediate;
+      Ex b = compound_statement();
+      s_->immediate_context -= immediate;
+      return b;
+    };
+    Ex then_ = branch(!negated);
+    Ex else_;
+    if (accept(Tk::kw_else)) else_ = branch(negated);
+    return s_->node(ast::IfConsteval{negated, sema::Sema::at(then_, begin), sema::Sema::at(else_, begin)}, begin, pos());
+  }
+
+  // `static_assert ( constant-expression , string-literal opt ) ;` ([dcl.pre]): the condition,
+  // contextually converted to bool, must be a constant expression whose value is true.
+  Ex static_assert_declaration() {
+    u32 begin = pos();
+    bump();
+    if (!expect(Tk::l_paren)) {
+      skip_to_semi();
+      return {NodeId::none, begin, pos()};
+    }
+    Ex e = constant_expression();
+    Ex cond = s_->to_bool(e, e.begin);
+    sema::ConstId message = sema::ConstId::none;
+    if (accept(Tk::comma)) {
+      Ex m = is(Tk::string_lit) ? primary_expression() : Ex{};
+      auto lit = s_->as<ast::Literal>(m);
+      if (!lit || s_->world().values.rec(lit->value).kind != sema::ValueKind::string) {
+        if (m.ok() || !is(Tk::string_lit)) s_->diag(m.ok() ? m.begin : pos(), Diag::not_supported, kind());
+        skip_to_semi();
+        return {NodeId::none, begin, pos()};
+      }
+      message = lit->value;
+    }
+    bool ok = expect(Tk::r_paren);
+    if (!expect(Tk::semi)) skip_to_semi();
+    if (!cond.ok() || !ok) return {NodeId::none, begin, pos()};
+    sema::Evaluated v = sema::Evaluator(*s_, questions()).evaluate(cond);
+    if (!v.value) {
+      s_->diag(e.begin, Diag::not_constant, v.reason);
+    } else if (s_->world().values.rec(*v.value).bits == 0) {
+      if (message == sema::ConstId::none) s_->diag(begin, Diag::static_assert_failed);
+      else s_->diag(begin, Diag::static_assert_failed_message, message);
+    }
+    return s_->node(ast::StaticAssert{sema::Sema::at(cond, begin), message}, begin, pos());
+  }
+
+  // A call to a consteval function outside an immediate function context is an immediate
+  // invocation: it must be a constant expression, and it is replaced by its value ([expr.const]).
+  Ex immediate(Ex call) {
+    auto c = s_->as<ast::Call>(call);
+    if (!c || c->function == ast::EntityId::none || !s_->is_consteval(c->function) || s_->immediate_context) return call;
+    sema::Evaluated v = sema::Evaluator(*s_, questions()).evaluate(call);
+    if (!v.value) {
+      s_->diag(call.begin, Diag::not_constant, v.reason);
+      return {NodeId::none, call.begin, call.end};
+    }
+    return s_->literal(call.type(), *v.value, ast::ValueCategory::prvalue, call.begin, call.end);
   }
 
   // `( condition )` ([stmt.pre]), converted to bool. A condition that declares a variable is
@@ -964,10 +1044,19 @@ public:
   Ex declaration_statement() {
     u32 begin = pos();
     DeclSpec spec = decl_specifiers();
-    if (spec.is_static || spec.is_extern || spec.is_inline || spec.is_constexpr) {
+    if (spec.is_static || spec.is_extern || spec.is_inline) {
       s_->diag(begin, Diag::not_supported,
-               spec.is_static ? Tk::kw_static : spec.is_extern ? Tk::kw_extern : spec.is_inline ? Tk::kw_inline
-                                                                                                : Tk::kw_constexpr);
+               spec.is_static ? Tk::kw_static : spec.is_extern ? Tk::kw_extern : Tk::kw_inline);
+      skip_to_semi();
+      return {NodeId::none, begin, pos()};
+    }
+    if (spec.is_constinit) {
+      s_->diag(begin, Diag::constinit_automatic);  // [dcl.constinit]/1
+      skip_to_semi();
+      return {NodeId::none, begin, pos()};
+    }
+    if (spec.is_consteval) {
+      s_->diag(begin, Diag::consteval_not_function);
       skip_to_semi();
       return {NodeId::none, begin, pos()};
     }
@@ -989,6 +1078,8 @@ public:
         skip_to_semi();
         return {NodeId::none, begin, pos()};
       }
+      // [dcl.constexpr]: a constexpr variable is const.
+      if (spec.is_constexpr) d.type = s_->types().add_cv(d.type, sema::Cv::const_);
       u32 local = s_->declare_local(d.name, d.type, 0, d.name_at);
       Ex init;
       if (accept(Tk::equal)) {
@@ -1002,11 +1093,21 @@ public:
           s_->diag(dbegin, Diag::not_supported, Tk::l_square);  // array initialization
         } else {
           init = s_->convert(e, d.type, e.begin);
+          // A constexpr variable, or a const integral one with a constant initializer, is usable
+          // in constant expressions ([expr.const]); a constexpr one must have one ([dcl.constexpr]).
+          bool usable_kind = sema::Types::is_const(d.type) && s_->types().is_integral(d.type);
+          if (init.ok() && (spec.is_constexpr || usable_kind)) {
+            sema::Evaluated v = sema::Evaluator(*s_, questions()).evaluate(init);
+            if (v.value) s_->set_local_value(local, *v.value);
+            else if (spec.is_constexpr) s_->diag(e.begin, Diag::not_constant, v.reason);
+          }
         }
       } else if (is(Tk::l_paren) || is(Tk::l_brace)) {
         s_->diag(pos(), Diag::not_supported, kind());
         skip_to_semi();
         return {NodeId::none, begin, pos()};
+      } else if (spec.is_constexpr) {
+        s_->diag(d.name_at, Diag::constexpr_uninitialized, d.name);
       } else if (sema::Types::is_const(d.type)) {
         s_->diag(d.name_at, Diag::const_uninitialized, d.name);
       }
@@ -1020,7 +1121,8 @@ public:
     return s_->node(ast::DeclStmt{s_->builder().list(cs)}, begin, pos());
   }
 
-  // The questions sema's constant folder may ask (for array bounds); set by the owner.
+  // The questions constant evaluation asks (array bounds, constexpr, static_assert); set by the
+  // owner.
   void set_questions(sema::Questions& q) { q_ = &q; }
   sema::Questions& questions() { return *q_; }
 

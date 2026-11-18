@@ -2,11 +2,13 @@
 // carries its severity and message as an annotation, so the table is derived by reflection, as
 // the lexer's is (ycxx.lex:diag). A diagnostic is located at `Loc{item, token offset}` (ast.md
 // §8.2) and its arguments are integers or handles: `{N}` is argument N in decimal, `{N:n}` a
-// `NameId`'s spelling, `{N:t}` a `QualType` as written, `{N:k}` a token kind's spelling.
+// `NameId`'s spelling, `{N:t}` a `QualType` as written, `{N:k}` a token kind's spelling, `{N:c}`
+// a string literal constant's text, `{N:r}` why an evaluation is not constant (`reason_arg`).
 export module ycxx.sema:diag;
 
 import std;
 import ycxx.engine;
+import ycxx.interp;
 import ycxx.lex;
 
 export namespace ycxx::sema {
@@ -48,7 +50,17 @@ enum class Diag : std::uint32_t {
   overload_not_supported [[=message{Severity::error, "overloading '{0:n}' is not supported yet"}]],
   linkage_conflict [[=message{Severity::error, "'{0:n}' was declared with a different language linkage"}]],
   unknown_linkage [[=message{Severity::error, "unknown language linkage; only \"C\" and \"C++\" are known"}]],
-  nonconstant_initializer [[=message{Severity::error, "dynamic initialization of a namespace-scope variable is not supported yet"}]],
+  nonconstant_initializer [[=message{Severity::error, "dynamic initialization of a namespace-scope variable is not supported yet: {0:r}"}]],
+  // [dcl.constexpr], [dcl.pre], [expr.const]
+  not_constant [[=message{Severity::error, "not a constant expression: {0:r}"}]],
+  static_assert_failed [[=message{Severity::error, "static assertion failed"}]],
+  static_assert_failed_message [[=message{Severity::error, "static assertion failed: {0:c}"}]],
+  constexpr_uninitialized [[=message{Severity::error, "constexpr variable '{0:n}' must be initialized"}]],
+  constexpr_specifiers [[=message{Severity::error, "at most one of 'constexpr', 'consteval' and 'constinit' may appear"}]],
+  consteval_not_function [[=message{Severity::error, "'consteval' can only declare a function"}]],
+  constinit_automatic [[=message{Severity::error, "'constinit' can only declare a variable with static storage duration"}]],
+  consteval_redeclared [[=message{Severity::error, "'{0:n}' is declared both 'consteval' and not"}]],
+  constexpr_redeclared [[=message{Severity::error, "'{0:n}' is declared both 'constexpr' and not"}]],
   // [basic.start.main]
   main_return_type [[=message{Severity::error, "'main' must return 'int'"}]],
   main_parameters [[=message{Severity::error, "'main' must have no parameters or (int, char**)"}]],
@@ -83,6 +95,18 @@ enum class Diag : std::uint32_t {
   return_missing_value [[=message{Severity::error, "a non-void function must return a value"}]],
   redeclared_local [[=message{Severity::error, "redefinition of '{0:n}'"}]],
 };
+
+// A `{N:r}` argument: why an evaluation was not constant. 0 is an expression the front end
+// cannot turn into L1 yet; otherwise the interpreter's reason plus one, and its argument above.
+constexpr std::uint64_t reason_arg(const interp::Failure& f) {
+  return (f.arg << 8) | (std::uint64_t(std::to_underlying(f.reason)) + 1);
+}
+inline constexpr std::uint64_t reason_unsupported = 0;
+
+inline std::string spell_reason(std::uint64_t raw) {
+  if (raw == reason_unsupported) return "the expression cannot be evaluated yet";
+  return interp::message({interp::Reason(std::uint8_t((raw & 0xff) - 1)), raw >> 8, {}});
+}
 
 inline constexpr std::uint32_t sema_diag_base = 0x2000;
 
@@ -132,7 +156,7 @@ std::string render(Diag d, std::span<const std::uint64_t> args, Spell&& spell) {
     std::uint64_t v = n < args.size() ? args[n] : 0;
     char how = spec.size() > 2 ? spec[2] : 'd';
     if (how == 'k') out += lex::spelling(lex::Tk(v));
-    else if (how == 'n' || how == 't') out += spell(how, v);
+    else if (how == 'n' || how == 't' || how == 'c' || how == 'r') out += spell(how, v);
     else out += std::format("{}", v);
     i = close;
   }

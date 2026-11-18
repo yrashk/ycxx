@@ -56,6 +56,11 @@ struct FunctionInput {
   ast::BodySema body{};
   ast::ItemId item{};
   std::uint32_t body_offset = 0;  // the declaration part's length in tokens
+  // For the thunk of a constant expression (`{ return e; }`, query-engine.md §B7): the values of
+  // the enclosing function's locals usable in constant expressions ([expr.const]), by local
+  // index. Each becomes a const object of the thunk, made at its entry; a local without a value
+  // cannot be named.
+  std::span<const std::optional<ast::ConstId>> local_values{};
 };
 
 struct FunctionIr {
@@ -248,6 +253,14 @@ class Gen {
       start_lifetime(p);
       slots_[i] = p;
     }
+    for (uint32_t i = 0; i < fn_.local_values.size() && i < slots_.size(); ++i) {
+      if (!fn_.local_values[i]) continue;
+      ast::QualType t = in_.seqs.at(fn_.body.locals, i).type;
+      Place p = begin_object(t, ir::Init::indeterminate);
+      store(p, constant(t, *fn_.local_values[i]));
+      start_lifetime(p);
+      slots_[i] = p;
+    }
     stmt({fn_.body.tree, fn_.body_offset});
     if (live_) {
       // Flowing off the end ([stmt.return]): `main` returns 0 ([basic.start.main]); any other
@@ -340,6 +353,10 @@ class Gen {
       ret_(v);
     } else if (is<ast::If>(a)) {
       if_(a);
+    } else if (is<ast::IfConsteval>(a)) {
+      if_consteval(a);
+    } else if (is<ast::StaticAssert>(a)) {
+      // Checked when it was analysed; it has no effect ([dcl.pre]).
     } else if (is<ast::While>(a)) {
       auto w = get<ast::While>(a);
       loop(a, ast::Child{}, w.condition, ast::Child{}, w.body, false);
@@ -399,6 +416,26 @@ class Gen {
     }
     enter(join);
     pop_scope();
+  }
+
+  // [stmt.if]: the first substatement on `consteval_br`'s consteval edge, the second on its
+  // runtime edge; `if !consteval` swaps them.
+  void if_consteval(At a) {
+    auto s = get<ast::IfConsteval>(a);
+    ir::BlockId then_b = new_block(), join = new_block();
+    ir::BlockId else_b = s.else_.id != NodeId::none ? new_block() : join;
+    ir::SuccRef succs[] = {edge(s.negated ? else_b : then_b), edge(s.negated ? then_b : else_b)};
+    emit(ir::Op::consteval_br, {}, {}, {}, 0, succs);
+    live_ = false;
+    enter(then_b);
+    substmt(child(a, s.then_));
+    if (live_) br(join);
+    if (s.else_.id != NodeId::none) {
+      enter(else_b);
+      substmt(child(a, s.else_));
+      if (live_) br(join);
+    }
+    enter(join);
   }
 
   struct Loop {
@@ -635,7 +672,8 @@ class Gen {
     using enum ast::BinaryOp;
     switch (bn.op) {
       case lt: case gt: case le: case ge: case eq: case ne: {
-        if (cls(ot) == TypeClass::pointer) {
+        // Pointers, and std::nullptr_t values (only == and !=, [expr.eq]), compare as pointers.
+        if (cls(ot) == TypeClass::pointer || cls(ot) == TypeClass::other) {
           ir::Pred p = bn.op == lt ? ir::Pred::lt : bn.op == gt ? ir::Pred::gt : bn.op == le ? ir::Pred::le
                      : bn.op == ge ? ir::Pred::ge : bn.op == eq ? ir::Pred::eq : ir::Pred::ne;
           return pure(ir::Op::ptr_cmp, t, {x, y}, {std::to_underlying(p)});
