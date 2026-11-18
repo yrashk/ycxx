@@ -62,8 +62,7 @@ build/bin/ycxx cxx hello.cpp -o hello && ./hello
 **Not yet:**
 - `#embed`, and the standard library's headers: `<cstdio>` now preprocesses, but libycxx does
   not yet know ycxx (yrashk/libycxx#17), and sema lacks namespaces.
-- Inheritance and virtual functions, passing classes by value, enums, namespaces, templates and
-  overloading.
+- Inheritance and virtual functions, passing classes by value, enums, namespaces, and templates.
 - `if constexpr`, and taking the address of a variable in a namespace-scope initializer
   (`int* p = &g;` passes the front end but not code generation yet).
 - Exceptions.
