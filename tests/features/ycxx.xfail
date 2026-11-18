@@ -2,6 +2,7 @@
 # `<test id> <reason>` per line, the reason being ycxx's first diagnostic. Most need what the α
 # subset lacks (classes, templates, the preprocessor's directives). An XPASS fails the run, so a
 # line goes when ycxx starts passing its test (tests/driver/toolchain.py: ycxx_xfails).
+diff/smoke/integer-arithmetic.diff.cpp preprocessing directives are not supported yet
 draft/basic/basic.align-1.accept.cpp 'struct' not supported yet
 draft/basic/basic.contract.eval-1.accept.cpp 'struct' not supported yet
 draft/basic/basic.contract.eval-2.accept.cpp 'constexpr' not supported yet
@@ -678,6 +679,7 @@ draft/temp/temp.variadic-4.accept.cpp 'auto' not supported yet
 draft/temp/temp.variadic-5.accept.cpp 'template' not supported yet
 draft/temp/temp.variadic-7.accept.cpp 'template' not supported yet
 draft/temp/temp.variadic-8.accept.cpp 'template' not supported yet
+own/smoke/exit-status.run.cpp preprocessing directives are not supported yet
 own/smoke/missing-semicolon.reject.cpp errors elsewhere: 'struct' not supported yet
 own/pp/include-macros.accept.cpp dynamic initialization of a namespace-scope variable is not supported yet
 own/pp/macro-decls.accept.cpp dynamic initialization of a namespace-scope variable is not supported yet

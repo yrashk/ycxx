@@ -113,6 +113,15 @@ class Parts(unittest.TestCase):
                 code, output, _ = kinds.execute(test, kinds.Ctx(REPO, cut, {}, 'clang', d / 'work', 5))
                 self.assertEqual(code, want, output)
 
+    def test_features_limited_to_hosts(self):
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            (d / 'tests' / 'features').mkdir(parents=True)
+            (d / 'tests' / 'features' / 'ycxx.txt').write_text('syntax\nrun darwin-arm64  # one target\n')
+            self.assertEqual(toolchain.ycxx_features(d, 'darwin-arm64'), {'syntax', 'run'})
+            self.assertEqual(toolchain.ycxx_features(d, 'linux-x86_64'), {'syntax'})
+            self.assertRegex(toolchain.HOST, r'^\w+-\w+$')
+
     def test_unsupported_keeps_a_failure(self):
         with tempfile.TemporaryDirectory() as d:
             state.State(d, 'b', 'clang').update({'a': ('FAIL', 1.0)}, 'c1')
@@ -134,6 +143,19 @@ class Parts(unittest.TestCase):
             parts = [t for i in (1, 2, 3) for t in listed('--shard', f'{i}/3')]
             self.assertEqual(sorted(parts), sorted(whole))
             self.assertEqual(len(parts), len(set(parts)))
+
+    def test_no_unsupported(self):
+        # An UNSUPPORTED test passes a run, but fails it with --no-unsupported, and so does a
+        # selection that runs nothing: a CI step that must run its tests cannot go green vacuously.
+        inc = 'incremental/smoke/inline-function-body.incr'  # ycxx has no "incremental" (tests/features/ycxx.txt)
+        with tempfile.TemporaryDirectory() as d:
+            def status(stage, what, *flags):
+                return subprocess.run([sys.executable, str(REPO / 'tools' / 'test'), '--cxx', 'ycxx', '--state', d,
+                                       '--no-state', '-q', *flags, stage, what], capture_output=True, text=True).returncode
+            self.assertEqual(status('wider', inc), 0)
+            self.assertEqual(status('wider', inc, '--no-unsupported'), 1)
+            self.assertEqual(status('core', inc), 0)  # the core stage selects no incremental/ test
+            self.assertEqual(status('core', inc, '--no-unsupported'), 1)
 
     def test_affected(self):
         tests = [discover.Test('own/a.run.cpp', Path(), 'own', 'run'), discover.Test('own/b.run.cpp', Path(), 'own', 'run')]

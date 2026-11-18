@@ -1,5 +1,8 @@
 # What ycxx can do today, one feature per line: syntax, preprocess, run, incremental
 # (tests/driver/toolchain.py). A test needing a feature not listed is UNSUPPORTED with that
-# reason. Add the line when ycxx starts doing the work, and the tests start counting.
+# reason. Add the line when ycxx starts doing the work, and the tests start counting. Hosts after
+# a feature limit it to them.
 syntax
 preprocess
+# ycxx builds executables for AArch64 Mach-O only (DECISIONS §1.3).
+run darwin-arm64
