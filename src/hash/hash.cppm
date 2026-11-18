@@ -36,6 +36,16 @@ class Hasher {
 public:
   constexpr explicit Hasher(std::uint32_t seed = hash_seed) noexcept : h1_(seed), h2_(seed) {}
 
+  // A local hasher serves in-memory hash tables of one process (`local_hash`): a handle whose
+  // fingerprint lives in an interner is hashed by its number, which is cheaper and needs no
+  // interner, and is never stored or compared across processes.
+  static constexpr Hasher local_hasher() noexcept {
+    Hasher h;
+    h.local_ = true;
+    return h;
+  }
+  constexpr bool local() const noexcept { return local_; }
+
   template <class Char>
     requires (sizeof(Char) == 1 && (std::integral<Char> || std::same_as<Char, std::byte>))
   constexpr Hasher& bytes(std::span<const Char> in) noexcept {
@@ -122,6 +132,7 @@ private:
   std::uint64_t len_ = 0;
   std::array<std::uint8_t, 16> buf_{};
   std::size_t fill_ = 0;
+  bool local_ = false;
 };
 
 // The fingerprint of a byte string.
@@ -214,6 +225,12 @@ template <fingerprintable T>
 constexpr void hash_append(Hasher& h, const T& v) noexcept {
   constexpr shape s = shape_of<T>();
   if constexpr (s == shape::custom) {
+    // A handle (an enumeration, or a 32-bit id) in a local hash: its number.
+    if constexpr (std::is_enum_v<T>) {
+      if (h.local()) return void(h.uint(static_cast<std::make_unsigned_t<std::underlying_type_t<T>>>(std::to_underlying(v))));
+    } else if constexpr (std::is_trivially_copyable_v<T> && sizeof(T) == 4) {
+      if (h.local()) return void(h.uint(std::bit_cast<std::uint32_t>(v)));
+    }
     hash_into(h, v);
   } else if constexpr (s == shape::fingerprint) {
     h.fp(v);
@@ -247,6 +264,15 @@ constexpr void hash_append(Hasher& h, const T& v) noexcept {
 template <fingerprintable T>
 constexpr Fp128 fingerprint(const T& v) noexcept {
   Hasher h;
+  hash_append(h, v);
+  return h.finish();
+}
+
+// A hash for in-memory tables of this process: like `fingerprint`, but handles count by their
+// numbers (`Hasher::local_hasher`). Never stored, never compared across processes or sessions.
+template <fingerprintable T>
+constexpr Fp128 local_hash(const T& v) noexcept {
+  Hasher h = Hasher::local_hasher();
   hash_append(h, v);
   return h.finish();
 }

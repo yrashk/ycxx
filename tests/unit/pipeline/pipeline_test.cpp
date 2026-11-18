@@ -149,10 +149,11 @@ struct Body {
     std::vector<ast::ParamSema> ps;
     for (auto& [name, t] : params) ps.push_back({EntityId::none, t, w.in.names.intern(name), NodeId::none, 0});
     ast::DeclSema decl{f, type, ast::DeclKind::function, ast::Linkage::external, ast::Storage::none, ast::Access::none,
-                       0, {}, NodeId::none, NodeId::none, w.in.intern_seq(std::span<const ast::ParamSema>(ps))};
+                       0, w.in.intern_seq(std::span<const NodeId>{}), NodeId::none, NodeId::none,
+                       w.in.intern_seq(std::span<const ast::ParamSema>(ps))};
     auto locs = b.seq(std::span<const ast::LocalRec>(locals));
     ast::BodySema body = b.commit(ast::BodySema{tree, locs});
-    w.tu.functions.push_back({f, decl, body, ast::ItemId(1), 0});
+    w.tu.functions.push_back({f, decl, body, w.in.items.add<ast::ItemId>(ast::seed("test item")), 0});
   }
 };
 
@@ -270,7 +271,7 @@ void unsupported_is_an_error() {
   World w;
   QualType arr = w.array(w.int_t, 4);
   EntityId v = w.entity("v", arr, false);
-  ast::Loc at{ast::ItemId(3), 2};
+  ast::Loc at{w.in.items.add<ast::ItemId>(ast::seed("test item 3")), 2};
   w.tu.variables.push_back({v, arr, ast::int_value(w.in, ast::aarch64_darwin, w.int_t, 1), at});
   auto o = pl::compile(w.tu, w.in, w.consts);
   check(!o && o.error().size() == 1 && o.error()[0].message.contains("not supported yet") && o.error()[0].at == at,
@@ -284,7 +285,7 @@ void names_only_when_used() {
   QualType fp = ast::pointer_to(w.in, w.fn(w.int_t, {w.int_t}));
   QualType fn_apply = w.fn(w.int_t, {fp, w.int_t});
   EntityId apply = w.entity("apply", fn_apply, true);
-  ast::Loc at{ast::ItemId(5), 1};
+  ast::Loc at{w.in.items.add<ast::ItemId>(ast::seed("test item 5")), 1};
   w.tu.entities.back().at = at;
   EntityId m = w.entity("main", w.fn(w.int_t, {}), true);
   {

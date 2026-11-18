@@ -350,10 +350,13 @@ one import `ycxx.ast`; unit tests in `tests/unit/ast` (run by ctest, see docs/TE
     (some with lists, names and blocks longer than a storage block) from 8 threads in shuffled
     orders and compares with a single-threaded run; `unit.ast_store` covers the storage.
 - **Fingerprints** (`fingerprint.cppm`): a thin adapter over `ycxx.hash` (#14); `Fp128` is
-  `ycxx::Fp128`. Not done yet: ADL `hash_into` for the AST handles. Without it,
-  `ycxx::fingerprint(v)` hashes a handle by its number, so engine keys that hold AST handles must
-  not be fingerprinted that way. `hash_into` needs to reach the process-wide `Interners`, which
-  the engine has to provide.
+  `ycxx::Fp128`.
+  - A handle's `hash_into` (`handles.cppm`, #68) appends its interner's Merkle fingerprint. It
+    reaches the `Interners` bound on the thread (`ast::BindInterners`; `pipeline::Bind` binds a
+    session's), and fingerprinting a handle with none bound violates a contract.
+  - The engine's in-memory tables use `local_hash`, which counts a handle by its number.
+  - Handles serialize by number; the persistent cache (#17) maps them through fingerprints.
+  - `unit.ast_fingerprints` (mutation-checked): different interning orders, equal fingerprints.
 - **Frame builder** (`builder.cppm`): drafts in the frame's arena (a `std::pmr` resource).
   `commit(value)` interns what the value reaches, bottom-up, so abandoned drafts leave nothing
   (§9.3). Lists of records that hold nodes are drafts; other lists are interned eagerly.
