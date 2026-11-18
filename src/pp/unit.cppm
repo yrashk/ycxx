@@ -41,6 +41,7 @@ public:
     FileId file{};
     u32 presumed = 0;
     u32 found_dir = 0;
+    bool root = false;  // a main file: `#pragma once` there is diagnosed, not applied
     Fp128 content;
     auto operator<=>(const Key&) const = default;
   };
@@ -68,8 +69,8 @@ public:
 struct Tree {
   std::shared_ptr<const FileRegion> builtins;
   std::shared_ptr<const FileRegion> main;
-  std::vector<std::pair<FileId, u32>> builtins_bindings;
-  std::vector<std::pair<FileId, u32>> main_bindings;
+  std::vector<RootBinding> builtins_bindings;
+  std::vector<RootBinding> main_bindings;
 };
 
 inline constexpr std::size_t max_include_depth = 200;
@@ -120,12 +121,12 @@ private:
     // Bindings: by name, and where each is as the includer sees it (the TU, for a root).
     std::unordered_map<u32, u32> binding_index;
     std::vector<Bound> parent_bounds;
-    std::vector<std::pair<FileId, u32>> root_bindings;
+    std::vector<RootBinding> root_bindings;
   };
 
   // --- regions ---------------------------------------------------------------------------------
 
-  std::shared_ptr<const FileRegion> enter_root(FileId file, std::string_view presumed, std::vector<std::pair<FileId, u32>>& bindings) {
+  std::shared_ptr<const FileRegion> enter_root(FileId file, std::string_view presumed, std::vector<RootBinding>& bindings) {
     const Files::Content* c = s_->files.content(file);
     if (!c) return nullptr;
     std::vector<Bound> ignored;
@@ -135,15 +136,16 @@ private:
   // The region of `file` here: a cached one whose trace verifies, or a new one. `bounds` gets its
   // bindings as the current region sees them, or `root` as the TU does.
   std::shared_ptr<const FileRegion> enter(FileId file, std::string_view presumed, u32 found_dir, const Files::Content& c,
-                                          std::vector<Bound>& bounds, std::vector<std::pair<FileId, u32>>* root = nullptr) {
-    Session::Key key{file, s_->spellings.name(presumed), found_dir, c.fp};
+                                          std::vector<Bound>& bounds, std::vector<RootBinding>* root = nullptr) {
+    Session::Key key{file, s_->spellings.name(presumed), found_dir, root != nullptr, c.fp};
     if (auto it = s_->cache.find(key); it != s_->cache.end()) {
       for (const std::shared_ptr<const FileRegion>& r : it->second) {
-        if (verifies(*r)) {
+        // The nesting limit is part of the value: a region reused deeper must still fit.
+        if (frames_.size() + r->depth <= max_include_depth && verifies(*r)) {
           // Its bindings are the entry state's definitions.
           for (u32 name : r->bindings) {
             const MacroDef& d = *macros_.at(name);
-            if (root) root->emplace_back(d.file, d.offset);
+            if (root) root->push_back({d.file, d.file_name, d.offset});
             else bounds.push_back(bound_for(frames_.size() - 1, name, d));
           }
           reuse(*r);
@@ -235,6 +237,8 @@ private:
     }
     r.once.assign(f.once_touched.begin(), f.once_touched.end());
     r.fatal = fatal_;
+    for (const Include& i : r.includes)
+      if (i.region) r.depth = std::max(r.depth, i.region->depth + 1);
     return std::make_shared<const FileRegion>(std::move(r));
   }
 
@@ -277,7 +281,7 @@ private:
   // history defined it, else its binding.
   Bound bound_for(std::size_t k, u32 name, const MacroDef& d) {
     Frame& f = *frames_[k];
-    if (f.touched.contains(name)) return Bound{file_index(f, d.file), d.offset, false, 0};
+    if (f.touched.contains(name)) return Bound{file_index(f, d.file, d.file_name), d.offset, false, 0};
     return Bound{0, 0, true, bind(k, name, d)};
   }
   // Region `k`'s binding of `name`, made when it first uses the entry state's definition.
@@ -288,7 +292,7 @@ private:
     contract_assert(b < bound_file);
     f.out.bindings.push_back(name);
     f.binding_index.emplace(name, b);
-    if (k == 0) f.root_bindings.emplace_back(d.file, d.offset);
+    if (k == 0) f.root_bindings.push_back({d.file, d.file_name, d.offset});
     else f.parent_bounds.push_back(bound_for(k - 1, name, d));
     return b;
   }
@@ -307,7 +311,16 @@ private:
   void report(Frame& f, u32 offset, lex::LexDiag kind, u64 a = 0, u64 b = 0) {
     f.out.diags.push_back({0, offset, kind, {a, b}});
   }
-  void report(Frame& f, const PTok& at, lex::LexDiag kind, u64 a = 0, u64 b = 0) { report(f, at.loc.offset, kind, a, b); }
+  // At a token's site in the file: a replaced token is reported where its expansion began.
+  void report(Frame& f, const PTok& at, lex::LexDiag kind, u64 a = 0, u64 b = 0) { report(f, site(f, at), kind, a, b); }
+  static u32 site(const Frame& f, const PTok& t) {
+    TokLoc l = t.loc;
+    while (l.expansion != 0) {
+      const Expansion& e = f.out.expansions[l.expansion];
+      l = TokLoc{e.site_file, e.parent, e.site_offset};
+    }
+    return l.offset;
+  }
 
   // A lexer token as a phase-4 token: spellings moved to the session's table.
   PTok convert(Frame& f, const lex::PpToken& t) {
@@ -429,11 +442,11 @@ private:
     }
   }
 
-  u16 file_index(Frame& f, FileId file) {
+  u16 file_index(Frame& f, FileId file, u32 name) {
     auto [it, fresh] = f.file_index.emplace(file, u16(f.out.files.size()));
     if (fresh) {
       f.out.files.push_back(file);
-      f.out.file_names.push_back(s_->spellings.name(s_->files.path(file)));
+      f.out.file_names.push_back(name);
     }
     return it->second;
   }
@@ -538,6 +551,7 @@ private:
     auto def = std::make_shared<MacroDef>();
     def->name = name->tok.payload;
     def->file = f.file;
+    def->file_name = f.out.presumed;
     def->offset = name->loc.offset;
     for (std::size_t i = 1; i < line.size(); ++i) {
       if (line[i].tok.kind == Tk::hashhash) {
@@ -594,6 +608,7 @@ private:
     Passthrough p{static_cast<u32>(f.out.tokens.size()), {}};
     p.tokens.push_back(hash);
     p.tokens.push_back(word);
+    p.tokens.back().tok.flags &= u8(~tok_flag::space_before);  // `#pragma`, as Clang prints it
     p.tokens.insert(p.tokens.end(), line.begin(), line.end());
     f.out.passthrough.push_back(std::move(p));
   }
@@ -675,7 +690,9 @@ private:
     u32 at = static_cast<u32>(f.out.tokens.size());
     std::vector<Bound> bounds;
     std::shared_ptr<const FileRegion> child = enter(r->file, presumed, r->dir, *c, bounds);
-    f.out.includes.push_back(Include{at, d.loc.offset, std::move(child), std::move(bounds)});
+    // Placed after the directive's own diagnostics, at its last token.
+    u32 end = line.empty() ? site(f, h) : site(f, line.back());
+    f.out.includes.push_back(Include{at, end, std::move(child), std::move(bounds)});
   }
 
   // A directive's tokens, fully macro-replaced; replacement does not read past them.

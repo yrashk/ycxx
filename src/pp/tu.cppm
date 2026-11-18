@@ -40,9 +40,9 @@ public:
   // Where a region's bindings are in the TU: a file of its table, and the definition's offset.
   using Bindings = std::vector<std::pair<u16, u32>>;
 
-  Bindings root(const std::vector<std::pair<FileId, u32>>& defs) {
+  Bindings root(const std::vector<RootBinding>& defs) {
     Bindings b;
-    for (auto [f, offset] : defs) b.emplace_back(file(f, s_->spellings.name(s_->files.path(f))), offset);
+    for (const RootBinding& d : defs) b.emplace_back(file(d.file, d.file_name), d.offset);
     return b;
   }
 
@@ -158,9 +158,10 @@ Flat flatten(Session& s, const Tree& t) {
   if (t.main) {
     out.main = t.main->file;
     fl.first(*t.main);  // the main file is [0]
-    fl.add(*t.main, fl.root(t.main_bindings));
   }
+  // The command line's diagnostics come first, as it is preprocessed first.
   if (t.builtins && (!t.builtins->diags.empty() || !t.builtins->tokens.empty())) fl.add(*t.builtins, fl.root(t.builtins_bindings));
+  if (t.main) fl.add(*t.main, fl.root(t.main_bindings));
   return out;
 }
 

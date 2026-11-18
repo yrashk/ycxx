@@ -158,6 +158,30 @@ void reuse() {
   check(text(run(s, h, "five.cpp").region) == "int e = 4 ;", "a reused region's delta applies");
 }
 
+// What a region's value depends on beyond its trace: whether it is a main file, and how deep it
+// is nested (both found by review).
+void roots_and_depth() {
+  MemHost h;
+  h.files["h.cpp"] = "#pragma once\nint h;\n";
+  h.files["m.cpp"] = "#include \"h.cpp\"\n#include \"h.cpp\"\nint m;\n";
+  pp::Session s(h);
+  check(kinds(run(s, h, "h.cpp")) == std::vector{lex::LexDiag::pragma_once_in_main}, "#pragma once in the main file");
+  auto m = run(s, h, "m.cpp");
+  check(text(m.region) == "int h ; int m ;" && m.diags.empty(), "the same file as a header is another region");
+
+  // A chain of 150 headers fits under the limit of 200 from a main file, but not below 60 more.
+  for (int i = 1; i <= 150; ++i) h.files[std::format("c{}.h", i)] = i < 150 ? std::format("#include \"c{}.h\"\n", i + 1) : "int end;\n";
+  for (int i = 1; i <= 60; ++i) h.files[std::format("d{}.h", i)] = std::format("#include \"{}.h\"\n", i < 60 ? std::format("d{}", i + 1) : "c1");
+  h.files["a.cpp"] = "#include \"c1.h\"\n";
+  h.files["b.cpp"] = "#include \"d1.h\"\n";
+  check(text(run(s, h, "a.cpp").region) == "int end ;", "a deep chain");
+  auto deep = run(s, h, "b.cpp");
+  pp::Session cold(h);
+  auto fresh = run(cold, h, "b.cpp");
+  check(kinds(deep) == std::vector{lex::LexDiag::include_too_deep} && deep.region == fresh.region && deep.diags == fresh.diags,
+        "a region is not reused deeper than it fits");
+}
+
 // Incremental equals cold (DECISIONS §4.2): after each edit, a session that has seen every earlier
 // state gives the same region and diagnostics as a fresh session.
 void incremental_equals_cold() {
@@ -205,6 +229,7 @@ int main() {
   object_like();
   traces();
   reuse();
+  roots_and_depth();
   incremental_equals_cold();
   spacing();
   return unit::result("unit.pp");

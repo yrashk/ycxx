@@ -75,7 +75,8 @@ struct MacroDef {
   std::vector<Tok> body;
   std::vector<u32> offsets;
   FileId file{};
-  u32 offset = 0;  // of the name in the directive
+  u32 file_name = 0;  // its presumed name, a `Spellings` id
+  u32 offset = 0;     // of the name in the directive
   // The answer of `macro(name)` when this is the definition: its spelling, and its tokens' offsets
   // relative to the name, but not where it is, so a region that uses it is reused wherever an
   // equal definition is in scope (its includer binds the location).
@@ -171,6 +172,15 @@ struct FileRegion {
   std::vector<MacroChange> delta;
   std::vector<FileId> once;  // files this region (or a child) marked `#pragma once`
   bool fatal = false;        // preprocessing stopped (a missing include)
+  u32 depth = 1;             // the deepest nesting of files below it, itself included
+};
+
+// Where a root region's binding is in the TU: a file, its presumed name and the definition's
+// offset.
+struct RootBinding {
+  FileId file{};
+  u32 file_name = 0;
+  u32 offset = 0;
 };
 
 // A translation unit's tree flattened, after phases 5 and 6: what the item splitter and the
