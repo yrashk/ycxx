@@ -4,6 +4,7 @@ export module ycxx.client;
 
 import std;
 import ycxx.parse;
+import ycxx.pp;
 
 export namespace ycxx::client {
 int cxx(std::span<const std::string_view> args);
@@ -23,9 +24,19 @@ int not_yet(std::string_view front) {
 // pipeline to an executable is #43's.
 int cxx(std::span<const std::string_view> args) {
   bool syntax_only = false;
+  bool preprocess_only = false;
+  pp::Config cfg;
   std::vector<std::string_view> files;
-  for (std::string_view a : args) {
+  for (std::size_t i = 0; i < args.size(); ++i) {
+    std::string_view a = args[i];
+    auto option = pp::take_option(args, i, cfg);
+    if (!option) {
+      std::println(std::cerr, "ycxx: {}", option.error());
+      return 2;
+    }
+    if (*option) continue;
     if (a == "-fsyntax-only") syntax_only = true;
+    else if (a == "-E") preprocess_only = true;
     // The language is C++26 with reflection and contracts; what other compilers need flags for
     // is always on here.
     else if (a.starts_with("-std=") || a == "-pedantic-errors" || a == "-freflection" || a == "-fcontracts") continue;
@@ -34,11 +45,12 @@ int cxx(std::span<const std::string_view> args) {
       return 2;
     } else files.push_back(a);
   }
-  if (!syntax_only) return not_yet("c++ (only -fsyntax-only)");
+  if (!syntax_only && !preprocess_only) return not_yet("c++ (only -fsyntax-only and -E)");
   if (files.empty()) {
     std::println(std::cerr, "ycxx: no input files");
     return 2;
   }
+  pp::configure(pp::with_system_dirs(std::move(cfg)));
   int errors = 0;
   for (std::string_view f : files) {
     std::ifstream in{std::string(f), std::ios::binary};
@@ -47,6 +59,15 @@ int cxx(std::span<const std::string_view> args) {
       return 2;
     }
     std::string text{std::istreambuf_iterator<char>(in), {}};
+    if (preprocess_only) {
+      auto [out, messages] = pp::preprocess_to_text(pp::session(), text, f);
+      std::print("{}", out);
+      for (const pp::Message& m : messages) {
+        std::println(std::cerr, "{}:{}:{}: {}: {}", m.file, m.line, m.column, m.error ? "error" : "warning", m.text);
+        errors += m.error;
+      }
+      continue;
+    }
     errors += parse::check_file(f, text, std::cerr);
   }
   return errors ? 1 : 0;
