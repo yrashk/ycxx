@@ -470,6 +470,7 @@ struct MemberDeclRec {
 
 struct ClassRec {
   bool defined = false;
+  bool union_ = false;  // a union ([class.union]): its members share its storage
   std::vector<FieldRec> fields;        // in declaration order
   std::vector<MemberDeclRec> members;  // member functions and static data members
   // Special members ([special]): whether a constructor is user-declared; the destructor and the

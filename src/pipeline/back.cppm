@@ -116,6 +116,7 @@ struct Variable {
 struct ClassShape {
   EntityId entity = EntityId::none;
   std::vector<QualType> fields;
+  bool union_ = false;  // every member at offset 0 ([class.union]/2)
 };
 struct EnumShape {
   EntityId entity = EntityId::none;
@@ -521,6 +522,8 @@ ir::TypeLayout QueryLayout::type(QualType q) const {
     if (*b == ast::Builtin::void_) return {void_, 0, 1, false, {}};
     ast::BuiltinLayout l = target[*b];
     if (*b == ast::Builtin::bool_) return {boolean, l.size, l.align, false, {}};
+    // std::nullptr_t's object holds a null pointer ([basic.fundamental]/16).
+    if (*b == ast::Builtin::nullptr_t) return {pointer, l.size, l.align, false, ast::builtin(in, ast::Builtin::void_)};
     if (ast::is_integral(*b)) return {integer, l.size, l.align, ast::is_signed(target, *b), {}};
     return {other, l.size, l.align, false, {}};
   }
@@ -555,15 +558,18 @@ std::optional<ClassLayout> QueryLayout::class_layout(QualType c) const {
   if (it == classes_.end()) return std::nullopt;
   ClassLayout out;
   std::uint64_t at = 0;
+  std::uint64_t end = 0;  // past the largest member of a union
   for (QualType f : it->second->fields) {
     QualType t = in.canonical(f);
     ir::TypeLayout m = type(t);
+    if (it->second->union_) at = 0;  // [class.union]/2: the members share the union's address
     at = (at + m.align - 1) / m.align * m.align;
     out.fields.push_back({at, t});
     at += m.size;
+    end = std::max(end, at);
     out.align = std::max(out.align, m.align);
   }
-  out.size = at == 0 ? 1 : (at + out.align - 1) / out.align * out.align;
+  out.size = end == 0 ? 1 : (end + out.align - 1) / out.align * out.align;
   return out;
 }
 

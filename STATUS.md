@@ -899,6 +899,46 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   unions (the next steps of #133); a reference or pointer to an array of unknown bound; asm labels
   on class members and the other gaps of #190.
 
+## `<cstdio>`, step 4a: casts, sizeof, alignof, decltype (#133, 2026-11-18)
+
+- **Casts:** `static_cast` ([expr.static.cast]): the implicit conversions, to `void`, between
+  integers and enumerations (scoped ones too), and from `cv void*` to an object pointer;
+  functional casts `T(e)` for keyword types, enumerations and typedef-names, and C-style casts
+  `(T)e`, as static_cast does them ([expr.type.conv]/2, [expr.cast]/4). Downcasts and the
+  const_cast and reinterpret_cast parts of a C-style cast are not supported yet.
+- **sizeof, alignof** of fundamental, pointer, enumeration and array types and of an expression,
+  from `ast::Target`; a class's is #194 (sema has no `layout(C)` yet).
+- **decltype(e)** ([dcl.type.decltype]): an unparenthesized id-expression or member access names
+  its declared type, else the expression's type and value category. `decltype(auto)` is not
+  supported yet.
+- `std::nullptr_t` objects are laid out as pointers and convert to pointers; comparing two of
+  them, and the other gaps the review found, are #199.
+- A cast of a constant to an enumeration is folded to the enumeration's constant (the
+  interpreter has no enumeration-typed values yet, #25). `decltype` reads declared types from
+  the declaration that named the entity; a statement that begins with a functional cast is an
+  expression unless it can be a declaration ([stmt.ambig]).
+- Tests: `tests/own/casts` (9, three from the review). One more draft example passes.
+
+## `<cstdio>`, step 4b: unions, floating types as types, include directories (#133, 2026-11-18)
+
+- **Unions** ([class.union]): `union U { … }`, named, unnamed with a typedef-name, as members
+  and through `union U` elaborated; every member at offset 0 and the size of the largest
+  (`ClassRec::union_`, `ClassShape::union_`, `QueryLayout::class_layout`); a braced initializer
+  initializes the first member ([dcl.init.aggr]/16), with its default member initializer if it has
+  one; class template unions. A reference member is rejected. A designator naming another member,
+  a default member initializer on another member, anonymous unions and variant members with
+  non-trivial special members are diagnosed as not supported (#203).
+- **Floating types as types:** `float`, `double` and `long double` in decl-specifiers, so the
+  SDK's `typedef long double max_align_t;` declares; `sizeof`/`alignof` give their sizes. Their
+  values (literals, conversions, arithmetic) are #201 and are diagnosed, not miscompiled.
+  `__STDCPP_FLOAT16_T__` and the other extended floating-point macros are no longer defined
+  until those types work (DECISIONS §1.5; Clang does not define them either).
+- **Include directories:** a `-I` or `-isystem` directory that is one of the built-in system
+  directories is searched only at the system directory's place, as GCC and Clang do; before,
+  `-isystem deps/libycxx/include` made libycxx's `<cstddef>` find its own `<stddef.h>` again.
+- A floating local no longer stops constant evaluation in its function (the thunk skips it).
+- Tests: `tests/own/unions` (7, three from the review). Six more draft examples pass.
+
 ## Templates, ζ step 1: function templates (#88, 2026-11-18)
 
 Instantiation follows ast.md §6.4 as amended by #88 (Fable's decision): declarations and
@@ -1056,7 +1096,7 @@ session's.*
   named outside every expansion, an expansion naming no pack, and an empty fold over another
   operator are diagnosed.
 - **Mangling:** `J…E`, `Dp`, `XspT_E`; checked against Clang's symbols.
-- Tests: `tests/own/templates/p4-*`; 4 more draft examples pass. `<cstdio>`: 161 → 78 errors.
+- Tests: `tests/own/templates/p4-*`; 7 more draft examples pass. `<cstdio>`: 161 → 78 errors.
 - Not yet: template template parameters (#208); value-dependent expressions as template
   arguments, which `__int_pack_double` needs (#209); an expansion for non-pack parameters and
   per-element notes (#210); alias templates and concepts (#88); built-in type traits

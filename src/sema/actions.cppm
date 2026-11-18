@@ -693,9 +693,16 @@ public:
     if (tr.kind == TypeKind::array) {
       r.assign(tr.bound, Element{tr.inner, no_name()});
     } else if (const ClassRec* c = tr.kind == TypeKind::class_ ? class_rec(tr.entity) : nullptr) {
-      for (const FieldRec& f : c->fields) r.push_back({types().add_cv(f.type, Types::cv(t)), f.name, f.init, f.dmi});
+      for (const FieldRec& f : c->fields) {
+        r.push_back({types().add_cv(f.type, Types::cv(t)), f.name, f.init, f.dmi});
+        if (c->union_) break;  // [dcl.init.aggr]/16: a union's list initializes its first member
+      }
     }
     return r;
+  }
+  bool is_union(QualType t) {
+    const ClassRec* c = types().is_class(t) ? class_rec(types().class_of(t)) : nullptr;
+    return c && c->union_;
   }
 
   // Whether initializing a `t` runs a default member initializer.
@@ -847,6 +854,10 @@ public:
         // skipped are initialized as if there were no initializer.
         std::size_t j = i;
         while (j < elems.size() && elems[j].name != c.designator) ++j;
+        if (j == elems.size() && is_union(t) && !elided) {
+          diag(c.begin, Diag::not_supported, lex::Tk::period);  // a union's member other than its first
+          return fail;
+        }
         if (elided || !types().is_class(t) || j == elems.size()) {
           diag(c.begin, Diag::bad_designator, c.designator, Types::unqualified(t));
           return fail;
@@ -1737,7 +1748,9 @@ public:
       return {NodeId::none, begin, end};
     }
     if (args.empty()) return value_init(t, begin, end);
-    if (!has_user_ctors(t) && args.size() == 1) return convert(args[0], t, begin);
+    // [expr.type.conv]/2: one argument is the cast-expression `(T)e`, as static_cast does it.
+    if (!has_user_ctors(t) && args.size() == 1)
+      return types().is_class(t) ? convert(args[0], t, begin) : static_cast_to(args[0], t, begin);
     if (!has_user_ctors(t)) {
       diag(begin, Diag::no_viable_constructor, Types::unqualified(t));  // parenthesized aggregate init is not supported
       return {NodeId::none, begin, end};
@@ -1963,6 +1976,7 @@ public:
     ExprInfo info{types().referee(d.type), ValueCategory::lvalue, 0};
     Ex r = node(ast::DeclRef{info, d.entity}, begin, end, info);
     if (unqualified && d.kind == ast::DeclKind::function) unqualified_[std::to_underlying(r.id)] = {d};
+    declared_types_[std::to_underlying(r.id)] = d.type;
     return r;
   }
 
@@ -2223,6 +2237,9 @@ public:
       return convert_node(e, ast::ConversionKind::null_pointer, target);
     e = rvalue(e);
     QualType from = e.type();
+    // A std::nullptr_t object's value is a null pointer constant too ([conv.ptr]/1).
+    if (e.ok() && types().is_pointer(target) && types().is(Types::unqualified(from), Builtin::nullptr_t))
+      return convert_node(e, ast::ConversionKind::null_pointer, target);
     // [dcl.enum]: an enumeration is initialized only from its own type; an unscoped one converts
     // to an integer or bool ([conv.integral], [conv.bool]).
     if (types().is_enum(target)) {
@@ -2250,6 +2267,94 @@ public:
       return convert_node(e, ast::ConversionKind::pointer, target);
     diag(at_, Diag::no_conversion, from, to);
     return {NodeId::none, e.begin, e.end};
+  }
+
+  // A conversion as `static_cast<to>(e)` performs it ([expr.static.cast]); a cast in functional
+  // notation or a cast-expression is one when static_cast applies ([expr.type.conv]/2,
+  // [expr.cast]/4). Downcasts and the const_cast and reinterpret_cast parts are not supported yet.
+  Ex static_cast_to(Ex e, QualType to, u32 at_) {
+    if (!e.ok()) return e;
+    if (dependent(e) || types().is_dependent(to))
+      return dependent_node({e}, e.begin, e.end, types().is_dependent(to) ? std::nullopt : std::optional(Types::unqualified(to)));
+    QualType target = Types::unqualified(to);
+    if (types().is_void(target)) return convert_node(e, ast::ConversionKind::to_void, target);  // /6
+    if (types().is_reference(to) || types().is_class(target) || types().is_array(target)) return convert(e, to, at_);
+    Ex v = rvalue(e);
+    if (!v.ok()) return v;
+    QualType from = Types::unqualified(v.type());
+    // /10: an integral or enumeration value to an enumeration; /9: a scoped enumeration's to an
+    // integral type.
+    if (types().is_enum(target) && (types().is_integral(from) || types().is_enum(from))) {
+      if (types().canonical(from) == types().canonical(target)) return v;
+      // A constant (an enumerator, a literal) is folded to the enumeration's constant: the
+      // interpreter has no enumeration-typed values yet (#25).
+      if (auto lit = as<ast::Literal>(v))
+        return literal(target, w_->values.integer(underlying_of(target), w_->values.rec(lit->value).bits), ValueCategory::prvalue,
+                       v.begin, v.end);
+      return convert_node(v, ast::ConversionKind::integral, target);
+    }
+    if (is_scoped_enum(from) && types().is_arithmetic(target))
+      return convert_node(v, types().is(target, Builtin::bool_) ? ast::ConversionKind::boolean : ast::ConversionKind::integral, target);
+    // /14: a pointer to cv void to a pointer to an object type at least as cv-qualified.
+    if (types().is_pointer(from) && types().is_pointer(target) && types().is_void(types().pointee(from)) &&
+        types().is_object(types().pointee(target)) && cv_within(object_cv(types().pointee(from)), object_cv(types().pointee(target))))
+      return convert_node(v, ast::ConversionKind::pointer, target);
+    return convert(v, to, at_);
+  }
+
+  // `sizeof` and `alignof` of a type ([expr.sizeof], [expr.alignof]), a `size_t` prvalue; zero
+  // after a diagnostic. A class's layout is the back end's (#194).
+  Ex size_of(QualType t, bool align, u32 begin, u32 end) {
+    QualType st = builtin(target.size_type);
+    if (types().is_dependent(t)) return dependent_node({}, begin, end, st);
+    t = types().referee(t);  // [expr.sizeof]/2, [expr.alignof]/3
+    std::optional<u64> n = layout_of(t, align);
+    if (!n) {
+      if (types().is_function(t) || !is_complete(t)) diag(begin, Diag::sizeof_incomplete, t);
+      else diag(begin, Diag::not_supported, align ? lex::Tk::kw_alignof : lex::Tk::kw_sizeof);
+      return {NodeId::none, begin, end};
+    }
+    return literal(st, w_->values.integer(st, *n), ValueCategory::prvalue, begin, end);
+  }
+  // A complete non-class object type's size or alignment, from the target.
+  std::optional<u64> layout_of(QualType t, bool align) {
+    TypeRec r = types().rec(t);
+    switch (r.kind) {
+    case TypeKind::builtin:
+      if (!target.has(r.builtin) || r.builtin == Builtin::void_) return std::nullopt;
+      return align ? target[r.builtin].align : target[r.builtin].size;
+    case TypeKind::pointer: return align ? target.pointer_align : target.pointer_size;
+    case TypeKind::enum_: return is_complete(t) ? layout_of(underlying_of(t), align) : std::nullopt;
+    case TypeKind::array: {
+      if (r.bound_value == ConstId::none) return std::nullopt;
+      auto e = layout_of(r.inner, align);
+      return e && !align ? std::optional<u64>(*e * r.bound) : e;
+    }
+    default: return std::nullopt;  // void, functions, classes (#194)
+    }
+  }
+
+  // [dcl.type.decltype]/1: an unparenthesized id-expression or member access names its entity's
+  // declared type; any other expression has its type, as `T&&` for an xvalue and `T&` for an
+  // lvalue.
+  QualType decltype_of(Ex e, bool parenthesized) {
+    if (!parenthesized) {
+      if (auto l = as<ast::LocalRef>(e)) return locals_[l->local].type;
+      // The declared type: the declaration's that named the entity (a static data member's is
+      // its type, a function's its function type), a data member's from its class.
+      if (as<ast::DeclRef>(e)) {
+        if (auto it = declared_types_.find(std::to_underlying(e.id)); it != declared_types_.end()) return it->second;
+        return e.type();
+      }
+      if (auto m = as<ast::Member>(e))
+        if (const ClassRec* c = class_rec(w_->entities.rec(m->member).scope))
+          for (const FieldRec& f : c->fields)
+            if (f.entity == m->member) return f.type;
+    }
+    QualType t = e.type();
+    if (e.cat() == ValueCategory::xvalue) return types().rvalue_ref(t);
+    if (e.cat() == ValueCategory::lvalue) return types().lvalue_ref(t);
+    return t;
   }
 
   // [conv.ptr]/2: a pointer to an object type converts to a pointer to `void` at least as
@@ -2866,6 +2971,7 @@ private:
     QualType type;
   };
   std::vector<BlockType> block_types_;
+  std::map<u32, QualType> declared_types_;  // by DeclRef node: the declared type of what it names
   std::map<u32, std::vector<ast::DeclSema>> overloads_;  // by draft overload-set DeclRef
   std::map<u32, std::vector<TemplateArg>> explicit_args_;  // by draft overload-set DeclRef
   std::map<u32, std::vector<ast::DeclSema>> unqualified_;  // by draft DeclRef named by an unqualified-id
