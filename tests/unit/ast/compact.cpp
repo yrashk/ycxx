@@ -29,7 +29,7 @@ int main() {
     NodeId f = b.add(DeclRef{rv, f_e}, 1);
     NodeId call = b.add(Call{rv, f_e, {f, 0}, b.list({{one, 2}, {two, 4}})}, 6);
     NodeId local = b.add(LocalVar{0, {call, 2}, EntityId::none}, 9);
-    body = b.commit(BodySema{b.add(Compound{b.list({{local, 1}}), in.intern_seq<Cleanup>({})}, 11),
+    body = b.commit(BodySema{b.add(Compound{b.list({{local, 1}})}, 11),
                              b.seq({LocalRec{in.names.intern("v"), int_t, EntityId::none, local, 0}})});
     DeclSema d{f_e, int_t, DeclKind::function, Linkage::external, Storage::none, Access::none, 0,
                b.seq<NodeId>({}), NodeId::none, NodeId::none,
@@ -60,7 +60,7 @@ int main() {
   check(in.seqs.at(in.seqs.at(item.decls, 0).params, 0).default_arg == in.ast.children(c.args)[1].id, "in.seqs.at(in.seqs.at(item.decls, 0).params, 0).default_arg == in.ast.children(c.args)[1].id");
 
   // The rebuilt tables find the survivors: re-interning gives the compacted handle.
-  check(in.intern(in.ast.get<Call>(item.tree), 6, in.ast.edges()) == item.tree, "in.intern(in.ast.get<Call>(item.tree), 6, in.ast.edges()) == item.tree");
+  check(in.intern_stored(in.ast.get<Call>(item.tree), 6) == item.tree, "in.intern_stored(in.ast.get<Call>(item.tree), 6) == item.tree");
   check(in.ast.node_count() == before - 2, "in.ast.node_count() == before - 2");
   return ycxx::unit::result("ast.compact");
 }

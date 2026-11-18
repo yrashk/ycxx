@@ -1521,7 +1521,7 @@ private:
       stmts.push_back({s_.node(ast::MemberInit{i, f.type, {init.id, 0}}, 0, 0).id, 0});
     }
     stmts.push_back(sema::Sema::at(body, 0));
-    return s_.node(ast::Compound{b_.list(stmts), b_.seq(std::span<const ast::Cleanup>{})}, 0, body.end);
+    return s_.node(ast::Compound{b_.list(stmts)}, 0, body.end);
   }
 
   // A default member initializer, analysed in this constructor (a complete-class context with
@@ -1663,12 +1663,12 @@ const ast::BodySema& Program::synthesized_body(std::size_t i) {
       Ex init = copy_from(sm, src, f.type);
       stmts.push_back({sm.node(ast::MemberInit{i, f.type, {init.id, 0}}, 0, 0).id, 0});
     }
-    Ex body = sm.node(ast::Compound{b.list({}), b.seq(std::span<const ast::Cleanup>{})}, 0, 0);
+    Ex body = sm.node(ast::Compound{b.list({})}, 0, 0);
     stmts.push_back({body.id, 0});
-    root = sm.node(ast::Compound{b.list(stmts), b.seq(std::span<const ast::Cleanup>{})}, 0, 0);
+    root = sm.node(ast::Compound{b.list(stmts)}, 0, 0);
     sm.pop_scope();
   } else {
-    Ex body = sm.node(ast::Compound{b.list({}), b.seq(std::span<const ast::Cleanup>{})}, 0, 0);
+    Ex body = sm.node(ast::Compound{b.list({})}, 0, 0);
     root = BodyAnalysis::destructor_body(sm, cls, body);
   }
   std::vector<ast::LocalRec> locals(sm.locals().begin(), sm.locals().end());

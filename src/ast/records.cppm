@@ -94,7 +94,7 @@ struct BodySema {
 };
 
 // The element types of the `seqs` interner: one pool each, indexed by position in this list.
-using SeqElements = closed_list<NodeId, EntityId, QualType, NameId, Cleanup, ParamSema, DeclSema, BaseSpec,
+using SeqElements = closed_list<NodeId, EntityId, QualType, NameId, ParamSema, DeclSema, BaseSpec,
                                 MemberRec, LocalRec, u8, u32, ConstId>;
 
 static_assert(std::ranges::all_of(SeqElements::infos, [](std::meta::info t) {

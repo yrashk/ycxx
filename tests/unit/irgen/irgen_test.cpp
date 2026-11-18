@@ -136,7 +136,6 @@ struct Body {
 
   ast::ExprInfo pr(QualType t) { return {t, ast::ValueCategory::prvalue, 0}; }
   ast::ExprInfo lv(QualType t) { return {t, ast::ValueCategory::lvalue, 0}; }
-  ast::SeqId<ast::Cleanup> no_cleanups() { return w.in.intern_seq(std::span<const ast::Cleanup>()); }
   template <class T>
   NodeId add(const T& v) {
     return b.add(v, 1);
@@ -182,13 +181,13 @@ struct Body {
     NodeId v = add(ast::LocalVar{i, {init, 0}, ast::EntityId::none});
     return add(ast::DeclStmt{b.list({{v, 0}})});
   }
-  NodeId ret(NodeId v = NodeId::none) { return add(ast::Return{{v, 0}, no_cleanups()}); }
+  NodeId ret(NodeId v = NodeId::none) { return add(ast::Return{{v, 0}}); }
   NodeId expr(NodeId e) { return add(ast::ExprStmt{{e, 0}}); }
   NodeId block(std::initializer_list<NodeId> stmts, std::initializer_list<std::uint32_t> offsets = {}) {
     std::vector<Child> cs;
     auto at = offsets.begin();
     for (NodeId s : stmts) cs.push_back({s, at != offsets.end() ? *at++ : 0});
-    return add(ast::Compound{b.list(cs), no_cleanups()});
+    return add(ast::Compound{b.list(cs)});
   }
   NodeId if_(NodeId c, NodeId t, NodeId e = NodeId::none) { return add(ast::If{{}, {c, 0}, {t, 0}, {e, 0}}); }
   NodeId while_(NodeId c, NodeId body) { return add(ast::While{{c, 0}, {body, 0}}); }
@@ -196,8 +195,8 @@ struct Body {
   NodeId for_(NodeId init, NodeId c, NodeId incr, NodeId body) {
     return add(ast::For{{init, 0}, {c, 0}, {incr, 0}, {body, 0}});
   }
-  NodeId brk() { return add(ast::Break{no_cleanups()}); }
-  NodeId cont() { return add(ast::Continue{no_cleanups()}); }
+  NodeId brk() { return add(ast::Break{}); }
+  NodeId cont() { return add(ast::Continue{}); }
 
   ast::BodySema finish(NodeId tree) {
     auto locs = b.seq(std::span<const ast::LocalRec>(locals));

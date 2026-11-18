@@ -180,6 +180,9 @@ inline constexpr u8 line_start = 1;    // first token of a logical line
 inline constexpr u8 space_before = 2;  // whitespace or a comment precedes it on its line
 inline constexpr u8 alt = 4;           // spelled as an alternative token ([lex.digraph])
 inline constexpr u8 continued = 8;     // a string-literal that phase 5 joined to the one before it
+// `export`, `module` or `import` that begins a module or import directive: phase 4's
+// export-keyword, module-keyword and import-keyword ([cpp.module], [cpp.import]).
+inline constexpr u8 directive = 16;
 inline constexpr u8 whitespace = line_start | space_before;
 }  // namespace tok_flag
 

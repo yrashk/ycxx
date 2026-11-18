@@ -321,11 +321,21 @@ public:
     if (r.linkage == ast::Linkage::internal)
       f = ast::mix(ast::mix(f, ins_->items.fp(r.first.item)), std::to_underlying(r.first.ord));
     EntityId e = ins_->entities.add<EntityId>(f);
-    if (std::to_underlying(e) == recs_.size()) recs_.push_back(r);
+    // The interner is shared: the back end adds entities of its own (string literal objects), which
+    // have no record here, so records are indexed by handle with gaps.
+    const auto i = std::to_underlying(e);
+    if (i >= recs_.size()) {
+      recs_.resize(i + 1);
+      known_.resize(i + 1);
+    }
+    if (!known_[i]) {
+      recs_[i] = r;
+      known_[i] = true;
+    }
     return e;
   }
   const EntityRec& rec(EntityId e) const
-    pre(std::to_underlying(e) < recs_.size())
+    pre(std::to_underlying(e) < recs_.size() && known_[std::to_underlying(e)])
   {
     return recs_[std::to_underlying(e)];
   }
@@ -334,6 +344,7 @@ private:
   ast::Interners* ins_;
   Types* types_;
   std::deque<EntityRec> recs_;  // a deque: references to records stay valid as entities are added
+  std::vector<bool> known_;     // which handles have a record
 };
 
 // ---------------------------------------------------------------- classes (stand-in for #33)
@@ -396,16 +407,6 @@ struct EnumRec {
   std::vector<EnumeratorRec> enumerators;
 };
 
-// The layout of an object type on the target ([basic.align], [class.mem]): its size and alignment
-// and, for a class, its members' offsets. Classes follow the Itanium C++ ABI §2.4: each member at
-// the next offset its alignment allows, in declaration order; the size rounded up to the
-// alignment; an empty class has size 1.
-struct ObjectLayout {
-  u64 size = 0;
-  u32 align = 1;
-  std::vector<u64> offsets;  // a class's members
-};
-
 class Classes {
 public:
   explicit Classes(ast::Interners& ins, Types& types) : ins_(&ins), types_(&types) {}
@@ -428,39 +429,6 @@ public:
   bool is_defined(EntityId c) const {
     const ClassRec* r = find(c);
     return r && r->defined;
-  }
-
-  // The layout of a complete object type: `layout` (AST design Part D) until #33 has it.
-  ObjectLayout layout(QualType q) const {
-    TypeRec r = types_->rec(q);
-    switch (r.kind) {
-    case TypeKind::builtin: {
-      ast::BuiltinLayout l = target[r.builtin];
-      return {l.size, l.align, {}};
-    }
-    case TypeKind::pointer:
-    case TypeKind::reference: return {target.pointer_size, target.pointer_align, {}};
-    case TypeKind::enum_: return layout(underlying(r.entity));
-    case TypeKind::array: {
-      ObjectLayout e = layout(r.inner);
-      return {e.size * r.bound, e.align, {}};
-    }
-    case TypeKind::class_: {
-      ObjectLayout out;
-      const ClassRec* c = find(r.entity);
-      if (c)
-        for (const FieldRec& f : c->fields) {
-          ObjectLayout m = layout(f.type);
-          out.size = (out.size + m.align - 1) / m.align * m.align;
-          out.offsets.push_back(out.size);
-          out.size += m.size;
-          out.align = std::max(out.align, m.align);
-        }
-      out.size = out.size == 0 ? 1 : (out.size + out.align - 1) / out.align * out.align;
-      return out;
-    }
-    default: return {};
-    }
   }
 
   // The destructor that ends a `t`, none if trivial; for an array, its elements' ([class.dtor]).

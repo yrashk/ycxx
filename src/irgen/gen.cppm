@@ -42,7 +42,7 @@
 // α slice (#39) and δ's aggregates (#86): scalars, pointers, string literals and aggregates; no
 // cleanups or exceptions, and no class parameters or results yet.
 // Calls are `call`, never `invoke`: with no destructors to run, an exception leaves the function
-// with nothing to do. A call site will choose `invoke` once a scope has cleanups (§3.7.3); every
+// with nothing to do. A call site will choose `invoke` once a scope has destructors (§3.7.3); every
 // call already goes through `call_fn` for that reason.
 export module ycxx.irgen:gen;
 
@@ -414,7 +414,6 @@ class Gen {
     Position here(loc_, a.offset);
     if (is<ast::Compound>(a)) {
       auto s = get<ast::Compound>(a);
-      if (in_.seqs.size(s.cleanups)) unsupported(a, "with cleanups");
       push_scope();
       for (ast::Child c : ast_.children(s.stmts)) stmt(child(a, c));
       pop_scope();
@@ -445,7 +444,6 @@ class Gen {
       }
     } else if (is<ast::Return>(a)) {
       auto r = get<ast::Return>(a);
-      if (in_.seqs.size(r.cleanups)) unsupported(a, "with cleanups");
       std::optional<ValueId> v;
       // A void operand is evaluated and the function returns nothing ([stmt.return]); a
       // reference result is the address of its object. The operand's temporaries end first.
@@ -470,8 +468,6 @@ class Gen {
       loop(a, f.init, f.condition, f.increment, f.body, false);
     } else if (is<ast::Break>(a) || is<ast::Continue>(a)) {
       bool brk = is<ast::Break>(a);
-      auto cleanups = brk ? get<ast::Break>(a).cleanups : get<ast::Continue>(a).cleanups;
-      if (in_.seqs.size(cleanups)) unsupported(a, "with cleanups");
       if (loops_.empty()) unsupported(a, "outside a loop");
       const Loop& l = loops_.back();
       exit_scopes(l.depth);
