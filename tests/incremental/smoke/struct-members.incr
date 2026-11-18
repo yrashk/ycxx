@@ -1,0 +1,13 @@
+// ACTION: run
+// A struct's members change between builds of one file: the members read follow each edit.
+--- main.cpp
+struct S { int a; };
+int main() { S s{3}; return s.a; }
+=== edit
+--- main.cpp
+struct S { int b; int a; };
+int main() { S s{1, 5}; return s.a + s.b * 10; }
+=== edit
+--- main.cpp
+struct S { int a; int b; int c; };
+int main() { S s{2, 4, 6}; return s.c - s.a; }

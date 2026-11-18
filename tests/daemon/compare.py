@@ -2,23 +2,42 @@
 """Daemon versus in-process (daemon design §8.2): `ycxx cxx` through a private daemon must give
 the same stdout, stderr, exit status and output bytes as under YCXX_NO_DAEMON=1.
 
-    tests/daemon/compare.py <ycxx> <tests/own>
+    tests/daemon/compare.py <ycxx> <tests/own> [--all]
 
 Covered:
-- every test of tests/own/slice and tests/own/smoke, linked, with -c, -fsyntax-only and -E;
+- every test of tests/own/slice and tests/own/smoke, and a sample of every other suite of tests/own
+  (all of them with --all, about two minutes), linked, with -c, -fsyntax-only and -E;
 - the same argument vector from two working directories with different local headers;
 - an edit between two requests (the watcher), with the answer equal to a cold compile;
 - fallback: an unusable runtime directory runs in-process with the same output;
 - a daemon killed between requests leaves a stale socket; the next client starts a new one.
 
+The client restarts a daemon that died and asks again (§7.2), which would hide a crash: until the
+daemon is killed on purpose, one daemon (one pid) must answer every request.
+
 The daemon runs on a private, short YCXX_RUNTIME_DIR and is shut down at the end. #98 owns the
 rest of the β daemon tests (tests/daemon: edits during a build, a killed client, a killed daemon
 mid-request, the cache across restarts; .incr through the daemon).
 """
-import os, shutil, signal, subprocess, sys, tempfile, time
+import hashlib, os, shutil, signal, subprocess, sys, tempfile, time
 from pathlib import Path
 
 failures = []
+
+# Divergences known to come from a bug with its own issue: test -> (issue, the fields that may
+# differ). Everything else of that test is still compared; a known test whose fields all agree
+# fails the run (remove the entry). The sample and its order are fixed, so these are
+# deterministic.
+KNOWN = {
+    # A daemon session keeps an earlier test's `struct S` (first-wins entity records).
+}
+known_seen = set()
+
+
+def sampled(test):
+    """Whether a test of a sampled suite is in the default run: by a hash of its own name, so
+    adding a test elsewhere neither moves another test in or out nor changes their order."""
+    return int(hashlib.sha256(test.encode()).hexdigest(), 16) % 8 == 0
 
 
 def fail(what):
@@ -49,8 +68,14 @@ def compare(ycxx, name, args, setup, envs):
         finally:
             shutil.rmtree(d, ignore_errors=True)
     (c0, o0, e0, f0), (c1, o1, e1, f1) = results
+    test = name.split(' ')[0]
+    issue, allowed = KNOWN.get(test, (None, ()))
     for what, a, b in (('exit status', c0, c1), ('stdout', o0, o1), ('stderr', e0, e1), ('outputs', f0, f1)):
         if a != b:
+            if what in allowed:
+                known_seen.add(test)
+                print(f'known divergence ({issue}): {name}: {what}')
+                continue
             fail(f'{name}: {what} differs between in-process and the daemon:\n  in-process: {a!r:.300}\n  daemon:     {b!r:.300}')
 
 
@@ -62,6 +87,9 @@ def main():
     for k in ('YCXX_DAEMON', 'YCXX_NO_DAEMON', 'YCXX_ROOT', 'YCXX_NO_WATCH'):
         base.pop(k, None)
     base['YCXX_RUNTIME_DIR'] = runtime
+    base['YCXX_DAEMON_IDLE_EXIT'] = '300'
+    cache = tempfile.mkdtemp(prefix='ycxx-cache-')
+    base['XDG_CACHE_HOME'] = cache  # the persistent cache, once #17 has one
     cold = dict(base, YCXX_NO_DAEMON='1')
     daemon = dict(base, YCXX_DAEMON='require')
     envs = [('in-process', cold), ('daemon', daemon)]
@@ -71,8 +99,34 @@ def main():
     tempfile.tempdir = str(scope)
 
     try:
-        # 1. The own suites, each test in each action.
-        tests = sorted(p for sub in ('slice', 'smoke') for p in (own / sub).glob('*.cpp'))
+        pinned = None
+
+        def same_daemon(where):
+            """The client restarts a daemon that died and asks again: the pid must not change."""
+            nonlocal pinned
+            st = subprocess.run([ycxx, 'ctl', 'status'], cwd=scope, env=base, capture_output=True, text=True, timeout=60)
+            pid = dict(line.split(': ', 1) for line in st.stdout.splitlines() if ': ' in line).get('pid')
+            if pid is None:
+                fail(f'{where}: no daemon answers `ctl status`')
+            elif pinned is None:
+                pinned = pid
+            elif pid != pinned:
+                fail(f'{where}: a different daemon answers (pid {pinned}, now {pid}): it died and a client restarted it')
+
+        # 0. One request starts the daemon, whose pid is pinned before anything else runs.
+        (scope / 'first.cpp').write_text('int main() { return 0; }\n')
+        if run(ycxx, ['-c', 'first.cpp', '-o', 'first.o'], scope, daemon)[0] != 0:
+            fail('the first request through the daemon failed')
+            return 1
+        same_daemon('the first request')
+
+        # 1. The own suites, each test in each action: slice and smoke whole, a fixed eighth of the
+        # others (by name hash), or all with --all.
+        tests = []
+        for sub in sorted(p for p in own.iterdir() if p.is_dir()):
+            ts = sorted(sub.glob('*.cpp'))
+            whole = sub.name in ('slice', 'smoke') or '--all' in sys.argv
+            tests += [t for t in ts if whole or sampled(f'{sub.name}/{t.name}')]
         for t in tests:
             def setup(d, t=t):
                 shutil.copy(t, d / t.name)
@@ -81,6 +135,8 @@ def main():
             for action in ([], ['-c'], ['-fsyntax-only'], ['-E']):
                 compare(ycxx, f'{t.parent.name}/{t.name} {" ".join(action) or "link"}',
                         [*action, t.name, *(['-o', 'prog'] if not action else [])], setup, envs)
+
+        same_daemon('the own suites')
 
         # 2. One argument vector, two directories, two different local headers (§5.2): run both
         # through one daemon, each must equal its own cold compile.
@@ -102,6 +158,8 @@ def main():
                 want, got = build(sub, cold, args), build(sub, daemon, args)
                 if want != got:
                     fail(f'same argv {args} in {sub}/: {got!r:.300} != cold {want!r:.300}')
+
+        same_daemon('two directories')
 
         # 3. An edit to a header between two identical requests is seen at once (cookie sync,
         # §5.4), in -E and in the object: the engine session kept for an identical request must
@@ -141,6 +199,8 @@ def main():
         if status.returncode != 0 or int(fields.get('revision', 0)) < 3 or int(fields.get('requests', 0)) == 0:
             fail(f'ctl status after edits: {status.stdout!r:.500} {status.stderr!r:.300}')
 
+        same_daemon('edits')
+
         # 4. Fallback: a runtime directory that cannot be used runs in-process, silently.
         bad = dict(base, YCXX_DAEMON='1', YCXX_RUNTIME_DIR=str(work / 'a' / 'v.h'))
         if run(ycxx, ['-E', 'm.cpp'], work / 'a', bad) != run(ycxx, ['-E', 'm.cpp'], work / 'a', cold):
@@ -151,7 +211,7 @@ def main():
         # 5. A daemon killed between requests leaves its socket behind; the next client finds it
         # stale, starts a new daemon, and gets the same answer.
         pid = int(fields.get('pid', 0))
-        if pid:
+        if pid > 1:  # never kill(-1)
             os.kill(pid, signal.SIGKILL)
             for _ in range(100):
                 try:
@@ -168,14 +228,40 @@ def main():
             if f'pid: {pid}\n' in again.stdout or again.returncode != 0:
                 fail(f'no new daemon after the old one was killed: {again.stdout!r:.300}')
     finally:
-        subprocess.run([ycxx, 'ctl', 'shutdown'], cwd=scope, env=base, capture_output=True)
+        # Shut the daemon down, and kill it if it lingers (a request stuck in it); after a failure,
+        # print the end of its log before the runtime directory goes.
+        pid = None
+        try:
+            st = subprocess.run([ycxx, 'ctl', 'status'], cwd=scope, env=base, capture_output=True, text=True, timeout=30)
+            pid = int(dict(line.split(': ', 1) for line in st.stdout.splitlines() if ': ' in line).get('pid', 0))
+            subprocess.run([ycxx, 'ctl', 'shutdown'], cwd=scope, env=base, capture_output=True, timeout=30)
+        except (subprocess.TimeoutExpired, ValueError):
+            pass
+        if pid and pid > 1:  # never kill(-1)
+            for _ in range(100):
+                try:
+                    os.kill(pid, 0)
+                    time.sleep(0.05)
+                except ProcessLookupError:
+                    break
+            else:
+                os.kill(pid, signal.SIGKILL)
+        if failures:
+            for log in Path(runtime).glob('*.log'):
+                print(f'--- the daemon\'s log ({log.name}), last lines:', file=sys.stderr)
+                print('\n'.join(log.read_text(errors='replace').splitlines()[-40:]), file=sys.stderr)
         shutil.rmtree(scope, ignore_errors=True)
         shutil.rmtree(runtime, ignore_errors=True)
+        shutil.rmtree(cache, ignore_errors=True)
 
+    for test in KNOWN:
+        if test not in known_seen and any(t.parent.name + '/' + t.name == test for t in tests):
+            fail(f'{test} no longer diverges: remove it from KNOWN ({KNOWN[test]})')
     if failures:
         print(f'daemon.compare: {len(failures)} failure(s)', file=sys.stderr)
         return 1
-    print(f'daemon.compare: {len(tests)} tests x 4 actions, two directories, edits, fallback and a killed daemon: identical')
+    print(f'daemon.compare: {len(tests)} tests x 4 actions, two directories, edits, fallback and a killed daemon: '
+          'identical, from one daemon until it was killed')
     return 0
 
 
