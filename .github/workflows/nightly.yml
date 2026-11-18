@@ -1,0 +1,108 @@
+name: nightly
+
+# The nightly tier (DECISIONS §9.3): everything tools/test runs at --tier nightly, on both hosts,
+# with Clang 23 provisioned as the oracle (DECISIONS §2.3). Sanitizers, the borrowed suites,
+# edit-sequence fuzzing, benchmarks and the bootstrap chain arrive through the driver's tier as
+# they exist. Skipped when main has not changed since the last nightly run.
+
+on:
+  schedule:
+    - cron: '41 4 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: nightly
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  changed:
+    runs-on: ubuntu-24.04
+    outputs:
+      run: ${{ steps.check.outputs.run }}
+    steps:
+      - id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          last=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/nightly.yml/runs?status=success&per_page=1" --jq '.workflow_runs[0].head_sha // ""')
+          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ] || [ "$last" != "$GITHUB_SHA" ]; then
+            echo run=true >> "$GITHUB_OUTPUT"
+          else
+            echo "main is at $GITHUB_SHA, as at the last successful nightly run: nothing to do"
+            echo run=false >> "$GITHUB_OUTPUT"
+          fi
+
+  test:
+    needs: changed
+    if: needs.changed.outputs.run == 'true'
+    name: ${{ matrix.host.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        host:
+          - { name: linux-x86_64, runs-on: ubuntu-24.04, container: 'gcc:16', jobs: 4 }
+          - { name: macos-arm64, runs-on: macos-15, container: '', jobs: 3 }
+    runs-on: ${{ matrix.host.runs-on }}
+    container: ${{ matrix.host.container }}
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Toolchain (GCC 16, and Clang 23 as the oracle)
+        uses: ./.github/actions/setup
+        with:
+          oracle: 'true'
+
+      - name: Policy (tools/check-policy)
+        run: tools/check-policy
+
+      - name: Build and bootstrap smoke test (tools/build)
+        run: tools/build -j ${{ matrix.host.jobs }}
+
+      - name: Restore test state
+        uses: actions/cache/restore@v4
+        with:
+          path: build/test-state
+          key: test-state-main-${{ matrix.host.name }}-${{ github.run_id }}
+          restore-keys: test-state-main-${{ matrix.host.name }}-
+
+      - name: Tests (tools/test, nightly tier)
+        run: tools/test --tier nightly -j ${{ matrix.host.jobs }}
+
+      - name: Save test state
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: build/test-state
+          key: test-state-main-${{ matrix.host.name }}-${{ github.run_id }}
+
+      - name: Test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-logs-${{ matrix.host.name }}
+          path: build/test-logs/
+          if-no-files-found: ignore
+
+  wall-time:
+    needs: test
+    if: always() && needs.test.result != 'skipped'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: tools/ci
+      - name: Record wall time (DECISIONS §9.8)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: tools/ci/wall-time nightly 240
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wall-time
+          path: wall-time.json

@@ -1,0 +1,101 @@
+name: ci
+
+# The pull-request and main tiers (DECISIONS §9). Both hosts, stages in fail-fast order: policy,
+# build with the bootstrap smoke test, then the test driver's tier. A newer push to the same
+# branch or PR cancels the older run, and documentation-only changes run nothing. The last job
+# records the run's wall time.
+
+on:
+  pull_request:
+    paths-ignore: ['**.md', 'docs/**', 'LICENSE']
+  push:
+    branches: [main]
+    paths-ignore: ['**.md', 'docs/**', 'LICENSE']
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  test:
+    name: ${{ matrix.host.name }}
+    strategy:
+      # On a PR the first failing host cancels the other (fail fast); on main both finish.
+      fail-fast: ${{ github.event_name == 'pull_request' }}
+      matrix:
+        host:
+          - { name: linux-x86_64, runs-on: ubuntu-24.04, container: 'gcc:16', jobs: 4 }
+          - { name: macos-arm64, runs-on: macos-15, container: '', jobs: 3 }
+    runs-on: ${{ matrix.host.runs-on }}
+    container: ${{ matrix.host.container }}
+    timeout-minutes: 30
+    env:
+      TIER: ${{ github.event_name == 'pull_request' && 'pr' || 'main' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Toolchain (GCC 16)
+        uses: ./.github/actions/setup
+
+      - name: Policy (tools/check-policy)
+        run: tools/check-policy
+
+      - name: Build and bootstrap smoke test (tools/build)
+        run: tools/build -j ${{ matrix.host.jobs }}
+
+      # The driver's fail-fast state (DECISIONS §9.6), keyed as tools/test (#5) expects.
+      - name: Restore test state
+        uses: actions/cache/restore@v4
+        with:
+          path: build/test-state
+          key: test-state-${{ github.head_ref || github.ref_name }}-${{ matrix.host.name }}-${{ github.run_id }}
+          restore-keys: |
+            test-state-${{ github.head_ref || github.ref_name }}-${{ matrix.host.name }}-
+            test-state-main-${{ matrix.host.name }}-
+
+      - name: Tests (tools/test, ${{ env.TIER }} tier)
+        run: |
+          if [ "$TIER" = pr ]; then
+            tools/test --fast -j ${{ matrix.host.jobs }}
+          else
+            tools/test --tier main -j ${{ matrix.host.jobs }}
+          fi
+
+      - name: Save test state
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: build/test-state
+          key: test-state-${{ github.head_ref || github.ref_name }}-${{ matrix.host.name }}-${{ github.run_id }}
+
+      - name: Test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-logs-${{ matrix.host.name }}
+          path: build/test-logs/
+          if-no-files-found: ignore
+
+  wall-time:
+    needs: test
+    if: always()
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: tools/ci
+      - name: Record wall time (DECISIONS §9.8)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: tools/ci/wall-time ${{ github.event_name == 'pull_request' && 'pr 15' || 'main 60' }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wall-time
+          path: wall-time.json
