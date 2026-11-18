@@ -581,11 +581,9 @@ draft/temp/temp.res.general-6.reject.cpp errors elsewhere: 'template' not suppor
 draft/temp/temp.spec.general-1.accept.cpp 'template' not supported yet
 draft/temp/temp.spec.general-2.accept.cpp 'template' not supported yet
 draft/temp/temp.spec.general-3.reject.cpp errors elsewhere: 'template' not supported yet
-draft/temp/temp.spec.partial.general-1.accept.cpp 'template' not supported yet
 draft/temp/temp.spec.partial.general-2.accept.cpp 'template' not supported yet
 draft/temp/temp.spec.partial.general-3.accept.cpp 'template' not supported yet
 draft/temp/temp.spec.partial.general-4.accept.cpp 'namespace' not supported yet
-draft/temp/temp.spec.partial.match-1.reject.cpp errors elsewhere: 'template' not supported yet
 draft/temp/temp.spec.partial.match-2.accept.cpp 'template' not supported yet
 draft/temp/temp.spec.partial.match-3.reject.cpp errors elsewhere: 'template' not supported yet
 draft/temp/temp.spec.partial.member-1.reject.cpp errors elsewhere: 'template' not supported yet

@@ -230,7 +230,11 @@ private:
   // The name a class-head declares: the last identifier outside template arguments, attributes
   // and `final` ([class.pre]); empty for an unnamed class.
   std::string_view class_name(u32 key, u32 end) const {
-    std::string_view name;
+    u32 at = class_name_token(key, end);
+    return at == 0 ? std::string_view{} : r_.name(r_.tokens[at]);
+  }
+  u32 class_name_token(u32 key, u32 end) const {
+    u32 at = 0;
     int angle = 0;
     for (u32 n = key + 1; n < end; ++n) {
       Tk t = kind(n);
@@ -239,9 +243,19 @@ private:
       else if (t == Tk::greater) --angle;
       else if (t == Tk::greatergreater) angle -= 2;
       else if (t == Tk::colon && angle <= 0) break;
-      else if (t == Tk::identifier && angle <= 0 && !is_name(n, "final")) name = r_.name(r_.tokens[n]);
+      else if (t == Tk::identifier && angle <= 0 && !is_name(n, "final")) at = n;
     }
-    return name;
+    return at;
+  }
+  // The scope a class's members are in: its name, and the template arguments of a specialization
+  // (`X<T*>`), so a partial or explicit specialization's members are not its template's.
+  std::string class_scope(u32 key, u32 end) const {
+    u32 at = class_name_token(key, end);
+    if (at == 0) return "(anonymous)";
+    std::string r(r_.name(r_.tokens[at]));
+    if (kind(at + 1) == Tk::less)
+      for (u32 n = at + 1, close = match_angle(at + 1); n < close && n < end; ++n) r += r_.spelling(r_.tokens[n]);
+    return r;
   }
 
   const pp::Region& r_;
@@ -464,9 +478,8 @@ void Splitter::general(u32 k) {
           j = at(k).brace_end = match(j);
         } else {
           std::string inner = at(k).scope;
-          std::string_view name = class_name(class_key, j);
           if (!inner.empty()) inner += "::";
-          inner += name.empty() ? std::string_view("(anonymous)") : name;
+          inner += class_scope(class_key, j);
           j = nested(k, j, inner);
         }
         class_key = none;
@@ -545,7 +558,9 @@ private:
   void add(u32 k, std::string n, u32 at, u8 flags) {
     Item& it = out_.items[k];
     if (it.template_depth > 0 && (flags & name_flag::enumerator) == 0) flags |= name_flag::template_;
-    if (it.specialization) flags |= name_flag::specialization;
+    // `template<…> class-key X<args>`, `template<…> T v<args>`: a partial specialization's name.
+    if (it.specialization || (it.template_depth > 0 && kind(at + 1) == Tk::less && !n.starts_with("operator")))
+      flags |= name_flag::specialization;
     it.names.push_back({std::move(n), at - it.begin, static_cast<u32>(it.names.size()), flags});
   }
 

@@ -148,6 +148,10 @@ enum class Diag : std::uint32_t {
   no_template_matches [[=message{Severity::error, "no template named '{0:n}' has this specialization"}]],
   ambiguous_specialization [[=message{Severity::error, "the specialization of '{0:n}' is ambiguous"}]],
   specialized_after_use [[=message{Severity::error, "'{0:n}' is explicitly specialized after its first use"}]],
+  partial_same_as_primary [[=message{Severity::error, "the partial specialization of '{0:n}' has the primary template's own arguments"}]],
+  partial_argument [[=message{Severity::error, "a specialized non-type argument of '{0:n}' must be a template parameter or not depend on one"}]],
+  partial_argument_type [[=message{Severity::error, "the type of a specialized non-type argument of '{0:n}' depends on a parameter of the partial specialization"}]],
+  ambiguous_partial [[=message{Severity::error, "more than one partial specialization of '{0:n}' matches, and none is more specialized"}]],
 };
 
 // A `{N:r}` argument: why an evaluation was not constant. 0 is an expression the front end

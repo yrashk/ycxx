@@ -129,6 +129,7 @@ inline constexpr u16 destructor = 1024;
 inline constexpr u16 implicit = 2048;  // an implicitly declared special member ([special])
 inline constexpr u16 template_ = 4096;  // a template ([temp.pre]); its head is `template_params`
 inline constexpr u16 specialization = 8192;  // an explicit specialization ([temp.expl.spec])
+inline constexpr u16 partial = 16384;  // a partial specialization ([temp.spec.partial]), with `template_`
 }
 
 // What a cell demands of the program besides its value (query-engine.md §B1.4): a function
