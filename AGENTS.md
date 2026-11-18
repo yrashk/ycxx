@@ -43,9 +43,12 @@ in our own terms. Never copy sequences or commit their listings (DECISIONS §2.3
 - Small commits, reviewed P0–P2 (DECISIONS §5). Cite draft clauses by stable name (`[temp.deduct]`).
 - A design question beyond your issue goes to a new issue labelled `status:needs-decision`,
   and `model:fable` if it is hard. Don't decide it silently in code.
-- **Fable through subagents** (DECISIONS §6.5). You are most likely running on Opus.
-  - On a `model:fable` issue, and for any architecture question or hard clause on other issues,
-    use the Agent tool with `model: "fable"`.
+- **Fable, sparingly, for design** (DECISIONS §6.5). You are most likely running on Opus.
+  - Use Fable (the Agent tool with `model: "fable"`) for design decisions, the hardest
+    specification questions, and independent verification of a design.
+  - Never use it to write code, review code, write tests, draft prose or relay messages.
+  - Escalate a coding problem to Fable only after two serious Opus attempts have failed. Say
+    what was tried; Fable diagnoses, and you write the code.
   - Give the subagent a self-contained brief: the question, the clauses by stable name, the
     relevant DECISIONS sections, and the rule never to read compiler source.
   - Review its conclusions before using them, and push back with a follow-up when something is

@@ -268,10 +268,20 @@ project must survive any session ending.
 4. **Areas:** `area:*` labels partition the code. Two sessions never write the same area at the
    same time, and each works in its own git worktree and branch.
 5. **Model allocation:**
-   - Fable: architecture decisions, the hardest specification clauses ([basic.lookup],
-     [over.match], [temp.deduct], [temp.point], [dcl.init], [expr.const], [class.mem] layout,
-     Itanium mangling edge cases) and the triage of failures nobody understands.
-   - Opus at medium effort: most implementation work, raised to high effort for intricate parts.
+   - **Fable is used sparingly, for design, not for writing code.** It is for:
+     - architecture and design decisions;
+     - the hardest specification questions ([basic.lookup], [over.match], [temp.deduct],
+       [temp.point], [dcl.init], [expr.const], [class.mem] layout, Itanium mangling edge
+       cases), when a design or an implementation choice depends on them;
+     - independent verification of a design before it is accepted.
+
+     Fable does not write code, review code, write tests or do routine triage.
+   - **Escalation to Fable for code** happens only when Opus has demonstrably failed: two serious
+     attempts at a bug or an implementation have not converged, or nobody understands a failure.
+     The escalation brief states what was tried and why it failed. Fable diagnoses or decides;
+     the session writes the code.
+   - Opus at medium effort: all implementation, code review and testing, raised to high effort
+     for intricate parts.
    - Smaller models: mechanical work (data tables, extraction scripts, bulk test triage).
 
    Issues that need Fable are labelled `model:fable`.
@@ -280,7 +290,9 @@ project must survive any session ending.
    model above its parent's. Fable is used through subagents: the Agent tool with
    `model: "fable"`.
    - On a `model:fable` issue, the Opus session owns the claim, the issue bookkeeping, the
-     writing and the code. It gives every decision-bearing question to a Fable subagent.
+     writing and the code. It gives the *decision-bearing* questions to a Fable subagent, as few
+     and as well-scoped as the design allows. Drafting prose, spikes, bookkeeping, relaying and
+     polishing stay with Opus.
    - Each brief is self-contained: the question, the draft clauses by stable name, the relevant
      DECISIONS sections, and the rule never to read compiler source (§2.2). A subagent sees only
      its brief.
@@ -288,8 +300,8 @@ project must survive any session ending.
      to the same subagent when something is unclear or seems wrong. It does not silently
      override.
    - Design documents and decision comments say which conclusions came from Fable.
-   - On issues without the label, the session calls Fable on its own judgment when it meets a
-     question listed above.
+   - On issues without the label, the session calls Fable only for a design question listed
+     above, or for an escalation after Opus has demonstrably failed.
 6. **Design documents** live in `docs/design/` and are written before the code they govern. Once
    accepted, their conclusions are summarized in this file.
 
