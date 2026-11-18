@@ -210,6 +210,12 @@ public:
       if (auto a = template_args.at(p->depth, p->index)) return a->type;
       return p->type;
     }
+    // In a class template, its name without arguments is the injected-class-name: the current
+    // instantiation, or in an instantiation the specialization ([temp.local]/1).
+    if (current_class != EntityId::none) {
+      const EntityRec& c = w_->entities.rec(current_class);
+      if (c.templ != EntityId::none && c.name == name) return types().class_type(current_class);
+    }
     // A type nested in the class whose scope this is ([basic.scope.class]).
     if (current_class != EntityId::none) {
       if (const ClassRec* cr = class_rec(current_class); cr && cr->defined) {
@@ -230,6 +236,8 @@ public:
       }
     if (!found || !is_type(found->kind)) return std::nullopt;
     if (found->kind == ast::DeclKind::type_alias && !aliases) return std::nullopt;
+    // A class template's name needs its arguments outside the template ([temp.names]).
+    if (found->flags & decl_flag::template_) return std::nullopt;
     return found->type;
   }
   static bool is_type(ast::DeclKind k) {
@@ -253,6 +261,97 @@ public:
     block_types_.push_back({depth, name, type});
   }
 
+  // The class template unqualified lookup finds for `name`, which a `<` after it begins the
+  // arguments of ([temp.names]/3); none if it finds anything else.
+  std::optional<ast::DeclSema> class_template(NameId name) {
+    for (auto s = scopes_.rbegin(); s != scopes_.rend(); ++s)
+      for (auto p = s->rbegin(); p != s->rend(); ++p)
+        if (p->first == name) return std::nullopt;
+    if (template_param(name)) return std::nullopt;
+    std::optional<ast::DeclSema> found;
+    // Block-scope using-declarations, innermost first ([namespace.udecl]).
+    for (auto u = block_usings_.rbegin(); u != block_usings_.rend() && !found; ++u)
+      if (u->name == name)
+        for (const ast::DeclSema& d : u->decls)
+          if (d.kind == ast::DeclKind::class_ && (d.flags & decl_flag::template_)) found = d;
+    for (auto p = own.rbegin(); p != own.rend() && !found; ++p)
+      if (p->name == name) found = p->sema;
+    std::vector<ast::DeclSema> decls;
+    for (DeclId d : q_->visible_decls(name, directives())) {
+      ast::DeclSema s = q_->decl_sema(d);
+      if (s.entity != EntityId::none && !is_special(s)) decls.push_back(s);
+    }
+    if (!found && !decls.empty()) found = decls.back();
+    if (!found || found->kind != ast::DeclKind::class_ || !(found->flags & decl_flag::template_)) return std::nullopt;
+    // Default arguments from every earlier declaration of the template ([temp.param]/12).
+    std::vector<ast::TemplateParamSema> params = ins().seqs.elements(found->template_params);
+    bool merged = false;
+    for (const ast::DeclSema& d : decls) {
+      if (d.entity != found->entity) continue;
+      std::vector<ast::TemplateParamSema> other = ins().seqs.elements(d.template_params);
+      for (std::size_t i = 0; i < params.size() && i < other.size(); ++i)
+        if (!params[i].has_default && other[i].has_default) {
+          params[i].has_default = 1;
+          params[i].default_ = other[i].default_;
+          merged = true;
+        }
+    }
+    if (merged) found->template_params = ins().intern_seq(std::span<const ast::TemplateParamSema>(params));
+    return found;
+  }
+
+  // The class template named `name` that is a member of namespace `ns` ([namespace.qual]).
+  std::optional<ast::DeclSema> namespace_class_template(EntityId ns, NameId name) {
+    for (const ast::DeclSema& d : q_->namespace_members(ns, name))
+      if (d.kind == ast::DeclKind::class_ && (d.flags & decl_flag::template_)) return d;
+    return std::nullopt;
+  }
+
+  // The specialization of class template `templ` for `args` ([temp.spec.general]): its entity is
+  // the template and the canonical arguments (§B1.5). With dependent arguments it is a dependent
+  // type ([temp.dep.type]).
+  EntityId class_specialization(EntityId templ, std::span<const TemplateArg> args) {
+    return templates().specialize_class(templ, args);
+  }
+
+  // `X<args>` naming a class template specialization ([temp.names], [temp.arg]): each argument of
+  // its parameter's kind, values converted to the parameter's type, defaults for the rest.
+  std::optional<QualType> class_template_id(const ast::DeclSema& tmpl, std::span<const TemplateArg> args, u32 at) {
+    std::vector<ast::TemplateParamSema> params = ins().seqs.elements(tmpl.template_params);
+    NameId name = w_->entities.rec(tmpl.entity).name;
+    if (args.size() > params.size()) {
+      diag(at, Diag::template_args_mismatch, name);
+      return std::nullopt;
+    }
+    Templates t = templates();
+    Bindings given;
+    given.levels.resize(params.empty() ? 1 : params[0].depth + 1);
+    auto& out = given.levels.back();
+    out.resize(params.size());
+    for (std::size_t i = 0; i < args.size(); ++i) {
+      if (args[i].kind != params[i].kind) {
+        diag(at, Diag::template_args_mismatch, name);
+        return std::nullopt;
+      }
+      out[i] = args[i];
+      if (params[i].kind == ast::TemplateArgKind::value) {
+        auto pt = t.substitute(params[i].type, given);
+        auto v = pt ? t.converted_value(args[i], *pt) : std::nullopt;
+        if (!v) {
+          diag(at, Diag::template_args_mismatch, name);
+          return std::nullopt;
+        }
+        out[i] = *v;
+      }
+    }
+    auto full = t.complete(tmpl, params, out);
+    if (!full) {
+      diag(at, Diag::template_args_mismatch, name);
+      return std::nullopt;
+    }
+    return types().class_type(class_specialization(tmpl.entity, *full));
+  }
+
   // `using enum E;` in a block ([enum.udecl]): E's enumerators are found in this scope.
   void using_enum(QualType t, u32 at_) {
     if (!types().is_enum(t)) {
@@ -274,6 +373,17 @@ public:
   // The first component of a nested-name-specifier, by unqualified lookup ([basic.lookup.qual]/1:
   // only namespaces, types and templates).
   std::optional<Scope> scope_named(NameId n) {
+    // A type template parameter as a nested-name-specifier names a dependent type
+    // ([temp.dep.type]); in an instantiation, its argument.
+    if (const ast::TemplateParamSema* p = template_param(n)) {
+      if (p->kind != ast::TemplateArgKind::type) return std::nullopt;
+      // Bound to a type that has no members, it names no scope ([basic.lookup.qual]/1).
+      if (auto a = template_args.at(p->depth, p->index)) {
+        if (!types().is_class(a->type) && !types().is_enum(a->type)) return std::nullopt;
+        return Scope{std::nullopt, a->type};
+      }
+      return Scope{std::nullopt, p->type};
+    }
     for (auto a = block_aliases_.rbegin(); a != block_aliases_.rend(); ++a)
       if (a->name == n) return Scope{a->ns, std::nullopt};
     if (auto t = class_name(n, true)) return Scope{std::nullopt, t};
@@ -282,6 +392,9 @@ public:
   }
   // A later component: a namespace or type member of a namespace, or a type nested in a class.
   std::optional<Scope> scope_member(const Scope& s, NameId n) {
+    // A member of a dependent type is looked up when the template is instantiated
+    // ([temp.dep.type]/7): a dependent type here.
+    if (s.type && types().is_dependent(*s.type)) return Scope{std::nullopt, types().dep_name(*s.type, n)};
     if (s.ns) {
       for (const ast::DeclSema& d : q_->namespace_members(*s.ns, n)) {
         if (d.kind == ast::DeclKind::namespace_) return Scope{d.entity, std::nullopt};
@@ -303,9 +416,14 @@ public:
   }
   // `S::n` as an expression ([expr.prim.id.qual]).
   Ex scope_expr(const Scope& s, NameId n, u32 begin, u32 name_at, u32 end) {
+    if (s.type && types().is_dependent(*s.type)) return dependent_node({}, begin, end, std::nullopt, ValueCategory::lvalue);
     if (s.type) {
       if (types().is_enum(*s.type)) {
         if (auto r = find_enumerator(types().enum_of(*s.type), n, begin, end)) return *r;
+        diag(name_at, Diag::no_member, n, *s.type);
+        return {NodeId::none, begin, end};
+      }
+      if (!types().is_class(*s.type)) {
         diag(name_at, Diag::no_member, n, *s.type);
         return {NodeId::none, begin, end};
       }
@@ -357,6 +475,12 @@ public:
 
   // Whether `t` is complete at this point; a class needs its definition before the point.
   bool is_complete(QualType t) {
+    // A dependent type is checked when the template is instantiated; the current instantiation's
+    // class is defined by its template's definition, which completeness asks for.
+    if (types().is_dependent(t)) {
+      if (types().is_class(t)) q_->is_complete(types().class_of(t));
+      return true;
+    }
     if (types().is_void(t)) return false;
     if (types().is_array(t)) return is_complete(types().rec(t).inner);
     if (types().is_class(t)) return q_->is_complete(types().class_of(t));
@@ -601,6 +725,7 @@ public:
     for (std::size_t i = 0; i < elems.size(); ++i) {
       if (next == b.clauses.size()) {
         out.push_back(element_default(elems[i], true, end, end));
+        if (!out.back().ok()) return fail;  // diagnosed (a default member initializer not supported yet)
         continue;
       }
       const Braced::Clause& c = b.clauses[next];
@@ -778,7 +903,7 @@ public:
   // What the cell demands of the program (§B1.4), in program order.
   std::vector<Demand> demands;
 
-  Templates templates() { return Templates(*w_); }
+  Templates templates() { return Templates(*w_, classes()); }
   bool dependent(const Ex& e) {
     return e.ok() && ((e.info.flags & expr_flag::dependent) || types().is_dependent(e.type()));
   }
@@ -2193,6 +2318,13 @@ public:
   Ex call(Ex callee, std::vector<Ex> args, u32 end, u32 paren_at) {
     u32 begin = callee.begin;
     if (!callee.ok() || std::ranges::any_of(args, [](const Ex& a) { return !a.ok(); })) return {NodeId::none, begin, end};
+    // A member function called with a dependent argument is resolved when the template is
+    // instantiated ([temp.dep.expr]).
+    if (is_bound_member(callee) && any_dependent(args)) {
+      std::vector<Ex> ops{callee};
+      ops.insert(ops.end(), args.begin(), args.end());
+      return dependent_node(ops, begin, end);
+    }
     if (is_bound_member(callee)) return member_call(callee, std::move(args), end, paren_at);
     // [temp.dep.candidate]: an unqualified call with a type-dependent argument is resolved when the
     // template is instantiated, among what lookup finds at the definition and argument-dependent

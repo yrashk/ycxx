@@ -152,7 +152,6 @@ draft/class/class.virtual-10.accept.cpp 'class' not supported yet
 draft/class/class.virtual-2.accept.cpp 'struct' not supported yet
 draft/class/class.virtual-3.reject.cpp errors elsewhere: 'struct' not supported yet
 draft/class/class.virtual-4.reject.cpp errors elsewhere: 'struct' not supported yet
-draft/class/class.virtual-5.reject.cpp errors elsewhere: 'template' not supported yet
 draft/class/class.virtual-6.reject.cpp errors elsewhere: 'class' not supported yet
 draft/class/class.virtual-7.reject.cpp errors elsewhere: 'struct' not supported yet
 draft/class/class.virtual-8.reject.cpp errors elsewhere: 'struct' not supported yet
@@ -276,7 +275,6 @@ draft/dcl/dcl.type.class.deduct-2.reject.cpp errors elsewhere: preprocessing dir
 draft/dcl/dcl.type.decltype-1.accept.cpp '&&' not supported yet
 draft/dcl/dcl.type.elab-1.accept.cpp 'enum' not supported yet
 draft/dcl/dcl.type.splice-1.reject.cpp errors elsewhere: preprocessing directives are not supported yet
-draft/dcl/dcl.typedef-2.reject.cpp errors elsewhere: 'using' not supported yet
 draft/dcl/dcl.typedef-3.reject.cpp errors elsewhere: 'struct' not supported yet
 draft/dcl/dcl.typedef-4.accept.cpp 'typedef' not supported yet
 draft/dcl/dcl.typedef-5.reject.cpp errors elsewhere: 'typedef' not supported yet
@@ -456,7 +454,6 @@ draft/temp/temp.arg.general-3.reject.cpp errors elsewhere: 'template' not suppor
 draft/temp/temp.arg.general-4.reject.cpp errors elsewhere: 'template' not supported yet
 draft/temp/temp.arg.general-5.reject.cpp errors elsewhere: 'template' not supported yet
 draft/temp/temp.arg.general-6.accept.cpp 'template' not supported yet
-draft/temp/temp.arg.general-7.accept.cpp 'template' not supported yet
 draft/temp/temp.arg.nontype-1.reject.cpp errors elsewhere: 'template' not supported yet
 draft/temp/temp.arg.nontype-2.reject.cpp errors elsewhere: 'template' not supported yet
 draft/temp/temp.arg.nontype-3.reject.cpp errors elsewhere: 'template' not supported yet
@@ -530,13 +527,11 @@ draft/temp/temp.expl.spec-9.reject.cpp errors elsewhere: 'template' not supporte
 draft/temp/temp.explicit-1.accept.cpp 'template' not supported yet
 draft/temp/temp.explicit-2.reject.cpp errors elsewhere: 'template' not supported yet
 draft/temp/temp.explicit-3.accept.cpp 'template' not supported yet
-draft/temp/temp.fct.general-1.accept.cpp 'template' not supported yet
 draft/temp/temp.fct.spec.general-1.accept.cpp 'template' not supported yet
 draft/temp/temp.friend-1.accept.cpp 'template' not supported yet
 draft/temp/temp.friend-2.accept.cpp 'class' not supported yet
 draft/temp/temp.friend-3.accept.cpp 'class' not supported yet
 draft/temp/temp.friend-4.reject.cpp errors elsewhere: 'template' not supported yet
-draft/temp/temp.friend-5.reject.cpp errors elsewhere: 'template' not supported yet
 draft/temp/temp.func.order-1.accept.cpp 'struct' not supported yet
 draft/temp/temp.func.order-2.reject.cpp errors elsewhere: 'template' not supported yet
 draft/temp/temp.func.order-3.accept.cpp 'template' not supported yet
@@ -544,9 +539,7 @@ draft/temp/temp.func.order-4.reject.cpp errors elsewhere: 'template' not support
 draft/temp/temp.func.order-5.accept.cpp 'template' not supported yet
 draft/temp/temp.func.order-6.accept.cpp 'template' not supported yet
 draft/temp/temp.inst-1.accept.cpp 'template' not supported yet
-draft/temp/temp.inst-10.accept.cpp 'template' not supported yet
 draft/temp/temp.inst-11.reject.cpp errors elsewhere: 'template' not supported yet
-draft/temp/temp.inst-2.reject.cpp errors elsewhere: 'template' not supported yet
 draft/temp/temp.inst-3.reject.cpp errors elsewhere: 'template' not supported yet
 draft/temp/temp.inst-4.reject.cpp errors elsewhere: 'template' not supported yet
 draft/temp/temp.inst-5.accept.cpp 'template' not supported yet
@@ -568,7 +561,6 @@ draft/temp/temp.mem-6.accept.cpp 'struct' not supported yet
 draft/temp/temp.mem.enum-1.accept.cpp 'template' not supported yet
 draft/temp/temp.mem.func-1.reject.cpp errors elsewhere: 'template' not supported yet
 draft/temp/temp.names-1.reject.cpp errors elsewhere: preprocessing directives are not supported yet
-draft/temp/temp.names-2.reject.cpp errors elsewhere: 'template' not supported yet
 draft/temp/temp.names-3.reject.cpp errors elsewhere: preprocessing directives are not supported yet
 draft/temp/temp.names-4.reject.cpp errors elsewhere: 'template' not supported yet
 draft/temp/temp.names-5.reject.cpp errors elsewhere: 'template' not supported yet
@@ -581,10 +573,7 @@ draft/temp/temp.param-11.reject.cpp errors elsewhere: 'template' not supported y
 draft/temp/temp.param-2.accept.cpp 'class' not supported yet
 draft/temp/temp.param-3.accept.cpp 'template' not supported yet
 draft/temp/temp.param-4.reject.cpp errors elsewhere: 'using' not supported yet
-draft/temp/temp.param-5.reject.cpp errors elsewhere: 'template' not supported yet
-draft/temp/temp.param-6.accept.cpp 'template' not supported yet
 draft/temp/temp.param-7.accept.cpp 'template' not supported yet
-draft/temp/temp.param-9.reject.cpp errors elsewhere: 'template' not supported yet
 draft/temp/temp.pre-2.reject.cpp errors elsewhere: 'template' not supported yet
 draft/temp/temp.pre-3.reject.cpp errors elsewhere: 'class' not supported yet
 draft/temp/temp.pre-4.reject.cpp errors elsewhere: 'template' not supported yet
@@ -599,7 +588,6 @@ draft/temp/temp.spec.partial.general-1.accept.cpp 'template' not supported yet
 draft/temp/temp.spec.partial.general-2.accept.cpp 'template' not supported yet
 draft/temp/temp.spec.partial.general-3.accept.cpp 'template' not supported yet
 draft/temp/temp.spec.partial.general-4.accept.cpp 'namespace' not supported yet
-draft/temp/temp.spec.partial.general-5.reject.cpp errors elsewhere: 'template' not supported yet
 draft/temp/temp.spec.partial.match-1.reject.cpp errors elsewhere: 'template' not supported yet
 draft/temp/temp.spec.partial.match-2.accept.cpp 'template' not supported yet
 draft/temp/temp.spec.partial.match-3.reject.cpp errors elsewhere: 'template' not supported yet
@@ -626,3 +614,6 @@ own/classes/s1-elaborated.run.cpp block-scope elaborated type specifier (#117)
 own/classes/s1-locals-scopes.run.cpp local classes (#117)
 own/classes/s2-constexpr-members.run.cpp classes in constant evaluation (#25)
 own/templates/f1-deduce-function.run.cpp function_ir: a call through a pointer to function is not supported yet (#24)
+own/templates/c2-constexpr-members.run.cpp constexpr constructors (#157) and class objects in constant evaluation (#25)
+own/templates/c2-dependent-members.run.cpp aggregate initialization of a reference member: function_ir rejects the bound glvalue, for any class (#157)
+own/templates/c2-distinct-types.reject.cpp a namespace-scope reference bound to a variable is not a constant initializer yet, for any class (#101)
