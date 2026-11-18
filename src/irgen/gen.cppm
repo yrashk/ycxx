@@ -255,7 +255,7 @@ class Gen {
       return;
     }
     ValueId self[] = {p.ptr};
-    call_fn(destructor, facts_.int_type(), self, true);
+    call_fn(destructor, facts_.int_type(), self, 1, true);
   }
   // Ends the objects of the scopes above `depth`, innermost first; the scopes stay open.
   void exit_scopes(std::size_t depth) {
@@ -550,7 +550,7 @@ class Gen {
       if (c.zero_first && !zeroed) unsupported(e, "value-initializing an object that is not new");
       std::vector<ValueId> args{p.ptr};
       for (ast::Child arg : ast_.children(c.args)) args.push_back(argument(child(e, arg)));
-      call_fn(c.ctor, facts_.int_type(), args, true);
+      call_fn(c.ctor, facts_.int_type(), args, 1, true);
       return;
     }
     if (is<ast::InitList>(e)) {
@@ -974,24 +974,31 @@ class Gen {
     if (c.function == ast::EntityId::none) unsupported(a, "through a pointer");
     std::vector<ValueId> args;
     for (ast::Child arg : ast_.children(c.args)) args.push_back(argument(child(a, arg)));
-    return call_fn(c.function, result_type(c.info), args);
+    return call_fn(c.function, result_type(c.info), args, 0);
   }
   // A non-static member function's call: the object's address is the first argument.
   std::optional<ValueId> member_call(At a) {
     auto c = get<ast::MemberCall>(a);
     std::vector<ValueId> args{rvalue(child(a, c.object))};
     for (ast::Child arg : ast_.children(c.args)) args.push_back(argument(child(a, arg)));
-    return call_fn(c.function, result_type(c.info), args);
+    return call_fn(c.function, result_type(c.info), args, 1);
   }
   // The IR type of a call's result: a glvalue's is a pointer to its object ([expr.call]).
   ast::QualType result_type(const ast::ExprInfo& i) {
     return i.category == ast::ValueCategory::prvalue ? i.type : facts_.pointer_to(i.type);
   }
-  std::optional<ValueId> call_fn(ast::EntityId f, ast::QualType result, std::span<const ValueId> args, bool void_ = false) {
+  // A call to `f`. The first `implicit` arguments are not its parameters' (the object); the
+  // arguments after its parameters are the ones its ellipsis matches ([expr.call]/12), which
+  // sema already promoted.
+  std::optional<ValueId> call_fn(ast::EntityId f, ast::QualType result, std::span<const ValueId> args,
+                                 std::size_t implicit, bool void_ = false) {
     std::vector<ir::Ty> results;
     bool has_value = !void_ && cls(result) != TypeClass::void_;
     if (has_value) results.push_back(vty(result));
-    std::uint64_t imms[] = {word(f)};
+    std::size_t through_ellipsis = 0;
+    if (auto named = facts_.ellipsis_after(f); named && args.size() > implicit + *named)
+      through_ellipsis = args.size() - implicit - *named;
+    std::uint64_t imms[] = {word(f), through_ellipsis};
     ir::Flags flags = facts_.is_constexpr(f) ? 0 : ir::bit(ir::Flag::not_constexpr);
     ir::NodeId n = stateful(ir::Op::call, results, args, imms, flags);
     if (has_value) return b_.result(n, 1);

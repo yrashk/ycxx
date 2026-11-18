@@ -349,7 +349,7 @@ func {@fact} {
   ret %4, %2
 ^2(%5: !state):
   %6: {int} = sub nsw %1, %2
-  %7: !state, %8: {int} = call %5, %6 [{@fact}]
+  %7: !state, %8: {int} = call %5, %6 [{@fact}, 0]
   %9: {int} = mul nsw %1, %8
   ret %7, %9
 }
@@ -372,7 +372,7 @@ void recursion() {
   Run inf(R"(
 func {@loop} {
 ^0(%0: !state, %1: {int}):
-  %2: !state, %3: {int} = call %0, %1 [{@loop}]
+  %2: !state, %3: {int} = call %0, %1 [{@loop}, 0]
   ret %2, %3
 }
 )");
@@ -388,18 +388,18 @@ func {@f} {
   %3: {bool} = icmp %1, %2 [eq]
   cond_br %3 ^1(%0), ^2(%0)
 ^1(%4: !state):
-  %5: !state, %6: {int} = call not_constexpr %4, %1 [{@g}]
+  %5: !state, %6: {int} = call not_constexpr %4, %1 [{@g}, 0]
   ret %5, %6
 ^2(%7: !state):
   %8: {int} = const [{i1}]
   %9: {bool} = icmp %1, %8 [eq]
   cond_br %9 ^3(%7), ^4(%7)
 ^3(%10: !state):
-  %11: !state, %12: {int} = call %10, %1 [{@h}]
+  %11: !state, %12: {int} = call %10, %1 [{@h}, 0]
   ret %11, %12
 ^4(%13: !state):
   %14: {int*} = func_addr [{@k}]
-  %15: !state, %16: {int} = call_ind %13, %14, %1
+  %15: !state, %16: {int} = call_ind %13, %14, %1 [0]
   ret %15, %16
 }
 func {@g} {
@@ -511,7 +511,7 @@ func {@ind} {
   Run dangling(R"(
 func {@use} {
 ^0(%0: !state):
-  %1: !state, %2: {int*} = call %0 [{@esc}]
+  %1: !state, %2: {int*} = call %0 [{@esc}, 0]
   %3: {int} = load %1, %2 [{int}, /]
   ret %1, %3
 }
@@ -997,7 +997,7 @@ func {@f} {
   ret %6, %7
 ^2(%8: !state):
   %9: {int(*)(int)} = const [{&k}]
-  %10: !state, %11: {int} = call_ind %8, %9, %1
+  %10: !state, %11: {int} = call_ind %8, %9, %1 [0]
   ret %10, %11
 }
 func {@k} {
