@@ -691,8 +691,9 @@ class cell_sender;
 // requests are made with `get` (blocking) or `request` (a sender), each the root of a demand.
 class Db {
 public:
-  // Requests run on the thread that makes them, one at a time. Everything, stop requests
-  // included, comes from the thread that created the Db.
+  // Requests run on the thread that makes them, one at a time. Any thread may make one, but never
+  // two at once, and a request's stop comes from the thread that runs it (a daemon serving one
+  // request per connection thread, behind its own lock, is fine).
   Db();
   // Requests run on the pool's workers. The pool outlives the Db.
   explicit Db(Pool& pool);
@@ -888,7 +889,7 @@ private:
   std::atomic<std::size_t> live_{0};
   Pool* pool_ = nullptr;
   std::vector<Work> local_;  // the queue when there is no pool
-  std::thread::id owner_;    // the only thread that uses a Db without a pool
+  std::atomic<std::thread::id> driver_{};  // without a pool, the thread running a request now
   std::mutex wait_mutex_;
   Arena<Registered> registry_;
   std::mutex ids_mutex_;
@@ -1242,6 +1243,7 @@ struct Request : Root, Settle {
     // At start, not when the sender was made: a `set` between the two must not leave the revision
     // this request reads at unmarked (review of #95, P0).
     d.observe();
+    if (!d.pool_) d.driver_.store(std::this_thread::get_id(), std::memory_order_relaxed);
     (void)start(std::span<const CellId>(&cell, 1));
     d.drain();
   }
@@ -2105,8 +2107,8 @@ void Db::push(Work w, Priority p) noexcept {
     pool_->push(w, p);
     return;
   }
-  // A stop requested from another thread would push here while the owner drains.
-  contract_assert(std::this_thread::get_id() == owner_);
+  // A stop requested from another thread would push here while the request's thread drains.
+  contract_assert(std::this_thread::get_id() == driver_.load(std::memory_order_relaxed));
   local_.push_back(w);
 }
 
@@ -2126,7 +2128,7 @@ void Db::count(Counter what, const Root* root, CellId c, std::uint64_t n) noexce
   if (per_kind_.load(std::memory_order_relaxed)) tables_[cells_[c].kind].load(std::memory_order_acquire)->counters.add(what, n, stripe);
 }
 
-Db::Db() : owner_(std::this_thread::get_id()) { (void)registry_.emplace(); }  // id 0 is never an owner that waits
+Db::Db() { (void)registry_.emplace(); }  // id 0 is never an owner that waits
 
 Db::Db(Pool& pool) : Db() { pool_ = &pool; }
 
