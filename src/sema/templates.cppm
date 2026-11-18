@@ -101,7 +101,9 @@ public:
         auto p = ins().values.get<ast::VDepParam>(r.bound_value);
         auto a = b.at(p.depth, p.index);
         if (!a) return p.depth == dependent_depth ? std::nullopt : std::optional(types().array_dependent(*e, r.bound_value));
-        if (a->kind != TemplateArgKind::value || !ins().values.is<ast::VInt>(a->value)) return std::nullopt;
+        if (a->kind != TemplateArgKind::value) return std::nullopt;
+        if (ins().values.is_dependent(a->value)) return types().array_dependent(*e, a->value);  // a unique value
+        if (!ins().values.is<ast::VInt>(a->value)) return std::nullopt;
         // [dcl.array]/1: the bound's value is greater than zero.
         if (ast::is_signed(target, *types().builtin_of(a->type)) && ast::is_negative(ast::int_bits(ins(), a->value)))
           return std::nullopt;
@@ -167,16 +169,22 @@ public:
     case TypeKind::class_:
     case TypeKind::enum_: return pr.entity == ar.entity;
     case TypeKind::pointer:
-      // Under /4.2 the pointee may be less cv-qualified in A: a qualification conversion adds it.
-      return deduce(pr.inner, ar.inner, depth, out, {.more_cv = allow.qualification, .qualification = false});
+      // Under /4.2 the pointee may be less cv-qualified in A: a qualification conversion adds it,
+      // at a deeper level only below a const one ([conv.qual]).
+      return deduce(pr.inner, ar.inner, depth, out,
+                    {.more_cv = allow.qualification, .qualification = allow.qualification && Types::is_const(types().canonical(pr.inner))});
     case TypeKind::reference: return pr.rvalue_ref == ar.rvalue_ref && deduce(pr.inner, ar.inner, depth, out);
     case TypeKind::array:
       // [temp.deduct.type]/8: `T[i]`, a non-type parameter deduced from the bound.
       if (pr.bound_value != ConstId::none && ins().values.is<ast::VDepParam>(pr.bound_value)) {
         auto p = ins().values.get<ast::VDepParam>(pr.bound_value);
         if (p.depth == depth) {
-          if (ar.bound_value == ConstId::none || !ins().values.is<ast::VInt>(ar.bound_value)) return false;
-          QualType size = types().canonical(ins().values.get<ast::VInt>(ar.bound_value).type);
+          // A known bound, or in partial ordering a unique value ([temp.func.order]/3).
+          if (ar.bound_value == ConstId::none) return false;
+          if (ins().values.is<ast::VDepParam>(ar.bound_value) && ins().values.get<ast::VDepParam>(ar.bound_value).depth == depth)
+            return false;
+          if (!ins().values.is<ast::VInt>(ar.bound_value) && !ins().values.is<ast::VDepParam>(ar.bound_value)) return false;
+          QualType size = types().canonical(types().builtin(Builtin::unsigned_long));
           if (!bind(out, p.index, {TemplateArgKind::value, size, ar.bound_value})) return false;
           return deduce(pr.inner, ar.inner, depth, out, {.more_cv = allow.more_cv});
         }
@@ -297,6 +305,14 @@ public:
         auto s = substitute(d.type, bindings(depth, out));
         if (!s) return std::nullopt;
         d.type = types().canonical(*s);
+      } else if (ins().values.is<ast::VDepParam>(d.value)) {
+        // `int N = M`: an earlier parameter's argument, converted ([temp.arg.nontype]).
+        auto p = ins().values.get<ast::VDepParam>(d.value);
+        auto a = p.depth == depth && p.index < i ? out[p.index] : std::nullopt;
+        auto pt = substitute(params[i].type, bindings(depth, out));
+        auto v = a && pt ? converted_value(*a, *pt) : std::nullopt;
+        if (!v) return std::nullopt;
+        d = *v;
       }
       out[i] = d;
     }

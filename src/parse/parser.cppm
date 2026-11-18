@@ -771,8 +771,9 @@ public:
     // [temp.param]/7: a structural type; class types are not supported yet.
     if (!s_->types().is_integral(t) && !s_->types().is_pointer(t) && !s_->types().is_reference(t) &&
         !s_->types().is(t, Builtin::nullptr_t) && !s_->types().is_dependent(t)) {
-      s_->diag(at, s_->types().is_class(t) ? Diag::not_supported : Diag::invalid_template_parameter_type,
-               s_->types().is_class(t) ? Tk::kw_class : Tk::kw_template);
+      bool later = s_->types().is_class(t) || s_->types().kind(t) == sema::TypeKind::enum_;  // structural, not supported yet
+      s_->diag(at, later ? Diag::not_supported : Diag::invalid_template_parameter_type,
+               s_->types().is_class(t) ? Tk::kw_class : Tk::kw_enum);
       ok = false;
       return std::nullopt;
     }
@@ -811,9 +812,13 @@ public:
   std::optional<sema::ConstId> template_value(Ex e, QualType t) {
     if (!e.ok()) return std::nullopt;
     if (auto lit = s_->as<ast::Literal>(e); lit && s_->world().ins.values.is_dependent(lit->value)) return lit->value;
-    // Value-dependent: its value is known when the template is instantiated. (A `VDep*` form of
-    // the expression comes with class templates, where it is part of a type.)
-    if (s_->dependent(e)) return s_->world().ins.intern_value(ast::VDepParam{sema::dependent_depth, 0});
+    // Value-dependent: in a body its value is known when the body is instantiated; in a declaration
+    // it is part of the template's signature, which needs the expression's `VDep*` form (#88).
+    if (s_->dependent(e)) {
+      if (body) return s_->world().ins.intern_value(ast::VDepParam{sema::dependent_depth, 0});
+      s_->diag(e.begin, Diag::not_supported, Tk::kw_template);
+      return std::nullopt;
+    }
     Ex c = s_->convert(e, t, e.begin);
     if (!c.ok()) return std::nullopt;
     sema::Evaluated v = sema::Evaluator(*s_, questions()).evaluate(c);
@@ -1179,8 +1184,12 @@ public:
         auto args = template_argument_list();
         if (!args) return {NodeId::none, begin, pos()};
         // [temp.dep.expr]/3: a template-id with a dependent argument is type-dependent.
-        if (std::ranges::any_of(*args, [&](const ast::TemplateArg& a) { return s_->dependent(a); }))
+        if (std::ranges::any_of(*args, [&](const ast::TemplateArg& a) { return s_->dependent(a); })) {
+          // A call of it is a dependent call ([temp.dep.candidate]): its instantiation adds
+          // argument-dependent lookup.
+          if (is(Tk::l_paren)) s_->dependent_calls.push_back(begin);
           return s_->dependent_node({}, begin, pos());
+        }
         return s_->template_id(n, std::move(*args), begin, pos());
       }
       return s_->name_expr(n, begin, pos(), is(Tk::l_paren));
@@ -1286,6 +1295,14 @@ public:
     u32 name_at = pos();
     NameId n = name_of(tok());
     bump();
+    if (is(Tk::less)) {
+      Ex r = s_->scope_expr(*s, n, begin, name_at, pos());
+      if (r.ok() && s_->types().is(r.type(), Builtin::overload_set)) {
+        s_->diag(pos(), Diag::not_supported, Tk::less);  // qualified template-ids (#88)
+        return {NodeId::none, begin, pos()};
+      }
+      return r;
+    }
     return s_->scope_expr(*s, n, begin, name_at, pos());
   }
 
@@ -1829,6 +1846,9 @@ private:
   LangLinkage linkage_ = LangLinkage::cxx;
   int in_params_ = 0;
   int angle_ = 0;               // inside a template argument or parameter list, outside parentheses
+public:
+  bool body = false;  // the part is a function body, not a declaration part
+private:
   const Level* top_ = nullptr;  // the declarator being built
 };
 

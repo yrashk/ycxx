@@ -341,6 +341,7 @@ public:
   // ([temp.dep.candidate]); its instantiations add argument-dependent lookup to them.
   std::map<u32, std::vector<u32>> dependent_calls_;
   u32 end() const { return static_cast<u32>(items_->items.size()); }
+  bool instantiation_gave_up() const { return depth_reported_; }
 
   // Every item and body analysed, in item order; the diagnostics of each cell in order.
   void analyze_all() {
@@ -471,8 +472,9 @@ private:
   std::deque<Instance> instances_;               // a deque: instances are referred to as they are added
   std::vector<const Instance*> instance_order_;  // the completed ones, in order of instantiation
   std::map<u32, std::size_t> instance_index_;    // by specialization: its slot in `instances_`
-  std::map<u32, u32> instance_depth_;            // by specialization: how deeply it is nested
   std::set<u32> instantiating_;                  // specializations whose instantiation is running
+  static constexpr u32 instantiation_limit = 900;  // [temp.inst]/16 ([implimits]: 1024)
+  bool depth_reported_ = false;
   std::vector<engine::Diagnostic> end_diags_;    // the END phase's own
   std::vector<EntityId> required_;
   std::map<u32, std::optional<irgen::FunctionIr>> instance_irs_;  // by specialization
@@ -530,6 +532,7 @@ public:
   bool is_constexpr(EntityId f) override { return p_->is_constexpr(f, item_); }
   bool is_complete(EntityId c) override { return p_->is_complete(c, item_, self_, own_class_complete); }
   std::optional<ConstId> constant_value(EntityId v) override { return p_->constant_value(v, item_); }
+  bool instantiation_gave_up() override { return p_->instantiation_gave_up(); }
   std::optional<ast::DeclSema> earlier_member(ast::NameId name) override {
     const items::Item& it = p_->items().items[item_];
     if (it.parent == items::none || p_->items().items[it.parent].kind != ItemKind::class_def) return std::nullopt;
@@ -576,6 +579,7 @@ public:
   bool is_complete(EntityId c) override { return p_->is_complete(c, p_->end(), true, true); }
   std::optional<ConstId> constant_value(EntityId v) override { return p_->constant_value(v, p_->end()); }
   std::optional<ast::DeclSema> earlier_member(ast::NameId) override { return std::nullopt; }
+  bool instantiation_gave_up() override { return p_->instantiation_gave_up(); }
   bool dependent_call(sema::u32 offset) override {
     auto it = p_->dependent_calls_.find(item_);
     return it != p_->dependent_calls_.end() && std::ranges::contains(it->second, offset);
@@ -1539,6 +1543,16 @@ private:
         s_.diag(d.name_at, Diag::not_supported, Tk::kw_template);  // variable templates
         return false;
       }
+      // [temp.local]/6: neither the template nor its parameters may take a parameter's name.
+      if (s_.template_param(d.name)) {
+        s_.diag(d.name_at, Diag::redeclared_local, d.name);
+        return false;
+      }
+      for (const parse::Param& prm : d.params)
+        if (prm.name != s_.no_name() && s_.template_param(prm.name)) {
+          s_.diag(prm.at, Diag::redeclared_local, prm.name);
+          return false;
+        }
       sem.template_params = b_.seq(std::span<const ast::TemplateParamSema>(s_.template_scopes.front()));
       flags |= sema::decl_flag::template_;
     }
@@ -1554,6 +1568,8 @@ private:
             head_fp(p_->world().ins.seqs.elements(p.template_params)) != head)
           return true;
         sema::TypeRec a = types.rec(p.type), c = types.rec(sem.type);
+        // A function template's return type is part of its signature ([defns.signature.templ]).
+        if ((flags & sema::decl_flag::template_) && types.canonical(a.inner) != types.canonical(c.inner)) return true;
         auto canon = [&](std::vector<QualType> v) {
           for (QualType& q : v) q = types.canonical(q);
           return v;
@@ -1869,6 +1885,7 @@ public:
         s_(p.world(), b_, *q_, out_.diags, p.id(item), it_->body_begin - it_->begin),
         ps_(p.region(), it_->body_begin, it_->body_end, s_), inst_(std::move(inst)) {
     ps_.set_questions(*q_);
+    ps_.body = true;
     at_ = inst_ ? &static_cast<AtInstantiation&>(*q_).pattern_context() : &static_cast<AtItem&>(*q_);
   }
 
@@ -2181,6 +2198,16 @@ const Program::Instance* Program::instance(EntityId spec) {
   auto def = definitions_.find(std::to_underlying(rec.templ));
   if (def == definitions_.end()) return nullptr;  // declared only: defined in another unit, or nowhere
   const u32 k = def->second;
+  // [temp.inst]/16: instantiations nested through constant evaluation are limited as the END
+  // worklist's are; the limit is reported once, at the template.
+  if (instantiating_.size() >= instantiation_limit) {
+    if (!depth_reported_) {
+      depth_reported_ = true;
+      end_diags_.push_back({engine::Loc{std::to_underlying(id(k)), 0}, sema::diag_id(sema::Diag::instantiation_depth),
+                            {engine::diag_arg(instantiation_limit)}});
+    }
+    return nullptr;
+  }
   ast::DeclSema tmpl = w_->ins.seqs.at(item_sema(k).value.decls, 0);
   std::vector<ast::TemplateParamSema> head = w_->ins.seqs.elements(tmpl.template_params);
   const sema::u16 depth = head.empty() ? 0 : head[0].depth;
@@ -2194,7 +2221,14 @@ const Program::Instance* Program::instance(EntityId spec) {
   decl.template_params = w_->ins.intern_seq(std::span<const ast::TemplateParamSema>{});
   sema::Templates t(*w_);
   std::vector<ast::ParamSema> params = w_->ins.seqs.elements(tmpl.params);
-  for (ast::ParamSema& p : params) p.type = t.substitute(p.type, args).value_or(p.type);
+  // A parameter's type is adjusted again after substitution ([dcl.fct]/5): an array or function
+  // becomes a pointer; the body's object keeps its cv-qualifiers.
+  for (ast::ParamSema& p : params) {
+    p.type = t.substitute(p.type, args).value_or(p.type);
+    sema::Types& ty = w_->types;
+    if (ty.is_array(p.type)) p.type = ty.add_cv(ty.pointer(ty.rec(p.type).inner), sema::Types::cv(p.type));
+    else if (ty.is_function(p.type)) p.type = ty.pointer(p.type);
+  }
   decl.params = w_->ins.intern_seq(std::span<const ast::ParamSema>(params));
   Instance in{spec, k, decl, {}, false};
   // A definition with errors was diagnosed; its instantiations say nothing more.
@@ -2220,8 +2254,7 @@ void Program::instantiate_all() {
     if (body_cells_[k]) work.insert(work.end(), body_cells_[k]->demands.begin(), body_cells_[k]->demands.end());
   }
   std::vector<u32> depth(work.size(), 1);
-  // [temp.inst]/16: an implementation-defined limit on nested instantiations ([implimits]: 1024).
-  constexpr u32 limit = 900;
+  constexpr u32 limit = instantiation_limit;
   std::set<u32> seen;
   for (std::size_t i = 0; i < work.size(); ++i) {
     if (!seen.insert(std::to_underlying(work[i].spec)).second) continue;
@@ -2232,7 +2265,7 @@ void Program::instantiate_all() {
       break;
     }
     const Instance* in = instance(work[i].spec);
-    if (!in) continue;
+    if (!in || !in->body.diags.empty()) continue;  // what an erroneous instance demands is not code
     for (const sema::Demand& d : in->body.demands) {
       work.push_back(d);
       depth.push_back(depth[i] + 1);
@@ -2245,11 +2278,14 @@ interp::Callee Program::function_ir(EntityId f, u32 item) {
   c.is_constexpr = is_constexpr(f, item);
   // A function template specialization needed for constant evaluation is instantiated where it
   // is needed ([temp.inst]/8).
-  if (w_->entities.rec(f).templ != EntityId::none) {
+  if (EntityId templ = w_->entities.rec(f).templ; templ != EntityId::none) {
+    // Its template must be defined before the point, as a function must ([expr.const]).
+    auto def = definitions_.find(std::to_underlying(templ));
+    if (def == definitions_.end() || def->second >= item) return c;
     const Instance* in = instance(f);
     const u32 key = std::to_underlying(f);
     if (!in || in->failed || !in->body.diags.empty() || in->body.value.tree == NodeId::none) {
-      c.unsupported = in == nullptr;
+      c.unsupported = in != nullptr;  // erroneous: its body cannot be evaluated
       return c;
     }
     if (!instance_irs_.contains(key)) {

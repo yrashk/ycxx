@@ -152,7 +152,7 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
   for (const parse::Program::Instance* in : program.instances()) {
     if (in->failed || in->body.value.tree == ast::NodeId::none) continue;
     const items::Item& it = items.items[in->item];
-    declare(in->decl, std::nullopt);
+    declare(in->decl, ast::Loc{program.id(in->item), 0});  // errors in its name point at the template
     tu.functions.push_back({in->spec, in->decl, in->body.value, program.id(in->item), it.body_begin - it.begin, std::nullopt});
   }
   for (EntityId spec : program.required()) {

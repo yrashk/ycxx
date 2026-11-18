@@ -60,6 +60,9 @@ public:
   // point of instantiation, which argument-dependent lookup searches ([temp.dep.candidate]).
   // Outside one, false and none.
   virtual bool dependent_call(u32 /*offset*/) { return false; }
+  // Whether instantiation has given up at its nesting limit, which was diagnosed ([temp.inst]/16):
+  // what fails because of it says nothing more.
+  virtual bool instantiation_gave_up() { return false; }
   virtual std::vector<ast::DeclSema> members_at_instantiation(EntityId /*ns*/, NameId) { return {}; }
   virtual ~Questions() = default;
 };
@@ -483,6 +486,7 @@ public:
         if (!c.list) ops.push_back(c.expr);
       return dependent_node(ops, b.begin, b.end, types().is_dependent(t) ? std::nullopt : std::optional(Types::unqualified(t)));
     }
+    if (types().is_void(t) && b.clauses.empty()) return void_prvalue(b.begin, b.end);  // [expr.type.conv]/2
     if (!require_complete(t, b.begin)) return fail;
     // [dcl.init.general]: an initializer-list or a designated-initializer-list, not a mix.
     if (std::ranges::any_of(b.clauses, &Braced::Clause::designated) &&
@@ -679,6 +683,9 @@ public:
   // enclosing scope is guarded: a function's parameters, a for-init-statement's or a condition's
   // declarations ([basic.scope.block]/2). Parameters are checked by the parser (`check` false).
   u32 declare_local(NameId name, QualType type, u16 flags, u32 at, bool check = true) {
+    // [temp.local]/6: a template parameter's name is not redeclared in its scope.
+    // (Parameters are checked where the declarator is.)
+    if (!(flags & local_flag::parameter) && name != no_name() && template_param(name)) diag(at, Diag::redeclared_local, name);
     if (name != no_name() && check) {
       bool clash = std::ranges::any_of(scopes_.back(), [&](auto& p) { return p.first == name; });
       if (scopes_.size() >= 2 && !guarded_.empty() && guarded_.back() == scopes_.size() - 2)
@@ -774,6 +781,8 @@ public:
       for (auto p = s->rbegin(); p != s->rend(); ++p)
         if (p->first == name) return false;
     if (template_param(name)) return false;
+    for (const BlockUsing& u : block_usings_)
+      if (u.name == name) return std::ranges::any_of(u.decls, [](const ast::DeclSema& d) { return (d.flags & decl_flag::template_) != 0; });
     for (const OwnDecl& o : own)
       if (o.name == name) return (o.sema.flags & decl_flag::template_) != 0;
     for (DeclId d : q_->visible_decls(name, directives()))
@@ -1264,6 +1273,15 @@ public:
   // `T(args)` and `T{…}` for a class T ([expr.type.conv]): a prvalue.
   Ex functional_cast(QualType t, std::vector<Ex> args, u32 begin, u32 end) {
     if (types().is_dependent(t) || any_dependent(args)) return construct(t, std::move(args), begin, end);
+    // [expr.type.conv]/2: `void()` is a void prvalue; one argument is a cast to the type, a
+    // reference included ([expr.cast]); value-initializing a reference, a function or an array is
+    // ill-formed or not supported yet.
+    if (args.empty() && types().is_void(t)) return void_prvalue(begin, end);
+    if (args.size() == 1 && types().is_reference(t)) return bind_reference(args[0], t, begin);
+    if (types().is_reference(t) || types().is_function(t) || types().is_array(t)) {
+      diag(begin, types().is_reference(t) ? Diag::reference_uninitialized : Diag::not_supported, lex::Tk::l_paren);
+      return {NodeId::none, begin, end};
+    }
     if (args.empty()) return value_init(t, begin, end);
     if (!has_user_ctors(t) && args.size() == 1) return convert(args[0], t, begin);
     if (!has_user_ctors(t)) {
@@ -1271,6 +1289,13 @@ public:
       return {NodeId::none, begin, end};
     }
     return construct(t, std::move(args), begin, end);
+  }
+
+  // A void prvalue ([expr.type.conv]/2): `(void)0`.
+  Ex void_prvalue(u32 begin, u32 end) {
+    QualType i = builtin(Builtin::int_);
+    Ex zero = literal(i, w_->values.integer(i, 0), ValueCategory::prvalue, begin, end);
+    return convert_node(zero, ast::ConversionKind::to_void, builtin(Builtin::void_));
   }
 
   // Temporary materialization ([conv.rval]) of the prvalue `v` as an object of type `t`.
@@ -1568,6 +1593,15 @@ public:
     if (!e.ok()) return {NodeId::none, begin, end};
     // A parenthesized member function name is that name ([expr.prim.paren]): only a call may follow.
     if (is_bound_member(e)) return {e.id, begin, end, e.info};
+    // So is a parenthesized overload set, which only a call or an address may follow; it gets no
+    // argument-dependent lookup ([basic.lookup.argdep]/1).
+    if (types().is(e.type(), Builtin::overload_set)) {
+      Ex r = node(ast::DeclRef{e.info, as<ast::DeclRef>(e)->entity}, begin, end, e.info);
+      overloads_[std::to_underlying(r.id)] = overloads_.at(std::to_underlying(e.id));
+      if (auto ex = explicit_args_.find(std::to_underlying(e.id)); ex != explicit_args_.end())
+        explicit_args_[std::to_underlying(r.id)] = ex->second;
+      return r;
+    }
     return node(ast::Paren{e.info, at(e, begin)}, begin, end, e.info);
   }
 
@@ -1622,7 +1656,7 @@ public:
   // [conv.prom], after the lvalue conversions.
   Ex promote(Ex e) {
     e = rvalue(e);
-    if (!e.ok()) return e;
+    if (!e.ok() || dependent(e)) return e;
     // [conv.prom]/4: an unscoped enumeration promotes as its underlying type does.
     if (is_unscoped_enum(e.type())) {
       QualType u = underlying_of(e.type());
@@ -1732,12 +1766,19 @@ public:
     return types().is_void(b) && types().is_object(a) && cv_within(Types::cv(a), Types::cv(b));
   }
 
-  // [conv.qual], for one level of pointers: `T cv1*` to `T cv2*` where cv2 holds cv1.
+  // [conv.qual]: pointers of equal depth to the same type, where each level of `to` holds the
+  // cv-qualifiers of `from`'s, and a level that adds some is preceded only by const levels.
   bool qualification_convertible(QualType from, QualType to) {
-    QualType a = types().pointee(from), b = types().pointee(to);
-    if (Types::unqualified(a) != Types::unqualified(b)) return false;
-    auto ca = std::to_underlying(Types::cv(a)), cb = std::to_underlying(Types::cv(b));
-    return (ca & cb) == ca;
+    QualType a = from, b = to;
+    bool const_so_far = true;
+    while (types().is_pointer(a) && types().is_pointer(b)) {
+      a = types().pointee(a);
+      b = types().pointee(b);
+      Cv ca = object_cv(a), cb = object_cv(b);
+      if (!cv_within(ca, cb) || (ca != cb && !const_so_far)) return false;
+      const_so_far = const_so_far && (std::to_underlying(cb) & 1);
+    }
+    return !types().is_pointer(a) && !types().is_pointer(b) && same_unqualified(a, b);
   }
 
   // Contextual conversion to bool ([conv.general], [conv.bool]).
@@ -2054,7 +2095,7 @@ public:
   Ex conditional(Ex cond, Ex t, Ex f, u32 q_at) {
     u32 begin = cond.begin, end = f.end;
     if (!cond.ok() || !t.ok() || !f.ok()) return {NodeId::none, begin, end};
-    if (dependent(t) || dependent(f)) return dependent_node({cond, t, f}, begin, end);
+    if (dependent(cond) || dependent(t) || dependent(f)) return dependent_node({cond, t, f}, begin, end);
     Ex c = to_bool(cond, cond.begin);
     if (!c.ok()) return {NodeId::none, begin, end};
     ExprInfo info;

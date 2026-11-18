@@ -41,7 +41,7 @@ struct Evaluated {
   u64 reason = reason_unsupported;
   bool constant = false;
   // The expression is value-dependent ([temp.dep.constexpr]): it is evaluated when the template is
-  // instantiated.
+  // instantiated. Also set when instantiation gave up at its limit, which was diagnosed already.
   bool dependent = false;
 };
 
@@ -79,6 +79,8 @@ public:
     if (!body) return {};
     Host host{q_};
     interp::Outcome out = interp::evaluate(host, in, target, body->body, EntityId::none, {}).run();
+    if (out.status != interp::Outcome::Status::value && q_->instantiation_gave_up())
+      return {std::nullopt, reason_unsupported, false, true};
     if (out.status != interp::Outcome::Status::value) {
       // In the thunk's own frame, the only objects outside their lifetime are the enclosing
       // function's locals that are not usable in constant expressions.
