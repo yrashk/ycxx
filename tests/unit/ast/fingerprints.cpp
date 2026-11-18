@@ -69,6 +69,14 @@ int main() {
   check(fx == fy, "equal content, equal fingerprints, whatever the numbers");
   check(local_x != local_y, "the local hash follows the numbers");
 
+  // `none` needs no interners, and equals what an interner says for it.
+  ycxx::Fp128 unbound_none = ycxx::fingerprint(EntityId::none);
+  {
+    BindInterners bind(a);
+    check(ycxx::fingerprint(EntityId::none) == unbound_none && a.fp(EntityId::none) == seed("ycxx.ast.none"),
+          "none is fingerprinted without a binding, as the interners do");
+  }
+
   // Another thread has its own binding.
   ycxx::Fp128 on_thread;
   std::thread([&] {

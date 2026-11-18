@@ -119,6 +119,10 @@ inline Fp128 (*interned_fp)(const void* interners, H h) = nullptr;
 template <class H>
   requires is_handle<H>
 void hash_into(Hasher& h, H v) {
+  // `none` names nothing: the interners' fixed fingerprint for it, with no lookup and no binding.
+  if constexpr (requires { H::none; }) {
+    if (v == H::none) return void(h.fp(fingerprint128(std::string_view("ycxx.ast.none"))));
+  }
   const void* in = bound_interners;
   contract_assert(in != nullptr);  // fingerprinting a handle needs its interners bound (#68)
   h.fp(interned_fp<H>(in, v));
