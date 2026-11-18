@@ -132,8 +132,10 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
       }
     }
     for (std::size_t i = 0; i < decls.size(); ++i) declare(decls[i], at[i]);
-    // A template's definition is not code; its instances are, below.
-    if (!decls.empty() && (decls[0].flags & sema::decl_flag::template_)) continue;
+    // A template's definition, or a class template's member defined outside it, is not code; its
+    // instances are, below.
+    if (!decls.empty() && ((decls[0].flags & sema::decl_flag::template_) || ins.seqs.size(decls[0].template_params) > 0))
+      continue;
     if (it.kind == items::ItemKind::function && it.has_body() && !decls.empty() && decls[0].entity != EntityId::none &&
         !(decls[0].flags & sema::decl_flag::deleted)) {
       tu.functions.push_back({decls[0].entity, decls[0], program.analyze_body(k).value, program.id(k), it.body_begin - it.begin,

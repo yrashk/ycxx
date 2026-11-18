@@ -237,6 +237,11 @@ public:
         if (p->first == name) return std::nullopt;
     if (template_param(name)) return std::nullopt;
     std::optional<ast::DeclSema> found;
+    // Block-scope using-declarations, innermost first ([namespace.udecl]).
+    for (auto u = block_usings_.rbegin(); u != block_usings_.rend() && !found; ++u)
+      if (u->name == name)
+        for (const ast::DeclSema& d : u->decls)
+          if (d.kind == ast::DeclKind::class_ && (d.flags & decl_flag::template_)) found = d;
     for (auto p = own.rbegin(); p != own.rend() && !found; ++p)
       if (p->name == name) found = p->sema;
     if (!found)
@@ -248,15 +253,18 @@ public:
     return found;
   }
 
+  // The class template named `name` that is a member of namespace `ns` ([namespace.qual]).
+  std::optional<ast::DeclSema> namespace_class_template(EntityId ns, NameId name) {
+    for (const ast::DeclSema& d : q_->namespace_members(ns, name))
+      if (d.kind == ast::DeclKind::class_ && (d.flags & decl_flag::template_)) return d;
+    return std::nullopt;
+  }
+
   // The specialization of class template `templ` for `args` ([temp.spec.general]): its entity is
   // the template and the canonical arguments (§B1.5). With dependent arguments it is a dependent
   // type ([temp.dep.type]).
   EntityId class_specialization(EntityId templ, std::span<const TemplateArg> args) {
-    const EntityRec& t = w_->entities.rec(templ);
-    EntityRec r{EntityKind::class_, t.name, {}, LangLinkage::cxx, t.linkage, t.first, t.scope};
-    r.templ = templ;
-    r.args.assign(args.begin(), args.end());
-    return w_->entities.entity(std::move(r));
+    return templates().specialize_class(templ, args);
   }
 
   // `X<args>` naming a class template specialization ([temp.names], [temp.arg]): each argument of
@@ -318,6 +326,13 @@ public:
   // The first component of a nested-name-specifier, by unqualified lookup ([basic.lookup.qual]/1:
   // only namespaces, types and templates).
   std::optional<Scope> scope_named(NameId n) {
+    // A type template parameter as a nested-name-specifier names a dependent type
+    // ([temp.dep.type]); in an instantiation, its argument.
+    if (const ast::TemplateParamSema* p = template_param(n)) {
+      if (p->kind != ast::TemplateArgKind::type) return std::nullopt;
+      if (auto a = template_args.at(p->depth, p->index)) return Scope{std::nullopt, a->type};
+      return Scope{std::nullopt, p->type};
+    }
     for (auto a = block_aliases_.rbegin(); a != block_aliases_.rend(); ++a)
       if (a->name == n) return Scope{a->ns, std::nullopt};
     if (auto t = class_name(n, true)) return Scope{std::nullopt, t};
@@ -326,6 +341,9 @@ public:
   }
   // A later component: a namespace or type member of a namespace, or a type nested in a class.
   std::optional<Scope> scope_member(const Scope& s, NameId n) {
+    // A member of a dependent type is looked up when the template is instantiated
+    // ([temp.dep.type]/7): a dependent type here.
+    if (s.type && types().is_dependent(*s.type)) return Scope{std::nullopt, builtin(Builtin::dependent)};
     if (s.ns) {
       for (const ast::DeclSema& d : q_->namespace_members(*s.ns, n)) {
         if (d.kind == ast::DeclKind::namespace_) return Scope{d.entity, std::nullopt};
@@ -347,6 +365,7 @@ public:
   }
   // `S::n` as an expression ([expr.prim.id.qual]).
   Ex scope_expr(const Scope& s, NameId n, u32 begin, u32 name_at, u32 end) {
+    if (s.type && types().is_dependent(*s.type)) return dependent_node({}, begin, end, std::nullopt, ValueCategory::lvalue);
     if (s.type) {
       if (types().is_enum(*s.type)) {
         if (auto r = find_enumerator(types().enum_of(*s.type), n, begin, end)) return *r;
@@ -401,7 +420,12 @@ public:
 
   // Whether `t` is complete at this point; a class needs its definition before the point.
   bool is_complete(QualType t) {
-    if (types().is_dependent(t)) return true;  // checked when the template is instantiated
+    // A dependent type is checked when the template is instantiated; the current instantiation's
+    // class is defined by its template's definition, which completeness asks for.
+    if (types().is_dependent(t)) {
+      if (types().is_class(t)) q_->is_complete(types().class_of(t));
+      return true;
+    }
     if (types().is_void(t)) return false;
     if (types().is_array(t)) return is_complete(types().rec(t).inner);
     if (types().is_class(t)) return q_->is_complete(types().class_of(t));
@@ -2215,6 +2239,13 @@ public:
   Ex call(Ex callee, std::vector<Ex> args, u32 end, u32 paren_at) {
     u32 begin = callee.begin;
     if (!callee.ok() || std::ranges::any_of(args, [](const Ex& a) { return !a.ok(); })) return {NodeId::none, begin, end};
+    // A member function called with a dependent argument is resolved when the template is
+    // instantiated ([temp.dep.expr]).
+    if (is_bound_member(callee) && any_dependent(args)) {
+      std::vector<Ex> ops{callee};
+      ops.insert(ops.end(), args.begin(), args.end());
+      return dependent_node(ops, begin, end);
+    }
     if (is_bound_member(callee)) return member_call(callee, std::move(args), end, paren_at);
     // [temp.dep.candidate]: an unqualified call with a type-dependent argument is resolved when the
     // template is instantiated, among what lookup finds at the definition and argument-dependent

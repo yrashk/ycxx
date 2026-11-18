@@ -265,6 +265,12 @@ class Mangler {
         out += *t;
         continue;
       }
+      // A template parameter as an argument: an <expression>, `X T_ E` (§5.1.5.7, §5.1.6).
+      if (in_.values.is<ast::VDepParam>(a.value) && in_.values.get<ast::VDepParam>(a.value).depth == 0) {
+        auto i = in_.values.get<ast::VDepParam>(a.value).index;
+        out += i == 0 ? "XT_E" : std::format("XT{}_E", i - 1);
+        continue;
+      }
       auto b = ast::builtin_of(in_, a.type);
       auto code = b ? builtin_code(*b) : std::nullopt;
       if (!code || !in_.values.is<ast::VInt>(a.value)) return std::unexpected("a template argument that is not a type or an integer");

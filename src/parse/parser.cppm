@@ -152,7 +152,7 @@ public:
   // ([stmt.ambig]: what can be a declaration is one).
   bool starts_declaration() {
     if (starts_decl_specifier(kind())) return true;
-    if ((is(Tk::identifier) && kind(1) == Tk::coloncolon) || is(Tk::coloncolon)) {
+    if (qualified_ahead()) {
       auto q = qualified_type(0);
       return q && kind(q->second) != Tk::l_paren && kind(q->second) != Tk::period && kind(q->second) != Tk::l_brace;
     }
@@ -170,6 +170,14 @@ public:
     }
     Tk after = kind(j + 1);
     return after != Tk::period && after != Tk::arrow && after != Tk::l_paren && after != Tk::l_square;
+  }
+
+  // Whether a qualified name starts here: `::`, `N::`, or `X<…>::` ([basic.lookup.qual]).
+  bool qualified_ahead() {
+    if (is(Tk::coloncolon)) return true;
+    if (!is(Tk::identifier)) return false;
+    if (kind(1) == Tk::coloncolon) return true;
+    return kind(1) == Tk::less && kind(past_template_args(1)) == Tk::coloncolon;
   }
 
   // The offset of the token after the template argument list whose `<` is at `j` ahead: angle
@@ -262,6 +270,21 @@ public:
         s_->diag(pos(), Diag::not_supported, k);  // an enum-specifier where a type is named
         d.ok = false;
         goto done;
+      case Tk::kw_typename: {
+        // `typename nested-name-specifier identifier` ([temp.res.general]/5): a type, dependent
+        // until the template is instantiated.
+        u32 at = pos();
+        bump();
+        auto q = qualified_ahead() ? qualified_type(0) : std::nullopt;
+        if (!q || any_type()) {
+          s_->diag(at, Diag::expected_type_specifier);
+          d.ok = false;
+          goto done;
+        }
+        cls = q->first;
+        for (u32 j = 0; j < q->second; ++j) bump();
+        continue;
+      }
       case Tk::kw_struct:
       case Tk::kw_class: {
         u32 at = pos();
@@ -293,8 +316,8 @@ public:
       case Tk::coloncolon:
       case Tk::identifier:
         if (!any_type()) {
-          if (k == Tk::coloncolon || kind(1) == Tk::coloncolon) {
-            // `N::C`, `::C`, `C::E` ([dcl.type.simple]).
+          if (qualified_ahead()) {
+            // `N::C`, `::C`, `C::E`, `X<T>::E` ([dcl.type.simple]).
             if (auto q = qualified_type(0); q && kind(q->second) != Tk::l_paren) {
               cls = q->first;
               for (u32 j = 1; j < q->second; ++j) bump();
@@ -444,7 +467,7 @@ public:
       }
       l.pointers.push_back({op, sema::Cv(cv)});
     }
-    if (!abstract && ((is(Tk::identifier) && kind(1) == Tk::coloncolon) || is(Tk::coloncolon))) {
+    if (!abstract && qualified_ahead()) {
       // A qualified declarator-id `N::C::name`, defining a member of namespace N or class C
       // ([namespace.memdef], [class.mfct], [class.static.data]). What follows it is looked up in
       // that scope.
@@ -548,24 +571,64 @@ public:
       s = s_->scope_named(name_of(tok(j)));
       if (!s) return std::nullopt;
       j += 2;
+    } else if (auto t = template_id_scope(std::nullopt, j)) {
+      s = t;
     } else {
       return std::nullopt;
     }
-    while (kind(j) == Tk::identifier && kind(j + 1) == Tk::coloncolon) {
-      auto m = s_->scope_member(*s, name_of(tok(j)));
-      if (!m) return std::nullopt;
-      s = m;
-      j += 2;
+    for (;;) {
+      if (kind(j) == Tk::identifier && kind(j + 1) == Tk::coloncolon) {
+        auto m = s_->scope_member(*s, name_of(tok(j)));
+        if (!m) return std::nullopt;
+        s = m;
+        j += 2;
+      } else if (auto t = template_id_scope(s, j)) {
+        s = t;
+      } else {
+        break;
+      }
     }
     if (kind(j) != Tk::identifier && kind(j) != Tk::tilde) return std::nullopt;
     next = j;
     return s;
   }
+  // A component `X<args>::` at `j` ahead naming a class template specialization, found by
+  // unqualified lookup or in namespace `in` ([temp.names]); `j` moves past the `::`. The arguments
+  // are parsed ahead of the tokens being taken and then left, with what they said dropped:
+  // nested names are read ahead before the parse commits to them.
+  std::optional<sema::Sema::Scope> template_id_scope(std::optional<sema::Sema::Scope> in, u32& j, bool scope = true) {
+    if (kind(j) != Tk::identifier || kind(j + 1) != Tk::less) return std::nullopt;
+    if (in && !in->ns) return std::nullopt;  // member templates of classes come later (#88)
+    NameId n = name_of(tok(j));
+    auto tmpl = in ? s_->namespace_class_template(*in->ns, n) : s_->class_template(n);
+    if (!tmpl) return std::nullopt;
+    u32 saved = i_;
+    bool saved_half = half_;
+    std::size_t diags = s_->diag_count();
+    i_ += j + 1;
+    auto args = template_argument_list();
+    u32 after = i_ - saved;
+    bool closed = !half_ && (!scope || kind() == Tk::coloncolon);
+    std::optional<QualType> t;
+    if (args && closed) t = s_->class_template_id(*tmpl, *args, 0);
+    i_ = saved;
+    half_ = saved_half;
+    s_->truncate_diags(diags);
+    if (!t) return std::nullopt;
+    j = scope ? after + 1 : after;
+    return sema::Sema::Scope{std::nullopt, *t};
+  }
+
   // A qualified type name at token `start`: its type and the tokens it takes.
   std::optional<std::pair<QualType, u32>> qualified_type(u32 start) {
     u32 next = 0;
     auto s = nested_name(start, next);
     if (!s || kind(next) != Tk::identifier || kind(next + 1) == Tk::coloncolon) return std::nullopt;
+    // `N::X<args>`: a class template specialization named in a namespace ([temp.names]).
+    if (kind(next + 1) == Tk::less && s->ns) {
+      u32 j = next;
+      if (auto t = template_id_scope(s, j, false)) return std::pair{*t->type, j - start};
+    }
     auto t = s_->scope_type(*s, name_of(tok(next)));
     if (!t) return std::nullopt;
     return std::pair{*t, next + 1 - start};
@@ -908,7 +971,7 @@ public:
   bool starts_type_id() {
     if (starts_decl_specifier(kind())) return !is(Tk::kw_static) && !is(Tk::kw_extern);
     if (is(Tk::identifier) && kind(1) == Tk::less && s_->class_template(name_of(tok()))) return true;
-    if ((is(Tk::identifier) && kind(1) == Tk::coloncolon) || is(Tk::coloncolon)) return qualified_type(0).has_value();
+    if (qualified_ahead()) return qualified_type(0).has_value();
     return is(Tk::identifier) && kind(1) != Tk::coloncolon && s_->class_name(name_of(tok())).has_value();
   }
 
@@ -1207,6 +1270,7 @@ public:
     }
     case Tk::identifier: {
       NameId n = name_of(tok());
+      if (qualified_ahead()) return qualified_id(begin);
       // `X<args>(…)` and `X<args>{…}` for a class template X ([expr.type.conv]).
       if (kind(1) == Tk::less && s_->class_template(n)) {
         auto t = class_template_type();
