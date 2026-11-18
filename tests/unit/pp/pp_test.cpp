@@ -110,6 +110,57 @@ void object_like() {
   check(r.site(1).offset == 20, "its site");
 }
 
+void function_like() {
+  MemHost h;
+  pp::Session s(h);
+  auto pre = [&](std::string src) {
+    h.files["main.cpp"] = std::move(src);
+    return run(s, h);
+  };
+  // [cpp.rescan]/2's example: f(2)(9) is 2*9*g.
+  check(text(pre("#define f(a) a*g\n#define g(a) f(a)\nf(2)(9)\n").region) == "2 * 9 * g", "rescanning");
+  check(text(pre("#define F(...) f(0 __VA_OPT__(,) __VA_ARGS__)\nF(a, b) F()\n").region) == "f ( 0 , a , b ) f ( 0 )",
+        "__VA_OPT__");
+  check(text(pre("#define t(x,y,z) x ## y ## z\nt(1,2,3) t(,4,5) t(,,)\n").region) == "123 45", "placemarkers");
+  check(text(pre("#define S(x) #x\nS( a  \"b\\n\" ) S()\n").region) == "\"a \\\"b\\\\n\\\"\" \"\"", "stringizing");
+  check(text(pre("#define F(a) a\nF\n+ F\n(1)\n").region) == "F + 1", "a name without ( is left alone");
+  // An argument's tokens keep their spelling, in an argument expansion whose site leads to the
+  // invocation's.
+  auto loc = pre("#define ID(x) [x]\nint a = ID(v);\n");
+  const pp::Region& r = loc.region;
+  std::size_t v = 4;  // int a = [ v ] ;
+  check(r.name(r.tokens[v]) == "v" && r.locs[v].offset == 29, "an argument token's spelling");
+  check(r.expansions[r.locs[v].expansion].kind == pp::ExpansionKind::argument && r.site(v).offset == 26,
+        "its expansion and site");
+  check(kinds(pre("#define P(a,b) a##b\nP(/,/)\n")) == std::vector{lex::LexDiag::paste_invalid}, "an invalid paste");
+  check(kinds(pre("#define J(a,b) a b\nJ(1) J(1,2,3)\n")) ==
+            std::vector{lex::LexDiag::too_few_arguments, lex::LexDiag::too_many_arguments},
+        "argument counts");
+  // Found by review: an argument is replaced once, however often it is used ([cpp.subst]/1).
+  check(kinds(pre("#define g(a) a\n#define F(...) __VA_OPT__(x) __VA_ARGS__ __VA_ARGS__\nF(g(1,2))\n")) ==
+            std::vector{lex::LexDiag::too_many_arguments},
+        "an argument replaced once");
+  // A directive ends the search for `(`.
+  check(text(pre("#define f(x) [x]\na f\n#undef f\n(1) b\n").region) == "a f ( 1 ) b", "a directive before (");
+  check(kinds(pre("#define f(x) x\nf(1\n#include \"x.h\"\n)\n")) == std::vector{lex::LexDiag::directive_in_arguments},
+        "#include in arguments");
+  // Stringizing a raw string written across lines, and an invalid result.
+  check(text(pre("#define s(x) #x\ns(R\"(a\nb)\")\n").region) == "\"R\\\"(a\\nb)\\\"\"", "a raw string stringized");
+  check(kinds(pre("#define s(x) #x\ns(\\)\n")) == std::vector{lex::LexDiag::stringize_invalid}, "an invalid stringizing");
+  check(kinds(pre("#define F(__VA_OPT__, ...)\n")) == std::vector{lex::LexDiag::macro_param_expected}, "__VA_OPT__ is no parameter");
+  // A header's invocation of a macro the includer defines is reused where an equal definition is
+  // elsewhere.
+  h.files["use.h"] = "int u = TWICE(3);\n";
+  h.files["a.cpp"] = "#define TWICE(x) ((x) * 2)\n#include \"use.h\"\n";
+  h.files["b.cpp"] = "\n\n#define TWICE(x) ((x) * 2)\n#include \"use.h\"\n";
+  run(s, h, "a.cpp");
+  auto computed = s.stats.computed;
+  auto b = run(s, h, "b.cpp");
+  check(s.stats.computed == computed + 1 && text(b.region) == "int u = ( ( 3 ) * 2 ) ;", "a header reused across TUs");
+  check(b.region.expansions[1].definition_offset == 10 && b.region.file_names[b.region.expansions[1].definition_file] == "b.cpp",
+        "its expansion bound to this TU's definition");
+}
+
 // The questions a region asks of its entry state.
 void traces() {
   MemHost h;
@@ -197,6 +248,9 @@ void incremental_equals_cold() {
       {{"main.cpp", "#include \"a.h\"\n#include \"a.h\"\nB\n"}},
       {{"c.h", "int c;\n"}, {"a.h", "#include \"c.h\"\n#include \"missing.h\"\n"}},
       {{"missing.h", "int now_here;\n"}},
+      {{"main.cpp", "#define F(x) [x A]\n#include \"a.h\"\nF(B) G(1)\n"}, {"a.h", "#define G(y) F(y) #y\n#define A a\n"}},
+      {{"a.h", "#define G(y) F(y)##y\n#define A b\n"}},
+      {{"main.cpp", "#define F(...) <__VA_OPT__(x) __VA_ARGS__>\n#include \"a.h\"\nF() F(1) G(2)\n"}},
   };
   MemHost warm_host;
   pp::Session warm(warm_host);
@@ -227,6 +281,7 @@ void spacing() {
 int main() {
   includes();
   object_like();
+  function_like();
   traces();
   reuse();
   roots_and_depth();
