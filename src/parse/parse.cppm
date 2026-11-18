@@ -145,21 +145,55 @@ public:
   // Unqualified lookup ([basic.lookup.unqual]) of `name` at `item` (and in it, when `self`),
   // starting in namespace `from`: the first enclosing namespace that declares it before the
   // point, counting the namespaces using-directives nominate where [namespace.udir]/2 puts them.
-  std::vector<DeclId> visible_decls(std::string_view name, u32 item, bool self, const std::string& from) {
+  // `block` are the namespaces block-scope using-directives at the point nominate.
+  std::vector<DeclId> visible_decls(std::string_view name, u32 item, bool self, const std::string& from,
+                                    std::span<const std::string> block = {}) {
+    // Each nominated namespace, and those its own directives nominate ([namespace.udir]/4), with
+    // the namespace that encloses both it and the directive: where its names appear.
+    std::vector<std::pair<std::string, std::string>> nominated;  // (namespace, level)
+    auto add = [&](const std::string& at, const std::string& target) {
+      for (const std::string& t : closure(target, item)) nominated.push_back({t, common_ancestor(at, t)});
+    };
+    for (const Directive& d : directives_) {
+      if (!d.target && !d.alias && d.item < item) item_sema(d.item);  // resolves it
+      if (!d.alias && d.item < item && d.target && encloses(d.at, from)) add(d.at, *d.target);
+    }
+    for (const std::string& t : block) add(from, t);
     for (std::string level = from;; level = parent_of(level)) {
       std::vector<DeclId> r = declared_in(name, level, item, self);
-      for (const Directive& d : directives_) {
-        if (!d.target && !d.alias && d.item < item) item_sema(d.item);  // resolves it
-        if (d.alias || d.item >= item || !d.target || !encloses(d.at, from)) continue;
-        if (common_ancestor(d.at, *d.target) != level) continue;
-        std::vector<DeclId> more = declared_in(name, *d.target, item, self);
-        r.insert(r.end(), more.begin(), more.end());
-      }
+      for (const auto& [t, at] : nominated)
+        if (at == level) {
+          std::vector<DeclId> more = declared_in(name, t, item, self);
+          r.insert(r.end(), more.begin(), more.end());
+        }
       if (!r.empty() || level.empty()) return r;
     }
   }
   std::vector<DeclId> visible_decls(std::string_view name, u32 item, bool self) {
     return visible_decls(name, item, self, ns_of_[item]);
+  }
+  // `ns` and the namespaces its using-directives nominate before `item`, transitively.
+  std::vector<std::string> closure(const std::string& ns, u32 item) {
+    std::vector<std::string> out{ns};
+    for (std::size_t i = 0; i < out.size(); ++i)
+      for (const Directive& d : directives_) {
+        if (!d.target && !d.alias && d.item < item) item_sema(d.item);
+        if (!d.alias && d.item < item && d.target && d.at == out[i] && !std::ranges::contains(out, *d.target))
+          out.push_back(*d.target);
+      }
+    return out;
+  }
+  // Qualified lookup in namespace `ns` ([namespace.qual]/2): its own declarations, or, when it has
+  // none, those of the namespaces its using-directives nominate.
+  std::vector<DeclId> qualified_decls(std::string_view name, const std::string& ns, u32 item, bool self) {
+    std::vector<DeclId> r = declared_in(name, ns, item, self);
+    if (!r.empty()) return r;
+    for (const std::string& t : closure(ns, item))
+      if (t != ns) {
+        std::vector<DeclId> more = declared_in(name, t, item, self);
+        r.insert(r.end(), more.begin(), more.end());
+      }
+    return r;
   }
   // The declarations of `name` that are members of namespace `path` ([namespace.memdef]) before
   // the point: of its own definitions, and of its inline and unnamed members.
@@ -388,9 +422,9 @@ private:
       if (in_class_[k] || its[k].kind != ItemKind::declaration) continue;
       lex::Tk a = r_->tokens[its[k].begin].kind;
       lex::Tk b = its[k].begin + 1 < its[k].end ? r_->tokens[its[k].begin + 1].kind : lex::Tk::eof;
-      if (a == lex::Tk::kw_using && b == lex::Tk::kw_namespace) directives_.push_back({k, eff_ns_[k], std::nullopt, std::nullopt});
+      if (a == lex::Tk::kw_using && b == lex::Tk::kw_namespace) directives_.push_back({k, ns_of_[k], std::nullopt, std::nullopt});
       if (a == lex::Tk::kw_namespace && b == lex::Tk::identifier)
-        directives_.push_back({k, eff_ns_[k], w_->ins.names.intern(r_->name(r_->tokens[its[k].begin + 1])), std::nullopt});
+        directives_.push_back({k, ns_of_[k], w_->ins.names.intern(r_->name(r_->tokens[its[k].begin + 1])), std::nullopt});
     }
   }
   std::vector<Synthesized> synth_;
@@ -421,17 +455,19 @@ private:
 class AtItem final : public sema::Questions {
 public:
   AtItem(Program& p, u32 item, bool self) : from(p.ns_of(item)), p_(&p), item_(item), self_(self) {}
-  std::vector<DeclId> visible_decls(ast::NameId name) override {
-    return p_->visible_decls(p_->world().ins.names.spelling(name), item_, self_, from);
+  std::vector<DeclId> visible_decls(ast::NameId name, std::span<const EntityId> directives = {}) override {
+    std::vector<std::string> paths;
+    for (EntityId ns : directives) paths.push_back(p_->namespace_path(ns));
+    return p_->visible_decls(p_->world().ins.names.spelling(name), item_, self_, from, paths);
   }
-  std::optional<EntityId> namespace_named(ast::NameId name) override {
-    for (DeclId d : visible_decls(name))
+  std::optional<EntityId> namespace_named(ast::NameId name, std::span<const EntityId> directives = {}) override {
+    for (DeclId d : visible_decls(name, directives))
       if (auto s = p_->decl_sema(d); s && s->kind == ast::DeclKind::namespace_) return s->entity;
     return std::nullopt;
   }
   std::vector<ast::DeclSema> namespace_members(EntityId ns, ast::NameId name) override {
     std::vector<ast::DeclSema> r;
-    for (DeclId d : p_->declared_in(p_->world().ins.names.spelling(name), p_->namespace_path(ns), item_, self_))
+    for (DeclId d : p_->qualified_decls(p_->world().ins.names.spelling(name), p_->namespace_path(ns), item_, self_))
       if (auto s = p_->decl_sema(d); s && s->entity != EntityId::none) r.push_back(*s);
     return r;
   }
@@ -568,6 +604,7 @@ private:
       if (!l) s_.diag(at, Diag::unknown_linkage);
       lang = l.value_or(LangLinkage::cxx);
       explicit_lang = true;
+      single_linkage_spec_ = true;  // [dcl.link]/7: it declares as if `extern` were given
       ps_.bump();
       ps_.bump();
       while (ps_.is(Tk::string_lit) && ps_.tok().has(lex::tok_flag::continued)) ps_.bump();
@@ -1325,7 +1362,7 @@ private:
     if (deleted) is_function_def = true;
     if (deleted) flags |= sema::decl_flag::deleted;
     bool has_init = !deleted && (early || ps_.is(Tk::equal) || ps_.is(Tk::l_brace) || (!fn && ps_.is(Tk::l_paren)));
-    bool definition = fn ? is_function_def || deleted : !(spec.is_extern && !has_init);
+    bool definition = fn ? is_function_def || deleted : !((spec.is_extern || single_linkage_spec_) && !has_init);
     if (definition) flags |= sema::decl_flag::definition;
     if (!fn && types.is_void(d.type)) {
       s_.diag(d.name_at, Diag::void_variable, d.name);
@@ -1345,7 +1382,7 @@ private:
       for (DeclId p : q_.visible_decls(d.name))
         if (auto ds = p_->decl_sema(p); ds && ds->entity != EntityId::none && ds->kind != ast::DeclKind::class_ &&
                                         ds->kind != ast::DeclKind::namespace_ && ds->kind != ast::DeclKind::enum_ &&
-                                        (same_scope(*ds) || (fn && lang == LangLinkage::c)))
+                                        (same_scope(*ds) || lang == LangLinkage::c))
           prior.push_back(*ds);
       for (const auto& o : s_.own)
         if (o.name == d.name && o.sema.kind != ast::DeclKind::class_) prior.push_back(o.sema);
@@ -1433,10 +1470,10 @@ private:
       sema::EntityRec e{fn ? sema::EntityKind::function : sema::EntityKind::variable,
                         d.name,
                         sem.type,
-                        fn ? lang : LangLinkage::cxx,
+                        lang,
                         sem.linkage,
                         {p_->id(k_), ast::make_decl_ord(ast::DeclClass::syntactic, ord)},
-                        fn && lang == LangLinkage::c ? EntityId::none : ns_entity()};
+                        lang == LangLinkage::c ? EntityId::none : ns_entity()};
       sem.entity = s_.world().entities.entity(e);
     }
 
@@ -1574,6 +1611,7 @@ private:
   std::vector<ast::DeclSema> decls_;
   std::vector<Ex> declarators_;
   NodeId tree_ = NodeId::none;  // the root when it is not a DeclGroup (a static_assert)
+  bool single_linkage_spec_ = false;  // `extern "C" declaration` without braces
 };
 
 const Result<ast::ItemSema>& Program::item_sema(u32 item) {

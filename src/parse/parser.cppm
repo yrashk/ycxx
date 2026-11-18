@@ -528,9 +528,8 @@ public:
   bool params_ahead() {
     Tk k = kind(1);
     if (k == Tk::r_paren || k == Tk::ellipsis || starts_decl_specifier(k)) return true;
-    if (k == Tk::identifier && kind(2) == Tk::coloncolon && kind(3) == Tk::identifier &&
-        s_->nested_type(name_of(tok(1)), name_of(tok(3))))
-      return true;  // `C::E`
+    if ((k == Tk::identifier && kind(2) == Tk::coloncolon) || k == Tk::coloncolon)
+      return qualified_type(1).has_value();  // `N::S`, `C::E`, `::S`
     return k == Tk::identifier && kind(2) != Tk::coloncolon && s_->class_name(name_of(tok(1))).has_value();
   }
 

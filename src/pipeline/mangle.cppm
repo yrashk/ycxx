@@ -241,7 +241,9 @@ std::expected<std::string, std::string> symbol_name(const ast::Interners& in, st
     if (!prefix) return prefix;
     return std::format("__ZN{}{}{}E", *prefix, name.size(), name);
   }
-  if (!is_function || name == "main" || lang == ast::LangLinkage::c) return "_" + std::string(name);
+  // [basic.start.main]: only the global namespace's `main` is the program's.
+  if (!is_function || (name == "main" && scope == ast::EntityId::none) || lang == ast::LangLinkage::c)
+    return "_" + std::string(name);
   auto m = mangled_function(in, name, type, classes, scope, special);
   if (!m) return m;
   return "_" + *m;

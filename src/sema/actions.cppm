@@ -32,7 +32,9 @@ class Questions {
 public:
   // The declarations of `name` in the global namespace visible at the current point: those that
   // precede the current item, and, inside a function body, the item's own (§B2, [basic.scope.pdecl]).
-  virtual std::vector<DeclId> visible_decls(NameId name) = 0;
+  // `directives` are the namespaces block-scope using-directives nominate ([namespace.udir]): their
+  // names join the lookup where [namespace.udir]/2 puts them.
+  virtual std::vector<DeclId> visible_decls(NameId name, std::span<const EntityId> directives = {}) = 0;
   virtual ast::DeclSema decl_sema(DeclId d) = 0;
   // What a constant evaluation fetches (§B7): `function_ir` of a function defined before the
   // current point ([expr.const]), and a namespace-scope variable as the interpreter sees it.
@@ -50,7 +52,7 @@ public:
   // Namespaces ([basic.namespace]), the global one being `EntityId::none`: the namespace (or
   // alias) unqualified lookup finds for `name`, and qualified lookup of `name` in namespace `ns`
   // ([namespace.qual]).
-  virtual std::optional<EntityId> namespace_named(NameId name) = 0;
+  virtual std::optional<EntityId> namespace_named(NameId name, std::span<const EntityId> directives = {}) = 0;
   virtual std::vector<ast::DeclSema> namespace_members(EntityId ns, NameId name) = 0;
   virtual ~Questions() = default;
 };
@@ -178,7 +180,7 @@ public:
     for (auto p = own.rbegin(); p != own.rend() && !found; ++p)
       if (p->name == name) found = p->sema;
     if (!found)
-      for (DeclId d : q_->visible_decls(name)) {
+      for (DeclId d : q_->visible_decls(name, directives())) {
         ast::DeclSema s = q_->decl_sema(d);
         if (s.entity == EntityId::none || is_special(s)) continue;
         if (s.kind == ast::DeclKind::class_ || s.kind == ast::DeclKind::enum_ || !elaborated) found = s;
@@ -211,7 +213,7 @@ public:
     for (auto a = block_aliases_.rbegin(); a != block_aliases_.rend(); ++a)
       if (a->name == n) return Scope{a->ns, std::nullopt};
     if (auto t = class_name(n, true)) return Scope{std::nullopt, t};
-    if (auto ns = q_->namespace_named(n)) return Scope{ns, std::nullopt};
+    if (auto ns = q_->namespace_named(n, directives())) return Scope{ns, std::nullopt};
     return std::nullopt;
   }
   // A later component: a namespace or type member of a namespace, or a type nested in a class.
@@ -258,6 +260,12 @@ public:
   // Block-scope `using namespace N;`, `using N::x;` and `namespace A = N;` ([namespace.udir],
   // [namespace.udecl], [namespace.alias]).
   void using_directive(EntityId ns) { block_directives_.push_back({scopes_.size() - 1, ns}); }
+  // The namespaces the block-scope using-directives in force nominate.
+  std::vector<EntityId> directives() const {
+    std::vector<EntityId> r;
+    for (const auto& [depth, ns] : block_directives_) r.push_back(ns);
+    return r;
+  }
   void using_declaration(const Scope& s, NameId n, u32 at_) {
     // [basic.scope.scope]/4: it may not clash with a local declared in the same block before it.
     if (!scopes_.empty() && std::ranges::any_of(scopes_.back(), [&](const auto& p) { return p.first == n; })) {
@@ -612,10 +620,13 @@ public:
 
   void push_scope() { scopes_.emplace_back(); }
   void pop_scope() {
-    std::erase_if(using_enums_, [&](const auto& u) { return u.first >= scopes_.size(); });
-    std::erase_if(block_usings_, [&](const auto& u) { return u.depth >= scopes_.size(); });
-    std::erase_if(block_directives_, [&](const auto& u) { return u.first >= scopes_.size(); });
-    std::erase_if(block_aliases_, [&](const auto& u) { return u.depth >= scopes_.size(); });
+    // What the innermost scope's using-declarations, using-directives and aliases brought in ends
+    // with it.
+    std::size_t inner = scopes_.size() - 1;
+    std::erase_if(using_enums_, [&](const auto& u) { return u.first >= inner; });
+    std::erase_if(block_usings_, [&](const auto& u) { return u.depth >= inner; });
+    std::erase_if(block_directives_, [&](const auto& u) { return u.first >= inner; });
+    std::erase_if(block_aliases_, [&](const auto& u) { return u.depth >= inner; });
     if (!guarded_.empty() && guarded_.back() == scopes_.size() - 1) guarded_.pop_back();
     scopes_.pop_back();
   }
@@ -1179,13 +1190,21 @@ public:
   // An id-expression naming `name`, at `begin`: the innermost block-scope declaration, else the
   // namespace-scope ones.
   Ex name_expr(NameId name, u32 begin, u32 end) {
-    for (auto s = scopes_.rbegin(); s != scopes_.rend(); ++s)
-      for (auto p = s->rbegin(); p != s->rend(); ++p)
+    // Block scopes, innermost first: a scope's locals and the names its using-declarations
+    // brought in ([namespace.udecl]) hide those of enclosing scopes ([basic.scope.hiding]);
+    // using-declarations of one scope make one set.
+    for (std::size_t d = scopes_.size(); d-- > 0;) {
+      for (auto p = scopes_[d].rbegin(); p != scopes_[d].rend(); ++p)
         if (p->first == name) {
           const ast::LocalRec& l = locals_[p->second];
           ExprInfo info{types().referee(l.type), ValueCategory::lvalue, 0};  // [expr.type]: a reference names its object
           return node(ast::LocalRef{info, p->second}, begin, end, info);
         }
+      std::vector<ast::DeclSema> used;
+      for (const BlockUsing& u : block_usings_)
+        if (u.depth == d && u.name == name) used.insert(used.end(), u.decls.begin(), u.decls.end());
+      if (!used.empty()) return decls_expr(std::move(used), true, name, begin, end);
+    }
     // Enumerators a `using enum` brought into a block scope ([enum.udecl]).
     for (auto u = using_enums_.rbegin(); u != using_enums_.rend(); ++u)
       if (auto r = find_enumerator(u->second, name, begin, end)) return *r;
@@ -1202,18 +1221,12 @@ public:
           return node(ast::DeclRef{info, m->entity}, begin, end, info);
         }
     }
-    // Names a block's using-declaration or using-directive brought in ([namespace.udecl],
-    // [namespace.udir]).
-    for (auto u = block_usings_.rbegin(); u != block_usings_.rend(); ++u)
-      if (u->name == name) return decls_expr(u->decls, true, name, begin, end);
-    for (auto u = block_directives_.rbegin(); u != block_directives_.rend(); ++u)
-      if (auto ds = q_->namespace_members(u->second, name); !ds.empty()) return decls_expr(ds, true, name, begin, end);
     std::vector<ast::DeclSema> found;
     for (auto p = own.rbegin(); p != own.rend(); ++p)
       if (p->name == name) found.push_back(p->sema);
     bool any = !found.empty();
     if (found.empty())
-      for (DeclId d : q_->visible_decls(name)) {
+      for (DeclId d : q_->visible_decls(name, directives())) {
         any = true;
         ast::DeclSema s = q_->decl_sema(d);
         if (s.entity != EntityId::none && !is_special(s)) found.push_back(s);  // else its item diagnosed it
