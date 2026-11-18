@@ -6,7 +6,7 @@ What is true of the code today. Work in progress and its owners are tracked in
 ## Bootstrapping (2026-11-17)
 
 - Charter written: [README.md](README.md), [DECISIONS.md](DECISIONS.md) (scope, provenance,
-  bootstrap, architecture direction, process, coordination), [CLAUDE.md](CLAUDE.md) (agent guide).
+  bootstrap, architecture direction, process, coordination), [AGENTS.md](AGENTS.md) (agent guide).
 - libycxx added as a submodule at `deps/libycxx`.
 - No compiler code yet. The query engine design (`docs/design/query-engine.md`) is the first
   piece of work. Everything else waits for it.

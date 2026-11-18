@@ -286,7 +286,7 @@ its way out has learned something the next session should not have to rediscover
 2. **Record the recovery.** When a session recovers from one of these, it writes down the
    symptom, what worked and the rule to follow next time.
    - A rule about *how to work* (process, coordination, models, review) goes into this file or
-     `CLAUDE.md`.
+     `AGENTS.md`.
    - A *recipe* for a recurring situation goes into [`docs/LESSONS.md`](docs/LESSONS.md), the
      list of common solutions.
 3. **Every handover and closing comment answers one question:** *what would have made this
@@ -294,7 +294,7 @@ its way out has learned something the next session should not have to rediscover
    PR or as a direct commit to `main`.
 4. **Read before starting.** Sessions read `docs/LESSONS.md` along with this file. A situation it
    covers is handled its way, or the entry is corrected if it turned out to be wrong.
-5. **Consolidate.** A lesson that recurs is promoted to a rule here or in `CLAUDE.md`, and its
+5. **Consolidate.** A lesson that recurs is promoted to a rule here or in `AGENTS.md`, and its
    entry points at the rule. Entries that stop applying are deleted. Keep the list short enough to
    read in full.
 
