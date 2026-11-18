@@ -52,7 +52,9 @@ struct Done {
   Report report;
 };
 
-// Called before each translation unit; true stops the request, whose answer is then meaningless.
+// Polled while the request runs (every 50 ms or so, on the calling thread); true cancels it, and
+// its answer is then meaningless. The daemon also applies batches from it, which restart the
+// request where it stopped (daemon design §4.1).
 using Stop = std::function<bool()>;
 
 // The variables of `environment` this process has.
@@ -68,12 +70,11 @@ struct Threads {
 };
 Threads threads();
 
-// Where a request's units are (daemon design §6.1): the view their files are read through, and
-// the number of the first. The editor view's units are numbered apart from the disk view's, so a
-// keystroke never turns a build's unit red.
+// Where a request's units are (daemon design §6.1): the view their files are read through. A unit
+// is named by what it is (`pipeline::Session::unit`), view included, so the editor view's units
+// are apart from the disk view's and a keystroke never turns a build's unit red.
 struct Units {
   pp::View view = pp::View::disk;
-  std::uint32_t first = 0;
 };
 
 // Runs a request in `session` (#63), reading files through `host` (which reads the view `units`
@@ -200,47 +201,20 @@ std::filesystem::path object_name(const std::string& source) {
   return std::filesystem::path(source).filename().replace_extension(".o");
 }
 
-// Compiles one translation unit through the session's queries; nullopt after reporting its
-// errors. With `-fsyntax-only` or `-E`, an object with no content.
-std::optional<obj::object> compile_unit(Done& d, const Request& r, const pp::Config& config, pp::Host& host,
-                                        pipeline::Session& session, pipeline::TuId tu, const std::string& path,
-                                        Options::Stop stop) {
-  auto text = host.read(path);
-  if (!text) {
-    std::format_to(std::back_inserter(d.err), "ycxx: error: cannot read '{}'\n", path);
-    return std::nullopt;
+// Preprocesses one source to `d.out` (`-E`), with no engine work; false after reporting errors.
+bool preprocess_unit(Done& d, const pp::Config& config, const std::string& path, const std::string& text) {
+  pp::Session& ps = pp::session_for(config);
+  std::unique_lock lock(ps.mutex);
+  auto [out, messages] = pp::preprocess_to_text(ps, text, path);
+  lock.unlock();
+  d.out += out;
+  bool errors = false;
+  for (const pp::Message& m : messages) {
+    std::format_to(std::back_inserter(d.err), "{}:{}:{}: {}: {}\n", m.file, m.line, m.column, m.error ? "error" : "warning",
+                   m.text);
+    errors = errors || m.error;
   }
-  if (stop == Options::Stop::preprocess) {
-    pp::Session& ps = pp::session_for(config);
-    std::unique_lock lock(ps.mutex);
-    auto [out, messages] = pp::preprocess_to_text(ps, *text, path);
-    lock.unlock();
-    d.out += out;
-    bool errors = false;
-    for (const pp::Message& m : messages) {
-      std::format_to(std::back_inserter(d.err), "{}:{}:{}: {}: {}\n", m.file, m.line, m.column, m.error ? "error" : "warning",
-                     m.text);
-      errors = errors || m.error;
-    }
-    if (errors) return std::nullopt;
-    return obj::object{};
-  }
-  session.set_source(tu, path, *text, object_name(path).native_encoded_string(), r.cwd, config);
-  Renderer out(d.err, path, *text);
-  const pipeline::FrontResult& front = session.get<pipeline::TuFront>(tu);
-  for (const pipeline::Message& m : front.messages) {
-    if (m.where.empty()) out.at(m.offset, m.error, m.text);
-    else std::format_to(std::back_inserter(d.err), "{}: {}: {}\n", m.where, m.error ? "error" : "warning", m.text);
-  }
-  if (front.has_errors()) return std::nullopt;
-  if (stop == Options::Stop::syntax) return obj::object{};
-  const pipeline::TuValue& v = session.get<pipeline::Tu>(tu);
-  for (const pipeline::BackError& e : v.errors) {
-    if (e.at) out.at(session.byte_offset(tu, *e.at), true, e.message);
-    else out.file_level(e.message);
-  }
-  if (!v.object) return std::nullopt;
-  return *v.object;
+  return !errors;
 }
 
 std::int32_t fail(Done& d, std::string_view message) {
@@ -347,62 +321,110 @@ Done run(const Request& r, pp::Host& host, pipeline::Session& session, const Sto
     return ps.stats;
   };
   const pp::Session::Stats before = stats();
-  const engine::Stats engine_before = session.db().stats();
-  bool failed = false;
-  std::vector<pipeline::TuId> tus;
-  for (std::uint32_t k = 0; k < opts->sources.size(); ++k) {
-    const std::string& s = opts->sources[k];
-    if (stop && stop()) {
-      stopped = true;
-      return d;
-    }
-    const pipeline::TuId tu{units.first + k};
-    auto o = compile_unit(d, r, config, host, session, tu, s, opts->stop);
-    if (!o) {
-      failed = true;
-      continue;
-    }
-    if (opts->stop == Options::Stop::object) {
-      std::string out = opts->output ? *opts->output : object_name(s).native_encoded_string();
-      d.outputs.push_back({std::move(out), obj::macho::write_object(*o), false});
-    } else if (opts->stop == Options::Stop::link) {
-      tus.push_back(tu);
-    }
-  }
-  auto count = [&] {
+  auto count_regions = [&] {
     const pp::Session::Stats after = stats();
     d.report.regions_computed = after.computed - before.computed;
     d.report.regions_reused = after.reused - before.reused;
-    const engine::Stats now = session.db().stats();
-    d.report.executed = now.executed - engine_before.executed;
-    d.report.validated = now.validated - engine_before.validated;
   };
-  if (failed || opts->stop != Options::Stop::link) {
-    count();
+  bool failed = false;
+  if (opts->stop == Options::Stop::preprocess) {
+    for (const std::string& s : opts->sources) {
+      auto text = host.read(absolute_in(r, s));  // never through a host's working directory: requests run at once
+      if (!text) {
+        std::format_to(std::back_inserter(d.err), "ycxx: error: cannot read '{}'\n", s);
+        failed = true;
+        continue;
+      }
+      failed = !preprocess_unit(d, config, s, *text) || failed;
+    }
+    count_regions();
     if (failed) d.exit_status = 1;
     return d;
   }
 
-  std::vector<obj::object> objects;
-  // Objects named on the command line are read as they are, never through the file table (§5.2).
-  for (const std::string& path : opts->objects) {
-    auto text = read_disk(in_cwd(r, path));
-    if (!text) {
-      fail(d, std::format("cannot read '{}'", path));
-      return d;
-    }
-    std::vector<std::uint8_t> bytes(text->begin(), text->end());
-    auto o = obj::macho::read_object(bytes, path);
-    if (!o) {
-      fail(d, o.error());
-      return d;
-    }
-    objects.push_back(std::move(*o));
-  }
+  // The units, named by what they are (#139), and the whole request as one root.
+  pipeline::BuildKey key;
+  key.until = opts->stop == Options::Stop::syntax ? pipeline::Until::syntax
+              : opts->stop == Options::Stop::object ? pipeline::Until::object
+                                                    : pipeline::Until::link;
+  for (const std::string& s : opts->sources)
+    key.units.push_back(session.unit({s, r.cwd, config, object_name(s).native_encoded_string()}));
   std::filesystem::path out = opts->output.value_or("a.out");
-  session.set_program(pipeline::ProgramId{0}, {std::move(tus), std::move(objects), out.filename().native_encoded_string()});
-  const pipeline::Linked& image = session.get<pipeline::Link>(pipeline::ProgramId{0});
-  count();
+  // A command-line object that cannot be used is reported after the units' diagnostics, and only
+  // when they compiled; the units are then built without the link.
+  std::optional<std::string> bad_object;
+  if (key.until == pipeline::Until::link) {
+    std::vector<obj::object> objects;
+    // Objects named on the command line are read as they are, never through the file table (§5.2).
+    for (const std::string& path : opts->objects) {
+      auto text = read_disk(in_cwd(r, path));
+      if (!text) {
+        bad_object = std::format("cannot read '{}'", path);
+        break;
+      }
+      std::vector<std::uint8_t> bytes(text->begin(), text->end());
+      auto o = obj::macho::read_object(bytes, path);
+      if (!o) {
+        bad_object = o.error();
+        break;
+      }
+      objects.push_back(std::move(*o));
+    }
+    if (bad_object) key.until = pipeline::Until::object;
+    else key.program = session.program({key.units, std::move(objects), out.filename().native_encoded_string()});
+  }
+  const pipeline::Until until = bad_object ? pipeline::Until::link : key.until;
+  pipeline::RunStats rs;
+  std::optional<pipeline::Built> built = session.run<pipeline::Build>(session.request(std::move(key)), stop, &rs);
+  if (!built) {
+    stopped = true;
+    return d;
+  }
+  d.report.restarts = static_cast<std::uint32_t>(rs.restarts);
+  d.report.executed = rs.engine.executed;
+  d.report.validated = rs.engine.validated;
+  count_regions();
+
+  for (std::size_t i = 0; i < opts->sources.size(); ++i) {
+    const pipeline::UnitBuilt& u = built->units[i];
+    const std::string& path = opts->sources[i];
+    if (!u.text) {
+      std::format_to(std::back_inserter(d.err), "ycxx: error: cannot read '{}'\n", path);
+      failed = true;
+      continue;
+    }
+    Renderer render(d.err, path, *u.text);
+    for (const pipeline::Message& m : u.messages) {
+      if (m.where.empty()) render.at(m.offset, m.error, m.text);
+      else std::format_to(std::back_inserter(d.err), "{}: {}: {}\n", m.where, m.error ? "error" : "warning", m.text);
+    }
+    if (u.front_failed) {
+      failed = true;
+      continue;
+    }
+    if (until == pipeline::Until::syntax) continue;
+    for (const auto& [at, message] : u.errors) {
+      if (at) render.at(*at, true, message);
+      else render.file_level(message);
+    }
+    if (!u.object) {
+      failed = true;
+      continue;
+    }
+    if (until == pipeline::Until::object) {
+      std::string o = opts->output ? *opts->output : object_name(path).native_encoded_string();
+      d.outputs.push_back({std::move(o), obj::macho::write_object(*u.object), false});
+    }
+  }
+  if (failed || until != pipeline::Until::link) {
+    if (failed) d.exit_status = 1;
+    return d;
+  }
+  if (bad_object) {
+    fail(d, *bad_object);
+    return d;
+  }
+  const pipeline::Linked& image = *built->linked;
   if (!image.errors.empty()) {
     for (const std::string& e : image.errors) std::format_to(std::back_inserter(d.err), "ycxx: error: {}\n", e);
     d.exit_status = 1;

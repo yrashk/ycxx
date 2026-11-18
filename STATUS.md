@@ -540,7 +540,7 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
 ## The resident daemon (#96, #97, 2026-11-18)
 
 `ycxx daemon` serves `ycxx cxx`, per `docs/design/daemon.md`. It is opt-in, with `YCXX_DAEMON=1`
-or `--daemon`: requests run one at a time in it until #120 (#15, #95). Without it, `ycxx cxx` runs
+or `--daemon`; requests run in it at once (#139). Without it, `ycxx cxx` runs
 the same handler in-process.
 
 - `ycxx.compile` (`src/client/compile.cppm`): the c++-compatible request handler, which was the
@@ -553,6 +553,15 @@ the same handler in-process.
   `YCXX_CHAOS_SEED`; the daemon takes them from the client that starts it and reports `threads`
   in `ctl status`. Workers and the daemon's request threads have 256 MiB stacks (address space),
   above a main thread's 8 MiB (#178, #187).
+- Concurrent requests (#139, daemon design §4): a unit, a program and a request are named by what
+  they are (`Session::unit`, `program`, `request`: path, working directory, configuration, object;
+  units, objects, name), numbered by a registry whose values provide their inputs, so admitting a
+  request sets nothing and needs no quiescence. A request is one root, `Build` (front ends, then
+  objects or the link), spawned into the engine's `Epochs` by `Session::run`, so a batch that
+  stops it restarts the whole root at cell level and the answer is of one revision. Batches,
+  editor buffers and the admission quantum are the daemon's edit strand; a batch applies through
+  `Session::apply` before a request and, once the quantum allows, while requests run. A hang-up
+  cancels the request's ticket. `ctl status` reports `peak_running`.
 - The daemon keeps one `Session` for its life (#120). Its `pp::FileContent` cells are provided
   from the file table, with the toolchain and sysroot as `high` durability. A batch sets the
   provided entries it changed, at quiescence. A repeated request executes nothing
@@ -961,7 +970,8 @@ miscompiles it (DECISIONS §3.2). Each is removed once ycxx compiles itself.
     in-class member functions are not affected.
   - Fix: belongs in GCC.
 - **A contract predicate inside a lambda that names a member of the enclosing class goes through
-  a local `bool`** (`src/ast` interner, builder, compaction).
+  a local `bool`, or a member's precondition** (`src/ast` interner, builder, compaction;
+  `pipeline::Session`'s registry providers).
   - Cause: in such a predicate GCC 16.2 takes `this` to be the closure object, so the member
     read is garbage. The lambda's own captures read correctly, and so does the same expression
     in the lambda body. It happens in a plain TU, with generic or plain lambdas, `contract_assert`
