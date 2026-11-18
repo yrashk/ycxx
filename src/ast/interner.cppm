@@ -76,6 +76,7 @@ public:
   RawPool() = default;
   explicit RawPool(u32 stride) : units_(stride) {}
 
+  // A high-water mark for a pool filled with `append` (ycxx.ast.store); a count with `push` only.
   u32 size() const { return units_.size(); }
   u32 stride() const { return units_.unit(); }
 
@@ -238,7 +239,8 @@ public:
   std::optional<u32> find(Fp128 f) const { return table_.find(f); }
 
   // The value with fingerprint `f`, inserting `v` if there is none; whether it was inserted.
-  // `also(n)` runs under the same lock for a new value, before anyone else can find it.
+  // `also(n)` runs under the same lock for a new value, before anyone else can find it; like
+  // `make`, it takes no index lock.
   template <class T, class Also = void (*)(u32)>
     requires(List::template contains<T>)
   std::pair<u32, bool> find_or_insert(const T& v, Fp128 f, Also also = [](u32) {}) {

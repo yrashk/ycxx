@@ -14,9 +14,13 @@ import ycxx.ast.handles;
 export namespace ycxx::ast {
 
 // Append-only units of `unit` bytes in blocks that never move: block b holds `1024 << b` units.
-// `alloc(n)` hands out n contiguous units that never cross a block (the rest of a block is
-// skipped instead), so a range is one span; with `alloc(1)` only, indices are dense. Moves only
-// at quiescence (compaction).
+// `alloc(n)` hands out n contiguous units that never cross a block (the rest of a block, or whole
+// blocks too small for the range, are skipped instead), so a range is one span; with `alloc(1)`
+// only, indices are dense. Moves only at quiescence (compaction).
+//
+// Reads use relaxed loads: whoever reads unit i learnt i through something that synchronized with
+// its writer (an index's shard lock, or an engine cell published with release), and the writer
+// allocated the block and wrote the unit before that.
 class Chunked {
 public:
   explicit Chunked(u32 unit = 1) : unit_(unit) {}
@@ -39,17 +43,22 @@ public:
   ~Chunked() { release(); }
 
   u32 unit() const noexcept { return unit_; }
-  // Units handed out so far, skipped ones included.
-  u32 size() const noexcept { return size_.load(std::memory_order_acquire); }
+  // A high-water mark: units handed out, with skipped ones (a block's tail, whole blocks), which
+  // are not readable. Dense only for a store filled with `alloc(1)`.
+  u32 size() const noexcept { return size_.load(std::memory_order_relaxed); }
 
   u32 alloc(u32 n) {
     std::lock_guard lock(m_);
     u32 at = cursor_;
     if (n > 0) {
-      const auto [b, off] = locate(at);
-      if (off + n > block_units(b)) at = static_cast<u32>(block_base(b + 1));  // skip the block's tail
-      contract_assert(locate(at).second + n <= block_units(locate(at).first));  // a range fits one block
-      block(locate(at).first);
+      auto [b, off] = locate(at);
+      while (off + n > block_units(b)) {  // skip to the first block with room for the whole range
+        ++b;
+        off = 0;
+        contract_assert(b < blocks);
+      }
+      at = static_cast<u32>(block_base(b) + off);
+      block(b);
     }
     cursor_ = at + n;
     size_.store(cursor_, std::memory_order_release);
@@ -61,7 +70,7 @@ public:
 
   std::byte* at(u32 i) const noexcept {
     const auto [b, off] = locate(i);
-    return blocks_[b].load(std::memory_order_acquire) + std::size_t(off) * unit_;
+    return blocks_[b].load(std::memory_order_relaxed) + std::size_t(off) * unit_;
   }
 
 private:
@@ -126,7 +135,8 @@ public:
   }
   std::span<const T> span(u32 offset, u32 n) const noexcept {
     if (n == 0) return {};
-    return {reinterpret_cast<const T*>(c_.at(offset)), n};
+    // The block's bytes hold implicitly created `T`s (operator new, then memcpy).
+    return {std::launder(reinterpret_cast<const T*>(c_.at(offset))), n};
   }
 
 private:
@@ -144,7 +154,9 @@ public:
     return std::nullopt;
   }
   // The value for `f`, or `make()`'s, inserted, under the shard's lock: of two workers interning
-  // equal content, exactly one makes it. `make` must not intern into this table.
+  // equal content, exactly one makes it. `make` takes no index lock (no interning, into any
+  // table): two workers each holding a shard and waiting for the other's would deadlock. It may
+  // append to `Chunked` stores, whose lock is a leaf.
   template <class F>
   std::pair<V, bool> find_or_insert(Fp128 f, F&& make) {
     Shard& s = shard(f);

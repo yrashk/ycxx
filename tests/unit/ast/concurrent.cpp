@@ -1,6 +1,7 @@
 // Interning from several threads at once (#107; ast.md §2, §9): equal content interns to one
 // handle whichever thread comes first, fingerprints equal a single-threaded run's, nothing is
-// interned twice, readers see whole values while others append, and compaction still works.
+// interned twice, readers see whole values while others append, lists longer than a storage
+// block are whole, and compaction still works. Every pool grows across several blocks.
 import std;
 import ycxx.ast;
 import ycxx.unit;
@@ -10,7 +11,7 @@ using ycxx::unit::check;
 
 namespace {
 
-constexpr int trees = 400;
+constexpr int trees = 3000;
 constexpr int threads = 8;
 
 struct Result {
@@ -20,6 +21,7 @@ struct Result {
   QualType canonical;
   NameId name;
   SeqId<QualType> params;
+  NodeId again;  // the call, re-interned from the edge pool
 };
 
 // Tree `i`: `{ g_i(x_i + k); return x_i + k; }` over a type built from sugar, pointers, arrays and
@@ -36,11 +38,19 @@ Result build(Interners& in, int i) {
   QualType arr = in.intern_type(TArray{sugar, bound});
   SeqId<QualType> params = in.intern_seq<QualType>({arr, int_t});
   QualType fn = in.intern_type(TFunction{int_t, params, ConstId::none, 0, Cv::none, RefQual::none, LangLinkage::cxx});
-  NameId name = in.names.intern(std::format("name{}", i % 50));
+  // Every 97th tree also has a name, a list and a block longer than a storage block.
+  const bool long_one = i % 97 == 0;
+  NameId name = in.names.intern(long_one ? std::string(3000 + i, 'n') : std::format("name{}", i));
+  if (long_one) {
+    std::vector<QualType> many(2500 + i % 5, int_t);
+    many.back() = arr;
+    (void)in.intern_seq<QualType>(std::span<const QualType>(many));
+  }
 
   EntityId g = in.entities.add<EntityId>(seed(std::format("g{}", i)));
   EntityId x = in.entities.add<EntityId>(seed(std::format("x{}", i % 11)));
-  ConstId kc = in.intern_value(VInt{int_t, bits_of(std::int64_t{k})});
+  ConstId kc = in.intern_value(VInt{int_t, bits_of(std::int64_t{i})});
+  (void)k;
   ExprInfo rv{int_t, ValueCategory::prvalue, 0};
   NodeId lit = in.intern(Literal{rv, kc}, 1);
   NodeId ref = in.intern(DeclRef{{int_t, ValueCategory::lvalue, 0}, x}, 1);
@@ -50,9 +60,11 @@ Result build(Interners& in, int i) {
   NodeId call = in.intern(Call{rv, g, {callee, 0}, {0, 1}}, 6, args);
   NodeId stmt = in.intern(ExprStmt{{call, 0}}, 7);
   NodeId ret = in.intern(Return{{sum, 1}, in.intern_seq<Cleanup>({})}, 5);
-  std::array stmts{Child{stmt, 1}, Child{ret, 8}};
-  NodeId block = in.intern(Compound{{0, 2}, in.intern_seq<Cleanup>({})}, 14, stmts);
-  return {block, in.ast.fp(block), sugar, in.canonical(sugar), name, params};
+  std::vector<Child> stmts{Child{stmt, 1}, Child{ret, 8}};
+  if (long_one) stmts.resize(2600, Child{stmt, 1});
+  NodeId block = in.intern(Compound{{0, static_cast<u32>(stmts.size())}, in.intern_seq<Cleanup>({})}, 14, stmts);
+  NodeId again = in.intern_stored(in.ast.get<Call>(call), 6);
+  return {block, in.ast.fp(block), sugar, in.canonical(sugar), name, params, again};
 }
 
 }  // namespace
@@ -62,7 +74,7 @@ int main() {
   std::vector<Result> want;
   for (int i = 0; i < trees; ++i) want.push_back(build(reference, i));
 
-  for (int round = 0; round < 5; ++round) {
+  for (int round = 0; round < 3; ++round) {
     Interners in;
     std::vector<std::vector<Result>> got(threads, std::vector<Result>(trees));
     std::atomic<int> torn{0};
@@ -77,8 +89,10 @@ int main() {
             got[w][i] = build(in, i);
             // Read back what this thread holds while the others append.
             const Result& r = got[w][i];
-            if (in.ast.fp(r.block) != r.fp || in.names.spelling(r.name) != std::format("name{}", i % 50) ||
-                in.seqs.size(r.params) != 2) {
+            const std::string spelling = i % 97 == 0 ? std::string(3000 + i, 'n') : std::format("name{}", i);
+            const u32 stmts = i % 97 == 0 ? 2600 : 2;
+            if (in.ast.fp(r.block) != r.fp || in.names.spelling(r.name) != spelling || in.seqs.size(r.params) != 2 ||
+                in.ast.children(in.ast.get<Compound>(r.block).stmts).size() != stmts) {
               ++torn;
             }
           }
@@ -90,11 +104,12 @@ int main() {
       for (int w = 1; w < threads; ++w) {
         const Result& a = got[0][i];
         const Result& b = got[w][i];
-        disagree += a.block != b.block || a.type != b.type || a.canonical != b.canonical || a.name != b.name || a.params != b.params;
+        disagree += a.block != b.block || a.type != b.type || a.canonical != b.canonical || a.name != b.name || a.params != b.params ||
+                    a.again != b.again;
       }
       wrong_fp += got[0][i].fp != want[i].fp || in.types.fp(got[0][i].type) != reference.types.fp(want[i].type) ||
                   in.types.fp(got[0][i].canonical) != reference.types.fp(want[i].canonical);
-      wrong_canon += in.canonical(got[0][i].type) != got[0][i].canonical;
+      wrong_canon += in.canonical(got[0][i].type) != got[0][i].canonical || in.ast.fp(got[0][i].again) != reference.ast.fp(want[i].again);
     }
     check(disagree == 0, std::format("round {}: every thread got the same handles ({} differ)", round, disagree));
     check(wrong_fp == 0, std::format("round {}: fingerprints equal the single-threaded run's ({} differ)", round, wrong_fp));

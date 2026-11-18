@@ -323,8 +323,9 @@ one import `ycxx.ast`; unit tests in `tests/unit/ast` (run by ctest, see docs/TE
   - Shared by the engine's workers (#107): pools are append-only chunked storage that readers
     use without a lock, and each interner's fingerprint index is 64 locked shards, so equal
     content interns to one handle whichever worker is first (`ycxx.ast.store`). Handle numbers
-    may differ between runs; fingerprints never do. `unit.ast_concurrent` interns 400 trees
-    from 8 threads in shuffled orders and compares with a single-threaded run.
+    may differ between runs; fingerprints never do. `unit.ast_concurrent` interns 3,000 trees
+    (some with lists, names and blocks longer than a storage block) from 8 threads in shuffled
+    orders and compares with a single-threaded run; `unit.ast_store` covers the storage.
 - **Fingerprints** (`fingerprint.cppm`): a thin adapter over `ycxx.hash` (#14); `Fp128` is
   `ycxx::Fp128`. Not done yet: ADL `hash_into` for the AST handles. Without it,
   `ycxx::fingerprint(v)` hashes a handle by its number, so engine keys that hold AST handles must
