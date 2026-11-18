@@ -1,0 +1,81 @@
+#!/usr/bin/env python3
+"""Record a CI run's wall time (DECISIONS §9.8): the run's, each job's and each step's.
+
+  tools/ci/wall-time TIER BUDGET_MINUTES [OUT.json]
+
+Runs as the last job of a workflow, under GitHub Actions, with GH_TOKEN set. It reads this run's
+jobs through `gh api`, prints a table to $GITHUB_STEP_SUMMARY, writes OUT.json (default
+wall-time.json; CI uploads it, so the history is in the artifacts), and warns when the run so far
+is over its tier's budget. The time to the first failed step is reported too: the PR tier's
+budget for it is about 5 minutes (DECISIONS §9.3).
+"""
+import datetime, json, os, subprocess, sys
+
+
+def parse(t):
+    return datetime.datetime.fromisoformat(t.replace("Z", "+00:00")) if t else None
+
+
+def minutes(a, b):
+    return round((b - a).total_seconds() / 60, 2) if a and b else None
+
+
+def main(tier, budget, out="wall-time.json"):
+    repo, run_id = os.environ["GITHUB_REPOSITORY"], os.environ["GITHUB_RUN_ID"]
+    attempt = os.environ.get("GITHUB_RUN_ATTEMPT", "1")
+    me = os.environ.get("GITHUB_JOB", "")
+    run = json.loads(subprocess.check_output(
+        ["gh", "api", f"repos/{repo}/actions/runs/{run_id}/attempts/{attempt}"]))
+    # One compact JSON object per line, across pages.
+    jobs = [json.loads(line) for line in subprocess.check_output(
+        ["gh", "api", "--paginate", f"repos/{repo}/actions/runs/{run_id}/attempts/{attempt}/jobs",
+         "--jq", ".jobs[] | tojson"], text=True).splitlines() if line]
+    start = parse(run["run_started_at"])
+    now = datetime.datetime.now(datetime.timezone.utc)
+    first_failure = None
+    rows = []
+    for j in jobs:
+        if j["name"] == me or j["name"].startswith("wall-time"):
+            continue
+        js, je = parse(j["started_at"]), parse(j["completed_at"])
+        steps = []
+        for s in j.get("steps", []):
+            ss, se = parse(s["started_at"]), parse(s["completed_at"])
+            steps.append({"name": s["name"], "conclusion": s["conclusion"], "minutes": minutes(ss, se)})
+            if s["conclusion"] == "failure" and se and (first_failure is None or se < first_failure):
+                first_failure = se
+        rows.append({"job": j["name"], "conclusion": j["conclusion"], "minutes": minutes(js, je),
+                     "steps": steps})
+    record = {
+        "tier": tier, "budget_minutes": budget, "run_id": run_id, "attempt": attempt,
+        "sha": os.environ.get("GITHUB_SHA"), "ref": os.environ.get("GITHUB_REF"),
+        "event": os.environ.get("GITHUB_EVENT_NAME"), "started_at": run["run_started_at"],
+        "wall_minutes": minutes(start, now),
+        "first_failure_minutes": minutes(start, first_failure),
+        "jobs": rows,
+    }
+    with open(out, "w") as f:
+        json.dump(record, f, indent=2)
+
+    lines = [f"### Wall time, {tier} tier: {record['wall_minutes']} min (budget {budget})", ""]
+    if first_failure:
+        lines.append(f"First failure after {record['first_failure_minutes']} min.\n")
+    lines += ["| job | result | minutes |", "| --- | --- | --- |"]
+    lines += [f"| {r['job']} | {r['conclusion']} | {r['minutes']} |" for r in rows]
+    summary = os.environ.get("GITHUB_STEP_SUMMARY")
+    text = "\n".join(lines) + "\n"
+    if summary:
+        with open(summary, "a") as f:
+            f.write(text)
+    print(text)
+    if record["wall_minutes"] > budget:
+        print(f"::warning title=CI over budget::{tier} tier took {record['wall_minutes']} min, "
+              f"budget {budget} (DECISIONS §9.8: open an issue)")
+    return 0
+
+
+if __name__ == "__main__":
+    if len(sys.argv) < 3:
+        print(__doc__, file=sys.stderr)
+        sys.exit(2)
+    sys.exit(main(sys.argv[1], float(sys.argv[2]), *sys.argv[3:4]))
