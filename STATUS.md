@@ -94,11 +94,18 @@ miscompiles it (DECISIONS §3.2). Each is removed once ycxx compiles itself.
     precondition. The importer fails to link unless it has a contract of its own. Templates and
     in-class member functions are not affected.
   - Fix: belongs in GCC.
-- **`contract_assert` inside a lambda takes a local `bool`** (`src/ast` interner, builder,
-  compaction).
-  - Cause: GCC 16.2 evaluated such predicates to false, against values that were right when
-    evaluated into a local. It showed up in generic lambdas inside module templates.
-  - Not yet reduced to a standalone repro; two attempts did not reproduce it.
+- **A contract predicate inside a lambda that names a member of the enclosing class goes through
+  a local `bool`** (`src/ast` interner, builder, compaction).
+  - Cause: in such a predicate GCC 16.2 takes `this` to be the closure object, so the member
+    read is garbage. The lambda's own captures read correctly, and so does the same expression
+    in the lambda body. It happens in a plain TU, with generic or plain lambdas, `contract_assert`
+    or the lambda's `pre`, at -O0 and -O2:
+
+        struct S { int x = 42;
+          void f() { [this] { contract_assert(x == 42); }(); } };  // reported violated
+        int main() { S{}.f(); }
+
+  - Fix: belongs in GCC. Restore the plain form when ycxx compiles itself.
 - **The std module's BMI must be built with `-freflection -fcontracts`.**
   - `CMakeLists.txt` adds the flags to libycxx's `ycxx_modules` target.
   - Without them, `std::meta` is empty. An importer whose `-freflection` does not match the

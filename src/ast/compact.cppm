@@ -119,7 +119,7 @@ public:
             }
           });
           NodeId n = ast.insert(v, ins.ast.width(old), ins.ast.fp(old));
-          bool as_numbered = n == remap_.map(old);  // BOOTSTRAP: contracts: as in Interners::intern
+          bool as_numbered = n == remap_.map(old);  // BOOTSTRAP: contracts: names a member (Interners::intern)
           contract_assert(as_numbered);
         }
       });
@@ -132,8 +132,7 @@ public:
         std::vector<T> xs = ins.seqs.elements(SeqId<T>{i});
         for (T& x : xs) remap_.rewrite(x);
         SeqId<T> s = seqs.insert<T>(xs, ins.seqs.fp(SeqId<T>{i}));
-        bool as_numbered = s.index == live[i];  // BOOTSTRAP: contracts: as in Interners::intern
-        contract_assert(as_numbered);
+        contract_assert(s.index == live[i]);
       }
     });
     ins.ast = std::move(ast);

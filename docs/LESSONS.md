@@ -126,6 +126,10 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
     workaround and list it in STATUS.
   - Do: print with `std::println(std::cerr, …)` inside the failing function. lldb on macOS showed
     only the `__pthread_kill` frame for a contract abort.
+  - Do: print from inside the predicate itself, with a comma expression such as
+    `contract_assert((std::println("{}", (void*)this), pred))`. That showed GCC takes `this` to be
+    the closure, and the repro was then three lines. The two guessed repros had failed because
+    neither predicate named a member.
   - Learned on #32.
 
 ## Evidence and tests

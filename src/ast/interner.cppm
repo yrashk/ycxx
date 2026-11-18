@@ -372,16 +372,14 @@ struct Interners {
   template <class T>
     requires is_node_kind<T>
   NodeId intern(const T& v, u32 width, std::span<const Child> edges = {}) {
-    // BOOTSTRAP: contracts: a predicate inside a lambda is evaluated into a local first; GCC 16.2
-    // reported `h == none || ast.contains(h)` false here while the same expression in a local was
-    // true. Not reduced to a standalone repro yet (STATUS).
     for_each_ref(v, [this, edges]<class H>(const H& h) {
       if constexpr (std::is_same_v<H, NodeId>) {
+        // BOOTSTRAP: contracts: in a lambda's contract predicate GCC 16.2 takes `this` to be the
+        // closure, so a predicate naming a member goes through a local (STATUS).
         bool interned = h == NodeId::none || ast.contains(h);
         contract_assert(interned);
       } else if constexpr (std::is_same_v<H, ChildList>) {
-        bool in_edges = h.offset + h.size <= edges.size();
-        contract_assert(in_edges);
+        contract_assert(h.offset + h.size <= edges.size());
       }
     });
     Fp128 f = mix(fingerprint(v, edges), width);

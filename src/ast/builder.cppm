@@ -197,11 +197,12 @@ private:
       if constexpr (std::is_same_v<H, NodeId>) {
         check_node(h);
       } else if constexpr (std::is_same_v<H, ChildList>) {
-        bool in_edges = h.offset + h.size <= edges_.size();  // BOOTSTRAP: contracts: as in Interners::intern
+        bool in_edges = h.offset + h.size <= edges_.size();  // BOOTSTRAP: contracts: names a member
         contract_assert(in_edges);
       } else if constexpr (is_seq_id<H>) {
         using T = typename seq_element<H>::type;
         if constexpr (holds_nodes_v<T>) {
+          // BOOTSTRAP: contracts: names a member, as in Interners::intern.
           bool draft = h.index < entries_.size() && entries_[h.index].seq &&
                        entries_[h.index].what == SeqElements::index_of<T>();
           contract_assert(draft);
