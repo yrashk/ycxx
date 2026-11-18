@@ -110,6 +110,7 @@ private:
     std::vector<Context> contexts;
     std::unordered_map<u32, u32> active;  // disabled macros
     bool pending_space = false;
+    u32 collecting = 0;  // invocations whose arguments are being collected
     FileRegion out;
     std::map<FileId, u16> file_index;
     // What this region's own history decided, and what it has asked already.
@@ -312,8 +313,17 @@ private:
   void report(Frame& f, u32 offset, lex::LexDiag kind, u64 a = 0, u64 b = 0) {
     f.out.diags.push_back({0, offset, kind, {a, b}});
   }
-  // At a token's site in the file: a replaced token is reported where its expansion began.
-  void report(Frame& f, const PTok& at, lex::LexDiag kind, u64 a = 0, u64 b = 0) { report(f, site(f, at), kind, a, b); }
+  // At a token's site in the file: a replaced token is reported where its expansion began, but a
+  // token written in a macro's argument where it is written.
+  void report(Frame& f, const PTok& at, lex::LexDiag kind, u64 a = 0, u64 b = 0) {
+    TokLoc l = at.loc;
+    while (l.expansion != 0) {
+      const Expansion& e = f.out.expansions[l.expansion];
+      if (e.kind == ExpansionKind::argument && l.file == 0) return report(f, l.offset, kind, a, b);
+      l = TokLoc{e.site_file, e.parent, e.site_offset};
+    }
+    report(f, l.offset, kind, a, b);
+  }
   static u32 site(const Frame& f, const PTok& t) {
     TokLoc l = t.loc;
     while (l.expansion != 0) {
@@ -375,15 +385,16 @@ private:
 
   // [cpp.pre]/2: `#`, or `import`, `module` or `export` followed on the same line by the right
   // token.
-  bool introduces_directive(Frame& f, const PTok& t) {
+  // `base` is how many tokens are pending before the ones after `t`.
+  bool introduces_directive(Frame& f, const PTok& t, std::size_t base = 0) {
     if (t.tok.kind == Tk::hash) return true;
-    std::size_t at = 0;
+    std::size_t at = base;
     PTok word = t;
     if (is_name(t, "export")) {
-      const PTok& n = peek(f, 0);
+      const PTok& n = peek(f, base);
       if (!same_line(n) || !(is_name(n, "import") || is_name(n, "module"))) return false;
       word = n;
-      at = 1;
+      at = base + 1;
     }
     if (is_name(word, "import")) {
       const PTok& n = peek(f, at, true);
@@ -420,6 +431,15 @@ private:
       return with_pending_space(f, t);
     }
   }
+  // Whether the next token read comes from the file and starts a directive.
+  bool directive_next(Frame& f) {
+    for (auto it = f.contexts.rbegin(); it != f.contexts.rend(); ++it) {
+      if (it->pos < it->toks.size() || it->barrier) return false;
+    }
+    if (fatal_) return false;
+    PTok t = peek(f, 0);
+    return t.tok.kind != Tk::eof && t.tok.has(tok_flag::line_start) && introduces_directive(f, t, 1);
+  }
   static PTok with_pending_space(Frame& f, PTok t) {
     if (f.pending_space) {
       t.tok.flags |= tok_flag::space_before;
@@ -442,8 +462,12 @@ private:
       std::vector<Arg> args;
       if (def->function_like) {
         PTok close;
-        auto a = invocation(f, t, *def, close);
-        if (!a) return t;
+        bool drop = false;
+        auto a = invocation(f, t, *def, close, drop);
+        if (!a) {
+          if (drop) continue;
+          return t;
+        }
         args = std::move(*a);
         replace(f, t, *def, args, site(f, close) + 1);
         continue;
@@ -466,6 +490,10 @@ private:
   // An argument as written, its tokens unreplaced.
   struct Arg {
     std::vector<PTok> raw;
+    // Its replacement, made once ([cpp.subst]/1) at its first use, whose argument expansion is
+    // `tag`; later uses relocate it.
+    std::optional<std::vector<PTok>> replaced;
+    u32 tag = 0;
   };
   // A token of a replacement being built: a placemarker stands for an empty argument
   // ([cpp.concat]/2); `paste` marks a `##` operator of the replacement list.
@@ -484,8 +512,11 @@ private:
 
   // [cpp.replace.general]/11: a function-like macro's name followed by `(` starts an invocation,
   // whose arguments run to the matching `)`; new-lines in it are whitespace. Nothing if the next
-  // token is not `(` (it is read again), or if the invocation is ill-formed (reported).
-  std::optional<std::vector<Arg>> invocation(Frame& f, const PTok& name, const MacroDef& def, PTok& close) {
+  // token is not `(` (it is read again), or if the invocation is ill-formed (reported; `drop`
+  // when the name goes too, as it does when the invocation is unterminated). A directive ends
+  // the search for `(`, as it ends a text line.
+  std::optional<std::vector<Arg>> invocation(Frame& f, const PTok& name, const MacroDef& def, PTok& close, bool& drop) {
+    if (directive_next(f)) return std::nullopt;
     PTok n = read(f);
     if (n.tok.kind != Tk::l_paren) {
       f.contexts.push_back(Context{{n}, 0, std::nullopt, false});
@@ -494,11 +525,17 @@ private:
     std::vector<Arg> args(1);
     std::size_t depth = 0;
     const std::size_t named = def.params.size();
+    ++f.collecting;
+    struct Done {
+      Frame& f;
+      ~Done() { --f.collecting; }
+    } done{f};
     for (;;) {
       PTok a = read(f);
       if (a.tok.kind == Tk::eof) {
         report(f, name, lex::LexDiag::invocation_unterminated);
         f.contexts.push_back(Context{{a}, 0, std::nullopt, false});
+        drop = true;
         return std::nullopt;
       }
       if (a.tok.kind == Tk::l_paren) ++depth;
@@ -519,6 +556,8 @@ private:
     // arguments may be omitted ([cpp.replace.general]/12).
     const std::size_t k = args.size();
     if (named == 0 && !def.variadic && k == 1 && args[0].raw.empty()) args.clear();
+    // Ill-formed or not, the invocation ends at its `)`.
+    f.out.continuations.push_back({static_cast<u32>(f.out.tokens.size()), site(f, name), site(f, close)});
     if (k < named) {
       report(f, close, lex::LexDiag::too_few_arguments);
       return std::nullopt;
@@ -536,7 +575,7 @@ private:
   // the macro disabled ([cpp.replace.general]/10–11, [cpp.rescan]).
   // `end` is 1 + the offset of the invocation's `)` in the file, which `-E` continues the line
   // after (0 for an object-like macro).
-  void replace(Frame& f, const PTok& name, const MacroDef& def, std::span<const Arg> args, u32 end) {
+  void replace(Frame& f, const PTok& name, const MacroDef& def, std::span<Arg> args, u32 end) {
     Where w;
     w.expansion = static_cast<u32>(f.out.expansions.size());
     // A definition from the entry state is located through a binding, relative to its name.
@@ -605,19 +644,33 @@ private:
 
   // Argument `p` for its use at replacement-list token `at`: its tokens in an expansion of kind
   // argument, fully replaced unless `raw` ([cpp.subst]/1).
-  std::vector<PTok> argument(Frame& f, const MacroDef& def, const Where& w, std::span<const Arg> args, std::size_t p,
+  std::vector<PTok> argument(Frame& f, const MacroDef& def, const Where& w, std::span<Arg> args, std::size_t p,
                              std::size_t at, bool raw) {
     u32 ae = static_cast<u32>(f.out.expansions.size());
     TokLoc site = body_loc(def, w, at, w.expansion);
     f.out.expansions.push_back(Expansion{ExpansionKind::argument, def.name, w.expansion, site.file, site.offset, w.file,
                                          def.offset - w.base, static_cast<u32>(p), 0});
-    std::vector<PTok> toks = args[p].raw;
-    for (PTok& t : toks) t.loc.expansion = ae;
-    return raw ? toks : expand_line(f, std::move(toks));
+    Arg& a = args[p];
+    if (raw) {
+      std::vector<PTok> toks = a.raw;
+      for (PTok& t : toks) t.loc.expansion = ae;
+      return toks;
+    }
+    if (!a.replaced) {
+      std::vector<PTok> toks = a.raw;
+      for (PTok& t : toks) t.loc.expansion = ae;
+      a.replaced = expand_line(f, std::move(toks));
+      a.tag = ae;
+      return *a.replaced;
+    }
+    std::vector<PTok> toks = *a.replaced;
+    for (PTok& t : toks)
+      if (t.loc.expansion == a.tag) t.loc.expansion = ae;
+    return toks;
   }
 
   // [cpp.subst], [cpp.stringize], [cpp.concat] over replacement-list tokens [b, end).
-  std::vector<Item> substitute(Frame& f, const MacroDef& def, const Where& w, std::span<const Arg> args, std::size_t b,
+  std::vector<Item> substitute(Frame& f, const MacroDef& def, const Where& w, std::span<Arg> args, std::size_t b,
                                std::size_t end, bool va) {
     std::vector<Item> out;
     const std::vector<Tok>& body = def.body;
@@ -641,7 +694,7 @@ private:
           text = stringize(args[p].raw);
           i += 1;
         }
-        PTok s = lex_one(text).value();
+        PTok s = string_token(f, text, body_loc(def, w, i, w.expansion));
         s.tok.flags = ws;
         s.loc = body_loc(def, w, i, w.expansion);
         out.push_back({s});
@@ -722,6 +775,10 @@ private:
       std::string text = spelling(t, s_->spellings);
       if (t.kind == Tk::string_lit || t.kind == Tk::char_lit) {
         for (char c : text) {
+          if (c == '\n') {  // in a raw string literal written across lines
+            s += "\\n";
+            continue;
+          }
           if (c == '"' || c == '\\') s += '\\';
           s += c;
         }
@@ -730,6 +787,20 @@ private:
       }
     }
     return s + '"';
+  }
+
+  // [cpp.stringize]/2: the string literal stringizing made; one that is not valid is diagnosed and
+  // kept as it is spelled, without a value.
+  PTok string_token(Frame& f, const std::string& text, TokLoc at) {
+    if (auto s = lex_one(text)) {
+      s->loc = at;
+      return *s;
+    }
+    report(f, PTok{Tok{}, at, false}, lex::LexDiag::stringize_invalid);
+    Literal l;
+    l.spelling = text;
+    l.bad = true;
+    return PTok{Tok{Tk::string_lit, 0, s_->spellings.literal(std::move(l))}, at, false};
   }
 
   // The one preprocessing token `text` spells, or nothing if it spells none or several.
@@ -841,7 +912,8 @@ private:
         if (i < line.size() && line[i].tok.kind == Tk::ellipsis) {
           def->variadic = true;
           ++i;
-        } else if (i < line.size() && line[i].tok.kind == Tk::identifier && line[i].tok.payload != va_args_) {
+        } else if (i < line.size() && line[i].tok.kind == Tk::identifier && line[i].tok.payload != va_args_ &&
+                   line[i].tok.payload != va_opt_) {
           if (std::ranges::contains(def->params, line[i].tok.payload)) {
             report(f, line[i], lex::LexDiag::macro_param_duplicate);
             return;
@@ -939,6 +1011,10 @@ private:
   // [cpp.pragma]: `#pragma once` here; other pragmas pass through to `-E`.
   void pragma(Frame& f, const PTok& hash, const PTok& word) {
     std::vector<PTok> line = rest_of_line(f);
+    if (f.collecting > 0) {  // as for #include: Clang rejects it too
+      report(f, word, lex::LexDiag::directive_in_arguments);
+      return;
+    }
     if (!line.empty() && is_name(line[0], "once")) {
       if (frames_.size() == 1)
         report(f, line[0], lex::LexDiag::pragma_once_in_main);
@@ -957,6 +1033,11 @@ private:
 
   // [cpp.include]
   void include(Frame& f, const PTok& d, IncludeForm form) {
+    if (f.collecting > 0) {  // [cpp.replace.general]/13 leaves it undefined; Clang rejects it too
+      report(f, d, lex::LexDiag::directive_in_arguments);
+      rest_of_line(f);
+      return;
+    }
     PTok h = lex_next(f, true);
     std::string spelled;
     std::vector<PTok> line;

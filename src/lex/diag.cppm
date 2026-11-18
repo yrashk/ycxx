@@ -81,6 +81,8 @@ enum class LexDiag : u32 {
   stringize_not_parameter [[=message{Severity::error, "'#' is not followed by a macro parameter"}]],
   paste_at_edge [[=message{Severity::error, "'##' cannot appear at either end of a replacement list"}]],
   paste_invalid [[=message{Severity::error, "pasting does not form a valid preprocessing token"}]],
+  stringize_invalid [[=message{Severity::error, "stringizing does not form a valid string literal"}]],
+  directive_in_arguments [[=message{Severity::error, "#include and #pragma within macro arguments are not supported"}]],
   invocation_unterminated [[=message{Severity::error, "unterminated function-like macro invocation"}]],
   too_few_arguments [[=message{Severity::error, "too few arguments in a macro invocation"}]],
   too_many_arguments [[=message{Severity::error, "too many arguments in a macro invocation"}]],

@@ -136,6 +136,18 @@ void function_like() {
   check(kinds(pre("#define J(a,b) a b\nJ(1) J(1,2,3)\n")) ==
             std::vector{lex::LexDiag::too_few_arguments, lex::LexDiag::too_many_arguments},
         "argument counts");
+  // Found by review: an argument is replaced once, however often it is used ([cpp.subst]/1).
+  check(kinds(pre("#define g(a) a\n#define F(...) __VA_OPT__(x) __VA_ARGS__ __VA_ARGS__\nF(g(1,2))\n")) ==
+            std::vector{lex::LexDiag::too_many_arguments},
+        "an argument replaced once");
+  // A directive ends the search for `(`.
+  check(text(pre("#define f(x) [x]\na f\n#undef f\n(1) b\n").region) == "a f ( 1 ) b", "a directive before (");
+  check(kinds(pre("#define f(x) x\nf(1\n#include \"x.h\"\n)\n")) == std::vector{lex::LexDiag::directive_in_arguments},
+        "#include in arguments");
+  // Stringizing a raw string written across lines, and an invalid result.
+  check(text(pre("#define s(x) #x\ns(R\"(a\nb)\")\n").region) == "\"R\\\"(a\\nb)\\\"\"", "a raw string stringized");
+  check(kinds(pre("#define s(x) #x\ns(\\)\n")) == std::vector{lex::LexDiag::stringize_invalid}, "an invalid stringizing");
+  check(kinds(pre("#define F(__VA_OPT__, ...)\n")) == std::vector{lex::LexDiag::macro_param_expected}, "__VA_OPT__ is no parameter");
   // A header's invocation of a macro the includer defines is reused where an equal definition is
   // elsewhere.
   h.files["use.h"] = "int u = TWICE(3);\n";
