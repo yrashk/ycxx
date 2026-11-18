@@ -240,11 +240,23 @@ void conditionals() {
   check(text(pre("#include \"c.h\"\n#include \"c.h\"\nint b = __COUNTER__;\n").region) == "int a = 0 ; int a = 1 ; int b = 2 ;",
         "the counter");
   check(text(pre("int z = __COUNTER__;\n#include \"c.h\"\n").region) == "int z = 0 ; int a = 1 ;", "a region's counter question");
+  // Found by review: a directive outside the guarded group makes the file unguarded, and so does
+  // a diagnostic its skipping would repeat.
+  h.files["g1.h"] = "#ifndef G1\n#define G1\nint g1;\n#endif\n#define AFTER 42\n";
+  check(text(pre("#include \"g1.h\"\n#undef AFTER\n#include \"g1.h\"\nAFTER\n").region) == "int g1 ; 42", "not a guard");
+  h.files["g4.h"] = "#ifndef G4\n#define G4\n#endif extra\n";
+  check(kinds(pre("#include \"g4.h\"\n#include \"g4.h\"\n")) ==
+            std::vector{lex::LexDiag::extra_tokens, lex::LexDiag::extra_tokens},
+        "a guarded file that says something is read again");
+  // __LINE__: an argument's own line, or the `)` of the invocation whose replacement made it.
+  check(text(pre("#define F(x) x\n#define H(x) x __LINE__\nF(\n__LINE__\n) F(H(\n1\n)\n)\n").region) == "4 1 7",
+        "__LINE__ in arguments");
+  check(text(pre("#if (1, 2) == 2\nc\n#endif\n").region) == "c", "a comma in parentheses");
   // #line
   auto l = pre("#line 10 \"x.cpp\"\nint a = __LINE__; const char* f = __FILE__;\n#line 1\n#error e\n");
   check(text(l.region) == "int a = 10 ; const char * f = \"x.cpp\" ;", "#line");
-  pp::Message m = pp::message(s, s.files.id("main.cpp"), "main.cpp", l.diags.at(0), {});
-  check(l.diags.size() == 1 && m.line == 4, "diagnostics need the #line table to be presumed");
+  pp::Message m = pp::message(s, s.files.id("main.cpp"), "main.cpp", l.diags.at(0));
+  check(l.diags.size() == 1 && m.line == 1 && m.file == "x.cpp", "a diagnostic's presumed location");
 }
 
 // What a region's value depends on beyond its trace: whether it is a main file, and how deep it

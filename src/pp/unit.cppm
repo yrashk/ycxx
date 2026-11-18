@@ -164,6 +164,7 @@ private:
     };
     std::vector<Cond> conds;
     bool in_condition = false;
+    u32 replacing_argument = 0;  // arguments being replaced ([cpp.subst]/1)
     // The include guard: 0 nothing yet; 1 inside `#ifndef guard`'s group; 2 after its #endif; -1
     // none.
     int guard_stage = 0;
@@ -207,7 +208,8 @@ private:
       // §B9: a guarded file included where its guard is defined is empty. That is a region too,
       // whose one question is the guard's, so it is not read again.
       for (const std::shared_ptr<const FileRegion>& r : it->second) {
-        if (!r->guard || !macros_.contains(*r->guard)) continue;
+        // Not when skipping it again would say something (a diagnostic, a pragma).
+        if (!r->guard || !macros_.contains(*r->guard) || !r->diags.empty() || !r->passthrough.empty()) continue;
         auto empty = std::make_shared<FileRegion>();
         empty->file = file;
         empty->presumed = key.presumed;
@@ -304,8 +306,18 @@ private:
 
   std::shared_ptr<const FileRegion> finish(Frame& f) {
     FileRegion& r = f.out;
-    for (const lex::LexDiagnostic& d : f.lex_diags) r.diags.push_back({0, d.offset, d.kind, d.args});
+    for (const lex::LexDiagnostic& d : f.lex_diags) r.diags.push_back({0, d.offset, d.kind, d.args, 0, std::nullopt});
     std::ranges::stable_sort(r.diags, {}, &Diag::offset);
+    // The presumed locations of this occurrence ([cpp.line]).
+    if (!r.lines.empty()) {
+      for (Diag& d : r.diags) {
+        auto l = std::ranges::upper_bound(r.lines, d.offset, {}, &FileRegion::Line::at);
+        if (l == r.lines.begin()) continue;
+        --l;
+        d.presumed_line = static_cast<u32>(static_cast<std::int64_t>(physical_line(f, d.offset)) + l->delta);
+        d.presumed_name = l->name;
+      }
+    }
     std::vector<u32> names(f.touched.begin(), f.touched.end());
     std::ranges::sort(names);
     for (u32 n : names) {
@@ -398,18 +410,21 @@ private:
   // --- reading tokens --------------------------------------------------------------------------
 
   void report(Frame& f, u32 offset, lex::LexDiag kind, u64 a = 0, u64 b = 0) {
-    f.out.diags.push_back({0, offset, kind, {a, b}});
+    f.out.diags.push_back({0, offset, kind, {a, b}, 0, std::nullopt});
   }
   // At a token's site in the file: a replaced token is reported where its expansion began, but a
   // token written in a macro's argument where it is written.
-  void report(Frame& f, const PTok& at, lex::LexDiag kind, u64 a = 0, u64 b = 0) {
-    TokLoc l = at.loc;
+  void report(Frame& f, const PTok& at, lex::LexDiag kind, u64 a = 0, u64 b = 0) { report(f, written(f, at), kind, a, b); }
+  // Where a token is in the file: its site, but for a token written in a macro's argument where
+  // it is written.
+  static u32 written(const Frame& f, const PTok& t) {
+    TokLoc l = t.loc;
     while (l.expansion != 0) {
       const Expansion& e = f.out.expansions[l.expansion];
-      if (e.kind == ExpansionKind::argument && l.file == 0) return report(f, l.offset, kind, a, b);
+      if (e.kind == ExpansionKind::argument && l.file == 0) return l.offset;
       l = TokLoc{e.site_file, e.parent, e.site_offset};
     }
-    report(f, l.offset, kind, a, b);
+    return l.offset;
   }
   static u32 site(const Frame& f, const PTok& t) {
     TokLoc l = t.loc;
@@ -542,7 +557,9 @@ private:
       if (t.tok.kind != Tk::identifier || t.painted) return t;
       if (f.in_condition && (s_->spellings.name(t.tok.payload) == "defined" || condition_operator(t.tok.payload) != CondOp::none))
         return condition(f, t);
-      if (s_->spellings.name(t.tok.payload) == "_Pragma") {
+      // _Pragma is carried out on rescanning, not while an argument is replaced ([cpp.pragma.op]).
+      if (s_->spellings.name(t.tok.payload) == "_Pragma" && f.replacing_argument == 0) {
+        if (f.guard_stage != 1) f.guard_stage = -1;
         pragma_operator(f, t);
         continue;
       }
@@ -563,7 +580,7 @@ private:
           return t;
         }
         args = std::move(*a);
-        replace(f, t, *def, args, site(f, close) + 1);
+        replace(f, t, *def, args, written(f, close) + 1);
         continue;
       }
       replace(f, t, *def, args, 0);
@@ -753,7 +770,9 @@ private:
     if (!a.replaced) {
       std::vector<PTok> toks = a.raw;
       for (PTok& t : toks) t.loc.expansion = ae;
+      ++f.replacing_argument;
       a.replaced = expand_line(f, std::move(toks));
+      --f.replacing_argument;
       a.tag = ae;
       return *a.replaced;
     }
@@ -949,13 +968,14 @@ private:
       return;
     }
     std::string_view word = d.tok.kind == Tk::identifier ? s_->spellings.name(d.tok.payload) : std::string_view();
+    // The include guard: only `#ifndef X` first, and its `#endif` last, at the outermost level;
+    // any other directive there means the file is more than its guarded group.
+    if (f.conds.empty() && !(f.guard_stage == 0 && word == "ifndef") && f.guard_stage != 1) f.guard_stage = -1;
     if (word == "include") return include(f, d, IncludeForm{false, false});
     if (word == "include_next") return include(f, d, IncludeForm{false, true});
     if (word == "define") return define(f, d);
     if (word == "undef") return undef(f, d);
     if (word == "pragma") return pragma(f, intro, d);
-    // The include guard: only `#ifndef X` first, and its `#endif` last, at the outermost level.
-    if (f.conds.empty() && !(f.guard_stage == 0 && word == "ifndef") && f.guard_stage != 1) f.guard_stage = -1;
     if (word == "if" || word == "ifdef" || word == "ifndef") return cond_if(f, d, word);
     if (word == "elif" || word == "elifdef" || word == "elifndef" || word == "else" || word == "endif")
       return cond_else(f, d, word);
@@ -1029,10 +1049,19 @@ private:
     case line: {
       // The presumed line where the name's replacement ends: its own line, or that of the `)` of
       // the outermost invocation that produced it, as Clang has it.
+      // Walking out: a token written in an argument is on its own line; one a function-like
+      // macro's replacement produced, on the line of that invocation's `)`.
       u32 at = site(f, name);
       for (TokLoc l = name.loc; l.expansion != 0;) {
         const Expansion& x = f.out.expansions[l.expansion];
-        if (x.kind == ExpansionKind::function && x.operand_a != 0) at = std::max(at, x.operand_a - 1);
+        if (x.kind == ExpansionKind::argument && l.file == 0) {
+          at = l.offset;
+          break;
+        }
+        if (x.kind == ExpansionKind::function && x.operand_a != 0) {
+          at = x.operand_a - 1;
+          break;
+        }
         l = TokLoc{x.site_file, x.parent, x.site_offset};
       }
       text = std::to_string(static_cast<std::int64_t>(physical_line(f, at)) + f.line_delta);
@@ -1126,7 +1155,12 @@ private:
     const std::string* lit = str.tok.kind == Tk::string_lit ? &s_->spellings.literal(str.tok.payload).spelling : nullptr;
     if (open.tok.kind != Tk::l_paren || !lit || close.tok.kind != Tk::r_paren || !(lit->starts_with('"') || lit->starts_with("L\""))) {
       report(f, op, lex::LexDiag::pragma_operator_malformed);
-      if (close.tok.kind == Tk::eof) f.contexts.push_back(Context{{close}, 0, std::nullopt, false});
+      // What was read but is not the operand is read again.
+      std::vector<PTok> back;
+      if (open.tok.kind != Tk::l_paren) back = {open};
+      else if (!lit) back = {str};
+      else back = {close};
+      f.contexts.push_back(Context{std::move(back), 0, std::nullopt, false});
       return;
     }
     std::string_view body(*lit);
@@ -1212,8 +1246,11 @@ private:
         rest = k + 2;  // `module : private`
       } else if (name_part() && (k >= line.size() || line[k].tok.kind != Tk::colon || (++k, name_part()))) {
         rest = k;
-        // [cpp.module]/?: the name is followed by `;` or `[`, perhaps on a later line.
-        const PTok& after = k < line.size() ? line[k] : peek(f, 0);
+        // [cpp.module]: the name is followed by `;` or `[`, after replacement, perhaps on a later
+        // line.
+        std::vector<PTok> tail(line.begin() + std::ptrdiff_t(k), line.end());
+        std::vector<PTok> replaced = expand_line(f, tail);
+        const PTok& after = !replaced.empty() ? replaced[0] : peek(f, 0);
         if (after.tok.kind != Tk::semi && after.tok.kind != Tk::l_square) report(f, after, lex::LexDiag::module_name_end);
       } else {
         report(f, k < line.size() ? line[k] : line.back(), lex::LexDiag::module_name_end);

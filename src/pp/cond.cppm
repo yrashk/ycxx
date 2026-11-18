@@ -157,6 +157,11 @@ private:
     case Tk::l_paren: {
       ++pos_;
       auto v = conditional(live);
+      // `( expression )`: a comma expression has the value of its last operand.
+      while (v && at(Tk::comma)) {
+        ++pos_;
+        v = conditional(live);
+      }
       if (!v) return std::nullopt;
       if (!at(Tk::r_paren)) return fail(last(), lex::LexDiag::cond_expected_rparen);
       ++pos_;

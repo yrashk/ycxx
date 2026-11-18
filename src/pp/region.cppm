@@ -151,6 +151,10 @@ struct Diag {
   u32 offset = 0;
   lex::LexDiag kind{};
   std::array<u64, 2> args{};
+  // After a #line ([cpp.line]): the presumed line, and the presumed name (a `Spellings` id) if
+  // the #line gave one; 0 when there was none.
+  u32 presumed_line = 0;
+  std::optional<u32> presumed_name;
   bool operator==(const Diag&) const = default;
 };
 

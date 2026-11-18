@@ -151,7 +151,7 @@ engine::query_task<FrontResult> TuFront::run(engine::Ctx& cx, TuId tu) {
     if (d.at.item != lex::file_level) {
       std::uint16_t f = static_cast<std::uint16_t>(lex::file_level - d.at.item);
       pp::Message pm = pp::message(pp::session(), pp::session().files.id(region.files[f]), region.file_names[f],
-                                   pp::Diag{f, d.at.offset, *kind, {}});
+                                   pp::Diag{f, d.at.offset, *kind, {}, 0, std::nullopt});
       m.where = std::format("{}:{}:{}", pm.file, pm.line, pm.column);
     }
     out.messages.push_back(std::move(m));

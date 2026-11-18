@@ -51,8 +51,7 @@ struct Message {
   bool error = true;
   std::string text;
 };
-// `lines`: the file's #line directives ([cpp.line]), by offset.
-Message message(Session& s, FileId file, std::string_view presumed, const Diag& d, std::span<const FileRegion::Line> lines = {});
+Message message(Session& s, FileId file, std::string_view presumed, const Diag& d);
 
 // `-E`: the text Clang's `-E` would print, and the diagnostics.
 std::pair<std::string, std::vector<Message>> preprocess_to_text(Session& s, std::string_view text, std::string_view path);
@@ -129,7 +128,7 @@ Preprocessed preprocess(Session& s, std::string_view text, std::string_view path
 
 Preprocessed preprocess(std::string_view text, std::string_view path) { return preprocess(session(), text, path); }
 
-Message message(Session& s, FileId file, std::string_view presumed, const Diag& d, std::span<const FileRegion::Line> lines) {
+Message message(Session& s, FileId file, std::string_view presumed, const Diag& d) {
   const Files::Content* c = s.files.content(file);
   std::vector<u32> starts = line_starts(c ? std::string_view(c->text) : std::string_view());
   auto at = std::ranges::upper_bound(starts, d.offset);
@@ -139,12 +138,9 @@ Message message(Session& s, FileId file, std::string_view presumed, const Diag& 
     text = s.spellings.name(static_cast<u32>(d.args[0]));
   u32 line = static_cast<u32>(at - starts.begin());
   std::string name(presumed);
-  // [cpp.line]: the presumed line and name from the last #line before the offset.
-  for (const FileRegion::Line& l : lines) {
-    if (l.at > d.offset) break;
-    line = static_cast<u32>(static_cast<std::int64_t>(at - starts.begin()) + l.delta);
-    if (l.name) name = s.spellings.name(*l.name);
-  }
+  // [cpp.line]: the presumed line and name its region resolved.
+  if (d.presumed_line != 0) line = d.presumed_line;
+  if (d.presumed_name) name = s.spellings.name(*d.presumed_name);
   return Message{std::move(name), line, d.offset - *(at - 1) + 1, lex::message_of(d.kind).severity == lex::Severity::error,
                  std::move(text)};
 }
@@ -157,7 +153,7 @@ std::pair<std::string, std::vector<Message>> preprocess_to_text(Session& s, std:
   std::vector<Message> msgs;
   // Phases 1–4 only: -E stops before phases 5–6 ([lex.phases]).
   for (const auto& [at, d] : flat.diags)
-    msgs.push_back(message(s, flat.files[d.file], s.spellings.name(flat.file_names[d.file]), d, flat.lines[d.file]));
+    msgs.push_back(message(s, flat.files[d.file], s.spellings.name(flat.file_names[d.file]), d));
   return {std::move(out), std::move(msgs)};
 }
 

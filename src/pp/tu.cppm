@@ -30,8 +30,6 @@ struct Flat {
     u32 end = 0;
   };
   std::vector<Continuation> continuations;
-  // Per file of the table, its #line directives (of its first occurrence that has any).
-  std::vector<std::vector<FileRegion::Line>> lines;
   FileId main{};
 };
 
@@ -59,11 +57,6 @@ public:
   void first(const FileRegion& r) { file(r.files[0], r.file_names[0]); }
 
   void add(const FileRegion& r, const Bindings& bound) {
-    if (!r.lines.empty()) {
-      u16 own = file(r.files[0], r.file_names[0]);
-      if (out_->lines.size() <= own) out_->lines.resize(own + 1u);
-      if (out_->lines[own].empty()) out_->lines[own] = r.lines;
-    }
     // The region's files in the TU's table, added when first used.
     std::vector<std::optional<u16>> local(r.files.size());
     auto files = [&](u16 i) {
@@ -180,7 +173,6 @@ Flat flatten(Session& s, const Tree& t) {
   // The command line's diagnostics come first, as it is preprocessed first.
   if (t.builtins && (!t.builtins->diags.empty() || !t.builtins->tokens.empty())) fl.add(*t.builtins, fl.root(t.builtins_bindings));
   if (t.main) fl.add(*t.main, fl.root(t.main_bindings));
-  out.lines.resize(out.files.size());  // every file has its (perhaps empty) #line table
   return out;
 }
 
@@ -197,7 +189,7 @@ Preprocessed to_region(Session& s, const Flat& flat) {
   const std::vector<PTok>& pp = flat.tokens;
   auto report_at = [&](std::size_t i) {
     return [&, i](u32 offset, lex::LexDiag d, u64 a, u64 b) {
-      diags.emplace_back(u64(i) * 2 + 1, Diag{pp[i].loc.file, pp[i].loc.offset + offset, d, {a, b}});
+      diags.emplace_back(u64(i) * 2 + 1, Diag{pp[i].loc.file, pp[i].loc.offset + offset, d, {a, b}, 0, std::nullopt});
     };
   };
   auto literal = [&](u32 id) {
@@ -407,11 +399,9 @@ std::string print(Session& s, const Flat& flat) {
     TokLoc at = site(t.loc);
     auto [line, column] = line_of(at.file, at.offset);
     if (directive_start) {
-      move_to(at.file, line);
-      if (!line_empty) {
-        out += '\n';
-        ++cur_line;
-      }
+      // A directive starts its own line; in the middle of one (a _Pragma), as Clang prints it,
+      // after a marker for the same line.
+      if (!line_empty || static_cast<int>(at.file) != cur_file || line != cur_line) marker(at.file, line);
     } else if (static_cast<int>(at.file) == cur_file && line > cur_line && line <= cont_line) {
       // Still on the line of an invocation that ended on a later line, as Clang prints it.
     } else if (static_cast<int>(at.file) != cur_file || line != cur_line) {
