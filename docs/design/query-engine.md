@@ -26,7 +26,9 @@ Sources, per DECISIONS §2: the C++26 working draft (cited by stable clause name
 and published work on incremental computation: salsa's red–green validation and durability as
 publicly described, Adapton, Mokhov, Mitchell and Peyton Jones, *Build Systems à la Carte*
 (ICFP 2018), Roslyn's red–green trees, Blumofe–Leiserson work stealing and the Chase–Lev deque.
-No compiler's source code or design documents were consulted. The issue's prior-art list also
+No compiler's source code or design documents were consulted. The GCC 16.2 feature probes behind §A10.4 were
+compiled in a scratch directory against libstdc++; only their accept/reject and run results were
+used (DECISIONS §2.3). The issue's prior-art list also
 names Zig's incremental compilation writeups; DECISIONS §2.2 forbids design documents of Zig's
 compiler, so they were not read.
 
@@ -39,8 +41,8 @@ the review, the spike and the synthesis were done by the Opus session that owns 
 - **Part B (the C++ layer)** was drafted by a second Fable subagent: items and identities,
   program points, lookup, ADL, overload resolution, templates, constant evaluation, the
   preprocessor, granularity and soundness.
-- **Review rounds.** The Opus session reviewed both drafts and sent three rounds of pushback. Each
-  changed the design:
+- **Review rounds.** The Opus session reviewed both drafts and sent six rounds of pushback or
+  revision requests. Each changed the design:
   1. Validation originally short-circuited within a dependency group. That would make the set of
      cells verified at a revision depend on scheduling. Now every member of a group is verified;
      this costs nothing, because the re-execution would fetch the same group anyway (§A1.5).
@@ -57,6 +59,21 @@ the review, the spike and the synthesis were done by the Opus session that owns 
      per index, and divergence became the derived query `odr_report` (§A1.9). Part B was then
      updated to that contract by its author, who also corrected two of its own claims (§B6.2,
      §B6.6).
+  4. DECISIONS §3.2–3.3 then made coroutines, `std::execution`, concepts, reflection, contracts
+     and modules mandatory, with GCC 16.2 as the bootstrap compiler. The first draft of Part A had
+     rejected senders inside the engine, so Part A's Fable agent redesigned concurrency,
+     cancellation and the API on coroutines and senders, and probed GCC 16.2 (§A3, §A4, §A10).
+  5. An independent review of the assembled document found four P0s, among them:
+     - a tree id that ignored macro deltas;
+     - TU-specific internal-linkage entity ids inside shared results;
+     - "required from here" tags that were lost on trie hits;
+     - no defined point of first demand.
+
+     It also found fifteen P1s. Each part's Fable author fixed its own findings. Part B chose to
+     carry demand lists in values, and Part A adopted them in place of edge tags.
+  6. Part B's first fix for the point of first demand rejected some well-formed programs: those
+     whose class template specialization would differ at a later site. On pushback it adopted the
+     conforming rule, pinning the first instantiation (§B6.2).
 - **Part C (the spike)**, §1 (decisions in brief), Part D (constraints on other designs) and
   Part E (open items and follow-ups) were written by the Opus session.
 
@@ -72,14 +89,16 @@ the review, the spike and the synthesis were done by the Opus session that owns 
 2. **Contextual queries.** A header's analysis, an instantiation or a constant evaluation is
    computed in a context: what precedes it in some TU. The context is a `Prefix`, an interned,
    content-addressed description of everything textually before the point. A demanded
-   `(index, prefix)` is an ordinary red/green *selection cell*. When it must execute, it first
+   `(index, ctx)` is an ordinary red/green *selection cell*, where `ctx = (prefix, pinned,
+   evaluating)`. Only the prefix is abstracted by the trie; the other two parts are ordinary key
+   data and are empty in ordinary demands. When it must execute, it first
    walks a per-index trie of recorded traces (*verifying traces*), and reuses any result whose
    questions get the same answers at this prefix. At most one leaf can match, so selection never
    depends on history. Results are shared across TUs exactly where every question they asked
    agrees, not only where preambles are identical. (§A1.9, §B1.4)
 3. **Identity without positions.** The preprocessed token stream is cut into *items* before
-   parsing. An item's id comes from its scope path, its declaration-part tokens and an ordinal
-   among identical siblings, never from where it sits or from its body. Positions are
+   parsing. An item's id comes from its file identity, its scope path, its declaration-part tokens
+   and an ordinal among identical siblings, never from where it sits or from its body. Positions are
    `(item, offset)`. Two levels of identity:
    - Declaration ids are what lookup returns.
    - Structural entity ids key class definitions, layouts, IR, instantiations and ODR checks.
@@ -96,31 +115,52 @@ the review, the spike and the synthesis were done by the Opus session that owns 
    Adding a declaration changes only the answers that concern its name, in its scope, after its
    position. (§B2–§B5, §B7–§B9)
 5. **Overload resolution** is memoized by the call's observable inputs: the exact candidate
-   declaration set, argument shapes and kind of call. Identical call shapes share one entry
-   program-wide. A new overload re-analyses only bodies that looked up its name, and only bodies
+   declaration set, argument shapes and kind of call. Identical call shapes walk to one
+   trie leaf program-wide. A new overload re-analyses only bodies that looked up its name, and only bodies
    whose chosen candidate changed propagate further. (§B5)
 6. **Templates.**
    - Function template definitions are instantiated in the end-of-TU context.
-   - Class and variable templates, and concept satisfaction, are instantiated at first demand.
-   - Specialization selection uses the TU-wide set.
+   - Class and variable templates, and concept satisfaction, are instantiated at the demanding
+     site's own prefix. Specialization selection uses the instantiating computation's own prefix.
+   - Each selection cell's value carries the list of instantiations it demanded, so `tu(TU)` can
+     build, in source order, a table of first demands.
+   - When a later site's class template specialization would differ from the first one,
+     `tu(TU)` re-analyses that site with the first instantiation *pinned*. That reuses it, as
+     [temp.point]/7 requires, and costs nothing for programs whose meaning is order-independent.
 
-   The "must mean the same at every point" rules, which are ill-formed with no diagnostic
-   required, are *diagnosed*: a selected trace is re-verified at the other point. Divergence
-   across TUs comes out of `odr_report`. (§B6, §B10)
+   The rules that a specialization must mean the same at every point, which are ill-formed with no
+   diagnostic required (variable templates, satisfaction, specializations declared after a use),
+   are *diagnosed* by comparing against END or the first demand. Divergence across TUs is
+   reported by `odr_report`, a derived query over what each TU selected. (§B6, §B10)
 7. **Cycles are internal errors, never recovered.** Every "in progress" situation in C++
    (completeness, deduced return types, mutually referential constant initializers) is a
    position comparison or an explicit key argument. Cycles are detected on a wait-for graph and
    reported deterministically. (§A2)
-8. **Concurrency.** ycxx has its own fork-join pool on Chase–Lev deques with interactive and
-   background priorities. A joining worker runs only its own join's tasks, and blocking is
-   compensated by spare threads. `std::execution` appears only at the daemon's edges. (§A3)
-9. **Cancellation is cooperative, and revisions advance only at quiescence.** Every completed
-   cell survives a cancelled request; nothing half-computed is ever stored. (§A4)
+8. **Concurrency on coroutines and senders.**
+   - Query executions are coroutines (`query_task`), and a cell's future is a `std::execution`
+     sender (`cell_sender`).
+   - The pool is a `std::execution` scheduler that also backs `parallel_scheduler`. It has two
+     priorities, interactive and background.
+   - A frame that has to wait suspends and frees its worker. Completions enqueue continuations
+     rather than resuming them inline, so stacks never nest and no thread ever blocks.
+   - `cheap` kinds, the question queries, are synchronous functions that may fetch only inputs and
+     other cheap kinds. That keeps the hit path at about 100 ns with no allocation.
+   (§A3)
+9. **Cancellation uses stop tokens, and revisions advance only at quiescence.**
+   - Each root request owns a stop source.
+   - Once a stop is requested, `fetch` completes as stopped instead of suspending, and a stopped
+     await destroys its frame without resuming it.
+   - The daemon joins the roots' `counting_scope` before it writes inputs.
+   - Every completed cell survives a cancelled request. Nothing half-computed is ever stored, and
+     no exception is involved.
+   (§A4)
 10. **Determinism.**
     - Every order that reaches an output comes from stable keys.
     - Parallel results are positional.
-    - Diagnostics are values: only errors that hold in every context are emitted as
-      diagnostics, and they are sorted and deduplicated after the fact.
+    - Diagnostics are values with locations of the form `Loc = (item, offset)`. Only errors that
+      hold in every context are diagnostics; everything context-dependent is part of a value.
+    - `tu(TU)` renders and orders the diagnostics, and attaches "required from here" chains from
+      demand lists. The driver merges diagnostics across TUs on the rendered location.
     - A banned list covers pointer order, unordered iteration, `std::hash`, thread ids and
       clocks.
     (§A5, §A1.7)
@@ -142,6 +182,15 @@ the review, the spike and the synthesis were done by the Opus session that owns 
 
     The spike shows the approach working, including catching a deliberately missed dependency.
     (§A9, §B12, Part C)
+14. **The engine is written in modern C++, as DECISIONS §3.2 requires.**
+    - Concepts constrain query kinds, keys and values.
+    - Reflection derives hashing, equality, fingerprints and cache serialization.
+    - Annotations declare query traits.
+    - Contracts state the engine's invariants.
+    - Modules give the code layout.
+
+    Probes compiled with GCC 16.2 (§A10.4) found no `// BOOTSTRAP:` workaround needed, with
+    `std::execution` taken from libycxx. (§A10)
 
 ## Part A. The engine
 
@@ -163,14 +212,14 @@ world it learns through `cx.fetch`. There is no other channel: no globals, no am
 reading the file system. The API makes this physically hard (a query receives a `Ctx&` and its
 key, nothing else) and review makes it a P0 defect.
 
-Two flavours of derived query, chosen per kind by the dependency design:
+Three flavours of derived query, chosen per kind by the dependency design:
 
 - **Memoized** (the default): has an entry in the memo table, its own dependency list, its own
   value and fingerprint. This is what gives early cutoff.
 - **Transparent**: not memoized. Its fetches are recorded into the *caller's* dependency list, as
   if the caller had made them. Use it for helpers that are called once per caller and would only
   bloat the table. A transparent query cannot act as a firewall; a memoized one can.
-- **Contextual** (§A1.9): memoized, with a key `(index, prefix)`, whose execution first tries to
+- **Contextual** (§A1.9): memoized, with a key `(index, ctx)`, whose execution first tries to
   select an already computed result whose recorded trace verifies at this prefix. This is how
   header analyses, instantiations and constant evaluations are shared across translation units.
 
@@ -185,10 +234,10 @@ values: integers, interned handles, small tuples of those. Requirements:
   carries a Merkle fingerprint computed from its content and its children's fingerprints at
   interning time. A key's fingerprint is the hash of its kind id and its arguments' fingerprints.
   This is what goes to disk (§A7); in memory, keys are compared by handle and hashed by handle hash.
-- **Small**: a key should fit in 32 bytes. `decls_named(scope, name)` is two 32-bit handles. Large
+- **Small**: a key should fit in 32 bytes. `visible_decls(S, name, prefix)` is three 32-bit handles. Large
   arguments (a token sequence, a macro environment) are interned first and passed by handle.
 
-Negative results are ordinary values. `decls_named` returning an empty list is an entry like any
+Negative results are ordinary values. `visible_decls` returning an empty list is an entry like any
 other, and it is the entry that gets invalidated when a declaration with that name appears.
 
 #### A1.3 Values
@@ -223,8 +272,8 @@ useful part of that at one byte per entry).
 
 #### A1.5 Red–green validation with early cutoff
 
-Dependencies are stored as an ordered list of groups, each group an ordered list of cell ids (§A3.3).
-Program order, not completion order (§A3.4). The validation algorithm, per entry:
+Dependencies are stored as an ordered list of groups, each group an ordered list of cell ids (§A3.6).
+Program order, not completion order (§A3.7). The validation algorithm, per entry:
 
 ```
 maybe_changed_after(cell, since, R) -> bool:        # "has this value changed since revision `since`?"
@@ -293,17 +342,20 @@ Running / Validating ──abort (cancel, ICE)──▶ Empty / Done(old)     # 
 The state word is one 64-bit atomic: 2 bits of state, 30 bits of owner frame id, 32 bits of
 `verified_at`. Claims are a CAS. A frame that loses the claim waits (§A3.1). Publication is
 release-store of the state word after the value is written; readers acquire-load the state, then
-read the value. Because an entry's storage is never reused within a revision (§A3.3), there is no
+read the value. Because an entry's storage is never reused within a revision (§A3.6), there is no
 ABA on the claim word.
 
 #### A1.7 Diagnostics are values
 
 A query reports a diagnostic with `cx.diag(...)`. The engine appends it to the executing frame's
 list, and the list is stored with the entry as part of its output, fingerprinted with the value.
-A diagnostic is a value: `(stable_location, id, args)`, where `stable_location` is
-`(item id, offset)` (§B2), turned into a file and line only when rendered. It contains no pointers, no text and no context chain;
-rendering, `-W` filtering and context are later, pure steps. Diagnostics are stored unfiltered, so
-changing warning flags changes the report without invalidating a single cell.
+A diagnostic is a value: `(Loc, id, args)`, where `Loc = (item id, offset)` (§B2) is a function of
+the item's own content, shared across TUs and prefixes. A `Loc` is neither renderable nor an
+ordering key by itself: `tu(TU)` turns it into `(file, line, column, include chain)` from the TU's
+ordered item sequence, and orders by item order in the TU, then offset (§A5.2). A diagnostic
+contains no pointers, no text and no context chain; rendering, `-W` filtering, ordering and chains
+are later, pure steps. Diagnostics are stored unfiltered, so changing warning flags changes the
+report without invalidating a single cell.
 
 **What may be a diagnostic.** `cx.diag` is only for a diagnostic that is correct in *every*
 context that can reach the cell: the cell's key alone determines that the program is ill-formed
@@ -325,38 +377,43 @@ already draws between values and errors.
 
 **Collection.** `diags_of(cell)` = the entry's own diagnostics followed by, for each dependency in
 program order, `diags_of(dep)`, memoized, pruned by a `has_diags` bit that is the OR over the
-subgraph (the millions of entries with nothing to say cost one bit each). `tu_diagnostics(tu)` is
-`diags_of(root cell of the TU)`, deduplicated as §A5.2 says. A header's error appears in each TU
-that includes it, which is correct C++, and the build-level report deduplicates across TUs.
+subgraph (the millions of entries with nothing to say cost one bit each), and **not descending
+into `demanded` kinds** (below). `tu_diagnostics(TU)` is a separate kind (§A10.3): it fetches
+`diags_of` of the TU's analysis cell (a cell fetching `diags_of` of itself would be a cycle,
+§A2.1), adds the diagnostics of the cells the TU demanded with their chains, renders and orders
+(§A5.2). A header's error appears in each TU that includes it, which is correct C++, and the
+driver merges the copies.
 
 **Context ("required from here").** Instantiation keys exclude the demanding TU (Part D), so the
-chain of requests cannot live in the instantiation's own stored diagnostics. It lives on the
-*edges*: a fetch may carry a context tag, `cx.fetch<Q>(key, cx.at(pos))`, meaning "this cell was
-demanded from position `pos` of the fetching cell"; the dependency design uses it for
-instantiation requests and for the other places a sequential compiler prints a "required from"
-note. `diags_of(parent)` wraps each child's collected diagnostics with `(child key, pos)` when the
-edge is tagged, and passes them through unchanged otherwise. Each level adds one frame, so the
-chain accumulates on the way up to the TU root while `diags_of(child)` stays context-free and
-shared. Tagged edges are rare, so they are kept in a per-cell side list and untagged edges stay
-four bytes.
+chain of requests cannot live in the instantiation's own diagnostics. It does not live on
+dependency edges either: an edge is not a value, so a tag on it would be absent from a trie hit
+and from a restarted daemon, and the report would differ between a leaf that was computed and one
+that was selected. It lives in **demand lists** (§B1.4). A kind whose cells are *demanded*
+(`instantiate_*`, `satisfies`, `constant_value`; the `demanded` trait, §A10.1) is fetched with
+`cx.demand<Q>(key, loc)`, never with `fetch`; the engine appends `(index, loc, selected fp)` to the
+frame's demand list, which is part of the cell's value, fingerprinted with it and persisted with
+the leaf. `tu(TU)` traverses the demand lists from its items in source order, builds its
+first-demand table (§B6.2), and attaches each demanded cell's `diags_of` to the chain of request
+positions leading to its first demand in that TU. The chain is a function of values alone: the
+same whether the leaf was computed here or selected from the trie, and the same after a restart.
 
-A consequence: an error inside `X<int>` requested from 500 sites in one TU would collect 500 times
-with 500 chains. A sequential compiler reports it once, at the first point of instantiation; so
-do we, by the deduplication rule in §A5.2, which keeps the lexicographically smallest chain. Fatal
-errors are values too: a query that hits one returns a value saying "stopped here", and its
-consumers decide what to skip; nothing throws across query boundaries except engine control flow
-(§A4.3, §A2.3).
+A consequence: an error inside `X<int>` requested from 500 sites in one TU is reported once, at
+the first demand in that TU's source order, which is what a sequential compiler's point of
+instantiation gives; the copies other TUs produce are merged by the driver (§A5.2). Fatal errors
+are values too: a query that hits one returns a value saying "stopped here", and its consumers
+decide what to skip; nothing throws across query boundaries (§A4.3, §A2.3).
 
 Rejected: a global diagnostic sink. It makes diagnostics an effect, so an entry replayed from
 memo would not re-emit them, and ordering would follow completion.
 
 #### A1.8 Firewalls and projections
 
-A projection like `decls_named(scope, name)` built on top of `scope_members(scope)` needs no
-special status: it is a memoized query whose re-execution is cheap and whose fingerprint usually
+A projection (illustratively `decls_named(scope, name)` over `scope_members(scope)`; Part B's real
+question is `visible_decls(S, name, prefix)`, §B2) needs no special status: it is a memoized query whose re-execution is cheap and whose fingerprint usually
 does not change, so the propagation stops at it. The engine offers two hints, both about cost, not
-semantics: `cheap` (never spawned as a separate task in `par_fetch`, always run inline, value
-evicted last) and `transparent` (§A1.1). The dependency design decides, per kind, which to use. The
+semantics: `cheap` (a synchronous plain function, never a coroutine: it may fetch only inputs and
+other `cheap` kinds, never waits, is computed again rather than awaited when another frame is
+already computing it, and its value is never evicted, §A6.2; §A3.3) and `transparent` (§A1.1). The dependency design decides, per kind, which to use. The
 engine's job is to make a memoized fetch cost about a hundred nanoseconds on a hit: hash two
 handles, probe one shard, one acquire load, push one `u32` onto the frame's dependency list.
 
@@ -388,14 +445,15 @@ answer from the prefix's item lists and the region indexes, with no TU anywhere 
 Why this matters more than it looks: with `(TU, position)` in the key, every header item demanded
 by 500 TUs would have 500 selection cells and 500 copies of each question cell. A TU that includes
 the standard library has about 10^5 items; at five questions each that is 2.5×10^8 question cells
-plus 5×10^7 selection cells across 500 TUs, 15–20 GB at the cell sizes of §A3.3, and 500 trace
+plus 5×10^7 selection cells across 500 TUs, 15–20 GB at the cell sizes of §A3.6, and 500 trace
 verifications per item on every header edit. With prefixes, an item has as many selection cells as
 there are distinct include orders leading to it, typically tens, so the same program is on the
 order of 10^7 cells, under a gigabyte, and a header edit verifies each item once per distinct
-prefix. "Context equivalence by slot-prefix digest" is therefore not a verification shortcut
+prefix. "Context equivalence by prefix digest" is therefore not a verification shortcut
 bolted onto TU-keyed cells; it *is* the key.
 
-**Selection cells.** A contextual query is an ordinary query kind with `Key = (Index, Prefix)` and
+**Selection cells.** A contextual query is an ordinary query kind with `Key = (Index, Ctx)` where `Ctx = (prefix, pinned, evaluating)` (§B1.4; only the prefix is
+abstracted, see below) and
 the `contextual` trait. The cell for `(index, prefix)` is a **selection cell**: a red/green cell
 like any other, whose value is the selected shared result (a handle) and its diagnostics, and
 whose dependencies are the selected result's trace instantiated at this prefix. Early cutoff,
@@ -404,25 +462,27 @@ engine never sees anything but a cell with dependencies and a value. What is spe
 it *executes*:
 
 ```
-execute(sel(index, prefix)):
-  node = trie[index].root
+execute(sel(index, ctx)):                       # ctx = (prefix, pinned, evaluating)
+  node = trie[index, ctx.pinned, ctx.evaluating].root   # one trie per index part; the prefix is what varies
   loop:
     if node is a leaf:                          # every question on the path answered as recorded
-        record deps = path questions @prefix;  return (node.result, node.diags)
+        record deps = path elements @prefix;  return (node.result, node.diags)
     answers = par_map(node.questions, q -> fp(fetch(q @prefix)))   # one trie node = one dep group
     edge = node.edges[answers]
     if edge missing:
         claim node for computing (others arriving here wait, then re-walk)
-        (value, diags, trace) = run(index, prefix)            # ordinary tracked execution
+        (value, diags, trace) = run(index, ctx)               # ordinary tracked execution
         assert trace starts with the path to node             # determinism detector (debug: ICE)
-        trie[index].insert(trace with prefix abstracted, value, diags);  release
+        trie[index, ctx.pinned, ctx.evaluating].insert(trace with prefix abstracted, value, diags);  release
         return (value, diags)
     node = edge.target
 ```
 
 The **trace** is the computation's complete dependency list in program order, groups included:
-contextual questions *and* context-free dependencies (region indexes by content hash, pure
-matchers, body tokens). Each element is `(key pattern, answer fingerprint)`, where a key pattern is
+the question cells it asked at its prefix *and* its context-free dependencies, which have stable
+ids: `body_tokens(item)`, `item_tokens(item)`, pure matchers, other selection cells. A trace never
+names a content-hashed syntactic index (§B1.3); those are reached only inside question cells, and
+what the trace records is the question's answer. Each element is `(key pattern, answer fingerprint)`, where a key pattern is
 the dependency's key with the cell's own prefix replaced by a placeholder; context-free keys have no
 placeholder. Including context-free dependencies is what makes the trace a *sufficient* set: a
 body edit changes `body_tokens(item)`, the leaf stops verifying, and no stale result can be
@@ -435,6 +495,24 @@ result is a function of the answers along its path, because the computation is d
 reads nothing except through recorded fetches; the answers to questions of other, rejected paths
 cannot change which result is correct.
 
+**The context has three parts; the trie abstracts one.** `Ctx = (prefix, pinned, evaluating)`
+(§B1.4). `pinned` (a sorted map `spec → Ctx` naming the cell in which this TU first instantiated a
+class template specialization, §B6.2) and `evaluating` (the constant-evaluation chain, §B7) are
+ordinary key data: with the entity they form the *index part*, so there is one trie per
+`(index, pinned, evaluating)`, and the one-leaf argument below applies to each unchanged. They are
+empty in every ordinary demand, so in the common case the extra parts cost two zero handles per
+key. Engine conditions for this to work: both maps are interned handles, so a key stays within 32
+bytes (§A1.2); the prefixes *inside* a pin are not the frame's own prefix and sit inside an opaque
+handle, so the abstraction rule (replace `[[=context]]` members equal to the frame's own prefix,
+§A10.1) leaves them alone, which is right because a pin names a specific cell; a pinned fetch,
+`instantiate_class(S, ctx.pinned[S])`, is therefore an ordinary stable-id dependency, verified by
+fingerprint in the trace, kept alive by the dependency for garbage collection (§A6.2), persisted by
+fingerprint (§A7.1), and walked by the wait-for graph like any other, so a pin that led back to the
+pinning cell would be reported as a cycle rather than hang; the engine adds the contract
+`pre(S ∉ ctx.pinned[S].pinned)` on `demand`. Cells with a non-empty `pinned` carry a TU-specific
+context and are never shared across TUs, which is intended: they exist only to repair a divergence
+`tu(TU)` found in that TU, under its source-ordered re-fetch loop (§B6.2).
+
 **Why at most one leaf matches.** A deterministic computation asks the same first question group
 in every context; each later group is a function of the answers so far. So the traces of one index
 form a decision tree over answer fingerprints, a prefix follows exactly one path, and two leaves
@@ -445,7 +523,7 @@ does not follow the existing path up to its divergence point has read something 
 nondeterministic, which the `assert` above reports. The argument needs three things, all already
 required elsewhere: completeness of traces (above); determinism and no untracked reads (§A1.1,
 §A5.1); and results that mention nothing context-specific (declaration and entity ids, item-relative
-positions, never a TU or a slot; Part D). Its residual risks are the fingerprint collision of §A1.5
+positions, never a TU or a prefix; Part D). Its residual risks are the fingerprint collision of §A1.5
 (the same 2^-65, with the same effect: a wrong reuse) and nothing else. Cancellation cannot leave a
 partial leaf because a leaf is inserted by the ordinary store step, which never runs for an
 unwound frame (§A4.3). A non-contextual dependency whose value changed between revisions is a trace
@@ -475,9 +553,9 @@ two selection cells fetched by `tu(TU)` and compared; nothing new. The trie's sh
 pure cache: it can be emptied at any time without changing any output.
 
 **Churn under edits.** An edit at item `k` of a region leaves the prefixes of items before `k`
-unchanged (their question cells re-execute in O(1) because the region index keys changed, and cut
-off) and gives new prefixes to items at or after `k` in that region and to everything included
-after them in the TU. Those items get *new* selection cells, each executing as a trie walk: one
+unchanged, and with them the hash-consed item lists their question cells read, so nothing of
+theirs re-executes; it gives new prefixes to items at or after `k` in that region and to
+everything included after them in the TU. Those items get *new* selection cells, each executing as a trie walk: one
 O(1) question fetch per trace element, shared by every TU with the same new prefix; the old cells
 become garbage. The END prefix changes on any edit to the TU, so every END-context cell of that TU
 re-walks; at ~10^4–10^5 instantiations per TU with ~10 questions each this is tens of milliseconds,
@@ -542,29 +620,34 @@ and it must be reported in a way that lets someone fix the compiler.
 
 #### A2.2 Detection across threads
 
-Every executing query is a **frame**: `{cell, parent frame, root request, path index in parent's
-group, waiting_on}`. A frame can be waiting on a cell in three ways: a blocked fetch on a cell
-that another frame is executing or validating; an inline child execution (the parent is waiting
-on the child's cell until it returns); and a join on a parallel group whose stolen members are
-still running (waiting on each outstanding member's cell). Together with each cell's owner frame,
-this is a wait-for graph.
+Every executing query is a **frame**: the coroutine frame of its `query_task` (§A3.1), whose
+promise holds `{cell, parent frame, root request, path index in parent's group, waiting_on}`.
+A frame is never a thread; it is suspended whenever it waits. It can wait on a cell in three ways:
+a fetch of a cell that another frame is executing or validating; a child execution it started by
+symmetric transfer (the parent waits on the child's cell until the child completes); and a
+parallel group whose members are still running (waiting on each incomplete member's cell).
+Together with each cell's owner frame, this is a wait-for graph.
 
-When frame `F` is about to block on cell `c` owned by frame `G`, it takes the engine's single
+When frame `F` is about to suspend on cell `c` owned by frame `G`, it takes the engine's single
 **wait mutex**, records `F.waiting_on = c`, and walks: `G`, then whatever `G` waits on, and so on.
-If the walk reaches `F`, there is a cycle; otherwise `F` parks. The mutex is taken only when a
-frame blocks or is woken, which is rare relative to fetches (it happens when two frames want the
-same not-yet-computed entry at the same time). Inline-child and join edges are written by the
-owning thread with release stores; they are consistent for the walk because a cell's owner does
-not change while it is `Running` within a revision, and a finished cell has no owner, which ends
-the walk. The old parent-chain walk is the special case where every edge is an inline-child edge.
+If the walk reaches `F`, there is a cycle; otherwise `F` suspends. The mutex is taken only when a
+frame suspends on a foreign cell or is resumed from one, which is rare relative to fetches (it
+happens when two frames want the same not-yet-computed entry at the same time). Child and group
+edges are written by the owning frame with release stores before the child starts; they are
+consistent for the walk because a cell's owner does not change while it is `Running` within a
+revision, and a finished cell has no owner, which ends the walk. A frame waiting for another frame's claim on a trie node (§A1.9) is an edge of the same
+kind, with the node's claimant as owner, so node claims and cell claims are walked alike. Since
+frames are not threads, the walk is the same whether the frames involved sit on one worker or on
+twenty.
 
 #### A2.3 Deterministic reporting
 
 On detection, the detecting frame computes the set of cells on the cycle and sorts their keys by
 `(kind id, key fingerprint)`. The ICE is `"internal error: query cycle"` with that sorted list,
 and, as a note, the program-order path from the detecting frame's root. Every frame on the cycle
-is unwound with `CycleUnwind`, their cells reset to `Empty` (nothing is stored), and the exception
-propagates to the root request, which fails. Because the sorted set depends only on the cycle and
+is completed through its `set_error` channel with the cycle report, which destroys its frame
+(nothing is stored) and resets its cell to `Empty`; the error propagates through each awaiting
+parent the same way to the root request, which fails. Because the sorted set depends only on the cycle and
 not on which member was entered or which thread found it, the same cycle always prints the same
 message. When a strongly connected component contains several cycles, parallel runs may find
 different ones; since this is an ICE in any case, the canonical report is defined as the one a
@@ -577,11 +660,11 @@ flag is either a position comparison or an explicit key argument.**
 
 - **Class completeness.** `struct S { static constexpr int n = sizeof(S); };` is ill-formed because
   `S` is incomplete at that point; it is not a cycle. Completeness is positional:
-  `is_complete_at(S, pos)` is true after the closing brace and inside complete-class contexts
-  (member function bodies, default arguments, default member initializers, noexcept-specifiers).
-  Analysing a member declaration must never demand `layout(S)` or `complete_class(S)` for the
-  enclosing class; it asks `is_complete_at`. For instantiated classes the positions are the
-  template's positions plus the instantiation context, so the same rule applies.
+  `complete_before(S, prefix)` (§B8) is a question cell, true at prefixes after the closing brace
+  and in complete-class contexts (member function bodies, default arguments, default member
+  initializers, noexcept-specifiers). Analysing a member declaration must never demand
+  `layout(S)` or `class_def(S)` for the enclosing class; it asks `complete_before` at its own
+  prefix. An instantiated class asks the same question at the instantiation's prefix.
 - **Deduced return types.** [dcl.spec.auto.general] is positional: a function with a placeholder
   return type cannot be used before its definition has been seen, and within its own body a
   return type deduced from an earlier return statement is usable. So `return_type(f)` at a use
@@ -596,80 +679,163 @@ flag is either a position comparison or an explicit key argument.**
   only happens in programs that are ill-formed or nearly so.
 - **Constant evaluation of variables whose initializers refer to each other**
   (`template<class T> struct X { static constexpr int n = X<T>::m; static constexpr int m = X<T>::n; };`).
-  Same device: `constant_value(var, evaluating = {...})`; a variable found in its own evaluation
-  context is "not usable in constant expressions", per [expr.const]. The context is empty in all
-  ordinary evaluations, so the key space does not blow up.
+  Same device: `constant_value(var, prefix, evaluating)` (§B7), where `evaluating` is the ordered
+  set of variables whose initializers are being evaluated on this chain, threaded likewise through
+  `instantiate_fn/var(spec, prefix, evaluating)` for the specializations an evaluation needs. A
+  variable found in `evaluating` is "not usable in constant expressions" ([expr.const]) without a
+  fetch. The set is empty in all ordinary evaluations, so the key space does not blow up.
 - **Default member initializers used in the class.** DMIs are complete-class contexts, so they are
   evaluated with the class complete; a DMI that uses another DMI uses it through a member
   access on a complete class. Not a cycle. Order-of-initialization questions are positional.
 - **Recursive template instantiation** (`X<N>` needs `X<N-1>`) is depth, not a cycle; the depth
   limit is checked by the instantiation query itself. `X<N>` needing `X<N>` through a member
   initializer is caught by the evaluation context above.
-- **Constexpr recursion** is evaluated inside one `evaluate(expr, context)` query with a step
-  limit; individual calls are not queries, so infinite recursion is a step-limit error, not a
-  cycle.
+- **Constexpr recursion** runs inside one `constant_value` (or one evaluation of a
+  constant-expression context) with a step limit; individual calls are not queries, so infinite
+  recursion is a step-limit error, not a cycle.
 
 If a corpus program produces an engine cycle, the fix is in the front end, found by the
 `--threads=1` report; the test suite (§A9) treats an ICE as a failure like any other.
 
 ### A3. Concurrency
 
-#### A3.1 Scheduling: fork-join on a work-stealing pool, blocking with compensation
+#### A3.1 Shape: executions are coroutines, cell futures are senders, the pool is a scheduler
+
+A query execution is a coroutine of type `query_task<Value>` (ycxx's own promise type, §A10). It
+suspends when it needs something that is not yet available: a cell another frame is executing or
+validating, or the completion of a parallel group. A suspended execution holds no thread. Its
+frame is linked into the cell's waiter list and the worker returns to its deque. Each worker is a
+trampoline, `while (t = pop() or steal()) t.resume()`, and every resumption begins at that loop's
+depth, so there is no stack nesting anywhere in the engine. This removes the three devices an
+earlier draft needed because frames were thread stacks: compensation threads, the rule that a
+joiner may only pop its own join's tasks, and the false-deadlock hazard of helping.
+
+Three `std::execution` entities make this concrete:
+
+- **`pool_scheduler`** satisfies `std::execution::scheduler`. `schedule()` returns a sender whose
+  operation state is a deque task: pushed onto the calling worker's deque, or onto the injection
+  queue when `start` runs on a non-worker thread (the file watcher, the LSP transport). The pool
+  also implements `std::execution::parallel_scheduler_replacement::parallel_scheduler_backend`
+  and is installed at daemon start, so `std::execution::parallel_scheduler` anywhere in ycxx *is*
+  this pool: one set of worker threads per process. Query code never names a scheduler.
+- **`cell_sender(cell, priority)`** is the future of a memo cell: a sender that completes with
+  `const Value&`, on the pool (`get_completion_scheduler<set_value_t>` is `pool_scheduler`).
+  `connect` yields an intrusive operation state that lives in the awaiting frame, so waiting
+  allocates nothing. `start` is `ensure_green`: a `Done` cell completes at once; a `Running` or
+  `Validating` cell links the operation state into the cell's waiter list; an `Empty` cell is
+  claimed and its execution started. On completion the owning frame publishes `Done` and
+  **enqueues** every waiter's continuation onto its own deque at the waiter's priority; it never
+  resumes a waiter inline from the completion path. The one exception is a child started by
+  symmetric transfer with its parent as sole waiter, which transfers back to the parent the same
+  way, which costs nothing and nests nothing.
+- **`query_task<V>`** is a sender as well as an awaitable (`as_awaitable` finds its `connect`), so
+  it composes with `std::execution::task`, `when_all`, `counting_scope` and `spawn` in the daemon
+  code that calls into the engine. Its `set_stopped` channel is cancellation (§A4) and its
+  `set_error` channel is an internal error: a cycle (§A2.3) or an exception escaping query code.
+
+Why ycxx's own promise rather than `std::execution::task` for every execution: `task`'s
+environment carries a type-erased `task_scheduler`, with a virtual call per schedule and (in
+libycxx today) a backend allocation per construction; its scheduler affinity re-schedules through
+`schedule()` after an await completes elsewhere, whereas the engine wants the *completer* to
+enqueue continuations in deque order, which affinity cannot express; its frames are allocated
+through the `allocator_arg` protocol rather than the per-worker free lists of §A3.3; and it knows
+nothing of dependency recording. `std::execution::task` is used where it fits: the daemon's request
+handling, the LSP and watcher transports, the persistence writer, the test harness. Both are
+senders, so they compose freely.
+
+#### A3.2 The scheduler
 
 The pool has `P` workers (hardware threads by default). Each worker owns one Chase–Lev deque per
-priority level (two levels: `interactive`, `background`). `par_fetch` pushes its members onto the
-executing worker's deque at the frame's priority, runs the first member inline, then joins: it pops
-and runs members from the top of its own deque while the top task belongs to this join, and when
-its own members have all been stolen, it **blocks** until they finish. It never pops a task from an
-outer join (that task could block on something beneath it on this stack, a deadlock the wait-for
-graph would report as a false cycle) and never steals while joining. Idle workers steal from the
-bottom (oldest task) of a random victim, trying `interactive` deques of all workers before any
-`background` deque.
+priority level (`interactive`, `background`). A deque task is an intrusive node with a resume
+function: a coroutine handle for query executions and enqueued continuations, an operation state
+for `schedule()`. A worker pushes to and pops from the top of its own deques, interactive first;
+an idle worker steals from the bottom (oldest task) of a random victim, trying every worker's
+`interactive` deque before any `background` one, spins briefly, then parks on a futex guarded by
+a global pending-task count. Nothing ever blocks a worker except an empty system.
 
-A fetch of a cell that is `Running` or `Validating` under another frame also blocks.
+`par_fetch(k1..kn)` records its group (§A3.4), then starts members `n..2` as deque tasks and member
+`1` by symmetric transfer, leaving the parent suspended with a counter of incomplete members.
+Each completing member decrements it; the last enqueues the parent. Thieves take the earliest
+members first (they steal from the bottom), the owner works through the later ones, and none of
+this is visible in values because the dependency order was fixed before any member ran.
+`par_fetch` has `when_all`'s completion contract (values positionally, stop or error on the first
+member that stops or errors, with stop requested on the rest) and is implemented in the engine
+rather than as `when_all(cell_sender...) | continues_on(pool)` only for the fast path of §A3.3:
+when every member is already `Done`, no sender is connected at all.
 
-Blocking parks a core. To keep `P` cores busy, the pool compensates: a worker that is about to
-park signals the pool, which wakes a spare thread (or creates one, up to a cap of `4P`). A spare
-that finds no work goes back to sleep. Above the cap, blocking is uncompensated; that costs
-throughput, never correctness.
+#### A3.3 The fast path and the cost of an execution
 
-**Deadlock-freedom.** Every blocked frame waits on cells, and every `Running`/`Validating` cell has
-an owner frame on some thread. A thread is parked only while its current frame is blocked. If all
-threads were parked, following owner edges from any blocked frame would stay inside the finite set
-of blocked frames and therefore revisit one: a cycle, which the wait-for walk detects before
-parking and breaks by unwinding. Hence at any time some owner frame's thread is runnable, and
-since every query terminates (it is a finite computation over finite inputs), it makes progress.
-Tasks pushed to a deque but not yet claimed block nobody: their parent will pop them.
-Compensation and priorities are irrelevant to this argument; they only decide how many cores do
-the work.
+`co_await cx.fetch<Q>(k)` is an awaitable whose `await_ready()` does the whole hit path: hash the
+key, probe the shard, acquire-load the state word, and if the cell is `Done` and verified at this
+revision, push one `u32` onto the frame's recorder and return `true`. No frame is created, no
+sender connected, nothing allocated: about a hundred nanoseconds, and that is the path millions of
+fetches per build take. Only `await_suspend` runs `ensure_green`: it claims the cell for validation
+or execution, allocates the child's coroutine frame, and starts it by symmetric transfer.
+
+Coroutine frames come from per-worker size-class free lists. A frame freed on another worker (its
+execution migrated after a suspension) goes onto that worker's list; frames are fungible memory,
+so no worker owns a frame. GCC 16 does not elide frames (HALO; probed: a child coroutine awaited
+by its parent still allocates), so the budget assumes one allocation per executed query: a
+free-list pop and push, about twenty nanoseconds, plus promise construction and the final
+suspension, under a hundred nanoseconds in all, and a frame of roughly 128–512 bytes whose size is
+dominated by the query's own locals. Against the microseconds a non-trivial query costs to run,
+this is noise; it is not noise for the millions of tiny lookups, which is why those are not
+coroutines:
+
+A **`cheap`** kind is a plain synchronous function, not a coroutine. Its `run` takes a `SyncCtx`
+whose `fetch` is constrained to inputs and other `cheap` kinds, so it can never need to wait, and
+the layering is enforced at compile time by concepts. If it finds its cell `Running` under another
+frame (two frames computing the same tiny lookup at once), it computes the value again instead of
+waiting; determinism makes the two values equal, and the second publish verifies that with a
+`contract_assert` on the fingerprint and discards its copy. The C++ layer's question queries
+(`visible_decls`, `macro`, the region indexes) are `cheap`. A `transparent` helper is a coroutine
+when it fetches non-cheap kinds and a plain function otherwise.
+
+#### A3.4 Deadlock-freedom with suspended frames
+
+Every suspended frame waits on cells, and every `Running`/`Validating` cell has an owner frame. An
+owner frame is either runnable (in a deque, or being resumed) or itself suspended. Suppose no
+frame is runnable while some frame is suspended. Following owner edges from any suspended frame
+then stays inside the finite set of suspended frames and revisits one: a cycle, which the wait-for
+walk (§A2.2) detects at suspension time and breaks by completing the participants with an error.
+So whenever a frame is suspended, some frame is runnable, and since the scheduler eventually runs
+every enqueued task (idle workers steal; the pending count wakes a parked worker on every push to
+an empty system) and every query terminates, it makes progress. Tasks pushed but not yet claimed
+delay nobody: they are runnable by definition. Priorities, the number of workers and the order
+of stealing are irrelevant to the argument; they decide only how many cores do the work.
 
 **Rejected alternatives.**
-- *Fibers (stackful coroutines per frame).* They would let a blocked frame yield its worker
-  without stack nesting. Cost: a hand-written context switch per target, a stack per in-flight
-  frame, poor debugger and sanitizer support, thread-local state semantics that C++ libraries do
-  not expect. Blocking is rare in this engine (it needs two frames to want the same uncomputed
-  entry at the same moment), so fibers would buy little.
-- *Helping: a blocked worker runs any available task on top of its stack.* Unsafe as described
-  above; the spike's restriction to the current join is the safe subset and is kept.
-- *`std::execution` senders as the futures abstraction.* Senders describe asynchronous work as
-  composable values and are a fine interface at the daemon's edges (the LSP transport, the file
-  watcher). Inside the engine the "future" is just a `Running` memo entry, and the composition
-  rule is dependency recording in program order, which senders do not know about. ycxx's pool is
-  exposed as a `std::execution::scheduler` for those edges; queries never see senders. libycxx's
-  `<thread>`, `<atomic>` and futex-style waits are what the pool is built on.
+- *Fibers (stackful coroutines per frame).* Stackless coroutines give the same freedom without a
+  hand-written context switch per target, a stack per in-flight frame, or sanitizer and debugger
+  trouble. The only cost fibers would avoid is turning `run` into a coroutine, which the charter
+  wants anyway.
+- *Threads as frames, blocking with compensation (the previous draft).* Correct but needs spare
+  threads, a restricted join rule and a stack-nesting argument; coroutines remove all three.
+- *`std::execution::task` for every execution.* See §A3.1: type-erased scheduler, re-scheduling
+  affinity, allocator protocol, no dependency recording.
+- *Resuming waiters inline on the completing frame's stack.* Fast, but a chain of completions
+  (child completes, resumes parent, which completes, resumes grandparent, …) nests to the depth of
+  the demand graph, which for instantiation chains is thousands. Enqueueing costs a push and a pop
+  and keeps the stack flat.
+- *Making `cheap` kinds coroutines too.* Uniform, and a frame allocation per `visible_decls` call
+  would dominate the engine's cost.
 
-#### A3.2 Interactive versus background work
+#### A3.5 Interactive versus background work
 
 A root request carries a priority. LSP requests are `interactive`; builds and the optimizer's
-idle work are `background`. Workers prefer `interactive` deques when stealing, and a worker whose
-`background` task finishes checks for `interactive` work before continuing its own deque. There
-is no preemption inside a task: an `interactive` frame that needs a cell being computed by a
-`background` frame waits for it; the background thread finishes that cell at full speed. Task
-granularity (a declaration, a function body, an instantiation) keeps that wait in the
-milliseconds. Long-running leaves (solvers, §A8) poll a cancellation and yield flag at their
-deterministic budget checkpoints.
+idle work are `background`. A continuation is enqueued at its root's priority, workers prefer
+`interactive` deques when stealing, and a worker that finishes a `background` segment checks for
+`interactive` work before popping its own `background` deque; this is safe at any point, because no
+worker ever joins on its stack (§A3.1), so there is no join during which stealing could nest. There
+is no preemption inside a
+segment (the code between two suspension points), but a segment is at most the work between two
+fetches that miss, so interactive latency is bounded by that, not by a whole task. An
+`interactive` frame that needs a cell being computed by a `background` frame suspends on it; the
+background frame continues at full speed on whatever worker runs it. Long-running leaves (solvers,
+§A8) poll `cx.stop_token()` at their deterministic budget checkpoints and may `co_await
+schedule(pool)` there to yield the worker; yielding changes no value.
 
-#### A3.3 Shared memory layout and lifetime
+#### A3.6 Shared memory layout and lifetime
 
 The memo table is a sharded concurrent hash map from `(kind, key)` to a **cell id**: a `u32`
 index into a per-kind entry arena. Cells are never freed or reused while any frame is running;
@@ -691,10 +857,11 @@ under a gigabyte, which is the order of magnitude a whole-program daemon must af
 
 Memory ordering: the state word is the only synchronization point. A writer fills value, deps and
 diagnostics, then release-stores `Done`. A reader acquire-loads `Done` and may then read all of
-them without further synchronization. Waiters park on a parking lot keyed by cell id, so cells
-carry no condition variable.
+them without further synchronization. Waiters are the intrusive operation states of `cell_sender`
+(§A3.1), linked from one `waiters` pointer per cell by CAS and taken by the completing frame, so
+cells carry no condition variable and a wait allocates nothing.
 
-#### A3.4 Deterministic dependency recording
+#### A3.7 Deterministic dependency recording
 
 Each frame has a dependency recorder: a vector of cell ids with group markers and a small
 "already recorded" set. `fetch` appends one singleton group; `par_fetch(k1..kn)` appends one group
@@ -706,16 +873,28 @@ records into its caller's. On store, the recorder is compacted into the dependen
 Validation of a group in parallel (§A1.5) is itself a `par_fetch` of `ensure_green` tasks, so the
 same scheduler serves both.
 
+A frame may resume on a different worker after any `co_await`. Nothing thread-local is therefore
+cached across a suspension point: the recorder and the scratch arena belong to the frame
+(§A6.1), the worker is re-read from the resuming context, and `thread_local` is banned in query
+code (§A5.1). The chaos scheduler (§A9) migrates frames deliberately to expose violations.
+
 ### A4. Cancellation
 
 #### A4.1 Revisions advance only at quiescence
 
-The daemon coalesces file-system events into a batch. To apply a batch it sets the global cancel
-flag, which every `fetch` checks on entry and every parked waiter is woken to check; frames unwind
-with the `Cancelled` exception, their `Running`/`Validating` cells revert, and the daemon waits
-until no frame is running. Then it writes the inputs, advances `R`, and clears the flag. Latency
-to quiescence is bounded by the longest fetch-free stretch of work, which is why solvers and the
-code generator poll the flag at their budget checkpoints.
+The daemon coalesces file-system events into a batch. Every root request owns an
+`std::inplace_stop_source`; its token is the `get_stop_token` of every frame under that root and
+is what `cx.stop_token()` returns. To apply a batch the daemon requests stop on every live root,
+then `co_await`s the join of the `counting_scope` that holds the roots, then writes the inputs and
+advances `R`. Cancellation is cooperative and exception-free: the `fetch` awaitable tests
+`stop_requested()` on entry and completes with `set_stopped` instead of suspending; a frame
+already suspended on a cell has an `inplace_stop_callback` registered by its operation state,
+which unlinks it from the waiter list and completes it stopped. A `query_task` whose awaited
+sender completes stopped does not resume the coroutine: the promise's `unhandled_stopped` destroys
+the frame (destructors run, the cell it was executing reverts to `Empty` or to its old `Done`) and
+completes the parent's await stopped, and so on up to the root's receiver. Latency to quiescence is
+bounded by the longest segment between two fetches or polls, which is why solvers and the code
+generator poll the token at their budget checkpoints.
 
 Why not let the old revision keep computing (snapshot isolation)? It would need every cell to hold
 two versions, or a copy-on-write table, for the duration of in-flight work, and the work being
@@ -741,9 +920,12 @@ revision.** It holds because the revision cannot change while any frame runs (§
 frame finishes before the bump and its value is correct for that revision, or the bump is pending,
 the flag is set, and the frame's next fetch throws before it can store. A frame with no further
 fetches that completes while the flag is set stores a value that is still correct for the old
-revision, because nothing has changed yet. `Cancelled` and `CycleUnwind` are the only exceptions
-that cross query boundaries; query code must be exception-safe and must not catch them (a
-`catch (...)` in query code is a review P0).
+revision, because nothing has changed yet. The store happens only in `co_return`, which is the
+`set_value` path; the `set_stopped` and `set_error` paths never reach it, and query code cannot
+observe either (a stopped await simply never resumes the coroutine), so there is no exception to
+catch and nothing to get wrong. An exception thrown by query code reaches the promise's
+`unhandled_exception`, completes the frame with `set_error`, and is an internal compiler error; a
+`catch (...)` in query code is a review P0 because it would hide one.
 
 Determinism is untouched because the memo table never affects *what* a value is, only whether it
 is recomputed. A cancelled run leaves a table that is a subset of what a complete run leaves, with
@@ -762,10 +944,10 @@ graph, not the build's.
 
 #### A5.1 Rules
 
-1. Every order that reaches an output is derived from stable keys: source positions
-   `(item id, offset)`, instantiation contexts, mangled names, the command-line order of
-   TUs. Never from completion order, cell ids (allocation order differs between runs), thread ids,
-   addresses, or time.
+1. Every order that reaches an output is derived from stable keys: source order as `tu(TU)`
+   renders it from its item sequence and `Loc` offsets (§A5.2; a `Loc` alone is not an ordering
+   key), mangled names, the command-line order of TUs. Never from completion order, cell ids
+   (allocation order differs between runs), thread ids, addresses, or time.
 2. Parallel operations return results positionally: `par_fetch` returns a tuple in argument
    order; `par_map(keys, f)` returns a vector in key order. A parallel reduction is a `par_map`
    followed by a sequential fold over that vector, or a tree reduction whose shape depends only
@@ -780,16 +962,17 @@ graph, not the build's.
 
 #### A5.2 Diagnostics
 
-The build report is `sort(dedup(concat over TUs in command-line order of tu_diagnostics(tu)))`.
-The **primary key** of a diagnostic is `(file path, offset, severity, id, args)`; its context
-chain (§A1.7) is not part of it. Deduplication is by primary key, keeping the lexicographically
-smallest chain (chains compared frame by frame by position, a shorter chain before a longer one
-with the same prefix). The sort key is the primary key followed by the surviving chain. A header
-error seen by 500 TUs is one line. An error inside a shared instantiation requested from many
-sites is one line, attributed to the lexically first request, which is what a sequential
-compiler's "first point of instantiation" produces. Per-file LSP
-diagnostics are the same query filtered by file. Error limits are applied after sorting, so
-"the first 20 errors" means the first in source order, not in time.
+`tu_diagnostics(TU)` renders and orders (§B2): each `Loc = (item id, offset)` becomes
+`(file, line, column, include chain)` from the TU's ordered item sequence, and the TU's order is
+that sequence, then the offset. Chains ("in instantiation of … requested here") come from the TU's
+first-demand table (§B6.2, §A1.7): the diagnostics of a demanded cell are attached, once, to the
+chain of request positions leading to its first demand in that TU, so a shared instantiation's
+error is reported once per TU, at the point of instantiation a sequential compiler would name.
+The build report concatenates the TUs in command-line order and the driver deduplicates on the
+rendered `(file, line, column, severity, id, args)`, keeping the first TU's chain; the report's
+order is file, line, column, severity, id, args, then chain. A header error seen by 500 TUs is one
+line. Per-file LSP diagnostics are the per-TU result filtered by file. Error limits are applied
+after ordering, so "the first 20 errors" means the first in source order, not in time.
 
 #### A5.3 Symbols and sections
 
@@ -825,7 +1008,8 @@ fingerprint. Values in the memo table are handles, so a header parsed once is on
 shared by every TU that includes it, and two TUs instantiating `std::vector<int>` share the
 instantiation. Interners are append-only during a revision and compacted at quiescence.
 
-A frame gets a bump allocator for scratch that is freed when the frame returns; anything that
+A frame owns a bump allocator for scratch (a chunk list hanging off its promise, so it follows the
+frame when it resumes on another worker) that is freed when the frame completes; anything that
 outlives the frame must be interned. This is the memory discipline that keeps millions of small
 queries from fragmenting the heap.
 
@@ -857,26 +1041,32 @@ information a sequential compiler holds for one TU at a time, deduplicated acros
 The cache directory is keyed by the **compiler build hash** (a hash of the ycxx binary) and the
 **schema hash** (kind ids, key and value layouts, per-kind version salts). A mismatch means an empty
 cache; there is no migration. Inside, an append-only log of segments plus a manifest written by
-atomic rename. Each record is `(kind, key fp, value fp, deps as (kind, key fp) list with group
-markers, durability, value bytes or absent, diag bytes)`, checksummed. Inputs are recorded with
-their content fingerprint. Trie leaves of contextual queries are a second record type
-(`index fp, path of (pattern fp, answer fp) groups, result fp, result bytes, diags`), and selection
-cells are stored without dependencies (§A1.9). Revisions are not persisted; they are a session
-concept.
+atomic rename. Each record is `(kind, key bytes, key fp, value fp, deps as (kind, key fp) list
+with group markers, durability, value bytes or absent, diag bytes)`, checksummed. Key bytes are
+the structural serialization of §A10.1 with interned handles written as the fingerprint of the
+interned content, so a loaded dependency that turns red can be re-executed from its record; a
+record whose key names an interned object the cache does not contain is dropped. Inputs are
+recorded with their content fingerprint. Trie leaves of contextual queries are a second record
+type (`index fp, index bytes, path of (pattern fp, answer fp) groups, result fp, result bytes
+including the demand list, diags`), and selection cells are stored without dependencies (§A1.9).
+Revisions are not persisted; they are a session concept.
 
-Keys and dependencies are stored as fingerprints, not handles, so the file does not depend on
-interning order, two daemons' caches can be merged, and the optimization cache (§A8) can be shared
-between machines.
+Fingerprints, not handles, are what records refer to each other by, so the file does not depend
+on interning order, two daemons' caches can be merged, and the optimization cache (§A8) can be
+shared between machines.
 
 #### A7.2 Loading
 
-On start, records are loaded with `verified_at = -1`, `changed_at = 0`; the interner is rebuilt by
-deserializing values (fingerprint to handle map). The daemon hashes every input file it knows
-about (in parallel; this is the cold cost of a restart) and sets `changed_at = 1` for the ones
-whose fingerprint differs, bumping `last_changed[durability]` accordingly. The first request then
-runs the ordinary red–green walk: a header that did not change is green by the durability
-shortcut if nothing of its durability changed, otherwise by deep verification. There is no
-separate "cache validation" algorithm; it is the same algorithm with a different starting state.
+On start the session's revision counter is `R = 1`. Records are loaded with `verified_at = 0`
+and `changed_at = 0`; the interner is rebuilt by deserializing values (fingerprint to handle map).
+The daemon hashes every input file it knows about (in parallel; this is the cold cost of a
+restart): an input whose fingerprint matches keeps `changed_at = 0`, one that differs gets
+`changed_at = 1`, and `last_changed[d]` is `1` for every durability with a changed input and `0`
+otherwise. The first request then runs the ordinary red–green walk: a loaded cell of a durability
+with no changed input is green by the shortcut (`verified_at 0 >= last_changed 0`), everything
+else by deep verification, re-executing from the persisted key bytes where a dependency turned
+red. There is no separate "cache validation" algorithm; it is the same algorithm with a different
+starting state.
 
 #### A7.3 Crash safety and trust
 
@@ -915,8 +1105,10 @@ revision was created.** `S` is an *input* of the engine (`opt_cache_snapshot`), 
 like any other input, so it is stable for the whole build and recorded as a dependency by exactly
 the queries that read it. For each function, `codegen` asks `best_available(key, B, S)`: if `S`
 holds a result at level `≥ B`, use it (the highest level present); otherwise compute
-`optimized(key, B)` now and record it into the OC for the future. Rule: the result used is always
-the cached one with the highest level, and never one *below* `B`. Two consequences, both intended:
+`optimized(key, B)` now. Rule: the result used is always the cached one with the highest level,
+and never one *below* `B`. The OC is written only by the daemon, at quiescence, from the
+`optimized` cells a build or the background work produced; a query never writes it (that would be
+an effect). Two consequences, both intended:
 a development build gets better over time as background work lands, and two machines with
 different OC contents can produce different, individually correct objects. That is the trade
 DECISIONS §4.8 makes; what we add is that the dependence is explicit and recorded, so the
@@ -979,69 +1171,251 @@ manifest), since §A8.3 makes outputs a function of `S` by design.
 
 ### A10. The API a query author sees
 
+The engine is written the way DECISIONS §3.2 asks: concepts constrain what a query kind, key and
+value are; reflection derives hashing, equality, fingerprints and cache serialization from the key
+and value types themselves; annotations carry query traits; contracts state the engine's
+invariants; coroutines and `std::execution` carry the futures. Everything below compiles in spirit
+on GCC 16.2 (§A10.4 says what was actually probed).
+
+#### A10.1 Keys, values and kinds: concepts, derived by reflection
+
 ```cpp
-// A query kind is a struct with Key, Value, traits and run().  Registered by the schema.
-struct DeclsNamed {
-  struct Key { ScopeId scope; NameId name; };            // 8 bytes; hashed and fingerprinted by content
-  using Value = DeclList;                                // interned handle, empty list is a value
-  static constexpr QueryTraits traits{ .cheap = true };  // run inline, evict last
-  static Value run(Ctx& cx, Key k) {
-    const Members& m = cx.fetch<ScopeMembers>(k.scope);  // records the dependency
-    return m.lookup(k.name);                             // negative result: empty DeclList
+export module ycxx.engine;                 // partitions: :cell :sched :coro :trace :persist :verify
+import std;
+
+export namespace ycxx::engine {
+
+// A key is a structural aggregate: handles (strong enums over interned ids), integers, and nested
+// structural aggregates. One consteval predicate decides it, recursively, by reflection.
+consteval bool structural(std::meta::info t) {
+  if (std::meta::is_enumerable_type(t) || std::meta::is_integral_type(t)) return true;
+  if (!std::meta::is_aggregate_type(t) || !std::meta::is_trivially_copyable_type(t)) return false;
+  for (auto m : std::meta::nonstatic_data_members_of(t, std::meta::access_context::unchecked()))
+    if (!structural(std::meta::type_of(m))) return false;
+  return true;
+}
+template<class T> consteval auto members() {
+  return std::define_static_array(
+      std::meta::nonstatic_data_members_of(^^T, std::meta::access_context::unchecked()));
+}
+
+template<class T> concept QueryKey   = structural(^^T) && std::equality_comparable<T> && sizeof(T) <= 32;
+template<class T> concept QueryValue = requires(const T& v, Sink& out) {
+  { fingerprint(v) } -> std::same_as<Fp128>;   // Merkle for handles, structural for aggregates
+  { serialize(v, out) };                        // derived below for structural types, hand-written for interned ones
+};
+
+// Fingerprint, equality, serialization: one definition each, for every structural type, forever.
+template<class T> requires (structural(^^T) && std::is_class_v<T>)
+constexpr Fp128 fingerprint(const T& k) {
+  Fp128 h = type_seed<T>();                    // consteval hash of display_string_of(^^T): part of the schema
+  template for (constexpr auto m : members<T>()) h = mix(h, fingerprint(k.[:m:]));
+  return h;
+}
+template<class T> requires (structural(^^T) && std::is_class_v<T>)
+void serialize(const T& k, Sink& out) { template for (constexpr auto m : members<T>()) serialize(k.[:m:], out); }
+template<class T> requires (structural(^^T) && std::is_class_v<T>)
+T deserialize(Source& in) { T k; template for (constexpr auto m : members<T>()) k.[:m:] = deserialize<typename [:std::meta::type_of(m):]>(in); return k; }
+
+// Traits are annotations (P3394). An annotation's type is const-qualified, so look up by type.
+struct cheap_t {}; struct transparent_t {}; struct contextual_t {}; struct context_t {};
+struct input_t { Durability durability; };
+inline constexpr cheap_t cheap{}; inline constexpr transparent_t transparent{};
+inline constexpr contextual_t contextual{}; inline constexpr context_t context{};
+struct demanded_t {}; inline constexpr demanded_t demanded{};   // instantiate_*, satisfies, constant_value (§A1.7)
+template<class Q, class Trait>
+concept has_trait = std::meta::annotations_of_with_type(^^Q, ^^Trait).size() > 0;
+
+template<class Q> concept CheapQuery = QueryKey<typename Q::Key> && QueryValue<typename Q::Value>
+  && has_trait<Q, cheap_t>
+  && requires(SyncCtx& cx, typename Q::Key k) { { Q::run(cx, k) } -> std::same_as<typename Q::Value>; };
+template<class Q> concept AsyncQuery = QueryKey<typename Q::Key> && QueryValue<typename Q::Value>
+  && !has_trait<Q, cheap_t>
+  && requires(Ctx& cx, typename Q::Key k) { { Q::run(cx, k) } -> std::same_as<query_task<typename Q::Value>>; };
+template<class Q> concept InputKind  = QueryKey<typename Q::Key> && QueryValue<typename Q::Value> && has_trait<Q, input_t>;
+template<class Q> concept DemandedQuery = AsyncQuery<Q> && has_trait<Q, demanded_t>;   // fetched only through cx.demand
+template<class Q> concept Query      = CheapQuery<Q> || AsyncQuery<Q> || InputKind<Q>;
+
+// The schema: kind ids are positions in this list; the schema hash (§A7.1) is a consteval fold over
+// each kind's name, Key and Value member names and types. Adding a field changes the cache key.
+template<Query... Qs> struct kinds { static constexpr Fp128 schema_hash = fold_schema<Qs...>(); };
+
+}  // namespace ycxx::engine
+```
+
+Any key member of type `Prefix` that is the computation's context is marked `[[=context]]`, on
+contextual kinds and on question cells alike, at any nesting depth (the `CtxKey` aggregate below
+carries it): in trace patterns the engine replaces every such member that equals the fetching
+frame's own prefix with the placeholder (§A1.9), so the C++ layer never spells out which member is
+the prefix. The `pinned` and `evaluating` members of a `CtxKey` are ordinary key data and are never
+abstracted. A `demanded` kind cannot be fetched with `fetch`; the
+`DemandedQuery` constraint on `cx.demand` and its absence from `fetch` make a missing request
+`Loc` a compile error.
+
+#### A10.2 The context handle, with contracts
+
+```cpp
+export namespace ycxx::engine {
+
+class Ctx {                                   // one per frame; the only way to observe the world
+public:
+  template<AsyncQuery Q> requires (!DemandedQuery<Q>)
+  fetch_awaitable<Q> fetch(typename Q::Key k) noexcept;
+  template<DemandedQuery Q>
+  fetch_awaitable<Q> demand(typename Q::Key k, Loc at) noexcept;   // fetch + (index, at, fp) into the demand list
+  template<Query Q> CellRef cell_of(typename Q::Key k) const noexcept;   // a key for DiagsOf; records nothing
+  template<CheapQuery Q> const typename Q::Value& fetch(typename Q::Key k) noexcept;
+  template<InputKind Q>  const typename Q::Value& fetch(typename Q::Key k) noexcept;
+  template<AsyncQuery... Q> par_fetch_awaitable<Q...> par_fetch(q<Q>... qs) noexcept;   // when_all contract, positional
+  template<AsyncQuery Q, std::ranges::input_range R> par_map_awaitable<Q> par_map(R&& keys) noexcept;
+  template<class... A> void diag(DiagId id, A&&... args);
+  Prefix prefix() const noexcept pre(contextual_);                 // only a contextual frame has one
+  CtxKey ctx() const noexcept pre(contextual_);                    // (prefix, pinned, evaluating): passed on unchanged
+  std::inplace_stop_token stop_token() const noexcept;
+  Arena& scratch() noexcept;                                       // frame-owned, survives migration
+  CellId self() const noexcept;
+};
+
+class SyncCtx {                               // for cheap kinds: inputs and cheap kinds only
+public:
+  template<class Q> requires (CheapQuery<Q> || InputKind<Q>)
+  const typename Q::Value& fetch(typename Q::Key k) noexcept;
+};
+
+// The engine's own invariants are contracts, not asserts. A few that the design states in prose:
+void Cell::publish(const Fp128 fp, const ValueRef v, const Revision r) noexcept
+  pre(state() == State::Running) pre(owner() == current_frame())
+  post(state() == State::Done) post(verified_at() == r) post(changed_at() <= verified_at());
+bool Cell::maybe_changed_after(const Revision since, const Revision r) noexcept
+  pre(since <= r) post(ok : !ok || changed_at() > since);
+void Db::set_input(auto key, auto value, const Durability d)
+  pre(live_frames() == 0);                                         // revisions advance only at quiescence
+void Trie::insert(const Path& fresh, Leaf l)
+  pre(fresh.starts_with(path_to(claimed_node_)));                  // the determinism check of §A1.9
+
+}  // namespace ycxx::engine
+```
+
+A coroutine may carry preconditions but no postconditions (P2900), so a `query_task`'s
+"postconditions" are `contract_assert`s before `co_return`. Development and CI builds compile the
+engine with `-fcontract-evaluation-semantic=enforce` and a violation handler that prints the
+query kind and key and aborts as an internal compiler error; release builds use `quick_enforce`,
+which keeps the checks and drops the handler. One semantic per build, never mixed across TUs.
+
+#### A10.3 Queries, as an author writes them
+
+```cpp
+export module ycxx.sema.lookup;
+import std;
+import ycxx.engine;
+using namespace ycxx::engine;
+
+// An input kind: durability travels with the kind. Set by the daemon, never read from disk in a query.
+struct [[=input{Durability::Low}]] FileText { using Key = PathId; using Value = Blob; };
+
+// A question cell (cheap, synchronous): Part B's real signature (§B2). The prefix is ordinary key
+// data, marked [[=context]] so that traces abstract it. Keys of this shape number in the millions.
+struct [[=cheap]] VisibleDecls {
+  struct Key { ScopeId scope; NameId name; [[=context]] Prefix at; bool operator==(const Key&) const = default; };  // 12 bytes
+  using Value = DeclList;                                       // interned handle; empty is a value
+  static Value run(SyncCtx& cx, Key k) {
+    const auto& lists = cx.fetch<PrefixItemLists>(k.at);        // hash-consed item lists of the prefix
+    return lists.decls_named(k.scope, k.name);                  // through the syntactic indexes (§B1.3)
   }
 };
 
+// A transparent helper: not memoized; its fetches land in the caller's dependency list.
+struct [[=transparent]] BodyTokenCount {
+  struct Key { ItemId item; bool operator==(const Key&) const = default; };
+  using Value = std::uint32_t;
+  static Value run(SyncCtx& cx, Key k) { return cx.fetch<BodyTokens>(k.item).size(); }
+};
+
+// An ordinary kind: a coroutine. The hit path of co_await never suspends and allocates nothing.
+struct AnalyzeTu {
+  using Key = TuId;  using Value = TuSummary;                   // includes the TU's first-demand table (§B6.2)
+  static query_task<Value> run(Ctx& cx, TuId tu) {
+    auto [tree, cfg] = co_await cx.par_fetch(q<TuTree>(tu), q<Config>(tu));        // one group, argument order
+    auto items  = co_await cx.fetch<TuItems>(tree);
+    auto bodies = co_await cx.par_map<AnalyzeBody>(items.function_bodies());         // vector in key order
+    if (bodies.size() > cfg.limit) cx.diag(Diag::TooManyFunctions, Loc{items.first(), 0}, cfg.limit);  // a value
+    co_return summarize(items, bodies);
+  }
+};
+
+// The TU's diagnostics are a separate kind over AnalyzeTu's cell: a cell fetching DiagsOf of itself
+// would be a cycle (§A2.1). This is where Locs are rendered and chains attached (§A1.7, §A5.2).
 struct TuDiagnostics {
-  using Key = TuId;  using Value = DiagSet;
-  static Value run(Ctx& cx, TuId tu) {
-    auto [pp, cfg] = cx.par_fetch(q<Preprocessed>(tu), q<Config>(tu));  // one group, argument order
-    auto decls = cx.fetch<TopLevelDecls>(pp);
-    auto bodies = cx.par_map<CheckBody>(decls.functions());               // vector in key order
-    if (bodies.size() > cfg.limit) cx.diag(Diag::TooManyFunctions, cfg.limit);  // a value, not an effect
-    return cx.fetch<DiagsOf>(cx.self());                                   // collect, program order
+  using Key = TuId;  using Value = RenderedDiags;
+  static query_task<Value> run(Ctx& cx, TuId tu) {
+    auto summary = co_await cx.fetch<AnalyzeTu>(tu);
+    auto own     = co_await cx.fetch<DiagsOf>(cx.cell_of<AnalyzeTu>(tu));            // program order, stops at demanded kinds
+    co_return render(cx, tu, own, summary.first_demand_table());                     // + demanded cells' diags with chains
   }
 };
 
-// Transparent helper: not memoized, its fetches land in the caller's dependency list.
-struct IsCompleteAt { struct Key { ClassId c; SrcPos at; }; using Value = bool;
-  static constexpr QueryTraits traits{ .transparent = true };
-  static bool run(Ctx& cx, Key k) { return cx.fetch<ClassExtent>(k.c).complete_at(k.at); }
-};
-
-// Inputs are set by the daemon, never fetched from the file system inside a query.
-db.set_input<FileText>(path, bytes, Durability::Low);   // only between requests, at quiescence
-auto report = db.request<BuildReport>(build, Priority::Background);   // a root; returns a future
-```
-
-```cpp
-// An instantiation request carries the position it is made from; diags_of wraps along this edge.
-auto inst = cx.fetch<InstantiateClass>(X_int, cx.at(use_pos));     // "required from here"
-// Context-dependent outcomes are values, not diagnostics: the consumer decides.
-if (auto r = cx.fetch<Substitute>({tmpl, args}); r.failed()) { /* SFINAE: discard r.reason() */ }
-```
-
-```cpp
-// A contextual query: index + prefix. The engine selects a shared result by trie walk first (§A1.9).
-struct InstantiateClass {
-  struct Key { EntityId spec; Prefix ctx; };          // ctx is the point of first demand's prefix
+// A contextual, demanded kind: index + prefix, instantiated at the demanding site's own prefix (§B6.2).
+// The engine walks the per-index trie before running this (§A1.9); tu(TU) does the END comparison.
+// The context of every contextual kind (§A1.9, §B1.4): the prefix is abstracted by the trie; the two
+// maps are interned handles, ordinary key data, empty handles in every ordinary demand.
+struct CtxKey { [[=context]] Prefix prefix; PinnedId pinned; EvaluatingId evaluating;
+                bool operator==(const CtxKey&) const = default; };                          // 12 bytes
+struct [[=contextual, =demanded]] InstantiateClass {
+  struct Key { EntityId spec; CtxKey ctx; bool operator==(const Key&) const = default; };   // 16 bytes
   using Value = ClassDef;
-  static constexpr QueryTraits traits{ .contextual = true };
-  static Value run(Ctx& cx, Key k) {
-    auto specs = cx.fetch<ExplicitSpecs>({k.spec.primary(), cx.prefix()});   // question @ctx
-    auto complete = cx.fetch<CompleteBefore>({k.spec.arg(0), cx.prefix()});  // question @ctx
-    auto tmpl = cx.fetch<ClassTemplateDef>(k.spec.primary());                 // context-free, still traced
-    ...
+  static query_task<Value> run(Ctx& cx, Key k) {
+    if (auto first = pinned_lookup(k.ctx.pinned, k.spec))                                  // this TU pinned S (§B6.2):
+      co_return co_await cx.fetch<InstantiateClass>({k.spec, *first});                     // reuse that cell, ordinary dependency
+    auto specs = co_await cx.fetch<SpecializationsOf>({k.spec.primary(), cx.prefix()});    // question @ own prefix (§B6.3)
+    auto tmpl  = co_await cx.fetch<ClassTemplateDef>(k.spec.primary());                    // context-free, still traced
+    co_return co_await instantiate(cx, tmpl, specs);
   }
 };
+
+// Demanding one, from a body analysis. The context is passed on unchanged; the request Loc goes into
+// *this* cell's demand list (a value): not into the key, not onto an edge. tu(TU) builds the
+// first-demand table and "required from here" chains from demand lists.
+auto def = co_await cx.demand<InstantiateClass>({spec, cx.ctx()}, Loc{item, offset});
+// Context-dependent outcomes are values, not diagnostics: the consumer decides.
+if (auto r = co_await cx.fetch<Substitute>({tmpl, args}); r.failed()) { /* SFINAE: discard r.reason() */ }
 ```
 
-`Ctx` offers exactly: `fetch<Q>(key)`, `fetch<Q>(key, at(pos))`, `par_fetch(q<Q1>(k1), …)`,
-`par_map<Q>(range)`, `diag(...)`, `self()`, `prefix()` (the cell's own context, the only prefix a
-contextual computation may use), `scratch()` (the frame allocator), and `check_cancelled()` for
-long leaves.
-There is no way to read an input except `fetch<SomeInput>`. Query code may throw its own
-`QueryError` types across its own helpers but never across a query boundary: a query's failure is
-a value in its `Value` type. `Cancelled` and `CycleUnwind` pass through untouched.
+```cpp
+// The daemon's edge: std::execution::task, a counting_scope of roots, stop sources per root.
+std::execution::task<void> Daemon::on_build(BuildRequest r) {
+  auto root = db.request<BuildReport>(r.build, Priority::Background);    // a query_task: sender + awaitable
+  std::execution::spawn(std::move(root) | std::execution::then([&](const BuildReport& b) { reply(b); }),
+                        roots_, root_env(r.stop_source));
+  co_return;
+}
+std::execution::task<void> Daemon::apply_edits(EditBatch b) {
+  for (auto& s : live_stop_sources_) s.request_stop();
+  co_await roots_.join();                                                 // quiescence (§A4.1)
+  db.set_inputs(b);                                                       // pre(live_frames() == 0)
+}
+```
+
+`Ctx` offers exactly what the listing shows and nothing else; there is no way to read an input
+except `fetch`. Query code may throw its own types across its own helpers but never out of `run`:
+a query's failure is a value in its `Value` type, and an escaping exception is an internal compiler
+error (§A4.3).
+
+#### A10.4 Bootstrap: what GCC 16.2 does, what it does not, and the workaround for each
+
+Probed with `g++-16 -std=c++26 -freflection -fcontracts -fmodules` on macOS arm64 (Homebrew GCC
+16.2.0), libstdc++ only. libycxx ships `<meta>`, `<contracts>`, `<coroutine>`, `<stop_token>`,
+`<execution>` with P2300, P3552 `task` and `parallel_scheduler_replacement`, and a `std` module,
+so none of the engine's includes need a `// BOOTSTRAP:` fallback to libstdc++.
+
+| Feature the design leans on | GCC 16.2 | Risk, and the smallest workaround if it bites |
+| --- | --- | --- |
+| `nonstatic_data_members_of` + `define_static_array` + `template for` + `[:m:]` splices (fingerprint, equality, serialization) | Works, including nested aggregates and `typename [:type_of(m):]` | Expansion over a non-static range is not supported by the paper either; always go through `define_static_array`. |
+| Annotations (P3394) on classes, members, static members, variables, functions, enumerators, namespaces; `annotations_of_with_type`, `extract` | All positions work | `type_of(annotation)` is `const T`, so `type_of(a) == ^^T` is false; use `annotations_of_with_type` (done above). Annotations on template specializations and across module boundaries are unprobed; `// BOOTSTRAP: annotations: static constexpr traits member read by static_data_members_of` if they fail. |
+| Reflection inside a module unit, `import std`, a consumer reflecting through an imported template | Works | Reflecting an *exported* class from another module unit is unprobed; low risk, checked in the engine's first commit. |
+| Contracts: `pre`, `post(r: …)`, `contract_assert`, user `handle_contract_violation`, `-fcontract-evaluation-semantic=ignore|observe|enforce|quick_enforce` | Work; default is `enforce` (handler, then terminate) | Parameters named in `post` must be `const` (the paper requires it; GCC enforces it): engine signatures with postconditions take `const` parameters. Postconditions on coroutines are ill-formed: use `contract_assert` before `co_return`. Mixing semantics across TUs is permitted by P2900 but unprobed on GCC; use one per build. |
+| Coroutines: promise `operator new` with a leading `Ctx&`, symmetric transfer via `noop_coroutine`, `await_ready` fast path, `pre` on a coroutine | Work | No HALO at `-O2` (a child awaited by its parent still allocates), so the budget of §A3.3 assumes one free-list allocation per executed query. If frame sizes surprise, the open item in Part E caps them. |
+| `std::execution` senders, `task`, `parallel_scheduler_replacement`, stop tokens | Absent from libstdc++ 16; present in libycxx and tested there on GCC 16.2 under TSan | ycxx builds against libycxx, so nothing to work around. The two libycxx gaps that touch the daemon's edges (per-construction backend allocation in `task_scheduler`, no completion domain from `spawn_future`) are avoided as Part E says. |
+| `import std` | Works once the std module is built (`-fmodules -fsearch-include-path -fmodule-only`) | Build system must build libycxx's `std.cppm` first; a `// BOOTSTRAP: modules: header import` fallback is not expected to be needed. |
 
 ## Part B. The C++ layer: what is a query, what is its key, what it records
 
@@ -1053,13 +1427,14 @@ the one capability it needs beyond the salsa model, contextual queries, is speci
 ### B0. Part B in one screen
 
 1. **The unit of source identity is the item**: a top-level or member declaration cut from the
-   preprocessed token stream before parsing. Its id is derived from its own tokens (declaration
-   part only, bodies excluded), its syntactic scope path and an ordinal among identical siblings.
-   Not from its position, not from the content of the enclosing file.
+   preprocessed token stream before parsing. Its id is derived from the identity of its file, its
+   own tokens (declaration part only, bodies excluded), its syntactic scope path and an ordinal
+   among identical siblings. Not from its position, not from the content of the enclosing file.
 2. **A program point is `(item, offset-in-item)`.** Visibility of a declaration at a point is a
-   query `visible_decls(S, name, at: item)`, decomposed into a shared part (what precedes the
-   item's header occurrence in the include tree) and a local part (what precedes the item inside
-   its own region). Absolute positions never appear in a key.
+   question `visible_decls(S, name, at: prefix)`, answered from shared syntactic indexes of the
+   item lists and trees that make up the prefix. Absolute positions never appear in a key; a
+   location in any value is `(item, offset)` and is rendered to file, line and column by `tu(TU)`
+   (§B2).
 3. **Semantic queries are contextual.** Their key is `(index part, prefix)`, where the prefix is
    an interned, content-addressed description of everything that textually precedes the point
    (§A1.9); no TU appears in any semantic key. The results for one index part are
@@ -1075,11 +1450,17 @@ the one capability it needs beyond the salsa model, contextual queries, is speci
    resolutions, conversions, instantiations and constant evaluations are queries (recorded and
    shared); individual expressions are not.
 6. **Function template definitions are instantiated in the end-of-TU context**
-   ([temp.point]); class and variable templates, concept satisfaction and anything needed for
-   constant evaluation are instantiated at the point of first demand. The "same meaning at every
-   point" IFNDR rules are *diagnosed* by fetching the same index at the other point's prefix and
-   comparing (a trie walk when the answers agree, a second computation only when they do not),
-   and across TUs by `odr_report(program)`, a derived query over the results each TU selected.
+   ([temp.point]/7); class and variable template specializations, concept satisfaction and
+   anything needed for constant evaluation are instantiated **at the prefix of the demanding
+   site**, and specialization selection uses the specializations visible at that prefix. No
+   query computes "the point of first demand": every selection-cell value carries the list of
+   specializations it demanded directly, and `tu(TU)` traverses those lists in source order to
+   build the TU's first-demand table. A later site of the same TU that selected a different
+   result for a class template specialization is repaired by re-fetching it with a `pinned` key
+   argument that routes the specialization to the first demand's cell, so the TU gets the one
+   instantiation [temp.point]/7 prescribes; the same divergence for variable templates, static
+   data members and satisfaction is IFNDR and is diagnosed (§B6.2). Across TUs,
+   `odr_report(program)` compares the results each TU selected (§B6.6, §B10).
 7. **The region index is syntactic.** Per preprocessed file occurrence, "which items declare
    `name` in scope path `P`", friend declarations, using-directives, specializations and
    definitions are indexed without semantics, so that invalidation of lookups is decided by hash
@@ -1090,9 +1471,11 @@ the one capability it needs beyond the salsa model, contextual queries, is speci
 #### B1.1 Regions, trees, prefixes
 
 Preprocessing a file occurrence yields a **region**: its own token stream (with `#include`
-directives replaced by references to child regions) plus the macro delta it produced. A region and
-its children form a **tree**; the tree id is the hash of all token streams in it. A TU is the tree
-rooted at the main file.
+directives replaced by references to child regions), the macro delta it produced, its `#pragma
+once` effects and its `__COUNTER__` delta. A region and its children form a **tree**; the tree id
+is the fingerprint of the *complete* `pp` results of the tree, not of the token streams alone, so
+that two configuration headers whose only difference is what they `#define` have different tree
+ids and different prefixes. A TU is the tree rooted at the main file.
 
 A program point's context is its **prefix** (§A1.9): for each level of the include
 path, the item list of that region up to the include item that leads down, with include items
@@ -1132,13 +1515,14 @@ file changes no id. `body_tokens(item)` is a separate query, so bodies are input
 
 #### B1.3 Syntactic indexes
 
-Per item list (keyed by the content-addressed handle of the list, which is what a prefix node
-carries; non-contextual, pure, cheap):
+Per item list (`R` below is the content-addressed handle of a region's item list, which is what a
+prefix node carries; non-contextual, pure, cheap):
 
 - `region_items(R)`: the item tree, in order.
 - `region_decls_named(R, P, name)`: ordered items declaring `name` into scope path `P`
-  (including unscoped enumerators into the enclosing scope, injected-class-names, using-declarations
-  under the name they introduce, and `using namespace` excluded). Friend declarations are indexed
+  (including unscoped enumerators into the enclosing scope, injected-class-names and
+  using-declarations under the name they introduce; `using namespace` is not a declaration of a
+  name and is indexed separately). Friend declarations are indexed
   separately in `region_friends(R, P_class, name)` because ordinary lookup must not see them
   ([class.friend]).
 - `region_using_directives(R, P)`, `region_inline_namespaces(R, P)`,
@@ -1151,8 +1535,15 @@ etc.), descending only into children whose `tree_names` contains `name`. These a
 TU that includes the same preprocessed header. Because the keys are content hashes, an edit makes
 *new* keys; the old entries become garbage. That is acceptable because these queries are
 recomputed in microseconds and are reached only from question cells whose own key, the prefix,
-pins the same content-addressed handles (§B1.4); a selection cell's trace names question cells,
-never these indexes directly.
+pins the same content-addressed handles (§B1.4).
+
+**Decision (adopted by §A1.9):** a trace never names a syntactic index directly. Every
+prefix-dependent read goes through a question cell keyed by `(question, prefix)`, and the trace
+element is that question with the prefix abstracted. Context-free dependencies that are keyed by
+stable ids (`body_tokens(item)`, `item_tokens(item)`, pure matchers such as `match_partial`,
+other selection cells) appear in the trace as they are. A content-hash key in a trace element
+would never match in another prefix whose equivalent tree has a different hash, which is exactly
+the case the trie exists to share.
 
 #### B1.4 Contextual queries and traces: the engine contract
 
@@ -1171,14 +1562,28 @@ untracked, at most one leaf can match; the trie is a pure cache and may be empti
 changing any output.
 
 Two consequences shape everything below. A result may mention declaration ids, entity ids and
-item-relative positions, never a TU, a slot or a prefix, or two prefixes with identical traces
+item-relative positions, never a TU or a prefix, or two prefixes with identical traces
 would hold different results. And a computation asks questions only at its own prefix; an
 entity-keyed query asked at prefix `Q` (`class_def(C, Q)`, `instantiate_fn(spec, END)`) locates
 the defining item with a question (`definition_item(C, Q)`) and fetches that item's analysis at
 the item's own prefix, which is a sub-prefix of `Q`, as an ordinary dependency.
 
-Notation: in the rest of this document `ctx` in a query signature is the prefix argument, and
-`at: I` abbreviates the prefix of item `I`.
+Notation: in the rest of this document `ctx` in a query signature is the context argument
+`Ctx = (prefix, pinned, evaluating)`: the prefix, which the trie abstracts, and two small maps that
+are ordinary key data and empty in every ordinary demand (`pinned`, §B6.2; `evaluating`, §B7).
+Every fetch a contextual computation makes passes its own `ctx` on unchanged, except that
+`evaluating` grows along a constant-evaluation chain. `at: I` abbreviates the context whose prefix
+is that of item `I`; `complete_before(C, at I)` is therefore the question cell `complete_before(C,
+prefix-of-I)` (questions take the prefix alone).
+
+**Demand lists.** The value of every selection cell carries, besides its result, the ordered list
+of *direct demands* it made: for each instantiation, satisfaction check or constant evaluation it
+fetched, the index, the `(item, offset)` at which it was requested, and the fingerprint of the
+result it selected. Nested demands are in the demanded cell's own list, so `tu(TU)` reaches the
+transitive set by traversal. The list is a value like any other (fingerprinted, persisted with
+the leaf), so it is what "required from here" chains, emission sets and the first-demand table
+of §B6.2 are built from. The engine appends the entry when a demand is made with
+`cx.demand<Q>(key, loc)` (§A1.7).
 
 Divergence (two leaves under one index with different results) is not reported from the trie:
 `tu(TU)` emits the list of entity-keyed indexes it demanded with the result fingerprint selected
@@ -1197,9 +1602,18 @@ knows which.
 `entity_of(decl, ctx)` maps a declaration to a structural id: for namespaces, the canonical path;
 for classes and enumerations, `(scope entity, name)`; for functions, `(scope entity, name,
 canonical function type, template head)`; for specializations, `(template entity, canonical
-arguments)`; for internal-linkage and local entities, prefixed with the TU or enclosing entity.
-Entity ids never change when a redeclaration is added. They key everything program-wide:
-`class_def`, `layout`, `function_ir`, `instantiate_*`, `satisfies`, ODR.
+arguments)`. Entity ids never change when a redeclaration is added. They key everything
+program-wide: `class_def`, `layout`, `function_ir`, `instantiate_*`, `satisfies`, ODR.
+
+Entities with internal linkage, members of unnamed namespaces and local entities get ids that are
+**TU-free**: `(scope entity, name, declaration id of the first declaration)` for the first two
+(the unnamed namespace itself is identified by the declaration id of its first
+*namespace-definition*), `(enclosing entity, ordinal)` for local entities. The same `static`
+helper in a header therefore has one id in every TU, which is what lets results that mention it be
+shared; the standard's rule that such declarations in different TUs are different entities
+([basic.link]/8, /9) is applied where it is observable: `tu(TU)` gives their symbols a TU-local
+name at emission, and `odr_report` skips indexes whose entity has internal linkage or is
+TU-local. No TU appears in any entity id.
 
 ### B2. Program points and visibility
 
@@ -1209,9 +1623,10 @@ The question "which declarations of `name` in scope `S` precede item `I`" is the
     visible_decls(S, name, at: prefix)  →  ordered list of (declaration id, flags)
 
 a question cell computed by walking the prefix from the root: at each level,
-`list_decls_named(item-list handle, S, name)` for the level's items before the include item, with
-each earlier include item contributing `tree_decls_named(tree id, S, name)`; at the leaf, the
-item's own region's items before it. All of these are the shared syntactic indexes of §B1.3, so a
+`region_decls_named(R, S, name)` over the level's item-list handle `R` (the items before the
+include item), with each earlier include item contributing `tree_decls_named(tree id, S, name)`;
+at the leaf, the item's own region's items before it. All of these are the shared syntactic
+indexes of §B1.3, so a
 question cell is a handful of hash lookups and holds only content-addressed dependencies. `S` is a
 namespace entity id mapped to the scope paths that spell it (its canonical path; inline namespaces
 are handled in §B3). Lookups into inline namespaces, nominated namespaces and bases are separate
@@ -1225,9 +1640,23 @@ their prefixes do not contain the new item. A body edit elsewhere in the same fi
 prefixes to the items after it; their selection cells re-walk the trie, each question answers in
 O(1), each answer hash is equal, every walk lands on its old leaf.
 
-What the AST must provide: items as the unit of parsing; source positions stored as
-`(item, offset)` and only turned into file/line by a late query `item_location(item, ctx)` for
-diagnostics and debug info; declaration ids and entity ids as the only cross-item references.
+**Locations and source order (adopted by §A1.7 and §A5.2).** A location in any value, diagnostics
+included, is `Loc = (item id, offset)`: the offset counts tokens (or characters) from the start of
+the item's own tokens, so a `Loc` is a function of the item's content and is shared across TUs and
+prefixes. It is not an ordering key on its own and cannot be rendered on its own. `tu(TU)` renders
+it: the TU's tree gives the ordered sequence of its items, each with the file identity of its
+region and the item's offset in that file (the regions' token streams carry file offsets); from
+these `render(Loc, TU) = (file, line, column, include chain)`. Source order within a TU is the
+order of items in that sequence, then the offset; a diagnostic's sort key is that position, and
+duplicates of a shared item's diagnostic across TUs are merged by the driver on the rendered
+`(file, line, column, id, args)`. The "required from here" chain of an instantiation diagnostic is
+the sequence of request positions along the demand lists (§B1.4) from the TU's item to the
+instantiation, each rendered the same way. Equal `Loc`s in different items are different
+positions because the item id differs; an item that occurs twice in a TU is distinguished by its
+prefix-derived salt (§B1.2).
+
+What the AST must provide: items as the unit of parsing; source positions stored as `Loc`;
+declaration ids and entity ids as the only cross-item references.
 
 Rejected: absolute offsets as keys (every edit above shifts them); "the scope's member list" as
 the dependency (any addition to `std` would invalidate everything); order-maintenance labels
@@ -1265,11 +1694,11 @@ namespace N { void f(char); }   // after g: never affects visible_decls(N, f, at
 `visible_decls(M, name, at I)` for each `M` in `inline_members(N, at I)` (namespaces declared
 `inline` in `N` before `I`, transitively; [namespace.def.general]) ∪ the using-directive
 contribution: for each using-directive visible at `I` whose nominated namespace `U` has `N` as the
-nearest namespace enclosing both the directive and `U` ([namespace.udir]/2), `visible_decls(U,
+nearest namespace enclosing both the directive and `U` ([namespace.udir]/3), `visible_decls(U,
 name, at I)`. The set of directives is `directive_closure(at I)`: the using-directives in every
 scope of the chain before `I` (block-scope ones are inside the body being analysed and cost no
 query; namespace ones are `using_directives(Sk, at I)` per level), closed transitively through
-`using_directives(U, at I)` for each nominated `U` ([namespace.udir]/3). The closure is one query
+`using_directives(U, at I)` for each nominated `U` ([namespace.udir]/5). The closure is one query
 per item, shared by all names looked up from that item, and every lookup from `I` records it.
 
 ```cpp
@@ -1289,10 +1718,11 @@ fetched (so a new member in a base cannot disturb a lookup that `C` itself satis
 the lookup sets of the direct bases are merged with the subobject rules, and ambiguity is a
 *value* in the result, not an exception. Within the class definition but outside complete-class
 contexts ([class.mem.general]), members are filtered to those before the member item:
-`class_decls_named_before(C, name, member item)`. The rule that a name must mean the same thing
-when re-evaluated in the completed class ([basic.scope.class]) is IFNDR; we diagnose it by
-re-verifying the member's trace with the "before" filter removed once `class_def(C)` is done
-(§B6.6 explains the technique).
+`class_decls_named_before(C, name, member item)`. The rule that a search from a member declaration
+must give the same result as a search in a complete-class context of the class
+([class.member.lookup]/6) is IFNDR; `class_def(C)` diagnoses it by fetching, for each name its
+member declarations looked up, the complete-class answer and comparing (§B6.6 explains the
+technique).
 
 **Block scopes, template parameter scopes, enumeration scopes.** Block-scope declarations are
 inside the body being analysed and are plain data of that query; a hiding declaration added to a
@@ -1323,11 +1753,13 @@ answering in O(1) and cutting off); `class_decls_named` sees the class definitio
 
 ADL ([basic.lookup.argdep]) is `adl(name, arg types, at I)`:
 
-1. `associated(T)` per argument type: namespaces and classes per [basic.lookup.argdep]/3,
+1. `associated(T, at I)` per argument type: namespaces and classes per [basic.lookup.argdep]/3,
    computed from the canonical type, its template arguments, function parameter and return types,
-   and the bases of class types (`class_def(C)` fetched when complete; an incomplete class
-   contributes itself and its namespace only, and `complete_before(C, at I)` is recorded). Pure
-   per type and memoized program-wide.
+   and the bases of class types. It is contextual because bases are only known for a class that
+   is complete at `I`: it records `complete_before(C, at I)` for each class type it meets and
+   fetches `class_def(C, at I)` only when the answer is true; an incomplete class contributes
+   itself and its namespace only. Its trie has one leaf per distinct completeness pattern, which
+   in practice is one.
 2. For each associated namespace `N`: `visible_decls(N, name, at I)`, **without** the
    using-directive contribution ([basic.lookup.argdep]/4).
 3. For each associated class `C` that is complete at `I`: `friend_decls(C, name)` from
@@ -1354,7 +1786,7 @@ only after a matching namespace-scope declaration, which the region index will t
 
 Friend injection into a namespace is modelled as the region index listing the friend under the
 class, never under the namespace; nothing is "injected" as state. ADL in templates at the point
-of instantiation uses the same query with the instantiation context's position (§B6.2).
+of instantiation uses the same query at the instantiation's prefix (§B6.2).
 
 ### B5. Overload resolution
 
@@ -1411,35 +1843,101 @@ declaration properties); per-expression queries (memory; a body re-run is micros
 For each dependent unqualified call, the result stores the definition-context unqualified lookup
 set as a value ([temp.dep.candidate]: candidates are the definition-context lookup plus ADL from
 both contexts). Dependent qualified names and member accesses are left symbolic. This is a
-contextual query like any declaration's; its context is the template's own position.
+contextual query like any declaration's; its prefix is the template item's own.
 
 #### B6.2 Instantiation and its context
 
-    instantiate_fn(spec entity, prefix)      prefix = END of the TU (default) or a point
-    instantiate_class(spec entity, prefix)   prefix = point of first demand in the TU
-    instantiate_var(spec entity, prefix)     prefix = point of first demand in the TU
+    instantiate_fn(spec entity, prefix, evaluating = ∅)   prefix = END of the TU, or the demanding
+                                                          site's prefix when needed for constant
+                                                          evaluation ([temp.inst]/8)
+    instantiate_class(spec entity, prefix)                prefix = the demanding site's prefix
+    instantiate_var(spec entity, prefix, evaluating = ∅)  prefix = the demanding site's prefix
 
 The index is the specialization's entity id (`(template entity, canonical arguments)`), so a
 single trie serves the whole program. What the instantiation observed via ADL, partial
-specializations, completeness and constant evaluation is in its trace. Two TUs whose END prefixes
+specializations, completeness and constant evaluation is in its trace. Two TUs whose prefixes
 agree on every question walk to the same leaf and compute nothing. A TU whose preamble changes an
 answer computes a second leaf; `tu(TU)` reports the fingerprint it selected, and `odr_report`
-(§B10) diagnoses that the specialization has different meanings in the two TUs ([temp.point]/8
+(§B10) diagnoses that the specialization has different meanings in the two TUs ([temp.point]/7
 says that is ill-formed, no diagnostic required; we give one).
 
-Function template definitions use the END context because the end of the TU is a point of
-instantiation for every specialization that has one ([temp.point]/7), all points must agree or
-the program is IFNDR, and END sees the most declarations, which is what the real-world corpus
-assumes of compilers. The exception is a specialization needed for constant evaluation while
-parsing ([temp.inst]/8): it is instantiated in the context of the enclosing namespace-scope item
-and that cell is the one used for code generation. `tu(TU)` also fetches the same index at the END
-prefix and compares fingerprints; a difference means two points of instantiation disagree, and we
-diagnose it ([temp.point]/8) instead of silently choosing.
+**Function templates** use the END context because the end of the TU is a point of instantiation
+for every specialization that has one ([temp.point]/7), all points must agree or the program is
+IFNDR, and END sees the most declarations, which is what the real-world corpus assumes of
+compilers. `tu(TU)` demands them: it traverses the demand lists (§B1.4) of its items and fetches
+`instantiate_fn(spec, END)` for every function template specialization whose definition is
+required. The exception is a specialization needed for constant evaluation while parsing
+([temp.inst]/8): the evaluating site fetches it at its own prefix and that cell is the one used
+for code generation; `tu(TU)` also fetches the END cell and compares fingerprints; a difference
+means two points of instantiation disagree, and we diagnose it ([temp.point]/7) instead of
+silently choosing. The `evaluating` argument is the cycle-avoidance context of §B7 and is empty
+except on a constant-evaluation chain.
 
-Class templates use the point of first demand because completeness is observable and not covered
-by the IFNDR rule (`X<S>` instantiated before `S` is complete has a different, valid meaning), and
-a class template specialization has at most one point of instantiation per TU ([temp.point]), so
-there is nothing to compare within a TU; across TUs, `odr_report` compares the selected results.
+**Class templates: the demanding site's prefix, the first-demand table, and pins.** A class
+template specialization is implicitly instantiated when it is first referenced in a context that
+requires it to be complete ([temp.inst]/2), it has at most one point of instantiation per TU
+([temp.point]/7), and later uses in the same TU see that one instantiation. What the
+instantiation can observe of its point is: the specializations of its template that are visible
+(§B6.3), the completeness of the types its definition inspects (`sizeof(T)`, `T::type`, dependent
+bases), and ADL for dependent calls in the class body. A sequential compiler finds the first
+demand by having done everything before it. A query cannot: a demanding site asks questions only
+at its own prefix (§B1.4), and a question `first_demand(spec, prefix)` would be an aggregation
+over the *semantic* results of every earlier item, bodies included, making every item depend on
+every earlier body and serialising the TU. There is no such question.
+
+The rule has three parts.
+
+1. *Every demanding site fetches `instantiate_class(spec, own context)`.* In a program whose
+   meaning does not depend on the order of demands, every site's walk lands on the same leaf,
+   because the questions (completeness of the inspected types, the specialization set, ADL
+   answers) have the same answers at every site. This is the common case and costs nothing beyond
+   the walk.
+2. *`tu(TU)` builds the first-demand table.* It traverses its items in source order and, within
+   each, the demand lists (§B1.4) in program order, recording `spec → (first demanding Loc, the
+   context of the cell that demanded it, selected fingerprint)`. The first entry is the TU's point
+   of instantiation for attribution and the "required from here" chain.
+3. *Divergence is repaired by pinning.* The context of every contextual query is
+   `Ctx = (prefix, pinned, evaluating)`, where `pinned` is a small sorted map `spec → Ctx` that is
+   key data like `evaluating` (§B7), threaded unchanged into every fetch the computation makes,
+   and empty in every ordinary demand. `instantiate_class(S, ctx)` with `S ∈ ctx.pinned` does not
+   compute: it fetches `instantiate_class(S, ctx.pinned[S])`, the cell in which this TU first
+   instantiated `S`, as an ordinary dependency, and returns its result. When `tu(TU)`, processing
+   item `J`, finds in `J`'s demand list a class specialization `S` whose fingerprint differs from
+   the table's earlier entry, it re-fetches `J`'s analysis with `pinned ∪ {S → first context}`
+   and traverses the new demand list; it repeats until the list agrees with the table, then moves
+   on. Later items inherit no pins unless they diverge themselves.
+
+Why this is sound. The pin map is in the key, so `analyze(J, P_J, {S → c})` and `analyze(J, P_J,
+∅)` are different indexes with their own tries; the one-leaf argument of §A1.9 is unchanged
+because each is a deterministic function of its key and its recorded answers. A pin names a cell
+(`spec` and the full context it was demanded in), not a fingerprint, so there is no
+fingerprint-to-value lookup and an evicted value is recomputed at exactly the context that
+produced it. Pins flow to nested demands because they are part of the context that every fetch
+inherits: an `S` demanded inside `instantiate_class(X<T>, ctx)` or inside an
+`instantiate_fn(spec, END-ctx)` sees the same `pinned`. The table is built in source order and
+each item is repaired before the next is examined, so an earlier entry is always the corrected
+one. Termination: each round adds at least one pin for a specialization `J` demands, a pin is
+never removed, and the specializations `J` can demand are finite (instantiation depth is
+bounded), so the rounds are bounded in practice by the number of divergent specializations,
+which is one or two. Determinism: source order, sorted maps, no completion-order input.
+
+What it costs. In the common case, nothing: `pinned = ∅` in every key, the table is a traversal
+over values `tu(TU)` needs anyway for emission and `odr_report`, no new question cells exist, and
+no body depends on another body. In the divergent case, one re-analysis of the divergent item per
+round under a TU-specific key (the pin's context is this TU's), with the pinned instantiation
+itself not recomputed; the result for `J` is then exactly the sequential compiler's. The
+`is_complete<T>` idiom and its relatives are the programs that take this path. A note-level
+diagnostic ("`X<S>` at a.cpp:14 uses the instantiation from a.cpp:10, where `S` was incomplete")
+is available as a warning and off by default.
+
+**Variable templates, static data members and satisfaction** are not pinned. Their
+specializations have the end of the TU as an additional point of instantiation, so two points
+that disagree make the program ill-formed, no diagnostic required ([temp.point]/7); identical
+atomic constraints with different satisfaction results at different points are likewise IFNDR
+([temp.constr.atomic]/3). For these the table entry with a different fingerprint is reported as
+an error with the differing question found by the §B6.6 technique ("`V<S>` evaluated at a.cpp:14
+differs from a.cpp:10; `S` is complete at the second point and not at the first"). Pinning them
+would silently pick one meaning for a program the draft says has none.
 
 The example the design must get right:
 
@@ -1466,14 +1964,20 @@ fingerprints for one index, so `odr_report` says that `call<lib::S>` means diffe
 `select_specialization(primary, args, prefix)` gathers `explicit_specs(primary, prefix)` and
 `partial_specs(primary, prefix)`, both question cells over the syntactic indexes,
 matches each candidate with `match_partial(spec, args)` ([temp.spec.partial.match]; pure, shared)
-and orders with `more_specialized(a, b)` ([temp.spec.partial.order]; pure, shared). The context
-position is END: a partial or explicit specialization must be declared before the first use that
-would select it, in every TU, or the program is IFNDR ([temp.spec.partial.general],
-[temp.expl.spec]), so using the TU-wide set is permitted and maximizes sharing. The diagnostic
-is again a comparison of two cells: `tu(TU)` knows the prefix of the first demand of each
-specialization (it orders demands by source position anyway, §B6.4) and fetches
-`select_specialization(primary, args, first-demand prefix)` beside the END one. A different
-winner is reported as "specialization declared after a use that it would affect".
+and orders with `more_specialized(a, b)` ([temp.spec.partial.order]; pure, shared). **The prefix
+is the instantiating computation's own**: an instantiation at prefix `P` selects among the
+specializations visible at `P`, which is what a sequential compiler does and is the only prefix
+the computation may ask at (§B1.4); an instantiation demanded by `tu(TU)` at END selects among
+the TU-wide set. A partial or explicit specialization must be reachable from every use that
+would select it, in every TU, or the program is ill-formed, no diagnostic required
+([temp.spec.partial.general]/1, [temp.expl.spec]/7), so a declaration that appears after such a
+use can only make the program IFNDR, and we diagnose it: `tu(TU)` fetches, for every class and
+variable specialization in its first-demand table (§B6.2), `select_specialization(primary, args,
+END)`, a cheap cell (question cells plus memoized matches), and compares the winner with the one
+recorded in the instantiation's result. A different winner is "specialization of `X` declared
+at a.cpp:30 after a use at a.cpp:12 that it would affect". Sharing is unaffected in practice:
+specializations live in headers, so the answers to `explicit_specs`/`partial_specs` are the same
+at every demanding prefix and the walks land on one leaf.
 
 Across TUs:
 
@@ -1490,10 +1994,14 @@ that TU; each is a few memoized matches, and the winner is usually unchanged, so
 
 #### B6.4 Points of instantiation and ordering
 
-Which instantiations a TU emits and in what order is `tu_instantiations(TU)`: the set of
-specialization entities demanded transitively, ordered by the source position of first demand
-(item, offset), never by completion order (DECISIONS §4.4). Diagnostics from an instantiation are
-attached to that position.
+Which instantiations a TU emits is the transitive closure of the demand lists (§B1.4) reached from
+the TU's items, computed by `tu(TU)`. **Emission order is by mangled name** (adopted by §A5.3):
+the mangled name is a function of the entity id, so moving a use within the TU does not reorder
+the object file, and two TUs emitting the same COMDAT group emit it identically. Source positions
+are used only for attribution: diagnostics from an instantiation are attached to the first
+demanding `Loc` in the TU's first-demand table (§B6.2), and the "required from here" chain is the
+path of request positions through the demand lists. Nothing is ordered by completion order
+(DECISIONS §4.4).
 
 #### B6.5 Constraints and `requires`
 
@@ -1501,43 +2009,69 @@ attached to that position.
 atomic constraints with `atomic_satisfied(atomic id, mapping, ctx)`, each a substitution followed by
 constant evaluation (§B7); `requires`-expressions ([expr.prim.req]) substitute each requirement and
 record the lookups, conversions and completeness checks they perform, with substitution failure
-as a `false` *value*. The context is the point of first demand, not END: a requirement like
-`requires { sizeof(T); }` legitimately differs before and after `T` is defined, and only *checking
-it at both points* is IFNDR ([temp.constr.atomic]/3). Memoization by entity id gives the required
-caching; a second entry with a different result for the same key is the IFNDR case and is
-diagnosed.
+as a `false` *value*. The prefix is the demanding site's, not END: a requirement like `requires {
+sizeof(T); }` is legitimately false before `T` is defined, and a program that checks it only there
+is well-formed. If identical atomic constraints with the same arguments have different
+satisfaction results at different points in the program, the program is ill-formed, no diagnostic
+required ([temp.constr.atomic]/3); we diagnose it exactly as for class templates (§B6.2): the
+index `(atomic constraint, mapping)` appears in the demand lists, `tu(TU)`'s first-demand table
+sees two fingerprints for it within a TU, and `odr_report` sees them across TUs. Memoization by
+the atomic constraint and its arguments is the caching the draft describes; a well-formed program
+walks to one leaf from every point.
 
 #### B6.6 The re-verification technique
 
 Several rules say "if this gives a different answer at another point, the program is ill-formed,
-no diagnostic required" ([temp.point]/8, [temp.constr.atomic]/3, [temp.spec.partial.general],
-[temp.expl.spec], [basic.scope.class]). Each is implemented by one mechanism: fetch the same
-index at the other point's prefix and compare the selected fingerprints. When the program is
-well-formed the second fetch is a trie walk, one hash lookup per trace element and no
-computation; only when an answer differs is a second result computed, which is exactly the case
-being diagnosed. The explanation is the first question on the selected path whose answer differs
-at the other prefix ("`f(S, long)` is visible at the end of the TU but not at the point of
-instantiation"), computed from live question cells. Divergence between TUs is the same comparison
-performed by `odr_report` over the fingerprints each `tu(TU)` selected.
+no diagnostic required" ([temp.point]/7, [temp.constr.atomic]/3, [temp.spec.partial.general]/1,
+[temp.expl.spec]/7, [class.member.lookup]/6). Each is implemented by one mechanism: the same
+index fetched at two prefixes, and the selected fingerprints compared. The two cells come from
+two demanding sites (the first-demand table of §B6.2), from a site and END (`tu(TU)` for function
+templates and specialization selection), or from a member declaration and the complete class
+(`class_def`). When the program is well-formed the second fetch is a trie walk, one hash lookup
+per trace element and no computation; only when an answer differs is a second result computed,
+which is exactly the case being diagnosed. The explanation is the first question on the selected
+path whose answer differs at the other prefix ("`f(S, long)` is visible at the end of the TU but
+not at the point of instantiation"), computed from live question cells. Divergence between TUs is
+the same comparison performed by `odr_report` over the fingerprints each `tu(TU)` selected.
 
 ### B7. Constant evaluation and reflection
 
 Constant evaluation runs ycxx's IR in the interpreter (DECISIONS §4.6) inside whichever query
 needs the value (an initializer, a template argument, `static_assert`, an array bound,
-`if constexpr`, a satisfaction check). It is not itself a query per expression; the memoized
-results are `constant_value(variable entity, ctx)` for variables with constant initializers and
-`function_ir(entity, ctx)` for callees. What an evaluation records:
+`if constexpr`, a satisfaction check). It is not itself a query per expression: the evaluation of
+one expression, with all the constexpr calls it makes, runs inside the query that contains the
+expression (`decl_sema`, `analyze_body`, `instantiate_*`, `atomic_satisfied`), with a step limit,
+so constexpr recursion is a step-limit error and never a cycle (§A2.4). The memoized units are:
+
+    constant_value(variable entity, prefix, evaluating = ∅)   the value of a variable usable in
+                                                              constant expressions, from its
+                                                              initializer at the variable's own prefix
+    function_ir(function entity, prefix)                      the IR the interpreter runs
+
+`evaluating` is the ordered set of variable entities whose initializers are being evaluated on the
+current chain (the "in progress" flag of a sequential compiler made a key argument, §A2.4). A
+read of a variable in `evaluating` yields "not usable in constant expressions" ([expr.const])
+without a fetch; otherwise the read fetches `constant_value(V, prefix, evaluating ∪ {current})`.
+The same set is threaded through `instantiate_fn` and `instantiate_var` when a constant
+evaluation demands them (§B6.2), because an instantiated body can contain a constant expression
+that reads a variable on the chain (`template<class T> constexpr int f() { int a[V<T>]; … }`
+with `template<class T> constexpr int V = f<T>();`). It is empty in every ordinary demand, so the
+key space grows only along such chains, which exist only in ill-formed programs. `pinned`
+(§B6.2) travels in the same context and is never changed by an evaluation. The entity in
+the key is enough for variable template specializations (`V<int>`) and static data members of
+class template specializations (`X<int>::n`); their initializer is instantiated by the
+`constant_value` computation itself. What an evaluation records:
 
 - `function_ir(F, ctx)` for every call, and `definition_before(F, at I)`: a constexpr function
   that is not defined at the point of evaluation makes the expression non-constant
   ([expr.const]); the negative answer changes when a definition appears before `I` and stays
   equal when one appears after.
-- `constant_value(V, ctx)` for every `constexpr`/`constinit`/const-integral variable read, and
-  `definition_before(V, at I)`.
+- `constant_value(V, ctx, evaluating)` for every `constexpr`/`constinit`/const-integral variable
+  read, and `definition_before(V, at I)`.
 - `layout(C, ctx)` for `sizeof`, member offsets and object representation, `vtable(C)` for virtual
   calls, `class_def(C, ctx)` for member access, `complete_before(C, at I)`.
-- For template specializations needed by the evaluation, `instantiate_fn(spec, ctx)` with this
-  point's context (§B6.2).
+- For template specializations needed by the evaluation, `instantiate_fn(spec, ctx, evaluating)`
+  at this point's prefix (§B6.2).
 
 Reflection ([meta.reflection]): `members_of(^^C, ctx)` on a class fetches `class_def(C, ctx)` and
 is therefore as coarse as the member list, which is the right granularity because the result
@@ -1551,8 +2085,9 @@ possible). `type_of`, `parameters_of`, `template_arguments_of` and friends map t
 ([dcl.pre]) are side effects, modelled as results: `item_effects(J, ctx)` is the list of
 synthesized declarations an item's plainly constant-evaluated evaluations produce, with ids
 derived from `(J, ordinal)`. `definition_item(S, ctx)` consults the region indexes *and*
-`injected_definitions(TU, at I)`, an aggregation of `item_effects` over items before `I`, kept per
-region so that a region with no reflection produces an empty value that cuts off. The draft
+`injected_definitions(prefix)`, a question cell aggregating `item_effects` over the items of the
+prefix, kept per item list so that a region with no reflection produces an empty value that cuts
+off. The draft
 restricts injection to plainly constant-evaluated contexts, which is what makes `item_effects` a
 function of the item rather than of the order in which speculative evaluations happened to run.
 
@@ -1561,11 +2096,14 @@ orders; `__COUNTER__`-like state does not exist at this level.
 
 ### B8. Class completeness and layout
 
-- `definition_item(E, ctx)`: which item (or injected declaration) before this prefix defines `E`;
-  `complete_before(C, at I)` is `definition_item` compared with `I`, a boolean whose change
-  invalidates exactly the observers of (in)completeness: `sizeof` in a `requires`, derived-to-base
-  conversions, member access, `C::m`, base specifiers, ADL association by bases, `is_complete`
-  tricks.
+- `definition_item(E, prefix)`: which item (or injected declaration) in the prefix defines `E`.
+- `complete_before(C, prefix)`: a question cell, true iff `definition_item(C, prefix)` exists (for
+  a class template specialization: iff its instantiation has been demanded, which the demanding
+  computation knows because it demands it) or the prefix is inside a complete-class context of
+  `C`. It is a cell, never a transparent function, because its answer is what traces branch on
+  (adopted by §A2.4 and §A10 in place of `is_complete_at(S, pos)`). Its change invalidates exactly
+  the observers of (in)completeness: `sizeof` in a `requires`, derived-to-base conversions,
+  member access, `C::m`, base specifiers, ADL association by bases, `is_complete` tricks.
 - `class_def(C, ctx)`: the analysed definition without its complete-class contexts: bases
   (resolved), members with their types, access, `virtual`/`override`, friends, nested types,
   static data members. Default member initializers, member function bodies, default arguments and
@@ -1609,9 +2147,9 @@ region's delta). Its result is the region: tokens
   inputs ([cpp.predefined]).
 
 `__LINE__` and `__FILE__` are functions of the file's own content and spelled path. `__DATE__` and
-`__TIME__` are an input `build_timestamp` set by the client per build request (default: the
+`__TIME__` are an input `build_time` (§A1.1) set by the client per build request (default: the
 request time); a region that uses them records it and is legitimately re-preprocessed every
-build, with a warning. Incremental equals cold because the cold run is given the same timestamp.
+build, with a warning. Incremental equals cold because the cold run is given the same `build_time`.
 
 Reuse: a header's region is reused across include sites and TUs whenever its trace verifies. A
 guarded header included a second time verifies the trace `{macro(X): undefined}`, fails, and
@@ -1661,9 +2199,11 @@ constraints of one declaration); `class_def`, `layout`, `vtable`; `analyze_body(
 `directive_closure`, `complete_before`, `definition_item`, `macro`.
 
 **(i) Editing a function body in `a.cpp`.** The main region's hash changes; `region_items` re-runs
-(a lex and split of the file, milliseconds); item ids are unchanged except that `body_tokens(f)`
-changes. Every item of the region has its trace re-asked: each `visible_decls` is a new region
-key answered in O(1); all verify. `analyze_body(f)` re-runs, `function_ir(f)` re-runs; if `f` is
+(a lex and split of the file, milliseconds); item ids are unchanged, and `body_tokens(f)` changes.
+Items before `f` keep their prefixes and nothing about them is touched. Items after `f` have new
+prefixes (their item-list handle now contains the new body); their selection cells walk the trie,
+each question answered in O(1) from the new indexes, and land on their old leaves.
+`analyze_body(f)` re-runs, `function_ir(f)` re-runs; if `f` is
 `constexpr` and was evaluated elsewhere, those evaluations re-validate on `function_ir(f)` and cut
 off if the IR is equal. If `f` has a deduced return type, `return_type(f)` re-runs and callers cut
 off when it is unchanged. Code generation for `f` only.
@@ -1683,8 +2223,8 @@ per trace element; per calling body, one re-analysis. Nothing is re-parsed excep
 `select_specialization(X, args, ctx)` re-runs for each specialization of `X` demanded in TUs that
 see the new declaration (`match_partial` against the new candidate, memoized across TUs); winners
 unchanged cut off; a changed winner re-instantiates that one class and its dependents. The
-first-use re-verification reports uses that preceded the new specialization and would have selected
-it.
+END comparison in `tu(TU)` (§B6.3) reports uses that preceded the new specialization and would
+have selected it.
 
 **(iv) Adding a hidden friend to `S`.** `class_def(S)` changes (new item in the class body).
 `friend_decls(S, name)` changes for that name only; ADL lookups with `S` associated that asked that
@@ -1694,8 +2234,11 @@ for other names cut off.
 **(v) Adding `#define FOO` to a header `h.h`.** `pp(h.h)` recomputes; its delta now defines `FOO`.
 Every later region in each TU that tested `FOO` (`#ifdef FOO`, or merely spelled the identifier
 `FOO`) fails its `macro(FOO)` question and re-preprocesses; regions that never mention `FOO`
-verify. Re-preprocessed regions with unchanged tokens have unchanged region hashes and nothing
-below them moves.
+verify. A re-preprocessed region whose complete result (tokens, macro delta, `#pragma once` and
+`__COUNTER__` effects) is unchanged keeps its tree id, so the prefixes of what follows it are
+unchanged and nothing below it moves; `h.h` itself has a new tree id, so everything after its
+include item in each TU gets a new prefix and walks the trie, landing on old leaves wherever
+`FOO` was not asked about.
 
 ### B12. Soundness and test strategy
 
@@ -1731,7 +2274,9 @@ Over-invalidation accepted on purpose, with expected cost:
 - Region re-split on any edit to the file (a lex pass).
 - Ordinal shift among identical redeclarations when an earlier twin is removed.
 - A trace re-ask per recorded question for every item after an edit in the same file (O(1) each).
-- `__COUNTER__` and `build_timestamp` users recompute every time they legitimately must.
+- `__COUNTER__` and `build_time` users recompute every time they legitimately must.
+- An item whose class template demands diverge from the TU's first demand is analysed once more
+  per divergent specialization, under a TU-specific pinned key (§B6.2).
 
 ### B13. Rejected alternatives, collected
 
@@ -1753,6 +2298,20 @@ Over-invalidation accepted on purpose, with expected cost:
   multiply by the TU count, and a hook's output depends on garbage-collection timing.
 - **Per-TU prefix chains over all nested regions.** O(regions × names) nodes per TU; the include
   tree aggregation shares everything below the top level.
+- **A `first_demand(spec, prefix)` question** for class template instantiation. Its answer is an
+  aggregate of the semantic results of every earlier item, bodies included, so every item would
+  depend on every earlier body: the TU becomes sequential (§B6.2).
+- **Rejecting programs whose class template instantiation depends on demand order** (Part B's
+  first answer to the first-demand problem). A conforming program ([temp.point]/7 gives the
+  specialization one point of instantiation and later uses see it) would be refused; pinning
+  (§B6.2) gives the sequential meaning at a cost confined to the divergent item.
+- **Pinning by fingerprint** rather than by the first demand's cell. Needs a fingerprint-to-value
+  lookup in the trie and a way to recompute an evicted value without knowing its context; a pin
+  that names the cell has neither problem.
+- **Pinning variable templates, static data members and satisfaction.** Their divergence is IFNDR
+  ([temp.point]/7, [temp.constr.atomic]/3); pinning would hide it.
+- **Emission in first-demand source order.** Moving a use reorders the object file and makes
+  COMDAT contents TU-dependent; mangled-name order has neither problem (§B6.4).
 - **TU-level reanalysis when a header changes.** The status quo this project exists to replace.
 
 ### B14. Points settled with Part A
@@ -1761,6 +2320,17 @@ Over-invalidation accepted on purpose, with expected cost:
   divergence is `odr_report` over the fingerprints each `tu(TU)` selected (§A1.9).
 - Question cells are recomputed in O(1) from the syntactic indexes and are not persisted; trie
   leaves are persisted as `(index, path, result)` records (§A1.9, §A7).
+- Decisions Part B makes that Part A adopts: a tree id is the fingerprint of the complete `pp`
+  results (§B1.1); a trace names question cells and stable-id context-free cells, never a
+  syntactic index (§B1.3); `Loc = (item id, offset)` rendered and ordered by `tu(TU)` (§B2);
+  selection-cell values carry their direct demand list with request positions (§B1.4), which is
+  where "required from here" chains come from; `complete_before(C, prefix)` is a cell (§B8);
+  the context of a contextual query is `Ctx = (prefix, pinned, evaluating)`, the prefix abstracted
+  by the trie and the two maps ordinary key data, empty in ordinary demands (§B1.4, §B6.2, §B7);
+  `tu(TU)` builds the first-demand table and repairs class template divergence by re-fetching the
+  divergent item with `pinned` (§B6.2); emission order by mangled name (§B6.4); the input is named
+  `build_time` (§B9); internal linkage entity ids are TU-free and made TU-local only at emission
+  (§B1.5).
 - Still to confirm with the preprocessor design: the token-level prefix for `pp` (§B9) and the
   placement of an `#include` that falls inside an item.
 
@@ -1795,7 +2365,6 @@ standalone (`make check`) because the build skeleton (#4) does not exist yet. Me
 The spike confirms the parts of Part A it implements:
 - ordered dependency groups, validated group by group with every member of a group verified;
 - per-entry claiming, so each query executes at most once per revision;
-- fork-join where a joiner runs only its own join's tasks;
 - early cutoff by equality;
 - per-name firewall queries, with negative results as values;
 - positions relative to items.
@@ -1810,7 +2379,10 @@ It deliberately leaves out several things Part A specifies:
   spike has no way to end a request early.
 - **Diagnostics as values.** They are values in the toy, but collected ad hoc rather than by
   `diags_of` (§A1.7).
-- **Cell storage.** Entries are heap objects; Part A uses dense cell ids in arenas (§A3.3).
+- **Cell storage.** Entries are heap objects; Part A uses dense cell ids in arenas (§A3.6).
+- **Scheduling.** The spike uses threads that block in a fork-join, where a joiner runs only its
+  own join's tasks. Part A replaces this with coroutines on `std::execution`, so no thread
+  blocks (§A3).
 - **The C++-specific parts:** contextual queries, items cut from tokens, point-of-declaration
   ordering, scopes, ADL, templates and the preprocessor.
 
@@ -1828,7 +2400,7 @@ These are posted as comments on #2 and #3.
   (§B2).
 - **Two identities.** Declaration ids (syntactic) and entity ids (structural, program-wide) are
   the only references between items. There are no pointers between items' trees and no parent
-  pointers: a shared green tree is navigated through a red view that is never stored (§B1.5).
+  pointers: a shared green tree is navigated through a red view that is never stored (§B1.2, §B1.5).
 - **Nodes** are immutable, hash-consed, and carry Merkle fingerprints. Types have structural
   equality, and their canonical form does not depend on interning order. Every value is
   equatable, fingerprintable and serializable without the interner.
@@ -1843,14 +2415,23 @@ These are posted as comments on #2 and #3.
   (§B8).
 - **Templates.** A template's analysed form stores, for each dependent unqualified call, the
   definition-context lookup set as a value, and keeps dependent constructs symbolic (§B6.1).
-- **Contextual results.** The context of a contextual query is a `Prefix`, never a TU or a slot.
-  The results of contextual queries mention nothing context-specific (§A1.9).
-- **Instantiation requests** carry their request position on the edge (`cx.at(pos)`), never in
-  the key (§A1.7).
+- **Contextual results.** The context of a contextual query is a `Prefix`, never a TU. The
+  results of contextual queries mention nothing context-specific: no TU, no prefix (§A1.9).
+- **Demands.** Instantiations, satisfaction checks and constant evaluations are `demanded` kinds,
+  fetched with `cx.demand(key, loc)`. The request `Loc` goes into the demanding cell's demand list,
+  a value persisted with it, never into the key and never onto an edge; `tu(TU)` builds the
+  first-demand table and the "required from here" chains from demand lists (§A1.7, §B1.4, §B6.2).
 - **Synthesized declarations** get ids from their origin and an ordinal. These are implicit
   special members, deduction guides, injected-class-names, and declarations created by
   `define_aggregate` or consteval blocks (§B7).
 - **Ordering.** Containers iterate deterministically, and no result depends on hash-table order.
+- **Kinds and coroutines.** A query's `run` is a `query_task` coroutine unless the kind is
+  `cheap`, in which case it is a synchronous function that may fetch only inputs and other
+  `cheap` kinds (§A3.3). The question queries of Part B (`visible_decls`, `macro`, the region
+  indexes, `complete_before`) are `cheap`; everything that can instantiate, evaluate or analyse a
+  body is a coroutine. Keys are structural aggregates of handles (§A10.1); every `Prefix` key
+  member that is the computation's context carries `[[=context]]`, on contextual kinds and
+  question cells alike; `complete_before(C, prefix)` is a cell everywhere, never transparent.
 
 **On the optimization architecture (#3):**
 
@@ -1867,8 +2448,11 @@ These are posted as comments on #2 and #3.
   internally; the engine never resolves cycles (§A2.1).
 - **Parallelism** inside the optimizer uses positional `par_fetch`/`par_map` or solvers'
   deterministic modes. There is no shared mutable e-graph across tasks.
-- **Cancellation.** Solvers poll `check_cancelled()` at their deterministic checkpoints and
-  return the heuristic result when cancelled.
+- **Cancellation.** Solvers poll `cx.stop_token().stop_requested()` at their deterministic
+  checkpoints and return the heuristic result when stopped; a solver that runs for more than a
+  few milliseconds between checkpoints `co_await`s `schedule(pool)` there to yield its worker.
+- **Coroutines.** Optimizer queries are `query_task` coroutines like any other; solver back ends
+  behind the constraint layer may be synchronous leaves called from one.
 - **Evidence.** Results carry their verification evidence as a value, so a replay re-checks
   instead of trusting.
 - **The optimization cache** is read only through `best_available(key, B, S)`, with the snapshot
@@ -1891,13 +2475,21 @@ Open items, to be settled in the implementation issues below:
   the directive), because items are not known until the region is complete. An `#include` that
   falls inside an item is placed before that item. To be confirmed with the preprocessor work
   (§B9).
+- **Coroutine frame sizes.** Measure the frame size of representative queries under GCC 16 and
+  the cost of the free-list path against the budget of §A3.3; decide whether large frames need a
+  size cap enforced by a `static_assert` on `sizeof` of the promise plus locals.
+- **Bootstrap workarounds.** None needed by the probes of §A10.4. Each one that becomes necessary
+  is marked `// BOOTSTRAP:` and listed in STATUS (DECISIONS §3.2).
+- **libycxx `std::execution` gaps** that touch the daemon's edges: `task_scheduler` allocating its
+  backend per construction (construct one and keep it), `spawn_future` reporting no completion
+  domain (avoid `spawn_future` in the engine; `spawn` into a `counting_scope` suffices).
 
 Follow-up implementation issues are opened when this design is accepted, one per row:
 
 | Issue | Area | Content |
 | --- | --- | --- |
 | Engine core | `area:query-engine` | Cells, the sharded table, fingerprints, red/green with groups, durability, diagnostics as values with `diags_of`, the query API of §A10 |
-| Scheduler | `area:query-engine` | Chase–Lev pool with priorities and compensation, wait-for-graph cycle detection, cooperative cancellation |
+| Scheduler | `area:query-engine` | `pool_scheduler` (Chase–Lev deques, two priorities, `std::execution::scheduler` and `parallel_scheduler_replacement` backend), `query_task`, `cell_sender`, `par_fetch`, frame free lists, wait-for-graph cycle detection over suspended frames, stop-token cancellation |
 | Contextual queries | `area:query-engine` | Prefixes, selection cells, per-index trace tries, `odr_report` |
 | Memory and persistence | `area:query-engine` | Interners, three-step eviction, the on-disk cache and loading |
 | Incremental == cold harness | `area:tests`, `area:query-engine` | Edit generators, table comparison, `--verify-memo`, chaos scheduler, cancellation injection |
