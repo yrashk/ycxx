@@ -23,7 +23,9 @@ class Fixtures(unittest.TestCase):
         if cut is None:
             raise unittest.SkipTest('neither Clang 23 nor GCC 16 found')
         cls.tmp = tempfile.TemporaryDirectory()
-        cls.ctx = kinds.Ctx(REPO, cut, cls.compilers, 'clang', Path(cls.tmp.name), 20)
+        # Generous, as in #145: a timeout only guards a hang, and a loaded machine must not turn a
+        # fixture's expected outcome into TIMEOUT (own/timeout.run.cpp sets its own).
+        cls.ctx = kinds.Ctx(REPO, cut, cls.compilers, 'clang', Path(cls.tmp.name), 120)
 
     @classmethod
     def tearDownClass(cls):
