@@ -15,6 +15,10 @@ export namespace ycxx::sema {
 using ast::TemplateArg;
 using ast::TemplateArgKind;
 
+// The depth of the `VDepParam` that stands for a value-dependent expression in a template's
+// definition, which only an instantiation evaluates.
+inline constexpr u16 dependent_depth = 0x7ffe;
+
 // The arguments a substitution gives, per template-head depth then parameter index (ast.md §5.6);
 // a parameter without one stays as it is.
 struct Bindings {
@@ -91,6 +95,19 @@ public:
     case TypeKind::array: {
       auto e = substitute(r.inner, b);
       if (!e || !types().is_object(*e)) return std::nullopt;
+      if (r.bound_value != ConstId::none && ins().values.is_dependent(r.bound_value)) {
+        // A bound that is a non-type parameter; one that is any other dependent expression is
+        // known only to an instantiation of the body (#88).
+        auto p = ins().values.get<ast::VDepParam>(r.bound_value);
+        auto a = b.at(p.depth, p.index);
+        if (!a) return p.depth == dependent_depth ? std::nullopt : std::optional(types().array_dependent(*e, r.bound_value));
+        if (a->kind != TemplateArgKind::value || !ins().values.is<ast::VInt>(a->value)) return std::nullopt;
+        // [dcl.array]/1: the bound's value is greater than zero.
+        if (ast::is_signed(target, *types().builtin_of(a->type)) && ast::is_negative(ast::int_bits(ins(), a->value)))
+          return std::nullopt;
+        if (ast::int_bits(ins(), a->value) == ast::Bits128{}) return std::nullopt;
+        return types().array_dependent(*e, a->value);
+      }
       return types().array(*e, r.bound);
     }
     case TypeKind::function: {
@@ -114,8 +131,12 @@ public:
     TypeRec r = types().rec(t);
     switch (r.kind) {
     case TypeKind::template_param: return r.depth == depth;
-    case TypeKind::pointer:
     case TypeKind::array:
+      if (r.bound_value != ConstId::none && ins().values.is<ast::VDepParam>(r.bound_value) &&
+          ins().values.get<ast::VDepParam>(r.bound_value).depth == depth)
+        return true;
+      return mentions(r.inner, depth);
+    case TypeKind::pointer:
     case TypeKind::reference: return mentions(r.inner, depth);
     case TypeKind::function:
       return mentions(r.inner, depth) || std::ranges::any_of(r.params, [&](QualType p) { return mentions(p, depth); });
@@ -149,7 +170,20 @@ public:
       // Under /4.2 the pointee may be less cv-qualified in A: a qualification conversion adds it.
       return deduce(pr.inner, ar.inner, depth, out, {.more_cv = allow.qualification, .qualification = false});
     case TypeKind::reference: return pr.rvalue_ref == ar.rvalue_ref && deduce(pr.inner, ar.inner, depth, out);
-    case TypeKind::array: return pr.bound == ar.bound && deduce(pr.inner, ar.inner, depth, out);
+    case TypeKind::array:
+      // [temp.deduct.type]/8: `T[i]`, a non-type parameter deduced from the bound.
+      if (pr.bound_value != ConstId::none && ins().values.is<ast::VDepParam>(pr.bound_value)) {
+        auto p = ins().values.get<ast::VDepParam>(pr.bound_value);
+        if (p.depth == depth) {
+          if (ar.bound_value == ConstId::none || !ins().values.is<ast::VInt>(ar.bound_value)) return false;
+          QualType size = types().canonical(ins().values.get<ast::VInt>(ar.bound_value).type);
+          if (!bind(out, p.index, {TemplateArgKind::value, size, ar.bound_value})) return false;
+          return deduce(pr.inner, ar.inner, depth, out, {.more_cv = allow.more_cv});
+        }
+      }
+      // An array's cv-qualifiers are its elements' ([basic.type.qualifier]/3).
+      return pr.bound == ar.bound && pr.bound_value == ar.bound_value &&
+             deduce(pr.inner, ar.inner, depth, out, {.more_cv = allow.more_cv});
     case TypeKind::function:
       if (pr.params.size() != ar.params.size() || pr.variadic != ar.variadic || pr.fn_cv != ar.fn_cv) return false;
       if (!deduce(pr.inner, ar.inner, depth, out)) return false;
@@ -205,8 +239,7 @@ public:
         if (pr.rvalue_ref && inner.kind == TypeKind::template_param && inner.depth == depth &&
             Types::cv(types().canonical(pr.inner)) == Cv::none && args[i].lvalue)
           a = types().lvalue_ref(a);
-        else
-          p = pr.inner;
+        p = pr.inner;
         allow.more_cv = true;
       } else {
         // [temp.deduct.call]/2: A decays, and top-level cv is dropped from both.
@@ -217,6 +250,15 @@ public:
         allow.qualification = types().is_pointer(p);
       }
       if (!deduce(p, a, depth, out, allow)) return std::nullopt;
+    }
+    // A value deduced from an array bound converts to its parameter's type
+    // ([temp.deduct.type]/20).
+    for (std::size_t i = explicit_args.size(); i < params.size(); ++i) {
+      if (!out[i] || params[i].kind != TemplateArgKind::value) continue;
+      auto pt = substitute(params[i].type, bindings(depth, out));
+      auto v = pt ? converted_value(*out[i], *pt) : std::nullopt;
+      if (!v) return std::nullopt;
+      out[i] = *v;
     }
     return complete(tmpl, params, std::move(out));
   }
@@ -271,35 +313,48 @@ public:
 
   // ------------------------------------------------------------ partial ordering ([temp.func.order])
 
-  // Whether function template `f1` is at least as specialized as `f2` for a call with `nargs`
-  // arguments ([temp.deduct.partial]): `f2`'s parameters can be deduced from `f1`'s function
-  // parameter types with a unique type for each of `f1`'s template parameters.
-  bool at_least_as_specialized(const ast::DeclSema& f1, const ast::DeclSema& f2, std::size_t nargs) {
+  // Partial ordering of function templates `f1` and `f2` for a call with `nargs` arguments
+  // ([temp.deduct.partial]): whether `f1` is at least as specialized as `f2`, and the converse.
+  // `f1` is when `f2`'s parameters can be deduced from `f1`'s function parameter types with a
+  // unique type for each of `f1`'s template parameters.
+  std::pair<bool, bool> ordering(const ast::DeclSema& f1, const ast::DeclSema& f2, std::size_t nargs) {
     std::vector<ast::TemplateParamSema> p1 = w_->ins.seqs.elements(f1.template_params);
     std::vector<ast::TemplateParamSema> p2 = w_->ins.seqs.elements(f2.template_params);
-    if (p1.empty() || p2.empty()) return false;
-    // Unique types and values: parameters of a depth no template-head has.
-    std::vector<TemplateArg> unique;
-    for (const ast::TemplateParamSema& p : p1) {
-      if (p.kind == TemplateArgKind::type) unique.push_back(type_arg(types().template_param(unique_depth, p.index)));
-      else unique.push_back(value_arg(p.type, w_->ins.intern_value(ast::VDepParam{unique_depth, p.index})));
-    }
-    Bindings b = Bindings::of(p1[0].depth, unique);
+    if (p1.empty() || p2.empty()) return {false, false};
+    Bindings b1 = unique_bindings(p1), b2 = unique_bindings(p2);
     TypeRec t1 = types().rec(f1.type), t2 = types().rec(f2.type);
     std::size_t n = std::min({nargs, t1.params.size(), t2.params.size()});
-    std::vector<std::optional<TemplateArg>> out(p2.size());
+    std::vector<std::optional<TemplateArg>> out12(p2.size()), out21(p1.size());
+    bool all12 = true, all21 = true;
     for (std::size_t i = 0; i < n; ++i) {
-      auto a = substitute(t1.params[i], b);
-      if (!a) return false;
+      auto a1 = substitute(t1.params[i], b1);
+      auto a2 = substitute(t2.params[i], b2);
       // [temp.deduct.partial]/5–7: references are replaced by what they refer to, then top-level
       // cv-qualifiers are dropped.
-      QualType p = strip(t2.params[i]), aa = strip(*a);
-      if (!deduce(p, aa, p2[0].depth, out)) return false;
+      bool s12 = a1 && deduce(strip(t2.params[i]), strip(*a1), p2[0].depth, out12);
+      bool s21 = a2 && deduce(strip(t1.params[i]), strip(*a2), p1[0].depth, out21);
+      // /9: when both types were references and deduction succeeds both ways, an lvalue
+      // reference beats an rvalue one, then the more cv-qualified referred-to type wins.
+      if (s12 && s21 && types().is_reference(t1.params[i]) && types().is_reference(t2.params[i])) {
+        bool l1 = !types().rec(t1.params[i]).rvalue_ref, l2 = !types().rec(t2.params[i]).rvalue_ref;
+        Cv c1 = Types::cv(types().canonical(types().referee(t1.params[i])));
+        Cv c2 = Types::cv(types().canonical(types().referee(t2.params[i])));
+        if (l1 != l2) {
+          s21 = s21 && !l1;
+          s12 = s12 && !l2;
+        } else if (c1 != c2) {
+          if (within(c2, c1)) s21 = false;
+          if (within(c1, c2)) s12 = false;
+        }
+      }
+      all12 = all12 && s12;
+      all21 = all21 && s21;
     }
-    return true;
+    return {all12, all21};
   }
   bool more_specialized(const ast::DeclSema& f1, const ast::DeclSema& f2, std::size_t nargs) {
-    return at_least_as_specialized(f1, f2, nargs) && !at_least_as_specialized(f2, f1, nargs);
+    auto [a, b] = ordering(f1, f2, nargs);
+    return a && !b;
   }
 
 private:
@@ -312,6 +367,17 @@ private:
     if (out[index]) return *out[index] == v;  // [temp.deduct.type]/2: one value for each
     out[index] = v;
     return true;
+  }
+
+  // A unique type or value for each of a template's parameters ([temp.func.order]/3): a
+  // parameter of a depth no template-head has.
+  Bindings unique_bindings(std::span<const ast::TemplateParamSema> ps) {
+    std::vector<TemplateArg> unique;
+    for (const ast::TemplateParamSema& p : ps) {
+      if (p.kind == TemplateArgKind::type) unique.push_back(type_arg(types().template_param(unique_depth, p.index)));
+      else unique.push_back(value_arg(p.type, w_->ins.intern_value(ast::VDepParam{unique_depth, p.index})));
+    }
+    return Bindings::of(ps[0].depth, unique);
   }
 
   Bindings bindings(u16 depth, const std::vector<std::optional<TemplateArg>>& out) {

@@ -354,6 +354,8 @@ public:
     sema::Cv cv = sema::Cv::none;  // a member function's cv-qualifier-seq ([dcl.fct])
     u64 bound = 0;
     bool unknown_bound = false;  // `[]`: in a parameter, or the outermost bound of a variable
+    // A value-dependent bound ([temp.dep.constexpr]): a template parameter's `VDepParam`.
+    std::optional<sema::ConstId> dependent_bound;
   };
   struct Level {
     // ptr-operators, outermost first ([dcl.ptr], [dcl.ref]): `*` with its cv, `&` or `&&`.
@@ -469,7 +471,14 @@ public:
         Suffix s;
         // [dcl.array]: a converted constant expression of integral type.
         Ex e = s_->promote(constant_expression());
-        auto v = sema::Evaluator(*s_, questions()).evaluate(e).value;
+        sema::Evaluated ev = sema::Evaluator(*s_, questions()).evaluate(e);
+        auto v = ev.value;
+        if (ev.dependent) {
+          s.dependent_bound = template_value(e, s_->types().canonical(e.type()));
+          ok = expect(Tk::r_square) && ok && s.dependent_bound.has_value();
+          l.suffixes.push_back(std::move(s));
+          continue;
+        }
         if (!v || s_->world().values.rec(*v).kind != sema::ValueKind::integer || i64_of(*v) <= 0) {
           if (e.ok()) s_->diag(at + 1, Diag::bound_not_constant);
           ok = false;
@@ -574,6 +583,8 @@ public:
           d.ok = false;
         }
         d.unknown_bound = true;
+      } else if (s->dependent_bound && s_->types().is_object(t)) {
+        t = s_->types().array_dependent(t, *s->dependent_bound);
       } else if (!s_->types().is_object(t) || s->bound == 0) {
         // [dcl.array]: the element type is an object type; an array of functions or of void is
         // ill-formed.
@@ -800,6 +811,9 @@ public:
   std::optional<sema::ConstId> template_value(Ex e, QualType t) {
     if (!e.ok()) return std::nullopt;
     if (auto lit = s_->as<ast::Literal>(e); lit && s_->world().ins.values.is_dependent(lit->value)) return lit->value;
+    // Value-dependent: its value is known when the template is instantiated. (A `VDep*` form of
+    // the expression comes with class templates, where it is part of a type.)
+    if (s_->dependent(e)) return s_->world().ins.intern_value(ast::VDepParam{sema::dependent_depth, 0});
     Ex c = s_->convert(e, t, e.begin);
     if (!c.ok()) return std::nullopt;
     sema::Evaluated v = sema::Evaluator(*s_, questions()).evaluate(c);
@@ -1164,6 +1178,9 @@ public:
         // A template-id ([temp.names]): `f<args>`.
         auto args = template_argument_list();
         if (!args) return {NodeId::none, begin, pos()};
+        // [temp.dep.expr]/3: a template-id with a dependent argument is type-dependent.
+        if (std::ranges::any_of(*args, [&](const ast::TemplateArg& a) { return s_->dependent(a); }))
+          return s_->dependent_node({}, begin, pos());
         return s_->template_id(n, std::move(*args), begin, pos());
       }
       return s_->name_expr(n, begin, pos(), is(Tk::l_paren));

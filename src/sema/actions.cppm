@@ -731,6 +731,9 @@ public:
   bool dependent(const Ex& e) {
     return e.ok() && ((e.info.flags & expr_flag::dependent) || types().is_dependent(e.type()));
   }
+  bool dependent(const TemplateArg& a) {
+    return a.kind == ast::TemplateArgKind::type ? types().is_dependent(a.type) : ins().values.is_dependent(a.value);
+  }
   bool any_dependent(std::span<const Ex> es) {
     return std::ranges::any_of(es, [&](const Ex& e) { return dependent(e); });
   }
@@ -1037,8 +1040,18 @@ public:
   }
   static int cv_bits(Cv c) { return std::popcount(unsigned(std::to_underlying(c))); }
   static bool cv_within(Cv a, Cv b) { return (std::to_underlying(a) & ~std::to_underlying(b)) == 0; }
-  bool same_unqualified(QualType a, QualType b) {
-    return types().canonical(Types::unqualified(a)) == types().canonical(Types::unqualified(b));
+  bool same_unqualified(QualType a, QualType b) { return object_unqualified(a) == object_unqualified(b); }
+  // An object type's cv-qualifiers; an array's are its elements' ([basic.type.qualifier]/3).
+  Cv object_cv(QualType t) {
+    TypeRec r = types().rec(t);
+    return r.kind == TypeKind::array ? object_cv(r.inner) : Types::cv(types().canonical(t));
+  }
+  // The canonical object type without them.
+  QualType object_unqualified(QualType t) {
+    TypeRec r = types().rec(t);
+    if (r.kind == TypeKind::array && object_cv(r.inner) != Cv::none)
+      return types().canonical(types().array_dependent(object_unqualified(r.inner), r.bound_value));
+    return types().canonical(Types::unqualified(types().canonical(t)));
   }
 
   // The type `a` has after the lvalue conversions ([conv.lval], [conv.array], [conv.func]).
@@ -1058,10 +1071,10 @@ public:
       // [dcl.init.ref]: a direct binding to an lvalue (or, for an rvalue reference, an xvalue)
       // of the type, no less qualified.
       bool direct_cat = r.rvalue_ref ? a.cat() == ValueCategory::xvalue : a.cat() == ValueCategory::lvalue;
-      if (direct_cat && same_unqualified(a.type(), t) && cv_within(Types::cv(a.type()), Types::cv(t)))
+      if (direct_cat && same_unqualified(a.type(), t) && cv_within(object_cv(a.type()), object_cv(t)))
         return binding({true, 0, 0}, r.rvalue_ref, a.cat() != ValueCategory::lvalue,
-                       cv_bits(Types::cv(t)) - cv_bits(Types::cv(a.type())));
-      bool const_ref = Types::is_const(t) && !Types::is_volatile(t);
+                       cv_bits(object_cv(t)) - cv_bits(object_cv(a.type())));
+      bool const_ref = object_cv(t) == Cv::const_;
       if (!r.rvalue_ref && !const_ref) return {};
       if (r.rvalue_ref && a.cat() == ValueCategory::lvalue) return {};
       Ics v = ics(a, Types::unqualified(t));  // to a temporary
@@ -1284,11 +1297,11 @@ public:
     Ex fail{NodeId::none, e.begin, e.end};
     bool direct_cat = rr.rvalue_ref ? e.cat() == ValueCategory::xvalue : e.cat() == ValueCategory::lvalue;
     if (direct_cat && same_unqualified(e.type(), t)) {
-      if (cv_within(Types::cv(e.type()), Types::cv(t))) return extend ? extended(e) : e;
+      if (cv_within(object_cv(e.type()), object_cv(t))) return extend ? extended(e) : e;
       diag(at_, Diag::bind_drops_qualifiers, e.type(), r);
       return fail;
     }
-    bool const_ref = Types::is_const(t) && !Types::is_volatile(t);
+    bool const_ref = object_cv(t) == Cv::const_;
     if (!rr.rvalue_ref && !const_ref) {
       if (e.cat() == ValueCategory::lvalue && same_unqualified(e.type(), t)) diag(at_, Diag::bind_drops_qualifiers, e.type(), r);
       else diag(at_, Diag::bind_to_rvalue, t);
@@ -1299,7 +1312,7 @@ public:
       diag(at_, Diag::bind_to_lvalue, t);
       return fail;
     }
-    if (e.glvalue() && same_unqualified(e.type(), t) && cv_within(Types::cv(e.type()), Types::cv(t)))
+    if (e.glvalue() && same_unqualified(e.type(), t) && cv_within(object_cv(e.type()), object_cv(t)))
       return extend ? extended(e) : e;
     Ex v = convert(e, Types::unqualified(t), at_);
     if (!v.ok() || v.glvalue()) return v;

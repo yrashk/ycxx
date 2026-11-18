@@ -133,6 +133,27 @@ class Mangler {
         if (!r) return r;
         candidates_.push_back(full_key(bare));
         return (rv ? "O" : "R") + *r;
+      } else if (in_.types.is<ast::TArray>(in_.types.canon(bare))) {
+        // <array-type> ::= A <dimension number> _ <element type>, a substitution candidate
+        // (§5.1.5.6).
+        if (auto s = find(full_key(bare))) return qualify(qualifiers, *s, q);
+        auto a = in_.types.get<ast::TArray>(in_.types.canon(bare));
+        // The dimension is a number, or a template parameter's <template-param>, which is an
+        // <expression> here and not a substitution candidate.
+        std::string dim;
+        if (a.bound != ast::ConstId::none && in_.values.is<ast::VInt>(a.bound)) {
+          dim = std::format("{}", in_.values.get<ast::VInt>(a.bound).bits.lo);
+        } else if (a.bound != ast::ConstId::none && in_.values.is<ast::VDepParam>(a.bound) &&
+                   in_.values.get<ast::VDepParam>(a.bound).depth == 0) {
+          auto i = in_.values.get<ast::VDepParam>(a.bound).index;
+          dim = i == 0 ? "T_" : std::format("T{}_", i - 1);
+        } else {
+          return std::unexpected("an array of unknown or dependent bound");
+        }
+        auto e = type(a.elem);
+        if (!e) return e;
+        inner = std::format("A{}_{}", dim, *e);
+        candidates_.push_back(full_key(bare));
       } else if (in_.types.is<ast::TTemplateParam>(in_.types.canon(bare))) {
         // <template-param> ::= T_ | T <parameter-2 non-negative number> _, a substitution
         // candidate (§5.1.5.8, §5.1.10). Function templates of namespace scope have one level.

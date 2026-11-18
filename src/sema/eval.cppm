@@ -60,7 +60,12 @@ public:
     ast::Child root = s_->builder().commit(ast::Child{e.id, 0});
     NodeId ret = in.intern(ast::Return{root}, e.width());
     std::vector<ast::LocalRec> locals(s_->locals().begin(), s_->locals().end());
-    for (ast::LocalRec& l : locals) l.decl = NodeId::none;  // drafts of the enclosing frame
+    for (ast::LocalRec& l : locals) {
+      l.decl = NodeId::none;  // drafts of the enclosing frame
+      // In a template's definition a local of dependent type has no object yet; a non-dependent
+      // expression cannot name it, so it stands as an `int` outside its lifetime.
+      if (s_->types().is_dependent(l.type)) l.type = s_->builtin(Builtin::int_);
+    }
     ast::DeclSema thunk{};
     thunk.entity = EntityId::none;
     thunk.type = s_->types().function(Types::unqualified(e.type()), {}, false, LangLinkage::cxx);

@@ -63,6 +63,7 @@ struct TypeRec {
   EntityId entity = EntityId::none;  // a class's or an enumeration's
   Cv fn_cv = Cv::none;               // a member function type's cv-qualifier-seq
   bool rvalue_ref = false;           // a reference's kind; `inner` is what it refers to
+  ConstId bound_value = ConstId::none;  // an array's bound as a constant, possibly dependent
   u16 depth = 0;                     // a template parameter's position ([temp.param])
   u16 index = 0;
   bool pack = false;
@@ -74,6 +75,8 @@ public:
 
   QualType builtin(Builtin b) { return ast::builtin(*ins_, b); }
   QualType pointer(QualType pointee) { return ast::pointer_to(*ins_, pointee); }
+  // An array whose bound is value-dependent ([temp.dep.constexpr]).
+  QualType array_dependent(QualType elem, ConstId bound) { return ast::array_of(*ins_, target, elem, bound); }
   QualType array(QualType elem, u64 bound) {
     return ast::array_of(*ins_, target, elem, ast::int_value(*ins_, target, Builtin::unsigned_long, i64(bound)));
   }
@@ -104,7 +107,8 @@ public:
       auto a = t.get<ast::TArray>(c);
       r.kind = TypeKind::array;
       r.inner = a.elem;
-      r.bound = a.bound == ConstId::none ? 0 : ast::int_bits(*ins_, a.bound).lo;
+      r.bound = a.bound == ConstId::none || ins_->values.is_dependent(a.bound) ? 0 : ast::int_bits(*ins_, a.bound).lo;
+      r.bound_value = a.bound;
     } else if (t.is<ast::TFunction>(c)) {
       auto f = t.get<ast::TFunction>(c);
       r.kind = TypeKind::function;
@@ -140,8 +144,9 @@ public:
     switch (r.kind) {
     case TypeKind::template_param: return true;
     case TypeKind::builtin: return r.builtin == Builtin::dependent;
-    case TypeKind::pointer:
     case TypeKind::array:
+      return is_dependent(r.inner) || (r.bound_value != ConstId::none && ins_->values.is_dependent(r.bound_value));
+    case TypeKind::pointer:
     case TypeKind::reference: return is_dependent(r.inner);
     case TypeKind::function:
       return is_dependent(r.inner) || std::ranges::any_of(r.params, [&](QualType p) { return is_dependent(p); });
