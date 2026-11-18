@@ -31,8 +31,9 @@ in [GitHub issues](https://github.com/yrashk/ycxx/issues) and the
     out of the class, `const`, static), `this`, and static data members. Constructors and
     destructors (RAII: destructors run at every block exit, `return`, `break` and `continue`),
     temporaries, references, and overloading by exact match, promotion and conversion; scoped and
-    unscoped enumerations. Not yet: passing or returning a class by value, inheritance,
-    namespaces.
+    unscoped enumerations; namespaces (nested, inline and unnamed ones, qualified names,
+    `using namespace`, `using N::x;` in a block, aliases, members defined outside their
+    namespace). Not yet: passing or returning a class by value, inheritance.
   - Constant evaluation, by ycxx's own interpreter of its IR: `constexpr` and `consteval`
     functions and variables, `constinit`, `static_assert` and `if consteval`, with an error that
     says why an expression is not constant (overflow, an uninitialized read, a dangling pointer,
@@ -49,9 +50,11 @@ in [GitHub issues](https://github.com/yrashk/ycxx/issues) and the
   - `ycxx cxx -E` prints what Clang's `-E` does.
 - A resident daemon, opt-in (2026-11-18): with `YCXX_DAEMON=1`, `ycxx cxx` sends its command
   line to a per-project `ycxx daemon`, starting one if needed. The daemon watches the files it
-  has read (FSEvents on macOS, inotify on Linux) and keeps the preprocessor's results between
-  commands. Its answers are byte for byte those of an in-process run, which is also the fallback
-  on any failure. `ycxx ctl status` and `ycxx ctl shutdown` talk to it.
+  has read (FSEvents on macOS, inotify on Linux) and keeps one engine session between commands:
+  a repeated build re-runs nothing, and an edit re-runs only what read the changed file, through
+  code generation and the link (checked against a cold build by the `.incr` tests). Its answers
+  are byte for byte those of an in-process run, which is also the fallback on any failure.
+  `ycxx ctl status` and `ycxx ctl shutdown` talk to it.
 - The acceptance tests in `tests/own/slice` run with ycxx as the compiler in CI, and every
   [draft example](tests/draft) is checked against Clang and GCC.
 
@@ -62,17 +65,17 @@ build/bin/ycxx cxx hello.cpp -o hello && ./hello
 
 **Not yet:**
 - `#embed`, and the standard library's headers: `<cstdio>` now preprocesses, but libycxx does
-  not yet know ycxx (yrashk/libycxx#17), and sema lacks namespaces.
-- Namespaces, inheritance and virtual functions, passing classes by value, and templates.
+  not yet know ycxx (yrashk/libycxx#17).
+- Inheritance and virtual functions, passing classes by value, and templates.
 - `if constexpr`, and taking the address of a variable in a namespace-scope initializer
   (`int* p = &g;` passes the front end but not code generation yet).
 - Exceptions.
 - The standard library.
 - Optimization (`-O`).
-- The resident daemon as the default, with concurrent requests and incremental compilation past
-  the preprocessor ([#120](https://github.com/yrashk/ycxx/issues/120),
-  [#63](https://github.com/yrashk/ycxx/issues/63)). Without `YCXX_DAEMON=1`, `ycxx cxx` runs
-  in-process, once per invocation.
+- The resident daemon as the default, with concurrent requests
+  ([#137](https://github.com/yrashk/ycxx/issues/137),
+  [#139](https://github.com/yrashk/ycxx/issues/139)). Without `YCXX_DAEMON=1`, `ycxx cxx` runs
+  in-process, once per invocation, and the daemon serves one request at a time.
 - Linux and x86-64.
 
 Nothing beyond the subset above compiles, so neither real programs nor libycxx do yet.
@@ -81,12 +84,12 @@ Nothing beyond the subset above compiles, so neither real programs nor libycxx d
 - the resident daemon: concurrent requests, and making it the default
   ([#84](https://github.com/yrashk/ycxx/issues/84));
 - classes and the object model ([#86](https://github.com/yrashk/ycxx/issues/86));
+- templates and overload resolution ([#88](https://github.com/yrashk/ycxx/issues/88));
 - including the standard headers: libycxx's compiler detection
   ([yrashk/libycxx#17](https://github.com/yrashk/libycxx/issues/17)), then `<cstdio>`
   through sema ([#133](https://github.com/yrashk/ycxx/issues/133)).
 
-Next come templates ([#88](https://github.com/yrashk/ycxx/issues/88)) and exceptions
-([#89](https://github.com/yrashk/ycxx/issues/89)).
+Next come exceptions ([#89](https://github.com/yrashk/ycxx/issues/89)).
 
 ## Goals
 

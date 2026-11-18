@@ -31,6 +31,17 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
     macOS jobs short. Count a libycxx PR as about an hour of every repository's macOS capacity.
   - Learned on the α slice (#39), 2026-11-18.
 
+- **Don't stack more than one step on an unmerged PR while main moves under it.** δ (#86) stacked
+  four PRs (#123 → #131 → #141 → #144) while #122 reshaped the pipeline under them. Every move of
+  `main` cost a merge into each PR in turn. The bottom PR's stand-in layout was rewritten into
+  #122's queries, and a test GCC disagreed with had to be fixed at the bottom and carried up.
+  - Do: once a PR is up, keep at most one step stacked on it, and start further steps only as the
+    base lands. When another session owns a seam you need (here the layout query, #63), build
+    against its announced shape, not a parallel stand-in.
+  - Do: run the own tests with every oracle (`tools/test --cxx gcc core own`, then `--cxx clang`)
+    before opening each PR. The oracle job is what blocks a merge, and one error per reject file
+    keeps the two compilers in agreement.
+  - Learned on #86.
 - **Build on unmerged dependencies in a local integration branch, then cherry-pick.** #24 needed
   #36 and #38 while both waited for CI. A local-only branch merging both let the work build and
   test at once. When they landed, the commits, which touched only #24's files, cherry-picked onto

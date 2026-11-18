@@ -289,7 +289,7 @@ private:
 // ---------------------------------------------------------------- entities (stand-in for #33)
 
 // `data_member` is a non-static data member ([class.mem]).
-enum class EntityKind : u8 { function, variable, class_, data_member, constructor, destructor, enum_, enumerator };
+enum class EntityKind : u8 { function, variable, class_, data_member, constructor, destructor, enum_, enumerator, namespace_ };
 
 // The structure behind an entity id (§4.3): for a function `(scope, name, canonical type)`, with
 // `::` as the scope of a function with C language linkage ([dcl.link]); for a variable with

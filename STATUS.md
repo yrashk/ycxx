@@ -739,6 +739,33 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
 - Not yet: opaque enum declarations (`enum E : int;`), unnamed enumerations, `switch`, `E{}` and
   `E(v)` as expressions, enumerations in a block (#117), constexpr enumeration objects (#25).
 
+## Classes, δ step 4b: namespaces (#86, 2026-11-18)
+
+- **Scopes:** a namespace is named by its path (`a::b`; `(anonymous)` for an unnamed one);
+  `Program` gives each item the namespace whose definitions enclose it, and, for lookup, that
+  namespace with inline and unnamed components dropped, so their members are found in the
+  enclosing one ([namespace.def]/7, [namespace.unnamed]). Namespace entities (`EntityKind::
+  namespace_`) are the scope of their members' entities, so `geo::value` and `::value` are two;
+  members of an unnamed namespace have internal linkage.
+- **Lookup:** unqualified lookup ([basic.lookup.unqual]) walks the enclosing namespaces from the
+  point, with namespace-scope using-directives where [namespace.udir]/2 puts their names;
+  qualified lookup ([namespace.qual]) in `N::x`, `::x`, `N::C::m`, `N::E::e` and qualified type
+  names; block-scope `using namespace`, `using N::x;` and `namespace A = N;`, and namespace-scope
+  directives and aliases; directives are transitive ([namespace.udir]/4) and qualified lookup
+  follows them ([namespace.qual]/2). Two using-directives that bring in different entities make a name
+  ambiguous. Constructors and destructors are not found by name ([class.ctor]/1).
+- **Definitions outside:** `int N::f(…) {…}`, `int N::C::count = 0;`, `N::C::C(…) : … {}` and
+  `N::C::~C()`: what follows the declarator-id, the body included, is looked up in that scope
+  ([basic.lookup.unqual]/9).
+- Linkage names: `<nested-name>`s with namespace prefixes as substitution candidates, and
+  `_GLOBAL__N_1` for the unnamed namespace, checked against Clang's symbols.
+- Tests: `tests/own/classes/s4-namespace*`, `s4-using` (spec-only, plus one from the review): 5
+  of 5. Seven more draft examples pass.
+- A linkage-specification with one declaration (`extern "C" int v;`) declares as if `extern`
+  were given ([dcl.link]/7); a variable with C language linkage is one in every namespace.
+- Not yet (#153): `using N::f;` at namespace scope, `N::S{…}` as an expression, some clashes
+  with namespace names and using-declarations, `std::` abbreviations in linkage names.
+
 ## Bootstrap workarounds
 
 Places where ycxx's sources avoid or work around a C++26 feature because GCC 16 lacks it or
