@@ -45,6 +45,11 @@ in [GitHub issues](https://github.com/yrashk/ycxx/issues) and the
     names that match Clang's. Not yet: member and alias templates, parameter packs, concepts, and
     a specialization used in two translation units of one program (its definitions are not coalesced yet,
     [#124](https://github.com/yrashk/ycxx/issues/124)).
+  - Casts and type queries (2026-11-18): `static_cast`, functional and C-style casts between the
+    supported types, `sizeof` and `alignof` of non-class types, `decltype`, and `std::nullptr_t`
+    objects. `sizeof` of a class type is not yet supported
+    ([#194](https://github.com/yrashk/ycxx/issues/194)); other cast gaps are
+    [#199](https://github.com/yrashk/ycxx/issues/199).
   - Constant evaluation, by ycxx's own interpreter of its IR: `constexpr` and `consteval`
     functions and variables, `constinit`, `static_assert` and `if consteval`, with an error that
     says why an expression is not constant (overflow, an uninitialized read, a dangling pointer,
