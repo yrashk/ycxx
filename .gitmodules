@@ -1,0 +1,3 @@
+[submodule "deps/libycxx"]
+	path = deps/libycxx
+	url = https://github.com/yrashk/libycxx.git
