@@ -44,6 +44,9 @@ public:
   virtual bool is_complete(EntityId c) = 0;
   // The constant a variable usable in constant expressions holds ([expr.const]), if it is known.
   virtual std::optional<ConstId> constant_value(EntityId v) = 0;
+  // In a member declaration of a class being defined: the member named `name` declared before it
+  // ([basic.scope.class]; the class's member list is not complete yet).
+  virtual std::optional<ast::DeclSema> earlier_member(NameId name) = 0;
   virtual ~Questions() = default;
 };
 
@@ -571,12 +574,14 @@ public:
       return node(ast::Member{info, f->field->entity, f->index, 1, at(self, begin)}, begin, end, info);
     }
     const MemberDeclRec& m = *f->member;
-    if (!m.is_function) {
+    // A static member, data or function, is named like a namespace-scope entity
+    // ([expr.prim.id.qual]): `S::f` can have its address taken or be called.
+    if (!m.is_function || m.is_static) {
       ExprInfo info{m.type, ValueCategory::lvalue, 0};
       return node(ast::DeclRef{info, m.entity}, begin, end, info);
     }
     std::optional<Ex> object;
-    if (has_this && !m.is_static) object = this_expr(begin, begin);
+    if (has_this) object = this_expr(begin, begin);
     return bound_member(m, object, true, begin, end);
   }
 
@@ -608,7 +613,13 @@ public:
     auto children = call_args(fr, args, begin, paren_at);
     if (!children) return fail;
     ExprInfo info{Types::unqualified(fr.inner), ValueCategory::prvalue, 0};
-    if (d->is_static) return node(ast::Call{info, d->entity, at(callee, begin), b_->list(*children)}, begin, end, info);
+    if (d->is_static) {
+      // The object expression is evaluated, then discarded ([expr.ref]).
+      Ex call = node(ast::Call{info, d->entity, at(callee, begin), b_->list(*children)}, begin, end, info);
+      if (!object) return call;
+      Ex discarded = convert_node(*object, ast::ConversionKind::to_void, builtin(Builtin::void_));
+      return node(ast::OrderedBinary{info, ast::OrderedOp::comma, at(discarded, begin), at(call, begin)}, begin, end, info);
+    }
     if (!object) {
       diag(begin, Diag::member_without_object, d->name);
       return fail;
@@ -643,8 +654,18 @@ public:
                       {l.type, ValueCategory::lvalue, 0});
         }
     // The class's members, in a member function's body ([basic.scope.class]).
-    if (current_class != EntityId::none)
+    if (current_class != EntityId::none) {
       if (auto r = class_member(current_class, name, begin, end)) return *r;
+      if (!w_->classes.is_defined(current_class))
+        if (auto m = q_->earlier_member(name)) {
+          if (m->kind != ast::DeclKind::variable) {
+            diag(begin, Diag::member_without_object, name);
+            return {NodeId::none, begin, end};
+          }
+          ExprInfo info{m->type, ValueCategory::lvalue, 0};
+          return node(ast::DeclRef{info, m->entity}, begin, end, info);
+        }
+    }
     std::vector<ast::DeclSema> found;
     for (auto p = own.rbegin(); p != own.rend(); ++p)
       if (p->name == name) found.push_back(p->sema);
@@ -770,8 +791,28 @@ public:
     return literal(t, w_->values.null_pointer(t), ValueCategory::prvalue, begin, end);
   }
 
+  // The value of a static data member of integral type usable in constant expressions.
+  std::optional<ConstId> static_constant(const Ex& e) {
+    auto d = as<ast::DeclRef>(e);
+    if (!d || !types().is_integral(e.type()) || Types::is_volatile(e.type()) ||
+        w_->entities.rec(d->entity).scope == EntityId::none)
+      return std::nullopt;
+    return q_->constant_value(d->entity);
+  }
+
+  // An expression statement's expression, a discarded-value expression ([expr.context]).
+  Ex discarded(Ex e) {
+    if (is_bound_member(e)) {
+      diag(e.begin, Diag::bound_member_not_called, w_->entities.rec(as<ast::Member>(e)->member).name);
+      return {NodeId::none, e.begin, e.end};
+    }
+    return e;
+  }
+
   Ex paren(Ex e, u32 begin, u32 end) {
     if (!e.ok()) return {NodeId::none, begin, end};
+    // A parenthesized member function name is that name ([expr.prim.paren]): only a call may follow.
+    if (is_bound_member(e)) return {e.id, begin, end, e.info};
     return node(ast::Paren{e.info, at(e, begin)}, begin, end, e.info);
   }
 
@@ -792,10 +833,17 @@ public:
     if (!e.ok() || !e.glvalue()) return e;
     QualType t = e.type();
     // A static data member usable in constant expressions is read as its value, which is no
-    // odr-use ([basic.def.odr]), so it needs no definition.
-    if (auto d = as<ast::DeclRef>(e); d && types().is_integral(t) && w_->entities.rec(d->entity).scope != EntityId::none)
-      if (auto v = q_->constant_value(d->entity))
-        return literal(Types::unqualified(t), *v, ValueCategory::prvalue, e.begin, e.end);
+    // odr-use ([basic.def.odr]), so it needs no definition; through an object (`a.x`, the comma
+    // `member` built), the object is still evaluated.
+    if (auto v = static_constant(e)) return literal(Types::unqualified(t), *v, ValueCategory::prvalue, e.begin, e.end);
+    if (auto c = as<ast::OrderedBinary>(e); c && c->op == ast::OrderedOp::comma && types().is_integral(t)) {
+      Ex rhs{c->rhs.id, e.begin + c->rhs.at, e.end, c->info};
+      if (auto v = static_constant(rhs)) {
+        Ex lit = literal(Types::unqualified(t), *v, ValueCategory::prvalue, rhs.begin, rhs.end);
+        ExprInfo info{Types::unqualified(t), ValueCategory::prvalue, 0};
+        return node(ast::OrderedBinary{info, ast::OrderedOp::comma, c->lhs, at(lit, e.begin)}, e.begin, e.end, info);
+      }
+    }
     if (types().is_array(t)) {
       QualType p = types().pointer(types().rec(t).inner);
       return convert_node(e, ast::ConversionKind::array_to_pointer, p);

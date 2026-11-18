@@ -514,7 +514,7 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
 - IR: `this` is the entry block's first value parameter (`FunctionInput::this_type`), as the
   Itanium ABI passes it. Linkage names are `<nested-name>`s with the member's cv-qualifiers,
   checked against Clang's symbols.
-- Tests: `tests/own/classes/s2-*` (spec-only): 9 of 10 pass; the constexpr one waits for records
+- Tests: `tests/own/classes/s2-*` (spec-only, plus three from the review): 12 of 13 pass; the constexpr one waits for records
   in the interpreter (#25). In-class member functions are not weak definitions yet (#124).
 - Not yet: overloaded member functions, ref-qualifiers, `= default`/`= delete`.
 

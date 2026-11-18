@@ -993,6 +993,7 @@ public:
     if (starts_declaration()) return declaration_statement();
     Ex e = expression();
     if (!expect(Tk::semi)) skip_to_semi();
+    e = s_->discarded(e);
     return s_->node(ast::ExprStmt{sema::Sema::at(e, begin)}, begin, pos());
   }
 

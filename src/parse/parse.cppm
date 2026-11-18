@@ -271,6 +271,18 @@ public:
   bool is_constexpr(EntityId f) override { return p_->is_constexpr(f, item_); }
   bool is_complete(EntityId c) override { return p_->is_complete(c, item_, self_, own_class_complete); }
   std::optional<ConstId> constant_value(EntityId v) override { return p_->constant_value(v, item_); }
+  std::optional<ast::DeclSema> earlier_member(ast::NameId name) override {
+    const items::Item& it = p_->items().items[item_];
+    if (it.parent == items::none || p_->items().items[it.parent].kind != ItemKind::class_def) return std::nullopt;
+    std::optional<ast::DeclSema> r;
+    for (u32 m : p_->items().items[it.parent].members) {
+      if (m == item_) break;
+      for (const ast::DeclSema& d : p_->world().ins.seqs.elements(p_->item_sema(m).value.decls))
+        if (d.entity != EntityId::none && d.kind != ast::DeclKind::class_ && p_->world().entities.rec(d.entity).name == name)
+          r = d;
+    }
+    return r;
+  }
   // Past the closing brace of the class the item defines, that class is complete.
   bool own_class_complete = false;
 
@@ -494,6 +506,7 @@ private:
     EntityId ce = p_->class_entity(it_->parent);
     if (ce == EntityId::none) return bad();
     ast::DeclSema c = class_decl(ce, true);
+    s_.current_class = ce;  // names in a member declaration are looked up in the class first
     if (ps_.accept(Tk::semi)) return;
     if (!Parser::starts_decl_specifier(ps_.kind()) && !ps_.starts_declaration()) {
       s_.diag(ps_.pos(), lex::is_keyword(ps_.kind()) || ps_.is(Tk::l_square) || ps_.is(Tk::coloncolon) || ps_.is(Tk::tilde)
@@ -583,7 +596,12 @@ private:
 
   // A qualified declarator `C::m` outside its class: the definition of a member function or a
   // static data member C declares ([class.mfct], [class.static.data]), with its entity and flags.
-  bool define_member(const parse::Declarator& d, ast::DeclSema& sem, bool fn, bool definition) {
+  bool define_member(const DeclSpec& spec, const parse::Declarator& d, ast::DeclSema& sem, bool fn, bool definition,
+                     bool has_init) {
+    if (spec.is_static) {
+      s_.diag(spec.begin, Diag::static_outside_class);  // [class.static.mfct], [class.static.data]
+      return false;
+    }
     auto t = s_.class_name(d.qualifier, true);
     if (!t) {
       s_.diag(d.qualifier_at, Diag::not_a_type, d.qualifier);
@@ -605,7 +623,17 @@ private:
       s_.diag(d.name_at, Diag::conflicting_declaration, d.name);
       return false;
     }
-    if (mem->flags & sema::decl_flag::definition) {
+    // [depr.static.constexpr]: a constexpr static data member may be redeclared without an
+    // initializer; it stays defined in its class.
+    if (!fn && (mem->flags & sema::decl_flag::constexpr_) && !has_init) {
+      sem.flags = u16((sem.flags & ~sema::decl_flag::definition) | sema::decl_flag::member | sema::decl_flag::static_);
+      sem.entity = m->entity;
+      sem.storage = mem->storage;
+      return true;
+    }
+    // [basic.def.odr]: one definition, in the class or after it.
+    auto latest = p_->declaration(m->entity, k_);
+    if ((mem->flags & sema::decl_flag::definition) || (latest && (latest->flags & sema::decl_flag::definition))) {
       s_.diag(d.name_at, Diag::redefinition, d.name);
       return false;
     }
@@ -671,7 +699,8 @@ private:
         Ex e = ps_.assignment_expression();
         init = s_.convert(e, d.type, e.begin);
         if (!init.ok()) return false;
-        bool usable = spec.is_constexpr || (sema::Types::is_const(d.type) && types.is_integral(d.type));
+        bool usable = spec.is_constexpr || (sema::Types::is_const(d.type) && !sema::Types::is_volatile(d.type) &&
+                                            types.is_integral(d.type));
         sema::Evaluated v = usable ? sema::Evaluator(s_, q_).evaluate(init) : sema::Evaluated{};
         if (!v.value) {
           s_.diag(e.begin, usable ? Diag::not_constant : Diag::not_supported, usable ? v.reason : u64(Tk::equal));
@@ -814,7 +843,10 @@ private:
     sem.flags = flags;
 
     if (d.qualified) {
-      if (!define_member(d, sem, fn, definition)) return false;
+      if (!define_member(spec, d, sem, fn, definition, has_init)) return false;
+      // The rest of the declarator, its initializer included, is in the class's scope
+      // ([basic.scope.class]).
+      s_.current_class = s_.world().entities.rec(sem.entity).scope;
     } else if (!prior.empty()) {
       const ast::DeclSema& p = prior.back();
       if ((p.kind == ast::DeclKind::function) != fn) {
@@ -923,6 +955,11 @@ private:
     } else if (!fn && definition && s_.has_member_inits(d.type)) {
       // Zero-initialization, then the default member initializers ([basic.start.static]).
       value = *constant_initializer(s_.default_init(d.type, d.name_at, ps_.pos()));
+    } else if (!fn && d.qualified) {
+      // [class.static.data]/4: the definition of a member initialized in its class repeats no
+      // initializer, and has the class's value.
+      if (auto v = p_->constant_value(sem.entity, k_)) value = *v;
+      else if (sema::Types::is_const(d.type)) s_.diag(d.name_at, Diag::const_uninitialized, d.name);
     } else if (!fn && spec.is_constexpr) {
       s_.diag(d.name_at, Diag::constexpr_uninitialized, d.name);
     } else if (!fn && sema::Types::is_const(d.type) && !spec.is_extern) {

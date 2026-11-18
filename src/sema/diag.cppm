@@ -115,7 +115,8 @@ enum class Diag : std::uint32_t {
   // [class.mfct], [class.this], [class.static]
   this_outside_member [[=message{Severity::error, "'this' can only be used in a non-static member function"}]],
   member_without_object [[=message{Severity::error, "'{0:n}' is a non-static member: it needs an object"}]],
-  const_member_call [[=message{Severity::error, "'{0:n}' is not a const member function: it cannot be called on a const object"}]],
+  const_member_call [[=message{Severity::error, "'{0:n}' lacks the const or volatile qualifier of the object it is called on"}]],
+  static_outside_class [[=message{Severity::error, "'static' can only be specified inside the class definition"}]],
   no_member_declared [[=message{Severity::error, "'{1:t}' declares no member '{0:n}' with this type"}]],
   cv_on_non_member [[=message{Severity::error, "only a non-static member function can have a cv-qualifier"}]],
   bound_member_not_called [[=message{Severity::error, "a reference to the non-static member function '{0:n}' must be called"}]],
