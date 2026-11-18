@@ -20,11 +20,14 @@ A slow translation unit (tens of thousands of statements: 1.5-3 s in the Debug b
 a Release build would need more) opens the window in which an edit or a kill lands. Each variant
 changes its constant, so the daemon cannot answer it from cells it already holds.
 """
-import os, signal, subprocess, sys, tempfile, threading, time, shutil
+import os, platform, signal, subprocess, sys, tempfile, threading, time, shutil
 from pathlib import Path
 
 failures = []
 SLOW_STATEMENTS = 40000
+# ycxx builds AArch64 Mach-O only (DECISIONS §1.3), so its programs run only on Apple arm64, as
+# `run darwin-arm64` in tests/features/ycxx.txt; outputs are compared byte for byte everywhere.
+CAN_RUN = sys.platform == 'darwin' and platform.machine() == 'arm64'
 
 
 def fail(what):
@@ -197,9 +200,10 @@ def edit_during_build(env):
             fail(f'edit during a build (attempt {attempt}): the answer is not the final state\'s (exit {client.returncode}, '
                  f'cold {want_code}, outputs {"equal" if got_bytes == want_bytes else "differ"})')
             return
-        run = subprocess.run([str(d / 'prog')], capture_output=True, timeout=60)
-        if run.returncode != attempt + 1 + 20 + attempt:
-            fail(f'edit during a build: the program returned {run.returncode}, want {attempt + 1 + 20 + attempt}')
+        if CAN_RUN:
+            run = subprocess.run([str(d / 'prog')], capture_output=True, timeout=60)
+            if run.returncode != attempt + 1 + 20 + attempt:
+                fail(f'edit during a build: the program returned {run.returncode}, want {attempt + 1 + 20 + attempt}')
         # An edit to a file the build has not read yet changes no table entry (§5.3), and the build
         # reads the new text anyway; the daemon still restarts it today (#161). Only a restart
         # with a new revision is the one this test is for: an edit to a file already read.
