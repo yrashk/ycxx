@@ -420,3 +420,12 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
   every C++ library it links (the e-graph spike needed a second HiGHS build).
   - Do: plan TSan runs on macOS with Clang from the start, or run them on Linux.
   - Learned on #3's e-graph spike.
+- **GCC 16.2 can write a module interface it cannot read back.** Adding a member of a new struct
+  type to `pipeline::TranslationUnit` (a reflection-serialized engine value) made every importer of
+  `ycxx.pipeline` fail with `failed to read compiled module cluster N: Bad file data` and `failed
+  to load pendings for 'std::__y1::allocator'`. Deleting the `.gcm` and rebuilding writes the same
+  broken file; `std::map` for `std::unordered_map` and moving coroutine bodies out of line did not
+  help. The same struct as a member of another value (`FrontResult`) was fine.
+  - Do: when this message appears after an edit to a module interface, bisect the edit (comment
+    out the new member and its uses) instead of rebuilding; move the member to another type.
+  - Learned on #115.

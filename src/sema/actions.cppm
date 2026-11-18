@@ -48,6 +48,8 @@ public:
   // Inside the enumerator list of an enumeration this unit is defining: its record so far, which
   // is published only after the list (#156).
   virtual const EnumRec* defining_enum(EntityId) { return nullptr; }
+  // This unit's class and enumeration records (#115).
+  virtual const Classes& classes() = 0;
   // The constant a variable usable in constant expressions holds ([expr.const]), if it is known.
   virtual std::optional<ConstId> constant_value(EntityId v) = 0;
   // In a member declaration of a class being defined: the member named `name` declared before it
@@ -431,15 +433,16 @@ public:
 
   // The destructor that ends an object of type `t`, or none if it is trivial ([class.dtor]); for
   // an array, its elements'.
-  EntityId destructor_of(QualType t) { return w_->classes.destructor_of(t); }
-  // A class's record where the class is complete ([class.mem.general]). Every unit that defines a
-  // class publishes its record, the first one wins (#156): a unit must not see it before its own
-  // definition, or while it analyses that definition, or what it accepts depends on other units.
-  const ClassRec* class_rec(EntityId c) { return q_->is_complete(c) ? w_->classes.find(c) : nullptr; }
+  EntityId destructor_of(QualType t) { return q_->classes().destructor_of(t); }
+  // This unit's records (#115).
+  const Classes& classes() { return q_->classes(); }
+  // A class's record where the class is complete ([class.mem.general]), not while the unit
+  // analyses its definition (#156).
+  const ClassRec* class_rec(EntityId c) { return q_->is_complete(c) ? q_->classes().find(c) : nullptr; }
   // An enumeration's record: in its own enumerator list, this unit's so far.
   const EnumRec* enum_rec(EntityId e) {
     if (const EnumRec* r = q_->defining_enum(e)) return r;
-    return w_->classes.find_enum(e);
+    return q_->classes().find_enum(e);
   }
 
   // The elements of an aggregate, in order: an array's elements, a class's non-static data

@@ -34,6 +34,7 @@ struct Message {
 struct FrontResult {
   std::vector<Message> messages;  // in order of position in the unit
   TranslationUnit unit;           // meaningful when there are no errors
+  Shapes shapes;                  // its classes and enumerations, for `layout` (#115)
   bool has_errors() const {
     return std::ranges::any_of(messages, [](const Message& m) { return m.error; });
   }
@@ -249,7 +250,21 @@ engine::query_task<FrontResult> TuFront::run(engine::Ctx& cx, TuId tu) {
   }
   std::ranges::stable_sort(out.messages, {}, &Message::token);
   if (!out.has_errors()) out.unit = unit_of(program, world, items, src.name);
+  // The unit's own records of its classes and enumerations (#115).
+  const sema::Classes& classes = program.classes();
+  for (EntityId c : classes.classes()) {
+    ClassShape& shape = out.shapes.classes.emplace_back(ClassShape{c, {}});
+    for (const sema::FieldRec& f : classes.rec(c).fields) shape.fields.push_back(f.type);
+  }
+  for (EntityId e : classes.enums()) out.shapes.enums.push_back({e, classes.underlying(e)});
   co_return out;
+}
+
+// A unit given as definitions has no classes of its own.
+engine::query_task<Shapes> UnitShapes::run(engine::Ctx& cx, TuId tu) {
+  if (!cx.fetch<TuSourceIn>(tu).file) co_return Shapes{};
+  const FrontResult& u = co_await cx.fetch<TuFront>(tu);
+  co_return u.shapes;
 }
 
 engine::query_task<TranslationUnit> TuUnit::run(engine::Ctx& cx, TuId tu) {

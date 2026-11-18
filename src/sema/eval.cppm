@@ -23,7 +23,10 @@ export namespace ycxx::sema {
 class EvalFacts : public irgen::TypeFacts {
 public:
   EvalFacts(World& w, Questions& q) : TypeFacts(w.ins, sema::target), w_(&w), q_(&q) {
-    enum_underlying = [&w](EntityId e) { return w.classes.underlying(e); };
+    enum_underlying = [&q](EntityId e) {
+      if (const EnumRec* r = q.defining_enum(e); r && r->underlying) return *r->underlying;
+      return q.classes().underlying(e);
+    };
   }
   ConstId string_address(ConstId s) { return w_->values.address({}, s, 0); }
   bool is_constexpr(EntityId f) { return q_->is_constexpr(f); }
