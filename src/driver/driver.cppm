@@ -54,6 +54,8 @@ export int run(std::span<const std::string_view> argv)
     return 0;
   }
   if (auto f = front_named(args[0])) return run_front(*f, args.subspan(1));
+  // `ycxx -fsyntax-only a.cpp`: an option first means the c++-compatible front.
+  if (args[0].starts_with("-")) return run_front(front::cxx, args);
   std::println(std::cerr, "ycxx: unknown front '{}'", args[0]);
   usage(std::cerr);
   return 2;

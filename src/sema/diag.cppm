@@ -1,0 +1,142 @@
+// The parser's and sema's diagnostics (query-engine.md §A1.7: diagnostics are values). Each kind
+// carries its severity and message as an annotation, so the table is derived by reflection, as
+// the lexer's is (ycxx.lex:diag). A diagnostic is located at `Loc{item, token offset}` (ast.md
+// §8.2) and its arguments are integers or handles: `{N}` is argument N in decimal, `{N:n}` a
+// `NameId`'s spelling, `{N:t}` a `QualType` as written, `{N:k}` a token kind's spelling.
+export module ycxx.sema:diag;
+
+import std;
+import ycxx.engine;
+import ycxx.lex;
+
+export namespace ycxx::sema {
+
+using lex::Severity;
+
+struct message {
+  Severity severity;
+  char text[120];
+};
+
+enum class Diag : std::uint32_t {
+  // [gram]: syntax
+  expected_token [[=message{Severity::error, "expected '{0:k}'"}]] = 1,
+  expected_expression [[=message{Severity::error, "expected an expression"}]],
+  expected_statement [[=message{Severity::error, "expected a statement"}]],
+  expected_declaration [[=message{Severity::error, "expected a declaration"}]],
+  expected_type_specifier [[=message{Severity::error, "expected a type specifier"}]],
+  expected_declarator [[=message{Severity::error, "expected a declarator"}]],
+  expected_unqualified_id [[=message{Severity::error, "expected an identifier"}]],
+  unexpected_token [[=message{Severity::error, "unexpected '{0:k}'"}]],
+  unexpected_identifier [[=message{Severity::error, "unexpected identifier '{0:n}'"}]],
+  not_supported [[=message{Severity::error, "'{0:k}' is not supported yet"}]],
+  // [dcl.spec], [dcl.type]
+  duplicate_specifier [[=message{Severity::error, "duplicate '{0:k}'"}]],
+  conflicting_specifiers [[=message{Severity::error, "'{0:k}' cannot be combined with the other type specifiers"}]],
+  storage_class_conflict [[=message{Severity::error, "a declaration has at most one storage class specifier"}]],
+  missing_type_specifier [[=message{Severity::error, "a declaration needs a type specifier"}]],
+  // [dcl.decl], [dcl.fct], [dcl.init]
+  void_variable [[=message{Severity::error, "variable '{0:n}' has incomplete type 'void'"}]],
+  void_parameter [[=message{Severity::error, "a parameter cannot have type 'void'"}]],
+  bound_not_constant [[=message{Severity::error, "an array bound must be a positive integral constant expression"}]],
+  invalid_array_element [[=message{Severity::error, "an array element cannot have type '{0:t}'"}]],
+  function_returns_function [[=message{Severity::error, "a function cannot return a function or an array"}]],
+  function_initialized [[=message{Severity::error, "function '{0:n}' cannot have an initializer"}]],
+  const_uninitialized [[=message{Severity::error, "const variable '{0:n}' must be initialized"}]],
+  redefinition [[=message{Severity::error, "redefinition of '{0:n}'"}]],
+  conflicting_declaration [[=message{Severity::error, "conflicting declaration of '{0:n}'"}]],
+  overload_not_supported [[=message{Severity::error, "overloading '{0:n}' is not supported yet"}]],
+  linkage_conflict [[=message{Severity::error, "'{0:n}' was declared with a different language linkage"}]],
+  unknown_linkage [[=message{Severity::error, "unknown language linkage; only \"C\" and \"C++\" are known"}]],
+  nonconstant_initializer [[=message{Severity::error, "dynamic initialization of a namespace-scope variable is not supported yet"}]],
+  // [basic.start.main]
+  main_return_type [[=message{Severity::error, "'main' must return 'int'"}]],
+  main_parameters [[=message{Severity::error, "'main' must have no parameters or (int, char**)"}]],
+  main_specifier [[=message{Severity::error, "'main' cannot be declared '{0:k}'"}]],
+  main_not_function [[=message{Severity::error, "'main' at global scope must be a function"}]],
+  main_named [[=message{Severity::error, "'main' cannot be used in an expression"}]],
+  main_linkage [[=message{Severity::error, "'main' cannot have C language linkage"}]],
+  // [basic.lookup.unqual]
+  undeclared [[=message{Severity::error, "use of undeclared identifier '{0:n}'"}]],
+  // [expr]
+  not_assignable [[=message{Severity::error, "expression is not assignable"}]],
+  assign_to_const [[=message{Severity::error, "cannot assign to a variable of const-qualified type '{0:t}'"}]],
+  invalid_operands [[=message{Severity::error, "invalid operands to binary expression ('{0:t}' and '{1:t}')"}]],
+  invalid_operand [[=message{Severity::error, "invalid argument type '{0:t}' to unary expression"}]],
+  increment_bool [[=message{Severity::error, "ISO C++17 does not allow incrementing or decrementing a bool"}]],
+  not_lvalue_address [[=message{Severity::error, "cannot take the address of an rvalue of type '{0:t}'"}]],
+  indirection_not_pointer [[=message{Severity::error, "indirection requires a pointer operand ('{0:t}' invalid)"}]],
+  not_callable [[=message{Severity::error, "called object of type '{0:t}' is not a function"}]],
+  too_few_arguments [[=message{Severity::error, "too few arguments in call: expected {0}, have {1}"}]],
+  too_many_arguments [[=message{Severity::error, "too many arguments in call: expected {0}, have {1}"}]],
+  no_conversion [[=message{Severity::error, "cannot convert '{0:t}' to '{1:t}'"}]],
+  not_contextually_bool [[=message{Severity::error, "'{0:t}' cannot be converted to bool"}]],
+  integer_literal_too_large [[=message{Severity::error, "integer literal is too large for any of its types"}]],
+  void_value [[=message{Severity::error, "a void expression has no value"}]],
+  incompatible_operands [[=message{Severity::error, "incompatible operand types ('{0:t}' and '{1:t}')"}]],
+  pointer_arithmetic_void [[=message{Severity::error, "arithmetic on a pointer to an incomplete or function type '{0:t}'"}]],
+  divide_by_zero [[=message{Severity::error, "division by zero in a constant expression"}]],
+  // [stmt]
+  break_outside_loop [[=message{Severity::error, "'break' outside a loop or switch"}]],
+  continue_outside_loop [[=message{Severity::error, "'continue' outside a loop"}]],
+  return_value_in_void [[=message{Severity::error, "a void function cannot return a value"}]],
+  return_missing_value [[=message{Severity::error, "a non-void function must return a value"}]],
+  redeclared_local [[=message{Severity::error, "redefinition of '{0:n}'"}]],
+};
+
+inline constexpr std::uint32_t sema_diag_base = 0x2000;
+
+constexpr engine::DiagId diag_id(Diag d) { return engine::DiagId(sema_diag_base + std::to_underlying(d)); }
+
+consteval auto diag_enumerators() { return std::define_static_array(std::meta::enumerators_of(^^Diag)); }
+
+// The kind of a DiagId in sema's range.
+constexpr std::optional<Diag> sema_diag_of(engine::DiagId id) {
+  std::uint32_t v = std::to_underlying(id);
+  std::optional<Diag> r;
+  template for (constexpr auto e : diag_enumerators()) {
+    if (v == sema_diag_base + std::to_underlying([:e:])) r = [:e:];
+  }
+  return r;
+}
+
+constexpr message message_of(Diag d) {
+  message m{};
+  template for (constexpr auto e : diag_enumerators()) {
+    if (d == [:e:]) m = std::meta::extract<message>(std::meta::annotations_of_with_type(e, ^^message)[0]);
+  }
+  return m;
+}
+
+constexpr std::string_view diag_name(Diag d) {
+  std::string_view r;
+  template for (constexpr auto e : diag_enumerators()) {
+    if (d == [:e:]) r = std::define_static_string(std::meta::identifier_of(e));
+  }
+  return r;
+}
+
+// Renders a message; `spell(kind, raw)` spells a `n` (name) or `t` (type) argument.
+template <class Spell>
+std::string render(Diag d, std::span<const std::uint64_t> args, Spell&& spell) {
+  std::string_view t(message_of(d).text);
+  std::string out;
+  for (std::size_t i = 0; i < t.size(); ++i) {
+    if (t[i] != '{' || i + 2 >= t.size()) {
+      out += t[i];
+      continue;
+    }
+    std::size_t close = t.find('}', i);
+    std::string_view spec = t.substr(i + 1, close - i - 1);
+    std::size_t n = std::size_t(spec[0] - '0');
+    std::uint64_t v = n < args.size() ? args[n] : 0;
+    char how = spec.size() > 2 ? spec[2] : 'd';
+    if (how == 'k') out += lex::spelling(lex::Tk(v));
+    else if (how == 'n' || how == 't') out += spell(how, v);
+    else out += std::format("{}", v);
+    i = close;
+  }
+  return out;
+}
+
+}  // namespace ycxx::sema

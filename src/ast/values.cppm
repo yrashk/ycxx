@@ -61,6 +61,21 @@ struct VInt {
 
 struct VNullptr {};
 
+// A string literal object ([lex.string]): its array type and its code units, the terminating
+// null included. String literals are identified by content, not by an entity (§3.7.9).
+struct VString {
+  QualType type;
+  SeqId<u8> units;
+};
+
+// The address of an object or of a subobject of it, plus a byte offset (§5.5): `base` is a
+// `VString` (or, later, a `VEntity`), `path` the subobject indices from it.
+struct VLvalue {
+  ConstId base;
+  SeqId<u32> path;
+  std::int64_t offset;
+};
+
 // ---------------------------------------------------------------- the dependent family
 
 // A non-type template parameter ([temp.param]).
@@ -76,7 +91,7 @@ struct [[=dependent]] VDepFnParam {
   u16 index;
 };
 
-using ValueKinds = closed_list<VInt, VNullptr, VDepParam, VDepFnParam>;
+using ValueKinds = closed_list<VInt, VNullptr, VString, VLvalue, VDepParam, VDepFnParam>;
 
 template <class T>
 constexpr bool is_value_kind = ValueKinds::contains<T>;

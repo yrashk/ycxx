@@ -28,6 +28,7 @@ class Compiler:
     name: str
     exe: str | None
     features: set = field(default_factory=set)
+    xfail: dict = field(default_factory=dict)  # test id -> reason (ycxx: tests/features/ycxx.xfail)
     version: str = ''
     why_missing: str = ''
 
@@ -118,6 +119,20 @@ def ycxx_features(repo):
     return feats
 
 
+def ycxx_xfails(repo):
+    """tests/features/ycxx.xfail: one `<test id> <reason>` per line, the tests ycxx is expected to
+    fail with the features it has, kept outside the test files because most are generated
+    (tests/draft). An XPASS fails the run, so a line goes when ycxx starts passing its test."""
+    path = repo / 'tests' / 'features' / 'ycxx.xfail'
+    out = {}
+    for line in path.read_text().splitlines() if path.is_file() else ():
+        line = line.split('#', 1)[0].strip()
+        if line:
+            test, _, why = line.partition(' ')
+            out[test] = why.strip() or '(no reason given)'
+    return out
+
+
 def discover(repo):
     """{name: Compiler} for ycxx, clang and gcc."""
     load_toolchains_env()
@@ -130,7 +145,7 @@ def discover(repo):
                 break
         else:
             why = 'set $YCXX or build it (build/bin/ycxx)'
-    out['ycxx'] = Compiler('ycxx', exe, ycxx_features(repo), why_missing=why)
+    out['ycxx'] = Compiler('ycxx', exe, ycxx_features(repo), ycxx_xfails(repo), why_missing=why)
     for name, var, names in (('clang', 'YCXX_CLANGXX', ('clang++-23',)), ('gcc', 'YCXX_GXX', ('g++-16',))):
         exe, why = _find(var, names)
         out[name] = Compiler(name, exe, set(FEATURES), why_missing=why)
