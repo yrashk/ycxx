@@ -996,10 +996,9 @@ public:
     std::vector<ast::Child> cs;
     for (const Ex& st : stmts)
       if (st.ok()) cs.push_back(sema::Sema::at(st, begin));
-    return s_->node(ast::Compound{s_->builder().list(cs), no_cleanups()}, begin, pos());
+    return s_->node(ast::Compound{s_->builder().list(cs)}, begin, pos());
   }
 
-  ast::SeqId<ast::Cleanup> no_cleanups() { return s_->builder().seq(std::span<const ast::Cleanup>{}); }
 
   // A substatement that is not a compound-statement has its own block scope ([stmt.pre]).
   Ex substatement() {
@@ -1028,8 +1027,8 @@ public:
         s_->diag(begin, brk ? Diag::break_outside_loop : Diag::continue_outside_loop);
         return {NodeId::none, begin, pos()};
       }
-      if (brk) return s_->node(ast::Break{no_cleanups()}, begin, pos());
-      return s_->node(ast::Continue{no_cleanups()}, begin, pos());
+      if (brk) return s_->node(ast::Break{}, begin, pos());
+      return s_->node(ast::Continue{}, begin, pos());
     }
     case Tk::kw_return: return return_statement();
     case Tk::kw_switch:
@@ -1300,7 +1299,7 @@ public:
       s_->diag(begin, Diag::return_missing_value);
     }
     if (!expect(Tk::semi)) skip_to_semi();
-    return s_->node(ast::Return{sema::Sema::at(value, begin), no_cleanups()}, begin, pos());
+    return s_->node(ast::Return{sema::Sema::at(value, begin)}, begin, pos());
   }
 
   // A block-scope simple-declaration ([stmt.dcl], [dcl.pre]): each declarator is a local

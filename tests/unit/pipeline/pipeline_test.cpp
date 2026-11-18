@@ -110,7 +110,6 @@ struct Body {
 
   ast::ExprInfo pr(QualType t) { return {t, ast::ValueCategory::prvalue, 0}; }
   ast::ExprInfo lv(QualType t) { return {t, ast::ValueCategory::lvalue, 0}; }
-  ast::SeqId<ast::Cleanup> no_cleanups() { return w.in.intern_seq(std::span<const ast::Cleanup>()); }
   template <class T>
   NodeId add(const T& v) {
     return b.add(v, 1);
@@ -136,13 +135,13 @@ struct Body {
     locals.push_back({w.in.names.intern(name), t, EntityId::none, NodeId::none, 0});
     return std::uint32_t(locals.size() - 1);
   }
-  NodeId ret(NodeId v = NodeId::none) { return add(ast::Return{{v, 0}, no_cleanups()}); }
+  NodeId ret(NodeId v = NodeId::none) { return add(ast::Return{{v, 0}}); }
   NodeId expr(NodeId e) { return add(ast::ExprStmt{{e, 0}}); }
   NodeId if_(NodeId c, NodeId t) { return add(ast::If{{}, {c, 0}, {t, 0}, {NodeId::none, 0}}); }
   NodeId block(std::initializer_list<NodeId> stmts) {
     std::vector<Child> cs;
     for (NodeId s : stmts) cs.push_back({s, 0});
-    return add(ast::Compound{b.list(cs), no_cleanups()});
+    return add(ast::Compound{b.list(cs)});
   }
   // Adds the definition of `f` with this body; the parameters are the first locals.
   void define(EntityId f, QualType type, std::vector<std::pair<std::string, QualType>> params, NodeId tree) {

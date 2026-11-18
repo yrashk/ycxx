@@ -207,25 +207,19 @@ struct DefaultInit {
 
 // ---------------------------------------------------------------- structure
 
-// A destructor call on a scope-exit edge (§3.7.3): the body local and the destructor.
-struct Cleanup {
-  u32 local;
-  EntityId destructor;
-  constexpr bool operator==(const Cleanup&) const = default;
-};
-
 struct ExprStmt {
   Child expr;
 };
 
+// The destructors a scope exit runs are not listed on the exiting statement: each object names
+// its own (`LocalVar::destructor`, `Materialize::destructor`, `DestroyMember`), and `function_ir`
+// derives every exit edge's calls from the scopes it leaves (ast.md §3.7.3, #135).
 struct Return {
   Child value;
-  SeqId<Cleanup> cleanups;  // in order, computed by analyze_body
 };
 
 struct Compound {
   ChildList stmts;
-  SeqId<Cleanup> cleanups;  // on normal exit
 };
 
 struct If {
@@ -270,13 +264,9 @@ struct For {
   Child body;
 };
 
-// [stmt.break], [stmt.cont]: the destructor calls on the exit edge, in order (§3.7.3).
-struct Break {
-  SeqId<Cleanup> cleanups;
-};
-struct Continue {
-  SeqId<Cleanup> cleanups;
-};
+// [stmt.break], [stmt.cont].
+struct Break {};
+struct Continue {};
 
 // A block-scope simple-declaration ([stmt.dcl]): its `LocalVar`s, in order.
 struct DeclStmt {

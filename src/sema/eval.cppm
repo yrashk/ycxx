@@ -52,7 +52,7 @@ public:
     if (!e.ok()) return {};
     ast::Interners& in = s_->ins();
     ast::Child root = s_->builder().commit(ast::Child{e.id, 0});
-    NodeId ret = in.intern(ast::Return{root, in.intern_seq(std::span<const ast::Cleanup>{})}, e.width());
+    NodeId ret = in.intern(ast::Return{root}, e.width());
     std::vector<ast::LocalRec> locals(s_->locals().begin(), s_->locals().end());
     for (ast::LocalRec& l : locals) l.decl = NodeId::none;  // drafts of the enclosing frame
     ast::DeclSema thunk{};
