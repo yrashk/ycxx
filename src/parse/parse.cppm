@@ -90,9 +90,16 @@ public:
   // Every item and body analysed, in item order; the diagnostics of each cell in order.
   void analyze_all() {
     for (u32 k = 0; k < items_->items.size(); ++k) {
+      // Members of a class or namespace wait for those (M2); the enclosing item was diagnosed.
+      if (!in_global_scope(k)) continue;
       item_sema(k);
       if (items_->items[k].has_body() && items_->items[k].kind == ItemKind::function) analyze_body(k);
     }
+  }
+  bool in_global_scope(u32 k) const {
+    for (u32 j = items_->items[k].parent; j != items::none; j = items_->items[j].parent)
+      if (items_->items[j].kind != ItemKind::linkage_block) return false;
+    return true;
   }
   std::vector<engine::Diagnostic> diagnostics() const {
     std::vector<engine::Diagnostic> r;
@@ -260,6 +267,7 @@ private:
   void bad() {
     while (decls_.size() < it_->names.size()) {
       ast::DeclSema d = invalid_decl();
+      d.type = s_.builtin(sema::Builtin::void_);  // an interned type, for the record's fingerprint
       d.attributes = b_.seq(std::span<const NodeId>{});
       d.params = b_.seq(std::span<const ast::ParamSema>{});
       decls_.push_back(d);
