@@ -11,6 +11,8 @@ function(ycxxc_unit_test name source)
 endfunction()
 
 add_subdirectory(hash)
+add_subdirectory(ast)
 add_subdirectory(engine)
 add_subdirectory(lex)
+add_subdirectory(items)
 add_subdirectory(link)
