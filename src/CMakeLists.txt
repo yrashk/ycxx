@@ -4,6 +4,8 @@
 # Libraries, lowest first.
 add_subdirectory(hash)
 add_subdirectory(engine)
+add_subdirectory(obj)
+add_subdirectory(link)
 
 configure_file(version.cppm.in ${CMAKE_CURRENT_BINARY_DIR}/version.cppm @ONLY)
 

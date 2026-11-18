@@ -12,3 +12,4 @@ endfunction()
 
 add_subdirectory(hash)
 add_subdirectory(engine)
+add_subdirectory(link)
