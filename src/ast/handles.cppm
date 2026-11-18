@@ -6,6 +6,7 @@
 export module ycxx.ast.handles;
 
 import std;
+import ycxx.hash;
 
 export namespace ycxx::ast {
 
@@ -104,6 +105,42 @@ using handles = closed_list<NameId, TokSeqId, BodyId, ItemId, EntityId, ConstId,
 
 template <class T>
 constexpr bool is_handle = handles::contains<T> || is_seq_id<T>;
+
+// A handle's fingerprint is its interner's Merkle fingerprint of what it names, never its number
+// (§2, query-engine.md §A1.2; #68). `hash_into` is declared here, beside the handles, so every
+// importer finds it by ADL; it reaches the interners bound on this thread (`BindInterners`,
+// ycxx.ast.interner) through a function that module installs per handle type. Fingerprinting a
+// handle with no interners bound violates a contract: a number would silently make fingerprints
+// depend on interning order. In-memory hash tables use `local_hash`, which takes the number.
+inline thread_local const void* bound_interners = nullptr;
+template <class H>
+inline Fp128 (*interned_fp)(const void* interners, H h) = nullptr;
+
+template <class H>
+  requires is_handle<H>
+void hash_into(Hasher& h, H v) {
+  // `none` names nothing: the interners' fixed fingerprint for it, with no lookup and no binding.
+  if constexpr (requires { H::none; }) {
+    if (v == H::none) return void(h.fp(fingerprint128(std::string_view("ycxx.ast.none"))));
+  }
+  const void* in = bound_interners;
+  contract_assert(in != nullptr);  // fingerprinting a handle needs its interners bound (#68)
+  h.fp(interned_fp<H>(in, v));
+}
+
+// Stored by number: the in-memory form of a value that holds handles (the engine's serializer
+// finds these by ADL; a custom fingerprint otherwise means "say how to store it"). The persistent
+// cache (#17) must map handles through their fingerprints instead.
+template <class Sink, class H>
+  requires is_handle<H>
+void serialize_into(Sink& out, H v) {
+  out.uint(std::bit_cast<u32>(v));
+}
+template <class Source, class H>
+  requires is_handle<H>
+H deserialize_from(Source& in, std::type_identity<H>) {
+  return std::bit_cast<H>(in.template uint<u32>());
+}
 
 // The interner a handle enum names in its annotation.
 consteval interner interner_of(std::meta::info handle) {

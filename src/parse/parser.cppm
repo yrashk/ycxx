@@ -60,10 +60,11 @@ struct Declarator {
   NameId name{};
   bool named = false;
   u32 name_at = 0;
-  // `C::name`: the class named by the nested-name-specifier ([dcl.meaning]).
+  // `N::C::name`: the namespace or class the nested-name-specifier names ([dcl.meaning]).
   bool qualified = false;
-  NameId qualifier{};
+  NameId qualifier{};  // its last component
   u32 qualifier_at = 0;
+  sema::Sema::Scope scope{};
   u32 begin = 0;
   QualType type{};
   std::vector<Param> params;
@@ -147,6 +148,10 @@ public:
   // ([stmt.ambig]: what can be a declaration is one).
   bool starts_declaration() {
     if (starts_decl_specifier(kind())) return true;
+    if ((is(Tk::identifier) && kind(1) == Tk::coloncolon) || is(Tk::coloncolon)) {
+      auto q = qualified_type(0);
+      return q && kind(q->second) != Tk::l_paren && kind(q->second) != Tk::period && kind(q->second) != Tk::l_brace;
+    }
     if (!is(Tk::identifier) || kind(1) == Tk::coloncolon || !s_->class_name(name_of(tok()))) return false;
     // `T(args).f()` and `T{…}.m` are expressions; `T (x);` declares x ([stmt.ambig]).
     if (kind(1) == Tk::l_brace) return false;
@@ -208,6 +213,22 @@ public:
       case Tk::kw_constexpr: once(d.is_constexpr, k); break;
       case Tk::kw_consteval: once(d.is_consteval, k); break;
       case Tk::kw_constinit: once(d.is_constinit, k); break;
+      case Tk::kw_enum:
+        if (kind(1) == Tk::identifier && kind(2) != Tk::l_brace && kind(2) != Tk::colon) {
+          // An elaborated-type-specifier naming an enumeration ([dcl.type.elab]).
+          bump();
+          auto t = s_->class_name(name_of(tok()), true);
+          if (!t || !s_->types().is_enum(*t)) {
+            s_->diag(pos(), Diag::not_a_type, name_of(tok()));
+            d.ok = false;
+          } else {
+            cls = t;
+          }
+          break;
+        }
+        s_->diag(pos(), Diag::not_supported, k);  // an enum-specifier where a type is named
+        d.ok = false;
+        goto done;
       case Tk::kw_struct:
       case Tk::kw_class: {
         u32 at = pos();
@@ -236,12 +257,23 @@ public:
         }
         continue;
       }
+      case Tk::coloncolon:
       case Tk::identifier:
         if (!any_type()) {
-          if (auto t = s_->class_name(name_of(tok()))) {
-            cls = t;
-            break;
+          if (k == Tk::coloncolon || kind(1) == Tk::coloncolon) {
+            // `N::C`, `::C`, `C::E` ([dcl.type.simple]).
+            if (auto q = qualified_type(0); q && kind(q->second) != Tk::l_paren) {
+              cls = q->first;
+              for (u32 j = 1; j < q->second; ++j) bump();
+              break;
+            }
+            goto done;
           }
+          if (kind(1) != Tk::coloncolon)
+            if (auto t = s_->class_name(name_of(tok()))) {
+              cls = t;
+              break;
+            }
         }
         goto done;
       default:
@@ -337,6 +369,7 @@ public:
     bool qualified = false;
     NameId qualifier{};
     u32 qualifier_at = 0;
+    sema::Sema::Scope scope{};
     std::vector<Suffix> suffixes;
   };
 
@@ -367,14 +400,23 @@ public:
       }
       l.pointers.push_back({op, sema::Cv(cv)});
     }
-    if (!abstract && is(Tk::identifier) && kind(1) == Tk::coloncolon && kind(2) == Tk::identifier) {
-      // A qualified declarator-id `C::name`, defining a member of class C ([class.mfct],
-      // [class.static.data]).
-      l.qualified = true;
-      l.qualifier = name_of(tok());
+    if (!abstract && ((is(Tk::identifier) && kind(1) == Tk::coloncolon) || is(Tk::coloncolon))) {
+      // A qualified declarator-id `N::C::name`, defining a member of namespace N or class C
+      // ([namespace.memdef], [class.mfct], [class.static.data]). What follows it is looked up in
+      // that scope.
+      u32 next = 0;
       l.qualifier_at = pos();
-      bump();
-      bump();
+      auto sc = nested_name(0, next);
+      if (!sc) {
+        s_->diag(pos(), Diag::not_a_namespace, is(Tk::identifier) ? name_of(tok()) : s_->no_name());
+        ok = false;
+        return l;
+      }
+      l.qualified = true;
+      l.qualifier = next >= 2 && kind(next - 2) == Tk::identifier ? name_of(tok(next - 2)) : s_->no_name();
+      l.scope = *sc;
+      for (u32 j = 0; j < next; ++j) bump();
+      if (qualified_hook) qualified_hook(*sc);
     }
     if (is(Tk::identifier)) {
       l.name = name_of(tok());
@@ -443,11 +485,51 @@ public:
     return l;
   }
 
+  // A nested-name-specifier ([expr.prim.id.qual]) at token `start` ahead: `::`, `N::`, `N::C::`,
+  // resolved as it is read, without consuming it. `next` is where the name after it is.
+  std::optional<sema::Sema::Scope> nested_name(u32 start, u32& next) {
+    u32 j = start;
+    std::optional<sema::Sema::Scope> s;
+    if (kind(j) == Tk::coloncolon) {
+      s = sema::Sema::global_scope();
+      ++j;
+    } else if (kind(j) == Tk::identifier && kind(j + 1) == Tk::coloncolon) {
+      s = s_->scope_named(name_of(tok(j)));
+      if (!s) return std::nullopt;
+      j += 2;
+    } else {
+      return std::nullopt;
+    }
+    while (kind(j) == Tk::identifier && kind(j + 1) == Tk::coloncolon) {
+      auto m = s_->scope_member(*s, name_of(tok(j)));
+      if (!m) return std::nullopt;
+      s = m;
+      j += 2;
+    }
+    if (kind(j) != Tk::identifier && kind(j) != Tk::tilde) return std::nullopt;
+    next = j;
+    return s;
+  }
+  // A qualified type name at token `start`: its type and the tokens it takes.
+  std::optional<std::pair<QualType, u32>> qualified_type(u32 start) {
+    u32 next = 0;
+    auto s = nested_name(start, next);
+    if (!s || kind(next) != Tk::identifier || kind(next + 1) == Tk::coloncolon) return std::nullopt;
+    auto t = s_->scope_type(*s, name_of(tok(next)));
+    if (!t) return std::nullopt;
+    return std::pair{*t, next + 1 - start};
+  }
+  // Called once a qualified declarator-id is read, before its parameters, so they are looked up
+  // in the scope it names ([basic.scope.namespace], [class.mfct]).
+  std::function<void(const sema::Sema::Scope&)> qualified_hook;
+
   // Whether the `(` here begins a parameter-declaration-clause rather than an initializer
   // ([dcl.ambig.res]: what can be a declaration is one).
   bool params_ahead() {
     Tk k = kind(1);
     if (k == Tk::r_paren || k == Tk::ellipsis || starts_decl_specifier(k)) return true;
+    if ((k == Tk::identifier && kind(2) == Tk::coloncolon) || k == Tk::coloncolon)
+      return qualified_type(1).has_value();  // `N::S`, `C::E`, `::S`
     return k == Tk::identifier && kind(2) != Tk::coloncolon && s_->class_name(name_of(tok(1))).has_value();
   }
 
@@ -508,6 +590,7 @@ public:
     d.qualified = l.qualified;
     d.qualifier = l.qualifier;
     d.qualifier_at = l.qualifier_at;
+    d.scope = l.scope;
     return t;
   }
 
@@ -1058,8 +1141,8 @@ public:
     case Tk::identifier: {
       NameId n = name_of(tok());
       if ((kind(1) == Tk::l_paren || kind(1) == Tk::l_brace))
-        if (auto t = s_->class_name(n)) {
-          // `T(args)` or `T{…}` ([expr.type.conv]).
+        if (auto t = s_->class_name(n); t && (s_->types().is_class(*t) || s_->template_param(n))) {
+          // `T(args)` or `T{…}` ([expr.type.conv]), T a class or a template parameter.
           bump();
           if (is(Tk::l_brace)) {
             auto b = braced_init_list();
@@ -1075,6 +1158,7 @@ public:
           Ex r = s_->functional_cast(*t, std::move(args), begin, pos());
           return {r.id, begin, pos(), r.info};
         }
+      if (kind(1) == Tk::coloncolon) return qualified_id(begin);
       bump();
       if (is(Tk::less) && s_->is_template_name(n)) {
         // A template-id ([temp.names]): `f<args>`.
@@ -1082,25 +1166,13 @@ public:
         if (!args) return {NodeId::none, begin, pos()};
         return s_->template_id(n, std::move(*args), begin, pos());
       }
-      if (is(Tk::coloncolon) && kind(1) == Tk::identifier) {
-        // A qualified-id `C::name` ([expr.prim.id.qual]).
-        bump();
-        u32 name_at = pos();
-        NameId m = name_of(tok());
-        bump();
-        if (is(Tk::coloncolon)) {
-          s_->diag(pos(), Diag::not_supported, Tk::coloncolon);
-          return {NodeId::none, begin, pos()};
-        }
-        return s_->qualified_name(n, m, begin, name_at, pos());
-      }
       return s_->name_expr(n, begin, pos(), is(Tk::l_paren));
     }
+    case Tk::coloncolon: return qualified_id(begin);
     case Tk::kw_this: bump(); return s_->this_expr(begin, pos());
     case Tk::float_lit:
     case Tk::l_square:
     case Tk::kw_requires:
-    case Tk::coloncolon:
     case Tk::kw_operator:
     case Tk::tilde:
     case Tk::kw_typeid:
@@ -1116,6 +1188,29 @@ public:
       s_->diag(begin, Diag::expected_expression);
       return {NodeId::none, begin, begin};
     }
+  }
+
+  // A namespace named by `N`, `N::M` or `::N` ([namespace.alias], [namespace.udir]), consumed.
+  std::optional<ast::EntityId> namespace_spec() {
+    u32 at = pos();
+    std::optional<sema::Sema::Scope> s;
+    u32 next = 0;
+    if (is(Tk::identifier) && kind(1) != Tk::coloncolon) {
+      s = s_->scope_named(name_of(tok()));
+      next = 0;
+      if (s) {
+        bump();
+        if (s->ns) return s->ns;
+      }
+    } else if ((s = nested_name(0, next)) && kind(next) == Tk::identifier) {
+      for (u32 j = 0; j < next; ++j) bump();
+      auto m = s_->scope_member(*s, name_of(tok()));
+      bump();
+      if (m && m->ns) return m->ns;
+    }
+    s_->diag(at, Diag::not_a_namespace, s_->no_name());
+    skip_to_semi();
+    return std::nullopt;
   }
 
   // braced-init-list ([dcl.init.general]): `{ initializer-clause, … }`, or with designators
@@ -1159,6 +1254,22 @@ public:
         --depth;
       }
     }
+  }
+
+  // A qualified-id ([expr.prim.id.qual]): `N::x`, `::x`, `C::m`, `E::e`, `N::C::f`.
+  Ex qualified_id(u32 begin) {
+    u32 next = 0;
+    auto s = nested_name(0, next);
+    if (!s || kind(next) != Tk::identifier) {
+      s_->diag(begin, Diag::not_a_namespace, is(Tk::identifier) ? name_of(tok()) : s_->no_name());
+      while (is(Tk::identifier) || is(Tk::coloncolon)) bump();
+      return {NodeId::none, begin, pos()};
+    }
+    for (u32 j = 0; j < next; ++j) bump();
+    u32 name_at = pos();
+    NameId n = name_of(tok());
+    bump();
+    return s_->scope_expr(*s, n, begin, name_at, pos());
   }
 
   // ------------------------------------------------------------ [stmt]
@@ -1219,9 +1330,62 @@ public:
     case Tk::kw_goto:
     case Tk::kw_try:
     case Tk::kw_static_assert: return static_assert_declaration();
-    case Tk::kw_co_return:
-    case Tk::kw_using:
     case Tk::kw_namespace:
+      if (kind(1) == Tk::identifier && kind(2) == Tk::equal) {
+        // A namespace alias in a block ([namespace.alias]).
+        NameId alias = name_of(tok(1));
+        bump();
+        bump();
+        bump();
+        if (auto ns = namespace_spec()) s_->namespace_alias(alias, *ns);
+        expect(Tk::semi);
+        return s_->node(ast::ExprStmt{}, begin, pos());
+      }
+      s_->diag(begin, Diag::not_supported, kind());
+      skip_statement();
+      return {NodeId::none, begin, pos()};
+    case Tk::kw_using:
+      if (kind(1) == Tk::kw_namespace) {
+        // A using-directive in a block ([namespace.udir]).
+        bump();
+        bump();
+        if (auto ns = namespace_spec()) s_->using_directive(*ns);
+        expect(Tk::semi);
+        return s_->node(ast::ExprStmt{}, begin, pos());
+      }
+      if (kind(1) == Tk::identifier || kind(1) == Tk::coloncolon) {
+        // A using-declaration in a block ([namespace.udecl]): `using N::x;`.
+        bump();
+        u32 next = 0;
+        auto s = nested_name(0, next);
+        if (!s || kind(next) != Tk::identifier) {
+          s_->diag(pos(), Diag::not_a_namespace, is(Tk::identifier) ? name_of(tok()) : s_->no_name());
+          skip_to_semi();
+          return {NodeId::none, begin, pos()};
+        }
+        for (u32 j = 0; j < next; ++j) bump();
+        s_->using_declaration(*s, name_of(tok()), pos());
+        bump();
+        expect(Tk::semi);
+        return s_->node(ast::ExprStmt{}, begin, pos());
+      }
+      if (kind(1) == Tk::kw_enum && kind(2) == Tk::identifier) {
+        // A using-enum-declaration ([enum.udecl]).
+        bump();
+        bump();
+        u32 at = pos();
+        NameId n = name_of(tok());
+        bump();
+        auto t = s_->class_name(n, true);
+        if (!t) s_->diag(at, Diag::not_a_type, n);
+        else s_->using_enum(*t, at);
+        expect(Tk::semi);
+        return s_->node(ast::ExprStmt{}, begin, pos());
+      }
+      s_->diag(begin, Diag::not_supported, kind());
+      skip_statement();
+      return {NodeId::none, begin, pos()};
+    case Tk::kw_co_return:
     case Tk::kw_asm:
     case Tk::kw_contract_assert:
     case Tk::kw_template:

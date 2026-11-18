@@ -76,6 +76,7 @@ public:
     }
     case TypeKind::builtin:
     case TypeKind::class_:
+    case TypeKind::enum_:
     case TypeKind::other: return t;
     case TypeKind::pointer: {
       auto p = substitute(r.inner, b);
@@ -142,7 +143,8 @@ public:
     switch (pr.kind) {
     case TypeKind::template_param: return pr.depth == ar.depth && pr.index == ar.index && pr.pack == ar.pack;
     case TypeKind::builtin: return pr.builtin == ar.builtin;
-    case TypeKind::class_: return pr.entity == ar.entity;
+    case TypeKind::class_:
+    case TypeKind::enum_: return pr.entity == ar.entity;
     case TypeKind::pointer:
       // Under /4.2 the pointee may be less cv-qualified in A: a qualification conversion adds it.
       return deduce(pr.inner, ar.inner, depth, out, {.more_cv = allow.qualification, .qualification = false});

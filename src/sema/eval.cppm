@@ -22,7 +22,9 @@ export namespace ycxx::sema {
 // The facts `function_ir` needs (ycxx.irgen:facts), over sema's world and questions.
 class EvalFacts : public irgen::TypeFacts {
 public:
-  EvalFacts(World& w, Questions& q) : TypeFacts(w.ins, sema::target), w_(&w), q_(&q) {}
+  EvalFacts(World& w, Questions& q) : TypeFacts(w.ins, sema::target), w_(&w), q_(&q) {
+    enum_underlying = [&w](EntityId e) { return w.classes.underlying(e); };
+  }
   ConstId string_address(ConstId s) { return w_->values.address({}, s, 0); }
   bool is_constexpr(EntityId f) { return q_->is_constexpr(f); }
   bool is_main(EntityId) { return false; }  // `main` is never evaluated ([basic.start.main])

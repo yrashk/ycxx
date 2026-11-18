@@ -16,13 +16,19 @@ export namespace ycxx::pipeline {
 namespace ast = ycxx::ast;
 
 // Fails, naming the type, on what the α subset does not mangle yet.
-// How a class is named: its identifier (the global namespace only, so far).
-using ClassNames = std::function<std::string(ast::EntityId)>;
+// How a class, enumeration or namespace is named: its identifier ("(anonymous)" for an unnamed
+// namespace), and the class or namespace it is in, or none for the global namespace.
+struct ClassName {
+  std::string name;
+  ast::EntityId scope = ast::EntityId::none;
+};
+using ClassNames = std::function<ClassName(ast::EntityId)>;
 
-// `scope` is the class type of a member, mangled as a <nested-name> (§5.1.5.3).
+// `scope` is the class or namespace a function is a member of, none for the global namespace;
+// a scoped name is a <nested-name> (§5.1.5.3).
 std::expected<std::string, std::string> mangled_function(const ast::Interners& in, std::string_view name,
                                                          ast::QualType type, const ClassNames& classes = {},
-                                                         std::optional<ast::QualType> scope = std::nullopt,
+                                                         ast::EntityId scope = ast::EntityId::none,
                                                          bool special = false);
 
 // A function template specialization (§5.1.2, §5.1.5): its <template-args>, then its template's
@@ -33,8 +39,8 @@ struct TemplateSpec {
   std::vector<ast::TemplateArg> args;
 };
 std::expected<std::string, std::string> mangled_specialization(const ast::Interners& in, std::string_view name,
-                                                               const TemplateSpec& spec,
-                                                               const ClassNames& classes = {});
+                                                               const TemplateSpec& spec, const ClassNames& classes = {},
+                                                               ast::EntityId scope = ast::EntityId::none);
 
 // <substitution> for the candidate at `index`: `S_`, then `S0_` … `SZ_`, `S10_` … (§5.1.10).
 std::string substitution(std::size_t index);
@@ -43,7 +49,7 @@ std::string substitution(std::size_t index);
 std::expected<std::string, std::string> symbol_name(const ast::Interners& in, std::string_view name, ast::QualType type,
                                                     bool is_function, ast::LangLinkage lang,
                                                     const ClassNames& classes = {},
-                                                    std::optional<ast::QualType> scope = std::nullopt,
+                                                    ast::EntityId scope = ast::EntityId::none,
                                                     bool special = false, const TemplateSpec* spec = nullptr);
 
 }  // namespace ycxx::pipeline
@@ -144,7 +150,7 @@ class Mangler {
         if (!sig) return sig;
         inner = "F" + *sig + "E";
         candidates_.push_back(full_key(bare));
-      } else if (in_.types.is<ast::TClass>(in_.types.canon(bare))) {
+      } else if (in_.types.is<ast::TClass>(in_.types.canon(bare)) || in_.types.is<ast::TEnum>(in_.types.canon(bare))) {
         // <class-enum-type> ::= <name>: a global-namespace class is its <source-name>, a
         // substitution candidate (§5.1.5.3, §5.1.10).
         auto n = class_name(bare);
@@ -159,13 +165,43 @@ class Mangler {
 
   // A global-namespace class's <source-name>, or its substitution once it has been mangled.
   std::expected<std::string, std::string> class_name(ast::QualType cls) {
-    if (auto s = find(full_key(cls))) return *s;
-    std::string n = classes_ ? classes_(in_.types.get<ast::TClass>(in_.types.canon(cls)).entity) : "";
-    if (n.empty()) return std::unexpected("a class whose name is unknown");
-    candidates_.push_back(full_key(cls));
-    return std::format("{}{}", n.size(), n);
+    ast::QualType c = in_.types.canon(cls);
+    return entity_name(in_.types.is<ast::TEnum>(c) ? in_.types.get<ast::TEnum>(c).entity : in_.types.get<ast::TClass>(c).entity);
   }
-
+  // A class's or enumeration's <name> as a type: its <source-name>, or, inside a class or a
+  // namespace, a <nested-name> whose prefixes are candidates first (§5.1.5.3, §5.1.10). Classes
+  // and namespaces are keyed by entity.
+  std::expected<std::string, std::string> entity_name(ast::EntityId e) {
+    std::uint64_t key = (std::uint64_t{1} << 32) | std::to_underlying(e);
+    if (auto s = find(key)) return *s;
+    ClassName n = classes_ ? classes_(e) : ClassName{};
+    if (n.name.empty()) return std::unexpected("a class whose name is unknown");
+    std::string r = source_name(n.name);
+    if (n.scope != ast::EntityId::none) {
+      auto p = prefix(n.scope);
+      if (!p) return p;
+      r = "N" + *p + r + "E";
+    }
+    candidates_.push_back(key);
+    return r;
+  }
+  // The <prefix> naming class or namespace `e` inside a <nested-name>: its enclosing prefix, then
+  // its own name, each a candidate as it completes.
+  std::expected<std::string, std::string> prefix(ast::EntityId e) {
+    std::uint64_t key = (std::uint64_t{1} << 32) | std::to_underlying(e);
+    if (auto s = find(key)) return *s;
+    ClassName n = classes_ ? classes_(e) : ClassName{};
+    if (n.name.empty()) return std::unexpected("a scope whose name is unknown");
+    std::string r;
+    if (n.scope != ast::EntityId::none) {
+      auto p = prefix(n.scope);
+      if (!p) return p;
+      r = *p;
+    }
+    r += source_name(n.name);
+    candidates_.push_back(key);
+    return r;
+  }
   // <bare-function-type>: the return type when `with_return`, then the parameter types, `v` for
   // none (§5.1.5.3).
   std::expected<std::string, std::string> signature(const ast::TFunction& f, bool with_return) {
@@ -209,11 +245,26 @@ class Mangler {
     return out + "E";
   }
 
-  // The <unscoped-template-name> of a function template: its <source-name>, a substitution
-  // candidate (§5.1.10).
-  std::string template_name(std::string_view name) {
-    candidates_.push_back((std::uint64_t{1} << 32) | candidates_.size());
-    return std::format("{}{}", name.size(), name);
+  // A function template's name before its <template-args>: an <unscoped-template-name>, or in a
+  // namespace a <template-prefix> after the namespace's <prefix>; a substitution candidate either
+  // way (§5.1.5.3, §5.1.10).
+  std::expected<std::string, std::string> template_name(std::string_view name, ast::EntityId scope) {
+    std::string r;
+    if (scope != ast::EntityId::none) {
+      auto p = prefix(scope);
+      if (!p) return p;
+      r = *p;
+    }
+    r += source_name(name);
+    candidates_.push_back((std::uint64_t{2} << 32) | candidates_.size());
+    return r;
+  }
+
+  // <source-name>; an unnamed namespace is `_GLOBAL__N_1`, unique to its translation unit
+  // (§5.1.4.4).
+  static std::string source_name(std::string_view n) {
+    if (n == "(anonymous)") n = "_GLOBAL__N_1";
+    return std::format("{}{}", n.size(), n);
   }
 
  private:
@@ -225,6 +276,8 @@ class Mangler {
     candidates_.push_back(full_key(q));
     return qualifiers + inner;
   }
+  // Keys: a type is its canonical handle, an entity (a class or namespace) and a template name
+  // have bit 32 or 33 set.
   std::uint64_t full_key(ast::QualType q) const { return std::to_underlying(in_.canonical(q)); }
   std::optional<std::string> find(std::uint64_t key) const {
     for (std::size_t i = 0; i < candidates_.size(); ++i)
@@ -234,22 +287,21 @@ class Mangler {
 
   const ast::Interners& in_;
   const ClassNames& classes_;
-  // Canonical types, and names (with bit 32 set), in order of completion.
-  std::vector<std::uint64_t> candidates_;
+  std::vector<std::uint64_t> candidates_;  // in order of completion
 };
 
 std::expected<std::string, std::string> mangled_function(const ast::Interners& in, std::string_view name,
                                                          ast::QualType type, const ClassNames& classes,
-                                                         std::optional<ast::QualType> scope, bool special) {
+                                                         ast::EntityId scope, bool special) {
   ast::QualType c = in.types.canon(type);
   if (!in.types.is<ast::TFunction>(c)) return std::unexpected("not a function type");
   auto f = in.types.get<ast::TFunction>(c);
   Mangler m(in, classes);
   std::string out = std::format("_Z{}{}", name.size(), name);
-  if (scope) {
+  if (scope != ast::EntityId::none) {
     // <nested-name> ::= N [<CV-qualifiers>] <prefix> <unqualified-name> E, the member function's
     // cv-qualifiers in the order r V K (§5.1.5.3).
-    auto prefix = m.class_name(*scope);
+    auto prefix = m.prefix(scope);
     if (!prefix) return prefix;
     std::string cv = std::string(std::to_underlying(f.cv) & 2 ? "V" : "") + (std::to_underlying(f.cv) & 1 ? "K" : "");
     // A <ctor-dtor-name> (`C1`, `D1`) stands as it is; other names are <source-name>s.
@@ -267,34 +319,40 @@ std::expected<std::string, std::string> mangled_function(const ast::Interners& i
 }
 
 std::expected<std::string, std::string> mangled_specialization(const ast::Interners& in, std::string_view name,
-                                                               const TemplateSpec& spec, const ClassNames& classes) {
+                                                               const TemplateSpec& spec, const ClassNames& classes,
+                                                               ast::EntityId scope) {
   ast::QualType c = in.types.canon(spec.pattern);
   if (!in.types.is<ast::TFunction>(c)) return std::unexpected("not a function type");
   Mangler m(in, classes);
-  std::string out = "_Z" + m.template_name(name);
+  auto n = m.template_name(name, scope);
+  if (!n) return n;
   auto args = m.template_args(spec.args);
   if (!args) return args;
   auto sig = m.signature(in.types.get<ast::TFunction>(c), true);
   if (!sig) return sig;
-  return out + *args + *sig;
+  // In a namespace, a <nested-name> ending in the template-args (§5.1.5.3).
+  return scope != ast::EntityId::none ? std::format("_ZN{}{}E{}", *n, *args, *sig) : "_Z" + *n + *args + *sig;
 }
 
 std::expected<std::string, std::string> symbol_name(const ast::Interners& in, std::string_view name, ast::QualType type,
                                                     bool is_function, ast::LangLinkage lang,
-                                                    const ClassNames& classes, std::optional<ast::QualType> scope,
+                                                    const ClassNames& classes, ast::EntityId scope,
                                                     bool special, const TemplateSpec* spec) {
-  if (spec && !scope) {
-    auto m = mangled_specialization(in, name, *spec, classes);
+  if (spec) {
+    auto m = mangled_specialization(in, name, *spec, classes, scope);
     if (!m) return m;
     return "_" + *m;
   }
-  if (scope && !is_function) {
-    // A static data member: <nested-name> ([class.static.data], §5.1.2).
-    std::string n = classes ? classes(in.types.get<ast::TClass>(in.types.canon(*scope)).entity) : "";
-    if (n.empty()) return std::unexpected("a class whose name is unknown");
-    return std::format("__ZN{}{}{}{}E", n.size(), n, name.size(), name);
+  if (scope != ast::EntityId::none && !is_function) {
+    // A static data member or a namespace's variable: a <nested-name> (§5.1.2).
+    Mangler m(in, classes);
+    auto prefix = m.prefix(scope);
+    if (!prefix) return prefix;
+    return std::format("__ZN{}{}{}E", *prefix, name.size(), name);
   }
-  if (!is_function || name == "main" || lang == ast::LangLinkage::c) return "_" + std::string(name);
+  // [basic.start.main]: only the global namespace's `main` is the program's.
+  if (!is_function || (name == "main" && scope == ast::EntityId::none) || lang == ast::LangLinkage::c)
+    return "_" + std::string(name);
   auto m = mangled_function(in, name, type, classes, scope, special);
   if (!m) return m;
   return "_" + *m;

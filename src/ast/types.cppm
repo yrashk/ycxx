@@ -98,6 +98,12 @@ struct TClass {
   EntityId entity;
 };
 
+// An enumeration type ([dcl.enum]): its entity; its underlying type and enumerators are the
+// enumeration's definition, not part of the type.
+struct TEnum {
+  EntityId entity;
+};
+
 // A type template parameter ([temp.param]), by position: `depth` counts the enclosing
 // template-heads from the outermost, `index` the parameters of its own head. Parameters are not
 // named in the type, so two declarations of one template whose heads are equivalent have equal
@@ -117,7 +123,7 @@ struct STypedef {
   EntityId alias;
 };
 
-using TypeKinds = closed_list<TBuiltin, TPointer, TLRef, TRRef, TArray, TFunction, TClass, STypedef, TTemplateParam>;
+using TypeKinds = closed_list<TBuiltin, TPointer, TLRef, TRRef, TArray, TFunction, TClass, TEnum, STypedef, TTemplateParam>;
 
 template <class T>
 constexpr bool is_type_kind = TypeKinds::contains<T>;

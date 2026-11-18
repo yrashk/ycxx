@@ -505,10 +505,90 @@ void incremental_equals_cold() {
       if (keys(inc.dependencies<Node>(k)) != keys(cold.dependencies<Node>(k))) ++mismatches;
     }
     if (inc.stats().executed != before.executed) ++mismatches;
+    // The engine's own comparison (§A9) agrees.
+    const auto t = inc.verify_table(cold);
+    if (!t.ok() || t.checked == 0) ++mismatches;
   }
   check(mismatches == 0, std::format("incremental == cold over 1000 edits ({} mismatches)", mismatches));
   check(inc.stats().backdated > 0 && inc.stats().durable > 0 && inc.stats().validated > 0,
         "the edits exercised cutoff, the durability shortcut and validation");
+}
+
+// A query that reads the world behind the engine's back: the missed dependency §A9's table
+// comparison exists to catch.
+std::int64_t hidden = 0;
+struct Impure {
+  using Key = std::uint32_t;
+  using Value = std::int64_t;
+  static query_task<Value> run(Ctx& cx, Key k) { co_return cx.fetch<In>(k) + hidden; }
+};
+
+void verify_table_catches_a_missed_dependency() {
+  Db inc;
+  inc.set<In>(0, 1);
+  hidden = 10;
+  (void)inc.get<Impure>(0);
+  (void)inc.diags_of<Impure>(0);
+  hidden = 20;
+  inc.set<In>(1, 5);  // a new revision; Impure stays green
+  Db cold;
+  cold.set<In>(0, 1);
+  cold.set<In>(1, 5);
+  (void)cold.get<Impure>(0);
+  (void)cold.diags_of<Impure>(0);
+  const auto t = inc.verify_table(cold);
+  check(!t.ok() && t.executed == 0 && t.mismatches.size() == 1 && t.mismatches[0].contains("Impure") &&
+            t.mismatches[0].contains("different value"),
+        "the stale cell is named, nothing executed");
+  hidden = 10;
+  Db fresh;
+  fresh.set<In>(0, 1);
+  fresh.set<In>(1, 5);
+  (void)fresh.get<Impure>(0);
+  (void)fresh.diags_of<Impure>(0);
+  const auto ok = inc.verify_table(fresh);
+  check(ok.ok() && ok.checked >= 3, std::format("with the world as the cell saw it, the tables agree ({} checked)", ok.checked));
+}
+
+// Always 0, so its value never shows which input it read; only its dependency list does.
+std::uint32_t hidden_choice = 0;
+struct Chooser {
+  using Key = std::uint32_t;
+  using Value = std::int64_t;
+  static query_task<Value> run(Ctx& cx, Key) { co_return 0 * cx.fetch<In>(hidden_choice); }
+};
+
+void verify_table_other_cases() {
+  // The same value from another dependency: a different dependency list.
+  Db inc, cold;
+  for (Db* db : {&inc, &cold}) {
+    db->set<In>(0, 1);
+    db->set<In>(1, 1);
+  }
+  hidden_choice = 0;
+  (void)inc.get<Chooser>(0);
+  hidden_choice = 1;
+  (void)cold.get<Chooser>(0);
+  const auto deps = inc.verify_table(cold);
+  check(!deps.ok() && deps.mismatches.size() == 1 && deps.mismatches[0].contains("dependency list"), "a different dependency list");
+
+  // A cell the incremental Db never computed is reported, not computed.
+  (void)cold.get<Echo>(0);
+  const std::size_t before = inc.stats().executed;
+  const auto missing = inc.verify_table(cold);
+  check(std::ranges::any_of(missing.mismatches, [](const std::string& m) { return m.contains("never computed here"); }) &&
+            inc.stats().executed == before,
+        "a cell never computed here is named and left alone");
+
+  // A cell that is out of date here executes when brought up to date: the check fails.
+  Db stale, fresh;
+  stale.set<In>(0, 1);
+  (void)stale.get<Echo>(0);
+  stale.set<In>(0, 2);
+  fresh.set<In>(0, 2);
+  (void)fresh.get<Echo>(0);
+  const auto ran = stale.verify_table(fresh);
+  check(!ran.ok() && ran.executed == 1 && ran.mismatches.empty(), "work done while checking fails the check");
 }
 
 }  // namespace
@@ -528,5 +608,7 @@ int main() {
   serialization();
   concepts();
   incremental_equals_cold();
+  verify_table_catches_a_missed_dependency();
+  verify_table_other_cases();
   return ycxx::unit::result("engine");
 }

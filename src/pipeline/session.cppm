@@ -39,12 +39,16 @@ class Session {
   // preprocessing configuration. The driver's file number is the unit's.
   void set_source(TuId tu, std::string path, std::string text, std::string object, std::string cwd = {},
                   pp::Config config = {}) {
+    Bind bind(universe_);  // input values may hold handles, fingerprinted by their interners
     const pp::FileId file{tu.n};
     db_.set<pp::SourceOf>(file, {std::move(path), std::move(cwd), std::move(config)});
     db_.set<pp::FileText>(file, std::move(text));
     db_.set<TuSourceIn>(tu, {std::move(object), tu.n, {}});
   }
-  void set_program(ProgramId p, ProgramInputs in) { db_.set<ProgramIn>(p, std::move(in)); }
+  void set_program(ProgramId p, ProgramInputs in) {
+    Bind bind(universe_);
+    db_.set<ProgramIn>(p, std::move(in));
+  }
 
   // A root request, with the session's universe bound.
   template <engine::MemoQuery Q>

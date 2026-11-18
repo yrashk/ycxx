@@ -1,0 +1,17 @@
+// ACTION: preprocess
+// A macro in an included header is redefined, removed and added again: the -E output of each
+// state equals a cold preprocessing of it.
+--- main.cpp
+#include "m.h"
+int x = VALUE;
+--- m.h
+#define VALUE 1
+=== edit
+--- m.h
+#define VALUE (2 + 3)
+=== edit
+--- m.h
+// no VALUE now
+=== edit
+--- m.h
+#define VALUE 7

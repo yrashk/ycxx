@@ -204,6 +204,8 @@ struct Universe {
   UnitStore* units = nullptr;
 };
 Universe& universe();
+// Binds a universe on this thread for the queries it runs, and its interners for the
+// fingerprints of the handles they store (#68).
 class Bind {
  public:
   explicit Bind(Universe& u);
@@ -212,6 +214,7 @@ class Bind {
 
  private:
   Universe* old_;
+  std::optional<ast::BindInterners> interners_;
 };
 
 // ---------------------------------------------------------------------------------------------
@@ -465,14 +468,16 @@ std::expected<obj::object, std::vector<BackError>> compile(const TranslationUnit
 namespace ycxx::pipeline {
 
 Universe*& bound() {
-  static Universe* u = nullptr;
+  static thread_local Universe* u = nullptr;
   return u;
 }
 Universe& universe() {
   contract_assert(bound() != nullptr);  // queries run inside a `Bind`
   return *bound();
 }
-Bind::Bind(Universe& u) : old_(std::exchange(bound(), &u)) {}
+Bind::Bind(Universe& u) : old_(std::exchange(bound(), &u)) {
+  if (u.in) interners_.emplace(*u.in);
+}
 Bind::~Bind() { bound() = old_; }
 
 // ------------------------------------------------------------------------------------- layout
@@ -503,6 +508,9 @@ ir::TypeLayout LayoutType::run(engine::SyncCtx& cx, QualType q) {
     return {pointer, target.pointer_size, target.pointer_align, false,
             in.canonical(in.types.is<ast::TLRef>(c) ? in.types.get<ast::TLRef>(c).referee : in.types.get<ast::TRRef>(c).referee)};
   if (auto r = class_layout(cx, c)) return {record, r->size, r->align, false, {}};
+  // An enumeration is laid out as its underlying type ([dcl.enum]/8).
+  if (in.types.is<ast::TEnum>(c) && universe().world)
+    return cx.fetch<LayoutType>(universe().world->classes.underlying(in.types.get<ast::TEnum>(c).entity));
   return {};
 }
 
@@ -574,7 +582,12 @@ engine::query_task<FunctionSource> FunctionSourceQ::run(engine::Ctx& cx, FnKey k
 // `Constants`, declarations from the function's source.
 class UnitFacts : public irgen::TypeFacts {
  public:
-  UnitFacts(const FunctionSource& src) : TypeFacts(*universe().in, *universe().target), src_(&src) {}
+  UnitFacts(const FunctionSource& src) : TypeFacts(*universe().in, *universe().target), src_(&src) {
+    enum_underlying = [](EntityId e) {
+      const sema::World* w = universe().world;
+      return w ? w->classes.underlying(e) : ast::builtin(*universe().in, ast::Builtin::int_);
+    };
+  }
   ConstId string_address(ConstId c) { return universe().consts->address_of(c); }
   bool is_constexpr(EntityId e) { return std::ranges::binary_search(src_->constexpr_functions, e); }
   bool is_main(EntityId e) { return e != EntityId::none && e == src_->def.entity && src_->is_main; }
@@ -812,8 +825,6 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
   }
   for (const Entity& e : tu.entities) {
     if (!used.contains(ir::raw(e.id))) continue;
-    std::optional<QualType> scope;
-    if (e.scope != EntityId::none) scope = in.intern_type(ast::TClass{e.scope});
     // The complete-object constructor and destructor (C1, D1): with no virtual bases they are the
     // base-object ones too (#136).
     std::string name_ = e.special == Special::constructor ? "C1" : e.special == Special::destructor ? "D1" : e.name;
@@ -822,10 +833,10 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
         in, name_, e.type, e.is_function, e.lang,
         [](EntityId c) {
           const sema::World* w = universe().world;
-          return w ? std::string(w->ins.names.spelling(w->entities.rec(c).name)) : std::string();
+          return w ? ClassName{std::string(w->ins.names.spelling(w->entities.rec(c).name)), w->entities.rec(c).scope}
+                   : ClassName{};
         },
-        scope, e.special != Special::none,
-        e.template_type ? &spec : nullptr);
+        e.scope, e.special != Special::none, e.template_type ? &spec : nullptr);
     if (!name) {
       errors.push_back({e.at, std::format("the name of '{}': {} is not supported yet", e.name, name.error())});
       continue;

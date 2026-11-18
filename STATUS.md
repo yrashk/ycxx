@@ -19,10 +19,14 @@ What is true of the code today. Work in progress and its owners are tracked in
   (#1), summarized in DECISIONS §4. A throwaway prototype is in `spikes/query-engine/`.
 - Test driver: `tools/test` ([docs/TESTING.md](docs/TESTING.md), #5). Test kinds accept/reject
   (error locations), `-E` against an oracle, run, differential against Clang 23 and GCC 16, and
-  incremental (format and hook; the ycxx side waits for #19). Fail-fast state, `--fast`, tiers,
-  failed-first, duration sharding, affected-test hook. A smoke suite of each kind passes with
-  Clang and GCC as the compiler under test; with ycxx every test is UNSUPPORTED
-  (`tests/features/ycxx.txt` lists nothing yet).
+  incremental (format and hook). Fail-fast state, `--fast`, tiers, failed-first, duration
+  sharding, affected-test hook. A smoke suite of each kind passes with Clang and GCC as the
+  compiler under test; ycxx runs what `tests/features/ycxx.txt` lists.
+- Incremental == cold (#19): ycxx's `.incr` side is a private resident daemon per test, with each
+  request repeated (no engine cell may execute) and each edit costing no more than a fresh
+  daemon; `tools/incr-fuzz` (random token edits, `-fsyntax-only`, delta-minimized `.incr`
+  regressions). Not yet: `ctl verify-table` (#146, after #137), git-history replay, regrouping
+  and nightly fuzzing (#147), `--verify-memo` (#148).
 - Optimization design accepted: [`docs/design/optimization.md`](docs/design/optimization.md)
   (#3), summarized in DECISIONS §4.8. Throwaway spikes are in `spikes/optimization/`: e-graph
   extraction, and solver builds against libycxx.
@@ -114,7 +118,8 @@ What is true of the code today. Work in progress and its owners are tracked in
   when a dependency is dropped (`unit.engine`, single-threaded). `unit.engine_scheduler`: the
   pool, priorities and backend; outputs, dependency lists and execution counts equal at 1, 2, P
   and 2P threads with the chaos scheduler; incremental == cold at each; cancellation injected;
-  hand-over from a stopped owner; respawn; cycles and errors from every entry point. `unit.engine_inputs`: providers (once per cell under
+  hand-over from a stopped owner; respawn; cycles and errors from every entry point. `Db::verify_table`
+  is §A9's memo-table comparison against a cold `Db` (#19); both fuzzes use it. `unit.engine_inputs`: providers (once per cell under
   contention, durability, failure), the `editor` and `ambient` shortcuts, `reset_unobserved`
   racing readers over 300 rounds, counts per request and per kind. Clean under
   ASan and UBSan; ThreadSanitizer needs Linux (#105).
@@ -350,10 +355,13 @@ one import `ycxx.ast`; unit tests in `tests/unit/ast` (run by ctest, see docs/TE
     (some with lists, names and blocks longer than a storage block) from 8 threads in shuffled
     orders and compares with a single-threaded run; `unit.ast_store` covers the storage.
 - **Fingerprints** (`fingerprint.cppm`): a thin adapter over `ycxx.hash` (#14); `Fp128` is
-  `ycxx::Fp128`. Not done yet: ADL `hash_into` for the AST handles. Without it,
-  `ycxx::fingerprint(v)` hashes a handle by its number, so engine keys that hold AST handles must
-  not be fingerprinted that way. `hash_into` needs to reach the process-wide `Interners`, which
-  the engine has to provide.
+  `ycxx::Fp128`.
+  - A handle's `hash_into` (`handles.cppm`, #68) appends its interner's Merkle fingerprint. It
+    reaches the `Interners` bound on the thread (`ast::BindInterners`; `pipeline::Bind` binds a
+    session's), and fingerprinting a handle with none bound violates a contract.
+  - The engine's in-memory tables use `local_hash`, which counts a handle by its number.
+  - Handles serialize by number; the persistent cache (#17) maps them through fingerprints.
+  - `unit.ast_fingerprints` (mutation-checked): different interning orders, equal fingerprints.
 - **Frame builder** (`builder.cppm`): drafts in the frame's arena (a `std::pmr` resource).
   `commit(value)` interns what the value reaches, bottom-up, so abandoned drafts leave nothing
   (§9.3). Lists of records that hold nodes are drafts; other lists are interned eagerly.
@@ -702,6 +710,54 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
 - Not yet: temporaries with destructors created in a conditional operand, value-initializing a
   member subobject whose class has an implicit constructor, delegating constructors, `explicit`,
   `= default`, out-of-class constructor definitions.
+
+## Classes, δ step 4a: enumerations (#86, 2026-11-18)
+
+- `TEnum{entity}` in `types`; sema's enumeration table (`Classes::enum_rec`: scoped or not, the
+  underlying type, fixed or chosen to hold the values, the enumerators and their values).
+- Unscoped and scoped enumerations (`enum class`, `enum struct`), fixed underlying types,
+  enumerator values from constant expressions (narrowing into a fixed type diagnosed), unscoped
+  enumerators in the enclosing scope and clashes with other declarations, `E::e`, enumerations
+  nested in classes (`C::E`, `C::e`), `using enum` in a block, `enum E` elaborated specifiers.
+- Conversions: an unscoped enumeration promotes ([conv.prom]/4) and converts to integers and
+  bool; nothing converts implicitly to an enumeration except its own type; a scoped one
+  compares only with its own type; `E e{n}` for a fixed underlying type ([dcl.init.list]/3.8).
+  Overload ranking knows enumeration promotions.
+- An enumerator is a `Literal` of its enumeration; converted to an integer it is folded to that
+  integer's constant, so the interpreter, which has no enumeration objects yet (#25), sees only
+  integers. The IR, `lower` and the layout treat an enumeration as its underlying type.
+- Linkage names of enumerations, nested ones included, match Clang's.
+- Tests: `tests/own/classes/s4-*enum*`, `s4-scoped-enum`, `s4-unscoped-enum` (spec-only, plus two
+  from the review): 7 of 7.
+- Not yet: opaque enum declarations (`enum E : int;`), unnamed enumerations, `switch`, `E{}` and
+  `E(v)` as expressions, enumerations in a block (#117), constexpr enumeration objects (#25).
+
+## Classes, δ step 4b: namespaces (#86, 2026-11-18)
+
+- **Scopes:** a namespace is named by its path (`a::b`; `(anonymous)` for an unnamed one);
+  `Program` gives each item the namespace whose definitions enclose it, and, for lookup, that
+  namespace with inline and unnamed components dropped, so their members are found in the
+  enclosing one ([namespace.def]/7, [namespace.unnamed]). Namespace entities (`EntityKind::
+  namespace_`) are the scope of their members' entities, so `geo::value` and `::value` are two;
+  members of an unnamed namespace have internal linkage.
+- **Lookup:** unqualified lookup ([basic.lookup.unqual]) walks the enclosing namespaces from the
+  point, with namespace-scope using-directives where [namespace.udir]/2 puts their names;
+  qualified lookup ([namespace.qual]) in `N::x`, `::x`, `N::C::m`, `N::E::e` and qualified type
+  names; block-scope `using namespace`, `using N::x;` and `namespace A = N;`, and namespace-scope
+  directives and aliases; directives are transitive ([namespace.udir]/4) and qualified lookup
+  follows them ([namespace.qual]/2). Two using-directives that bring in different entities make a name
+  ambiguous. Constructors and destructors are not found by name ([class.ctor]/1).
+- **Definitions outside:** `int N::f(…) {…}`, `int N::C::count = 0;`, `N::C::C(…) : … {}` and
+  `N::C::~C()`: what follows the declarator-id, the body included, is looked up in that scope
+  ([basic.lookup.unqual]/9).
+- Linkage names: `<nested-name>`s with namespace prefixes as substitution candidates, and
+  `_GLOBAL__N_1` for the unnamed namespace, checked against Clang's symbols.
+- Tests: `tests/own/classes/s4-namespace*`, `s4-using` (spec-only, plus one from the review): 5
+  of 5. Seven more draft examples pass.
+- A linkage-specification with one declaration (`extern "C" int v;`) declares as if `extern`
+  were given ([dcl.link]/7); a variable with C language linkage is one in every namespace.
+- Not yet (#153): `using N::f;` at namespace scope, `N::S{…}` as an expression, some clashes
+  with namespace names and using-declarations, `std::` abbreviations in linkage names.
 
 ## Templates, ζ step 1: function templates (#88, 2026-11-18)
 

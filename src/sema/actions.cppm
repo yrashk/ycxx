@@ -33,7 +33,9 @@ class Questions {
 public:
   // The declarations of `name` in the global namespace visible at the current point: those that
   // precede the current item, and, inside a function body, the item's own (§B2, [basic.scope.pdecl]).
-  virtual std::vector<DeclId> visible_decls(NameId name) = 0;
+  // `directives` are the namespaces block-scope using-directives nominate ([namespace.udir]): their
+  // names join the lookup where [namespace.udir]/2 puts them.
+  virtual std::vector<DeclId> visible_decls(NameId name, std::span<const EntityId> directives = {}) = 0;
   virtual ast::DeclSema decl_sema(DeclId d) = 0;
   // What a constant evaluation fetches (§B7): `function_ir` of a function defined before the
   // current point ([expr.const]), and a namespace-scope variable as the interpreter sees it.
@@ -48,11 +50,17 @@ public:
   // In a member declaration of a class being defined: the member named `name` declared before it
   // ([basic.scope.class]; the class's member list is not complete yet).
   virtual std::optional<ast::DeclSema> earlier_member(NameId name) = 0;
+  // Namespaces ([basic.namespace]), the global one being `EntityId::none`: the namespace (or
+  // alias) unqualified lookup finds for `name`, and qualified lookup of `name` in namespace `ns`
+  // ([namespace.qual]).
+  virtual std::optional<EntityId> namespace_named(NameId name, std::span<const EntityId> directives = {}) = 0;
+  virtual std::vector<ast::DeclSema> namespace_members(EntityId ns, NameId name) = 0;
   // In an instantiation: whether the call whose callee begins at `offset` was dependent in the
-  // template's definition, and the declarations argument-dependent lookup finds at the point of
-  // instantiation ([temp.dep.candidate]). Outside one, false and none.
+  // template's definition, and the members of namespace `ns` named `name` that are visible at the
+  // point of instantiation, which argument-dependent lookup searches ([temp.dep.candidate]).
+  // Outside one, false and none.
   virtual bool dependent_call(u32 /*offset*/) { return false; }
-  virtual std::vector<DeclId> visible_at_instantiation(NameId) { return {}; }
+  virtual std::vector<ast::DeclSema> members_at_instantiation(EntityId /*ns*/, NameId) { return {}; }
   virtual ~Questions() = default;
 };
 
@@ -188,17 +196,128 @@ public:
       if (auto a = template_args.at(p->depth, p->index)) return a->type;
       return p->type;
     }
+    // A type nested in the class whose scope this is ([basic.scope.class]).
+    if (current_class != EntityId::none) {
+      if (const ClassRec* cr = w_->classes.find(current_class); cr && cr->defined) {
+        for (const auto& [n, t] : cr->types)
+          if (n == name) return t;
+      } else if (auto m = q_->earlier_member(name); m && m->kind == ast::DeclKind::enum_) {
+        return m->type;
+      }
+    }
     std::optional<ast::DeclSema> found;
     for (auto p = own.rbegin(); p != own.rend() && !found; ++p)
       if (p->name == name) found = p->sema;
     if (!found)
-      for (DeclId d : q_->visible_decls(name)) {
+      for (DeclId d : q_->visible_decls(name, directives())) {
         ast::DeclSema s = q_->decl_sema(d);
-        if (s.entity == EntityId::none) continue;
-        if (s.kind == ast::DeclKind::class_ || !elaborated) found = s;
+        if (s.entity == EntityId::none || is_special(s)) continue;
+        if (s.kind == ast::DeclKind::class_ || s.kind == ast::DeclKind::enum_ || !elaborated) found = s;
       }
-    if (!found || found->kind != ast::DeclKind::class_) return std::nullopt;
+    if (!found || (found->kind != ast::DeclKind::class_ && found->kind != ast::DeclKind::enum_)) return std::nullopt;
     return found->type;
+  }
+
+  // `using enum E;` in a block ([enum.udecl]): E's enumerators are found in this scope.
+  void using_enum(QualType t, u32 at_) {
+    if (!types().is_enum(t)) {
+      diag(at_, Diag::not_a_type, no_name());
+      return;
+    }
+    using_enums_.push_back({scopes_.size() - 1, types().enum_of(t)});
+  }
+
+  // ------------------------------------------------------------ qualified names ([basic.lookup.qual])
+
+  // What a nested-name-specifier names: a namespace (none for the global one) or a class or
+  // enumeration.
+  struct Scope {
+    std::optional<EntityId> ns;
+    std::optional<QualType> type;
+  };
+  static Scope global_scope() { return {EntityId::none, std::nullopt}; }
+  // The first component of a nested-name-specifier, by unqualified lookup ([basic.lookup.qual]/1:
+  // only namespaces, types and templates).
+  std::optional<Scope> scope_named(NameId n) {
+    for (auto a = block_aliases_.rbegin(); a != block_aliases_.rend(); ++a)
+      if (a->name == n) return Scope{a->ns, std::nullopt};
+    if (auto t = class_name(n, true)) return Scope{std::nullopt, t};
+    if (auto ns = q_->namespace_named(n, directives())) return Scope{ns, std::nullopt};
+    return std::nullopt;
+  }
+  // A later component: a namespace or type member of a namespace, or a type nested in a class.
+  std::optional<Scope> scope_member(const Scope& s, NameId n) {
+    if (s.ns) {
+      for (const ast::DeclSema& d : q_->namespace_members(*s.ns, n)) {
+        if (d.kind == ast::DeclKind::namespace_) return Scope{d.entity, std::nullopt};
+        if (d.kind == ast::DeclKind::class_ || d.kind == ast::DeclKind::enum_) return Scope{std::nullopt, d.type};
+      }
+      return std::nullopt;
+    }
+    if (s.type && types().is_class(*s.type))
+      if (const ClassRec* cr = w_->classes.find(types().class_of(*s.type)))
+        for (const auto& [name, t] : cr->types)
+          if (name == n) return Scope{std::nullopt, t};
+    return std::nullopt;
+  }
+  // `S::n` naming a type.
+  std::optional<QualType> scope_type(const Scope& s, NameId n) {
+    auto m = scope_member(s, n);
+    if (!m || !m->type) return std::nullopt;
+    return m->type;
+  }
+  // `S::n` as an expression ([expr.prim.id.qual]).
+  Ex scope_expr(const Scope& s, NameId n, u32 begin, u32 name_at, u32 end) {
+    if (s.type) {
+      if (types().is_enum(*s.type)) {
+        if (auto r = find_enumerator(types().enum_of(*s.type), n, begin, end)) return *r;
+        diag(name_at, Diag::no_member, n, *s.type);
+        return {NodeId::none, begin, end};
+      }
+      if (!require_complete(*s.type, begin)) return {NodeId::none, begin, end};
+      if (auto r = class_member(types().class_of(*s.type), n, begin, end)) return *r;
+      diag(name_at, Diag::no_member, n, *s.type);
+      return {NodeId::none, begin, end};
+    }
+    std::vector<ast::DeclSema> found = q_->namespace_members(*s.ns, n);
+    if (found.empty()) {
+      diag(name_at, Diag::no_namespace_member, n);
+      return {NodeId::none, begin, end};
+    }
+    return decls_expr(std::move(found), true, n, begin, end);
+  }
+  // Block-scope `using namespace N;`, `using N::x;` and `namespace A = N;` ([namespace.udir],
+  // [namespace.udecl], [namespace.alias]).
+  void using_directive(EntityId ns) { block_directives_.push_back({scopes_.size() - 1, ns}); }
+  // The namespaces the block-scope using-directives in force nominate.
+  std::vector<EntityId> directives() const {
+    std::vector<EntityId> r;
+    for (const auto& [depth, ns] : block_directives_) r.push_back(ns);
+    return r;
+  }
+  void using_declaration(const Scope& s, NameId n, u32 at_) {
+    // [basic.scope.scope]/4: it may not clash with a local declared in the same block before it.
+    if (!scopes_.empty() && std::ranges::any_of(scopes_.back(), [&](const auto& p) { return p.first == n; })) {
+      diag(at_, Diag::redeclared_local, n);
+      return;
+    }
+    std::vector<ast::DeclSema> found = s.ns ? q_->namespace_members(*s.ns, n) : std::vector<ast::DeclSema>{};
+    if (found.empty()) {
+      diag(at_, Diag::no_namespace_member, n);
+      return;
+    }
+    block_usings_.push_back({scopes_.size() - 1, n, std::move(found)});
+  }
+  void namespace_alias(NameId n, EntityId ns) { block_aliases_.push_back({scopes_.size() - 1, n, ns}); }
+
+  // A type nested in a class: `C::T` ([class.mem], [basic.lookup.qual]).
+  std::optional<QualType> nested_type(NameId cls, NameId name) {
+    auto t = class_name(cls, true);
+    if (!t || !types().is_class(*t)) return std::nullopt;
+    if (const ClassRec* cr = w_->classes.find(types().class_of(*t)))
+      for (const auto& [n, nt] : cr->types)
+        if (n == name) return nt;
+    return std::nullopt;
   }
 
   // Whether `t` is complete at this point; a class needs its definition before the point.
@@ -412,6 +531,16 @@ public:
       diag(c.begin, Diag::braces_for_scalar, Types::unqualified(t));
       return fail;
     }
+    // [dcl.init.list]/3.8: an enumeration with a fixed underlying type from one integer, without
+    // narrowing.
+    if (types().is_enum(t) && c.expr.ok() && !types().is_enum(c.expr.type())) {
+      const EnumRec* er = w_->classes.find_enum(types().enum_of(t));
+      if (er && er->fixed) {
+        Ex v = list_element(*er->underlying, c.expr);
+        if (!v.ok()) return fail;
+        return convert_node(v, ast::ConversionKind::integral, Types::unqualified(t));
+      }
+    }
     return list_element(t, c.expr);
   }
 
@@ -531,6 +660,13 @@ public:
 
   void push_scope() { scopes_.emplace_back(); }
   void pop_scope() {
+    // What the innermost scope's using-declarations, using-directives and aliases brought in ends
+    // with it.
+    std::size_t inner = scopes_.size() - 1;
+    std::erase_if(using_enums_, [&](const auto& u) { return u.first >= inner; });
+    std::erase_if(block_usings_, [&](const auto& u) { return u.depth >= inner; });
+    std::erase_if(block_directives_, [&](const auto& u) { return u.first >= inner; });
+    std::erase_if(block_aliases_, [&](const auto& u) { return u.depth >= inner; });
     if (!guarded_.empty() && guarded_.back() == scopes_.size() - 1) guarded_.pop_back();
     scopes_.pop_back();
   }
@@ -637,7 +773,7 @@ public:
     if (template_param(name)) return false;
     for (const OwnDecl& o : own)
       if (o.name == name) return (o.sema.flags & decl_flag::template_) != 0;
-    for (DeclId d : q_->visible_decls(name))
+    for (DeclId d : q_->visible_decls(name, directives()))
       if (q_->decl_sema(d).flags & decl_flag::template_) return true;
     return false;
   }
@@ -739,7 +875,14 @@ public:
   // or a qualified name `C::name`: none if `c` has no such member.
   std::optional<Ex> class_member(EntityId c, NameId name, u32 begin, u32 end) {
     auto f = find_member(c, name);
-    if (!f) return std::nullopt;
+    if (!f) {
+      // The enumerators of an unscoped enumeration nested in the class are its members.
+      if (const ClassRec* cr = w_->classes.find(c))
+        for (const auto& [n, t] : cr->types)
+          if (is_unscoped_enum(t))
+            if (auto r = find_enumerator(types().enum_of(t), name, begin, end)) return r;
+      return std::nullopt;
+    }
     Ex fail{NodeId::none, begin, end};
     bool has_this = this_type && current_class == c;
     if (f->field) {
@@ -765,12 +908,31 @@ public:
     return bound_member(c, name, object, true, begin, end);
   }
 
-  // `C::name` ([expr.prim.id.qual]) for a class C.
+  // An enumerator ([dcl.enum]): a prvalue of its enumeration with its value.
+  Ex enumerator(EntityId e, QualType t, u32 begin, u32 end) {
+    auto v = q_->constant_value(e);
+    if (!v) return {NodeId::none, begin, end};  // its enumeration was diagnosed
+    return literal(Types::unqualified(t), *v, ValueCategory::prvalue, begin, end);
+  }
+  // The enumerator `name` of enumeration `e`, if it has one.
+  std::optional<Ex> find_enumerator(EntityId e, NameId name, u32 begin, u32 end) {
+    if (const EnumRec* r = w_->classes.find_enum(e))
+      for (const EnumeratorRec& x : r->enumerators)
+        if (x.name == name) return enumerator(x.entity, types().enum_type(e), begin, end);
+    return std::nullopt;
+  }
+
+  // `C::name` ([expr.prim.id.qual]) for a class or enumeration C.
   Ex qualified_name(NameId cls, NameId name, u32 begin, u32 name_at, u32 end) {
     Ex fail{NodeId::none, begin, end};
     auto t = class_name(cls, true);
     if (!t) {
       diag(begin, Diag::not_a_type, cls);
+      return fail;
+    }
+    if (types().is_enum(*t)) {
+      if (auto r = find_enumerator(types().enum_of(*t), name, begin, end)) return *r;
+      diag(name_at, Diag::no_member, name, *t);
       return fail;
     }
     if (!require_complete(*t, begin)) return fail;
@@ -915,6 +1077,20 @@ public:
     QualType from = value_type(a);
     if (types().is_class(from) || types().is_void(from)) return {};
     if (types().canonical(from) == types().canonical(to)) return {true, 0, 0};
+    if (types().is_enum(to)) return {};
+    if (types().is_enum(from)) {
+      if (!is_unscoped_enum(from)) return {};
+      if (types().is(to, Builtin::bool_)) return {true, 2, 0};
+      if (!types().is_integral(to)) return {};
+      // [conv.prom]/4, [over.ics.rank]/4.2: with a fixed type, to it is the better promotion.
+      if (const EnumRec* er = w_->classes.find_enum(types().enum_of(from)); er && er->fixed) {
+        if (types().canonical(*er->underlying) == types().canonical(to)) return {true, 1, 0};
+        if (builtin(promoted(*types().builtin_of(*er->underlying))) == to) return {true, 1, 1};
+        return {true, 2, 0};
+      }
+      bool promotion = builtin(promoted(*types().builtin_of(underlying_of(from)))) == to;
+      return {true, promotion ? 1 : 2, 0};
+    }
     if (types().is_pointer(from) && types().is_pointer(to))
     {
       if (qualification_convertible(from, to)) return {true, 0, 1};
@@ -1153,13 +1329,24 @@ public:
   // namespace-scope ones. The `callee` of a call that lookup does not find is a `DepName`: the
   // call decides once it has its arguments ([temp.dep.candidate]).
   Ex name_expr(NameId name, u32 begin, u32 end, bool callee = false) {
-    for (auto s = scopes_.rbegin(); s != scopes_.rend(); ++s)
-      for (auto p = s->rbegin(); p != s->rend(); ++p)
+    // Block scopes, innermost first: a scope's locals and the names its using-declarations
+    // brought in ([namespace.udecl]) hide those of enclosing scopes ([basic.scope.hiding]);
+    // using-declarations of one scope make one set.
+    for (std::size_t d = scopes_.size(); d-- > 0;) {
+      for (auto p = scopes_[d].rbegin(); p != scopes_[d].rend(); ++p)
         if (p->first == name) {
           const ast::LocalRec& l = locals_[p->second];
           ExprInfo info{types().referee(l.type), ValueCategory::lvalue, 0};  // [expr.type]: a reference names its object
           return node(ast::LocalRef{info, p->second}, begin, end, info);
         }
+      std::vector<ast::DeclSema> used;
+      for (const BlockUsing& u : block_usings_)
+        if (u.depth == d && u.name == name) used.insert(used.end(), u.decls.begin(), u.decls.end());
+      if (!used.empty()) return decls_expr(std::move(used), true, name, begin, end, callee, true);
+    }
+    // Enumerators a `using enum` brought into a block scope ([enum.udecl]).
+    for (auto u = using_enums_.rbegin(); u != using_enums_.rend(); ++u)
+      if (auto r = find_enumerator(u->second, name, begin, end)) return *r;
     // A non-type template parameter is a prvalue whose value depends on the argument
     // ([temp.param]/8, [temp.dep.constexpr]).
     if (const ast::TemplateParamSema* p = template_param(name)) {
@@ -1191,11 +1378,27 @@ public:
       if (p->name == name) found.push_back(p->sema);
     bool any = !found.empty();
     if (found.empty())
-      for (DeclId d : q_->visible_decls(name)) {
+      for (DeclId d : q_->visible_decls(name, directives())) {
         any = true;
         ast::DeclSema s = q_->decl_sema(d);
-        if (s.entity != EntityId::none) found.push_back(s);  // else its item diagnosed it
+        if (s.entity != EntityId::none && !is_special(s)) found.push_back(s);  // else its item diagnosed it
       }
+    return decls_expr(std::move(found), any, name, begin, end, callee, true);
+  }
+
+  // A constructor or destructor: it has no name that lookup finds ([class.ctor]/1, [class.dtor]/1);
+  // its definition outside the class still names the class's declaration in the skeleton.
+  static bool is_special(const ast::DeclSema& d) {
+    return (d.flags & (decl_flag::constructor | decl_flag::destructor)) != 0;
+  }
+
+  // The expression naming what lookup found for `name` ([expr.prim.id]): one entity, or an
+  // overload set.
+  // `unqualified`: named by an unqualified-id, so a call may add argument-dependent lookup
+  // ([basic.lookup.argdep]/1); what was found is kept for it.
+  Ex decls_expr(std::vector<ast::DeclSema> found, bool any, NameId name, u32 begin, u32 end, bool callee = false,
+                bool unqualified = false) {
+    std::erase_if(found, [](const ast::DeclSema& d) { return d.kind == ast::DeclKind::namespace_; });
     // A class hidden by a variable or function of the same name ([basic.scope.hiding]/2).
     if (std::ranges::any_of(found, [](const ast::DeclSema& d) { return d.kind != ast::DeclKind::class_; }))
       std::erase_if(found, [](const ast::DeclSema& d) { return d.kind == ast::DeclKind::class_; });
@@ -1216,23 +1419,28 @@ public:
     bool templ = std::ranges::any_of(set, [](const ast::DeclSema& x) { return (x.flags & decl_flag::template_) != 0; });
     if (set.size() > 1 || templ) {
       if (!std::ranges::all_of(set, [](const ast::DeclSema& x) { return x.kind == ast::DeclKind::function; })) {
-        diag(begin, Diag::overload_not_supported, name);
+        diag(begin, Diag::ambiguous_name, name);  // [basic.lookup.general]/1: two entities
         return {NodeId::none, begin, end};
       }
       ExprInfo info{builtin(Builtin::overload_set), ValueCategory::lvalue, 0};
       Ex r = node(ast::DeclRef{info, d.entity}, begin, end, info);
+      if (unqualified) unqualified_[std::to_underlying(r.id)] = set;
       overloads_[std::to_underlying(r.id)] = std::move(set);
       return r;
     }
     if (d.kind == ast::DeclKind::function && (d.flags & decl_flag::consteval_))
       consteval_.insert(std::to_underlying(d.entity));
     if (d.kind == ast::DeclKind::function && (d.flags & decl_flag::deleted)) deleted_.insert(std::to_underlying(d.entity));
-    if (d.kind == ast::DeclKind::function && ins().names.spelling(name) == "main") {
+    if (d.kind == ast::DeclKind::enumerator) return enumerator(d.entity, d.type, begin, end);
+    if (d.kind == ast::DeclKind::function && ins().names.spelling(name) == "main" &&
+        w_->entities.rec(d.entity).scope == EntityId::none) {
       diag(begin, Diag::main_named);  // [basic.start.main]/3: main shall not be used
       return {NodeId::none, begin, end};
     }
     ExprInfo info{types().referee(d.type), ValueCategory::lvalue, 0};
-    return node(ast::DeclRef{info, d.entity}, begin, end, info);
+    Ex r = node(ast::DeclRef{info, d.entity}, begin, end, info);
+    if (unqualified && d.kind == ast::DeclKind::function) unqualified_[std::to_underlying(r.id)] = {d};
+    return r;
   }
 
   // ------------------------------------------------------------ literals ([lex.literal])
@@ -1353,6 +1561,14 @@ public:
   // ------------------------------------------------------------ conversions ([conv])
 
   Ex convert_node(Ex e, ast::ConversionKind k, QualType to, ValueCategory cat = ValueCategory::prvalue) {
+    // An enumerator converted to an integer is that integer's constant: enumeration-typed
+    // constants stay out of the IR's arithmetic.
+    if (auto lit = as<ast::Literal>(e); lit && types().is_enum(e.type()) &&
+                                        (k == ast::ConversionKind::integral || k == ast::ConversionKind::boolean)) {
+      u64 bits = w_->values.rec(lit->value).bits;
+      if (k == ast::ConversionKind::boolean) bits = bits != 0;
+      return literal(to, w_->values.integer(to, bits), ValueCategory::prvalue, e.begin, e.end);
+    }
     ExprInfo info{to, cat, 0};
     return node(ast::ImplicitConversion{info, k, EntityId::none, at(e, e.begin)}, e.begin, e.end, info);
   }
@@ -1394,12 +1610,26 @@ public:
   Ex promote(Ex e) {
     e = rvalue(e);
     if (!e.ok()) return e;
+    // [conv.prom]/4: an unscoped enumeration promotes as its underlying type does.
+    if (is_unscoped_enum(e.type())) {
+      QualType u = underlying_of(e.type());
+      return convert_node(e, ast::ConversionKind::integral, builtin(promoted(*types().builtin_of(u))));
+    }
     auto b = types().builtin_of(e.type());
     if (!b || !is_integral(*b)) return e;
     Builtin p = promoted(*b);
     if (p == *b) return e;
     return convert_node(e, ast::ConversionKind::integral, builtin(p));
   }
+
+  // Enumerations ([dcl.enum]).
+  bool is_unscoped_enum(QualType t) {
+    if (!types().is_enum(t)) return false;
+    const EnumRec* r = w_->classes.find_enum(types().enum_of(t));
+    return !r || !r->scoped;
+  }
+  bool is_scoped_enum(QualType t) { return types().is_enum(t) && !is_unscoped_enum(t); }
+  QualType underlying_of(QualType t) { return w_->classes.underlying(types().enum_of(t)); }
 
   // [conv.ptr]: an integer literal with value zero, or a prvalue of type std::nullptr_t.
   bool is_null_pointer_constant(const Ex& e) {
@@ -1453,6 +1683,15 @@ public:
       return convert_node(e, ast::ConversionKind::null_pointer, target);
     e = rvalue(e);
     QualType from = e.type();
+    // [dcl.enum]: an enumeration is initialized only from its own type; an unscoped one converts
+    // to an integer or bool ([conv.integral], [conv.bool]).
+    if (types().is_enum(target)) {
+      if (e.ok() && types().canonical(Types::unqualified(from)) == types().canonical(target)) return e;
+      if (e.ok()) diag(at_, Diag::no_conversion, from, to);
+      return {NodeId::none, e.begin, e.end};
+    }
+    if (e.ok() && is_unscoped_enum(from) && types().is_arithmetic(target))
+      return convert_node(e, types().is(target, Builtin::bool_) ? ast::ConversionKind::boolean : ast::ConversionKind::integral, target);
     if (types().is_void(from)) {
       diag(at_, Diag::void_value);
       return {NodeId::none, e.begin, e.end};
@@ -1495,7 +1734,7 @@ public:
     if (dependent(e)) return dependent_node({e}, e.begin, e.end, builtin(Builtin::bool_));
     QualType t = e.type();
     if (types().is(t, Builtin::bool_)) return e;
-    if (types().is_arithmetic(t) || types().is_pointer(t) || types().is(t, Builtin::nullptr_t))
+    if (types().is_arithmetic(t) || types().is_pointer(t) || types().is(t, Builtin::nullptr_t) || is_unscoped_enum(t))
       return convert_node(e, ast::ConversionKind::boolean, builtin(Builtin::bool_));
     diag(at_, Diag::not_contextually_bool, t);
     return {NodeId::none, e.begin, e.end};
@@ -1653,6 +1892,24 @@ public:
     }
     Ex a = rvalue(l), c = rvalue(r);
     if (!a.ok() || !c.ok()) return {NodeId::none, begin, end};
+    // [expr.arith.conv]: unscoped enumerations are promoted; a scoped one is compared only with
+    // its own type, by value; enumerations do not otherwise mix.
+    if (types().is_enum(a.type()) || types().is_enum(c.type())) {
+      bool cmp = op == lt || op == gt || op == le || op == ge || op == eq || op == ne;
+      if (is_scoped_enum(a.type()) || is_scoped_enum(c.type())) {
+        if (!cmp || types().canonical(Types::unqualified(a.type())) != types().canonical(Types::unqualified(c.type())))
+          return invalid();
+        QualType u = underlying_of(a.type());
+        a = convert_node(a, ast::ConversionKind::integral, u);
+        c = convert_node(c, ast::ConversionKind::integral, u);
+      } else {
+        if (types().is_enum(a.type()) && types().is_enum(c.type()) &&
+            types().canonical(Types::unqualified(a.type())) != types().canonical(Types::unqualified(c.type())))
+          return invalid();  // P2864: arithmetic between different enumerations is ill-formed
+        if (types().is_enum(a.type())) a = promote(a);
+        if (types().is_enum(c.type())) c = promote(c);
+      }
+    }
     QualType ta = a.type(), tc = c.type();
     bool arith = types().is_arithmetic(ta) && types().is_arithmetic(tc);
     bool integral = types().is_integral(ta) && types().is_integral(tc);
@@ -1739,7 +1996,7 @@ public:
     } else {
       Ex lv = rvalue(l);  // only to read its type; the IR loads the left operand itself
       QualType tl = lv.type();
-      Ex rv = rvalue(r);
+      Ex rv = is_unscoped_enum(r.type()) ? promote(r) : rvalue(r);  // [conv.prom]
       if (!rv.ok()) return {NodeId::none, begin, end};
       QualType tr = rv.type();
       bool shift = op == AsgOp::shl || op == AsgOp::shr;
@@ -1909,40 +2166,44 @@ public:
   }
 
   // The name of a callee named by an unqualified-id: an undeclared name, an overload set, or a
-  // namespace-scope function ([basic.lookup.argdep]/1: not parenthesized, not qualified).
+  // function that is not a class member ([basic.lookup.argdep]/1: not parenthesized, not
+  // qualified).
   std::optional<NameId> unqualified_name(const Ex& callee) {
     if (auto d = as<ast::DepName>(callee)) return d->name;
     auto r = as<ast::DeclRef>(callee);
-    if (!r) return std::nullopt;
+    if (!r || !unqualified_.contains(std::to_underlying(callee.id))) return std::nullopt;
     const EntityRec& e = w_->entities.rec(r->entity);
-    if (e.scope != EntityId::none) return std::nullopt;
-    if (types().is(callee.type(), Builtin::overload_set) || types().is_function(callee.type())) return e.name;
-    return std::nullopt;
+    if (e.scope != EntityId::none && w_->entities.rec(e.scope).kind == EntityKind::class_) return std::nullopt;
+    return e.name;
   }
 
-  // A type's associated namespaces ([basic.lookup.argdep]/3) include the global one: a class of
-  // the global namespace, or a pointer to, array of or reference to one. (Namespaces: #86.)
-  bool has_associated_namespace(QualType t) {
+  // The namespace associated with a type ([basic.lookup.argdep]/3): the innermost namespace
+  // enclosing its class or enumeration, through pointers, arrays and references; none for a
+  // fundamental type. The global namespace is `EntityId::none`.
+  std::optional<EntityId> associated_namespace(QualType t) {
     TypeRec r = types().rec(t);
     while (r.kind == TypeKind::pointer || r.kind == TypeKind::array || r.kind == TypeKind::reference) r = types().rec(r.inner);
-    return r.kind == TypeKind::class_;
+    if (r.kind != TypeKind::class_ && r.kind != TypeKind::enum_) return std::nullopt;
+    EntityId s = w_->entities.rec(r.entity).scope;
+    while (s != EntityId::none && w_->entities.rec(s).kind != EntityKind::namespace_) s = w_->entities.rec(s).scope;
+    return s;
   }
 
   // The callee of a call that was dependent in the template's definition, in an instantiation:
-  // the functions named `name` that argument-dependent lookup finds at the point of instantiation,
-  // with those the definition found ([temp.dep.candidate]). Every function the program declares
-  // is in the global namespace, which argument-dependent lookup searches only for an argument
-  // with an associated class.
+  // the functions the definition found, with those named `name` that argument-dependent lookup
+  // finds in the arguments' associated namespaces at the point of instantiation
+  // ([temp.dep.candidate], [basic.lookup.argdep]/4).
   Ex with_adl(Ex callee, NameId name, std::span<const Ex> args) {
-    if (!std::ranges::any_of(args, [&](const Ex& a) { return has_associated_namespace(a.type()); })) return callee;
-    std::vector<ast::DeclSema> found;
-    for (DeclId d : q_->visible_at_instantiation(name)) {
-      ast::DeclSema s = q_->decl_sema(d);
-      if (s.entity != EntityId::none && s.kind == ast::DeclKind::function) found.push_back(s);
-    }
+    std::vector<EntityId> namespaces;
+    for (const Ex& a : args)
+      if (auto ns = associated_namespace(a.type()); ns && !std::ranges::contains(namespaces, *ns)) namespaces.push_back(*ns);
+    if (namespaces.empty()) return callee;
     std::vector<ast::DeclSema> set;
-    for (auto o = found.rbegin(); o != found.rend(); ++o)
-      if (!std::ranges::any_of(set, [&](const ast::DeclSema& x) { return x.entity == o->entity; })) set.push_back(*o);
+    if (auto it = unqualified_.find(std::to_underlying(callee.id)); it != unqualified_.end()) set = it->second;
+    for (EntityId ns : namespaces)
+      for (const ast::DeclSema& d : q_->members_at_instantiation(ns, name))
+        if (d.kind == ast::DeclKind::function && !std::ranges::any_of(set, [&](const ast::DeclSema& x) { return x.entity == d.entity; }))
+          set.push_back(d);
     if (set.empty()) return callee;
     ExprInfo info{builtin(Builtin::overload_set), ValueCategory::lvalue, 0};
     Ex r = node(ast::DeclRef{info, set.front().entity}, callee.begin, callee.end, info);
@@ -1991,7 +2252,7 @@ public:
     u32 begin = base.begin;
     if (!base.ok() || !index.ok()) return {NodeId::none, begin, end};
     if (dependent(base) || dependent(index)) return dependent_node({base, index}, begin, end, std::nullopt, ValueCategory::lvalue);
-    Ex a = rvalue(base), c = rvalue(index);
+    Ex a = rvalue(base), c = is_unscoped_enum(index.type()) ? promote(index) : rvalue(index);
     if (!is_object_pointer(a.type()) || !types().is_integral(c.type())) {
       diag(at_, Diag::invalid_operands, base.type(), index.type());
       return {NodeId::none, begin, end};
@@ -2017,8 +2278,23 @@ private:
   };
   std::map<u32, Bound> bound_;                        // by draft bound-member Member
   std::set<u32> deleted_;                             // deleted functions named so far
+  std::vector<std::pair<std::size_t, EntityId>> using_enums_;  // (scope depth, enumeration)
+  struct BlockUsing {
+    std::size_t depth;
+    NameId name;
+    std::vector<ast::DeclSema> decls;
+  };
+  struct BlockAlias {
+    std::size_t depth;
+    NameId name;
+    EntityId ns;
+  };
+  std::vector<BlockUsing> block_usings_;
+  std::vector<std::pair<std::size_t, EntityId>> block_directives_;  // (scope depth, namespace)
+  std::vector<BlockAlias> block_aliases_;
   std::map<u32, std::vector<ast::DeclSema>> overloads_;  // by draft overload-set DeclRef
   std::map<u32, std::vector<TemplateArg>> explicit_args_;  // by draft overload-set DeclRef
+  std::map<u32, std::vector<ast::DeclSema>> unqualified_;  // by draft DeclRef named by an unqualified-id
   std::vector<std::vector<std::pair<NameId, u32>>> scopes_;
   std::vector<std::size_t> guarded_;
   QualType return_type_{};
