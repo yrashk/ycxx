@@ -27,10 +27,12 @@ struct Message {
   // `file:line:col` when the diagnostic is in another file than the main one (an included
   // header); the offset is then meaningless. Until #34's renderer.
   std::string where;
+  // The region token it is at or before: messages are in this order, across files.
+  std::uint32_t token = 0;
 };
 
 struct FrontResult {
-  std::vector<Message> messages;  // in order of position
+  std::vector<Message> messages;  // in order of position in the unit
   TranslationUnit unit;           // meaningful when there are no errors
   bool has_errors() const {
     return std::ranges::any_of(messages, [](const Message& m) { return m.error; });
@@ -212,8 +214,21 @@ engine::query_task<FrontResult> TuFront::run(engine::Ctx& cx, TuId tu) {
     for (const engine::DiagArg& a : d.args) args.push_back(a.raw);
     Message m{d.at.offset, lex::message_of(*kind).severity == lex::Severity::error, lex::render(*kind, args), {}};
     // Located in an included file (pp::file_loc).
-    if (d.at.item != lex::file_level)
-      m.where = where_in(static_cast<std::uint16_t>(lex::file_level - d.at.item), d.at.offset, *kind);
+    const auto f = static_cast<std::uint16_t>(lex::file_level - d.at.item);
+    if (f != 0) m.where = where_in(f, d.at.offset, *kind);
+    // The first token at or after the position in its file, else (a header of only directives)
+    // the first token of a file included after it (files are numbered as they are first met).
+    m.token = static_cast<std::uint32_t>(region.locs.size() - 1);
+    std::uint32_t later = m.token;
+    for (std::uint32_t t = 0; t + 1 < region.locs.size(); ++t) {
+      pp::TokLoc l = region.site(t);
+      if (l.file == f && l.offset >= d.at.offset) {
+        m.token = t;
+        break;
+      }
+      if (l.file > f && later == region.locs.size() - 1) later = t;
+    }
+    m.token = std::min(m.token, later);
     out.messages.push_back(std::move(m));
   }
   // The unit's language options: the instantiation limit (`-ftemplate-depth`).
@@ -229,9 +244,9 @@ engine::query_task<FrontResult> TuFront::run(engine::Ctx& cx, TuId tu) {
     out.messages.push_back({at.offset, sema::message_of(*kind).severity == lex::Severity::error,
                             sema::render(*kind, args, [&](char how, std::uint64_t raw) { return program.spell(how, raw); }),
                             // A declaration of an included header: located there.
-                            at.file != 0 ? where_in(at.file, at.offset, std::nullopt) : std::string()});
+                            at.file != 0 ? where_in(at.file, at.offset, std::nullopt) : std::string(), program.token(d.at)});
   }
-  std::ranges::stable_sort(out.messages, {}, &Message::offset);
+  std::ranges::stable_sort(out.messages, {}, &Message::token);
   if (!out.has_errors()) out.unit = unit_of(program, world, items, src.name);
   co_return out;
 }
