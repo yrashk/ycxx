@@ -521,6 +521,8 @@ ir::TypeLayout QueryLayout::type(QualType q) const {
     if (*b == ast::Builtin::void_) return {void_, 0, 1, false, {}};
     ast::BuiltinLayout l = target[*b];
     if (*b == ast::Builtin::bool_) return {boolean, l.size, l.align, false, {}};
+    // std::nullptr_t's object holds a null pointer ([basic.fundamental]/16).
+    if (*b == ast::Builtin::nullptr_t) return {pointer, l.size, l.align, false, ast::builtin(in, ast::Builtin::void_)};
     if (ast::is_integral(*b)) return {integer, l.size, l.align, ast::is_signed(target, *b), {}};
     return {other, l.size, l.align, false, {}};
   }
