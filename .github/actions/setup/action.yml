@@ -1,0 +1,37 @@
+name: setup
+description: >
+  The toolchains, provisioned by libycxx's own script (deps/libycxx/tools/toolchain/provision)
+  the way libycxx's CI does it (deps/libycxx/.github/actions), with its prefix cached. GCC 16 is
+  the bootstrap compiler: the gcc:16 container's on Linux, Homebrew's on macOS. With oracle
+  'true', also Clang 23, the black-box oracle (DECISIONS §2.3), which never builds ycxx:
+  apt.llvm.org on Linux, the LLVM release on macOS. The build tools come from the system package
+  manager.
+inputs:
+  oracle:
+    description: also provision Clang 23 (the oracle)
+    default: 'false'
+runs:
+  using: composite
+  steps:
+    - if: runner.os == 'Linux'
+      shell: bash
+      run: |
+        apt-get update -qq
+        apt-get install -y -qq ninja-build cmake python3 git >/dev/null
+    - if: runner.os == 'Linux' && inputs.oracle == 'true'
+      shell: bash
+      run: |
+        apt-get install -y -qq wget gnupg lsb-release >/dev/null
+        wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key > /etc/apt/trusted.gpg.d/apt.llvm.org.asc
+        echo "deb http://apt.llvm.org/$(lsb_release -cs)/ llvm-toolchain-$(lsb_release -cs)-23 main" > /etc/apt/sources.list.d/llvm.list
+        apt-get update -qq
+        apt-get install -y -qq clang-23 lld-23 >/dev/null
+    - if: runner.os == 'macOS'
+      shell: bash
+      run: brew install gcc ninja cmake
+    - uses: actions/cache@v4
+      with:
+        path: ~/.local/share/ycxx/toolchains
+        key: ycxx-toolchains-${{ runner.os }}-${{ runner.arch }}-gcc-16.2.0${{ inputs.oracle == 'true' && '-llvm-23.1.5' || '' }}-${{ hashFiles('deps/libycxx/tools/toolchain/provision') }}
+    - shell: bash
+      run: deps/libycxx/tools/toolchain/provision ${{ inputs.oracle == 'true' && ' ' || '--gcc-only' }}

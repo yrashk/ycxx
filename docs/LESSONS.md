@@ -71,6 +71,21 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
   - Do: stop reviewing when a round finds no P0 or P1 issues (DECISIONS §8.6).
   - Learned on #1.
 
+## Toolchain
+
+- **Reduce a compiler crash from the build system's exact command, with a script.** A GCC ICE
+  under CMake seemed to vanish when re-run by hand. Two things cost about 20 minutes of
+  bisecting:
+  - The tool shell is zsh, which does not word-split `$CXX file.cpp`. The command never ran, and
+    `grep -c internal` printed 0.
+  - Importing a BMI with a different `-freflection` setting crashes too, but in a different way.
+  - Do: get the command with `ninja -t commands <target>`.
+  - Do: drop flags and source lines one at a time in a Python script (`subprocess` with a list).
+  - Do: check the exit status of the reduced command, not only the absence of an error.
+  - Do: once it reproduces, cut it down to a standalone repro with no libycxx. That repro is the
+    bug report, and it shows where the fix belongs.
+  - Learned on #4.
+
 ## Evidence and tests
 
 - **Test a selection's invariant end to end, not just its helper.** The test driver's shard

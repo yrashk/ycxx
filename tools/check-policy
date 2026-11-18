@@ -1,0 +1,8 @@
+#!/bin/sh
+# Stage 1 policy checks (DECISIONS §9.2): fast, no compiler needed. tools/test's `policy` stage
+# and CI run this before building; a new check added here runs everywhere. Today: the
+# preprocessor policy (tools/check-preprocessor). Formatting and the provenance leak check join
+# when they exist.
+set -eu
+root=$(cd "$(dirname "$0")/.." && pwd)
+exec python3 "$root/tools/check-preprocessor"
