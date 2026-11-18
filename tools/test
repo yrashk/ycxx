@@ -1,22 +1,11 @@
-#!/bin/sh
-# STAND-IN for the test driver, which #5 is writing and which replaces this file whole. It
-# accepts the driver's command line (agreed on #4 and #5) so that CI calls the same thing before
-# and after, and runs what exists today: the policy checks and the build with its bootstrap
-# smoke test. Other options are accepted and ignored. Exit status: 0 passed, 1 failed, 2 usage.
-set -eu
-root=$(cd "$(dirname "$0")/.." && pwd)
-jobs=
-while [ $# -gt 0 ]; do
-  case $1 in
-    --fast) ;;
-    --tier) case ${2:-} in pr|main|nightly) ;; *) echo "test: --tier pr|main|nightly" >&2; exit 2 ;; esac; shift ;;
-    --shard|--state|--branch|--base|--cxx) shift ;;
-    -j) jobs=$2; shift ;;
-    -j*) jobs=${1#-j} ;;
-    policy|build|failed|affected|core|wider|rest) ;;
-    *) echo "test: unknown argument $1" >&2; exit 2 ;;
-  esac
-  shift
-done
-"$root/tools/check-policy" || exit 1
-"$root/tools/build" ${jobs:+-j "$jobs"} || exit 1
+#!/usr/bin/env python3
+# ycxx's test driver (DECISIONS §5.5, §9): stages, live progress, transcripts of every test and
+# HTML and Markdown reports. The code is in tests/driver; usage: tools/test --help, docs/TESTING.md.
+import os, sys
+
+if sys.version_info < (3, 10):
+    sys.exit('tools/test needs Python 3.10 or later')
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from tests.driver.main import main  # noqa: E402
+
+sys.exit(main())
