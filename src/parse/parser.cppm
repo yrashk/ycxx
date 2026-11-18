@@ -156,6 +156,20 @@ public:
   // Whether a declaration starts here: a decl-specifier keyword, or a name that denotes a class
   // ([stmt.ambig]: what can be a declaration is one).
   bool starts_declaration() {
+    // [stmt.ambig]: `int(x) + 1;`, `int(3);` and `void();` are expressions; `int(x);`, `int(x) = 1;`
+    // and `int(*f)(int);` declare.
+    if (simple_type_keyword(kind()) && kind(1) == Tk::l_paren) {
+      Tk inner = kind(2);
+      if (inner == Tk::r_paren || lex::is_literal(inner)) return false;
+      u32 j = 1, depth = 0;
+      for (; i_ + j < end_; ++j) {
+        if (kind(j) == Tk::l_paren) ++depth;
+        if (kind(j) == Tk::r_paren && --depth == 0) break;
+      }
+      Tk after = kind(j + 1);
+      return after == Tk::semi || after == Tk::equal || after == Tk::comma || after == Tk::l_square ||
+             after == Tk::l_paren || after == Tk::l_brace;
+    }
     if (starts_decl_specifier(kind())) return true;
     if (qualified_ahead()) {
       auto q = qualified_type(0);
@@ -270,7 +284,6 @@ public:
         }
         bump();
         bump();
-        bool parenthesized = is(Tk::l_paren);
         int saved = std::exchange(angle_, 0);
         Ex e = expression();
         angle_ = saved;
@@ -278,7 +291,7 @@ public:
           d.ok = false;
           goto done;
         }
-        cls = s_->decltype_of(e, parenthesized);
+        cls = s_->decltype_of(e, s_->as<ast::Paren>(e).has_value());
         continue;
       }
       case Tk::kw_constexpr: once(d.is_constexpr, k); break;
@@ -1277,13 +1290,17 @@ public:
         return {NodeId::none, begin, pos()};
       }
       if (is(Tk::l_paren)) {
+        // Tentatively a type-id: `sizeof(int(1))` and `sizeof(T{})` are expressions.
         u32 back = i_;
         bump();
         if (starts_type_id()) {
+          std::size_t n = s_->diag_count();
           auto t = type_id();
-          if (!t || !expect(Tk::r_paren)) return {NodeId::none, begin, pos()};
-          Ex r = s_->size_of(*t, align, begin, pos());
-          return {r.id, begin, pos(), r.info};
+          if (t && accept(Tk::r_paren)) {
+            Ex r = s_->size_of(*t, align, begin, pos());
+            return {r.id, begin, pos(), r.info};
+          }
+          s_->truncate_diags(n);
         }
         i_ = back;
       }

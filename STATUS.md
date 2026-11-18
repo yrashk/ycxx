@@ -908,8 +908,13 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
 - **decltype(e)** ([dcl.type.decltype]): an unparenthesized id-expression or member access names
   its declared type, else the expression's type and value category. `decltype(auto)` is not
   supported yet.
-- `std::nullptr_t` objects are laid out as pointers.
-- Tests: `tests/own/casts` (6). One more draft example passes.
+- `std::nullptr_t` objects are laid out as pointers and convert to pointers; comparing two of
+  them, and the other gaps the review found, are #199.
+- A cast of a constant to an enumeration is folded to the enumeration's constant (the
+  interpreter has no enumeration-typed values yet, #25). `decltype` reads declared types from
+  the declaration that named the entity; a statement that begins with a functional cast is an
+  expression unless it can be a declaration ([stmt.ambig]).
+- Tests: `tests/own/casts` (9, three from the review). One more draft example passes.
 
 ## Templates, ζ step 1: function templates (#88, 2026-11-18)
 

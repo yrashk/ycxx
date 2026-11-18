@@ -1708,6 +1708,7 @@ public:
     ExprInfo info{types().referee(d.type), ValueCategory::lvalue, 0};
     Ex r = node(ast::DeclRef{info, d.entity}, begin, end, info);
     if (unqualified && d.kind == ast::DeclKind::function) unqualified_[std::to_underlying(r.id)] = {d};
+    declared_types_[std::to_underlying(r.id)] = d.type;
     return r;
   }
 
@@ -1968,6 +1969,9 @@ public:
       return convert_node(e, ast::ConversionKind::null_pointer, target);
     e = rvalue(e);
     QualType from = e.type();
+    // A std::nullptr_t object's value is a null pointer constant too ([conv.ptr]/1).
+    if (e.ok() && types().is_pointer(target) && types().is(Types::unqualified(from), Builtin::nullptr_t))
+      return convert_node(e, ast::ConversionKind::null_pointer, target);
     // [dcl.enum]: an enumeration is initialized only from its own type; an unscoped one converts
     // to an integer or bool ([conv.integral], [conv.bool]).
     if (types().is_enum(target)) {
@@ -2012,8 +2016,15 @@ public:
     QualType from = Types::unqualified(v.type());
     // /10: an integral or enumeration value to an enumeration; /9: a scoped enumeration's to an
     // integral type.
-    if (types().is_enum(target) && (types().is_integral(from) || types().is_enum(from)))
-      return types().canonical(from) == types().canonical(target) ? v : convert_node(v, ast::ConversionKind::integral, target);
+    if (types().is_enum(target) && (types().is_integral(from) || types().is_enum(from))) {
+      if (types().canonical(from) == types().canonical(target)) return v;
+      // A constant (an enumerator, a literal) is folded to the enumeration's constant: the
+      // interpreter has no enumeration-typed values yet (#25).
+      if (auto lit = as<ast::Literal>(v))
+        return literal(target, w_->values.integer(underlying_of(target), w_->values.rec(lit->value).bits), ValueCategory::prvalue,
+                       v.begin, v.end);
+      return convert_node(v, ast::ConversionKind::integral, target);
+    }
     if (is_scoped_enum(from) && types().is_arithmetic(target))
       return convert_node(v, types().is(target, Builtin::bool_) ? ast::ConversionKind::boolean : ast::ConversionKind::integral, target);
     // /14: a pointer to cv void to a pointer to an object type at least as cv-qualified.
@@ -2061,12 +2072,11 @@ public:
   QualType decltype_of(Ex e, bool parenthesized) {
     if (!parenthesized) {
       if (auto l = as<ast::LocalRef>(e)) return locals_[l->local].type;
-      // The declared type: a variable's from its declaration, a data member's from its class.
-      if (auto d = as<ast::DeclRef>(e)) {
-        const EntityRec& r = w_->entities.rec(d->entity);
-        if (r.kind == EntityKind::variable)
-          for (DeclId p : q_->visible_decls(r.name, directives()))
-            if (ast::DeclSema ds = q_->decl_sema(p); ds.entity == d->entity) return ds.type;
+      // The declared type: the declaration's that named the entity (a static data member's is
+      // its type, a function's its function type), a data member's from its class.
+      if (as<ast::DeclRef>(e)) {
+        if (auto it = declared_types_.find(std::to_underlying(e.id)); it != declared_types_.end()) return it->second;
+        return e.type();
       }
       if (auto m = as<ast::Member>(e))
         if (const ClassRec* c = class_rec(w_->entities.rec(m->member).scope))
@@ -2679,6 +2689,7 @@ private:
     QualType type;
   };
   std::vector<BlockType> block_types_;
+  std::map<u32, QualType> declared_types_;  // by DeclRef node: the declared type of what it names
   std::map<u32, std::vector<ast::DeclSema>> overloads_;  // by draft overload-set DeclRef
   std::map<u32, std::vector<TemplateArg>> explicit_args_;  // by draft overload-set DeclRef
   std::map<u32, std::vector<ast::DeclSema>> unqualified_;  // by draft DeclRef named by an unqualified-id
