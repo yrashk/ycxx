@@ -315,6 +315,10 @@ def _main(argv):
             return EXIT_USAGE
         shard = (int(m[1]), int(m[2]))
 
+    # Submodules at their pins before anything runs: a stale deps/libycxx tests the wrong library.
+    sync = REPO / 'tools' / 'sync-submodules'
+    if sync.exists() and subprocess.run([str(sync)]).returncode != 0:
+        return EXIT_FAIL
     try:
         compilers = toolchain.discover(REPO)
     except ValueError as e:

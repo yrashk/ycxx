@@ -5,11 +5,15 @@ ycxx is built by GCC 16.2 (`-freflection -fcontracts`) against libycxx, the subm
 and Python 3.10 or later. Linux x86_64 and macOS arm64 are supported.
 
 ```sh
-git submodule update --init deps/libycxx
 tools/build                      # configures build/ on first use, builds, runs the smoke test
 build/bin/ycxx --version
 tools/test --fast                # what the PR tier of CI runs (DECISIONS §9.1)
 ```
+
+`tools/build` and `tools/test` first run `tools/sync-submodules`, which moves each submodule to
+the commit this checkout pins. `git pull` does not, and a stale `deps/libycxx` builds against
+the wrong library. A submodule with local changes at another commit (libycxx work in progress)
+stops them instead, unless `YCXX_SUBMODULE_DRIFT=allow`.
 
 ## The compiler
 

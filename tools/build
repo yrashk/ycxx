@@ -6,7 +6,8 @@
 #
 # Environment: YCXX_BUILD_DIR (default build), YCXX_BUILD_TYPE (default Debug), and anything
 # libycxx's toolchain file reads (YCXX_TOOLCHAINS; docs/BUILDING.md). A build directory
-# configured earlier is reused as it is.
+# configured earlier is reused as it is. Submodules are first moved to their pinned commits
+# (tools/sync-submodules).
 set -eu
 root=$(cd "$(dirname "$0")/.." && pwd)
 dir=${YCXX_BUILD_DIR:-$root/build}
@@ -23,9 +24,7 @@ while [ $# -gt 0 ]; do
   shift
 done
 
-if [ ! -f "$root/deps/libycxx/CMakeLists.txt" ]; then
-  git -C "$root" submodule update --init deps/libycxx
-fi
+"$root/tools/sync-submodules"
 if [ ! -f "$dir/build.ninja" ]; then
   cmake -S "$root" -B "$dir" -G Ninja -DCMAKE_BUILD_TYPE="${YCXX_BUILD_TYPE:-Debug}"
 fi

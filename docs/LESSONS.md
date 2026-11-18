@@ -31,6 +31,15 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
     macOS jobs short. Count a libycxx PR as about an hour of every repository's macOS capacity.
   - Learned on the α slice (#39), 2026-11-18.
 
+- **Build on unmerged dependencies in a local integration branch, then cherry-pick.** #24 needed
+  #36 and #38 while both waited for CI. A local-only branch merging both let the work build and
+  test at once. When they landed, the commits, which touched only #24's files, cherry-picked onto
+  `main` with two one-line CMake conflicts.
+  - Do: keep your commits free of the dependencies' files, never push the integration branch, and
+    agree any shared file (here `ast/nodes.cppm`) with its owner first. Carry the owner's diff
+    verbatim, so whichever branch merges second merges cleanly.
+  - Learned on #24.
+
 ## Working with Fable subagents
 
 - **Agree the contract between parts before splitting a design.** #1's engine part and C++ part
@@ -183,6 +192,12 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
   - Do: vendor the UCD file of the same version (`tools/unicode/ucd/`) with the Unicode License
     v3 (`src/lex/LICENSE.unicode`), and have the generator check the versions agree.
   - Learned on #40.
+
+- **`git pull` leaves submodules where they were.** After a libycxx bump, a checkout whose
+  `deps/libycxx` was not updated built the old library and hit a GCC ICE that the bump had fixed.
+  - Do: `tools/build` and `tools/test` run `tools/sync-submodules` first, so the pin is enforced
+    rather than remembered.
+  - Learned on the α slice (#39), 2026-11-18.
 
 ## Evidence and tests
 
