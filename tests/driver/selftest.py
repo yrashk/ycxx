@@ -110,7 +110,9 @@ class Parts(unittest.TestCase):
                 exe.write_text(f'#!/bin/sh\necho "$3:1:1: error: no" >&2\nexit {status}\n')
                 exe.chmod(0o755)
                 cut = toolchain.Compiler('ycxx', str(exe), {'syntax'}, {test.id: 'expected'})
-                code, output, _ = kinds.execute(test, kinds.Ctx(REPO, cut, {}, 'clang', d / 'work', 5))
+                # The timeout only guards a hang: this checks a classification, not wall time, and a
+                # loaded machine once took 5 s to start the shell script (#145).
+                code, output, _ = kinds.execute(test, kinds.Ctx(REPO, cut, {}, 'clang', d / 'work', 120))
                 self.assertEqual(code, want, output)
 
     def test_features_limited_to_hosts(self):
@@ -147,11 +149,16 @@ class Parts(unittest.TestCase):
     def test_no_unsupported(self):
         # An UNSUPPORTED test passes a run, but fails it with --no-unsupported, and so does a
         # selection that runs nothing: a CI step that must run its tests cannot go green vacuously.
+        # No test runs a compiler here, so ycxx is a stub: the policy stage runs this before ycxx
+        # is built (#159).
         inc = 'incremental/smoke/inline-function-body.incr'
         with tempfile.TemporaryDirectory() as d:
             features = Path(d) / 'features.txt'
             features.write_text('syntax\npreprocess\n')  # no "incremental": the test is UNSUPPORTED
-            env = dict(os.environ, YCXX_FEATURES=str(features))
+            stub = Path(d) / 'ycxx'
+            stub.write_text('#!/bin/sh\necho "ycxx stub: never runs a test" >&2\nexit 2\n')
+            stub.chmod(0o755)
+            env = dict(os.environ, YCXX_FEATURES=str(features), YCXX=str(stub))
             def status(stage, what, *flags):
                 return subprocess.run([sys.executable, str(REPO / 'tools' / 'test'), '--cxx', 'ycxx', '--state', d,
                                        '--no-state', '-q', *flags, stage, what], capture_output=True, text=True,
