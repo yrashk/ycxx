@@ -80,6 +80,26 @@ What is true of the code today. Work in progress and its owners are tracked in
 - Not yet: phase 4 (M1), `long double` and the extended floating types' values (left to the
   target), the type of an integer literal (sema, #33).
 
+## Item splitter (#18, 2026-11-18)
+
+- `ycxx.items` (`src/items/`): `split(region, file)` and the query `RegionItems(FileId)` cut a
+  region into items before parsing (query-engine.md §B1.2), preorder with nested lists for
+  namespaces, linkage and export blocks and class bodies.
+  - Bodies: compound statements, ctor-initializers, function-try-blocks, `= default`,
+    `= delete(…)`; consteval blocks. Template-heads attach to what follows.
+  - Skeletons (ast.md §3.1): kind, declared names in token order with ordinal, offset and flags
+    (type, template, namespace, unknown, definition, friend, enumerator), the first declarator's
+    spelled qualifier, template depth, body range.
+  - Ids: 128-bit fingerprints over the file identity, scope path, declaration-part tokens (kind
+    and content, not whitespace or alternative spelling) and the ordinal among siblings. A
+    namespace's id excludes its members; a class's excludes its members' bodies. Bodies are
+    content-addressed.
+- Token heuristics, not a parse: a few forms are known to be guessed wrong (`S (x);`,
+  `decltype(b){1}` as a mem-initializer, template arguments with commas in an initializer).
+- Not yet: `ItemId`/`BodyId` handles from the `items` and `tokens` interners (fingerprints only
+  until #38's placeholders are replaced), the occurrence salt (needs prefixes, #16), flattening
+  child regions (needs includes, M1), the syntactic indexes of §B1.3.
+
 ## Bootstrap workarounds
 
 Places where ycxx's sources avoid or work around a C++26 feature because GCC 16 lacks it or
