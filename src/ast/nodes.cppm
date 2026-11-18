@@ -121,6 +121,7 @@ struct Call {
 enum class ConversionKind : u8 {
   lvalue_to_rvalue, integral, floating_integral, user_defined, derived_to_base,
   array_to_pointer, function_to_pointer, qualification, boolean, null_pointer, to_void,
+  pointer,  // [conv.ptr]: an object pointer to `cv void*`
 };
 
 // An implicit conversion: a node of width zero beyond its operand (§3.3), naming its function for

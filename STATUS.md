@@ -540,7 +540,7 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   its own scope stack (block end, `return`, `break`, `continue`) and ends a full-expression's
   temporaries at its end. The `Cleanup` lists of ast.md §3.7.3 stay empty; #135 decides.
 - Linkage names: `C1`/`D1` (#136 for `C2`/`D2`/`D0`), checked against Clang's symbols.
-- Tests: `tests/own/classes/s3-*` (spec-only): 14 of 14 pass. 10 more draft examples pass.
+- Tests: `tests/own/classes/s3-*` (spec-only, plus two from the review): 16 of 16 pass. 10 more draft examples pass.
 - Not yet: temporaries with destructors created in a conditional operand, value-initializing a
   member subobject whose class has an implicit constructor, delegating constructors, `explicit`,
   `= default`, out-of-class constructor definitions.

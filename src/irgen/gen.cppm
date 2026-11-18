@@ -802,6 +802,7 @@ class Gen {
         std::uint64_t path[] = {1, ir::encode({ir::Step::elem, 0})};
         return pure(ir::Op::ptr_member, t, {arr.ptr}, {word(ty(elem)), path[0], path[1]});
       }
+      case ast::ConversionKind::pointer:
       case ast::ConversionKind::qualification: {
         ValueId v = rvalue(from);
         if (same_type(info(from).type, t)) return v;

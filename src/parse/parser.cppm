@@ -1365,7 +1365,11 @@ public:
           d.type = s_->types().array(d.type, n);
           s_->set_local_type(local, d.type);
         }
-        init = s_->list_init(d.type, *b);
+        // A reference from one element binds as `= e` does, extending a temporary ([class.temporary]/6).
+        if (s_->types().is_reference(d.type) && b->clauses.size() == 1 && !b->clauses[0].list && !b->clauses[0].designated)
+          init = s_->bind_reference(b->clauses[0].expr, d.type, b->clauses[0].begin, true);
+        else
+          init = s_->list_init(d.type, *b);
         // As for `= e` below: a constexpr local, or a const integral one with a constant
         // initializer, is usable in constant expressions ([expr.const]).
         bool usable_kind = sema::Types::is_const(d.type) && !sema::Types::is_volatile(d.type) &&

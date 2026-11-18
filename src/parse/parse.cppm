@@ -178,6 +178,7 @@ public:
   // Its body, analysed on first use.
   const ast::BodySema& synthesized_body(std::size_t i);
   void special_members(u32 item, EntityId cls, sema::ClassRec& rec);
+  Ex copy_from(sema::Sema& sm, Ex src, QualType t);
 
   // The type of `this` in a non-static member function ([expr.prim.this]): a pointer to its class,
   // with the function's cv-qualifiers.
@@ -1407,6 +1408,7 @@ void Program::special_members(u32 item, EntityId cls, sema::ClassRec& rec) {
   sema::Types& types = w_->types;
   QualType ct = types.class_type(cls);
   bool user_copy = false;
+  bool user_move = false;
   EntityId user_dtor = EntityId::none;
   for (const sema::MemberDeclRec& m : rec.members) {
     if (m.is_dtor) user_dtor = m.entity;
@@ -1415,6 +1417,10 @@ void Program::special_members(u32 item, EntityId cls, sema::ClassRec& rec) {
     sema::TypeRec fr = types.rec(m.type);
     if (fr.params.size() == 1 && types.is_reference(fr.params[0]) &&
         types.canonical(sema::Types::unqualified(types.referee(fr.params[0]))) == types.canonical(ct)) {
+      if (types.rec(fr.params[0]).rvalue_ref) {
+        user_move = true;  // a move constructor
+        continue;
+      }
       user_copy = true;
       rec.copy_ctor = m.is_deleted ? EntityId::none : m.entity;
       rec.copy_deleted = m.is_deleted;
@@ -1455,7 +1461,9 @@ void Program::special_members(u32 item, EntityId cls, sema::ClassRec& rec) {
     rec.destructor = synthesize(false);
   // [class.copy.ctor]/10–11: the implicit copy constructor is deleted with a member's, and not
   // trivial when a member's is not.
-  if (!user_copy) {
+  // [class.copy.ctor]/6: a user-declared move constructor deletes the implicit copy constructor.
+  if (!user_copy && user_move) rec.copy_deleted = true;
+  if (!user_copy && !user_move) {
     bool nontrivial = false;
     for (const sema::FieldRec& f : rec.fields) {
       if (types.is_reference(f.type)) continue;
@@ -1465,6 +1473,22 @@ void Program::special_members(u32 item, EntityId cls, sema::ClassRec& rec) {
     }
     if (!rec.copy_deleted && nontrivial) rec.copy_ctor = synthesize(true);
   }
+}
+
+// The copy of the object `src` designates as an initializer of type `t` ([class.copy.ctor]/14):
+// a class through its copy constructor; an array whose elements' copy is not trivial element by
+// element, else as a whole.
+Ex Program::copy_from(sema::Sema& sm, Ex src, QualType t) {
+  if (!w_->types.is_array(t)) return sm.convert(src, t, 0);
+  if (!w_->classes.copy_of(t).first) return sm.convert_node(src, ast::ConversionKind::lvalue_to_rvalue, sema::Types::unqualified(t));
+  sema::TypeRec r = w_->types.rec(t);
+  std::vector<Ex> elems;
+  QualType index = w_->types.builtin(sema::Builtin::int_);
+  for (sema::u64 i = 0; i < r.bound; ++i) {
+    Ex at = sm.literal(index, w_->values.integer(index, i), ast::ValueCategory::prvalue, 0, 0);
+    elems.push_back(copy_from(sm, sm.subscript(src, at, 0, 0), r.inner));
+  }
+  return sm.list_of(t, std::move(elems), 0, 0);
 }
 
 const ast::BodySema& Program::synthesized_body(std::size_t i) {
@@ -1489,8 +1513,7 @@ const ast::BodySema& Program::synthesized_body(std::size_t i) {
     for (u32 i = 0; i < rec.fields.size(); ++i) {
       const sema::FieldRec& f = rec.fields[i];
       Ex src = sm.member(sm.name_expr(other, 0, 0), false, f.name, 0, 0, 0);
-      Ex init = w_->types.is_array(f.type) ? sm.convert_node(src, ast::ConversionKind::lvalue_to_rvalue, sema::Types::unqualified(f.type))
-                                           : sm.convert(src, f.type, 0);
+      Ex init = copy_from(sm, src, f.type);
       stmts.push_back({sm.node(ast::MemberInit{i, f.type, {init.id, 0}}, 0, 0).id, 0});
     }
     Ex body = sm.node(ast::Compound{b.list({}), b.seq(std::span<const ast::Cleanup>{})}, 0, 0);

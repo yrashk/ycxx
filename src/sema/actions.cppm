@@ -731,9 +731,28 @@ public:
   struct Ics {
     bool viable = false;
     int rank = 0;
-    int sub = 0;
-    bool operator<(const Ics& o) const { return rank != o.rank ? rank < o.rank : sub < o.sub; }
+    int sub = 0;              // a qualification conversion among exact matches ([over.ics.rank]/3.2.5)
+    bool ref = false;         // a reference binding: the tie-breaks of /3.2.3 and /3.2.6 apply
+    bool rvalue_ref = false;  // binding an rvalue reference
+    bool to_rvalue = false;   // to an rvalue
+    int ref_cv = 0;           // the cv-qualifiers the referred-to type adds
+    bool operator<(const Ics& o) const {
+      if (rank != o.rank) return rank < o.rank;
+      if (ref && o.ref) {
+        if (to_rvalue && o.to_rvalue && rvalue_ref != o.rvalue_ref) return rvalue_ref;  // /3.2.3
+        return ref_cv < o.ref_cv;                                                         // /3.2.6
+      }
+      if (!ref && !o.ref) return sub < o.sub;
+      return false;
+    }
   };
+  static Ics binding(Ics v, bool rvalue_ref, bool to_rvalue, int cv) {
+    v.ref = true;
+    v.rvalue_ref = rvalue_ref;
+    v.to_rvalue = to_rvalue;
+    v.ref_cv = cv;
+    return v;
+  }
   static int cv_bits(Cv c) { return std::popcount(unsigned(std::to_underlying(c))); }
   static bool cv_within(Cv a, Cv b) { return (std::to_underlying(a) & ~std::to_underlying(b)) == 0; }
   bool same_unqualified(QualType a, QualType b) {
@@ -758,13 +777,14 @@ public:
       // of the type, no less qualified.
       bool direct_cat = r.rvalue_ref ? a.cat() == ValueCategory::xvalue : a.cat() == ValueCategory::lvalue;
       if (direct_cat && same_unqualified(a.type(), t) && cv_within(Types::cv(a.type()), Types::cv(t)))
-        return {true, 0, cv_bits(Types::cv(t)) - cv_bits(Types::cv(a.type()))};
+        return binding({true, 0, 0}, r.rvalue_ref, a.cat() != ValueCategory::lvalue,
+                       cv_bits(Types::cv(t)) - cv_bits(Types::cv(a.type())));
       bool const_ref = Types::is_const(t) && !Types::is_volatile(t);
       if (!r.rvalue_ref && !const_ref) return {};
       if (r.rvalue_ref && a.cat() == ValueCategory::lvalue) return {};
       Ics v = ics(a, Types::unqualified(t));  // to a temporary
-      v.sub += 2;
-      return v;
+      if (!v.viable) return v;
+      return binding(v, r.rvalue_ref, true, cv_bits(Types::cv(t)));
     }
     QualType to = Types::unqualified(p);
     if (types().is_class(to)) {
@@ -776,7 +796,10 @@ public:
     if (types().is_class(from) || types().is_void(from)) return {};
     if (types().canonical(from) == types().canonical(to)) return {true, 0, 0};
     if (types().is_pointer(from) && types().is_pointer(to))
-      return qualification_convertible(from, to) ? Ics{true, 0, 1} : Ics{};
+    {
+      if (qualification_convertible(from, to)) return {true, 0, 1};
+      return pointer_convertible(from, to) ? Ics{true, 2, 0} : Ics{};
+    }
     if (types().is(to, Builtin::bool_) && (types().is_arithmetic(from) || types().is_pointer(from))) return {true, 2, 0};
     if (types().is_integral(from) && types().is_integral(to)) {
       bool promotion = builtin(promoted(*types().builtin_of(from))) == to && !types().is(from, *types().builtin_of(to));
@@ -798,7 +821,7 @@ public:
       // The implicit object parameter, first: the object must not be more cv-qualified.
       if (!cands[i].no_object && object_cv) {
         if (!cv_within(*object_cv, fr.fn_cv)) continue;
-        seq.push_back({true, 0, cv_bits(fr.fn_cv) - cv_bits(*object_cv)});
+        seq.push_back(binding({true, 0, 0}, false, false, cv_bits(fr.fn_cv) - cv_bits(*object_cv)));
       } else {
         seq.push_back({true, 0, 0});
       }
@@ -948,7 +971,7 @@ public:
     Ex fail{NodeId::none, e.begin, e.end};
     bool direct_cat = rr.rvalue_ref ? e.cat() == ValueCategory::xvalue : e.cat() == ValueCategory::lvalue;
     if (direct_cat && same_unqualified(e.type(), t)) {
-      if (cv_within(Types::cv(e.type()), Types::cv(t))) return e;
+      if (cv_within(Types::cv(e.type()), Types::cv(t))) return extend ? extended(e) : e;
       diag(at_, Diag::bind_drops_qualifiers, e.type(), r);
       return fail;
     }
@@ -958,10 +981,33 @@ public:
       else diag(at_, Diag::bind_to_rvalue, t);
       return fail;
     }
-    if (e.glvalue() && same_unqualified(e.type(), t) && cv_within(Types::cv(e.type()), Types::cv(t))) return e;
+    // [dcl.init.ref]/5.4.4: an rvalue reference does not bind to an lvalue.
+    if (rr.rvalue_ref && e.cat() == ValueCategory::lvalue) {
+      diag(at_, Diag::bind_to_lvalue, t);
+      return fail;
+    }
+    if (e.glvalue() && same_unqualified(e.type(), t) && cv_within(Types::cv(e.type()), Types::cv(t)))
+      return extend ? extended(e) : e;
     Ex v = convert(e, Types::unqualified(t), at_);
     if (!v.ok() || v.glvalue()) return v;
     return materialize(v, t, extend);
+  }
+
+  // A temporary a reference is bound to through its subobject (`const int& m = A().x`) lives as
+  // long as the reference too ([class.temporary]/6): the `Materialize` under `.` and parentheses,
+  // rebuilt extended.
+  Ex extended(Ex e) {
+    if (auto m = as<ast::Materialize>(e))
+      return node(ast::Materialize{m->info, m->destructor, 1, m->operand}, e.begin, e.end, m->info);
+    if (auto p = as<ast::Paren>(e)) {
+      Ex inner = extended({p->operand.id, e.begin + p->operand.at, e.end, {}});
+      return node(ast::Paren{p->info, at(inner, e.begin)}, e.begin, e.end, p->info);
+    }
+    if (auto m = as<ast::Member>(e); m && !m->arrow && !m->reference) {
+      Ex inner = extended({m->object.id, e.begin + m->object.at, e.end, {}});
+      return node(ast::Member{m->info, m->member, m->field, 0, 0, at(inner, e.begin)}, e.begin, e.end, m->info);
+    }
+    return e;
   }
 
   // ------------------------------------------------------------ names ([basic.lookup.unqual])
@@ -1261,8 +1307,17 @@ public:
     }
     if (types().is_pointer(from) && types().is_pointer(target) && qualification_convertible(from, target))
       return convert_node(e, ast::ConversionKind::qualification, target);
+    if (types().is_pointer(from) && types().is_pointer(target) && pointer_convertible(from, target))
+      return convert_node(e, ast::ConversionKind::pointer, target);
     diag(at_, Diag::no_conversion, from, to);
     return {NodeId::none, e.begin, e.end};
+  }
+
+  // [conv.ptr]/2: a pointer to an object type converts to a pointer to `void` at least as
+  // cv-qualified.
+  bool pointer_convertible(QualType from, QualType to) {
+    QualType a = types().pointee(from), b = types().pointee(to);
+    return types().is_void(b) && types().is_object(a) && cv_within(Types::cv(a), Types::cv(b));
   }
 
   // [conv.qual], for one level of pointers: `T cv1*` to `T cv2*` where cv2 holds cv1.
