@@ -8,7 +8,12 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 # checked out, or is at another commit, is moved to its pin. One with local changes at another
 # commit (libycxx work in progress) stops the build, unless YCXX_SUBMODULE_DRIFT=allow.
 short() { printf '%.11s' "$1"; }
-status=$(git -C "$root" submodule status --recursive)
+# Without a readable git repository (a source archive, or a CI container where git refuses a
+# checkout owned by another user) there is nothing to compare: the checkout step pinned them.
+if ! status=$(git -C "$root" submodule status --recursive 2>&1); then
+  echo "build: not checking submodule pins: $(printf '%s' "$status" | head -n 1)" >&2
+  exit 0
+fi
 while IFS= read -r line; do
   [ -n "$line" ] || continue
   flag=$(printf '%.1s' "$line")
