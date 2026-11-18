@@ -162,6 +162,21 @@ struct If {
   Child else_;
 };
 
+// [stmt.if]: `if consteval`, or with `negated` 1 `if !consteval`. The first substatement runs when
+// the statement is evaluated in a manifestly constant-evaluated context.
+struct IfConsteval {
+  u32 negated;
+  Child then_;
+  Child else_;
+};
+
+// [dcl.pre]: `static_assert(condition, message)`, checked when it was analysed. The condition is
+// converted to bool; the message is a string literal's `VString`, or none.
+struct StaticAssert {
+  Child condition;
+  ConstId message;
+};
+
 // [stmt.while]: the condition is converted to bool.
 struct While {
   Child condition;
@@ -226,7 +241,8 @@ struct Attribute {
 
 using Nodes = closed_list<Literal, DeclRef, Paren, Unary, Binary, OrderedBinary, Assign, Subscript, Call,
                           ImplicitConversion, ExprStmt, Return, Compound, If, LocalVar, Attribute, LocalRef,
-                          Conditional, While, Do, For, Break, Continue, DeclStmt, Declarator, DeclGroup>;
+                          Conditional, While, Do, For, Break, Continue, DeclStmt, Declarator, DeclGroup,
+                          IfConsteval, StaticAssert>;
 
 static_assert(Nodes::size < max_node_kinds);
 

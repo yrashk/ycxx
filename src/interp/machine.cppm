@@ -65,7 +65,7 @@ struct Value {
 // `constant_value(V, ctx)` for one usable in constant expressions).
 struct GlobalVar {
   QualType type{};                // as declared, cv included
-  std::optional<ConstId> value;   // its value when constant-initialized; else zero-initialized
+  std::optional<ConstId> value;   // its value when constant-initialized (a scalar); else zero
   bool usable = false;            // usable in constant expressions ([expr.const])
 };
 
@@ -73,6 +73,7 @@ struct GlobalVar {
 struct Callee {
   const ir::Function* body = nullptr;  // none: not defined ([expr.const]: before the evaluation)
   bool is_constexpr = false;           // a constexpr or consteval function ([dcl.constexpr])
+  bool unsupported = false;            // defined, but its body has no L1 yet
 };
 
 // Where an evaluation was: the function and the node, innermost first. The caller maps each to a
@@ -101,6 +102,7 @@ struct Result {
   ConstId literal{};         // address within a string literal object
   std::vector<PathStep> path;
   bool past = false;
+  i64 offset = 0;            // address: in bytes from the start of the object
   bool operator==(const Result&) const = default;
 };
 
@@ -135,7 +137,8 @@ private:
 
   enum class Flow : u8 { next, jumped, called, returned, suspend, stop };
   enum class Life : u8 { before, alive, after };
-  enum class Fill : u8 { indeterminate, erroneous, value };
+  // `constant`: a global's initial value, the ConstId in `v.bits`, decoded when first read.
+  enum class Fill : u8 { indeterminate, erroneous, value, constant };
   enum class Origin : u8 { automatic, global, literal };
   enum class Use : u8 { read, write, lifetime };
   enum class Kind : u8 { integer, pointer, array, function, other };
@@ -164,7 +167,8 @@ private:
     Kind kind = Kind::other;
     u32 width = 0;  // integer
     bool is_signed = false;
-    QualType inner{};  // pointee or element
+    QualType inner{};  // pointee or element; none for std::nullptr_t
+    bool is_nullptr = false;
     u64 bound = 0;     // array
     u64 leaves = 0;    // cells of an object of this type
     u64 size = 0;      // bytes ([basic.types.general]); 0 for a function type
@@ -212,8 +216,10 @@ private:
   std::optional<Place> resolve(const Value& p, std::span<const u64> extra, bool& past);
   Flow locate(const Value& p, std::span<const u64> extra, QualType t, Use use, bool volatile_, Place& out);
   Flow note_access(const Place& p, bool write);
-  std::optional<Value> constant(ConstId c, QualType type);
+  Flow constant(ConstId c, QualType type, Value& out);
   std::optional<u32> literal_object(ConstId s);
+  Flow global_object(EntityId e, u32& out);
+  Flow address(u32 obj, QualType pointee, i64 offset, Value& out);
   i64 offset_of(const Value& p);
   bool may_overlap(const Value& a, const Value& b);
 
@@ -291,6 +297,7 @@ const Machine::Shape& Machine::shape(QualType q) {
       s.size = (*target_)[*b].size;
     } else if (*b == ast::Builtin::nullptr_t) {
       s.kind = Kind::pointer;
+      s.is_nullptr = true;
       s.leaves = 1;
       s.size = (*target_)[*b].size;
     }
@@ -321,7 +328,7 @@ bool Machine::similar(QualType a, QualType b) {
   if (ca == cb) return true;
   const Shape sa = shape(ca), sb = shape(cb);
   if (sa.kind != sb.kind) return false;
-  if (sa.kind == Kind::pointer) return sa.inner != QualType{} && sb.inner != QualType{} && similar(sa.inner, sb.inner);
+  if (sa.kind == Kind::pointer) return !sa.is_nullptr && !sb.is_nullptr && similar(sa.inner, sb.inner);
   if (sa.kind == Kind::array) return sa.bound == sb.bound && similar(sa.inner, sb.inner);
   return false;
 }
@@ -486,36 +493,109 @@ std::optional<u32> Machine::literal_object(ConstId s) {
   return o;
 }
 
-// A constant as a value of type `type`: an integer, a null pointer, or the address of a string
-// literal object (as a pointer to the array, or to one of its elements).
-std::optional<Value> Machine::constant(ConstId c, QualType type) {
+// A constant as a value of type `type`: an integer, a null pointer, or an address: of a function,
+// or of an object (a string literal object or a global variable) plus a byte offset, as a pointer
+// to the object or to a subobject of it. A global's object may first need the host.
+Machine::Flow Machine::constant(ConstId c, QualType type, Value& out) {
   const ast::Values& vs = in_->values;
+  const Shape& s = shape(type);
   if (vs.is<ast::VInt>(c)) {
-    const Shape& s = shape(type);
-    if (s.kind != Kind::integer) return std::nullopt;
-    return Value::integer(norm(vs.get<ast::VInt>(c).bits.lo, s.width, s.is_signed));
+    if (s.kind != Kind::integer) return fail(Reason::ill_formed);
+    out = Value::integer(norm(vs.get<ast::VInt>(c).bits.lo, s.width, s.is_signed));
+    return Flow::next;
   }
-  if (vs.is<ast::VNullptr>(c)) return Value::null();
-  if (vs.is<ast::VLvalue>(c)) {
-    auto l = vs.get<ast::VLvalue>(c);
-    if (!in_->seqs.elements(l.path).empty()) return std::nullopt;
-    auto o = literal_object(l.base);
-    const Shape& s = shape(type);
-    if (!o || s.kind != Kind::pointer || s.inner == QualType{}) return std::nullopt;
-    QualType array = objects_[*o].type;
-    if (similar(s.inner, array)) {
-      if (l.offset != 0) return std::nullopt;
-      return Value{VKind::object, false, *o, 0};
+  if (vs.is<ast::VNullptr>(c)) {
+    out = Value::null();
+    return Flow::next;
+  }
+  if (!vs.is<ast::VLvalue>(c) || s.kind != Kind::pointer || s.is_nullptr) return fail(Reason::unsupported_constant);
+  auto l = vs.get<ast::VLvalue>(c);
+  if (!in_->seqs.elements(l.path).empty()) return fail(Reason::unsupported_constant);
+  u32 o = 0;
+  if (vs.is<ast::VString>(l.base)) {
+    auto lit = literal_object(l.base);
+    if (!lit) return fail(Reason::unsupported_constant);
+    o = *lit;
+  } else if (vs.is<ast::VEntity>(l.base)) {
+    EntityId e = vs.get<ast::VEntity>(l.base).entity;
+    if (shape(s.inner).kind == Kind::function) {
+      if (l.offset != 0) return fail(Reason::unsupported_constant);
+      out = Value::function(e);
+      return Flow::next;
     }
-    const Shape& a = shape(array);
-    auto b = ast::builtin_of(*in_, a.inner);
-    u64 size = b ? (*target_)[*b].size : 0;
-    if (!similar(s.inner, a.inner) || size == 0 || l.offset < 0 || u64(l.offset) % size) return std::nullopt;
-    u64 index = u64(l.offset) / size;
-    if (index > a.bound) return std::nullopt;
-    return Value{VKind::object, false, *o, child(0, {ir::Step::elem, u32(index)})};
+    if (Flow fl = global_object(e, o); fl != Flow::next) return fl;
+  } else {
+    return fail(Reason::unsupported_constant);
   }
-  return std::nullopt;
+  return address(o, s.inner, l.offset, out);
+}
+
+// A pointer to `pointee` at `offset` bytes into object `obj`: down through array elements until
+// the type is `pointee`, or one past the end of the last such element or of the whole object.
+Machine::Flow Machine::address(u32 obj, QualType pointee, i64 offset, Value& out) {
+  QualType cur = objects_[obj].type;
+  u32 path = 0;
+  if (offset < 0) return fail(Reason::unsupported_constant);
+  u64 off = u64(offset);
+  for (;;) {
+    const Shape cs = shape(cur);
+    if (similar(cur, pointee)) {
+      if (off == 0) {
+        out = Value{VKind::object, false, obj, path};
+        return Flow::next;
+      }
+      if (off == cs.size && path == 0) {
+        out = Value{VKind::object, true, obj, path};
+        return Flow::next;
+      }
+    }
+    if (cs.kind != Kind::array) return fail(Reason::unsupported_constant);
+    u64 es = shape(cs.inner).size;
+    if (es == 0 || off / es > cs.bound) return fail(Reason::unsupported_constant);
+    u64 index = off / es;
+    off -= index * es;
+    path = child(path, {ir::Step::elem, u32(index)});
+    cur = cs.inner;
+    if (index == cs.bound) {
+      if (off != 0 || !similar(cur, pointee)) return fail(Reason::unsupported_constant);
+      out = Value{VKind::object, false, obj, path};
+      return Flow::next;
+    }
+  }
+}
+
+// The object of a namespace-scope variable, made on first use from what the host says of it. Its
+// value, if it has one, is decoded when it is first read: it may be the address of another global.
+Machine::Flow Machine::global_object(EntityId e, u32& out) {
+  if (auto it = globals_.find(std::to_underlying(e)); it != globals_.end()) {
+    out = it->second;
+    return Flow::next;
+  }
+  auto info = global_info_.find(std::to_underlying(e));
+  if (info == global_info_.end()) {
+    wanted_ = e;
+    pending_ = Event::need_global;
+    return Flow::suspend;
+  }
+  if (!info->second) return fail(Reason::ill_formed);
+  const GlobalVar g = *info->second;
+  const Shape s = shape(g.type);
+  if (s.leaves == 0 || (g.value && (s.leaves != 1 || s.kind == Kind::array))) return fail(Reason::unsupported_constant);
+  u32 o = make_object(g.type, Origin::global);
+  Object& ob = objects_[o];
+  ob.entity = e;
+  ob.outside = true;
+  ob.usable = g.usable;
+  for (u32 c = ob.cell0; c < ob.cell0 + ob.ncells; ++c) cells_[c].life = Life::alive;
+  if (g.value) {
+    cells_[ob.cell0].fill = Fill::constant;
+    cells_[ob.cell0].v = {VKind::none, false, 0, std::to_underlying(*g.value)};
+  } else if (config_.mode == Mode::runtime || !g.usable) {
+    fill_zero(g.type, ob.cell0);  // static storage is zero-initialized ([basic.start.static])
+  }
+  globals_.emplace(std::to_underlying(e), o);
+  out = o;
+  return Flow::next;
 }
 
 void Machine::give_global(EntityId e, std::optional<GlobalVar> g) {
@@ -813,6 +893,7 @@ std::vector<Result> Machine::results() const {
       r.literal = ob.literal;
       r.path = steps_of(u32(v.bits));
       r.past = v.past;
+      r.offset = const_cast<Machine*>(this)->offset_of(v);
       break;
     }
     }

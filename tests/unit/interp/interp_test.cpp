@@ -75,9 +75,15 @@ struct World {
     type("cint", cint_t);
     type("cchar", cchar_t);
     type("int*", ast::pointer_to(in, int_t));
+    type("void*", ast::pointer_to(in, ast::builtin(in, void_)));
+    type("char*", ast::pointer_to(in, char_t));
     type("cchar*", ast::pointer_to(in, cchar_t));
     type("int**", ast::pointer_to(in, ast::pointer_to(in, int_t)));
     type("int[3]", arr(int_t, 3));
+    {
+      std::array<QualType, 1> ps{int_t};
+      type("int(*)(int)", ast::pointer_to(in, ast::function_type(in, int_t, std::span<const QualType>(ps))));
+    }
     type("int[3]*", ast::pointer_to(in, arr(int_t, 3)));
     type("int[2][3]", arr(arr(int_t, 3), 2));
     type("int[2][3]*", ast::pointer_to(in, arr(arr(int_t, 3), 2)));
@@ -136,7 +142,9 @@ struct Run {
 
   // Parses the bodies; the first is the entry. Every function is constexpr unless named in
   // `plain`.
-  explicit Run(std::string_view text, std::set<std::string> plain = {}) {
+  explicit Run(std::string_view text, std::set<std::string> plain = {},
+               std::function<void(World&)> setup = {}) {
+    if (setup) setup(w);
     auto parsed = ir::parse(w.expand(text));
     if (!parsed) {
       check(false, std::format("parse error {}:{}: {}", parsed.error().line, parsed.error().column, parsed.error().message));
@@ -905,6 +913,21 @@ func {@u} {
   expect_value(u.runtime(), -1, "int read as unsigned in runtime mode");
   expect_failure(u.go(), Reason::access_type, "int read as unsigned in constant mode");
 
+  // static_cast<int*>(void* to a char) is not constant ([expr.const]); int is QualType 0 here,
+  // which must not read as "no pointee".
+  Run vc(R"(
+func {@vc} {
+^0(%0: !state):
+  %1: !state, %2: {char*} = alloc %0 [{char}, automatic, zero]
+  %3: {void*} = ptr_cast %2 [{void*}]
+  %4: {int*} = ptr_cast %3 [{int*}]
+  %5: {int} = const [{i0}]
+  ret %1, %5
+}
+)");
+  check(std::to_underlying(vc.w.int_t) == 0, "the test's int is QualType 0");
+  expect_failure(vc.go(), Reason::void_cast_type, "void* to a char converted to int*");
+
   // Only the signed or unsigned counterpart: not long through long long, nor int through wchar_t.
   Run w(R"(
 func {@w} {
@@ -949,9 +972,66 @@ func {@lit} {
   expect_value(lit.go({i(0)}), 0, "\"hi\" + 1 == \"ci\" + 1");
 }
 
+// Address constants of entities (#57): p = &a[1] is decoded when p is first read, a function's
+// address is a function pointer, and an address result carries its byte offset.
+void entity_addresses() {
+  auto setup = [](World& w) {
+    ast::Interners& in = w.in;
+    auto addr = [&](const std::string& e, std::int64_t off) {
+      ConstId base = in.intern_value(ast::VEntity{w.entity(e)});
+      return in.intern_value(ast::VLvalue{base, in.intern_seq(std::span<const std::uint32_t>{}), off});
+    };
+    w.keys["{&a1}"] = std::format("#{}", std::to_underlying(addr("a", 4)));
+    w.keys["{&k}"] = std::format("#{}", std::to_underlying(addr("k", 0)));
+  };
+  Run r(R"(
+func {@f} {
+^0(%0: !state, %1: {int}):
+  %2: {int**} = global [{@p}]
+  %3: {int*} = load %0, %2 [{int*}, /]
+  %4: {int} = const [{i0}]
+  %5: {bool} = icmp %1, %4 [eq]
+  cond_br %5 ^1(%0), ^2(%0)
+^1(%6: !state):
+  %7: {int} = load %6, %3 [{int}, /]
+  ret %6, %7
+^2(%8: !state):
+  %9: {int(*)(int)} = const [{&k}]
+  %10: !state, %11: {int} = call_ind %8, %9, %1
+  ret %10, %11
+}
+func {@k} {
+^0(%0: !state, %1: {int}):
+  ret %0, %1
+}
+func {@res} {
+^0(%0: !state):
+  %1: {int*} = const [{&a1}]
+  %2: {int} = const [{i1}]
+  %3: {int*} = ptr_add %1, %2 [{int}]
+  ret %0, %3
+}
+)", {}, setup);
+  ast::Interners& in = r.w.in;
+  QualType int3 = ast::array_of(in, target, r.w.int_t, ast::int_value(in, target, ast::Builtin::unsigned_long, 3));
+  r.host.globals[std::to_underlying(r.w.entity("a"))] = {int3, std::nullopt, false};
+  ConstId p_value = in.intern_value(ast::VLvalue{in.intern_value(ast::VEntity{r.w.entity("a")}),
+                                                 in.intern_seq(std::span<const std::uint32_t>{}), 4});
+  r.host.globals[std::to_underlying(r.w.entity("p"))] = {ast::pointer_to(in, r.w.int_t), p_value, true};
+  expect_value(r.runtime({i(0)}), 0, "*p with p = &a[1], a zero-initialized");
+  expect_failure(r.go({i(0)}), Reason::not_usable, "*p reads a, which is not usable in constant expressions");
+  expect_value(r.go({i(5)}), 5, "a call through the constant address of k");
+  auto o = interp::evaluate(r.host, in, target, r.fns[2].body, r.fns[2].name, {}).run();
+  check(o.status == interp::Outcome::Status::value && o.values.size() == 1 &&
+            o.values[0].kind == interp::Result::Kind::address && o.values[0].base == interp::Base::global &&
+            o.values[0].entity == r.w.entity("a") && o.values[0].offset == 8,
+        "&a[1] + 1 is the address of a plus 8 bytes");
+}
+
 }  // namespace
 
 int main() {
+  entity_addresses();
   review_regressions();
   arithmetic();
   division_and_shifts();

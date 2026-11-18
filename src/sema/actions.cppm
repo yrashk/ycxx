@@ -14,6 +14,7 @@ export module ycxx.sema:actions;
 import std;
 import ycxx.ast;
 import ycxx.engine;
+import ycxx.interp;
 import ycxx.lex;
 import :types;
 import :diag;
@@ -33,9 +34,11 @@ public:
   // precede the current item, and, inside a function body, the item's own (§B2, [basic.scope.pdecl]).
   virtual std::vector<DeclId> visible_decls(NameId name) = 0;
   virtual ast::DeclSema decl_sema(DeclId d) = 0;
-  // The value of a variable usable in constant expressions ([expr.const]): a const variable of
-  // integral type with a constant initializer.
-  virtual std::optional<ConstId> constant_value(EntityId e) = 0;
+  // What a constant evaluation fetches (§B7): `function_ir` of a function defined before the
+  // current point ([expr.const]), and a namespace-scope variable as the interpreter sees it.
+  virtual interp::Callee function_ir(EntityId f) = 0;
+  virtual std::optional<interp::GlobalVar> global(EntityId v) = 0;
+  virtual bool is_constexpr(EntityId f) = 0;  // a constexpr or consteval function
   virtual ~Questions() = default;
 };
 
@@ -64,6 +67,7 @@ inline constexpr u16 inline_ = 2;
 inline constexpr u16 constexpr_ = 4;
 inline constexpr u16 variadic = 8;
 inline constexpr u16 lang_c = 16;  // declared with C language linkage ([dcl.link])
+inline constexpr u16 consteval_ = 32;  // an immediate function ([dcl.constexpr])
 }
 
 class Sema {
@@ -73,6 +77,7 @@ public:
       : w_(&w), b_(&b), q_(&q), diags_(&diags), item_(item), loc_base_(loc_base) {}
 
   World& world() { return *w_; }
+  ast::ItemId item() const { return item_; }
   Types& types() { return w_->types; }
   ast::Builder& builder() { return *b_; }
   ast::Interners& ins() { return w_->ins; }
@@ -83,6 +88,7 @@ public:
   engine::DiagArg arg(QualType t) { return {std::to_underlying(t), types().fp(t)}; }
   engine::DiagArg arg(lex::Tk k) { return engine::diag_arg(std::to_underlying(k)); }
   engine::DiagArg arg(u64 v) { return engine::diag_arg(v); }
+  engine::DiagArg arg(ConstId c) { return {std::to_underlying(c), ins().values.fp(c)}; }
 
   template <class... A>
   void diag(u32 at, Diag d, const A&... args) {
@@ -132,10 +138,15 @@ public:
     }
     u32 index = static_cast<u32>(locals_.size());
     locals_.push_back({name, type, EntityId::none, NodeId::none, flags});
+    local_values_.push_back(std::nullopt);
     if (name != no_name()) scopes_.back().push_back({name, index});
     return index;
   }
   void set_local_decl(u32 local, NodeId decl) { locals_[local].decl = decl; }
+  // A local usable in constant expressions ([expr.const]): constexpr, or const integral with a
+  // constant initializer; its value.
+  void set_local_value(u32 local, ConstId v) { local_values_[local] = v; }
+  std::span<const std::optional<ConstId>> local_values() const { return local_values_; }
   const ast::LocalRec& local(u32 i) const { return locals_[i]; }
   std::span<const ast::LocalRec> locals() const { return locals_; }
   // The function's parameters are in the scope at this depth; its body's outermost block is the
@@ -150,6 +161,11 @@ public:
   void set_return_type(QualType t) { return_type_ = t; }
   QualType return_type() const { return return_type_; }
   u32 loop_depth = 0;
+  // Inside an immediate function context ([expr.const]): a consteval function's body, or the
+  // consteval branch of `if consteval`. A call to a consteval function elsewhere is an immediate
+  // invocation, evaluated where it appears.
+  u32 immediate_context = 0;
+  bool is_consteval(EntityId f) const { return consteval_.contains(std::to_underlying(f)); }
 
   // Names the current item has declared so far in its declaration part; visible after their
   // declarators ([basic.scope.pdecl]).
@@ -193,6 +209,8 @@ public:
         diag(begin, Diag::overload_not_supported, name);
         return {NodeId::none, begin, end};
       }
+    if (d.kind == ast::DeclKind::function && (d.flags & decl_flag::consteval_))
+      consteval_.insert(std::to_underlying(d.entity));
     if (d.kind == ast::DeclKind::function && ins().names.spelling(name) == "main") {
       diag(begin, Diag::main_named);  // [basic.start.main]/3: main shall not be used
       return {NodeId::none, begin, end};
@@ -756,6 +774,8 @@ private:
   ast::ItemId item_;
   u32 loc_base_;
   std::vector<ast::LocalRec> locals_;
+  std::vector<std::optional<ConstId>> local_values_;  // by local
+  std::set<u32> consteval_;                           // consteval functions named so far
   std::vector<std::vector<std::pair<NameId, u32>>> scopes_;
   std::vector<std::size_t> guarded_;
   QualType return_type_{};

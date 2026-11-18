@@ -45,6 +45,7 @@ enum class Reason : std::uint8_t {
   volatile_access [[=says{"access through a volatile glvalue"}]],
   not_constexpr [[=says{"call to a function that is not constexpr"}]],
   undefined_function [[=says{"call to a function that is not defined"}]],
+  callee_unsupported [[=says{"the called function's body cannot be evaluated yet"}]],
   null_call [[=says{"call through a null function pointer"}]],
   reinterpret [[=says{"a reinterpret_cast or a conversion between a pointer and an integer"}]],
   asm_ [[=says{"an asm declaration"}]],
@@ -52,6 +53,8 @@ enum class Reason : std::uint8_t {
   local_address [[=says{"the result points to an object with automatic storage duration"}]],
   // Not yet: an operation the interpreter does not evaluate, by its op number.
   unsupported [[=says{"the interpreter does not evaluate '{0}' yet"}]],
+  // A constant the interpreter does not decode yet (an aggregate, an address with a path).
+  unsupported_constant [[=says{"the interpreter does not evaluate this constant yet"}]],
   // The body broke an invariant `ir::verify` does not check (a value of the wrong kind).
   ill_formed [[=says{"internal error: the IR is ill-formed here"}]],
 };
