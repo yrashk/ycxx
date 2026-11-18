@@ -290,10 +290,14 @@ def restart(env):
 
 
 def concurrent_clients(env):
-    """Six clients at once: four files, and one file twice. Each answer equals a cold compile."""
+    """Six clients at once: four files, and one file twice. Each answer equals a cold compile, and
+    the requests ran in the engine at the same time (#139)."""
     d = env.scope / 'concurrent'
     d.mkdir()
-    sources = {f'c{i}.cpp': f'int f{i}() {{ return {i}; }}\nint main() {{ return f{i}() * 2; }}\n' for i in range(4)}
+    # Long enough that six requests sent together overlap.
+    body = ''.join(f'int g{{i}}_{k}(int x) {{ return x * {k} + {k % 7}; }}\n' for k in range(400))
+    sources = {f'c{i}.cpp': body.replace('{i}', str(i)) + f'int f{i}() {{ return {i}; }}\nint main() {{ return f{i}() * 2; }}\n'
+               for i in range(4)}
     for name, text in sources.items():
         (d / name).write_text(text)
     jobs = [(f'c{i}.cpp', f'c{i}-{n}.o') for i in range(4) for n in range(1 if i else 2)]
@@ -314,6 +318,8 @@ def concurrent_clients(env):
             fail(f'concurrent clients: {obj} differs from a cold compile')
     if env.number('requests') != requests + len(jobs):
         fail(f'concurrent clients: {len(jobs)} requests sent, {env.number("requests") - requests} answered')
+    if env.number('peak_running') < 2:
+        fail(f'concurrent clients: the requests ran one at a time (peak_running {env.number("peak_running")})')
 
 
 def main():
