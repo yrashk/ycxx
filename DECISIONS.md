@@ -437,12 +437,13 @@ project must survive any session ending.
    Either way the source then links to that issue. A follow-up that lives only in a comment is a
    defect. A handover, closing comment or PR description is incomplete until every follow-up in
    it carries its issue link, and the coordinator does not merge a PR until it does.
-8. **The README tells the truth about status.** Its Status section says what a user can do today
-   (what compiles, on which platforms, which options), what is not done yet, and which slices are
-   in progress, with links to their epics, and the date it was last updated. A PR that changes
-   what a user can do, or completes, starts or drops a slice, updates that section in the same
-   PR; the coordinator does not merge it otherwise. The README never describes a goal as if it
-   were already working.
+8. **The README tells the truth about status.** Its Status section is an overview, not a log: what
+   a user can do today, grouped by area (what compiles, on which platforms, which tools), what is
+   not done yet, and which slices are in progress, with links to their epics, under one "as of"
+   date. Per-change detail belongs in STATUS.md and the issues. A PR that changes what a user can
+   do, or completes, starts or drops a slice, updates that overview in the same PR, editing it in
+   place rather than appending; the coordinator does not merge it otherwise. The README never
+   describes a goal as if it were already working.
 
 ## 7. Third-party libraries
 
