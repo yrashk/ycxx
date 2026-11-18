@@ -85,6 +85,7 @@ the review, the spike and the synthesis were done by the Opus session that owns 
      - run `on_build` on the edit strand (§A10.3).
 
      Those last patches have not been independently re-verified.
+  8. Final verification by an independent Fable check: no P0; 4 P1 and 7 P2 fixed in 50676f1.
 - **Part C (the spike)**, §1 (decisions in brief), Part D (constraints on other designs) and
   Part E (open items and follow-ups) were written by the Opus session.
 
