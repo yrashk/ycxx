@@ -69,6 +69,29 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
     prose (DECISIONS §6.5).
   - Learned on #3.
 
+- **Ask Fable for a terse decision list, and do the writing yourself.** On #2 the first brief asked
+  for a 3,000-word drafted part; mid-run it was redirected to "decision, reason, rejected
+  alternatives, one or two lines each". The decision lists (about 1,700 and 2,100 words) were
+  enough to write the document from, and gaps were cheaper to spot in them than in prose.
+  - Do: brief Fable for numbered decisions with reasons and rejections, plus "what other parts
+    must assume". Push back on gaps with a short follow-up to the same agent. Now a rule:
+    DECISIONS §6.5.
+  - Learned on #2.
+- **Write the interface first, then one brief for the rest.** #2 gave the handle vocabulary and
+  core decisions to one Fable brief, then everything else to a second brief that took the first
+  as its contract. The second brief's findings against the first were all local fixes, and there
+  was no reconciliation round.
+  - Learned on #2.
+- **Merge `main` just before the final review when sibling designs are running.** #3 was accepted
+  while #2's review ran, and #2's debug-info section then had to be re-aligned after the review.
+  - Do: before the one independent check, merge `main` and read any newly accepted design that
+    shares a boundary, so the check covers the reconciled text.
+  - Learned on #2.
+- **Ask the reviewer for a failing example and the smallest fix per finding.** #2's single
+  independent check found 9 P1s; every one came with an example and a local fix, so all 24
+  findings were fixed in one commit and the second check covered only the diff.
+  - Learned on #2.
+
 ## Bureaucracy loops
 
 - **A design document became a loop.** The query-engine design (#1) grew to 31,500 words over
@@ -95,6 +118,13 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
   - Learned on #4.
 
 ## Evidence and tests
+
+- **A `std::tuple` over a long type list is a compile-time trap with GCC 16.** The AST spike stored
+  240 node kinds as `std::tuple<std::vector<Ts>...>`; `std::get` on it cost over 50 s of front-end
+  time, while the reflection-derived code for all 240 kinds took about 2 s.
+  - Do: index per-kind storage by a kind number (an array of untyped pools), and measure
+    `-ftime-report` before blaming reflection.
+  - Learned on #2's spike.
 
 - **Test a selection's invariant end to end, not just its helper.** The test driver's shard
   helper was unit-tested and correct, but main.py fed each stage a list that depended on earlier

@@ -260,6 +260,42 @@ specified by the accepted [optimization design](docs/design/optimization.md) (#3
      scan, the validators and the §A8 plumbing. Neither needs an e-graph, rule, solver or SMT
      query. *Reason:* M4/M5 are not blocked on optimization work. (§O10)
 
+9. **AST, entities and types.** Specified by the accepted [AST design](docs/design/ast.md) (#2); the
+   section references in this item point into it.
+   - **Handles, not pointers.** Every reference is a typed 32-bit handle into a process-wide
+     interner, or an 8-byte structural id (`DeclId`, `Loc`). Values hold nothing context-specific;
+     fingerprints, never handles, cross process boundaries. *Reason:* sharing across TUs and
+     restarts (§A1.9, §A7). (§2)
+   - **The parser analyses as it parses,** inside `item_sema` and `analyze_body`; the splitter
+     yields lookup-free skeletons. *Reason:* C++ cannot be parsed without knowing which names are
+     types and templates. (§3)
+   - **One hash-consed tree family** with implicit operations and dependent constructs as kinds.
+     Nodes hold no position; a child edge holds its offset relative to the parent, and a red view on
+     the stack computes positions. *Reason:* equal subtrees are one node; the IR needs implicit
+     operations explicit. (§3)
+   - **Identities.** `DeclId = (ItemId, ordinal)` for written, synthesized and injected
+     declarations, none inside bodies; structural `EntityId`s that include module attachment and
+     trailing requires-clauses, with local entities numbered as the Itanium ABI does. *Reason:*
+     ids survive body edits and edits elsewhere. (§4)
+   - **Types:** one closed list of canonical and sugar kinds, cv in the handle's low bits, and the
+     canonical form as a derived array filled at interning. Expressions carry the sugared type.
+     *Reason:* O(1) canonicalization that does not depend on interning order, and diagnostics in
+     the user's spelling. (§5)
+   - **Templates.** Dependent values in canonical positions are `VDep*` constants, so no tree
+     enters a type or a key. Substitution is a function whose lookups are the cells, and
+     instantiation builds a fresh tree that keeps the pattern's offsets. *Reason:* keys stay
+     small and eager; diagnostics point into the template. (§5.5, §6)
+   - **C++26:** reflections are constants over entity, type, value and positional handles;
+     expansion statements store the pattern or the instances; contracts are declaration data.
+     (§7)
+   - **Locations:** tokens carry none; the region keeps a table of byte offsets and macro
+     expansions, which is part of the tree id. `Loc` offsets count tokens, and positions that
+     become constant values go through the recorded question `token_location`. *Reason:*
+     reformatting moves no `Loc` and no item id. (§8)
+   - **Memory:** trees are built in the frame arena and interned when the frame commits, into
+     per-kind pools, never a `std::tuple` over the kinds; keys are interned eagerly. *Reason:*
+     speculative parses and deductions leave no garbage. (§9)
+
 ## 5. Development process
 
 libycxx's process (`deps/libycxx/DECISIONS.md` §6) applies, adapted:
