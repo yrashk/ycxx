@@ -55,6 +55,31 @@ What is true of the code today. Work in progress and its owners are tracked in
   today), contextual queries (#16), eviction and persistence (#17; the dependency and diagnostic
   pools only grow).
 
+## Lexer and directive-free `pp` (#40, 2026-11-18)
+
+- `ycxx.lex` (`src/lex/`): translation phases 1–3, 5 and 6 as functions.
+  - Phases 1–2: UTF-8 checked, CR LF and CR become LF, a leading BOM is deleted, splices removed,
+    with maps from logical offsets back to phase-1 text (raw strings revert splices) and to
+    physical byte offsets.
+  - Phase 3: every [lex] preprocessing token. UCNs (`\u`, `\U`, `\u{}`, `\N{}` with names and
+    aliases), XID and ID_Compat_Math identifiers with the NFC check, maximal munch with the
+    `<::`, `[::` and `[:>` exceptions, raw strings, digraphs and alternative tokens, header names
+    on request.
+  - Phases 5–6: keywords, integer and floating literals (UDL suffixes per [lex.ext]),
+    character literals, and string-literal concatenation with the common encoding. Values:
+    integers to 64 bits, `double` and `float` correctly rounded, code units for characters and
+    strings. Ordinary literals are UTF-8 and wide ones UTF-32.
+  - `Tk` and the diagnostic table are derived by reflection from annotated enumerators.
+  - Unicode 17.0 tables from `tools/unicode/gen-tables` (`unicode_tables.cppm`,
+    `unicode_names.txt`). Name aliases come from Unicode 13 data (Perl's), checked against 17.0.
+- `ycxx.pp` (`src/pp/`): `pp(FileId)` over the input `FileText`, valued as a `Region` of tokens,
+  `TokLoc`s, names and literals. Every directive (`#…`, and the `module`/`import` lines of
+  [cpp.pre]) is diagnosed as unsupported and skipped. Diagnostics are at
+  `Loc{file_level, byte offset}`.
+- Measured (Release, Apple M-series, `lex_bench`): about 25 MB/s, 110 ns per token. Not tuned.
+- Not yet: phase 4 (M1), `long double` and the extended floating types' values (left to the
+  target), the type of an integer literal (sema, #33).
+
 ## Bootstrap workarounds
 
 Places where ycxx's sources avoid or work around a C++26 feature because GCC 16 lacks it or
