@@ -8,6 +8,7 @@ module;
 #include <stdlib.h>
 #include <string.h>
 #include <sys/file.h>
+#include <sys/resource.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
@@ -64,6 +65,15 @@ struct Identity {
   bool directory = false;
   bool operator==(const Identity&) const = default;
 };
+// The stack a process's main thread may grow to (RLIMIT_STACK), for threads that must recurse as
+// deep: 8 MiB when it is unlimited or unknown, at least 1 MiB.
+std::size_t main_stack_size() {
+  constexpr std::size_t fallback = std::size_t{8} << 20;
+  rlimit r{};
+  if (::getrlimit(RLIMIT_STACK, &r) != 0 || r.rlim_cur == RLIM_INFINITY) return fallback;
+  return std::max<std::size_t>(r.rlim_cur, std::size_t{1} << 20);
+}
+
 std::optional<Identity> stat_path(const std::string& path) {
   struct stat st{};
   if (::stat(path.c_str(), &st) != 0) return std::nullopt;

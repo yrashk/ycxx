@@ -50,6 +50,10 @@ namespace {
 
 using Clock = std::chrono::steady_clock;
 
+// A request's thread has the stack the client's main thread has in-process: the daemon inherits
+// the client's RLIMIT_STACK (#178).
+const std::size_t request_stack = main_stack_size();
+
 void log(std::string_view what) {
   auto now = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch());
   std::println(std::cerr, "[{}] ycxx daemon {}: {}", now.count(), my_pid(), what);
@@ -201,7 +205,8 @@ class Server {
       std::lock_guard g(conn_mu_);
       ++connections_;
     }
-    std::thread([this, c = std::move(c)]() mutable {
+    // A request recurses as deep in the daemon as in-process, on a main thread's stack (#178).
+    std::thread(std::thread::stack_size_hint(request_stack), [this, c = std::move(c)]() mutable {
       serve_connection(c.get());
       c.reset();
       std::lock_guard g(conn_mu_);
