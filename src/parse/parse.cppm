@@ -1011,8 +1011,9 @@ private:
     QualType type = s_.types().function(s_.builtin(sema::Builtin::void_), ps, fs.variadic, LangLinkage::cxx, fs.cv);
     const sema::ClassRec* cr = s_.world().classes.find(c);
     const sema::MemberDeclRec* m = nullptr;
-    for (const sema::MemberDeclRec& r : cr ? cr->members : std::vector<sema::MemberDeclRec>{})
-      if ((ctor ? r.is_ctor : r.is_dtor) && s_.types().canonical(r.type) == s_.types().canonical(type)) m = &r;
+    if (cr)
+      for (const sema::MemberDeclRec& r : cr->members)
+        if ((ctor ? r.is_ctor : r.is_dtor) && s_.types().canonical(r.type) == s_.types().canonical(type)) m = &r;
     if (!m) {
       s_.diag(name_at, Diag::no_member_declared, p_->world().entities.rec(c).name, cls);
       return bad();
@@ -1023,8 +1024,10 @@ private:
       s_.diag(name_at, Diag::redefinition, m->name);
       return bad();
     }
+    // Its record, rebuilt in this frame (the declaration's lists belong to the class's item).
     ast::DeclSema sem = *mem;
     sem.flags |= sema::decl_flag::definition;
+    sem.attributes = b_.seq(std::span<const NodeId>{});
     std::vector<ast::ParamSema> params;
     for (const parse::Param& p : fs.params) params.push_back({EntityId::none, p.type, p.name, NodeId::none, 0});
     sem.params = b_.seq(std::span<const ast::ParamSema>(params));
@@ -1036,6 +1039,14 @@ private:
   // `namespace N { … }` ([namespace.def]): the namespace its members belong to.
   void namespace_definition() {
     if (it_->names.empty()) return;  // an unnamed namespace declares no name
+    // [basic.scope.scope]/4, [namespace.def]: a namespace name names nothing else in its scope.
+    NameId name = p_->world().ins.names.intern(it_->names.back().name);
+    for (DeclId p : q_.visible_decls(name))
+      if (auto ds = p_->decl_sema(p); ds && ds->entity != EntityId::none && ds->kind != ast::DeclKind::namespace_ &&
+                                      same_scope(*ds)) {
+        s_.diag(it_->names.back().offset, Diag::conflicting_declaration, name);
+        return bad();
+      }
     EntityId e = p_->namespace_entity(p_->inner_of(k_));
     ast::DeclSema sem = class_decl(e, true);
     sem.kind = ast::DeclKind::namespace_;

@@ -180,7 +180,7 @@ public:
     if (!found)
       for (DeclId d : q_->visible_decls(name)) {
         ast::DeclSema s = q_->decl_sema(d);
-        if (s.entity == EntityId::none) continue;
+        if (s.entity == EntityId::none || is_special(s)) continue;
         if (s.kind == ast::DeclKind::class_ || s.kind == ast::DeclKind::enum_ || !elaborated) found = s;
       }
     if (!found || (found->kind != ast::DeclKind::class_ && found->kind != ast::DeclKind::enum_)) return std::nullopt;
@@ -259,6 +259,11 @@ public:
   // [namespace.udecl], [namespace.alias]).
   void using_directive(EntityId ns) { block_directives_.push_back({scopes_.size() - 1, ns}); }
   void using_declaration(const Scope& s, NameId n, u32 at_) {
+    // [basic.scope.scope]/4: it may not clash with a local declared in the same block before it.
+    if (!scopes_.empty() && std::ranges::any_of(scopes_.back(), [&](const auto& p) { return p.first == n; })) {
+      diag(at_, Diag::redeclared_local, n);
+      return;
+    }
     std::vector<ast::DeclSema> found = s.ns ? q_->namespace_members(*s.ns, n) : std::vector<ast::DeclSema>{};
     if (found.empty()) {
       diag(at_, Diag::no_namespace_member, n);
@@ -1211,9 +1216,15 @@ public:
       for (DeclId d : q_->visible_decls(name)) {
         any = true;
         ast::DeclSema s = q_->decl_sema(d);
-        if (s.entity != EntityId::none) found.push_back(s);  // else its item diagnosed it
+        if (s.entity != EntityId::none && !is_special(s)) found.push_back(s);  // else its item diagnosed it
       }
     return decls_expr(std::move(found), any, name, begin, end);
+  }
+
+  // A constructor or destructor: it has no name that lookup finds ([class.ctor]/1, [class.dtor]/1);
+  // its definition outside the class still names the class's declaration in the skeleton.
+  static bool is_special(const ast::DeclSema& d) {
+    return (d.flags & (decl_flag::constructor | decl_flag::destructor)) != 0;
   }
 
   // The expression naming what lookup found for `name` ([expr.prim.id]): one entity, or an
