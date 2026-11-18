@@ -379,12 +379,16 @@ public:
     return r;
   }
 
-  // The byte offset in the file of a diagnostic's location (ast.md §8.3, steps 1–3).
-  u32 byte_offset(engine::Loc at) const {
+  // The file and byte offset of a diagnostic's location (ast.md §8.3, steps 1–3); a macro's
+  // token is where it was expanded.
+  pp::TokLoc site(engine::Loc at) const { return r_->site(token(at)); }
+  // The region token of a diagnostic's location.
+  u32 token(engine::Loc at) const {
     const items::Item& it = items_->items[index(ItemId(at.item))];
-    u32 tok = std::min<u32>(it.begin + at.offset, static_cast<u32>(r_->locs.size() - 1));
-    return r_->site(tok).offset;  // a macro's token: where it was expanded
+    return std::min<u32>(it.begin + at.offset, static_cast<u32>(r_->locs.size() - 1));
   }
+  // The byte offset in its file of a diagnostic's location.
+  u32 byte_offset(engine::Loc at) const { return site(at).offset; }
 
   // Spells a diagnostic argument: a name, a type, a string literal or why an evaluation failed.
   std::string spell(char how, u64 raw) const {
