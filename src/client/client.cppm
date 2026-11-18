@@ -159,11 +159,12 @@ int lsp(std::span<const std::string_view> args) {
     std::println(std::cerr, "ycxx: error: cannot reach the daemon: {}", c.error());
     return 1;
   }
-  if (auto t = daemon::tunnel_lsp(*c, 0, 1); !t) {
-    std::println(std::cerr, "ycxx: error: {}", t.error());
+  auto status = daemon::tunnel_lsp(*c, 0, 1);
+  if (!status) {
+    std::println(std::cerr, "ycxx: error: {}", status.error());
     return 1;
   }
-  return 0;
+  return *status;
 }
 
 // `ycxx ctl status|shutdown [--root DIR]`: asks the daemon of DIR's scope (default: the working

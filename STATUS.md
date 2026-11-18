@@ -600,8 +600,10 @@ the same handler in-process.
 ## The LSP front and the editor view (#99, 2026-11-18)
 
 `ycxx lsp [--root DIR]` is an editor's language server, per daemon design §6. It reaches the
-daemon of its scope (starting one), sends `lsp`, and from then on copies bytes between its stdio
-and the socket; the server runs in the daemon.
+daemon of its scope (starting one) and sends `lsp`; the server runs in the daemon. From then on the
+editor's bytes go to the daemon as they are, one thread per direction, and the daemon's come back
+in `lsp` frames (`LspOut`), the last of which carries LSP's exit status (1 after `exit` without
+`shutdown`), which `ycxx lsp` exits with.
 
 - The editor view (§6.1–§6.3):
   - `pp::Buffer(PathId) -> optional<text>`, an input at `editor` durability, provided as nothing
@@ -617,18 +619,23 @@ and the socket; the server runs in the daemon.
 - `ycxx.lsp` (`src/lsp/`): `:json` (a JSON value, parser and printer, and a codec for aggregates
   by reflection), and the session: `Content-Length` framing, `initialize`, `shutdown`, `exit`,
   full-text `didOpen`/`didChange`, `didSave`, `didClose`, and `publishDiagnostics` for every open
-  document after each batch of changes (what arrived together is diagnosed once), with UTF-16
-  columns. `lsp::parse_messages` reads the compiler's `path:line:col: error:` lines.
-- The daemon: a document is checked with the last served `compile` request that compiled it
-  (else alone in its directory), in the editor view, under the engine lock, after the same
-  freshness batch as a compile request. The session's buffers become `pp::Buffer` inputs
-  (unchanged ones keep their value). `ctl status` counts `diagnoses`.
+  document after each batch of changes (what arrived together is diagnosed once, in one call),
+  to the URI the editor opened, with UTF-16 columns. Requests before `initialize` get -32002,
+  after `shutdown` -32600. `lsp::parse_messages` reads the compiler's `path:line:col: error:` lines.
+- The daemon: a document is checked with the last served `compile` request that compiled it,
+  found by real path (else alone in its directory), in the editor view, under the engine lock.
+  One freshness batch and one setting of the buffers serve a batch of documents; each buffer is
+  set under the editor's name and its real path, and unchanged ones keep their value. Stopping
+  the daemon ends its LSP sessions. `ctl status` counts `diagnoses`.
 - Tests: `unit.lsp` (JSON, URIs, messages, two scripted sessions, framing); `unit.daemon`'s
   `check_requests`; `unit.pipeline_incremental`'s `editor_view` (an unsaved header and the unit's
   own buffer reach the editor view, a closed buffer falls back to the disk, and a build after a
-  keystroke executes nothing); `daemon.lsp` (`tests/daemon/lsp.py`: open, an unsaved error at its
-  position, a build after it equal to a cold compile of the disk with nothing executed, an unsaved
-  header breaking its includer and closed again, a save, shutdown and exit).
+  keystroke executes and validates nothing); `daemon.lsp` (`tests/daemon/lsp.py`): editing (open,
+  an unsaved error at its position, a build after it equal to a cold compile of the disk with
+  nothing executed or validated, an unsaved header breaking its includer and closed again, a
+  save), a unit and header opened through a symbolic link, a build sent during a `didChange`
+  (the saved file's object, the buffer's diagnostics), 600-error answers crossing large edits,
+  the exit status, and `ctl shutdown` with a session open.
 - Not yet: `compile_commands.json` (#167); stopping a diagnosis on a newer edit,
   `$/cancelRequest`, debouncing and interactive priority (#168); `buffers_in`, the disk-view
   assertion and one view per session (#169); go-to-definition and diagnostics inside headers

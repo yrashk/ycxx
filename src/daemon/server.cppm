@@ -127,9 +127,12 @@ class Server {
       }
     }
     // Finish the requests in flight (§7.4), then remove the socket while still holding the lock.
+    // An LSP session lasts as long as its editor: it is ended, and its `ycxx lsp` exits.
     listener_.reset();
     remove_file(paths_.socket());
     std::unique_lock g(conn_mu_);
+    lsp_closed_ = true;
+    for (int fd : lsp_fds_) shutdown_both(fd);
     conn_cv_.wait(g, [&] { return connections_ == 0; });
     log("exited");
     return 0;
@@ -315,69 +318,116 @@ class Server {
     }
   }
 
-  // The command line of each source a served request compiled: an editor's document is checked
-  // with it (§6.4; `compile_commands.json` is the fallback still to come, #167).
-  void remember(const compile::Request& r) {
-    std::lock_guard g(commands_mu_);
-    for (std::string& s : compile::sources_of(r)) commands_.insert_or_assign(std::move(s), r);
+  // A file's real path (its directory's, for a file not on disk yet): the name a build's cells and
+  // the file table know it by, whatever symbolic link the editor reached it through.
+  static std::string canonical(const std::string& path) {
+    if (auto r = real_path(path)) return *r;
+    const std::filesystem::path p(path);
+    if (auto dir = real_path(p.parent_path().native_encoded_string()))
+      return (std::filesystem::path(*dir) / p.filename()).native_encoded_string();
+    return path;
   }
 
-  // The request that checks the document at `path`: its unit in the last served request that
+  // The command line of each source a served request compiled, by its real path: an editor's
+  // document is checked with it (§6.4; `compile_commands.json` is the fallback still to come,
+  // #167). One copy of the request serves all its sources.
+  void remember(const compile::Request& r) {
+    auto shared = std::make_shared<const compile::Request>(r);
+    std::vector<std::pair<std::string, std::string>> sources;
+    for (std::string& s : compile::sources_of(r)) sources.emplace_back(canonical(s), std::move(s));
+    std::lock_guard g(commands_mu_);
+    for (auto& [real, spelled] : sources) commands_.insert_or_assign(std::move(real), Command{shared, std::move(spelled)});
+  }
+
+  // The request that checks the document at `real`: its unit in the last served request that
   // compiled it, else the file alone in its directory; nothing if it is no translation unit.
-  std::optional<compile::Request> check_request(const std::string& path) {
+  std::optional<compile::Request> check_request(const std::string& real) {
     {
       std::lock_guard g(commands_mu_);
-      if (auto it = commands_.find(path); it != commands_.end()) return compile::check_one(it->second, path);
+      if (auto it = commands_.find(real); it != commands_.end()) return compile::check_one(*it->second.request, it->second.source);
     }
-    compile::Request alone{{"-fsyntax-only", path}, std::filesystem::path(path).parent_path().native_encoded_string(), env_, 0};
+    compile::Request alone{{"-fsyntax-only", real}, std::filesystem::path(real).parent_path().native_encoded_string(), env_, 0};
     if (compile::sources_of(alone).empty()) return std::nullopt;
     return alone;
   }
 
-  // The editor's end of an LSP session: the connection's bytes.
+  // The editor's end of an LSP session: its bytes in, `LspOut` frames out.
   class SocketChannel final : public lsp::Channel {
    public:
     explicit SocketChannel(int fd) : fd_(fd) {}
     std::size_t read(std::span<char> out) override { return read_some(fd_, out); }
     bool pending() override { return wait_readable(fd_, std::chrono::milliseconds(0)); }
-    bool write(std::string_view bytes) override { return write_all(fd_, std::as_bytes(std::span(bytes))); }
+    bool write(std::string_view bytes) override { return send(fd_, Kind::lsp, LspOut{std::string(bytes)}); }
 
    private:
     int fd_;
   };
 
   void serve_lsp(int fd) {
-    if (!send(fd, Kind::lsp, LspRequest{})) return;
-    SocketChannel io(fd);
-    log("an LSP session started");
-    const int status = lsp::serve(io, [this](const std::string& path, const lsp::Buffers& open) { return diagnose(path, open); });
-    log(std::format("an LSP session ended ({})", status));
+    {
+      std::lock_guard g(conn_mu_);
+      if (lsp_closed_) return;  // the daemon is stopping
+      lsp_fds_.insert(fd);
+    }
+    if (send(fd, Kind::lsp, LspRequest{})) {
+      SocketChannel io(fd);
+      log("an LSP session started");
+      const int status = lsp::serve(io, [this](std::span<const std::string> paths, const lsp::Buffers& open) { return diagnose(paths, open); });
+      send(fd, Kind::lsp, LspOut{{}, true, status});
+      log(std::format("an LSP session ended ({})", status));
+    }
+    std::lock_guard g(conn_mu_);
+    lsp_fds_.erase(fd);
   }
 
-  // The diagnostics of the document at `path`, its unit checked in the editor view with `open`
-  // as the editor's buffers (§6.1).
-  std::vector<lsp::Diagnostic> diagnose(const std::string& path, const lsp::Buffers& open) {
-    std::optional<compile::Request> r = check_request(path);
-    if (!r) return {};
+  // The diagnostics of the documents at `paths`, each unit checked in the editor view with `open`
+  // as the editor's buffers (§6.1). One freshness batch and one setting of the buffers serve them
+  // all.
+  std::vector<lsp::Diagnostic> diagnose(std::span<const std::string> paths, const lsp::Buffers& open) {
+    struct Check {
+      const std::string* path;  // the editor's name
+      std::string real;
+      compile::Request request;
+    };
+    std::vector<Check> checks;
+    for (const std::string& path : paths) {
+      std::string real = canonical(path);
+      if (auto r = check_request(real)) checks.push_back({&path, std::move(real), std::move(*r)});
+    }
+    // Each buffer under the editor's name and its real one: the unit's cells read one or the other,
+    // as its command line and includes spell it.
+    lsp::Buffers spelled;
+    for (const auto& [path, text] : open) {
+      spelled.insert_or_assign(canonical(path), text);
+      spelled.insert_or_assign(path, text);
+    }
     std::unique_lock engine(engine_mu_);
     catch_up();
-    set_buffers(open);
-    table_.set_cwd(r->cwd);
-    overlay_.open = &open;
-    overlay_.cwd = r->cwd;
-    bool stopped = false;
-    compile::Done d = compile::run(*r, overlay_, session(), {}, stopped, {pp::View::editor, editor_unit(path)});
-    overlay_.open = nullptr;
-    {
-      std::lock_guard g(stats_mu_);
-      ++stats_.diagnoses;
-      stats_.executed += d.report.executed;
-      stats_.validated += d.report.validated;
-      stats_.last_executed = d.report.executed;
+    set_buffers(spelled);
+    overlay_.open = &spelled;
+    struct Reset {
+      Overlay& o;
+      ~Reset() { o.open = nullptr; }
+    } reset{overlay_};
+    std::vector<lsp::Diagnostic> found;
+    for (const Check& c : checks) {
+      table_.set_cwd(c.request.cwd);
+      overlay_.cwd = c.request.cwd;
+      bool stopped = false;
+      const compile::Done d = compile::run(c.request, overlay_, session(), {}, stopped, {pp::View::editor, editor_unit(c.real)});
+      {
+        std::lock_guard g(stats_mu_);
+        ++stats_.diagnoses;
+        stats_.executed += d.report.executed;
+        stats_.validated += d.report.validated;
+        stats_.last_executed = d.report.executed;
+      }
+      for (lsp::Diagnostic& x : lsp::parse_messages(d.err, c.request.cwd)) {
+        // About the unit as a whole, or in it: under the editor's name for it.
+        if (x.path.empty() || x.path == c.real || canonical(x.path) == c.real) x.path = *c.path;
+        found.push_back(std::move(x));
+      }
     }
-    std::vector<lsp::Diagnostic> found = lsp::parse_messages(d.err, r->cwd);
-    for (lsp::Diagnostic& x : found)
-      if (x.path.empty()) x.path = path;  // about the unit as a whole
     return found;
   }
 
@@ -558,8 +608,14 @@ class Server {
   Overlay overlay_{table_};                          // under engine_mu_
   std::set<std::string> buffers_;                    // the paths whose `pp::Buffer` is set; under engine_mu_
   std::map<std::string, std::uint32_t> editor_units_;  // under engine_mu_
+  struct Command {
+    std::shared_ptr<const compile::Request> request;
+    std::string source;  // as `request` names it, absolute
+  };
   std::mutex commands_mu_;
-  std::map<std::string, compile::Request> commands_;  // source -> the last served request compiling it
+  std::map<std::string, Command> commands_;  // real path -> the last served request compiling it
+  std::set<int> lsp_fds_;    // the LSP sessions' connections; under conn_mu_
+  bool lsp_closed_ = false;  // stopping: no new session; under conn_mu_
 
   std::mutex conn_mu_;
   std::condition_variable conn_cv_;

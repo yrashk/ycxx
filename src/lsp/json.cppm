@@ -362,8 +362,9 @@ std::expected<T, std::string> from_json(const Json& j) {
     return std::unexpected("expected a string");
   } else if constexpr (std::is_integral_v<T>) {
     const double* d = j.number();
+    // The bounds are exact doubles: `max()` would round up to 2^digits, which does not fit.
     if (!d || *d != std::floor(*d) || *d < static_cast<double>(std::numeric_limits<T>::min()) ||
-        *d > static_cast<double>(std::numeric_limits<T>::max())) {
+        *d >= std::ldexp(1.0, std::numeric_limits<T>::digits)) {
       return std::unexpected("expected an integer in range");
     }
     return static_cast<T>(*d);

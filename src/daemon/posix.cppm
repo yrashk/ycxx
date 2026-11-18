@@ -221,6 +221,8 @@ std::size_t read_some(int fd, std::span<char> out) {
 
 // Ends what this side sends on a socket: the peer reads end of file, and can still answer.
 void shutdown_write(int fd) { ::shutdown(fd, SHUT_WR); }
+// Ends a socket both ways: a thread blocked reading or writing it returns.
+void shutdown_both(int fd) { ::shutdown(fd, SHUT_RDWR); }
 
 // Empties what is readable now from a pipe used only to wake a poll.
 void drain(int fd) {

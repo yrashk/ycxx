@@ -228,12 +228,17 @@ void editor_view() {
   pl::Session s;
   const std::vector<std::uint8_t> disk = build_in(s);
   check(!disk.empty() && check_editor(s), "the editor view of an unedited unit is clean");
+  // Opening the editor's unit set its `low` inputs: the next build verifies, once.
+  build_in(s);
 
   // A keystroke in the header: the editor's unit sees it, the build does not.
   s.db().set<pp::Buffer>(id("v.h"), std::string("#define W 1\n"));
   check(!check_editor(s), "an unsaved header reaches the editor view");
   s.db().reset_stats();
-  check(build_in(s) == disk && s.db().stats().executed == 0, "a build after a keystroke executes nothing");
+  // Nothing deep-verified either: a disk-view cell that read a buffer would take its durability
+  // and be validated after every keystroke without executing (§6.3).
+  check(build_in(s) == disk && s.db().stats().executed == 0 && s.db().stats().validated == 0,
+        "a build after a keystroke executes and validates nothing");
 
   // A keystroke in the unit itself, then the header's buffer closed.
   s.db().set<pp::Buffer>(id("m.cpp"), std::string("#include \"v.h\"\nint main() { return W; }\n"));
@@ -243,7 +248,7 @@ void editor_view() {
   s.db().set<pp::Buffer>(id("m.cpp"), std::nullopt);
   check(check_editor(s), "with every buffer closed the editor view is the disk's");
   s.db().reset_stats();
-  check(build_in(s) == disk && s.db().stats().executed == 0, "the build is still the disk's");
+  check(build_in(s) == disk && s.db().stats().executed == 0 && s.db().stats().validated == 0, "the build is still the disk's");
   fs::remove_all(dir);
 }
 

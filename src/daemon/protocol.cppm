@@ -27,7 +27,15 @@ struct Welcome {
 struct Refused {
   std::string reason;
 };
-struct LspRequest {};  // answered by an empty `lsp`; the connection is then the tunnel (§6.4)
+// `lsp{}` (§6.4) is answered by an empty `lsp`. From then on the editor's bytes reach the daemon as
+// they are, and the daemon's reach the client in `lsp` frames of `LspOut`, the last of which ends
+// the session with the exit status LSP prescribes.
+struct LspRequest {};
+struct LspOut {
+  std::string bytes;
+  bool end = false;
+  std::int32_t exit_status = 0;
+};
 struct StatusRequest {};
 struct ShutdownRequest {};
 struct Bye {};
@@ -65,6 +73,7 @@ inline constexpr Fp128 schema_hash = [] {
   engine::fold_schema<Hello>(h);
   engine::fold_schema<Welcome>(h);
   engine::fold_schema<Refused>(h);
+  engine::fold_schema<LspOut>(h);
   engine::fold_schema<Status>(h);
   engine::fold_schema<compile::Request>(h);
   engine::fold_schema<compile::Done>(h);

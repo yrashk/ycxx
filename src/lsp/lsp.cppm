@@ -38,8 +38,9 @@ struct Diagnostic {
 // The open documents: absolute path -> text.
 using Buffers = std::map<std::string, std::string>;
 
-// The diagnostics of `path`'s translation unit, with `open` overlaid on the disk.
-using Diagnose = std::function<std::vector<Diagnostic>(const std::string& path, const Buffers& open)>;
+// The diagnostics of the translation units of `paths`, with `open` overlaid on the disk: one call
+// per batch of changes, so the daemon synchronizes with the disk and sets the buffers once.
+using Diagnose = std::function<std::vector<Diagnostic>(std::span<const std::string> paths, const Buffers& open)>;
 
 struct ServerInfo {
   std::string name = "ycxx";
@@ -183,19 +184,32 @@ public:
 private:
   // The exit status when the message ends the session.
   std::optional<int> handle(const Json& msg) {
-    const std::string* method = msg["method"] ? msg["method"]->string() : nullptr;
     const Json* id = msg["id"];
-    const Json params = msg["params"] ? *msg["params"] : Json(nullptr);
-    if (!method) return std::nullopt;  // a response to a request of ours: none yet
     const bool request = id != nullptr;
+    if (!msg["method"]) return std::nullopt;  // a response to a request of ours: none yet
+    const std::string* method = msg["method"]->string();
+    if (!method) {
+      if (request) reply_error(*id, -32600, "the method is not a string");
+      return std::nullopt;
+    }
+    const Json params = msg["params"] ? *msg["params"] : Json(nullptr);
+    if (*method == "exit") return shut_down_ ? 0 : 1;
+    // Before `initialize` only `exit` is heard; after `shutdown`, nothing but `exit` is served.
+    if (!initialized_ && *method != "initialize") {
+      if (request) reply_error(*id, -32002, "the server is not initialized");
+      return std::nullopt;
+    }
+    if (shut_down_) {
+      if (request) reply_error(*id, -32600, "the server is shut down");
+      return std::nullopt;
+    }
     if ((*method == "initialize" || *method == "shutdown") && !request) return std::nullopt;
     if (*method == "initialize") {
+      initialized_ = true;
       reply(*id, to_json(InitializeResult{{}, info_}));
     } else if (*method == "shutdown") {
       shut_down_ = true;
       reply(*id, Json(nullptr));
-    } else if (*method == "exit") {
-      return shut_down_ ? 0 : 1;
     } else if (*method == "textDocument/didOpen") {
       if (auto p = from_json<DidOpen>(params); p) set(p->textDocument.uri, p->textDocument.text, p->textDocument.version);
     } else if (*method == "textDocument/didChange") {
@@ -206,9 +220,11 @@ private:
       dirty_ = true;  // the disk changed: a document's unsaved neighbours may see it now
     } else if (*method == "textDocument/didClose") {
       if (auto p = from_json<DidSaveOrClose>(params); p) {
-        if (auto path = path_of(p->textDocument.uri); path && open_.erase(*path)) {
-          versions_.erase(*path);
+        if (auto path = path_of(p->textDocument.uri); path && open_.contains(*path)) {
           send_diagnostics(*path, {});
+          open_.erase(*path);
+          versions_.erase(*path);
+          uris_.erase(*path);
           dirty_ = true;
         }
       }
@@ -223,27 +239,30 @@ private:
     if (!path) return;
     open_[*path] = std::move(text);
     versions_[*path] = version;
+    uris_[*path] = uri;  // the editor's spelling, which its answers carry back
     dirty_ = true;
   }
 
   // Every open document's diagnostics: an unsaved header changes its includers' answers.
   void publish() {
-    for (const auto& [path, text] : open_) {
-      std::vector<LspDiagnostic> out;
-      for (const Diagnostic& d : diagnose_(path, open_)) {
-        if (d.path != path) continue;
-        const std::uint32_t line = d.line ? d.line - 1 : 0;
-        const std::uint32_t character = utf16_column(text, d.line, d.column);
-        out.push_back({{{line, character}, {line, character}}, d.severity, "ycxx", d.message});
-      }
-      send_diagnostics(path, std::move(out));
+    const std::vector<std::string> paths = open_ | std::views::keys | std::ranges::to<std::vector>();
+    std::map<std::string, std::vector<LspDiagnostic>> found;
+    for (const Diagnostic& d : diagnose_(paths, open_)) {
+      const auto doc = open_.find(d.path);
+      if (doc == open_.end()) continue;  // in a file that is not open (#170)
+      const std::uint32_t line = d.line ? d.line - 1 : 0;
+      const std::uint32_t character = utf16_column(doc->second, d.line, d.column);
+      found[d.path].push_back({{{line, character}, {line, character}}, d.severity, "ycxx", d.message});
     }
+    for (const std::string& path : paths) send_diagnostics(path, std::move(found[path]));
   }
 
   void send_diagnostics(const std::string& path, std::vector<LspDiagnostic> diags) {
     const auto v = versions_.find(path);
+    const auto uri = uris_.find(path);
     notify("textDocument/publishDiagnostics",
-           to_json(PublishDiagnostics{uri_of(path), v == versions_.end() ? std::nullopt : v->second, std::move(diags)}));
+           to_json(PublishDiagnostics{uri == uris_.end() ? uri_of(path) : uri->second,
+                                      v == versions_.end() ? std::nullopt : v->second, std::move(diags)}));
   }
 
   void notify(std::string_view method, Json params) {
@@ -263,6 +282,8 @@ private:
   const ServerInfo& info_;
   Buffers open_;
   std::map<std::string, std::optional<std::int64_t>> versions_;
+  std::map<std::string, std::string> uris_;
+  bool initialized_ = false;
   bool dirty_ = false;
   bool shut_down_ = false;
 };

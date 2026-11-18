@@ -74,6 +74,8 @@ void json() {
   check(back && back->s == "hi" && !back->maybe && back->items.size() == 2 && back->items[1].n == 2 && back->flag, "from_json");
   check(!from_json<Outer>(*parse(R"({"s":1,"items":[],"flag":true})")), "a member of the wrong type is an error");
   check(!from_json<Inner>(*parse(R"({"n":1.5})")), "an integer must be whole");
+  check(!from_json<std::int64_t>(Json(0x1p63)) && from_json<std::int64_t>(Json(-0x1p63)) && !from_json<std::uint32_t>(Json(0x1p32)),
+        "an integer one past the type's range is an error");
 }
 
 void uris() {
@@ -106,22 +108,24 @@ void messages() {
 
 void session() {
   Script io;
-  std::vector<std::pair<std::string, Buffers>> asked;
-  // A fake compiler: an error on every line of the document that contains "bad", and in a.h's
+  std::vector<std::pair<std::vector<std::string>, Buffers>> asked;
+  // A fake compiler: an error on every line of a document that contains "bad", and in a.h's
   // includer when a.h's open text says "broken".
-  Diagnose diagnose = [&](const std::string& path, const Buffers& open) {
-    asked.emplace_back(path, open);
+  Diagnose diagnose = [&](std::span<const std::string> paths, const Buffers& open) {
+    asked.emplace_back(std::vector<std::string>(paths.begin(), paths.end()), open);
     std::vector<Diagnostic> out;
-    const std::string& text = open.at(path);
-    std::uint32_t line = 1;
-    for (std::size_t at = 0; at < text.size(); ++line) {
-      const std::size_t eol = std::min(text.find('\n', at), text.size());
-      const std::string_view l(text.data() + at, eol - at);
-      if (const auto col = l.find("bad"); col != std::string_view::npos) out.push_back({path, line, static_cast<std::uint32_t>(col + 1), 1, "bad here"});
-      at = eol + 1;
+    for (const std::string& path : paths) {
+      const std::string& text = open.at(path);
+      std::uint32_t line = 1;
+      for (std::size_t at = 0; at < text.size(); ++line) {
+        const std::size_t eol = std::min(text.find('\n', at), text.size());
+        const std::string_view l(text.data() + at, eol - at);
+        if (const auto col = l.find("bad"); col != std::string_view::npos) out.push_back({path, line, static_cast<std::uint32_t>(col + 1), 1, "bad here"});
+        at = eol + 1;
+      }
+      if (path == "/w/main.cpp" && open.contains("/w/a.h") && open.at("/w/a.h").contains("broken")) out.push_back({path, 1, 1, 1, "from a.h"});
     }
-    if (path == "/w/main.cpp" && open.contains("/w/a.h") && open.at("/w/a.h").contains("broken")) out.push_back({path, 1, 1, 1, "from a.h"});
-    out.push_back({"/w/elsewhere.h", 1, 1, 1, "not this document"});
+    out.push_back({"/w/elsewhere.h", 1, 1, 1, "not an open document"});
     return out;
   };
   io.send(request(1, "initialize", Json(Object{{"capabilities", Json(Object{})}})));
@@ -167,7 +171,8 @@ void session() {
   io2.send(notification("exit", Json(nullptr)));
   check(serve(io2, diagnose) == 0, "exit after shutdown: status 0");
   // One diagnosis of both documents after the batch, then main.cpp alone after the close.
-  check(asked.size() == 3 && asked[0].second.size() == 2 && asked[2].first == "/w/main.cpp" && asked[2].second.size() == 1,
+  check(asked.size() == 2 && asked[0].first.size() == 2 && asked[0].second.size() == 2 &&
+            asked[1].first == std::vector<std::string>{"/w/main.cpp"} && asked[1].second.size() == 1,
         std::format("diagnosed once per batch ({} calls)", asked.size()));
   bool saw_header = false, saw_unknown = false, saw_cleared = false;
   for (const Json& m : io2.replies()) {
@@ -181,6 +186,28 @@ void session() {
   check(saw_header, "a header's unsaved text changes its includer's diagnostics");
   check(saw_unknown, "an unknown request gets MethodNotFound");
   check(saw_cleared, "a closed document's diagnostics are cleared");
+
+  // The lifecycle's errors, and answers carrying the editor's own URI.
+  Script io3;
+  io3.send(request(1, "textDocument/hover"));
+  io3.send(request(2, "initialize"));
+  io3.send(Json(Object{{"jsonrpc", "2.0"}, {"id", 3}, {"method", 5}}));
+  io3.send(notification("textDocument/didOpen",
+                        Json(Object{{"textDocument", Json(Object{{"uri", "file:///w/%61.cpp"}, {"version", 1}, {"text", "bad\n"}})}})));
+  io3.pause();
+  io3.send(request(4, "shutdown"));
+  io3.send(request(5, "textDocument/hover"));
+  io3.send(notification("exit", Json(nullptr)));
+  check(serve(io3, diagnose) == 0, "exit after shutdown, with errors on the way: status 0");
+  std::map<int, int> errors;
+  bool own_uri = false;
+  for (const Json& m : io3.replies()) {
+    if (m["error"]) errors[static_cast<int>(*m["id"]->number())] = static_cast<int>(*(*m["error"])["code"]->number());
+    if (const Json* p = m["params"]; p && p->object() && (*p)["uri"]) own_uri = *(*p)["uri"]->string() == "file:///w/%61.cpp";
+  }
+  check(errors == std::map<int, int>{{1, -32002}, {3, -32600}, {5, -32600}},
+        "not initialized, a method that is no string, and a request after shutdown");
+  check(own_uri, "diagnostics are published to the URI the editor opened");
 }
 
 void framing() {

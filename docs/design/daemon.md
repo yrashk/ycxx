@@ -438,7 +438,8 @@ cell of every TU being built.
 ### 6.4 The LSP front
 
 `ycxx lsp` is started by the editor. It finds the daemon for its workspace folder (§2, §7.1),
-sends `lsp{}`, and from then on copies bytes between its stdio and the socket. The LSP server
+sends `lsp{}`, and from then on copies bytes between its stdio and the socket (the daemon's
+side in `lsp` frames, whose last carries LSP's exit status, #99). The LSP server
 itself (JSON-RPC, documents, position mapping per ast.md §8.5) runs in the daemon, one session per
 connection:
 

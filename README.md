@@ -58,8 +58,9 @@ in [GitHub issues](https://github.com/yrashk/ycxx/issues) and the
 - A language server (2026-11-18): an editor that runs `ycxx lsp` gets ycxx's diagnostics for
   open files on open, change and save, through the daemon. Unsaved text, in the file or in a
   header it includes, reaches the diagnostics and never a build. A file is checked with the
-  command line of the last `ycxx cxx` that built it through the daemon. Not yet: go-to-definition
-  (#170) and `compile_commands.json` (#167).
+  command line of the last `ycxx cxx` that built it through the daemon (with `YCXX_DAEMON=1`),
+  else alone in its directory. Not yet: go-to-definition (#170) and `compile_commands.json`
+  (#167).
 - The acceptance tests in `tests/own/slice` run with ycxx as the compiler in CI, and every
   [draft example](tests/draft) is checked against Clang and GCC.
 
