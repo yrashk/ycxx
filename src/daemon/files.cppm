@@ -3,9 +3,9 @@
 // batch applies between epochs. A batch is a set of dirty real paths from the watcher; a path no
 // entry knows is dropped, which is how the build's own outputs fall out.
 //
-// Seam: until the engine has input providers (#95) the table is the preprocessor's `pp::Host`,
-// and the pp session's traces carry the dependencies; with #95 its entries back `file_text` and
-// `file_exists` cells, and a changed entry becomes a `Db::set`.
+// The table backs the engine's `pp::FileContent` inputs through a provider (#95, #93): a cell is
+// provided from its entry on first read, and an entry a batch changes is reported (`take_changed`)
+// so the daemon sets the cells that were provided. It is also the `pp::Host` of `-E`.
 export module ycxx.daemon:files;
 
 import std;
@@ -24,7 +24,9 @@ class FileTable final : public pp::Host {
   // The directory relative paths of the current request are relative to.
   void set_cwd(std::string cwd) { cwd_ = std::move(cwd); }
 
+  // Safe to call from any thread (a provider may run on any worker).
   std::optional<std::string> read(const std::string& path) override {
+    std::lock_guard g(mu_);
     std::string key = absolute(path);
     auto it = entries_.find(key);
     if (it == entries_.end()) it = fill(std::move(key));
@@ -35,6 +37,7 @@ class FileTable final : public pp::Host {
   // Applies a batch (§5.3): every entry a dirty path reaches, by its real path or by a directory
   // above it, is re-stat'ed and re-hashed. The number of entries that changed.
   std::size_t apply(std::span<const std::string> dirty) {
+    std::lock_guard g(mu_);
     std::set<std::string> touched;
     for (const std::string& d : dirty) reached(d, touched);
     std::size_t changed = 0;
@@ -44,6 +47,7 @@ class FileTable final : public pp::Host {
 
   // Whether any dirty path reaches an entry: a batch that would change nothing is dropped.
   bool knows_any(std::span<const std::string> dirty) const {
+    std::lock_guard g(mu_);
     std::set<std::string> touched;
     for (const std::string& d : dirty) {
       reached(d, touched);
@@ -55,6 +59,7 @@ class FileTable final : public pp::Host {
   // The full rescan (§5.4): stat every entry, re-hash those whose stat identity changed. With
   // `under`, only the entries that watch one of those directories (the unwatched ones, §5.5).
   std::size_t rescan(std::optional<std::span<const std::string>> under = std::nullopt) {
+    std::lock_guard g(mu_);
     std::size_t changed = 0;
     std::vector<std::string> keys;
     for (const auto& [key, e] : entries_) {
@@ -66,7 +71,16 @@ class FileTable final : public pp::Host {
     return changed;
   }
 
-  std::size_t size() const { return entries_.size(); }
+  std::size_t size() const {
+    std::lock_guard g(mu_);
+    return entries_.size();
+  }
+
+  // The keys of the entries changed by the batches and rescans since the last call.
+  std::vector<std::string> take_changed() {
+    std::lock_guard g(mu_);
+    return std::exchange(changed_, {});
+  }
 
   // The absolute key of a path of the current request.
   std::string absolute(const std::string& path) const {
@@ -202,11 +216,15 @@ class FileTable final : public pp::Host {
     Fp128 fp = e.fp;
     load(key, e);
     index(key, e);
-    return was != e.present || fp != e.fp ? 1 : 0;
+    if (was == e.present && fp == e.fp) return 0;
+    changed_.push_back(key);
+    return 1;
   }
 
+  mutable std::mutex mu_;
   std::function<void(const std::string&)> watch_;
   std::string cwd_;
+  std::vector<std::string> changed_;
   std::map<std::string, Entry> entries_;
   std::map<std::string, std::set<std::string>> by_real_;  // real name -> keys (§5.5)
 };

@@ -89,6 +89,8 @@ class Server {
     }
     wake_r_ = std::move(wake->first);
     wake_w_ = std::move(wake->second);
+    for (const std::string& d : pp::system_dirs())
+      system_dirs_.push_back(std::filesystem::path(d).lexically_normal().generic_native_encoded_string());
     start_watching();
     log(std::format("serving {} on {} (watcher: {})", paths_.root, paths_.socket(), watcher_state_));
     if (o_.ready_fd) {
@@ -266,6 +268,7 @@ class Server {
       // Directories past the watch limit are stat-checked instead (§5.5).
       if (auto un = watcher_->unwatched(); !un.empty()) changed += table_.rescan(std::span<const std::string>(un));
     }
+    set_changed_inputs();
     std::lock_guard g(stats_mu_);
     if (changed > 0) {
       ++stats_.revision;
@@ -339,7 +342,7 @@ class Server {
         return false;
       };
       bool stopped = false;
-      compile::Done d = compile::run(r, table_, session_for(r), stop, stopped);
+      compile::Done d = compile::run(r, table_, session(), stop, stopped);
       if (!stopped) {
         // The only live root stored its answer: the quantum returns to the floor (§4.2).
         admission_.progressed();
@@ -371,25 +374,38 @@ class Server {
     }
   }
 
-  // The engine session a request runs in (#63). It is kept only for the same request at the same
-  // revision: `Pp` records only the main file's text, not the headers it includes, the include
-  // paths or the main file's path (they are read through pp's process session), so a session kept
-  // across an edit, another directory or other options could answer from stale cells. Within one
-  // revision no file the table knows has changed, so an identical request is answered from the
-  // session, executing nothing. Input providers (#95, #120) lift the restriction.
-  pipeline::Session& session_for(const compile::Request& r) {
-    std::uint64_t revision;
-    {
-      std::lock_guard g(stats_mu_);
-      revision = stats_.revision;
-    }
-    if (!session_ || session_revision_ != revision || session_argv_ != r.argv || session_cwd_ != r.cwd) {
+  // The engine session every request runs in (#63), for the daemon's life: its file inputs are
+  // provided from the table (§5.1), and a batch sets the ones it changed, so an edit invalidates
+  // exactly the cells that read the file and a repeated request executes nothing.
+  pipeline::Session& session() {
+    if (!session_) {
       session_ = std::make_unique<pipeline::Session>();
-      session_revision_ = revision;
-      session_argv_ = r.argv;
-      session_cwd_ = r.cwd;
+      provided_.clear();
+      session_->db().set_provider<pp::FileContent>([this](pp::PathId id) { return provide(id); });
     }
     return *session_;
+  }
+
+  // The toolchain and sysroot never change under a build: their files are `high` (§5.1).
+  engine::provided<std::optional<std::string>> provide(pp::PathId id) {
+    const std::string& key = pp::path_of(id);
+    {
+      std::lock_guard g(provided_mu_);
+      provided_.insert(key);
+    }
+    bool system = std::ranges::any_of(system_dirs_, [&](const std::string& d) {
+      return key.size() > d.size() && key.starts_with(d) && key[d.size()] == '/';
+    });
+    return {table_.read(key), system ? engine::Durability::high : engine::Durability::low};
+  }
+
+  // At quiescence: the provided inputs whose entries a batch changed get their new values.
+  void set_changed_inputs() {
+    std::vector<std::string> changed = table_.take_changed();
+    if (!session_) return;
+    std::lock_guard g(provided_mu_);
+    for (const std::string& key : changed)
+      if (provided_.contains(key)) session_->db().set<pp::FileContent>(pp::path_id(key), table_.read(key));
   }
 
   void requeue(Events::Batch b) {
@@ -410,9 +426,9 @@ class Server {
   Admission admission_;
   std::timed_mutex engine_mu_;  // one request in the engine at a time (#15 lifts this)
   std::unique_ptr<pipeline::Session> session_;  // under engine_mu_
-  std::uint64_t session_revision_ = 0;
-  std::vector<std::string> session_argv_;
-  std::string session_cwd_;
+  std::mutex provided_mu_;
+  std::set<std::string> provided_;  // the table keys provided to session_'s FileContent cells
+  std::vector<std::string> system_dirs_;
 
   std::mutex conn_mu_;
   std::condition_variable conn_cv_;
