@@ -163,12 +163,15 @@ def edit_during_build(env):
         run = subprocess.run([str(d / 'prog')], capture_output=True, timeout=60)
         if run.returncode != attempt + 1 + 20 + attempt:
             fail(f'edit during a build: the program returned {run.returncode}, want {attempt + 1 + 20 + attempt}')
-        if env.number('revision') <= revision_before or env.number('inputs_changed') <= changed_before:
-            fail('edit during a build: `ctl status` counts no new revision or changed input (§8.1)')
+        # An edit to a file the build has not read yet changes no table entry (§5.3), and the build
+        # reads the new text anyway; the daemon still restarts it today (#161). Only a restart
+        # with a new revision is the one this test is for: an edit to a file already read.
         if (restarts_of(err) or 0) >= 1:
             if env.number('restarts') < restarts_before + 1:
                 fail('edit during a build: `ctl status` does not count the restart')
-            return
+            if env.number('revision') > revision_before and env.number('inputs_changed') > changed_before:
+                return
+            print(f'edit during a build (attempt {attempt}): restarted with no changed entry (#161); trying again')
     fail('an edit during a build never restarted it (3 attempts)')
 
 
