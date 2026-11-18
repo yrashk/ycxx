@@ -425,6 +425,112 @@ void test_exports_trie() {
   check(!trie_lookup(*image, "_ma"), "a prefix of an exported name is not found");
 }
 
+// Findings of the review of #42, one check each.
+void test_review_cases() {
+  {
+    // ___dso_handle and __mh_execute_header are defined by the linker, at the header.
+    auto o = return42();
+    auto d = o.add_section(obj::standard_section::data_const);
+    o.sections[d].emit64(0);
+    o.sections[d].relocate(reloc_kind::abs64, o.reference("___dso_handle"));
+    o.sections[d].emit64(0);
+    o.sections[d].relocate(reloc_kind::abs64, o.reference("__mh_execute_header"));
+    auto r = link::link(std::span(&o, 1), with_exports({}));
+    check(r.has_value(), "___dso_handle and __mh_execute_header resolve to the linker's definitions");
+  }
+  {
+    // Tentative definitions read from an object merge to the largest.
+    auto common = [](std::string name, std::uint64_t size) {
+      obj::object o;
+      o.name = name;
+      auto sec = obj::section::standard(obj::standard_section::bss);
+      sec.name = "__common";
+      sec.zerofill_size = size;
+      auto k = o.add_section(std::move(sec));
+      o.symbols.push_back({"_buf", obj::binding::global, k, 0, true});
+      return o;
+    };
+    std::vector<obj::object> objs = {return42(), common("small.o", 8), common("big.o", 4096)};
+    auto image = link::link(objs);
+    check(image.has_value(), "common symbols link");
+    // The reader turns a Mach-O common symbol (N_UNDF, value = size) into that representation.
+    auto bytes = obj::macho::write_object(common("c.o", 16));
+    auto o = obj::macho::read_object(bytes, "c.o");
+    check(o && o->sections.size() == 1 && o->sections[0].name == "__common" && o->symbols[0].weak, "a common round-trips");
+  }
+  {
+    // A weak reference no dylib exports is imported weakly; a strong one is an error in either order.
+    auto weak_user = [](bool weak) {
+      obj::object o = return42();
+      o.name = weak ? "weak.o" : "strong.o";
+      if (weak) o.symbols[0].name = "_main";
+      else o.symbols[0].name = "_other";
+      auto d = o.add_section(obj::standard_section::data_const);
+      o.sections[d].emit64(0);
+      auto s = o.reference("_absent");
+      o.symbols[s].weak = weak;
+      o.sections[d].relocate(reloc_kind::abs64, s);
+      return o;
+    };
+    std::vector<obj::object> weak_only = {weak_user(true)};
+    check(link::link(weak_only, with_exports({})).has_value(), "an absent weak import links");
+    std::vector<obj::object> ab = {weak_user(true), weak_user(false)}, ba = {weak_user(false), weak_user(true)};
+    auto r1 = link::link(ab, with_exports({}));
+    auto r2 = link::link(ba, with_exports({}));
+    check(!r1 && !r2, "an absent symbol with one strong reference is undefined, in either order");
+  }
+  {
+    // Weak definitions are exported as weak, and the header says so.
+    auto o = return42();
+    o.symbols[0].weak = true;
+    auto image = link::link(std::span(&o, 1));
+    check(image && (obj::macho::load32(*image, 24) & obj::macho::mh_weak_defines) != 0, "MH_WEAK_DEFINES is set");
+  }
+  {
+    // Globals whose names start with 'l' are exported; only local temporary labels are dropped.
+    auto o = return42();
+    o.define("lglobal", obj::binding::global, 0, 0);
+    auto image = link::link(std::span(&o, 1));
+    check(image && trie_lookup(*image, "lglobal").has_value(), "a global named l... is exported");
+  }
+  {
+    // A relocation to a global defined in a discarded section is an error, not an exception.
+    auto o = return42();
+    auto ld = o.add_section({"__LD", "__compact_unwind", obj::section_flags::debug, 3, std::vector<std::uint8_t>(8, 0), 0, {}});
+    auto g = o.define("_in_dropped", obj::binding::global, ld, 0);
+    o.sections[0].emit32(bl);
+    o.sections[0].relocate(reloc_kind::branch26, g);
+    auto r = link::link(std::span(&o, 1));
+    check(!r && r.error()[0].message.contains("discarded section"), "reference into a discarded section is diagnosed");
+  }
+  {
+    // An unreferenced local symbol with a bad section index is an error.
+    auto o = return42();
+    o.symbols.push_back({"bad", obj::binding::local, 7, 0, false});
+    auto r = link::link(std::span(&o, 1));
+    check(!r && r.error()[0].message.contains("bad section"), "a local symbol with a bad section is diagnosed");
+  }
+  {
+    // GOT-relative words keep their addends through the writer and reader.
+    auto o = return42();
+    auto d = o.add_section(obj::standard_section::data_const);
+    o.sections[d].emit32(0xdeadbeef);
+    o.sections[d].relocate(reloc_kind::got_rel32, o.reference("_x"), 4);
+    auto back = obj::macho::read_object(obj::macho::write_object(o), o.name);
+    check(back && back->sections[d].relocs[0].addend == 4, "got_rel32 addend round-trips");
+  }
+  {
+    // Truncated load commands are rejected, not read past the end of the buffer.
+    for (std::uint32_t cmd : {obj::macho::lc_symtab, obj::macho::lc_segment_64}) {
+      obj::macho::byte_writer w;
+      for (std::uint32_t v : {obj::macho::mh_magic_64, obj::macho::cpu_type_arm64, 0u, obj::macho::mh_object, 1u, 8u, 0u, 0u}) w.u32(v);
+      w.u32(cmd);
+      w.u32(8);
+      check(!obj::macho::read_object(w.bytes, "short.o").has_value(), "a truncated load command is rejected");
+    }
+  }
+}
+
 // --- Running (arm64 macOS only) ----------------------------------------------------------------
 
 int shell(const std::string& cmd) {
@@ -519,6 +625,7 @@ int main(int argc, char** argv) {
   test_diagnostics();
   test_deterministic();
   test_exports_trie();
+  test_review_cases();
   if (run_dir) {
     test_run(*run_dir);
     if (cc) test_mixed(*run_dir, *cc);

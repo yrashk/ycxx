@@ -27,6 +27,7 @@ inline constexpr std::uint32_t mh_execute = 0x2;
 inline constexpr std::uint32_t mh_noundefs = 0x1;
 inline constexpr std::uint32_t mh_dyldlink = 0x4;
 inline constexpr std::uint32_t mh_twolevel = 0x80;
+inline constexpr std::uint32_t mh_weak_defines = 0x8000;
 inline constexpr std::uint32_t mh_pie = 0x200000;
 inline constexpr std::uint32_t lc_req_dyld = 0x80000000;
 inline constexpr std::uint32_t lc_segment_64 = 0x19;
@@ -128,6 +129,8 @@ constexpr void store64(std::span<std::uint8_t> b, std::size_t at, std::uint64_t 
 // The minimum OS version written into objects' LC_BUILD_VERSION, as xxxx.yy.zz nibbles.
 inline constexpr std::uint32_t default_min_os = 0x000c0000;  // macOS 12.0
 
+// Preconditions, checked by contract assertions (codegen bugs, not input errors): addends of
+// branch26, page21 and pageoff12 fit ARM64_RELOC_ADDEND's 24 bits; GOT loads have no addend.
 std::vector<std::uint8_t> write_object(const object& o);
 std::expected<object, std::string> read_object(std::span<const std::uint8_t> bytes, std::string name);
 
@@ -236,8 +239,8 @@ std::vector<std::uint8_t> write_object(const object& o) {
           entry(r.offset, reloc_word(sym, false, 2, true, reloc_type::got_load_pageoff12));
           break;
         case reloc_kind::got_rel32:
-          contract_assert(r.addend == 0);
           entry(r.offset, reloc_word(sym, true, 2, true, reloc_type::pointer_to_got));
+          store32(contents[i], r.offset, static_cast<std::uint32_t>(r.addend));
           break;
         case reloc_kind::abs64:
         case reloc_kind::abs32: {
@@ -400,6 +403,7 @@ std::expected<object, std::string> read_object(std::span<const std::uint8_t> b, 
     const std::uint32_t cmd = load32(b, at), size = load32(b, at + 4);
     if (size < 8 || !in_bounds(at, size)) return fail("bad load command size");
     if (cmd == lc_segment_64) {
+      if (size < segment_command_64_size) return fail("bad segment command");
       const std::uint32_t n = load32(b, at + 64);
       if (size < segment_command_64_size + section_64_size * n) return fail("bad segment command");
       for (std::uint32_t i = 0; i < n; ++i) {
@@ -422,6 +426,7 @@ std::expected<object, std::string> read_object(std::span<const std::uint8_t> b, 
         o.sections.push_back(std::move(sec));
       }
     } else if (cmd == lc_symtab) {
+      if (size < 24) return fail("bad symbol table command");
       symoff = load32(b, at + 8);
       nsyms = load32(b, at + 12);
       stroff = load32(b, at + 16);
@@ -446,7 +451,18 @@ std::expected<object, std::string> read_object(std::span<const std::uint8_t> b, 
     sym.bind = !(type & n_ext) ? binding::local : (type & n_pext) ? binding::hidden : binding::global;
     switch (type & n_type) {
       case n_undf:
-        if (value != 0) return fail(std::format("common symbol {} is not supported", sym.name));
+        if (value != 0) {
+          // A tentative definition (common symbol): a weak definition alone in a zero-fill
+          // __DATA,__common section, which the linker merges to the largest size.
+          if (!(type & n_ext)) return fail(std::format("common symbol {} is not external", sym.name));
+          auto common = section::standard(standard_section::bss);
+          common.name = "__common";
+          common.align_log2 = static_cast<std::uint8_t>((desc >> 8) & 0x0f);  // GET_COMM_ALIGN
+          common.zerofill_size = value;
+          sym.section = o.add_section(std::move(common));
+          sym.weak = true;
+          break;
+        }
         sym.weak = (desc & n_weak_ref) != 0;
         break;
       case n_sect:

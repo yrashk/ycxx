@@ -82,6 +82,7 @@ constexpr std::uint64_t page = 0x4000;              // arm64 macOS pages
 constexpr std::uint64_t sign_page = 0x1000;         // code directory pages
 constexpr std::uint32_t stub_size = 12;
 
+constexpr bool fits32(std::int64_t v) { return v >= std::numeric_limits<std::int32_t>::min() && v <= std::numeric_limits<std::int32_t>::max(); }
 constexpr std::uint64_t align_up(std::uint64_t v, std::uint64_t a) { return (v + a - 1) / a * a; }
 
 enum class seg : std::uint8_t { text, data_const, data };
@@ -150,9 +151,17 @@ std::size_t uleb_size(std::uint64_t v) {
 // The exports trie (<mach-o/loader.h>, "export information"): a radix tree over symbol names.
 // Each node is a terminal size (0, or the size of `flags, address` as ULEB128s), the terminal
 // payload, a child count, and per child the edge's characters, a NUL and the child's offset.
-std::vector<std::uint8_t> exports_trie(const std::vector<std::pair<std::string, std::uint64_t>>& sorted) {
+struct export_entry {
+  std::string name;
+  std::uint64_t offset;  // from the image base
+  std::uint32_t flags;
+};
+constexpr std::uint32_t export_weak_definition = 0x04;  // EXPORT_SYMBOL_FLAGS_WEAK_DEFINITION
+
+std::vector<std::uint8_t> exports_trie(const std::vector<export_entry>& sorted) {
   struct node {
     std::optional<std::uint64_t> address;
+    std::uint32_t flags = 0;
     std::vector<std::pair<std::string, std::size_t>> children;  // edge, node index
     std::size_t offset = 0;
   };
@@ -161,14 +170,17 @@ std::vector<std::uint8_t> exports_trie(const std::vector<std::pair<std::string, 
   auto build = [&](this auto&& self, std::size_t lo, std::size_t hi, std::size_t depth) -> std::size_t {
     const std::size_t me = nodes.size();
     nodes.emplace_back();
-    if (lo < hi && sorted[lo].first.size() == depth) nodes[me].address = sorted[lo++].second;
+    if (lo < hi && sorted[lo].name.size() == depth) {
+      nodes[me].address = sorted[lo].offset;
+      nodes[me].flags = sorted[lo++].flags;
+    }
     while (lo < hi) {
-      const char c = sorted[lo].first[depth];
+      const char c = sorted[lo].name[depth];
       std::size_t end = lo;
-      while (end < hi && sorted[end].first[depth] == c) ++end;
+      while (end < hi && sorted[end].name[depth] == c) ++end;
       // The group's common prefix: the first and last names bound it, as the range is sorted.
-      const auto& a = sorted[lo].first;
-      const auto& b = sorted[end - 1].first;
+      const auto& a = sorted[lo].name;
+      const auto& b = sorted[end - 1].name;
       std::size_t common = depth;
       while (common < a.size() && common < b.size() && a[common] == b[common]) ++common;
       const std::size_t child = self(lo, end, common);
@@ -180,7 +192,7 @@ std::vector<std::uint8_t> exports_trie(const std::vector<std::pair<std::string, 
   build(std::size_t{0}, sorted.size(), std::size_t{0});
 
   // Node offsets depend on ULEB128 sizes of offsets: iterate to a fixed point.
-  auto payload = [](const node& n) { return n.address ? 1 + uleb_size(*n.address) : 0; };
+  auto payload = [](const node& n) { return n.address ? uleb_size(n.flags) + uleb_size(*n.address) : 0; };
   for (bool changed = true; changed;) {
     changed = false;
     std::size_t off = 0;
@@ -199,7 +211,7 @@ std::vector<std::uint8_t> exports_trie(const std::vector<std::pair<std::string, 
     const std::size_t p = payload(n);
     put_uleb(out, p);
     if (n.address) {
-      out.push_back(0);  // flags: a regular export
+      put_uleb(out, n.flags);
       put_uleb(out, *n.address);
     }
     out.push_back(static_cast<std::uint8_t>(n.children.size()));
@@ -273,8 +285,20 @@ private:
   void fail(std::string m) { errors_.push_back({std::move(m)}); }
 
   static bool dropped(const obj::section& s) {
-    return (s.flags & obj::section_flags::debug) != 0 || s.segment == "__LD" || (s.segment == "__TEXT" && s.name == "__eh_frame");
+    return (s.flags & obj::section_flags::debug) != 0 || s.segment == "__LD" || s.segment == "__LLVM" ||
+           (s.segment == "__TEXT" && s.name == "__eh_frame");
   }
+
+  // A tentative definition, as the Mach-O reader represents one: a weak definition alone at the
+  // start of a __DATA,__common zero-fill section.
+  static bool is_common(const obj::object& o, const obj::symbol& s) {
+    const auto& sec = o.sections[*s.section];
+    return s.offset == 0 && sec.segment == "__DATA" && sec.name == "__common" && sec.is_zerofill();
+  }
+
+  // Symbols the linker defines when no object does: both name the Mach-O header.
+  static bool synthetic(std::string_view name) { return name == "__mh_execute_header" || name == "___dso_handle"; }
+  static constexpr std::uint32_t synthetic_obj = ~0u;
 
   // 1. Symbol resolution.
   void resolve() {
@@ -282,34 +306,48 @@ private:
       const auto& o = objs_[i];
       for (std::uint32_t j = 0; j < o.symbols.size(); ++j) {
         const auto& s = o.symbols[j];
-        if (!s.defined() || s.bind == obj::binding::local) continue;
+        if (!s.defined()) continue;
         if (*s.section >= o.sections.size()) {
           fail(std::format("{}: symbol {} names a bad section", o.name, s.name));
           continue;
         }
-        if (dropped(o.sections[*s.section])) continue;
+        if (s.bind == obj::binding::local || dropped(o.sections[*s.section])) continue;
         auto [it, inserted] = globals_.try_emplace(s.name, symref{i, j});
         if (inserted) continue;
-        const auto& prev = objs_[it->second.obj].symbols[it->second.sym];
+        const auto& prev_obj = objs_[it->second.obj];
+        const auto& prev = prev_obj.symbols[it->second.sym];
         if (prev.weak && !s.weak) it->second = {i, j};
-        else if (!prev.weak && !s.weak) fail(std::format("duplicate symbol {} in {} and {}", s.name, objs_[it->second.obj].name, o.name));
+        else if (!prev.weak && !s.weak) fail(std::format("duplicate symbol {} in {} and {}", s.name, prev_obj.name, o.name));
+        else if (prev.weak && s.weak && is_common(o, s) && is_common(prev_obj, prev) &&
+                 o.sections[*s.section].size() > prev_obj.sections[*prev.section].size()) {
+          it->second = {i, j};  // tentative definitions merge to the largest
+        }
       }
     }
     if (!globals_.contains(opts_.entry)) fail(std::format("entry point {} is not defined", opts_.entry));
 
-    std::map<std::string, std::pair<std::uint32_t, bool>, std::less<>> wanted;  // name -> (ordinal, weak)
-    std::set<std::string, std::less<>> reported;
-    for (const auto& o : objs_) {
-      for (const auto& s : o.symbols) {
-        if (s.defined() || globals_.contains(s.name) || wanted.contains(s.name)) continue;
-        std::optional<std::uint32_t> ordinal;
-        for (std::uint32_t d = 0; d < opts_.dylibs.size() && !ordinal; ++d) {
-          const auto& ex = opts_.dylibs[d].exports;
-          if (!ex || ex->contains(s.name)) ordinal = d + 1;
-        }
-        if (ordinal) wanted.emplace(s.name, std::pair{*ordinal, s.weak});
-        else if (reported.insert(s.name).second) fail(std::format("undefined symbol {}, referenced from {}", s.name, o.name));
+    // Undefined names, weak only if every reference is weak, with the first referencing object.
+    std::map<std::string, std::pair<bool, std::uint32_t>, std::less<>> undefined;
+    for (std::uint32_t i = 0; i < objs_.size(); ++i) {
+      for (const auto& s : objs_[i].symbols) {
+        if (s.defined() || globals_.contains(s.name) || synthetic(s.name)) continue;
+        auto [it, inserted] = undefined.try_emplace(s.name, s.weak, i);
+        if (!inserted) it->second.first = it->second.first && s.weak;
       }
+    }
+    std::map<std::string, std::pair<std::uint32_t, bool>, std::less<>> wanted;  // name -> (ordinal, weak)
+    for (const auto& [name, ref] : undefined) {
+      const auto [weak, first] = ref;
+      std::optional<std::uint32_t> ordinal;
+      for (std::uint32_t d = 0; d < opts_.dylibs.size() && !ordinal; ++d) {
+        const auto& ex = opts_.dylibs[d].exports;
+        if (!ex || ex->contains(name)) ordinal = d + 1;
+      }
+      // A weak reference no dylib exports is still imported, weakly, from the first dylib: the
+      // loader binds a missing weak import to 0.
+      if (!ordinal && weak && !opts_.dylibs.empty()) ordinal = 1;
+      if (ordinal) wanted.emplace(name, std::pair{*ordinal, weak});
+      else fail(std::format("undefined symbol {}, referenced from {}", name, objs_[first].name));
     }
     for (const auto& [name, info] : wanted) {
       import_index_.emplace(name, static_cast<std::uint32_t>(imports_.size()));
@@ -322,6 +360,7 @@ private:
     symref def{oi, si};
     if (!s.defined() || s.bind != obj::binding::local) {
       if (auto it = globals_.find(s.name); it != globals_.end()) def = it->second;
+      else if (synthetic(s.name)) return defined_at{image_base};
       else return imported{import_index_.at(s.name)};
     }
     const auto& d = objs_[def.obj].symbols[def.sym];
@@ -333,6 +372,7 @@ private:
     const auto& s = objs_[oi].symbols[si];
     if (s.defined() && s.bind == obj::binding::local) return {false, oi, si};
     if (auto it = globals_.find(s.name); it != globals_.end()) return {false, it->second.obj, it->second.sym};
+    if (synthetic(s.name)) return {false, synthetic_obj, 0};
     return {true, import_index_.at(s.name), 0};
   }
 
@@ -441,7 +481,7 @@ private:
       fail(std::format("{}: symbol {} names a bad section", o.name, s.name));
       return false;
     }
-    if (s.bind == obj::binding::local && !placed_[oi][*s.section]) {
+    if (s.bind == obj::binding::local ? !placed_[oi][*s.section] : !globals_.contains(s.name)) {
       const auto& sec = o.sections[*s.section];
       fail(std::format("{}: relocation refers to {} in the discarded section {},{}", o.name, s.name, sec.segment, sec.name));
       return false;
@@ -650,6 +690,7 @@ private:
                 }
                 const std::uint64_t v = SA - std::get<defined_at>(m).addr;
                 if (r.kind == reloc_kind::abs64) mo::store64(out.bytes, at, v);
+                else if (!fits32(static_cast<std::int64_t>(v))) fail(std::format("{}: address difference does not fit in 32 bits", where));
                 else mo::store32(out.bytes, at, static_cast<std::uint32_t>(v));
               } else if (r.kind == reloc_kind::abs32) {
                 fail(std::format("{}: a 32-bit absolute address cannot be represented", where));
@@ -659,9 +700,12 @@ private:
               }
               break;
             }
-            case reloc_kind::got_rel32:
-              mo::store32(out.bytes, at, static_cast<std::uint32_t>(got_address(i, r.symbol) + static_cast<std::uint64_t>(r.addend) - P));
+            case reloc_kind::got_rel32: {
+              const auto v = static_cast<std::int64_t>(got_address(i, r.symbol) + static_cast<std::uint64_t>(r.addend) - P);
+              if (!fits32(v)) fail(std::format("{}: GOT slot out of 32-bit range", where));
+              else mo::store32(out.bytes, at, static_cast<std::uint32_t>(v));
               break;
+            }
           }
         }
       }
@@ -671,7 +715,7 @@ private:
       auto& g = sections_[*got_];
       for (std::uint32_t k = 0; k < got_entries_.size(); ++k) {
         const auto& e = got_entries_[k];
-        const resolved t = e.is_import ? resolved{imported{e.a}} : resolve_symbol(e.a, e.b);
+        const resolved t = e.is_import ? resolved{imported{e.a}} : e.a == synthetic_obj ? resolved{defined_at{image_base}} : resolve_symbol(e.a, e.b);
         add_fixup(g.addr + 8 * k, t, 0, "__DATA_CONST,__got");
       }
     }
@@ -762,7 +806,8 @@ private:
     for (std::uint32_t i = 0; i < objs_.size(); ++i) {
       for (std::uint32_t j = 0; j < objs_[i].symbols.size(); ++j) {
         const auto& s = objs_[i].symbols[j];
-        if (!s.defined() || !placed_[i][*s.section] || s.name.empty() || s.name[0] == 'l' || s.name[0] == 'L') continue;
+        if (!s.defined() || !placed_[i][*s.section] || s.name.empty()) continue;
+        if (s.bind == obj::binding::local && (s.name[0] == 'l' || s.name[0] == 'L')) continue;  // temporary labels
         if (s.bind != obj::binding::local) {
           const auto it = globals_.find(s.name);
           if (it == globals_.end() || it->second != symref{i, j}) continue;
@@ -774,7 +819,10 @@ private:
         else locals.push_back(e);
       }
     }
-    extdefs.push_back({"__mh_execute_header", static_cast<std::uint8_t>(mo::n_sect | mo::n_ext), 1, mo::referenced_dynamically, image_base});
+    if (!globals_.contains("__mh_execute_header")) {
+      extdefs.push_back({"__mh_execute_header", static_cast<std::uint8_t>(mo::n_sect | mo::n_ext), 1, mo::referenced_dynamically, image_base});
+    }
+    if (!globals_.contains("___dso_handle")) locals.push_back({"___dso_handle", mo::n_sect, 1, 0, image_base});
     std::ranges::sort(extdefs, {}, &sym_entry::name);
     for (const auto& im : imports_) {
       undefs.push_back({im.name, static_cast<std::uint8_t>(mo::n_undf | mo::n_ext), 0,
@@ -798,8 +846,13 @@ private:
     const auto fixups_blob = chained_fixups();
     const std::uint64_t fixups_off = le_off + le.size();
     le.raw(fixups_blob);
-    std::vector<std::pair<std::string, std::uint64_t>> exported;
-    for (const auto& e : extdefs) exported.emplace_back(e.name, e.value - image_base);
+    std::vector<export_entry> exported;
+    bool weak_defines = false;
+    for (const auto& e : extdefs) {
+      const bool weak = (e.desc & mo::n_weak_def) != 0;
+      weak_defines = weak_defines || weak;
+      exported.push_back({e.name, e.value - image_base, weak ? export_weak_definition : 0u});
+    }
     const auto trie = exports_trie(exported);
     const std::uint64_t trie_off = le_off + le.size();
     le.raw(trie);
@@ -839,7 +892,7 @@ private:
     h.u32(mo::mh_execute);
     h.u32(command_count());
     h.u32(header_size_ - static_cast<std::uint32_t>(mo::mach_header_64_size));
-    h.u32(mo::mh_noundefs | mo::mh_dyldlink | mo::mh_twolevel | mo::mh_pie);
+    h.u32(mo::mh_noundefs | mo::mh_dyldlink | mo::mh_twolevel | mo::mh_pie | (weak_defines ? mo::mh_weak_defines : 0));
     h.u32(0);
     for (const auto& sg : segments_) {
       h.u32(mo::lc_segment_64);

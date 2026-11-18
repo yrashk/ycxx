@@ -62,11 +62,13 @@ What is true of the code today. Work in progress and its owners are tracked in
   Relocations are `branch26`, `page21`, `pageoff12`, `got_page21`, `got_pageoff12`, `abs64`,
   `abs32` (differences only) and `got_rel32`, with explicit addends. Lists keep build order (§A5.3).
 - `ycxx.obj.macho`: the arm64 MH_OBJECT writer and reader. The reader takes Clang and GCC objects
-  as black-box inputs; it rejects common, absolute and indirect symbols, scattered and TLV
-  relocations, and section-relative relocations other than UNSIGNED.
+  as black-box inputs. A common symbol becomes a weak definition in its own `__DATA,__common`
+  zero-fill section. The reader rejects absolute and indirect symbols, alignments above 2^15,
+  scattered and TLV relocations, and section-relative relocations other than UNSIGNED.
 - `ycxx.link` (`src/link/`): `link(objects, options) -> expected<bytes, errors>`.
   - Diagnoses duplicate and undefined symbols and a missing entry point. A strong definition beats
-    a weak one.
+    a weak one; common symbols merge to the largest. `__mh_execute_header` and `___dso_handle` are
+    defined by the linker. A weak reference that no dylib exports is imported weakly (0 at run time).
   - Imports come from the dylibs in `options` (libSystem by default), checked against export
     lists read from `.tbd` files (`tbd_exports`). A dylib without a list accepts any name.
   - Lays out `__PAGEZERO`, `__TEXT`, `__DATA_CONST`, `__DATA` and `__LINKEDIT` on 16 KiB pages,
@@ -77,7 +79,9 @@ What is true of the code today. Work in progress and its owners are tracked in
   - Output is byte-identical across runs.
   - Not yet: unwind info (`__compact_unwind` and `__eh_frame` input sections are dropped, so C++
     exceptions cannot cross ycxx-linked frames), thread-local variables, dead stripping, literal
-    merging, branch islands beyond ±128 MiB, other dylibs' re-exports, incremental relinking.
+    merging, branch islands beyond ±128 MiB, other dylibs' re-exports, incremental relinking, and
+    import addends outside 0..255 (`DYLD_CHAINED_IMPORT_ADDEND`). `__LLVM` (embedded bitcode),
+    `__LD` and debug sections are dropped.
 - `build/bin/ycxx-ld a.o b.o -o out`: links objects from the command line, for tests. It reads
   libSystem's exports from the SDK (`--sdk`, `$SDKROOT` or the Command Line Tools' SDK).
 - `unit.link`: SHA-256 vectors, object round trips, `.tbd` parsing, diagnostics, the exports trie
