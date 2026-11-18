@@ -1,0 +1,216 @@
+#!/usr/bin/env python3
+"""Generates the lexer's Unicode tables (src/lex/unicode_tables.cppm, src/lex/unicode_names.txt).
+
+The data comes from Python's `unicodedata` (its Unicode version is recorded in the output) and,
+for the character name aliases that `unicodedata` cannot enumerate, from the UCD's
+NameAliases.txt of the same version (tools/unicode/ucd/, `--aliases`), each alias checked with
+`unicodedata.lookup`. The versions must agree. The outputs are Unicode Data Files under the
+Unicode License v3 (src/lex/LICENSE.unicode).
+
+    tools/unicode/gen-tables [--aliases PATH]
+
+Tables:
+- identifier-start and identifier-continue ranges beyond ASCII ([lex.name]): XID_Start and
+  XID_Continue, derived from `str.isidentifier`, which implements them, plus ID_Compat_Math_Start
+  and ID_Compat_Math_Continue (UAX #31, PropList.txt), listed below;
+- Normalization Form C checking ([lex.name]/1): canonical combining classes, the characters that
+  never occur in NFC, the characters that may compose with a preceding starter, and the canonical
+  compositions;
+- character names and aliases for named-universal-character ([lex.universal.char]/3), excluding
+  names derived algorithmically (Hangul syllables and the `PREFIX-HEX` families), whose code point
+  ranges are emitted instead.
+"""
+import argparse, os, sys, unicodedata
+
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+MAX = 0x110000
+
+# UAX #31, PropList.txt: ID_Compat_Math_Start, and the additional ID_Compat_Math_Continue.
+COMPAT_MATH_START = [0x2202, 0x2207, 0x221E, 0x1D6C1, 0x1D6DB, 0x1D6FB, 0x1D715, 0x1D735, 0x1D74F,
+                     0x1D76F, 0x1D789, 0x1D7A9, 0x1D7C3]
+COMPAT_MATH_CONTINUE = COMPAT_MATH_START + [0xB2, 0xB3, 0xB9, 0x2070] + list(range(0x2074, 0x207F)) + \
+    list(range(0x2080, 0x208F))
+
+COPYRIGHT = ("Copyright © 1991-2026 Unicode, Inc. Unicode Data Files, Unicode License v3: "
+             "src/lex/LICENSE.unicode")
+
+ALGORITHMIC_PREFIXES = ["CJK UNIFIED IDEOGRAPH-", "CJK COMPATIBILITY IDEOGRAPH-", "TANGUT IDEOGRAPH-",
+                        "KHITAN SMALL SCRIPT CHARACTER-", "NUSHU CHARACTER-", "EGYPTIAN HIEROGLYPH-"]
+
+
+def scalar(c):
+    return not (0xD800 <= c <= 0xDFFF)
+
+
+def ranges(pred):
+    out, start = [], None
+    for c in range(0x80, MAX):
+        p = scalar(c) and pred(c)
+        if p and start is None:
+            start = c
+        elif not p and start is not None:
+            out.append((start, c - 1))
+            start = None
+    if start is not None:
+        out.append((start, MAX - 1))
+    return out
+
+
+def xid_start(c):
+    return ("" + chr(c)).isidentifier() and chr(c) != "_" or c in COMPAT_MATH_START
+
+
+def xid_continue(c):
+    return ("a" + chr(c)).isidentifier() or c in COMPAT_MATH_CONTINUE
+
+
+def nfc_tables():
+    ccc = []          # (first, last, class), maximal runs of one non-zero class
+    run = None
+    for c in range(MAX):
+        k = unicodedata.combining(chr(c)) if scalar(c) else 0
+        if run and k == run[2] and c == run[1] + 1:
+            run[1] = c
+        else:
+            if run and run[2]:
+                ccc.append(tuple(run))
+            run = [c, c, k]
+    if run and run[2]:
+        ccc.append(tuple(run))
+    no = []           # characters that never appear in NFC text: NFC(c) != c
+    compositions = [] # (first, second, composite): canonical pairs that NFC composes
+    decompositions = [] # (c, first, second or 0): one level of canonical decomposition
+    for c in range(MAX):
+        if not scalar(c):
+            continue
+        s = chr(c)
+        if unicodedata.normalize("NFC", s) != s:
+            no.append(c)
+        d = unicodedata.decomposition(s)
+        if d and not d.startswith("<") and not 0xAC00 <= c <= 0xD7A3:
+            parts = [int(x, 16) for x in d.split()]
+            decompositions.append((c, parts[0], parts[1] if len(parts) == 2 else 0))
+            if len(parts) == 2 and unicodedata.normalize("NFC", chr(parts[0]) + chr(parts[1])) == s:
+                compositions.append((parts[0], parts[1], c))
+    maybe = sorted({second for _, second, _ in compositions})
+    compositions.sort()
+    return ccc, compress(no), compress(maybe), compositions, decompositions
+
+
+def compress(cps):
+    out = []
+    for c in cps:
+        if out and out[-1][1] == c - 1:
+            out[-1][1] = c
+        else:
+            out.append([c, c])
+    return [tuple(r) for r in out]
+
+
+def names(alias_path):
+    table = {}
+    algorithmic = {p: [] for p in ALGORITHMIC_PREFIXES}
+    for c in range(MAX):
+        if not scalar(c):
+            continue
+        n = unicodedata.name(chr(c), "")
+        if not n or n.startswith("HANGUL SYLLABLE "):
+            continue
+        for p in ALGORITHMIC_PREFIXES:
+            if n == p + "%04X" % c:
+                algorithmic[p].append(c)
+                break
+        else:
+            table[n] = c
+    aliases = 0
+    with open(alias_path, encoding="utf-8") as f:
+        lines = f.read().splitlines()
+    version = lines[0].removeprefix("# NameAliases-").removesuffix(".txt")
+    if version != unicodedata.unidata_version:
+        sys.exit(f"{alias_path} is Unicode {version}; Python's unicodedata is {unicodedata.unidata_version}")
+    for line in lines:
+        if not line.strip() or line.startswith("#"):
+            continue
+        code, name, _ = line.split(";")
+        c = int(code, 16)
+        if unicodedata.lookup(name) != chr(c):
+            sys.exit(f"alias {name} does not name U+{c:04X}")
+        if name not in table:
+            table[name] = c
+            aliases += 1
+    return table, {p: compress(v) for p, v in algorithmic.items()}, aliases
+
+
+def cpp_ranges(name, rs):
+    body = ",\n".join("  {0x%X, 0x%X}" % r for r in rs)
+    return f"inline constexpr std::array<CodeRange, {len(rs)}> {name}{{{{\n{body}}}}};\n"
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--aliases", default=os.path.join(ROOT, "tools/unicode/ucd/NameAliases.txt"))
+    args = ap.parse_args()
+    start, cont = ranges(xid_start), ranges(xid_continue)
+    ccc, no, maybe, comps, decomps = nfc_tables()
+    table, algorithmic, aliases = names(args.aliases)
+    out = []
+    out.append(f"""// Generated by tools/unicode/gen-tables from Unicode {unicodedata.unidata_version} (Python's
+// unicodedata and NameAliases.txt); do not edit.
+// {COPYRIGHT}
+export module ycxx.lex:unicode_tables;
+
+import std;
+
+export namespace ycxx::lex::unicode {{
+
+inline constexpr std::string_view version = "{unicodedata.unidata_version}";
+
+struct CodeRange {{
+  char32_t first, last;
+}};
+struct ClassRange {{
+  char32_t first, last;
+  std::uint8_t ccc;
+}};
+// A canonical pair: `composite` is `first` followed by `second` (0 for a singleton).
+struct Composition {{
+  char32_t first, second, composite;
+}};
+
+// [lex.name]: XID_Start or ID_Compat_Math_Start, beyond ASCII.
+""")
+    out.append(cpp_ranges("identifier_start", start))
+    out.append("\n// [lex.name]: XID_Continue or ID_Compat_Math_Continue, beyond ASCII.\n")
+    out.append(cpp_ranges("identifier_continue", cont))
+    out.append("\n// Normalization Form C: runs of one non-zero canonical combining class.\n")
+    body = ",\n".join("  {0x%X, 0x%X, %d}" % r for r in ccc)
+    out.append(f"inline constexpr std::array<ClassRange, {len(ccc)}> combining_classes{{{{\n{body}}}}};\n")
+    out.append("\n// Characters that never occur in NFC text (NFC_Quick_Check=No).\n")
+    out.append(cpp_ranges("nfc_no", no))
+    out.append("\n// Characters that may compose with a preceding starter (NFC_Quick_Check=Maybe).\n")
+    out.append(cpp_ranges("nfc_maybe", maybe))
+    out.append("\n// Canonical compositions, sorted by (first, second); Hangul is algorithmic.\n")
+    body = ",\n".join("  {0x%X, 0x%X, 0x%X}" % r for r in comps)
+    out.append(f"inline constexpr std::array<Composition, {len(comps)}> compositions{{{{\n{body}}}}};\n")
+    out.append("\n// One level of canonical decomposition, sorted by composite; Hangul is algorithmic.\n")
+    body = ",\n".join("  {0x%X, 0x%X, 0x%X}" % (r[1], r[2], r[0]) for r in decomps)
+    out.append(f"inline constexpr std::array<Composition, {len(decomps)}> decompositions{{{{\n{body}}}}};\n")
+    out.append("\n// Names of the form PREFIX-HEX: the prefix and the code points that have such a name.\n")
+    out.append("struct AlgorithmicName {\n  std::string_view prefix;\n  std::span<const CodeRange> ranges;\n};\n")
+    for i, (p, rs) in enumerate(algorithmic.items()):
+        out.append(cpp_ranges(f"algorithmic_{i}", rs))
+    entries = ",\n".join(f'  {{"{p}", algorithmic_{i}}}' for i, p in enumerate(algorithmic))
+    out.append(f"inline constexpr std::array<AlgorithmicName, {len(algorithmic)}> algorithmic_names{{{{\n{entries}}}}};\n")
+    out.append("\n}  // namespace ycxx::lex::unicode\n")
+    with open(os.path.join(ROOT, "src/lex/unicode_tables.cppm"), "w") as f:
+        f.write("".join(out))
+    with open(os.path.join(ROOT, "src/lex/unicode_names.txt"), "w", encoding="utf-8") as f:
+        f.write(f"# {COPYRIGHT}\n")  # sorts before every name
+        for n in sorted(table):
+            f.write("%s;%X\n" % (n, table[n]))
+    print(f"Unicode {unicodedata.unidata_version}: {len(start)} start, {len(cont)} continue ranges, "
+          f"{len(ccc)} ccc runs, {len(comps)} compositions, {len(table)} names ({aliases} aliases)")
+
+
+if __name__ == "__main__":
+    sys.exit(main())
