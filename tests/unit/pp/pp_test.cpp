@@ -218,9 +218,8 @@ void conditionals() {
     return run(s, h);
   };
   check(text(pre("#if 1 + 1 == 2 && defined(__cplusplus)\na\n#elif 1/0\nb\n#else\nc\n#endif\n").region) == "a", "#if");
-  check(text(pre("#if 0\n'x\n#bogus\n#if 1\nno\n#endif\n#elifdef __LINE__\nyes\n#endif\n").region) == "yes" &&
-            pre("#if 0\n'x\n#endif\n").diags.empty(),
-        "skipped groups, quietly");
+  check(text(pre("#if 0\n#bogus\n#if 1\nno\n#endif\n#elifdef __LINE__\nyes\n#endif\n").region) == "yes", "skipped groups");
+  check(kinds(pre("#if 0\n'x\n#endif\n")) == std::vector{lex::LexDiag::unterminated_char}, "lexed all the same");
   check(kinds(pre("#if 1\n#else\n#else\n#endif\n#endif\n#if 1\n")) ==
             std::vector{lex::LexDiag::cond_else_after_else, lex::LexDiag::cond_endif_without_if, lex::LexDiag::cond_unterminated},
         "mismatched conditionals");

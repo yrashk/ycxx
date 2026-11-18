@@ -154,7 +154,7 @@ What is true of the code today. Work in progress and its owners are tracked in
 - `ycxx cxx -E` prints what Clang's `-E` would, by Clang's line and spacing rules. `preprocess`
   is in `tests/features/ycxx.txt`. Diagnostics in included files name their file.
 - Tests:
-  - `tests/own/pp` (by spec-only authors): 42 `-E`, 19 reject and 4 accept tests, the draft's
+  - `tests/own/pp` (by spec-only authors): 103 tests (`-E`, reject and accept), the draft's
     [cpp.scope], [cpp.subst], [cpp.stringize] and [cpp.concat] examples among them;
   - `tests/own/slice/a3-local-header.run.cpp`;
   - `unit.pp`: resolution, traces, reuse across TUs, and incremental equals cold over edit

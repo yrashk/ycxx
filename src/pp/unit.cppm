@@ -164,9 +164,6 @@ private:
     };
     std::vector<Cond> conds;
     bool in_condition = false;
-    // Byte ranges of lines skipped by conditional inclusion: what the lexer reported there is
-    // dropped ([cpp.cond]/? only directives are processed in a skipped group).
-    std::vector<std::pair<u32, u32>> skipped;
     // The include guard: 0 nothing yet; 1 inside `#ifndef guard`'s group; 2 after its #endif; -1
     // none.
     int guard_stage = 0;
@@ -307,11 +304,7 @@ private:
 
   std::shared_ptr<const FileRegion> finish(Frame& f) {
     FileRegion& r = f.out;
-    for (const lex::LexDiagnostic& d : f.lex_diags) {
-      auto in = std::ranges::upper_bound(f.skipped, d.offset, {}, &std::pair<u32, u32>::first);
-      if (in != f.skipped.begin() && d.offset < std::prev(in)->second) continue;  // on a skipped line
-      r.diags.push_back({0, d.offset, d.kind, d.args});
-    }
+    for (const lex::LexDiagnostic& d : f.lex_diags) r.diags.push_back({0, d.offset, d.kind, d.args});
     std::ranges::stable_sort(r.diags, {}, &Diag::offset);
     std::vector<u32> names(f.touched.begin(), f.touched.end());
     std::ranges::sort(names);
@@ -940,7 +933,8 @@ private:
       f.out.tokens.push_back(t);
     }
     // [cpp.cond]/? each #if is matched by an #endif in the same file.
-    for (const Frame::Cond& c : f.conds) report(f, c.offset, lex::LexDiag::cond_unterminated);
+    if (!fatal_)  // after a missing include, as Clang and GCC do, nothing more is reported
+      for (const Frame::Cond& c : f.conds) report(f, c.offset, lex::LexDiag::cond_unterminated);
     f.conds.clear();
     if (f.guard_stage == 2) f.out.guard = f.guard;
   }
@@ -1293,7 +1287,8 @@ private:
   }
 
   // Skips the lines of groups not included, up to the group to include or the #if's `#endif`.
-  // Only conditional directives are looked at; what the lexer reports on skipped lines is dropped.
+  // Only conditional directives are looked at. Skipped lines are still lexed, and what phase 3
+  // reports there stands ([lex.pptoken]/2: an unmatched ' is ill-formed, skipped or not).
   void skip_groups(Frame& f) {
     std::size_t depth = 0;
     for (;;) {
@@ -1303,12 +1298,7 @@ private:
         f.pending.push_front(t);
         return;
       }
-      auto skip_line = [&] {
-        rest_of_line(f);
-        u32 end = f.pending.empty() || f.pending.front().tok.kind == Tk::eof ? std::numeric_limits<u32>::max()
-                                                                              : f.pending.front().loc.offset;
-        f.skipped.emplace_back(t.loc.offset, end);
-      };
+      auto skip_line = [&] { rest_of_line(f); };
       if (t.tok.kind != Tk::hash || !t.tok.has(tok_flag::line_start)) {
         skip_line();
         continue;
