@@ -1022,6 +1022,46 @@ template's tokens again with the arguments bound.
   expressions other than a parameter (`A<I+5>`), and coalesced definitions of specializations
   used in two units (#124).
 
+## Templates, ζ step 4: parameter packs (#88, 2026-11-18)
+
+*The representation is Fable's decision (ast.md §5.6 and §6.4 amended); the code is the
+session's.*
+
+- **Representation:** a pack parameter's argument is a `pack` `TemplateArg` holding its elements
+  (`elems`, a list; the empty list is list 0 of every interner), one entry per parameter, so a
+  specialization's identity and its Itanium name (`J…E`) keep the grouping. While dependent an
+  element may be an expansion: a type `TPackExpansion` or a value `VDepExpansion`; a function
+  parameter pack's type is a `TPackExpansion` in its function type. `VDepSizeofPack` is
+  `sizeof...(P)` of a template parameter pack.
+- **Declarations:** `class... Ts`, `T... Ns` (a pack of an earlier parameter's type too),
+  `Ts... xs`, `Ts&&... xs` (`T...` without a pack is a C ellipsis), `pattern...` in template
+  argument lists. A class or variable template's pack is last; a function template's is followed
+  only by deduced or defaulted parameters ([temp.param]).
+- **Substitution and deduction** (`ycxx.sema:templates`): `substitute_expansion` expands an
+  expansion in a list (function parameters, template arguments) with each pack bound to its
+  element, failing on packs of different lengths ([temp.variadic]/7). Deduction compares lists
+  with packs' elements in place, a trailing expansion against the rest ([temp.deduct.type]/9);
+  a call's trailing function parameter pack takes the remaining arguments, forwarding references
+  included, after an explicitly specified prefix ([temp.deduct.call]/1, [temp.arg.explicit]/9);
+  a pack neither given nor deduced is empty. Partial ordering treats a function parameter pack's
+  pattern as the parameter for each remaining argument and prefers a template without a
+  trailing pack ([temp.deduct.partial]). Partial specializations match and order through the
+  same list deduction (`Head<List<T, Us...>>`).
+- **Bodies and initializers** (re-analysis, ast.md §6.4): a definition records its expansions
+  (call arguments, braced lists, fold patterns) by their pattern's offset with the packs they
+  name; an instantiation reads each pattern once per element with those packs bound to it (a
+  stack of frames). A function parameter pack is its elements' parameters under one name. Fold
+  expressions of all four forms nest as [temp.variadic] says; an empty one is `true`, `false` or
+  `void()` for `&&`, `||` and `,`. `sizeof...` of a template or function parameter pack. A pack
+  named outside every expansion, an expansion naming no pack, and an empty fold over another
+  operator are diagnosed.
+- **Mangling:** `J…E`, `Dp`, `XspT_E`; checked against Clang's symbols.
+- Tests: `tests/own/templates/p4-*`; 4 more draft examples pass. `<cstdio>`: 161 → 78 errors.
+- Not yet: template template parameters (#208); value-dependent expressions as template
+  arguments, which `__int_pack_double` needs (#209); an expansion for non-pack parameters and
+  per-element notes (#210); alias templates and concepts (#88); built-in type traits
+  (`__is_same`, `__remove_cv`, …) that libycxx's headers use.
+
 ## Bootstrap workarounds
 
 Places where ycxx's sources avoid or work around a C++26 feature because GCC 16 lacks it or

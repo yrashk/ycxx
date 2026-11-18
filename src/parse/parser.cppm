@@ -874,7 +874,8 @@ public:
     // [basic.scope.param]: parameter names are distinct.
     for (std::size_t i = 0; i < s.params.size(); ++i)
       for (std::size_t j = 0; j < i; ++j)
-        if (s.params[i].name == s.params[j].name && s.params[i].name != s_->no_name())
+        if (s.params[i].name == s.params[j].name && s.params[i].name != s_->no_name() &&
+            !(s.params[i].element && s.params[j].element))  // a pack's elements share its name
           s_->diag(s.params[i].at, Diag::redeclared_local, s.params[i].name);
     return s;
   }
@@ -1122,6 +1123,14 @@ public:
     ++angle_;
     if (!is(Tk::greater)) {
       do {
+        u32 arg_at = pos();
+        s_->begin_pattern();
+        struct EndPattern {
+          sema::Sema* s;
+          bool expanded = false;
+          u32 at;
+          ~EndPattern() { s->end_pattern(expanded, at, at, false); }
+        } end_pattern{s_, false, arg_at};
         if (starts_type_id()) {
           auto t = type_id();
           if (!t) ok = false;
@@ -1147,6 +1156,7 @@ public:
             continue;
           }
           args.back() = s_->templates().expansion_of(args.back());
+          end_pattern.expanded = true;
         }
       } while (accept(Tk::comma));
     }

@@ -203,6 +203,16 @@ void mangling() {
         "an integral argument is an <expr-primary>, n for negative");
   check(spec("p", w.fn(w.void_t, {ast::pointer_to(w.in, w.fn(t0, {t0}))}), {type_arg(w.int_t)}) == "__Z1pIiEvPFT_S0_E",
         "a function type is F…E");
+  // Parameter packs: an argument pack is J…E, a pack expansion in the signature Dp (§5.1.5.7);
+  // `template<class... Ts> int count(Ts...)`, checked against Clang's symbols.
+  QualType pack0 = w.in.intern_type(ast::TTemplateParam{0, 0, 1});
+  QualType dp = w.in.intern_type(ast::TPackExpansion{pack0});
+  auto pack_arg = [&](std::vector<ast::TemplateArg> elems) {
+    return ast::TemplateArg{ast::TemplateArgKind::pack, {}, ast::ConstId::none, w.in.intern_seq(std::span<const ast::TemplateArg>(elems))};
+  };
+  check(spec("count", w.fn(w.int_t, {dp}), {pack_arg({type_arg(w.int_t), type_arg(w.char_t)})}) == "__Z5countIJicEEiDpT_",
+        "an argument pack is J…E, an expansion Dp");
+  check(spec("count", w.fn(w.int_t, {dp}), {pack_arg({})}) == "__Z5countIJEEiDpT_", "an empty pack is JE");
 }
 
 // ------------------------------------------------------------------ programs

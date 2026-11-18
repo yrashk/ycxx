@@ -1044,11 +1044,12 @@ public:
   void begin_pattern() { pattern_packs_.emplace_back(); }
   // After the operand: the packs it names. With `...` they are recorded as an expansion of the
   // definition ([temp.variadic]/5); without, they are the enclosing operand's too.
-  std::vector<PackRef> end_pattern(bool expanded, u32 begin, u32 end) {
+  // A template argument's expansion is substituted structurally, and not recorded (`record`).
+  std::vector<PackRef> end_pattern(bool expanded, u32 begin, u32 end, bool record = true) {
     std::vector<PackRef> packs = std::move(pattern_packs_.back());
     pattern_packs_.pop_back();
     if (expanded) {
-      expansions.push_back({begin, end, packs});
+      if (record) expansions.push_back({begin, end, packs});
       return packs;
     }
     for (const PackRef& r : packs) note_pack(r);
@@ -1839,6 +1840,10 @@ public:
           const ast::LocalRec& l = locals_[p->second];
           // A function parameter pack of the definition: its uses are expanded ([temp.variadic]).
           if (types().kind(l.type) == TypeKind::pack_expansion) {
+            if (pattern_packs_.empty()) {
+              diag(begin, Diag::unexpanded_pack, name);  // [temp.variadic]/5: outside every expansion
+              return {NodeId::none, begin, end};
+            }
             note_pack({0, 0, name});
             return dependent_node({}, begin, end);
           }
@@ -1862,6 +1867,10 @@ public:
     if (const ast::TemplateParamSema* p = template_param(name)) {
       if (p->kind == ast::TemplateArgKind::type) {
         diag(begin, Diag::expected_expression);
+        return {NodeId::none, begin, end};
+      }
+      if (p->pack && pattern_packs_.empty() && frames_.empty()) {
+        diag(begin, Diag::unexpanded_pack, name);  // [temp.variadic]/5: outside every expansion
         return {NodeId::none, begin, end};
       }
       if (auto a = bound_arg(*p))
