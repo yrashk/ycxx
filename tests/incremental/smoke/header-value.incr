@@ -1,0 +1,26 @@
+// ACTION: run
+// A header's inline function changes its value, a new header is included, then removed again:
+// each state's program, built and run incrementally, behaves as a cold build of it.
+--- main.cpp
+#include "a.h"
+int main() { return f(); }
+--- a.h
+inline int f() { return 3; }
+=== edit
+--- a.h
+inline int f() { return 4; }
+=== edit
+--- main.cpp
+#include "a.h"
+#include "b.h"
+int main() { return f() + g(); }
+--- b.h
+inline int g() { return 10; }
+=== edit
+--- b.h
+inline int g() { return 20; }
+=== edit
+--- main.cpp
+#include "a.h"
+int main() { return f() * 2; }
+--- delete b.h

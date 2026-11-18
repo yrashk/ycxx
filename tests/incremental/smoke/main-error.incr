@@ -1,0 +1,19 @@
+// An error in the main file appears, moves and goes away while a header stays unchanged.
+--- main.cpp
+#include "a.h"
+int main() { return f(); }
+--- a.h
+inline int f() { return 0; }
+=== edit
+--- main.cpp
+#include "a.h"
+int main() { return f() + nope; } //! error
+=== edit
+--- main.cpp
+#include "a.h"
+int g() { return nope; } //! error
+int main() { return f(); }
+=== edit
+--- main.cpp
+#include "a.h"
+int main() { return f(); }

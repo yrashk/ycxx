@@ -812,4 +812,31 @@ static_assert([] {
   return true;
 }());
 
+// Binds `in` as this thread's interners for `hash_into` of every handle (ycxx.ast.handles, #68),
+// restoring the previous binding when it ends.
+class BindInterners {
+ public:
+  explicit BindInterners(const Interners& in) : old_(std::exchange(bound_interners, &in)) {
+    static std::once_flag installed;
+    std::call_once(installed, [] {
+      [&]<u32... I>(std::integer_sequence<u32, I...>) {
+        (install<handles::at<I>>(), ...);
+      }(std::make_integer_sequence<u32, handles::size>());
+      [&]<u32... I>(std::integer_sequence<u32, I...>) {
+        (install<SeqId<SeqElements::at<I>>>(), ...);
+      }(std::make_integer_sequence<u32, SeqElements::size>());
+    });
+  }
+  ~BindInterners() { bound_interners = old_; }
+  BindInterners(const BindInterners&) = delete;
+  BindInterners& operator=(const BindInterners&) = delete;
+
+ private:
+  template <class H>
+  static void install() {
+    interned_fp<H> = [](const void* in, H h) { return static_cast<const Interners*>(in)->fp(h); };
+  }
+  const void* old_;
+};
+
 }  // namespace ycxx::ast

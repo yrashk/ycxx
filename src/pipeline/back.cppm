@@ -200,6 +200,8 @@ struct Universe {
   UnitStore* units = nullptr;
 };
 Universe& universe();
+// Binds a universe on this thread for the queries it runs, and its interners for the
+// fingerprints of the handles they store (#68).
 class Bind {
  public:
   explicit Bind(Universe& u);
@@ -208,6 +210,7 @@ class Bind {
 
  private:
   Universe* old_;
+  std::optional<ast::BindInterners> interners_;
 };
 
 // ---------------------------------------------------------------------------------------------
@@ -461,14 +464,16 @@ std::expected<obj::object, std::vector<BackError>> compile(const TranslationUnit
 namespace ycxx::pipeline {
 
 Universe*& bound() {
-  static Universe* u = nullptr;
+  static thread_local Universe* u = nullptr;
   return u;
 }
 Universe& universe() {
   contract_assert(bound() != nullptr);  // queries run inside a `Bind`
   return *bound();
 }
-Bind::Bind(Universe& u) : old_(std::exchange(bound(), &u)) {}
+Bind::Bind(Universe& u) : old_(std::exchange(bound(), &u)) {
+  if (u.in) interners_.emplace(*u.in);
+}
 Bind::~Bind() { bound() = old_; }
 
 // ------------------------------------------------------------------------------------- layout

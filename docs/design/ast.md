@@ -810,6 +810,9 @@ it, and only they compute again, because their output really changed. (Settled o
    cells and diagnostics. Interners are append-only during a revision and compacted at
    quiescence (§A6.1). *Rejected:* one untyped interner (no typed handles, no per-type layout);
    per-TU interners (defeats sharing).
+   As built, "process-wide" is one set of interners per engine session (a daemon has one; a test
+   process may hold several). A handle's fingerprint reaches its session's interners through a
+   per-thread binding (#68).
 2. **Interning identity is the 128-bit fingerprint.** §A1.5 and §A1.9 already rest on it for
    cutoff and trace matching. Debug builds also compare structurally and fail a `contract_assert`
    on a collision.

@@ -208,6 +208,9 @@ int table_mismatches(Db& inc, Db& cold) {
     if (cold.runs<Mix>(i) != 0 && inc.get<Mix>(i) != cold.get<Mix>(i)) ++bad;
   }
   if (inc.stats().executed != before.executed) ++bad;
+  // The engine's own comparison (§A9), the same claims by key.
+  const auto t = inc.verify_table(cold);
+  if (!t.ok() || t.checked == 0) ++bad;
   return bad;
 }
 
