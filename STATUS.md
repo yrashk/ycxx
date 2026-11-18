@@ -465,8 +465,69 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   past the front end; a body edit runs that function's cells once each, `tu` and the link, and no
   other function's; incremental equals cold after each edit, also when the warm session numbers
   entities differently (mutating `tu` to order by handle makes it fail).
-- Not yet: the daemon (designed in `docs/design/daemon.md`; #95–#98), `#include` (#65), optimization
+- Not yet: `ycxx cxx` through the daemon by default (#120), `#include` (#65), optimization
   levels and the other common options (`-O` is rejected, #81).
+
+## The resident daemon (#96, #97, 2026-11-18)
+
+`ycxx daemon` serves `ycxx cxx`, per `docs/design/daemon.md`. It is opt-in, with `YCXX_DAEMON=1`
+or `--daemon`: requests run one at a time in it until #120 (#15, #95). Without it, `ycxx cxx` runs
+the same handler in-process.
+
+- `ycxx.compile` (`src/client/compile.cppm`): the c++-compatible request handler, which was the
+  body of `client::cxx`. It takes argv, cwd, the environment table and the client's clock. It
+  returns stdout, stderr, the exit status and the output bytes, which the client writes with
+  `pipeline::write_file`. Files are read through a `pp::Host`, and the units are built in a
+  `pipeline::Session` (#63).
+- The daemon keeps its `Session` only for an identical request (argv and cwd) at an unchanged
+  file-table revision. Such a request executes nothing (`last_executed: 0` in `ycxx ctl status`).
+  Any other request gets a fresh session. The reason: `Pp` records only the main file's text, not
+  its headers, include paths or path (#120, with #95's providers).
+- `ycxx.daemon` (`src/daemon/`):
+  - `:scope`: the root is `YCXX_ROOT`, or the nearest `.ycxx` (with `root =`) or version-control
+    marker; submodules are skipped, worktrees counted, and the fallback is the home scope. The
+    runtime directory is per user and 0700 (`YCXX_RUNTIME_DIR`). The socket is
+    `<scope>-<build>.sock`, with its `sun_path` length checked. The build hash is the binary's
+    file identity.
+  - `:protocol`: u32 length, u16 kind, and a body by `ycxx.engine:serial`. The `hello`/`welcome`
+    handshake checks the build hash, the schema hash (by reflection) and the uid. Peer uids are
+    checked; malformed frames close the connection.
+  - `:connect`: connect; else take the start lock, connect again, then spawn a detached daemon
+    (setsid, double fork, descriptors closed, log in the runtime directory) and wait for its
+    readiness byte.
+  - `:server`: one thread per connection, with `compile`, `status`, `shutdown`; `lsp` is refused
+    (#99). It holds a lifetime lock with a 10 s wait and unlinks a stale socket. It exits after
+    30 minutes idle (`--idle-exit`, `YCXX_DAEMON_IDLE_EXIT`), or on shutdown or SIGTERM once
+    requests finish. A hang-up stops the request before its next translation unit. A request
+    whose configuration environment differs from the daemon's is refused, and the client runs it
+    in-process.
+  - `:files`: the file table. Keys are absolute paths (relative ones against the request's cwd),
+    with real paths and a reverse index for symlinks, and negative entries. Entries change only
+    between epochs. A batch re-reads every entry a dirty path reaches, by path or by a directory
+    above it, and drops the rest. The rescan is the fallback.
+  - `:events`, `:watch`: dirty paths and shared cookies. On macOS, one recursive FSEvents stream,
+    recreated from the event id taken before the first read when a directory outside it appears.
+    On Linux, an inotify watch per directory, added before the read, with `max_user_watches`
+    overflow stat-checked. A rescan happens on overflow, cookie timeout, watcher failure, and
+    under `YCXX_NO_WATCH=1`.
+  - `:admission`: the progress quantum (50 ms floor, doubling without progress).
+- `ycxx cxx` falls back to in-process on any failure, and retries a lost daemon once.
+  `YCXX_DAEMON=require` or `--daemon=require` makes a failure an error (the tests' hook);
+  `YCXX_NO_DAEMON=1` or `--no-daemon` turns the daemon off. `-v` says where the request was
+  answered, and `@file` response files are expanded by the client. `ycxx ctl status|shutdown`.
+- `pp::configure(Config, Host&)`: a session with the same host and configuration is kept, so its
+  region cache is reused between requests.
+- Tests:
+  - `unit.daemon`: framing and malformed frames, root discovery, the quantum under simulated
+    time, file-table batches, and the real watcher with cookie sync.
+  - `daemon.compare` (`tests/daemon/compare.py`): `tests/own/slice` and `smoke` in four actions,
+    through a daemon and in-process, byte for byte. It also covers two directories with one
+    argv, edits, fallback, and a killed daemon.
+  - Both run on macOS and Linux.
+- Not yet (#120): input providers and per-root engine stats (#95), concurrent requests and
+  cell-level restarts (#15), the daemon as the default, `progress` messages, and `build_time`.
+  Also not yet: the persistent cache handoff and the file table in it (#17), the LSP front
+  (#99), and the rest of the β tests (#98).
 
 ## The L1 interpreter (#25, 2026-11-18)
 

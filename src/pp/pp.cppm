@@ -31,6 +31,10 @@ export namespace ycxx::pp {
 // translation unit.
 Session& session();
 void configure(Config cfg);
+// The daemon's: files are read through `host` (its file table). A session with the same host and
+// configuration is kept, with its region cache, and starts a new generation of file contents
+// (the traces verify what changed); otherwise a new session starts.
+void configure(Config cfg, Host& host);
 // The path of a file the driver numbered itself (a `FileText` input).
 void name_file(FileId driver_file, std::string path);
 
@@ -82,6 +86,7 @@ namespace ycxx::pp {
 struct Process {
   DiskHost disk;
   std::unique_ptr<Session> session;
+  Host* host = &disk;  // the session's
   std::map<FileId, std::string> driver_names;
 };
 Process& process() {
@@ -111,6 +116,17 @@ Session& session() {
 void configure(Config cfg) {
   Process& p = process();
   p.session = std::make_unique<Session>(p.disk, std::move(cfg));
+  p.host = &p.disk;
+}
+
+void configure(Config cfg, Host& host) {
+  Process& p = process();
+  if (p.session && p.host == &host && p.session->config_fp == cfg.fingerprint()) {
+    p.session->files.new_generation();
+    return;
+  }
+  p.session = std::make_unique<Session>(host, std::move(cfg));
+  p.host = &host;
 }
 
 void name_file(FileId driver_file, std::string path) { process().driver_names.insert_or_assign(driver_file, std::move(path)); }
