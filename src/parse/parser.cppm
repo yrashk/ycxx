@@ -283,11 +283,26 @@ public:
       if (is(Tk::l_paren)) {
         bump();
         l.suffixes.push_back(parameters(ok));
+        // cv-qualifiers, ref-qualifiers, noexcept-specifiers and trailing return types
+        // ([dcl.fct]) are beyond the α subset.
+        if (is(Tk::kw_const) || is(Tk::kw_volatile) || is(Tk::amp) || is(Tk::ampamp) || is(Tk::kw_noexcept) ||
+            is(Tk::kw_throw) || is(Tk::arrow)) {
+          s_->diag(pos(), Diag::not_supported, kind());
+          ok = false;
+          return l;
+        }
       } else if (is(Tk::l_square)) {
         u32 at = pos();
         bump();
+        if (is(Tk::r_square)) {
+          s_->diag(at, Diag::not_supported, Tk::l_square);  // an unknown bound
+          ok = false;
+          bump();
+          continue;
+        }
         Suffix s;
-        Ex e = constant_expression();
+        // [dcl.array]: a converted constant expression of integral type.
+        Ex e = s_->promote(constant_expression());
         auto v = sema::Folder(*s_, questions()).fold(e);
         if (!v || s_->world().values.rec(*v).kind != sema::ValueKind::integer || i64_of(*v) <= 0) {
           if (e.ok()) s_->diag(at, Diag::not_supported, Tk::l_square);

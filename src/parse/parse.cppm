@@ -190,6 +190,7 @@ public:
     case ItemKind::function: declaration(); break;
     default:
       s_.diag(0, Diag::not_supported, p_->region().tokens[it_->begin].kind);
+      bad();
       break;
     }
     std::vector<ast::Child> cs;
@@ -232,8 +233,11 @@ private:
       return;
     }
     if (!Parser::starts_decl_specifier(ps_.kind())) {
-      s_.diag(ps_.pos(), Diag::expected_declaration);
-      return;
+      if (lex::is_keyword(ps_.kind()) || ps_.is(Tk::l_square) || ps_.is(Tk::coloncolon))
+        s_.diag(ps_.pos(), Diag::not_supported, ps_.kind());  // templates, using, static_assert, …
+      else
+        s_.diag(ps_.pos(), Diag::expected_declaration);
+      return bad();
     }
     DeclSpec spec = ps_.decl_specifiers();
     bool is_function_def = it_->kind == ItemKind::function;

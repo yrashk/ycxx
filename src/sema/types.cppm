@@ -265,7 +265,7 @@ private:
     if ((std::to_underlying(ast::cv_of(q)) & 2) != 0) cv += "volatile ";
     switch (r.kind) {
     case TypeKind::builtin:
-      return cv + std::string(sema::spelling(r.builtin)) + (inner.empty() ? "" : " " + inner);
+      return cv + std::string(sema::spelling(r.builtin)) + (inner.empty() || inner[0] == '[' ? "" : " ") + inner;
     case TypeKind::pointer: {
       std::string p = "*" + (cv.empty() ? "" : " " + cv.substr(0, cv.size() - 1)) + inner;
       const TypeRec& t = rec(r.inner);
