@@ -937,6 +937,43 @@ template's tokens again with the arguments bound.
   overload set argument ([temp.deduct.call]/6), "required from here" notes. Argument-dependent
   lookup runs for dependent calls in instantiations only (#165). Coalesced (weak) definitions of specializations are #124.
 
+## Templates, ζ step 2: class templates (#88, 2026-11-18)
+
+- **Declarations:** class templates at namespace scope (`template<…> struct X {…};` and
+  forward declarations), with the defaults rule of [temp.param]/14. The template is a
+  `class_template` entity; inside it, `X` and `X<T…>` are the current instantiation, a class
+  specialization with the parameters as arguments ([temp.dep.type], [temp.local]), whose record
+  is the pattern's. Member items are analysed in the template's head's scope.
+- **Template-ids** `X<args>` as types (declarations, parameters, template arguments), in
+  expressions (`X<int>(…)`, `X<int>{…}`) and in nested-name-specifiers (`X<T>::f`,
+  `N::X<int>`); `>>` closes two lists ([temp.names]/4). Arguments are checked and converted
+  against the parameters, with defaults from every declaration ([temp.arg], [temp.param]/12).
+  `typename T::x` is its own dependent type (`TDepName`: substituted to the member type, a
+  non-deduced context, mangled `N T_ 4x E`), and `T::name` is dependent in phase one
+  ([temp.res.general]/5, [temp.dep.type]).
+- **Instantiation** (`Program::instantiate_class`, [temp.inst]/2): where a specialization must
+  be complete, after its template's definition (not inside it), each member item's declaration
+  part is analysed again with the arguments bound and its questions asked at the point of
+  instantiation ([temp.point]), and the class record is built whole, then published (#156).
+  Each unit keeps its own instantiation state, whichever unit published the record. Nesting is
+  limited (`-ftemplate-depth`). Member functions, in the class or defined outside it
+  (`template<class T> R X<T>::f() {…}`, constructors and destructors too), are instantiated only
+  when an emitted body names them ([temp.inst]/4), found by walking the bodies' trees.
+- **Deduction and substitution** through specializations: `const Box<T>&` from `Box<int>`,
+  `Arr<N>` deducing `N` ([temp.deduct.type]/8); `substitute` rebuilds `X<T>` as `X<int>`.
+- **Mangling:** specializations as `<template-name> <template-args>` with both as substitution
+  candidates, inside namespaces too, members as `N…E` (`_ZNK3BoxIiE3getEv`), a value parameter
+  as an argument `XT_E`; checked against Clang's symbols.
+- Tests: `tests/own/templates/c2-*` (spec-only, plus nine from the review): 44 of 47 pass; the other three need things
+  outside templates: constexpr constructors and class objects in constant evaluation (#157,
+  #25), aggregate initialization of reference members (#157), and namespace-scope references
+  (#101). 11 more draft examples pass. In a daemon session that compiles unrelated programs
+  defining one class template differently, the first one's template record wins (#115).
+- Not yet (#88): member templates, nested classes in class templates, static data members of
+  class templates, explicit and partial specializations, alias templates, packs, concepts,
+  qualified names whose nested-name-specifier is a member template, and members found through a
+  dependent base.
+
 ## Bootstrap workarounds
 
 Places where ycxx's sources avoid or work around a C++26 feature because GCC 16 lacks it or

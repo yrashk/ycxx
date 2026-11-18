@@ -118,6 +118,8 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
     bool member = it.parent != items::none && items.items[it.parent].kind == items::ItemKind::class_def &&
                   program.in_global_scope(it.parent);
     if (!program.in_global_scope(k) && !member) continue;
+    // A class template's members are patterns; its specializations' are instances, below.
+    if (member && items.items[it.parent].template_depth > 0) continue;
     if (it.kind != items::ItemKind::declaration && it.kind != items::ItemKind::function &&
         it.kind != items::ItemKind::class_def && it.kind != items::ItemKind::enum_def)  // its declarators: `struct S { … } s;`
       continue;
@@ -136,8 +138,10 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
       }
     }
     for (std::size_t i = 0; i < decls.size(); ++i) declare(decls[i], at[i]);
-    // A template's definition is not code; its instances are, below.
-    if (!decls.empty() && (decls[0].flags & sema::decl_flag::template_)) continue;
+    // A template's definition, or a class template's member defined outside it, is not code; its
+    // instances are, below.
+    if (!decls.empty() && ((decls[0].flags & sema::decl_flag::template_) || ins.seqs.size(decls[0].template_params) > 0))
+      continue;
     if (it.kind == items::ItemKind::function && it.has_body() && !decls.empty() && decls[0].entity != EntityId::none &&
         !(decls[0].flags & sema::decl_flag::deleted)) {
       tu.functions.push_back({decls[0].entity, decls[0], program.analyze_body(k).value, program.id(k), it.body_begin - it.begin,
@@ -159,7 +163,8 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
     if (in->failed || in->body.value.tree == ast::NodeId::none) continue;
     const items::Item& it = items.items[in->item];
     declare(in->decl, ast::Loc{program.id(in->item), 0});  // errors in its name point at the template
-    tu.functions.push_back({in->spec, in->decl, in->body.value, program.id(in->item), it.body_begin - it.begin, std::nullopt});
+    tu.functions.push_back({in->spec, in->decl, in->body.value, program.id(in->item), it.body_begin - it.begin,
+                            program.this_type(in->decl)});
   }
   for (EntityId spec : program.required()) {
     ast::DeclSema d{};
@@ -170,6 +175,8 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
   // The implicitly defined special members that are not trivial ([class.copy.ctor], [class.dtor]).
   for (std::size_t i = 0; i < program.synthesized().size(); ++i) {
     const parse::Program::Synthesized& s = program.synthesized()[i];
+    // A class template's current instantiation is not code ([temp.dep.type]).
+    if (world.types.is_dependent(world.types.class_type(world.entities.rec(s.decl.entity).scope))) continue;
     declare(s.decl, std::nullopt);
     tu.functions.push_back({s.decl.entity, s.decl, program.synthesized_body(i), program.id(s.item), 0, program.this_type(s.decl)});
   }

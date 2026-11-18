@@ -858,8 +858,9 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
         in, name_, e.type, e.is_function, e.lang,
         [](EntityId c) {
           const sema::World* w = universe().world;
-          return w ? ClassName{std::string(w->ins.names.spelling(w->entities.rec(c).name)), w->entities.rec(c).scope}
-                   : ClassName{};
+          if (!w) return ClassName{};
+          const sema::EntityRec& r = w->entities.rec(c);
+          return ClassName{std::string(w->ins.names.spelling(r.name)), r.scope, r.templ, r.args};
         },
         e.scope, e.special != Special::none, e.template_type ? &spec : nullptr);
     if (!name) {

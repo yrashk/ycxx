@@ -53,7 +53,8 @@ struct Allowance {
 
 class Templates {
 public:
-  explicit Templates(World& w) : w_(&w) {}
+  // `classes` is the unit's class records (#115), which a dependent name's lookup reads.
+  Templates(World& w, const Classes& classes) : w_(&w), classes_(&classes) {}
 
   Types& types() { return w_->types; }
   ast::Interners& ins() { return w_->ins; }
@@ -78,8 +79,42 @@ public:
       if (a->kind != TemplateArgKind::type) return std::nullopt;
       return types().add_cv(a->type, cv);
     }
+    case TypeKind::class_: {
+      // `X<T…>`: the specialization for the substituted arguments ([temp.inst]).
+      const EntityRec rec = w_->entities.rec(r.entity);
+      if (rec.templ == EntityId::none || !types().is_dependent(t)) return t;
+      std::vector<TemplateArg> args;
+      for (const TemplateArg& a : rec.args) {
+        if (a.kind == TemplateArgKind::type) {
+          auto s = substitute(a.type, b);
+          if (!s) return std::nullopt;
+          args.push_back(type_arg(*s));
+        } else if (ins().values.is<ast::VDepParam>(a.value)) {
+          auto p = ins().values.get<ast::VDepParam>(a.value);
+          auto v = b.at(p.depth, p.index);
+          if (!v) args.push_back(a);
+          else if (v->kind != TemplateArgKind::value) return std::nullopt;
+          else args.push_back({TemplateArgKind::value, a.type, v->value});
+        } else {
+          args.push_back(a);
+        }
+      }
+      return types().add_cv(types().class_type(specialize_class(rec.templ, args)), cv);
+    }
+    case TypeKind::dep_name: {
+      // `typename Q::n`: the member type `n` of the substituted Q, which must be a complete
+      // class declaring one ([temp.deduct.general]/11).
+      auto q = substitute(r.inner, b);
+      if (!q) return std::nullopt;
+      if (types().is_dependent(*q)) return types().add_cv(types().dep_name(*q, r.name), cv);
+      if (!types().is_class(*q)) return std::nullopt;
+      const ClassRec* c = classes_->find(types().class_of(*q));
+      if (!c) return std::nullopt;
+      for (const auto& [n, mt] : c->types)
+        if (n == r.name) return types().add_cv(mt, cv);
+      return std::nullopt;
+    }
     case TypeKind::builtin:
-    case TypeKind::class_:
     case TypeKind::enum_:
     case TypeKind::other: return t;
     case TypeKind::pointer: {
@@ -133,6 +168,11 @@ public:
     TypeRec r = types().rec(t);
     switch (r.kind) {
     case TypeKind::template_param: return r.depth == depth;
+    case TypeKind::class_:
+      return std::ranges::any_of(w_->entities.rec(r.entity).args, [&](const TemplateArg& a) {
+        if (a.kind == TemplateArgKind::type) return mentions(a.type, depth);
+        return ins().values.is<ast::VDepParam>(a.value) && ins().values.get<ast::VDepParam>(a.value).depth == depth;
+      });
     case TypeKind::array:
       if (r.bound_value != ConstId::none && ins().values.is<ast::VDepParam>(r.bound_value) &&
           ins().values.get<ast::VDepParam>(r.bound_value).depth == depth)
@@ -154,6 +194,8 @@ public:
     QualType pc = types().canonical(p), ac = types().canonical(a);
     Cv cp = Types::cv(pc), ca = Types::cv(ac);
     TypeRec pr = types().rec(pc);
+    // `typename Q::n` is a non-deduced context ([temp.deduct.type]/5.1).
+    if (pr.kind == TypeKind::dep_name) return true;
     if (pr.kind == TypeKind::template_param && pr.depth == depth) {
       // `cv T` from `cv' A`: T is A without cv, or with the cv `cv'` has beyond `cv`.
       if (!within(cp, ca) && !allow.more_cv) return false;
@@ -165,8 +207,11 @@ public:
     if (pr.kind != ar.kind) return false;
     switch (pr.kind) {
     case TypeKind::template_param: return pr.depth == ar.depth && pr.index == ar.index && pr.pack == ar.pack;
+    case TypeKind::dep_name: return types().canonical(pr.inner) == types().canonical(ar.inner) && pr.name == ar.name;
     case TypeKind::builtin: return pr.builtin == ar.builtin;
     case TypeKind::class_:
+      if (pr.entity == ar.entity) return true;
+      return deduce_specialization(pr.entity, ar.entity, depth, out);
     case TypeKind::enum_: return pr.entity == ar.entity;
     case TypeKind::pointer:
       // Under /4.2 the pointee may be less cv-qualified in A: a qualification conversion adds it,
@@ -201,6 +246,37 @@ public:
     case TypeKind::other: return false;
     }
     return false;
+  }
+
+  // The specialization of class template `templ` for `args` ([temp.spec.general]): its entity is
+  // the template and the canonical arguments (§B1.5).
+  EntityId specialize_class(EntityId templ, std::span<const TemplateArg> args) {
+    const EntityRec& t = w_->entities.rec(templ);
+    EntityRec r{EntityKind::class_, t.name, {}, LangLinkage::cxx, t.linkage, t.first, t.scope};
+    r.templ = templ;
+    r.args.assign(args.begin(), args.end());
+    return w_->entities.entity(std::move(r));
+  }
+
+  // `TT<args…>` from a specialization of the same class template ([temp.deduct.type]/8): each
+  // argument from the corresponding one, a type by `deduce`, a value parameter by binding.
+  bool deduce_specialization(EntityId p, EntityId a, u16 depth, std::vector<std::optional<TemplateArg>>& out) {
+    const EntityRec& pr = w_->entities.rec(p);
+    const EntityRec& ar = w_->entities.rec(a);
+    if (pr.templ == EntityId::none || pr.templ != ar.templ || pr.args.size() != ar.args.size()) return false;
+    for (std::size_t i = 0; i < pr.args.size(); ++i) {
+      const TemplateArg& x = pr.args[i];
+      const TemplateArg& y = ar.args[i];
+      if (x.kind != y.kind) return false;
+      if (x.kind == TemplateArgKind::type) {
+        if (!deduce(x.type, y.type, depth, out)) return false;
+      } else if (ins().values.is<ast::VDepParam>(x.value) && ins().values.get<ast::VDepParam>(x.value).depth == depth) {
+        if (!bind(out, ins().values.get<ast::VDepParam>(x.value).index, y)) return false;
+      } else if (x.value != y.value) {
+        return false;
+      }
+    }
+    return true;
   }
 
   // ------------------------------------------------------------ calls ([temp.deduct.call])
@@ -411,6 +487,7 @@ private:
   }
 
   World* w_;
+  const Classes* classes_;
 };
 
 }  // namespace ycxx::sema

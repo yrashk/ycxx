@@ -34,13 +34,15 @@ in [GitHub issues](https://github.com/yrashk/ycxx/issues) and the
     unscoped enumerations; namespaces (nested, inline and unnamed ones, qualified names,
     `using namespace`, `using N::x;` in a block, aliases, members defined outside their
     namespace). Not yet: passing or returning a class by value, inheritance.
-  - Function templates (2026-11-18): templates at namespace scope with type and integral
-    non-type parameters and default arguments, template argument deduction from calls,
-    explicitly specified arguments (`f<int>(x)`), overload resolution among templates and
-    functions with partial ordering, two-phase name lookup with argument-dependent lookup at the
-    end of the translation unit, and instantiation with Itanium names that match Clang's. Not
-    yet: class templates, specializations, parameter packs, concepts, and a specialization used
-    in two translation units of one program (its definitions are not coalesced yet,
+  - Function and class templates (2026-11-18): templates at namespace scope with type and
+    integral non-type parameters and default arguments, template argument deduction from calls
+    (through class template specializations too), explicitly specified arguments
+    (`f<int>(x)`), overload resolution among templates and functions with partial ordering,
+    two-phase name lookup with argument-dependent lookup at the end of the translation unit, class
+    templates with member functions in and outside the class, constructors and destructors, and
+    instantiation on use, with Itanium names that match Clang's. Not yet: specializations, member
+    and alias templates, parameter packs, concepts, and a specialization used in two translation
+    units of one program (its definitions are not coalesced yet,
     [#124](https://github.com/yrashk/ycxx/issues/124)).
   - Constant evaluation, by ycxx's own interpreter of its IR: `constexpr` and `consteval`
     functions and variables, `constinit`, `static_assert` and `if consteval`, with an error that
@@ -80,7 +82,7 @@ build/bin/ycxx cxx hello.cpp -o hello && ./hello
 **Not yet:**
 - `#embed`, and the standard library's headers: `<cstdio>` now preprocesses, but libycxx does
   not yet know ycxx (yrashk/libycxx#17).
-- Inheritance and virtual functions, passing classes by value, and class templates.
+- Inheritance and virtual functions, and passing classes by value.
 - `if constexpr`, and taking the address of a variable in a namespace-scope initializer
   (`int* p = &g;` passes the front end but not code generation yet).
 - Exceptions.
@@ -98,7 +100,7 @@ Nothing beyond the subset above compiles, so neither real programs nor libycxx d
 - the resident daemon: concurrent requests, and making it the default
   ([#84](https://github.com/yrashk/ycxx/issues/84));
 - classes and the object model ([#86](https://github.com/yrashk/ycxx/issues/86));
-- templates and overload resolution: function templates work, class templates are next
+- templates and overload resolution: function and class templates work, specializations are next
   ([#88](https://github.com/yrashk/ycxx/issues/88));
 - including the standard headers: libycxx's compiler detection
   ([yrashk/libycxx#17](https://github.com/yrashk/libycxx/issues/17)), then `<cstdio>`

@@ -28,10 +28,13 @@ failures = []
 # differ). Everything else of that test is still compared; a known test whose fields all agree
 # fails the run (remove the entry). The sample and its order are fixed, so these are
 # deterministic.
-KNOWN = {
-    # A daemon session keeps an earlier test's `struct S` (first-wins entity records).
-}
+KNOWN = {}
 known_seen = set()
+
+
+# Compared in every run, sampled or not: the deepest recursion of tests/own, which a daemon thread
+# with a smaller stack than the in-process main thread's did not survive (#178).
+ALWAYS = {'templates/f1-review-nesting-limit.reject.cpp', 'templates/c2-review-nesting-limit.reject.cpp'}
 
 
 def sampled(test):
@@ -126,7 +129,7 @@ def main():
         for sub in sorted(p for p in own.iterdir() if p.is_dir()):
             ts = sorted(sub.glob('*.cpp'))
             whole = sub.name in ('slice', 'smoke') or '--all' in sys.argv
-            tests += [t for t in ts if whole or sampled(f'{sub.name}/{t.name}')]
+            tests += [t for t in ts if whole or sampled(f'{sub.name}/{t.name}') or f'{sub.name}/{t.name}' in ALWAYS]
         for t in tests:
             def setup(d, t=t):
                 shutil.copy(t, d / t.name)
@@ -158,6 +161,17 @@ def main():
                 want, got = build(sub, cold, args), build(sub, daemon, args)
                 if want != got:
                     fail(f'same argv {args} in {sub}/: {got!r:.300} != cold {want!r:.300}')
+
+        # Two unrelated programs that define one class name differently, alternately through one
+        # daemon: each keeps its own record of the class (#185).
+        for sub, text in (('p', 'struct Pt { int x, y; };\nint main() { Pt p{2, 3}; return p.x + p.y - 5; }\n'),
+                          ('q', 'struct Pt { int x; };\nint main() { Pt p{1}; return p.x - 1; }\n')):
+            (work / sub).mkdir()
+            (work / sub / 'm.cpp').write_text(text)
+        for sub in ('p', 'q', 'p', 'q'):
+            want, got = build(sub, cold), build(sub, daemon)
+            if want != got:
+                fail(f'a class of one name in two programs, {sub}/: the daemon\'s object differs from a cold compile')
 
         same_daemon('two directories')
 
