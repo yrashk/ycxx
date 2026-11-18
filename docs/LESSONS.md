@@ -191,6 +191,11 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
     only that it compiles. Reduce a module ICE to two files with `g++-16 -fmodules` first.
   - Learned on #14.
 
+- **A class defined inside a coroutine template's body breaks the build** when an object of it
+  lives across a `co_await` (an awaitable): GCC 16.2 stores it in the frame type and reports
+  `-Werror=subobject-linkage` ("has a field whose type has no linkage") in every importer.
+  - Do: define awaitables at namespace scope, as class templates if they need the query's types.
+  - Learned on #15.
 - **An executable killed at exec with status 137 says nothing about why.** A linked Mach-O whose
   `ncmds` was one too high passed `codesign -v`, then the kernel killed it before `main`.
   - Do: run `otool -l` on the output first. It reports "malformed load command" and where.
