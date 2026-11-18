@@ -14,8 +14,7 @@ What is true of the code today. Work in progress and its owners are tracked in
   - CI runs PR, `main` and nightly tiers on Linux x86_64 and macOS arm64.
   - `ycxx --version` works. The fronts (`daemon`, `cxx`, `lsp`, `ctl`) are stubs that exit 2.
 - The bootstrap smoke test (`tests/bootstrap`) passes for modules, reflection, contracts,
-  coroutines and the other C++26 features ycxx relies on. `std::execution` is an expected
-  failure (below).
+  coroutines, `std::execution` and the other C++26 features ycxx relies on.
 - Query engine design accepted: [`docs/design/query-engine.md`](docs/design/query-engine.md)
   (#1), summarized in DECISIONS §4. A throwaway prototype is in `spikes/query-engine/`.
 - Test driver: `tools/test` ([docs/TESTING.md](docs/TESTING.md), #5). Test kinds accept/reject
@@ -108,6 +107,26 @@ What is true of the code today. Work in progress and its owners are tracked in
 - Not yet: phase 4 (M1), `long double` and the extended floating types' values (left to the
   target), the type of an integer literal (sema, #33).
 
+## Item splitter (#18, 2026-11-18)
+
+- `ycxx.items` (`src/items/`): `split(region, file)` and the query `RegionItems(FileId)` cut a
+  region into items before parsing (query-engine.md §B1.2), preorder with nested lists for
+  namespaces, linkage and export blocks and class bodies.
+  - Bodies: compound statements, ctor-initializers, function-try-blocks, `= default`,
+    `= delete(…)`; consteval blocks. Template-heads attach to what follows.
+  - Skeletons (ast.md §3.1): kind, declared names in token order with ordinal, offset and flags
+    (type, template, namespace, unknown, definition, friend, enumerator), the first declarator's
+    spelled qualifier, template depth, body range.
+  - Ids: 128-bit fingerprints over the file identity, scope path, declaration-part tokens (kind
+    and content, not whitespace or alternative spelling) and the ordinal among siblings. A
+    namespace's id excludes its members; a class's excludes its members' bodies. Bodies are
+    content-addressed.
+- Token heuristics, not a parse: a few forms are known to be guessed wrong (`S (x);`,
+  `decltype(b){1}` as a mem-initializer, template arguments with commas in an initializer).
+- Not yet: `ItemId`/`BodyId` handles from the `items` and `tokens` interners (fingerprints only
+  until #38's placeholders are replaced), the occurrence salt (needs prefixes, #16), flattening
+  child regions (needs includes, M1), the syntactic indexes of §B1.3.
+
 ## Mach-O objects and the linker (#42, 2026-11-18)
 
 - `ycxx.obj` (`src/obj/`): the in-memory object. Sections are named the Mach-O way and hold bytes
@@ -188,15 +207,6 @@ one import `ycxx.ast`; unit tests in `tests/unit/ast` (run by ctest, see docs/TE
 Places where ycxx's sources avoid or work around a C++26 feature because GCC 16 lacks it or
 miscompiles it (DECISIONS §3.2). Each is removed once ycxx compiles itself.
 
-- **`std::execution` through `import std;` does not compile** (GCC 16.2 ICE in `tsubst_expr`).
-  - Cause: a GCC modules bug. An exported concept whose nested requirement uses a
-    requires-parameter inside a template argument crashes the compiler. libycxx's
-    `std::unstoppable_token` has that shape.
-  - Affected: anything that checks `std::unstoppable_token`, including `parallel_scheduler`,
-    `when_all`, `counting_scope` and `task`. This blocks the query engine (DECISIONS §4.3).
-  - Fix: belongs in libycxx (yrashk/libycxx#4, which has a 10-line repro and a tested
-    workaround). Then bump the submodule and drop `_xfail_execution` in
-    `tests/bootstrap/CMakeLists.txt`.
 - **Defaulted comparisons are members, not hidden friends** (`src/ast`, `src/ir`, `ycxx.hash`'s `Fp128`).
   - Cause: GCC 16.2 crashes (segfault) in an importer that compares two values of an exported
     struct whose defaulted `operator==` is a friend, with or without `-freflection` (found by

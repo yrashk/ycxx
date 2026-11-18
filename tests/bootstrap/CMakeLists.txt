@@ -10,7 +10,6 @@ set(_features modules reflection contracts coroutines execution language)
 # Expected failures: features the bootstrap toolchain cannot compile yet, with the reason. Such a
 # program is left out of the build; its test builds it and passes while the build fails, so a
 # fix shows up as a failing test (remove the entry then). Each is listed in STATUS too.
-set(_xfail_execution "GCC 16.2 ICE on unstoppable_token through import std (yrashk/libycxx#4)")
 foreach(feature IN LISTS _features)
   if(DEFINED _xfail_${feature})
     add_executable(bootstrap_${feature} EXCLUDE_FROM_ALL ${feature}.cpp)
