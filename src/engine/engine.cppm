@@ -579,6 +579,11 @@ private:
   std::exception_ptr error_;
 };
 
+// A fingerprint as a hash table key: already uniform, never `std::hash` (§A5.1).
+struct FpHash {
+  std::size_t operator()(const Fp128& f) const noexcept { return static_cast<std::size_t>(f.lo); }
+};
+
 // A kind's part of the memo table: a sharded index from key to cell (§A3.6) and the keys and
 // values by slot.
 struct KindTableBase {
@@ -764,6 +769,21 @@ public:
   // A cell's demand list (§A1.7).
   template <MemoQuery Q>
   std::vector<Demand> demands(const typename Q::Key& k) const;
+
+  // The memo-table comparison of incremental == cold (§A9): every cell `cold` executed and still
+  // holds valid at its last revision, found here by its key's fingerprint and brought up to date,
+  // has the same fingerprint and dependency list, and none of it executes; an input has the same
+  // fingerprint. A cell `cold` has and this Db never computed is reported, not computed.
+  // Preconditions: both Dbs are quiescent and in this process, and their keys mean the same:
+  // keys holding interner handles need one set of interners shared by both, until handles are
+  // fingerprinted by content (§A7.1, #68).
+  struct TableCheck {
+    std::uint64_t checked = 0;
+    std::uint64_t executed = 0;           // executions here while checking: 0 when it holds
+    std::vector<std::string> mismatches;  // "kind key-fingerprint: what differs", at most 20
+    bool ok() const noexcept { return executed == 0 && mismatches.empty(); }
+  };
+  TableCheck verify_table(const Db& cold);
 
 private:
   friend class SyncCtx;
@@ -2234,6 +2254,59 @@ struct Blocking final : Request {
     d->notify_all();
   }
 };
+
+Db::TableCheck Db::verify_table(const Db& cold) {
+  contract_assert(live_frames() == 0 && cold.live_frames() == 0);
+  TableCheck r;
+  const auto note = [&](CellId c, std::string_view what) {
+    if (r.mismatches.size() < 20) {
+      r.mismatches.push_back(std::format("{} {:016x}{:016x}: {}", cold.kind_name_of(c), cold.cells_[c].key_fp.hi, cold.cells_[c].key_fp.lo, what));
+    }
+  };
+  std::unordered_map<Fp128, CellId, FpHash> ids;
+  std::unordered_set<Fp128, FpHash> shared;  // key fingerprints of two cells here
+  for (CellId c = 0; c < cells_.size(); ++c) {
+    if (!ids.emplace(cells_[c].key_fp, c).second) shared.insert(cells_[c].key_fp);
+  }
+  const auto keys_of = [](const Db& db, const Cell& e) {
+    std::vector<Fp128> out;
+    for (std::uint32_t d : e.deps) out.push_back(db.cells_[d & ~group_start].key_fp);
+    return out;
+  };
+  const std::uint64_t before = stats().executed;
+  for (CellId c = 0; c < cold.cells_.size(); ++c) {
+    const Cell& want = cold.cells_[c];
+    if (want.input ? !want.has_value : want.runs == 0) continue;
+    const std::uint64_t w = want.word.load(std::memory_order_acquire);
+    if (!want.input && !(state_of(w) == State::done && verified_of(w) == cold.revision())) continue;  // stale in `cold`
+    ++r.checked;
+    if (shared.contains(want.key_fp)) {
+      note(c, "two cells here share its key fingerprint");
+      continue;
+    }
+    const auto it = ids.find(want.key_fp);
+    if (it == ids.end()) {
+      note(c, "never computed here");
+      continue;
+    }
+    const CellId here = it->second;
+    if (!want.input) {
+      Blocking b(*this, here, Priority::background);
+      const auto done = b.done;
+      b.begin();
+      done->wait(false, std::memory_order_acquire);
+      if (b.error) {
+        note(c, "an internal error bringing it up to date");
+        continue;
+      }
+    }
+    const Cell& got = cells_[here];
+    if (!got.has_value || got.fp != want.fp) note(c, "a different value (fingerprint)");
+    else if (!want.input && keys_of(*this, got) != keys_of(cold, want)) note(c, "a different dependency list");
+  }
+  r.executed = stats().executed - before;
+  return r;
+}
 
 template <InputKind Q>
 bool Db::set(const typename Q::Key& k, typename Q::Value v) {

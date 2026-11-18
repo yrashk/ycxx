@@ -170,10 +170,10 @@ def expected_stdout(test):
     return None
 
 
-def build_and_run(c, src, ctx, tr, flags, timeout, work, tag='', label=''):
-    """(compiled, exit status, stdout) of src built by c and run."""
+def build_and_run(c, src, ctx, tr, flags, timeout, work, tag='', label='', env=None):
+    """(compiled, exit status, stdout) of src built by c (in env, when given) and run."""
     exe = work / f'{c.name}{tag}.out'
-    r = run(tr, f'{label}build', c.build(src, exe, flags), timeout, cwd=src.parent)
+    r = run(tr, f'{label}build', c.build(src, exe, flags), timeout, cwd=src.parent, env=env)
     if crashed(r.status):
         why = f'{c.name} crashed building {src.name} (exit {r.status})'
         raise Unresolved(why) if c.name in toolchain.ORACLES and c is not ctx.cut else Failed(why)
