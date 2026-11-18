@@ -125,7 +125,7 @@ What is true of the code today. Work in progress and its owners are tracked in
   ASan and UBSan; ThreadSanitizer needs Linux (#105).
 - Not yet: allocation-free waits, per-worker frame free lists and lock-free index reads
   (#104); the cycle report's program-order path note (#106); contextual queries (#16);
-  eviction and persistence (#17); `ycxx cxx` and the daemon on a pool (#139).
+  eviction and persistence (#17).
 - A session on a pool (#137):
   - `Pool::set_scope` makes each worker enter a scope before it runs work. A
     `pipeline::Session(Pool&)` uses it to bind its universe and interners on the worker's
@@ -548,6 +548,11 @@ the same handler in-process.
   returns stdout, stderr, the exit status and the output bytes, which the client writes with
   `pipeline::write_file`. Files are read through a `pp::Host`, and the units are built in a
   `pipeline::Session` (#63).
+- The session runs on a worker pool, in-process and in the daemon alike (#139):
+  `compile::threads()` reads `YCXX_THREADS` (default: the hardware's concurrency) and
+  `YCXX_CHAOS_SEED`; the daemon takes them from the client that starts it and reports `threads`
+  in `ctl status`. Workers and the daemon's request threads have 256 MiB stacks (address space),
+  above a main thread's 8 MiB (#178, #187).
 - The daemon keeps one `Session` for its life (#120). Its `pp::FileContent` cells are provided
   from the file table, with the toolchain and sysroot as `high` durability. A batch sets the
   provided entries it changed, at quiescence. A repeated request executes nothing
@@ -590,12 +595,14 @@ the same handler in-process.
   - `unit.daemon`: framing and malformed frames, root discovery, the quantum under simulated
     time, file-table batches, and the real watcher with cookie sync.
   - `daemon.compare` (`tests/daemon/compare.py`): `tests/own/slice` and `smoke` whole and a
-    fixed eighth of the other suites, by name hash (`--all`: every test), in four actions,
-    through a daemon and in-process, byte for byte; two directories with one argv, edits,
-    fallback, and a killed daemon. One daemon (one pid, pinned by a first request) must answer
-    until it is killed, so a crash hidden by the client's retry fails it. `--all` shows 12
-    `classes/` tests diverging after earlier tests' structs (#115); `KNOWN` lists the
-    divergences of the default run that have their own issue (none today).
+    fixed eighth of the other suites, by name hash (`--all`: every test), plus the two deepest
+    nesting tests, in four actions, through a daemon on 8 threads under a chaos seed and
+    in-process on one (so link, `-c` and `-fsyntax-only` also compare 1 and N threads), byte
+    for byte; two directories with one argv, two programs defining one
+    class name differently (#185), edits, fallback, and a killed daemon. One daemon (one pid,
+    pinned by a first request) must answer until it is killed, so a crash hidden by the
+    client's retry fails it. `KNOWN` lists the divergences of the default run that have their
+    own issue (none today).
   - `daemon.process` (`tests/daemon/process.py`, #98): an edit landing mid-build (restarted,
     answered as the final state, counted in `ctl status`), a killed client (cancelled), a killed
     daemon mid-request (the client retries), a restart, and concurrent clients.

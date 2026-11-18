@@ -17,6 +17,7 @@ export module ycxx.daemon:server;
 
 import std;
 import ycxx.compile;
+import ycxx.engine;
 import ycxx.lsp;
 import ycxx.pipeline;
 import ycxx.pp;
@@ -261,6 +262,7 @@ class Server {
     s.socket = paths_.socket();
     s.watcher = watcher_state_;
     s.idle_exit_s = static_cast<std::uint64_t>(o_.idle_exit.count());
+    s.threads = threads_.count;
     return s;
   }
 
@@ -540,7 +542,8 @@ class Server {
   // exactly the cells that read the file and a repeated request executes nothing.
   pipeline::Session& session() {
     if (!session_) {
-      session_ = std::make_unique<pipeline::Session>();
+      if (!pool_) pool_ = std::make_unique<engine::Pool>(threads_.count, threads_.chaos_seed);
+      session_ = std::make_unique<pipeline::Session>(*pool_);
       provided_.clear();
       buffers_.clear();
       session_->db().set_provider<pp::FileContent>([this](pp::PathId id) { return provide(id); });
@@ -587,6 +590,8 @@ class Server {
   FileTable table_;
   Admission admission_;
   std::timed_mutex engine_mu_;  // one request in the engine at a time (#15 lifts this)
+  const compile::Threads threads_ = compile::threads();
+  std::unique_ptr<engine::Pool> pool_;           // under engine_mu_; outlives the session
   std::unique_ptr<pipeline::Session> session_;  // under engine_mu_
   std::mutex provided_mu_;
   std::set<std::string> provided_;  // the table keys provided to session_'s FileContent cells

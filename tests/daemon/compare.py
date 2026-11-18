@@ -12,6 +12,10 @@ Covered:
 - fallback: an unusable runtime directory runs in-process with the same output;
 - a daemon killed between requests leaves a stale socket; the next client starts a new one.
 
+The in-process side runs on one thread and the daemon on eight under a chaos seed (§8.2), so every
+comparison of a link, -c or -fsyntax-only is also one of 1 and N threads (DECISIONS §4); -E runs
+no engine work.
+
 The client restarts a daemon that died and asks again (§7.2), which would hide a crash: until the
 daemon is killed on purpose, one daemon (one pid) must answer every request.
 
@@ -87,14 +91,15 @@ def main():
     runtime = tempfile.mkdtemp(prefix='yd', dir='/tmp')  # short: sun_path holds 104 bytes on macOS
     os.chmod(runtime, 0o700)
     base = dict(os.environ)
-    for k in ('YCXX_DAEMON', 'YCXX_NO_DAEMON', 'YCXX_ROOT', 'YCXX_NO_WATCH'):
+    for k in ('YCXX_DAEMON', 'YCXX_NO_DAEMON', 'YCXX_ROOT', 'YCXX_NO_WATCH', 'YCXX_THREADS', 'YCXX_CHAOS_SEED'):
         base.pop(k, None)
     base['YCXX_RUNTIME_DIR'] = runtime
     base['YCXX_DAEMON_IDLE_EXIT'] = '300'
     cache = tempfile.mkdtemp(prefix='ycxx-cache-')
     base['XDG_CACHE_HOME'] = cache  # the persistent cache, once #17 has one
-    cold = dict(base, YCXX_NO_DAEMON='1')
-    daemon = dict(base, YCXX_DAEMON='require')
+    cold = dict(base, YCXX_NO_DAEMON='1', YCXX_THREADS='1')
+    # The daemon takes its pool from the environment of the client that starts it.
+    daemon = dict(base, YCXX_DAEMON='require', YCXX_THREADS='8', YCXX_CHAOS_SEED='7')
     envs = [('in-process', cold), ('daemon', daemon)]
     # Scratch directories are outside any repository: give them one scope, by marker.
     scope = Path(tempfile.mkdtemp(prefix='ycxx-scope-'))
@@ -108,7 +113,10 @@ def main():
             """The client restarts a daemon that died and asks again: the pid must not change."""
             nonlocal pinned
             st = subprocess.run([ycxx, 'ctl', 'status'], cwd=scope, env=base, capture_output=True, text=True, timeout=60)
-            pid = dict(line.split(': ', 1) for line in st.stdout.splitlines() if ': ' in line).get('pid')
+            fields = dict(line.split(': ', 1) for line in st.stdout.splitlines() if ': ' in line)
+            pid = fields.get('pid')
+            if pid is not None and fields.get('threads') != '8':
+                fail(f'{where}: the daemon runs {fields.get("threads")} threads, not the 8 its environment asks')
             if pid is None:
                 fail(f'{where}: no daemon answers `ctl status`')
             elif pinned is None:
