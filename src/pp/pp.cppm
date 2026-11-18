@@ -154,7 +154,8 @@ std::pair<std::string, std::vector<Message>> preprocess_to_text(Session& s, std:
   Flat flat = flatten(s, Unit(s).run(main, path));
   std::string out = print(s, flat);
   std::vector<Message> msgs;
-  for (const Diag& d : to_region(s, flat).diags)
+  // Phases 1–4 only: -E stops before phases 5–6 ([lex.phases]).
+  for (const auto& [at, d] : flat.diags)
     msgs.push_back(message(s, flat.files[d.file], s.spellings.name(flat.file_names[d.file]), d));
   return {std::move(out), std::move(msgs)};
 }

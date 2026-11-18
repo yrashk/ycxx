@@ -22,6 +22,14 @@ struct Flat {
   std::vector<std::pair<u32, std::vector<PTok>>> passthrough;
   std::vector<std::pair<u32, Diag>> diags;
   std::vector<u32> boundaries;  // where a region starts or resumes after an include
+  // Before token `at`, `-E` continues the line of `start` through that of `end` (in one file).
+  struct Continuation {
+    u32 at = 0;
+    u16 file = 0;
+    u32 start = 0;
+    u32 end = 0;
+  };
+  std::vector<Continuation> continuations;
   FileId main{};
 };
 
@@ -85,8 +93,11 @@ public:
       }
       return l.offset;
     };
-    std::size_t inc = 0, pass = 0, diag = 0;
+    std::size_t inc = 0, pass = 0, diag = 0, cont = 0;
     for (std::size_t k = 0; k <= r.tokens.size(); ++k) {
+      for (; cont < r.continuations.size() && r.continuations[cont].at == k; ++cont)
+        out_->continuations.push_back(
+            {static_cast<u32>(out_->tokens.size()), files(0), r.continuations[cont].start, r.continuations[cont].end});
       const u32 limit = k < r.tokens.size() ? site(k) : std::numeric_limits<u32>::max();
       for (;;) {
         // The earliest pending event at this position.
@@ -337,11 +348,14 @@ std::string print(Session& s, const Flat& flat) {
   std::string prev, prev2;  // the last two tokens printed
   TokLoc prev_loc;
   std::size_t prev_end = 0;
+  // The line of the last `)` of the invocations printed on this line: tokens up to it stay here.
+  u32 cont_line = 0;
   auto marker = [&](u16 file, u32 line) {
     if (!out.empty() && out.back() != '\n') out += '\n';
     out += std::format("# {} \"{}\"\n", line, s.spellings.name(flat.file_names[file]));
     cur_file = file;
     cur_line = line;
+    cont_line = 0;
     line_empty = true;
   };
   auto move_to = [&](u16 file, u32 line) {
@@ -355,6 +369,31 @@ std::string print(Session& s, const Flat& flat) {
       }
     }
   };
+  auto close_line = [&](TokLoc l) {
+    u32 best = 0;
+    while (l.expansion != 0) {
+      const Expansion& e = flat.expansions[l.expansion];
+      if (e.kind == ExpansionKind::function && e.operand_a != 0) {
+        TokLoc outer = site(l);
+        best = std::max(best, line_of(outer.file, e.operand_a - 1).first);
+      }
+      l = TokLoc{e.site_file, e.parent, e.site_offset};
+    }
+    return best;
+  };
+  // Continuations waiting for the printer to reach their invocation's line: file, start, end.
+  struct Armed {
+    u16 file;
+    u32 start, end;
+  };
+  std::vector<Armed> armed;
+  auto fire = [&] {
+    std::erase_if(armed, [&](const Armed& a) {
+      if (static_cast<int>(a.file) != cur_file || a.start > cur_line) return false;
+      if (a.start == cur_line) cont_line = std::max(cont_line, a.end);
+      return true;
+    });
+  };
   std::size_t pass = 0;
   auto print_tok = [&](const PTok& t, bool directive_start) {
     TokLoc at = site(t.loc);
@@ -365,9 +404,13 @@ std::string print(Session& s, const Flat& flat) {
         out += '\n';
         ++cur_line;
       }
+    } else if (static_cast<int>(at.file) == cur_file && line > cur_line && line <= cont_line) {
+      // Still on the line of an invocation that ended on a later line, as Clang prints it.
     } else if (static_cast<int>(at.file) != cur_file || line != cur_line) {
+      if (static_cast<int>(at.file) == cur_file && line > cont_line && cont_line > cur_line) cur_line = cont_line;
       move_to(at.file, line);
     }
+    fire();
     std::string text = spelling(t.tok, s.spellings);
     if (line_empty) {
       if (!directive_start) out.append(column > 1 ? column - 1 : 0, ' ');
@@ -383,9 +426,16 @@ std::string print(Session& s, const Flat& flat) {
     prev2 = std::exchange(prev, text);
     prev_loc = t.loc;
     prev_end = t.loc.offset + text.size();
+    if (static_cast<int>(at.file) == cur_file) cont_line = std::max(cont_line, close_line(t.loc));
+    if (cont_line < cur_line) cont_line = 0;
   };
-  std::size_t boundary = 0;
+  std::size_t boundary = 0, cont = 0;
   for (std::size_t i = 0; i <= flat.tokens.size(); ++i) {
+    for (; cont < flat.continuations.size() && flat.continuations[cont].at == i; ++cont) {
+      const Flat::Continuation& c = flat.continuations[cont];
+      armed.push_back({c.file, line_of(c.file, c.start).first, line_of(c.file, c.end).first});
+    }
+    fire();  // an invocation on the current line (an empty one leaves no token to fire it)
     for (; boundary < flat.boundaries.size() && flat.boundaries[boundary] == i; ++boundary) cur_file = -1;
     for (; pass < flat.passthrough.size() && flat.passthrough[pass].first == i; ++pass) {
       const std::vector<PTok>& line = flat.passthrough[pass].second;

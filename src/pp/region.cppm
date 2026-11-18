@@ -167,6 +167,14 @@ struct FileRegion {
   std::vector<u32> bindings;
   std::vector<Include> includes;
   std::vector<Passthrough> passthrough;
+  // Function-like invocations: before own token `at`, `-E` continues the line of offset `start`
+  // through that of offset `end` in the region's file, as Clang does.
+  struct Continuation {
+    u32 at = 0;
+    u32 start = 0;
+    u32 end = 0;
+  };
+  std::vector<Continuation> continuations;
   std::vector<Diag> diags;
   std::vector<Question> trace;
   std::vector<MacroChange> delta;

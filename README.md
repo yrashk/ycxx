@@ -30,9 +30,12 @@ in [GitHub issues](https://github.com/yrashk/ycxx/issues) and the
     a call to a non-constexpr function, …). Constant array bounds can come from `const` locals.
   - `-o`, `-c`, `-fsyntax-only` and `-std=c++26` are accepted. Errors are reported as
     `file:line:col: error: …`, with exit status 1.
-- The preprocessor, in part (2026-11-18): `#include` of your own headers (`"..."`, `<...>`, `-I`,
-  `-isystem`, `-iquote`, `#include_next`), object-like macros (`#define`, `#undef`, `-D`, `-U`)
-  and `#pragma once`. `ycxx cxx -E` prints what Clang's `-E` does.
+- The preprocessor, in part (updated 2026-11-18):
+  - `#include` of your own headers (`"..."`, `<...>`, `-I`, `-isystem`, `-iquote`,
+    `#include_next`) and `#pragma once`;
+  - object-like and function-like macros (`#define`, `#undef`, `-D`, `-U`), with `#`, `##`,
+    `__VA_ARGS__` and `__VA_OPT__`;
+  - `ycxx cxx -E` prints what Clang's `-E` does.
 - A resident daemon, opt-in (2026-11-18): with `YCXX_DAEMON=1`, `ycxx cxx` sends its command
   line to a per-project `ycxx daemon`, starting one if needed. The daemon watches the files it
   has read (FSEvents on macOS, inotify on Linux) and keeps the preprocessor's results between
@@ -47,8 +50,8 @@ build/bin/ycxx cxx hello.cpp -o hello && ./hello
 ```
 
 **Not yet:**
-- The rest of the preprocessor: function-like macros, `#if` and the other conditionals,
-  `#line`, `#error`, `_Pragma`, and the predefined macros. Without conditionals, system headers
+- The rest of the preprocessor: `#if` and the other conditionals, `#line`, `#error`,
+  `_Pragma`, and the predefined macros. Without conditionals, system headers
   such as `<cstdio>` cannot be included yet.
 - Classes, templates and overloading.
 - `if constexpr`, and taking the address of a variable in a namespace-scope initializer
