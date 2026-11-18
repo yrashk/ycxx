@@ -1,0 +1,8 @@
+// The version, from CMakeLists.txt's project() (configured into the build directory).
+export module ycxx.version;
+
+import std;
+
+export namespace ycxx {
+inline constexpr std::string_view version = "@PROJECT_VERSION@";
+}

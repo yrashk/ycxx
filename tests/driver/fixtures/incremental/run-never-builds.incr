@@ -1,0 +1,7 @@
+// FIXTURE: FAIL, a run action whose states never build (equal on both sides, still wrong).
+// ACTION: run
+--- main.cpp
+int main() { return nope; }
+=== edit
+--- main.cpp
+int main() { return nope2; }

@@ -1,0 +1,11 @@
+#!/usr/bin/env python3
+# ycxx's test driver (DECISIONS §5.5, §9): stages, live progress, transcripts of every test and
+# HTML and Markdown reports. The code is in tests/driver; usage: tools/test --help, docs/TESTING.md.
+import os, sys
+
+if sys.version_info < (3, 10):
+    sys.exit('tools/test needs Python 3.10 or later')
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from tests.driver.main import main  # noqa: E402
+
+sys.exit(main())

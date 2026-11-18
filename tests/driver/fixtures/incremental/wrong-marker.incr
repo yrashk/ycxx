@@ -1,0 +1,6 @@
+// FIXTURE: FAIL, the edit breaks the build but has no marker.
+--- main.cpp
+int main() { return 0; }
+=== edit
+--- main.cpp
+int main() { return nope; }
