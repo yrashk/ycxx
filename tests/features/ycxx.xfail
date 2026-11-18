@@ -317,7 +317,6 @@ draft/dcl/namespace.udecl-10.reject.cpp errors elsewhere: 'struct' not supported
 draft/dcl/namespace.udecl-11.reject.cpp errors elsewhere: 'class' not supported yet
 draft/dcl/namespace.udecl-2.reject.cpp errors elsewhere: 'struct' not supported yet
 draft/dcl/namespace.udecl-3.reject.cpp errors elsewhere: 'struct' not supported yet
-draft/dcl/namespace.udecl-4.reject.cpp errors elsewhere: 'struct' not supported yet
 draft/dcl/namespace.udecl-5.reject.cpp errors elsewhere: 'struct' not supported yet
 draft/dcl/namespace.udecl-6.accept.cpp 'namespace' not supported yet
 draft/dcl/namespace.udecl-8.reject.cpp errors elsewhere: 'namespace' not supported yet
@@ -668,3 +667,4 @@ own/classes/s1-byvalue-return.run.cpp classes by value (#116)
 own/classes/s1-default-member-init.run.cpp a default member initializer naming another member (#118)
 own/classes/s1-elaborated.run.cpp block-scope elaborated type specifier (#117)
 own/classes/s1-locals-scopes.run.cpp local classes (#117)
+own/classes/s2-constexpr-members.run.cpp classes in constant evaluation (#25)

@@ -497,7 +497,26 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
 - Tests: `tests/own/classes/s1-*` (spec-only, plus two from the review). 16 of 22 pass; the others wait for classes by value
   (#116), local classes (#117), non-constant default member initializers (#118) and records in
   the interpreter (#25).
-- Not yet: unions, bit-fields, member functions, constructors, bases, access checking (#119).
+- Not yet: unions, bit-fields, constructors, bases, access checking (#119).
+
+## Classes, δ step 2: member functions and `this` (#86, 2026-11-18)
+
+- Member functions (in-class and out-of-class definitions, `const`/`volatile`, static) and static
+  data members (in-class `static const`/`constexpr` values, out-of-class definitions) are entities
+  scoped to their class (`EntityRec::scope`); `class_def` lists them in `ClassRec::members`.
+  A qualified declarator `C::m` defines the member C declares with that type.
+- Bodies of member functions are complete-class contexts: class member lookup comes before
+  namespace lookup, and their class is complete there. `This` and implicit member access
+  (`Member` on `this`), bound member functions (a `Member` of type `bound_member` that only a call
+  may follow), `MemberCall` with the object's address as its first operand, `C::m`, and the const
+  rule of the implicit object parameter ([class.this]). Reads of a static data member usable in
+  constant expressions become its value (no odr-use).
+- IR: `this` is the entry block's first value parameter (`FunctionInput::this_type`), as the
+  Itanium ABI passes it. Linkage names are `<nested-name>`s with the member's cv-qualifiers,
+  checked against Clang's symbols.
+- Tests: `tests/own/classes/s2-*` (spec-only): 9 of 10 pass; the constexpr one waits for records
+  in the interpreter (#25). In-class member functions are not weak definitions yet (#124).
+- Not yet: overloaded member functions, ref-qualifiers, `= default`/`= delete`.
 
 ## Bootstrap workarounds
 

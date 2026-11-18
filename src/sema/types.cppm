@@ -61,6 +61,7 @@ struct TypeRec {
   bool variadic = false;
   LangLinkage linkage = LangLinkage::cxx;
   EntityId entity = EntityId::none;  // a class's
+  Cv fn_cv = Cv::none;               // a member function type's cv-qualifier-seq
 };
 
 class Types {
@@ -73,8 +74,9 @@ public:
     return ast::array_of(*ins_, target, elem, ast::int_value(*ins_, target, Builtin::unsigned_long, i64(bound)));
   }
   // The parameters are adjusted by #33's `function_type` ([dcl.fct]).
-  QualType function(QualType ret, std::span<const QualType> params, bool variadic, LangLinkage linkage) {
-    return ast::function_type(*ins_, ret, params, {.variadic = variadic, .linkage = linkage});
+  QualType function(QualType ret, std::span<const QualType> params, bool variadic, LangLinkage linkage,
+                    Cv cv = Cv::none) {
+    return ast::function_type(*ins_, ret, params, {.variadic = variadic, .cv = cv, .linkage = linkage});
   }
   QualType class_type(EntityId c) { return ins_->intern_type(ast::TClass{c}); }
 
@@ -100,6 +102,7 @@ public:
       r.params = ins_->seqs.elements(f.params);
       r.variadic = f.variadic != 0;
       r.linkage = f.linkage;
+      r.fn_cv = f.cv;
     } else if (t.is<ast::TClass>(c)) {
       r.kind = TypeKind::class_;
       r.entity = t.get<ast::TClass>(c).entity;
@@ -175,7 +178,9 @@ private:
       std::string ps;
       for (std::size_t i = 0; i < r.params.size(); ++i) ps += (i ? ", " : "") + spell(r.params[i]);
       if (r.variadic) ps += r.params.empty() ? "..." : ", ...";
-      return spell(r.inner, inner + "(" + ps + ")");
+      std::string q = (std::to_underlying(r.fn_cv) & 1) ? " const" : "";
+      if (std::to_underlying(r.fn_cv) & 2) q += " volatile";
+      return spell(r.inner, inner + "(" + ps + ")" + q);
     }
     case TypeKind::class_:
       return cvs + (class_name ? class_name(r.entity) : "<class>") + (inner.empty() || inner[0] == '[' ? "" : " ") + inner;
@@ -318,9 +323,21 @@ struct FieldRec {
 // What `class_def(C)` (ast.md §3.6) says of a class that member lookup and the layout need, kept
 // by class entity. A class is complete once its definition has been analysed
 // ([class.mem.general]); completeness at a point is the parser's question (`Program`).
+// A member function ([class.mfct]) or static data member ([class.static.data]): its declaration
+// in the class, which a qualified definition outside it redeclares.
+struct MemberDeclRec {
+  NameId name{};
+  EntityId entity = EntityId::none;
+  QualType type{};
+  DeclId decl{};
+  bool is_function = false;
+  bool is_static = false;
+};
+
 struct ClassRec {
   bool defined = false;
-  std::vector<FieldRec> fields;  // in declaration order
+  std::vector<FieldRec> fields;        // in declaration order
+  std::vector<MemberDeclRec> members;  // member functions and static data members
 };
 
 // The layout of an object type on the target ([basic.align], [class.mem]): its size and alignment

@@ -72,6 +72,7 @@ struct Entity {
   ast::Linkage linkage = ast::Linkage::external;
   bool is_constexpr = false;
   std::optional<ast::Loc> at;  // its first declarator, for diagnostics
+  EntityId scope = EntityId::none;  // the class of a member
 };
 
 // A variable definition at namespace scope with its constant initializer, or `ConstId::none` for
@@ -315,9 +316,11 @@ std::expected<obj::object, std::vector<BackError>> compile(const TranslationUnit
   }
   for (const Entity& e : tu.entities) {
     if (!used.contains(ir::raw(e.id))) continue;
-    auto name = symbol_name(in, e.name, e.type, e.is_function, e.lang, [&](EntityId c) {
-      return records ? records->class_name(c) : std::string();
-    });
+    std::optional<QualType> scope;
+    if (e.scope != EntityId::none) scope = in.intern_type(ast::TClass{e.scope});
+    auto name = symbol_name(
+        in, e.name, e.type, e.is_function, e.lang,
+        [&](EntityId c) { return records ? records->class_name(c) : std::string(); }, scope);
     if (!name) {
       errors.push_back({e.at, std::format("the name of '{}': {} is not supported yet", e.name, name.error())});
       continue;

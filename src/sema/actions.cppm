@@ -42,6 +42,8 @@ public:
   // Whether class `c` is complete at the current point ([class.mem.general]): its definition
   // precedes the point and does not enclose it.
   virtual bool is_complete(EntityId c) = 0;
+  // The constant a variable usable in constant expressions holds ([expr.const]), if it is known.
+  virtual std::optional<ConstId> constant_value(EntityId v) = 0;
   virtual ~Questions() = default;
 };
 
@@ -87,6 +89,8 @@ inline constexpr u16 constexpr_ = 4;
 inline constexpr u16 variadic = 8;
 inline constexpr u16 lang_c = 16;  // declared with C language linkage ([dcl.link])
 inline constexpr u16 consteval_ = 32;  // an immediate function ([dcl.constexpr])
+inline constexpr u16 member = 64;      // a member of a class ([class.mem])
+inline constexpr u16 static_ = 128;    // a static member ([class.static])
 }
 
 class Sema {
@@ -193,15 +197,22 @@ public:
     }
     if (!require_complete(ct, op_at)) return fail;
     EntityId c = types().class_of(ct);
-    const ClassRec* cr = w_->classes.find(c);
-    u32 index = 0;
-    for (; cr && index < cr->fields.size(); ++index)
-      if (cr->fields[index].name == name) break;
-    if (!cr || index == cr->fields.size()) {
+    auto found = find_member(c, name);
+    if (!found) {
       diag(name_at, Diag::no_member, name, Types::unqualified(ct));
       return fail;
     }
-    const FieldRec& f = cr->fields[index];
+    if (found->member && found->member->is_function) return bound_member(*found->member, object, arrow, begin, end);
+    if (found->member) {
+      // A static data member: the object expression is evaluated, then discarded ([expr.ref]).
+      const MemberDeclRec& m = *found->member;
+      ExprInfo info{m.type, ValueCategory::lvalue, 0};
+      Ex ref = node(ast::DeclRef{info, m.entity}, name_at, end, info);
+      Ex discarded = convert_node(object, ast::ConversionKind::to_void, builtin(Builtin::void_));
+      return node(ast::OrderedBinary{info, ast::OrderedOp::comma, at(discarded, begin), at(ref, begin)}, begin, end, info);
+    }
+    u32 index = found->index;
+    const FieldRec& f = *found->field;
     // [expr.ref]/7.2: the member's type, with the object's cv-qualifiers added; the result is an
     // lvalue if the object is (or is reached through a pointer), else an xvalue.
     QualType t = types().add_cv(f.type, Types::cv(ct));
@@ -491,6 +502,134 @@ public:
   };
   std::vector<OwnDecl> own;
 
+  // ------------------------------------------------------------ member functions ([class.mfct])
+
+  // The class whose member function body is being analysed, and the type of `this` there: none
+  // outside a non-static member function ([expr.prim.this]).
+  EntityId current_class = EntityId::none;
+  std::optional<QualType> this_type;
+
+  Ex this_expr(u32 begin, u32 end) {
+    if (!this_type) {
+      diag(begin, Diag::this_outside_member);
+      return {NodeId::none, begin, end};
+    }
+    ExprInfo info{*this_type, ValueCategory::prvalue, 0};
+    return node(ast::This{info}, begin, end, info);
+  }
+
+  // A member of class `c` named `name` ([class.member.lookup], one class, no bases yet): a
+  // non-static data member, or a member function or static data member.
+  struct Found {
+    const FieldRec* field = nullptr;
+    u32 index = 0;
+    const MemberDeclRec* member = nullptr;
+  };
+  std::optional<Found> find_member(EntityId c, NameId name) {
+    const ClassRec* cr = w_->classes.find(c);
+    if (!cr) return std::nullopt;
+    for (u32 i = 0; i < cr->fields.size(); ++i)
+      if (cr->fields[i].name == name) return Found{&cr->fields[i], i, nullptr};
+    for (const MemberDeclRec& m : cr->members)
+      if (m.name == name) return Found{nullptr, 0, &m};
+    return std::nullopt;
+  }
+  const MemberDeclRec* member_decl(EntityId f) {
+    EntityId c = w_->entities.rec(f).scope;
+    if (const ClassRec* cr = c == EntityId::none ? nullptr : w_->classes.find(c))
+      for (const MemberDeclRec& m : cr->members)
+        if (m.entity == f) return &m;
+    return nullptr;
+  }
+
+  // A member function named without a call yet: `a.f`, `p->f`, `f` or `S::f`, bound to its object
+  // (none when there is none to bind, as in a static member function). Only a call may follow
+  // ([expr.ref]/6.3.2).
+  Ex bound_member(const MemberDeclRec& m, std::optional<Ex> object, bool arrow, u32 begin, u32 end) {
+    ExprInfo info{builtin(Builtin::bound_member), ValueCategory::prvalue, 0};
+    Ex r = node(ast::Member{info, m.entity, ~u32{0}, arrow ? 1u : 0u, object ? at(*object, begin) : Child{}}, begin, end, info);
+    bound_[std::to_underlying(r.id)] = object;
+    return r;
+  }
+  bool is_bound_member(const Ex& e) { return e.ok() && types().is(e.type(), Builtin::bound_member); }
+
+  // The implicit member access `name` inside a member function of `c` ([class.mfct.non.static]),
+  // or a qualified name `C::name`: none if `c` has no such member.
+  std::optional<Ex> class_member(EntityId c, NameId name, u32 begin, u32 end) {
+    auto f = find_member(c, name);
+    if (!f) return std::nullopt;
+    Ex fail{NodeId::none, begin, end};
+    bool has_this = this_type && current_class == c;
+    if (f->field) {
+      if (!has_this) {
+        diag(begin, Diag::member_without_object, name);
+        return fail;
+      }
+      Ex self = this_expr(begin, begin);
+      QualType t = types().add_cv(f->field->type, Types::cv(types().pointee(*this_type)));
+      ExprInfo info{t, ValueCategory::lvalue, 0};
+      return node(ast::Member{info, f->field->entity, f->index, 1, at(self, begin)}, begin, end, info);
+    }
+    const MemberDeclRec& m = *f->member;
+    if (!m.is_function) {
+      ExprInfo info{m.type, ValueCategory::lvalue, 0};
+      return node(ast::DeclRef{info, m.entity}, begin, end, info);
+    }
+    std::optional<Ex> object;
+    if (has_this && !m.is_static) object = this_expr(begin, begin);
+    return bound_member(m, object, true, begin, end);
+  }
+
+  // `C::name` ([expr.prim.id.qual]) for a class C.
+  Ex qualified_name(NameId cls, NameId name, u32 begin, u32 name_at, u32 end) {
+    Ex fail{NodeId::none, begin, end};
+    auto t = class_name(cls, true);
+    if (!t) {
+      diag(begin, Diag::not_a_type, cls);
+      return fail;
+    }
+    if (!require_complete(*t, begin)) return fail;
+    if (auto r = class_member(types().class_of(*t), name, begin, end)) return *r;
+    diag(name_at, Diag::no_member, name, *t);
+    return fail;
+  }
+
+  // A call of a member function ([expr.call], [over.match.funcs]): a static one is an ordinary
+  // call; a non-static one passes its object, which must be at least as cv-qualified as the
+  // function ([class.this]).
+  Ex member_call(Ex callee, std::vector<Ex> args, u32 end, u32 paren_at) {
+    u32 begin = callee.begin;
+    Ex fail{NodeId::none, begin, end};
+    auto m = *as<ast::Member>(callee);
+    const MemberDeclRec* d = member_decl(m.member);
+    if (!d) return fail;
+    std::optional<Ex> object = bound_.at(std::to_underlying(callee.id));
+    TypeRec fr = types().rec(d->type);
+    auto children = call_args(fr, args, begin, paren_at);
+    if (!children) return fail;
+    ExprInfo info{Types::unqualified(fr.inner), ValueCategory::prvalue, 0};
+    if (d->is_static) return node(ast::Call{info, d->entity, at(callee, begin), b_->list(*children)}, begin, end, info);
+    if (!object) {
+      diag(begin, Diag::member_without_object, d->name);
+      return fail;
+    }
+    Ex o = *object;
+    if (!m.arrow) {
+      if (!o.glvalue()) {
+        diag(paren_at, Diag::not_supported, lex::Tk::l_paren);  // a member call on a temporary
+        return fail;
+      }
+      ExprInfo pi{types().pointer(o.type()), ValueCategory::prvalue, 0};
+      o = node(ast::Unary{pi, ast::UnaryOp::address_of, at(o, o.begin)}, o.begin, o.end, pi);
+    }
+    Cv object_cv = Types::cv(types().pointee(o.type()));
+    if ((std::to_underlying(object_cv) & ~std::to_underlying(fr.fn_cv)) != 0) {
+      diag(begin, Diag::const_member_call, d->name);
+      return fail;
+    }
+    return node(ast::MemberCall{info, d->entity, at(o, begin), b_->list(*children)}, begin, end, info);
+  }
+
   // ------------------------------------------------------------ names ([basic.lookup.unqual])
 
   // An id-expression naming `name`, at `begin`: the innermost block-scope declaration, else the
@@ -503,6 +642,9 @@ public:
           return node(ast::LocalRef{{l.type, ValueCategory::lvalue, 0}, p->second}, begin, end,
                       {l.type, ValueCategory::lvalue, 0});
         }
+    // The class's members, in a member function's body ([basic.scope.class]).
+    if (current_class != EntityId::none)
+      if (auto r = class_member(current_class, name, begin, end)) return *r;
     std::vector<ast::DeclSema> found;
     for (auto p = own.rbegin(); p != own.rend(); ++p)
       if (p->name == name) found.push_back(p->sema);
@@ -643,8 +785,17 @@ public:
   // The conversions every operand that needs a prvalue gets ([basic.lval], [conv.lval],
   // [conv.array], [conv.func]).
   Ex rvalue(Ex e) {
+    if (is_bound_member(e)) {
+      diag(e.begin, Diag::bound_member_not_called, w_->entities.rec(as<ast::Member>(e)->member).name);
+      return {NodeId::none, e.begin, e.end};
+    }
     if (!e.ok() || !e.glvalue()) return e;
     QualType t = e.type();
+    // A static data member usable in constant expressions is read as its value, which is no
+    // odr-use ([basic.def.odr]), so it needs no definition.
+    if (auto d = as<ast::DeclRef>(e); d && types().is_integral(t) && w_->entities.rec(d->entity).scope != EntityId::none)
+      if (auto v = q_->constant_value(d->entity))
+        return literal(Types::unqualified(t), *v, ValueCategory::prvalue, e.begin, e.end);
     if (types().is_array(t)) {
       QualType p = types().pointer(types().rec(t).inner);
       return convert_node(e, ast::ConversionKind::array_to_pointer, p);
@@ -1064,6 +1215,7 @@ public:
   Ex call(Ex callee, std::vector<Ex> args, u32 end, u32 paren_at) {
     u32 begin = callee.begin;
     if (!callee.ok() || std::ranges::any_of(args, [](const Ex& a) { return !a.ok(); })) return {NodeId::none, begin, end};
+    if (is_bound_member(callee)) return member_call(callee, std::move(args), end, paren_at);
     EntityId function = EntityId::none;
     QualType ft = callee.type();
     if (auto d = as<ast::DeclRef>(callee); d && types().is_function(ft)) {
@@ -1077,26 +1229,31 @@ public:
       diag(paren_at, Diag::not_callable, callee.type());
       return {NodeId::none, begin, end};
     }
-    const TypeRec& fr = types().rec(ft);
+    TypeRec fr = types().rec(ft);
+    auto children = call_args(fr, args, begin, paren_at);
+    if (!children) return {NodeId::none, begin, end};
+    ExprInfo info{Types::unqualified(fr.inner), ValueCategory::prvalue, 0};
+    return node(ast::Call{info, function, at(callee, begin), b_->list(*children)}, begin, end, info);
+  }
+
+  // The arguments of a call to a function of type `fr`, each copy-initializing its parameter.
+  std::optional<std::vector<Child>> call_args(const TypeRec& fr, std::span<const Ex> args, u32 begin, u32 paren_at) {
     std::vector<QualType> params = fr.params;  // copied: converting may intern new types
-    QualType ret = fr.inner;
-    bool variadic = fr.variadic;
     if (args.size() < params.size()) {
       diag(paren_at, Diag::too_few_arguments, u64(params.size()), u64(args.size()));
-      return {NodeId::none, begin, end};
+      return std::nullopt;
     }
-    if (args.size() > params.size() && !variadic) {
+    if (args.size() > params.size() && !fr.variadic) {
       diag(args[params.size()].begin, Diag::too_many_arguments, u64(params.size()), u64(args.size()));
-      return {NodeId::none, begin, end};
+      return std::nullopt;
     }
     std::vector<Child> children;
     for (std::size_t i = 0; i < args.size(); ++i) {
       Ex a = i < params.size() ? convert(args[i], params[i], args[i].begin) : variadic_argument(args[i]);
-      if (!a.ok()) return {NodeId::none, begin, end};
+      if (!a.ok()) return std::nullopt;
       children.push_back(at(a, begin));
     }
-    ExprInfo info{Types::unqualified(ret), ValueCategory::prvalue, 0};
-    return node(ast::Call{info, function, at(callee, begin), b_->list(children)}, begin, end, info);
+    return children;
   }
 
   // [expr.call]/12: an argument matched by the ellipsis gets the lvalue conversions and the
@@ -1137,6 +1294,7 @@ private:
   std::vector<std::optional<ConstId>> local_values_;  // by local
   std::set<u32> consteval_;                           // consteval functions named so far
   std::map<u32, std::vector<Ex>> list_elems_;         // by draft InitList
+  std::map<u32, std::optional<Ex>> bound_;            // by draft bound-member Member: its object
   std::vector<std::vector<std::pair<NameId, u32>>> scopes_;
   std::vector<std::size_t> guarded_;
   QualType return_type_{};

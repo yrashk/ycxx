@@ -156,11 +156,14 @@ TranslationUnit Front::unit(std::string name) {
     bool fn = r.kind == sema::EntityKind::function;
     std::string id(ins_.names.spelling(r.name));
     if (fn && id == "main") tu.main = e;
-    tu.entities.push_back({e, std::move(id), r.type, fn, r.lang, r.linkage, false, at});
+    tu.entities.push_back({e, std::move(id), r.type, fn, r.lang, r.linkage, false, at, r.scope});
   };
   for (std::uint32_t k = 0; k < items_.items.size(); ++k) {
     const items::Item& it = items_.items[k];
-    if (!program_->in_global_scope(k)) continue;
+    // Items of the global namespace, and the members of its classes.
+    bool member = it.parent != items::none && items_.items[it.parent].kind == items::ItemKind::class_def &&
+                  program_->in_global_scope(it.parent);
+    if (!program_->in_global_scope(k) && !member) continue;
     if (it.kind != items::ItemKind::declaration && it.kind != items::ItemKind::function &&
         it.kind != items::ItemKind::class_def)
       continue;
@@ -182,6 +185,7 @@ TranslationUnit Front::unit(std::string name) {
     if (it.kind == items::ItemKind::function && it.has_body() && !decls.empty() && decls[0].entity != EntityId::none) {
       tu.functions.push_back({decls[0].entity, decls[0], program_->analyze_body(k).value, program_->id(k),
                               it.body_begin - it.begin});
+      tu.functions.back().this_type = program_->this_type(decls[0]);
       continue;
     }
     // Variable definitions, with the constants their declarators were initialized with.

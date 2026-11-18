@@ -69,6 +69,9 @@ struct FunctionInput {
   // becomes an object outside its lifetime.
   bool thunk = false;
   std::span<const std::optional<ast::ConstId>> local_values{};
+  // A non-static member function's `this` type ([expr.prim.this]): its implicit object argument,
+  // the entry block's first value parameter, before the declared ones (Itanium C++ ABI §3.1).
+  std::optional<ast::QualType> this_type{};
 };
 
 struct FunctionIr {
@@ -252,12 +255,15 @@ class Gen {
     ast::QualType fty = fn_.decl.type;
     auto params = in_.seqs.elements(fn_.decl.params);
     std::vector<ir::Ty> entry{ir::Ty::state()};
+    if (fn_.this_type) entry.push_back(vty(*fn_.this_type));
     for (const ast::ParamSema& p : params) {
       if (cls(p.type) == TypeClass::record) throw Unsupported{"a parameter of class type"};
       entry.push_back(vty(p.type));
     }
     if (cls(facts_.return_type(fty)) == TypeClass::record) throw Unsupported{"a function returning a class"};
     enter(b_.add_block(entry));
+    uint32_t first = fn_.this_type ? 2 : 1;  // the first declared parameter's block parameter
+    if (fn_.this_type) this_ = b_.param(block_, 1);
     loc_ = fn_.body_offset;
     push_scope();
     // The parameters are the first body locals (#41), named by `LocalRef` like the others.
@@ -266,7 +272,7 @@ class Gen {
     for (uint32_t i = 0; i < params.size(); ++i) {
       Place p = begin_object(params[i].type, ir::Init::indeterminate);
       debug_.vars.push_back({ir::LocalId(i), {last_node()}});
-      store(p, b_.param(block_, i + 1));
+      store(p, b_.param(block_, i + first));
       start_lifetime(p);
       slots_[i] = p;
     }
@@ -657,6 +663,11 @@ class Gen {
     if (is<ast::Binary>(a)) return binary(a);
     if (is<ast::OrderedBinary>(a)) return ordered(a);
     if (is<ast::Call>(a)) return call(a);
+    if (is<ast::MemberCall>(a)) return member_call(a);
+    if (is<ast::This>(a)) {
+      if (!this_) unsupported(a, "outside a non-static member function");
+      return *this_;
+    }
     if (is<ast::Conditional>(a)) return conditional(a, false).value;
     if (is<ast::ValueInit>(a) && cls(t) != TypeClass::record && cls(t) != TypeClass::array) return zero(t);
     unsupported(a);
@@ -854,6 +865,13 @@ class Gen {
     for (ast::Child arg : ast_.children(c.args)) args.push_back(rvalue(child(a, arg)));
     return call_fn(c.function, c.info.type, args);
   }
+  // A non-static member function's call: the object's address is the first argument.
+  std::optional<ValueId> member_call(At a) {
+    auto c = get<ast::MemberCall>(a);
+    std::vector<ValueId> args{rvalue(child(a, c.object))};
+    for (ast::Child arg : ast_.children(c.args)) args.push_back(rvalue(child(a, arg)));
+    return call_fn(c.function, c.info.type, args);
+  }
   std::optional<ValueId> call_fn(ast::EntityId f, ast::QualType result, std::span<const ValueId> args) {
     std::vector<ir::Ty> results;
     bool has_value = cls(result) != TypeClass::void_;
@@ -1045,6 +1063,7 @@ class Gen {
   std::vector<std::vector<Place>> scopes_;
   std::vector<Loop> loops_;
   std::vector<std::optional<Place>> slots_;  // by local index
+  std::optional<ValueId> this_;              // a non-static member function's `this`
 };
 
 template <Facts F>

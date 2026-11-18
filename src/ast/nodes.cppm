@@ -143,6 +143,22 @@ struct Member {
   [[=sequenced]] Child object;
 };
 
+// `this` ([expr.prim.this]): a prvalue pointer to the object a non-static member function was
+// called on. An implicit member access ([class.mfct.non.static]) names it with width 0.
+struct This {
+  ExprInfo info;
+};
+
+// A call of a non-static member function ([expr.call], [class.mfct.non.static]): `object` is the
+// implicit object argument as a pointer prvalue (`&a` for `a.f()`, `p` for `p->f()`, `this` for an
+// implicit call), sequenced before the arguments.
+struct MemberCall {
+  ExprInfo info;
+  EntityId function;
+  [[=sequenced(0)]] Child object;
+  [[=indeterminately_sequenced(1)]] ChildList args;
+};
+
 // List-initialization of an aggregate ([dcl.init.aggr]), as analysed: one element per array
 // element or non-static data member, in order, with brace elision and designators resolved and the
 // elements without an initializer value-initialized. Each element is already converted to its
@@ -275,7 +291,8 @@ struct Attribute {
 using Nodes = closed_list<Literal, DeclRef, Paren, Unary, Binary, OrderedBinary, Assign, Subscript, Call,
                           ImplicitConversion, ExprStmt, Return, Compound, If, LocalVar, Attribute, LocalRef,
                           Conditional, While, Do, For, Break, Continue, DeclStmt, Declarator, DeclGroup,
-                          IfConsteval, StaticAssert, Member, InitList, ValueInit, DefaultInit>;
+                          IfConsteval, StaticAssert, Member, InitList, ValueInit, DefaultInit, This,
+                          MemberCall>;
 
 static_assert(Nodes::size < max_node_kinds);
 

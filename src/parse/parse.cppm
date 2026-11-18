@@ -76,11 +76,14 @@ public:
 
   // Whether class `c` is complete at `item` ([class.mem.general]): its definition is an earlier
   // item that does not enclose `item`.
-  bool is_complete(EntityId c, u32 item, bool own = false) {
+  // A function body inside the class is a complete-class context ([class.mem.general]); past
+  // the closing brace of the class an item defines (`own`), that class is complete too.
+  bool is_complete(EntityId c, u32 item, bool body = false, bool own = false) {
     auto it = class_items_.find(std::to_underlying(c));
     if (it == class_items_.end()) return false;
     u32 d = it->second;
-    if ((d >= item && !(own && d == item)) || (d < item && item <= last_member(d))) return false;
+    bool inside = item > d && item <= last_member(d);
+    if ((item < d) || (item == d && !own) || (inside && !body)) return false;
     class_def(d);
     return w_->classes.is_defined(c);
   }
@@ -150,13 +153,27 @@ public:
     return d && (d->flags & (sema::decl_flag::constexpr_ | sema::decl_flag::consteval_));
   }
 
+  // The type of `this` in a non-static member function ([expr.prim.this]): a pointer to its class,
+  // with the function's cv-qualifiers.
+  std::optional<QualType> this_type(const ast::DeclSema& f) {
+    if (f.kind != ast::DeclKind::function || !(f.flags & sema::decl_flag::member) || (f.flags & sema::decl_flag::static_))
+      return std::nullopt;
+    EntityId c = w_->entities.rec(f.entity).scope;
+    return w_->types.pointer(w_->types.add_cv(w_->types.class_type(c), w_->types.rec(f.type).fn_cv));
+  }
+
   // Every item and body analysed, in item order; the diagnostics of each cell in order.
   void analyze_all() {
     for (u32 k = 0; k < items_->items.size(); ++k) {
       // Members of a class or namespace wait for those (M2); the enclosing item was diagnosed.
       if (!in_global_scope(k)) continue;
       item_sema(k);
-      if (items_->items[k].kind == ItemKind::class_def) class_def(k);
+      if (items_->items[k].kind == ItemKind::class_def) {
+        class_def(k);
+        // The members' function bodies, complete-class contexts.
+        for (u32 m : items_->items[k].members)
+          if (items_->items[m].kind == ItemKind::function && items_->items[m].has_body()) analyze_body(m);
+      }
       if (items_->items[k].has_body() && items_->items[k].kind == ItemKind::function) analyze_body(k);
     }
   }
@@ -252,7 +269,8 @@ public:
   interp::Callee function_ir(EntityId f) override { return p_->function_ir(f, item_); }
   std::optional<interp::GlobalVar> global(EntityId v) override { return p_->global(v, item_); }
   bool is_constexpr(EntityId f) override { return p_->is_constexpr(f, item_); }
-  bool is_complete(EntityId c) override { return p_->is_complete(c, item_, own_class_complete); }
+  bool is_complete(EntityId c) override { return p_->is_complete(c, item_, self_, own_class_complete); }
+  std::optional<ConstId> constant_value(EntityId v) override { return p_->constant_value(v, item_); }
   // Past the closing brace of the class the item defines, that class is complete.
   bool own_class_complete = false;
 
@@ -302,12 +320,8 @@ public:
       else declaration();
       break;
     case ItemKind::function:
-      if (member) {
-        s_.diag(0, Diag::not_supported, Tk::l_brace);  // member function definitions
-        bad();
-      } else {
-        declaration();
-      }
+      if (member) member_declaration();
+      else declaration();
       break;
     case ItemKind::class_def:
       if (member) {
@@ -489,8 +503,8 @@ private:
       return bad();
     }
     DeclSpec spec = ps_.decl_specifiers();
-    if (spec.is_static || spec.is_extern || spec.is_inline || spec.is_constexpr || spec.is_consteval || spec.is_constinit) {
-      s_.diag(spec.begin, Diag::not_supported, spec.is_static ? Tk::kw_static : spec.is_inline ? Tk::kw_inline : Tk::kw_constexpr);
+    if (spec.is_extern || spec.is_constinit) {
+      s_.diag(spec.begin, Diag::not_supported, spec.is_extern ? Tk::kw_extern : Tk::kw_constinit);
       return bad();
     }
     if (!spec.ok) return bad();
@@ -506,10 +520,18 @@ private:
         s_.diag(d.name_at, Diag::unknown_bound_member);  // [class.mem.general]: a complete type
         return bad();
       }
-      if (types.is_function(d.type) || ps_.is(Tk::colon)) {
-        // Member functions and bit-fields come later (#86).
-        s_.diag(types.is_function(d.type) ? d.name_at : ps_.pos(), Diag::not_supported,
-                types.is_function(d.type) ? Tk::l_paren : ps_.kind());
+      if (d.qualified) {
+        s_.diag(d.qualifier_at, Diag::not_supported, Tk::coloncolon);
+        return bad();
+      }
+      if (types.is_function(d.type) || spec.is_static) {
+        if (!member_function_or_static(spec, d, c)) return bad();
+        if (it_->kind == ItemKind::function) return;  // its body follows the declaration part
+        continue;
+      }
+      if (ps_.is(Tk::colon) || spec.is_inline || spec.is_constexpr || spec.is_consteval) {
+        // Bit-fields; inline or constexpr non-static data members are ill-formed.
+        s_.diag(ps_.is(Tk::colon) ? ps_.pos() : spec.begin, Diag::not_supported, ps_.is(Tk::colon) ? Tk::colon : Tk::kw_constexpr);
         return bad();
       }
       // [class.mem.general]: a non-static data member has a complete object type; the class is
@@ -559,6 +581,117 @@ private:
     if (!ps_.expect(Tk::semi)) bad();
   }
 
+  // A qualified declarator `C::m` outside its class: the definition of a member function or a
+  // static data member C declares ([class.mfct], [class.static.data]), with its entity and flags.
+  bool define_member(const parse::Declarator& d, ast::DeclSema& sem, bool fn, bool definition) {
+    auto t = s_.class_name(d.qualifier, true);
+    if (!t) {
+      s_.diag(d.qualifier_at, Diag::not_a_type, d.qualifier);
+      return false;
+    }
+    if (!s_.require_complete(*t, d.qualifier_at)) return false;
+    const sema::ClassRec* cr = s_.world().classes.find(s_.types().class_of(*t));
+    const sema::MemberDeclRec* m = nullptr;
+    for (const sema::MemberDeclRec& r : cr->members)
+      if (r.name == d.name && r.is_function == fn && s_.types().canonical(r.type) == s_.types().canonical(sem.type)) m = &r;
+    if (!m || (!fn && !m->is_static)) {
+      s_.diag(d.name_at, Diag::no_member_declared, d.name, *t);
+      return false;
+    }
+    auto mem = p_->decl_sema(m->decl);
+    if (!mem) return false;
+    // [class.mfct]/1, [class.static.data]/3: outside its class a member is only defined, once.
+    if (!definition) {
+      s_.diag(d.name_at, Diag::conflicting_declaration, d.name);
+      return false;
+    }
+    if (mem->flags & sema::decl_flag::definition) {
+      s_.diag(d.name_at, Diag::redefinition, d.name);
+      return false;
+    }
+    constexpr u16 kept = sema::decl_flag::member | sema::decl_flag::static_ | sema::decl_flag::constexpr_ |
+                         sema::decl_flag::consteval_;
+    sem.flags = u16((sem.flags & ~kept) | (mem->flags & kept));
+    sem.entity = m->entity;
+    sem.linkage = mem->linkage;
+    sem.storage = mem->storage;
+    return true;
+  }
+
+  // A member function or static data member of class `c` declared in its class ([class.mfct],
+  // [class.static]).
+  bool member_function_or_static(const DeclSpec& spec, parse::Declarator& d, ast::DeclSema c) {
+    sema::Types& types = s_.types();
+    bool fn = types.is_function(d.type);
+    bool is_def = it_->kind == ItemKind::function;
+    ast::DeclSema sem = class_decl(c.entity, false);
+    sem.type = d.type;
+    sem.linkage = ast::Linkage::external;
+    u16 flags = sema::decl_flag::member;
+    if (spec.is_static) flags |= sema::decl_flag::static_;
+    if (spec.is_constexpr) flags |= sema::decl_flag::constexpr_;
+    if (spec.is_consteval) flags |= sema::decl_flag::consteval_;
+    if (spec.is_inline || spec.is_constexpr || spec.is_consteval || is_def) flags |= sema::decl_flag::inline_;
+    if (member_declared(d.name)) {
+      s_.diag(d.name_at, fn ? Diag::overload_not_supported : Diag::redeclared_member, d.name);
+      return false;
+    }
+    Ex init;
+    ConstId value = ConstId::none;
+    if (fn) {
+      const sema::TypeRec& r = types.rec(d.type);
+      if (spec.is_static && r.fn_cv != sema::Cv::none) {
+        s_.diag(d.name_at, Diag::cv_on_non_member);  // [class.static.mfct]/2
+        return false;
+      }
+      if (ps_.is(Tk::equal)) {
+        s_.diag(ps_.pos(), Diag::not_supported, Tk::equal);  // pure, defaulted and deleted functions
+        return false;
+      }
+      sem.kind = ast::DeclKind::function;
+      if (is_def) flags |= sema::decl_flag::definition;
+      if (r.variadic) flags |= sema::decl_flag::variadic;
+      std::vector<ast::ParamSema> params;
+      for (const parse::Param& p : d.params) params.push_back({EntityId::none, p.type, p.name, NodeId::none, 0});
+      sem.params = b_.seq(std::span<const ast::ParamSema>(params));
+      sem.entity = s_.world().entities.entity(
+          {sema::EntityKind::function, d.name, d.type, LangLinkage::cxx, ast::Linkage::external, {}, c.entity});
+    } else {
+      // A static data member: a declaration, unless inline or constexpr ([class.static.data]).
+      // One that is const integral or constexpr may give its value in the class, and is then
+      // usable in constant expressions ([expr.const]).
+      sem.kind = ast::DeclKind::variable;
+      sem.storage = ast::Storage::static_;
+      if (spec.is_constexpr) d.type = types.add_cv(d.type, sema::Cv::const_);
+      sem.type = d.type;
+      if (spec.is_inline || spec.is_constexpr) flags |= sema::decl_flag::definition;
+      sem.entity = s_.world().entities.entity(
+          {sema::EntityKind::variable, d.name, d.type, LangLinkage::cxx, ast::Linkage::external, {}, c.entity});
+      if (ps_.accept(Tk::equal)) {
+        Ex e = ps_.assignment_expression();
+        init = s_.convert(e, d.type, e.begin);
+        if (!init.ok()) return false;
+        bool usable = spec.is_constexpr || (sema::Types::is_const(d.type) && types.is_integral(d.type));
+        sema::Evaluated v = usable ? sema::Evaluator(s_, q_).evaluate(init) : sema::Evaluated{};
+        if (!v.value) {
+          s_.diag(e.begin, usable ? Diag::not_constant : Diag::not_supported, usable ? v.reason : u64(Tk::equal));
+          return false;
+        }
+        value = *v.value;
+        p_->set_constant(sem.entity, value, k_);
+      } else if (spec.is_constexpr) {
+        s_.diag(d.name_at, Diag::constexpr_uninitialized, d.name);
+        return false;
+      }
+    }
+    sem.flags = flags;
+    s_.own.push_back({d.name, sem});
+    p_->declared(sem, k_);
+    declarators_.push_back(s_.node(ast::Declarator{u32(decls_.size()), sema::Sema::at(init, d.begin), value}, d.begin, ps_.pos()));
+    decls_.push_back(sem);
+    return true;
+  }
+
   // Whether the class already has a member named `n`: in this item, or an earlier member item
   // ([class.mem.general]: a member is declared once).
   bool member_declared(NameId n) {
@@ -568,7 +701,7 @@ private:
       if (m == k_) break;
       const ast::ItemSema& ms = p_->item_sema(m).value;
       for (const ast::DeclSema& d : p_->world().ins.seqs.elements(ms.decls))
-        if (d.entity != EntityId::none && d.kind == ast::DeclKind::data_member && p_->world().entities.rec(d.entity).name == n)
+        if (d.entity != EntityId::none && d.kind != ast::DeclKind::class_ && p_->world().entities.rec(d.entity).name == n)
           return true;
     }
     return false;
@@ -648,21 +781,28 @@ private:
       return false;
     }
 
-    // Earlier declarations of the name: in this item, then before it ([basic.link], [dcl.fct]).
+    // Earlier declarations of the name: in this item, then before it ([basic.link], [dcl.fct]). A
+    // qualified name redeclares a member of its class instead.
     std::vector<ast::DeclSema> prior;
     // A class and a variable or function may share a name; the class is hidden
     // ([basic.scope.scope]/4, [basic.scope.hiding]/2), so it is not an earlier declaration.
-    for (DeclId p : q_.visible_decls(d.name))
-      if (auto ds = p_->decl_sema(p); ds && ds->entity != EntityId::none && ds->kind != ast::DeclKind::class_)
-        prior.push_back(*ds);
-    for (const auto& o : s_.own)
-      if (o.name == d.name && o.sema.kind != ast::DeclKind::class_) prior.push_back(o.sema);
+    if (!d.qualified) {
+      for (DeclId p : q_.visible_decls(d.name))
+        if (auto ds = p_->decl_sema(p); ds && ds->entity != EntityId::none && ds->kind != ast::DeclKind::class_)
+          prior.push_back(*ds);
+      for (const auto& o : s_.own)
+        if (o.name == d.name && o.sema.kind != ast::DeclKind::class_) prior.push_back(o.sema);
+    }
     if (fn) {
       if (!explicit_lang && !prior.empty() && prior.back().kind == ast::DeclKind::function)
         lang = s_.world().entities.rec(prior.back().entity).lang;  // [dcl.link]/6: inherited
       const sema::TypeRec& r = types.rec(d.type);
+      if (r.fn_cv != sema::Cv::none && !d.qualified) {
+        s_.diag(d.name_at, Diag::cv_on_non_member);  // [dcl.fct]/6
+        return false;
+      }
       std::vector<QualType> ps = r.params;
-      sem.type = types.function(r.inner, ps, r.variadic, lang);
+      sem.type = types.function(r.inner, ps, r.variadic, lang, r.fn_cv);
       if (lang == LangLinkage::c) flags |= sema::decl_flag::lang_c;
       if (r.variadic) flags |= sema::decl_flag::variadic;
       std::vector<ast::ParamSema> params;
@@ -673,7 +813,9 @@ private:
     }
     sem.flags = flags;
 
-    if (!prior.empty()) {
+    if (d.qualified) {
+      if (!define_member(d, sem, fn, definition)) return false;
+    } else if (!prior.empty()) {
       const ast::DeclSema& p = prior.back();
       if ((p.kind == ast::DeclKind::function) != fn) {
         s_.diag(d.name_at, Diag::conflicting_declaration, d.name);
@@ -894,6 +1036,7 @@ const Result<ast::ClassDef>& Program::class_def(u32 item) {
   // [class.access.spec]: members of a class defined with `class` are private by default.
   ast::Access access = r_->tokens[it.begin].kind == lex::Tk::kw_class ? ast::Access::private_ : ast::Access::public_;
   std::vector<sema::FieldRec> fields;
+  std::vector<sema::MemberDeclRec> statics;
   for (u32 m : it.members) {
     const items::Item& mi = items_->items[m];
     if (mi.kind == ItemKind::access_spec) {
@@ -916,12 +1059,17 @@ const Result<ast::ClassDef>& Program::class_def(u32 item) {
       members.push_back({{id(m), ast::make_decl_ord(ast::DeclClass::syntactic, i)}, d.entity, access});
       if (d.kind == ast::DeclKind::data_member)
         fields.push_back({w_->entities.rec(d.entity).name, d.type, d.entity, inits.contains(i) ? inits[i] : ConstId::none});
+      else if (d.kind == ast::DeclKind::function || d.kind == ast::DeclKind::variable)
+        statics.push_back({w_->entities.rec(d.entity).name, d.entity, d.type,
+                           {id(m), ast::make_decl_ord(ast::DeclClass::syntactic, i)}, d.kind == ast::DeclKind::function,
+                           (d.flags & sema::decl_flag::static_) != 0});
     }
   }
   if (cls && *cls != EntityId::none) {
     sema::ClassRec& rec = w_->classes.rec(*cls);
     if (!rec.defined) {
       rec.fields = std::move(fields);
+      rec.members = std::move(statics);
       rec.defined = true;
     }
   }
@@ -957,6 +1105,11 @@ public:
       s_.set_return_type(s_.types().rec(f->type).inner);
       // A consteval function's body is an immediate function context ([expr.const]).
       if (f->flags & sema::decl_flag::consteval_) s_.immediate_context = 1;
+      // A member function's body sees its class's members ([basic.scope.class]) and `this`.
+      if (f->flags & sema::decl_flag::member) {
+        s_.current_class = p_->world().entities.rec(f->entity).scope;
+        s_.this_type = p_->this_type(*f);
+      }
       // The parameters are the first locals, in their own scope ([basic.scope.param]).
       s_.push_scope();
       s_.guard_scope();
@@ -1008,6 +1161,7 @@ interp::Callee Program::function_ir(EntityId f, u32 item) {
       ast::DeclSema d = w_->ins.seqs.at(is.decls, 0);
       const items::Item& it = items_->items[k];
       irgen::FunctionInput input{d.entity, d, body.value, id(k), it.body_begin - it.begin};
+      input.this_type = this_type(d);
       AtItem q(*this, k, true);
       sema::EvalFacts facts(*w_, q);
       if (auto r = irgen::function_ir(w_->ins, input, facts)) ir = std::move(*r);
