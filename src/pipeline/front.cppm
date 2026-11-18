@@ -49,6 +49,7 @@ class Front {
 
   ast::Interners& interners() { return ins_; }
   Constants& constants() { return consts_; }
+  const Records& records() const { return records_; }
 
  private:
   // String literal objects and their addresses, from the values interner (`VString`, `VLvalue`).
@@ -71,9 +72,32 @@ class Front {
     sema::World* w_;
   };
 
+  // Class layouts and names, from sema's class table.
+  class ClassRecords final : public Records {
+   public:
+    explicit ClassRecords(sema::World& w) : w_(&w) {}
+    std::optional<Record> record(EntityId c) const override {
+      if (!w_->classes.is_defined(c)) return std::nullopt;
+      QualType t = w_->types.class_type(c);
+      sema::ObjectLayout l = w_->classes.layout(t);
+      Record r{l.size, l.align, {}};
+      const sema::ClassRec* cr = w_->classes.find(c);
+      for (std::size_t i = 0; i < cr->fields.size(); ++i)
+        r.fields.push_back({l.offsets[i], w_->ins.canonical(cr->fields[i].type)});
+      return r;
+    }
+    std::string class_name(EntityId c) const override {
+      return std::string(w_->ins.names.spelling(w_->entities.rec(c).name));
+    }
+
+   private:
+    sema::World* w_;
+  };
+
   ast::Interners ins_;
   sema::World world_{ins_};
   ValueConstants consts_{world_};
+  ClassRecords records_{world_};
   engine::Db db_;
   pp::Region region_;
   items::Items items_;
@@ -128,6 +152,7 @@ TranslationUnit Front::unit(std::string name) {
   auto declare = [&](EntityId e, std::optional<ast::Loc> at) {
     if (e == EntityId::none || !seen.insert(std::to_underlying(e)).second) return;
     const sema::EntityRec& r = world_.entities.rec(e);
+    if (r.kind != sema::EntityKind::function && r.kind != sema::EntityKind::variable) return;
     bool fn = r.kind == sema::EntityKind::function;
     std::string id(ins_.names.spelling(r.name));
     if (fn && id == "main") tu.main = e;
@@ -136,7 +161,9 @@ TranslationUnit Front::unit(std::string name) {
   for (std::uint32_t k = 0; k < items_.items.size(); ++k) {
     const items::Item& it = items_.items[k];
     if (!program_->in_global_scope(k)) continue;
-    if (it.kind != items::ItemKind::declaration && it.kind != items::ItemKind::function) continue;
+    if (it.kind != items::ItemKind::declaration && it.kind != items::ItemKind::function &&
+        it.kind != items::ItemKind::class_def)
+      continue;
     const ast::ItemSema& is = program_->item_sema(k).value;
     std::vector<ast::DeclSema> decls = ins_.seqs.elements(is.decls);
     // The declarators, by declaration ordinal: their constants and item-relative locations (the

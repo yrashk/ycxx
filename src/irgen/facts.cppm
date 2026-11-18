@@ -12,7 +12,8 @@ export namespace ycxx::irgen {
 namespace ast = ycxx::ast;
 
 // The classes of types the α slice's IR generation distinguishes (#39).
-enum class TypeClass : std::uint8_t { void_, bool_, integer, pointer, array, function, other };
+// `record` is a class type ([class]).
+enum class TypeClass : std::uint8_t { void_, bool_, integer, pointer, array, function, record, other };
 
 // An integral type's representation: bool is an unsigned 1-bit integer ([basic.fundamental]).
 struct IntRep {

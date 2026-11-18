@@ -4,6 +4,7 @@
 export module ycxx.client;
 
 import std;
+import ycxx.ast;
 import ycxx.obj.macho;
 import ycxx.pipeline;
 import ycxx.pp;
@@ -129,7 +130,7 @@ std::optional<obj::object> compile(const std::string& path, Options::Stop stop) 
   if (front.has_errors()) return std::nullopt;
   if (stop == Options::Stop::syntax) return obj::object{};
   pipeline::TranslationUnit tu = front.unit(object_name(path).native_encoded_string());
-  auto o = pipeline::compile(tu, front.interners(), front.constants());
+  auto o = pipeline::compile(tu, front.interners(), front.constants(), ycxx::ast::aarch64_darwin, &front.records());
   if (!o) {
     for (const pipeline::BackError& e : o.error()) {
       if (e.at) out.at(front.byte_offset(*e.at), true, e.message);

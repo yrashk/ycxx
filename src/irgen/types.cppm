@@ -30,6 +30,7 @@ class TypeFacts {
     if (in_->types.is<ast::TPointer>(c)) return TypeClass::pointer;
     if (in_->types.is<ast::TArray>(c)) return TypeClass::array;
     if (in_->types.is<ast::TFunction>(c)) return TypeClass::function;
+    if (in_->types.is<ast::TClass>(c)) return TypeClass::record;
     return TypeClass::other;
   }
 

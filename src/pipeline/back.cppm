@@ -47,6 +47,21 @@ class Constants {
   virtual ConstId address_of(ConstId object) = 0;
 };
 
+// What the back end asks of classes (ast.md §3.6, `layout` of AST design Part D): the layout of a
+// complete class ([class.mem], Itanium C++ ABI §2.4) and its name, for linkage names. The front
+// end answers from sema's class table until #33 and #63 provide the query.
+class Records {
+ public:
+  virtual ~Records() = default;
+  struct Record {
+    std::uint64_t size = 0;
+    std::uint32_t align = 1;
+    std::vector<ir::SubObject> fields;  // the non-static data members, in order
+  };
+  virtual std::optional<Record> record(EntityId c) const = 0;
+  virtual std::string class_name(EntityId c) const = 0;
+};
+
 // An entity the translation unit declares (or defines): what its symbol is made of.
 struct Entity {
   EntityId id = EntityId::none;
@@ -87,8 +102,8 @@ struct BackError {
 // the target. String literal objects become entities of their own, numbered on first use.
 class Layout {
  public:
-  Layout(ast::Interners& in, const ast::Target& target, const Constants& consts)
-      : in_(&in), target_(&target), consts_(&consts) {}
+  Layout(ast::Interners& in, const ast::Target& target, const Constants& consts, const Records* records = nullptr)
+      : in_(&in), target_(&target), consts_(&consts), records_(records) {}
 
   ir::TypeLayout type(QualType q) const {
     using enum ir::TypeKind;
@@ -109,7 +124,13 @@ class Layout {
       return {array, e.size * n, e.align, false, {}};
     }
     if (in_->types.is<ast::TFunction>(c)) return {function, 0, 1, false, {}};
+    if (auto r = class_record(c)) return {record, r->size, r->align, false, {}};
     return {};
+  }
+
+  std::optional<Records::Record> class_record(QualType c) const {
+    if (!records_ || !in_->types.is<ast::TClass>(c)) return std::nullopt;
+    return records_->record(in_->types.get<ast::TClass>(c).entity);
   }
 
   ir::SubObject step(QualType q, ir::PathStep s) const {
@@ -118,7 +139,8 @@ class Layout {
       QualType e = in_->canonical(in_->types.get<ast::TArray>(c).elem);
       return {s.index * type(e).size, e};
     }
-    return {};  // classes come with #33's layout
+    if (auto r = class_record(c); r && s.step == ir::Step::field && s.index < r->fields.size()) return r->fields[s.index];
+    return {};
   }
 
   ir::ConstValue constant(ConstId c) const {
@@ -143,13 +165,15 @@ class Layout {
   ast::Interners* in_;
   const ast::Target* target_;
   const Constants* consts_;
+  const Records* records_;
   mutable std::vector<std::pair<ConstId, EntityId>> strings_;  // the layout query's own memo
 };
 
 // The objects of one translation unit, or what the α subset cannot compile yet.
 std::expected<obj::object, std::vector<BackError>> compile(const TranslationUnit& tu, ast::Interners& in,
                                                            Constants& consts,
-                                                           const ast::Target& target = ast::aarch64_darwin);
+                                                           const ast::Target& target = ast::aarch64_darwin,
+                                                           const Records* records = nullptr);
 
 }  // namespace ycxx::pipeline
 
@@ -181,31 +205,49 @@ struct Bytes {
   std::vector<aarch64::DataReloc> relocs;
 };
 
-std::expected<Bytes, std::string> initial_bytes(const ast::Interners& in, const Layout& layout, QualType type, ConstId init) {
+// Writes the value `init` of an object of `type` at `offset` in `out`.
+std::expected<void, std::string> place_value(const ast::Interners& in, const Layout& layout, QualType type, ConstId init,
+                                             std::uint64_t offset, Bytes& out) {
   ir::TypeLayout l = layout.type(type);
-  Bytes out;
-  out.bytes.assign(l.size, 0);
-  if (init == ConstId::none) return out;
   if (l.kind == ir::TypeKind::pointer) {
     ir::ConstValue v = layout.constant(init);
-    if (v.base) out.relocs.push_back({0, *v.base, v.bits});
+    if (v.base) out.relocs.push_back({std::uint32_t(offset), *v.base, v.bits});
     else if (v.bits != 0) return std::unexpected("a pointer initialized with an integer other than zero");
-    return out;
+    return {};
   }
   if (l.kind == ir::TypeKind::integer || l.kind == ir::TypeKind::boolean) {
     if (!in.values.is<ast::VInt>(init)) return std::unexpected("an integer variable's initializer is not an integer");
     std::uint64_t v = in.values.get<ast::VInt>(init).bits.lo;
-    for (std::uint64_t i = 0; i < l.size; ++i) out.bytes[i] = std::uint8_t(v >> (8 * i));
-    return out;
+    for (std::uint64_t i = 0; i < l.size; ++i) out.bytes[offset + i] = std::uint8_t(v >> (8 * i));
+    return {};
+  }
+  if ((l.kind == ir::TypeKind::array || l.kind == ir::TypeKind::record) && in.values.is<ast::VAggregate>(init)) {
+    // [dcl.init.aggr]: each element at its offset.
+    auto elems = in.seqs.elements(in.values.get<ast::VAggregate>(init).elems);
+    ir::Step step = l.kind == ir::TypeKind::array ? ir::Step::elem : ir::Step::field;
+    for (std::uint32_t i = 0; i < elems.size(); ++i) {
+      ir::SubObject s = layout.step(type, {step, i});
+      if (auto r = place_value(in, layout, s.type, elems[i], offset + s.offset, out); !r) return r;
+    }
+    return {};
   }
   return std::unexpected("a variable of this type");
 }
 
+std::expected<Bytes, std::string> initial_bytes(const ast::Interners& in, const Layout& layout, QualType type, ConstId init) {
+  Bytes out;
+  out.bytes.assign(layout.type(type).size, 0);
+  if (init == ConstId::none) return out;
+  if (auto r = place_value(in, layout, type, init, 0, out); !r) return std::unexpected(r.error());
+  return out;
+}
+
 std::expected<obj::object, std::vector<BackError>> compile(const TranslationUnit& tu, ast::Interners& in,
-                                                           Constants& consts, const ast::Target& target) {
+                                                           Constants& consts, const ast::Target& target,
+                                                           const Records* records) {
   std::vector<BackError> errors;
   UnitFacts facts(in, target, consts, tu);
-  Layout layout(in, target, consts);
+  Layout layout(in, target, consts, records);
   aarch64::Unit unit;
   unit.name = tu.name;
 
@@ -273,7 +315,9 @@ std::expected<obj::object, std::vector<BackError>> compile(const TranslationUnit
   }
   for (const Entity& e : tu.entities) {
     if (!used.contains(ir::raw(e.id))) continue;
-    auto name = symbol_name(in, e.name, e.type, e.is_function, e.lang);
+    auto name = symbol_name(in, e.name, e.type, e.is_function, e.lang, [&](EntityId c) {
+      return records ? records->class_name(c) : std::string();
+    });
     if (!name) {
       errors.push_back({e.at, std::format("the name of '{}': {} is not supported yet", e.name, name.error())});
       continue;
