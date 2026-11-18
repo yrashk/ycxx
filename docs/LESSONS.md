@@ -201,6 +201,23 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
   - Do: run `otool -l` on the output first. It reports "malformed load command" and where.
     `dyld_info -fixups -exports -imports` checks chained fixups and the exports trie the same way.
   - Learned on #42.
+- **GCC cannot parse `<CoreServices/CoreServices.h>`**: Apple's headers declare blocks (`^`),
+  which GCC 16 rejects. FSEvents alone is plain C.
+  - Do: `#include <FSEvents/FSEvents.h>` in the global module fragment, with
+    `-F<sdk>/System/Library/Frameworks/CoreServices.framework/Frameworks` on that one file, and
+    link `-framework CoreServices` (src/daemon/CMakeLists.txt). `<dispatch/dispatch.h>` parses.
+  - Do: platform code goes in one module partition per platform, picked by CMake (`:os`,
+    `:watch` in src/daemon); the preprocessor policy rules out `#if`.
+  - Do: check Linux-only code before pushing, with the CI image:
+    `docker run --rm -v "$PWD":/src:ro gcc:16 …`, copying the tree and running cmake and ctest
+    directly (`tools/sync-submodules` cannot see a worktree's `.git` from inside the container).
+  - Learned on #96/#97.
+- **A watcher test that passes at once may not test the race.** The FSEvents test of "an edit
+  between the read and the new stream" passed with the replay removed: a stream created "since
+  now" still saw an event `fseventsd` had not journaled yet.
+  - Do: mutate the code under test, and add the delay that makes the event happen before the race
+    window (here, 1 s before recreating the stream).
+  - Learned on #96/#97.
 - **libycxx deprecates `std::filesystem::path::string()`** (C++26 [depr.fs.path.obs]), and
   `-Werror` turns it into a build failure.
   - Do: use `native_encoded_string()` for file names passed on, `display_string()` for messages.
