@@ -152,6 +152,10 @@ design §8.2): a private daemon per test sees each state as file changes. Each r
 repeated and must execute no engine cell, and an edited state may not execute more cells than a
 fresh daemon does for it.
 
+The daemon's own tests are ctest programs in [`tests/daemon`](../tests/daemon): `compare.py`
+(daemon versus in-process over `tests/own`, byte for byte) and `process.py` (an edit mid-build,
+killed clients and daemons, a restart, concurrent clients), each on a private daemon.
+
 [`tools/incr-fuzz`](../tools/incr-fuzz) generates random token edits over `.incr` tests or C++
 files, compares the daemon with a cold compile on every state (`-fsyntax-only`), and writes each
 divergence, delta-minimized, as a `.incr` regression test.

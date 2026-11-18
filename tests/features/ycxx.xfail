@@ -653,3 +653,4 @@ own/classes/s1-default-member-init.run.cpp a default member initializer naming a
 own/classes/s1-elaborated.run.cpp block-scope elaborated type specifier (#117)
 own/classes/s1-locals-scopes.run.cpp local classes (#117)
 own/classes/s2-constexpr-members.run.cpp classes in constant evaluation (#25)
+incremental/smoke/struct-members.incr the daemon keeps a struct's members from before an edit and rejects the edited state (#115)

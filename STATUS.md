@@ -568,16 +568,23 @@ the same handler in-process.
 - Tests:
   - `unit.daemon`: framing and malformed frames, root discovery, the quantum under simulated
     time, file-table batches, and the real watcher with cookie sync.
-  - `daemon.compare` (`tests/daemon/compare.py`): `tests/own/slice` and `smoke` in four actions,
-    through a daemon and in-process, byte for byte. It also covers two directories with one
-    argv, edits, fallback, and a killed daemon.
-  - Both run on macOS and Linux.
+  - `daemon.compare` (`tests/daemon/compare.py`): `tests/own/slice` and `smoke` whole and every
+    8th test of the other suites (`--all`: every test), in four actions, through a daemon and
+    in-process, byte for byte; two directories with one argv, edits, fallback, and a killed
+    daemon. One daemon (one pid) must answer until it is killed, so a crash hidden by the
+    client's retry fails it. Divergences with their own issue are listed (`KNOWN`, #115).
+  - `daemon.process` (`tests/daemon/process.py`, #98): an edit landing mid-build (restarted,
+    answered as the final state, counted in `ctl status`), a killed client (cancelled), a killed
+    daemon mid-request (the client retries), a restart, and concurrent clients.
+  - All run on macOS and Linux.
 - Not yet:
   - concurrent requests, cell-level restarts, and the daemon as the default (#139, which needs
     requests as root keys and a front end on a pool, #107);
   - `progress` messages and `build_time` (#140);
   - the persistent cache handoff and the file table in it (#17);
-  - the LSP front (#99), and the rest of the β tests (#98).
+  - the LSP front (#99);
+  - the β tests that need those: the cache across a restart (#17), every answer at 1 and P
+    threads and requests that overlap (#139).
   - The engine counts in a report are the session's `Db::stats()` deltas, which are exact while
     requests run one at a time; per-request `Counters` come with #139.
 
