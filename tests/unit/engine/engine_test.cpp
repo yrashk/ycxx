@@ -550,6 +550,47 @@ void verify_table_catches_a_missed_dependency() {
   check(ok.ok() && ok.checked >= 3, std::format("with the world as the cell saw it, the tables agree ({} checked)", ok.checked));
 }
 
+// Always 0, so its value never shows which input it read; only its dependency list does.
+std::uint32_t hidden_choice = 0;
+struct Chooser {
+  using Key = std::uint32_t;
+  using Value = std::int64_t;
+  static query_task<Value> run(Ctx& cx, Key) { co_return 0 * cx.fetch<In>(hidden_choice); }
+};
+
+void verify_table_other_cases() {
+  // The same value from another dependency: a different dependency list.
+  Db inc, cold;
+  for (Db* db : {&inc, &cold}) {
+    db->set<In>(0, 1);
+    db->set<In>(1, 1);
+  }
+  hidden_choice = 0;
+  (void)inc.get<Chooser>(0);
+  hidden_choice = 1;
+  (void)cold.get<Chooser>(0);
+  const auto deps = inc.verify_table(cold);
+  check(!deps.ok() && deps.mismatches.size() == 1 && deps.mismatches[0].contains("dependency list"), "a different dependency list");
+
+  // A cell the incremental Db never computed is reported, not computed.
+  (void)cold.get<Echo>(0);
+  const std::size_t before = inc.stats().executed;
+  const auto missing = inc.verify_table(cold);
+  check(std::ranges::any_of(missing.mismatches, [](const std::string& m) { return m.contains("never computed here"); }) &&
+            inc.stats().executed == before,
+        "a cell never computed here is named and left alone");
+
+  // A cell that is out of date here executes when brought up to date: the check fails.
+  Db stale, fresh;
+  stale.set<In>(0, 1);
+  (void)stale.get<Echo>(0);
+  stale.set<In>(0, 2);
+  fresh.set<In>(0, 2);
+  (void)fresh.get<Echo>(0);
+  const auto ran = stale.verify_table(fresh);
+  check(!ran.ok() && ran.executed == 1 && ran.mismatches.empty(), "work done while checking fails the check");
+}
+
 }  // namespace
 
 int main() {
@@ -568,5 +609,6 @@ int main() {
   concepts();
   incremental_equals_cold();
   verify_table_catches_a_missed_dependency();
+  verify_table_other_cases();
   return ycxx::unit::result("engine");
 }

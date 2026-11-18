@@ -595,9 +595,6 @@ struct KindTableBase {
   virtual void execute_sync(Db& db, CellId c, std::uint64_t restore, const Frame* chain) = 0;
   // Gives a claimed input cell without a value its provider's value, and publishes it.
   virtual void provide(Db& db, CellId c) = 0;
-  // The cell of `inc` with the key of `cold`'s cell `c` (`ids` maps key fingerprints to `inc`'s
-  // cells, for keys that name a cell).
-  virtual CellId counterpart(Db& inc, const Db& cold, CellId c, const std::unordered_map<Fp128, CellId, FpHash>& ids) = 0;
   std::string_view name;
   Fp128 seed;
   Counters counters;
@@ -630,7 +627,6 @@ struct KindTable final : KindTableBase {
   std::coroutine_handle<> make_frame(Db& db, CellId c, std::uint32_t id, Root& root, bool validate, std::uint64_t old) override;
   void execute_sync(Db& db, CellId c, std::uint64_t restore, const Frame* chain) override;
   void provide(Db& db, CellId c) override;
-  CellId counterpart(Db& inc, const Db& cold, CellId c, const std::unordered_map<Fp128, CellId, FpHash>& ids) override;
   // Set at quiescence, called by any worker (daemon design §5.1).
   [[no_unique_address]] std::conditional_t<InputKind<Q>, std::function<provided<Value>(const Key&)>, std::monostate> provider;
 };
@@ -773,9 +769,13 @@ public:
   template <MemoQuery Q>
   std::vector<Demand> demands(const typename Q::Key& k) const;
 
-  // The memo-table comparison of incremental == cold (§A9): every cell `cold` executed, brought
-  // up to date here, has the same fingerprint and dependency list, and none of it executes; an
-  // input has the same fingerprint. Both Dbs are quiescent and in this process.
+  // The memo-table comparison of incremental == cold (§A9): every cell `cold` executed and still
+  // holds valid at its last revision, found here by its key's fingerprint and brought up to date,
+  // has the same fingerprint and dependency list, and none of it executes; an input has the same
+  // fingerprint. A cell `cold` has and this Db never computed is reported, not computed.
+  // Preconditions: both Dbs are quiescent and in this process, and their keys mean the same:
+  // keys holding interner handles need one set of interners shared by both, until handles are
+  // fingerprinted by content (§A7.1, #68).
   struct TableCheck {
     std::uint64_t checked = 0;
     std::uint64_t executed = 0;           // executions here while checking: 0 when it holds
@@ -1990,18 +1990,6 @@ void KindTable<Q>::execute_sync(Db& db, CellId c, std::uint64_t restore, const F
 }
 
 template <MemoQuery Q>
-CellId KindTable<Q>::counterpart(Db& inc, const Db& cold, CellId c, const std::unordered_map<Fp128, CellId, FpHash>& ids) {
-  Key k = cold.key_of<Q>(c);
-  if constexpr (std::is_same_v<Key, CellRef>) {
-    // A key naming a cell (`DiagsOf`) names `inc`'s cell of the same key.
-    const auto it = ids.find(k.key);
-    if (it == ids.end()) return no_cell;
-    k.id = it->second;
-  }
-  return inc.cell_for<Q>(k);
-}
-
-template <MemoQuery Q>
 void KindTable<Q>::provide(Db& db, CellId c) {
   if constexpr (InputKind<Q>) db.provide<Q>(c);
   else contract_assert(false);  // only inputs are provided
@@ -2275,7 +2263,10 @@ Db::TableCheck Db::verify_table(const Db& cold) {
     }
   };
   std::unordered_map<Fp128, CellId, FpHash> ids;
-  for (CellId c = 0; c < cells_.size(); ++c) ids.emplace(cells_[c].key_fp, c);
+  std::unordered_set<Fp128, FpHash> shared;  // key fingerprints of two cells here
+  for (CellId c = 0; c < cells_.size(); ++c) {
+    if (!ids.emplace(cells_[c].key_fp, c).second) shared.insert(cells_[c].key_fp);
+  }
   const auto keys_of = [](const Db& db, const Cell& e) {
     std::vector<Fp128> out;
     for (std::uint32_t d : e.deps) out.push_back(db.cells_[d & ~group_start].key_fp);
@@ -2285,12 +2276,19 @@ Db::TableCheck Db::verify_table(const Db& cold) {
   for (CellId c = 0; c < cold.cells_.size(); ++c) {
     const Cell& want = cold.cells_[c];
     if (want.input ? !want.has_value : want.runs == 0) continue;
+    const std::uint64_t w = want.word.load(std::memory_order_acquire);
+    if (!want.input && !(state_of(w) == State::done && verified_of(w) == cold.revision())) continue;  // stale in `cold`
     ++r.checked;
-    const CellId here = cold.tables_[want.kind].load(std::memory_order_acquire)->counterpart(*this, cold, c, ids);
-    if (here == no_cell) {
-      note(c, "the cell it names does not exist here");
+    if (shared.contains(want.key_fp)) {
+      note(c, "two cells here share its key fingerprint");
       continue;
     }
+    const auto it = ids.find(want.key_fp);
+    if (it == ids.end()) {
+      note(c, "never computed here");
+      continue;
+    }
+    const CellId here = it->second;
     if (!want.input) {
       Blocking b(*this, here, Priority::background);
       const auto done = b.done;
