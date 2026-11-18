@@ -62,7 +62,7 @@ void phases_1_and_2() {
   check(bom.region.locs[0].offset == 3, "offset after the BOM");
   // A lone CR is a new-line: `#` after it starts a directive.
   auto cr = pp::preprocess("a\r#x\rb");
-  check(diags(cr) == std::vector{LexDiag::directive_unsupported}, "lone CR ends a line");
+  check(diags(cr) == std::vector{LexDiag::invalid_directive}, "lone CR ends a line");
   check(kinds(cr.region) == std::vector{Tk::identifier, Tk::identifier}, "lone CR: tokens");
   // Ill-formed UTF-8 ([lex.phases]/1).
   auto bad = pp::preprocess("a \xC3\x28 b \xED\xA0\x80 \xF0\x9F\x98");
@@ -346,10 +346,10 @@ void string_literals() {
 }
 
 void directives() {
-  auto p = pp::preprocess("#define X 1\nint x;\n  # include <a>\n%:x\n#\n");
-  check(std::ranges::count(diags(p), LexDiag::directive_unsupported) == 4, "four directives");
+  auto p = pp::preprocess("#define X 1\nint x;\n  # bogus <a>\n%:x\n#\n");
+  check(diags(p) == std::vector{LexDiag::invalid_directive, LexDiag::invalid_directive}, "two invalid directives");
   check(kinds(p.region) == std::vector{Tk::kw_int, Tk::identifier, Tk::semi}, "directive lines are skipped");
-  check(p.diags[0].offset == 0, "directive offset");
+  check(p.diags[0].offset == 23 && p.diags[1].offset == 35, "directive offsets");
   check(diags(pp::preprocess("a # b")) == std::vector{LexDiag::stray_token}, "# inside a line");
   check(diags(pp::preprocess("a ## b")) == std::vector{LexDiag::stray_token}, "##");
   // [cpp.pre]/2's examples.
@@ -428,7 +428,7 @@ void query() {
   pp::FileId f{7};
   db.set<pp::FileText>(f, "int main() { return 42; } @");
   const Region& r = db.get<pp::Pp>(f);
-  check(r.size() == 10 && r.files == std::vector{f}, "pp(file)");
+  check(r.size() == 10 && r.files.size() == 1 && r.file_names == std::vector<std::string>{"<file 7>"}, "pp(file)");
   const auto& d = db.diags_of<pp::Pp>(f);
   check(d.size() == 1 && d[0].at.item == lex::file_level && d[0].at.offset == 26 &&
             d[0].id == lex::diag_id(LexDiag::stray_basic_character),

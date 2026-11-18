@@ -21,6 +21,9 @@ struct Message {
   std::uint32_t offset = 0;
   bool error = true;
   std::string text;
+  // `file:line:col` when the diagnostic is in another file than the main one (an included
+  // header); the offset is then meaningless. Until #34's renderer.
+  std::string where;
 };
 
 // One translation unit, analysed. It owns everything the front end built, which the back half
@@ -84,7 +87,8 @@ namespace ycxx::pipeline {
 
 constexpr pp::FileId main_file{0};
 
-Front::Front(std::string_view, std::string text) {
+Front::Front(std::string_view path, std::string text) {
+  pp::name_file(main_file, std::string(path));
   db_.set<pp::FileText>(main_file, std::move(text));
   region_ = db_.get<pp::Pp>(main_file);
   items_ = db_.get<items::RegionItems>(main_file);
@@ -94,7 +98,15 @@ Front::Front(std::string_view, std::string text) {
     if (!kind) continue;
     std::vector<std::uint64_t> args;
     for (const engine::DiagArg& a : d.args) args.push_back(a.raw);
-    messages_.push_back({d.at.offset, lex::message_of(*kind).severity == lex::Severity::error, lex::render(*kind, args)});
+    Message m{d.at.offset, lex::message_of(*kind).severity == lex::Severity::error, lex::render(*kind, args), {}};
+    // Located in an included file: rendered here (pp::file_loc).
+    if (d.at.item != lex::file_level) {
+      std::uint16_t f = static_cast<std::uint16_t>(lex::file_level - d.at.item);
+      pp::Message pm = pp::message(pp::session(), pp::session().files.id(region_.files[f]), region_.file_names[f],
+                                   pp::Diag{f, d.at.offset, *kind, {}});
+      m.where = std::format("{}:{}:{}", pm.file, pm.line, pm.column);
+    }
+    messages_.push_back(std::move(m));
   }
   program_ = std::make_unique<parse::Program>(world_, region_, items_);
   program_->analyze_all();
@@ -104,7 +116,7 @@ Front::Front(std::string_view, std::string text) {
     std::vector<std::uint64_t> args;
     for (const engine::DiagArg& a : d.args) args.push_back(a.raw);
     messages_.push_back({program_->byte_offset(d.at), sema::message_of(*kind).severity == lex::Severity::error,
-                         sema::render(*kind, args, [&](char how, std::uint64_t raw) { return program_->spell(how, raw); })});
+                         sema::render(*kind, args, [&](char how, std::uint64_t raw) { return program_->spell(how, raw); }), {}});
   }
   std::ranges::stable_sort(messages_, {}, &Message::offset);
 }

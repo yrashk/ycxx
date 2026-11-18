@@ -26,6 +26,9 @@ in [GitHub issues](https://github.com/yrashk/ycxx/issues) and the
     `extern "C"` calls into libSystem (`puts`, `putchar`).
   - `-o`, `-c`, `-fsyntax-only` and `-std=c++26` are accepted. Errors are reported as
     `file:line:col: error: …`, with exit status 1.
+- The preprocessor, in part (2026-11-18): `#include` of your own headers (`"..."`, `<...>`, `-I`,
+  `-isystem`, `-iquote`, `#include_next`), object-like macros (`#define`, `#undef`, `-D`, `-U`)
+  and `#pragma once`. `ycxx cxx -E` prints what Clang's `-E` does.
 - The acceptance tests in `tests/own/slice` run with ycxx as the compiler in CI, and every
   [draft example](tests/draft) is checked against Clang and GCC.
 
@@ -35,7 +38,9 @@ build/bin/ycxx cxx hello.cpp -o hello && ./hello
 ```
 
 **Not yet:**
-- Preprocessor directives (`#include`, macros).
+- The rest of the preprocessor: function-like macros, `#if` and the other conditionals,
+  `#line`, `#error`, `_Pragma`, and the predefined macros. Without conditionals, system headers
+  such as `<cstdio>` cannot be included yet.
 - Classes, templates and overloading.
 - `constexpr` and `static_assert`.
 - Exceptions.

@@ -6,6 +6,7 @@ export module ycxx.client;
 import std;
 import ycxx.obj.macho;
 import ycxx.pipeline;
+import ycxx.pp;
 
 export namespace ycxx::client {
 int cxx(std::span<const std::string_view> args);
@@ -23,7 +24,8 @@ int not_yet(std::string_view front) {
 
 // What the c++-compatible command line asks for.
 struct Options {
-  enum class Stop { link, object, syntax } stop = Stop::link;
+  enum class Stop { link, object, syntax, preprocess } stop = Stop::link;
+  pp::Config pp;  // -I, -isystem, -iquote, -D, -U
   std::optional<std::string> output;
   std::vector<std::string> sources;  // translation units
   std::vector<std::string> objects;  // Mach-O objects, linked as they are
@@ -40,8 +42,12 @@ std::expected<Options, std::string> parse_options(std::span<const std::string_vi
   Options o;
   for (std::size_t i = 0; i < args.size(); ++i) {
     std::string_view a = args[i];
+    auto pp_option = pp::take_option(args, i, o.pp);
+    if (!pp_option) return std::unexpected(pp_option.error());
+    if (*pp_option) continue;
     if (a == "-c") o.stop = Options::Stop::object;
     else if (a == "-fsyntax-only") o.stop = Options::Stop::syntax;
+    else if (a == "-E") o.stop = Options::Stop::preprocess;
     else if (a == "-o") {
       if (i + 1 == args.size()) return std::unexpected("argument to '-o' is missing");
       o.output = std::string(args[++i]);
@@ -103,9 +109,23 @@ std::optional<obj::object> compile(const std::string& path, Options::Stop stop) 
     std::println(std::cerr, "ycxx: error: cannot read '{}'", path);
     return std::nullopt;
   }
+  if (stop == Options::Stop::preprocess) {
+    auto [out, messages] = pp::preprocess_to_text(pp::session(), *text, path);
+    std::print("{}", out);
+    bool errors = false;
+    for (const pp::Message& m : messages) {
+      std::println(std::cerr, "{}:{}:{}: {}: {}", m.file, m.line, m.column, m.error ? "error" : "warning", m.text);
+      errors = errors || m.error;
+    }
+    if (errors) return std::nullopt;
+    return obj::object{};
+  }
   Renderer out(path, *text);
   pipeline::Front front(path, *text);
-  for (const pipeline::Message& m : front.messages()) out.at(m.offset, m.error, m.text);
+  for (const pipeline::Message& m : front.messages()) {
+    if (m.where.empty()) out.at(m.offset, m.error, m.text);
+    else std::println(std::cerr, "{}: {}: {}", m.where, m.error ? "error" : "warning", m.text);
+  }
   if (front.has_errors()) return std::nullopt;
   if (stop == Options::Stop::syntax) return obj::object{};
   pipeline::TranslationUnit tu = front.unit(object_name(path).native_encoded_string());
@@ -130,6 +150,7 @@ int cxx(std::span<const std::string_view> args) {
     std::println(std::cerr, "ycxx: error: {}", opts.error());
     return 1;
   }
+  pp::configure(pp::with_system_dirs(opts->pp));
   bool failed = false;
   std::vector<obj::object> objects;
   for (const std::string& s : opts->sources) {

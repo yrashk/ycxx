@@ -117,7 +117,7 @@ public:
   u32 byte_offset(engine::Loc at) const {
     const items::Item& it = items_->items[index(ItemId(at.item))];
     u32 tok = std::min<u32>(it.begin + at.offset, static_cast<u32>(r_->locs.size() - 1));
-    return r_->locs[tok].offset;
+    return r_->site(tok).offset;  // a macro's token: where it was expanded
   }
 
   // Spells a diagnostic argument: a name or a type.
@@ -533,7 +533,7 @@ std::pair<u32, u32> line_column(std::string_view text, u32 offset) {
 // Preprocesses, splits and analyses one file, and renders every diagnostic as
 // `file:line:col: error: message`. Returns the number of errors.
 int check_file(std::string_view path, std::string_view text, std::ostream& err) {
-  pp::Preprocessed pre = pp::preprocess(text, pp::FileId{0});
+  pp::Preprocessed pre = pp::preprocess(text, path);
   items::Items its = items::split(pre.region, ycxx::fingerprint128(path));
   ast::Interners ins;
   sema::World w(ins);
@@ -545,8 +545,14 @@ int check_file(std::string_view path, std::string_view text, std::ostream& err) 
     std::string text;
   };
   std::vector<Line> lines;
-  for (const lex::LexDiagnostic& d : pre.diags)
-    lines.push_back({d.offset, lex::message_of(d.kind).severity, lex::render(d.kind, d.args)});
+  // Phase 4's diagnostics name their file.
+  std::vector<pp::Message> pp_messages;
+  for (const pp::Diag& d : pre.diags) {
+    if (d.file == 0) lines.push_back({d.offset, lex::message_of(d.kind).severity, lex::render(d.kind, d.args)});
+    else pp_messages.push_back(pp::message(pp::session(), pp::session().files.id(pre.region.files[d.file]), pre.region.file_names[d.file], d));
+  }
+  for (const pp::Message& m : pp_messages)
+    std::println(err, "{}:{}:{}: {}: {}", m.file, m.line, m.column, m.error ? "error" : "warning", m.text);
   for (const engine::Diagnostic& d : p.diagnostics()) {
     auto kind = sema::sema_diag_of(d.id);
     if (!kind) continue;
@@ -556,7 +562,7 @@ int check_file(std::string_view path, std::string_view text, std::ostream& err) 
                      sema::render(*kind, args, [&](char how, u64 raw) { return p.spell(how, raw); })});
   }
   std::ranges::stable_sort(lines, {}, &Line::offset);
-  int errors = 0;
+  int errors = static_cast<int>(std::ranges::count_if(pp_messages, &pp::Message::error));
   for (const Line& l : lines) {
     auto [line, col] = line_column(text, l.offset);
     bool error = l.severity == lex::Severity::error;

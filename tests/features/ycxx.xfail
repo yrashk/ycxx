@@ -178,21 +178,20 @@ draft/class/class.virtual-7.reject.cpp errors elsewhere: 'struct' not supported 
 draft/class/class.virtual-8.reject.cpp errors elsewhere: 'struct' not supported yet
 draft/class/class.virtual-9.accept.cpp 'struct' not supported yet
 draft/class/special-1.accept.cpp 'struct' not supported yet
-draft/cpp/cpp.concat-3.accept.cpp preprocessing directives are not supported yet
-draft/cpp/cpp.cond-1.accept.cpp preprocessing directives are not supported yet
-draft/cpp/cpp.cond-2.accept.cpp preprocessing directives are not supported yet
-draft/cpp/cpp.embed.param.if.empty-2.accept.cpp preprocessing directives are not supported yet
-draft/cpp/cpp.embed.param.limit-1.accept.cpp preprocessing directives are not supported yet
+draft/cpp/cpp.concat-3.accept.cpp function-like macros are not supported yet
+draft/cpp/cpp.cond-1.accept.cpp preprocessing directives are not supported yet (#if)
+draft/cpp/cpp.cond-2.accept.cpp preprocessing directives are not supported yet (#if)
+draft/cpp/cpp.embed.param.if.empty-2.accept.cpp preprocessing directives are not supported yet (#if)
+draft/cpp/cpp.embed.param.limit-1.accept.cpp preprocessing directives are not supported yet (#if)
 draft/cpp/cpp.module-2.reject.cpp errors elsewhere: preprocessing directives are not supported yet
 draft/cpp/cpp.module-3.accept.cpp preprocessing directives are not supported yet
 draft/cpp/cpp.module-4.accept.cpp preprocessing directives are not supported yet
 draft/cpp/cpp.module-5.accept.cpp preprocessing directives are not supported yet
-draft/cpp/cpp.pragma.op-1.accept.cpp preprocessing directives are not supported yet
+draft/cpp/cpp.pragma.op-1.accept.cpp expected a declaration (_Pragma)
 draft/cpp/cpp.pre-2.accept.cpp 'using' not supported yet
-draft/cpp/cpp.replace.general-1.accept.cpp preprocessing directives are not supported yet
-draft/cpp/cpp.replace.general-2.accept.cpp preprocessing directives are not supported yet
-draft/cpp/cpp.replace.general-3.accept.cpp preprocessing directives are not supported yet
-draft/cpp/cpp.subst-1.accept.cpp preprocessing directives are not supported yet
+draft/cpp/cpp.replace.general-1.accept.cpp function-like macros are not supported yet
+draft/cpp/cpp.replace.general-3.accept.cpp function-like macros are not supported yet
+draft/cpp/cpp.subst-1.accept.cpp function-like macros are not supported yet
 draft/dcl/basic.namespace.general-1.accept.cpp preprocessing directives are not supported yet
 draft/dcl/dcl.align-1.reject.cpp errors elsewhere: 'struct' not supported yet
 draft/dcl/dcl.align-4.reject.cpp errors elsewhere: 'alignas' not supported yet
@@ -443,7 +442,6 @@ draft/expr/expr.type.conv-1.accept.cpp 'struct' not supported yet
 draft/lex/lex.ext-2.reject.cpp errors elsewhere: preprocessing directives are not supported yet
 draft/lex/lex.ext-3.reject.cpp errors elsewhere: '' not supported yet
 draft/lex/lex.fcon-2.accept.cpp preprocessing directives are not supported yet
-draft/lex/lex.pptoken-1.reject.cpp errors elsewhere: preprocessing directives are not supported yet
 draft/module/module.global.frag-1.accept.cpp 'constexpr' not supported yet
 draft/module/module.interface-3.accept.cpp preprocessing directives are not supported yet
 draft/module/module.interface-4.reject.cpp errors elsewhere: preprocessing directives are not supported yet
@@ -683,3 +681,6 @@ draft/temp/temp.variadic-7.accept.cpp 'template' not supported yet
 draft/temp/temp.variadic-8.accept.cpp 'template' not supported yet
 own/smoke/exit-status.run.cpp preprocessing directives are not supported yet
 own/smoke/missing-semicolon.reject.cpp errors elsewhere: 'struct' not supported yet
+own/pp/include-macros.accept.cpp dynamic initialization of a namespace-scope variable is not supported yet (#94)
+own/pp/macro-decls.accept.cpp dynamic initialization of a namespace-scope variable is not supported yet (#94)
+own/smoke/object-like-macro.pp.cpp function-like macros are not supported yet
