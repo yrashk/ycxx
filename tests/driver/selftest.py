@@ -98,6 +98,21 @@ class Parts(unittest.TestCase):
         problems, _ = kinds.verdict_problems(ctx, r, {(f, 1, None)}, REPO)
         self.assertTrue(any('crashed' in p for p in problems))
 
+    def test_xfail_list_never_covers_a_crash(self):
+        # tests/features/ycxx.xfail turns a failure into XFAIL, but a crash stays a FAIL.
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            (d / 'own').mkdir()
+            (d / 'own' / 'a.accept.cpp').write_text('int x;\n')
+            test = discover.discover(d)[0]
+            for status, want in ((1, 'XFAIL'), (134, 'FAIL')):
+                exe = d / f'cxx{status}'
+                exe.write_text(f'#!/bin/sh\necho "$3:1:1: error: no" >&2\nexit {status}\n')
+                exe.chmod(0o755)
+                cut = toolchain.Compiler('ycxx', str(exe), {'syntax'}, {test.id: 'expected'})
+                code, output, _ = kinds.execute(test, kinds.Ctx(REPO, cut, {}, 'clang', d / 'work', 5))
+                self.assertEqual(code, want, output)
+
     def test_unsupported_keeps_a_failure(self):
         with tempfile.TemporaryDirectory() as d:
             state.State(d, 'b', 'clang').update({'a': ('FAIL', 1.0)}, 'c1')
