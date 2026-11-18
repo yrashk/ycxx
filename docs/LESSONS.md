@@ -60,6 +60,14 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
   - Review the assembled document as soon as it is assembled. Seams between separately written
     parts are where most P0s were.
   - Seeded on #1. Revise this entry if it proves wrong.
+- **Run spikes in parallel with the design subagent, and start them first.** On #3 the spikes
+  (a toy e-graph, solver builds) ran on Opus while Fable drafted. Their results changed the
+  draft's numbers (exact ILP extraction stops being practical near 1,000 e-nodes, not 2,000
+  nodes), so the decision subagent should have the results, or be told which claims wait on them.
+  - Do: brief the decision subagent to ask for a decision record (decision, reasons, rejected
+    alternatives), not prose, and to mark claims that wait on a spike. The session writes the
+    prose (DECISIONS §6.5).
+  - Learned on #3.
 
 ## Bureaucracy loops
 
@@ -110,3 +118,12 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
   - Do: compare thread counts on incremental rebuilds after edits, where early cutoff and reuse
     actually happen.
   - Learned on #1's prototype review.
+- **A build script can report PASS for a crash.** In bash, `if run; then` disables `set -e` inside
+  `run`, so a failing step in the middle went unnoticed and a segfaulting smoke test passed.
+  - Do: run the step in a subshell, `if (set -e; run); then`, and check the script once against
+    a deliberately failing step.
+  - Learned on #3's solver spike.
+- **GCC has no ThreadSanitizer on macOS arm64.** A TSan build needs Clang and libc++, and so does
+  every C++ library it links (the e-graph spike needed a second HiGHS build).
+  - Do: plan TSan runs on macOS with Clang from the start, or run them on Linux.
+  - Learned on #3's e-graph spike.

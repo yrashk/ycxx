@@ -24,7 +24,10 @@ What is true of the code today. Work in progress and its owners are tracked in
   failed-first, duration sharding, affected-test hook. A smoke suite of each kind passes with
   Clang and GCC as the compiler under test; with ycxx every test is UNSUPPORTED
   (`tests/features/ycxx.txt` lists nothing yet).
-- Next: the AST design (#2) and the optimization architecture (#3).
+- Optimization design accepted: [`docs/design/optimization.md`](docs/design/optimization.md)
+  (#3), summarized in DECISIONS §4.8. Throwaway spikes are in `spikes/optimization/`: e-graph
+  extraction, and solver builds against libycxx.
+- Next: the AST design (#2).
 
 ## Bootstrap workarounds
 
