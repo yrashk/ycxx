@@ -65,6 +65,52 @@ What is true of the code today. Work in progress and its owners are tracked in
   today), contextual queries (#16), eviction and persistence (#17; the dependency and diagnostic
   pools only grow).
 
+## Lexer and directive-free `pp` (#40, 2026-11-18)
+
+- `ycxx.lex` (`src/lex/`): translation phases 1–3, 5 and 6 as functions.
+  - Phases 1–2: UTF-8 checked, CR LF and CR become LF, a leading BOM is deleted, splices removed,
+    with maps from logical offsets back to phase-1 text (raw strings revert splices) and to
+    physical byte offsets.
+  - Phase 3: every [lex] preprocessing token. UCNs (`\u`, `\U`, `\u{}`, `\N{}` with names and
+    aliases), XID and ID_Compat_Math identifiers with the NFC check, maximal munch with the
+    `<::`, `[::` and `[:>` exceptions, raw strings, digraphs and alternative tokens, header names
+    on request.
+  - Phases 5–6: keywords, integer and floating literals (UDL suffixes per [lex.ext]),
+    character literals, and string-literal concatenation with the common encoding. Values:
+    integers to 64 bits, `double` and `float` correctly rounded, code units for characters and
+    strings. Ordinary literals are UTF-8 and wide ones UTF-32.
+  - `Tk` and the diagnostic table are derived by reflection from annotated enumerators.
+  - Unicode 17.0 tables from `tools/unicode/gen-tables` (`unicode_tables.cppm`,
+    `unicode_names.txt`): Python's `unicodedata` and the vendored UCD `NameAliases.txt`
+    (`tools/unicode/ucd/`). Unicode License v3 in `src/lex/LICENSE.unicode`.
+- `ycxx.pp` (`src/pp/`): `pp(FileId)` over the input `FileText`, valued as a `Region` of tokens,
+  `TokLoc`s, names and literals. Every directive (`#…`, and the `module`/`import` lines of
+  [cpp.pre]) is diagnosed as unsupported and skipped. Diagnostics are at
+  `Loc{file_level, byte offset}`.
+- Measured (Release, Apple M-series, `lex_bench`): about 25 MB/s, 110 ns per token. Not tuned.
+- Not yet: phase 4 (M1), `long double` and the extended floating types' values (left to the
+  target), the type of an integer literal (sema, #33).
+
+## Item splitter (#18, 2026-11-18)
+
+- `ycxx.items` (`src/items/`): `split(region, file)` and the query `RegionItems(FileId)` cut a
+  region into items before parsing (query-engine.md §B1.2), preorder with nested lists for
+  namespaces, linkage and export blocks and class bodies.
+  - Bodies: compound statements, ctor-initializers, function-try-blocks, `= default`,
+    `= delete(…)`; consteval blocks. Template-heads attach to what follows.
+  - Skeletons (ast.md §3.1): kind, declared names in token order with ordinal, offset and flags
+    (type, template, namespace, unknown, definition, friend, enumerator), the first declarator's
+    spelled qualifier, template depth, body range.
+  - Ids: 128-bit fingerprints over the file identity, scope path, declaration-part tokens (kind
+    and content, not whitespace or alternative spelling) and the ordinal among siblings. A
+    namespace's id excludes its members; a class's excludes its members' bodies. Bodies are
+    content-addressed.
+- Token heuristics, not a parse: a few forms are known to be guessed wrong (`S (x);`,
+  `decltype(b){1}` as a mem-initializer, template arguments with commas in an initializer).
+- Not yet: `ItemId`/`BodyId` handles from the `items` and `tokens` interners (fingerprints only
+  until #38's placeholders are replaced), the occurrence salt (needs prefixes, #16), flattening
+  child regions (needs includes, M1), the syntactic indexes of §B1.3.
+
 ## Mach-O objects and the linker (#42, 2026-11-18)
 
 - `ycxx.obj` (`src/obj/`): the in-memory object. Sections are named the Mach-O way and hold bytes
@@ -99,13 +145,76 @@ What is true of the code today. Work in progress and its owners are tracked in
   calls between objects, data, GOT and pointer relocations, `puts` from libSystem), checks
   `codesign -v`, and links a C object compiled by the bootstrap compiler.
 
+## AST core (#32)
+
+`src/ast/`, from the [AST design](docs/design/ast.md) §2, §3, §9 and §10. Modules `ycxx.ast.*`,
+one import `ycxx.ast`; unit tests in `tests/unit/ast` (run by ctest, see docs/TESTING.md).
+
+- **Handles** (`handles.cppm`): the strong enums of §2 and the closed list `handles`. Each
+  handle enum names its interner in an annotation (`[[=interner::names]]`), which the §12 probe
+  confirmed GCC 16.2 supports. `SeqId<T>`, `DeclId`, `DeclOrd`, `Loc`, `Child`, `ChildList`.
+- **Schema** (`schema.cppm`, `nodes.cppm`, `records.cppm`): node kinds are plain aggregates in
+  one closed list, `Nodes`. Reflection checks the §2 invariants on every kind and record (no
+  pointer, no `Loc`, only listed handles, edges only in nodes) and the 32-byte payload budget
+  (§9.6). It also reads the sequencing annotations of §3.7.4, `[[=sequenced(r)]]`,
+  `[[=indeterminately_sequenced(r)]]` and `[[=unsequenced(r)]]`, with ranks ordering operand
+  groups. `operands<T>` and `relation<T>(a, b)` expose them.
+  - The first list of kinds covers expressions with every sequencing shape, statements and
+    attributes. The parser adds the rest.
+  - `ItemSema`, `DeclSema`, `ClassDef` and `BodySema` follow §3.6. `ParamSema`, `BaseSpec`,
+    `MemberRec`, `LocalRec` and the enums are first cuts for sema to fill in.
+- **Interners** (`interner.cppm`):
+  - Per-kind untyped pools indexed by kind number, never a tuple, plus one edge pool.
+  - Identity is the 128-bit Merkle fingerprint. Debug builds compare structurally on a hit.
+  - Fingerprint, equality and the handle walk `for_each_ref` are derived by reflection, and
+    dispatch goes through a generated table.
+  - Interners: `names` and `seqs` (one pool per element type) and `ast`.
+  - `tokens`, `items`, `entities`, `types` and `values` are placeholders that hold only
+    fingerprints, until #18 and #33.
+  - Single-threaded: sharing between workers is the engine's (#14).
+- **Fingerprints** (`fingerprint.cppm`): a thin adapter over `ycxx.hash` (#14); `Fp128` is
+  `ycxx::Fp128`. Not done yet: ADL `hash_into` for the AST handles. Without it,
+  `ycxx::fingerprint(v)` hashes a handle by its number, so engine keys that hold AST handles must
+  not be fingerprinted that way. `hash_into` needs to reach the process-wide `Interners`, which
+  the engine has to provide.
+- **Frame builder** (`builder.cppm`): drafts in the frame's arena (a `std::pmr` resource).
+  `commit(value)` interns what the value reaches, bottom-up, so abandoned drafts leave nothing
+  (§9.3). Lists of records that hold nodes are drafts; other lists are interned eagerly.
+- **Red view** (`red.cppm`): a stack cursor with item-relative offsets and the parent chain, and
+  `find(offset)` for descent.
+- **Compaction** (`compact.cppm`): holders mark live values, the survivors are renumbered with
+  their fingerprints kept, and holders rewrite their values with the returned `Remap`. Covers
+  `ast` and `seqs`.
+
 ## Bootstrap workarounds
 
 Places where ycxx's sources avoid or work around a C++26 feature because GCC 16 lacks it or
 miscompiles it (DECISIONS §3.2). Each is removed once ycxx compiles itself.
 
-- **A defaulted friend comparison in an exported class ICEs GCC 16.2** in the importer
-  (segfault), with or without `-freflection`. `ycxx.hash`'s `Fp128` uses member operators.
+- **Defaulted comparisons are members, not hidden friends** (`src/ast`, `ycxx.hash`'s `Fp128`).
+  - Cause: GCC 16.2 crashes (segfault) in an importer that compares two values of an exported
+    struct whose defaulted `operator==` is a friend, with or without `-freflection` (found by
+    #14, #23 and #32).
+  - Fix: belongs in GCC. Restore the friend form when ycxx compiles itself.
+- **Checked `constexpr` constructors of handles are not `constexpr`** (`make_node`,
+  `make_qual_type`, `make_decl_ord` in `src/ast/handles.cppm`).
+  - Cause: GCC 16.2 does not emit its TU-local contract-violation helper
+    (`__tu_has_violation`) in an importer that inlines a non-template inline function with a
+    precondition. The importer fails to link unless it has a contract of its own. Templates and
+    in-class member functions are not affected.
+  - Fix: belongs in GCC.
+- **A contract predicate inside a lambda that names a member of the enclosing class goes through
+  a local `bool`** (`src/ast` interner, builder, compaction).
+  - Cause: in such a predicate GCC 16.2 takes `this` to be the closure object, so the member
+    read is garbage. The lambda's own captures read correctly, and so does the same expression
+    in the lambda body. It happens in a plain TU, with generic or plain lambdas, `contract_assert`
+    or the lambda's `pre`, at -O0 and -O2:
+
+        struct S { int x = 42;
+          void f() { [this] { contract_assert(x == 42); }(); } };  // reported violated
+        int main() { S{}.f(); }
+
+  - Fix: belongs in GCC. Restore the plain form when ycxx compiles itself.
 - **`pre` on a function template is dropped when it is instantiated through an import** (GCC
   16.2; non-template functions keep theirs). `Db::set` asserts its precondition with
   `contract_assert` in the body instead.

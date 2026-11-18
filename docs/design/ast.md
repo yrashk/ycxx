@@ -899,9 +899,10 @@ design:
 - **Node index width.** 24 bits allow 16 M distinct nodes per kind. Count distinct nodes per kind
   over libycxx and a large corpus once the parser exists; the escape is a 64-bit `NodeId` or a
   kind directory, with no format change since handles are never persisted.
-- **Annotations on enumeration types** (handles annotated with their interner): §A10.4 probed
-  enumerators, not enum types. Probe in the first AST commit; the fallback is a trait
-  specialization marked `// BOOTSTRAP: annotations`.
+- **Annotations on enumeration types** (handles annotated with their interner): settled by #32.
+  GCC 16.2 accepts `enum class [[=interner::names]] NameId : u32 {};` and
+  `annotations_of_with_type` reads it, so no fallback was needed (`src/ast/handles.cppm`).
+- **The payload budget:** checked on every kind by `check_node_kind` (`src/ast/schema.cppm`, #32).
 - **`decl_sema` as its own cell** costs one cell per declared name for no extra cutoff. Keep it
   (§B1.3), measure on libycxx, and make it `transparent` over `item_sema` if cells dominate.
 - **`substitute` as a function** (§6.3): measure on libycxx; if resolving `TDepName` dominates,
