@@ -8,8 +8,10 @@ What is true of the code today. Work in progress and its owners are tracked in
 - Charter written: [README.md](README.md), [DECISIONS.md](DECISIONS.md) (scope, provenance,
   bootstrap, architecture direction, process, coordination), [AGENTS.md](AGENTS.md) (agent guide).
 - libycxx added as a submodule at `deps/libycxx`.
-- No compiler code yet. The query engine design (`docs/design/query-engine.md`) is the first
-  piece of work. Everything else waits for it.
+- No compiler code yet.
+- Query engine design accepted: [`docs/design/query-engine.md`](docs/design/query-engine.md)
+  (#1), summarized in DECISIONS §4. A throwaway prototype is in `spikes/query-engine/`.
+- Next: the AST design (#2) and the optimization architecture (#3).
 
 ## Bootstrap workarounds
 

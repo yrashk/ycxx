@@ -119,39 +119,84 @@ reasoning; do not leave decisions only in issue threads.
    libycxx needs from ycxx comes from libycxx's existing list of probes. If a new one is needed,
    it is added to libycxx upstream first.
 
-## 4. Architecture (direction; details open)
+## 4. Architecture
 
-These are the commitments. How each one is met is open until its design document lands.
+These are the commitments. §4.1–4.5 and the query parts of §4.8 are specified by the accepted
+[query-engine design](docs/design/query-engine.md) (#1). References of the form §A1 or §B6 point into that document. The rest is open until its
+design document lands.
 
-1. **Resident, query-based core.** Every analysis result is a memoized query over inputs (file
-   contents, command-line configuration). Queries record what they read, *including negative
-   results*: failed lookups, overload sets considered, macros tested and found undefined. A
-   change invalidates exactly the queries that observed it, and a recomputed query whose result
-   is unchanged stops propagation (early cutoff). **Open: [query-engine design].**
-2. **Incremental equals from scratch.** For any sequence of edits, the incremental result must be
-   identical to a cold run on the final state. This is a test invariant enforced on every suite,
-   not an aspiration.
-3. **Futures and parallelism.** Queries are scheduled as futures on a work-stealing pool.
-   Translation units, function bodies and template instantiations proceed in parallel.
-4. **Determinism.** Output never depends on scheduling. Any ordering that the language or the
-   output format exposes (points of instantiation, diagnostic order, symbol and section order,
-   string table order) is derived from source positions and stable keys, never from completion
-   order.
-5. **Shared across translation units:** preprocessed and parsed headers (keyed by content and by
-   the macro state they actually depend on), module interfaces and template instantiations.
+1. **Resident, query-based core.**
+   - **Red/green queries with early cutoff by fingerprint.** Every analysis result is a pure,
+     memoized query over inputs (file contents, configuration). It reads the world only through
+     recorded fetches. Dependencies are ordered groups; validation verifies every member of a
+     group and re-executes at the first changed group. Cutoff compares 128-bit Merkle
+     fingerprints, so it survives eviction and restarts. Durability levels keep untouched system
+     headers green in O(1). *Reason:* pay only for what an edit can change, deterministically.
+     (§A1)
+   - **Every semantic observation is a question keyed by exactly what was asked**, with negative
+     answers as values: names in one scope at one point, member lookup, ADL, completeness, one
+     macro, one include resolution. Overload resolution is keyed by candidate set and argument
+     shapes. *Reason:* adding a declaration invalidates only the answers it could change. (§B2–§B9)
+   - **Identity without positions.** Items are cut from the preprocessed tokens before parsing.
+     Their ids exclude bodies and positions, and locations are `(item, offset)`. Declaration ids
+     and structural entity ids are separate. *Reason:* edits elsewhere disturb no keys. (§B1, §B2)
+   - **Cycles are internal errors.** Every C++ "in progress" state is a position or a key
+     argument. Cycles are detected on a wait-for graph and reported deterministically. *Reason:*
+     any recovery value would depend on entry order. (§A2)
+2. **Incremental equals from scratch.** For any sequence of edits, the incremental result is
+   identical to a cold run on the final state. This is a test invariant enforced on every suite.
+   - Edit generators: random, mined from git history, delta-minimized.
+   - Outputs are compared, and so is the memo table, through `ensure_green` with zero
+     executions.
+   - Runs repeat at several thread counts under a seeded chaos scheduler.
+   - `--verify-memo` re-runs green cells to find missed dependencies.
+   - Cancellation is injected at random points.
+   *Reason:* a missed dependency is otherwise invisible until it miscompiles. (§A9, §B12)
+3. **Coroutines and senders.**
+   - Query executions are coroutines, and a cell's future is a `std::execution` sender, from
+     libycxx.
+   - The pool is a scheduler that also backs `parallel_scheduler`, with interactive and
+     background priorities. Waiting suspends a frame and frees its worker.
+   - `cheap` kinds, a closed list of prefix-only questions, are synchronous, so the hit path
+     stays at about 100 ns with no allocation.
+   - Cancellation uses stop tokens, and revisions advance only at quiescence: one `counting_scope`
+     per epoch, joined before inputs change. Nothing half-computed is stored.
+   *Reason:* parallel without blocked threads or partial results (§3.2). (§A3, §A4)
+4. **Determinism.**
+   - Every order that reaches an output comes from stable keys, and parallel results are
+     positional.
+   - Diagnostics are values: only errors that hold in every context. `tu(TU)` renders and orders
+     them, with "required from here" chains taken from demand lists.
+   - Pointer order, unordered iteration, `std::hash`, thread ids and clocks are banned in queries.
+   *Reason:* output is bit-identical at any thread count. (§A5, §A1.7)
+5. **Shared across translation units through contextual queries.**
+   - A header analysis, an instantiation or a constant evaluation is a selection cell keyed by
+     `(index, ctx)`, where `ctx = (prefix, pins, chain)`. A prefix is a content-addressed
+     description of everything before the point, rooted at the configuration.
+   - When a selection cell must execute, it first walks a per-index trie of verifying traces, and
+     reuses any result whose questions get the same answers.
+   - Function templates are instantiated at the end of the TU, and class and variable templates
+     at the demanding site. A class template specialization that would differ later is pinned to
+     its first instantiation ([temp.point]/7).
+   - Divergence that is ill-formed, no diagnostic required, is diagnosed. Divergence across TUs
+     is reported by the derived `odr_report`.
+   *Reason:* results are shared wherever every question asked agrees, not only for identical
+   preambles. (§A1.9, §B1.4, §B6, §B10)
 6. **Interpreter first.** The constant evaluator executes ycxx's own IR. The same interpreter runs
    whole programs, so the front end can be validated by running tests long before a native back
    end exists.
 7. **One binary, many fronts.** The `ycxx` binary is the daemon and also its clients: a
    `c++`-compatible command line, an LSP server and a control interface (reload, status, query).
 8. **Optimization is search over verified transformations, and it runs while the compiler is idle.**
-   - **Optimizations are queries too.** A function's optimized form is memoized, keyed by its IR
-     hash, target, options and optimizer version. It is persisted to an on-disk cache, so work
-     done once is never redone.
-   - **Anytime optimization.** A build gets the best result available within its budget. While
-     idle, the resident compiler keeps improving hot or recently changed functions in the
-     background, and later builds pick that up. A fast development build and a strong release
-     build differ in budget, not in pipeline.
+   - **Optimizations are queries too.** `optimized(ir_fp, target, options, optimizer_version,
+     level)` is a pure memoized query, persisted to the on-disk cache. Its budget level is counted
+     in deterministic units. *Reason:* work done once is never redone, on any machine. ([query-engine design](docs/design/query-engine.md)
+     §A8)
+   - **Anytime optimization.** While idle, the daemon improves hot or recently changed functions
+     at higher levels into an optimization cache. A build's output is a function of three things:
+     its inputs, the requested level, and an optimization-cache snapshot that is an engine input.
+     A development build and a release build differ in level, not in pipeline. *Reason:* builds
+     improve over time and stay reproducible. (§A8.2–A8.3)
    - **Search, not just fixed pass pipelines.** The mid-level optimizer is expected to use
      equality saturation (an e-graph of equivalent forms, with extraction by cost). Phase
      ordering, inlining and unrolling are searched or tuned against cost models, not hard-coded
@@ -169,8 +214,8 @@ These are the commitments. How each one is met is open until its design document
      validation of the region. On failure or timeout the heuristic result is used.
    - **Determinism (§4.4) holds:** budgets are counted in deterministic units (solver conflicts
      or nodes, e-graph iterations), never wall-clock time, and parallel solvers run in their
-     deterministic modes. A build is reproducible from its inputs plus its optimization cache.
-     The cache can be exported and committed, so a release build can replay it exactly.
+     deterministic modes. A stopped solver stores nothing. The part of the cache a build used is
+     exported as a replay manifest, so a release build replays it exactly. (§A8.4)
    - **Cost models are data, measured per target** (latency and throughput microbenchmarks run on
      real hardware), not constants guessed in code.
 
