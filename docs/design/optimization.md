@@ -46,14 +46,15 @@ solver builds, §4.2).
    Other code-changing passes: SMT-validated per acyclic region where the level affords it, else
    trusted and listed. Evidence is a value; replay re-checks it. (§6)
 8. **The ladder**: 0 naive; 1 cleanups and a small greedy e-graph; 2 inlining, loop passes, ILP
-   extraction; 3 combinatorial codegen and superoptimization; above 3, every budget × 4 per
+   extraction on small e-graphs, bounded TV on small changed regions; 3 combinatorial codegen and superoptimization; above 3, every budget × 4 per
    level. (§7)
 9. **Cost models are measured tables**, one per (target, microarchitecture), a high-durability
    input whose fingerprint is in the `target` key. (§8)
 10. **The oracle feeds a daemon-side work list** that orders background roots and never reaches a
     value; verified superoptimizer results become rule candidates for agents. (§9)
 11. **M4 and M5 build L1, the interpreter, `lower`, the pattern table, the validators and the §A8
-    plumbing at level 0. No e-graph, rule, solver or SMT.** (§10)
+    plumbing, with level 0 and level 1's code generation (linear scan, list scheduling). No
+    e-graph, rule, solver or SMT.** (§10)
 
 ## 2. The IR
 
@@ -63,7 +64,7 @@ solver builds, §4.2).
 | --- | --- | --- | --- |
 | Produced by | `function_ir(F, ctx)` from the analysed body | `lower(ir)` | `optimized(unit, …)` |
 | Values | Typed: C++ scalar types, pointers as abstract `(object, path)`, aggregates by access path | `iN`, `fN`, `ptr` (an `i64` with provenance facts), tuples | Register classes, immediates, memory operands |
-| Memory | `load/store(state, ptr, type, path)`, `obj.begin/end`, `union.activate`, `alloc(storage, type, init)` | Byte-addressed `load/store(state, ptr, iN)`, `alloca(size, align)`, `lifetime.end` | Frame slots, addressing modes |
+| Memory | `load/store(state, ptr, type, path)`, `obj.begin/end`, `union.activate`, `alloc(storage, type, init)` | Byte-addressed `load/store(state, ptr, iN, alias tag)`, `alloca(size, align)`, `lifetime.end`; the alias tag is derived from the L1 access type, ignored by equivalence and read by alias analysis | Frame slots, addressing modes |
 | Control | Blocks with arguments; `br`, `switch`, `ret`, `call` with normal/unwind edges, `consteval_br`, `unreachable` | Same, minus `consteval_br` | Target branches, call-site tables |
 | UB | Every UB and every non-constant operation is detectable by the interpreter | Poison for deferred UB, immediate UB at pinned operations (§6.1) | None introduced |
 | Who runs it | Interpreter (constant evaluation, whole programs) | Optimizer, translation validator; a testing interpreter later (§13) | Encoder, object writer |
@@ -101,7 +102,10 @@ every extra level is a lowering that must be trusted (§6).
 
   Floating nodes are the e-graph's domain; pinned and state nodes are in the e-graph too, with the
   block as an operand, so they can be rewritten (store-to-load forwarding, dead stores, load CSE
-  by congruence) but never move across control dependence.
+  by congruence) but never move across control dependence. A pinned node built by a rule takes
+  the block of the left-hand side's root pinned node, and a rule may not introduce a pinned node
+  when its left-hand side has none. Extraction may choose a node with a block operand only if
+  that block dominates every use of its class (§3.5).
 - **Acyclicity.** Loop-carried values enter through block arguments, which are leaves, so the
   dataflow DAG of a function is acyclic. Loop transformations are structural passes on the
   skeleton (§3.1), not e-graph rewrites.
@@ -122,13 +126,13 @@ an attribute, so the interpreter never guesses:
 
 | [expr.const] requirement | L1 device | Interpreter | Lowering to L2 |
 | --- | --- | --- | --- |
-| Lifetime ([basic.life]), access outside it | `obj.begin(p, T)`, `obj.end(p)` emitted at construction end and destruction start; `alloc` with storage duration | Abstract memory: objects with lifetime state per subobject | Stack-slot liveness; dropped for globals |
+| Lifetime ([basic.life]), access outside it | `obj.begin(p, T)`, `obj.end(p)` emitted at construction end and destruction start; `alloc` with storage duration | Abstract memory: objects with lifetime state per subobject, including an under-construction state for the accesses [class.cdtor] allows | Stack-slot liveness; dropped for globals |
 | Uninitialized reads; erroneous behaviour (P2795) | `alloc(…, init = erroneous \| indeterminate \| zero)` | Bytes carry `uninit`/`erroneous`/value; reading either is non-constant | `erroneous` becomes a fixed byte pattern store (the implementation-defined value; zero on every target); `indeterminate` becomes nothing, reads yield poison |
 | Pointer provenance, comparison, arithmetic ([expr.eq], [expr.rel], [expr.add]) | Pointers are `(object id, access path)`; `ptr_add(p, i, T)`, `ptr_cmp(op, p, q)`, `ptr_to_int`, `int_to_ptr` | Bounds and one-past-end checks; unrelated relational compares are non-constant; `ptr_to_int`, `int_to_ptr`, `reinterpret_cast` non-constant | Integers with provenance facts for alias analysis (§6.1) |
 | Typed access, aliasing, unions ([basic.lval], [class.union]) | `load/store` carry the static type and the access path; `union.activate(p, member)` | Checks active member, dynamic type, path validity | Offsets from `layout`; `union.activate` dropped |
 | Virtual calls, `dynamic_cast`, `typeid` | vptr is a typed field holding `vtable_addr(C)`; `vcall(s, obj, slot)` is a load plus `call` | Dispatch on the symbolic vtable value | Indirect call |
 | Non-constant operations: non-constexpr calls, `volatile`, `asm`, `goto` into a block with initialization, `new` beyond the evaluation | Attributes on `call`, `load`, `store`; `asm` op; `alloc(dynamic)` | Reject with reason; transient allocation tracked and must be freed | Ordinary code |
-| `std::is_constant_evaluated()`, `if consteval` | `is_const_eval` op; `consteval_br` terminator | `true`; the consteval edge | `false`; the runtime edge |
+| `std::is_constant_evaluated()`, `if consteval` | `is_const_eval` op; `consteval_br` terminator | By mode: `true` and the consteval edge in `constant` mode, `false` and the runtime edge in `runtime` mode | `false`; the runtime edge |
 | Unsequenced conflicting side effects ([intro.execution]) | `useq.begin/end` markers around the operands of an unsequenced evaluation group | Records accesses inside a group; a conflict is UB | Dropped |
 | Signed overflow, shifts, division ([expr.arith]) | Ops carry `nsw`/`nuw`/`exact` flags | Overflow is UB (non-constant) | Flags become poison-producing (§6.1) |
 | Reflection ([meta.reflection]) | `meta.*` intrinsics on `std::meta::info` constants | Answered by the queries of §B7 | Never reach L2: a reflection value escaping to runtime is ill-formed |
@@ -136,8 +140,11 @@ an attribute, so the interpreter never guesses:
 The interpreter is a trampolined step loop inside a `query_task`: it fetches callees'
 `function_ir` lazily at call sites with `co_await`, polls `stop_point()` every fixed number of
 steps, and keeps a deterministic step budget ([implimits]). The same loop runs whole programs
-(DECISIONS §4.6) with a host interface for I/O; the two differ only in which non-constant
-operations are permitted.
+(DECISIONS §4.6) with a host interface for I/O. It has two modes, `constant` and `runtime`, which
+differ in which non-constant operations are permitted and in how `is_const_eval` and
+`consteval_br` are answered: `true` and the consteval edge in `constant` mode, `false` and the
+runtime edge in `runtime` mode. Whole-program runs and the optimizer's call folding (§3.2) use
+`runtime`.
 
 ### 2.4 Identity, hashing, debug info
 
@@ -149,13 +156,15 @@ operations are permitted.
   every downstream result.
 - `function_debug(F, ctx)` is a separate value: node id → `Loc`, variable declaration → the nodes
   and `alloc`s that hold it, inlined-at chains later. Every transformation from L1 to L3 carries
-  an **origin map** (new node → set of input node ids) inside its value; `tu(TU)` composes the
+  an **origin map** (new node → set of `(function entity, node id)` pairs) inside its value; `tu(TU)` composes the
   maps and renders DWARF late, so neither the IR fingerprint nor any optimization key ever sees a
   position (Part D).
 - The **optimization unit** is what `ir_fp` in §A8 names: an interned value holding the function's
   L2 IR, the L2 IR of each callee in its *inline candidate set* (callees under a size threshold
   from `options`, taken transitively to a fixed depth, outside the function's SCC), and the
-  `ipo_summary` of every other callee. `unit(F)` is a query; its fingerprint is a Merkle hash over
+  `ipo_summary` of every other callee. Only definitions the link is sure to use are candidates:
+same TU, internal linkage, or `inline`/COMDAT definitions under the ODR (whole-program mode
+aside). `unit(F, ctx, inline_opts)` is a query; its fingerprint is a Merkle hash over
   that closure, so the optimization-cache key is honest about everything inlining can see, while a
   change to a large callee's body changes only its summary fingerprint, and then only if the
   summary changed.
@@ -170,7 +179,8 @@ operations are permitted.
 At L2, per optimization unit, over the whole function's dataflow after the structural passes of
 that level (inlining, SROA/mem2reg, loop passes, CFG simplification) have run. Those passes are
 ordinary code on the skeleton and are *searched over* at level 2 and above: a small fixed set of
-pass orders is tried and the cheapest estimated result kept, deterministically. The e-graph holds
+pass orders is tried, saturation running once after each, and the cheapest estimated result is
+kept, deterministically. The e-graph holds
 every node of the DAG; block arguments, function arguments and the results of opaque calls are
 leaves. A unit is one e-graph; units are independent and run under `par_map`. There is no shared
 mutable e-graph across tasks (Part D), and no parallelism inside one.
@@ -193,21 +203,26 @@ widths unless restricted; side conditions are predicates on constants and e-clas
 (known bits, ranges, non-zero, alignment), never on positions. Constant folding is one built-in
 "rule": any node whose operands are all constants is evaluated by the L2 evaluator (the same op
 semantics the interpreter uses after lowering) and merged with its constant. Calls to functions
-the `ipo_summary` proves pure, with constant arguments, are folded by running the interpreter on
-the callee: no rule needed, and the result is as trusted as constant evaluation already is.
+the `ipo_summary` proves pure, with constant arguments, are folded by running the interpreter in
+`runtime` mode on the callee's L1 (`function_ir`), with the L2 constants converted at the
+boundary: no rule needed, and the result is as trusted as the interpreter already is.
 
 ### 3.3 Proving rules once
 
 `tools/rules prove` translates every rule to an SMT query over the L2 semantics of §6.1 (QF_BV;
 QF_ABV for memory rules) at widths 1, 8, 16, 32 and 64, under its side condition, and asks for a
-counterexample to *equivalence* (not refinement, §3.4). The output is `opt/rules/PROOFS`: the rule
+counterexample to *equivalence* (not refinement, §3.4). Two sides are equivalent when, on every
+input where neither side's pinned operations have immediate UB, their values and output states
+are equal, and their UB conditions are equal except for UB raised by a state operand both sides
+share (the store in `store_load_fwd` stays in the program as `?s2`); `ptr` values must agree in
+provenance too (§6.1). A rule that fails this goes to the directed pre-pass. The output is `opt/rules/PROOFS`: the rule
 set's fingerprint, the solver build, and per rule `proven`, `trusted(reason)` or `rejected`. The
 rule set fingerprint plus the PROOFS fingerprint is a component of `optimizer_version`; CI
 re-proves when either changes; a rule without a `proven` or `trusted` row is not loaded.
 `trusted` is for rules outside the solver's reach (a few floating-point rules under the strict
 model, nothing else at first) and each one is listed in STATUS. Fixed widths are a known
-limitation (Alive proves at fixed widths too); a rule is also proven at the widths a target
-actually has, which are all in the list.
+limitation (Alive proves at fixed widths too); a rule is applied only at widths it was proven
+at, so `__int128` and vector widths need their own entries in the list.
 
 ### 3.4 Only equivalences go in the e-graph
 
@@ -218,10 +233,14 @@ wrong direction. So:
 
 - The e-graph works over the **total algebra**: operations with poison as a value in the domain.
   `mul x 2 = shl x 1`, `add x 0 = x`, `load (store s p v) p = v` are equivalences there.
-- Facts that come from UB (`nsw`, inbounds, dominating guards, non-null from dereference) enter as
-  **e-class analysis facts** (ranges, known bits) that side conditions consult. A rule guarded by
-  such a fact is still an equivalence *under the fact*; the proof obligation includes the fact as
-  a hypothesis.
+- **E-class analysis facts** (ranges, known bits, non-zero) that side conditions consult come
+  only from flow-insensitive sources: the node's own operation and flags, constant operands,
+  widths and extensions, argument attributes and `ipo_summary` return ranges. An e-class holds
+  for the whole function, so a fact that holds only where something dominates (a guard, a
+  dereference) is not an e-class fact; those facts are used by the directed pre-pass below. A
+  fact derived from a flag is encoded in the proof as `¬poison(v) → P(v)`, and the rule must
+  still be an equivalence over the total algebra, so a rewrite that only refines poison is
+  rejected.
 - Refinement-only rewrites (dropping a flag, replacing a poison-producing expression by a
   defined one, `freeze` elimination) run as a **directed pre-pass** before saturation, where
   direction is preserved, and the pass is covered by region translation validation (§6.2).
@@ -232,7 +251,11 @@ later experiment; not the foundation.
 ### 3.5 Extraction
 
 Cost of an e-node: the measured cost (§8) of the cheapest L3 pattern that covers it on this
-target, weighted by the static or profile frequency of its block; leaves cost zero.
+target, weighted by the static or profile frequency of its block (for a floating node, the
+shallowest block its operands allow), as a positive integer with weights clamped to at least 1,
+so greedy extraction cannot pick a cycle on a tie; leaves cost zero. Both extractors respect the
+dominance restriction on pinned nodes (§2.2): a filter in greedy, one constraint per such node in
+the ILP.
 
 | Level | Extractor | Why |
 | --- | --- | --- |
@@ -243,8 +266,9 @@ The ILP model is built after **dominance pruning**: an e-node is dropped when an
 its class is no more expensive and uses a subset of its child classes, and e-nodes with their own
 class as a child are dropped. Cycles are forbidden by ordering integers (Miller–Tucker–Zemlin)
 only on edges inside strongly connected components of the class graph. To make the result
-independent of the solver's search path, costs are scaled integers with a tie-break by e-node id
-in the low digits, so the optimum is unique. If the ILP hits its node or iteration budget
+independent of the solver's search path, the objective is all-integer: real costs are scaled by
+`n · max_id` and a tie-break by e-node id is added, so every tie-break difference is at least 1,
+the total stays below 2⁵³, and the optimum is unique. If the ILP hits its node or iteration budget
 without an optimal solution, the best feasible solution found is used if one exists (it is a
 valid extraction; feasibility is checked, §6.3), otherwise the greedy extraction.
 
@@ -280,7 +304,7 @@ of the input. Determinism of construction and extraction rests on these rules, w
   id order.
 - Greedy extraction iterates classes in id order with ties broken by node id; the ILP's variable
   order is node order; HiGHS is given `threads = 1`, `random_seed` from the key fingerprint and
-  `mip_rel_gap = 0` explicitly, never `time_limit`, since its defaults depend on the machine.
+  `mip_rel_gap = 0` and `mip_abs_gap = 0` explicitly, never `time_limit`, since its defaults depend on the machine.
 
 ## 4. The constraint-model layer
 
@@ -305,10 +329,10 @@ struct Model {
   void minimize(std::span<const Term>);
 };
 struct Budget { std::uint64_t units; };                     // conflicts, nodes, iterations: back end's unit
-struct Outcome { Status status;                             // optimal | feasible | infeasible | budget_exhausted
+struct Outcome { Status status;                             // optimal | feasible | infeasible | budget_exhausted | stopped
                  std::vector<std::int64_t> values; Stats stats; };
-template<class B> concept Backend = requires(B b, const Model& m, Budget bu, Seed s) {
-  { b.solve(m, bu, s) } -> std::same_as<Outcome>;           // synchronous leaf, no threads, no clock
+template<class B> concept Backend = requires(B b, const Model& m, Budget bu, Seed s, std::stop_token st) {
+  { b.solve(m, bu, s, st) } -> std::same_as<Outcome>;       // synchronous leaf, no threads, no clock
   { B::supports(m) } -> std::same_as<bool>;                 // which constraint kinds it takes natively
 };
 void write_flatzinc(const Model&, Sink&);                   // for minizinc, chuffed, cp-sat offline
@@ -318,7 +342,9 @@ void write_flatzinc(const Model&, Sink&);                   // for minizinc, chu
 Contracts state the leaf's rules: `solve` is `pre(bu.units > 0)` and `post(r: r.status !=
 feasible || satisfies(m, r.values))`. A back end that does not support a constraint kind gets it
 decomposed by the layer (linearization, Boolean encodings); the decomposition is deterministic
-and part of the layer, so the model a solver sees is a function of the model built. The enclosing
+and part of the layer, so the model a solver sees is a function of the model built. The stop token is wired
+to the solver's own termination hook (CaDiCaL's terminator, a HiGHS callback, Z3's interrupt,
+a Gecode `Stop`) and is used only to abort: a `stopped` outcome carries no values. The enclosing
 `query_task` calls `co_await cx.stop_point()` between solver calls and after a `stopped` outcome;
 a solver never observes the clock or a thread id (Part D).
 
@@ -350,8 +376,10 @@ workaround (B2); both go upstream to libycxx before the HiGHS back end lands. Z3
 was identical across the two standard libraries. CaDiCaL was repeatable per binary but took a
 different search path under each standard library (52,405 against 44,220 conflicts on one
 instance). So a deterministic budget is reproducible only for one solver *binary*: the solvers
-are linked into ycxx, their build is covered by the optimizer build hash in `optimizer_version`
-(§7), and `smt_validated` evidence names the solver build (§6.3). Chuffed has only a wall-clock
+are linked into ycxx, their build is covered by the build hash in `optimizer_version` (§7), and
+`smt_validated` evidence names the solver build (§6.3). The cross-host CI test above compares
+solutions for all four back ends, not only HiGHS, and the remedy of §6.3 applies to whichever
+fails. Chuffed has only a wall-clock
 limit and a time-based default seed, which confirms it as export-only.
 
 ## 5. Combinatorial code generation
@@ -396,7 +424,10 @@ Validation is only as good as the IR's semantics, so these are fixed here, for L
 
 - **Poison** is the deferred-UB value (Lee et al., "Taming Undefined Behavior in LLVM"): produced
   by `nsw`/`nuw`/`exact` violations, out-of-range shifts, `ptr_add inbounds` leaving its object,
-  reads of `indeterminate` memory; it propagates through pure operations; `freeze` stops it.
+  reads of `indeterminate` memory; it propagates through pure operations, except that `select`
+  is poison only if its condition or the chosen arm is poison, and a block argument takes only
+  the taken edge's value; `freeze` stops it. `freeze` is never duplicated or rematerialized,
+  since two copies may differ.
   Branching on poison, storing poison to memory that is later read as a pointer, or passing it to
   a pinned operation that requires a defined value is **immediate UB**.
 - **Immediate UB** happens only at pinned operations: a memory access through a pointer that is
@@ -405,12 +436,16 @@ Validation is only as good as the IR's semantics, so these are fixed here, for L
   move, floating a pure node earlier is always sound: the worst it can produce is poison that
   nobody branches on.
 - **No `undef`.** Uninitialized automatic storage is erroneous (a concrete pattern, §2.3) unless
-  `[[indeterminate]]`, in which case reads give poison.
+  `[[indeterminate]]`, in which case reads give poison; uninitialized dynamic storage is
+  indeterminate ([basic.indet]), so its reads give poison too. Memory holds bytes with a poison
+  bit each.
 - **Pointers** are integers with a provenance *fact*, maintained by alias analysis following the
   PNVI-ae-udi model (Memarian et al.; ISO/IEC TS 6010): a pointer derived from an allocation by
   `ptr_add` has that allocation's provenance; `ptr_to_int` *exposes* the allocation;
-  `int_to_ptr` yields a pointer that may alias any exposed allocation. Pointer equality is integer
-  equality (unspecified results in the draft become concrete, as they do at run time).
+  `int_to_ptr` yields a pointer that may alias any exposed allocation, and a pointer loaded from
+  memory may alias any allocation. Pointer equality is integer equality (unspecified results in
+  the draft become concrete, as they do at run time), but two `ptr` values are *equivalent* only
+  if their integers and provenance agree.
 - **Refinement**, between a source and a target region: for every input, if the source has UB the
   target may do anything; otherwise the target has no UB, and for each output, the source's value
   is poison or equals the target's. This is the relation Alive and Alive2 check; it is the
@@ -431,13 +466,16 @@ unsound in combination with poison and gains nothing here.
 | Directed pre-pass (refinement rules), SROA, mem2reg, CFG simplification, GCM placement, peepholes at L2 | **Translation-validated** per acyclic region when the level's TV budget allows; otherwise trusted | Z3 refinement query over §6.1; region = a block or a single-entry acyclic hammock; inputs symbolic; memory an array; alias facts as hypotheses |
 | Inlining, loop passes (unrolling, LICM, induction variables), ABI lowering | Trusted in v1 | Tested; v2 adds pass-supplied witnesses (simulation relations) checked by SMT, after Namjoshi and Zuck |
 | Instruction selection (patterns) | Patterns trusted; the covering checked | Each pattern's L3 semantics is executable (the L3 evaluator, §13) and tested against its L2 pattern on random and exhaustive small inputs; covering validity (every node once, operands aligned) is checked |
-| Register allocation | **Checked** | Validator after Rideau and Leroy: a dataflow check that every use reads the value the pre-allocation code defined, spills and reloads included; no SMT |
-| Scheduling | **Checked** | Same multiset of instructions, every dependence edge of the (trusted) dependence graph respected |
+| Analyses that supply facts or TV hypotheses (alias analysis, e-class analyses, `ipo_summary`) and the L2 evaluator used for folding | Trusted | Differential tests against the L2 interpreter and the SMT semantics of §6.1; a wrong alias fact can let a wrong transformation pass TV, which is why these are listed |
+| Late L3 passes: out-of-SSA copies, stack-slot colouring, block layout, prologue and epilogue, post-allocation peepholes | Trusted, except where the allocation validator reads their result | Tested |
+| Register allocation | **Checked**: solver answers in every build; the heuristic allocator in debug and CI builds, trusted in release builds | Validator after Rideau and Leroy: a dataflow check that every use reads the value the pre-allocation code defined, spills and reloads included; no SMT |
+| Scheduling | **Checked**, on the same terms as allocation | Same multiset of instructions, every dependence edge of the (trusted) dependence graph respected |
 | Superoptimizer results | **Translation-validated** | The SMT query is part of the search |
 | Encoding, object writer, linker | Trusted | Round-trip tests through our disassembler of our own objects (DECISIONS §2.3) |
 
 Why not validate everything with SMT: it costs a solver call per region per optimization run,
-which the ladder affords only at high levels; proofs once per rule and cheap checkers per solver
+so the ladder affords it from level 2 only, bounded to small changed regions (which `-O2` compile
+time pays for), and fully only at level 3 and above; proofs once per rule and cheap checkers per solver
 answer give the same guarantee for a fraction of the cost, and the trusted set is short and named.
 
 ### 6.3 Evidence as a value
@@ -450,6 +488,9 @@ answer give the same guarantee for a fraction of the cost, and the trusted set i
 | `smt_validated` | fingerprint of the SMT query, solver build id, `rlimit`, result `unsat` | re-run the same query with the same solver build and budget; deterministic, so the answer is the same; `--replay-trust` skips it for speed |
 | `checked` | which validator (feasibility, allocation, dependences) and its input fingerprint | re-run the validator (microseconds) |
 | `trusted` | the pass name | none; this is what the trusted list means |
+
+A re-check that fails under `--replay` is a hard error (the manifest does not match this
+compiler), never a fallback, since a fallback would change the output the manifest promises.
 
 A solver's *solution* is itself part of the value (the extraction chosen, the allocation, the
 schedule), so a replay never re-solves: it re-checks. This is also what makes §A8's "same key,
@@ -476,14 +517,18 @@ differ while remaining correct, which is the trade §A8.3 already accepts.
 refines its ladder. `options` holds everything that changes *semantics or objective*
 (`-ffast-math` subsets, `-Os`/`-Oz` weighting, `-fno-exceptions`, PIC, profile data fingerprint);
 `level` holds only budget. `-O0`, `-O1`, `-O2`/`-O3` request levels 0, 1, 2 synchronously;
-background work continues up the ladder.
+background work continues up the ladder. As a refinement of §A8.3, `-O0` pins level 0 exactly:
+`best_available` is consulted only for `B ≥ 1`, so a debug build never receives optimized code
+from the cache. The self-hosting fixed point (DECISIONS §3.4) and the incremental == cold tests
+run with a pinned snapshot `S` (empty or a manifest), since background work between two runs
+changes `S`.
 
 | Level | Passes | E-graph (iters, nodes, classes, matches/rule) | Extraction | Inlining growth | Codegen | TV `rlimit`/region | Superopt |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | 0 | none: `lower`, tree select, stack slots | off | – | none | heuristic | off | off |
 | 1 | mem2reg/SROA, const fold, DCE, CFG simplify, directed pre-pass | 4, 10k, 5k, 100 | greedy | none | linear scan, list schedule | off (trusted) | off |
 | 2 | + inlining by cost, loop passes, pass-order search over 3 orders | 12, 100k, 50k, 1k | greedy; ILP (10k B&B nodes, 100k iters) when the pruned e-graph has ≤ 300 e-nodes | 2× unit size | same | 10⁶ on changed regions ≤ 64 nodes | off |
-| 3 | + combinatorial selection, joint RA/scheduling | 24, 400k, 200k, 4k | ILP when ≤ 1,000 pruned e-nodes | 4× | CP: 10⁵ failures per function; SAT: 10⁵ conflicts | 10⁷ | 10³ candidates, regions ≤ 6 nodes |
+| 3 | + combinatorial selection, joint RA/scheduling | 24, 400k, 200k, 4k | ILP (10⁵ B&B nodes, 10⁶ iters) when ≤ 1,000 pruned e-nodes | 4× | CP: 10⁵ failures per function; SAT: 10⁵ conflicts | 10⁷ | 10³ candidates, regions ≤ 6 nodes |
 | 3+k | same | every numeric budget × 4ᵏ | | | | | |
 
 The numbers are starting points, tuned on the corpus (#9) and committed as data in
@@ -494,7 +539,9 @@ The optimization cache, `best_available(key, B, S)` and the replay manifest are 
 Two refinements: the OC entry is `(unit_fp, target, options, optimizer_version) → (level, result,
 evidence, cost estimate)`, with the whole result and not only its fingerprint, since a result is
 reused on machines that never computed it; and `optimizer_version` is the fingerprint of (rule set,
-PROOFS, ladder, pattern tables, the optimizer's source build hash), so any of those changing
+PROOFS, ladder, pattern tables, and the build hash: the hash of the binary's build inputs, i.e.
+the revisions of ycxx and every `deps/` submodule, libycxx included, and the compiler's version
+and flags), so any of those changing
 invalidates the cache in O(1) by key.
 
 ## 8. Cost models
@@ -512,7 +559,7 @@ invalidates the cache in O(1) by key.
   `generic.costs` per architecture is derived by a stated formula (max latency, min throughput
   over the measured set) and committed too. Files are data: no constant in code.
 - **Engine input:** `cost_model(target)` is an input kind of durability `High`; its fingerprint
-  is a component of the `target` key of `optimized` (`target = (triple, uarch, cost_fp)`), so a
+  is a component of the `target` key of `optimized` (`target = (triple, uarch, ISA feature set, cost_fp)`), so a
   retuned table changes keys and never mixes with old results (Part D). Derived from it:
   `op_cost(L2 op, target)` = the cheapest covering pattern's cost, which is what the e-graph
   extractor and the inliner use, so mid-level costs and machine costs agree by construction.
@@ -553,8 +600,8 @@ back end's shape changing. Nothing below requires an e-graph, a rule, a solver o
 
 | Must exist | Why now |
 | --- | --- |
-| `lower(ir)` L1 → L2 as §2.1 describes, coroutine splitting and EH lowering included | The optimizer sits on L2; the pipeline's shape is final on day one |
-| `unit(F)` with an empty inline candidate set, `optimized(unit, …, level 0)` = `lower` + heuristic codegen, `codegen(F)` reading `best_available(key, B, S)` with `S` the empty `opt_cache_snapshot` input | The plumbing of §A8 runs from the first build, so anytime work later only adds cells |
+| `lower(ir)` L1 → L2 as §2.1 describes, coroutine splitting (ramp, resume and destroy pieces get entity ids from their origin and an ordinal, and their own units) and EH lowering included, alias tags on memory operations | The optimizer sits on L2; the pipeline's shape is final on day one |
+| `unit(F, ctx, inline_opts)` with an empty inline candidate set, `optimized(unit, …, level 0)` = `lower` + heuristic codegen, `codegen(F)` reading `best_available(key, B, S)` with `S` the empty `opt_cache_snapshot` input | The plumbing of §A8 runs from the first build, so anytime work later only adds cells |
 | The target description as data: pattern table in the §3.2 language (read by the maximal-munch selector), register classes, calling convention, encodings | The covering selector reads the same table; nothing emits instructions outside it |
 | Stack-slot allocation with a block-local allocator, then SSA linear scan; the allocation validator and the dependence checker, run on every function in debug and CI builds | The validators are the verification boundary for all later allocators and schedulers |
 | L3 with an origin map; DWARF and unwind tables rendered late by `tu(TU)` from `function_debug` composed with origin maps | Debug info survives optimization by construction |
@@ -660,7 +707,10 @@ Open items, settled in those issues:
 Following DECISIONS §6.5, the decisions (and a first draft of the text) came from a Fable
 subagent. The spikes, the changes they forced (§3.5's size bounds, dominance pruning, the unique
 optimum and HiGHS's explicit settings; §4.2's solver facts), the editing and the bookkeeping were
-done by the Opus session that owns the issue.
+done by the Opus session that owns the issue. One independent review by a second Fable subagent
+found 2 P0 (path-dependent facts used as function-wide e-class facts; the interpreter answering
+`if consteval` as constant evaluation in whole-program runs), 13 P1 and 10 P2; the session
+applied the smallest fix for each, and the reviewer checked the diff.
 
 Sources, per DECISIONS §2: the C++26 working draft (cited by stable clause name), P2795
 (erroneous behaviour), ISO/IEC TS 6010 (pointer provenance), the accepted query-engine design,
