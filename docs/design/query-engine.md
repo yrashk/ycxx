@@ -41,7 +41,7 @@ the review, the spike and the synthesis were done by the Opus session that owns 
 - **Part B (the C++ layer)** was drafted by a second Fable subagent: items and identities,
   program points, lookup, ADL, overload resolution, templates, constant evaluation, the
   preprocessor, granularity and soundness.
-- **Review rounds.** The Opus session reviewed both drafts and sent six rounds of pushback or
+- **Review rounds.** The Opus session reviewed both drafts and sent seven rounds of pushback or
   revision requests. Each changed the design:
   1. Validation originally short-circuited within a dependency group. That would make the set of
      cells verified at a revision depend on scheduling. Now every member of a group is verified;
@@ -74,6 +74,17 @@ the review, the spike and the synthesis were done by the Opus session that owns 
   6. Part B's first fix for the point of first demand rejected some well-formed programs: those
      whose class template specialization would differ at a later site. On pushback it adopted the
      conforming rule, pinning the first instantiation (§B6.2).
+  7. A verification pass over round 6's fixes (the third review round) found further gaps. Most
+     were in text the fixes had added: forward prefixes inside `pp`, demand-list entries naming
+     concrete cells, and waiter hand-over. Both Fable agents fixed them; a diff-only check
+     confirmed those fixes. The check also found three narrow P0s with obvious remedies, which
+     the Opus session patched itself without a new design decision:
+     - clear the waiter list on every claim, and complete late linkers only on a `Done` that is
+       valid at the current revision (§A3.1);
+     - discard first-demand entries recorded under a superseded traversal (§B6.2);
+     - run `on_build` on the edit strand (§A10.3).
+
+     Those last patches have not been independently re-verified.
 - **Part C (the spike)**, §1 (decisions in brief), Part D (constraints on other designs) and
   Part E (open items and follow-ups) were written by the Opus session.
 
@@ -803,10 +814,14 @@ Three `std::execution` entities make this concrete:
   **enqueues** every waiter's continuation onto its own deque at the waiter's priority; it never
   resumes a waiter inline from the completion path. **Waiter protocol.** The cell's `waiters`
   word is a lock-free push list with a `CLOSED` sentinel: the completer exchanges `CLOSED` in,
-  then walks what it took; a linker whose push sees `CLOSED` re-reads the state word: `Done` means
-  complete at once, anything else (the list was taken by an abort, below) means retry
-  `ensure_green` from the start, so no late linker is lost and none completes against an
-  unpublished value. Each operation state has one atomic
+  then walks what it took; a linker whose push sees `CLOSED` re-reads the state word:
+  `Done(verified_at == R)` means complete at once; anything else means retry `ensure_green` from
+  the start. "Anything else" covers a list taken by an abort (below) and an old `Done` that was
+  reverted to without validation. So no late linker is lost, and none completes against an
+  unpublished or unvalidated value. Every successful claim (from `Empty`, or from `Done` with
+  `verified_at < R` into `Validating`) resets `waiters` from `CLOSED` to empty right after its
+  CAS, before execution or validation starts. A cell that was published in an earlier revision
+  therefore never leaves linkers retrying against a stale `CLOSED`. Each operation state has one atomic
   `{waiting, completed, cancelled}`; the completer and a stop callback both CAS from `waiting`,
   and exactly one wins; a cancelled state stays in the list and is skipped, so nothing is ever
   unlinked from the middle of a lock-free list. **Abort hand-over.** An owner that leaves without
@@ -1371,7 +1386,8 @@ contextual kinds and on question cells alike, at any nesting depth (the `CtxKey`
 carries it): in trace patterns the engine replaces every such member that equals the fetching
 frame's own prefix with the placeholder (§A1.9), so the C++ layer never spells out which member is
 the prefix. The `pins` member is marked the same way and abstracted with it (the placeholder covers
-the pair); a prefix obtained with `cx.prefix_of(I)` is abstracted as `rel(◇.prefix, I)` (§A1.9);
+the pair); a prefix obtained with `cx.prefix_of(I)` is abstracted as `rel(◇.prefix, I)` and one obtained
+with `cx.prefix_after(h)` as `ext(◇.prefix, h)` (§A1.9);
 the `chain` member is ordinary key data and is never abstracted. A literal context is accepted in a
 dependency only by `reuse`, whose precondition is that it was the answer of a `pin_of` fetch in
 this frame. A `demanded` kind cannot be fetched with `fetch`, `par_fetch` or `par_map`, all of
@@ -1533,7 +1549,7 @@ if (auto r = co_await cx.fetch<Substitute>({tmpl, args}); r.failed()) { /* SFINA
 ```cpp
 // The daemon's edge: std::execution::task, one counting_scope per revision epoch, stop sources
 // owned by the request table (inplace_stop_source is immovable and must outlive the root).
-std::execution::task<void> Daemon::on_build(BuildRequest r) {
+std::execution::task<void> Daemon::on_build(BuildRequest r) {        // runs on the same strand as apply_edits
   Request& req = requests_.add(r);                                       // owns req.stop; removed on completion
   auto root = db.request<BuildReport>(r.build, Priority::Background);    // a query_task: sender + awaitable
   std::execution::spawn(std::move(root) | std::execution::then([&](const BuildReport& b) { reply(req, b); }),
@@ -1550,6 +1566,8 @@ std::execution::task<void> Daemon::apply_edits(EditBatch b) {           // runs 
   epoch_.gate.open();                                                     // epoch_ is still `mine`: the strand guarantees it
 }
 // gated_env's gate wait is a sender that completes set_stopped when the request's stop is requested.
+// on_build and apply_edits share one strand, so a request is always spawned into the current, open
+// epoch and never into a scope that apply_edits has already closed.
 ```
 
 `Ctx` offers exactly what the listing shows and nothing else; there is no way to read an input
@@ -1758,7 +1776,9 @@ missing edge it runs the computation in this context and inserts the new path. B
 computation is deterministic and reads nothing untracked, at most one leaf can match; the trie is
 a pure cache and may be emptied without changing any output.
 
-**What changes where.** A computation asks questions only in its own context. Of the context it
+**What changes where.** A computation asks questions only in its own context, or in a prefix
+derived from it with `cx.prefix_of(I)` (backward, recorded `rel(◇.prefix, I)`) or
+`cx.prefix_after(h)` (forward, recorded `ext(◇.prefix, h)`; only `pp` needs it, §B9). Of the context it
 passes to the cells it fetches, `pins` never changes; `chain` grows only along a
 constant-evaluation or return-type-deduction chain (§B7); `prefix` changes only on a **hop**: an
 entity-keyed query asked at prefix `Q` (`class_def(C, ctx)`, `function_ir(F, ctx)`) locates the
@@ -2134,11 +2154,13 @@ The rule has three parts.
    reached from item `J`, meets an `instantiated` entry for a class specialization `S` whose
    fingerprint differs from the table's, `tu(TU)` extends the TU's **pin table** with `S → c`,
    where `c` is the context of the cell that first instantiated `S`, and re-fetches `J`'s root
-   cells with the extended table; from then on every cell `tu(TU)` fetches (later items, the END
+   cells with the extended table. Before traversing them again it discards every first-demand
+   entry and visited mark first made under `J`'s superseded traversal, so a specialization that
+   only the unpinned analysis demanded is neither emitted nor diagnosed; from then on every cell `tu(TU)` fetches (later items, the END
    phase) carries the extended table, and so does every cell those reach, because `pins` is part
    of the context every fetch passes on. `instantiate_class(S, ctx)` and `instantiate_var(S, ctx)`
    begin by asking `pin_of(S)`; if the answer is a context `c`, the cell fetches the same index at
-   `c` as an ordinary dependency and returns its result without computing. Re-fetched later items
+   `c` with `reuse` (§A10.1) and returns its result without computing. Re-fetched later items
    re-walk their tries; their
    walks differ from the earlier ones only at `pin_of` answers for pinned specializations, so they
    land on their old leaves except where `S` matters.
@@ -2654,7 +2676,7 @@ Over-invalidation accepted on purpose, with expected cost:
   `tu(TU)`, dedup on `(file, line, column, severity, id, args)` (§B2); demand lists with the
   three entry kinds `instantiated(k, loc)`, `nested(k)`, `definition_required(spec, loc)`
   (positions in the dependency list, never cells), carried by every contextual
-  cell, `cx.demand` allowed only from contextual cells (§B1.4); `complete_before(C, ctx)` is a
+  cell, `cx.demand` allowed only from contextual cells and from the TU-level `AnalyzeTu` frame (§B1.4, §A1.7); `complete_before(C, ctx)` is a
   contextual cell meaning "a definition is reachable" (§B8); `tu(TU)` (`AnalyzeTu`) fetches root
   cells in parallel, traverses in sequential-compiler order with complete-class contexts deferred
   to the outermost closing brace, builds the first-demand table, repairs divergence by extending
@@ -2671,8 +2693,7 @@ Over-invalidation accepted on purpose, with expected cost:
   frame may demand with a TU-level `Loc`, its own demand list is the END worklist, and
   `tu_diagnostics` collects only from `summary.final_cells()` (§B6.2, §B11); `include_resolution`
   takes the prefix root (the configuration fingerprint) as key data, and so does every other cheap
-  kind that
-  reads configuration takes the prefix root as key data; `syntactic_definition` returns candidate
+  kind that reads configuration; `syntactic_definition` returns candidate
   items and `prefix_item_lists` is a cheap kind (§B1.3).
 - Still to confirm with the preprocessor design: the placement of an `#include` that falls inside
   an item.
