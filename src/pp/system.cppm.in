@@ -1,0 +1,19 @@
+// The system include directories of this build (configured by CMake): libycxx's headers, the
+// ones libycxx's build generated, and the C library's headers in the SDK (`$SDKROOT` overrides
+// the SDK the build used).
+export module ycxx.pp:system;
+
+import std;
+
+export namespace ycxx::pp {
+
+std::vector<std::string> system_dirs() {
+  std::vector<std::string> dirs{"@YCXX_LIBYCXX_INCLUDE@", "@YCXX_LIBYCXX_GENERATED_INCLUDE@"};
+  std::string sdk = "@CMAKE_OSX_SYSROOT@";
+  if (const char* env = std::getenv("SDKROOT"); env != nullptr && *env != '\0') sdk = env;
+  if (!sdk.empty()) dirs.push_back(sdk + "/usr/include");
+  else dirs.push_back("/usr/include");
+  return dirs;
+}
+
+}  // namespace ycxx::pp

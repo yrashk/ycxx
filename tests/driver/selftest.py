@@ -147,15 +147,15 @@ class Parts(unittest.TestCase):
     def test_no_unsupported(self):
         # An UNSUPPORTED test passes a run, but fails it with --no-unsupported, and so does a
         # selection that runs nothing: a CI step that must run its tests cannot go green vacuously.
-        pp = 'own/smoke/object-like-macro.pp.cpp'  # ycxx has no "preprocess" (tests/features/ycxx.txt)
+        inc = 'incremental/smoke/inline-function-body.incr'  # ycxx has no "incremental" (tests/features/ycxx.txt)
         with tempfile.TemporaryDirectory() as d:
             def status(stage, what, *flags):
                 return subprocess.run([sys.executable, str(REPO / 'tools' / 'test'), '--cxx', 'ycxx', '--state', d,
                                        '--no-state', '-q', *flags, stage, what], capture_output=True, text=True).returncode
-            self.assertEqual(status('core', pp), 0)
-            self.assertEqual(status('core', pp, '--no-unsupported'), 1)
-            self.assertEqual(status('wider', pp), 0)  # the wider stage selects no own/ test
-            self.assertEqual(status('wider', pp, '--no-unsupported'), 1)
+            self.assertEqual(status('wider', inc), 0)
+            self.assertEqual(status('wider', inc, '--no-unsupported'), 1)
+            self.assertEqual(status('core', inc), 0)  # the core stage selects no incremental/ test
+            self.assertEqual(status('core', inc, '--no-unsupported'), 1)
 
     def test_affected(self):
         tests = [discover.Test('own/a.run.cpp', Path(), 'own', 'run'), discover.Test('own/b.run.cpp', Path(), 'own', 'run')]

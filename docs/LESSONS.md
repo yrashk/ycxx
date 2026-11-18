@@ -127,6 +127,16 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
     or build; otherwise don't switch branches until it reports.
   - Learned on #40.
 
+- **Brief a plumbing design with the real invocations, not only the principles.** On #83 the
+  decision brief described `make -j` in general. The one review then found a P0 and three P1s in
+  invocations it never listed: recursive make running the same command line in two directories,
+  a link reading `.o` files that the build keeps rewriting, `echo | c++ -E -` probes, and
+  `SOURCE_DATE_EPOCH` next to clock-timed requests.
+  - Do: list concrete command lines and event sequences in the brief (working directories,
+    response files, stdin, environment, what the build writes where), and ask the subagent to
+    walk each one through its decisions.
+  - Learned on #83.
+
 ## Bureaucracy loops
 
 - **A design document became a loop.** The query-engine design (#1) grew to 31,500 words over
@@ -212,6 +222,14 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
   - Learned on the α slice (#39), 2026-11-18.
 
 ## Evidence and tests
+
+- **An incremental-equals-cold check also catches values that depend on the session.** On #85,
+  `unit.pp` compared a warm session's `Region` with a fresh one's after each edit. Five states
+  differed, while every token, location and name matched. The difference was `Region::files`,
+  which held `FileId`s numbered in the order a session first saw each path.
+  - Do: compare whole values, not what they print. Keep handles that a session numbers out of
+    values; use paths or fingerprints.
+  - Learned on #85.
 
 - **Rerun the crash survey after every change, through the real driver.** On #41 a survey of
   every draft example found no crash; two later changes (placeholder records with an uninterned

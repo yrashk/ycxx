@@ -63,6 +63,21 @@ enum class LexDiag : u32 {
   concat_suffix_mismatch [[=message{Severity::error, "adjacent string literals have different ud-suffixes"}]],
   // [cpp]
   directive_unsupported [[=message{Severity::error, "preprocessing directives are not supported yet"}]],
+  invalid_directive [[=message{Severity::error, "invalid preprocessing directive"}]],
+  extra_tokens [[=message{Severity::warning, "extra tokens at end of preprocessing directive"}]],
+  // [cpp.include]
+  include_expected [[=message{Severity::error, "expected \"FILENAME\" or <FILENAME>"}]],
+  include_not_found [[=message{Severity::error, "file not found"}]],
+  include_too_deep [[=message{Severity::error, "#include nested too deeply"}]],
+  // [cpp.replace]
+  macro_name_missing [[=message{Severity::error, "macro name missing"}]],
+  macro_name_not_identifier [[=message{Severity::error, "macro name must be an identifier"}]],
+  macro_name_defined [[=message{Severity::error, "'defined' cannot be used as a macro name"}]],
+  macro_redefined [[=message{Severity::error, "macro redefined with a different replacement list"}]],
+  function_like_unsupported [[=message{Severity::error, "function-like macros are not supported yet"}]],
+  paste_unsupported [[=message{Severity::error, "'##' is not supported yet"}]],
+  // [cpp.pragma]
+  pragma_once_in_main [[=message{Severity::warning, "#pragma once in main file"}]],
 };
 
 // A diagnostic as the lexer produces it, before it reaches a query's context.
