@@ -54,7 +54,7 @@ func @2 {
   ret %s, %one
 ^2:
   %m: T1 = sub nsw %n, %one
-  %s3: !state, %r: T1 = call %s, %m [@2]
+  %s3: !state, %r: T1 = call %s, %m [@2, 0]
   %p: T1 = mul nsw %n, %r
   ret %s3, %p
 }
@@ -66,7 +66,7 @@ func @2 {
   cond_br %3 ^2, ^1
 ^1:
   %4: i32 = sub nsw %1, %2
-  %5: !state, %6: i32 = call %0, %4 [@2, 1]
+  %5: !state, %6: i32 = call %0, %4 [@2, 1, 0]
   %7: i32 = mul nsw %1, %6
   ret %5, %7
 ^2:
@@ -82,7 +82,7 @@ func @3 {
 ^0(%s: !state, %c: T5, %b: T2, %u: T10):
   %w: T1 = iconv %c
   %x: T4 = iconv %u
-  %s1: !state, %r: T5 = call %s, %c, %b [@4]
+  %s1: !state, %r: T5 = call %s, %c, %b [@4, 0]
   %t: T2 = tobool %w
   %v: T13 = iconv %x
   ret %s1, %t
@@ -92,7 +92,7 @@ func @3 {
 ^0(%0: !state, %1: i8, %2: i1, %3: i8):
   %4: i32 = zext %3
   %5: i16 = trunc %4
-  %6: !state, %7: i32 = call %0, %1, %2 [@4, 1]
+  %6: !state, %7: i32 = call %0, %1, %2 [@4, 1, 0]
   %8: i8 = trunc %7
   %9: i32 = sext %1
   %10: i32 = const [0]
@@ -161,7 +161,7 @@ func @6 {
   %n: T7 = ptr_add %g, %i [T1]
   %e: T2 = ptr_cmp %p, %q [lt]
   %z: T2 = tobool %p
-  %s1: !state, %r: T1 = call %s, %p [@101]
+  %s1: !state, %r: T1 = call %s, %p [@101, 0]
   ret %s1, %r
 }
 )",
@@ -181,7 +181,7 @@ func @6 {
   %13: ptr = const [0]
   %14: i1 = icmp %2, %13 [ne]
   %15: i8 = load %0, %4 [T5]
-  %16: !state, %17: i32 = call %0, %2 [@101, 0]
+  %16: !state, %17: i32 = call %0, %2 [@101, 0, 0]
   ret %16, %17
 }
 )");

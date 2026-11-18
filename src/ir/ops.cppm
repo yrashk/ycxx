@@ -213,8 +213,10 @@ export enum class Op : std::uint16_t {
   rtti__dyncast [[=state({S, V}, {V}).imms({type})]],
 
   // Calls without an unwind edge: the callee cannot throw, or the exception leaves the function.
-  call [[=state({S, Vs}, {S, Vs}).imms({entity}).accepts({not_constexpr})]],
-  call_ind [[=state({S, V, Vs}, {S, Vs}).accepts({not_constexpr})]],
+  // The u32 is how many of the last arguments the callee's ellipsis matches ([expr.call]/12);
+  // they already have the default argument promotions. A target may pass them differently.
+  call [[=state({S, Vs}, {S, Vs}).imms({entity, u32}).accepts({not_constexpr})]],
+  call_ind [[=state({S, V, Vs}, {S, Vs}).imms({u32}).accepts({not_constexpr})]],
   builtin [[=state({S, Vs}, {S, Vs}).imms({u32})]],
   asm_ [[=state({S, Vs}, {S, Vs}).imms({constant}).with({nonconstant})]],
 
@@ -254,8 +256,9 @@ export enum class Op : std::uint16_t {
   ret [[=control({S, Vs}, {}, 0)]],
   unreachable [[=control({}, {}, 0)]],
   consteval_br [[=control({}, {}, 2)]],                  // consteval, runtime ([stmt.if])
-  invoke [[=control({S, Vs}, {S, Vs}, 2).imms({entity}).accepts({not_constexpr})]],  // normal, unwind
-  invoke_ind [[=control({S, V, Vs}, {S, Vs}, 2).accepts({not_constexpr})]],
+  // normal, unwind; the u32 as for `call`
+  invoke [[=control({S, Vs}, {S, Vs}, 2).imms({entity, u32}).accepts({not_constexpr})]],
+  invoke_ind [[=control({S, V, Vs}, {S, Vs}, 2).imms({u32}).accepts({not_constexpr})]],
   throw_ [[=control({S, V}, {}, 0, true).imms({type})]],  // the exception object; optional unwind
   rethrow [[=control({S}, {}, 0, true)]],
   resume [[=control({S, X}, {}, 0, true)]],               // keep unwinding

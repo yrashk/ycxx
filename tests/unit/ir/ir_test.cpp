@@ -195,7 +195,7 @@ func @2 {
 constexpr std::string_view exceptions = R"(
 func @3 {
 ^0(%s: !state, %a: T1):
-  %s1: !state, %r: T1 = invoke %s, %a [@9] ^ok, ^lpad(%a)
+  %s1: !state, %r: T1 = invoke %s, %a [@9, 0] ^ok, ^lpad(%a)
 ^ok:
   ret %s1, %r
 ^lpad(%t: !state, %e: !exn, %a2: T1):
@@ -215,7 +215,7 @@ func @4 {
 ^0(%s: !state):
   %s1: !state, %h: !coro = coro.begin %s
   %p: T3 = coro.promise %h
-  %s2: !state = call %s1, %p [@20]
+  %s2: !state = call %s1, %p [@20, 0]
   coro.suspend %s2, %h [0] ^resumed, ^destroyed
 ^resumed(%s3: !state):
   coro.suspend %s3, %h [1] ^destroyed, ^destroyed
@@ -389,7 +389,7 @@ void errors() {
       "^2:\n  br ^3\n^3:\n  ret %s, %x\n}",
       "does not dominate");
   has("func @1 {\n^0(%s: !state, %v: T1):\n  br ^1(%v)\n^1(%w: T2):\n  ret %s\n}", "wrong type");
-  has("func @1 {\n^0(%s: !state, %v: T1):\n  %s1: !state = invoke %s [@3] ^1, ^2\n^1:\n  unreachable\n^2(%a: T1, %b: T1):\n  unreachable\n}",
+  has("func @1 {\n^0(%s: !state, %v: T1):\n  %s1: !state = invoke %s [@3, 0] ^1, ^2\n^1:\n  unreachable\n^2(%a: T1, %b: T1):\n  unreachable\n}",
       "implicit parameters");
   has("func @1 {\n^0(%s: !state, %v: T1):\n  %a: T1 = add %v, %b\n  %b: T1 = add %a, %v\n  ret %s\n}",
       "cycle");
@@ -405,12 +405,12 @@ void errors() {
       "  %c: T1 = load %a, %p [T1, /]\n  cond_br %c ^1, ^2\n^2:\n  ret %a\n}",
       "moves %0 after node");
   // Review findings on #23.
-  has("func @1 {\n^0(%s: !state, %c: T1):\n  cond_br %c ^a, ^b\n^a:\n  %s1: !state, %r: T1 = invoke %s [@3] ^n, ^u\n"
+  has("func @1 {\n^0(%s: !state, %c: T1):\n  cond_br %c ^a, ^b\n^a:\n  %s1: !state, %r: T1 = invoke %s [@3, 0] ^n, ^u\n"
       "^b:\n  br ^n\n^n:\n  ret %s1, %r\n^u(%us: !state, %e: !exn):\n  unreachable\n}",
       "no other predecessor");
   has("func @1 {\n^0(%s: !state):\n  %y: T1 = neg %x\n  br ^1\n^1:\n  %x: T1 = unreachable\n}", "node 0");
   has("func @1 {\n^0(%s: !state):\n  br ^1(%s, %s)\n^1(%a: !state, %b: !state):\n  ret %a\n}", "more than one !state");
-  has("func @1 {\n^0(%s: !state):\n  %t: !state = invoke %s [@3] ^1(%s), ^2\n^1(%a: !state):\n  ret %a\n"
+  has("func @1 {\n^0(%s: !state):\n  %t: !state = invoke %s [@3, 0] ^1(%s), ^2\n^1(%a: !state):\n  ret %a\n"
       "^2(%u: !state, %e: !exn):\n  unreachable\n}",
       "consumes a state twice");
   has("func @1 {\n^0(%s: !state):\n  br ^1(%s)\n^1(%a: !state):\n  br ^0(%a)\n}", "entry block");

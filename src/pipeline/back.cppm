@@ -366,11 +366,18 @@ struct UnitShapes {
   static engine::query_task<Value> run(engine::Ctx& cx, TuId tu);
 };
 
+// A function declared with an ellipsis ([dcl.fct]) and how many parameters precede it.
+struct VariadicFunction {
+  EntityId entity = EntityId::none;
+  std::uint32_t parameters = 0;
+};
+
 // F's definition and the facts `function_ir` asks of the rest of the unit.
 struct FunctionSource {
   FunctionDef def;
   bool is_main = false;
-  std::vector<EntityId> constexpr_functions;  // the unit's, sorted by handle
+  std::vector<EntityId> constexpr_functions;        // the unit's, sorted by handle
+  std::vector<VariadicFunction> variadic_functions;  // the unit's, sorted by handle
 };
 struct FunctionSourceQ {
   using Key = FnKey;
@@ -594,9 +601,14 @@ engine::query_task<FunctionSource> FunctionSourceQ::run(engine::Ctx& cx, FnKey k
   for (const FunctionDef& f : tu.functions)
     if (f.entity == k.fn) out.def = f;
   out.is_main = k.fn == tu.main;
-  for (const Entity& e : tu.entities)
-    if (e.is_function && e.is_constexpr) out.constexpr_functions.push_back(e.id);
+  irgen::TypeFacts types(*universe().in, *universe().target);
+  for (const Entity& e : tu.entities) {
+    if (!e.is_function) continue;
+    if (e.is_constexpr) out.constexpr_functions.push_back(e.id);
+    if (auto n = types.parameters_before_ellipsis(e.type)) out.variadic_functions.push_back({e.id, *n});
+  }
   std::ranges::sort(out.constexpr_functions);
+  std::ranges::sort(out.variadic_functions, {}, &VariadicFunction::entity);
   co_return out;
 }
 
@@ -614,6 +626,11 @@ class UnitFacts : public irgen::TypeFacts {
   ConstId string_address(ConstId c) { return universe().consts->address_of(c); }
   bool is_constexpr(EntityId e) { return std::ranges::binary_search(src_->constexpr_functions, e); }
   bool is_main(EntityId e) { return e != EntityId::none && e == src_->def.entity && src_->is_main; }
+  std::optional<std::uint32_t> ellipsis_after(EntityId e) {
+    auto it = std::ranges::lower_bound(src_->variadic_functions, e, {}, &VariadicFunction::entity);
+    if (it == src_->variadic_functions.end() || it->entity != e) return std::nullopt;
+    return it->parameters;
+  }
 
  private:
   const FunctionSource* src_;
