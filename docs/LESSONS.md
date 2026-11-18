@@ -39,6 +39,18 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
     agree any shared file (here `ast/nodes.cppm`) with its owner first. Carry the owner's diff
     verbatim, so whichever branch merges second merges cleanly.
   - Learned on #24.
+- **A worktree-isolated agent's shell refuses commands it cannot prove are not git.** Loops over
+  `$f`, a compiler named by a variable, or several `python3 - <<EOF` steps chained with `&&` were
+  refused whole, which cost a retry each on #43.
+  - Do: put loops and multi-step edits in a script in the scratchpad and run that one file; use
+    `tools/test` with a path filter (`tools/test --cxx ycxx core own/slice`) to compile and run
+    a set of tests.
+  - Learned on #43.
+- **Write the back half against hand-built inputs while its front waits.** #43 needed the parser
+  (#52) for any end-to-end run. The back half (function_ir to a running executable) was written
+  and tested first, from bodies built the way sema builds them. When #52 landed, the front half
+  took one commit, and every slice test passed on the first run.
+  - Learned on #43.
 
 ## Working with Fable subagents
 
@@ -114,6 +126,24 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
   - Do: give a reviewer a commit SHA, not `HEAD`, and `isolation: "worktree"` when it may edit
     or build; otherwise don't switch branches until it reports.
   - Learned on #40.
+
+- **Brief a plumbing design with the real invocations, not only the principles.** On #83 the
+  decision brief described `make -j` in general. The one review then found a P0 and three P1s in
+  invocations it never listed: recursive make running the same command line in two directories,
+  a link reading `.o` files that the build keeps rewriting, `echo | c++ -E -` probes, and
+  `SOURCE_DATE_EPOCH` next to clock-timed requests.
+  - Do: list concrete command lines and event sequences in the brief (working directories,
+    response files, stdin, environment, what the build writes where), and ask the subagent to
+    walk each one through its decisions.
+  - Learned on #83.
+
+- **A subagent that writes files must not share your worktree while you switch branches.** On
+  #87 the spec-only test author wrote into the session's worktree while the session parked work
+  in WIP commits and switched to the PR 1 branch for review fixes. Its files were swept into a WIP
+  commit, and a failed `cd` left copies at the root.
+  - Do: give a writing subagent `isolation: "worktree"`, or don't switch branches until it
+    reports. Before a PR, rebuild unpushed history from a soft reset, so stray WIP never ships.
+  - Learned on #87.
 
 ## Bureaucracy loops
 
@@ -206,6 +236,14 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
 
 ## Evidence and tests
 
+- **An incremental-equals-cold check also catches values that depend on the session.** On #85,
+  `unit.pp` compared a warm session's `Region` with a fresh one's after each edit. Five states
+  differed, while every token, location and name matched. The difference was `Region::files`,
+  which held `FileId`s numbered in the order a session first saw each path.
+  - Do: compare whole values, not what they print. Keep handles that a session numbers out of
+    values; use paths or fingerprints.
+  - Learned on #85.
+
 - **Rerun the crash survey after every change, through the real driver.** On #41 a survey of
   every draft example found no crash; two later changes (placeholder records with an uninterned
   type, then the switch to #33's checked `array_of`) brought crashes that the earlier survey
@@ -213,6 +251,13 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
   - Do: keep the survey a loop over `tools/test core` plus a direct run, and rerun it last.
   - Do: an expected-failure list must never cover a crash (`Crashed` in tests/driver/kinds.py).
   - Learned on #41.
+- **A default-constructed handle is a real handle.** `QualType{}` is type number 0, the first type
+  interned (often `int`). The interpreter used it as "no pointee" for `std::nullptr_t`, and so
+  skipped its `void*` cast check for every `int*`. The unit tests' world happened to intern `int`
+  first, which is how it showed.
+  - Do: say "none" with a flag or `std::optional`, or with the kind's `none` enumerator where the
+    handle has one (`ConstId::none`, `NodeId::none`), never with `T{}`.
+  - Learned on #25.
 - **A reference into a growing side table dangles.** A `const TypeRec&` held across creating
   another type pointed into a reallocated `std::vector`, giving a wrong diagnostic that depended
   on the file's length. Use a `std::deque` for tables whose records are referenced, or return

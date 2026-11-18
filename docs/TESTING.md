@@ -41,11 +41,13 @@ or configuration error; 3 internal driver error; 130 interrupted.
 `build/ycxx`), `clang` or `gcc`. The oracles are Clang 23 and GCC 16 (`$YCXX_CLANGXX`,
 `$YCXX_GXX`, else libycxx's `toolchains.env`, else `clang++-23` and `g++-16`), always run with
 `-std=c++26 -pedantic-errors`. A missing oracle makes the tests that need it UNSUPPORTED;
-`--require-oracles` makes it an error (CI uses it).
+`--require-oracles` makes it an error (CI uses it). `--no-unsupported` fails the run on any
+UNSUPPORTED test, or when the selection runs no test (CI's α slice step uses it).
 
 What ycxx can do is listed in [`tests/features/ycxx.txt`](../tests/features/ycxx.txt): `syntax`,
 `preprocess`, `run`, `incremental`. A test that needs a feature ycxx lacks is UNSUPPORTED with
-that reason, and the summary counts the reasons. When ycxx learns to do something, add the line:
+that reason, and the summary counts the reasons. Hosts after a feature limit it to them (`run
+darwin-arm64`). When ycxx learns to do something, add the line:
 the tests start counting. [`tests/features/ycxx.xfail`](../tests/features/ycxx.xfail) lists the
 tests ycxx is expected to fail with the features it has (`<test id> <reason>` per line), outside
 the test files because most are generated. It works like an `XFAIL: ycxx` line: an XPASS fails

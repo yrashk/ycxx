@@ -40,7 +40,7 @@ stages, in order:
   rest      every other suite
 A test runs in the first stage that selects it.
 
-exit status: 0 all passed (XFAIL and UNSUPPORTED included); 1 a test or stage failed; 2 usage or
+exit status: 0 all passed (XFAIL, and UNSUPPORTED unless --no-unsupported); 1 a test or stage failed; 2 usage or
 configuration error; 3 internal driver error; 130 interrupted (Ctrl-C).
 """
 
@@ -57,6 +57,8 @@ def parse_args(argv):
                    help='the compiler under test (default ycxx; clang and gcc check the tests themselves)')
     p.add_argument('--oracle', default='clang', choices=toolchain.ORACLES, help='default oracle of -E tests')
     p.add_argument('--require-oracles', action='store_true', help='a missing oracle is an error, not UNSUPPORTED')
+    p.add_argument('--no-unsupported', action='store_true',
+                   help='an UNSUPPORTED test, or a selection that runs no test, fails the run')
     p.add_argument('--shard', help='I/N: run the I-th of N shards, split by recorded duration')
     p.add_argument('--state', default=str(REPO / 'build' / 'test-state'), help='fail-fast state directory')
     p.add_argument('--branch', help='branch whose last failures to use and update (default: from CI or git)')
@@ -219,7 +221,7 @@ def run_tests(ui, args, stage, tests, ctx, results, shown_failures, interrupted)
                 err = summary_error(code, output)
                 results[t.id] = {'name': t.id, 'code': code, 'secs': round(secs, 3), 'steps': steps,
                                  'error': err, 'output': output, 'stage': stage, 'kind': t.kind, 'link': ''}
-                good = code in GOOD or code == 'UNSUPPORTED'
+                good = code in accepted(args)
                 ok = ok and good
                 if not (args.quiet and good):
                     col = ui.green if code in GOOD else ui.yellow if code == 'UNSUPPORTED' else ui.red
@@ -262,6 +264,11 @@ def detect_branch(args):
             return os.environ[v]
     b = state.git(REPO, 'rev-parse', '--abbrev-ref', 'HEAD')
     return b if b and b != 'HEAD' else 'detached'
+
+
+def accepted(args):
+    """The results that do not fail a run: UNSUPPORTED too, unless --no-unsupported."""
+    return GOOD if args.no_unsupported else GOOD | {'UNSUPPORTED'}
 
 
 def main(argv=None):
@@ -438,7 +445,7 @@ def _main(argv):
                 ts = plan[s]
                 ui.section(f'{s}: {len(ts)} tests' + (f' ({notes[s]})' if s in notes else ''))
                 ok = run_tests(ui, args, s, ts, ctx, results, shown, interrupted) if ts else True
-                bad = sum(1 for t in ts if t.id in results and results[t.id]['code'] not in GOOD | {'UNSUPPORTED'})
+                bad = sum(1 for t in ts if t.id in results and results[t.id]['code'] not in accepted(args))
                 records.append({'name': s, 'status': 'interrupted' if interrupted[0] else 'ok' if ok else 'FAIL',
                                 'secs': time.monotonic() - t0,
                                 'detail': f'{len(ts)} tests, {bad} not passing' + (f'; {notes[s]}' if s in notes else '')})
@@ -474,7 +481,10 @@ def _main(argv):
         r.pop('log', None)
     page = report.write(logs / 'report', title, clean, records, tests, REPO)
     ui.line()
-    total_bad = sum(n for c, n in counts.items() if c not in GOOD | {'UNSUPPORTED'})
+    total_bad = sum(n for c, n in counts.items() if c not in accepted(args))
+    if args.no_unsupported and not results and not interrupted[0]:
+        failed_stage = failed_stage or 'selection'
+        ui.fail('--no-unsupported', 'no test ran')
     summary = ', '.join(f'{c} {n}' for c, n in counts.items()) or 'no tests ran'
     if interrupted[0]:
         ui.warn(f'interrupted after {meta["time"]}', summary)

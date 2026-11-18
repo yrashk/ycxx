@@ -2,10 +2,10 @@
 // interner. A value's type is canonical and cv-unqualified, so template-argument-equivalent values
 // are one `ConstId` (§5.6).
 //
-// This first list is the α slice's (#39): integers (bool and the character types included) and
-// `nullptr`, and the shape of the dependent family: a kind marked `[[=dependent]]` is a `VDep*`
-// value, one with free template parameters. Floating values, lvalues, strings, aggregates and the
-// rest of the `VDep*` family follow (#33).
+// This first list is the α slice's (#39): integers (bool and the character types included),
+// `nullptr`, string literal objects and addresses of them and of entities, and the shape of the
+// dependent family: a kind marked `[[=dependent]]` is a `VDep*` value, one with free template
+// parameters. Floating values, aggregates and the rest of the `VDep*` family follow (#33).
 export module ycxx.ast.values;
 
 import std;
@@ -68,8 +68,13 @@ struct VString {
   SeqId<u8> units;
 };
 
+// A declared object or function, as the base of an address (§5.5).
+struct VEntity {
+  EntityId entity;
+};
+
 // The address of an object or of a subobject of it, plus a byte offset (§5.5): `base` is a
-// `VString` (or, later, a `VEntity`), `path` the subobject indices from it.
+// `VString` or a `VEntity`, `path` the subobject indices from it.
 struct VLvalue {
   ConstId base;
   SeqId<u32> path;
@@ -91,7 +96,7 @@ struct [[=dependent]] VDepFnParam {
   u16 index;
 };
 
-using ValueKinds = closed_list<VInt, VNullptr, VString, VLvalue, VDepParam, VDepFnParam>;
+using ValueKinds = closed_list<VInt, VNullptr, VString, VLvalue, VEntity, VDepParam, VDepFnParam>;
 
 template <class T>
 constexpr bool is_value_kind = ValueKinds::contains<T>;

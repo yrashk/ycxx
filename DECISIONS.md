@@ -295,6 +295,29 @@ specified by the accepted [optimization design](docs/design/optimization.md) (#3
    - **Memory:** trees are built in the frame arena and interned when the frame commits, into
      per-kind pools, never a `std::tuple` over the kinds; keys are interned eagerly. *Reason:*
      speculative parses and deductions leave no garbage. (§9)
+10. **The resident daemon.** Specified by the accepted [daemon design](docs/design/daemon.md)
+    (#83); the section references in this item point into it.
+    - **One daemon per project root and ycxx binary.** The root is the first `.ycxx` or
+      version-control marker found walking up from the source (submodules skipped, worktrees
+      counted). *Reason:* one revision per daemon, so one project's edits never stop another's
+      builds, and two binaries never share a daemon. (§2)
+    - **A Unix socket named by scope and build hash; the client writes the outputs.** One
+      `compile` request carries the whole command line, made absolute against its `cwd`, and the
+      answer carries stdout, stderr, exit status and output bytes. A disconnect stops the request.
+      *Reason:* drop-in `c++` behaviour lives in one code path. (§3)
+    - **Batches apply at once; stopped requests restart inside the daemon, behind a progress
+      quantum** that grows only while restarts make no progress. *Reason:* LSP latency, no
+      livelock, and the policy chooses only the revision a request is answered at. (§4)
+    - **Inputs are provided on first fetch from a file table that changes only between epochs.**
+      A batch is a set of dirty paths; a path no cell knows is dropped, so build outputs never
+      stop a build. A request starts after a cookie on the watcher's queue shows every earlier
+      change applied. (§5)
+    - **Editor buffers are a second view in the same engine,** at a new lowest durability, so a
+      keystroke leaves every build cell green in O(1) and builds never see unsaved text. (§6)
+    - **Fallback to in-process on any failure; a crashed daemon is retried once.** Idle exit, and
+      the persistent cache handed to the next daemon as red/green from a different start. (§7)
+    - **Every answer carries its revision and per-root counters,** which the β tests check, with
+      daemon and in-process outputs compared byte for byte. (§8)
 
 ## 5. Development process
 
@@ -390,6 +413,12 @@ project must survive any session ending.
    Either way the source then links to that issue. A follow-up that lives only in a comment is a
    defect. A handover, closing comment or PR description is incomplete until every follow-up in
    it carries its issue link, and the coordinator does not merge a PR until it does.
+8. **The README tells the truth about status.** Its Status section says what a user can do today
+   (what compiles, on which platforms, which options), what is not done yet, and which slices are
+   in progress, with links to their epics, and the date it was last updated. A PR that changes
+   what a user can do, or completes, starts or drops a slice, updates that section in the same
+   PR; the coordinator does not merge it otherwise. The README never describes a goal as if it
+   were already working.
 
 ## 7. Third-party libraries
 

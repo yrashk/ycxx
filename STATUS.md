@@ -130,13 +130,49 @@ What is true of the code today. Work in progress and its owners are tracked in
   - Unicode 17.0 tables from `tools/unicode/gen-tables` (`unicode_tables.cppm`,
     `unicode_names.txt`): Python's `unicodedata` and the vendored UCD `NameAliases.txt`
     (`tools/unicode/ucd/`). Unicode License v3 in `src/lex/LICENSE.unicode`.
-- `ycxx.pp` (`src/pp/`): `pp(FileId)` over the input `FileText`, valued as a `Region` of tokens,
-  `TokLoc`s, names and literals. Every directive (`#…`, and the `module`/`import` lines of
-  [cpp.pre]) is diagnosed as unsupported and skipped. Diagnostics are at
-  `Loc{file_level, byte offset}`.
+- `ycxx.pp`: phase 4 since #85; see "Preprocessor" below.
 - Measured (Release, Apple M-series, `lex_bench`): about 25 MB/s, 110 ns per token. Not tuned.
-- Not yet: phase 4 (M1), `long double` and the extended floating types' values (left to the
+- Not yet: `long double` and the extended floating types' values (left to the
   target), the type of an integer literal (sema, #33).
+
+## Preprocessor, includes and object-like macros (#85, 2026-11-18)
+
+- `ycxx.pp` (`src/pp/`): phase 4 as query-engine.md §B9's contextual query, with a local stand-in
+  for the engine parts that do not exist yet (#16, #93).
+  - Each file occurrence is a `FileRegion` (`:region`). It holds its own tokens and its child
+    regions, its macro delta and `#pragma once` marks, its `TokLoc` and `Expansion` tables
+    (ast.md §8.1), its diagnostics, and its *trace*. The trace lists the questions its entry state
+    answered: `macro(name)` for every identifier tested that the region had not defined itself,
+    `once(file)`, include resolutions and file contents.
+  - A `Session` (`:unit`) caches regions by file occurrence and reuses one wherever its trace
+    verifies. A header is reused across TUs and within one, and only a header whose answers
+    changed is recomputed.
+  - Macro answers are location-free. A region refers to a definition it did not make through a
+    binding that its includer resolves.
+  - `Region` is the TU flattened after phases 5–6, which the item splitter and the parser read.
+    Its `files` are paths with presumed names, so its value does not depend on the session.
+    `Region::site(tok)` gives a macro token's expansion site.
+- Directives:
+  - `#include` in both forms and the macro-replaced form, and `#include_next`;
+  - search directories from `-I`, `-isystem` and `-iquote`, then libycxx's headers and the
+    SDK's (`:system`, configured by CMake);
+  - object-like `#define` and `#undef` with the redefinition check, rescanning and painting
+    ([cpp.rescan]);
+  - `#pragma once` (other pragmas pass through to `-E`), and the null directive.
+  - Every other directive is diagnosed as unsupported. Function-like macros and conditionals
+    come in the next two parts of #85.
+- `ycxx cxx -E` prints what Clang's `-E` would, by Clang's line and spacing rules. `preprocess`
+  is in `tests/features/ycxx.txt`. Diagnostics in included files name their file.
+- Tests:
+  - `tests/own/pp` (by a spec-only author): 16 `-E`, 6 reject and 2 accept tests;
+  - `tests/own/slice/a3-local-header.run.cpp`;
+  - `unit.pp`: resolution, traces, reuse across TUs, and incremental equals cold over edit
+    sequences.
+- Not yet: function-like macros, `#`/`##`, conditionals, `#line`, `#error`, `_Pragma`, the
+  predefined macros beyond `__cplusplus`, and module and import lines (#85). The engine cell
+  `Pp(main)` does not depend on headers until #93. Items are cut from the flattened TU, so a
+  header's items carry the main file's identity (#85). Sema diagnostics in headers render
+  against the main file (#34).
 
 ## Item splitter (#18, 2026-11-18)
 
@@ -235,7 +271,7 @@ stay open for the rest.
     arithmetic and calling convention, over thousands of argument pairs. It covers narrow types,
     stack arguments both ways, function pointers and the GOT. Mutating `sdiv` or the stack packing
     makes it fail.
-- Not yet: the `unit`/`optimized`/`codegen` queries (#43 wires the pipeline), the allocation
+- Not yet: the `unit`/`optimized`/`codegen` queries (#63), the allocation
   validator and dependence checker (#29), SSA linear scan, list scheduling, unwind info and DWARF,
   `cost_model`, variadic calls, more than one result, frame objects aligned above 16 bytes.
 
@@ -325,7 +361,8 @@ one import `ycxx.ast`; unit tests in `tests/unit/ast` (run by ctest, see docs/TE
   statements; every C0 operator with its precedence, the usual arithmetic conversions, promotions,
   value categories and lvalue-to-rvalue conversion as explicit nodes; calls; unqualified lookup in
   block and namespace scope; string literals, `const char*`, indirection, subscripts and pointer
-  arithmetic. Namespace-scope initializers and array bounds are folded to constants (`Folder`).
+  arithmetic. Namespace-scope initializers and array bounds are evaluated by the interpreter (ε,
+  below).
 - **Trees:** the node kinds `LocalRef`, `Conditional`, `While`, `Do`, `For`, `Break`, `Continue`,
   `DeclStmt`, `Declarator`, `DeclGroup`, `Assign.computation` and more `ConversionKind`s are in
   `ycxx.ast.nodes`. `VString` and `VLvalue` are in `ycxx.ast.values`.
@@ -380,6 +417,93 @@ one import `ycxx.ast`; unit tests in `tests/unit/ast` (run by ctest, see docs/TE
   - `string_address`, `is_constexpr` and `is_main` over real entities and `VString`s;
   - classes, arrays as objects, cleanups, EH (`invoke`), coroutines, static locals, calls
     through pointers, floating point, `switch` and `goto`.
+
+## The pipeline: `ycxx cxx a.cpp -o a` (#43, 2026-11-18)
+
+The α slice end to end (epic #39): every test in `tests/own/slice` compiles, links and runs, or is
+rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm64 macOS.
+
+- `ycxx.pipeline` (`src/pipeline/`), run in-process by `client::cxx`:
+  - `:front`: the file's text as the engine's `FileText`, `pp` and `RegionItems` as engine queries,
+    then `parse::Program` (item_sema, analyze_body). Its diagnostics by byte offset, and the
+    `TranslationUnit`: entities, function definitions with their analysed bodies, variable
+    definitions with their constants.
+  - `:back`: `function_ir`, `lower` and `codegen` per function, variables and string literals as
+    data, into one object. `Layout` stands in for the `layout` query (#33); string literal
+    objects become local `l_.str.N` entities. Errors (what the α subset does not support yet)
+    point into the item when there is a node.
+  - `:mangle`: Itanium names for global-namespace functions over fundamental, pointer and cv types
+    with substitutions; `main`, `extern "C"` functions and variables are not mangled (#64).
+  - `:executable`: the link with libSystem's exports from `$SDKROOT`, else `xcrun --show-sdk-path`,
+    else the Command Line Tools' SDK, looked up once per process.
+  - `:lines`: a minimal line table for rendering (#34 owns the full one).
+- `ycxx cxx` (also `ycxx -…` with an option first): `-o`, `-c`, `-fsyntax-only`, `-std=c++26`;
+  `.o` inputs are linked as they are. Errors are `path:line:col: error: message` on stderr; exit 0
+  on success, 1 on any error in the input or the command line.
+- `tests/features/ycxx.txt` lists `syntax` and `run darwin-arm64`: a feature can be limited to
+  hosts. CI's macOS job runs the slice before its tier, with `--no-unsupported`.
+- `unit.pipeline`: the line table, linkage names, and the back half from hand-built analysed
+  bodies, linked and run on arm64 macOS.
+- Not yet: the stages as engine queries (#63) and the daemon (designed in `docs/design/daemon.md`; #95–#98), `#include` (#65), optimization
+  levels and the other common options (`-O` is rejected, #81).
+
+## The L1 interpreter (#25, 2026-11-18)
+
+`src/interp/` (module `ycxx.interp`), from the [optimization design](docs/design/optimization.md)
+§2.3 and §10; unit test `unit.interp`, on bodies written in L1's text form.
+
+- `evaluate(host, interners, target, entry, name, args, config)` is a `query_task`: the step
+  machine runs until it needs a callee's body (`host.body(e)`, in the engine `function_ir`) or a
+  global (`host.global(e)`, `constant_value`), which it fetches lazily with `co_await`, once per
+  evaluation; it polls `host.stop_requested()` every `poll_interval` steps. Calls push frames on
+  the machine's own stack. Limits: a step budget counted in nodes and a call depth ([implimits]).
+- Modes: `constant` ([expr.const] holds; `is_const_eval` is true and `consteval_br` takes its
+  consteval edge) and `runtime` (non-constexpr calls, globals read and written, the erroneous
+  value is zero).
+- Abstract memory: objects are a type and one cell per scalar leaf, each with its lifetime
+  (before, alive, after), whether it holds an indeterminate, erroneous or real value, and the
+  value. Pointers are `(object, access path)` plus "one past a non-array object"; they never
+  become integers.
+- Checks, each a `Failure` with a `Reason`, an argument and the stack of `(function, node)` sites
+  (innermost first): signed and `nuw` overflow, division by zero and unrepresentable quotients,
+  shift counts, indeterminate and erroneous reads, accesses outside the lifetime or after the
+  storage ended, through null or past the end, through a different type, stores to const objects
+  and string literals, unsequenced conflicts in `useq` groups, pointer arithmetic out of bounds or
+  on the wrong type, differences across arrays, unspecified pointer comparisons, `void*` casts to
+  the wrong type; in constant mode also reads of globals not usable in constant expressions,
+  writes to objects from outside the evaluation, volatile accesses, non-constexpr and undefined
+  callees, `reinterpret_cast`-like ops and `asm`.
+- The dispatch table is `ir::eval_table<Ops, …>()` with `complete`: every op has a handler. Ops
+  outside the α slice (floating point, aggregates and `copy`, unions, dynamic storage, virtual
+  calls, atomics, EH, coroutines, reflection) fail with `Reason::unsupported`, naming the op.
+- Not yet: whole-program runs with a host I/O interface, records and the under-construction state
+  of [class.cdtor] (#25).
+
+## Constant evaluation in the front end (ε slice, #87, 2026-11-18)
+
+`sema::Evaluator` (`src/sema/eval.cppm`) replaces the α folder: an analysed expression becomes the
+L1 thunk `{ return e; }` through `function_ir`, and the interpreter runs it in constant mode inside
+the cell that analyses the expression (query-engine.md §B7). `parse::Program` answers its
+questions: `function_ir` of a function defined in an earlier item (memoized per item), and a
+namespace-scope variable's type and, if usable in constant expressions, its value.
+
+- `constexpr` functions and variables (namespace and block scope; a constexpr variable is const
+  and must be constant-initialized), `consteval` functions with immediate invocations replaced by
+  their value outside an immediate function context, `constinit`, and the redeclaration rules of
+  [dcl.constexpr]/1.
+- `static_assert(e)` and `static_assert(e, "message")` at namespace and block scope (the
+  `StaticAssert` node); `if consteval` and `if !consteval` (`IfConsteval`, lowered to
+  `consteval_br`).
+- Constant array bounds from const integral locals (#58), and address constants of variables and
+  functions (#57) as `VLvalue{VEntity, [], byte offset}` (`VEntity` is new in `ycxx.ast.values`).
+  The pipeline's data relocations for them wait for #101.
+- Errors say why: "not a constant expression: <the interpreter's reason>", located at the
+  evaluated expression.
+- Tests: `tests/own/consteval` (spec-only); the draft's [dcl.constexpr]/5 ex. 3, [dcl.constinit]/3
+  ex. 1 and [stmt.if]/4 ex. 3 pass.
+- Not yet (#102): naming a consteval function outside a call, `if constexpr`, static_assert
+  messages that are constant expressions, notes along the call chain, block-scope static constexpr
+  variables.
 
 ## Bootstrap workarounds
 
