@@ -28,6 +28,12 @@ struct DeclRef {
   EntityId entity;
 };
 
+// A name of a block-scope variable or a parameter: an index into `BodySema::locals` (§4.4).
+struct LocalRef {
+  ExprInfo info;
+  u32 local;
+};
+
 // Parentheses change meaning (`decltype((x))`, `(f)(x)`), so they are a kind (§3.4).
 struct Paren {
   ExprInfo info;
@@ -91,7 +97,21 @@ struct Call {
   [[=indeterminately_sequenced(1)]] ChildList args;
 };
 
-enum class ConversionKind : u8 { lvalue_to_rvalue, integral, floating_integral, user_defined, derived_to_base };
+// `c ? a : b`: the condition is sequenced before the arm that is evaluated ([expr.cond]).
+struct Conditional {
+  ExprInfo info;
+  [[=sequenced(0)]] Child condition;
+  [[=sequenced(1)]] Child then_;
+  [[=sequenced(1)]] Child else_;
+};
+
+enum class ConversionKind : u8 {
+  lvalue_to_rvalue, integral, floating_integral, user_defined, derived_to_base,
+  boolean,           // [conv.bool]
+  array_to_pointer,  // [conv.array]
+  qualification,     // [conv.qual]
+  null_pointer,      // [conv.ptr]
+};
 
 // An implicit conversion: a node of width zero beyond its operand (§3.3), naming its function for
 // a user-defined conversion.
@@ -132,6 +152,36 @@ struct If {
   Child else_;
 };
 
+// Iteration statements ([stmt.iter]); an absent part of a `for` is `NodeId::none`.
+struct While {
+  Child condition;
+  Child body;
+};
+
+struct Do {
+  Child body;
+  Child condition;
+};
+
+struct For {
+  Child init;
+  Child condition;
+  Child increment;
+  Child body;
+};
+
+// Jump statements ([stmt.jump]) with their scope-exit cleanups (§3.7.3).
+struct Break {
+  SeqId<Cleanup> cleanups;
+};
+
+struct Continue {
+  SeqId<Cleanup> cleanups;
+};
+
+// The null statement `;` ([stmt.expr]).
+struct Null {};
+
 // A block-scope variable: an index into `BodySema::locals` (§4.4) and its initializer.
 struct LocalVar {
   u32 local;
@@ -145,7 +195,8 @@ struct Attribute {
 };
 
 using Nodes = closed_list<Literal, DeclRef, Paren, Unary, Binary, OrderedBinary, Assign, Subscript, Call,
-                          ImplicitConversion, ExprStmt, Return, Compound, If, LocalVar, Attribute>;
+                          ImplicitConversion, ExprStmt, Return, Compound, If, LocalVar, Attribute, LocalRef,
+                          Conditional, While, Do, For, Break, Continue, Null>;
 
 static_assert(Nodes::size < max_node_kinds);
 
