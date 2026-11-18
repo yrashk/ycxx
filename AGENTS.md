@@ -35,6 +35,10 @@ in our own terms. Never copy sequences or commit their listings (DECISIONS §2.3
 - If you burn time (retries, review rounds that don't converge, a dead end, a brief that came back
   off-target) and then find the way out, record it in `docs/LESSONS.md`, or as a rule in
   DECISIONS or here (DECISIONS §8).
+- **Don't get lost in bureaucracy loops** (DECISIONS §8.6). Extra review rounds, evidence nobody
+  reads, repeated relays, waiting for approvals you don't need, and documents that grow faster
+  than their decisions all waste time. Before each such step, ask what bug, decision or
+  unblocked work it produces. If the answer is none, skip it and say so in one line.
 - Keep the issue body current: done, next, blocked. Comment on decisions and surprises.
 - Small commits, reviewed P0–P2 (DECISIONS §5). Cite draft clauses by stable name (`[temp.deduct]`).
 - A design question beyond your issue goes to a new issue labelled `status:needs-decision`,

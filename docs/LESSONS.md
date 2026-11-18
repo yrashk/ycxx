@@ -61,6 +61,16 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
     parts are where most P0s were.
   - Seeded on #1. Revise this entry if it proves wrong.
 
+## Bureaucracy loops
+
+- **A design document became a loop.** The query-engine design (#1) grew to 31,500 words over
+  seven rounds of pushback and three reviews, plus repeated relays between two subagents. Each
+  round's fixes added text, and the next round found new problems in that text.
+  - Do: write decisions, reasons and rejected alternatives, nothing more.
+  - Do: settle mechanism questions in the spike, not in prose.
+  - Do: stop reviewing when a round finds no P0 or P1 issues (DECISIONS §8.6).
+  - Learned on #1.
+
 ## Evidence and tests
 
 - **Run sanitizers on any concurrent code before trusting its results.** The spike's fork-join
