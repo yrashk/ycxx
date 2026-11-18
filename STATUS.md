@@ -793,12 +793,17 @@ template's tokens again with the arguments bound.
   needed ([temp.inst]/8). Diagnostics point into the template.
 - **Mangling:** `<template-args>` (types, integers as `L…E`), `<template-param>`s and the return
   type in a specialization's name, and function types (`F…E`); checked against Clang's symbols.
-- Tests: `tests/own/templates/f1-*` (spec-only); 9 more draft examples pass ([temp.over],
-  [temp.deduct.general], [temp.deduct.partial], [temp.arg.general], [temp.deduct.type]).
+- Dependent array bounds `T (&)[N]` and `int a[N]`, with `N` deduced from an array argument
+  ([temp.deduct.type]/8) and mangled as `A T_ _`; the reference tie-break of
+  [temp.deduct.partial]/9. Reference binding reads an array's cv-qualifiers from its elements
+  ([basic.type.qualifier]/3), for templates and other code.
+- Tests: `tests/own/templates/f1-*` (spec-only): 37 of 38 pass; the other calls through a
+  function pointer (#24). 9 more draft examples pass ([temp.over], [temp.deduct.general],
+  [temp.deduct.partial], [temp.arg.general], [temp.deduct.type]).
 - Not yet (#88): class templates, specializations, packs, concepts, member templates, dependent
   qualified names (`typename T::x`, with the `SSubst` sugar of ast.md §6.4), deduction from an
-  overload set argument ([temp.deduct.call]/6), dependent array bounds, "required from here"
-  notes. Coalesced (weak) definitions of specializations are #124.
+  overload set argument ([temp.deduct.call]/6), value-dependent expressions other than a
+  parameter in canonical positions (`VDepOp`), "required from here" notes. Coalesced (weak) definitions of specializations are #124.
 
 ## Bootstrap workarounds
 
