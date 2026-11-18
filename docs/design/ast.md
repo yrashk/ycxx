@@ -126,7 +126,7 @@ Invariants every part of the front end keeps:
 
 The token-level splitter (§B1.2, #18) records per item a *skeleton*: the item's kind, its declared
 names in token order (each with its ordinal, its token offset, whether it is a type, template or
-namespace name, and whether it is a definition), the spelled qualifier, the template depth, the `BodyId`, the
+namespace name or, for a using-declaration, unknown until lookup, and whether it is a definition), the spelled qualifier, the template depth, the `BodyId`, the
 nested member items of a class, and the length of the declaration part. The syntactic indexes of
 §B1.3 are built from skeletons.
 
@@ -196,16 +196,24 @@ and a node's parent is only ever the cursor chain of the current walk (spike, §
 ```cpp
 struct ItemSema { NodeId tree; SeqId<DeclSema> decls; };                 // item_sema(item, ctx)
 struct DeclSema { EntityId entity; QualType type; u8 kind, linkage, storage, access; u16 flags;
-                  SeqId<AttrId> attributes; NodeId constraint; NodeId contracts;   // §7.5
+                  SeqId<AttrId> attributes; NodeId constraint;
+                  NodeId contracts;             // non-members only, this declaration's own (§7.5)
                   SeqId<ParamSema> params; };   // flags include explicit_object (§5.4)
-struct ClassDef { SeqId<BaseSpec> bases; SeqId<MemberRec> members; SeqId<DeclId> friends;
+struct ClassDef { SeqId<BaseSpec> bases; SeqId<MemberRec> members; SeqId<MemberRec> friends;
+                  SeqId<DeclSema> synthesized;  // class-1 declarations (§4.1)
                   SeqId<EntityId> nested; EntityId injected_class_name; u16 flags; };
 struct BodySema { NodeId tree; SeqId<LocalRec> locals; };                // analyze_body
 ```
 
-- `decl_sema(d, ctx)` stays a cell (§B1.3). It fetches `item_sema` and returns `decls[d.ord]`.
+- `decl_sema(d, ctx)` stays a cell (§B1.3). For a written declaration it fetches `item_sema` and
+  returns `decls[d.ord]`. For a synthesized one it fetches `class_def(C)` and returns its
+  `synthesized` entry: whether an implicit copy constructor is deleted or trivial depends on the
+  members. There is no cycle, because `class_def` fetches only written members.
+- Lists that hold `NodeId`s (`SeqId<DeclSema>`, `SeqId<LocalRec>`) are interned with their tree
+  when the frame commits, not eagerly (§9.3).
 - A parameter's default argument is in `ParamSema` for a non-member function; for a member it is
-  the separate query `default_arg(p, ctx)` in the complete-class context (§B8).
+  the separate query `default_arg(p, ctx)` in the complete-class context (§B8). Default arguments
+  of a function template specialization are instantiated with it (§6.4).
 - `class_def(C, ctx)` hops to the class item, reads its head and bases from `ItemSema`, and
   fetches `decl_sema` of each member.
 - **What `function_ir(F, ctx)` reads:** `BodySema.tree` through the hop of §B1.4, `decl_sema(F)`,
@@ -223,8 +231,10 @@ struct BodySema { NodeId tree; SeqId<LocalRec> locals; };                // anal
   enum or namespace is 0 and enumerators follow. In `struct { … } s;` the unnamed class is 0 and
   `s` is 1. A structured binding declaration declares its hidden variable first, then each name.
 - **Synthesized** (class 1), in fixed slots: default constructor, copy and move constructors, copy
-  and move assignment, destructor, injected-class-name, then implicit deduction guides by
-  constructor ordinal; §6 appends what templates need.
+  and move assignment, destructor, injected-class-name, the copy deduction candidate, then implicit
+  deduction guides by constructor ordinal and, for inherited constructors, by `(using-declaration
+  ordinal, base constructor ordinal)` ([over.match.class.deduct]). Their records live in
+  `ClassDef` (§3.6).
 - **Injected** (class 2): the n-th declaration produced by a consteval-block item (§B7,
   `item_effects`).
 
@@ -238,13 +248,16 @@ declaration ids (an interner for no gain).
 
 ### 4.2 Members share the class item's prefix
 
-The members of a class are analysed at the prefix of the outermost enclosing top-level item. A
+The members of a class are analysed at the prefix of the outermost enclosing *class* item (whose
+position inside a namespace's item list is addressed by the prefix as usual). A
 member's position among its siblings is its `DeclId`, and "the members before this one named `x`"
 is the cheap, context-free query `class_decls_named_before(K, name, ord)` over the class item `K`'s
 tokens. It is keyed by stable ids, so it appears in traces as it is.
 
 Complete-class contexts ([class.mem.general]: member function bodies, default arguments, default
-member initializers, noexcept-specifiers, including those of nested classes) are analysed at the
+template arguments, noexcept-specifiers, function contract specifiers and default member
+initializers, including those of nested classes; each is its own cell, `default_template_arg`
+beside §B8's) are analysed at the
 prefix **after** `K`: `K` is complete there, and nothing that follows `K` is visible.
 
 *Reason:* `class_def(C)` needs `decl_sema(m)` of each member, so `decl_sema(m)` must never reach
@@ -263,14 +276,27 @@ needs `cx.prefix_after_item(K)`, recorded in traces as `rel_after(◇.prefix, K)
 
 The records of §B1.5, made concrete:
 
-- namespace, class, enumeration, variable: `(scope, name)`;
-- function: `(scope, name, canonical type, template head)`;
+- namespace, class, enumeration, variable: `(scope, name, module)`;
+- function: `(scope, name, module, canonical type, template head, trailing requires-clause)`, where
+  the template head is the template parameter list and its requires-clause and both clauses are
+  `VDep*` constants or `VNone` ([temp.over.link] makes them part of correspondence);
 - specialization: `(template, canonical arguments)`;
 - internal linkage or unnamed: `(scope, name or none, first DeclId)`;
 - **local** entities (block-scope classes, lambdas' closure types, block-scope statics):
-  `(enclosing entity, kind, ordinal in token order)`. This follows the Itanium ABI's
-  discriminators, so a local entity's mangled name is a function of its id. A lambda in a
-  declaration part takes the entity of the enclosing declaration as its enclosing entity.
+  `(enclosing entity, kind, name or none, ordinal among same-kind, same-name locals in token
+  order)`. This follows the Itanium ABI's discriminators, so a local entity's mangled name is a
+  function of its id. A lambda in a declaration part takes the entity of the enclosing
+  declaration as its enclosing entity;
+- objects that are not declared entities but can be the base of a constant pointer
+  ([expr.const]): a temporary lifetime-extended by a static-storage reference
+  `(owner entity, ordinal)`, and a template parameter object `(canonical type, value)`
+  ([temp.param]); `define_static_array` and `define_static_string` produce template parameter
+  objects.
+
+`module` is the named module the declaration is attached to, or none for the global module
+([basic.link], [module.unit]). It is a recorded question of the item's own prefix,
+`module_of(prefix)`. A function with C language linkage uses `::` as its scope, since such
+functions in different namespaces are one function ([dcl.link]).
 
 A block-scope `extern` declaration gets the namespace-scope entity's id ([basic.link]). An
 implicit special member gets the id a user-declared one would have. `entity_of(decl, ctx)` is a
@@ -341,9 +367,10 @@ sugar as nodes keeps `QualType` at 4 bytes.
 ### 5.2 Canonical form is a parallel array
 
 `types` keeps, beside its fingerprint array (§9.4), an array `canon[node]` filled when a node is
-interned. Children are interned first, so `canon(TPointer{p})` is `intern(TPointer{canon[p]})`, a
-sugar node's entry is its child's, and every other node's is itself. Then `canonical(q)` is
-`with_cv(canon[q.node], q.cv)`, where `with_cv` pushes cv into array elements
+interned. An entry is a `QualType`, so the cv a typedef adds survives (`typedef const int A;`).
+Children are interned first, so `canon(TPointer{p})` is `intern(TPointer{canonical(p)})`, a sugar
+node's entry is its child's canonical form, and every other node's is itself. Then `canonical(q)`
+is `with_cv(canon[q.node], q.cv)`, where `with_cv` merges the two cvs, pushes cv into array elements
 ([basic.type.qualifier]) and drops it on references ([dcl.ref]) and function types.
 
 Invariants: a canonical `QualType` has no cv on an array, reference or function node, and a
@@ -384,14 +411,26 @@ Types mention entities only by `EntityId`, whose internal-linkage and local reco
 
 Constant values live in the `values` interner as `ConstId`s:
 
-- `VInt{QualType; u64 lo, hi}`, `VFloat{QualType; u64}`, `VNullptr`,
-  `VLvalue{EntityId object_or_function; SeqId<u32> path; i64 offset}`, `VString{QualType;
-  SeqId<u8>}`, `VMemberPtr`, `VAggregate{QualType; SeqId<ConstId>}`, `VReflect` (§7.1), `VNone`,
-  and `VNotConstant{SeqId<Note>}`, the failure value of §A1.7;
-- the **dependent family** `VDep*`: `VDepParam{depth, index}`, `VDepOp{op; SeqId<ConstId>}`,
-  `VDepCall{callee; SeqId<ConstId>}`, `VDepName{QualType qualifier; NameId}`,
-  `VDepMember{ConstId object; NameId; arrow}`, `VDepSizeof{QualType}`, `VDepFold`,
+- `VInt{QualType; u64 lo, hi}`, `VFloat{QualType; u64 lo, hi}` (wide enough for 80- and 128-bit
+  formats), `VNullptr`, `VLvalue{ConstId base; SeqId<u32> path; i64 offset}`, `VString{QualType;
+  SeqId<u8>}`, `VMemberPtr`, `VAggregate{QualType; SeqId<ConstId>}`, `VUnion{QualType; u32 active;
+  ConstId value}`, `VReflect` (§7.1), `VNone`, and `VNotConstant{SeqId<Note>}`, the failure value
+  of §A1.7;
+- the base of a `VLvalue` is `VEntity{EntityId}` (a declared object or function), a `VString`
+  (a string literal object), or a `VEntity` of a lifetime-extended temporary or a template
+  parameter object, whose entity records §4.3 defines ([expr.const]);
+- the **dependent family** `VDep*`: `VDepParam{depth, index}` (a template parameter),
+  `VDepFnParam{depth, index}` (a function parameter named in a trailing return type or
+  `noexcept`, positional, as the Itanium ABI mangles it), `VDepOp{op; TemplateArgs operands}` (so
+  an operand may be a type: casts, `T{}`, `alignof(T)`, `new T`, `typeid(T)`),
+  `VDepCall{callee; SeqId<ConstId>}`, `VDepName{QualType qualifier; NameId; TemplateArgs}`,
+  `VDepMember{ConstId object; NameId; TemplateArgs; arrow}`, `VDepRequires{TypeListId params;
+  SeqId<Requirement>}` ([expr.prim.req]), `VDepSizeof{QualType}`, `VDepFold`,
   `VDepExpansion{ConstId pattern}`, `VDepPackIndex`, `VDepSplice`, `VDepReflect`.
+
+A function's own type never contains its own `EntityId`; parameters it mentions are
+`VDepFnParam`, so `decltype(x + y)` and `decltype(a + b)` in two declarations of one template are
+equal.
 
 A dependent expression in a **canonical position** (a template argument, an array bound, a
 noexcept operand, a decltype operand, a pack index, a constraint's parameter mapping) is stored in
@@ -410,7 +449,10 @@ unbound).
 
 `TemplateArg{u8 kind; u32 payload}` (8 bytes), with kind type, value, template, template parameter
 or pack expansion. `TemplateArgs = SeqId<TemplateArg>` is one level, with packs flattened and
-values converted ([temp.arg.nontype]) or in `VDep*` form. `ArgLevels = SeqId<TemplateArgs>` holds
+values converted ([temp.arg.nontype]) or in `VDep*` form. Conversion canonicalizes every type
+inside a value (a `VReflect` of a type keeps an `STypedef` top node, as §7.1 compares), so
+template-argument-equivalent values ([temp.type]) are one `ConstId`: `X<A(1)>` and `X<1>` are one
+specialization. `ArgLevels = SeqId<TemplateArgs>` holds
 the levels outermost first; the levels of `X<int>::f<char>` come from the entity's scope chain
 (§4.3).
 
@@ -450,7 +492,10 @@ substitute(QualType | ConstId | TemplateArgs, ArgLevels, cx)
 `substitute` is a transparent function (§A1.1), not a query. Structural cases rebuild through
 `types` and `values`. `TDepName` fetches `member_lookup` and `decl_sema`, and may demand
 `instantiate_class`. `TDecltype` and `VDep*` operands are instantiated into a tree in the frame
-arena, then typed and evaluated within the frame (§B7). Failure is a value (§A1.7): `deduce`,
+arena, then typed and evaluated within the frame (§B7). An unqualified `VDepName` callee has no
+stored lookup set (its equality is by name), so substitution performs the definition-context
+lookup of [temp.dep.candidate] itself: `visible_decls` at `cx.prefix_of(pattern item)`, recorded
+as `rel(◇.prefix, I)`, plus ADL at its own prefix. Failure is a value (§A1.7): `deduce`,
 `satisfies` and `resolve` decide what it means.
 
 *Rejected:* a cell per substituted type: millions of cells for work that is mostly structural
@@ -459,7 +504,10 @@ rebuilding, below the granularity of §B0.5. If measurement says otherwise, a
 
 ### 6.4 Instantiation produces a fresh tree with the pattern's offsets
 
-`instantiate_fn(spec, ctx)` returns a `BodySema`. `instantiate_class(spec, ctx)` returns a
+`instantiate_fn(spec, ctx)` returns `FnInst{BodySema body; NodeId contracts; SeqId<NodeId>
+default_args}`: everything of the declaration that a specialization instantiates. `default_arg`
+and `contract_specs` for a member of a class template specialization take the specialization's
+`EntityId` as key data. `instantiate_class(spec, ctx)` returns a
 `ClassDef` whose members pair the pattern's declaration with the instantiated entity:
 `MemberRec{DeclId pattern; EntityId instantiated; QualType substituted; …}`. A member template of
 a specialization is `(DeclId pattern, TemplateArgs outer)`, and it is instantiated at all levels at
@@ -477,7 +525,13 @@ phase-one bindings of [temp.res]).
 
 An instantiated declaration is its `EntityId` (§4.3) plus the pattern's `DeclId`. `decl_sema(d)`
 is the pattern's record; the specialization's record lives in `instantiate_class(spec).members`.
-The synthesized slots of §4.1 need nothing more.
+
+A pattern `DeclId` alone does not identify an instantiated candidate: the hidden friend `f` of
+`X<int>` and of `X<long>` share one. So lookup results that reach members or friends of a
+specialization, `ClassDef.members` and `ClassDef.friends`, carry `(DeclId pattern, EntityId
+instantiated)`, as `MemberRec` does; `resolve`'s candidate set (§B5) is a set of such pairs, and
+`function_type` reads the instantiated entity's type. This extends §B3's "lookup results are lists
+of declaration ids" without changing it for non-template code, where the entity is not needed.
 
 ## 7. C++26 constructs
 
@@ -540,8 +594,11 @@ Preconditions and postconditions are declaration data, not part of the type
 - For a member function they are analysed in the complete-class context, by a new per-part cell
   `contract_specs(f, ctx)` beside §B8's `default_arg`, `default_member_init` and `noexcept_spec`.
 - `contract_assert` in a body is the statement kind `ContractAssert{Child predicate}`.
-- `DeclSema` gains `NodeId contracts`, the first declaration's, and `decl_sema` checks that
-  redeclarations agree.
+- For a non-member, `DeclSema.contracts` holds the declaration's *own* tree, with a flag saying
+  whether it agrees with the first declaration's ([dcl.contract.func]); it never holds another
+  item's node. A member's contracts are only in `contract_specs`, so `decl_sema` never reaches a
+  complete-class cell (§A2.4).
+- A function template specialization's contracts are instantiated with it (`FnInst`, §6.4).
 
 The evaluation semantic is configuration (the prefix's root node), read by `function_ir`; trees
 record only what was written.
@@ -567,10 +624,10 @@ identity ignores whitespace and provenance (§B1.2). Beside its token stream, th
 produces (§B9) holds a parallel table:
 
 ```cpp
-struct TokLoc   { u16 file; u16 expansion; u32 offset; };   // byte offset of the spelling in `file`
+struct TokLoc   { u16 file; u32 expansion; u32 offset; };   // byte offset of the spelling in `file`
 struct Expansion{ u8 kind;      // object, function, argument, stringize, paste, va_opt, pragma,
                                 // builtin, embed
-                  NameId macro; u16 parent; u32 site_offset;
+                  NameId macro; u32 parent; u16 site_file; u32 site_offset;
                   u16 definition_file; u32 definition_offset; u32 operand_a, operand_b; };
 ```
 
@@ -580,8 +637,10 @@ produced the token, 0 for none. `region_items` flattens a child region that fall
 into the item's tokens, so an item may span files (`enum E { #include "values.h" };`), and their
 `TokLoc`s name the child's file.
 
-The location table is part of the region's value and therefore of the tree id (§B1.1). A prefix
-node's leaf handle is the region handle plus the item count, while the syntactic indexes (§B1.3)
+The location table is part of the region's value and therefore of the tree id, which amends
+§B1.1's list of what the tree id covers. A prefix node's leaf handle is the hash-consed prefix of
+the region's `(tokens, TokLoc)` stream up to its item `k`, so an edit after item `k` leaves the
+prefixes before it unchanged (§A1.9), while the syntactic indexes (§B1.3)
 and item ids are keyed by the region's location-free `items` sub-handle. A whitespace edit in a
 header therefore recomputes no index and changes no item id. It does give new prefixes to the
 items after it in every TU that includes the header, whose selection cells re-walk their tries at
@@ -607,29 +666,32 @@ column of statements and calls only, which tokens give.
 
 `render(Loc, TU)`:
 
-1. `tu_item_index(TU)` maps each `ItemId` to its region occurrence and its first token index. It is
-   built once per TU and revision, from the TU's tree. An item occurs once in a TU (the salt of
-   §B1.2 separates repeats) and has one body there, so a `Loc` inside a body needs no `BodyId`.
+1. `tu_item_index(TreeId)` maps each `ItemId` to its region occurrence and its first token index,
+   from the TU's tree. An item occurs once in a TU and has one body there: the salt of §B1.2 counts
+   earlier occurrences of the same *item id* in the prefix (not only of an identical region), so
+   two occurrences with different bodies, which only an ill-formed redefinition produces, still
+   get distinct ids, so a `Loc` inside a body needs no `BodyId`.
 2. The token index is the item's first token plus the `Loc`'s offset.
 3. Its `TokLoc` gives the file and byte offset.
-4. `line_table(file)`, cached per file content, gives line and column by binary search. The
+4. `line_table(content)`, a memoized cell keyed by file content, gives line and column by binary search. The
    region's `#line` table gives presumed values (§8.6).
-5. The macro backtrace follows `Expansion.parent`, rendering each `site_offset` in the file being
-   preprocessed and each `definition_offset` in the definition's file.
+5. The macro backtrace follows `Expansion.parent`, rendering each site in its `site_file` (for a
+   nested expansion, the outer macro's definition file) and each definition in its file.
 6. The include chain is the occurrence's path in the TU's tree, each include directive rendered
    the same way.
 
 It costs one hash probe, a binary search and the depth of the macro and include nesting.
-`render` is a function called per diagnostic or DWARF row, not a cell; `tu_item_index` and
-`line_table` are cached. For a module unit, an importer resolves an `ItemId` that is not in its own
+`render` is a function called per diagnostic or DWARF row, not a cell; `tu_item_index(TreeId)`
+and `line_table` are memoized, content-keyed cells, so its reads are recorded. For a module unit, an importer resolves an `ItemId` that is not in its own
 index through the indexes of the imported module's TUs (`module_interface(M)` names its TU), and
 the chain reads "imported from M".
 
 ### 8.4 Debug information
 
-`function_ir`'s value is `{IrId hashed; SeqId<Loc> locs; SeqId<InlineSite{EntityId; Loc}>}`. The
-optimizer (`optimized(ir_fp, …)`, keyed by the hashed part) returns each output instruction's
-*provenance*, an index into its input, so `tu(TU)` re-attaches the `Loc`s and renders the line
+`function_ir`'s value is `{IrId hashed; SeqId<Loc> locs}`. The optimizer (`optimized(ir_fp, …)`,
+keyed by the hashed part) returns each output instruction's *provenance*, `(EntityId function,
+u32 index)` into that function's IR, the function itself or one inlined into it, so `tu(TU)`
+re-attaches the `Loc`s from each function's side table and renders the line
 table. A token produced by a macro is attributed to the **outermost expansion site**, since
 debuggers step through the user's file; `is_stmt` marks statement starts. A function from a
 header emitted by several TUs renders to the same file and line in each; instantiations point at
@@ -702,7 +764,7 @@ it, and only they compute again, because their output really changed. (Settled o
    on a collision.
 3. **Trees are built in the frame arena and interned when the frame commits,** bottom-up, at
    `co_return`. Types, names, entities, constants and lists are interned eagerly, because they
-   are used as keys. *Reason:* backtracking parses, failed deductions, `requires` checks and
+   are used as keys, except lists that hold `NodeId`s, which are interned with their tree. *Reason:* backtracking parses, failed deductions, `requires` checks and
    SFINAE build expressions that are thrown away. Interning them eagerly would fill the interner
    with garbage, and a cancelled frame would leak into it (§A4.3). *Rejected:* interning node by
    node; interning a whole tree as one opaque blob (no shared subtrees, no per-node fingerprint).
@@ -755,16 +817,16 @@ Posted as comments on the issues named.
 **On the IR and optimizer (#3):**
 
 1. `function_ir(F, ctx)` consumes a tree with no dependent kind and no `VDep*` constant, checked by
-   a `contract_assert` on entry. For a specialization the tree is `instantiate_fn(F, ctx)`'s. The
+   a `contract_assert` on entry. For a specialization the tree is `instantiate_fn(F, ctx).body`. The
    IR never substitutes.
 2. IR types are canonical `QualType`s (`canon[]`), never sugar. Layout and vtables come from
    `layout(C)` and `vtable(C)` by `EntityId`.
-3. IR constants are `ConstId`s. A symbolic address is `VLvalue{EntityId, path, offset}`. The
+3. IR constants are `ConstId`s. A symbolic address is `VLvalue{base, path, offset}` (§5.5). The
    interpreter returns a `ConstId`, including `VNotConstant{notes}`. A `meta_info` value is an IR
    scalar legal only under constant evaluation; code generation meeting one is an internal error.
-4. The hashed IR carries no `Loc`. `function_ir`'s value adds a side table, `SeqId<Loc>` with the
-   inline-site chain, and the optimizer returns provenance indices into its input, never a `Loc`
-   (§8.4).
+4. The hashed IR carries no `Loc`. `function_ir`'s value adds a side table, `SeqId<Loc>`, and the
+   optimizer returns each instruction's provenance as `(EntityId function, u32 index)`, the
+   function or one inlined into it, never a `Loc` (§8.4).
 5. Contracts: the IR generator reads `PreAssert`, `PostAssert` and `ContractAssert` and the
    configured evaluation semantic; a postcondition's result name binds to the return slot.
 6. Expansion statements, pack indexing, splices and binding packs never reach the IR; it sees only
@@ -781,9 +843,10 @@ Posted as comments on the issues named.
 ordinals and flags, spelled qualifier, template depth, `BodyId`, member items, declaration-part
 length), and `region_items` flattens child regions that fall inside an item (§8.1).
 
-**On contextual queries (#16), a reading of §B1.1:** a prefix node's leaf handle is the region
-handle (location table included) plus the item count, while syntactic indexes are keyed by the
-region's location-free `items` sub-handle (§8.1). `item_location` becomes `token_location`
+**On contextual queries (#16), an amendment to §B1.1:** the tree id covers the region's location
+table; a prefix node's leaf handle is the hash-consed `(tokens, TokLoc)` prefix of the region up to
+its item, while syntactic indexes are keyed by the region's location-free `items` sub-handle
+(§8.1). `module_of(prefix)` is a new cheap question (§4.3). `item_location` becomes `token_location`
 (§8.7).
 
 ## 12. Open items and follow-up issues
