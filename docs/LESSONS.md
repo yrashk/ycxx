@@ -162,6 +162,16 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
     the same for every guard the parser relies on.
   - Learned on #23.
 
+- **Let the oracles' output drive bulk-classification rules.** The draft-example extractor's first
+  rules for "OK", "error" and "fragment" were guesses. Counting the oracles' error messages and
+  the comments on the lines they hit found the real annotation forms ("ambiguous", "access
+  error") and fragment signatures in three rounds, and halved the noise in the disagreement table.
+  Running the generated suite through `tools/test --cxx clang|gcc` then caught 25 tests whose
+  markers the driver did not recognise, which the extractor's own comparison had missed.
+  - Do: write the crudest rules, run the oracles, histogram the messages, then refine. Check the
+    generated tests through the real driver before committing them.
+  - Learned on #6.
+
 - **Run sanitizers on any concurrent code before trusting its results.** The spike's fork-join
   passed its demos while one of them crashed now and then: the joiner freed the join while the
   last finisher was still notifying it. ASan found the bug at once; TSan and repeated fuzzing
