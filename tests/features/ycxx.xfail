@@ -179,15 +179,13 @@ draft/class/class.virtual-8.reject.cpp errors elsewhere: 'struct' not supported 
 draft/class/class.virtual-9.accept.cpp 'struct' not supported yet
 draft/class/special-1.accept.cpp 'struct' not supported yet
 draft/cpp/cpp.concat-3.accept.cpp '[' is not supported yet (arrays, #111); the example also redefines j, which Clang and GCC reject
-draft/cpp/cpp.cond-1.accept.cpp preprocessing directives are not supported yet (#if)
-draft/cpp/cpp.cond-2.accept.cpp preprocessing directives are not supported yet (#if)
-draft/cpp/cpp.embed.param.if.empty-2.accept.cpp preprocessing directives are not supported yet (#if)
-draft/cpp/cpp.embed.param.limit-1.accept.cpp preprocessing directives are not supported yet (#if)
-draft/cpp/cpp.module-2.reject.cpp errors elsewhere: preprocessing directives are not supported yet
-draft/cpp/cpp.module-3.accept.cpp preprocessing directives are not supported yet
-draft/cpp/cpp.module-4.accept.cpp preprocessing directives are not supported yet
-draft/cpp/cpp.module-5.accept.cpp preprocessing directives are not supported yet
-draft/cpp/cpp.pragma.op-1.accept.cpp expected a declaration (_Pragma)
+draft/cpp/cpp.cond-1.accept.cpp libycxx's config.hpp stops at #error until it knows ycxx (yrashk/libycxx#17); then 'namespace' is not supported yet
+draft/cpp/cpp.cond-2.accept.cpp '[' is not supported yet (attributes)
+draft/cpp/cpp.embed.param.if.empty-2.accept.cpp #error: the resource does not exist, as Clang and GCC agree (tests/draft/DISAGREEMENTS.md)
+draft/cpp/cpp.module-2.reject.cpp 'export' is not supported yet (modules in sema)
+draft/cpp/cpp.module-3.accept.cpp 'export' is not supported yet (modules in sema)
+draft/cpp/cpp.module-4.accept.cpp 'export' is not supported yet (modules in sema)
+draft/cpp/cpp.module-5.accept.cpp 'export' is not supported yet (modules in sema)
 draft/cpp/cpp.pre-2.accept.cpp 'using' not supported yet
 draft/cpp/cpp.replace.general-1.accept.cpp macro redefined with a different replacement list: the example's last four definitions are invalid, as Clang and GCC agree (tests/draft/DISAGREEMENTS.md)
 draft/dcl/basic.namespace.general-1.accept.cpp preprocessing directives are not supported yet

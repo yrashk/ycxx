@@ -30,6 +30,8 @@ struct Flat {
     u32 end = 0;
   };
   std::vector<Continuation> continuations;
+  // Per file of the table, its #line directives (of its first occurrence that has any).
+  std::vector<std::vector<FileRegion::Line>> lines;
   FileId main{};
 };
 
@@ -57,6 +59,11 @@ public:
   void first(const FileRegion& r) { file(r.files[0], r.file_names[0]); }
 
   void add(const FileRegion& r, const Bindings& bound) {
+    if (!r.lines.empty()) {
+      u16 own = file(r.files[0], r.file_names[0]);
+      if (out_->lines.size() <= own) out_->lines.resize(own + 1u);
+      if (out_->lines[own].empty()) out_->lines[own] = r.lines;
+    }
     // The region's files in the TU's table, added when first used.
     std::vector<std::optional<u16>> local(r.files.size());
     auto files = [&](u16 i) {
@@ -173,6 +180,7 @@ Flat flatten(Session& s, const Tree& t) {
   // The command line's diagnostics come first, as it is preprocessed first.
   if (t.builtins && (!t.builtins->diags.empty() || !t.builtins->tokens.empty())) fl.add(*t.builtins, fl.root(t.builtins_bindings));
   if (t.main) fl.add(*t.main, fl.root(t.main_bindings));
+  out.lines.resize(out.files.size());  // every file has its (perhaps empty) #line table
   return out;
 }
 
@@ -198,7 +206,7 @@ Preprocessed to_region(Session& s, const Flat& flat) {
     return tables.literal(std::move(l));
   };
   auto emit = [&](Tok t, const PTok& p) {
-    t.flags &= u8(tok_flag::line_start | tok_flag::space_before | tok_flag::alt | tok_flag::continued);
+    t.flags &= u8(tok_flag::line_start | tok_flag::space_before | tok_flag::alt | tok_flag::continued | tok_flag::directive);
     r.tokens.push_back(t);
     r.locs.push_back(p.loc);
   };

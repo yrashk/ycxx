@@ -10,6 +10,7 @@
 //   :tu      flattening, phases 5–6, and `-E` output
 //   :system  the build's system include directories and ycxx's version
 //   :predefined  the predefined macros ([cpp.predefined], DECISIONS §1.5)
+//   :cond    #if expressions ([cpp.cond])
 //
 // `pp(file)` is an engine query over the main file's text. The files it includes and the
 // configuration are read through the process's session (`session()`) until the engine has inputs
@@ -26,6 +27,7 @@ export import :unit;
 export import :tu;
 export import :system;
 export import :predefined;
+export import :cond;
 
 export namespace ycxx::pp {
 
@@ -49,7 +51,8 @@ struct Message {
   bool error = true;
   std::string text;
 };
-Message message(Session& s, FileId file, std::string_view presumed, const Diag& d);
+// `lines`: the file's #line directives ([cpp.line]), by offset.
+Message message(Session& s, FileId file, std::string_view presumed, const Diag& d, std::span<const FileRegion::Line> lines = {});
 
 // `-E`: the text Clang's `-E` would print, and the diagnostics.
 std::pair<std::string, std::vector<Message>> preprocess_to_text(Session& s, std::string_view text, std::string_view path);
@@ -126,12 +129,24 @@ Preprocessed preprocess(Session& s, std::string_view text, std::string_view path
 
 Preprocessed preprocess(std::string_view text, std::string_view path) { return preprocess(session(), text, path); }
 
-Message message(Session& s, FileId file, std::string_view presumed, const Diag& d) {
+Message message(Session& s, FileId file, std::string_view presumed, const Diag& d, std::span<const FileRegion::Line> lines) {
   const Files::Content* c = s.files.content(file);
   std::vector<u32> starts = line_starts(c ? std::string_view(c->text) : std::string_view());
   auto at = std::ranges::upper_bound(starts, d.offset);
-  return Message{std::string(presumed), static_cast<u32>(at - starts.begin()), d.offset - *(at - 1) + 1,
-                 lex::message_of(d.kind).severity == lex::Severity::error, lex::render(d.kind, d.args)};
+  std::string text = lex::render(d.kind, d.args);
+  // #error and #warning say their line's text, a spelling of the session.
+  if (d.kind == lex::LexDiag::error_directive || d.kind == lex::LexDiag::warning_directive)
+    text = s.spellings.name(static_cast<u32>(d.args[0]));
+  u32 line = static_cast<u32>(at - starts.begin());
+  std::string name(presumed);
+  // [cpp.line]: the presumed line and name from the last #line before the offset.
+  for (const FileRegion::Line& l : lines) {
+    if (l.at > d.offset) break;
+    line = static_cast<u32>(static_cast<std::int64_t>(at - starts.begin()) + l.delta);
+    if (l.name) name = s.spellings.name(*l.name);
+  }
+  return Message{std::move(name), line, d.offset - *(at - 1) + 1, lex::message_of(d.kind).severity == lex::Severity::error,
+                 std::move(text)};
 }
 
 std::pair<std::string, std::vector<Message>> preprocess_to_text(Session& s, std::string_view text, std::string_view path) {
@@ -142,7 +157,7 @@ std::pair<std::string, std::vector<Message>> preprocess_to_text(Session& s, std:
   std::vector<Message> msgs;
   // Phases 1–4 only: -E stops before phases 5–6 ([lex.phases]).
   for (const auto& [at, d] : flat.diags)
-    msgs.push_back(message(s, flat.files[d.file], s.spellings.name(flat.file_names[d.file]), d));
+    msgs.push_back(message(s, flat.files[d.file], s.spellings.name(flat.file_names[d.file]), d, flat.lines[d.file]));
   return {std::move(out), std::move(msgs)};
 }
 
