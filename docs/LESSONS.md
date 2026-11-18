@@ -300,6 +300,12 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
   - Do: say "none" with a flag or `std::optional`, or with the kind's `none` enumerator where the
     handle has one (`ConstId::none`, `NodeId::none`), never with `T{}`.
   - Learned on #25.
+- **Test blocked storage past its first block.** #107's chunked pools passed a concurrency test
+  that never left block 0; the review found that any list longer than the next block aborted,
+  which one 3,000-statement function triggers.
+  - Do: test such storage at the block edges, with a range longer than a block, and at a scale
+    where every column crosses several blocks.
+  - Learned on #107.
 - **A reference into a growing side table dangles.** A `const TypeRec&` held across creating
   another type pointed into a reallocated `std::vector`, giving a wrong diagnostic that depended
   on the file's length. Use a `std::deque` for tables whose records are referenced, or return
