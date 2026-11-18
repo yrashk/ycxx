@@ -4,7 +4,7 @@
 //
 // Seam: the files a header names are discovered while preprocessing, so they cannot be engine
 // inputs set beforehand (engine inputs are set before a request). Until the engine has inputs
-// read on demand (FOLLOWUP-FS), the host is read directly and the traces carry the dependency.
+// read on demand (#93), the host is read directly and the traces carry the dependency.
 export module ycxx.pp:files;
 
 import std;

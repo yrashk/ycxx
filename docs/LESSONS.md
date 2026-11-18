@@ -213,6 +213,14 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
 
 ## Evidence and tests
 
+- **An incremental-equals-cold check also catches values that depend on the session.** On #85,
+  `unit.pp` compared a warm session's `Region` with a fresh one's after each edit. Five states
+  differed, while every token, location and name matched. The difference was `Region::files`,
+  which held `FileId`s numbered in the order a session first saw each path.
+  - Do: compare whole values, not what they print. Keep handles that a session numbers out of
+    values; use paths or fingerprints.
+  - Learned on #85.
+
 - **Rerun the crash survey after every change, through the real driver.** On #41 a survey of
   every draft example found no crash; two later changes (placeholder records with an uninterned
   type, then the switch to #33's checked `array_of`) brought crashes that the earlier survey

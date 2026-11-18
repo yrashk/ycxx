@@ -130,7 +130,6 @@ void traces() {
   // Answered at entry: `int`, `v`, `OUTER`, `Z`, `w`, and LOCAL's absence (a redefinition would be
   // diagnosed). LOCAL's use and Z's after its #undef are the header's own.
   check(asked == std::set<std::string>{"LOCAL", "int", "v", "OUTER", "Z", "w"}, "macro questions are the entry state's");
-  if (std::getenv("PP_DEBUG")) std::println("asked {}", asked);
   check((*header)->delta.size() == 2, "the delta: LOCAL defined, Z undefined");
 }
 
@@ -187,13 +186,6 @@ void incremental_equals_cold() {
     pp::Session cold(cold_host);
     auto fresh = run(cold, cold_host);
     check(inc.region == fresh.region && inc.diags == fresh.diags, std::format("state {}: incremental equals cold", step));
-    if (std::getenv("PP_DEBUG") && !(inc.region == fresh.region && inc.diags == fresh.diags)) {
-      std::println("warm: {} | {} diags | files {} | exps {}", text(inc.region), inc.diags.size(), inc.region.file_names, inc.region.expansions.size());
-      std::println("cold: {} | {} diags | files {} | exps {}", text(fresh.region), fresh.diags.size(), fresh.region.file_names, fresh.region.expansions.size());
-      std::println("locs equal {} names equal {}", inc.region.locs == fresh.region.locs, inc.region.names == fresh.region.names);
-      for (std::size_t i = 0; i < std::min(inc.region.locs.size(), fresh.region.locs.size()); ++i)
-        if (!(inc.region.locs[i] == fresh.region.locs[i])) std::println("  loc {}: {} {} {} vs {} {} {}", i, inc.region.locs[i].file, inc.region.locs[i].expansion, inc.region.locs[i].offset, fresh.region.locs[i].file, fresh.region.locs[i].expansion, fresh.region.locs[i].offset);
-    }
     ++step;
   }
   check(warm.stats.reused > 0, "the warm session reused regions");

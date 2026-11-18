@@ -681,6 +681,6 @@ draft/temp/temp.variadic-7.accept.cpp 'template' not supported yet
 draft/temp/temp.variadic-8.accept.cpp 'template' not supported yet
 own/smoke/exit-status.run.cpp preprocessing directives are not supported yet
 own/smoke/missing-semicolon.reject.cpp errors elsewhere: 'struct' not supported yet
-own/pp/include-macros.accept.cpp dynamic initialization of a namespace-scope variable is not supported yet
-own/pp/macro-decls.accept.cpp dynamic initialization of a namespace-scope variable is not supported yet
+own/pp/include-macros.accept.cpp dynamic initialization of a namespace-scope variable is not supported yet (#94)
+own/pp/macro-decls.accept.cpp dynamic initialization of a namespace-scope variable is not supported yet (#94)
 own/smoke/object-like-macro.pp.cpp function-like macros are not supported yet

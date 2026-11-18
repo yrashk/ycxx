@@ -12,7 +12,7 @@
 //
 // `pp(file)` is an engine query over the main file's text. The files it includes and the
 // configuration are read through the process's session (`session()`) until the engine has inputs
-// read on demand and contextual queries (#16); the regions' traces carry those dependencies.
+// read on demand (#93) and contextual queries (#16); the regions' traces carry those dependencies.
 export module ycxx.pp;
 
 import std;
