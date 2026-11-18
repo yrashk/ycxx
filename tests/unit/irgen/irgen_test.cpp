@@ -113,7 +113,7 @@ struct World {
   // The printed body with handles named: `T<n>` by type name, `@<n>` by entity name and `#<n>` by
   // constant spelling.
   std::string text(EntityId fn, const ir::Function& body) {
-    std::string raw = ir::print(ir::EntityId(std::to_underlying(fn)), body), out;
+    std::string raw = ir::print(fn, body), out;
     for (std::size_t i = 0; i < raw.size();) {
       char c = raw[i];
       std::size_t j = i + 1;
@@ -247,7 +247,7 @@ void expect(World& w, const Fn& fn, ast::BodySema body, std::string_view expecte
   if (expected.starts_with('\n')) expected.remove_prefix(1);
   check(got == expected, std::format("IR differs; got:\n{}", got), at);
   // The text form parses back to the same body (the printer's handles are numbers).
-  auto parsed = ir::parse(ir::print(ir::EntityId(std::to_underlying(fn.entity)), r.body));
+  auto parsed = ir::parse(ir::print(fn.entity, r.body));
   check(parsed && parsed->size() == 1 && parsed->front().body == r.body, "the text form round-trips", at);
 }
 
@@ -639,9 +639,9 @@ void debug_and_fingerprint() {
   check(r1.body == r2.body && ir::fingerprint(r1.body) == ir::fingerprint(r2.body), "positions are not in the body");
   check(r1.debug.loc.size() == r1.body.nodes.size(), "a location per node");
   // Node 0 is x's alloc, at the declaration (body offset 10 + 1); the ret is at the return (+6).
-  check(r1.debug.loc[0] == ir::Loc{7, 11} && r2.debug.loc[0] == ir::Loc{7, 23}, "alloc located at the declaration");
+  check(r1.debug.loc[0] == ir::Loc{ast::ItemId(7), 11} && r2.debug.loc[0] == ir::Loc{ast::ItemId(7), 23}, "alloc located at the declaration");
   ir::NodeId last{std::uint32_t(r1.body.nodes.size() - 1)};
-  check(r1.body.node(last).op == ir::Op::ret && r1.debug.loc[ir::raw(last)] == ir::Loc{7, 16}, "ret located at the return");
+  check(r1.body.node(last).op == ir::Op::ret && r1.debug.loc[ir::raw(last)] == ir::Loc{ast::ItemId(7), 16}, "ret located at the return");
   check(r1.debug.vars.size() == 1 && r1.debug.vars[0].var == ir::LocalId(0) && r1.debug.vars[0].nodes.size() == 1 &&
             r1.body.node(r1.debug.vars[0].nodes[0]).op == ir::Op::alloc,
         "x is held by its alloc");

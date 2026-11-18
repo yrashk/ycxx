@@ -110,7 +110,7 @@ class Gen {
  private:
   // ------------------------------------------------------------------ handles and types
 
-  ir::QualType ty(ast::QualType q) { return ir::QualType(std::to_underlying(facts_.canonical(q))); }
+  ir::QualType ty(ast::QualType q) { return facts_.canonical(q); }
   ir::Ty vty(ast::QualType q) { return ir::Ty::of(ty(q)); }
   static std::uint64_t word(auto h) { return std::to_underlying(h); }
   TypeClass cls(ast::QualType q) { return facts_.classify(q); }
@@ -124,7 +124,7 @@ class Gen {
                   std::span<const ir::SuccRef> succs = {}) {
     ir::NodeId n = b_.emit(block_, op, flags, results, operands, imms, succs);
     debug_.loc.resize(ir::raw(n) + 1);
-    debug_.loc[ir::raw(n)] = ir::Loc{std::to_underlying(fn_.item), loc_};
+    debug_.loc[ir::raw(n)] = ir::Loc{fn_.item, loc_};
     return n;
   }
   // A pure node with one result.
