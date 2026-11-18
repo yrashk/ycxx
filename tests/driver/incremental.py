@@ -26,11 +26,13 @@ git history, minimized; DECISIONS §4.2) produce states in the same shape: a lis
 
 The hook is incremental_results(): for Clang and GCC, which have no incremental mode, it edits
 one directory in place and compiles it cold each time, which exercises the format and the
-comparison. For ycxx it is the daemon's incremental protocol, which #19 (the incremental
-harness) plugs in here; until then ycxx lacks the "incremental" feature and the tests are
-UNSUPPORTED.
+comparison. For ycxx it is the resident daemon (daemon design §8.2, #19): a private daemon per
+test, on its own runtime directory and scope, sees each state as file changes, and answers the
+action through `ycxx` as any build would. Beyond equality with the cold run, each state's request
+is repeated, and the repeat must execute no engine cell; and an edited state must execute no more
+cells than a fresh daemon does for that state from scratch.
 """
-import os, shutil
+import os, shutil, subprocess, tempfile
 from pathlib import Path
 
 from . import kinds
@@ -95,31 +97,101 @@ def materialize(state, d, previous=None):
             (d / p).write_text(text)
 
 
-def observe(c, action, main, d, ctx, tr, flags, timeout, label):
+def observe(c, action, main, d, ctx, tr, flags, timeout, label, env=None):
     """One state's result, comparable across directories (paths made relative to d)."""
     src = d / main
     if action == 'syntax':
-        r = kinds.run(tr, f'{label} syntax', c.syntax(src, flags), timeout, cwd=d)
+        r = kinds.run(tr, f'{label} syntax', c.syntax(src, flags), timeout, cwd=d, env=env)
         if kinds.crashed(r.status):
             raise kinds.Failed(f'{label}: {c.name} crashed (exit {r.status})')
         errs = sorted((os.path.relpath(f, os.path.realpath(d)), l, col)
                       for f, l, col in kinds.toolchain.errors_in(r.stdout + r.stderr, d))
         return ('accept' if r.status == 0 else 'reject', tuple(errs)), r
     if action == 'preprocess':
-        r = kinds.run(tr, f'{label} -E', c.preprocess(src, flags), timeout, cwd=d, stdout_to=d.parent / f'{d.name}.i')
+        r = kinds.run(tr, f'{label} -E', c.preprocess(src, flags), timeout, cwd=d, env=env, stdout_to=d.parent / f'{d.name}.i')
         out = [l for l in kinds.normalize_pp(r.stdout) if str(d) not in l]
         return (r.status, tuple(out)), r
-    ok, st, out = kinds.build_and_run(c, src, ctx, tr, flags, timeout, d.parent, tag=f'-{d.name}', label=f'{label} ')
+    ok, st, out = kinds.build_and_run(c, src, ctx, tr, flags, timeout, d.parent, tag=f'-{d.name}', label=f'{label} ',
+                                      env=env)
     return (('accept', st, out) if ok else ('reject',)), None
+
+
+class Daemon:
+    """A private ycxx daemon (daemon design §8.2): its own short runtime directory (a socket path
+    holds 104 bytes on macOS) and its own scope, a directory marked `.ycxx`, so neither the
+    repository nor another test shares it. `env` routes `ycxx` through it; `close` shuts it down."""
+
+    def __init__(self, c, scope):
+        self.c = c
+        self.runtime = Path(tempfile.mkdtemp(prefix='yi', dir='/tmp'))
+        os.chmod(self.runtime, 0o700)
+        self.scope = scope
+        scope.mkdir(parents=True, exist_ok=True)
+        (scope / '.ycxx').write_text('')
+        base = {k: v for k, v in os.environ.items() if k not in ('YCXX_DAEMON', 'YCXX_NO_DAEMON', 'YCXX_ROOT', 'YCXX_NO_WATCH')}
+        base['YCXX_RUNTIME_DIR'] = str(self.runtime)
+        self.base = base
+        self.env = dict(base, YCXX_DAEMON='require')
+
+    def status(self):
+        """`ycxx ctl status` as {field: value}."""
+        p = subprocess.run([self.c.exe, 'ctl', 'status'], cwd=self.scope, env=self.base, capture_output=True,
+                           text=True, timeout=60)
+        if p.returncode != 0:
+            raise kinds.Failed(f'ycxx ctl status failed (exit {p.returncode}): {p.stderr.strip()[:300]}')
+        return dict(line.split(': ', 1) for line in p.stdout.splitlines() if ': ' in line)
+
+    def executed(self):
+        """Engine cells the last request executed."""
+        return int(self.status().get('last_executed', -1))
+
+    def close(self):
+        subprocess.run([self.c.exe, 'ctl', 'shutdown'], cwd=self.scope, env=self.base, capture_output=True, timeout=60)
+        shutil.rmtree(self.runtime, ignore_errors=True)
+
+
+def daemon_results(c, states, action, main, ctx, tr, flags, timeout, work):
+    """ycxx's side: one daemon sees every state in one directory, edited in place."""
+    tr.note('# incremental side: a private ycxx daemon, each state written as file changes')
+    dm = Daemon(c, work / 'scope')
+    d = dm.scope / 'incremental'
+    out, executed, prev = [], [], None
+    try:
+        for i, s in enumerate(states):
+            materialize(s, d, prev)
+            prev = s
+            result = observe(c, action, main, d, ctx, tr, flags, timeout, f'inc{i}', env=dm.env)[0]
+            executed.append(dm.executed())
+            again = observe(c, action, main, d, ctx, tr, flags, timeout, f'inc{i} again', env=dm.env)[0]
+            repeat = dm.executed()
+            if again != result:
+                raise kinds.Failed(f'state {i}: a repeated request through the daemon answered differently')
+            if repeat != 0:
+                raise kinds.Failed(f'state {i}: a repeated request executed {repeat} engine cells (want 0)')
+            out.append(result)
+    finally:
+        dm.close()
+    tr.check(f'every state answered the same when repeated, executing nothing; executed per state: {executed}')
+    # The same states, each from scratch in a fresh daemon: an edit may not cost more than that.
+    for i, s in enumerate(states[1:], 1):
+        fresh = Daemon(c, work / f'scope-cold-{i}')
+        try:
+            materialize(s, fresh.scope / 'cold')
+            observe(c, action, main, fresh.scope / 'cold', ctx, tr, flags, timeout, f'fresh{i}', env=fresh.env)
+            cold = fresh.executed()
+        finally:
+            fresh.close()
+        if executed[i] > cold:
+            raise kinds.Failed(f'state {i}: the edit executed {executed[i]} engine cells, a cold daemon {cold}')
+    if len(states) > 1:
+        tr.check('no edited state executed more engine cells than a fresh daemon for it')
+    return out
 
 
 def incremental_results(c, states, action, main, ctx, tr, flags, timeout, work):
     """The hook: the result of each state, as compiler c sees it after the earlier states."""
     if c.name == 'ycxx':
-        # #19 replaces this with the daemon's protocol: load states[0], apply each edit as a
-        # file change, ask for the action's result after each.
-        raise kinds.Unresolved('tests/features/ycxx.txt lists "incremental", but its protocol is not '
-                               'wired here yet (#19)')
+        return daemon_results(c, states, action, main, ctx, tr, flags, timeout, work)
     tr.note(f'# incremental side: {c.name} has no incremental mode; one directory edited in place, '
             'compiled cold after each edit')
     d = work / 'incremental'

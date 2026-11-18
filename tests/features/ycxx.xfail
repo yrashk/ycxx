@@ -678,3 +678,4 @@ own/pp/include-macros.accept.cpp dynamic initialization of a namespace-scope var
 own/pp/macro-decls.accept.cpp dynamic initialization of a namespace-scope variable is not supported yet (#94)
 own/pp/variadic-decls.accept.cpp arrays (#111) and overloading (#88) are not supported yet
 own/pp/cond-decls.accept.cpp dynamic initialization of a namespace-scope variable is not supported yet (#94)
+incremental/smoke/inline-function-body.incr an error inside an included header is reported at the including main file's position (#34)

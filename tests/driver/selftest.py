@@ -5,7 +5,7 @@ says which in its `// FIXTURE: <code>` line. They run with Clang (else GCC) as t
 under test, so a driver that passes everything, or fails everything, is caught. The rest checks
 the parts that need no compiler: markers, the incremental format, sharding, state and selection.
 """
-import json, re, subprocess, sys, tempfile, unittest
+import json, os, re, subprocess, sys, tempfile, unittest
 from pathlib import Path
 
 from . import discover, incremental, kinds, state, toolchain
@@ -147,11 +147,15 @@ class Parts(unittest.TestCase):
     def test_no_unsupported(self):
         # An UNSUPPORTED test passes a run, but fails it with --no-unsupported, and so does a
         # selection that runs nothing: a CI step that must run its tests cannot go green vacuously.
-        inc = 'incremental/smoke/inline-function-body.incr'  # ycxx has no "incremental" (tests/features/ycxx.txt)
+        inc = 'incremental/smoke/inline-function-body.incr'
         with tempfile.TemporaryDirectory() as d:
+            features = Path(d) / 'features.txt'
+            features.write_text('syntax\npreprocess\n')  # no "incremental": the test is UNSUPPORTED
+            env = dict(os.environ, YCXX_FEATURES=str(features))
             def status(stage, what, *flags):
                 return subprocess.run([sys.executable, str(REPO / 'tools' / 'test'), '--cxx', 'ycxx', '--state', d,
-                                       '--no-state', '-q', *flags, stage, what], capture_output=True, text=True).returncode
+                                       '--no-state', '-q', *flags, stage, what], capture_output=True, text=True,
+                                      env=env).returncode
             self.assertEqual(status('wider', inc), 0)
             self.assertEqual(status('wider', inc, '--no-unsupported'), 1)
             self.assertEqual(status('core', inc), 0)  # the core stage selects no incremental/ test
