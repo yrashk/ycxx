@@ -22,7 +22,7 @@ import json, os, queue, subprocess, sys, threading, time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from process import Env, fail, failures, gone, slow_source  # noqa: E402
+from process import Env, fail, failures, slow_source, wait_until  # noqa: E402
 
 TIMEOUT = 120  # a debug build's first diagnosis builds the standard library's headers
 UNDECLARED = "use of undeclared identifier 'gg'"
@@ -247,6 +247,20 @@ def exit_status(env):
     expect(ed.finish(shutdown=False), 1, '`ycxx lsp` after `exit` without `shutdown`')
 
 
+def alive(pid):
+    """Whether `pid` runs. A zombie has exited: the daemon double-forks, so on Linux it is reaped by
+    PID 1, which in a container (CI's `gcc:16` job) may never reap it."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    try:
+        stat = Path(f'/proc/{pid}/stat').read_text()
+        return stat[stat.rindex(')') + 2] != 'Z'  # the state follows the parenthesized name
+    except (OSError, ValueError, IndexError):
+        return True  # no /proc (macOS): kill() is the answer
+
+
 def shutdown_with_session(env, pid):
     ed = Editor(env, env.scope)
     subprocess.run([env.ycxx, 'ctl', 'shutdown'], cwd=env.scope, env=env.base, capture_output=True, timeout=30)
@@ -254,13 +268,8 @@ def shutdown_with_session(env, pid):
         ed.p.wait(timeout=30)
     except subprocess.TimeoutExpired:
         fail('`ycxx lsp` still runs after the daemon was shut down')
-    try:
-        os.kill(pid, 0)
-        time.sleep(5)
-        os.kill(pid, 0)
+    if not wait_until(lambda: not alive(pid), 5):
         fail('the daemon still runs 5 s after `ctl shutdown` with an LSP session open')
-    except ProcessLookupError:
-        pass
     (env.scope / 'next.cpp').write_text('int main() { return 0; }\n')
     code, _, err = env.cxx(['-fsyntax-only', 'next.cpp'], env.scope, env.daemon)
     expect((code, err), (0, b''), 'a build after the shutdown starts a new daemon')
