@@ -420,6 +420,14 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
   every C++ library it links (the e-graph spike needed a second HiGHS build).
   - Do: plan TSan runs on macOS with Clang from the start, or run them on Linux.
   - Learned on #3's e-graph spike.
+- **ycxx's ThreadSanitizer build runs on a Mac in the `gcc:16` image.** The arm64 image's GCC
+  16.2 ships libtsan, and Docker Desktop's VM has `vm.mmap_rnd_bits` at 18, under TSan's limit of
+  28. Install cmake and ninja-build, mount the checkout, keep the build in a Docker volume, and run
+  `YCXX_TSAN_BUILD_DIR=/build tools/tsan`. It took about 25 minutes, against an hour of building
+  GCC on a CI cache miss before the first result.
+  - Do: run tools/tsan this way before dispatching the nightly job. A canary keeps a clean run
+    honest: reintroduce a known race (here, the deque's fence-based push) and see the test fail.
+  - Learned on #105.
 - **GCC 16.2 can write a module interface it cannot read back.** Adding a member of a new struct
   type to `pipeline::TranslationUnit` (a reflection-serialized engine value) made every importer of
   `ycxx.pipeline` fail with `failed to read compiled module cluster N: Bad file data` and `failed
