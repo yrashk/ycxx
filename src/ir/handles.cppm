@@ -1,29 +1,24 @@
 // The handles L1 uses to refer outside itself (AST design §2): entities, canonical types,
-// constants and locations. They are opaque stand-ins until the AST core (#32, #33) provides the
-// real ones; each is a strong 32-bit enum or, for `Loc`, an 8-byte structural pair, so wiring the
-// real types in is a change of these declarations only.
+// constants and locations, from `ycxx.ast.handles`. `LocalId` is a stand-in until the AST has a
+// `LocalRec` index type (§7.1).
 //
 // The body never hashes a handle's number: fingerprints go through a `handle_fingerprints`
-// object (canon.cppm), because handles are local to the session (AST design §2, invariant 5).
+// object (identity.cppm), because handles are local to the session (AST design §2, invariant 5).
 export module ycxx.ir:handles;
 
 import std;
+import ycxx.ast.handles;
 
 namespace ycxx::ir {
 
-export enum class EntityId : std::uint32_t {};
-export enum class QualType : std::uint32_t {};
-export enum class ConstId : std::uint32_t {};
+export using ast::ConstId;
+export using ast::EntityId;
+export using ast::ItemId;
+export using ast::Loc;
+export using ast::QualType;
+
 // A block-scope variable, by its `LocalRec` index (AST design §7.1); used by function_debug only.
 export enum class LocalId : std::uint32_t {};
-
-// BOOTSTRAP: modules: comparisons in src/ir are defaulted members, not hidden friends: a defaulted
-// friend comparison in an exported class ICEs GCC 16.2 in the importer (STATUS).
-export struct Loc {
-  std::uint32_t item = 0;    // ItemId
-  std::uint32_t offset = 0;  // token offset inside the item
-  constexpr bool operator==(const Loc&) const = default;
-};
 
 export constexpr std::uint32_t raw(auto h)
   requires std::is_enum_v<decltype(h)>

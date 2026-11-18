@@ -347,10 +347,11 @@ void builder_and_debug() {
         "the unused root first, then the terminator's operands in operand order");
   check(raw(built->node_of[3]) == none, "the dead node is dropped");
 
-  FunctionDebug emitted{.loc = {{7, 0}, {7, 1}, {7, 2}, {7, 9}, {7, 3}, {7, 4}},
+  FunctionDebug emitted{.loc = {{ItemId(7), 0}, {ItemId(7), 1}, {ItemId(7), 2}, {ItemId(7), 9}, {ItemId(7), 3}, {ItemId(7), 4}},
                         .vars = {{LocalId(0), {st, unused}}}};
   FunctionDebug d = emitted.remap(built->node_of, std::uint32_t(f.nodes.size()));
-  check(d.loc.size() == 5 && d.loc[2] == Loc{7, 2} && d.loc[3] == Loc{7, 4} && d.loc[4] == Loc{7, 3},
+  check(d.loc.size() == 5 && d.loc[2] == Loc{ItemId(7), 2} && d.loc[3] == Loc{ItemId(7), 4} &&
+            d.loc[4] == Loc{ItemId(7), 3},
         "locations follow their nodes");
   check(d.vars[0].nodes == std::vector{NodeId(0), NodeId(2)}, "variables follow their nodes");
 

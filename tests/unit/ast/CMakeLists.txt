@@ -1,0 +1,6 @@
+ycxxc_unit_test(ast_handles handles.cpp ycxxc_ast)
+ycxxc_unit_test(ast_schema schema.cpp ycxxc_ast)
+ycxxc_unit_test(ast_interner interner.cpp ycxxc_ast)
+ycxxc_unit_test(ast_builder builder.cpp ycxxc_ast)
+ycxxc_unit_test(ast_red red.cpp ycxxc_ast)
+ycxxc_unit_test(ast_compact compact.cpp ycxxc_ast)
