@@ -49,7 +49,7 @@ constexpr std::string_view spelling(Builtin b) {
 
 // ---------------------------------------------------------------- types
 
-enum class TypeKind : u8 { builtin, pointer, array, function, other };
+enum class TypeKind : u8 { builtin, pointer, array, function, class_, other };
 
 // The canonical form of a type, read out by value.
 struct TypeRec {
@@ -60,6 +60,7 @@ struct TypeRec {
   std::vector<QualType> params;
   bool variadic = false;
   LangLinkage linkage = LangLinkage::cxx;
+  EntityId entity = EntityId::none;  // a class's
 };
 
 class Types {
@@ -75,6 +76,7 @@ public:
   QualType function(QualType ret, std::span<const QualType> params, bool variadic, LangLinkage linkage) {
     return ast::function_type(*ins_, ret, params, {.variadic = variadic, .linkage = linkage});
   }
+  QualType class_type(EntityId c) { return ins_->intern_type(ast::TClass{c}); }
 
   TypeRec rec(QualType q) const {
     const ast::Types& t = ins_->types;
@@ -98,6 +100,9 @@ public:
       r.params = ins_->seqs.elements(f.params);
       r.variadic = f.variadic != 0;
       r.linkage = f.linkage;
+    } else if (t.is<ast::TClass>(c)) {
+      r.kind = TypeKind::class_;
+      r.entity = t.get<ast::TClass>(c).entity;
     }
     return r;
   }
@@ -122,6 +127,18 @@ public:
   bool is_pointer(QualType q) const { return ast::is_pointer(*ins_, q); }
   bool is_function(QualType q) const { return ast::is_function(*ins_, q); }
   bool is_array(QualType q) const { return ast::is_array(*ins_, q); }
+  bool is_class(QualType q) const { return ins_->types.is<ast::TClass>(ins_->types.canon(q)); }
+  // The class of a class type.
+  EntityId class_of(QualType q) const
+    pre(is_class(q))
+  {
+    return ins_->types.get<ast::TClass>(ins_->types.canon(q)).entity;
+  }
+  // [basic.types.general]: arithmetic, enumeration, pointer, pointer-to-member and std::nullptr_t
+  // types, cv-qualified or not.
+  bool is_scalar(QualType q) const {
+    return is_arithmetic(q) || is_pointer(q) || is(q, Builtin::nullptr_t);
+  }
   // [basic.types.general]: an object type is not a function, reference or void type.
   bool is_object(QualType q) const { return !is_function(q) && !is_void(q) && !ast::is_reference(*ins_, q); }
   QualType pointee(QualType q) const
@@ -132,6 +149,8 @@ public:
 
   // The type as it would be written, for diagnostics.
   std::string spell(QualType q) const { return spell(q, ""); }
+  // How a class is named in diagnostics; set by the world that knows the entities.
+  std::function<std::string(EntityId)> class_name;
 
   Fp128 fp(QualType q) const { return ins_->fp(q); }
 
@@ -158,6 +177,8 @@ private:
       if (r.variadic) ps += r.params.empty() ? "..." : ", ...";
       return spell(r.inner, inner + "(" + ps + ")");
     }
+    case TypeKind::class_:
+      return cvs + (class_name ? class_name(r.entity) : "<class>") + (inner.empty() || inner[0] == '[' ? "" : " ") + inner;
     case TypeKind::other: return "<type>";
     }
     return {};
@@ -199,6 +220,10 @@ public:
   ConstId null_pointer(QualType) { return ins_->intern_value(ast::VNullptr{}); }
   // A declared object or function as the base of an address (§5.5).
   ConstId entity(EntityId e) { return ins_->intern_value(ast::VEntity{e}); }
+  // An array or class object, from its elements' values in order ([dcl.init.aggr]).
+  ConstId aggregate(QualType t, std::span<const ConstId> elems) {
+    return ins_->intern_value(ast::VAggregate{ast::without_cv(ins_->canonical(t)), ins_->intern_seq(elems)});
+  }
 
   ValueRec rec(ConstId c) const {
     const ast::Values& v = ins_->values;
@@ -231,12 +256,13 @@ private:
 
 // ---------------------------------------------------------------- entities (stand-in for #33)
 
-enum class EntityKind : u8 { function, variable };
+// `data_member` is a non-static data member ([class.mem]).
+enum class EntityKind : u8 { function, variable, class_, data_member };
 
 // The structure behind an entity id (§4.3): for a function `(scope, name, canonical type)`, with
 // `::` as the scope of a function with C language linkage ([dcl.link]); for a variable with
 // external linkage `(scope, name)`; for an entity with internal linkage, also its first
-// declaration. The α subset has only the global namespace as a scope.
+// declaration. `scope` is the enclosing class, or none for the global namespace.
 struct EntityRec {
   EntityKind kind = EntityKind::function;
   NameId name{};
@@ -244,6 +270,7 @@ struct EntityRec {
   LangLinkage lang = LangLinkage::cxx;
   ast::Linkage linkage = ast::Linkage::external;
   DeclId first{};  // internal linkage only
+  EntityId scope = EntityId::none;
 };
 
 class Entities {
@@ -254,6 +281,7 @@ public:
     Fp128 f = ast::seed("ycxx.sema.Entity");
     f = ast::mix(f, std::to_underlying(r.kind));
     f = ast::mix(f, ins_->names.fp(r.name));
+    if (r.scope != EntityId::none) f = ast::mix(f, ins_->entities.fp(r.scope));
     // A variable's type is not part of its identity; a function's is ([basic.link]).
     if (r.kind == EntityKind::function) f = ast::mix(f, types_->fp(types_->canonical(r.type)));
     f = ast::mix(f, std::to_underlying(r.linkage));
@@ -275,14 +303,98 @@ private:
   std::deque<EntityRec> recs_;  // a deque: references to records stay valid as entities are added
 };
 
+// ---------------------------------------------------------------- classes (stand-in for #33)
+
+// A non-static data member ([class.mem]).
+struct FieldRec {
+  NameId name{};
+  QualType type{};
+  EntityId entity = EntityId::none;
+  // Its default member initializer's value ([class.mem.general]), or none. The front end keeps
+  // only those that are constants of scalar type so far (#86).
+  ConstId init = ConstId::none;
+};
+
+// What `class_def(C)` (ast.md §3.6) says of a class that member lookup and the layout need, kept
+// by class entity. A class is complete once its definition has been analysed
+// ([class.mem.general]); completeness at a point is the parser's question (`Program`).
+struct ClassRec {
+  bool defined = false;
+  std::vector<FieldRec> fields;  // in declaration order
+};
+
+// The layout of an object type on the target ([basic.align], [class.mem]): its size and alignment
+// and, for a class, its members' offsets. Classes follow the Itanium C++ ABI §2.4: each member at
+// the next offset its alignment allows, in declaration order; the size rounded up to the
+// alignment; an empty class has size 1.
+struct ObjectLayout {
+  u64 size = 0;
+  u32 align = 1;
+  std::vector<u64> offsets;  // a class's members
+};
+
+class Classes {
+public:
+  explicit Classes(ast::Interners& ins, Types& types) : ins_(&ins), types_(&types) {}
+
+  ClassRec& rec(EntityId c) { return recs_[std::to_underlying(c)]; }
+  const ClassRec* find(EntityId c) const {
+    auto it = recs_.find(std::to_underlying(c));
+    return it == recs_.end() ? nullptr : &it->second;
+  }
+  bool is_defined(EntityId c) const {
+    const ClassRec* r = find(c);
+    return r && r->defined;
+  }
+
+  // The layout of a complete object type: `layout` (AST design Part D) until #33 has it.
+  ObjectLayout layout(QualType q) const {
+    TypeRec r = types_->rec(q);
+    switch (r.kind) {
+    case TypeKind::builtin: {
+      ast::BuiltinLayout l = target[r.builtin];
+      return {l.size, l.align, {}};
+    }
+    case TypeKind::pointer: return {target.pointer_size, target.pointer_align, {}};
+    case TypeKind::array: {
+      ObjectLayout e = layout(r.inner);
+      return {e.size * r.bound, e.align, {}};
+    }
+    case TypeKind::class_: {
+      ObjectLayout out;
+      const ClassRec* c = find(r.entity);
+      if (c)
+        for (const FieldRec& f : c->fields) {
+          ObjectLayout m = layout(f.type);
+          out.size = (out.size + m.align - 1) / m.align * m.align;
+          out.offsets.push_back(out.size);
+          out.size += m.size;
+          out.align = std::max(out.align, m.align);
+        }
+      out.size = out.size == 0 ? 1 : (out.size + out.align - 1) / out.align * out.align;
+      return out;
+    }
+    default: return {};
+    }
+  }
+
+private:
+  ast::Interners* ins_;
+  Types* types_;
+  std::map<u32, ClassRec> recs_;
+};
+
 // What the front end shares process-wide (§9.1): the AST core's interners, and sema's views.
 struct World {
   ast::Interners& ins;
   Types types{ins};
   Values values{ins, types};
   Entities entities{ins, types};
+  Classes classes{ins, types};
 
-  explicit World(ast::Interners& i) : ins(i) {}
+  explicit World(ast::Interners& i) : ins(i) {
+    types.class_name = [this](EntityId e) { return std::string(ins.names.spelling(entities.rec(e).name)); };
+  }
   World(const World&) = delete;
 };
 
