@@ -238,10 +238,18 @@ sequencing, were decided by the session.
 2. **Temporaries:** materialization is a width-0 node carrying the storage duration, the
    destructor and the full-expression or reference that ends its lifetime, with lifetime
    extension resolved ([class.temporary]).
-3. **Cleanups:** every scope-exit edge (normal exit, `return`, `break`, `continue`, `goto`, the
-   exceptional edge) carries its ordered list of destructor calls, partially constructed objects
-   included ([except.ctor]). It is a `SeqId` on the exiting statement node, computed by
-   `analyze_body`.
+3. **Cleanups** (revised by #135): each object that needs destruction names its destructor where
+   it is declared or created: `LocalVar::destructor` for a block-scope variable,
+   `Materialize::destructor` for a temporary (with whether a reference extends it), and a
+   destructor's `DestroyMember` list for its members ([class.dtor]). `function_ir` derives every
+   scope-exit edge's destructor calls (normal exit, `return`, `break`, `continue`) from the
+   scopes it leaves, innermost first and in reverse order of construction, and ends a
+   full-expression's temporaries at its end ([class.temporary]). The exiting statements carry no
+   list. The exceptional edge and `goto` use the same derivation, partially constructed objects
+   included ([except.ctor]; noted on #89).
+   *Rejected:* a `SeqId` of destructor calls on each exiting statement, computed by
+   `analyze_body`: it repeats what the scopes already say, needs keeping consistent per edge, and
+   has no node for a scope without a statement of its own (a for-init-statement's).
 4. **Sequencing:** each expression kind declares the sequencing of its operands by an annotation
    on its members (`[[=sequenced]]`, `[[=indeterminately_sequenced]]`, `[[=unsequenced]]`,
    [intro.execution]), read by reflection like the rest of the schema. The rule belongs to the

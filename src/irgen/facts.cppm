@@ -12,7 +12,8 @@ export namespace ycxx::irgen {
 namespace ast = ycxx::ast;
 
 // The classes of types the α slice's IR generation distinguishes (#39).
-enum class TypeClass : std::uint8_t { void_, bool_, integer, pointer, array, function, other };
+// `record` is a class type ([class]).
+enum class TypeClass : std::uint8_t { void_, bool_, integer, pointer, array, function, record, other };
 
 // An integral type's representation: bool is an unsigned 1-bit integer ([basic.fundamental]).
 struct IntRep {
@@ -39,6 +40,10 @@ concept Facts = requires(F& f, ast::QualType q, ast::ConstId c, ast::EntityId e,
   { f.string_address(c) } -> std::same_as<ast::ConstId>;
   { f.is_constexpr(e) } -> std::same_as<bool>;  // a constexpr or consteval function
   { f.is_main(e) } -> std::same_as<bool>;       // the program's `main` ([basic.start.main])
+  // References ([dcl.ref]) are pointers in the IR: `canonical` and `classify` see a pointer.
+  { f.is_reference(q) } -> std::same_as<bool>;
+  { f.referee(q) } -> std::same_as<ast::QualType>;  // pre: reference
+  { f.bound(q) } -> std::same_as<std::uint64_t>;    // pre: array of known bound
 };
 
 }  // namespace ycxx::irgen

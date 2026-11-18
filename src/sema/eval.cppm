@@ -22,7 +22,9 @@ export namespace ycxx::sema {
 // The facts `function_ir` needs (ycxx.irgen:facts), over sema's world and questions.
 class EvalFacts : public irgen::TypeFacts {
 public:
-  EvalFacts(World& w, Questions& q) : TypeFacts(w.ins, sema::target), w_(&w), q_(&q) {}
+  EvalFacts(World& w, Questions& q) : TypeFacts(w.ins, sema::target), w_(&w), q_(&q) {
+    enum_underlying = [&w](EntityId e) { return w.classes.underlying(e); };
+  }
   ConstId string_address(ConstId s) { return w_->values.address({}, s, 0); }
   bool is_constexpr(EntityId f) { return q_->is_constexpr(f); }
   bool is_main(EntityId) { return false; }  // `main` is never evaluated ([basic.start.main])
@@ -52,7 +54,7 @@ public:
     if (!e.ok()) return {};
     ast::Interners& in = s_->ins();
     ast::Child root = s_->builder().commit(ast::Child{e.id, 0});
-    NodeId ret = in.intern(ast::Return{root, in.intern_seq(std::span<const ast::Cleanup>{})}, e.width());
+    NodeId ret = in.intern(ast::Return{root}, e.width());
     std::vector<ast::LocalRec> locals(s_->locals().begin(), s_->locals().end());
     for (ast::LocalRec& l : locals) l.decl = NodeId::none;  // drafts of the enclosing frame
     ast::DeclSema thunk{};

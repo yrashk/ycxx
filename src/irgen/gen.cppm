@@ -33,9 +33,16 @@
 // The emission order is the tree's evaluation order; `ir::Builder::finish` puts the body in
 // canonical order (§2.4), so the fingerprint does not depend on it.
 //
-// α slice (#39): scalars, pointers and string literals, no classes, cleanups or exceptions.
+// - A class or array object is never a value: it is initialized element by element through
+//   `ptr_member` (an `InitList`), or from another object by `copy` (a class glvalue converted to
+//   a prvalue, the trivial copy constructor and copy assignment, [class.copy.ctor]). An object
+//   whose initializer value-initializes some element is allocated `zero`, and those elements are
+//   left as they are ([dcl.init.general]).
+//
+// α slice (#39) and δ's aggregates (#86): scalars, pointers, string literals and aggregates; no
+// cleanups or exceptions, and no class parameters or results yet.
 // Calls are `call`, never `invoke`: with no destructors to run, an exception leaves the function
-// with nothing to do. A call site will choose `invoke` once a scope has cleanups (§3.7.3); every
+// with nothing to do. A call site will choose `invoke` once a scope has destructors (§3.7.3); every
 // call already goes through `call_fn` for that reason.
 export module ycxx.irgen:gen;
 
@@ -62,6 +69,9 @@ struct FunctionInput {
   // becomes an object outside its lifetime.
   bool thunk = false;
   std::span<const std::optional<ast::ConstId>> local_values{};
+  // A non-static member function's `this` type ([expr.prim.this]): its implicit object argument,
+  // the entry block's first value parameter, before the declared ones (Itanium C++ ABI §3.1).
+  std::optional<ast::QualType> this_type{};
 };
 
 struct FunctionIr {
@@ -210,28 +220,59 @@ class Gen {
 
   // ------------------------------------------------------------------ objects and scopes
 
-  Place begin_object(ast::QualType type, ir::Init init) {
+  Place begin_object(ast::QualType type, ir::Init init, ir::Storage storage = ir::Storage::automatic) {
     ir::Ty r[] = {vty(facts_.pointer_to(type))};
-    std::uint64_t imms[] = {word(ty(type)), std::to_underlying(ir::Storage::automatic), std::to_underlying(init)};
+    std::uint64_t imms[] = {word(ty(type)), std::to_underlying(storage), std::to_underlying(init)};
     ir::NodeId n = stateful(ir::Op::alloc, r, {}, imms);
     return {b_.result(n, 1), type};
   }
-  void start_lifetime(const Place& p) {
+  // An object a scope ends: its destructor (none if trivial) runs, then its lifetime and storage
+  // end ([basic.life], [class.dtor]).
+  struct Ending {
+    Place place;
+    ast::EntityId destructor = ast::EntityId::none;
+    ir::Storage storage = ir::Storage::automatic;
+  };
+  void start_lifetime(const Place& p, ast::EntityId destructor = ast::EntityId::none,
+                      ir::Storage storage = ir::Storage::automatic) {
     ValueId ops[] = {p.ptr};
     std::uint64_t imms[] = {word(ty(p.type))};
     stateful(ir::Op::obj__begin, {}, ops, imms);
-    scopes_.back().push_back(p);
+    scopes_.back().push_back({p, destructor, storage});
   }
-  void end_lifetime(const Place& p) {
-    ValueId ops[] = {p.ptr};
+  void end_lifetime(const Ending& e) {
+    if (e.destructor != ast::EntityId::none) destroy(e.place, e.destructor);
+    ValueId ops[] = {e.place.ptr};
     stateful(ir::Op::obj__end, {}, ops);
-    std::uint64_t imms[] = {std::to_underlying(ir::Storage::automatic)};
+    std::uint64_t imms[] = {std::to_underlying(e.storage)};
     stateful(ir::Op::dealloc, {}, ops, imms);
+  }
+  // Calls `destructor` on the object at `p`; an array's elements, the last first ([class.dtor]).
+  void destroy(const Place& p, ast::EntityId destructor) {
+    if (cls(p.type) == TypeClass::array) {
+      ast::QualType e = facts_.element(p.type);
+      for (std::uint64_t i = facts_.bound(p.type); i-- > 0;) destroy(subobject(p, ir::Step::elem, uint32_t(i), e), destructor);
+      return;
+    }
+    ValueId self[] = {p.ptr};
+    call_fn(destructor, facts_.int_type(), self, true);
   }
   // Ends the objects of the scopes above `depth`, innermost first; the scopes stay open.
   void exit_scopes(std::size_t depth) {
     for (std::size_t i = scopes_.size(); i-- > depth;)
       for (auto p = scopes_[i].rbegin(); p != scopes_[i].rend(); ++p) end_lifetime(*p);
+  }
+
+  // Full-expressions ([intro.execution]): the temporaries one materializes are destroyed at its
+  // end, the last first ([class.temporary]/4).
+  template <class Body>
+  auto full_expression(Body&& f) {
+    temps_.emplace_back();
+    auto r = f();
+    std::vector<Ending> ts = std::move(temps_.back());
+    temps_.pop_back();
+    for (auto t = ts.rbegin(); t != ts.rend(); ++t) end_lifetime(*t);
+    return r;
   }
   void push_scope() { scopes_.emplace_back(); }
   void pop_scope() {
@@ -245,17 +286,29 @@ class Gen {
     ast::QualType fty = fn_.decl.type;
     auto params = in_.seqs.elements(fn_.decl.params);
     std::vector<ir::Ty> entry{ir::Ty::state()};
-    for (const ast::ParamSema& p : params) entry.push_back(vty(p.type));
+    if (fn_.this_type) entry.push_back(vty(*fn_.this_type));
+    for (const ast::ParamSema& p : params) {
+      if (cls(p.type) == TypeClass::record) throw Unsupported{"a parameter of class type"};
+      entry.push_back(vty(p.type));
+    }
+    if (cls(facts_.return_type(fty)) == TypeClass::record) throw Unsupported{"a function returning a class"};
     enter(b_.add_block(entry));
+    uint32_t first = fn_.this_type ? 2 : 1;  // the first declared parameter's block parameter
+    if (fn_.this_type) this_ = b_.param(block_, 1);
     loc_ = fn_.body_offset;
     push_scope();
     // The parameters are the first body locals (#41), named by `LocalRef` like the others.
     slots_.assign(in_.seqs.size(fn_.body.locals), std::nullopt);
     if (slots_.size() < params.size()) throw Unsupported{"a body whose locals do not start with the parameters"};
     for (uint32_t i = 0; i < params.size(); ++i) {
+      if (facts_.is_reference(params[i].type)) {
+        // A reference parameter is the address of its object, not an object ([dcl.ref]).
+        slots_[i] = Place{b_.param(block_, i + first), facts_.referee(params[i].type)};
+        continue;
+      }
       Place p = begin_object(params[i].type, ir::Init::indeterminate);
       debug_.vars.push_back({ir::LocalId(i), {last_node()}});
-      store(p, b_.param(block_, i + 1));
+      store(p, b_.param(block_, i + first));
       start_lifetime(p);
       slots_[i] = p;
     }
@@ -264,6 +317,11 @@ class Gen {
     for (uint32_t i = 0; fn_.thunk && i < slots_.size(); ++i) {
       if (slots_[i]) continue;
       ast::QualType t = in_.seqs.at(fn_.body.locals, i).type;
+      // A class or array local is never usable in a constant expression: naming it is
+      // unsupported, so it needs no object.
+      if (cls(t) == TypeClass::record || cls(t) == TypeClass::array || facts_.is_reference(t) ||
+          in_.types.is<ast::TEnum>(in_.types.canon(t)))
+        continue;  // (the interpreter has no enumeration objects yet, #25)
       Place p = begin_object(t, ir::Init::indeterminate);
       if (i < fn_.local_values.size() && fn_.local_values[i]) {
         store(p, constant(t, *fn_.local_values[i]));
@@ -302,6 +360,11 @@ class Gen {
 
   void ret_(std::optional<ValueId> v) {
     exit_scopes(0);
+    // A destructor's members are destroyed after its body, on every way out ([class.dtor]/13).
+    for (At m : epilogue_) {
+      auto d = get<ast::DestroyMember>(m);
+      destroy(subobject({*this_, {}}, ir::Step::field, d.field, d.type), d.destructor);
+    }
     std::vector<ValueId> ops{state_};
     if (v) ops.push_back(*v);
     emit(ir::Op::ret, {}, ops);
@@ -351,12 +414,27 @@ class Gen {
     Position here(loc_, a.offset);
     if (is<ast::Compound>(a)) {
       auto s = get<ast::Compound>(a);
-      if (in_.seqs.size(s.cleanups)) unsupported(a, "with cleanups");
       push_scope();
       for (ast::Child c : ast_.children(s.stmts)) stmt(child(a, c));
       pop_scope();
     } else if (is<ast::ExprStmt>(a)) {
-      discard(child(a, get<ast::ExprStmt>(a).expr));
+      full_expression([&] {
+        discard(child(a, get<ast::ExprStmt>(a).expr));
+        return 0;
+      });
+    } else if (is<ast::MemberInit>(a)) {
+      // [class.base.init]: the member subobject of `*this`.
+      auto m = get<ast::MemberInit>(a);
+      if (!this_) unsupported(a, "outside a constructor");
+      Place p = subobject({*this_, {}}, ir::Step::field, m.field, m.type);
+      full_expression([&] {
+        initialize(p, child(a, m.init), false);
+        return 0;
+      });
+    } else if (is<ast::Destructor>(a)) {
+      auto d = get<ast::Destructor>(a);
+      for (ast::Child c : ast_.children(d.members)) epilogue_.push_back(child(a, c));
+      stmt(child(a, d.body));
     } else if (is<ast::DeclStmt>(a)) {
       for (ast::Child c : ast_.children(get<ast::DeclStmt>(a).decls)) {
         At v = child(a, c);
@@ -366,10 +444,12 @@ class Gen {
       }
     } else if (is<ast::Return>(a)) {
       auto r = get<ast::Return>(a);
-      if (in_.seqs.size(r.cleanups)) unsupported(a, "with cleanups");
       std::optional<ValueId> v;
-      // A void operand is evaluated and the function returns nothing ([stmt.return]).
-      if (r.value.id != NodeId::none) v = rvalue_or_void(child(a, r.value));
+      // A void operand is evaluated and the function returns nothing ([stmt.return]); a
+      // reference result is the address of its object. The operand's temporaries end first.
+      At value = child(a, r.value);
+      if (r.value.id != NodeId::none)
+        v = full_expression([&] { return is_lvalue(value) ? std::optional(lvalue(value).ptr) : rvalue_or_void(value); });
       ret_(v);
     } else if (is<ast::If>(a)) {
       if_(a);
@@ -388,8 +468,6 @@ class Gen {
       loop(a, f.init, f.condition, f.increment, f.body, false);
     } else if (is<ast::Break>(a) || is<ast::Continue>(a)) {
       bool brk = is<ast::Break>(a);
-      auto cleanups = brk ? get<ast::Break>(a).cleanups : get<ast::Continue>(a).cleanups;
-      if (in_.seqs.size(cleanups)) unsupported(a, "with cleanups");
       if (loops_.empty()) unsupported(a, "outside a loop");
       const Loop& l = loops_.back();
       exit_scopes(l.depth);
@@ -404,25 +482,147 @@ class Gen {
     ast::LocalRec rec = in_.seqs.at(fn_.body.locals, v.local);
     if (rec.entity != ast::EntityId::none) unsupported(a, "with static or thread storage duration");
     bool has_init = v.init.id != NodeId::none;
-    Place p = begin_object(rec.type, has_init ? ir::Init::indeterminate : ir::Init::erroneous);
+    if (facts_.is_reference(rec.type)) {
+      // A reference is bound to the object its initializer designates ([dcl.init.ref]); a
+      // temporary bound to it lives as long as it ([class.temporary]/6).
+      if (!has_init) unsupported(a, "of reference type without an initializer");
+      slots_[v.local] = full_expression([&] { return Place{lvalue(child(a, v.init)).ptr, facts_.referee(rec.type)}; });
+      return;
+    }
+    bool zeroed = has_init && value_initializes(child(a, v.init));
+    bool partial = has_init && !zeroed && default_initializes(child(a, v.init));
+    Place p = begin_object(rec.type, zeroed ? ir::Init::zero
+                                     : has_init && !partial ? ir::Init::indeterminate
+                                                            : ir::Init::erroneous);
     debug_.vars.push_back({ir::LocalId(v.local), {last_node()}});
     // The name is in scope in its own initializer ([basic.scope.pdecl]); reading it there reads an
     // object whose lifetime has not begun.
     slots_[v.local] = p;
-    if (has_init) {
-      At init = child(a, v.init);
-      if (cls(rec.type) == TypeClass::array || cls(rec.type) == TypeClass::other)
-        unsupported(a, "of aggregate type");
-      store(p, rvalue(init));
+    if (has_init)
+      full_expression([&] {
+        initialize(p, child(a, v.init), zeroed);
+        return 0;
+      });
+    start_lifetime(p, v.destructor);
+  }
+
+  // Whether initializer `e` value-initializes some element (`ValueInit`), so the object is
+  // allocated zero.
+  bool value_initializes(At e) {
+    if (is<ast::ValueInit>(e)) return true;
+    if (is<ast::CtorCall>(e)) return get<ast::CtorCall>(e).zero_first != 0;
+    if (is<ast::Paren>(e)) return value_initializes(child(e, get<ast::Paren>(e).operand));
+    if (!is<ast::InitList>(e)) return false;
+    for (ast::Child c : ast_.children(get<ast::InitList>(e).elems))
+      if (value_initializes(child(e, c))) return true;
+    return false;
+  }
+
+  // Whether initializer `e` leaves some element default-initialized (`DefaultInit`): its value
+  // is erroneous ([basic.indet]).
+  bool default_initializes(At e) {
+    if (is<ast::DefaultInit>(e)) return true;
+    if (!is<ast::InitList>(e)) return false;
+    for (ast::Child c : ast_.children(get<ast::InitList>(e).elems))
+      if (default_initializes(child(e, c))) return true;
+    return false;
+  }
+
+  // The subobject `index` of the object `p` points to: an array element or a non-static data
+  // member of type `t` ([intro.object]).
+  Place subobject(const Place& p, ir::Step step, uint32_t index, ast::QualType t) {
+    std::uint64_t path[] = {1, ir::encode({step, index})};
+    return {pure(ir::Op::ptr_member, facts_.pointer_to(t), {p.ptr}, {word(ty(t)), path[0], path[1]}), t};
+  }
+
+  // Initializes the object at `p` from the prvalue `e` ([dcl.init]). In a `zeroed` object, a
+  // value-initialized element is already zero.
+  void initialize(const Place& p, At e, bool zeroed) {
+    Position here(loc_, e.offset);
+    if (is<ast::Paren>(e)) return initialize(p, child(e, get<ast::Paren>(e).operand), zeroed);
+    if (facts_.is_reference(p.type)) {
+      store(p, lvalue(e).ptr);  // a reference member holds its object's address
+      return;
     }
-    start_lifetime(p);
+    if (is<ast::CtorCall>(e)) {
+      // [class.ctor]: the constructor initializes the object in place.
+      auto c = get<ast::CtorCall>(e);
+      if (c.zero_first && !zeroed) unsupported(e, "value-initializing an object that is not new");
+      std::vector<ValueId> args{p.ptr};
+      for (ast::Child arg : ast_.children(c.args)) args.push_back(argument(child(e, arg)));
+      call_fn(c.ctor, facts_.int_type(), args, true);
+      return;
+    }
+    if (is<ast::InitList>(e)) {
+      bool array = cls(p.type) == TypeClass::array;
+      uint32_t i = 0;
+      for (ast::Child c : ast_.children(get<ast::InitList>(e).elems)) {
+        At x = child(e, c);
+        initialize(subobject(p, array ? ir::Step::elem : ir::Step::field, i++, info(x).type), x, zeroed);
+      }
+      return;
+    }
+    if (is<ast::DefaultInit>(e)) return;
+    if (is<ast::ValueInit>(e)) {
+      if (zeroed) return;
+      if (cls(p.type) == TypeClass::record || cls(p.type) == TypeClass::array) unsupported(e, "of an aggregate");
+      store(p, zero(p.type));
+      return;
+    }
+    if (cls(p.type) == TypeClass::record || cls(p.type) == TypeClass::array) {
+      copy(p, class_source(e));
+      return;
+    }
+    store(p, rvalue(e));
+  }
+
+  // An argument: a glvalue binds a reference parameter, so it passes its object's address.
+  ValueId argument(At a) { return is_lvalue(a) ? lvalue(a).ptr : rvalue(a); }
+
+  // A temporary ([class.temporary]): initialized from a prvalue, ended with the full-expression
+  // or, when a reference it is bound to extends it, with that reference's scope.
+  Place materialize(At a) {
+    auto m = get<ast::Materialize>(a);
+    At v = child(a, m.operand);
+    bool zeroed = value_initializes(v);
+    Place p = begin_object(m.info.type, zeroed ? ir::Init::zero : ir::Init::indeterminate, ir::Storage::temporary);
+    initialize(p, v, zeroed);
+    ValueId ops[] = {p.ptr};
+    std::uint64_t imms[] = {word(ty(p.type))};
+    stateful(ir::Op::obj__begin, {}, ops, imms);
+    Ending end{p, m.destructor, ir::Storage::temporary};
+    if (m.extended) scopes_.back().push_back(end);
+    else if (temps_.empty()) unsupported(a, "outside a full-expression");
+    else if (branches_ > 0 && m.destructor != ast::EntityId::none) unsupported(a, "with a destructor, created conditionally");
+    else temps_.back().push_back(end);
+    return p;
+  }
+
+  // The object a class prvalue is copied from: a glvalue of the class converted to a prvalue
+  // ([conv.lval]), whose copy constructor is trivial.
+  Place class_source(At e) {
+    while (is<ast::Paren>(e)) e = child(e, get<ast::Paren>(e).operand);
+    if (is<ast::ImplicitConversion>(e)) {
+      auto c = get<ast::ImplicitConversion>(e);
+      if (c.conversion == ast::ConversionKind::lvalue_to_rvalue) return lvalue(child(e, c.operand));
+    }
+    unsupported(e, "as a class prvalue");
+  }
+  void copy(const Place& dst, const Place& src) {
+    ValueId ops[] = {dst.ptr, src.ptr};
+    std::uint64_t imms[] = {word(ty(dst.type))};
+    stateful(ir::Op::copy, {}, ops, imms);
+  }
+  ValueId zero(ast::QualType t) {
+    if (cls(t) == TypeClass::pointer) return constant(t, facts_.null_constant(t));
+    return int_constant(t, 0);
   }
 
   void if_(At a) {
     auto s = get<ast::If>(a);
     push_scope();
     stmt(child(a, s.init));
-    ValueId c = rvalue(child(a, s.condition));
+    ValueId c = full_expression([&] { return rvalue(child(a, s.condition)); });
     ir::BlockId then_b = new_block(), join = new_block();
     ir::BlockId else_b = s.else_.id != NodeId::none ? new_block() : join;
     cond_br(c, edge(then_b), edge(else_b));
@@ -473,7 +673,7 @@ class Gen {
     br(body_first ? body_b : head);
     enter(head);
     if (cond.id != NodeId::none) {
-      ValueId c = rvalue(child(a, cond));
+      ValueId c = full_expression([&] { return rvalue(child(a, cond)); });
       cond_br(c, edge(body_b), edge(exit));
     } else {
       br(body_b);
@@ -485,7 +685,10 @@ class Gen {
     if (live_) br(next);
     if (incr.id != NodeId::none) {
       enter(next);
-      discard(child(a, incr));
+      full_expression([&] {
+        discard(child(a, incr));
+        return 0;
+      });
       br(head);
     }
     enter(exit);
@@ -568,7 +771,13 @@ class Gen {
     if (is<ast::Binary>(a)) return binary(a);
     if (is<ast::OrderedBinary>(a)) return ordered(a);
     if (is<ast::Call>(a)) return call(a);
+    if (is<ast::MemberCall>(a)) return member_call(a);
+    if (is<ast::This>(a)) {
+      if (!this_) unsupported(a, "outside a non-static member function");
+      return *this_;
+    }
     if (is<ast::Conditional>(a)) return conditional(a, false).value;
+    if (is<ast::ValueInit>(a) && cls(t) != TypeClass::record && cls(t) != TypeClass::array) return zero(t);
     unsupported(a);
   }
 
@@ -591,6 +800,7 @@ class Gen {
         std::uint64_t path[] = {1, ir::encode({ir::Step::elem, 0})};
         return pure(ir::Op::ptr_member, t, {arr.ptr}, {word(ty(elem)), path[0], path[1]});
       }
+      case ast::ConversionKind::pointer:
       case ast::ConversionKind::qualification: {
         ValueId v = rvalue(from);
         if (same_type(info(from).type, t)) return v;
@@ -742,7 +952,9 @@ class Gen {
         if (is_and) cond_br(x, edge(rhs_b), edge(join, {x}));
         else cond_br(x, edge(join, {x}), edge(rhs_b));
         enter(rhs_b);
+        ++branches_;
         ValueId y = rvalue(r);
+        --branches_;
         br(join, {y});
         enter(join);
         return b_.param(join, 1);
@@ -761,12 +973,23 @@ class Gen {
     auto c = get<ast::Call>(a);
     if (c.function == ast::EntityId::none) unsupported(a, "through a pointer");
     std::vector<ValueId> args;
-    for (ast::Child arg : ast_.children(c.args)) args.push_back(rvalue(child(a, arg)));
-    return call_fn(c.function, c.info.type, args);
+    for (ast::Child arg : ast_.children(c.args)) args.push_back(argument(child(a, arg)));
+    return call_fn(c.function, result_type(c.info), args);
   }
-  std::optional<ValueId> call_fn(ast::EntityId f, ast::QualType result, std::span<const ValueId> args) {
+  // A non-static member function's call: the object's address is the first argument.
+  std::optional<ValueId> member_call(At a) {
+    auto c = get<ast::MemberCall>(a);
+    std::vector<ValueId> args{rvalue(child(a, c.object))};
+    for (ast::Child arg : ast_.children(c.args)) args.push_back(argument(child(a, arg)));
+    return call_fn(c.function, result_type(c.info), args);
+  }
+  // The IR type of a call's result: a glvalue's is a pointer to its object ([expr.call]).
+  ast::QualType result_type(const ast::ExprInfo& i) {
+    return i.category == ast::ValueCategory::prvalue ? i.type : facts_.pointer_to(i.type);
+  }
+  std::optional<ValueId> call_fn(ast::EntityId f, ast::QualType result, std::span<const ValueId> args, bool void_ = false) {
     std::vector<ir::Ty> results;
-    bool has_value = cls(result) != TypeClass::void_;
+    bool has_value = !void_ && cls(result) != TypeClass::void_;
     if (has_value) results.push_back(vty(result));
     std::uint64_t imms[] = {word(f)};
     ir::Flags flags = facts_.is_constexpr(f) ? 0 : ir::bit(ir::Flag::not_constexpr);
@@ -792,6 +1015,7 @@ class Gen {
     for (auto [blk, arm] : {std::pair{then_b, c.then_}, std::pair{else_b, c.else_}}) {
       enter(blk);
       At x = child(a, arm);
+      ++branches_;
       if (!has_value) {
         discard(x);
         br(join);
@@ -799,6 +1023,7 @@ class Gen {
         ValueId v = glvalue ? lvalue(x).ptr : rvalue(x);
         br(join, {v});
       }
+      --branches_;
     }
     enter(join);
     if (!has_value) return {};
@@ -851,6 +1076,21 @@ class Gen {
       ValueId p = base_is_ptr ? x : y, i = base_is_ptr ? y : x;
       return {pure(ir::Op::ptr_add, facts_.pointer_to(t), {p, i}, {word(ty(t))}), t};
     }
+    if (is<ast::Member>(a)) {
+      // [expr.ref]: the member subobject of the object, or of the object the pointer points to;
+      // for a reference member, the object it refers to.
+      auto m = get<ast::Member>(a);
+      At o = child(a, m.object);
+      ValueId base = m.arrow ? rvalue(o) : lvalue(o).ptr;
+      if (!m.reference) return subobject({base, info(o).type}, ir::Step::field, m.field, t);
+      Place ref = subobject({base, info(o).type}, ir::Step::field, m.field, facts_.pointer_to(t));
+      return {load(ref), t};
+    }
+    if (is<ast::Materialize>(a)) return materialize(a);
+    if (is<ast::Call>(a) || is<ast::MemberCall>(a)) {
+      auto v = is<ast::Call>(a) ? call(a) : member_call(a);
+      return {*v, t};  // a call returning a reference designates the object it refers to
+    }
     if (is<ast::Assign>(a)) return assign(a);
     if (is<ast::Conditional>(a)) return conditional(a, true).place;
     if (is<ast::OrderedBinary>(a) && get<ast::OrderedBinary>(a).op == ast::OrderedOp::comma) {
@@ -866,6 +1106,7 @@ class Gen {
   // promoted type); the left is loaded once, converted to it, and the result converted back.
   Place assign(At a) {
     auto s = get<ast::Assign>(a);
+    if (cls(s.info.type) == TypeClass::record) return assign_class(a);
     ValueId v = rvalue(child(a, s.rhs));
     At rhs = child(a, s.rhs);
     Place p = lvalue(child(a, s.lhs));
@@ -901,6 +1142,37 @@ class Gen {
     return p;
   }
 
+  // Assignment of a class object by its trivial copy assignment operator ([class.copy.assign]):
+  // from a glvalue, a copy of its object; from a braced list, a copy of the temporary the list
+  // initializes ([expr.assign]/9), which ends with the full-expression ([class.temporary]).
+  Place assign_class(At a) {
+    auto s = get<ast::Assign>(a);
+    At rhs = child(a, s.rhs);
+    ast::QualType t = s.computation;
+    std::optional<Place> temp;
+    Place src;
+    if (is<ast::InitList>(rhs) || is<ast::ValueInit>(rhs)) {
+      bool zeroed = value_initializes(rhs);
+      temp = begin_object(t, zeroed ? ir::Init::zero : ir::Init::indeterminate, ir::Storage::temporary);
+      initialize(*temp, rhs, zeroed);
+      ValueId ops[] = {temp->ptr};
+      std::uint64_t imms[] = {word(ty(t))};
+      stateful(ir::Op::obj__begin, {}, ops, imms);
+      src = *temp;
+    } else {
+      src = class_source(rhs);
+    }
+    Place p = lvalue(child(a, s.lhs));
+    copy(p, src);
+    if (temp) {
+      ValueId ops[] = {temp->ptr};
+      stateful(ir::Op::obj__end, {}, ops);
+      std::uint64_t imms[] = {std::to_underlying(ir::Storage::temporary)};
+      stateful(ir::Op::dealloc, {}, ops, imms);
+    }
+    return p;
+  }
+
   // ------------------------------------------------------------------ state
 
   const ast::Interners& in_;
@@ -913,9 +1185,13 @@ class Gen {
   ValueId state_{};
   bool live_ = false;
   uint32_t loc_ = 0;
-  std::vector<std::vector<Place>> scopes_;
+  std::vector<std::vector<Ending>> scopes_;
   std::vector<Loop> loops_;
   std::vector<std::optional<Place>> slots_;  // by local index
+  std::optional<ValueId> this_;              // a non-static member function's `this`
+  std::vector<std::vector<Ending>> temps_;   // the open full-expressions' temporaries
+  std::vector<At> epilogue_;                 // a destructor's DestroyMember statements
+  int branches_ = 0;                         // conditionally evaluated operands entered
 };
 
 template <Facts F>

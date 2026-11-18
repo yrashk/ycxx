@@ -4,7 +4,8 @@
 // definitions by reflection (ycxx.ast.interner), as for tree nodes.
 //
 // This first list is the α slice's (#39): builtins, pointers, references, arrays, function types
-// and typedef sugar. Classes, enums, member pointers and the dependent kinds follow (#33).
+// and typedef sugar, and class types (δ, #86). Enums, member pointers and the dependent kinds
+// follow (#33).
 export module ycxx.ast.types;
 
 import std;
@@ -90,6 +91,19 @@ struct TFunction {
   LangLinkage linkage;
 };
 
+// A class type ([class]): the class's entity (§4.3). Its members and layout are the class's
+// `class_def` and `layout` (§3.6), not part of the type, so the type of an incomplete class and of
+// its definition are one type ([basic.types.general]).
+struct TClass {
+  EntityId entity;
+};
+
+// An enumeration type ([dcl.enum]): its entity; its underlying type and enumerators are the
+// enumeration's definition, not part of the type.
+struct TEnum {
+  EntityId entity;
+};
+
 // ---------------------------------------------------------------- sugar kinds
 
 // A use of a typedef-name or alias-declaration. The alias's template arguments come with alias
@@ -99,7 +113,7 @@ struct STypedef {
   EntityId alias;
 };
 
-using TypeKinds = closed_list<TBuiltin, TPointer, TLRef, TRRef, TArray, TFunction, STypedef>;
+using TypeKinds = closed_list<TBuiltin, TPointer, TLRef, TRRef, TArray, TFunction, TClass, TEnum, STypedef>;
 
 template <class T>
 constexpr bool is_type_kind = TypeKinds::contains<T>;

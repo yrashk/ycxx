@@ -634,6 +634,99 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   messages that are constant expressions, notes along the call chain, block-scope static constexpr
   variables.
 
+## Classes, δ step 1: structs and aggregates (#86, 2026-11-18)
+
+- **Types and values:** `TClass{entity}` in `types` (complete or not, one type); `VAggregate`
+  (an array's or class's element values) in `values`; `DeclKind::data_member`.
+- **Front end:** a class definition at namespace scope is a `class_def` item whose members are
+  their own items (ast.md §4.2); `Program::class_def(item)` reads them into a `ClassDef` and into
+  sema's class table (`World::classes`, the stand-in for `class_def`'s member list, which the
+  layout queries read). A class is complete at an item after its
+  definition that it does not enclose (`Questions::is_complete`). Class names as type
+  specifiers, elaborated type specifiers and forward declarations, member access (`Member`,
+  [expr.ref]), list-initialization of aggregates and scalars (`InitList`, `ValueInit`,
+  `DefaultInit`: brace elision, designators, narrowing, [dcl.init.list]/3.2), arrays whose bound
+  comes from their initializer, class copies as `lvalue_to_rvalue` of a class glvalue, `x = {…}`.
+  Default member initializers are kept as their values, constants of scalar type only (#118).
+  Namespace-scope aggregates with constant elements are folded to a `VAggregate`.
+- **IR:** members through `ptr_member` field steps; aggregates initialized element by element,
+  in an object allocated `zero` when some element is value-initialized; trivial copies and copy
+  assignment as `copy`, which `lower` turns into chunked loads and stores. Class layouts (Itanium
+  §2.4) are in the `LayoutType` and `LayoutStep` queries, from sema's class table; data with
+  `VAggregate` initializers; Itanium names for global-namespace class types in parameters.
+- Tests: `tests/own/classes/s1-*` (spec-only, plus seven from the review). 21 of 27 pass; the others wait for classes by value
+  (#116), local classes (#117), non-constant default member initializers (#118) and records in
+  the interpreter (#25).
+- Not yet: unions, bit-fields, constructors, bases, access checking (#119).
+
+## Classes, δ step 2: member functions and `this` (#86, 2026-11-18)
+
+- Member functions (in-class and out-of-class definitions, `const`/`volatile`, static) and static
+  data members (in-class `static const`/`constexpr` values, out-of-class definitions) are entities
+  scoped to their class (`EntityRec::scope`); `class_def` lists them in `ClassRec::members`.
+  A qualified declarator `C::m` defines the member C declares with that type.
+- Bodies of member functions are complete-class contexts: class member lookup comes before
+  namespace lookup, and their class is complete there. `This` and implicit member access
+  (`Member` on `this`), bound member functions (a `Member` of type `bound_member` that only a call
+  may follow), `MemberCall` with the object's address as its first operand, `C::m`, and the const
+  rule of the implicit object parameter ([class.this]). Reads of a static data member usable in
+  constant expressions become its value (no odr-use).
+- IR: `this` is the entry block's first value parameter (`FunctionInput::this_type`), as the
+  Itanium ABI passes it. Linkage names are `<nested-name>`s with the member's cv-qualifiers,
+  checked against Clang's symbols.
+- Tests: `tests/own/classes/s2-*` (spec-only, plus three from the review): 12 of 13 pass; the constexpr one waits for records
+  in the interpreter (#25). In-class member functions are not weak definitions yet (#124).
+- Not yet: ref-qualifiers, `= default`.
+
+## Classes, δ step 3: constructors, destructors, references, overloading (#86, 2026-11-18)
+
+- **References** ([dcl.ref], [dcl.init.ref]): `T&` and `T&&` declarators, reference locals,
+  parameters, results and members; direct binding, and binding a const reference to a
+  materialized temporary (`Materialize`), extended for a local reference ([class.temporary]/6).
+  In the IR a reference is the pointer to its object (`TypeFacts` maps reference types to
+  pointers); a reference local or parameter is that pointer, not an object. Itanium `R`/`O`.
+- **Overloading** ([over.match]): namespace-scope and member function overloads, and
+  constructors; implicit conversion sequences ranked as exact match (with qualification and
+  reference-binding tie-breaks), promotion, conversion; ambiguity and deleted functions
+  (`= delete`) diagnosed.
+- **Constructors and destructors**: declarations in the class, mem-initializers and default
+  member initializers (analysed again in each constructor, a complete-class context; #118 stays
+  open for aggregates), `CtorCall` for every initialization form (`T x(a)`, `T x{a}`, `T x = a`,
+  `T(a)`, `T{a}`, value- and default-initialization, copies), `MemberInit` statements in
+  declaration order, `Destructor`/`DestroyMember` for members after the body. Implicit copy
+  constructors and destructors that are not trivial are synthesized (`Program::synthesized`).
+  A class with user-declared constructors is not an aggregate.
+- **Cleanups** (ast.md §3.7.3 as revised by #135): `LocalVar::destructor`; `function_ir` runs
+  destructors on every scope exit from its own scope stack (block end, `return`, `break`,
+  `continue`) and ends a full-expression's temporaries at its end. Statements carry no cleanup
+  lists; the `Cleanup` record is gone.
+- Linkage names: `C1`/`D1` (#136 for `C2`/`D2`/`D0`), checked against Clang's symbols.
+- Tests: `tests/own/classes/s3-*` (spec-only, plus two from the review): 16 of 16 pass. 10 more draft examples pass.
+- Not yet: temporaries with destructors created in a conditional operand, value-initializing a
+  member subobject whose class has an implicit constructor, delegating constructors, `explicit`,
+  `= default`, out-of-class constructor definitions.
+
+## Classes, δ step 4a: enumerations (#86, 2026-11-18)
+
+- `TEnum{entity}` in `types`; sema's enumeration table (`Classes::enum_rec`: scoped or not, the
+  underlying type, fixed or chosen to hold the values, the enumerators and their values).
+- Unscoped and scoped enumerations (`enum class`, `enum struct`), fixed underlying types,
+  enumerator values from constant expressions (narrowing into a fixed type diagnosed), unscoped
+  enumerators in the enclosing scope and clashes with other declarations, `E::e`, enumerations
+  nested in classes (`C::E`, `C::e`), `using enum` in a block, `enum E` elaborated specifiers.
+- Conversions: an unscoped enumeration promotes ([conv.prom]/4) and converts to integers and
+  bool; nothing converts implicitly to an enumeration except its own type; a scoped one
+  compares only with its own type; `E e{n}` for a fixed underlying type ([dcl.init.list]/3.8).
+  Overload ranking knows enumeration promotions.
+- An enumerator is a `Literal` of its enumeration; converted to an integer it is folded to that
+  integer's constant, so the interpreter, which has no enumeration objects yet (#25), sees only
+  integers. The IR, `lower` and the layout treat an enumeration as its underlying type.
+- Linkage names of enumerations, nested ones included, match Clang's.
+- Tests: `tests/own/classes/s4-*enum*`, `s4-scoped-enum`, `s4-unscoped-enum` (spec-only, plus two
+  from the review): 7 of 7.
+- Not yet: opaque enum declarations (`enum E : int;`), unnamed enumerations, `switch`, `E{}` and
+  `E(v)` as expressions, enumerations in a block (#117), constexpr enumeration objects (#25).
+
 ## Bootstrap workarounds
 
 Places where ycxx's sources avoid or work around a C++26 feature because GCC 16 lacks it or

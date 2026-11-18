@@ -121,6 +121,7 @@ struct Call {
 enum class ConversionKind : u8 {
   lvalue_to_rvalue, integral, floating_integral, user_defined, derived_to_base,
   array_to_pointer, function_to_pointer, qualification, boolean, null_pointer, to_void,
+  pointer,  // [conv.ptr]: an object pointer to `cv void*`
 };
 
 // An implicit conversion: a node of width zero beyond its operand (§3.3), naming its function for
@@ -132,27 +133,93 @@ struct ImplicitConversion {
   [[=sequenced]] Child operand;
 };
 
-// ---------------------------------------------------------------- structure
-
-// A destructor call on a scope-exit edge (§3.7.3): the body local and the destructor.
-struct Cleanup {
-  u32 local;
-  EntityId destructor;
-  constexpr bool operator==(const Cleanup&) const = default;
+// Class member access ([expr.ref]): `object.member`, or with `arrow` 1 `object->member`, whose
+// object is then the pointer. `field` is the member's position among its class's non-static data
+// members, the access path step the IR takes. With `reference` 1 the member is a reference, and
+// the result is the object it refers to ([expr.ref]/7.2).
+struct Member {
+  ExprInfo info;
+  EntityId member;
+  u32 field;
+  u32 arrow;
+  u32 reference;
+  [[=sequenced]] Child object;
 };
+
+// Temporary materialization ([conv.rval], [class.temporary]): a temporary object initialized from
+// the prvalue `operand`, as an xvalue. It is destroyed by `destructor` (none if trivial) at the end
+// of the full-expression, or, with `extended` 1, when the reference it was bound to goes out of
+// scope ([class.temporary]/6).
+struct Materialize {
+  ExprInfo info;
+  EntityId destructor;
+  u32 extended;
+  [[=sequenced]] Child operand;
+};
+
+// A constructor call initializing a prvalue's result object ([class.ctor], [dcl.init.general]):
+// `T(args)`, `T{args}`, or an initialization that resolved to `ctor`. With `zero_first` 1 the
+// object is zero-initialized first (value-initialization, [dcl.init.general]/9).
+struct CtorCall {
+  ExprInfo info;
+  EntityId ctor;
+  u32 zero_first;
+  [[=indeterminately_sequenced]] ChildList args;
+};
+
+// `this` ([expr.prim.this]): a prvalue pointer to the object a non-static member function was
+// called on. An implicit member access ([class.mfct.non.static]) names it with width 0.
+struct This {
+  ExprInfo info;
+};
+
+// A call of a non-static member function ([expr.call], [class.mfct.non.static]): `object` is the
+// implicit object argument as a pointer prvalue (`&a` for `a.f()`, `p` for `p->f()`, `this` for an
+// implicit call), sequenced before the arguments.
+struct MemberCall {
+  ExprInfo info;
+  EntityId function;
+  [[=sequenced(0)]] Child object;
+  [[=indeterminately_sequenced(1)]] ChildList args;
+};
+
+// List-initialization of an aggregate ([dcl.init.aggr]), as analysed: one element per array
+// element or non-static data member, in order, with brace elision and designators resolved and the
+// elements without an initializer value-initialized. Each element is already converted to its
+// element type; a sub-aggregate's element is an `InitList` or a prvalue of its type. The
+// initializer-clauses are sequenced in order ([dcl.init.list]).
+struct InitList {
+  ExprInfo info;
+  [[=sequenced]] ChildList elems;
+};
+
+// Value-initialization of an object of the type ([dcl.init.general]): for a scalar, zero; for an
+// aggregate without constructors, every element value-initialized.
+struct ValueInit {
+  ExprInfo info;
+};
+
+// Default-initialization of an object of scalar or aggregate type that performs no
+// initialization ([dcl.init.general]/7.3): its value is erroneous, or indeterminate.
+struct DefaultInit {
+  ExprInfo info;
+};
+
+// ---------------------------------------------------------------- structure
 
 struct ExprStmt {
   Child expr;
 };
 
+// The destructors a scope exit runs are not listed on the exiting statement: each object names
+// its own (`LocalVar::destructor`, `Materialize::destructor`, `DestroyMember`), and `function_ir`
+// derives every exit edge's calls from the scopes it leaves (ast.md §3.7.3, #135).
 struct Return {
   Child value;
-  SeqId<Cleanup> cleanups;  // in order, computed by analyze_body
 };
 
 struct Compound {
   ChildList stmts;
-  SeqId<Cleanup> cleanups;  // on normal exit
 };
 
 struct If {
@@ -197,13 +264,9 @@ struct For {
   Child body;
 };
 
-// [stmt.break], [stmt.cont]: the destructor calls on the exit edge, in order (§3.7.3).
-struct Break {
-  SeqId<Cleanup> cleanups;
-};
-struct Continue {
-  SeqId<Cleanup> cleanups;
-};
+// [stmt.break], [stmt.cont].
+struct Break {};
+struct Continue {};
 
 // A block-scope simple-declaration ([stmt.dcl]): its `LocalVar`s, in order.
 struct DeclStmt {
@@ -227,10 +290,34 @@ struct DeclGroup {
   ChildList declarators;
 };
 
-// A block-scope variable: an index into `BodySema::locals` (§4.4) and its initializer.
+// A block-scope variable: an index into `BodySema::locals` (§4.4), its initializer, and the
+// destructor that ends it at scope exit, or none ([stmt.dcl], [class.dtor]). For an array it
+// destroys each element, the last first.
 struct LocalVar {
   u32 local;
   Child init;
+  EntityId destructor;
+};
+
+// A non-static data member's initialization in a constructor ([class.base.init]): from its
+// mem-initializer, its default member initializer, or default-initialized. The statements of a
+// constructor's body come in declaration order before the compound statement.
+struct MemberInit {
+  u32 field;
+  QualType type;  // the member's declared type
+  Child init;
+};
+
+// A destructor's body ([class.dtor]): `body`, then on every way out of it the destruction of the
+// members (`DestroyMember`s, in reverse declaration order).
+struct Destructor {
+  Child body;
+  ChildList members;
+};
+struct DestroyMember {
+  u32 field;
+  QualType type;  // the member's declared type; an array's elements are destroyed last first
+  EntityId destructor;
 };
 
 struct Attribute {
@@ -242,7 +329,8 @@ struct Attribute {
 using Nodes = closed_list<Literal, DeclRef, Paren, Unary, Binary, OrderedBinary, Assign, Subscript, Call,
                           ImplicitConversion, ExprStmt, Return, Compound, If, LocalVar, Attribute, LocalRef,
                           Conditional, While, Do, For, Break, Continue, DeclStmt, Declarator, DeclGroup,
-                          IfConsteval, StaticAssert>;
+                          IfConsteval, StaticAssert, Member, InitList, ValueInit, DefaultInit, This,
+                          MemberCall, Materialize, CtorCall, MemberInit, Destructor, DestroyMember>;
 
 static_assert(Nodes::size < max_node_kinds);
 

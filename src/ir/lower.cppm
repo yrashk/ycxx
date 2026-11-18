@@ -15,7 +15,8 @@
 //     (Apple arm64 extends register arguments to 32 bits but packs stack arguments by size).
 //
 // This is the α-slice subset (epic #39): what C-like functions need. Any other op is an error
-// naming the node, not a silent miscompile. Not yet: aggregates, `copy`, `switch`, EH, coroutines,
+// naming the node, not a silent miscompile. Aggregates are memory only: `alloc`, access paths and
+// `copy` (δ, #86). Not yet: `switch`, EH, coroutines,
 // vptr loads, poison for indeterminate reads beyond "no store".
 export module ycxx.ir.lower;
 
@@ -377,6 +378,13 @@ class Lowering {
           return fail("only automatic deallocation is in the α subset");
         out(n, 0, in(n, 0));
         return {};
+      case Op::copy: {
+        // A trivial copy ([class.copy.ctor], [basic.types.general]): the object's bytes, in the
+        // widest chunks its alignment allows.
+        TypeLayout l = layout(QualType(std::uint32_t(imms[0])));
+        out(n, 0, copy_bytes(in(n, 0), in(n, 1), in(n, 2), l, imms[0]));
+        return {};
+      }
       case Op::load: {
         QualType t = QualType(std::uint32_t(imms[0]));
         auto vt = type_of(t);
@@ -480,6 +488,24 @@ class Lowering {
       }
       default: return fail(std::format("`{}` is not in the α subset", info(nd.op).name));
     }
+  }
+
+  // Copies the object at `src` to `dst`, chunk by chunk.
+  ValueId copy_bytes(ValueId s, ValueId dst, ValueId src, const TypeLayout& l, std::uint64_t alias) {
+    std::uint64_t off = 0;
+    while (off < l.size) {
+      std::uint64_t w = 8;
+      while (w > 1 && (w > l.size - off || off % w || w > l.align)) w /= 2;
+      T t = *l2::int_of_bits(w * 8);
+      auto o = origin();
+      ValueId v = b_.value(Op2::load, t, {s, add_offset(src, off)}, {alias}, 0, o);
+      T st[] = {T::state};
+      ValueId ops[] = {s, add_offset(dst, off), v};
+      std::uint64_t im[] = {alias};
+      s = b_.peek().result(b_.emit(Op2::store, st, ops, im, 0, {}, o));
+      off += w;
+    }
+    return s;
   }
 
   // Stores zero over the object at `p` (the erroneous value is zero on every target, and `zero`
