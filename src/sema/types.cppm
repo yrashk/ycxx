@@ -150,9 +150,13 @@ public:
     case TypeKind::reference: return is_dependent(r.inner);
     case TypeKind::function:
       return is_dependent(r.inner) || std::ranges::any_of(r.params, [&](QualType p) { return is_dependent(p); });
+    case TypeKind::class_: return class_dependent && class_dependent(r.entity);
     default: return false;
     }
   }
+  // Whether a class is a specialization with a dependent argument (`X<T>`); set by the world that
+  // knows the entities.
+  std::function<bool(EntityId)> class_dependent;
 
   static Cv cv(QualType q) { return ast::cv_of(q); }
   static bool is_const(QualType q) { return (std::to_underlying(ast::cv_of(q)) & 1) != 0; }
@@ -326,9 +330,11 @@ private:
 
 // `data_member` is a non-static data member ([class.mem]).
 // A `function_template` is a function template ([temp.fct]); a specialization of one is a
-// `function` whose `templ` is the template.
+// `function` whose `templ` is the template. A `class_template` likewise ([temp.class]); a
+// specialization of it, the current instantiation included ([temp.dep.type]), is a `class_`.
 enum class EntityKind : u8 {
-  function, variable, class_, data_member, constructor, destructor, enum_, enumerator, namespace_, function_template
+  function, variable, class_, data_member, constructor, destructor, enum_, enumerator, namespace_, function_template,
+  class_template
 };
 
 // The structure behind an entity id (§4.3): for a function `(scope, name, canonical type)`, with
@@ -520,6 +526,11 @@ struct World {
 
   explicit World(ast::Interners& i) : ins(i) {
     types.class_name = [this](EntityId e) { return std::string(ins.names.spelling(entities.rec(e).name)); };
+    types.class_dependent = [this](EntityId e) {
+      return std::ranges::any_of(entities.rec(e).args, [&](const ast::TemplateArg& a) {
+        return a.kind == ast::TemplateArgKind::type ? types.is_dependent(a.type) : ins.values.is_dependent(a.value);
+      });
+    };
   }
   World(const World&) = delete;
 };

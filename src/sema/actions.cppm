@@ -199,6 +199,12 @@ public:
       if (auto a = template_args.at(p->depth, p->index)) return a->type;
       return p->type;
     }
+    // In a class template, its name without arguments is the injected-class-name: the current
+    // instantiation, or in an instantiation the specialization ([temp.local]/1).
+    if (current_class != EntityId::none) {
+      const EntityRec& c = w_->entities.rec(current_class);
+      if (c.templ != EntityId::none && c.name == name) return types().class_type(current_class);
+    }
     // A type nested in the class whose scope this is ([basic.scope.class]).
     if (current_class != EntityId::none) {
       if (const ClassRec* cr = w_->classes.find(current_class); cr && cr->defined) {
@@ -218,7 +224,77 @@ public:
         if (s.kind == ast::DeclKind::class_ || s.kind == ast::DeclKind::enum_ || !elaborated) found = s;
       }
     if (!found || (found->kind != ast::DeclKind::class_ && found->kind != ast::DeclKind::enum_)) return std::nullopt;
+    // A class template's name needs its arguments outside the template ([temp.names]).
+    if (found->flags & decl_flag::template_) return std::nullopt;
     return found->type;
+  }
+
+  // The class template unqualified lookup finds for `name`, which a `<` after it begins the
+  // arguments of ([temp.names]/3); none if it finds anything else.
+  std::optional<ast::DeclSema> class_template(NameId name) {
+    for (auto s = scopes_.rbegin(); s != scopes_.rend(); ++s)
+      for (auto p = s->rbegin(); p != s->rend(); ++p)
+        if (p->first == name) return std::nullopt;
+    if (template_param(name)) return std::nullopt;
+    std::optional<ast::DeclSema> found;
+    for (auto p = own.rbegin(); p != own.rend() && !found; ++p)
+      if (p->name == name) found = p->sema;
+    if (!found)
+      for (DeclId d : q_->visible_decls(name, directives())) {
+        ast::DeclSema s = q_->decl_sema(d);
+        if (s.entity != EntityId::none && !is_special(s)) found = s;
+      }
+    if (!found || found->kind != ast::DeclKind::class_ || !(found->flags & decl_flag::template_)) return std::nullopt;
+    return found;
+  }
+
+  // The specialization of class template `templ` for `args` ([temp.spec.general]): its entity is
+  // the template and the canonical arguments (§B1.5). With dependent arguments it is a dependent
+  // type ([temp.dep.type]).
+  EntityId class_specialization(EntityId templ, std::span<const TemplateArg> args) {
+    const EntityRec& t = w_->entities.rec(templ);
+    EntityRec r{EntityKind::class_, t.name, {}, LangLinkage::cxx, t.linkage, t.first, t.scope};
+    r.templ = templ;
+    r.args.assign(args.begin(), args.end());
+    return w_->entities.entity(std::move(r));
+  }
+
+  // `X<args>` naming a class template specialization ([temp.names], [temp.arg]): each argument of
+  // its parameter's kind, values converted to the parameter's type, defaults for the rest.
+  std::optional<QualType> class_template_id(const ast::DeclSema& tmpl, std::span<const TemplateArg> args, u32 at) {
+    std::vector<ast::TemplateParamSema> params = ins().seqs.elements(tmpl.template_params);
+    NameId name = w_->entities.rec(tmpl.entity).name;
+    if (args.size() > params.size()) {
+      diag(at, Diag::template_args_mismatch, name);
+      return std::nullopt;
+    }
+    Templates t = templates();
+    Bindings given;
+    given.levels.resize(params.empty() ? 1 : params[0].depth + 1);
+    auto& out = given.levels.back();
+    out.resize(params.size());
+    for (std::size_t i = 0; i < args.size(); ++i) {
+      if (args[i].kind != params[i].kind) {
+        diag(at, Diag::template_args_mismatch, name);
+        return std::nullopt;
+      }
+      out[i] = args[i];
+      if (params[i].kind == ast::TemplateArgKind::value) {
+        auto pt = t.substitute(params[i].type, given);
+        auto v = pt ? t.converted_value(args[i], *pt) : std::nullopt;
+        if (!v) {
+          diag(at, Diag::template_args_mismatch, name);
+          return std::nullopt;
+        }
+        out[i] = *v;
+      }
+    }
+    auto full = t.complete(tmpl, params, out);
+    if (!full) {
+      diag(at, Diag::template_args_mismatch, name);
+      return std::nullopt;
+    }
+    return types().class_type(class_specialization(tmpl.entity, *full));
   }
 
   // `using enum E;` in a block ([enum.udecl]): E's enumerators are found in this scope.
@@ -325,6 +401,7 @@ public:
 
   // Whether `t` is complete at this point; a class needs its definition before the point.
   bool is_complete(QualType t) {
+    if (types().is_dependent(t)) return true;  // checked when the template is instantiated
     if (types().is_void(t)) return false;
     if (types().is_array(t)) return is_complete(types().rec(t).inner);
     if (types().is_class(t)) return q_->is_complete(types().class_of(t));

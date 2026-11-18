@@ -87,11 +87,15 @@ public:
 
   // ------------------------------------------------------------ tokens
 
-  Tk kind(u32 ahead = 0) const { return i_ + ahead < end_ ? r_->tokens[i_ + ahead].kind : Tk::eof; }
+  Tk kind(u32 ahead = 0) const {
+    if (ahead == 0 && half_) return Tk::greater;  // the second `>` of a `>>` ([temp.names]/4)
+    return i_ + ahead < end_ ? r_->tokens[i_ + ahead].kind : Tk::eof;
+  }
   const Tok& tok(u32 ahead = 0) const { return r_->tokens[i_ + ahead]; }
   bool is(Tk k) const { return kind() == k; }
   u32 pos() const { return i_ - begin_; }  // the current token's offset in the part
   void bump() {
+    half_ = false;
     if (i_ < end_) ++i_;
   }
   bool accept(Tk k) {
@@ -152,11 +156,13 @@ public:
       auto q = qualified_type(0);
       return q && kind(q->second) != Tk::l_paren && kind(q->second) != Tk::period && kind(q->second) != Tk::l_brace;
     }
-    if (!is(Tk::identifier) || kind(1) == Tk::coloncolon || !s_->class_name(name_of(tok()))) return false;
+    u32 next = 1;  // the token after the type's name: after `X<…>` for a class template
+    if (is(Tk::identifier) && kind(1) == Tk::less && s_->class_template(name_of(tok()))) next = past_template_args(1);
+    else if (!is(Tk::identifier) || kind(1) == Tk::coloncolon || !s_->class_name(name_of(tok()))) return false;
     // `T(args).f()` and `T{…}.m` are expressions; `T (x);` declares x ([stmt.ambig]).
-    if (kind(1) == Tk::l_brace) return false;
-    if (kind(1) != Tk::l_paren) return true;
-    u32 j = 1, depth = 0;
+    if (kind(next) == Tk::l_brace) return false;
+    if (kind(next) != Tk::l_paren) return true;
+    u32 j = next, depth = 0;
     for (; i_ + j < end_; ++j) {
       Tk k = kind(j);
       if (k == Tk::l_paren) ++depth;
@@ -164,6 +170,33 @@ public:
     }
     Tk after = kind(j + 1);
     return after != Tk::period && after != Tk::arrow && after != Tk::l_paren && after != Tk::l_square;
+  }
+
+  // The offset of the token after the template argument list whose `<` is at `j` ahead: angle
+  // brackets balanced outside parentheses and brackets, `>>` closing two ([temp.names]/4).
+  u32 past_template_args(u32 j) {
+    int angles = 0, parens = 0;
+    for (; i_ + j < end_; ++j) {
+      Tk k = kind(j);
+      if (k == Tk::l_paren || k == Tk::l_square || k == Tk::l_brace) ++parens;
+      else if ((k == Tk::r_paren || k == Tk::r_square || k == Tk::r_brace) && parens > 0) --parens;
+      else if (parens == 0 && k == Tk::less) ++angles;
+      else if (parens == 0 && k == Tk::greater && --angles == 0) return j + 1;
+      else if (parens == 0 && k == Tk::greatergreater && (angles -= 2) <= 0) return j + 1;
+      else if (parens == 0 && (k == Tk::semi || k == Tk::l_brace)) return j;
+    }
+    return j;
+  }
+
+  // `X<args>` where X is a class template ([temp.names]): the specialization's type, from the
+  // name; the arguments are consumed.
+  std::optional<QualType> class_template_type() {
+    u32 at = pos();
+    auto tmpl = s_->class_template(name_of(tok()));
+    bump();
+    auto args = template_argument_list();
+    if (!tmpl || !args) return std::nullopt;
+    return s_->class_template_id(*tmpl, *args, at);
   }
 
   // What an elaborated-type-specifier naming no declared class does: at namespace scope it
@@ -268,6 +301,15 @@ public:
               break;
             }
             goto done;
+          }
+          if (kind(1) == Tk::less && s_->class_template(name_of(tok()))) {
+            auto t = class_template_type();
+            if (!t) {
+              d.ok = false;
+              goto done;
+            }
+            cls = t;
+            continue;  // the arguments are consumed
           }
           if (kind(1) != Tk::coloncolon)
             if (auto t = s_->class_name(name_of(tok()))) {
@@ -539,6 +581,7 @@ public:
     if (k == Tk::r_paren || k == Tk::ellipsis || starts_decl_specifier(k)) return true;
     if ((k == Tk::identifier && kind(2) == Tk::coloncolon) || k == Tk::coloncolon)
       return qualified_type(1).has_value();  // `N::S`, `C::E`, `::S`
+    if (k == Tk::identifier && kind(2) == Tk::less && s_->class_template(name_of(tok(1)))) return true;
     return k == Tk::identifier && kind(2) != Tk::coloncolon && s_->class_name(name_of(tok(1))).has_value();
   }
 
@@ -856,11 +899,16 @@ public:
       } while (accept(Tk::comma));
     }
     --angle_;
-    if (!expect(Tk::greater) || !ok) return std::nullopt;
+    // [temp.names]/4: `>>` closes this list and the enclosing one.
+    if (is(Tk::greatergreater) && !half_) half_ = true;
+    else if (!expect(Tk::greater)) return std::nullopt;
+    if (!ok) return std::nullopt;
     return args;
   }
   bool starts_type_id() {
     if (starts_decl_specifier(kind())) return !is(Tk::kw_static) && !is(Tk::kw_extern);
+    if (is(Tk::identifier) && kind(1) == Tk::less && s_->class_template(name_of(tok()))) return true;
+    if ((is(Tk::identifier) && kind(1) == Tk::coloncolon) || is(Tk::coloncolon)) return qualified_type(0).has_value();
     return is(Tk::identifier) && kind(1) != Tk::coloncolon && s_->class_name(name_of(tok())).has_value();
   }
 
@@ -1159,6 +1207,24 @@ public:
     }
     case Tk::identifier: {
       NameId n = name_of(tok());
+      // `X<args>(…)` and `X<args>{…}` for a class template X ([expr.type.conv]).
+      if (kind(1) == Tk::less && s_->class_template(n)) {
+        auto t = class_template_type();
+        if (!t) return {NodeId::none, begin, pos()};
+        if (is(Tk::l_brace)) {
+          auto b = braced_init_list();
+          Ex r = s_->list_init(*t, *b);
+          return {r.id, begin, pos(), r.info};
+        }
+        if (!expect(Tk::l_paren)) return {NodeId::none, begin, pos()};
+        std::vector<Ex> args;
+        if (!is(Tk::r_paren))
+          do args.push_back(assignment_expression());
+          while (accept(Tk::comma));
+        if (!expect(Tk::r_paren)) return {NodeId::none, begin, pos()};
+        Ex r = s_->functional_cast(*t, std::move(args), begin, pos());
+        return {r.id, begin, pos(), r.info};
+      }
       if ((kind(1) == Tk::l_paren || kind(1) == Tk::l_brace))
         if (auto t = s_->class_name(n); t && (s_->types().is_class(*t) || s_->template_param(n))) {
           // `T(args)` or `T{…}` ([expr.type.conv]), T a class or a template parameter.
@@ -1846,6 +1912,7 @@ private:
   LangLinkage linkage_ = LangLinkage::cxx;
   int in_params_ = 0;
   int angle_ = 0;               // inside a template argument or parameter list, outside parentheses
+  bool half_ = false;           // the current `>>` has had its first `>` taken by a template-id
 public:
   bool body = false;  // the part is a function body, not a declaration part
 private:
