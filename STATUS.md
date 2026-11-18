@@ -866,6 +866,29 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
 - Not yet (#153): enumerators through `using E::e;` (/7), a function target with the same
   parameter types as a function of the scope (/14), `typename` with dependent names (ζ).
 
+## `<cstdio>`, step 3: attributes, asm labels, string-initialized arrays (#133, 2026-11-18)
+
+- **Attributes:** `[[…]]` attribute-specifiers on declarations, class heads and statements, and
+  GNU `__attribute__((…))` before and after declarators, are parsed and ignored
+  ([dcl.attr.grammar]/6); none before a linkage-specification ([dcl.link]).
+- **Asm labels:** `__asm("…")` after a declarator gives the entity's symbol exactly as written
+  (`Program::asm_label`, `pipeline::Entity::asm_label`), as the SDK's `__DARWIN_ALIAS` needs.
+  Both extensions are listed in `docs/EXTENSIONS.md` (DECISIONS §1.2).
+- **Arrays:** character arrays from string literals, with or without braces ([dcl.init.string]),
+  their bound from the literal when it is left out; `extern T a[];`, an incomplete type
+  (`Types::array_unknown`), completed by a later declaration with a bound ([basic.link]/11);
+  arrays of pointers of unknown bound.
+- `__FLT_EVAL_METHOD__` is predefined (0), as Clang has it for the target.
+- Attributes are also accepted after a declarator-id, on parameters, alias-declarations and
+  statements, and in the GNU form on class heads and after template-heads. A string literal
+  initializes a character-array element of an aggregate. A default member initializer that is
+  not a scalar constant, in a class without constructors, is now diagnosed (#118) instead of
+  being dropped.
+- Tests: `tests/own/decls` (11, three from the review). Five more draft examples pass.
+- Not yet: `sizeof`, `alignof`, `decltype`, `static_cast` and other casts, operator functions,
+  unions (the next steps of #133); a reference or pointer to an array of unknown bound; asm labels
+  on class members and the other gaps of #190.
+
 ## Templates, ζ step 1: function templates (#88, 2026-11-18)
 
 Instantiation follows ast.md §6.4 as amended by #88 (Fable's decision): declarations and

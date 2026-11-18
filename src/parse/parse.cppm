@@ -137,6 +137,11 @@ public:
   // item that does not enclose `item`.
   // A function body inside the class is a complete-class context ([class.mem.general]); past
   // the closing brace of the class an item defines (`own`), that class is complete too.
+  // An entity's GNU asm label: its symbol as written (docs/EXTENSIONS.md); empty if it has none.
+  std::string asm_label(EntityId e) const {
+    auto it = asm_labels_.find(std::to_underlying(e));
+    return it == asm_labels_.end() ? std::string() : it->second;
+  }
   bool is_complete(EntityId c, u32 item, bool body = false, bool own = false) {
     auto it = class_items_.find(std::to_underlying(c));
     // A class template specialization is instantiated where it must be complete ([temp.inst]/2),
@@ -539,6 +544,7 @@ private:
   // What each namespace-scope using-declaration introduces, by (item, name ordinal): the
   // declarations qualified lookup found at it ([namespace.udecl]/1).
   std::map<std::pair<u32, u32>, std::vector<DeclId>> using_targets_;
+  std::map<u32, std::string> asm_labels_;  // by entity: its GNU asm label (docs/EXTENSIONS.md)
   std::map<u32, ast::DeclSema> class_heads_;  // by class item: the class's record, for its members
   std::map<u32, u32> class_templates_;        // by class template entity: its defining item
   std::map<std::pair<u32, u32>, Result<ast::ItemSema>> class_member_cells_;  // by (member item, specialization)
@@ -847,6 +853,13 @@ private:
   void declaration() {
     LangLinkage lang = enclosing_linkage();
     bool explicit_lang = lang != LangLinkage::cxx;
+    u32 attrs_at = ps_.pos();
+    // [dcl.link]: a linkage-specification has no attribute-specifier-seq.
+    // (GNU attributes there are accepted, as GCC and Clang do.)
+    if ((ps_.skip_attributes() & parse::Parser::attr_std) && ps_.is(Tk::kw_extern) && ps_.kind(1) == Tk::string_lit) {
+      s_.diag(attrs_at, Diag::attributes_not_allowed);
+      return bad();
+    }
     if (ps_.is(Tk::kw_extern) && ps_.kind(1) == Tk::string_lit) {
       u32 at = ps_.pos() + 1;
       auto l = linkage_named(p_->region(), it_->begin + at);
@@ -857,6 +870,7 @@ private:
       ps_.bump();
       ps_.bump();
       while (ps_.is(Tk::string_lit) && ps_.tok().has(lex::tok_flag::continued)) ps_.bump();
+      ps_.skip_attributes();
     }
     ps_.set_linkage(lang);
     // A template-head ([temp.pre]): what follows declares a function template. Explicit
@@ -867,6 +881,7 @@ private:
         return bad();
       }
       if (!ps_.template_head(0)) return bad();
+      ps_.skip_attributes();
       template_ = true;
       // `template<…> struct X;` declares a class template ([temp.class]), defined later.
       if ((ps_.is(Tk::kw_struct) || ps_.is(Tk::kw_class)) && ps_.kind(1) == Tk::identifier && ps_.kind(2) == Tk::semi) {
@@ -922,7 +937,7 @@ private:
     // A using-declaration ([namespace.udecl]): `using N::x, ::y;`, each declarator introducing
     // what qualified lookup finds at this point.
     if (ps_.is(Tk::kw_using) && ps_.kind(1) != Tk::kw_namespace && ps_.kind(1) != Tk::kw_enum &&
-        !(ps_.kind(1) == Tk::identifier && ps_.kind(2) == Tk::equal)) {
+        !(ps_.kind(1) == Tk::identifier && ps_.kind(ps_.past_attributes(2)) == Tk::equal)) {
       ps_.bump();
       do {
         if (!using_declarator()) {
@@ -935,11 +950,12 @@ private:
       return;
     }
     // An alias-declaration ([dcl.typedef]/2): `using T = type-id;`.
-    if (ps_.is(Tk::kw_using) && ps_.kind(1) == Tk::identifier && ps_.kind(2) == Tk::equal) {
+    if (ps_.is(Tk::kw_using) && ps_.kind(1) == Tk::identifier && ps_.kind(ps_.past_attributes(2)) == Tk::equal) {
       ps_.bump();
       NameId n = ps_.name_of(ps_.tok());
       u32 at = ps_.pos();
       ps_.bump();
+      ps_.skip_attributes();  // appertaining to the alias ([dcl.pre]/1)
       ps_.bump();
       auto t = ps_.type_id();
       if (!t || !declare_alias(n, at, *t)) return bad();
@@ -1224,6 +1240,7 @@ private:
       template_ = true;
     }
     u32 at = ps_.pos();
+    ps_.skip_attributes();
     bool td = ps_.accept(Tk::kw_typedef);  // `typedef class-specifier declarators;` ([dcl.typedef])
     Tk key = ps_.kind();
     if (key == Tk::kw_union || (key != Tk::kw_struct && key != Tk::kw_class)) {
@@ -1231,6 +1248,7 @@ private:
       return bad();
     }
     ps_.bump();
+    ps_.skip_attributes();
     auto named = td ? typedef_name_after_braces() : std::nullopt;
     if (!ps_.is(Tk::identifier) && !named) {
       s_.diag(ps_.pos(), Diag::not_supported, ps_.kind());  // unnamed classes, attributes
@@ -1474,6 +1492,10 @@ private:
     do {
       parse::Declarator d = ps_.declarator(spec.type, false);
       if (!d.ok || !d.named) return bad();
+      if (!d.asm_label.empty()) {
+        s_.diag(d.name_at, Diag::not_supported, Tk::kw_asm);  // a member's asm label
+        return bad();
+      }
       if (d.unknown_bound) {
         s_.diag(d.name_at, Diag::unknown_bound_member);  // [class.mem.general]: a complete type
         return bad();
@@ -1902,11 +1924,18 @@ private:
     u32 ord = static_cast<u32>(decls_.size());
     // `T a[] = {…}`: the bound from the list ([dcl.array]/8), parsed here and used below.
     std::unique_ptr<sema::Braced> early;
-    if (d.unknown_bound) {
-      if (!(ps_.is(Tk::l_brace) || (ps_.is(Tk::equal) && ps_.kind(1) == Tk::l_brace))) {
-        s_.diag(d.name_at, Diag::not_supported, Tk::l_square);  // an array of unknown bound
+    if (d.unknown_bound && ps_.is(Tk::equal) && ps_.kind(1) == Tk::string_lit) {
+      // `char s[] = "…"`: the bound from the literal, null included ([dcl.init.string]/1); the
+      // initialization below checks the element type.
+      d.type = types.array(d.type, ps_.literal_at(1).units.size() + 1);
+    } else if (d.unknown_bound && !(ps_.is(Tk::l_brace) || (ps_.is(Tk::equal) && ps_.kind(1) == Tk::l_brace))) {
+      // `extern T a[];`: an incomplete type ([dcl.array]/6); a definition needs a bound.
+      d.type = types.array_unknown(d.type);
+      if (!spec.is_extern && !single_linkage_spec_) {
+        s_.diag(d.name_at, Diag::incomplete_type, d.type);
         return false;
       }
+    } else if (d.unknown_bound) {
       ps_.accept(Tk::equal);
       early = ps_.braced_init_list();
       u64 n = s_.deduce_bound(d.type, *early);
@@ -2095,7 +2124,15 @@ private:
           s_.diag(d.name_at, Diag::overload_not_supported, d.name);
         return false;
       }
-      if (!fn && p.type != sem.type) {  // [basic.link]/11: the same type, cv included
+      // [basic.link]/11: the same type, cv included, except that an array's bound may be
+      // given by one declaration and not another.
+      auto bound_only = [&](QualType a, QualType b) {
+        return types.is_array(a) && types.is_array(b) && types.rec(a).inner == types.rec(b).inner &&
+               (types.rec(a).bound_value == ConstId::none || types.rec(b).bound_value == ConstId::none);
+      };
+      if (!fn && p.type != sem.type && bound_only(p.type, sem.type)) {
+        if (types.rec(sem.type).bound_value == ConstId::none) sem.type = p.type;  // the bound known before
+      } else if (!fn && p.type != sem.type) {
         s_.diag(d.name_at, Diag::conflicting_declaration, d.name);
         return false;
       }
@@ -2158,10 +2195,7 @@ private:
         }
       }
     } else if (!fn && ps_.accept(Tk::equal)) {
-      if (types.is_array(d.type)) {
-        s_.diag(ps_.pos(), Diag::not_supported, ps_.kind());
-        ps_.skip_to_semi();
-      } else {
+      {
         Ex e = ps_.assignment_expression();
         init = s_.convert(e, d.type, e.begin);
         if (init.ok()) {
@@ -2171,7 +2205,11 @@ private:
           // constant expressions ([expr.const]).
           // An enumerator is its own constant; the interpreter has no enumeration objects (#25).
           auto lit = types.is_enum(d.type) ? s_.as<ast::Literal>(init) : std::nullopt;
-          sema::Evaluated v = lit ? sema::Evaluated{lit->value, 0, true} : sema::Evaluator(s_, q_).evaluate(init);
+          // A character array from a string literal is its elements' list ([dcl.init.string]).
+          auto list = s_.as<ast::InitList>(init) ? constant_initializer(init) : std::nullopt;
+          sema::Evaluated v = lit    ? sema::Evaluated{lit->value, 0, true}
+                              : list ? sema::Evaluated{*list, 0, true}
+                                     : sema::Evaluator(s_, q_).evaluate(init);
           if (v.value) {
             value = *v.value;
             if (spec.is_constexpr || (sema::Types::is_const(d.type) && !sema::Types::is_volatile(d.type) &&
@@ -2203,6 +2241,15 @@ private:
     }
     declarators_.push_back(s_.node(ast::Declarator{ord, sema::Sema::at(init, d.begin), value}, d.begin, ps_.pos()));
     decls_.push_back(sem);
+    if (!d.asm_label.empty()) {
+      // Every labelled declaration of an entity gives it one label (docs/EXTENSIONS.md).
+      std::string earlier = p_->asm_label(sem.entity);
+      if (!earlier.empty() && earlier != d.asm_label) {
+        s_.diag(d.name_at, Diag::asm_label_conflict, d.name);
+        return false;
+      }
+      p_->asm_labels_[std::to_underlying(sem.entity)] = d.asm_label;
+    }
     return true;
   }
 

@@ -205,7 +205,7 @@ private:
     bool named = false;
     for (u32 n = key + 1; n < open; ++n) {
       Tk t = kind(n);
-      if (t == Tk::l_square || (t == Tk::kw_alignas && kind(n + 1) == Tk::l_paren)) {
+      if (t == Tk::l_square || ((t == Tk::kw_alignas || is_name(n, "__attribute__")) && kind(n + 1) == Tk::l_paren)) {
         n = match(t == Tk::l_square ? n : n + 1) - 1;
       } else if (t == Tk::kw_class && kind(key) == Tk::kw_enum && n == key + 1) {
         // `enum class`
@@ -377,7 +377,9 @@ void Splitter::general(u32 k) {
       if (!initializer && prev != Tk::kw_decltype && prev != Tk::kw_noexcept && prev != Tk::kw_alignas &&
           prev != Tk::kw_sizeof && prev != Tk::kw_alignof && prev != Tk::kw_explicit && prev != Tk::kw_typeid &&
           prev != Tk::kw_static_assert && prev != Tk::kw_asm && prev != Tk::kw_requires &&
-          !(prev == Tk::kw_operator)) {
+          !(prev == Tk::kw_operator) &&
+          // a GNU attribute or asm label (docs/EXTENSIONS.md)
+          !(j > at(k).begin && (is_name(j - 1, "__attribute__") || is_name(j - 1, "__asm") || is_name(j - 1, "__asm__")))) {
         params = true;
       }
       j = match(j);
@@ -545,13 +547,20 @@ private:
   }
 
   // The first token after attributes, `export`, `extern "C"` and template-heads.
+  // A GNU attribute or asm label, `__attribute__((…))` or `__asm(…)`, which no name is in
+  // (docs/EXTENSIONS.md).
+  bool gnu_extension(u32 n) const {
+    return kind(n + 1) == Tk::l_paren &&
+           (kind(n) == Tk::kw_asm || is_name(n, "__attribute__") || is_name(n, "__asm") || is_name(n, "__asm__"));
+  }
+
   u32 start_of(u32 k) const {
     const Item& it = out_.items[k];
     u32 j = it.begin;
     for (;;) {
       Tk t = kind(j);
       if (t == Tk::l_square && kind(j + 1) == Tk::l_square) j = match(j);
-      else if (t == Tk::kw_alignas && kind(j + 1) == Tk::l_paren) j = match(j + 1);
+      else if ((t == Tk::kw_alignas && kind(j + 1) == Tk::l_paren) || gnu_extension(j)) j = match(j + 1);
       else if (t == Tk::kw_export) ++j;
       else if (t == Tk::kw_template && kind(j + 1) == Tk::less) j = match_angle(j + 1, it.end);
       else if (t == Tk::kw_extern && kind(j + 1) == Tk::string_lit) j += 2;
@@ -789,9 +798,10 @@ private:
       Tk t = kind(n);
       if (t == Tk::l_square && kind(n + 1) == Tk::l_square) {
         n = match(n);
-      } else if ((t == Tk::kw_decltype || t == Tk::kw_alignas || t == Tk::kw_noexcept || t == Tk::kw_explicit ||
-                  t == Tk::kw_sizeof) &&
-                 kind(n + 1) == Tk::l_paren) {
+      } else if (((t == Tk::kw_decltype || t == Tk::kw_alignas || t == Tk::kw_noexcept || t == Tk::kw_explicit ||
+                   t == Tk::kw_sizeof) &&
+                  kind(n + 1) == Tk::l_paren) ||
+                 gnu_extension(n)) {
         n = match(n + 1);
       } else if (t == Tk::identifier || t == Tk::coloncolon) {
         if (t == Tk::coloncolon || kind(n + 1) == Tk::coloncolon || (kind(n + 1) == Tk::less && angle_then_scope(n + 1, to))) {

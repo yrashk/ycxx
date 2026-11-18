@@ -269,6 +269,8 @@ std::string target_macros(const ast::Target& t) {
   }
   // The floating types whose limits a binary64 can hold exactly.
   def("__FLT_RADIX__", 2);
+  // FLT_EVAL_METHOD ([cfloat.syn], C 5.2.4.2.2): every target evaluates in the operands' own type.
+  def("__FLT_EVAL_METHOD__", 0);
   if (ast::shape_of(t[Builtin::float_].format).precision <= 53) float_family(out, "FLT", t[Builtin::float_].format, "F");
   if (ast::shape_of(t[Builtin::double_].format).precision <= 53) float_family(out, "DBL", t[Builtin::double_].format, "");
   if (ast::shape_of(t[Builtin::long_double].format).precision <= 53) {

@@ -79,6 +79,8 @@ public:
   QualType pointer(QualType pointee) { return ast::pointer_to(*ins_, pointee); }
   // An array whose bound is value-dependent ([temp.dep.constexpr]).
   QualType array_dependent(QualType elem, ConstId bound) { return ast::array_of(*ins_, target, elem, bound); }
+  // An array of unknown bound, an incomplete type ([dcl.array]/6).
+  QualType array_unknown(QualType elem) { return ast::array_of(*ins_, target, elem, ConstId::none); }
   QualType array(QualType elem, u64 bound) {
     return ast::array_of(*ins_, target, elem, ast::int_value(*ins_, target, Builtin::unsigned_long, i64(bound)));
   }
@@ -239,7 +241,8 @@ private:
       if (k == TypeKind::array || k == TypeKind::function) p = "(" + p + ")";
       return spell(r.inner, p);
     }
-    case TypeKind::array: return spell(r.inner, inner + "[" + std::to_string(r.bound) + "]");
+    case TypeKind::array:
+      return spell(r.inner, inner + "[" + (r.bound_value == ConstId::none ? std::string() : std::to_string(r.bound)) + "]");
     case TypeKind::function: {
       std::string ps;
       for (std::size_t i = 0; i < r.params.size(); ++i) ps += (i ? ", " : "") + spell(r.params[i]);
