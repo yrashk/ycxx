@@ -27,7 +27,7 @@ target_sources(ycxxc_lib PUBLIC FILE_SET CXX_MODULES
     driver/driver.cppm
     daemon/daemon.cppm
     client/client.cppm)
-target_link_libraries(ycxxc_lib PUBLIC ycxxc_options ycxxc_parse)
+target_link_libraries(ycxxc_lib PUBLIC ycxxc_options ycxxc_pipeline)
 
 add_executable(ycxxc main.cpp)
 set_target_properties(ycxxc PROPERTIES OUTPUT_NAME ycxx RUNTIME_OUTPUT_DIRECTORY ${PROJECT_BINARY_DIR}/bin)

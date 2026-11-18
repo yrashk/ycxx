@@ -7,4 +7,5 @@ export module ycxx.pipeline;
 export import :lines;
 export import :mangle;
 export import :back;
+export import :front;
 export import :executable;
