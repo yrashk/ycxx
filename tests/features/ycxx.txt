@@ -1,0 +1,3 @@
+# What ycxx can do today, one feature per line: syntax, preprocess, run, incremental
+# (tests/driver/toolchain.py). A test needing a feature not listed is UNSUPPORTED with that
+# reason. Add the line when ycxx starts doing the work, and the tests start counting.
