@@ -50,6 +50,7 @@ inline constexpr u8 unknown = 8;     // a using-declaration's name: unknown unti
 inline constexpr u8 definition = 16; // the declaration is a definition
 inline constexpr u8 friend_ = 32;    // a friend declaration: indexed apart ([class.friend])
 inline constexpr u8 enumerator = 64; // an unscoped enumerator, declared into the enclosing scope
+inline constexpr u8 specialization = 128;  // an explicit specialization's: no name lookup finds ([temp.expl.spec])
 }  // namespace name_flag
 
 // One name an item declares, in token order; its ordinal is its `DeclOrd` number (ast.md §4.1).
@@ -77,6 +78,7 @@ struct Item {
   u32 brace_begin = 0;
   u32 brace_end = 0;
   u32 template_depth = 0;  // the number of template-heads
+  bool specialization = false;  // `template<>`: an explicit specialization ([temp.expl.spec])
   // The spelled nested-name-specifier of the first declarator (`N::S::` in `void N::S::f()`), as
   // region tokens [qualifier_begin, qualifier_end).
   u32 qualifier_begin = 0;
@@ -313,10 +315,12 @@ u32 Splitter::item(u32 parent, const std::string& scope) {
     at(k).end = i_ = j + 2;
     return k;
   }
-  // Template heads.
+  // Template heads; `template<>` begins an explicit specialization, which is no template
+  // ([temp.expl.spec]/1).
   while (kind(j) == Tk::kw_template && kind(j + 1) == Tk::less) {
+    if (kind(j + 2) != Tk::greater) ++at(k).template_depth;
+    else at(k).specialization = true;
     j = match_angle(j + 1);
-    ++at(k).template_depth;
   }
   i_ = j;
   general(k);
@@ -541,6 +545,7 @@ private:
   void add(u32 k, std::string n, u32 at, u8 flags) {
     Item& it = out_.items[k];
     if (it.template_depth > 0 && (flags & name_flag::enumerator) == 0) flags |= name_flag::template_;
+    if (it.specialization) flags |= name_flag::specialization;
     it.names.push_back({std::move(n), at - it.begin, static_cast<u32>(it.names.size()), flags});
   }
 

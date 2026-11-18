@@ -145,6 +145,9 @@ enum class Diag : std::uint32_t {
   default_not_last [[=message{Severity::error, "a template parameter after one with a default argument needs a default argument too"}]],
   default_redefined [[=message{Severity::error, "a template parameter's default argument is given again"}]],
   member_of_function_type [[=message{Severity::error, "a data member cannot have function type '{0:t}'"}]],
+  no_template_matches [[=message{Severity::error, "no template named '{0:n}' has this specialization"}]],
+  ambiguous_specialization [[=message{Severity::error, "the specialization of '{0:n}' is ambiguous"}]],
+  specialized_after_use [[=message{Severity::error, "'{0:n}' is explicitly specialized after its first use"}]],
 };
 
 // A `{N:r}` argument: why an evaluation was not constant. 0 is an expression the front end

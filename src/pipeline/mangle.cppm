@@ -392,12 +392,13 @@ std::expected<std::string, std::string> mangled_specialization(const ast::Intern
                                                                const TemplateSpec& spec, const ClassNames& classes,
                                                                ast::EntityId scope) {
   ast::QualType c = in.types.canon(spec.pattern);
-  if (!in.types.is<ast::TFunction>(c)) return std::unexpected("not a function type");
   Mangler m(in, classes);
   auto n = m.template_name(name, scope);
   if (!n) return n;
   auto args = m.template_args(spec.args);
   if (!args) return args;
+  // A variable template specialization: its name and arguments, no type (§5.1.2).
+  if (!in.types.is<ast::TFunction>(c)) return scope != ast::EntityId::none ? std::format("_ZN{}{}E", *n, *args) : "_Z" + *n + *args;
   auto sig = m.signature(in.types.get<ast::TFunction>(c), true);
   if (!sig) return sig;
   // In a namespace, a <nested-name> ending in the template-args (§5.1.5.3).

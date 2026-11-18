@@ -263,10 +263,17 @@ public:
   bool deduce_specialization(EntityId p, EntityId a, u16 depth, std::vector<std::optional<TemplateArg>>& out) {
     const EntityRec& pr = w_->entities.rec(p);
     const EntityRec& ar = w_->entities.rec(a);
-    if (pr.templ == EntityId::none || pr.templ != ar.templ || pr.args.size() != ar.args.size()) return false;
-    for (std::size_t i = 0; i < pr.args.size(); ++i) {
-      const TemplateArg& x = pr.args[i];
-      const TemplateArg& y = ar.args[i];
+    if (pr.templ == EntityId::none || pr.templ != ar.templ) return false;
+    return deduce_args(pr.args, ar.args, depth, out);
+  }
+  // Template argument list `p` from `a`, argument by argument ([temp.deduct.type]/8): also how a
+  // partial specialization matches a specialization ([temp.spec.partial.match]/2).
+  bool deduce_args(std::span<const TemplateArg> p, std::span<const TemplateArg> a, u16 depth,
+                   std::vector<std::optional<TemplateArg>>& out) {
+    if (p.size() != a.size()) return false;
+    for (std::size_t i = 0; i < p.size(); ++i) {
+      const TemplateArg& x = p[i];
+      const TemplateArg& y = a[i];
       if (x.kind != y.kind) return false;
       if (x.kind == TemplateArgKind::type) {
         if (!deduce(x.type, y.type, depth, out)) return false;
@@ -395,6 +402,33 @@ public:
     std::vector<TemplateArg> r;
     for (auto& a : out) r.push_back(*a);
     return r;
+  }
+
+  // The arguments for which function template `tmpl` is the function of type `type`, after the
+  // explicitly specified `explicit_args` ([temp.deduct.decl]): what an explicit specialization
+  // of it specializes; none if there are none.
+  std::optional<std::vector<TemplateArg>> deduce_declaration(const ast::DeclSema& tmpl, QualType type,
+                                                             std::span<const TemplateArg> explicit_args) {
+    std::vector<ast::TemplateParamSema> params = w_->ins.seqs.elements(tmpl.template_params);
+    if (params.empty() || explicit_args.size() > params.size()) return std::nullopt;
+    u16 depth = params[0].depth;
+    std::vector<std::optional<TemplateArg>> out(params.size());
+    for (std::size_t i = 0; i < explicit_args.size(); ++i) {
+      if (explicit_args[i].kind != params[i].kind) return std::nullopt;
+      out[i] = explicit_args[i];
+      if (params[i].kind == TemplateArgKind::value) {
+        auto pt = substitute(params[i].type, bindings(depth, out));
+        auto v = pt ? converted_value(explicit_args[i], *pt) : std::nullopt;
+        if (!v) return std::nullopt;
+        out[i] = *v;
+      }
+    }
+    if (!deduce(tmpl.type, type, depth, out)) return std::nullopt;
+    auto full = complete(tmpl, params, std::move(out));
+    if (!full) return std::nullopt;
+    auto t = specialization_type(tmpl, *full);
+    if (!t || types().canonical(*t) != types().canonical(type)) return std::nullopt;
+    return full;
   }
 
   // The type of a specialization's declaration: the template's function type with `args`.
