@@ -1243,8 +1243,8 @@ private:
     ps_.skip_attributes();
     bool td = ps_.accept(Tk::kw_typedef);  // `typedef class-specifier declarators;` ([dcl.typedef])
     Tk key = ps_.kind();
-    if (key == Tk::kw_union || (key != Tk::kw_struct && key != Tk::kw_class)) {
-      s_.diag(ps_.pos(), Diag::not_supported, key);  // unions, and other specifiers before the class-key
+    if (key != Tk::kw_struct && key != Tk::kw_class && key != Tk::kw_union) {
+      s_.diag(ps_.pos(), Diag::not_supported, key);  // other specifiers before the class-key
       return bad();
     }
     ps_.bump();
@@ -2410,6 +2410,12 @@ const Result<ast::ClassDef>& Program::class_def(u32 item) {
     // Every unit that defines the class builds its own record (#115), and synthesizes the special
     // members its own object needs.
     sema::ClassRec rec;
+    // The class-key of the class-head: `union` makes a union ([class.union]).
+    for (u32 t = items_->items[item].begin; t < items_->items[item].brace_begin; ++t)
+      if (lex::Tk k = r_->tokens[t].kind; k == lex::Tk::kw_union || k == lex::Tk::kw_struct || k == lex::Tk::kw_class) {
+        rec.union_ = k == lex::Tk::kw_union;
+        break;
+      }
     rec.fields = std::move(fields);
     rec.members = std::move(statics);
     rec.types = std::move(nested);

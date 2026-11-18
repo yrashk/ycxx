@@ -919,6 +919,23 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   expression unless it can be a declaration ([stmt.ambig]).
 - Tests: `tests/own/casts` (9, three from the review). One more draft example passes.
 
+## `<cstdio>`, step 4b: unions, floating types as types, include directories (#133, 2026-11-18)
+
+- **Unions** ([class.union]): `union U { … }`, named, unnamed with a typedef-name, as members
+  and through `union U` elaborated; every member at offset 0 and the size of the largest
+  (`ClassRec::union_`, `ClassShape::union_`, `QueryLayout::class_layout`); a braced initializer
+  initializes the first member ([dcl.init.aggr]/16). A designator naming another member,
+  anonymous unions and variant members with non-trivial special members are not supported yet.
+- **Floating types as types:** `float`, `double` and `long double` in decl-specifiers, so the
+  SDK's `typedef long double max_align_t;` declares; `sizeof`/`alignof` give their sizes. Their
+  values (literals, conversions, arithmetic) are #201 and are diagnosed, not miscompiled.
+  `__STDCPP_FLOAT16_T__` and the other extended floating-point macros are no longer defined
+  until those types work (DECISIONS §1.5; Clang does not define them either).
+- **Include directories:** a built-in system directory that `-I` or `-isystem` already names is
+  not searched twice, so `#include_next` from it goes past both (as GCC and Clang do); before,
+  `-isystem deps/libycxx/include` made libycxx's `<cstddef>` find its own `<stddef.h>` again.
+- Tests: `tests/own/unions` (4). Six more draft examples pass.
+
 ## Templates, ζ step 1: function templates (#88, 2026-11-18)
 
 Instantiation follows ast.md §6.4 as amended by #88 (Fable's decision): declarations and
