@@ -896,6 +896,21 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   unions (the next steps of #133); a reference or pointer to an array of unknown bound; asm labels
   on class members and the other gaps of #190.
 
+## `<cstdio>`, step 4a: casts, sizeof, alignof, decltype (#133, 2026-11-18)
+
+- **Casts:** `static_cast` ([expr.static.cast]): the implicit conversions, to `void`, between
+  integers and enumerations (scoped ones too), and from `cv void*` to an object pointer;
+  functional casts `T(e)` for keyword types, enumerations and typedef-names, and C-style casts
+  `(T)e`, as static_cast does them ([expr.type.conv]/2, [expr.cast]/4). Downcasts and the
+  const_cast and reinterpret_cast parts of a C-style cast are not supported yet.
+- **sizeof, alignof** of fundamental, pointer, enumeration and array types and of an expression,
+  from `ast::Target`; a class's is #194 (sema has no `layout(C)` yet).
+- **decltype(e)** ([dcl.type.decltype]): an unparenthesized id-expression or member access names
+  its declared type, else the expression's type and value category. `decltype(auto)` is not
+  supported yet.
+- `std::nullptr_t` objects are laid out as pointers.
+- Tests: `tests/own/casts` (6). One more draft example passes.
+
 ## Templates, ζ step 1: function templates (#88, 2026-11-18)
 
 Instantiation follows ast.md §6.4 as amended by #88 (Fable's decision): declarations and

@@ -261,6 +261,26 @@ public:
         once(d.is_extern, k);
         break;
       case Tk::kw_inline: once(d.is_inline, k); break;
+      case Tk::kw_decltype: {
+        // `decltype(e)` ([dcl.type.decltype]); `decltype(auto)` is not supported yet.
+        if (any_type() || kind(1) != Tk::l_paren || kind(2) == Tk::kw_auto) {
+          s_->diag(pos(), Diag::not_supported, k);
+          d.ok = false;
+          goto done;
+        }
+        bump();
+        bump();
+        bool parenthesized = is(Tk::l_paren);
+        int saved = std::exchange(angle_, 0);
+        Ex e = expression();
+        angle_ = saved;
+        if (!e.ok() || !expect(Tk::r_paren)) {
+          d.ok = false;
+          goto done;
+        }
+        cls = s_->decltype_of(e, parenthesized);
+        continue;
+      }
       case Tk::kw_constexpr: once(d.is_constexpr, k); break;
       case Tk::kw_consteval: once(d.is_consteval, k); break;
       case Tk::kw_constinit: once(d.is_constinit, k); break;
@@ -1213,14 +1233,22 @@ public:
 
   // cast-expression ([expr.cast]); explicit type conversion is beyond the α subset.
   Ex cast_expression() {
-    if (is(Tk::l_paren) && starts_decl_specifier(kind(1))) {
-      u32 at = pos();
-      s_->diag(at, Diag::not_supported, Tk::l_paren);
+    if (is(Tk::l_paren)) {
+      // `(T)e` ([expr.cast]), as static_cast performs it; a parenthesized expression otherwise.
+      u32 back = i_, begin = pos();
       bump();
-      while (!is(Tk::r_paren) && !at_end()) bump();
-      accept(Tk::r_paren);
-      cast_expression();
-      return {NodeId::none, at, pos()};
+      if (starts_type_id()) {
+        // Tentatively: `(T(1)).m` begins with a type too.
+        std::size_t n = s_->diag_count();
+        auto t = type_id();
+        if (t && accept(Tk::r_paren) && !is(Tk::l_brace) && !is(Tk::period) && !is(Tk::arrow)) {
+          Ex e = cast_expression();
+          Ex r = s_->static_cast_to(e, *t, begin);
+          return {r.id, begin, pos(), r.info};
+        }
+        s_->truncate_diags(n);
+      }
+      i_ = back;
     }
     return unary_expression();
   }
@@ -1239,7 +1267,35 @@ public:
     case Tk::exclaim: op = ast::UnaryOp::not_; break;
     case Tk::tilde: op = ast::UnaryOp::compl_; break;
     case Tk::kw_sizeof:
-    case Tk::kw_alignof:
+    case Tk::kw_alignof: {
+      // `sizeof(T)`, `sizeof e`, `alignof(T)` ([expr.sizeof], [expr.alignof]); the expression is
+      // an unevaluated operand. `sizeof...` is not supported yet.
+      bool align = is(Tk::kw_alignof);
+      bump();
+      if (is(Tk::ellipsis)) {
+        s_->diag(pos(), Diag::not_supported, Tk::ellipsis);
+        return {NodeId::none, begin, pos()};
+      }
+      if (is(Tk::l_paren)) {
+        u32 back = i_;
+        bump();
+        if (starts_type_id()) {
+          auto t = type_id();
+          if (!t || !expect(Tk::r_paren)) return {NodeId::none, begin, pos()};
+          Ex r = s_->size_of(*t, align, begin, pos());
+          return {r.id, begin, pos(), r.info};
+        }
+        i_ = back;
+      }
+      if (align) {  // [expr.alignof]/1: a type-id only
+        s_->diag(pos(), Diag::expected_type_specifier);
+        return {NodeId::none, begin, pos()};
+      }
+      Ex e = unary_expression();
+      if (!e.ok()) return {NodeId::none, begin, pos()};
+      Ex r = s_->size_of(e.type(), false, begin, pos());
+      return {r.id, begin, pos(), r.info};
+    }
     case Tk::kw_new:
     case Tk::kw_delete:
     case Tk::kw_co_await:
@@ -1397,8 +1453,9 @@ public:
         return {r.id, begin, pos(), r.info};
       }
       if ((kind(1) == Tk::l_paren || kind(1) == Tk::l_brace))
-        if (auto t = s_->class_name(n); t && (s_->types().is_class(*t) || s_->template_param(n))) {
-          // `T(args)` or `T{…}` ([expr.type.conv]), T a class or a template parameter.
+        if (auto t = s_->class_name(n)) {
+          // `T(args)` or `T{…}` ([expr.type.conv]), T a type name: a class, an enumeration, a
+          // typedef-name or a template parameter.
           bump();
           if (is(Tk::l_brace)) {
             auto b = braced_init_list();
@@ -1438,8 +1495,20 @@ public:
     case Tk::kw_requires:
     case Tk::kw_operator:
     case Tk::tilde:
+    case Tk::kw_static_cast: {
+      // `static_cast<T>(e)` ([expr.static.cast]).
+      bump();
+      if (!expect(Tk::less)) return {NodeId::none, begin, pos()};
+      auto t = type_id();
+      if (!t || !expect(Tk::greater) || !expect(Tk::l_paren)) return {NodeId::none, begin, pos()};
+      int saved = std::exchange(angle_, 0);
+      Ex e = expression();
+      angle_ = saved;
+      if (!expect(Tk::r_paren)) return {NodeId::none, begin, pos()};
+      Ex r = s_->static_cast_to(e, *t, begin);
+      return {r.id, begin, pos(), r.info};
+    }
     case Tk::kw_typeid:
-    case Tk::kw_static_cast:
     case Tk::kw_dynamic_cast:
     case Tk::kw_const_cast:
     case Tk::kw_reinterpret_cast:
@@ -1448,9 +1517,39 @@ public:
       bump();
       return {NodeId::none, begin, pos()};
     default:
+      if (simple_type_keyword(kind()) && (kind(1) == Tk::l_paren || kind(1) == Tk::l_brace)) {
+        // `int(x)`, `unsigned{}` ([expr.type.conv]): one simple-type-specifier keyword.
+        QualType t = decl_specifiers().type;
+        return type_conversion(t, begin);
+      }
       s_->diag(begin, Diag::expected_expression);
       return {NodeId::none, begin, begin};
     }
+  }
+  static bool simple_type_keyword(Tk k) {
+    switch (k) {
+    case Tk::kw_void: case Tk::kw_bool: case Tk::kw_char: case Tk::kw_char8_t: case Tk::kw_char16_t:
+    case Tk::kw_char32_t: case Tk::kw_wchar_t: case Tk::kw_short: case Tk::kw_int: case Tk::kw_long:
+    case Tk::kw_signed: case Tk::kw_unsigned: case Tk::kw_float: case Tk::kw_double:
+      return true;
+    default: return false;
+    }
+  }
+  // `T(args)` or `T{…}` at the `(` or `{` ([expr.type.conv]).
+  Ex type_conversion(QualType t, u32 begin) {
+    if (is(Tk::l_brace)) {
+      auto b = braced_init_list();
+      Ex r = s_->list_init(t, *b);
+      return {r.id, begin, pos(), r.info};
+    }
+    bump();
+    std::vector<Ex> args;
+    if (!is(Tk::r_paren))
+      do args.push_back(assignment_expression());
+      while (accept(Tk::comma));
+    if (!expect(Tk::r_paren)) return {NodeId::none, begin, pos()};
+    Ex r = s_->functional_cast(t, std::move(args), begin, pos());
+    return {r.id, begin, pos(), r.info};
   }
 
   // A namespace named by `N`, `N::M` or `::N` ([namespace.alias], [namespace.udir]), consumed.
