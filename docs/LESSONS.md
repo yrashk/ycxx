@@ -437,3 +437,18 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
     later redeclarations of anything that has members), check that its member items' scope differs.
     The splitter now scopes a class's members by its template-id (`class_scope`).
   - Learned on #88 step 3.
+- **A probe script run from the worktree writes its files into the commit.** An audit script
+  that wrote its cases to relative paths was run with the worktree as the working directory.
+  `git add -A` then committed 39 probe `.cpp` files at the repository root, and only the review
+  caught it.
+  - Do: write probe and scratch files under the session's scratchpad by absolute path, or `cd`
+    into it in the same command. Before committing, check `git status --short` for files you did
+    not mean to add.
+  - Learned on #212.
+- **"Not supported yet" on malformed input reads as "the feature is missing".** A class missing
+  its `;` swallowed the next declaration and was reported as "'struct' is not supported yet",
+  and the user concluded classes did not work.
+  - Do: when a feature lands, feed it the common mistakes (a missing `;`, `}`, `)`, `:` or name,
+    a stray token). Check that each gives a syntax error on the line Clang and GCC use, not a
+    not-supported message or silent acceptance (`tests/own/syntax`).
+  - Learned on #212.
