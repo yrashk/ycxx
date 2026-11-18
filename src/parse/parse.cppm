@@ -2529,6 +2529,15 @@ private:
           s_.diag(0, Diag::pack_not_last);
           return false;
         }
+        // A function parameter pack that is not last is not supported yet (#88).
+        if (fn) {
+          const std::vector<QualType>& ps = types.rec(sem.type).params;
+          for (std::size_t i = 0; i + 1 < ps.size(); ++i)
+            if (types.kind(ps[i]) == sema::TypeKind::pack_expansion) {
+              s_.diag(d.name_at, Diag::not_supported, Tk::ellipsis);
+              return false;
+            }
+        }
         if (fn) {
           std::vector<std::pair<u16, u16>> deduced;
           for (QualType p : types.rec(sem.type).params) s_.templates().params_in(p, deduced);
@@ -3471,7 +3480,15 @@ const Program::Instance* Program::instance(EntityId spec, u32 point) {
     if (k != decl_item && w_->ins.seqs.size(item_sema(k).value.decls) > 0) {
       std::vector<ast::ParamSema> params = w_->ins.seqs.elements(decl->params);
       std::vector<ast::ParamSema> named = w_->ins.seqs.elements(w_->ins.seqs.at(item_sema(k).value.decls, 0).params);
-      for (std::size_t i = 0; i < params.size() && i < named.size(); ++i) params[i].name = named[i].name;
+      // A function parameter pack of the definition names all its elements ([temp.variadic]/8).
+      std::size_t i = 0;
+      for (const ast::ParamSema& n : named) {
+        if (w_->types.kind(n.type) == sema::TypeKind::pack_expansion) {
+          for (; i < params.size() && (params[i].flags & sema::param_flag::pack_element); ++i) params[i].name = n.name;
+          continue;
+        }
+        if (i < params.size()) params[i++].name = n.name;
+      }
       decl->params = w_->ins.intern_seq(std::span<const ast::ParamSema>(params));
     }
     sema::Bindings args = class_args_.at(std::to_underlying(cls));

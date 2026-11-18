@@ -255,55 +255,67 @@ public:
     if (e.kind == TemplateArgKind::type) return type_arg(types().rec(e.type).inner);
     return {TemplateArgKind::value, e.type, ins().values.get<ast::VDepExpansion>(e.value).pattern};
   }
-  // The template parameters a type or value names, by (depth, index).
-  void params_in(QualType t, std::vector<std::pair<u16, u16>>& out) {
+  // The template parameters a type or value names, by (depth, index). Without `nested`, not those
+  // of an expansion inside it, which that expansion expands ([temp.variadic]/5): an expansion's
+  // own packs.
+  void params_in(QualType t, std::vector<std::pair<u16, u16>>& out, bool nested = true) {
     TypeRec r = types().rec(t);
     switch (r.kind) {
     case TypeKind::template_param: out.push_back({r.depth, r.index}); return;
     case TypeKind::class_:
-      for (const TemplateArg& a : w_->entities.rec(r.entity).args) params_in(a, out);
+      for (const TemplateArg& a : w_->entities.rec(r.entity).args) params_in(a, out, nested);
       return;
     case TypeKind::array:
-      if (r.bound_value != ConstId::none) params_in(r.bound_value, out);
-      params_in(r.inner, out);
+      if (r.bound_value != ConstId::none) params_in(r.bound_value, out, nested);
+      params_in(r.inner, out, nested);
+      return;
+    case TypeKind::pack_expansion:
+      if (nested) params_in(r.inner, out, nested);
       return;
     case TypeKind::pointer:
     case TypeKind::reference:
-    case TypeKind::dep_name:
-    case TypeKind::pack_expansion: params_in(r.inner, out); return;
+    case TypeKind::dep_name: params_in(r.inner, out, nested); return;
     case TypeKind::function:
-      params_in(r.inner, out);
-      for (QualType p : r.params) params_in(p, out);
+      params_in(r.inner, out, nested);
+      for (QualType p : r.params) params_in(p, out, nested);
       return;
     default: return;
     }
   }
-  void params_in(ConstId v, std::vector<std::pair<u16, u16>>& out) {
+  void params_in(ConstId v, std::vector<std::pair<u16, u16>>& out, bool nested = true) {
     if (ins().values.is<ast::VDepParam>(v)) out.push_back({ins().values.get<ast::VDepParam>(v).depth, ins().values.get<ast::VDepParam>(v).index});
-    else if (ins().values.is<ast::VDepExpansion>(v)) params_in(ins().values.get<ast::VDepExpansion>(v).pattern, out);
+    else if (nested && ins().values.is<ast::VDepExpansion>(v)) params_in(ins().values.get<ast::VDepExpansion>(v).pattern, out, nested);
   }
-  void params_in(const TemplateArg& a, std::vector<std::pair<u16, u16>>& out) {
-    if (a.kind == TemplateArgKind::type) params_in(a.type, out);
-    else if (a.kind == TemplateArgKind::value) params_in(a.value, out);
+  void params_in(const TemplateArg& a, std::vector<std::pair<u16, u16>>& out, bool nested = true) {
+    if (a.kind == TemplateArgKind::type) params_in(a.type, out, nested);
+    else if (a.kind == TemplateArgKind::value) params_in(a.value, out, nested);
     else
-      for (const TemplateArg& e : elements(a)) params_in(e, out);
+      for (const TemplateArg& e : elements(a)) params_in(e, out, nested);
   }
-  // The bindings of an expansion's `i`-th element: each pack bound in `b` as its `i`-th element.
-  Bindings element(const Bindings& b, std::size_t i) {
+  // The packs an expansion's pattern names, not those an expansion inside it expands.
+  std::vector<std::pair<u16, u16>> own_packs(const TemplateArg& pattern) {
+    std::vector<std::pair<u16, u16>> refs;
+    params_in(pattern, refs, false);
+    return refs;
+  }
+  // The bindings of an expansion's `i`-th element: each of its packs `refs` bound in `b` as its
+  // `i`-th element.
+  Bindings element(const Bindings& b, std::size_t i, std::span<const std::pair<u16, u16>> refs) {
     Bindings r = b;
-    for (auto& level : r.levels)
-      for (auto& a : level)
-        if (a && a->kind == TemplateArgKind::pack) {
-          std::vector<TemplateArg> es = elements(*a);
-          a = i < es.size() ? std::optional(es[i]) : std::nullopt;
-        }
+    for (auto [d, k] : refs) {
+      if (d >= r.levels.size() || k >= r.levels[d].size()) continue;
+      auto& a = r.levels[d][k];
+      if (a && a->kind == TemplateArgKind::pack) {
+        std::vector<TemplateArg> es = elements(*a);
+        a = i < es.size() ? std::optional(es[i]) : std::nullopt;
+      }
+    }
     return r;
   }
   // The length of the packs an expansion's pattern names that `b` binds: none when it binds none;
   // a failure when two differ ([temp.variadic]/7).
   std::optional<std::optional<std::size_t>> expansion_length(const TemplateArg& pattern, const Bindings& b) {
-    std::vector<std::pair<u16, u16>> refs;
-    params_in(pattern, refs);
+    std::vector<std::pair<u16, u16>> refs = own_packs(pattern);
     std::optional<std::size_t> n;
     for (auto [d, i] : refs)
       if (auto a = b.at(d, i); a && a->kind == TemplateArgKind::pack) {
@@ -325,8 +337,9 @@ public:
       return std::vector<TemplateArg>{expansion_of(*s)};
     }
     std::vector<TemplateArg> out;
+    std::vector<std::pair<u16, u16>> refs = own_packs(pattern);
     for (std::size_t i = 0; i < **n; ++i) {
-      auto s = substitute_arg(pattern, element(b, i));
+      auto s = substitute_arg(pattern, element(b, i, refs));
       if (!s) return std::nullopt;
       out.push_back(*s);
     }
@@ -488,19 +501,20 @@ public:
   }
   // The packs an expansion's `pattern` names, each from the arguments `a` in turn: every
   // element deduced as a parameter of its own, the others agreeing across elements
-  // ([temp.deduct.type]/9). `skip` leading arguments belong to elements already given (an
-  // explicitly specified prefix, [temp.arg.explicit]/9).
+  // ([temp.deduct.type]/9). A pack whose leading elements were specified explicitly is extended
+  // past them: as many leading arguments are theirs ([temp.arg.explicit]/9).
   bool deduce_expansion(const TemplateArg& pattern, std::span<const TemplateArg> a, u16 depth,
-                        std::vector<std::optional<TemplateArg>>& out, std::size_t skip = 0, Allowance allow = {}) {
-    std::vector<std::pair<u16, u16>> refs;
-    params_in(pattern, refs);
+                        std::vector<std::optional<TemplateArg>>& out, Allowance allow = {}) {
     std::vector<u16> packs;
-    for (auto [d, i] : refs)
-      if (d == depth && i < out.size() && is_pack_ref(pattern, i) && !std::ranges::contains(packs, i)) packs.push_back(i);
+    for (auto [d, i] : own_packs(pattern))
+      if (d == depth && i < out.size() && is_pack_ref(pattern, depth, i) && !std::ranges::contains(packs, i)) packs.push_back(i);
     std::map<u16, std::vector<TemplateArg>> elems;
-    if (skip > 0)
-      for (u16 k : packs)
-        if (out[k] && out[k]->kind == TemplateArgKind::pack) elems[k] = elements(*out[k]);
+    std::size_t skip = 0;
+    for (u16 k : packs)
+      if (explicit_packs_.contains(k) && out[k] && out[k]->kind == TemplateArgKind::pack) {
+        elems[k] = elements(*out[k]);
+        skip = std::max(skip, elems[k].size());
+      }
     for (std::size_t j = skip; j < a.size(); ++j) {
       std::vector<std::optional<TemplateArg>> tmp = out;
       for (u16 k : packs) tmp[k] = std::nullopt;
@@ -520,14 +534,16 @@ public:
     }
     for (u16 k : packs) {
       TemplateArg p = pack(elems[k]);
-      if (out[k] && *out[k] != p && !(out[k]->kind == TemplateArgKind::pack && skip > 0)) return false;
+      if (out[k] && *out[k] != p && !explicit_packs_.contains(k)) return false;
       out[k] = p;
+      explicit_packs_.erase(k);  // extended once; another list must agree with it
     }
     return true;
   }
-  // Whether parameter `i` is a pack in `pattern`: a type parameter marked so, or a non-type one
-  // (a non-type expansion's pattern names only packs).
-  bool is_pack_ref(const TemplateArg& pattern, u16 i) {
+  // Whether parameter `i` of the head at `depth` is a pack: by the head being deduced when it is
+  // known; else a type parameter marked so, or a non-type one in a non-type pattern.
+  bool is_pack_ref(const TemplateArg& pattern, u16 depth, u16 i) {
+    if (!head_.empty() && head_[0].depth == depth && i < head_.size()) return head_[i].pack != 0;
     if (pattern.kind == TemplateArgKind::value) return true;
     std::vector<QualType> found;
     pack_types_in(pattern.type, found);
@@ -565,6 +581,7 @@ public:
                                                        std::span<const TemplateArg> explicit_args) {
     std::vector<ast::TemplateParamSema> params = w_->ins.seqs.elements(tmpl.template_params);
     if (params.empty()) return std::nullopt;
+    Deducing deducing(this, params);
     u16 depth = params[0].depth;
     std::vector<std::optional<TemplateArg>> out(params.size());
     if (!explicit_into(params, explicit_args, out)) return std::nullopt;
@@ -596,10 +613,8 @@ public:
       if (!p0) return std::nullopt;
       // The elements given explicitly take the first remaining arguments.
       std::size_t skip = 0;
-      std::vector<std::pair<u16, u16>> refs;
-      params_in(*p0, refs);
-      for (auto [d, k] : refs)
-        if (d == depth && out[k] && out[k]->kind == TemplateArgKind::pack) skip = std::max<std::size_t>(skip, ins().seqs.size(out[k]->elems));
+      for (auto [d, k] : own_packs(type_arg(*p0)))
+        if (d == depth && explicit_packs_.contains(k)) skip = std::max<std::size_t>(skip, ins().seqs.size(out[k]->elems));
       std::vector<TemplateArg> as;
       QualType p = *p0;
       Allowance allow;
@@ -610,8 +625,7 @@ public:
         allow = al;
         as.push_back(type_arg(a));
       }
-      if (as.size() < skip) skip = as.size();
-      if (!deduce_expansion(type_arg(p), as, depth, out, skip, allow)) return std::nullopt;
+      if (!deduce_expansion(type_arg(p), as, depth, out, allow)) return std::nullopt;
     }
     // A value deduced from an array bound converts to its parameter's type
     // ([temp.deduct.type]/20).
@@ -673,6 +687,7 @@ public:
           es.push_back(*v);
         }
         out[i] = pack(es);
+        explicit_packs_.insert(u16(i));
         break;
       }
       auto v = one(params[i], written[j++]);
@@ -744,6 +759,7 @@ public:
                                                              std::span<const TemplateArg> explicit_args) {
     std::vector<ast::TemplateParamSema> params = w_->ins.seqs.elements(tmpl.template_params);
     if (params.empty()) return std::nullopt;
+    Deducing deducing(this, params);
     u16 depth = params[0].depth;
     std::vector<std::optional<TemplateArg>> out(params.size());
     if (!explicit_into(params, explicit_args, out)) return std::nullopt;
@@ -769,6 +785,7 @@ public:
   std::optional<std::vector<TemplateArg>> match_partial(std::span<const ast::TemplateParamSema> params,
                                                         std::span<const TemplateArg> pattern, std::span<const TemplateArg> args) {
     if (params.empty()) return std::nullopt;
+    Deducing deducing(this, params);
     u16 depth = params[0].depth;
     std::vector<std::optional<TemplateArg>> out(params.size());
     if (!deduce_args(pattern, args, depth, out) || std::ranges::any_of(out, [](const auto& a) { return !a; })) return std::nullopt;
@@ -790,6 +807,7 @@ public:
   // `args` with a unique value for each.
   bool deducible(std::span<const ast::TemplateParamSema> params, std::span<const TemplateArg> args) {
     if (params.empty()) return false;
+    Deducing deducing(this, params);
     auto unique = substitute_args(args, unique_bindings(params));
     std::vector<std::optional<TemplateArg>> out(params.size());
     return unique && deduce_args(args, *unique, params[0].depth, out) && std::ranges::all_of(out, [](const auto& a) { return a.has_value(); });
@@ -797,6 +815,7 @@ public:
   bool at_least_as_specialized(std::span<const ast::TemplateParamSema> p1, std::span<const TemplateArg> a1,
                                std::span<const ast::TemplateParamSema> p2, std::span<const TemplateArg> a2) {
     if (p1.empty() || p2.empty()) return false;
+    Deducing deducing(this, p2);
     auto unique = substitute_args(a1, unique_bindings(p1));
     std::vector<std::optional<TemplateArg>> out(p2.size());
     return unique && deduce_args(a2, *unique, p2[0].depth, out);
@@ -828,10 +847,34 @@ public:
       return std::nullopt;
     };
     std::vector<std::optional<TemplateArg>> out12(p2.size()), out21(p1.size());
+    // From position `i` on, where one of them has a function parameter pack: P's pack's pattern
+    // deduced from every remaining A at once; an A from a pack deduces no P that is not one
+    // ([temp.deduct.partial]/8).
+    auto rest = [&](const TypeRec& ta, const Bindings& ba, const TypeRec& tp, std::span<const ast::TemplateParamSema> pp,
+                    std::vector<std::optional<TemplateArg>>& out, std::size_t i) {
+      auto xp = param_at(tp, i);
+      if (!xp || !xp->pack) return false;
+      std::vector<TemplateArg> as;
+      for (std::size_t j = i; j < nargs; ++j) {
+        auto y = param_at(ta, j);
+        if (!y) break;
+        auto a = substitute(y->type, ba);
+        if (!a) return false;
+        as.push_back(y->pack ? type_arg(types().pack_expansion(strip(*a))) : type_arg(strip(*a)));
+        if (y->pack) break;
+      }
+      Deducing deducing(this, pp);
+      return deduce_expansion(type_arg(strip(xp->type)), as, pp[0].depth, out);
+    };
     bool all12 = true, all21 = true;
     for (std::size_t i = 0; i < nargs; ++i) {
       auto x1 = param_at(t1, i), x2 = param_at(t2, i);
       if (!x1 || !x2) break;
+      if (x1->pack || x2->pack) {
+        all12 = all12 && rest(t1, b1, t2, p2, out12, i);
+        all21 = all21 && rest(t2, b2, t1, p1, out21, i);
+        break;
+      }
       auto a1 = substitute(x1->type, b1);
       auto a2 = substitute(x2->type, b2);
       // [temp.deduct.partial]/8: an A from a function parameter pack deduces no P that is not one.
@@ -853,7 +896,6 @@ public:
       }
       all12 = all12 && s12;
       all21 = all21 && s21;
-      if (x1->pack && x2->pack) break;  // the rest are the same patterns again
     }
     // [temp.deduct.partial]/11: otherwise equal, a template without a trailing function parameter
     // pack is more specialized than one with.
@@ -910,6 +952,25 @@ private:
 
   World* w_;
   const Classes* classes_;
+  // The template-head whose parameters a deduction deduces, and its packs whose leading elements
+  // were specified explicitly ([temp.arg.explicit]/9).
+  std::vector<ast::TemplateParamSema> head_;
+  std::set<u16> explicit_packs_;
+  // Sets `head_` (and clears the explicit packs) for one deduction.
+  struct Deducing {
+    Templates* t;
+    std::vector<ast::TemplateParamSema> saved;
+    std::set<u16> saved_explicit;
+    Deducing(Templates* t, std::span<const ast::TemplateParamSema> head)
+        : t(t), saved(std::move(t->head_)), saved_explicit(std::move(t->explicit_packs_)) {
+      t->head_.assign(head.begin(), head.end());
+      t->explicit_packs_.clear();
+    }
+    ~Deducing() {
+      t->head_ = std::move(saved);
+      t->explicit_packs_ = std::move(saved_explicit);
+    }
+  };
 };
 
 }  // namespace ycxx::sema

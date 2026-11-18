@@ -1094,7 +1094,7 @@ session's.*
   expressions of all four forms nest as [temp.variadic] says; an empty one is `true`, `false` or
   `void()` for `&&`, `||` and `,`. `sizeof...` of a template or function parameter pack. A pack
   named outside every expansion, an expansion naming no pack, and an empty fold over another
-  operator are diagnosed.
+  operator are diagnosed. A function parameter pack that is not last is not supported yet (#210).
 - **Mangling:** `J…E`, `Dp`, `XspT_E`; checked against Clang's symbols.
 - Tests: `tests/own/templates/p4-*`; 7 more draft examples pass. `<cstdio>`: 161 → 78 errors.
 - Not yet: template template parameters (#208); value-dependent expressions as template

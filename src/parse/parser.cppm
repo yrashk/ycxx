@@ -972,12 +972,20 @@ public:
         } else {
           s.params.push_back({e, d.named ? d.name : s_->no_name(), d.named ? d.name_at : at, true, false});
         }
+        if (accept(Tk::ellipsis)) {  // `Ts......`: a pack, then a C ellipsis ([dcl.fct]/3)
+          s.variadic = true;
+          break;
+        }
         if (!accept(Tk::comma)) break;
         continue;
       }
       // The parameter keeps its top-level cv as a variable of the body; the function type drops
       // it (`function_type` adjusts).
       s.params.push_back({t, d.named ? d.name : s_->no_name(), d.named ? d.name_at : at});
+      if (accept(Tk::ellipsis)) {  // `int x...` is `int x, ...` ([dcl.fct]/3)
+        s.variadic = true;
+        break;
+      }
       if (is(Tk::equal)) {
         s_->diag(pos(), Diag::not_supported, Tk::equal);  // default arguments
         ok = false;
@@ -1161,9 +1169,18 @@ public:
     std::vector<ast::TemplateArg> args;
     bool ok = true;
     ++angle_;
-    if (!is(Tk::greater)) {
+    if (!is(Tk::greater) && !is(Tk::greatergreater)) {
       do {
         u32 arg_at = pos();
+        struct Unframe {
+          sema::Sema* s;
+          decltype(s->hide_frames()) saved;
+          bool on;
+          ~Unframe() {
+            if (on) s->restore_frames(std::move(saved));
+          }
+        } unframe{s_, {}, s_->in_expansion() && argument_expands()};
+        if (unframe.on) unframe.saved = s_->hide_frames();
         s_->begin_pattern();
         struct EndPattern {
           sema::Sema* s;
@@ -1277,7 +1294,9 @@ public:
     default: return false;
     }
   }
-  // Whether the parenthesis here begins a fold-expression: `( ... op`, or `op ...` at its top level.
+  // Whether the parenthesis here begins a fold-expression: `( ... op`, or at its top level
+  // `op ...` followed by `)` or the same operator. Another `...` there (`sizeof...`, an expansion
+  // in a template argument list) is not a fold's.
   bool fold_ahead() {
     if (kind(1) == Tk::ellipsis) return fold_operator(kind(2));
     int depth = 0;
@@ -1287,8 +1306,25 @@ public:
       else if (k == Tk::r_paren || k == Tk::r_square || k == Tk::r_brace) {
         if (depth == 0) return false;
         --depth;
-      } else if (k == Tk::ellipsis && depth == 0) {
-        return fold_operator(kind(j - 1));
+      } else if (k == Tk::ellipsis && depth == 0 && kind(j - 1) != Tk::kw_sizeof && fold_operator(kind(j - 1)) &&
+                 (kind(j + 1) == Tk::r_paren || kind(j + 1) == kind(j - 1))) {
+        return true;
+      }
+    }
+    return false;
+  }
+  // Whether the template argument here is a pack expansion: `...` ends it before its `,` or `>`.
+  bool argument_expands() {
+    int depth = 0;
+    for (u32 j = 0; i_ + j < end_; ++j) {
+      Tk k = kind(j);
+      if (k == Tk::l_paren || k == Tk::l_square || k == Tk::l_brace || k == Tk::less) ++depth;
+      else if (k == Tk::r_paren || k == Tk::r_square || k == Tk::r_brace || k == Tk::greater || k == Tk::greatergreater) {
+        if (depth == 0) return j > 0 && kind(j - 1) == Tk::ellipsis;
+        depth -= k == Tk::greatergreater ? 2 : 1;
+        if (depth < 0) return j > 0 && kind(j - 1) == Tk::ellipsis;
+      } else if (k == Tk::comma && depth == 0) {
+        return j > 0 && kind(j - 1) == Tk::ellipsis;
       }
     }
     return false;

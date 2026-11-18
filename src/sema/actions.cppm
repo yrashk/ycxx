@@ -1055,7 +1055,10 @@ public:
   void begin_pattern() { pattern_packs_.emplace_back(); }
   // After the operand: the packs it names. With `...` they are recorded as an expansion of the
   // definition ([temp.variadic]/5); without, they are the enclosing operand's too.
-  // A template argument's expansion is substituted structurally, and not recorded (`record`).
+  // A template argument's expansion is substituted structurally, and not recorded (`record`);
+  // its packs may still be expanded by the declarator it is in, so an unexpanded one is not
+  // diagnosed there. An expression's packs that no enclosing pattern takes are unexpanded
+  // ([temp.variadic]/5).
   std::vector<PackRef> end_pattern(bool expanded, u32 begin, u32 end, bool record = true) {
     std::vector<PackRef> packs = std::move(pattern_packs_.back());
     pattern_packs_.pop_back();
@@ -1063,8 +1066,16 @@ public:
       if (record) expansions.push_back({begin, end, packs});
       return packs;
     }
+    if (record && pattern_packs_.empty() && frames_.empty() && !packs.empty()) diag(begin, Diag::unexpanded_pack, pack_name(packs[0]));
     for (const PackRef& r : packs) note_pack(r);
     return packs;
+  }
+  NameId pack_name(const PackRef& r) {
+    if (r.fn != NameId{}) return r.fn;
+    for (const auto& scope : template_scopes)
+      for (const ast::TemplateParamSema& p : scope)
+        if (p.depth == r.depth && p.index == r.index) return p.name;
+    return no_name();
   }
   void note_pack(PackRef r) {
     if (!pattern_packs_.empty() && !std::ranges::contains(pattern_packs_.back(), r)) pattern_packs_.back().push_back(r);
@@ -1102,6 +1113,10 @@ public:
     return n;
   }
   void push_frame(const std::vector<PackRef>& packs, u32 index) { frames_.push_back({packs, index}); }
+  // While a template argument that is itself a pack expansion is read, the enclosing expansions'
+  // elements are not in effect: its packs are expanded whole ([temp.variadic]/5).
+  auto hide_frames() { return std::exchange(frames_, {}); }
+  void restore_frames(auto f) { frames_ = std::move(f); }
   void pop_frame() { frames_.pop_back(); }
   bool in_expansion() const { return !frames_.empty(); }
   // A function parameter pack of the function being instantiated: its name, and its parameters'
@@ -1160,15 +1175,10 @@ public:
   std::vector<Expansion> expansions;
   // Whether a type or argument names a parameter pack, as a pack expansion's pattern must
   // ([temp.variadic]/5).
-  bool names_pack(QualType t) {
-    std::vector<QualType> found;
-    templates().pack_types_in(t, found);
-    return !found.empty();
-  }
+  bool names_pack(QualType t) { return names_pack(templates().type_arg(t)); }
   bool names_pack(const TemplateArg& a) {
-    if (a.kind == ast::TemplateArgKind::type) return names_pack(a.type);
     std::vector<std::pair<u16, u16>> refs;
-    templates().params_in(a.value, refs);
+    templates().params_in(a, refs, false);
     for (auto [d, i] : refs)
       for (const auto& scope : template_scopes)
         for (const ast::TemplateParamSema& p : scope)
@@ -1834,16 +1844,6 @@ public:
   // namespace-scope ones. The `callee` of a call that lookup does not find is a `DepName`: the
   // call decides once it has its arguments ([temp.dep.candidate]).
   Ex name_expr(NameId name, u32 begin, u32 end, bool callee = false) {
-    // A function parameter pack of an instantiation: its element ([temp.variadic]/8).
-    bool is_pack = false;
-    if (auto l = pack_element(name, is_pack)) {
-      ExprInfo info{types().referee(locals_[*l].type), ValueCategory::lvalue, 0};
-      return node(ast::LocalRef{info, *l}, begin, end, info);
-    }
-    if (is_pack) {
-      diag(begin, Diag::unexpanded_pack, name);
-      return {NodeId::none, begin, end};
-    }
     // Block scopes, innermost first: a scope's locals and the names its using-declarations
     // brought in ([namespace.udecl]) hide those of enclosing scopes ([basic.scope.hiding]);
     // using-declarations of one scope make one set.
@@ -1871,6 +1871,17 @@ public:
       for (const BlockUsing& u : block_usings_)
         if (u.depth == d && u.name == name) used.insert(used.end(), u.decls.begin(), u.decls.end());
       if (!used.empty()) return decls_expr(std::move(used), true, name, begin, end, callee, true);
+    }
+    // A function parameter pack of an instantiation, unless a block declares the name: its element
+    // ([temp.variadic]/8).
+    bool is_pack = false;
+    if (auto l = pack_element(name, is_pack)) {
+      ExprInfo info{types().referee(locals_[*l].type), ValueCategory::lvalue, 0};
+      return node(ast::LocalRef{info, *l}, begin, end, info);
+    }
+    if (is_pack) {
+      diag(begin, Diag::unexpanded_pack, name);
+      return {NodeId::none, begin, end};
     }
     // Enumerators a `using enum` brought into a block scope ([enum.udecl]).
     for (auto u = using_enums_.rbegin(); u != using_enums_.rend(); ++u)
