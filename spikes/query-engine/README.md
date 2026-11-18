@@ -9,6 +9,17 @@ build skeleton (#4) does not exist yet:
 make CXX=clang++ check
 ```
 
+The spike predates DECISIONS §3.2–3.3 and is plain C++23 with threads, mutexes and
+`std::function`, built with Apple Clang. Production code does not follow it: it is written as
+§3.2 requires (modules, concepts, reflection-derived key hashing and serialization, contracts,
+coroutines and `std::execution` from libycxx) and bootstrapped with GCC 16.2. Part A of the
+design document describes that form.
+
+The spike also builds and passes with GCC 16.2 (`make CXX=g++-16`). GCC's `-Wdangling-reference`
+warnings on `auto& x = unbox<T>(c.fetch(...))` point at the lifetime invariant documented at
+`unbox` in `engine.hpp`: a value outlives the fetch because its memo entry holds it for the rest of
+the revision. The real engine hands out owning handles instead.
+
 ## What is in it
 
 - `engine.hpp` (~500 lines): a red/green query engine. Keys are totally ordered; values are
