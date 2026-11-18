@@ -65,7 +65,7 @@ in [GitHub issues](https://github.com/yrashk/ycxx/issues) and the
   engine session between commands: a repeated build re-runs nothing, and an edit re-runs only
   what read the changed file, through code generation and the link (checked against a cold build
   by the `.incr` tests). It serves concurrent requests at once (`make -j`), on a worker pool
-  (`YCXX_THREADS`); an edit that lands during a build restarts it where it stopped. Its answers
+  sized by the `YCXX_THREADS` of the client that starts it; an edit that lands during a build restarts it where it stopped. Its answers
   are byte for byte those of an in-process run, at any thread count, and an in-process run is
   also the fallback on any failure. `ycxx ctl status` and `ycxx ctl shutdown` talk to it.
 - A language server (2026-11-18): an editor that runs `ycxx lsp` gets ycxx's diagnostics for

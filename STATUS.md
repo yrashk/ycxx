@@ -613,14 +613,9 @@ private daemons.
     daemon mid-request (the client retries), a restart, and concurrent clients.
   - All run on macOS and Linux.
 - Not yet:
-  - concurrent requests, cell-level restarts, and the daemon as the default (#139, which needs
-    requests as root keys and a front end on a pool, #107);
   - `progress` messages and `build_time` (#140);
-  - the persistent cache handoff and the file table in it (#17);
-  - the β tests that need those: the cache across a restart (#17), every answer at 1 and P
-    threads and requests that overlap (#139).
-  - The engine counts in a report are the session's `Db::stats()` deltas, which are exact while
-    requests run one at a time; per-request `Counters` come with #139.
+  - the persistent cache handoff and the file table in it (#17), and the β test that needs it:
+    the cache across a restart.
 
 ## The LSP front and the editor view (#99, 2026-11-18)
 
