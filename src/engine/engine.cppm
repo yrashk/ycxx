@@ -854,7 +854,10 @@ public:
     std::suspend_always initial_suspend() noexcept { return {}; }
     struct final_awaiter {
       bool await_ready() noexcept { return false; }
-      std::coroutine_handle<> await_suspend(std::coroutine_handle<promise_type> h) noexcept { return h.promise().continuation; }
+      std::coroutine_handle<> await_suspend(std::coroutine_handle<promise_type> h) noexcept {
+        const std::coroutine_handle<> c = h.promise().continuation;
+        return c ? c : std::noop_coroutine();
+      }
       void await_resume() noexcept {}
     };
     final_awaiter final_suspend() noexcept { return {}; }
@@ -870,6 +873,15 @@ public:
   query_task& operator=(query_task&&) = delete;
   ~query_task() {
     if (h_) h_.destroy();
+  }
+
+  // Runs the body to completion on this stack, for code outside the engine whose every await
+  // completes inline (the interpreter's host, until evaluation runs as a query). An exception
+  // escaping the body is rethrown.
+  V run() && {
+    h_.resume();
+    contract_assert(h_.done());  // it awaited something that suspended
+    return await_resume();
   }
 
   // Awaiting a task (a transparent helper) runs it on the awaiting query's behalf.
