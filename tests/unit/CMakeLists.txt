@@ -12,4 +12,5 @@ endfunction()
 
 add_subdirectory(hash)
 add_subdirectory(engine)
+add_subdirectory(lex)
 add_subdirectory(link)
