@@ -258,6 +258,7 @@ private:
   std::vector<error> errors_;
 
   std::map<std::string, symref, std::less<>> globals_;
+  std::map<std::string, std::uint8_t, std::less<>> common_align_;  // name -> largest alignment of its tentative definitions
   struct import_info {
     std::string name;
     std::uint32_t ordinal;
@@ -312,6 +313,10 @@ private:
           continue;
         }
         if (s.bind == obj::binding::local || dropped(o.sections[*s.section])) continue;
+        if (is_common(o, s)) {
+          auto& al = common_align_[s.name];
+          al = std::max(al, o.sections[*s.section].align_log2);
+        }
         auto [it, inserted] = globals_.try_emplace(s.name, symref{i, j});
         if (inserted) continue;
         const auto& prev_obj = objs_[it->second.obj];
@@ -421,8 +426,15 @@ private:
           fail(std::format("{}: section {},{} mixes zero-fill and contents", o.name, s.segment, s.name));
           continue;
         }
-        const std::uint64_t a = std::uint64_t{1} << s.align_log2;
-        out.align_log2 = std::max(out.align_log2, s.align_log2);
+        // A merged tentative definition takes the largest alignment of all its copies.
+        std::uint8_t align = s.align_log2;
+        for (const auto& sym : o.symbols) {
+          if (sym.section == j && sym.bind != obj::binding::local && is_common(o, sym)) {
+            if (auto c = common_align_.find(sym.name); c != common_align_.end()) align = std::max(align, c->second);
+          }
+        }
+        const std::uint64_t a = std::uint64_t{1} << align;
+        out.align_log2 = std::max(out.align_log2, align);
         out.size = align_up(out.size, a);
         placed_[i][j] = place{k, out.size};
         out.size += s.size();
@@ -814,7 +826,9 @@ private:
         }
         const std::uint64_t a = std::get<defined_at>(resolve_symbol(i, j)).addr;
         const auto sect = static_cast<std::uint8_t>(placed_[i][*s.section]->out + 1);
-        const sym_entry e{s.name, mo::n_sect, sect, static_cast<std::uint16_t>(s.weak ? mo::n_weak_def : 0), a};
+        // A merged tentative definition is an ordinary definition in the executable.
+        const bool weak = s.weak && !is_common(objs_[i], s);
+        const sym_entry e{s.name, mo::n_sect, sect, static_cast<std::uint16_t>(weak ? mo::n_weak_def : 0), a};
         if (s.bind == obj::binding::global) extdefs.push_back({e.name, static_cast<std::uint8_t>(mo::n_sect | mo::n_ext), e.sect, e.desc, e.value});
         else locals.push_back(e);
       }

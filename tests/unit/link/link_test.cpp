@@ -451,8 +451,15 @@ void test_review_cases() {
       return o;
     };
     std::vector<obj::object> objs = {return42(), common("small.o", 8), common("big.o", 4096)};
+    objs[1].sections[0].align_log2 = 4;
     auto image = link::link(objs);
     check(image.has_value(), "common symbols link");
+    check(image && (obj::macho::load32(*image, 24) & obj::macho::mh_weak_defines) == 0, "a merged common is not a weak export");
+    // The merged copy (big.o's, alignment 1) takes small.o's alignment of 16.
+    if (image) {
+      const auto off = trie_lookup(*image, "_buf");
+      check(off && *off % 16 == 0, "a merged common has the largest alignment");
+    }
     // The reader turns a Mach-O common symbol (N_UNDF, value = size) into that representation.
     auto bytes = obj::macho::write_object(common("c.o", 16));
     auto o = obj::macho::read_object(bytes, "c.o");
