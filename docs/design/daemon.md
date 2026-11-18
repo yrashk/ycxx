@@ -1,8 +1,8 @@
 # The resident daemon
 
 Design for [yrashk/ycxx#83](https://github.com/yrashk/ycxx/issues/83), part of the β slice
-([#84](https://github.com/yrashk/ycxx/issues/84)). Status: **proposed**. When it is accepted, §1
-is summarized in DECISIONS §4.10.
+([#84](https://github.com/yrashk/ycxx/issues/84)). Status: **accepted**, summarized in DECISIONS
+§4.10.
 
 The daemon is plumbing around the accepted [query-engine design](query-engine.md), cited as §A…
 and §B…. It decides how clients reach the engine, how the file system becomes engine inputs, at
@@ -40,7 +40,11 @@ session that owns the issue wrote this document and the bookkeeping.
   refined the session's rules for `build_time` (an in-place reset of an unread value, without
   which a `__TIME__` read after an idle gap would be stale) and the optimization-cache snapshot
   (its own durability) (§4.4).
-- **Review.** REVIEW-PLACEHOLDER
+- **Review.** One independent Fable check found 1 P0 (relative paths shared between requests run
+  in different directories), 7 P1 and 6 P2, each with a failing scenario and a smallest fix; all
+  were applied in one commit. A check of that diff alone found the 14 closed, and one new P1: a
+  `pp` index without the spelled path would give two identical headers one `__FILE__`. The
+  session applied that one-line fix and two P2s without a further round (DECISIONS §8.6).
 
 ## 1. Decisions in brief
 
@@ -154,9 +158,11 @@ A connection carries one session, chosen by its first request after the handshak
 `compile` covers every action of the `c++` command line: linking, `-c`, `-fsyntax-only` and `-E`
 are arguments, parsed by the daemon with the code the in-process path uses. `env` is the closed
 list of environment variables the driver reads (`SDKROOT`, `DEVELOPER_DIR`, `CPATH`,
-`CPLUS_INCLUDE_PATH`, `SOURCE_DATE_EPOCH`, and whatever later decides colour or line wrapping,
-such as whether stderr is a terminal), declared in one table that both paths read, so a variable
-the driver reads cannot be missing from the request. `build_time` is the client's clock (§4.4).
+`CPLUS_INCLUDE_PATH`, `SOURCE_DATE_EPOCH`), declared in one table that both paths read, so a
+variable the driver reads cannot be missing from the request. The table has two parts:
+configuration variables, interned into the root of the request's prefixes (§4.4), and rendering
+variables (whether stderr is a terminal, colour and width settings), which reach only the
+rendering of `done` and never a key, so a terminal build and the LSP still share their cells. `build_time` is the client's clock (§4.4).
 
 **The request is self-contained.** The client expands `@file` response files (relative to its own
 working directory) and reads `-` (standard input, as in `echo | ycxx cxx -E -x c++ -`) before
@@ -272,7 +278,7 @@ revision and how many times the request was restarted (§8.1).
   been read (a TU that uses `__TIME__` after a long idle gap would read a stale time).
 - **`opt_cache_snapshot`** (§A8.3) advances only inside a batch that is applied anyway, or when no
   client request is live; the idle optimizer's own roots do not count, and are stopped and
-  restarted like any root. Between advances, idle results accumulate in the optimization cache,
+  respawned as §4.2 says. Between advances, idle results accumulate in the optimization cache,
   invisible to the engine, so a build sees one stable snapshot. The snapshot has the durability
   `ambient`, between `editor` and `low`, which it shares with `build_time`: an advance walks only
   the cells that read one of them (the `best_available` chain, regions that use `__TIME__`), and a
@@ -386,7 +392,8 @@ holds two **views**:
 
 Files are read only through transparent helpers `text(view, path)`, `exists(view, path)` and
 `entries(view, dir)`, and only from the question cells rooted at a view: `include_resolution` and
-the TU's own source. `pp`'s index is the content identity in `include_resolution`'s answer, so no
+the TU's own source. `pp`'s index is the content identity and the spelled path (as `__FILE__`
+prints it) from `include_resolution`'s answer, so no
 trace-recorded leaf ever records a `buffer` or `buffers_in` dependency; if one did, a disk-view
 cell reusing that leaf would inherit the `editor` durability, and every keystroke would turn the
 build's shared leaves red. Debug builds assert that no such dependency appears under a disk-view
@@ -562,7 +569,8 @@ the same totals, plus the watcher's state, the cache size, memory and the longes
   epoch, and the admission quantum's hook (a root's "stored a cell since its last restart").
 - **Preprocessor** (§B9): `buffer` and `buffers_in`, the transparent `text`, `exists` and `entries`
   helpers called only from view-rooted question cells, `pp` indexed by the content identity that
-  `include_resolution` answers, the spelling as data, `view` in the configuration root, and the
+  `include_resolution` answers together with the spelled path (two identical headers reached by
+  different spellings are two leaves, as `__FILE__` requires), `view` in the configuration root, and the
   time helper that prefers the configuration's `SOURCE_DATE_EPOCH` over `build_time`.
 - **Driver** (`client::cxx`, #63): path arguments made absolute against `cwd` at admission,
   response files and `-` read by the client, and non-source inputs interned into the request's
@@ -572,4 +580,17 @@ the same totals, plus the watcher's state, the cache size, memory and the longes
 
 ## 10. Follow-up issues
 
-ISSUES-PLACEHOLDER
+Implementation, one issue per part:
+
+| Issue | Area | Content |
+| --- | --- | --- |
+| [#95](https://github.com/yrashk/ycxx/issues/95) | `area:query-engine` | Input providers, `editor` and `ambient` durabilities, `Db::set` reporting a change, `reset_unobserved`, per-root `Stats` (§9) |
+| [#96](https://github.com/yrashk/ycxx/issues/96) | `area:daemon`, `area:driver` | Scope, transport, requests, discovery, fallback, crashes, locks, idle exit, handoff (§2, §3, §7) |
+| [#97](https://github.com/yrashk/ycxx/issues/97) | `area:daemon` | File table, dirty-path batches, cookie sync, watchers, admission and the quantum (§4, §5) |
+| [#98](https://github.com/yrashk/ycxx/issues/98) | `area:tests`, `area:daemon` | The β tests (§8.2) |
+| [#99](https://github.com/yrashk/ycxx/issues/99) | `area:lsp`, `area:pp` | The editor view and `ycxx lsp` (§6) |
+
+Routed to existing issues: the epoch strand's respawn and the quantum hook (#15); the file table
+in the cache, the per-scope cache directory, and reusing high-durability records across scopes
+(#17); `ycxx ctl verify-table` (#19); the optimization cache per user and its snapshot's
+durability (#30); the driver's admission of paths and non-source inputs (#63).
