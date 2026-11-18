@@ -185,8 +185,8 @@ one import `ycxx.ast`; unit tests in `tests/unit/ast` (run by ctest, see docs/TE
   - Fingerprint, equality and the handle walk `for_each_ref` are derived by reflection, and
     dispatch goes through a generated table.
   - Interners: `names` and `seqs` (one pool per element type) and `ast`.
-  - `tokens`, `items`, `entities`, `types` and `values` are placeholders that hold only
-    fingerprints, until #18 and #33.
+  - `tokens`, `items` and `entities` are placeholders that hold only fingerprints, until #18
+    and #33.
   - Single-threaded: sharing between workers is the engine's (#14).
 - **Fingerprints** (`fingerprint.cppm`): a thin adapter over `ycxx.hash` (#14); `Fp128` is
   `ycxx::Fp128`. Not done yet: ADL `hash_into` for the AST handles. Without it,
@@ -201,6 +201,33 @@ one import `ycxx.ast`; unit tests in `tests/unit/ast` (run by ctest, see docs/TE
 - **Compaction** (`compact.cppm`): holders mark live values, the survivors are renumbered with
   their fingerprints kept, and holders rewrite their values with the returned `Remap`. Covers
   `ast` and `seqs`.
+
+## Types and constants (#33, α subset)
+
+`src/ast/`, from the [AST design](docs/design/ast.md) §5; unit test `unit.ast_types`.
+
+- **Type kinds** (`types.cppm`): `TBuiltin` (every fundamental type of [basic.fundamental] and
+  [basic.extended.fp], `meta_info`, the markers), `TPointer`, `TLRef`, `TRRef`, `TArray`,
+  `TFunction` (adjusted parameters, `noexcept` as a bool constant, variadic, cv, ref-qualifier,
+  language linkage) and the sugar kind `STypedef`, whose spelled type is marked `[[=canonical]]`.
+- **The `types` interner** (`interner.cppm`): a kind table numbered densely across kinds, and
+  `canon[]` filled at interning (§5.2). `Interners::intern_type`, `qualified` (cv dropped on
+  references and functions, pushed into array elements, the canonical form interned at once) and
+  the `const` reads `canonical` and `same_type`.
+- **The `values` interner**: `VInt` (bool, character and integer values as 128-bit two's
+  complement, normalized to the type), `VNullptr`, and the dependent family's shape: kinds marked
+  `[[=dependent]]` (`VDepParam`, `VDepFnParam`), `Values::is_dependent`.
+- **Targets** (`target.cppm`): sizes, alignments and floating formats of the fundamental types,
+  `char` signedness, the character types' underlying types; `aarch64_darwin` and `x86_64_linux`.
+- **What sema calls** (`typeops.cppm`): checked constructors (reference collapsing, parameter
+  adjustment, `function_type`, `array_of` with the bound converted to `size_t`), predicates that
+  see through sugar (`is_pointer`, `pointee_of`, …), integer conversion rank and floating-point conversion rank and
+  subrank ([conv.rank]), promotions with bit-fields ([conv.prom]), the usual arithmetic
+  conversions ([expr.arith.conv]), integer constants and their integral conversion
+  ([conv.integral], [conv.bool]).
+- Compaction keeps every type and constant, and rewrites the lists they hold.
+- Not yet: classes, enums, member pointers, template arguments, the dependent type kinds and the
+  rest of `VDep*`, floating constants, sugar other than typedefs, `substitute`.
 
 ## Bootstrap workarounds
 
@@ -231,6 +258,11 @@ miscompiles it (DECISIONS §3.2). Each is removed once ycxx compiles itself.
         int main() { S{}.f(); }
 
   - Fix: belongs in GCC. Restore the plain form when ycxx compiles itself.
+- **Checked functions of `ycxx.ast.typeops` and `wrap` are not `constexpr`,** for the reason
+  above (an importer that inlines a checked inline function fails to link).
+- **`Values::is_dependent` reads a table instead of calling `dispatch`.** GCC 16.2 ICEs
+  (`gimplify_expr`) on `dispatch`'s `pre` when `is_dependent` calls it. Not reduced yet;
+  `compact.cppm`'s calls of `dispatch` over the same list compile.
 - **`pre` on a function template is dropped when it is instantiated through an import** (GCC
   16.2; non-template functions keep theirs). `Db::set` asserts its precondition with
   `contract_assert` in the body instead.

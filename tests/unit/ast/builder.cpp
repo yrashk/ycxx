@@ -10,10 +10,10 @@ using ycxx::unit::check;
 
 int main() {
   Interners in;
-  QualType int_t = in.types.add<QualType>(seed("int"));
+  QualType int_t = in.intern_type(TBuiltin{Builtin::int_});
   ExprInfo rv{int_t, ValueCategory::prvalue, 0};
-  ConstId one_c = in.values.add<ConstId>(seed("1"));
-  ConstId two_c = in.values.add<ConstId>(seed("2"));
+  ConstId one_c = in.intern_value(VInt{int_t, bits_of(std::int64_t{1})});
+  ConstId two_c = in.intern_value(VInt{int_t, bits_of(std::int64_t{2})});
   EntityId f_e = in.entities.add<EntityId>(seed("f"));
 
   std::array<std::byte, 4096> buffer;

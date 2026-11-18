@@ -162,6 +162,17 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
   - Do: use `native_encoded_string()` for file names passed on, `display_string()` for messages.
   - Learned on #42.
 
+- **A contract predicate sees the parameters as `const`** ([dcl.contract.func], P2900's implicit
+  const-ification). A `pre` that called `is_void(Interners&, …)` did not compile.
+  - Do: give predicate helpers `const&` parameters, and answer them from data that is already
+    computed (`types.canon(q)`), not from functions that may intern.
+  - Learned on #33.
+- **A mutation that changes nothing proves nothing.** On #33 the first mutation of
+  `usual_arithmetic` (`>=` to `>` on rank) was equivalent for the standard integer types, and the
+  suite rightly stayed green.
+  - Do: mutate a branch that some test input must take, and check that the suite turns red.
+  - Learned on #33.
+
 ## Data the front end needs
 
 - **Unicode tables from Python, plus one UCD file.** Python's `unicodedata` (Unicode 17.0 in the

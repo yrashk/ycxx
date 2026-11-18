@@ -10,10 +10,10 @@ using ycxx::unit::check;
 
 int main() {
   Interners in;
-  QualType int_t = in.types.add<QualType>(seed("int"));
+  QualType int_t = in.intern_type(TBuiltin{Builtin::int_});
   ExprInfo rv{int_t, ValueCategory::prvalue, 0};
   EntityId f_e = in.entities.add<EntityId>(seed("f"));
-  auto lit = [&](const char* v) { return Literal{rv, in.values.add<ConstId>(seed(v))}; };
+  auto lit = [&](const char* v) { return Literal{rv, in.intern_value(VInt{int_t, bits_of(std::int64_t{std::atoi(v)})})}; };
 
   // Garbage first, so the survivors' handles move.
   NodeId garbage = in.intern(lit("7"), 1);
