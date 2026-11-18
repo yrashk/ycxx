@@ -52,7 +52,7 @@ provisioned on its own: `deps/libycxx/tools/toolchain/provision --clang-only`.
 | `src/pp/` | `ycxx.pp`: the `pp` query and its region (directives not yet supported) |
 | `src/items/` | `ycxx.items`: the item splitter, skeletons and item ids |
 | `src/obj/` | `ycxx.obj`: the in-memory object file; `ycxx.obj.macho`: the Mach-O object writer and reader |
-| `src/link/` | `ycxx.link`: the linker (signed arm64 macOS executables); `ycxx-ld`, its command line for tests |
+| `src/link/` | `ycxx.link`: the linker (signed arm64 macOS executables), driven by `ycxx cxx` |
 | `tests/bootstrap/` | the bootstrap smoke test: one program per C++26 feature ycxx relies on |
 | `tests/unit/` | unit tests, one CTest program per area (`ycxxc_unit_test`), run by `tools/build` |
 | `tools/check-policy`, `tools/check-preprocessor` | stage-1 policy checks |

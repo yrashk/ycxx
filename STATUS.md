@@ -274,8 +274,9 @@ What is true of the code today. Work in progress and its owners are tracked in
     merging, branch islands beyond ±128 MiB, other dylibs' re-exports, incremental relinking, and
     import addends outside 0..255 (`DYLD_CHAINED_IMPORT_ADDEND`). `__LLVM` (embedded bitcode),
     `__LD` and debug sections are dropped.
-- `build/bin/ycxx-ld a.o b.o -o out`: links objects from the command line, for tests. It reads
-  libSystem's exports from the SDK (`--sdk`, `$SDKROOT` or the Command Line Tools' SDK).
+- Objects from ycxx, Clang or GCC are linked by `ycxx cxx a.o b.o -o out`, with libSystem's
+  exports read from the SDK (`$SDKROOT`, else `xcrun --show-sdk-path`). There is no separate
+  linker binary (DECISIONS §4.7: one binary, many fronts).
 - `unit.link`: SHA-256 vectors, object round trips, `.tbd` parsing, diagnostics, the exports trie
   and determinism on both hosts. On arm64 macOS it also runs hand-encoded programs (exit code,
   calls between objects, data, GOT and pointer relocations, `puts` from libSystem), checks
