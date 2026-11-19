@@ -173,6 +173,7 @@ enum class Diag : std::uint32_t {
   empty_fold [[=message{Severity::error, "a fold over an empty pack needs an initial value for this operator"}]],
   pack_not_last [[=message{Severity::error, "a template parameter pack is followed by a parameter that is neither deduced nor defaulted"}]],
   member_named_as_class [[=message{Severity::error, "a member type cannot have the name of its class '{0:n}'"}]],
+  trait_not_applicable [[=message{Severity::error, "this type trait does not apply to '{0:t}'"}]],
 };
 
 // A `{N:r}` argument: why an evaluation was not constant. 0 is an expression the front end

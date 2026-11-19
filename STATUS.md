@@ -1125,6 +1125,22 @@ session's.*
   templates; template template parameters (#208); value-dependent expressions as template
   arguments (#209).
 
+## Type-trait built-ins (#211, 2026-11-18)
+
+- `ycxx.lex:builtins` lists the type-trait built-ins ycxx implements (`lex::type_traits`): 29
+  predicates and 13 transformations, those libycxx probes and uses that ycxx's type system can
+  answer exactly. The preprocessor's `__has_builtin` answers 1 for exactly these, 0 for any other.
+- A predicate `__is_same(T, U)` is a `bool` prvalue constant (`Sema::trait_expr`), value-dependent
+  while a type is dependent. A transformation `__remove_cv(T)` is a type specifier
+  (`Templates::transform`); of a dependent type it is a `TTransform` that substitution applies and
+  deduction treats as a non-deduced context, mangled as Clang does (`u11__remove_cvIT_E`).
+- Listed in docs/EXTENSIONS.md. Tests: `tests/own/builtins/`. `<cstdio>`: 53 → 33 errors.
+- Not yet (#211 follow-up): the built-ins that need the object model, such as
+  `__is_constructible`, `__is_convertible`, `__is_assignable`, the `__is_trivially_*` and
+  `__is_nothrow_*` families, `__is_base_of`, `__is_standard_layout` and
+  `__reference_binds_to_temporary`; a value-dependent predicate as a template argument outside a
+  body (#209).
+
 ## Bootstrap workarounds
 
 Places where ycxx's sources avoid or work around a C++26 feature because GCC 16 lacks it or

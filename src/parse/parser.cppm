@@ -162,9 +162,17 @@ public:
     }
   }
 
+  // A type-transforming built-in here, `__remove_cv(`: its entry.
+  const lex::TypeTraitInfo* transform_trait_ahead(u32 j = 0) {
+    if (kind(j) != Tk::identifier || kind(j + 1) != Tk::l_paren) return nullptr;
+    const lex::TypeTraitInfo* t = s_->type_trait(name_of(tok(j)));
+    return t && t->transforms ? t : nullptr;
+  }
+
   // Whether a declaration starts here: a decl-specifier keyword, or a name that denotes a class
   // ([stmt.ambig]: what can be a declaration is one).
   bool starts_declaration() {
+    if (transform_trait_ahead()) return true;
     // [stmt.ambig]: `int(x) + 1;`, `int(3);` and `void();` are expressions; `int(x);`, `int(x) = 1;`
     // and `int(*f)(int);` declare.
     if (simple_type_keyword(kind()) && kind(1) == Tk::l_paren) {
@@ -380,6 +388,23 @@ public:
       case Tk::coloncolon:
       case Tk::identifier:
         if (!any_type()) {
+          // A type-transforming built-in, `__remove_cv(T)` (docs/EXTENSIONS.md).
+          if (const lex::TypeTraitInfo* tr = transform_trait_ahead()) {
+            u32 at = pos();
+            bump();
+            bump();
+            auto t = type_id();
+            if (!t || !expect(Tk::r_paren)) {
+              d.ok = false;
+              goto done;
+            }
+            cls = s_->trait_type(tr->trait, *t, at);
+            if (!cls) {
+              d.ok = false;
+              goto done;
+            }
+            continue;
+          }
           if (qualified_ahead()) {
             // `N::C`, `::C`, `C::E`, `X<T>::E` ([dcl.type.simple]).
             if (auto q = qualified_type(0); q && kind(q->second) != Tk::l_paren) {
@@ -819,6 +844,7 @@ public:
     if ((k == Tk::identifier && kind(2) == Tk::coloncolon) || k == Tk::coloncolon)
       return qualified_type(1).has_value();  // `N::S`, `C::E`, `::S`
     if (k == Tk::identifier && kind(2) == Tk::less && s_->type_template(name_of(tok(1)))) return true;
+    if (transform_trait_ahead(1)) return true;
     return k == Tk::identifier && kind(2) != Tk::coloncolon && s_->class_name(name_of(tok(1))).has_value();
   }
 
@@ -1227,6 +1253,7 @@ public:
     return args;
   }
   bool starts_type_id() {
+    if (transform_trait_ahead()) return true;
     if (starts_decl_specifier(kind())) return !is(Tk::kw_static) && !is(Tk::kw_extern);
     if (is(Tk::identifier) && kind(1) == Tk::less && s_->type_template(name_of(tok()))) return true;
     if (qualified_ahead()) return qualified_type(0).has_value();
@@ -1776,6 +1803,24 @@ public:
     }
     case Tk::identifier: {
       NameId n = name_of(tok());
+      // A type-testing built-in, `__is_same(T, U)` (docs/EXTENSIONS.md).
+      if (kind(1) == Tk::l_paren)
+        if (const lex::TypeTraitInfo* tr = s_->type_trait(n); tr && !tr->transforms) {
+          bump();
+          bump();
+          std::vector<QualType> args;
+          bool ok = true;
+          int saved = std::exchange(angle_, 0);
+          for (int i = 0; i < tr->arity; ++i) {
+            if (i > 0 && !expect(Tk::comma)) ok = false;
+            auto t = ok ? type_id() : std::nullopt;
+            if (!t) ok = false;
+            else args.push_back(*t);
+          }
+          angle_ = saved;
+          if (!expect(Tk::r_paren) || !ok) return {NodeId::none, begin, pos()};
+          return s_->trait_expr(tr->trait, args, begin, pos());
+        }
       if (qualified_ahead()) return qualified_id(begin);
       // `X<args>(…)` and `X<args>{…}` for a class template X ([expr.type.conv]).
       if (kind(1) == Tk::less && s_->type_template(n)) {

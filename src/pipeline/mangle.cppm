@@ -10,6 +10,7 @@ export module ycxx.pipeline:mangle;
 
 import std;
 import ycxx.ast;
+import ycxx.lex;
 
 export namespace ycxx::pipeline {
 
@@ -165,6 +166,16 @@ class Mangler {
         auto p = type(d.qualifier);
         if (!p) return p;
         inner = "N" + *p + source_name(in_.names.spelling(d.name)) + "E";
+        candidates_.push_back(full_key(bare));
+      } else if (in_.types.is<ast::TTransform>(in_.types.canon(bare))) {
+        // A type-trait built-in of a dependent type: a vendor-extended type `u <source-name>` with
+        // its argument, `u11__remove_cvIT_E`, as Clang spells it (docs/EXTENSIONS.md).
+        if (auto s = find(full_key(bare))) return qualify(qualifiers, *s, q);
+        auto x = in_.types.get<ast::TTransform>(in_.types.canon(bare));
+        auto a = type(x.arg);
+        if (!a) return a;
+        std::string_view n = lex::type_trait_info(lex::TypeTrait(x.trait)).name;
+        inner = std::format("u{}{}I{}E", n.size(), n, *a);
         candidates_.push_back(full_key(bare));
       } else if (in_.types.is<ast::TPackExpansion>(in_.types.canon(bare))) {
         // A pack expansion `Dp <type>`, a substitution candidate (§5.1.5).
