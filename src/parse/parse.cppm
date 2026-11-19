@@ -589,6 +589,8 @@ public:
     bool braced = false;
   };
   void set_dmi(EntityId field, Dmi d) { dmis_[std::to_underlying(field)] = d; }
+  // A class's base-clause ([class.derived.general]), recorded when its head is analysed.
+  void set_bases(EntityId cls, std::vector<sema::BaseRec> bases) { class_bases_[std::to_underlying(cls)] = std::move(bases); }
   std::optional<Dmi> dmi(EntityId field) const {
     auto it = dmis_.find(std::to_underlying(field));
     if (it == dmis_.end()) return std::nullopt;
@@ -915,6 +917,7 @@ private:
   std::set<u32> classes_instantiated_;  // by specialization: instantiated in this unit
   std::vector<std::pair<u32, u32>> class_member_order_;  // the cells above, in order of analysis
   std::map<u32, Dmi> dmis_;                       // by field entity
+  std::map<u32, std::vector<sema::BaseRec>> class_bases_;  // by class entity
   std::vector<std::string> ns_of_, eff_ns_;       // by item
   std::vector<std::string> inner_of_;             // by namespace definition item: the namespace
   std::vector<bool> in_class_;                    // by item
@@ -1085,6 +1088,12 @@ public:
   bool use_static_member(EntityId v) override {
     p_->use_member(v);
     return !p_->member_failed(v);
+  }
+  std::vector<EntityId> defining_bases(EntityId c) override {
+    std::vector<EntityId> r;
+    if (auto b = p_->class_bases_.find(std::to_underlying(c)); b != p_->class_bases_.end())
+      for (const sema::BaseRec& x : b->second) r.push_back(x.cls);
+    return r;
   }
   std::optional<ast::DeclSema> earlier_member(ast::NameId name) override {
     const items::Item& it = p_->items().items[item_];
@@ -2192,8 +2201,16 @@ private:
     if (ps_.is(Tk::identifier)) ps_.bump();
     if (explicit_) return explicit_class_definition(name, name_at);
     if (template_ && ps_.is(Tk::less)) return partial_class_definition(name, name_at);
+    std::vector<sema::BaseRec> bases;
+    if (ps_.is(Tk::colon) && !template_) {
+      if (key == Tk::kw_union) {
+        s_.diag(ps_.pos(), Diag::union_with_base);  // [class.union.general]/1
+        return bad();
+      }
+      if (!base_clause(key, name, bases)) return bad();
+    }
     if (!ps_.is(Tk::l_brace)) {
-      s_.diag(ps_.pos(), Diag::not_supported, ps_.kind());  // base classes, `final`
+      s_.diag(ps_.pos(), Diag::not_supported, ps_.kind());  // bases of templates (#308), `final`
       return bad();
     }
     for (DeclId p : q_.visible_decls(name))
@@ -2212,6 +2229,7 @@ private:
     decls_.push_back(sem);
     s_.own.push_back({name, sem});
     p_->declared(sem, k_);
+    if (!template_) p_->set_bases(sem.entity, std::move(bases));
     if (template_) p_->current_instantiation(s_.types().class_of(sem.type), k_, sem);
     // The declarators after the closing brace: `struct S { … } s, *p;`, where S is complete.
     ps_.seek(it_->brace_end);
@@ -2235,6 +2253,49 @@ private:
       }
     } while (ps_.accept(Tk::comma));
     if (!ps_.expect(Tk::semi)) bad();
+  }
+
+  // A base-clause ([class.derived.general]): `: [virtual] [access] class-name, …`. Each base is a
+  // complete class other than this one, named once ([class.mi]/3); its access defaults to
+  // private for a `class`, public for a `struct` ([class.access.base]/2).
+  bool base_clause(Tk key, NameId name, std::vector<sema::BaseRec>& bases) {
+    ps_.bump();
+    sema::Types& types = s_.types();
+    do {
+      ps_.skip_attributes();
+      if (ps_.is(Tk::kw_virtual) || (ps_.kind(1) == Tk::kw_virtual && (ps_.is(Tk::kw_public) || ps_.is(Tk::kw_protected) ||
+                                                                         ps_.is(Tk::kw_private)))) {
+        s_.diag(ps_.pos(), Diag::not_supported, Tk::kw_virtual);  // virtual bases (#310)
+        return false;
+      }
+      ast::Access access = key == Tk::kw_class ? ast::Access::private_ : ast::Access::public_;
+      if (ps_.accept(Tk::kw_public)) access = ast::Access::public_;
+      else if (ps_.accept(Tk::kw_protected)) access = ast::Access::protected_;
+      else if (ps_.accept(Tk::kw_private)) access = ast::Access::private_;
+      u32 at = ps_.pos();
+      DeclSpec spec = ps_.decl_specifiers();
+      if (!spec.ok) return false;
+      if (!types.is_class(spec.type) || sema::Types::cv(spec.type) != sema::Cv::none) {
+        s_.diag(at, Diag::base_not_class, spec.type);
+        return false;
+      }
+      EntityId b = types.class_of(spec.type);
+      if (p_->world().entities.rec(b).name == name && p_->world().entities.rec(b).scope == ns_entity()) {
+        s_.diag(at, Diag::incomplete_type, spec.type);  // the class itself: incomplete here
+        return false;
+      }
+      if (!s_.require_complete(spec.type, at)) return false;
+      if (const sema::ClassRec* r = p_->classes_.find(b); r && r->union_) {
+        s_.diag(at, Diag::base_not_class, spec.type);  // [class.union.general]/1: not a union
+        return false;
+      }
+      if (std::ranges::any_of(bases, [&](const sema::BaseRec& r) { return r.cls == b; })) {
+        s_.diag(at, Diag::duplicate_base, spec.type);
+        return false;
+      }
+      bases.push_back({b, access});
+    } while (ps_.accept(Tk::comma));
+    return true;
   }
 
   // An enumeration's definition ([dcl.enum]): `enum [class|struct] E [: T] { e [= c], … }`, then
@@ -3977,6 +4038,8 @@ const Result<ast::ClassDef>& Program::class_def(u32 item) {
   ast::ClassDef def{};
   def.injected_class_name = EntityId::none;
   std::optional<EntityId> cls = class_entity(item);
+  // Its head first: the base-clause (`set_bases`).
+  if (std::ranges::find(running_, item) == running_.end()) item_sema(item);
   ClassContent c = class_content(item, [&](u32 m) -> const ast::ItemSema& { return item_sema(m).value; });
   std::vector<ast::MemberRec>& members = c.members;
   std::vector<sema::FieldRec>& fields = c.fields;
@@ -3990,6 +4053,7 @@ const Result<ast::ClassDef>& Program::class_def(u32 item) {
     rec.fields = std::move(fields);
     rec.members = std::move(statics);
     rec.types = std::move(nested);
+    if (auto b = class_bases_.find(std::to_underlying(*cls)); b != class_bases_.end()) rec.bases = b->second;
     for (const ast::MemberRec& m : members) rec.access.push_back({m.entity, m.access});
     rec.friends = std::move(c.friends);
     special_members(item, *cls, rec);
@@ -4294,7 +4358,8 @@ public:
     return own || !p_->enclosing_heads(k_).empty();
   }
 
-  // A destructor's body ([class.dtor]/13): `body`, then its members destroyed, the last first.
+  // A destructor's body ([class.dtor]/13): `body`, then its members destroyed, the last first,
+  // then its direct bases, the last first (a `DestroyMember` of field `~0u`).
   static Ex destructor_body(sema::Sema& s, EntityId cls, Ex body) {
     const sema::ClassRec& rec = s.classes().rec(cls);
     std::vector<ast::Child> members;
@@ -4302,6 +4367,11 @@ public:
       const sema::FieldRec& f = rec.fields[i];
       EntityId d = s.classes().destructor_of(f.type);
       if (d != EntityId::none) members.push_back({s.node(ast::DestroyMember{i, f.type, d}, body.end, body.end).id, 0});
+    }
+    for (std::size_t i = rec.bases.size(); i-- > 0;) {
+      QualType bt = s.types().class_type(rec.bases[i].cls);
+      EntityId d = s.classes().destructor_of(bt);
+      if (d != EntityId::none) members.push_back({s.node(ast::DestroyMember{~0u, bt, d}, body.end, body.end).id, 0});
     }
     return s.node(ast::Destructor{sema::Sema::at(body, body.begin), s.builder().list(members)}, body.begin, body.end);
   }
@@ -4324,12 +4394,20 @@ private:
       ps_.bump();
       u32 field = 0;
       while (field < rec.fields.size() && rec.fields[field].name != n) ++field;
+      // [class.base.init]/2: else a direct base, named by a type-name.
       if (field == rec.fields.size()) {
-        s_.diag(at, Diag::no_member, n, ct);  // base classes and delegating constructors are not supported yet
+        auto bt = s_.class_name(n, false);
+        auto b = bt && s_.types().is_class(*bt)
+                     ? std::ranges::find(rec.bases, s_.types().class_of(*bt), &sema::BaseRec::cls)
+                     : rec.bases.end();
+        if (b != rec.bases.end()) field = u32(rec.fields.size() + (b - rec.bases.begin()));
+      }
+      if (field == rec.fields.size() + rec.bases.size() || (field >= rec.fields.size() && rec.bases.empty())) {
+        s_.diag(at, Diag::no_member, n, ct);  // delegating constructors are not supported yet
         ps_.skip_param();
         continue;
       }
-      QualType ft = rec.fields[field].type;
+      QualType ft = field < rec.fields.size() ? rec.fields[field].type : s_.types().class_type(rec.bases[field - rec.fields.size()].cls);
       Ex init;
       if (ps_.is(Tk::l_brace)) {
         init = s_.list_init(ft, *ps_.braced_init_list());
@@ -4358,12 +4436,22 @@ private:
     return r;
   }
 
-  // A constructor's body: every member initialized in declaration order ([class.base.init]/13),
-  // from its mem-initializer, its default member initializer, or default-initialized; then the
-  // compound statement.
+  // A constructor's body ([class.base.init]/13): its direct bases initialized in declaration
+  // order, from their mem-initializers (keyed after the members) or default-initialized (a
+  // `MemberInit` of field `~0u`); then every member in declaration order, from its
+  // mem-initializer, its default member initializer, or default-initialized; then the compound
+  // statement.
   Ex constructor_body(std::map<u32, Ex> inits, Ex body) {
     const sema::ClassRec& rec = p_->classes_.rec(s_.current_class);
     std::vector<ast::Child> stmts;
+    for (std::size_t i = 0; i < rec.bases.size(); ++i) {
+      QualType bt = s_.types().class_type(rec.bases[i].cls);
+      Ex init;
+      if (auto it = inits.find(u32(rec.fields.size() + i)); it != inits.end()) init = it->second;
+      else init = s_.default_init(bt, 0, 0);
+      if (!init.ok()) continue;
+      stmts.push_back({s_.node(ast::MemberInit{~0u, bt, {init.id, 0}}, 0, 0).id, 0});
+    }
     for (u32 i = 0; i < rec.fields.size(); ++i) {
       const sema::FieldRec& f = rec.fields[i];
       Ex init;
@@ -4464,9 +4552,13 @@ void Program::special_members(u32 item, EntityId cls, sema::ClassRec& rec) {
     synth_.push_back({item, b.commit(d), copy});
     return synth_.back().decl.entity;
   };
-  // [class.dtor]/8: the implicit destructor is not trivial when a member's is not.
+  // The types of its subobjects: its direct bases', then its members' ([class.base.init]/13).
+  std::vector<QualType> subobjects;
+  for (const sema::BaseRec& b : rec.bases) subobjects.push_back(types.class_type(b.cls));
+  for (const sema::FieldRec& f : rec.fields) subobjects.push_back(f.type);
+  // [class.dtor]/8: the implicit destructor is not trivial when a base's or member's is not.
   if (user_dtor != EntityId::none) rec.destructor = user_dtor;
-  else if (std::ranges::any_of(rec.fields, [&](const sema::FieldRec& f) { return classes_.destructor_of(f.type) != EntityId::none; }))
+  else if (std::ranges::any_of(subobjects, [&](QualType t) { return classes_.destructor_of(t) != EntityId::none; }))
     rec.destructor = synthesize(false);
   // [class.copy.ctor]/10–11: the implicit copy constructor is deleted with a member's, and not
   // trivial when a member's is not.
@@ -4474,9 +4566,9 @@ void Program::special_members(u32 item, EntityId cls, sema::ClassRec& rec) {
   if (!user_copy && user_move) rec.copy_deleted = true;
   if (!user_copy && !user_move) {
     bool nontrivial = false;
-    for (const sema::FieldRec& f : rec.fields) {
-      if (types.is_reference(f.type)) continue;
-      auto [n, del] = classes_.copy_of(f.type);
+    for (QualType t : subobjects) {
+      if (types.is_reference(t)) continue;
+      auto [n, del] = classes_.copy_of(t);
       rec.copy_deleted = rec.copy_deleted || del;
       nontrivial = nontrivial || n;
     }
@@ -4485,13 +4577,39 @@ void Program::special_members(u32 item, EntityId cls, sema::ClassRec& rec) {
   // [class.copy.ctor]/8, 10–11: the implicit move constructor, declared without a user-declared
   // copy or move constructor or destructor, is not trivial when a member's move is not.
   if (!user_copy && !user_move && user_dtor == EntityId::none) {
-    rec.move_usable = !rec.copy_deleted || std::ranges::none_of(rec.fields, [&](const sema::FieldRec& f) {
-                        return !types.is_reference(f.type) && classes_.unmovable(f.type);
+    rec.move_usable = !rec.copy_deleted || std::ranges::none_of(subobjects, [&](QualType t) {
+                        return !types.is_reference(t) && classes_.unmovable(t);
                       });
-    rec.move_nontrivial = std::ranges::any_of(rec.fields, [&](const sema::FieldRec& f) {
-      return !types.is_reference(f.type) && classes_.move_nontrivial(f.type);
+    rec.move_nontrivial = std::ranges::any_of(subobjects, [&](QualType t) {
+      return !types.is_reference(t) && classes_.move_nontrivial(t);
     });
   }
+  // POD for layout, as Clang has it (`ast::record_layout`): a trivial class ([class.prop]/2: its
+  // default constructor, copy and move operations and destructor trivial), and standard-layout
+  // (/3: one access for all its data members, no reference members, and its data members all
+  // in one class of the hierarchy), whose members and bases are too.
+  auto pod_type = [&](QualType t) {
+    while (types.is_array(t)) t = types.rec(t).inner;
+    if (types.is_reference(t)) return false;
+    const sema::ClassRec* m = types.is_class(t) ? classes_.find(types.class_of(t)) : nullptr;
+    return !m || m->pod;
+  };
+  bool user_assign = std::ranges::any_of(rec.members, [&](const sema::MemberDeclRec& m) {
+    return m.is_function && !m.is_static && w_->ins.names.spelling(m.name) == "operator=";
+  });
+  bool one_access = std::ranges::adjacent_find(rec.fields, [&](const sema::FieldRec& a, const sema::FieldRec& b) {
+                      return rec.access_of(a.entity) != rec.access_of(b.entity);
+                    }) == rec.fields.end();
+  bool data_in_bases = std::ranges::any_of(rec.bases, [&](const sema::BaseRec& b) {
+    const sema::ClassRec* r = classes_.find(b.cls);
+    return r && (!r->fields.empty() || !r->pod);
+  });
+  rec.pod = !rec.user_ctors && user_dtor == EntityId::none && rec.destructor == EntityId::none &&
+            rec.copy_ctor == EntityId::none && !rec.copy_deleted && !user_move && !user_assign &&
+            std::ranges::none_of(rec.fields, &sema::FieldRec::dmi) && one_access &&
+            std::ranges::all_of(rec.fields, [&](const sema::FieldRec& f) { return pod_type(f.type); }) &&
+            std::ranges::all_of(rec.bases, [&](const sema::BaseRec& b) { return pod_type(types.class_type(b.cls)); }) &&
+            (rec.fields.empty() || !data_in_bases);
 }
 
 // The copy of the object `src` designates as an initializer of type `t` ([class.copy.ctor]/14):
@@ -4529,6 +4647,12 @@ const ast::BodySema& Program::synthesized_body(std::size_t i) {
     sm.push_scope();
     sm.declare_local(other, w_->ins.seqs.at(s.decl.params, 0).type, sema::local_flag::parameter, 0, false);
     std::vector<ast::Child> stmts;
+    // Each direct base from the other object's base class subobject.
+    for (const sema::BaseRec& base : rec.bases) {
+      QualType bt = w_->types.class_type(base.cls);
+      Ex init = copy_from(sm, sm.name_expr(other, 0, 0), bt);
+      stmts.push_back({sm.node(ast::MemberInit{~0u, bt, {init.id, 0}}, 0, 0).id, 0});
+    }
     for (u32 i = 0; i < rec.fields.size(); ++i) {
       const sema::FieldRec& f = rec.fields[i];
       Ex src = sm.member(sm.name_expr(other, 0, 0), false, f.name, 0, 0, 0);

@@ -581,8 +581,19 @@ struct NestedType {
   EntityId entity = EntityId::none;
 };
 
+// A direct base class ([class.derived]): non-virtual so far.
+struct BaseRec {
+  EntityId cls = EntityId::none;
+  ast::Access access = ast::Access::public_;
+};
+
 struct ClassRec {
   bool defined = false;
+  // Its direct base classes, in declaration order ([class.derived.general]).
+  std::vector<BaseRec> bases;
+  // POD for the purposes of layout, as Clang has it (`ast::record_layout`): trivial and
+  // standard-layout ([class.prop]).
+  bool pod = true;
   bool union_ = false;  // a union ([class.union]): its members share its storage
   std::vector<FieldRec> fields;        // in declaration order
   std::vector<MemberDeclRec> members;  // member functions and static data members
