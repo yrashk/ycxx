@@ -448,6 +448,15 @@ public:
   // required).
   std::optional<bool> atom_satisfied(ConstId c, u32 point);
   std::map<u32, std::optional<bool>> atoms_;
+  std::set<u32> atom_errors_;  // the atoms whose satisfaction check raised a hard error
+  // Whether an atom of normal form `c` is among them.
+  bool satisfaction_failed(ConstId c) {
+    if (c == ConstId::none) return false;
+    if (w_->ins.values.is<ast::VConstraint>(c))
+      return std::ranges::any_of(w_->ins.seqs.elements(w_->ins.values.get<ast::VConstraint>(c).operands),
+                                 [&](ConstId o) { return satisfaction_failed(o); });
+    return atom_errors_.contains(std::to_underlying(c));
+  }
 
   // The type of variable template specialization `v` at `point` when it is not its template's:
   // its explicit specialization's, or that of the partial specialization it is instantiated
@@ -919,6 +928,7 @@ public:
   const std::vector<sema::Expansion>* pattern_expansions() override { return at_point ? p_->expansions(item_, 0) : nullptr; }
   bool is_union_class(EntityId c) override { return p_->is_union_class(c, point()); }
   std::optional<bool> satisfied(ConstId c) override { return p_->satisfied(c, point()); }
+  bool satisfaction_failed(ConstId c) override { return p_->satisfaction_failed(c); }
   std::optional<ast::DeclSema> earlier_member(ast::NameId name) override {
     const items::Item& it = p_->items().items[item_];
     if (it.parent == items::none || p_->items().items[it.parent].kind != ItemKind::class_def) return std::nullopt;
@@ -980,6 +990,7 @@ public:
   const std::vector<sema::Expansion>* pattern_expansions() override { return p_->expansions(item_, 1); }
   bool is_union_class(EntityId c) override { return p_->is_union_class(c, p_->end()); }
   std::optional<bool> satisfied(ConstId c) override { return p_->satisfied(c, p_->end()); }
+  bool satisfaction_failed(ConstId c) override { return p_->satisfaction_failed(c); }
   bool dependent_call(sema::u32 offset) override {
     return p_->dependent_call(item_, offset);
   }
@@ -3455,6 +3466,7 @@ std::optional<bool> Program::atom_satisfied(ConstId c, u32 point) {
   atoms_[key] = true;  // its own evaluation asks for itself only through a cycle, which [temp.constr.atomic] does not satisfy
   std::vector<engine::Diagnostic> hard;
   bool r = AtomAnalysis(*this, w_->ins.values.get<ast::VAtom>(c), point).run(hard);
+  if (!hard.empty()) atom_errors_.insert(key);
   for (engine::Diagnostic& d : hard)
     if (!std::ranges::contains(end_diags_, d)) end_diags_.push_back(std::move(d));
   atoms_[key] = r;

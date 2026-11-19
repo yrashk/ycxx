@@ -2141,10 +2141,6 @@ public:
     case Tk::coloncolon: return qualified_id(begin);
     case Tk::kw_this: bump(); return s_->this_expr(begin, pos());
     case Tk::kw_requires: return requires_expression();
-    case Tk::float_lit:
-    case Tk::l_square:
-    case Tk::kw_operator:
-    case Tk::tilde:
     case Tk::kw_static_cast: {
       // `static_cast<T>(e)` ([expr.static.cast]).
       bump();
@@ -2158,6 +2154,13 @@ public:
       Ex r = s_->static_cast_to(e, *t, begin);
       return {r.id, begin, pos(), r.info};
     }
+    case Tk::float_lit:
+      s_->diag(begin, Diag::float_literal_not_supported);
+      bump();
+      return {NodeId::none, begin, pos()};
+    case Tk::l_square:
+    case Tk::kw_operator:
+    case Tk::tilde:
     case Tk::kw_typeid:
     case Tk::kw_dynamic_cast:
     case Tk::kw_const_cast:

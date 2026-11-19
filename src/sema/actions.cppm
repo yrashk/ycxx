@@ -92,6 +92,9 @@ public:
   virtual std::optional<QualType> specialization_type(EntityId /*v*/) { return std::nullopt; }
   // Whether normal form `c` is satisfied here ([temp.constr.sat]); none while it is dependent.
   virtual std::optional<bool> satisfied(ConstId /*c*/) { return true; }
+  // Whether checking normal form `c`'s satisfaction raised a hard error (an atom not of type
+  // bool, not constant, or not supported): the expression that asked is then invalid.
+  virtual bool satisfaction_failed(ConstId /*c*/) { return false; }
   // Whether class `c`, complete or not, was declared with the class-key `union`.
   virtual bool is_union_class(EntityId /*c*/) { return false; }
   // In an instantiation: the pack expansions the definition of what it re-analyses recorded.
@@ -493,8 +496,12 @@ public:
           mapping.push_back(ConstId::none);
           continue;
         }
-        TemplateArg a = p.kind == ast::TemplateArgKind::type ? t.type_arg(p.type)
-                                                             : t.value_arg(p.type, ins().intern_value(ast::VDepParam{p.depth, p.index}));
+        // Bound in an instantiation (a nested-requirement of a requires-expression being
+        // re-analysed): its argument; otherwise the parameter itself.
+        auto bound = template_args.at(p.depth, p.index);
+        TemplateArg a = bound                                     ? *bound
+                        : p.kind == ast::TemplateArgKind::type ? t.type_arg(p.type)
+                                                               : t.value_arg(p.type, ins().intern_value(ast::VDepParam{p.depth, p.index}));
         mapping.push_back(t.mapping_value(a));
       }
     }
@@ -519,6 +526,7 @@ public:
     if (!nf) return {NodeId::none, begin, end};
     auto sat = q_->satisfied(*nf);
     if (!sat) return dependent_node({}, begin, end, b);
+    if (q_->satisfaction_failed(*nf)) return {NodeId::none, begin, end};
     return bool_literal(*sat, begin, end);
   }
 
