@@ -748,8 +748,9 @@ group = 'expr'
 clauses = ['dcl.mptr', 'expr.mptr.oper', 'conv.mem']
 std = 'C++98'
 detect = '\w\s*::\s*\*\s*\w|\.\*|->\*'
-status = 'missing'
-issues = [238]
+status = 'partial'
+issues = [238, 411]
+note = 'Member-pointer types, declarators and traits, including dependent types. Member addresses, application operators, conversions and value ABI remain open.'
 probe = '''
 struct S { int a; int f() { return a; } };
 int main() { int S::*pm = &S::a; int (S::*pf)() = &S::f; S s{4}; S* p = &s; return (s.*pm == 4 && (p->*pf)() == 4) ? 0 : 1; }

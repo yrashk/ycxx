@@ -77,6 +77,14 @@ struct Target {
   constexpr bool has(Builtin b) const { return (*this)[b].size != 0; }
 };
 
+// Itanium C++ ABI §2.3: a data member pointer is a ptrdiff_t; on both supported
+// LP64 targets a member function pointer is a code pointer and a ptrdiff_t adjustment.
+constexpr BuiltinLayout member_pointer_layout(const Target& t, bool function) {
+  BuiltinLayout offset = t[t.ptrdiff_type];
+  if (!function) return offset;
+  return {u8(t.pointer_size + offset.size), std::max(t.pointer_align, offset.align)};
+}
+
 // A class's layout (Itanium C++ ABI §2.4, [class.mem], [class.derived]; no virtual bases or
 // virtual functions yet). The one rule sema (`sizeof`, #194) and the back end (`layout`) both
 // read, from what each component's own layout says of it (`Placed`):

@@ -377,10 +377,13 @@ class Gen {
     // lifetime has ended, so evaluating a use of it fails, while naming it unevaluated does not.
     for (uint32_t i = 0; fn_.thunk && i < slots_.size(); ++i) {
       if (slots_[i]) continue;
-      ast::QualType t = in_.seqs.at(fn_.body.locals, i).type;
+      const ast::LocalRec rec = in_.seqs.at(fn_.body.locals, i);
+      if (rec.flags & ast::local_flag::requires_parameter) continue;
+      ast::QualType t = rec.type;
       // A class or array local is never usable in a constant expression: naming it is
       // unsupported, so it needs no object.
       if (cls(t) == TypeClass::record || cls(t) == TypeClass::array || facts_.is_reference(t) ||
+          in_.types.is<ast::TMemberPtr>(in_.types.canon(t)) ||
           in_.types.is<ast::TEnum>(in_.types.canon(t)))
         continue;  // (the interpreter has no enumeration objects yet, #25)
       Place p = begin_object(t, ir::Init::indeterminate);
@@ -746,6 +749,7 @@ class Gen {
     stateful(ir::Op::copy, {}, ops, imms);
   }
   ValueId zero(ast::QualType t) {
+    if (in_.types.is<ast::TMemberPtr>(in_.types.canon(t))) throw Unsupported{"value-initializing a pointer to member"};
     if (cls(t) == TypeClass::pointer) return constant(t, facts_.null_constant(t));
     if (cls(t) == TypeClass::floating) return float_constant(t, 0.0);
     return int_constant(t, 0);

@@ -50,6 +50,9 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parent.parent
+sys.path.insert(0, str(REPO))
+from tests.driver.toolchain import ycxx_xfails
+
 FEATURES = HERE / 'features.toml'
 COUNTS = HERE / 'counts.tsv'
 CORPUS_TSV = HERE / 'corpus.tsv'
@@ -345,12 +348,8 @@ def owners(feats, parents):
 # --- draft examples -----------------------------------------------------------------------------
 
 def draft_examples():
-    """{clause: (passing, total)} for ycxx on tests/draft (a test passes unless ycxx.xfail lists it)."""
-    xfail = set()
-    for line in (REPO / 'tests' / 'features' / 'ycxx.xfail').read_text().splitlines():
-        line = line.split('#', 1)[0].strip()
-        if line:
-            xfail.add(line.split()[0])
+    """{clause: (passing, total)} from the rendering host's ycxx.xfail expectations."""
+    xfail = ycxx_xfails(REPO)
     out = {}
     for t in sorted((REPO / 'tests' / 'draft').rglob('*.cpp')):
         m = re.match(r'(.+)-\d+\.(?:accept|reject)\.cpp$', t.name)
@@ -546,8 +545,8 @@ HOW = """\
   {n} projects use it. *core*: every program uses it. *n/m*: not measured (no reliable
   detector); ranked at the median.
 - **Draft examples:** of the draft's examples (tests/draft) in clauses only this feature cites,
-  how many ycxx passes. An example often needs other features too, so a done feature can have
-  failing examples.
+  how many ycxx passes on the host rendering the table. An example often needs other features
+  too, so a done feature can have failing examples.
 - **Status:** on `main`, judged from a probe program (`feature-map probe`), tests/own, the draft
   examples, STATUS.md and the open issues. *partial* means the common case works.
 - **#:** the priority rank: older and more used first (`score = usage + age`, see

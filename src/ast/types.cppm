@@ -4,8 +4,8 @@
 // definitions by reflection (ycxx.ast.interner), as for tree nodes.
 //
 // This first list is the α slice's (#39): builtins, pointers, references, arrays, function types
-// and typedef sugar, and class types (δ, #86). Enums, member pointers and the dependent kinds
-// follow (#33).
+// and typedef sugar, with class, enumeration, dependent and member pointer types added in later
+// slices.
 export module ycxx.ast.types;
 
 import std;
@@ -63,6 +63,13 @@ struct TBuiltin {
 
 struct TPointer {
   QualType pointee;
+};
+
+// A pointer to a non-static data member or member function ([dcl.mptr]). `cls` can still be
+// dependent and need not be complete. The member type can itself be a function type.
+struct TMemberPtr {
+  QualType cls;
+  QualType member;
 };
 
 // References are built through ycxx.ast.typeops, which collapses them ([dcl.ref]).
@@ -170,7 +177,7 @@ struct STypedef {
 };
 
 using TypeKinds = closed_list<TBuiltin, TPointer, TLRef, TRRef, TArray, TFunction, TClass, TEnum, STypedef, TTemplateParam,
-                              TDepName, TPackExpansion, TTransform, TDepSpec, TBuiltinSpec, TAuto>;
+                              TDepName, TPackExpansion, TTransform, TDepSpec, TBuiltinSpec, TAuto, TMemberPtr>;
 
 template <class T>
 constexpr bool is_type_kind = TypeKinds::contains<T>;

@@ -50,8 +50,9 @@ that reason, and the summary counts the reasons. Hosts after a feature limit it 
 darwin-arm64`). When ycxx learns to do something, add the line:
 the tests start counting. [`tests/features/ycxx.xfail`](../tests/features/ycxx.xfail) lists the
 tests ycxx is expected to fail with the features it has (`<test id> <reason>` per line), outside
-the test files because most are generated. It works like an `XFAIL: ycxx` line: an XPASS fails
-the run, so remove the line when ycxx passes the test. A crash is never expected.
+the test files because most are generated. A row can use `<test id>@<host> <reason>` to apply on
+one host, with the same host names as `ycxx.txt`. An XPASS fails the run, so remove the row when
+ycxx passes the test on the specified host. A crash is never expected.
 
 ## Stages and fail-fast (DECISIONS §9)
 

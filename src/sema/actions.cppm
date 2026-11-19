@@ -673,11 +673,10 @@ public:
     case is_class: v = types().is_class(c) && !is_union_type(c); break;
     case is_union: v = is_union_type(c); break;
     case is_pointer: v = types().is_pointer(c); break;
-    // ycxx has no pointers to members yet, nor virtual functions, abstract or final classes: these
-    // are false of every type it has.
-    case is_member_pointer:
-    case is_member_object_pointer:
-    case is_member_function_pointer:
+    case is_member_pointer: v = types().is_member_pointer(c); break;
+    case is_member_object_pointer: v = types().is_member_pointer(c) && !types().is_function(types().rec(c).inner); break;
+    case is_member_function_pointer: v = types().is_member_pointer(c) && types().is_function(types().rec(c).inner); break;
+    // The current slice has no virtual functions, abstract or final classes.
     case is_polymorphic:
     case is_abstract:
     case is_final:
@@ -834,7 +833,7 @@ public:
     return m->type;
   }
   // `S::n` as an expression ([expr.prim.id.qual]).
-  Ex scope_expr(const Scope& s, NameId n, u32 begin, u32 name_at, u32 end) {
+  Ex scope_expr(const Scope& s, NameId n, u32 begin, u32 name_at, u32 end, bool bare_address = false) {
     if (s.type && types().is_dependent(*s.type)) return dependent_node({}, begin, end, std::nullopt, ValueCategory::lvalue);
     if (s.type) {
       if (types().is_enum(*s.type)) {
@@ -847,7 +846,7 @@ public:
         return {NodeId::none, begin, end};
       }
       if (!require_complete(*s.type, begin)) return {NodeId::none, begin, end};
-      if (auto r = class_member(types().class_of(*s.type), n, begin, end, name_at)) return *r;
+      if (auto r = class_member(types().class_of(*s.type), n, begin, end, name_at, bare_address)) return *r;
       diag(name_at, Diag::no_member, n, *s.type);
       return {NodeId::none, begin, end};
     }
@@ -1133,6 +1132,10 @@ public:
   // members have default member initializers gets them (the implicit default constructor's).
   Ex value_init(QualType t, u32 begin, u32 end) {
     if (types().is_dependent(t)) return dependent_node({}, begin, end);
+    if (types().is_member_pointer(t)) {
+      diag(begin, Diag::member_pointer_values);
+      return {NodeId::none, begin, end};
+    }
     if (has_user_ctors(t)) return construct(t, {}, begin, end);  // the default constructor
     if (has_member_inits(t)) return member_inits(t, true, begin, end);
     ExprInfo info{Types::unqualified(t), ValueCategory::prvalue, 0};
@@ -1477,6 +1480,11 @@ public:
   std::span<const std::optional<ConstId>> local_values() const { return local_values_; }
   const ast::LocalRec& local(u32 i) const { return locals_[i]; }
   std::span<const ast::LocalRec> locals() const { return locals_; }
+  // After the scope of a requires-expression ends, its parameters leave no runtime locals.
+  void discard_local_declarations(std::size_t first) {
+    locals_.resize(first);
+    local_values_.resize(first);
+  }
   // The function's parameters are in the scope at this depth; its body's outermost block is the
   // next one.
   // Marks the innermost scope as guarded (`declare_local`); it stays so until it is popped.
@@ -1831,6 +1839,7 @@ public:
     case TypeKind::pointer:
     case TypeKind::reference:
     case TypeKind::array: return internal_type(r.inner);
+    case TypeKind::member_pointer: return internal_type(r.member_owner) || internal_type(r.inner);
     case TypeKind::function:
       return internal_type(r.inner) || std::ranges::any_of(r.params, [&](QualType p) { return internal_type(p); });
     default: return false;
@@ -2950,7 +2959,7 @@ public:
 
   // The implicit member access `name` inside a member function of `c` ([class.mfct.non.static]),
   // or a qualified name `C::name`: none if `c` has no such member.
-  std::optional<Ex> class_member(EntityId c, NameId name, u32 begin, u32 end, u32 name_at) {
+  std::optional<Ex> class_member(EntityId c, NameId name, u32 begin, u32 end, u32 name_at, bool bare_address = false) {
     auto f = find_member(c, name);
     if (!f) return std::nullopt;
     Ex fail{NodeId::none, begin, end};
@@ -2979,6 +2988,10 @@ public:
     if (!(f->member && f->member->is_function) && !check_access(c, f->field ? f->field->entity : f->member->entity, name, name_at, naming))
       return fail;
     if (f->field) {
+      if (bare_address) {
+        diag(name_at, f->field->bit_width ? Diag::bit_field_address : Diag::member_pointer_values);
+        return fail;
+      }
       if (!has_this) {
         diag(begin, Diag::member_without_object, name);
         return fail;
@@ -2993,6 +3006,11 @@ public:
       return node(ast::Member{info, f->field->entity, f->index, 1, ref ? 1u : 0u, at(self, begin)}, begin, end, info);
     }
     const MemberDeclRec& m = *f->member;
+    if (bare_address && !m.is_static &&
+        !std::ranges::any_of(member_functions(c, name), [](const MemberDeclRec* f) { return f->is_static; })) {
+      diag(name_at, Diag::member_pointer_values);
+      return fail;
+    }
     // A static member, data or function, is named like a namespace-scope entity
     // ([expr.prim.id.qual]): `S::f` can have its address taken or be called. A member function
     // template is a set to deduce from, as overloads are.
@@ -4426,9 +4444,18 @@ public:
     }
     if (types().is_pointer(target) && is_null_pointer_constant(e))
       return convert_node(e, ast::ConversionKind::null_pointer, target);
+    if (types().is_member_pointer(target) && is_null_pointer_constant(e)) {
+      diag(at_, Diag::member_pointer_values);
+      return {NodeId::none, e.begin, e.end};
+    }
     e = rvalue(e);
     if (!e.ok()) return e;
     QualType from = e.type();
+    if ((types().is_member_pointer(target) && types().is(from, Builtin::nullptr_t)) ||
+        (types().is(target, Builtin::bool_) && types().is_member_pointer(from))) {
+      diag(at_, Diag::member_pointer_values);
+      return {NodeId::none, e.begin, e.end};
+    }
     // A std::nullptr_t object's value is a null pointer constant too ([conv.ptr]/1).
     if (e.ok() && types().is_pointer(target) && types().is(Types::unqualified(from), Builtin::nullptr_t))
       return convert_node(e, ast::ConversionKind::null_pointer, target);
@@ -4557,6 +4584,10 @@ public:
       return ast::scalar_placed(w_->target[r.builtin].size, w_->target[r.builtin].align);
     case TypeKind::pointer:
     case TypeKind::reference: return ast::scalar_placed(w_->target.pointer_size, w_->target.pointer_align);  // a reference member's
+    case TypeKind::member_pointer: {
+      ast::BuiltinLayout l = ast::member_pointer_layout(w_->target, types().is_function(r.inner));
+      return ast::scalar_placed(l.size, l.align);
+    }
     case TypeKind::enum_: return is_complete(t) ? place_of(underlying_of(t)) : std::nullopt;
     case TypeKind::array: {
       if (r.bound_value == ConstId::none) return std::nullopt;
@@ -4662,7 +4693,8 @@ public:
     for (;;) {
       TypeRec r = types().rec(t);
       if (r.kind == TypeKind::placeholder) return r.decltype_auto;
-      if (r.kind != TypeKind::pointer && r.kind != TypeKind::reference && r.kind != TypeKind::array && r.kind != TypeKind::function)
+      if (r.kind != TypeKind::pointer && r.kind != TypeKind::member_pointer && r.kind != TypeKind::reference &&
+          r.kind != TypeKind::array && r.kind != TypeKind::function)
         return false;
       t = r.inner;
     }
@@ -4787,7 +4819,8 @@ public:
     if (types().is(t, Builtin::bool_)) return e;
     if (types().is_arithmetic(t) || types().is_pointer(t) || types().is(t, Builtin::nullptr_t) || is_unscoped_enum(t))
       return convert_node(e, ast::ConversionKind::boolean, builtin(Builtin::bool_));
-    diag(at_, Diag::not_contextually_bool, t);
+    if (types().is_member_pointer(t)) diag(at_, Diag::member_pointer_values);
+    else diag(at_, Diag::not_contextually_bool, t);
     return {NodeId::none, e.begin, e.end};
   }
 
@@ -5096,6 +5129,11 @@ public:
       // [expr.rel], [expr.eq]: pointers converted to their composite pointer type; for the
       // equality operators also a pointer and a null pointer constant.
       bool equality = op == eq || op == ne;
+      if (equality && ((types().is_member_pointer(ta) && (same_unqualified(ta, tc) || is_null_pointer_constant(r))) ||
+                       (types().is_member_pointer(tc) && is_null_pointer_constant(l)))) {
+        diag(op_at, Diag::member_pointer_values);
+        return {NodeId::none, begin, end};
+      }
       if (types().is_pointer(ta) && types().is_pointer(tc)) {
         QualType pa = types().pointee(ta), pc = types().pointee(tc);
         // [expr.type]/4.6: a pointer to a derived class converted to one to its base class.

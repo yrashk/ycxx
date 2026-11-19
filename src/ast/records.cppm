@@ -138,6 +138,10 @@ struct ClassDef {
   constexpr bool operator==(const ClassDef&) const = default;
 };
 
+namespace local_flag {
+inline constexpr u16 requires_parameter = 2;  // notation without storage ([expr.prim.req.general])
+}
+
 // A block-scope declaration: plain data of the body tree (§4.4). `entity` is set for those that
 // can be named from outside the body (local classes, lambdas' closure types, block-scope statics).
 struct LocalRec {

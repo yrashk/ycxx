@@ -641,11 +641,15 @@ ir::TypeLayout QueryLayout::type(QualType q) const {
   }
   if (in.types.is<ast::TPointer>(c))
     return {pointer, target.pointer_size, target.pointer_align, false, in.canonical(ast::pointee_of(in, c))};
+  if (in.types.is<ast::TMemberPtr>(c)) {
+    ast::BuiltinLayout l = ast::member_pointer_layout(target, ast::is_function(in, in.types.get<ast::TMemberPtr>(c).member));
+    return {.kind = member_pointer, .size = l.size, .align = l.align, .contains_member_pointer = true};
+  }
   if (in.types.is<ast::TArray>(c)) {
     auto a = in.types.get<ast::TArray>(c);
     ir::TypeLayout e = type(a.elem);
     std::uint64_t n = a.bound == ConstId::none ? 0 : in.values.get<ast::VInt>(a.bound).bits.lo;
-    return {array, e.size * n, e.align, false, {}};
+    return {.kind = array, .size = e.size * n, .align = e.align, .contains_member_pointer = e.contains_member_pointer};
   }
   if (in.types.is<ast::TFunction>(c)) return {function, 0, 1, false, {}};
   // A reference member is held as the address of its object ([dcl.ref]).
@@ -680,6 +684,7 @@ ir::TypeLayout QueryLayout::type(QualType q) const {
         ft = a.elem;
       }
       ir::TypeLayout m = type(ft);
+      l.contains_member_pointer |= m.contains_member_pointer;
       std::uint8_t mb = m.kind == floating ? std::uint8_t(m.size) : m.hfa_bytes;
       std::uint64_t mn = (m.kind == floating ? 1 : m.hfa) * n;
       if (!mb || mn == 0 || (bytes && mb != bytes)) hfa = false;
@@ -1162,8 +1167,10 @@ std::expected<void, std::string> place_value(const ast::Interners& in, const Que
 
 std::expected<Bytes, std::string> initial_bytes(const ast::Interners& in, const QueryLayout& layout, QualType type,
                                                 ConstId init) {
+  ir::TypeLayout l = layout.type(type);
+  if (l.contains_member_pointer) return std::unexpected("static storage containing pointers to members");
   Bytes out;
-  out.bytes.assign(layout.type(type).size, 0);
+  out.bytes.assign(l.size, 0);
   if (init == ConstId::none) return out;
   if (auto r = place_value(in, layout, type, init, 0, out); !r) return std::unexpected(r.error());
   return out;

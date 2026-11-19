@@ -910,9 +910,8 @@ private:
         }
         cand_end = n;
       } else if (t == Tk::l_paren) {
-        // A parameter list follows the declarator-id; `T (*p)(…)`, where a ptr-operator follows
-        // the `(`, is a grouping parenthesis around the declarator ([dcl.ambig.res]).
-        bool ptr = kind(n + 1) == Tk::star || kind(n + 1) == Tk::amp || kind(n + 1) == Tk::ampamp;
+        // A ptr-operator after `(` starts a grouped declarator, including `T (C::*p)(…)`.
+        bool ptr = kind(n + 1) == Tk::star || kind(n + 1) == Tk::amp || kind(n + 1) == Tk::ampamp || member_ptr_ahead(n + 1, to);
         if (cand != none && n == cand_end && !ptr) {
           function = true;
           break;
@@ -926,6 +925,8 @@ private:
       } else if (t == Tk::l_square || t == Tk::equal || t == Tk::l_brace || t == Tk::colon || t == Tk::semi) {
         break;
       } else {
+        // The qualifier belongs to `C::*`, not to the name this declarator introduces.
+        if (t == Tk::star && n > from && kind(n - 1) == Tk::coloncolon) qual = none;
         if (t == Tk::less) {
           n = match_angle(n, to);
           continue;
@@ -946,6 +947,25 @@ private:
 
   // Whether the template arguments at `j` are followed by `::`: a qualifier `A<T>::`.
   bool angle_then_scope(u32 j, u32 to) const { return kind(match_angle(j, to)) == Tk::coloncolon; }
+
+  bool member_ptr_ahead(u32 j, u32 to) const {
+    u32 start = j;
+    if (kind(j) == Tk::kw_decltype && kind(j + 1) == Tk::l_paren) {
+      j = match(j + 1);
+      if (kind(j) != Tk::coloncolon) return false;
+      ++j;
+    } else if (kind(j) == Tk::coloncolon) {
+      ++j;
+    }
+    while (j < to && (kind(j) == Tk::identifier || kind(j) == Tk::kw_template)) {
+      if (kind(j) == Tk::kw_template) ++j;
+      if (kind(j) != Tk::identifier) break;
+      u32 after = kind(j + 1) == Tk::less ? match_angle(j + 1, to) : j + 1;
+      if (kind(after) != Tk::coloncolon) break;
+      j = after + 1;
+    }
+    return j != start && kind(j) == Tk::star;
+  }
 
   const pp::Region& r_;
   Items& out_;
