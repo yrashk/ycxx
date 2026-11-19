@@ -17,6 +17,10 @@ export namespace ycxx::compile {
 inline constexpr std::array<std::string_view, 5> environment = {"SDKROOT", "DEVELOPER_DIR", "CPATH", "CPLUS_INCLUDE_PATH",
                                                                   "SOURCE_DATE_EPOCH"};
 
+// Whether a request's engine events go back to its client (#245): none, events, or events with
+// the values of the kinds that can show theirs.
+enum class Trace : std::uint8_t { off, events, values };
+
 // One request. `argv` follows the front's name, with response files expanded by the client;
 // relative paths in it are relative to `cwd`.
 struct Request {
@@ -24,6 +28,7 @@ struct Request {
   std::string cwd;
   std::vector<std::pair<std::string, std::string>> env;  // the set variables of `environment`
   std::int64_t build_time = 0;                           // the client's clock, seconds since the epoch
+  Trace trace = Trace::off;
 };
 
 // A file the client writes, at a path relative to its working directory.
@@ -77,9 +82,9 @@ struct Units {
 };
 
 // Runs a request in `session` (#63), reading files through `host` (which reads the view `units`
-// names). `stopped` is set when `stop` stopped it.
+// names). `stopped` is set when `stop` stopped it. `tracer` gets the events of its engine requests.
 Done run(const Request& r, pp::Host& host, pipeline::Session& session, const Stop& stop, bool& stopped,
-         Units units = {});
+         Units units = {}, engine::Tracer* tracer = nullptr);
 
 // The path a request's scope is found from (§2): its first source file, else its first input,
 // else nothing (the working directory). Relative to the request's `cwd`.
@@ -204,7 +209,7 @@ std::filesystem::path object_name(const std::string& source) {
 // errors. With `-fsyntax-only` or `-E`, an object with no content.
 std::optional<obj::object> compile_unit(Done& d, const Request& r, const pp::Config& config, pp::Host& host,
                                         pipeline::Session& session, pipeline::TuId tu, const std::string& path,
-                                        Options::Stop stop) {
+                                        Options::Stop stop, engine::Tracer* tracer) {
   auto text = host.read(path);
   if (!text) {
     std::format_to(std::back_inserter(d.err), "ycxx: error: cannot read '{}'\n", path);
@@ -227,14 +232,14 @@ std::optional<obj::object> compile_unit(Done& d, const Request& r, const pp::Con
   }
   session.set_source(tu, path, *text, object_name(path).native_encoded_string(), r.cwd, config);
   Renderer out(d.err, path, *text);
-  const pipeline::FrontResult& front = session.get<pipeline::TuFront>(tu);
+  const pipeline::FrontResult& front = session.get<pipeline::TuFront>(tu, tracer);
   for (const pipeline::Message& m : front.messages) {
     if (m.where.empty()) out.at(m.offset, m.error, m.text);
     else std::format_to(std::back_inserter(d.err), "{}: {}: {}\n", m.where, m.error ? "error" : "warning", m.text);
   }
   if (front.has_errors()) return std::nullopt;
   if (stop == Options::Stop::syntax) return obj::object{};
-  const pipeline::TuValue& v = session.get<pipeline::Tu>(tu);
+  const pipeline::TuValue& v = session.get<pipeline::Tu>(tu, tracer);
   for (const pipeline::BackError& e : v.errors) {
     if (e.at) out.at(session.byte_offset(tu, *e.at), true, e.message);
     else out.file_level(e.message);
@@ -331,7 +336,7 @@ std::optional<Request> check_one(const Request& r, std::string_view source) {
 // The c++-compatible front: `[-c|-fsyntax-only|-E] [-o out] [-std=c++26] a.cpp...`. Exits 0 on
 // success and 1 on any error in the input or the command line.
 Done run(const Request& r, pp::Host& host, pipeline::Session& session, const Stop& stop, bool& stopped,
-         Units units) {
+         Units units, engine::Tracer* tracer) {
   Done d;
   stopped = false;
   auto opts = parse_options(views(r.argv));
@@ -357,7 +362,7 @@ Done run(const Request& r, pp::Host& host, pipeline::Session& session, const Sto
       return d;
     }
     const pipeline::TuId tu{units.first + k};
-    auto o = compile_unit(d, r, config, host, session, tu, s, opts->stop);
+    auto o = compile_unit(d, r, config, host, session, tu, s, opts->stop, tracer);
     if (!o) {
       failed = true;
       continue;
@@ -401,7 +406,7 @@ Done run(const Request& r, pp::Host& host, pipeline::Session& session, const Sto
   }
   std::filesystem::path out = opts->output.value_or("a.out");
   session.set_program(pipeline::ProgramId{0}, {std::move(tus), std::move(objects), out.filename().native_encoded_string()});
-  const pipeline::Linked& image = session.get<pipeline::Link>(pipeline::ProgramId{0});
+  const pipeline::Linked& image = session.get<pipeline::Link>(pipeline::ProgramId{0}, tracer);
   count();
   if (!image.errors.empty()) {
     for (const std::string& e : image.errors) std::format_to(std::back_inserter(d.err), "ycxx: error: {}\n", e);

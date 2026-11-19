@@ -29,7 +29,13 @@ struct Failure {
   bool lost = false;
 };
 
-std::expected<compile::Done, Failure> request_compile(Connection& c, const compile::Request& r);
+// `on_trace` gets the request's trace batches as they arrive, when it asked for them (#245).
+std::expected<compile::Done, Failure> request_compile(Connection& c, const compile::Request& r,
+                                                      const std::function<void(TraceBatch&&)>& on_trace = {});
+// Attaches to the daemon's traces (#245); then `next_trace` reads them, one batch at a time,
+// nothing once the daemon has gone.
+std::expected<void, std::string> watch_traces(Connection& c, bool values);
+std::optional<TraceBatch> next_trace(Connection& c);
 std::expected<Status, std::string> request_status(Connection& c);
 // Turns the connection into an LSP tunnel (§6.4): copies `in` to the daemon and the daemon's
 // answers to `out` until the session ends; its exit status, or why there is none.
@@ -114,9 +120,16 @@ std::expected<Connection, std::string> reach(const std::string& root, bool start
   return try_connect(p, absent);
 }
 
-std::expected<compile::Done, Failure> request_compile(Connection& c, const compile::Request& r) {
+std::expected<compile::Done, Failure> request_compile(Connection& c, const compile::Request& r,
+                                                      const std::function<void(TraceBatch&&)>& on_trace) {
   if (!send(c.fd.get(), Kind::compile, r)) return std::unexpected(Failure{"cannot send the request", true});
   auto f = receive(c.fd.get());
+  while (f && f->kind == Kind::trace) {
+    auto b = decode<TraceBatch>(*f);
+    if (!b) return std::unexpected(Failure{"malformed trace", false});
+    if (on_trace) on_trace(std::move(*b));
+    f = receive(c.fd.get());
+  }
   if (!f) return std::unexpected(Failure{"the daemon closed the connection: " + f.error(), true});
   if (f->kind == Kind::refused) {
     auto why = decode<Refused>(*f);
@@ -126,6 +139,19 @@ std::expected<compile::Done, Failure> request_compile(Connection& c, const compi
   auto d = decode<compile::Done>(*f);
   if (!d) return std::unexpected(Failure{"malformed answer", false});
   return std::move(*d);
+}
+
+std::expected<void, std::string> watch_traces(Connection& c, bool values) {
+  if (!send(c.fd.get(), Kind::watch, WatchRequest{values})) return std::unexpected("cannot send the request");
+  auto f = receive(c.fd.get());
+  if (!f || f->kind != Kind::watch) return std::unexpected("the daemon did not attach the watch");
+  return {};
+}
+
+std::optional<TraceBatch> next_trace(Connection& c) {
+  auto f = receive(c.fd.get());
+  if (!f || f->kind != Kind::trace) return std::nullopt;
+  return decode<TraceBatch>(*f);
 }
 
 std::expected<Status, std::string> request_status(Connection& c) {

@@ -13,6 +13,9 @@
 // An `lsp` connection is an LSP session (§6.4): its documents' buffers are the engine's editor
 // view, and each diagnosis is one more request admitted the same way, checking the document's
 // translation unit with the command line a served `compile` gave it.
+//
+// A `watch` connection (#245) receives the engine trace of every request served from then on;
+// a `compile` that asks for its trace receives its own, before its answer.
 export module ycxx.daemon:server;
 
 import std;
@@ -21,6 +24,7 @@ import ycxx.engine;
 import ycxx.lsp;
 import ycxx.pipeline;
 import ycxx.pp;
+import ycxx.trace;
 import :posix;
 import :os;
 import :scope;
@@ -139,6 +143,10 @@ class Server {
     std::unique_lock g(conn_mu_);
     lsp_closed_ = true;
     for (int fd : lsp_fds_) shutdown_both(fd);
+    {
+      std::lock_guard w(watch_mu_);
+      for (const auto& watcher : watchers_) shutdown_both(watcher->fd);
+    }
     conn_cv_.wait(g, [&] { return connections_ == 0; });
     log("exited");
     return 0;
@@ -246,6 +254,9 @@ class Server {
       case Kind::lsp:
         serve_lsp(fd);
         return;
+      case Kind::watch:
+        if (auto r = decode<WatchRequest>(*frame)) serve_watch(fd, *r);
+        return;
       case Kind::compile:
         if (auto r = decode<compile::Request>(*frame)) serve_compile(fd, *r);
         return;
@@ -295,6 +306,111 @@ class Server {
     return changed;
   }
 
+  // ---- Traces (#245)
+
+  // An attached `ycxx ctl trace`.
+  struct Watching {
+    int fd = -1;
+    bool values = false;
+    std::mutex m;  // one frame at a time
+    std::atomic<bool> gone{false};
+  };
+
+  // One request's trace: a collector whose batches go to the request's client, when it asked,
+  // and to each watcher attached when it started. Ends with an `end` batch, before the answer.
+  class RequestTrace {
+   public:
+    RequestTrace(Server& s, int client, bool values, std::string label, std::vector<std::shared_ptr<Watching>> watchers)
+        : server_(&s), client_(client), watchers_(std::move(watchers)) {
+      batch_.request = s.trace_requests_.fetch_add(1, std::memory_order_relaxed) + 1;
+      batch_.label = std::move(label);
+      batch_.started_ns = s.trace_clock();
+      for (const auto& w : watchers_) values = values || w->values;
+      collector_.emplace([this](std::span<const trace::Event> events) { deliver(events); }, values, s.trace_origin_);
+    }
+    ~RequestTrace() {
+      collector_->finish();
+      batch_.end = true;
+      batch_.ended_ns = server_->trace_clock();
+      deliver({});
+    }
+    RequestTrace(const RequestTrace&) = delete;
+    engine::Tracer* tracer() { return &*collector_; }
+
+   private:
+    // Under the collector's lock, or after the request's frames have all finished.
+    void deliver(std::span<const trace::Event> events) {
+      batch_.events.assign(events.begin(), events.end());
+      if (client_ >= 0) send(client_, Kind::trace, batch_);
+      for (const auto& w : watchers_) {
+        // Under its lock: a watcher that has detached may have had its descriptor reused.
+        std::lock_guard g(w->m);
+        if (w->gone.load(std::memory_order_relaxed)) continue;
+        if (!send(w->fd, Kind::trace, batch_)) w->gone.store(true, std::memory_order_relaxed);
+      }
+    }
+
+    Server* server_;
+    int client_;
+    std::vector<std::shared_ptr<Watching>> watchers_;
+    TraceBatch batch_;
+    std::optional<trace::Collector> collector_;
+  };
+
+  // A request's trace when its client asked for one or someone watches; nothing otherwise, so an
+  // untraced request costs nothing.
+  std::unique_ptr<RequestTrace> trace_for(int client, compile::Trace asked, std::string label) {
+    std::vector<std::shared_ptr<Watching>> watchers;
+    {
+      std::lock_guard g(watch_mu_);
+      std::erase_if(watchers_, [](const auto& w) { return w->gone.load(std::memory_order_relaxed); });
+      watchers = watchers_;
+    }
+    if (asked == compile::Trace::off && watchers.empty()) return nullptr;
+    return std::make_unique<RequestTrace>(*this, asked == compile::Trace::off ? -1 : client, asked == compile::Trace::values,
+                                          std::move(label), std::move(watchers));
+  }
+  std::uint64_t trace_clock() const {
+    return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - trace_origin_).count());
+  }
+  static std::string label_of(std::string_view front, const compile::Request& r) {
+    std::string out(front);
+    for (const std::string& a : r.argv) out += " " + a;
+    return out;
+  }
+
+  // Attaches a watcher until it hangs up or the daemon stops (which shuts its socket).
+  void serve_watch(int fd, const WatchRequest& r) {
+    auto w = std::make_shared<Watching>();
+    w->fd = fd;
+    w->values = r.values;
+    {
+      std::lock_guard g(conn_mu_);
+      if (lsp_closed_) return;  // the daemon is stopping
+    }
+    {
+      std::lock_guard g(w->m);
+      if (!send(fd, Kind::watch, WatchAck{})) return;
+    }
+    {
+      std::lock_guard g(watch_mu_);
+      watchers_.push_back(w);
+    }
+    log("a trace watcher attached");
+    // The watcher sends nothing: a readable socket is its hang-up (or the stop's shutdown).
+    while (!w->gone.load(std::memory_order_relaxed) && !wait_readable(fd, std::chrono::seconds(1))) {}
+    {
+      // Waits for a frame in flight; no request sends to it after this, so the descriptor may close.
+      std::lock_guard g(w->m);
+      w->gone.store(true, std::memory_order_relaxed);
+    }
+    {
+      std::lock_guard g(watch_mu_);
+      std::erase(watchers_, w);
+    }
+    log("a trace watcher detached");
+  }
+
   void serve_compile(int fd, const compile::Request& r) {
     if (r.env != env_) {
       send(fd, Kind::refused, Refused{"the environment differs from the daemon's"});
@@ -304,7 +420,9 @@ class Server {
       std::lock_guard g(stats_mu_);
       ++stats_.live;
     }
-    auto done = run_compile(fd, r);
+    auto traced = trace_for(fd, r.trace, label_of("cxx", r));
+    auto done = run_compile(fd, r, traced ? traced->tracer() : nullptr);
+    traced.reset();  // its last batch before the answer
     {
       std::lock_guard g(stats_mu_);
       --stats_.live;
@@ -422,7 +540,10 @@ class Server {
       table_.set_cwd(c.request.cwd);
       overlay_.cwd = c.request.cwd;
       bool stopped = false;
-      const compile::Done d = compile::run(c.request, overlay_, session(), {}, stopped, {pp::View::editor, editor_unit(c.real)});
+      auto traced = trace_for(-1, compile::Trace::off, "lsp " + *c.path);
+      const compile::Done d = compile::run(c.request, overlay_, session(), {}, stopped, {pp::View::editor, editor_unit(c.real)},
+                                           traced ? traced->tracer() : nullptr);
+      traced.reset();
       {
         std::lock_guard g(stats_mu_);
         ++stats_.diagnoses;
@@ -465,7 +586,7 @@ class Server {
   }
 
   // One request, admitted into the engine; nothing if the client hung up.
-  std::optional<compile::Done> run_compile(int fd, const compile::Request& r) {
+  std::optional<compile::Done> run_compile(int fd, const compile::Request& r, engine::Tracer* tracer) {
     std::unique_lock engine(engine_mu_, std::defer_lock);
     while (!engine.try_lock_for(std::chrono::milliseconds(50)))
       if (hung_up(fd)) return std::nullopt;
@@ -487,7 +608,7 @@ class Server {
         return false;
       };
       bool stopped = false;
-      compile::Done d = compile::run(r, table_, session(), stop, stopped);
+      compile::Done d = compile::run(r, table_, session(), stop, stopped, {}, tracer);
       if (!stopped) {
         // The only live root stored its answer: the quantum returns to the floor (§4.2).
         admission_.progressed();
@@ -636,6 +757,11 @@ class Server {
 
   std::mutex stats_mu_;
   Status stats_;
+
+  std::mutex watch_mu_;
+  std::vector<std::shared_ptr<Watching>> watchers_;  // under watch_mu_
+  std::atomic<std::uint64_t> trace_requests_{0};
+  const Clock::time_point trace_origin_ = Clock::now();  // the clock of every trace's events
 };
 
 }  // namespace

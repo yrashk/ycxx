@@ -7,11 +7,13 @@ export module ycxx.daemon:protocol;
 import std;
 import ycxx.engine;
 import ycxx.compile;
+import ycxx.trace;
 import :posix;
 
 export namespace ycxx::daemon {
 
-enum class Kind : std::uint16_t { hello = 1, welcome, compile, done, status, status_reply, shutdown, bye, lsp, refused };
+enum class Kind : std::uint16_t { hello = 1, welcome, compile, done, status, status_reply, shutdown, bye, lsp, refused, trace, watch };
+inline constexpr Kind last_kind = Kind::watch;
 
 struct Hello {
   std::uint64_t build_hash = 0;
@@ -36,6 +38,23 @@ struct LspOut {
   bool end = false;
   std::int32_t exit_status = 0;
 };
+// A request's engine events (#245), a complete subtree per batch (`trace::Collector`): to the
+// client of a `compile` that asked, before its `done`, and to every watcher. A request's last
+// batch has no events and `end` set.
+struct TraceBatch {
+  std::uint64_t request = 0;      // the daemon's number for the request
+  std::string label;              // what it is: `cxx a.cpp -o a`, `lsp a.cpp`
+  std::uint64_t started_ns = 0;   // its start, on the events' clock (the daemon's)
+  std::vector<trace::Event> events;
+  bool end = false;
+  std::uint64_t ended_ns = 0;     // with `end`
+};
+// `watch{values}` (#245) attaches to the daemon: answered by an empty `watch`, then a `trace`
+// frame for each batch of every request it serves, until either end closes the connection.
+struct WatchRequest {
+  bool values = false;
+};
+struct WatchAck {};
 struct StatusRequest {};
 struct ShutdownRequest {};
 struct Bye {};
@@ -78,6 +97,8 @@ inline constexpr Fp128 schema_hash = [] {
   engine::fold_schema<Status>(h);
   engine::fold_schema<compile::Request>(h);
   engine::fold_schema<compile::Done>(h);
+  engine::fold_schema<TraceBatch>(h);
+  engine::fold_schema<WatchRequest>(h);
   return h.finish();
 }();
 
@@ -112,7 +133,7 @@ std::expected<Frame, std::string> receive(int fd) {
   auto len = h.uint<std::uint32_t>();
   auto kind = h.uint<std::uint16_t>();
   if (len > max_frame) return std::unexpected("frame too large");
-  if (kind < std::to_underlying(Kind::hello) || kind > std::to_underlying(Kind::refused)) return std::unexpected("unknown message kind");
+  if (kind < std::to_underlying(Kind::hello) || kind > std::to_underlying(last_kind)) return std::unexpected("unknown message kind");
   Frame f{static_cast<Kind>(kind), std::vector<std::byte>(len)};
   if (!read_exact(fd, f.body)) return std::unexpected("connection closed in a frame");
   return f;
