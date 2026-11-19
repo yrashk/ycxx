@@ -203,6 +203,13 @@ public:
   std::size_t diag_count() const { return diags_->size(); }
   // Drops the diagnostics after the first `n`: a part analysed again where it was diagnosed already.
   void truncate_diags(std::size_t n) { diags_->resize(n); }
+  // Drops the diagnostics after the first `n` but those that `survives_substitution` keeps: a
+  // substitution failure makes something false, not ill-formed.
+  void drop_failures(std::size_t n) {
+    auto kept = std::ranges::remove_if(diags_->begin() + n, diags_->end(),
+                                       [](const engine::Diagnostic& d) { return !survives_substitution(d.id); });
+    diags_->erase(kept.begin(), kept.end());
+  }
 
   // ------------------------------------------------------------ building
 
@@ -485,6 +492,7 @@ public:
   // parameter mapping takes the innermost head's parameters among `names` (the identifiers it
   // contains) to themselves, the others to none.
   ConstId atom(u32 begin, u32 end, std::span<const NameId> names) {
+    const bool fn_params = std::ranges::any_of(names, [&](NameId n) { return local_named(n); });
     u16 depth = 0;
     std::vector<ConstId> mapping;
     if (!template_scopes.empty() && !template_scopes.back().empty()) {
@@ -492,7 +500,7 @@ public:
       depth = head[0].depth;
       Templates t = templates();
       for (const ast::TemplateParamSema& p : head) {
-        if (!std::ranges::contains(names, p.name)) {
+        if (!fn_params && !std::ranges::contains(names, p.name)) {
           mapping.push_back(ConstId::none);
           continue;
         }
@@ -505,7 +513,11 @@ public:
         mapping.push_back(t.mapping_value(a));
       }
     }
-    return ins().intern_value(ast::VAtom{item_, loc_base_ + begin, loc_base_ + end, depth, ins().intern_seq(std::span<const ConstId>(mapping))});
+    std::vector<u32> calls;
+    for (u32 c : dependent_calls)
+      if (c >= begin && c < end) calls.push_back(c - begin);
+    return ins().intern_value(ast::VAtom{item_, loc_base_ + begin, loc_base_ + end, depth, ins().intern_seq(std::span<const ConstId>(mapping)),
+                                         ins().intern_seq(std::span<const u32>(calls)), fn_params});
   }
   // `C<args>` in normal form: C's with the arguments substituted into its atoms' mappings
   // ([temp.constr.normal]/1.4); none, diagnosed, when they do not fit or a mapping cannot be formed.
@@ -513,9 +525,7 @@ public:
     auto full = template_arguments(c, args, at);
     if (!full) return std::nullopt;
     std::vector<ast::TemplateParamSema> params = ins().seqs.elements(c.template_params);
-    auto nf = templates().substitute_constraint(c.constraints, Bindings::of(params.empty() ? 0 : params[0].depth, *full));
-    if (!nf) diag(at, Diag::constraints_not_satisfied, w_->entities.rec(c.entity).name);
-    return nf;
+    return templates().substitute_constraint(c.constraints, Bindings::of(params.empty() ? 0 : params[0].depth, *full));
   }
   // A concept-id as an expression ([temp.names]/8): whether it is satisfied, a `bool` prvalue;
   // value-dependent while its arguments are.
@@ -1374,6 +1384,10 @@ public:
     ConstId v = ins().intern_value(ast::VDepSizeofPack{p->depth, p->index});
     ExprInfo info{size_t_, ValueCategory::prvalue, expr_flag::dependent};
     return node(ast::Literal{info, v}, begin, end, info);
+  }
+  // Whether `name` is a local in scope here.
+  bool local_named(NameId name) const {
+    return std::ranges::any_of(scopes_, [&](const auto& sc) { return std::ranges::any_of(sc, [&](const auto& p) { return p.first == name; }); });
   }
   // Whether `name` is a function parameter pack of the definition being analysed (its type a pack
   // expansion), in phase one.

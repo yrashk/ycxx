@@ -481,8 +481,9 @@ Constant values live in the `values` interner as `ConstId`s:
   SeqId<Requirement>}` ([expr.prim.req]), `VDepSizeof{QualType}`, `VDepFold`,
   `VDepExpansion{ConstId pattern}`, `VDepPackIndex`, `VDepSplice`, `VDepReflect`.
 - the **constraint family** (*amended by #88 step 6, Fable's decision*, §6.6): `VAtom{ItemId item;
-  u32 begin, end; u16 depth; SeqId<ConstId> mapping}` (an atomic constraint: its tokens and its
-  parameter mapping), `VConstraint{u8 op; SeqId<ConstId> operands}` (a conjunction or disjunction
+  u32 begin, end; u16 depth; SeqId<ConstId> mapping; SeqId<u32> calls; bool fn_params}` (an
+  atomic constraint: its tokens, its parameter mapping, its dependent calls, and whether it names
+  a function parameter), `VConstraint{u8 op; SeqId<ConstId> operands}` (a conjunction or disjunction
   in normal form), and `VType{QualType unqualified; u8 cv}` (a type argument in a mapping; a value
   holds only unqualified canonical types, so the cv-qualifiers ride beside it).
 
@@ -684,12 +685,20 @@ mappings (/1.4); any other operand is a `VAtom`.
   expression, and the arguments of the innermost head's parameters that the expression names; the
   others are none ([temp.constr.atomic]/1). Two atoms are identical when they are one expression in
   the source with equal mappings (/2), which is `ConstId` equality. So `Ctrue<typename T::type>`
-  with `concept Ctrue = true` never forms `T::type`.
+  with `concept Ctrue = true` never forms `T::type`. A mapping that is invalid for the arguments
+  makes the atom an empty disjunction, false (/3). An atom of a trailing requires-clause that names
+  a function parameter maps every parameter of its head, since the function parameter's type may
+  name any of them (*the Opus session's, from the review*).
 - **Satisfaction re-analyses the tokens with the mapping bound**, as §6.4 re-analyses bodies:
   any error there makes the atom unsatisfied ([temp.constr.atomic]/3: substitution failure), but
   "not supported" and the instantiation depth are hard errors, and so is a result that is not a
   `bool` constant. An atom's result is memoized by its `ConstId`; the first evaluation is the
-  program's (re-verification at END is #235).
+  program's (re-verification at END is #235). Its unqualified calls that were dependent where it
+  appears (`calls`) add argument-dependent lookup at the point of the check, as instantiated
+  bodies do ([temp.dep.candidate]).
+- **A nested requirement is checked in place** (*the Opus session's, from the review*): with the
+  requires-expression's parameters in scope, its `||` and `&&` short-circuiting as satisfaction
+  does; it forms no atoms, since subsumption never looks inside a requires-expression.
 - **Redeclarations compare clauses as tokens.** Whether two declarations of a function template
   are one ([temp.over.link]/5,7) is decided by a fingerprint of their clauses' tokens with each
   template parameter replaced by its position, mixed into the entity key; normal forms are not

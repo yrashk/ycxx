@@ -327,7 +327,8 @@ public:
       auto t = ins().values.get<ast::VType>(v);
       return type_arg(types().add_cv(t.type, Cv(t.cv)));
     }
-    return {TemplateArgKind::value, QualType{}, v};
+    // An integer carries its type; another value takes its parameter's (AtomAnalysis).
+    return {TemplateArgKind::value, ins().values.is<ast::VInt>(v) ? ins().values.get<ast::VInt>(v).type : QualType{}, v};
   }
   ConstId mapping_value(const TemplateArg& a) {
     if (a.kind == TemplateArgKind::type) {
@@ -359,7 +360,9 @@ public:
         continue;
       }
       auto s = substitute_arg(mapping_arg(e), b);
-      if (!s) return std::nullopt;
+      // An invalid mapping leaves the atom unsatisfied ([temp.constr.atomic]/3): an empty
+      // disjunction, false.
+      if (!s) return ins().intern_value(ast::VConstraint{1, ins().intern_seq(std::span<const ConstId>{})});
       m.push_back(mapping_value(*s));
     }
     a.mapping = ins().intern_seq(std::span<const ConstId>(m));
@@ -398,6 +401,10 @@ private:
     constexpr std::size_t budget = 65536;
     if (ins().values.is<ast::VAtom>(c)) return std::vector<std::vector<ConstId>>{{c}};
     auto v = ins().values.get<ast::VConstraint>(c);
+    // No operands (an atom whose mapping was invalid, false): no clause beside the others, or one
+    // empty clause in every combination.
+    if (ins().seqs.size(v.operands) == 0)
+      return v.op == outer ? std::vector<std::vector<ConstId>>{} : std::vector<std::vector<ConstId>>{{}};
     std::vector<std::vector<ConstId>> acc;
     bool first = true;
     for (ConstId o : ins().seqs.elements(v.operands)) {

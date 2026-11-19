@@ -1177,27 +1177,30 @@ Fable decided the representation (ast.md §6.6); the Opus session wrote the code
   normal form ([temp.constr.normal]): `VConstraint` conjunctions and disjunctions over `VAtom`s,
   each the atom's tokens and a mapping of the parameters it names.
 - **Satisfaction** ([temp.constr.sat]): an atom is re-analysed from its tokens with its mapping
-  bound; an error there makes it unsatisfied, a non-`bool` or non-constant result and "not
-  supported" are hard errors. Results are memoized per atom (`Program::atom_satisfied`).
+  bound, its function parameters declared and argument-dependent lookup at the point of the
+  check; an error there makes it unsatisfied, a non-`bool` or non-constant result and "not
+  supported" are hard errors (`survives_substitution`), so a missing feature never picks another
+  overload. Results are memoized per atom (`Program::atom_satisfied`).
 - **Overload resolution** drops candidates whose constraints are not satisfied
   ([over.match.viable]/3) and, between templates that are otherwise equally specialized, prefers
   the one whose constraints subsume the other's ([temp.constr.order], [temp.func.order]/6).
   Declarations whose clauses differ are distinct overloads; equivalent clauses (as tokens, with
   parameters by position) redeclare.
 - **Requires-expressions** ([expr.prim.req]) with parameters and simple, type, compound (with a
-  return-type-requirement) and nested requirements: false in a templated entity when a
-  requirement is invalid, ill-formed elsewhere.
+  return-type-requirement, also a qualified concept) and nested requirements, checked in place:
+  false in a templated entity when a requirement is invalid, ill-formed elsewhere.
 - **`if constexpr`** ([stmt.if]/2): the condition is evaluated as it is parsed; an
   instantiation skips the discarded branch, and outside templates its odr-uses demand nothing.
 - Also: the stand-in `Program` indexes declared names, so a namespace-scope lookup visits only
   its own name's items (draft tests including libycxx headers: 8 s → 5 s); floating literals
   report "not supported" instead of "expected '<'".
-- Tests: `tests/own/templates/c6-*` (11, agreeing with Clang and GCC); 5 more draft examples
+- Tests: `tests/own/templates/c6-*` (18, agreeing with Clang and GCC); 6 more draft examples
   pass. `<cstdio>`: 33 → 18 errors.
 - Not yet: constraints on class and variable templates, partial specializations and members,
   constrained packs, fold-expanded constraints, `C auto`, `noexcept` in compound requirements
   (#234); re-verification of satisfaction at END (#235); Itanium constraint mangling (#236);
-  recorded discarded extents for `if constexpr` (#237); value-dependent mapping arguments (#209).
+  recorded discarded extents for `if constexpr` (#237); value-dependent mapping arguments (#209);
+  `static_assert(false)` in a template that is never instantiated (#241).
 
 ## Bootstrap workarounds
 

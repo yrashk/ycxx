@@ -1472,6 +1472,7 @@ public:
   // is no concept-id.
   std::optional<sema::ConstId> concept_id_constraint() {
     u32 back = i_;
+    std::size_t n = s_->diag_count();
     std::optional<ast::DeclSema> c;
     u32 at = pos();
     if (qualified_ahead()) {
@@ -1488,11 +1489,85 @@ public:
       bump();
     }
     auto args = template_argument_list();
-    if (!args) {
+    if (!args) {  // read again as an expression, which diagnoses it
       i_ = back;
+      s_->truncate_diags(n);
       return std::nullopt;
     }
     return s_->concept_constraint(*c, *args, at).value_or(sema::ConstId::none);
+  }
+
+  // `C` or `N::C` naming a concept here, read; none, with nothing read, otherwise.
+  std::optional<ast::DeclSema> concept_name() {
+    std::optional<ast::DeclSema> c;
+    u32 at = 0;
+    if (qualified_ahead()) {
+      auto sc = nested_name(0, at);
+      if (!sc || !sc->ns || kind(at) != Tk::identifier) return std::nullopt;
+      c = s_->namespace_template(*sc->ns, name_of(tok(at)), ast::DeclKind::concept_);
+    } else if (is(Tk::identifier)) {
+      c = s_->concept_named(name_of(tok()));
+    }
+    if (!c) return std::nullopt;
+    for (u32 j = 0; j <= at; ++j) bump();
+    return c;
+  }
+
+  // A nested-requirement's constraint-expression, checked where it is written, with the
+  // requires-expression's parameters in scope ([expr.prim.req.nested]): its `||` and `&&`
+  // short-circuit as satisfaction does ([temp.constr.op]), so an operand that is not checked may be
+  // invalid. Its normal form is not needed: subsumption does not look into a requires-expression.
+  enum class Truth : u8 { no, yes, dependent, invalid };
+  Truth nested_constraint(bool templated) {
+    Truth l = nested_conjunction(templated);
+    while (accept(Tk::pipepipe)) {
+      std::size_t n = s_->diag_count();
+      Truth r = nested_conjunction(templated);
+      if (l == Truth::yes) {
+        s_->drop_failures(n);
+        continue;
+      }
+      if (r == Truth::yes) l = r;
+      else if (l == Truth::dependent || r == Truth::dependent) l = Truth::dependent;
+      else l = Truth::no;
+    }
+    return l;
+  }
+  Truth nested_conjunction(bool templated) {
+    Truth l = nested_operand(templated);
+    while (accept(Tk::ampamp)) {
+      std::size_t n = s_->diag_count();
+      Truth r = nested_operand(templated);
+      if (l == Truth::no || l == Truth::invalid) {
+        s_->drop_failures(n);
+        continue;
+      }
+      if (r == Truth::no || r == Truth::invalid) l = r;
+      else if (l == Truth::dependent || r == Truth::dependent) l = Truth::dependent;
+    }
+    return l;
+  }
+  Truth nested_operand(bool templated) {
+    std::size_t n = s_->diag_count();
+    u32 at = pos();
+    Ex e = binary_expression(3);
+    if (s_->diag_count() > n || !e.ok()) {
+      if (templated) s_->drop_failures(n);
+      return Truth::invalid;
+    }
+    if (s_->dependent(e)) return Truth::dependent;
+    Ex v = s_->rvalue(e);
+    if (!s_->types().is(sema::Types::unqualified(s_->types().canonical(v.type())), sema::Builtin::bool_)) {
+      s_->diag(at, Diag::constraint_not_bool, v.type());
+      return Truth::invalid;
+    }
+    sema::Evaluated r = sema::Evaluator(*s_, questions()).evaluate(v);
+    if (r.dependent) return Truth::dependent;
+    if (!r.value) {
+      s_->diag(at, Diag::constraint_not_constant, r.reason);
+      return Truth::invalid;
+    }
+    return s_->world().values.as_signed(*r.value) != 0 ? Truth::yes : Truth::no;
   }
 
   // A requires-expression ([expr.prim.req]): a `bool` prvalue, true when every requirement is
@@ -1528,30 +1603,27 @@ public:
         bool dep = s_->dependent(e);
         if (accept(Tk::arrow)) {  // `-> C<args>`: C<decltype((e)), args…> ([expr.prim.req.compound])
           u32 at = pos();
-          std::optional<ast::DeclSema> c = is(Tk::identifier) ? s_->concept_named(name_of(tok())) : std::nullopt;
-          if (!c) {
+          if (std::optional<ast::DeclSema> c = concept_name()) {
+            std::vector<ast::TemplateArg> args;
+            if (is(Tk::less)) args = template_argument_list().value_or(std::vector<ast::TemplateArg>{});
+            if (!dep && e.ok()) {
+              args.insert(args.begin(), s_->templates().type_arg(s_->decltype_of(e, true)));
+              auto nf = s_->concept_constraint(*c, args, at);
+              auto sat = nf ? s_->questions().satisfied(*nf) : std::optional<bool>(false);
+              if (!sat) dependent = true;
+              else if (!*sat) failed = true;
+            }
+          } else {
             s_->diag(at, Diag::not_a_concept, is(Tk::identifier) ? name_of(tok()) : s_->no_name());
             failed = true;
             skip_to_semi();
-            continue;
-          }
-          bump();
-          std::vector<ast::TemplateArg> args;
-          if (is(Tk::less)) args = template_argument_list().value_or(std::vector<ast::TemplateArg>{});
-          if (!dep && e.ok()) {
-            args.insert(args.begin(), s_->templates().type_arg(s_->decltype_of(e, true)));
-            auto nf = s_->concept_constraint(*c, args, at);
-            auto sat = nf ? s_->questions().satisfied(*nf) : std::optional<bool>(false);
-            if (!sat) dependent = true;
-            else if (!*sat) failed = true;
           }
         }
         if (dep) dependent = true;
       } else if (accept(Tk::kw_requires)) {  // a nested-requirement ([expr.prim.req.nested])
-        sema::ConstId nf = constraint_expression(false);
-        auto sat = s_->questions().satisfied(nf);
-        if (!sat) dependent = true;
-        else if (!*sat) failed = true;
+        Truth t = nested_constraint(templated);
+        if (t == Truth::dependent) dependent = true;
+        else if (t != Truth::yes) failed = true;
       } else {  // a simple-requirement
         Ex e = expression();
         if (s_->dependent(e)) dependent = true;
@@ -1560,7 +1632,7 @@ public:
       if (i_ == before) bump();  // no progress: drop the token
       if (s_->diag_count() > n || failed) {
         satisfied = false;
-        if (templated) s_->truncate_diags(n);
+        if (templated) s_->drop_failures(n);
       }
     }
     expect(Tk::r_brace);

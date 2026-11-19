@@ -951,6 +951,17 @@ public:
   // at its point of instantiation ([temp.point]); lookup stays at the item.
   std::optional<u32> at_point;
   EntityId instantiating = EntityId::none;  // the class specialization whose member this is
+  // Checking an atomic constraint: the offsets of its calls that were dependent where it appears,
+  // which argument-dependent lookup at the point of use completes ([temp.dep.candidate]).
+  std::vector<u32> atom_calls;
+  bool dependent_call(sema::u32 offset) override { return std::ranges::contains(atom_calls, offset); }
+  std::vector<ast::DeclSema> members_at_instantiation(EntityId ns, ast::NameId name) override {
+    std::vector<ast::DeclSema> r;
+    if (atom_calls.empty()) return r;
+    for (DeclId d : p_->declared_in(p_->world().ins.names.spelling(name), p_->namespace_path(ns), point(), false))
+      if (auto s = p_->decl_sema(d); s && s->entity != EntityId::none) r.push_back(*s);
+    return r;
+  }
 
 private:
   u32 point() const { return at_point ? *at_point : item_; }
@@ -2978,7 +2989,13 @@ private:
           }
         sem.template_params = b_.seq(std::span<const ast::TemplateParamSema>(s_.template_scopes.front()));
         flags |= sema::decl_flag::template_;
-        if (fn) trailing_requires_clause();
+        if (fn) {  // its parameters are in scope ([basic.scope.param])
+          s_.push_scope();
+          for (const parse::Param& prm : d.params)
+            if (prm.name != s_.no_name()) s_.declare_local(prm.name, prm.type, sema::local_flag::parameter, prm.at, false);
+          trailing_requires_clause();
+          s_.pop_scope();
+        }
         sem.constraints = associated_constraints();
         // [temp.param]: a variable template's pack is last; a function template's is followed only
         // by parameters with a default or deduced from its parameter-type-list.
@@ -3461,6 +3478,7 @@ public:
         s_(p.world(), b_, q_, sink_, a.item, a.begin), ps_(p.region(), it_->begin + a.begin, it_->begin + a.end, s_), atom_(a) {
     ps_.set_questions(q_);
     q_.at_point = point;
+    q_.atom_calls = p.world().ins.seqs.elements(a.calls);
   }
 
   // Satisfied or not; hard errors go to `hard`.
@@ -3476,13 +3494,24 @@ public:
     s_.template_args.levels.resize(atom_.depth + 1);
     for (ConstId e : ins.seqs.elements(atom_.mapping))
       s_.template_args.levels[atom_.depth].push_back(e == ConstId::none ? std::nullopt : std::optional(t.mapping_arg(e)));
+    // The function's parameters, of their substituted types, for an atom that names them.
+    if (atom_.fn_params && ins.seqs.size(is.decls) > 0) s_.push_scope();
+    if (atom_.fn_params && ins.seqs.size(is.decls) > 0)
+      for (const ast::ParamSema& prm : ins.seqs.elements(ins.seqs.at(is.decls, 0).params)) {
+        auto ty = t.substitute(prm.type, s_.template_args);
+        s_.declare_local(prm.name, ty ? *ty : prm.type, sema::local_flag::parameter, 0, false);
+      }
+    // A value argument without a type of its own has its parameter's, substituted
+    // ([temp.arg.nontype]).
+    for (const auto& head : s_.template_scopes)
+      if (!head.empty() && head[0].depth == atom_.depth)
+        for (std::size_t i = 0; i < head.size() && i < s_.template_args.levels[atom_.depth].size(); ++i)
+          if (auto& a = s_.template_args.levels[atom_.depth][i]; a && a->kind == ast::TemplateArgKind::value && a->type == QualType{})
+            if (auto ty = t.substitute(head[i].type, s_.template_args); ty && !s_.types().is_dependent(*ty)) a->type = *ty;
     Ex e = ps_.expression();
-    auto hard_id = [](engine::DiagId id) {
-      return id == sema::diag_id(Diag::not_supported) || id == sema::diag_id(Diag::instantiation_depth);
-    };
     bool failed = !e.ok() || !ps_.at_end();
     for (const engine::Diagnostic& d : sink_) {
-      if (hard_id(d.id)) hard.push_back(d);
+      if (sema::survives_substitution(d.id)) hard.push_back(d);
       failed = true;
     }
     if (failed) return false;
@@ -3494,7 +3523,7 @@ public:
     }
     sema::Evaluated v = sema::Evaluator(s_, q_).evaluate(s_.rvalue(e));
     if (!v.value) {
-      s_.diag(0, Diag::not_constant, v.reason);
+      s_.diag(0, Diag::constraint_not_constant, v.reason);
       hard.push_back(sink_.back());
       return false;
     }
@@ -3518,12 +3547,17 @@ std::optional<bool> Program::atom_satisfied(ConstId c, u32 point) {
   if (auto it = atoms_.find(key); it != atoms_.end()) return it->second;
   sema::Templates t(*w_, classes_);
   if (t.constraint_dependent(c)) return std::nullopt;
+  // An atom of the item being analysed is checked once its analysis is done: its head is not
+  // known before ([temp.constr.decl] constraints are checked where they are used).
+  if (std::ranges::contains(running_, index(w_->ins.values.get<ast::VAtom>(c).item))) return std::nullopt;
   atoms_[key] = true;  // its own evaluation asks for itself only through a cycle, which [temp.constr.atomic] does not satisfy
   std::vector<engine::Diagnostic> hard;
   bool r = AtomAnalysis(*this, w_->ins.values.get<ast::VAtom>(c), point).run(hard);
   if (!hard.empty()) atom_errors_.insert(key);
+  // A limit met in the atom's tokens may have been met already where they were first analysed.
+  const std::vector<engine::Diagnostic>& seen = item_sema(index(w_->ins.values.get<ast::VAtom>(c).item)).diags;
   for (engine::Diagnostic& d : hard)
-    if (!std::ranges::contains(end_diags_, d)) end_diags_.push_back(std::move(d));
+    if (!std::ranges::contains(end_diags_, d) && !std::ranges::contains(seen, d)) end_diags_.push_back(std::move(d));
   atoms_[key] = r;
   return r;
 }

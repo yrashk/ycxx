@@ -445,7 +445,6 @@ draft/temp/temp.concept-1.accept.cpp preprocessing directives are not supported 
 draft/temp/temp.constr.atomic-1.accept.cpp 'template' not supported yet
 draft/temp/temp.constr.concept-1.accept.cpp 'template' not supported yet
 draft/temp/temp.constr.decl-2.accept.cpp 'template' not supported yet
-draft/temp/temp.constr.normal-1.accept.cpp 'template' not supported yet
 draft/temp/temp.constr.normal-3.accept.cpp 'template' not supported yet
 draft/temp/temp.constr.normal-4.accept.cpp 'template' not supported yet
 draft/temp/temp.constr.normal-5.reject.cpp errors elsewhere: 'template' not supported yet

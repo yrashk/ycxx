@@ -129,13 +129,18 @@ struct VType {
 // contains it, and its tokens [begin, end) in that item's declaration part), and its parameter
 // mapping: one entry per parameter of the head at `depth`, a `VType` or a value for a parameter the
 // expression names and none for the others ([temp.constr.atomic]/1). Two are identical when they
-// are one value ([temp.constr.atomic]/2).
+// are one value ([temp.constr.atomic]/2). `calls` are the offsets, from `begin`, of its unqualified
+// calls that were dependent where it appears: checking it adds argument-dependent lookup at the
+// point of use to them ([temp.dep.candidate]). An atom of a trailing requires-clause may name the
+// function's parameters, whose types may name any template parameter: its mapping is then complete.
 struct VAtom {
   ItemId item;
   u32 begin;
   u32 end;
   u16 depth;
   SeqId<ConstId> mapping;
+  SeqId<u32> calls;
+  bool fn_params;  // it names a function parameter (a trailing requires-clause's), so it maps all
 };
 
 // A normal form ([temp.constr.normal]): the conjunction (`op` 0) or disjunction (`op` 1) of normal
