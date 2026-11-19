@@ -22,16 +22,32 @@ reasoning; do not leave decisions only in issue threads.
    (§4.8) is laid out from day one for optimization by search, solvers and measured cost models,
    so that strong optimization arrives later without the front end or IR having to change. The
    goal is to compete with Clang and GCC on generated code, measured (§5.4).
-5. **Predefined macros** (decided on #112). Beyond the draft's ([cpp.predefined]):
-   - **Identity:** `__ycxx__`, `__ycxx_major__`, `__ycxx_minor__` and `__ycxx_patchlevel__`.
-     Neither `__clang__` nor `__GNUC__` is defined, because either one claims a whole dialect.
-     libycxx learns ycxx at its detection point (§3.6, yrashk/libycxx#17).
+5. **Predefined macros** (decided on #112, identity revised on #229). Beyond the draft's
+   ([cpp.predefined]):
+   - **Identity:** `__ycxx__`, `__ycxx_major__`, `__ycxx_minor__` and `__ycxx_patchlevel__`, and
+     `__GNUC__` 4, `__GNUC_MINOR__` 2 and `__GNUC_PATCHLEVEL__` 1, the version Clang claims
+     (#229). Not `__clang__`, `__llvm__` or `__GNUG__`.
+     - *Why `__GNUC__`:* #112 left it undefined, to be revisited if the SDK's non-GNU paths
+       proved unusable. They warned on every `<stdio.h>` (`sys/cdefs.h`'s "Unsupported compiler
+       detected"), and Clang has shown for years that `__GNUC__` 4.2.1 commits a compiler to a
+       known, small set of GNU extensions.
+     - *Conditions:* every GNU extension the SDK's and libycxx's `__GNUC__` paths use is
+       supported or diagnosed, and listed in `docs/EXTENSIONS.md` (§1.2). libycxx recognizes
+       ycxx by `__ycxx__` before `__clang__` and `__GNUC__`, and every compiler-specific choice
+       in it tests its `_YCXX_COMPILER_*` identity, so no GCC workaround applies to ycxx
+       (yrashk/libycxx#28, §3.6).
+     - *Not `__GNUG__`:* the SDK's `__DARWIN_NULL` would become `__null`, an extension nothing
+       else needs yet.
+   - **System headers:** a warning located in a system header is not reported, as Clang and GCC
+     do (#229). A system header is one found in a system directory (`-isystem`, libycxx's, the
+     SDK's; a `-I` directory that is also one of these counts as one), or one a system header
+     includes, wherever it is found. A warning on a token a system header's macro produced is
+     reported where the macro is used, and hidden where that is in a system header. Errors are
+     always reported, and so is `#warning`, which Clang and GCC report from a system header too.
    - **Probes:** `__has_feature`, `__has_extension`, `__has_attribute`, `__has_cpp_attribute`
      and `__has_builtin` answer truthfully from ycxx's own tables, 0 until implemented. Headers
      take the paths those answers select, and an extension they turn out to need goes to
      `docs/EXTENSIONS.md` (§1.2).
-     - *Revisit* if the SDK's non-GNU paths prove unusable. The fallback is `__GNUC__` with the
-       GNU extensions the SDK uses.
    - **Target macros** are generated from `ast::Target`, the source of layout, and checked
      against Clang's for the same target (`tests/own/pp/predefined-target.pp.cpp`).
    - **Feature-test macros:** a `__cpp_*` macro is defined only for a feature ycxx implements,
@@ -40,6 +56,26 @@ reasoning; do not leave decisions only in issue threads.
    - *Reason:* a header that tests for a compiler or a feature must get the truth about ycxx.
    - *Rejected:* mimicking Clang (its extensions would all be owed at once), and defining every
      feature-test macro now (libycxx would enable code sema cannot compile).
+6. **Which classes pass in registers** (decided on #230). This is the rule for when a class is
+   trivially copyable for the purposes of calls. Compilers disagree on it.
+   - **Default, every target:** upstream Clang and GCC, the Itanium "non-trivial for the purposes
+     of calls" wording ([class.temporary]/3, Itanium C++ ABI §3.1.2.3). Where they differ, upstream
+     Clang (the oracle) decides. They differ on a class whose member can be neither copied nor
+     moved.
+   - **The switch, `-fclass-call-abi=apple`:** on arm64 Darwin, Apple Clang's behaviour, for code
+     that links with Xcode-built objects. A class passes in registers when its destructor is
+     trivial and its copy constructor is trivial or deleted, whatever its move constructors.
+     Apple Clang 21 passes move-only and deleted-copy classes in registers; Clang 23 and GCC 16
+     pass them by address.
+   - **Data:** `ast::Target` carries each target's default (`call_triviality`) and whether it
+     offers the switch (`apple_calls`). The option is part of the compile configuration
+     (`pp::Config::call_triviality`), so it enters the unit's fingerprint and the daemon's
+     configuration.
+   - **Tests:** `tests/own/abi/call-triviality` checks the default against Clang 23 objects. It is
+     an expected failure under GCC only because of those members. `call-triviality-apple` checks
+     the switch against Apple Clang objects (`PEER-WITH: apple-clang`).
+   - *Reason:* the oracles and the ABI document agree on the default, and the switch serves code
+     that must link with the platform's own objects.
 
 ## 2. Provenance
 

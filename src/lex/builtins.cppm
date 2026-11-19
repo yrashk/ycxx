@@ -78,6 +78,18 @@ constexpr const TypeTraitInfo* type_trait(std::string_view name) {
     if (t.name == name) return &t;
   return nullptr;
 }
+// The GNU built-in functions the SDK's and libycxx's headers call and ycxx does not have yet
+// (docs/EXTENSIONS.md, #248): a call of one is diagnosed as not supported, its arguments skipped.
+// Any other `__builtin_` name is an ordinary name, undeclared unless declared, so a
+// requires-expression probing it is unsatisfied ([expr.prim.req]).
+inline constexpr std::array<std::string_view, 16> lacking_builtins{
+    "__builtin_fabsf",     "__builtin_fabs",       "__builtin_fabsl",       "__builtin_inff",
+    "__builtin_inf",       "__builtin_infl",       "__builtin_huge_valf",   "__builtin_huge_val",
+    "__builtin_huge_vall", "__builtin_nanf",       "__builtin_nan",         "__builtin_nanl",
+    "__builtin_alloca",    "__builtin_constant_p", "__builtin_offsetof",    "__builtin_expect",
+};
+constexpr bool lacking_builtin(std::string_view name) { return std::ranges::contains(lacking_builtins, name); }
+
 // The first spelling of `t`, Clang's where GCC spells it differently.
 constexpr const TypeTraitInfo& type_trait_info(TypeTrait t) {
   for (const TypeTraitInfo& i : type_traits)

@@ -220,7 +220,7 @@ ast::DeclSema decl_of(World& w, const Fn& fn) {
   for (auto [e, t] : fn.params) ps.push_back({e, t, w.in.names.intern(w.f.entities.at(std::to_underlying(e))), NodeId::none, 0});
   auto params = w.in.intern_seq(std::span<const ast::ParamSema>(ps));
   return {fn.entity, fn.type, ast::DeclKind::function, ast::Linkage::external, ast::Storage::none,
-          ast::Access::none, 0, {}, NodeId::none, NodeId::none, params,
+          ast::Access::none, 0, {}, NodeId::none, ast::ConstId::none, NodeId::none, params,
           w.in.intern_seq(std::span<const ast::TemplateParamSema>{})};
 }
 

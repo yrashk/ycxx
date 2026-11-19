@@ -1,0 +1,27 @@
+// ACTION: run
+// ζ s7 (#88), from the step's review: a class template's static constexpr member changes its
+// initializer and the specializations used change: each state behaves as a cold build of it.
+--- main.cpp
+#include "s.h"
+int main() { const int* p = &S<int>::v; return *p == 4 && S<char>::v == 1 ? 0 : 1; }
+--- s.h
+template<class T> struct S { static constexpr int v = sizeof(T); };
+struct Q { static constexpr int value = 9; };
+=== edit
+--- main.cpp
+#include "s.h"
+int main() { return S<Q>::v == 9 ? 0 : 1; }
+--- s.h
+template<class T> struct S { static constexpr int v = T::value; };
+struct Q { static constexpr int value = 9; };
+=== edit
+--- main.cpp
+#include "s.h"
+int main() { const int* p = &S<Q>::v; return *p == 9 ? 0 : 1; }
+=== edit
+--- s.h
+template<class T> struct S { static constexpr int v = sizeof(T); };
+struct Q { static constexpr int value = 9; };
+--- main.cpp
+#include "s.h"
+int main() { const int* p = &S<int>::v; return *p == 4 ? 0 : 1; }

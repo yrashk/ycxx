@@ -214,7 +214,7 @@ What is true of the code today. Work in progress and its owners are tracked in
   - module and import lines go on to phase 7, their keywords flagged `tok_flag::directive`.
     Header-unit imports and `#embed` are diagnosed as unsupported.
 - Predefined macros (`:predefined`, DECISIONS §1.5):
-  - `__ycxx__` and its version, and the draft's macros;
+  - `__ycxx__` and its version, `__GNUC__` 4.2.1 (#229), and the draft's macros;
   - a feature-test table, with lexer features only;
   - the target's macros, generated from `ast::Target` and checked against Clang
     (`tests/own/pp/predefined-target.pp.cpp`);
@@ -560,6 +560,18 @@ private daemons.
   `YCXX_CHAOS_SEED`; the daemon takes them from the client that starts it and reports `threads`
   in `ctl status`. Workers and the daemon's request threads have 256 MiB stacks (address space),
   above a main thread's 8 MiB (#178, #187).
+- Nesting too deep for the stack (#187): `ycxx.stack::deep()` says whether more than half of the
+  thread's stack is in use (pthreads, a partition per platform). The parser asks at
+  `cast_expression` (parentheses, casts), `unary_expression` (`++`, `--`, `sizeof`),
+  `braced_init_list` and `statement` (blocks), and at the
+  first deep one diagnoses "nested too deeply to analyse" and throws `parse::TooDeep`, which the
+  item's or body's analysis catches: the item fails, the unit has an error, the daemon lives.
+  Instantiations nest through those parses. `engine::Pool` takes a worker stack size (default
+  256 MiB); `unit.pipeline_incremental`'s `too_deep` runs 20,000-deep parentheses, blocks,
+  increments, `sizeof`s and braced lists on 1 MiB workers (without the guards: SIGBUS). Not yet:
+  declarators, template-ids, deep trees from flat chains, the passes after the parse, and a
+  diagnostic that does not depend on the stack's size (#260). The time to get that deep is
+  superlinear (#258).
 - Concurrent requests (#139, daemon design §4): a unit, a program and a request are named by what
   they are (`Session::unit`, `program`, `request`: path, working directory, configuration, object;
   units, objects, name), numbered by a registry whose values provide their inputs, so admitting a
@@ -667,10 +679,29 @@ in `lsp` frames (`LspOut`), the last of which carries LSP's exit status (1 after
   save), a unit and header opened through a symbolic link, a build sent during a `didChange`
   (the saved file's object, the buffer's diagnostics), 600-error answers crossing large edits,
   the exit status, and `ctl shutdown` with a session open.
-- Not yet: `compile_commands.json` (#167); stopping a diagnosis on a newer edit,
+- A document's command line (#167, §6.4): the last served `compile` request that compiled it,
+  else its entry in `compile_commands.json` at the scope's root (`arguments`, or `command` split
+  as a shell's words; its preprocessing options and template depth kept by
+  `compile::check_command`, another compiler's other options dropped; the file read again when
+  its identity changes; `@file` response files expanded relative to the entry's directory; a
+  header or C entry is no unit), else the file alone in its directory. `daemon.lsp`'s
+  `compile_commands` covers both forms, a response file, a header and a C file, a directory
+  spelled through a symbolic link, and a change (mutation-checked). Options `pp` does not take
+  yet (`-include`, `--sysroot`, …) are dropped (#251).
+- Not yet: stopping a diagnosis on a newer edit,
   `$/cancelRequest`, debouncing and interactive priority (#168); `buffers_in`, the disk-view
-  assertion and one view per session (#169); go-to-definition and diagnostics inside headers
-  (#170, after #34); open documents as eviction roots (#17).
+  assertion and one view per session (#169); go-to-definition from a declaration part (a
+  parameter's type, a base) and of locals (#242); open documents as eviction roots (#17).
+- Go-to-definition and headers' diagnostics (#170): `textDocument/definition` asks the daemon
+  (`lsp::Define`), which checks the document's unit in the editor view and runs
+  `pipeline::DefinitionAt{unit, file, offset}`: the offset's token in the region (its site, a
+  macro's at its name), the innermost item, the node `ast::Red::find` reaches in that item's
+  function body, and the entity a `DeclRef`, `Member` or `Call` there names; then that entity's
+  first declaration (`FrontResult::declared`, kept with errors too) mapped back to a file and an
+  offset. Diagnostics located in a file the editor has not opened are published under it and
+  cleared when no document reports them; a header's message is rendered against its open buffer
+  in the editor view. `daemon.lsp`'s `definitions` covers a header's function, unsaved text, a
+  header's warning shown, moved by an unsaved edit, and cleared (mutation-checked).
 
 ## The L1 interpreter (#25, 2026-11-18)
 
@@ -726,7 +757,7 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   evaluated expression.
 - Tests: `tests/own/consteval` (spec-only); the draft's [dcl.constexpr]/5 ex. 3, [dcl.constinit]/3
   ex. 1 and [stmt.if]/4 ex. 3 pass.
-- Not yet (#102): naming a consteval function outside a call, `if constexpr`, static_assert
+- Not yet (#102): naming a consteval function outside a call, static_assert
   messages that are constant expressions, notes along the call chain, block-scope static constexpr
   variables.
 
@@ -968,8 +999,8 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   (#219); `N::T(…)` and `N::T{…}` are functional casts.
 - `T (*p)(args);` with T a typedef-name declares p ([stmt.ambig]), in sema and in the splitter.
 - **`#include <stdio.h>`** (the SDK's) compiles, and `printf`, `puts`, `fputs` and `stdout` run
-  (`tests/own/headers/stdio.run.cpp`). `<cstdio>` still waits for libycxx's templates and
-  concepts (#88).
+  (`tests/own/headers/stdio.run.cpp`). `<cstdio>` still waits for static members of class
+  templates and template template parameters (#88) and pointer-to-member types (#238).
 - Member operators get the [over.oper] checks too; `S::operator@` and `N::operator@` define outside;
   unary `*` and `&` call operator functions; a deleted or ambiguous choice is an error, not the
   built-in operator. `N::T(…)` is a cast only when no function or variable hides N::T.
@@ -989,16 +1020,19 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   most 16 bytes passes and returns in one or two 8-byte registers; a larger or non-trivial one by
   address, an indirect result in x8 (`l2::Function::indirect_result`, the call's fourth
   immediate). A class needing more registers than are left goes whole on the stack and leaves the
-  rest unused (C.11). An empty class passes nothing, as in Clang. A user-provided move
-  constructor makes a class non-trivial for calls, as in Clang 23 and GCC; Apple Clang 21
-  differs (#230).
-- **Mixed-object tests:** `PEER:` in a run test names a file Clang compiles and links with it
-  (docs/TESTING.md). `tests/own/abi` checks 3- to 24-byte classes, a non-trivial one, member
-  functions returning classes and exhausted registers, calling both ways.
+  rest unused (C.11). An empty class passes nothing, as in Clang. Which classes are trivial for
+  calls follows upstream Clang and GCC by default (Itanium, `ClassRec::move_usable`,
+  `move_nontrivial`). `-fclass-call-abi=apple` selects Apple Clang's rule on arm64 Darwin
+  (`ast::Target::call_triviality`, `pp::Config::call_triviality`, DECISIONS §1.6).
+- **Mixed-object tests:** `PEER:` in a run test names a file the oracle Clang compiles and links
+  with it, or Apple Clang with `PEER-WITH: apple-clang` (docs/TESTING.md). `tests/own/abi`
+  checks 3- to 24-byte classes, member functions returning classes, exhausted registers, empty
+  classes, and each kind of class for calls (trivially copyable, non-trivial copy or destructor,
+  move-only, deleted copy, a move-only member) under both settings, calling both ways.
 - Not yet: braced arguments to overload sets, templates and member calls (#231), class arguments
   through an ellipsis and calls through pointers returning classes (#196), classes with
   floating members (#201), classes in constant evaluation (#25).
-- Tests: `tests/own/abi` (3), `tests/own/classes/s5-byvalue-lifetimes`, `-temporaries`;
+- Tests: `tests/own/abi` (5), `tests/own/classes/s5-byvalue-lifetimes`, `-temporaries`;
   s1-byvalue-params and -return pass.
 
 ## Templates, ζ step 1: function templates (#88, 2026-11-18)
@@ -1200,6 +1234,98 @@ session's.*
   `__is_nothrow_*` families, `__is_base_of`, `__is_standard_layout` and
   `__reference_binds_to_temporary`; a value-dependent predicate as a template argument outside a
   body (#209).
+
+## Templates, ζ step 6: concepts and `if constexpr` (#88, 2026-11-18)
+
+Fable decided the representation (ast.md §6.6); the Opus session wrote the code.
+- **Concept definitions** ([temp.concept]) are `concept_` entities whose `DeclSema.constraints` is
+  the normal form of their constraint-expression. A concept-id `C<args>` is a `bool` constant, or
+  value-dependent while an argument is.
+- **Associated constraints** of function templates ([temp.constr.decl]): type-constraints
+  (`template<C T>`, `template<C<U> T>`), the head's requires-clause and the trailing one, in
+  normal form ([temp.constr.normal]): `VConstraint` conjunctions and disjunctions over `VAtom`s,
+  each the atom's tokens and a mapping of the parameters it names.
+- **Satisfaction** ([temp.constr.sat]): an atom is re-analysed from its tokens with its mapping
+  bound, its function parameters declared and argument-dependent lookup at the point of the
+  check; an error there makes it unsatisfied, a non-`bool` or non-constant result and "not
+  supported" are hard errors (`survives_substitution`), so a missing feature never picks another
+  overload. Results are memoized per atom (`Program::atom_satisfied`).
+- **Overload resolution** drops candidates whose constraints are not satisfied
+  ([over.match.viable]/3) and, between templates that are otherwise equally specialized, prefers
+  the one whose constraints subsume the other's ([temp.constr.order], [temp.func.order]/6).
+  Declarations whose clauses differ are distinct overloads; equivalent clauses (as tokens, with
+  parameters by position) redeclare.
+- **Requires-expressions** ([expr.prim.req]) with parameters and simple, type, compound (with a
+  return-type-requirement, also a qualified concept) and nested requirements, checked in place:
+  false in a templated entity when a requirement is invalid, ill-formed elsewhere.
+- **`if constexpr`** ([stmt.if]/2): the condition is evaluated as it is parsed; an
+  instantiation skips the discarded branch, and outside templates its odr-uses demand nothing.
+- Also: the stand-in `Program` indexes declared names, so a namespace-scope lookup visits only
+  its own name's items (draft tests including libycxx headers: 8 s → 5 s); floating literals
+  report "not supported" instead of "expected '<'".
+- Tests: `tests/own/templates/c6-*` (18, agreeing with Clang and GCC); 6 more draft examples
+  pass. `<cstdio>`: 33 → 18 errors.
+- Not yet: constraints on class and variable templates, partial specializations and members,
+  constrained packs, fold-expanded constraints, `C auto`, `noexcept` in compound requirements
+  (#234); re-verification of satisfaction at END (#235); Itanium constraint mangling (#236);
+  recorded discarded extents for `if constexpr` (#237); value-dependent mapping arguments (#209);
+  `static_assert(false)` in a template that is never instantiated (#241).
+
+## Templates, ζ step 7: static data members of class templates (#88, 2026-11-18)
+
+- A class template's static data members are declared with its other members. A specialization
+  declares them; the in-class initializer of one defined in the class (constexpr or inline) is
+  instantiated only when the member is used ([temp.inst]/3, `Program::member_value`), from the
+  extent the template's analysis recorded, under the nesting limit ([temp.inst]/16). Only the
+  members used are defined in the unit (`Program::used_members`); as with variable templates,
+  the definitions are not yet coalesced across units (#124).
+- In the template, a static member whose initializer is value-dependent is value-dependent
+  ([temp.dep.constexpr]/2.3); one whose initializer is not is a constant there. `static const T k
+  = 5;` is checked again in each specialization.
+- `X<args>::m` with a dependent qualifier names a value, not a type, in a statement, a condition, a
+  cast's parentheses or a template argument, unless `typename` says otherwise
+  ([temp.res.general]/4).
+- An explicitly specialized static data member, `template<> int A<char>::x = 0;`, defines it; one
+  that already has an in-class initializer cannot be given another.
+- A member whose initializer is in error is declared, and its uses report nothing more.
+- Tests: `tests/own/templates/s7-*` (11, agreeing with Clang and GCC),
+  `tests/incremental/templates/static-members.incr`; 1 more draft example passes.
+  `<cstdio>`: 18 → 16 errors.
+- Not yet: a definition outside the class, `template<class T> int X<T>::n = 5;`, reported as not
+  supported (#256); an array bound or template argument that is a dependent expression other than
+  a parameter (`int a[sizeof(T)]`, `F<N - 1>`, #209); `static_assert` in a member-specification
+  (#257); dynamic initialization of an inline static member. Found on the way: #262, #263, #264.
+
+## `__GNUC__` and system-header warnings (#229, 2026-11-19)
+
+- ycxx predefines `__GNUC__` 4.2.1, as Clang does (`:predefined`; DECISIONS §1.5, revising #112),
+  so the SDK's `sys/cdefs.h` no longer warns "Unsupported compiler detected". Not `__GNUG__`,
+  `__clang__` or `__llvm__`. libycxx tests `__ycxx__` first (yrashk/libycxx#28).
+- What the SDK's `__GNUC__` paths then use, in the headers libycxx's C headers reach, is in
+  docs/EXTENSIONS.md. New: `__builtin_va_list`, the target's va_list type (`char*`;
+  `ast::Target::va_list`), found where lookup finds nothing else (`Sema::builtin_type_name`).
+  The `__builtin_*` functions ycxx lacks (`__builtin_fabsf`, `__builtin_inff`, `__builtin_alloca`,
+  `__builtin_offsetof`, …) are diagnosed as "built-in function '…' is not supported yet", their
+  arguments skipped (`lex::lacking_builtins`, `Sema::unsupported_builtin`). Any other `__builtin_`
+  name is an ordinary one, so a requires-expression probing it is unsatisfied.
+- Warnings located in a system header are not reported; errors are, and so is `#warning`, as
+  with Clang and GCC. A system header is one found in a system directory (a `-I` directory that
+  is also an `-isystem` one is dropped from the `-I` list), or one a system header includes
+  (`Config::system_header`, `Frame::system`, part of a region's cache key). Phase 4's warnings
+  are dropped when the region finishes; phases 5 and 6's when flattened (`Flat::system`), by
+  their token's outermost expansion site, and one spelled in a system header's macro is reported
+  where the macro is used. Sema has no warnings yet; when it gets some, it needs the region's
+  system files too.
+  - Not yet: `Flat::system` is by file, so a header without a guard included both as a system
+    header and not has phases 5 and 6's warnings hidden in both.
+- The test driver checks warnings where a test has `//! warning` markers (docs/TESTING.md), and
+  reads markers in headers a test includes with `<...>` from its `FLAGS` directories.
+- Tests: `tests/own/pp/predefined-gnuc.pp.cpp`, `tests/own/headers/system-warnings.accept.cpp`,
+  `tests/own/headers/stdio-no-warnings.accept.cpp` (`<stdio.h>` with no warning; darwin only
+  until Linux searches glibc's multiarch directory, #252), `tests/own/headers/system-error.reject.cpp`,
+  `tests/own/builtins/va-list.run.cpp`, `tests/own/builtins/unsupported.reject.cpp`, `tests/own/builtins/unknown-probe.accept.cpp`. `<cstdio>`: 25 errors before and after, and no warning
+  (was 1). `<cmath>` and `<cstdlib>` gain errors in the SDK's `__GNUC__` inline functions (local
+  unions, floating-point operations, `__builtin_fabs*`), which already had thousands.
 
 ## The engine trace (#245, 2026-11-19)
 

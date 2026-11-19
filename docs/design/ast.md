@@ -40,6 +40,8 @@ Opus session that owns the issue wrote the spike, this document and the bookkeep
   that diff alone closed 23 of them and found that one proposed fix (default arguments carried by
   `instantiate_fn`) would make a call depend on the END instantiation; the session applied the
   narrow remedy (§6.4) without a further round.
+- **Amendments by #88.** Step 4's packs (§5.6, §6.4) and step 6's constraints (§5.5, §6.6) were
+  each decided by a Fable subagent; the Opus session wrote the code and this text.
 
 ## 1. Decisions in brief
 
@@ -202,6 +204,7 @@ and a node's parent is only ever the cursor chain of the current walk (spike, §
 struct ItemSema { NodeId tree; SeqId<DeclSema> decls; };                 // item_sema(item, ctx)
 struct DeclSema { EntityId entity; QualType type; u8 kind, linkage, storage, access; u16 flags;
                   SeqId<AttrId> attributes; NodeId constraint;
+                  ConstId constraints;          // associated constraints' normal form (§6.6)
                   NodeId contracts;             // non-members only, this declaration's own (§7.5)
                   SeqId<ParamSema> params; };   // flags include explicit_object (§5.4)
 struct ClassDef { SeqId<BaseSpec> bases; SeqId<MemberRec> members; SeqId<MemberRec> friends;
@@ -477,6 +480,12 @@ Constant values live in the `values` interner as `ConstId`s:
   `VDepMember{ConstId object; NameId; TemplateArgs; arrow}`, `VDepRequires{TypeListId params;
   SeqId<Requirement>}` ([expr.prim.req]), `VDepSizeof{QualType}`, `VDepFold`,
   `VDepExpansion{ConstId pattern}`, `VDepPackIndex`, `VDepSplice`, `VDepReflect`.
+- the **constraint family** (*amended by #88 step 6, Fable's decision*, §6.6): `VAtom{ItemId item;
+  u32 begin, end; u16 depth; SeqId<ConstId> mapping; SeqId<u32> calls; bool fn_params}` (an
+  atomic constraint: its tokens, its parameter mapping, its dependent calls, and whether it names
+  a function parameter), `VConstraint{u8 op; SeqId<ConstId> operands}` (a conjunction or disjunction
+  in normal form), and `VType{QualType unqualified; u8 cv}` (a type argument in a mapping; a value
+  holds only unqualified canonical types, so the cv-qualifiers ride beside it).
 
 A function's own type never contains its own `EntityId`; parameters it mentions are
 `VDepFnParam`, so `decltype(x + y)` and `decltype(a + b)` in two declarations of one template are
@@ -660,6 +669,49 @@ specialization, `ClassDef.members` and `ClassDef.friends`, carry `(DeclId patter
 instantiated)`, as `MemberRec` does; `resolve`'s candidate set (§B5) is a set of such pairs, and
 `function_type` reads the instantiated entity's type. This extends §B3's "lookup results are lists
 of declaration ids" without changing it for non-template code, where the entity is not needed.
+
+### 6.6 Constraints
+
+*Added by #88 step 6; Fable's decision, implemented and written by the Opus session.*
+
+A declaration's associated constraints ([temp.constr.decl]/3: its head's type-constraints, its
+head's requires-clause, its trailing requires-clause) are stored in normal form
+([temp.constr.normal]) in `DeclSema.constraints`, a `ConstId` of the constraint family (§5.5), none
+when unconstrained. `||` and `&&` become `VConstraint`s; parentheses and concept-ids decompose,
+a concept-id into its concept's normal form with the arguments substituted into its atoms'
+mappings (/1.4); any other operand is a `VAtom`.
+
+- **An atom is its tokens plus a mapping.** `VAtom` names the item and the token extent of the
+  expression, and the arguments of the innermost head's parameters that the expression names; the
+  others are none ([temp.constr.atomic]/1). Two atoms are identical when they are one expression in
+  the source with equal mappings (/2), which is `ConstId` equality. So `Ctrue<typename T::type>`
+  with `concept Ctrue = true` never forms `T::type`. A mapping that is invalid for the arguments
+  makes the atom an empty disjunction, false (/3). An atom of a trailing requires-clause that names
+  a function parameter maps every parameter of its head, since the function parameter's type may
+  name any of them (*the Opus session's, from the review*).
+- **Satisfaction re-analyses the tokens with the mapping bound**, as §6.4 re-analyses bodies:
+  any error there makes the atom unsatisfied ([temp.constr.atomic]/3: substitution failure), but
+  "not supported" and the instantiation depth are hard errors, and so is a result that is not a
+  `bool` constant. An atom's result is memoized by its `ConstId`; the first evaluation is the
+  program's (re-verification at END is #235). Its unqualified calls that were dependent where it
+  appears (`calls`) add argument-dependent lookup at the point of the check, as instantiated
+  bodies do ([temp.dep.candidate]).
+- **A nested requirement is checked in place** (*the Opus session's, from the review*): with the
+  requires-expression's parameters in scope, its `||` and `&&` short-circuiting as satisfaction
+  does; it forms no atoms, since subsumption never looks inside a requires-expression.
+- **Redeclarations compare clauses as tokens.** Whether two declarations of a function template
+  are one ([temp.over.link]/5,7) is decided by a fingerprint of their clauses' tokens with each
+  template parameter replaced by its position, mixed into the entity key; normal forms are not
+  compared (they would identify functionally equivalent but differently spelled clauses).
+- **Subsumption** ([temp.constr.order]) puts the left side in disjunctive and the right in
+  conjunctive normal form and compares atoms by identity, with a budget of 65536 clauses beyond
+  which neither subsumes.
+- **Mangling** carries no constraints, as Darwin's Clang emits today; Itanium's is #236.
+
+`if constexpr` ([stmt.if]/2) evaluates its condition while parsing. A dependent condition keeps
+both branches; otherwise only the kept one is in the tree. In an instantiation the discarded
+branch is skipped as tokens (#237 replaces the skipper by recorded extents); outside a template
+it is analysed and its odr-uses demand nothing ([basic.def.odr]/15).
 
 ## 7. C++26 constructs
 

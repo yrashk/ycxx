@@ -42,37 +42,6 @@ Use use_from_environment() {
   return Use::on;
 }
 
-// Splits a response file's text into arguments: whitespace separates them, and quotes and
-// backslashes escape as in a shell's words.
-std::vector<std::string> split_words(std::string_view text) {
-  std::vector<std::string> out;
-  std::string cur;
-  bool in_word = false;
-  char quote = 0;
-  for (std::size_t i = 0; i < text.size(); ++i) {
-    char c = text[i];
-    if (quote) {
-      if (c == quote) quote = 0;
-      else if (c == '\\' && quote == '"' && i + 1 < text.size()) cur += text[++i];
-      else cur += c;
-    } else if (c == '\'' || c == '"') {
-      quote = c;
-      in_word = true;
-    } else if (c == '\\' && i + 1 < text.size()) {
-      cur += text[++i];
-      in_word = true;
-    } else if (std::isspace(static_cast<unsigned char>(c))) {
-      if (in_word) out.push_back(std::exchange(cur, {}));
-      in_word = false;
-    } else {
-      cur += c;
-      in_word = true;
-    }
-  }
-  if (in_word) out.push_back(cur);
-  return out;
-}
-
 // Expands `@file` arguments, relative to the client's working directory (§3.2). A file that
 // cannot be read stays an argument, as other compilers keep it.
 void expand(std::string_view a, std::vector<std::string>& out, int depth) {
@@ -80,7 +49,7 @@ void expand(std::string_view a, std::vector<std::string>& out, int depth) {
     std::ifstream in(std::string(a.substr(1)), std::ios::binary);
     if (in) {
       std::string text{std::istreambuf_iterator<char>(in), {}};
-      for (const std::string& w : split_words(text)) expand(w, out, depth + 1);
+      for (const std::string& w : compile::split_words(text)) expand(w, out, depth + 1);
       return;
     }
   }

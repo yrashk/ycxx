@@ -19,8 +19,9 @@ FEATURES = ('syntax', 'preprocess', 'run', 'incremental')
 ORACLES = ('clang', 'gcc')
 
 # file:line:col: error: ... (GCC and Clang, and the form ycxx's c++-compatible front emits,
-# DECISIONS §4.7). Notes and warnings are not errors.
+# DECISIONS §4.7). Notes and warnings are not errors; WARNING finds the warnings.
 DIAG = re.compile(r'^(?P<file>[^:\n]+):(?P<line>\d+):(?P<col>\d+): (?:fatal )?error: ', re.M)
+WARNING = re.compile(r'^(?P<file>[^:\n]+):(?P<line>\d+):(?P<col>\d+): warning: ', re.M)
 
 
 @dataclass
@@ -63,10 +64,11 @@ class Compiler:
         return ''
 
 
-def errors_in(text, cwd):
-    """The error locations in a compiler's output: [(absolute path, line, col)]."""
+def errors_in(text, cwd, pattern=DIAG):
+    """The error locations (with pattern=WARNING, the warnings') in a compiler's output:
+    [(absolute path, line, col)]."""
     out = []
-    for m in DIAG.finditer(text):
+    for m in pattern.finditer(text):
         p = Path(m['file'])
         p = p if p.is_absolute() else Path(cwd) / p
         out.append((os.path.realpath(p), int(m['line']), int(m['col'])))

@@ -17,10 +17,10 @@ KINDS = {  # file suffix -> kind
 SUITE_STAGE = {'draft': 'core', 'own': 'core', 'diff': 'wider', 'incremental': 'wider'}
 NOT_SUITES = {'driver', 'features', 'bootstrap'}  # bootstrap: #4's toolchain smoke test, run by tools/build
 
-DIRECTIVE = re.compile(r'^\s*//\s*(REQUIRES|XFAIL|FLAGS|TIMEOUT|EXIT|STDOUT|PP-COMPARE|ORACLE|DIFF|ACTION|MAIN|TIER|PEER):(.*)$')
+DIRECTIVE = re.compile(r'^\s*//\s*(REQUIRES|XFAIL|FLAGS|TIMEOUT|EXIT|STDOUT|PP-COMPARE|ORACLE|DIFF|ACTION|MAIN|TIER|PEER|PEER-WITH):(.*)$')
 # An expected error: `//! error` on its line, `//! error@+1` / `@-2` relative, `@12` absolute,
-# and an optional column, `//! error@+1:5`.
-MARKER = re.compile(r'//!\s*error(?:@([+-]?\d+))?(?::(\d+))?')
+# and an optional column, `//! error@+1:5`. `//! warning` expects a warning the same way.
+MARKER = re.compile(r'//!\s*(error|warning)(?:@([+-]?\d+))?(?::(\d+))?')
 
 
 @dataclass
@@ -58,14 +58,16 @@ def directives_of(text, incremental=False):
     return out
 
 
-def markers_in(text):
-    """[(line, col or None)] of the errors a file's `//!` markers expect."""
+def markers_in(text, severity='error'):
+    """[(line, col or None)] of the errors (or warnings) a file's `//!` markers expect."""
     out = []
     for n, line in enumerate(text.splitlines(), 1):
         for m in MARKER.finditer(line):
-            at = m[1]
+            if m[1] != severity:
+                continue
+            at = m[2]
             target = n if at is None else (n + int(at) if at[0] in '+-' else int(at))
-            out.append((target, int(m[2]) if m[2] else None))
+            out.append((target, int(m[3]) if m[3] else None))
     return out
 
 
