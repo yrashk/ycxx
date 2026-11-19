@@ -1618,9 +1618,10 @@ checked against Clang 23 and GCC 16 probes).
   (`Evaluator::closure_callee` for the part being analysed, `Program::closure_ir` otherwise),
   and closure members are constexpr; the interpreter does not evaluate class objects yet (#262),
   so constexpr lambdas wait on it.
-- Tests: `tests/own/lambda/p3-*` (33 spec-only + 1 ABI): 22 pass, 12 XFAIL (constexpr lambdas
-  #262, default arguments #300, `static_cast<T&&>` and dependent `decltype` #199, a generic
-  lambda's conversion #339, explicit template arguments #347).
+- Tests: `tests/own/lambda/p3-*` (33 spec-only + 6 own, one an ABI test against Clang objects):
+  all but 12 pass; those are XFAIL (constexpr lambdas #262, default arguments #300,
+  `static_cast<T&&>` and dependent `decltype` #199, a generic lambda's conversion #339, explicit
+  template arguments #347).
 - **Packs:** `auto... xs` invents a template parameter pack and `[]<class... Ts>(Ts... xs)`
   declares one; a specialization's parameters are the pack's elements (`open_generic`), and the
   body's expansions are those its definition recorded (`GenericClosure::expansions`, kept in the

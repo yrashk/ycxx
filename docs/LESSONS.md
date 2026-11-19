@@ -101,7 +101,11 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
   - Do: before the review, run every new deduction through discarded statements, overload
     sets and their addresses, the current instantiation's members, and a template's definition
     versus its instantiation, and give each a test.
-  - Learned on #279.
+  - The same held for lambdas (#280, #281): the P0s and P1s were odr-use of constants, arrays of
+    classes, a plain lambda inside a generic one, and a generic lambda calling a function
+    template. Do: combine the new construct with each neighbouring one it can nest in or call
+    (lambdas in templates and templates in lambdas) before the review.
+  - Learned on #279; confirmed on #280 and #281.
 
 ## Working with Fable subagents
 
