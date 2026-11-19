@@ -17,6 +17,10 @@ reasoning; do not leave decisions only in issue threads.
 3. **Targets, in order:** AArch64 Mach-O (macOS), x86-64 ELF (Linux), AArch64 ELF (Linux). Each
    target has to be fully supported, including its object format, linker, unwind tables and DWARF,
    before the next one starts.
+   - The first Linux x86-64 [dynamic link](docs/design/linux-dynamic-executable.md) uses
+     explicit shared objects, the target interpreter and a fixed-address executable. Native
+     direct function imports use eager GOT relocations. Target CRT and normal hosted process
+     startup follow under #390.
 4. **Optimization is designed in from the start, and delivered after correctness.** The first
    back end aims for correct, debuggable code of roughly `-O0`/`-O1` quality. The architecture
    (§4.8) is laid out from day one for optimization by search, solvers and measured cost models,
