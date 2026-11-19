@@ -8,6 +8,16 @@ run once per translation unit and exit, but to stay resident, hold the whole pro
 in memory, and, when a file changes (reported by a file-system watcher, an editor or a build
 tool), recompute only what that change can affect.
 
+## Watch mode demo
+
+Vim edits trigger live rebuilds in ycxx's interactive trace. The demo follows one function through
+L1 IR, lowered L2 IR, and emitted ARM64 instructions, then shows compiler errors and their fixes.
+The final Linux x86-64 self-check uses the freestanding support in [#380](https://github.com/yrashk/ycxx/pull/380).
+
+![Vim and ycxx watch mode showing live rebuilds, L1 and L2 IR, and ARM64 assembly](docs/media/ycxx-watch-ir-codegen.gif)
+
+[View the GIF at full size](docs/media/ycxx-watch-ir-codegen.gif)
+
 ## Status
 
 **Pre-0.1** (as of 2026-11-19). ycxx compiles a substantial subset of C++ (C-like code, classes,
