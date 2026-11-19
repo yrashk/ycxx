@@ -115,8 +115,36 @@ struct [[=dependent]] VDepSizeofPack {
   u16 index;
 };
 
+// ---------------------------------------------------------------- constraints ([temp.constr])
+// *#88 step 6, Fable's decision.*
+
+// A type as a value: a type parameter's argument in an atomic constraint's parameter mapping.
+struct VType {
+  QualType type;
+};
+
+// An atomic constraint ([temp.constr.atomic]): the appearance of its expression (the item that
+// contains it, and its tokens [begin, end) in that item's declaration part), and its parameter
+// mapping: one entry per parameter of the head at `depth`, a `VType` or a value for a parameter the
+// expression names and none for the others ([temp.constr.atomic]/1). Two are identical when they
+// are one value ([temp.constr.atomic]/2).
+struct VAtom {
+  ItemId item;
+  u32 begin;
+  u32 end;
+  u16 depth;
+  SeqId<ConstId> mapping;
+};
+
+// A normal form ([temp.constr.normal]): the conjunction (`op` 0) or disjunction (`op` 1) of normal
+// forms and atoms.
+struct VConstraint {
+  u8 op;
+  SeqId<ConstId> operands;
+};
+
 using ValueKinds = closed_list<VInt, VNullptr, VString, VLvalue, VEntity, VAggregate, VDepParam, VDepFnParam, VDepExpansion,
-                               VDepSizeofPack>;
+                               VDepSizeofPack, VType, VAtom, VConstraint>;
 
 template <class T>
 constexpr bool is_value_kind = ValueKinds::contains<T>;

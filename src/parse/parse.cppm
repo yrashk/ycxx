@@ -37,6 +37,7 @@ ast::DeclSema invalid_decl() {
   ast::DeclSema d{};
   d.entity = EntityId::none;
   d.constraint = ast::NodeId::none;
+  d.constraints = ast::ConstId::none;
   d.contracts = ast::NodeId::none;
   return d;
 }
@@ -1766,6 +1767,7 @@ private:
     sem.flags = definition ? sema::decl_flag::definition : 0;
     sem.attributes = b_.seq(std::span<const NodeId>{});
     sem.constraint = NodeId::none;
+    sem.constraints = ast::ConstId::none;
     sem.contracts = NodeId::none;
     sem.params = b_.seq(std::span<const ast::ParamSema>{});
     sem.template_params = b_.seq(std::span<const ast::TemplateParamSema>{});
@@ -2657,6 +2659,7 @@ private:
     sem.linkage = internal || Program::unnamed(p_->ns_of(k_)) ? ast::Linkage::internal : ast::Linkage::external;
     sem.access = ast::Access::none;
     sem.constraint = NodeId::none;
+    sem.constraints = ast::ConstId::none;
     sem.contracts = NodeId::none;
     sem.attributes = b_.seq(std::span<const NodeId>{});
     sem.template_params = b_.seq(std::span<const ast::TemplateParamSema>{});
@@ -3481,6 +3484,7 @@ void Program::special_members(u32 item, EntityId cls, sema::ClassRec& rec) {
               (copy ? sema::decl_flag::constructor : sema::decl_flag::destructor);
     d.attributes = b.seq(std::span<const NodeId>{});
     d.constraint = NodeId::none;
+    d.constraints = ast::ConstId::none;
     d.contracts = NodeId::none;
     d.params = b.seq(std::span<const ast::ParamSema>(params));
     d.template_params = b.seq(std::span<const ast::TemplateParamSema>{});

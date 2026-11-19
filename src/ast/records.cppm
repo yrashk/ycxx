@@ -67,6 +67,9 @@ struct DeclSema {
   u16 flags;  // includes explicit_object (§5.4)
   SeqId<NodeId> attributes;  // Attribute nodes
   NodeId constraint;
+  // A template's associated constraints in normal form (a `VConstraint` or `VAtom`), or a concept's
+  // own constraint-expression's; none if it has none ([temp.constr.decl]).
+  ConstId constraints;
   NodeId contracts;  // non-members only, this declaration's own (§7.5)
   SeqId<ParamSema> params;
   // A template's template-head ([temp.pre]); empty for a declaration that is not a template.
