@@ -36,6 +36,18 @@ class Encoder {
 
   void move(Reg dst, Reg src) { reg({0x89}, src, dst); }
 
+  // DIV and IDIV take the dividend in EDX:EAX or RDX:RAX. They put the quotient in EAX
+  // or RAX and the remainder in EDX or RDX (AMD64 Programmer's Manual, vol. 3).
+  void divide(Reg divisor, bool is_signed, bool wide) {
+    if (is_signed) {
+      rex(wide, 0, 0);
+      emit({0x99});  // cdq or cqo
+    } else {
+      reg({0x31}, Reg::rdx, Reg::rdx, false);  // xor edx, edx also clears the high 32 bits of RDX
+    }
+    reg({0xf7}, is_signed ? 7 : 6, divisor, wide);  // idiv or div
+  }
+
   void load(Reg dst, Reg base, std::int32_t disp, unsigned width) {
     // Narrow loads zero-extend into a 32-bit register, which also clears its high 32 bits.
     switch (width) {

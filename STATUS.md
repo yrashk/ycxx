@@ -355,6 +355,12 @@ stay open for the rest.
   validator and dependence checker (#29), SSA linear scan, list scheduling, unwind info and DWARF,
   a measured `cost_model` (#9), defining a variadic function (`va_start`), more than one result, frame objects aligned above 16 bytes.
 
+## System V AMD64 scalar integer division
+
+- The x86-64 emitter supports L2 `sdiv`, `udiv`, `srem` and `urem` for `i32` and `i64`.
+  `unit.x86_64` lowers C++ functions using `/` and `%` and runs them on Linux x86-64. It checks
+  signed boundary values, unsigned high bits and the existing diagnostic for narrower L2 types.
+
 ## AST core (#32)
 
 `src/ast/`, from the [AST design](docs/design/ast.md) §2, §3, §9 and §10. Modules `ycxx.ast.*`,

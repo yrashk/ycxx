@@ -143,6 +143,60 @@ extern "C" long* address() { return &payload; }
   }
 }
 
+template <class T>
+void check_division(pl::Session& session, std::string_view name,
+                    std::initializer_list<std::pair<T, T>> inputs) {
+  auto machine = compile(session, name);
+  check(machine.has_value(), machine ? std::format("compile {}", name) : machine.error());
+  if (!machine) return;
+  Executable code(machine->bytes);
+  check(bool(code), std::format("map {} as executable", name));
+  if (!code) return;
+  auto* divide = code.function<T(T, T, T*)>();
+  for (const auto& [a, b] : inputs) {
+    T remainder{};
+    T quotient = divide(a, b, &remainder);
+    check(quotient == a / b, std::format("{} quotient of {} / {}", name, a, b));
+    check(remainder == a % b, std::format("{} remainder of {} % {}", name, a, b));
+  }
+}
+
+void integer_division() {
+  pl::Session session;
+  session.set_source(tu, "division.cpp", R"(
+extern "C" int signed32(int a, int b, int* remainder) {
+  *remainder = a % b;
+  return a / b;
+}
+extern "C" unsigned unsigned32(unsigned a, unsigned b, unsigned* remainder) {
+  *remainder = a % b;
+  return a / b;
+}
+extern "C" long signed64(long a, long b, long* remainder) {
+  *remainder = a % b;
+  return a / b;
+}
+extern "C" unsigned long unsigned64(unsigned long a, unsigned long b, unsigned long* remainder) {
+  *remainder = a % b;
+  return a / b;
+}
+)", "division.o");
+
+  check_division<int>(session, "signed32",
+                      {{-17, 5}, {17, -5}, {-17, -5}, {17, 5}, {0, -1}, {3, 7}, {-256, -1},
+                       {std::numeric_limits<int>::min(), 3}, {std::numeric_limits<int>::max(), 251}});
+  check_division<unsigned>(session, "unsigned32",
+                           {{0, 3}, {3, 7}, {17, 5}, {0xffff'ffffu, 1}, {0xffff'ffffu, 3},
+                            {0xffff'ffffu, 0x8000'0000u}, {1, 0xffff'ffffu}});
+  check_division<long>(session, "signed64",
+                       {{-17, 5}, {17, -5}, {-17, -5}, {17, 5}, {0, -1}, {-(1L << 40), -1},
+                        {std::numeric_limits<long>::min(), 3}, {std::numeric_limits<long>::max(), -(1L << 40)}});
+  constexpr auto umax64 = std::numeric_limits<unsigned long>::max();
+  check_division<unsigned long>(session, "unsigned64",
+                                {{0, 3}, {3, 7}, {17, 5}, {umax64, 1}, {umax64, 3},
+                                 {umax64, 1ul << 40}, {umax64, 1ul << 63}});
+}
+
 void loop_edge() {
   using enum l2::Type;
   using l2::Op;
@@ -215,14 +269,17 @@ void rejection() {
     b.emit(Op::ret, {}, ret);
     expect_error(b.finish({}), "frame object alignment");
   }
-  {
-    l2::Builder b;
-    const l2::Type params[] = {state, i64, i64};
-    auto entry = b.begin_block(params);
-    auto quot = b.value(Op::sdiv, i64, {b.param(entry, 1), b.param(entry, 2)});
-    const ir::ValueId ret[] = {b.param(entry, 0), quot};
-    b.emit(Op::ret, {}, ret);
-    expect_error(b.finish({i64}), "`sdiv`: operation is outside the x86-64 integer subset");
+  for (auto type : {i1, i8, i16}) {
+    for (auto op : {Op::sdiv, Op::udiv, Op::srem, Op::urem}) {
+      l2::Builder b;
+      const l2::Type params[] = {state, type, type};
+      auto entry = b.begin_block(params);
+      auto result = b.value(op, type, {b.param(entry, 1), b.param(entry, 2)});
+      const ir::ValueId ret[] = {b.param(entry, 0), result};
+      b.emit(Op::ret, {}, ret);
+      expect_error(b.finish({type}), std::format("`{}`: operation is outside the x86-64 integer subset",
+                                               l2::info(op).name));
+    }
   }
 }
 
@@ -230,6 +287,7 @@ void rejection() {
 
 int main() {
   source();
+  integer_division();
   loop_edge();
   rejection();
   return ycxx::unit::result("x86_64");
