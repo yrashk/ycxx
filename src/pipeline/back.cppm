@@ -346,6 +346,9 @@ class QueryLayout {
   std::map<std::uint32_t, const ClassShape*> classes_;
   std::map<std::uint32_t, QualType> enums_;
   mutable std::vector<StringUse> strings_;
+  // Each class's layout and type layout, once: a member's are needed by every class holding it.
+  mutable std::map<std::uint32_t, std::optional<ClassLayout>> class_layouts_;
+  mutable std::map<std::uint32_t, ir::TypeLayout> records_;
 };
 
 // ---------------------------------------------------------------------------------------------
@@ -563,6 +566,8 @@ ir::TypeLayout QueryLayout::type(QualType q) const {
   if (in.types.is<ast::TLRef>(c) || in.types.is<ast::TRRef>(c))
     return {pointer, target.pointer_size, target.pointer_align, false,
             in.canonical(in.types.is<ast::TLRef>(c) ? in.types.get<ast::TLRef>(c).referee : in.types.get<ast::TRRef>(c).referee)};
+  if (in.types.is<ast::TClass>(c))
+    if (auto done = records_.find(std::to_underlying(in.types.get<ast::TClass>(c).entity)); done != records_.end()) return done->second;
   if (auto r = class_layout(c)) {
     auto it = classes_.find(std::to_underlying(in.types.get<ast::TClass>(c).entity));
     ir::TypeLayout l{record, r->size, r->align, false, {}, it == classes_.end() || it->second->trivial_calls};
@@ -574,6 +579,7 @@ ir::TypeLayout QueryLayout::type(QualType q) const {
       auto b = ast::builtin_of(in, ft);
       l.floating = l.floating || (b && ast::is_floating(*b)) || type(ft).floating;
     }
+    records_[std::to_underlying(in.types.get<ast::TClass>(c).entity)] = l;
     return l;
   }
   // An enumeration is laid out as its underlying type ([dcl.enum]/8).
@@ -582,29 +588,24 @@ ir::TypeLayout QueryLayout::type(QualType q) const {
   return {};
 }
 
-// A class's layout (Itanium C++ ABI §2.4, [class.mem]): each non-static data member at the next
-// offset its alignment allows, in declaration order; the size rounded up to the alignment; an
-// empty class has size 1. Its members are the unit's shape of it, when units come from source;
-// none otherwise.
+// A class's layout (`ast::record_layout`, the rule sema's `sizeof` reads too). Its members are the
+// unit's shape of it, when units come from source; none otherwise.
 std::optional<ClassLayout> QueryLayout::class_layout(QualType c) const {
   ast::Interners& in = *universe().in;
   if (!in.types.is<ast::TClass>(c)) return std::nullopt;
-  auto it = classes_.find(std::to_underlying(in.types.get<ast::TClass>(c).entity));
+  auto key = std::to_underlying(in.types.get<ast::TClass>(c).entity);
+  if (auto done = class_layouts_.find(key); done != class_layouts_.end()) return done->second;
+  auto it = classes_.find(key);
   if (it == classes_.end()) return std::nullopt;
-  ClassLayout out;
-  std::uint64_t at = 0;
-  std::uint64_t end = 0;  // past the largest member of a union
+  std::vector<ast::FieldPlace> places;
   for (QualType f : it->second->fields) {
-    QualType t = in.canonical(f);
-    ir::TypeLayout m = type(t);
-    if (it->second->union_) at = 0;  // [class.union]/2: the members share the union's address
-    at = (at + m.align - 1) / m.align * m.align;
-    out.fields.push_back({at, t});
-    at += m.size;
-    end = std::max(end, at);
-    out.align = std::max(out.align, m.align);
+    ir::TypeLayout m = type(in.canonical(f));
+    places.push_back({m.size, m.align});
   }
-  out.size = end == 0 ? 1 : (end + out.align - 1) / out.align * out.align;
+  ast::RecordLayout r = ast::record_layout(places, it->second->union_);
+  ClassLayout out{r.size, std::uint32_t(r.align), {}};
+  for (std::size_t i = 0; i < r.offsets.size(); ++i) out.fields.push_back({r.offsets[i], in.canonical(it->second->fields[i])});
+  class_layouts_[key] = out;
   return out;
 }
 
