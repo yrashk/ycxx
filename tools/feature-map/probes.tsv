@@ -1,4 +1,4 @@
-# Each probe built and run by ycxx a6f40e495ad3 and by an oracle (feature-map probe).
+# Each probe built and run by ycxx 7897fa40b193 and by an oracle (feature-map probe).
 feature	oracle	ycxx	first_error
 lex-core	gcc	pass	
 lex-digraph	gcc	pass	
