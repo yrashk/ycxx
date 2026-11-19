@@ -3863,8 +3863,10 @@ public:
       ast::EntityId dtor = s_->types().is_reference(d.type) ? ast::EntityId::none : s_->destructor_of(d.type);
       Ex var = variable_node(spec, local, init, dtor, dbegin);
       s_->set_local_decl(local, var.id);
-      // Default-initialization that initializes nothing is vacuous ([basic.life]/2).
-      if ((init.ok() && !s_->as<ast::DefaultInit>(init)) || dtor != ast::EntityId::none) s_->set_initialized(local);
+      // A jump may bypass a static declaration ([stmt.dcl]/2). Default-initialization that
+      // initializes nothing is vacuous ([basic.life]/2).
+      if (!spec.is_static && ((init.ok() && !s_->as<ast::DefaultInit>(init)) || dtor != ast::EntityId::none))
+        s_->set_initialized(local);
       vars.push_back(var);
     } while (accept(Tk::comma));
     if (!expect(Tk::semi)) skip_to_semi();
