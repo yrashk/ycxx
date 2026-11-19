@@ -53,6 +53,7 @@ struct ClassName {
   // and the function it is local to (`scope`), as a <local-name> (§5.1.6, §5.1.8).
   bool closure = false;
   ast::QualType closure_type{};
+  std::vector<ast::TemplateParamSema> closure_head{};  // its explicit template parameters
   std::uint32_t closure_number = 0;
   std::shared_ptr<const LocalFunction> local{};
 };
@@ -299,7 +300,7 @@ class Mangler {
       if (!n.local) return std::unexpected("a closure type whose function is unknown");
       auto l = local_encoding(*n.local);
       if (!l) return l;
-      auto sig = signature(in_.types.get<ast::TFunction>(in_.types.canon(n.closure_type)), false);
+      auto sig = closure_sig(n);
       if (!sig) return sig;
       std::string r = "Z" + *l + "EUl" + *sig + "E" + (n.closure_number ? std::to_string(n.closure_number - 1) : "") + "_";
       candidates_.push_back(key);
@@ -332,7 +333,7 @@ class Mangler {
       // <closure-type-name> ::= Ul <lambda-sig> E [<number>] _, its parameter types or `v`; the
       // n-th closure of one signature in its context is numbered n − 2 (§5.1.8). Its context is
       // the <local-name> before the nested-name it begins.
-      auto sig = signature(in_.types.get<ast::TFunction>(in_.types.canon(n.closure_type)), false);
+      auto sig = closure_sig(n);
       if (!sig) return sig;
       std::string r = "Ul" + *sig + "E" + (n.closure_number ? std::to_string(n.closure_number - 1) : "") + "_";
       candidates_.push_back(key);
@@ -349,6 +350,19 @@ class Mangler {
     r += source_name(n.name);
     candidates_.push_back(key);
     return r;
+  }
+  // <lambda-sig> ::= <template-param-decl>* <parameter type>+: a generic lambda's explicit
+  // template parameters, then its parameters' types (§5.1.8; `Ty` as Clang has it).
+  std::expected<std::string, std::string> closure_sig(const ClassName& n) {
+    std::string out;
+    for (const ast::TemplateParamSema& p : n.closure_head) {
+      auto d = param_decl(p);
+      if (!d) return d;
+      out += *d;
+    }
+    auto sig = signature(in_.types.get<ast::TFunction>(in_.types.canon(n.closure_type)), false);
+    if (!sig) return sig;
+    return out + *sig;
   }
   // A function's <encoding> (§5.1.2), without `_Z`: its <name>, a <nested-name> in a class or
   // namespace, then its parameter types. A member of a closure type is in a <local-name>, the
@@ -403,6 +417,35 @@ class Mangler {
   std::expected<std::string, std::string> specialization_encoding_at(std::string_view name, const TemplateSpec& spec, ast::EntityId scope,
                                                                      bool special) {
     ast::QualType c = in_.types.canon(spec.pattern);
+    // A generic lambda's function call operator, a member function template of a closure type:
+    // `N [<CV-qualifiers>] <prefix> <unqualified-name> <template-args> E` and its signature, in a
+    // <local-name> when the class is a closure type (§5.1.5.3, §5.1.6).
+    ClassName sc = scope != ast::EntityId::none && classes_ ? classes_(scope) : ClassName{};
+    if (sc.closure && in_.types.is<ast::TFunction>(c)) {
+      auto f = in_.types.get<ast::TFunction>(c);
+      std::string local;
+      if (sc.closure) {
+        if (!sc.local) return std::unexpected("a closure type whose function is unknown");
+        auto l = local_encoding(*sc.local);
+        if (!l) return l;
+        local = "Z" + *l + "E";
+      }
+      auto p = prefix(scope);
+      if (!p) return p;
+      std::string unqualified = std::format("{}{}", name.size(), name);
+      if (name.starts_with("operator") && name.size() > 8) {
+        auto code = operator_code(name.substr(8), in_.seqs.size(f.params) + 1);
+        if (!code) return std::unexpected(std::format("the operator function '{}'", name));
+        unqualified = *code;
+      }
+      candidates_.push_back((std::uint64_t{2} << 32) | candidates_.size());  // the <template-prefix>
+      auto args = spec.params.empty() ? template_args(spec.args) : own_template_args(spec.args, spec.params, spec.same_heads);
+      if (!args) return args;
+      auto sig = signature(f, true);
+      if (!sig) return sig;
+      std::string cv = std::string(std::to_underlying(f.cv) & 2 ? "V" : "") + (std::to_underlying(f.cv) & 1 ? "K" : "");
+      return local + "N" + cv + *p + unqualified + *args + "E" + *sig;
+    }
     auto n = template_name(name, scope, special);
     if (!n) return n;
     auto args = spec.params.empty() ? template_args(spec.args) : own_template_args(spec.args, spec.params, spec.same_heads);
