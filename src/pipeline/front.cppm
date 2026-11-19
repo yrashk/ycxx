@@ -97,7 +97,8 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
     const sema::EntityRec& r = world.entities.rec(e);
     if (r.kind == sema::EntityKind::class_ || r.kind == sema::EntityKind::data_member || r.kind == sema::EntityKind::type_alias ||
         r.kind == sema::EntityKind::enum_ || r.kind == sema::EntityKind::enumerator ||
-        r.kind == sema::EntityKind::function_template || r.kind == sema::EntityKind::variable_template)
+        r.kind == sema::EntityKind::function_template || r.kind == sema::EntityKind::variable_template ||
+        r.kind == sema::EntityKind::alias_template)
       return;  // no symbol: a template's specializations have them
     bool fn = r.kind != sema::EntityKind::variable;
     std::string id(ins.names.spelling(r.name));
