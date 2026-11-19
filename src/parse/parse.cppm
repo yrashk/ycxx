@@ -1383,6 +1383,27 @@ private:
     return false;
   }
 
+  // A member operator function ([over.oper.general]/7–10, [over.unary], [over.binary],
+  // [over.assign]): not static except `()` and `[]` ([over.call], [over.sub]), and with the
+  // operator's arity less the object.
+  bool member_operator_ok(const parse::Declarator& d, bool is_static) {
+    std::string_view n = p_->world().ins.names.spelling(d.name);
+    if (!n.starts_with("operator") || n.size() == 8) return true;
+    std::string_view op = n.substr(8);
+    if (op == "()" || op == "[]") return true;
+    if (is_static) {
+      s_.diag(d.name_at, Diag::operator_static, d.name);
+      return false;
+    }
+    std::size_t count = d.params.size();
+    bool ok = op == "->"                                  ? count == 0
+              : op == "~" || op == "!"                    ? count == 0
+              : op == "+" || op == "-" || op == "*" || op == "&" || op == "++" || op == "--" ? count <= 1
+                                                                                             : count == 1;
+    if (!ok) s_.diag(d.name_at, Diag::operator_arity, d.name);
+    return ok;
+  }
+
   // A non-member operator function ([over.oper.general]/7–10): a parameter of class or enumeration
   // type (or a reference to one), one or two of them, and not `=`, `()`, `[]` or `->`, which only
   // a member may be.
@@ -2408,6 +2429,7 @@ private:
   bool member_function_or_static(const DeclSpec& spec, parse::Declarator& d, ast::DeclSema c) {
     sema::Types& types = s_.types();
     bool fn = types.is_function(d.type);
+    if (fn && !member_operator_ok(d, spec.is_static)) return false;
     bool is_def = it_->kind == ItemKind::function;
     ast::DeclSema sem = class_decl(c.entity, false);
     sem.type = d.type;

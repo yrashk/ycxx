@@ -791,7 +791,7 @@ public:
         break;
       }
     }
-    if (kind(j) != Tk::identifier && kind(j) != Tk::tilde) return std::nullopt;
+    if (kind(j) != Tk::identifier && kind(j) != Tk::tilde && kind(j) != Tk::kw_operator) return std::nullopt;
     next = j;
     return s;
   }
@@ -2038,8 +2038,9 @@ public:
     u32 name_at = pos();
     NameId n = name_of(tok());
     bump();
-    // `N::T(args)` or `N::T{…}` ([expr.type.conv]): a qualified type name.
-    if (is(Tk::l_paren) || is(Tk::l_brace))
+    // `N::T(args)` or `N::T{…}` ([expr.type.conv]): a qualified type name, unless a function or
+    // variable of the name hides it.
+    if ((is(Tk::l_paren) || is(Tk::l_brace)) && !s_->scope_names_object(*s, n))
       if (auto t = s_->scope_type(*s, n)) return type_conversion(*t, begin);
     if (is(Tk::less)) {
       // `N::v<args>`: a variable template of the namespace ([temp.names]/3).

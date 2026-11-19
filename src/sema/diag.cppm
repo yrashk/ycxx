@@ -40,6 +40,7 @@ enum class Diag : std::uint32_t {
   operator_member_only [[=message{Severity::error, "'{0:n}' must be a member function"}]],
   operator_arity [[=message{Severity::error, "'{0:n}' has the wrong number of parameters"}]],
   operator_needs_class [[=message{Severity::error, "'{0:n}' needs a parameter of class or enumeration type"}]],
+  operator_static [[=message{Severity::error, "'{0:n}' cannot be a static member function"}]],
   expected_statement [[=message{Severity::error, "expected a statement"}]],
   expected_declaration [[=message{Severity::error, "expected a declaration"}]],
   expected_type_specifier [[=message{Severity::error, "expected a type specifier"}]],

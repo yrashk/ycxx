@@ -511,6 +511,18 @@ public:
     }
     return std::nullopt;
   }
+  // Whether `S::n` names a function or variable, which hides a type of that name in its scope
+  // ([basic.scope.hiding]/2): `::stat(path, &buf)` calls the function.
+  bool scope_names_object(const Scope& s, NameId n) {
+    if (s.ns)
+      return std::ranges::any_of(q_->namespace_members(*s.ns, n), [](const ast::DeclSema& d) {
+        return d.kind == ast::DeclKind::function || d.kind == ast::DeclKind::variable;
+      });
+    if (s.type && types().is_class(*s.type))
+      if (const ClassRec* c = class_rec(types().class_of(*s.type)))
+        return std::ranges::any_of(c->members, [&](const MemberDeclRec& m) { return m.name == n; });
+    return false;
+  }
   // `S::n` naming a type.
   std::optional<QualType> scope_type(const Scope& s, NameId n) {
     auto m = scope_member(s, n);
@@ -2529,6 +2541,11 @@ public:
     overloads_[std::to_underlying(callee.id)] = std::move(set);
     Ex r = call(callee, std::move(operands), end, op_at);
     if (!r.ok()) {
+      // A deleted or ambiguous choice makes the expression ill-formed ([over.match.oper]/3,
+      // [over.match.best]); only when no candidate is viable does the built-in operator apply.
+      for (std::size_t i = n; i < diags_->size(); ++i)
+        if ((*diags_)[i].id == diag_id(Diag::deleted_function) || (*diags_)[i].id == diag_id(Diag::ambiguous_call))
+          return Ex{NodeId::none, begin, end};
       truncate_diags(n);
       return std::nullopt;
     }
@@ -2539,7 +2556,7 @@ public:
     using enum ast::UnaryOp;
     if (!e.ok()) return {NodeId::none, begin, end};
     if (dependent(e)) return dependent_node({e}, begin, end);
-    static constexpr std::string_view unary_spellings[] = {"+", "-", "!", "~", "", "", "++", "--", "", ""};
+    static constexpr std::string_view unary_spellings[] = {"+", "-", "!", "~", "*", "&", "++", "--", "", ""};
     if (std::string_view sp = unary_spellings[std::to_underlying(op)]; !sp.empty())
       if (auto o = overloaded(sp, {e}, begin, end, op_at)) return *o;
     auto make = [&](Ex operand, QualType t, ValueCategory cat) {

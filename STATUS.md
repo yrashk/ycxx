@@ -959,7 +959,10 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
 - **`#include <stdio.h>`** (the SDK's) compiles, and `printf`, `puts`, `fputs` and `stdout` run
   (`tests/own/headers/stdio.run.cpp`). `<cstdio>` still waits for libycxx's templates and
   concepts (#88).
-- Tests: `tests/own/operators` (5), `tests/own/headers` (2).
+- Member operators get the [over.oper] checks too; `S::operator@` and `N::operator@` define outside;
+  unary `*` and `&` call operator functions; a deleted or ambiguous choice is an error, not the
+  built-in operator. `N::T(…)` is a cast only when no function or variable hides N::T.
+- Tests: `tests/own/operators` (12, seven from the review), `tests/own/headers` (2).
 
 ## Templates, ζ step 1: function templates (#88, 2026-11-18)
 
