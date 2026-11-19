@@ -599,7 +599,7 @@ group = 'basic'
 clauses = ['stmt.dcl', 'basic.stc.static']
 std = 'C++98'
 ftm = '__cpp_threadsafe_static_init'
-detect = '(?m)^[ \t]{4,}static\s+(?!_assert|assert|inline\b|void\b|constexpr\s+[\w:<>]+\s+\w+\s*\()(?:const(?:expr)?\s+)?[\w:<>]+[\s*&]+\w+\s*(?:=|\{|;)'
+detect = '''(?m)^[ \t]{4,}static\s+(?!_assert|assert|inline\b|void\b|constexpr\b|const\b)[\w:<>]+[\s*&]+\w+\s*(?:=|\{|;)'''
 status = 'missing'
 probe = '''
 int calls = 0;
@@ -1051,7 +1051,7 @@ name = 'Default arguments'
 group = 'dcl'
 clauses = ['dcl.fct.default']
 std = 'C++98'
-detect = '\((?:[^()]|\([^()]*\))*\b\w+\s*=\s*[^=](?:[^()]|\([^()]*\))*\)\s*(?:const\s*)?(?:noexcept\s*)?[;{]'
+detect = '''\((?:[^();{}]|\([^();{}]*\))*\b\w+\s*=\s*[^=;{}](?:[^();{}]|\([^();{}]*\))*\)\s*(?:const\s*)?(?:noexcept\s*)?[;{]'''
 probe = '''
 int f(int a, int b = 2) { return a + b; }
 int main() { return f(1) == 3 ? 0 : 1; }

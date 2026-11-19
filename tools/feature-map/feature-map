@@ -27,7 +27,7 @@ in features.toml next to its feature, so a count can be checked by running it by
 Priority (rank()) puts older and more used features first:
     score = usage + age
     usage = log10(1 + uses per million lines) + projects using it / projects   (0 to ~5)
-    age   = 0.5 per standard revision before C++26 (C++98 = 3.5, C++26 = 0)
+    age   = 0.5 per standard revision before C++26 (C++98 = 3.0, C++26 = 0)
 A feature without a detector is used by every program (it is the language's core) and gets the
 corpus's highest usage.
 """
@@ -187,7 +187,7 @@ def git_head(path):
 # One alternation, scanned left to right: comments, raw strings, ordinary strings and character
 # literals, and pp-numbers (so that a digit separator is not taken for a character literal).
 _TOKEN = re.compile(r'''
-    (?P<diag>^[ \t]*\#[ \t]*(?:error|warning)\b[^\n]*)
+    (?P<diag>^[ \t]*\#[ \t]*(?P<kw>error|warning)\b[^\n]*)
   | (?P<line>//[^\n]*)
   | (?P<block>/\*.*?\*/)
   | (?P<raw>(?:u8|u|U|L)?R"(?P<delim>[^()\\ \n]{0,16})\((?P<rawbody>.*?)\)(?P=delim)")
@@ -204,7 +204,7 @@ def strip(text, keep_literals=False):
         if m.group('line') is not None:
             return ''
         if m.group('diag') is not None:
-            return m.group(0)[:m.group(0).index('#') + 1] + 'error'
+            return m.group(0)[:m.end('kw') - m.start()]
         if m.group('block') is not None:
             return '\n' * m.group(0).count('\n') or ' '
         if m.group('num') is not None or keep_literals:
@@ -615,6 +615,8 @@ def cmd_check(args):
     for f in feats:
         p = probes.get(f['id'])
         if not p:
+            if f.get('probe'):
+                bad.append(f'{f["id"]}: its probe was never run (feature-map probe)')
             continue
         if p['oracle'] == 'none':
             bad.append(f'{f["id"]}: no oracle accepts the probe')
