@@ -1618,6 +1618,7 @@ public:
     // A static member, data or function, is named like a namespace-scope entity
     // ([expr.prim.id.qual]): `S::f` can have its address taken or be called.
     if (!m.is_function || (m.is_static && member_functions(c, name).size() == 1)) {
+      if (!m.is_function) return static_member(c, m.entity, m.type, begin, end);
       ExprInfo info{m.type, ValueCategory::lvalue, 0};
       return node(ast::DeclRef{info, m.entity}, begin, end, info);
     }
@@ -1626,6 +1627,14 @@ public:
     return bound_member(c, name, object, true, begin, end);
   }
 
+  // A static data member of class `c`. Of the current instantiation of a class template, a const
+  // one is value-dependent: its initializer may be ([temp.dep.constexpr]/2.3), and its value is
+  // known in each specialization.
+  Ex static_member(EntityId c, EntityId v, QualType t, u32 begin, u32 end) {
+    bool dep = Types::is_const(t) && types().is_dependent(types().class_type(c));
+    ExprInfo info{t, ValueCategory::lvalue, dep ? expr_flag::dependent : u8(0)};
+    return node(ast::DeclRef{info, v}, begin, end, info);
+  }
   // An enumerator ([dcl.enum]): a prvalue of its enumeration with its value.
   Ex enumerator(EntityId e, QualType t, u32 begin, u32 end) {
     auto v = q_->constant_value(e);
@@ -2166,8 +2175,7 @@ public:
             diag(begin, Diag::member_without_object, name);
             return {NodeId::none, begin, end};
           }
-          ExprInfo info{m->type, ValueCategory::lvalue, 0};
-          return node(ast::DeclRef{info, m->entity}, begin, end, info);
+          return static_member(current_class, m->entity, m->type, begin, end);
         }
     }
     std::vector<ast::DeclSema> found;

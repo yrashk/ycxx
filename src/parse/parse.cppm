@@ -611,6 +611,19 @@ public:
     Result<ast::ItemSema> cell;
   };
   const std::deque<VarInstance>& variable_instances() const { return var_instances_; }
+  // The members of class template specializations analysed, in order: (member item, specialization)
+  // and the member's record for that specialization ([temp.inst]/3).
+  struct MemberInstance {
+    u32 item;
+    EntityId spec;
+    const Result<ast::ItemSema>* cell;
+  };
+  std::vector<MemberInstance> member_instances() const {
+    std::vector<MemberInstance> r;
+    for (const auto& key : class_member_order_)
+      r.push_back({key.first, EntityId(key.second), &class_member_cells_.at(key)});
+    return r;
+  }
   // A class's members, from its member items' records (`class_def` and `instantiate_class`).
   struct ClassContent {
     std::vector<ast::MemberRec> members;
@@ -2316,11 +2329,6 @@ private:
         s_.diag(d.name_at, Diag::member_of_function_type, d.type);
         return bad();
       }
-      // A class template's static data members are not supported yet (#88).
-      if ((inst_ || !p_->enclosing_heads(k_).empty()) && spec.is_static && !types.is_function(d.type)) {
-        s_.diag(spec.begin, Diag::not_supported, Tk::kw_static);
-        return bad();
-      }
       if (types.is_function(d.type) || spec.is_static) {
         if (!member_function_or_static(spec, d, c)) return bad();
         if (it_->kind == ItemKind::function) return;  // its body follows the declaration part
@@ -2702,23 +2710,44 @@ private:
       if (spec.is_inline || spec.is_constexpr) flags |= sema::decl_flag::definition;
       sem.entity = s_.world().entities.entity(
           {sema::EntityKind::variable, d.name, d.type, LangLinkage::cxx, ast::Linkage::external, {}, c.entity});
+      // A member whose initializer is in error is still declared, so its uses say nothing more.
+      auto declare_member = [&](ConstId v, const Ex& e) {
+        sem.flags = flags;
+        s_.own.push_back({d.name, sem});
+        p_->declared(sem, k_);
+        declarators_.push_back(s_.node(ast::Declarator{u32(decls_.size()), sema::Sema::at(e, d.begin), v}, d.begin, ps_.pos()));
+        decls_.push_back(sem);
+      };
       if (ps_.accept(Tk::equal)) {
         Ex e = ps_.assignment_expression();
         init = s_.convert(e, d.type, e.begin);
-        if (!init.ok()) return false;
+        if (!init.ok()) {
+          declare_member(ConstId::none, {});
+          return false;
+        }
         bool usable = spec.is_constexpr || (sema::Types::is_const(d.type) && !sema::Types::is_volatile(d.type) &&
                                             types.is_integral(d.type));
+        // In a class template, a value-dependent initializer is evaluated in each specialization
+        // ([temp.inst]/3: the static data member is instantiated with the class's declarations).
+        if (usable && (s_.dependent(init) || types.is_dependent(d.type))) {
+          declare_member(ConstId::none, {});
+          return true;
+        }
         sema::Evaluated v = usable ? sema::Evaluator(s_, q_).evaluate(init) : sema::Evaluated{};
         if (!v.value) {
           s_.diag(e.begin, usable ? Diag::not_constant : Diag::not_supported, usable ? v.reason : u64(Tk::equal));
+          declare_member(ConstId::none, {});
           return false;
         }
         value = *v.value;
         p_->set_constant(sem.entity, value, k_);
       } else if (spec.is_constexpr) {
         s_.diag(d.name_at, Diag::constexpr_uninitialized, d.name);
+        declare_member(ConstId::none, {});
         return false;
       }
+      declare_member(value, init);
+      return true;
     }
     sem.flags = flags;
     s_.own.push_back({d.name, sem});
@@ -2970,6 +2999,10 @@ private:
         // Or a partial specialization's pattern, whose members are its own ([temp.spec.partial.member]).
         if (!current && !p_->partial_pattern(s_.types().class_of(*d.scope.type), k_)) {
           s_.diag(d.qualifier_at, Diag::template_args_mismatch, c.name);
+          return false;
+        }
+        if (!fn) {  // its instantiation is #256
+          s_.diag(d.qualifier_at, Diag::static_member_definition_not_supported);
           return false;
         }
         class_member = true;

@@ -546,7 +546,6 @@ draft/temp/temp.res.general-1.accept.cpp 'struct' not supported yet
 draft/temp/temp.res.general-3.accept.cpp 'struct' not supported yet
 draft/temp/temp.res.general-4.reject.cpp errors elsewhere: 'struct' not supported yet
 draft/temp/temp.res.general-6.reject.cpp errors elsewhere: 'template' not supported yet
-draft/temp/temp.spec.general-1.accept.cpp 'template' not supported yet
 draft/temp/temp.spec.general-2.accept.cpp 'template' not supported yet
 draft/temp/temp.spec.general-3.reject.cpp errors elsewhere: 'template' not supported yet
 draft/temp/temp.spec.partial.general-2.accept.cpp 'template' not supported yet

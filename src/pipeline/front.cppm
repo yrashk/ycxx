@@ -183,6 +183,22 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
       if (d.flags & sema::decl_flag::definition) tu.variables.push_back({d.entity, d.type, value, at});
     }
   }
+  // The static data members of class template specializations that are defined in the class
+  // (constexpr or inline, [class.static.data]/4), with their constants.
+  for (const parse::Program::MemberInstance& m : program.member_instances()) {
+    if (!m.cell->diags.empty() || world.types.is_dependent(world.types.class_type(m.spec))) continue;
+    const ast::ItemSema& is = m.cell->value;
+    if (is.tree == ast::NodeId::none || !ins.ast.is<ast::DeclGroup>(is.tree)) continue;
+    for (ast::Child c : ins.ast.children(ins.ast.get<ast::DeclGroup>(is.tree).declarators)) {
+      auto dr = ins.ast.get<ast::Declarator>(c.id);
+      if (dr.decl >= ins.seqs.size(is.decls)) continue;
+      ast::DeclSema d = ins.seqs.at(is.decls, dr.decl);
+      if (d.kind != ast::DeclKind::variable || d.entity == EntityId::none || !(d.flags & sema::decl_flag::definition)) continue;
+      ast::Loc at{program.id(m.item), c.at};
+      declare(d, at);
+      tu.variables.push_back({d.entity, d.type, dr.value, at});
+    }
+  }
   for (EntityId spec : program.required()) {
     ast::DeclSema d{};
     d.entity = spec;
