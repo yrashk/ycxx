@@ -511,3 +511,10 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
     `tests/driver/kinds.py`), and try GCC too. When two compilers disagree, cross-link their
     objects to find out which convention each one uses.
   - Learned on #116.
+- **"As other compilers do" is a claim to check against the oracles before coding it.** #229's
+  decision said to drop system headers' warnings "as other compilers do". The first version
+  dropped `#warning` too, and its tests failed with Clang and GCC as the compiler under test:
+  both report `#warning` from a system header (`-W#warnings`, `-Wcpp`).
+  - Do: when a decision names other compilers' behaviour, write the test first and run it with
+    `tools/test --cxx clang` and `--cxx gcc`, then implement what they do.
+  - Learned on #229.

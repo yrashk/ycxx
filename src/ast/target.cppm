@@ -41,6 +41,10 @@ struct BuiltinLayout {
   FloatFormat format = FloatFormat::none;
 };
 
+// What `__builtin_va_list` names (docs/EXTENSIONS.md): `char*` in Apple's arm64 ABI; the System
+// V x86-64 ABI's `__va_list_tag[1]`, which ycxx does not have yet.
+enum class VaList : u8 { char_pointer, sysv_x86_64 };
+
 struct Target {
   std::string_view triple;
   std::array<BuiltinLayout, builtin_count> layout;
@@ -52,6 +56,7 @@ struct Target {
   Builtin char32_underlying;  // uint_least32_t
   Builtin size_type;
   Builtin ptrdiff_type;
+  VaList va_list;
 
   constexpr BuiltinLayout operator[](Builtin b) const { return layout[std::to_underlying(b)]; }
   constexpr bool has(Builtin b) const { return (*this)[b].size != 0; }
@@ -106,6 +111,7 @@ inline constexpr Target aarch64_darwin{
     .char32_underlying = Builtin::unsigned_int,
     .size_type = Builtin::unsigned_long,
     .ptrdiff_type = Builtin::long_,
+    .va_list = VaList::char_pointer,
 };
 
 // x86_64-linux-gnu (System V): `long double` is the x87 80-bit format in 16 bytes.
@@ -121,6 +127,7 @@ inline constexpr Target x86_64_linux{
     .char32_underlying = Builtin::unsigned_int,
     .size_type = Builtin::unsigned_long,
     .ptrdiff_type = Builtin::long_,
+    .va_list = VaList::sysv_x86_64,
 };
 
 }  // namespace ycxx::ast

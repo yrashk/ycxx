@@ -179,6 +179,9 @@ enum class Diag : std::uint32_t {
   pack_not_last [[=message{Severity::error, "a template parameter pack is followed by a parameter that is neither deduced nor defaulted"}]],
   member_named_as_class [[=message{Severity::error, "a member type cannot have the name of its class '{0:n}'"}]],
   trait_not_applicable [[=message{Severity::error, "this type trait does not apply to '{0:t}'"}]],
+  // A GNU built-in function the SDK's or libycxx's headers use and ycxx does not have yet
+  // (docs/EXTENSIONS.md), named where lookup finds nothing else.
+  builtin_unsupported [[=message{Severity::error, "built-in function '{0:n}' is not supported yet"}]],
 };
 
 // A `{N:r}` argument: why an evaluation was not constant. 0 is an expression the front end

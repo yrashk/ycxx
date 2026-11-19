@@ -214,7 +214,7 @@ What is true of the code today. Work in progress and its owners are tracked in
   - module and import lines go on to phase 7, their keywords flagged `tok_flag::directive`.
     Header-unit imports and `#embed` are diagnosed as unsupported.
 - Predefined macros (`:predefined`, DECISIONS §1.5):
-  - `__ycxx__` and its version, and the draft's macros;
+  - `__ycxx__` and its version, `__GNUC__` 4.2.1 (#229), and the draft's macros;
   - a feature-test table, with lexer features only;
   - the target's macros, generated from `ast::Target` and checked against Clang
     (`tests/own/pp/predefined-target.pp.cpp`);
@@ -1200,6 +1200,30 @@ session's.*
   `__is_nothrow_*` families, `__is_base_of`, `__is_standard_layout` and
   `__reference_binds_to_temporary`; a value-dependent predicate as a template argument outside a
   body (#209).
+
+## `__GNUC__` and system-header warnings (#229, 2026-11-19)
+
+- ycxx predefines `__GNUC__` 4.2.1, as Clang does (`:predefined`; DECISIONS §1.5, revising #112),
+  so the SDK's `sys/cdefs.h` no longer warns "Unsupported compiler detected". Not `__GNUG__`,
+  `__clang__` or `__llvm__`. libycxx tests `__ycxx__` first (yrashk/libycxx#28).
+- What the SDK's `__GNUC__` paths then use, in the headers libycxx's C headers reach, is in
+  docs/EXTENSIONS.md. New: `__builtin_va_list`, the target's va_list type (`char*`;
+  `ast::Target::va_list`), found where lookup finds nothing else (`Sema::builtin_type_name`).
+  The `__builtin_*` functions ycxx lacks (`__builtin_fabsf`, `__builtin_inff`, `__builtin_alloca`,
+  `__builtin_offsetof`, …) are diagnosed as "built-in function '…' is not supported yet", their
+  arguments skipped (`Sema::unsupported_builtin`).
+- Warnings located in a system header are not reported; errors are, and so is `#warning`, as
+  with Clang and GCC. A system header is one found in a system directory, or from one in its own
+  directory (`Config::system_header`, `Frame::system`, part of a region's cache key). Phase 4's
+  warnings are dropped when the region finishes, phases 5 and 6's when flattened (`Flat::system`).
+  Sema has no warnings yet; when it gets some, it needs the region's system files too.
+- The test driver checks warnings where a test has `//! warning` markers (docs/TESTING.md), and
+  reads markers in headers a test includes with `<...>` from its `FLAGS` directories.
+- Tests: `tests/own/pp/predefined-gnuc.pp.cpp`, `tests/own/headers/system-warnings.accept.cpp`
+  (`<stdio.h>` with no warning), `tests/own/headers/system-error.reject.cpp`,
+  `tests/own/builtins/va-list.run.cpp`. `<cstdio>`: 25 errors before and after, and no warning
+  (was 1). `<cmath>` and `<cstdlib>` gain errors in the SDK's `__GNUC__` inline functions (local
+  unions, floating-point operations, `__builtin_fabs*`), which already had thousands.
 
 ## Bootstrap workarounds
 

@@ -31,6 +31,8 @@ struct Flat {
   };
   std::vector<Continuation> continuations;
   FileId main{};
+  // The files included as system headers, whose phase 5 and 6 warnings are not reported (#229).
+  std::set<FileId> system;
 };
 
 // What preprocessing a translation unit produced: the region and every diagnostic, in order.
@@ -64,6 +66,7 @@ public:
       return *local[i];
     };
     files(0);
+    if (r.system) out_->system.insert(r.files[0]);
     const u32 base = static_cast<u32>(out_->expansions.size());
     auto exp = [&](u32 local) { return local == 0 ? 0 : base + local - 1; };
     // A location in the TU's tables; a bound one is relative to its definition.
@@ -189,6 +192,8 @@ Preprocessed to_region(Session& s, const Flat& flat) {
   const std::vector<PTok>& pp = flat.tokens;
   auto report_at = [&](std::size_t i) {
     return [&, i](u32 offset, lex::LexDiag d, u64 a, u64 b) {
+      // Where the token is spelled: in a macro's definition for one the macro produced.
+      if (hidden_in_system_header(d) && flat.system.contains(flat.files[pp[i].loc.file])) return;
       diags.emplace_back(u64(i) * 2 + 1, Diag{pp[i].loc.file, pp[i].loc.offset + offset, d, {a, b}, 0, std::nullopt});
     };
   };

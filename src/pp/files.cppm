@@ -120,6 +120,12 @@ struct Config {
   std::uint32_t template_depth = default_template_depth;
   static constexpr std::uint32_t default_template_depth = 900;
 
+  // Whether a file found in directory `found` (an index into quote then angle directories, as
+  // `Resolved::dir`) is a system header: found in a system directory. One found in its includer's
+  // directory is one when its includer is (`includer_system`). Warnings from a system header are
+  // not reported (#229).
+  bool system_header(u32 found, bool includer_system) const;
+
   Fp128 fingerprint() const {
     Hasher h;
     h.bytes(target->triple).uint(u8(0)).uint(std::to_underlying(view));
@@ -153,6 +159,11 @@ struct Resolved {
   u32 dir = includer_dir;
   bool operator==(const Resolved&) const = default;
 };
+
+inline bool Config::system_header(u32 found, bool includer_system) const {
+  if (found == includer_dir) return includer_system;
+  return found >= quote_dirs.size() + system_from;
+}
 
 // The search order of `form` for a file found in `found_dir` whose directory is `here`.
 std::optional<Resolved> resolve(Files& files, const Config& cfg, std::string_view header, IncludeForm form,
