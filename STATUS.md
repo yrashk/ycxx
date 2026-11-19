@@ -1412,6 +1412,45 @@ request it serves.
 - Not yet: the analysed tree as a value, and stages linked to source (#254); per-resumption
   spans, so a frame's waits are not drawn as work (#255).
 
+## Engine memory (#274, 2026-11-19)
+
+What the process allocates, attributed to the engine's cells, in the trace and the daemon's status.
+
+- `ycxx.memory` (`src/memory/`): the program's replacements of the global allocation functions
+  (`new.cpp`, an object library linked into `ycxx` and `unit.engine_memory`; libycxx unchanged:
+  its defaults are weak and its allocation table forwards to them) count requested sizes; an
+  unsized delete asks `malloc_size`/`malloc_usable_size` (`:usable`, one file per platform).
+  Process totals are batched per thread (64 KiB, flushed at thread exit too); a `Window` is a
+  build's peak. `memory::disable()` stops counting: clients, `ctl`, `lsp`, and untraced in-process
+  compiles call it.
+- Engine (`src/engine/engine.cppm`, "Memory"): each `Frame` has a `memory::Usage`, the thread's
+  target while the frame's code runs. It is set where the code starts or resumes (`run_frame`,
+  `Settle::resume`, cheap execution and validation, a provider) and cleared after each work item,
+  before a frame can be resumed elsewhere, and in `Root::release`. Child coroutine frames, `Wait`
+  records, the engine's tables and the trace's strings count for no cell. A cell's `retained` moves by
+  each run's net bytes measured after `store` (first allocator pays; an early cutoff drops its new
+  value first); inputs from a provider are measured, inputs `set` from outside are walked
+  (`heap_footprint`). Kinds sum them (`Db::memory_per_kind`). `TraceEvent` carries
+  `alloc_bytes`, `allocs`, `peak_bytes`, `retained_bytes`.
+- Trace (`src/trace/`): rollups over subtrees (retained once per cell, where it settles), sums per
+  kind, the stream's columns and `memory:`/`by kind:` summary lines (off with `times`, so the golden
+  is unchanged), the JSON fields and summary (`docs/TRACE.md`), the browser's columns, pane, header
+  and `s` sort. A traced build's end batch carries the process's bytes and its window's peak.
+- Daemon: `Status` has `memory_current`, `memory_peak`, `memory_allocated`, `allocations`,
+  `memory_retained`, `memory_unattributed` and `retained_by_kind`.
+- Cost: hit paths unchanged (no target store on a fetch that does not wait; `engine_bench` in
+  Release, minimum of ten interleaved runs: fetch hit 42.3–43.7 ns against `main`'s 42.5–43.1,
+  root `get` hit 17.5–17.6 ns against 17.1–17.3). A new/delete pair costs 22.4–23.0 ns with
+  counting off and about 26 ns with it on, against 24.6–27.6 ns for libycxx's Debug defaults.
+  Debug compiles measured about +2% CPU in paired runs on a shared machine, with counting on or
+  off (#284). GCC on macOS uses emulated TLS for the thread's record.
+- Tests: `unit.engine_memory` (known amounts, a cutoff, inputs set and provided, nested async and
+  cheap cells, 32 frames resumed across workers under three schedules, process totals and a
+  window), mutation-checked; `unit.trace` (rollups, lines, JSON, order, summaries); `daemon.trace`
+  (the JSON memory schema, the stream's summary, `ctl status`).
+- Not yet: drift of retained bytes over a long daemon session, a peak per request, and small
+  inexactness (#284).
+
 ## Bootstrap workarounds
 
 Places where ycxx's sources avoid or work around a C++26 feature because GCC 16 lacks it or

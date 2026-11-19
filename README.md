@@ -63,7 +63,8 @@ thread pool, and its output is byte for byte that of a cold, in-process build.
 
 **See what the engine does.** `ycxx cxx --trace-engine a.cpp` (or `YCXX_TRACE_ENGINE=stream`)
 prints every query the build went through as a colored tree on stderr: what ran, what was
-reused, verified green or cut off early, how long it took and on which worker. A second build
+reused, verified green or cut off early, how long it took and on which worker, and how much
+memory each cell allocated and retains, with sums per subtree, per query kind and per build. A second build
 shows everything reused, and a compile error is marked red at the cell where it starts, its
 message bubbled up to the root. `--trace-engine=interactive` opens a browser of the trace after
 the compile: a tree with each function's IR and assembly, a timeline of the pool's workers, and
@@ -71,7 +72,8 @@ filters. `--trace-engine=json` writes the whole trace as JSON Lines, for tools a
 `ycxx cxx --watch` stays attached and builds again whenever a file the build read changes,
 headers included; with `--trace-engine` each rebuild shows what it re-ran, and
 `--trace-engine=interactive` keeps the browser open and adds each rebuild live. `ycxx ctl trace
-[--interactive]` attaches to the daemon and shows every request it serves.
+[--interactive]` attaches to the daemon and shows every request it serves, and `ycxx ctl status`
+reports its memory, with what each query kind retains.
 
 **Editor support.** `ycxx lsp` is a language server that reports ycxx's errors as you type,
 including those in the headers a file includes, and goes to the definition of a name used in a
