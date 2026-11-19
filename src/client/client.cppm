@@ -8,6 +8,7 @@ import std;
 import ycxx.compile;
 import ycxx.daemon;
 import ycxx.engine;
+import ycxx.memory;
 import ycxx.pipeline;
 import ycxx.pp;
 import ycxx.trace;
@@ -99,12 +100,14 @@ class TraceOut {
   void batch(daemon::TraceBatch&& b) {
     if (b.end) {
       total_ = b.ended_ns - std::min(b.ended_ns, b.started_ns);
+      memory_ = b.memory;
       return;
     }
     trace::rebase(b.events, b.started_ns);
     events(b.events);
   }
   void total(std::uint64_t ns) { total_ = ns; }
+  void memory(trace::BuildMemory m) { memory_ = m; }
   // A new run of the request (a retry, or the in-process fallback): its trace starts afresh, as
   // event numbers restart in another engine.
   void restart(std::string_view why) {
@@ -113,18 +116,20 @@ class TraceOut {
     tree_ = {};
     stream_.reset();
     total_.reset();
+    memory_.reset();
   }
 
   // After the compile: the stream's summary, or the browser (the stream, without a terminal).
   void finish() {
     if (mode_ == TraceMode::interactive) {
+      if (memory_) tree_.set_memory(*memory_);
       if (trace::browse(tree_)) return;
       std::println(std::cerr, "ycxx: no terminal for --trace-engine=interactive; printing the trace");
       std::vector<trace::Event> all;
       for (const auto& n : tree_.nodes()) all.push_back(n.ev);
       stream_.batch(all);
     }
-    stream_.summary(total_);
+    stream_.summary(total_, memory_);
   }
 
  private:
@@ -132,6 +137,7 @@ class TraceOut {
   trace::Stream stream_;
   trace::Tree tree_;
   std::optional<std::uint64_t> total_;
+  std::optional<trace::BuildMemory> memory_;
 };
 
 // The request through the daemon; why not, if it could not be answered there. A daemon that
@@ -400,8 +406,12 @@ int watch_builds(compile::Request r, bool verbose, TraceMode mode) {
                          if (e.parent != 0) e.parent += space;
                        }
                        open(i, i.offset_ns);
-                       if (b.end) tree.close_group(id, i.offset_ns + (b.ended_ns - std::min(b.ended_ns, start)));
-                       else tree.add(b.events, id);
+                       if (b.end) {
+                         tree.close_group(id, i.offset_ns + (b.ended_ns - std::min(b.ended_ns, start)));
+                         tree.set_memory(b.memory);
+                       } else {
+                         tree.add(b.events, id);
+                       }
                      }
                      return !ended;
                    },
@@ -440,6 +450,9 @@ int cxx(std::span<const std::string_view> args) {
     else expand(a, argv, 0);
   }
   if (forced_off) use = Use::off;
+  // Counting memory serves a trace (#274): without one nothing reads the counts, and every
+  // allocation from here on pays only a load and a branch.
+  if (trace_mode == TraceMode::off) memory::disable();
 
   compile::Request r{std::move(argv), cwd_now(), compile::environment_now(), now_seconds()};
   if (watch) {
@@ -484,12 +497,15 @@ int cxx(std::span<const std::string_view> args) {
   pipeline::Session session(pool);
   bool stopped = false;
   std::optional<trace::Collector> collector;
+  std::optional<memory::Window> window;  // the process's peak while it builds (#274)
+  if (traced) window.emplace();
   const auto start = std::chrono::steady_clock::now();
   if (traced) collector.emplace([&](std::span<const trace::Event> batch) { traced->events(batch); }, r.trace == compile::Trace::values, start);
   compile::Done d = compile::run(r, disk, session, {}, stopped, {}, collector ? &*collector : nullptr);
   if (collector) {
     collector->finish();
     traced->total(static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count()));
+    traced->memory({memory::process().current, window->peak()});
   }
   return finish(d);
 }
@@ -498,6 +514,7 @@ int cxx(std::span<const std::string_view> args) {
 // (default: the working directory's), started if none runs; this process only copies bytes between
 // its stdio and the daemon (daemon design §6.4).
 int lsp(std::span<const std::string_view> args) {
+  memory::disable();  // this process only copies bytes; the daemon counts (#274)
   std::optional<std::string> root;
   for (std::size_t i = 0; i < args.size(); ++i) {
     if (args[i] == "--root" && i + 1 < args.size()) root = std::string(args[++i]);
@@ -545,8 +562,12 @@ int watch(daemon::Connection& c, bool interactive, bool json) {
                        if (!b) return false;
                        rebase(*b);
                        if (seen.insert(b->request).second) tree.open_group(group_of(b->request), std::format("#{} {}", b->request, b->label), b->started_ns);
-                       if (b->end) tree.close_group(group_of(b->request), b->ended_ns);
-                       else tree.add(b->events, group_of(b->request));
+                       if (b->end) {
+                         tree.close_group(group_of(b->request), b->ended_ns);
+                         tree.set_memory(b->memory);
+                       } else {
+                         tree.add(b->events, group_of(b->request));
+                       }
                        return true;
                      },
                      std::format("daemon of {} (builds of files under it; --root picks another)", c.welcome.root)};
@@ -568,7 +589,7 @@ int watch(daemon::Connection& c, bool interactive, bool json) {
     }
     last = b->request;
     if (b->end) {
-      it->second.summary(b->ended_ns - std::min(b->ended_ns, b->started_ns));
+      it->second.summary(b->ended_ns - std::min(b->ended_ns, b->started_ns), b->memory);
       requests.erase(it);
       last = 0;
     } else {
@@ -588,6 +609,7 @@ int watch(daemon::Connection& c, bool interactive, bool json) {
 // `ycxx ctl status|shutdown|trace [--root DIR]`: asks the daemon of DIR's scope (default: the
 // working directory's), never starting one.
 int control(std::span<const std::string_view> args) {
+  memory::disable();  // the daemon's numbers are the daemon's (#274)
   std::optional<std::string> command, root;
   bool interactive = false, json = false;
   for (std::size_t i = 0; i < args.size(); ++i) {
@@ -619,9 +641,15 @@ int control(std::span<const std::string_view> args) {
     return 1;
   }
   // One `name: value` line per field of the status, by reflection.
+  // What each kind retains (#274), one line each: `retained_by_kind: Tu 1234567 bytes in 12 cells`.
   template for (constexpr auto m : std::define_static_array(std::meta::nonstatic_data_members_of(^^daemon::Status,
                                                                                                   std::meta::access_context::unchecked()))) {
-    std::println("{}: {}", std::meta::identifier_of(m), s->[:m:]);
+    if constexpr (std::formattable<typename[:std::meta::type_of(m):], char>) {
+      std::println("{}: {}", std::meta::identifier_of(m), s->[:m:]);
+    } else {
+      for (const daemon::KindRetained& k : s->retained_by_kind)
+        std::println("{}: {} {} bytes in {} cells", std::meta::identifier_of(m), k.kind, k.retained, k.values);
+    }
   }
   return 0;
 }

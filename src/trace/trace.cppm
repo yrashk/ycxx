@@ -76,6 +76,10 @@ class Collector final : public engine::Tracer {
     ev.value = e.value;
     ev.errors = e.errors;
     ev.cell = e.cell;
+    ev.alloc_bytes = e.alloc_bytes;
+    ev.allocs = e.allocs;
+    ev.peak_bytes = e.peak_bytes;
+    ev.retained_bytes = e.retained_bytes;
     return ev;
   }
 

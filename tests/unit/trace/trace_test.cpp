@@ -248,6 +248,106 @@ void lines() {
         "worker names");
 }
 
+// Memory (#274): sums over subtrees count allocations everywhere and retained bytes only where a
+// cell settles; the stream, the JSON line, the tree's order and the summary agree.
+void memory() {
+  const auto with = [](Event e, std::uint64_t alloc, std::int64_t retained, std::uint32_t depth) {
+    e.alloc_bytes = alloc;
+    e.allocs = alloc / 64;
+    e.peak_bytes = static_cast<std::int64_t>(alloc);
+    e.retained_bytes = retained;
+    e.depth = depth;
+    return e;
+  };
+  // Build → {Front → {Pp, Pp reused elsewhere}, Back}; the reuse retains the same bytes again.
+  std::vector<Event> b = {
+      with(ev(1, 0, "Build", "a", Outcome::executed, 0, 10), 100, 10, 0),
+      with(ev(2, 1, "Front", "a", Outcome::executed, 1, 5), 1000, 300, 1),
+      with(ev(3, 2, "Pp", "a", Outcome::executed, 2, 3), 5000, 2000, 2),
+      with(ev(4, 1, "Back", "a", Outcome::executed, 6, 9), 3000, 50, 1),
+      with(ev(5, 4, "Pp", "a", Outcome::reused, 7, 7), 0, 2000, 2),
+  };
+  b[2].cell = b[4].cell = 77;
+  const std::vector<trace::Rollup> r = trace::rollups(b);
+  check(r[0].alloc == 9100 && r[0].retained == 2360, std::format("the root's subtree ({}, {})", r[0].alloc, r[0].retained));
+  check(r[1].alloc == 6000 && r[1].retained == 2300 && r[3].alloc == 3000 && r[3].retained == 50, "each subtree's");
+  check(r[4].alloc == 0 && r[4].retained == 0, "a reuse counts nothing: its bytes count where the cell settled");
+
+  check(trace::format_bytes(812) == "812B" && trace::format_bytes(41 * 1024) == "41.0KiB" && trace::format_bytes(1300000) == "1.24MiB" &&
+            trace::format_bytes(-2048) == "-2.0KiB",
+        "bytes");
+  const std::string line = trace::stream_line(b[1], {false, true}, false, {}, r[1]);
+  check(line.ends_with(" alloc 1000B, 5.9KiB in all, retains 300B"), std::format("a line's memory: {}", line));
+  check(!trace::stream_line(b[1], {false, false}, false, {}, r[1]).contains("alloc"), "left out with times, as the golden has it");
+  check(!trace::stream_line(b[4], {false, true}, false, {}, r[4]).contains("retains"), "a reuse shows no retained bytes");
+  const std::string json = trace::json_line(b[1], false, std::nullopt, {}, r[1]);
+  check(json.contains(R"("alloc_bytes":1000,"allocs":15,"peak_bytes":1000,"retained_bytes":300,"incl_alloc_bytes":6000,"incl_retained_bytes":2300)"),
+        std::format("the JSON line's memory: {}", json));
+
+  // The tree: inclusive sums, and siblings by memory.
+  trace::Tree t;
+  t.add(b);
+  const auto names = [&] {
+    std::vector<std::string> out;
+    for (const auto& row : t.rows()) out.push_back(t.node(row.node).ev.kind);
+    return out;
+  };
+  t.expand_all(true);
+  check(t.node(0).incl.alloc == 9100 && t.node(0).incl.retained == 2360, "the tree's sums are the stream's");
+  check(names() == std::vector<std::string>{"Build", "Front", "Pp", "Back", "Pp"}, "start order");
+  t.set_order(trace::Tree::Order::alloc);
+  check(names() == std::vector<std::string>{"Build", "Front", "Pp", "Back", "Pp"}, "by bytes allocated: Front's 6000 before Back's 3000");
+  t.set_order(trace::Tree::Order::retained);
+  check(names() == std::vector<std::string>{"Build", "Front", "Pp", "Back", "Pp"}, "by bytes retained: Front's 2300 before Back's 50");
+  b[3].alloc_bytes = 7000;  // Back now allocates more than Front's subtree
+  trace::Tree t2;
+  t2.add(b);
+  t2.expand_all(true);
+  t2.set_order(trace::Tree::Order::alloc);
+  std::vector<std::string> got;
+  for (const auto& row : t2.rows()) got.push_back(t2.node(row.node).ev.kind);
+  check(got == std::vector<std::string>{"Build", "Back", "Pp", "Front", "Pp"}, "most allocated first");
+  // Retained order differs from both: Back allocates less than Front's subtree but retains most.
+  b[3].alloc_bytes = 3000;
+  b[3].retained_bytes = 5000;
+  trace::Tree t3;
+  t3.add(b);
+  t3.expand_all(true);
+  t3.set_order(trace::Tree::Order::retained);
+  got.clear();
+  for (const auto& row : t3.rows()) got.push_back(t3.node(row.node).ev.kind);
+  check(got == std::vector<std::string>{"Build", "Back", "Pp", "Front", "Pp"}, "most retained first");
+  t3.set_order(trace::Tree::Order::alloc);
+  got.clear();
+  for (const auto& row : t3.rows()) got.push_back(t3.node(row.node).ev.kind);
+  check(got == std::vector<std::string>{"Build", "Front", "Pp", "Back", "Pp"}, "and by bytes allocated, Front first");
+  b[3].alloc_bytes = 7000;
+  b[3].retained_bytes = 50;
+  const trace::Summary s = t.summary();
+  check(s.alloc_bytes == 9100 && s.retained_bytes == 2360, "the summary's memory");
+
+  // The stream's summary: the build's memory and its kinds.
+  std::ostringstream out;
+  trace::Stream st(out, {false, true});
+  st.batch(b);
+  st.summary(1000, trace::BuildMemory{4096, 8192});
+  const std::string text = out.str();
+  check(text.contains("memory: 12.8KiB allocated in 140 allocations, 2.3KiB retained; process 4.0KiB, peak 8.0KiB"),
+        std::format("the memory line: {}", text));
+  check(text.contains("by kind: Back 6.8KiB, Pp 4.9KiB, Front 1000B, Build 100B"), "kinds by bytes allocated");
+  std::ostringstream quiet;
+  trace::Stream golden_style(quiet, {false, false});
+  golden_style.batch(b);
+  golden_style.summary();
+  check(!quiet.str().contains("memory"), "no memory lines when times are off");
+  std::ostringstream js;
+  trace::Stream jst(js, {false, true, true});
+  jst.batch(b);
+  jst.summary(1000, trace::BuildMemory{4096, 8192});
+  check(js.str().contains(R"("memory":{"alloc_bytes":13100,"allocs":140,"retained_bytes":2360,"process_current_bytes":4096,"process_peak_bytes":8192},"kinds":[{"kind":"Back")"),
+        std::format("the JSON summary: {}", js.str().substr(js.str().rfind("{\"summary"))));
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -259,5 +359,6 @@ int main(int argc, char** argv) {
   collector();
   tree();
   lines();
+  memory();
   return ycxx::unit::result("unit.trace");
 }
