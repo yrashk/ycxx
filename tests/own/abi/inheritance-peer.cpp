@@ -19,3 +19,14 @@ D peer_make() {
 }
 int peer_du(const DU& x) { return x.i * 10 + x.d; }
 int peer_dtors() { return dtors; }
+struct OnlyBase : A {};
+struct FB { float f; };
+struct FD : FB { float g; };
+int peer_only(int x, OnlyBase o, int y) { return int(x * 100 + o.a * 10 + y); }
+float peer_hfa(FD d) { return d.f * 10 + d.g; }
+FD peer_make_hfa() {
+  FD d;
+  d.f = 3;
+  d.g = 4;
+  return d;
+}

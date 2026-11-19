@@ -7,7 +7,8 @@
 // - a multicharacter literal's value is its code units, first most significant, in 32 bits;
 // - conditional-escape-sequences are not supported (ill-formed);
 // - an inexact floating value is rounded to nearest, ties to even, and a nonzero value smaller
-//   than the type's least subnormal becomes zero.
+//   than the type's least subnormal becomes zero; a value beyond the type's finite range is an
+//   infinity, which [lex.fcon]/4 allows (its example), with a warning, as Clang and GCC give.
 export module ycxx.lex:literal;
 
 import std;
@@ -418,7 +419,8 @@ Tk classify_number(Literal& l, Tables& names, R&& report) {
       l.bad = true;
       return Tk::float_lit;
     }
-    if (l.ud_suffix == no_name && (l.float_suffix == FloatSuffix::none || l.float_suffix == FloatSuffix::f)) {
+    if (l.ud_suffix == no_name && (l.float_suffix == FloatSuffix::none || l.float_suffix == FloatSuffix::f ||
+                                   l.float_suffix == FloatSuffix::l)) {
       std::string text = digits;
       if (!fraction.empty() || hex) text += '.' + fraction;
       text += (hex ? "p" : "e") + (exponent.empty() ? std::string("0") : exponent);
@@ -440,8 +442,8 @@ Tk classify_number(Literal& l, Tables& names, R&& report) {
                                                     : float_bits<double>(text, fmt, at_least_one, overflow);
       if (overflow) {
         report(0, LexDiag::float_out_of_range, 0, 0);
-        l.bad = true;
-        return Tk::float_lit;
+        bits = l.float_suffix == FloatSuffix::f ? u64(std::bit_cast<std::uint32_t>(std::numeric_limits<float>::infinity()))
+                                                : std::bit_cast<u64>(std::numeric_limits<double>::infinity());
       }
       l.value = bits.value_or(0);
     }

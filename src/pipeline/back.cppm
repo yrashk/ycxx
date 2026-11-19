@@ -559,6 +559,7 @@ ir::TypeLayout QueryLayout::type(QualType q) const {
     // std::nullptr_t's object holds a null pointer ([basic.fundamental]/16).
     if (*b == ast::Builtin::nullptr_t) return {pointer, l.size, l.align, false, ast::builtin(in, ast::Builtin::void_)};
     if (ast::is_integral(*b)) return {integer, l.size, l.align, ast::is_signed(target, *b), {}};
+    if (ast::is_floating(*b) && ast::computes(l.format)) return {floating, l.size, l.align, false, {}};
     return {other, l.size, l.align, false, {}};
   }
   if (in.types.is<ast::TPointer>(c))
@@ -579,14 +580,39 @@ ir::TypeLayout QueryLayout::type(QualType q) const {
   if (auto r = class_layout(c)) {
     auto it = classes_.find(std::to_underlying(in.types.get<ast::TClass>(c).entity));
     ir::TypeLayout l{record, r->size, r->align, false, {}, it == classes_.end() || it->second->trivial_calls};
-    l.empty = r->fields.empty();
+    l.empty = r->placed.empty;  // no data members, in it or its bases
     l.data = r->placed.nvsize;
-    // A floating member makes the class a candidate for the vector registers (AAPCS64 HFAs).
-    for (const ir::SubObject& f : r->fields) {
+    // A homogeneous floating-point aggregate (AAPCS64 §5.9.5): every member, through arrays and
+    // member classes, of one floating type, 1 to 4 of them; a union's members overlap, so it has
+    // as many as its largest.
+    bool union_ = it != classes_.end() && it->second->union_;
+    std::uint32_t count = 0;
+    std::uint8_t bytes = 0;
+    // Its non-empty bases' members count as its own (AAPCS64 §5.9.5, as Clang has it).
+    std::vector<ir::SubObject> parts;
+    for (const ir::SubObject& b : r->bases)
+      if (!type(b.type).empty) parts.push_back(b);
+    parts.insert(parts.end(), r->fields.begin(), r->fields.end());
+    bool hfa = !parts.empty();
+    for (const ir::SubObject& f : parts) {
       QualType ft = f.type;
-      while (in.types.is<ast::TArray>(in.types.canon(ft))) ft = in.types.get<ast::TArray>(in.types.canon(ft)).elem;
-      auto b = ast::builtin_of(in, ft);
-      l.floating = l.floating || (b && ast::is_floating(*b)) || type(ft).floating;
+      std::uint64_t n = 1;
+      while (in.types.is<ast::TArray>(in.types.canon(ft))) {
+        auto a = in.types.get<ast::TArray>(in.types.canon(ft));
+        n *= a.bound == ConstId::none ? 0 : in.values.get<ast::VInt>(a.bound).bits.lo;
+        ft = a.elem;
+      }
+      ir::TypeLayout m = type(ft);
+      std::uint8_t mb = m.kind == floating ? std::uint8_t(m.size) : m.hfa_bytes;
+      std::uint64_t mn = (m.kind == floating ? 1 : m.hfa) * n;
+      if (!mb || mn == 0 || (bytes && mb != bytes)) hfa = false;
+      bytes = mb;
+      count = union_ ? std::max<std::uint32_t>(count, std::uint32_t(std::min<std::uint64_t>(mn, 5)))
+                     : std::uint32_t(std::min<std::uint64_t>(count + mn, 5));
+    }
+    if (hfa && count <= 4 && count * bytes == r->size) {
+      l.hfa = std::uint8_t(count);
+      l.hfa_bytes = bytes;
     }
     records_[std::to_underlying(in.types.get<ast::TClass>(c).entity)] = l;
     return l;
@@ -655,6 +681,7 @@ ConstLayout LayoutConstant::run(engine::SyncCtx&, ConstId c) {
     return {a->offset, e, a->object};
   }
   if (in.values.is<ast::VInt>(c)) return {std::int64_t(in.values.get<ast::VInt>(c).bits.lo), {}, {}};
+  if (in.values.is<ast::VFloat>(c)) return {std::int64_t(in.values.get<ast::VFloat>(c).bits.lo), {}, {}};
   return {};  // a null pointer, or not a constant `lower` reads: `lower` reports what it cannot use
 }
 
@@ -905,6 +932,12 @@ std::expected<void, std::string> place_value(const ast::Interners& in, const Que
     ir::ConstValue v = layout.constant(init);
     if (v.base) out.relocs.push_back({std::uint32_t(offset), *v.base, v.bits});
     else if (v.bits != 0) return std::unexpected("a pointer initialized with an integer other than zero");
+    return {};
+  }
+  if (l.kind == ir::TypeKind::floating) {  // its encoding
+    if (!in.values.is<ast::VFloat>(init)) return std::unexpected("a floating variable's initializer is not floating");
+    std::uint64_t v = in.values.get<ast::VFloat>(init).bits.lo;
+    for (std::uint64_t i = 0; i < l.size; ++i) out.bytes[offset + i] = std::uint8_t(v >> (8 * i));
     return {};
   }
   if (l.kind == ir::TypeKind::integer || l.kind == ir::TypeKind::boolean) {

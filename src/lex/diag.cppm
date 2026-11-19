@@ -48,7 +48,7 @@ enum class LexDiag : u32 {
   // [lex.icon], [lex.fcon], [lex.ext]
   invalid_number [[=message{Severity::error, "invalid preprocessing number: '{0:c}' cannot follow the literal"}]],
   integer_too_large [[=message{Severity::error, "integer literal is too large for any integer type"}]],
-  float_out_of_range [[=message{Severity::error, "floating-point literal is out of the range of its type"}]],
+  float_out_of_range [[=message{Severity::warning, "floating-point literal is out of the range of its type; it is infinity"}]],
   // [lex.ccon], [lex.string] escapes
   unknown_escape [[=message{Severity::error, "unknown escape sequence '\\{0:c}'"}]],
   empty_escape [[=message{Severity::error, "escape sequence has no digits"}]],

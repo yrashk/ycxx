@@ -15,12 +15,21 @@ import ycxx.ir;
 namespace ycxx::aarch64 {
 
 // Registers by their encoding number; `sp` and `zr` share 31 and are told apart by the operand.
+// The SIMD and floating-point registers follow, `v0` to `v31`, encoded 0 to 31 by forms whose
+// operands are of that class (C1.2.5); a value uses its low 32 (S) or 64 (D) bits.
 export enum class R : std::uint8_t {
   x0, x1, x2, x3, x4, x5, x6, x7, x8, x9, x10, x11, x12, x13, x14, x15, x16, x17,
   x18, x19, x20, x21, x22, x23, x24, x25, x26, x27, x28, fp, lr, sp, zr,
+  v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15,
+  v16, v17, v18, v19, v20, v21, v22, v23, v24, v25, v26, v27, v28, v29, v30, v31,
 };
-export constexpr std::uint32_t enc(R r) { return r == R::zr ? 31u : std::uint32_t(r); }
+export constexpr bool is_fp(R r) { return r >= R::v0; }
+export constexpr R vreg_n(std::uint32_t n) { return R(std::uint32_t(R::v0) + n); }
+export constexpr std::uint32_t enc(R r) {
+  return r == R::zr ? 31u : is_fp(r) ? std::uint32_t(r) - std::uint32_t(R::v0) : std::uint32_t(r);
+}
 export std::string reg_name(R r, bool wide) {
+  if (is_fp(r)) return std::format("{}{}", wide ? 'd' : 's', enc(r));
   if (r == R::sp) return wide ? "sp" : "wsp";
   if (r == R::zr) return wide ? "xzr" : "wzr";
   if (r == R::fp) return "x29";
@@ -62,6 +71,8 @@ export enum class Size : std::uint8_t {
   sf,     // bit 31 set for 64-bit operation
   sfn,    // bits 31 and 22 (N) set for 64-bit operation (bitfield moves)
   mem,    // bits [31:30] are log2 of the access size
+  ftype,  // bit 22 (ftype 01) set for double precision, clear for single (C7.2)
+  sfft,   // bits 31 and 22 set for X and D registers, clear for W and S (FMOV, general)
 };
 
 export enum class Reloc : std::uint8_t { none, page21, pageoff12, got_page21, got_pageoff12, branch26 };
@@ -69,6 +80,7 @@ export enum class Reloc : std::uint8_t { none, page21, pageoff12, got_page21, go
 export struct Opnd {
   Role role = Role::use;
   Field field = Field::none;
+  bool fp = false;  // a SIMD&FP register
 };
 
 export struct FormSpec {
@@ -85,6 +97,8 @@ using enum Role;
 using enum Field;
 constexpr Opnd D(Field f = rd) { return {def, f}; }
 constexpr Opnd U(Field f) { return {use, f}; }
+constexpr Opnd DV(Field f = rd) { return {def, f, true}; }
+constexpr Opnd UV(Field f) { return {use, f, true}; }
 constexpr Opnd I(Field f) { return {imm, f}; }
 constexpr Opnd S() { return {sym, Field::none}; }
 constexpr Opnd L(Field f) { return {label, f}; }
@@ -143,8 +157,38 @@ export enum class Form : std::uint16_t {
   LDRlo [[=f(0x39400000, Size::mem, {D(), U(rn), S()}, Reloc::pageoff12)]],
   STRlo [[=f(0x39000000, Size::mem, {U(rd), U(rn), S()}, Reloc::pageoff12)]],
   LDRgot [[=f(0xF9400000, Size::fixed, {D(), U(rn), S()}, Reloc::got_pageoff12)]],
+  // Loads and stores of SIMD and floating-point registers, unsigned offset (C7.2: LDR, STR
+  // (immediate, SIMD&FP)); frame layout uses these for a form above whose register is one.
+  LDRuiF [[=f(0x3D400000, Size::mem, {DV(), U(rn), I(uoff12)})]],
+  STRuiF [[=f(0x3D000000, Size::mem, {UV(rd), U(rn), I(uoff12)})]],
+  LDRloF [[=f(0x3D400000, Size::mem, {DV(), U(rn), S()}, Reloc::pageoff12)]],
+  STRloF [[=f(0x3D000000, Size::mem, {UV(rd), U(rn), S()}, Reloc::pageoff12)]],
   STPpre [[=f(0xA9800000, Size::fixed, {U(rd), U(rt2), D(rn), I(imm7x8)})]],   // 64-bit, pre-index
   LDPpost [[=f(0xA8C00000, Size::fixed, {D(rd), D(rt2), D(rn), I(imm7x8)})]],  // 64-bit, post-index
+  // Floating point, scalar (C7.2), single or double precision by `wide`.
+  FADD [[=f(0x1E202800, Size::ftype, {DV(), UV(rn), UV(rm)})]],
+  FSUB [[=f(0x1E203800, Size::ftype, {DV(), UV(rn), UV(rm)})]],
+  FMUL [[=f(0x1E200800, Size::ftype, {DV(), UV(rn), UV(rm)})]],
+  FDIV [[=f(0x1E201800, Size::ftype, {DV(), UV(rn), UV(rm)})]],
+  FNEG [[=f(0x1E214000, Size::ftype, {DV(), UV(rn)})]],
+  FABS [[=f(0x1E20C000, Size::ftype, {DV(), UV(rn)})]],
+  FMOVrr [[=f(0x1E204000, Size::ftype, {DV(), UV(rn)})]],     // FMOV (register)
+  FCMP [[=f(0x1E202000, Size::ftype, {UV(rn), UV(rm)})]],
+  FCSEL [[=f(0x1E200C00, Size::ftype, {DV(), UV(rn), UV(rm), C(cc)})]],
+  FCVTsd [[=f(0x1E22C000, Size::fixed, {DV(), UV(rn)})]],     // FCVT Dd, Sn
+  FCVTds [[=f(0x1E624000, Size::fixed, {DV(), UV(rn)})]],     // FCVT Sd, Dn
+  // Conversions between floating point and integers: the letter is the floating operand's
+  // precision, `wide` the integer's width.
+  FCVTZSs [[=f(0x1E380000, Size::sf, {D(), UV(rn)})]],
+  FCVTZSd [[=f(0x1E780000, Size::sf, {D(), UV(rn)})]],
+  FCVTZUs [[=f(0x1E390000, Size::sf, {D(), UV(rn)})]],
+  FCVTZUd [[=f(0x1E790000, Size::sf, {D(), UV(rn)})]],
+  SCVTFs [[=f(0x1E220000, Size::sf, {DV(), U(rn)})]],
+  SCVTFd [[=f(0x1E620000, Size::sf, {DV(), U(rn)})]],
+  UCVTFs [[=f(0x1E230000, Size::sf, {DV(), U(rn)})]],
+  UCVTFd [[=f(0x1E630000, Size::sf, {DV(), U(rn)})]],
+  FMOVtoF [[=f(0x1E270000, Size::sfft, {DV(), U(rn)})]],     // FMOV Sd, Wn / Dd, Xn: the bits
+  FMOVtoI [[=f(0x1E260000, Size::sfft, {D(), UV(rn)})]],     // FMOV Wd, Sn / Xd, Dn
   // Branches.
   B [[=branch(f(0x14000000, Size::fixed, {L(rel26)}))]],
   Bcc [[=f(0x54000000, Size::fixed, {C(bcond), L(rel19)})]],
@@ -240,6 +284,8 @@ export std::expected<std::uint32_t, std::string> encode(const Encodable& in) {
     case Size::sf: if (in.wide) w |= 1u << 31; break;
     case Size::sfn: if (in.wide) w |= 1u << 31 | 1u << 22; break;
     case Size::mem: w |= std::uint32_t(in.access) << 30; break;
+    case Size::ftype: if (in.wide) w |= 1u << 22; break;
+    case Size::sfft: if (in.wide) w |= 1u << 31 | 1u << 22; break;
   }
   auto ops = s.ops.view();
   for (std::size_t i = 0; i < ops.size(); ++i) {

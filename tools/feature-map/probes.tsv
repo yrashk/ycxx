@@ -1,4 +1,4 @@
-# Each probe built and run by ycxx 5591c60fbd1c and by an oracle (feature-map probe).
+# Each probe built and run by ycxx 4a0100b72609 and by an oracle (feature-map probe).
 feature	oracle	ycxx	first_error
 lex-core	gcc	pass	
 lex-digraph	gcc	pass	
@@ -9,7 +9,7 @@ lex-unicode-literals	gcc	fail	'' is not supported yet
 lex-char8	gcc	pass	
 lex-binary	gcc	pass	
 lex-digit-sep	gcc	pass	
-lex-hex-float	gcc	fail	floating-point literals are not supported yet
+lex-hex-float	gcc	pass	
 lex-udl	gcc	fail	'operator' is not supported yet
 lex-size-t-suffix	gcc	pass	
 lex-escapes	gcc	pass	
@@ -20,8 +20,8 @@ cpp-variadic-macros	gcc	pass
 cpp-va-opt	gcc	pass	
 cpp-embed	gcc	fail	an array bound must be a positive integral constant expression
 basic-integral	gcc	pass	
-basic-float	gcc	fail	floating-point literals are not supported yet
-basic-ext-fp	gcc	fail	floating-point literals are not supported yet
+basic-float	gcc	pass	
+basic-ext-fp	gcc	fail	extended floating-point types are not supported yet
 basic-ptr-arr-ref	gcc	pass	
 basic-fnptr	gcc	pass	
 basic-rvalue-ref	gcc	fail	an rvalue reference to 'S' cannot bind to an lvalue
