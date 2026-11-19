@@ -452,3 +452,12 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
     a stray token). Check that each gives a syntax error on the line Clang and GCC use, not a
     not-supported message or silent acceptance (`tests/own/syntax`).
   - Learned on #212.
+- **Template parameters are positional, so "the current instantiation" is a property of the
+  point, not of the type.** `R<T>` written inside an alias template `template<class T> using RT =
+  typename R<T>::type;` is the same entity as `R`'s own current instantiation, because both `T`s are
+  (depth 0, index 0). Looking members up early in "any class that is a current instantiation"
+  read the primary template's member where a partial specialization's was meant.
+  - Do: look a dependent class's members up early only when it is the class whose
+    member-specification is being read (`Sema::current_class`), or when matching an out-of-class
+    member definition against its own class.
+  - Learned on #88 step 5.
