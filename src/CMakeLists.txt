@@ -5,6 +5,7 @@
 add_subdirectory(hash)
 add_subdirectory(ast)
 add_subdirectory(engine)
+add_subdirectory(trace)
 add_subdirectory(lex)
 add_subdirectory(pp)
 add_subdirectory(ir)
