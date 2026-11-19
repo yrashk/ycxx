@@ -40,6 +40,7 @@ class Editor:
         threading.Thread(target=self._read, daemon=True).start()
         init = self.request('initialize', {'processId': os.getpid(), 'rootUri': Path(root).as_uri(), 'capabilities': {}})
         reply = self.wait(lambda m: m.get('id') == init, 'initialize')
+        self.capabilities = reply['result']['capabilities'] if reply is not None else {}
         if reply is not None and reply['result']['capabilities']['textDocumentSync']['change'] != 1:
             fail('initialize: the server does not ask for full-text sync')
         self.notify('initialized', {})
@@ -227,6 +228,86 @@ def compile_commands(env):
     expect(len(ed.diagnostics(b, 2, 'b.cpp relisted') or []), 1, 'the database read again after a change')
     expect(ed.finish(), 0, '`ycxx lsp` after shutdown and exit')
     db.unlink()
+def definitions(env):
+    """Go-to-definition and a header's diagnostics (#170): F12 on a call of a function a header
+    declares lands on its declarator there, F12 in unsaved text follows it, and a message located
+    in a header the editor has not opened is published under the header, then cleared."""
+    d = project(env, 'definitions')
+    unit, header = d / 'a.cpp', d / 'inc' / 'h.hpp'
+    ed = Editor(env, d)
+    if not ed.capabilities.get('definitionProvider'):
+        fail('initialize: the server does not offer definitions')
+    ed.open(unit, GOOD)
+    expect(ed.diagnostics(unit, 1, 'open'), [], 'a clean unit on open')
+
+    def definition(line, character, what):
+        r = ed.request('textDocument/definition', {'textDocument': {'uri': unit.as_uri()},
+                                                    'position': {'line': line, 'character': character}})
+        m = ed.wait(lambda m: m.get('id') == r, what)
+        if m is None or 'error' in m:
+            fail(f'{what}: {m}')
+            return None
+        loc = m.get('result')
+        return None if loc is None else (loc['uri'], loc['range']['start']['line'], loc['range']['start']['character'])
+
+    # `return g() - 1;`: `g` is at character 20 of line 1; h.hpp declares it at 0:4.
+    expect(definition(1, 20, 'F12 on g'), (header.as_uri(), 0, 4), 'a call of a function its header declares')
+    expect(definition(1, 4, 'F12 on main\'s name'), None, 'a declaration\'s own name, not yet')
+    # Unsaved text: a function defined above `main`, then called; a call's argument names no
+    # function (a local, a literal); a pointer's declarator starts before its name; a call of a
+    # function template lands on the template.
+    version = 1
+
+    def edit(text, what):
+        nonlocal version
+        version += 1
+        ed.change(unit, text, version)
+        expect(ed.diagnostics(unit, version, what), [], f'{what}: the unsaved unit is clean')
+        return text.splitlines()
+
+    def at(lines, line, word, nth=0):
+        """The position of the `nth` occurrence of `word` on `line`."""
+        i = -1
+        for _ in range(nth + 1):
+            i = lines[line].index(word, i + 1)
+        return line, i
+
+    lines = edit('#include "h.hpp"\nint k(int x) { return x; }\nint main() { int y = 1; return k(y) + k(7) - 8; }\n', 'k')
+    expect(definition(*at(lines, 2, 'k('), 'F12 on k'), (unit.as_uri(), *at(lines, 1, 'k')), 'a function defined in unsaved text')
+    expect(definition(*at(lines, 2, 'y)'), 'F12 on an argument'), None, 'a local passed to a call: not the callee')
+    expect(definition(*at(lines, 2, '7'), 'F12 on a literal'), None, 'a literal passed to a call: not the callee')
+    expect(definition(*at(lines, 2, ' + '), 'F12 on whitespace'), None, 'whitespace between names: nothing')
+    lines = edit('#include "h.hpp"\nint *gp = 0;\nint main() { return gp ? 1 : 0; }\n', 'gp')
+    expect(definition(*at(lines, 2, 'gp'), 'F12 on gp'), (unit.as_uri(), *at(lines, 1, 'gp')), 'a pointer: its name, not its `*`')
+    lines = edit('template <class T> T id(T x) { return x; }\nint main() { return id(0); }\n', 'id')
+    expect(definition(*at(lines, 1, 'id'), 'F12 on id'), (unit.as_uri(), *at(lines, 0, 'id')), 'a call of a function template')
+
+    # A header the editor has not opened, with a warning in it: published under the header, then
+    # cleared once the unit no longer includes it.
+    (d / 'inc' / 'w.hpp').write_text('// a header\n#warning from the header\n')
+    warned = d / 'inc' / 'w.hpp'
+
+    def header_messages(what):
+        m = ed.wait(lambda m: m.get('method') == 'textDocument/publishDiagnostics' and m['params']['uri'] == warned.as_uri(),
+                    what)
+        return None if m is None else [(x['range']['start']['line'], x['severity']) for x in m['params']['diagnostics']]
+
+    version += 1
+    ed.change(unit, '#include "w.hpp"\nint main() { return 0; }\n', version)
+    expect(header_messages('a header\'s warning'), [(1, 2)], 'a warning in a header that is not open')
+    version += 1
+    ed.change(unit, GOOD, version)
+    expect(header_messages('the header\'s warning cleared'), [], 'the header\'s warning once nothing includes it')
+    # Open and unsaved, the header's warning moves down two lines: it is rendered in the buffer.
+    version += 1
+    ed.change(unit, '#include "w.hpp"\nint main() { return 0; }\n', version)
+    ed.open(warned, '// a header\n\n\n#warning from the header\n', 1)
+    m = ed.wait(lambda m: m.get('method') == 'textDocument/publishDiagnostics' and m['params']['uri'] == warned.as_uri() and
+                m['params'].get('version') == 1, 'the open header\'s warning')
+    got = [] if m is None else [(x['range']['start']['line'], x['severity']) for x in m['params']['diagnostics']]
+    expect(got, [(3, 2)], 'a header\'s warning rendered in its unsaved buffer')
+    ed.notify('textDocument/didClose', {'textDocument': {'uri': warned.as_uri()}})
+    expect(ed.finish(), 0, '`ycxx lsp` after shutdown and exit')
 
 
 def symlinked(env):
@@ -325,7 +406,7 @@ def main():
         if env.cxx(['-fsyntax-only', 'first.cpp'], env.scope, env.daemon)[0] != 0 or env.pid() is None:
             fail('the first request through the daemon failed: no test can run')
             return 1
-        for test in (editing, compile_commands, symlinked, concurrent_build, crossing, exit_status):
+        for test in (editing, definitions, compile_commands, symlinked, concurrent_build, crossing, exit_status):
             t0 = time.monotonic()
             pid = env.pid()
             if pid is None:
@@ -341,7 +422,7 @@ def main():
     if failures:
         print(f'daemon.lsp: {len(failures)} failure(s)', file=sys.stderr)
         return 1
-    print('daemon.lsp: editing, compile_commands.json, a symlinked path, a concurrent build, crossing messages, exit status and shutdown')
+    print('daemon.lsp: editing, definitions and a header\'s diagnostics, compile_commands.json, a symlinked path, a concurrent build, crossing messages, exit status and shutdown')
     return 0
 
 
