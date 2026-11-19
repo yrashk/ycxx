@@ -177,6 +177,10 @@ class Gen {
   }
   ValueId constant(ast::QualType type, ast::ConstId c) { return pure(ir::Op::const_, type, {}, {word(c)}); }
   ValueId int_constant(ast::QualType type, std::int64_t v) { return constant(type, facts_.int_constant(type, v)); }
+  ValueId float_constant(ast::QualType type, double v) {
+    if (auto c = facts_.float_constant(type, v)) return constant(type, *c);
+    throw Unsupported{"an extended floating-point format"};
+  }
 
   // An access through a volatile glvalue is a side effect ([intro.execution]) and never constant.
   ir::Flags access_flags(ast::QualType t) {
@@ -743,7 +747,7 @@ class Gen {
   }
   ValueId zero(ast::QualType t) {
     if (cls(t) == TypeClass::pointer) return constant(t, facts_.null_constant(t));
-    if (cls(t) == TypeClass::floating) return constant(t, facts_.float_constant(t, 0.0));
+    if (cls(t) == TypeClass::floating) return float_constant(t, 0.0);
     return int_constant(t, 0);
   }
 
@@ -1242,7 +1246,7 @@ class Gen {
       return pure(ir::Op::ptr_add, t, {old, one}, {word(ty(facts_.pointee(t)))});
     }
     if (cls(t) == TypeClass::floating)
-      return pure(inc ? ir::Op::fadd : ir::Op::fsub, t, {old, constant(t, facts_.float_constant(t, 1.0))});
+      return pure(inc ? ir::Op::fadd : ir::Op::fsub, t, {old, float_constant(t, 1.0)});
     if (cls(t) != TypeClass::integer) throw Unsupported{"++ or -- of a non-integer type"};
     ast::QualType p = facts_.promoted(t, bit_width);
     ValueId v = same_type(p, t) ? old : pure(ir::Op::iconv, p, {old});

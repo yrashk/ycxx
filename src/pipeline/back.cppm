@@ -1,6 +1,6 @@
 // The back half of a translation unit's pipeline (#43, #63) as engine queries: every function
 // definition through `function_ir` (ycxx.irgen), `lower` (ycxx.ir.lower), its optimization unit,
-// `optimized` at level 0 and `codegen` (AArch64), then `tu(TU)`, whose value is the object
+// `optimized` at level 0 and `codegen`, then `tu(TU)`, whose value is the object
 // (`ycxx.obj`) with every variable definition and string literal in it. An edit to one function's
 // body re-executes that function's cells, `tu` and the link; every other function's cells stay
 // green, because each reads its definition through a projection that backdates (§A1.8).
@@ -21,11 +21,10 @@
 //   layout                   `layout_type(T)`, `layout_step(T, s)`, `layout_constant(c)` (cheap)
 //
 // What a query reads besides its key and fetches: the process's interners, sema's constants and
-// the target, bound by whoever owns them (`Universe`, as pp's `session()`); handles in values are
+// the default target for pre-built units, bound by whoever owns them (`Universe`); handles in values are
 // numbers in those interners, so a cell's value is meaningful only with them (#17 persists them).
 //
-// α subset (#39): the target is AArch64 Darwin; functions and variables of the global namespace;
-// constants are integers, null pointers and addresses of string literal objects.
+// The Linux ABI subset admits 32- and 64-bit integers and pointers in function signatures.
 export module ycxx.pipeline:back;
 
 import std;
@@ -36,8 +35,10 @@ import ycxx.ir.l2;
 import ycxx.ir.lower;
 import ycxx.irgen;
 import ycxx.obj;
+import ycxx.pp;
 import ycxx.sema;
 import ycxx.target.aarch64;
+import ycxx.target.x86_64;
 import :mangle;
 
 export namespace ycxx::pipeline {
@@ -236,15 +237,20 @@ class UnitStore {
   std::map<Fp128, OptUnit> units_;  // node-based: references stay valid as units are added
 };
 
-// What the queries read besides their keys: the interners, constants and target of the process,
-// and sema's world when units come from source. Bound for the duration of a `Bind`; the owner
-// (`Session`, or `compile`) keeps them alive as long as its engine.
+// The interners, constants, default target for given units, and sema worlds for source units.
+// The owner (`Session` or `compile`) keeps them alive as long as its engine. Each worker's `Bind`
+// makes them available to the queries it runs.
 struct Universe {
   ast::Interners* in = nullptr;
   Constants* consts = nullptr;
   const ast::Target* target = &ast::aarch64_darwin;
   sema::World* world = nullptr;
   UnitStore* units = nullptr;
+  sema::World* linux_world = nullptr;
+
+  sema::World* world_for(const ast::Target& t) const {
+    return t.triple == ast::x86_64_linux.triple ? linux_world : world;
+  }
 };
 Universe& universe();
 // Binds `u` and its interners on this thread until it is bound again: a pool worker's (#137).
@@ -347,7 +353,7 @@ struct StringUse {
 // cell above. Records the string literal objects whose addresses it gave, in order of first use.
 class QueryLayout {
  public:
-  QueryLayout(engine::SyncCtx& cx, const Shapes& shapes) : cx_(&cx) {
+  QueryLayout(engine::SyncCtx& cx, const Shapes& shapes, const ast::Target& target) : cx_(&cx), target_(&target) {
     for (const ClassShape& c : shapes.classes) classes_.emplace(std::to_underlying(c.entity), &c);
     for (const EnumShape& e : shapes.enums) enums_.emplace(std::to_underlying(e.entity), e.underlying);
   }
@@ -366,6 +372,7 @@ class QueryLayout {
   ast::Placed placed(QualType t) const;
 
   engine::SyncCtx* cx_;
+  const ast::Target* target_;
   std::map<std::uint32_t, const ClassShape*> classes_;
   std::map<std::uint32_t, QualType> enums_;
   mutable std::vector<StringUse> strings_;
@@ -487,6 +494,8 @@ struct OptKey {
 struct Machine {
   std::optional<aarch64::MachineCode> code;
   std::string error;
+  std::optional<x86_64::MachineCode> linux_code{};
+  bool ok() const { return code.has_value() || linux_code.has_value(); }
 };
 // `optimized(unit, target, options, optimizer_version, level)` (§A8.1). Options and the optimizer
 // version have nothing to choose yet: the version is the binary's, and a daemon serves one binary.
@@ -495,7 +504,7 @@ struct Optimized {
   using Value = Machine;
   static engine::query_task<Value> run(engine::Ctx& cx, OptKey k);
   static std::string show(const Value& v);  // the instruction words, for traces (#245)
-  static std::string errors(const Value& v) { return v.code ? std::string() : v.error; }
+  static std::string errors(const Value& v) { return v.ok() ? std::string() : v.error; }
 };
 
 // `codegen(F)`: `best_available(unit, B, S)` (§A8.3; optimization design §7: S is consulted only
@@ -562,10 +571,25 @@ Bind::~Bind() { bound() = old_; }
 
 // ------------------------------------------------------------------------------------- layout
 
+namespace {
+
+// A source unit uses the target in its configuration; a given unit uses its owner's target.
+const ast::Target& unit_target(engine::SyncCtx& cx, TuId tu) {
+  const TuSource& src = cx.fetch<TuSourceIn>(tu);
+  if (src.file) return *cx.fetch<pp::SourceOf>(pp::FileId{*src.file}).config.target;
+  return *universe().target;
+}
+
+obj::target object_target(const ast::Target& target) {
+  return target.triple == ast::x86_64_linux.triple ? obj::target::x86_64_linux : obj::target::aarch64_macos;
+}
+
+}  // namespace
+
 ir::TypeLayout QueryLayout::type(QualType q) const {
   using enum ir::TypeKind;
   ast::Interners& in = *universe().in;
-  const ast::Target& target = *universe().target;
+  const ast::Target& target = *target_;
   QualType c = in.types.canon(q);
   if (auto b = ast::builtin_of(in, c)) {
     if (*b == ast::Builtin::void_) return {void_, 0, 1, false, {}};
@@ -716,6 +740,7 @@ namespace {
 std::string entity_name(EntityId e) {
   std::string out;
   const sema::World* w = universe().world;
+  if (universe().linux_world && (!w || !w->entities.find(e))) w = universe().linux_world;
   const auto name = [&](this const auto& self, EntityId x, int depth) -> void {
     const sema::EntityRec* r = w ? w->entities.find(x) : nullptr;
     if (!r) {
@@ -773,7 +798,7 @@ engine::query_task<FunctionSource> FunctionSourceQ::run(engine::Ctx& cx, FnKey k
   for (const FunctionDef& f : tu.functions)
     if (f.entity == k.fn) out.def = f;
   out.is_main = k.fn == tu.main;
-  irgen::TypeFacts types(*universe().in, *universe().target);
+  irgen::TypeFacts types(*universe().in, unit_target(cx, k.tu));
   for (const Entity& e : tu.entities) {
     if (!e.is_function) continue;
     if (e.is_constexpr) out.constexpr_functions.push_back(e.id);
@@ -788,7 +813,8 @@ engine::query_task<FunctionSource> FunctionSourceQ::run(engine::Ctx& cx, FnKey k
 // `Constants`, declarations from the function's source.
 class UnitFacts : public irgen::TypeFacts {
  public:
-  UnitFacts(const FunctionSource& src, const Shapes& shapes) : TypeFacts(*universe().in, *universe().target), src_(&src) {
+  UnitFacts(const FunctionSource& src, const Shapes& shapes, const ast::Target& target)
+      : TypeFacts(*universe().in, target), src_(&src) {
     enum_underlying = [&shapes](EntityId e) {
       for (const EnumShape& s : shapes.enums)
         if (s.entity == e) return s.underlying;
@@ -822,7 +848,7 @@ static_assert(irgen::Facts<UnitFacts>);
 engine::query_task<Generated> FunctionGen::run(engine::Ctx& cx, FnKey k) {
   const FunctionSource& src = co_await cx.fetch<FunctionSourceQ>(k);
   const Shapes& shapes = co_await cx.fetch<UnitShapes>(k.tu);
-  UnitFacts facts(src, shapes);
+  UnitFacts facts(src, shapes, unit_target(cx, k.tu));
   const FunctionDef& d = src.def;
   irgen::FunctionInput input{d.entity, d.decl, d.body, d.item, d.body_offset};
   input.this_type = d.this_type;
@@ -855,9 +881,12 @@ std::string Lower::show(const Lowered& v) {
 }
 
 std::string Optimized::show(const Machine& m) {
-  if (!m.code) return m.error.empty() ? std::string() : "error: " + m.error;
-  return std::format("{} bytes, {} relocations\n", m.code->bytes.size(), m.code->relocs.size()) +
-         aarch64::disassemble(*m.code, [](EntityId e) { return entity_name(e); });
+  if (m.linux_code)
+    return std::format("{} bytes, {} relocations\n", m.linux_code->bytes.size(), m.linux_code->relocs.size());
+  if (m.code)
+    return std::format("{} bytes, {} relocations\n", m.code->bytes.size(), m.code->relocs.size()) +
+           aarch64::disassemble(*m.code, [](EntityId e) { return entity_name(e); });
+  return m.error.empty() ? std::string() : "error: " + m.error;
 }
 
 engine::query_task<FunctionIrValue> FunctionIr::run(engine::Ctx& cx, FnKey k) {
@@ -871,11 +900,68 @@ engine::query_task<ir::FunctionDebug> FunctionDebug::run(engine::Ctx& cx, FnKey 
   co_return g.ir ? g.ir->debug : ir::FunctionDebug{};
 }
 
+namespace {
+
+// Lowering implements the Darwin aggregate calling convention. Check the original signature of
+// each function and call before lowering can erase an aggregate, narrow integer or ellipsis.
+std::string_view linux_signature_error(const ast::Interners& in, const QueryLayout& layout, QualType type) {
+  QualType canonical = in.types.canon(type);
+  if (!in.types.is<ast::TFunction>(canonical)) return "the function type is unavailable";
+  auto f = in.types.get<ast::TFunction>(canonical);
+  if (f.variadic) return "variadic functions are not supported";
+  auto scalar = [&](QualType t) {
+    ir::TypeLayout l = layout.type(t);
+    return l.kind == ir::TypeKind::pointer || (l.kind == ir::TypeKind::integer && (l.size == 4 || l.size == 8));
+  };
+  if (layout.type(f.ret).kind != ir::TypeKind::void_ && !scalar(f.ret))
+    return "only void, 32- and 64-bit integer, pointer and reference results are supported";
+  for (QualType p : in.seqs.elements(f.params))
+    if (!scalar(p)) return "only 32- and 64-bit integer, pointer and reference parameters are supported";
+  return {};
+}
+
+}  // namespace
+
 engine::query_task<Lowered> Lower::run(engine::Ctx& cx, FnKey k) {
   const FunctionIrValue& f = co_await cx.fetch<FunctionIr>(k);
-  if (!f.body) co_return Lowered{std::nullopt, {}, f.error};
-  QueryLayout layout(cx, co_await cx.fetch<UnitShapes>(k.tu));
-  auto l2 = ir::lower(*f.body, k.fn, layout);
+  const ast::Target& target = unit_target(cx, k.tu);
+  const bool linux = object_target(target) == obj::target::x86_64_linux;
+  if (!f.body && !linux) co_return Lowered{std::nullopt, {}, f.error};
+  QueryLayout layout(cx, co_await cx.fetch<UnitShapes>(k.tu), target);
+  ir::LowerConfig config;
+  if (linux) {
+    const ast::Interners& in = *universe().in;
+    const FunctionDef& def = (co_await cx.fetch<FunctionSourceQ>(k)).def;
+    QualType type = def.body.deduced ? def.body.deduced_type : def.decl.type;
+    if (auto error = linux_signature_error(in, layout, type); !error.empty()) {
+      auto message = std::format("x86-64 System V ABI: {}", error);
+      co_return Lowered{std::nullopt, {}, BackError{ast::Loc{def.item, def.body_offset}, std::move(message)}};
+    }
+    if (!f.body) co_return Lowered{std::nullopt, {}, f.error};
+    const TranslationUnit& tu = co_await cx.fetch<TuUnit>(k.tu);
+    const ir::Function& body = *f.body;
+    for (std::size_t i = 0; i < body.nodes.size(); ++i) {
+      const auto n = ir::NodeId(static_cast<std::uint32_t>(i));
+      const ir::Op op = body.node(n).op;
+      std::optional<QualType> callee;
+      if (op == ir::Op::call) {
+        const auto id = EntityId(static_cast<std::uint32_t>(body.imms_of(n)[0]));
+        auto e = std::ranges::find(tu.entities, id, &Entity::id);
+        if (e != tu.entities.end()) callee = e->type;
+      } else if (op == ir::Op::call_ind) {
+        QualType ptr = body.value(body.operands_of(n)[1]).type.type;
+        callee = ast::pointee_of(in, ptr);
+      } else continue;
+      std::string_view error = callee ? linux_signature_error(in, layout, *callee) : "the function type is unavailable";
+      if (error.empty()) continue;
+      const ir::FunctionDebug& debug = co_await cx.fetch<FunctionDebug>(k);
+      auto at = i < debug.loc.size() ? debug.loc[i] : ast::Loc{def.item, def.body_offset};
+      co_return Lowered{std::nullopt, {}, BackError{at, std::format("x86-64 System V ABI: call: {}", error)}};
+    }
+    config.int_arg_registers = 6;
+    config.min_result_bits = 0;
+  }
+  auto l2 = ir::lower(*f.body, k.fn, layout, config);
   if (!l2) {
     // Only an error needs positions.
     const ir::FunctionDebug& debug = co_await cx.fetch<FunctionDebug>(k);
@@ -896,15 +982,24 @@ std::vector<ir::EntityId> references(const l2::Function& body) {
   return out;
 }
 
-// The entities a unit defines: its functions and variables.
+// The unit's definitions code generation can address directly. ELF default-visibility global
+// symbols may be preempted, so only internal definitions can use RIP-relative addressing here.
 struct TuDefined {
   using Key = TuId;
   using Value = std::vector<EntityId>;  // sorted by handle
   static engine::query_task<Value> run(engine::Ctx& cx, TuId tu) {
     const TranslationUnit& u = co_await cx.fetch<TuUnit>(tu);
+    const bool linux = object_target(unit_target(cx, tu)) == obj::target::x86_64_linux;
     std::vector<EntityId> out;
-    for (const FunctionDef& f : u.functions) out.push_back(f.entity);
-    for (const Variable& v : u.variables) out.push_back(v.entity);
+    auto add = [&](EntityId id) {
+      if (linux) {
+        auto e = std::ranges::find(u.entities, id, &Entity::id);
+        if (e == u.entities.end() || e->linkage != ast::Linkage::internal) return;
+      }
+      out.push_back(id);
+    };
+    for (const FunctionDef& f : u.functions) add(f.entity);
+    for (const Variable& v : u.variables) add(v.entity);
     std::ranges::sort(out);
     co_return out;
   }
@@ -913,8 +1008,7 @@ struct TuDefined {
 engine::query_task<UnitRef> UnitQ::run(engine::Ctx& cx, FnKey k) {
   auto [lowered, defined] = co_await cx.par_fetch(engine::q<Lower>{k}, engine::q<TuDefined>{k.tu});
   if (!lowered.body) co_return UnitRef{std::nullopt, lowered.error};
-  // Which of its references the object defines: the unit's definitions and the string literal
-  // objects the function itself uses (the object defines every one its functions use).
+  // Which references can be addressed directly, including the function's string literals.
   OptUnit u{*lowered.body, {}};
   for (ir::EntityId e : references(u.body.f))
     if (std::ranges::binary_search(defined, e) || std::ranges::contains(lowered.strings, e, &StringUse::entity))
@@ -927,14 +1021,19 @@ engine::query_task<UnitRef> UnitQ::run(engine::Ctx& cx, FnKey k) {
 engine::query_task<Machine> Optimized::run(engine::Ctx& cx, OptKey k) {
   (void)cx.fetch<CostModelIn>(k.target);  // part of `target` (§O8); level 0 reads no cost
   const OptUnit& u = universe().units->at(k.unit);
-  // Level 0: `lower` already ran (it made the unit); tree selection and stack slots (§O7).
+  // Level 0: `lower` already ran (it made the unit); selection and stack slots (§O7).
+  if (k.target == obj::target::x86_64_linux) {
+    auto m = x86_64::compile_function(u.body.f, u.local);
+    if (!m) co_return Machine{std::nullopt, m.error()};
+    co_return Machine{std::nullopt, {}, std::move(*m)};
+  }
   auto m = aarch64::compile_function(u.body.f, u.local);
   if (!m) co_return Machine{std::nullopt, m.error()};
   co_return Machine{std::move(*m), {}};
 }
 
 engine::query_task<Machine> Codegen::run(engine::Ctx& cx, FnKey k) {
-  constexpr obj::target target = obj::target::aarch64_macos;
+  const obj::target target = object_target(unit_target(cx, k.tu));
   const UnitRef& unit = co_await cx.fetch<UnitQ>(k);
   if (!unit.unit) co_return Machine{std::nullopt, unit.error ? unit.error->message : "no unit"};
   // best_available(unit, B, S): the highest level S holds, never one below B.
@@ -1009,17 +1108,96 @@ std::expected<Bytes, std::string> initial_bytes(const ast::Interners& in, const 
   return out;
 }
 
+namespace {
+
+struct LinuxFunction {
+  EntityId entity;
+  const x86_64::MachineCode* code;
+};
+
+std::expected<obj::object, aarch64::CodegenError> assemble_linux(
+    const std::string& name, std::span<const LinuxFunction> functions,
+    std::span<const aarch64::DataDef> data, std::span<const aarch64::Symbol> symbols) {
+  obj::object o;
+  o.name = name;
+  o.arch = obj::target::x86_64_linux;
+  std::map<EntityId, std::uint32_t> symbol_of;
+  for (const auto& s : symbols) symbol_of.emplace(s.entity, o.add_symbol({s.name, s.bind, {}, 0, false}));
+  auto missing = [](EntityId e) {
+    return std::unexpected(aarch64::CodegenError{e, std::format("@{} has no symbol name", ir::raw(e))});
+  };
+  if (!functions.empty()) {
+    const std::uint32_t text = o.add_section(obj::standard_section::text);
+    obj::section& sec = o.sections[text];
+    for (const LinuxFunction& f : functions) {
+      auto sym = symbol_of.find(f.entity);
+      if (sym == symbol_of.end()) return missing(f.entity);
+      sec.align(4);
+      const std::size_t base = sec.bytes.size();
+      o.symbols[sym->second].section = text;
+      o.symbols[sym->second].offset = base;
+      sec.emit(f.code->bytes);
+      for (const auto& r : f.code->relocs) {
+        auto target = symbol_of.find(r.target);
+        if (target == symbol_of.end()) return missing(r.target);
+        auto kind = r.kind == x86_64::RelocKind::pc32 ? obj::reloc_kind::x86_64_pc32 : obj::reloc_kind::x86_64_plt32;
+        if (base + r.offset > std::numeric_limits<std::uint32_t>::max())
+          return std::unexpected(aarch64::CodegenError{f.entity, "a text relocation exceeds the object offset limit"});
+        sec.relocate(kind, target->second, r.addend, static_cast<std::uint32_t>(base + r.offset));
+      }
+    }
+  }
+  using K = aarch64::DataKind;
+  using S = obj::standard_section;
+  for (auto [kind, section] : {std::pair{K::cstring, S::cstring}, {K::rodata, S::rodata}, {K::data_const, S::data_const},
+                               {K::data, S::data}, {K::bss, S::bss}}) {
+    if (!std::ranges::contains(data, kind, &aarch64::DataDef::kind)) continue;
+    const std::uint32_t index = o.add_section(section);
+    obj::section& sec = o.sections[index];
+    for (const auto& d : data) {
+      if (d.kind != kind) continue;
+      auto sym = symbol_of.find(d.entity);
+      if (sym == symbol_of.end()) return missing(d.entity);
+      sec.align(std::countr_zero(std::bit_ceil(d.align)));
+      const std::uint64_t base = sec.size();
+      o.symbols[sym->second].section = index;
+      o.symbols[sym->second].offset = base;
+      if (kind == K::bss) sec.reserve_zerofill(d.size);
+      else sec.emit(d.bytes);
+      for (const auto& r : d.relocs) {
+        auto target = symbol_of.find(r.target);
+        if (target == symbol_of.end()) return missing(r.target);
+        if (base + r.offset > std::numeric_limits<std::uint32_t>::max())
+          return std::unexpected(aarch64::CodegenError{d.entity, "a data relocation exceeds the object offset limit"});
+        sec.relocate(obj::reloc_kind::abs64, target->second, r.addend, static_cast<std::uint32_t>(base + r.offset));
+      }
+    }
+  }
+  return o;
+}
+
+}  // namespace
+
 // Functions, variables, string literals and symbols in definition order (§A5.3): functions and
 // variables as the unit lists them, string literal objects by first use in that order, and
 // undefined symbols by first reference.
 engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
   const TranslationUnit& tu = co_await cx.fetch<TuUnit>(id);
   ast::Interners& in = *universe().in;
+  const ast::Target& target = unit_target(cx, id);
+  const bool linux = object_target(target) == obj::target::x86_64_linux;
   TuValue out;
   std::vector<BackError>& errors = out.errors;
   if (tu.front_failed) {
     // Its diagnostics are the front end's (`TuFront`); this only keeps an object out of a link.
     errors.push_back({std::nullopt, "the translation unit has errors"});
+    co_return out;
+  }
+  if (linux && !tu.init_functions.empty()) {
+    const auto init = std::ranges::find(tu.functions, tu.init_functions.front().first, &FunctionDef::entity);
+    std::optional<ast::Loc> at;
+    if (init != tu.functions.end()) at = ast::Loc{init->item, init->body_offset};
+    errors.push_back({at, "namespace-scope dynamic initialization and destruction are not supported on x86-64 Linux"});
     co_return out;
   }
   std::vector<FnKey> fns;
@@ -1047,7 +1225,7 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
   std::vector<aarch64::DataDef> data;
   const Shapes& shapes = co_await cx.fetch<UnitShapes>(id);
   for (const Variable& v : tu.variables) {
-    QueryLayout layout(cx, shapes);
+    QueryLayout layout(cx, shapes, target);
     auto b = initial_bytes(in, layout, v.type, v.init);
     use(layout.strings());
     if (!b) {
@@ -1083,7 +1261,7 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
       continue;
     }
     data.push_back({entity, aarch64::DataKind::cstring, std::move(*units), 0, 1, {}});
-    symbols.push_back({entity, std::format("l_.str.{}", n++), obj::binding::local});
+    symbols.push_back({entity, std::format("{}.str.{}", linux ? ".L" : "l_", n++), obj::binding::local});
   }
 
   // Symbols for the entities the object defines or refers to; a declaration nothing uses needs
@@ -1107,7 +1285,7 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
     return TemplateSpec{e.template_type.value_or(e.type), e.template_args, e.template_params, e.template_same_heads};
   };
   ClassNames names = [&](EntityId c) {
-    const sema::World* w = universe().world;
+    const sema::World* w = universe().world_for(target);
     if (!w) return ClassName{};
     const sema::EntityRec& r = w->entities.rec(c);
     ClassName n{std::string(w->ins.names.spelling(r.name)), r.scope, r.templ, r.args,
@@ -1141,7 +1319,7 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
     std::string name_ = e.special == Special::constructor ? "C1" : e.special == Special::destructor ? "D1" : e.name;
     TemplateSpec spec{e.template_type.value_or(e.type), e.template_args, e.template_params, e.template_same_heads};
     auto name = symbol_name(in, name_, e.type, e.is_function, e.lang, names, e.scope, e.special != Special::none,
-                            e.template_type ? &spec : nullptr);
+                            e.template_type ? &spec : nullptr, !linux);
     if (!name) {
       errors.push_back({e.at, std::format("the name of '{}': {} is not supported yet", e.name, name.error())});
       continue;
@@ -1152,36 +1330,42 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
   }
   // A static local and its guard: `_ZZ <encoding> E <name> [_<n>]` and `_ZGV` before it, the
   // function's own <encoding> taken from its symbol (Itanium C++ ABI §5.1.6, §5.1.4.6).
+  const std::string_view object_prefix = linux ? "" : "_";
   for (const Entity* e : locals) {
     auto f = mangled.find(ir::raw(e->local_function));
     if (f == mangled.end()) {
       errors.push_back({e->at, std::format("the name of the static local '{}': its function has no symbol", e->name)});
       continue;
     }
-    std::string_view fs = f->second;
-    std::string encoding = fs.starts_with("__Z") ? std::string(fs.substr(3))  // `_` + `_Z` + encoding
-                                                 : std::format("{}{}", fs.size() - 1, fs.substr(1));  // C linkage, `main`
+    std::string_view function_symbol = f->second;
+    function_symbol.remove_prefix(object_prefix.size());
+    std::string encoding = function_symbol.starts_with("_Z") ? std::string(function_symbol.substr(2))
+                                                              : std::format("{}{}", function_symbol.size(), function_symbol);
     std::uint32_t k = e->discriminator;
     std::string disc = k == 0 ? "" : k <= 10 ? std::format("_{}", k - 1) : std::format("__{}_", k - 1);
-    symbols.push_back({e->id, std::format("_{}Z{}E{}{}{}", e->guard ? "_ZGV" : "_Z", encoding, e->name.size(), e->name, disc),
+    symbols.push_back({e->id, std::format("{}{}{}E{}{}{}", object_prefix, e->guard ? "_ZGVZ" : "_ZZ",
+                                         encoding, e->name.size(), e->name, disc),
                        obj::binding::local});
   }
   if (!errors.empty()) co_return out;
 
   // Code: codegen(F) for every function, in definition order.
-  std::vector<aarch64::CompiledFunction> code;
-  {
-    auto ms = co_await cx.par_map<Codegen>(fns);
-    for (std::size_t i = 0; i < fns.size(); ++i) {
-      const Machine& m = ms[i];
-      if (!m.code) {
-        errors.push_back({ast::Loc{tu.functions[i].item, tu.functions[i].body_offset}, "codegen: " + m.error});
-        co_return out;
-      }
-      code.push_back({fns[i].fn, *m.code});
-    }
+  auto ms = co_await cx.par_map<Codegen>(fns);
+  for (std::size_t i = 0; i < fns.size(); ++i) {
+    if (ms[i].get().ok()) continue;
+    errors.push_back({ast::Loc{tu.functions[i].item, tu.functions[i].body_offset}, "codegen: " + ms[i].get().error});
+    co_return out;
   }
-  auto o = aarch64::assemble(tu.name, code, data, symbols);
+  auto o = [&] {
+    if (linux) {
+      std::vector<LinuxFunction> code;
+      for (std::size_t i = 0; i < fns.size(); ++i) code.push_back({fns[i].fn, &*ms[i].get().linux_code});
+      return assemble_linux(tu.name, code, data, symbols);
+    }
+    std::vector<aarch64::CompiledFunction> code;
+    for (std::size_t i = 0; i < fns.size(); ++i) code.push_back({fns[i].fn, *ms[i].get().code});
+    return aarch64::assemble(tu.name, code, data, symbols);
+  }();
   if (!o) {
     std::optional<ast::Loc> at;
     for (const FunctionDef& fn : tu.functions)
@@ -1199,9 +1383,10 @@ std::expected<obj::object, std::vector<BackError>> compile(const TranslationUnit
   Universe u{&in, &consts, &target, nullptr, &units};
   Bind bind(u);
   engine::Db db;
-  db.set<CostModelIn>(obj::target::aarch64_macos, {});
-  db.set<OptCacheSnapshot>(obj::target::aarch64_macos, {});
-  db.set<OptLevel>(obj::target::aarch64_macos, 0);
+  const obj::target arch = object_target(target);
+  db.set<CostModelIn>(arch, {});
+  db.set<OptCacheSnapshot>(arch, {});
+  db.set<OptLevel>(arch, 0);
   db.set<TuSourceIn>(TuId{0}, {tu.name, std::nullopt, tu});
   const TuValue& v = db.get<Tu>(TuId{0});
   if (!v.object) return std::unexpected(v.errors);

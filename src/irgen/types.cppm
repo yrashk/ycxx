@@ -106,7 +106,11 @@ class TypeFacts {
     if (in_->types.is<ast::TEnum>(c)) q = enum_underlying(in_->types.get<ast::TEnum>(c).entity);  // its value's type
     return ast::int_value(*in_, *target_, canonical(q), v);
   }
-  ast::ConstId float_constant(ast::QualType q, double v) { return ast::float_value(*in_, *target_, canonical(q), v); }
+  std::optional<ast::ConstId> float_constant(ast::QualType q, double v) {
+    q = canonical(q);
+    if (!ast::computes(ast::float_format(*in_, *target_, q))) return std::nullopt;
+    return ast::float_value(*in_, *target_, q, v);
+  }
   ast::ConstId null_constant(ast::QualType) { return in_->intern_value(ast::VNullptr{}); }
 
  private:

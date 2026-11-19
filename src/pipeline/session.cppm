@@ -130,10 +130,11 @@ class Session {
 
  private:
   void init() {
-    constexpr obj::target t = obj::target::aarch64_macos;
-    db_.set<CostModelIn>(t, {});
-    db_.set<OptCacheSnapshot>(t, {});
-    db_.set<OptLevel>(t, 0);
+    for (obj::target t : {obj::target::aarch64_macos, obj::target::x86_64_linux}) {
+      db_.set<CostModelIn>(t, {});
+      db_.set<OptCacheSnapshot>(t, {});
+      db_.set<OptLevel>(t, 0);
+    }
     // Headers are read from the disk unless the owner provides them otherwise (the daemon's file
     // table, daemon design §5.1).
     db_.set_provider<pp::FileContent>(pp::read_disk);
@@ -376,9 +377,10 @@ class Session {
  private:
   ast::Interners ins_;
   sema::World world_{ins_};
+  sema::World linux_world_{ins_, ast::x86_64_linux};
   ValueConstants consts_{world_};
   UnitStore units_;
-  Universe universe_{&ins_, &consts_, &ast::aarch64_darwin, &world_, &units_};
+  Universe universe_{&ins_, &consts_, &ast::aarch64_darwin, &world_, &units_, &linux_world_};
   engine::Db db_;
   engine::Pool* pool_ = nullptr;
   engine::Pool::Scope scope_;

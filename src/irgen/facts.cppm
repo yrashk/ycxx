@@ -37,7 +37,7 @@ concept Facts = requires(F& f, ast::QualType q, ast::ConstId c, ast::EntityId e,
   { f.bool_type() } -> std::same_as<ast::QualType>;
   { f.ptrdiff_type() } -> std::same_as<ast::QualType>;  // std::ptrdiff_t ([support.types.layout])
   { f.int_constant(q, v) } -> std::same_as<ast::ConstId>;  // `v` converted to integral type q
-  { f.float_constant(q, d) } -> std::same_as<ast::ConstId>;  // `d` converted to floating type q
+  { f.float_constant(q, d) } -> std::same_as<std::optional<ast::ConstId>>;  // `d` converted to floating type q, if supported
   { f.null_constant(q) } -> std::same_as<ast::ConstId>;    // the null pointer value of type q
   // The address of a string literal object: a VLvalue whose base is the VString `c` ([lex.string]).
   { f.string_address(c) } -> std::same_as<ast::ConstId>;

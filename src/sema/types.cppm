@@ -1,6 +1,6 @@
 // Sema's view of types, constants and entities. Types and constants are #33's (ycxx.ast: `types`,
 // `values`, ycxx.ast.typeops) and this partition only shapes them for sema: by-value records of
-// the canonical form, and the target fixed to AArch64 Darwin. Entities are still a STAND-IN for
+// the canonical form using the selected target. Entities are still a STAND-IN for
 // #33: a side table behind the AST core's fingerprint-only `entities` placeholder, isolated here.
 export module ycxx.sema:types;
 
@@ -26,19 +26,16 @@ using ast::u64;
 using ast::u8;
 using i64 = std::int64_t;
 
-// The target of the α slice (#39).
-inline constexpr const ast::Target& target = ast::aarch64_darwin;
-
 // Width in bits and signedness of an integral type on the target.
 struct IntShape {
   u32 bits;
   bool is_signed;
 };
-inline IntShape shape(Builtin b) { return {ast::width_of(target, b), ast::is_signed(target, b)}; }
+inline IntShape shape(const ast::Target& target, Builtin b) { return {ast::width_of(target, b), ast::is_signed(target, b)}; }
 
 // [conv.prom] and [expr.arith.conv] on the target.
-inline Builtin promoted(Builtin b, u8 bit_width = 0) { return ast::is_integral(b) ? ast::promoted(target, b, bit_width) : b; }
-inline Builtin common_integer(Builtin a, Builtin b) { return *ast::usual_arithmetic(target, a, b); }
+inline Builtin promoted(const ast::Target& target, Builtin b, u8 bit_width = 0) { return ast::is_integral(b) ? ast::promoted(target, b, bit_width) : b; }
+inline Builtin common_integer(const ast::Target& target, Builtin a, Builtin b) { return *ast::usual_arithmetic(target, a, b); }
 
 constexpr std::string_view spelling(Builtin b) {
   constexpr std::array<std::string_view, 21> names{
@@ -80,16 +77,17 @@ struct TypeRec {
 
 class Types {
 public:
-  explicit Types(ast::Interners& ins) : ins_(&ins) {}
+  explicit Types(ast::Interners& ins, const ast::Target& target = ast::aarch64_darwin) : ins_(&ins), target_(&target) {}
+  const ast::Target& target() const { return *target_; }
 
   QualType builtin(Builtin b) { return ast::builtin(*ins_, b); }
   QualType pointer(QualType pointee) { return ast::pointer_to(*ins_, pointee); }
   // An array whose bound is value-dependent ([temp.dep.constexpr]).
-  QualType array_dependent(QualType elem, ConstId bound) { return ast::array_of(*ins_, target, elem, bound); }
+  QualType array_dependent(QualType elem, ConstId bound) { return ast::array_of(*ins_, *target_, elem, bound); }
   // An array of unknown bound, an incomplete type ([dcl.array]/6).
-  QualType array_unknown(QualType elem) { return ast::array_of(*ins_, target, elem, ConstId::none); }
+  QualType array_unknown(QualType elem) { return ast::array_of(*ins_, *target_, elem, ConstId::none); }
   QualType array(QualType elem, u64 bound) {
-    return ast::array_of(*ins_, target, elem, ast::int_value(*ins_, target, Builtin::unsigned_long, i64(bound)));
+    return ast::array_of(*ins_, *target_, elem, ast::int_value(*ins_, *target_, Builtin::unsigned_long, i64(bound)));
   }
   // The parameters are adjusted by #33's `function_type` ([dcl.fct]).
   QualType function(QualType ret, std::span<const QualType> params, bool variadic, LangLinkage linkage,
@@ -354,6 +352,7 @@ private:
   }
 
   ast::Interners* ins_;
+  const ast::Target* target_;
 };
 
 // ---------------------------------------------------------------- constants
@@ -376,12 +375,12 @@ struct ValueRec {
 
 class Values {
 public:
-  explicit Values(ast::Interners& ins, Types&) : ins_(&ins) {}
+  explicit Values(ast::Interners& ins, const Types& types) : ins_(&ins), target_(&types.target()) {}
 
   // An integer of type `t`, wrapped to its width ([conv.integral]).
-  ConstId integer(QualType t, u64 bits) { return ast::int_value(*ins_, target, t, ast::Bits128{bits, 0}); }
+  ConstId integer(QualType t, u64 bits) { return ast::int_value(*ins_, *target_, t, ast::Bits128{bits, 0}); }
   // A value of standard floating type `t`: `v` rounded to its format ([conv.double]).
-  ConstId floating(QualType t, double v) { return ast::float_value(*ins_, target, t, v); }
+  ConstId floating(QualType t, double v) { return ast::float_value(*ins_, *target_, t, v); }
   // A string literal object of array type `t` holding `units`, one byte per code unit.
   ConstId string(QualType t, std::string units) {
     std::vector<u8> us(units.begin(), units.end());
@@ -411,7 +410,7 @@ public:
       r.kind = ValueKind::floating;
       r.type = f.type;
       r.bits = f.bits.lo;
-      r.real = ast::float_double(*ins_, target, c);
+      r.real = ast::float_double(*ins_, *target_, c);
     } else if (v.is<ast::VString>(c)) {
       auto s = v.get<ast::VString>(c);
       r.kind = ValueKind::string;
@@ -431,6 +430,7 @@ public:
 
 private:
   ast::Interners* ins_;
+  const ast::Target* target_;
 };
 
 // ---------------------------------------------------------------- entities (stand-in for #33)
@@ -756,11 +756,12 @@ private:
 // Class and enumeration records are each unit's (`Classes`).
 struct World {
   ast::Interners& ins;
-  Types types{ins};
+  const ast::Target& target;
+  Types types{ins, target};
   Values values{ins, types};
   Entities entities{ins, types};
 
-  explicit World(ast::Interners& i) : ins(i) {
+  explicit World(ast::Interners& i, const ast::Target& t = ast::aarch64_darwin) : ins(i), target(t) {
     types.class_name = [this](EntityId e) {
       std::string n(ins.names.spelling(entities.rec(e).name));
       return n.empty() ? std::string("(lambda)") : n;  // a closure type ([expr.prim.lambda.closure])

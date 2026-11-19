@@ -505,7 +505,8 @@ engine::query_task<FrontResult> TuFront::run(engine::Ctx& cx, TuId tu) {
   const TuSource& src = cx.fetch<TuSourceIn>(tu);
   contract_assert(src.file.has_value());  // a unit given as definitions has no front end
   const pp::FileId file{*src.file};
-  sema::World& world = *universe().world;
+  const pp::Source& unit_source = cx.fetch<pp::SourceOf>(file);
+  sema::World& world = *universe().world_for(*unit_source.config.target);
   const pp::Region& region = co_await cx.fetch<pp::Pp>(file);
   const items::Items& items = co_await cx.fetch<items::RegionItems>(file);
   const std::vector<engine::Diagnostic>& lexed = co_await cx.fetch<engine::DiagsOf>(cx.cell_of<items::RegionItems>(file));
@@ -515,19 +516,18 @@ engine::query_task<FrontResult> TuFront::run(engine::Ctx& cx, TuId tu) {
   // position (#93). Phase 4's diagnostics (`kind`) may have a presumed line ([cpp.line]).
   auto where_in = [&](std::uint16_t f, std::uint32_t offset, std::optional<lex::LexDiag> kind) {
     const std::string& name = region.files[f];
-    const pp::Source& source = cx.fetch<pp::SourceOf>(file);
-    pp::Session& ps = pp::session_for(source.config);
+    pp::Session& ps = pp::session_for(unit_source.config);
     std::lock_guard lock(ps.mutex);
     std::string_view text;  // `<built-in>` is the session's
     if (name.starts_with('<')) {
       if (const pp::Files::Content* c = ps.files.content(ps.files.id(name))) text = c->text;
     } else {
       std::filesystem::path p(name);
-      if (p.is_relative() && !source.cwd.empty()) p = source.cwd / p;
+      if (p.is_relative() && !unit_source.cwd.empty()) p = unit_source.cwd / p;
       const pp::PathId id = pp::path_id(p.lexically_normal().generic_native_encoded_string());
       // The editor view reads an open buffer before the file (daemon design §6.1).
       const std::optional<std::string>* content = nullptr;
-      if (source.config.view == pp::View::editor) content = &cx.fetch<pp::Buffer>(id);
+      if (unit_source.config.view == pp::View::editor) content = &cx.fetch<pp::Buffer>(id);
       if (!content || !*content) content = &cx.fetch<pp::FileContent>(id);
       if (*content) text = **content;
     }
@@ -564,7 +564,6 @@ engine::query_task<FrontResult> TuFront::run(engine::Ctx& cx, TuId tu) {
     out.messages.push_back(std::move(m));
   }
   // The unit's language options: the instantiation limit (`-ftemplate-depth`).
-  const pp::Source& unit_source = cx.fetch<pp::SourceOf>(file);
   parse::Program program(world, region, items, unit_source.config.template_depth);
   program.analyze_all();
   // What an editor's position requests read (#170): where each entity is first declared, and the
@@ -695,16 +694,17 @@ engine::query_task<std::optional<FileOffset>> DefinitionAt::run(engine::Ctx& cx,
   }
   if (named == EntityId::none) co_return std::nullopt;
   // A function template's specialization is declared as its template.
+  const sema::World& world = *universe().world_for(*source.config.target);
   auto d = std::ranges::find(front.declared, named, &std::pair<EntityId, ast::Loc>::first);
   if (d == front.declared.end())
-    if (EntityId templ = universe().world->entities.rec(named).templ; templ != EntityId::none) {
+    if (EntityId templ = world.entities.rec(named).templ; templ != EntityId::none) {
       named = templ;
       d = std::ranges::find(front.declared, named, &std::pair<EntityId, ast::Loc>::first);
     }
   if (d == front.declared.end()) co_return std::nullopt;
   // Where it is first declared: its declarator's token in its item, moved to the declared name
   // (`*p` and `(*f)()` start before it), then that token's site.
-  const std::string_view name = in.names.spelling(universe().world->entities.rec(named).name);
+  const std::string_view name = in.names.spelling(world.entities.rec(named).name);
   for (const items::Item& it : items.items) {
     if (in.items.add<ast::ItemId>(it.id) != d->second.item) continue;
     std::size_t t = std::min<std::size_t>(it.begin + d->second.offset, region.locs.size() - 1);

@@ -1879,7 +1879,7 @@ private:
 
   // Whether integral type `t` represents `v` (`big`: the unsigned value of v's bits, 2^63 or more).
   bool holds(QualType t, std::int64_t v, bool big) {
-    sema::IntShape sh = sema::shape(*s_.types().builtin_of(t));
+    sema::IntShape sh = sema::shape(s_.world().target, *s_.types().builtin_of(t));
     if (big) return !sh.is_signed && sh.bits == 64;
     if (sh.is_signed) return sh.bits >= 64 || (v >= -(std::int64_t(1) << (sh.bits - 1)) && v < (std::int64_t(1) << (sh.bits - 1)));
     return v >= 0 && (sh.bits >= 64 || v < (std::int64_t(1) << sh.bits));
@@ -2503,7 +2503,7 @@ private:
         if (!c || s_.world().values.rec(*c).kind != sema::ValueKind::integer || !types.is_integral(v.type())) {
           if (x.ok()) s_.diag(x.begin, Diag::bound_not_constant);
         } else {
-          sema::IntShape sh = sema::shape(*types.builtin_of(v.type()));
+          sema::IntShape sh = sema::shape(s_.world().target, *types.builtin_of(v.type()));
           sema::u64 bits = s_.world().values.rec(*c).bits;
           value = sh.is_signed && sh.bits < 64 && ((bits >> (sh.bits - 1)) & 1) ? std::int64_t(bits | ~((sema::u64{1} << sh.bits) - 1))
                                                                                : std::int64_t(bits);
