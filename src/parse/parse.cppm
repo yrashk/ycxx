@@ -3951,6 +3951,7 @@ public:
       } else {
         root = ps_.compound_statement();
         if (!ps_.at_end()) s_.diag(ps_.pos(), sema::Diag::unexpected_token, ps_.kind());
+        s_.check_labels();  // labels have function scope ([stmt.label]/2)
       }
       s_.pop_scope();
       if (root.ok() && ctor) root = constructor_body(std::move(inits), root);
