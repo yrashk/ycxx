@@ -1209,12 +1209,13 @@ request it serves.
 
 - Engine (`src/engine/engine.cppm`): a request may carry an `engine::Tracer` (`Db::get`,
   `Db::request`, `Epochs::spawn`), held on its `Root` like its `Counters`, so concurrent requests
-  never mix and a request keeps one trace through its restarts. One `TraceEvent` per cell its
-  frames settle: executed, cutoff (re-executed, value unchanged), verified (green after its
-  dependencies), reused (verified at this revision), durable (the shortcut), input, failed; with
-  the parent's event, start and end times and the workers it started and ended on. Frames report
-  before they publish, so children precede parents. Re-checks after a wait trace only cells
-  another frame owned. Keys render through a kind's `describe`, a key type's `trace_describe`
+  never mix and a request keeps one trace through its restarts. Every activity on a cell goes
+  through one call, `Db::note`, which counts `Stats` and gives the tracer its event, so the two
+  cannot disagree: executed, cutoff (re-executed, value unchanged), verified (green after its
+  dependencies), reused (verified at this revision), durable (the shortcut), input (a first
+  read), recomputed, waited (contended), failed; with the parent's event, start and end times and
+  the workers it started and ended on. Frames note before they publish, so children precede
+  parents. Re-checks after a wait note only cells another frame owned (`Stats.hits` too). Keys render through a kind's `describe`, a key type's `trace_describe`
   (ADL), or their fields by reflection; values through a kind's `show`, when asked.
 - Cost when off: one load and branch at each hook; `engine_bench` (Release, minimum of ten runs)
   measures the hit paths as before (41.4 ns a fetch hit, 16.9 ns a root `get` hit). Formatting
