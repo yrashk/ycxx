@@ -32,7 +32,11 @@ export struct RInst {
   ir::List<ROp, 4> ops;
 };
 
-export enum class CKind : std::uint8_t { uimm12, nuimm12, uoff, nonneg, local, extern_, wide, narrow, signed_, unsigned_ };
+export enum class CKind : std::uint8_t {
+  uimm12, nuimm12, uoff, nonneg, local, extern_, wide, narrow, signed_, unsigned_, f32, f64
+};
+// A condition's variable, or `root_var` for `?d`, the root's result.
+export constexpr std::uint8_t root_var = 0xff;
 export struct PCond {
   CKind kind{};
   std::uint8_t var = 0;
@@ -240,10 +244,16 @@ struct LineParser {
         {"uimm12", CKind::uimm12}, {"nuimm12", CKind::nuimm12}, {"uoff", CKind::uoff},
         {"nonneg", CKind::nonneg}, {"local", CKind::local},     {"extern", CKind::extern_},
         {"wide", CKind::wide},     {"narrow", CKind::narrow},   {"signed", CKind::signed_},
-        {"unsigned", CKind::unsigned_}};
+        {"unsigned", CKind::unsigned_}, {"f32", CKind::f32},    {"f64", CKind::f64}};
     for (auto [name, kind] : names) {
       if (n != name) continue;
       if (!eat("(") || !eat("?")) return fail("expected PRED(?x)");
+      std::size_t save = at;
+      if (ident() == "d" && (kind == CKind::f32 || kind == CKind::f64) && eat(")")) {
+        t.conds.push_back({kind, root_var});
+        return true;
+      }
+      at = save;
       auto v = var(false);
       if (!v || !eat(")")) return fail("expected PRED(?x) with a bound variable");
       t.conds.push_back({kind, *v});

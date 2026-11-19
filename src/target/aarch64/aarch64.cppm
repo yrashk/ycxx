@@ -247,6 +247,8 @@ constexpr std::uint32_t variable_bits(const FormSpec& s) {
     case Size::sf: v |= 1u << 31; break;
     case Size::sfn: v |= 1u << 31 | 1u << 22; break;
     case Size::mem: v |= 3u << 30; break;
+    case Size::ftype: v |= 1u << 22; break;
+    case Size::sfft: v |= 1u << 31 | 1u << 22; break;
   }
   return v;
 }
@@ -317,23 +319,33 @@ std::string disassemble(const MachineCode& m, const std::function<std::string(ir
       auto [lsb, width] = place(f);
       return (w >> lsb) & ((1u << width) - 1);
     };
-    const auto reg = [&](Field f) {
+    // A SIMD&FP register's view: by the precision bit, the access size, or the form's name.
+    const auto fp_view = [&](const Opnd& o) {
+      if (s.size == Size::mem) return "bhsd"[access];
+      if (s.size == Size::ftype || s.size == Size::sfft) return (w >> 22) & 1 ? 'd' : 's';
+      if (form == "FCVTsd") return o.role == Role::def ? 'd' : 's';
+      if (form == "FCVTds") return o.role == Role::def ? 's' : 'd';
+      return form.back();  // a conversion's floating operand: FCVTZSd, SCVTFs
+    };
+    const auto reg = [&](const Opnd& o) {
+      const Field f = o.field;
       const std::uint32_t n = field(f);
+      if (o.fp) return std::format("{}{}", fp_view(o), n);
       const bool x = memory ? (f == Field::rn ? true : access == 3 || form.ends_with("pre") || form.ends_with("post") || form == "LDRgot") : wide;
       if (n == 31) return std::string((f == Field::rn && sp_base) || (f == Field::rd && sp_dest) ? (x ? "sp" : "wsp") : (x ? "xzr" : "wzr"));
       return reg_name(R(n), x);
     };
     std::string mn = mnemonic(form);
     // A byte or halfword access says so (`ldrb`, `strh`); the register is then a w register.
-    if (s.size == Size::mem && access < 2) mn += access == 0 ? "b" : "h";
+    if (s.size == Size::mem && access < 2 && !s.ops.at[0].fp) mn += access == 0 ? "b" : "h";
     std::vector<std::string> ops;
     std::string mem_base, mem_off;
     for (const Opnd& o : s.ops.view()) {
       switch (o.role) {
         case Role::def:
         case Role::use:
-          if (memory && o.field == Field::rn) mem_base = reg(o.field);
-          else ops.push_back(reg(o.field));
+          if (memory && o.field == Field::rn) mem_base = reg(o);
+          else ops.push_back(reg(o));
           break;
         case Role::imm:
           switch (o.field) {
