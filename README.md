@@ -44,12 +44,16 @@ build/bin/ycxx cxx hello.cpp -o hello && ./hello
   type-trait built-ins libycxx's headers use (`__is_same`, `__remove_cv`, …)
   ([docs/EXTENSIONS.md](docs/EXTENSIONS.md));
 - templates: function, class and variable templates, deduction, partial ordering, explicit and
-  partial specializations, static constexpr members of class templates, parameter packs and
-  fold expressions, alias templates, template template parameters, concepts and
-  requires-expressions in overload resolution, `if constexpr`, two-phase lookup, with Itanium
-  names identical to Clang's; Clang's `__make_integer_seq`;
+  partial specializations, static constexpr members of class templates, member function and
+  constructor templates, parameter packs and fold expressions, alias templates, template
+  template parameters, concepts and requires-expressions in overload resolution,
+  `if constexpr`, two-phase lookup, with Itanium names identical to Clang's; Clang's
+  `__make_integer_seq`;
 - placeholder types: `auto` and `decltype(auto)` variables (`const auto&`, `auto*`, `auto&&`),
   deduced and trailing return types, in templates too;
+- lambdas in function bodies: captures by copy and by reference, capture-defaults, `this` and
+  `*this`, init-captures, `mutable`, conversion to a pointer to function, and closures passed to
+  and called from function templates, with Clang's names for closure types;
 - casts, `sizeof`/`alignof` (classes included), `decltype`, and calls through pointers to
   functions;
 - constant evaluation on ycxx's own interpreter: `constexpr`, `consteval`, `constinit`,
@@ -90,8 +94,10 @@ checked with the flags of its last build, or else with its line in the project's
 
 - The standard library and its headers. C headers such as `<stdio.h>` compile without warnings
   and `printf` runs; libycxx's `<cstdio>` still needs pointer-to-member types.
-- Lambdas, structured bindings, and inheritance and virtual functions.
-- Member templates, and constraints on class templates and their members.
+- Generic and constexpr lambdas, lambdas outside function bodies, structured bindings, and
+  inheritance and virtual functions.
+- Member class and alias templates, conversion function templates, and constraints on class
+  templates and their members.
 - Floating-point arithmetic, exceptions, and optimization (`-O`).
 - Linux and x86-64 output.
 
@@ -100,8 +106,8 @@ checked with the flags of its last build, or else with its line in the project's
 - Standard headers, starting with `<cstdio>` ([#133](https://github.com/yrashk/ycxx/issues/133)).
 - ι: statements and declarations, the C++98/11 core: default arguments, block-scope statics,
   range-based `for`, casts and arrays ([#337](https://github.com/yrashk/ycxx/issues/337)).
-- `auto` and lambdas: placeholder types are done; lambdas and generic lambdas are next
-  ([#278](https://github.com/yrashk/ycxx/issues/278)).
+- `auto` and lambdas: placeholder types and lambdas are done; generic and constexpr lambdas are
+  next ([#278](https://github.com/yrashk/ycxx/issues/278)).
 
 Next come exceptions ([#89](https://github.com/yrashk/ycxx/issues/89)).
 

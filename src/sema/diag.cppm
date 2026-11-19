@@ -52,6 +52,7 @@ enum class Diag : std::uint32_t {
   not_supported [[=message{Severity::error, "'{0:k}' is not supported yet"}]],
   float_literal_not_supported [[=message{Severity::error, "floating-point literals are not supported yet"}]],
   static_member_definition_not_supported [[=message{Severity::error, "defining a static data member of a class template outside the class is not supported yet"}]],
+  extraneous_template_head [[=message{Severity::error, "extraneous template parameter list: only a member template of a class template is declared after two"}]],
   // [dcl.spec], [dcl.type]
   duplicate_specifier [[=message{Severity::error, "duplicate '{0:k}'"}]],
   conflicting_specifiers [[=message{Severity::error, "'{0:k}' cannot be combined with the other type specifiers"}]],
@@ -66,6 +67,12 @@ enum class Diag : std::uint32_t {
   auto_undeduced [[=message{Severity::error, "'{0:n}' is used before its return type is deduced"}]],
   decltype_auto_alone [[=message{Severity::error, "'decltype(auto)' must be the whole declared type"}]],
   auto_not_allowed [[=message{Severity::error, "a placeholder type is not allowed here"}]],
+  not_captured [[=message{Severity::error, "'{0:n}' is not captured: the lambda has no capture-default"}]],
+  cannot_capture [[=message{Severity::error, "'{0:n}' cannot be captured: it is not a local variable"}]],
+  capture_twice [[=message{Severity::error, "'{0:n}' is captured twice"}]],
+  closure_assignment [[=message{Severity::error, "'{0:t}' has a lambda-capture: its copy assignment is deleted"}]],
+  capture_redundant [[=message{Severity::error, "'{0:n}' is captured the way the capture-default already captures"}]],
+  this_not_captured [[=message{Severity::error, "'this' is not captured: the lambda has no capture-default"}]],
   trailing_return_needs_auto [[=message{Severity::error, "a function with a trailing return type is declared with 'auto' alone"}]],
   // [dcl.decl], [dcl.fct], [dcl.init]
   void_variable [[=message{Severity::error, "variable '{0:n}' has incomplete type 'void'"}]],

@@ -28,6 +28,7 @@ inline constexpr std::array feature_macros{
     FeatureMacro{"__cpp_binary_literals", "201304L"},           // ycxx.lex
     FeatureMacro{"__cpp_decltype_auto", "201304L"},             // θ step 1 (#279)
     FeatureMacro{"__cpp_hex_float", "201603L"},                 // ycxx.lex
+    FeatureMacro{"__cpp_init_captures", "201304L"},             // θ step 2 (#280): not yet packs (#281)
     FeatureMacro{"__cpp_named_character_escapes", "202606L"},   // ycxx.lex
     FeatureMacro{"__cpp_raw_strings", "200710L"},               // ycxx.lex
     FeatureMacro{"__cpp_return_type_deduction", "201304L"},     // θ step 1 (#279)
