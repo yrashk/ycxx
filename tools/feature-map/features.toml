@@ -1924,7 +1924,8 @@ name = 'Member templates'
 group = 'temp'
 clauses = ['temp.mem']
 std = 'C++98'
-status = 'missing'
+status = 'partial'
+note = 'member function templates; not yet out-of-class definitions, constructor and conversion templates, member class templates'
 probe = '''
 struct S { template<class T> T get(T t) const { return t; } };
 template<class U> struct W { template<class T> int f(T) { return sizeof(U); } };
@@ -1996,7 +1997,8 @@ template<class T> struct Box { T v; };
 template<template<class> class C> int f() { C<int> c{3}; return c.v; }
 int main() { return f<Box>() - 3; }
 '''
-status = 'missing'
+status = 'partial'
+note = 'constrained template template parameters; partial ordering through them'
 
 [[feature]]
 id = 'temp-variadic'

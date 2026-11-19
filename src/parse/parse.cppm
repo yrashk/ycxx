@@ -487,7 +487,14 @@ public:
   }
 
   // The template-heads of the class templates enclosing `item`, outermost first.
+  // The leading heads of a member template of a class template defined outside it, before its
+  // own ([temp.mem]/1): its body is in their scope too.
+  void set_outer_heads(u32 item, std::vector<std::vector<ast::TemplateParamSema>> heads) { outer_heads_[item] = std::move(heads); }
   std::vector<std::vector<ast::TemplateParamSema>> enclosing_heads(u32 item) {
+    if (auto o = outer_heads_.find(item); o != outer_heads_.end()) {
+      item_sema(item);
+      return o->second;
+    }
     std::vector<std::vector<ast::TemplateParamSema>> r;
     u32 parent = items_->items[item].parent;
     if (parent != items::none && items_->items[parent].kind == ItemKind::class_def && items_->items[parent].template_depth > 0) {
@@ -953,6 +960,7 @@ public:
 
 private:
   std::vector<u32> running_;
+  std::map<u32, std::vector<std::vector<ast::TemplateParamSema>>> outer_heads_;  // by item
   std::map<std::pair<u32, u32>, u32> static_init_ends_;  // by (member item, ordinal): its initializer's end
   std::map<u32, LazyMember> lazy_members_;                 // by member entity
   std::vector<EntityId> used_members_;                     // in order of first use
@@ -1333,6 +1341,14 @@ private:
       }
       if (!ps_.template_head(0)) return bad();
       head_requires_clause();
+      // `template<class U> template<class T> R X<U>::f(T)`: a member template of a class template
+      // defined outside it ([temp.mem]/1); its body is in the scope of both heads.
+      if (ps_.is(Tk::kw_template) && ps_.kind(1) == Tk::less) {
+        p_->set_outer_heads(k_, {s_.template_scopes.front()});
+        if (!ps_.template_head(1)) return bad();
+        head_requires_clause();
+        member_template_ = true;
+      }
       ps_.skip_attributes();
       template_ = true;
       ps_.template_ids_in_declarators = true;  // `template<…> T v<args>`: a partial specialization
@@ -2762,8 +2778,24 @@ private:
     std::vector<ast::ParamSema> params;
     for (const parse::Param& p : fs.params) params.push_back({EntityId::none, p.type, p.name, NodeId::none, p.element ? sema::param_flag::pack_element : u16(0)});
     sem.params = b_.seq(std::span<const ast::ParamSema>(params));
-    sem.entity = s_.world().entities.entity({ctor ? sema::EntityKind::constructor : sema::EntityKind::destructor, name, type,
-                                            LangLinkage::cxx, ast::Linkage::external, {}, c.entity});
+    if (member_template_) {
+      // A constructor template ([temp.mem]/1): a function template named as its class, whose
+      // specializations are constructors (`Sema::specialization`). A destructor is none.
+      if (!ctor) {
+        s_.diag(name_at, Diag::not_supported, Tk::kw_template);
+        return bad();
+      }
+      sem.template_params = b_.seq(std::span<const ast::TemplateParamSema>(s_.template_scopes.back()));
+      sem.flags |= sema::decl_flag::template_;
+      sema::EntityRec e{sema::EntityKind::function_template, name, type, LangLinkage::cxx, ast::Linkage::external, {}, c.entity};
+      e.head = head_fp(s_.template_scopes.back());
+      sem.constraints = associated_constraints();
+      e.constraints = constraints_fp_;
+      sem.entity = s_.world().entities.entity(e);
+    } else {
+      sem.entity = s_.world().entities.entity({ctor ? sema::EntityKind::constructor : sema::EntityKind::destructor, name, type,
+                                              LangLinkage::cxx, ast::Linkage::external, {}, c.entity});
+    }
     // One declaration of each ([class.mem.general]/5).
     for (u32 m : p_->items().items[it_->parent].members) {
       if (m == k_) break;
@@ -3246,23 +3278,34 @@ private:
       if (template_ && d.qualified && d.scope.type && s_.types().is_class(*d.scope.type)) {
         const sema::EntityRec& c = s_.world().entities.rec(s_.types().class_of(*d.scope.type));
         if (c.templ == EntityId::none) {
-          s_.diag(d.qualifier_at, Diag::not_a_template, c.name);  // member templates are not supported yet (#88)
-          return false;
-        }
-        const std::vector<ast::TemplateParamSema>& head = s_.template_scopes.front();
-        bool current = c.args == s_.templates().own_args(head);
-        // Or a partial specialization's pattern, whose members are its own ([temp.spec.partial.member]).
-        if (!current && !p_->partial_pattern(s_.types().class_of(*d.scope.type), k_)) {
-          s_.diag(d.qualifier_at, Diag::template_args_mismatch, c.name);
-          return false;
-        }
-        if (!fn) {  // its instantiation is #256
-          s_.diag(d.qualifier_at, Diag::static_member_definition_not_supported);
-          return false;
+          // `template<class T> R S::f(T)`: a member template of a class defined outside it
+          // ([temp.mem]); a static data member template is not supported.
+          if (!fn) {
+            s_.diag(d.qualifier_at, Diag::not_a_template, c.name);
+            return false;
+          }
+          member_template_ = true;
+        } else {
+          const std::vector<ast::TemplateParamSema>& head = s_.template_scopes.front();
+          bool current = c.args == s_.templates().own_args(head);
+          // Or a partial specialization's pattern, whose members are its own ([temp.spec.partial.member]).
+          if (!current && !p_->partial_pattern(s_.types().class_of(*d.scope.type), k_)) {
+            s_.diag(d.qualifier_at, Diag::template_args_mismatch, c.name);
+            return false;
+          }
+          if (!fn) {  // its instantiation is #256
+            s_.diag(d.qualifier_at, Diag::static_member_definition_not_supported);
+            return false;
+          }
         }
         class_member = true;
       }
-      if (class_member) {
+      if (member_template_ && class_member) {
+        // A member template's definition: its own head, the innermost ([temp.mem]/1).
+        sem.template_params = b_.seq(std::span<const ast::TemplateParamSema>(s_.template_scopes.back()));
+        flags |= sema::decl_flag::template_;
+        class_member = true;
+      } else if (class_member) {
         sem.template_params = b_.seq(std::span<const ast::TemplateParamSema>(s_.template_scopes.front()));
       } else if (template_) {
         // [temp.local]/6: neither the template nor its parameters may take a parameter's name.
@@ -4382,7 +4425,13 @@ const Program::Instance* Program::instance(EntityId spec, u32 point) {
   auto member = member_patterns_.find(key);
   if (member == member_patterns_.end() && rec.templ == EntityId::none) return nullptr;
   auto def = member != member_patterns_.end() ? definitions_.end() : definitions_.find(std::to_underlying(rec.templ));
-  if (member == member_patterns_.end() && def == definitions_.end()) return nullptr;  // declared only
+  // A member template of a class template specialization defined outside the class: the
+  // definition of the current instantiation's member template at the same place ([temp.mem]/1).
+  std::optional<u32> outside;
+  if (member == member_patterns_.end() && def == definitions_.end())
+    if (auto mt = member_patterns_.find(std::to_underlying(rec.templ)); mt != member_patterns_.end())
+      outside = out_of_class_definition(rec.templ, mt->second);
+  if (member == member_patterns_.end() && def == definitions_.end() && !outside) return nullptr;  // declared only
   u32 decl_item = member != member_patterns_.end() ? member->second.item : 0;
   u32 body_item = decl_item;
   if (member != member_patterns_.end() && !items_->items[decl_item].has_body()) {
@@ -4392,7 +4441,7 @@ const Program::Instance* Program::instance(EntityId spec, u32 point) {
     if (!out) return nullptr;
     body_item = *out;
   }
-  const u32 k = member != member_patterns_.end() ? body_item : def->second;
+  const u32 k = member != member_patterns_.end() ? body_item : outside ? *outside : def->second;
   // [temp.inst]/16: instantiations nested through constant evaluation are limited as the END
   // worklist's are; the limit is reported once, at the template.
   if (too_deep(instantiating_.size(), k)) return nullptr;
@@ -4439,6 +4488,14 @@ const Program::Instance* Program::instance(EntityId spec, u32 point) {
   std::vector<ast::TemplateParamSema> head = w_->ins.seqs.elements(tmpl.template_params);
   const sema::u16 depth = head.empty() ? 0 : head[0].depth;
   sema::Bindings args = sema::Bindings::of(depth, rec.args);
+  // A member template of a class template specialization ([temp.mem]): the class's arguments
+  // bind the enclosing levels.
+  if (auto outer = class_args_.find(std::to_underlying(w_->entities.rec(rec.templ).scope)); outer != class_args_.end()) {
+    sema::Bindings all = outer->second;
+    all.levels.resize(depth + 1);
+    all.levels[depth] = args.levels[depth];
+    args = std::move(all);
+  }
   // The specialization's declaration: the template's, with the arguments substituted ([temp.inst]).
   // Every handle in it is interned already.
   ast::DeclSema decl = tmpl;

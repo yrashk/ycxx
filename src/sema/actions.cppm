@@ -1615,7 +1615,9 @@ public:
   // The specialization of function template `tmpl` for `args`, whose type is `type` (§B1.5).
   EntityId specialization(const ast::DeclSema& tmpl, std::span<const TemplateArg> args, QualType type) {
     const EntityRec& t = w_->entities.rec(tmpl.entity);
-    EntityRec r{EntityKind::function, t.name, type, t.lang, t.linkage, t.first, t.scope};
+    // A constructor template's specializations are constructors ([temp.mem]/1).
+    EntityKind kind = (tmpl.flags & decl_flag::constructor) ? EntityKind::constructor : EntityKind::function;
+    EntityRec r{kind, t.name, type, t.lang, t.linkage, t.first, t.scope};
     r.templ = tmpl.entity;
     r.args.assign(args.begin(), args.end());
     return w_->entities.entity(std::move(r));
@@ -2180,8 +2182,24 @@ public:
     std::vector<Candidate> cands;
     std::vector<EntityId> ents;
     bool user_copy = false;
+    std::deque<ast::DeclSema> patterns;
+    std::vector<ArgShape> shapes;
+    for (const Ex& a : args)
+      shapes.push_back({a.type(), a.cat() == ValueCategory::lvalue, !types().is(a.type(), Builtin::overload_set) && !is_bound_member(a)});
     for (const MemberDeclRec& m : cr->members)
-      if (m.is_ctor) {
+      if (m.is_ctor && m.is_template) {
+        // A constructor template: the specialization deduction gives ([temp.over]/1), never a
+        // copy constructor ([class.copy.ctor]/5).
+        auto tmpl = q_->template_decl(m.entity);
+        if (!tmpl) continue;
+        const ast::DeclSema& td = patterns.emplace_back(*tmpl);
+        Templates t = templates();
+        auto targs = t.deduce_call(td, shapes, {});
+        if (!targs) continue;
+        auto st = t.specialization_type(td, *targs);
+        if (!st || (copy_init && types().rec(*st).params.size() != 1)) continue;
+        cands.push_back({specialization(td, *targs, *st), *st, true, m.is_deleted, &td});
+      } else if (m.is_ctor) {
         TypeRec fr = types().rec(m.type);
         if (copy_init && fr.params.size() != 1) continue;
         cands.push_back({m.entity, m.type, true, m.is_deleted});
@@ -2196,7 +2214,9 @@ public:
     auto chosen = resolve(cands, args, begin, no_name(), std::nullopt, ut);
     if (!chosen) return fail;
     const Candidate& k = cands[*chosen];
-    if (k.entity != EntityId::none && !check_access(c, k.entity, w_->entities.rec(c).name, begin)) return fail;
+    if (k.entity != EntityId::none && !check_access(c, k.pattern ? k.pattern->entity : k.entity, w_->entities.rec(c).name, begin)) return fail;
+    // A specialization called is one whose definition the program requires ([temp.inst]/8).
+    if (k.pattern) demands.push_back({k.entity, ast::Loc{item_, loc_base_ + begin}});
     TypeRec fr = types().rec(k.type);
     if (k.entity == EntityId::none) {
       // Trivial: a copy of the argument's object, or nothing to construct.
