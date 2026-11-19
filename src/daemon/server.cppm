@@ -381,12 +381,50 @@ class Server {
     if (send(fd, Kind::lsp, LspRequest{})) {
       SocketChannel io(fd);
       log("an LSP session started");
-      const int status = lsp::serve(io, [this](std::span<const std::string> paths, const lsp::Buffers& open) { return diagnose(paths, open); });
+      const int status =
+          lsp::serve(io, [this](std::span<const std::string> paths, const lsp::Buffers& open) { return diagnose(paths, open); },
+                     [this](const lsp::Location& at, const lsp::Buffers& open) { return define(at, open); });
       send(fd, Kind::lsp, LspOut{{}, true, status});
       log(std::format("an LSP session ended ({})", status));
     }
     std::lock_guard g(conn_mu_);
     lsp_fds_.erase(fd);
+  }
+
+  // Go-to-definition (#170): the document's unit, checked in the editor view with `open` as the
+  // editor's buffers (§6.1), asked where the entity named at `at` is first declared.
+  std::optional<lsp::Location> define(const lsp::Location& at, const lsp::Buffers& open) {
+    const std::string real = canonical(at.path);
+    std::optional<compile::Request> request = check_request(real);
+    if (!request) return std::nullopt;
+    lsp::Buffers spelled;
+    for (const auto& [path, text] : open) {
+      spelled.insert_or_assign(canonical(path), text);
+      spelled.insert_or_assign(path, text);
+    }
+    std::lock_guard lsp(lsp_mu_);
+    {
+      std::lock_guard strand(strand_mu_);
+      catch_up();
+      set_buffers(spelled);
+    }
+    // A file's text as the editor sees it: its buffer, else the table's.
+    auto text_of = [&](const std::string& path) -> std::optional<std::string> {
+      if (auto it = spelled.find(path); it != spelled.end()) return it->second;
+      return table_.read(path);
+    };
+    const std::optional<std::string> text = text_of(real);
+    if (!text) return std::nullopt;
+    pipeline::LineTable lines(*text);
+    overlay_.open = &spelled;
+    overlay_.cwd = request->cwd;
+    auto found = compile::definition(*request, overlay_, session(), real, lines.offset_of(at.line, at.column), {pp::View::editor});
+    overlay_.open = nullptr;
+    if (!found) return std::nullopt;
+    const std::optional<std::string> target = text_of(found->path);
+    if (!target) return std::nullopt;
+    const pipeline::LineColumn lc = pipeline::LineTable(*target).line_column(found->offset);
+    return lsp::Location{found->path, lc.line, lc.column};
   }
 
   // The diagnostics of the documents at `paths`, each unit checked in the editor view with `open`

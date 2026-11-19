@@ -42,6 +42,16 @@ using Buffers = std::map<std::string, std::string>;
 // per batch of changes, so the daemon synchronizes with the disk and sets the buffers once.
 using Diagnose = std::function<std::vector<Diagnostic>(std::span<const std::string> paths, const Buffers& open)>;
 
+// A place in a file: its absolute path, a 1-based line and byte column.
+struct Location {
+  std::string path;
+  std::uint32_t line = 1;
+  std::uint32_t column = 1;
+};
+// Go-to-definition (#170): where the entity named at `at` in an open document is declared, with
+// `open` overlaid on the disk; nothing when no entity is named there.
+using Define = std::function<std::optional<Location>(const Location& at, const Buffers& open)>;
+
 struct ServerInfo {
   std::string name = "ycxx";
   std::string version;
@@ -49,7 +59,7 @@ struct ServerInfo {
 
 // Runs the session until the editor sends `exit` or closes the channel; the exit status LSP
 // prescribes (0 after `shutdown`, 1 otherwise).
-int serve(Channel& io, const Diagnose& diagnose, const ServerInfo& info = {});
+int serve(Channel& io, const Diagnose& diagnose, const Define& define = {}, const ServerInfo& info = {});
 
 // A `file://` URI's path (absolute and lexically normal: the engine's name for the file), and back.
 std::optional<std::string> path_of(std::string_view uri);
@@ -128,6 +138,15 @@ struct SyncOptions {
 };
 struct Capabilities {
   SyncOptions textDocumentSync;
+  bool definitionProvider = false;
+};
+struct TextDocumentPosition {
+  DocumentId textDocument;
+  Position position;
+};
+struct LspLocation {
+  std::string uri;
+  Range range;
 };
 struct InitializeResult {
   Capabilities capabilities;
@@ -139,6 +158,33 @@ int hex(char c) {
   if (c >= 'a' && c <= 'f') return c - 'a' + 10;
   if (c >= 'A' && c <= 'F') return c - 'A' + 10;
   return -1;
+}
+
+// A file's text from the disk, for positions in a file the editor has not opened.
+std::optional<std::string> read_disk(const std::string& path) {
+  std::ifstream in(path, std::ios::binary);
+  if (!in) return std::nullopt;
+  return std::string{std::istreambuf_iterator<char>(in), {}};
+}
+
+// A UTF-16 column of `line` (0-based, of `text`) as a 1-based byte column: the inverse of
+// `utf16_column`.
+std::uint32_t byte_column(std::string_view text, std::uint32_t line, std::uint32_t character) {
+  std::size_t at = 0;
+  for (std::uint32_t l = 0; l < line && at != std::string_view::npos; ++l) {
+    at = text.find('\n', at);
+    if (at != std::string_view::npos) ++at;
+  }
+  if (at == std::string_view::npos) return character + 1;
+  const std::string_view rest = text.substr(at, text.find('\n', at) - at);
+  std::size_t i = 0;
+  for (std::uint32_t units = 0; i < rest.size() && units < character;) {
+    const auto c = static_cast<unsigned char>(rest[i]);
+    const std::size_t len = c < 0x80 ? 1 : c < 0xe0 ? 2 : c < 0xf0 ? 3 : 4;
+    units += len == 4 ? 2 : 1;
+    i += len;
+  }
+  return static_cast<std::uint32_t>(i + 1);
 }
 
 // A byte column of `line` (1-based, of `text`) as UTF-16 code units, for LSP's positions.
@@ -162,7 +208,8 @@ std::uint32_t utf16_column(std::string_view text, std::uint32_t line, std::uint3
 
 class Session {
 public:
-  Session(Channel& io, const Diagnose& diagnose, const ServerInfo& info) : io_(io), diagnose_(diagnose), info_(info) {}
+  Session(Channel& io, const Diagnose& diagnose, const Define& define, const ServerInfo& info)
+      : io_(io), diagnose_(diagnose), define_(define), info_(info) {}
 
   int run() {
     while (auto text = read_message(io_)) {
@@ -206,7 +253,9 @@ private:
     if ((*method == "initialize" || *method == "shutdown") && !request) return std::nullopt;
     if (*method == "initialize") {
       initialized_ = true;
-      reply(*id, to_json(InitializeResult{{}, info_}));
+      InitializeResult r{{}, info_};
+      r.capabilities.definitionProvider = static_cast<bool>(define_);
+      reply(*id, to_json(r));
     } else if (*method == "shutdown") {
       shut_down_ = true;
       reply(*id, Json(nullptr));
@@ -228,10 +277,36 @@ private:
           dirty_ = true;
         }
       }
+    } else if (*method == "textDocument/definition" && request && define_) {
+      reply(*id, definition(params));
     } else if (request) {
       reply_error(*id, -32601, "method not found: " + *method);
     }
     return std::nullopt;
+  }
+
+  // The text of a file as the editor sees it: an open document's, else the disk's.
+  std::optional<std::string> text_of(const std::string& path) const {
+    if (auto it = open_.find(path); it != open_.end()) return it->second;
+    return read_disk(path);
+  }
+
+  // `textDocument/definition`: a `Location`, or null.
+  Json definition(const Json& params) {
+    auto p = from_json<TextDocumentPosition>(params);
+    if (!p) return Json(nullptr);
+    auto path = path_of(p->textDocument.uri);
+    if (!path) return Json(nullptr);
+    const std::optional<std::string> text = text_of(*path);
+    if (!text) return Json(nullptr);
+    const Location at{*path, p->position.line + 1, byte_column(*text, p->position.line, p->position.character)};
+    const std::optional<Location> found = define_(at, open_);
+    if (!found) return Json(nullptr);
+    const std::uint32_t line = found->line ? found->line - 1 : 0;
+    const std::optional<std::string> target = text_of(found->path);
+    const std::uint32_t character = target ? utf16_column(*target, found->line, found->column) : found->column - 1;
+    auto uri = uris_.find(found->path);
+    return to_json(LspLocation{uri == uris_.end() ? uri_of(found->path) : uri->second, {{line, character}, {line, character}}});
   }
 
   void set(const std::string& uri, std::string text, std::optional<std::int64_t> version) {
@@ -243,18 +318,36 @@ private:
     dirty_ = true;
   }
 
-  // Every open document's diagnostics: an unsaved header changes its includers' answers.
+  // Every open document's diagnostics: an unsaved header changes its includers' answers. Those
+  // located in a file the editor has not opened (a header the document includes, #170) are
+  // published under that file, and cleared once no document reports them.
   void publish() {
     const std::vector<std::string> paths = open_ | std::views::keys | std::ranges::to<std::vector>();
     std::map<std::string, std::vector<LspDiagnostic>> found;
+    std::map<std::string, std::optional<std::string>> texts;  // of files not open
     for (const Diagnostic& d : diagnose_(paths, open_)) {
-      const auto doc = open_.find(d.path);
-      if (doc == open_.end()) continue;  // in a file that is not open (#170)
+      if (d.path.empty()) continue;  // about no file
       const std::uint32_t line = d.line ? d.line - 1 : 0;
-      const std::uint32_t character = utf16_column(doc->second, d.line, d.column);
+      std::uint32_t character = d.column ? d.column - 1 : 0;
+      if (const auto doc = open_.find(d.path); doc != open_.end()) {
+        character = utf16_column(doc->second, d.line, d.column);
+      } else {
+        auto [t, fresh] = texts.try_emplace(d.path);
+        if (fresh) t->second = read_disk(d.path);
+        if (t->second) character = utf16_column(*t->second, d.line, d.column);
+      }
       found[d.path].push_back({{{line, character}, {line, character}}, d.severity, "ycxx", d.message});
     }
     for (const std::string& path : paths) send_diagnostics(path, std::move(found[path]));
+    std::set<std::string> elsewhere;
+    for (auto& [path, diags] : found)
+      if (!open_.contains(path)) {
+        elsewhere.insert(path);
+        send_diagnostics(path, std::move(diags));
+      }
+    for (const std::string& path : elsewhere_)
+      if (!elsewhere.contains(path) && !open_.contains(path)) send_diagnostics(path, {});
+    elsewhere_ = std::move(elsewhere);
   }
 
   void send_diagnostics(const std::string& path, std::vector<LspDiagnostic> diags) {
@@ -279,7 +372,9 @@ private:
 
   Channel& io_;
   const Diagnose& diagnose_;
+  const Define& define_;
   const ServerInfo& info_;
+  std::set<std::string> elsewhere_;  // files not open that the last publish reported on
   Buffers open_;
   std::map<std::string, std::optional<std::int64_t>> versions_;
   std::map<std::string, std::string> uris_;
@@ -406,6 +501,8 @@ bool write_message(Channel& io, const Json& message) {
   return io.write(std::format("Content-Length: {}\r\n\r\n", body.size())) && io.write(body);
 }
 
-int serve(Channel& io, const Diagnose& diagnose, const ServerInfo& info) { return Session(io, diagnose, info).run(); }
+int serve(Channel& io, const Diagnose& diagnose, const Define& define, const ServerInfo& info) {
+  return Session(io, diagnose, define, info).run();
+}
 
 }  // namespace ycxx::lsp

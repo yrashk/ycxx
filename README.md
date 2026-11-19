@@ -59,8 +59,9 @@ its analysis between commands. A repeated build re-runs nothing, and an edit re-
 it affects, through code generation and the link. The daemon serves concurrent requests on a
 thread pool, and its output is byte for byte that of a cold, in-process build.
 
-**Editor diagnostics.** `ycxx lsp` is a language server that reports ycxx's errors as you type,
-through the daemon, without unsaved text ever reaching a build.
+**Editor support.** `ycxx lsp` is a language server that reports ycxx's errors as you type,
+including those in the headers a file includes, and goes to the definition of a name used in a
+function body, through the daemon, without unsaved text ever reaching a build.
 
 ### Not yet
 
@@ -71,7 +72,6 @@ through the daemon, without unsaved text ever reaching a build.
   uses private members ([#119](https://github.com/yrashk/ycxx/issues/119)).
 - Concepts, member templates, template template parameters, `if constexpr`.
 - Floating-point arithmetic, exceptions, and optimization (`-O`).
-- Go-to-definition in the language server.
 - Linux and x86-64 output.
 
 ### In progress

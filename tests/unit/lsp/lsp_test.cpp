@@ -136,8 +136,12 @@ void session() {
   const int code = serve(io, diagnose);
   check(code == 1, "an editor that leaves without shutdown: exit status 1");
   auto r = io.replies();
-  check(r.size() == 2, std::format("an initialize result and one publish ({} messages)", r.size()));
-  if (r.size() == 2) {
+  // A message in a file the editor has not opened is published under that file (#170).
+  check(r.size() == 3, std::format("an initialize result, the document's publish and elsewhere.h's ({} messages)", r.size()));
+  if (r.size() == 3) {
+    const Json& e = *r[2]["params"];
+    check(*e["uri"]->string() == "file:///w/elsewhere.h" && !e["version"]->number() && e["diagnostics"]->array()->size() == 1,
+          "a file that is not open: its diagnostics, with no version");
     const Json* caps = (*r[0]["result"])["capabilities"];
     check(caps && *(*(*caps)["textDocumentSync"])["change"]->number() == 1, "full-text sync");
     const Json& p = *r[1]["params"];
@@ -203,7 +207,8 @@ void session() {
   bool own_uri = false;
   for (const Json& m : io3.replies()) {
     if (m["error"]) errors[static_cast<int>(*m["id"]->number())] = static_cast<int>(*(*m["error"])["code"]->number());
-    if (const Json* p = m["params"]; p && p->object() && (*p)["uri"]) own_uri = *(*p)["uri"]->string() == "file:///w/%61.cpp";
+    if (const Json* p = m["params"]; p && p->object() && (*p)["uri"])
+      own_uri = own_uri || *(*p)["uri"]->string() == "file:///w/%61.cpp";
   }
   check(errors == std::map<int, int>{{1, -32002}, {3, -32600}, {5, -32600}},
         "not initialized, a method that is no string, and a request after shutdown");
