@@ -135,6 +135,8 @@ struct Options {
   std::optional<std::string> output, interpreter;
   std::vector<std::string> sources;  // translation units
   std::vector<std::string> objects;  // objects named on the command line
+  std::vector<std::string> archives;
+  std::vector<pipeline::LinkOperand> operands;
   std::vector<std::string> libraries;  // shared objects in command-line order
 };
 
@@ -154,6 +156,11 @@ bool is_shared_object(std::string_view f) {
 std::expected<Options, std::string> parse_options(std::span<const std::string_view> args) {
   Options o;
   std::vector<std::string_view> other_inputs;
+  using Kind = pipeline::LinkOperand::Kind;
+  const auto add_operand = [&](Kind kind, std::vector<std::string>& paths, std::string_view path) {
+    o.operands.push_back({kind, paths.size()});
+    paths.emplace_back(path);
+  };
   for (std::size_t i = 0; i < args.size(); ++i) {
     std::string_view a = args[i];
     auto pp_option = pp::take_option(args, i, o.pp);
@@ -203,8 +210,9 @@ std::expected<Options, std::string> parse_options(std::span<const std::string_vi
              a == "-fno-color-diagnostics")
       continue;
     else if (a.starts_with("-") && a != "-") return std::unexpected(std::format("unsupported option '{}'", a));
-    else if (a.ends_with(".o")) o.objects.emplace_back(a);
-    else if (is_source(a)) o.sources.emplace_back(a);
+    else if (a.ends_with(".o")) add_operand(Kind::object, o.objects, a);
+    else if (a.ends_with(".a")) add_operand(Kind::archive, o.archives, a);
+    else if (is_source(a)) add_operand(Kind::source, o.sources, a);
     else other_inputs.push_back(a);
   }
   const bool linux_link = o.pp.target == &ast::x86_64_linux && o.stop == Options::Stop::link;
@@ -213,6 +221,13 @@ std::expected<Options, std::string> parse_options(std::span<const std::string_vi
   for (std::string_view path : other_inputs) {
     if (is_shared_object(path) || o.interpreter) o.libraries.emplace_back(path);
     else return std::unexpected(std::format("'{}': unknown kind of input file", path));
+  }
+  if (!o.archives.empty()) {
+    if (!linux_link) return std::unexpected("archive inputs require an x86-64 Linux executable link");
+    if (o.interpreter || !o.libraries.empty())
+      return std::unexpected("archive inputs cannot be combined with explicit Linux dynamic linking");
+    if (o.sources.empty() && o.objects.empty())
+      return std::unexpected("an archive link requires at least one source or ordinary object");
   }
   if (!o.libraries.empty() && !linux_link)
     return std::unexpected("shared object inputs require an x86-64 Linux executable link");
@@ -481,15 +496,23 @@ Done run(const Request& r, pp::Host& host, pipeline::Session& session, const Sto
   std::optional<std::string> bad_input;
   if (key.until == pipeline::Until::link) {
     std::vector<obj::object> objects;
+    std::vector<link::elf::archive_input> archives;
     const bool linux_target = opts->pp.target == &ast::x86_64_linux;
-    // Objects named on the command line are read as they are, never through the file table (§5.2).
-    for (const std::string& path : opts->objects) {
+    // Snapshot disk inputs at ingress, outside the file table (§5.2).
+    using Kind = pipeline::LinkOperand::Kind;
+    for (const auto [kind, index] : opts->operands) {
+      if (kind == Kind::source) continue;
+      const auto& path = kind == Kind::archive ? opts->archives[index] : opts->objects[index];
       auto text = read_disk(in_cwd(r, path));
       if (!text) {
         bad_input = std::format("cannot read '{}'", path);
         break;
       }
-      std::vector<std::uint8_t> bytes(text->begin(), text->end());
+      if (kind == Kind::archive) {
+        archives.push_back({path, std::move(*text)});
+        continue;
+      }
+      const auto bytes = std::span(reinterpret_cast<const std::uint8_t*>(text->data()), text->size());
       auto o = linux_target ? obj::elf::read_object(bytes, path) : obj::macho::read_object(bytes, path);
       if (!o) {
         bad_input = o.error();
@@ -515,9 +538,13 @@ Done run(const Request& r, pp::Host& host, pipeline::Session& session, const Sto
         dynamic->libraries.push_back(std::move(*library));
       }
     }
+    std::optional<pipeline::ArchiveLinkInputs> archive_link;
+    if (!archives.empty())
+      archive_link.emplace(pipeline::ArchiveLinkInputs{
+          obj::target::x86_64_linux, std::move(opts->operands), std::move(archives)});
     if (bad_input) key.until = pipeline::Until::object;
     else key.program = session.program(
-        {key.units, std::move(objects), out.filename().native_encoded_string(), std::move(dynamic)});
+        {key.units, std::move(objects), out.filename().native_encoded_string(), std::move(dynamic), std::move(archive_link)});
   }
   const pipeline::Until until = bad_input ? pipeline::Until::link : key.until;
   pipeline::RunStats rs;

@@ -4,9 +4,9 @@
 // `xcrun --show-sdk-path` prints, else the Command Line Tools' SDK. The SDK is located and its
 // export list read once per process.
 //
-// `link(P)` is the engine query over a program's translation units: their `tu(TU)` objects, in
-// command-line order, then the objects given as files. The SDK is read outside the engine, once
-// per process, as configuration the daemon's file table will provide (#97).
+// `link(P)` is the engine query over a program's translation units and disk inputs. Static
+// archive links follow operand order. The SDK is read outside the engine, once per process,
+// as configuration the daemon's file table will provide (#97).
 module;
 #include <stdio.h>
 export module ycxx.pipeline:executable;
@@ -44,14 +44,27 @@ struct ProgramId {
 };
 // A program in engine traces (#245): its output's name, once a session has named it.
 void trace_describe(std::string& out, ProgramId p);
-// What a program is linked from: translation units, in command-line order, then objects read from
-// files. Linux dynamic links carry their target interpreter and the ordered shared inputs.
-// `identifier` names the Mach-O code signature.
+struct LinkOperand {
+  enum class Kind : std::uint8_t { source, object, archive };
+  Kind kind;
+  std::size_t index;  // into the corresponding input vector
+};
+
+struct ArchiveLinkInputs {
+  obj::target target;
+  std::vector<LinkOperand> operands;
+  std::vector<link::elf::archive_input> archives;
+};
+
+// Ordinarily, translation units precede disk objects. Archive links carry a positional manifest
+// of all operands and the archive snapshots. Linux dynamic links carry their target interpreter
+// and ordered shared inputs. `identifier` names the Mach-O code signature.
 struct ProgramInputs {
   std::vector<TuId> tus;
   std::vector<obj::object> objects;
   std::string identifier;
   std::optional<link::elf::dynamic_options> dynamic = std::nullopt;
+  std::optional<ArchiveLinkInputs> archive_link = std::nullopt;
 };
 struct [[=engine::input{engine::Durability::low}]] ProgramIn {
   using Key = ProgramId;
@@ -330,16 +343,39 @@ std::optional<std::string> write_file(const std::filesystem::path& path, std::sp
 
 engine::query_task<Linked> Link::run(engine::Ctx& cx, ProgramId p) {
   const ProgramInputs& in = cx.fetch<ProgramIn>(p);
-  std::vector<obj::object> objects;
   Linked out;
   const auto tus = co_await cx.par_map<Tu>(in.tus);
   for (std::size_t i = 0; i < in.tus.size(); ++i) {
-    const TuValue& t = tus[i];
-    if (!t.object) out.errors.push_back(std::format("translation unit {} did not compile", in.tus[i].n));
-    else objects.push_back(*t.object);
+    if (!tus[i].get().object) out.errors.push_back(std::format("translation unit {} did not compile", in.tus[i].n));
   }
   if (!out.errors.empty()) co_return out;
-  objects.append_range(in.objects);
+
+  std::vector<obj::object> objects;
+  if (const auto& archive_link = in.archive_link) {
+    if (archive_link->target != obj::target::x86_64_linux || in.dynamic) {
+      out.errors.push_back("archive inputs require a static x86-64 Linux executable link");
+      co_return out;
+    }
+    std::vector<link::elf::static_operand> operands;
+    operands.reserve(archive_link->operands.size());
+    for (const auto [kind, index] : archive_link->operands) {
+      switch (kind) {
+        case LinkOperand::Kind::source: operands.emplace_back(std::cref(*tus[index].get().object)); break;
+        case LinkOperand::Kind::object: operands.emplace_back(std::cref(in.objects[index])); break;
+        case LinkOperand::Kind::archive: operands.emplace_back(std::cref(archive_link->archives[index])); break;
+      }
+    }
+    auto selected = link::elf::select_archive_members(operands);
+    if (!selected) {
+      out.errors.push_back(std::move(selected.error()));
+      co_return out;
+    }
+    objects = std::move(*selected);
+  } else {
+    objects.reserve(in.tus.size() + in.objects.size());
+    for (const TuValue& t : tus) objects.push_back(*t.object);
+    objects.append_range(in.objects);
+  }
   auto image = link_executable(objects, in.identifier, in.dynamic ? &*in.dynamic : nullptr);
   if (!image) {
     for (const link::error& e : image.error()) out.errors.push_back(e.message);
@@ -348,7 +384,7 @@ engine::query_task<Linked> Link::run(engine::Ctx& cx, ProgramId p) {
   if (!objects.empty() && objects.front().arch == obj::target::x86_64_linux &&
       !std::ranges::any_of(objects, [](const obj::object& o) { return defines_symbol(o, "_start"); })) {
     for (std::size_t i = 0; i < in.tus.size(); ++i) {
-      if (!defines_symbol(objects[i], "main")) continue;
+      if (!defines_symbol(*tus[i].get().object, "main")) continue;
       const auto& tu = co_await cx.fetch<TuUnit>(in.tus[i]);
       if (!has_valid_linux_main(tu, *universe().in))
         out.errors.push_back(std::format("{}: Linux startup requires 'int main()' or 'int main(int, char**)'", tu.name));
