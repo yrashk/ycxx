@@ -1907,6 +1907,8 @@ values, end to end; results match Clang's bit for bit.
   a template-id without a target type (#335), and function pointer or reference template
   arguments (#406). A free immediate function selected from an overload is diagnosed outside an
   immediate invocation or context. General immediate-function name validation is tracked in #102.
+- The Linux x86-64 backend can call through an address taken from an internal function. Emitting
+  addresses of externally linked functions on that target is tracked in #407.
 - Tests are in `tests/own/function-pointers/`, with draft examples for [over.over] and
   [temp.deduct.call] enabled.
 

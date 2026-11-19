@@ -489,8 +489,8 @@ int twice(int x) { return 2 * x; }
 int main() { int (*f)(int) = twice; return f(2) == 4 ? 0 : 1; }
 '''
 status = 'partial'
-issues = [196, 219, 287]
-note = 'variadic indirect calls, noexcept conversions and C language linkage'
+issues = [196, 219, 287, 407]
+note = 'variadic indirect calls, noexcept conversions, C language linkage and external ELF addresses'
 
 [[feature]]
 id = 'basic-rvalue-ref'
