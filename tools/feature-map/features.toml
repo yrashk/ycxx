@@ -885,7 +885,7 @@ clauses = ['expr.prim.lambda.closure', 'dcl.constexpr']
 std = 'C++17'
 detect = '\]\s*\([^)]*\)\s*(?:mutable\s+)?(?:constexpr|consteval)\b'
 status = 'missing'
-issues = [346]
+issues = [262, 102]
 probe = '''
 int main() { constexpr auto sq = [](int x) { return x * x; }; static_assert(sq(3) == 9); return 0; }
 '''

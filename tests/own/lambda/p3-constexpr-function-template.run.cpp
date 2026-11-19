@@ -1,7 +1,7 @@
 // θ step 3 (#281), spec-only: a lambda passed to a constexpr function template and called there is
 // evaluated in a constant expression, with captureless and capturing closures and a generic one
 // ([expr.prim.lambda.closure], [dcl.constexpr], [expr.const], [temp.deduct.call]).
-// XFAIL: ycxx class objects in constant evaluation, #346
+// XFAIL: ycxx class objects in constant evaluation, #262
 template<class F> constexpr int apply(F f, int x) { return f(x); }
 template<class F> constexpr int fold(F f, int init, int n) {
   for (int i = 1; i <= n; ++i) init = f(init, i);

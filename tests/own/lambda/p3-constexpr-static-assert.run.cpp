@@ -1,7 +1,7 @@
 // θ step 3 (#281), spec-only: a lambda's function call operator is constexpr when it satisfies the
 // requirements of a constexpr function, so calling a lambda inside a static_assert in a function body
 // is a constant expression ([expr.prim.lambda.closure], [dcl.constexpr], [expr.const]).
-// XFAIL: ycxx class objects in constant evaluation, #346
+// XFAIL: ycxx class objects in constant evaluation, #262
 int main() {
   static_assert([](int x) { return x * x; }(7) == 49);
   static_assert([] { return 3; }() + 1 == 4);

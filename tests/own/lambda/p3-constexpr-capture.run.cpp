@@ -1,7 +1,7 @@
 // θ step 3 (#281), spec-only: a lambda that captures constexpr locals by copy, stored in a constexpr
 // closure object, is called in constant expressions; its copied members are constant
 // ([expr.prim.lambda.capture], [expr.prim.lambda.closure], [expr.const]).
-// XFAIL: ycxx class objects in constant evaluation, #346
+// XFAIL: ycxx class objects in constant evaluation, #262
 int main() {
   constexpr int k = 5;
   constexpr int scale = 3;

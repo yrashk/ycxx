@@ -104,7 +104,7 @@ checked with the flags of its last build, or else with its line in the project's
 - Standard headers, starting with `<cstdio>` ([#133](https://github.com/yrashk/ycxx/issues/133)).
 - `auto` and lambdas ([#278](https://github.com/yrashk/ycxx/issues/278)): placeholder types,
   lambdas and generic lambdas are done; constexpr lambdas wait on class objects in the
-  interpreter ([#346](https://github.com/yrashk/ycxx/issues/346)).
+  interpreter ([#262](https://github.com/yrashk/ycxx/issues/262)).
 
 Next come exceptions ([#89](https://github.com/yrashk/ycxx/issues/89)).
 

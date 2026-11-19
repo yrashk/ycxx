@@ -1591,10 +1591,10 @@ checked against Clang 23 and GCC 16 probes).
   others, mangled as member template specializations in a <local-name>.
 - **Constant evaluation of closures:** `Questions::function_ir` of a closure member is answered
   (`Evaluator::closure_callee` for the part being analysed, `Program::closure_ir` otherwise),
-  and closure members are constexpr; the interpreter does not evaluate class objects yet (#346),
+  and closure members are constexpr; the interpreter does not evaluate class objects yet (#262),
   so constexpr lambdas wait on it.
 - Tests: `tests/own/lambda/p3-*` (33 spec-only + 1 ABI): 22 pass, 12 XFAIL (constexpr lambdas
-  #346, default arguments #300, `static_cast<T&&>` and dependent `decltype` #199, a generic
+  #262, default arguments #300, `static_cast<T&&>` and dependent `decltype` #199, a generic
   lambda's conversion #339, explicit template arguments #347).
 - Not yet: parameter packs, pack captures, requires-clauses, static lambdas (#350).
 
