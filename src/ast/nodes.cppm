@@ -328,6 +328,14 @@ struct Goto {
   NameId label;
 };
 
+// A call's argument taken from its parameter's default argument ([dcl.fct.default]): the tree
+// analysed at the declaration, converted to the parameter's type. Its nodes are positioned at the
+// call, which is in another item.
+struct DefaultArg {
+  ExprInfo info;
+  [[=sequenced]] Child arg;
+};
+
 // ---------------------------------------------------------------- declarations (item trees)
 
 // One declarator of an item ([dcl.decl]): the ordinal of its record in `ItemSema::decls`, its
@@ -386,7 +394,7 @@ using Nodes = closed_list<Literal, DeclRef, Paren, Unary, Binary, OrderedBinary,
                           Conditional, While, Do, For, Break, Continue, DeclStmt, Declarator, DeclGroup,
                           IfConsteval, StaticAssert, Member, InitList, ValueInit, DefaultInit, This,
                           MemberCall, Materialize, CtorCall, MemberInit, Destructor, DestroyMember, Dependent,
-                          DepName, CondDecl, Switch, Case, Default, Label, Goto>;
+                          DepName, CondDecl, Switch, Case, Default, Label, Goto, DefaultArg>;
 
 static_assert(Nodes::size < max_node_kinds);
 

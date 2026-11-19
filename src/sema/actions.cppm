@@ -1989,7 +1989,7 @@ public:
     if (object) object_cv = Types::cv(m.arrow ? types().pointee(object->type()) : object->type());
     std::vector<Candidate> cands;
     for (const MemberDeclRec* c : bound.cands)
-      cands.push_back({c->entity, c->type, c->is_static, c->is_deleted});
+      cands.push_back({c->entity, c->type, c->is_static, c->is_deleted, nullptr, c->defaults});
     // [class.this]: a non-static member function needs the object's cv-qualifiers.
     if (object_cv && std::ranges::none_of(bound.cands, [&](const MemberDeclRec* c) {
           return c->is_static || cv_within(*object_cv, types().rec(c->type).fn_cv);
@@ -2004,7 +2004,7 @@ public:
     auto dt = deduced_function(d->entity, d->type, begin);
     if (!dt) return fail;
     TypeRec fr = types().rec(*dt);
-    auto children = call_args(fr, args, begin, paren_at);
+    auto children = call_args(fr, args, begin, paren_at, d->defaults);
     if (!children) return fail;
     ExprInfo info = result_info(fr.inner);
     if (d->is_static) {
@@ -2042,7 +2042,35 @@ public:
     bool deleted;
     // A function template specialization's template ([over.match.best]/2.4–2.5), else null.
     const ast::DeclSema* pattern = nullptr;
+    // Its parameters' default arguments, by position, none where a parameter has none
+    // ([dcl.fct.default]); empty if it has none.
+    std::vector<NodeId> defaults{};
+    // How many arguments a call must give ([over.match.viable]/2.3).
+    std::size_t required(std::size_t params) const {
+      std::size_t k = params;
+      while (k > 0 && k - 1 < defaults.size() && defaults[k - 1] != NodeId::none) --k;
+      return k;
+    }
   };
+
+  // The default arguments of a function's declaration `d`, by parameter, or empty if it has none.
+  // `d` was found by lookup: its lists are interned.
+  std::vector<NodeId> defaults_of(const ast::DeclSema& d) {
+    std::vector<NodeId> r;
+    for (const ast::ParamSema& p : ins().seqs.elements(d.params)) r.push_back(p.default_arg);
+    if (std::ranges::all_of(r, [](NodeId n) { return n == NodeId::none; })) r.clear();
+    return r;
+  }
+  // Those of function `f` as lookup found it, or, for a member, as its class records them.
+  std::vector<NodeId> defaults_of(EntityId f) {
+    if (auto it = defaults_.find(std::to_underlying(f)); it != defaults_.end()) return it->second;
+    EntityId scope = w_->entities.rec(f).scope;
+    if (scope != EntityId::none && w_->entities.rec(scope).kind != EntityKind::namespace_)
+      if (const ClassRec* cr = class_rec(scope))
+        for (const MemberDeclRec& m : cr->members)
+          if (m.entity == f) return m.defaults;
+    return {};
+  }
 
   // An implicit conversion sequence's ranking ([over.ics.rank]): exact match, promotion,
   // conversion, then a tie-break among exact matches (an added qualification, or a reference
@@ -2162,7 +2190,7 @@ public:
     std::vector<std::pair<std::size_t, std::vector<Ics>>> viable;
     for (std::size_t i = 0; i < cands.size(); ++i) {
       TypeRec fr = types().rec(cands[i].type);
-      if (args.size() < fr.params.size() || (args.size() > fr.params.size() && !fr.variadic)) continue;
+      if (args.size() < cands[i].required(fr.params.size()) || (args.size() > fr.params.size() && !fr.variadic)) continue;
       std::vector<Ics> seq;
       // The implicit object parameter, first: the object must not be more cv-qualified.
       if (!cands[i].no_object && object_cv) {
@@ -2266,8 +2294,10 @@ public:
     for (const MemberDeclRec& m : cr->members)
       if (m.is_ctor) {
         TypeRec fr = types().rec(m.type);
-        if (copy_init && fr.params.size() != 1) continue;
-        cands.push_back({m.entity, m.type, true, m.is_deleted});
+        Candidate k{m.entity, m.type, true, m.is_deleted, nullptr, m.defaults};
+        // Copy-initialization converts with a constructor that takes one argument ([class.conv.ctor]).
+        if (copy_init && (fr.params.empty() || k.required(fr.params.size()) > 1)) continue;
+        cands.push_back(std::move(k));
         user_copy = user_copy || is_copy_ctor(fr, ut);
       }
     QualType void_ = builtin(Builtin::void_);
@@ -2286,6 +2316,11 @@ public:
       if (fr.params.empty()) return value_init_aggregate(ut, begin, end);
       Ex a = args[0];
       return a.glvalue() ? convert_node(a, ast::ConversionKind::lvalue_to_rvalue, ut) : a;
+    }
+    for (std::size_t i = args.size(); i < fr.params.size() && i < k.defaults.size(); ++i) {
+      auto a = default_argument(k.defaults[i], end);
+      if (!a) return fail;
+      args.push_back(*a);
     }
     std::vector<Child> cs;
     for (std::size_t i = 0; i < args.size(); ++i) {
@@ -2483,6 +2518,7 @@ public:
       if (auto r = class_member(current_class, name, begin, end, begin)) return *r;
       if (!class_rec(current_class))
         if (auto m = q_->earlier_member(name)) {
+          if (m->kind == ast::DeclKind::enumerator) return enumerator(m->entity, m->type, begin, end);
           if (m->kind != ast::DeclKind::variable) {
             diag(begin, Diag::member_without_object, name);
             return {NodeId::none, begin, end};
@@ -2554,6 +2590,12 @@ public:
       if (!any) undeclared(begin, name);
       return {NodeId::none, begin, end};
     }
+    // A function's default arguments, from the latest declaration found, which has every earlier
+    // one's ([dcl.fct.default]/4). This item's own declarations are drafts and have none yet.
+    for (auto o = found.rbegin(); o != found.rend(); ++o)
+      if (o->kind == ast::DeclKind::function && !defaults_.contains(std::to_underlying(o->entity)) &&
+          std::ranges::none_of(own, [&](const OwnDecl& w) { return w.sema.entity == o->entity && w.sema.params == o->params; }))
+        if (auto ds = defaults_of(*o); !ds.empty()) defaults_[std::to_underlying(o->entity)] = std::move(ds);
     // Several functions: an overload set, resolved by the call ([over.match]); the latest
     // declaration of each gives its type.
     const ast::DeclSema& d = found.back();
@@ -3523,6 +3565,7 @@ public:
   // argument promotions.
   Ex call(Ex callee, std::vector<Ex> args, u32 end, u32 paren_at) {
     u32 begin = callee.begin;
+    std::vector<NodeId> defaults;  // the chosen function's default arguments
     if (!callee.ok() || std::ranges::any_of(args, [](const Ex& a) { return !a.ok(); })) return {NodeId::none, begin, end};
     // A member function called with a dependent argument is resolved when the template is
     // instantiated ([temp.dep.expr]).
@@ -3579,7 +3622,7 @@ public:
         if (!(d.flags & decl_flag::template_)) {
           // Explicit template arguments name only templates ([temp.arg.explicit]).
           if (ex != explicit_args_.end()) continue;
-          cands.push_back({d.entity, d.type, true, deleted});
+          cands.push_back({d.entity, d.type, true, deleted, nullptr, defaults_of(d.entity)});
           decls.push_back(&d);
           continue;
         }
@@ -3598,7 +3641,7 @@ public:
         }
         auto st = t.specialization_type(d, *targs);
         if (!st) continue;
-        cands.push_back({specialization(d, *targs, *st), *st, true, deleted, &d});
+        cands.push_back({specialization(d, *targs, *st), *st, true, deleted, &d, defaults_of(d.entity)});
         decls.push_back(&d);
       }
       auto chosen = resolve(cands, args, callee.begin, w_->entities.rec(set.front().entity).name, std::nullopt);
@@ -3612,6 +3655,7 @@ public:
       if (!kt) return {NodeId::none, begin, end};
       ExprInfo ci{*kt, ValueCategory::lvalue, 0};
       callee = node(ast::DeclRef{ci, k.entity}, callee.begin, callee.end, ci);
+      defaults = k.defaults;
     } else if (auto d = as<ast::DeclRef>(callee); d && deleted_.contains(std::to_underlying(d->entity))) {
       // One function: still not callable when deleted ([dcl.fct.def.delete]).
       diag(callee.begin, Diag::deleted_function, w_->entities.rec(d->entity).name);
@@ -3621,6 +3665,7 @@ public:
     QualType ft = callee.type();
     if (auto d = as<ast::DeclRef>(callee); d && types().is_function(ft)) {
       function = d->entity;
+      if (defaults.empty()) defaults = defaults_of(function);
     } else {
       callee = rvalue(callee);
       ft = callee.type();
@@ -3631,7 +3676,7 @@ public:
       return {NodeId::none, begin, end};
     }
     TypeRec fr = types().rec(ft);
-    auto children = call_args(fr, args, begin, paren_at);
+    auto children = call_args(fr, args, begin, paren_at, defaults);
     if (!children) return {NodeId::none, begin, end};
     ExprInfo info = result_info(fr.inner);
     return node(ast::Call{info, function, at(callee, begin), b_->list(*children)}, begin, end, info);
@@ -3687,6 +3732,19 @@ public:
 
   // A braced-init-list as a call's argument: a placeholder, list-initializing its parameter once
   // the callee is known (`call_args`).
+  // The argument a parameter's default argument gives a call, positioned at the call's `)`: its
+  // tree, analysed at the declaration ([dcl.fct.default]/5). One of a template that depends on its
+  // parameters would be instantiated for the call ([temp.inst]/12), which is not supported yet.
+  std::optional<Ex> default_argument(NodeId d, u32 at_) {
+    NodeId arg = ins().ast.get<ast::DefaultArg>(d).arg.id;
+    if (ast::kind_of(arg) == ast::Nodes::index_of<ast::Dependent>()) {
+      diag(at_, Diag::default_arg_dependent);
+      return std::nullopt;
+    }
+    ExprInfo info = ins().ast.get<ast::DefaultArg>(d).info;
+    return Ex{b_->adopt(d), at_, at_, info};
+  }
+
   Ex braced_argument(std::unique_ptr<Braced> b) {
     ExprInfo info{builtin(Builtin::void_), ValueCategory::prvalue, 0};
     Ex r = node(ast::ValueInit{info}, b->begin, b->end, info);
@@ -3696,8 +3754,16 @@ public:
   bool is_braced(const Ex& e) const { return e.ok() && braced_args_.contains(std::to_underlying(e.id)); }
 
   // The arguments of a call to a function of type `fr`, each copy-initializing its parameter.
-  std::optional<std::vector<Child>> call_args(const TypeRec& fr, std::span<const Ex> args, u32 begin, u32 paren_at) {
+  // A parameter without an argument takes its default argument ([dcl.fct.default], [expr.call]/5).
+  std::optional<std::vector<Child>> call_args(const TypeRec& fr, std::span<const Ex> given, u32 begin, u32 paren_at,
+                                              std::span<const NodeId> defaults = {}) {
     std::vector<QualType> params = fr.params;  // copied: converting may intern new types
+    std::vector<Ex> args(given.begin(), given.end());
+    for (std::size_t i = args.size(); i < params.size() && i < defaults.size() && defaults[i] != NodeId::none; ++i) {
+      auto a = default_argument(defaults[i], paren_at);
+      if (!a) return std::nullopt;
+      args.push_back(*a);
+    }
     if (args.size() < params.size()) {
       diag(paren_at, Diag::too_few_arguments, u64(params.size()), u64(args.size()));
       return std::nullopt;
@@ -3801,6 +3867,7 @@ private:
   };
   std::map<u32, Bound> bound_;                        // by draft bound-member Member
   std::set<u32> deleted_;                             // deleted functions named so far
+  std::map<u32, std::vector<NodeId>> defaults_;       // by function: its default arguments ([dcl.fct.default])
   std::vector<std::pair<std::size_t, EntityId>> using_enums_;  // (scope depth, enumeration)
   struct BlockUsing {
     std::size_t depth;

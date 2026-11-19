@@ -543,6 +543,7 @@ struct MemberDeclRec {
   bool is_ctor = false;
   bool is_dtor = false;
   bool is_deleted = false;
+  std::vector<ast::NodeId> defaults;  // a function's default arguments by parameter, or empty
 };
 
 struct NestedType {

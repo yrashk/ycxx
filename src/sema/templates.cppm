@@ -947,14 +947,22 @@ public:
     const std::size_t fixed = trailing ? n - 1 : n;
     for (std::size_t i = 0; i < fixed; ++i)
       if (types().kind(f.params[i]) == TypeKind::pack_expansion) return std::nullopt;
-    if (args.size() < fixed || (args.size() > n && !trailing && !f.variadic) || (!trailing && args.size() < n))
+    // Trailing parameters with default arguments need none ([temp.deduct.call]/1: only those with
+    // an argument take part).
+    std::size_t defaulted = 0;
+    if (!trailing) {
+      std::vector<ast::ParamSema> ps = w_->ins.seqs.elements(tmpl.params);
+      while (defaulted < ps.size() && ps[ps.size() - 1 - defaulted].default_arg != ast::NodeId::none) ++defaulted;
+    }
+    const std::size_t least = n - std::min(defaulted, n);
+    if (args.size() < std::min(fixed, least) || (args.size() > n && !trailing && !f.variadic) || (!trailing && args.size() < least))
       return std::nullopt;
     // The explicitly specified arguments are substituted first ([temp.deduct.general]/2); packs
     // stay open, to be extended by deduction ([temp.arg.explicit]/9).
     Bindings given = bindings(depth, out);
     for (auto& a : given.levels[depth])
       if (a && a->kind == TemplateArgKind::pack) a = std::nullopt;
-    for (std::size_t i = 0; i < fixed; ++i) {
+    for (std::size_t i = 0; i < fixed && i < args.size(); ++i) {
       if (!args[i].deducible) continue;
       auto p0 = substitute(tmpl_param_type(tmpl, i), given);
       if (!p0) return std::nullopt;
