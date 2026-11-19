@@ -122,7 +122,9 @@ What is true of the code today. Work in progress and its owners are tracked in
   is §A9's memo-table comparison against a cold `Db` (#19); both fuzzes use it. `unit.engine_inputs`: providers (once per cell under
   contention, durability, failure), the `editor` and `ambient` shortcuts, `reset_unobserved`
   racing readers over 300 rounds, counts per request and per kind. Clean under
-  ASan and UBSan; ThreadSanitizer needs Linux (#105).
+  ASan and UBSan. ThreadSanitizer runs nightly on Linux (`tools/tsan`, `linux-x86_64-tsan`; #105).
+  The deque stores `bottom_` with release, not a release fence, since ThreadSanitizer does not
+  model fences.
 - Not yet: allocation-free waits, per-worker frame free lists and lock-free index reads
   (#104); the cycle report's program-order path note (#106); contextual queries (#16);
   eviction and persistence (#17).
@@ -916,6 +918,26 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   expression unless it can be a declaration ([stmt.ambig]).
 - Tests: `tests/own/casts` (9, three from the review). One more draft example passes.
 
+## `<cstdio>`, step 4b: unions, floating types as types, include directories (#133, 2026-11-18)
+
+- **Unions** ([class.union]): `union U { … }`, named, unnamed with a typedef-name, as members
+  and through `union U` elaborated; every member at offset 0 and the size of the largest
+  (`ClassRec::union_`, `ClassShape::union_`, `QueryLayout::class_layout`); a braced initializer
+  initializes the first member ([dcl.init.aggr]/16), with its default member initializer if it has
+  one; class template unions. A reference member is rejected. A designator naming another member,
+  a default member initializer on another member, anonymous unions and variant members with
+  non-trivial special members are diagnosed as not supported (#203).
+- **Floating types as types:** `float`, `double` and `long double` in decl-specifiers, so the
+  SDK's `typedef long double max_align_t;` declares; `sizeof`/`alignof` give their sizes. Their
+  values (literals, conversions, arithmetic) are #201 and are diagnosed, not miscompiled.
+  `__STDCPP_FLOAT16_T__` and the other extended floating-point macros are no longer defined
+  until those types work (DECISIONS §1.5; Clang does not define them either).
+- **Include directories:** a `-I` or `-isystem` directory that is one of the built-in system
+  directories is searched only at the system directory's place, as GCC and Clang do; before,
+  `-isystem deps/libycxx/include` made libycxx's `<cstddef>` find its own `<stddef.h>` again.
+- A floating local no longer stops constant evaluation in its function (the thunk skips it).
+- Tests: `tests/own/unions` (7, three from the review). Six more draft examples pass.
+
 ## Templates, ζ step 1: function templates (#88, 2026-11-18)
 
 Instantiation follows ast.md §6.4 as amended by #88 (Fable's decision): declarations and
@@ -1038,6 +1060,67 @@ template's tokens again with the arguments bound.
   static data members of class templates, non-type template arguments that are dependent
   expressions other than a parameter (`A<I+5>`), and coalesced definitions of specializations
   used in two units (#124).
+
+## Templates, ζ step 4: parameter packs (#88, 2026-11-18)
+
+*The representation is Fable's decision (ast.md §5.6 and §6.4 amended); the code is the
+session's.*
+
+- **Representation:** a pack parameter's argument is a `pack` `TemplateArg` holding its elements
+  (`elems`, a list; the empty list is list 0 of every interner), one entry per parameter, so a
+  specialization's identity and its Itanium name (`J…E`) keep the grouping. While dependent an
+  element may be an expansion: a type `TPackExpansion` or a value `VDepExpansion`; a function
+  parameter pack's type is a `TPackExpansion` in its function type. `VDepSizeofPack` is
+  `sizeof...(P)` of a template parameter pack.
+- **Declarations:** `class... Ts`, `T... Ns` (a pack of an earlier parameter's type too),
+  `Ts... xs`, `Ts&&... xs` (`T...` without a pack is a C ellipsis), `pattern...` in template
+  argument lists. A class or variable template's pack is last; a function template's is followed
+  only by deduced or defaulted parameters ([temp.param]).
+- **Substitution and deduction** (`ycxx.sema:templates`): `substitute_expansion` expands an
+  expansion in a list (function parameters, template arguments) with each pack bound to its
+  element, failing on packs of different lengths ([temp.variadic]/7). Deduction compares lists
+  with packs' elements in place, a trailing expansion against the rest ([temp.deduct.type]/9);
+  a call's trailing function parameter pack takes the remaining arguments, forwarding references
+  included, after an explicitly specified prefix ([temp.deduct.call]/1, [temp.arg.explicit]/9);
+  a pack neither given nor deduced is empty. Partial ordering treats a function parameter pack's
+  pattern as the parameter for each remaining argument and prefers a template without a
+  trailing pack ([temp.deduct.partial]). Partial specializations match and order through the
+  same list deduction (`Head<List<T, Us...>>`).
+- **Bodies and initializers** (re-analysis, ast.md §6.4): a definition records its expansions
+  (call arguments, braced lists, fold patterns) by their pattern's offset with the packs they
+  name; an instantiation reads each pattern once per element with those packs bound to it (a
+  stack of frames). A function parameter pack is its elements' parameters under one name. Fold
+  expressions of all four forms nest as [temp.variadic] says; an empty one is `true`, `false` or
+  `void()` for `&&`, `||` and `,`. `sizeof...` of a template or function parameter pack. A pack
+  named outside every expansion, an expansion naming no pack, and an empty fold over another
+  operator are diagnosed. A function parameter pack that is not last is not supported yet (#210).
+- **Mangling:** `J…E`, `Dp`, `XspT_E`; checked against Clang's symbols.
+- Tests: `tests/own/templates/p4-*`; 7 more draft examples pass. `<cstdio>`: 161 → 78 errors.
+- Not yet: template template parameters (#208); value-dependent expressions as template
+  arguments, which `__int_pack_double` needs (#209); an expansion for non-pack parameters and
+  per-element notes (#210); alias templates and concepts (#88); built-in type traits
+  (`__is_same`, `__remove_cv`, …) that libycxx's headers use.
+
+## Templates, ζ step 5: alias templates and member aliases (#88, 2026-11-18)
+
+- **Member typedefs and alias-declarations** (#180, item 1): `using T = …;` and `typedef … T;` in
+  a class or class template are types of its scope (`ClassRec.types`, as nested enumerations
+  are): named by later members and member function bodies, as `C::T` outside, and as
+  `typename X<T>::type` through a specialization. In an instantiation, a member is looked up among
+  the specialization's own member records (`AtItem::instantiating`).
+- **Alias templates** at namespace scope ([temp.alias]): `template<…> using A = type-id;`, an
+  `alias_template` entity (scope, name, head). A use `A<args>` (also `N::A<args>`, in
+  nested-name-specifiers and wherever a class template-id may be) is the type it stands for with
+  the arguments substituted, so it has no identity or mangling of its own; packs group as for
+  class templates. `Templates::complete_class` completes a class that substituting
+  `typename X<T>::type` needs, instantiating a specialization.
+- Tests: `tests/own/templates/a5-*`; 2 more draft examples pass. `<cstdio>`: 78 → 53 errors.
+- Also: `C::T` inside the class (being defined or instantiated) and in its out-of-class member
+  definitions names its member type, as the current instantiation's ([temp.dep.type]/1).
+- Not yet: access, hiding and qualified functional casts of member types (#216); member alias
+  templates (`template<…> using __apply = …` in a class), with member
+  templates; template template parameters (#208); value-dependent expressions as template
+  arguments (#209).
 
 ## Bootstrap workarounds
 

@@ -31,13 +31,17 @@ build/bin/ycxx cxx hello.cpp -o hello && ./hello
 ```
 
 **Language.** Programs can use:
-- the fundamental integer and character types, pointers, arrays, references and enumerations;
+- the fundamental integer and character types, pointers, arrays, references and enumerations,
+  and the floating types as types (not yet their values);
   all statements and operators; functions, recursion and overloading;
-- classes: data and static members, member functions, constructors and destructors with RAII,
-  aggregate and designated initialization;
+- classes and unions: data and static members, member functions, constructors and destructors
+  with RAII, aggregate and designated initialization;
 - namespaces, typedefs and alias declarations, `using` declarations and directives;
+- `[[…]]` attributes, and the GNU attributes and `asm` labels the macOS SDK's headers use
+  ([docs/EXTENSIONS.md](docs/EXTENSIONS.md));
 - templates: function, class and variable templates, deduction, partial ordering, explicit and
-  partial specializations, two-phase lookup, with Itanium names identical to Clang's;
+  partial specializations, parameter packs and fold expressions, alias templates, two-phase
+  lookup, with Itanium names identical to Clang's;
 - casts, `sizeof`/`alignof` of non-class types, and `decltype`;
 - constant evaluation on ycxx's own interpreter: `constexpr`, `consteval`, `constinit`,
   `static_assert` and `if consteval`, with errors that explain why something is not constant;
@@ -60,7 +64,7 @@ through the daemon, without unsaved text ever reaching a build.
 
 - The standard library and its headers. `<cstdio>` preprocesses but does not yet pass sema.
 - Inheritance and virtual functions, passing classes by value, `sizeof` of a class.
-- Parameter packs, concepts, member and alias templates, `if constexpr`.
+- Concepts, member templates, template template parameters, `if constexpr`.
 - Floating-point arithmetic, exceptions, and optimization (`-O`).
 - Go-to-definition in the language server.
 - Linux and x86-64 output.

@@ -302,12 +302,15 @@ std::string predefined_text(const ast::Target& t) {
   def("__STDC_HOSTED__", 1);
   def("__STDCPP_DEFAULT_NEW_ALIGNMENT__", std::format("{}UL", 2 * t.pointer_size));
   def("__STDCPP_THREADS__", 1);
-  // [cpp.predefined]/2: the extended floating-point types the target has.
-  if (t.has(Builtin::float16)) def("__STDCPP_FLOAT16_T__", 1);
-  if (t.has(Builtin::float32)) def("__STDCPP_FLOAT32_T__", 1);
-  if (t.has(Builtin::float64)) def("__STDCPP_FLOAT64_T__", 1);
-  if (t.has(Builtin::float128)) def("__STDCPP_FLOAT128_T__", 1);
-  if (t.has(Builtin::bfloat16)) def("__STDCPP_BFLOAT16_T__", 1);
+  // [cpp.predefined]/2: the extended floating-point types the target has, once ycxx supports
+  // floating-point values (#201); until then a header must not take them for available
+  // (DECISIONS §1.5).
+  constexpr bool floating_values = false;
+  if (floating_values && t.has(Builtin::float16)) def("__STDCPP_FLOAT16_T__", 1);
+  if (floating_values && t.has(Builtin::float32)) def("__STDCPP_FLOAT32_T__", 1);
+  if (floating_values && t.has(Builtin::float64)) def("__STDCPP_FLOAT64_T__", 1);
+  if (floating_values && t.has(Builtin::float128)) def("__STDCPP_FLOAT128_T__", 1);
+  if (floating_values && t.has(Builtin::bfloat16)) def("__STDCPP_BFLOAT16_T__", 1);
   for (const FeatureMacro& m : feature_macros) def(m.name, m.value);
   return s + target_macros(t);
 }

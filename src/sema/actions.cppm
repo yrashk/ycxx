@@ -27,6 +27,23 @@ using ast::ExprInfo;
 using ast::NodeId;
 using ast::ValueCategory;
 
+// A pack a pattern names ([temp.variadic]): a template parameter pack by depth and index, or a
+// function parameter pack by name (`fn`).
+struct PackRef {
+  u16 depth = 0;
+  u16 index = 0;
+  NameId fn{};
+  bool operator==(const PackRef&) const = default;
+};
+// A pack expansion of a definition, by the offset of its pattern's first token: the offset just
+// past its pattern, and the packs its pattern names. An instantiation analyses the pattern once
+// per element (ast.md §6.4).
+struct Expansion {
+  u32 begin = 0;
+  u32 end = 0;
+  std::vector<PackRef> packs;
+};
+
 // What sema asks of its context (§B1.4, §B3). In the engine these are `visible_decls(::, name,
 // at item)` and fetches of `decl_sema`.
 class Questions {
@@ -73,6 +90,8 @@ public:
   // template's with the arguments substituted: an explicit specialization's, or a partial
   // specialization's that it is instantiated from ([temp.expl.spec], [temp.spec.partial]).
   virtual std::optional<QualType> specialization_type(EntityId /*v*/) { return std::nullopt; }
+  // In an instantiation: the pack expansions the definition of what it re-analyses recorded.
+  virtual const std::vector<Expansion>* pattern_expansions() { return nullptr; }
   virtual ~Questions() = default;
 };
 
@@ -117,6 +136,9 @@ inline constexpr u8 dependent = 1;
 // Flags of `LocalRec::flags` and `DeclSema::flags`.
 namespace local_flag {
 inline constexpr u16 parameter = 1;
+}
+namespace param_flag {
+inline constexpr u16 pack_element = 1;  // an element of a function parameter pack ([temp.variadic]/8)
 }
 namespace decl_flag {
 inline constexpr u16 definition = 1;
@@ -166,7 +188,10 @@ public:
 
   template <class... A>
   void diag(u32 at, Diag d, const A&... args) {
-    diags_->push_back({engine::Loc{std::to_underlying(item_), loc_base_ + at}, diag_id(d), {arg(args)...}});
+    engine::Diagnostic x{engine::Loc{std::to_underlying(item_), loc_base_ + at}, diag_id(d), {arg(args)...}};
+    // The elements of an expansion say an equal diagnostic once (ast.md §6.4).
+    if (!frames_.empty() && std::ranges::contains(*diags_, x)) return;
+    diags_->push_back(std::move(x));
   }
   std::size_t diag_count() const { return diags_->size(); }
   // Drops the diagnostics after the first `n`: a part analysed again where it was diagnosed already.
@@ -213,7 +238,7 @@ public:
     // A template parameter hides what the enclosing scopes declare ([basic.scope.temp]).
     if (const ast::TemplateParamSema* p = template_param(name)) {
       if (elaborated || p->kind != ast::TemplateArgKind::type) return std::nullopt;
-      if (auto a = template_args.at(p->depth, p->index)) return a->type;
+      if (auto a = bound_arg(*p)) return a->type;
       return p->type;
     }
     // In a class template, its name without arguments is the injected-class-name: the current
@@ -227,7 +252,7 @@ public:
       if (const ClassRec* cr = class_rec(current_class); cr && cr->defined) {
         for (const auto& [n, t] : cr->types)
           if (n == name) return t;
-      } else if (auto m = q_->earlier_member(name); m && m->kind == ast::DeclKind::enum_) {
+      } else if (auto m = q_->earlier_member(name); m && (m->kind == ast::DeclKind::enum_ || m->kind == ast::DeclKind::type_alias)) {
         return m->type;
       }
     }
@@ -280,6 +305,16 @@ public:
   // The class template unqualified lookup finds for `name`, which a `<` after it begins the
   // arguments of ([temp.names]/3); none if it finds anything else.
   std::optional<ast::DeclSema> class_template(NameId name) { return named_template(name, ast::DeclKind::class_); }
+  // A template-name that names a type with its arguments ([temp.names]): a class template, or an
+  // alias template ([temp.alias]).
+  std::optional<ast::DeclSema> type_template(NameId name) {
+    if (auto c = class_template(name)) return c;
+    return named_template(name, ast::DeclKind::type_alias);
+  }
+  std::optional<ast::DeclSema> namespace_type_template(EntityId ns, NameId name) {
+    if (auto c = namespace_class_template(ns, name)) return c;
+    return namespace_template(ns, name, ast::DeclKind::type_alias);
+  }
   // The variable template unqualified lookup finds for `name` ([temp.pre]/1), likewise.
   std::optional<ast::DeclSema> variable_template(NameId name) { return named_template(name, ast::DeclKind::variable); }
   // The template of kind `kind` unqualified lookup finds for `name`, with the default arguments of
@@ -339,10 +374,19 @@ public:
     return templates().specialize_class(templ, args);
   }
 
-  // `X<args>` naming a class template specialization ([temp.names], [temp.arg]).
+  // `X<args>` naming a class template specialization ([temp.names], [temp.arg]), or the type an
+  // alias template specialization stands for: its type with the arguments substituted
+  // ([temp.alias]/2).
   std::optional<QualType> class_template_id(const ast::DeclSema& tmpl, std::span<const TemplateArg> args, u32 at) {
     auto full = template_arguments(tmpl, args, at);
     if (!full) return std::nullopt;
+    if (tmpl.kind == ast::DeclKind::type_alias) {
+      std::vector<ast::TemplateParamSema> params = ins().seqs.elements(tmpl.template_params);
+      auto t = templates().substitute(tmpl.type, Bindings::of(params.empty() ? 0 : params[0].depth, *full));
+      // Past the nesting limit, which was diagnosed, it says nothing more ([temp.inst]/16).
+      if (!t && !q_->instantiation_gave_up()) diag(at, Diag::template_args_mismatch, w_->entities.rec(tmpl.entity).name);
+      return t;
+    }
     return types().class_type(class_specialization(tmpl.entity, *full));
   }
 
@@ -379,30 +423,18 @@ public:
   std::optional<std::vector<TemplateArg>> template_arguments(const ast::DeclSema& tmpl, std::span<const TemplateArg> args, u32 at) {
     std::vector<ast::TemplateParamSema> params = ins().seqs.elements(tmpl.template_params);
     NameId name = w_->entities.rec(tmpl.entity).name;
-    if (args.size() > params.size()) {
-      diag(at, Diag::template_args_mismatch, name);
-      return std::nullopt;
-    }
     Templates t = templates();
-    Bindings given;
-    given.levels.resize(params.empty() ? 1 : params[0].depth + 1);
-    auto& out = given.levels.back();
-    out.resize(params.size());
-    for (std::size_t i = 0; i < args.size(); ++i) {
-      if (args[i].kind != params[i].kind) {
-        diag(at, Diag::template_args_mismatch, name);
+    // An expansion only for a pack parameter: for others it is not supported yet (#88).
+    std::size_t first_pack = std::ranges::find_if(params, [](const ast::TemplateParamSema& p) { return p.pack != 0; }) - params.begin();
+    for (std::size_t i = 0; i < args.size() && i < first_pack; ++i)
+      if (t.is_expansion(args[i])) {
+        diag(at, Diag::not_supported, lex::Tk::ellipsis);
         return std::nullopt;
       }
-      out[i] = args[i];
-      if (params[i].kind == ast::TemplateArgKind::value) {
-        auto pt = t.substitute(params[i].type, given);
-        auto v = pt ? t.converted_value(args[i], *pt) : std::nullopt;
-        if (!v) {
-          diag(at, Diag::template_args_mismatch, name);
-          return std::nullopt;
-        }
-        out[i] = *v;
-      }
+    std::vector<std::optional<TemplateArg>> out(params.size());
+    if (!t.explicit_into(params, args, out)) {
+      diag(at, Diag::template_args_mismatch, name);
+      return std::nullopt;
     }
     auto full = t.complete(tmpl, params, out);
     if (!full) diag(at, Diag::template_args_mismatch, name);
@@ -435,7 +467,7 @@ public:
     if (const ast::TemplateParamSema* p = template_param(n)) {
       if (p->kind != ast::TemplateArgKind::type) return std::nullopt;
       // Bound to a type that has no members, it names no scope ([basic.lookup.qual]/1).
-      if (auto a = template_args.at(p->depth, p->index)) {
+      if (auto a = bound_arg(*p)) {
         if (!types().is_class(a->type) && !types().is_enum(a->type)) return std::nullopt;
         return Scope{std::nullopt, a->type};
       }
@@ -448,9 +480,27 @@ public:
     return std::nullopt;
   }
   // A later component: a namespace or type member of a namespace, or a type nested in a class.
+  // A type member `n` of class `c` ([class.member.lookup], types): from its record where it is
+  // complete, a specialization instantiated for it; or, in the class being defined or
+  // instantiated, among the members declared so far ([basic.scope.class]).
+  std::optional<QualType> member_type(EntityId c, NameId n) {
+    if (const ClassRec* cr = class_rec(c)) {
+      for (const auto& [name, t] : cr->types)
+        if (name == n) return t;
+      return std::nullopt;
+    }
+    if (c == current_class)
+      if (auto m = q_->earlier_member(n); m && (m->kind == ast::DeclKind::enum_ || m->kind == ast::DeclKind::type_alias))
+        return m->type;
+    return std::nullopt;
+  }
+
   std::optional<Scope> scope_member(const Scope& s, NameId n) {
-    // A member of a dependent type is looked up when the template is instantiated
-    // ([temp.dep.type]/7): a dependent type here.
+    // A member of the class whose member-specification this is (the current instantiation in a
+    // template) is found where it is declared ([temp.dep.type]/1); a member of another dependent
+    // type is looked up when the template is instantiated ([temp.dep.type]/7): a dependent type.
+    if (s.type && types().is_class(*s.type) && (!types().is_dependent(*s.type) || types().class_of(*s.type) == current_class))
+      if (auto t = member_type(types().class_of(*s.type), n)) return Scope{std::nullopt, *t};
     if (s.type && types().is_dependent(*s.type)) return Scope{std::nullopt, types().dep_name(*s.type, n)};
     if (s.ns) {
       for (const ast::DeclSema& d : q_->namespace_members(*s.ns, n)) {
@@ -459,10 +509,6 @@ public:
       }
       return std::nullopt;
     }
-    if (s.type && types().is_class(*s.type))
-      if (const ClassRec* cr = class_rec(types().class_of(*s.type)))
-        for (const auto& [name, t] : cr->types)
-          if (name == n) return Scope{std::nullopt, t};
     return std::nullopt;
   }
   // `S::n` naming a type.
@@ -680,9 +726,16 @@ public:
     if (tr.kind == TypeKind::array) {
       r.assign(tr.bound, Element{tr.inner, no_name()});
     } else if (const ClassRec* c = tr.kind == TypeKind::class_ ? class_rec(tr.entity) : nullptr) {
-      for (const FieldRec& f : c->fields) r.push_back({types().add_cv(f.type, Types::cv(t)), f.name, f.init, f.dmi});
+      for (const FieldRec& f : c->fields) {
+        r.push_back({types().add_cv(f.type, Types::cv(t)), f.name, f.init, f.dmi});
+        if (c->union_) break;  // [dcl.init.aggr]/16: a union's list initializes its first member
+      }
     }
     return r;
+  }
+  bool is_union(QualType t) {
+    const ClassRec* c = types().is_class(t) ? class_rec(types().class_of(t)) : nullptr;
+    return c && c->union_;
   }
 
   // Whether initializing a `t` runs a default member initializer.
@@ -834,6 +887,10 @@ public:
         // skipped are initialized as if there were no initializer.
         std::size_t j = i;
         while (j < elems.size() && elems[j].name != c.designator) ++j;
+        if (j == elems.size() && is_union(t) && !elided) {
+          diag(c.begin, Diag::not_supported, lex::Tk::period);  // a union's member other than its first
+          return fail;
+        }
         if (elided || !types().is_class(t) || j == elems.size()) {
           diag(c.begin, Diag::bad_designator, c.designator, Types::unqualified(t));
           return fail;
@@ -1008,15 +1065,192 @@ public:
         if (p.name == name) return &p;  // an unnamed parameter's name is never looked up
     return nullptr;
   }
+  // The argument a template parameter named here stands for: its argument, or for a pack the
+  // element of the innermost expansion naming it ([temp.variadic]/5). A pack outside every
+  // expansion is unexpanded: none, as an unbound parameter is, and noted for the expansion that
+  // must enclose it.
+  std::optional<TemplateArg> bound_arg(const ast::TemplateParamSema& p) {
+    if (p.pack) note_pack({p.depth, p.index, {}});
+    auto a = template_args.at(p.depth, p.index);
+    if (!a || a->kind != ast::TemplateArgKind::pack) return a;
+    for (auto f = frames_.rbegin(); f != frames_.rend(); ++f)
+      if (std::ranges::contains(f->packs, PackRef{p.depth, p.index, {}})) {
+        std::vector<TemplateArg> es = ins().seqs.elements(a->elems);
+        return f->index < es.size() ? std::optional(es[f->index]) : std::nullopt;
+      }
+    return std::nullopt;
+  }
+
+  // ------------------------------------------------------------ packs ([temp.variadic])
+
+  // The packs the operand being read names, for the expansion that may follow it: one list for
+  // each operand being read, innermost last.
+  void begin_pattern() { pattern_packs_.emplace_back(); }
+  // After the operand: the packs it names. With `...` they are recorded as an expansion of the
+  // definition ([temp.variadic]/5); without, they are the enclosing operand's too.
+  // A template argument's expansion is substituted structurally, and not recorded (`record`);
+  // its packs may still be expanded by the declarator it is in, so an unexpanded one is not
+  // diagnosed there. An expression's packs that no enclosing pattern takes are unexpanded
+  // ([temp.variadic]/5).
+  std::vector<PackRef> end_pattern(bool expanded, u32 begin, u32 end, bool record = true) {
+    std::vector<PackRef> packs = std::move(pattern_packs_.back());
+    pattern_packs_.pop_back();
+    if (expanded) {
+      if (record) expansions.push_back({begin, end, packs});
+      return packs;
+    }
+    if (record && pattern_packs_.empty() && frames_.empty() && !packs.empty()) diag(begin, Diag::unexpanded_pack, pack_name(packs[0]));
+    for (const PackRef& r : packs) note_pack(r);
+    return packs;
+  }
+  NameId pack_name(const PackRef& r) {
+    if (r.fn != NameId{}) return r.fn;
+    for (const auto& scope : template_scopes)
+      for (const ast::TemplateParamSema& p : scope)
+        if (p.depth == r.depth && p.index == r.index) return p.name;
+    return no_name();
+  }
+  void note_pack(PackRef r) {
+    if (!pattern_packs_.empty() && !std::ranges::contains(pattern_packs_.back(), r)) pattern_packs_.back().push_back(r);
+  }
+  // Whether this is an instantiation of a definition with expansions: where they are is known.
+  bool expansion_at_any() { return q_->pattern_expansions() != nullptr; }
+  // The expansion of the definition at `begin`, in an instantiation.
+  const Expansion* expansion_at(u32 begin) {
+    if (const std::vector<Expansion>* es = q_->pattern_expansions())
+      for (const Expansion& e : *es)
+        if (e.begin == begin) return &e;
+    return nullptr;
+  }
+  // How many elements an expansion has here: the length of the packs it names, all equal
+  // ([temp.variadic]/7); none while one of them is not bound.
+  std::optional<std::size_t> expansion_length(const Expansion& e, u32 at) {
+    std::optional<std::size_t> n;
+    for (const PackRef& r : e.packs) {
+      std::size_t m = 0;
+      if (r.fn != NameId{}) {
+        auto it = std::ranges::find(param_packs_, r.fn, &ParamPack::name);
+        if (it == param_packs_.end()) return std::nullopt;
+        m = it->locals.size();
+      } else {
+        auto a = template_args.at(r.depth, r.index);
+        if (!a || a->kind != ast::TemplateArgKind::pack) return std::nullopt;
+        m = ins().seqs.size(a->elems);
+      }
+      if (n && *n != m) {
+        diag(at, Diag::pack_length_mismatch);
+        return std::nullopt;
+      }
+      n = m;
+    }
+    return n;
+  }
+  void push_frame(const std::vector<PackRef>& packs, u32 index) { frames_.push_back({packs, index}); }
+  // While a template argument that is itself a pack expansion is read, the enclosing expansions'
+  // elements are not in effect: its packs are expanded whole ([temp.variadic]/5).
+  auto hide_frames() { return std::exchange(frames_, {}); }
+  void restore_frames(auto f) { frames_ = std::move(f); }
+  void pop_frame() { frames_.pop_back(); }
+  bool in_expansion() const { return !frames_.empty(); }
+  // A function parameter pack of the function being instantiated: its name, and its parameters'
+  // locals, one per element ([temp.variadic]/8).
+  void declare_param_pack(NameId name) { param_packs_.push_back({name, {}}); }
+  void declare_pack_element(NameId name, QualType type) {
+    u32 l = declare_local(no_name(), type, local_flag::parameter, 0, false);
+    locals_[l].name = name;
+    auto it = std::ranges::find(param_packs_, name, &ParamPack::name);
+    if (it == param_packs_.end()) {
+      param_packs_.push_back({name, {}});
+      it = param_packs_.end() - 1;
+    }
+    it->locals.push_back(l);
+  }
+  // The local a function parameter pack's name stands for here: its element of the innermost
+  // expansion naming it; none outside every expansion.
+  std::optional<u32> pack_element(NameId name, bool& is_pack) {
+    auto it = std::ranges::find(param_packs_, name, &ParamPack::name);
+    is_pack = it != param_packs_.end();
+    if (!is_pack) return std::nullopt;
+    note_pack({0, 0, name});
+    for (auto f = frames_.rbegin(); f != frames_.rend(); ++f)
+      if (std::ranges::contains(f->packs, PackRef{0, 0, name}))
+        return f->index < it->locals.size() ? std::optional(it->locals[f->index]) : std::nullopt;
+    return std::nullopt;
+  }
+  // `sizeof...(name)` ([expr.sizeof]/5): a template parameter pack's or a function parameter
+  // pack's length, value-dependent until it is bound.
+  Ex sizeof_pack(NameId name, u32 begin, u32 end) {
+    QualType size_t_ = builtin(Builtin::unsigned_long);
+    auto it = std::ranges::find(param_packs_, name, &ParamPack::name);
+    if (it != param_packs_.end()) return literal(size_t_, w_->values.integer(size_t_, it->locals.size()), ValueCategory::prvalue, begin, end);
+    const ast::TemplateParamSema* p = template_param(name);
+    if (!p || !p->pack) {
+      if (is_function_pack_pattern(name)) return dependent_node({}, begin, end, size_t_);
+      diag(begin, Diag::not_a_pack, name);
+      return {NodeId::none, begin, end};
+    }
+    auto a = template_args.at(p->depth, p->index);
+    if (a && a->kind == ast::TemplateArgKind::pack)
+      return literal(size_t_, w_->values.integer(size_t_, ins().seqs.size(a->elems)), ValueCategory::prvalue, begin, end);
+    ConstId v = ins().intern_value(ast::VDepSizeofPack{p->depth, p->index});
+    ExprInfo info{size_t_, ValueCategory::prvalue, expr_flag::dependent};
+    return node(ast::Literal{info, v}, begin, end, info);
+  }
+  // Whether `name` is a function parameter pack of the definition being analysed (its type a pack
+  // expansion), in phase one.
+  bool is_function_pack_pattern(NameId name) {
+    for (std::size_t d = scopes_.size(); d-- > 0;)
+      for (auto p = scopes_[d].rbegin(); p != scopes_[d].rend(); ++p)
+        if (p->first == name) return types().kind(locals_[p->second].type) == TypeKind::pack_expansion;
+    return false;
+  }
+  // The pack expansions this definition has (phase one), for its instantiations.
+  std::vector<Expansion> expansions;
+  // Whether a type or argument names a parameter pack, as a pack expansion's pattern must
+  // ([temp.variadic]/5).
+  bool names_pack(QualType t) { return names_pack(templates().type_arg(t)); }
+  bool names_pack(const TemplateArg& a) {
+    std::vector<std::pair<u16, u16>> refs;
+    templates().params_in(a, refs, false);
+    for (auto [d, i] : refs)
+      for (const auto& scope : template_scopes)
+        for (const ast::TemplateParamSema& p : scope)
+          if (p.depth == d && p.index == i && p.pack) return true;
+    return false;
+  }
+  // `args` with the expansions whose packs are bound here expanded ([temp.variadic]/8); none when
+  // there is none such.
+  std::optional<std::vector<TemplateArg>> expand_bound(std::span<const TemplateArg> args) {
+    Templates t = templates();
+    bool any = false;
+    std::vector<TemplateArg> out;
+    for (const TemplateArg& a : args) {
+      auto n = t.is_expansion(a) ? t.expansion_length(t.pattern_of(a), template_args) : std::nullopt;
+      if (!n || !*n) {
+        out.push_back(a);
+        continue;
+      }
+      auto xs = t.substitute_expansion(a, template_args);
+      if (!xs) return std::nullopt;
+      out.insert(out.end(), xs->begin(), xs->end());
+      any = true;
+    }
+    if (!any) return std::nullopt;
+    return out;
+  }
   // What the cell demands of the program (§B1.4), in program order.
   std::vector<Demand> demands;
 
-  Templates templates() { return Templates(*w_, classes()); }
+  Templates templates() {
+    Templates t(*w_, classes());
+    t.member_type = [this](EntityId c, NameId n) { return member_type(c, n); };
+    return t;
+  }
   bool dependent(const Ex& e) {
     return e.ok() && ((e.info.flags & expr_flag::dependent) || types().is_dependent(e.type()));
   }
   bool dependent(const TemplateArg& a) {
-    return a.kind == ast::TemplateArgKind::type ? types().is_dependent(a.type) : ins().values.is_dependent(a.value);
+    return w_->arg_dependent(a);
   }
   bool any_dependent(std::span<const Ex> es) {
     return std::ranges::any_of(es, [&](const Ex& e) { return dependent(e); });
@@ -1654,6 +1888,15 @@ public:
       for (auto p = scopes_[d].rbegin(); p != scopes_[d].rend(); ++p)
         if (p->first == name) {
           const ast::LocalRec& l = locals_[p->second];
+          // A function parameter pack of the definition: its uses are expanded ([temp.variadic]).
+          if (types().kind(l.type) == TypeKind::pack_expansion) {
+            if (pattern_packs_.empty()) {
+              diag(begin, Diag::unexpanded_pack, name);  // [temp.variadic]/5: outside every expansion
+              return {NodeId::none, begin, end};
+            }
+            note_pack({0, 0, name});
+            return dependent_node({}, begin, end);
+          }
           ExprInfo info{types().referee(l.type), ValueCategory::lvalue, 0};  // [expr.type]: a reference names its object
           return node(ast::LocalRef{info, p->second}, begin, end, info);
         }
@@ -1666,6 +1909,17 @@ public:
         if (u.depth == d && u.name == name) used.insert(used.end(), u.decls.begin(), u.decls.end());
       if (!used.empty()) return decls_expr(std::move(used), true, name, begin, end, callee, true);
     }
+    // A function parameter pack of an instantiation, unless a block declares the name: its element
+    // ([temp.variadic]/8).
+    bool is_pack = false;
+    if (auto l = pack_element(name, is_pack)) {
+      ExprInfo info{types().referee(locals_[*l].type), ValueCategory::lvalue, 0};
+      return node(ast::LocalRef{info, *l}, begin, end, info);
+    }
+    if (is_pack) {
+      diag(begin, Diag::unexpanded_pack, name);
+      return {NodeId::none, begin, end};
+    }
     // Enumerators a `using enum` brought into a block scope ([enum.udecl]).
     for (auto u = using_enums_.rbegin(); u != using_enums_.rend(); ++u)
       if (auto r = find_enumerator(u->second, name, begin, end)) return *r;
@@ -1676,7 +1930,11 @@ public:
         diag(begin, Diag::expected_expression);
         return {NodeId::none, begin, end};
       }
-      if (auto a = template_args.at(p->depth, p->index))
+      if (p->pack && pattern_packs_.empty() && frames_.empty()) {
+        diag(begin, Diag::unexpanded_pack, name);  // [temp.variadic]/5: outside every expansion
+        return {NodeId::none, begin, end};
+      }
+      if (auto a = bound_arg(*p))
         return literal(Types::unqualified(a->type), a->value, ValueCategory::prvalue, begin, end);
       ConstId v = ins().intern_value(ast::VDepParam{p->depth, p->index});
       ExprInfo info{Types::unqualified(p->type), ValueCategory::prvalue, expr_flag::dependent};
@@ -2718,6 +2976,20 @@ private:
   ast::ItemId item_;
   u32 loc_base_;
   std::vector<ast::LocalRec> locals_;
+  // Packs ([temp.variadic]): the expansions being instantiated, innermost last, each with the
+  // element its pattern is read for; the packs each operand being read names; and the function
+  // parameter packs of the function being instantiated.
+  struct Frame {
+    std::vector<PackRef> packs;
+    u32 index;
+  };
+  std::vector<Frame> frames_;
+  std::vector<std::vector<PackRef>> pattern_packs_;
+  struct ParamPack {
+    NameId name;
+    std::vector<u32> locals;
+  };
+  std::vector<ParamPack> param_packs_;
   std::vector<std::optional<ConstId>> local_values_;  // by local
   std::set<u32> consteval_;                           // consteval functions named so far
   std::map<u32, std::vector<Ex>> list_elems_;         // by draft InitList

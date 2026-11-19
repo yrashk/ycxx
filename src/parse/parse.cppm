@@ -137,6 +137,14 @@ public:
   // item that does not enclose `item`.
   // A function body inside the class is a complete-class context ([class.mem.general]); past
   // the closing brace of the class an item defines (`own`), that class is complete too.
+  // Whether the class item `item` is a union: its class-head's class-key ([class.union]), the
+  // last one before the brace (a template-head's `class T` comes earlier).
+  bool class_rec_is_union(u32 item) const {
+    for (u32 t = items_->items[item].brace_begin; t-- > items_->items[item].begin;)
+      if (lex::Tk k = r_->tokens[t].kind; k == lex::Tk::kw_union || k == lex::Tk::kw_struct || k == lex::Tk::kw_class)
+        return k == lex::Tk::kw_union;
+    return false;
+  }
   // An entity's GNU asm label: its symbol as written (docs/EXTENSIONS.md); empty if it has none.
   std::string asm_label(EntityId e) const {
     auto it = asm_labels_.find(std::to_underlying(e));
@@ -580,7 +588,37 @@ public:
   std::span<const EntityId> required() const { return required_; }
   // The calls of a template's body that were dependent at its definition, by the template's item
   // ([temp.dep.candidate]); its instantiations add argument-dependent lookup to them.
-  std::map<u32, std::vector<u32>> dependent_calls_;
+  // Whether a call of the templated body of `item` at `offset` was dependent, read from the
+  // body's analysis (ast.md §6.4).
+  bool dependent_call(u32 item, u32 offset) {
+    const ast::BodySema& b = analyze_body(item).value;
+    for (u32 o : w_->ins.seqs.elements(b.dependent_calls))
+      if (o == offset) return true;
+    return false;
+  }
+  // The pack expansions of a templated definition's part (0 its declaration part, 1 its body), read
+  // from that part's analysis (ast.md §6.4), for the instantiations that read their patterns once
+  // per element. A cache of the values.
+  const std::vector<sema::Expansion>* expansions(u32 item, u32 part) {
+    auto key = std::pair(item, part);
+    if (auto it = expansions_.find(key); it != expansions_.end()) return it->second.empty() ? nullptr : &it->second;
+    ast::SeqId<ast::ExpansionRec> list = part == 0 ? item_sema(item).value.expansions : analyze_body(item).value.expansions;
+    std::vector<sema::Expansion> out;
+    for (const ast::ExpansionRec& e : w_->ins.seqs.elements(list)) {
+      sema::Expansion x{e.begin, e.end, {}};
+      for (const ast::PackRefRec& r : w_->ins.seqs.elements(e.packs)) x.packs.push_back({r.depth, r.index, r.fn});
+      out.push_back(std::move(x));
+    }
+    auto& v = expansions_[key] = std::move(out);
+    return v.empty() ? nullptr : &v;
+  }
+  // Whether the body of `item` is a template's definition or a member of one: a pattern.
+  bool templated_body(u32 item) {
+    const ast::ItemSema& is = item_sema(item).value;
+    bool templ = w_->ins.seqs.size(is.decls) > 0 && w_->ins.seqs.size(w_->ins.seqs.at(is.decls, 0).template_params) > 0;
+    return templ || !enclosing_heads(item).empty();
+  }
+  std::map<std::pair<u32, u32>, std::vector<sema::Expansion>> expansions_;
   u32 end() const { return static_cast<u32>(items_->items.size()); }
   const u32 instantiation_limit;  // [temp.inst]/16 ([implimits]: at least 1024)
   bool instantiation_gave_up() const { return depth_reported_; }
@@ -827,13 +865,18 @@ public:
   std::optional<ConstId> constant_value(EntityId v) override { return p_->constant_value(v, point()); }
   bool instantiation_gave_up() override { return p_->instantiation_gave_up(); }
   std::optional<QualType> specialization_type(EntityId v) override { return p_->specialization_type(v, point()); }
+  const std::vector<sema::Expansion>* pattern_expansions() override { return at_point ? p_->expansions(item_, 0) : nullptr; }
   std::optional<ast::DeclSema> earlier_member(ast::NameId name) override {
     const items::Item& it = p_->items().items[item_];
     if (it.parent == items::none || p_->items().items[it.parent].kind != ItemKind::class_def) return std::nullopt;
     std::optional<ast::DeclSema> r;
     for (u32 m : p_->items().items[it.parent].members) {
       if (m == item_) break;
-      for (const ast::DeclSema& d : p_->world().ins.seqs.elements(p_->item_sema(m).value.decls))
+      // In a class template's instantiation, the specialization's own records of its members.
+      const ast::ItemSema& ms = instantiating != EntityId::none && p_->items().items[m].kind != ItemKind::access_spec
+                                    ? p_->class_member_sema(m, instantiating)
+                                    : p_->item_sema(m).value;
+      for (const ast::DeclSema& d : p_->world().ins.seqs.elements(ms.decls))
         if (d.entity != EntityId::none && d.kind != ast::DeclKind::class_ && p_->world().entities.rec(d.entity).name == name)
           r = d;
     }
@@ -844,6 +887,7 @@ public:
   // In a class template's instantiation (#88): completeness and constant evaluation are answered
   // at its point of instantiation ([temp.point]); lookup stays at the item.
   std::optional<u32> at_point;
+  EntityId instantiating = EntityId::none;  // the class specialization whose member this is
 
 private:
   u32 point() const { return at_point ? *at_point : item_; }
@@ -880,9 +924,9 @@ public:
   std::optional<ast::DeclSema> earlier_member(ast::NameId) override { return std::nullopt; }
   bool instantiation_gave_up() override { return p_->instantiation_gave_up(); }
   std::optional<QualType> specialization_type(EntityId v) override { return p_->specialization_type(v, p_->end()); }
+  const std::vector<sema::Expansion>* pattern_expansions() override { return p_->expansions(item_, 1); }
   bool dependent_call(sema::u32 offset) override {
-    auto it = p_->dependent_calls_.find(item_);
-    return it != p_->dependent_calls_.end() && std::ranges::contains(it->second, offset);
+    return p_->dependent_call(item_, offset);
   }
   // [basic.lookup.argdep]/4: the namespace's own members, using-directives ignored.
   std::vector<ast::DeclSema> members_at_instantiation(EntityId ns, ast::NameId name) override {
@@ -901,6 +945,17 @@ private:
 };
 
 // ---------------------------------------------------------------- item_sema
+
+// A part's pack expansions as the records its value keeps (ast.md §6.4).
+ast::SeqId<ast::ExpansionRec> expansion_list(ast::Builder& b, const std::vector<sema::Expansion>& es) {
+  std::vector<ast::ExpansionRec> out;
+  for (const sema::Expansion& e : es) {
+    std::vector<ast::PackRefRec> packs;
+    for (const sema::PackRef& r : e.packs) packs.push_back({r.depth, r.index, r.fn});
+    out.push_back({e.begin, e.end, b.seq(std::span<const ast::PackRefRec>(packs))});
+  }
+  return b.seq(std::span<const ast::ExpansionRec>(out));
+}
 
 // [dcl.link]: the language linkage a linkage-specification's string names.
 std::optional<LangLinkage> linkage_named(const pp::Region& r, u32 tok) {
@@ -921,7 +976,10 @@ public:
         s_(p.world(), b_, q_, out_.diags, p.id(item), 0),
         ps_(p.region(), it_->begin, it_->begin + it_->decl_length(), s_), inst_(std::move(inst)) {
     ps_.set_questions(q_);
-    if (inst_) q_.at_point = inst_->point;
+    if (inst_) {
+      q_.at_point = inst_->point;
+      q_.instantiating = inst_->spec;
+    }
     // A member of a class template is in the scope of the template's head ([basic.scope.temp]).
     for (auto& head : p_->enclosing_heads(item)) s_.template_scopes.push_back(std::move(head));
     if (inst_) s_.template_args = inst_->args;
@@ -956,8 +1014,14 @@ public:
     bool member = it_->parent != items::none && p_->items().items[it_->parent].kind == ItemKind::class_def;
     switch (it_->kind) {
     case ItemKind::empty:
-    case ItemKind::access_spec:
-    case ItemKind::linkage_block: break;  // its members are items of their own
+    case ItemKind::access_spec: break;
+    case ItemKind::stray:  // a `}` that closes nothing ([gram]: no declaration begins with it)
+      s_.diag(0, Diag::extraneous_brace);
+      bad();
+      break;
+    case ItemKind::linkage_block:  // its members are items of their own
+      braces_closed();
+      break;
     case ItemKind::declaration:
       if (member) member_declaration();
       else declaration();
@@ -989,7 +1053,8 @@ public:
       for (const Ex& d : declarators_) cs.push_back(sema::Sema::at(d, 0));
       root = s_.node(ast::DeclGroup{b_.list(cs)}, 0, it_->decl_length()).id;
     }
-    ast::ItemSema v{root, b_.seq(std::span<const ast::DeclSema>(decls_))};
+    std::vector<sema::Expansion> none;
+    ast::ItemSema v{root, b_.seq(std::span<const ast::DeclSema>(decls_)), expansion_list(b_, inst_ || var_ ? none : s_.expansions)};
     out_.value = b_.commit(v);
     out_.demands = std::move(s_.demands);
     return std::move(out_);
@@ -1083,6 +1148,19 @@ private:
         ast::DeclSema sem = class_template_decl(name, false);
         decls_.push_back(sem);
         p_->declared(sem, k_);
+        return;
+      }
+      // `template<…> using N = type-id;` declares an alias template ([temp.alias]).
+      if (ps_.is(Tk::kw_using) && ps_.kind(1) == Tk::identifier && ps_.kind(ps_.past_attributes(2)) == Tk::equal) {
+        ps_.bump();
+        NameId name = ps_.name_of(ps_.tok());
+        u32 name_at = ps_.pos();
+        ps_.bump();
+        ps_.skip_attributes();
+        ps_.bump();
+        auto t = ps_.type_id();
+        if (!t || !alias_template(name, name_at, *t)) return bad();
+        if (!ps_.expect(Tk::semi)) bad();
         return;
       }
       // `template<…> struct X<args>;` declares a partial specialization ([temp.spec.partial]).
@@ -1414,10 +1492,7 @@ private:
       s_.diag(at, Diag::partial_not_deducible, name);
       return std::nullopt;
     }
-    std::vector<ast::TemplateArg> primary;
-    for (const ast::TemplateParamSema& p : params)
-      primary.push_back(p.kind == ast::TemplateArgKind::type ? t.type_arg(p.type)
-                                                             : t.value_arg(p.type, s_.world().ins.intern_value(ast::VDepParam{p.depth, p.index})));
+    std::vector<ast::TemplateArg> primary = t.own_args(params);
     if (!t.more_specialized_partial(head, *full, params, primary)) {
       s_.diag(at, Diag::partial_not_more_specialized, name);
       return std::nullopt;
@@ -1462,7 +1537,9 @@ private:
     p_->current_instantiation(pattern, k_, sem);
     ps_.seek(it_->brace_end);
     q_.own_class_complete = true;
-    if (!ps_.accept(Tk::semi)) {
+    if (ps_.at_end()) {
+      ps_.expect(Tk::semi);  // the `;` is missing ([class.pre]/1)
+    } else if (!ps_.accept(Tk::semi)) {
       s_.diag(ps_.pos(), Diag::not_supported, ps_.kind());  // declarators after a partial specialization
       bad();
     }
@@ -1532,6 +1609,39 @@ private:
     }
   }
 
+  // An alias template ([temp.alias]): its entity is (scope, name, head); a use of it is the type it
+  // stands for with the arguments substituted (`Sema::class_template_id`). It is the only
+  // declaration of its name in the namespace ([temp.alias]/1, [basic.scope.scope]).
+  bool alias_template(NameId name, u32 at, QualType type) {
+    const std::vector<ast::TemplateParamSema>& head = s_.template_scopes.back();
+    if (!pack_last(head)) {
+      s_.diag(0, Diag::pack_not_last);
+      return false;
+    }
+    for (DeclId p : q_.visible_decls(name))
+      if (auto ds = p_->decl_sema(p); ds && ds->entity != EntityId::none && same_scope(*ds)) {
+        s_.diag(at, Diag::conflicting_declaration, name);
+        return false;
+      }
+    sema::EntityRec e{sema::EntityKind::alias_template, name, {}, LangLinkage::cxx, ast::Linkage::none, {}, ns_entity()};
+    e.head = head_fp(head);
+    ast::DeclSema sem = class_decl(s_.world().entities.entity(e), false);
+    sem.kind = ast::DeclKind::type_alias;
+    sem.type = type;
+    sem.linkage = ast::Linkage::none;
+    sem.flags = sema::decl_flag::template_;
+    sem.template_params = b_.seq(std::span<const ast::TemplateParamSema>(head));
+    decls_.push_back(sem);
+    s_.own.push_back({name, sem});
+    p_->declared(sem, k_);
+    return true;
+  }
+  // Whether a template-head's pack, if any, is its last parameter ([temp.param]).
+  static bool pack_last(std::span<const ast::TemplateParamSema> head) {
+    for (std::size_t i = 0; i + 1 < head.size(); ++i)
+      if (head[i].pack) return false;
+    return true;
+  }
   // A class template's definition ([temp.class]): the template's entity, (scope, name, head), and
   // as its type the current instantiation `X<T…>` ([temp.dep.type]), whose class its members are.
   ast::DeclSema class_template_decl(NameId name, bool definition = true) {
@@ -1540,21 +1650,17 @@ private:
     // argument have default arguments.
     bool defaulted = false;
     for (const ast::TemplateParamSema& p : head) {
-      if (defaulted && !p.has_default) {
+      if (defaulted && !p.has_default && !p.pack) {
         s_.diag(0, Diag::default_not_last);
         break;
       }
       defaulted = defaulted || p.has_default;
     }
+    if (!pack_last(head)) s_.diag(0, Diag::pack_not_last);
     sema::EntityRec t{sema::EntityKind::class_template, name, {}, LangLinkage::cxx, ast::Linkage::external, {}, ns_entity()};
     t.head = head_fp(head);
     EntityId templ = s_.world().entities.entity(t);
-    std::vector<ast::TemplateArg> own;
-    sema::Templates tt(s_.world(), p_->classes_);
-    for (const ast::TemplateParamSema& p : head)
-      own.push_back(p.kind == ast::TemplateArgKind::type
-                        ? tt.type_arg(p.type)
-                        : tt.value_arg(p.type, s_.world().ins.intern_value(ast::VDepParam{p.depth, p.index})));
+    std::vector<ast::TemplateArg> own = sema::Templates(s_.world(), p_->classes_).own_args(head);
     // Another declaration of a class template of the name in this scope: the same template, which
     // gives each default argument once ([temp.param]/12); a different head declares another
     // template of one name, which [temp.pre]/7 forbids.
@@ -1620,8 +1726,8 @@ private:
     ps_.skip_attributes();
     bool td = ps_.accept(Tk::kw_typedef);  // `typedef class-specifier declarators;` ([dcl.typedef])
     Tk key = ps_.kind();
-    if (key == Tk::kw_union || (key != Tk::kw_struct && key != Tk::kw_class)) {
-      s_.diag(ps_.pos(), Diag::not_supported, key);  // unions, and other specifiers before the class-key
+    if (key != Tk::kw_struct && key != Tk::kw_class && key != Tk::kw_union) {
+      s_.diag(ps_.pos(), Diag::not_supported, key);  // other specifiers before the class-key
       return bad();
     }
     ps_.bump();
@@ -1661,6 +1767,10 @@ private:
     ps_.seek(it_->brace_end);
     q_.own_class_complete = true;
     if (ps_.accept(Tk::semi)) return;
+    if (ps_.at_end()) {  // the `;` is missing; the definition stands ([class.pre]/1)
+      ps_.expect(Tk::semi);
+      return;
+    }
     DeclSpec spec;
     spec.begin = at;
     spec.type = sem.type;
@@ -1750,6 +1860,7 @@ private:
       NameId en = ps_.name_of(ps_.tok());
       u32 en_at = ps_.pos();
       ps_.bump();
+      ps_.skip_attributes();  // an enumerator's attribute-specifier-seq ([dcl.enum]/1)
       std::int64_t value = next;
       if (!ps_.is(Tk::equal) && fixed && !values.empty()) {
         // An implicit value must fit the fixed type too.
@@ -1796,7 +1907,11 @@ private:
       decls_.push_back(xs);
       xs.type = prev_type;  // inside the list
       s_.own.push_back({en, xs});
-      if (!ps_.accept(Tk::comma)) break;
+      if (!ps_.accept(Tk::comma)) {
+        // [dcl.enum]/1: the enumerator-list is comma-separated.
+        if (!ps_.is(Tk::r_brace) && !ps_.at_end()) s_.diag(ps_.pos(), Diag::expected_token, Tk::comma);
+        break;
+      }
     }
     // [dcl.enum]/7: without a fixed type, the type holds every value, and is no larger than int
     // unless a value fits neither int nor unsigned int.
@@ -1820,6 +1935,12 @@ private:
     p_->classes_.publish_enum(e, std::move(er));
     ps_.seek(it_->brace_end);
     if (ps_.accept(Tk::semi)) return;
+    // The item ended at the brace: the `;` is missing, and the definition stands
+    // ([class.pre]/1, [dcl.enum]/1).
+    if (ps_.at_end()) {
+      ps_.expect(Tk::semi);
+      return;
+    }
     DeclSpec spec;
     spec.begin = at;
     spec.type = t;
@@ -1844,9 +1965,28 @@ private:
     ast::DeclSema c = class_decl(ce, true);
     s_.current_class = ce;  // names in a member declaration are looked up in the class first
     if (ps_.accept(Tk::semi)) return;
+    // An access-specifier missing its `:` ([class.access.spec]/1).
+    if ((ps_.is(Tk::kw_public) || ps_.is(Tk::kw_protected) || ps_.is(Tk::kw_private)) && ps_.kind(1) != Tk::colon) {
+      ps_.bump();
+      ps_.expect(Tk::colon);
+      return bad();
+    }
     // A constructor or destructor ([class.ctor], [class.dtor]): the class's name, or `~` and it,
     // then a parameter list.
     NameId cname = p_->world().entities.rec(ce).name;
+    // A member alias-declaration ([class.mem], [dcl.typedef]/2): a type nested in the class.
+    if (ps_.is(Tk::kw_using) && ps_.kind(1) == Tk::identifier && ps_.kind(ps_.past_attributes(2)) == Tk::equal) {
+      ps_.bump();
+      NameId n = ps_.name_of(ps_.tok());
+      u32 at = ps_.pos();
+      ps_.bump();
+      ps_.skip_attributes();
+      ps_.bump();
+      auto t = ps_.type_id();
+      if (!t || !member_alias(c, n, at, *t)) return bad();
+      if (!ps_.expect(Tk::semi)) bad();
+      return;
+    }
     bool dtor = ps_.is(Tk::tilde) && ps_.kind(1) == Tk::identifier && ps_.name_of(ps_.tok(1)) == cname;
     if (dtor || (ps_.is(Tk::identifier) && ps_.kind(1) == Tk::l_paren && ps_.name_of(ps_.tok()) == cname))
       return special_member(c, !dtor);
@@ -1866,6 +2006,15 @@ private:
     if (spec.elaborated && ps_.is(Tk::semi)) {
       s_.diag(spec.begin, Diag::not_supported, Tk::kw_struct);  // a member class declaration
       return bad();
+    }
+    // A member typedef ([class.mem], [dcl.typedef]): each declarator a type nested in the class.
+    if (spec.is_typedef) {
+      do {
+        parse::Declarator d = ps_.declarator(spec.type, false);
+        if (!d.ok || !d.named || d.qualified || !member_alias(c, d.name, d.name_at, d.type)) return bad();
+      } while (ps_.accept(Tk::comma));
+      if (!ps_.expect(Tk::semi)) bad();
+      return;
     }
     sema::Types& types = s_.types();
     do {
@@ -1911,6 +2060,7 @@ private:
         return bad();
       }
       if (!s_.require_complete(d.type, d.name_at)) return bad();
+      if (p_->class_rec_is_union(it_->parent) && !variant_member(d)) return bad();
       if (member_declared(d.name)) {
         s_.diag(d.name_at, Diag::redeclared_member, d.name);
         return bad();
@@ -1947,6 +2097,34 @@ private:
       decls_.push_back(sem);
     } while (ps_.accept(Tk::comma));
     if (!ps_.expect(Tk::semi)) bad();
+  }
+
+  // A typedef-name or alias-declaration that is a member of class `c` ([class.mem],
+  // [dcl.typedef]): a type of the class's scope, `C::name` outside it.
+  bool member_alias(const ast::DeclSema& c, NameId name, u32 at, QualType type) {
+    // [temp.local]/6: not a template parameter's name; [class.mem.general]: not the class's.
+    if (s_.template_param(name)) {
+      s_.diag(at, Diag::redeclared_local, name);
+      return false;
+    }
+    if (name == s_.world().entities.rec(c.entity).name) {
+      s_.diag(at, Diag::member_named_as_class, name);
+      return false;
+    }
+    if (member_declared(name)) {
+      s_.diag(at, Diag::redeclared_member, name);
+      return false;
+    }
+    ast::DeclSema sem = class_decl(s_.world().entities.entity({sema::EntityKind::type_alias, name, {}, LangLinkage::cxx,
+                                                                 ast::Linkage::none, {}, c.entity}),
+                                   false);
+    sem.kind = ast::DeclKind::type_alias;
+    sem.type = type;
+    sem.linkage = ast::Linkage::none;
+    sem.flags = sema::decl_flag::member;
+    decls_.push_back(sem);
+    s_.own.push_back({name, sem});
+    return true;
   }
 
   // Whether the item's "body" is `= delete` ([dcl.fct.def.delete]).
@@ -2016,7 +2194,7 @@ private:
     sem.flags |= sema::decl_flag::definition;
     sem.attributes = b_.seq(std::span<const NodeId>{});
     std::vector<ast::ParamSema> params;
-    for (const parse::Param& p : fs.params) params.push_back({EntityId::none, p.type, p.name, NodeId::none, 0});
+    for (const parse::Param& p : fs.params) params.push_back({EntityId::none, p.type, p.name, NodeId::none, p.element ? sema::param_flag::pack_element : u16(0)});
     sem.params = b_.seq(std::span<const ast::ParamSema>(params));
     // A class template's constructor or destructor defined outside it: the head is its body's.
     if (template_) sem.template_params = b_.seq(std::span<const ast::TemplateParamSema>(s_.template_scopes.front()));
@@ -2026,7 +2204,24 @@ private:
   }
 
   // `namespace N { … }` ([namespace.def]): the namespace its members belong to.
+  // A namespace's or linkage block's `}` ([namespace.def], [dcl.link]): the splitter cut the item
+  // at the end of the file without one.
+  void braces_closed() {
+    const pp::Region& r = p_->region();
+    if (it_->brace_end <= it_->brace_begin) return;
+    int depth = 0;
+    for (u32 t = it_->brace_begin; t < it_->brace_end; ++t) {
+      Tk k = r.tokens[t].kind;
+      depth += k == Tk::l_brace ? 1 : k == Tk::r_brace ? -1 : 0;
+    }
+    if (depth > 0) {
+      ps_.seek(it_->brace_end);
+      ps_.expect(Tk::r_brace);
+    }
+  }
+
   void namespace_definition() {
+    braces_closed();
     if (it_->names.empty()) return;  // an unnamed namespace declares no name
     // [basic.scope.scope]/4, [namespace.def]: a namespace name names nothing else in its scope.
     NameId name = p_->world().ins.names.intern(it_->names.back().name);
@@ -2076,7 +2271,7 @@ private:
     sem.linkage = ast::Linkage::external;
     sem.flags = flags;
     std::vector<ast::ParamSema> params;
-    for (const parse::Param& p : fs.params) params.push_back({EntityId::none, p.type, p.name, NodeId::none, 0});
+    for (const parse::Param& p : fs.params) params.push_back({EntityId::none, p.type, p.name, NodeId::none, p.element ? sema::param_flag::pack_element : u16(0)});
     sem.params = b_.seq(std::span<const ast::ParamSema>(params));
     sem.entity = s_.world().entities.entity({ctor ? sema::EntityKind::constructor : sema::EntityKind::destructor, name, type,
                                             LangLinkage::cxx, ast::Linkage::external, {}, c.entity});
@@ -2117,6 +2312,15 @@ private:
       s_.diag(d.qualifier_at, Diag::not_supported, Tk::kw_template);
       return false;
     }
+    // `typename C<U>::T` in the definition names the class's own member type T ([temp.dep.type]/1).
+    EntityId cls = s_.types().class_of(*t);
+    QualType own = s_.templates().resolve_dep_names(sem.type, [&](QualType q, NameId n) -> std::optional<QualType> {
+      if (!s_.types().is_class(q) || s_.types().class_of(q) != cls) return std::nullopt;
+      for (const auto& [name, mt] : cr->types)
+        if (name == n) return mt;
+      return std::nullopt;
+    });
+    if (s_.types().canonical(own) != s_.types().canonical(sem.type)) sem.type = own;
     const sema::MemberDeclRec* m = nullptr;
     for (const sema::MemberDeclRec& r : cr->members)
       if (r.name == d.name && r.is_function == fn && s_.types().canonical(r.type) == s_.types().canonical(sem.type)) m = &r;
@@ -2204,7 +2408,7 @@ private:
       if (is_def) flags |= sema::decl_flag::definition;
       if (r.variadic) flags |= sema::decl_flag::variadic;
       std::vector<ast::ParamSema> params;
-      for (const parse::Param& p : d.params) params.push_back({EntityId::none, p.type, p.name, NodeId::none, 0});
+      for (const parse::Param& p : d.params) params.push_back({EntityId::none, p.type, p.name, NodeId::none, p.element ? sema::param_flag::pack_element : u16(0)});
       sem.params = b_.seq(std::span<const ast::ParamSema>(params));
       sem.entity = s_.world().entities.entity(
           {sema::EntityKind::function, d.name, d.type, LangLinkage::cxx, ast::Linkage::external, {}, c.entity});
@@ -2249,6 +2453,36 @@ private:
   // ([class.mem.general]: a member is declared once).
   // A member function `function` (its type) clashes only with a member that is not a function or
   // one of the same type ([class.mem.general]/5, [over.load]).
+  // A union's member ([class.union.general]): no reference (/2). Variant members whose class has
+  // non-trivial special members or default member initializers (which make the union's deleted,
+  // /3), and a default member initializer on a member other than the first, are not supported
+  // yet.
+  bool variant_member(const parse::Declarator& d) {
+    sema::Types& types = s_.types();
+    if (types.is_reference(d.type)) {
+      s_.diag(d.name_at, Diag::union_reference, d.name);
+      return false;
+    }
+    QualType et = d.type;
+    while (types.is_array(et)) et = types.rec(et).inner;
+    if (s_.has_member_inits(et) || s_.destructor_of(et) != EntityId::none || q_.classes().copy_of(et).first) {
+      s_.diag(d.name_at, Diag::not_supported, Tk::kw_union);
+      return false;
+    }
+    bool earlier = std::ranges::any_of(s_.own, [](const auto& o) { return o.sema.kind == ast::DeclKind::data_member; });
+    for (u32 m : p_->items().items[it_->parent].members) {
+      if (m == k_ || earlier) break;
+      for (const ast::DeclSema& o : p_->world().ins.seqs.elements(earlier_sema(m).decls))
+        earlier = earlier || o.kind == ast::DeclKind::data_member;
+    }
+    if (earlier && (ps_.is(Tk::equal) || ps_.is(Tk::l_brace))) {
+      s_.diag(ps_.pos(), Diag::not_supported, Tk::equal);
+      return false;
+    }
+    return true;
+  }
+  const ast::ItemSema& earlier_sema(u32 m) { return earlier(m); }
+
   bool member_declared(NameId n, std::optional<QualType> function = std::nullopt) {
     auto clash = [&](const ast::DeclSema& d) {
       if (!function || d.kind != ast::DeclKind::function) return true;
@@ -2435,7 +2669,7 @@ private:
         if (lang == LangLinkage::c) flags |= sema::decl_flag::lang_c;
         if (r.variadic) flags |= sema::decl_flag::variadic;
         std::vector<ast::ParamSema> params;
-        for (const parse::Param& p : d.params) params.push_back({EntityId::none, p.type, p.name, NodeId::none, 0});
+        for (const parse::Param& p : d.params) params.push_back({EntityId::none, p.type, p.name, NodeId::none, p.element ? sema::param_flag::pack_element : u16(0)});
         sem.params = b_.seq(std::span<const ast::ParamSema>(params));
       } else {
         sem.params = b_.seq(std::span<const ast::ParamSema>{});
@@ -2451,16 +2685,7 @@ private:
           return false;
         }
         const std::vector<ast::TemplateParamSema>& head = s_.template_scopes.front();
-        bool current = c.args.size() == head.size();
-        for (std::size_t i = 0; current && i < head.size(); ++i) {
-          const ast::TemplateArg& a = c.args[i];
-          sema::TypeRec r = types.rec(a.type);
-          current = a.kind == ast::TemplateArgKind::type
-                        ? r.kind == sema::TypeKind::template_param && r.depth == 0 && r.index == i
-                        : s_.world().ins.values.is<ast::VDepParam>(a.value) &&
-                              s_.world().ins.values.get<ast::VDepParam>(a.value).depth == 0 &&
-                              s_.world().ins.values.get<ast::VDepParam>(a.value).index == i;
-        }
+        bool current = c.args == s_.templates().own_args(head);
         // Or a partial specialization's pattern, whose members are its own ([temp.spec.partial.member]).
         if (!current && !p_->partial_pattern(s_.types().class_of(*d.scope.type), k_)) {
           s_.diag(d.qualifier_at, Diag::template_args_mismatch, c.name);
@@ -2483,6 +2708,34 @@ private:
           }
         sem.template_params = b_.seq(std::span<const ast::TemplateParamSema>(s_.template_scopes.front()));
         flags |= sema::decl_flag::template_;
+        // [temp.param]: a variable template's pack is last; a function template's is followed only
+        // by parameters with a default or deduced from its parameter-type-list.
+        const std::vector<ast::TemplateParamSema>& head = s_.template_scopes.front();
+        if (!fn && !pack_last(head)) {
+          s_.diag(0, Diag::pack_not_last);
+          return false;
+        }
+        // A function parameter pack that is not last is not supported yet (#88).
+        if (fn) {
+          const std::vector<QualType>& ps = types.rec(sem.type).params;
+          for (std::size_t i = 0; i + 1 < ps.size(); ++i)
+            if (types.kind(ps[i]) == sema::TypeKind::pack_expansion) {
+              s_.diag(d.name_at, Diag::not_supported, Tk::ellipsis);
+              return false;
+            }
+        }
+        if (fn) {
+          std::vector<std::pair<u16, u16>> deduced;
+          for (QualType p : types.rec(sem.type).params) s_.templates().params_in(p, deduced);
+          bool after_pack = false;
+          for (const ast::TemplateParamSema& p : head) {
+            if (after_pack && !p.has_default && !std::ranges::contains(deduced, std::pair(p.depth, p.index))) {
+              s_.diag(0, Diag::pack_not_last);
+              return false;
+            }
+            after_pack = after_pack || p.pack;
+          }
+        }
       }
       sema::Fp128 head = class_member ? sema::Fp128{} : head_fp(p_->world().ins.seqs.elements(sem.template_params));
       sem.flags = flags;
@@ -2674,7 +2927,7 @@ private:
     sem.flags = u16(flags | sema::decl_flag::specialization);
     std::vector<ast::TemplateArg> given = d.template_args.value_or(std::vector<ast::TemplateArg>{});
     std::vector<ast::ParamSema> params;
-    for (const parse::Param& p : d.params) params.push_back({EntityId::none, p.type, p.name, NodeId::none, 0});
+    for (const parse::Param& p : d.params) params.push_back({EntityId::none, p.type, p.name, NodeId::none, p.element ? sema::param_flag::pack_element : u16(0)});
     sem.params = b_.seq(std::span<const ast::ParamSema>(params));
     // `template<> R X<args>::f(…)`: a member of a class template specialization, defined here
     // instead of instantiated ([temp.expl.spec]/1). Members of the template itself are not
@@ -2865,7 +3118,7 @@ Program::ClassContent Program::class_content(u32 item, const std::function<const
       if (d.kind == ast::DeclKind::data_member)
         fields.push_back({w_->entities.rec(d.entity).name, d.type, d.entity, inits.contains(i) ? inits[i] : ConstId::none,
                         dmis_.contains(std::to_underlying(d.entity))});
-      else if (d.kind == ast::DeclKind::enum_)
+      else if (d.kind == ast::DeclKind::enum_ || d.kind == ast::DeclKind::type_alias)
         nested.push_back({w_->entities.rec(d.entity).name, d.type});
       else if (d.kind == ast::DeclKind::function || d.kind == ast::DeclKind::variable) {
         member_decls_[std::to_underlying(d.entity)] = {id(m), ast::make_decl_ord(ast::DeclClass::syntactic, i)};
@@ -2896,6 +3149,7 @@ const Result<ast::ClassDef>& Program::class_def(u32 item) {
     // Every unit that defines the class builds its own record (#115), and synthesizes the special
     // members its own object needs.
     sema::ClassRec rec;
+    rec.union_ = class_rec_is_union(item);
     rec.fields = std::move(fields);
     rec.members = std::move(statics);
     rec.types = std::move(nested);
@@ -2962,8 +3216,15 @@ public:
       // The parameters are the first locals, in their own scope ([basic.scope.param]).
       s_.push_scope();
       s_.guard_scope();
-      for (const ast::ParamSema& prm : p_->world().ins.seqs.elements(f->params))
-        s_.declare_local(prm.name, prm.type, sema::local_flag::parameter, 0, false);
+      // In an instantiation, a function parameter pack of the definition is its elements' names
+      // ([temp.variadic]/8), however many there are.
+      if (inst_)
+        for (const ast::ParamSema& prm : p_->world().ins.seqs.elements(pattern->params))
+          if (s_.types().kind(prm.type) == sema::TypeKind::pack_expansion) s_.declare_param_pack(prm.name);
+      for (const ast::ParamSema& prm : p_->world().ins.seqs.elements(f->params)) {
+        if (prm.flags & sema::param_flag::pack_element) s_.declare_pack_element(prm.name, prm.type);
+        else s_.declare_local(prm.name, prm.type, sema::local_flag::parameter, 0, false);
+      }
       bool ctor = f->flags & sema::decl_flag::constructor;
       std::map<u32, Ex> inits;
       if (ctor && ps_.is(lex::Tk::colon)) inits = mem_initializers();
@@ -2979,13 +3240,16 @@ public:
       if (root.ok() && (f->flags & sema::decl_flag::destructor)) root = destructor_body(s_, s_.current_class, root);
     }
     std::vector<ast::LocalRec> locals(s_.locals().begin(), s_.locals().end());
-    ast::BodySema v{root.id, b_.seq(std::span<const ast::LocalRec>(locals))};
-    out_.value = b_.commit(v);
     // A template's definition demands nothing; its instantiations do. What it keeps for them is
-    // which calls were dependent ([temp.dep.candidate]).
+    // which calls were dependent ([temp.dep.candidate]) and its pack expansions (ast.md §6.4).
     bool templated = (pattern && p_->world().ins.seqs.size(pattern->template_params) > 0) || !p_->enclosing_heads(k_).empty();
-    if (templated && !inst_) p_->dependent_calls_[k_] = std::move(s_.dependent_calls);
-    else out_.demands = std::move(s_.demands);
+    std::vector<sema::Expansion> none;
+    std::vector<u32> no_calls;
+    const bool keeps = templated && !inst_;
+    ast::BodySema v{root.id, b_.seq(std::span<const ast::LocalRec>(locals)), expansion_list(b_, keeps ? s_.expansions : none),
+                    b_.seq(std::span<const u32>(keeps ? s_.dependent_calls : no_calls))};
+    out_.value = b_.commit(v);
+    if (!keeps) out_.demands = std::move(s_.demands);
     return std::move(out_);
   }
 
@@ -3225,7 +3489,8 @@ const ast::BodySema& Program::synthesized_body(std::size_t i) {
     root = BodyAnalysis::destructor_body(sm, cls, body);
   }
   std::vector<ast::LocalRec> locals(sm.locals().begin(), sm.locals().end());
-  return synth_bodies_[i] = b.commit(ast::BodySema{root.id, b.seq(std::span<const ast::LocalRec>(locals))});
+  return synth_bodies_[i] = b.commit(ast::BodySema{root.id, b.seq(std::span<const ast::LocalRec>(locals)),
+                                                   b.seq(std::span<const ast::ExpansionRec>{}), b.seq(std::span<const u32>{})});
 }
 
 const Result<ast::BodySema>& Program::analyze_body(u32 item) {
@@ -3294,6 +3559,7 @@ const sema::ClassRec* Program::instantiate_class(EntityId spec, u32 point) {
       member_patterns_.emplace(std::to_underlying(m.entity), MemberOf{index(m.decl.item), spec});
   // Built whole, then published once (#156); the first publication wins.
   sema::ClassRec built;
+  built.union_ = class_rec_is_union(k);
   built.fields = std::move(c.fields);
   built.members = std::move(c.statics);
   built.types = std::move(c.nested);
@@ -3400,7 +3666,15 @@ const Program::Instance* Program::instance(EntityId spec, u32 point) {
     if (k != decl_item && w_->ins.seqs.size(item_sema(k).value.decls) > 0) {
       std::vector<ast::ParamSema> params = w_->ins.seqs.elements(decl->params);
       std::vector<ast::ParamSema> named = w_->ins.seqs.elements(w_->ins.seqs.at(item_sema(k).value.decls, 0).params);
-      for (std::size_t i = 0; i < params.size() && i < named.size(); ++i) params[i].name = named[i].name;
+      // A function parameter pack of the definition names all its elements ([temp.variadic]/8).
+      std::size_t i = 0;
+      for (const ast::ParamSema& n : named) {
+        if (w_->types.kind(n.type) == sema::TypeKind::pack_expansion) {
+          for (; i < params.size() && (params[i].flags & sema::param_flag::pack_element); ++i) params[i].name = n.name;
+          continue;
+        }
+        if (i < params.size()) params[i++].name = n.name;
+      }
       decl->params = w_->ins.intern_seq(std::span<const ast::ParamSema>(params));
     }
     sema::Bindings args = class_args_.at(std::to_underlying(cls));
@@ -3430,14 +3704,28 @@ const Program::Instance* Program::instance(EntityId spec, u32 point) {
   decl.flags = sema::u16(decl.flags & ~sema::decl_flag::template_);
   decl.template_params = w_->ins.intern_seq(std::span<const ast::TemplateParamSema>{});
   sema::Templates t(*w_, classes_);
-  std::vector<ast::ParamSema> params = w_->ins.seqs.elements(tmpl.params);
+  std::vector<ast::ParamSema> params;
   // A parameter's type is adjusted again after substitution ([dcl.fct]/5): an array or function
-  // becomes a pointer; the body's object keeps its cv-qualifiers.
-  for (ast::ParamSema& p : params) {
-    p.type = t.substitute(p.type, args).value_or(p.type);
-    sema::Types& ty = w_->types;
+  // becomes a pointer; the body's object keeps its cv-qualifiers. A function parameter pack is a
+  // parameter for each element ([temp.variadic]/8).
+  sema::Types& ty = w_->types;
+  auto adjusted = [&](ast::ParamSema p) {
     if (ty.is_array(p.type)) p.type = ty.add_cv(ty.pointer(ty.rec(p.type).inner), sema::Types::cv(p.type));
     else if (ty.is_function(p.type)) p.type = ty.pointer(p.type);
+    return p;
+  };
+  for (ast::ParamSema p : w_->ins.seqs.elements(tmpl.params)) {
+    if (ty.kind(p.type) == sema::TypeKind::pack_expansion) {
+      for (const ast::TemplateArg& x : t.substitute_expansion(t.type_arg(p.type), args).value_or(std::vector<ast::TemplateArg>{})) {
+        ast::ParamSema e = p;
+        e.type = x.type;
+        e.flags = u16(e.flags | sema::param_flag::pack_element);
+        params.push_back(adjusted(e));
+      }
+      continue;
+    }
+    p.type = t.substitute(p.type, args).value_or(p.type);
+    params.push_back(adjusted(p));
   }
   decl.params = w_->ins.intern_seq(std::span<const ast::ParamSema>(params));
   Instance in{spec, k, decl, {}, false};
@@ -3509,7 +3797,7 @@ void Program::instantiate_all() {
     if (item_cells_[k]) work.insert(work.end(), item_cells_[k]->demands.begin(), item_cells_[k]->demands.end());
     if (body_cells_[k]) {
       work.insert(work.end(), body_cells_[k]->demands.begin(), body_cells_[k]->demands.end());
-      if (dependent_calls_.find(k) == dependent_calls_.end()) required_members(body_cells_[k]->value.tree, id(k));
+      if (!templated_body(k)) required_members(body_cells_[k]->value.tree, id(k));
     }
   }
   // The synthesized special members' bodies, those of classes instantiated as the worklist runs

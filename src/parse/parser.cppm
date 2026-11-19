@@ -53,6 +53,10 @@ struct Param {
   QualType type{};
   NameId name{};
   u32 at = 0;
+  // A function parameter pack ([dcl.fct]/23): `type` is its pack expansion; in an instantiation,
+  // one element of it (`element`).
+  bool pack = false;
+  bool element = false;
 };
 
 // What a declarator declares ([dcl.decl]): its name and type, and, for a function declarator,
@@ -80,6 +84,7 @@ struct Declarator {
   u32 template_args_at = 0;
   // A GNU asm label, `__asm("_fopen")`: the symbol as written (docs/EXTENSIONS.md); empty if none.
   std::string asm_label;
+  bool pack = false;  // `T... x`: a declarator-id after an ellipsis ([dcl.fct]/23, [temp.param]/17)
   bool ok = true;
 };
 
@@ -180,7 +185,7 @@ public:
       return q && kind(q->second) != Tk::l_paren && kind(q->second) != Tk::period && kind(q->second) != Tk::l_brace;
     }
     u32 next = 1;  // the token after the type's name: after `X<…>` for a class template
-    if (is(Tk::identifier) && kind(1) == Tk::less && s_->class_template(name_of(tok()))) next = past_template_args(1);
+    if (is(Tk::identifier) && kind(1) == Tk::less && s_->type_template(name_of(tok()))) next = past_template_args(1);
     else if (!is(Tk::identifier) || kind(1) == Tk::coloncolon || !s_->class_name(name_of(tok()))) return false;
     // `T(args).f()` and `T{…}.m` are expressions; `T (x);` declares x ([stmt.ambig]).
     if (kind(next) == Tk::l_brace) return false;
@@ -227,7 +232,7 @@ public:
   // name; the arguments are consumed.
   std::optional<QualType> class_template_type() {
     u32 at = pos();
-    auto tmpl = s_->class_template(name_of(tok()));
+    auto tmpl = s_->type_template(name_of(tok()));
     bump();
     auto args = template_argument_list();
     if (!tmpl || !args) return std::nullopt;
@@ -244,12 +249,12 @@ public:
     DeclSpec d;
     d.begin = pos();
     int n_char = 0, n_short = 0, n_int = 0, n_long = 0, n_signed = 0, n_unsigned = 0, n_void = 0, n_bool = 0;
-    int n_char8 = 0, n_char16 = 0, n_char32 = 0, n_wchar = 0;
+    int n_char8 = 0, n_char16 = 0, n_char32 = 0, n_wchar = 0, n_float = 0, n_double = 0;
     bool c = false, v = false;
     std::optional<QualType> cls;  // a class-name or elaborated-type-specifier
     auto any_type = [&] {
       return cls || n_char + n_short + n_int + n_long + n_signed + n_unsigned + n_void + n_bool + n_char8 + n_char16 +
-                        n_char32 + n_wchar > 0;
+                        n_char32 + n_wchar + n_float + n_double > 0;
     };
     auto once = [&](bool& flag, Tk k) {
       if (flag) s_->diag(pos(), Diag::duplicate_specifier, k);
@@ -266,6 +271,8 @@ public:
       case Tk::kw_char16_t: ++n_char16; break;
       case Tk::kw_char32_t: ++n_char32; break;
       case Tk::kw_wchar_t: ++n_wchar; break;
+      case Tk::kw_float: ++n_float; break;  // types only: their values are #201
+      case Tk::kw_double: ++n_double; break;
       case Tk::kw_short: ++n_short; break;
       case Tk::kw_int: ++n_int; break;
       case Tk::kw_long: ++n_long; break;
@@ -337,7 +344,8 @@ public:
         continue;
       }
       case Tk::kw_struct:
-      case Tk::kw_class: {
+      case Tk::kw_class:
+      case Tk::kw_union: {
         u32 at = pos();
         // A class-specifier where a type is named (a local or unnamed class) is not supported yet.
         if (kind(1) != Tk::identifier || kind(2) == Tk::l_brace || kind(2) == Tk::colon || kind(2) == Tk::coloncolon) {
@@ -381,7 +389,7 @@ public:
             }
             goto done;
           }
-          if (kind(1) == Tk::less && s_->class_template(name_of(tok()))) {
+          if (kind(1) == Tk::less && s_->type_template(name_of(tok()))) {
             auto t = class_template_type();
             if (!t) {
               d.ok = false;
@@ -423,7 +431,7 @@ public:
     }
     // [dcl.type.general]: the combinations of simple-type-specifiers, as in its table.
     int total = n_char + n_short + n_int + n_long + n_signed + n_unsigned + n_void + n_bool + n_char8 + n_char16 +
-                n_char32 + n_wchar;
+                n_char32 + n_wchar + n_float + n_double;
     if (cls) {
       if (total > 0) {
         s_->diag(d.begin, Diag::conflicting_specifiers, Tk::kw_int);
@@ -443,6 +451,10 @@ public:
     int sign = n_signed + n_unsigned;
     int others = n_void + n_bool + n_char8 + n_char16 + n_char32 + n_wchar;
     if (n_signed > 1 || n_unsigned > 1 || sign > 1 || n_long > 2 || n_short > 1 || n_int > 1 || n_char > 1 || others > 1) {
+    } else if (n_float + n_double > 0) {
+      // `float`, `double`, `long double` alone ([dcl.type.general]).
+      if (n_float + n_double == 1 && others + n_char + n_short + n_int + sign == 0 && n_long <= n_double)
+        b = n_float ? Builtin::float_ : n_long ? Builtin::long_double : Builtin::double_;
     } else if (others == 1) {
       if (n_char + n_short + n_int + n_long + sign == 0)
         b = n_void ? Builtin::void_ : n_bool ? Builtin::bool_ : n_char8 ? Builtin::char8_t_ : n_char16 ? Builtin::char16_t_
@@ -476,6 +488,7 @@ public:
   struct Suffix {
     bool function = false;
     std::vector<Param> params;
+    std::vector<NameId> empty_packs;  // function parameter packs instantiated with no element
     bool variadic = false;
     sema::Cv cv = sema::Cv::none;  // a member function's cv-qualifier-seq ([dcl.fct])
     u64 bound = 0;
@@ -500,6 +513,7 @@ public:
     sema::Sema::Scope scope{};
     std::optional<std::vector<ast::TemplateArg>> template_args;
     u32 template_args_at = 0;
+    bool pack = false;
     std::vector<Suffix> suffixes;
   };
 
@@ -596,6 +610,11 @@ public:
         bump();
       }
       l.pointers.push_back({op, sema::Cv(cv)});
+    }
+    // A parameter pack's declarator ([dcl.fct]/23, [temp.param]/17): `T... x`, `Ts&&...`.
+    if (abstract && packs_in_declarators_ && is(Tk::ellipsis)) {
+      bump();
+      l.pack = true;
     }
     if (!abstract && qualified_ahead()) {
       // A qualified declarator-id `N::C::name`, defining a member of namespace N or class C
@@ -737,7 +756,7 @@ public:
     if (kind(j) != Tk::identifier || kind(j + 1) != Tk::less) return std::nullopt;
     if (in && !in->ns) return std::nullopt;  // member templates of classes come later (#88)
     NameId n = name_of(tok(j));
-    auto tmpl = in ? s_->namespace_class_template(*in->ns, n) : s_->class_template(n);
+    auto tmpl = in ? s_->namespace_type_template(*in->ns, n) : s_->type_template(n);
     if (!tmpl) return std::nullopt;
     u32 saved = i_;
     bool saved_half = half_;
@@ -788,6 +807,8 @@ public:
   std::function<void(const sema::Sema::Scope&)> qualified_hook;
   // In an explicit specialization, a declarator-id may be a template-id ([temp.expl.spec]/1).
   bool template_ids_in_declarators = false;
+  // In a parameter-declaration or a template-parameter, an ellipsis may begin a pack's declarator.
+  bool packs_in_declarators_ = false;
 
   // Whether the `(` here begins a parameter-declaration-clause rather than an initializer
   // ([dcl.ambig.res]: what can be a declaration is one).
@@ -797,7 +818,7 @@ public:
     if (k == Tk::r_paren || k == Tk::ellipsis || starts_decl_specifier(k)) return true;
     if ((k == Tk::identifier && kind(2) == Tk::coloncolon) || k == Tk::coloncolon)
       return qualified_type(1).has_value();  // `N::S`, `C::E`, `::S`
-    if (k == Tk::identifier && kind(2) == Tk::less && s_->class_template(name_of(tok(1)))) return true;
+    if (k == Tk::identifier && kind(2) == Tk::less && s_->type_template(name_of(tok(1)))) return true;
     return k == Tk::identifier && kind(2) != Tk::coloncolon && s_->class_name(name_of(tok(1))).has_value();
   }
 
@@ -864,6 +885,7 @@ public:
     d.scope = l.scope;
     d.template_args = l.template_args;
     d.template_args_at = l.template_args_at;
+    d.pack = l.pack;
     return t;
   }
 
@@ -892,7 +914,8 @@ public:
     // [basic.scope.param]: parameter names are distinct.
     for (std::size_t i = 0; i < s.params.size(); ++i)
       for (std::size_t j = 0; j < i; ++j)
-        if (s.params[i].name == s.params[j].name && s.params[i].name != s_->no_name())
+        if (s.params[i].name == s.params[j].name && s.params[i].name != s_->no_name() &&
+            !(s.params[i].element && s.params[j].element))  // a pack's elements share its name
           s_->diag(s.params[i].at, Diag::redeclared_local, s.params[i].name);
     return s;
   }
@@ -915,7 +938,9 @@ public:
         s_->diag(at, Diag::not_supported, Tk::kw_static);
         ok = false;
       }
+      bool saved = std::exchange(packs_in_declarators_, true);
       Declarator d = declarator(spec.type, true);
+      packs_in_declarators_ = saved;
       ok = ok && spec.ok && d.ok;
       QualType t = d.type;
       // [dcl.fct]/5: arrays and functions decay; top-level cv is dropped.
@@ -925,9 +950,42 @@ public:
         s_->diag(at, Diag::void_parameter);
         ok = false;
       }
+      // `T...` with no pack in T is `T, ...` ([dcl.fct]/3).
+      if (d.pack && !s_->names_pack(t)) {
+        if (d.named) {
+          s_->diag(d.name_at, Diag::expansion_without_pack);
+          ok = false;
+        }
+        s.params.push_back({t, s_->no_name(), at});
+        s.variadic = true;
+        break;
+      }
+      if (d.pack) {
+        // A function parameter pack; in an instantiation its elements are the parameters
+        // ([temp.variadic]/8).
+        QualType e = s_->types().pack_expansion(t);
+        std::array<ast::TemplateArg, 1> one{s_->templates().type_arg(e)};
+        if (auto xs = s_->expand_bound(one)) {
+          for (const ast::TemplateArg& x : *xs)
+            s.params.push_back({x.type, d.named ? d.name : s_->no_name(), d.named ? d.name_at : at, false, true});
+          if (xs->empty() && d.named) s.empty_packs.push_back(d.name);
+        } else {
+          s.params.push_back({e, d.named ? d.name : s_->no_name(), d.named ? d.name_at : at, true, false});
+        }
+        if (accept(Tk::ellipsis)) {  // `Ts......`: a pack, then a C ellipsis ([dcl.fct]/3)
+          s.variadic = true;
+          break;
+        }
+        if (!accept(Tk::comma)) break;
+        continue;
+      }
       // The parameter keeps its top-level cv as a variable of the body; the function type drops
       // it (`function_type` adjusts).
       s.params.push_back({t, d.named ? d.name : s_->no_name(), d.named ? d.name_at : at});
+      if (accept(Tk::ellipsis)) {  // `int x...` is `int x, ...` ([dcl.fct]/3)
+        s.variadic = true;
+        break;
+      }
       if (is(Tk::equal)) {
         s_->diag(pos(), Diag::not_supported, Tk::equal);  // default arguments
         ok = false;
@@ -992,14 +1050,24 @@ public:
     bool type_param = (is(Tk::kw_class) || is(Tk::kw_typename)) &&
                       (kind(1) == Tk::comma || kind(1) == Tk::greater || kind(1) == Tk::equal || kind(1) == Tk::ellipsis ||
                        (kind(1) == Tk::identifier && kind(2) != Tk::coloncolon));
-    if (is(Tk::kw_template) || (type_param && kind(1) == Tk::ellipsis)) {
-      s_->diag(pos() + (is(Tk::kw_template) ? 0 : 1), Diag::not_supported, is(Tk::kw_template) ? Tk::kw_template : Tk::ellipsis);
+    if (is(Tk::kw_template)) {
+      s_->diag(pos(), Diag::not_supported, Tk::kw_template);  // template template parameters
       ok = false;
       return std::nullopt;
     }
     if (type_param) {
-      // A type-parameter ([temp.param]/1), with a default type-id.
+      // A type-parameter ([temp.param]/1), with a default type-id; `class... Ts` is a pack.
       bump();
+      if (accept(Tk::ellipsis)) {
+        p.pack = 1;
+        p.kind = ast::TemplateArgKind::type;
+        p.type = s_->types().template_param(depth, index, true);
+        if (is(Tk::identifier)) {
+          p.name = name_of(tok());
+          bump();
+        }
+        return p;
+      }
       if (is(Tk::identifier)) {
         p.name = name_of(tok());
         bump();
@@ -1021,11 +1089,14 @@ public:
     // adjusted to a pointer and whose top-level cv-qualifiers are ignored ([temp.param]/10, /6).
     u32 at = pos();
     DeclSpec spec = decl_specifiers();
+    bool saved = std::exchange(packs_in_declarators_, true);
     Declarator d = declarator(spec.type, true);
+    packs_in_declarators_ = saved;
     if (!spec.ok || !d.ok) {
       ok = false;
       return std::nullopt;
     }
+    p.pack = d.pack;
     QualType t = d.type;
     if (s_->types().is_array(t)) t = s_->types().pointer(s_->types().rec(t).inner);
     else if (s_->types().is_function(t)) t = s_->types().pointer(t);
@@ -1042,7 +1113,7 @@ public:
     if (d.named) p.name = d.name;
     p.kind = ast::TemplateArgKind::value;
     p.type = t;
-    if (accept(Tk::equal)) {
+    if (!p.pack && accept(Tk::equal)) {
       Ex e = conditional_expression();
       auto v = template_value(e, t);
       if (!v) {
@@ -1098,25 +1169,56 @@ public:
     std::vector<ast::TemplateArg> args;
     bool ok = true;
     ++angle_;
-    if (!is(Tk::greater)) {
+    if (!is(Tk::greater) && !is(Tk::greatergreater)) {
       do {
+        u32 arg_at = pos();
+        struct Unframe {
+          sema::Sema* s;
+          decltype(s->hide_frames()) saved;
+          bool on;
+          ~Unframe() {
+            if (on) s->restore_frames(std::move(saved));
+          }
+        } unframe{s_, {}, s_->in_expansion() && argument_expands()};
+        if (unframe.on) unframe.saved = s_->hide_frames();
+        s_->begin_pattern();
+        struct EndPattern {
+          sema::Sema* s;
+          bool expanded = false;
+          u32 at;
+          ~EndPattern() { s->end_pattern(expanded, at, at, false); }
+        } end_pattern{s_, false, arg_at};
         if (starts_type_id()) {
           auto t = type_id();
           if (!t) ok = false;
           else args.push_back({ast::TemplateArgKind::type, s_->types().canonical(*t), sema::ConstId::none});
-          continue;
+        } else {
+          Ex e = conditional_expression();
+          if (!e.ok()) {
+            ok = false;
+            continue;
+          }
+          // Converted to its parameter's type when the template is known ([temp.arg.nontype]).
+          auto v = template_value(e, sema::Types::unqualified(s_->rvalue(e).type()));
+          if (!v) ok = false;
+          else args.push_back({ast::TemplateArgKind::value, s_->types().canonical(sema::Types::unqualified(s_->rvalue(e).type())), *v});
         }
-        Ex e = conditional_expression();
-        if (!e.ok()) {
-          ok = false;
-          continue;
+        // `pattern...`: a pack expansion ([temp.variadic]/5), expanded where its packs are bound.
+        if (ok && is(Tk::ellipsis)) {
+          u32 at = pos();
+          bump();
+          if (!s_->names_pack(args.back())) {
+            s_->diag(at, Diag::expansion_without_pack);
+            ok = false;
+            continue;
+          }
+          args.back() = s_->templates().expansion_of(args.back());
+          end_pattern.expanded = true;
         }
-        // Converted to its parameter's type when the template is known ([temp.arg.nontype]).
-        auto v = template_value(e, sema::Types::unqualified(s_->rvalue(e).type()));
-        if (!v) ok = false;
-        else args.push_back({ast::TemplateArgKind::value, s_->types().canonical(sema::Types::unqualified(s_->rvalue(e).type())), *v});
       } while (accept(Tk::comma));
     }
+    if (ok)
+      if (auto xs = s_->expand_bound(args)) args = *xs;
     --angle_;
     // [temp.names]/4: `>>` closes this list and the enclosing one.
     if (is(Tk::greatergreater) && !half_) half_ = true;
@@ -1126,7 +1228,7 @@ public:
   }
   bool starts_type_id() {
     if (starts_decl_specifier(kind())) return !is(Tk::kw_static) && !is(Tk::kw_extern);
-    if (is(Tk::identifier) && kind(1) == Tk::less && s_->class_template(name_of(tok()))) return true;
+    if (is(Tk::identifier) && kind(1) == Tk::less && s_->type_template(name_of(tok()))) return true;
     if (qualified_ahead()) return qualified_type(0).has_value();
     return is(Tk::identifier) && kind(1) != Tk::coloncolon && s_->class_name(name_of(tok())).has_value();
   }
@@ -1134,6 +1236,206 @@ public:
   // The language linkage function types get: from an enclosing linkage-specification.
   void set_linkage(LangLinkage l) { linkage_ = l; }
   LangLinkage linkage() const { return linkage_; }
+
+  // ------------------------------------------------------------ pack expansions ([temp.variadic])
+
+  // An operand that may be the pattern of a pack expansion `pattern...` ([temp.variadic]/5);
+  // `read` reads one. In a definition the expansion is recorded and is one dependent operand; in
+  // an instantiation its pattern is read once for each element, with the packs it names bound
+  // to that element (ast.md §6.4).
+  template <class F>
+  std::vector<Ex> expandable(F read) {
+    u32 begin = pos();
+    if (const sema::Expansion* x = s_->expansion_at(begin)) {
+      sema::Expansion e = *x;
+      auto n = s_->expansion_length(e, begin);
+      std::vector<Ex> out;
+      if (!n) {
+        // A pack not bound yet (an enclosing template's): the expansion stays dependent.
+        s_->begin_pattern();
+        Ex p = read();
+        s_->end_pattern(true, begin, e.end);
+        accept(Tk::ellipsis);
+        out.push_back(s_->dependent_node({p}, begin, pos()));
+        return out;
+      }
+      for (std::size_t i = 0; i < *n; ++i) {
+        i_ = begin_ + begin;
+        s_->push_frame(e.packs, u32(i));
+        out.push_back(read());
+        s_->pop_frame();
+      }
+      i_ = begin_ + e.end;
+      expect(Tk::ellipsis);
+      return out;
+    }
+    s_->begin_pattern();
+    Ex p = read();
+    if (is(Tk::ellipsis)) {
+      u32 end = pos();
+      bump();
+      if (s_->end_pattern(true, begin, end).empty()) s_->diag(end, Diag::expansion_without_pack);
+      return {s_->dependent_node({p}, begin, pos())};
+    }
+    s_->end_pattern(false, begin, 0);
+    return {p};
+  }
+
+  // ------------------------------------------------------------ fold expressions ([expr.prim.fold])
+
+  static bool fold_operator(Tk k) {
+    switch (k) {
+    case Tk::plus: case Tk::minus: case Tk::star: case Tk::slash: case Tk::percent: case Tk::caret: case Tk::amp:
+    case Tk::pipe: case Tk::lessless: case Tk::greatergreater: case Tk::plusequal: case Tk::minusequal:
+    case Tk::starequal: case Tk::slashequal: case Tk::percentequal: case Tk::caretequal: case Tk::ampequal:
+    case Tk::pipeequal: case Tk::lesslessequal: case Tk::greatergreaterequal: case Tk::equal: case Tk::equalequal:
+    case Tk::exclaimequal: case Tk::less: case Tk::greater: case Tk::lessequal: case Tk::greaterequal:
+    case Tk::ampamp: case Tk::pipepipe: case Tk::comma: case Tk::periodstar: case Tk::arrowstar: return true;
+    default: return false;
+    }
+  }
+  // Whether the parenthesis here begins a fold-expression: `( ... op`, or at its top level
+  // `op ...` followed by `)` or the same operator. Another `...` there (`sizeof...`, an expansion
+  // in a template argument list) is not a fold's.
+  bool fold_ahead() {
+    if (kind(1) == Tk::ellipsis) return fold_operator(kind(2));
+    int depth = 0;
+    for (u32 j = 1; i_ + j < end_; ++j) {
+      Tk k = kind(j);
+      if (k == Tk::l_paren || k == Tk::l_square || k == Tk::l_brace) ++depth;
+      else if (k == Tk::r_paren || k == Tk::r_square || k == Tk::r_brace) {
+        if (depth == 0) return false;
+        --depth;
+      } else if (k == Tk::ellipsis && depth == 0 && kind(j - 1) != Tk::kw_sizeof && fold_operator(kind(j - 1)) &&
+                 (kind(j + 1) == Tk::r_paren || kind(j + 1) == kind(j - 1))) {
+        return true;
+      }
+    }
+    return false;
+  }
+  // Whether the template argument here is a pack expansion: `...` ends it before its `,` or `>`.
+  bool argument_expands() {
+    int depth = 0;
+    for (u32 j = 0; i_ + j < end_; ++j) {
+      Tk k = kind(j);
+      if (k == Tk::l_paren || k == Tk::l_square || k == Tk::l_brace || k == Tk::less) ++depth;
+      else if (k == Tk::r_paren || k == Tk::r_square || k == Tk::r_brace || k == Tk::greater || k == Tk::greatergreater) {
+        if (depth == 0) return j > 0 && kind(j - 1) == Tk::ellipsis;
+        depth -= k == Tk::greatergreater ? 2 : 1;
+        if (depth < 0) return j > 0 && kind(j - 1) == Tk::ellipsis;
+      } else if (k == Tk::comma && depth == 0) {
+        return j > 0 && kind(j - 1) == Tk::ellipsis;
+      }
+    }
+    return false;
+  }
+  // A fold-expression ([expr.prim.fold]): in a definition one dependent operand; in an
+  // instantiation the elements of its pattern nested as [temp.variadic]/11 says, an empty one as
+  // /12 says.
+  Ex fold_expression(u32 begin) {
+    bump();
+    int saved = std::exchange(angle_, 0);
+    struct Restore {
+      int& a;
+      int s;
+      ~Restore() { a = s; }
+    } restore{angle_, saved};
+    bool left = false;
+    Tk op{};
+    std::optional<Ex> init;
+    std::optional<std::vector<Ex>> elems;
+    if (is(Tk::ellipsis)) {  // ( ... op pattern ), a unary left fold
+      bump();
+      op = kind();
+      bump();
+      left = true;
+      elems = fold_pattern();
+    } else {
+      // ( pattern op ... ), ( pattern op ... op init ), or ( init op ... op pattern ).
+      // Which operand is the pattern: the one that names a pack, as the definition found.
+      u32 first = pos();
+      bool a_is_pattern = s_->expansion_at(first) != nullptr;
+      if (!a_is_pattern && !s_->expansion_at_any()) {
+        std::size_t n = s_->diag_count();
+        s_->begin_pattern();
+        cast_expression();
+        a_is_pattern = !s_->end_pattern(false, first, 0).empty();
+        s_->truncate_diags(n);
+        i_ = begin_ + first;
+      }
+      if (a_is_pattern) {
+        elems = fold_pattern();
+      } else {
+        init = cast_expression();
+        left = true;
+      }
+      op = kind();
+      bump();
+      if (!expect(Tk::ellipsis)) return {NodeId::none, begin, pos()};
+      if (!is(Tk::r_paren)) {
+        if (kind() != op) {
+          s_->diag(pos(), Diag::unexpected_token, kind());
+          return {NodeId::none, begin, pos()};
+        }
+        bump();
+        if (left) elems = fold_pattern();
+        else init = cast_expression();
+      }
+    }
+    if (!expect(Tk::r_paren)) return {NodeId::none, begin, pos()};
+    if (!elems) return s_->dependent_node({}, begin, pos());
+    u32 at = begin;
+    auto apply = [&](Ex l, Ex r) -> Ex {
+      if (op == Tk::comma) return s_->binary(sema::Sema::BinOp::comma, l, r, at);
+      if (auto info = binary_operator(op)) return s_->binary(info->op, l, r, at);
+      if (auto a = assignment_operator(op)) return s_->assign(*a, l, r, at);
+      s_->diag(at, Diag::not_supported, op);
+      return {NodeId::none, l.begin, r.end};
+    };
+    std::vector<Ex>& es = *elems;
+    if (es.empty() && !init) {
+      if (op == Tk::ampamp) return s_->bool_literal(true, begin, pos());
+      if (op == Tk::pipepipe) return s_->bool_literal(false, begin, pos());
+      if (op == Tk::comma) return s_->void_prvalue(begin, pos());
+      s_->diag(begin, Diag::empty_fold);
+      return {NodeId::none, begin, pos()};
+    }
+    Ex r;
+    if (left) {
+      std::size_t i = 0;
+      r = init ? *init : es[i++];
+      for (; i < es.size(); ++i) r = apply(r, es[i]);
+    } else {
+      std::size_t i = es.size();
+      r = init ? *init : es[--i];
+      while (i-- > 0) r = apply(es[i], r);
+    }
+    return {r.id, begin, pos(), r.info};
+  }
+  // A fold's pattern, a cast-expression: its elements in an instantiation; none in a definition,
+  // where the expansion is recorded and the fold is dependent.
+  std::optional<std::vector<Ex>> fold_pattern() {
+    u32 begin = pos();
+    if (const sema::Expansion* x = s_->expansion_at(begin)) {
+      sema::Expansion e = *x;
+      auto n = s_->expansion_length(e, begin);
+      std::vector<Ex> out;
+      if (n)
+        for (std::size_t i = 0; i < *n; ++i) {
+          i_ = begin_ + begin;
+          s_->push_frame(e.packs, u32(i));
+          out.push_back(cast_expression());
+          s_->pop_frame();
+        }
+      i_ = begin_ + e.end;
+      if (!n) return std::nullopt;
+      return out;
+    }
+    s_->begin_pattern();
+    cast_expression();
+    if (s_->end_pattern(true, begin, pos()).empty()) s_->diag(begin, Diag::expansion_without_pack);
+    return std::nullopt;
+  }
 
   // ------------------------------------------------------------ [expr]
 
@@ -1296,9 +1598,16 @@ public:
     case Tk::exclaim: op = ast::UnaryOp::not_; break;
     case Tk::tilde: op = ast::UnaryOp::compl_; break;
     case Tk::kw_sizeof:
+      // `sizeof...(P)` ([expr.sizeof]/5).
+      if (kind(1) == Tk::ellipsis && kind(2) == Tk::l_paren && kind(3) == Tk::identifier && kind(4) == Tk::r_paren) {
+        NameId n = name_of(tok(3));
+        for (int i = 0; i < 5; ++i) bump();
+        return s_->sizeof_pack(n, begin, pos());
+      }
+      [[fallthrough]];
     case Tk::kw_alignof: {
       // `sizeof(T)`, `sizeof e`, `alignof(T)` ([expr.sizeof], [expr.alignof]); the expression is
-      // an unevaluated operand. `sizeof...` is not supported yet.
+      // an unevaluated operand; `sizeof...` is above, and another use of `...` here is not supported.
       bool align = is(Tk::kw_alignof);
       bump();
       if (is(Tk::ellipsis)) {
@@ -1369,7 +1678,7 @@ public:
               s_->diag(pos(), Diag::not_supported, Tk::l_brace);
               return {NodeId::none, e.begin, pos()};
             }
-            args.push_back(assignment_expression());
+            for (const Ex& x : expandable([&] { return assignment_expression(); })) args.push_back(x);
           } while (accept(Tk::comma));
         }
         if (!expect(Tk::r_paren)) return {NodeId::none, e.begin, pos()};
@@ -1457,6 +1766,7 @@ public:
     }
     case Tk::kw_nullptr: bump(); return s_->nullptr_literal(begin, pos());
     case Tk::l_paren: {
+      if (fold_ahead()) return fold_expression(begin);
       bump();
       int saved = std::exchange(angle_, 0);
       Ex e = expression();
@@ -1468,7 +1778,7 @@ public:
       NameId n = name_of(tok());
       if (qualified_ahead()) return qualified_id(begin);
       // `X<args>(…)` and `X<args>{…}` for a class template X ([expr.type.conv]).
-      if (kind(1) == Tk::less && s_->class_template(n)) {
+      if (kind(1) == Tk::less && s_->type_template(n)) {
         auto t = class_template_type();
         if (!t) return {NodeId::none, begin, pos()};
         if (is(Tk::l_brace)) {
@@ -1627,8 +1937,25 @@ public:
           break;
         }
       }
-      if (is(Tk::l_brace)) c.list = braced_init_list();
-      else c.expr = assignment_expression();
+      if (is(Tk::l_brace)) {
+        c.list = braced_init_list();
+      } else if (!c.designated) {
+        // An initializer-clause may be a pack expansion ([dcl.init.general]/1).
+        std::vector<Ex> xs = expandable([&] { return assignment_expression(); });
+        for (std::size_t i = 0; i + 1 < xs.size(); ++i) {
+          sema::Braced::Clause e;
+          e.begin = c.begin;
+          e.expr = xs[i];
+          b->clauses.push_back(std::move(e));
+        }
+        if (xs.empty()) {
+          if (!accept(Tk::comma)) break;
+          continue;
+        }
+        c.expr = xs.back();
+      } else {
+        c.expr = assignment_expression();
+      }
       b->clauses.push_back(std::move(c));
       if (!accept(Tk::comma)) break;
     }
@@ -2123,7 +2450,10 @@ public:
         return {NodeId::none, begin, pos()};
       }
       if (s_->types().is_function(d.type)) {
-        s_->diag(d.name_at, Diag::not_supported, Tk::l_paren);  // block-scope function declarations
+        // [dcl.fct.def.general]/2: a function is defined only at namespace or class scope; a
+        // block-scope declaration of one is not supported yet.
+        if (is(Tk::l_brace)) s_->diag(d.name_at, Diag::function_definition_in_block);
+        else s_->diag(d.name_at, Diag::not_supported, Tk::l_paren);
         skip_to_semi();
         return {NodeId::none, begin, pos()};
       }

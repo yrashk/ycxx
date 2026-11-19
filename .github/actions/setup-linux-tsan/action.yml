@@ -1,0 +1,34 @@
+name: setup-linux-tsan
+description: >
+  The toolchain for a ThreadSanitizer build of ycxx (#105), as libycxx's own action of the same
+  name (deps/libycxx/.github/actions/setup-linux-tsan): on the bare ubuntu-24.04 runner, not the
+  gcc:16 container, whose kernel settings cannot be changed and whose GCC may lack libsanitizer.
+  vm.mmap_rnd_bits at most 28 (ThreadSanitizer's shadow memory layout needs it), and GCC 16.2 with
+  its sanitizer runtimes, built by libycxx's provision --with-sanitizers (about 17 minutes) and cached.
+runs:
+  using: composite
+  steps:
+    # ThreadSanitizer maps its shadow memory at fixed addresses, which the 32 bits of mmap
+    # randomization of the runners' kernels can collide with ("FATAL: ThreadSanitizer: unexpected
+    # memory mapping").
+    - shell: bash
+      run: |
+        bits=$(sudo sysctl -n vm.mmap_rnd_bits)
+        echo "vm.mmap_rnd_bits=$bits"
+        if [ "$bits" -gt 28 ]; then sudo sysctl -w vm.mmap_rnd_bits=28; fi
+    - shell: bash
+      run: |
+        sudo apt-get update -qq
+        sudo apt-get install -y -qq ninja-build cmake python3 git xz-utils curl >/dev/null
+    - id: gcc-cache
+      uses: actions/cache/restore@v4
+      with:
+        path: ~/.local/share/ycxx/toolchains/gcc-16.2.0
+        key: ycxx-gcc-16.2.0-sanitizers-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('deps/libycxx/tools/toolchain/provision') }}
+    - shell: bash
+      run: deps/libycxx/tools/toolchain/provision --gcc-only --with-sanitizers --jobs 4
+    - if: steps.gcc-cache.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v4
+      with:
+        path: ~/.local/share/ycxx/toolchains/gcc-16.2.0
+        key: ${{ steps.gcc-cache.outputs.cache-primary-key }}
