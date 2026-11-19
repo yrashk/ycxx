@@ -420,6 +420,14 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
   every C++ library it links (the e-graph spike needed a second HiGHS build).
   - Do: plan TSan runs on macOS with Clang from the start, or run them on Linux.
   - Learned on #3's e-graph spike.
+- **ycxx's ThreadSanitizer build runs on a Mac in the `gcc:16` image.** The arm64 image's GCC
+  16.2 ships libtsan, and Docker Desktop's VM has `vm.mmap_rnd_bits` at 18, under TSan's limit of
+  28. Install cmake and ninja-build, mount the checkout, keep the build in a Docker volume, and run
+  `YCXX_TSAN_BUILD_DIR=/build tools/tsan`. It took about 25 minutes. The CI job's first run took 47 (17 of them
+  building GCC on the cache miss), and a dispatch round trip costs more than a local rerun.
+  - Do: run tools/tsan this way before dispatching the nightly job. A canary keeps a clean run
+    honest: reintroduce a known race (here, the deque's fence-based push) and see the test fail.
+  - Learned on #105.
 - **GCC 16.2 can write a module interface it cannot read back.** Adding a member of a new struct
   type to `pipeline::TranslationUnit` (a reflection-serialized engine value) made every importer of
   `ycxx.pipeline` fail with `failed to read compiled module cluster N: Bad file data` and `failed
@@ -452,3 +460,12 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
     a stray token). Check that each gives a syntax error on the line Clang and GCC use, not a
     not-supported message or silent acceptance (`tests/own/syntax`).
   - Learned on #212.
+- **Template parameters are positional, so "the current instantiation" is a property of the
+  point, not of the type.** `R<T>` written inside an alias template `template<class T> using RT =
+  typename R<T>::type;` is the same entity as `R`'s own current instantiation, because both `T`s are
+  (depth 0, index 0). Looking members up early in "any class that is a current instantiation"
+  read the primary template's member where a partial specialization's was meant.
+  - Do: look a dependent class's members up early only when it is the class whose
+    member-specification is being read (`Sema::current_class`), or when matching an out-of-class
+    member definition against its own class.
+  - Learned on #88 step 5.

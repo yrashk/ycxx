@@ -40,8 +40,8 @@ build/bin/ycxx cxx hello.cpp -o hello && ./hello
 - `[[…]]` attributes, and the GNU attributes and `asm` labels the macOS SDK's headers use
   ([docs/EXTENSIONS.md](docs/EXTENSIONS.md));
 - templates: function, class and variable templates, deduction, partial ordering, explicit and
-  partial specializations, parameter packs and fold expressions, two-phase lookup, with Itanium
-  names identical to Clang's;
+  partial specializations, parameter packs and fold expressions, alias templates, two-phase
+  lookup, with Itanium names identical to Clang's;
 - casts, `sizeof`/`alignof` of non-class types, and `decltype`;
 - constant evaluation on ycxx's own interpreter: `constexpr`, `consteval`, `constinit`,
   `static_assert` and `if consteval`, with errors that explain why something is not constant;
@@ -65,7 +65,7 @@ through the daemon, without unsaved text ever reaching a build.
 - The standard library and its headers. C headers such as `<stdio.h>` compile and `printf` runs;
   libycxx's `<cstdio>` still needs parameter packs and concepts.
 - Inheritance and virtual functions, passing classes by value, `sizeof` of a class.
-- Concepts, member and alias templates, template template parameters, `if constexpr`.
+- Concepts, member templates, template template parameters, `if constexpr`.
 - Floating-point arithmetic, exceptions, and optimization (`-O`).
 - The daemon as the default, and go-to-definition in the language server.
 - Linux and x86-64 output.

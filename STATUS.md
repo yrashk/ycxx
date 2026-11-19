@@ -122,7 +122,9 @@ What is true of the code today. Work in progress and its owners are tracked in
   is §A9's memo-table comparison against a cold `Db` (#19); both fuzzes use it. `unit.engine_inputs`: providers (once per cell under
   contention, durability, failure), the `editor` and `ambient` shortcuts, `reset_unobserved`
   racing readers over 300 rounds, counts per request and per kind. Clean under
-  ASan and UBSan; ThreadSanitizer needs Linux (#105).
+  ASan and UBSan. ThreadSanitizer runs nightly on Linux (`tools/tsan`, `linux-x86_64-tsan`; #105).
+  The deque stores `bottom_` with release, not a release fence, since ThreadSanitizer does not
+  model fences.
 - Not yet: allocation-free waits, per-worker frame free lists and lock-free index reads
   (#104); the cycle report's program-order path note (#106); contextual queries (#16);
   eviction and persistence (#17).
@@ -1121,6 +1123,27 @@ session's.*
   arguments, which `__int_pack_double` needs (#209); an expansion for non-pack parameters and
   per-element notes (#210); alias templates and concepts (#88); built-in type traits
   (`__is_same`, `__remove_cv`, …) that libycxx's headers use.
+
+## Templates, ζ step 5: alias templates and member aliases (#88, 2026-11-18)
+
+- **Member typedefs and alias-declarations** (#180, item 1): `using T = …;` and `typedef … T;` in
+  a class or class template are types of its scope (`ClassRec.types`, as nested enumerations
+  are): named by later members and member function bodies, as `C::T` outside, and as
+  `typename X<T>::type` through a specialization. In an instantiation, a member is looked up among
+  the specialization's own member records (`AtItem::instantiating`).
+- **Alias templates** at namespace scope ([temp.alias]): `template<…> using A = type-id;`, an
+  `alias_template` entity (scope, name, head). A use `A<args>` (also `N::A<args>`, in
+  nested-name-specifiers and wherever a class template-id may be) is the type it stands for with
+  the arguments substituted, so it has no identity or mangling of its own; packs group as for
+  class templates. `Templates::complete_class` completes a class that substituting
+  `typename X<T>::type` needs, instantiating a specialization.
+- Tests: `tests/own/templates/a5-*`; 2 more draft examples pass. `<cstdio>`: 78 → 53 errors.
+- Also: `C::T` inside the class (being defined or instantiated) and in its out-of-class member
+  definitions names its member type, as the current instantiation's ([temp.dep.type]/1).
+- Not yet: access, hiding and qualified functional casts of member types (#216); member alias
+  templates (`template<…> using __apply = …` in a class), with member
+  templates; template template parameters (#208); value-dependent expressions as template
+  arguments (#209).
 
 ## Bootstrap workarounds
 
