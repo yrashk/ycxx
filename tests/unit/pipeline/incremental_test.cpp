@@ -408,29 +408,27 @@ void records() {
   }
 }
 
-// Nesting too deep for the stack (#187): on workers with 1 MiB stacks, 20,000 nested parentheses
-// and 20,000 nested blocks are diagnosed, not a crash, and the session goes on.
+// Nesting too deep for the stack (#187): on workers with 1 MiB stacks, 20,000 nested parentheses,
+// blocks, increments, `sizeof`s and braced lists are diagnosed, not a crash, and the session goes
+// on. The rest of the pipeline is #260.
 void too_deep() {
   engine::Pool pool(2, std::nullopt, std::size_t{1} << 20);
   pl::Session s(pool);
   constexpr int n = 20000;
   const std::string parens = "int main() { return " + std::string(n, '(') + "0" + std::string(n, ')') + "; }\n";
   const std::string blocks = "int main() { " + std::string(n, '{') + std::string(n, '}') + " return 0; }\n";
-  for (const std::string* text : {&parens, &blocks}) {
+  std::string increments = "int main() { int x = 0; return ", sizes = "int main() { return ";
+  for (int i = 0; i < n; ++i) increments += "++";
+  for (int i = 0; i < n; ++i) sizes += "sizeof ";
+  increments += "x; }\n";
+  sizes += "0; }\n";
+  const std::string braces = "int main() { int a = " + std::string(n, '{') + "0" + std::string(n, '}') + "; return a; }\n";
+  for (const std::string* text : std::initializer_list<const std::string*>{&parens, &blocks, &increments, &sizes, &braces}) {
     build(s, *text);
     const pl::FrontResult& f = s.get<pl::TuFront>(tu);
     check(f.has_errors() && std::ranges::any_of(f.messages, [](const pl::Message& m) { return m.text.contains("nested too deeply"); }),
           "nesting too deep for the stack: diagnosed");
   }
-  // Instantiations nest through the analysis too: the depth limit (900) or the stack, whichever
-  // comes first, is diagnosed.
-  build(s, "template <int N> int f() { return f<N - 1>() + 1; }\ntemplate <> int f<0>() { return 0; }\n"
-           "int main() { return f<5000>() - 5000; }\n");
-  const pl::FrontResult& t = s.get<pl::TuFront>(tu);
-  check(t.has_errors() && std::ranges::any_of(t.messages, [](const pl::Message& m) {
-          return m.text.contains("nested too deeply") || m.text.contains("nest more than");
-        }),
-        "instantiations too deep: diagnosed");
   build(s, v0);
   check(s.get<pl::Link>(program).image == cold(v0), "the session goes on after a too-deep unit");
 }

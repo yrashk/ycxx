@@ -9,8 +9,9 @@ import std;
 
 export namespace ycxx::stack {
 
-// Whether more than half of this thread's stack is in use: the other half is left for unwinding
-// and for the passes after the one that asks, which recurse over the same nesting.
+// Whether more than half of this thread's stack is in use. The parser asks it; the passes after
+// the parse recurse over the same nesting and are not guarded yet (a later pass may use more stack
+// per level: #260).
 bool deep() noexcept {
   static thread_local const std::pair<std::uintptr_t, std::uintptr_t> b = bounds();
   if (b.second <= b.first) return false;  // unknown

@@ -1650,7 +1650,7 @@ public:
   }
 
   Ex cast_expression() {
-    deep_enough();  // parentheses, casts and unary operators nest through here
+    deep_enough();  // parentheses and casts nest through here
     if (is(Tk::l_paren)) {
       // `(T)e` ([expr.cast]), as static_cast performs it; a parenthesized expression otherwise.
       u32 back = i_, begin = pos();
@@ -1673,6 +1673,7 @@ public:
 
   // unary-expression ([expr.unary]).
   Ex unary_expression() {
+    deep_enough();  // `++`, `--` and `sizeof` take their operands through here
     u32 begin = pos();
     std::optional<ast::UnaryOp> op;
     switch (kind()) {
@@ -2026,6 +2027,7 @@ public:
   // braced-init-list ([dcl.init.general]): `{ initializer-clause, … }`, or with designators
   // `{ .m = e, .n{…} }` ([dcl.init.aggr]).
   std::unique_ptr<sema::Braced> braced_init_list() {
+    deep_enough();  // nested braced lists
     auto b = std::make_unique<sema::Braced>();
     b->begin = pos();
     expect(Tk::l_brace);
