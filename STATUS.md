@@ -1659,8 +1659,13 @@ values, end to end; results match Clang's bit for bit.
   `__GLOBAL__sub_I_<file>`; a pointer to it goes in `__DATA,__mod_init_func`
   (`obj::standard_section::mod_init_func`, `aarch64::DataKind::init_func`), which dyld runs before
   `main`. A dynamically initialized `const` variable is placed in writable data.
-- Not yet: references bound at run time (#367); inline variables (#368); default member
-  initializers that are not constants (#118).
+- An initializer is dynamic when it is not a constant expression but the front end has code for
+  it (`sema::has_runtime_code`); one it has no code for, or a scalar's that hit the evaluator's
+  limits, is still an error. Class objects the interpreter cannot evaluate yet are initialized
+  dynamically even when constant by the draft (#25). Each declaration's variables get their own
+  function (`__GLOBAL__sub_I_<file>.<n>`), so an error points at it.
+- Not yet: references bound at run time (#367); inline variables and variable templates (#368);
+  default member initializers that are not constants (#118); array construction as a loop (#370).
 - Tests: `tests/own/dynamic-init/` (spec-only, 16 tests; a Clang peer with its own initializers
   in `peer.run.cpp`).
 
