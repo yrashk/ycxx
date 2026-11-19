@@ -357,6 +357,21 @@ struct DestroyMember {
   EntityId destructor;
 };
 
+// The dynamic initialization of a namespace-scope variable ([basic.start.dynamic]), a statement
+// of the unit's initialization function: `init`, the variable's initializer from its declaration
+// (another item's tree, so its nodes take this node's position), initializes the object of
+// `variable`, of type `type`. Its `destructor`, if any, is then registered to run at exit
+// ([basic.start.term]) through `atexit` (`__cxa_atexit`) with `dso` (`__dso_handle`), the
+// image's handle (Itanium C++ ABI §3.3.5).
+struct StaticInit {
+  EntityId variable;
+  QualType type;
+  Child init;
+  EntityId destructor;
+  EntityId atexit;
+  EntityId dso;
+};
+
 struct Attribute {
   NameId scope;  // NameId of the attribute-namespace, or of "" for none
   NameId name;
@@ -368,7 +383,7 @@ using Nodes = closed_list<Literal, DeclRef, Paren, Unary, Binary, OrderedBinary,
                           Conditional, While, Do, For, Break, Continue, DeclStmt, Declarator, DeclGroup,
                           IfConsteval, StaticAssert, Member, InitList, ValueInit, DefaultInit, This,
                           MemberCall, Materialize, CtorCall, MemberInit, Destructor, DestroyMember, Dependent,
-                          DepName, BuiltinCall, Lambda>;
+                          DepName, BuiltinCall, Lambda, StaticInit>;
 
 static_assert(Nodes::size < max_node_kinds);
 

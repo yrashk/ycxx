@@ -24,7 +24,8 @@ namespace ycxx::aarch64 {
 
 // cstring: NUL-terminated string literals; rodata: read-only without pointers; data_const: read-only
 // after load (holds pointers the loader adjusts); data: writable; bss: writable, zero.
-export enum class DataKind : std::uint8_t { cstring, rodata, data_const, data, bss };
+// `init_func` is a pointer in the list of functions run before `main` ([basic.start.dynamic]).
+export enum class DataKind : std::uint8_t { cstring, rodata, data_const, data, bss, init_func };
 
 // A pointer inside a variable's initial bytes: the address of `target` plus `addend`, at `offset`.
 export struct DataReloc {
@@ -142,13 +143,15 @@ std::expected<obj::object, CodegenError> assemble(std::string name, std::span<co
   std::optional<std::uint32_t> text;
   std::map<DataKind, std::uint32_t> sections;
   if (!functions.empty()) text = o.add_section(obj::standard_section::text);
-  for (DataKind k : {DataKind::cstring, DataKind::rodata, DataKind::data_const, DataKind::data, DataKind::bss}) {
+  for (DataKind k : {DataKind::cstring, DataKind::rodata, DataKind::data_const, DataKind::data, DataKind::bss,
+                     DataKind::init_func}) {
     if (!std::ranges::any_of(data, [&](const DataDef& d) { return d.kind == k; })) continue;
     obj::standard_section s = k == DataKind::cstring  ? obj::standard_section::cstring
                               : k == DataKind::rodata ? obj::standard_section::rodata
                               : k == DataKind::data_const ? obj::standard_section::data_const
                               : k == DataKind::data   ? obj::standard_section::data
-                                                      : obj::standard_section::bss;
+                              : k == DataKind::bss    ? obj::standard_section::bss
+                                                      : obj::standard_section::mod_init_func;
     sections[k] = o.add_section(s);
   }
 

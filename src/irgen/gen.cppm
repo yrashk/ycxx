@@ -414,11 +414,14 @@ class Gen {
   }
 
   // Positions every node emitted while `a` is generated at `a`, and restores the outer position.
+  // Inside another item's tree (`pinned_`), every node keeps the outer position.
   struct Position {
-    uint32_t& loc;
+    Gen& g;
     uint32_t saved;
-    Position(uint32_t& l, uint32_t at) : loc(l), saved(l) { loc = at; }
-    ~Position() { loc = saved; }
+    Position(Gen& gen, uint32_t at) : g(gen), saved(gen.loc_) {
+      if (g.pinned_ == 0) g.loc_ = at;
+    }
+    ~Position() { g.loc_ = saved; }
   };
 
   // A substatement is in a scope of its own even if it is not a compound statement ([stmt.pre]).
@@ -431,7 +434,7 @@ class Gen {
   void stmt(At a) {
     if (a.id == NodeId::none) return;
     ensure_live();
-    Position here(loc_, a.offset);
+    Position here(*this, a.offset);
     if (is<ast::Compound>(a)) {
       auto s = get<ast::Compound>(a);
       push_scope();
@@ -458,7 +461,7 @@ class Gen {
     } else if (is<ast::DeclStmt>(a)) {
       for (ast::Child c : ast_.children(get<ast::DeclStmt>(a).decls)) {
         At v = child(a, c);
-        Position at(loc_, v.offset);
+        Position at(*this, v.offset);
         if (!is<ast::LocalVar>(v)) unsupported(v, "in a declaration statement");
         local_var(v);
       }
@@ -493,6 +496,8 @@ class Gen {
     } else if (is<ast::For>(a)) {
       auto f = get<ast::For>(a);
       loop(a, f.init, f.condition, f.increment, f.body, false);
+    } else if (is<ast::StaticInit>(a)) {
+      static_init(a);
     } else if (is<ast::Break>(a) || is<ast::Continue>(a)) {
       bool brk = is<ast::Break>(a);
       if (loops_.empty()) unsupported(a, "outside a loop");
@@ -565,7 +570,7 @@ class Gen {
   // Initializes the object at `p` from the prvalue `e` ([dcl.init]). In a `zeroed` object, a
   // value-initialized element is already zero.
   void initialize(const Place& p, At e, bool zeroed) {
-    Position here(loc_, e.offset);
+    Position here(*this, e.offset);
     if (is<ast::Paren>(e)) return initialize(p, child(e, get<ast::Paren>(e).operand), zeroed);
     if (facts_.is_reference(p.type)) {
       store(p, lvalue(e).ptr);  // a reference member holds its object's address
@@ -708,6 +713,35 @@ class Gen {
     enter(join);
   }
 
+  // [basic.start.dynamic]: the variable's object is initialized, then its destructor is registered
+  // with `__cxa_atexit(destructor, &object, &__dso_handle)` ([basic.start.term]).
+  void static_init(At a) {
+    auto si = get<ast::StaticInit>(a);
+    Place p{pure(ir::Op::global, facts_.pointer_to(si.type), {}, {word(si.variable)}), si.type};
+    if (si.init.id != NodeId::none) {
+      ++pinned_;  // the initializer's offsets are its declaration's
+      full_expression([&] {
+        initialize(p, child(a, si.init), false);
+        return 0;
+      });
+      --pinned_;
+    }
+    if (si.destructor == ast::EntityId::none) return;
+    // An array's elements are each registered, the first first, so the last is destroyed first.
+    auto each = [&](this auto& self, const Place& o) -> void {
+      if (cls(o.type) == TypeClass::array) {
+        ast::QualType e = facts_.element(o.type);
+        for (std::uint64_t i = 0; i < facts_.bound(o.type); ++i) self(subobject(o, ir::Step::elem, uint32_t(i), e));
+        return;
+      }
+      ast::QualType vp = facts_.pointer_to(facts_.int_type());  // any object pointer: the callee takes void*
+      ValueId args[] = {pure(ir::Op::func_addr, vp, {}, {word(si.destructor)}), o.ptr,
+                        pure(ir::Op::global, vp, {}, {word(si.dso)})};
+      call_fn(si.atexit, facts_.int_type(), args, 0);
+    };
+    each(p);
+  }
+
   struct Loop {
     ir::BlockId next, exit;  // where `continue` and `break` go
     std::size_t depth;       // the scopes open outside the body
@@ -810,7 +844,7 @@ class Gen {
   }
 
   std::optional<ValueId> rvalue_or_void(At a) {
-    Position here(loc_, a.offset);
+    Position here(*this, a.offset);
     ast::ExprInfo ei = info(a);
     if (ei.category != ast::ValueCategory::prvalue) unsupported(a, "as a glvalue where a prvalue is expected");
     ast::QualType t = ei.type;
@@ -1177,7 +1211,7 @@ class Gen {
 
   // The object a glvalue designates ([basic.lval]).
   Place lvalue(At a) {
-    Position here(loc_, a.offset);
+    Position here(*this, a.offset);
     ast::ExprInfo ei = info(a);
     if (ei.category == ast::ValueCategory::prvalue) unsupported(a, "as a prvalue where a glvalue is expected");
     ast::QualType t = ei.type;
@@ -1346,6 +1380,7 @@ class Gen {
   std::vector<std::vector<Ending>> temps_;   // the open full-expressions' temporaries
   std::vector<At> epilogue_;                 // a destructor's DestroyMember statements
   int branches_ = 0;                         // conditionally evaluated operands entered
+  int pinned_ = 0;                           // inside another item's tree: positions stay
 };
 
 template <Facts F>

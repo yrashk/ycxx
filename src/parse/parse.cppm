@@ -2821,6 +2821,12 @@ private:
     decls_.push_back(sem);
   }
 
+  // An array's innermost element type; any other type itself.
+  QualType element_type(QualType t) {
+    while (s_.types().is_array(t)) t = s_.types().rec(t).inner;
+    return t;
+  }
+
   // A constructor or destructor declared in class `c` ([class.ctor], [class.dtor]), possibly
   // deleted ([dcl.fct.def.delete]).
   void special_member(const ast::DeclSema& c, bool ctor) {
@@ -3582,10 +3588,11 @@ private:
         if (auto v = constant_initializer(init)) {
           value = *v;
           if (spec.is_constexpr) p_->set_constant(sem.entity, *v, k_);
-        } else {
-          s_.diag(b->begin, spec.is_constexpr || spec.is_constinit ? Diag::not_constant : Diag::nonconstant_initializer,
-                  sema::reason_unsupported);
-        }
+        } else if (spec.is_constexpr || spec.is_constinit) {
+          s_.diag(b->begin, Diag::not_constant, sema::reason_unsupported);
+        } else if (types.is_reference(d.type) || spec.is_inline) {
+          s_.diag(b->begin, Diag::nonconstant_initializer, sema::reason_unsupported);  // #367, #368
+        }  // else dynamic initialization ([basic.start.dynamic]): the unit's initialization function
       }
     } else if (!fn && (early_expr || ps_.accept(Tk::equal))) {
       {
@@ -3608,22 +3615,53 @@ private:
             if (spec.is_constexpr || (sema::Types::is_const(d.type) && !sema::Types::is_volatile(d.type) &&
                                       types.is_integral(d.type)))
               p_->set_constant(sem.entity, *v.value, k_);
-          } else {
-            s_.diag(e.begin, spec.is_constexpr || spec.is_constinit ? Diag::not_constant : Diag::nonconstant_initializer,
-                    v.reason);
-          }
+          } else if (spec.is_constexpr || spec.is_constinit) {
+            s_.diag(e.begin, Diag::not_constant, v.reason);
+          } else if (types.is_reference(d.type) || spec.is_inline) {
+            // A reference variable's object (#367); an inline variable is initialized once (#368).
+            s_.diag(e.begin, Diag::nonconstant_initializer, v.reason);
+          }  // else dynamic initialization ([basic.start.dynamic]): the unit's initialization function
         }
       }
-    } else if (!fn && ps_.is(Tk::l_paren)) {
-      s_.diag(ps_.pos(), Diag::not_supported, ps_.kind());
-      ps_.skip_to_semi();
+    } else if (!fn && ps_.is(Tk::l_paren) && !pattern) {
+      // Direct-initialization ([dcl.init.general]): `T x(args)`, constant or dynamic.
+      u32 open = ps_.pos();
+      ps_.bump();
+      std::vector<Ex> args;
+      if (!ps_.is(Tk::r_paren))
+        do args.push_back(ps_.assignment_expression());
+        while (ps_.accept(Tk::comma));
+      if (!ps_.expect(Tk::r_paren)) ps_.skip_to_semi();
+      else if (types.is_class(d.type)) init = s_.construct(d.type, std::move(args), open, ps_.pos());
+      else if (args.size() == 1 && !types.is_array(d.type) && !types.is_reference(d.type))
+        init = s_.convert(args[0], d.type, open);
+      else s_.diag(open, Diag::not_supported, Tk::l_paren);  // a list for a scalar or an array
+      if (init.ok() && !types.is_class(d.type) && !types.is_reference(d.type)) {
+        sema::Evaluated v = sema::Evaluator(s_, q_).evaluate(init);
+        if (v.value) value = *v.value;
+        else if (spec.is_constexpr || spec.is_constinit) s_.diag(open, Diag::not_constant, v.reason);
+        else if (spec.is_inline) s_.diag(open, Diag::nonconstant_initializer, v.reason);  // #368
+      } else if (init.ok() && (spec.is_constexpr || spec.is_constinit)) {
+        s_.diag(open, Diag::not_constant, sema::reason_unsupported);
+      } else if (init.ok() && spec.is_inline) {
+        s_.diag(open, Diag::nonconstant_initializer, sema::reason_unsupported);  // #368
+      }
     } else if (pattern) {
       // Its specializations' types are complete, or not ([temp.inst]/7).
     } else if (!fn && definition && !s_.require_complete(d.type, d.name_at)) {
       // A definition needs a complete object type ([basic.def]).
+    } else if (!fn && definition && !types.is_dependent(d.type) && s_.has_user_ctors(element_type(d.type))) {
+      // Default-initialization by a constructor, of an object or each element: dynamic
+      // ([basic.start.dynamic]).
+      init = s_.default_init(d.type, d.name_at, ps_.pos());
+      if (spec.is_inline) s_.diag(d.name_at, Diag::nonconstant_initializer, sema::reason_unsupported);  // #368
     } else if (!fn && definition && s_.has_member_inits(d.type)) {
-      // Zero-initialization, then the default member initializers ([basic.start.static]).
-      value = *constant_initializer(s_.default_init(d.type, d.name_at, ps_.pos()));
+      // Zero-initialization, then the default member initializers ([basic.start.static]), or, if
+      // they are not constant, dynamic initialization ([basic.start.dynamic]).
+      Ex di = s_.default_init(d.type, d.name_at, ps_.pos());
+      if (auto v = di.ok() ? constant_initializer(di) : std::nullopt) value = *v;
+      else if (di.ok() && spec.is_inline) s_.diag(d.name_at, Diag::nonconstant_initializer, sema::reason_unsupported);  // #368
+      else init = di;
     } else if (!fn && d.qualified) {
       // [class.static.data]/4: the definition of a member initialized in its class repeats no
       // initializer, and has the class's value.
