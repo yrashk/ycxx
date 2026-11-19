@@ -2318,6 +2318,12 @@ path of request positions through the demand lists. Nothing is ordered by comple
 
 #### B6.5 Constraints and `requires`
 
+*Amended by #88 step 6 (ast.md §6.6):* until this section's queries exist, the stand-in
+`parse::Program` normalizes when a declaration is analysed and memoizes `atomic_satisfied` by the
+atom's `ConstId` (its tokens and mapping); a requires-expression is analysed in place, false in a
+templated entity when a requirement is invalid and ill-formed elsewhere. The END comparison below
+is #235.
+
 `satisfies(concept entity, canonical args, ctx)` normalizes ([temp.constr.normal]) and evaluates
 atomic constraints with `atomic_satisfied(atomic id, mapping, ctx)`, each a substitution followed by
 constant evaluation (§B7); `requires`-expressions ([expr.prim.req]) substitute each requirement and

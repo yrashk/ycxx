@@ -21,7 +21,7 @@ the code in [STATUS.md](STATUS.md), and the work in
 ### What you can do today
 
 **Compile and run programs.** `ycxx cxx a.cpp -o a` (also `-c`, `-fsyntax-only`, `-E`, `-I`,
-`-D`, `-std=c++26`) builds an executable with ycxx's own front end, IR, AArch64 code generator
+`-D`, `-std=c++26`, and `-fclass-call-abi=apple` to pass classes as Apple Clang does) builds an executable with ycxx's own front end, IR, AArch64 code generator
 and Mach-O linker. It also links object files from Clang or GCC. Errors are reported as
 `file:line:col: error: …`.
 
@@ -42,8 +42,9 @@ build/bin/ycxx cxx hello.cpp -o hello && ./hello
   type-trait built-ins libycxx's headers use (`__is_same`, `__remove_cv`, …)
   ([docs/EXTENSIONS.md](docs/EXTENSIONS.md));
 - templates: function, class and variable templates, deduction, partial ordering, explicit and
-  partial specializations, parameter packs and fold expressions, alias templates, two-phase
-  lookup, with Itanium names identical to Clang's;
+  partial specializations, parameter packs and fold expressions, alias templates, concepts and
+  requires-expressions in overload resolution, `if constexpr`, two-phase lookup, with Itanium
+  names identical to Clang's;
 - casts, `sizeof`/`alignof` of non-class types, and `decltype`;
 - constant evaluation on ycxx's own interpreter: `constexpr`, `consteval`, `constinit`,
   `static_assert` and `if consteval`, with errors that explain why something is not constant;
@@ -66,11 +67,13 @@ flags of its last build, or else with its line in the project's `compile_command
 ### Not yet
 
 - The standard library and its headers. C headers such as `<stdio.h>` compile and `printf` runs;
-  libycxx's `<cstdio>` still needs parameter packs and concepts.
+  libycxx's `<cstdio>` still needs static members of class templates, template template
+  parameters and pointer-to-member types.
 - Inheritance and virtual functions, `sizeof` of a class.
 - Access control: `private` and `protected` are not checked yet, so ycxx accepts code that
   uses private members ([#119](https://github.com/yrashk/ycxx/issues/119)).
-- Concepts, member templates, template template parameters, `if constexpr`.
+- Member templates, template template parameters, and constraints on class templates and
+  their members.
 - Floating-point arithmetic, exceptions, and optimization (`-O`).
 - Go-to-definition in the language server.
 - Linux and x86-64 output.
@@ -78,7 +81,8 @@ flags of its last build, or else with its line in the project's `compile_command
 ### In progress
 
 - Standard headers, starting with `<cstdio>` ([#133](https://github.com/yrashk/ycxx/issues/133)).
-- Templates: parameter packs, then concepts ([#88](https://github.com/yrashk/ycxx/issues/88)).
+- Templates: static members of class templates, then template template parameters
+  ([#88](https://github.com/yrashk/ycxx/issues/88)).
 
 Next come exceptions ([#89](https://github.com/yrashk/ycxx/issues/89)).
 

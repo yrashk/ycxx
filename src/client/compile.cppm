@@ -9,6 +9,7 @@ import ycxx.obj.macho;
 import ycxx.pipeline;
 import ycxx.engine;
 import ycxx.pp;
+import ycxx.ast.target;
 
 export namespace ycxx::compile {
 
@@ -151,6 +152,13 @@ std::expected<Options, std::string> parse_options(std::span<const std::string_vi
       auto [p, ec] = std::from_chars(v.data(), v.data() + v.size(), n);
       if (ec != std::errc{} || p != v.data() + v.size() || n == 0) return std::unexpected(std::format("invalid value in '{}'", a));
       o.pp.template_depth = n;
+    } else if (a.starts_with("-fclass-call-abi=")) {
+      // Which classes pass in registers (DECISIONS §1.6): `itanium`, as upstream Clang and GCC,
+      // or `apple`, as Apple Clang on arm64 Darwin.
+      auto v = a.substr(17);
+      if (v == "itanium") o.pp.call_triviality = ast::CallTriviality::itanium;
+      else if (v == "apple" && o.pp.target->apple_calls) o.pp.call_triviality = ast::CallTriviality::apple;
+      else return std::unexpected(std::format("invalid value in '{}'", a));
     } else if (a.starts_with("-std=")) {
       // The language is the C++26 working draft (DECISIONS §1.1).
       if (a != "-std=c++26" && a != "-std=c++2c") return std::unexpected(std::format("unsupported language standard '{}'; ycxx compiles C++26", a.substr(5)));
@@ -318,7 +326,8 @@ std::vector<std::string> split_words(std::string_view text) {
 
 namespace {
 
-// The arguments of `args` a check keeps: the preprocessing options and the template depth, and
+// The arguments of `args` a check keeps: the preprocessing options, the template depth and the
+// class call ABI, and
 // with `std` the language standard (ycxx's own command lines; another compiler's may name one ycxx
 // does not take).
 void checking_options(std::span<const std::string_view> args, bool std, std::vector<std::string>& out) {
@@ -329,7 +338,8 @@ void checking_options(std::span<const std::string_view> args, bool std, std::vec
       for (std::size_t k = from; k <= i; ++k) out.emplace_back(args[k]);
     } else if (args[i] == "-o") {
       ++i;
-    } else if ((std && args[i].starts_with("-std=")) || args[i].starts_with("-ftemplate-depth=")) {
+    } else if ((std && args[i].starts_with("-std=")) || args[i].starts_with("-ftemplate-depth=") ||
+               args[i].starts_with("-fclass-call-abi=")) {
       out.emplace_back(args[i]);
     }
   }
