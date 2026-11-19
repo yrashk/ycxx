@@ -75,12 +75,13 @@ std::expected<std::string, std::string> mangled_specialization(const ast::Intern
 // <substitution> for the candidate at `index`: `S_`, then `S0_` … `SZ_`, `S10_` … (§5.1.10).
 std::string substitution(std::size_t index);
 
-// The symbol of an entity: `_` and the mangled name or the identifier.
+// The symbol of an entity: the mangled name or identifier with the platform prefix, if any.
 std::expected<std::string, std::string> symbol_name(const ast::Interners& in, std::string_view name, ast::QualType type,
                                                     bool is_function, ast::LangLinkage lang,
                                                     const ClassNames& classes = {},
                                                     ast::EntityId scope = ast::EntityId::none,
-                                                    bool special = false, const TemplateSpec* spec = nullptr);
+                                                    bool special = false, const TemplateSpec* spec = nullptr,
+                                                    bool leading_underscore = true);
 
 }  // namespace ycxx::pipeline
 
@@ -738,25 +739,26 @@ std::expected<std::string, std::string> mangled_specialization(const ast::Intern
 std::expected<std::string, std::string> symbol_name(const ast::Interners& in, std::string_view name, ast::QualType type,
                                                     bool is_function, ast::LangLinkage lang,
                                                     const ClassNames& classes, ast::EntityId scope,
-                                                    bool special, const TemplateSpec* spec) {
+                                                    bool special, const TemplateSpec* spec, bool leading_underscore) {
+  const std::string prefix = leading_underscore ? "_" : "";
   if (spec) {
     auto m = mangled_specialization(in, name, *spec, classes, scope, special);
     if (!m) return m;
-    return "_" + *m;
+    return prefix + *m;
   }
   if (scope != ast::EntityId::none && !is_function) {
     // A static data member or a namespace's variable: a <nested-name> (§5.1.2).
     Mangler m(in, classes);
-    auto prefix = m.prefix(scope);
-    if (!prefix) return prefix;
-    return std::format("__ZN{}{}{}E", *prefix, name.size(), name);
+    auto scope_name = m.prefix(scope);
+    if (!scope_name) return scope_name;
+    return std::format("{}_ZN{}{}{}E", prefix, *scope_name, name.size(), name);
   }
   // [basic.start.main]: only the global namespace's `main` is the program's.
   if (!is_function || (name == "main" && scope == ast::EntityId::none) || lang == ast::LangLinkage::c)
-    return "_" + std::string(name);
+    return prefix + std::string(name);
   auto m = mangled_function(in, name, type, classes, scope, special);
   if (!m) return m;
-  return "_" + *m;
+  return prefix + *m;
 }
 
 }  // namespace ycxx::pipeline

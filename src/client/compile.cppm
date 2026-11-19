@@ -6,6 +6,7 @@ export module ycxx.compile;
 
 import std;
 import ycxx.obj.macho;
+import ycxx.obj.elf;
 import ycxx.pipeline;
 import ycxx.engine;
 import ycxx.pp;
@@ -129,10 +130,11 @@ namespace {
 // What the c++-compatible command line asks for.
 struct Options {
   enum class Stop { link, object, syntax, preprocess } stop = Stop::link;
-  pp::Config pp;  // -I, -isystem, -iquote, -D, -U
+  pp::Config pp;  // include paths, macros and target
+  bool nostdlib = false;
   std::optional<std::string> output;
   std::vector<std::string> sources;  // translation units
-  std::vector<std::string> objects;  // Mach-O objects, linked as they are
+  std::vector<std::string> objects;  // objects named on the command line
 };
 
 bool is_source(std::string_view f) {
@@ -152,7 +154,14 @@ std::expected<Options, std::string> parse_options(std::span<const std::string_vi
     if (a == "-c") o.stop = Options::Stop::object;
     else if (a == "-fsyntax-only") o.stop = Options::Stop::syntax;
     else if (a == "-E") o.stop = Options::Stop::preprocess;
-    else if (a == "-o") {
+    else if (a == "-nostdlib") o.nostdlib = true;
+    else if (a == "--target" || a.starts_with("--target=")) {
+      if (a == "--target" && i + 1 == args.size()) return std::unexpected("argument to '--target' is missing");
+      auto triple = a == "--target" ? args[++i] : a.substr(9);
+      const ast::Target* target = ast::target_for_triple(triple);
+      if (!target) return std::unexpected(std::format("unsupported target '{}'", triple));
+      o.pp.target = target;
+    } else if (a == "-o") {
       if (i + 1 == args.size()) return std::unexpected("argument to '-o' is missing");
       o.output = std::string(args[++i]);
     } else if (a.starts_with("-o")) o.output = std::string(a.substr(2));
@@ -168,7 +177,7 @@ std::expected<Options, std::string> parse_options(std::span<const std::string_vi
       // or `apple`, as Apple Clang on arm64 Darwin.
       auto v = a.substr(17);
       if (v == "itanium") o.pp.call_triviality = ast::CallTriviality::itanium;
-      else if (v == "apple" && o.pp.target->apple_calls) o.pp.call_triviality = ast::CallTriviality::apple;
+      else if (v == "apple") o.pp.call_triviality = ast::CallTriviality::apple;
       else return std::unexpected(std::format("invalid value in '{}'", a));
     } else if (a.starts_with("-std=")) {
       // The language is the C++26 working draft (DECISIONS §1.1).
@@ -183,7 +192,13 @@ std::expected<Options, std::string> parse_options(std::span<const std::string_vi
     else if (a.ends_with(".o")) o.objects.emplace_back(a);
     else o.sources.emplace_back(a);
   }
+  if (o.pp.target != &ast::x86_64_linux && o.nostdlib)
+    return std::unexpected("unsupported option '-nostdlib'");
+  if (o.pp.call_triviality == ast::CallTriviality::apple && !o.pp.target->apple_calls)
+    return std::unexpected("invalid value in '-fclass-call-abi=apple'");
   if (o.sources.empty() && o.objects.empty()) return std::unexpected("no input files");
+  if (o.pp.target == &ast::x86_64_linux && o.stop == Options::Stop::link && !o.nostdlib)
+    return std::unexpected("hosted Linux linking is not supported. Use '-nostdlib' for a freestanding executable");
   if (o.output && o.stop == Options::Stop::object && o.sources.size() > 1)
     return std::unexpected("cannot specify '-o' with '-c' and several input files");
   for (const std::string& s : o.sources)
@@ -346,6 +361,14 @@ void checking_options(std::span<const std::string_view> args, bool std, std::vec
     const std::size_t from = i;
     if (auto taken = pp::take_option(args, i, scratch); taken && *taken) {
       for (std::size_t k = from; k <= i; ++k) out.emplace_back(args[k]);
+    } else if (args[i] == "--target" && i + 1 < args.size()) {
+      if (ast::target_for_triple(args[i + 1])) {
+        out.emplace_back(args[i]);
+        out.emplace_back(args[i + 1]);
+      }
+      ++i;
+    } else if (args[i].starts_with("--target=") && ast::target_for_triple(args[i].substr(9))) {
+      out.emplace_back(args[i]);
     } else if (args[i] == "-o") {
       ++i;
     } else if ((std && args[i].starts_with("-std=")) || args[i].starts_with("-ftemplate-depth=") ||
@@ -433,6 +456,7 @@ Done run(const Request& r, pp::Host& host, pipeline::Session& session, const Sto
   std::optional<std::string> bad_object;
   if (key.until == pipeline::Until::link) {
     std::vector<obj::object> objects;
+    const bool linux_target = opts->pp.target == &ast::x86_64_linux;
     // Objects named on the command line are read as they are, never through the file table (§5.2).
     for (const std::string& path : opts->objects) {
       auto text = read_disk(in_cwd(r, path));
@@ -441,7 +465,7 @@ Done run(const Request& r, pp::Host& host, pipeline::Session& session, const Sto
         break;
       }
       std::vector<std::uint8_t> bytes(text->begin(), text->end());
-      auto o = obj::macho::read_object(bytes, path);
+      auto o = linux_target ? obj::elf::read_object(bytes, path) : obj::macho::read_object(bytes, path);
       if (!o) {
         bad_object = o.error();
         break;
@@ -491,7 +515,15 @@ Done run(const Request& r, pp::Host& host, pipeline::Session& session, const Sto
     }
     if (until == pipeline::Until::object) {
       std::string o = opts->output ? *opts->output : object_name(path).native_encoded_string();
-      d.outputs.push_back({std::move(o), obj::macho::write_object(*u.object), false});
+      if (u.object->arch == obj::target::x86_64_linux) {
+        auto bytes = obj::elf::write_object(*u.object);
+        if (!bytes) {
+          render.file_level(bytes.error());
+          failed = true;
+          continue;
+        }
+        d.outputs.push_back({std::move(o), std::move(*bytes), false});
+      } else d.outputs.push_back({std::move(o), obj::macho::write_object(*u.object), false});
     }
   }
   if (failed || until != pipeline::Until::link) {
