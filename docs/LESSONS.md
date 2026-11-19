@@ -469,3 +469,11 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
     member-specification is being read (`Sema::current_class`), or when matching an out-of-class
     member definition against its own class.
   - Learned on #88 step 5.
+- **The item splitter must learn every token-level construct that looks like `name(`.** It decides
+  what a namespace-scope item declares from tokens alone, and a miss is silent: `typedef
+  __remove_cv(const int) T;` was split as a function named `__remove_cv`, so `T` never existed and
+  only its uses failed, far away.
+  - Do: when adding a specifier that takes parentheses (`decltype`, `__attribute__`, the type-trait
+    built-ins), teach `items.cppm`'s declarator scan and its function detection, and test a
+    namespace-scope typedef, variable and function template whose type begins with it.
+  - Learned on #211.
