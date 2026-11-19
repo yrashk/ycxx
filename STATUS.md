@@ -560,6 +560,18 @@ private daemons.
   `YCXX_CHAOS_SEED`; the daemon takes them from the client that starts it and reports `threads`
   in `ctl status`. Workers and the daemon's request threads have 256 MiB stacks (address space),
   above a main thread's 8 MiB (#178, #187).
+- Nesting too deep for the stack (#187): `ycxx.stack::deep()` says whether more than half of the
+  thread's stack is in use (pthreads, a partition per platform). The parser asks at
+  `cast_expression` (parentheses, casts), `unary_expression` (`++`, `--`, `sizeof`),
+  `braced_init_list` and `statement` (blocks), and at the
+  first deep one diagnoses "nested too deeply to analyse" and throws `parse::TooDeep`, which the
+  item's or body's analysis catches: the item fails, the unit has an error, the daemon lives.
+  Instantiations nest through those parses. `engine::Pool` takes a worker stack size (default
+  256 MiB); `unit.pipeline_incremental`'s `too_deep` runs 20,000-deep parentheses, blocks,
+  increments, `sizeof`s and braced lists on 1 MiB workers (without the guards: SIGBUS). Not yet:
+  declarators, template-ids, deep trees from flat chains, the passes after the parse, and a
+  diagnostic that does not depend on the stack's size (#260). The time to get that deep is
+  superlinear (#258).
 - Concurrent requests (#139, daemon design §4): a unit, a program and a request are named by what
   they are (`Session::unit`, `program`, `request`: path, working directory, configuration, object;
   units, objects, name), numbered by a registry whose values provide their inputs, so admitting a
