@@ -77,8 +77,9 @@ INTEGER ABI subset. Use the host linker to link these objects with libc.
   lookup through bases, derived-to-base conversions, base initializers;
 - namespaces, nested (`namespace a::b`) and inline ones, typedefs and alias declarations,
   `using` declarations and directives;
-- `[[…]]` attributes, the GNU attributes and `asm` labels the macOS SDK's headers use, and the
-  type-trait built-ins libycxx's headers use (`__is_same`, `__remove_cv`, …)
+- `[[…]]` attributes, the GNU attributes and `asm` labels the macOS SDK's headers use, the
+  GNU pointer qualifiers glibc uses, and the type-trait built-ins libycxx's headers use
+  (`__is_same`, `__remove_cv`, …)
   ([docs/EXTENSIONS.md](docs/EXTENSIONS.md));
 - templates: function, class and variable templates, deduction, partial ordering, explicit and
   partial specializations, static constexpr members of class templates, member function and

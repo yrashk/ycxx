@@ -79,6 +79,7 @@ enum class Diag : std::uint32_t {
   void_parameter [[=message{Severity::error, "a parameter cannot have type 'void'"}]],
   bound_not_constant [[=message{Severity::error, "an array bound must be a positive integral constant expression"}]],
   invalid_array_element [[=message{Severity::error, "an array element cannot have type '{0:t}'"}]],
+  restrict_function_pointer [[=message{Severity::error, "a pointer to a function cannot be restrict-qualified"}]],
   function_returns_function [[=message{Severity::error, "a function cannot return a function or an array"}]],
   function_initialized [[=message{Severity::error, "function '{0:n}' cannot have an initializer"}]],
   const_uninitialized [[=message{Severity::error, "const variable '{0:n}' must be initialized"}]],
