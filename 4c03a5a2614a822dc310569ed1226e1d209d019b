@@ -1,0 +1,43 @@
+November 19 Claude recovery handoff
+
+Recovery issue: https://github.com/yrashk/ycxx/issues/377
+Repository: yrashk/ycxx
+Handoff branch: handoff-nov-19/interp-25-ade4bb
+Original branch: refs/heads/claude/interp-25-ade4bb
+Original directory: (branch-only checkpoint; see session log paths)
+Original HEAD: 4c03a5a2614a822dc310569ed1226e1d209d019b
+Snapshot tip: 4c03a5a2614a822dc310569ed1226e1d209d019b
+Snapshot kind: original commit; no worktree changes added
+Task: Interpreter and constant evaluation
+Issues: https://github.com/yrashk/ycxx/issues/25
+Commits absent from current origin/main at inventory: 0
+
+Claude chat summaries (one entry per matched chat):
+
+Session e1b59716-7ac5-49f2-a027-a166e7985a91
+Log: /Users/yrashk/.claude/projects/-Users-yrashk-Projects-ycxx--claude-worktrees-build-ci-2331d6/e1b59716-7ac5-49f2-a027-a166e7985a91.jsonl
+Log SHA-256: 476894551d11d0d332e64a4a12b351ebc476363f5ede52b7cbfeebbe7e26aa9d
+This earlier pipeline chat implemented expression-to-IR generation for PR #54 and fixed review findings in pointer arithmetic, sequencing, cleanup rejection and void returns. It reported tools/test --fast and 26 unit tests passing, with mutation checks for branch-target selection. Its final work clarified lowering conventions and left the pushed PR for CI/integration. It is historical context from the same reused directory, separate from interpreter continuation.
+
+Session 6905ab91-e926-4e35-8fd3-d8312480151f
+Log: /Users/yrashk/.claude/projects/-Users-yrashk-Projects-ycxx--claude-worktrees-build-ci-2331d6/6905ab91-e926-4e35-8fd3-d8312480151f.jsonl
+Log SHA-256: 42cd86f7a7e04afd306b416aed628b4b8cf65d5f230603c9f6a2c55161246f58
+This earlier chat built the draft-example extraction/oracle workflow (PR #35), merged main while retaining engine and draft status entries, and reported fast checks passing with 700 then-unsupported tests. Re-extraction with oracles left tests/draft unchanged. CI was rerunning after bd97944. This checkpoint predates the later compiler slices.
+
+Session 2f4de7d3-0306-461b-9b8a-21a6103397ac
+Log: /Users/yrashk/.claude/projects/-Users-yrashk-Projects-ycxx--claude-worktrees-build-ci-2331d6/2f4de7d3-0306-461b-9b8a-21a6103397ac.jsonl
+Log SHA-256: 1889f594509da958c6b171b8bae99980d57391913fd102f9b2849858e5bcdf6a
+This pipeline-query chat implemented compiler stages as queries (#63 / PR #122), including body-level reuse and pipeline outputs as values. It coordinated the daemon interface: pipeline returns messages/objects/errors/image, while clients print and write files. The owner of the second PR to land would adapt to the first, keeping one pipeline Session per daemon. The final report left #122 waiting on CI and merge.
+
+Session b33d82ae-6c32-4758-8575-ee07c66c2094
+Log: /Users/yrashk/.claude/projects/-Users-yrashk-Projects-ycxx--claude-worktrees-build-ci-2331d6/b33d82ae-6c32-4758-8575-ee07c66c2094.jsonl
+Log SHA-256: 747f997c4e8d9f6d215f30a6964648a699f2a45a520e1f49bd1ecc6e4d7ee978
+This bootstrap chat implemented GCC/libycxx provisioning and smoke CI (#4 / PR #21), reporting Linux and macOS 9/9 smoke tests with execution expected to fail. It recorded GCC module-crash blocking work on libycxx#4 and the need for the later submodule bump to remove the execution xfail. It removed the claim and left the issue open until merge. The final integration run was queued; earlier CI was green.
+
+Session 1f145465-0728-4401-9cd3-cbdc6b0db271
+Log: /Users/yrashk/.claude/projects/-Users-yrashk-Projects-ycxx--claude-worktrees-build-ci-2331d6/1f145465-0728-4401-9cd3-cbdc6b0db271.jsonl
+Log SHA-256: 898cc9c80113985d802c14c62d59bf00070ddb6ef61704c0732da7f98e2928d5
+The epsilon/interpreter chat implemented #25 in PR #92 and connected front-end constant evaluation in PR #109. The interpreter is a budgeted query that lazily fetches called bodies and checks lifetimes, initialization and pointer provenance. It fixed review crashes/correctness findings with unit regressions; constant expressions use IR execution with reasons for rejection. constexpr, consteval, constinit, static_assert and if consteval were covered by independent oracle-checked tests. The report said interpreter core was merged, front-end integration was awaiting merge and the fast tier passed with 86 tests. Follow-ups were routed to #101 and #102; use current issue status before choosing new work.
+
+Recovery next step: read the linked issue, compare this snapshot with current main and the implementation/test-author counterparts, finish unfinished review work, run required checks in a new worktree, and continue toward a green PR. Notify original issues when starting the parallel continuation; after the PR is green, link it there and explicitly take over from the previous agent. Amend WIP snapshots as the work continues, preserving/rewriting the note onto the new tip.
+Validation: preservation session verified source HEAD/index/status unchanged and snapshot tree equality. Historical test statements above are reports from Claude logs, not new test runs. No compiler implementation sources were consulted to summarize these chats.
