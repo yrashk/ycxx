@@ -60,8 +60,8 @@ build/bin/ycxx cxx --target=x86_64-pc-linux-gnu -nostdlib example.o -o example
   floating members included) by Clang's calling convention;
   all operators, and the statements: `switch`, labels and `goto`, declarations in conditions,
   and init-statements in `if` and `switch` (not yet range-based `for`); functions with default
-  arguments, recursion, overloading and calls through function pointers; a pointer or reference
-  target type can select an overloaded free or static member function;
+  arguments, recursion and overloading, including operators; programs can call through function
+  pointers, and a pointer or reference target type can select a free or static member overload;
 - classes and unions: data and static members, member functions, constructors and destructors
   with RAII, aggregate and designated initialization, namespace-scope objects initialized by
   code before `main` and destroyed after it, block-scope `static` variables initialized once, passing and returning them by value with

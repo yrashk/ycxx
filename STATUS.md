@@ -1906,7 +1906,8 @@ values, end to end; results match Clang's bit for bit.
 - Related work covers pointers to non-static members (#238), `noexcept` function types (#219),
   a template-id without a target type (#335), and function pointer or reference template
   arguments (#406).
-- Tests are in `tests/own/function-pointers/`. The draft's first [over.over] example passes.
+- Tests are in `tests/own/function-pointers/`, with draft examples for [over.over] and
+  [temp.deduct.call] enabled.
 
 ## Bootstrap workarounds
 

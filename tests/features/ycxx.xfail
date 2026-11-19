@@ -396,8 +396,6 @@ draft/temp/temp.constr.normal-5.reject.cpp errors elsewhere: 'template' not supp
 draft/temp/temp.deduct.call-2.reject.cpp errors elsewhere: 'template' not supported yet
 draft/temp/temp.deduct.call-4.reject.cpp errors elsewhere: 'template' not supported yet
 draft/temp/temp.deduct.call-5.accept.cpp 'template' not supported yet
-draft/temp/temp.deduct.call-6.accept.cpp 'template' not supported yet
-draft/temp/temp.deduct.call-8.accept.cpp 'template' not supported yet
 draft/temp/temp.deduct.call-9.accept.cpp 'template' not supported yet
 draft/temp/temp.deduct.general-10.reject.cpp errors elsewhere: 'template' not supported yet
 draft/temp/temp.deduct.general-11.accept.cpp 'template' not supported yet
