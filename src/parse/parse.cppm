@@ -343,6 +343,12 @@ public:
       class_heads_.emplace(item, d);
     }
   }
+  // Template operations at the end of the unit, whose templates' declarations it knows.
+  sema::Templates templates() {
+    sema::Templates t(*w_, classes_);
+    t.template_decl = [this](EntityId e) { return declaration(e, end()); };
+    return t;
+  }
   void set_constant(EntityId e, ConstId c, u32 item) { constants_[std::to_underlying(e)] = {item, c}; }
   bool has_constant(EntityId e) const { return constants_.contains(std::to_underlying(e)); }
   // The current instantiation of the class template item `item` defines ([temp.dep.type]): the
@@ -401,7 +407,7 @@ public:
     const sema::EntityRec rec = w_->entities.rec(spec);
     auto it = partials_.find(std::to_underlying(rec.templ));
     if (it == partials_.end()) return std::nullopt;
-    sema::Templates t(*w_, classes_);
+    sema::Templates t = templates();
     struct Match {
       const Partial* p;
       std::vector<ast::TemplateParamSema> params;
@@ -469,7 +475,7 @@ public:
     }
     std::optional<Chosen> c = choose_partial(v, point);
     if (!c || c->ambiguous) return std::nullopt;
-    return sema::Templates(*w_, classes_).substitute(w_->ins.seqs.at(item_sema(c->item).value.decls, 0).type, c->args);
+    return templates().substitute(w_->ins.seqs.at(item_sema(c->item).value.decls, 0).type, c->args);
   }
   // At the end of the unit, it is said where the demand being instantiated came from.
   void ambiguous_partial(EntityId spec, u32 point) {
@@ -1012,6 +1018,7 @@ public:
   std::optional<bool> satisfied(ConstId c) override { return p_->satisfied(c, point()); }
   bool satisfaction_failed(ConstId c) override { return p_->satisfaction_failed(c); }
   bool value_dependent_member(EntityId v) override { return p_->is_value_dependent_member(v); }
+  std::optional<ast::DeclSema> template_decl(EntityId t) override { return p_->declaration(t, p_->end()); }
   bool use_static_member(EntityId v) override {
     p_->use_member(v);
     return !p_->member_failed(v);
@@ -1091,6 +1098,7 @@ public:
   std::optional<bool> satisfied(ConstId c) override { return p_->satisfied(c, p_->end()); }
   bool satisfaction_failed(ConstId c) override { return p_->satisfaction_failed(c); }
   bool value_dependent_member(EntityId v) override { return p_->is_value_dependent_member(v); }
+  std::optional<ast::DeclSema> template_decl(EntityId t) override { return p_->declaration(t, p_->end()); }
   bool use_static_member(EntityId v) override {
     p_->use_member(v);
     return !p_->member_failed(v);
@@ -3886,7 +3894,7 @@ private:
 std::optional<bool> Program::atom_satisfied(ConstId c, u32 point) {
   const u32 key = std::to_underlying(c);
   if (auto it = atoms_.find(key); it != atoms_.end()) return it->second;
-  sema::Templates t(*w_, classes_);
+  sema::Templates t = templates();
   if (t.constraint_dependent(c)) return std::nullopt;
   // An atom of the item being analysed is checked once its analysis is done: its head is not
   // known before ([temp.constr.decl] constraints are checked where they are used).
@@ -4487,7 +4495,7 @@ const Program::Instance* Program::instance(EntityId spec, u32 point) {
   decl.type = rec.type;
   decl.flags = sema::u16(decl.flags & ~sema::decl_flag::template_);
   decl.template_params = w_->ins.intern_seq(std::span<const ast::TemplateParamSema>{});
-  sema::Templates t(*w_, classes_);
+  sema::Templates t = templates();
   std::vector<ast::ParamSema> params;
   // A parameter's type is adjusted again after substitution ([dcl.fct]/5): an array or function
   // becomes a pointer; the body's object keeps its cv-qualifiers. A function parameter pack is a

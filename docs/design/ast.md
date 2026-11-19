@@ -40,8 +40,9 @@ Opus session that owns the issue wrote the spike, this document and the bookkeep
   that diff alone closed 23 of them and found that one proposed fix (default arguments carried by
   `instantiate_fn`) would make a call depend on the END instantiation; the session applied the
   narrow remedy (§6.4) without a further round.
-- **Amendments by #88.** Step 4's packs (§5.6, §6.4) and step 6's constraints (§5.5, §6.6) were
-  each decided by a Fable subagent; the Opus session wrote the code and this text.
+- **Amendments by #88.** Step 4's packs (§5.6, §6.4), step 6's constraints (§5.5, §6.6) and step
+  8's template template parameters (§5.1, §5.6, §6.7) were each decided by a Fable subagent; the
+  Opus session wrote the code and this text.
 
 ## 1. Decisions in brief
 
@@ -405,6 +406,8 @@ TDepName{QualType qualifier; NameId name; TemplateArgs args}
 TDecltype{ConstId expr; u8 id_or_member}  TSplice{ConstId refl}  TPackExpansion{QualType pattern}
 TPackIndex{QualType pack; ConstId index}  TAuto{u8 kind; EntityId concept; TemplateArgs cargs}
 TDeducedClass{EntityId tmpl}
+TDepSpec{u16 depth, index; u8 pack; TemplateArgs args}    // TT<args>, TT a template template parameter (§6.7)
+TBuiltinSpec{u8 which; TemplateArgs args}                // __make_integer_seq<…> while dependent (§6.7)
 ```
 
 **Sugar kinds**, each with one child marked `[[=canonical]]`, the type it spells: `STypedef{EntityId
@@ -507,7 +510,8 @@ unbound).
 ### 5.6 Template arguments
 
 `TemplateArg{u8 kind; u32 payload}` (8 bytes), with kind type, value, template, template parameter
-or pack. `TemplateArgs = SeqId<TemplateArg>` has one entry per parameter of the head (*amended by
+or pack (*as built*: `{kind type|value|pack|template_; QualType type; ConstId value; TemplateArgs
+elems; EntityId templ}`, a template argument's template in `templ`, §6.7). `TemplateArgs = SeqId<TemplateArg>` has one entry per parameter of the head (*amended by
 #88 step 4, Fable's decision*): a pack parameter's entry is a `pack` argument holding its
 elements, never a pack itself; while dependent an element may be an expansion (a type
 `TPackExpansion` or a value `VDepExpansion`), expanded in place by substitution. Identity and
@@ -712,6 +716,46 @@ mappings (/1.4); any other operand is a `VAtom`.
 both branches; otherwise only the kept one is in the tree. In an instantiation the discarded
 branch is skipped as tokens (#237 replaces the skipper by recorded extents); outside a template
 it is analysed and its odr-uses demand nothing ([basic.def.odr]/15).
+
+### 6.7 Template template parameters
+
+*Added by #88 step 8 (#208); Fable's decision, implemented and written by the Opus session.*
+
+- **The parameter** is a `TemplateParamSema` of kind `template_` whose `params` is its own
+  template-head, at `depth + 1` (its parameters are named only there), and whose `type` is its
+  `TTemplateParam`, the handle `TT<args>` refers to. A pack is `pack` with `template_` elements; a
+  default is a `template_` argument.
+- **The argument** is a `TemplateArg` of kind `template_` whose `templ` is a class or alias template
+  ([temp.arg.template]/1). While dependent it is a template template parameter's `TTemplateParam`
+  in `type`. Equivalence is the same template ([temp.type]/1), so an alias template is its own
+  template, distinct from the class template it names, as Clang has it (GCC folds it; CWG1286 is
+  not in the draft).
+- **`TT<args>`** is `TDepSpec` while TT is a parameter, its arguments completed and grouped by TT's
+  own head (its defaults and empty packs added, packs as packs, as Itanium mangles them); bound,
+  the completed arguments are those its template gets ([temp.arg.template]).
+- **The injected-class-name** as a template argument is the template, and the class when the
+  parameter is a type parameter ([temp.local]/1): a `template_` argument carrying both. Substitution applies the template TT is bound to,
+  fitting the arguments as a template-id does (`Templates::apply_template`): a class template's
+  specialization, an alias template's substituted type; a misfit is a substitution failure.
+- **Deduction** ([temp.deduct.type]/8): from a class template specialization, TT is its template,
+  and the arguments are deduced from that template's specialization for TT's arguments, which
+  fills its defaults (`TT<int>` from `V<int, int>`); with an expansion among them, directly. From
+  another `TDepSpec` (partial ordering), TT is that parameter.
+- **Matching** ([temp.arg.template]/4, P0522): the parameter's own arguments, made unique, must fit
+  the argument template's head with its defaults; a trailing pack among them stands for every
+  remaining parameter of its kind. The last step (binding every parameter of that
+  head) and constrained heads are #272 and #271.
+- **`__make_integer_seq<Seq, T, N>`** (docs/EXTENSIONS.md) is `Seq<T, 0, …, N-1>` for an integral T
+  other than `bool` and N not negative, applied through `apply_template`; with a dependent argument
+  it is a `TBuiltinSpec`, a non-deduced context.
+- **Mangling** follows the published ABI for a template argument (its `<name>`) and `TT<args>`
+  (`T_ I … E`), and Clang's unpublished `<template-param-decl>` prefixes on a function template's
+  own arguments: `Tn <type>` before a value whose parameter's type is dependent or that is an empty
+  pack, and `Tt <decl>* E` before a template whose head is not equivalent to the parameter's or
+  that is an empty pack (a pack judged by its first element, prefixed `Tp`),
+  a nested head's parameter written `TL <level-1> _ [<index-1>] _`. A dependent
+  `__make_integer_seq<…>` is mangled as a global class template of that name. GCC differs on the
+  prefixes.
 
 ## 7. C++26 constructs
 

@@ -85,6 +85,9 @@ struct Entity {
   // which its name encodes (Itanium §5.1.5.7–8).
   std::optional<QualType> template_type{};
   std::vector<ast::TemplateArg> template_args{};
+  std::vector<ast::TemplateParamSema> template_params{};  // its template's head
+  // BOOTSTRAP: std::vector<bool>: GCC 16 writes a module unit exporting one that importers cannot read.
+  std::vector<std::uint8_t> template_same_heads{};  // by argument: see `TemplateSpec`
   // A GNU asm label: the symbol exactly as written (docs/EXTENSIONS.md); empty if none.
   std::string asm_label{};
 };
@@ -669,6 +672,8 @@ std::string entity_name(EntityId e) {
             for (const ast::TemplateArg& x : w->ins.seqs.elements(a.elems)) p += (p.empty() ? "" : ", ") + one(x);
             return p;
           }
+          case ast::TemplateArgKind::template_:
+            return a.templ != EntityId::none ? std::string(w->ins.names.spelling(w->entities.rec(a.templ).name)) : w->types.spell(a.type);
         }
         return "?";
       };
@@ -990,7 +995,7 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
     // The complete-object constructor and destructor (C1, D1): with no virtual bases they are the
     // base-object ones too (#136).
     std::string name_ = e.special == Special::constructor ? "C1" : e.special == Special::destructor ? "D1" : e.name;
-    TemplateSpec spec{e.template_type.value_or(e.type), e.template_args};
+    TemplateSpec spec{e.template_type.value_or(e.type), e.template_args, e.template_params, e.template_same_heads};
     auto name = symbol_name(
         in, name_, e.type, e.is_function, e.lang,
         [](EntityId c) {

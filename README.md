@@ -44,8 +44,9 @@ build/bin/ycxx cxx hello.cpp -o hello && ./hello
   ([docs/EXTENSIONS.md](docs/EXTENSIONS.md));
 - templates: function, class and variable templates, deduction, partial ordering, explicit and
   partial specializations, static constexpr members of class templates, parameter packs and
-  fold expressions, alias templates, concepts and requires-expressions in overload resolution,
-  `if constexpr`, two-phase lookup, with Itanium names identical to Clang's;
+  fold expressions, alias templates, template template parameters, concepts and
+  requires-expressions in overload resolution, `if constexpr`, two-phase lookup, with Itanium
+  names identical to Clang's; Clang's `__make_integer_seq`;
 - placeholder types: `auto` and `decltype(auto)` variables (`const auto&`, `auto*`, `auto&&`),
   deduced and trailing return types, in templates too;
 - casts, `sizeof`/`alignof` (classes included), `decltype`, and calls through pointers to
@@ -85,19 +86,15 @@ checked with the flags of its last build, or else with its line in the project's
 ### Not yet
 
 - The standard library and its headers. C headers such as `<stdio.h>` compile without warnings
-  and `printf` runs; libycxx's `<cstdio>` still needs template template parameters and
-  pointer-to-member types.
+  and `printf` runs; libycxx's `<cstdio>` still needs pointer-to-member types.
 - Lambdas, structured bindings, and inheritance and virtual functions.
-- Member templates, template template parameters, and constraints on class templates and
-  their members.
+- Member templates, and constraints on class templates and their members.
 - Floating-point arithmetic, exceptions, and optimization (`-O`).
 - Linux and x86-64 output.
 
 ### In progress
 
 - Standard headers, starting with `<cstdio>` ([#133](https://github.com/yrashk/ycxx/issues/133)).
-- Templates: template template parameters and integer sequences
-  ([#88](https://github.com/yrashk/ycxx/issues/88)).
 - `auto` and lambdas: placeholder types are done; lambdas and generic lambdas are next
   ([#278](https://github.com/yrashk/ycxx/issues/278)).
 
