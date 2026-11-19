@@ -1308,18 +1308,21 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
   }
   // A static local and its guard: `_ZZ <encoding> E <name> [_<n>]` and `_ZGV` before it, the
   // function's own <encoding> taken from its symbol (Itanium C++ ABI §5.1.6, §5.1.4.6).
+  const std::string_view object_prefix = linux ? "" : "_";
   for (const Entity* e : locals) {
     auto f = mangled.find(ir::raw(e->local_function));
     if (f == mangled.end()) {
       errors.push_back({e->at, std::format("the name of the static local '{}': its function has no symbol", e->name)});
       continue;
     }
-    std::string_view fs = f->second;
-    std::string encoding = fs.starts_with("__Z") ? std::string(fs.substr(3))  // `_` + `_Z` + encoding
-                                                 : std::format("{}{}", fs.size() - 1, fs.substr(1));  // C linkage, `main`
+    std::string_view function_symbol = f->second;
+    function_symbol.remove_prefix(object_prefix.size());
+    std::string encoding = function_symbol.starts_with("_Z") ? std::string(function_symbol.substr(2))
+                                                              : std::format("{}{}", function_symbol.size(), function_symbol);
     std::uint32_t k = e->discriminator;
     std::string disc = k == 0 ? "" : k <= 10 ? std::format("_{}", k - 1) : std::format("__{}_", k - 1);
-    symbols.push_back({e->id, std::format("_{}Z{}E{}{}{}", e->guard ? "_ZGV" : "_Z", encoding, e->name.size(), e->name, disc),
+    symbols.push_back({e->id, std::format("{}{}{}E{}{}{}", object_prefix, e->guard ? "_ZGVZ" : "_ZZ",
+                                         encoding, e->name.size(), e->name, disc),
                        obj::binding::local});
   }
   if (!errors.empty()) co_return out;

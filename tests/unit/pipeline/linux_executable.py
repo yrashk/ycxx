@@ -100,6 +100,26 @@ int main(int argc, char* argv[]) {
         compile(target, '-nostdlib', 'start.o', '-o', 'explicit-object-entry')
         compile(target, '-nostdlib', 'start.o', 'bad_alias.cpp', '-o', 'explicit-object-with-main')
 
+        source('static_locals.cpp', """namespace outer::inline inner {
+struct Counter { int value; };
+int tick() { static Counter count = {10}; return ++count.value; }
+}
+int main() { static int base = 20; return base + outer::tick() + outer::tick(); }""")
+        compile(target, '-c', 'static_locals.cpp')
+        symbols = run([readelf, '-Ws', 'static_locals.o'])
+        assert ' _ZZN5outer5inner4tickEvE5count\n' in symbols
+        assert ' _ZZ4mainE4base\n' in symbols
+        compile(target, '-nostdlib', 'static_locals.o', '-o', 'static-locals')
+        run(['./static-locals'], status=43)
+
+        source('guarded_static.cpp', 'int remember(int value) { static int first = value; return first; }\n'
+                                    'int main() { return remember(17) + remember(99); }')
+        compile(target, '-c', 'guarded_static.cpp')
+        symbols = run([readelf, '-Ws', 'guarded_static.o'])
+        assert ' _ZZ8rememberiE5first\n' in symbols
+        assert ' _ZGVZ8rememberiE5first\n' in symbols
+        reject('guarded_static.o', error="undefined symbol '__cxa_guard_acquire'")
+
         compile('-c', 'trivial.cpp', '-o', 'darwin.o')
         compile('darwin.o', '-o', 'darwin-object-program')
         assert (scope / 'darwin-object-program').read_bytes().startswith(bytes.fromhex('cffaedfe'))
