@@ -125,8 +125,9 @@ def main():
 
         def run(args, status=0, error='', env=cold):
             result = subprocess.run(args, cwd=scope, env=env, capture_output=True, text=True, timeout=45)
-            if result.returncode != status or error not in result.stderr:
-                raise AssertionError(f'{args} exited {result.returncode}, expected {status}'
+            expected_status = result.returncode != 0 if status is None else result.returncode == status
+            if not expected_status or error not in result.stderr:
+                raise AssertionError(f'{args} exited {result.returncode}, expected {status if status is not None else "nonzero"}'
                                      f' and stderr containing {error!r}\n{result.stdout}{result.stderr}')
             return result
 
@@ -179,6 +180,10 @@ def main():
         (scope / 'link/leaf.input').rename(scope / 'first' / soname)
         execute('first', 53)
         execute('second', 63)
+        missing = run(['./program', 'Q'], status=None, error=soname, env=dict(cold, LD_LIBRARY_PATH=''))
+        assert missing.stdout == ''
+        cxx(*options, inputs[0], f'first/{soname}', inputs[2], '-o', 'relocated')
+        assert (scope / 'relocated').read_bytes() == image
         (scope / 'link/leaf.input').write_bytes(linked_provider)
         source('no-imports.cpp', 'int main() { return 21; }')
         cxx(*options, 'no-imports.cpp', 'link/leaf.input', '-o', 'no-imports')
