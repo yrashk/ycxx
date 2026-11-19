@@ -42,7 +42,7 @@ struct BuiltinLayout {
 };
 
 // What `__builtin_va_list` names (docs/EXTENSIONS.md): `char*` in Apple's arm64 ABI; the System
-// V x86-64 ABI's `__va_list_tag[1]`, which ycxx does not have yet.
+// V x86-64 ABI's `__va_list_tag[1]`.
 enum class VaList : u8 { char_pointer, sysv_x86_64 };
 
 // When a class is trivially copyable for the purposes of calls, so that it passes in registers
