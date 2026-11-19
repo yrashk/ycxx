@@ -133,21 +133,105 @@ struct Dynamic {
   std::uint32_t item;
 };
 
+// The C++ runtime's entry points the unit calls (Itanium C++ ABI §3.3), declared on first use.
+template <class Declare>
+struct Runtime {
+  sema::World& world;
+  Declare& declare;
+  EntityId atexit_ = EntityId::none, dso_ = EntityId::none, acquire_ = EntityId::none, release_ = EntityId::none;
+  EntityId declared(std::string_view n, QualType t, bool fn) {
+    EntityId e = world.entities.entity({fn ? sema::EntityKind::function : sema::EntityKind::variable, world.ins.names.intern(n), t,
+                                        ast::LangLinkage::c, ast::Linkage::external, {}, EntityId::none});
+    ast::DeclSema d{};
+    d.entity = e;
+    d.type = t;
+    declare(d, std::nullopt);
+    return e;
+  }
+  QualType vp() { return world.types.pointer(world.types.builtin(sema::Builtin::void_)); }
+  QualType int_() { return world.types.builtin(sema::Builtin::int_); }
+  // `int __cxa_atexit(void (*)(void*), void*, void*)` and `__dso_handle`.
+  EntityId atexit() {
+    if (atexit_ == EntityId::none) {
+      QualType v = vp();
+      QualType dtor = world.types.pointer(world.types.function(world.types.builtin(sema::Builtin::void_), std::span(&v, 1), false, ast::LangLinkage::c));
+      QualType ps[] = {dtor, v, v};
+      atexit_ = declared("__cxa_atexit", world.types.function(int_(), ps, false, ast::LangLinkage::c), true);
+    }
+    return atexit_;
+  }
+  EntityId dso() {
+    if (dso_ == EntityId::none) dso_ = declared("__dso_handle", world.types.builtin(sema::Builtin::char_), false);
+    return dso_;
+  }
+  // `int __cxa_guard_acquire(int64_t*)`, `void __cxa_guard_release(int64_t*)`.
+  EntityId acquire() {
+    if (acquire_ == EntityId::none) {
+      QualType g = world.types.pointer(world.types.builtin(sema::Builtin::long_long));
+      acquire_ = declared("__cxa_guard_acquire", world.types.function(int_(), std::span(&g, 1), false, ast::LangLinkage::c), true);
+    }
+    return acquire_;
+  }
+  EntityId release() {
+    if (release_ == EntityId::none) {
+      QualType g = world.types.pointer(world.types.builtin(sema::Builtin::long_long));
+      release_ = declared("__cxa_guard_release",
+                          world.types.function(world.types.builtin(sema::Builtin::void_), std::span(&g, 1), false, ast::LangLinkage::c), true);
+    }
+    return release_;
+  }
+};
+
+// A function's static locals ([stmt.dcl]/3): each a variable of the unit, initialized with its
+// constant if it has one, else zero; one initialized by code, or with a destructor, also gets a
+// guard variable, and the function the runtime entry points its initialization calls.
+template <class R>
+void static_locals(sema::World& world, TranslationUnit& tu, FunctionDef& f, R& runtime) {
+  ast::Interners& ins = world.ins;
+  for (const ast::LocalRec& l : ins.seqs.elements(f.body.locals)) {
+    if (l.entity == EntityId::none || l.decl == ast::NodeId::none || !ins.ast.is<ast::StaticVar>(l.decl)) continue;
+    auto s = ins.ast.get<ast::StaticVar>(l.decl);
+    bool code = s.destructor != EntityId::none || (s.value == ast::ConstId::none && s.init.id != ast::NodeId::none);
+    const sema::EntityRec& r = world.entities.rec(l.entity);
+    auto local = [&](EntityId e, QualType t, bool guard) {
+      tu.entities.push_back({e, std::string(ins.names.spelling(r.name)), t, false, ast::LangLinkage::cxx, ast::Linkage::internal,
+                             false, std::nullopt, EntityId::none, Special::none});
+      tu.entities.back().local_function = f.entity;
+      tu.entities.back().discriminator = r.ordinal;
+      tu.entities.back().guard = guard;
+    };
+    local(l.entity, l.type, false);
+    tu.variables.push_back({l.entity, l.type, s.value, std::nullopt, code});
+    if (!code) continue;
+    QualType gt = world.types.builtin(sema::Builtin::long_long);
+    sema::EntityRec gr{sema::EntityKind::variable, r.name, gt, ast::LangLinkage::cxx, ast::Linkage::none, {}, l.entity};
+    gr.head = ast::seed("ycxx.pipeline.static-guard");
+    EntityId g = world.entities.entity(std::move(gr));
+    local(g, gt, true);
+    tu.variables.push_back({g, gt, ast::ConstId::none, std::nullopt, true});
+    f.guards.push_back({l.entity, g});
+    f.guard_acquire = runtime.acquire();
+    f.guard_release = runtime.release();
+    if (s.destructor != EntityId::none) {
+      f.atexit = runtime.atexit();
+      f.dso = runtime.dso();
+    }
+  }
+}
+
 // The unit's initialization function, which dyld runs before `main` (`__mod_init_func`): each
 // dynamic initialization in definition order ([basic.start.dynamic]/1), each destructor registered
 // with `__cxa_atexit` (Itanium C++ ABI §3.3.5). Named like Clang's, with internal linkage.
 void init_function_def(parse::Program& program, sema::World& world, TranslationUnit& tu, EntityId fn, QualType fn_type, ast::NodeId root,
                        std::uint32_t item);
-template <class Declare>
+template <class Declare, class R>
 void init_function(parse::Program& program, sema::World& world, TranslationUnit& tu, std::span<const Dynamic> dynamic,
-                   Declare& declare, std::string_view source) {
+                   Declare& declare, R& runtime, std::string_view source) {
   if (dynamic.empty()) return;
   ast::Interners& ins = world.ins;
   sema::Types& types = world.types;
-  QualType void_ = types.builtin(sema::Builtin::void_), int_ = types.builtin(sema::Builtin::int_);
+  QualType void_ = types.builtin(sema::Builtin::void_);
   QualType vp = types.pointer(void_);
-  QualType dtor_ptr = types.pointer(types.function(void_, std::span(&vp, 1), false, ast::LangLinkage::c));
-  QualType atexit_params[] = {dtor_ptr, vp, vp};
   auto entity = [&](sema::EntityKind kind, std::string_view n, QualType t, ast::LangLinkage lang, ast::Linkage linkage) {
     return world.entities.entity({kind, ins.names.intern(n), t, lang, linkage, {}, EntityId::none});
   };
@@ -157,14 +241,10 @@ void init_function(parse::Program& program, sema::World& world, TranslationUnit&
     d.type = t;
     declare(d, std::nullopt);
   };
-  EntityId atexit = entity(sema::EntityKind::function, "__cxa_atexit", types.function(int_, atexit_params, false, ast::LangLinkage::c),
-                           ast::LangLinkage::c, ast::Linkage::external);
-  EntityId dso = entity(sema::EntityKind::variable, "__dso_handle", types.builtin(sema::Builtin::char_), ast::LangLinkage::c,
-                        ast::Linkage::external);
+  EntityId atexit = runtime.atexit();
+  EntityId dso = runtime.dso();
   QualType fn_type = types.function(void_, {}, false, ast::LangLinkage::cxx);
   const std::string base = "__GLOBAL__sub_I_" + std::filesystem::path(source).filename().native_encoded_string();
-  symbol(atexit, world.entities.rec(atexit).type);
-  symbol(dso, world.entities.rec(dso).type);
   // One function per declaration, so that what fails points at it; dyld runs them in order.
   for (std::size_t first = 0, n = 0; first < dynamic.size(); ++n) {
     std::size_t last = first;
@@ -296,6 +376,7 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
       }
     }
   };
+  Runtime<decltype(declare)> runtime{world, declare};
   for (std::uint32_t k = 0; k < items.items.size(); ++k) {
     const items::Item& it = items.items[k];
     // Items of the global namespace, and the members of its classes.
@@ -353,7 +434,7 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
       }
     }
   }
-  init_function(program, world, tu, dynamic, declare, program.region().files.at(0));
+  init_function(program, world, tu, dynamic, declare, runtime, program.region().files.at(0));
   // The function template specializations instantiated at the end of the unit ([temp.inst]), in
   // order of instantiation. A specialization that is only declared here is an external reference.
   for (const parse::Program::Instance* in : program.instances()) {
@@ -416,6 +497,7 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
     declare(s.decl, std::nullopt);
     tu.functions.push_back({s.decl.entity, s.decl, program.synthesized_body(i), program.id(s.item), 0, program.this_type(s.decl)});
   }
+  for (FunctionDef& f : tu.functions) static_locals(world, tu, f, runtime);
   return tu;
 }
 

@@ -53,7 +53,7 @@ build/bin/ycxx cxx --target=x86_64-pc-linux-gnu -nostdlib example.o -o example
   arguments, recursion and overloading, operator functions included;
 - classes and unions: data and static members, member functions, constructors and destructors
   with RAII, aggregate and designated initialization, namespace-scope objects initialized by
-  code before `main` and destroyed after it, passing and returning them by value with
+  code before `main` and destroyed after it, block-scope `static` variables initialized once, passing and returning them by value with
   Clang's calling convention, so ycxx and Clang objects call each other; access control
   (`public`, `protected`, `private`) and friend functions and classes;
 - single and multiple inheritance (not virtual): base classes laid out as Clang does, member

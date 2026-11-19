@@ -142,6 +142,9 @@ public:
   virtual bool value_dependent_member(EntityId /*v*/) { return false; }
   // False when its initializer was in error, which was reported: what uses it says nothing more.
   virtual bool use_static_member(EntityId /*v*/) { return true; }
+  // A static local declared ([stmt.dcl]/3), for constant evaluation's questions about it
+  // (`global`): its type, and its constant if constant-initialized.
+  virtual void static_local(EntityId /*v*/, QualType /*type*/, std::optional<ConstId> /*value*/) {}
   // Whether class `c`, complete or not, was declared with the class-key `union`.
   virtual bool is_union_class(EntityId /*c*/) { return false; }
   // The function type of `f`, whose declared return type holds a placeholder, with the return
@@ -1437,6 +1440,20 @@ public:
     return index;
   }
   void set_local_decl(u32 local, NodeId decl) { locals_[local].decl = decl; }
+  // A static block-scope variable's entity ([stmt.dcl]/3): local to the function, or the lambda,
+  // being defined, numbered among its statics of that name as Itanium discriminates them
+  // (§5.1.6), with no linkage.
+  void static_local(u32 local) {
+    ast::LocalRec& l = locals_[local];
+    EntityId scope = lambdas_.empty() ? current_function : lambdas_.back().call;
+    u32 ordinal = u32(std::ranges::count_if(statics_, [&](const auto& s) { return s.first == scope && s.second == l.name; }));
+    statics_.push_back({scope, l.name});
+    EntityRec r{EntityKind::variable, l.name, l.type, LangLinkage::cxx, ast::Linkage::none, {}, scope};
+    r.head = ast::mix(ast::seed("ycxx.sema.static-local"), u64(ordinal));
+    r.ordinal = ordinal;
+    l.entity = w_->entities.entity(std::move(r));
+  }
+  void static_value(u32 local, std::optional<ConstId> value) { q_->static_local(locals_[local].entity, locals_[local].type, value); }
   // An array of unknown bound gets its bound from its initializer ([dcl.array]/8).
   void set_local_type(u32 local, QualType t) { locals_[local].type = t; }
   // A local usable in constant expressions ([expr.const]): constexpr, or const integral with a
@@ -1981,6 +1998,13 @@ public:
       note_pack({0, 0, name});
       return dependent_node({}, begin, end);
     }
+    // A static local is no local entity, so it is named, never captured
+    // ([expr.prim.lambda.capture]/7, [basic.pre]/7).
+    if (!(key & capture_bit) && lambdas_[ctx].outer_locals[key].entity != EntityId::none) {
+      const ast::LocalRec& l = lambdas_[ctx].outer_locals[key];
+      ExprInfo info{types().referee(l.type), ValueCategory::lvalue, 0};
+      return node(ast::DeclRef{info, l.entity}, begin, end, info);
+    }
     // In an unevaluated operand naming it is no odr-use: no capture ([expr.prim.lambda.capture]/8),
     // only its type, and for `decltype` its declared type.
     if (unevaluated > 0) {
@@ -2198,6 +2222,13 @@ public:
       switch (c.kind) {
       case K::copy:
       case K::ref:
+        // A variable with static storage duration is not captured ([expr.prim.lambda.capture]/5).
+        if (!(c.source->second & capture_bit) &&
+            (c.source->first == lambdas_.size() ? locals_[c.source->second] : lambdas_[c.source->first].outer_locals[c.source->second])
+                    .entity != EntityId::none) {
+          diag(c.at, Diag::cannot_capture, c.name);
+          return false;
+        }
         if (!add_capture(f, c.source->first, c.source->second, c.name, c.kind == K::ref, c.init)) return false;
         break;
       case K::this_:
@@ -5276,6 +5307,7 @@ private:
   ast::ItemId item_;
   u32 loc_base_;
   std::vector<ast::LocalRec> locals_;
+  std::vector<std::pair<EntityId, NameId>> statics_;  // the static locals so far: (function, name)
   // Packs ([temp.variadic]): the expansions being instantiated, innermost last, each with the
   // element its pattern is read for; the packs each operand being read names; and the function
   // parameter packs of the function being instantiated.

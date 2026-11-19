@@ -1867,6 +1867,23 @@ values, end to end; results match Clang's bit for bit.
   Clang peer).
 - Tests: `tests/own/namespaces/`.
 
+## Block-scope static variables, ι (#291, #337, 2026-11-19)
+
+- **Sema** (src/parse/parser.cppm `variable_node`, src/sema/actions.cppm `static_local`): a
+  `static` (or `constinit static`) block-scope variable is an entity local to its function or
+  lambda, numbered among its statics of that name (`EntityRec::ordinal`, also in its identity),
+  declared as a `StaticVar` node with the constant it is initialized with when there is one.
+- **Pipeline** (src/pipeline/front.cppm `static_locals`): each is a variable of the unit, with
+  its constant or zero; one initialized by code, or with a destructor, gets a guard variable
+  (8 bytes) and its function the runtime's entry points (`Runtime`). Names are Clang's: the
+  function's own symbol gives the <encoding> of `_ZZ<encoding>E<name>[_n]` and `_ZGVZ…` (back.cppm).
+  The Mach-O linker adds libc++abi (`__cxa_guard_*`) when the objects need it (`libcxxabi()`).
+- **IR** (src/irgen/gen.cppm `static_var`): `if (__cxa_guard_acquire(&g)) { init; at_exit(d);
+  __cxa_guard_release(&g); }`, the acquire called on every pass (#372); a static local's object is
+  its entity's from the function's entry, so a jump past its declaration finds it.
+- Not yet: inline functions' statics are per unit (#124); static references (#367).
+- Tests: `tests/own/static-locals/` (spec-only, 19 tests, a Clang peer in `mixed.run.cpp`).
+
 ## Bootstrap workarounds
 
 Places where ycxx's sources avoid or work around a C++26 feature because GCC 16 lacks it or
