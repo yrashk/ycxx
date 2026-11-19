@@ -20,7 +20,7 @@ target_sources(ycxxc_daemon PUBLIC FILE_SET CXX_MODULES FILES
   ${YCXXC_DAEMON_WATCH}
   server.cppm
   daemon.cppm)
-target_link_libraries(ycxxc_daemon PUBLIC ycxxc_compile ycxxc_engine ycxxc_lsp ycxxc_pp)
+target_link_libraries(ycxxc_daemon PUBLIC ycxxc_compile ycxxc_engine ycxxc_lsp ycxxc_pp ycxxc_trace)
 if(APPLE)
   # FSEvents.h alone: CoreServices.h pulls in headers with blocks, which GCC cannot parse.
   set_source_files_properties(watch_darwin.cppm PROPERTIES COMPILE_OPTIONS

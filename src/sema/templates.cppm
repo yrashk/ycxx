@@ -104,7 +104,7 @@ public:
       }
       const ClassRec* c = classes_->find(types().class_of(*q));
       if (!c) return std::nullopt;
-      for (const auto& [n, mt] : c->types)
+      for (const auto& [n, mt, te] : c->types)
         if (n == r.name) return types().add_cv(mt, cv);
       return std::nullopt;
     }

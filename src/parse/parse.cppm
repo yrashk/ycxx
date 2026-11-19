@@ -680,7 +680,8 @@ public:
     std::vector<ast::MemberRec> members;
     std::vector<sema::FieldRec> fields;
     std::vector<sema::MemberDeclRec> statics;
-    std::vector<std::pair<NameId, QualType>> nested;
+    std::vector<sema::NestedType> nested;
+    std::vector<EntityId> friends;
   };
   ClassContent class_content(u32 item, const std::function<const ast::ItemSema&(u32)>& sema_of);
   // `instantiate_class(spec)` ([temp.inst]/2, §B6.2): the class record of a class template
@@ -742,6 +743,16 @@ public:
   std::map<std::pair<u32, u32>, std::vector<sema::Expansion>> expansions_;
   u32 end() const { return static_cast<u32>(items_->items.size()); }
   const u32 instantiation_limit;  // [temp.inst]/16 ([implimits]: at least 1024)
+  // Whether an instantiation `depth` deep may not begin: the limit; reported once, at item `k`. The
+  // stack is guarded in the parse of each instantiation's body (`Parser::deep_enough`, #187).
+  bool too_deep(std::size_t depth, u32 k) {
+    if (depth < instantiation_limit) return false;
+    if (!depth_reported_)
+      end_diags_.push_back({engine::Loc{std::to_underlying(id(k)), 0}, sema::diag_id(sema::Diag::instantiation_depth),
+                            {engine::diag_arg(instantiation_limit)}});
+    depth_reported_ = true;
+    return true;
+  }
   bool instantiation_gave_up() const { return depth_reported_; }
 
   // Every item and body analysed, in item order; the diagnostics of each cell in order.
@@ -1180,6 +1191,18 @@ public:
   }
 
   Result<ast::ItemSema> run() {
+    try {
+      analyse();
+    } catch (const TooDeep&) {
+      // Diagnosed: the item fails, its scopes unwound with the parse.
+      tree_ = NodeId::none;
+      declarators_.clear();
+      bad();
+    }
+    return finish();
+  }
+
+  void analyse() {
     bool member = it_->parent != items::none && p_->items().items[it_->parent].kind == ItemKind::class_def;
     switch (it_->kind) {
     case ItemKind::empty:
@@ -1216,6 +1239,10 @@ public:
       bad();
       break;
     }
+  }
+
+  // The item's record and tree, from what the analysis left.
+  Result<ast::ItemSema> finish() {
     NodeId root = tree_;
     if (root == NodeId::none) {
       std::vector<ast::Child> cs;
@@ -1436,8 +1463,10 @@ private:
         s_.diag(ps_.pos(), Diag::expected_declaration);
       return bad();
     }
+    s_.defer_type_access = true;
     DeclSpec spec = ps_.decl_specifiers();
     if (spec.elaborated && ps_.is(Tk::semi)) {
+      s_.settle_type_access(EntityId::none);
       // `class-key identifier ;` declares the class ([dcl.type.elab]); it stays incomplete until
       // its definition.
       ps_.bump();
@@ -1450,8 +1479,11 @@ private:
     }
     bool is_function_def = it_->kind == ItemKind::function;
     do {
+      s_.defer_type_access = true;
       parse::Declarator d = ps_.declarator(spec.type, false);
-      if (!d.ok || !spec.ok || !d.named || !declare(spec, d, lang, explicit_lang, is_function_def)) {
+      bool declared = d.ok && spec.ok && d.named && declare(spec, d, lang, explicit_lang, is_function_def);
+      s_.settle_type_access(EntityId::none);  // what `declare` did not settle
+      if (!declared) {
         // Later declarators keep their skeleton ordinals with placeholder records.
         bad();
         if (!is_function_def) ps_.skip_to_semi();
@@ -2357,6 +2389,7 @@ private:
       if (!ps_.expect(Tk::semi)) bad();
       return;
     }
+    if (ps_.is(Tk::kw_friend)) return friend_declaration();
     bool dtor = ps_.is(Tk::tilde) && ps_.kind(1) == Tk::identifier && ps_.name_of(ps_.tok(1)) == cname;
     if (dtor || (ps_.is(Tk::identifier) && ps_.kind(1) == Tk::l_paren && ps_.name_of(ps_.tok()) == cname))
       return special_member(c, !dtor);
@@ -2462,6 +2495,87 @@ private:
       decls_.push_back(sem);
     } while (ps_.accept(Tk::comma));
     if (!ps_.expect(Tk::semi)) bad();
+  }
+
+  // A friend declaration in class `c` ([class.friend]): `friend class X;` or `friend X;`, a class
+  // (declared in the enclosing namespace when lookup finds none, [dcl.type.elab]/4), or a function
+  // declaration, of a namespace-scope function or of another class's member. The friend is not a
+  // member, and the declaration makes no name visible to ordinary lookup ([class.friend]/7).
+  void friend_declaration() {
+    u32 friend_at = ps_.pos();
+    ps_.bump();
+    if (it_->kind == ItemKind::function) {
+      s_.diag(friend_at, Diag::not_supported, Tk::kw_friend);  // a friend function's definition (#259)
+      return bad();
+    }
+    if (ps_.is(Tk::kw_template) || !p_->enclosing_heads(k_).empty() || inst_) {
+      s_.diag(friend_at, Diag::not_supported, Tk::kw_friend);  // in or of a template (#259)
+      return bad();
+    }
+    sema::Types& types = s_.types();
+    ast::DeclSema sem = class_decl(EntityId::none, false);
+    sem.flags = sema::decl_flag::friend_;
+    // `friend class X;`: the class lookup finds, else one the declaration introduces in the
+    // innermost enclosing namespace ([dcl.type.elab]/4, [namespace.memdef]/3).
+    if ((ps_.is(Tk::kw_class) || ps_.is(Tk::kw_struct)) && ps_.kind(1) == Tk::identifier && ps_.kind(2) == Tk::semi) {
+      NameId n = ps_.name_of(ps_.tok(1));
+      auto t = s_.class_name(n, false);
+      sem.entity = t && types.is_class(*t) ? types.class_of(*t) : class_entity(n);
+      decls_.push_back(sem);
+      ps_.bump();
+      ps_.bump();
+      ps_.bump();
+      return;
+    }
+    DeclSpec spec = ps_.decl_specifiers();
+    if (!spec.ok) return bad();
+    if (ps_.accept(Tk::semi)) {
+      if (!types.is_class(spec.type)) {
+        s_.diag(spec.begin, Diag::not_supported, Tk::kw_friend);  // a friend that is not a class
+        return bad();
+      }
+      sem.entity = types.class_of(spec.type);
+      decls_.push_back(sem);
+      return;
+    }
+    parse::Declarator d = ps_.declarator(spec.type, false);
+    if (!d.ok || !d.named) return bad();
+    if (!types.is_function(d.type) || !ps_.is(Tk::semi)) {
+      s_.diag(d.name_at, Diag::not_supported, Tk::kw_friend);  // only function declarations
+      return bad();
+    }
+    sem.kind = ast::DeclKind::function;
+    sem.type = d.type;
+    if (d.qualified && d.scope.ns) {
+      // `friend R ::f(…);`, `friend R N::f(…);`: a function the namespace declared earlier.
+      auto f = s_.namespace_function(*d.scope.ns, d.name, d.type);
+      if (!f) {
+        s_.diag(d.name_at, Diag::no_friend_match, d.name);
+        return bad();
+      }
+      sem.entity = *f;
+    } else if (d.qualified) {
+      // A member function of another, complete class: its declaration with this type.
+      if (!d.scope.type || !types.is_class(*d.scope.type) || !s_.require_complete(*d.scope.type, d.qualifier_at)) return bad();
+      EntityId other = types.class_of(*d.scope.type);
+      const sema::ClassRec* r = p_->classes_.find(other);
+      const sema::MemberDeclRec* m = nullptr;
+      if (r)
+        for (const sema::MemberDeclRec& x : r->members)
+          if (x.name == d.name && x.is_function && types.canonical(x.type) == types.canonical(d.type)) m = &x;
+      if (!m) {
+        s_.diag(d.name_at, Diag::no_member_declared, d.name, *d.scope.type);
+        return bad();
+      }
+      sem.entity = m->entity;
+    } else {
+      // The function of the innermost enclosing namespace with this name and type
+      // ([namespace.memdef]/3), whose namespace-scope declarations name the same entity.
+      sem.entity = s_.world().entities.entity(
+          {sema::EntityKind::function, d.name, d.type, LangLinkage::cxx, ast::Linkage::external, {}, ns_entity()});
+    }
+    decls_.push_back(sem);
+    ps_.expect(Tk::semi);
   }
 
   // A typedef-name or alias-declaration that is a member of class `c` ([class.mem],
@@ -2681,7 +2795,7 @@ private:
     EntityId cls = s_.types().class_of(*t);
     QualType own = s_.templates().resolve_dep_names(sem.type, [&](QualType q, NameId n) -> std::optional<QualType> {
       if (!s_.types().is_class(q) || s_.types().class_of(q) != cls) return std::nullopt;
-      for (const auto& [name, mt] : cr->types)
+      for (const auto& [name, mt, me] : cr->types)
         if (name == n) return mt;
       return std::nullopt;
     });
@@ -3200,6 +3314,7 @@ private:
         // The rest of the declarator, its initializer included, is in the class's scope
         // ([basic.scope.class]).
         s_.current_class = s_.world().entities.rec(sem.entity).scope;
+        s_.settle_type_access(sem.entity);
       } else if (!prior.empty()) {
         const ast::DeclSema& p = prior.back();
         if ((p.kind == ast::DeclKind::function) != fn || p.kind == ast::DeclKind::type_alias) {
@@ -3264,6 +3379,7 @@ private:
         e.constraints = constraints_fp_;
         sem.entity = s_.world().entities.entity(e);
       }
+      s_.settle_type_access(sem.entity);
 
     }
     if (fn && p_->world().ins.names.spelling(d.name) == "main") check_main(spec, sem, d, lang);
@@ -3536,9 +3652,21 @@ Program::ClassContent Program::class_content(u32 item, const std::function<const
   const items::Item& it = items_->items[item];
   std::vector<sema::FieldRec>& fields = out.fields;
   std::vector<sema::MemberDeclRec>& statics = out.statics;
-  std::vector<std::pair<NameId, QualType>>& nested = out.nested;
-  // [class.access.spec]: members of a class defined with `class` are private by default.
-  ast::Access access = r_->tokens[it.begin].kind == lex::Tk::kw_class ? ast::Access::private_ : ast::Access::public_;
+  std::vector<sema::NestedType>& nested = out.nested;
+  // [class.access.spec]: members of a class defined with `class` are private by default. The
+  // class-key follows any template heads: past each `template <…>`.
+  u32 key = it.begin;
+  while (key < it.brace_begin && r_->tokens[key].kind == lex::Tk::kw_template) {
+    int depth = 0;
+    for (++key; key < it.brace_begin; ++key) {
+      lex::Tk k = r_->tokens[key].kind;
+      if (k == lex::Tk::less) ++depth;
+      else if (k == lex::Tk::greater && --depth == 0) break;
+      else if (k == lex::Tk::greatergreater && (depth -= 2) <= 0) break;
+    }
+    ++key;
+  }
+  ast::Access access = r_->tokens[key].kind == lex::Tk::kw_class ? ast::Access::private_ : ast::Access::public_;
   for (u32 m : it.members) {
     const items::Item& mi = items_->items[m];
     if (mi.kind == ItemKind::access_spec) {
@@ -3558,12 +3686,17 @@ Program::ClassContent Program::class_content(u32 item, const std::function<const
     for (u32 i = 0; i < w_->ins.seqs.size(ms.decls); ++i) {
       ast::DeclSema d = w_->ins.seqs.at(ms.decls, i);
       if (d.entity == EntityId::none) continue;
+      // A friend declaration names a function or class that is not a member ([class.friend]/1).
+      if (d.flags & sema::decl_flag::friend_) {
+        if (std::ranges::find(out.friends, d.entity) == out.friends.end()) out.friends.push_back(d.entity);
+        continue;
+      }
       members.push_back({{id(m), ast::make_decl_ord(ast::DeclClass::syntactic, i)}, d.entity, access});
       if (d.kind == ast::DeclKind::data_member)
         fields.push_back({w_->entities.rec(d.entity).name, d.type, d.entity, inits.contains(i) ? inits[i] : ConstId::none,
                         dmis_.contains(std::to_underlying(d.entity))});
       else if (d.kind == ast::DeclKind::enum_ || d.kind == ast::DeclKind::type_alias)
-        nested.push_back({w_->entities.rec(d.entity).name, d.type});
+        nested.push_back({w_->entities.rec(d.entity).name, d.type, d.entity});
       else if (d.kind == ast::DeclKind::function || d.kind == ast::DeclKind::variable) {
         member_decls_[std::to_underlying(d.entity)] = {id(m), ast::make_decl_ord(ast::DeclClass::syntactic, i)};
         statics.push_back({w_->entities.rec(d.entity).name, d.entity, d.type, d.kind == ast::DeclKind::function,
@@ -3588,7 +3721,7 @@ const Result<ast::ClassDef>& Program::class_def(u32 item) {
   std::vector<ast::MemberRec>& members = c.members;
   std::vector<sema::FieldRec>& fields = c.fields;
   std::vector<sema::MemberDeclRec>& statics = c.statics;
-  std::vector<std::pair<NameId, QualType>>& nested = c.nested;
+  std::vector<sema::NestedType>& nested = c.nested;
   if (cls && *cls != EntityId::none) {
     // Every unit that defines the class builds its own record (#115), and synthesizes the special
     // members its own object needs.
@@ -3597,6 +3730,8 @@ const Result<ast::ClassDef>& Program::class_def(u32 item) {
     rec.fields = std::move(fields);
     rec.members = std::move(statics);
     rec.types = std::move(nested);
+    for (const ast::MemberRec& m : members) rec.access.push_back({m.entity, m.access});
+    rec.friends = std::move(c.friends);
     special_members(item, *cls, rec);
     rec.defined = true;
     classes_.publish(*cls, std::move(rec));
@@ -3756,6 +3891,19 @@ public:
   }
 
   Result<ast::BodySema> run() {
+    try {
+      return analyse();
+    } catch (const TooDeep&) {
+      // Diagnosed: the body fails, its scopes unwound with the parse; it holds nothing.
+      std::vector<sema::Expansion> none;
+      out_.value = b_.commit(ast::BodySema{NodeId::none, b_.seq(std::span<const ast::LocalRec>{}), expansion_list(b_, none),
+                                           b_.seq(std::span<const u32>{})});
+      out_.demands.clear();
+      return std::move(out_);
+    }
+  }
+
+  Result<ast::BodySema> analyse() {
     const ast::ItemSema& is = p_->item_sema(k_).value;
     std::optional<ast::DeclSema> f;
     if (p_->world().ins.seqs.size(is.decls) > 0) f = p_->world().ins.seqs.at(is.decls, 0);
@@ -3775,6 +3923,7 @@ public:
       // A member function's body sees its class's members ([basic.scope.class]) and `this`; a
       // body is looked up in the namespace of what it defines ([basic.lookup.unqual]/9).
       EntityId scope = p_->world().entities.rec(f->entity).scope;
+      s_.current_function = f->entity;
       if (f->flags & sema::decl_flag::member) {
         s_.current_class = scope;
         s_.this_type = p_->this_type(*f);
@@ -4105,13 +4254,7 @@ const sema::ClassRec* Program::instantiate_class(EntityId spec, u32 point) {
   if (std::ranges::find(running_, k | 0x80000000u) != running_.end() || std::ranges::find(running_, k) != running_.end())
     return nullptr;
   // [temp.inst]/16: nested instantiations are limited, as functions' are.
-  if (classes_instantiating_.size() >= instantiation_limit) {
-    if (!depth_reported_)
-      end_diags_.push_back({engine::Loc{std::to_underlying(id(k)), 0}, sema::diag_id(sema::Diag::instantiation_depth),
-                            {engine::diag_arg(instantiation_limit)}});
-    depth_reported_ = true;
-    return nullptr;
-  }
+  if (too_deep(classes_instantiating_.size(), k)) return nullptr;
   class_def(k);  // the pattern, analysed as the current instantiation's
   ast::DeclSema head = w_->ins.seqs.at(item_sema(k).value.decls, 0);
   std::vector<ast::TemplateParamSema> params = w_->ins.seqs.elements(head.template_params);
@@ -4144,6 +4287,8 @@ const sema::ClassRec* Program::instantiate_class(EntityId spec, u32 point) {
   built.fields = std::move(c.fields);
   built.members = std::move(c.statics);
   built.types = std::move(c.nested);
+  for (const ast::MemberRec& m : c.members) built.access.push_back({m.entity, m.access});
+  built.friends = std::move(c.friends);
   special_members(k, spec, built);
   built.defined = true;
   return &classes_.publish(spec, std::move(built));
@@ -4182,13 +4327,7 @@ const Program::VarInstance* Program::variable_instance(EntityId v, u32 point) {
   if (!partial && (t == var_templates_.end() || t->second >= point)) return nullptr;
   const u32 k = partial ? partial->item : t->second;
   // [temp.inst]/16: nested instantiations are limited, as functions' are.
-  if (var_instantiating_.size() >= instantiation_limit) {
-    if (!depth_reported_)
-      end_diags_.push_back({engine::Loc{std::to_underlying(id(k)), 0}, sema::diag_id(sema::Diag::instantiation_depth),
-                            {engine::diag_arg(instantiation_limit)}});
-    depth_reported_ = true;
-    return nullptr;
-  }
+  if (too_deep(var_instantiating_.size(), k)) return nullptr;
   ast::DeclSema tmpl = w_->ins.seqs.at(item_sema(k).value.decls, 0);
   std::vector<ast::TemplateParamSema> head = w_->ins.seqs.elements(tmpl.template_params);
   sema::Bindings args = partial ? partial->args : sema::Bindings::of(head.empty() ? 0 : head[0].depth, rec.args);
@@ -4226,14 +4365,7 @@ const Program::Instance* Program::instance(EntityId spec, u32 point) {
   const u32 k = member != member_patterns_.end() ? body_item : def->second;
   // [temp.inst]/16: instantiations nested through constant evaluation are limited as the END
   // worklist's are; the limit is reported once, at the template.
-  if (instantiating_.size() >= instantiation_limit) {
-    if (!depth_reported_) {
-      depth_reported_ = true;
-      end_diags_.push_back({engine::Loc{std::to_underlying(id(k)), 0}, sema::diag_id(sema::Diag::instantiation_depth),
-                            {engine::diag_arg(instantiation_limit)}});
-    }
-    return nullptr;
-  }
+  if (too_deep(instantiating_.size(), k)) return nullptr;
   if (member != member_patterns_.end()) {
     // Its declaration is the one the class's instantiation made; the class's arguments are bound.
     EntityId cls = member->second.spec;

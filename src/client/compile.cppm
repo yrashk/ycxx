@@ -20,11 +20,16 @@ inline constexpr std::array<std::string_view, 5> environment = {"SDKROOT", "DEVE
 
 // One request. `argv` follows the front's name, with response files expanded by the client;
 // relative paths in it are relative to `cwd`.
+// Whether a request's engine events go back to its client (#245): none, events, or events with
+// the values of the kinds that can show theirs.
+enum class Trace : std::uint8_t { off, events, values };
+
 struct Request {
   std::vector<std::string> argv;
   std::string cwd;
   std::vector<std::pair<std::string, std::string>> env;  // the set variables of `environment`
   std::int64_t build_time = 0;                           // the client's clock, seconds since the epoch
+  Trace trace = Trace::off;
 };
 
 // A file the client writes, at a path relative to its working directory.
@@ -43,6 +48,7 @@ struct Report {
   std::uint64_t regions_reused = 0;
   std::uint64_t executed = 0;   // engine cells executed and validated in this request's session
   std::uint64_t validated = 0;
+  std::uint64_t started_at = 0;  // the revision it started from: a later batch may not be in it (`--watch`)
 };
 
 struct Done {
@@ -79,9 +85,9 @@ struct Units {
 };
 
 // Runs a request in `session` (#63), reading files through `host` (which reads the view `units`
-// names). `stopped` is set when `stop` stopped it.
+// names). `stopped` is set when `stop` stopped it. `tracer` gets the events of its engine requests.
 Done run(const Request& r, pp::Host& host, pipeline::Session& session, const Stop& stop, bool& stopped,
-         Units units = {});
+         Units units = {}, engine::Tracer* tracer = nullptr);
 
 // The path a request's scope is found from (§2): its first source file, else its first input,
 // else nothing (the working directory). Relative to the request's `cwd`.
@@ -95,6 +101,16 @@ std::vector<std::string> sources_of(const Request& r);
 // language options, `source` (absolute, lexically normal) spelled as `r` spells it. Nothing when
 // `r` does not compile `source`.
 std::optional<Request> check_one(const Request& r, std::string_view source);
+
+// The check of `source` (absolute) with another compiler's command line (`compile_commands.json`'s,
+// daemon design §6.4; `args` without the compiler's name), relative to `cwd`: its preprocessing
+// options and template depth, as for `check_one`; its other options are that compiler's.
+Request check_command(std::span<const std::string> args, std::string cwd, std::string_view source,
+                      std::vector<std::pair<std::string, std::string>> env);
+
+// Splits a response file's text into arguments: whitespace separates them, and quotes and
+// backslashes escape as in a shell's words.
+std::vector<std::string> split_words(std::string_view text);
 
 // Writes the outputs and prints stdout and stderr; the exit status. A failed write is reported on
 // stderr after the request's own diagnostics, with status 1.
@@ -290,6 +306,66 @@ std::vector<std::string> sources_of(const Request& r) {
          std::ranges::to<std::vector>();
 }
 
+std::vector<std::string> split_words(std::string_view text) {
+  std::vector<std::string> out;
+  std::string cur;
+  bool in_word = false;
+  char quote = 0;
+  for (std::size_t i = 0; i < text.size(); ++i) {
+    char c = text[i];
+    if (quote) {
+      if (c == quote) quote = 0;
+      else if (c == '\\' && quote == '"' && i + 1 < text.size()) cur += text[++i];
+      else cur += c;
+    } else if (c == '\'' || c == '"') {
+      quote = c;
+      in_word = true;
+    } else if (c == '\\' && i + 1 < text.size()) {
+      cur += text[++i];
+      in_word = true;
+    } else if (std::isspace(static_cast<unsigned char>(c))) {
+      if (in_word) out.push_back(std::exchange(cur, {}));
+      in_word = false;
+    } else {
+      cur += c;
+      in_word = true;
+    }
+  }
+  if (in_word) out.push_back(cur);
+  return out;
+}
+
+namespace {
+
+// The arguments of `args` a check keeps: the preprocessing options, the template depth and the
+// class call ABI, and with `std` the language standard (ycxx's own command lines; another
+// compiler's may name one ycxx does not take).
+void checking_options(std::span<const std::string_view> args, bool std, std::vector<std::string>& out) {
+  pp::Config scratch;
+  for (std::size_t i = 0; i < args.size(); ++i) {
+    const std::size_t from = i;
+    if (auto taken = pp::take_option(args, i, scratch); taken && *taken) {
+      for (std::size_t k = from; k <= i; ++k) out.emplace_back(args[k]);
+    } else if (args[i] == "-o") {
+      ++i;
+    } else if ((std && args[i].starts_with("-std=")) || args[i].starts_with("-ftemplate-depth=") ||
+               args[i].starts_with("-fclass-call-abi=")) {
+      out.emplace_back(args[i]);
+    }
+  }
+}
+
+}  // namespace
+
+Request check_command(std::span<const std::string> args, std::string cwd, std::string_view source,
+                      std::vector<std::pair<std::string, std::string>> env) {
+  Request one{{}, std::move(cwd), std::move(env), 0};
+  checking_options(views(std::vector<std::string>(args.begin(), args.end())), false, one.argv);
+  one.argv.emplace_back("-fsyntax-only");
+  one.argv.emplace_back(source);
+  return one;
+}
+
 std::optional<Request> check_one(const Request& r, std::string_view source) {
   auto opts = parse_options(views(r.argv));
   if (!opts) return std::nullopt;
@@ -298,18 +374,7 @@ std::optional<Request> check_one(const Request& r, std::string_view source) {
   Request one{{}, r.cwd, r.env, r.build_time};
   // The preprocessing and language options, as given; the action, the output and the other
   // inputs are this request's own.
-  const std::vector<std::string_view> args = views(r.argv);
-  pp::Config scratch;
-  for (std::size_t i = 0; i < args.size(); ++i) {
-    const std::size_t from = i;
-    if (auto taken = pp::take_option(args, i, scratch); taken && *taken) {
-      for (std::size_t k = from; k <= i; ++k) one.argv.emplace_back(args[k]);
-    } else if (args[i] == "-o") {
-      ++i;
-    } else if (args[i].starts_with("-std=") || args[i].starts_with("-ftemplate-depth=") || args[i].starts_with("-fclass-call-abi=")) {
-      one.argv.emplace_back(args[i]);
-    }
-  }
+  checking_options(views(r.argv), true, one.argv);
   one.argv.emplace_back("-fsyntax-only");
   one.argv.push_back(*spelled);
   return one;
@@ -318,7 +383,7 @@ std::optional<Request> check_one(const Request& r, std::string_view source) {
 // The c++-compatible front: `[-c|-fsyntax-only|-E] [-o out] [-std=c++26] a.cpp...`. Exits 0 on
 // success and 1 on any error in the input or the command line.
 Done run(const Request& r, pp::Host& host, pipeline::Session& session, const Stop& stop, bool& stopped,
-         Units units) {
+         Units units, engine::Tracer* tracer) {
   Done d;
   stopped = false;
   auto opts = parse_options(views(r.argv));
@@ -388,7 +453,7 @@ Done run(const Request& r, pp::Host& host, pipeline::Session& session, const Sto
   }
   const pipeline::Until until = bad_object ? pipeline::Until::link : key.until;
   pipeline::RunStats rs;
-  std::optional<pipeline::Built> built = session.run<pipeline::Build>(session.request(std::move(key)), stop, &rs);
+  std::optional<pipeline::Built> built = session.run<pipeline::Build>(session.request(std::move(key)), stop, &rs, tracer);
   if (!built) {
     stopped = true;
     return d;

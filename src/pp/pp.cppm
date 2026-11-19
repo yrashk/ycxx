@@ -51,6 +51,12 @@ PathId path_id(std::string_view absolute);
 const std::string& path_of(PathId p);
 void hash_into(Hasher& h, PathId p) { h.bytes(path_of(p)).uint(u8(0)); }
 
+// Names in engine traces (#245): a path by its last two components, a driver's file by the name
+// it was given (`name_file`, process-wide), else its number.
+void name_file(FileId f, std::string name);
+void trace_describe(std::string& out, PathId p);
+void trace_describe(std::string& out, FileId f);
+
 // Phases 1–6 of one translation unit, as a function: `text` is the main file's, `path` its name
 // as given (it locates `#include "..."` and is its presumed name).
 Preprocessed preprocess(Session& s, std::string_view text, std::string_view path);
@@ -100,6 +106,8 @@ struct [[=engine::input{engine::Durability::low}]] FileText {
 struct [[=engine::input{engine::Durability::low}]] FileContent {
   using Key = PathId;
   using Value = std::optional<std::string>;
+  // For traces (#245): an include search's probe often finds nothing.
+  static std::string show(const Value& v) { return v ? std::format("{} bytes", v->size()) : std::string("absent"); }
 };
 
 // The text of an editor's open buffer at a path, or nothing when none is open (daemon design §6.1):
@@ -165,6 +173,21 @@ struct Pp {
   using Key = FileId;
   using Value = Region;
   static engine::query_task<Value> run(engine::Ctx& cx, Key file);
+  // For traces (#245): its error-severity diagnostics, rendered; a `#warning` is no error.
+  static std::string diagnostic_errors(std::span<const engine::Diagnostic> ds) {
+    std::string out;
+    for (const engine::Diagnostic& d : ds) {
+      const auto raw = std::to_underlying(d.id);
+      if (raw < lex::lex_diag_base) continue;
+      const auto kind = lex::LexDiag(raw - lex::lex_diag_base);
+      const lex::message m = lex::message_of(kind);
+      if (m.severity != lex::Severity::error || m.text[0] == 0) continue;
+      std::vector<u64> args;
+      for (const engine::DiagArg& a : d.args) args.push_back(a.raw);
+      out += lex::render(kind, args) + "\n";
+    }
+    return out;
+  }
 };
 
 }  // namespace ycxx::pp
@@ -251,6 +274,16 @@ class HostScope {
   Host* old_;
 };
 
+// The names of the driver's files, for traces (#245).
+struct FileNames {
+  std::mutex m;
+  std::map<FileId, std::string> names;
+};
+FileNames& file_names() {
+  static FileNames n;
+  return n;
+}
+
 }  // namespace ycxx::pp
 
 export namespace ycxx::pp {
@@ -298,6 +331,44 @@ PathId path_id(std::string_view absolute) {
   p.spelled.emplace_back(absolute);
   p.ids.emplace(std::string(absolute), id);
   return id;
+}
+
+void name_file(FileId f, std::string name) {
+  FileNames& n = file_names();
+  std::lock_guard lock(n.m);
+  n.names.insert_or_assign(f, std::move(name));
+}
+
+void trace_describe(std::string& out, FileId f) {
+  FileNames& n = file_names();
+  std::lock_guard lock(n.m);
+  if (const auto it = n.names.find(f); it != n.names.end()) out += it->second;
+  else std::format_to(std::back_inserter(out), "file {}", std::to_underlying(f));
+}
+
+// The whole path, so the include search's probes of one name in several directories differ,
+// with its long prefixes named: an SDK (`<sdk>/usr/include/stdio.h`), a toolchain, the home.
+void trace_describe(std::string& out, PathId p) {
+  std::string_view path = path_of(p);
+  if (const std::size_t sdk = path.find(".sdk/"); sdk != std::string_view::npos) {
+    out += "<sdk>";
+    out += path.substr(sdk + 4);
+    return;
+  }
+  for (std::string_view tc : {".xctoolchain/", "/CommandLineTools/"}) {
+    if (const std::size_t at = path.find(tc); at != std::string_view::npos) {
+      out += "<toolchain>/";
+      out += path.substr(at + tc.size());
+      return;
+    }
+  }
+  if (const char* home = std::getenv("HOME"); home && *home && path.starts_with(home) && path.size() > std::strlen(home) &&
+                                               path[std::strlen(home)] == '/') {
+    out += "~";
+    out += path.substr(std::strlen(home));
+    return;
+  }
+  out += path;
 }
 
 const std::string& path_of(PathId id) {

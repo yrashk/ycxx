@@ -8,12 +8,17 @@
 export module ycxx.parse:parser;
 
 import std;
+import ycxx.stack;
 import ycxx.ast;
 import ycxx.engine;
 import ycxx.pp;
 import ycxx.sema;
 
 export namespace ycxx::parse {
+
+// Thrown when the input nests deeper than half of the thread's stack allows (#187), after the
+// diagnostic; caught where an item's or a body's analysis begins, which then fails.
+struct TooDeep {};
 
 using lex::Tk;
 using lex::Tok;
@@ -353,7 +358,7 @@ public:
         // until the template is instantiated.
         u32 at = pos();
         bump();
-        auto q = qualified_ahead() ? qualified_type(0) : std::nullopt;
+        auto q = qualified_ahead() ? qualified_type(0, true) : std::nullopt;
         if (!q || any_type()) {
           s_->diag(at, Diag::expected_type_specifier);
           d.ok = false;
@@ -419,7 +424,7 @@ public:
           }
           if (qualified_ahead()) {
             // `N::C`, `::C`, `C::E`, `X<T>::E` ([dcl.type.simple]).
-            if (auto q = qualified_type(0); q && kind(q->second) != Tk::l_paren) {
+            if (auto q = qualified_type(0, true); q && kind(q->second) != Tk::l_paren) {
               cls = q->first;
               take_qualified(q->second);
               continue;
@@ -869,7 +874,8 @@ public:
   }
 
   // A qualified type name at token `start`: its type and the tokens it takes.
-  std::optional<std::pair<QualType, u32>> qualified_type(u32 start) {
+  // `checked`: the name is taken here, so its access is checked ([class.access]/4).
+  std::optional<std::pair<QualType, u32>> qualified_type(u32 start, bool checked = false) {
     u32 next = 0;
     auto s = nested_name(start, next);
     if (!s || kind(next) != Tk::identifier || kind(next + 1) == Tk::coloncolon) return std::nullopt;
@@ -881,6 +887,7 @@ public:
     }
     auto t = s_->scope_type(*s, name_of(tok(next)));
     if (!t) return std::nullopt;
+    if (checked) s_->type_member_access(*s, name_of(tok(next)), pos() + next);  // the type stands either way
     return std::pair{*t, next + 1 - start};
   }
   // Called once a qualified declarator-id is read, before its parameters, so they are looked up
@@ -2010,7 +2017,15 @@ public:
   }
 
   // cast-expression ([expr.cast]); explicit type conversion is beyond the α subset.
+  // Diagnoses and abandons the item when the nesting is too deep for the stack (#187).
+  void deep_enough() {
+    if (!stack::deep()) return;
+    s_->diag(pos(), Diag::nested_too_deeply);
+    throw TooDeep{};
+  }
+
   Ex cast_expression() {
+    deep_enough();  // parentheses and casts nest through here
     if (is(Tk::l_paren)) {
       // `(T)e` ([expr.cast]), as static_cast performs it; a parenthesized expression otherwise.
       u32 back = i_, begin = pos();
@@ -2033,6 +2048,7 @@ public:
 
   // unary-expression ([expr.unary]).
   Ex unary_expression() {
+    deep_enough();  // `++`, `--` and `sizeof` take their operands through here
     u32 begin = pos();
     std::optional<ast::UnaryOp> op;
     switch (kind()) {
@@ -2400,6 +2416,7 @@ public:
   // braced-init-list ([dcl.init.general]): `{ initializer-clause, … }`, or with designators
   // `{ .m = e, .n{…} }` ([dcl.init.aggr]).
   std::unique_ptr<sema::Braced> braced_init_list() {
+    deep_enough();  // nested braced lists
     auto b = std::make_unique<sema::Braced>();
     b->begin = pos();
     expect(Tk::l_brace);
@@ -2525,6 +2542,7 @@ public:
   }
 
   Ex statement() {
+    deep_enough();  // blocks and the statements they hold nest through here
     u32 begin = pos();
     switch (kind()) {
     case Tk::l_brace: return compound_statement();

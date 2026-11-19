@@ -408,6 +408,31 @@ void records() {
   }
 }
 
+// Nesting too deep for the stack (#187): on workers with 1 MiB stacks, 20,000 nested parentheses,
+// blocks, increments, `sizeof`s and braced lists are diagnosed, not a crash, and the session goes
+// on. The rest of the pipeline is #260.
+void too_deep() {
+  engine::Pool pool(2, std::nullopt, std::size_t{1} << 20);
+  pl::Session s(pool);
+  constexpr int n = 20000;
+  const std::string parens = "int main() { return " + std::string(n, '(') + "0" + std::string(n, ')') + "; }\n";
+  const std::string blocks = "int main() { " + std::string(n, '{') + std::string(n, '}') + " return 0; }\n";
+  std::string increments = "int main() { int x = 0; return ", sizes = "int main() { return ";
+  for (int i = 0; i < n; ++i) increments += "++";
+  for (int i = 0; i < n; ++i) sizes += "sizeof ";
+  increments += "x; }\n";
+  sizes += "0; }\n";
+  const std::string braces = "int main() { int a = " + std::string(n, '{') + "0" + std::string(n, '}') + "; return a; }\n";
+  for (const std::string* text : std::initializer_list<const std::string*>{&parens, &blocks, &increments, &sizes, &braces}) {
+    build(s, *text);
+    const pl::FrontResult& f = s.get<pl::TuFront>(tu);
+    check(f.has_errors() && std::ranges::any_of(f.messages, [](const pl::Message& m) { return m.text.contains("nested too deeply"); }),
+          "nesting too deep for the stack: diagnosed");
+  }
+  build(s, v0);
+  check(s.get<pl::Link>(program).image == cold(v0), "the session goes on after a too-deep unit");
+}
+
 }  // namespace
 
 int main() {
@@ -418,5 +443,6 @@ int main() {
   pooled();
   pooled_units();
   records();
+  too_deep();
   return ycxx::unit::result("unit.pipeline_incremental");
 }

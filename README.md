@@ -36,7 +36,8 @@ build/bin/ycxx cxx hello.cpp -o hello && ./hello
   all statements and operators; functions, recursion and overloading, operator functions included;
 - classes and unions: data and static members, member functions, constructors and destructors
   with RAII, aggregate and designated initialization, passing and returning them by value with
-  Clang's calling convention, so ycxx and Clang objects call each other;
+  Clang's calling convention, so ycxx and Clang objects call each other; access control
+  (`public`, `private`) and friend functions and classes;
 - namespaces, typedefs and alias declarations, `using` declarations and directives;
 - `[[…]]` attributes, the GNU attributes and `asm` labels the macOS SDK's headers use, and the
   type-trait built-ins libycxx's headers use (`__is_same`, `__remove_cv`, …)
@@ -61,17 +62,29 @@ its analysis between commands. A repeated build re-runs nothing, and an edit re-
 it affects, through code generation and the link. The daemon serves concurrent requests on a
 thread pool, and its output is byte for byte that of a cold, in-process build.
 
+**See what the engine does.** `ycxx cxx --trace-engine a.cpp` (or `YCXX_TRACE_ENGINE=stream`)
+prints every query the build went through as a colored tree on stderr: what ran, what was
+reused, verified green or cut off early, how long it took and on which worker. A second build
+shows everything reused, and a compile error is marked red at the cell where it starts, its
+message bubbled up to the root. `--trace-engine=interactive` opens a browser of the trace after
+the compile: a tree with each function's IR and assembly, a timeline of the pool's workers, and
+filters. `--trace-engine=json` writes the whole trace as JSON Lines, for tools and agents.
+`ycxx cxx --watch` stays attached and builds again whenever a file the build read changes,
+headers included; with `--trace-engine` each rebuild shows what it re-ran, and
+`--trace-engine=interactive` keeps the browser open and adds each rebuild live. `ycxx ctl trace
+[--interactive]` attaches to the daemon and shows every request it serves.
+
 **Editor support.** `ycxx lsp` is a language server that reports ycxx's errors as you type,
 including those in the headers a file includes, and goes to the definition of a name used in a
-function body, through the daemon, without unsaved text ever reaching a build.
+function body, through the daemon, without unsaved text ever reaching a build. Each file is
+checked with the flags of its last build, or else with its line in the project's
+`compile_commands.json`.
 
 ### Not yet
 
 - The standard library and its headers. C headers such as `<stdio.h>` compile without warnings
   and `printf` runs; libycxx's `<cstdio>` still needs pointer-to-member types.
 - Inheritance and virtual functions, `sizeof` of a class.
-- Access control: `private` and `protected` are not checked yet, so ycxx accepts code that
-  uses private members ([#119](https://github.com/yrashk/ycxx/issues/119)).
 - Member templates, and constraints on class templates and their members.
 - Floating-point arithmetic, exceptions, and optimization (`-O`).
 - Linux and x86-64 output.
