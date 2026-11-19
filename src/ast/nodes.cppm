@@ -117,11 +117,14 @@ struct Call {
 
 // The standard conversions ([conv]) and the others an implicit conversion sequence is made of.
 // `integral` covers integral promotions ([conv.prom]) and conversions ([conv.integral]), told
-// apart by the types; `to_void` is a discarded-value expression's conversion ([expr.context]).
+// apart by the types, and `floating` floating-point promotions ([conv.fpprom]) and conversions
+// ([conv.double]); `floating_integral` goes either way between the two ([conv.fpint]); `to_void`
+// is a discarded-value expression's conversion ([expr.context]).
 enum class ConversionKind : u8 {
   lvalue_to_rvalue, integral, floating_integral, user_defined, derived_to_base,
   array_to_pointer, function_to_pointer, qualification, boolean, null_pointer, to_void,
   pointer,  // [conv.ptr]: an object pointer to `cv void*`
+  floating,
 };
 
 // An implicit conversion: a node of width zero beyond its operand (§3.3), naming its function for

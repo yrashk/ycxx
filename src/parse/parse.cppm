@@ -3590,6 +3590,7 @@ private:
     }
     if (s_.types().is_pointer(t)) return s_.world().values.null_pointer(t);
     if (s_.types().is_integral(t)) return s_.world().values.integer(sema::Types::unqualified(t), 0);
+    if (s_.types().is_standard_floating(t)) return s_.world().values.floating(sema::Types::unqualified(t), 0.0);
     return std::nullopt;
   }
 

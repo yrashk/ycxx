@@ -93,14 +93,14 @@ struct Ops {
     return m.set(f, n, m.operand(f, n, c.bits ? 1 : 2));
   }
 
-  // ---------------------------------------------------------------- floating point (not yet)
+  // ---------------------------------------------------------------- floating point
 
-  static Flow fadd(M& m, Frame&, N n) { return m.unsupported(n); }
-  static Flow fsub(M& m, Frame&, N n) { return m.unsupported(n); }
-  static Flow fmul(M& m, Frame&, N n) { return m.unsupported(n); }
-  static Flow fdiv(M& m, Frame&, N n) { return m.unsupported(n); }
-  static Flow fneg(M& m, Frame&, N n) { return m.unsupported(n); }
-  static Flow fcmp(M& m, Frame&, N n) { return m.unsupported(n); }
+  static Flow fadd(M& m, Frame& f, N n) { return m.float_arith(f, n); }
+  static Flow fsub(M& m, Frame& f, N n) { return m.float_arith(f, n); }
+  static Flow fmul(M& m, Frame& f, N n) { return m.float_arith(f, n); }
+  static Flow fdiv(M& m, Frame& f, N n) { return m.float_arith(f, n); }
+  static Flow fneg(M& m, Frame& f, N n) { return m.float_arith(f, n); }
+  static Flow fcmp(M& m, Frame& f, N n) { return m.float_compare(f, n); }
 
   // ---------------------------------------------------------------- conversions
 
@@ -114,17 +114,21 @@ struct Ops {
     if (ast::builtin_of(*m.in_, m.result_type(f, n)) == ast::Builtin::bool_) return m.set(f, n, Value::integer(a.bits != 0));
     return m.set(f, n, Value::integer(M::norm(a.bits, s->width, s->is_signed)));
   }
-  static Flow fconv(M& m, Frame&, N n) { return m.unsupported(n); }
-  static Flow f2i(M& m, Frame&, N n) { return m.unsupported(n); }
-  static Flow i2f(M& m, Frame&, N n) { return m.unsupported(n); }
+  static Flow fconv(M& m, Frame& f, N n) { return m.float_convert(f, n); }
+  static Flow f2i(M& m, Frame& f, N n) { return m.float_convert(f, n); }
+  static Flow i2f(M& m, Frame& f, N n) { return m.float_convert(f, n); }
   static Flow bit_cast(M& m, Frame&, N n) { return m.unsupported(n); }
 
-  // [conv.bool]: zero and the null pointer are false. A pointer to an object or a function is
-  // never null.
+  // [conv.bool]: zero and the null pointer are false; a floating zero of either sign is, and a NaN
+  // is not. A pointer to an object or a function is never null.
   static Flow tobool(M& m, Frame& f, N n) {
     Value a = m.operand(f, n, 0);
     switch (a.kind) {
     case VKind::integer: return m.set(f, n, Value::integer(a.bits != 0));
+    case VKind::floating: {
+      u64 magnitude = m.shape(m.type_of(f, f.fn->operands_of(n)[0])).width == 32 ? a.bits & 0x7fff'ffffu : a.bits & ~(u64{1} << 63);
+      return m.set(f, n, Value::integer(magnitude != 0));
+    }
     case VKind::null: return m.set(f, n, Value::integer(0));
     case VKind::object:
     case VKind::function: return m.set(f, n, Value::integer(1));
@@ -312,7 +316,9 @@ struct Ops {
     case M::Fill::erroneous:
       // P2795: the erroneous value, zero on every target ycxx has; not constant ([expr.const]).
       if (constant(m)) return m.fail(Reason::read_erroneous);
-      return m.set(f, n, m.shape(t).kind == M::Kind::pointer ? Value::null() : Value::integer(0));
+      return m.set(f, n, m.shape(t).kind == M::Kind::pointer    ? Value::null()
+                         : m.shape(t).kind == M::Kind::floating ? Value::floating(0)
+                                                                 : Value::integer(0));
     case M::Fill::value:
     case M::Fill::constant: break;
     }

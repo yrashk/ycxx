@@ -5,8 +5,8 @@
 // This first list is the α slice's (#39): integers (bool and the character types included),
 // `nullptr`, string literal objects and addresses of them and of entities, and the shape of the
 // dependent family: a kind marked `[[=dependent]]` is a `VDep*` value, one with free template
-// parameters; aggregates of class and array type (δ, #86). Floating values and the rest of the
-// `VDep*` family follow (#33).
+// parameters; aggregates of class and array type (δ, #86); floating values (μ, #336). The rest of
+// the `VDep*` family follows (#33).
 export module ycxx.ast.values;
 
 import std;
@@ -56,6 +56,14 @@ constexpr bool is_negative(Bits128 v) { return std::int64_t(v.hi) < 0; }
 
 // An integral value of `type` ([basic.fundamental]): bool, a character or integer type.
 struct VInt {
+  QualType type;
+  Bits128 bits;
+};
+
+// A value of a floating-point type ([basic.fundamental], [basic.extended.fp]): its encoding in the
+// target's format for the type (`Target::layout`), in the low bits; 128 bits hold every format.
+// Values are bit patterns, so +0 and -0 are distinct and each NaN payload is its own value.
+struct VFloat {
   QualType type;
   Bits128 bits;
 };
@@ -150,7 +158,7 @@ struct VConstraint {
   SeqId<ConstId> operands;
 };
 
-using ValueKinds = closed_list<VInt, VNullptr, VString, VLvalue, VEntity, VAggregate, VDepParam, VDepFnParam, VDepExpansion,
+using ValueKinds = closed_list<VInt, VFloat, VNullptr, VString, VLvalue, VEntity, VAggregate, VDepParam, VDepFnParam, VDepExpansion,
                                VDepSizeofPack, VType, VAtom, VConstraint>;
 
 template <class T>

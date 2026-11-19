@@ -2341,10 +2341,16 @@ public:
       Ex r = s_->static_cast_to(e, *t, begin);
       return {r.id, begin, pos(), r.info};
     }
-    case Tk::float_lit:
-      s_->diag(begin, Diag::float_literal_not_supported);
+    case Tk::float_lit: {
+      const lex::Literal& l = literal();
       bump();
-      return {NodeId::none, begin, pos()};
+      if (l.ud_suffix != lex::no_name) {
+        s_->diag(begin, Diag::not_supported, Tk::float_lit);
+        return {NodeId::none, begin, pos()};
+      }
+      if (l.bad) return {NodeId::none, begin, pos()};
+      return s_->float_literal(l, begin, pos());
+    }
     case Tk::l_square:
     case Tk::kw_operator:
     case Tk::tilde:
