@@ -377,6 +377,7 @@ enum class EntityKind : u8 {
   class_template,
   variable_template,  // [temp.pre]: `(scope, name, head)`, as a function template's
   alias_template,     // [temp.alias]: `(scope, name, head)`; its uses are the types it stands for
+  concept_,           // [temp.concept]: `(scope, name, head)`
   type_alias  // a typedef-name or alias-declaration ([dcl.typedef]): `(scope, name)`
 };
 
@@ -399,6 +400,7 @@ struct EntityRec {
   DeclId first{};  // internal linkage only
   EntityId scope = EntityId::none;
   Fp128 head{};                          // a template's, or an unnamed namespace's unit
+  Fp128 constraints{};                   // a function template's constraints (ast.md §4.3)
   EntityId templ = EntityId::none;       // a specialization's template
   std::vector<ast::TemplateArg> args{};  // a specialization's template arguments
 };
@@ -430,8 +432,10 @@ public:
       f = ast::mix(f, types_->fp(types_->canonical(r.type)));
     if (r.kind == EntityKind::variable) f = ast::mix(f, std::to_underlying(r.lang));
     if (r.kind == EntityKind::function_template || r.kind == EntityKind::class_template ||
-        r.kind == EntityKind::variable_template || r.kind == EntityKind::alias_template || r.kind == EntityKind::namespace_)
+        r.kind == EntityKind::variable_template || r.kind == EntityKind::alias_template || r.kind == EntityKind::concept_ ||
+        r.kind == EntityKind::namespace_)
       f = ast::mix(f, r.head);
+    if (r.kind == EntityKind::function_template) f = ast::mix(f, r.constraints);
     if (r.templ != EntityId::none) {
       f = ast::mix(f, ins_->entities.fp(r.templ));
       for (const ast::TemplateArg& a : r.args) f = mix_arg(f, a);

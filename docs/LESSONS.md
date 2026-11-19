@@ -511,3 +511,17 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
     `tests/driver/kinds.py`), and try GCC too. When two compilers disagree, cross-link their
     objects to find out which convention each one uses.
   - Learned on #116.
+- **A recovery loop that may consume nothing hangs only on real headers.** The requires-expression
+  loop skipped to `;` after a failed requirement; at a `}` that consumed nothing, so 17 draft
+  tests that include libycxx timed out while every small test passed. The next symptom, a 2×
+  slowdown on the same tests, came from the new code asking the stand-in's linear lookup twice as
+  often, not from the new code itself.
+  - Do: give every parse loop a progress guard (`if (i_ == before) bump();`). On a timeout, run
+    the one test under `perl -e 'alarm 20; exec @ARGV'`, then `sample` it: the hot frames name the
+    loop or the lookup at once. Compare against main's binary before optimizing the new code.
+  - Learned on #88 step 6.
+- **A new `case` inserted above a fallthrough group joins it.** `case Tk::kw_static_cast:` was
+  added under `float_lit`, `[`, `operator` and `~`, which had fallen through to "not supported";
+  `1.0` then said "expected '<'", and calls with a floating argument failed far from the cause.
+  - Do: give a new case its own body, and read the cases above it before inserting.
+  - Learned on #88 step 6.

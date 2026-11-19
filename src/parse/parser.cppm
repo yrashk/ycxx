@@ -1094,6 +1094,7 @@ public:
   // template template parameters, packs and type-constraints.
   bool template_head(u16 depth) {
     s_->template_scopes.emplace_back();
+    s_->head_constraints.clear();
     if (!expect(Tk::kw_template) || !expect(Tk::less)) return false;
     bool ok = true;
     ++angle_;
@@ -1127,6 +1128,45 @@ public:
       s_->diag(pos(), Diag::not_supported, Tk::kw_template);  // template template parameters
       ok = false;
       return std::nullopt;
+    }
+    // A type-constraint ([temp.param]/2): `C T`, `C<args> T`, `N::C T`: a type parameter whose
+    // constraint is `C<T, args…>` ([temp.constr.decl]/3).
+    u32 concept_name = 0;
+    if (std::optional<ast::DeclSema> c = type_constraint_ahead(concept_name)) {
+      u32 at = pos();
+      for (u32 j = 0; j <= concept_name; ++j) bump();  // its nested-name-specifier and name
+      std::vector<ast::TemplateArg> cargs;
+      if (is(Tk::less)) {
+        auto a = template_argument_list();
+        if (!a) {
+          ok = false;
+          return std::nullopt;
+        }
+        cargs = *a;
+      }
+      if (is(Tk::ellipsis)) {
+        s_->diag(pos(), Diag::not_supported, Tk::ellipsis);  // a constrained pack: a fold-expanded constraint
+        ok = false;
+        return std::nullopt;
+      }
+      p.kind = ast::TemplateArgKind::type;
+      p.type = s_->types().template_param(depth, index);
+      if (is(Tk::identifier)) {
+        p.name = name_of(tok());
+        bump();
+      }
+      cargs.insert(cargs.begin(), s_->templates().type_arg(p.type));
+      if (auto nf = s_->concept_constraint(*c, cargs, at)) s_->head_constraints.push_back(*nf);
+      if (accept(Tk::equal)) {
+        auto t = type_id();
+        if (!t) {
+          ok = false;
+          return std::nullopt;
+        }
+        p.has_default = 1;
+        p.default_ = {ast::TemplateArgKind::type, s_->types().canonical(*t), sema::ConstId::none};
+      }
+      return p;
     }
     if (type_param) {
       // A type-parameter ([temp.param]/1), with a default type-id; `class... Ts` is a pack.
@@ -1197,6 +1237,24 @@ public:
       p.default_ = {ast::TemplateArgKind::value, s_->types().canonical(t), *v};
     }
     return p;
+  }
+
+  // A type-constraint's concept here, before a parameter's name: `C T`, `C<…> T`, `N::C T`.
+  // `name` is set to the offset of the concept's name.
+  std::optional<ast::DeclSema> type_constraint_ahead(u32& name) {
+    if (qualified_ahead()) {
+      u32 next = 0;
+      auto sc = nested_name(0, next);
+      if (!sc || !sc->ns || kind(next) != Tk::identifier) return std::nullopt;
+      name = next;
+      return s_->namespace_template(*sc->ns, name_of(tok(next)), ast::DeclKind::concept_);
+    }
+    name = 0;
+    if (!is(Tk::identifier)) return std::nullopt;
+    Tk k = kind(1);
+    if (k != Tk::identifier && k != Tk::less && k != Tk::ellipsis && k != Tk::comma && k != Tk::greater && k != Tk::equal)
+      return std::nullopt;
+    return s_->concept_named(name_of(tok()));
   }
 
   // A type-id ([dcl.name]): a decl-specifier-seq and an abstract declarator.
@@ -1353,6 +1411,235 @@ public:
     }
     s_->end_pattern(false, begin, 0);
     return {p};
+  }
+
+  // ------------------------------------------------------------ constraints ([temp.constr])
+
+  // A constraint-expression read into its normal form ([temp.constr.normal]): `||`, `&&`,
+  // parentheses and concept-ids decompose; any other operand is an atomic constraint. With
+  // `primaries` (a requires-clause, [temp.pre]/9) operands are primary-expressions; otherwise (a
+  // concept's definition) they are what binds tighter than `&&`.
+  sema::ConstId constraint_expression(bool primaries) {
+    sema::ConstId l = constraint_conjunction(primaries);
+    while (is(Tk::pipepipe)) {
+      bump();
+      l = s_->templates().constraint_op(1, l, constraint_conjunction(primaries));
+    }
+    return l;
+  }
+  sema::ConstId constraint_conjunction(bool primaries) {
+    sema::ConstId l = constraint_operand(primaries);
+    while (is(Tk::ampamp)) {
+      bump();
+      l = s_->templates().constraint_op(0, l, constraint_operand(primaries));
+    }
+    return l;
+  }
+  // Whether an operand of `&&` or `||` ends here.
+  bool operand_ends(bool primaries) {
+    return primaries || is(Tk::ampamp) || is(Tk::pipepipe) || is(Tk::r_paren) || is(Tk::semi) || at_end();
+  }
+  sema::ConstId constraint_operand(bool primaries) {
+    u32 back = i_;
+    std::size_t n = s_->diag_count();
+    // `( constraint-expression )`, when it is the whole operand.
+    if (is(Tk::l_paren)) {
+      bump();
+      int saved = std::exchange(angle_, 0);
+      sema::ConstId c = constraint_expression(false);
+      angle_ = saved;
+      if (accept(Tk::r_paren) && operand_ends(primaries)) return c;
+      i_ = back;
+      s_->truncate_diags(n);
+    }
+    // A concept-id, when it is the whole operand: its concept's normal form with the arguments
+    // substituted ([temp.constr.normal]/1.4).
+    if (auto c = concept_id_constraint()) {
+      if (operand_ends(primaries)) return *c;
+      i_ = back;
+      s_->truncate_diags(n);
+    }
+    u32 begin = pos();
+    Ex e = primaries ? primary_expression() : binary_expression(3);
+    (void)e;
+    // The template parameters the expression names: its parameter mapping's ([temp.constr.atomic]/1).
+    std::vector<NameId> names;
+    for (u32 j = begin_ + begin; j < i_; ++j)
+      if (r_->tokens[j].kind == Tk::identifier) names.push_back(name_of(r_->tokens[j]));
+    return s_->atom(begin, pos(), names);
+  }
+  // `C<args>` or `N::C<args>` naming a concept here: its normal form; none (nothing read) if it
+  // is no concept-id.
+  std::optional<sema::ConstId> concept_id_constraint() {
+    u32 back = i_;
+    std::size_t n = s_->diag_count();
+    std::optional<ast::DeclSema> c;
+    u32 at = pos();
+    if (qualified_ahead()) {
+      u32 next = 0;
+      auto sc = nested_name(0, next);
+      if (!sc || !sc->ns || kind(next) != Tk::identifier || kind(next + 1) != Tk::less) return std::nullopt;
+      c = s_->namespace_template(*sc->ns, name_of(tok(next)), ast::DeclKind::concept_);
+      if (!c) return std::nullopt;
+      for (u32 j = 0; j <= next; ++j) bump();
+    } else {
+      if (!is(Tk::identifier) || kind(1) != Tk::less) return std::nullopt;
+      c = s_->concept_named(name_of(tok()));
+      if (!c) return std::nullopt;
+      bump();
+    }
+    auto args = template_argument_list();
+    if (!args) {  // read again as an expression, which diagnoses it
+      i_ = back;
+      s_->truncate_diags(n);
+      return std::nullopt;
+    }
+    return s_->concept_constraint(*c, *args, at).value_or(sema::ConstId::none);
+  }
+
+  // `C` or `N::C` naming a concept here, read; none, with nothing read, otherwise.
+  std::optional<ast::DeclSema> concept_name() {
+    std::optional<ast::DeclSema> c;
+    u32 at = 0;
+    if (qualified_ahead()) {
+      auto sc = nested_name(0, at);
+      if (!sc || !sc->ns || kind(at) != Tk::identifier) return std::nullopt;
+      c = s_->namespace_template(*sc->ns, name_of(tok(at)), ast::DeclKind::concept_);
+    } else if (is(Tk::identifier)) {
+      c = s_->concept_named(name_of(tok()));
+    }
+    if (!c) return std::nullopt;
+    for (u32 j = 0; j <= at; ++j) bump();
+    return c;
+  }
+
+  // A nested-requirement's constraint-expression, checked where it is written, with the
+  // requires-expression's parameters in scope ([expr.prim.req.nested]): its `||` and `&&`
+  // short-circuit as satisfaction does ([temp.constr.op]), so an operand that is not checked may be
+  // invalid. Its normal form is not needed: subsumption does not look into a requires-expression.
+  enum class Truth : u8 { no, yes, dependent, invalid };
+  Truth nested_constraint(bool templated) {
+    Truth l = nested_conjunction(templated);
+    while (accept(Tk::pipepipe)) {
+      std::size_t n = s_->diag_count();
+      Truth r = nested_conjunction(templated);
+      if (l == Truth::yes) {
+        s_->drop_failures(n);
+        continue;
+      }
+      if (r == Truth::yes) l = r;
+      else if (l == Truth::dependent || r == Truth::dependent) l = Truth::dependent;
+      else l = Truth::no;
+    }
+    return l;
+  }
+  Truth nested_conjunction(bool templated) {
+    Truth l = nested_operand(templated);
+    while (accept(Tk::ampamp)) {
+      std::size_t n = s_->diag_count();
+      Truth r = nested_operand(templated);
+      if (l == Truth::no || l == Truth::invalid) {
+        s_->drop_failures(n);
+        continue;
+      }
+      if (r == Truth::no || r == Truth::invalid) l = r;
+      else if (l == Truth::dependent || r == Truth::dependent) l = Truth::dependent;
+    }
+    return l;
+  }
+  Truth nested_operand(bool templated) {
+    std::size_t n = s_->diag_count();
+    u32 at = pos();
+    Ex e = binary_expression(3);
+    if (s_->diag_count() > n || !e.ok()) {
+      if (templated) s_->drop_failures(n);
+      return Truth::invalid;
+    }
+    if (s_->dependent(e)) return Truth::dependent;
+    Ex v = s_->rvalue(e);
+    if (!s_->types().is(sema::Types::unqualified(s_->types().canonical(v.type())), sema::Builtin::bool_)) {
+      s_->diag(at, Diag::constraint_not_bool, v.type());
+      return Truth::invalid;
+    }
+    sema::Evaluated r = sema::Evaluator(*s_, questions()).evaluate(v);
+    if (r.dependent) return Truth::dependent;
+    if (!r.value) {
+      s_->diag(at, Diag::constraint_not_constant, r.reason);
+      return Truth::invalid;
+    }
+    return s_->world().values.as_signed(*r.value) != 0 ? Truth::yes : Truth::no;
+  }
+
+  // A requires-expression ([expr.prim.req]): a `bool` prvalue, true when every requirement is
+  // satisfied, value-dependent while one depends on a template parameter. In a templated entity
+  // an invalid requirement makes it false; elsewhere it is ill-formed (/5).
+  Ex requires_expression() {
+    u32 begin = pos();
+    bump();
+    s_->push_scope();
+    bool ok = true;
+    if (accept(Tk::l_paren)) {
+      Suffix params = parameter_list(ok);
+      for (const Param& p : params.params) s_->declare_local(p.name, p.type, sema::local_flag::parameter, p.at, false);
+    }
+    const bool templated = s_->templated();
+    bool satisfied = true;
+    bool dependent = false;
+    if (!expect(Tk::l_brace)) ok = false;
+    while (ok && !is(Tk::r_brace) && !at_end()) {
+      std::size_t n = s_->diag_count();
+      u32 before = i_;
+      bool failed = false;
+      if (is(Tk::kw_typename)) {  // a type-requirement
+        auto t = type_id();
+        if (t && s_->types().is_dependent(*t)) dependent = true;
+      } else if (accept(Tk::l_brace)) {  // a compound-requirement
+        Ex e = expression();
+        expect(Tk::r_brace);
+        if (is(Tk::kw_noexcept)) {
+          s_->diag(pos(), Diag::not_supported, Tk::kw_noexcept);
+          bump();
+        }
+        bool dep = s_->dependent(e);
+        if (accept(Tk::arrow)) {  // `-> C<args>`: C<decltype((e)), args…> ([expr.prim.req.compound])
+          u32 at = pos();
+          if (std::optional<ast::DeclSema> c = concept_name()) {
+            std::vector<ast::TemplateArg> args;
+            if (is(Tk::less)) args = template_argument_list().value_or(std::vector<ast::TemplateArg>{});
+            if (!dep && e.ok()) {
+              args.insert(args.begin(), s_->templates().type_arg(s_->decltype_of(e, true)));
+              auto nf = s_->concept_constraint(*c, args, at);
+              auto sat = nf ? s_->questions().satisfied(*nf) : std::optional<bool>(false);
+              if (!sat) dependent = true;
+              else if (!*sat) failed = true;
+            }
+          } else {
+            s_->diag(at, Diag::not_a_concept, is(Tk::identifier) ? name_of(tok()) : s_->no_name());
+            failed = true;
+            skip_to_semi();
+          }
+        }
+        if (dep) dependent = true;
+      } else if (accept(Tk::kw_requires)) {  // a nested-requirement ([expr.prim.req.nested])
+        Truth t = nested_constraint(templated);
+        if (t == Truth::dependent) dependent = true;
+        else if (t != Truth::yes) failed = true;
+      } else {  // a simple-requirement
+        Ex e = expression();
+        if (s_->dependent(e)) dependent = true;
+      }
+      if (!expect(Tk::semi)) skip_to_semi();
+      if (i_ == before) bump();  // no progress: drop the token
+      if (s_->diag_count() > n || failed) {
+        satisfied = false;
+        if (templated) s_->drop_failures(n);
+      }
+    }
+    expect(Tk::r_brace);
+    s_->pop_scope();
+    if (!ok) return {NodeId::none, begin, pos()};
+    if (satisfied && dependent) return s_->dependent_node({}, begin, pos(), s_->builtin(Builtin::bool_));
+    return s_->bool_literal(satisfied, begin, pos());
   }
 
   // ------------------------------------------------------------ fold expressions ([expr.prim.fold])
@@ -1925,11 +2212,7 @@ public:
     }
     case Tk::coloncolon: return qualified_id(begin);
     case Tk::kw_this: bump(); return s_->this_expr(begin, pos());
-    case Tk::float_lit:
-    case Tk::l_square:
-    case Tk::kw_requires:
-    case Tk::kw_operator:
-    case Tk::tilde:
+    case Tk::kw_requires: return requires_expression();
     case Tk::kw_static_cast: {
       // `static_cast<T>(e)` ([expr.static.cast]).
       bump();
@@ -1943,6 +2226,13 @@ public:
       Ex r = s_->static_cast_to(e, *t, begin);
       return {r.id, begin, pos(), r.info};
     }
+    case Tk::float_lit:
+      s_->diag(begin, Diag::float_literal_not_supported);
+      bump();
+      return {NodeId::none, begin, pos()};
+    case Tk::l_square:
+    case Tk::kw_operator:
+    case Tk::tilde:
     case Tk::kw_typeid:
     case Tk::kw_dynamic_cast:
     case Tk::kw_const_cast:
@@ -2281,7 +2571,8 @@ public:
     u32 begin = pos();
     bump();
     if (is(Tk::kw_consteval) || (is(Tk::exclaim) && kind(1) == Tk::kw_consteval)) return if_consteval(begin);
-    if (is(Tk::kw_constexpr) || is(Tk::exclaim)) {
+    if (is(Tk::kw_constexpr)) return if_constexpr(begin);
+    if (is(Tk::exclaim)) {
       s_->diag(pos(), Diag::not_supported, kind());
       skip_statement();
       return {NodeId::none, begin, pos()};
@@ -2294,6 +2585,95 @@ public:
     s_->pop_scope();
     return s_->node(ast::If{{}, sema::Sema::at(cond, begin), sema::Sema::at(then_, begin), sema::Sema::at(else_, begin)},
                     begin, pos());
+  }
+
+  // `if constexpr ( condition ) statement else statement` ([stmt.if]/2): the condition is a
+  // constant expression contextually converted to bool. While it is value-dependent (a template's
+  // definition) both branches are analysed; otherwise only the one it selects is the statement.
+  // In an instantiation the other, discarded, branch is not instantiated: its tokens are skipped.
+  // Outside templates it is checked, but neither emits code nor demands anything.
+  Ex if_constexpr(u32 begin) {
+    bump();  // constexpr
+    s_->push_scope();
+    if (!expect(Tk::l_paren)) {
+      s_->pop_scope();
+      skip_statement();
+      return {NodeId::none, begin, pos()};
+    }
+    if (starts_declaration()) {
+      s_->diag(pos(), Diag::not_supported, kind());  // an init-statement or a declaration condition
+      skip_param();
+    }
+    Ex e = expression();
+    Ex cond = s_->to_bool(e, e.begin);
+    expect(Tk::r_paren);
+    std::optional<bool> take;
+    if (cond.ok() && !s_->dependent(cond)) {
+      sema::Evaluated v = sema::Evaluator(*s_, questions()).evaluate(cond);
+      if (v.value) take = s_->world().values.as_signed(*v.value) != 0;
+      else if (!v.dependent) s_->diag(e.begin, Diag::not_constant, v.reason);
+    }
+    if (!take) {  // dependent, or in error: both branches, as an ordinary `if`
+      Ex then_ = substatement();
+      Ex else_;
+      if (accept(Tk::kw_else)) else_ = substatement();
+      s_->pop_scope();
+      return s_->node(ast::If{{}, sema::Sema::at(cond, begin), sema::Sema::at(then_, begin), sema::Sema::at(else_, begin)},
+                      begin, pos());
+    }
+    auto discarded = [&] {
+      if (s_->instantiating()) return skip_substatement();
+      std::size_t n = s_->demands.size();
+      substatement();
+      s_->demands.resize(n);
+    };
+    Ex kept;
+    if (*take) kept = substatement();
+    else discarded();
+    if (accept(Tk::kw_else)) {
+      if (*take) discarded();
+      else kept = substatement();
+    }
+    s_->pop_scope();
+    if (kept.ok()) return kept;
+    return s_->node(ast::Compound{s_->builder().list({})}, begin, pos());
+  }
+  // Past a statement, unanalysed: a discarded statement of an instantiation ([stmt.if]/2).
+  void skip_substatement() {
+    auto parens = [&] {
+      if (!is(Tk::l_paren)) return;
+      int depth = 0;
+      do {
+        if (is(Tk::l_paren)) ++depth;
+        if (is(Tk::r_paren)) --depth;
+        bump();
+      } while (depth > 0 && !at_end());
+    };
+    switch (kind()) {
+    case Tk::l_brace: skip_statement(); return;
+    case Tk::kw_if:
+      bump();
+      while (is(Tk::kw_constexpr) || is(Tk::exclaim) || is(Tk::kw_consteval)) bump();
+      parens();
+      skip_substatement();
+      if (accept(Tk::kw_else)) skip_substatement();
+      return;
+    case Tk::kw_for:
+    case Tk::kw_while:
+    case Tk::kw_switch:
+      bump();
+      parens();
+      skip_substatement();
+      return;
+    case Tk::kw_do:
+      bump();
+      skip_substatement();
+      accept(Tk::kw_while);
+      parens();
+      accept(Tk::semi);
+      return;
+    default: skip_to_semi(); return;
+    }
   }
 
   // `if !opt consteval compound-statement else statement` ([stmt.if]): the statement after `else`

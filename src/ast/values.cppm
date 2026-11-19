@@ -115,8 +115,43 @@ struct [[=dependent]] VDepSizeofPack {
   u16 index;
 };
 
+// ---------------------------------------------------------------- constraints ([temp.constr])
+// *#88 step 6, Fable's decision.*
+
+// A type as a value: a type parameter's argument in an atomic constraint's parameter mapping, its
+// cv-qualifiers apart.
+struct VType {
+  QualType type;  // unqualified, as types in values are
+  u8 cv;
+};
+
+// An atomic constraint ([temp.constr.atomic]): the appearance of its expression (the item that
+// contains it, and its tokens [begin, end) in that item's declaration part), and its parameter
+// mapping: one entry per parameter of the head at `depth`, a `VType` or a value for a parameter the
+// expression names and none for the others ([temp.constr.atomic]/1). Two are identical when they
+// are one value ([temp.constr.atomic]/2). `calls` are the offsets, from `begin`, of its unqualified
+// calls that were dependent where it appears: checking it adds argument-dependent lookup at the
+// point of use to them ([temp.dep.candidate]). An atom of a trailing requires-clause may name the
+// function's parameters, whose types may name any template parameter: its mapping is then complete.
+struct VAtom {
+  ItemId item;
+  u32 begin;
+  u32 end;
+  u16 depth;
+  SeqId<ConstId> mapping;
+  SeqId<u32> calls;
+  bool fn_params;  // it names a function parameter (a trailing requires-clause's), so it maps all
+};
+
+// A normal form ([temp.constr.normal]): the conjunction (`op` 0) or disjunction (`op` 1) of normal
+// forms and atoms.
+struct VConstraint {
+  u8 op;
+  SeqId<ConstId> operands;
+};
+
 using ValueKinds = closed_list<VInt, VNullptr, VString, VLvalue, VEntity, VAggregate, VDepParam, VDepFnParam, VDepExpansion,
-                               VDepSizeofPack>;
+                               VDepSizeofPack, VType, VAtom, VConstraint>;
 
 template <class T>
 constexpr bool is_value_kind = ValueKinds::contains<T>;

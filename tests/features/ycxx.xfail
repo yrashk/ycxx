@@ -354,8 +354,6 @@ draft/expr/expr.prim.lambda.general-4.accept.cpp 'auto' not supported yet
 draft/expr/expr.prim.req.compound-2.accept.cpp preprocessing directives are not supported yet
 draft/expr/expr.prim.req.general-1.accept.cpp preprocessing directives are not supported yet
 draft/expr/expr.prim.req.general-2.reject.cpp errors elsewhere: 'template' not supported yet
-draft/expr/expr.prim.req.nested-1.accept.cpp 'template' not supported yet
-draft/expr/expr.prim.req.simple-1.accept.cpp 'template' not supported yet
 draft/expr/expr.prim.req.type-1.accept.cpp 'template' not supported yet
 draft/expr/expr.prim.splice-1.reject.cpp errors elsewhere: 'struct' not supported yet
 draft/expr/expr.prim.this-1.accept.cpp 'struct' not supported yet
@@ -422,7 +420,6 @@ draft/stmt/stmt.dcl-2.accept.cpp 'static' not supported yet
 draft/stmt/stmt.expand-1.accept.cpp 'auto' is not supported yet
 draft/stmt/stmt.expand-2.accept.cpp preprocessing directives are not supported yet
 draft/stmt/stmt.expand-3.accept.cpp 'struct' not supported yet
-draft/stmt/stmt.if-2.accept.cpp 'template' not supported yet
 draft/stmt/stmt.ranged-2.accept.cpp preprocessing directives are not supported yet
 draft/stmt/stmt.return-1.reject.cpp errors elsewhere: 'class' not supported yet
 draft/stmt/stmt.return-2.reject.cpp errors elsewhere: 'auto' not supported yet
@@ -447,10 +444,7 @@ draft/temp/temp.class.general-1.accept.cpp 'template' not supported yet
 draft/temp/temp.concept-1.accept.cpp preprocessing directives are not supported yet
 draft/temp/temp.constr.atomic-1.accept.cpp 'template' not supported yet
 draft/temp/temp.constr.concept-1.accept.cpp 'template' not supported yet
-draft/temp/temp.constr.decl-1.accept.cpp 'template' not supported yet
 draft/temp/temp.constr.decl-2.accept.cpp 'template' not supported yet
-draft/temp/temp.constr.normal-1.accept.cpp 'template' not supported yet
-draft/temp/temp.constr.normal-2.accept.cpp 'template' not supported yet
 draft/temp/temp.constr.normal-3.accept.cpp 'template' not supported yet
 draft/temp/temp.constr.normal-4.accept.cpp 'template' not supported yet
 draft/temp/temp.constr.normal-5.reject.cpp errors elsewhere: 'template' not supported yet
@@ -537,7 +531,6 @@ draft/temp/temp.names-1.reject.cpp errors elsewhere: preprocessing directives ar
 draft/temp/temp.names-3.reject.cpp errors elsewhere: preprocessing directives are not supported yet
 draft/temp/temp.names-4.reject.cpp errors elsewhere: 'template' not supported yet
 draft/temp/temp.names-5.reject.cpp errors elsewhere: 'template' not supported yet
-draft/temp/temp.names-7.accept.cpp 'template' not supported yet
 draft/temp/temp.over-2.accept.cpp 'template' not supported yet
 draft/temp/temp.over.link-4.accept.cpp 'template' not supported yet
 draft/temp/temp.param-1.reject.cpp errors elsewhere: 'template' not supported yet
