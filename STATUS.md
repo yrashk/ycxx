@@ -1505,6 +1505,31 @@ What the process allocates, attributed to the engine's cells, in the trace and t
 - Not yet: drift of retained bytes over a long daemon session, a peak per request, and small
   inexactness (#284).
 
+## Templates, ζ step 9: member function templates (#88, #314, 2026-11-19)
+
+- **Member function templates** ([temp.mem]) of classes and class templates: their head one level
+  inside the class's; a call through an object or the class (`s.get(1)`, `S::st(1L)`) deduces
+  their specializations as a call of a namespace-scope template does, overloads with ordinary
+  members included; explicit arguments after `.f<…>`, `S::f<…>`, `N::f<…>`, an unqualified
+  member template, or `.template f<…>` / `X::template f<…>`. Members overload on template-ness,
+  template-head and constraints ([temp.over.link]/4-6).
+- A class template specialization's member template binds the class's arguments as its
+  enclosing level when it is instantiated.
+- **Constructor templates**, `template<class It> V(It, It)`: function templates named as their
+  class whose specializations are constructors; never `S(S)` ([class.copy.ctor]/5).
+- **Definitions outside the class**, `template<class T> R S::f(T)` and `template<class U>
+  template<class T> R W<U>::f(T)`, whose body is in the scope of both heads (`Program::outer_heads_`),
+  matching a member template by its head and constraints; two heads before anything else are an
+  error.
+- Mangled as Clang: `_ZNK1S3getIiEET_S1_`, `_ZN1WIiE1fIcEEiT_`, `_ZN1SC1IiEET_` (the member's own
+  parameters `T_` at any depth; a constructor without a return type).
+- Tests: `tests/own/templates/m9-*` (13, 8 from the review; a PEER test links Clang's
+  definitions); 5 more draft examples pass. Feature map: `temp-member` partial.
+- Not yet (#340): member class and alias templates (nested classes, #306), conversion function
+  templates (#339), trailing requires-clauses on member templates, static data member templates,
+  `&S::get<int>`, explicit specializations of member templates; a non-type default depending on
+  the class's parameter (#209). Found on the way: #345.
+
 ## Placeholder types, θ step 1 (#279, 2026-11-19)
 
 - **Types:** `TAuto{decltype_auto}` in `types` (ast.md §5.1's `TAuto`, without a type-constraint
@@ -1535,6 +1560,41 @@ What the process allocates, attributed to the engine's cells, in the trace and t
   `p1-impl-mangle` checks the `Da`/`Dc` names against Clang objects.
 - Not yet: constrained `C auto`, `auto x = {…}`, `auto x(e)` at namespace scope, abbreviated
   function templates (#286); structured bindings (#285).
+
+## Lambdas, θ step 2 (#280, 2026-11-19)
+
+The closure-type design is [docs/design/closures.md](docs/design/closures.md) (decided by Fable,
+checked against Clang 23 and GCC 16 probes).
+
+- **Closure types:** unnamed `class_` entities whose scope is the enclosing function (or the
+  enclosing lambda's `operator()`), with the call operator's declared type and an ordinal per
+  signature in closing-brace order (`EntityRec::ordinal`, mixed into the identity through
+  `head`). Each is complete once its lambda's body ends, when its `ClassRec` is published with
+  the implicit special members `special_members` gives (non-trivial copies and destructors of
+  captures included). A capturing closure's default constructor is deleted.
+- **Analysis** (`Sema::open_lambda`, `close_lambda`, the `LambdaFrame` stack): the body is
+  parsed inside the enclosing part with its own locals; a name that resolves to an enclosing
+  function's local or an init-capture is captured by every lambda between, by copy or by
+  reference, explicitly or by the capture-default, outermost first; a constant usable in
+  constant expressions is its value, not a capture. `this` and `*this`, init-captures, `mutable`,
+  trailing return types and deduced return types (step 1). Captures are `Member`s of `This` in
+  the body, and the lambda-expression is a `Lambda` node of `MemberInit`s. `BodySema::closures`
+  keeps each `ClosureDef`.
+- **Calls:** a class object's `operator()` is found and called ([over.call.object]); a member
+  function called on a prvalue object materializes it. A captureless closure converts to a
+  pointer to function through its static invoker (assignment, arguments, unary `+`).
+- **Emission and ABI:** the front end emits each closure's `operator()` and invoker with the
+  body that has it. Mangling: `<local-name>`s with `Ul <lambda-sig> E [n] _`, the invoker
+  `8__invoke`, closure types as template arguments; a specialization for a TU-local closure is
+  TU-local. Names and capture layout are checked against Clang objects (`p2-impl-mangle`).
+- Tests: `tests/own/lambda/` (56 spec-only, 1 ABI): 55 pass, 2 XFAIL (default arguments #300,
+  block-scope statics #291).
+- Not yet: lambdas outside function bodies (#338); generic lambdas, template lambdas, pack
+  captures and constexpr lambdas (#281); the conversion function's own symbol, conversions in
+  contextual and operator contexts, invokers for class or variadic parameters (#339); arrays of
+  non-trivially-copyable classes captured by copy (#353); weak definitions of closure members in
+  inline functions (#124). A constant named by a lambda with a capture-default is captured, where
+  Clang captures it only when it is odr-used (a layout difference for such closures, #355).
 
 ## Statements, ι step 1: `switch`, labels, `goto`, conditions (#337, 2026-11-19)
 

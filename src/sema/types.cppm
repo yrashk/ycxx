@@ -452,6 +452,9 @@ struct EntityRec {
   Fp128 constraints{};                   // a function template's constraints (ast.md §4.3)
   EntityId templ = EntityId::none;       // a specialization's template
   std::vector<ast::TemplateArg> args{};  // a specialization's template arguments
+  // A closure type's number among its context's closures of its signature (ast.md §4.3); its
+  // `type` is its function call operator's declared type (docs/design/closures.md).
+  u32 ordinal = 0;
 };
 
 class Entities {
@@ -487,6 +490,9 @@ public:
         r.kind == EntityKind::namespace_)
       f = ast::mix(f, r.head);
     if (r.kind == EntityKind::function_template) f = ast::mix(f, r.constraints);
+    // A closure type, unnamed, has its signature and ordinal in its scope as its `head`
+    // (docs/design/closures.md); other classes have none.
+    if (r.kind == EntityKind::class_) f = ast::mix(f, r.head);
     if (r.templ != EntityId::none) {
       f = ast::mix(f, ins_->entities.fp(r.templ));
       for (const ast::TemplateArg& a : r.args) f = mix_arg(f, a);
@@ -543,6 +549,7 @@ struct MemberDeclRec {
   bool is_ctor = false;
   bool is_dtor = false;
   bool is_deleted = false;
+  bool is_template = false;  // a member function template ([temp.mem])
   std::vector<ast::NodeId> defaults;  // a function's default arguments by parameter, or empty
 };
 
@@ -561,6 +568,10 @@ struct ClassRec {
   // copy constructor when they are not trivial (user-declared, or implicit and synthesized),
   // else none; whether the copy constructor is deleted.
   bool user_ctors = false;
+  // A closure type ([expr.prim.lambda.closure]): not an aggregate, its captures' members unnamed
+  // (/1); with a lambda-capture, its default constructor and copy assignment are deleted (/13).
+  bool closure = false;
+  bool default_deleted = false;
   EntityId destructor = EntityId::none;
   EntityId copy_ctor = EntityId::none;
   bool copy_deleted = false;
@@ -713,7 +724,10 @@ struct World {
   Entities entities{ins, types};
 
   explicit World(ast::Interners& i) : ins(i) {
-    types.class_name = [this](EntityId e) { return std::string(ins.names.spelling(entities.rec(e).name)); };
+    types.class_name = [this](EntityId e) {
+      std::string n(ins.names.spelling(entities.rec(e).name));
+      return n.empty() ? std::string("(lambda)") : n;  // a closure type ([expr.prim.lambda.closure])
+    };
     types.dep_name_spelling = [this](NameId n) { return std::string(ins.names.spelling(n)); };
     types.class_dependent = [this](EntityId e) {
       return std::ranges::any_of(entities.rec(e).args, [&](const ast::TemplateArg& a) { return arg_dependent(a); });

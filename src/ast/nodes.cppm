@@ -194,6 +194,14 @@ struct InitList {
   [[=sequenced]] ChildList elems;
 };
 
+// A lambda-expression ([expr.prim.lambda]): a prvalue of its closure type, whose captures are
+// initialized in field order by `inits`, `MemberInit`s ([expr.prim.lambda.capture]/15).
+struct Lambda {
+  ExprInfo info;
+  EntityId closure;
+  [[=sequenced]] ChildList inits;
+};
+
 // Value-initialization of an object of the type ([dcl.init.general]): for a scalar, zero; for an
 // aggregate without constructors, every element value-initialized.
 struct ValueInit {
@@ -394,7 +402,7 @@ using Nodes = closed_list<Literal, DeclRef, Paren, Unary, Binary, OrderedBinary,
                           Conditional, While, Do, For, Break, Continue, DeclStmt, Declarator, DeclGroup,
                           IfConsteval, StaticAssert, Member, InitList, ValueInit, DefaultInit, This,
                           MemberCall, Materialize, CtorCall, MemberInit, Destructor, DestroyMember, Dependent,
-                          DepName, CondDecl, Switch, Case, Default, Label, Goto, DefaultArg>;
+                          DepName, CondDecl, Switch, Case, Default, Label, Goto, Lambda, DefaultArg>;
 
 static_assert(Nodes::size < max_node_kinds);
 
