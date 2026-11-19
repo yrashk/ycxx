@@ -33,7 +33,7 @@ int main() {
                              b.seq({LocalRec{in.names.intern("v"), int_t, EntityId::none, local, 0}}),
                              b.seq(std::span<const ExpansionRec>{}), b.seq(std::span<const u32>{})});
     DeclSema d{f_e, int_t, DeclKind::function, Linkage::external, Storage::none, Access::none, 0,
-               b.seq<NodeId>({}), NodeId::none, NodeId::none,
+               b.seq<NodeId>({}), NodeId::none, ConstId::none, NodeId::none,
                b.seq({ParamSema{EntityId::none, int_t, in.names.intern("p"), two, 0}}),
                b.seq(std::span<const TemplateParamSema>{})};
     item = b.commit(ItemSema{call, b.seq({d}), b.seq(std::span<const ExpansionRec>{})});

@@ -681,8 +681,18 @@ in `lsp` frames (`LspOut`), the last of which carries LSP's exit status (1 after
   the exit status, and `ctl shutdown` with a session open.
 - Not yet: `compile_commands.json` (#167); stopping a diagnosis on a newer edit,
   `$/cancelRequest`, debouncing and interactive priority (#168); `buffers_in`, the disk-view
-  assertion and one view per session (#169); go-to-definition and diagnostics inside headers
-  (#170, after #34); open documents as eviction roots (#17).
+  assertion and one view per session (#169); go-to-definition from a declaration part (a
+  parameter's type, a base) and of locals (#242); open documents as eviction roots (#17).
+- Go-to-definition and headers' diagnostics (#170): `textDocument/definition` asks the daemon
+  (`lsp::Define`), which checks the document's unit in the editor view and runs
+  `pipeline::DefinitionAt{unit, file, offset}`: the offset's token in the region (its site, a
+  macro's at its name), the innermost item, the node `ast::Red::find` reaches in that item's
+  function body, and the entity a `DeclRef`, `Member` or `Call` there names; then that entity's
+  first declaration (`FrontResult::declared`, kept with errors too) mapped back to a file and an
+  offset. Diagnostics located in a file the editor has not opened are published under it and
+  cleared when no document reports them; a header's message is rendered against its open buffer
+  in the editor view. `daemon.lsp`'s `definitions` covers a header's function, unsaved text, a
+  header's warning shown, moved by an unsaved edit, and cleared (mutation-checked).
 
 ## The L1 interpreter (#25, 2026-11-18)
 
@@ -738,7 +748,7 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   evaluated expression.
 - Tests: `tests/own/consteval` (spec-only); the draft's [dcl.constexpr]/5 ex. 3, [dcl.constinit]/3
   ex. 1 and [stmt.if]/4 ex. 3 pass.
-- Not yet (#102): naming a consteval function outside a call, `if constexpr`, static_assert
+- Not yet (#102): naming a consteval function outside a call, static_assert
   messages that are constant expressions, notes along the call chain, block-scope static constexpr
   variables.
 
@@ -980,8 +990,8 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   (#219); `N::T(…)` and `N::T{…}` are functional casts.
 - `T (*p)(args);` with T a typedef-name declares p ([stmt.ambig]), in sema and in the splitter.
 - **`#include <stdio.h>`** (the SDK's) compiles, and `printf`, `puts`, `fputs` and `stdout` run
-  (`tests/own/headers/stdio.run.cpp`). `<cstdio>` still waits for libycxx's templates and
-  concepts (#88).
+  (`tests/own/headers/stdio.run.cpp`). `<cstdio>` still waits for static members of class
+  templates and template template parameters (#88) and pointer-to-member types (#238).
 - Member operators get the [over.oper] checks too; `S::operator@` and `N::operator@` define outside;
   unary `*` and `&` call operator functions; a deleted or ambiguous choice is an error, not the
   built-in operator. `N::T(…)` is a cast only when no function or variable hides N::T.
@@ -1001,16 +1011,19 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   most 16 bytes passes and returns in one or two 8-byte registers; a larger or non-trivial one by
   address, an indirect result in x8 (`l2::Function::indirect_result`, the call's fourth
   immediate). A class needing more registers than are left goes whole on the stack and leaves the
-  rest unused (C.11). An empty class passes nothing, as in Clang. A user-provided move
-  constructor makes a class non-trivial for calls, as in Clang 23 and GCC; Apple Clang 21
-  differs (#230).
-- **Mixed-object tests:** `PEER:` in a run test names a file Clang compiles and links with it
-  (docs/TESTING.md). `tests/own/abi` checks 3- to 24-byte classes, a non-trivial one, member
-  functions returning classes and exhausted registers, calling both ways.
+  rest unused (C.11). An empty class passes nothing, as in Clang. Which classes are trivial for
+  calls follows upstream Clang and GCC by default (Itanium, `ClassRec::move_usable`,
+  `move_nontrivial`). `-fclass-call-abi=apple` selects Apple Clang's rule on arm64 Darwin
+  (`ast::Target::call_triviality`, `pp::Config::call_triviality`, DECISIONS §1.6).
+- **Mixed-object tests:** `PEER:` in a run test names a file the oracle Clang compiles and links
+  with it, or Apple Clang with `PEER-WITH: apple-clang` (docs/TESTING.md). `tests/own/abi`
+  checks 3- to 24-byte classes, member functions returning classes, exhausted registers, empty
+  classes, and each kind of class for calls (trivially copyable, non-trivial copy or destructor,
+  move-only, deleted copy, a move-only member) under both settings, calling both ways.
 - Not yet: braced arguments to overload sets, templates and member calls (#231), class arguments
   through an ellipsis and calls through pointers returning classes (#196), classes with
   floating members (#201), classes in constant evaluation (#25).
-- Tests: `tests/own/abi` (3), `tests/own/classes/s5-byvalue-lifetimes`, `-temporaries`;
+- Tests: `tests/own/abi` (5), `tests/own/classes/s5-byvalue-lifetimes`, `-temporaries`;
   s1-byvalue-params and -return pass.
 
 ## Templates, ζ step 1: function templates (#88, 2026-11-18)
@@ -1212,6 +1225,42 @@ session's.*
   `__is_nothrow_*` families, `__is_base_of`, `__is_standard_layout` and
   `__reference_binds_to_temporary`; a value-dependent predicate as a template argument outside a
   body (#209).
+
+## Templates, ζ step 6: concepts and `if constexpr` (#88, 2026-11-18)
+
+Fable decided the representation (ast.md §6.6); the Opus session wrote the code.
+- **Concept definitions** ([temp.concept]) are `concept_` entities whose `DeclSema.constraints` is
+  the normal form of their constraint-expression. A concept-id `C<args>` is a `bool` constant, or
+  value-dependent while an argument is.
+- **Associated constraints** of function templates ([temp.constr.decl]): type-constraints
+  (`template<C T>`, `template<C<U> T>`), the head's requires-clause and the trailing one, in
+  normal form ([temp.constr.normal]): `VConstraint` conjunctions and disjunctions over `VAtom`s,
+  each the atom's tokens and a mapping of the parameters it names.
+- **Satisfaction** ([temp.constr.sat]): an atom is re-analysed from its tokens with its mapping
+  bound, its function parameters declared and argument-dependent lookup at the point of the
+  check; an error there makes it unsatisfied, a non-`bool` or non-constant result and "not
+  supported" are hard errors (`survives_substitution`), so a missing feature never picks another
+  overload. Results are memoized per atom (`Program::atom_satisfied`).
+- **Overload resolution** drops candidates whose constraints are not satisfied
+  ([over.match.viable]/3) and, between templates that are otherwise equally specialized, prefers
+  the one whose constraints subsume the other's ([temp.constr.order], [temp.func.order]/6).
+  Declarations whose clauses differ are distinct overloads; equivalent clauses (as tokens, with
+  parameters by position) redeclare.
+- **Requires-expressions** ([expr.prim.req]) with parameters and simple, type, compound (with a
+  return-type-requirement, also a qualified concept) and nested requirements, checked in place:
+  false in a templated entity when a requirement is invalid, ill-formed elsewhere.
+- **`if constexpr`** ([stmt.if]/2): the condition is evaluated as it is parsed; an
+  instantiation skips the discarded branch, and outside templates its odr-uses demand nothing.
+- Also: the stand-in `Program` indexes declared names, so a namespace-scope lookup visits only
+  its own name's items (draft tests including libycxx headers: 8 s → 5 s); floating literals
+  report "not supported" instead of "expected '<'".
+- Tests: `tests/own/templates/c6-*` (18, agreeing with Clang and GCC); 6 more draft examples
+  pass. `<cstdio>`: 33 → 18 errors.
+- Not yet: constraints on class and variable templates, partial specializations and members,
+  constrained packs, fold-expanded constraints, `C auto`, `noexcept` in compound requirements
+  (#234); re-verification of satisfaction at END (#235); Itanium constraint mangling (#236);
+  recorded discarded extents for `if constexpr` (#237); value-dependent mapping arguments (#209);
+  `static_assert(false)` in a template that is never instantiated (#241).
 
 ## Bootstrap workarounds
 
