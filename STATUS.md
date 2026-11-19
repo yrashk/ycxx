@@ -564,9 +564,13 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   configuration. Darwin remains the default.
 - The scalar System V AMD64 backend in `src/target/x86_64/` supports 32- and 64-bit integer,
   pointer and reference parameters and results, plus void results. It handles direct and
-  indirect calls, stack arguments and RIP-relative data references within a unit. Floating-point,
-  aggregate and narrow integer arguments and results, and variadic calls, are outside this ABI
-  subset.
+  indirect calls, stack arguments and RIP-relative data references within a unit. Direct
+  variadic calls use the same registers and stack slots for promoted 32- and 64-bit integers
+  and pointers. The emitter clears EAX immediately before every direct call so a variadic callee
+  receives a zero vector-register count in AL, including with an empty ellipsis. Floating-point,
+  aggregate and narrow integer arguments and results remain outside this ABI subset. Variadic
+  definitions and calls through function pointers remain unsupported.
+  [#399](https://github.com/yrashk/ycxx/issues/399), [#196](https://github.com/yrashk/ycxx/issues/196)
 - `-c` writes deterministic ELF64 relocatable objects through `src/obj/elf.cppm`. The reader
   accepts the supported x86-64 `ET_REL` subset emitted by ycxx. The native ELF linker consumes
   the same in-memory objects, resolves absolute and PC-relative relocations, and writes a static
@@ -579,11 +583,17 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   value. The link query checks a source function's ABI when an asm label gives it the symbol
   `main`. A `main` supplied in an ELF object must already use one of those signatures. Hosted
   linking and general-purpose ELF object interoperability remain unsupported.
-- ELF code generation diagnoses translation units that require namespace-scope dynamic
-  initialization or destruction. Syntax-only analysis still accepts them.
+- ELF objects record namespace-scope initializer functions in `.init_array`, with 8-byte slots
+  and `R_X86_64_64` relocations. The linker places arrays consecutively in input order and checks
+  each slot resolves into executable input bytes. Generated startup calls the functions before
+  `main` ([basic.start.dynamic]). A custom `_start` with a nonempty array is a link error.
   [#387](https://github.com/yrashk/ycxx/issues/387)
-- Linux x86-64 CI runs `unit.linux_compile`, which links a ycxx-produced object with a native C
-  caller, and `unit.linux_executable` (`tests/unit/pipeline/linux_executable.py`), which runs
+- ELF code generation diagnoses namespace-scope objects that require destruction at exit, at
+  their declaration. Syntax-only analysis accepts them. [#400](https://github.com/yrashk/ycxx/issues/400)
+- Linux x86-64 CI runs `unit.linux_compile`, which links ycxx-produced objects with native C
+  callers and variadic callees. It checks namespace initialization, default promotions, register
+  and stack arguments, stack alignment and the incoming AL for both empty and nonempty ellipses.
+  `unit.linux_executable` (`tests/unit/pipeline/linux_executable.py`) runs
   source-only, object-only and mixed-input executables and checks exit status, `argc` and `argv`,
   diagnostics, and cold and daemon output. The linker and startup also have native CTest
   coverage, including execution of an explicit `_start`.
@@ -1499,9 +1509,10 @@ request it serves.
 - Names: units and files by their file, functions by qualified name, requests and programs by
   their units and output (`Build(a.cpp → a)`).
 - Errors: a compile error is a value, so a kind says which of its values hold errors
-  (`errors(value)`; `Pp::diagnostic_errors` keeps error-severity diagnostics only, so a
-  `#warning` is none). Events carry the text; the cell where errors start (no child has any) is
+  (`errors(value)`). Events carry the text; the cell where errors start (no child has any) is
   marked, with its message, and every cell above names it (`error below:`, JSON `error_at`).
+  Preprocessing, front-end and back-end diagnostics include the source file, line and byte column
+  where available (#404). The trace keeps error-severity messages only, so a `#warning` is no error.
 - Values shown: L1 (`FunctionIr`), L2 (`Lower`), and assembly (`Codegen`, `Optimized`) from
   `aarch64::disassemble`, which decodes with the encoder's own form table.
 - `--trace-engine=json`: JSON Lines on stderr (events with values and errors, the diagnostics and
@@ -1908,6 +1919,26 @@ values, end to end; results match Clang's bit for bit.
   `!=` rewritten from `==` (#295). A constexpr reference requires a constexpr overloaded
   dereference. Full constant evaluation of the class iterator still needs #25.
 - Tests: `tests/own/range-for/` (17 from the independent author and nine review regressions).
+
+## The address of an overload set, ι (#313, #337, 2026-11-19)
+
+- A pointer or reference target picks a free or static member function by its function type
+  ([over.over]). Targets include initializers, assignments, arguments and return values, and
+  casts. List-initialization applies the target to each scalar element, including elements of
+  an array with a deduced bound.
+- Function template deduction uses the entire target type ([temp.deduct.funcaddr]). Selection
+  checks associated constraints, prefers a non-template function, and partially orders
+  matching templates by their full function types. A call can also deduce fixed function or
+  function-pointer parameters by trying the non-template members of an overload set
+  ([temp.deduct.call]/6).
+- Related work covers pointers to non-static members (#238), `noexcept` function types (#219),
+  a template-id without a target type (#335), and function pointer or reference template
+  arguments (#406). A free immediate function selected from an overload is diagnosed outside an
+  immediate invocation or context. General immediate-function name validation is tracked in #102.
+- The Linux x86-64 backend can call through an address taken from an internal function. Emitting
+  addresses of externally linked functions on that target is tracked in #407.
+- Tests are in `tests/own/function-pointers/`, with draft examples for [over.over] and
+  [temp.deduct.call] enabled.
 
 ## Bootstrap workarounds
 

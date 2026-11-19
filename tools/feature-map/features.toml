@@ -489,8 +489,8 @@ int twice(int x) { return 2 * x; }
 int main() { int (*f)(int) = twice; return f(2) == 4 ? 0 : 1; }
 '''
 status = 'partial'
-issues = [24, 196]
-note = 'calls through a pointer'
+issues = [196, 219, 287, 407]
+note = 'variadic indirect calls, noexcept conversions, C language linkage and external ELF addresses'
 
 [[feature]]
 id = 'basic-rvalue-ref'
@@ -1070,8 +1070,8 @@ clauses = ['dcl.fct', 'expr.call', 'over.ics.ellipsis']
 std = 'C++98'
 detect = ',\s*\.\.\.\s*\)|\bva_(?:start|arg|list)\b'
 status = 'partial'
-issues = [196]
-note = 'AMD64 System V `va_list` declarations are supported (#383). Definitions (`va_start`) and calls through pointers remain open'
+issues = [196, 399]
+note = 'Linux x86-64 supports the compiler resource `<stdarg.h>` and System V `va_list` declarations (#383), plus direct scalar INTEGER calls. SSE arguments (#399), variadic definitions (`va_start`), and calls through pointers (#196) remain open.'
 probe = '''
 #include <stdarg.h>
 int sum(int n, ...) { va_list ap; va_start(ap, n); int s = 0; for (int i = 0; i < n; ++i) s += va_arg(ap, int); va_end(ap); return s; }
@@ -1872,8 +1872,8 @@ int f(int) { return 1; } int f(long) { return 2; } int f(const char*) { return 3
 int main() { int (*p)(long) = f; return (f(1) == 1 && f(1L) == 2 && f("") == 3 && p(0) == 2) ? 0 : 1; }
 '''
 status = 'partial'
-issues = [313]
-note = 'the address of an overload set'
+issues = [219, 238, 335, 406]
+note = 'function qualifiers, member pointers and template argument targets'
 
 [[feature]]
 id = 'over-operators'
