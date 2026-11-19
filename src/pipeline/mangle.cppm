@@ -66,9 +66,10 @@ std::expected<std::string, std::string> mangled_function(const ast::Interners& i
                                                          ast::EntityId scope = ast::EntityId::none,
                                                          bool special = false);
 
+// `special`: `name` is a <ctor-dtor-name> (`C1`), a constructor template's specialization.
 std::expected<std::string, std::string> mangled_specialization(const ast::Interners& in, std::string_view name,
                                                                const TemplateSpec& spec, const ClassNames& classes = {},
-                                                               ast::EntityId scope = ast::EntityId::none);
+                                                               ast::EntityId scope = ast::EntityId::none, bool special = false);
 
 // <substitution> for the candidate at `index`: `S_`, then `S0_` … `SZ_`, `S10_` … (§5.1.10).
 std::string substitution(std::size_t index);
@@ -131,6 +132,9 @@ std::optional<std::string_view> operator_code(std::string_view op, std::size_t a
 class Mangler {
  public:
   Mangler(const ast::Interners& in, const ClassNames& classes) : in_(in), classes_(classes) {}
+  // The depth of the head of the template whose specialization is mangled: its parameters are
+  // `T_`, `T0_`, …
+  ast::u16 own_depth = 0;
 
   // <type> (§5.1.5), recording substitution candidates as they complete.
   std::expected<std::string, std::string> type(ast::QualType q) {
@@ -250,7 +254,11 @@ class Mangler {
         auto p = in_.types.get<ast::TTemplateParam>(in_.types.canon(bare));
         // A template template parameter's own parameter, in Clang's <template-param-decl>:
         // `TL <level-1> _ [<index-1>] _`.
-        if (p.depth != 0) inner = p.index == 0 ? std::format("TL{}__", p.depth - 1) : std::format("TL{}_{}_", p.depth - 1, p.index - 1);
+        // Its depth relative to the mangled template's own head (a member template's is inside its
+        // class's, whose parameters are substituted).
+        if (p.depth < own_depth) return std::unexpected("a template parameter of an enclosing template-head");
+        int level = p.depth - own_depth;
+        if (level != 0) inner = p.index == 0 ? std::format("TL{}__", level - 1) : std::format("TL{}_{}_", level - 1, p.index - 1);
         else inner = p.index == 0 ? "T_" : std::format("T{}_", p.index - 1);
         candidates_.push_back(full_key(bare));
       } else if (in_.types.is<ast::TFunction>(in_.types.canon(bare))) {
@@ -395,13 +403,25 @@ class Mangler {
     return out + *sig;
   }
   // A function template specialization's <encoding>, without `_Z` (§5.1.2).
-  std::expected<std::string, std::string> specialization_encoding(std::string_view name, const TemplateSpec& spec, ast::EntityId scope) {
+  // `special`: `name` is a <ctor-dtor-name> (`C1`), a constructor template's specialization.
+  std::expected<std::string, std::string> specialization_encoding(std::string_view name, const TemplateSpec& spec, ast::EntityId scope,
+                                                                  bool special = false) {
+    // Template parameters are mangled relative to the specialization's own head (a member
+    // template's is inside its class's), for its encoding only.
+    ast::u16 saved = own_depth;
+    if (!spec.params.empty()) own_depth = spec.params[0].depth;
+    auto r = specialization_encoding_at(name, spec, scope, special);
+    own_depth = saved;
+    return r;
+  }
+  std::expected<std::string, std::string> specialization_encoding_at(std::string_view name, const TemplateSpec& spec, ast::EntityId scope,
+                                                                     bool special) {
     ast::QualType c = in_.types.canon(spec.pattern);
-    // A member function template of a class (so far a generic lambda's function call operator):
+    // A generic lambda's function call operator, a member function template of a closure type:
     // `N [<CV-qualifiers>] <prefix> <unqualified-name> <template-args> E` and its signature, in a
     // <local-name> when the class is a closure type (§5.1.5.3, §5.1.6).
     ClassName sc = scope != ast::EntityId::none && classes_ ? classes_(scope) : ClassName{};
-    if (sc.is_class && in_.types.is<ast::TFunction>(c)) {
+    if (sc.closure && in_.types.is<ast::TFunction>(c)) {
       auto f = in_.types.get<ast::TFunction>(c);
       std::string local;
       if (sc.closure) {
@@ -426,16 +446,19 @@ class Mangler {
       std::string cv = std::string(std::to_underlying(f.cv) & 2 ? "V" : "") + (std::to_underlying(f.cv) & 1 ? "K" : "");
       return local + "N" + cv + *p + unqualified + *args + "E" + *sig;
     }
-    auto n = template_name(name, scope);
+    auto n = template_name(name, scope, special);
     if (!n) return n;
     auto args = spec.params.empty() ? template_args(spec.args) : own_template_args(spec.args, spec.params, spec.same_heads);
     if (!args) return args;
     // A variable template specialization: its name and arguments, no type (§5.1.2).
     if (!in_.types.is<ast::TFunction>(c)) return scope != ast::EntityId::none ? std::format("N{}{}E", *n, *args) : *n + *args;
-    auto sig = signature(in_.types.get<ast::TFunction>(c), true);
+    auto sig = signature(in_.types.get<ast::TFunction>(c), !special);  // a constructor has no return type
     if (!sig) return sig;
-    // In a namespace, a <nested-name> ending in the template-args (§5.1.5.3).
-    return scope != ast::EntityId::none ? std::format("N{}{}E{}", *n, *args, *sig) : *n + *args + *sig;
+    // In a namespace, a <nested-name> ending in the template-args (§5.1.5.3); a member function
+    // template's cv-qualifiers after the `N`.
+    ast::Cv fcv = in_.types.get<ast::TFunction>(c).cv;
+    std::string cv = std::string(std::to_underlying(fcv) & 2 ? "V" : "") + (std::to_underlying(fcv) & 1 ? "K" : "");
+    return scope != ast::EntityId::none ? std::format("N{}{}{}E{}", cv, *n, *args, *sig) : *n + *args + *sig;
   }
   std::expected<std::string, std::string> local_encoding(const LocalFunction& f) {
     if (f.spec) return specialization_encoding(f.name, *f.spec, f.scope);
@@ -602,14 +625,14 @@ class Mangler {
   // A function template's name before its <template-args>: an <unscoped-template-name>, or in a
   // namespace a <template-prefix> after the namespace's <prefix>; a substitution candidate either
   // way (§5.1.5.3, §5.1.10).
-  std::expected<std::string, std::string> template_name(std::string_view name, ast::EntityId scope) {
+  std::expected<std::string, std::string> template_name(std::string_view name, ast::EntityId scope, bool special = false) {
     std::string r;
     if (scope != ast::EntityId::none) {
       auto p = prefix(scope);
       if (!p) return p;
       r = *p;
     }
-    r += source_name(name);
+    r += special ? std::string(name) : source_name(name);
     candidates_.push_back((std::uint64_t{2} << 32) | candidates_.size());
     return r;
   }
@@ -698,9 +721,9 @@ std::expected<std::string, std::string> mangled_function(const ast::Interners& i
 
 std::expected<std::string, std::string> mangled_specialization(const ast::Interners& in, std::string_view name,
                                                                const TemplateSpec& spec, const ClassNames& classes,
-                                                               ast::EntityId scope) {
+                                                               ast::EntityId scope, bool special) {
   Mangler m(in, classes);
-  auto e = m.specialization_encoding(name, spec, scope);
+  auto e = m.specialization_encoding(name, spec, scope, special);
   if (!e) return e;
   return "_Z" + *e;
 }
@@ -710,7 +733,7 @@ std::expected<std::string, std::string> symbol_name(const ast::Interners& in, st
                                                     const ClassNames& classes, ast::EntityId scope,
                                                     bool special, const TemplateSpec* spec) {
   if (spec) {
-    auto m = mangled_specialization(in, name, *spec, classes, scope);
+    auto m = mangled_specialization(in, name, *spec, classes, scope, special);
     if (!m) return m;
     return "_" + *m;
   }

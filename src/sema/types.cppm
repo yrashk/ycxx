@@ -551,8 +551,9 @@ struct MemberDeclRec {
   bool is_ctor = false;
   bool is_dtor = false;
   bool is_deleted = false;
-  // A member function template's template-head: so far only a generic lambda's function call
-  // operator ([expr.prim.lambda.closure]/7).
+  bool is_template = false;  // a member function template ([temp.mem])
+  // A generic lambda's function call operator's template-head ([expr.prim.lambda.closure]/7):
+  // its definition is its lambda's, not an item's.
   std::vector<ast::TemplateParamSema> head{};
 };
 

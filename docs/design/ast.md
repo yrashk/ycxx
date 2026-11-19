@@ -757,6 +757,23 @@ it is analysed and its odr-uses demand nothing ([basic.def.odr]/15).
   `__make_integer_seq<…>` is mangled as a global class template of that name. GCC differs on the
   prefixes.
 
+### 6.8 Member function templates
+
+*Added by #88 step 9 (#314), following §6.3: a member template of a specialization is the member's
+own template, instantiated with the class's arguments and its own at once.*
+
+- A member function template's head is one level inside its class's (depth 1 in a class
+  template, 0 in a class); its entity is a `function_template` scoped in the class, a constructor
+  template's named as the class with the `constructor` flag. A class template specialization's
+  instantiation declares its own member templates (the member items analysed with the class's
+  arguments bound), so a call deduces only the member's own parameters.
+- Instantiating `W<int>::f<char>` binds the class specialization's arguments (`class_args_`) at
+  the enclosing level and the member's at its own (`Program::instance`). Defined outside the
+  class, the definition is the current instantiation's member template's, as for member
+  functions, and the definition item's leading heads are its body's enclosing heads.
+- Itanium mangles a member template specialization's own parameters as `T_`, `T0_`, … whatever
+  their depth (the class's are substituted): the mangler counts levels from the template's own head.
+
 ## 7. C++26 constructs
 
 ### 7.1 Reflection values

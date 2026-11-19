@@ -1,4 +1,4 @@
-# Each probe built and run by ycxx d466f1136a1a and by an oracle (feature-map probe).
+# Each probe built and run by ycxx 4bc8c0dc7641 and by an oracle (feature-map probe).
 feature	oracle	ycxx	first_error
 lex-core	gcc	pass	
 lex-digraph	gcc	pass	
@@ -44,11 +44,11 @@ expr-auto-cast	gcc	fail	expected an expression
 expr-multidim-subscript	gcc	fail	invalid operands to binary expression ('M' and 'int')
 expr-pack-index	gcc	fail	the parameter pack 't' is used without '...'
 lambda-basic	gcc	pass	
-lambda-generic	gcc	pass	
+lambda-generic	gcc	fail	'auto' is not supported yet
 lambda-init-capture	gcc	pass	
 lambda-constexpr	gcc	fail	not a constant expression: internal error: the IR is ill-formed here
 lambda-capture-this	gcc	pass	
-lambda-template	gcc	pass	
+lambda-template	gcc	fail	'<' is not supported yet
 lambda-unevaluated	gcc	fail	'[' is not supported yet
 lambda-pack-capture	gcc	fail	'...' is not supported yet
 lambda-static	gcc	fail	'static' is not supported yet
@@ -111,7 +111,7 @@ over-resolution	gcc	fail	the address of the overloaded function 'f' is not suppo
 over-operators	gcc	fail	invalid operands to binary expression ('V' and 'int')
 temp-fn	gcc	pass	
 temp-class	gcc	pass	
-temp-member	gcc	fail	'template' is not supported yet
+temp-member	gcc	pass	
 temp-spec	gcc	pass	
 temp-explicit-inst	gcc	fail	'template' is not supported yet
 temp-res	gcc	fail	function_ir: Dependent is not supported yet

@@ -938,6 +938,31 @@ public:
   }
 
   // [expr.ref]: `object.name`, or `object->name` with `arrow`.
+  // Whether `object.name` names a member function template ([temp.names]/3): the object's class
+  // has one of that name.
+  bool names_member_template(const Ex& object, bool arrow, NameId name) {
+    if (!object.ok() || dependent(object)) return false;
+    QualType t = arrow ? types().pointee(object.type()) : object.type();
+    if (!types().is_class(t)) return false;
+    const ClassRec* c = class_rec(types().class_of(t));
+    return c && std::ranges::any_of(c->members, [&](const MemberDeclRec& m) { return m.name == name && m.is_template; });
+  }
+  // Explicit template arguments for the function templates `e` names, a member or an overload set
+  // ([temp.arg.explicit]).
+  void explicit_template_args(const Ex& e, std::vector<TemplateArg> args) {
+    if (e.ok() && (is_bound_member(e) || types().is(e.type(), Builtin::overload_set)))
+      explicit_args_[std::to_underlying(e.id)] = std::move(args);
+  }
+  bool class_has_member_template(EntityId c, NameId name) {
+    const ClassRec* r = class_rec(c);
+    return r && std::ranges::any_of(r->members, [&](const MemberDeclRec& m) { return m.name == name && m.is_template; });
+  }
+  // Whether `S::name` names a function template ([temp.names]/3): a member template of class S,
+  // or a function template of namespace S.
+  bool scope_names_template(const Scope& sc, NameId name) {
+    if (sc.ns) return namespace_template(*sc.ns, name, ast::DeclKind::function).has_value();
+    return sc.type && types().is_class(*sc.type) && class_has_member_template(types().class_of(*sc.type), name);
+  }
   Ex member(Ex object, bool arrow, NameId name, u32 end, u32 op_at, u32 name_at) {
     u32 begin = object.begin;
     Ex fail{NodeId::none, begin, end};
@@ -1683,7 +1708,9 @@ public:
     // function that is not inline, is local to the unit too ([basic.link]/4).
     ast::Linkage linkage = std::ranges::any_of(args, [&](const TemplateArg& a) { return internal_arg(a); }) ? ast::Linkage::internal
                                                                                                            : t.linkage;
-    EntityRec r{EntityKind::function, t.name, type, t.lang, linkage, t.first, t.scope};
+    // A constructor template's specializations are constructors ([temp.mem]/1).
+    EntityKind kind = (tmpl.flags & decl_flag::constructor) ? EntityKind::constructor : EntityKind::function;
+    EntityRec r{kind, t.name, type, t.lang, linkage, t.first, t.scope};
     r.templ = tmpl.entity;
     r.args.assign(args.begin(), args.end());
     return w_->entities.entity(std::move(r));
@@ -1716,7 +1743,9 @@ public:
     for (auto s = scopes_.rbegin(); s != scopes_.rend(); ++s)
       for (auto p = s->rbegin(); p != s->rend(); ++p)
         if (p->first == name) return false;
-    if (template_param(name) || names_member(name)) return false;
+    if (template_param(name)) return false;
+    // A member template of the class whose member is being analysed ([temp.mem]).
+    if (names_member(name)) return current_class != EntityId::none && class_has_member_template(current_class, name);
     for (const BlockUsing& u : block_usings_)
       if (u.name == name) return std::ranges::any_of(u.decls, [](const ast::DeclSema& d) { return (d.flags & decl_flag::template_) != 0; });
     for (const OwnDecl& o : own)
@@ -1733,7 +1762,7 @@ public:
     if (auto c = concept_named(name)) return concept_id_expr(*c, args, begin, end);
     Ex r = name_expr(name, begin, end);
     if (!r.ok()) return r;
-    if (!types().is(r.type(), Builtin::overload_set)) {
+    if (!types().is(r.type(), Builtin::overload_set) && !is_bound_member(r)) {
       diag(begin, Diag::not_a_template, name);
       return {NodeId::none, begin, end};
     }
@@ -2201,7 +2230,7 @@ public:
     rec.default_deleted = fr.has_capture;
     rec.fields = fr.fields;
     for (FieldRec& fd : rec.fields) fd.name = no_name();  // named by its lambda's body only
-    rec.members.push_back({ins().names.intern("operator()"), fr.call, call_type, true, false, false, false, false, fr.head});
+    rec.members.push_back({ins().names.intern("operator()"), fr.call, call_type, true, false, false, false, false, generic, fr.head});
     // A generic lambda's conversion is a template (/10), not yet (#339).
     bool captureless = !fr.has_capture && !generic && !types().is_dependent(call_type);
     EntityId invoker = EntityId::none;
@@ -2716,8 +2745,9 @@ public:
     }
     const MemberDeclRec& m = *f->member;
     // A static member, data or function, is named like a namespace-scope entity
-    // ([expr.prim.id.qual]): `S::f` can have its address taken or be called.
-    if (!m.is_function || (m.is_static && member_functions(c, name).size() == 1)) {
+    // ([expr.prim.id.qual]): `S::f` can have its address taken or be called. A member function
+    // template is a set to deduce from, as overloads are.
+    if (!m.is_function || (m.is_static && !m.is_template && member_functions(c, name).size() == 1)) {
       if (m.is_function && !check_access(c, m.entity, name, name_at)) return fail;
       if (!m.is_function) return static_member(c, m.entity, m.type, begin, end);
       auto mt = deduced_function(m.entity, m.type, begin);
@@ -2788,50 +2818,82 @@ public:
     // The object's cv-qualifiers, which a non-static member function must have ([class.this]).
     std::optional<Cv> object_cv;
     if (object) object_cv = Types::cv(m.arrow ? types().pointee(object->type()) : object->type());
+    // The candidates: each member function, and of each member function template the
+    // specialization deduction gives ([temp.over]/1, [temp.mem]); explicit template arguments name
+    // only templates ([temp.arg.explicit]).
+    auto ex = explicit_args_.find(std::to_underlying(callee.id));
+    std::span<const TemplateArg> explicit_args;
+    if (ex != explicit_args_.end()) explicit_args = ex->second;
+    std::vector<ArgShape> shapes;
+    for (const Ex& a : args)
+      shapes.push_back({a.type(), a.cat() == ValueCategory::lvalue, !types().is(a.type(), Builtin::overload_set) && !is_bound_member(a)});
     std::vector<Candidate> cands;
-    std::vector<const MemberDeclRec*> decls;
-    std::vector<std::vector<TemplateArg>> deduced;  // a template's arguments, by candidate
+    std::vector<const MemberDeclRec*> recs;
+    std::deque<ast::DeclSema> patterns;
+    std::vector<std::vector<TemplateArg>> deduced;  // a generic lambda operator's arguments, by candidate
     for (const MemberDeclRec* c : bound.cands) {
-      if (c->head.empty()) {
+      if (!c->head.empty()) {
+        // A generic lambda's function call operator, a template whose definition is its lambda's:
+        // the specialization deduction gives ([temp.over]/1), instantiated by `generic_call`.
+        ast::DeclSema& td = patterns.emplace_back();
+        td.entity = c->entity;
+        td.type = c->type;
+        td.kind = ast::DeclKind::function;
+        td.constraints = ConstId::none;
+        td.template_params = ins().intern_seq(std::span<const ast::TemplateParamSema>(c->head));
+        Templates t = templates();
+        auto targs = t.deduce_call(td, shapes, explicit_args);
+        if (!targs) continue;
+        auto st = t.specialization_type(td, *targs);
+        if (!st) continue;
+        cands.push_back({c->entity, *st, c->is_static, c->is_deleted});
+        recs.push_back(c);
+        deduced.push_back(std::move(*targs));
+        continue;
+      }
+      if (!c->is_template) {
+        if (ex != explicit_args_.end()) continue;
         cands.push_back({c->entity, c->type, c->is_static, c->is_deleted});
-        decls.push_back(c);
+        recs.push_back(c);
         deduced.emplace_back();
         continue;
       }
-      // A generic lambda's function call operator contributes the specialization deduction gives
-      // ([temp.over]/1), or nothing when it fails.
-      ast::DeclSema tmpl{};
-      tmpl.entity = c->entity;
-      tmpl.type = c->type;
-      tmpl.kind = ast::DeclKind::function;
-      tmpl.template_params = ins().intern_seq(std::span<const ast::TemplateParamSema>(c->head));
-      std::vector<ArgShape> shapes;
-      for (const Ex& a : args)
-        shapes.push_back({a.type(), a.cat() == ValueCategory::lvalue, !types().is(a.type(), Builtin::overload_set) && !is_bound_member(a)});
-      auto targs = templates().deduce_call(tmpl, shapes, {});
+      auto tmpl = q_->template_decl(c->entity);
+      if (!tmpl) continue;
+      const ast::DeclSema& td = patterns.emplace_back(*tmpl);
+      Templates t = templates();
+      auto targs = t.deduce_call(td, shapes, explicit_args);
       if (!targs) continue;
-      auto st = templates().specialization_type(tmpl, *targs);
+      if (td.constraints != ConstId::none) {
+        std::vector<ast::TemplateParamSema> ps = ins().seqs.elements(td.template_params);
+        auto nf = t.substitute_constraint(td.constraints, Bindings::of(ps.empty() ? 0 : ps[0].depth, *targs));
+        auto sat = nf ? q_->satisfied(*nf) : std::optional<bool>(false);
+        if (sat && !*sat) continue;
+      }
+      auto st = t.specialization_type(td, *targs);
       if (!st) continue;
-      cands.push_back({c->entity, *st, c->is_static, c->is_deleted});
-      decls.push_back(c);
-      deduced.push_back(std::move(*targs));
+      cands.push_back({specialization(td, *targs, *st), *st, c->is_static, c->is_deleted, &td});
+      recs.push_back(c);
+      deduced.emplace_back();
     }
+    NameId name = bound.cands.front()->name;
     if (cands.empty()) {
-      diag(begin, Diag::no_viable_function, bound.cands.front()->name);
+      diag(begin, Diag::no_viable_function, name);
       return fail;
     }
     // [class.this]: a non-static member function needs the object's cv-qualifiers.
-    if (object_cv && std::ranges::none_of(bound.cands, [&](const MemberDeclRec* c) {
-          return c->is_static || cv_within(*object_cv, types().rec(c->type).fn_cv);
+    if (object_cv && std::ranges::none_of(cands, [&](const Candidate& c) {
+          return c.no_object || cv_within(*object_cv, types().rec(c.type).fn_cv);
         })) {
-      diag(begin, Diag::const_member_call, bound.cands.front()->name);
+      diag(begin, Diag::const_member_call, name);
       return fail;
     }
-    auto chosen = resolve(cands, args, begin, bound.cands.front()->name, object_cv);
+    auto chosen = resolve(cands, args, begin, name, object_cv);
     if (!chosen) return fail;
-    const MemberDeclRec* d = decls[*chosen];
+    const MemberDeclRec* d = recs[*chosen];
+    const Candidate& k = cands[*chosen];
     if (!check_access(bound.cls, d->entity, d->name, bound.name_at)) return fail;
-    EntityId fe = d->entity;
+    EntityId fe = k.entity;
     std::optional<QualType> dt;
     if (!d->head.empty()) {
       auto g = generic_call(*d, deduced[*chosen], begin);
@@ -2839,7 +2901,9 @@ public:
       fe = g->spec;
       dt = g->type;
     } else {
-      dt = deduced_function(d->entity, d->type, begin);
+      // A specialization called is one whose definition the program requires ([temp.inst]/8).
+      if (k.pattern) demands.push_back({k.entity, ast::Loc{item_, loc_base_ + begin}});
+      dt = deduced_function(k.entity, k.type, begin);
     }
     if (!dt) return fail;
     TypeRec fr = types().rec(*dt);
@@ -3102,8 +3166,26 @@ public:
     std::vector<Candidate> cands;
     std::vector<EntityId> ents;
     bool user_copy = false;
+    std::deque<ast::DeclSema> patterns;
+    std::vector<ArgShape> shapes;
+    for (const Ex& a : args)
+      shapes.push_back({a.type(), a.cat() == ValueCategory::lvalue, !types().is(a.type(), Builtin::overload_set) && !is_bound_member(a)});
     for (const MemberDeclRec& m : cr->members)
-      if (m.is_ctor) {
+      if (m.is_ctor && m.is_template) {
+        // A constructor template: the specialization deduction gives ([temp.over]/1), never a
+        // copy constructor ([class.copy.ctor]/5).
+        auto tmpl = q_->template_decl(m.entity);
+        if (!tmpl) continue;
+        const ast::DeclSema& td = patterns.emplace_back(*tmpl);
+        Templates t = templates();
+        auto targs = t.deduce_call(td, shapes, {});
+        if (!targs) continue;
+        auto st = t.specialization_type(td, *targs);
+        if (!st || (copy_init && types().rec(*st).params.size() != 1)) continue;
+        // [class.copy.ctor]/5: never `S(S)`, a constructor taking its own class by value.
+        if (TypeRec sr = types().rec(*st); sr.params.size() == 1 && Types::unqualified(types().canonical(sr.params[0])) == ut) continue;
+        cands.push_back({specialization(td, *targs, *st), *st, true, m.is_deleted, &td});
+      } else if (m.is_ctor) {
         TypeRec fr = types().rec(m.type);
         if (copy_init && fr.params.size() != 1) continue;
         cands.push_back({m.entity, m.type, true, m.is_deleted});
@@ -3118,7 +3200,9 @@ public:
     auto chosen = resolve(cands, args, begin, no_name(), std::nullopt, ut);
     if (!chosen) return fail;
     const Candidate& k = cands[*chosen];
-    if (k.entity != EntityId::none && !check_access(c, k.entity, w_->entities.rec(c).name, begin)) return fail;
+    if (k.entity != EntityId::none && !check_access(c, k.pattern ? k.pattern->entity : k.entity, w_->entities.rec(c).name, begin)) return fail;
+    // A specialization called is one whose definition the program requires ([temp.inst]/8).
+    if (k.pattern) demands.push_back({k.entity, ast::Loc{item_, loc_base_ + begin}});
     TypeRec fr = types().rec(k.type);
     if (k.entity == EntityId::none) {
       // Trivial: a copy of the argument's object, or nothing to construct.
