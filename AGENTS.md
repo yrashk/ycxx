@@ -25,6 +25,18 @@ in our own terms. Never copy sequences or commit their listings (DECISIONS §2.3
    - Re-read the issue's comments. If an earlier claim exists, back off.
 3. Work in your own worktree and branch. Stay inside your issue's `area:*` labels.
 
+## PRs and branches
+
+Work that never reaches `main` is lost. Twice, finished and reviewed work landed on a dead branch
+(LESSONS: #198, #233).
+- Every PR targets `main`. Stack at most one step on an unmerged PR. When its base merges,
+  retarget yours to `main` (`gh pr edit N --base main`) before anything else.
+- Before pushing to a PR's branch, check that the PR is still open (`gh pr view N --json state`).
+  Once it has merged, anything new, even a follow-up to the same issue, goes on a fresh branch
+  from `main` with a new PR.
+- After your PR merges, confirm its commits are on `main`
+  (`git merge-base --is-ancestor <sha> origin/main`) before you report it done.
+
 ## While working
 
 - Write C++ the way fully implemented C++26 would have it (DECISIONS §3.2): concepts,
