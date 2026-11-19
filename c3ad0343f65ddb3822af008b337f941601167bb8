@@ -1,0 +1,7 @@
+Current-main verification for #386
+
+Merged nested namespace support from main 6334908182d0b29cf790f55ab32a2d80b64c6bb6. Both STATUS sections are present. The source changes of both parents are preserved.
+
+Linux Debug tools/test --fast passed with GCC 16.2.0 and CMake 4.4.5. All 45 CTests passed, and the language suite recorded 651 passes, 496 expected failures and 492 unsupported cases. A combined nested inline namespace and static local probe ran successfully with Clang and GCC. ycxx's ARM64 Mach-O object contained initialized array data and the qualified guard symbols and calls.
+
+The previous continuation note is on 631113d1c708f38cee60e99207952c93beba9de2. The published recovery issue is https://github.com/yrashk/ycxx/issues/377.
