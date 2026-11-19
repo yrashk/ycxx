@@ -228,6 +228,7 @@ void nested() {
 void across_workers() {
   const unsigned threads = std::max(4u, std::thread::hardware_concurrency());
   bool every = true;
+  int moved_in_all = 0;
   for (std::uint64_t seed : {0ull, 7ull, 274ull}) {
     Pool pool(threads, seed == 0 ? std::nullopt : std::optional(seed));
     the_pool = &pool;
@@ -245,9 +246,11 @@ void across_workers() {
       }
       every = every && right;
     }
-    check(moved > 0, std::format("frames resumed on other workers (seed {}: {} of 32)", seed, moved.load()));
+    moved_in_all += moved.load();
     the_pool = nullptr;
   }
+  // The chaos seeds migrate tasks on purpose; without chaos, a loaded machine may not move any.
+  check(moved_in_all > 0, std::format("frames resumed on other workers ({} of 96)", moved_in_all));
   check(every, "a frame counts what it allocates before and after a wait, on whichever worker");
 }
 
