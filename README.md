@@ -107,10 +107,11 @@ thread pool, and its output is byte for byte that of a cold, in-process build.
 prints every query the build went through as a colored tree on stderr: what ran, what was
 reused, verified green or cut off early, how long it took and on which worker, and how much
 memory each cell allocated and retains, with sums per subtree, per query kind and per build. A second build
-shows everything reused, and a compile error is marked red at the cell where it starts, its
-message bubbled up to the root. `--trace-engine=interactive` opens a browser of the trace after
-the compile: a tree with each function's IR and assembly, a timeline of the pool's workers, and
-filters. `--trace-engine=json` writes the whole trace as JSON Lines, for tools and agents.
+shows everything reused. A compile error is marked red at the cell where it starts, and its
+message is shown up to the root. Diagnostic details include the file, line and column where
+available. `--trace-engine=interactive` opens a browser of the trace after the compile: a tree
+with each function's IR and assembly, a timeline of the pool's workers, and filters.
+`--trace-engine=json` writes the whole trace as JSON Lines, for tools and agents.
 `ycxx cxx --watch` stays attached and builds again whenever a file the build read changes,
 headers included; with `--trace-engine` each rebuild shows what it re-ran, and
 `--trace-engine=interactive` keeps the browser open and adds each rebuild live. `ycxx ctl trace

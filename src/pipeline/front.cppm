@@ -19,16 +19,24 @@ import :lines;
 
 export namespace ycxx::pipeline {
 
-// A diagnostic ready to render: a byte offset in the file, its severity and its message.
+// A diagnostic with its raw byte offset and rendered position, when located in source.
 struct Message {
-  std::uint32_t offset = 0;
+  std::optional<std::uint32_t> offset;
   bool error = true;
   std::string text;
-  // `file:line:col` when the diagnostic is in another file than the main one (an included
-  // header); the offset is then meaningless. Until #34's renderer.
-  std::string where;
+  std::string where;  // file:line:column
   // The region token it is at or before: messages are in this order, across files.
   std::uint32_t token = 0;
+
+  void append_trace_error(std::string& out) const {
+    if (!error) return;
+    if (!where.empty()) {
+      out += where;
+      out += ": ";
+    }
+    out += text;
+    out += '\n';
+  }
 };
 
 // A function body of the unit, for an editor's position requests (#170): its item, the
@@ -60,9 +68,7 @@ struct TuFront {
   // For traces (#245): its error messages, one a line.
   static std::string errors(const Value& v) {
     std::string out;
-    for (const Message& m : v.messages) {
-      if (m.error) out += (m.where.empty() ? std::format("at byte {}: ", m.offset) : m.where + ": ") + m.text + "\n";
-    }
+    for (const Message& m : v.messages) m.append_trace_error(out);
     return out;
   }
 };
@@ -107,20 +113,71 @@ class ValueConstants final : public Constants {
   sema::World* w_;
 };
 
-// The byte offset of an item location (ast.md §8.3, steps 1–3) in the region's main file.
-std::uint32_t byte_offset(ast::Interners& in, const pp::Region& region, const items::Items& items, ast::Loc at);
+// The file and byte offset of an item location (ast.md §8.3, steps 1–3).
+std::optional<pp::TokLoc> source_site(ast::Interners& in, const pp::Region& region, const items::Items& items, ast::Loc at);
+
+// File contents as this revision sees them. An open buffer takes precedence in the editor view.
+const std::optional<std::string>& source_content(engine::Ctx& cx, const pp::Source& source, std::string_view name);
+
+// Renders positions against the same source inputs as preprocessing. The table for a file is
+// built on its first diagnostic, then used for every diagnostic in that file.
+class SourceLocations {
+ public:
+  SourceLocations(engine::Ctx& cx, const pp::Source& source, pp::FileId file, const pp::Region& region)
+      : cx_(cx), source_(source), file_(file), region_(region) {}
+
+  std::string at(pp::TokLoc loc);
+
+ private:
+  engine::Ctx& cx_;
+  const pp::Source& source_;
+  pp::FileId file_;
+  const pp::Region& region_;
+  std::map<std::uint16_t, LineTable> lines_;
+};
 
 }  // namespace ycxx::pipeline
 
 namespace ycxx::pipeline {
 
-std::uint32_t byte_offset(ast::Interners& in, const pp::Region& region, const items::Items& items, ast::Loc at) {
+std::optional<pp::TokLoc> source_site(ast::Interners& in, const pp::Region& region, const items::Items& items, ast::Loc at) {
   for (const items::Item& it : items.items) {
     if (in.items.add<ast::ItemId>(it.id) != at.item) continue;
     std::uint32_t tok = std::min<std::uint32_t>(it.begin + at.offset, static_cast<std::uint32_t>(region.locs.size() - 1));
-    return region.site(tok).offset;  // a macro's token: where it was expanded
+    return region.site(tok);
   }
-  return 0;
+  return std::nullopt;
+}
+
+const std::optional<std::string>& source_content(engine::Ctx& cx, const pp::Source& source, std::string_view name) {
+  std::filesystem::path p(name);
+  if (p.is_relative() && !source.cwd.empty()) p = std::filesystem::path(source.cwd) / p;
+  const pp::PathId id = pp::path_id(p.lexically_normal().generic_native_encoded_string());
+  if (source.config.view == pp::View::editor)
+    if (const auto& open = cx.fetch<pp::Buffer>(id)) return open;
+  return cx.fetch<pp::FileContent>(id);
+}
+
+std::string SourceLocations::at(pp::TokLoc loc) {
+  if (loc.file >= region_.files.size()) return {};
+  const bool main = loc.file == 0;
+  const std::string& name = main ? source_.path : region_.files[loc.file];
+  auto it = lines_.find(loc.file);
+  if (it == lines_.end()) {
+    if (main && source_.config.view == pp::View::disk)
+      it = lines_.try_emplace(loc.file, cx_.fetch<pp::FileText>(file_)).first;
+    else if (!main && name == "<built-in>") {
+      pp::Session& ps = pp::session_for(source_.config);
+      std::lock_guard lock(ps.mutex);
+      it = lines_.try_emplace(loc.file, ps.builtin_text()).first;
+    } else {
+      const auto& text = source_content(cx_, source_, name);
+      if (!text) return {};
+      it = lines_.try_emplace(loc.file, *text).first;
+    }
+  }
+  const LineColumn lc = it->second.line_column(loc.offset);
+  return std::format("{}:{}:{}", main ? name : region_.file_names[loc.file], lc.line, lc.column);
 }
 
 // A variable with static storage duration initialized or destroyed by code ([basic.start.dynamic],
@@ -511,43 +568,16 @@ engine::query_task<FrontResult> TuFront::run(engine::Ctx& cx, TuId tu) {
   const items::Items& items = co_await cx.fetch<items::RegionItems>(file);
   const std::vector<engine::Diagnostic>& lexed = co_await cx.fetch<engine::DiagsOf>(cx.cell_of<items::RegionItems>(file));
   FrontResult out;
-  // `file:line:col` of a byte offset in an included file (region file `f`), rendered from the
-  // file's text as a recorded input, so an edit that moves only its newlines re-renders the
-  // position (#93). Phase 4's diagnostics (`kind`) may have a presumed line ([cpp.line]).
-  auto where_in = [&](std::uint16_t f, std::uint32_t offset, std::optional<lex::LexDiag> kind) {
-    const std::string& name = region.files[f];
-    pp::Session& ps = pp::session_for(unit_source.config);
-    std::lock_guard lock(ps.mutex);
-    std::string_view text;  // `<built-in>` is the session's
-    if (name.starts_with('<')) {
-      if (const pp::Files::Content* c = ps.files.content(ps.files.id(name))) text = c->text;
-    } else {
-      std::filesystem::path p(name);
-      if (p.is_relative() && !unit_source.cwd.empty()) p = unit_source.cwd / p;
-      const pp::PathId id = pp::path_id(p.lexically_normal().generic_native_encoded_string());
-      // The editor view reads an open buffer before the file (daemon design §6.1).
-      const std::optional<std::string>* content = nullptr;
-      if (unit_source.config.view == pp::View::editor) content = &cx.fetch<pp::Buffer>(id);
-      if (!content || !*content) content = &cx.fetch<pp::FileContent>(id);
-      if (*content) text = **content;
-    }
-    if (!kind) {
-      LineColumn lc = LineTable(text).line_column(offset);
-      return std::format("{}:{}:{}", region.file_names[f], lc.line, lc.column);
-    }
-    pp::Message pm = pp::message(ps.spellings, text, region.file_names[f], pp::Diag{f, offset, *kind, {}, 0, std::nullopt});
-    return std::format("{}:{}:{}", pm.file, pm.line, pm.column);
-  };
+  SourceLocations locations(cx, unit_source, file, region);
   // `pp` reports at byte offsets in the file (`lex::file_level`).
   for (const engine::Diagnostic& d : lexed) {
     auto kind = lex::lex_diag_of(d.id);
     if (!kind) continue;
     std::vector<std::uint64_t> args;
     for (const engine::DiagArg& a : d.args) args.push_back(a.raw);
-    Message m{d.at.offset, lex::message_of(*kind).severity == lex::Severity::error, lex::render(*kind, args), {}};
-    // Located in an included file (pp::file_loc).
     const auto f = static_cast<std::uint16_t>(lex::file_level - d.at.item);
-    if (f != 0) m.where = where_in(f, d.at.offset, *kind);
+    Message m{d.at.offset, lex::message_of(*kind).severity == lex::Severity::error, lex::render(*kind, args),
+              locations.at({f, 0, d.at.offset})};
     // The first token at or after the position in its file, else (a header of only directives)
     // the first token of a file included after it (files are numbered as they are first met).
     m.token = static_cast<std::uint32_t>(region.locs.size() - 1);
@@ -598,8 +628,7 @@ engine::query_task<FrontResult> TuFront::run(engine::Ctx& cx, TuId tu) {
     const pp::TokLoc at = program.site(d.at);
     out.messages.push_back({at.offset, sema::message_of(*kind).severity == lex::Severity::error,
                             sema::render(*kind, args, [&](char how, std::uint64_t raw) { return program.spell(how, raw); }),
-                            // A declaration of an included header: located there.
-                            at.file != 0 ? where_in(at.file, at.offset, std::nullopt) : std::string(), program.token(d.at)});
+                            locations.at(at), program.token(d.at)});
   }
   std::ranges::stable_sort(out.messages, {}, &Message::token);
   if (!out.has_errors()) out.unit = unit_of(program, world, items, src.name);

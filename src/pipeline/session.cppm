@@ -63,14 +63,11 @@ struct [[=engine::input{engine::Durability::low}]] BuildIn {
   using Value = BuildKey;
 };
 struct UnitBuilt {
-  // The main file's text at the build's revision, which the messages' offsets are in; none when
-  // it could not be read, and then nothing else is.
-  std::optional<std::string> text;
+  bool readable = false;
   std::vector<Message> messages;  // the front end's
   bool front_failed = false;
   std::optional<obj::object> object;  // with `object` or `link`, when the back end succeeded
-  // The back end's errors: a byte offset in the unit's main file, when there is a location.
-  std::vector<std::pair<std::optional<std::uint32_t>, std::string>> errors;
+  std::vector<Message> errors;  // the back end's
 };
 struct Built {
   std::vector<UnitBuilt> units;
@@ -83,11 +80,9 @@ struct Build {
   static std::string errors(const Value& v) {  // for traces (#245)
     std::string out;
     for (const UnitBuilt& u : v.units) {
-      if (!u.text) out += "cannot read a source file\n";
-      for (const Message& m : u.messages) {
-        if (m.error) out += m.text + "\n";
-      }
-      for (const auto& e : u.errors) out += e.second + "\n";
+      if (!u.readable) out += "cannot read a source file\n";
+      for (const Message& m : u.messages) m.append_trace_error(out);
+      for (const Message& m : u.errors) m.append_trace_error(out);
     }
     if (v.linked) {
       for (const std::string& e : v.linked->errors) out += e + "\n";
@@ -368,7 +363,8 @@ class Session {
   // The byte offset of a location in a source unit's main file.
   std::uint32_t byte_offset(TuId tu, ast::Loc at) {
     const pp::FileId file{tu.n};
-    return pipeline::byte_offset(ins_, get<pp::Pp>(file), get<items::RegionItems>(file), at);
+    if (const auto loc = source_site(ins_, get<pp::Pp>(file), get<items::RegionItems>(file), at)) return loc->offset;
+    return 0;
   }
 
   engine::Db& db() { return db_; }
@@ -408,26 +404,20 @@ engine::query_task<Built> Build::run(engine::Ctx& cx, RequestId r) {
   const BuildKey& k = cx.fetch<BuildIn>(r);
   Built out;
   bool all = true;
-  // Each main file as this revision has it (the file table's, in the daemon): a batch that
-  // restarts the build changes it here too.
+  // Check each main file in this revision (the file table's, in the daemon).
   std::vector<TuId> readable;
   for (TuId tu : k.units) {
     const pp::Source& src = cx.fetch<pp::SourceOf>(pp::FileId{tu.n});
-    std::filesystem::path p(src.path);
-    if (p.is_relative() && !src.cwd.empty()) p = std::filesystem::path(src.cwd) / p;
     UnitBuilt& u = out.units.emplace_back();
-    const pp::PathId id = pp::path_id(p.lexically_normal().generic_native_encoded_string());
-    // The editor view reads an open buffer before the file (daemon design §6.1).
-    if (src.config.view == pp::View::editor) u.text = cx.fetch<pp::Buffer>(id);
-    if (!u.text) u.text = cx.fetch<pp::FileContent>(id);
-    if (u.text) readable.push_back(tu);
+    u.readable = source_content(cx, src, src.path).has_value();
+    if (u.readable) readable.push_back(tu);
     else all = false;
   }
   {
     const auto fronts = co_await cx.par_map<TuFront>(readable);
     std::size_t j = 0;
     for (UnitBuilt& u : out.units) {
-      if (!u.text) continue;
+      if (!u.readable) continue;
       const FrontResult& f = fronts[j++];
       u.messages = f.messages;
       u.front_failed = f.has_errors();
@@ -437,25 +427,30 @@ engine::query_task<Built> Build::run(engine::Ctx& cx, RequestId r) {
   if (k.until == Until::syntax) co_return out;
   std::vector<TuId> compiled;
   for (std::size_t i = 0; i < k.units.size(); ++i)
-    if (out.units[i].text && !out.units[i].front_failed) compiled.push_back(k.units[i]);
+    if (out.units[i].readable && !out.units[i].front_failed) compiled.push_back(k.units[i]);
   {
     const auto tus = co_await cx.par_map<Tu>(compiled);
     std::size_t j = 0;
     for (std::size_t i = 0; i < k.units.size(); ++i) {
-      if (!out.units[i].text || out.units[i].front_failed) continue;
+      if (!out.units[i].readable || out.units[i].front_failed) continue;
       const TuValue& v = tus[j++];
       UnitBuilt& u = out.units[i];
       u.object = v.object;
       all = all && v.object.has_value();
+      std::optional<SourceLocations> locations;
       for (const BackError& e : v.errors) {
-        std::optional<std::uint32_t> at;
+        Message m{std::nullopt, true, e.message, {}};
         if (e.at) {
           const pp::FileId file{k.units[i].n};
           const pp::Region& region = co_await cx.fetch<pp::Pp>(file);
           const items::Items& items = co_await cx.fetch<items::RegionItems>(file);
-          at = byte_offset(*universe().in, region, items, *e.at);
+          if (const auto at = source_site(*universe().in, region, items, *e.at)) {
+            if (!locations) locations.emplace(cx, cx.fetch<pp::SourceOf>(file), file, region);
+            m.offset = at->offset;
+            m.where = locations->at(*at);
+          }
         }
-        u.errors.emplace_back(at, e.message);
+        u.errors.push_back(std::move(m));
       }
     }
   }

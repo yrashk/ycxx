@@ -174,21 +174,7 @@ struct Pp {
   using Key = FileId;
   using Value = Region;
   static engine::query_task<Value> run(engine::Ctx& cx, Key file);
-  // For traces (#245): its error-severity diagnostics, rendered; a `#warning` is no error.
-  static std::string diagnostic_errors(std::span<const engine::Diagnostic> ds) {
-    std::string out;
-    for (const engine::Diagnostic& d : ds) {
-      const auto raw = std::to_underlying(d.id);
-      if (raw < lex::lex_diag_base) continue;
-      const auto kind = lex::LexDiag(raw - lex::lex_diag_base);
-      const lex::message m = lex::message_of(kind);
-      if (m.severity != lex::Severity::error || m.text[0] == 0) continue;
-      std::vector<u64> args;
-      for (const engine::DiagArg& a : d.args) args.push_back(a.raw);
-      out += lex::render(kind, args) + "\n";
-    }
-    return out;
-  }
+  static std::string errors(const Value& v) { return v.error_details; }
 };
 
 }  // namespace ycxx::pp
@@ -496,7 +482,27 @@ engine::query_task<Region> Pp::run(engine::Ctx& cx, FileId file) {
   Preprocessed p = [&] {
     std::lock_guard g(s.mutex);
     HostScope scope(s.files, host);
-    return preprocess(s, src.config.view == View::editor ? std::string_view(own) : cx.fetch<FileText>(file), src.path);
+    Preprocessed result = preprocess(s, src.config.view == View::editor ? std::string_view(own) : cx.fetch<FileText>(file), src.path);
+    // Trace the errors at the same physical positions as the compiler's diagnostics (#404).
+    std::map<u16, std::vector<u32>> starts;
+    for (const Diag& d : result.diags) {
+      const lex::message info = lex::message_of(d.kind);
+      if (info.severity != lex::Severity::error || info.text[0] == 0) continue;
+      auto it = starts.find(d.file);
+      if (it == starts.end()) {
+        const Files::Content* content = s.files.content(s.files.id(result.region.files[d.file]));
+        it = starts.emplace(d.file, content ? line_starts(content->text) : std::vector<u32>{}).first;
+      }
+      if (!it->second.empty()) {
+        const auto line = std::ranges::upper_bound(it->second, d.offset);
+        const std::string& name = d.file == 0 ? src.path : result.region.file_names[d.file];
+        std::format_to(std::back_inserter(result.region.error_details), "{}:{}:{}: ", name,
+                       line - it->second.begin(), d.offset - *(line - 1) + 1);
+      }
+      result.region.error_details += lex::render(d.kind, d.args);
+      result.region.error_details += '\n';
+    }
+    return result;
   }();
   for (const Diag& d : p.diags) cx.diag(engine::Loc{file_loc(d.file), d.offset}, lex::diag_id(d.kind), d.args[0], d.args[1]);
   co_return std::move(p.region);

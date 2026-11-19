@@ -12,6 +12,7 @@
   (LESSONS: a long-lived connection's lifetime).
 - `--trace-engine=json`: every stderr line is a JSON object (events with their values, the
   diagnostics and exit status, the summary), for tools and agents.
+- Trace details show the compiler's file, line and column for source errors (#404).
 - Memory (#274): events carry their bytes in the schema docs/TRACE.md gives, the summary its
   totals and kinds, the stream a memory line, and `ctl status` the daemon's memory.
 - `ycxx cxx --watch --trace-engine` builds again when a header the build read changes, and only
@@ -109,6 +110,39 @@ def main(ycxx):
         check(any(o['kind'] == 'Build' and o['outcome'] in ('reused', 'executed') for o in events), 'the JSON trace has the root')
         check(all({'id', 'parent', 'depth', 'outcome', 'duration_ns', 'worker'} <= o.keys() for o in events), 'each event has its fields')
         check(sum('summary' in o for o in objs) == 1 and sum('exit_status' in o for o in objs) == 1, 'one summary, one exit status')
+
+        def traced_error(file, where, message, kinds, *options):
+            result = cxx('--trace-engine=json', *options, file)
+            records = [json.loads(l) for l in result.stderr.splitlines() if l.strip()]
+            expected = f'{where}: error: {message}'
+            check(result.returncode == 1 and any(expected in o.get('diagnostics', '') for o in records),
+                  f'the compiler reports {expected}')
+            for kind in kinds:
+                details = [o['errors'] for o in records if o.get('kind') == kind and 'errors' in o]
+                check(bool(details) and all(f'{where}: {message}' in text for text in details),
+                      f'{kind} details report {where}: {message}; got {details}')
+
+        diagnostic = scope / 'diagnostic.cpp'
+        missing = "use of undeclared identifier 'missing'"
+        diagnostic.write_bytes(b'/*   */\r\nint f() {\r\n  return missing;\r\n}\r\n')
+        traced_error('./diagnostic.cpp', './diagnostic.cpp:3:10', missing, ('Build', 'TuFront'), '-fsyntax-only')
+        # Same token byte offsets after this edit, but two more lines in the compiler's source.
+        diagnostic.write_bytes(b'/*\n\n */\r\nint f() {\r\n  return missing;\r\n}\r\n')
+        traced_error('./diagnostic.cpp', './diagnostic.cpp:5:10', missing, ('Build', 'TuFront'), '-fsyntax-only')
+        header = scope / 'diagnostic.h'
+        diagnostic.write_text('#include "diagnostic.h"\n')
+        header.write_text('\ninline int f() {\n  return missing;\n}\n')
+        traced_error('diagnostic.cpp', './diagnostic.h:3:10', missing, ('Build', 'TuFront'), '-fsyntax-only')
+        header.write_text('\n#include "no-such-header.h"\n')
+        traced_error('diagnostic.cpp', './diagnostic.h:2:10', 'file not found', ('Build', 'TuFront', 'Pp'), '-fsyntax-only')
+        header.write_text('\ndouble f(double x) {\n  return x;\n}\n')
+        traced_error('diagnostic.cpp', './diagnostic.h:2:20', 'x86-64 System V ABI:',
+                     ('Build',), '--target=x86_64-pc-linux-gnu', '-c')
+        absent = cxx('--trace-engine=json', '-fsyntax-only', 'absent.cpp')
+        records = [json.loads(l) for l in absent.stderr.splitlines() if l.strip()]
+        check(absent.returncode == 1 and any(o.get('kind') == 'Build' and o.get('errors') == 'cannot read a source file\n' for o in records),
+              'a trace still shows a readable error when the source file is absent')
+
         st = ctl('status')
         fields = dict(l.split(': ', 1) for l in st.stdout.splitlines() if ': ' in l and not l.startswith('retained_by_kind'))
         check(st.returncode == 0 and all(int(fields.get(f, '-1')) > 0 for f in ('memory_current', 'memory_peak', 'memory_allocated', 'allocations')),
