@@ -1273,7 +1273,11 @@ Fable decided the representation (ast.md §6.6); the Opus session wrote the code
 - Not yet (#259): friend function definitions and argument-dependent lookup of friends, friends
   in templates, destructor access, the wording for private member operators, elaborated types
   in member parameters.
-- Tests: `tests/own/classes/s6-access-*` (three reject tests, one run test); draft examples
+- A namespace-scope declaration's qualified types are checked once what it declares is known
+  (`Sema::defer_type_access`, `settle_type_access`): a member's definition outside its class and
+  a friend's declaration may name the class's private types ([class.access]/6–7). A friend
+  qualified by a namespace names an earlier declaration ([namespace.memdef]/3).
+- Tests: `tests/own/classes/s6-access-*` (four reject tests, two run tests); draft examples
   class.friend-1 and class.name-4 pass.
 
 ## Bootstrap workarounds
