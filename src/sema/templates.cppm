@@ -24,6 +24,9 @@ inline constexpr u16 dependent_depth = 0x7ffe;
 // a parameter without one stays as it is.
 struct Bindings {
   std::vector<std::vector<std::optional<TemplateArg>>> levels;
+  // What a placeholder type becomes ([dcl.type.auto.deduct]): the invented parameter deduction
+  // works on, then the type it deduced. Without one, a placeholder stays as it is.
+  std::optional<QualType> placeholder;
 
   std::optional<TemplateArg> at(u16 depth, u16 index) const {
     if (depth >= levels.size() || index >= levels[depth].size()) return std::nullopt;
@@ -111,6 +114,7 @@ public:
     case TypeKind::builtin:
     case TypeKind::enum_:
     case TypeKind::other: return t;
+    case TypeKind::placeholder: return b.placeholder ? types().add_cv(*b.placeholder, cv) : t;
     case TypeKind::pointer: {
       auto p = substitute(r.inner, b);
       if (!p || types().is_reference(*p)) return std::nullopt;
@@ -627,6 +631,7 @@ public:
     case TypeKind::template_param: return pr.depth == ar.depth && pr.index == ar.index && pr.pack == ar.pack;
     case TypeKind::dep_name: return types().canonical(pr.inner) == types().canonical(ar.inner) && pr.name == ar.name;
     case TypeKind::transform: return pr.trait == ar.trait && types().canonical(pr.inner) == types().canonical(ar.inner);
+    case TypeKind::placeholder: return pr.decltype_auto == ar.decltype_auto;
     case TypeKind::builtin: return pr.builtin == ar.builtin;
     case TypeKind::class_:
       if (pr.entity == ar.entity) return true;

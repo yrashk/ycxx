@@ -307,9 +307,30 @@ public:
         once(d.is_extern, k);
         break;
       case Tk::kw_inline: once(d.is_inline, k); break;
+      case Tk::kw_auto:
+        // A placeholder type ([dcl.spec.auto]), deduced from an initializer or a return statement.
+        if (any_type()) {
+          s_->diag(pos(), Diag::conflicting_specifiers, k);
+          d.ok = false;
+          break;
+        }
+        cls = s_->types().placeholder(false);
+        break;
       case Tk::kw_decltype: {
-        // `decltype(e)` ([dcl.type.decltype]); `decltype(auto)` is not supported yet.
-        if (any_type() || kind(1) != Tk::l_paren || kind(2) == Tk::kw_auto) {
+        // `decltype(auto)` ([dcl.spec.auto]) and `decltype(e)` ([dcl.type.decltype]).
+        if (!any_type() && kind(1) == Tk::l_paren && kind(2) == Tk::kw_auto && kind(3) == Tk::r_paren) {
+          cls = s_->types().placeholder(true);
+          bump();
+          bump();
+          bump();
+          break;
+        }
+        if (!any_type() && kind(1) == Tk::l_paren && kind(2) == Tk::kw_auto) {  // `decltype(auto` without `)`
+          s_->diag(pos() + 3, Diag::expected_token, Tk::r_paren);
+          d.ok = false;
+          goto done;
+        }
+        if (any_type() || kind(1) != Tk::l_paren) {
           s_->diag(pos(), Diag::not_supported, k);
           d.ok = false;
           goto done;
@@ -533,6 +554,7 @@ public:
     bool unknown_bound = false;  // `[]`: in a parameter, or the outermost bound of a variable
     // A value-dependent bound ([temp.dep.constexpr]): a template parameter's `VDepParam`.
     std::optional<sema::ConstId> dependent_bound;
+    std::optional<QualType> trailing;  // `-> T`: the trailing return type ([dcl.fct]/2)
   };
   struct Level {
     // ptr-operators, outermost first ([dcl.ptr], [dcl.ref]): `*` with its cv, `&` or `&&`.
@@ -748,8 +770,21 @@ public:
             ok = e.ok() && expect(Tk::r_paren) && ok;
           }
         }
-        // ref-qualifiers, dynamic exception specifications and trailing return types are not
-        // supported yet.
+        // A trailing return type ([dcl.fct]/2), with the parameters in scope ([basic.scope.param]).
+        if (is(Tk::arrow)) {
+          bump();
+          s_->push_scope();
+          for (const Param& p : l.suffixes.back().params)
+            if (p.name != s_->no_name()) s_->declare_local(p.name, p.type, sema::local_flag::parameter, p.at, false);
+          auto t = type_id();
+          s_->pop_scope();
+          if (!t) {
+            ok = false;
+            return l;
+          }
+          l.suffixes.back().trailing = *t;
+        }
+        // ref-qualifiers and dynamic exception specifications are not supported yet.
         if (is(Tk::amp) || is(Tk::ampamp) || is(Tk::kw_noexcept) || is(Tk::kw_throw) || is(Tk::arrow)) {
           s_->diag(pos(), Diag::not_supported, kind());
           ok = false;
@@ -931,6 +966,15 @@ public:
         if (s_->types().is_function(t) || s_->types().is_array(t)) {
           s_->diag(d.begin, Diag::function_returns_function);
           d.ok = false;
+        }
+        // `auto f() -> T`: the return type is T, and the declared type `auto` alone ([dcl.fct]/2).
+        if (s->trailing) {
+          if (s_->types().kind(t) != sema::TypeKind::placeholder || s_->types().rec(t).decltype_auto ||
+              sema::Types::cv(t) != sema::Cv::none) {
+            s_->diag(d.begin, Diag::trailing_return_needs_auto);
+            d.ok = false;
+          }
+          t = *s->trailing;
         }
         std::vector<QualType> ps;
         for (const Param& p : s->params) ps.push_back(p.type);
@@ -2900,6 +2944,28 @@ public:
     bump();
     QualType rt = s_->return_type();
     Ex value;
+    // A declared return type with a placeholder is deduced from each return ([dcl.spec.auto.general]/3).
+    if (s_->deduces_return()) {
+      if (is(Tk::l_brace)) {  // [dcl.type.auto.deduct]/2: not from a braced-init-list
+        auto b = braced_init_list();
+        s_->diag(b->begin, Diag::auto_list, u64(b->clauses.size()));
+        if (!expect(Tk::semi)) skip_to_semi();
+        return {NodeId::none, begin, pos()};
+      }
+      std::optional<Ex> e;
+      if (!is(Tk::semi)) e = expression();
+      auto t = s_->deduce_return(e ? &*e : nullptr, e ? e->begin : begin);
+      if (!t || (e && !e->ok())) {
+        skip_to_semi();
+        return {NodeId::none, begin, pos()};
+      }
+      rt = *t;
+      if (e && s_->types().is_void(rt)) value = *e;
+      else if (e && s_->types().is_reference(rt)) value = s_->bind_reference(*e, rt, e->begin);
+      else if (e) value = s_->convert(*e, rt, e->begin);
+      if (!expect(Tk::semi)) skip_to_semi();
+      return s_->node(ast::Return{sema::Sema::at(value, begin)}, begin, pos());
+    }
     if (!is(Tk::semi)) {
       if (is(Tk::l_brace)) {
         // `return {…};` copy-list-initializes the result ([stmt.return]/2).
@@ -2953,12 +3019,18 @@ public:
           skip_to_semi();
           return {NodeId::none, begin, pos()};
         }
+        if (s_->types().has_placeholder(d.type)) {
+          s_->diag(d.name_at, Diag::auto_not_allowed);  // [dcl.spec.auto.general]: not in a typedef
+          skip_to_semi();
+          return {NodeId::none, begin, pos()};
+        }
         s_->local_type_alias(d.name, d.type, d.name_at);
       } while (accept(Tk::comma));
       expect(Tk::semi);
       return s_->node(ast::ExprStmt{}, begin, pos());
     }
     std::vector<Ex> vars;
+    std::optional<QualType> replaced;  // what the declarators' placeholder deduced ([dcl.type.auto.deduct]/2)
     do {
       u32 dbegin = pos();
       Declarator d = declarator(spec.type, false);
@@ -2985,6 +3057,21 @@ public:
       if (d.unknown_bound && is(Tk::equal) && kind(1) == Tk::string_lit) {
         d.type = s_->types().array(d.type, literal_at(1).units.size() + 1);
         d.unknown_bound = false;
+      }
+      // A placeholder type, deduced from the initializer ([dcl.type.auto.deduct]); the name is
+      // declared first, so that its initializer cannot use it ([dcl.spec.auto.general]/11).
+      if (s_->types().has_placeholder(d.type)) {
+        u32 local = s_->declare_local(d.name, d.type, 0, d.name_at);
+        Ex init = placeholder_variable(d, local, spec.is_constexpr, replaced);
+        if (!init.ok()) {
+          skip_to_semi();
+          return {NodeId::none, begin, pos()};
+        }
+        ast::EntityId dtor = s_->types().is_reference(d.type) ? ast::EntityId::none : s_->destructor_of(d.type);
+        Ex var = s_->node(ast::LocalVar{local, sema::Sema::at(init, dbegin), dtor}, dbegin, pos());
+        s_->set_local_decl(local, var.id);
+        vars.push_back(var);
+        continue;
       }
       u32 local = s_->declare_local(d.name, d.type, 0, d.name_at);
       Ex init;
@@ -3087,6 +3174,76 @@ public:
     std::vector<ast::Child> cs;
     for (const Ex& v : vars) cs.push_back(sema::Sema::at(v, begin));
     return s_->node(ast::DeclStmt{s_->builder().list(cs)}, begin, pos());
+  }
+
+  // The initializer of block-scope variable `d`, declared as `local` with a placeholder type:
+  // `= e`, `(e)` or `{e}` ([dcl.type.auto.deduct]/2), from which its type is deduced, then the
+  // variable initialized as one of that type. `replaced` holds what an earlier declarator's
+  // placeholder deduced. An invalid `Ex` after a diagnosed error.
+  Ex placeholder_variable(Declarator& d, u32 local, bool constexpr_, std::optional<QualType>& replaced) {
+    u32 at = pos();
+    Ex e;
+    if (accept(Tk::equal)) {
+      if (is(Tk::l_brace)) {  // `auto x = {…}` deduces std::initializer_list, not supported yet
+        s_->diag(pos(), Diag::not_supported, Tk::l_brace);
+        return {NodeId::none, at, pos()};
+      }
+      e = assignment_expression();
+    } else if (is(Tk::l_brace) || is(Tk::l_paren)) {
+      bool brace = is(Tk::l_brace);
+      u32 open = pos();
+      std::vector<Ex> args;
+      if (brace) {
+        auto b = braced_init_list();
+        for (auto& c : b->clauses) {
+          if (c.list || c.designated) {
+            s_->diag(c.begin, Diag::auto_list, u64(b->clauses.size()));
+            return {NodeId::none, at, pos()};
+          }
+          args.push_back(c.expr);
+        }
+      } else {
+        bump();
+        if (!is(Tk::r_paren))
+          do args.push_back(assignment_expression());
+          while (accept(Tk::comma));
+        if (!expect(Tk::r_paren)) return {NodeId::none, at, pos()};
+      }
+      if (args.size() != 1) {  // [dcl.type.auto.deduct]/2.1: a single element
+        s_->diag(open, Diag::auto_list, u64(args.size()));
+        return {NodeId::none, at, pos()};
+      }
+      e = args[0];
+    } else {
+      s_->diag(d.name_at, Diag::auto_uninitialized, d.name);
+      return {NodeId::none, at, pos()};
+    }
+    if (!e.ok()) return e;
+    QualType r{};
+    auto t = s_->deduce_placeholder(d.type, e, e.begin, &r);
+    if (!t) return {NodeId::none, at, pos()};
+    if (replaced && !s_->types().is_dependent(r) && !s_->types().is_dependent(*replaced) &&
+        s_->types().canonical(*replaced) != s_->types().canonical(r)) {
+      s_->diag(d.name_at, Diag::auto_inconsistent, d.type, r, *replaced);
+      return {NodeId::none, at, pos()};
+    }
+    replaced = r;
+    if (s_->types().is_void(*t)) {
+      s_->diag(d.name_at, Diag::void_variable, d.name);
+      return {NodeId::none, at, pos()};
+    }
+    d.type = *t;
+    s_->set_local_type(local, d.type);
+    Ex init = s_->types().is_reference(d.type) ? s_->bind_reference(e, d.type, e.begin, true) : s_->convert(e, d.type, e.begin);
+    // As for a declared type: usable in constant expressions when constexpr, or const integral
+    // with a constant initializer ([expr.const]).
+    bool usable_kind = sema::Types::is_const(d.type) && !sema::Types::is_volatile(d.type) && s_->types().is_integral(d.type);
+    if (init.ok() && (constexpr_ || usable_kind)) {
+      sema::Evaluated v = sema::Evaluator(*s_, questions()).evaluate(init);
+      if (v.value) s_->set_local_value(local, *v.value);
+      else if (constexpr_ && !v.dependent) s_->diag(e.begin, Diag::not_constant, v.reason);
+    }
+    return init;
   }
 
   // The questions constant evaluation asks (array bounds, constexpr, static_assert); set by the

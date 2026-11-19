@@ -134,6 +134,13 @@ struct TTransform {
   QualType arg;
 };
 
+// A placeholder type ([dcl.spec.auto]): `auto` (`decltype_auto` 0) or `decltype(auto)` (1), in a
+// declared type whose deduction has not replaced it ([dcl.type.auto.deduct]): a function's
+// declared return type, or a variable's before its initializer is seen.
+struct TAuto {
+  u8 decltype_auto;
+};
+
 // ---------------------------------------------------------------- sugar kinds
 
 // A use of a typedef-name or alias-declaration. The alias's template arguments come with alias
@@ -144,7 +151,7 @@ struct STypedef {
 };
 
 using TypeKinds = closed_list<TBuiltin, TPointer, TLRef, TRRef, TArray, TFunction, TClass, TEnum, STypedef, TTemplateParam,
-                              TDepName, TPackExpansion, TTransform>;
+                              TDepName, TPackExpansion, TTransform, TAuto>;
 
 template <class T>
 constexpr bool is_type_kind = TypeKinds::contains<T>;

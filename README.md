@@ -10,7 +10,7 @@ tool), recompute only what that change can affect.
 
 ## Status
 
-**Pre-0.1** (as of 2026-11-18). ycxx compiles a substantial subset of C++ (C-like code, classes,
+**Pre-0.1** (as of 2026-11-19). ycxx compiles a substantial subset of C++ (C-like code, classes,
 templates and constant evaluation) on macOS arm64, from source to a signed, running executable,
 with no external compiler, assembler or linker. It does not compile real programs yet: the
 standard library is out of reach. The plan is in [DECISIONS.md](DECISIONS.md), the details of
@@ -46,7 +46,10 @@ build/bin/ycxx cxx hello.cpp -o hello && ./hello
   partial specializations, static constexpr members of class templates, parameter packs and
   fold expressions, alias templates, concepts and requires-expressions in overload resolution,
   `if constexpr`, two-phase lookup, with Itanium names identical to Clang's;
-- casts, `sizeof`/`alignof` (classes included), and `decltype`;
+- placeholder types: `auto` and `decltype(auto)` variables (`const auto&`, `auto*`, `auto&&`),
+  deduced and trailing return types, in templates too;
+- casts, `sizeof`/`alignof` (classes included), `decltype`, and calls through pointers to
+  functions;
 - constant evaluation on ycxx's own interpreter: `constexpr`, `consteval`, `constinit`,
   `static_assert` and `if consteval`, with errors that explain why something is not constant;
 - `extern "C"` functions from libSystem, including `printf` with integers, characters,
@@ -84,7 +87,7 @@ checked with the flags of its last build, or else with its line in the project's
 - The standard library and its headers. C headers such as `<stdio.h>` compile without warnings
   and `printf` runs; libycxx's `<cstdio>` still needs template template parameters and
   pointer-to-member types.
-- Inheritance and virtual functions.
+- Lambdas, structured bindings, and inheritance and virtual functions.
 - Member templates, template template parameters, and constraints on class templates and
   their members.
 - Floating-point arithmetic, exceptions, and optimization (`-O`).
@@ -95,6 +98,8 @@ checked with the flags of its last build, or else with its line in the project's
 - Standard headers, starting with `<cstdio>` ([#133](https://github.com/yrashk/ycxx/issues/133)).
 - Templates: template template parameters and integer sequences
   ([#88](https://github.com/yrashk/ycxx/issues/88)).
+- `auto` and lambdas: placeholder types are done; lambdas and generic lambdas are next
+  ([#278](https://github.com/yrashk/ycxx/issues/278)).
 
 Next come exceptions ([#89](https://github.com/yrashk/ycxx/issues/89)).
 

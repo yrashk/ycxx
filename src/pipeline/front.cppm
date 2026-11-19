@@ -185,8 +185,11 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
       continue;
     if (it.kind == items::ItemKind::function && it.has_body() && !decls.empty() && decls[0].entity != EntityId::none &&
         !(decls[0].flags & sema::decl_flag::deleted)) {
-      tu.functions.push_back({decls[0].entity, decls[0], program.analyze_body(k).value, program.id(k), it.body_begin - it.begin,
-                              program.this_type(decls[0])});
+      // A placeholder return type is the one its body deduced ([dcl.spec.auto]).
+      const ast::BodySema& body = program.analyze_body(k).value;
+      ast::DeclSema d = decls[0];
+      if (body.deduced) d.type = body.deduced_type;
+      tu.functions.push_back({d.entity, d, body, program.id(k), it.body_begin - it.begin, program.this_type(d)});
       continue;
     }
     // Variable definitions, with the constants their declarators were initialized with.

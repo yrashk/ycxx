@@ -159,6 +159,10 @@ class Mangler {
         if (!e) return e;
         inner = std::format("A{}_{}", dim, *e);
         candidates_.push_back(full_key(bare));
+      } else if (in_.types.is<ast::TAuto>(in_.types.canon(bare))) {
+        // A placeholder, as a template's declared return type keeps it: the builtin types `Da`
+        // (auto) and `Dc` (decltype(auto)), not substitution candidates (§5.1.5.2).
+        inner = in_.types.get<ast::TAuto>(in_.types.canon(bare)).decltype_auto ? "Dc" : "Da";
       } else if (in_.types.is<ast::TDepName>(in_.types.canon(bare))) {
         // `typename Q::n`: <nested-name> N <prefix> <source-name> E, a substitution candidate
         // (§5.1.5.3).
