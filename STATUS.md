@@ -1884,6 +1884,18 @@ values, end to end; results match Clang's bit for bit.
 - Not yet: inline functions' statics are per unit (#124); static references (#367).
 - Tests: `tests/own/static-locals/` (spec-only, 19 tests, a Clang peer in `mixed.run.cpp`).
 
+## The address of an overload set, ι (#313, #337, 2026-11-19)
+
+- [over.over] (src/sema/actions.cppm `address_matches`, `overload_address`): `f` or `&f` naming an
+  overload set, converted to a pointer or reference to function type `F` (initialization,
+  assignment, an argument, a return, `static_cast` and C-style casts), is the function of type
+  `F`: a non-template one if there is one, else a template's specialization deduced from `F`
+  ([temp.deduct.funcaddr], `Templates::deduce_declaration`), demanded like a call's. In overload
+  resolution such an argument is an exact match when it names exactly one function of the
+  parameter's type.
+- Not yet: deducing a template parameter from an overload-set argument ([temp.deduct.call]/6).
+- Tests: `tests/own/function-pointers/`.
+
 ## Bootstrap workarounds
 
 Places where ycxx's sources avoid or work around a C++26 feature because GCC 16 lacks it or
