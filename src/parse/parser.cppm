@@ -1096,7 +1096,8 @@ public:
         ok = false;
       }
       // `T...` with no pack in T is `T, ...` ([dcl.fct]/3).
-      if (d.pack && !s_->names_pack(t)) {
+      // A generic lambda's `auto... xs` names the pack its placeholder invents (lambda_expression).
+      if (d.pack && !s_->names_pack(t) && !(placeholder_params && s_->types().has_placeholder(t))) {
         if (d.named) {
           s_->diag(d.name_at, Diag::expansion_without_pack);
           ok = false;
@@ -1201,10 +1202,11 @@ public:
   // to pop at the end of the declaration; each parameter is in scope from the end of its own
   // declaration ([basic.scope.pdecl]), so later ones and their defaults may name it. Not yet:
   // template template parameters, packs and type-constraints.
-  bool template_head(u16 depth) {
+  // `keyword` false: a lambda's template-parameter-list, without `template` ([expr.prim.lambda.general]).
+  bool template_head(u16 depth, bool keyword = true) {
     s_->template_scopes.emplace_back();
     s_->head_constraints.clear();
-    if (!expect(Tk::kw_template) || !expect(Tk::less)) return false;
+    if ((keyword && !expect(Tk::kw_template)) || !expect(Tk::less)) return false;
     bool ok = true;
     ++angle_;
     if (!is(Tk::greater)) {
@@ -1322,9 +1324,12 @@ public:
     // [temp.param]/7: a structural type; class types are not supported yet.
     if (!s_->types().is_integral(t) && !s_->types().is_pointer(t) && !s_->types().is_reference(t) &&
         !s_->types().is(t, Builtin::nullptr_t) && !s_->types().is_dependent(t)) {
-      bool later = s_->types().is_class(t) || s_->types().kind(t) == sema::TypeKind::enum_;  // structural, not supported yet
+      bool later = s_->types().is_class(t) || s_->types().kind(t) == sema::TypeKind::enum_ ||
+                   s_->types().is_floating(t);  // structural, not supported yet (floating: #317)
       s_->diag(at, later ? Diag::not_supported : Diag::invalid_template_parameter_type,
-               s_->types().is_class(t) ? Tk::kw_class : Tk::kw_enum);
+               s_->types().is_class(t)      ? Tk::kw_class
+               : s_->types().is_floating(t) ? (s_->types().is(t, Builtin::float_) ? Tk::kw_float : Tk::kw_double)
+                                            : Tk::kw_enum);
       ok = false;
       return std::nullopt;
     }
@@ -2361,6 +2366,19 @@ public:
         expect(Tk::r_paren);
         return {NodeId::none, begin, pos()};
       }
+      // A built-in function ycxx implements, `__builtin_fabs(x)` (docs/EXTENSIONS.md).
+      if (kind(1) == Tk::l_paren)
+        if (const lex::BuiltinFunctionInfo* bf = s_->builtin_function(n)) {
+          bump();
+          bump();
+          std::vector<Ex> args;
+          if (!is(Tk::r_paren))
+            do args.push_back(assignment_expression());
+            while (accept(Tk::comma));
+          if (!expect(Tk::r_paren)) return {NodeId::none, begin, pos()};
+          Ex r = s_->builtin_call(*bf, std::move(args), begin, pos());
+          return {r.id, begin, pos(), r.info};
+        }
       // A type-testing built-in, `__is_same(T, U)` (docs/EXTENSIONS.md).
       if (kind(1) == Tk::l_paren)
         if (const lex::TypeTraitInfo* tr = s_->type_trait(n); tr && !tr->transforms) {
@@ -2450,10 +2468,16 @@ public:
       Ex r = s_->static_cast_to(e, *t, begin);
       return {r.id, begin, pos(), r.info};
     }
-    case Tk::float_lit:
-      s_->diag(begin, Diag::float_literal_not_supported);
+    case Tk::float_lit: {
+      const lex::Literal& l = literal();
       bump();
-      return {NodeId::none, begin, pos()};
+      if (l.ud_suffix != lex::no_name) {
+        s_->diag(begin, Diag::not_supported, Tk::float_lit);
+        return {NodeId::none, begin, pos()};
+      }
+      if (l.bad) return {NodeId::none, begin, pos()};
+      return s_->float_literal(l, begin, pos());
+    }
     case Tk::l_square:
       // [dcl.attr.grammar]/7: `[[` begins an attribute-specifier only, never a lambda.
       if (kind(1) == Tk::l_square) {
@@ -2667,7 +2691,10 @@ public:
     spec.begin = pos();
     bump();
     bool intro = true;  // still in the lambda-introducer, whose `]` recovery skips first
+    bool head = false;  // a generic lambda's template-head was pushed onto the template scopes
     auto fail = [&] {
+      if (head) s_->template_scopes.pop_back();
+      head = false;
       if (intro) {
         for (int depth = 0; !at_end(); bump()) {
           if (is(Tk::l_square)) ++depth;
@@ -2709,7 +2736,16 @@ public:
         c.at = pos();
         c.name = name_of(tok());
         bump();
-        if (is(Tk::ellipsis)) {  // a pack capture ([expr.prim.lambda.capture]/17)
+        if (is(Tk::ellipsis) && (kind(1) == Tk::comma || kind(1) == Tk::r_square)) {
+          // A pack capture `xs...` ([expr.prim.lambda.capture]/17): each element of the pack.
+          bump();
+          c.kind = ref ? K::ref : K::copy;
+          c.pack = true;
+          spec.captures.push_back(std::move(c));
+          if (!accept(Tk::comma)) break;
+          continue;
+        }
+        if (is(Tk::ellipsis)) {  // an init-capture pack `...xs = e` (#350)
           s_->diag(pos(), Diag::not_supported, Tk::ellipsis);
           return fail();
         }
@@ -2749,9 +2785,15 @@ public:
     }
     if (!expect(Tk::r_square)) return fail();
     intro = false;
-    if (is(Tk::less)) {  // a template-parameter-list: step 3 (#281)
-      s_->diag(pos(), Diag::not_supported, Tk::less);
-      return fail();
+    // A template-parameter-list: a generic lambda ([expr.prim.lambda.general]/2).
+    const u16 depth = u16(s_->template_scopes.size());
+    if (is(Tk::less)) {
+      head = true;
+      if (!template_head(depth, false)) return fail();
+      if (is(Tk::kw_requires)) {  // a requires-clause on a lambda (#281)
+        s_->diag(pos(), Diag::not_supported, Tk::kw_requires);
+        return fail();
+      }
     }
     // lambda-declarator ([expr.prim.lambda.general]): parameters, specifiers, trailing return type;
     // without parameters, it may still have specifiers (C++23).
@@ -2766,11 +2808,39 @@ public:
         if (!ok) return fail();
       }
       for (const Param& p : ps.params) {
-        if (p.pack || s_->types().has_placeholder(p.type)) {  // generic lambdas: step 3 (#281)
-          s_->diag(p.at, Diag::not_supported, Tk::kw_auto);
-          return fail();
+        QualType t = p.type;
+        // A function parameter pack `auto... xs` or `Ts... xs` ([dcl.fct]/23): its pattern.
+        const bool pack = s_->types().kind(t) == sema::TypeKind::pack_expansion;
+        if (pack) t = s_->types().rec(t).inner;
+        // A placeholder parameter declares an invented type parameter of the operator's
+        // template-head, appended to it ([expr.prim.lambda.closure]/7, [dcl.fct]/22); a pack's
+        // is a template parameter pack.
+        if (s_->types().has_placeholder(t)) {
+          if (!head) {
+            s_->template_scopes.emplace_back();
+            head = true;
+          }
+          ast::TemplateParamSema inv{};
+          inv.name = s_->invented_name();
+          inv.kind = ast::TemplateArgKind::type;
+          inv.depth = depth;
+          inv.index = u16(s_->template_scopes.back().size());
+          inv.pack = u8(pack);
+          inv.type = s_->types().template_param(depth, inv.index, pack);
+          inv.default_ = {ast::TemplateArgKind::type, s_->builtin(Builtin::void_), sema::ConstId::none};
+          inv.params = s_->world().ins.intern_seq(std::span<const ast::TemplateParamSema>{});
+          s_->template_scopes.back().push_back(inv);
+          sema::Bindings invent;
+          invent.placeholder = inv.type;
+          auto r = s_->templates().substitute(t, invent);
+          if (!r || s_->types().rec(t).decltype_auto) {
+            s_->diag(p.at, Diag::auto_not_allowed);
+            return fail();
+          }
+          t = *r;
         }
-        spec.params.push_back({p.name, p.type, p.at});
+        if (pack) t = s_->types().pack_expansion(t);
+        spec.params.push_back({p.name, t, p.at});
       }
       spec.variadic = ps.variadic;
       bool constexpr_ = false;
@@ -2799,9 +2869,9 @@ public:
       skip_attributes();
       if (accept(Tk::arrow)) {
         s_->push_scope();
-        for (const Param& p : ps.params)
+        for (const sema::Sema::LambdaParam& p : spec.params)
           if (p.name != s_->no_name()) s_->declare_local(p.name, p.type, sema::local_flag::parameter, p.at, false);
-        auto t = type_id();
+        auto t = type_id(true);  // `-> auto&`: a placeholder the body deduces ([dcl.spec.auto.general]/3)
         s_->pop_scope();
         if (!t) return fail();
         spec.trailing = *t;
@@ -2811,15 +2881,20 @@ public:
       s_->diag(pos(), Diag::expected_token, Tk::l_brace);
       return fail();
     }
+    if (head) spec.head = s_->template_scopes.back();
+    u32 begin = spec.begin;
     if (!s_->open_lambda(std::move(spec))) {
+      if (head) s_->template_scopes.pop_back();
       skip_to_brace_end();
-      return Ex{NodeId::none, spec.begin, pos()};
+      return Ex{NodeId::none, begin, pos()};
     }
     u32 body_begin = pos();
     int saved = std::exchange(angle_, 0);
     Ex body = compound_statement();
     angle_ = saved;
-    return s_->close_lambda(body, body_begin, pos());
+    Ex r = s_->close_lambda(body, body_begin, pos());
+    if (head) s_->template_scopes.pop_back();
+    return r;
   }
   // After an error in a lambda's introducer or declarator: past its body, if it has one.
   void skip_to_brace_end_of_lambda() {

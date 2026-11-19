@@ -226,12 +226,16 @@ void floating_literals() {
   check(d("1e-400") == 0.0, "underflow to zero");
   check(std::bit_cast<float>(std::uint32_t(v("0.1f").value)) == 0.1f, "float is rounded once");
   check(has(pp::preprocess("1e309"), LexDiag::float_out_of_range), "double overflow");
+  check(std::bit_cast<double>(lit(pp::preprocess("1e309")).value) == std::numeric_limits<double>::infinity() &&
+            !lit(pp::preprocess("1e309")).bad,
+        "overflow is infinity ([lex.fcon]/4's example)");
   check(only(pp::preprocess("0x1p128f")).kind == Tk::float_lit, "an out-of-range float stays a float_lit");
   check(only(pp::preprocess("1.2.3")).kind == Tk::float_lit, "an ill-formed float stays a float_lit");
   check(has(pp::preprocess("3.5e38f"), LexDiag::float_out_of_range), "float overflow");
   check(has(pp::preprocess("1000000000000000000000000000000000000000000000000e-5f"), LexDiag::float_out_of_range),
         "overflow with a negative exponent");
-  check(v("1.0L").float_suffix == lex::FloatSuffix::l && v("1.0L").value == 0, "long double: the target's");
+  check(v("1.0L").float_suffix == lex::FloatSuffix::l && std::bit_cast<double>(v("1.0L").value) == 1.0,
+        "long double: binary64, the target's");
   check(v("1.0f16").float_suffix == lex::FloatSuffix::f16 && v("1.0BF16").float_suffix == lex::FloatSuffix::bf16 &&
             v("2.f128").float_suffix == lex::FloatSuffix::f128,
         "extended suffixes");

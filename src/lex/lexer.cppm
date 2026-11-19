@@ -29,7 +29,8 @@ struct Literal {
   bool bad = false;  // ill-formed and diagnosed: has no value
   // [lex.icon]: base 2, 8, 10 or 16; `value` is the value, `overflow` set if it exceeds 64 bits.
   // [lex.fcon]: base 10 or 16; `value` holds the IEEE bits of the value for the suffixes none
-  // (binary64) and f (binary32), and is 0 for the others, whose formats are the target's.
+  // and l (binary64) and f (binary32), and is 0 for the others. A `long double` literal's bits and
+  // range check are its type's only where `long double` is binary64; sema checks the format.
   // [lex.ccon]: `value` is the code unit, or the numeric escape's value before conversion to the
   // literal's type, or a multicharacter literal's int value (as two's-complement bits).
   u8 base = 0;

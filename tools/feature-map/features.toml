@@ -1,4 +1,4 @@
-# The C++26 feature map's data (tools/feature-map/feature-map, docs/feature-map.md, #282).
+# The C++26 feature map's data (tools/feature-map/feature-map, #282). PRs change rows here and nothing else (#366).
 #
 # One [[feature]] per feature a user would name. Fields:
 #   id        stable key (used in counts.tsv and probes.tsv)
@@ -220,9 +220,8 @@ clauses = ['lex.fcon']
 std = 'C++17'
 ftm = '__cpp_hex_float'
 detect = '''\b0[xX][\dA-Fa-f']*\.?[\dA-Fa-f']*[pP][+-]?\d'''
-status = 'missing'
-issues = [201]
-note = 'floating values'
+status = 'done'
+issues = [336]
 probe = '''
 int main() { double d = 0x1.8p1; return d == 3.0 ? 0 : 1; }
 '''
@@ -447,9 +446,8 @@ group = 'basic'
 clauses = ['basic.fundamental', 'lex.fcon', 'conv.fpprom', 'conv.double', 'conv.fpint']
 std = 'C++98'
 detect = '\b(?:float|double)\b'
-status = 'missing'
-issues = [201]
-note = 'floating types exist as types only'
+status = 'done'
+issues = [336]
 probe = '''
 int main() { double d = 1.5; float f = 2.0f; d = d * f + 0.5; return (int)d == 3 ? 0 : 1; }
 '''
@@ -462,7 +460,7 @@ clauses = ['basic.extended.fp', 'lex.fcon', 'conv.rank']
 std = 'C++23'
 detect = '\b(?:std::)?b?float(?:16|32|64|128)_t\b|\b\d[\d.]*(?:f16|f32|f64|f128|bf16|F16|F32|F64|F128|BF16)\b'
 status = 'missing'
-issues = [201]
+issues = [351]
 probe = '''
 int main() { decltype(1.0f32) x = 1.5f32; return x > 1 ? 0 : 1; }
 '''
@@ -856,8 +854,9 @@ clauses = ['expr.prim.lambda.closure']
 std = 'C++14'
 ftm = '__cpp_generic_lambdas'
 detect = '(?:^|[=(,{;:?!]|\breturn)\s*\[[^\[\]]*\]\s*\([^)]*\bauto\b'
-status = 'missing'
-issues = [281]
+status = 'partial'
+note = 'not yet conversion to a function pointer'
+issues = [339]
 probe = '''
 int main() { auto id = [](auto x) { return x; }; return id(0) + id('\0'); }
 '''
@@ -884,7 +883,7 @@ clauses = ['expr.prim.lambda.closure', 'dcl.constexpr']
 std = 'C++17'
 detect = '\]\s*\([^)]*\)\s*(?:mutable\s+)?(?:constexpr|consteval)\b'
 status = 'missing'
-issues = [281]
+issues = [262, 102]
 probe = '''
 int main() { constexpr auto sq = [](int x) { return x * x; }; static_assert(sq(3) == 9); return 0; }
 '''
@@ -911,8 +910,9 @@ group = 'lambda'
 clauses = ['expr.prim.lambda']
 std = 'C++20'
 detect = '(?:^|[=(,{;:?!]|\breturn)\s*\[[^\[\]]*\]\s*<'
-status = 'missing'
-issues = [281]
+status = 'partial'
+note = 'not yet explicit template arguments or requires-clauses'
+issues = [347, 350]
 probe = '''
 int main() { auto f = []<class T>(T x) { return sizeof(T) + x; }; return f(0) == sizeof(int) ? 0 : 1; }
 '''
@@ -939,8 +939,9 @@ clauses = ['expr.prim.lambda.capture']
 std = 'C++20'
 ftm = '__cpp_init_captures'
 detect = '(?:^|[=(,{;:?!]|\breturn)\s*\[[^\[\]]*\.\.\.[^\[\]]*\]\s*[({<m]'
-status = 'missing'
-issues = [281]
+status = 'partial'
+note = '`[xs...]`; not yet init-capture packs `[...ys = xs]`'
+issues = [350]
 probe = '''
 template<class... T> int sum(T... t) { auto f = [...u = t] { return (0 + ... + u); }; return f(); }
 int main() { return sum(1, 2, -3); }
@@ -955,7 +956,7 @@ std = 'C++23'
 ftm = '__cpp_static_call_operator'
 detect = '\bstatic\s+[\w:<>&* ]*operator\s*\(\s*\)\s*\(|\]\s*(?:\([^)]*\))?\s*static\b'
 status = 'missing'
-issues = [281]
+issues = [350]
 probe = '''
 struct F { static int operator()(int x) { return x; } };
 int main() { auto l = [](int x) static { return x; }; return F{}(0) + l(0); }
@@ -1068,7 +1069,7 @@ std = 'C++98'
 detect = ',\s*\.\.\.\s*\)|\bva_(?:start|arg|list)\b'
 status = 'partial'
 issues = [196]
-note = 'definitions (`va_start`), floating arguments, calls through pointers'
+note = 'definitions (`va_start`), calls through pointers'
 probe = '''
 #include <stdarg.h>
 int sum(int n, ...) { va_list ap; va_start(ap, n); int s = 0; for (int i = 0; i < n; ++i) s += va_arg(ap, int); va_end(ap); return s; }

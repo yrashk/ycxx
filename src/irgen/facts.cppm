@@ -12,8 +12,8 @@ export namespace ycxx::irgen {
 namespace ast = ycxx::ast;
 
 // The classes of types the α slice's IR generation distinguishes (#39).
-// `record` is a class type ([class]).
-enum class TypeClass : std::uint8_t { void_, bool_, integer, pointer, array, function, record, other };
+// `record` is a class type ([class]); `floating` a floating-point type ([basic.fundamental]).
+enum class TypeClass : std::uint8_t { void_, bool_, integer, pointer, array, function, record, other, floating };
 
 // An integral type's representation: bool is an unsigned 1-bit integer ([basic.fundamental]).
 struct IntRep {
@@ -23,7 +23,7 @@ struct IntRep {
 };
 
 template <class F>
-concept Facts = requires(F& f, ast::QualType q, ast::ConstId c, ast::EntityId e, std::int64_t v) {
+concept Facts = requires(F& f, ast::QualType q, ast::ConstId c, ast::EntityId e, std::int64_t v, double d) {
   { f.canonical(q) } -> std::same_as<ast::QualType>;  // cv-unqualified
   { f.classify(q) } -> std::same_as<TypeClass>;
   { f.integer(q) } -> std::same_as<IntRep>;        // pre: bool or integer
@@ -36,6 +36,7 @@ concept Facts = requires(F& f, ast::QualType q, ast::ConstId c, ast::EntityId e,
   { f.bool_type() } -> std::same_as<ast::QualType>;
   { f.ptrdiff_type() } -> std::same_as<ast::QualType>;  // std::ptrdiff_t ([support.types.layout])
   { f.int_constant(q, v) } -> std::same_as<ast::ConstId>;  // `v` converted to integral type q
+  { f.float_constant(q, d) } -> std::same_as<ast::ConstId>;  // `d` converted to floating type q
   { f.null_constant(q) } -> std::same_as<ast::ConstId>;    // the null pointer value of type q
   // The address of a string literal object: a VLvalue whose base is the VString `c` ([lex.string]).
   { f.string_address(c) } -> std::same_as<ast::ConstId>;

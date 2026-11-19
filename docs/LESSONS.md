@@ -7,6 +7,15 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
 
 ## Orchestration and sessions
 
+- **Don't commit a generated file that every feature PR regenerates.** Under the first §6.9, each
+  feature PR committed the feature map's `probes.tsv` and rendered table. With five slices
+  running, every merge to `main` made the other open PRs conflict in both files, and #358, #352,
+  #364 and #359 each needed an extra merge round and CI run within an hour.
+  - Do: commit only the hand-edited source (here a row in `features.toml`), and let CI generate
+    the rest and check it, publishing the result as an artifact or an issue body. A merge driver
+    cannot regenerate data that needs a build, and `merge=ours` keeps it silently stale.
+  - Rule: DECISIONS §6.9. Learned on #366.
+
 - **A session cannot run on a model above its parent's.** A session asked to run on Fable
   silently started on Opus.
   - Do: run sessions on Opus and reach Fable through Agent subagents with `model: "fable"`.
@@ -93,6 +102,19 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
   - Rule: AGENTS.md, "PRs and branches".
   - Learned on #229, 2026-11-19.
 
+- **A new deduction or template mechanism meets the old features in the review.** Both P0s of
+  #334 (`auto`) were interactions: a return in a discarded `if constexpr` branch deduced the
+  type, and `&` of an overload set reached deduction and crashed. The P1s were the same kind
+  (a member of a class template named in its definition, a variable template's dependent
+  initializer).
+  - Do: before the review, run every new deduction through discarded statements, overload
+    sets and their addresses, the current instantiation's members, and a template's definition
+    versus its instantiation, and give each a test.
+  - The same held for lambdas (#280, #281): the P0s and P1s were odr-use of constants, arrays of
+    classes, a plain lambda inside a generic one, and a generic lambda calling a function
+    template. Do: combine the new construct with each neighbouring one it can nest in or call
+    (lambdas in templates and templates in lambdas) before the review.
+  - Learned on #279; confirmed on #280 and #281.
 - **A reviewer running your binary blocks your rebuilds.** On #337 the reviewer probed with the
   worktree's `build/bin/ycxx`, so the next step could not be built for 15 minutes.
   - Do: build the next step into a build directory in the scratchpad
@@ -346,6 +368,16 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
     check fail (DECISIONS §5.6).
   - Learned on #282.
 
+- **Start the spec-only test author at the slice's first commit, briefed on every step.** On #336
+  the author wrote 84 tests from the draft while the back end was being written, checked against
+  both oracles. Run against ycxx they found two front-end bugs no hand probe had (arithmetic
+  between an enumeration and a floating type accepted; `static_cast<E>(-2.9)` not constant), a
+  lexer error the draft's own example contradicts (an overflowing literal is an infinity), and
+  that `<math.h>` is libycxx's wrapper of `<cmath>`, so no `<math.h>` test can pass until #349.
+  - Do: launch the author in its own worktree before writing the back end; cherry-pick its commit
+    and triage each failure as a bug, a missing feature (XFAIL with the issue) or a test that leans
+    on an unrelated gap (move that line into a function).
+  - Learned on #336.
 - **Test a long-lived connection's lifetime before the review.** Both P0s of #99 were in the
   LSP tunnel, and the functional tests could not have shown either:
   - a one-thread copy loop deadlocked once a large answer and a large edit crossed;

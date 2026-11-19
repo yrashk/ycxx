@@ -129,9 +129,14 @@ public:
   QualType builtin_spec(ast::BuiltinTemplate which, std::span<const ast::TemplateArg> args) {
     return ins_->intern_type(ast::TBuiltinSpec{u8(which), ins_->intern_seq(args)});
   }
+  // A floating-point type ([basic.fundamental]); `float`, `double` and `long double` have values.
   bool is_floating(QualType q) const {
     auto b = builtin_of(q);
     return b && ast::is_floating(*b);
+  }
+  bool is_standard_floating(QualType q) const {
+    auto b = builtin_of(q);
+    return b && ast::is_standard_floating(*b);
   }
 
   TypeRec rec(QualType q) const {
@@ -244,9 +249,12 @@ public:
   std::optional<Builtin> builtin_of(QualType q) const { return ast::builtin_of(*ins_, q); }
   bool is_void(QualType q) const { return ast::is_void(*ins_, q); }
   bool is_integral(QualType q) const { return builtin_of(q) && ast::is_integral(*builtin_of(q)); }
+  // [basic.fundamental]: the integral and floating-point types. An extended floating-point type
+  // ([basic.extended.fp]) has no values yet (#336), so it is not arithmetic here and its uses are
+  // diagnosed.
   bool is_arithmetic(QualType q) const {
     auto b = builtin_of(q);
-    return b && ast::is_integral(*b);  // the α subset has no floating types
+    return b && (ast::is_integral(*b) || ast::is_standard_floating(*b));
   }
   bool is_pointer(QualType q) const { return ast::is_pointer(*ins_, q); }
   bool is_function(QualType q) const { return ast::is_function(*ins_, q); }
@@ -350,15 +358,17 @@ private:
 
 // ---------------------------------------------------------------- constants
 
-enum class ValueKind : u8 { integer, string, address, null_pointer, other };
+enum class ValueKind : u8 { integer, floating, string, address, null_pointer, other };
 
 // A constant read out by value (§5.5): an integer of an integral type (`VInt`, its low 64 bits),
+// a floating value (`VFloat`, its encoding in `bits` and its value in `real`),
 // a string literal object's code units (`VString`), the address of one or of an entity
 // (`VEntity`) plus an offset (`VLvalue`), or a null pointer (`VNullptr`).
 struct ValueRec {
   ValueKind kind = ValueKind::other;
   QualType type{};
   u64 bits = 0;
+  double real = 0;
   std::string units;
   ConstId base = ConstId::none;
   i64 offset = 0;
@@ -370,6 +380,8 @@ public:
 
   // An integer of type `t`, wrapped to its width ([conv.integral]).
   ConstId integer(QualType t, u64 bits) { return ast::int_value(*ins_, target, t, ast::Bits128{bits, 0}); }
+  // A value of standard floating type `t`: `v` rounded to its format ([conv.double]).
+  ConstId floating(QualType t, double v) { return ast::float_value(*ins_, target, t, v); }
   // A string literal object of array type `t` holding `units`, one byte per code unit.
   ConstId string(QualType t, std::string units) {
     std::vector<u8> us(units.begin(), units.end());
@@ -394,6 +406,12 @@ public:
       r.kind = ValueKind::integer;
       r.type = i.type;
       r.bits = i.bits.lo;
+    } else if (v.is<ast::VFloat>(c)) {
+      auto f = v.get<ast::VFloat>(c);
+      r.kind = ValueKind::floating;
+      r.type = f.type;
+      r.bits = f.bits.lo;
+      r.real = ast::float_double(*ins_, target, c);
     } else if (v.is<ast::VString>(c)) {
       auto s = v.get<ast::VString>(c);
       r.kind = ValueKind::string;
@@ -455,6 +473,8 @@ struct EntityRec {
   // A closure type's number among its context's closures of its signature (ast.md §4.3); its
   // `type` is its function call operator's declared type (docs/design/closures.md).
   u32 ordinal = 0;
+  // A generic closure's explicit template parameters, which its name declares (`Ty`, `Tn`).
+  std::vector<ast::TemplateParamSema> closure_head{};
 };
 
 class Entities {
@@ -550,6 +570,9 @@ struct MemberDeclRec {
   bool is_dtor = false;
   bool is_deleted = false;
   bool is_template = false;  // a member function template ([temp.mem])
+  // A generic lambda's function call operator's template-head ([expr.prim.lambda.closure]/7):
+  // its definition is its lambda's, not an item's.
+  std::vector<ast::TemplateParamSema> head{};
   std::vector<ast::NodeId> defaults;  // a function's default arguments by parameter, or empty
 };
 

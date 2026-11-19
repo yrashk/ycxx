@@ -347,10 +347,9 @@ class Gen {
       ast::QualType t = in_.seqs.at(fn_.body.locals, i).type;
       // A class or array local is never usable in a constant expression: naming it is
       // unsupported, so it needs no object.
-      auto b = ast::builtin_of(in_, t);
       if (cls(t) == TypeClass::record || cls(t) == TypeClass::array || facts_.is_reference(t) ||
-          in_.types.is<ast::TEnum>(in_.types.canon(t)) || (b && ast::is_floating(*b)))
-        continue;  // (the interpreter has no enumeration objects yet, #25, nor floating ones, #201)
+          in_.types.is<ast::TEnum>(in_.types.canon(t)))
+        continue;  // (the interpreter has no enumeration objects yet, #25)
       Place p = begin_object(t, ir::Init::indeterminate);
       if (i < fn_.local_values.size() && fn_.local_values[i]) {
         store(p, constant(t, *fn_.local_values[i]));
@@ -698,6 +697,7 @@ class Gen {
   }
   ValueId zero(ast::QualType t) {
     if (cls(t) == TypeClass::pointer) return constant(t, facts_.null_constant(t));
+    if (cls(t) == TypeClass::floating) return constant(t, facts_.float_constant(t, 0.0));
     return int_constant(t, 0);
   }
 
@@ -1039,6 +1039,10 @@ class Gen {
     if (is<ast::OrderedBinary>(a)) return ordered(a);
     if (is<ast::Call>(a)) return call(a);
     if (is<ast::MemberCall>(a)) return member_call(a);
+    if (is<ast::BuiltinCall>(a)) {  // `__builtin_fabs` (lex::BuiltinFunction::fabs), the one there is
+      auto b = get<ast::BuiltinCall>(a);
+      return pure(ir::Op::fabs, t, {rvalue(child(a, *ast_.children(b.args).begin()))});
+    }
     if (is<ast::This>(a)) {
       if (!this_) unsupported(a, "outside a non-static member function");
       return *this_;
@@ -1055,11 +1059,9 @@ class Gen {
     switch (c.conversion) {
       case ast::ConversionKind::lvalue_to_rvalue: return load(lvalue(from));
       case ast::ConversionKind::function_to_pointer: return lvalue(from).ptr;
-      case ast::ConversionKind::integral: {
-        ValueId v = rvalue(from);
-        if (same_type(info(from).type, t)) return v;
-        return pure(ir::Op::iconv, t, {v});
-      }
+      case ast::ConversionKind::integral:
+      case ast::ConversionKind::floating:
+      case ast::ConversionKind::floating_integral: return arithmetic(info(from).type, t, rvalue(from));
       case ast::ConversionKind::boolean: return pure(ir::Op::tobool, t, {rvalue(from)});
       case ast::ConversionKind::array_to_pointer: {
         Place arr = lvalue(from);
@@ -1083,6 +1085,16 @@ class Gen {
     }
   }
 
+  // An arithmetic conversion of `v` from `from` to `to` ([conv.integral], [conv.double],
+  // [conv.fpprom], [conv.fpint]); bool counts as an integer here, and conversions to bool are
+  // `tobool`.
+  ValueId arithmetic(ast::QualType from, ast::QualType to, ValueId v) {
+    if (same_type(from, to)) return v;
+    bool ff = cls(from) == TypeClass::floating, tf = cls(to) == TypeClass::floating;
+    if (ff && cls(to) == TypeClass::bool_) return pure(ir::Op::tobool, to, {v});
+    return pure(ff && tf ? ir::Op::fconv : ff ? ir::Op::f2i : tf ? ir::Op::i2f : ir::Op::iconv, to, {v});
+  }
+
   // `x + 1` or `x - 1` of `x`'s type, for `++` and `--` ([expr.pre.incr], [expr.post.incr]): the
   // arithmetic is done in the promoted type, so a narrow type wraps through the conversion back.
   ValueId step(ast::QualType t, ValueId old, bool inc) {
@@ -1090,6 +1102,8 @@ class Gen {
       ValueId one = int_constant(facts_.int_type(), inc ? 1 : -1);
       return pure(ir::Op::ptr_add, t, {old, one}, {word(ty(facts_.pointee(t)))});
     }
+    if (cls(t) == TypeClass::floating)
+      return pure(inc ? ir::Op::fadd : ir::Op::fsub, t, {old, constant(t, facts_.float_constant(t, 1.0))});
     if (cls(t) != TypeClass::integer) throw Unsupported{"++ or -- of a non-integer type"};
     ast::QualType p = facts_.promoted(t);
     ValueId v = same_type(p, t) ? old : pure(ir::Op::iconv, p, {old});
@@ -1105,6 +1119,7 @@ class Gen {
       case ast::UnaryOp::plus: return rvalue(o);
       case ast::UnaryOp::minus: {
         ValueId v = rvalue(o);
+        if (cls(t) == TypeClass::floating) return pure(ir::Op::fneg, t, {v});
         return pure(ir::Op::neg, t, {v}, {}, is_signed(t) ? ir::bit(ir::Flag::nsw) : 0);
       }
       case ast::UnaryOp::not_: return pure(ir::Op::xor_, t, {rvalue(o), int_constant(t, 1)});
@@ -1123,6 +1138,15 @@ class Gen {
 
   // An arithmetic or bitwise operation on two values of the computation type `t`.
   ValueId arith(ast::BinaryOp op, ast::QualType t, ValueId x, ValueId y) {
+    if (cls(t) == TypeClass::floating) {
+      switch (op) {
+        case ast::BinaryOp::add: return pure(ir::Op::fadd, t, {x, y});
+        case ast::BinaryOp::sub: return pure(ir::Op::fsub, t, {x, y});
+        case ast::BinaryOp::mul: return pure(ir::Op::fmul, t, {x, y});
+        case ast::BinaryOp::div: return pure(ir::Op::fdiv, t, {x, y});
+        default: throw Unsupported{"this floating-point operator"};
+      }
+    }
     bool s = is_signed(t);
     ir::Flags nsw = s ? ir::bit(ir::Flag::nsw) : 0;
     switch (op) {
@@ -1181,6 +1205,12 @@ class Gen {
           ir::Pred p = bn.op == lt ? ir::Pred::lt : bn.op == gt ? ir::Pred::gt : bn.op == le ? ir::Pred::le
                      : bn.op == ge ? ir::Pred::ge : bn.op == eq ? ir::Pred::eq : ir::Pred::ne;
           return pure(ir::Op::ptr_cmp, t, {x, y}, {std::to_underlying(p)});
+        }
+        if (cls(ot) == TypeClass::floating) {
+          // [expr.rel], [expr.eq]: ordered, so false when either is a NaN; `!=` is true then.
+          ir::Pred p = bn.op == lt ? ir::Pred::lt : bn.op == gt ? ir::Pred::gt : bn.op == le ? ir::Pred::le
+                     : bn.op == ge ? ir::Pred::ge : bn.op == eq ? ir::Pred::eq : ir::Pred::ne;
+          return pure(ir::Op::fcmp, t, {x, y}, {std::to_underlying(p)});
         }
         bool s = is_signed(ot);
         ir::Pred p = bn.op == eq ? ir::Pred::eq : bn.op == ne ? ir::Pred::ne
@@ -1457,7 +1487,7 @@ class Gen {
       bool is_shift = s.op == ast::AssignOp::shl || s.op == ast::AssignOp::shr;
       // The left operand is converted to the computation type and the result back ([expr.assign]).
       ast::QualType ct = s.computation;
-      ValueId x = same_type(ct, p.type) ? old : pure(ir::Op::iconv, ct, {old});
+      ValueId x = arithmetic(p.type, ct, old);
       if (is_shift) {
         r = shift(s.op == ast::AssignOp::shl, ct, x, v);
       } else {
@@ -1468,7 +1498,7 @@ class Gen {
                          : s.op == bit_xor ? ast::BinaryOp::bit_xor : ast::BinaryOp::bit_or;
         r = arith(op, ct, x, v);
       }
-      if (!same_type(ct, p.type)) r = pure(ir::Op::iconv, p.type, {r});
+      r = arithmetic(ct, p.type, r);
     }
     store(p, r);
     return p;
