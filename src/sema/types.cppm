@@ -575,6 +575,7 @@ struct MemberDeclRec {
   // A generic lambda's function call operator's template-head ([expr.prim.lambda.closure]/7):
   // its definition is its lambda's, not an item's.
   std::vector<ast::TemplateParamSema> head{};
+  std::vector<ast::NodeId> defaults;  // a function's default arguments by parameter, or empty
 };
 
 struct NestedType {
@@ -583,8 +584,19 @@ struct NestedType {
   EntityId entity = EntityId::none;
 };
 
+// A direct base class ([class.derived]): non-virtual so far.
+struct BaseRec {
+  EntityId cls = EntityId::none;
+  ast::Access access = ast::Access::public_;
+};
+
 struct ClassRec {
   bool defined = false;
+  // Its direct base classes, in declaration order ([class.derived.general]).
+  std::vector<BaseRec> bases;
+  // POD for the purposes of layout, as Clang has it (`ast::record_layout`): trivial and
+  // standard-layout ([class.prop]).
+  bool pod = true;
   bool union_ = false;  // a union ([class.union]): its members share its storage
   std::vector<FieldRec> fields;        // in declaration order
   std::vector<MemberDeclRec> members;  // member functions and static data members

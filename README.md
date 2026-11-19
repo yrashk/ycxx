@@ -35,12 +35,16 @@ build/bin/ycxx cxx hello.cpp -o hello && ./hello
   enumerations; `float`, `double` and `long double` with literals, arithmetic, comparisons and
   conversions giving Clang's results bit for bit, and passing and returning them (classes of
   floating members included) by Clang's calling convention;
-  all statements and operators; functions, recursion and overloading, operator functions included;
+  all operators, and the statements: `switch`, labels and `goto`, declarations in conditions,
+  and init-statements in `if` and `switch` (not yet range-based `for`); functions with default
+  arguments, recursion and overloading, operator functions included;
 - classes and unions: data and static members, member functions, constructors and destructors
   with RAII, aggregate and designated initialization, namespace-scope objects initialized by
   code before `main` and destroyed after it, block-scope `static` variables initialized once, passing and returning them by value with
   Clang's calling convention, so ycxx and Clang objects call each other; access control
-  (`public`, `private`) and friend functions and classes;
+  (`public`, `protected`, `private`) and friend functions and classes;
+- single and multiple inheritance (not virtual): base classes laid out as Clang does, member
+  lookup through bases, derived-to-base conversions, base initializers;
 - namespaces, typedefs and alias declarations, `using` declarations and directives;
 - `[[…]]` attributes, the GNU attributes and `asm` labels the macOS SDK's headers use, and the
   type-trait built-ins libycxx's headers use (`__is_same`, `__remove_cv`, …)
@@ -100,7 +104,8 @@ checked with the flags of its last build, or else with its line in the project's
   and `printf` runs; libycxx's `<cstdio>` still needs pointer-to-member types, and `<cmath>`
   (which `<math.h>` includes) does not compile yet ([#349](https://github.com/yrashk/ycxx/issues/349)).
 - Constexpr lambdas (the interpreter has no class objects yet), lambdas outside function bodies,
-  structured bindings, and inheritance and virtual functions.
+  structured bindings, virtual functions, virtual base classes, inheriting constructors, and bases
+  of class templates.
 - Member class and alias templates, conversion function templates, and constraints on class
   templates and their members.
 - Exceptions, optimization (`-O`), and the extended floating-point types (`std::float16_t`, …).
@@ -109,6 +114,8 @@ checked with the flags of its last build, or else with its line in the project's
 ### In progress
 
 - Standard headers, starting with `<cstdio>` ([#133](https://github.com/yrashk/ycxx/issues/133)).
+- ι: statements and declarations, the C++98/11 core: default arguments, block-scope statics,
+  range-based `for`, casts and arrays ([#337](https://github.com/yrashk/ycxx/issues/337)).
 - `auto` and lambdas ([#278](https://github.com/yrashk/ycxx/issues/278)): placeholder types,
   lambdas and generic lambdas are done; constexpr lambdas wait on class objects in the
   interpreter ([#262](https://github.com/yrashk/ycxx/issues/262)).
