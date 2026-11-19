@@ -1505,9 +1505,10 @@ request it serves.
 - Names: units and files by their file, functions by qualified name, requests and programs by
   their units and output (`Build(a.cpp → a)`).
 - Errors: a compile error is a value, so a kind says which of its values hold errors
-  (`errors(value)`; `Pp::diagnostic_errors` keeps error-severity diagnostics only, so a
-  `#warning` is none). Events carry the text; the cell where errors start (no child has any) is
+  (`errors(value)`). Events carry the text; the cell where errors start (no child has any) is
   marked, with its message, and every cell above names it (`error below:`, JSON `error_at`).
+  Preprocessing, front-end and back-end diagnostics include the source file, line and byte column
+  where available (#404). The trace keeps error-severity messages only, so a `#warning` is no error.
 - Values shown: L1 (`FunctionIr`), L2 (`Lower`), and assembly (`Codegen`, `Optimized`) from
   `aarch64::disassemble`, which decodes with the encoder's own form table.
 - `--trace-engine=json`: JSON Lines on stderr (events with values and errors, the diagnostics and
