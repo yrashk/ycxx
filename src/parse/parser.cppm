@@ -62,6 +62,9 @@ struct Param {
   // one element of it (`element`).
   bool pack = false;
   bool element = false;
+  // Its default argument ([dcl.fct.default]): the initializer-clause converted to the parameter's
+  // type, analysed here; none if it has none.
+  NodeId default_arg = NodeId::none;
 };
 
 // What a declarator declares ([dcl.decl]): its name and type, and, for a function declarator,
@@ -1129,10 +1132,9 @@ public:
         s.variadic = true;
         break;
       }
-      if (is(Tk::equal)) {
-        s_->diag(pos(), Diag::not_supported, Tk::equal);  // default arguments
-        ok = false;
-        skip_param();
+      if (accept(Tk::equal)) {
+        s.params.back().default_arg = default_argument(t);
+        if (s.params.back().default_arg == NodeId::none) ok = false;  // diagnosed
       }
       if (!accept(Tk::comma)) break;
       if (is(Tk::ellipsis)) {
@@ -1153,6 +1155,33 @@ public:
         }
     return s;
   }
+  // A default argument ([dcl.fct.default]/1, /5): its names are bound and its copy-initialization
+  // of the parameter is checked here. A template's that depends on its parameters is kept as it
+  // is, and rejected where a call would use it.
+  NodeId default_argument(QualType t) {
+    // Not in the parameters of a parameter's own function type ([dcl.fct.default]/3).
+    if (in_params_ > 1) s_->diag(pos(), Diag::default_arg_not_allowed);
+    Ex e;
+    bool ref = s_->types().is_reference(t);
+    if (is(Tk::l_brace)) {
+      auto b = braced_init_list();
+      if (!b) return NodeId::none;
+      if (ref && b->clauses.size() == 1 && !b->clauses[0].list && !b->clauses[0].designated)
+        e = s_->bind_reference(b->clauses[0].expr, t, b->clauses[0].begin, false);
+      else
+        e = s_->list_init(sema::Types::unqualified(t), *b);
+    } else {
+      Ex a = assignment_expression();
+      if (!a.ok()) return NodeId::none;
+      e = s_->types().is_dependent(t) || s_->dependent(a) ? a
+          : ref                                             ? s_->bind_reference(a, t, a.begin, false)
+                                                            : s_->convert(a, t, a.begin);
+    }
+    if (!e.ok()) return NodeId::none;
+    if (s_->types().is_dependent(t) || s_->dependent(e)) e = s_->dependent_node({e}, e.begin, e.end);
+    return s_->node(ast::DefaultArg{e.info, sema::Sema::at(e, e.begin)}, e.begin, e.end, e.info).id;
+  }
+
   // Set while a lambda's parameters are read, which check their placeholders themselves.
   bool placeholder_params = false;
   void skip_param() {

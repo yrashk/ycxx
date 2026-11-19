@@ -1758,6 +1758,31 @@ values, end to end; results match Clang's bit for bit.
 - Tests: `tests/own/stmt/` (written spec-only, 23 run and 15 reject tests, and the split-off XFAILs
   for the above).
 
+## Default arguments, ι step 2 (#300, 2026-11-19)
+
+- **Declarations** (src/parse/parser.cppm `default_argument`, parse.cppm `merge_defaults`): a
+  default argument is analysed where it is written ([dcl.fct.default]/5) and kept, converted to the
+  parameter's type, as a `DefaultArg` tree in `ParamSema::default_arg`, the slot ast.md reserved.
+  Redeclarations at namespace scope inherit earlier defaults (`b_.adopt`), may not repeat one, and
+  leave none missing after one ([dcl.fct.default]/4). Members' are recorded in
+  `MemberDeclRec::defaults` by `class_content`.
+- **Calls** (src/sema/actions.cppm): `Candidate::defaults` and `required` make a candidate viable
+  with fewer arguments ([over.match.viable]/2); `Templates::deduce_call` skips defaulted trailing
+  parameters. `call_args` and `construct` adopt the chosen function's trees (`default_argument`),
+  so a constructor whose parameters all have defaults is a default constructor, and one with one
+  required parameter converts. `Sema::defaults_` records what lookup found per function.
+- **IR:** a `DefaultArg`'s nodes take the call's position (`Gen::pinned`), since its offsets are
+  its declaration's.
+- Each call takes the defaults its own lookup found (`Sema::defaults_` by DeclRef node), since
+  declarations in different scopes have their own. A copy or move constructor's other parameters
+  may have defaults. Defaults are rejected where [dcl.fct.default]/3–4 and [over.oper.general]
+  forbid them (`defaults_allowed`, `defaults_trail`).
+- Not yet: defaults that depend on template parameters (#356); a member's default naming a later
+  member, and defaults added by an out-of-class or qualified definition (#354); defaults added
+  after a using-declaration (#362, the oracles disagree).
+- Tests: `tests/own/default-args/` (spec-only: 16 run and 9 reject tests, some split out as XFAIL
+  for #354, #356, #357, #102 and #94).
+
 ## Nested namespace definitions, ι (#153, #337, 2026-11-19)
 
 - `namespace a::b::c { }` (C++17) and `namespace a::inline b { }` (C++20), [namespace.def]: the

@@ -1056,8 +1056,9 @@ probe = '''
 int f(int a, int b = 2) { return a + b; }
 int main() { return f(1) == 3 ? 0 : 1; }
 '''
-status = 'missing'
-issues = [300]
+status = 'partial'
+issues = [356, 354]
+note = 'defaults that depend on template parameters; members in complete-class context'
 
 [[feature]]
 id = 'dcl-variadic-fn'
