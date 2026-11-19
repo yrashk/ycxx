@@ -737,8 +737,8 @@ Machine::Flow Machine::shift(Frame& f, NodeId n) {
 // ------------------------------------------------------------------ floating point
 
 // Values are computed in the type's own format, binary32 as `float` and binary64 as `double`, with
-// the host's IEEE arithmetic in its default mode: round to nearest, ties to even ([expr.pre]/6
-// allows no other precision here, and the target's code computes the same way).
+// the host's IEEE arithmetic in its default mode: round to nearest, ties to even. [expr.pre]/6
+// would allow greater precision; ycxx computes as the target's code does, so both agree.
 template <class T>
 using FloatBits = std::conditional_t<sizeof(T) == 4, u32, u64>;
 template <class T>
@@ -763,8 +763,9 @@ Machine::Flow Machine::float_shape(QualType t, const Shape*& s) {
 }
 
 // fadd, fsub, fmul, fdiv, fneg, fabs. In constant mode ([expr.const], [expr.pre]/4), a division by zero
-// ([expr.mul]/4) and a NaN result, which is not mathematically defined, are not constant; an
-// overflow to an infinity is, as in Clang. In runtime mode the operations are IEEE's.
+// ([expr.mul]/4) and an arithmetic NaN result, which is not mathematically defined, are not
+// constant; an overflow to an infinity is, as in Clang, and so are fneg and fabs of a NaN, which
+// only change its sign. In runtime mode the operations are IEEE's.
 Machine::Flow Machine::float_arith(Frame& f, NodeId n) {
   const ir::Node& nd = f.fn->node(n);
   const Shape* s;
@@ -786,7 +787,8 @@ Machine::Flow Machine::float_arith(Frame& f, NodeId n) {
     case Op::fabs: r = std::fabs(x); break;
     default: return unsupported(n);
     }
-    if (config_.mode == Mode::constant && std::isnan(r)) return fail(Reason::float_nan);
+    if (config_.mode == Mode::constant && nd.op != Op::fneg && nd.op != Op::fabs && std::isnan(r))
+      return fail(Reason::float_nan);
     return set(f, n, Value::floating(encode(r)));
   };
   if (s->width == 32) return compute(decode<float>(a.bits), decode<float>(b.bits));

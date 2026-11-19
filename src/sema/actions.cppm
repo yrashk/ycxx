@@ -1245,7 +1245,12 @@ public:
     if (!from.ok() || dependent(from) || types().is_dependent(to)) return false;
     auto a = types().builtin_of(from.type()), b = types().builtin_of(to);
     if (types().is_pointer(from.type()) && b == Builtin::bool_) return true;
-    if (b && ast::is_floating(*b) && is_unscoped_enum(from.type())) a = types().builtin_of(underlying_of(from.type()));
+    // An unscoped enumeration's value is read as its underlying type's: the interpreter has no
+    // enumeration-typed values (#25), and an enumerator converted so is an integer literal.
+    if (b && ast::is_floating(*b) && is_unscoped_enum(from.type())) {
+      QualType u = underlying_of(from.type());
+      return narrows_floating(convert_node(from, ast::ConversionKind::integral, u), *types().builtin_of(u), *b);
+    }
     if (a && b && (ast::is_floating(*a) || ast::is_floating(*b))) return narrows_floating(from, *a, *b);
     if (!a || !b || !ast::is_integral(*a) || !ast::is_integral(*b) || *a == *b) return false;
     IntShape sa = shape(*a), sb = shape(*b);
@@ -1281,7 +1286,8 @@ public:
     }
     // /7.3: an integer to a floating type, unless the source is constant and its value converts
     // back unchanged: its significant bits fit the type's precision (the exponent range of every
-    // supported format covers 128-bit integers).
+    // supported format covers 128-bit integers). Integer types are at most 64 bits wide here: a
+    // 128-bit one would need the constant's high word.
     if (!v || w_->values.rec(*v).kind != ValueKind::integer) return true;
     IntShape sa = shape(a);
     if (a == Builtin::bool_) sa = {1, false};
@@ -3061,7 +3067,11 @@ public:
         if (sh.is_signed ? x >= -top && x < top : x > -1 && x < top)
           return literal(target, w_->values.integer(u, sh.is_signed ? u64(i64(x)) : u64(x)), ValueCategory::prvalue, v.begin, v.end);
       }
-      return convert_node(arithmetic_conversion(v, u), ast::ConversionKind::integral, target);
+      // An underlying `bool` is reached by [conv.fpint]'s truncation too, through int, not by
+      // [conv.bool].
+      Ex i = types().is(u, Builtin::bool_) ? arithmetic_conversion(arithmetic_conversion(v, builtin(Builtin::int_)), u)
+                                           : arithmetic_conversion(v, u);
+      return convert_node(i, ast::ConversionKind::integral, target);
     }
     if (types().is_enum(target) && (types().is_integral(from) || types().is_enum(from))) {
       if (types().canonical(from) == types().canonical(target)) return v;
@@ -3595,6 +3605,11 @@ public:
     } else {
       Ex lv = rvalue(l);  // only to read its type; the IR loads the left operand itself
       QualType tl = lv.type();
+      // [expr.arith.conv]/1: an enumeration and a floating type do not mix.
+      if ((types().is_enum(tl) && types().is_floating(r.type())) || (types().is_floating(tl) && types().is_enum(r.type()))) {
+        diag(op_at, Diag::invalid_operands, lt, r.type());
+        return {NodeId::none, begin, end};
+      }
       Ex rv = is_unscoped_enum(r.type()) ? promote(r) : rvalue(r);  // [conv.prom]
       if (!rv.ok()) return {NodeId::none, begin, end};
       QualType tr = rv.type();

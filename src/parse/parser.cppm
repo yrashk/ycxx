@@ -1291,7 +1291,8 @@ public:
     // [temp.param]/7: a structural type; class types are not supported yet.
     if (!s_->types().is_integral(t) && !s_->types().is_pointer(t) && !s_->types().is_reference(t) &&
         !s_->types().is(t, Builtin::nullptr_t) && !s_->types().is_dependent(t)) {
-      bool later = s_->types().is_class(t) || s_->types().kind(t) == sema::TypeKind::enum_;  // structural, not supported yet
+      bool later = s_->types().is_class(t) || s_->types().kind(t) == sema::TypeKind::enum_ ||
+                   s_->types().is_floating(t);  // structural, not supported yet (floating: #317)
       s_->diag(at, later ? Diag::not_supported : Diag::invalid_template_parameter_type,
                s_->types().is_class(t) ? Tk::kw_class : Tk::kw_enum);
       ok = false;
