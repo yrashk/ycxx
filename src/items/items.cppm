@@ -317,6 +317,10 @@ u32 Splitter::item(u32 parent, const std::string& scope) {
       at(k).kind = ItemKind::namespace_def;
       std::string inner = scope;
       for (u32 n = ns + 1; n < h; ++n) {
+        if (kind(n) == Tk::l_square || (kind(n) == Tk::identifier && kind(n + 1) == Tk::l_paren)) {
+          n = match(kind(n) == Tk::l_square ? n : n + 1) - 1;  // past attributes
+          continue;
+        }
         if (kind(n) != Tk::identifier) continue;
         if (!inner.empty()) inner += "::";
         inner += r_.name(r_.tokens[n]);
