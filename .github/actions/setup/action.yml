@@ -4,8 +4,8 @@ description: >
   the way libycxx's CI does it (deps/libycxx/.github/actions), with its prefix cached. GCC 16 is
   the bootstrap compiler: the gcc:16 container's on Linux, Homebrew's on macOS. With oracle
   'true', also Clang 23, the black-box oracle (DECISIONS §2.3), which never builds ycxx:
-  apt.llvm.org on Linux, the LLVM release on macOS. The build tools come from the system package
-  manager.
+  apt.llvm.org on Linux, the LLVM release on macOS. CMake comes from the system package manager on
+  Linux and a pinned Kitware release on macOS.
 inputs:
   oracle:
     description: also provision Clang 23 (the oracle)
@@ -28,7 +28,17 @@ runs:
         apt-get install -y -qq clang-23 lld-23 >/dev/null
     - if: runner.os == 'macOS'
       shell: bash
-      run: brew install gcc ninja cmake
+      run: |
+        brew install gcc ninja
+        # CMake 4.5 scans the toolchain's std module, which needs headers libycxx disables (#381).
+        cmake_dir=$(mktemp -d "$RUNNER_TEMP/ycxx-cmake.XXXXXX")
+        cmake_archive=cmake-4.4.5-macos-universal
+        curl -fsSL --retry 3 -o "$cmake_dir/$cmake_archive.tar.gz" \
+          "https://github.com/Kitware/CMake/releases/download/v4.4.5/$cmake_archive.tar.gz"
+        printf '%s  %s\n' 679e77a96b9ef9484cc6c1445255fc4f84206b48a65420efbedf16bdab55fbff \
+          "$cmake_dir/$cmake_archive.tar.gz" | shasum -a 256 -c -
+        tar -xzf "$cmake_dir/$cmake_archive.tar.gz" -C "$cmake_dir"
+        echo "$cmake_dir/$cmake_archive/CMake.app/Contents/bin" >> "$GITHUB_PATH"
     - uses: actions/cache@v4
       with:
         path: ~/.local/share/ycxx/toolchains

@@ -598,14 +598,15 @@ clauses = ['stmt.dcl', 'basic.stc.static']
 std = 'C++98'
 ftm = '__cpp_threadsafe_static_init'
 detect = '''(?m)^[ \t]{4,}static\s+(?!_assert|assert|inline\b|void\b|constexpr\b|const\b)[\w:<>]+[\s*&]+\w+\s*(?:=|\{|;)'''
-status = 'missing'
+status = 'partial'
 probe = '''
 int calls = 0;
 int init() { return ++calls; }
 int get() { static int v = init(); return v; }
 int main() { get(); return (get() == 1 && calls == 1) ? 0 : 1; }
 '''
-issues = [291]
+issues = [124, 372]
+note = "inline functions' statics are per unit; the guard is always called"
 
 [[feature]]
 id = 'basic-dynamic-init'
@@ -614,8 +615,9 @@ group = 'basic'
 clauses = ['basic.start', 'basic.start.main', 'basic.start.static', 'basic.start.dynamic', 'basic.start.term']
 std = 'C++98'
 core = true
-status = 'missing'
-issues = [94]
+status = 'partial'
+issues = [367, 368]
+note = 'references bound at run time; inline variables'
 probe = '''
 int f() { return 42; }
 int g = f();
@@ -1056,8 +1058,9 @@ probe = '''
 int f(int a, int b = 2) { return a + b; }
 int main() { return f(1) == 3 ? 0 : 1; }
 '''
-status = 'missing'
-issues = [300]
+status = 'partial'
+issues = [356, 354]
+note = 'defaults that depend on template parameters; members in complete-class context'
 
 [[feature]]
 id = 'dcl-variadic-fn'
@@ -1068,7 +1071,7 @@ std = 'C++98'
 detect = ',\s*\.\.\.\s*\)|\bva_(?:start|arg|list)\b'
 status = 'partial'
 issues = [196]
-note = 'definitions (`va_start`), calls through pointers'
+note = 'AMD64 System V `va_list` declarations are supported (#383). Definitions (`va_start`) and calls through pointers remain open'
 probe = '''
 #include <stdarg.h>
 int sum(int n, ...) { va_list ap; va_start(ap, n); int s = 0; for (int i = 0; i < n; ++i) s += va_arg(ap, int); va_end(ap); return s; }
@@ -1292,8 +1295,7 @@ probe = '''
 namespace a::b::inline c { int f() { return 0; } }
 int main() { return a::b::f(); }
 '''
-status = 'missing'
-issues = [153]
+status = 'done'
 
 [[feature]]
 id = 'dcl-alias'

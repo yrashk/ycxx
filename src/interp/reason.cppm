@@ -52,6 +52,7 @@ enum class Reason : std::uint8_t {
   reinterpret [[=says{"a reinterpret_cast or a conversion between a pointer and an integer"}]],
   asm_ [[=says{"an asm declaration"}]],
   goto_ [[=says{"a goto statement"}]],
+  static_definition [[=says{"control passes through the definition of a static variable"}]],
   unreachable [[=says{"control reached the end of a function that must return a value"}]],
   local_address [[=says{"the result points to an object with automatic storage duration"}]],
   // Not yet: an operation the interpreter does not evaluate, by its op number.

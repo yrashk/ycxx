@@ -35,7 +35,6 @@ draft/basic/basic.scope.scope-2.reject.cpp errors elsewhere: 'typedef' not suppo
 draft/basic/basic.scope.scope-3.reject.cpp errors elsewhere: '(' not supported yet
 draft/basic/basic.scope.scope-4.accept.cpp 'namespace' not supported yet
 draft/basic/basic.splice-1.reject.cpp errors elsewhere: preprocessing directives are not supported yet
-draft/basic/basic.start.term-1.accept.cpp 'struct' not supported yet
 draft/basic/basic.types.general-1.reject.cpp errors elsewhere: 'class' not supported yet
 draft/basic/class.member.lookup-1.accept.cpp 'struct' not supported yet
 draft/basic/class.member.lookup-2.reject.cpp errors elsewhere: 'struct' not supported yet
@@ -66,7 +65,6 @@ draft/class/class.access.virt-1.reject.cpp errors elsewhere: 'class' not support
 draft/class/class.base.init-12.accept.cpp 'template' not supported yet
 draft/class/class.base.init-2.reject.cpp errors elsewhere: 'struct' not supported yet
 draft/class/class.base.init-3.reject.cpp errors elsewhere: 'struct' not supported yet
-draft/class/class.base.init-4.accept.cpp 'struct' not supported yet
 draft/class/class.base.init-5.reject.cpp errors elsewhere: 'struct' not supported yet
 draft/class/class.base.init-6.reject.cpp errors elsewhere: 'struct' not supported yet
 draft/class/class.base.init-8.reject.cpp errors elsewhere: 'struct' not supported yet
@@ -78,7 +76,6 @@ draft/class/class.cdtor-4.accept.cpp 'struct' not supported yet
 draft/class/class.cdtor-5.accept.cpp preprocessing directives are not supported yet
 draft/class/class.compare.default-2.accept.cpp preprocessing directives are not supported yet
 draft/class/class.compare.secondary-1.accept.cpp 'struct' not supported yet
-draft/class/class.conv.ctor-1.accept.cpp 'struct' not supported yet
 draft/class/class.conv.ctor-2.reject.cpp errors elsewhere: 'struct' not supported yet
 draft/class/class.conv.fct-1.reject.cpp errors elsewhere: 'struct' not supported yet
 draft/class/class.conv.fct-5.reject.cpp errors elsewhere: 'struct' not supported yet
@@ -86,14 +83,11 @@ draft/class/class.conv.general-1.reject.cpp errors elsewhere: 'struct' not suppo
 draft/class/class.copy.assign-1.reject.cpp errors elsewhere: 'struct' not supported yet
 draft/class/class.copy.assign-2.accept.cpp 'struct' not supported yet
 draft/class/class.copy.assign-3.accept.cpp 'struct' not supported yet
-draft/class/class.copy.ctor-1.accept.cpp 'struct' not supported yet
-draft/class/class.copy.ctor-2.accept.cpp 'struct' not supported yet
 draft/class/class.copy.elision-1.reject.cpp errors elsewhere: 'class' not supported yet
 draft/class/class.copy.elision-2.reject.cpp errors elsewhere: 'class' not supported yet
 draft/class/class.dtor-1.accept.cpp 'struct' not supported yet
 draft/class/class.dtor-2.accept.cpp preprocessing directives are not supported yet
 draft/class/class.eq-1.accept.cpp 'struct' not supported yet
-draft/class/class.expl.init-1.accept.cpp 'struct' not supported yet
 draft/class/class.free-1.reject.cpp errors elsewhere: preprocessing directives are not supported yet
 draft/class/class.free-2.accept.cpp preprocessing directives are not supported yet
 draft/class/class.free-3.accept.cpp preprocessing directives are not supported yet
@@ -111,7 +105,6 @@ draft/class/class.local-1.reject.cpp errors elsewhere: 'static' not supported ye
 draft/class/class.mem.general-1.accept.cpp 'struct' not supported yet
 draft/class/class.mem.general-2.reject.cpp errors elsewhere: 'struct' not supported yet
 draft/class/class.mem.general-4.accept.cpp 'struct' not supported yet
-draft/class/class.mfct-1.accept.cpp 'struct' not supported yet
 draft/class/class.mfct-2.accept.cpp 'typedef' not supported yet
 draft/class/class.name-3.accept.cpp 'struct' not supported yet
 draft/class/class.name-5.accept.cpp 'struct' not supported yet
@@ -179,35 +172,29 @@ draft/dcl/dcl.fct.def.delete-3.reject.cpp errors elsewhere: 'struct' not support
 draft/dcl/dcl.fct.def.general-2.reject.cpp errors elsewhere: 'struct' not supported yet
 draft/dcl/dcl.fct.default-10.reject.cpp errors elsewhere: 'struct' not supported yet
 draft/dcl/dcl.fct.default-2.reject.cpp errors elsewhere: '=' not supported yet
-draft/dcl/dcl.fct.default-3.accept.cpp '=' not supported yet
 draft/dcl/dcl.fct.default-4.reject.cpp errors elsewhere: 'class' not supported yet
 draft/dcl/dcl.fct.default-5.reject.cpp errors elsewhere: 'extern' not supported yet
 draft/dcl/dcl.fct.default-7.reject.cpp errors elsewhere: '=' not supported yet
 draft/dcl/dcl.fct.default-8.reject.cpp errors elsewhere: preprocessing directives are not supported yet
-draft/dcl/dcl.fct.default-9.reject.cpp errors elsewhere: '=' not supported yet
 draft/dcl/dcl.fct.spec-1.reject.cpp errors elsewhere: 'struct' not supported yet
 draft/dcl/dcl.init.aggr-1.accept.cpp 'struct' not supported yet
 draft/dcl/dcl.init.aggr-10.accept.cpp 'struct' not supported yet
 draft/dcl/dcl.init.aggr-11.reject.cpp errors elsewhere: 'struct' not supported yet
 draft/dcl/dcl.init.aggr-15.accept.cpp redefinition of 'y' (the example's two definitions are alternatives)
-draft/dcl/dcl.init.aggr-16.accept.cpp 'struct' not supported yet
 draft/dcl/dcl.init.aggr-17.accept.cpp 'struct' not supported yet
 draft/dcl/dcl.init.aggr-18.reject.cpp errors elsewhere: 'union' not supported yet
 draft/dcl/dcl.init.aggr-2.reject.cpp errors elsewhere: 'struct' not supported yet
 draft/dcl/dcl.init.aggr-3.accept.cpp 'struct' not supported yet
 draft/dcl/dcl.init.aggr-4.accept.cpp 'struct' not supported yet
 draft/dcl/dcl.init.aggr-5.accept.cpp 'struct' not supported yet
-draft/dcl/dcl.init.general-1.accept.cpp dynamic initialization of a namespace-scope variable not supported yet
 draft/dcl/dcl.init.general-3.reject.cpp errors elsewhere: preprocessing directives are not supported yet
 draft/dcl/dcl.init.list-11.reject.cpp errors elsewhere: preprocessing directives are not supported yet
 draft/dcl/dcl.init.list-12.accept.cpp preprocessing directives are not supported yet
 draft/dcl/dcl.init.list-13.accept.cpp preprocessing directives are not supported yet
 draft/dcl/dcl.init.list-14.reject.cpp errors elsewhere: preprocessing directives are not supported yet
-draft/dcl/dcl.init.list-15.reject.cpp errors elsewhere: dynamic initialization of a namespace-scope variable not supported yet
 draft/dcl/dcl.init.list-2.reject.cpp errors elsewhere: 'struct' not supported yet
 draft/dcl/dcl.init.list-4.accept.cpp preprocessing directives are not supported yet
 draft/dcl/dcl.init.list-5.accept.cpp preprocessing directives are not supported yet
-draft/dcl/dcl.init.list-6.reject.cpp errors elsewhere: 'struct' not supported yet
 draft/dcl/dcl.init.list-9.reject.cpp errors elsewhere: preprocessing directives are not supported yet
 draft/dcl/dcl.init.ref-2.reject.cpp errors elsewhere: '&' not supported yet
 draft/dcl/dcl.init.ref-3.accept.cpp dynamic initialization of a namespace-scope variable is not supported yet
@@ -236,9 +223,7 @@ draft/dcl/dcl.type.auto.deduct-1.reject.cpp errors elsewhere: preprocessing dire
 draft/dcl/dcl.type.auto.deduct-3.reject.cpp errors elsewhere: preprocessing directives are not supported yet
 draft/dcl/dcl.type.class.deduct-2.reject.cpp errors elsewhere: preprocessing directives are not supported yet
 draft/dcl/dcl.type.decltype-1.accept.cpp '&&' not supported yet
-draft/dcl/dcl.type.elab-1.accept.cpp 'enum' not supported yet
 draft/dcl/dcl.type.splice-1.reject.cpp errors elsewhere: preprocessing directives are not supported yet
-draft/dcl/dcl.typedef-3.reject.cpp errors elsewhere: 'struct' not supported yet
 draft/dcl/dcl.typedef-4.accept.cpp 'typedef' not supported yet
 draft/dcl/dcl.typedef-5.reject.cpp errors elsewhere: 'typedef' not supported yet
 draft/dcl/enum.udecl-1.accept.cpp 'enum' not supported yet
@@ -253,7 +238,6 @@ draft/dcl/namespace.udecl-3.reject.cpp errors elsewhere: 'struct' not supported 
 draft/dcl/namespace.udecl-5.reject.cpp errors elsewhere: 'struct' not supported yet
 draft/dcl/namespace.udecl-8.reject.cpp errors elsewhere: 'namespace' not supported yet
 draft/dcl/namespace.udecl-9.reject.cpp errors elsewhere: 'struct' not supported yet
-draft/dcl/namespace.udir-2.reject.cpp errors elsewhere: 'namespace' not supported yet
 draft/except/except.ctor-1.accept.cpp 'struct' not supported yet
 draft/except/except.handle-2.accept.cpp 'noexcept' not supported yet
 draft/except/except.pre-1.reject.cpp errors elsewhere: 'goto' not supported yet
@@ -265,10 +249,8 @@ draft/except/except.throw-2.accept.cpp preprocessing directives are not supporte
 draft/expr/basic.lval-1.accept.cpp 'struct' not supported yet
 draft/expr/conv.fctptr-1.reject.cpp errors elsewhere: 'noexcept' not supported yet
 draft/expr/conv.lval-1.accept.cpp 'struct' not supported yet
-draft/expr/conv.rval-1.accept.cpp 'struct' not supported yet
 draft/expr/expr.add-1.accept.cpp '{' not supported yet
 draft/expr/expr.await-1.reject.cpp errors elsewhere: preprocessing directives are not supported yet
-draft/expr/expr.call-2.reject.cpp errors elsewhere: 'template' not supported yet
 draft/expr/expr.call-4.accept.cpp preprocessing directives are not supported yet
 draft/expr/expr.call-5.accept.cpp 'struct' not supported yet
 draft/expr/expr.cast-1.reject.cpp errors elsewhere: 'struct' not supported yet
@@ -354,14 +336,10 @@ draft/over/over.call.func-1.reject.cpp errors elsewhere: 'struct' not supported 
 draft/over/over.call.object-1.accept.cpp 'operator' is not supported yet
 draft/over/over.ics.list-1.reject.cpp errors elsewhere: 'struct' not supported yet
 draft/over/over.ics.rank-1.accept.cpp preprocessing directives are not supported yet
-draft/over/over.ics.rank-10.accept.cpp 'struct' not supported yet
-draft/over/over.ics.rank-4.accept.cpp '&' not supported yet
 draft/over/over.ics.rank-5.accept.cpp overloading 'f' not supported yet
-draft/over/over.ics.rank-6.reject.cpp errors elsewhere: '&' not supported yet
 draft/over/over.ics.rank-7.accept.cpp 'struct' not supported yet
 draft/over/over.ics.rank-8.accept.cpp 'struct' not supported yet
 draft/over/over.ics.rank-9.reject.cpp errors elsewhere: preprocessing directives are not supported yet
-draft/over/over.ics.ref-1.accept.cpp 'struct' not supported yet
 draft/over/over.inc.default-2.reject.cpp errors elsewhere: 'struct' not supported yet
 draft/over/over.inc.general-1.accept.cpp 'struct' not supported yet
 draft/over/over.match.best.general-1.reject.cpp errors elsewhere: 'struct' not supported yet
@@ -388,7 +366,6 @@ draft/stmt/stmt.ambig-2.accept.cpp 'class' not supported yet
 draft/stmt/stmt.ambig-3.accept.cpp 'struct' not supported yet
 draft/stmt/stmt.ambig-4.accept.cpp 'struct' not supported yet
 draft/stmt/stmt.contract.assert-1.accept.cpp 'contract_assert' not supported yet
-draft/stmt/stmt.dcl-2.accept.cpp 'static' not supported yet
 draft/stmt/stmt.expand-1.accept.cpp 'auto' is not supported yet
 draft/stmt/stmt.expand-2.accept.cpp preprocessing directives are not supported yet
 draft/stmt/stmt.expand-3.accept.cpp 'struct' not supported yet
@@ -417,9 +394,7 @@ draft/temp/temp.constr.decl-2.accept.cpp 'template' not supported yet
 draft/temp/temp.constr.normal-3.accept.cpp 'template' not supported yet
 draft/temp/temp.constr.normal-4.accept.cpp 'template' not supported yet
 draft/temp/temp.constr.normal-5.reject.cpp errors elsewhere: 'template' not supported yet
-draft/temp/temp.constr.op-2.reject.cpp errors elsewhere: 'template' not supported yet
 draft/temp/temp.deduct.call-2.reject.cpp errors elsewhere: 'template' not supported yet
-draft/temp/temp.deduct.call-3.accept.cpp 'template' not supported yet
 draft/temp/temp.deduct.call-4.reject.cpp errors elsewhere: 'template' not supported yet
 draft/temp/temp.deduct.call-5.accept.cpp 'template' not supported yet
 draft/temp/temp.deduct.call-6.accept.cpp 'template' not supported yet
@@ -430,10 +405,8 @@ draft/temp/temp.deduct.general-11.accept.cpp 'template' not supported yet
 draft/temp/temp.deduct.general-12.accept.cpp 'template' not supported yet
 draft/temp/temp.deduct.general-13.accept.cpp 'template' not supported yet
 draft/temp/temp.deduct.general-14.accept.cpp 'template' not supported yet
-draft/temp/temp.deduct.general-16.reject.cpp errors elsewhere: 'template' not supported yet
 draft/temp/temp.deduct.general-4.reject.cpp errors elsewhere: 'template' not supported yet
 draft/temp/temp.deduct.general-5.accept.cpp 'template' not supported yet
-draft/temp/temp.deduct.general-9.accept.cpp 'struct' not supported yet
 draft/temp/temp.deduct.guide-1.accept.cpp 'template' not supported yet
 draft/temp/temp.deduct.type-10.accept.cpp 'template' not supported yet
 draft/temp/temp.deduct.type-11.accept.cpp 'template' not supported yet
@@ -466,13 +439,10 @@ draft/temp/temp.expl.spec-9.reject.cpp errors elsewhere: 'template' not supporte
 draft/temp/temp.explicit-1.accept.cpp 'template' not supported yet
 draft/temp/temp.explicit-2.reject.cpp errors elsewhere: 'template' not supported yet
 draft/temp/temp.explicit-3.accept.cpp 'template' not supported yet
-draft/temp/temp.fct.spec.general-1.accept.cpp 'template' not supported yet
 draft/temp/temp.friend-1.accept.cpp 'template' not supported yet
 draft/temp/temp.friend-2.accept.cpp 'class' not supported yet
 draft/temp/temp.friend-3.accept.cpp 'class' not supported yet
 draft/temp/temp.friend-4.reject.cpp errors elsewhere: 'template' not supported yet
-draft/temp/temp.func.order-3.accept.cpp 'template' not supported yet
-draft/temp/temp.func.order-4.reject.cpp errors elsewhere: 'template' not supported yet
 draft/temp/temp.func.order-6.accept.cpp 'template' not supported yet
 draft/temp/temp.inst-1.accept.cpp 'template' not supported yet
 draft/temp/temp.inst-11.reject.cpp errors elsewhere: 'template' not supported yet
@@ -525,12 +495,8 @@ draft/temp/temp.spec.partial.order-2.accept.cpp 'template' not supported yet
 draft/temp/temp.static-1.accept.cpp 'template' not supported yet
 draft/temp/temp.static-2.accept.cpp 'template' not supported yet
 draft/temp/temp.variadic-4.accept.cpp 'auto' not supported yet
-draft/temp/temp.variadic-7.accept.cpp 'template' not supported yet
 draft/temp/temp.variadic-8.accept.cpp 'template' not supported yet
 own/smoke/exit-status.run.cpp <cstdio> preprocesses; libycxx does not know ycxx yet (yrashk/libycxx#17), then sema needs namespaces (#133)
-own/pp/include-macros.accept.cpp dynamic initialization of a namespace-scope variable is not supported yet (#94)
-own/pp/macro-decls.accept.cpp dynamic initialization of a namespace-scope variable is not supported yet (#94)
-own/pp/cond-decls.accept.cpp dynamic initialization of a namespace-scope variable is not supported yet (#94)
 own/classes/s1-byvalue-constexpr.run.cpp classes in constant evaluation (#25)
 own/classes/s1-default-member-init.run.cpp a default member initializer naming another member (#118)
 own/classes/s1-elaborated.run.cpp block-scope elaborated type specifier (#117)

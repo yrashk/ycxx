@@ -42,7 +42,7 @@ struct BuiltinLayout {
 };
 
 // What `__builtin_va_list` names (docs/EXTENSIONS.md): `char*` in Apple's arm64 ABI; the System
-// V x86-64 ABI's `__va_list_tag[1]`, which ycxx does not have yet.
+// V x86-64 ABI's `__va_list_tag[1]`.
 enum class VaList : u8 { char_pointer, sysv_x86_64 };
 
 // When a class is trivially copyable for the purposes of calls, so that it passes in registers
@@ -63,6 +63,12 @@ struct Target {
   Builtin char32_underlying;  // uint_least32_t
   Builtin size_type;
   Builtin ptrdiff_type;
+  std::array<Builtin, 4> exact_width_int_types;  // int8_t, int16_t, int32_t, int64_t
+  Builtin intmax_type;
+  Builtin intptr_type;
+  Builtin wint_type;
+  Builtin sig_atomic_type;
+  std::string_view multiarch;  // the C library directory within usr/include, when there is one
   VaList va_list;
   CallTriviality call_triviality;  // the default
   bool apple_calls;                 // whether `-fclass-call-abi=apple` is offered
@@ -211,6 +217,12 @@ inline constexpr Target aarch64_darwin{
     .char32_underlying = Builtin::unsigned_int,
     .size_type = Builtin::unsigned_long,
     .ptrdiff_type = Builtin::long_,
+    .exact_width_int_types = {Builtin::signed_char, Builtin::short_, Builtin::int_, Builtin::long_long},
+    .intmax_type = Builtin::long_,
+    .intptr_type = Builtin::long_,
+    .wint_type = Builtin::int_,
+    .sig_atomic_type = Builtin::int_,
+    .multiarch = {},
     .va_list = VaList::char_pointer,
     .call_triviality = CallTriviality::itanium,
     .apple_calls = true,
@@ -229,9 +241,21 @@ inline constexpr Target x86_64_linux{
     .char32_underlying = Builtin::unsigned_int,
     .size_type = Builtin::unsigned_long,
     .ptrdiff_type = Builtin::long_,
+    .exact_width_int_types = {Builtin::signed_char, Builtin::short_, Builtin::int_, Builtin::long_},
+    .intmax_type = Builtin::long_,
+    .intptr_type = Builtin::long_,
+    .wint_type = Builtin::unsigned_int,
+    .sig_atomic_type = Builtin::int_,
+    .multiarch = "x86_64-linux-gnu",
     .va_list = VaList::sysv_x86_64,
     .call_triviality = CallTriviality::itanium,
     .apple_calls = false,
 };
+
+constexpr const Target* target_for_triple(std::string_view triple) {
+  if (triple == aarch64_darwin.triple) return &aarch64_darwin;
+  if (triple == x86_64_linux.triple || triple == x86_64_linux.multiarch) return &x86_64_linux;
+  return nullptr;
+}
 
 }  // namespace ycxx::ast

@@ -94,16 +94,6 @@ constexpr Builtin unsigned_of(Builtin b) {
   }
 }
 
-// The choices of a target's C library that `Target` does not hold: which standard type each
-// `<cstdint>` typedef names (Apple's arm64 ABI; [cstdint.syn]).
-struct IntTypes {
-  Builtin int8, int16, int32, int64, intmax, intptr, wint, sig_atomic;
-};
-constexpr IntTypes int_types(const ast::Target&) {
-  return {Builtin::signed_char, Builtin::short_, Builtin::int_, Builtin::long_long,
-          Builtin::long_, Builtin::long_, Builtin::int_, Builtin::int_};
-}
-
 // A floating constant with `digits` significant digits (0: its exact decimal value), as Clang
 // prints `__FLT_MAX__`: no leading zeros in the exponent.
 std::string floating(double v, int digits, std::string_view suffix) {
@@ -130,25 +120,31 @@ void float_family(std::string& out, std::string_view prefix, FloatFormat f, std:
   const double log2 = std::log10(2.0);
   const int dig = static_cast<int>(std::floor((p - 1) * log2));
   const int decimal_dig = static_cast<int>(std::ceil(1 + p * log2));
-  const double max = std::ldexp(2.0 - std::ldexp(1.0, 1 - p), max_exp - 1);
-  const double min = std::ldexp(1.0, min_exp - 1);
+  const double max_significand = 2.0 - std::ldexp(1.0, 1 - p);
   const int digits = exact ? 0 : decimal_dig;
+  // The x87 limits rounded to 21 significant digits. Host long double can be binary64,
+  // so generate those spellings from the target format without host floating-point conversion.
+  auto limit = [&](double significand, int exponent, std::string_view x87) {
+    if (f == FloatFormat::x87_extended) return std::format("{}{}", x87, suf);
+    return floating(std::ldexp(significand, exponent), digits, suf);
+  };
+  auto max = limit(max_significand, max_exp - 1, "1.18973149535723176502e+4932");
   auto def = [&](std::string_view name, std::string value) { out += std::format("#define __{}_{}__ {}\n", prefix, name, value); };
   def("DECIMAL_DIG", std::to_string(decimal_dig));
-  def("DENORM_MIN", floating(std::ldexp(1.0, min_exp - p), digits, suf));
+  def("DENORM_MIN", limit(1.0, min_exp - p, "3.64519953188247460253e-4951"));
   def("DIG", std::to_string(dig));
-  def("EPSILON", floating(std::ldexp(1.0, 1 - p), digits, suf));
+  def("EPSILON", limit(1.0, 1 - p, "1.08420217248550443401e-19"));
   def("HAS_DENORM", "1");
   def("HAS_INFINITY", "1");
   def("HAS_QUIET_NAN", "1");
   def("MANT_DIG", std::to_string(p));
-  def("MAX_10_EXP", std::to_string(static_cast<int>(std::floor(std::log10(max)))));
+  def("MAX_10_EXP", std::to_string(static_cast<int>(std::floor((max_exp - 1) * log2 + std::log10(max_significand)))));
   def("MAX_EXP", std::to_string(max_exp));
-  def("MAX", floating(max, digits, suf));
-  def("MIN_10_EXP", std::format("({})", static_cast<int>(std::ceil(std::log10(min)))));
+  def("MAX", max);
+  def("MIN_10_EXP", std::format("({})", static_cast<int>(std::ceil((min_exp - 1) * log2))));
   def("MIN_EXP", std::format("({})", min_exp));
-  def("MIN", floating(min, digits, suf));
-  def("NORM_MAX", floating(max, digits, suf));
+  def("MIN", limit(1.0, min_exp - 1, "3.36210314311209350626e-4932"));
+  def("NORM_MAX", max);
 }
 
 std::string target_macros(const ast::Target& t) {
@@ -161,7 +157,8 @@ std::string target_macros(const ast::Target& t) {
     std::uint64_t m = n == 64 ? (uns ? ~0ull : ~0ull >> 1) : (uns ? (1ull << n) - 1 : (1ull << (n - 1)) - 1);
     return std::format("{}{}", m, suffix(b));
   };
-  const bool darwin = t.triple.find("apple-darwin") != t.triple.npos;
+  const bool darwin = t.triple == ast::aarch64_darwin.triple;
+  const bool linux_target = t.triple == ast::x86_64_linux.triple;
   const bool aarch64 = t.triple.starts_with("arm64") || t.triple.starts_with("aarch64");
   if (darwin) {
     def("__APPLE__", 1);
@@ -173,12 +170,20 @@ std::string target_macros(const ast::Target& t) {
     def("TARGET_OS_OSX", 1);
     def("__USER_LABEL_PREFIX__", "_");
   }
+  if (linux_target) {
+    for (std::string_view macro : {"__ELF__", "__gnu_linux__", "__linux", "__linux__", "__unix", "__unix__"})
+      def(macro, 1);
+    def("__USER_LABEL_PREFIX__", "");
+  }
   if (aarch64) {
     def("__aarch64__", 1);
     if (darwin) {
       def("__arm64", 1);
       def("__arm64__", 1);
     }
+  }
+  if (t.triple.starts_with("x86_64")) {
+    for (std::string_view macro : {"__amd64", "__amd64__", "__x86_64", "__x86_64__"}) def(macro, 1);
   }
   if (t.pointer_size == 8 && t[Builtin::long_].size == 8) {
     def("_LP64", 1);
@@ -207,8 +212,7 @@ std::string target_macros(const ast::Target& t) {
   def("__SIZEOF_SIZE_T__", t[t.size_type].size);
   def("__SIZEOF_PTRDIFF_T__", t[t.ptrdiff_type].size);
   def("__SIZEOF_WCHAR_T__", t[Builtin::wchar_t_].size);
-  const IntTypes it = int_types(t);
-  def("__SIZEOF_WINT_T__", t[it.wint].size);
+  def("__SIZEOF_WINT_T__", t[t.wint_type].size);
   // Limits and widths of the standard integer types.
   def("__SCHAR_MAX__", max_of(Builtin::signed_char));
   def("__SHRT_MAX__", max_of(Builtin::short_));
@@ -224,17 +228,21 @@ std::string target_macros(const ast::Target& t) {
     def(std::format("__{}_TYPE__", name), type_name(b));
     def(std::format("__{}_MAX__", name), max_of(b));
     if (width) def(std::format("__{}_WIDTH__", name), bits(b));
-    if (min) def(std::format("__{}_MIN__", name), std::format("(-__{}_MAX__ - 1)", name));
+    if (min) {
+      auto value = ast::is_standard_unsigned(b) ? std::format("0{}", suffix(b)) : std::format("(-__{}_MAX__ - 1)", name);
+      def(std::format("__{}_MIN__", name), value);
+    }
   };
   typedef_family("WCHAR", t.wchar_underlying, true, true);
-  typedef_family("WINT", it.wint, true, true);
-  typedef_family("SIG_ATOMIC", it.sig_atomic, true, true);
+  typedef_family("WINT", t.wint_type, true, true);
+  if (ast::is_standard_unsigned(t.wint_type)) def("__WINT_UNSIGNED__", 1);
+  typedef_family("SIG_ATOMIC", t.sig_atomic_type, true, true);
   typedef_family("SIZE", t.size_type, true, false);
   typedef_family("PTRDIFF", t.ptrdiff_type, true, false);
-  typedef_family("INTMAX", it.intmax, true, false);
-  typedef_family("UINTMAX", unsigned_of(it.intmax), true, false);
-  typedef_family("INTPTR", it.intptr, true, false);
-  typedef_family("UINTPTR", unsigned_of(it.intptr), true, false);
+  typedef_family("INTMAX", t.intmax_type, true, false);
+  typedef_family("UINTMAX", unsigned_of(t.intmax_type), true, false);
+  typedef_family("INTPTR", t.intptr_type, true, false);
+  typedef_family("UINTPTR", unsigned_of(t.intptr_type), true, false);
   def("__CHAR16_TYPE__", type_name(t.char16_underlying));
   def("__CHAR32_TYPE__", type_name(t.char32_underlying));
   auto formats = [&](std::string_view name, Builtin b) {
@@ -247,11 +255,12 @@ std::string target_macros(const ast::Target& t) {
   };
   formats("SIZE", t.size_type);
   formats("PTRDIFF", t.ptrdiff_type);
-  formats("INTMAX", it.intmax);
-  formats("UINTMAX", unsigned_of(it.intmax));
-  formats("INTPTR", it.intptr);
-  formats("UINTPTR", unsigned_of(it.intptr));
-  for (auto [n, b] : {std::pair{8, it.int8}, {16, it.int16}, {32, it.int32}, {64, it.int64}}) {
+  formats("INTMAX", t.intmax_type);
+  formats("UINTMAX", unsigned_of(t.intmax_type));
+  formats("INTPTR", t.intptr_type);
+  formats("UINTPTR", unsigned_of(t.intptr_type));
+  for (Builtin b : t.exact_width_int_types) {
+    auto n = bits(b);
     for (Builtin x : {b, unsigned_of(b)}) {
       std::string_view u = ast::is_standard_unsigned(x) ? "U" : "";
       for (std::string_view kind : {"", "_LEAST", "_FAST"}) {
@@ -268,20 +277,18 @@ std::string target_macros(const ast::Target& t) {
       else out += std::format("#define __{}_C(c) c##{}\n", c, s);
     }
   }
-  for (auto [name, b] : {std::pair{"INTMAX", it.intmax}, {"UINTMAX", unsigned_of(it.intmax)}}) {
+  for (auto [name, b] : {std::pair{"INTMAX", t.intmax_type}, {"UINTMAX", unsigned_of(t.intmax_type)}}) {
     def(std::format("__{}_C_SUFFIX__", name), suffix(b));
     out += std::format("#define __{}_C(c) c##{}\n", name, suffix(b));
   }
-  // The floating types whose limits a binary64 can hold exactly.
+  // The standard floating types and the _Float16 extension.
   def("__FLT_RADIX__", 2);
   // FLT_EVAL_METHOD ([cfloat.syn], C 5.2.4.2.2): every target evaluates in the operands' own type.
   def("__FLT_EVAL_METHOD__", 0);
   if (ast::shape_of(t[Builtin::float_].format).precision <= 53) float_family(out, "FLT", t[Builtin::float_].format, "F");
   if (ast::shape_of(t[Builtin::double_].format).precision <= 53) float_family(out, "DBL", t[Builtin::double_].format, "");
-  if (ast::shape_of(t[Builtin::long_double].format).precision <= 53) {
-    float_family(out, "LDBL", t[Builtin::long_double].format, "L");
-    def("__DECIMAL_DIG__", "__LDBL_DECIMAL_DIG__");
-  }
+  float_family(out, "LDBL", t[Builtin::long_double].format, "L");
+  def("__DECIMAL_DIG__", "__LDBL_DECIMAL_DIG__");
   if (t.has(Builtin::float16)) float_family(out, "FLT16", t[Builtin::float16].format, "F16", true);
   return out;
 }
