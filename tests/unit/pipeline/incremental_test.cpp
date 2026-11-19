@@ -408,6 +408,61 @@ void records() {
   }
 }
 
+void bit_fields() {
+  std::string text = R"cpp(
+enum Width { second = 5 };
+struct F { unsigned a : 1 + 2, b : second; };
+struct FileSlice { int descriptor; signed int flags : 24; char next; long offset; };
+static_assert(sizeof(F) == 4 && alignof(F) == 4);
+static_assert(sizeof(FileSlice) == 16 && alignof(FileSlice) == 8);
+F packed{3, 17};
+FileSlice file{1, -177, 'Q', 2L};
+static_assert(__is_same(decltype(packed.a), unsigned int));
+static_assert(__is_same(decltype(+packed.a), int));
+static_assert(__is_same(decltype(packed.a + packed.b), int));
+static_assert(__is_same(decltype(+static_cast<unsigned>(packed.a)), unsigned));
+static_assert(__is_same(decltype(+(unsigned)packed.a), unsigned));
+static_assert(__is_same(decltype(+unsigned(packed.a)), unsigned));
+int main() {
+  F f{};
+  f.a = 9;
+  f.b = 31;
+  if (f.a != 1 || f.b != 31) return 1;
+  FileSlice g{1, -177, 'Q', 2L};
+  if (g.flags++ != -177 || g.flags != -176 || g.next != 'Q') return 2;
+  file.flags += 3;
+  if (file.flags != -174 || file.next != 'Q' || file.offset != 2) return 3;
+  return 0;
+}
+)cpp";
+  pl::Session s;
+  build(s, text);
+  const auto& front = s.get<pl::TuFront>(tu);
+  check(!front.has_errors(), pl::TuFront::errors(front));
+  const auto& result = s.get<pl::Tu>(tu);
+  check(result.object.has_value(), pl::Tu::errors(result));
+  if (!result.object) return;
+  auto bytes_of = [](const auto& obj, std::string_view name) -> std::span<const std::uint8_t> {
+    auto sym = std::ranges::find(obj.symbols, name, &ycxx::obj::symbol::name);
+    if (sym == obj.symbols.end() || !sym->section) return {};
+    return std::span(obj.sections[*sym->section].bytes).subspan(sym->offset);
+  };
+  auto packed = bytes_of(*result.object, "_packed");
+  auto file = bytes_of(*result.object, "_file");
+  check(packed.size() >= 4 && packed[0] == 0x8b, "static adjacent bit-fields share the same byte");
+  check(file.size() >= 16 && file[4] == 0x4f && file[5] == 0xff && file[6] == 0xff && file[7] == 'Q',
+        "static signed 24-bit storage preserves the adjacent ordinary byte");
+
+  text.replace(text.find("1 + 2"), 5, "1 + 3");
+  build(s, text);
+  const auto& edited = s.get<pl::Tu>(tu);
+  check(edited.object.has_value(), pl::Tu::errors(edited));
+  if (!edited.object) return;
+  auto repacked = bytes_of(*edited.object, "_packed");
+  check(repacked.size() >= 4 && repacked[0] == 0x13 && repacked[1] == 0x01,
+        "editing a bit-field width republishes the layout and static object bytes");
+}
+
 void unnamed_union_members() {
   const std::string value = "union { unsigned code; char bytes[12]; } value, mirror;\n";
   const std::string spare = "union { unsigned code; char bytes[12]; } spare;\n";
@@ -503,6 +558,7 @@ int main() {
   pooled();
   pooled_units();
   records();
+  bit_fields();
   unnamed_union_members();
   too_deep();
   return ycxx::unit::result("unit.pipeline_incremental");

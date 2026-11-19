@@ -33,6 +33,10 @@ public:
         for (const BaseRec& b : cr->bases) r.push_back(b.cls);
       return r;
     };
+    bit_field_width = [&q](EntityId c, std::uint32_t field) -> std::uint8_t {
+      const ClassRec* r = q.classes().find(c);
+      return r && field < r->fields.size() ? r->fields[field].bit_width : 0;
+    };
   }
   ConstId string_address(ConstId s) { return w_->values.address({}, s, 0); }
   bool is_constexpr(EntityId f) { return Sema::closure_member(*w_, f) || q_->is_constexpr(f); }

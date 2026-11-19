@@ -82,6 +82,7 @@ struct DeclSema {
   SeqId<ParamSema> params;
   // A template's template-head ([temp.pre]); empty for a declaration that is not a template.
   SeqId<TemplateParamSema> template_params;
+  u8 bit_width = 0;  // a non-static data member declared as a bit-field ([class.bit])
   constexpr bool operator==(const DeclSema&) const = default;
 };
 

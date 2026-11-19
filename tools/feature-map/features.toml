@@ -1657,7 +1657,8 @@ group = 'class'
 clauses = ['class.bit']
 std = 'C++98'
 detect = '(?m)^\s*(?:unsigned|signed|int|bool|char|short|long|u?int\d+_t|std::u?int\d+_t)(?:\s+(?:int|char|long))?\s+\w+\s*:\s*\d+\s*[;,={]'
-status = 'missing'
+status = 'partial'
+note = 'named int and unsigned int fields of width 1–32 in ordinary unpacked, non-template classes with no bases'
 probe = '''
 struct F { unsigned a : 3; unsigned b : 5; };
 int main() { F f{}; f.a = 9; f.b = 31; return (f.a == 1 && f.b == 31 && sizeof(F) == 4) ? 0 : 1; }

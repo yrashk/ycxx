@@ -98,6 +98,7 @@ struct Placed {
   bool empty = false;  // an empty class ([class.prop], Itanium §1.1)
   // Its subobjects of empty class type, by class entity and offset, itself included.
   std::vector<std::pair<std::uint32_t, std::uint64_t>> empties;
+  u8 bit_width = 0;  // a bit-field has a width within its declared type's allocation unit
 };
 // A scalar, pointer or reference member's.
 constexpr Placed scalar_placed(std::uint64_t size, std::uint64_t align) { return {size, align, size, align, false, {}}; }
@@ -107,6 +108,15 @@ constexpr Placed array_placed(const Placed& e, std::uint64_t n) {
     for (auto [t, at] : e.empties) out.empties.push_back({t, at + i * e.size});
   return out;
 }
+// A bit-field's storage within the bytes beginning at its member offset (little endian).
+struct BitField {
+  u8 shift = 0;
+  u8 width = 0;
+  constexpr explicit operator bool() const { return width != 0; }
+  constexpr u32 bytes() const { return (u32(shift) + width + 7) / 8; }
+  constexpr u32 mask() const { return u32(((std::uint64_t{1} << width) - 1) << shift); }
+};
+
 struct RecordLayout {
   std::uint64_t size = 1;
   std::uint64_t align = 1;
@@ -114,6 +124,7 @@ struct RecordLayout {
   std::uint64_t nvsize = 0;
   std::vector<std::uint64_t> base_offsets;  // the direct bases', in declaration order
   std::vector<std::uint64_t> offsets;       // the members', in declaration order
+  std::vector<BitField> bit_fields;         // parallel to offsets, empty width for ordinary members
   Placed placed;                            // what it says of the class as a component
 };
 constexpr RecordLayout record_layout(std::span<const Placed> bases, std::span<const Placed> fields, bool union_, bool pod,
@@ -145,7 +156,23 @@ constexpr RecordLayout record_layout(std::span<const Placed> bases, std::span<co
     return at;
   };
   for (const Placed& b : bases) out.base_offsets.push_back(place(b, true));
+  std::uint64_t next_bit = dsize * 8;
   for (const Placed& f : fields) {
+    if (f.bit_width != 0) {
+      // Itanium §2.4 and the target C psABI: keep a bit-field in one aligned allocation unit of
+      // its declared type. An ordinary member can start at the first whole byte after it.
+      std::uint64_t alignment = f.align * 8;
+      if (next_bit % alignment + f.bit_width > f.size * 8)
+        next_bit = (next_bit + alignment - 1) / alignment * alignment;
+      out.offsets.push_back(next_bit / 8);
+      out.bit_fields.push_back({u8(next_bit % 8), f.bit_width});
+      next_bit += f.bit_width;
+      dsize = (next_bit + 7) / 8;
+      size = std::max(size, dsize);
+      align = std::max(align, f.align);
+      continue;
+    }
+    out.bit_fields.push_back({});
     if (union_) {
       out.offsets.push_back(0);
       for (auto [t, x] : f.empties) empties.push_back({t, x});
@@ -155,6 +182,7 @@ constexpr RecordLayout record_layout(std::span<const Placed> bases, std::span<co
       continue;
     }
     out.offsets.push_back(place(f, false));
+    next_bit = dsize * 8;
   }
   bool empty = fields.empty() && std::ranges::all_of(bases, &Placed::empty);
   std::uint64_t nvsize = size;

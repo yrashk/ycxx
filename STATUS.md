@@ -557,7 +557,7 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
 - Not yet: `ycxx cxx` through the daemon by default (#120), `#include` (#65), optimization
   levels and the other common options (`-O` is rejected, #81).
 
-## x86-64 ELF objects and freestanding executables (2026-11-19)
+## x86-64 ELF objects and executables (2026-11-19)
 
 - `--target=x86_64-pc-linux-gnu` (also `x86_64-linux-gnu`) selects Linux preprocessing,
   layout and code generation. The in-process driver and daemon keep the target in the unit
@@ -584,8 +584,18 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   command-line order. When the program supplies an explicit `_start`, that symbol is the entry.
   Otherwise ycxx's startup calls `int main()` or `int main(int, char**)` and exits with the returned
   value. The link query checks a source function's ABI when an asm label gives it the symbol
-  `main`. A `main` supplied in an ELF object must already use one of those signatures. Hosted
-  linking and general-purpose ELF object interoperability remain unsupported.
+  `main`. A `main` supplied in an ELF object must already use one of those signatures.
+- `-nostdlib --dynamic-linker=/absolute/target/loader` with explicit shared objects writes a
+  fixed-address, sectionless `ET_EXEC`. Libraries need a slash-free `DT_SONAME` and a SysV
+  `DT_HASH`, and cannot have loader dependencies. The linker checks direct calls against their
+  default-visible, unversioned global functions. One RX thunk and one eager `R_X86_64_GLOB_DAT`
+  relocation in RW storage serve each imported name. The loader finds libraries by SONAME,
+  binds imported names, and runs provider initializers. Startup runs the executable's
+  initializers, calls `main`, and calls the loader's termination callback before exiting with
+  `main`'s result. The interpreter
+  path and ordered shared inputs, including provider content fingerprints, enter the `Link`
+  query. Target CRT selection, versioned imports and GNU-hash-only providers remain part of
+  [#390](https://github.com/yrashk/ycxx/issues/390).
 - ELF objects record namespace-scope initializer functions in `.init_array`, with 8-byte slots
   and `R_X86_64_64` relocations. The linker places arrays consecutively in input order and checks
   each slot resolves into executable input bytes. Generated startup calls the functions before
@@ -599,7 +609,10 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   `unit.linux_executable` (`tests/unit/pipeline/linux_executable.py`) runs
   source-only, object-only and mixed-input executables and checks exit status, `argc` and `argv`,
   diagnostics, and cold and daemon output. The linker and startup also have native CTest
-  coverage, including execution of an explicit `_start`.
+  coverage, including execution of an explicit `_start`. `unit.linux_dynamic` links and runs a
+  libc-free provider built by the host C compiler. It checks the ELF layout, argument passing,
+  runtime rebinding, initialization and finalization, and reproducibility and invalidation in
+  the daemon.
 
 ## The resident daemon (#96, #97, 2026-11-18)
 
@@ -1925,6 +1938,23 @@ values, end to end; results match Clang's bit for bit.
   its entity's from the function's entry, so a jump past its declaration finds it.
 - Not yet: inline functions' statics are per unit (#124); static references (#367).
 - Tests: `tests/own/static-locals/` (spec-only, 19 tests, a Clang peer in `mixed.run.cpp`).
+
+## Named `int` bit-fields (#307, 2026-11-19)
+
+- Ordinary unpacked, non-template classes without bases support named non-static `int` and
+  `unsigned int` bit-fields of width 1 through 32 ([class.bit]). The AST retains the width
+  in the declaration and member expressions. Sema and the back end share the target byte
+  and bit placement, including a signed 24-bit member followed by an ordinary byte.
+- In the native pipeline, field projections carry the record pointer and field index. Loads
+  sign-extend signed values and stores mask only the field's occupied bytes. Static aggregate
+  initialization uses the same layout. Width-aware integer promotions apply in built-in
+  arithmetic, shifts, and the other promotion contexts ([conv.prom]).
+- Remaining scope in #307 includes other declared types, unnamed fields, union variants,
+  templates, packed layout, default member initializers, reference binding, volatile access,
+  bit-field conditional glvalues, and constant evaluation of bit-field access. The preprocessor
+  still passes `#pragma pack` through for `-E`.
+- Tests cover widths and alignments on both targets, hard diagnostics, static data bytes and a
+  width edit in `unit.ast_types`, `unit.sema` and `unit.pipeline_incremental`.
 
 ## Range-based `for`, ι (#298, #337, 2026-11-19)
 

@@ -2761,6 +2761,12 @@ private:
         s_.diag(d.name_at, Diag::member_of_function_type, d.type);
         return bad();
       }
+      u8 bit_width = 0;
+      if (ps_.is(Tk::colon)) {
+        auto width = bit_field(spec, d, c.entity);
+        if (!width) return bad();
+        bit_width = *width;
+      }
       if (types.is_function(d.type) || spec.is_static) {
         if (it_->kind == ItemKind::class_def || p_->items().items[it_->parent].unnamed_type_ordinal != items::none) {
           s_.diag(d.name_at, Diag::not_supported, Tk::kw_union);
@@ -2770,9 +2776,9 @@ private:
         if (it_->kind == ItemKind::function) return;  // its body follows the declaration part
         continue;
       }
-      if (ps_.is(Tk::colon) || spec.is_inline || spec.is_constexpr || spec.is_consteval) {
-        // Bit-fields; inline or constexpr non-static data members are ill-formed.
-        s_.diag(ps_.is(Tk::colon) ? ps_.pos() : spec.begin, Diag::not_supported, ps_.is(Tk::colon) ? Tk::colon : Tk::kw_constexpr);
+      if (spec.is_inline || spec.is_constexpr || spec.is_consteval) {
+        // Inline or constexpr non-static data members are ill-formed.
+        s_.diag(spec.begin, Diag::not_supported, Tk::kw_constexpr);
         return bad();
       }
       // [dcl.spec.auto.general]: a non-static data member's type has no placeholder.
@@ -2795,6 +2801,7 @@ private:
       ast::DeclSema sem = class_decl(c.entity, false);
       sem.kind = ast::DeclKind::data_member;
       sem.type = d.type;
+      sem.bit_width = bit_width;
       sem.linkage = ast::Linkage::none;
       sem.flags = sema::decl_flag::definition;
       sem.entity = s_.world().entities.entity(
@@ -2824,6 +2831,46 @@ private:
       decls_.push_back(sem);
     } while (ps_.accept(Tk::comma));
     if (!ps_.expect(Tk::semi)) bad();
+  }
+
+  std::optional<u8> bit_field(const DeclSpec& spec, const parse::Declarator& d, EntityId owner) {
+    const items::Item& record = p_->items().items[it_->parent];
+    // The first slice covers a non-template record without bases or layout attributes.
+    auto attributed = [&](u32 begin, u32 end) {
+      const pp::Region& region = p_->region();
+      for (u32 i = begin; i < end; ++i) {
+        const auto token = region.tokens[i];
+        if (token.kind == Tk::kw_alignas ||
+            (token.kind == Tk::l_square && i + 1 < end && region.tokens[i + 1].kind == Tk::l_square) ||
+            (token.kind == Tk::identifier && region.name(token) == "__attribute__")) return true;
+      }
+      return false;
+    };
+    if (d.name_at != d.begin || d.template_args || member_template_ || spec.is_static || !q_.defining_bases(owner).empty() ||
+        p_->class_rec_is_union(it_->parent) || record.template_depth != 0 || record.specialization ||
+        sema::Types::cv(s_.types().canonical(d.type)) != sema::Cv::none ||
+        !(s_.types().is(d.type, sema::Builtin::int_) || s_.types().is(d.type, sema::Builtin::unsigned_int)) ||
+        attributed(record.begin, record.brace_begin) || attributed(it_->begin, ps_.index())) {
+      s_.diag(ps_.pos(), Diag::bit_field_declaration);
+      return std::nullopt;
+    }
+    ps_.bump();
+    u32 at = ps_.pos();
+    Ex e = s_.promote(ps_.constant_expression());
+    if (!e.ok()) return std::nullopt;
+    std::optional<ConstId> v;
+    if (s_.types().is_integral(e.type())) v = sema::Evaluator(s_, q_).evaluate(e).value;
+    auto& values = s_.world().values;
+    u64 width = v && values.rec(*v).kind == sema::ValueKind::integer ? values.rec(*v).bits : 0;
+    if (width == 0 || width > 32) {
+      s_.diag(at, Diag::bit_field_width);
+      return std::nullopt;
+    }
+    if (ps_.is(Tk::equal) || ps_.is(Tk::l_brace)) {
+      s_.diag(ps_.pos(), Diag::bit_field_initializer);
+      return std::nullopt;
+    }
+    return u8(width);
   }
 
   // A friend declaration in class `c` ([class.friend]): `friend class X;` or `friend X;`, a class
@@ -4275,7 +4322,7 @@ Program::ClassContent Program::class_content(u32 item, const std::function<const
       members.push_back({{id(m), ast::make_decl_ord(ast::DeclClass::syntactic, i)}, d.entity, access});
       if (d.kind == ast::DeclKind::data_member)
         fields.push_back({w_->entities.rec(d.entity).name, d.type, d.entity, inits.contains(i) ? inits[i] : ConstId::none,
-                        dmis_.contains(std::to_underlying(d.entity))});
+                        dmis_.contains(std::to_underlying(d.entity)), d.bit_width});
       else if (d.kind == ast::DeclKind::enum_ || d.kind == ast::DeclKind::type_alias)
         nested.push_back({w_->entities.rec(d.entity).name, d.type, d.entity});
       else if (d.kind == ast::DeclKind::function || d.kind == ast::DeclKind::variable) {

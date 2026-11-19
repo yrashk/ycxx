@@ -100,11 +100,11 @@ using std::uint32_t;
 using ast::NodeId;
 using ir::ValueId;
 
-// An object designated by an lvalue: a pointer to it and its type. Access paths are empty in the
-// α slice, where every object is a complete scalar or array object.
+// An lvalue designates an addressable object or a bit-field projected from its record pointer.
 struct Place {
   ValueId ptr{};
   ast::QualType type{};
+  std::optional<std::uint32_t> bit_field{};
 };
 
 // A node of the tree and its item-relative token offset (the red view's position, ast.md §3.5).
@@ -190,13 +190,27 @@ class Gen {
   ValueId load(const Place& p) {
     ir::Ty r[] = {vty(p.type)};
     ValueId ops[] = {state_, p.ptr};
+    if (p.bit_field) {
+      std::uint64_t imms[] = {*p.bit_field};
+      return b_.result(emit(ir::Op::bit_field_load, r, ops, imms));
+    }
     std::uint64_t imms[] = {word(ty(p.type)), 0};  // the type, then an empty path
     return b_.result(emit(ir::Op::load, r, ops, imms, access_flags(p.type)));
   }
   void store(const Place& p, ValueId v) {
     ValueId ops[] = {p.ptr, v};
+    if (p.bit_field) {
+      std::uint64_t imms[] = {*p.bit_field};
+      stateful(ir::Op::bit_field_store, {}, ops, imms);
+      return;
+    }
     std::uint64_t imms[] = {word(ty(p.type)), 0};
     stateful(ir::Op::store, {}, ops, imms, access_flags(p.type));
+  }
+  ValueId address(At a) {
+    Place p = lvalue(a);
+    if (p.bit_field) unsupported(a, "as an addressable object (a bit-field has no address)");
+    return p.ptr;
   }
 
   // ------------------------------------------------------------------ blocks
@@ -411,8 +425,9 @@ class Gen {
     // A destructor's members are destroyed after its body, on every way out ([class.dtor]/13).
     for (At m : epilogue_) {
       auto d = get<ast::DestroyMember>(m);
-      destroy(d.field == ~0u ? subobject({*this_, {}}, ir::Step::base, std::to_underlying(facts_.class_entity(d.type)), d.type)
-                             : subobject({*this_, {}}, ir::Step::field, d.field, d.type),
+      Place self{*this_, facts_.pointee(*fn_.this_type)};
+      destroy(d.field == ~0u ? subobject(self, ir::Step::base, std::to_underlying(facts_.class_entity(d.type)), d.type)
+                             : subobject(self, ir::Step::field, d.field, d.type),
               d.destructor);
     }
     std::vector<ValueId> ops{state_};
@@ -489,8 +504,9 @@ class Gen {
       auto m = get<ast::MemberInit>(a);
       if (!this_) unsupported(a, "outside a constructor");
       // A field of `~0u` is the base class subobject of type `type`.
-      Place p = m.field == ~0u ? subobject({*this_, {}}, ir::Step::base, std::to_underlying(facts_.class_entity(m.type)), m.type)
-                               : subobject({*this_, {}}, ir::Step::field, m.field, m.type);
+      Place self{*this_, facts_.pointee(*fn_.this_type)};
+      Place p = m.field == ~0u ? subobject(self, ir::Step::base, std::to_underlying(facts_.class_entity(m.type)), m.type)
+                               : subobject(self, ir::Step::field, m.field, m.type);
       full_expression([&] {
         initialize(p, child(a, m.init), false);
         return 0;
@@ -523,7 +539,7 @@ class Gen {
           return 0;
         });
       } else if (r.value.id != NodeId::none) {
-        v = full_expression([&] { return is_lvalue(value) ? std::optional(lvalue(value).ptr) : rvalue_or_void(value); });
+        v = full_expression([&] { return is_lvalue(value) ? std::optional(address(value)) : rvalue_or_void(value); });
       }
       ret_(v);
     } else if (is<ast::If>(a)) {
@@ -571,7 +587,7 @@ class Gen {
       // A reference is bound to the object its initializer designates ([dcl.init.ref]); a
       // temporary bound to it lives as long as it ([class.temporary]/6).
       if (!has_init) unsupported(a, "of reference type without an initializer");
-      slots_[v.local] = full_expression([&] { return Place{lvalue(child(a, v.init)).ptr, facts_.referee(rec.type)}; });
+      slots_[v.local] = full_expression([&] { return Place{address(child(a, v.init)), facts_.referee(rec.type)}; });
       return;
     }
     bool zeroed = has_init && value_initializes(child(a, v.init));
@@ -617,6 +633,8 @@ class Gen {
   // The subobject `index` of the object `p` points to: an array element or a non-static data
   // member of type `t` ([intro.object]).
   Place subobject(const Place& p, ir::Step step, uint32_t index, ast::QualType t) {
+    if (step == ir::Step::field && facts_.bit_field_width(facts_.class_entity(p.type), index) != 0)
+      return {p.ptr, t, index};
     std::uint64_t path[] = {1, ir::encode({step, index})};
     return {pure(ir::Op::ptr_member, facts_.pointer_to(t), {p.ptr}, {word(ty(t)), path[0], path[1]}), t};
   }
@@ -628,7 +646,7 @@ class Gen {
     if (is<ast::Paren>(e)) return initialize(p, child(e, get<ast::Paren>(e).operand), zeroed);
     if (is<ast::DefaultArg>(e)) return pinned([&] { initialize(p, child(e, get<ast::DefaultArg>(e).arg), zeroed); });
     if (facts_.is_reference(p.type)) {
-      store(p, lvalue(e).ptr);  // a reference member holds its object's address
+      store(p, address(e));  // a reference member holds its object's address
       return;
     }
     if (is<ast::Call>(e) && class_prvalue(info(e))) {
@@ -690,7 +708,7 @@ class Gen {
   }
 
   // An argument: a glvalue binds a reference parameter, so it passes its object's address.
-  ValueId argument(At a) { return is_lvalue(a) ? lvalue(a).ptr : rvalue(a); }
+  ValueId argument(At a) { return is_lvalue(a) ? address(a) : rvalue(a); }
 
   // A temporary ([class.temporary]): initialized from a prvalue, ended with the full-expression
   // or, when a reference it is bound to extends it, with that reference's scope.
@@ -1222,7 +1240,7 @@ class Gen {
 
   // `x + 1` or `x - 1` of `x`'s type, for `++` and `--` ([expr.pre.incr], [expr.post.incr]): the
   // arithmetic is done in the promoted type, so a narrow type wraps through the conversion back.
-  ValueId step(ast::QualType t, ValueId old, bool inc) {
+  ValueId step(ast::QualType t, ValueId old, bool inc, std::uint8_t bit_width) {
     if (cls(t) == TypeClass::pointer) {
       ValueId one = int_constant(facts_.int_type(), inc ? 1 : -1);
       return pure(ir::Op::ptr_add, t, {old, one}, {word(ty(facts_.pointee(t)))});
@@ -1230,7 +1248,7 @@ class Gen {
     if (cls(t) == TypeClass::floating)
       return pure(inc ? ir::Op::fadd : ir::Op::fsub, t, {old, float_constant(t, 1.0)});
     if (cls(t) != TypeClass::integer) throw Unsupported{"++ or -- of a non-integer type"};
-    ast::QualType p = facts_.promoted(t);
+    ast::QualType p = facts_.promoted(t, bit_width);
     ValueId v = same_type(p, t) ? old : pure(ir::Op::iconv, p, {old});
     ValueId r = arith(inc ? ast::BinaryOp::add : ast::BinaryOp::sub, p, v, int_constant(p, 1));
     return same_type(p, t) ? r : pure(ir::Op::iconv, t, {r});
@@ -1249,12 +1267,12 @@ class Gen {
       }
       case ast::UnaryOp::not_: return pure(ir::Op::xor_, t, {rvalue(o), int_constant(t, 1)});
       case ast::UnaryOp::compl_: return pure(ir::Op::xor_, t, {rvalue(o), int_constant(t, -1)});
-      case ast::UnaryOp::address_of: return lvalue(o).ptr;
+      case ast::UnaryOp::address_of: return address(o);
       case ast::UnaryOp::post_inc:
       case ast::UnaryOp::post_dec: {
         Place p = lvalue(o);
         ValueId old = load(p);
-        store(p, step(p.type, old, u.op == ast::UnaryOp::post_inc));
+        store(p, step(p.type, old, u.op == ast::UnaryOp::post_inc, info(o).bit_width));
         return old;
       }
       default: unsupported(a, "as a prvalue");
@@ -1506,7 +1524,7 @@ class Gen {
         discard(x);
         br(join);
       } else {
-        ValueId v = glvalue ? lvalue(x).ptr : rvalue(x);
+        ValueId v = glvalue ? address(x) : rvalue(x);
         br(join, {v});
       }
       --branches_;
@@ -1554,7 +1572,7 @@ class Gen {
       if (u.op == ast::UnaryOp::deref) return {rvalue(o), t};
       if (u.op == ast::UnaryOp::pre_inc || u.op == ast::UnaryOp::pre_dec) {
         Place p = lvalue(o);
-        store(p, step(p.type, load(p), u.op == ast::UnaryOp::pre_inc));
+        store(p, step(p.type, load(p), u.op == ast::UnaryOp::pre_inc, info(o).bit_width));
         return p;
       }
       unsupported(a, "as a glvalue");
@@ -1575,8 +1593,9 @@ class Gen {
       auto m = get<ast::Member>(a);
       At o = child(a, m.object);
       ValueId base = m.arrow ? rvalue(o) : lvalue(o).ptr;
-      if (!m.reference) return subobject({base, info(o).type}, ir::Step::field, m.field, t);
-      Place ref = subobject({base, info(o).type}, ir::Step::field, m.field, facts_.pointer_to(t));
+      auto owner = m.arrow ? facts_.pointee(info(o).type) : info(o).type;
+      if (!m.reference) return subobject({base, owner}, ir::Step::field, m.field, t);
+      Place ref = subobject({base, owner}, ir::Step::field, m.field, facts_.pointer_to(t));
       return {load(ref), t};
     }
     if (is<ast::Materialize>(a)) return materialize(a);

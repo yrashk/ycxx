@@ -1,4 +1,4 @@
-// Linking a program (#43) through ycxx's linkers. x86-64 Linux produces a static ELF executable.
+// Linking a program (#43) through ycxx's linkers. x86-64 Linux produces an ELF executable.
 // arm64 macOS links the objects and libSystem into a signed Mach-O executable. Imports are checked
 // against the export list of the SDK's `usr/lib/libSystem.B.tbd`. The SDK is `$SDKROOT`, else what
 // `xcrun --show-sdk-path` prints, else the Command Line Tools' SDK. The SDK is located and its
@@ -15,7 +15,7 @@ import std;
 import ycxx.ast;
 import ycxx.engine;
 export import ycxx.link;
-import ycxx.link.elf;
+export import ycxx.link.elf;
 import :back;
 
 export namespace ycxx::pipeline {
@@ -28,9 +28,9 @@ const std::optional<std::filesystem::path>& sdk_path();
 const link::dylib& libsystem();
 
 // The executable's bytes, or the linker's errors. `identifier` names the Mach-O code signature.
-// Linux objects define `_start` or use the pipeline's freestanding startup with `main`.
-std::expected<std::vector<std::uint8_t>, std::vector<link::error>> link_executable(std::span<const obj::object> objects,
-                                                                                   std::string identifier);
+// Linux uses the pipeline's startup with `main`, or a static executable can define `_start`.
+std::expected<std::vector<std::uint8_t>, std::vector<link::error>> link_executable(
+    std::span<const obj::object> objects, std::string identifier, const link::elf::dynamic_options* dynamic = nullptr);
 
 // Writes bytes to `path`, replacing a regular file or a symbolic link, and makes a new file
 // executable when `executable` is set; an error message on failure.
@@ -45,11 +45,13 @@ struct ProgramId {
 // A program in engine traces (#245): its output's name, once a session has named it.
 void trace_describe(std::string& out, ProgramId p);
 // What a program is linked from: translation units, in command-line order, then objects read from
-// files; `identifier` names the code signature.
+// files. Linux dynamic links carry their target interpreter and the ordered shared inputs.
+// `identifier` names the Mach-O code signature.
 struct ProgramInputs {
   std::vector<TuId> tus;
   std::vector<obj::object> objects;
   std::string identifier;
+  std::optional<link::elf::dynamic_options> dynamic = std::nullopt;
 };
 struct [[=engine::input{engine::Durability::low}]] ProgramIn {
   using Key = ProgramId;
@@ -144,7 +146,7 @@ bool has_valid_linux_main(const TranslationUnit& tu, ast::Interners& in) {
   return true;
 }
 
-obj::object linux_startup(std::int64_t init_array_size) {
+obj::object linux_startup(std::int64_t init_array_size, bool dynamic) {
   obj::object startup;
   startup.name = "<ycxx Linux startup>";
   startup.arch = obj::target::x86_64_linux;
@@ -159,6 +161,10 @@ obj::object linux_startup(std::int64_t init_array_size) {
   // The AMD64 psABI initial stack has 16-byte alignment, then argc and argv at offsets 0 and 8.
   // Leave %rsp in place so every call meets the System V function-entry alignment rule.
   code.emit(std::array<std::uint8_t, 2>{0x31, 0xed});  // xor ebp, ebp
+  if (dynamic) {
+    // The AMD64 psABI passes the loader's termination callback in RDX. Keep it across calls.
+    code.emit(std::array<std::uint8_t, 3>{0x49, 0x89, 0xd6});  // mov r14, rdx
+  }
   if (init_end) {
     // The table is contiguous and this object's empty .init_array marks its end. R12 and R13
     // are callee-saved, so callbacks preserve the cursor and end address.
@@ -179,17 +185,27 @@ obj::object linux_startup(std::int64_t init_array_size) {
       0x48, 0x8d, 0x74, 0x24, 8, // lea rsi, [rsp + 8]
       0xe8, 0, 0, 0, 0});       // call main
   code.relocate(obj::reloc_kind::x86_64_plt32, startup.reference("main"), -4);
-  code.emit(std::array<std::uint8_t, 9>{
-      0x89, 0xc7,        // mov edi, eax
-      0xb8, 60, 0, 0, 0, // mov eax, 60 (Linux exit)
-      0x0f, 0x05});      // syscall
+  if (dynamic) {
+    // The callback takes no arguments. Preserve main's result in a callee-saved register.
+    code.emit(std::array<std::uint8_t, 14>{
+        0x41, 0x89, 0xc4,  // mov r12d, eax
+        0x4d, 0x85, 0xf6,  // test r14, r14
+        0x74, 3,           // jz done
+        0x41, 0xff, 0xd6,  // call r14
+        0x44, 0x89, 0xe7}); // done: mov edi, r12d
+  } else {
+    code.emit(std::array<std::uint8_t, 2>{0x89, 0xc7});  // mov edi, eax
+  }
+  code.emit(std::array<std::uint8_t, 7>{
+      0xb8, 60, 0, 0, 0,  // mov eax, 60 (Linux exit)
+      0x0f, 0x05});       // syscall
   return startup;
 }
 
 std::expected<std::vector<std::uint8_t>, std::vector<link::error>> link_linux_executable(
-    std::span<const obj::object> objects) {
-  const auto link_elf = [](std::span<const obj::object> input, std::string_view entry) {
-    return link::elf::link(input, entry).transform_error([](std::string message) {
+    std::span<const obj::object> objects, const link::elf::dynamic_options* dynamic) {
+  const auto link_elf = [&](std::span<const obj::object> input, std::string_view entry) {
+    return link::elf::link(input, entry, dynamic).transform_error([](std::string message) {
       return std::vector<link::error>{{std::move(message)}};
     });
   };
@@ -217,6 +233,8 @@ std::expected<std::vector<std::uint8_t>, std::vector<link::error>> link_linux_ex
     }
   }
   if (custom_start) {
+    if (dynamic)
+      return std::unexpected(std::vector<link::error>{{"a custom '_start' is unsupported for dynamic ELF linking"}});
     if (init_array_size != 0)
       return std::unexpected(std::vector<link::error>{{"a custom '_start' with a nonempty ELF .init_array is unsupported"}});
     return link_elf(objects, "_start");
@@ -230,7 +248,7 @@ std::expected<std::vector<std::uint8_t>, std::vector<link::error>> link_linux_ex
 
   // The object model only describes the code symbol. The source caller checks main's type.
   std::vector<obj::object> with_startup(objects.begin(), objects.end());
-  with_startup.push_back(linux_startup(static_cast<std::int64_t>(init_array_size)));
+  with_startup.push_back(linux_startup(static_cast<std::int64_t>(init_array_size), dynamic != nullptr));
   return link_elf(with_startup, "_start");
 }
 
@@ -252,9 +270,10 @@ const std::optional<link::dylib>& libcxxabi() {
   return lib;
 }
 
-std::expected<std::vector<std::uint8_t>, std::vector<link::error>> link_executable(std::span<const obj::object> objects,
-                                                                                   std::string identifier) {
-  const auto target = objects.empty() ? obj::target::aarch64_macos : objects.front().arch;
+std::expected<std::vector<std::uint8_t>, std::vector<link::error>> link_executable(
+    std::span<const obj::object> objects, std::string identifier, const link::elf::dynamic_options* dynamic) {
+  const auto target = objects.empty() ? (dynamic ? obj::target::x86_64_linux : obj::target::aarch64_macos)
+                                      : objects.front().arch;
   for (const auto& object : objects) {
     if (object.arch != obj::target::aarch64_macos && object.arch != obj::target::x86_64_linux)
       return std::unexpected(std::vector<link::error>{{std::format("{}: unsupported executable object target", object.name)}});
@@ -262,7 +281,8 @@ std::expected<std::vector<std::uint8_t>, std::vector<link::error>> link_executab
       return std::unexpected(std::vector<link::error>{{
           std::format("{}: cannot mix arm64 Mach-O and x86-64 Linux objects", object.name)}});
   }
-  if (target == obj::target::x86_64_linux) return link_linux_executable(objects);
+  if (target == obj::target::x86_64_linux) return link_linux_executable(objects, dynamic);
+  if (dynamic) return std::unexpected(std::vector<link::error>{{"dynamic ELF options require x86-64 Linux objects"}});
 
   link::options opts;
   opts.dylibs = {libsystem()};
@@ -320,7 +340,7 @@ engine::query_task<Linked> Link::run(engine::Ctx& cx, ProgramId p) {
   }
   if (!out.errors.empty()) co_return out;
   objects.append_range(in.objects);
-  auto image = link_executable(objects, in.identifier);
+  auto image = link_executable(objects, in.identifier, in.dynamic ? &*in.dynamic : nullptr);
   if (!image) {
     for (const link::error& e : image.error()) out.errors.push_back(e.message);
     co_return out;

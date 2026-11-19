@@ -574,7 +574,10 @@ engine::query_task<FrontResult> TuFront::run(engine::Ctx& cx, TuId tu) {
   const sema::Classes& classes = program.classes();
   for (EntityId c : classes.classes()) {
     ClassShape& shape = out.shapes.classes.emplace_back(ClassShape{c, {}, {}});
-    for (const sema::FieldRec& f : classes.rec(c).fields) shape.fields.push_back(f.type);
+    const auto& fields = classes.rec(c).fields;
+    for (const sema::FieldRec& f : fields) shape.fields.push_back(f.type);
+    if (std::ranges::any_of(fields, [](const sema::FieldRec& f) { return f.bit_width != 0; }))
+      for (const sema::FieldRec& f : fields) shape.bit_widths.push_back(f.bit_width);
     shape.union_ = classes.rec(c).union_;
     shape.pod = classes.rec(c).pod;
     for (const sema::BaseRec& b : classes.rec(c).bases) shape.bases.push_back(b.cls);
