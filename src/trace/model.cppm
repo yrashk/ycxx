@@ -9,7 +9,7 @@ import ycxx.engine;
 export namespace ycxx::trace {
 
 using engine::Outcome;
-inline constexpr std::size_t outcome_count = 7;
+inline constexpr std::size_t outcome_count = 9;
 
 // An engine event as it crosses the daemon socket: times in nanoseconds since the trace began.
 struct Event {
@@ -43,6 +43,8 @@ constexpr std::string_view outcome_name(Outcome o) {
     case Outcome::reused: return "reused";
     case Outcome::durable: return "durable";
     case Outcome::input: return "input";
+    case Outcome::recomputed: return "recomputed";
+    case Outcome::waited: return "waited";
     case Outcome::failed: return "failed";
   }
   return "?";
@@ -55,7 +57,9 @@ constexpr std::string_view outcome_meaning(Outcome o) {
     case Outcome::verified: return "green after re-checking its dependencies";
     case Outcome::reused: return "green: already verified at this revision";
     case Outcome::durable: return "green: nothing as durable changed";
-    case Outcome::input: return "an input read";
+    case Outcome::input: return "an input read for the first time";
+    case Outcome::recomputed: return "computed privately: another frame owned it";
+    case Outcome::waited: return "another frame owned it: waited for it";
     case Outcome::failed: return "left without a value";
   }
   return "?";
@@ -69,12 +73,14 @@ constexpr std::string_view outcome_glyph(Outcome o, bool unicode) {
     case Outcome::reused: return unicode ? "○" : "=";
     case Outcome::durable: return unicode ? "◇" : "#";
     case Outcome::input: return unicode ? "·" : ".";
+    case Outcome::recomputed: return unicode ? "◆" : "%";
+    case Outcome::waited: return unicode ? "⧗" : "&";
     case Outcome::failed: return unicode ? "✗" : "!";
   }
   return "?";
 }
 // SGR parameters: executed red, cutoff yellow, verified green, reused bright green, durable
-// blue, inputs dim, failed bold magenta.
+// blue, inputs dim, recomputed bright red, waited cyan, failed bold magenta.
 constexpr std::string_view outcome_sgr(Outcome o) {
   switch (o) {
     case Outcome::executed: return "31";
@@ -83,6 +89,8 @@ constexpr std::string_view outcome_sgr(Outcome o) {
     case Outcome::reused: return "92";
     case Outcome::durable: return "34";
     case Outcome::input: return "90";
+    case Outcome::recomputed: return "91";
+    case Outcome::waited: return "36";
     case Outcome::failed: return "1;35";
   }
   return "0";

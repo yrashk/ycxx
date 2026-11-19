@@ -302,10 +302,12 @@ private:
   std::array<Stripe, stripes> stripes_{};
 };
 
-// What a request did with one cell, for its tracer (#245): the outcomes are `Stats`'s, seen one
-// cell at a time. `input` is an input read; `failed` a frame that left without publishing (an
-// internal error, or a stop).
-enum class Outcome : std::uint8_t { executed, cutoff, verified, reused, durable, input, failed };
+// What the engine did with one cell (#245): `Stats`'s counts, one cell at a time, through
+// `Db::note`. `cutoff` is an execution whose value did not change; `input` an input read for the
+// first time (counted nowhere; later reads are `reused`); `recomputed` a cheap cell computed
+// privately while another frame owned it; `waited` a fetch that found it owned and waited;
+// `failed` a frame that left without publishing (an internal error, or a stop; counted nowhere).
+enum class Outcome : std::uint8_t { executed, cutoff, verified, reused, durable, input, recomputed, waited, failed };
 
 // One event. Ids are unique in a Db and given in start order; `parent` is the event of the frame
 // that asked for the cell, 0 for the request's own. Times and workers are observations of the
@@ -462,6 +464,7 @@ inline constexpr std::uint32_t group_start = 0x80000000u;
 // started.
 struct Span {
   std::uint64_t id = 0;
+  std::uint64_t parent = 0;  // the event of the frame that asked for the cell
   std::chrono::steady_clock::time_point start;
   std::int32_t worker = -1;
 };
@@ -683,9 +686,9 @@ private:
   std::vector<std::uint32_t> busy_at_;  // the position in `cells_` of each link of the wait
   std::uint32_t error_at_ = ~0u;        // the held error's position; cells from it on are not settled
   std::exception_ptr error_;
-  // Traced requests only (#245): rounds after the first look again at cells this frame computed
-  // or claimed, which are not reuses; only cells another frame owned are traced then, by position
-  // in `waited_` (the first 64; past them, none). Plain words, so an untraced fetch pays nothing.
+  // Rounds after the first look again at cells this frame computed or claimed, which are not
+  // reuses: only cells another frame owned are noted then, by position in `waited_` (the first
+  // 64; past them, none).
   std::uint32_t round_ = 0;
   std::uint64_t waited_ = 0;
 };
@@ -973,7 +976,7 @@ private:
 
   // One step of `ensure_green` for a frame (§A1.5): ready, or busy because it is now claimed for a
   // new frame (pushed onto `children`) or owned by another frame.
-  // `quiet`: a traced request has seen this cell already (`Settle::waited_`).
+  // `quiet`: the requester has seen this cell already (`Settle::waited_`); nothing is noted.
   Settled try_settle(CellId c, Frame& requester, std::vector<std::coroutine_handle<>>& children, bool quiet = false);
   // `ensure_green` of an input or cheap cell on this stack (§A3.3): false if another frame owns it.
   // Re-entering a cell of the synchronous chain is a cycle (thrown as `query_cycle`).
@@ -993,9 +996,9 @@ private:
   void finish(Frame& f) noexcept;
   // After a successful claim: the waiter list becomes linkable (§A3.1).
   void reopen(Cell& e) noexcept;
-  // Returns whether the value changed (false: early cutoff).
+  // Notes the execution: `executed`, or `cutoff` when the value did not change.
   template <MemoQuery Q>
-  bool store(CellId c, typename Q::Value v, Frame& f);
+  void store(CellId c, typename Q::Value v, Frame& f);
   // Publishes `Done` at this revision and wakes every waiter.
   void publish(CellId c) noexcept;
   // Leaves a claimed cell without publishing: the word goes back to `restore` (Empty, or the old
@@ -1017,19 +1020,23 @@ private:
   void chaos_point() noexcept {
     if (pool_) pool_->chaos_point();
   }
-  // Counts into the Db's stripe, the request's counters and, when on, the cell's kind.
-  void count(Counter what, const Root* root, CellId c, std::uint64_t n = 1) noexcept;
+  // Every activity on a cell goes through `note` (#245): counted into the Db's stripe, the
+  // request's counters and, when on, the cell's kind (`Stats`), and given to the request's tracer
+  // as an event. `by` is the frame that asked: an instant event under its own; with `span`, the
+  // frame whose own work this ends. `direct` is a tracer for a request with no frame (a root
+  // `get` hit). The trace and `Stats` come from the same calls, so they cannot disagree.
+  void note(Outcome what, const Frame* by, CellId c, const Span* span = nullptr, Tracer* direct = nullptr) noexcept;
   void observe() noexcept { observed_.store(true, std::memory_order_relaxed); }
 
-  // Tracing (#245). Every hook first asks `tracer_of`, so an untraced request pays one load and
-  // a branch; what builds events is cold and out of line, so the hot paths stay small.
+  // Tracing (#245): a frame opens a span when its request is traced; what builds events is cold
+  // and out of line, so the hot paths stay small.
   static Tracer* tracer_of(const Frame* f) noexcept { return f && f->root ? f->root->tracer : nullptr; }
   // A cell's key as traces show it.
   std::string describe(CellId c) const;
   [[gnu::cold, gnu::noinline]] Span open_span() noexcept;
   std::int32_t worker_now() const noexcept;
   // Reports cell `c` to `t`: an instant, or the end of `span`'s work.
-  [[gnu::cold, gnu::noinline]] void trace(Tracer* t, std::uint64_t parent, CellId c, Outcome o, const Span* span = nullptr) noexcept;
+  [[gnu::cold, gnu::noinline]] void trace(Tracer* t, const Frame* by, CellId c, Outcome o, const Span* span) noexcept;
 
   Arena<Cell> cells_;
   mutable std::array<std::atomic<KindTableBase*>, max_kinds> tables_{};
@@ -1165,8 +1172,7 @@ public:
     const std::uint32_t at = record_self();
     if (loc_) frame_->demands.push_back({at, *loc_});
     if (!db_->is_current(cell_)) return false;
-    db_->count(Counter::hits, frame_->root, cell_);
-    if (Tracer* t = Db::tracer_of(frame_)) db_->trace(t, frame_->span.id, cell_, Outcome::reused);
+    db_->note(Outcome::reused, frame_, cell_);
     return true;
   }
   bool await_suspend(std::coroutine_handle<> h) noexcept {
@@ -1208,10 +1214,7 @@ public:
     for (CellId c : cells_) {
       if (!db_->is_current(c)) return false;
     }
-    for (CellId c : cells_) db_->count(Counter::hits, frame_->root, c);
-    if (Tracer* t = Db::tracer_of(frame_)) {
-      for (CellId c : cells_) db_->trace(t, frame_->span.id, c, Outcome::reused);
-    }
+    for (CellId c : cells_) db_->note(Outcome::reused, frame_, c);
     return true;
   }
   bool await_suspend(std::coroutine_handle<> h) noexcept {
@@ -1244,10 +1247,7 @@ public:
     for (CellId c : cells_) {
       if (!db_->is_current(c)) return false;
     }
-    for (CellId c : cells_) db_->count(Counter::hits, frame_->root, c);
-    if (Tracer* t = Db::tracer_of(frame_)) {
-      for (CellId c : cells_) db_->trace(t, frame_->span.id, c, Outcome::reused);
-    }
+    for (CellId c : cells_) db_->note(Outcome::reused, frame_, c);
     return true;
   }
   bool await_suspend(std::coroutine_handle<> h) noexcept {
@@ -1706,17 +1706,16 @@ std::coroutine_handle<> Settle::step() noexcept {
     busy_at_.clear();
     // Only the cells before a held error are settled: it is reported once they are verified.
     const auto limit = static_cast<std::uint32_t>(std::min<std::size_t>(cells_.size(), error_at_));
-    const bool traced = Db::tracer_of(frame_) != nullptr;
     std::uint64_t waited = 0;
     for (std::uint32_t i = 0; i < limit; ++i) {
       try {
         const std::size_t claimed = children.size();
         const std::uint64_t bit = i < 64 ? std::uint64_t{1} << i : 0;
-        const bool quiet = traced && round_ > 0 && !(waited_ & bit);
+        const bool quiet = round_ > 0 && !(waited_ & bit);
         if (db.try_settle(cells_[i], *frame_, children, quiet) == Db::Settled::busy) {
           busy.push_back(cells_[i]);
           busy_at_.push_back(i);
-          if (traced && children.size() == claimed) waited |= bit;
+          if (children.size() == claimed) waited |= bit;
         }
       } catch (...) {
         // A cheap cell failed on this stack (an exception from its query, or a cycle).
@@ -1823,21 +1822,18 @@ void Db::abort(CellId c, std::uint64_t restore, const std::exception_ptr& error)
 Db::Settled Db::try_settle(CellId c, Frame& requester, std::vector<std::coroutine_handle<>>& children, bool quiet) {
   Cell& e = cells_[c];
   if (e.input || e.cheap) return ensure_sync(c, &requester, quiet) ? Settled::ready : Settled::busy;
-  Tracer* const tracer = quiet ? nullptr : tracer_of(&requester);
   const Revision r = revision();
   std::uint64_t w = e.word.load(std::memory_order_acquire);
   while (true) {
     switch (state_of(w)) {
       case State::done: {
         if (verified_of(w) == r) {
-          count(Counter::hits, requester.root, c);
-          if (tracer) trace(tracer, requester.span.id, c, Outcome::reused);
+          if (!quiet) note(Outcome::reused, &requester, c);
           return Settled::ready;
         }
         if (durable(e, w)) {
           if (e.word.compare_exchange_weak(w, make_word(State::done, 0, r), std::memory_order_acq_rel, std::memory_order_acquire)) {
-            count(Counter::durable, requester.root, c);
-            if (tracer) trace(tracer, requester.span.id, c, Outcome::durable);
+            note(Outcome::durable, &requester, c);
             return Settled::ready;
           }
           continue;
@@ -1864,7 +1860,7 @@ Db::Settled Db::try_settle(CellId c, Frame& requester, std::vector<std::coroutin
       }
       case State::running:
       case State::validating:
-        count(Counter::contended, requester.root, c);
+        note(Outcome::waited, &requester, c);
         return Settled::busy;
     }
   }
@@ -1877,8 +1873,6 @@ Db::Settled Db::try_settle(CellId c, Frame& requester, std::vector<std::coroutin
 // this revision (§5.1).
 bool Db::ensure_input(CellId c, const Frame* chain, bool quiet) {
   Cell& e = cells_[c];
-  const Root* root = chain ? chain->root : nullptr;
-  Tracer* const tracer = quiet ? nullptr : tracer_of(chain);
   // A seq_cst load that finds the mark already set orders this read after it as well as a store
   // would, without every reader writing the cell's line.
   if (!e.observed.load(std::memory_order_seq_cst)) e.observed.store(true, std::memory_order_seq_cst);
@@ -1886,14 +1880,13 @@ bool Db::ensure_input(CellId c, const Frame* chain, bool quiet) {
   while (true) {
     switch (state_of(w)) {
       case State::done:
-        count(Counter::hits, root, c);
-        if (tracer) trace(tracer, chain->span.id, c, Outcome::input);
+        if (!quiet) note(Outcome::reused, chain, c);
         return true;
       case State::empty:
         if (!e.word.compare_exchange_strong(w, make_word(State::running, 0, 0), std::memory_order_seq_cst)) continue;
         reopen(e);
         tables_[e.kind].load(std::memory_order_acquire)->provide(*this, c);
-        if (tracer) trace(tracer, chain->span.id, c, Outcome::input);
+        if (!quiet) note(Outcome::input, chain, c);
         return true;
       case State::running:
       case State::validating:
@@ -1905,22 +1898,18 @@ bool Db::ensure_input(CellId c, const Frame* chain, bool quiet) {
 bool Db::ensure_sync(CellId c, const Frame* chain, bool quiet) {
   Cell& e = cells_[c];
   if (e.input) return ensure_input(c, chain, quiet);
-  const Root* root = chain ? chain->root : nullptr;
-  Tracer* const tracer = quiet ? nullptr : tracer_of(chain);
   const Revision r = revision();
   std::uint64_t w = e.word.load(std::memory_order_acquire);
   while (true) {
     switch (state_of(w)) {
       case State::done:
         if (verified_of(w) == r) {
-          count(Counter::hits, root, c);
-          if (tracer) trace(tracer, chain->span.id, c, Outcome::reused);
+          if (!quiet) note(Outcome::reused, chain, c);
           return true;
         }
         if (durable(e, w)) {
           if (e.word.compare_exchange_weak(w, make_word(State::done, 0, r), std::memory_order_acq_rel, std::memory_order_acquire)) {
-            count(Counter::durable, root, c);
-            if (tracer) trace(tracer, chain->span.id, c, Outcome::durable);
+            note(Outcome::durable, chain, c);
             return true;
           }
           continue;
@@ -1959,8 +1948,10 @@ void Db::validate_sync(CellId c, std::uint64_t old, const Frame* chain) {
   vf.root = chain ? chain->root : nullptr;
   vf.cell = c;
   vf.sync_parent = chain;
-  Tracer* const tracer = tracer_of(chain);
-  if (tracer) vf.span = open_span();
+  if (tracer_of(chain)) {
+    vf.span = open_span();
+    vf.span.parent = chain->span.id;
+  }
   const Revision since = verified_of(old);
   bool changed = false;
   Durability d = Durability::high;
@@ -1975,20 +1966,19 @@ void Db::validate_sync(CellId c, std::uint64_t old, const Frame* chain) {
       } while (k < e.deps.size() && !(e.deps[k] & group_start));
     }
   } catch (...) {
-    if (tracer) trace(tracer, chain->span.id, c, Outcome::failed, &vf.span);
+    note(Outcome::failed, &vf, c, &vf.span);
     abort(c, old, std::current_exception());
     throw;
   }
   if (!changed) {
     e.durability.store(d, std::memory_order_relaxed);
-    count(Counter::validated, vf.root, c);
-    if (tracer) trace(tracer, chain->span.id, c, Outcome::verified, &vf.span);
+    note(Outcome::verified, &vf, c, &vf.span);
     publish(c);
     return;
   }
   e.word.store(make_word(State::running, 0, since), std::memory_order_release);
   tables_[e.kind].load(std::memory_order_acquire)->execute_sync(*this, c, make_word(State::done, 0, since), chain,
-                                                                tracer ? &vf.span : nullptr);
+                                                                vf.span.id ? &vf.span : nullptr);
 }
 
 template <MemoQuery Q>
@@ -1999,19 +1989,20 @@ void Db::execute_sync(CellId c, std::uint64_t restore, const Frame* chain, const
     f.root = chain ? chain->root : nullptr;
     f.cell = c;
     f.sync_parent = chain;
-    Tracer* const tracer = tracer_of(chain);
-    if (tracer) f.span = span ? *span : open_span();
+    if (tracer_of(chain)) {
+      f.span = span ? *span : open_span();
+      f.span.parent = chain->span.id;
+    }
     std::optional<typename Q::Value> v;
     try {
       SyncCtx cx(*this, f);
       v.emplace(Q::run(cx, key_of<Q>(c)));
     } catch (...) {
-      if (tracer) trace(tracer, chain->span.id, c, Outcome::failed, &f.span);
+      note(Outcome::failed, &f, c, &f.span);
       abort(c, restore, std::current_exception());
       throw;
     }
-    const bool changed = store<Q>(c, std::move(*v), f);
-    if (tracer) trace(tracer, chain->span.id, c, changed ? Outcome::executed : Outcome::cutoff, &f.span);
+    store<Q>(c, std::move(*v), f);
     publish(c);
   } else {
     contract_assert(false);  // only cheap kinds run synchronously
@@ -2037,7 +2028,7 @@ typename Q::Value Db::fetch_cheap(CellId c, Frame& f) {
   const bool has_diags = !pf.diags.empty() || pf.deps_have_diags;
   f.durability = std::min(f.durability, pf.durability);
   f.deps_have_diags = f.deps_have_diags || has_diags;
-  count(Counter::recomputed, f.root, c);
+  note(Outcome::recomputed, &f, c);
   const Cell& e = cells_[c];
   const std::uint64_t w = e.word.load(std::memory_order_acquire);
   if (state_of(w) == State::done && verified_of(w) == revision()) {
@@ -2103,8 +2094,10 @@ frame_task Db::run_frame(Db& db, CellId c, std::uint32_t id, Root& root, bool va
   f.task = co_await own_handle{};
   // Opened when the frame first runs, not when it was queued; reported before `finish`, which may
   // end the request and its tracer with it.
-  Tracer* const tracer = root.tracer;
-  if (tracer) f.span = db.open_span();
+  if (root.tracer) {
+    f.span = db.open_span();
+    f.span.parent = parent;
+  }
   Cell& e = db.cells_[c];
   // The word to restore if the frame leaves without publishing: Empty, or the old Done (§A1.6).
   std::uint64_t restore = make_word(State::empty, 0, 0);
@@ -2124,7 +2117,7 @@ frame_task Db::run_frame(Db& db, CellId c, std::uint32_t id, Root& root, bool va
       } while (k < e.deps.size() && !(e.deps[k] & group_start));
       co_await settle_group(f, group);
       if (f.error || f.stopped) {
-        if (tracer) db.trace(tracer, parent, c, Outcome::failed, &f.span);
+        db.note(Outcome::failed, &f, c, &f.span);
         db.abort(c, restore, f.error);
         db.finish(f);
         co_return;
@@ -2141,8 +2134,7 @@ frame_task Db::run_frame(Db& db, CellId c, std::uint32_t id, Root& root, bool va
       // update, since lowering a dependency's durability takes a re-execution somewhere below it,
       // caused by an input change that also moved `last_changed_` at this cell's level.
       e.durability.store(d, std::memory_order_relaxed);
-      db.count(Counter::validated, &root, c);
-      if (tracer) db.trace(tracer, parent, c, Outcome::verified, &f.span);
+      db.note(Outcome::verified, &f, c, &f.span);
       db.publish(c);
       db.finish(f);
       co_return;
@@ -2168,8 +2160,7 @@ frame_task Db::run_frame(Db& db, CellId c, std::uint32_t id, Root& root, bool va
         if (body->h_.promise().error) {
           f.error = body->h_.promise().error;
         } else {
-          const bool changed = db.store<Q>(c, std::move(*body->h_.promise().value), f);
-          if (tracer) db.trace(tracer, parent, c, changed ? Outcome::executed : Outcome::cutoff, &f.span);
+          db.store<Q>(c, std::move(*body->h_.promise().value), f);
           db.publish(c);
           db.finish(f);
           co_return;
@@ -2177,7 +2168,7 @@ frame_task Db::run_frame(Db& db, CellId c, std::uint32_t id, Root& root, bool va
       }
     }
   }
-  if (tracer) db.trace(tracer, parent, c, Outcome::failed, &f.span);
+  db.note(Outcome::failed, &f, c, &f.span);
   db.abort(c, restore, f.error);
   db.finish(f);
 }
@@ -2205,7 +2196,7 @@ void KindTable<Q>::provide(Db& db, CellId c) {
 }
 
 template <MemoQuery Q>
-bool Db::store(CellId c, typename Q::Value v, Frame& f) {
+void Db::store(CellId c, typename Q::Value v, Frame& f) {
   Cell& e = cells_[c];
   contract_assert(e.state() == State::running);
   // `has_diags` is part of the fingerprint: when a dependency gains or loses diagnostics, this
@@ -2218,11 +2209,8 @@ bool Db::store(CellId c, typename Q::Value v, Frame& f) {
   hash_append(h, has_diags);
   const Fp128 fp = h.finish();
   ++e.runs;
-  count(Counter::executed, f.root, c);
   const bool changed = !(e.has_value && fp == e.fp);
-  if (!changed) {
-    count(Counter::backdated, f.root, c);  // early cutoff: `changed_at` stays
-  } else {
+  if (changed) {
     table<Q>().slots[e.slot].value = std::move(v);
     e.fp = fp;
     e.changed_at = revision();
@@ -2234,7 +2222,9 @@ bool Db::store(CellId c, typename Q::Value v, Frame& f) {
   e.durability.store(f.durability, std::memory_order_relaxed);
   e.has_diags = has_diags;
   contract_assert(e.changed_at <= revision());
-  return changed;
+  // Before `publish`: a waiter woken by it may finish its own frame, and a child's event must
+  // precede its parent's. Early cutoff (`cutoff`) leaves `changed_at` as it was.
+  note(changed ? Outcome::executed : Outcome::cutoff, &f, c, &f.span);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -2329,11 +2319,32 @@ void Db::drain() noexcept {
   }
 }
 
-void Db::count(Counter what, const Root* root, CellId c, std::uint64_t n) noexcept {
-  const std::size_t stripe = pool_ ? pool_->worker_index().value_or(pool_->size()) : 0;
-  stats_.add(what, n, stripe);
-  if (root && root->counters) root->counters->add(what, n, stripe);
-  if (per_kind_.load(std::memory_order_relaxed)) tables_[cells_[c].kind].load(std::memory_order_acquire)->counters.add(what, n, stripe);
+void Db::note(Outcome what, const Frame* by, CellId c, const Span* span, Tracer* direct) noexcept {
+  const Root* root = by ? by->root : nullptr;
+  // The counts of `Stats` each outcome makes; an execution that cut off early is both.
+  std::array<Counter, 2> counts{};
+  std::size_t n = 0;
+  switch (what) {
+    case Outcome::executed: counts[n++] = Counter::executed; break;
+    case Outcome::cutoff: counts[n++] = Counter::executed, counts[n++] = Counter::backdated; break;
+    case Outcome::verified: counts[n++] = Counter::validated; break;
+    case Outcome::reused: counts[n++] = Counter::hits; break;
+    case Outcome::durable: counts[n++] = Counter::durable; break;
+    case Outcome::recomputed: counts[n++] = Counter::recomputed; break;
+    case Outcome::waited: counts[n++] = Counter::contended; break;
+    case Outcome::input:
+    case Outcome::failed: break;
+  }
+  if (n > 0) {
+    const std::size_t stripe = pool_ ? pool_->worker_index().value_or(pool_->size()) : 0;
+    KindTableBase* kind = per_kind_.load(std::memory_order_relaxed) ? tables_[cells_[c].kind].load(std::memory_order_acquire) : nullptr;
+    for (std::size_t i = 0; i < n; ++i) {
+      stats_.add(counts[i], 1, stripe);
+      if (root && root->counters) root->counters->add(counts[i], 1, stripe);
+      if (kind) kind->counters.add(counts[i], 1, stripe);
+    }
+  }
+  if (Tracer* t = root ? root->tracer : direct) [[unlikely]] trace(t, by, c, what, span);
 }
 
 Span Db::open_span() noexcept {
@@ -2351,15 +2362,17 @@ std::int32_t Db::worker_now() const noexcept {
   return -1;
 }
 
-void Db::trace(Tracer* t, std::uint64_t parent, CellId c, Outcome o, const Span* span) noexcept {
-  const Span now = span ? Span{span->id, span->start, span->worker} : open_span();
+void Db::trace(Tracer* t, const Frame* by, CellId c, Outcome o, const Span* span) noexcept {
+  // With a span, the event of that frame's own work; else an instant under the asking frame's.
+  Span now = span ? *span : open_span();
+  if (!span) now.parent = by ? by->span.id : 0;
   const Cell& e = cells_[c];
   KindTableBase& table = *tables_[e.kind].load(std::memory_order_acquire);
   TraceEvent ev;
   ev.id = now.id;
-  ev.parent = parent;
+  ev.parent = now.parent;
   ev.kind = table.name;
-  ev.outcome = o;
+  ev.outcome = e.input && o == Outcome::reused ? Outcome::input : o;
   ev.start = now.start;
   ev.end = span ? std::chrono::steady_clock::now() : now.start;
   ev.worker = now.worker;
@@ -2666,10 +2679,8 @@ decltype(auto) Db::get(const typename Q::Key& k, Tracer* tracer) {
   if constexpr (InputKind<Q>) {
     // Marked and read as every input read is, so a racing reset either fails or is waited for.
     while (!ensure_input(c, nullptr)) std::this_thread::yield();
-    if (tracer) trace(tracer, 0, c, Outcome::input);
   } else if (is_current(c)) {
-    count(Counter::hits, nullptr, c);
-    if (tracer) trace(tracer, 0, c, Outcome::reused);
+    note(Outcome::reused, nullptr, c, nullptr, tracer);
   } else {
     Blocking b(*this, c, Priority::background);
     b.tracer = tracer;
