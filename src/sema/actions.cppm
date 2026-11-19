@@ -3186,6 +3186,10 @@ public:
 
   Ics ics(const Ex& a, QualType p) {
     if (!a.ok()) return {};
+    // An overload set converts to a pointer or reference to function when it names exactly one
+    // function of that type: an exact match ([over.ics.scs]/3, [over.over]).
+    if (auto f = address_target(p))
+      if (auto am = address_matches(a, *f)) return am->found.size() == 1 ? Ics{true, 0, 0} : Ics{};
     if (types().is_reference(p)) {
       TypeRec r = types().rec(p);
       QualType t = r.inner;
@@ -3494,6 +3498,10 @@ public:
       QualType t = types().referee(r);
       return dependent_node({e}, e.begin, e.end, types().is_dependent(t) ? std::nullopt : std::optional(t),
                             types().rec(r).rvalue_ref ? ValueCategory::xvalue : ValueCategory::lvalue);
+    }
+    if (auto f = address_target(r)) {  // a reference to function bound to an overload set ([over.over]/1)
+      if (auto o = overload_address(e, *f, at_)) e = *o;
+      if (!e.ok()) return e;
     }
     if (is_bound_member(e) || types().is(e.type(), Builtin::overload_set)) return rvalue(e);
     TypeRec rr = types().rec(r);
@@ -3973,6 +3981,95 @@ public:
     return node(ast::ImplicitConversion{info, k, EntityId::none, at(e, e.begin)}, e.begin, e.end, info);
   }
 
+  // The address of an overload set ([over.over]): the function type a target of type `to` takes,
+  // a pointer or a reference to function, or the function type itself.
+  std::optional<QualType> address_target(QualType to) {
+    QualType t = types().is_reference(to) ? types().referee(to) : Types::unqualified(to);
+    if (types().is_pointer(t)) t = types().pointee(t);
+    if (!types().is_function(t)) return std::nullopt;
+    return t;
+  }
+  // `f` or `&f` naming an overload set, for a target of function type `fn`: the function of that
+  // type, a non-template one before a template's specialization deduced from it
+  // ([over.over]/2–5, [temp.deduct.funcaddr]); none if `e` is not an overload set.
+  // The functions of type `fn` that the overload set `e` names (`f` or `&f`), after [over.over]/4
+  // removes specializations when there is another; none if `e` is not an overload set.
+  struct AddressMatch {
+    EntityId entity;
+    QualType type;
+    bool specialization;
+  };
+  struct AddressMatches {
+    Ex set;
+    bool address = false;
+    NameId name{};
+    std::vector<AddressMatch> found;
+  };
+  std::optional<AddressMatches> address_matches(Ex e, QualType fn) {
+    AddressMatches m;
+    m.set = e;
+    if (types().is_pointer(e.type()) && types().is(types().pointee(e.type()), Builtin::overload_set)) {
+      auto u = as<ast::Unary>(e);
+      if (!u) return std::nullopt;
+      m.set = Ex{u->operand.id, e.begin, e.end, ExprInfo{builtin(Builtin::overload_set), ValueCategory::lvalue, 0}};
+      m.address = true;
+    }
+    if (!m.set.ok() || !types().is(m.set.type(), Builtin::overload_set)) return std::nullopt;
+    auto it = overloads_.find(std::to_underlying(m.set.id));
+    if (it == overloads_.end()) return std::nullopt;
+    const std::vector<ast::DeclSema> decls = it->second;
+    auto ex = explicit_args_.find(std::to_underlying(m.set.id));
+    std::span<const TemplateArg> explicit_args;
+    if (ex != explicit_args_.end()) explicit_args = ex->second;
+    m.name = w_->entities.rec(decls.front().entity).name;
+    std::vector<AddressMatch>& found = m.found;
+    for (const ast::DeclSema& d : decls) {
+      if (!(d.flags & decl_flag::template_)) {
+        if (ex == explicit_args_.end() && types().canonical(d.type) == types().canonical(fn)) found.push_back({d.entity, d.type, false});
+        continue;
+      }
+      Templates t = templates();
+      auto targs = t.deduce_declaration(d, fn, explicit_args);
+      if (!targs) continue;
+      auto st = t.specialization_type(d, *targs);
+      if (!st) continue;
+      found.push_back({specialization(d, *targs, *st), *st, true});
+    }
+    // [over.over]/4: a function that is not a specialization is preferred.
+    if (std::ranges::any_of(found, [](const AddressMatch& a) { return !a.specialization; }))
+      std::erase_if(found, [](const AddressMatch& a) { return a.specialization; });
+    return m;
+  }
+  std::optional<Ex> overload_address(Ex e, QualType fn, u32 at_) {
+    auto am = address_matches(e, fn);
+    if (!am) return std::nullopt;
+    const Ex& set = am->set;
+    const bool address = am->address;
+    const NameId name = am->name;
+    const std::vector<AddressMatch>& found = am->found;
+    if (found.empty()) {
+      diag(at_, Diag::overload_address_none, name, fn);
+      return Ex{NodeId::none, e.begin, e.end};
+    }
+    if (found.size() > 1) {
+      diag(at_, Diag::overload_address_ambiguous, name);
+      return Ex{NodeId::none, e.begin, e.end};
+    }
+    const AddressMatch& m = found.front();
+    // A specialization whose address is taken is one whose definition the program requires
+    // ([temp.inst]/8).
+    if (m.specialization) demands.push_back({m.entity, ast::Loc{item_, loc_base_ + set.begin}});
+    if (deleted_.contains(std::to_underlying(m.entity))) {
+      diag(set.begin, Diag::deleted_function, name);
+      return Ex{NodeId::none, e.begin, e.end};
+    }
+    ExprInfo info{m.type, ValueCategory::lvalue, 0};
+    Ex r = node(ast::DeclRef{info, m.entity}, set.begin, set.end, info);
+    if (!address) return r;
+    ExprInfo pi{types().pointer(m.type), ValueCategory::prvalue, 0};
+    return node(ast::Unary{pi, ast::UnaryOp::address_of, at(r, e.begin)}, e.begin, e.end, pi);
+  }
+
   // The conversions every operand that needs a prvalue gets ([basic.lval], [conv.lval],
   // [conv.array], [conv.func]).
   Ex rvalue(Ex e) {
@@ -4084,6 +4181,10 @@ public:
       if (types().is_reference(to)) return bind_reference(e, to, at_);
       return dependent_node({e}, e.begin, e.end, types().is_dependent(to) ? std::nullopt : std::optional(Types::unqualified(to)));
     }
+    if (auto f = address_target(to)) {
+      if (auto r = overload_address(e, *f, at_)) e = *r;
+      if (!e.ok()) return e;
+    }
     QualType target = Types::unqualified(to);
     if (auto inv = closure_invoker(e.type(), target)) return invoker_pointer(e, *inv);
     if (types().is_array(target)) {
@@ -4166,6 +4267,10 @@ public:
     if (!e.ok()) return e;
     if (dependent(e) || types().is_dependent(to))
       return dependent_node({e}, e.begin, e.end, types().is_dependent(to) ? std::nullopt : std::optional(Types::unqualified(to)));
+    if (auto f = address_target(to)) {  // [over.over]/1: a cast's target type
+      if (auto r = overload_address(e, *f, at_)) e = *r;
+      if (!e.ok()) return e;
+    }
     QualType target = Types::unqualified(to);
     if (types().is_void(target)) return convert_node(e, ast::ConversionKind::to_void, target);  // /6
     if (types().is_reference(to) || types().is_class(target) || types().is_array(target)) return convert(e, to, at_);
