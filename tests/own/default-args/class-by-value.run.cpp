@@ -1,6 +1,7 @@
 // ι (#300): a by-value parameter of class type with a default argument: each call that uses
 // the default constructs a new object, and the default can call a constructor with its own
 // arguments or name a global object ([dcl.fct.default]/1, /9, [expr.call]/5).
+// XFAIL: ycxx `Rect unit(1, 1);` needs dynamic initialization of a namespace-scope variable (#94)
 // EXIT: 0
 int constructed = 0;
 

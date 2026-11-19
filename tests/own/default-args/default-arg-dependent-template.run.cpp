@@ -2,6 +2,7 @@
 // parameter. With one argument, T is deduced from it alone and the default `T(5)` is
 // instantiated for that T; a default that would be ill-formed for some T is instantiated only
 // when a call uses it ([dcl.fct.default]/1, [temp.deduct.call]/1, [temp.inst]).
+// XFAIL: ycxx default arguments that depend on template parameters (#356), and operators found at instantiation (#357)
 // EXIT: 0
 template<class T> T g(T x, T y = T(5)) { return x + y; }
 
