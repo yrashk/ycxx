@@ -41,6 +41,10 @@ struct BuiltinLayout {
   FloatFormat format = FloatFormat::none;
 };
 
+// What `__builtin_va_list` names (docs/EXTENSIONS.md): `char*` in Apple's arm64 ABI; the System
+// V x86-64 ABI's `__va_list_tag[1]`, which ycxx does not have yet.
+enum class VaList : u8 { char_pointer, sysv_x86_64 };
+
 // When a class is trivially copyable for the purposes of calls, so that it passes in registers
 // (DECISIONS §1.6). `itanium`: [class.temporary]/3 and the Itanium C++ ABI, as GCC and upstream
 // Clang have it, the default everywhere. `apple`: as Apple Clang has it on arm64 Darwin, a trivial
@@ -59,6 +63,7 @@ struct Target {
   Builtin char32_underlying;  // uint_least32_t
   Builtin size_type;
   Builtin ptrdiff_type;
+  VaList va_list;
   CallTriviality call_triviality;  // the default
   bool apple_calls;                 // whether `-fclass-call-abi=apple` is offered
 
@@ -115,6 +120,7 @@ inline constexpr Target aarch64_darwin{
     .char32_underlying = Builtin::unsigned_int,
     .size_type = Builtin::unsigned_long,
     .ptrdiff_type = Builtin::long_,
+    .va_list = VaList::char_pointer,
     .call_triviality = CallTriviality::itanium,
     .apple_calls = true,
 };
@@ -132,6 +138,7 @@ inline constexpr Target x86_64_linux{
     .char32_underlying = Builtin::unsigned_int,
     .size_type = Builtin::unsigned_long,
     .ptrdiff_type = Builtin::long_,
+    .va_list = VaList::sysv_x86_64,
     .call_triviality = CallTriviality::itanium,
     .apple_calls = false,
 };

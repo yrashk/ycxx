@@ -108,8 +108,13 @@ reports key on it. Its kind comes from its suffix:
 **Error markers:** `//! error` expects an error on its own line, `//! error@+1` / `@-2` on a
 relative line, `@12` on line 12; `:5` adds a column (`//! error@+1:5`). Every expected location
 must get an error and every error must be expected. Markers in a header the test includes with
-`#include "..."` expect errors in that header. Locations are parsed from
+`#include "..."`, or with `#include <...>` from an `-I` or `-isystem` directory of its `FLAGS`,
+expect errors in that header. Locations are parsed from
 `file:line:col: error:` lines. A crash (a signal, or an exit status above 1) is never a rejection. Leave the column out where Clang and GCC disagree on it.
+
+**Warning markers:** `//! warning`, with the same `@` and `:` forms, expects a warning. An accept
+or reject test with any warning marker must get warnings exactly at its warning markers, from
+`file:line:col: warning:` lines; a test without one does not look at warnings.
 
 **Directives** (`// KEY: value` lines):
 

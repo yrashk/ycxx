@@ -66,9 +66,9 @@ function body, through the daemon, without unsaved text ever reaching a build.
 
 ### Not yet
 
-- The standard library and its headers. C headers such as `<stdio.h>` compile and `printf` runs;
-  libycxx's `<cstdio>` still needs static members of class templates, template template
-  parameters and pointer-to-member types.
+- The standard library and its headers. C headers such as `<stdio.h>` compile without warnings
+  and `printf` runs; libycxx's `<cstdio>` still needs static members of class templates, template
+  template parameters and pointer-to-member types.
 - Inheritance and virtual functions, `sizeof` of a class.
 - Access control: `private` and `protected` are not checked yet, so ycxx accepts code that
   uses private members ([#119](https://github.com/yrashk/ycxx/issues/119)).

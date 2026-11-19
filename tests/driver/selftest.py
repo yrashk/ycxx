@@ -48,6 +48,9 @@ class Parts(unittest.TestCase):
     def test_markers(self):
         text = 'a //! error\n//! error@+1:5\nb\nc //! error@1 //! error@-1:2\n'
         self.assertEqual(discover.markers_in(text), [(1, None), (3, 5), (1, None), (3, 2)])
+        text = 'a //! warning\n//! error@+1 //! warning@+2:3\n'
+        self.assertEqual(discover.markers_in(text), [(3, None)])
+        self.assertEqual(discover.markers_in(text, 'warning'), [(1, None), (4, 3)])
 
     def test_incremental_format(self):
         states = incremental.parse('// h\n--- a.cpp\nx\n--- b.h\ny\n=== edit\n--- b.h\nz\n=== edit\n--- delete b.h\n')
