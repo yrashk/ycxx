@@ -232,6 +232,32 @@ void loop_edge() {
   check(code && code.function<long(long, long)>()(12, 34) == 3412, "a backedge swaps block arguments in parallel");
 }
 
+void direct_ellipsis() {
+  using enum l2::Type;
+  using l2::Op;
+  for (std::uint64_t ellipsis : {0, 1}) {
+    l2::Builder b;
+    const l2::Type params[] = {state, i32};
+    auto entry = b.begin_block(params);
+    const l2::Type results[] = {state, i32};
+    const ir::ValueId call[] = {b.param(entry, 0), b.param(entry, 1)};
+    const std::uint64_t imms[] = {7, 0, ellipsis, 0};
+    auto n = b.emit(Op::call, results, call, imms);
+    const ir::ValueId ret[] = {b.peek().result(n), b.peek().result(n, 1)};
+    b.emit(Op::ret, {}, ret);
+    auto machine = x64::compile_function(b.finish({i32}));
+    check(machine.has_value(), machine ? "compile a direct call" : machine.error());
+    if (!machine) continue;
+    check(machine->relocs.size() == 1, "direct call has one relocation");
+    if (machine->relocs.size() != 1) continue;
+    auto offset = machine->relocs.front().offset;
+    constexpr std::uint8_t prefix[] = {0x31, 0xc0, 0xe8};  // xor eax, eax followed by call rel32
+    check(offset >= std::size(prefix) && offset <= machine->bytes.size() &&
+          std::ranges::equal(std::span(machine->bytes).first(offset).last(std::size(prefix)), prefix),
+          std::format("clear EAX just before the direct call with {} ellipsis arguments", ellipsis));
+  }
+}
+
 void rejection() {
   using enum l2::Type;
   using l2::Op;
@@ -250,15 +276,15 @@ void rejection() {
   }
   {
     l2::Builder b;
-    const l2::Type params[] = {state, i32};
+    const l2::Type params[] = {state, ptr, i32};
     auto entry = b.begin_block(params);
     const l2::Type results[] = {state, i32};
-    ir::ValueId call[] = {b.param(entry, 0), b.param(entry, 1)};
-    const std::uint64_t imms[] = {7, 0, 1, 0};
-    auto n = b.emit(Op::call, results, call, imms);
+    const ir::ValueId call[] = {b.param(entry, 0), b.param(entry, 1), b.param(entry, 2)};
+    const std::uint64_t imms[] = {0, 1, 0};
+    auto n = b.emit(Op::call_ind, results, call, imms);
     ir::ValueId ret[] = {b.peek().result(n), b.peek().result(n, 1)};
     b.emit(Op::ret, {}, ret);
-    expect_error(b.finish({i32}), "variadic calls");
+    expect_error(b.finish({i32}), "indirect variadic calls");
   }
   {
     l2::Builder b;
@@ -289,6 +315,7 @@ int main() {
   source();
   integer_division();
   loop_edge();
+  direct_ellipsis();
   rejection();
   return ycxx::unit::result("x86_64");
 }
