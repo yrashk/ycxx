@@ -384,9 +384,11 @@ engine::query_task<FrontResult> TuFront::run(engine::Ctx& cx, TuId tu) {
   // The unit's own records of its classes and enumerations (#115).
   const sema::Classes& classes = program.classes();
   for (EntityId c : classes.classes()) {
-    ClassShape& shape = out.shapes.classes.emplace_back(ClassShape{c, {}});
+    ClassShape& shape = out.shapes.classes.emplace_back(ClassShape{c, {}, {}});
     for (const sema::FieldRec& f : classes.rec(c).fields) shape.fields.push_back(f.type);
     shape.union_ = classes.rec(c).union_;
+    shape.pod = classes.rec(c).pod;
+    for (const sema::BaseRec& b : classes.rec(c).bases) shape.bases.push_back(b.cls);
     shape.trivial_calls = classes.trivial_for_calls(c, unit_source.config.calls());
   }
   for (EntityId e : classes.enums()) out.shapes.enums.push_back({e, classes.underlying(e)});

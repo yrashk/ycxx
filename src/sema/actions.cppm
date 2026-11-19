@@ -905,6 +905,17 @@ public:
       diag(name_at, Diag::no_member, name, Types::unqualified(ct));
       return fail;
     }
+    if (found->ambiguous) {
+      diag(name_at, Diag::ambiguous_member, name, Types::unqualified(ct));
+      return fail;
+    }
+    // A member of a base: named through the base class subobject ([class.member.lookup]).
+    if (found->owner != c) {
+      object = to_base(object, found->owner, name_at);
+      if (!object.ok()) return fail;
+      ct = arrow ? types().pointee(object.type()) : object.type();
+      c = found->owner;
+    }
     if (found->member && found->member->is_function) return bound_member(c, name, object, arrow, begin, end, name_at);
     if (!check_access(c, found->member ? found->member->entity : found->field->entity, name, name_at)) return fail;
     if (found->member) {
@@ -967,6 +978,8 @@ public:
     if (tr.kind == TypeKind::array) {
       r.assign(tr.bound, Element{tr.inner, no_name()});
     } else if (const ClassRec* c = tr.kind == TypeKind::class_ ? class_rec(tr.entity) : nullptr) {
+      // [dcl.init.aggr]/2: the direct bases in declaration order, then the members.
+      for (const BaseRec& b : c->bases) r.push_back({types().add_cv(types().class_type(b.cls), Types::cv(t)), no_name()});
       for (const FieldRec& f : c->fields) {
         r.push_back({types().add_cv(f.type, Types::cv(t)), f.name, f.init, f.dmi});
         if (c->union_) break;  // [dcl.init.aggr]/16: a union's list initializes its first member
@@ -986,9 +999,12 @@ public:
     if (r.kind == TypeKind::array) return has_member_inits(r.inner);
     if (r.kind != TypeKind::class_) return false;
     if (const ClassRec* c = class_rec(r.entity); c && c->user_ctors) return true;
-    if (const ClassRec* c = class_rec(r.entity))
+    if (const ClassRec* c = class_rec(r.entity)) {
+      for (const BaseRec& b : c->bases)
+        if (has_member_inits(types().class_type(b.cls))) return true;
       for (const FieldRec& f : c->fields)
         if (f.init != ConstId::none || f.dmi || has_member_inits(f.type)) return true;
+    }
     return false;
   }
 
@@ -1669,9 +1685,10 @@ public:
   EntityId current_function = EntityId::none;
 
   // [class.access]/1–2: whether a member of class `c` with access `a` can be named here. A public
-  // one anywhere; a private or protected one (no base classes yet) in a member of `c` or of a
-  // class nested in it ([class.access.nest]), or in a friend of `c`: a function, or a class whose
-  // members are then all friends ([class.friend]/2).
+  // one anywhere; a private or protected one in a member of `c` or of a class nested in it
+  // ([class.access.nest]), or in a friend of `c`: a function, or a class whose members are then
+  // all friends ([class.friend]/2); a protected one also in a member or friend of a class derived
+  // from `c` ([class.protected], without its restriction on the object expression yet).
   bool accessible(EntityId c, ast::Access a) {
     if (a == ast::Access::public_ || a == ast::Access::none) return true;
     const ClassRec* cr = class_rec(c);
@@ -1682,6 +1699,8 @@ public:
       const EntityRec& r = w_->entities.rec(k);
       if (r.kind != EntityKind::class_ && r.kind != EntityKind::class_template) break;
       if (k == c || befriended(k)) return true;
+      int paths = 0;
+      if (a == ast::Access::protected_ && base_path(k, c, paths)) return true;
     }
     return false;
   }
@@ -1704,21 +1723,37 @@ public:
     return node(ast::This{info}, begin, end, info);
   }
 
-  // A member of class `c` named `name` ([class.member.lookup], one class, no bases yet): a
-  // non-static data member, or a member function or static data member.
+  // A member of class `c` named `name` ([class.member.lookup]): a non-static data member, or a
+  // member function or static data member, of `c` or else of its bases (`owner` declares it).
+  // Found in more than one base subobject it is `ambiguous`, unless it is one static member.
   struct Found {
     const FieldRec* field = nullptr;
     u32 index = 0;
     const MemberDeclRec* member = nullptr;
+    EntityId owner = EntityId::none;
+    bool ambiguous = false;
+    EntityId entity() const { return field ? field->entity : member->entity; }
   };
   std::optional<Found> find_member(EntityId c, NameId name) {
     const ClassRec* cr = class_rec(c);
     if (!cr) return std::nullopt;
     for (u32 i = 0; i < cr->fields.size(); ++i)
-      if (cr->fields[i].name == name) return Found{&cr->fields[i], i, nullptr};
+      if (cr->fields[i].name == name) return Found{&cr->fields[i], i, nullptr, c};
     for (const MemberDeclRec& m : cr->members)
-      if (m.name == name && !m.is_ctor && !m.is_dtor) return Found{nullptr, 0, &m};
-    return std::nullopt;
+      if (m.name == name && !m.is_ctor && !m.is_dtor) return Found{nullptr, 0, &m, c};
+    std::optional<Found> r;
+    for (const BaseRec& b : cr->bases) {
+      auto f = find_member(b.cls, name);
+      if (!f) continue;
+      if (f->ambiguous) return f;
+      if (!r) {
+        r = f;
+      } else if (r->entity() != f->entity() || !r->member || !r->member->is_static) {
+        r->ambiguous = true;
+        return r;
+      }
+    }
+    return r;
   }
   // The member functions of `c` named `name`: an overload set ([over.match.funcs]).
   std::vector<const MemberDeclRec*> member_functions(EntityId c, NameId name) {
@@ -1765,7 +1800,19 @@ public:
       return std::nullopt;
     }
     Ex fail{NodeId::none, begin, end};
-    bool has_this = this_type && current_class == c;
+    if (f->ambiguous) {
+      diag(name_at, Diag::ambiguous_member, name, types().class_type(c));
+      return fail;
+    }
+    // `this` names the member when the class is the current class or one of its bases.
+    bool has_this = this_type && current_class != EntityId::none &&
+                    (current_class == f->owner || base_depth(types().class_type(current_class), types().class_type(f->owner)));
+    // The current object as the class that declares the member.
+    auto self_of = [&]() {
+      Ex self = this_expr(begin, begin);
+      return f->owner == current_class ? self : to_base(self, f->owner, name_at);
+    };
+    c = f->owner;
     if (!(f->member && f->member->is_function) && !check_access(c, f->field ? f->field->entity : f->member->entity, name, name_at))
       return fail;
     if (f->field) {
@@ -1773,7 +1820,8 @@ public:
         diag(begin, Diag::member_without_object, name);
         return fail;
       }
-      Ex self = this_expr(begin, begin);
+      Ex self = self_of();
+      if (!self.ok()) return fail;
       bool ref = types().is_reference(f->field->type);
       QualType t = ref ? types().referee(f->field->type) : types().add_cv(f->field->type, Types::cv(types().pointee(*this_type)));
       ExprInfo info{t, ValueCategory::lvalue, 0};
@@ -1789,7 +1837,10 @@ public:
       return node(ast::DeclRef{info, m.entity}, begin, end, info);
     }
     std::optional<Ex> object;
-    if (has_this) object = this_expr(begin, begin);
+    if (has_this) {
+      object = self_of();
+      if (!object->ok()) return fail;
+    }
     return bound_member(c, name, object, true, begin, end, name_at);
   }
 
@@ -1917,8 +1968,10 @@ public:
     bool rvalue_ref = false;  // binding an rvalue reference
     bool to_rvalue = false;   // to an rvalue
     int ref_cv = 0;           // the cv-qualifiers the referred-to type adds
+    int base_depth = 0;       // a derived-to-base conversion's distance ([over.ics.rank]/4.4)
     bool operator<(const Ics& o) const {
       if (rank != o.rank) return rank < o.rank;
+      if (base_depth && o.base_depth && base_depth != o.base_depth) return base_depth < o.base_depth;
       if (ref && o.ref) {
         if (to_rvalue && o.to_rvalue && rvalue_ref != o.rvalue_ref) return rvalue_ref;  // /3.2.3
         return ref_cv < o.ref_cv;                                                         // /3.2.6
@@ -1970,6 +2023,13 @@ public:
       if (direct_cat && same_unqualified(a.type(), t) && cv_within(object_cv(a.type()), object_cv(t)))
         return binding({true, 0, 0}, r.rvalue_ref, a.cat() != ValueCategory::lvalue,
                        cv_bits(object_cv(t)) - cv_bits(object_cv(a.type())));
+      // [over.ics.ref]/1: binding to a base class subobject is a derived-to-base Conversion.
+      if (int d = base_depth(a.type(), t); d && (direct_cat || (a.glvalue() && (r.rvalue_ref || object_cv(t) == Cv::const_))) &&
+                                             cv_within(object_cv(a.type()), object_cv(t))) {
+        Ics v = binding({true, 2, 0}, r.rvalue_ref, a.cat() != ValueCategory::lvalue, cv_bits(object_cv(t)) - cv_bits(object_cv(a.type())));
+        v.base_depth = d;
+        return v;
+      }
       bool const_ref = object_cv(t) == Cv::const_;
       if (!r.rvalue_ref && !const_ref) return {};
       if (r.rvalue_ref && a.cat() == ValueCategory::lvalue) return {};
@@ -1980,6 +2040,12 @@ public:
     QualType to = Types::unqualified(p);
     if (types().is_class(to)) {
       if (initializes(to, a)) return {true, 0, 0};
+      // [over.best.ics]/6: a base class object copied from a derived class's, a Conversion.
+      if (int d = base_depth(a.type(), to)) {
+        Ics v{true, 2, 0};
+        v.base_depth = d;
+        return v;
+      }
       return {};
     }
     if (types().is_pointer(to) && is_null_pointer_constant(a)) return {true, 2, 0};
@@ -2006,6 +2072,12 @@ public:
     if (types().is_pointer(from) && types().is_pointer(to))
     {
       if (qualification_convertible(from, to)) return {true, 0, 1};
+      if (int d = base_depth(types().pointee(from), types().pointee(to));
+          d && cv_within(Types::cv(types().pointee(from)), Types::cv(types().pointee(to)))) {
+        Ics v{true, 2, 0};
+        v.base_depth = d;
+        return v;
+      }
       return pointer_convertible(from, to) ? Ics{true, 2, 0} : Ics{};
     }
     if (types().is(to, Builtin::bool_) && (types().is_arithmetic(from) || types().is_pointer(from))) return {true, 2, 0};
@@ -2234,6 +2306,20 @@ public:
       if (cv_within(object_cv(e.type()), object_cv(t))) return extend ? extended(e) : e;
       diag(at_, Diag::bind_drops_qualifiers, e.type(), r);
       return fail;
+    }
+    // [dcl.init.ref]/5.1, 5.3: to the base class subobject of a glvalue of a derived class.
+    if (e.glvalue() && types().is_class(e.type()) && types().is_class(t) && !same_unqualified(e.type(), t) &&
+        (direct_cat || rr.rvalue_ref || object_cv(t) == Cv::const_) &&
+        !(rr.rvalue_ref && e.cat() == ValueCategory::lvalue)) {
+      int paths = 0;
+      if (is_complete(e.type()) && base_path(types().class_of(e.type()), types().class_of(t), paths)) {
+        if (!cv_within(object_cv(e.type()), object_cv(t))) {
+          diag(at_, Diag::bind_drops_qualifiers, e.type(), r);
+          return fail;
+        }
+        Ex b = to_base(e, types().class_of(t), at_);
+        return b.ok() && extend ? extended(b) : b;
+      }
     }
     bool const_ref = object_cv(t) == Cv::const_;
     if (!rr.rvalue_ref && !const_ref) {
@@ -2704,6 +2790,14 @@ public:
       if (cr && (cr->user_ctors || cr->copy_ctor != EntityId::none || cr->copy_deleted))
         return construct(target, {e}, e.begin, e.end, false, true);
       if (!initializes(target, e)) {
+        // A base class object copied from a derived class's ([dcl.init.general]/17.6.2): from its
+        // base class subobject.
+        if (base_depth(e.type(), target)) {
+          if (!e.glvalue()) e = materialize(e, Types::unqualified(e.type()), false);
+          Ex b = to_base(e, types().class_of(target), at_);
+          if (!b.ok()) return b;
+          return convert_node(b, ast::ConversionKind::lvalue_to_rvalue, target);
+        }
         diag(at_, Diag::no_conversion, e.type(), to);
         return {NodeId::none, e.begin, e.end};
       }
@@ -2741,6 +2835,17 @@ public:
       return convert_node(e, ast::ConversionKind::qualification, target);
     if (types().is_pointer(from) && types().is_pointer(target) && pointer_convertible(from, target))
       return convert_node(e, ast::ConversionKind::pointer, target);
+    // [conv.ptr]/3: a pointer to a derived class to one to its base class.
+    if (types().is_pointer(from) && types().is_pointer(target) && types().is_class(types().pointee(from)) &&
+        types().is_class(types().pointee(target)) && types().class_of(types().pointee(from)) != types().class_of(types().pointee(target)) &&
+        cv_within(Types::cv(types().pointee(from)), Types::cv(types().pointee(target))) && is_complete(types().pointee(from))) {
+      int paths = 0;
+      if (base_path(types().class_of(types().pointee(from)), types().class_of(types().pointee(target)), paths)) {
+        Ex b = to_base(e, types().class_of(types().pointee(target)), at_);
+        if (!b.ok() || types().canonical(b.type()) == types().canonical(target)) return b;
+        return convert_node(b, ast::ConversionKind::qualification, target);
+      }
+    }
     diag(at_, Diag::no_conversion, from, to);
     return {NodeId::none, e.begin, e.end};
   }
@@ -2799,40 +2904,50 @@ public:
     if (!p) return std::nullopt;
     return align ? p->align : p->size;
   }
-  // Size and alignment together, once per class (`class_places_`): each member's are needed.
-  std::optional<ast::FieldPlace> place_of(QualType t) {
+  // What a complete object type's layout says of it as a component, once per class
+  // (`class_places_`).
+  std::optional<ast::Placed> place_of(QualType t) {
     TypeRec r = types().rec(t);
     switch (r.kind) {
     case TypeKind::builtin:
       if (!target.has(r.builtin) || r.builtin == Builtin::void_) return std::nullopt;
-      return ast::FieldPlace{target[r.builtin].size, target[r.builtin].align};
+      return ast::scalar_placed(target[r.builtin].size, target[r.builtin].align);
     case TypeKind::pointer:
-    case TypeKind::reference: return ast::FieldPlace{target.pointer_size, target.pointer_align};  // a reference member's
+    case TypeKind::reference: return ast::scalar_placed(target.pointer_size, target.pointer_align);  // a reference member's
     case TypeKind::enum_: return is_complete(t) ? place_of(underlying_of(t)) : std::nullopt;
     case TypeKind::array: {
       if (r.bound_value == ConstId::none) return std::nullopt;
       auto e = place_of(r.inner);
       if (!e) return std::nullopt;
-      return ast::FieldPlace{e->size * r.bound, e->align};
+      return ast::array_placed(*e, r.bound);
     }
     case TypeKind::class_: {
-      EntityId ce = types().class_of(t);
-      if (auto it = class_places_.find(std::to_underlying(ce)); it != class_places_.end()) return it->second;
-      const ClassRec* c = is_complete(t) ? class_rec(ce) : nullptr;
-      if (!c) return std::nullopt;
-      std::vector<ast::FieldPlace> places;
-      for (const FieldRec& f : c->fields) {
-        auto m = place_of(f.type);
-        if (!m) return std::nullopt;
-        places.push_back(*m);
-      }
-      ast::RecordLayout l = ast::record_layout(places, c->union_);
-      return class_places_[std::to_underlying(ce)] = ast::FieldPlace{l.size, l.align};
+      auto l = class_layout(types().class_of(t));
+      if (!l) return std::nullopt;
+      return l->placed;
     }
     default: return std::nullopt;  // void, functions
     }
   }
-  std::map<u32, ast::FieldPlace> class_places_;  // complete classes' sizes and alignments
+  // A complete class's layout (`ast::record_layout`, the rule the back end lays it out by).
+  std::optional<ast::RecordLayout> class_layout(EntityId ce) {
+    if (auto it = class_places_.find(std::to_underlying(ce)); it != class_places_.end()) return it->second;
+    const ClassRec* c = is_complete(types().class_type(ce)) ? class_rec(ce) : nullptr;
+    if (!c) return std::nullopt;
+    std::vector<ast::Placed> bases, places;
+    for (const BaseRec& b : c->bases) {
+      auto m = place_of(types().class_type(b.cls));
+      if (!m) return std::nullopt;
+      bases.push_back(*m);
+    }
+    for (const FieldRec& f : c->fields) {
+      auto m = place_of(f.type);
+      if (!m) return std::nullopt;
+      places.push_back(*m);
+    }
+    return class_places_[std::to_underlying(ce)] = ast::record_layout(bases, places, c->union_, c->pod, std::to_underlying(ce));
+  }
+  std::map<u32, ast::RecordLayout> class_places_;  // complete classes' layouts
 
   // [dcl.type.decltype]/1: an unparenthesized id-expression or member access names its entity's
   // declared type; any other expression has its type, as `T&&` for an xvalue and `T&` for an
@@ -2859,6 +2974,69 @@ public:
 
   // [conv.ptr]/2: a pointer to an object type converts to a pointer to `void` at least as
   // cv-qualified.
+  // ------------------------------------------------------------ base classes ([class.derived])
+
+  // The direct bases leading from class `d` to its base class `b` ([class.derived.general]/2),
+  // each step's class, `b` last; none if `b` is not a base of `d`. `paths` counts the ways `b` is
+  // a base: more than one is an ambiguous base ([class.mi]/5, [conv.ptr]/3).
+  std::optional<std::vector<EntityId>> base_path(EntityId d, EntityId b, int& paths) {
+    std::optional<std::vector<EntityId>> found;
+    const ClassRec* r = class_rec(d);
+    if (!r) return std::nullopt;
+    for (const BaseRec& x : r->bases) {
+      if (x.cls == b) {
+        ++paths;
+        found = std::vector<EntityId>{b};
+        continue;
+      }
+      if (auto p = base_path(x.cls, b, paths)) {
+        p->insert(p->begin(), x.cls);
+        found = std::move(p);
+      }
+    }
+    return found;
+  }
+  // The number of steps from class type `from` to its unambiguous base class type `to`, 0 when
+  // `to` is not one (cv-qualifiers aside).
+  int base_depth(QualType from, QualType to) {
+    if (!types().is_class(from) || !types().is_class(to) || types().is_dependent(from) || types().is_dependent(to)) return 0;
+    EntityId d = types().class_of(from), b = types().class_of(to);
+    if (d == b || !is_complete(from)) return 0;
+    int paths = 0;
+    auto p = base_path(d, b, paths);
+    return p && paths == 1 ? int(p->size()) : 0;
+  }
+  // `e`, a glvalue of class type or a pointer to one, converted to its base class `b`
+  // ([conv.ptr]/3, [dcl.init.ref]/5, [expr.static.cast]): one derived-to-base conversion per
+  // direct base on the way, the cv-qualifiers kept. The base must be unambiguous and accessible
+  // here ([class.access.base]/4); diagnosed at `at_` if not.
+  Ex to_base(Ex e, EntityId b, u32 at_) {
+    bool pointer = types().is_pointer(e.type());
+    QualType ct = pointer ? types().pointee(e.type()) : e.type();
+    Cv cv = Types::cv(ct);
+    EntityId d = types().class_of(ct);
+    int paths = 0;
+    auto path = base_path(d, b, paths);
+    if (!path || paths != 1) {
+      diag(at_, Diag::ambiguous_base, types().class_type(b), Types::unqualified(ct));
+      return {NodeId::none, e.begin, e.end};
+    }
+    EntityId from = d;
+    for (EntityId step : *path) {
+      const ClassRec* r = class_rec(from);
+      auto x = std::ranges::find(r->bases, step, &BaseRec::cls);
+      if (!accessible(from, x->access)) {
+        diag(at_, Diag::inaccessible_base, types().class_type(b), Types::unqualified(ct));
+        return {NodeId::none, e.begin, e.end};
+      }
+      QualType st = types().add_cv(types().class_type(step), cv);
+      ExprInfo info{pointer ? types().pointer(st) : st, pointer ? ValueCategory::prvalue : e.cat(), 0};
+      e = node(ast::ImplicitConversion{info, ast::ConversionKind::derived_to_base, step, at(e, e.begin)}, e.begin, e.end, info);
+      from = step;
+    }
+    return e;
+  }
+
   bool pointer_convertible(QualType from, QualType to) {
     QualType a = types().pointee(from), b = types().pointee(to);
     return types().is_void(b) && types().is_object(a) && cv_within(Types::cv(a), Types::cv(b));

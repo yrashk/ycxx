@@ -34,6 +34,9 @@ class TypeFacts {
 
   // An enumeration's underlying type ([dcl.enum]), from whoever knows the enumerations.
   std::function<ast::QualType(ast::EntityId)> enum_underlying;
+  // A class's direct base classes in declaration order ([class.derived]), from whoever knows the
+  // classes: an aggregate's first elements ([dcl.init.aggr]/2).
+  std::function<std::vector<ast::EntityId>(ast::EntityId)> bases_of = [](ast::EntityId) { return std::vector<ast::EntityId>{}; };
 
   TypeClass classify(ast::QualType q) const {
     if (is_reference(q)) return TypeClass::pointer;
@@ -62,6 +65,8 @@ class TypeFacts {
   ast::QualType promoted(ast::QualType q) { return ast::promoted(*in_, *target_, q); }
   // Pointee and element types keep their cv: `pointer_to` of them must give the same pointer type.
   ast::QualType pointee(ast::QualType q) const { return in_->canonical(ast::pointee_of(*in_, q)); }
+  // A class type's class.
+  ast::EntityId class_entity(ast::QualType q) const { return in_->types.get<ast::TClass>(in_->types.canon(q)).entity; }
   ast::QualType element(ast::QualType q) const {
     return in_->canonical(in_->types.get<ast::TArray>(in_->types.canon(q)).elem);
   }

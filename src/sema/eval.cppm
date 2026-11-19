@@ -27,6 +27,12 @@ public:
       if (const EnumRec* r = q.defining_enum(e); r && r->underlying) return *r->underlying;
       return q.classes().underlying(e);
     };
+    bases_of = [&q](EntityId c) {
+      std::vector<EntityId> r;
+      if (const ClassRec* cr = q.classes().find(c))
+        for (const BaseRec& b : cr->bases) r.push_back(b.cls);
+      return r;
+    };
   }
   ConstId string_address(ConstId s) { return w_->values.address({}, s, 0); }
   bool is_constexpr(EntityId f) { return q_->is_constexpr(f); }

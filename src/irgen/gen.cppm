@@ -384,7 +384,9 @@ class Gen {
     // A destructor's members are destroyed after its body, on every way out ([class.dtor]/13).
     for (At m : epilogue_) {
       auto d = get<ast::DestroyMember>(m);
-      destroy(subobject({*this_, {}}, ir::Step::field, d.field, d.type), d.destructor);
+      destroy(d.field == ~0u ? subobject({*this_, {}}, ir::Step::base, std::to_underlying(facts_.class_entity(d.type)), d.type)
+                             : subobject({*this_, {}}, ir::Step::field, d.field, d.type),
+              d.destructor);
     }
     std::vector<ValueId> ops{state_};
     if (v) ops.push_back(*v);
@@ -447,7 +449,9 @@ class Gen {
       // [class.base.init]: the member subobject of `*this`.
       auto m = get<ast::MemberInit>(a);
       if (!this_) unsupported(a, "outside a constructor");
-      Place p = subobject({*this_, {}}, ir::Step::field, m.field, m.type);
+      // A field of `~0u` is the base class subobject of type `type`.
+      Place p = m.field == ~0u ? subobject({*this_, {}}, ir::Step::base, std::to_underlying(facts_.class_entity(m.type)), m.type)
+                               : subobject({*this_, {}}, ir::Step::field, m.field, m.type);
       full_expression([&] {
         initialize(p, child(a, m.init), false);
         return 0;
@@ -596,10 +600,14 @@ class Gen {
     }
     if (is<ast::InitList>(e)) {
       bool array = cls(p.type) == TypeClass::array;
+      // A class's elements are its direct bases, then its members ([dcl.init.aggr]/2).
+      std::vector<ast::EntityId> bases = array ? std::vector<ast::EntityId>{} : facts_.bases_of(facts_.class_entity(p.type));
       uint32_t i = 0;
       for (ast::Child c : ast_.children(get<ast::InitList>(e).elems)) {
         At x = child(e, c);
-        initialize(subobject(p, array ? ir::Step::elem : ir::Step::field, i++, info(x).type), x, zeroed);
+        if (i < bases.size()) initialize(subobject(p, ir::Step::base, std::to_underlying(bases[i]), info(x).type), x, zeroed);
+        else initialize(subobject(p, array ? ir::Step::elem : ir::Step::field, i - uint32_t(bases.size()), info(x).type), x, zeroed);
+        ++i;
       }
       return;
     }
@@ -846,6 +854,18 @@ class Gen {
         ValueId v = rvalue(from);
         if (same_type(info(from).type, t)) return v;
         return pure(ir::Op::ptr_cast, t, {v}, {word(ty(t))});
+      }
+      case ast::ConversionKind::derived_to_base: {
+        // A pointer to a derived class's object to its direct base's ([conv.ptr]/3): the base
+        // subobject's address, a null pointer to a null pointer.
+        ValueId v = rvalue(from);
+        ast::QualType b = facts_.pointee(t);
+        std::uint64_t path[] = {1, ir::encode({ir::Step::base, std::to_underlying(c.function)})};
+        ValueId moved = pure(ir::Op::ptr_member, t, {v}, {word(ty(b)), path[0], path[1]});
+        ast::QualType ft = info(from).type;
+        ValueId null = pure(ir::Op::ptr_cmp, ast::builtin(facts_.interners(), ast::Builtin::bool_), {v, constant(ft, facts_.null_constant(ft))},
+                            {std::to_underlying(ir::Pred::eq)});
+        return pure(ir::Op::select, t, {null, constant(t, facts_.null_constant(t)), moved});
       }
       case ast::ConversionKind::to_void:
         discard(from);
@@ -1122,6 +1142,12 @@ class Gen {
       uint32_t i = get<ast::LocalRef>(a).local;
       if (i >= slots_.size() || !slots_[i]) unsupported(a, "naming a local that is not declared yet");
       return *slots_[i];
+    }
+    // A derived class's object as its direct base's ([conv.ptr]/3, [dcl.init.ref]): the base
+    // subobject, named by the base class's entity.
+    if (is<ast::ImplicitConversion>(a) && get<ast::ImplicitConversion>(a).conversion == ast::ConversionKind::derived_to_base) {
+      auto c = get<ast::ImplicitConversion>(a);
+      return subobject(lvalue(child(a, c.operand)), ir::Step::base, std::to_underlying(c.function), t);
     }
     if (is<ast::DeclRef>(a)) {
       ast::EntityId e = get<ast::DeclRef>(a).entity;

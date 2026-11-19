@@ -119,7 +119,9 @@ struct Variable {
 struct ClassShape {
   EntityId entity = EntityId::none;
   std::vector<QualType> fields;
+  std::vector<EntityId> bases;  // its direct base classes, in declaration order
   bool union_ = false;  // every member at offset 0 ([class.union]/2)
+  bool pod = true;      // POD for layout (`ast::record_layout`)
   // Trivially copyable for calls ([class.temporary]/3): no non-trivial copy constructor or
   // destructor, and the copy not deleted, so the calling convention may pass it in registers.
   bool trivial_calls = true;
@@ -304,6 +306,8 @@ struct ClassLayout {
   std::uint64_t size = 0;
   std::uint32_t align = 1;
   std::vector<ir::SubObject> fields;
+  std::vector<ir::SubObject> bases;  // the direct bases' subobjects, in declaration order
+  ast::Placed placed;                // what it says of the class as a component
 };
 
 struct ConstLayout {
@@ -344,6 +348,7 @@ class QueryLayout {
 
  private:
   std::optional<ClassLayout> class_layout(QualType c) const;
+  ast::Placed placed(QualType t) const;
 
   engine::SyncCtx* cx_;
   std::map<std::uint32_t, const ClassShape*> classes_;
@@ -600,16 +605,29 @@ std::optional<ClassLayout> QueryLayout::class_layout(QualType c) const {
   if (auto done = class_layouts_.find(key); done != class_layouts_.end()) return done->second;
   auto it = classes_.find(key);
   if (it == classes_.end()) return std::nullopt;
-  std::vector<ast::FieldPlace> places;
-  for (QualType f : it->second->fields) {
-    ir::TypeLayout m = type(in.canonical(f));
-    places.push_back({m.size, m.align});
-  }
-  ast::RecordLayout r = ast::record_layout(places, it->second->union_);
-  ClassLayout out{r.size, std::uint32_t(r.align), {}};
+  std::vector<ast::Placed> bases, places;
+  for (EntityId b : it->second->bases) bases.push_back(placed(in.intern_type(ast::TClass{b})));
+  for (QualType f : it->second->fields) places.push_back(placed(in.canonical(f)));
+  ast::RecordLayout r = ast::record_layout(bases, places, it->second->union_, it->second->pod, key);
+  ClassLayout out{r.size, std::uint32_t(r.align), {}, {}, r.placed};
   for (std::size_t i = 0; i < r.offsets.size(); ++i) out.fields.push_back({r.offsets[i], in.canonical(it->second->fields[i])});
+  for (std::size_t i = 0; i < r.base_offsets.size(); ++i) out.bases.push_back({r.base_offsets[i], in.intern_type(ast::TClass{it->second->bases[i]})});
   class_layouts_[key] = out;
   return out;
+}
+
+// What a type's layout says of it as a component of a class.
+ast::Placed QueryLayout::placed(QualType t) const {
+  ast::Interners& in = *universe().in;
+  QualType c = in.types.canon(t);
+  if (in.types.is<ast::TArray>(c)) {
+    auto a = in.types.get<ast::TArray>(c);
+    std::uint64_t n = a.bound == ConstId::none ? 0 : in.values.get<ast::VInt>(a.bound).bits.lo;
+    return ast::array_placed(placed(a.elem), n);
+  }
+  if (auto r = class_layout(c)) return r->placed;
+  ir::TypeLayout m = type(c);
+  return ast::scalar_placed(m.size, m.align);
 }
 
 ir::SubObject QueryLayout::step(QualType q, ir::PathStep s) const {
@@ -621,6 +639,11 @@ ir::SubObject QueryLayout::step(QualType q, ir::PathStep s) const {
   }
   if (s.step == ir::Step::field)
     if (auto r = class_layout(c); r && s.index < r->fields.size()) return r->fields[s.index];
+  // A direct base's subobject, by the base class's entity (direct bases are distinct).
+  if (s.step == ir::Step::base)
+    if (auto r = class_layout(c))
+      for (const ir::SubObject& b : r->bases)
+        if (std::to_underlying(in.types.get<ast::TClass>(in.types.canon(b.type)).entity) == s.index) return b;
   return {};
 }
 
@@ -722,6 +745,11 @@ class UnitFacts : public irgen::TypeFacts {
       for (const EnumShape& s : shapes.enums)
         if (s.entity == e) return s.underlying;
       return ast::builtin(*universe().in, ast::Builtin::int_);
+    };
+    bases_of = [&shapes](EntityId c) {
+      for (const ClassShape& s : shapes.classes)
+        if (s.entity == c) return s.bases;
+      return std::vector<EntityId>{};
     };
   }
   ConstId string_address(ConstId c) { return universe().consts->address_of(c); }
