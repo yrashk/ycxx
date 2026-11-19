@@ -1506,6 +1506,31 @@ What the process allocates, attributed to the engine's cells, in the trace and t
 - Not yet: drift of retained bytes over a long daemon session, a peak per request, and small
   inexactness (#284).
 
+## Templates, ζ step 9: member function templates (#88, #314, 2026-11-19)
+
+- **Member function templates** ([temp.mem]) of classes and class templates: their head one level
+  inside the class's; a call through an object or the class (`s.get(1)`, `S::st(1L)`) deduces
+  their specializations as a call of a namespace-scope template does, overloads with ordinary
+  members included; explicit arguments after `.f<…>`, `S::f<…>`, `N::f<…>`, an unqualified
+  member template, or `.template f<…>` / `X::template f<…>`. Members overload on template-ness,
+  template-head and constraints ([temp.over.link]/4-6).
+- A class template specialization's member template binds the class's arguments as its
+  enclosing level when it is instantiated.
+- **Constructor templates**, `template<class It> V(It, It)`: function templates named as their
+  class whose specializations are constructors; never `S(S)` ([class.copy.ctor]/5).
+- **Definitions outside the class**, `template<class T> R S::f(T)` and `template<class U>
+  template<class T> R W<U>::f(T)`, whose body is in the scope of both heads (`Program::outer_heads_`),
+  matching a member template by its head and constraints; two heads before anything else are an
+  error.
+- Mangled as Clang: `_ZNK1S3getIiEET_S1_`, `_ZN1WIiE1fIcEEiT_`, `_ZN1SC1IiEET_` (the member's own
+  parameters `T_` at any depth; a constructor without a return type).
+- Tests: `tests/own/templates/m9-*` (13, 8 from the review; a PEER test links Clang's
+  definitions); 5 more draft examples pass. Feature map: `temp-member` partial.
+- Not yet (#340): member class and alias templates (nested classes, #306), conversion function
+  templates (#339), trailing requires-clauses on member templates, static data member templates,
+  `&S::get<int>`, explicit specializations of member templates; a non-type default depending on
+  the class's parameter (#209). Found on the way: #345.
+
 ## Placeholder types, θ step 1 (#279, 2026-11-19)
 
 - **Types:** `TAuto{decltype_auto}` in `types` (ast.md §5.1's `TAuto`, without a type-constraint

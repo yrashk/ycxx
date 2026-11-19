@@ -52,6 +52,7 @@ enum class Diag : std::uint32_t {
   not_supported [[=message{Severity::error, "'{0:k}' is not supported yet"}]],
   extended_float_not_supported [[=message{Severity::error, "extended floating-point types are not supported yet"}]],
   static_member_definition_not_supported [[=message{Severity::error, "defining a static data member of a class template outside the class is not supported yet"}]],
+  extraneous_template_head [[=message{Severity::error, "extraneous template parameter list: only a member template of a class template is declared after two"}]],
   // [dcl.spec], [dcl.type]
   duplicate_specifier [[=message{Severity::error, "duplicate '{0:k}'"}]],
   conflicting_specifiers [[=message{Severity::error, "'{0:k}' cannot be combined with the other type specifiers"}]],
