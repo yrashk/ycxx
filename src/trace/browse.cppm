@@ -432,7 +432,8 @@ class Browser {
     out += paint("2", std::format("   {} events, {} workers, {}", s.events, s.workers, format_duration(s.span_ns)));
     // Memory (#274): what the frames allocated and the cells retain; the process's, when known.
     std::string mem = std::format("   {} allocated, {} retained", format_bytes(static_cast<std::int64_t>(s.alloc_bytes)), format_bytes(s.retained_bytes));
-    if (const auto m = tree_.memory()) mem += std::format(", process {} peak {}", format_bytes(m->process_current), format_bytes(m->process_peak));
+    if (const auto m = tree_.memory())
+      mem += std::format("; last build: process {}, peak {}", format_bytes(m->process_current), format_bytes(m->process_peak));
     return out + paint("2", mem);
   }
   std::string status_line() const {

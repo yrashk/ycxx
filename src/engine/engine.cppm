@@ -524,7 +524,9 @@ inline constexpr std::uint32_t group_start = 0x80000000u;
 // and its target, so the hit path pays nothing. So a frame's numbers follow it from worker to
 // worker, and only one thread counts into it at a time. Engine objects that one frame makes and
 // another frees (a child's coroutine frame, a `Wait`) count for nobody, and so do the engine's
-// tables. A cell retains what its runs left alive, interned trees included, paid for by the
+// tables and queues: the kind tables and new cells (`table`, `cell_for` on a miss), frame ids and
+// the wait registry (`take_id`, `give_id`, `Settle::step`), the work queues (`push`), and the
+// trace's strings (`trace`). A cell retains what its runs left alive, interned trees included, paid for by the
 // first cell to allocate them: each run adds its net bytes, which count the old value it
 // replaced (`store`, `retain`).
 //
@@ -1869,8 +1871,12 @@ std::coroutine_handle<> Settle::step() noexcept {
     }
     if (!error && frame_->id != 0) {
       std::lock_guard lock(db.wait_mutex_);
-      if (auto cycle = db.find_cycle(*frame_, busy)) error = db.cycle_error(std::move(*cycle));
-      else db.registry_[frame_->id].waits.assign(busy.begin(), busy.end());
+      if (auto cycle = db.find_cycle(*frame_, busy)) {
+        error = db.cycle_error(std::move(*cycle));
+      } else {
+        memory::Target none(nullptr);  // the registry is the engine's, and keeps its capacity
+        db.registry_[frame_->id].waits.assign(busy.begin(), busy.end());
+      }
     }
     if (error) {
       start_children();
@@ -1909,7 +1915,10 @@ std::coroutine_handle<> Settle::step() noexcept {
     start_children();
     std::uint8_t expected = Wait::suspending;
     // Once the wait is published another worker may resume the frame: this thread stops counting
-    // for it first.
+    // for it first, and frees this round's lists while it still counts (they would go uncounted).
+    const std::size_t busy_count = busy.size();
+    std::vector<std::coroutine_handle<>>().swap(children);
+    std::vector<CellId>().swap(busy);
     memory::Usage* const mine = memory::exchange_target(nullptr);
     if (w->phase.compare_exchange_strong(expected, Wait::waiting, std::memory_order_acq_rel, std::memory_order_acquire)) return {};
     memory::exchange_target(mine);
@@ -1918,7 +1927,7 @@ std::coroutine_handle<> Settle::step() noexcept {
       frame_->stopped = true;
       return failed();
     }
-    if (unlinked == busy.size()) std::this_thread::yield();  // a claim between its two CASes (§A3.1)
+    if (unlinked == busy_count) std::this_thread::yield();  // a claim between its two CASes (§A3.1)
   }
 }
 
@@ -2147,6 +2156,7 @@ void Db::execute_sync(CellId c, std::uint64_t restore, const Frame* chain, const
       abort(c, restore, std::current_exception());
       throw;
     }
+    std::unordered_map<CellId, std::uint32_t>().swap(f.recorded);  // before `store` measures, as in `run_frame`
     store<Q>(c, std::move(*v), f);
     publish(c);
   } else {
@@ -2448,6 +2458,7 @@ void Db::sync_cycle(const Frame* chain, CellId c) const {
 // Frame ids, the queue and statistics.
 
 std::uint32_t Db::take_id() {
+  memory::Target none(nullptr);  // the engine's registry and free list count for no cell (#274)
   {
     std::lock_guard lock(ids_mutex_);
     if (!free_ids_.empty()) {
@@ -2463,11 +2474,13 @@ std::uint32_t Db::take_id() {
 
 void Db::give_id(std::uint32_t id) noexcept {
   if (id == 0) return;
+  memory::Target none(nullptr);
   std::lock_guard lock(ids_mutex_);
   free_ids_.push_back(id);
 }
 
 void Db::push(Work w, Priority p) noexcept {
+  memory::Target none(nullptr);  // the queues are the engine's (#274)
   if (pool_) {
     pool_->push(w, p);
     return;

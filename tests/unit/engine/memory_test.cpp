@@ -137,8 +137,8 @@ struct Splits {
   }
 };
 
-// A provider of 30,000 bytes, and a reader of them.
-provided<std::string> provide_text(const std::uint32_t& k) { return {std::string(30000, static_cast<char>('a' + k % 26)), Durability::low}; }
+// A provider of 300,000 bytes (more than `slack`, so its reader would show them), and a reader.
+provided<std::string> provide_text(const std::uint32_t& k) { return {std::string(300000, static_cast<char>('a' + k % 26)), Durability::low}; }
 struct Reads {
   using Key = std::uint32_t;
   using Value = std::uint64_t;
@@ -203,7 +203,7 @@ void known_amounts() {
   Events pev;
   (void)provided.get<Reads>(7, &pev);
   const auto input = pev.of("::Text", "7", Outcome::input);
-  check(input && near(static_cast<std::int64_t>(input->alloc_bytes), 30000) && near(input->retained_bytes, 30000),
+  check(input && near(static_cast<std::int64_t>(input->alloc_bytes), 300000) && near(input->retained_bytes, 300000),
         std::format("a provided input: what its provider allocated ({}, {})", input ? input->alloc_bytes : 0, input ? input->retained_bytes : 0));
   const auto reader = pev.of("::Reads", "7", Outcome::executed);
   check(reader && reader->alloc_bytes < static_cast<std::uint64_t>(slack), "is not its reader's");

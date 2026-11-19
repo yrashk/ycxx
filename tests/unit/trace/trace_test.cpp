@@ -307,6 +307,22 @@ void memory() {
   std::vector<std::string> got;
   for (const auto& row : t2.rows()) got.push_back(t2.node(row.node).ev.kind);
   check(got == std::vector<std::string>{"Build", "Back", "Pp", "Front", "Pp"}, "most allocated first");
+  // Retained order differs from both: Back allocates less than Front's subtree but retains most.
+  b[3].alloc_bytes = 3000;
+  b[3].retained_bytes = 5000;
+  trace::Tree t3;
+  t3.add(b);
+  t3.expand_all(true);
+  t3.set_order(trace::Tree::Order::retained);
+  got.clear();
+  for (const auto& row : t3.rows()) got.push_back(t3.node(row.node).ev.kind);
+  check(got == std::vector<std::string>{"Build", "Back", "Pp", "Front", "Pp"}, "most retained first");
+  t3.set_order(trace::Tree::Order::alloc);
+  got.clear();
+  for (const auto& row : t3.rows()) got.push_back(t3.node(row.node).ev.kind);
+  check(got == std::vector<std::string>{"Build", "Front", "Pp", "Back", "Pp"}, "and by bytes allocated, Front first");
+  b[3].alloc_bytes = 7000;
+  b[3].retained_bytes = 50;
   const trace::Summary s = t.summary();
   check(s.alloc_bytes == 9100 && s.retained_bytes == 2360, "the summary's memory");
 

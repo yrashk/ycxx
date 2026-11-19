@@ -220,9 +220,11 @@ Window::Window() noexcept {
   std::uint64_t open = global.windows.load(std::memory_order_relaxed);
   while (open != ~std::uint64_t{0}) {
     const int s = std::countr_one(open);
-    // The slot's start before it is open, so a flush never sees a stale peak.
-    global.window_peak[static_cast<std::size_t>(s)].store(global.current.load(std::memory_order_relaxed), std::memory_order_relaxed);
     if (global.windows.compare_exchange_weak(open, open | (std::uint64_t{1} << s), std::memory_order_acq_rel)) {
+      // The start, once the slot is this window's. A flush that read the open slots before the
+      // last window here closed may still raise it with its own moment's value, a little before
+      // this window opened: off by at most one thread's batch.
+      global.window_peak[static_cast<std::size_t>(s)].store(global.current.load(std::memory_order_relaxed), std::memory_order_relaxed);
       slot_ = s;
       return;
     }

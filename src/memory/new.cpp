@@ -16,6 +16,7 @@ constexpr std::size_t malloc_align = 16;
 void* raw(std::size_t n, std::size_t align) noexcept {
   if (n == 0) n = 1;
   if (align <= malloc_align) return std::malloc(n);
+  if (n > std::numeric_limits<std::size_t>::max() - align) return nullptr;  // an overflowed array size
   return std::aligned_alloc(align, (n + align - 1) / align * align);
 }
 
