@@ -201,6 +201,8 @@ export enum class Op : std::uint16_t {
   union__activate [[=state({S, V}, {S}).imms({path})]],
   load [[=state({S, V}, {V}).imms({type, path}).accepts({volatile_})]],
   store [[=state({S, V, V}, {S}).imms({type, path}).accepts({volatile_})]],
+  bit_field_load [[=state({S, V}, {V}).imms({u32}).with({nonconstant})]],  // record pointer and field index
+  bit_field_store [[=state({S, V, V}, {S}).imms({u32}).with({nonconstant})]],
   copy [[=state({S, V, V}, {S}).imms({type})]],  // trivial copy of an object: dst, src
   atomic__load [[=state({S, V}, {S, V}).imms({type, order}).accepts({volatile_})]],
   atomic__store [[=state({S, V, V}, {S}).imms({type, order}).accepts({volatile_})]],

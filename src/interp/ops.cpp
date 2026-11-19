@@ -342,6 +342,8 @@ struct Ops {
   }
 
   static Flow copy(M& m, Frame&, N n) { return m.unsupported(n); }
+  static Flow bit_field_load(M& m, Frame&, N n) { return m.unsupported(n); }
+  static Flow bit_field_store(M& m, Frame&, N n) { return m.unsupported(n); }
   static Flow atomic__load(M& m, Frame&, N n) { return m.unsupported(n); }
   static Flow atomic__store(M& m, Frame&, N n) { return m.unsupported(n); }
   static Flow atomic__rmw(M& m, Frame&, N n) { return m.unsupported(n); }

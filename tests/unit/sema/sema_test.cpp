@@ -109,6 +109,41 @@ void redeclarations_and_linkage() {
         "a string literal is an lvalue array");
 }
 
+void unsupported_bit_fields() {
+  for (std::string_view source : {
+           "struct F { unsigned a : 0; };",
+           "struct F { unsigned a : 33; };",
+           "struct F { unsigned a : -1; };",
+           "struct F { unsigned a : 3.0; };",
+           "int n; struct F { unsigned a : n; };",
+           "struct F { unsigned : 1; };",
+           "struct F { unsigned (a) : 1; };",
+           "struct F { volatile int a : 1; };",
+           "using I = const int; struct F { I a : 1; };",
+           "struct F { long a : 1; };",
+           "struct F { static int a : 1; };",
+           "struct F { unsigned a : 1 = 1; };",
+           "union F { unsigned a : 1; };",
+           "struct B {}; struct F : B { unsigned a : 1; };",
+           "template<class T> struct F { unsigned a : 1; };",
+           "struct F { template<class T> unsigned a : 1; };",
+           "struct __attribute__((packed)) F { unsigned a : 1; };"}) {
+    check(!Analysed(source).diags().empty(), source);
+  }
+  for (std::string_view source : {
+           "unsigned* test(F& f) { return &(f.a); }",
+           "unsigned* test(F& f) { return &(f.a = 1); }",
+           "unsigned* test(F& f) { return &(++f.a); }",
+           "auto test(F& f) { return sizeof((0, f.a)); }",
+           "unsigned& test(F& f) { return f.a; }",
+           "int test(F& f) { const unsigned& r = f.a; return r; }",
+           "unsigned test(volatile F& f) { return f.a; }",
+           "constexpr F f{3, 4}; static_assert(f.a == 3);",
+           "void test(bool b, F& f) { (b ? f.a : f.b) = 1; }"}) {
+    check(!Analysed("struct F { unsigned a : 3; unsigned b : 5; }; " + std::string(source)).diags().empty(), source);
+  }
+}
+
 void gnu_pointer_qualifiers() {
   Analysed a(R"cpp(
 #define HEADER_RESTRICT __restrict
@@ -275,6 +310,7 @@ int main() {
   constant_evaluation();
   conversions_and_locals();
   redeclarations_and_linkage();
+  unsupported_bit_fields();
   gnu_pointer_qualifiers();
   constants();
   assignments();

@@ -1923,6 +1923,23 @@ values, end to end; results match Clang's bit for bit.
 - Not yet: inline functions' statics are per unit (#124); static references (#367).
 - Tests: `tests/own/static-locals/` (spec-only, 19 tests, a Clang peer in `mixed.run.cpp`).
 
+## Named `int` bit-fields (#307, 2026-11-19)
+
+- Ordinary unpacked, non-template classes without bases support named non-static `int` and
+  `unsigned int` bit-fields of width 1 through 32 ([class.bit]). The AST retains the width
+  in the declaration and member expressions. Sema and the back end share the target byte
+  and bit placement, including a signed 24-bit member followed by an ordinary byte.
+- In the native pipeline, field projections carry the record pointer and field index. Loads
+  sign-extend signed values and stores mask only the field's occupied bytes. Static aggregate
+  initialization uses the same layout. Width-aware integer promotions apply in built-in
+  arithmetic, shifts, and the other promotion contexts ([conv.prom]).
+- Remaining scope in #307 includes other declared types, unnamed fields, union variants,
+  templates, packed layout, default member initializers, reference binding, volatile access,
+  bit-field conditional glvalues, and constant evaluation of bit-field access. The preprocessor
+  still passes `#pragma pack` through for `-E`.
+- Tests cover widths and alignments on both targets, hard diagnostics, static data bytes and a
+  width edit in `unit.ast_types`, `unit.sema` and `unit.pipeline_incremental`.
+
 ## Range-based `for`, ι (#298, #337, 2026-11-19)
 
 - **Parser** (src/parse/parser.cppm `range_for`): `for ( init-statement_opt decl : initializer )`

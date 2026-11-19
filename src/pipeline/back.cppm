@@ -139,6 +139,7 @@ struct ClassShape {
   // Trivially copyable for calls ([class.temporary]/3): no non-trivial copy constructor or
   // destructor, and the copy not deleted, so the calling convention may pass it in registers.
   bool trivial_calls = true;
+  std::vector<std::uint8_t> bit_widths{};  // parallel to fields, empty for ordinary records
 };
 struct EnumShape {
   EntityId entity = EntityId::none;
@@ -710,10 +711,15 @@ std::optional<ClassLayout> QueryLayout::class_layout(QualType c) const {
   if (it == classes_.end()) return std::nullopt;
   std::vector<ast::Placed> bases, places;
   for (EntityId b : it->second->bases) bases.push_back(placed(in.intern_type(ast::TClass{b})));
-  for (QualType f : it->second->fields) places.push_back(placed(in.canonical(f)));
+  for (std::size_t i = 0; i < it->second->fields.size(); ++i) {
+    ast::Placed f = placed(in.canonical(it->second->fields[i]));
+    if (!it->second->bit_widths.empty()) f.bit_width = it->second->bit_widths[i];
+    places.push_back(std::move(f));
+  }
   ast::RecordLayout r = ast::record_layout(bases, places, it->second->union_, it->second->pod, key);
   ClassLayout out{r.size, std::uint32_t(r.align), {}, {}, r.placed};
-  for (std::size_t i = 0; i < r.offsets.size(); ++i) out.fields.push_back({r.offsets[i], in.canonical(it->second->fields[i])});
+  for (std::size_t i = 0; i < r.offsets.size(); ++i)
+    out.fields.push_back({r.offsets[i], in.canonical(it->second->fields[i]), r.bit_fields[i]});
   for (std::size_t i = 0; i < r.base_offsets.size(); ++i) out.bases.push_back({r.base_offsets[i], in.intern_type(ast::TClass{it->second->bases[i]})});
   class_layouts_[key] = out;
   return out;
@@ -856,6 +862,11 @@ class UnitFacts : public irgen::TypeFacts {
       for (const ClassShape& s : shapes.classes)
         if (s.entity == c) return s.bases;
       return std::vector<EntityId>{};
+    };
+    bit_field_width = [&shapes](EntityId c, std::uint32_t field) -> std::uint8_t {
+      for (const ClassShape& shape : shapes.classes)
+        if (shape.entity == c && field < shape.bit_widths.size()) return shape.bit_widths[field];
+      return 0;
     };
   }
   ConstId string_address(ConstId c) { return universe().consts->address_of(c); }
@@ -1129,6 +1140,17 @@ std::expected<void, std::string> place_value(const ast::Interners& in, const Que
     ir::Step step = l.kind == ir::TypeKind::array ? ir::Step::elem : ir::Step::field;
     for (std::uint32_t i = 0; i < elems.size(); ++i) {
       ir::SubObject s = layout.step(type, {step, i});
+      if (s.bit_field) {
+        if (!in.values.is<ast::VInt>(elems[i])) return std::unexpected("a bit-field initializer is not an integer");
+        const auto bits = s.bit_field;
+        auto value = std::uint32_t(in.values.get<ast::VInt>(elems[i]).bits.lo) << bits.shift;
+        for (std::uint32_t byte = 0; byte < bits.bytes(); ++byte) {
+          auto mask = std::uint8_t(bits.mask() >> (8 * byte));
+          auto& dst = out.bytes[offset + s.offset + byte];
+          dst = std::uint8_t((dst & ~mask) | ((value >> (8 * byte)) & mask));
+        }
+        continue;
+      }
       if (auto r = place_value(in, layout, s.type, elems[i], offset + s.offset, out); !r) return r;
     }
     return {};

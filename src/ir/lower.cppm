@@ -23,6 +23,7 @@
 export module ycxx.ir.lower;
 
 import std;
+import ycxx.ast.target;
 import ycxx.ir;
 import ycxx.ir.l2;
 
@@ -54,6 +55,7 @@ export struct TypeLayout {
 export struct SubObject {
   std::uint64_t offset = 0;  // from the start of the enclosing object
   QualType type{};
+  ast::BitField bit_field{};
 };
 
 // A constant's value: an integral, bool or null pointer value, a floating value's encoding, or the
@@ -236,6 +238,51 @@ class Lowering {
   ValueId add_offset(ValueId p, std::uint64_t off) {
     if (off == 0) return p;
     return emit1(Op2::ptradd, T::ptr, {p, constant(T::i64, std::int64_t(off))});
+  }
+
+  // Load only the bytes intersecting the field. The enclosing allocation unit can also contain
+  // a separate ordinary member, which is a distinct memory location ([intro.memory]).
+  ValueId load_field(ValueId state, ValueId base, const SubObject& field) {
+    const ast::BitField bits = field.bit_field;
+    ValueId packed = constant(T::i32, 0);
+    for (std::uint32_t i = 0; i < bits.bytes(); ++i) {
+      ValueId p = add_offset(base, field.offset + i);
+      ValueId byte = emit1(Op2::load, T::i8, {state, p}, {0});
+      ValueId v = resize(byte, T::i32, false);
+      if (i != 0) v = emit1(Op2::shl, T::i32, {v, constant(T::i32, 8 * i)});
+      packed = emit1(Op2::or_, T::i32, {packed, v});
+    }
+    if (bits.shift != 0) packed = emit1(Op2::lshr, T::i32, {packed, constant(T::i32, bits.shift)});
+    if (bits.width == 32) return packed;
+    if (layout(field.type).is_signed) {
+      ValueId shift = constant(T::i32, 32 - bits.width);
+      ValueId high = emit1(Op2::shl, T::i32, {packed, shift});
+      return emit1(Op2::ashr, T::i32, {high, shift});
+    }
+    return emit1(Op2::and_, T::i32, {packed, constant(T::i32, bits.mask() >> bits.shift)});
+  }
+
+  ValueId store_field(ValueId state, ValueId base, const SubObject& field, ValueId value) {
+    const ast::BitField bits = field.bit_field;
+    if (bits.shift != 0) value = emit1(Op2::shl, T::i32, {value, constant(T::i32, bits.shift)});
+    for (std::uint32_t i = 0; i < bits.bytes(); ++i) {
+      std::uint8_t mask = std::uint8_t(bits.mask() >> (8 * i));
+      ValueId p = add_offset(base, field.offset + i);
+      ValueId v = i == 0 ? value : emit1(Op2::lshr, T::i32, {value, constant(T::i32, 8 * i)});
+      ValueId byte = resize(v, T::i8, false);
+      if (mask != 0xff) {
+        ValueId previous = emit1(Op2::load, T::i8, {state, p}, {0});
+        previous = emit1(Op2::and_, T::i8, {previous, constant(T::i8, std::uint8_t(~mask))});
+        byte = emit1(Op2::and_, T::i8, {byte, constant(T::i8, mask)});
+        byte = emit1(Op2::or_, T::i8, {previous, byte});
+      }
+      auto o = origin();
+      T result[] = {T::state};
+      ValueId operands[] = {state, p, byte};
+      std::uint64_t alias[] = {0};  // character-sized access to the object representation
+      state = b_.peek().result(b_.emit(Op2::store, result, operands, alias, 0, {}, o));
+    }
+    return state;
   }
   // The path immediate starting at word `i` of `imms`: its length, then its steps.
   static std::span<const std::uint64_t> path_at(std::span<const std::uint64_t> imms, std::size_t i) {
@@ -553,6 +600,15 @@ class Lowering {
         ValueId ops[] = {in(n, 0), p, v};
         std::uint64_t im[] = {imms[0]};
         out(n, 0, b_.peek().result(b_.emit(Op2::store, st, ops, im, nd.flags, {}, o)));
+        return {};
+      }
+      case Op::bit_field_load:
+      case Op::bit_field_store: {
+        QualType owner = layout(cxx(f_.operands_of(n)[1])).pointee;
+        SubObject field = layout_.step(owner, {Step::field, std::uint32_t(imms[0])});
+        if (!field.bit_field) return fail("no bit-field layout for the projected member");
+        if (nd.op == Op::bit_field_load) out(n, 0, load_field(in(n, 0), in(n, 1), field));
+        else out(n, 0, store_field(in(n, 0), in(n, 1), field, in(n, 2)));
         return {};
       }
       case Op::call:
