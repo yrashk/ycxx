@@ -3693,7 +3693,8 @@ public:
     s_->static_local(local);
     ast::ConstId value = ast::ConstId::none;
     if (init.ok() && !s_->dependent(init) && !s_->types().is_dependent(s_->local(local).type)) {
-      sema::Evaluated v = sema::Evaluator(*s_, questions()).evaluate(init);
+      sema::Evaluator evaluator(*s_, questions());
+      sema::Evaluated v = s_->as<ast::InitList>(init) ? evaluator.evaluate_initializer(init) : evaluator.evaluate(init);
       if (v.value) value = *v.value;
       else if (spec.is_constinit && !v.dependent) s_->diag(init.begin, Diag::not_constant, v.reason);
     }

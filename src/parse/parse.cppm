@@ -4018,37 +4018,8 @@ private:
     if (lang == LangLinkage::c) s_.diag(d.name_at, Diag::main_linkage);
   }
 
-  // The constant an analysed initializer gives its object, if it is a constant expression
-  // ([expr.const]): a list-initialized aggregate's elements one by one, each a constant.
   std::optional<ConstId> constant_initializer(Ex e) {
-    if (s_.as<ast::InitList>(e)) {
-      std::vector<ConstId> elems;
-      for (const Ex& sub : s_.list_elements(e)) {
-        auto v = constant_initializer(sub);
-        if (!v) return std::nullopt;
-        elems.push_back(*v);
-      }
-      return s_.world().values.aggregate(e.type(), elems);
-    }
-    if (s_.as<ast::ValueInit>(e) || s_.as<ast::DefaultInit>(e)) return zero_constant(e.type());
-    if (s_.types().is_class(e.type())) return std::nullopt;  // a copy: dynamic initialization
-    return sema::Evaluator(s_, q_).evaluate(e).value;
-  }
-  // The value of a zero-initialized object of type `t` ([dcl.init.general]).
-  std::optional<ConstId> zero_constant(QualType t) {
-    if (s_.is_aggregate(t)) {
-      std::vector<ConstId> elems;
-      for (const sema::Sema::Element& e : s_.elements(t)) {
-        auto v = zero_constant(e.type);
-        if (!v) return std::nullopt;
-        elems.push_back(*v);
-      }
-      return s_.world().values.aggregate(t, elems);
-    }
-    if (s_.types().is_pointer(t)) return s_.world().values.null_pointer(t);
-    if (s_.types().is_integral(t)) return s_.world().values.integer(sema::Types::unqualified(t), 0);
-    if (s_.types().is_standard_floating(t)) return s_.world().values.floating(sema::Types::unqualified(t), 0.0);
-    return std::nullopt;
+    return sema::Evaluator(s_, q_).evaluate_initializer(e).value;
   }
 
   Program* p_;
