@@ -43,8 +43,9 @@ build/bin/ycxx cxx hello.cpp -o hello && ./hello
   type-trait built-ins libycxx's headers use (`__is_same`, `__remove_cv`, …)
   ([docs/EXTENSIONS.md](docs/EXTENSIONS.md));
 - templates: function, class and variable templates, deduction, partial ordering, explicit and
-  partial specializations, static constexpr members of class templates, parameter packs and
-  fold expressions, alias templates, template template parameters, concepts and
+  partial specializations, static constexpr members of class templates, member function and
+  constructor templates, parameter packs and fold expressions, alias templates, template
+  template parameters, concepts and
   requires-expressions in overload resolution, `if constexpr`, two-phase lookup, with Itanium
   names identical to Clang's; Clang's `__make_integer_seq`;
 - casts, `sizeof`/`alignof` (classes included), and `decltype`;
@@ -87,7 +88,8 @@ checked with the flags of its last build, or else with its line in the project's
 - The standard library and its headers. C headers such as `<stdio.h>` compile without warnings
   and `printf` runs; libycxx's `<cstdio>` still needs pointer-to-member types.
 - Inheritance and virtual functions.
-- Member templates, and constraints on class templates and their members.
+- Member class and alias templates, conversion function templates, and constraints on class
+  templates and their members.
 - Floating-point arithmetic, exceptions, and optimization (`-O`).
 - Linux and x86-64 output.
 

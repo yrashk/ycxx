@@ -1925,13 +1925,13 @@ group = 'temp'
 clauses = ['temp.mem']
 std = 'C++98'
 status = 'partial'
-note = 'member function templates; not yet out-of-class definitions, constructor and conversion templates, member class templates'
+note = 'member class and alias templates, conversion function templates'
 probe = '''
 struct S { template<class T> T get(T t) const { return t; } };
 template<class U> struct W { template<class T> int f(T) { return sizeof(U); } };
 int main() { S s; W<int> w; return s.get(0) + w.f('a') - 4; }
 '''
-issues = [314, 88]
+issues = [340, 306, 339]
 
 [[feature]]
 id = 'temp-spec'
