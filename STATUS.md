@@ -1574,8 +1574,13 @@ What the process allocates, attributed to the engine's cells, in the trace and t
   required parameter converts. `Sema::defaults_` records what lookup found per function.
 - **IR:** a `DefaultArg`'s nodes take the call's position (`Gen::pinned`), since its offsets are
   its declaration's.
+- Each call takes the defaults its own lookup found (`Sema::defaults_` by DeclRef node), since
+  declarations in different scopes have their own. A copy or move constructor's other parameters
+  may have defaults. Defaults are rejected where [dcl.fct.default]/3–4 and [over.oper.general]
+  forbid them (`defaults_allowed`, `defaults_trail`).
 - Not yet: defaults that depend on template parameters (#356); a member's default naming a later
-  member, and defaults added by an out-of-class member definition (#354).
+  member, and defaults added by an out-of-class or qualified definition (#354); defaults added
+  after a using-declaration (#362, the oracles disagree).
 - Tests: `tests/own/default-args/` (spec-only: 16 run and 9 reject tests, some split out as XFAIL
   for #354, #356, #357, #102 and #94).
 
