@@ -532,13 +532,13 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
     node.
   - `:mangle`: Itanium names for global-namespace functions over fundamental, pointer and cv types
     with substitutions; `main`, `extern "C"` functions and variables are not mangled (#64).
-  - `:executable`: `link(P)`, the query over a program's `tu` objects and the `.o` inputs, with
-    libSystem's exports from `$SDKROOT`, else `xcrun --show-sdk-path`, else the Command Line Tools'
-    SDK, looked up once per process outside the engine.
+  - `:executable` provides `link(P)`, the query over a program's `tu` objects. The Darwin link
+    also takes `.o` files and libSystem's exports from `$SDKROOT`, else `xcrun --show-sdk-path`,
+    else the Command Line Tools' SDK, looked up once per process outside the engine.
   - `:lines`: a minimal line table for rendering (#34 owns the full one).
-- `ycxx cxx` (also `ycxx -…` with an option first): `-o`, `-c`, `-fsyntax-only`, `-std=c++26`;
-  `.o` inputs are linked as they are. Errors are `path:line:col: error: message` on stderr; exit 0
-  on success, 1 on any error in the input or the command line.
+- `ycxx cxx` (also `ycxx -…` with an option first) takes `-o`, `-c`, `-fsyntax-only` and
+  `-std=c++26`. Errors are `path:line:col: error: message` on stderr. It exits 0 on success and 1
+  on any error in the input or the command line.
 - `tests/features/ycxx.txt` lists `syntax` and `run darwin-arm64`: a feature can be limited to
   hosts. CI's macOS job runs the slice before its tier, with `--no-unsupported`.
 - `unit.pipeline`: the line table, linkage names, and the back half from hand-built analysed
@@ -550,6 +550,29 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   entities differently (mutating `tu` to order by handle makes it fail).
 - Not yet: `ycxx cxx` through the daemon by default (#120), `#include` (#65), optimization
   levels and the other common options (`-O` is rejected, #81).
+
+## x86-64 ELF objects and freestanding executables (2026-11-19)
+
+- `--target=x86_64-pc-linux-gnu` (also `x86_64-linux-gnu`) selects Linux preprocessing,
+  layout and code generation. The in-process driver and daemon keep the target in the unit
+  configuration. Darwin remains the default.
+- The scalar System V AMD64 backend in `src/target/x86_64/` supports 32- and 64-bit integer,
+  pointer and reference parameters and results, plus void results. It handles direct and
+  indirect calls, stack arguments and RIP-relative data references within a unit. Floating-point,
+  aggregate and narrow integer arguments and results, and variadic calls, are outside this ABI
+  subset.
+- `-c` writes deterministic ELF64 relocatable objects through `ycxx.obj.elf`. The native ELF
+  linker consumes the same in-memory objects, resolves absolute and PC-relative relocations,
+  and writes a static `ET_EXEC` image with load segments and a non-executable stack.
+- `ycxx cxx --target=x86_64-pc-linux-gnu -nostdlib a.cpp b.cpp -o a` compiles and links C++
+  sources in one invocation. When the program supplies an explicit `_start`, that symbol is the
+  entry. Otherwise ycxx's startup calls `int main()` or `int main(int, char**)` and exits with the
+  returned value. The link query checks a source function's ABI when an asm label gives it the
+  symbol `main`. Hosted linking and linking `.o` files from disk remain unsupported.
+- Linux x86-64 CI runs `unit.linux_compile`, which links a ycxx-produced object with a native C
+  caller, and `unit.linux_executable`, which runs single- and multi-unit executables and checks
+  exit status, `argc` and `argv`, diagnostics, and cold and daemon output. The linker and
+  startup also have native CTest coverage, including execution of an explicit `_start`.
 
 ## The resident daemon (#96, #97, 2026-11-18)
 
