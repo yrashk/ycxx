@@ -186,6 +186,7 @@ class Emitter {
   void write(ValueId v) {
     // Keep high bits clear for later unsigned operations and narrow ABI values. The psABI
     // leaves bits outside an INTEGER value's memory representation unspecified at the boundary.
+    // A valid bool has a low byte of 0 or 1 (§3.2.3), which fits in the internal i1.
     unsigned bits = l2::bits(body_.type(v));
     if (bits < 32) {
       e_.emit({0x25});  // and eax, imm32

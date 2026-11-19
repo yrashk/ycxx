@@ -562,22 +562,29 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
 - `--target=x86_64-pc-linux-gnu` (also `x86_64-linux-gnu`) selects Linux preprocessing,
   layout and code generation. The in-process driver and daemon keep the target in the unit
   configuration. Darwin remains the default.
-- The scalar System V AMD64 backend in `src/target/x86_64/` supports 8-, 16-, 32- and 64-bit
+- The scalar System V AMD64 backend in `src/target/x86_64/` supports `bool` and 8-, 16-, 32- and 64-bit
   integer and enum parameters and results, plus pointers, references and void results. It handles
   direct and indirect calls, stack arguments and RIP-relative data references within a unit.
   Narrow register arguments and results are extended to 32 bits when sent for interoperability.
   Incoming values use their declared width in registers and stack slots (AMD64 psABI §3.2.3).
+  A `bool` uses the byte value 0 or 1.
   Direct variadic calls use the same registers and stack slots for promoted 32- and 64-bit integers
   and pointers. The emitter clears EAX immediately before every direct call so a variadic callee
-  receives a zero vector-register count in AL, including with an empty ellipsis. Bool, floating-point
+  receives a zero vector-register count in AL, including with an empty ellipsis. Floating-point
   and aggregate arguments and results remain outside this ABI subset. Variadic definitions and
   variadic calls through function pointers remain unsupported.
-  [#412](https://github.com/yrashk/ycxx/issues/412), [#399](https://github.com/yrashk/ycxx/issues/399),
+  [#417](https://github.com/yrashk/ycxx/issues/417), [#412](https://github.com/yrashk/ycxx/issues/412),
+  [#399](https://github.com/yrashk/ycxx/issues/399),
   [#196](https://github.com/yrashk/ycxx/issues/196)
 - `-c` writes deterministic ELF64 relocatable objects through `src/obj/elf.cppm`. The reader
   accepts the supported x86-64 `ET_REL` subset emitted by ycxx. The native ELF linker consumes
   the same in-memory objects, resolves absolute and PC-relative relocations, and writes a static
   `ET_EXEC` image with load segments and a non-executable stack.
+- The ELF reader accepts the GNU-built libycxx static linkage-marker object. It reads sized
+  object symbols and local section symbols, preserves the marker's hidden binding, and maps
+  `.data.rel.ro.local` to the existing read-only output for relocated pointers. It validates and
+  discards file symbols, ordinary nonallocated DWARF and comment sections, and an empty
+  non-executable GNU stack marker. [#419](https://github.com/yrashk/ycxx/issues/419)
 - `ycxx cxx --target=x86_64-pc-linux-gnu -nostdlib a.cpp b.cpp -o a` compiles and links C++
   sources in one invocation. Either source can also be compiled separately with `-c` and passed
   as a `.o` input. Links limited to sources and disk objects place compiled sources first. Each
