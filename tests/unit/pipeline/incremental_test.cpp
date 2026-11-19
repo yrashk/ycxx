@@ -408,6 +408,121 @@ void records() {
   }
 }
 
+void bit_fields() {
+  std::string text = R"cpp(
+enum Width { second = 5 };
+struct F { unsigned a : 1 + 2, b : second; };
+struct FileSlice { int descriptor; signed int flags : 24; char next; long offset; };
+static_assert(sizeof(F) == 4 && alignof(F) == 4);
+static_assert(sizeof(FileSlice) == 16 && alignof(FileSlice) == 8);
+F packed{3, 17};
+FileSlice file{1, -177, 'Q', 2L};
+static_assert(__is_same(decltype(packed.a), unsigned int));
+static_assert(__is_same(decltype(+packed.a), int));
+static_assert(__is_same(decltype(packed.a + packed.b), int));
+static_assert(__is_same(decltype(+static_cast<unsigned>(packed.a)), unsigned));
+static_assert(__is_same(decltype(+(unsigned)packed.a), unsigned));
+static_assert(__is_same(decltype(+unsigned(packed.a)), unsigned));
+int main() {
+  F f{};
+  f.a = 9;
+  f.b = 31;
+  if (f.a != 1 || f.b != 31) return 1;
+  FileSlice g{1, -177, 'Q', 2L};
+  if (g.flags++ != -177 || g.flags != -176 || g.next != 'Q') return 2;
+  file.flags += 3;
+  if (file.flags != -174 || file.next != 'Q' || file.offset != 2) return 3;
+  return 0;
+}
+)cpp";
+  pl::Session s;
+  build(s, text);
+  const auto& front = s.get<pl::TuFront>(tu);
+  check(!front.has_errors(), pl::TuFront::errors(front));
+  const auto& result = s.get<pl::Tu>(tu);
+  check(result.object.has_value(), pl::Tu::errors(result));
+  if (!result.object) return;
+  auto bytes_of = [](const auto& obj, std::string_view name) -> std::span<const std::uint8_t> {
+    auto sym = std::ranges::find(obj.symbols, name, &ycxx::obj::symbol::name);
+    if (sym == obj.symbols.end() || !sym->section) return {};
+    return std::span(obj.sections[*sym->section].bytes).subspan(sym->offset);
+  };
+  auto packed = bytes_of(*result.object, "_packed");
+  auto file = bytes_of(*result.object, "_file");
+  check(packed.size() >= 4 && packed[0] == 0x8b, "static adjacent bit-fields share the same byte");
+  check(file.size() >= 16 && file[4] == 0x4f && file[5] == 0xff && file[6] == 0xff && file[7] == 'Q',
+        "static signed 24-bit storage preserves the adjacent ordinary byte");
+
+  text.replace(text.find("1 + 2"), 5, "1 + 3");
+  build(s, text);
+  const auto& edited = s.get<pl::Tu>(tu);
+  check(edited.object.has_value(), pl::Tu::errors(edited));
+  if (!edited.object) return;
+  auto repacked = bytes_of(*edited.object, "_packed");
+  check(repacked.size() >= 4 && repacked[0] == 0x13 && repacked[1] == 0x01,
+        "editing a bit-field width republishes the layout and static object bytes");
+}
+
+void unnamed_union_members() {
+  const std::string value = "union { unsigned code; char bytes[12]; } value, mirror;\n";
+  const std::string spare = "union { unsigned code; char bytes[12]; } spare;\n";
+  const std::string rest = R"cpp(
+  short suffix;
+} State;
+typedef struct { union { unsigned code; char bytes[12]; } value; } Other;
+extern State state;
+extern Other other;
+static_assert(sizeof(State) == 44 && alignof(State) == 4);
+static_assert(sizeof(decltype(state.value)) == 12 && alignof(decltype(state.value)) == 4);
+static_assert(__is_union(decltype(state.value)));
+static_assert(__is_same(decltype(state.value), decltype(state.mirror)));
+static_assert(!__is_same(decltype(state.value), decltype(state.spare)));
+static_assert(!__is_same(decltype(state.value), decltype(other.value)));
+void value_type(decltype(state.value)*) {}
+void spare_type(decltype(state.spare)*) {}
+int main() {
+  State s{};
+  s.value.code = 7;
+  s.mirror.code = 3;
+  s.spare.code = 9;
+  return s.value.code + s.mirror.code + s.spare.code - 19;
+}
+)cpp";
+  pl::Session s;
+  for (bool swapped : {false, true}) {
+    std::string text = "typedef struct { char prefix;\n" + (swapped ? spare + value : value + spare) + rest;
+    build(s, text);
+    constexpr pl::TuId peer{1};
+    s.set_source(peer, "union-peer.cpp", text, "union-peer.o");
+    const auto& front = s.get<pl::TuFront>(tu);
+    check(!front.has_errors(), pl::TuFront::errors(front));
+    const auto& peer_front = s.get<pl::TuFront>(peer);
+    check(!peer_front.has_errors() && front.shapes.classes.size() == 5 &&
+              std::ranges::equal(front.shapes.classes, peer_front.shapes.classes, {}, &pl::ClassShape::entity, &pl::ClassShape::entity),
+          "unnamed nested union identities correspond across translation units");
+    const auto& result = s.get<pl::Tu>(tu);
+    check(result.object.has_value(), pl::Tu::errors(result));
+    if (!result.object) continue;
+    const char* first = swapped ? "__Z10spare_typePN5StateUt_E" : "__Z10value_typePN5StateUt_E";
+    const char* second = swapped ? "__Z10value_typePN5StateUt0_E" : "__Z10spare_typePN5StateUt0_E";
+    check(std::ranges::contains(result.object->symbols, first, &ycxx::obj::symbol::name) &&
+              std::ranges::contains(result.object->symbols, second, &ycxx::obj::symbol::name),
+          "unnamed sibling union types mangle in lexical order");
+    const pl::Linked& l = s.get<pl::Link>(program);
+    check(l.errors.empty() && l.image == cold(text), "after changing union order, incremental equals cold");
+  }
+
+  for (const std::string source : {
+           "struct S { union { int variant; } member; }; int get(S* s) { return s->variant; }",
+           "struct S { union { int variant; }; };",
+           "class S { union { int variant; } member; }; int get(S* s) { return s->member.variant; }",
+           "struct S { union { int& variant; } member; };",
+           "struct S { union { int f() { return 0; } int variant; } member; };"}) {
+    build(s, source);
+    check(s.get<pl::TuFront>(tu).has_errors(), source);
+  }
+}
+
 // Nesting too deep for the stack (#187): on workers with 1 MiB stacks, 20,000 nested parentheses,
 // blocks, increments, `sizeof`s and braced lists are diagnosed, not a crash, and the session goes
 // on. The rest of the pipeline is #260.
@@ -443,6 +558,8 @@ int main() {
   pooled();
   pooled_units();
   records();
+  bit_fields();
+  unnamed_union_members();
   too_deep();
   return ycxx::unit::result("unit.pipeline_incremental");
 }

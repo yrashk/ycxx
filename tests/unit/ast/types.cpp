@@ -281,6 +281,30 @@ void constants() {
   check(in.canonical(da) == da && in.types.get<TArray>(da).bound == d, "T[N] holds VDepParam");
 }
 
+void bit_field_layout() {
+  for (const Target& target : {aarch64_darwin, x86_64_linux}) {
+    auto integer = scalar_placed(target[Builtin::int_].size, target[Builtin::int_].align);
+    auto character = scalar_placed(1, 1);
+    auto long_ = scalar_placed(target[Builtin::long_].size, target[Builtin::long_].align);
+    auto bits = [&](u8 width) {
+      Placed field = integer;
+      field.bit_width = width;
+      return field;
+    };
+    auto file_slice = record_layout({}, std::array{integer, bits(24), character, long_}, false, true, 0);
+    check(file_slice.offsets == std::vector<std::uint64_t>{0, 4, 7, 8} && file_slice.size == 16 && file_slice.align == 8 &&
+              file_slice.bit_fields[1].mask() == 0xffffffu && file_slice.bit_fields[1].bytes() == 3,
+          "the signed 24-bit field occupies exactly three bytes before the ordinary char");
+    auto common = record_layout({}, std::array{bits(3), bits(5), character}, false, true, 0);
+    check(common.offsets == std::vector<std::uint64_t>{0, 0, 1} && common.size == 4 &&
+              common.bit_fields[0].mask() == 0x07u && common.bit_fields[1].mask() == 0xf8u,
+          "consecutive fields can share one byte");
+    auto boundary = record_layout({}, std::array{bits(31), bits(2), character}, false, true, 0);
+    check(boundary.offsets == std::vector<std::uint64_t>{0, 4, 5} && boundary.size == 8,
+          "a bit-field that does not fit starts a fresh allocation unit");
+  }
+}
+
 void compaction() {
   // Lists held only by types survive compaction and are rewritten in place.
   Interners in;
@@ -309,6 +333,7 @@ int main() {
   promotions();
   arithmetic();
   constants();
+  bit_field_layout();
   compaction();
   return ycxx::unit::result("ast.types");
 }

@@ -26,6 +26,7 @@ struct ExprInfo {
   QualType type;
   ValueCategory category;
   u8 flags;  // manifestly constant-evaluated and the like (§3.7.7); defined with the parser
+  u8 bit_width = 0;  // a glvalue designating a bit-field ([expr.ref])
   constexpr bool operator==(const ExprInfo&) const = default;
 };
 

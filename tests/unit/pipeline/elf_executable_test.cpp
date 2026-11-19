@@ -39,6 +39,24 @@ obj::object main_in_data() {
   return object;
 }
 
+void add_initialization(obj::object& object) {
+  const auto text = object.add_section(obj::standard_section::text);
+  const auto init = object.add_section(obj::standard_section::init_array);
+  const auto fn = object.define("init", obj::binding::local, text);
+  // Check the AMD64 function-entry stack alignment and clobber main's argument registers.
+  object.sections[text].emit(std::array<std::uint8_t, 17>{
+      0x89, 0xe0,      // mov eax, esp
+      0x83, 0xe0, 15,  // and eax, 15
+      0x83, 0xf8, 8,   // cmp eax, 8
+      0x75, 5,         // jne invalid_alignment
+      0x31, 0xff,      // xor edi, edi
+      0x31, 0xf6,      // xor esi, esi
+      0xc3,            // ret
+      0x0f, 0x0b});    // invalid_alignment: ud2
+  object.sections[init].emit64(0);
+  object.sections[init].relocate(obj::reloc_kind::abs64, fn);
+}
+
 obj::object custom_start() {
   auto object = linux_object("start.o");
   const auto text = object.add_section(obj::standard_section::text);
@@ -102,7 +120,9 @@ int main(int argc, char** argv) {
   weak_main.symbols[0].weak = true;
   auto local_start = start;
   local_start.symbols[0].bind = obj::binding::local;
-  const std::array automatic_objects{weak_main, local_start, main_object};
+  auto initializers = linux_object("initializers.o");
+  add_initialization(initializers);
+  const std::array automatic_objects{weak_main, local_start, main_object, initializers};
   const std::array explicit_objects{main_object, start};
   const auto automatic = pipeline::link_executable(automatic_objects, "automatic");
   const auto explicit_start = pipeline::link_executable(explicit_objects, "explicit");
@@ -112,6 +132,10 @@ int main(int argc, char** argv) {
   check(automatic && pipeline::link_executable(automatic_objects, "other-name") == automatic,
         "Linux output is deterministic and independent of the Mach-O signature identifier");
   check(pipeline::link_executable(std::span(&start, 1), "start-only").has_value(), "caller startup can omit main");
+  auto start_with_empty_array = start;
+  start_with_empty_array.add_section(obj::standard_section::init_array);
+  check(pipeline::link_executable(std::span(&start_with_empty_array, 1), "empty-init").has_value(),
+        "caller startup can coexist with an empty initializer array");
 
   if (argc == 3 && automatic && explicit_start) {
     const auto auto_error = pipeline::write_file(argv[1], *automatic, true);

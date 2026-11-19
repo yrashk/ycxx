@@ -23,6 +23,7 @@ constexpr std::uint16_t et_rel = 1, em_x86_64 = 62, shn_loreserve = 0xff00;
 constexpr std::uint16_t header_size = 64, section_header_size = 64;
 constexpr std::uint64_t symbol_size = 24, rela_size = 24;
 constexpr std::uint32_t sht_progbits = 1, sht_symtab = 2, sht_strtab = 3, sht_rela = 4, sht_nobits = 8;
+constexpr std::uint32_t sht_init_array = 14;
 constexpr std::uint64_t shf_write = 1, shf_alloc = 2, shf_execinstr = 4, shf_info_link = 0x40;
 constexpr std::uint8_t stt_notype = 0, stb_local = 0, stb_global = 1, stb_weak = 2;
 constexpr std::uint8_t stv_default = 0, stv_hidden = 2;
@@ -43,6 +44,7 @@ constexpr std::array standard_sections{
     section_mapping{standard_section::data_const, "__DATA", "__const", ".data.rel.ro", sht_progbits, shf_alloc | shf_write},
     section_mapping{standard_section::data, "__DATA", "__data", ".data", sht_progbits, shf_alloc | shf_write},
     section_mapping{standard_section::bss, "__DATA", "__bss", ".bss", sht_nobits, shf_alloc | shf_write},
+    section_mapping{standard_section::init_array, "__DATA", "__init_array", ".init_array", sht_init_array, shf_alloc | shf_write},
 };
 
 struct relocation_mapping {
@@ -188,9 +190,12 @@ std::expected<bytes, std::string> write_object(const object& o) {
     }
     if (s.align_log2 >= std::numeric_limits<std::ptrdiff_t>::digits)
       return fail(std::format("alignment of section {} exceeds the ELF writer's limit", mapping->name));
+    const bool init_array = mapping->type == sht_init_array;
+    if (init_array && (s.flags != section_flags::regular || s.zerofill_size != 0 || s.align_log2 != 3 || s.size() % 8 != 0))
+      return fail("invalid ELF .init_array flags, alignment or size");
     section_names.push_back(mapping->name);
     add_section(mapping->name, {.type = mapping->type, .flags = mapping->flags, .size = s.size(),
-                                .align = std::uint64_t{1} << s.align_log2}, s.bytes);
+                                .align = std::uint64_t{1} << s.align_log2, .entsize = init_array ? 8u : 0u}, s.bytes);
   }
 
   // The ABI puts local symbols before nonlocal symbols. Keep input order within each group,
@@ -342,8 +347,10 @@ std::expected<object, std::string> read_object(std::span<const std::uint8_t> fil
         h.size == 0 && h.link == 0 && h.info == 0 && h.entsize == 0) continue;
     const auto mapping = std::ranges::find(standard_sections, section_name, &section_mapping::name);
     if (mapping == standard_sections.end() || h.type != mapping->type || h.flags != mapping->flags ||
-        h.link != 0 || h.info != 0 || h.entsize != 0)
+        h.link != 0 || h.info != 0 || (h.entsize != 0 && !(h.type == sht_init_array && h.entsize == 8)))
       return fail(std::format("unsupported ELF section '{}'", section_name));
+    if (h.type == sht_init_array && (h.align != 8 || h.size % 8 != 0))
+      return fail("invalid ELF .init_array alignment or size");
     auto s = section::standard(mapping->kind);
     s.align_log2 = static_cast<std::uint8_t>(std::countr_zero(h.align == 0 ? std::uint64_t{1} : h.align));
     if (h.type == sht_nobits) s.zerofill_size = h.size;

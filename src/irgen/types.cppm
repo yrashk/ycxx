@@ -37,6 +37,8 @@ class TypeFacts {
   // A class's direct base classes in declaration order ([class.derived]), from whoever knows the
   // classes: an aggregate's first elements ([dcl.init.aggr]/2).
   std::function<std::vector<ast::EntityId>(ast::EntityId)> bases_of = [](ast::EntityId) { return std::vector<ast::EntityId>{}; };
+  std::function<std::uint8_t(ast::EntityId, std::uint32_t)> bit_field_width =
+      [](ast::EntityId, std::uint32_t) -> std::uint8_t { return 0; };
 
   TypeClass classify(ast::QualType q) const {
     if (is_reference(q)) return TypeClass::pointer;
@@ -63,7 +65,7 @@ class TypeFacts {
     return {ast::is_signed(*target_, b), ast::width_of(*target_, b)};
   }
 
-  ast::QualType promoted(ast::QualType q) { return ast::promoted(*in_, *target_, q); }
+  ast::QualType promoted(ast::QualType q, std::uint8_t width = 0) { return ast::promoted(*in_, *target_, q, width); }
   // Pointee and element types keep their cv: `pointer_to` of them must give the same pointer type.
   ast::QualType pointee(ast::QualType q) const { return in_->canonical(ast::pointee_of(*in_, q)); }
   // A class type's class.

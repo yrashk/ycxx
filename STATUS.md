@@ -583,12 +583,16 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   value. The link query checks a source function's ABI when an asm label gives it the symbol
   `main`. A `main` supplied in an ELF object must already use one of those signatures. Hosted
   linking and general-purpose ELF object interoperability remain unsupported.
-- ELF code generation diagnoses translation units that require namespace-scope dynamic
-  initialization or destruction. Syntax-only analysis still accepts them.
+- ELF objects record namespace-scope initializer functions in `.init_array`, with 8-byte slots
+  and `R_X86_64_64` relocations. The linker places arrays consecutively in input order and checks
+  each slot resolves into executable input bytes. Generated startup calls the functions before
+  `main` ([basic.start.dynamic]). A custom `_start` with a nonempty array is a link error.
   [#387](https://github.com/yrashk/ycxx/issues/387)
+- ELF code generation diagnoses namespace-scope objects that require destruction at exit, at
+  their declaration. Syntax-only analysis accepts them. [#400](https://github.com/yrashk/ycxx/issues/400)
 - Linux x86-64 CI runs `unit.linux_compile`, which links ycxx-produced objects with native C
-  callers and variadic callees. It checks default promotions, register and stack arguments,
-  stack alignment and the incoming AL for both empty and nonempty ellipses.
+  callers and variadic callees. It checks namespace initialization, default promotions, register
+  and stack arguments, stack alignment and the incoming AL for both empty and nonempty ellipses.
   `unit.linux_executable` (`tests/unit/pipeline/linux_executable.py`) runs
   source-only, object-only and mixed-input executables and checks exit status, `argc` and `argv`,
   diagnostics, and cold and daemon output. The linker and startup also have native CTest
@@ -1036,6 +1040,19 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
 - A floating local no longer stops constant evaluation in its function (the thunk skips it).
 - Tests: `tests/own/unions` (7, three from the review). Six more draft examples pass.
 
+## Unnamed union types in named data members (#203)
+
+- A non-template class can declare a data member with an unnamed union type as in glibc's `__mbstate_t`.
+  The nested type uses ordinary union layout and access through the named member. Declarators
+  following one union definition share its type.
+- Astra recommended the enclosing class and lexical unnamed-type ordinal as the type's identity
+  across translation units. The splitter distinguishes identical sibling definitions and their
+  members with the ordinal, and the Itanium mangler uses it for `Ut_`, `Ut0_`, and later names.
+- `unit.items` checks the splitter's ordinals and item identities. `unit.pipeline_incremental`
+  checks layout, member lookup, mangling, and cold and warm builds after swapping identical
+  sibling unions.
+- Anonymous union member injection and the other union extensions remain tracked in #203.
+
 ## `<cstdio>`, step 4c: operator functions; `<stdio.h>` compiles (#133, 2026-11-18)
 
 - **Operator functions** ([over.oper]): `operator@` declarator-ids for the overloadable
@@ -1409,6 +1426,13 @@ Fable decided the representation (ast.md §6.6); the Opus session wrote the code
   `tests/own/builtins/va-list.run.cpp`, `tests/own/builtins/unsupported.reject.cpp`, `tests/own/builtins/unknown-probe.accept.cpp`. `<cstdio>`: 25 errors before and after, and no warning
   (was 1). `<cmath>` and `<cstdlib>` gain errors in the SDK's `__GNUC__` inline functions (local
   unions, floating-point operations, `__builtin_fabs*`), which already had thousands.
+
+## GNU pointer qualifiers in glibc declarations (#384)
+
+- The parser accepts `__restrict` and `__restrict__` after `*` in pointer declarators
+  ([dcl.ptr]), including the parameter declarations in glibc's `<stdio.h>`. Type construction
+  and alias analysis use the ordinary pointer rules. `unit.sema` covers both spellings and
+  invalid declarators. See `docs/EXTENSIONS.md`.
 
 ## Linux compiler resource `<stddef.h>` (#133)
 
@@ -1898,6 +1922,60 @@ values, end to end; results match Clang's bit for bit.
   its entity's from the function's entry, so a jump past its declaration finds it.
 - Not yet: inline functions' statics are per unit (#124); static references (#367).
 - Tests: `tests/own/static-locals/` (spec-only, 19 tests, a Clang peer in `mixed.run.cpp`).
+
+## Named `int` bit-fields (#307, 2026-11-19)
+
+- Ordinary unpacked, non-template classes without bases support named non-static `int` and
+  `unsigned int` bit-fields of width 1 through 32 ([class.bit]). The AST retains the width
+  in the declaration and member expressions. Sema and the back end share the target byte
+  and bit placement, including a signed 24-bit member followed by an ordinary byte.
+- In the native pipeline, field projections carry the record pointer and field index. Loads
+  sign-extend signed values and stores mask only the field's occupied bytes. Static aggregate
+  initialization uses the same layout. Width-aware integer promotions apply in built-in
+  arithmetic, shifts, and the other promotion contexts ([conv.prom]).
+- Remaining scope in #307 includes other declared types, unnamed fields, union variants,
+  templates, packed layout, default member initializers, reference binding, volatile access,
+  bit-field conditional glvalues, and constant evaluation of bit-field access. The preprocessor
+  still passes `#pragma pack` through for `-E`.
+- Tests cover widths and alignments on both targets, hard diagnostics, static data bytes and a
+  width edit in `unit.ast_types`, `unit.sema` and `unit.pipeline_incremental`.
+
+## Range-based `for`, ι (#298, #337, 2026-11-19)
+
+- **Parser** (src/parse/parser.cppm `range_for`): `for ( init-statement_opt decl : initializer )`
+  (`range_for_ahead` finds the `:`, past `?:`) is built as [stmt.ranged] expands it, from existing
+  kinds: hidden locals `auto&& __range`, `auto __begin`, `auto __end` (`deduce_placeholder`),
+  then a `For` over `__begin != __end` and `++__begin` whose body declares the loop variable from
+  `*__begin`. An array supplies its begin and one-past-end pointers. A class supplies member calls
+  when member lookup finds both names, including inherited members. The fallback uses ordinary
+  lookup for `begin(__range)` and `end(__range)` until #165 supplies ADL-only lookup. The loop
+  variable and init-statement names are in the guarded scope ([basic.scope.block]/2). A dependent
+  range is expanded at instantiation.
+- Remaining work covers ADL-only nonmember lookup (#165), C++23 lifetime extension for
+  temporaries inside the range initializer (#376), braced ranges (#329), and sentinels that rely on
+  `!=` rewritten from `==` (#295). A constexpr reference requires a constexpr overloaded
+  dereference. Full constant evaluation of the class iterator still needs #25.
+- Tests: `tests/own/range-for/` (17 from the independent author and nine review regressions).
+
+## The address of an overload set, ι (#313, #337, 2026-11-19)
+
+- A pointer or reference target picks a free or static member function by its function type
+  ([over.over]). Targets include initializers, assignments, arguments and return values, and
+  casts. List-initialization applies the target to each scalar element, including elements of
+  an array with a deduced bound.
+- Function template deduction uses the entire target type ([temp.deduct.funcaddr]). Selection
+  checks associated constraints, prefers a non-template function, and partially orders
+  matching templates by their full function types. A call can also deduce fixed function or
+  function-pointer parameters by trying the non-template members of an overload set
+  ([temp.deduct.call]/6).
+- Related work covers pointers to non-static members (#238), `noexcept` function types (#219),
+  a template-id without a target type (#335), and function pointer or reference template
+  arguments (#406). A free immediate function selected from an overload is diagnosed outside an
+  immediate invocation or context. General immediate-function name validation is tracked in #102.
+- The Linux x86-64 backend can call through an address taken from an internal function. Emitting
+  addresses of externally linked functions on that target is tracked in #407.
+- Tests are in `tests/own/function-pointers/`, with draft examples for [over.over] and
+  [temp.deduct.call] enabled.
 
 ## Pointer-to-member types and declarators (#238)
 

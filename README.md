@@ -42,9 +42,10 @@ build/bin/ycxx cxx hello.cpp -o hello && ./hello
 
 **Compile for x86-64 Linux.** Select `--target=x86_64-pc-linux-gnu` to compile with the scalar
 System V AMD64 backend. Use `-c` to write an ELF object, or `-nostdlib` to link C++ sources,
-ycxx-generated `.o` files, or a mixture into a static executable. The startup calls `int main()`
-or `int main(int, char**)` and passes its return value to Linux as the exit status. A program can
-also supply its own `_start`. For example, given `example.cpp` containing
+ycxx-generated `.o` files, or a mixture into a static executable. The startup runs namespace-scope
+initializers, then calls `int main()` or `int main(int, char**)` and passes its return value to Linux
+as the exit status. A program without such initializers can supply its own `_start`. Given
+`example.cpp` containing
 `int main() { return 0; }`, run the following on x86-64 Linux.
 
 ```sh
@@ -63,19 +64,25 @@ INTEGER ABI subset. Use the host linker to link these objects with libc.
   conversions giving Clang's results bit for bit, and passing and returning them (classes of
   floating members included) by Clang's calling convention;
   all operators, and the statements: `switch`, labels and `goto`, declarations in conditions,
-  and init-statements in `if` and `switch` (not yet range-based `for`); functions with default
-  arguments, recursion and overloading, operator functions included;
-- classes and unions: data and static members, member functions, constructors and destructors
+  init-statements in `if` and `switch`, and range-based `for` over arrays or classes with
+  `begin` and `end`, with optional init-statements. Functions support default arguments,
+  recursion, operator overloading and calls through pointers. A pointer or reference target type
+  can select a free or static member overload.
+- classes and unions: data and static members, named data members of unnamed union type,
+  member functions, constructors and destructors
   with RAII, aggregate and designated initialization, namespace-scope objects initialized by
   code before `main` and destroyed after it, block-scope `static` variables initialized once, passing and returning them by value with
   Clang's calling convention, so ycxx and Clang objects call each other; access control
   (`public`, `protected`, `private`) and friend functions and classes;
+- named `int` and `unsigned int` bit-fields of width 1 through 32 in ordinary unpacked,
+  non-template classes without bases;
 - single and multiple inheritance (not virtual): base classes laid out as Clang does, member
   lookup through bases, derived-to-base conversions, base initializers;
 - namespaces, nested (`namespace a::b`) and inline ones, typedefs and alias declarations,
   `using` declarations and directives;
-- `[[…]]` attributes, the GNU attributes and `asm` labels the macOS SDK's headers use, and the
-  type-trait built-ins libycxx's headers use (`__is_same`, `__remove_cv`, …)
+- `[[…]]` attributes, the GNU attributes and `asm` labels the macOS SDK's headers use, the
+  GNU pointer qualifiers glibc uses, and the type-trait built-ins libycxx's headers use
+  (`__is_same`, `__remove_cv`, …)
   ([docs/EXTENSIONS.md](docs/EXTENSIONS.md));
 - templates: function, class and variable templates, deduction, partial ordering, explicit and
   partial specializations, static constexpr members of class templates, member function and
@@ -146,14 +153,13 @@ declarations, type traits and requires-expressions. [#238](https://github.com/yr
   templates and their members.
 - Exceptions, optimization (`-O`), and the extended floating-point types (`std::float16_t`, …).
 - Hosted linking and general-purpose ELF object interoperability for x86-64 Linux.
-- Namespace-scope dynamic initialization and destruction for x86-64 Linux.
-  [#387](https://github.com/yrashk/ycxx/issues/387)
+- Namespace-scope destruction for x86-64 Linux. [#400](https://github.com/yrashk/ycxx/issues/400)
 
 ### In progress
 
 - Standard headers, starting with `<cstdio>` ([#133](https://github.com/yrashk/ycxx/issues/133)).
 - ι: statements and declarations, the C++98/11 core: default arguments, block-scope statics,
-  range-based `for`, casts and arrays ([#337](https://github.com/yrashk/ycxx/issues/337)).
+  casts and arrays ([#337](https://github.com/yrashk/ycxx/issues/337)).
 - `auto` and lambdas ([#278](https://github.com/yrashk/ycxx/issues/278)): placeholder types,
   lambdas and generic lambdas are done; constexpr lambdas wait on class objects in the
   interpreter ([#262](https://github.com/yrashk/ycxx/issues/262)).

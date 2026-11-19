@@ -139,6 +139,7 @@ struct ClassShape {
   // Trivially copyable for calls ([class.temporary]/3): no non-trivial copy constructor or
   // destructor, and the copy not deleted, so the calling convention may pass it in registers.
   bool trivial_calls = true;
+  std::vector<std::uint8_t> bit_widths{};  // parallel to fields, empty for ordinary records
 };
 struct EnumShape {
   EntityId entity = EntityId::none;
@@ -157,8 +158,9 @@ struct TranslationUnit {
   std::vector<Variable> variables;     // the definitions
   EntityId main = EntityId::none;      // the program's `main`, if this unit defines it
   // Its initialization functions ([basic.start.dynamic]), in order, each with the entity of its
-  // `__mod_init_func` pointer.
+  // startup array slot.
   std::vector<std::pair<EntityId, EntityId>> init_functions;
+  std::optional<ast::Loc> namespace_destruction;  // first variable whose destructor runs at exit
   bool front_failed = false;           // the front end reported errors: nothing to compile
 };
 
@@ -714,10 +716,15 @@ std::optional<ClassLayout> QueryLayout::class_layout(QualType c) const {
   if (it == classes_.end()) return std::nullopt;
   std::vector<ast::Placed> bases, places;
   for (EntityId b : it->second->bases) bases.push_back(placed(in.intern_type(ast::TClass{b})));
-  for (QualType f : it->second->fields) places.push_back(placed(in.canonical(f)));
+  for (std::size_t i = 0; i < it->second->fields.size(); ++i) {
+    ast::Placed f = placed(in.canonical(it->second->fields[i]));
+    if (!it->second->bit_widths.empty()) f.bit_width = it->second->bit_widths[i];
+    places.push_back(std::move(f));
+  }
   ast::RecordLayout r = ast::record_layout(bases, places, it->second->union_, it->second->pod, key);
   ClassLayout out{r.size, std::uint32_t(r.align), {}, {}, r.placed};
-  for (std::size_t i = 0; i < r.offsets.size(); ++i) out.fields.push_back({r.offsets[i], in.canonical(it->second->fields[i])});
+  for (std::size_t i = 0; i < r.offsets.size(); ++i)
+    out.fields.push_back({r.offsets[i], in.canonical(it->second->fields[i]), r.bit_fields[i]});
   for (std::size_t i = 0; i < r.base_offsets.size(); ++i) out.bases.push_back({r.base_offsets[i], in.intern_type(ast::TClass{it->second->bases[i]})});
   class_layouts_[key] = out;
   return out;
@@ -860,6 +867,11 @@ class UnitFacts : public irgen::TypeFacts {
       for (const ClassShape& s : shapes.classes)
         if (s.entity == c) return s.bases;
       return std::vector<EntityId>{};
+    };
+    bit_field_width = [&shapes](EntityId c, std::uint32_t field) -> std::uint8_t {
+      for (const ClassShape& shape : shapes.classes)
+        if (shape.entity == c && field < shape.bit_widths.size()) return shape.bit_widths[field];
+      return 0;
     };
   }
   ConstId string_address(ConstId c) { return universe().consts->address_of(c); }
@@ -1133,6 +1145,17 @@ std::expected<void, std::string> place_value(const ast::Interners& in, const Que
     ir::Step step = l.kind == ir::TypeKind::array ? ir::Step::elem : ir::Step::field;
     for (std::uint32_t i = 0; i < elems.size(); ++i) {
       ir::SubObject s = layout.step(type, {step, i});
+      if (s.bit_field) {
+        if (!in.values.is<ast::VInt>(elems[i])) return std::unexpected("a bit-field initializer is not an integer");
+        const auto bits = s.bit_field;
+        auto value = std::uint32_t(in.values.get<ast::VInt>(elems[i]).bits.lo) << bits.shift;
+        for (std::uint32_t byte = 0; byte < bits.bytes(); ++byte) {
+          auto mask = std::uint8_t(bits.mask() >> (8 * byte));
+          auto& dst = out.bytes[offset + s.offset + byte];
+          dst = std::uint8_t((dst & ~mask) | ((value >> (8 * byte)) & mask));
+        }
+        continue;
+      }
       if (auto r = place_value(in, layout, s.type, elems[i], offset + s.offset, out); !r) return r;
     }
     return {};
@@ -1193,7 +1216,7 @@ std::expected<obj::object, aarch64::CodegenError> assemble_linux(
   using K = aarch64::DataKind;
   using S = obj::standard_section;
   for (auto [kind, section] : {std::pair{K::cstring, S::cstring}, {K::rodata, S::rodata}, {K::data_const, S::data_const},
-                               {K::data, S::data}, {K::bss, S::bss}}) {
+                               {K::data, S::data}, {K::bss, S::bss}, {K::init_func, S::init_array}}) {
     if (!std::ranges::contains(data, kind, &aarch64::DataDef::kind)) continue;
     const std::uint32_t index = o.add_section(section);
     obj::section& sec = o.sections[index];
@@ -1236,11 +1259,8 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
     errors.push_back({std::nullopt, "the translation unit has errors"});
     co_return out;
   }
-  if (linux && !tu.init_functions.empty()) {
-    const auto init = std::ranges::find(tu.functions, tu.init_functions.front().first, &FunctionDef::entity);
-    std::optional<ast::Loc> at;
-    if (init != tu.functions.end()) at = ast::Loc{init->item, init->body_offset};
-    errors.push_back({at, "namespace-scope dynamic initialization and destruction are not supported on x86-64 Linux"});
+  if (linux && tu.namespace_destruction) {
+    errors.push_back({tu.namespace_destruction, "namespace-scope destruction is not supported on x86-64 Linux"});
     co_return co_await locate_errors(cx, id, std::move(out));
   }
   std::vector<FnKey> fns;
@@ -1288,7 +1308,7 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
   }
 
   std::vector<aarch64::Symbol> symbols;
-  // The pointers to the initialization functions that dyld calls before `main`, in order.
+  // The pointers to the initialization functions that startup calls before `main`, in order.
   for (std::size_t i = 0; i < tu.init_functions.size(); ++i) {
     auto [fn, slot] = tu.init_functions[i];
     data.push_back({slot, aarch64::DataKind::init_func, std::vector<std::uint8_t>(8, 0), 0, 8, {{0, fn, 0}}});
@@ -1333,7 +1353,8 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
     const sema::EntityRec& r = w->entities.rec(c);
     ClassName n{std::string(w->ins.names.spelling(r.name)), r.scope, r.templ, r.args,
                 r.kind == sema::EntityKind::class_ || r.kind == sema::EntityKind::class_template};
-    if (r.kind == sema::EntityKind::class_ && n.name.empty() && r.scope != EntityId::none) {
+    n.unnamed_type_ordinal = r.unnamed_type_ordinal;
+    if (r.kind == sema::EntityKind::class_ && n.name.empty() && r.scope != EntityId::none && !n.unnamed_type_ordinal) {
       auto f = by_id.find(ir::raw(r.scope));
       n.closure = true;
       n.closure_type = r.type;

@@ -55,7 +55,7 @@ inline constexpr u8 specialization = 128;  // an explicit specialization's: no n
 
 // One name an item declares, in token order; its ordinal is its `DeclOrd` number (ast.md §4.1).
 struct DeclName {
-  std::string name;  // an identifier, or `operator+`, `operator int`, `~S`, `operator""_x`
+  std::string name;  // empty for an unnamed class head, otherwise the spelling used for lookup
   u32 offset = 0;    // of its token, relative to the item's first token
   u32 ordinal = 0;
   u8 flags = 0;
@@ -87,6 +87,7 @@ struct Item {
   std::vector<u32> members;  // nested items, by index
   u32 parent = none;
   std::string scope;  // the syntactic scope path: enclosing namespaces and classes, `::`-joined
+  u32 unnamed_type_ordinal = none;  // the class scope's unnamed types in declaration order (Itanium §5.1.5.5)
   u32 ordinal = 0;    // earlier siblings with the same scope and declaration-part tokens
   Fp128 id;           // §B1.2: file identity, scope path, declaration-part tokens, ordinal
   Fp128 body;         // the body's tokens; zero without a body
@@ -140,7 +141,8 @@ public:
 
   // Splits items until `}` (not consumed) or the end, into `list`.
   void list(u32 parent, const std::string& scope, std::vector<u32>& list) {
-    while (kind(i_) != Tk::eof && kind(i_) != Tk::r_brace) list.push_back(item(parent, scope));
+    u32 unnamed_types = 0;
+    while (kind(i_) != Tk::eof && kind(i_) != Tk::r_brace) list.push_back(item(parent, scope, unnamed_types));
   }
   // At the top level an unmatched `}` is a stray item.
   void top() {
@@ -207,8 +209,8 @@ private:
     return j;
   }
 
-  u32 item(u32 parent, const std::string& scope);
-  void general(u32 k);
+  u32 item(u32 parent, const std::string& scope, u32& unnamed_types);
+  void general(u32 k, u32& unnamed_types);
   u32 ctor_initializer(u32 j);
   // Whether the tokens between a class-key and `{` are a class-head ([class.pre]): attributes,
   // one (qualified, possibly template) name, `final`; not `struct S s{1}`.
@@ -238,10 +240,6 @@ private:
   u32 nested(u32 k, u32 open, const std::string& scope);
   // The name a class-head declares: the last identifier outside template arguments, attributes
   // and `final` ([class.pre]); empty for an unnamed class.
-  std::string_view class_name(u32 key, u32 end) const {
-    u32 at = class_name_token(key, end);
-    return at == 0 ? std::string_view{} : r_.name(r_.tokens[at]);
-  }
   u32 class_name_token(u32 key, u32 end) const {
     u32 at = 0;
     int angle = 0;
@@ -258,12 +256,10 @@ private:
   }
   // The scope a class's members are in: its name, and the template arguments of a specialization
   // (`X<T*>`), so a partial or explicit specialization's members are not its template's.
-  std::string class_scope(u32 key, u32 end) const {
-    u32 at = class_name_token(key, end);
-    if (at == 0) return "(anonymous)";
-    std::string r(r_.name(r_.tokens[at]));
-    if (kind(at + 1) == Tk::less)
-      for (u32 n = at + 1, close = match_angle(at + 1); n < close && n < end; ++n) r += r_.spelling(r_.tokens[n]);
+  std::string class_scope(u32 name, u32 end) const {
+    std::string r(r_.name(r_.tokens[name]));
+    if (kind(name + 1) == Tk::less)
+      for (u32 n = name + 1, close = match_angle(name + 1); n < close && n < end; ++n) r += r_.spelling(r_.tokens[n]);
     return r;
   }
 
@@ -273,7 +269,7 @@ private:
 
 };
 
-u32 Splitter::item(u32 parent, const std::string& scope) {
+u32 Splitter::item(u32 parent, const std::string& scope, u32& unnamed_types) {
   u32 k = add(parent, scope);
   u32 j = i_;
   at(k).begin = j;
@@ -350,7 +346,7 @@ u32 Splitter::item(u32 parent, const std::string& scope) {
     j = match_angle(j + 1);
   }
   i_ = j;
-  general(k);
+  general(k, unnamed_types);
   return k;
 }
 
@@ -396,12 +392,13 @@ bool begins_declaration_only(Tk t) {
 }
 
 // Any other item: a declaration, or a definition of a function, class or enum.
-void Splitter::general(u32 k) {
+void Splitter::general(u32 k, u32& unnamed_types) {
   u32 j = i_;
   bool initializer = false;  // a depth-0 `=` was seen: braces are initializers
   bool params = false;       // a declarator's parameter list was seen
   u32 class_key = none;      // the class-key or `enum` of a class-head, if any
   bool base_clause = false;  // a `:` after the class-key, before any parameter list
+  bool typedef_ = false;
   auto finish_body = [&](u32 body_begin, u32 end) {
     at(k).kind = ItemKind::function;
     at(k).body_begin = body_begin;
@@ -494,6 +491,10 @@ void Splitter::general(u32 k) {
       if (class_key == none && !initializer && !params) class_key = j;
       ++j;
       continue;
+    case Tk::kw_typedef:
+      typedef_ = true;
+      ++j;
+      continue;
     case Tk::l_brace:
       if (initializer) {
         j = match(j);
@@ -502,6 +503,12 @@ void Splitter::general(u32 k) {
       if (class_key != none && (base_clause || (!params && is_class_head(class_key, j)))) {
         // A class or enum body; declarators may follow it.
         bool is_enum = kind(class_key) == Tk::kw_enum;
+        u32 name = class_name_token(class_key, j);
+        u32 alias = name == 0 && typedef_ ? match(j) : 0;
+        bool named_by_typedef = alias != 0 && kind(alias) == Tk::identifier;
+        u32 parent = at(k).parent;
+        if (name == 0 && !named_by_typedef && parent != none && at(parent).kind == ItemKind::class_def)
+          at(k).unnamed_type_ordinal = unnamed_types++;
         at(k).kind = is_enum ? ItemKind::enum_def : ItemKind::class_def;
         if (is_enum) {
           at(k).brace_begin = j;
@@ -509,7 +516,10 @@ void Splitter::general(u32 k) {
         } else {
           std::string inner = at(k).scope;
           if (!inner.empty()) inner += "::";
-          inner += class_scope(class_key, j);
+          if (name != 0) inner += class_scope(name, j);
+          else if (named_by_typedef) inner += r_.name(r_.tokens[alias]);
+          else if (at(k).unnamed_type_ordinal != none) inner += std::format("(unnamed type {})", at(k).unnamed_type_ordinal);
+          else inner += "(anonymous)";
           j = nested(k, j, inner);
         }
         // A `;` missing after the body ([class.pre], [dcl.enum]): what follows can only begin a
@@ -702,6 +712,8 @@ private:
       }
       add(k, std::string(name(head)), head,
           name_flag::type | name_flag::definition | (friend_ ? name_flag::friend_ : 0));
+    } else if (!is_enum && it.unnamed_type_ordinal != none) {
+      add(k, {}, key, name_flag::type | name_flag::definition);
     }
     if (is_enum) {
       // Enumerators: the identifier at the start of each comma-separated entry.
@@ -1018,6 +1030,7 @@ Items split(const pp::Region& r, Fp128 file) {
       Hasher h;
       h.fp(item_seed).fp(file);
       h.uint(static_cast<std::uint64_t>(out.items[k].scope.size())).bytes(out.items[k].scope);
+      if (out.items[k].unnamed_type_ordinal != none) h.uint(out.items[k].unnamed_type_ordinal);
       decl_tokens(out, k, [&](u32 j) { hash_token(h, r, r.tokens[j]); });
       Fp128 base = h.finish();
       Item& it = out.items[k];

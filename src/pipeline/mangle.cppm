@@ -56,6 +56,7 @@ struct ClassName {
   std::vector<ast::TemplateParamSema> closure_head{};  // its explicit template parameters
   std::uint32_t closure_number = 0;
   std::shared_ptr<const LocalFunction> local{};
+  std::optional<std::uint32_t> unnamed_type_ordinal{};
 };
 using ClassNames = std::function<ClassName(ast::EntityId)>;
 
@@ -324,7 +325,7 @@ class Mangler {
       candidates_.push_back(key);
       return r;
     }
-    if (n.name.empty()) return std::unexpected("a class whose name is unknown");
+    if (n.name.empty() && !n.unnamed_type_ordinal) return std::unexpected("a class whose name is unknown");
     if (n.templ != ast::EntityId::none) {
       // <unscoped-template-name> <template-args>, or inside a namespace a <nested-name> ending in
       // them: the template's name and the specialization are candidates (§5.1.5.3, §5.1.10).
@@ -332,7 +333,7 @@ class Mangler {
       if (!r) return r;
       return n.scope != ast::EntityId::none ? "N" + *r + "E" : *r;
     }
-    std::string r = source_name(n.name);
+    std::string r = class_component(n);
     if (n.scope != ast::EntityId::none) {
       auto p = prefix(n.scope);
       if (!p) return p;
@@ -357,7 +358,7 @@ class Mangler {
       candidates_.push_back(key);
       return r;
     }
-    if (n.name.empty()) return std::unexpected("a scope whose name is unknown");
+    if (n.name.empty() && !n.unnamed_type_ordinal) return std::unexpected("a scope whose name is unknown");
     if (n.templ != ast::EntityId::none) return specialization_prefix(e, n);
     std::string r;
     if (n.scope != ast::EntityId::none) {
@@ -365,9 +366,15 @@ class Mangler {
       if (!p) return p;
       r = *p;
     }
-    r += source_name(n.name);
+    r += class_component(n);
     candidates_.push_back(key);
     return r;
+  }
+  // <unnamed-type-name> ::= Ut [<number>] _ (Itanium ABI §5.1.5.5).
+  static std::string class_component(const ClassName& n) {
+    if (!n.unnamed_type_ordinal) return source_name(n.name);
+    std::uint32_t ordinal = *n.unnamed_type_ordinal;
+    return "Ut" + (ordinal ? std::to_string(ordinal - 1) : "") + "_";
   }
   // <lambda-sig> ::= <template-param-decl>* <parameter type>+: a generic lambda's explicit
   // template parameters, then its parameters' types (§5.1.8; `Ty` as Clang has it).

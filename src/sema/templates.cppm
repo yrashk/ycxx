@@ -44,7 +44,8 @@ struct Bindings {
 struct ArgShape {
   QualType type{};
   bool lvalue = false;
-  bool deducible = true;  // false for a braced-init-list or an overload set: a non-deduced context
+  bool deducible = true;  // false for an argument that does not supply one type
+  std::vector<QualType> overloads{};  // non-template overloads for trial deduction
 };
 
 // How far a deduced A may differ from A at the top of a P/A pair ([temp.deduct.call]/4): with
@@ -988,10 +989,14 @@ public:
     for (auto& a : given.levels[depth])
       if (a && a->kind == TemplateArgKind::pack) a = std::nullopt;
     for (std::size_t i = 0; i < fixed && i < args.size(); ++i) {
-      if (!args[i].deducible) continue;
+      if (!args[i].deducible && args[i].overloads.empty()) continue;
       auto p0 = substitute(tmpl_param_type(tmpl, i), given);
       if (!p0) return std::nullopt;
       if (!mentions(*p0, depth)) continue;  // checked by overload resolution as a conversion
+      if (!args[i].overloads.empty()) {
+        if (!deduce_overload_argument(*p0, args[i], depth, out)) return std::nullopt;
+        continue;
+      }
       auto [p, a, allow] = call_pair(*p0, args[i], depth);
       if (!deduce(p, a, depth, out, allow)) return std::nullopt;
     }
@@ -1051,6 +1056,26 @@ public:
       allow.qualification = types().is_pointer(p);
     }
     return {p, a, allow};
+  }
+  // [temp.deduct.call]/6: try each non-template overload independently. Deduction from other
+  // parameters cannot disambiguate these trials, but it must agree with a unique result.
+  bool deduce_overload_argument(QualType param, const ArgShape& arg, u16 depth,
+                                std::vector<std::optional<TemplateArg>>& out) {
+    QualType base = types().referee(param);
+    if (types().is_pointer(base)) base = types().pointee(base);
+    if (!types().is_function(base)) return true;
+    std::optional<CallPair> chosen;
+    const auto saved = explicit_packs_;
+    for (QualType t : arg.overloads) {
+      CallPair pair = call_pair(param, {t, arg.lvalue}, depth);
+      std::vector<std::optional<TemplateArg>> trial(out.size());
+      const bool matched = deduce(pair.p, pair.a, depth, trial, pair.allow);
+      explicit_packs_ = saved;
+      if (!matched) continue;
+      if (chosen && types().canonical(chosen->a) != types().canonical(pair.a)) return true;
+      chosen = pair;
+    }
+    return !chosen || deduce(chosen->p, chosen->a, depth, out, chosen->allow);
   }
   // Explicitly specified template arguments, by parameter ([temp.arg.explicit]): one each, and a
   // pack takes the rest; a value converted to its parameter's type with the arguments before it
@@ -1237,20 +1262,25 @@ public:
     return r;
   }
 
-  // The arguments for which function template `tmpl` is the function of type `type`, after the
-  // explicitly specified `explicit_args` ([temp.deduct.decl]): what an explicit specialization
-  // of it specializes; none if there are none.
+  // The arguments for which `tmpl` is the function of type `type` ([temp.deduct.decl],
+  // [temp.deduct.funcaddr]). A placeholder return in address deduction is checked after
+  // instantiating the specialization.
   std::optional<std::vector<TemplateArg>> deduce_declaration(const ast::DeclSema& tmpl, QualType type,
-                                                             std::span<const TemplateArg> explicit_args) {
+                                                             std::span<const TemplateArg> explicit_args,
+                                                             bool address = false) {
     std::vector<ast::TemplateParamSema> params = w_->ins.seqs.elements(tmpl.template_params);
     if (params.empty()) return std::nullopt;
     Deducing deducing(this, params);
     u16 depth = params[0].depth;
     std::vector<std::optional<TemplateArg>> out(params.size());
     if (!explicit_into(params, explicit_args, out)) return std::nullopt;
-    if (!deduce(tmpl.type, type, depth, out)) return std::nullopt;
+    QualType pattern = tmpl.type;
+    TypeRec f = types().rec(pattern);
+    const bool deduced_result = address && types().has_placeholder(f.inner);
+    if (deduced_result) pattern = types().function(types().rec(type).inner, f.params, f.variadic, f.linkage, f.fn_cv);
+    if (!deduce(pattern, type, depth, out)) return std::nullopt;
     auto full = complete(tmpl, params, std::move(out));
-    if (!full) return std::nullopt;
+    if (!full || deduced_result) return full;
     auto t = specialization_type(tmpl, *full);
     if (!t || types().canonical(*t) != types().canonical(type)) return std::nullopt;
     return full;
@@ -1307,6 +1337,21 @@ public:
   }
 
   // ------------------------------------------------------------ partial ordering ([temp.func.order])
+
+  // An address compares the full function types, including their return types
+  // ([temp.deduct.partial]/3). A call compares only the parameters it supplies.
+  std::pair<bool, bool> address_ordering(const ast::DeclSema& f1, const ast::DeclSema& f2) {
+    auto at_least = [&](const ast::DeclSema& a, const ast::DeclSema& p) {
+      std::vector<ast::TemplateParamSema> ap = ins().seqs.elements(a.template_params);
+      std::vector<ast::TemplateParamSema> pp = ins().seqs.elements(p.template_params);
+      if (ap.empty() || pp.empty()) return false;
+      auto transformed = substitute(a.type, unique_bindings(ap));
+      std::vector<std::optional<TemplateArg>> out(pp.size());
+      Deducing deducing(this, pp);
+      return transformed && deduce(p.type, *transformed, pp[0].depth, out);
+    };
+    return {at_least(f1, f2), at_least(f2, f1)};
+  }
 
   // Partial ordering of function templates `f1` and `f2` for a call with `nargs` arguments
   // ([temp.deduct.partial]): whether `f1` is at least as specialized as `f2`, and the converse.

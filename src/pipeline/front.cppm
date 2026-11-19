@@ -213,7 +213,7 @@ void static_locals(sema::World& world, TranslationUnit& tu, FunctionDef& f, R& r
   }
 }
 
-// The unit's initialization function, which dyld runs before `main` (`__mod_init_func`): each
+// The unit's initialization functions, which startup runs before `main`: each
 // dynamic initialization in definition order ([basic.start.dynamic]/1), each destructor registered
 // with `__cxa_atexit` (Itanium C++ ABI §3.3.5). Named like Clang's, with internal linkage.
 void init_function_def(parse::Program& program, sema::World& world, TranslationUnit& tu, EntityId fn, QualType fn_type, ast::NodeId root,
@@ -239,7 +239,7 @@ void init_function(parse::Program& program, sema::World& world, TranslationUnit&
   EntityId dso = runtime.dso();
   QualType fn_type = types.function(void_, {}, false, ast::LangLinkage::cxx);
   const std::string base = "__GLOBAL__sub_I_" + std::filesystem::path(source).filename().native_encoded_string();
-  // One function per declaration, so that what fails points at it; dyld runs them in order.
+  // One function per declaration, so that what fails points at it; startup runs them in order.
   for (std::size_t first = 0, n = 0; first < dynamic.size(); ++n) {
     std::size_t last = first;
     while (last < dynamic.size() && dynamic[last].item == dynamic[first].item) ++last;
@@ -422,6 +422,7 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
       // destructor runs at exit ([basic.start.term]).
       ast::NodeId init = declarators[i]->value == ast::ConstId::none ? declarators[i]->init.id : ast::NodeId::none;
       EntityId dtor = world.types.is_reference(d.type) ? EntityId::none : program.classes().destructor_of(d.type);
+      if (dtor != EntityId::none && !tu.namespace_destruction) tu.namespace_destruction = at[i];
       if (init != ast::NodeId::none || dtor != EntityId::none) {
         dynamic.push_back({d.entity, d.type, init, dtor, k});
         tu.variables.back().dynamic = true;  // written at run time: by its initialization or its destructor
@@ -573,7 +574,10 @@ engine::query_task<FrontResult> TuFront::run(engine::Ctx& cx, TuId tu) {
   const sema::Classes& classes = program.classes();
   for (EntityId c : classes.classes()) {
     ClassShape& shape = out.shapes.classes.emplace_back(ClassShape{c, {}, {}});
-    for (const sema::FieldRec& f : classes.rec(c).fields) shape.fields.push_back(f.type);
+    const auto& fields = classes.rec(c).fields;
+    for (const sema::FieldRec& f : fields) shape.fields.push_back(f.type);
+    if (std::ranges::any_of(fields, [](const sema::FieldRec& f) { return f.bit_width != 0; }))
+      for (const sema::FieldRec& f : fields) shape.bit_widths.push_back(f.bit_width);
     shape.union_ = classes.rec(c).union_;
     shape.pod = classes.rec(c).pod;
     for (const sema::BaseRec& b : classes.rec(c).bases) shape.bases.push_back(b.cls);

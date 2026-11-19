@@ -109,6 +109,76 @@ void redeclarations_and_linkage() {
         "a string literal is an lvalue array");
 }
 
+void unsupported_bit_fields() {
+  for (std::string_view source : {
+           "struct F { unsigned a : 0; };",
+           "struct F { unsigned a : 33; };",
+           "struct F { unsigned a : -1; };",
+           "struct F { unsigned a : 3.0; };",
+           "int n; struct F { unsigned a : n; };",
+           "struct F { unsigned : 1; };",
+           "struct F { unsigned (a) : 1; };",
+           "struct F { volatile int a : 1; };",
+           "using I = const int; struct F { I a : 1; };",
+           "struct F { long a : 1; };",
+           "struct F { static int a : 1; };",
+           "struct F { unsigned a : 1 = 1; };",
+           "union F { unsigned a : 1; };",
+           "struct B {}; struct F : B { unsigned a : 1; };",
+           "template<class T> struct F { unsigned a : 1; };",
+           "struct F { template<class T> unsigned a : 1; };",
+           "struct __attribute__((packed)) F { unsigned a : 1; };"}) {
+    check(!Analysed(source).diags().empty(), source);
+  }
+  for (std::string_view source : {
+           "unsigned* test(F& f) { return &(f.a); }",
+           "unsigned* test(F& f) { return &(f.a = 1); }",
+           "unsigned* test(F& f) { return &(++f.a); }",
+           "auto test(F& f) { return sizeof((0, f.a)); }",
+           "unsigned& test(F& f) { return f.a; }",
+           "int test(F& f) { const unsigned& r = f.a; return r; }",
+           "unsigned test(volatile F& f) { return f.a; }",
+           "constexpr F f{3, 4}; static_assert(f.a == 3);",
+           "void test(bool b, F& f) { (b ? f.a : f.b) = 1; }"}) {
+    check(!Analysed("struct F { unsigned a : 3; unsigned b : 5; }; " + std::string(source)).diags().empty(), source);
+  }
+}
+
+void gnu_pointer_qualifiers() {
+  Analysed a(R"cpp(
+#define HEADER_RESTRICT __restrict
+int read_value(const int* HEADER_RESTRICT value);
+#undef HEADER_RESTRICT
+
+using Reader = int (*)(const int* __restrict__);
+static_assert(__is_same(decltype(&read_value), Reader));
+
+extern int* __restrict const volatile qualified;
+static_assert(__is_const(decltype(qualified)));
+static_assert(__is_volatile(decltype(qualified)));
+
+extern int* __restrict__ * const __restrict nested;
+void unnamed(void* __restrict);
+
+int restrict = 1;
+int use(const int* __restrict input) {
+  const int* __restrict__ copy = input;
+  return *copy + restrict;
+}
+)cpp");
+  check(a.pre.diags.empty() && a.diags().empty(), "GNU pointer qualifiers through preprocessing and parsing");
+
+  for (std::string_view invalid : {"int __restrict scalar;", "int* trailing __restrict;", "int __restrict__;"})
+    check(!Analysed(invalid).diags().empty(), invalid);
+
+  auto function = Analysed("extern int (* __restrict__ function_ptr)();").diags();
+  check(function.size() == 1 && function.front().id == sema::diag_id(sema::Diag::restrict_function_pointer),
+        "the qualifier cannot apply directly to a pointer to function");
+  auto duplicate = Analysed("extern int* __restrict __restrict__ pointer;").diags();
+  check(duplicate.size() == 1 && duplicate.front().id == sema::diag_id(sema::Diag::duplicate_specifier),
+        "the two spellings count as one qualifier");
+}
+
 void constants() {
   Analysed a(
       "const int N = 2 + 3;\n"
@@ -240,6 +310,8 @@ int main() {
   constant_evaluation();
   conversions_and_locals();
   redeclarations_and_linkage();
+  unsupported_bit_fields();
+  gnu_pointer_qualifiers();
   constants();
   assignments();
   diagnostics();
