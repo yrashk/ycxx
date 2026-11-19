@@ -36,9 +36,9 @@ std::expected<compile::Done, Failure> request_compile(Connection& c, const compi
 // nothing once the daemon has gone.
 std::expected<void, std::string> watch_traces(Connection& c, bool values);
 std::optional<TraceBatch> next_trace(Connection& c);
-// Waits until a file some build read changes (#245); how many entries changed, or why there is no
-// answer (the daemon stopped).
-std::expected<std::uint64_t, std::string> await_change(Connection& c);
+// Waits until a file some build read changes after revision `since` of daemon `pid` (#245); how
+// many batches changed something, or why there is no answer (the daemon stopped).
+std::expected<std::uint64_t, std::string> await_change(Connection& c, std::uint64_t since, std::int64_t pid);
 std::expected<Status, std::string> request_status(Connection& c);
 // Turns the connection into an LSP tunnel (§6.4): copies `in` to the daemon and the daemon's
 // answers to `out` until the session ends; its exit status, or why there is none.
@@ -157,14 +157,14 @@ std::optional<TraceBatch> next_trace(Connection& c) {
   return decode<TraceBatch>(*f);
 }
 
-std::expected<std::uint64_t, std::string> await_change(Connection& c) {
-  if (!send(c.fd.get(), Kind::await_change, AwaitChange{})) return std::unexpected("cannot send the request");
+std::expected<std::uint64_t, std::string> await_change(Connection& c, std::uint64_t since, std::int64_t pid) {
+  if (!send(c.fd.get(), Kind::await_change, AwaitChange{since, pid})) return std::unexpected("cannot send the request");
   auto f = receive(c.fd.get());
   if (!f) return std::unexpected("the daemon closed the connection: " + f.error());
   if (f->kind != Kind::changed) return std::unexpected("unexpected answer");
   auto ch = decode<Changed>(*f);
   if (!ch) return std::unexpected("malformed answer");
-  return ch->entries;
+  return ch->revisions;
 }
 
 std::expected<Status, std::string> request_status(Connection& c) {

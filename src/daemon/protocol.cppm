@@ -56,12 +56,16 @@ struct WatchRequest {
   bool values = false;
 };
 struct WatchAck {};
-// `await_change{}` (`ycxx cxx --watch`, #245) is answered by `changed` once a batch changes a file
-// some build read (the file table's entries), however long that takes; the connection closes
-// unanswered when the daemon stops.
-struct AwaitChange {};
+// `await_change` (`ycxx cxx --watch`, #245) is answered by `changed` once the file table's revision
+// is past `since`: a batch changed a file some build read, whichever request applied it. A
+// different daemon (`daemon_pid`) answers at once: its revisions are not comparable. The
+// connection closes unanswered when the daemon stops.
+struct AwaitChange {
+  std::uint64_t since = 0;    // the revision the last build was answered at (`Report::revision`)
+  std::int64_t daemon_pid = 0;  // the daemon that answered it
+};
 struct Changed {
-  std::uint64_t entries = 0;  // file-table entries the batch changed
+  std::uint64_t revisions = 0;  // batches applied since
 };
 struct StatusRequest {};
 struct ShutdownRequest {};

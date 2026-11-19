@@ -687,10 +687,9 @@ private:
   std::uint32_t error_at_ = ~0u;        // the held error's position; cells from it on are not settled
   std::exception_ptr error_;
   // Rounds after the first look again at cells this frame computed or claimed, which are not
-  // reuses: only cells another frame owned are noted then, by position in `waited_` (the first
-  // 64; past them, every cell is noted again).
+  // reuses: only cells another frame owned are noted then, a bit per position in `waited_`.
   std::uint32_t round_ = 0;
-  std::uint64_t waited_ = 0;
+  std::vector<std::uint64_t> waited_;
 };
 
 // A fingerprint as a hash table key: already uniform, never `std::hash` (§A5.1).
@@ -1727,16 +1726,16 @@ std::coroutine_handle<> Settle::step() noexcept {
     busy_at_.clear();
     // Only the cells before a held error are settled: it is reported once they are verified.
     const auto limit = static_cast<std::uint32_t>(std::min<std::size_t>(cells_.size(), error_at_));
-    std::uint64_t waited = 0;
+    std::vector<std::uint64_t> waited((cells_.size() + 63) / 64);
     for (std::uint32_t i = 0; i < limit; ++i) {
       try {
         const std::size_t claimed = children.size();
-        const std::uint64_t bit = i < 64 ? std::uint64_t{1} << i : 0;
-        const bool quiet = round_ > 0 && bit != 0 && !(waited_ & bit);  // past 64: never quiet
+        const std::uint64_t bit = std::uint64_t{1} << (i % 64);
+        const bool quiet = round_ > 0 && !(waited_[i / 64] & bit);
         if (db.try_settle(cells_[i], *frame_, children, quiet) == Db::Settled::busy) {
           busy.push_back(cells_[i]);
           busy_at_.push_back(i);
-          if (children.size() == claimed) waited |= bit;
+          if (children.size() == claimed) waited[i / 64] |= bit;
         }
       } catch (...) {
         // A cheap cell failed on this stack (an exception from its query, or a cycle).
@@ -1744,7 +1743,7 @@ std::coroutine_handle<> Settle::step() noexcept {
         break;
       }
     }
-    waited_ = waited;
+    waited_ = std::move(waited);
     ++round_;
     // Claimed cells always get their frames started: something may already wait on them. Pushed
     // in reverse, so this worker takes the first next.

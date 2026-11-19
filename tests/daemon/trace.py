@@ -120,6 +120,12 @@ def main(ycxx):
         check(wait_for('trace: ', times=2), 'the rebuild is traced')
         second = ''.join(log[next(i for i, l in enumerate(log) if '── build 2' in l):])
         check('Lower(k) executed' in second or 'FunctionIr(k) executed' in second, f'k is built again: {second[:600]}')
+        # An edit that another client's build applies first still starts a build here.
+        check(wait_for('watching the files it read', times=2), 'the rebuild waits again')
+        (scope / 'k.h').write_text('inline int k() { return 1; }\n')
+        other = cxx('a.cpp', '-o', 'other')
+        check(other.returncode == 0, 'another client builds meanwhile')
+        check(wait_for('── build 3'), 'an edit another request applied is not lost')
         wp.kill()
         wp.wait(timeout=20)
 

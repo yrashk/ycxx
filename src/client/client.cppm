@@ -163,18 +163,52 @@ class TraceOut {
 
 // The request through the daemon; why not, if it could not be answered there. A daemon that
 // closed the connection without an answer is started again and asked once more (§7.2).
+// A connection another thread may cut (`ycxx cxx --watch`'s browser quitting): its descriptor is
+// published under `m` while in use, and `stop` shuts it down, so a build in flight or a wait ends.
+struct Interrupt {
+  std::mutex m;
+  int fd = -1;
+  bool stopped = false;
+  // Publishes `c`'s descriptor; false when already stopped.
+  bool enter(int c) {
+    std::lock_guard g(m);
+    fd = stopped ? -1 : c;
+    return !stopped;
+  }
+  // Before the connection closes, so `stop` never shuts a reused descriptor.
+  void leave() {
+    std::lock_guard g(m);
+    fd = -1;
+  }
+  void stop() {
+    std::lock_guard g(m);
+    stopped = true;
+    if (fd >= 0) daemon::shutdown_both(fd);
+  }
+  bool is_stopped() {
+    std::lock_guard g(m);
+    return stopped;
+  }
+};
+
 // `on_trace` gets the request's trace batches; `on_retry` is called before asking a new daemon.
+// `pid`, when given, is set to the daemon that answered; `cut`, when given, can interrupt it.
 using OnTrace = std::function<void(daemon::TraceBatch&&)>;
 std::expected<compile::Done, std::string> through_daemon(const compile::Request& r, bool verbose, const OnTrace& on_trace = {},
-                                                         const std::function<void()>& on_retry = {}) {
+                                                         const std::function<void()>& on_retry = {}, std::int64_t* pid = nullptr,
+                                                         Interrupt* cut = nullptr) {
   std::string root = daemon::root_for(compile::first_input(r.argv), r.cwd);
   std::string why;
   for (int attempt = 0; attempt < 2; ++attempt) {
+    if (cut && cut->is_stopped()) return std::unexpected("stopped");
     if (attempt > 0 && on_retry) on_retry();
     auto c = daemon::reach(root, true);
     if (!c) return std::unexpected(c.error());
+    if (cut && !cut->enter(c->fd.get())) return std::unexpected("stopped");
     auto d = daemon::request_compile(*c, r, on_trace);
+    if (cut) cut->leave();
     if (d) {
+      if (pid) *pid = c->welcome.daemon_pid;
       if (verbose)
         std::println(std::cerr, "ycxx: answered by daemon {} for {} at revision {} ({} restarts, {} pp regions reused)",
                      c->welcome.daemon_pid, c->welcome.root, d->report.revision, d->report.restarts, d->report.regions_reused);
@@ -191,23 +225,20 @@ std::int64_t now_seconds() {
   return std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();
 }
 
-// Waits, through the daemon of `root`, until a file some build read changes (#245); false when
-// it cannot be asked. A daemon that stops answers nothing: the next build starts a new one.
-// `current` holds the connection's descriptor while it waits, under `m`, for a stopper.
-bool await_change(const std::string& root, std::mutex& m, int& current) {
+// Waits, through the daemon of `root`, until a file some build read changes after revision `since`
+// of daemon `pid` (#245): how many batches changed something (0: the daemon stopped, so the next
+// build starts a new one), or nothing when it cannot be asked or was interrupted.
+std::optional<std::uint64_t> await_change(const std::string& root, std::uint64_t since, std::int64_t pid, Interrupt& cut) {
   auto c = daemon::reach(root, true);
   if (!c) {
     std::println(std::cerr, "ycxx: error: --watch: cannot reach the daemon: {}", c.error());
-    return false;
+    return std::nullopt;
   }
-  {
-    std::lock_guard g(m);
-    current = c->fd.get();
-  }
-  (void)daemon::await_change(*c);
-  std::lock_guard g(m);
-  current = -1;  // before the connection closes, so a stopper never shuts a reused descriptor
-  return true;
+  if (!cut.enter(c->fd.get())) return std::nullopt;
+  auto changed = daemon::await_change(*c, since, pid);
+  cut.leave();
+  if (cut.is_stopped()) return std::nullopt;
+  return changed.value_or(0);
 }
 
 // `ycxx cxx --watch` (#245): builds, then waits for the daemon to see a file some build read
@@ -217,32 +248,36 @@ bool await_change(const std::string& root, std::mutex& m, int& current) {
 // diagnostics.
 int watch_builds(compile::Request r, bool verbose, TraceMode mode) {
   const std::string root = daemon::root_for(compile::first_input(r.argv), r.cwd);
-  std::mutex m;
-  int current = -1;
-  const auto build_label = [](std::uint64_t n, std::uint64_t changed) {
-    return n == 1 ? std::string("build 1") : std::format("build {}, after {} file{} changed", n, changed, changed == 1 ? "" : "s");
+  Interrupt cut;
+  const auto build_label = [](std::uint64_t n, std::optional<std::uint64_t> changed) {
+    if (n == 1) return std::string("build 1");
+    if (!changed || *changed == 0) return std::format("build {}, by a new daemon", n);
+    return std::format("build {}, after {} change{}", n, *changed, *changed == 1 ? "" : "s");
   };
   if (mode != TraceMode::interactive || !trace::is_terminal(0)) {
-    std::uint64_t changed = 0;
+    std::optional<std::uint64_t> changed;
     for (std::uint64_t n = 1;; ++n) {
       std::println(std::cerr, "\n── {}", build_label(n, changed));
       r.build_time = now_seconds();
       std::optional<TraceOut> traced;
       if (mode != TraceMode::off) traced.emplace(TraceMode::stream);
+      std::int64_t pid = 0;
+      std::uint64_t revision = 0;
       auto d = through_daemon(r, verbose, [&](daemon::TraceBatch&& b) {
         if (traced) traced->batch(std::move(b));
       }, [&] {
         if (traced) traced->restart("the daemon was lost; asking a new one");
-      });
+      }, &pid);
       if (d) {
+        revision = d->report.revision;
         compile::finish(*d);
         if (traced) traced->finish();
       } else {
         std::println(std::cerr, "ycxx: error: the daemon could not build it: {}", d.error());
       }
       std::println(std::cerr, "ycxx: watching the files it read; ^C to stop");
-      if (!await_change(root, m, current)) return 1;
-      changed = 1;
+      changed = await_change(root, revision, pid, cut);
+      if (!changed) return 1;
     }
   }
 
@@ -250,7 +285,10 @@ int watch_builds(compile::Request r, bool verbose, TraceMode mode) {
   struct Item {
     enum { trace, done } what = trace;
     std::uint64_t build = 0;
+    std::uint64_t space = 0;      // the build's event numbers, apart from every other run's
+    std::uint64_t offset_ns = 0;  // the build's start, since the first's, on this process's clock
     daemon::TraceBatch batch;
+    std::string label;
     std::string text;  // with `done`: the build's diagnostics and outputs' errors
   };
   struct Shared {
@@ -272,13 +310,23 @@ int watch_builds(compile::Request r, bool verbose, TraceMode mode) {
     char c = 'w';
     daemon::write_all(wake_w, std::as_bytes(std::span(&c, 1)));
   };
-  std::atomic<bool> stop{false};
+  const auto first = std::chrono::steady_clock::now();
   std::jthread builder([&] {
-    for (std::uint64_t n = 1; !stop.load(); ++n) {
+    std::optional<std::uint64_t> changed;
+    for (std::uint64_t n = 1; !cut.is_stopped(); ++n) {
       r.build_time = now_seconds();
-      auto d = through_daemon(r, verbose, [&](daemon::TraceBatch&& b) { post({Item::trace, n, std::move(b), {}}); });
-      Item done{Item::done, n, {}, {}};
+      const std::string label = build_label(n, changed);
+      const auto offset = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - first).count());
+      // Event numbers restart in another engine (a retry, a new daemon): each run gets a space.
+      std::uint64_t run = n << 2;
+      std::int64_t pid = 0;
+      auto d = through_daemon(r, verbose, [&](daemon::TraceBatch&& b) {
+        post({Item::trace, n, run, offset, std::move(b), label, {}});
+      }, [&] { ++run; }, &pid, &cut);
+      Item done{Item::done, n, run, offset, {}, label, {}};
+      std::uint64_t revision = 0;
       if (d) {
+        revision = d->report.revision;
         for (const compile::Output& o : d->outputs) {
           if (auto err = pipeline::write_file(o.path, o.bytes, o.executable)) done.text += std::format("ycxx: error: {}\n", *err);
         }
@@ -288,16 +336,19 @@ int watch_builds(compile::Request r, bool verbose, TraceMode mode) {
         done.text = "the daemon could not build it: " + d.error();
       }
       post(std::move(done));
-      if (stop.load() || !await_change(root, m, current)) break;
+      changed = await_change(root, revision, pid, cut);
+      if (!changed) break;
     }
     std::lock_guard g(shared.m);
     shared.ended = true;
   });
 
   trace::Tree tree;
-  std::optional<std::uint64_t> base;  // times count from the first build's start
   const auto group_of = [](std::uint64_t build) { return (std::uint64_t{1} << 63) | build; };
   std::set<std::uint64_t> opened;
+  const auto open = [&](const Item& i, std::uint64_t start_ns) {
+    if (opened.insert(i.build).second) tree.open_group(group_of(i.build), i.label, start_ns);
+  };
   trace::Feed feed{wake->first.get(), [&] {
                      daemon::drain(wake->first.get());
                      std::deque<Item> items;
@@ -310,28 +361,32 @@ int watch_builds(compile::Request r, bool verbose, TraceMode mode) {
                      for (Item& i : items) {
                        const std::uint64_t id = group_of(i.build);
                        if (i.what == Item::done) {
+                         open(i, i.offset_ns);  // a build that sent no trace still shows its diagnostics
                          tree.annotate(id, std::move(i.text));
                          continue;
                        }
+                       // Times from the build's own start, placed at its start on this clock; event
+                       // numbers in the run's own space.
                        daemon::TraceBatch& b = i.batch;
-                       if (!base) base = b.started_ns;
-                       b.started_ns -= std::min(b.started_ns, *base);
-                       b.ended_ns -= std::min(b.ended_ns, *base);
-                       trace::rebase(b.events, *base);
-                       if (opened.insert(i.build).second) tree.open_group(id, build_label(i.build, i.build > 1), b.started_ns);
-                       if (b.end) tree.close_group(id, b.ended_ns);
+                       const std::uint64_t start = b.started_ns;
+                       trace::rebase(b.events, start);
+                       const std::uint64_t space = i.space << 40;
+                       for (trace::Event& e : b.events) {
+                         e.start_ns += i.offset_ns;
+                         e.end_ns += i.offset_ns;
+                         e.id += space;
+                         if (e.parent != 0) e.parent += space;
+                       }
+                       open(i, i.offset_ns);
+                       if (b.end) tree.close_group(id, i.offset_ns + (b.ended_ns - std::min(b.ended_ns, start)));
                        else tree.add(b.events, id);
                      }
                      return !ended;
                    },
                    std::format("rebuilding on every change of the files it reads ({})", root)};
   trace::browse(tree, &feed);
-  // Stops the builder: its wait is shut down; a build in flight finishes first.
-  stop.store(true);
-  {
-    std::lock_guard g(m);
-    if (current >= 0) daemon::shutdown_both(current);
-  }
+  // Stops the builder: a build in flight or its wait is cut, and the daemon cancels the build.
+  cut.stop();
   return 0;
 }
 

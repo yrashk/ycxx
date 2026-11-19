@@ -258,7 +258,7 @@ class Server {
         if (auto r = decode<WatchRequest>(*frame)) serve_watch(fd, *r);
         return;
       case Kind::await_change:
-        serve_await_change(fd);
+        if (auto r = decode<AwaitChange>(*frame)) serve_await_change(fd, *r);
         return;
       case Kind::compile:
         if (auto r = decode<compile::Request>(*frame)) serve_compile(fd, *r);
@@ -320,6 +320,7 @@ class Server {
     static constexpr std::size_t max_queued = std::size_t{64} << 20;
     int fd = -1;
     bool values = false;
+    std::size_t cap = max_queued;  // the requesting client's has none: its own thread drains it
     std::mutex m;
     std::condition_variable cv;
     std::deque<std::vector<std::byte>> queue;  // under m
@@ -329,7 +330,7 @@ class Server {
     void push(std::vector<std::byte> frame) {
       std::lock_guard g(m);
       if (gone) return;
-      if (!queue.empty() && queued + frame.size() > max_queued) {
+      if (!queue.empty() && queued + frame.size() > cap) {
         gone = dropped = true;
         cv.notify_all();
         return;
@@ -364,6 +365,7 @@ class Server {
       if (client >= 0) {
         client_ = std::make_shared<Watching>();
         client_->fd = client;
+        client_->cap = std::numeric_limits<std::size_t>::max();  // bounded by the request itself
       }
       batch_.request = s.trace_requests_.fetch_add(1, std::memory_order_relaxed) + 1;
       batch_.label = std::move(label);
@@ -466,23 +468,30 @@ class Server {
     log(dropped ? "a trace watcher fell behind and was dropped" : "a trace watcher detached");
   }
 
-  // `ycxx cxx --watch` between builds (#245): applies batches as a request's tick would, and
-  // answers once one changed a file-table entry. Ends unanswered on a hang-up or the stop.
-  void serve_await_change(int fd) {
-    while (!wait_readable(fd, std::chrono::milliseconds(150))) {
+  // `ycxx cxx --watch` between builds (#245): answers once the revision is past the one the last
+  // build saw, whoever applied the batch (another request, the LSP, or this wait, which applies
+  // batches as a request's tick would). Ends unanswered on a hang-up or the stop.
+  void serve_await_change(int fd, const AwaitChange& r) {
+    const auto revision = [&] {
+      std::lock_guard g(stats_mu_);
+      return stats_.revision;
+    };
+    // Without a watcher a batch is a rescan of the whole table: less often.
+    const auto every = watcher_ ? std::chrono::milliseconds(150) : std::chrono::milliseconds(1000);
+    const std::uint64_t since = r.daemon_pid == my_pid() ? r.since : 0;  // another daemon's: all is new
+    do {
+      if (const std::uint64_t now = revision(); now > since || r.daemon_pid != my_pid()) {
+        send(fd, Kind::changed, Changed{now - std::min(now, since)});
+        return;
+      }
       {
         std::lock_guard g(conn_mu_);
         if (lsp_closed_) return;
       }
       std::unique_lock strand(strand_mu_, std::try_to_lock);
-      if (!strand || (running_ > 0 && !admission_.may_apply(Clock::now()))) continue;
-      if (const std::size_t changed = apply_batch(false); changed > 0) {
+      if (strand && (running_ == 0 || admission_.may_apply(Clock::now())) && apply_batch(false) > 0)
         admission_.applied(Clock::now());
-        strand.unlock();
-        send(fd, Kind::changed, Changed{changed});
-        return;
-      }
-    }
+    } while (!wait_readable(fd, every));
   }
 
   void serve_compile(int fd, const compile::Request& r) {
