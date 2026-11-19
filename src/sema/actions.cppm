@@ -1242,6 +1242,10 @@ public:
     }
     return n;
   }
+  // Whether this analysis is an instantiation's: some template parameter is bound.
+  bool instantiating() const {
+    return std::ranges::any_of(template_args.levels, [](const auto& l) { return std::ranges::any_of(l, [](const auto& a) { return a.has_value(); }); });
+  }
   void push_frame(const std::vector<PackRef>& packs, u32 index) { frames_.push_back({packs, index}); }
   // While a template argument that is itself a pack expansion is read, the enclosing expansions'
   // elements are not in effect: its packs are expanded whole ([temp.variadic]/5).

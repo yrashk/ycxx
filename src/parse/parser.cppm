@@ -2281,7 +2281,8 @@ public:
     u32 begin = pos();
     bump();
     if (is(Tk::kw_consteval) || (is(Tk::exclaim) && kind(1) == Tk::kw_consteval)) return if_consteval(begin);
-    if (is(Tk::kw_constexpr) || is(Tk::exclaim)) {
+    if (is(Tk::kw_constexpr)) return if_constexpr(begin);
+    if (is(Tk::exclaim)) {
       s_->diag(pos(), Diag::not_supported, kind());
       skip_statement();
       return {NodeId::none, begin, pos()};
@@ -2294,6 +2295,95 @@ public:
     s_->pop_scope();
     return s_->node(ast::If{{}, sema::Sema::at(cond, begin), sema::Sema::at(then_, begin), sema::Sema::at(else_, begin)},
                     begin, pos());
+  }
+
+  // `if constexpr ( condition ) statement else statement` ([stmt.if]/2): the condition is a
+  // constant expression contextually converted to bool. While it is value-dependent (a template's
+  // definition) both branches are analysed; otherwise only the one it selects is the statement.
+  // In an instantiation the other, discarded, branch is not instantiated: its tokens are skipped.
+  // Outside templates it is checked, but neither emits code nor demands anything.
+  Ex if_constexpr(u32 begin) {
+    bump();  // constexpr
+    s_->push_scope();
+    if (!expect(Tk::l_paren)) {
+      s_->pop_scope();
+      skip_statement();
+      return {NodeId::none, begin, pos()};
+    }
+    if (starts_declaration()) {
+      s_->diag(pos(), Diag::not_supported, kind());  // an init-statement or a declaration condition
+      skip_param();
+    }
+    Ex e = expression();
+    Ex cond = s_->to_bool(e, e.begin);
+    expect(Tk::r_paren);
+    std::optional<bool> take;
+    if (cond.ok() && !s_->dependent(cond)) {
+      sema::Evaluated v = sema::Evaluator(*s_, questions()).evaluate(cond);
+      if (v.value) take = s_->world().values.as_signed(*v.value) != 0;
+      else if (!v.dependent) s_->diag(e.begin, Diag::not_constant, v.reason);
+    }
+    if (!take) {  // dependent, or in error: both branches, as an ordinary `if`
+      Ex then_ = substatement();
+      Ex else_;
+      if (accept(Tk::kw_else)) else_ = substatement();
+      s_->pop_scope();
+      return s_->node(ast::If{{}, sema::Sema::at(cond, begin), sema::Sema::at(then_, begin), sema::Sema::at(else_, begin)},
+                      begin, pos());
+    }
+    auto discarded = [&] {
+      if (s_->instantiating()) return skip_substatement();
+      std::size_t n = s_->demands.size();
+      substatement();
+      s_->demands.resize(n);
+    };
+    Ex kept;
+    if (*take) kept = substatement();
+    else discarded();
+    if (accept(Tk::kw_else)) {
+      if (*take) discarded();
+      else kept = substatement();
+    }
+    s_->pop_scope();
+    if (kept.ok()) return kept;
+    return s_->node(ast::Compound{s_->builder().list({})}, begin, pos());
+  }
+  // Past a statement, unanalysed: a discarded statement of an instantiation ([stmt.if]/2).
+  void skip_substatement() {
+    auto parens = [&] {
+      if (!is(Tk::l_paren)) return;
+      int depth = 0;
+      do {
+        if (is(Tk::l_paren)) ++depth;
+        if (is(Tk::r_paren)) --depth;
+        bump();
+      } while (depth > 0 && !at_end());
+    };
+    switch (kind()) {
+    case Tk::l_brace: skip_statement(); return;
+    case Tk::kw_if:
+      bump();
+      while (is(Tk::kw_constexpr) || is(Tk::exclaim) || is(Tk::kw_consteval)) bump();
+      parens();
+      skip_substatement();
+      if (accept(Tk::kw_else)) skip_substatement();
+      return;
+    case Tk::kw_for:
+    case Tk::kw_while:
+    case Tk::kw_switch:
+      bump();
+      parens();
+      skip_substatement();
+      return;
+    case Tk::kw_do:
+      bump();
+      skip_substatement();
+      accept(Tk::kw_while);
+      parens();
+      accept(Tk::semi);
+      return;
+    default: skip_to_semi(); return;
+    }
   }
 
   // `if !opt consteval compound-statement else statement` ([stmt.if]): the statement after `else`
