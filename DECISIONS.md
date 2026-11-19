@@ -435,40 +435,25 @@ project must survive any session ending.
 4. **Areas:** `area:*` labels partition the code. Two sessions never write the same area at the
    same time, and each works in its own git worktree and branch.
 5. **Model allocation:**
-   - **Fable is used sparingly, for design, not for writing code.** It is for:
-     - architecture and design decisions;
-     - the hardest specification questions ([basic.lookup], [over.match], [temp.deduct],
-       [temp.point], [dcl.init], [expr.const], [class.mem] layout, Itanium mangling edge
-       cases), when a design or an implementation choice depends on them;
-     - independent verification of a design before it is accepted.
-
-     Fable does not write code, review code, write tests or do routine triage.
-   - **Escalation to Fable for code** happens only when Opus has demonstrably failed: two serious
-     attempts at a bug or an implementation have not converged, or nobody understands a failure.
-     The escalation brief states what was tried and why it failed. Fable diagnoses or decides;
-     the session writes the code.
-   - Opus at medium effort: all implementation, code review and testing, raised to high effort
-     for intricate parts.
-   - Smaller models: mechanical work (data tables, extraction scripts, bulk test triage).
-
-   Issues that need Fable are labelled `model:fable`.
-
-   **How Fable is reached:** sessions run on Opus, because a session cannot be started on a
-   model above its parent's. Fable is used through subagents: the Agent tool with
-   `model: "fable"`.
-   - On a `model:fable` issue, the Opus session owns the claim, the issue bookkeeping, the
-     writing and the code. It gives the *decision-bearing* questions to a Fable subagent, as few
-     and as well-scoped as the design allows. Drafting prose, spikes, bookkeeping, relaying and
-     polishing stay with Opus.
-   - Each brief is self-contained: the question, the draft clauses by stable name, the relevant
-     DECISIONS sections, and the rule never to read compiler source (§2.2). A subagent sees only
-     its brief.
-   - The session reviews what Fable concludes before using it, and pushes back with a follow-up
-     to the same subagent when something is unclear or seems wrong. It does not silently
-     override.
-   - Design documents and decision comments say which conclusions came from Fable.
-   - On issues without the label, the session calls Fable only for a design question listed
-     above, or for an escalation after Opus has demonstrably failed.
+   - Routine implementation, code review and testing use Claude Opus or Codex Sol at medium
+     effort. Use high effort for intricate work. Smaller models can handle mechanical work
+     such as data tables, extraction scripts and bulk test triage.
+   - Use the corresponding design model sparingly: Claude Opus escalates to Fable and Codex
+     Sol escalates to Astra. Escalate architecture and design decisions, hard specification
+     questions that affect a design or implementation, and independent verification of a
+     proposed design. The design model does not write code, review code, write tests or do
+     routine triage.
+   - Escalate a coding problem only after two serious attempts at a bug or implementation
+     have failed to converge or explain the failure. The brief states what was tried and
+     why it failed. The design model diagnoses or decides. The implementation session writes
+     and verifies the code.
+   - An issue labelled `model:fable` requests design-model involvement. Use Fable in Claude
+     and Astra in Codex. Give the design model only the decision-bearing questions, in a
+     self-contained subagent brief with the relevant decisions, draft clauses by stable
+     name, and the rule never to read compiler source (§2.2).
+   - The implementation session owns the claim, issue bookkeeping, writing and code. It
+     checks the design model's conclusions before using them, follows up on unclear or
+     disputed points, and attributes the conclusions in design documents and issue comments.
 6. **Design documents** live in `docs/design/` and are written before the code they govern. Once
    accepted, their conclusions are summarized in this file.
 7. **No follow-up is lost.** A follow-up is any work named but not done: a deferred review

@@ -59,18 +59,22 @@ Work that never reaches `main` is lost. Twice, finished and reviewed work landed
 - Small commits, reviewed P0–P2 (DECISIONS §5). Cite draft clauses by stable name (`[temp.deduct]`).
 - A design question beyond your issue goes to a new issue labelled `status:needs-decision`,
   and `model:fable` if it is hard. Don't decide it silently in code.
-- **Fable, sparingly, for design** (DECISIONS §6.5). You are most likely running on Opus.
-  - Use Fable (the Agent tool with `model: "fable"`) for design decisions, the hardest
-    specification questions, and independent verification of a design.
-  - Never use it to write code, review code, write tests, draft prose or relay messages.
-  - Escalate a coding problem to Fable only after two serious Opus attempts have failed. Say
-    what was tried; Fable diagnoses, and you write the code.
-  - Give the subagent a self-contained brief: the question, the clauses by stable name, the
-    relevant DECISIONS sections, and the rule never to read compiler source.
-  - Review its conclusions before using them, and push back with a follow-up when something is
-    unclear or seems wrong.
-  - Say in the document or comment which conclusions came from Fable.
-  - You keep the claim, the writing, the code and the issue updates.
+- **Escalate design sparingly** (DECISIONS §6.5). Use Opus or Sol at medium effort for
+  implementation, code review and tests. Raise to high effort for intricate work.
+  - Opus escalates to Fable. Sol escalates to Astra. Give the design model a self-contained
+    brief for a design decision, hard specification question, independent design check, or
+    diagnosis after two serious failed implementation attempts.
+  - Include the question, prior attempts when relevant, stable draft clauses, applicable
+    decisions and the rule never to read compiler source. Review the answer and follow
+    up on disagreements. Attribute conclusions you use. Keep writing, implementation,
+    verification and issue bookkeeping in the owning session.
+
+## File references in shared artifacts
+
+Use repository-relative paths in issues, PR descriptions and comments, Markdown files,
+and commit messages. Add a repository name or a GitHub permalink when a reference crosses
+repositories. Replace machine-local absolute paths in pasted commands, logs and diagnostics
+with repository-relative paths or placeholders before publishing.
 
 ## When you stop
 

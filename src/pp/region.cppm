@@ -242,6 +242,8 @@ struct Region {
   std::vector<std::string> file_names;
   // The expansions `TokLoc::expansion` indexes; [0] is unused.
   std::vector<Expansion> expansions{Expansion{}};
+  // Engine trace details, rendered while the source files of this preprocessing run are open.
+  std::string error_details;
   bool operator==(const Region&) const = default;
 
   std::size_t size() const { return tokens.size(); }

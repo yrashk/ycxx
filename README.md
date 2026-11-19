@@ -42,9 +42,10 @@ build/bin/ycxx cxx hello.cpp -o hello && ./hello
 
 **Compile for x86-64 Linux.** Select `--target=x86_64-pc-linux-gnu` to compile with the scalar
 System V AMD64 backend. Use `-c` to write an ELF object, or `-nostdlib` to link C++ sources,
-ycxx-generated `.o` files, or a mixture into a static executable. The startup calls `int main()`
-or `int main(int, char**)` and passes its return value to Linux as the exit status. A program can
-also supply its own `_start`. For example, given `example.cpp` containing
+ycxx-generated `.o` files, or a mixture into a static executable. The startup runs namespace-scope
+initializers, then calls `int main()` or `int main(int, char**)` and passes its return value to Linux
+as the exit status. A program without such initializers can supply its own `_start`. Given
+`example.cpp` containing
 `int main() { return 0; }`, run the following on x86-64 Linux.
 
 ```sh
@@ -53,15 +54,22 @@ build/bin/ycxx cxx --target=x86_64-pc-linux-gnu -nostdlib example.o -o example
 ./example
 ```
 
+Linux objects can make direct calls to variadic functions such as `printf` within the scalar
+INTEGER ABI subset. Use the host linker to link these objects with libc.
+[#399](https://github.com/yrashk/ycxx/issues/399)
+
 **Language on macOS.** Programs can use:
 - the fundamental integer, character and floating types, pointers, arrays, references and
   enumerations; `float`, `double` and `long double` with literals, arithmetic, comparisons and
   conversions giving Clang's results bit for bit, and passing and returning them (classes of
   floating members included) by Clang's calling convention;
   all operators, and the statements: `switch`, labels and `goto`, declarations in conditions,
-  and init-statements in `if` and `switch` (not yet range-based `for`); functions with default
-  arguments, recursion and overloading, operator functions included;
-- classes and unions: data and static members, member functions, constructors and destructors
+  init-statements in `if` and `switch`, and range-based `for` over arrays or classes with
+  `begin` and `end`, with optional init-statements. Functions support default arguments,
+  recursion, operator overloading and calls through pointers. A pointer or reference target type
+  can select a free or static member overload.
+- classes and unions: data and static members, named data members of unnamed union type,
+  member functions, constructors and destructors
   with RAII, aggregate and designated initialization, namespace-scope objects initialized by
   code before `main` and destroyed after it, block-scope `static` variables initialized once, passing and returning them by value with
   Clang's calling convention, so ycxx and Clang objects call each other; access control
@@ -72,8 +80,9 @@ build/bin/ycxx cxx --target=x86_64-pc-linux-gnu -nostdlib example.o -o example
   lookup through bases, derived-to-base conversions, base initializers;
 - namespaces, nested (`namespace a::b`) and inline ones, typedefs and alias declarations,
   `using` declarations and directives;
-- `[[…]]` attributes, the GNU attributes and `asm` labels the macOS SDK's headers use, and the
-  type-trait built-ins libycxx's headers use (`__is_same`, `__remove_cv`, …)
+- `[[…]]` attributes, the GNU attributes and `asm` labels the macOS SDK's headers use, the
+  GNU pointer qualifiers glibc uses, and the type-trait built-ins libycxx's headers use
+  (`__is_same`, `__remove_cv`, …)
   ([docs/EXTENSIONS.md](docs/EXTENSIONS.md));
 - templates: function, class and variable templates, deduction, partial ordering, explicit and
   partial specializations, static constexpr members of class templates, member function and
@@ -97,7 +106,8 @@ build/bin/ycxx cxx --target=x86_64-pc-linux-gnu -nostdlib example.o -o example
 
 **Preprocessing.** All of translation phase 4: includes, object-like and function-like
 macros, conditionals, `_Pragma` and the predefined macros. `ycxx cxx -E` matches Clang's output.
-`ycxx cxx -E --target=x86_64-linux-gnu` selects Linux macros and glibc's multiarch include path.
+`ycxx cxx -E --target=x86_64-linux-gnu` selects Linux macros and glibc's multiarch include path
+and preprocesses glibc's `<stdio.h>`. Linux `<stdarg.h>` supplies the `va_list` declaration.
 
 **Incremental builds through a resident daemon.** `ycxx cxx` hands its work to a per-project
 `ycxx daemon` (`YCXX_NO_DAEMON=1` runs in-process), which watches the files it has read and keeps
@@ -109,10 +119,11 @@ thread pool, and its output is byte for byte that of a cold, in-process build.
 prints every query the build went through as a colored tree on stderr: what ran, what was
 reused, verified green or cut off early, how long it took and on which worker, and how much
 memory each cell allocated and retains, with sums per subtree, per query kind and per build. A second build
-shows everything reused, and a compile error is marked red at the cell where it starts, its
-message bubbled up to the root. `--trace-engine=interactive` opens a browser of the trace after
-the compile: a tree with each function's IR and assembly, a timeline of the pool's workers, and
-filters. `--trace-engine=json` writes the whole trace as JSON Lines, for tools and agents.
+shows everything reused. A compile error is marked red at the cell where it starts, and its
+message is shown up to the root. Diagnostic details include the file, line and column where
+available. `--trace-engine=interactive` opens a browser of the trace after the compile: a tree
+with each function's IR and assembly, a timeline of the pool's workers, and filters.
+`--trace-engine=json` writes the whole trace as JSON Lines, for tools and agents.
 `ycxx cxx --watch` stays attached and builds again whenever a file the build read changes,
 headers included; with `--trace-engine` each rebuild shows what it re-ran, and
 `--trace-engine=interactive` keeps the browser open and adds each rebuild live. `ycxx ctl trace
@@ -127,8 +138,8 @@ checked with the flags of its last build, or else with its line in the project's
 
 ### Not yet
 
-- The standard library and its headers. C headers such as `<stdio.h>` compile without warnings
-  and `printf` runs; libycxx's `<cstdio>` still needs pointer-to-member types, and `<cmath>`
+- The standard library and its headers. On macOS, C headers such as `<stdio.h>` compile without
+  warnings and `printf` runs. libycxx's `<cstdio>` still needs pointer-to-member types, and `<cmath>`
   (which `<math.h>` includes) does not compile yet ([#349](https://github.com/yrashk/ycxx/issues/349)).
 - Constexpr lambdas (the interpreter has no class objects yet), lambdas outside function bodies,
   structured bindings, virtual functions, virtual base classes, inheriting constructors, and bases
@@ -137,14 +148,13 @@ checked with the flags of its last build, or else with its line in the project's
   templates and their members.
 - Exceptions, optimization (`-O`), and the extended floating-point types (`std::float16_t`, …).
 - Hosted linking and general-purpose ELF object interoperability for x86-64 Linux.
-- Namespace-scope dynamic initialization and destruction for x86-64 Linux.
-  [#387](https://github.com/yrashk/ycxx/issues/387)
+- Namespace-scope destruction for x86-64 Linux. [#400](https://github.com/yrashk/ycxx/issues/400)
 
 ### In progress
 
 - Standard headers, starting with `<cstdio>` ([#133](https://github.com/yrashk/ycxx/issues/133)).
 - ι: statements and declarations, the C++98/11 core: default arguments, block-scope statics,
-  range-based `for`, casts and arrays ([#337](https://github.com/yrashk/ycxx/issues/337)).
+  casts and arrays ([#337](https://github.com/yrashk/ycxx/issues/337)).
 - `auto` and lambdas ([#278](https://github.com/yrashk/ycxx/issues/278)): placeholder types,
   lambdas and generic lambdas are done; constexpr lambdas wait on class objects in the
   interpreter ([#262](https://github.com/yrashk/ycxx/issues/262)).

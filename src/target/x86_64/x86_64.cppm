@@ -26,8 +26,9 @@ export struct MachineCode {
 };
 
 // Compile well-formed L2 with a scalar INTEGER ABI signature and scalar INTEGER calls. The
-// producer must check the original signatures: L2 can erase distinctions between scalars and
-// class arguments or results, and may carry zero ellipsis arguments at a variadic call. Pass
+// producer must check the original signatures and ellipsis argument types. L2 can erase
+// distinctions between scalar and class arguments or results. A variadic definition or
+// indirect call with an empty ellipsis cannot be identified from L2 alone. Pass
 // the entities whose addresses may be resolved directly by a signed RIP-relative displacement
 // (e.g. local definitions in the small code model) in `direct_symbols`.
 export std::expected<MachineCode, std::string> compile_function(const l2::Function& body,
@@ -126,7 +127,7 @@ std::expected<Frame, std::string> layout(const l2::Function& body) {
         bool indirect = nd.op == Op::call_ind;
         if (indirect && body.type(body.operands_of(n)[1]) != Type::ptr)
           return at_node(n, nd.op, "an indirect callee must be a pointer");
-        if (imms[indirect ? 1 : 2]) return at_node(n, nd.op, "variadic calls are outside the scalar ABI subset");
+        if (indirect && imms[1]) return at_node(n, nd.op, "indirect variadic calls are outside the scalar ABI subset");
         if (imms[indirect ? 2 : 3] || nd.nres > 2)
           return at_node(n, nd.op, "indirect and multiple results are outside the scalar ABI subset");
         std::size_t args = nd.nopnd - (indirect ? 2 : 1);
@@ -238,6 +239,9 @@ class Emitter {
       read(ops[1]);
       e_.reg({0xff}, 2, rax, false);  // call rax
     } else {
+      // AL gives the vector register count for variadic calls (AMD64 psABI §3.2.3).
+      // L2's ellipsis count can be zero for a variadic call, so set AL for every direct call.
+      e_.reg({0x31}, rax, rax, false);  // xor eax, eax
       e_.emit({0xe8});  // call rel32
       relocation(RelocKind::plt32, ir::EntityId(std::uint32_t(imms[0])));
     }

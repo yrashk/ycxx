@@ -59,6 +59,7 @@ enum class standard_section : std::uint8_t {
   data,        // __DATA,__data: writable data
   bss,         // __DATA,__bss: zero-initialized data
   mod_init_func,  // __DATA,__mod_init_func: pointers to the functions dyld runs before main
+  init_array,     // ELF .init_array: pointers to the functions startup runs before main
 };
 
 // How a relocation patches its site. S is the target symbol's address, A the addend, P the
@@ -97,6 +98,7 @@ struct section {
 
   static section standard(standard_section kind);
 
+  bool is_init_array() const noexcept { return segment == "__DATA" && name == "__init_array"; }
   bool is_zerofill() const noexcept { return section_flags::is_zerofill(flags); }
   std::uint64_t size() const noexcept { return is_zerofill() ? zerofill_size : bytes.size(); }
 
@@ -187,6 +189,7 @@ section section::standard(standard_section kind) {
     case standard_section::data: return {"__DATA", "__data", regular, 0, {}, 0, {}};
     case standard_section::bss: return {"__DATA", "__bss", zerofill, 0, {}, 0, {}};
     case standard_section::mod_init_func: return {"__DATA", "__mod_init_func", mod_init_func_pointers, 3, {}, 0, {}};
+    case standard_section::init_array: return {"__DATA", "__init_array", regular, 3, {}, 0, {}};
   }
   std::unreachable();
 }

@@ -144,6 +144,41 @@ void unsupported_bit_fields() {
   }
 }
 
+void gnu_pointer_qualifiers() {
+  Analysed a(R"cpp(
+#define HEADER_RESTRICT __restrict
+int read_value(const int* HEADER_RESTRICT value);
+#undef HEADER_RESTRICT
+
+using Reader = int (*)(const int* __restrict__);
+static_assert(__is_same(decltype(&read_value), Reader));
+
+extern int* __restrict const volatile qualified;
+static_assert(__is_const(decltype(qualified)));
+static_assert(__is_volatile(decltype(qualified)));
+
+extern int* __restrict__ * const __restrict nested;
+void unnamed(void* __restrict);
+
+int restrict = 1;
+int use(const int* __restrict input) {
+  const int* __restrict__ copy = input;
+  return *copy + restrict;
+}
+)cpp");
+  check(a.pre.diags.empty() && a.diags().empty(), "GNU pointer qualifiers through preprocessing and parsing");
+
+  for (std::string_view invalid : {"int __restrict scalar;", "int* trailing __restrict;", "int __restrict__;"})
+    check(!Analysed(invalid).diags().empty(), invalid);
+
+  auto function = Analysed("extern int (* __restrict__ function_ptr)();").diags();
+  check(function.size() == 1 && function.front().id == sema::diag_id(sema::Diag::restrict_function_pointer),
+        "the qualifier cannot apply directly to a pointer to function");
+  auto duplicate = Analysed("extern int* __restrict __restrict__ pointer;").diags();
+  check(duplicate.size() == 1 && duplicate.front().id == sema::diag_id(sema::Diag::duplicate_specifier),
+        "the two spellings count as one qualifier");
+}
+
 void constants() {
   Analysed a(
       "const int N = 2 + 3;\n"
@@ -276,6 +311,7 @@ int main() {
   conversions_and_locals();
   redeclarations_and_linkage();
   unsupported_bit_fields();
+  gnu_pointer_qualifiers();
   constants();
   assignments();
   diagnostics();

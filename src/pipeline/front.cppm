@@ -19,16 +19,24 @@ import :lines;
 
 export namespace ycxx::pipeline {
 
-// A diagnostic ready to render: a byte offset in the file, its severity and its message.
+// A diagnostic with its raw byte offset and rendered position, when located in source.
 struct Message {
-  std::uint32_t offset = 0;
+  std::optional<std::uint32_t> offset;
   bool error = true;
   std::string text;
-  // `file:line:col` when the diagnostic is in another file than the main one (an included
-  // header); the offset is then meaningless. Until #34's renderer.
-  std::string where;
+  std::string where;  // file:line:column
   // The region token it is at or before: messages are in this order, across files.
   std::uint32_t token = 0;
+
+  void append_trace_error(std::string& out) const {
+    if (!error) return;
+    if (!where.empty()) {
+      out += where;
+      out += ": ";
+    }
+    out += text;
+    out += '\n';
+  }
 };
 
 // A function body of the unit, for an editor's position requests (#170): its item, the
@@ -60,9 +68,7 @@ struct TuFront {
   // For traces (#245): its error messages, one a line.
   static std::string errors(const Value& v) {
     std::string out;
-    for (const Message& m : v.messages) {
-      if (m.error) out += (m.where.empty() ? std::format("at byte {}: ", m.offset) : m.where + ": ") + m.text + "\n";
-    }
+    for (const Message& m : v.messages) m.append_trace_error(out);
     return out;
   }
 };
@@ -107,21 +113,9 @@ class ValueConstants final : public Constants {
   sema::World* w_;
 };
 
-// The byte offset of an item location (ast.md §8.3, steps 1–3) in the region's main file.
-std::uint32_t byte_offset(ast::Interners& in, const pp::Region& region, const items::Items& items, ast::Loc at);
-
 }  // namespace ycxx::pipeline
 
 namespace ycxx::pipeline {
-
-std::uint32_t byte_offset(ast::Interners& in, const pp::Region& region, const items::Items& items, ast::Loc at) {
-  for (const items::Item& it : items.items) {
-    if (in.items.add<ast::ItemId>(it.id) != at.item) continue;
-    std::uint32_t tok = std::min<std::uint32_t>(it.begin + at.offset, static_cast<std::uint32_t>(region.locs.size() - 1));
-    return region.site(tok).offset;  // a macro's token: where it was expanded
-  }
-  return 0;
-}
 
 // A variable with static storage duration initialized or destroyed by code ([basic.start.dynamic],
 // [basic.start.term]): its initializer's tree in its declaration's item, if it is not constant.
@@ -219,7 +213,7 @@ void static_locals(sema::World& world, TranslationUnit& tu, FunctionDef& f, R& r
   }
 }
 
-// The unit's initialization function, which dyld runs before `main` (`__mod_init_func`): each
+// The unit's initialization functions, which startup runs before `main`: each
 // dynamic initialization in definition order ([basic.start.dynamic]/1), each destructor registered
 // with `__cxa_atexit` (Itanium C++ ABI §3.3.5). Named like Clang's, with internal linkage.
 void init_function_def(parse::Program& program, sema::World& world, TranslationUnit& tu, EntityId fn, QualType fn_type, ast::NodeId root,
@@ -245,7 +239,7 @@ void init_function(parse::Program& program, sema::World& world, TranslationUnit&
   EntityId dso = runtime.dso();
   QualType fn_type = types.function(void_, {}, false, ast::LangLinkage::cxx);
   const std::string base = "__GLOBAL__sub_I_" + std::filesystem::path(source).filename().native_encoded_string();
-  // One function per declaration, so that what fails points at it; dyld runs them in order.
+  // One function per declaration, so that what fails points at it; startup runs them in order.
   for (std::size_t first = 0, n = 0; first < dynamic.size(); ++n) {
     std::size_t last = first;
     while (last < dynamic.size() && dynamic[last].item == dynamic[first].item) ++last;
@@ -428,6 +422,7 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
       // destructor runs at exit ([basic.start.term]).
       ast::NodeId init = declarators[i]->value == ast::ConstId::none ? declarators[i]->init.id : ast::NodeId::none;
       EntityId dtor = world.types.is_reference(d.type) ? EntityId::none : program.classes().destructor_of(d.type);
+      if (dtor != EntityId::none && !tu.namespace_destruction) tu.namespace_destruction = at[i];
       if (init != ast::NodeId::none || dtor != EntityId::none) {
         dynamic.push_back({d.entity, d.type, init, dtor, k});
         tu.variables.back().dynamic = true;  // written at run time: by its initialization or its destructor
@@ -511,43 +506,16 @@ engine::query_task<FrontResult> TuFront::run(engine::Ctx& cx, TuId tu) {
   const items::Items& items = co_await cx.fetch<items::RegionItems>(file);
   const std::vector<engine::Diagnostic>& lexed = co_await cx.fetch<engine::DiagsOf>(cx.cell_of<items::RegionItems>(file));
   FrontResult out;
-  // `file:line:col` of a byte offset in an included file (region file `f`), rendered from the
-  // file's text as a recorded input, so an edit that moves only its newlines re-renders the
-  // position (#93). Phase 4's diagnostics (`kind`) may have a presumed line ([cpp.line]).
-  auto where_in = [&](std::uint16_t f, std::uint32_t offset, std::optional<lex::LexDiag> kind) {
-    const std::string& name = region.files[f];
-    pp::Session& ps = pp::session_for(unit_source.config);
-    std::lock_guard lock(ps.mutex);
-    std::string_view text;  // `<built-in>` is the session's
-    if (name.starts_with('<')) {
-      if (const pp::Files::Content* c = ps.files.content(ps.files.id(name))) text = c->text;
-    } else {
-      std::filesystem::path p(name);
-      if (p.is_relative() && !unit_source.cwd.empty()) p = unit_source.cwd / p;
-      const pp::PathId id = pp::path_id(p.lexically_normal().generic_native_encoded_string());
-      // The editor view reads an open buffer before the file (daemon design §6.1).
-      const std::optional<std::string>* content = nullptr;
-      if (unit_source.config.view == pp::View::editor) content = &cx.fetch<pp::Buffer>(id);
-      if (!content || !*content) content = &cx.fetch<pp::FileContent>(id);
-      if (*content) text = **content;
-    }
-    if (!kind) {
-      LineColumn lc = LineTable(text).line_column(offset);
-      return std::format("{}:{}:{}", region.file_names[f], lc.line, lc.column);
-    }
-    pp::Message pm = pp::message(ps.spellings, text, region.file_names[f], pp::Diag{f, offset, *kind, {}, 0, std::nullopt});
-    return std::format("{}:{}:{}", pm.file, pm.line, pm.column);
-  };
+  SourceLocations locations(cx, unit_source, file, region, items);
   // `pp` reports at byte offsets in the file (`lex::file_level`).
   for (const engine::Diagnostic& d : lexed) {
     auto kind = lex::lex_diag_of(d.id);
     if (!kind) continue;
     std::vector<std::uint64_t> args;
     for (const engine::DiagArg& a : d.args) args.push_back(a.raw);
-    Message m{d.at.offset, lex::message_of(*kind).severity == lex::Severity::error, lex::render(*kind, args), {}};
-    // Located in an included file (pp::file_loc).
     const auto f = static_cast<std::uint16_t>(lex::file_level - d.at.item);
-    if (f != 0) m.where = where_in(f, d.at.offset, *kind);
+    Message m{d.at.offset, lex::message_of(*kind).severity == lex::Severity::error, lex::render(*kind, args),
+              locations.at({f, 0, d.at.offset})};
     // The first token at or after the position in its file, else (a header of only directives)
     // the first token of a file included after it (files are numbered as they are first met).
     m.token = static_cast<std::uint32_t>(region.locs.size() - 1);
@@ -598,8 +566,7 @@ engine::query_task<FrontResult> TuFront::run(engine::Ctx& cx, TuId tu) {
     const pp::TokLoc at = program.site(d.at);
     out.messages.push_back({at.offset, sema::message_of(*kind).severity == lex::Severity::error,
                             sema::render(*kind, args, [&](char how, std::uint64_t raw) { return program.spell(how, raw); }),
-                            // A declaration of an included header: located there.
-                            at.file != 0 ? where_in(at.file, at.offset, std::nullopt) : std::string(), program.token(d.at)});
+                            locations.at(at), program.token(d.at)});
   }
   std::ranges::stable_sort(out.messages, {}, &Message::token);
   if (!out.has_errors()) out.unit = unit_of(program, world, items, src.name);
