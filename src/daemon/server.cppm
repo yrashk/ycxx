@@ -310,11 +310,32 @@ class Server {
   // ---- Traces (#245)
 
   // An attached `ycxx ctl trace`.
+  // An attached `ycxx ctl trace`. Requests queue its frames; its own connection thread writes
+  // them, so a watcher that stops reading never slows a build: past `max_queued` bytes it is
+  // dropped instead.
   struct Watching {
+    static constexpr std::size_t max_queued = std::size_t{64} << 20;
     int fd = -1;
     bool values = false;
-    std::mutex m;  // one frame at a time
-    std::atomic<bool> gone{false};
+    std::mutex m;
+    std::condition_variable cv;
+    std::deque<std::vector<std::byte>> queue;  // under m
+    std::size_t queued = 0;                    // bytes, under m
+    bool gone = false;                         // under m
+    // Queues a frame; false once it is gone.
+    bool push(std::vector<std::byte> frame) {
+      std::lock_guard g(m);
+      if (gone) return false;
+      if (queued + frame.size() > max_queued) {
+        gone = true;
+        cv.notify_all();
+        return false;
+      }
+      queued += frame.size();
+      queue.push_back(std::move(frame));
+      cv.notify_all();
+      return true;
+    }
   };
 
   // One request's trace: a collector whose batches go to the request's client, when it asked,
@@ -342,13 +363,13 @@ class Server {
     // Under the collector's lock, or after the request's frames have all finished.
     void deliver(std::span<const trace::Event> events) {
       batch_.events.assign(events.begin(), events.end());
+      // The client reads its answer's frames as they come; a hang-up stops the request anyway.
       if (client_ >= 0) send(client_, Kind::trace, batch_);
-      for (const auto& w : watchers_) {
-        // Under its lock: a watcher that has detached may have had its descriptor reused.
-        std::lock_guard g(w->m);
-        if (w->gone.load(std::memory_order_relaxed)) continue;
-        if (!send(w->fd, Kind::trace, batch_)) w->gone.store(true, std::memory_order_relaxed);
-      }
+      if (watchers_.empty()) return;
+      engine::Sink body;
+      engine::serialize(body, batch_);
+      const std::vector<std::byte> frame = encode_frame(Kind::trace, body.bytes());
+      for (const auto& w : watchers_) w->push(frame);
     }
 
     Server* server_;
@@ -364,7 +385,10 @@ class Server {
     std::vector<std::shared_ptr<Watching>> watchers;
     {
       std::lock_guard g(watch_mu_);
-      std::erase_if(watchers_, [](const auto& w) { return w->gone.load(std::memory_order_relaxed); });
+      std::erase_if(watchers_, [](const auto& w) {
+        std::lock_guard g(w->m);
+        return w->gone;
+      });
       watchers = watchers_;
     }
     if (asked == compile::Trace::off && watchers.empty()) return nullptr;
@@ -389,27 +413,33 @@ class Server {
       std::lock_guard g(conn_mu_);
       if (lsp_closed_) return;  // the daemon is stopping
     }
-    {
-      std::lock_guard g(w->m);
-      if (!send(fd, Kind::watch, WatchAck{})) return;
-    }
+    if (!send(fd, Kind::watch, WatchAck{})) return;
     {
       std::lock_guard g(watch_mu_);
       watchers_.push_back(w);
     }
     log("a trace watcher attached");
-    // The watcher sends nothing: a readable socket is its hang-up (or the stop's shutdown).
-    while (!w->gone.load(std::memory_order_relaxed) && !wait_readable(fd, std::chrono::seconds(1))) {}
-    {
-      // Waits for a frame in flight; no request sends to it after this, so the descriptor may close.
-      std::lock_guard g(w->m);
-      w->gone.store(true, std::memory_order_relaxed);
+    // Writes what requests queued until the watcher hangs up (it sends nothing, so a readable
+    // socket is its hang-up, or the stop's shutdown), a write fails, or it fell too far behind.
+    std::unique_lock g(w->m);
+    while (!w->gone) {
+      w->cv.wait_for(g, std::chrono::milliseconds(250), [&] { return w->gone || !w->queue.empty(); });
+      std::deque<std::vector<std::byte>> frames;
+      frames.swap(w->queue);
+      w->queued = 0;
+      g.unlock();
+      bool ok = !hung_up(fd);
+      for (const auto& f : frames) ok = ok && write_all(fd, f);
+      g.lock();
+      if (!ok) w->gone = true;
     }
+    const bool dropped = !w->queue.empty() || w->queued > 0;
+    g.unlock();
     {
-      std::lock_guard g(watch_mu_);
+      std::lock_guard l(watch_mu_);
       std::erase(watchers_, w);
     }
-    log("a trace watcher detached");
+    log(dropped ? "a trace watcher fell behind and was dropped" : "a trace watcher detached");
   }
 
   void serve_compile(int fd, const compile::Request& r) {
