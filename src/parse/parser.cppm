@@ -2204,6 +2204,10 @@ public:
       Ex e = unary_expression();
       --s_->unevaluated;
       if (!e.ok()) return {NodeId::none, begin, pos()};
+      if (e.glvalue() && e.info.bit_width) {
+        s_->diag(begin, Diag::bit_field_size);
+        return {NodeId::none, begin, pos()};
+      }
       Ex r = s_->size_of(e.type(), false, begin, pos());
       return {r.id, begin, pos(), r.info};
     }

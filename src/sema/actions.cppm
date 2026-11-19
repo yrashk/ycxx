@@ -1037,8 +1037,12 @@ public:
     // A reference member gives the object it refers to, an lvalue.
     bool ref = types().is_reference(f.type);
     QualType t = ref ? types().referee(f.type) : types().add_cv(f.type, Types::cv(ct));
+    if (f.bit_width && Types::is_volatile(t) && unevaluated == 0) {
+      diag(name_at, Diag::volatile_bit_field);
+      return fail;
+    }
     ValueCategory cat = ref || arrow || object.cat() == ValueCategory::lvalue ? ValueCategory::lvalue : ValueCategory::xvalue;
-    ExprInfo info{t, cat, 0};
+    ExprInfo info{t, cat, 0, f.bit_width};
     return node(ast::Member{info, f.entity, index, arrow ? 1u : 0u, ref ? 1u : 0u, at(object, begin)}, begin, end, info);
   }
 
@@ -3579,6 +3583,10 @@ public:
     TypeRec rr = types().rec(r);
     QualType t = rr.inner;
     Ex fail{NodeId::none, e.begin, e.end};
+    if (e.glvalue() && e.info.bit_width) {
+      diag(at_, Diag::bit_field_reference);
+      return fail;
+    }
     bool direct_cat = rr.rvalue_ref ? e.cat() == ValueCategory::xvalue : e.cat() == ValueCategory::lvalue;
     if (direct_cat && same_unqualified(e.type(), t)) {
       if (cv_within(object_cv(e.type()), object_cv(t))) return extend ? extended(e) : e;
@@ -4055,7 +4063,8 @@ public:
       if (k == ast::ConversionKind::boolean) bits = bits != 0;
       return literal(to, w_->values.integer(to, bits), ValueCategory::prvalue, e.begin, e.end);
     }
-    ExprInfo info{to, cat, 0};
+    u8 width = k == ast::ConversionKind::lvalue_to_rvalue || cat != ValueCategory::prvalue ? e.info.bit_width : u8(0);
+    ExprInfo info{to, cat, 0, width};
     return node(ast::ImplicitConversion{info, k, EntityId::none, at(e, e.begin)}, e.begin, e.end, info);
   }
 
@@ -4108,7 +4117,7 @@ public:
     }
     auto b = types().builtin_of(e.type());
     if (!b || !is_integral(*b)) return e;
-    Builtin p = promoted(*b);
+    Builtin p = promoted(*b, e.info.bit_width);
     if (p == *b) return e;
     return convert_node(e, ast::ConversionKind::integral, builtin(p));
   }
@@ -4358,6 +4367,7 @@ public:
     for (const FieldRec& f : c->fields) {
       auto m = place_of(f.type);
       if (!m) return std::nullopt;
+      m->bit_width = f.bit_width;
       places.push_back(*m);
     }
     return class_places_[std::to_underlying(ce)] = ast::record_layout(bases, places, c->union_, c->pod, std::to_underlying(ce));
@@ -4687,7 +4697,7 @@ public:
             return {p.id, begin, end, p.info};
           }
     auto make = [&](Ex operand, QualType t, ValueCategory cat) {
-      ExprInfo info{t, cat, 0};
+      ExprInfo info{t, cat, 0, cat == ValueCategory::prvalue ? u8(0) : operand.info.bit_width};
       return node(ast::Unary{info, op, at(operand, begin)}, begin, end, info);
     };
     switch (op) {
@@ -4717,6 +4727,10 @@ public:
       return make(o, types().pointee(o.type()), ValueCategory::lvalue);
     }
     case address_of:
+      if (e.glvalue() && e.info.bit_width) {
+        diag(op_at, Diag::bit_field_address);
+        return {NodeId::none, begin, end};
+      }
       if (!e.glvalue()) {
         diag(op_at, Diag::not_lvalue_address, e.type());
         return {NodeId::none, begin, end};
@@ -4811,6 +4825,10 @@ public:
     QualType ta = a.type(), tc = c.type();
     bool arith = types().is_arithmetic(ta) && types().is_arithmetic(tc);
     bool integral = types().is_integral(ta) && types().is_integral(tc);
+    auto arithmetic_bin = [&](ast::BinaryOp kind) {
+      QualType t = arithmetic_conversions(a, c);
+      return bin(kind, a, c, t);
+    };
     static constexpr std::array<ast::BinaryOp, 19> kinds{
         ast::BinaryOp::mul, ast::BinaryOp::div, ast::BinaryOp::rem, ast::BinaryOp::add, ast::BinaryOp::sub,
         ast::BinaryOp::mul, ast::BinaryOp::mul, ast::BinaryOp::lt, ast::BinaryOp::gt, ast::BinaryOp::le,
@@ -4821,16 +4839,16 @@ public:
     case mul:
     case div:
       if (!arith) return invalid();
-      return bin(k, a, c, arithmetic_conversions(a, c));
+      return arithmetic_bin(k);
     case rem:
     case bit_and:
     case bit_xor:
     case bit_or:
       if (!integral) return invalid();
-      return bin(k, a, c, arithmetic_conversions(a, c));
+      return arithmetic_bin(k);
     case add:
     case sub:
-      if (arith) return bin(k, a, c, arithmetic_conversions(a, c));
+      if (arith) return arithmetic_bin(k);
       // [expr.add]: a pointer to a complete object type and an integer; or, for `-`, two
       // pointers to the same type, giving std::ptrdiff_t (long).
       if (is_object_pointer(ta) && types().is_integral(tc)) return bin(k, a, promote(c), ta);
@@ -4926,10 +4944,11 @@ public:
       if (types().is_arithmetic(tl) && types().is_arithmetic(tr) &&
           (!integral_only || (types().is_integral(tl) && types().is_integral(tr)))) {
         if (shift) {
-          computation = builtin(promoted(*types().builtin_of(tl)));
+          computation = builtin(promoted(*types().builtin_of(tl), lv.info.bit_width));
           c = promote(rv);
         } else {
-          Builtin common = common_integer(promoted(*types().builtin_of(tl)), promoted(*types().builtin_of(tr)));
+          Builtin common = common_integer(promoted(*types().builtin_of(tl), lv.info.bit_width),
+                                           promoted(*types().builtin_of(tr), rv.info.bit_width));
           computation = builtin(common);
           c = convert(rv, computation, r.begin);
         }
@@ -4942,7 +4961,7 @@ public:
       }
     }
     if (!c.ok()) return {NodeId::none, begin, end};
-    ExprInfo info{lt, ValueCategory::lvalue, 0};
+    ExprInfo info{lt, ValueCategory::lvalue, 0, l.info.bit_width};
     return node(ast::Assign{info, ast::AssignOp(std::to_underlying(op)), at(l, begin), at(c, begin), computation}, begin,
                 end, info);
   }
@@ -4954,7 +4973,7 @@ public:
     if (!l.ok() || !check_modifiable(l, op_at) || !check_class_assignable(l, op_at)) return {NodeId::none, begin, end};
     Ex c = list_init(Types::unqualified(l.type()), b);
     if (!c.ok()) return {NodeId::none, begin, end};
-    ExprInfo info{l.type(), ValueCategory::lvalue, 0};
+    ExprInfo info{l.type(), ValueCategory::lvalue, 0, l.info.bit_width};
     return node(ast::Assign{info, ast::AssignOp::assign, at(l, begin), at(c, begin), Types::unqualified(l.type())},
                 begin, end, info);
   }
@@ -4977,6 +4996,10 @@ public:
       if (!t.ok() || !f.ok()) return {NodeId::none, begin, end};
     }
     if (t.glvalue() && t.cat() == f.cat() && t.type() == f.type()) {
+      if (t.info.bit_width || f.info.bit_width) {
+        diag(q_at, Diag::bit_field_conditional);
+        return {NodeId::none, begin, end};
+      }
       info = t.info;
     } else {
       Ex a = rvalue(t), b = rvalue(f);

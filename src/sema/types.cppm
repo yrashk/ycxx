@@ -37,7 +37,7 @@ struct IntShape {
 inline IntShape shape(Builtin b) { return {ast::width_of(target, b), ast::is_signed(target, b)}; }
 
 // [conv.prom] and [expr.arith.conv] on the target.
-inline Builtin promoted(Builtin b) { return ast::is_integral(b) ? ast::promoted(target, b) : b; }
+inline Builtin promoted(Builtin b, u8 bit_width = 0) { return ast::is_integral(b) ? ast::promoted(target, b, bit_width) : b; }
 inline Builtin common_integer(Builtin a, Builtin b) { return *ast::usual_arithmetic(target, a, b); }
 
 constexpr std::string_view spelling(Builtin b) {
@@ -554,6 +554,7 @@ struct FieldRec {
   // only those that are constants of scalar type so far (#86).
   ConstId init = ConstId::none;
   bool dmi = false;  // it has a default member initializer, constant or not
+  u8 bit_width = 0;
 };
 
 // What `class_def(C)` (ast.md §3.6) says of a class that member lookup and the layout need, kept

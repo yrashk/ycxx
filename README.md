@@ -53,6 +53,8 @@ build/bin/ycxx cxx hello.cpp -o hello && ./hello
   code before `main` and destroyed after it, block-scope `static` variables initialized once, passing and returning them by value with
   Clang's calling convention, so ycxx and Clang objects call each other; access control
   (`public`, `protected`, `private`) and friend functions and classes;
+- named `int` and `unsigned int` bit-fields of width 1 through 32 in ordinary unpacked,
+  non-template classes without bases;
 - single and multiple inheritance (not virtual): base classes laid out as Clang does, member
   lookup through bases, derived-to-base conversions, base initializers;
 - namespaces, nested (`namespace a::b`) and inline ones, typedefs and alias declarations,
