@@ -504,6 +504,10 @@ struct ClassRec {
   EntityId destructor = EntityId::none;
   EntityId copy_ctor = EntityId::none;
   bool copy_deleted = false;
+  // The move constructor ([class.copy.ctor]/8): whether one is declared and not deleted, and
+  // whether it is then not trivial (user-provided, or implicit and a member's move is not).
+  bool move_usable = false;
+  bool move_nontrivial = false;
   // Nested enumerations ([class.mem]): their types by name, and the unscoped ones' enumerators,
   // which are members of the class.
   std::vector<std::pair<NameId, QualType>> types;
@@ -590,6 +594,25 @@ public:
     const ClassRec* c = r.kind == TypeKind::class_ ? find(r.entity) : nullptr;
     if (!c) return {false, false};
     return {c->copy_ctor != EntityId::none, c->copy_deleted};
+  }
+  // Whether moving a `t` calls a constructor that is not trivial: its move constructor, or its
+  // copy constructor when it has none ([over.match.ctor]).
+  bool move_nontrivial(QualType t) const {
+    TypeRec r = types_->rec(t);
+    if (r.kind == TypeKind::array) return move_nontrivial(r.inner);
+    const ClassRec* c = r.kind == TypeKind::class_ ? find(r.entity) : nullptr;
+    if (!c) return false;
+    return c->move_usable ? c->move_nontrivial : c->copy_ctor != EntityId::none;
+  }
+  // Whether a `t` is trivially copyable for the purpose of calls ([class.temporary]/3; Itanium
+  // C++ ABI §3.1.2.3): its destructor and every copy and move constructor trivial or deleted, and
+  // at least one of those constructors not deleted.
+  bool trivial_for_calls(EntityId cls) const {
+    const ClassRec* c = find(cls);
+    if (!c) return true;
+    if (c->destructor != EntityId::none || c->copy_ctor != EntityId::none) return false;
+    if (c->move_usable && c->move_nontrivial) return false;
+    return !c->copy_deleted || c->move_usable;
   }
 
 private:

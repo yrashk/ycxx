@@ -117,6 +117,9 @@ struct ClassShape {
   EntityId entity = EntityId::none;
   std::vector<QualType> fields;
   bool union_ = false;  // every member at offset 0 ([class.union]/2)
+  // Trivially copyable for calls ([class.temporary]/3): no non-trivial copy constructor or
+  // destructor, and the copy not deleted, so the calling convention may pass it in registers.
+  bool trivial_calls = true;
 };
 struct EnumShape {
   EntityId entity = EntityId::none;
@@ -540,7 +543,19 @@ ir::TypeLayout QueryLayout::type(QualType q) const {
   if (in.types.is<ast::TLRef>(c) || in.types.is<ast::TRRef>(c))
     return {pointer, target.pointer_size, target.pointer_align, false,
             in.canonical(in.types.is<ast::TLRef>(c) ? in.types.get<ast::TLRef>(c).referee : in.types.get<ast::TRRef>(c).referee)};
-  if (auto r = class_layout(c)) return {record, r->size, r->align, false, {}};
+  if (auto r = class_layout(c)) {
+    auto it = classes_.find(std::to_underlying(in.types.get<ast::TClass>(c).entity));
+    ir::TypeLayout l{record, r->size, r->align, false, {}, it == classes_.end() || it->second->trivial_calls};
+    l.empty = r->fields.empty();
+    // A floating member makes the class a candidate for the vector registers (AAPCS64 HFAs).
+    for (const ir::SubObject& f : r->fields) {
+      QualType ft = f.type;
+      while (in.types.is<ast::TArray>(in.types.canon(ft))) ft = in.types.get<ast::TArray>(in.types.canon(ft)).elem;
+      auto b = ast::builtin_of(in, ft);
+      l.floating = l.floating || (b && ast::is_floating(*b)) || type(ft).floating;
+    }
+    return l;
+  }
   // An enumeration is laid out as its underlying type ([dcl.enum]/8).
   if (in.types.is<ast::TEnum>(c))
     if (auto it = enums_.find(std::to_underlying(in.types.get<ast::TEnum>(c).entity)); it != enums_.end()) return type(it->second);

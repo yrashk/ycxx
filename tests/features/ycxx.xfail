@@ -567,8 +567,6 @@ own/pp/include-macros.accept.cpp dynamic initialization of a namespace-scope var
 own/pp/macro-decls.accept.cpp dynamic initialization of a namespace-scope variable is not supported yet (#94)
 own/pp/cond-decls.accept.cpp dynamic initialization of a namespace-scope variable is not supported yet (#94)
 own/classes/s1-byvalue-constexpr.run.cpp classes in constant evaluation (#25)
-own/classes/s1-byvalue-params.run.cpp classes by value (#116)
-own/classes/s1-byvalue-return.run.cpp classes by value (#116)
 own/classes/s1-default-member-init.run.cpp a default member initializer naming another member (#118)
 own/classes/s1-elaborated.run.cpp block-scope elaborated type specifier (#117)
 own/classes/s1-locals-scopes.run.cpp local classes (#117)

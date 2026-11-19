@@ -2035,9 +2035,9 @@ public:
         std::vector<Ex> args;
         if (!is(Tk::r_paren)) {
           do {
-            if (is(Tk::l_brace)) {
-              s_->diag(pos(), Diag::not_supported, Tk::l_brace);
-              return {NodeId::none, e.begin, pos()};
+            if (is(Tk::l_brace)) {  // copy-list-initializes its parameter ([dcl.init.list]/1)
+              args.push_back(s_->braced_argument(braced_init_list()));
+              continue;
             }
             for (const Ex& x : expandable([&] { return assignment_expression(); })) args.push_back(x);
           } while (accept(Tk::comma));
@@ -2864,9 +2864,12 @@ public:
     Ex value;
     if (!is(Tk::semi)) {
       if (is(Tk::l_brace)) {
-        s_->diag(pos(), Diag::not_supported, Tk::l_brace);
-        skip_to_semi();
-        return {NodeId::none, begin, pos()};
+        // `return {…};` copy-list-initializes the result ([stmt.return]/2).
+        auto b = braced_init_list();
+        if (s_->types().is_void(rt)) s_->diag(begin, Diag::return_value_in_void);
+        else value = s_->list_init(rt, *b);
+        if (!expect(Tk::semi)) skip_to_semi();
+        return s_->node(ast::Return{sema::Sema::at(value, begin)}, begin, pos());
       }
       Ex e = expression();
       if (s_->types().is_void(rt)) {

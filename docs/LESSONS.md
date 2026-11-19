@@ -71,6 +71,15 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
     merges. After merging, confirm the merge commit is an ancestor of origin/main.
   - Learned on #139, 2026-11-18.
 
+- **Commits pushed to a PR's branch after it merges never reach main.** #233's Apple-ABI change
+  was pushed to `claude/byvalue-116` after the coordinator had merged #233, so it never reached
+  main (the same trap as #198, from the other side).
+  - Do: before pushing to a PR's branch, check that the PR is still open
+    (`gh pr view N --json state`). Once it has merged, start a fresh branch from main for anything
+    new, even a follow-up to the same issue.
+  - The coordinator's sweep also checks every merged PR's branch for commits that aren't on main.
+  - Learned on #116 and #230, 2026-11-18.
+
 ## Working with Fable subagents
 
 - **Agree the contract between parts before splitting a design.** #1's engine part and C++ part
@@ -485,6 +494,15 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
     built-ins), teach `items.cppm`'s declarator scan and its function detection, and test a
     namespace-scope typedef, variable and function template whose type begins with it.
   - Learned on #211.
+- **The Clang oracle is upstream Clang (the driver's toolchain), not `/usr/bin/clang++`.** Apple
+  Clang and upstream Clang differ in ABI corners: on arm64 macOS, Apple Clang 21 passes a class
+  with a user-provided move constructor in registers, while Clang 23 and GCC pass it by address
+  (#230). Mixed-object checks done by hand against Apple Clang all passed, then the `PEER:` test
+  crashed under the driver.
+  - Do: for ABI checks, compile with the driver's Clang (`tools/test` prints its path; see
+    `tests/driver/kinds.py`), and try GCC too. When two compilers disagree, cross-link their
+    objects to find out which convention each one uses.
+  - Learned on #116.
 - **A recovery loop that may consume nothing hangs only on real headers.** The requires-expression
   loop skipped to `;` after a failed requirement; at a `}` that consumed nothing, so 17 draft
   tests that include libycxx timed out while every small test passed. The next symptom, a 2×
