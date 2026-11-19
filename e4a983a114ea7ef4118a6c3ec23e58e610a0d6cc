@@ -1,0 +1,33 @@
+November 19 Claude recovery handoff
+
+Recovery issue: https://github.com/yrashk/ycxx/issues/377
+Repository: yrashk/ycxx
+Handoff branch: handoff-nov-19/design-optimization-2517d4
+Original branch: refs/heads/claude/templates-88-member-templates
+Original directory: /Users/yrashk/Projects/ycxx/.claude/worktrees/design-optimization-2517d4
+Original HEAD: e4a983a114ea7ef4118a6c3ec23e58e610a0d6cc
+Snapshot tip: e4a983a114ea7ef4118a6c3ec23e58e610a0d6cc
+Snapshot kind: original commit; no worktree changes added
+Task: Member function and constructor templates
+Issues: https://github.com/yrashk/ycxx/issues/88, https://github.com/yrashk/ycxx/issues/314, https://github.com/yrashk/ycxx/issues/16
+Commits absent from current origin/main at inventory: 0
+
+Claude chat summaries (one entry per matched chat):
+
+Session 661f0498-e1ce-4b3c-bee0-12b267228dbe
+Log: /Users/yrashk/.claude/projects/-Users-yrashk-Projects-ycxx--claude-worktrees-design-optimization-2517d4/661f0498-e1ce-4b3c-bee0-12b267228dbe.jsonl
+Log SHA-256: 77368e359ef87fdd3ff21a9fc1a0e1151c1da7378f84537748966f69bab41d33
+This earlier chat handled integration of the optimization-design PR. A conflict report referred to an obsolete head; the current merge c918718 already contained main and GitHub reported the PR mergeable. CI was still running at the last check. No additional implementation fix was needed in that final exchange.
+
+Session 12d155b3-30b8-4480-bcdb-94d9434e3d77
+Log: /Users/yrashk/.claude/projects/-Users-yrashk-Projects-ycxx--claude-worktrees-design-optimization-2517d4/12d155b3-30b8-4480-bcdb-94d9434e3d77.jsonl
+Log SHA-256: c0024a9a06f9466a6e7cac7e6bd1102a5bee7b446b4ade2f995d7f36df71d77d
+This earlier chat accepted the optimization design, summarized it in DECISIONS and STATUS, and created implementation issues #23-#30 on roadmap #12. A solver spike exposed libycxx problems: iterator-end stability #5, a GCC crash tracked in libycxx#1, and C-wrapper search behavior #6. The first two were reproduced locally; the third came from the spike report. A separate libycxx session was started to fix them. It reported tools/test --fast passing for the design acceptance commit d7426b6 and left merging PR #22 to the coordinator.
+
+Session 8a444d15-0b7d-49e7-ac44-6e01805f2e7e
+Log: /Users/yrashk/.claude/projects/-Users-yrashk-Projects-ycxx--claude-worktrees-design-optimization-2517d4/8a444d15-0b7d-49e7-ac44-6e01805f2e7e.jsonl
+Log SHA-256: f410ff165d1a8e87ddb3237e35838feaf4446543cdd1e5d04267506aadbf6d53
+The templates session implemented the zeta slice #88, from function/class templates through packs, aliases, concepts and member templates. Its latest implementation was #314 / PR #348: member-function and constructor templates, out-of-class definitions, explicit arguments and member overload matching. The reported review found one P0, five P1 and four P2 findings; all P0/P1 findings were fixed with regressions, including recursive by-value constructor-template copying, static members and declaration matching. It reported passing m9 tests with ycxx/Clang/GCC and tools/test --fast after merging main. Unfinished coverage is linked to #209 and #340; parsing follow-ups are #345. The planned next zeta steps were #271 then #272; contextual-query migration remains #16. PR state in this narrative is historical; use the inventory and current GitHub state.
+
+Recovery next step: read the linked issue, compare this snapshot with current main and the implementation/test-author counterparts, finish unfinished review work, run required checks in a new worktree, and continue toward a green PR. Notify original issues when starting the parallel continuation; after the PR is green, link it there and explicitly take over from the previous agent. Amend WIP snapshots as the work continues, preserving/rewriting the note onto the new tip.
+Validation: preservation session verified source HEAD/index/status unchanged and snapshot tree equality. Historical test statements above are reports from Claude logs, not new test runs. No compiler implementation sources were consulted to summarize these chats.
