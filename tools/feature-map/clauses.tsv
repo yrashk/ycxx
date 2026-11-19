@@ -1,0 +1,511 @@
+# The core clauses of the draft at 65890fab817ca1dfe7898f481c4fd088bbe2bbce (tests/draft/PINS), written by `feature-map fetch`.
+clause	level	parent	chapter	title
+lex	0		lex	Lexical conventions
+lex.separate	1	lex	lex	Separate translation
+lex.phases	1	lex	lex	Phases of translation
+lex.char	1	lex	lex	Characters
+lex.charset	2	lex.char	lex	Character sets
+lex.universal.char	2	lex.char	lex	Universal character names
+lex.comment	1	lex	lex	Comments
+lex.pptoken	1	lex	lex	Preprocessing tokens
+lex.header	1	lex	lex	Header names
+lex.ppnumber	1	lex	lex	Preprocessing numbers
+lex.operators	1	lex	lex	Operators and punctuators
+lex.digraph	1	lex	lex	Alternative tokens
+lex.token	1	lex	lex	Tokens
+lex.name	1	lex	lex	Identifiers
+lex.key	1	lex	lex	Keywords
+lex.literal	1	lex	lex	Literals
+lex.literal.kinds	2	lex.literal	lex	Kinds of literals
+lex.icon	2	lex.literal	lex	Integer literals
+lex.ccon	2	lex.literal	lex	Character literals
+lex.fcon	2	lex.literal	lex	Floating-point literals
+lex.string	2	lex.literal	lex	String literals
+lex.string.uneval	2	lex.literal	lex	Unevaluated strings
+lex.bool	2	lex.literal	lex	Boolean literals
+lex.nullptr	2	lex.literal	lex	Pointer literals
+lex.ext	2	lex.literal	lex	User-defined literals
+basic	0		basic	Basics
+basic.pre	1	basic	basic	Preamble
+basic.def	1	basic	basic	Declarations and definitions
+basic.def.odr	1	basic	basic	One-definition rule
+basic.scope	1	basic	basic	Scope
+basic.scope.scope	2	basic.scope	basic	General
+basic.scope.pdecl	2	basic.scope	basic	Point of declaration
+basic.scope.block	2	basic.scope	basic	Block scope
+basic.scope.param	2	basic.scope	basic	Function parameter scope
+basic.scope.lambda	2	basic.scope	basic	Lambda scope
+basic.scope.namespace	2	basic.scope	basic	Namespace scope
+basic.scope.class	2	basic.scope	basic	Class scope
+basic.scope.enum	2	basic.scope	basic	Enumeration scope
+basic.scope.temp	2	basic.scope	basic	Template parameter scope
+basic.scope.contract	2	basic.scope	basic	Contract-assertion scope
+basic.lookup	1	basic	basic	Name lookup
+basic.lookup.general	2	basic.lookup	basic	General
+class.member.lookup	2	basic.lookup	basic	Member name lookup
+basic.lookup.unqual	2	basic.lookup	basic	Unqualified name lookup
+basic.lookup.argdep	2	basic.lookup	basic	Argument-dependent name lookup
+basic.lookup.qual	2	basic.lookup	basic	Qualified name lookup
+basic.lookup.qual.general	3	basic.lookup.qual	basic	General
+class.qual	3	basic.lookup.qual	basic	Class members
+namespace.qual	3	basic.lookup.qual	basic	Namespace members
+basic.lookup.elab	2	basic.lookup	basic	Elaborated type specifiers
+basic.lookup.udir	2	basic.lookup	basic	Using-directives and namespace aliases
+basic.splice	1	basic	basic	Splice specifiers
+basic.link	1	basic	basic	Program and linkage
+basic.memobj	1	basic	basic	Memory and objects
+intro.memory	2	basic.memobj	basic	Memory model
+intro.object	2	basic.memobj	basic	Object model
+basic.align	2	basic.memobj	basic	Alignment
+basic.life	2	basic.memobj	basic	Lifetime
+basic.indet	2	basic.memobj	basic	Indeterminate and erroneous values
+basic.stc	2	basic.memobj	basic	Storage duration
+basic.stc.general	3	basic.stc	basic	General
+basic.stc.static	3	basic.stc	basic	Static storage duration
+basic.stc.thread	3	basic.stc	basic	Thread storage duration
+basic.stc.auto	3	basic.stc	basic	Automatic storage duration
+basic.stc.dynamic	3	basic.stc	basic	Dynamic storage duration
+basic.stc.dynamic.general	4	basic.stc.dynamic	basic	General
+basic.stc.dynamic.allocation	4	basic.stc.dynamic	basic	Allocation functions
+basic.stc.dynamic.deallocation	4	basic.stc.dynamic	basic	Deallocation functions
+class.temporary	2	basic.memobj	basic	Temporary objects
+basic.types	1	basic	basic	Types
+basic.types.general	2	basic.types	basic	General
+basic.types.trivial	2	basic.types	basic	Trivially copyable types
+basic.fundamental	2	basic.types	basic	Fundamental types
+basic.extended.fp	2	basic.types	basic	Optional extended floating-point types
+basic.compound	2	basic.types	basic	Compound types
+basic.type.qualifier	2	basic.types	basic	CV-qualifiers
+conv.rank	2	basic.types	basic	Conversion ranks
+basic.exec	1	basic	basic	Program execution
+intro.execution	2	basic.exec	basic	Sequential execution
+intro.multithread	2	basic.exec	basic	Multi-threaded executions and data races
+intro.multithread.general	3	intro.multithread	basic	General
+intro.races	3	intro.multithread	basic	Data races
+intro.progress	3	intro.multithread	basic	Forward progress
+basic.start	2	basic.exec	basic	Start and termination
+basic.start.main	3	basic.start	basic	main function
+basic.start.static	3	basic.start	basic	Static initialization
+basic.start.dynamic	3	basic.start	basic	Dynamic initialization of non-block variables
+basic.start.term	3	basic.start	basic	Termination
+basic.contract	1	basic	basic	Contract assertions
+basic.contract.general	2	basic.contract	basic	General
+basic.contract.eval	2	basic.contract	basic	Evaluation
+basic.contract.handler	2	basic.contract	basic	Contract-violation handler
+expr	0		expressions	Expressions
+expr.pre	1	expr	expressions	Preamble
+expr.prop	1	expr	expressions	Properties of expressions
+basic.lval	2	expr.prop	expressions	Value category
+expr.type	2	expr.prop	expressions	Type
+expr.context	2	expr.prop	expressions	Context dependence
+conv	1	expr	expressions	Standard conversions
+conv.general	2	conv	expressions	General
+conv.lval	2	conv	expressions	Lvalue-to-rvalue conversion
+conv.array	2	conv	expressions	Array-to-pointer conversion
+conv.func	2	conv	expressions	Function-to-pointer conversion
+conv.rval	2	conv	expressions	Temporary materialization conversion
+conv.qual	2	conv	expressions	Qualification conversions
+conv.prom	2	conv	expressions	Integral promotions
+conv.fpprom	2	conv	expressions	Floating-point promotion
+conv.integral	2	conv	expressions	Integral conversions
+conv.double	2	conv	expressions	Floating-point conversions
+conv.fpint	2	conv	expressions	Floating-integral conversions
+conv.ptr	2	conv	expressions	Pointer conversions
+conv.mem	2	conv	expressions	Pointer-to-member conversions
+conv.fctptr	2	conv	expressions	Function pointer conversions
+conv.bool	2	conv	expressions	Boolean conversions
+expr.arith.conv	1	expr	expressions	Usual arithmetic conversions
+expr.prim	1	expr	expressions	Primary expressions
+expr.prim.grammar	2	expr.prim	expressions	Grammar
+expr.prim.literal	2	expr.prim	expressions	Literals
+expr.prim.this	2	expr.prim	expressions	This
+expr.prim.paren	2	expr.prim	expressions	Parentheses
+expr.prim.id	2	expr.prim	expressions	Names
+expr.prim.id.general	3	expr.prim.id	expressions	General
+expr.prim.id.unqual	3	expr.prim.id	expressions	Unqualified names
+expr.prim.id.qual	3	expr.prim.id	expressions	Qualified names
+expr.prim.pack.index	3	expr.prim.id	expressions	Pack indexing expression
+expr.prim.id.dtor	3	expr.prim.id	expressions	Destruction
+expr.prim.lambda	2	expr.prim	expressions	Lambda expressions
+expr.prim.lambda.general	3	expr.prim.lambda	expressions	General
+expr.prim.lambda.closure	3	expr.prim.lambda	expressions	Closure types
+expr.prim.lambda.capture	3	expr.prim.lambda	expressions	Captures
+expr.prim.fold	2	expr.prim	expressions	Fold expressions
+expr.prim.req	2	expr.prim	expressions	Requires expressions
+expr.prim.req.general	3	expr.prim.req	expressions	General
+expr.prim.req.simple	3	expr.prim.req	expressions	Simple requirements
+expr.prim.req.type	3	expr.prim.req	expressions	Type requirements
+expr.prim.req.compound	3	expr.prim.req	expressions	Compound requirements
+expr.prim.req.nested	3	expr.prim.req	expressions	Nested requirements
+expr.prim.splice	2	expr.prim	expressions	Expression splicing
+expr.compound	1	expr	expressions	Compound expressions
+expr.post	2	expr.compound	expressions	Postfix expressions
+expr.post.general	3	expr.post	expressions	General
+expr.sub	3	expr.post	expressions	Subscripting
+expr.call	3	expr.post	expressions	Function call
+expr.type.conv	3	expr.post	expressions	Explicit type conversion (functional notation)
+expr.ref	3	expr.post	expressions	Class member access
+expr.post.incr	3	expr.post	expressions	Increment and decrement
+expr.dynamic.cast	3	expr.post	expressions	Dynamic cast
+expr.typeid	3	expr.post	expressions	Type identification
+expr.static.cast	3	expr.post	expressions	Static cast
+expr.reinterpret.cast	3	expr.post	expressions	Reinterpret cast
+expr.const.cast	3	expr.post	expressions	Const cast
+expr.unary	2	expr.compound	expressions	Unary expressions
+expr.unary.general	3	expr.unary	expressions	General
+expr.unary.op	3	expr.unary	expressions	Unary operators
+expr.pre.incr	3	expr.unary	expressions	Increment and decrement
+expr.await	3	expr.unary	expressions	Await
+expr.sizeof	3	expr.unary	expressions	Sizeof
+expr.alignof	3	expr.unary	expressions	Alignof
+expr.unary.noexcept	3	expr.unary	expressions	noexcept operator
+expr.new	3	expr.unary	expressions	New
+expr.delete	3	expr.unary	expressions	Delete
+expr.reflect	3	expr.unary	expressions	The reflection operator
+expr.cast	2	expr.compound	expressions	Explicit type conversion (cast notation)
+expr.mptr.oper	2	expr.compound	expressions	Pointer-to-member operators
+expr.mul	2	expr.compound	expressions	Multiplicative operators
+expr.add	2	expr.compound	expressions	Additive operators
+expr.shift	2	expr.compound	expressions	Shift operators
+expr.spaceship	2	expr.compound	expressions	Three-way comparison operator
+expr.rel	2	expr.compound	expressions	Relational operators
+expr.eq	2	expr.compound	expressions	Equality operators
+expr.bit.and	2	expr.compound	expressions	Bitwise AND operator
+expr.xor	2	expr.compound	expressions	Bitwise exclusive OR operator
+expr.or	2	expr.compound	expressions	Bitwise inclusive OR operator
+expr.log.and	2	expr.compound	expressions	Logical AND operator
+expr.log.or	2	expr.compound	expressions	Logical OR operator
+expr.cond	2	expr.compound	expressions	Conditional operator
+expr.yield	2	expr.compound	expressions	Yielding a value
+expr.throw	2	expr.compound	expressions	Throwing an exception
+expr.assign	2	expr.compound	expressions	Assignment and compound assignment operators
+expr.comma	2	expr.compound	expressions	Comma operator
+expr.const	1	expr	expressions	Constant evaluation
+expr.const.general	2	expr.const	expressions	General
+expr.const.core	2	expr.const	expressions	Core constant expressions
+expr.const.const	2	expr.const	expressions	Constant expressions
+expr.const.init	2	expr.const	expressions	Constant initialization
+expr.const.imm	2	expr.const	expressions	Immediate functions
+expr.const.reflect	2	expr.const	expressions	Reflection
+expr.const.defns	2	expr.const	expressions	Further definitions
+stmt	0		statements	Statements
+stmt.pre	1	stmt	statements	Preamble
+stmt.label	1	stmt	statements	Label
+stmt.expr	1	stmt	statements	Expression statement
+stmt.block	1	stmt	statements	Compound statement or block
+stmt.select	1	stmt	statements	Selection statements
+stmt.select.general	2	stmt.select	statements	General
+stmt.if	2	stmt.select	statements	The if statement
+stmt.switch	2	stmt.select	statements	The switch statement
+stmt.iter	1	stmt	statements	Iteration statements
+stmt.iter.general	2	stmt.iter	statements	General
+stmt.while	2	stmt.iter	statements	The while statement
+stmt.do	2	stmt.iter	statements	The do statement
+stmt.for	2	stmt.iter	statements	The for statement
+stmt.ranged	2	stmt.iter	statements	The range-based for statement
+stmt.expand	1	stmt	statements	Expansion statements
+stmt.jump	1	stmt	statements	Jump statements
+stmt.jump.general	2	stmt.jump	statements	General
+stmt.break	2	stmt.jump	statements	The break statement
+stmt.cont	2	stmt.jump	statements	The continue statement
+stmt.return	2	stmt.jump	statements	The return statement
+stmt.return.coroutine	2	stmt.jump	statements	The co_return statement
+stmt.goto	2	stmt.jump	statements	The goto statement
+stmt.contract.assert	1	stmt	statements	Assertion statement
+stmt.dcl	1	stmt	statements	Declaration statement
+stmt.ambig	1	stmt	statements	Ambiguity resolution
+dcl	0		declarations	Declarations
+dcl.pre	1	dcl	declarations	Preamble
+dcl.spec	1	dcl	declarations	Specifiers
+dcl.spec.general	2	dcl.spec	declarations	General
+dcl.stc	2	dcl.spec	declarations	Storage class specifiers
+dcl.fct.spec	2	dcl.spec	declarations	Function specifiers
+dcl.typedef	2	dcl.spec	declarations	The typedef specifier
+dcl.friend	2	dcl.spec	declarations	The friend specifier
+dcl.constexpr	2	dcl.spec	declarations	The constexpr and consteval specifiers
+dcl.constinit	2	dcl.spec	declarations	The constinit specifier
+dcl.inline	2	dcl.spec	declarations	The inline specifier
+dcl.type	2	dcl.spec	declarations	Type specifiers
+dcl.type.general	3	dcl.type	declarations	General
+dcl.type.cv	3	dcl.type	declarations	The cv-qualifier{s}
+dcl.type.simple	3	dcl.type	declarations	Simple type specifiers
+dcl.type.pack.index	3	dcl.type	declarations	Pack indexing specifier
+dcl.type.elab	3	dcl.type	declarations	Elaborated type specifiers
+dcl.type.decltype	3	dcl.type	declarations	Decltype specifiers
+dcl.spec.auto	3	dcl.type	declarations	Placeholder type specifiers
+dcl.spec.auto.general	4	dcl.spec.auto	declarations	General
+dcl.type.auto.deduct	4	dcl.spec.auto	declarations	Placeholder type deduction
+dcl.type.class.deduct	3	dcl.type	declarations	Deduced class template specialization types
+dcl.type.splice	3	dcl.type	declarations	Type splicing
+dcl.decl	1	dcl	declarations	Declarators
+dcl.decl.general	2	dcl.decl	declarations	General
+dcl.name	2	dcl.decl	declarations	Type names
+dcl.ambig.res	2	dcl.decl	declarations	Ambiguity resolution
+dcl.meaning	2	dcl.decl	declarations	Meaning of declarators
+dcl.meaning.general	3	dcl.meaning	declarations	General
+dcl.ptr	3	dcl.meaning	declarations	Pointers
+dcl.ref	3	dcl.meaning	declarations	References
+dcl.mptr	3	dcl.meaning	declarations	Pointers to members
+dcl.array	3	dcl.meaning	declarations	Arrays
+dcl.fct	3	dcl.meaning	declarations	Functions
+dcl.fct.default	3	dcl.meaning	declarations	Default arguments
+dcl.contract	1	dcl	declarations	Function contract specifiers
+dcl.contract.func	2	dcl.contract	declarations	General
+dcl.contract.res	2	dcl.contract	declarations	Referring to the result object
+dcl.init	1	dcl	declarations	Initializers
+dcl.init.general	2	dcl.init	declarations	General
+dcl.init.aggr	2	dcl.init	declarations	Aggregates
+dcl.init.string	2	dcl.init	declarations	Character arrays
+dcl.init.ref	2	dcl.init	declarations	References
+dcl.init.list	2	dcl.init	declarations	List-initialization
+dcl.fct.def	1	dcl	declarations	Function definitions
+dcl.fct.def.general	2	dcl.fct.def	declarations	General
+dcl.fct.def.default	2	dcl.fct.def	declarations	Explicitly-defaulted functions
+dcl.fct.def.delete	2	dcl.fct.def	declarations	Deleted definitions
+dcl.fct.def.coroutine	2	dcl.fct.def	declarations	Coroutine definitions
+dcl.fct.def.replace	2	dcl.fct.def	declarations	Replaceable function definitions
+dcl.struct.bind	1	dcl	declarations	Structured binding declarations
+enum	1	dcl	declarations	Enumerations
+dcl.enum	2	enum	declarations	Enumeration declarations
+enum.udecl	2	enum	declarations	The using enum declaration
+basic.namespace	1	dcl	declarations	Namespaces
+basic.namespace.general	2	basic.namespace	declarations	General
+namespace.def	2	basic.namespace	declarations	Namespace definition
+namespace.def.general	3	namespace.def	declarations	General
+namespace.unnamed	3	namespace.def	declarations	Unnamed namespaces
+namespace.alias	2	basic.namespace	declarations	Namespace alias
+namespace.udir	2	basic.namespace	declarations	Using namespace directive
+namespace.udecl	1	dcl	declarations	The using declaration
+dcl.asm	1	dcl	declarations	The asm declaration
+dcl.link	1	dcl	declarations	Linkage specifications
+dcl.attr	1	dcl	declarations	Attributes
+dcl.attr.grammar	2	dcl.attr	declarations	Attribute syntax and semantics
+dcl.align	2	dcl.attr	declarations	Alignment specifier
+dcl.attr.assume	2	dcl.attr	declarations	Assumption attribute
+dcl.attr.deprecated	2	dcl.attr	declarations	Deprecated attribute
+dcl.attr.fallthrough	2	dcl.attr	declarations	Fallthrough attribute
+dcl.attr.indet	2	dcl.attr	declarations	Indeterminate storage
+dcl.attr.likelihood	2	dcl.attr	declarations	Likelihood attributes
+dcl.attr.unused	2	dcl.attr	declarations	Maybe unused attribute
+dcl.attr.nodiscard	2	dcl.attr	declarations	Nodiscard attribute
+dcl.attr.noreturn	2	dcl.attr	declarations	Noreturn attribute
+dcl.attr.nouniqueaddr	2	dcl.attr	declarations	No unique address attribute
+dcl.attr.annotation	2	dcl.attr	declarations	Annotations
+module	0		modules	Modules
+module.unit	1	module	modules	Module units and purviews
+module.interface	1	module	modules	Export declaration
+module.import	1	module	modules	Import declaration
+module.global.frag	1	module	modules	Global module fragment
+module.private.frag	1	module	modules	Private module fragment
+module.context	1	module	modules	Instantiation context
+module.reach	1	module	modules	Reachability
+class	0		classes	Classes
+class.pre	1	class	classes	Preamble
+class.prop	1	class	classes	Properties of classes
+class.name	1	class	classes	Class names
+class.mem	1	class	classes	Class members
+class.mem.general	2	class.mem	classes	General
+class.mfct	2	class.mem	classes	Member functions
+class.mfct.non.static	2	class.mem	classes	Non-static member functions
+special	2	class.mem	classes	Special member functions
+class.ctor	2	class.mem	classes	Constructors
+class.ctor.general	3	class.ctor	classes	General
+class.default.ctor	3	class.ctor	classes	Default constructors
+class.copy.ctor	3	class.ctor	classes	Copy/move constructors
+class.copy.assign	2	class.mem	classes	Copy/move assignment operator
+class.dtor	2	class.mem	classes	Destructors
+class.conv	2	class.mem	classes	Conversions
+class.conv.general	3	class.conv	classes	General
+class.conv.ctor	3	class.conv	classes	Conversion by constructor
+class.conv.fct	3	class.conv	classes	Conversion functions
+class.static	2	class.mem	classes	Static members
+class.static.general	3	class.static	classes	General
+class.static.mfct	3	class.static	classes	Static member functions
+class.static.data	3	class.static	classes	Static data members
+class.bit	2	class.mem	classes	Bit-fields
+class.free	2	class.mem	classes	Allocation and deallocation functions
+class.nest	2	class.mem	classes	Nested class declarations
+class.union	1	class	classes	Unions
+class.union.general	2	class.union	classes	General
+class.union.anon	2	class.union	classes	Anonymous unions
+class.local	1	class	classes	Local class declarations
+class.derived	1	class	classes	Derived classes
+class.derived.general	2	class.derived	classes	General
+class.mi	2	class.derived	classes	Multiple base classes
+class.virtual	2	class.derived	classes	Virtual functions
+class.abstract	2	class.derived	classes	Abstract classes
+class.access	1	class	classes	Member access control
+class.access.general	2	class.access	classes	General
+class.access.spec	2	class.access	classes	Access specifiers
+class.access.base	2	class.access	classes	Accessibility of base classes and base class members
+class.friend	2	class.access	classes	Friends
+class.protected	2	class.access	classes	Protected member access
+class.access.virt	2	class.access	classes	Access to virtual functions
+class.paths	2	class.access	classes	Multiple access
+class.access.nest	2	class.access	classes	Nested classes
+class.init	1	class	classes	Initialization
+class.init.general	2	class.init	classes	General
+class.expl.init	2	class.init	classes	Explicit initialization
+class.base.init	2	class.init	classes	Initializing bases and members
+class.inhctor.init	2	class.init	classes	Initialization by inherited constructor
+class.cdtor	2	class.init	classes	Construction and destruction
+class.copy.elision	2	class.init	classes	Copy/move elision
+class.compare	1	class	classes	Comparisons
+class.compare.default	2	class.compare	classes	Defaulted comparison operator functions
+class.eq	2	class.compare	classes	Equality operator
+class.spaceship	2	class.compare	classes	Three-way comparison
+class.compare.secondary	2	class.compare	classes	Secondary comparison operators
+over	0		overloading	Overloading
+over.pre	1	over	overloading	Preamble
+over.match	1	over	overloading	Overload resolution
+over.match.general	2	over.match	overloading	General
+over.match.funcs	2	over.match	overloading	Candidate functions and argument lists
+over.match.funcs.general	3	over.match.funcs	overloading	General
+over.match.call	3	over.match.funcs	overloading	Function call syntax
+over.match.call.general	4	over.match.call	overloading	General
+over.call.func	4	over.match.call	overloading	Call to designated function
+over.call.object	4	over.match.call	overloading	Call to object of class type
+over.match.oper	3	over.match.funcs	overloading	Operators in expressions
+over.match.ctor	3	over.match.funcs	overloading	Initialization by constructor
+over.match.copy	3	over.match.funcs	overloading	Copy-initialization of class by user-defined conversion
+over.match.conv	3	over.match.funcs	overloading	Initialization by conversion function
+over.match.ref	3	over.match.funcs	overloading	Initialization by conversion function for direct reference binding
+over.match.list	3	over.match.funcs	overloading	Initialization by list-initialization
+over.match.class.deduct	3	over.match.funcs	overloading	Class template argument deduction
+over.match.viable	2	over.match	overloading	Viable functions
+over.match.best	2	over.match	overloading	Best viable function
+over.match.best.general	3	over.match.best	overloading	General
+over.best.ics	3	over.match.best	overloading	Implicit conversion sequences
+over.best.ics.general	4	over.best.ics	overloading	General
+over.ics.scs	4	over.best.ics	overloading	Standard conversion sequences
+over.ics.user	4	over.best.ics	overloading	User-defined conversion sequences
+over.ics.ellipsis	4	over.best.ics	overloading	Ellipsis conversion sequences
+over.ics.ref	4	over.best.ics	overloading	Reference binding
+over.ics.list	4	over.best.ics	overloading	List-initialization sequence
+over.ics.rank	3	over.match.best	overloading	Ranking implicit conversion sequences
+over.over	1	over	overloading	Address of an overload set
+over.oper	1	over	overloading	Overloaded operators
+over.oper.general	2	over.oper	overloading	General
+over.unary	2	over.oper	overloading	Unary operators
+over.binary	2	over.oper	overloading	Binary operators
+over.binary.general	3	over.binary	overloading	General
+over.assign	3	over.binary	overloading	Simple assignment
+over.call	2	over.oper	overloading	Function call
+over.sub	2	over.oper	overloading	Subscripting
+over.ref	2	over.oper	overloading	Class member access
+over.inc	2	over.oper	overloading	Increment and decrement
+over.inc.general	3	over.inc	overloading	General
+over.inc.default	3	over.inc	overloading	Defaulted function
+over.built	1	over	overloading	Built-in operators
+over.literal	1	over	overloading	User-defined literals
+temp	0		templates	Templates
+temp.pre	1	temp	templates	Preamble
+temp.param	1	temp	templates	Template parameters
+temp.names	1	temp	templates	Names of template specializations
+temp.arg	1	temp	templates	Template arguments
+temp.arg.general	2	temp.arg	templates	General
+temp.arg.type	2	temp.arg	templates	Type template arguments
+temp.arg.nontype	2	temp.arg	templates	Constant template arguments
+temp.arg.template	2	temp.arg	templates	Template template arguments
+temp.constr	1	temp	templates	Template constraints
+temp.constr.general	2	temp.constr	templates	General
+temp.constr.constr	2	temp.constr	templates	Constraints
+temp.constr.constr.general	3	temp.constr.constr	templates	General
+temp.constr.op	3	temp.constr.constr	templates	Logical operations
+temp.constr.atomic	3	temp.constr.constr	templates	Atomic constraints
+temp.constr.concept	3	temp.constr.constr	templates	Concept-dependent constraints
+temp.constr.fold	3	temp.constr.constr	templates	Fold expanded constraint
+temp.constr.decl	2	temp.constr	templates	Constrained declarations
+temp.constr.normal	2	temp.constr	templates	Constraint normalization
+temp.constr.order	2	temp.constr	templates	Partial ordering by constraints
+temp.type	1	temp	templates	Type equivalence
+temp.decls	1	temp	templates	Template declarations
+temp.decls.general	2	temp.decls	templates	General
+temp.class	2	temp.decls	templates	Class templates
+temp.class.general	3	temp.class	templates	General
+temp.mem.func	3	temp.class	templates	Member functions of class templates
+temp.deduct.guide	3	temp.class	templates	Deduction guides
+temp.mem.class	3	temp.class	templates	Member classes of class templates
+temp.static	3	temp.class	templates	Static data members of class templates
+temp.mem.enum	3	temp.class	templates	Enumeration members of class templates
+temp.mem	2	temp.decls	templates	Member templates
+temp.variadic	2	temp.decls	templates	Variadic templates
+temp.friend	2	temp.decls	templates	Friends
+temp.spec.partial	2	temp.decls	templates	Partial specialization
+temp.spec.partial.general	3	temp.spec.partial	templates	General
+temp.spec.partial.match	3	temp.spec.partial	templates	Matching of partial specializations
+temp.spec.partial.order	3	temp.spec.partial	templates	Partial ordering of partial specializations
+temp.spec.partial.member	3	temp.spec.partial	templates	Members of class template partial specializations
+temp.fct	2	temp.decls	templates	Function templates
+temp.fct.general	3	temp.fct	templates	General
+temp.over.link	3	temp.fct	templates	Function template overloading
+temp.func.order	3	temp.fct	templates	Partial ordering of function templates
+temp.alias	2	temp.decls	templates	Alias templates
+temp.concept	2	temp.decls	templates	Concept definitions
+temp.res	1	temp	templates	Name resolution
+temp.res.general	2	temp.res	templates	General
+temp.local	2	temp.res	templates	Locally declared names
+temp.dep	2	temp.res	templates	Dependent names
+temp.dep.general	3	temp.dep	templates	General
+temp.dep.type	3	temp.dep	templates	Dependent types
+temp.dep.expr	3	temp.dep	templates	Type-dependent expressions
+temp.dep.constexpr	3	temp.dep	templates	Value-dependent expressions
+temp.dep.splice	3	temp.dep	templates	Dependent splice specifiers
+temp.dep.namespace	3	temp.dep	templates	Dependent namespaces
+temp.dep.temp	3	temp.dep	templates	Dependent template arguments
+temp.dep.res	2	temp.res	templates	Dependent name resolution
+temp.point	3	temp.dep.res	templates	Point of instantiation
+temp.dep.candidate	3	temp.dep.res	templates	Candidate functions
+temp.spec	1	temp	templates	Template instantiation and specialization
+temp.spec.general	2	temp.spec	templates	General
+temp.inst	2	temp.spec	templates	Implicit instantiation
+temp.explicit	2	temp.spec	templates	Explicit instantiation
+temp.expl.spec	2	temp.spec	templates	Explicit specialization
+temp.fct.spec	1	temp	templates	Function template specializations
+temp.fct.spec.general	2	temp.fct.spec	templates	General
+temp.arg.explicit	2	temp.fct.spec	templates	Explicit template argument specification
+temp.deduct	2	temp.fct.spec	templates	Template argument deduction
+temp.deduct.general	3	temp.deduct	templates	General
+temp.deduct.call	3	temp.deduct	templates	Deducing template arguments from a function call
+temp.deduct.funcaddr	3	temp.deduct	templates	Deducing template arguments taking the address of a function template
+temp.deduct.conv	3	temp.deduct	templates	Deducing conversion function template arguments
+temp.deduct.partial	3	temp.deduct	templates	Deducing template arguments during partial ordering
+temp.deduct.type	3	temp.deduct	templates	Deducing template arguments from a type
+temp.deduct.decl	3	temp.deduct	templates	Deducing template arguments from a function declaration
+temp.over	2	temp.fct.spec	templates	Overload resolution
+except	0		exceptions	Exception handling
+except.pre	1	except	exceptions	Preamble
+except.throw	1	except	exceptions	Throwing an exception
+except.ctor	1	except	exceptions	Stack unwinding
+except.handle	1	except	exceptions	Handling an exception
+except.spec	1	except	exceptions	Exception specifications
+except.special	1	except	exceptions	Special functions
+except.special.general	2	except.special	exceptions	General
+except.terminate	2	except.special	exceptions	The std::terminate function
+cpp	0		preprocessor	Preprocessing directives
+cpp.pre	1	cpp	preprocessor	Preamble
+cpp.cond	1	cpp	preprocessor	Conditional inclusion
+cpp.include	1	cpp	preprocessor	Source file inclusion
+cpp.embed	1	cpp	preprocessor	Resource inclusion
+cpp.embed.gen	2	cpp.embed	preprocessor	General
+cpp.embed.param	2	cpp.embed	preprocessor	Embed parameters
+cpp.embed.param.limit	3	cpp.embed.param	preprocessor	limit parameter
+cpp.embed.param.offset	3	cpp.embed.param	preprocessor	offset parameter
+cpp.embed.param.prefix	3	cpp.embed.param	preprocessor	prefix parameter
+cpp.embed.param.suffix	3	cpp.embed.param	preprocessor	suffix parameter
+cpp.embed.param.if.empty	3	cpp.embed.param	preprocessor	if_empty parameter
+cpp.module	1	cpp	preprocessor	Module directive
+cpp.import	1	cpp	preprocessor	Header unit importation
+cpp.replace	1	cpp	preprocessor	Macro replacement
+cpp.replace.general	2	cpp.replace	preprocessor	General
+cpp.subst	2	cpp.replace	preprocessor	Argument substitution
+cpp.stringize	2	cpp.replace	preprocessor	The \# operator
+cpp.concat	2	cpp.replace	preprocessor	The \#\# operator
+cpp.rescan	2	cpp.replace	preprocessor	Rescanning and further replacement
+cpp.scope	2	cpp.replace	preprocessor	Scope of macro definitions
+cpp.line	1	cpp	preprocessor	Line control
+cpp.error	1	cpp	preprocessor	Diagnostic directives
+cpp.pragma	1	cpp	preprocessor	Pragma directive
+cpp.null	1	cpp	preprocessor	Null directive
+cpp.predefined	1	cpp	preprocessor	Predefined macro names
+cpp.pragma.op	1	cpp	preprocessor	Pragma operator
