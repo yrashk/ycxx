@@ -93,7 +93,7 @@ struct DefinitionAt {
   static engine::query_task<Value> run(engine::Ctx& cx, DefinitionKey k);
 };
 
-// String literal objects and their addresses, from the values interner (`VString`, `VLvalue`).
+// String literal objects and address constants, from the values interner (`VString`, `VLvalue`).
 class ValueConstants final : public Constants {
  public:
   explicit ValueConstants(sema::World& w) : w_(&w) {}

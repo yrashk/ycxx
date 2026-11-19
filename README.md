@@ -68,6 +68,10 @@ Linux objects can make direct calls to variadic functions such as `printf` withi
 INTEGER ABI subset. Use the host linker to link these objects with libc.
 [#399](https://github.com/yrashk/ycxx/issues/399)
 
+ELF and Mach-O objects support static pointer initializers naming variables, array elements,
+or functions. The referenced symbol may be defined in a separate translation unit.
+[#101](https://github.com/yrashk/ycxx/issues/101)
+
 **Language on macOS.** Programs can use:
 - the fundamental integer, character and floating types, pointers, arrays, references and
   enumerations; `float`, `double` and `long double` with literals, arithmetic, comparisons and
