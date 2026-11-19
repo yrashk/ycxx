@@ -174,6 +174,8 @@ public:
     // A class template specialization is instantiated where it must be complete ([temp.inst]/2),
     // after its template's definition, unless it is explicitly specialized ([temp.expl.spec]).
     if (it == class_items_.end()) {
+      // A closure type is complete once its lambda's body ends, where its record is published.
+      if (templ == EntityId::none && classes_.is_defined(c)) return true;
       if (templ == EntityId::none || explicitly_specialized(c, item)) return false;
       const sema::ClassRec* r = instantiate_class(c, item);
       return r && r->defined;
@@ -542,6 +544,13 @@ public:
   // `function_ir(F)` for a function defined in an item before `item` ([expr.const]: a function
   // defined later is not defined at the point of evaluation).
   interp::Callee function_ir(EntityId f, u32 item);
+  // A closure type's record, published by the analysis of `item`, its lambda's
+  // (docs/design/closures.md), with its implicit special members ([expr.prim.lambda.closure]/14).
+  const sema::ClassRec& publish_class(EntityId c, sema::ClassRec r, u32 item) {
+    if (const sema::ClassRec* done = classes_.find(c)) return *done;
+    special_members(item, c, r);
+    return classes_.publish(c, std::move(r));
+  }
   // The function type a definition before `item` deduced for `f` ([dcl.spec.auto.general]/11).
   std::optional<QualType> deduced_type(EntityId f, u32 item);
   // A namespace-scope variable as the interpreter sees it at `item`: its type and, if it is usable
@@ -1001,6 +1010,7 @@ class AtItem final : public sema::Questions {
 public:
   AtItem(Program& p, u32 item, bool self) : from(p.ns_of(item)), p_(&p), item_(item), self_(self) {}
   const sema::Classes& classes() override { return p_->classes(); }
+  const sema::ClassRec& publish_class(EntityId c, sema::ClassRec r) override { return p_->publish_class(c, std::move(r), item_); }
   const sema::EnumRec* defining_enum(EntityId e) override {
     return p_->defining_enum_.first == e ? p_->defining_enum_.second : nullptr;
   }
@@ -1100,6 +1110,7 @@ class AtInstantiation final : public sema::Questions {
 public:
   AtInstantiation(Program& p, u32 item) : p_(&p), item_(item), at_(p, item, true) {}
   const sema::Classes& classes() override { return p_->classes(); }
+  const sema::ClassRec& publish_class(EntityId c, sema::ClassRec r) override { return p_->publish_class(c, std::move(r), item_); }
   std::vector<DeclId> visible_decls(ast::NameId name, std::span<const EntityId> directives = {}) override {
     return at_.visible_decls(name, directives);
   }
@@ -4113,7 +4124,8 @@ public:
       // Diagnosed: the body fails, its scopes unwound with the parse; it holds nothing.
       std::vector<sema::Expansion> none;
       out_.value = b_.commit(ast::BodySema{NodeId::none, b_.seq(std::span<const ast::LocalRec>{}), expansion_list(b_, none),
-                                           b_.seq(std::span<const u32>{}), QualType{}, 0});
+                                           b_.seq(std::span<const u32>{}), QualType{}, 0,
+                                           b_.seq(std::span<const ast::ClosureDef>{})});
       out_.demands.clear();
       return std::move(out_);
     }
@@ -4140,6 +4152,10 @@ public:
       // body is looked up in the namespace of what it defines ([basic.lookup.unqual]/9).
       EntityId scope = p_->world().entities.rec(f->entity).scope;
       s_.current_function = f->entity;
+      // Its closures' members are defined wherever it is: an inline function, a member defined in
+      // its class, or a specialization ([dcl.inline], [temp.inst]).
+      s_.function_inline = (f->flags & sema::decl_flag::inline_) || inst_ ||
+                           (it_->parent != items::none && p_->items().items[it_->parent].kind == ItemKind::class_def);
       if (f->flags & sema::decl_flag::member) {
         s_.current_class = scope;
         s_.this_type = p_->this_type(*f);
@@ -4185,7 +4201,8 @@ public:
     const bool deduced = f && s_.return_deduced() && !keeps;
     ast::BodySema v{root.id, b_.seq(std::span<const ast::LocalRec>(locals)), expansion_list(b_, keeps ? s_.expansions : none),
                     b_.seq(std::span<const u32>(keeps ? s_.dependent_calls : no_calls)),
-                    deduced ? s_.with_return(f->type, s_.return_type()) : s_.builtin(sema::Builtin::void_), u8(deduced)};
+                    deduced ? s_.with_return(f->type, s_.return_type()) : s_.builtin(sema::Builtin::void_), u8(deduced),
+                    b_.seq(std::span<const ast::ClosureDef>(s_.closures))};
     out_.value = b_.commit(v);
     if (!keeps) out_.demands = std::move(s_.demands);
     return std::move(out_);
@@ -4450,7 +4467,7 @@ const ast::BodySema& Program::synthesized_body(std::size_t i) {
   std::vector<ast::LocalRec> locals(sm.locals().begin(), sm.locals().end());
   return synth_bodies_[i] = b.commit(ast::BodySema{root.id, b.seq(std::span<const ast::LocalRec>(locals)),
                                                    b.seq(std::span<const ast::ExpansionRec>{}), b.seq(std::span<const u32>{}),
-                                                   QualType{}, 0});
+                                                   QualType{}, 0, b.seq(std::span<const ast::ClosureDef>{})});
 }
 
 const Result<ast::BodySema>& Program::analyze_body(u32 item) {

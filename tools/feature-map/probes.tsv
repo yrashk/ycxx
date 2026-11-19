@@ -1,4 +1,4 @@
-# Each probe built and run by ycxx 7897fa40b193 and by an oracle (feature-map probe).
+# Each probe built and run by ycxx ae1bd8d2eb28 and by an oracle (feature-map probe).
 feature	oracle	ycxx	first_error
 lex-core	gcc	pass	
 lex-digraph	gcc	pass	
@@ -43,15 +43,15 @@ expr-spaceship	gcc	fail	expected ')'
 expr-auto-cast	gcc	fail	expected an expression
 expr-multidim-subscript	gcc	fail	invalid operands to binary expression ('M' and 'int')
 expr-pack-index	gcc	fail	the parameter pack 't' is used without '...'
-lambda-basic	gcc	fail	'[' is not supported yet
-lambda-generic	gcc	fail	'[' is not supported yet
-lambda-init-capture	gcc	fail	'[' is not supported yet
-lambda-constexpr	gcc	fail	'[' is not supported yet
-lambda-capture-this	gcc	fail	'[' is not supported yet
-lambda-template	gcc	fail	'[' is not supported yet
+lambda-basic	gcc	pass	
+lambda-generic	gcc	fail	'auto' is not supported yet
+lambda-init-capture	gcc	pass	
+lambda-constexpr	gcc	fail	not a constant expression: internal error: the IR is ill-formed here
+lambda-capture-this	gcc	pass	
+lambda-template	gcc	fail	'<' is not supported yet
 lambda-unevaluated	gcc	fail	'[' is not supported yet
-lambda-pack-capture	gcc	fail	'[' is not supported yet
-lambda-static	gcc	fail	'[' is not supported yet
+lambda-pack-capture	gcc	fail	'...' is not supported yet
+lambda-static	gcc	fail	'static' is not supported yet
 stmt-core	gcc	fail	not a constant expression: read of a variable that is not usable in constant expressions
 stmt-range-for	gcc	fail	expected ';'
 stmt-if-init	gcc	fail	'int' is not supported yet
