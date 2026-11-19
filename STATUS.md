@@ -1363,12 +1363,15 @@ Fable decided the representation (ast.md §6.6); the Opus session wrote the code
   offsets, size and alignment from its members' sizes and alignments (Itanium C++ ABI §2.4, no
   bases or virtual functions yet). The back end's `QueryLayout::class_layout` reads it with the
   unit's `ClassShape`; `Sema::layout_of` reads it with the complete class's `ClassRec`, from which
-  the shapes are built. A reference member is laid out as a pointer.
+  the shapes are built. A reference member is laid out as a pointer. Each reader computes a
+  class's layout once (`Sema::class_places_`, `QueryLayout::class_layouts_` and `records_`), so
+  nested classes cost linear time.
 - Bases, a vptr and empty-base placement extend `record_layout`'s input when inheritance and
   virtual functions arrive.
 - Tests: `tests/own/classes/s7-sizeof-class.accept.cpp` (padding, nesting, arrays, unions,
   references, empty and template classes), `s7-sizeof-incomplete.reject.cpp`,
-  `tests/own/abi/sizeof-class.run.cpp` (agrees with Clang's sizes and member offsets).
+  `s7-sizeof-deep.run.cpp` (22 levels of nesting), `tests/own/abi/sizeof-class.run.cpp` (agrees
+  with Clang's sizes and member offsets).
 
 ## Bootstrap workarounds
 

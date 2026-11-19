@@ -346,6 +346,9 @@ class QueryLayout {
   std::map<std::uint32_t, const ClassShape*> classes_;
   std::map<std::uint32_t, QualType> enums_;
   mutable std::vector<StringUse> strings_;
+  // Each class's layout and type layout, once: a member's are needed by every class holding it.
+  mutable std::map<std::uint32_t, std::optional<ClassLayout>> class_layouts_;
+  mutable std::map<std::uint32_t, ir::TypeLayout> records_;
 };
 
 // ---------------------------------------------------------------------------------------------
@@ -543,6 +546,8 @@ ir::TypeLayout QueryLayout::type(QualType q) const {
   if (in.types.is<ast::TLRef>(c) || in.types.is<ast::TRRef>(c))
     return {pointer, target.pointer_size, target.pointer_align, false,
             in.canonical(in.types.is<ast::TLRef>(c) ? in.types.get<ast::TLRef>(c).referee : in.types.get<ast::TRRef>(c).referee)};
+  if (in.types.is<ast::TClass>(c))
+    if (auto done = records_.find(std::to_underlying(in.types.get<ast::TClass>(c).entity)); done != records_.end()) return done->second;
   if (auto r = class_layout(c)) {
     auto it = classes_.find(std::to_underlying(in.types.get<ast::TClass>(c).entity));
     ir::TypeLayout l{record, r->size, r->align, false, {}, it == classes_.end() || it->second->trivial_calls};
@@ -554,6 +559,7 @@ ir::TypeLayout QueryLayout::type(QualType q) const {
       auto b = ast::builtin_of(in, ft);
       l.floating = l.floating || (b && ast::is_floating(*b)) || type(ft).floating;
     }
+    records_[std::to_underlying(in.types.get<ast::TClass>(c).entity)] = l;
     return l;
   }
   // An enumeration is laid out as its underlying type ([dcl.enum]/8).
@@ -567,7 +573,9 @@ ir::TypeLayout QueryLayout::type(QualType q) const {
 std::optional<ClassLayout> QueryLayout::class_layout(QualType c) const {
   ast::Interners& in = *universe().in;
   if (!in.types.is<ast::TClass>(c)) return std::nullopt;
-  auto it = classes_.find(std::to_underlying(in.types.get<ast::TClass>(c).entity));
+  auto key = std::to_underlying(in.types.get<ast::TClass>(c).entity);
+  if (auto done = class_layouts_.find(key); done != class_layouts_.end()) return done->second;
+  auto it = classes_.find(key);
   if (it == classes_.end()) return std::nullopt;
   std::vector<ast::FieldPlace> places;
   for (QualType f : it->second->fields) {
@@ -577,6 +585,7 @@ std::optional<ClassLayout> QueryLayout::class_layout(QualType c) const {
   ast::RecordLayout r = ast::record_layout(places, it->second->union_);
   ClassLayout out{r.size, std::uint32_t(r.align), {}};
   for (std::size_t i = 0; i < r.offsets.size(); ++i) out.fields.push_back({r.offsets[i], in.canonical(it->second->fields[i])});
+  class_layouts_[key] = out;
   return out;
 }
 

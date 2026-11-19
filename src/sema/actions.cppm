@@ -2719,34 +2719,44 @@ public:
   // A complete object type's size or alignment: from the target, and for a class by
   // `ast::record_layout` over its members' (#194), the rule the back end lays it out by.
   std::optional<u64> layout_of(QualType t, bool align) {
+    auto p = place_of(t);
+    if (!p) return std::nullopt;
+    return align ? p->align : p->size;
+  }
+  // Size and alignment together, once per class (`class_places_`): each member's are needed.
+  std::optional<ast::FieldPlace> place_of(QualType t) {
     TypeRec r = types().rec(t);
     switch (r.kind) {
     case TypeKind::builtin:
       if (!target.has(r.builtin) || r.builtin == Builtin::void_) return std::nullopt;
-      return align ? target[r.builtin].align : target[r.builtin].size;
-    case TypeKind::pointer: return align ? target.pointer_align : target.pointer_size;
-    case TypeKind::enum_: return is_complete(t) ? layout_of(underlying_of(t), align) : std::nullopt;
+      return ast::FieldPlace{target[r.builtin].size, target[r.builtin].align};
+    case TypeKind::pointer:
+    case TypeKind::reference: return ast::FieldPlace{target.pointer_size, target.pointer_align};  // a reference member's
+    case TypeKind::enum_: return is_complete(t) ? place_of(underlying_of(t)) : std::nullopt;
     case TypeKind::array: {
       if (r.bound_value == ConstId::none) return std::nullopt;
-      auto e = layout_of(r.inner, align);
-      return e && !align ? std::optional<u64>(*e * r.bound) : e;
+      auto e = place_of(r.inner);
+      if (!e) return std::nullopt;
+      return ast::FieldPlace{e->size * r.bound, e->align};
     }
-    case TypeKind::reference: return align ? target.pointer_align : target.pointer_size;  // a member's
     case TypeKind::class_: {
-      const ClassRec* c = is_complete(t) ? class_rec(types().class_of(t)) : nullptr;
+      EntityId ce = types().class_of(t);
+      if (auto it = class_places_.find(std::to_underlying(ce)); it != class_places_.end()) return it->second;
+      const ClassRec* c = is_complete(t) ? class_rec(ce) : nullptr;
       if (!c) return std::nullopt;
       std::vector<ast::FieldPlace> places;
       for (const FieldRec& f : c->fields) {
-        auto s = layout_of(f.type, false), a = layout_of(f.type, true);
-        if (!s || !a) return std::nullopt;
-        places.push_back({*s, *a});
+        auto m = place_of(f.type);
+        if (!m) return std::nullopt;
+        places.push_back(*m);
       }
       ast::RecordLayout l = ast::record_layout(places, c->union_);
-      return align ? l.align : l.size;
+      return class_places_[std::to_underlying(ce)] = ast::FieldPlace{l.size, l.align};
     }
     default: return std::nullopt;  // void, functions
     }
   }
+  std::map<u32, ast::FieldPlace> class_places_;  // complete classes' sizes and alignments
 
   // [dcl.type.decltype]/1: an unparenthesized id-expression or member access names its entity's
   // declared type; any other expression has its type, as `T&&` for an xvalue and `T&` for an
