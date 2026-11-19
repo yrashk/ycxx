@@ -190,6 +190,45 @@ void read_large_offsets() {
         "reader preserves BSS and symbol offsets above 32 bits, unnamed locals and full signed addends");
 }
 
+void read_init_array() {
+  obj::object input;
+  input.name = "init.o";
+  input.arch = obj::target::x86_64_linux;
+  const auto text = input.add_section(obj::standard_section::text);
+  const auto init = input.add_section(obj::standard_section::init_array);
+  const auto fn = input.define("init", obj::binding::local, text);
+  input.sections[text].emit(std::array<std::uint8_t, 1>{0xc3});  // ret
+  input.sections[init].emit64(0);
+  input.sections[init].relocate(obj::reloc_kind::abs64, fn);
+  const auto file = obj::elf::write_object(input);
+  check(file.has_value(), file ? "write .init_array" : file.error());
+  if (!file) return;
+  const auto header = field(*file, 40, 8) + 64 * 2;
+  check(field(*file, header + 4, 4) == 14 && field(*file, header + 8, 8) == 3 &&
+        field(*file, header + 32, 8) == 8 && field(*file, header + 48, 8) == 8 &&
+        field(*file, header + 56, 8) == 8, "SHT_INIT_ARRAY header with WA flags and pointer-sized entries");
+  const auto read = obj::elf::read_object(*file, input.name);
+  check(read && *read == input, "round-trip an initializer pointer and its relocation");
+
+  auto noncanonical = *file;
+  set_field(noncanonical, header + 56, 8, 0);
+  const auto read_zero = obj::elf::read_object(noncanonical, input.name);
+  check(read_zero && *read_zero == input, "accept a zero .init_array sh_entsize");
+  const auto reject = [&](std::size_t at, std::size_t width, std::uint64_t value) {
+    auto bad = *file;
+    set_field(bad, header + at, width, value);
+    const auto result = obj::elf::read_object(bad, input.name);
+    check(!result && result.error().contains(".init_array"), "reject malformed .init_array header");
+  };
+  reject(4, 4, 1);   // SHT_PROGBITS
+  reject(8, 8, 2);   // SHF_ALLOC alone
+  reject(32, 8, 7);  // Partial slot
+  reject(48, 8, 4);  // Alignment
+  reject(56, 8, 4);  // Entry size
+  input.sections[init].align_log2 = 4;
+  rejects("invalid ELF .init_array flags, alignment or size", input);
+}
+
 void reject_bad_files(std::span<const std::uint8_t> file) {
   constexpr std::string_view diagnostic_name = "malformed.o";
   auto reject = [&](std::span<const std::uint8_t> bytes, std::string_view reason) {
@@ -268,6 +307,7 @@ int main(int argc, char** argv) {
     }
   }
   read_large_offsets();
+  read_init_array();
 
   auto bad = o;
   bad.arch = obj::target::aarch64_macos;

@@ -144,17 +144,37 @@ bool has_valid_linux_main(const TranslationUnit& tu, ast::Interners& in) {
   return true;
 }
 
-obj::object linux_startup() {
+obj::object linux_startup(std::int64_t init_array_size) {
   obj::object startup;
   startup.name = "<ycxx Linux startup>";
   startup.arch = obj::target::x86_64_linux;
   const auto text = startup.add_section(obj::standard_section::text);
+  std::optional<std::uint32_t> init_end;
+  if (init_array_size != 0) {
+    const auto marker = startup.add_section(obj::standard_section::init_array);
+    init_end = startup.define("__ycxx_init_array_end", obj::binding::local, marker);
+  }
   startup.define("_start", obj::binding::hidden, text);
   auto& code = startup.sections[text];
   // The AMD64 psABI initial stack has 16-byte alignment, then argc and argv at offsets 0 and 8.
-  // Leave %rsp in place so the call also meets the System V function-entry alignment rule.
-  code.emit(std::array<std::uint8_t, 15>{
-      0x31, 0xed,                // xor ebp, ebp
+  // Leave %rsp in place so every call meets the System V function-entry alignment rule.
+  code.emit(std::array<std::uint8_t, 2>{0x31, 0xed});  // xor ebp, ebp
+  if (init_end) {
+    // The table is contiguous and this object's empty .init_array marks its end. R12 and R13
+    // are callee-saved, so callbacks preserve the cursor and end address.
+    code.emit(std::array<std::uint8_t, 7>{0x4c, 0x8d, 0x25, 0, 0, 0, 0});  // lea r12, [rip + begin]
+    code.relocate(obj::reloc_kind::x86_64_pc32, *init_end, -4 - init_array_size);
+    code.emit(std::array<std::uint8_t, 7>{0x4c, 0x8d, 0x2d, 0, 0, 0, 0});  // lea r13, [rip + end]
+    code.relocate(obj::reloc_kind::x86_64_pc32, *init_end, -4);
+    code.emit(std::array<std::uint8_t, 15>{
+        0x4d, 0x39, 0xec,        // loop: cmp r12, r13
+        0x74, 10,                // je done
+        0x41, 0xff, 0x14, 0x24,  // call [r12]
+        0x49, 0x83, 0xc4, 8,    // add r12, 8
+        0xeb, 0xf1});            // jmp loop
+  }
+  // Initializers may clobber argument registers. Set them just before calling main.
+  code.emit(std::array<std::uint8_t, 13>{
       0x8b, 0x3c, 0x24,          // mov edi, [rsp]
       0x48, 0x8d, 0x74, 0x24, 8, // lea rsi, [rsp + 8]
       0xe8, 0, 0, 0, 0});       // call main
@@ -175,16 +195,31 @@ std::expected<std::vector<std::uint8_t>, std::vector<link::error>> link_linux_ex
   };
   const obj::symbol* main = nullptr;
   const obj::object* main_object = nullptr;
+  bool custom_start = false;
+  std::uint64_t init_array_size = 0;
+  // The begin relocation also subtracts four bytes for PC32's instruction-relative displacement.
+  constexpr std::uint64_t init_array_limit = std::numeric_limits<std::int64_t>::max() - 4;
   for (const auto& object : objects) {
+    for (const auto& s : object.sections) {
+      if (!s.is_init_array()) continue;
+      if (s.size() > init_array_limit - init_array_size)
+        return std::unexpected(std::vector<link::error>{{"ELF .init_array exceeds the startup address limit"}});
+      init_array_size += s.size();
+    }
     for (const auto& symbol : object.symbols) {
       if (!defines_global(symbol)) continue;
-      if (symbol.name == "_start") return link_elf(objects, "_start");
+      if (symbol.name == "_start") custom_start = true;
       // Match the static linker's choice of the first weak definition or the strong definition.
       if (symbol.name == "main" && (!main || (main->weak && !symbol.weak))) {
         main = &symbol;
         main_object = &object;
       }
     }
+  }
+  if (custom_start) {
+    if (init_array_size != 0)
+      return std::unexpected(std::vector<link::error>{{"a custom '_start' with a nonempty ELF .init_array is unsupported"}});
+    return link_elf(objects, "_start");
   }
 
   // Let the ELF linker diagnose missing or invalid definitions, along with any other input errors.
@@ -195,7 +230,7 @@ std::expected<std::vector<std::uint8_t>, std::vector<link::error>> link_linux_ex
 
   // The object model only describes the code symbol. The source caller checks main's type.
   std::vector<obj::object> with_startup(objects.begin(), objects.end());
-  with_startup.push_back(linux_startup());
+  with_startup.push_back(linux_startup(static_cast<std::int64_t>(init_array_size)));
   return link_elf(with_startup, "_start");
 }
 

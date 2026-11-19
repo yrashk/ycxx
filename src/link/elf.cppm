@@ -31,7 +31,7 @@ constexpr std::uint64_t image_base = 0x400000, page_size = 0x1000;
 constexpr std::uint64_t image_size_limit = (std::uint64_t{1} << 47) - image_base;
 constexpr auto max_align_log2 = std::countr_zero(image_base);
 
-enum class group { text, read_only, data, bss, count };
+enum class group { text, read_only, data, init_array, bss, count };
 
 struct section_kind {
   std::string_view segment, name;
@@ -47,6 +47,7 @@ constexpr std::array section_kinds{
     section_kind{"__TEXT", "__const", regular, group::read_only},
     section_kind{"__DATA", "__const", regular, group::read_only},  // pointers are fixed at link time
     section_kind{"__DATA", "__data", regular, group::data},
+    section_kind{"__DATA", "__init_array", regular, group::init_array},
     section_kind{"__DATA", "__bss", zerofill, group::bss},
 };
 
@@ -67,6 +68,8 @@ struct patch {
 constexpr std::uint64_t align_up(std::uint64_t offset, std::uint64_t align) {
   return (offset + align - 1) & ~(align - 1);
 }
+
+bool executable(const obj::section& s) { return s.segment == "__TEXT" && s.name == "__text"; }
 
 std::unexpected<std::string> object_error(const obj::object& o, std::string_view reason) {
   return std::unexpected(std::format("{}: {}", o.name.empty() ? "ELF input" : o.name, reason));
@@ -144,6 +147,12 @@ std::expected<bytes, std::string> link(std::span<const obj::object> objects, std
         return section_error(o, s, "invalid zero-fill section contents");
       }
       if (s.align_log2 > max_align_log2) return section_error(o, s, "section alignment exceeds 4 MiB");
+      if (kind->output == group::init_array) {
+        if (s.align_log2 != 3 || s.size() % 8 != 0)
+          return section_error(o, s, "invalid .init_array alignment or size");
+        if (s.relocs.size() != s.size() / 8)
+          return section_error(o, s, ".init_array requires one relocation per slot");
+      }
       sections[std::to_underlying(kind->output)].push_back({oi, si});
     }
     for (const obj::symbol& s : o.symbols) {
@@ -182,13 +191,13 @@ std::expected<bytes, std::string> link(std::span<const obj::object> objects, std
   const auto start = globals.find(entry);
   if (start == globals.end()) return std::unexpected(std::format("ELF entry symbol '{}' is undefined", entry));
   const auto& entry_section = objects[start->second.object].sections[*start->second.symbol->section];
-  if (entry_section.segment != "__TEXT" || entry_section.name != "__text" ||
-      start->second.symbol->offset == entry_section.size()) {
+  if (!executable(entry_section) || start->second.symbol->offset == entry_section.size()) {
     return std::unexpected(std::format("ELF entry symbol '{}' is not inside executable code", entry));
   }
 
   const auto& bss = sections[std::to_underlying(group::bss)];
-  const bool has_read_only = !sections[std::to_underlying(group::read_only)].empty();
+  const auto& init_array = sections[std::to_underlying(group::init_array)];
+  const bool has_read_only = !sections[std::to_underlying(group::read_only)].empty() || !init_array.empty();
   const bool has_data = !sections[std::to_underlying(group::data)].empty() || !bss.empty();
   const auto program_count = static_cast<std::uint16_t>(2 + has_read_only + has_data);  // RX, GNU_STACK, R?, RW?
   std::uint64_t file_end = header_size + program_count * program_header_size;
@@ -218,7 +227,11 @@ std::expected<bytes, std::string> link(std::span<const obj::object> objects, std
   for (const auto& [kind, flags] : load_groups) {
     if ((kind == group::read_only && !has_read_only) || (kind == group::data && !has_data)) continue;
     const auto begin = kind == group::text ? 0 : align_up(file_end, page_size);
-    const auto initialized = place(sections[std::to_underlying(kind)], kind == group::text ? file_end : begin);
+    auto initialized = place(sections[std::to_underlying(kind)], kind == group::text ? file_end : begin);
+    if (!initialized) return std::unexpected(initialized.error());
+    // The table is fixed at link time. Each contribution has 8-byte alignment and an integral
+    // number of slots, so only the first can need padding. Startup's empty contribution is last.
+    if (kind == group::read_only) initialized = place(init_array, *initialized);
     if (!initialized) return std::unexpected(initialized.error());
     const auto memory = kind == group::data ? place(bss, *initialized) : initialized;
     if (!memory) return std::unexpected(memory.error());
@@ -229,11 +242,11 @@ std::expected<bytes, std::string> link(std::span<const obj::object> objects, std
   auto address = [&](definition d) {
     return image_base + offsets[d.object][*d.symbol->section] + d.symbol->offset;
   };
-  auto symbol_address = [&](std::size_t oi, const obj::symbol& s) -> std::uint64_t {
-    if (s.bind == binding::local) return address({oi, &s});
+  auto resolve = [&](std::size_t oi, const obj::symbol& s) -> std::optional<definition> {
+    if (s.bind == binding::local) return definition{oi, &s};
     const auto global = globals.find(s.name);
-    // An undefined weak symbol without a definition has value zero (ELF gABI, Symbol Binding).
-    return global == globals.end() ? 0 : address(global->second);
+    if (global == globals.end()) return std::nullopt;
+    return global->second;
   };
 
   std::vector<patch> patches;
@@ -241,19 +254,33 @@ std::expected<bytes, std::string> link(std::span<const obj::object> objects, std
     const auto& o = objects[oi];
     for (std::size_t si = 0; si < o.sections.size(); ++si) {
       const auto& s = o.sections[si];
+      const bool is_init_array = s.is_init_array();
       for (const auto& r : s.relocs) {
         const bool absolute = r.kind == reloc_kind::abs64;
         if (r.minus) return section_error(o, s, "ELF symbol-difference relocations are unsupported");
         if (!absolute && r.kind != reloc_kind::x86_64_pc32 && r.kind != reloc_kind::x86_64_plt32) {
           return section_error(o, s, "unsupported x86-64 ELF relocation kind");
         }
+        if (is_init_array && (!absolute || r.offset % 8 != 0))
+          return section_error(o, s, ".init_array requires an aligned R_X86_64_64 relocation per slot");
         const std::size_t width = absolute ? 8 : 4;
         if (r.offset > s.size() || width > s.size() - r.offset) {
           return section_error(o, s, "ELF relocation is outside its section");
         }
         if (r.symbol >= o.symbols.size()) return section_error(o, s, "invalid ELF relocation symbol index");
         const auto offset = offsets[oi][si] + r.offset;
-        const auto target = symbol_address(oi, o.symbols[r.symbol]);
+        const auto def = resolve(oi, o.symbols[r.symbol]);
+        if (is_init_array) {
+          if (!def) return section_error(o, s, ".init_array relocation has no defined target");
+          const auto& code = objects[def->object].sections[*def->symbol->section];
+          // Image layout has bounded both offsets. Compare the signed addend before adding it.
+          const auto symbol_offset = static_cast<std::int64_t>(def->symbol->offset);
+          const auto size = static_cast<std::int64_t>(code.size());
+          if (!executable(code) || r.addend < -symbol_offset || r.addend >= size - symbol_offset)
+            return section_error(o, s, ".init_array relocation target is outside its executable input section");
+        }
+        // An undefined weak symbol without a definition has value zero (ELF gABI, Symbol Binding).
+        const auto target = def ? address(*def) : 0;
         auto value = target + static_cast<std::uint64_t>(r.addend);  // R_X86_64_64: S + A modulo 2^64
         if (!absolute) {
           // R_X86_64_PC32: S + A - P. With static binding, PLT32 targets S directly as well.

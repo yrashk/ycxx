@@ -579,9 +579,13 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   value. The link query checks a source function's ABI when an asm label gives it the symbol
   `main`. A `main` supplied in an ELF object must already use one of those signatures. Hosted
   linking and general-purpose ELF object interoperability remain unsupported.
-- ELF code generation diagnoses translation units that require namespace-scope dynamic
-  initialization or destruction. Syntax-only analysis still accepts them.
+- ELF objects record namespace-scope initializer functions in `.init_array`, with 8-byte slots
+  and `R_X86_64_64` relocations. The linker places arrays consecutively in input order and checks
+  each slot resolves into executable input bytes. Generated startup calls the functions before
+  `main` ([basic.start.dynamic]). A custom `_start` with a nonempty array is a link error.
   [#387](https://github.com/yrashk/ycxx/issues/387)
+- ELF code generation diagnoses namespace-scope objects that require destruction at exit, at
+  their declaration. Syntax-only analysis accepts them. [#400](https://github.com/yrashk/ycxx/issues/400)
 - Linux x86-64 CI runs `unit.linux_compile`, which links a ycxx-produced object with a native C
   caller, and `unit.linux_executable` (`tests/unit/pipeline/linux_executable.py`), which runs
   source-only, object-only and mixed-input executables and checks exit status, `argc` and `argv`,

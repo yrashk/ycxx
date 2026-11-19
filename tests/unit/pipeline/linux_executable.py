@@ -76,15 +76,52 @@ int main(int argc, char* argv[]) {
         reject('bias.cpp', error="ELF entry symbol 'main' is undefined")
         reject('main.cpp', error="undefined symbol '_Z8add_biasi'")
         reject('trivial.cpp', 'main.cpp', 'bias.cpp', error="duplicate symbol 'main'")
-        source('dynamic_init.cpp', 'int f() { return 17; }\nstatic int x = f();\nint main() { return x; }')
-        dynamic_init_error = ('dynamic_init.cpp:2:1: error: namespace-scope dynamic initialization '
-                              'and destruction are not supported on x86-64 Linux')
-        compile(target, '-fsyntax-only', 'dynamic_init.cpp')
-        reject('dynamic_init.cpp', error=dynamic_init_error)
-        compile(target, '-c', 'dynamic_init.cpp', status=1, error=dynamic_init_error)
-        assert not (scope / 'dynamic_init.o').exists()
-        compile('-c', 'dynamic_init.cpp', '-o', 'darwin-dynamic.o')
+        source('init-first.cpp', """extern "C" int __cxa_atexit(void (*)(void*), void*, void*);
+extern "C" char __dso_handle;
+static int order;
+int append(int digit) { order = order * 10 + digit; return order; }
+static const int first = append(1), second = append(2);
+int current() { return order + first + second; }""")
+        source('init-second.cpp', 'int append(int); static int third = append(3);')
+        source('init-main.cpp', """int current();
+int main(int argc, char** argv) {
+  if (argc != 2 || argv[0] == nullptr || argv[argc] != nullptr || argv[1][0] != 'Q') return 1;
+  if (current() == 136) return 23;
+  return current() == 655 ? 29 : 2;
+}""")
+        compile(target, '-nostdlib', 'init-first.cpp', 'init-second.cpp', 'init-main.cpp', '-o', 'init-program')
+        run(['./init-program', 'Q'], status=23)
+        run(['./init-program'], status=1)
+        init_image = (scope / 'init-program').read_bytes()
+        for part in ('first', 'second', 'main'):
+            compile(target, '-c', f'init-{part}.cpp')
+        assert '.init_array' not in run([readelf, '-SW', 'init-main.o'])
+        compile(target, '-nostdlib', 'init-first.o', 'init-second.o', 'init-main.o', '-o', 'init-objects')
+        run(['./init-objects', 'Q'], status=23)
+        assert (scope / 'init-objects').read_bytes() == init_image
+        compile(target, '-nostdlib', 'init-second.o', 'init-first.o', 'init-main.o', '-o', 'init-objects')
+        run(['./init-objects', 'Q'], status=29)
+        compile(target, '-nostdlib', 'init-first.cpp', 'init-second.o', 'init-main.o', '-o', 'init-mixed')
+        run(['./init-mixed', 'Q'], status=23)
+        compile(target, '-nostdlib', 'init-second.cpp', 'init-first.o', 'init-main.o', '-o', 'init-mixed')
+        run(['./init-mixed', 'Q'], status=29)
+        custom_init = "a custom '_start' with a nonempty ELF .init_array is unsupported"
+        reject('start.cpp', 'init-first.cpp', error=custom_init)
+        reject('init-first.o', 'start.cpp', error=custom_init)
+        compile('-c', 'init-first.cpp', '-o', 'darwin-dynamic.o')
         assert b'__mod_init_func' in (scope / 'darwin-dynamic.o').read_bytes()
+
+        source('teardown.cpp', """struct Hook { int value; ~Hook(); };
+Hook::~Hook() { value = 0; }
+int seed() { return 7; }
+int earlier = seed();
+constinit Hook hook{17};
+int main() { return earlier + hook.value; }""")
+        teardown_error = 'teardown.cpp:5:16: error: namespace-scope destruction is not supported on x86-64 Linux'
+        compile(target, '-fsyntax-only', 'teardown.cpp')
+        reject('teardown.cpp', error=teardown_error)
+        compile(target, '-c', 'teardown.cpp', status=1, error=teardown_error)
+        assert not (scope / 'teardown.o').exists()
         compile(target, 'trivial.cpp', status=1, error='hosted Linux linking is not supported')
         compile(target, '-c', 'main.cpp')
         compile(target, '-c', 'bias.cpp')
@@ -143,7 +180,10 @@ int main() { static int base = 20; return base + outer::tick() + outer::tick(); 
             compile(target, '-nostdlib', 'main.o', 'bias.o', '-o', 'object-program', env=daemon)
             run(['./object-program', 'A', '!'], status=106)
             reject('bad_alias.cpp', error=bad_abi, env=daemon)
-            reject('dynamic_init.cpp', error=dynamic_init_error, env=daemon)
+            compile(target, '-nostdlib', 'init-first.cpp', 'init-second.cpp', 'init-main.cpp', '-o', 'init-program', env=daemon)
+            run(['./init-program', 'Q'], status=23)
+            assert (scope / 'init-program').read_bytes() == init_image
+            reject('teardown.cpp', error=teardown_error, env=daemon)
         finally:
             run([ycxx, 'ctl', 'shutdown'], env=base)
 
