@@ -2792,13 +2792,14 @@ private:
       for (u32 i = begin; i < end; ++i) {
         const auto token = region.tokens[i];
         if (token.kind == Tk::kw_alignas ||
-            (token.kind == Tk::l_square && region.tokens[i + 1].kind == Tk::l_square) ||
+            (token.kind == Tk::l_square && i + 1 < end && region.tokens[i + 1].kind == Tk::l_square) ||
             (token.kind == Tk::identifier && region.name(token) == "__attribute__")) return true;
       }
       return false;
     };
-    if (spec.is_static || !q_.defining_bases(owner).empty() || p_->class_rec_is_union(it_->parent) ||
-        record.template_depth != 0 || record.specialization || sema::Types::cv(s_.types().canonical(d.type)) != sema::Cv::none ||
+    if (d.name_at != d.begin || d.template_args || member_template_ || spec.is_static || !q_.defining_bases(owner).empty() ||
+        p_->class_rec_is_union(it_->parent) || record.template_depth != 0 || record.specialization ||
+        sema::Types::cv(s_.types().canonical(d.type)) != sema::Cv::none ||
         !(s_.types().is(d.type, sema::Builtin::int_) || s_.types().is(d.type, sema::Builtin::unsigned_int)) ||
         attributed(record.begin, record.brace_begin) || attributed(it_->begin, ps_.index())) {
       s_.diag(ps_.pos(), Diag::bit_field_declaration);
@@ -2806,10 +2807,10 @@ private:
     }
     ps_.bump();
     u32 at = ps_.pos();
-    Ex e = ps_.constant_expression();
+    Ex e = s_.promote(ps_.constant_expression());
     if (!e.ok()) return std::nullopt;
     std::optional<ConstId> v;
-    if (s_.types().is_integral(e.type())) v = sema::Evaluator(s_, q_).evaluate(s_.rvalue(e)).value;
+    if (s_.types().is_integral(e.type())) v = sema::Evaluator(s_, q_).evaluate(e).value;
     auto& values = s_.world().values;
     u64 width = v && values.rec(*v).kind == sema::ValueKind::integer ? values.rec(*v).bits : 0;
     if (width == 0 || width > 32) {

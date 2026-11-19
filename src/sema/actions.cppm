@@ -4304,7 +4304,11 @@ public:
     if (types().is_pointer(from) && types().is_pointer(target) && types().is_void(types().pointee(from)) &&
         types().is_object(types().pointee(target)) && cv_within(object_cv(types().pointee(from)), object_cv(types().pointee(target))))
       return convert_node(v, ast::ConversionKind::pointer, target);
-    return convert(v, to, at_);
+    Ex converted = convert(v, to, at_);
+    // An explicit cast to the field's declared type produces a new prvalue without its width.
+    if (converted.ok() && converted.info.bit_width)
+      return convert_node(converted, ast::ConversionKind::integral, converted.type());
+    return converted;
   }
 
   // `sizeof` and `alignof` of a type ([expr.sizeof], [expr.alignof]), a `size_t` prvalue; zero

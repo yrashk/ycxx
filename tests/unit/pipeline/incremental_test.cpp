@@ -410,7 +410,8 @@ void records() {
 
 void bit_fields() {
   std::string text = R"cpp(
-struct F { unsigned a : 1 + 2, b : 5; };
+enum Width { second = 5 };
+struct F { unsigned a : 1 + 2, b : second; };
 struct FileSlice { int descriptor; signed int flags : 24; char next; long offset; };
 static_assert(sizeof(F) == 4 && alignof(F) == 4);
 static_assert(sizeof(FileSlice) == 16 && alignof(FileSlice) == 8);
@@ -419,6 +420,9 @@ FileSlice file{1, -177, 'Q', 2L};
 static_assert(__is_same(decltype(packed.a), unsigned int));
 static_assert(__is_same(decltype(+packed.a), int));
 static_assert(__is_same(decltype(packed.a + packed.b), int));
+static_assert(__is_same(decltype(+static_cast<unsigned>(packed.a)), unsigned));
+static_assert(__is_same(decltype(+(unsigned)packed.a), unsigned));
+static_assert(__is_same(decltype(+unsigned(packed.a)), unsigned));
 int main() {
   F f{};
   f.a = 9;
