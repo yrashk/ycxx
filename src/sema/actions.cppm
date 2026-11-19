@@ -104,6 +104,11 @@ public:
   virtual bool use_static_member(EntityId /*v*/) { return true; }
   // Whether class `c`, complete or not, was declared with the class-key `union`.
   virtual bool is_union_class(EntityId /*c*/) { return false; }
+  // The function type of `f`, whose declared return type holds a placeholder, with the return
+  // type its definition deduced: a definition before the current point, or a function template
+  // specialization's instantiated here ([dcl.spec.auto.general]/11, [temp.inst]/8). None if
+  // there is none, or it is in error.
+  virtual std::optional<QualType> deduced_type(EntityId /*f*/) { return std::nullopt; }
   // In an instantiation: the pack expansions the definition of what it re-analyses recorded.
   virtual const std::vector<Expansion>* pattern_expansions() { return nullptr; }
   virtual ~Questions() = default;
@@ -1641,8 +1646,68 @@ public:
 
   // ------------------------------------------------------------ the function being defined
 
-  void set_return_type(QualType t) { return_type_ = t; }
+  void set_return_type(QualType t) {
+    return_type_ = t;
+    declared_return_ = t;
+    return_deduced_ = false;
+    return_seen_ = false;
+  }
   QualType return_type() const { return return_type_; }
+  // A declared return type holding a placeholder ([dcl.spec.auto.general]/3): each return
+  // statement deduces it, and the first one's deduction is the return type from then on (/11).
+  bool deduces_return() const { return w_->types.has_placeholder(declared_return_); }
+  bool return_deduced() const { return return_deduced_; }
+  // Whether a return statement was seen, deducing or failing to.
+  bool return_seen() const { return return_seen_; }
+  // Inside a discarded statement or a dependent `if constexpr`: returns deduce nothing.
+  u32 no_return_deduction = 0;
+  // What `return e;` (`e` none for `return;` or the end of the body) deduces: the return type,
+  // or none after a diagnosed error. In a template's definition a type-dependent `e` deduces
+  // nothing; each instantiation does ([dcl.spec.auto.general]/12).
+  std::optional<QualType> deduce_return(const Ex* e, u32 at_) {
+    std::optional<QualType> t;
+    QualType replaced{};
+    if (!e) {
+      // [dcl.type.auto.deduct]/2.2: as from a void operand, for `auto` or `decltype(auto)` alone.
+      if (types().kind(declared_return_) != TypeKind::placeholder) {
+        diag(at_, Diag::auto_deduction_failed, declared_return_, builtin(Builtin::void_));
+        return std::nullopt;
+      }
+      t = types().add_cv(builtin(Builtin::void_), Types::cv(declared_return_));
+    } else {
+      t = deduce_placeholder(declared_return_, *e, at_, &replaced);
+    }
+    // In a discarded statement, or a branch of a dependent `if constexpr`, the operand is checked
+    // against what it alone deduces.
+    if (no_return_deduction > 0) return !t || types().is_dependent(*t) || !return_deduced_ ? t : std::optional(return_type_);
+    return_seen_ = true;
+    if (!t || types().is_dependent(*t)) return t;
+    if (return_deduced_ && types().canonical(*t) != types().canonical(return_type_)) {
+      diag(at_, Diag::auto_inconsistent, declared_return_, *t, return_type_);
+      return std::nullopt;
+    }
+    return_deduced_ = true;
+    return_type_ = *t;
+    return t;
+  }
+  // `f`'s function type `t` with its return type deduced, for naming it: by its own body's return
+  // statements so far, or by its definition before this point ([dcl.spec.auto.general]/11);
+  // none after a diagnosed error.
+  std::optional<QualType> deduced_function(EntityId f, QualType t, u32 at_) {
+    if (!types().is_function(t) || !types().has_placeholder(types().rec(t).inner)) return t;
+    if (f == current_function && return_deduced_) return with_return(t, return_type_);
+    if (f != current_function)
+      if (auto d = q_->deduced_type(f)) return *d;
+    // In a template's definition, naming a member of the current instantiation (or anything else
+    // undeduced) is type-dependent: each instantiation deduces it ([temp.dep.expr]/3).
+    if (templated() && !instantiating()) return with_return(t, builtin(Builtin::dependent));
+    diag(at_, Diag::auto_undeduced, w_->entities.rec(f).name);
+    return std::nullopt;
+  }
+  QualType with_return(QualType fn, QualType ret) {
+    TypeRec r = types().rec(fn);
+    return types().function(ret, r.params, r.variadic, r.linkage, r.fn_cv);
+  }
   u32 loop_depth = 0;
 
   // ------------------------------------------------------------ jumps ([stmt.jump], [stmt.dcl]/2)
@@ -1849,7 +1914,9 @@ public:
     if (!m.is_function || (m.is_static && member_functions(c, name).size() == 1)) {
       if (m.is_function && !check_access(c, m.entity, name, name_at)) return fail;
       if (!m.is_function) return static_member(c, m.entity, m.type, begin, end);
-      ExprInfo info{m.type, ValueCategory::lvalue, 0};
+      auto mt = deduced_function(m.entity, m.type, begin);
+      if (!mt) return fail;
+      ExprInfo info{*mt, ValueCategory::lvalue, 0};
       return node(ast::DeclRef{info, m.entity}, begin, end, info);
     }
     std::optional<Ex> object;
@@ -1929,7 +1996,9 @@ public:
     if (!chosen) return fail;
     const MemberDeclRec* d = bound.cands[*chosen];
     if (!check_access(bound.cls, d->entity, d->name, bound.name_at)) return fail;
-    TypeRec fr = types().rec(d->type);
+    auto dt = deduced_function(d->entity, d->type, begin);
+    if (!dt) return fail;
+    TypeRec fr = types().rec(*dt);
     auto children = call_args(fr, args, begin, paren_at);
     if (!children) return fail;
     ExprInfo info = result_info(fr.inner);
@@ -2347,6 +2416,11 @@ public:
       for (auto p = scopes_[d].rbegin(); p != scopes_[d].rend(); ++p)
         if (p->first == name) {
           const ast::LocalRec& l = locals_[p->second];
+          // A variable whose type its own initializer deduces ([dcl.spec.auto.general]/11).
+          if (types().has_placeholder(l.type)) {
+            diag(begin, Diag::auto_used_in_initializer, name);
+            return {NodeId::none, begin, end};
+          }
           // A function parameter pack of the definition: its uses are expanded ([temp.variadic]).
           if (types().kind(l.type) == TypeKind::pack_expansion) {
             if (pattern_packs_.empty()) {
@@ -2506,10 +2580,16 @@ public:
       diag(begin, Diag::main_named);  // [basic.start.main]/3: main shall not be used
       return {NodeId::none, begin, end};
     }
-    ExprInfo info{types().referee(d.type), ValueCategory::lvalue, 0};
+    QualType dt = d.type;
+    if (d.kind == ast::DeclKind::function) {
+      auto t = deduced_function(d.entity, d.type, begin);
+      if (!t) return {NodeId::none, begin, end};
+      dt = *t;
+    }
+    ExprInfo info{types().referee(dt), ValueCategory::lvalue, 0};
     Ex r = node(ast::DeclRef{info, d.entity}, begin, end, info);
     if (unqualified && d.kind == ast::DeclKind::function) unqualified_[std::to_underlying(r.id)] = {d};
-    declared_types_[std::to_underlying(r.id)] = d.type;
+    declared_types_[std::to_underlying(r.id)] = dt;
     return r;
   }
 
@@ -2897,6 +2977,81 @@ public:
     }
   }
   std::map<u32, ast::FieldPlace> class_places_;  // complete classes' sizes and alignments
+
+  // ------------------------------------------------------------ placeholder types ([dcl.spec.auto])
+
+  // What declared type `t`, which holds a placeholder, deduces from initializer `e`
+  // ([dcl.type.auto.deduct]): for `decltype(auto)`, `e`'s decltype ([dcl.type.decltype]); for
+  // `auto`, `t` with `auto` replaced by an invented type parameter, deduced as from a call with
+  // `e` as the argument ([temp.deduct.call]). `Builtin::dependent` while `e` is type-dependent;
+  // none after a diagnosed failure, at `at_`.
+  // `replaced` receives what replaced the placeholder, which several declarators of one
+  // declaration must agree on ([dcl.type.auto.deduct]/2).
+  std::optional<QualType> deduce_placeholder(QualType t, const Ex& e, u32 at_, QualType* replaced = nullptr) {
+    if (!e.ok()) return std::nullopt;
+    if (dependent(e)) {
+      if (replaced) *replaced = builtin(Builtin::dependent);
+      return builtin(Builtin::dependent);
+    }
+    // An overload set, or its address, deduces nothing ([temp.deduct.call]/6); a template-id
+    // naming one specialization is not resolved yet (#335).
+    if (types().is(e.type(), Builtin::overload_set) || is_bound_member(e) ||
+        (types().is_pointer(e.type()) && types().is(types().pointee(e.type()), Builtin::overload_set))) {
+      diag(at_, Diag::auto_deduction_failed, t, e.type());
+      return std::nullopt;
+    }
+    if (types().kind(t) == TypeKind::placeholder && types().rec(t).decltype_auto) {
+      if (Types::cv(types().canonical(t)) != Cv::none) {  // [dcl.type.auto.deduct]/5: the placeholder alone
+        diag(at_, Diag::decltype_auto_alone);
+        return std::nullopt;
+      }
+      // `decltype(auto) x = (y);`: the parenthesized expression's ([dcl.type.auto.deduct]/5).
+      QualType r = decltype_of(e, as<ast::Paren>(e).has_value());
+      if (replaced) *replaced = r;
+      return r;
+    }
+    if (types_has_decltype_auto(t)) {
+      diag(at_, Diag::decltype_auto_alone);
+      return std::nullopt;
+    }
+    // `auto x = f();` of a void `f` deduces void, which the declaration then rejects.
+    if (types().is_void(e.type()) && types().kind(t) == TypeKind::placeholder) {
+      if (replaced) *replaced = e.type();
+      return types().add_cv(e.type(), Types::cv(t));
+    }
+    if (types().is(e.type(), Builtin::overload_set) || is_bound_member(e) || types().is_void(e.type())) {
+      diag(at_, Diag::auto_deduction_failed, t, e.type());
+      return std::nullopt;
+    }
+    Templates tm = templates();
+    const u16 depth = u16(template_scopes.size());
+    Bindings invent;
+    invent.placeholder = types().template_param(depth, 0);
+    auto p0 = tm.substitute(t, invent);
+    std::vector<std::optional<TemplateArg>> out(1);
+    if (p0) {
+      auto [p, a, allow] = tm.call_pair(*p0, ArgShape{e.type(), e.cat() == ValueCategory::lvalue}, depth);
+      if (tm.deduce(p, a, depth, out, allow) && out[0]) {
+        Bindings deduced;
+        deduced.placeholder = out[0]->type;
+        if (replaced) *replaced = out[0]->type;
+        if (auto r = tm.substitute(t, deduced)) return *r;
+      }
+    }
+    diag(at_, Diag::auto_deduction_failed, t, e.type());
+    return std::nullopt;
+  }
+  // Whether `decltype(auto)` appears in `t` other than as `t` itself, which is ill-formed
+  // ([dcl.type.auto.deduct]/5): `decltype(auto)&`, `decltype(auto)*`.
+  bool types_has_decltype_auto(QualType t) {
+    for (;;) {
+      TypeRec r = types().rec(t);
+      if (r.kind == TypeKind::placeholder) return r.decltype_auto;
+      if (r.kind != TypeKind::pointer && r.kind != TypeKind::reference && r.kind != TypeKind::array && r.kind != TypeKind::function)
+        return false;
+      t = r.inner;
+    }
+  }
 
   // [dcl.type.decltype]/1: an unparenthesized id-expression or member access names its entity's
   // declared type; any other expression has its type, as `T&&` for an xvalue and `T&` for an
@@ -3398,7 +3553,9 @@ public:
         diag(braced->begin, Diag::not_supported, lex::Tk::l_brace);
         return {NodeId::none, begin, end};
       }
-      ExprInfo ci{set[0].type, ValueCategory::lvalue, 0};
+      auto st = deduced_function(set[0].entity, set[0].type, callee.begin);
+      if (!st) return {NodeId::none, begin, end};
+      ExprInfo ci{*st, ValueCategory::lvalue, 0};
       callee = node(ast::DeclRef{ci, set[0].entity}, callee.begin, callee.end, ci);
     }
     if (types().is(callee.type(), Builtin::overload_set)) {
@@ -3446,7 +3603,9 @@ public:
       if (d.flags & decl_flag::consteval_) consteval_.insert(std::to_underlying(k.entity));
       // A specialization called is one whose definition the program requires ([temp.inst]/8).
       if (k.pattern) demands.push_back({k.entity, ast::Loc{item_, loc_base_ + callee.begin}});
-      ExprInfo ci{k.type, ValueCategory::lvalue, 0};
+      auto kt = deduced_function(k.entity, k.type, callee.begin);
+      if (!kt) return {NodeId::none, begin, end};
+      ExprInfo ci{*kt, ValueCategory::lvalue, 0};
       callee = node(ast::DeclRef{ci, k.entity}, callee.begin, callee.end, ci);
     } else if (auto d = as<ast::DeclRef>(callee); d && deleted_.contains(std::to_underlying(d->entity))) {
       // One function: still not callable when deleted ([dcl.fct.def.delete]).
@@ -3663,6 +3822,9 @@ private:
   std::vector<std::vector<std::pair<NameId, u32>>> scopes_;
   std::vector<std::size_t> guarded_;
   QualType return_type_{};
+  QualType declared_return_{};
+  bool return_deduced_ = false;
+  bool return_seen_ = false;
 };
 
 }  // namespace ycxx::sema

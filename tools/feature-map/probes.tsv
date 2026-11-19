@@ -1,4 +1,4 @@
-# Each probe built and run by ycxx 56047e676092 and by an oracle (feature-map probe).
+# Each probe built and run by ycxx b3d4cd6cba69 and by an oracle (feature-map probe).
 feature	oracle	ycxx	first_error
 lex-core	gcc	pass	
 lex-digraph	gcc	pass	
@@ -23,7 +23,7 @@ basic-integral	gcc	pass
 basic-float	gcc	fail	floating-point literals are not supported yet
 basic-ext-fp	gcc	fail	floating-point literals are not supported yet
 basic-ptr-arr-ref	gcc	pass	
-basic-fnptr	gcc	fail	function_ir: Call through a pointer is not supported yet
+basic-fnptr	gcc	pass	
 basic-rvalue-ref	gcc	fail	an rvalue reference to 'S' cannot bind to an lvalue
 basic-adl	gcc	fail	use of undeclared identifier 'f'
 basic-inline-vars	gcc	pass	
@@ -40,35 +40,35 @@ expr-rtti	gcc	fail	'virtual' is not supported yet
 expr-mptr	gcc	fail	'S' is not a namespace or class
 expr-list-init	gcc	pass	
 expr-spaceship	gcc	fail	expected ')'
-expr-auto-cast	gcc	fail	'auto' is not supported yet
+expr-auto-cast	gcc	fail	expected an expression
 expr-multidim-subscript	gcc	fail	invalid operands to binary expression ('M' and 'int')
 expr-pack-index	gcc	fail	the parameter pack 't' is used without '...'
 lambda-basic	gcc	fail	'[' is not supported yet
-lambda-generic	gcc	fail	'auto' is not supported yet
-lambda-init-capture	gcc	fail	'auto' is not supported yet
-lambda-constexpr	gcc	fail	'auto' is not supported yet
-lambda-capture-this	gcc	fail	'auto' is not supported yet
-lambda-template	gcc	fail	'auto' is not supported yet
+lambda-generic	gcc	fail	'[' is not supported yet
+lambda-init-capture	gcc	fail	'[' is not supported yet
+lambda-constexpr	gcc	fail	'[' is not supported yet
+lambda-capture-this	gcc	fail	'[' is not supported yet
+lambda-template	gcc	fail	'[' is not supported yet
 lambda-unevaluated	gcc	fail	'[' is not supported yet
-lambda-pack-capture	gcc	fail	'auto' is not supported yet
-lambda-static	gcc	fail	'auto' is not supported yet
-stmt-core	gcc	pass	
+lambda-pack-capture	gcc	fail	'[' is not supported yet
+lambda-static	gcc	fail	'[' is not supported yet
+stmt-core	gcc	fail	not a constant expression: read of a variable that is not usable in constant expressions
 stmt-range-for	gcc	fail	expected ';'
-stmt-if-init	gcc	pass	
+stmt-if-init	gcc	fail	'int' is not supported yet
 stmt-range-for-init	gcc	fail	expected an expression
-stmt-cpp23	gcc	pass	
+stmt-cpp23	gcc	fail	expected '('
 dcl-core	gcc	pass	
 dcl-default-args	gcc	fail	'=' is not supported yet
 dcl-variadic-fn	gcc	fail	file not found
 dcl-aggregate	gcc	pass	
 dcl-aggregate-ext	gcc	fail	':' is not supported yet
 dcl-designated	gcc	pass	
-dcl-auto	gcc	fail	'auto' is not supported yet
+dcl-auto	gcc	pass	
 dcl-decltype	gcc	pass	
-dcl-trailing-return	gcc	fail	'auto' is not supported yet
-dcl-return-deduction	gcc	fail	'auto' is not supported yet
-dcl-structured-bindings	gcc	fail	'auto' is not supported yet
-dcl-structured-bindings-26	gcc	fail	'auto' is not supported yet
+dcl-trailing-return	gcc	pass	
+dcl-return-deduction	gcc	pass	
+dcl-structured-bindings	gcc	fail	expected an identifier
+dcl-structured-bindings-26	gcc	fail	expected an identifier
 dcl-enum	gcc	pass	
 dcl-scoped-enum	gcc	fail	'enum' is not supported yet
 dcl-using-enum	gcc	fail	'using' is not supported yet
@@ -120,7 +120,7 @@ temp-variadic	gcc	pass
 temp-var	gcc	pass	
 temp-fold	gcc	pass	
 temp-ctad	gcc	fail	'' is not supported yet
-temp-auto-nttp	gcc	fail	'auto' is not supported yet
+temp-auto-nttp	gcc	fail	a non-type template parameter must have a structural type
 temp-class-nttp	gcc	fail	'class' is not supported yet
 concepts-def	gcc	pass	
 concepts-constraints	gcc	pass	
@@ -138,9 +138,9 @@ const-virtual	gcc	fail	a declaration needs a type specifier
 const-cpp20-relax	gcc	fail	not a constant expression: the interpreter does not evaluate 'alloc' yet
 const-cpp23-relax	gcc	fail	'static' is not supported yet
 const-void-ptr	gcc	pass	
-const-exceptions	gcc	fail	'try' is not supported yet
+const-exceptions	gcc	fail	expected '('
 const-static-assert-msg	gcc	fail	expected a string literal
-reflect-core	gcc	fail	'auto' is not supported yet
+reflect-core	gcc	fail	'^^' is not supported yet
 reflect-meta	gcc	fail	expected ')'
 stmt-expansion	gcc	fail	'template' is not supported yet
 contracts	gcc	fail	unexpected identifier 'pre'

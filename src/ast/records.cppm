@@ -155,6 +155,10 @@ struct BodySema {
   SeqId<LocalRec> locals;
   SeqId<ExpansionRec> expansions;
   SeqId<u32> dependent_calls;
+  // A function whose declared return type holds a placeholder ([dcl.spec.auto]): its function type
+  // with the return type its body deduced, when `deduced` is set.
+  QualType deduced_type{};
+  u8 deduced = 0;
   constexpr bool operator==(const BodySema&) const = default;
 };
 

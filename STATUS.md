@@ -1505,6 +1505,37 @@ What the process allocates, attributed to the engine's cells, in the trace and t
 - Not yet: drift of retained bytes over a long daemon session, a peak per request, and small
   inexactness (#284).
 
+## Placeholder types, θ step 1 (#279, 2026-11-19)
+
+- **Types:** `TAuto{decltype_auto}` in `types` (ast.md §5.1's `TAuto`, without a type-constraint
+  yet), `TypeKind::placeholder` in sema; `Types::has_placeholder` finds one under pointers,
+  references, arrays and a function's return type. The parser reads `auto` and `decltype(auto)`
+  as type specifiers, and trailing return types `auto f() -> T` ([dcl.fct]/2) with the
+  parameters in scope.
+- **Deduction** (`Sema::deduce_placeholder`, [dcl.type.auto.deduct]): `decltype(auto)` is the
+  initializer's decltype, alone or diagnosed; `auto` in any declarator form is replaced by an
+  invented type parameter (`Bindings::placeholder`) and deduced by `Templates::call_pair` and
+  `deduce`, as from a call. A type-dependent initializer deduces `Builtin::dependent`, and each
+  instantiation deduces again.
+- **Variables:** block scope (`= e`, `(e)`, `{e}`; the name is declared first, so its own
+  initializer cannot use it), namespace scope and variable templates (`= e`, `{e}`), static data
+  members; several declarators must deduce one type.
+- **Deduced return types:** each `return` deduces and the first fixes the type for the rest of
+  the body ([dcl.spec.auto.general]/11); no return deduces `void`. `BodySema` carries the deduced
+  function type (`deduced`, `deduced_type`). Naming the function (`Sema::deduced_function`) asks
+  `Questions::deduced_type`: a definition before the point, or a function template or class
+  template member specialization instantiated where it is named ([temp.inst]/8); its own body
+  sees the type once a return deduced it. The back end and the interpreter get the deduced type
+  with the body. Mangling keeps a template's declared placeholder as `Da`/`Dc`.
+- **Calls through pointers to functions:** irgen emits `call_ind` (`Gen::call_pointer`), which
+  lowering, AArch64 selection and the interpreter already had; constant evaluation calls through
+  them too.
+- Tests: `tests/own/auto/` (46 spec-only, 4 more): 41 pass, 9 are XFAIL: structured bindings
+  (#285), a namespace-scope reference or address (#101), `static_cast<int&&>` (#199).
+  `p1-impl-mangle` checks the `Da`/`Dc` names against Clang objects.
+- Not yet: constrained `C auto`, `auto x = {…}`, `auto x(e)` at namespace scope, abbreviated
+  function templates (#286); structured bindings (#285).
+
 ## Statements, ι step 1: `switch`, labels, `goto`, conditions (#337, 2026-11-19)
 
 - **Parser and sema** (src/parse/parser.cppm): `switch`, `case`, `default`, identifier labels and

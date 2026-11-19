@@ -135,6 +135,13 @@ struct TTransform {
   QualType arg;
 };
 
+// A placeholder type ([dcl.spec.auto]): `auto` (`decltype_auto` 0) or `decltype(auto)` (1), in a
+// declared type whose deduction has not replaced it ([dcl.type.auto.deduct]): a function's
+// declared return type, or a variable's before its initializer is seen.
+struct TAuto {
+  u8 decltype_auto;
+};
+
 // `TT<args>` where TT is a template template parameter, by position ([temp.param], [temp.dep.type]):
 // known once TT is bound, when it is the specialization of TT's argument for `args`
 // (*#88 step 8, Fable's decision*).
@@ -163,7 +170,7 @@ struct STypedef {
 };
 
 using TypeKinds = closed_list<TBuiltin, TPointer, TLRef, TRRef, TArray, TFunction, TClass, TEnum, STypedef, TTemplateParam,
-                              TDepName, TPackExpansion, TTransform, TDepSpec, TBuiltinSpec>;
+                              TDepName, TPackExpansion, TTransform, TDepSpec, TBuiltinSpec, TAuto>;
 
 template <class T>
 constexpr bool is_type_kind = TypeKinds::contains<T>;

@@ -796,7 +796,7 @@ std = 'C++23'
 ftm = '__cpp_auto_cast'
 detect = '(?<![\w>])auto\s*[({]\s*[\w*&]'
 status = 'missing'
-issues = [279]
+issues = [286]
 probe = '''
 int main() { int a = 1; auto b = auto(a); return b - 1; }
 '''
@@ -1123,8 +1123,9 @@ clauses = ['dcl.spec.auto', 'dcl.spec.auto.general', 'dcl.type.auto.deduct']
 std = 'C++11'
 ftm = '__cpp_decltype'
 detect = '\bauto\b'
-status = 'missing'
-issues = [279]
+status = 'partial'
+note = '`auto x = {…}` and `auto x(e)` at namespace scope are not yet'
+issues = [286]
 probe = '''
 int main() { auto x = 1; const auto& r = x; auto* p = &x; return x + r + *p - 3; }
 '''
@@ -1149,7 +1150,7 @@ group = 'dcl'
 clauses = ['dcl.fct']
 std = 'C++11'
 detect = '\bauto\s+(?:[\w:]+::)?~?\w+\s*\((?:[^()]|\([^()]*\))*\)\s*(?:const\s*)?(?:&{1,2}\s*)?(?:noexcept\b(?:\([^()]*\))?\s*)?->'
-status = 'missing'
+status = 'done'
 issues = [279]
 probe = '''
 auto f(int x) -> int { return x; }
@@ -1164,7 +1165,7 @@ clauses = ['dcl.spec.auto', 'dcl.type.auto.deduct', 'dcl.type.decltype']
 std = 'C++14'
 ftm = '__cpp_return_type_deduction'
 detect = '\bdecltype\s*\(\s*auto\s*\)|\bauto\s+(?:[\w:]+::)?\w+\s*\((?:[^()]|\([^()]*\))*\)\s*(?:const\s*)?(?:noexcept\s*)?\{'
-status = 'missing'
+status = 'done'
 issues = [279]
 probe = '''
 auto f(int x) { return x * 2; }
@@ -1181,7 +1182,7 @@ std = 'C++17'
 ftm = '__cpp_structured_bindings'
 detect = '\bauto\s*(?:const\s*)?&{0,2}\s*\['
 status = 'missing'
-issues = [279]
+issues = [285]
 probe = '''
 struct P { int x, y; };
 int main() { P p{1, 2}; auto [a, b] = p; int arr[2] = {3, 4}; auto& [c, d] = arr; return a + b + c + d - 10; }
@@ -1988,14 +1989,13 @@ clauses = ['temp.arg.template']
 std = 'C++98'
 ftm = '__cpp_template_template_args'
 detect = '\btemplate\s*<[^;{]*\btemplate\s*<'
-issues = [271, 272]
+issues = [208, 271, 272]
 probe = '''
 template<class T> struct Box { T v; };
 template<template<class> class C> int f() { C<int> c{3}; return c.v; }
 int main() { return f<Box>() - 3; }
 '''
-status = 'partial'
-note = 'constrained template template parameters; partial ordering'
+status = 'done'
 
 [[feature]]
 id = 'temp-variadic'
@@ -2076,7 +2076,7 @@ std = 'C++17'
 ftm = '__cpp_nontype_template_parameter_auto'
 detect = '''\btemplate\s*<[^;{<>]*\bauto\b'''
 status = 'missing'
-issues = [279]
+issues = [286]
 probe = '''
 template<auto N> int get() { return N; }
 int main() { return get<3>() + get<'a'>() - 100; }
@@ -2150,7 +2150,7 @@ clauses = ['dcl.fct', 'dcl.spec.auto', 'temp.param']
 std = 'C++20'
 detect = '''\b(?!if\b|while\b|for\b|switch\b|return\b|decltype\b|sizeof\b|alignof\b|noexcept\b|requires\b|catch\b)\w+\s*\(\s*(?:const\s+)?(?:[\w:]+\s+)?auto\s*(?:&{1,2}|\*)?\s*(?:\.\.\.\s*)?\w*\s*[,)=]'''
 status = 'missing'
-issues = [279, 234]
+issues = [286, 234]
 probe = '''
 template<class T> concept Int = sizeof(T) == 4;
 int f(Int auto x) { return x; }
