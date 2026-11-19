@@ -671,8 +671,11 @@ in `lsp` frames (`LspOut`), the last of which carries LSP's exit status (1 after
   else its entry in `compile_commands.json` at the scope's root (`arguments`, or `command` split
   as a shell's words; its preprocessing options and template depth kept by
   `compile::check_command`, another compiler's other options dropped; the file read again when
-  its identity changes), else the file alone in its directory. `daemon.lsp`'s
-  `compile_commands` covers both forms and a change (mutation-checked).
+  its identity changes; `@file` response files expanded relative to the entry's directory; a
+  header or C entry is no unit), else the file alone in its directory. `daemon.lsp`'s
+  `compile_commands` covers both forms, a response file, a header and a C file, a directory
+  spelled through a symbolic link, and a change (mutation-checked). Options `pp` does not take
+  yet (`-include`, `--sysroot`, …) are dropped (#251).
 - Not yet: stopping a diagnosis on a newer edit,
   `$/cancelRequest`, debouncing and interactive priority (#168); `buffers_in`, the disk-view
   assertion and one view per session (#169); go-to-definition and diagnostics inside headers

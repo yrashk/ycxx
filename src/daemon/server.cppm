@@ -338,8 +338,8 @@ class Server {
   }
 
   // The command line of each source a served request compiled, by its real path: an editor's
-  // document is checked with it (§6.4; `compile_commands.json` is the fallback still to come,
-  // #167). One copy of the request serves all its sources.
+  // document is checked with it (§6.4; `compile_commands.json` is the fallback, `listed_request`).
+  // One copy of the request serves all its sources.
   void remember(const compile::Request& r) {
     auto shared = std::make_shared<const compile::Request>(r);
     std::vector<std::pair<std::string, std::string>> sources;
@@ -348,10 +348,9 @@ class Server {
     for (auto& [real, spelled] : sources) commands_.insert_or_assign(std::move(real), Command{shared, std::move(spelled)});
   }
 
-  // The request that checks the document at `real`: its unit in the last served request that
-  // compiled it, else the file alone in its directory; nothing if it is no translation unit.
   // `compile_commands.json` at the scope's root (§6.4): a file's command line there, by its real
-  // path, checked with that line's preprocessing options. The file is read again when it changes
+  // path, checked with that line's preprocessing options; nothing for a file that is no
+  // translation unit ycxx compiles (a header, a C file). The file is read again when it changes
   // (its identity: size and times).
   std::optional<compile::Request> listed_request(const std::string& real) {
     const std::string path = (std::filesystem::path(paths_.root) / "compile_commands.json").native_encoded_string();
@@ -363,7 +362,9 @@ class Server {
     }
     auto it = listed_.find(real);
     if (it == listed_.end()) return std::nullopt;
-    return compile::check_command(it->second.args, it->second.directory, real, env_);
+    compile::Request check = compile::check_command(it->second.args, it->second.directory, real, env_);
+    if (compile::sources_of(check).empty()) return std::nullopt;
+    return check;
   }
 
   // The entries of a JSON compilation database: `directory`, `file`, and `arguments` (the
@@ -391,12 +392,29 @@ class Server {
       }
       if (args.empty()) continue;
       args.erase(args.begin());  // the compiler
+      // Response files, relative to the entry's directory (as the compiler would read them).
+      std::vector<std::string> expanded;
+      for (std::string& arg : args) {
+        if (!arg.starts_with('@')) {
+          expanded.push_back(std::move(arg));
+          continue;
+        }
+        std::filesystem::path rsp(arg.substr(1));
+        if (rsp.is_relative()) rsp = std::filesystem::path(*dir->string()) / rsp;
+        std::ifstream r(rsp, std::ios::binary);
+        if (!r) continue;
+        expanded.append_range(compile::split_words(std::string{std::istreambuf_iterator<char>(r), {}}));
+      }
+      args = std::move(expanded);
       std::filesystem::path f(*file->string());
       if (f.is_relative()) f = std::filesystem::path(*dir->string()) / f;
       listed_.try_emplace(canonical(f.lexically_normal().native_encoded_string()), Listed{std::move(args), *dir->string()});
     }
   }
 
+  // The request that checks the document at `real` (§6.4): its unit in the last served request
+  // that compiled it, else its `compile_commands.json` line, else the file alone in its
+  // directory; nothing if it is no translation unit.
   std::optional<compile::Request> check_request(const std::string& real) {
     {
       std::lock_guard g(commands_mu_);
