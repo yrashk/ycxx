@@ -145,6 +145,20 @@ public:
         return k == lex::Tk::kw_union;
     return false;
   }
+  // Whether class `c` was declared with `union`, complete or not: the class-key of its first
+  // declaration before `item` (a specialization's, its template's).
+  bool is_union_class(EntityId c, u32 item) {
+    if (EntityId t = w_->entities.rec(c).templ; t != EntityId::none) c = t;
+    auto it = decls_.find(std::to_underlying(c));
+    if (it == decls_.end() || it->second.empty() || it->second.front().first > item) return false;
+    u32 k = it->second.front().first;
+    const items::Item& i = items_->items[k];
+    if (i.kind == ItemKind::class_def) return class_rec_is_union(k);
+    for (u32 t = i.end; t-- > i.begin;)
+      if (lex::Tk kk = r_->tokens[t].kind; kk == lex::Tk::kw_union || kk == lex::Tk::kw_struct || kk == lex::Tk::kw_class)
+        return kk == lex::Tk::kw_union;
+    return false;
+  }
   // An entity's GNU asm label: its symbol as written (docs/EXTENSIONS.md); empty if it has none.
   std::string asm_label(EntityId e) const {
     auto it = asm_labels_.find(std::to_underlying(e));
@@ -866,6 +880,7 @@ public:
   bool instantiation_gave_up() override { return p_->instantiation_gave_up(); }
   std::optional<QualType> specialization_type(EntityId v) override { return p_->specialization_type(v, point()); }
   const std::vector<sema::Expansion>* pattern_expansions() override { return at_point ? p_->expansions(item_, 0) : nullptr; }
+  bool is_union_class(EntityId c) override { return p_->is_union_class(c, point()); }
   std::optional<ast::DeclSema> earlier_member(ast::NameId name) override {
     const items::Item& it = p_->items().items[item_];
     if (it.parent == items::none || p_->items().items[it.parent].kind != ItemKind::class_def) return std::nullopt;
@@ -925,6 +940,7 @@ public:
   bool instantiation_gave_up() override { return p_->instantiation_gave_up(); }
   std::optional<QualType> specialization_type(EntityId v) override { return p_->specialization_type(v, p_->end()); }
   const std::vector<sema::Expansion>* pattern_expansions() override { return p_->expansions(item_, 1); }
+  bool is_union_class(EntityId c) override { return p_->is_union_class(c, p_->end()); }
   bool dependent_call(sema::u32 offset) override {
     return p_->dependent_call(item_, offset);
   }
@@ -1269,7 +1285,10 @@ private:
       // `class-key identifier ;` declares the class ([dcl.type.elab]); it stays incomplete until
       // its definition.
       ps_.bump();
-      if (spec.ok) decls_.push_back(class_decl(s_.types().class_of(spec.type), false));
+      if (spec.ok) {
+        decls_.push_back(class_decl(s_.types().class_of(spec.type), false));
+        p_->declared(decls_.back(), k_);  // its class-key says whether it is a union
+      }
       if (!spec.ok || sema::Types::cv(spec.type) != sema::Cv::none || spec.is_static || spec.is_extern) bad();
       return;
     }

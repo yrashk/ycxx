@@ -8,6 +8,7 @@ export module ycxx.sema:templates;
 
 import std;
 import ycxx.ast;
+import ycxx.lex;
 import :types;
 
 export namespace ycxx::sema {
@@ -162,8 +163,71 @@ public:
       return types().function(*ret, ps, r.variadic, r.linkage, r.fn_cv);
     }
     case TypeKind::pack_expansion: return std::nullopt;  // only in a list, by `substitute_expansion`
+    case TypeKind::transform: {
+      auto a = substitute(r.inner, b);
+      if (!a) return std::nullopt;
+      auto x = transform(lex::TypeTrait(r.trait), *a);
+      if (!x) return std::nullopt;
+      return types().add_cv(*x, cv);
+    }
     }
     return t;
+  }
+
+  // ------------------------------------------------------------ type-trait built-ins (docs/EXTENSIONS.md)
+
+  // The type a transforming built-in gives for `t`, as the corresponding standard trait's `type`
+  // ([meta.trans]); a dependent `TTransform` while `t` is dependent; none where it does not apply
+  // (`__underlying_type` of a non-enumeration).
+  std::optional<QualType> transform(lex::TypeTrait trait, QualType t) {
+    using enum lex::TypeTrait;
+    if (types().is_dependent(t)) return types().transform(u8(trait), t);
+    QualType c = types().canonical(t);
+    auto with_cv = [&](QualType x, Cv keep) { return types().add_cv(Types::unqualified(x), Cv(std::to_underlying(Types::cv(x)) & std::to_underlying(keep))); };
+    // An array's cv-qualifiers are its elements' ([basic.type.qualifier]/3).
+    auto strip = [&](this auto& self, QualType x, Cv keep) -> QualType {
+      if (types().is_array(x)) {
+        TypeRec r = types().rec(x);
+        QualType e = self(r.inner, keep);
+        return r.bound_value == ConstId::none ? types().array_unknown(e) : types().array_dependent(e, r.bound_value);
+      }
+      return with_cv(x, keep);
+    };
+    // Whether `x` can be referred to: not void, nor a function type with cv-qualifiers.
+    auto referenceable = [&](QualType x) {
+      return !types().is_void(x) && !(types().is_function(x) && types().rec(x).fn_cv != Cv::none);
+    };
+    switch (trait) {
+    case remove_cv: return strip(c, Cv::none);
+    case remove_const: return strip(c, Cv(2));
+    case remove_volatile: return strip(c, Cv(1));
+    case remove_reference_t: return types().referee(c);
+    case remove_cvref: return strip(types().canonical(types().referee(c)), Cv::none);
+    case remove_pointer: return types().is_pointer(c) ? types().rec(c).inner : c;
+    case add_pointer: {
+      QualType x = types().referee(c);
+      return referenceable(x) || types().is_void(x) ? types().pointer(x) : c;
+    }
+    case add_lvalue_reference: return referenceable(c) ? types().lvalue_ref(c) : c;
+    case add_rvalue_reference: return referenceable(c) ? types().rvalue_ref(c) : c;
+    case remove_extent: return types().is_array(c) ? types().rec(c).inner : c;
+    case remove_all_extents:
+      while (types().is_array(c)) c = types().canonical(types().rec(c).inner);
+      return c;
+    case decay: {
+      QualType x = types().canonical(types().referee(c));
+      if (types().is_array(x)) return types().pointer(types().rec(x).inner);
+      if (types().is_function(x)) return referenceable(x) ? types().pointer(x) : x;
+      return Types::unqualified(x);
+    }
+    case underlying_type: {
+      if (!types().is_enum(c)) return std::nullopt;
+      const EnumRec* e = classes_->find_enum(types().enum_of(c));
+      if (!e || !e->underlying) return std::nullopt;
+      return *e->underlying;
+    }
+    default: return std::nullopt;
+    }
   }
 
   // Template arguments `args` with the parameters `b` binds replaced by their arguments; a pack's
@@ -308,7 +372,8 @@ public:
       return;
     case TypeKind::pointer:
     case TypeKind::reference:
-    case TypeKind::dep_name: params_in(r.inner, out, nested); return;
+    case TypeKind::dep_name:
+    case TypeKind::transform: params_in(r.inner, out, nested); return;
     case TypeKind::function:
       params_in(r.inner, out, nested);
       for (QualType p : r.params) params_in(p, out, nested);
@@ -427,8 +492,8 @@ public:
     QualType pc = types().canonical(p), ac = types().canonical(a);
     Cv cp = Types::cv(pc), ca = Types::cv(ac);
     TypeRec pr = types().rec(pc);
-    // `typename Q::n` is a non-deduced context ([temp.deduct.type]/5.1).
-    if (pr.kind == TypeKind::dep_name) return true;
+    // `typename Q::n` is a non-deduced context ([temp.deduct.type]/5.1), as is a built-in's result.
+    if (pr.kind == TypeKind::dep_name || pr.kind == TypeKind::transform) return true;
     if (pr.kind == TypeKind::template_param && pr.depth == depth) {
       // `cv T` from `cv' A`: T is A without cv, or with the cv `cv'` has beyond `cv`.
       if (!within(cp, ca) && !allow.more_cv) return false;
@@ -441,6 +506,7 @@ public:
     switch (pr.kind) {
     case TypeKind::template_param: return pr.depth == ar.depth && pr.index == ar.index && pr.pack == ar.pack;
     case TypeKind::dep_name: return types().canonical(pr.inner) == types().canonical(ar.inner) && pr.name == ar.name;
+    case TypeKind::transform: return pr.trait == ar.trait && types().canonical(pr.inner) == types().canonical(ar.inner);
     case TypeKind::builtin: return pr.builtin == ar.builtin;
     case TypeKind::class_:
       if (pr.entity == ar.entity) return true;
@@ -562,7 +628,12 @@ public:
         if (tmp[k] && !out[k]) out[k] = tmp[k];
       }
       for (u16 k : packs) {
-        if (!tmp[k]) return false;
+        // A pattern that deduces no element of a pack is a non-deduced context for it
+        // ([temp.deduct.type]/5): another list deduces it, or nothing does.
+        if (!tmp[k]) {
+          if (j == skip && !explicit_packs_.contains(k)) return true;
+          return false;
+        }
         elems[k].push_back(is_expansion(a[j]) ? expansion_of(*tmp[k]) : *tmp[k]);
       }
     }
@@ -597,6 +668,7 @@ public:
     case TypeKind::pointer:
     case TypeKind::reference:
     case TypeKind::dep_name:
+    case TypeKind::transform:
     case TypeKind::pack_expansion: pack_types_in(r.inner, out); return;
     case TypeKind::function:
       pack_types_in(r.inner, out);
