@@ -1807,6 +1807,16 @@ values, end to end; results match Clang's bit for bit.
 - Tests: `tests/own/dynamic-init/` (spec-only, 16 tests; a Clang peer with its own initializers
   in `peer.run.cpp`).
 
+## Nested namespace definitions, ι (#153, #337, 2026-11-19)
+
+- `namespace a::b::c { }` (C++17) and `namespace a::inline b { }` (C++20), [namespace.def]: the
+  item splitter declares every component (`namespace_names`), the first in the enclosing namespace
+  and each later one in the one before it (`Program::name_scopes_`, read by `declared_in`); only a
+  component preceded by `inline` is transparent to lookup. `namespace_definition` gives each
+  component its declaration. Names mangle as Clang's (`tests/own/namespaces/nested-mangling`, with a
+  Clang peer).
+- Tests: `tests/own/namespaces/`.
+
 ## Block-scope static variables, ι (#291, #337, 2026-11-19)
 
 - **Sema** (src/parse/parser.cppm `variable_node`, src/sema/actions.cppm `static_local`): a
