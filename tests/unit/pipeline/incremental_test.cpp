@@ -408,6 +408,33 @@ void records() {
   }
 }
 
+// Nesting too deep for the stack (#187): on workers with 1 MiB stacks, 20,000 nested parentheses
+// and 20,000 nested blocks are diagnosed, not a crash, and the session goes on.
+void too_deep() {
+  engine::Pool pool(2, std::nullopt, std::size_t{1} << 20);
+  pl::Session s(pool);
+  constexpr int n = 20000;
+  const std::string parens = "int main() { return " + std::string(n, '(') + "0" + std::string(n, ')') + "; }\n";
+  const std::string blocks = "int main() { " + std::string(n, '{') + std::string(n, '}') + " return 0; }\n";
+  for (const std::string* text : {&parens, &blocks}) {
+    build(s, *text);
+    const pl::FrontResult& f = s.get<pl::TuFront>(tu);
+    check(f.has_errors() && std::ranges::any_of(f.messages, [](const pl::Message& m) { return m.text.contains("nested too deeply"); }),
+          "nesting too deep for the stack: diagnosed");
+  }
+  // Instantiations nest through the analysis too: the depth limit (900) or the stack, whichever
+  // comes first, is diagnosed.
+  build(s, "template <int N> int f() { return f<N - 1>() + 1; }\ntemplate <> int f<0>() { return 0; }\n"
+           "int main() { return f<5000>() - 5000; }\n");
+  const pl::FrontResult& t = s.get<pl::TuFront>(tu);
+  check(t.has_errors() && std::ranges::any_of(t.messages, [](const pl::Message& m) {
+          return m.text.contains("nested too deeply") || m.text.contains("nest more than");
+        }),
+        "instantiations too deep: diagnosed");
+  build(s, v0);
+  check(s.get<pl::Link>(program).image == cold(v0), "the session goes on after a too-deep unit");
+}
+
 }  // namespace
 
 int main() {
@@ -418,5 +445,6 @@ int main() {
   pooled();
   pooled_units();
   records();
+  too_deep();
   return ycxx::unit::result("unit.pipeline_incremental");
 }

@@ -8,12 +8,17 @@
 export module ycxx.parse:parser;
 
 import std;
+import ycxx.stack;
 import ycxx.ast;
 import ycxx.engine;
 import ycxx.pp;
 import ycxx.sema;
 
 export namespace ycxx::parse {
+
+// Thrown when the input nests deeper than half of the thread's stack allows (#187), after the
+// diagnostic; caught where an item's or a body's analysis begins, which then fails.
+struct TooDeep {};
 
 using lex::Tk;
 using lex::Tok;
@@ -1637,7 +1642,15 @@ public:
   }
 
   // cast-expression ([expr.cast]); explicit type conversion is beyond the α subset.
+  // Diagnoses and abandons the item when the nesting is too deep for the stack (#187).
+  void deep_enough() {
+    if (!stack::deep()) return;
+    s_->diag(pos(), Diag::nested_too_deeply);
+    throw TooDeep{};
+  }
+
   Ex cast_expression() {
+    deep_enough();  // parentheses, casts and unary operators nest through here
     if (is(Tk::l_paren)) {
       // `(T)e` ([expr.cast]), as static_cast performs it; a parenthesized expression otherwise.
       u32 back = i_, begin = pos();
@@ -2138,6 +2151,7 @@ public:
   }
 
   Ex statement() {
+    deep_enough();  // blocks and the statements they hold nest through here
     u32 begin = pos();
     switch (kind()) {
     case Tk::l_brace: return compound_statement();

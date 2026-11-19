@@ -635,6 +635,16 @@ public:
   std::map<std::pair<u32, u32>, std::vector<sema::Expansion>> expansions_;
   u32 end() const { return static_cast<u32>(items_->items.size()); }
   const u32 instantiation_limit;  // [temp.inst]/16 ([implimits]: at least 1024)
+  // Whether an instantiation `depth` deep may not begin: the limit; reported once, at item `k`. The
+  // stack is guarded in the parse of each instantiation's body (`Parser::deep_enough`, #187).
+  bool too_deep(std::size_t depth, u32 k) {
+    if (depth < instantiation_limit) return false;
+    if (!depth_reported_)
+      end_diags_.push_back({engine::Loc{std::to_underlying(id(k)), 0}, sema::diag_id(sema::Diag::instantiation_depth),
+                            {engine::diag_arg(instantiation_limit)}});
+    depth_reported_ = true;
+    return true;
+  }
   bool instantiation_gave_up() const { return depth_reported_; }
 
   // Every item and body analysed, in item order; the diagnostics of each cell in order.
@@ -1027,6 +1037,18 @@ public:
   }
 
   Result<ast::ItemSema> run() {
+    try {
+      analyse();
+    } catch (const TooDeep&) {
+      // Diagnosed: the item fails, its scopes unwound with the parse.
+      tree_ = NodeId::none;
+      declarators_.clear();
+      bad();
+    }
+    return finish();
+  }
+
+  void analyse() {
     bool member = it_->parent != items::none && p_->items().items[it_->parent].kind == ItemKind::class_def;
     switch (it_->kind) {
     case ItemKind::empty:
@@ -1063,6 +1085,10 @@ public:
       bad();
       break;
     }
+  }
+
+  // The item's record and tree, from what the analysis left.
+  Result<ast::ItemSema> finish() {
     NodeId root = tree_;
     if (root == NodeId::none) {
       std::vector<ast::Child> cs;
@@ -3314,6 +3340,19 @@ public:
   }
 
   Result<ast::BodySema> run() {
+    try {
+      return analyse();
+    } catch (const TooDeep&) {
+      // Diagnosed: the body fails, its scopes unwound with the parse; it holds nothing.
+      std::vector<sema::Expansion> none;
+      out_.value = b_.commit(ast::BodySema{NodeId::none, b_.seq(std::span<const ast::LocalRec>{}), expansion_list(b_, none),
+                                           b_.seq(std::span<const u32>{})});
+      out_.demands.clear();
+      return std::move(out_);
+    }
+  }
+
+  Result<ast::BodySema> analyse() {
     const ast::ItemSema& is = p_->item_sema(k_).value;
     std::optional<ast::DeclSema> f;
     if (p_->world().ins.seqs.size(is.decls) > 0) f = p_->world().ins.seqs.at(is.decls, 0);
@@ -3664,13 +3703,7 @@ const sema::ClassRec* Program::instantiate_class(EntityId spec, u32 point) {
   if (std::ranges::find(running_, k | 0x80000000u) != running_.end() || std::ranges::find(running_, k) != running_.end())
     return nullptr;
   // [temp.inst]/16: nested instantiations are limited, as functions' are.
-  if (classes_instantiating_.size() >= instantiation_limit) {
-    if (!depth_reported_)
-      end_diags_.push_back({engine::Loc{std::to_underlying(id(k)), 0}, sema::diag_id(sema::Diag::instantiation_depth),
-                            {engine::diag_arg(instantiation_limit)}});
-    depth_reported_ = true;
-    return nullptr;
-  }
+  if (too_deep(classes_instantiating_.size(), k)) return nullptr;
   class_def(k);  // the pattern, analysed as the current instantiation's
   ast::DeclSema head = w_->ins.seqs.at(item_sema(k).value.decls, 0);
   std::vector<ast::TemplateParamSema> params = w_->ins.seqs.elements(head.template_params);
@@ -3741,13 +3774,7 @@ const Program::VarInstance* Program::variable_instance(EntityId v, u32 point) {
   if (!partial && (t == var_templates_.end() || t->second >= point)) return nullptr;
   const u32 k = partial ? partial->item : t->second;
   // [temp.inst]/16: nested instantiations are limited, as functions' are.
-  if (var_instantiating_.size() >= instantiation_limit) {
-    if (!depth_reported_)
-      end_diags_.push_back({engine::Loc{std::to_underlying(id(k)), 0}, sema::diag_id(sema::Diag::instantiation_depth),
-                            {engine::diag_arg(instantiation_limit)}});
-    depth_reported_ = true;
-    return nullptr;
-  }
+  if (too_deep(var_instantiating_.size(), k)) return nullptr;
   ast::DeclSema tmpl = w_->ins.seqs.at(item_sema(k).value.decls, 0);
   std::vector<ast::TemplateParamSema> head = w_->ins.seqs.elements(tmpl.template_params);
   sema::Bindings args = partial ? partial->args : sema::Bindings::of(head.empty() ? 0 : head[0].depth, rec.args);
@@ -3785,14 +3812,7 @@ const Program::Instance* Program::instance(EntityId spec, u32 point) {
   const u32 k = member != member_patterns_.end() ? body_item : def->second;
   // [temp.inst]/16: instantiations nested through constant evaluation are limited as the END
   // worklist's are; the limit is reported once, at the template.
-  if (instantiating_.size() >= instantiation_limit) {
-    if (!depth_reported_) {
-      depth_reported_ = true;
-      end_diags_.push_back({engine::Loc{std::to_underlying(id(k)), 0}, sema::diag_id(sema::Diag::instantiation_depth),
-                            {engine::diag_arg(instantiation_limit)}});
-    }
-    return nullptr;
-  }
+  if (too_deep(instantiating_.size(), k)) return nullptr;
   if (member != member_patterns_.end()) {
     // Its declaration is the one the class's instantiation made; the class's arguments are bound.
     EntityId cls = member->second.spec;
