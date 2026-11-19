@@ -270,6 +270,29 @@ void robustness() {
   check(checked == sample.size() + 1, "every prefix");
 }
 
+void unnamed_type_scopes() {
+  auto s = split("typedef struct { union { int x; } value, copy; union { int x; } spare; } A; "
+                 "typedef struct { union { int x; } value; } B;");
+  const Item& value = s[s.top(0).members[0]];
+  const Item& spare = s[s.top(0).members[1]];
+  const Item& other = s[s.top(1).members[0]];
+  check(names(value) == v({"", "value", "copy"}) && value.unnamed_type_ordinal == 0 && spare.unnamed_type_ordinal == 1,
+        "the unnamed union head occupies slot zero and one lexical type ordinal");
+  check(s[value.members[0]].id != s[spare.members[0]].id && s[value.members[0]].id != s[other.members[0]].id,
+        "identical field declarations in different unnamed unions have distinct ids");
+
+  auto shifted = split("typedef struct { int prefix; union { int x; } spare; union { int x; } value, copy; } A;");
+  const Item& moved = shifted[shifted.top(0).members[2]];
+  check(moved.id != value.id && shifted[moved.members[0]].id != s[value.members[0]].id,
+        "a changed lexical ordinal gives the union and its fields new ids");
+
+  auto n = split("struct N { typedef union { int x; } Alias; enum { e }; union { int a; }; union { int b; } member; };");
+  const auto& members = n.top(0).members;
+  check(n[members[0]].unnamed_type_ordinal == items::none && n[members[1]].unnamed_type_ordinal == 0 &&
+            n[members[2]].unnamed_type_ordinal == 1 && n[members[3]].unnamed_type_ordinal == 2,
+        "ordinal counting includes unnamed enums and anonymous unions and excludes typedef linkage names");
+}
+
 void query() {
   engine::Db db;
   pp::FileId f{3};
@@ -295,6 +318,7 @@ int main() {
   recovery();
   ids();
   robustness();
+  unnamed_type_scopes();
   query();
   return ycxx::unit::result("unit.items");
 }

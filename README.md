@@ -68,7 +68,8 @@ INTEGER ABI subset. Use the host linker to link these objects with libc.
   `begin` and `end`, with optional init-statements. Functions support default arguments,
   recursion, operator overloading and calls through pointers. A pointer or reference target type
   can select a free or static member overload.
-- classes and unions: data and static members, member functions, constructors and destructors
+- classes and unions: data and static members, named data members of unnamed union type,
+  member functions, constructors and destructors
   with RAII, aggregate and designated initialization, namespace-scope objects initialized by
   code before `main` and destroyed after it, block-scope `static` variables initialized once, passing and returning them by value with
   Clang's calling convention, so ycxx and Clang objects call each other; access control

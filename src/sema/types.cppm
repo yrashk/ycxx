@@ -475,6 +475,8 @@ struct EntityRec {
   u32 ordinal = 0;
   // A generic closure's explicit template parameters, which its name declares (`Ty`, `Tn`).
   std::vector<ast::TemplateParamSema> closure_head{};
+  // An unnamed type in a class has a lexical ordinal in that scope (Itanium ABI §5.1.5.5).
+  std::optional<u32> unnamed_type_ordinal{};
 };
 
 class Entities {
@@ -515,6 +517,8 @@ public:
     // A closure's `head` includes its signature and ordinal in its scope (docs/design/closures.md).
     // A compiler-owned class uses `head` to distinguish it from declarations of the same name.
     if (r.kind == EntityKind::class_) f = ast::mix(f, r.head);
+    if (r.unnamed_type_ordinal)
+      f = ast::mix(ast::mix(f, ast::seed("ycxx.sema.unnamed-type-in-class")), *r.unnamed_type_ordinal);
     if (r.templ != EntityId::none) {
       f = ast::mix(f, ins_->entities.fp(r.templ));
       for (const ast::TemplateArg& a : r.args) f = mix_arg(f, a);
@@ -765,7 +769,9 @@ struct World {
       sysv_va_list_tag_ = entities.entity({.kind = EntityKind::class_, .name = ins.names.intern("__va_list_tag"),
                                           .head = ast::seed("ycxx.sema.builtin.sysv_va_list_tag")});
     types.class_name = [this](EntityId e) {
-      std::string n(ins.names.spelling(entities.rec(e).name));
+      const EntityRec& r = entities.rec(e);
+      if (r.unnamed_type_ordinal) return std::string("(unnamed union)");
+      std::string n(ins.names.spelling(r.name));
       return n.empty() ? std::string("(lambda)") : n;  // a closure type ([expr.prim.lambda.closure])
     };
     types.dep_name_spelling = [this](NameId n) { return std::string(ins.names.spelling(n)); };

@@ -63,7 +63,8 @@ public:
       index_.emplace(std::to_underlying(id), static_cast<u32>(ids_.size() - 1));
     }
     for (u32 j = 0; j < its.items.size(); ++j)
-      for (u32 k = 0; k < its.items[j].names.size(); ++k) by_name_[its.items[j].names[k].name].push_back({j, k});
+      for (u32 k = 0; k < its.items[j].names.size(); ++k)
+        if (!its.items[j].names[k].name.empty()) by_name_[its.items[j].names[k].name].push_back({j, k});
     namespaces();
   }
 
@@ -1350,7 +1351,9 @@ public:
       break;
     case ItemKind::namespace_def: namespace_definition(); break;
     case ItemKind::class_def:
-      if (member) {
+      if (member && it_->unnamed_type_ordinal != items::none) {
+        unnamed_union_member();
+      } else if (member) {
         s_.diag(0, Diag::not_supported, p_->region().tokens[it_->begin].kind);  // nested classes
         bad();
       } else {
@@ -2359,6 +2362,41 @@ private:
     if (!ps_.expect(Tk::semi)) bad();
   }
 
+  // An unnamed union with a declarator in a class ([class.pre], [class.mem.general]). The head
+  // occupies declaration slot 0, and the declarators that follow it belong to the enclosing class.
+  void unnamed_union_member() {
+    const items::Item& outer = p_->items().items[it_->parent];
+    ps_.skip_attributes();
+    u32 at = ps_.pos();
+    Tk key = ps_.kind();
+    if (it_->names.size() < 2 || inst_ || outer.template_depth != 0 || outer.specialization || !ps_.accept(Tk::kw_union)) {
+      s_.diag(at, Diag::not_supported, key);
+      return bad();
+    }
+    ps_.skip_attributes();
+    if (!ps_.is(Tk::l_brace)) {
+      s_.diag(at, Diag::not_supported, key);
+      return bad();
+    }
+    EntityId owner = p_->class_entity(it_->parent);
+    if (owner == EntityId::none) return bad();
+    sema::EntityRec entity{.kind = sema::EntityKind::class_, .name = s_.no_name(), .scope = owner,
+                           .unnamed_type_ordinal = it_->unnamed_type_ordinal};
+    ast::DeclSema head = class_decl(s_.world().entities.entity(std::move(entity)), true);
+    decls_.push_back(head);
+    p_->declared(head, k_);
+    p_->class_def(k_);
+
+    ps_.seek(it_->brace_end);
+    s_.current_class = owner;
+    q_.own_class_complete = true;
+    DeclSpec spec;
+    spec.begin = at;
+    spec.type = head.type;
+    spec.has_type = true;
+    member_declarators(spec, class_decl(owner, true));
+  }
+
   // A base-clause ([class.derived.general]): `: [virtual] [access] class-name, …`. Each base is a
   // complete class other than this one, named once ([class.mi]/3); its access defaults to
   // private for a `class`, public for a `struct` ([class.access.base]/2).
@@ -2697,6 +2735,10 @@ private:
       if (!ps_.expect(Tk::semi)) bad();
       return;
     }
+    member_declarators(spec, c);
+  }
+
+  void member_declarators(const DeclSpec& spec, const ast::DeclSema& c) {
     sema::Types& types = s_.types();
     do {
       parse::Declarator d = ps_.declarator(spec.type, false);
@@ -2720,6 +2762,10 @@ private:
         return bad();
       }
       if (types.is_function(d.type) || spec.is_static) {
+        if (it_->kind == ItemKind::class_def || p_->items().items[it_->parent].unnamed_type_ordinal != items::none) {
+          s_.diag(d.name_at, Diag::not_supported, Tk::kw_union);
+          return bad();
+        }
         if (!member_function_or_static(spec, d, c)) return bad();
         if (it_->kind == ItemKind::function) return;  // its body follows the declaration part
         continue;

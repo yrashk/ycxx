@@ -1324,7 +1324,8 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
     const sema::EntityRec& r = w->entities.rec(c);
     ClassName n{std::string(w->ins.names.spelling(r.name)), r.scope, r.templ, r.args,
                 r.kind == sema::EntityKind::class_ || r.kind == sema::EntityKind::class_template};
-    if (r.kind == sema::EntityKind::class_ && n.name.empty() && r.scope != EntityId::none) {
+    n.unnamed_type_ordinal = r.unnamed_type_ordinal;
+    if (r.kind == sema::EntityKind::class_ && n.name.empty() && r.scope != EntityId::none && !n.unnamed_type_ordinal) {
       auto f = by_id.find(ir::raw(r.scope));
       n.closure = true;
       n.closure_type = r.type;

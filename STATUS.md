@@ -1040,6 +1040,19 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
 - A floating local no longer stops constant evaluation in its function (the thunk skips it).
 - Tests: `tests/own/unions` (7, three from the review). Six more draft examples pass.
 
+## Unnamed union types in named data members (#203)
+
+- A non-template class can declare a data member with an unnamed union type as in glibc's `__mbstate_t`.
+  The nested type uses ordinary union layout and access through the named member. Declarators
+  following one union definition share its type.
+- Astra recommended the enclosing class and lexical unnamed-type ordinal as the type's identity
+  across translation units. The splitter distinguishes identical sibling definitions and their
+  members with the ordinal, and the Itanium mangler uses it for `Ut_`, `Ut0_`, and later names.
+- `unit.items` checks the splitter's ordinals and item identities. `unit.pipeline_incremental`
+  checks layout, member lookup, mangling, and cold and warm builds after swapping identical
+  sibling unions.
+- Anonymous union member injection and the other union extensions remain tracked in #203.
+
 ## `<cstdio>`, step 4c: operator functions; `<stdio.h>` compiles (#133, 2026-11-18)
 
 - **Operator functions** ([over.oper]): `operator@` declarator-ids for the overloadable
