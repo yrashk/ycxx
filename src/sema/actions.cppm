@@ -1802,7 +1802,10 @@ public:
         if (builtin(promoted(*types().builtin_of(*er->underlying))) == to) return {true, 1, 1};
         return {true, 2, 0};
       }
-      bool promotion = builtin(promoted(*types().builtin_of(underlying_of(from)))) == to;
+      // [conv.prom]/3: without one, to the type its values need.
+      const EnumRec* er = enum_rec(types().enum_of(from));
+      QualType p = er && er->promotion ? *er->promotion : builtin(promoted(*types().builtin_of(underlying_of(from))));
+      bool promotion = types().canonical(p) == types().canonical(to);
       return {true, promotion ? 1 : 2, 0};
     }
     if (types().is_pointer(from) && types().is_pointer(to))
@@ -2395,8 +2398,11 @@ public:
   Ex promote(Ex e) {
     e = rvalue(e);
     if (!e.ok() || dependent(e)) return e;
-    // [conv.prom]/4: an unscoped enumeration promotes as its underlying type does.
+    // [conv.prom]/3: an unscoped enumeration without a fixed type promotes to the type its values
+    // need; /4: one with a fixed type promotes as its underlying type does.
     if (is_unscoped_enum(e.type())) {
+      if (const EnumRec* r = enum_rec(types().enum_of(e.type())); r && r->promotion)
+        return convert_node(e, ast::ConversionKind::integral, *r->promotion);
       QualType u = underlying_of(e.type());
       return convert_node(e, ast::ConversionKind::integral, builtin(promoted(*types().builtin_of(u))));
     }

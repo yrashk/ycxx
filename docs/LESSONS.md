@@ -63,6 +63,14 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
   took one commit, and every slice test passed on the first run.
   - Learned on #43.
 
+- **A stacked PR merges into its base branch, not main.** #198 was stacked on #191's branch. The
+  coordinator merged #191, then merged #198 without checking its base, so #198 landed in the
+  already-merged branch and never reached main. The β epic was closed and the README described
+  concurrency that main did not have, until the daemon session noticed (#226).
+  - Do: before merging, check `baseRefName` is `main`, and retarget a stacked PR once its base
+    merges. After merging, confirm the merge commit is an ancestor of origin/main.
+  - Learned on #139, 2026-11-18.
+
 ## Working with Fable subagents
 
 - **Agree the contract between parts before splitting a design.** #1's engine part and C++ part

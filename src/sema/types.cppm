@@ -520,6 +520,9 @@ struct EnumRec {
   bool scoped = false;
   bool fixed = false;
   std::optional<QualType> underlying;
+  // Without a fixed type, what it promotes to ([conv.prom]/3): the first of int, unsigned int,
+  // long, unsigned long that holds all its values, which may differ from `underlying`.
+  std::optional<QualType> promotion;
   std::vector<EnumeratorRec> enumerators;
 };
 

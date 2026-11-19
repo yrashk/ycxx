@@ -41,6 +41,7 @@ enum class Diag : std::uint32_t {
   operator_arity [[=message{Severity::error, "'{0:n}' has the wrong number of parameters"}]],
   operator_needs_class [[=message{Severity::error, "'{0:n}' needs a parameter of class or enumeration type"}]],
   operator_static [[=message{Severity::error, "'{0:n}' cannot be a static member function"}]],
+  enum_no_type [[=message{Severity::error, "no integral type can hold every value of '{0:n}'"}]],
   expected_statement [[=message{Severity::error, "expected a statement"}]],
   expected_declaration [[=message{Severity::error, "expected a declaration"}]],
   expected_type_specifier [[=message{Severity::error, "expected a type specifier"}]],
