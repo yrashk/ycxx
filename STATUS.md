@@ -679,7 +679,16 @@ in `lsp` frames (`LspOut`), the last of which carries LSP's exit status (1 after
   save), a unit and header opened through a symbolic link, a build sent during a `didChange`
   (the saved file's object, the buffer's diagnostics), 600-error answers crossing large edits,
   the exit status, and `ctl shutdown` with a session open.
-- Not yet: `compile_commands.json` (#167); stopping a diagnosis on a newer edit,
+- A document's command line (#167, §6.4): the last served `compile` request that compiled it,
+  else its entry in `compile_commands.json` at the scope's root (`arguments`, or `command` split
+  as a shell's words; its preprocessing options and template depth kept by
+  `compile::check_command`, another compiler's other options dropped; the file read again when
+  its identity changes; `@file` response files expanded relative to the entry's directory; a
+  header or C entry is no unit), else the file alone in its directory. `daemon.lsp`'s
+  `compile_commands` covers both forms, a response file, a header and a C file, a directory
+  spelled through a symbolic link, and a change (mutation-checked). Options `pp` does not take
+  yet (`-include`, `--sysroot`, …) are dropped (#251).
+- Not yet: stopping a diagnosis on a newer edit,
   `$/cancelRequest`, debouncing and interactive priority (#168); `buffers_in`, the disk-view
   assertion and one view per session (#169); go-to-definition from a declaration part (a
   parameter's type, a base) and of locals (#242); open documents as eviction roots (#17).

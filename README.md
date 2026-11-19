@@ -62,7 +62,9 @@ thread pool, and its output is byte for byte that of a cold, in-process build.
 
 **Editor support.** `ycxx lsp` is a language server that reports ycxx's errors as you type,
 including those in the headers a file includes, and goes to the definition of a name used in a
-function body, through the daemon, without unsaved text ever reaching a build.
+function body, through the daemon, without unsaved text ever reaching a build. Each file is
+checked with the flags of its last build, or else with its line in the project's
+`compile_commands.json`.
 
 ### Not yet
 

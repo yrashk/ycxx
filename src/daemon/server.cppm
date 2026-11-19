@@ -338,8 +338,8 @@ class Server {
   }
 
   // The command line of each source a served request compiled, by its real path: an editor's
-  // document is checked with it (§6.4; `compile_commands.json` is the fallback still to come,
-  // #167). One copy of the request serves all its sources.
+  // document is checked with it (§6.4; `compile_commands.json` is the fallback, `listed_request`).
+  // One copy of the request serves all its sources.
   void remember(const compile::Request& r) {
     auto shared = std::make_shared<const compile::Request>(r);
     std::vector<std::pair<std::string, std::string>> sources;
@@ -348,13 +348,79 @@ class Server {
     for (auto& [real, spelled] : sources) commands_.insert_or_assign(std::move(real), Command{shared, std::move(spelled)});
   }
 
-  // The request that checks the document at `real`: its unit in the last served request that
-  // compiled it, else the file alone in its directory; nothing if it is no translation unit.
+  // `compile_commands.json` at the scope's root (§6.4): a file's command line there, by its real
+  // path, checked with that line's preprocessing options; nothing for a file that is no
+  // translation unit ycxx compiles (a header, a C file). The file is read again when it changes
+  // (its identity: size and times).
+  std::optional<compile::Request> listed_request(const std::string& real) {
+    const std::string path = (std::filesystem::path(paths_.root) / "compile_commands.json").native_encoded_string();
+    std::lock_guard g(listed_mu_);
+    if (const std::optional<Identity> id = stat_path(path); id != listed_identity_) {
+      listed_identity_ = id;
+      listed_.clear();
+      if (id) load_listed(path);
+    }
+    auto it = listed_.find(real);
+    if (it == listed_.end()) return std::nullopt;
+    compile::Request check = compile::check_command(it->second.args, it->second.directory, real, env_);
+    if (compile::sources_of(check).empty()) return std::nullopt;
+    return check;
+  }
+
+  // The entries of a JSON compilation database: `directory`, `file`, and `arguments` (the
+  // compiler first) or `command` (a shell's words). The first entry of a file wins, as in other
+  // tools; an entry that cannot be read is skipped.
+  void load_listed(const std::string& path) {
+    std::ifstream in(path, std::ios::binary);
+    const std::string text{std::istreambuf_iterator<char>(in), {}};
+    auto json = lsp::parse(text);
+    const lsp::Array* entries = json ? json->array() : nullptr;
+    if (!entries) {
+      log(std::format("{}: not a JSON array of entries: ignored", path));
+      return;
+    }
+    for (const lsp::Json& e : *entries) {
+      const lsp::Json* dir = e["directory"];
+      const lsp::Json* file = e["file"];
+      if (!dir || !dir->string() || !file || !file->string()) continue;
+      std::vector<std::string> args;
+      if (const lsp::Json* a = e["arguments"]; a && a->array()) {
+        for (const lsp::Json& x : *a->array())
+          if (x.string()) args.push_back(*x.string());
+      } else if (const lsp::Json* c = e["command"]; c && c->string()) {
+        args = compile::split_words(*c->string());
+      }
+      if (args.empty()) continue;
+      args.erase(args.begin());  // the compiler
+      // Response files, relative to the entry's directory (as the compiler would read them).
+      std::vector<std::string> expanded;
+      for (std::string& arg : args) {
+        if (!arg.starts_with('@')) {
+          expanded.push_back(std::move(arg));
+          continue;
+        }
+        std::filesystem::path rsp(arg.substr(1));
+        if (rsp.is_relative()) rsp = std::filesystem::path(*dir->string()) / rsp;
+        std::ifstream r(rsp, std::ios::binary);
+        if (!r) continue;
+        expanded.append_range(compile::split_words(std::string{std::istreambuf_iterator<char>(r), {}}));
+      }
+      args = std::move(expanded);
+      std::filesystem::path f(*file->string());
+      if (f.is_relative()) f = std::filesystem::path(*dir->string()) / f;
+      listed_.try_emplace(canonical(f.lexically_normal().native_encoded_string()), Listed{std::move(args), *dir->string()});
+    }
+  }
+
+  // The request that checks the document at `real` (§6.4): its unit in the last served request
+  // that compiled it, else its `compile_commands.json` line, else the file alone in its
+  // directory; nothing if it is no translation unit.
   std::optional<compile::Request> check_request(const std::string& real) {
     {
       std::lock_guard g(commands_mu_);
       if (auto it = commands_.find(real); it != commands_.end()) return compile::check_one(*it->second.request, it->second.source);
     }
+    if (auto listed = listed_request(real)) return listed;
     compile::Request alone{{"-fsyntax-only", real}, std::filesystem::path(real).parent_path().native_encoded_string(), env_, 0};
     if (compile::sources_of(alone).empty()) return std::nullopt;
     return alone;
@@ -688,6 +754,13 @@ class Server {
     std::string source;  // as `request` names it, absolute
   };
   std::mutex commands_mu_;
+  struct Listed {
+    std::vector<std::string> args;  // without the compiler
+    std::string directory;
+  };
+  std::mutex listed_mu_;
+  std::optional<Identity> listed_identity_;   // of compile_commands.json when last read; under listed_mu_
+  std::map<std::string, Listed> listed_;      // by real path; under listed_mu_
   std::map<std::string, Command> commands_;  // real path -> the last served request compiling it
   std::set<int> lsp_fds_;    // the LSP sessions' connections; under conn_mu_
   bool lsp_closed_ = false;  // stopping: no new session; under conn_mu_
