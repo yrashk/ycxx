@@ -38,7 +38,7 @@ build/bin/ycxx cxx hello.cpp -o hello && ./hello
   with RAII, aggregate and designated initialization, passing and returning them by value with
   Clang's calling convention, so ycxx and Clang objects call each other; access control
   (`public`, `private`) and friend functions and classes;
-- namespaces, typedefs and alias declarations, `using` declarations and directives;
+- namespaces, nested (`namespace a::b`) and inline ones, typedefs and alias declarations, `using` declarations and directives;
 - `[[…]]` attributes, the GNU attributes and `asm` labels the macOS SDK's headers use, and the
   type-trait built-ins libycxx's headers use (`__is_same`, `__remove_cv`, …)
   ([docs/EXTENSIONS.md](docs/EXTENSIONS.md));

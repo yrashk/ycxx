@@ -1292,8 +1292,7 @@ probe = '''
 namespace a::b::inline c { int f() { return 0; } }
 int main() { return a::b::f(); }
 '''
-status = 'missing'
-issues = [153]
+status = 'done'
 
 [[feature]]
 id = 'dcl-alias'

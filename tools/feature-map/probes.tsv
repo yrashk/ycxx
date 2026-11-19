@@ -1,4 +1,4 @@
-# Each probe built and run by ycxx a2416e31f921 and by an oracle (feature-map probe).
+# Each probe built and run by ycxx b6f9056e24b8 and by an oracle (feature-map probe).
 feature	oracle	ycxx	first_error
 lex-core	gcc	pass	
 lex-digraph	gcc	pass	
@@ -74,7 +74,7 @@ dcl-scoped-enum	gcc	fail	'enum' is not supported yet
 dcl-using-enum	gcc	fail	'using' is not supported yet
 dcl-namespaces	gcc	pass	
 dcl-inline-ns	gcc	pass	
-dcl-nested-ns	gcc	fail	'a' is not a namespace or class
+dcl-nested-ns	gcc	pass	
 dcl-static-assert	gcc	pass	
 dcl-asm	gcc	fail	'asm' is not supported yet
 dcl-linkage-spec	gcc	pass	

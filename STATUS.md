@@ -1561,6 +1561,16 @@ What the process allocates, attributed to the engine's cells, in the trace and t
 - Not yet: constrained `C auto`, `auto x = {…}`, `auto x(e)` at namespace scope, abbreviated
   function templates (#286); structured bindings (#285).
 
+## Nested namespace definitions, ι (#153, #337, 2026-11-19)
+
+- `namespace a::b::c { }` (C++17) and `namespace a::inline b { }` (C++20), [namespace.def]: the
+  item splitter declares every component (`namespace_names`), the first in the enclosing namespace
+  and each later one in the one before it (`Program::name_scopes_`, read by `declared_in`); only a
+  component preceded by `inline` is transparent to lookup. `namespace_definition` gives each
+  component its declaration. Names mangle as Clang's (`tests/own/namespaces/nested-mangling`, with a
+  Clang peer).
+- Tests: `tests/own/namespaces/`.
+
 ## Bootstrap workarounds
 
 Places where ycxx's sources avoid or work around a C++26 feature because GCC 16 lacks it or
