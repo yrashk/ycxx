@@ -1229,6 +1229,16 @@ request it serves.
   with a time cursor, worker selection, live feed.
 - Names: units and files by their file, functions by qualified name, requests and programs by
   their units and output (`Build(a.cpp → a)`).
+- Errors: a compile error is a value, so a kind says which of its values hold errors
+  (`errors(value)`; `Pp::diagnostic_errors` keeps error-severity diagnostics only, so a
+  `#warning` is none). Events carry the text; the cell where errors start (no child has any) is
+  marked, with its message, and every cell above names it (`error below:`, JSON `error_at`).
+- Values shown: L1 (`FunctionIr`), L2 (`Lower`), and assembly (`Codegen`, `Optimized`) from
+  `aarch64::disassemble`, which decodes with the encoder's own form table.
+- `--trace-engine=json`: JSON Lines on stderr (events with values and errors, the diagnostics and
+  exit status, a summary); every line parses. `ctl trace --json` likewise.
+- An input's first read is `input`, later reads `reused`; identical instants in a row under one
+  parent are folded (`×3`, JSON `repeat`).
 - Daemon: a `compile` that asks gets `trace` frames before its answer, written by its connection
   thread; a `watch` connection gets every request's, through a queue its own thread writes (a
   watcher 64 MiB behind is dropped), and is shut down with the daemon. A cancelled request's runs
@@ -1243,8 +1253,8 @@ request it serves.
   the collector under 8 threads; the tree, filters, summary and timeline); `daemon.trace` (traced
   builds through the daemon, a watcher, a stalled watcher beside 40 builds, shutdown). The
   browser's key handling is untested.
-- Not yet: each stage's value from the analysed tree to instructions (#254); per-resumption spans,
-  so a frame's waits are not drawn as work (#255).
+- Not yet: the analysed tree as a value, and stages linked to source (#254); per-resumption
+  spans, so a frame's waits are not drawn as work (#255).
 
 ## Bootstrap workarounds
 
