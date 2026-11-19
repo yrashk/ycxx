@@ -71,6 +71,15 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
     merges. After merging, confirm the merge commit is an ancestor of origin/main.
   - Learned on #139, 2026-11-18.
 
+- **Commits pushed to a PR's branch after it merges never reach main.** #233's Apple-ABI change
+  was pushed to `claude/byvalue-116` after the coordinator had merged #233, so it never reached
+  main (the same trap as #198, from the other side).
+  - Do: before pushing to a PR's branch, check that the PR is still open
+    (`gh pr view N --json state`). Once it has merged, start a fresh branch from main for anything
+    new, even a follow-up to the same issue.
+  - The coordinator's sweep also checks every merged PR's branch for commits that aren't on main.
+  - Learned on #116 and #230, 2026-11-18.
+
 ## Working with Fable subagents
 
 - **Agree the contract between parts before splitting a design.** #1's engine part and C++ part
