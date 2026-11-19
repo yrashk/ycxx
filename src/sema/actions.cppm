@@ -1309,30 +1309,28 @@ public:
   // `TT<args>` of template template parameter `p` ([temp.names]): bound, the specialization of its
   // argument; otherwise a dependent type.
   std::optional<QualType> template_param_id(const ast::TemplateParamSema& p, std::span<const TemplateArg> args, u32 at) {
+    // The arguments fit the parameter's own head, whose defaults complete them, whatever template
+    // it is bound to ([temp.arg]/4, [temp.arg.template]); a pack parameter's arguments grouped, as
+    // Itanium mangles them (`T_IclE`, `T_IcJEE`).
+    std::vector<ast::TemplateParamSema> head = ins().seqs.elements(p.params);
+    Templates t = templates();
+    std::vector<std::optional<TemplateArg>> out(head.size());
+    std::optional<std::vector<TemplateArg>> full;
+    if (t.explicit_into(head, args, out)) full = t.complete(ast::DeclSema{}, head, out);
+    if (!full) {
+      diag(at, Diag::template_args_mismatch, p.name);
+      return std::nullopt;
+    }
     if (auto a = bound_arg(p); a && a->kind == ast::TemplateArgKind::template_) {
       if (a->templ != EntityId::none) {
         auto d = q_->template_decl(a->templ);
         if (!d) return std::nullopt;
-        return class_template_id(*d, args, at);
+        return class_template_id(*d, t.flatten(*full), at);
       }
       TypeRec r = types().rec(a->type);
-      return types().dep_spec(r.depth, r.index, r.pack, args);
+      return types().dep_spec(r.depth, r.index, r.pack, *full);
     }
-    // The arguments fit the parameter's own head, with its defaults ([temp.arg]/4).
-    std::vector<ast::TemplateParamSema> head = ins().seqs.elements(p.params);
-    Templates t = templates();
-    std::vector<std::optional<TemplateArg>> out(head.size());
-    if (!t.explicit_into(head, args, out) || !t.complete(ast::DeclSema{}, head, out)) {
-      diag(at, Diag::template_args_mismatch, p.name);
-      return std::nullopt;
-    }
-    // As written, a pack parameter's arguments grouped (as Itanium mangles them, `J … E`).
-    std::vector<TemplateArg> grouped;
-    for (const auto& a : out) {
-      if (!a) break;
-      grouped.push_back(*a);
-    }
-    return types().dep_spec(p.depth, p.index, p.pack != 0, grouped);
+    return types().dep_spec(p.depth, p.index, p.pack != 0, *full);
   }
   // The template template parameter `name` names here, if it does.
   const ast::TemplateParamSema* template_template_param(NameId name) const {
@@ -1353,15 +1351,9 @@ public:
   // other than bool and a value N of type T that is not negative; while an argument is dependent, a
   // dependent type.
   std::optional<QualType> builtin_template_id(NameId name, std::span<const TemplateArg> args, u32 at) {
-    std::vector<TemplateArg> xs(args.begin(), args.end());
-    bool ok = xs.size() == 3 && xs[0].kind == ast::TemplateArgKind::template_ && xs[1].kind == ast::TemplateArgKind::type &&
-              xs[2].kind == ast::TemplateArgKind::value;
-    if (ok && !types().is_dependent(xs[1].type)) {
-      auto v = templates().converted_value(xs[2], xs[1].type);
-      ok = v.has_value();
-      if (v) xs[2] = *v;
-    }
-    auto t = ok ? templates().builtin_template(ast::BuiltinTemplate::make_integer_seq, xs) : std::nullopt;
+    bool ok = args.size() == 3 && args[0].kind == ast::TemplateArgKind::template_ &&
+              args[1].kind == ast::TemplateArgKind::type && args[2].kind == ast::TemplateArgKind::value;
+    auto t = ok ? templates().builtin_template(ast::BuiltinTemplate::make_integer_seq, args) : std::nullopt;
     if (!t) diag(at, Diag::template_args_mismatch, name);
     return t;
   }
@@ -1376,6 +1368,13 @@ public:
         if (auto a = bound_arg(*p)) return a;
         return TemplateArg{ast::TemplateArgKind::template_, p->type, ConstId::none};
       }
+    // In a class template, its injected-class-name is the template as a template argument and the
+    // class (the current instantiation, or the specialization) as a type one ([temp.local]/1).
+    if (!ns && current_class != EntityId::none) {
+      const EntityRec& c = w_->entities.rec(current_class);
+      if (c.templ != EntityId::none && c.name == name && !local_named(name))
+        return TemplateArg{ast::TemplateArgKind::template_, types().class_type(current_class), ConstId::none, {}, c.templ};
+    }
     auto t = ns ? namespace_type_template(*ns, name) : type_template(name);
     if (!t) return std::nullopt;
     return TemplateArg{ast::TemplateArgKind::template_, QualType{}, ConstId::none, {}, t->entity};

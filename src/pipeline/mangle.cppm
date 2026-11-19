@@ -434,13 +434,16 @@ class Mangler {
     for (std::size_t i = 0; i < args.size(); ++i) {
       const ast::TemplateArg& a = args[i];
       if (i < params.size()) {
+        // Clang's choices, as its output has them: a value whose parameter's type is dependent, or
+        // an empty pack of values; a template whose head is not the parameter's (for a pack, its
+        // first element's), or an empty pack of templates. Type parameters get none.
         const ast::TemplateParamSema& p = params[i];
-        if (p.kind == ast::TemplateArgKind::value && dependent(p.type)) {
-          auto t = type(p.type);
-          if (!t) return t;
-          out += (p.pack ? "TpTn" : "Tn") + *t;
-        } else if (p.kind == ast::TemplateArgKind::template_ && !p.pack && a.templ != ast::EntityId::none &&
-                   !(i < same_heads.size() && same_heads[i])) {
+        bool empty = p.pack && a.kind == ast::TemplateArgKind::pack && in_.seqs.size(a.elems) == 0;
+        bool same = i < same_heads.size() && same_heads[i];
+        bool decl = p.kind == ast::TemplateArgKind::value    ? dependent(p.type) || empty
+                    : p.kind == ast::TemplateArgKind::template_ ? empty || !same
+                                                                : false;
+        if (decl) {
           auto d = param_decl(p);
           if (!d) return d;
           out += *d;

@@ -730,8 +730,11 @@ it is analysed and its odr-uses demand nothing ([basic.def.odr]/15).
   in `type`. Equivalence is the same template ([temp.type]/1), so an alias template is its own
   template, distinct from the class template it names, as Clang has it (GCC folds it; CWG1286 is
   not in the draft).
-- **`TT<args>`** is `TDepSpec` while TT is a parameter, its arguments grouped by TT's own head
-  (packs as packs, as Itanium mangles them). Substitution applies the template TT is bound to,
+- **`TT<args>`** is `TDepSpec` while TT is a parameter, its arguments completed and grouped by TT's
+  own head (its defaults and empty packs added, packs as packs, as Itanium mangles them); bound,
+  the completed arguments are those its template gets ([temp.arg.template]).
+- **The injected-class-name** as a template argument is the template, and the class when the
+  parameter is a type parameter ([temp.local]/1): a `template_` argument carrying both. Substitution applies the template TT is bound to,
   fitting the arguments as a template-id does (`Templates::apply_template`): a class template's
   specialization, an alias template's substituted type; a misfit is a substitution failure.
 - **Deduction** ([temp.deduct.type]/8): from a class template specialization, TT is its template,
@@ -739,15 +742,17 @@ it is analysed and its odr-uses demand nothing ([basic.def.odr]/15).
   fills its defaults (`TT<int>` from `V<int, int>`); with an expansion among them, directly. From
   another `TDepSpec` (partial ordering), TT is that parameter.
 - **Matching** ([temp.arg.template]/4, P0522): the parameter's own arguments, made unique, must fit
-  the argument template's head with its defaults. The last step (binding every parameter of that
+  the argument template's head with its defaults; a trailing pack among them stands for every
+  remaining parameter of its kind. The last step (binding every parameter of that
   head) and constrained heads are #272 and #271.
 - **`__make_integer_seq<Seq, T, N>`** (docs/EXTENSIONS.md) is `Seq<T, 0, …, N-1>` for an integral T
   other than `bool` and N not negative, applied through `apply_template`; with a dependent argument
   it is a `TBuiltinSpec`, a non-deduced context.
 - **Mangling** follows the published ABI for a template argument (its `<name>`) and `TT<args>`
   (`T_ I … E`), and Clang's unpublished `<template-param-decl>` prefixes on a function template's
-  own arguments: `Tn <type>` (`TpTn` for a pack) before a value whose parameter's type is
-  dependent, and `Tt <decl>* E` before a template whose head is not equivalent to the parameter's,
+  own arguments: `Tn <type>` before a value whose parameter's type is dependent or that is an empty
+  pack, and `Tt <decl>* E` before a template whose head is not equivalent to the parameter's or
+  that is an empty pack (a pack judged by its first element, prefixed `Tp`),
   a nested head's parameter written `TL <level-1> _ [<index-1>] _`. A dependent
   `__make_integer_seq<…>` is mangled as a global class template of that name. GCC differs on the
   prefixes.

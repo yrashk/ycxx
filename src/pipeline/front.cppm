@@ -157,9 +157,13 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
           std::vector<ast::TemplateParamSema> ps = ins.seqs.elements(td->template_params);
           sema::Templates t = program.templates();
           std::vector<std::uint8_t> same;
-          for (std::size_t i = 0; i < r.args.size(); ++i)
-            same.push_back(i < ps.size() && ps[i].kind == ast::TemplateArgKind::template_ && r.args[i].templ != EntityId::none &&
-                           t.heads_equivalent(ps[i], r.args[i].templ));
+          for (std::size_t i = 0; i < r.args.size(); ++i) {
+            // A pack's first element stands for it.
+            ast::TemplateArg a = r.args[i];
+            if (a.kind == ast::TemplateArgKind::pack && ins.seqs.size(a.elems) > 0) a = ins.seqs.at(a.elems, 0);
+            same.push_back(i < ps.size() && ps[i].kind == ast::TemplateArgKind::template_ && a.templ != EntityId::none &&
+                           t.heads_equivalent(ps[i], a.templ));
+          }
           tu.entities.back().template_params = std::move(ps);
           tu.entities.back().template_same_heads = std::move(same);
         }

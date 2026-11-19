@@ -208,9 +208,12 @@ public:
         args[2].kind != TemplateArgKind::value)
       return std::nullopt;
     QualType t = types().canonical(args[1].type);
-    if (!types().is_integral(t) || types().is(t, Builtin::bool_) || !ins().values.is<ast::VInt>(args[2].value)) return std::nullopt;
-    ast::Bits128 n = ast::int_bits(ins(), args[2].value);
-    auto bt = types().builtin_of(args[2].type);
+    if (!types().is_integral(t) || types().is(t, Builtin::bool_)) return std::nullopt;
+    // N is a converted constant expression of type T ([temp.arg.nontype]): not narrowed.
+    auto nv = converted_value(args[2], t);
+    if (!nv || !ins().values.is<ast::VInt>(nv->value)) return std::nullopt;
+    ast::Bits128 n = ast::int_bits(ins(), nv->value);
+    auto bt = types().builtin_of(t);
     if (bt && ast::is_signed(target, *bt) && ast::is_negative(n)) return std::nullopt;
     constexpr u64 limit = u64(1) << 20;  // beyond any instantiation an implementation would finish
     if (n.hi != 0 || n.lo > limit) return std::nullopt;
@@ -823,6 +826,17 @@ public:
     if (x.kind != y.kind) return false;
     if (x.kind == TemplateArgKind::type) return deduce(x.type, y.type, depth, out);
     if (x.kind == TemplateArgKind::pack) return deduce_list(elements(x), elements(y), depth, out);
+    // A template template parameter from a template ([temp.deduct.type]/8: `TT`); a template
+    // only from itself.
+    if (x.kind == TemplateArgKind::template_) {
+      if (is_expansion(x) && is_expansion(y)) return deduce_arg(pattern_of(x), pattern_of(y), depth, out);
+      if (x.templ == EntityId::none && types().kind(x.type) == TypeKind::template_param) {
+        TypeRec r = types().rec(x.type);
+        if (r.depth == depth) return bind(out, r.index, y);
+      }
+      if (x.templ != EntityId::none || y.templ != EntityId::none) return x.templ == y.templ;
+      return types().canonical(x.type) == types().canonical(y.type);
+    }
     if (ins().values.is<ast::VDepParam>(x.value) && ins().values.get<ast::VDepParam>(x.value).depth == depth)
       return bind(out, ins().values.get<ast::VDepParam>(x.value).index, y);
     if (is_expansion(x) && is_expansion(y)) return deduce_arg(pattern_of(x), pattern_of(y), depth, out);
@@ -1006,7 +1020,12 @@ public:
   bool explicit_into(std::span<const ast::TemplateParamSema> params, std::span<const TemplateArg> written,
                      std::vector<std::optional<TemplateArg>>& out) {
     u16 depth = params.empty() ? 0 : params[0].depth;
-    auto one = [&](const ast::TemplateParamSema& p, const TemplateArg& a) -> std::optional<TemplateArg> {
+    auto one = [&](const ast::TemplateParamSema& p, TemplateArg a) -> std::optional<TemplateArg> {
+      // The injected-class-name names the class for a type parameter, the template for a template
+      // template parameter ([temp.local]/1).
+      if (a.kind == TemplateArgKind::template_ && p.kind == TemplateArgKind::type && a.templ != EntityId::none &&
+          types().is_class(a.type))
+        a = type_arg(a.type);
       if (a.kind != p.kind) return std::nullopt;
       if (p.kind == TemplateArgKind::type) return a;
       if (p.kind == TemplateArgKind::template_) return template_matches(p, a) ? std::optional(a) : std::nullopt;
@@ -1098,6 +1117,25 @@ public:
       auto u = substitute_args(own_args(ps), unique_bindings(ps));
       if (!u) return false;
       synth = flatten(*u);
+    }
+    // A trailing pack of p's stands for any number of arguments of its kind
+    // ([temp.arg.template]/3's example: `template<class...> class` takes `template<class, class>`):
+    // a unique one for each of a's remaining parameters, an expansion for a's own pack.
+    if (!ps.empty() && ps.back().pack && !synth.empty() && is_expansion(synth.back())) {
+      TemplateArg pack = synth.back();
+      synth.pop_back();
+      for (std::size_t j = synth.size(); j < as.size(); ++j) {
+        if (as[j].kind != ps.back().kind) return false;
+        if (as[j].pack) {
+          synth.push_back(pack);
+          break;
+        }
+        u16 index = u16(ps.size() + j);  // past p's own unique parameters
+        if (as[j].kind == TemplateArgKind::type) synth.push_back(type_arg(types().template_param(unique_depth, index)));
+        else if (as[j].kind == TemplateArgKind::value)
+          synth.push_back(value_arg(as[j].type, ins().intern_value(ast::VDepParam{unique_depth, index})));
+        else synth.push_back({TemplateArgKind::template_, types().template_param(unique_depth, index), ConstId::none});
+      }
     }
     std::vector<std::optional<TemplateArg>> out(as.size());
     std::set<u16> saved = std::exchange(explicit_packs_, {});

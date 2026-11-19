@@ -843,7 +843,8 @@ public:
     NameId n = name_of(tok(j));
     const ast::TemplateParamSema* tt = in ? nullptr : s_->template_template_param(n);
     auto tmpl = in || !tt ? (in ? s_->namespace_type_template(*in->ns, n) : s_->type_template(n)) : std::nullopt;
-    if (!tmpl && !tt) return std::nullopt;
+    bool builtin = !in && !tt && !tmpl && s_->builtin_template(n);  // `__make_integer_seq<…>::`
+    if (!tmpl && !tt && !builtin) return std::nullopt;
     u32 saved = i_;
     bool saved_half = half_;
     std::size_t diags = s_->diag_count();
@@ -853,7 +854,8 @@ public:
     bool closed = scope ? !half_ && kind() == Tk::coloncolon : true;
     bool ended_half = half_;  // the list ended in the first half of a `>>`
     std::optional<QualType> t;
-    if (args && closed) t = tt ? s_->template_param_id(*tt, *args, 0) : s_->class_template_id(*tmpl, *args, 0);
+    if (args && closed)
+      t = tt ? s_->template_param_id(*tt, *args, 0) : builtin ? s_->builtin_template_id(n, *args, 0) : s_->class_template_id(*tmpl, *args, 0);
     i_ = saved;
     half_ = saved_half;
     if (!scope) qualified_half_ = ended_half;

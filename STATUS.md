@@ -1365,22 +1365,28 @@ Fable decided the representation (ast.md §6.7); the Opus session wrote the code
 - **Template arguments that are templates** ([temp.arg.template]): a class or alias template, a
   template template parameter, `N::X`; `TemplateArg::templ`. An argument template fits a
   parameter when the parameter's own arguments, made unique, fit its head with its defaults
-  (P0522): `template<class> class` takes `template<class, class = int> class`, and `template<class
-  U, U...> class` takes `template<class T, int...> class`.
-- **`TT<args>`** is a dependent type (`TDepSpec`) until TT is bound, then its template's
-  specialization or alias (`Templates::apply_template`); TT and its arguments are deduced from a
-  class template specialization ([temp.deduct.type]/8), also in partial specializations.
+  (P0522), a trailing pack taking every remaining parameter of its kind: `template<class> class`
+  takes `template<class, class = int> class`, `template<class U, U...> class` takes
+  `template<class T, int...> class`, and `template<class...> class` takes `template<class, class>
+  class`. A class template's injected-class-name is the template for a template parameter and
+  the class for a type one ([temp.local]/1).
+- **`TT<args>`** is a dependent type (`TDepSpec`), completed by the defaults of TT's own head,
+  until TT is bound, then its template's specialization or alias (`Templates::apply_template`); TT
+  is deduced from a class template specialization and from a template argument
+  ([temp.deduct.type]/8), also in partial specializations and as a pack.
 - **`__make_integer_seq<Seq, T, N>`**, Clang's built-in (docs/EXTENSIONS.md), with
   `__has_builtin(__make_integer_seq)` answering 1: libycxx's `make_integer_sequence` now reaches it.
 - **Mangling** as Clang's: a template argument by its name, `T_I…E`, `18__make_integer_seq`, and
-  Clang's `Tn`, `TpTn`, `Tt…E` and `TL…_` prefixes on a function template's own arguments, which
-  also corrects `template<class T, T N>` specializations (`_Z1fIiTnT_Li3EEiv`).
-- Tests: `tests/own/templates/t8-*` (7; a PEER test links Clang's definitions), 2 more draft
-  examples pass. `<cstdio>`: 16 → 8 errors, all pointer-to-member types (#238).
+  Clang's `Tn`, `Tp`, `Tt…E` and `TL…_` prefixes on a function template's own arguments (for a
+  pack, by its first element or its emptiness), which also corrects `template<class T, T N>`
+  specializations (`_Z1fIiTnT_Li3EEiv`).
+- Tests: `tests/own/templates/t8-*` (15, 8 from the review; a PEER test links Clang's
+  definitions), 3 more draft examples pass. `<cstdio>`: 16 → 8 errors, all pointer-to-member types (#238).
 - Not yet: constrained template template parameters (#271); partial ordering of partial
   specializations through template template parameters with different heads, the last step of
-  [temp.arg.template]/4, and `__make_integer_seq` as an argument (#272); member templates and
-  `Q::template M` as an argument.
+  [temp.arg.template]/4, and `__make_integer_seq` as an argument (#272); the diagnostics of a
+  template-id before `::` whose arguments do not fit (#275); member templates and `Q::template M`
+  as an argument.
 
 ## The engine trace (#245, 2026-11-19)
 
