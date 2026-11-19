@@ -1,6 +1,6 @@
 // The system include directories of this build (configured by CMake): libycxx's headers, the
-// ones libycxx's build generated, and the C library's headers in the SDK (`$SDKROOT` overrides
-// the SDK the build used).
+// ones libycxx's build generated, ycxx's resource headers for Linux, and the C library's
+// headers in the SDK (`$SDKROOT` overrides the SDK the build used).
 export module ycxx.pp:system;
 
 import std;
@@ -15,6 +15,7 @@ inline constexpr int version_patch = @PROJECT_VERSION_PATCH@;
 
 std::vector<std::string> system_dirs(const ast::Target& target = ast::aarch64_darwin) {
   std::vector<std::string> dirs{"@YCXX_LIBYCXX_INCLUDE@", "@YCXX_LIBYCXX_GENERATED_INCLUDE@"};
+  if (target.triple == ast::x86_64_linux.triple) dirs.push_back("@YCXX_LINUX_RESOURCE_INCLUDE@");
   std::string sdk = target.triple == ast::aarch64_darwin.triple ? "@CMAKE_OSX_SYSROOT@" : "";
   if (const char* env = std::getenv("SDKROOT"); env != nullptr && *env != '\0') sdk = env;
   std::string include = sdk + "/usr/include";

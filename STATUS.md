@@ -202,8 +202,8 @@ What is true of the code today. Work in progress and its owners are tracked in
 - Directives:
   - `#include` in both forms and the macro-replaced form, and `#include_next`;
   - search directories from `-I`, `-isystem` and `-iquote`, then libycxx's headers and the
-    target's C library headers (`:system`, configured by CMake). For x86-64 Linux, the SDK's
-    `usr/include/x86_64-linux-gnu` precedes `usr/include` (#252);
+    target's system headers (`:system`, configured by CMake). For x86-64 Linux, ycxx's resource
+    headers (#133) precede the SDK's `usr/include/x86_64-linux-gnu` and `usr/include` (#252);
   - `#define` and `#undef` with the redefinition check, rescanning and painting
     ([cpp.rescan]);
   - function-like macros (`:unit`'s `invocation`, `substitute`, `paste`): arguments across
@@ -1361,12 +1361,22 @@ Fable decided the representation (ast.md §6.6); the Opus session wrote the code
 - The test driver checks warnings where a test has `//! warning` markers (docs/TESTING.md), and
   reads markers in headers a test includes with `<...>` from its `FLAGS` directories.
 - Tests: `tests/own/pp/predefined-gnuc.pp.cpp`, `tests/own/headers/system-warnings.accept.cpp`,
-  `tests/own/headers/stdio-no-warnings.accept.cpp` (`<stdio.h>` with no warning on Darwin;
-  glibc still needs a compiler-provided `<stddef.h>` after #252, see #133),
+  `tests/own/headers/stdio-no-warnings.accept.cpp` (`<stdio.h>` with no warning on Darwin),
   `tests/own/headers/system-error.reject.cpp`,
   `tests/own/builtins/va-list.run.cpp`, `tests/own/builtins/unsupported.reject.cpp`, `tests/own/builtins/unknown-probe.accept.cpp`. `<cstdio>`: 25 errors before and after, and no warning
   (was 1). `<cmath>` and `<cstdlib>` gain errors in the SDK's `__GNUC__` inline functions (local
   unions, floating-point operations, `__builtin_fabs*`), which already had thousands.
+
+## Linux compiler resource `<stddef.h>` (#133)
+
+- For x86-64 Linux, `resources/linux/include` is searched after libycxx, so its `<stddef.h>`
+  forwards glibc's `__need_size_t`, `__need_wchar_t` and `__need_NULL` requests to ycxx. Each
+  request is consumed, and partial inclusions can precede libycxx's full `<cstddef>` inclusion.
+  The full resource header supplies `max_align_t` with 16-byte alignment (AMD64 psABI §3.1.2).
+  `unit.pp` exercises both paths through the configured header search.
+- glibc's `<stdio.h>` now reaches its `__need___va_list` request for `<stdarg.h>`. Compiling
+  `<stdio.h>` still needs a compiler resource `<stdarg.h>` and the System V `__builtin_va_list`
+  type (#133).
 
 ## Templates, ζ step 8: template template parameters and `__make_integer_seq` (#88, #208, 2026-11-19)
 
