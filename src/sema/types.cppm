@@ -52,7 +52,8 @@ constexpr std::string_view spelling(Builtin b) {
 // ---------------------------------------------------------------- types
 
 enum class TypeKind : u8 {
-  builtin, pointer, array, function, class_, reference, enum_, template_param, dep_name, pack_expansion, transform, other
+  builtin, pointer, array, function, class_, reference, enum_, template_param, dep_name, pack_expansion, transform,
+  dep_spec, builtin_spec, other
 };
 
 // The canonical form of a type, read out by value.
@@ -72,7 +73,8 @@ struct TypeRec {
   u16 depth = 0;                     // a template parameter's position ([temp.param])
   u16 index = 0;
   bool pack = false;
-  u8 trait = 0;  // a transform's `lex::TypeTrait`
+  u8 trait = 0;  // a transform's `lex::TypeTrait`; a built-in specialization's `ast::BuiltinTemplate`
+  ast::SeqId<ast::TemplateArg> args{};  // a dependent or built-in specialization's arguments
 };
 
 class Types {
@@ -104,6 +106,13 @@ public:
   QualType pack_expansion(QualType pattern) { return ins_->intern_type(ast::TPackExpansion{pattern}); }
   // `__trait(arg)` of a dependent `arg` (docs/EXTENSIONS.md).
   QualType transform(u8 trait, QualType arg) { return ins_->intern_type(ast::TTransform{trait, arg}); }
+  // `TT<args>` of a template template parameter, and `__make_integer_seq<args>` while dependent.
+  QualType dep_spec(u16 depth, u16 index, bool pack, std::span<const ast::TemplateArg> args) {
+    return ins_->intern_type(ast::TDepSpec{depth, index, u8(pack), ins_->intern_seq(args)});
+  }
+  QualType builtin_spec(ast::BuiltinTemplate which, std::span<const ast::TemplateArg> args) {
+    return ins_->intern_type(ast::TBuiltinSpec{u8(which), ins_->intern_seq(args)});
+  }
   bool is_floating(QualType q) const {
     auto b = builtin_of(q);
     return b && ast::is_floating(*b);
@@ -151,6 +160,17 @@ public:
       r.kind = TypeKind::transform;
       r.inner = t.get<ast::TTransform>(c).arg;
       r.trait = t.get<ast::TTransform>(c).trait;
+    } else if (t.is<ast::TDepSpec>(c)) {
+      auto d = t.get<ast::TDepSpec>(c);
+      r.kind = TypeKind::dep_spec;
+      r.depth = d.depth;
+      r.index = d.index;
+      r.pack = d.pack != 0;
+      r.args = d.args;
+    } else if (t.is<ast::TBuiltinSpec>(c)) {
+      r.kind = TypeKind::builtin_spec;
+      r.trait = t.get<ast::TBuiltinSpec>(c).which;
+      r.args = t.get<ast::TBuiltinSpec>(c).args;
     } else if (t.is<ast::TPackExpansion>(c)) {
       r.kind = TypeKind::pack_expansion;
       r.inner = t.get<ast::TPackExpansion>(c).pattern;
@@ -172,7 +192,9 @@ public:
     case TypeKind::template_param:
     case TypeKind::dep_name:
     case TypeKind::pack_expansion:
-    case TypeKind::transform: return true;
+    case TypeKind::transform:
+    case TypeKind::dep_spec:
+    case TypeKind::builtin_spec: return true;
     case TypeKind::builtin: return r.builtin == Builtin::dependent;
     case TypeKind::array:
       return is_dependent(r.inner) || (r.bound_value != ConstId::none && ins_->values.is_dependent(r.bound_value));
@@ -291,6 +313,12 @@ private:
     case TypeKind::transform:
       return cvs + std::string(lex::type_trait_info(lex::TypeTrait(r.trait)).name) + "(" + spell(r.inner) + ")" +
              (inner.empty() ? "" : " " + inner);
+    case TypeKind::dep_spec:
+    case TypeKind::builtin_spec: {
+      std::string name = r.kind == TypeKind::builtin_spec ? std::string("__make_integer_seq")
+                                                          : std::format("template-parameter-{}-{}", r.depth, r.index);
+      return cvs + name + "<…>" + (inner.empty() ? "" : " " + inner);
+    }
     case TypeKind::other: return "<type>";
     }
     return {};
@@ -415,6 +443,8 @@ public:
       for (const ast::TemplateArg& e : ins_->seqs.elements(a.elems)) f = mix_arg(f, e);
       return f;
     }
+    // A template: itself ([temp.type]/1: the same template), or while dependent its parameter.
+    if (a.kind == ast::TemplateArgKind::template_ && a.templ != EntityId::none) return ast::mix(f, ins_->entities.fp(a.templ));
     f = ast::mix(f, types_->fp(types_->canonical(a.type)));
     if (a.value != ConstId::none) f = ast::mix(f, ins_->values.fp(a.value));
     return f;
@@ -653,6 +683,7 @@ struct World {
   bool arg_dependent(const ast::TemplateArg& a) const {
     if (a.kind == ast::TemplateArgKind::type) return types.is_dependent(a.type);
     if (a.kind == ast::TemplateArgKind::value) return ins.values.is_dependent(a.value);
+    if (a.kind == ast::TemplateArgKind::template_) return a.templ == EntityId::none;
     return std::ranges::any_of(ins.seqs.elements(a.elems), [&](const ast::TemplateArg& x) { return arg_dependent(x); });
   }
 };

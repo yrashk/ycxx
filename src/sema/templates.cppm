@@ -162,6 +162,29 @@ public:
       }
       return types().function(*ret, ps, r.variadic, r.linkage, r.fn_cv);
     }
+    case TypeKind::dep_spec: {
+      // `TT<args>`: the specialization of TT's argument for the substituted arguments, or the
+      // same form while TT is not bound to a template ([temp.arg.template]).
+      auto args = substitute_args(ins().seqs.elements(r.args), b);
+      if (!args) return std::nullopt;
+      auto x = b.at(r.depth, r.index);
+      if (!x) return types().add_cv(types().dep_spec(r.depth, r.index, r.pack, *args), cv);
+      if (x->kind != TemplateArgKind::template_) return std::nullopt;
+      if (x->templ == EntityId::none) {
+        TypeRec p = types().rec(x->type);
+        return types().add_cv(types().dep_spec(p.depth, p.index, p.pack, *args), cv);
+      }
+      auto t2 = apply_template(x->templ, *args);
+      if (!t2) return std::nullopt;
+      return types().add_cv(*t2, cv);
+    }
+    case TypeKind::builtin_spec: {
+      auto args = substitute_args(ins().seqs.elements(r.args), b);
+      if (!args) return std::nullopt;
+      auto t2 = builtin_template(ast::BuiltinTemplate(r.trait), *args);
+      if (!t2) return std::nullopt;
+      return types().add_cv(*t2, cv);
+    }
     case TypeKind::pack_expansion: return std::nullopt;  // only in a list, by `substitute_expansion`
     case TypeKind::transform: {
       auto a = substitute(r.inner, b);
@@ -172,6 +195,28 @@ public:
     }
     }
     return t;
+  }
+
+  // ------------------------------------------------------------ built-in templates (docs/EXTENSIONS.md)
+
+  // `__make_integer_seq<Seq, T, N>`, Clang's: `Seq<T, 0, 1, …, N-1>`, for an integral T other
+  // than bool and N not negative; a dependent `TBuiltinSpec` while an argument is dependent.
+  std::optional<QualType> builtin_template(ast::BuiltinTemplate which, std::span<const TemplateArg> args) {
+    if (std::ranges::any_of(args, [&](const TemplateArg& a) { return w_->arg_dependent(a); }))
+      return types().builtin_spec(which, args);
+    if (args.size() != 3 || args[0].kind != TemplateArgKind::template_ || args[1].kind != TemplateArgKind::type ||
+        args[2].kind != TemplateArgKind::value)
+      return std::nullopt;
+    QualType t = types().canonical(args[1].type);
+    if (!types().is_integral(t) || types().is(t, Builtin::bool_) || !ins().values.is<ast::VInt>(args[2].value)) return std::nullopt;
+    ast::Bits128 n = ast::int_bits(ins(), args[2].value);
+    auto bt = types().builtin_of(args[2].type);
+    if (bt && ast::is_signed(target, *bt) && ast::is_negative(n)) return std::nullopt;
+    constexpr u64 limit = u64(1) << 20;  // beyond any instantiation an implementation would finish
+    if (n.hi != 0 || n.lo > limit) return std::nullopt;
+    std::vector<TemplateArg> xs{type_arg(t)};
+    for (u64 i = 0; i < n.lo; ++i) xs.push_back(value_arg(t, w_->values.integer(t, i)));
+    return apply_template(args[0].templ, xs);
   }
 
   // ------------------------------------------------------------ type-trait built-ins (docs/EXTENSIONS.md)
@@ -259,6 +304,15 @@ public:
   }
   // One type or value argument, substituted.
   std::optional<TemplateArg> substitute_arg(const TemplateArg& a, const Bindings& b) {
+    // A template: itself, or the argument of the template template parameter it is.
+    if (a.kind == TemplateArgKind::template_) {
+      if (a.templ != EntityId::none || types().kind(a.type) != TypeKind::template_param) return a;
+      TypeRec r = types().rec(a.type);
+      auto x = b.at(r.depth, r.index);
+      if (!x) return a;
+      if (x->kind != TemplateArgKind::template_) return std::nullopt;
+      return *x;
+    }
     if (a.kind == TemplateArgKind::type) {
       auto s = substitute(a.type, b);
       if (!s) return std::nullopt;
@@ -439,8 +493,9 @@ public:
   std::vector<TemplateArg> own_args(std::span<const ast::TemplateParamSema> params) {
     std::vector<TemplateArg> r;
     for (const ast::TemplateParamSema& p : params) {
-      TemplateArg a = p.kind == TemplateArgKind::type ? type_arg(p.type)
-                                                      : value_arg(p.type, ins().intern_value(ast::VDepParam{p.depth, p.index}));
+      TemplateArg a = p.kind == TemplateArgKind::type       ? type_arg(p.type)
+                      : p.kind == TemplateArgKind::template_ ? TemplateArg{TemplateArgKind::template_, p.type, ConstId::none}
+                                                             : value_arg(p.type, ins().intern_value(ast::VDepParam{p.depth, p.index}));
       if (p.pack) {
         std::array<TemplateArg, 1> e{expansion_of(a)};
         a = pack(e);
@@ -460,17 +515,21 @@ public:
   }
   std::vector<TemplateArg> elements(const TemplateArg& a) { return ins().seqs.elements(a.elems); }
   bool is_expansion(const TemplateArg& a) {
+    if (a.kind == TemplateArgKind::template_) return a.templ == EntityId::none && types().kind(a.type) == TypeKind::pack_expansion;
     return a.kind == TemplateArgKind::type ? types().kind(a.type) == TypeKind::pack_expansion
                                            : a.kind == TemplateArgKind::value && ins().values.is<ast::VDepExpansion>(a.value);
   }
   // The expansion of `pattern` as a pack element.
   TemplateArg expansion_of(const TemplateArg& pattern) {
     if (pattern.kind == TemplateArgKind::type) return type_arg(types().pack_expansion(pattern.type));
+    if (pattern.kind == TemplateArgKind::template_)
+      return {TemplateArgKind::template_, types().pack_expansion(pattern.type), ConstId::none};
     return {TemplateArgKind::value, pattern.type, ins().intern_value(ast::VDepExpansion{pattern.value})};
   }
   // An expansion's pattern, as an argument of its kind.
   TemplateArg pattern_of(const TemplateArg& e) {
     if (e.kind == TemplateArgKind::type) return type_arg(types().rec(e.type).inner);
+    if (e.kind == TemplateArgKind::template_) return {TemplateArgKind::template_, types().rec(e.type).inner, ConstId::none};
     return {TemplateArgKind::value, e.type, ins().values.get<ast::VDepExpansion>(e.value).pattern};
   }
   // The template parameters a type or value names, by (depth, index). Without `nested`, not those
@@ -498,6 +557,12 @@ public:
       params_in(r.inner, out, nested);
       for (QualType p : r.params) params_in(p, out, nested);
       return;
+    case TypeKind::dep_spec:
+      out.push_back({r.depth, r.index});
+      [[fallthrough]];
+    case TypeKind::builtin_spec:
+      for (const TemplateArg& a : ins().seqs.elements(r.args)) params_in(a, out, nested);
+      return;
     default: return;
     }
   }
@@ -508,6 +573,9 @@ public:
   void params_in(const TemplateArg& a, std::vector<std::pair<u16, u16>>& out, bool nested = true) {
     if (a.kind == TemplateArgKind::type) params_in(a.type, out, nested);
     else if (a.kind == TemplateArgKind::value) params_in(a.value, out, nested);
+    else if (a.kind == TemplateArgKind::template_) {
+      if (a.templ == EntityId::none) params_in(a.type, out, nested);
+    }
     else
       for (const TemplateArg& e : elements(a)) params_in(e, out, nested);
   }
@@ -591,6 +659,12 @@ public:
       return std::ranges::any_of(refs, [&](auto ref) { return ref.first == depth; });
     }
     case TypeKind::pack_expansion: return mentions(r.inner, depth);
+    case TypeKind::dep_spec: {
+      if (r.depth == depth) return true;
+      std::vector<std::pair<u16, u16>> refs;
+      for (const TemplateArg& a : ins().seqs.elements(r.args)) params_in(a, refs);
+      return std::ranges::any_of(refs, [&](auto ref) { return ref.first == depth; });
+    }
     case TypeKind::array:
       if (r.bound_value != ConstId::none && ins().values.is<ast::VDepParam>(r.bound_value) &&
           ins().values.get<ast::VDepParam>(r.bound_value).depth == depth)
@@ -620,10 +694,28 @@ public:
       QualType v = types().add_cv(Types::unqualified(ac), Cv(std::to_underlying(ca) & ~std::to_underlying(cp)));
       return bind(out, pr.index, {TemplateArgKind::type, types().canonical(v), ConstId::none});
     }
+    if (pr.kind == TypeKind::builtin_spec) return true;  // a built-in's result: non-deduced
     if (!(cp == ca || (allow.more_cv && within(ca, cp)))) return false;
     TypeRec ar = types().rec(ac);
+    // [temp.deduct.type]/8: `TT<args>` from a class template specialization: TT is its template,
+    // and the arguments are deduced from that template's specialization for `args` (which fills
+    // its defaults: `TT<int>` from `V<int, int>`).
+    if (pr.kind == TypeKind::dep_spec && pr.depth == depth && ar.kind == TypeKind::class_) {
+      const EntityRec& spec = w_->entities.rec(ar.entity);
+      if (spec.templ == EntityId::none) return false;
+      if (!bind(out, pr.index, {TemplateArgKind::template_, QualType{}, ConstId::none, {}, spec.templ})) return false;
+      auto own = apply_template(spec.templ, ins().seqs.elements(pr.args));
+      if (!own || !types().is_class(*own)) return false;
+      const EntityRec& o = w_->entities.rec(types().class_of(*own));
+      if (o.templ != spec.templ) return false;
+      return deduce_args(o.args, spec.args, depth, out);
+    }
     if (pr.kind != ar.kind) return false;
     switch (pr.kind) {
+    case TypeKind::dep_spec:
+      return pr.depth == ar.depth && pr.index == ar.index && pr.pack == ar.pack &&
+             deduce_args(ins().seqs.elements(pr.args), ins().seqs.elements(ar.args), depth, out);
+    case TypeKind::builtin_spec: return true;
     case TypeKind::template_param: return pr.depth == ar.depth && pr.index == ar.index && pr.pack == ar.pack;
     case TypeKind::dep_name: return types().canonical(pr.inner) == types().canonical(ar.inner) && pr.name == ar.name;
     case TypeKind::transform: return pr.trait == ar.trait && types().canonical(pr.inner) == types().canonical(ar.inner);
@@ -900,6 +992,7 @@ public:
     auto one = [&](const ast::TemplateParamSema& p, const TemplateArg& a) -> std::optional<TemplateArg> {
       if (a.kind != p.kind) return std::nullopt;
       if (p.kind == TemplateArgKind::type) return a;
+      if (p.kind == TemplateArgKind::template_) return template_matches(p, a) ? std::optional(a) : std::nullopt;
       auto pt = substitute(p.type, bindings(depth, out));
       return pt ? converted_value(a, *pt) : std::nullopt;
     };
@@ -921,6 +1014,78 @@ public:
       out[i] = *v;
     }
     return j == written.size();
+  }
+
+  // Whether template `a`'s template-head is equivalent to template template parameter `p`'s:
+  // parameters of the same kinds and packs, values of the same types position by position, nested
+  // heads alike ([temp.over.link]/6).
+  bool heads_equivalent(const ast::TemplateParamSema& p, EntityId a) {
+    if (!template_decl) return false;
+    auto d = template_decl(a);
+    if (!d) return false;
+    return heads_equivalent(ins().seqs.elements(p.params), ins().seqs.elements(d->template_params));
+  }
+  bool heads_equivalent(std::span<const ast::TemplateParamSema> ps, std::span<const ast::TemplateParamSema> as) {
+    if (ps.size() != as.size()) return false;
+    if (ps.empty()) return true;
+    Bindings b = Bindings::of(as[0].depth, own_args(ps));
+    for (std::size_t i = 0; i < ps.size(); ++i) {
+      if (ps[i].kind != as[i].kind || ps[i].pack != as[i].pack) return false;
+      if (ps[i].kind == TemplateArgKind::value) {
+        auto t = substitute(as[i].type, b);
+        if (!t || types().canonical(*t) != types().canonical(ps[i].type)) return false;
+      }
+      if (ps[i].kind == TemplateArgKind::template_ &&
+          !heads_equivalent(ins().seqs.elements(ps[i].params), ins().seqs.elements(as[i].params)))
+        return false;
+    }
+    return true;
+  }
+
+  // The type template `templ` names with `args`, as a template-id says it ([temp.names]): a class
+  // template's specialization, an alias template's type with the arguments substituted
+  // ([temp.alias]/2); none when the arguments do not fit ([temp.deduct.general]/8).
+  std::optional<QualType> apply_template(EntityId templ, std::span<const TemplateArg> args) {
+    if (!template_decl) return std::nullopt;
+    auto decl = template_decl(templ);
+    if (!decl) return std::nullopt;
+    std::vector<ast::TemplateParamSema> ps = ins().seqs.elements(decl->template_params);
+    std::size_t first_pack = std::ranges::find_if(ps, [](const ast::TemplateParamSema& p) { return p.pack != 0; }) - ps.begin();
+    for (std::size_t i = 0; i < args.size() && i < first_pack; ++i)
+      if (is_expansion(args[i])) return std::nullopt;  // for a non-pack parameter: not supported yet (#210)
+    std::vector<std::optional<TemplateArg>> out(ps.size());
+    std::set<u16> saved = std::exchange(explicit_packs_, {});
+    bool fits = explicit_into(ps, args, out);
+    explicit_packs_ = std::move(saved);
+    if (!fits) return std::nullopt;
+    auto full = complete(*decl, ps, out);
+    if (!full) return std::nullopt;
+    if (decl->kind == ast::DeclKind::type_alias)
+      return substitute(decl->type, Bindings::of(ps.empty() ? 0 : ps[0].depth, *full));
+    return types().class_type(specialize_class(templ, *full));
+  }
+
+  // Whether template `a` is an argument template template parameter `p` takes ([temp.arg.template]/4,
+  // P0522): p's own parameters, made unique, are arguments a's head takes, with a's defaults. A
+  // template template parameter (dependent) is checked when it is bound.
+  bool template_matches(const ast::TemplateParamSema& p, const TemplateArg& a) {
+    if (a.templ == EntityId::none) return true;
+    if (!template_decl) return false;
+    auto decl = template_decl(a.templ);
+    if (!decl) return false;
+    std::vector<ast::TemplateParamSema> ps = ins().seqs.elements(p.params);
+    std::vector<ast::TemplateParamSema> as = ins().seqs.elements(decl->template_params);
+    std::vector<TemplateArg> synth;
+    if (!ps.empty()) {
+      auto u = substitute_args(own_args(ps), unique_bindings(ps));
+      if (!u) return false;
+      synth = flatten(*u);
+    }
+    std::vector<std::optional<TemplateArg>> out(as.size());
+    std::set<u16> saved = std::exchange(explicit_packs_, {});
+    bool ok = explicit_into(as, synth, out) && complete(*decl, as, out).has_value();
+    explicit_packs_ = std::move(saved);
+    return ok;
   }
 
   // A template argument's value as a converted constant expression of type `t` ([expr.const]):
@@ -1157,6 +1322,8 @@ private:
     std::vector<TemplateArg> unique;
     for (const ast::TemplateParamSema& p : ps) {
       if (p.kind == TemplateArgKind::type) unique.push_back(type_arg(types().template_param(unique_depth, p.index, p.pack != 0)));
+      else if (p.kind == TemplateArgKind::template_)
+        unique.push_back({TemplateArgKind::template_, types().template_param(unique_depth, p.index, p.pack != 0), ConstId::none});
       else unique.push_back(value_arg(p.type, w_->ins.intern_value(ast::VDepParam{unique_depth, p.index})));
     }
     return Bindings::of(ps[0].depth, unique);
@@ -1183,6 +1350,8 @@ public:
   // The type member of a class with a name, as lookup at a point finds it; set by whoever asks at
   // a point, which `classes_` alone does not know.
   std::function<std::optional<QualType>(EntityId, NameId)> member_type;
+  // The declaration of template `templ` with its head, as lookup at a point finds it.
+  std::function<std::optional<ast::DeclSema>(EntityId)> template_decl;
 
 private:
   // The template-head whose parameters a deduction deduces, and its packs whose leading elements

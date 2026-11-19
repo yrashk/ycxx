@@ -143,6 +143,18 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
     if (r.templ != EntityId::none) {
       tu.entities.back().template_type = world.entities.rec(r.templ).type;
       tu.entities.back().template_args = r.args;
+      // Only a function template's own arguments carry Clang's <template-param-decl> prefixes.
+      if (world.entities.rec(r.templ).kind == sema::EntityKind::function_template)
+        if (auto td = program.declaration(r.templ, program.end())) {
+          std::vector<ast::TemplateParamSema> ps = ins.seqs.elements(td->template_params);
+          sema::Templates t = program.templates();
+          std::vector<std::uint8_t> same;
+          for (std::size_t i = 0; i < r.args.size(); ++i)
+            same.push_back(i < ps.size() && ps[i].kind == ast::TemplateArgKind::template_ && r.args[i].templ != EntityId::none &&
+                           t.heads_equivalent(ps[i], r.args[i].templ));
+          tu.entities.back().template_params = std::move(ps);
+          tu.entities.back().template_same_heads = std::move(same);
+        }
     }
   };
   for (std::uint32_t k = 0; k < items.items.size(); ++k) {

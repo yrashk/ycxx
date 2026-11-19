@@ -42,6 +42,12 @@ std::expected<std::string, std::string> mangled_function(const ast::Interners& i
 struct TemplateSpec {
   ast::QualType pattern{};
   std::vector<ast::TemplateArg> args;
+  // The template's parameters, for Clang's <template-param-decl> prefixes (`Tn`, `Tt`); none
+  // leaves them out.
+  std::vector<ast::TemplateParamSema> params{};
+  // By argument: whether a template argument's head is equivalent to its parameter's, so that
+  // Clang writes no `Tt` for it.
+  std::vector<std::uint8_t> same_heads{};
 };
 std::expected<std::string, std::string> mangled_specialization(const ast::Interners& in, std::string_view name,
                                                                const TemplateSpec& spec, const ClassNames& classes = {},
@@ -178,6 +184,35 @@ class Mangler {
         std::string_view n = lex::type_trait_info(lex::TypeTrait(x.trait)).name;
         inner = std::format("u{}{}I{}E", n.size(), n, *a);
         candidates_.push_back(full_key(bare));
+      } else if (in_.types.is<ast::TDepSpec>(in_.types.canon(bare))) {
+        // `TT<args>`: <template-template-param> <template-args>, the parameter a candidate, then
+        // the whole (§5.1.5.8, §5.1.10).
+        if (auto s = find(full_key(bare))) return qualify(qualifiers, *s, q);
+        auto d = in_.types.get<ast::TDepSpec>(in_.types.canon(bare));
+        // The parameter's own type, which sema interned when the template was declared.
+        auto p = type(const_cast<ast::Interners&>(in_).intern_type(ast::TTemplateParam{d.depth, d.index, d.pack}));
+        if (!p) return p;
+        auto a = template_args(in_.seqs.elements(d.args));
+        if (!a) return a;
+        inner = *p + *a;
+        candidates_.push_back(full_key(bare));
+      } else if (in_.types.is<ast::TBuiltinSpec>(in_.types.canon(bare))) {
+        // `__make_integer_seq<args>` while dependent: as Clang, a global class template of that
+        // name, the name and the whole candidates (docs/EXTENSIONS.md).
+        if (auto s = find(full_key(bare))) return qualify(qualifiers, *s, q);
+        auto d = in_.types.get<ast::TBuiltinSpec>(in_.types.canon(bare));
+        constexpr std::uint64_t name_key = (std::uint64_t{3} << 32) | 0;
+        std::string n;
+        if (auto s = find(name_key)) {
+          n = *s;
+        } else {
+          n = source_name("__make_integer_seq");
+          candidates_.push_back(name_key);
+        }
+        auto a = template_args(in_.seqs.elements(d.args));
+        if (!a) return a;
+        inner = n + *a;
+        candidates_.push_back(full_key(bare));
       } else if (in_.types.is<ast::TPackExpansion>(in_.types.canon(bare))) {
         // A pack expansion `Dp <type>`, a substitution candidate (§5.1.5).
         if (auto s = find(full_key(bare))) return qualify(qualifiers, *s, q);
@@ -307,6 +342,8 @@ class Mangler {
         return out + "E";
       }
       if (a.kind == ast::TemplateArgKind::type) return type(a.type);
+      // A template: its <name>, the name a candidate (§5.1.5.7); while dependent, its parameter.
+      if (a.kind == ast::TemplateArgKind::template_) return a.templ != ast::EntityId::none ? template_entity_name(a.templ) : type(a.type);
       // A non-type pack expansion: `sp` and its pattern, an <expression> (§5.1.6).
       if (in_.values.is<ast::VDepExpansion>(a.value)) {
         ast::ConstId pat = in_.values.get<ast::VDepExpansion>(a.value).pattern;
@@ -335,6 +372,83 @@ class Mangler {
       out += std::format("L{}{}{}E", *code, neg ? "n" : "", mag);
     }
     return out;
+  }
+
+  // A class or alias template as a template argument: its <source-name>, in a namespace or class a
+  // <nested-name>; keyed as a specialization's template-name is (§5.1.5.7, §5.1.10).
+  std::expected<std::string, std::string> template_entity_name(ast::EntityId t) {
+    std::uint64_t key = (std::uint64_t{1} << 32) | std::to_underlying(t);
+    if (auto s = find(key)) return *s;
+    ClassName n = classes_ ? classes_(t) : ClassName{};
+    if (n.name.empty()) return std::unexpected("a template whose name is unknown");
+    std::string r;
+    if (n.scope != ast::EntityId::none) {
+      auto p = prefix(n.scope);
+      if (!p) return p;
+      r = "N" + *p + source_name(n.name) + "E";
+    } else {
+      r = source_name(n.name);
+    }
+    candidates_.push_back(key);
+    return r;
+  }
+  // Whether a type names a template parameter.
+  bool dependent(ast::QualType q) {
+    ast::QualType c = in_.types.canon(ast::without_cv(in_.canonical(q)));
+    if (in_.types.is<ast::TTemplateParam>(c) || in_.types.is<ast::TDepName>(c) || in_.types.is<ast::TPackExpansion>(c) ||
+        in_.types.is<ast::TTransform>(c) || in_.types.is<ast::TDepSpec>(c) || in_.types.is<ast::TBuiltinSpec>(c))
+      return true;
+    if (in_.types.is<ast::TPointer>(c)) return dependent(in_.types.get<ast::TPointer>(c).pointee);
+    if (in_.types.is<ast::TLRef>(c)) return dependent(in_.types.get<ast::TLRef>(c).referee);
+    if (in_.types.is<ast::TRRef>(c)) return dependent(in_.types.get<ast::TRRef>(c).referee);
+    if (in_.types.is<ast::TArray>(c)) return dependent(in_.types.get<ast::TArray>(c).elem);
+    return false;
+  }
+  // Clang's <template-param-decl> for parameter `p` (an extension beyond the published ABI):
+  // `Ty`, `Tn <type>`, `Tt <decl>* E`, `Tp <decl>` for a pack.
+  std::expected<std::string, std::string> param_decl(const ast::TemplateParamSema& p) {
+    std::string r = p.pack ? "Tp" : "";
+    if (p.kind == ast::TemplateArgKind::type) return r + "Ty";
+    if (p.kind == ast::TemplateArgKind::value) {
+      auto t = type(p.type);
+      if (!t) return t;
+      return r + "Tn" + *t;
+    }
+    r += "Tt";
+    for (const ast::TemplateParamSema& q : in_.seqs.elements(p.params)) {
+      auto d = param_decl(q);
+      if (!d) return d;
+      r += *d;
+    }
+    return r + "E";
+  }
+  // A function template specialization's own <template-args>, with Clang's prefixes: `Tn <type>`
+  // before a value whose parameter's type is dependent, `Tt <decl>* E` before a template whose head
+  // is not the parameter's ([temp.arg.template]).
+  std::expected<std::string, std::string> own_template_args(std::span<const ast::TemplateArg> args,
+                                                            std::span<const ast::TemplateParamSema> params,
+                                                            const std::vector<std::uint8_t>& same_heads) {
+    std::string out = "I";
+    for (std::size_t i = 0; i < args.size(); ++i) {
+      const ast::TemplateArg& a = args[i];
+      if (i < params.size()) {
+        const ast::TemplateParamSema& p = params[i];
+        if (p.kind == ast::TemplateArgKind::value && dependent(p.type)) {
+          auto t = type(p.type);
+          if (!t) return t;
+          out += "Tn" + *t;
+        } else if (p.kind == ast::TemplateArgKind::template_ && !p.pack && a.templ != ast::EntityId::none &&
+                   !(i < same_heads.size() && same_heads[i])) {
+          auto d = param_decl(p);
+          if (!d) return d;
+          out += *d;
+        }
+      }
+      auto m = template_arg(a);
+      if (!m) return m;
+      out += *m;
+    }
+    return out + "E";
   }
 
   // A function template's name before its <template-args>: an <unscoped-template-name>, or in a
@@ -469,7 +583,7 @@ std::expected<std::string, std::string> mangled_specialization(const ast::Intern
   Mangler m(in, classes);
   auto n = m.template_name(name, scope);
   if (!n) return n;
-  auto args = m.template_args(spec.args);
+  auto args = spec.params.empty() ? m.template_args(spec.args) : m.own_template_args(spec.args, spec.params, spec.same_heads);
   if (!args) return args;
   // A variable template specialization: its name and arguments, no type (§5.1.2).
   if (!in.types.is<ast::TFunction>(c)) return scope != ast::EntityId::none ? std::format("_ZN{}{}E", *n, *args) : "_Z" + *n + *args;
