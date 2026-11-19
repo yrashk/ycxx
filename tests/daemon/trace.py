@@ -103,10 +103,10 @@ def main(ycxx):
         log = []
         threading.Thread(target=lambda: log.extend(iter(wp.stderr.readline, '')), daemon=True).start()
 
-        def wait_for(what, timeout=60):
+        def wait_for(what, times=1, timeout=60):
             deadline = time.monotonic() + timeout
             while time.monotonic() < deadline:
-                if sum(what in l for l in log) > 0:
+                if sum(what in l for l in list(log)) >= times:
                     return True
                 time.sleep(0.1)
             return False
@@ -117,7 +117,7 @@ def main(ycxx):
         check(not any('── build 2' in l for l in log), 'a file no build read starts no build')
         (scope / 'k.h').write_text('inline int k() { return 0; }\n')
         check(wait_for('── build 2'), f'a header the build read starts a build: {"".join(log)[-400:]}')
-        check(wait_for('trace: ') and sum('trace: ' in l for l in log) >= 2, 'the rebuild is traced')
+        check(wait_for('trace: ', times=2), 'the rebuild is traced')
         second = ''.join(log[next(i for i, l in enumerate(log) if '── build 2' in l):])
         check('Lower(k) executed' in second or 'FunctionIr(k) executed' in second, f'k is built again: {second[:600]}')
         wp.kill()
