@@ -931,8 +931,10 @@ public:
   // The template arguments of the function template `tmpl` for a call with `args`, after the
   // explicitly specified `explicit_args` ([temp.arg.explicit]); none when deduction fails
   // ([temp.deduct.general]).
+  // `defaults` are its parameters' default arguments, by position ([dcl.fct.default]).
   std::optional<std::vector<TemplateArg>> deduce_call(const ast::DeclSema& tmpl, std::span<const ArgShape> args,
-                                                       std::span<const TemplateArg> explicit_args) {
+                                                       std::span<const TemplateArg> explicit_args,
+                                                       std::span<const ast::NodeId> defaults = {}) {
     std::vector<ast::TemplateParamSema> params = w_->ins.seqs.elements(tmpl.template_params);
     if (params.empty()) return std::nullopt;
     Deducing deducing(this, params);
@@ -951,11 +953,8 @@ public:
     // an argument take part).
     // Before a trailing pack, the defaulted parameters just before it.
     std::size_t defaulted = 0;
-    {
-      std::vector<ast::ParamSema> ps = w_->ins.seqs.elements(tmpl.params);
-      const std::size_t last = std::min(fixed, ps.size());
-      while (defaulted < last && ps[last - 1 - defaulted].default_arg != ast::NodeId::none) ++defaulted;
-    }
+    const std::size_t last = std::min(fixed, defaults.size());
+    while (defaulted < last && defaults[last - 1 - defaulted] != ast::NodeId::none) ++defaulted;
     const std::size_t least = fixed - defaulted;  // with no pack, `fixed` is every parameter
     if (args.size() < least || (args.size() > n && !trailing && !f.variadic)) return std::nullopt;
     // The explicitly specified arguments are substituted first ([temp.deduct.general]/2); packs

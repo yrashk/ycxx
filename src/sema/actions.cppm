@@ -2575,7 +2575,7 @@ public:
       if (!tmpl) continue;
       const ast::DeclSema& td = patterns.emplace_back(*tmpl);
       Templates t = templates();
-      auto targs = t.deduce_call(td, shapes, explicit_args);
+      auto targs = t.deduce_call(td, shapes, explicit_args, c->defaults);
       if (!targs) continue;
       if (td.constraints != ConstId::none) {
         std::vector<ast::TemplateParamSema> ps = ins().seqs.elements(td.template_params);
@@ -2585,7 +2585,7 @@ public:
       }
       auto st = t.specialization_type(td, *targs);
       if (!st) continue;
-      cands.push_back({specialization(td, *targs, *st), *st, c->is_static, c->is_deleted, &td, found_defaults(td)});
+      cands.push_back({specialization(td, *targs, *st), *st, c->is_static, c->is_deleted, &td, c->defaults});
       recs.push_back(c);
     }
     NameId name = bound.cands.front()->name;
@@ -2919,13 +2919,16 @@ public:
         if (!tmpl) continue;
         const ast::DeclSema& td = patterns.emplace_back(*tmpl);
         Templates t = templates();
-        auto targs = t.deduce_call(td, shapes, {});
+        auto targs = t.deduce_call(td, shapes, {}, m.defaults);
         if (!targs) continue;
         auto st = t.specialization_type(td, *targs);
-        if (!st || (copy_init && types().rec(*st).params.size() != 1)) continue;
+        if (!st) continue;
+        Candidate k{EntityId::none, *st, true, m.is_deleted, &td, m.defaults};
+        if (copy_init && (types().rec(*st).params.empty() || k.required(types().rec(*st).params.size()) > 1)) continue;
         // [class.copy.ctor]/5: never `S(S)`, a constructor taking its own class by value.
         if (TypeRec sr = types().rec(*st); sr.params.size() == 1 && Types::unqualified(types().canonical(sr.params[0])) == ut) continue;
-        cands.push_back({specialization(td, *targs, *st), *st, true, m.is_deleted, &td});
+        k.entity = specialization(td, *targs, *st);
+        cands.push_back(std::move(k));
       } else if (m.is_ctor) {
         TypeRec fr = types().rec(m.type);
         Candidate k{m.entity, m.type, true, m.is_deleted, nullptr, m.defaults};
@@ -4286,7 +4289,7 @@ public:
         // A function template contributes the specialization deduction gives ([temp.over]/1),
         // or nothing when deduction fails ([temp.deduct.general]).
         Templates t = templates();
-        auto targs = t.deduce_call(d, shapes, explicit_args);
+        auto targs = t.deduce_call(d, shapes, explicit_args, found_defaults(d));
         if (!targs) continue;
         // Its associated constraints are satisfied, or it is not viable ([temp.deduct.general]/5,
         // [over.match.viable]/3).
