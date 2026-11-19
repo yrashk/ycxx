@@ -11,7 +11,7 @@
 //   one, `a` shows all again.
 module;
 #include <fcntl.h>
-#include <poll.h>
+#include <sys/select.h>
 #include <sys/ioctl.h>
 #include <termios.h>
 #include <unistd.h>
@@ -90,9 +90,14 @@ class Terminal {
   // One key: a byte, or an escape sequence as one string; empty when `feed` became readable first.
   std::string key(int feed = -1) const {
     if (feed >= 0) {
-      pollfd fds[2] = {{fd_, POLLIN, 0}, {feed, POLLIN, 0}};
-      while (::poll(fds, 2, -1) < 0) {}
-      if (!(fds[0].revents & POLLIN) && fds[1].revents) return {};
+      // select, not poll: macOS's poll does not support devices, and flags the terminal invalid.
+      fd_set in;
+      do {
+        FD_ZERO(&in);
+        FD_SET(fd_, &in);
+        FD_SET(feed, &in);
+      } while (::select(std::max(fd_, feed) + 1, &in, nullptr, nullptr, nullptr) < 0);
+      if (!FD_ISSET(fd_, &in)) return {};
     }
     char c = 0;
     if (::read(fd_, &c, 1) != 1) return "q";

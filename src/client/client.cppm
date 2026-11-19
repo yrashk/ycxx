@@ -102,6 +102,18 @@ std::optional<TraceMode> trace_mode_named(std::string_view a) {
   return std::nullopt;
 }
 
+// `YCXX_TRACE_ENGINE=stream|interactive` (or `1`): the flag for builds whose command lines a
+// build system writes. The flag wins.
+TraceMode trace_mode_from_environment() {
+  const char* e = std::getenv("YCXX_TRACE_ENGINE");
+  const std::string_view v = e ? e : "";
+  if (falsy(v)) return TraceMode::off;
+  if (v == "interactive") return TraceMode::interactive;
+  if (v != "stream" && v != "1" && v != "on")
+    std::println(std::cerr, "ycxx: warning: YCXX_TRACE_ENGINE='{}' is not one of stream, interactive, 0: streaming", v);
+  return TraceMode::stream;
+}
+
 // Where a request's trace goes: printed batch by batch, or gathered for the browser.
 class TraceOut {
  public:
@@ -175,7 +187,7 @@ int cxx(std::span<const std::string_view> args) {
   const char* no = std::getenv("YCXX_NO_DAEMON");
   bool forced_off = no && !falsy(no);
   bool verbose = false;
-  TraceMode trace_mode = TraceMode::off;
+  TraceMode trace_mode = trace_mode_from_environment();
   std::vector<std::string> argv;
   for (std::string_view a : args) {
     if (auto m = trace_mode_named(a)) trace_mode = *m;
@@ -288,6 +300,7 @@ int watch(daemon::Connection& c, bool interactive) {
   }
   const trace::Style style{trace::colors_for(1), true};
   std::println("ycxx: watching the daemon of {} (pid {}); ^C to stop", c.welcome.root, c.welcome.daemon_pid);
+  std::cout.flush();  // a pipe buffers: whoever reads it knows the watch is attached
   std::map<std::uint64_t, trace::Stream> requests;
   std::uint64_t last = 0;
   while (auto b = daemon::next_trace(c)) {
