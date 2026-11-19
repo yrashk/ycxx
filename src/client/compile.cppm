@@ -129,7 +129,7 @@ namespace {
 // What the c++-compatible command line asks for.
 struct Options {
   enum class Stop { link, object, syntax, preprocess } stop = Stop::link;
-  pp::Config pp;  // -I, -isystem, -iquote, -D, -U
+  pp::Config pp;  // include paths, macros and target
   std::optional<std::string> output;
   std::vector<std::string> sources;  // translation units
   std::vector<std::string> objects;  // Mach-O objects, linked as they are
@@ -152,7 +152,13 @@ std::expected<Options, std::string> parse_options(std::span<const std::string_vi
     if (a == "-c") o.stop = Options::Stop::object;
     else if (a == "-fsyntax-only") o.stop = Options::Stop::syntax;
     else if (a == "-E") o.stop = Options::Stop::preprocess;
-    else if (a == "-o") {
+    else if (a == "--target" || a.starts_with("--target=")) {
+      if (a == "--target" && i + 1 == args.size()) return std::unexpected("argument to '--target' is missing");
+      auto triple = a == "--target" ? args[++i] : a.substr(9);
+      const ast::Target* target = ast::target_for_triple(triple);
+      if (!target) return std::unexpected(std::format("unsupported target '{}'", triple));
+      o.pp.target = target;
+    } else if (a == "-o") {
       if (i + 1 == args.size()) return std::unexpected("argument to '-o' is missing");
       o.output = std::string(args[++i]);
     } else if (a.starts_with("-o")) o.output = std::string(a.substr(2));
@@ -168,7 +174,7 @@ std::expected<Options, std::string> parse_options(std::span<const std::string_vi
       // or `apple`, as Apple Clang on arm64 Darwin.
       auto v = a.substr(17);
       if (v == "itanium") o.pp.call_triviality = ast::CallTriviality::itanium;
-      else if (v == "apple" && o.pp.target->apple_calls) o.pp.call_triviality = ast::CallTriviality::apple;
+      else if (v == "apple") o.pp.call_triviality = ast::CallTriviality::apple;
       else return std::unexpected(std::format("invalid value in '{}'", a));
     } else if (a.starts_with("-std=")) {
       // The language is the C++26 working draft (DECISIONS §1.1).
@@ -183,6 +189,10 @@ std::expected<Options, std::string> parse_options(std::span<const std::string_vi
     else if (a.ends_with(".o")) o.objects.emplace_back(a);
     else o.sources.emplace_back(a);
   }
+  if (o.pp.target != &ast::aarch64_darwin && o.stop != Options::Stop::preprocess)
+    return std::unexpected(std::format("target '{}' only supports preprocessing (-E)", o.pp.target->triple));
+  if (o.pp.call_triviality == ast::CallTriviality::apple && !o.pp.target->apple_calls)
+    return std::unexpected("invalid value in '-fclass-call-abi=apple'");
   if (o.sources.empty() && o.objects.empty()) return std::unexpected("no input files");
   if (o.output && o.stop == Options::Stop::object && o.sources.size() > 1)
     return std::unexpected("cannot specify '-o' with '-c' and several input files");
@@ -368,7 +378,7 @@ Request check_command(std::span<const std::string> args, std::string cwd, std::s
 
 std::optional<Request> check_one(const Request& r, std::string_view source) {
   auto opts = parse_options(views(r.argv));
-  if (!opts) return std::nullopt;
+  if (!opts || opts->pp.target != &ast::aarch64_darwin) return std::nullopt;
   auto spelled = std::ranges::find_if(opts->sources, [&](const std::string& s) { return absolute_in(r, s) == source; });
   if (spelled == opts->sources.end()) return std::nullopt;
   Request one{{}, r.cwd, r.env, r.build_time};
@@ -515,7 +525,7 @@ Done run(const Request& r, pp::Host& host, pipeline::Session& session, const Sto
 std::optional<pipeline::FileOffset> definition(const Request& r, pp::Host& host, pipeline::Session& session,
                                                const std::string& file, std::uint32_t offset, Units units) {
   auto opts = parse_options(views(r.argv));
-  if (!opts || opts->sources.empty()) return std::nullopt;
+  if (!opts || opts->pp.target != &ast::aarch64_darwin || opts->sources.empty()) return std::nullopt;
   pp::Config config = pp::with_system_dirs(opts->pp);
   config.view = units.view;
   pp::configure(config, host);

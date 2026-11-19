@@ -202,7 +202,8 @@ What is true of the code today. Work in progress and its owners are tracked in
 - Directives:
   - `#include` in both forms and the macro-replaced form, and `#include_next`;
   - search directories from `-I`, `-isystem` and `-iquote`, then libycxx's headers and the
-    SDK's (`:system`, configured by CMake);
+    target's C library headers (`:system`, configured by CMake). For x86-64 Linux, the SDK's
+    `usr/include/x86_64-linux-gnu` precedes `usr/include` (#252);
   - `#define` and `#undef` with the redefinition check, rescanning and painting
     ([cpp.rescan]);
   - function-like macros (`:unit`'s `invocation`, `substitute`, `paste`): arguments across
@@ -221,13 +222,14 @@ What is true of the code today. Work in progress and its owners are tracked in
 - Predefined macros (`:predefined`, DECISIONS §1.5):
   - `__ycxx__` and its version, `__GNUC__` 4.2.1 (#229), and the draft's macros;
   - a feature-test table, with lexer features only;
-  - the target's macros, generated from `ast::Target` and checked against Clang
-    (`tests/own/pp/predefined-target.pp.cpp`);
+  - the target's macros, generated from `ast::Target` and checked against Clang on AArch64
+    Darwin and x86-64 Linux (`tests/own/pp/predefined-target*.pp.cpp`, #132);
   - `__LINE__`, `__FILE__`, `__COUNTER__`, `__DATE__` and `__TIME__`.
 - `#include <cstdio>` preprocesses until libycxx's `#error` for unknown compilers
   (yrashk/libycxx#17).
 - `ycxx cxx -E` prints what Clang's `-E` would, by Clang's line and spacing rules. `preprocess`
-  is in `tests/features/ycxx.txt`. Diagnostics in included files name their file.
+  is in `tests/features/ycxx.txt`. Diagnostics in included files name their file. Darwin is the
+  default target. `-E --target=x86_64-linux-gnu` (also `x86_64-pc-linux-gnu`) selects Linux.
 - Tests:
   - `tests/own/pp` (by spec-only authors): 103 tests (`-E`, reject and accept), the draft's
     [cpp.scope], [cpp.subst], [cpp.stringize] and [cpp.concat] examples among them;
@@ -1359,8 +1361,9 @@ Fable decided the representation (ast.md §6.6); the Opus session wrote the code
 - The test driver checks warnings where a test has `//! warning` markers (docs/TESTING.md), and
   reads markers in headers a test includes with `<...>` from its `FLAGS` directories.
 - Tests: `tests/own/pp/predefined-gnuc.pp.cpp`, `tests/own/headers/system-warnings.accept.cpp`,
-  `tests/own/headers/stdio-no-warnings.accept.cpp` (`<stdio.h>` with no warning; darwin only
-  until Linux searches glibc's multiarch directory, #252), `tests/own/headers/system-error.reject.cpp`,
+  `tests/own/headers/stdio-no-warnings.accept.cpp` (`<stdio.h>` with no warning on Darwin;
+  glibc still needs a compiler-provided `<stddef.h>` after #252, see #133),
+  `tests/own/headers/system-error.reject.cpp`,
   `tests/own/builtins/va-list.run.cpp`, `tests/own/builtins/unsupported.reject.cpp`, `tests/own/builtins/unknown-probe.accept.cpp`. `<cstdio>`: 25 errors before and after, and no warning
   (was 1). `<cmath>` and `<cstdlib>` gain errors in the SDK's `__GNUC__` inline functions (local
   unions, floating-point operations, `__builtin_fabs*`), which already had thousands.
