@@ -72,6 +72,15 @@ struct FunctionInput {
   // A non-static member function's `this` type ([expr.prim.this]): its implicit object argument,
   // the entry block's first value parameter, before the declared ones (Itanium C++ ABI §3.1).
   std::optional<ast::QualType> this_type{};
+  // Its static locals initialized by code ([stmt.dcl]/3): each one's guard variable (Itanium C++
+  // ABI §3.3.3), and the runtime functions the guarded initialization calls.
+  struct StaticGuard {
+    ast::EntityId variable = ast::EntityId::none;
+    ast::EntityId guard = ast::EntityId::none;
+  };
+  std::span<const StaticGuard> guards{};
+  ast::EntityId guard_acquire = ast::EntityId::none, guard_release = ast::EntityId::none;
+  ast::EntityId atexit = ast::EntityId::none, dso = ast::EntityId::none;
 };
 
 struct FunctionIr {
@@ -340,6 +349,12 @@ class Gen {
       start_lifetime(p);
       slots_[i] = p;
     }
+    // Static locals: their objects are their entities', wherever control enters ([stmt.dcl]/3).
+    for (uint32_t i = params.size(); !fn_.thunk && i < slots_.size(); ++i) {
+      ast::LocalRec rec = in_.seqs.at(fn_.body.locals, i);
+      if (rec.entity != ast::EntityId::none && !facts_.is_reference(rec.type))
+        slots_[i] = Place{pure(ir::Op::global, facts_.pointer_to(rec.type), {}, {word(rec.entity)}), rec.type};
+    }
     // A thunk's locals: those with values are const objects; any other is an object whose
     // lifetime has ended, so evaluating a use of it fails, while naming it unevaluated does not.
     for (uint32_t i = 0; fn_.thunk && i < slots_.size(); ++i) {
@@ -484,6 +499,10 @@ class Gen {
       for (ast::Child c : ast_.children(get<ast::DeclStmt>(a).decls)) {
         At v = child(a, c);
         Position at(*this, v.offset);
+        if (is<ast::StaticVar>(v)) {
+          static_var(v);
+          continue;
+        }
         if (!is<ast::LocalVar>(v)) unsupported(v, "in a declaration statement");
         local_var(v);
       }
@@ -776,11 +795,15 @@ class Gen {
         });
       });
     }
-    if (si.destructor == ast::EntityId::none) return;
+    if (si.destructor != ast::EntityId::none) at_exit(p, si.destructor, si.atexit, si.dso);
+  }
+  // Registers `destructor` to run on the object at `p` at exit with `__cxa_atexit(destructor,
+  // object, &__dso_handle)` ([basic.start.term]).
+  void at_exit(const Place& p, ast::EntityId destructor, ast::EntityId atexit_fn, ast::EntityId dso) {
     ast::QualType vp = facts_.pointer_to(facts_.int_type());  // any object pointer: the callee takes void*
     auto atexit = [&](ValueId object) {
-      ValueId args[] = {pure(ir::Op::func_addr, vp, {}, {word(si.destructor)}), object, pure(ir::Op::global, vp, {}, {word(si.dso)})};
-      call_fn(si.atexit, facts_.int_type(), args, 0);
+      ValueId args[] = {pure(ir::Op::func_addr, vp, {}, {word(destructor)}), object, pure(ir::Op::global, vp, {}, {word(dso)})};
+      call_fn(atexit_fn, facts_.int_type(), args, 0);
     };
     if (cls(p.type) != TypeClass::array) return atexit(p.ptr);
     // An array's elements are each registered, the first first, so that the last is destroyed
@@ -802,6 +825,41 @@ class Gen {
     atexit(pure(ir::Op::ptr_add, facts_.pointer_to(first.type), {first.ptr, i}, {word(ty(first.type))}));
     br(head, {arith(ast::BinaryOp::add, it, i, int_constant(it, 1))});
     enter(done);
+  }
+
+  // [stmt.dcl]/3: a static local's object is its entity's. Unless constant-initialized with
+  // nothing to destroy, it is initialized the first time control passes here, once even with
+  // several threads: `if (__cxa_guard_acquire(&guard)) { init; atexit(destructor); __cxa_guard_release(&guard); }`
+  // (Itanium C++ ABI §3.3.3), the acquire called on every pass.
+  void static_var(At a) {
+    auto s = get<ast::StaticVar>(a);
+    ast::LocalRec rec = in_.seqs.at(fn_.body.locals, s.local);
+    if (s.destructor == ast::EntityId::none && (s.value != ast::ConstId::none || s.init.id == NodeId::none)) return;
+    auto g = std::ranges::find(fn_.guards, rec.entity, &FunctionInput::StaticGuard::variable);
+    if (g == fn_.guards.end() || fn_.guard_acquire == ast::EntityId::none) {
+      // For constant evaluation, which has no guards: passing here is not constant ([expr.const]).
+      emit(ir::Op::unreachable, {}, {}, {}, ir::bit(ir::Flag::not_constexpr));
+      live_ = false;
+      return;
+    }
+    // Keep the address defined at function entry so jumps may bypass this declaration.
+    const Place& p = *slots_[s.local];
+    ast::QualType vp = facts_.pointer_to(facts_.int_type());
+    ValueId guard[] = {pure(ir::Op::global, vp, {}, {word(g->guard)})};
+    ValueId first = *call_fn(fn_.guard_acquire, facts_.int_type(), guard, 0);
+    ValueId taken = pure(ir::Op::icmp, facts_.bool_type(), {first, int_constant(facts_.int_type(), 0)}, {std::to_underlying(ir::Pred::ne)});
+    ir::BlockId init_b = new_block(), join = new_block();
+    cond_br(taken, edge(init_b), edge(join));
+    enter(init_b);
+    if (s.init.id != NodeId::none && s.value == ast::ConstId::none)
+      full_expression([&] {
+        initialize(p, child(a, s.init), false);
+        return 0;
+      });
+    if (s.destructor != ast::EntityId::none) at_exit(p, s.destructor, fn_.atexit, fn_.dso);
+    call_fn(fn_.guard_release, facts_.int_type(), guard, 0, true);
+    br(join);
+    enter(join);
   }
 
   struct Loop {
@@ -1014,6 +1072,7 @@ class Gen {
   // ------------------------------------------------------------------ expressions
 
   ast::ExprInfo info(At a) {
+    if (a.id == NodeId::none) throw Unsupported{"an initializer that failed to be analysed"};
     ast::ExprInfo r{};
     ast::dispatch<ast::Nodes>(ast::kind_of(a.id), [&]<class T>(std::type_identity<T>) {
       if constexpr (requires(T t) { t.info; }) r = ast_.get<T>(a.id).info;

@@ -569,6 +569,11 @@ public:
   // A namespace-scope variable as the interpreter sees it at `item`: its type and, if it is usable
   // in constant expressions, its value.
   std::optional<interp::GlobalVar> global(EntityId v, u32 item) {
+    // A static local: usable in constant expressions when const and constant-initialized
+    // ([expr.const]); reading or writing another is not constant.
+    if (auto s = static_locals_.find(std::to_underlying(v)); s != static_locals_.end())
+      return interp::GlobalVar{s->second.first, s->second.second,
+                               s->second.second.has_value() && sema::Types::is_const(s->second.first)};
     variable_instance(v, item);
     auto d = declaration(v, item);
     if (!d || d->kind != ast::DeclKind::variable) return std::nullopt;
@@ -589,6 +594,7 @@ public:
     u32 end = 0;
     bool braced = false;
   };
+  std::map<u32, std::pair<QualType, std::optional<ConstId>>> static_locals_;  // by entity (`global`)
   void set_dmi(EntityId field, Dmi d) { dmis_[std::to_underlying(field)] = d; }
   // A class's base-clause ([class.derived.general]), recorded when its head is analysed.
   void set_bases(EntityId cls, std::vector<sema::BaseRec> bases) { class_bases_[std::to_underlying(cls)] = std::move(bases); }
@@ -1125,6 +1131,9 @@ public:
       for (const sema::BaseRec& x : b->second) r.push_back(x.cls);
     return r;
   }
+  void static_local(EntityId v, QualType t, std::optional<ConstId> value) override {
+    p_->static_locals_[std::to_underlying(v)] = {t, value};
+  }
   std::optional<ast::DeclSema> earlier_member(ast::NameId name) override {
     const items::Item& it = p_->items().items[item_];
     if (it.parent == items::none || p_->items().items[it.parent].kind != ItemKind::class_def) return std::nullopt;
@@ -1210,6 +1219,7 @@ public:
     p_->use_member(v);
     return !p_->member_failed(v);
   }
+  void static_local(EntityId v, QualType t, std::optional<ConstId> value) override { p_->static_locals_[std::to_underlying(v)] = {t, value}; }
   bool dependent_call(sema::u32 offset) override {
     return p_->dependent_call(item_, offset);
   }
@@ -4105,37 +4115,8 @@ private:
     if (lang == LangLinkage::c) s_.diag(d.name_at, Diag::main_linkage);
   }
 
-  // The constant an analysed initializer gives its object, if it is a constant expression
-  // ([expr.const]): a list-initialized aggregate's elements one by one, each a constant.
   std::optional<ConstId> constant_initializer(Ex e) {
-    if (s_.as<ast::InitList>(e)) {
-      std::vector<ConstId> elems;
-      for (const Ex& sub : s_.list_elements(e)) {
-        auto v = constant_initializer(sub);
-        if (!v) return std::nullopt;
-        elems.push_back(*v);
-      }
-      return s_.world().values.aggregate(e.type(), elems);
-    }
-    if (s_.as<ast::ValueInit>(e) || s_.as<ast::DefaultInit>(e)) return zero_constant(e.type());
-    if (s_.types().is_class(e.type())) return std::nullopt;  // a copy: dynamic initialization
-    return sema::Evaluator(s_, q_).evaluate(e).value;
-  }
-  // The value of a zero-initialized object of type `t` ([dcl.init.general]).
-  std::optional<ConstId> zero_constant(QualType t) {
-    if (s_.is_aggregate(t)) {
-      std::vector<ConstId> elems;
-      for (const sema::Sema::Element& e : s_.elements(t)) {
-        auto v = zero_constant(e.type);
-        if (!v) return std::nullopt;
-        elems.push_back(*v);
-      }
-      return s_.world().values.aggregate(t, elems);
-    }
-    if (s_.types().is_pointer(t)) return s_.world().values.null_pointer(t);
-    if (s_.types().is_integral(t)) return s_.world().values.integer(sema::Types::unqualified(t), 0);
-    if (s_.types().is_standard_floating(t)) return s_.world().values.floating(sema::Types::unqualified(t), 0.0);
-    return std::nullopt;
+    return sema::Evaluator(s_, q_).evaluate_initializer(e).value;
   }
 
   Program* p_;

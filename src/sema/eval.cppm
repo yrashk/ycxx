@@ -107,7 +107,45 @@ public:
     return constant(out.values[0]);
   }
 
+  // An aggregate initializer is constant when each of its elements is constant ([expr.const]).
+  Evaluated evaluate_initializer(Ex e) {
+    if (s_->as<ast::InitList>(e)) {
+      std::vector<ConstId> elements;
+      for (const Ex& element : s_->list_elements(e)) {
+        Evaluated result = evaluate_initializer(element);
+        if (!result.value) return result;
+        elements.push_back(*result.value);
+      }
+      return {s_->world().values.aggregate(e.type(), elements), 0, true};
+    }
+    if (s_->as<ast::ValueInit>(e) || s_->as<ast::DefaultInit>(e)) {
+      if (auto value = zero_constant(e.type())) return {*value, 0, true};
+      return {};
+    }
+    if (s_->types().is_class(e.type())) return {};  // the interpreter cannot return class objects yet (#25)
+    return evaluate(e);
+  }
+
 private:
+  // The value of a zero-initialized object of type `t` ([dcl.init.general]).
+  std::optional<ConstId> zero_constant(QualType t) {
+    Types& types = s_->types();
+    Values& values = s_->world().values;
+    if (s_->is_aggregate(t)) {
+      std::vector<ConstId> elements;
+      for (const Sema::Element& element : s_->elements(t)) {
+        auto value = zero_constant(element.type);
+        if (!value) return std::nullopt;
+        elements.push_back(*value);
+      }
+      return values.aggregate(t, elements);
+    }
+    if (types.is_pointer(t)) return values.null_pointer(t);
+    if (types.is_integral(t)) return values.integer(Types::unqualified(t), 0);
+    if (types.is_standard_floating(t)) return values.floating(Types::unqualified(t), 0.0);
+    return std::nullopt;
+  }
+
   struct Host {
     Questions* q;
     Evaluator* e;
