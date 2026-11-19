@@ -76,6 +76,23 @@ def main():
         run([cc, 'linux_narrow_boundaries.s', 'linux_narrow_boundaries.o', '-o', 'narrow_boundaries'], scope, cold)
         run(['./narrow_boundaries'], scope, cold)
 
+        for name in ('abi.hpp', 'caller.cpp', 'callee.cpp', 'host_variadic.cpp', 'carrier.s'):
+            name = f'linux_bool_{name}'
+            shutil.copyfile(source_dir / name, scope / name)
+        bool_probes = ('-DBOOL417_VARIADIC_PROBE', '-DBOOL417_CARRIER_PROBE')
+        for part in ('caller', 'callee'):
+            source = f'linux_bool_{part}.cpp'
+            compile(target, '-c', *bool_probes, source)
+            run([cc, '-std=c++20', '-O2', '-c', *bool_probes, source,
+                 '-o', f'native_bool_{part}.o'], scope, cold)
+        run([cc, '-std=c++20', '-O2', '-c', 'linux_bool_host_variadic.cpp'], scope, cold)
+        run([cc, '-c', 'linux_bool_carrier.s'], scope, cold)
+        for caller, callee in (('linux_bool_caller.o', 'native_bool_callee.o'),
+                               ('native_bool_caller.o', 'linux_bool_callee.o')):
+            run([cc, caller, callee, 'linux_bool_host_variadic.o', 'linux_bool_carrier.o',
+                 '-o', 'bool_abi'], scope, cold)
+            run(['./bool_abi'], scope, cold)
+
         compile('-c', 'source.cpp', '-o', 'cold-darwin.o')
         try:
             compile(target, '-c', 'source.cpp', '-o', 'warm-first-linux.o', env=daemon)
@@ -90,13 +107,11 @@ def main():
         finally:
             run([ycxx, 'ctl', 'shutdown'], scope, base)
 
-        parameters = 'only 8-, 16-, 32- and 64-bit integer, pointer and reference parameters'
-        results = 'only void, 8-, 16-, 32- and 64-bit integer, pointer and reference results'
+        parameters = 'only bool, 8-, 16-, 32- and 64-bit integer, pointer and reference parameters'
+        results = 'only void, bool, 8-, 16-, 32- and 64-bit integer, pointer and reference results'
         cases = (
             ('double f(double x) { return x; }', results),
             ('long double f(long double x) { return x; }', results),
-            ('int f(bool x) { return x; }', parameters),
-            ('bool f(int x) { return x; }', results),
             ('struct X { int x; }; int f(X x) { return x.x; }', parameters),
             ('struct X { int x; }; int g(X); int f() { return g(X{1}); }',
              f'call: {parameters}'),
@@ -106,7 +121,6 @@ def main():
             ('int f(int (*g)(int, ...)) { return g(1); }', 'call: variadic functions'),
             ('int f(int (*g)(int, ...)) { return g(1, 2); }', 'call: variadic functions'),
             ('int g(double, ...); int f() { return g(1.0); }', f'call: {parameters}'),
-            ('int g(bool, ...); int f() { return g(true); }', f'call: {parameters}'),
             ('double g(int, ...); int f() { return g(1); }', f'call: {results}'),
             ('int g(int, ...); int f() { return g(1, 1.0f); }',
              'call: only 32- and 64-bit integer and pointer ellipsis arguments'),

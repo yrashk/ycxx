@@ -955,7 +955,8 @@ bool linux_ellipsis_scalar(ir::TypeLayout l) {
 }
 
 bool linux_fixed_scalar(ir::TypeLayout l) {
-  return linux_ellipsis_scalar(l) || (l.kind == ir::TypeKind::integer && (l.size == 1 || l.size == 2));
+  return l.kind == ir::TypeKind::boolean || linux_ellipsis_scalar(l) ||
+         (l.kind == ir::TypeKind::integer && (l.size == 1 || l.size == 2));
 }
 
 // Lowering implements the Darwin aggregate calling convention. Check the original signature of
@@ -968,10 +969,10 @@ std::string_view linux_signature_error(const ast::Interners& in, const QueryLayo
   if (f.variadic && !allow_variadic) return "variadic functions are not supported";
   ir::TypeLayout result = layout.type(f.ret);
   if (result.kind != ir::TypeKind::void_ && !linux_fixed_scalar(result))
-    return "only void, 8-, 16-, 32- and 64-bit integer, pointer and reference results are supported";
+    return "only void, bool, 8-, 16-, 32- and 64-bit integer, pointer and reference results are supported";
   for (QualType p : in.seqs.elements(f.params))
     if (!linux_fixed_scalar(layout.type(p)))
-      return "only 8-, 16-, 32- and 64-bit integer, pointer and reference parameters are supported";
+      return "only bool, 8-, 16-, 32- and 64-bit integer, pointer and reference parameters are supported";
   return {};
 }
 
