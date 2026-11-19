@@ -312,7 +312,6 @@ draft/expr/expr.prim.lambda.capture-12.accept.cpp preprocessing directives are n
 draft/expr/expr.prim.lambda.capture-13.accept.cpp preprocessing directives are not supported yet
 draft/expr/expr.prim.lambda.capture-3.reject.cpp errors elsewhere: 'auto' not supported yet
 draft/expr/expr.prim.lambda.capture-4.accept.cpp preprocessing directives are not supported yet
-draft/expr/expr.prim.lambda.capture-5.accept.cpp 'template' not supported yet
 draft/expr/expr.prim.lambda.capture-6.reject.cpp errors elsewhere: 'auto' not supported yet
 draft/expr/expr.prim.lambda.capture-7.reject.cpp errors elsewhere: '=' not supported yet
 draft/expr/expr.prim.lambda.capture-9.accept.cpp '[' is not supported yet

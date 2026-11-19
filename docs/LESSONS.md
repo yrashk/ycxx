@@ -7,6 +7,15 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
 
 ## Orchestration and sessions
 
+- **Don't commit a generated file that every feature PR regenerates.** Under the first §6.9, each
+  feature PR committed the feature map's `probes.tsv` and rendered table. With five slices
+  running, every merge to `main` made the other open PRs conflict in both files, and #358, #352,
+  #364 and #359 each needed an extra merge round and CI run within an hour.
+  - Do: commit only the hand-edited source (here a row in `features.toml`), and let CI generate
+    the rest and check it, publishing the result as an artifact or an issue body. A merge driver
+    cannot regenerate data that needs a build, and `merge=ours` keeps it silently stale.
+  - Rule: DECISIONS §6.9. Learned on #366.
+
 - **A session cannot run on a model above its parent's.** A session asked to run on Fable
   silently started on Opus.
   - Do: run sessions on Opus and reach Fable through Agent subagents with `model: "fable"`.
@@ -92,6 +101,20 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
     passes and `main` has not moved again.
   - Rule: AGENTS.md, "PRs and branches".
   - Learned on #229, 2026-11-19.
+
+- **A new deduction or template mechanism meets the old features in the review.** Both P0s of
+  #334 (`auto`) were interactions: a return in a discarded `if constexpr` branch deduced the
+  type, and `&` of an overload set reached deduction and crashed. The P1s were the same kind
+  (a member of a class template named in its definition, a variable template's dependent
+  initializer).
+  - Do: before the review, run every new deduction through discarded statements, overload
+    sets and their addresses, the current instantiation's members, and a template's definition
+    versus its instantiation, and give each a test.
+  - The same held for lambdas (#280, #281): the P0s and P1s were odr-use of constants, arrays of
+    classes, a plain lambda inside a generic one, and a generic lambda calling a function
+    template. Do: combine the new construct with each neighbouring one it can nest in or call
+    (lambdas in templates and templates in lambdas) before the review.
+  - Learned on #279; confirmed on #280 and #281.
 
 ## Working with Fable subagents
 
