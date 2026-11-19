@@ -12,6 +12,8 @@
   (LESSONS: a long-lived connection's lifetime).
 - `--trace-engine=json`: every stderr line is a JSON object (events with their values, the
   diagnostics and exit status, the summary), for tools and agents.
+- Memory (#274): events carry their bytes in the schema docs/TRACE.md gives, the summary its
+  totals and kinds, the stream a memory line, and `ctl status` the daemon's memory.
 - `ycxx cxx --watch --trace-engine` builds again when a header the build read changes, and only
   then: an unrelated file changes nothing.
 """
@@ -79,7 +81,10 @@ def main(ycxx):
         check('\x1b[' not in first.stderr, 'no colors on a non-terminal')
         check(any(' executed' in l for l in lines(first.stderr)), 'a cold build executes cells')
         check('Build(a.cpp → a)' in first.stderr and 'Lower(square)' in first.stderr, 'keys read as files and functions')
-        check(first.stderr.rstrip().splitlines()[-1].startswith('trace: '), 'the summary line ends the stream')
+        tail = first.stderr.rstrip().splitlines()[-3:]
+        check(len(tail) == 3 and tail[0].startswith('trace: ') and tail[1].startswith('memory: ') and tail[2].startswith('by kind: '),
+              f'the summary ends the stream, with memory and kinds: {tail}')
+        check(any(' alloc ' in l and 'retains ' in l for l in lines(first.stderr)), 'executed cells show what they allocate and retain')
 
         second = cxx('--trace-engine', 'a.cpp', '-o', 'a')
         check(second.returncode == 0, 'the second traced build')
@@ -104,10 +109,36 @@ def main(ycxx):
         check(any(o['kind'] == 'Build' and o['outcome'] in ('reused', 'executed') for o in events), 'the JSON trace has the root')
         check(all({'id', 'parent', 'depth', 'outcome', 'duration_ns', 'worker'} <= o.keys() for o in events), 'each event has its fields')
         check(sum('summary' in o for o in objs) == 1 and sum('exit_status' in o for o in objs) == 1, 'one summary, one exit status')
+        st = ctl('status')
+        fields = dict(l.split(': ', 1) for l in st.stdout.splitlines() if ': ' in l and not l.startswith('retained_by_kind'))
+        check(st.returncode == 0 and all(int(fields.get(f, '-1')) > 0 for f in ('memory_current', 'memory_peak', 'memory_allocated', 'allocations')),
+              f'ctl status has the daemon\'s memory: {st.stdout[-600:]}')
+        check(int(fields.get('memory_retained', '0')) > 0 and int(fields.get('memory_current', '0')) - int(fields.get('memory_retained', '0'))
+              == int(fields.get('memory_unattributed', '-1')), 'retained and unattributed add up to the current bytes')
+        check(any(l.startswith('retained_by_kind: Pp ') for l in st.stdout.splitlines()), f'and what each kind retains: {st.stdout[-600:]}')
         src.write_text(SOURCE.replace('x * x', 'x * x * 3'))
         js2 = cxx('--trace-engine=json', 'a.cpp', '-o', 'a')
         values = [json.loads(l) for l in js2.stderr.splitlines() if '"value"' in l]
         check(any(v['kind'] == 'FunctionIr' and 'mul' in v['value'] for v in values), 'a re-run function shows its IR')
+        # The memory schema (docs/TRACE.md), on a build that re-runs cells.
+        objs = [json.loads(l) for l in js2.stderr.splitlines() if l.strip()]
+        events = [o for o in objs if 'kind' in o]
+        mem_fields = ('alloc_bytes', 'allocs', 'peak_bytes', 'retained_bytes', 'incl_alloc_bytes', 'incl_retained_bytes')
+        check(all(all(isinstance(o.get(f), int) for f in mem_fields) for o in events), 'each event has its memory fields, as integers')
+        check(all(o['incl_alloc_bytes'] >= o['alloc_bytes'] >= 0 and o['allocs'] >= 0 for o in events), 'a subtree allocates at least its root')
+        check(all(o['alloc_bytes'] == 0 for o in events if o['outcome'] == 'reused'), 'a reuse allocates nothing')
+        summary = next((o['summary'] for o in objs if 'summary' in o), {})
+        memory = summary.get('memory', {})
+        check(all(isinstance(memory.get(f), int) for f in ('alloc_bytes', 'allocs', 'retained_bytes', 'process_current_bytes', 'process_peak_bytes')),
+              f'the summary has the build\'s memory: {memory}')
+        check(memory.get('process_peak_bytes', 0) >= memory.get('process_current_bytes', 1) > 0, 'the process peak is at least its current bytes')
+        check(memory.get('alloc_bytes', 0) > 0 and memory.get('alloc_bytes') == sum(o['alloc_bytes'] for o in events),
+              'the summary sums the events\' allocations')
+        kinds = summary.get('kinds', [])
+        check(all({'kind', 'executions', 'alloc_bytes', 'allocs', 'peak_bytes', 'retained_bytes'} <= k.keys() for k in kinds),
+              f'each kind has its fields: {kinds[:2]}')
+        check(sum(k['alloc_bytes'] for k in kinds) == memory.get('alloc_bytes'), 'the kinds add up to the build')
+        check([k['alloc_bytes'] for k in kinds] == sorted((k['alloc_bytes'] for k in kinds), reverse=True), 'most allocated first')
         src.write_text(EDITED)
 
         bad = cxx('--trace-engine=sideways', 'a.cpp')

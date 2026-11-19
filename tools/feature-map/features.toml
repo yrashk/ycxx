@@ -1,0 +1,2617 @@
+# The C++26 feature map's data (tools/feature-map/feature-map, docs/feature-map.md, #282).
+#
+# One [[feature]] per feature a user would name. Fields:
+#   id        stable key (used in counts.tsv and probes.tsv)
+#   name      what a user calls it
+#   group     a [[group]] id
+#   clauses   stable names in the pinned draft (tests/draft/PINS); a clause covers its subclauses
+#   std       the standard it first appeared in (Annex C, the feature-test macro's first value,
+#             cppreference's compiler-support tables); later extensions are their own rows
+#   ftm       its feature-test macro, if any ([cpp.predefined], [version.syn])
+#   detect    a Python regular expression counted over the corpus with comments and literals
+#             blanked ('code'), or over code with literals kept when text = true
+#   core      true: every program uses it; no detector, ranked as the most used
+#   status    done | partial | missing, on main (judged from the probe, tests/own, the draft
+#             examples, STATUS.md and the open issues)
+#   issues    the issues that track what is missing or partial (required unless done)
+#   note      what is missing, in a few words
+#   probe     a whole program that returns 0 when the feature works; `feature-map probe`
+#             builds and runs it with ycxx, and checks it with an oracle first
+
+[[group]]
+id = 'lex'
+name = 'Lexical conventions and literals'
+
+[[group]]
+id = 'cpp'
+name = 'Preprocessor'
+
+[[group]]
+id = 'basic'
+name = 'Types, objects, storage and linkage'
+
+[[group]]
+id = 'expr'
+name = 'Expressions'
+
+[[group]]
+id = 'lambda'
+name = 'Lambdas'
+
+[[group]]
+id = 'stmt'
+name = 'Statements'
+
+[[group]]
+id = 'dcl'
+name = 'Declarations and initialization'
+
+[[group]]
+id = 'attr'
+name = 'Attributes'
+
+[[group]]
+id = 'class'
+name = 'Classes'
+
+[[group]]
+id = 'over'
+name = 'Overloading'
+
+[[group]]
+id = 'temp'
+name = 'Templates'
+
+[[group]]
+id = 'concepts'
+name = 'Concepts'
+
+[[group]]
+id = 'except'
+name = 'Exceptions'
+
+[[group]]
+id = 'coro'
+name = 'Coroutines'
+
+[[group]]
+id = 'module'
+name = 'Modules'
+
+[[group]]
+id = 'const'
+name = 'Constant evaluation'
+
+[[group]]
+id = 'reflect'
+name = 'Reflection and expansion statements'
+
+[[group]]
+id = 'contract'
+name = 'Contracts'
+
+[[group]]
+id = 'lib'
+name = 'Library support the compiler provides'
+
+# --- Lexical conventions and literals ----------------------------------------------------------
+
+[[feature]]
+id = 'lex-core'
+name = 'Tokens, identifiers, keywords, integer, character and string literals'
+group = 'lex'
+clauses = ['lex.separate', 'lex.phases', 'lex.char', 'lex.comment', 'lex.pptoken', 'lex.header', 'lex.ppnumber', 'lex.operators', 'lex.token', 'lex.name', 'lex.key', 'lex.literal*', 'lex.icon', 'lex.ccon', 'lex.string', 'lex.string.uneval', 'lex.bool']
+std = 'C++98'
+core = true
+status = 'done'
+probe = '''
+int main() { const char* s = "a" "b"; char c = '\x41'; return (s[1] == 'b' && c == 'A' && 0x10 == 16 && 010 == 8 && true) ? 0 : 1; }
+'''
+
+[[feature]]
+id = 'lex-digraph'
+name = 'Alternative tokens (and, or, not, <% %>)'
+group = 'lex'
+clauses = ['lex.digraph']
+std = 'C++98'
+detect = '\b(?:and|or|not|bitand|bitor|xor|compl|and_eq|or_eq|xor_eq|not_eq)\b'
+status = 'done'
+probe = '''
+int main() <% bool a = true, b = false; return (a and not b) ? 0 : 1; %>
+'''
+
+[[feature]]
+id = 'lex-long-long'
+name = '`long long`'
+group = 'lex'
+clauses = ['basic.fundamental', 'lex.icon']
+std = 'C++11'
+detect = '\blong\s+long\b|\b\d+[uU]?(?:ll|LL)\b'
+status = 'done'
+probe = '''
+int main() { long long x = 1LL << 40; unsigned long long y = 2ull; return (x > 0 && y == 2) ? 0 : 1; }
+'''
+
+[[feature]]
+id = 'lex-nullptr'
+name = '`nullptr` and `std::nullptr_t`'
+group = 'lex'
+clauses = ['lex.nullptr', 'basic.fundamental', 'conv.ptr']
+std = 'C++11'
+detect = '\bnullptr(?:_t)?\b'
+status = 'partial'
+issues = [199]
+note = '`std::nullptr_t` conversions and casts'
+probe = '''
+int main() { int* p = nullptr; decltype(nullptr) n = nullptr; return (p == nullptr && !n) ? 0 : 1; }
+'''
+
+[[feature]]
+id = 'lex-raw-string'
+name = 'Raw string literals'
+group = 'lex'
+clauses = ['lex.string']
+std = 'C++11'
+ftm = '__cpp_raw_strings'
+detect = '\b(?:u8|u|U|L)?R""'
+status = 'done'
+probe = '''
+int main() { const char* s = R"x(a\b)x"; return (s[1] == '\\' && s[3] == 0) ? 0 : 1; }
+'''
+
+[[feature]]
+id = 'lex-unicode-literals'
+name = 'Unicode literals (`u8`, `u`, `U`) and `char16_t`, `char32_t`'
+group = 'lex'
+clauses = ['lex.string', 'lex.ccon', 'basic.fundamental']
+std = 'C++11'
+ftm = '__cpp_unicode_literals'
+detect = '''\b(?:u8|u|U)R?(?:""|'{2})|\bchar(?:16|32)_t\b'''
+probe = '''
+int main() { const char16_t* s = u"ab"; char32_t c = U'x'; return (s[1] == u'b' && c == 120) ? 0 : 1; }
+'''
+status = 'partial'
+issues = [288]
+note = '`u"…"` and `U"…"` strings'
+
+[[feature]]
+id = 'lex-char8'
+name = '`char8_t`'
+group = 'lex'
+clauses = ['basic.fundamental', 'lex.ccon', 'lex.string']
+std = 'C++20'
+ftm = '__cpp_char8_t'
+detect = '\bchar8_t\b'
+status = 'done'
+probe = '''
+int main() { const char8_t* s = u8"a"; char8_t c = u8'b'; return (s[0] == 97 && c == 98) ? 0 : 1; }
+'''
+
+[[feature]]
+id = 'lex-binary'
+name = 'Binary literals'
+group = 'lex'
+clauses = ['lex.icon']
+std = 'C++14'
+ftm = '__cpp_binary_literals'
+detect = '\b0[bB][01]'
+status = 'done'
+probe = '''
+int main() { return 0b101 == 5 ? 0 : 1; }
+'''
+
+[[feature]]
+id = 'lex-digit-sep'
+name = 'Digit separators'
+group = 'lex'
+clauses = ['lex.icon', 'lex.fcon']
+std = 'C++14'
+detect = '''\b\d[\dA-Fa-fxXbB]*'[\dA-Fa-f]'''
+status = 'done'
+probe = '''
+int main() { return 1'000'000 == 1000000 ? 0 : 1; }
+'''
+
+[[feature]]
+id = 'lex-hex-float'
+name = 'Hexadecimal floating literals'
+group = 'lex'
+clauses = ['lex.fcon']
+std = 'C++17'
+ftm = '__cpp_hex_float'
+detect = '''\b0[xX][\dA-Fa-f']*\.?[\dA-Fa-f']*[pP][+-]?\d'''
+status = 'missing'
+issues = [201]
+note = 'floating values'
+probe = '''
+int main() { double d = 0x1.8p1; return d == 3.0 ? 0 : 1; }
+'''
+
+[[feature]]
+id = 'lex-udl'
+name = 'User-defined literals'
+group = 'lex'
+clauses = ['lex.ext', 'over.literal']
+std = 'C++11'
+ftm = '__cpp_user_defined_literals'
+detect = '''\boperator\s*""\s*\w+|""_\w+|\b\d[\w']*_\w+\b|\b\d+(?:ms|us|ns|min|h|s|sv)\b|""(?:s|sv)\b'''
+status = 'missing'
+probe = '''
+constexpr unsigned long long operator""_k(unsigned long long v) { return v * 1000; }
+int main() { return 2_k == 2000 ? 0 : 1; }
+'''
+issues = [289]
+
+[[feature]]
+id = 'lex-size-t-suffix'
+name = '`z` and `uz` literal suffixes'
+group = 'lex'
+clauses = ['lex.icon']
+std = 'C++23'
+ftm = '__cpp_size_t_suffix'
+detect = '''\b\d[\d']*(?:[uU][zZ]|[zZ][uU]?)\b'''
+status = 'done'
+probe = '''
+int main() { unsigned long n = 3uz; return n == 3 ? 0 : 1; }
+'''
+
+[[feature]]
+id = 'lex-escapes'
+name = 'Named (`\N{…}`) and delimited (`\x{…}`, `\o{…}`, `\u{…}`) escapes'
+group = 'lex'
+clauses = ['lex.charset', 'lex.universal.char', 'lex.ccon']
+std = 'C++23'
+ftm = '__cpp_named_character_escapes'
+text = true
+detect = '\\N\{|\\[xou]\{'
+status = 'done'
+probe = '''
+int main() { char32_t c = U'\N{LATIN SMALL LETTER A}'; char d = '\x{42}'; return (c == 97 && d == 66) ? 0 : 1; }
+'''
+
+[[feature]]
+id = 'lex-unicode-ident'
+name = 'Unicode identifiers (UAX #31) and UTF-8 source'
+group = 'lex'
+clauses = ['lex.name', 'lex.phases']
+std = 'C++23'
+detect = '[^\x00-\x7f]'
+status = 'done'
+probe = '''
+int main() { int café = 1; return café - 1; }
+'''
+
+# --- Preprocessor ---------------------------------------------------------------------------------
+
+[[feature]]
+id = 'cpp-include'
+name = '`#include` and include paths'
+group = 'cpp'
+clauses = ['cpp.pre', 'cpp.include']
+std = 'C++98'
+detect = '(?m)^\s*#\s*include\b'
+status = 'done'
+
+[[feature]]
+id = 'cpp-macros'
+name = 'Object-like and function-like macros, `#` and `##`'
+group = 'cpp'
+clauses = ['cpp.replace', 'cpp.subst', 'cpp.stringize', 'cpp.concat', 'cpp.rescan', 'cpp.scope']
+std = 'C++98'
+detect = '(?m)^\s*#\s*define\b'
+status = 'done'
+probe = '''
+#define CAT(a, b) a##b
+#define STR(x) #x
+int main() { int CAT(x, y) = 0; return STR(q)[0] == 'q' ? xy : 1; }
+'''
+
+[[feature]]
+id = 'cpp-cond'
+name = 'Conditional inclusion (`#if`, `#ifdef`, `defined`)'
+group = 'cpp'
+clauses = ['cpp.cond']
+std = 'C++98'
+detect = '(?m)^\s*#\s*(?:if|ifdef|ifndef|elif)\b'
+status = 'done'
+
+[[feature]]
+id = 'cpp-misc'
+name = '`#line`, `#error`, `#pragma`, the null directive'
+group = 'cpp'
+clauses = ['cpp.line', 'cpp.error', 'cpp.pragma', 'cpp.null']
+std = 'C++98'
+detect = '(?m)^\s*#\s*(?:line|error|pragma)\b'
+status = 'done'
+issues = [172]
+
+[[feature]]
+id = 'cpp-predefined'
+name = 'Predefined macros (`__cplusplus`, `__FILE__`, `__LINE__`, …)'
+group = 'cpp'
+clauses = ['cpp.predefined']
+std = 'C++98'
+detect = '\b__(?:FILE|LINE|DATE|TIME)__\b|\b__cplusplus\b'
+status = 'done'
+probe = '''
+int main() { return (__cplusplus >= 202400L && __LINE__ == 1) ? 0 : 1; }
+'''
+
+[[feature]]
+id = 'cpp-variadic-macros'
+name = 'Variadic macros (`__VA_ARGS__`)'
+group = 'cpp'
+clauses = ['cpp.replace.general']
+std = 'C++11'
+detect = '__VA_ARGS__'
+status = 'done'
+probe = '''
+#define SUM(...) add(__VA_ARGS__)
+int add(int a, int b) { return a + b; }
+int main() { return SUM(1, -1); }
+'''
+
+[[feature]]
+id = 'cpp-pragma-op'
+name = '`_Pragma`'
+group = 'cpp'
+clauses = ['cpp.pragma.op']
+std = 'C++11'
+detect = '\b_Pragma\s*\('
+status = 'done'
+
+[[feature]]
+id = 'cpp-has-include'
+name = '`__has_include`'
+group = 'cpp'
+clauses = ['cpp.cond']
+std = 'C++17'
+detect = '\b__has_include\b'
+status = 'done'
+
+[[feature]]
+id = 'cpp-va-opt'
+name = '`__VA_OPT__`'
+group = 'cpp'
+clauses = ['cpp.subst']
+std = 'C++20'
+detect = '\b__VA_OPT__\b'
+status = 'done'
+probe = '''
+#define F(a, ...) a __VA_OPT__(+ __VA_ARGS__)
+int main() { return F(1, -1) + F(0); }
+'''
+
+[[feature]]
+id = 'cpp-has-cpp-attribute'
+name = '`__has_cpp_attribute` and the feature-test macros'
+group = 'cpp'
+clauses = ['cpp.cond', 'cpp.predefined']
+std = 'C++20'
+detect = '\b__has_cpp_attribute\b|\b__cpp_\w+'
+status = 'done'
+
+[[feature]]
+id = 'cpp-elifdef'
+name = '`#elifdef`, `#elifndef`'
+group = 'cpp'
+clauses = ['cpp.cond']
+std = 'C++23'
+detect = '(?m)^\s*#\s*elifn?def\b'
+status = 'done'
+
+[[feature]]
+id = 'cpp-warning'
+name = '`#warning`'
+group = 'cpp'
+clauses = ['cpp.error']
+std = 'C++23'
+detect = '(?m)^\s*#\s*warning\b'
+status = 'done'
+issues = [172]
+
+[[feature]]
+id = 'cpp-embed'
+name = '`#embed` and `__has_embed`'
+group = 'cpp'
+clauses = ['cpp.embed*']
+std = 'C++26'
+ftm = '__cpp_pp_embed'
+detect = '(?m)^\s*#\s*embed\b|\b__has_embed\b'
+status = 'missing'
+issues = [125]
+probe = '''
+int main() { const unsigned char d[] = {
+#embed __FILE__ limit(3)
+}; return sizeof d == 3 ? 0 : 1; }
+'''
+
+# --- Types, objects, storage and linkage ---------------------------------------------------------
+
+[[feature]]
+id = 'basic-integral'
+name = 'Integer, character and `bool` types, conversions and promotions'
+group = 'basic'
+clauses = ['basic.types', 'basic.types.general', 'basic.fundamental', 'basic.compound', 'basic.type.qualifier', 'conv.rank', 'conv', 'conv.general', 'conv.lval', 'conv.array', 'conv.func', 'conv.rval', 'conv.qual', 'conv.prom', 'conv.integral', 'conv.bool', 'expr.arith.conv']
+std = 'C++98'
+core = true
+status = 'done'
+probe = '''
+int main() { unsigned char c = 255; short s = c; long l = s + 1; bool b = l; return (l == 256 && b && -1 < 0u == false) ? 0 : 1; }
+'''
+
+[[feature]]
+id = 'basic-float'
+name = 'Floating-point types: values, literals, arithmetic, conversions'
+group = 'basic'
+clauses = ['basic.fundamental', 'lex.fcon', 'conv.fpprom', 'conv.double', 'conv.fpint']
+std = 'C++98'
+detect = '\b(?:float|double)\b'
+status = 'missing'
+issues = [201]
+note = 'floating types exist as types only'
+probe = '''
+int main() { double d = 1.5; float f = 2.0f; d = d * f + 0.5; return (int)d == 3 ? 0 : 1; }
+'''
+
+[[feature]]
+id = 'basic-ext-fp'
+name = 'Extended floating-point types (`std::float16_t`, `bfloat16_t`, `f16` suffixes)'
+group = 'basic'
+clauses = ['basic.extended.fp', 'lex.fcon', 'conv.rank']
+std = 'C++23'
+detect = '\b(?:std::)?b?float(?:16|32|64|128)_t\b|\b\d[\d.]*(?:f16|f32|f64|f128|bf16|F16|F32|F64|F128|BF16)\b'
+status = 'missing'
+issues = [201]
+probe = '''
+int main() { decltype(1.0f32) x = 1.5f32; return x > 1 ? 0 : 1; }
+'''
+
+[[feature]]
+id = 'basic-ptr-arr-ref'
+name = 'Pointers, arrays and lvalue references'
+group = 'basic'
+clauses = ['basic.compound', 'dcl.ptr', 'dcl.ref', 'dcl.array', 'conv.ptr', 'expr.sub']
+std = 'C++98'
+core = true
+status = 'done'
+probe = '''
+int main() { int a[3] = {1, 2, 3}; int* p = a + 1; int& r = a[2]; r = *p; return a[2] == 2 ? 0 : 1; }
+'''
+
+[[feature]]
+id = 'basic-fnptr'
+name = 'Pointers to functions'
+group = 'basic'
+clauses = ['dcl.fct', 'conv.func', 'conv.fctptr', 'over.over']
+std = 'C++98'
+detect = '\(\s*\*\s*\w*\s*\)\s*\('
+probe = '''
+int twice(int x) { return 2 * x; }
+int main() { int (*f)(int) = twice; return f(2) == 4 ? 0 : 1; }
+'''
+status = 'partial'
+issues = [24, 196]
+note = 'calls through a pointer'
+
+[[feature]]
+id = 'basic-rvalue-ref'
+name = 'Rvalue references and move semantics'
+group = 'basic'
+clauses = ['dcl.ref', 'dcl.init.ref', 'basic.lval', 'class.copy.ctor']
+std = 'C++11'
+ftm = '__cpp_rvalue_references'
+detect = '\bstd::(?:move|forward)\b|\w&&(?=\s*[\w,)>.])'
+status = 'partial'
+issues = [199, 290]
+note = '`static_cast<T&&>`; `S b(S(1))` is misparsed'
+probe = '''
+struct S { int v; S(int x) : v(x) {} S(S&& o) : v(o.v) { o.v = 0; } };
+int main() { int&& r = 1; S a(1); S b(static_cast<S&&>(a)); return (r == 1 && b.v == 1 && a.v == 0) ? 0 : 1; }
+'''
+
+[[feature]]
+id = 'basic-lookup'
+name = 'Scopes and name lookup (unqualified, qualified, class members)'
+group = 'basic'
+clauses = ['basic.pre', 'basic.def', 'basic.scope*', 'basic.lookup*', 'class.member.lookup', 'basic.lookup.unqual', 'basic.lookup.qual', 'class.qual', 'namespace.qual', 'basic.lookup.elab', 'basic.lookup.udir']
+std = 'C++98'
+core = true
+status = 'done'
+issues = [216]
+
+[[feature]]
+id = 'basic-adl'
+name = 'Argument-dependent lookup'
+group = 'basic'
+clauses = ['basic.lookup.argdep']
+std = 'C++98'
+core = true
+status = 'partial'
+issues = [165]
+note = 'ADL for non-template calls'
+probe = '''
+namespace n { struct S {}; int f(S) { return 0; } }
+int main() { n::S s; return f(s); }
+'''
+
+[[feature]]
+id = 'basic-linkage'
+name = 'Linkage, the one-definition rule, inline functions'
+group = 'basic'
+clauses = ['basic.link', 'basic.def.odr', 'dcl.inline']
+std = 'C++98'
+core = true
+status = 'partial'
+issues = [124, 193]
+note = 'weak definitions for inline functions; internal-linkage mangling'
+
+[[feature]]
+id = 'basic-inline-vars'
+name = 'Inline variables'
+group = 'basic'
+clauses = ['dcl.inline']
+std = 'C++17'
+ftm = '__cpp_inline_variables'
+detect = '\binline\s+(?:static\s+)?(?:const(?:expr)?\s+)?[\w:<>,]+\s+\w+\s*(?:=|\{|;)|\bstatic\s+(?:constexpr\s+)?inline\s+(?!\w+\s*\()'
+status = 'partial'
+issues = [124]
+probe = '''
+inline int counter = 41;
+struct S { static inline int n = 1; };
+int main() { return counter + S::n == 42 ? 0 : 1; }
+'''
+
+[[feature]]
+id = 'basic-object-lifetime'
+name = 'Object lifetime, temporaries and lifetime extension'
+group = 'basic'
+clauses = ['basic.memobj', 'intro.memory', 'intro.object', 'basic.align', 'basic.life', 'basic.stc*', 'basic.stc.auto', 'basic.stc.static', 'class.temporary']
+std = 'C++98'
+core = true
+status = 'partial'
+issues = [157]
+note = 'temporaries in some contexts'
+probe = '''
+int n = 0;
+struct T { int v; T(int x) : v(x) {} ~T() { ++n; } };
+int main() { { const T& r = T(3); if (n != 0 || r.v != 3) return 1; } return n == 1 ? 0 : 1; }
+'''
+
+[[feature]]
+id = 'basic-elision'
+name = 'Copy elision: guaranteed elision and implicit move'
+group = 'basic'
+clauses = ['class.copy.elision', 'dcl.init.general', 'stmt.return']
+std = 'C++17'
+ftm = '__cpp_guaranteed_copy_elision'
+status = 'done'
+probe = '''
+struct N { int v; N(int x) : v(x) {} N(const N&) = delete; N(N&&) = delete; };
+N make() { return N(7); }
+int main() { N n = make(); return n.v == 7 ? 0 : 1; }
+'''
+
+[[feature]]
+id = 'basic-static-local'
+name = 'Block-scope static variables (thread-safe initialization)'
+group = 'basic'
+clauses = ['stmt.dcl', 'basic.stc.static']
+std = 'C++98'
+ftm = '__cpp_threadsafe_static_init'
+detect = '''(?m)^[ \t]{4,}static\s+(?!_assert|assert|inline\b|void\b|constexpr\b|const\b)[\w:<>]+[\s*&]+\w+\s*(?:=|\{|;)'''
+status = 'missing'
+probe = '''
+int calls = 0;
+int init() { return ++calls; }
+int get() { static int v = init(); return v; }
+int main() { get(); return (get() == 1 && calls == 1) ? 0 : 1; }
+'''
+issues = [291]
+
+[[feature]]
+id = 'basic-dynamic-init'
+name = 'Dynamic initialization and destruction of namespace-scope variables'
+group = 'basic'
+clauses = ['basic.start', 'basic.start.main', 'basic.start.static', 'basic.start.dynamic', 'basic.start.term']
+std = 'C++98'
+core = true
+status = 'missing'
+issues = [94]
+probe = '''
+int f() { return 42; }
+int g = f();
+int main() { return g == 42 ? 0 : 1; }
+'''
+
+[[feature]]
+id = 'basic-thread-local'
+name = '`thread_local` variables'
+group = 'basic'
+clauses = ['basic.stc.thread', 'dcl.stc']
+std = 'C++11'
+detect = '\bthread_local\b'
+status = 'missing'
+probe = '''
+thread_local int t = 3;
+int main() { return t == 3 ? 0 : 1; }
+'''
+issues = [292, 73]
+
+[[feature]]
+id = 'basic-new-delete'
+name = '`new` and `delete` expressions, placement new, replaceable allocation functions'
+group = 'basic'
+clauses = ['expr.new', 'expr.delete', 'basic.stc.dynamic*', 'dcl.fct.def.replace']
+std = 'C++98'
+detect = '\bnew\s+[\w:(]|\bdelete\s*(?:\[\s*\])?\s*[\w(*]'
+status = 'missing'
+probe = '''
+struct S { int v; S(int x) : v(x) {} };
+int main() { S* p = new S(5); int r = p->v; delete p; int* a = new int[3]; delete[] a; return r == 5 ? 0 : 1; }
+'''
+issues = [293]
+
+[[feature]]
+id = 'basic-aligned-new'
+name = 'Allocation of over-aligned types'
+group = 'basic'
+clauses = ['basic.stc.dynamic.allocation', 'expr.new']
+std = 'C++17'
+ftm = '__cpp_aligned_new'
+detect = '\balign_val_t\b'
+status = 'missing'
+probe = '''
+struct alignas(64) A { char c; };
+int main() { A* a = new A; bool ok = (reinterpret_cast<unsigned long>(a) % 64) == 0; delete a; return ok ? 0 : 1; }
+'''
+issues = [293, 303]
+
+[[feature]]
+id = 'basic-sized-delete'
+name = 'Sized deallocation'
+group = 'basic'
+clauses = ['basic.stc.dynamic.deallocation']
+std = 'C++14'
+ftm = '__cpp_sized_deallocation'
+detect = '\boperator\s+delete\s*(?:\[\s*\])?\s*\([^)]*,\s*(?:std::)?size_t'
+status = 'missing'
+issues = [293]
+
+[[feature]]
+id = 'basic-destroying-delete'
+name = 'Destroying `operator delete`'
+group = 'basic'
+clauses = ['expr.delete', 'basic.stc.dynamic.deallocation']
+std = 'C++20'
+ftm = '__cpp_impl_destroying_delete'
+detect = '\bdestroying_delete\b'
+status = 'missing'
+issues = [293]
+
+# --- Expressions -----------------------------------------------------------------------------------
+
+[[feature]]
+id = 'expr-core'
+name = 'Operators, calls, member access, `sizeof`, the conditional and comma operators'
+group = 'expr'
+clauses = ['expr', 'expr.pre', 'expr.prop', 'basic.lval', 'expr.type', 'expr.context', 'expr.prim', 'expr.prim.grammar', 'expr.prim.literal', 'expr.prim.this', 'expr.prim.paren', 'expr.prim.id*', 'expr.compound', 'expr.post', 'expr.post.general', 'expr.call', 'expr.ref', 'expr.post.incr', 'expr.unary', 'expr.unary.general', 'expr.unary.op', 'expr.pre.incr', 'expr.sizeof', 'expr.mul', 'expr.add', 'expr.shift', 'expr.rel', 'expr.eq', 'expr.bit.and', 'expr.xor', 'expr.or', 'expr.log.and', 'expr.log.or', 'expr.cond', 'expr.assign', 'expr.comma', 'intro.execution']
+std = 'C++98'
+core = true
+status = 'done'
+probe = '''
+struct P { int x; };
+int main() { P p{3}; P* q = &p; int a = q->x << 2 | 1; a = (a > 10) ? a % 7 : -a; return (a == 6 && sizeof(int) == 4, a == 6) ? 0 : 1; }
+'''
+
+[[feature]]
+id = 'expr-alignof'
+name = '`alignof`'
+group = 'expr'
+clauses = ['expr.alignof']
+std = 'C++11'
+detect = '\balignof\s*\('
+status = 'done'
+
+[[feature]]
+id = 'expr-casts'
+name = '`static_cast`, `const_cast`, `reinterpret_cast`, C-style and functional casts'
+group = 'expr'
+clauses = ['expr.static.cast', 'expr.reinterpret.cast', 'expr.const.cast', 'expr.cast', 'expr.type.conv']
+std = 'C++98'
+detect = '\b(?:static|const|reinterpret)_cast\s*<'
+status = 'partial'
+issues = [199, 59]
+note = 'casts involving `void*` and `std::nullptr_t`'
+probe = '''
+int main() { long l = 5; int i = static_cast<int>(l); const int* c = &i; int* m = const_cast<int*>(c); char* b = reinterpret_cast<char*>(m); return (i == 5 && (int)l == int(l) && b) ? 0 : 1; }
+'''
+
+[[feature]]
+id = 'expr-rtti'
+name = '`dynamic_cast`, `typeid` and `std::type_info`'
+group = 'expr'
+clauses = ['expr.dynamic.cast', 'expr.typeid']
+std = 'C++98'
+detect = '\b(?:dynamic_cast|typeid)\b'
+status = 'missing'
+probe = '''
+struct B { virtual ~B() {} }; struct D : B {};
+int main() { D d; B* b = &d; return dynamic_cast<D*>(b) == &d ? 0 : 1; }
+'''
+issues = [294]
+
+[[feature]]
+id = 'expr-mptr'
+name = 'Pointers to members: types, `.*` and `->*`'
+group = 'expr'
+clauses = ['dcl.mptr', 'expr.mptr.oper', 'conv.mem']
+std = 'C++98'
+detect = '\w\s*::\s*\*\s*\w|\.\*|->\*'
+status = 'missing'
+issues = [238]
+probe = '''
+struct S { int a; int f() { return a; } };
+int main() { int S::*pm = &S::a; int (S::*pf)() = &S::f; S s{4}; S* p = &s; return (s.*pm == 4 && (p->*pf)() == 4) ? 0 : 1; }
+'''
+
+[[feature]]
+id = 'expr-list-init'
+name = 'List-initialization (braced initializers) and narrowing checks'
+group = 'expr'
+clauses = ['dcl.init.list', 'over.ics.list', 'over.match.list']
+std = 'C++11'
+ftm = '__cpp_initializer_lists'
+detect = '[\w>]\{|=\s*\{|\breturn\s*\{|\(\s*\{|,\s*\{'
+status = 'partial'
+issues = [231]
+note = 'braced arguments to overload sets, templates and member calls'
+probe = '''
+struct P { int x, y; };
+int f(P p) { return p.x + p.y; }
+int main() { int i{1}; P p{2, 3}; return (f({1, -2}) == -1 && i + p.x == 3) ? 0 : 1; }
+'''
+
+[[feature]]
+id = 'expr-spaceship'
+name = 'Three-way comparison (`<=>`) and rewritten comparison candidates'
+group = 'expr'
+clauses = ['expr.spaceship', 'over.match.oper', 'cmp.categories']
+std = 'C++20'
+ftm = '__cpp_impl_three_way_comparison'
+detect = '<=>'
+status = 'missing'
+probe = '''
+#include <compare>
+int main() { auto c = 1 <=> 2; return c < 0 ? 0 : 1; }
+'''
+issues = [295]
+
+[[feature]]
+id = 'expr-auto-cast'
+name = '`auto(x)` and `auto{x}` decay-copy'
+group = 'expr'
+clauses = ['expr.type.conv']
+std = 'C++23'
+ftm = '__cpp_auto_cast'
+detect = '(?<![\w>])auto\s*[({]\s*[\w*&]'
+status = 'missing'
+issues = [286]
+probe = '''
+int main() { int a = 1; auto b = auto(a); return b - 1; }
+'''
+
+[[feature]]
+id = 'expr-multidim-subscript'
+name = 'Multidimensional subscript operator'
+group = 'expr'
+clauses = ['expr.sub', 'over.sub']
+std = 'C++23'
+ftm = '__cpp_multidimensional_subscript'
+detect = '\boperator\s*\[\s*\]\s*\([^()]*,'
+status = 'missing'
+probe = '''
+struct M { int operator[](int i, int j) const { return i * 10 + j; } };
+int main() { M m; return m[1, 2] == 12 ? 0 : 1; }
+'''
+issues = [296]
+
+[[feature]]
+id = 'expr-pack-index'
+name = 'Pack indexing (`Ts...[N]`)'
+group = 'expr'
+clauses = ['expr.prim.pack.index', 'dcl.type.pack.index']
+std = 'C++26'
+ftm = '__cpp_pack_indexing'
+detect = '\.\.\.\s*\['
+status = 'missing'
+probe = '''
+template<class... T> int second(T... t) { return t...[1]; }
+int main() { return second(1, 0, 2); }
+'''
+issues = [297]
+
+# --- Lambdas -----------------------------------------------------------------------------------------
+
+[[feature]]
+id = 'lambda-basic'
+name = 'Lambda expressions, captures and closure types'
+group = 'lambda'
+clauses = ['expr.prim.lambda', 'expr.prim.lambda.general', 'expr.prim.lambda.closure', 'expr.prim.lambda.capture', 'basic.scope.lambda']
+std = 'C++11'
+ftm = '__cpp_lambdas'
+detect = '(?:^|[=(,{;:?!]|\breturn)\s*\[[^\[\]]*\]\s*(?:\(|\{|<|mutable\b|->|constexpr\b|noexcept\b)'
+status = 'missing'
+issues = [280]
+probe = '''
+int main() { int k = 2; int s = 0; [&] { ++s; }(); return ([k](int x) { return x + k; }(1) == 3 && s == 1) ? 0 : 1; }
+'''
+
+[[feature]]
+id = 'lambda-generic'
+name = 'Generic lambdas (`auto` parameters)'
+group = 'lambda'
+clauses = ['expr.prim.lambda.closure']
+std = 'C++14'
+ftm = '__cpp_generic_lambdas'
+detect = '(?:^|[=(,{;:?!]|\breturn)\s*\[[^\[\]]*\]\s*\([^)]*\bauto\b'
+status = 'missing'
+issues = [281]
+probe = '''
+int main() { auto id = [](auto x) { return x; }; return id(0) + id('\0'); }
+'''
+
+[[feature]]
+id = 'lambda-init-capture'
+name = 'Init-captures'
+group = 'lambda'
+clauses = ['expr.prim.lambda.capture']
+std = 'C++14'
+ftm = '__cpp_init_captures'
+detect = '(?:^|[=(,{;:?!]|\breturn)\s*\[[^\[\]]*?&?\b\w+\s*=[^=][^\[\]]*\]\s*[({<m]'
+status = 'missing'
+issues = [280]
+probe = '''
+int main() { auto f = [n = 2] { return n * 2; }; return f() == 4 ? 0 : 1; }
+'''
+
+[[feature]]
+id = 'lambda-constexpr'
+name = 'Constexpr lambdas'
+group = 'lambda'
+clauses = ['expr.prim.lambda.closure', 'dcl.constexpr']
+std = 'C++17'
+detect = '\]\s*\([^)]*\)\s*(?:mutable\s+)?(?:constexpr|consteval)\b'
+status = 'missing'
+issues = [281]
+probe = '''
+int main() { constexpr auto sq = [](int x) { return x * x; }; static_assert(sq(3) == 9); return 0; }
+'''
+
+[[feature]]
+id = 'lambda-capture-this'
+name = 'Capturing `*this`, and `[=, this]`'
+group = 'lambda'
+clauses = ['expr.prim.lambda.capture']
+std = 'C++17'
+ftm = '__cpp_capture_star_this'
+detect = '\[[^\[\]]*\*this[^\[\]]*\]|\[\s*=\s*,\s*this\s*\]'
+status = 'missing'
+issues = [280]
+probe = '''
+struct S { int v = 3; int f() { auto l = [*this] { return v; }; return l(); } };
+int main() { S s; return s.f() == 3 ? 0 : 1; }
+'''
+
+[[feature]]
+id = 'lambda-template'
+name = 'Lambdas with template parameter lists'
+group = 'lambda'
+clauses = ['expr.prim.lambda']
+std = 'C++20'
+detect = '(?:^|[=(,{;:?!]|\breturn)\s*\[[^\[\]]*\]\s*<'
+status = 'missing'
+issues = [281]
+probe = '''
+int main() { auto f = []<class T>(T x) { return sizeof(T) + x; }; return f(0) == sizeof(int) ? 0 : 1; }
+'''
+
+[[feature]]
+id = 'lambda-unevaluated'
+name = 'Lambdas in unevaluated operands; default-constructible captureless lambdas'
+group = 'lambda'
+clauses = ['expr.prim.lambda.closure']
+std = 'C++20'
+detect = '\bdecltype\s*\(\s*\[[^\[\]]*\]'
+status = 'missing'
+issues = [280]
+probe = '''
+using L = decltype([] { return 5; });
+int main() { L l; return l() == 5 ? 0 : 1; }
+'''
+
+[[feature]]
+id = 'lambda-pack-capture'
+name = 'Pack expansions in lambda captures'
+group = 'lambda'
+clauses = ['expr.prim.lambda.capture']
+std = 'C++20'
+ftm = '__cpp_init_captures'
+detect = '(?:^|[=(,{;:?!]|\breturn)\s*\[[^\[\]]*\.\.\.[^\[\]]*\]\s*[({<m]'
+status = 'missing'
+issues = [281]
+probe = '''
+template<class... T> int sum(T... t) { auto f = [...u = t] { return (0 + ... + u); }; return f(); }
+int main() { return sum(1, 2, -3); }
+'''
+
+[[feature]]
+id = 'lambda-static'
+name = 'Static lambdas and static `operator()`'
+group = 'lambda'
+clauses = ['over.call', 'expr.prim.lambda.closure']
+std = 'C++23'
+ftm = '__cpp_static_call_operator'
+detect = '\bstatic\s+[\w:<>&* ]*operator\s*\(\s*\)\s*\(|\]\s*(?:\([^)]*\))?\s*static\b'
+status = 'missing'
+issues = [281]
+probe = '''
+struct F { static int operator()(int x) { return x; } };
+int main() { auto l = [](int x) static { return x; }; return F{}(0) + l(0); }
+'''
+
+# --- Statements ------------------------------------------------------------------------------------
+
+[[feature]]
+id = 'stmt-core'
+name = 'Statements: blocks, `if`, `switch`, loops, `break`, `continue`, `return`, `goto`, labels'
+group = 'stmt'
+clauses = ['stmt', 'stmt.pre', 'stmt.label', 'stmt.expr', 'stmt.block', 'stmt.select', 'stmt.if', 'stmt.switch', 'stmt.iter', 'stmt.while', 'stmt.do', 'stmt.for', 'stmt.jump', 'stmt.break', 'stmt.cont', 'stmt.return', 'stmt.goto', 'stmt.dcl', 'stmt.ambig']
+std = 'C++98'
+core = true
+probe = '''
+int main() { int s = 0; for (int i = 0; i < 5; ++i) { if (i == 3) continue; s += i; } int k = 2; switch (k) { case 2: s += 1; break; default: s = 0; } do { --s; } while (s > 7); if (s != 7) goto bad; return 0; bad: return 1; }
+'''
+status = 'partial'
+issues = [267, 299]
+note = '`switch` on a variable; declarations in conditions'
+
+[[feature]]
+id = 'stmt-range-for'
+name = 'Range-based `for`'
+group = 'stmt'
+clauses = ['stmt.ranged']
+std = 'C++11'
+ftm = '__cpp_range_based_for'
+detect = '\bfor\s*\((?:[^;()]|\([^()]*\))*?[^:]:(?!:)'
+status = 'missing'
+probe = '''
+struct R { int a[3] = {1, 2, 3}; int* begin() { return a; } int* end() { return a + 3; } };
+int main() { int s = 0; int arr[2] = {4, 5}; for (int x : arr) s += x; R r; for (int& x : r) s += x; return s == 15 ? 0 : 1; }
+'''
+issues = [298]
+
+[[feature]]
+id = 'stmt-if-init'
+name = '`if` and `switch` with an initializer'
+group = 'stmt'
+clauses = ['stmt.if', 'stmt.switch', 'stmt.pre']
+std = 'C++17'
+detect = '\b(?:if|switch)\s*(?:constexpr\s*)?\((?:[^;()]|\([^()]*\))*;'
+probe = '''
+int main() { if (int x = 2; x > 1) { switch (int y = x; y) { case 2: return 0; } } return 1; }
+'''
+status = 'missing'
+issues = [299]
+
+[[feature]]
+id = 'stmt-range-for-init'
+name = 'Range-based `for` with an initializer'
+group = 'stmt'
+clauses = ['stmt.ranged']
+std = 'C++20'
+detect = '\bfor\s*\((?:[^;()]|\([^()]*\))*;(?:[^;()]|\([^()]*\))*?[^:]:(?!:)'
+status = 'missing'
+probe = '''
+int main() { int s = 0; for (int a[2] = {1, 2}; int x : a) s += x; return s == 3 ? 0 : 1; }
+'''
+issues = [298]
+
+[[feature]]
+id = 'stmt-cpp23'
+name = 'Labels at the end of compound statements; alias declarations in init-statements'
+group = 'stmt'
+clauses = ['stmt.label', 'stmt.pre']
+std = 'C++23'
+probe = '''
+int main() { int r = 1; { r = 0; goto end; end: } for (using T = int; T i = 0;) {} return r; }
+'''
+status = 'missing'
+issues = [299]
+
+# --- Declarations and initialization -----------------------------------------------------------------
+
+[[feature]]
+id = 'dcl-core'
+name = 'Declarations, declarators, specifiers, `typedef`, cv-qualifiers, initialization'
+group = 'dcl'
+clauses = ['dcl', 'dcl.pre', 'dcl.spec', 'dcl.spec.general', 'dcl.stc', 'dcl.fct.spec', 'dcl.typedef', 'dcl.type', 'dcl.type.general', 'dcl.type.cv', 'dcl.type.simple', 'dcl.type.elab', 'dcl.decl', 'dcl.decl.general', 'dcl.name', 'dcl.ambig.res', 'dcl.meaning', 'dcl.meaning.general', 'dcl.fct', 'dcl.fct.def', 'dcl.fct.def.general', 'dcl.init', 'dcl.init.general', 'dcl.init.string', 'dcl.init.ref']
+std = 'C++98'
+core = true
+status = 'done'
+issues = [179, 180, 222]
+probe = '''
+typedef unsigned long ul; const volatile int cv = 1; char s[] = "ab";
+int main() { ul x = cv; int* const p = nullptr; return (x == 1 && sizeof s == 3 && !p) ? 0 : 1; }
+'''
+
+[[feature]]
+id = 'dcl-default-args'
+name = 'Default arguments'
+group = 'dcl'
+clauses = ['dcl.fct.default']
+std = 'C++98'
+detect = '''\((?:[^();{}]|\([^();{}]*\))*\b\w+\s*=\s*[^=;{}](?:[^();{}]|\([^();{}]*\))*\)\s*(?:const\s*)?(?:noexcept\s*)?[;{]'''
+probe = '''
+int f(int a, int b = 2) { return a + b; }
+int main() { return f(1) == 3 ? 0 : 1; }
+'''
+status = 'missing'
+issues = [300]
+
+[[feature]]
+id = 'dcl-variadic-fn'
+name = 'C variadic functions (`...`, `va_list`)'
+group = 'dcl'
+clauses = ['dcl.fct', 'expr.call', 'over.ics.ellipsis']
+std = 'C++98'
+detect = ',\s*\.\.\.\s*\)|\bva_(?:start|arg|list)\b'
+status = 'partial'
+issues = [196]
+note = 'definitions (`va_start`), floating arguments, calls through pointers'
+probe = '''
+#include <stdarg.h>
+int sum(int n, ...) { va_list ap; va_start(ap, n); int s = 0; for (int i = 0; i < n; ++i) s += va_arg(ap, int); va_end(ap); return s; }
+int main() { return sum(3, 1, 2, -3); }
+'''
+
+[[feature]]
+id = 'dcl-aggregate'
+name = 'Aggregate initialization of arrays and classes'
+group = 'dcl'
+clauses = ['dcl.init.aggr']
+std = 'C++98'
+detect = '=\s*\{'
+status = 'partial'
+issues = [111]
+probe = '''
+struct P { int x; int y[2]; };
+int main() { P p = {1, {2, 3}}; int a[] = {4, 5}; int m[2][2] = {{1, 0}, {0, 1}}; return (p.y[1] + a[1] + m[1][1] == 9) ? 0 : 1; }
+'''
+
+[[feature]]
+id = 'dcl-aggregate-ext'
+name = 'Aggregates with base classes; parenthesized aggregate initialization'
+group = 'dcl'
+clauses = ['dcl.init.aggr', 'dcl.init.general']
+std = 'C++17'
+ftm = '__cpp_aggregate_bases'
+status = 'missing'
+probe = '''
+struct B { int b; }; struct D : B { int d; }; struct P { int x, y; };
+int main() { D d{{1}, 2}; P p(3, 4); return (d.b + d.d + p.x + p.y == 10) ? 0 : 1; }
+'''
+issues = [301]
+
+[[feature]]
+id = 'dcl-designated'
+name = 'Designated initializers'
+group = 'dcl'
+clauses = ['dcl.init.aggr', 'dcl.init.list']
+std = 'C++20'
+ftm = '__cpp_designated_initializers'
+detect = '[{,]\s*\.\w+\s*='
+status = 'done'
+probe = '''
+struct P { int x, y; };
+int main() { P p{.x = 1, .y = 2}; return p.y - 2 * p.x; }
+'''
+
+[[feature]]
+id = 'dcl-auto'
+name = '`auto` variables'
+group = 'dcl'
+clauses = ['dcl.spec.auto', 'dcl.spec.auto.general', 'dcl.type.auto.deduct']
+std = 'C++11'
+ftm = '__cpp_decltype'
+detect = '\bauto\b'
+status = 'partial'
+note = '`auto x = {…}` and `auto x(e)` at namespace scope are not yet'
+issues = [286]
+probe = '''
+int main() { auto x = 1; const auto& r = x; auto* p = &x; return x + r + *p - 3; }
+'''
+
+[[feature]]
+id = 'dcl-decltype'
+name = '`decltype`'
+group = 'dcl'
+clauses = ['dcl.type.decltype']
+std = 'C++11'
+ftm = '__cpp_decltype'
+detect = '\bdecltype\s*\((?!\s*auto\s*\))'
+status = 'done'
+probe = '''
+int main() { int i = 0; decltype(i) j = 1; decltype((i)) r = i; r = j; return i - 1; }
+'''
+
+[[feature]]
+id = 'dcl-trailing-return'
+name = 'Trailing return types'
+group = 'dcl'
+clauses = ['dcl.fct']
+std = 'C++11'
+detect = '\bauto\s+(?:[\w:]+::)?~?\w+\s*\((?:[^()]|\([^()]*\))*\)\s*(?:const\s*)?(?:&{1,2}\s*)?(?:noexcept\b(?:\([^()]*\))?\s*)?->'
+status = 'done'
+issues = [279]
+probe = '''
+auto f(int x) -> int { return x; }
+int main() { return f(0); }
+'''
+
+[[feature]]
+id = 'dcl-return-deduction'
+name = 'Deduced return types and `decltype(auto)`'
+group = 'dcl'
+clauses = ['dcl.spec.auto', 'dcl.type.auto.deduct', 'dcl.type.decltype']
+std = 'C++14'
+ftm = '__cpp_return_type_deduction'
+detect = '\bdecltype\s*\(\s*auto\s*\)|\bauto\s+(?:[\w:]+::)?\w+\s*\((?:[^()]|\([^()]*\))*\)\s*(?:const\s*)?(?:noexcept\s*)?\{'
+status = 'done'
+issues = [279]
+probe = '''
+auto f(int x) { return x * 2; }
+decltype(auto) g(int& x) { return (x); }
+int main() { int v = 1; g(v) = 0; return f(v); }
+'''
+
+[[feature]]
+id = 'dcl-structured-bindings'
+name = 'Structured bindings'
+group = 'dcl'
+clauses = ['dcl.struct.bind']
+std = 'C++17'
+ftm = '__cpp_structured_bindings'
+detect = '\bauto\s*(?:const\s*)?&{0,2}\s*\['
+status = 'missing'
+issues = [285]
+probe = '''
+struct P { int x, y; };
+int main() { P p{1, 2}; auto [a, b] = p; int arr[2] = {3, 4}; auto& [c, d] = arr; return a + b + c + d - 10; }
+'''
+
+[[feature]]
+id = 'dcl-structured-bindings-26'
+name = 'Structured binding packs, attributes, conditions and `constexpr` bindings'
+group = 'dcl'
+clauses = ['dcl.struct.bind', 'stmt.pre']
+std = 'C++26'
+ftm = '__cpp_structured_bindings'
+detect = '\bauto\s*(?:const\s*)?&{0,2}\s*\[[^\]]*(?:\.\.\.|\[\[)|\b(?:if|while)\s*\(\s*(?:const\s+)?auto\s*&{0,2}\s*\['
+status = 'missing'
+issues = [279]
+probe = '''
+struct P { int x, y; };
+template<class T> int sum(T t) { auto [...xs] = t; return (0 + ... + xs); }
+int main() { return sum(P{1, -1}); }
+'''
+
+[[feature]]
+id = 'dcl-enum'
+name = 'Enumerations'
+group = 'dcl'
+clauses = ['enum', 'dcl.enum']
+std = 'C++98'
+detect = '\benum\b'
+status = 'done'
+issues = [157]
+probe = '''
+enum Color { red, green = 5, blue };
+int main() { Color c = blue; return c == 6 ? 0 : 1; }
+'''
+
+[[feature]]
+id = 'dcl-scoped-enum'
+name = 'Scoped enumerations, fixed underlying types, opaque enum declarations'
+group = 'dcl'
+clauses = ['dcl.enum']
+std = 'C++11'
+detect = '\benum\s+(?:class|struct)\b|\benum\s+\w+\s*:\s*[\w:]'
+probe = '''
+enum class E : unsigned char { a, b };
+enum struct F;
+int main() { E e = E::b; return static_cast<int>(e) == 1 && sizeof(E) == 1 ? 0 : 1; }
+'''
+status = 'partial'
+issues = [157]
+note = 'opaque enum declarations'
+
+[[feature]]
+id = 'dcl-using-enum'
+name = '`using enum`'
+group = 'dcl'
+clauses = ['enum.udecl']
+std = 'C++20'
+ftm = '__cpp_using_enum'
+detect = '\busing\s+enum\b'
+status = 'partial'
+issues = [157]
+note = 'in class scope'
+probe = '''
+enum class E { a, b };
+struct S { using enum E; };
+int main() { using enum E; E e = b; return (e == E::b && S::a == E::a) ? 0 : 1; }
+'''
+
+[[feature]]
+id = 'dcl-namespaces'
+name = 'Namespaces, unnamed namespaces, namespace aliases, using-declarations and -directives'
+group = 'dcl'
+clauses = ['basic.namespace', 'basic.namespace.general', 'namespace.def', 'namespace.def.general', 'namespace.unnamed', 'namespace.alias', 'namespace.udir', 'namespace.udecl', 'basic.scope.namespace']
+std = 'C++98'
+detect = '\bnamespace\b'
+status = 'done'
+issues = [153]
+probe = '''
+namespace a { namespace b { int v = 1; } } namespace { int w = 1; }
+namespace ab = a::b; using ab::v;
+int main() { using namespace a; return v + w - 2 + b::v - 1; }
+'''
+
+[[feature]]
+id = 'dcl-inline-ns'
+name = 'Inline namespaces'
+group = 'dcl'
+clauses = ['namespace.def']
+std = 'C++11'
+detect = '\binline\s+namespace\b'
+status = 'done'
+probe = '''
+namespace lib { inline namespace v1 { int f() { return 0; } } }
+int main() { return lib::f(); }
+'''
+
+[[feature]]
+id = 'dcl-nested-ns'
+name = 'Nested namespace definitions (`namespace a::b`)'
+group = 'dcl'
+clauses = ['namespace.def']
+std = 'C++17'
+detect = '\bnamespace\s+\w+(?:\s*::\s*(?:inline\s+)?\w+)+\s*\{'
+probe = '''
+namespace a::b::inline c { int f() { return 0; } }
+int main() { return a::b::f(); }
+'''
+status = 'missing'
+issues = [153]
+
+[[feature]]
+id = 'dcl-alias'
+name = 'Alias declarations (`using T = …`)'
+group = 'dcl'
+clauses = ['dcl.typedef']
+std = 'C++11'
+ftm = '__cpp_alias_templates'
+detect = '\busing\s+\w+\s*(?:\[\[[^\]]*\]\]\s*)?=(?!=)'
+status = 'done'
+
+[[feature]]
+id = 'dcl-static-assert'
+name = '`static_assert`'
+group = 'dcl'
+clauses = ['dcl.pre']
+std = 'C++11'
+ftm = '__cpp_static_assert'
+detect = '\bstatic_assert\s*\('
+status = 'done'
+issues = [257, 241]
+probe = '''
+static_assert(sizeof(int) == 4, "int"); static_assert(true);
+int main() { return 0; }
+'''
+
+[[feature]]
+id = 'dcl-asm'
+name = '`asm` declarations (inline assembly)'
+group = 'dcl'
+clauses = ['dcl.asm']
+std = 'C++98'
+detect = '\b(?:asm|__asm__|__asm)\s*(?:volatile\s*|__volatile__\s*)?\('
+status = 'missing'
+issues = [190]
+probe = '''
+int main() { asm("nop"); return 0; }
+'''
+
+[[feature]]
+id = 'dcl-linkage-spec'
+name = 'Linkage specifications (`extern "C"`)'
+group = 'dcl'
+clauses = ['dcl.link']
+std = 'C++98'
+detect = '\bextern\s+""'
+status = 'done'
+probe = '''
+extern "C" int abs(int);
+int main() { return abs(-3) == 3 ? 0 : 1; }
+'''
+
+[[feature]]
+id = 'dcl-default-delete'
+name = 'Defaulted and deleted functions'
+group = 'dcl'
+clauses = ['dcl.fct.def.default', 'dcl.fct.def.delete']
+std = 'C++11'
+ftm = '__cpp_deleted_function'
+detect = '=\s*(?:default|delete)\s*[;(]'
+probe = '''
+struct S { S() = default; S(const S&) = delete; int v = 1; };
+void f(double) = delete;
+int main() { S s; return s.v - 1; }
+'''
+status = 'partial'
+issues = [157, 244]
+note = '`= default`'
+
+[[feature]]
+id = 'dcl-delete-reason'
+name = '`= delete("reason")`'
+group = 'dcl'
+clauses = ['dcl.fct.def.delete']
+std = 'C++26'
+ftm = '__cpp_deleted_function'
+detect = '=\s*delete\s*\('
+probe = '''
+void f(double) = delete("use int");
+void f(int) {}
+int main() { f(1); return 0; }
+'''
+status = 'done'
+
+[[feature]]
+id = 'dcl-placeholder-var'
+name = 'The `_` placeholder variable'
+group = 'dcl'
+clauses = ['basic.scope.scope']
+std = 'C++26'
+ftm = '__cpp_placeholder_variables'
+detect = '\b(?:auto|int|[\w:]+)\s+_\s*=|\[\s*_\s*,|,\s*_\s*[,\]]'
+status = 'missing'
+probe = '''
+int f() { return 1; }
+int main() { int _ = f(); int _ = 2; return 0; }
+'''
+issues = [302]
+
+# --- Attributes ------------------------------------------------------------------------------------------
+
+[[feature]]
+id = 'attr-syntax'
+name = 'Attribute syntax (`[[…]]`, `using` prefix, on namespaces and enumerators)'
+group = 'attr'
+clauses = ['dcl.attr', 'dcl.attr.grammar']
+std = 'C++11'
+ftm = '__cpp_attributes'
+detect = '\[\['
+status = 'done'
+issues = [190]
+probe = '''
+namespace [[deprecated]] old {} enum E { a [[maybe_unused]] };
+[[using gnu: unused]] static int x;
+int main() { return 0; }
+'''
+
+[[feature]]
+id = 'attr-alignas'
+name = '`alignas`'
+group = 'attr'
+clauses = ['dcl.align']
+std = 'C++11'
+detect = '\balignas\s*\('
+probe = '''
+struct alignas(16) A { char c; };
+int main() { alignas(8) char b[3]; return (alignof(A) == 16 && sizeof(A) == 16 && sizeof b == 3) ? 0 : 1; }
+'''
+status = 'missing'
+issues = [303]
+
+[[feature]]
+id = 'attr-noreturn'
+name = '`[[noreturn]]`'
+group = 'attr'
+clauses = ['dcl.attr.noreturn']
+std = 'C++11'
+detect = '\bnoreturn\b'
+status = 'done'
+
+[[feature]]
+id = 'attr-deprecated'
+name = '`[[deprecated]]` and its warnings'
+group = 'attr'
+clauses = ['dcl.attr.deprecated']
+std = 'C++14'
+detect = '\[\[[^\]]*\bdeprecated\b'
+status = 'partial'
+note = 'accepted, no warning'
+issues = [305]
+
+[[feature]]
+id = 'attr-nodiscard'
+name = '`[[nodiscard]]` and its warnings'
+group = 'attr'
+clauses = ['dcl.attr.nodiscard']
+std = 'C++17'
+detect = '\bnodiscard\b'
+status = 'partial'
+note = 'accepted, no warning'
+issues = [305]
+
+[[feature]]
+id = 'attr-maybe-unused-fallthrough'
+name = '`[[maybe_unused]]`, `[[fallthrough]]`'
+group = 'attr'
+clauses = ['dcl.attr.unused', 'dcl.attr.fallthrough']
+std = 'C++17'
+detect = '\b(?:maybe_unused|fallthrough)\b'
+status = 'done'
+
+[[feature]]
+id = 'attr-likely'
+name = '`[[likely]]`, `[[unlikely]]`'
+group = 'attr'
+clauses = ['dcl.attr.likelihood']
+std = 'C++20'
+detect = '\[\[\s*(?:un)?likely\s*\]\]'
+status = 'done'
+
+[[feature]]
+id = 'attr-no-unique-address'
+name = '`[[no_unique_address]]` (layout)'
+group = 'attr'
+clauses = ['dcl.attr.nouniqueaddr', 'intro.object']
+std = 'C++20'
+detect = '\bno_unique_address\b'
+status = 'missing'
+probe = '''
+struct E {}; struct S { [[no_unique_address]] E e; int i; };
+int main() { return sizeof(S) == sizeof(int) ? 0 : 1; }
+'''
+issues = [304]
+
+[[feature]]
+id = 'attr-assume'
+name = '`[[assume(expr)]]`'
+group = 'attr'
+clauses = ['dcl.attr.assume']
+std = 'C++23'
+detect = '\[\[\s*assume\s*\('
+status = 'done'
+probe = '''
+int f(int x) { [[assume(x > 0)]]; return x; }
+int main() { return f(1) - 1; }
+'''
+
+[[feature]]
+id = 'attr-indeterminate'
+name = 'Erroneous behaviour and `[[indeterminate]]`'
+group = 'attr'
+clauses = ['dcl.attr.indet', 'basic.indet']
+std = 'C++26'
+detect = '\[\[\s*indeterminate\s*\]\]'
+status = 'partial'
+note = 'the attribute is accepted; uninitialized automatic variables are not given an erroneous value'
+issues = [305]
+
+# --- Classes ---------------------------------------------------------------------------------------------
+
+[[feature]]
+id = 'class-core'
+name = 'Classes: data members, member functions, `this`, static members'
+group = 'class'
+std = 'C++98'
+detect = '\b(?:class|struct)\s+\w+\s*(?:final\s*)?[:{]'
+status = 'done'
+issues = [264, 216]
+clauses = ['class', 'class.pre', 'class.prop', 'class.name', 'class.mem', 'class.mem.general', 'class.mfct', 'class.mfct.non.static', 'class.static', 'class.static.general', 'class.static.mfct', 'class.static.data', 'class.free', 'basic.scope.class', 'basic.types.trivial']
+probe = '''
+struct S { int v; static int n; int get() const { return this->v + n; } static int sn() { return n; } };
+int S::n = 1;
+int main() { S s{2}; return s.get() + S::sn() - 4; }
+'''
+
+[[feature]]
+id = 'class-nested'
+name = 'Nested classes'
+group = 'class'
+clauses = ['class.nest']
+std = 'C++98'
+detect = '''\b(?:class|struct)\s+\w+\s*(?:final\s*)?[:{][^{}]*\b(?:class|struct)\s+\w+\s*[:{]'''
+status = 'missing'
+issues = [306]
+probe = '''
+struct S { struct In { int w; }; In i; };
+int main() { S s{{3}}; S::In j{4}; return s.i.w + j.w - 7; }
+'''
+
+[[feature]]
+id = 'class-ctor-dtor'
+name = 'Constructors, destructors and member initializer lists'
+group = 'class'
+clauses = ['special', 'class.ctor', 'class.ctor.general', 'class.default.ctor', 'class.dtor', 'class.init', 'class.init.general', 'class.expl.init', 'class.base.init', 'class.cdtor']
+std = 'C++98'
+core = true
+status = 'done'
+issues = [157]
+probe = '''
+int d = 0;
+struct S { int a, b; S(int x) : a(x), b(x + 1) {} ~S() { ++d; } };
+int main() { { S s(1); if (s.b != 2) return 1; } return d == 1 ? 0 : 1; }
+'''
+
+[[feature]]
+id = 'class-copy-move'
+name = 'Copy and move constructors and assignment; implicit special members'
+group = 'class'
+clauses = ['class.copy.ctor', 'class.copy.assign', 'special']
+std = 'C++98'
+detect = '\boperator\s*=\s*\('
+status = 'partial'
+issues = [244]
+note = 'user-declared assignment deleting the implicit copy, suppressing the implicit move'
+probe = '''
+struct S { int v; S(int x) : v(x) {} S(const S& o) : v(o.v + 1) {} S& operator=(const S& o) { v = o.v; return *this; } };
+int main() { S a(1); S b(a); S c(5); c = b; return c.v == 2 ? 0 : 1; }
+'''
+
+[[feature]]
+id = 'class-conv'
+name = 'Conversion functions, converting and `explicit` constructors'
+group = 'class'
+clauses = ['class.conv', 'class.conv.general', 'class.conv.ctor', 'class.conv.fct', 'over.ics.user', 'over.match.conv', 'over.match.copy', 'over.match.ref']
+std = 'C++98'
+detect = '\boperator\s+(?!new\b|delete\b|co_await\b)[\w:<>]+[\s*&]*\(\s*\)|\bexplicit\b'
+probe = '''
+struct S { int v; S(int x) : v(x) {} explicit operator bool() const { return v != 0; } operator int() const { return v; } };
+int f(S s) { return s.v; }
+int main() { S s = 3; int i = s; return (s && f(2) == 2 && i == 3) ? 0 : 1; }
+'''
+status = 'missing'
+issues = [157, 219]
+
+[[feature]]
+id = 'class-explicit-bool'
+name = '`explicit(bool)`'
+group = 'class'
+clauses = ['dcl.fct.spec']
+std = 'C++20'
+ftm = '__cpp_conditional_explicit'
+detect = '\bexplicit\s*\('
+status = 'missing'
+probe = '''
+struct S { explicit(false) S(int) {} };
+int main() { S s = 1; (void)s; return 0; }
+'''
+issues = [157]
+
+[[feature]]
+id = 'class-delegating-ctor'
+name = 'Delegating constructors'
+group = 'class'
+clauses = ['class.base.init']
+std = 'C++11'
+ftm = '__cpp_delegating_constructors'
+probe = '''
+struct S { int v; S(int x) : v(x) {} S() : S(4) {} };
+int main() { S s; return s.v - 4; }
+'''
+status = 'missing'
+issues = [157]
+
+[[feature]]
+id = 'class-inheriting-ctor'
+name = 'Inheriting constructors'
+group = 'class'
+clauses = ['namespace.udecl', 'class.inhctor.init']
+std = 'C++11'
+ftm = '__cpp_inheriting_constructors'
+detect = '''\busing\s+(?:typename\s+)?(?:[\w:]+::)?(\w+)(?:<[^;]*>)?::\1\s*;'''
+status = 'missing'
+probe = '''
+struct B { int v; B(int x) : v(x) {} }; struct D : B { using B::B; };
+int main() { D d(3); return d.v - 3; }
+'''
+issues = [308]
+
+[[feature]]
+id = 'class-nsdmi'
+name = 'Default member initializers'
+group = 'class'
+clauses = ['class.mem']
+std = 'C++11'
+ftm = '__cpp_nsdmi'
+status = 'partial'
+issues = [118]
+note = 'initializers that are not constants'
+probe = '''
+int seven() { return 7; }
+struct S { int a = 1; int b{2}; int c = seven(); };
+int main() { S s; return s.a + s.b + s.c - 10; }
+'''
+
+[[feature]]
+id = 'class-bitfields'
+name = 'Bit-fields'
+group = 'class'
+clauses = ['class.bit']
+std = 'C++98'
+detect = '(?m)^\s*(?:unsigned|signed|int|bool|char|short|long|u?int\d+_t|std::u?int\d+_t)(?:\s+(?:int|char|long))?\s+\w+\s*:\s*\d+\s*[;,={]'
+status = 'missing'
+probe = '''
+struct F { unsigned a : 3; unsigned b : 5; };
+int main() { F f{}; f.a = 9; f.b = 31; return (f.a == 1 && f.b == 31 && sizeof(F) == 4) ? 0 : 1; }
+'''
+issues = [307]
+
+[[feature]]
+id = 'class-unions'
+name = 'Unions, anonymous unions, unions with non-trivial members'
+group = 'class'
+clauses = ['class.union', 'class.union.general', 'class.union.anon']
+std = 'C++98'
+detect = '\bunion\b'
+status = 'partial'
+issues = [203]
+probe = '''
+union U { int i; char c; };
+struct S { union { int a; float f; }; };
+int main() { U u; u.i = 0; S s; s.a = 1; return u.c + s.a - 1; }
+'''
+
+[[feature]]
+id = 'class-trivial-union'
+name = 'Trivial unions'
+group = 'class'
+clauses = ['class.union']
+std = 'C++26'
+ftm = '__cpp_trivial_union'
+status = 'missing'
+issues = [203]
+
+[[feature]]
+id = 'class-local'
+name = 'Local classes'
+group = 'class'
+clauses = ['class.local']
+std = 'C++98'
+status = 'missing'
+issues = [117]
+probe = '''
+int main() { struct L { int v; }; L l{0}; return l.v; }
+'''
+
+[[feature]]
+id = 'class-access'
+name = 'Access control (`public`, `private`, `protected`)'
+group = 'class'
+clauses = ['class.access', 'class.access.general', 'class.access.spec', 'class.protected', 'class.paths', 'class.access.nest']
+std = 'C++98'
+detect = '\b(?:public|private|protected)\s*:'
+status = 'done'
+probe = '''
+class C { int p = 1; public: int get() const { return p; } };
+int main() { C c; return c.get() - 1; }
+'''
+
+[[feature]]
+id = 'class-friends'
+name = 'Friends (functions, classes, templates, `friend T;`)'
+group = 'class'
+clauses = ['class.friend', 'dcl.friend', 'temp.friend']
+std = 'C++98'
+detect = '\bfriend\b'
+status = 'partial'
+issues = [259]
+note = 'friend definitions, friends in templates'
+probe = '''
+class C { int p = 2; friend int peek(const C& c) { return c.p; } };
+int main() { C c; return peek(c) - 2; }
+'''
+
+[[feature]]
+id = 'class-variadic-friend'
+name = 'Variadic friends'
+group = 'class'
+clauses = ['class.friend']
+std = 'C++26'
+ftm = '__cpp_variadic_friend'
+detect = '\bfriend\s+[\w:<>]+\s*\.\.\.'
+status = 'missing'
+issues = [259]
+
+[[feature]]
+id = 'class-inheritance'
+name = 'Derived classes: single and multiple inheritance, base conversions'
+group = 'class'
+clauses = ['class.derived', 'class.derived.general', 'class.mi', 'class.access.base']
+std = 'C++98'
+detect = '\b(?:class|struct)\s+\w+(?:\s+final)?\s*:\s*(?!:)'
+status = 'missing'
+probe = '''
+struct A { int a = 1; }; struct B { int b = 2; }; struct D : A, B { int d = 3; };
+int sum(const B& b) { return b.b; }
+int main() { D d; A* pa = &d; return pa->a + sum(d) + d.d - 6; }
+'''
+issues = [308, 136]
+
+[[feature]]
+id = 'class-virtual'
+name = 'Virtual functions, abstract classes, `override` and `final`'
+group = 'class'
+clauses = ['class.virtual', 'class.abstract', 'class.access.virt']
+std = 'C++98'
+detect = '\bvirtual\b|\boverride\b'
+status = 'missing'
+probe = '''
+struct B { virtual int f() = 0; virtual ~B() {} };
+struct D final : B { int f() override { return 0; } };
+int main() { D d; B& b = d; return b.f(); }
+'''
+issues = [309]
+
+[[feature]]
+id = 'class-virtual-base'
+name = 'Virtual base classes'
+group = 'class'
+clauses = ['class.mi']
+std = 'C++98'
+detect = '\bvirtual\s+(?:public|private|protected)\b|\b(?:public|private|protected)\s+virtual\b'
+status = 'missing'
+probe = '''
+struct A { int a = 1; }; struct B : virtual A {}; struct C : virtual A {}; struct D : B, C {};
+int main() { D d; return d.a - 1; }
+'''
+issues = [310]
+
+[[feature]]
+id = 'class-ref-qual'
+name = 'Ref-qualified member functions'
+group = 'class'
+clauses = ['dcl.fct', 'over.match.funcs']
+std = 'C++11'
+ftm = '__cpp_ref_qualifiers'
+detect = '\)\s*(?:const\s*)?&{1,2}\s*(?:noexcept\b|override\b|[;{=])'
+status = 'missing'
+probe = '''
+struct S { int f() & { return 1; } int f() && { return 2; } };
+int main() { S s; return s.f() + S().f() - 3; }
+'''
+issues = [311]
+
+[[feature]]
+id = 'class-deducing-this'
+name = 'Explicit object parameters (deducing `this`)'
+group = 'class'
+clauses = ['dcl.fct', 'expr.prim.this', 'over.match.funcs']
+std = 'C++23'
+ftm = '__cpp_explicit_this_parameter'
+detect = '\(\s*this\s+[\w:]'
+status = 'missing'
+probe = '''
+struct S { int v = 2; int get(this const S& self) { return self.v; } };
+int main() { S s; return s.get() - 2; }
+'''
+issues = [312]
+
+[[feature]]
+id = 'class-defaulted-cmp'
+name = 'Defaulted comparison operators'
+group = 'class'
+clauses = ['class.compare', 'class.compare.default', 'class.eq', 'class.spaceship', 'class.compare.secondary']
+std = 'C++20'
+ftm = '__cpp_impl_three_way_comparison'
+detect = '\boperator\s*(?:==|<=>)\s*\([^)]*\)\s*(?:const\s*)?(?:noexcept\s*)?=\s*default'
+status = 'missing'
+probe = '''
+struct P { int x, y; bool operator==(const P&) const = default; };
+int main() { P a{1, 2}, b{1, 2}; return (a == b && !(a != b)) ? 0 : 1; }
+'''
+issues = [295]
+
+[[feature]]
+id = 'class-cond-trivial'
+name = 'Conditionally trivial special members (constrained destructors)'
+group = 'class'
+clauses = ['class.dtor', 'over.match.best']
+std = 'C++20'
+status = 'missing'
+issues = [234]
+probe = '''
+template<class T> struct W { ~W() requires (sizeof(T) > 4) {} ~W() = default; };
+int main() { W<int> w; (void)w; return 0; }
+'''
+
+[[feature]]
+id = 'class-static-op'
+name = 'Static `operator()` and `operator[]`'
+group = 'class'
+clauses = ['over.call', 'over.sub']
+std = 'C++23'
+ftm = '__cpp_static_call_operator'
+detect = '\bstatic\s+[\w:<>&* ]*operator\s*(?:\(\s*\)|\[\s*\])'
+status = 'missing'
+probe = '''
+struct F { static int operator[](int i) { return i; } };
+int main() { F f; return f[0]; }
+'''
+issues = [296]
+
+# --- Overloading -------------------------------------------------------------------------------------------
+
+[[feature]]
+id = 'over-resolution'
+name = 'Overload resolution, implicit conversion sequences, address of an overload set'
+group = 'over'
+clauses = ['over', 'over.pre', 'over.match', 'over.match.general', 'over.match.funcs*', 'over.match.call*', 'over.call.func', 'over.call.object', 'over.match.ctor', 'over.match.viable', 'over.match.best*', 'over.best.ics*', 'over.ics.scs', 'over.ics.ref', 'over.ics.rank', 'over.over']
+std = 'C++98'
+core = true
+probe = '''
+int f(int) { return 1; } int f(long) { return 2; } int f(const char*) { return 3; }
+int main() { int (*p)(long) = f; return (f(1) == 1 && f(1L) == 2 && f("") == 3 && p(0) == 2) ? 0 : 1; }
+'''
+status = 'partial'
+issues = [313]
+note = 'the address of an overload set'
+
+[[feature]]
+id = 'over-operators'
+name = 'Operator overloading'
+group = 'over'
+clauses = ['over.oper', 'over.oper.general', 'over.unary', 'over.binary*', 'over.assign', 'over.call', 'over.sub', 'over.ref', 'over.inc*', 'over.built', 'over.match.oper']
+std = 'C++98'
+detect = '\boperator\s*(?:[-+*/%^&|~!=<>,]|\(\s*\)|\[\s*\]|->)'
+issues = [219]
+probe = '''
+struct V { int x; V operator+(V o) const { return {x + o.x}; } int operator[](int) const { return x; } V& operator++() { ++x; return *this; } };
+bool operator==(V a, V b) { return a.x == b.x; }
+int main() { V a{1}, b{2}; ++a; return (a + b == V{4} && a[0] == 2) ? 0 : 1; }
+'''
+status = 'partial'
+note = 'member `operator[]`, `operator()`, postfix `++`, conversion functions'
+
+# --- Templates -----------------------------------------------------------------------------------------------
+
+[[feature]]
+id = 'temp-fn'
+name = 'Function templates: deduction, explicit arguments, partial ordering'
+group = 'temp'
+clauses = ['temp', 'temp.pre', 'temp.param', 'temp.names', 'temp.arg', 'temp.arg.general', 'temp.arg.type', 'temp.arg.nontype', 'temp.type', 'temp.decls', 'temp.decls.general', 'temp.fct', 'temp.fct.general', 'temp.over.link', 'temp.func.order', 'temp.fct.spec', 'temp.fct.spec.general', 'temp.arg.explicit', 'temp.deduct*', 'temp.over', 'basic.scope.temp']
+std = 'C++98'
+detect = '\btemplate\s*<'
+status = 'done'
+issues = [209, 210]
+probe = '''
+template<class T> T mx(T a, T b) { return a > b ? a : b; }
+template<class T> int k(T*) { return 1; } template<class T> int k(T) { return 2; }
+int main() { int i = 0; return (mx(1, 2) == 2 && mx<long>(1, 2L) == 2 && k(&i) == 1) ? 0 : 1; }
+'''
+
+[[feature]]
+id = 'temp-class'
+name = 'Class templates and their members'
+group = 'temp'
+clauses = ['temp.class', 'temp.class.general', 'temp.mem.func', 'temp.static', 'temp.mem.enum', 'temp.mem.class']
+std = 'C++98'
+detect = '\btemplate\s*<[^;{]*>\s*(?:class|struct|union)\b'
+status = 'done'
+issues = [256]
+probe = '''
+template<class T, int N> struct A { T v[N]; int size() const { return N; } static const int n = N; };
+int main() { A<int, 3> a{}; return a.size() + A<char, 2>::n - 5; }
+'''
+
+[[feature]]
+id = 'temp-member'
+name = 'Member templates'
+group = 'temp'
+clauses = ['temp.mem']
+std = 'C++98'
+status = 'missing'
+probe = '''
+struct S { template<class T> T get(T t) const { return t; } };
+template<class U> struct W { template<class T> int f(T) { return sizeof(U); } };
+int main() { S s; W<int> w; return s.get(0) + w.f('a') - 4; }
+'''
+issues = [314, 88]
+
+[[feature]]
+id = 'temp-spec'
+name = 'Explicit and partial specialization'
+group = 'temp'
+clauses = ['temp.spec', 'temp.spec.general', 'temp.expl.spec', 'temp.spec.partial', 'temp.spec.partial.general', 'temp.spec.partial.match', 'temp.spec.partial.order', 'temp.spec.partial.member']
+std = 'C++98'
+detect = '\btemplate\s*<\s*>'
+status = 'done'
+issues = [263]
+probe = '''
+template<class T> struct is_ptr { static const bool v = false; };
+template<class T> struct is_ptr<T*> { static const bool v = true; };
+template<> struct is_ptr<void> { static const bool v = true; };
+int main() { return (is_ptr<int*>::v && !is_ptr<int>::v && is_ptr<void>::v) ? 0 : 1; }
+'''
+
+[[feature]]
+id = 'temp-explicit-inst'
+name = 'Explicit instantiation and `extern template`'
+group = 'temp'
+clauses = ['temp.inst', 'temp.explicit']
+std = 'C++98'
+detect = '\btemplate\s+(?:class|struct)\s+[\w:]+\s*<|\bextern\s+template\b'
+status = 'missing'
+probe = '''
+template<class T> struct A { T f() { return T(); } };
+template struct A<int>;
+extern template struct A<long>;
+int main() { A<int> a; return a.f(); }
+'''
+issues = [315]
+
+[[feature]]
+id = 'temp-res'
+name = 'Dependent names, `typename` and `template` keywords, two-phase lookup, SFINAE'
+group = 'temp'
+clauses = ['temp.res', 'temp.res.general', 'temp.local', 'temp.dep', 'temp.dep.general', 'temp.dep.type', 'temp.dep.expr', 'temp.dep.constexpr', 'temp.dep.namespace', 'temp.dep.temp', 'temp.dep.res', 'temp.point', 'temp.dep.candidate']
+std = 'C++98'
+core = true
+status = 'partial'
+issues = [263, 241]
+probe = '''
+template<class T> struct H { using type = int; };
+template<class T> typename H<T>::type g(T) { return 0; }
+template<class T> decltype(T().missing(), 1) h(int) { return 1; }
+template<class T> int h(long) { return 0; }
+int main() { return g(1) + h<int>(0); }
+'''
+note = 'SFINAE on expressions and in partial specializations; `static_assert(false)` in templates'
+
+[[feature]]
+id = 'temp-ttp'
+name = 'Template template parameters'
+group = 'temp'
+clauses = ['temp.arg.template']
+std = 'C++98'
+ftm = '__cpp_template_template_args'
+detect = '\btemplate\s*<[^;{]*\btemplate\s*<'
+issues = [208, 271, 272]
+probe = '''
+template<class T> struct Box { T v; };
+template<template<class> class C> int f() { C<int> c{3}; return c.v; }
+int main() { return f<Box>() - 3; }
+'''
+status = 'done'
+
+[[feature]]
+id = 'temp-variadic'
+name = 'Variadic templates, parameter packs, `sizeof...`, pack expansions in `using`'
+group = 'temp'
+clauses = ['temp.variadic']
+std = 'C++11'
+ftm = '__cpp_variadic_templates'
+detect = '\b(?:typename|class)\s*\.\.\.|\bsizeof\s*\.\.\.'
+status = 'done'
+issues = [210]
+probe = '''
+template<class... T> int count(T...) { return sizeof...(T); }
+int main() { return count(1, 'a', 2L) - 3; }
+'''
+
+[[feature]]
+id = 'temp-alias'
+name = 'Alias templates'
+group = 'temp'
+clauses = ['temp.alias']
+std = 'C++11'
+ftm = '__cpp_alias_templates'
+detect = '\btemplate\s*<[^;{]*>\s*using\s+\w+\s*='
+status = 'done'
+
+[[feature]]
+id = 'temp-var'
+name = 'Variable templates'
+group = 'temp'
+clauses = ['temp.pre', 'temp.static']
+std = 'C++14'
+ftm = '__cpp_variable_templates'
+detect = '\btemplate\s*<[^;{()]*>\s*(?:inline\s+)?constexpr\s+[\w:<>]+\s+\w+\s*(?:=|\{)'
+status = 'done'
+probe = '''
+template<class T> constexpr int size_v = sizeof(T);
+int main() { return size_v<int> - 4; }
+'''
+
+[[feature]]
+id = 'temp-fold'
+name = 'Fold expressions'
+group = 'temp'
+clauses = ['expr.prim.fold']
+std = 'C++17'
+ftm = '__cpp_fold_expressions'
+detect = '\(\s*\.\.\.\s*(?:&&|\|\||[-+*,|&])|(?:&&|\|\||[-+*|&,])\s*\.\.\.\s*\)'
+status = 'done'
+probe = '''
+template<class... T> int sum(T... t) { return (t + ... + 0); }
+int main() { return sum(1, 2, -3); }
+'''
+
+[[feature]]
+id = 'temp-ctad'
+name = 'Class template argument deduction and deduction guides'
+group = 'temp'
+clauses = ['dcl.type.class.deduct', 'over.match.class.deduct', 'temp.deduct.guide']
+std = 'C++17'
+ftm = '__cpp_deduction_guides'
+detect = '\)\s*->\s*[\w:]+\s*<[^;{]*>\s*;'
+status = 'missing'
+probe = '''
+template<class T> struct Box { T v; Box(T x) : v(x) {} };
+template<class T> struct Agg { T v; };
+template<class T> Agg(T) -> Agg<T>;
+int main() { Box b(3); Agg a{4}; return b.v + a.v - 7; }
+'''
+issues = [316]
+
+[[feature]]
+id = 'temp-auto-nttp'
+name = '`auto` non-type template parameters'
+group = 'temp'
+clauses = ['temp.param']
+std = 'C++17'
+ftm = '__cpp_nontype_template_parameter_auto'
+detect = '''\btemplate\s*<[^;{<>]*\bauto\b'''
+status = 'missing'
+issues = [286]
+probe = '''
+template<auto N> int get() { return N; }
+int main() { return get<3>() + get<'a'>() - 100; }
+'''
+
+[[feature]]
+id = 'temp-class-nttp'
+name = 'Class-type and floating-point non-type template parameters'
+group = 'temp'
+clauses = ['temp.param', 'temp.arg.nontype']
+std = 'C++20'
+ftm = '__cpp_nontype_template_args'
+status = 'missing'
+probe = '''
+struct P { int x, y; };
+template<P p> int sum() { return p.x + p.y; }
+int main() { return sum<P{1, -1}>(); }
+'''
+issues = [317]
+
+[[feature]]
+id = 'temp-concept-ttp'
+name = 'Concept and variable-template template parameters'
+group = 'temp'
+clauses = ['temp.param', 'temp.arg.template']
+std = 'C++26'
+ftm = '__cpp_template_parameters'
+status = 'missing'
+issues = [271]
+
+# --- Concepts --------------------------------------------------------------------------------------------------
+
+[[feature]]
+id = 'concepts-def'
+name = 'Concepts and requires-expressions'
+group = 'concepts'
+clauses = ['temp.concept', 'expr.prim.req*', 'temp.constr', 'temp.constr.general', 'temp.constr.constr*', 'temp.constr.op', 'temp.constr.atomic', 'temp.constr.concept', 'temp.constr.normal']
+std = 'C++20'
+ftm = '__cpp_concepts'
+detect = '\bconcept\s+\w+\s*=|\brequires\s*(?:\([^)]*\)\s*)?\{'
+status = 'done'
+issues = [235]
+probe = '''
+template<class T> concept Small = sizeof(T) <= 4 && requires(T t) { t + t; };
+int main() { return (Small<int> && !Small<double>) ? 0 : 1; }
+'''
+
+[[feature]]
+id = 'concepts-constraints'
+name = 'Requires-clauses and type-constraints on templates and members'
+group = 'concepts'
+clauses = ['temp.constr.decl', 'temp.constr.order']
+std = 'C++20'
+ftm = '__cpp_concepts'
+detect = '\brequires\b'
+status = 'partial'
+issues = [234, 236]
+note = 'on class templates, partial specializations and members; constraint mangling'
+probe = '''
+template<class T> concept Int = sizeof(T) == 4;
+template<Int T> int f(T) { return 1; } template<class T> int f(T) { return 2; }
+template<class T> struct S { int g() requires Int<T> { return 0; } };
+int main() { S<int> s; return (f(1) == 1 && f('a') == 2) ? s.g() : 1; }
+'''
+
+[[feature]]
+id = 'concepts-abbreviated'
+name = 'Abbreviated function templates and constrained placeholders (`Concept auto`)'
+group = 'concepts'
+clauses = ['dcl.fct', 'dcl.spec.auto', 'temp.param']
+std = 'C++20'
+detect = '''\b(?!if\b|while\b|for\b|switch\b|return\b|decltype\b|sizeof\b|alignof\b|noexcept\b|requires\b|catch\b)\w+\s*\(\s*(?:const\s+)?(?:[\w:]+\s+)?auto\s*(?:&{1,2}|\*)?\s*(?:\.\.\.\s*)?\w*\s*[,)=]'''
+status = 'missing'
+issues = [286, 234]
+probe = '''
+template<class T> concept Int = sizeof(T) == 4;
+int f(Int auto x) { return x; }
+int main() { Int auto y = 0; return f(y); }
+'''
+
+[[feature]]
+id = 'concepts-fold'
+name = 'Fold-expanded constraints'
+group = 'concepts'
+clauses = ['temp.constr.fold']
+std = 'C++26'
+status = 'missing'
+issues = [234]
+
+# --- Exceptions ---------------------------------------------------------------------------------------------
+
+[[feature]]
+id = 'except-core'
+name = '`throw`, `try`/`catch`, function-try-blocks, stack unwinding'
+group = 'except'
+clauses = ['except', 'except.pre', 'except.throw', 'except.ctor', 'except.handle', 'except.special', 'except.special.general', 'except.terminate', 'expr.throw']
+std = 'C++98'
+detect = '\bthrow\b|\btry\b|\bcatch\s*\('
+status = 'missing'
+issues = [89, 72]
+probe = '''
+int d = 0; struct G { ~G() { ++d; } };
+int f() { G g; throw 3; }
+int main() { try { f(); } catch (int e) { return (e == 3 && d == 1) ? 0 : 1; } return 1; }
+'''
+
+[[feature]]
+id = 'except-noexcept'
+name = '`noexcept` specifier and operator, `noexcept` in the type system'
+group = 'except'
+clauses = ['except.spec', 'expr.unary.noexcept']
+std = 'C++11'
+ftm = '__cpp_noexcept_function_type'
+detect = '\bnoexcept\b'
+status = 'partial'
+issues = [219]
+probe = '''
+void f() noexcept {} void g() {}
+int main() { void (*p)() noexcept = f; return (noexcept(f()) && !noexcept(g()) && p) ? 0 : 1; }
+'''
+
+# --- Coroutines ------------------------------------------------------------------------------------------------
+
+[[feature]]
+id = 'coroutines'
+name = 'Coroutines (`co_await`, `co_yield`, `co_return`) and `<coroutine>`'
+group = 'coro'
+clauses = ['dcl.fct.def.coroutine', 'expr.await', 'expr.yield', 'stmt.return.coroutine', 'support.coroutine']
+std = 'C++20'
+ftm = '__cpp_impl_coroutine'
+detect = '\bco_(?:await|yield|return)\b'
+status = 'missing'
+probe = '''
+#include <coroutine>
+struct T { struct promise_type { int v = 0; T get_return_object() { return {std::coroutine_handle<promise_type>::from_promise(*this)}; }
+  std::suspend_always initial_suspend() { return {}; } std::suspend_always final_suspend() noexcept { return {}; }
+  void return_value(int x) { v = x; } void unhandled_exception() {} };
+  std::coroutine_handle<promise_type> h; };
+T co() { co_return 7; }
+int main() { T t = co(); t.h.resume(); int v = t.h.promise().v; t.h.destroy(); return v == 7 ? 0 : 1; }
+'''
+issues = [318]
+
+# --- Modules --------------------------------------------------------------------------------------------------
+
+[[feature]]
+id = 'modules'
+name = 'Named modules: interface and implementation units, partitions, `export`, `import`'
+group = 'module'
+clauses = ['module', 'module.unit', 'module.interface', 'module.import', 'module.global.frag', 'module.private.frag', 'module.context', 'module.reach', 'cpp.module', 'cpp.import']
+std = 'C++20'
+ftm = '__cpp_modules'
+detect = '(?m)^\s*(?:export\s+)?module\s+[\w.:]+\s*;|^\s*(?:export\s+)?import\s+[\w.:]+\s*;'
+status = 'missing'
+compile_only = true
+probe = '''
+export module m;
+export int f() { return 0; }
+'''
+issues = [319]
+
+[[feature]]
+id = 'module-header-units'
+name = 'Header units (`import <header>;`)'
+group = 'module'
+clauses = ['module.import', 'cpp.import']
+std = 'C++20'
+detect = '(?m)^\s*(?:export\s+)?import\s*(?:<|"")'
+status = 'missing'
+issues = [320]
+
+[[feature]]
+id = 'module-import-std'
+name = '`import std;`'
+group = 'module'
+clauses = ['module.import']
+std = 'C++23'
+detect = '(?m)^\s*import\s+std(?:\.compat)?\s*;'
+status = 'missing'
+issues = [320]
+
+# --- Constant evaluation ---------------------------------------------------------------------------------------
+
+[[feature]]
+id = 'const-constexpr'
+name = '`constexpr` functions and variables (with C++14 relaxations)'
+group = 'const'
+clauses = ['dcl.constexpr', 'expr.const', 'expr.const.general', 'expr.const.core', 'expr.const.const', 'expr.const.init', 'expr.const.defns']
+std = 'C++11'
+ftm = '__cpp_constexpr'
+detect = '\bconstexpr\b'
+issues = [102, 262]
+probe = '''
+constexpr int fact(int n) { int r = 1; for (int i = 2; i <= n; ++i) r *= i; return r; }
+struct P { int x; constexpr P(int v) : x(v) {} };
+constexpr P p(fact(4));
+static_assert(p.x == 24);
+int main() { return 0; }
+'''
+status = 'partial'
+note = '`constexpr` variables of class type'
+
+[[feature]]
+id = 'const-consteval'
+name = '`consteval` and immediate functions'
+group = 'const'
+clauses = ['dcl.constexpr', 'expr.const.imm']
+std = 'C++20'
+ftm = '__cpp_consteval'
+detect = '\bconsteval\s+(?!\{)'
+status = 'done'
+issues = [102]
+probe = '''
+consteval int sq(int x) { return x * x; }
+int main() { return sq(3) - 9; }
+'''
+
+[[feature]]
+id = 'const-consteval-propagation'
+name = 'Immediate-escalating functions (`consteval` propagation)'
+group = 'const'
+clauses = ['expr.const.imm']
+std = 'C++23'
+ftm = '__cpp_consteval'
+status = 'missing'
+issues = [102]
+probe = '''
+consteval int id(int x) { return x; }
+template<class T> constexpr int f(T t) { return id(t); }
+int main() { return f(0); }
+'''
+
+[[feature]]
+id = 'const-constinit'
+name = '`constinit`'
+group = 'const'
+clauses = ['dcl.constinit']
+std = 'C++20'
+ftm = '__cpp_constinit'
+detect = '\bconstinit\b'
+status = 'done'
+probe = '''
+constinit int g = 3;
+int main() { return g - 3; }
+'''
+
+[[feature]]
+id = 'const-dynamic-alloc'
+name = 'Constexpr dynamic allocation (`new`/`delete` in constant evaluation)'
+group = 'const'
+clauses = ['expr.const.core']
+std = 'C++20'
+ftm = '__cpp_constexpr_dynamic_alloc'
+status = 'missing'
+probe = '''
+constexpr int f() { int* p = new int(3); int v = *p; delete p; return v; }
+static_assert(f() == 3);
+int main() { return 0; }
+'''
+issues = [321]
+
+[[feature]]
+id = 'const-virtual'
+name = 'Constexpr virtual functions, `dynamic_cast` and `typeid`; virtual inheritance in constant evaluation'
+group = 'const'
+clauses = ['expr.const.core']
+std = 'C++20'
+ftm = '__cpp_constexpr'
+status = 'missing'
+probe = '''
+struct B { constexpr virtual int f() const { return 1; } }; struct D : B { constexpr int f() const override { return 2; } };
+constexpr int g() { D d; const B& b = d; return b.f(); }
+static_assert(g() == 2);
+int main() { return 0; }
+'''
+issues = [322]
+
+[[feature]]
+id = 'const-cpp20-relax'
+name = 'Constexpr `try` blocks, union member changes, trivial default initialization'
+group = 'const'
+clauses = ['dcl.constexpr', 'expr.const.core']
+std = 'C++20'
+ftm = '__cpp_constexpr'
+status = 'partial'
+issues = [102]
+probe = '''
+union U { int a; char b; };
+constexpr int f() { U u{1}; u.b = 2; int x; x = u.b; return x; }
+static_assert(f() == 2);
+int main() { return 0; }
+'''
+
+[[feature]]
+id = 'const-cpp23-relax'
+name = 'Constexpr functions with non-literal variables, `goto`, labels and `static` locals'
+group = 'const'
+clauses = ['dcl.constexpr', 'expr.const.core']
+std = 'C++23'
+ftm = '__cpp_constexpr'
+status = 'missing'
+issues = [102]
+probe = '''
+constexpr int f(int x) { if (x) return 1; static int s = 0; return s; }
+constexpr char g(int i) { static constexpr char t[] = "ab"; return t[i]; }
+static_assert(f(1) == 1 && g(1) == 'b');
+int main() { return 0; }
+'''
+
+[[feature]]
+id = 'const-void-ptr'
+name = 'Constexpr casts from `void*` and constexpr placement `new`'
+group = 'const'
+clauses = ['expr.const.core', 'expr.new']
+std = 'C++26'
+ftm = '__cpp_constexpr'
+probe = '''
+constexpr int f() { int i = 3; void* v = &i; return *static_cast<int*>(v); }
+static_assert(f() == 3);
+int main() { return 0; }
+'''
+status = 'partial'
+issues = [321]
+note = 'constexpr placement `new`'
+
+[[feature]]
+id = 'const-exceptions'
+name = 'Constexpr exceptions'
+group = 'const'
+clauses = ['expr.const.core', 'except.throw']
+std = 'C++26'
+ftm = '__cpp_constexpr_exceptions'
+status = 'missing'
+issues = [89]
+probe = '''
+constexpr int f() { try { throw 1; } catch (int e) { return e; } }
+static_assert(f() == 1);
+int main() { return 0; }
+'''
+
+[[feature]]
+id = 'const-static-assert-msg'
+name = 'User-generated `static_assert` messages'
+group = 'const'
+clauses = ['dcl.pre']
+std = 'C++26'
+ftm = '__cpp_static_assert'
+detect = '''\bstatic_assert\s*\([^;]*,\s*(?:std::)?format\s*\('''
+status = 'missing'
+probe = '''
+struct Msg { constexpr unsigned long size() const { return 2; } constexpr const char* data() const { return "ok"; } };
+static_assert(true, Msg{});
+int main() { return 0; }
+'''
+issues = [323]
+
+# --- Reflection and expansion statements -----------------------------------------------------------------------
+
+[[feature]]
+id = 'reflect-core'
+name = 'The reflection operator (`^^`) and splices (`[: :]`)'
+group = 'reflect'
+clauses = ['expr.reflect', 'expr.prim.splice', 'dcl.type.splice', 'basic.splice', 'temp.dep.splice', 'expr.const.reflect']
+std = 'C++26'
+ftm = '__cpp_impl_reflection'
+detect = '\^\^\s*[\w:(]|\[:'
+status = 'missing'
+probe = '''
+constexpr auto r = ^^int;
+typename [:r:] x = 0;
+int main() { return x; }
+'''
+issues = [324, 80]
+
+[[feature]]
+id = 'reflect-meta'
+name = '`std::meta` queries and `define_static_array`/`string`'
+group = 'reflect'
+clauses = ['meta.reflection']
+std = 'C++26'
+detect = '\bstd::meta::|\bmeta::\w+(?:_of)?\s*\(|\bdefine_static_(?:array|string|object)\b'
+status = 'missing'
+probe = '''
+#include <meta>
+struct S { int a, b; };
+static_assert(std::meta::nonstatic_data_members_of(^^S, std::meta::access_context::unchecked()).size() == 2);
+int main() { return 0; }
+'''
+issues = [324, 80]
+
+[[feature]]
+id = 'reflect-define-aggregate'
+name = '`std::meta::define_aggregate` (code generation)'
+group = 'reflect'
+clauses = ['meta.reflection.define.aggregate']
+std = 'C++26'
+detect = '\bdefine_aggregate\b'
+status = 'missing'
+issues = [324, 80]
+
+[[feature]]
+id = 'reflect-annotations'
+name = 'Annotations for reflection (`[[=value]]`)'
+group = 'reflect'
+clauses = ['dcl.attr.annotation']
+std = 'C++26'
+detect = '\[\[\s*='
+status = 'missing'
+issues = [324, 80]
+
+[[feature]]
+id = 'stmt-expansion'
+name = 'Expansion statements (`template for`)'
+group = 'reflect'
+clauses = ['stmt.expand']
+std = 'C++26'
+ftm = '__cpp_expansion_statements'
+detect = '\btemplate\s+for\b'
+status = 'missing'
+probe = '''
+int main() { int s = 0; template for (auto x : {1, 2, 3}) s += x; return s - 6; }
+'''
+issues = [325, 80]
+
+# --- Contracts -------------------------------------------------------------------------------------------------
+
+[[feature]]
+id = 'contracts'
+name = 'Contracts: `pre`, `post`, `contract_assert`, violation handling'
+group = 'contract'
+clauses = ['dcl.contract', 'dcl.contract.func', 'dcl.contract.res', 'stmt.contract.assert', 'basic.contract', 'basic.contract.general', 'basic.contract.eval', 'basic.contract.handler', 'basic.scope.contract', 'support.contract']
+std = 'C++26'
+ftm = '__cpp_contracts'
+detect = '\bcontract_assert\b|\)\s*(?:const\s*)?(?:noexcept\s*)?(?:pre|post)\s*\('
+status = 'missing'
+issues = [326]
+probe = '''
+int f(const int x) pre(x > 0) post(r : r > x) { contract_assert(x != 5); return x + 1; }
+int main() { return f(1) - 2; }
+'''
+
+# --- Library support the compiler provides --------------------------------------------------------------------
+
+[[feature]]
+id = 'lib-initializer-list'
+name = '`std::initializer_list`'
+group = 'lib'
+clauses = ['support.initlist', 'dcl.init.list']
+std = 'C++11'
+ftm = '__cpp_initializer_lists'
+detect = '\binitializer_list\b'
+status = 'missing'
+probe = '''
+#include <initializer_list>
+int sum(std::initializer_list<int> l) { int s = 0; for (const int* p = l.begin(); p != l.end(); ++p) s += *p; return s; }
+int main() { return sum({1, 2, -3}); }
+'''
+issues = [329]
+
+[[feature]]
+id = 'lib-type-traits'
+name = 'Type-trait built-ins behind `<type_traits>`'
+group = 'lib'
+clauses = ['meta.unary', 'meta.rel', 'meta.trans']
+std = 'C++11'
+detect = '\bstd::(?:is_\w+|enable_if|conditional|decay|remove_\w+|add_\w+|underlying_type|common_type|invoke_result)\w*\b'
+status = 'partial'
+note = 'traits that need the object model (`is_polymorphic`, `is_base_of`, `has_virtual_destructor`, layout traits)'
+issues = [218, 211]
+probe = '''
+enum E { e };
+int main() { return (__is_same(int, int) && __is_enum(E) && !__is_same(int, long)) ? 0 : 1; }
+'''
+
+[[feature]]
+id = 'lib-source-location'
+name = '`std::source_location`'
+group = 'lib'
+clauses = ['support.srcloc']
+std = 'C++20'
+detect = '\bsource_location\b'
+status = 'missing'
+probe = '''
+int main() { return __builtin_LINE() == 1 ? 0 : 1; }
+'''
+issues = [327]
+
+[[feature]]
+id = 'lib-utility-builtins'
+name = '`std::addressof`, `launder`, `bit_cast`, `is_constant_evaluated`, `unreachable`, `is_within_lifetime`'
+group = 'lib'
+clauses = ['specialized.addressof', 'ptr.launder', 'bit.cast', 'meta.const.eval', 'utility.unreachable']
+std = 'C++11'
+detect = '\bstd::(?:addressof|launder|bit_cast|is_constant_evaluated|unreachable|is_within_lifetime)\b'
+probe = '''
+int main() { int i = 1; float f = __builtin_bit_cast(float, i); return (__builtin_addressof(i) == &i && !__builtin_is_constant_evaluated() && __builtin_bit_cast(int, f) == 1) ? 0 : 1; }
+'''
+status = 'missing'
+issues = [330]
+
+[[feature]]
+id = 'lib-numeric-builtins'
+name = 'Numeric built-ins behind `<limits>`, `<bit>`, `<cmath>`, `offsetof`'
+group = 'lib'
+clauses = ['numeric.limits', 'bit', 'support.types.layout']
+std = 'C++98'
+detect = '\bnumeric_limits\b|\bstd::(?:popcount|countl_zero|countr_zero|bit_width|rotl|rotr|byteswap)\b|\boffsetof\s*\('
+issues = [248]
+probe = '''
+struct S { int a; int b; };
+int main() { return (__builtin_popcount(7u) == 3 && __builtin_offsetof(S, b) == 4) ? 0 : 1; }
+'''
+status = 'missing'
+
+[[feature]]
+id = 'lib-atomic'
+name = 'Atomic built-ins behind `<atomic>`; the memory model'
+group = 'lib'
+clauses = ['intro.multithread', 'intro.races', 'intro.progress', 'atomics']
+std = 'C++11'
+detect = '\bstd::atomic\b|\batomic(?:_ref)?\s*<|\b__atomic_\w+'
+status = 'missing'
+probe = '''
+int main() { int x = 0; __atomic_fetch_add(&x, 2, __ATOMIC_SEQ_CST); return __atomic_load_n(&x, __ATOMIC_ACQUIRE) - 2; }
+'''
+issues = [328]
+
+[[feature]]
+id = 'lib-exception-runtime'
+name = 'Exception runtime support: `std::exception_ptr`, `terminate`, `uncaught_exceptions`'
+group = 'lib'
+clauses = ['support.exception']
+std = 'C++11'
+detect = '\bexception_ptr\b|\b(?:current|rethrow|make)_exception(?:_ptr)?\b|\buncaught_exceptions?\b'
+status = 'missing'
+issues = [89]

@@ -22,6 +22,7 @@ import std;
 import ycxx.compile;
 import ycxx.engine;
 import ycxx.lsp;
+import ycxx.memory;
 import ycxx.pipeline;
 import ycxx.pp;
 import ycxx.trace;
@@ -278,6 +279,17 @@ class Server {
     s.idle_exit_s = static_cast<std::uint64_t>(o_.idle_exit.count());
     s.threads = threads_.count;
     s.peak_running = session().peak_requests();  // through the once: `session_` may be being made
+    const memory::Totals m = memory::process();
+    s.memory_current = m.current;
+    s.memory_peak = m.peak;
+    s.memory_allocated = m.allocated;
+    s.allocations = m.count;
+    for (const engine::KindMemory& k : session().db().memory_per_kind()) {
+      s.memory_retained += k.retained;
+      if (k.values > 0) s.retained_by_kind.push_back({trace::short_kind(k.kind), k.retained, k.values});
+    }
+    s.memory_unattributed = m.current - s.memory_retained;
+    std::ranges::stable_sort(s.retained_by_kind, std::greater{}, &KindRetained::retained);
     return s;
   }
 
@@ -382,6 +394,7 @@ class Server {
       collector_->finish();
       batch_.end = true;
       batch_.ended_ns = server_->trace_clock();
+      batch_.memory = {memory::process().current, window_.peak()};
       deliver({});
     }
     // On the client's connection thread.
@@ -405,6 +418,7 @@ class Server {
     std::vector<std::shared_ptr<Watching>> watchers_;
     TraceBatch batch_;
     std::optional<trace::Collector> collector_;
+    memory::Window window_;  // the process's peak while the request runs (#274)
   };
 
   // A request's trace when its client asked for one or someone watches; nothing otherwise, so an

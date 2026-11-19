@@ -210,6 +210,13 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
     inlined (`objdump --disassemble-symbols=…`, then grep `bl`).
   - Do: keep per-kind template code small; put formatting and strings in non-template functions.
   - Learned on #245.
+- **`await_resume` runs on the hit path too.** `co_await x` calls `x.await_resume()` even when
+  `await_ready()` returned true, so a store put there "where the body resumes" lands on every
+  fetch hit. On #274 a memory target set there would have taxed the 41 ns fetch hit; Fable's
+  review caught it. Every resumption after a real wait already went through `Settle::resume`.
+  - Do: put per-resumption work where the suspension ends (the task that resumes the frame), not
+    in the awaitable's `await_resume`.
+  - Learned on #274.
 - **macOS's `poll` does not support devices.** It flags `/dev/tty` `POLLNVAL` at once, so a TUI
   that polled the terminal and a socket fell into a blocking read and saw the socket only after
   a key.
@@ -315,6 +322,17 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
 
 ## Evidence and tests
 
+- **A feature probe must use nothing but the feature.** On #282, 40 of the first 150 probes failed
+  on something else: `auto` to hold a lambda, a nested `struct`, a default argument, `alignas`.
+  Each would have filed the wrong status and the wrong failing example.
+  - Do: write a probe from features already known to work, and confirm each failure with a
+    one-line micro-probe of the feature alone before recording it. ycxx's first error names the
+    construct it stopped at, which shows at once whether that is the feature under test.
+  - The same pass found that a coverage check walking up to cited ancestors could not fail
+    (`[class]` covered every `[class.*]`): mutate the data (rename a cited clause) to see the
+    check fail (DECISIONS §5.6).
+  - Learned on #282.
+
 - **Test a long-lived connection's lifetime before the review.** Both P0s of #99 were in the
   LSP tunnel, and the functional tests could not have shown either:
   - a one-thread copy loop deadlocked once a large answer and a large edit crossed;
@@ -384,6 +402,12 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
   records by value.
   - Learned on #41.
 
+- **A check over a build that reuses everything checks nothing about work.** On #274 the JSON
+  memory checks ran on a build after an unchanged rebuild. Every event was `reused` and every sum
+  was 0 = 0, so dropping the per-kind sums went unnoticed until the mutation run.
+  - Do: run checks about what work did (sums, allocations, executions) on a build that re-runs
+    something, and assert the total is non-zero.
+  - Learned on #274.
 - **Fuzz incremental == cold on every derived output, diagnostics included.** The engine's
   values, dependency lists and executions matched cold runs from the start, but `diags_of` was
   wrong in 119 of 300 edits: pruning by `has_diags` missed a backdated cell whose subgraph gained

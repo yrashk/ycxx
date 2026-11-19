@@ -1,6 +1,7 @@
 // The trace as values (#245): one `Event` per cell a request settled, the line both modes render,
 // and the browser's model: a tree with expansion, a filter by text, outcome or worker, the summary
-// header, and the timeline of the pool's workers. Nothing here touches a terminal.
+// header, and the timeline of the pool's workers. Memory (#274): each event's own bytes, sums over
+// its subtree, sums per kind, and a build's totals. Nothing here touches a terminal.
 export module ycxx.trace:model;
 
 import std;
@@ -27,7 +28,21 @@ struct Event {
   std::string errors;  // the errors its value holds, one a line; empty: none
   std::uint32_t repeat = 1;  // identical instants in a row under one parent, shown once (`×3`)
   std::uint64_t cell = 0;    // the cell's identity: equal in every event of one cell
+  // Memory (#274), as `engine::TraceEvent` has it: the frame's own allocations and their count,
+  // its net bytes' high-water mark, and what the cell retains.
+  std::uint64_t alloc_bytes = 0;
+  std::uint64_t allocs = 0;
+  std::int64_t peak_bytes = 0;
+  std::int64_t retained_bytes = 0;
   bool operator==(const Event&) const = default;
+};
+
+// A build's memory beyond its events (#274): the process's bytes when it ended and their
+// high-water mark while it ran (other builds the daemon ran at the same time included).
+struct BuildMemory {
+  std::int64_t process_current = 0;
+  std::int64_t process_peak = 0;
+  bool operator==(const BuildMemory&) const = default;
 };
 
 // `ycxx::pipeline::Tu` or `Tu@ycxx.pipeline` (a kind attached to a module) -> `Tu`.
@@ -116,6 +131,17 @@ std::string format_duration(std::uint64_t ns) {
   if (ns < 1'000'000'000) return std::format("{:.2f}ms", static_cast<double>(ns) / 1e6);
   return std::format("{:.2f}s", static_cast<double>(ns) / 1e9);
 }
+// `812B`, `41.0KiB`, `1.24MiB`, `3.40GiB`; below zero (a frame that freed what others allocated)
+// with a sign.
+std::string format_bytes(std::int64_t b) {
+  const std::string_view sign = b < 0 ? "-" : "";
+  const auto n = static_cast<double>(b < 0 ? -b : b);
+  if (n < 1024) return std::format("{}{}B", sign, b < 0 ? -b : b);
+  if (n < 1024.0 * 1024) return std::format("{}{:.1f}KiB", sign, n / 1024);
+  if (n < 1024.0 * 1024 * 1024) return std::format("{}{:.2f}MiB", sign, n / (1024.0 * 1024));
+  return std::format("{}{:.2f}GiB", sign, n / (1024.0 * 1024 * 1024));
+}
+
 std::string format_worker(std::int32_t w) { return w < 0 ? "main" : std::format("w{}", w); }
 // `main`, `3` or `w3`.
 std::optional<std::int32_t> worker_named(std::string_view s) {
@@ -133,6 +159,8 @@ std::string format_workers(const Event& e) {
 
 // How a line is drawn: colors (a TTY without `NO_COLOR`), and times and workers, which a golden
 // test leaves out because they differ between runs.
+// Times, workers and memory are measurements of one run on one host: `times` off leaves them all
+// out (a golden test).
 struct Style {
   bool color = false;
   bool times = true;
@@ -147,13 +175,97 @@ std::string sgr(const Style& s, std::string_view params, std::string_view text) 
 // `Kind(key)`: the cell, as both modes name it.
 std::string cell_name(const Event& e) { return e.key.empty() ? e.kind : std::format("{}({})", e.kind, e.key); }
 
-// The stream's line: glyph, indentation by depth, the cell, its outcome, and its time and worker.
+// Memory (#274). An outcome that settles a cell for the request (it ran, was checked, kept by
+// durability, or first read): where the bytes the cell retains count in sums. A reuse elsewhere
+// is the same bytes, and counts nothing.
+constexpr bool settles(Outcome o) {
+  return o == Outcome::executed || o == Outcome::cutoff || o == Outcome::verified || o == Outcome::durable || o == Outcome::input;
+}
+// What a cell retains as sums count it: once, where it settles, never below zero.
+std::int64_t counted_retained(const Event& e) { return settles(e.outcome) ? std::max<std::int64_t>(0, e.retained_bytes) : 0; }
+
+// Sums over an event's subtree, itself included: what its frames allocated (only frames that ran
+// allocate), and what the cells it settled retain.
+struct Rollup {
+  std::uint64_t alloc = 0;
+  std::int64_t retained = 0;
+};
+
+// Each event's `Rollup`, for a pre-order batch with depths (the collector's).
+std::vector<Rollup> rollups(std::span<const Event> events) {
+  std::vector<Rollup> out(events.size());
+  std::vector<std::optional<std::size_t>> parent(events.size());
+  std::vector<std::size_t> open;  // the last event at each depth, on the path to here
+  for (std::size_t i = 0; i < events.size(); ++i) {
+    while (!open.empty() && events[open.back()].depth >= events[i].depth) open.pop_back();
+    if (!open.empty() && events[open.back()].depth + 1 == events[i].depth) parent[i] = open.back();
+    open.push_back(i);
+  }
+  for (std::size_t i = events.size(); i-- > 0;) {
+    out[i].alloc += events[i].alloc_bytes;
+    out[i].retained += counted_retained(events[i]);
+    if (parent[i]) {
+      out[*parent[i]].alloc += out[i].alloc;
+      out[*parent[i]].retained += out[i].retained;
+    }
+  }
+  return out;
+}
+
+// Sums per kind (#274): which stages use the memory. `peak` is the highest of its frames'.
+struct KindSum {
+  std::string kind;
+  std::uint64_t executions = 0;
+  std::uint64_t alloc_bytes = 0;
+  std::uint64_t allocs = 0;
+  std::int64_t peak_bytes = 0;
+  std::int64_t retained_bytes = 0;
+};
+class Kinds {
+ public:
+  void add(const Event& e) {
+    if (e.alloc_bytes == 0 && counted_retained(e) == 0) return;
+    KindSum& k = by_name_[e.kind];
+    k.kind = e.kind;
+    k.executions += e.outcome == Outcome::executed || e.outcome == Outcome::cutoff;
+    k.alloc_bytes += e.alloc_bytes;
+    k.allocs += e.allocs;
+    k.peak_bytes = std::max(k.peak_bytes, e.peak_bytes);
+    k.retained_bytes += counted_retained(e);
+  }
+  // Most bytes allocated first, then most retained, then by name.
+  std::vector<KindSum> sorted() const {
+    std::vector<KindSum> out;
+    for (const auto& [_, k] : by_name_) out.push_back(k);
+    std::ranges::stable_sort(out, [](const KindSum& a, const KindSum& b) {
+      return std::tuple(a.alloc_bytes, a.retained_bytes) > std::tuple(b.alloc_bytes, b.retained_bytes);
+    });
+    return out;
+  }
+  bool empty() const noexcept { return by_name_.empty(); }
+
+ private:
+  std::map<std::string, KindSum> by_name_;
+};
+
+// ` alloc 1.20MiB, 3.40MiB in all, retains 640.0KiB`: an event's own allocations, its subtree's
+// when they are more, and what it retains where it settles.
+std::string memory_text(const Event& e, const Rollup& r) {
+  std::string out;
+  if (e.alloc_bytes > 0) out += " alloc " + format_bytes(static_cast<std::int64_t>(e.alloc_bytes));
+  if (r.alloc > e.alloc_bytes) out += std::format("{}{} in all", out.empty() ? " alloc " : ", ", format_bytes(static_cast<std::int64_t>(r.alloc)));
+  if (counted_retained(e) > 0) out += std::format("{}retains {}", out.empty() ? " " : ", ", format_bytes(e.retained_bytes));
+  return out;
+}
+
+// The stream's line: glyph, indentation by depth, the cell, its outcome, and its time, worker and
+// memory.
 //   ●   Tu(a.cpp) executed 1.24ms w2
 std::string_view event_sgr(const Event& e) { return e.errors.empty() ? outcome_sgr(e.outcome) : error_sgr; }
 
 // `here`: the errors start at this cell (none of its children has any), so the whole line is
 // marked, and its messages follow on their own lines.
-std::string stream_line(const Event& e, const Style& s, bool here = false, std::string_view below = {}) {
+std::string stream_line(const Event& e, const Style& s, bool here = false, std::string_view below = {}, const Rollup& r = {}) {
   std::string out = sgr(s, event_sgr(e), outcome_glyph(e.outcome, s.color));
   out += ' ';
   out.append(2 * e.depth, ' ');
@@ -163,7 +275,8 @@ std::string stream_line(const Event& e, const Style& s, bool here = false, std::
   body += here ? std::string(outcome_name(e.outcome)) : sgr(s, event_sgr(e), outcome_name(e.outcome));
   if (s.times) {
     const bool instant = e.end_ns == e.start_ns;
-    const std::string t = instant ? std::format(" {}", format_workers(e)) : std::format(" {} {}", format_duration(e.end_ns - e.start_ns), format_workers(e));
+    const std::string t = (instant ? std::format(" {}", format_workers(e)) : std::format(" {} {}", format_duration(e.end_ns - e.start_ns), format_workers(e))) +
+                          memory_text(e, r);
     body += here ? t : sgr(s, "2", t);
   }
   if (e.repeat > 1) body += here ? std::format(" ×{}", e.repeat) : sgr(s, "2", std::format(" ×{}", e.repeat));
@@ -239,10 +352,13 @@ std::string json_string(std::string_view s) {
 
 // One event as a JSON object on one line (`--trace-engine=json`, JSON Lines): the tree is in
 // `id`/`parent`, the depth is given, and `value` is there when the kind showed one.
-std::string json_line(const Event& e, bool here = false, std::optional<std::uint64_t> at = std::nullopt, std::string_view request = {}) {
+std::string json_line(const Event& e, bool here = false, std::optional<std::uint64_t> at = std::nullopt, std::string_view request = {},
+                      const Rollup& r = {}) {
   std::string out = std::format(R"({{"id":{},"parent":{},"depth":{},"kind":{},"key":{},"outcome":"{}","start_ns":{},"duration_ns":{},"worker":{},"end_worker":{})",
                                 e.id, e.parent, e.depth, json_string(e.kind), json_string(e.key), outcome_name(e.outcome), e.start_ns,
                                 e.end_ns - std::min(e.end_ns, e.start_ns), e.worker, e.end_worker);
+  out += std::format(R"(,"alloc_bytes":{},"allocs":{},"peak_bytes":{},"retained_bytes":{},"incl_alloc_bytes":{},"incl_retained_bytes":{})",
+                     e.alloc_bytes, e.allocs, e.peak_bytes, e.retained_bytes, r.alloc, r.retained);
   if (!request.empty()) out += ",\"request\":" + json_string(request);
   if (!e.value.empty()) out += ",\"value\":" + json_string(e.value);
   if (!e.errors.empty()) out += std::format(R"(,"errors":{},"error_here":{})", json_string(e.errors), here);
@@ -257,6 +373,15 @@ struct Summary {
   std::uint64_t events = 0;
   std::uint64_t span_ns = 0;  // from the trace's start to its last event's end
   std::int32_t workers = 0;   // pool workers seen
+  // Memory (#274): what the frames allocated, and what the cells settled retain.
+  std::uint64_t alloc_bytes = 0;
+  std::uint64_t allocs = 0;
+  std::int64_t retained_bytes = 0;
+  void add_memory(const Event& e) {
+    alloc_bytes += e.alloc_bytes;
+    allocs += e.allocs;
+    retained_bytes += counted_retained(e);
+  }
 };
 
 // The browser's tree. Events arrive in collector batches (pre-order); a node's children are in
@@ -272,7 +397,11 @@ class Tree {
     // In this node's subtree (itself included): events, and executions (executed or cutoff).
     std::uint64_t subtree = 1;
     std::uint64_t executions = 0;
+    Rollup incl;  // memory in its subtree, itself included (#274)
   };
+  // How siblings are ordered: as they started, or most memory first (#274): bytes allocated in
+  // the subtree, or retained in it.
+  enum class Order : std::uint8_t { start, alloc, retained };
   struct Row {
     std::int32_t node;
     std::uint32_t depth;
@@ -286,6 +415,13 @@ class Tree {
   // Top-level nodes newest first (the live views' default: the latest request on top).
   void set_newest_first(bool on) noexcept { newest_first_ = on; }
   bool newest_first() const noexcept { return newest_first_; }
+
+  void set_order(Order o) noexcept { order_ = o; }
+  Order order() const noexcept { return order_; }
+
+  // The latest build's totals beyond its events, for the header (#274).
+  void set_memory(BuildMemory m) noexcept { memory_ = m; }
+  std::optional<BuildMemory> memory() const noexcept { return memory_; }
 
   // A request's node (`ctl trace`, `--watch`), under which `add(batch, id)` puts its top-level
   // events. It opens folded the earlier requests', so the latest is the one shown whole.
@@ -338,6 +474,7 @@ class Tree {
       Node n;
       n.ev = e;
       n.executions = e.outcome == Outcome::executed || e.outcome == Outcome::cutoff;
+      n.incl = {e.alloc_bytes, counted_retained(e)};
       // Top-level nodes and the first levels below them start open, the rest closed.
       n.expanded = e.depth < open_depth;
       if (const auto it = by_id_.find(e.parent); e.parent != 0 && it != by_id_.end()) {
@@ -352,6 +489,8 @@ class Tree {
       for (std::int32_t p = nodes_[at].parent; p >= 0; p = nodes_[p].parent) {
         ++nodes_[p].subtree;
         nodes_[p].executions += nodes_[at].executions;
+        nodes_[p].incl.alloc += nodes_[at].incl.alloc;
+        nodes_[p].incl.retained += nodes_[at].incl.retained;
       }
     }
   }
@@ -446,6 +585,7 @@ class Tree {
       if (n.group) continue;
       ++s.counts[std::to_underlying(n.ev.outcome)];
       ++s.events;
+      s.add_memory(n.ev);
       s.span_ns = std::max(s.span_ns, n.ev.end_ns);
       top = std::max({top, n.ev.worker, n.ev.end_worker});
     }
@@ -469,16 +609,23 @@ class Tree {
     const Node& n = nodes_[i];
     return hide_reused_ && !n.group && n.children.empty() && n.ev.outcome == Outcome::reused;
   }
+  // Siblings in the chosen order; ties keep their start order.
+  std::vector<std::int32_t> ordered(std::span<const std::int32_t> ids) const {
+    std::vector<std::int32_t> out(ids.begin(), ids.end());
+    if (order_ == Order::alloc) std::ranges::stable_sort(out, std::greater{}, [&](std::int32_t i) { return nodes_[i].incl.alloc; });
+    else if (order_ == Order::retained) std::ranges::stable_sort(out, std::greater{}, [&](std::int32_t i) { return nodes_[i].incl.retained; });
+    return out;
+  }
   void walk(std::int32_t i, std::uint32_t depth, std::vector<Row>& out) const {
     if (hidden(i)) return;
     out.push_back({i, depth, true});
     if (!nodes_[i].expanded) return;
-    for (std::int32_t c : nodes_[i].children) walk(c, depth + 1, out);
+    for (std::int32_t c : ordered(nodes_[i].children)) walk(c, depth + 1, out);
   }
   void walk_filtered(std::int32_t i, std::uint32_t depth, const std::vector<char>& keep, std::vector<Row>& out) const {
     if (!keep[i] || hidden(i)) return;
     out.push_back({i, depth, keep[i] == 2});
-    for (std::int32_t c : nodes_[i].children) {
+    for (std::int32_t c : ordered(nodes_[i].children)) {
       if (keep[i] == 2 && nodes_[i].expanded) walk(c, depth + 1, out);
       else walk_filtered(c, depth + 1, keep, out);
     }
@@ -487,13 +634,15 @@ class Tree {
   std::vector<std::int32_t> ordered_roots() const {
     std::vector<std::int32_t> out = roots_;
     if (newest_first_) std::ranges::reverse(out);
-    return out;
+    return ordered(out);
   }
 
   std::vector<Node> nodes_;
   std::vector<std::int32_t> roots_;
   bool newest_first_ = false;
   bool hide_reused_ = false;
+  Order order_ = Order::start;
+  std::optional<BuildMemory> memory_;
   std::set<std::uint64_t> computed_with_errors_;  // cells some node computed with errors
   std::unordered_map<std::uint64_t, std::int32_t> by_id_;
   std::vector<std::string> words_;
@@ -522,15 +671,18 @@ class Stream {
   void batch(std::span<const Event> events) {
     std::string text;
     const Origins o = error_origins(events);
+    const std::vector<Rollup> r = rollups(events);
     for (std::size_t i = 0; i < events.size(); ++i) {
       const Event& e = events[i];
       const std::optional<std::uint64_t> at = o.at[i] ? std::optional(events[*o.at[i]].id) : std::nullopt;
       const std::string_view below = o.at[i] ? first_line(events[*o.at[i]].errors) : first_line(e.errors);
-      text += style_.json ? json_line(e, o.here[i], at) : stream_line(e, style_, o.here[i], below);
+      text += style_.json ? json_line(e, o.here[i], at, {}, r[i]) : stream_line(e, style_, o.here[i], below, r[i]);
       text += '\n';
       if (std::to_underlying(e.outcome) < outcome_count) ++summary_.counts[std::to_underlying(e.outcome)];
       ++summary_.events;
       summary_.span_ns = std::max(summary_.span_ns, e.end_ns);
+      summary_.add_memory(e);
+      kinds_.add(e);
     }
     *out_ << text << std::flush;
   }
@@ -553,22 +705,63 @@ class Stream {
     if (style_.times) out += sgr(style_, "2", std::format(" in {}", format_duration(total_ns.value_or(summary_.span_ns))));
     return out;
   }
-  // `{"summary":{"executed":3,…,"events":12,"total_ns":…}}` in JSON.
-  std::string summary_json(std::optional<std::uint64_t> total_ns = std::nullopt) const {
+  // `memory: 12.3MiB allocated in 45210 allocations, 3.10MiB retained; process 40.0MiB, peak
+  // 52.0MiB` and the kinds that allocated most, `by kind: Tu 5.10MiB, Pp 3.20MiB, …` (#274).
+  // Empty when times are off (a golden test) or nothing was counted.
+  std::string memory_lines(const std::optional<BuildMemory>& m = std::nullopt) const {
+    if (!style_.times || (summary_.alloc_bytes == 0 && summary_.retained_bytes == 0 && !m)) return {};
+    std::string out = std::format("memory: {} allocated in {} allocations, {} retained", format_bytes(static_cast<std::int64_t>(summary_.alloc_bytes)),
+                                  summary_.allocs, format_bytes(summary_.retained_bytes));
+    if (m) out += std::format("; process {}, peak {}", format_bytes(m->process_current), format_bytes(m->process_peak));
+    out = sgr(style_, "2", out);
+    const std::vector<KindSum> ks = kinds_.sorted();
+    if (!ks.empty()) {
+      std::string line = "by kind:";
+      for (std::size_t i = 0; i < ks.size() && i < top_kinds; ++i)
+        line += std::format("{} {} {}", i == 0 ? "" : ",", ks[i].kind, format_bytes(static_cast<std::int64_t>(ks[i].alloc_bytes)));
+      if (ks.size() > top_kinds) line += ", …";
+      out += '\n' + sgr(style_, "2", line);
+    }
+    return out;
+  }
+  static constexpr std::size_t top_kinds = 6;
+  // `{"summary":{"executed":3,…,"events":12,"total_ns":…,"memory":{…},"kinds":[…]}}` in JSON
+  // (docs/TRACE.md).
+  std::string summary_json(std::optional<std::uint64_t> total_ns = std::nullopt, const std::optional<BuildMemory>& m = std::nullopt) const {
     std::string out = R"({"summary":{)";
     for (std::uint8_t i = 0; i < outcome_count; ++i)
       std::format_to(std::back_inserter(out), R"("{}":{},)", outcome_name(static_cast<Outcome>(i)), summary_.counts[i]);
-    return out + std::format(R"("events":{},"total_ns":{}}}}})", summary_.events, total_ns.value_or(summary_.span_ns));
+    std::format_to(std::back_inserter(out), R"("events":{},"total_ns":{},"memory":{{"alloc_bytes":{},"allocs":{},"retained_bytes":{})",
+                   summary_.events, total_ns.value_or(summary_.span_ns), summary_.alloc_bytes, summary_.allocs, summary_.retained_bytes);
+    if (m) std::format_to(std::back_inserter(out), R"(,"process_current_bytes":{},"process_peak_bytes":{})", m->process_current, m->process_peak);
+    out += R"(},"kinds":[)";
+    bool first = true;
+    for (const KindSum& k : kinds_.sorted()) {
+      std::format_to(std::back_inserter(out), R"({}{{"kind":{},"executions":{},"alloc_bytes":{},"allocs":{},"peak_bytes":{},"retained_bytes":{}}})",
+                     first ? "" : ",", json_string(k.kind), k.executions, k.alloc_bytes, k.allocs, k.peak_bytes, k.retained_bytes);
+      first = false;
+    }
+    return out + "]}}";
   }
-  void summary(std::optional<std::uint64_t> total_ns = std::nullopt) {
-    *out_ << (style_.json ? summary_json(total_ns) : summary_line(total_ns)) << '\n' << std::flush;
+  void summary(std::optional<std::uint64_t> total_ns = std::nullopt, const std::optional<BuildMemory>& m = std::nullopt) {
+    if (style_.json) {
+      *out_ << summary_json(total_ns, m) << '\n' << std::flush;
+      return;
+    }
+    std::string text = summary_line(total_ns);
+    if (const std::string mem = memory_lines(m); !mem.empty()) text += '\n' + mem;
+    *out_ << text << '\n' << std::flush;
   }
-  void reset() { summary_ = {}; }
+  void reset() {
+    summary_ = {};
+    kinds_ = {};
+  }
 
  private:
   std::ostream* out_;
   Style style_;
   Summary summary_;
+  Kinds kinds_;
 };
 
 // Times made relative to `base_ns` (a request's start on the daemon's clock).

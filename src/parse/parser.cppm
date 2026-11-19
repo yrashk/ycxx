@@ -2927,8 +2927,9 @@ public:
     if (!expect(Tk::semi)) skip_to_semi();
     if (!cond.ok() || !ok) return {NodeId::none, begin, pos()};
     sema::Evaluated v = sema::Evaluator(*s_, questions()).evaluate(cond);
-    if (v.dependent && s_->templated()) {
-      // Checked when the template is instantiated ([dcl.pre]/10).
+    if (v.dependent && (s_->templated() || questions().instantiation_gave_up())) {
+      // Checked when the template is instantiated ([dcl.pre]/10); or past the nesting limit,
+      // which was diagnosed.
     } else if (v.dependent) {
       s_->diag(e.begin, Diag::not_constant, sema::reason_unsupported);  // nothing outside a template depends
     } else if (!v.value) {

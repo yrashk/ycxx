@@ -50,6 +50,7 @@ struct TraceBatch {
   std::vector<trace::Event> events;
   bool end = false;
   std::uint64_t ended_ns = 0;     // with `end`
+  trace::BuildMemory memory;      // with `end`: the process's bytes then, and their peak meanwhile (#274)
 };
 // `watch{values}` (#245) attaches to the daemon: answered by an empty `watch`, then a `trace`
 // frame for each batch of every request it serves, until either end closes the connection.
@@ -75,6 +76,13 @@ struct WatchedFiles {
 struct StatusRequest {};
 struct ShutdownRequest {};
 struct Bye {};
+
+// What one query kind's cells retain (#274).
+struct KindRetained {
+  std::string kind;
+  std::int64_t retained = 0;
+  std::uint64_t values = 0;  // cells holding a value
+};
 
 // The daemon's state and totals (§8.1), for `ycxx ctl status`.
 struct Status {
@@ -103,6 +111,16 @@ struct Status {
   std::uint64_t quantum_ms = 0;  // the admission quantum now (§4.2)
   std::uint64_t idle_exit_s = 0;
   std::uint64_t threads = 0;     // the session's pool (YCXX_THREADS)
+  // Memory (#274), in bytes: allocated now, the high-water mark, allocated ever and how many
+  // allocations; what the engine's cells retain, and the rest of what is allocated now (the
+  // engine's tables, the session's state, what no cell's run allocated); per kind, most first.
+  std::int64_t memory_current = 0;
+  std::int64_t memory_peak = 0;
+  std::uint64_t memory_allocated = 0;
+  std::uint64_t allocations = 0;
+  std::int64_t memory_retained = 0;
+  std::int64_t memory_unattributed = 0;
+  std::vector<KindRetained> retained_by_kind;
 };
 
 // The schema hash of the messages, derived by reflection (§3.1).

@@ -14,3 +14,6 @@ ycxxc_unit_test(engine_scheduler scheduler_test.cpp ycxxc_engine)
 
 # The engine's additions for the daemon (#95): providers, durabilities, reset_unobserved, counts.
 ycxxc_unit_test(engine_inputs inputs_test.cpp ycxxc_engine)
+
+# Memory (#274): attribution to cells across workers, kinds' retained bytes, process totals.
+ycxxc_unit_test(engine_memory memory_test.cpp ycxxc_engine ycxxc_new)
