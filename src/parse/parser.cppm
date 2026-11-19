@@ -1294,7 +1294,9 @@ public:
       bool later = s_->types().is_class(t) || s_->types().kind(t) == sema::TypeKind::enum_ ||
                    s_->types().is_floating(t);  // structural, not supported yet (floating: #317)
       s_->diag(at, later ? Diag::not_supported : Diag::invalid_template_parameter_type,
-               s_->types().is_class(t) ? Tk::kw_class : Tk::kw_enum);
+               s_->types().is_class(t)      ? Tk::kw_class
+               : s_->types().is_floating(t) ? (s_->types().is(t, Builtin::float_) ? Tk::kw_float : Tk::kw_double)
+                                            : Tk::kw_enum);
       ok = false;
       return std::nullopt;
     }
