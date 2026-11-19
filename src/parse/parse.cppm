@@ -2662,6 +2662,15 @@ private:
   }
 
   // A constructor or destructor defined outside its class: `N::C::C(…)`, `C::~C()`.
+  // Whether member `r` is what a definition outside the class defines: a member template when
+  // the definition's innermost head is the member's own, with an equivalent head and
+  // constraints ([temp.over.link]/4-6), otherwise a member that is no template.
+  bool same_template(const sema::MemberDeclRec& r, bool member_template) {
+    if (r.is_template != member_template) return false;
+    if (!member_template) return true;
+    const sema::EntityRec& e = p_->world().entities.rec(r.entity);
+    return e.head == head_fp(s_.template_scopes.back()) && e.constraints == constraints_fp_;
+  }
   void out_of_class_special(QualType cls, u32 next) {
     EntityId c = s_.types().class_of(cls);
     for (u32 j = 0; j < next; ++j) ps_.bump();
@@ -2679,10 +2688,14 @@ private:
     QualType type = s_.types().function(s_.builtin(sema::Builtin::void_), ps, fs.variadic, LangLinkage::cxx, fs.cv);
     // Complete here: this unit has analysed the class, so it knows the members' declarations.
     const sema::ClassRec* cr = q_.is_complete(c) ? p_->classes_.find(c) : nullptr;
+    // A constructor template's definition: the innermost head is its own ([temp.mem]/1).
+    const bool member_template = member_template_ || (template_ && s_.world().entities.rec(c).templ == EntityId::none);
     const sema::MemberDeclRec* m = nullptr;
     if (cr)
       for (const sema::MemberDeclRec& r : cr->members)
-        if ((ctor ? r.is_ctor : r.is_dtor) && s_.types().canonical(r.type) == s_.types().canonical(type)) m = &r;
+        if ((ctor ? r.is_ctor : r.is_dtor) && s_.types().canonical(r.type) == s_.types().canonical(type) &&
+            same_template(r, member_template))
+          m = &r;
     if (!m) {
       s_.diag(name_at, Diag::no_member_declared, p_->world().entities.rec(c).name, cls);
       return bad();
@@ -2701,8 +2714,10 @@ private:
     std::vector<ast::ParamSema> params;
     for (const parse::Param& p : fs.params) params.push_back({EntityId::none, p.type, p.name, NodeId::none, p.element ? sema::param_flag::pack_element : u16(0)});
     sem.params = b_.seq(std::span<const ast::ParamSema>(params));
-    // A class template's constructor or destructor defined outside it: the head is its body's.
-    if (template_) sem.template_params = b_.seq(std::span<const ast::TemplateParamSema>(s_.template_scopes.front()));
+    // A class template's constructor or destructor defined outside it: the head is its body's; a
+    // constructor template's, its own.
+    if (member_template) sem.template_params = b_.seq(std::span<const ast::TemplateParamSema>(s_.template_scopes.back()));
+    else if (template_) sem.template_params = b_.seq(std::span<const ast::TemplateParamSema>(s_.template_scopes.front()));
     p_->declared(sem, k_);
     declarators_.push_back(s_.node(ast::Declarator{u32(decls_.size()), {}, ConstId::none}, name_at, ps_.pos()));
     decls_.push_back(sem);
@@ -2844,7 +2859,9 @@ private:
     if (s_.types().canonical(own) != s_.types().canonical(sem.type)) sem.type = own;
     const sema::MemberDeclRec* m = nullptr;
     for (const sema::MemberDeclRec& r : cr->members)
-      if (r.name == d.name && r.is_function == fn && s_.types().canonical(r.type) == s_.types().canonical(sem.type)) m = &r;
+      if (r.name == d.name && r.is_function == fn && s_.types().canonical(r.type) == s_.types().canonical(sem.type) &&
+          same_template(r, member_template_))
+        m = &r;
     if (!m || (!fn && !m->is_static)) {
       s_.diag(d.name_at, Diag::no_member_declared, d.name, *t);
       return false;
@@ -3077,9 +3094,16 @@ private:
   const ast::ItemSema& earlier_sema(u32 m) { return earlier(m); }
 
   bool member_declared(NameId n, std::optional<QualType> function = std::nullopt) {
+    // Functions clash when they have the same type and are both templates with equivalent heads and
+    // constraints, or both not templates ([temp.over.link]/4-6, [over.load]).
     auto clash = [&](const ast::DeclSema& d) {
       if (!function || d.kind != ast::DeclKind::function) return true;
-      return s_.types().canonical(d.type) == s_.types().canonical(*function);
+      if (s_.types().canonical(d.type) != s_.types().canonical(*function)) return false;
+      bool templ = (d.flags & sema::decl_flag::template_) != 0;
+      if (templ != member_template_) return false;
+      if (!templ) return true;
+      const sema::EntityRec& e = p_->world().entities.rec(d.entity);
+      return e.head == head_fp(s_.template_scopes.back()) && e.constraints == constraints_fp_;
     };
     for (const auto& o : s_.own)
       if (o.name == n && clash(o.sema)) return true;
@@ -4420,6 +4444,8 @@ const Program::Instance* Program::instance(EntityId spec, u32 point) {
   if (instantiating_.contains(key)) return nullptr;  // its own constant evaluation (#88 follow-up)
   if (explicitly_specialized(spec, point)) return nullptr;  // defined, or not, by its explicit specialization
   const sema::EntityRec& rec = w_->entities.rec(spec);
+  // A template is no function: only its specializations are instantiated ([temp.inst]).
+  if (rec.kind == sema::EntityKind::function_template) return nullptr;
   // A member function of a class template specialization ([temp.inst]/4): its pattern is its
   // member item, defined in the class.
   auto member = member_patterns_.find(key);

@@ -886,9 +886,21 @@ public:
     const ClassRec* c = class_rec(types().class_of(t));
     return c && std::ranges::any_of(c->members, [&](const MemberDeclRec& m) { return m.name == name && m.is_template; });
   }
-  // Explicit template arguments for member `e`'s function templates ([temp.arg.explicit]).
+  // Explicit template arguments for the function templates `e` names, a member or an overload set
+  // ([temp.arg.explicit]).
   void explicit_template_args(const Ex& e, std::vector<TemplateArg> args) {
-    if (e.ok() && is_bound_member(e)) explicit_args_[std::to_underlying(e.id)] = std::move(args);
+    if (e.ok() && (is_bound_member(e) || types().is(e.type(), Builtin::overload_set)))
+      explicit_args_[std::to_underlying(e.id)] = std::move(args);
+  }
+  bool class_has_member_template(EntityId c, NameId name) {
+    const ClassRec* r = class_rec(c);
+    return r && std::ranges::any_of(r->members, [&](const MemberDeclRec& m) { return m.name == name && m.is_template; });
+  }
+  // Whether `S::name` names a function template ([temp.names]/3): a member template of class S,
+  // or a function template of namespace S.
+  bool scope_names_template(const Scope& sc, NameId name) {
+    if (sc.ns) return namespace_template(*sc.ns, name, ast::DeclKind::function).has_value();
+    return sc.type && types().is_class(*sc.type) && class_has_member_template(types().class_of(*sc.type), name);
   }
   Ex member(Ex object, bool arrow, NameId name, u32 end, u32 op_at, u32 name_at) {
     u32 begin = object.begin;
@@ -1629,7 +1641,9 @@ public:
     for (auto s = scopes_.rbegin(); s != scopes_.rend(); ++s)
       for (auto p = s->rbegin(); p != s->rend(); ++p)
         if (p->first == name) return false;
-    if (template_param(name) || names_member(name)) return false;
+    if (template_param(name)) return false;
+    // A member template of the class whose member is being analysed ([temp.mem]).
+    if (names_member(name)) return current_class != EntityId::none && class_has_member_template(current_class, name);
     for (const BlockUsing& u : block_usings_)
       if (u.name == name) return std::ranges::any_of(u.decls, [](const ast::DeclSema& d) { return (d.flags & decl_flag::template_) != 0; });
     for (const OwnDecl& o : own)
@@ -1646,7 +1660,7 @@ public:
     if (auto c = concept_named(name)) return concept_id_expr(*c, args, begin, end);
     Ex r = name_expr(name, begin, end);
     if (!r.ok()) return r;
-    if (!types().is(r.type(), Builtin::overload_set)) {
+    if (!types().is(r.type(), Builtin::overload_set) && !is_bound_member(r)) {
       diag(begin, Diag::not_a_template, name);
       return {NodeId::none, begin, end};
     }
@@ -2198,6 +2212,8 @@ public:
         if (!targs) continue;
         auto st = t.specialization_type(td, *targs);
         if (!st || (copy_init && types().rec(*st).params.size() != 1)) continue;
+        // [class.copy.ctor]/5: never `S(S)`, a constructor taking its own class by value.
+        if (TypeRec sr = types().rec(*st); sr.params.size() == 1 && Types::unqualified(types().canonical(sr.params[0])) == ut) continue;
         cands.push_back({specialization(td, *targs, *st), *st, true, m.is_deleted, &td});
       } else if (m.is_ctor) {
         TypeRec fr = types().rec(m.type);
