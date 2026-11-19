@@ -27,6 +27,7 @@ struct FeatureMacro {
 inline constexpr std::array feature_macros{
     FeatureMacro{"__cpp_binary_literals", "201304L"},           // ycxx.lex
     FeatureMacro{"__cpp_decltype_auto", "201304L"},             // θ step 1 (#279)
+    FeatureMacro{"__cpp_generic_lambdas", "201304L"},           // θ step 3 (#281): not yet requires-clauses (#350)
     FeatureMacro{"__cpp_hex_float", "201603L"},                 // ycxx.lex
     FeatureMacro{"__cpp_init_captures", "201304L"},             // θ step 2 (#280): not yet packs (#281)
     FeatureMacro{"__cpp_named_character_escapes", "202606L"},   // ycxx.lex

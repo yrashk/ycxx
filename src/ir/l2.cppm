@@ -35,23 +35,27 @@ using ir::raw;
 export using ir::bit;
 export using ir::none;
 
-// Value types. `i1` is a truth value; `ptr` is 64 bits.
-export enum class Type : std::uint8_t { state, i1, i8, i16, i32, i64, ptr };
+// Value types. `i1` is a truth value; `ptr` is 64 bits; `f32` and `f64` are IEEE binary32 and
+// binary64 values.
+export enum class Type : std::uint8_t { state, i1, i8, i16, i32, i64, ptr, f32, f64 };
 
 export constexpr std::uint32_t bits(Type t) {
   switch (t) {
     case Type::i1: return 1;
     case Type::i8: return 8;
     case Type::i16: return 16;
-    case Type::i32: return 32;
+    case Type::i32:
+    case Type::f32: return 32;
     case Type::i64:
-    case Type::ptr: return 64;
+    case Type::ptr:
+    case Type::f64: return 64;
     case Type::state: return 0;
   }
   return 0;
 }
 export constexpr std::uint32_t bytes(Type t) { return t == Type::i1 ? 1 : bits(t) / 8; }
-export constexpr bool is_int(Type t) { return t != Type::state && t != Type::ptr; }
+export constexpr bool is_float(Type t) { return t == Type::f32 || t == Type::f64; }
+export constexpr bool is_int(Type t) { return t != Type::state && t != Type::ptr && !is_float(t); }
 export constexpr std::optional<Type> int_of_bits(std::uint64_t n) {
   switch (n) {
     case 1: return Type::i1;
@@ -65,7 +69,7 @@ export constexpr std::optional<Type> int_of_bits(std::uint64_t n) {
 
 // Immediate operands.
 export enum class Imm : std::uint8_t {
-  i64,     // a constant's bits, sign-extended from its width
+  i64,     // a constant's bits: an integer's sign-extended from its width, a float's encoding
   entity,  // a function or variable
   u32,     // a size, an alignment, an ordinal
   pred,    // a Pred
@@ -134,6 +138,22 @@ export enum class Op : std::uint16_t {
   xor_ [[=pure({V, V}, {V})]],
   icmp [[=pure({V, V}, {V}).imms({pred})]],  // integers or pointers; result i1
   select [[=pure({V, V, V}, {V})]],
+
+  // Floating point, IEEE in round-to-nearest-even. `fcmp`'s predicates are the plain ones, ordered
+  // but for `ne`; the conversions to integers truncate, and a value out of range is poison.
+  fadd [[=pure({V, V}, {V})]],
+  fsub [[=pure({V, V}, {V})]],
+  fmul [[=pure({V, V}, {V})]],
+  fdiv [[=pure({V, V}, {V})]],
+  fneg [[=pure({V}, {V})]],
+  fabs [[=pure({V}, {V})]],
+  fcmp [[=pure({V, V}, {V}).imms({pred})]],  // result i1
+  fpext [[=pure({V}, {V})]],                 // f32 to f64
+  fptrunc [[=pure({V}, {V})]],               // f64 to f32, rounded
+  fptosi [[=pure({V}, {V})]],                // to i32 or i64
+  fptoui [[=pure({V}, {V})]],
+  sitofp [[=pure({V}, {V})]],                // from i32 or i64, rounded
+  uitofp [[=pure({V}, {V})]],
 
   // Width changes, to the result type.
   zext [[=pure({V}, {V})]],
@@ -352,7 +372,7 @@ export std::string print(EntityId name, const Function& f) {
 }
 
 export std::string_view name_of(Type t) {
-  static constexpr std::string_view names[] = {"!state", "i1", "i8", "i16", "i32", "i64", "ptr"};
+  static constexpr std::string_view names[] = {"!state", "i1", "i8", "i16", "i32", "i64", "ptr", "f32", "f64"};
   return names[std::to_underlying(t)];
 }
 
@@ -414,8 +434,29 @@ std::expected<void, std::string> verify(const Function& f) {
         case Op::neg:
           if (!is_int(r) || t(0) != r) return at("operand and result must be one integer type");
           break;
+        case Op::fadd: case Op::fsub: case Op::fmul: case Op::fdiv:
+          if (!is_float(r) || t(0) != r || t(1) != r) return at("operands and result must be one floating type");
+          break;
+        case Op::fneg: case Op::fabs:
+          if (!is_float(r) || t(0) != r) return at("operand and result must be one floating type");
+          break;
+        case Op::fcmp:
+          if (r != Type::i1 || !is_float(t(0)) || t(0) != t(1)) return at("compares two values of one floating type into i1");
+          break;
+        case Op::fpext:
+          if (r != Type::f64 || t(0) != Type::f32) return at("extends an f32 to f64");
+          break;
+        case Op::fptrunc:
+          if (r != Type::f32 || t(0) != Type::f64) return at("rounds an f64 to f32");
+          break;
+        case Op::fptosi: case Op::fptoui:
+          if ((r != Type::i32 && r != Type::i64) || !is_float(t(0))) return at("converts a floating value to i32 or i64");
+          break;
+        case Op::sitofp: case Op::uitofp:
+          if (!is_float(r) || (t(0) != Type::i32 && t(0) != Type::i64)) return at("converts an i32 or i64 to a floating type");
+          break;
         case Op::icmp:
-          if (r != Type::i1 || t(0) != t(1)) return at("compares two values of one type into i1");
+          if (r != Type::i1 || t(0) != t(1) || is_float(t(0))) return at("compares two integers or pointers of one type into i1");
           break;
         case Op::select:
           if (t(0) != Type::i1 || t(1) != r || t(2) != r) return at("selects between two values of the result type by an i1");

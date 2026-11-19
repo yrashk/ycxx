@@ -2,8 +2,12 @@
 //
 // The first allocator gives every virtual register an 8-byte stack slot (`-O0`-like and
 // debuggable): each instruction loads its operands from their slots into the convention's
-// scratch registers and stores its result back. SSA linear scan replaces it at level 1, and the
-// allocation validator (#29) checks both.
+// scratch registers, floating ones into its floating scratch registers, and stores its result
+// back. SSA linear scan replaces it at level 1, and the allocation validator (#29) checks both.
+//
+// A form's register operands are general-purpose registers. Where a floating value takes their
+// place, expansion picks the form's floating counterpart: a load or store of a SIMD&FP register,
+// FCSEL for CSEL, FMOV for MOVrr and, after a MOVi, FMOV from the integer register built.
 //
 // The frame, from sp upwards: the outgoing stack arguments, the slots, the frame objects
 // (`alloca`), then the frame record (x29, x30), which x29 points at:
@@ -46,17 +50,18 @@ void allocate_slots(MFunction& f, const CallingConvention& cc) {
     for (const MInst& in : b.insts) {
       MInst r = in;
       std::vector<MInst> after;
-      std::size_t next = 0;
+      std::size_t next = 0, next_fp = 0;
       auto ops = spec_of(in.form).ops.view();
+      auto fp = [&](std::uint8_t i) { return l2::is_float(f.vregs[in.ops[i].v]); };
       for (std::uint8_t i = 0; i < in.nops; ++i) {
         if (in.ops[i].kind != MK::vreg || ops[i].role != Role::use) continue;
-        R s = cc.scratch[next++];
+        R s = fp(i) ? cc.fp_scratch[next_fp++] : cc.scratch[next++];
         out.push_back({Form::LDRfi, true, 3, 3, {MOp::preg(s), {MK::slot, in.ops[i].v}, MOp::imm(0)}, in.origin});
         r.ops[i] = MOp::preg(s);
       }
       for (std::uint8_t i = 0; i < in.nops; ++i) {
         if (in.ops[i].kind != MK::vreg || ops[i].role != Role::def) continue;
-        R s = cc.scratch[0];
+        R s = fp(i) ? cc.fp_scratch[0] : cc.scratch[0];
         after.push_back({Form::STRfi, true, 3, 3, {MOp::preg(s), {MK::slot, in.ops[i].v}, MOp::imm(0)}, in.origin});
         r.ops[i] = MOp::preg(s);
       }
@@ -165,14 +170,27 @@ class Expander {
   }
 
   // A load or store of `access` at sp + off.
-  void frame_access(Form form, std::int64_t r, std::uint64_t off, std::uint8_t access) {
+  void frame_access(bool load, R r, std::uint64_t off, std::uint8_t access) {
+    Form form = is_fp(r) ? (load ? Form::LDRuiF : Form::STRuiF) : (load ? Form::LDRui : Form::STRui);
     std::uint64_t s = std::uint64_t(1) << access;
     if (off % s == 0 && off / s < 4096) {
-      put(form, true, {r, enc(R::sp), std::int64_t(off)}, access);
+      put(form, true, {enc(r), enc(R::sp), std::int64_t(off)}, access);
       return;
     }
     add_imm(cc_.ip0, R::sp, off);
-    put(form, true, {r, enc(cc_.ip0), 0}, access);
+    put(form, true, {enc(r), enc(cc_.ip0), 0}, access);
+  }
+
+  // The floating counterpart of a form whose register operand is a SIMD&FP register.
+  static Form fp_form(Form f) {
+    switch (f) {
+      case Form::LDRui: return Form::LDRuiF;
+      case Form::STRui: return Form::STRuiF;
+      case Form::LDRlo: return Form::LDRloF;
+      case Form::STRlo: return Form::STRloF;
+      case Form::CSEL: return Form::FCSEL;
+      default: return f;
+    }
   }
 
   // MOVZ or MOVN, then MOVK for each remaining halfword (C6.2, "MOV (wide immediate)").
@@ -205,12 +223,23 @@ class Expander {
   void inst(const MInst& in) {
     auto op = [&](std::size_t i) { return in.ops[i]; };
     switch (in.form) {
-      case Form::MOVi: mov_imm(reg(op(0)), op(1).v, in.wide); return;
+      case Form::MOVi:
+        // A floating constant's bits are built in ip0 and moved over.
+        if (is_fp(R(op(0).v))) {
+          mov_imm(enc(cc_.ip0), op(1).v, in.wide);
+          put(Form::FMOVtoF, in.wide, {reg(op(0)), enc(cc_.ip0)});
+          return;
+        }
+        mov_imm(reg(op(0)), op(1).v, in.wide);
+        return;
       case Form::CSET:
         put(Form::CSINC, in.wide, {reg(op(0)), enc(R::zr), enc(R::zr), std::to_underlying(invert(Cond(op(1).v)))});
         return;
       case Form::MOVrr:
-        if (R(op(0).v) == R::sp || R(op(1).v) == R::sp) put(Form::ADDri, true, {reg(op(0)), reg(op(1)), 0});
+        if (is_fp(R(op(0).v)) && is_fp(R(op(1).v))) put(Form::FMOVrr, true, {reg(op(0)), reg(op(1))});
+        else if (is_fp(R(op(0).v))) put(Form::FMOVtoF, true, {reg(op(0)), reg(op(1))});
+        else if (is_fp(R(op(1).v))) put(Form::FMOVtoI, true, {reg(op(0)), reg(op(1))});
+        else if (R(op(0).v) == R::sp || R(op(1).v) == R::sp) put(Form::ADDri, true, {reg(op(0)), reg(op(1)), 0});
         else put(Form::ORRrr, in.wide, {reg(op(0)), enc(R::zr), reg(op(1))});
         return;
       case Form::ADDfi: {
@@ -223,8 +252,7 @@ class Expander {
       }
       case Form::LDRfi:
       case Form::STRfi:
-        frame_access(in.form == Form::LDRfi ? Form::LDRui : Form::STRui, reg(op(0)),
-                     frame_address(op(1)) + std::uint64_t(op(2).v), in.access);
+        frame_access(in.form == Form::LDRfi, R(op(0).v), frame_address(op(1)) + std::uint64_t(op(2).v), in.access);
         return;
       case Form::RETp:
         put(Form::ADDri, true, {enc(R::sp), enc(R::fp), 0});
@@ -235,9 +263,11 @@ class Expander {
     }
     Real r;
     r.e.form = in.form;
+    for (std::uint8_t i = 0; i < in.nops; ++i)
+      if (in.ops[i].kind == MK::preg && is_fp(R(in.ops[i].v))) r.e.form = fp_form(in.form);
     r.e.wide = in.wide;
     r.e.access = in.access;
-    const FormSpec& s = spec_of(in.form);
+    const FormSpec& s = spec_of(r.e.form);
     for (std::uint8_t i = 0; i < in.nops; ++i) {
       const MOp& m = in.ops[i];
       switch (m.kind) {
@@ -252,7 +282,7 @@ class Expander {
           r.sym = m.v;
           r.reloc = s.reloc;
           break;
-        default: error = std::format("{}: operand {} is not allocated", info(in.form).name, i); return;
+        default: error = std::format("{}: operand {} is not allocated", info(r.e.form).name, i); return;
       }
     }
     code.push_back(r);

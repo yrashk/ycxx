@@ -29,7 +29,7 @@ public:
     };
   }
   ConstId string_address(ConstId s) { return w_->values.address({}, s, 0); }
-  bool is_constexpr(EntityId f) { return q_->is_constexpr(f); }
+  bool is_constexpr(EntityId f) { return Sema::closure_member(*w_, f) || q_->is_constexpr(f); }
   bool is_main(EntityId) { return false; }  // `main` is never evaluated ([basic.start.main])
   std::optional<std::uint32_t> ellipsis_after(EntityId f) { return parameters_before_ellipsis(w_->entities.rec(f).type); }
 
@@ -68,7 +68,8 @@ public:
       l.decl = NodeId::none;  // drafts of the enclosing frame
       // In a template's definition a local of dependent type has no object yet; a non-dependent
       // expression cannot name it, so it stands as an `int` outside its lifetime.
-      if (s_->types().is_dependent(l.type)) l.type = s_->builtin(Builtin::int_);
+      // So does a variable whose initializer is being read to deduce its placeholder type.
+      if (s_->types().is_dependent(l.type) || s_->types().has_placeholder(l.type)) l.type = s_->builtin(Builtin::int_);
     }
     ast::DeclSema thunk{};
     thunk.entity = EntityId::none;
@@ -83,7 +84,7 @@ public:
     EvalFacts facts(s_->world(), *q_);
     auto body = irgen::function_ir(in, input, facts);
     if (!body) return {};
-    Host host{q_};
+    Host host{q_, this};
     interp::Outcome out = interp::evaluate(host, in, target, body->body, EntityId::none, {}).run();
     if (out.status != interp::Outcome::Status::value && q_->instantiation_gave_up())
       return {std::nullopt, reason_unsupported, false, true};
@@ -103,7 +104,11 @@ public:
 private:
   struct Host {
     Questions* q;
-    interp::ready<interp::Callee> body(EntityId f) { return {q->function_ir(f)}; }
+    Evaluator* e;
+    interp::ready<interp::Callee> body(EntityId f) {
+      if (auto c = e->closure_callee(f)) return {*c};
+      return {q->function_ir(f)};
+    }
     interp::ready<std::optional<interp::GlobalVar>> global(EntityId v) { return {q->global(v)}; }
     bool stop_requested() const { return false; }  // until the scheduler has stop tokens (#15)
   };
@@ -115,6 +120,7 @@ private:
     using K = interp::Result::Kind;
     switch (r.kind) {
     case K::integer: return {vs.integer(r.type, r.bits), 0, true};
+    case K::floating: return {ast::float_value(s_->ins(), target, r.type, ast::Bits128{r.bits, 0}), 0, true};
     case K::null: return {vs.null_pointer(r.type), 0, true};
     case K::function: return {vs.address(r.type, vs.entity(r.entity), 0), 0, true};
     case K::address:
@@ -128,8 +134,35 @@ private:
     return {};
   }
 
+  // A member of a closure of the part being analysed, which is not committed yet
+  // (docs/design/closures.md, decision 12): its L1 from the drafts, committed now.
+  std::optional<interp::Callee> closure_callee(EntityId f) {
+    for (std::size_t i = 0; i < s_->closures.size(); ++i) {
+      const ast::ClosureDef& c = s_->closures[i];
+      if (c.call != f && c.invoker != f) continue;
+      std::vector<ast::LocalRec> locals = s_->closure_locals[i];
+      for (ast::LocalRec& l : locals) l.decl = NodeId::none;  // drafts
+      ast::Child body = s_->builder().commit(ast::Child{c.call == f ? c.body : c.invoker_body, 0});
+      Sema::ClosureMember m = Sema::closure_member_def(s_->world(), c, f, body.id, std::move(locals));
+      irgen::FunctionInput input{f, m.decl, m.body, s_->item(), s_->loc_base() + c.body_begin, false, {}, m.this_type};
+      EvalFacts facts(s_->world(), *q_);
+      interp::Callee r;
+      r.is_constexpr = true;
+      auto ir = irgen::function_ir(s_->ins(), input, facts);
+      if (!ir) {
+        r.unsupported = true;
+        return r;
+      }
+      owned_.push_back(std::move(*ir));
+      r.body = &owned_.back().body;
+      return r;
+    }
+    return std::nullopt;
+  }
+
   Sema* s_;
   Questions* q_;
+  std::deque<irgen::FunctionIr> owned_;  // the bodies `closure_callee` made, for the evaluation
 };
 
 }  // namespace ycxx::sema

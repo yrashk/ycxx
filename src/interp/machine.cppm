@@ -47,8 +47,9 @@ struct Config {
 };
 
 // A value in a register or a cell. An integer (bool and the character types included) is held
-// normalized to its type: sign-extended from its width when signed, zero-extended otherwise.
-enum class VKind : u8 { none, integer, null, object, function };
+// normalized to its type: sign-extended from its width when signed, zero-extended otherwise. A
+// floating value is its encoding in its type's format, binary32 in the low 32 bits.
+enum class VKind : u8 { none, integer, null, object, function, floating };
 struct Value {
   VKind kind = VKind::none;
   bool past = false;  // object: one past the end of a non-array object
@@ -56,6 +57,7 @@ struct Value {
   u64 bits = 0;       // integer: the value; object: the access path's id
 
   static constexpr Value integer(u64 bits) { return {VKind::integer, false, 0, bits}; }
+  static constexpr Value floating(u64 bits) { return {VKind::floating, false, 0, bits}; }
   static constexpr Value null() { return {VKind::null}; }
   static constexpr Value function(EntityId e) { return {VKind::function, false, std::to_underlying(e), 0}; }
   constexpr bool operator==(const Value&) const = default;
@@ -93,10 +95,10 @@ struct Failure {
 // A result, described without the machine's object numbers.
 enum class Base : u8 { global, literal, local };
 struct Result {
-  enum class Kind : u8 { integer, null, address, function };
+  enum class Kind : u8 { integer, null, address, function, floating };
   Kind kind = Kind::integer;
   QualType type{};
-  u64 bits = 0;              // integer, normalized to `type`
+  u64 bits = 0;              // integer, normalized to `type`; floating, its encoding
   Base base = Base::local;   // address
   EntityId entity{};         // address of a global; function
   ConstId literal{};         // address within a string literal object
@@ -141,7 +143,7 @@ private:
   enum class Fill : u8 { indeterminate, erroneous, value, constant };
   enum class Origin : u8 { automatic, global, literal };
   enum class Use : u8 { read, write, lifetime };
-  enum class Kind : u8 { integer, pointer, array, function, other };
+  enum class Kind : u8 { integer, pointer, array, function, floating, other };
 
   struct Cell {
     Life life = Life::before;
@@ -165,7 +167,7 @@ private:
   };
   struct Shape {
     Kind kind = Kind::other;
-    u32 width = 0;  // integer
+    u32 width = 0;  // integer; floating: 32 (binary32) or 64 (binary64)
     bool is_signed = false;
     QualType inner{};  // pointee or element; none for std::nullptr_t
     bool is_nullptr = false;
@@ -247,6 +249,12 @@ private:
   Flow divide(Frame& f, NodeId n);
   Flow shift(Frame& f, NodeId n);
   Flow compare_pointers(Frame& f, NodeId n, ir::Pred pred, const Value& a, const Value& b);
+
+  // Floating-point helpers: the shape of a floating type, the operations and the conversions.
+  Flow float_shape(QualType t, const Shape*& s);
+  Flow float_arith(Frame& f, NodeId n);
+  Flow float_compare(Frame& f, NodeId n);
+  Flow float_convert(Frame& f, NodeId n);
   Flow pointer_index(const Value& p, QualType elem, u32& base_path, i64& index, u64& bound, bool& single);
 
   const ast::Interners* in_;
@@ -293,6 +301,11 @@ const Machine::Shape& Machine::shape(QualType q) {
       s.kind = Kind::integer;
       s.width = ast::width_of(*target_, *b);
       s.is_signed = ast::is_signed(*target_, *b);
+      s.leaves = 1;
+      s.size = (*target_)[*b].size;
+    } else if (ast::is_floating(*b) && ast::computes((*target_)[*b].format)) {
+      s.kind = Kind::floating;
+      s.width = (*target_)[*b].format == ast::FloatFormat::binary32 ? 32 : 64;
       s.leaves = 1;
       s.size = (*target_)[*b].size;
     } else if (*b == ast::Builtin::nullptr_t) {
@@ -392,7 +405,7 @@ void Machine::fill_zero(QualType t, u32 cell) {
     return;
   }
   cells_[cell].fill = Fill::value;
-  cells_[cell].v = s.kind == Kind::pointer ? Value::null() : Value::integer(0);
+  cells_[cell].v = s.kind == Kind::pointer ? Value::null() : s.kind == Kind::floating ? Value::floating(0) : Value::integer(0);
 }
 
 // The subobject `p` designates, followed by `extra`. `past` is set when it is one past the end
@@ -502,6 +515,11 @@ Machine::Flow Machine::constant(ConstId c, QualType type, Value& out) {
   if (vs.is<ast::VInt>(c)) {
     if (s.kind != Kind::integer) return fail(Reason::ill_formed);
     out = Value::integer(norm(vs.get<ast::VInt>(c).bits.lo, s.width, s.is_signed));
+    return Flow::next;
+  }
+  if (vs.is<ast::VFloat>(c)) {
+    if (s.kind != Kind::floating) return fail(Reason::ill_formed);
+    out = Value::floating(vs.get<ast::VFloat>(c).bits.lo);
     return Flow::next;
   }
   if (vs.is<ast::VNullptr>(c)) {
@@ -716,6 +734,123 @@ Machine::Flow Machine::shift(Frame& f, NodeId n) {
   return set(f, n, Value::integer(norm(r, s->width, s->is_signed)));
 }
 
+// ------------------------------------------------------------------ floating point
+
+// Values are computed in the type's own format, binary32 as `float` and binary64 as `double`, with
+// the host's IEEE arithmetic in its default mode: round to nearest, ties to even. [expr.pre]/6
+// would allow greater precision; ycxx computes as the target's code does, so both agree.
+template <class T>
+using FloatBits = std::conditional_t<sizeof(T) == 4, u32, u64>;
+template <class T>
+T decode(u64 bits) { return std::bit_cast<T>(static_cast<FloatBits<T>>(bits)); }
+template <class T>
+u64 encode(T x) { return std::bit_cast<FloatBits<T>>(x); }
+// `x` truncated to an integer of `width` bits ([conv.fpint]); none when that does not fit.
+template <class T>
+std::optional<u64> truncate(T x, u32 width, bool is_signed) {
+  if (!std::isfinite(x)) return std::nullopt;
+  T t = std::trunc(x);
+  // 2^(width - 1) and 2^width are exact in both formats.
+  T top = std::ldexp(T(1), int(is_signed ? width - 1 : width));
+  if (is_signed ? (t < -top || t >= top) : (t <= T(-1) || t >= top)) return std::nullopt;
+  return is_signed ? u64(std::int64_t(t)) : u64(t);
+}
+
+Machine::Flow Machine::float_shape(QualType t, const Shape*& s) {
+  s = &shape(t);
+  if (s->kind != Kind::floating) return fail(Reason::ill_formed);
+  return Flow::next;
+}
+
+// fadd, fsub, fmul, fdiv, fneg, fabs. In constant mode ([expr.const], [expr.pre]/4), a division by zero
+// ([expr.mul]/4) and an arithmetic NaN result, which is not mathematically defined, are not
+// constant; an overflow to an infinity is, as in Clang, and so are fneg and fabs of a NaN, which
+// only change its sign. In runtime mode the operations are IEEE's.
+Machine::Flow Machine::float_arith(Frame& f, NodeId n) {
+  const ir::Node& nd = f.fn->node(n);
+  const Shape* s;
+  if (Flow fl = float_shape(result_type(f, n), s); fl != Flow::next) return fl;
+  Value a = operand(f, n, 0), b = nd.op == Op::fneg || nd.op == Op::fabs ? a : operand(f, n, 1);
+  if (a.kind != VKind::floating || b.kind != VKind::floating) return fail(Reason::ill_formed);
+  auto compute = [&](auto x, auto y) -> Flow {
+    using T = decltype(x);
+    T r{};
+    switch (nd.op) {
+    case Op::fadd: r = x + y; break;
+    case Op::fsub: r = x - y; break;
+    case Op::fmul: r = x * y; break;
+    case Op::fdiv:
+      if (config_.mode == Mode::constant && y == T(0)) return fail(Reason::division_by_zero);
+      r = x / y;
+      break;
+    case Op::fneg: r = -x; break;
+    case Op::fabs: r = std::fabs(x); break;
+    default: return unsupported(n);
+    }
+    if (config_.mode == Mode::constant && nd.op != Op::fneg && nd.op != Op::fabs && std::isnan(r))
+      return fail(Reason::float_nan);
+    return set(f, n, Value::floating(encode(r)));
+  };
+  if (s->width == 32) return compute(decode<float>(a.bits), decode<float>(b.bits));
+  return compute(decode<double>(a.bits), decode<double>(b.bits));
+}
+
+// [expr.rel], [expr.eq]: IEEE's comparisons; a NaN is unordered, so only `!=` holds for it.
+Machine::Flow Machine::float_compare(Frame& f, NodeId n) {
+  const Shape* s;
+  if (Flow fl = float_shape(type_of(f, f.fn->operands_of(n)[0]), s); fl != Flow::next) return fl;
+  Value a = operand(f, n, 0), b = operand(f, n, 1);
+  if (a.kind != VKind::floating || b.kind != VKind::floating) return fail(Reason::ill_formed);
+  auto compare = [&](auto x, auto y) -> Flow {
+    bool r;
+    switch (ir::Pred(f.fn->imms_of(n)[0])) {
+      using enum ir::Pred;
+    case eq: r = x == y; break;
+    case ne: r = x != y; break;
+    case lt: r = x < y; break;
+    case le: r = x <= y; break;
+    case gt: r = x > y; break;
+    case ge: r = x >= y; break;
+    default: return fail(Reason::ill_formed);
+    }
+    return set(f, n, Value::integer(r));
+  };
+  if (s->width == 32) return compare(decode<float>(a.bits), decode<float>(b.bits));
+  return compare(decode<double>(a.bits), decode<double>(b.bits));
+}
+
+// fconv ([conv.double], [conv.fpprom]: rounded to nearest; beyond the range, an infinity, as in
+// Clang), f2i ([conv.fpint]: truncated; a value the integer type cannot hold is undefined), i2f
+// ([conv.fpint]: rounded to nearest).
+Machine::Flow Machine::float_convert(Frame& f, NodeId n) {
+  const ir::Node& nd = f.fn->node(n);
+  const Shape& to = shape(result_type(f, n));
+  const Shape& from = shape(type_of(f, f.fn->operands_of(n)[0]));
+  Value a = operand(f, n, 0);
+  switch (nd.op) {
+  case Op::fconv: {
+    if (to.kind != Kind::floating || from.kind != Kind::floating || a.kind != VKind::floating) return fail(Reason::ill_formed);
+    if (from.width == to.width) return set(f, n, a);
+    if (to.width == 32) return set(f, n, Value::floating(encode(static_cast<float>(decode<double>(a.bits)))));
+    return set(f, n, Value::floating(encode(static_cast<double>(decode<float>(a.bits)))));
+  }
+  case Op::f2i: {
+    if (to.kind != Kind::integer || from.kind != Kind::floating || a.kind != VKind::floating) return fail(Reason::ill_formed);
+    auto r = from.width == 32 ? truncate(decode<float>(a.bits), to.width, to.is_signed)
+                              : truncate(decode<double>(a.bits), to.width, to.is_signed);
+    if (!r) return fail(Reason::float_to_integer);
+    return set(f, n, Value::integer(norm(*r, to.width, to.is_signed)));
+  }
+  case Op::i2f: {
+    if (to.kind != Kind::floating || from.kind != Kind::integer || a.kind != VKind::integer) return fail(Reason::ill_formed);
+    bool s = from.is_signed;
+    if (to.width == 32) return set(f, n, Value::floating(encode(s ? static_cast<float>(i64(a.bits)) : static_cast<float>(a.bits))));
+    return set(f, n, Value::floating(encode(s ? static_cast<double>(i64(a.bits)) : static_cast<double>(a.bits))));
+  }
+  default: return unsupported(n);
+  }
+}
+
 // ------------------------------------------------------------------ pointers
 
 // The array position of `p` seen as a pointer to `elem`: the path of the array it points into
@@ -883,6 +1018,7 @@ std::vector<Result> Machine::results() const {
     switch (v.kind) {
     case VKind::none:
     case VKind::integer: r.kind = Result::Kind::integer; r.bits = v.bits; break;
+    case VKind::floating: r.kind = Result::Kind::floating; r.bits = v.bits; break;
     case VKind::null: r.kind = Result::Kind::null; break;
     case VKind::function: r.kind = Result::Kind::function; r.entity = EntityId(v.ref); break;
     case VKind::object: {

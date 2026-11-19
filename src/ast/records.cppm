@@ -168,6 +168,13 @@ struct ClosureDef {
   u32 body_begin;
   u32 end;
   u16 flags;  // closure_flag
+  // A generic lambda's function call operator is a template ([expr.prim.lambda.closure]/7): its
+  // template-head; its specializations re-analyse the body from `body_begin`, where the enclosing
+  // function's constants it names without capturing them are `consts` with `const_values`.
+  SeqId<TemplateParamSema> template_params;
+  SeqId<LocalRec> consts;
+  SeqId<ConstId> const_values;
+  SeqId<NameId> captures;  // the names its body knows its closure's fields by
   constexpr bool operator==(const ClosureDef&) const = default;
 };
 
