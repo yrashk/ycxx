@@ -69,6 +69,7 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
   concurrency that main did not have, until the daemon session noticed (#226).
   - Do: before merging, check `baseRefName` is `main`, and retarget a stacked PR once its base
     merges. After merging, confirm the merge commit is an ancestor of origin/main.
+  - Rule: AGENTS.md, "PRs and branches".
   - Learned on #139, 2026-11-18.
 
 - **Commits pushed to a PR's branch after it merges never reach main.** #233's Apple-ABI change
@@ -78,7 +79,19 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
     (`gh pr view N --json state`). Once it has merged, start a fresh branch from main for anything
     new, even a follow-up to the same issue.
   - The coordinator's sweep also checks every merged PR's branch for commits that aren't on main.
+  - Rule: AGENTS.md, "PRs and branches".
   - Learned on #116 and #230, 2026-11-18.
+
+- **A PR green on yesterday's main can break today's.** #250's CI passed and it merged with
+  #243 without a textual conflict. Merged, #243's concepts test failed: #250 made every unknown
+  `__builtin_` name "not supported yet", and #243 treats "not supported" as a hard error inside
+  a constraint. Two more PRs that day had CI from before a sibling touching the same files
+  merged.
+  - Do: before merging, if `main` moved after the PR's last CI run, run `tools/test --fast` on
+    the PR merged with `main` (a scratch worktree, `git merge origin/main`), and merge only if it
+    passes and `main` has not moved again.
+  - Rule: AGENTS.md, "PRs and branches".
+  - Learned on #229, 2026-11-19.
 
 ## Working with Fable subagents
 
@@ -245,6 +258,7 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
   now" still saw an event `fseventsd` had not journaled yet.
   - Do: mutate the code under test, and add the delay that makes the event happen before the race
     window (here, 1 s before recreating the stream).
+  - Rule: DECISIONS §5.6.
   - Learned on #96/#97.
 - **libycxx deprecates `std::filesystem::path::string()`** (C++26 [depr.fs.path.obs]), and
   `-Werror` turns it into a build failure.
@@ -260,6 +274,7 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
   `usual_arithmetic` (`>=` to `>` on rank) was equivalent for the standard integer types, and the
   suite rightly stayed green.
   - Do: mutate a branch that some test input must take, and check that the suite turns red.
+  - Rule: DECISIONS §5.6.
   - Learned on #33.
 
 ## Data the front end needs
@@ -396,6 +411,7 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
   the comparison dropped messages.
   - Do: for each check, name the bug it catches and mutate that layer (here the daemon's batch,
     a daemon that dies); compare everything the compiler writes, not a projection of it.
+  - Rule: DECISIONS §5.6.
   - Learned on #19.
 - **A verifier's tests need malformed inputs, not only round trips.** #23's round-trip tests passed
   every op, and the one review still found two P1s in the verifier: a terminator's results accepted
@@ -403,6 +419,7 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
   showed up with a five-line hand-written body.
   - Do: for every rule a verifier enforces, write one body that breaks it and check the error. Do
     the same for every guard the parser relies on.
+  - Rule: DECISIONS §5.6.
   - Learned on #23.
 
 - **Let the oracles' output drive bulk-classification rules.** The draft-example extractor's first
@@ -494,14 +511,6 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
     built-ins), teach `items.cppm`'s declarator scan and its function detection, and test a
     namespace-scope typedef, variable and function template whose type begins with it.
   - Learned on #211.
-- **A stacked PR merges into its base branch, not main, unless retargeted.** #198 was opened on
-  #191's branch. When #191 merged to main, #198 kept that base, and its merge went into the dead
-  branch: main never got concurrent requests, and #224 (the daemon as the default) passed its
-  tests on a main without them.
-  - Do: when a stacked PR's base merges, retarget it to `main` at once (`gh pr edit N --base
-    main`), and before building on a merged step, check `git merge-base --is-ancestor <its merge
-    commit> origin/main`.
-  - Learned on #139.
 - **The Clang oracle is upstream Clang (the driver's toolchain), not `/usr/bin/clang++`.** Apple
   Clang and upstream Clang differ in ABI corners: on arm64 macOS, Apple Clang 21 passes a class
   with a user-provided move constructor in registers, while Clang 23 and GCC pass it by address
