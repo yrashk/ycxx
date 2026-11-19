@@ -131,6 +131,23 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
   std::set<std::uint32_t> seen;
   // The type from the declaration, not the entity's record: a variable's type is not part of its
   // identity, so a record made before an edit may hold the old one (#115).
+  // Whether a class is local to the unit ([basic.link]/4): it has internal linkage, as a closure
+  // type in a function that is not inline does, or is a specialization for such a type.
+  std::function<bool(QualType)> internal_type;
+  std::function<bool(EntityId)> internal_class = [&](EntityId c) {
+    const sema::EntityRec& r = world.entities.rec(c);
+    if (r.linkage == ast::Linkage::internal) return true;
+    for (const ast::TemplateArg& a : r.args)
+      if (a.kind == ast::TemplateArgKind::type && internal_type(a.type)) return true;
+    return false;
+  };
+  internal_type = [&](QualType t) {
+    sema::TypeRec r = world.types.rec(t);
+    if (r.kind == sema::TypeKind::class_) return internal_class(r.entity);
+    if (r.kind == sema::TypeKind::pointer || r.kind == sema::TypeKind::reference || r.kind == sema::TypeKind::array)
+      return internal_type(r.inner);
+    return false;
+  };
   auto declare = [&](const ast::DeclSema& d, std::optional<ast::Loc> at) {
     EntityId e = d.entity;
     if (e == EntityId::none || !seen.insert(std::to_underlying(e)).second) return;
@@ -143,7 +160,11 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
     bool fn = r.kind != sema::EntityKind::variable;
     std::string id(ins.names.spelling(r.name));
     if (fn && id == "main" && r.scope == EntityId::none) tu.main = e;  // [basic.start.main]: the global one
-    tu.entities.push_back({e, std::move(id), d.type, fn, r.lang, r.linkage, false, at, r.scope,
+    // A member of a class local to the unit is local too.
+    ast::Linkage linkage = r.linkage;
+    for (EntityId sc = r.scope; linkage == ast::Linkage::external && sc != EntityId::none; sc = world.entities.rec(sc).scope)
+      if (world.entities.rec(sc).kind == sema::EntityKind::class_ && internal_class(sc)) linkage = ast::Linkage::internal;
+    tu.entities.push_back({e, std::move(id), d.type, fn, r.lang, linkage, false, at, r.scope,
                            r.kind == sema::EntityKind::constructor  ? Special::constructor
                            : r.kind == sema::EntityKind::destructor ? Special::destructor
                                                                     : Special::none});

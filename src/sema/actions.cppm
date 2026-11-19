@@ -949,7 +949,9 @@ public:
     if (types().is_array(t)) return true;
     if (!types().is_class(t)) return false;
     const ClassRec* c = class_rec(types().class_of(t));
-    return !c || !c->user_ctors;  // [dcl.init.aggr]/1: no user-declared constructors
+    // [dcl.init.aggr]/1: no user-declared constructors; a closure type is none
+    // ([expr.prim.lambda.closure]/1).
+    return !c || (!c->user_ctors && !c->closure);
   }
   bool has_user_ctors(QualType t) { return types().is_class(t) && !is_aggregate(t); }
 
@@ -1742,6 +1744,7 @@ public:
     std::vector<Ex> inits;  // by field, in the enclosing context
     std::vector<Capture> captures;
     std::vector<std::pair<NameId, u32>> init_captures;  // their names and fields
+    std::map<u32, ConstId> const_fields;  // the fields of captured constants, with their values
     std::optional<u32> this_field;
     bool star_this = false;
     // The enclosing context's state.
@@ -1798,7 +1801,10 @@ public:
     ExprInfo ti{fr.this_type, ValueCategory::prvalue, 0};
     Ex self = node(ast::This{ti}, begin, begin, ti);
     ExprInfo info{t, ValueCategory::lvalue, 0};
-    return node(ast::Member{info, fd.entity, field, 1, ref ? 1u : 0u, at(self, begin)}, begin, end, info);
+    Ex m = node(ast::Member{info, fd.entity, field, 1, ref ? 1u : 0u, at(self, begin)}, begin, end, info);
+    // A captured constant read as a value is its value ([expr.const]: not an odr-use, #355).
+    if (auto c = fr.const_fields.find(field); c != fr.const_fields.end()) const_captures_[std::to_underlying(m.id)] = c->second;
+    return m;
   }
 
   // `name`, resolved at context `ctx` to `key`, used in the current context: captured by each
@@ -1806,10 +1812,26 @@ public:
   // is not an odr-use ([basic.def.odr]/5, [expr.prim.lambda.capture]/8).
   Ex captured(u32 ctx, u32 key, NameId name, u32 begin, u32 end) {
     if (ctx == lambdas_.size()) return source_expr(ctx, key, begin, end);
+    // In an unevaluated operand naming it is no odr-use: no capture ([expr.prim.lambda.capture]/8),
+    // only its type, and for `decltype` its declared type.
+    if (unevaluated > 0) {
+      QualType declared = key & capture_bit ? lambdas_[ctx - 1].fields[key & ~capture_bit].type
+                                            : lambdas_[ctx].outer_locals[key].type;
+      ExprInfo info{types().referee(declared), ValueCategory::lvalue, 0};
+      Ex e = node(ast::Dependent{info, b_->list(std::vector<Child>{})}, begin, end, info);
+      declared_types_[std::to_underlying(e.id)] = declared;
+      return e;
+    }
+    // A constant the innermost lambda cannot capture (no capture-default, not captured
+    // explicitly) is named for its value, which is no odr-use ([basic.def.odr]/5); one it can is
+    // captured, so that it is an lvalue where one is needed.
     if (!(key & capture_bit)) {
       const LambdaFrame& owner = lambdas_[ctx];
       const ast::LocalRec& l = owner.outer_locals[key];
-      if (owner.outer_values[key] && !types().is_reference(l.type) && types().is_scalar(l.type))
+      const LambdaFrame& inner = lambdas_.back();
+      bool capturable = inner.default_capture != 0 ||
+                        std::ranges::any_of(inner.captures, [&](const Capture& c) { return c.ctx == ctx && c.key == key; });
+      if (!capturable && owner.outer_values[key] && !types().is_reference(l.type) && types().is_scalar(l.type))
         return literal(Types::unqualified(l.type), *owner.outer_values[key], ValueCategory::prvalue, begin, end);
     }
     std::optional<u32> field;
@@ -1835,13 +1857,24 @@ public:
   }
   // A field of lambda `f`'s closure for an entity captured by copy or by reference, initialized
   // from `src` in the enclosing context ([expr.prim.lambda.capture]/10, /12, /15).
-  u32 add_capture(LambdaFrame& f, u32 ctx, u32 key, NameId name, bool by_ref, Ex src) {
-    QualType t = by_ref ? types().lvalue_ref(src.type()) : Types::unqualified(src.type());
-    // A copy keeps the entity's cv-qualifiers ([expr.prim.lambda.capture]/10).
-    if (!by_ref) t = types().add_cv(t, Types::cv(types().canonical(src.type())));
+  std::optional<u32> add_capture(LambdaFrame& f, u32 ctx, u32 key, NameId name, bool by_ref, Ex src) {
+    // The entity's own type, not the type `src` has through an enclosing lambda's const operator:
+    // a copy keeps the entity's cv-qualifiers ([expr.prim.lambda.capture]/10).
+    QualType ent = source_type(ctx, key);
+    QualType t = by_ref ? types().lvalue_ref(ent) : ent;
+    // An array of a class whose copy or destruction is not trivial is copied element by element
+    // with its copy constructor ([expr.prim.lambda.capture]/15): not yet (#353).
+    if (!by_ref && types().is_array(t) && (classes().copy_of(t).first || destructor_of(t) != EntityId::none)) {
+      diag(src.begin, Diag::not_supported, lex::Tk::l_square);
+      return std::nullopt;
+    }
     u32 field = u32(f.fields.size());
     EntityId e = w_->entities.entity({EntityKind::data_member, name, t, LangLinkage::cxx, ast::Linkage::none, {}, f.closure});
     f.fields.push_back({name, t, e, ConstId::none, false});
+    if (!(key & capture_bit)) {
+      const std::vector<std::optional<ConstId>>& values = ctx == lambdas_.size() ? local_values_ : lambdas_[ctx].outer_values;
+      if (key < values.size() && values[key] && types().is_scalar(ent)) f.const_fields[field] = *values[key];
+    }
     // An array is copied element by element ([expr.prim.lambda.capture]/15): its member from the
     // array's value, as a class object is copied.
     f.inits.push_back(by_ref                ? bind_reference(src, t, src.begin)
@@ -1854,6 +1887,10 @@ public:
   // capture it yet ([expr.prim.lambda.capture]/8, [expr.prim.this]): its pointer field, or the
   // address of its `*this` copy.
   Ex captured_this(u32 begin, u32 end) {
+    if (unevaluated > 0) {  // its type only, uncaptured
+      ExprInfo info{*this_type, ValueCategory::prvalue, 0};
+      return node(ast::This{info}, begin, end, info);
+    }
     for (std::size_t j = 0; j < lambdas_.size(); ++j) {
       LambdaFrame& f = lambdas_[j];
       if (f.this_field) continue;
@@ -1886,7 +1923,8 @@ public:
   // or for `*this` the object, copied ([expr.prim.lambda.capture]/10–12).
   void add_this(LambdaFrame& f, Ex src, bool star) {
     u32 field = u32(f.fields.size());
-    QualType t = star ? Types::unqualified(types().pointee(src.type())) : Types::unqualified(src.type());
+    // `*this` copies the object as it is: in a const member function, a const one (/10).
+    QualType t = star ? types().pointee(src.type()) : Types::unqualified(src.type());
     EntityId e = w_->entities.entity({EntityKind::data_member, ins().names.intern("this"), t, LangLinkage::cxx,
                                       ast::Linkage::none, {}, f.closure});
     f.fields.push_back({ins().names.intern("this"), t, e, ConstId::none, false});
@@ -1956,7 +1994,9 @@ public:
       }
       switch (c.kind) {
       case K::copy:
-      case K::ref: add_capture(f, c.source->first, c.source->second, c.name, c.kind == K::ref, c.init); break;
+      case K::ref:
+        if (!add_capture(f, c.source->first, c.source->second, c.name, c.kind == K::ref, c.init)) return false;
+        break;
       case K::this_:
       case K::star_this: {
         Ex t = this_expr(c.at, c.at);
@@ -2009,6 +2049,8 @@ public:
   // Whether the function whose body is analysed is inline ([dcl.inline]): its closures' members
   // are then defined in every unit that defines it. Set by the body's analysis.
   bool function_inline = false;
+  // Inside an unevaluated operand (`sizeof`, `decltype`, [expr.context]/1).
+  u32 unevaluated = 0;
 
   // Ends the body of the innermost lambda (`body`, from `body_begin`, the lambda's tokens ending
   // at `end`): its return type deduced, its closure's record published, and the lambda-expression,
@@ -2043,8 +2085,10 @@ public:
     // pointer to function returns (/8–9).
     ClassRec rec;
     rec.defined = true;
+    rec.closure = true;
     rec.default_deleted = fr.has_capture;
     rec.fields = fr.fields;
+    for (FieldRec& fd : rec.fields) fd.name = no_name();  // named by its lambda's body only
     rec.members.push_back({ins().names.intern("operator()"), fr.call, call_type, true, false, false, false, false});
     bool captureless = !fr.has_capture && !types().is_dependent(call_type);
     EntityId invoker = EntityId::none;
@@ -2327,8 +2371,11 @@ public:
         return fail;
       }
       Ex self = this_expr(begin, begin);
+      if (!self.ok()) return fail;
       bool ref = types().is_reference(f->field->type);
-      QualType t = ref ? types().referee(f->field->type) : types().add_cv(f->field->type, Types::cv(types().pointee(*this_type)));
+      // The object's cv-qualifiers: `this`'s, which in a lambda is the captured one (a `*this`
+      // copy is const unless the lambda is mutable, [expr.prim.lambda.closure]/12).
+      QualType t = ref ? types().referee(f->field->type) : types().add_cv(f->field->type, Types::cv(types().pointee(self.type())));
       ExprInfo info{t, ValueCategory::lvalue, 0};
       return node(ast::Member{info, f->field->entity, f->index, 1, ref ? 1u : 0u, at(self, begin)}, begin, end, info);
     }
@@ -3166,6 +3213,8 @@ public:
   // The conversions every operand that needs a prvalue gets ([basic.lval], [conv.lval],
   // [conv.array], [conv.func]).
   Ex rvalue(Ex e) {
+    if (auto c = e.ok() ? const_captures_.find(std::to_underlying(e.id)) : const_captures_.end(); c != const_captures_.end())
+      return literal(Types::unqualified(e.type()), c->second, ValueCategory::prvalue, e.begin, e.end);
     if (e.ok() && types().is(e.type(), Builtin::overload_set)) {
       diag(e.begin, Diag::overload_address, w_->entities.rec(as<ast::DeclRef>(e)->entity).name);
       return {NodeId::none, e.begin, e.end};
@@ -3487,6 +3536,8 @@ public:
   QualType decltype_of(Ex e, bool parenthesized) {
     if (!parenthesized) {
       if (auto l = as<ast::LocalRef>(e)) return locals_[l->local].type;
+      if (as<ast::Dependent>(e))
+        if (auto it = declared_types_.find(std::to_underlying(e.id)); it != declared_types_.end()) return it->second;
       // The declared type: the declaration's that named the entity (a static data member's is
       // its type, a function's its function type), a data member's from its class.
       if (as<ast::DeclRef>(e)) {
@@ -3570,6 +3621,11 @@ public:
     return false;
   }
   bool check_class_assignable(const Ex& l, u32 at_) {
+    if (types().is_class(l.type()))
+      if (const ClassRec* r = class_rec(types().class_of(l.type())); r && r->closure && r->default_deleted) {
+        diag(at_, Diag::closure_assignment, Types::unqualified(l.type()));
+        return false;
+      }
     if (!types().is_class(l.type()) || !has_const_member(l.type())) return true;
     diag(at_, Diag::const_member_assign, Types::unqualified(l.type()));
     return false;
@@ -4270,6 +4326,7 @@ private:
   std::vector<LambdaFrame> lambdas_;  // outermost first
   std::vector<std::pair<EntityId, Fp128>> completed_closures_;  // (enclosing entity, signature)
   std::map<u32, QualType> closure_calls_;  // by operator() entity: its type, the return type deduced
+  std::map<u32, ConstId> const_captures_;  // by draft Member naming a captured constant: its value
 };
 
 }  // namespace ycxx::sema

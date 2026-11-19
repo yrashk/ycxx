@@ -1565,8 +1565,11 @@ checked against Clang 23 and GCC 16 probes).
 - Tests: `tests/own/lambda/` (56 spec-only, 1 ABI): 55 pass, 2 XFAIL (default arguments #300,
   block-scope statics #291).
 - Not yet: lambdas outside function bodies (#338); generic lambdas, template lambdas, pack
-  captures and constexpr lambdas (#281); the conversion function's own symbol (#339); weak
-  definitions of closure members in inline functions (#124).
+  captures and constexpr lambdas (#281); the conversion function's own symbol, conversions in
+  contextual and operator contexts, invokers for class or variadic parameters (#339); arrays of
+  non-trivially-copyable classes captured by copy (#353); weak definitions of closure members in
+  inline functions (#124). A constant named by a lambda with a capture-default is captured, where
+  Clang captures it only when it is odr-used (a layout difference for such closures, #355).
 
 ## Bootstrap workarounds
 

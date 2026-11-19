@@ -566,8 +566,9 @@ struct ClassRec {
   // copy constructor when they are not trivial (user-declared, or implicit and synthesized),
   // else none; whether the copy constructor is deleted.
   bool user_ctors = false;
-  // A closure type with a lambda-capture: its default constructor is deleted
-  // ([expr.prim.lambda.closure]/13).
+  // A closure type ([expr.prim.lambda.closure]): not an aggregate, its captures' members unnamed
+  // (/1); with a lambda-capture, its default constructor and copy assignment are deleted (/13).
+  bool closure = false;
   bool default_deleted = false;
   EntityId destructor = EntityId::none;
   EntityId copy_ctor = EntityId::none;

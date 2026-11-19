@@ -69,6 +69,7 @@ enum class Diag : std::uint32_t {
   not_captured [[=message{Severity::error, "'{0:n}' is not captured: the lambda has no capture-default"}]],
   cannot_capture [[=message{Severity::error, "'{0:n}' cannot be captured: it is not a local variable"}]],
   capture_twice [[=message{Severity::error, "'{0:n}' is captured twice"}]],
+  closure_assignment [[=message{Severity::error, "'{0:t}' has a lambda-capture: its copy assignment is deleted"}]],
   capture_redundant [[=message{Severity::error, "'{0:n}' is captured the way the capture-default already captures"}]],
   this_not_captured [[=message{Severity::error, "'this' is not captured: the lambda has no capture-default"}]],
   trailing_return_needs_auto [[=message{Severity::error, "a function with a trailing return type is declared with 'auto' alone"}]],

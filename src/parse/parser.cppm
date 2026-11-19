@@ -342,7 +342,9 @@ public:
         bump();
         bump();
         int saved = std::exchange(angle_, 0);
+        ++s_->unevaluated;
         Ex e = expression();
+        --s_->unevaluated;
         angle_ = saved;
         if (!e.ok() || !expect(Tk::r_paren)) {
           d.ok = false;
@@ -2159,7 +2161,9 @@ public:
         s_->diag(pos(), Diag::expected_type_specifier);
         return {NodeId::none, begin, pos()};
       }
+      ++s_->unevaluated;
       Ex e = unary_expression();
+      --s_->unevaluated;
       if (!e.ok()) return {NodeId::none, begin, pos()};
       Ex r = s_->size_of(e.type(), false, begin, pos());
       return {r.id, begin, pos(), r.info};
@@ -2406,7 +2410,14 @@ public:
       s_->diag(begin, Diag::float_literal_not_supported);
       bump();
       return {NodeId::none, begin, pos()};
-    case Tk::l_square: return lambda_expression();
+    case Tk::l_square:
+      // [dcl.attr.grammar]/7: `[[` begins an attribute-specifier only, never a lambda.
+      if (kind(1) == Tk::l_square) {
+        s_->diag(begin, Diag::not_supported, Tk::l_square);
+        bump();
+        return {NodeId::none, begin, pos()};
+      }
+      return lambda_expression();
     case Tk::kw_operator:
     case Tk::tilde:
     case Tk::kw_typeid:
@@ -2678,6 +2689,10 @@ public:
       }
       spec.captures.push_back(std::move(c));
       if (!accept(Tk::comma)) break;
+      if (is(Tk::r_square)) {  // a capture follows a comma ([expr.prim.lambda.capture]/1)
+        s_->diag(pos(), Diag::expected_unqualified_id);
+        return fail();
+      }
     }
     if (!expect(Tk::r_square)) return fail();
     intro = false;
@@ -2687,7 +2702,8 @@ public:
     }
     // lambda-declarator ([expr.prim.lambda.general]): parameters, specifiers, trailing return type;
     // without parameters, it may still have specifiers (C++23).
-    if (is(Tk::l_paren) || is(Tk::kw_mutable) || is(Tk::kw_constexpr) || is(Tk::kw_noexcept) || is(Tk::arrow)) {
+    if (is(Tk::l_paren) || is(Tk::kw_mutable) || is(Tk::kw_constexpr) || is(Tk::kw_noexcept) || is(Tk::arrow) ||
+        is(Tk::kw_static) || is(Tk::kw_consteval)) {
       Suffix ps;
       if (accept(Tk::l_paren)) {
         bool ok = true;
@@ -2704,9 +2720,16 @@ public:
         spec.params.push_back({p.name, p.type, p.at});
       }
       spec.variadic = ps.variadic;
+      bool constexpr_ = false;
       for (;;) {
+        // [expr.prim.lambda.general]/3: each lambda-specifier at most once.
+        if ((is(Tk::kw_mutable) && spec.mutable_) || (is(Tk::kw_constexpr) && constexpr_)) {
+          s_->diag(pos(), Diag::duplicate_specifier, kind());
+          return fail();
+        }
         if (accept(Tk::kw_mutable)) spec.mutable_ = true;
         else if (accept(Tk::kw_constexpr)) {
+          constexpr_ = true;
         } else if (is(Tk::kw_consteval) || is(Tk::kw_static)) {
           s_->diag(pos(), Diag::not_supported, kind());
           return fail();
