@@ -248,12 +248,14 @@ public:
   // name; the arguments are consumed.
   std::optional<QualType> class_template_type() {
     u32 at = pos();
-    const ast::TemplateParamSema* tt = s_->template_template_param(name_of(tok()));
-    auto tmpl = tt ? std::nullopt : s_->type_template(name_of(tok()));
+    NameId name = name_of(tok());
+    const ast::TemplateParamSema* tt = s_->template_template_param(name);
+    auto tmpl = tt ? std::nullopt : s_->type_template(name);
     bump();
     auto args = template_argument_list();
-    if (!args || (!tt && !tmpl)) return std::nullopt;
+    if (!args) return std::nullopt;
     if (tt) return s_->template_param_id(*tt, *args, at);  // `TT<args>` ([temp.param])
+    if (!tmpl) return s_->builtin_template_id(name, *args, at);  // `__make_integer_seq<…>`
     return s_->class_template_id(*tmpl, *args, at);
   }
 

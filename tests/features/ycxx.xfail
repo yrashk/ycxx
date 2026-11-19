@@ -436,7 +436,6 @@ draft/temp/temp.arg.nontype-2.reject.cpp errors elsewhere: 'template' not suppor
 draft/temp/temp.arg.nontype-3.reject.cpp errors elsewhere: 'template' not supported yet
 draft/temp/temp.arg.nontype-4.reject.cpp errors elsewhere: 'template' not supported yet
 draft/temp/temp.arg.template-2.accept.cpp 'template' not supported yet
-draft/temp/temp.arg.template-3.reject.cpp errors elsewhere: 'template' not supported yet
 draft/temp/temp.arg.template-4.reject.cpp errors elsewhere: 'template' not supported yet
 draft/temp/temp.arg.type-1.accept.cpp 'template' not supported yet
 draft/temp/temp.class.general-1.accept.cpp 'template' not supported yet

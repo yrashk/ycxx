@@ -43,8 +43,9 @@ build/bin/ycxx cxx hello.cpp -o hello && ./hello
   ([docs/EXTENSIONS.md](docs/EXTENSIONS.md));
 - templates: function, class and variable templates, deduction, partial ordering, explicit and
   partial specializations, static constexpr members of class templates, parameter packs and
-  fold expressions, alias templates, concepts and requires-expressions in overload resolution,
-  `if constexpr`, two-phase lookup, with Itanium names identical to Clang's;
+  fold expressions, alias templates, template template parameters, concepts and
+  requires-expressions in overload resolution, `if constexpr`, two-phase lookup, with Itanium
+  names identical to Clang's; Clang's `__make_integer_seq`;
 - casts, `sizeof`/`alignof` of non-class types, and `decltype`;
 - constant evaluation on ycxx's own interpreter: `constexpr`, `consteval`, `constinit`,
   `static_assert` and `if consteval`, with errors that explain why something is not constant;
@@ -67,21 +68,17 @@ function body, through the daemon, without unsaved text ever reaching a build.
 ### Not yet
 
 - The standard library and its headers. C headers such as `<stdio.h>` compile without warnings
-  and `printf` runs; libycxx's `<cstdio>` still needs template template parameters and
-  pointer-to-member types.
+  and `printf` runs; libycxx's `<cstdio>` still needs pointer-to-member types.
 - Inheritance and virtual functions, `sizeof` of a class.
 - Access control: `private` and `protected` are not checked yet, so ycxx accepts code that
   uses private members ([#119](https://github.com/yrashk/ycxx/issues/119)).
-- Member templates, template template parameters, and constraints on class templates and
-  their members.
+- Member templates, and constraints on class templates and their members.
 - Floating-point arithmetic, exceptions, and optimization (`-O`).
 - Linux and x86-64 output.
 
 ### In progress
 
 - Standard headers, starting with `<cstdio>` ([#133](https://github.com/yrashk/ycxx/issues/133)).
-- Templates: template template parameters and integer sequences
-  ([#88](https://github.com/yrashk/ycxx/issues/88)).
 
 Next come exceptions ([#89](https://github.com/yrashk/ycxx/issues/89)).
 

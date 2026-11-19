@@ -1480,7 +1480,8 @@ private:
         report(f, operand.empty() ? t : operand.size() > 1 ? operand[1] : operand[0], lex::LexDiag::cond_expected_rparen);
         return number_token(t, 0);
       }
-      return number_token(t, lex::type_trait(s_->spellings.name(operand[0].tok.payload)) != nullptr ? 1 : 0);
+      std::string_view name = s_->spellings.name(operand[0].tok.payload);
+      return number_token(t, lex::type_trait(name) != nullptr || lex::builtin_template(name) ? 1 : 0);
     }
     // [cpp.cond]/? the header, as for #include: a string literal, `<...>`, or tokens that become
     // one after replacement.

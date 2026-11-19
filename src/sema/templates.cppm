@@ -280,6 +280,13 @@ public:
   std::optional<std::vector<TemplateArg>> substitute_args(std::span<const TemplateArg> args, const Bindings& b) {
     std::vector<TemplateArg> out;
     for (const TemplateArg& a : args) {
+      // An expansion as written in `TT<Ts...>`, not grouped into a pack: expanded in place.
+      if (is_expansion(a)) {
+        auto xs = substitute_expansion(a, b);
+        if (!xs) return std::nullopt;
+        out.insert(out.end(), xs->begin(), xs->end());
+        continue;
+      }
       if (a.kind != TemplateArgKind::pack) {
         auto s = substitute_arg(a, b);
         if (!s) return std::nullopt;
@@ -704,11 +711,21 @@ public:
       const EntityRec& spec = w_->entities.rec(ar.entity);
       if (spec.templ == EntityId::none) return false;
       if (!bind(out, pr.index, {TemplateArgKind::template_, QualType{}, ConstId::none, {}, spec.templ})) return false;
-      auto own = apply_template(spec.templ, ins().seqs.elements(pr.args));
+      std::vector<TemplateArg> pargs = ins().seqs.elements(pr.args);
+      // `TT<Ts...>`: the expansion takes the specialization's arguments as they are.
+      if (std::ranges::any_of(flatten(pargs), [&](const TemplateArg& x) { return is_expansion(x); }))
+        return deduce_args(pargs, spec.args, depth, out);
+      auto own = apply_template(spec.templ, pargs);
       if (!own || !types().is_class(*own)) return false;
       const EntityRec& o = w_->entities.rec(types().class_of(*own));
       if (o.templ != spec.templ) return false;
       return deduce_args(o.args, spec.args, depth, out);
+    }
+    // From another `TT'<args>` (a unique one, in partial ordering): TT is TT'.
+    if (pr.kind == TypeKind::dep_spec && pr.depth == depth && ar.kind == TypeKind::dep_spec) {
+      if (!bind(out, pr.index, {TemplateArgKind::template_, types().template_param(ar.depth, ar.index, ar.pack), ConstId::none}))
+        return false;
+      return deduce_args(ins().seqs.elements(pr.args), ins().seqs.elements(ar.args), depth, out);
     }
     if (pr.kind != ar.kind) return false;
     switch (pr.kind) {
@@ -1045,8 +1062,9 @@ public:
   // The type template `templ` names with `args`, as a template-id says it ([temp.names]): a class
   // template's specialization, an alias template's type with the arguments substituted
   // ([temp.alias]/2); none when the arguments do not fit ([temp.deduct.general]/8).
-  std::optional<QualType> apply_template(EntityId templ, std::span<const TemplateArg> args) {
+  std::optional<QualType> apply_template(EntityId templ, std::span<const TemplateArg> written) {
     if (!template_decl) return std::nullopt;
+    std::vector<TemplateArg> args = flatten(written);  // `TT<args>` keeps its own head's packs
     auto decl = template_decl(templ);
     if (!decl) return std::nullopt;
     std::vector<ast::TemplateParamSema> ps = ins().seqs.elements(decl->template_params);

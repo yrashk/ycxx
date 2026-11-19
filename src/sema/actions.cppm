@@ -1288,7 +1288,13 @@ public:
       diag(at, Diag::template_args_mismatch, p.name);
       return std::nullopt;
     }
-    return types().dep_spec(p.depth, p.index, p.pack != 0, args);
+    // As written, a pack parameter's arguments grouped (as Itanium mangles them, `J … E`).
+    std::vector<TemplateArg> grouped;
+    for (const auto& a : out) {
+      if (!a) break;
+      grouped.push_back(*a);
+    }
+    return types().dep_spec(p.depth, p.index, p.pack != 0, grouped);
   }
   // The template template parameter `name` names here, if it does.
   const ast::TemplateParamSema* template_template_param(NameId name) const {
@@ -1297,7 +1303,30 @@ public:
   }
   // Whether `name` names a template whose template-id is a type: a class or alias template, or a
   // template template parameter.
-  bool names_type_template(NameId name) { return template_template_param(name) || type_template(name); }
+  bool names_type_template(NameId name) {
+    return template_template_param(name) || type_template(name) || builtin_template(name);
+  }
+  // `__make_integer_seq` (docs/EXTENSIONS.md), unless something declared hides it.
+  bool builtin_template(NameId name) {
+    if (!lex::builtin_template(ins().names.spelling(name))) return false;
+    return !template_param(name) && q_->visible_decls(name, directives()).empty();
+  }
+  // `__make_integer_seq<Seq, T, N>`: `Seq<T, 0, 1, …, N-1>` for a template Seq, an integral type T
+  // other than bool and a value N of type T that is not negative; while an argument is dependent, a
+  // dependent type.
+  std::optional<QualType> builtin_template_id(NameId name, std::span<const TemplateArg> args, u32 at) {
+    std::vector<TemplateArg> xs(args.begin(), args.end());
+    bool ok = xs.size() == 3 && xs[0].kind == ast::TemplateArgKind::template_ && xs[1].kind == ast::TemplateArgKind::type &&
+              xs[2].kind == ast::TemplateArgKind::value;
+    if (ok && !types().is_dependent(xs[1].type)) {
+      auto v = templates().converted_value(xs[2], xs[1].type);
+      ok = v.has_value();
+      if (v) xs[2] = *v;
+    }
+    auto t = ok ? templates().builtin_template(ast::BuiltinTemplate::make_integer_seq, xs) : std::nullopt;
+    if (!t) diag(at, Diag::template_args_mismatch, name);
+    return t;
+  }
 
   // A template-name as a template argument ([temp.arg.template]/1): a class or alias template, in
   // namespace `ns` or found by unqualified lookup, or a template template parameter (its argument

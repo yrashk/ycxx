@@ -225,8 +225,10 @@ class Mangler {
         // candidate (§5.1.5.8, §5.1.10). Function templates of namespace scope have one level.
         if (auto s = find(full_key(bare))) return qualify(qualifiers, *s, q);
         auto p = in_.types.get<ast::TTemplateParam>(in_.types.canon(bare));
-        if (p.depth != 0) return std::unexpected("a template parameter of a nested template-head");
-        inner = p.index == 0 ? "T_" : std::format("T{}_", p.index - 1);
+        // A template template parameter's own parameter, in Clang's <template-param-decl>:
+        // `TL <level-1> _ [<index-1>] _`.
+        if (p.depth != 0) inner = p.index == 0 ? std::format("TL{}__", p.depth - 1) : std::format("TL{}_{}_", p.depth - 1, p.index - 1);
+        else inner = p.index == 0 ? "T_" : std::format("T{}_", p.index - 1);
         candidates_.push_back(full_key(bare));
       } else if (in_.types.is<ast::TFunction>(in_.types.canon(bare))) {
         // <function-type> ::= F [Y] <bare-function-type> E, a substitution candidate (§5.1.5.3).
@@ -436,7 +438,7 @@ class Mangler {
         if (p.kind == ast::TemplateArgKind::value && dependent(p.type)) {
           auto t = type(p.type);
           if (!t) return t;
-          out += "Tn" + *t;
+          out += (p.pack ? "TpTn" : "Tn") + *t;
         } else if (p.kind == ast::TemplateArgKind::template_ && !p.pack && a.templ != ast::EntityId::none &&
                    !(i < same_heads.size() && same_heads[i])) {
           auto d = param_decl(p);
