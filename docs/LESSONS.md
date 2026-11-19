@@ -509,7 +509,8 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
   crashed under the driver.
   - Do: for ABI checks, compile with the driver's Clang (`tools/test` prints its path; see
     `tests/driver/kinds.py`), and try GCC too. When two compilers disagree, cross-link their
-    objects to find out which convention each one uses.
+    objects to find out which convention each one uses, and ask for a decision (#230 chose the
+    oracles by default, with `-fclass-call-abi=apple` for Apple Clang).
   - Learned on #116.
 - **A recovery loop that may consume nothing hangs only on real headers.** The requires-expression
   loop skipped to `;` after a failed requirement; at a `}` that consumed nothing, so 17 draft
@@ -525,3 +526,10 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
   `1.0` then said "expected '<'", and calls with a floating argument failed far from the cause.
   - Do: give a new case its own body, and read the cases above it before inserting.
   - Learned on #88 step 6.
+- **"As other compilers do" is a claim to check against the oracles before coding it.** #229's
+  decision said to drop system headers' warnings "as other compilers do". The first version
+  dropped `#warning` too, and its tests failed with Clang and GCC as the compiler under test:
+  both report `#warning` from a system header (`-W#warnings`, `-Wcpp`).
+  - Do: when a decision names other compilers' behaviour, write the test first and run it with
+    `tools/test --cxx clang` and `--cxx gcc`, then implement what they do.
+  - Learned on #229.

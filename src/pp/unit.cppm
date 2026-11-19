@@ -61,6 +61,7 @@ public:
     u32 found_dir = 0;
     bool root = false;  // a main file: `#pragma once` there is diagnosed, not applied
     Fp128 content;
+    bool system = false;  // a system header: its warnings are dropped
     auto operator<=>(const Key&) const = default;
   };
   std::map<Key, std::vector<std::shared_ptr<const FileRegion>>> cache;
@@ -130,7 +131,8 @@ private:
   struct Frame {
     FileId file{};
     u32 found_dir = includer_dir;
-    std::string here;  // the directory of the real path
+    bool system = false;  // a system header (Config::system_header); the main file never is
+    std::string here;     // the directory of the real path
     std::string presumed;
     std::string_view text;  // the file's physical text
     std::vector<u32> line_starts;
@@ -185,14 +187,15 @@ private:
     const Files::Content* c = s_->files.content(file);
     if (!c) return nullptr;
     std::vector<Bound> ignored;
-    return enter(file, presumed, includer_dir, *c, ignored, &bindings);
+    return enter(file, presumed, includer_dir, false, *c, ignored, &bindings);
   }
 
   // The region of `file` here: a cached one whose trace verifies, or a new one. `bounds` gets its
   // bindings as the current region sees them, or `root` as the TU does.
-  std::shared_ptr<const FileRegion> enter(FileId file, std::string_view presumed, u32 found_dir, const Files::Content& c,
-                                          std::vector<Bound>& bounds, std::vector<RootBinding>* root = nullptr) {
-    Session::Key key{file, s_->spellings.name(presumed), found_dir, root != nullptr, c.fp};
+  std::shared_ptr<const FileRegion> enter(FileId file, std::string_view presumed, u32 found_dir, bool system,
+                                          const Files::Content& c, std::vector<Bound>& bounds,
+                                          std::vector<RootBinding>* root = nullptr) {
+    Session::Key key{file, s_->spellings.name(presumed), found_dir, root != nullptr, c.fp, system};
     if (auto it = s_->cache.find(key); it != s_->cache.end()) {
       for (const std::shared_ptr<const FileRegion>& r : it->second) {
         // The nesting limit is part of the value: a region reused deeper must still fit.
@@ -221,6 +224,7 @@ private:
         empty->file_names = {key.presumed};
         empty->trace = {Question{Ask::defined, *r->guard, 0, 0, 0, Fp128{1, 0}}};
         empty->guard = r->guard;
+        empty->system = system;
         it->second.push_back(empty);
         reuse(*empty);
         ++s_->stats.reused;
@@ -230,6 +234,7 @@ private:
     auto f = std::make_unique<Frame>();
     f->file = file;
     f->found_dir = found_dir;
+    f->system = system;
     f->here = directory_of(s_->files.path(file));
     f->presumed = presumed;
     f->text = c.text;
@@ -310,6 +315,10 @@ private:
   std::shared_ptr<const FileRegion> finish(Frame& f) {
     FileRegion& r = f.out;
     for (const lex::LexDiagnostic& d : f.lex_diags) r.diags.push_back({0, d.offset, d.kind, d.args, 0, std::nullopt});
+    // A system header's warnings are not reported (`hidden_in_system_header`); phases 5 and 6
+    // drop theirs when flattened (:tu).
+    r.system = f.system;
+    if (f.system) std::erase_if(r.diags, [](const Diag& d) { return hidden_in_system_header(d.kind); });
     std::ranges::stable_sort(r.diags, {}, &Diag::offset);
     // The presumed locations of this occurrence ([cpp.line]).
     if (!r.lines.empty()) {
@@ -1739,7 +1748,8 @@ private:
     }
     u32 at = static_cast<u32>(f.out.tokens.size());
     std::vector<Bound> bounds;
-    std::shared_ptr<const FileRegion> child = enter(r->file, presumed, r->dir, *c, bounds);
+    std::shared_ptr<const FileRegion> child =
+        enter(r->file, presumed, r->dir, s_->config.system_header(r->dir, f.system), *c, bounds);
     // Placed after the directive's own diagnostics, at its last token.
     u32 end = line.empty() ? site(f, h) : site(f, line.back());
     f.out.includes.push_back(Include{at, end, std::move(child), std::move(bounds)});

@@ -9,6 +9,7 @@ import ycxx.obj.macho;
 import ycxx.pipeline;
 import ycxx.engine;
 import ycxx.pp;
+import ycxx.ast.target;
 
 export namespace ycxx::compile {
 
@@ -99,6 +100,11 @@ std::optional<Request> check_one(const Request& r, std::string_view source);
 // stderr after the request's own diagnostics, with status 1.
 int finish(Done& d);
 
+// Go-to-definition (#170): in the unit of `r`'s first source, the place where the entity named at
+// byte `offset` of `file` (absolute: the source or a header it includes) is first declared.
+std::optional<pipeline::FileOffset> definition(const Request& r, pp::Host& host, pipeline::Session& session,
+                                               const std::string& file, std::uint32_t offset, Units units = {});
+
 }  // namespace ycxx::compile
 
 namespace ycxx::compile {
@@ -141,6 +147,13 @@ std::expected<Options, std::string> parse_options(std::span<const std::string_vi
       auto [p, ec] = std::from_chars(v.data(), v.data() + v.size(), n);
       if (ec != std::errc{} || p != v.data() + v.size() || n == 0) return std::unexpected(std::format("invalid value in '{}'", a));
       o.pp.template_depth = n;
+    } else if (a.starts_with("-fclass-call-abi=")) {
+      // Which classes pass in registers (DECISIONS §1.6): `itanium`, as upstream Clang and GCC,
+      // or `apple`, as Apple Clang on arm64 Darwin.
+      auto v = a.substr(17);
+      if (v == "itanium") o.pp.call_triviality = ast::CallTriviality::itanium;
+      else if (v == "apple" && o.pp.target->apple_calls) o.pp.call_triviality = ast::CallTriviality::apple;
+      else return std::unexpected(std::format("invalid value in '{}'", a));
     } else if (a.starts_with("-std=")) {
       // The language is the C++26 working draft (DECISIONS §1.1).
       if (a != "-std=c++26" && a != "-std=c++2c") return std::unexpected(std::format("unsupported language standard '{}'; ycxx compiles C++26", a.substr(5)));
@@ -293,7 +306,7 @@ std::optional<Request> check_one(const Request& r, std::string_view source) {
       for (std::size_t k = from; k <= i; ++k) one.argv.emplace_back(args[k]);
     } else if (args[i] == "-o") {
       ++i;
-    } else if (args[i].starts_with("-std=") || args[i].starts_with("-ftemplate-depth=")) {
+    } else if (args[i].starts_with("-std=") || args[i].starts_with("-ftemplate-depth=") || args[i].starts_with("-fclass-call-abi=")) {
       one.argv.emplace_back(args[i]);
     }
   }
@@ -432,6 +445,19 @@ Done run(const Request& r, pp::Host& host, pipeline::Session& session, const Sto
   }
   d.outputs.push_back({out.native_encoded_string(), image.image, true});
   return d;
+}
+
+std::optional<pipeline::FileOffset> definition(const Request& r, pp::Host& host, pipeline::Session& session,
+                                               const std::string& file, std::uint32_t offset, Units units) {
+  auto opts = parse_options(views(r.argv));
+  if (!opts || opts->sources.empty()) return std::nullopt;
+  pp::Config config = pp::with_system_dirs(opts->pp);
+  config.view = units.view;
+  pp::configure(config, host);
+  const std::string& s = opts->sources.front();
+  const pipeline::TuId tu = session.unit({s, r.cwd, config, object_name(s).native_encoded_string()});
+  auto found = session.run<pipeline::DefinitionAt>({tu, pp::path_id(file), offset});
+  return found ? *found : std::nullopt;
 }
 
 int finish(Done& d) {

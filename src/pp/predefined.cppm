@@ -1,6 +1,7 @@
 // The predefined macros ([cpp.predefined]), as the text of `<built-in>`. What ycxx defines beyond
 // the draft is decided on #112 and recorded in DECISIONS §1.5:
-// - its identity, `__ycxx__` and its version, and neither `__clang__` nor `__GNUC__`;
+// - its identity, `__ycxx__` and its version, and `__GNUC__` 4.2.1 as Clang has it (#229, which
+//   revised #112), not `__clang__`;
 // - the target's macros, generated from `ast::Target` (the source of layout), and checked against
 //   Clang's for the same target by tests/own/pp/predefined-target.pp.cpp;
 // - a feature-test macro only for a feature ycxx implements (`feature_macros`, which a slice that
@@ -294,6 +295,12 @@ std::string predefined_text(const ast::Target& t) {
   def("__ycxx_major__", version_major);
   def("__ycxx_minor__", version_minor);
   def("__ycxx_patchlevel__", version_patch);
+  // The GNU dialect, at the version Clang claims (#229): the SDK's headers test `__GNUC__` for a
+  // supported compiler, and the GNU extensions their `__GNUC__` paths use are in
+  // docs/EXTENSIONS.md. libycxx tells ycxx from GCC by `__ycxx__`, which it tests first.
+  def("__GNUC__", 4);
+  def("__GNUC_MINOR__", 2);
+  def("__GNUC_PATCHLEVEL__", 1);
   // [cpp.predefined]/1.
   def("__cplusplus", "202400L");
   def("__STDC_EMBED_NOT_FOUND__", 0);

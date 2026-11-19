@@ -214,7 +214,7 @@ What is true of the code today. Work in progress and its owners are tracked in
   - module and import lines go on to phase 7, their keywords flagged `tok_flag::directive`.
     Header-unit imports and `#embed` are diagnosed as unsupported.
 - Predefined macros (`:predefined`, DECISIONS §1.5):
-  - `__ycxx__` and its version, and the draft's macros;
+  - `__ycxx__` and its version, `__GNUC__` 4.2.1 (#229), and the draft's macros;
   - a feature-test table, with lexer features only;
   - the target's macros, generated from `ast::Target` and checked against Clang
     (`tests/own/pp/predefined-target.pp.cpp`);
@@ -669,8 +669,18 @@ in `lsp` frames (`LspOut`), the last of which carries LSP's exit status (1 after
   the exit status, and `ctl shutdown` with a session open.
 - Not yet: `compile_commands.json` (#167); stopping a diagnosis on a newer edit,
   `$/cancelRequest`, debouncing and interactive priority (#168); `buffers_in`, the disk-view
-  assertion and one view per session (#169); go-to-definition and diagnostics inside headers
-  (#170, after #34); open documents as eviction roots (#17).
+  assertion and one view per session (#169); go-to-definition from a declaration part (a
+  parameter's type, a base) and of locals (#242); open documents as eviction roots (#17).
+- Go-to-definition and headers' diagnostics (#170): `textDocument/definition` asks the daemon
+  (`lsp::Define`), which checks the document's unit in the editor view and runs
+  `pipeline::DefinitionAt{unit, file, offset}`: the offset's token in the region (its site, a
+  macro's at its name), the innermost item, the node `ast::Red::find` reaches in that item's
+  function body, and the entity a `DeclRef`, `Member` or `Call` there names; then that entity's
+  first declaration (`FrontResult::declared`, kept with errors too) mapped back to a file and an
+  offset. Diagnostics located in a file the editor has not opened are published under it and
+  cleared when no document reports them; a header's message is rendered against its open buffer
+  in the editor view. `daemon.lsp`'s `definitions` covers a header's function, unsaved text, a
+  header's warning shown, moved by an unsaved edit, and cleared (mutation-checked).
 
 ## The L1 interpreter (#25, 2026-11-18)
 
@@ -989,16 +999,19 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   most 16 bytes passes and returns in one or two 8-byte registers; a larger or non-trivial one by
   address, an indirect result in x8 (`l2::Function::indirect_result`, the call's fourth
   immediate). A class needing more registers than are left goes whole on the stack and leaves the
-  rest unused (C.11). An empty class passes nothing, as in Clang. A user-provided move
-  constructor makes a class non-trivial for calls, as in Clang 23 and GCC; Apple Clang 21
-  differs (#230).
-- **Mixed-object tests:** `PEER:` in a run test names a file Clang compiles and links with it
-  (docs/TESTING.md). `tests/own/abi` checks 3- to 24-byte classes, a non-trivial one, member
-  functions returning classes and exhausted registers, calling both ways.
+  rest unused (C.11). An empty class passes nothing, as in Clang. Which classes are trivial for
+  calls follows upstream Clang and GCC by default (Itanium, `ClassRec::move_usable`,
+  `move_nontrivial`). `-fclass-call-abi=apple` selects Apple Clang's rule on arm64 Darwin
+  (`ast::Target::call_triviality`, `pp::Config::call_triviality`, DECISIONS §1.6).
+- **Mixed-object tests:** `PEER:` in a run test names a file the oracle Clang compiles and links
+  with it, or Apple Clang with `PEER-WITH: apple-clang` (docs/TESTING.md). `tests/own/abi`
+  checks 3- to 24-byte classes, member functions returning classes, exhausted registers, empty
+  classes, and each kind of class for calls (trivially copyable, non-trivial copy or destructor,
+  move-only, deleted copy, a move-only member) under both settings, calling both ways.
 - Not yet: braced arguments to overload sets, templates and member calls (#231), class arguments
   through an ellipsis and calls through pointers returning classes (#196), classes with
   floating members (#201), classes in constant evaluation (#25).
-- Tests: `tests/own/abi` (3), `tests/own/classes/s5-byvalue-lifetimes`, `-temporaries`;
+- Tests: `tests/own/abi` (5), `tests/own/classes/s5-byvalue-lifetimes`, `-temporaries`;
   s1-byvalue-params and -return pass.
 
 ## Templates, ζ step 1: function templates (#88, 2026-11-18)
@@ -1261,6 +1274,37 @@ Fable decided the representation (ast.md §6.6); the Opus session wrote the code
   supported (#256); an array bound or template argument that is a dependent expression other than
   a parameter (`int a[sizeof(T)]`, `F<N - 1>`, #209); `static_assert` in a member-specification
   (#257); dynamic initialization of an inline static member. Found on the way: #262, #263, #264.
+
+## `__GNUC__` and system-header warnings (#229, 2026-11-19)
+
+- ycxx predefines `__GNUC__` 4.2.1, as Clang does (`:predefined`; DECISIONS §1.5, revising #112),
+  so the SDK's `sys/cdefs.h` no longer warns "Unsupported compiler detected". Not `__GNUG__`,
+  `__clang__` or `__llvm__`. libycxx tests `__ycxx__` first (yrashk/libycxx#28).
+- What the SDK's `__GNUC__` paths then use, in the headers libycxx's C headers reach, is in
+  docs/EXTENSIONS.md. New: `__builtin_va_list`, the target's va_list type (`char*`;
+  `ast::Target::va_list`), found where lookup finds nothing else (`Sema::builtin_type_name`).
+  The `__builtin_*` functions ycxx lacks (`__builtin_fabsf`, `__builtin_inff`, `__builtin_alloca`,
+  `__builtin_offsetof`, …) are diagnosed as "built-in function '…' is not supported yet", their
+  arguments skipped (`lex::lacking_builtins`, `Sema::unsupported_builtin`). Any other `__builtin_`
+  name is an ordinary one, so a requires-expression probing it is unsatisfied.
+- Warnings located in a system header are not reported; errors are, and so is `#warning`, as
+  with Clang and GCC. A system header is one found in a system directory (a `-I` directory that
+  is also an `-isystem` one is dropped from the `-I` list), or one a system header includes
+  (`Config::system_header`, `Frame::system`, part of a region's cache key). Phase 4's warnings
+  are dropped when the region finishes; phases 5 and 6's when flattened (`Flat::system`), by
+  their token's outermost expansion site, and one spelled in a system header's macro is reported
+  where the macro is used. Sema has no warnings yet; when it gets some, it needs the region's
+  system files too.
+  - Not yet: `Flat::system` is by file, so a header without a guard included both as a system
+    header and not has phases 5 and 6's warnings hidden in both.
+- The test driver checks warnings where a test has `//! warning` markers (docs/TESTING.md), and
+  reads markers in headers a test includes with `<...>` from its `FLAGS` directories.
+- Tests: `tests/own/pp/predefined-gnuc.pp.cpp`, `tests/own/headers/system-warnings.accept.cpp`,
+  `tests/own/headers/stdio-no-warnings.accept.cpp` (`<stdio.h>` with no warning; darwin only
+  until Linux searches glibc's multiarch directory, #252), `tests/own/headers/system-error.reject.cpp`,
+  `tests/own/builtins/va-list.run.cpp`, `tests/own/builtins/unsupported.reject.cpp`, `tests/own/builtins/unknown-probe.accept.cpp`. `<cstdio>`: 25 errors before and after, and no warning
+  (was 1). `<cmath>` and `<cstdlib>` gain errors in the SDK's `__GNUC__` inline functions (local
+  unions, floating-point operations, `__builtin_fabs*`), which already had thousands.
 
 ## Bootstrap workarounds
 

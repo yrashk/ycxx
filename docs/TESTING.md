@@ -108,8 +108,13 @@ reports key on it. Its kind comes from its suffix:
 **Error markers:** `//! error` expects an error on its own line, `//! error@+1` / `@-2` on a
 relative line, `@12` on line 12; `:5` adds a column (`//! error@+1:5`). Every expected location
 must get an error and every error must be expected. Markers in a header the test includes with
-`#include "..."` expect errors in that header. Locations are parsed from
+`#include "..."`, or with `#include <...>` from an `-I` or `-isystem` directory of its `FLAGS`,
+expect errors in that header. Locations are parsed from
 `file:line:col: error:` lines. A crash (a signal, or an exit status above 1) is never a rejection. Leave the column out where Clang and GCC disagree on it.
+
+**Warning markers:** `//! warning`, with the same `@` and `:` forms, expects a warning. An accept
+or reject test with any warning marker must get warnings exactly at its warning markers, from
+`file:line:col: warning:` lines; a test without one does not look at warnings.
 
 **Directives** (`// KEY: value` lines):
 
@@ -118,9 +123,10 @@ must get an error and every error must be expected. Markers in a header the test
   pass is XPASS, which fails the run, so the mark goes when the cause does.
 - `FLAGS: -O2`, `TIMEOUT: 120` (seconds per command), `TIER: nightly`.
 - Run tests: `EXIT: 3` (default 0); `STDOUT: line` (repeatable), or a `<test>.stdout` file.
-  `PEER: name.cpp` (repeatable): Clang compiles `name.cpp`, next to the test and not a test itself,
-  to an object linked with the test: a mixed-object ABI test (DECISIONS §5.4). The peer can call
-  back into the test's functions.
+  `PEER: name.cpp` (repeatable): the oracle Clang compiles `name.cpp`, next to the test and not a
+  test itself, to an object linked with the test: a mixed-object ABI test (DECISIONS §5.4). The
+  peer can call back into the test's functions. `PEER-WITH: apple-clang` compiles the peers with
+  Apple Clang (`xcrun clang++`) instead, for tests of `-fclass-call-abi=apple` (§1.6).
 - Preprocess tests: `ORACLE: gcc` (default Clang); `PP-COMPARE: exact` keeps whitespace
   (default: line markers and blank lines dropped, whitespace runs collapsed).
 - Diff tests: `DIFF: run` (default: verdict, exit status and stdout), `verdict` or `preprocess`.

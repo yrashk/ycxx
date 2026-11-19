@@ -21,7 +21,7 @@ the code in [STATUS.md](STATUS.md), and the work in
 ### What you can do today
 
 **Compile and run programs.** `ycxx cxx a.cpp -o a` (also `-c`, `-fsyntax-only`, `-E`, `-I`,
-`-D`, `-std=c++26`) builds an executable with ycxx's own front end, IR, AArch64 code generator
+`-D`, `-std=c++26`, and `-fclass-call-abi=apple` to pass classes as Apple Clang does) builds an executable with ycxx's own front end, IR, AArch64 code generator
 and Mach-O linker. It also links object files from Clang or GCC. Errors are reported as
 `file:line:col: error: …`.
 
@@ -60,20 +60,21 @@ its analysis between commands. A repeated build re-runs nothing, and an edit re-
 it affects, through code generation and the link. The daemon serves concurrent requests on a
 thread pool, and its output is byte for byte that of a cold, in-process build.
 
-**Editor diagnostics.** `ycxx lsp` is a language server that reports ycxx's errors as you type,
-through the daemon, without unsaved text ever reaching a build.
+**Editor support.** `ycxx lsp` is a language server that reports ycxx's errors as you type,
+including those in the headers a file includes, and goes to the definition of a name used in a
+function body, through the daemon, without unsaved text ever reaching a build.
 
 ### Not yet
 
-- The standard library and its headers. C headers such as `<stdio.h>` compile and `printf` runs;
-  libycxx's `<cstdio>` still needs template template parameters and pointer-to-member types.
+- The standard library and its headers. C headers such as `<stdio.h>` compile without warnings
+  and `printf` runs; libycxx's `<cstdio>` still needs template template parameters and
+  pointer-to-member types.
 - Inheritance and virtual functions, `sizeof` of a class.
 - Access control: `private` and `protected` are not checked yet, so ycxx accepts code that
   uses private members ([#119](https://github.com/yrashk/ycxx/issues/119)).
 - Member templates, template template parameters, and constraints on class templates and
   their members.
 - Floating-point arithmetic, exceptions, and optimization (`-O`).
-- Go-to-definition in the language server.
 - Linux and x86-64 output.
 
 ### In progress
