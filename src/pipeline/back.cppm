@@ -652,6 +652,35 @@ std::string entity_name(EntityId e) {
       out += "::";
     }
     out += w->ins.names.spelling(r->name);
+    // A specialization: its template arguments, so `Describe<int>` and `Describe<int*>` differ.
+    if (r->templ != EntityId::none) {
+      const auto arg = [&](this const auto& one, const ast::TemplateArg& a) -> std::string {
+        switch (a.kind) {
+          case ast::TemplateArgKind::type: return w->types.spell(a.type);
+          case ast::TemplateArgKind::value: {
+            const sema::ValueRec v = w->values.rec(a.value);
+            if (v.kind == sema::ValueKind::integer) return std::to_string(static_cast<std::int64_t>(v.bits));
+            if (v.kind == sema::ValueKind::null_pointer) return "nullptr";
+            return "…";
+          }
+          case ast::TemplateArgKind::pack: {
+            std::string p;
+            for (const ast::TemplateArg& x : w->ins.seqs.elements(a.elems)) p += (p.empty() ? "" : ", ") + one(x);
+            return p;
+          }
+        }
+        return "?";
+      };
+      out += '<';
+      bool first = true;
+      for (const ast::TemplateArg& a : r->args) {
+        const std::string text = arg(a);
+        if (text.empty()) continue;  // an empty pack
+        out += (first ? "" : ", ") + text;
+        first = false;
+      }
+      out += '>';
+    }
   };
   name(e, 0);
   return out;
