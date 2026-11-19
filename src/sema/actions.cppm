@@ -2061,9 +2061,19 @@ public:
     if (std::ranges::all_of(r, [](NodeId n) { return n == NodeId::none; })) r.clear();
     return r;
   }
-  // Those of function `f` as lookup found it, or, for a member, as its class records them.
-  std::vector<NodeId> defaults_of(EntityId f) {
-    if (auto it = defaults_.find(std::to_underlying(f)); it != defaults_.end()) return it->second;
+  // Those of a declaration lookup found: the latest one found has every earlier one's in its scope
+  // ([dcl.fct.default]/4); declarations in other scopes have their own. This item's own
+  // declarations are drafts and have none yet.
+  std::vector<NodeId> found_defaults(const ast::DeclSema& d) {
+    if (std::ranges::any_of(own, [&](const OwnDecl& w) { return w.sema.entity == d.entity && w.sema.params == d.params; })) return {};
+    return defaults_of(d);
+  }
+  // Those of a function named by `callee` (a DeclRef, perhaps parenthesized): as its lookup found
+  // them, or, for a member, as its class records them.
+  std::vector<NodeId> defaults_of(Ex callee, EntityId f) {
+    NodeId n = callee.id;
+    while (n != NodeId::none && ast::kind_of(n) == ast::Nodes::index_of<ast::Paren>()) n = b_->get<ast::Paren>(n).operand.id;
+    if (auto it = defaults_.find(std::to_underlying(n)); it != defaults_.end()) return it->second;
     EntityId scope = w_->entities.rec(f).scope;
     if (scope != EntityId::none && w_->entities.rec(scope).kind != EntityKind::namespace_)
       if (const ClassRec* cr = class_rec(scope))
@@ -2297,8 +2307,8 @@ public:
         Candidate k{m.entity, m.type, true, m.is_deleted, nullptr, m.defaults};
         // Copy-initialization converts with a constructor that takes one argument ([class.conv.ctor]).
         if (copy_init && (fr.params.empty() || k.required(fr.params.size()) > 1)) continue;
+        user_copy = user_copy || is_copy_ctor(fr, ut, k.required(fr.params.size()));
         cands.push_back(std::move(k));
-        user_copy = user_copy || is_copy_ctor(fr, ut);
       }
     QualType void_ = builtin(Builtin::void_);
     if (!user_copy) {
@@ -2338,9 +2348,10 @@ public:
     ExprInfo info{ut, ValueCategory::prvalue, 0};
     return node(ast::CtorCall{info, k.entity, 0, b_->list(cs)}, begin, end, info);
   }
-  // [class.copy.ctor]/2: a constructor whose only parameter is `C&` or `cv C&`.
-  bool is_copy_ctor(const TypeRec& fr, QualType c) {
-    return fr.params.size() == 1 && types().is_reference(fr.params[0]) && !types().rec(fr.params[0]).rvalue_ref &&
+  // [class.copy.ctor]/2: a constructor whose first parameter is `C&` or `cv C&` and whose others
+  // have default arguments (`required` is how many need arguments).
+  bool is_copy_ctor(const TypeRec& fr, QualType c, std::size_t required) {
+    return !fr.params.empty() && required <= 1 && types().is_reference(fr.params[0]) && !types().rec(fr.params[0]).rvalue_ref &&
            same_unqualified(types().referee(fr.params[0]), c);
   }
   // Value-initialization of an aggregate (no constructor to call).
@@ -2519,6 +2530,9 @@ public:
       if (!class_rec(current_class))
         if (auto m = q_->earlier_member(name)) {
           if (m->kind == ast::DeclKind::enumerator) return enumerator(m->entity, m->type, begin, end);
+          // A static member function needs no object ([class.static.mfct]).
+          if (m->kind == ast::DeclKind::function && (m->flags & decl_flag::static_))
+            return decls_expr({*m}, true, name, begin, end, callee);
           if (m->kind != ast::DeclKind::variable) {
             diag(begin, Diag::member_without_object, name);
             return {NodeId::none, begin, end};
@@ -2590,12 +2604,6 @@ public:
       if (!any) undeclared(begin, name);
       return {NodeId::none, begin, end};
     }
-    // A function's default arguments, from the latest declaration found, which has every earlier
-    // one's ([dcl.fct.default]/4). This item's own declarations are drafts and have none yet.
-    for (auto o = found.rbegin(); o != found.rend(); ++o)
-      if (o->kind == ast::DeclKind::function && !defaults_.contains(std::to_underlying(o->entity)) &&
-          std::ranges::none_of(own, [&](const OwnDecl& w) { return w.sema.entity == o->entity && w.sema.params == o->params; }))
-        if (auto ds = defaults_of(*o); !ds.empty()) defaults_[std::to_underlying(o->entity)] = std::move(ds);
     // Several functions: an overload set, resolved by the call ([over.match]); the latest
     // declaration of each gives its type.
     const ast::DeclSema& d = found.back();
@@ -2636,6 +2644,8 @@ public:
     ExprInfo info{types().referee(dt), ValueCategory::lvalue, 0};
     Ex r = node(ast::DeclRef{info, d.entity}, begin, end, info);
     if (unqualified && d.kind == ast::DeclKind::function) unqualified_[std::to_underlying(r.id)] = {d};
+    if (d.kind == ast::DeclKind::function)
+      if (auto ds = found_defaults(d); !ds.empty()) defaults_[std::to_underlying(r.id)] = std::move(ds);
     declared_types_[std::to_underlying(r.id)] = dt;
     return r;
   }
@@ -3622,7 +3632,7 @@ public:
         if (!(d.flags & decl_flag::template_)) {
           // Explicit template arguments name only templates ([temp.arg.explicit]).
           if (ex != explicit_args_.end()) continue;
-          cands.push_back({d.entity, d.type, true, deleted, nullptr, defaults_of(d.entity)});
+          cands.push_back({d.entity, d.type, true, deleted, nullptr, found_defaults(d)});
           decls.push_back(&d);
           continue;
         }
@@ -3641,7 +3651,7 @@ public:
         }
         auto st = t.specialization_type(d, *targs);
         if (!st) continue;
-        cands.push_back({specialization(d, *targs, *st), *st, true, deleted, &d, defaults_of(d.entity)});
+        cands.push_back({specialization(d, *targs, *st), *st, true, deleted, &d, found_defaults(d)});
         decls.push_back(&d);
       }
       auto chosen = resolve(cands, args, callee.begin, w_->entities.rec(set.front().entity).name, std::nullopt);
@@ -3663,9 +3673,11 @@ public:
     }
     EntityId function = EntityId::none;
     QualType ft = callee.type();
+    Ex named = callee;  // `(f)()` takes f's default arguments too ([expr.call]/1)
+    while (auto p = as<ast::Paren>(named)) named = Ex{p->operand.id};
+    if (auto d = as<ast::DeclRef>(named); d && types().is_function(ft) && defaults.empty()) defaults = defaults_of(named, d->entity);
     if (auto d = as<ast::DeclRef>(callee); d && types().is_function(ft)) {
       function = d->entity;
-      if (defaults.empty()) defaults = defaults_of(function);
     } else {
       callee = rvalue(callee);
       ft = callee.type();
@@ -3867,7 +3879,7 @@ private:
   };
   std::map<u32, Bound> bound_;                        // by draft bound-member Member
   std::set<u32> deleted_;                             // deleted functions named so far
-  std::map<u32, std::vector<NodeId>> defaults_;       // by function: its default arguments ([dcl.fct.default])
+  std::map<u32, std::vector<NodeId>> defaults_;       // by a function's DeclRef: the default arguments its lookup found
   std::vector<std::pair<std::size_t, EntityId>> using_enums_;  // (scope depth, enumeration)
   struct BlockUsing {
     std::size_t depth;

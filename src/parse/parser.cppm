@@ -1151,6 +1151,8 @@ public:
   // of the parameter is checked here. A template's that depends on its parameters is kept as it
   // is, and rejected where a call would use it.
   NodeId default_argument(QualType t) {
+    // Not in the parameters of a parameter's own function type ([dcl.fct.default]/3).
+    if (in_params_ > 1) s_->diag(pos(), Diag::default_arg_not_allowed);
     Ex e;
     bool ref = s_->types().is_reference(t);
     if (is(Tk::l_brace)) {

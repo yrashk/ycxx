@@ -949,14 +949,15 @@ public:
       if (types().kind(f.params[i]) == TypeKind::pack_expansion) return std::nullopt;
     // Trailing parameters with default arguments need none ([temp.deduct.call]/1: only those with
     // an argument take part).
+    // Before a trailing pack, the defaulted parameters just before it.
     std::size_t defaulted = 0;
-    if (!trailing) {
+    {
       std::vector<ast::ParamSema> ps = w_->ins.seqs.elements(tmpl.params);
-      while (defaulted < ps.size() && ps[ps.size() - 1 - defaulted].default_arg != ast::NodeId::none) ++defaulted;
+      const std::size_t last = std::min(fixed, ps.size());
+      while (defaulted < last && ps[last - 1 - defaulted].default_arg != ast::NodeId::none) ++defaulted;
     }
-    const std::size_t least = n - std::min(defaulted, n);
-    if (args.size() < std::min(fixed, least) || (args.size() > n && !trailing && !f.variadic) || (!trailing && args.size() < least))
-      return std::nullopt;
+    const std::size_t least = fixed - defaulted;  // with no pack, `fixed` is every parameter
+    if (args.size() < least || (args.size() > n && !trailing && !f.variadic)) return std::nullopt;
     // The explicitly specified arguments are substituted first ([temp.deduct.general]/2); packs
     // stay open, to be extended by deduction ([temp.arg.explicit]/9).
     Bindings given = bindings(depth, out);
