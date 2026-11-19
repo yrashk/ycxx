@@ -156,6 +156,7 @@ constexpr RecordLayout record_layout(std::span<const Placed> bases, std::span<co
   out.size = size == 0 ? align : (size + align - 1) / align * align;
   out.dsize = pod ? out.size : dsize;
   out.nvsize = pod ? out.size : nvsize;
+  if (empty) out.dsize = out.nvsize = 0;  // nothing a copy writes, nothing a member cannot share
   out.placed = {out.size, out.align, out.nvsize, out.align, empty, std::move(empties)};
   if (empty) out.placed.empties.insert(out.placed.empties.begin(), {self, 0});
   return out;

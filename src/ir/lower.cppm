@@ -42,6 +42,9 @@ export struct TypeLayout {
   // move constructor and destructor, so the target's convention may pass it in registers.
   bool trivial_calls = true;
   bool empty = false;     // records: no non-static data members
+  // Records: the bytes a trivial copy writes, nvsize (Itanium §2.4), none for an empty class: not
+  // the tail padding a derived class's members may occupy when the object is a base subobject.
+  std::uint64_t data = 0;
   bool floating = false;  // records: a floating member, at any depth
 };
 
@@ -460,6 +463,7 @@ class Lowering {
         // A trivial copy ([class.copy.ctor], [basic.types.general]): the object's bytes, in the
         // widest chunks its alignment allows.
         TypeLayout l = layout(QualType(std::uint32_t(imms[0])));
+        if (l.kind == TypeKind::record) l.size = l.data;
         out(n, 0, copy_bytes(in(n, 0), in(n, 1), in(n, 2), l, imms[0]));
         return {};
       }

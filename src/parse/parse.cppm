@@ -1023,6 +1023,12 @@ public:
     p_->use_member(v);
     return !p_->member_failed(v);
   }
+  std::vector<EntityId> defining_bases(EntityId c) override {
+    std::vector<EntityId> r;
+    if (auto b = p_->class_bases_.find(std::to_underlying(c)); b != p_->class_bases_.end())
+      for (const sema::BaseRec& x : b->second) r.push_back(x.cls);
+    return r;
+  }
   std::optional<ast::DeclSema> earlier_member(ast::NameId name) override {
     const items::Item& it = p_->items().items[item_];
     if (it.parent == items::none || p_->items().items[it.parent].kind != ItemKind::class_def) return std::nullopt;

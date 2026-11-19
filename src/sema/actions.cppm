@@ -72,6 +72,8 @@ public:
   // In a member declaration of a class being defined: the member named `name` declared before it
   // ([basic.scope.class]; the class's member list is not complete yet).
   virtual std::optional<ast::DeclSema> earlier_member(NameId name) = 0;
+  // The direct bases of class `c` while it is being defined (its base-clause), none otherwise.
+  virtual std::vector<EntityId> defining_bases(EntityId) { return {}; }
   // Namespaces ([basic.namespace]), the global one being `EntityId::none`: the namespace (or
   // alias) unqualified lookup finds for `name`, and qualified lookup of `name` in namespace `ns`
   // ([namespace.qual]).
@@ -272,10 +274,13 @@ public:
     // A type nested in the class whose scope this is ([basic.scope.class]).
     if (current_class != EntityId::none) {
       if (const ClassRec* cr = class_rec(current_class); cr && cr->defined) {
-        for (const auto& [n, t, te] : cr->types)
-          if (n == name) return t;
+        if (auto r = nested_member(current_class, name)) return r->first.type;
       } else if (auto m = q_->earlier_member(name); m && (m->kind == ast::DeclKind::enum_ || m->kind == ast::DeclKind::type_alias)) {
         return m->type;
+      } else {
+        // In the class being defined, a type of its (complete) bases.
+        for (EntityId b : q_->defining_bases(current_class))
+          if (auto r = nested_member(b, name)) return r->first.type;
       }
     }
     std::optional<ast::DeclSema> found;
@@ -675,10 +680,20 @@ public:
   // A type member `n` of class `c` ([class.member.lookup], types): from its record where it is
   // complete, a specialization instantiated for it; or, in the class being defined or
   // instantiated, among the members declared so far ([basic.scope.class]).
+  // A type nested in complete class `c` or else in its bases ([class.member.lookup]), with the
+  // class that declares it.
+  std::optional<std::pair<NestedType, EntityId>> nested_member(EntityId c, NameId n) {
+    const ClassRec* cr = class_rec(c);
+    if (!cr) return std::nullopt;
+    for (const NestedType& t : cr->types)
+      if (t.name == n) return std::pair{t, c};
+    for (const BaseRec& b : cr->bases)
+      if (auto r = nested_member(b.cls, n)) return r;
+    return std::nullopt;
+  }
   std::optional<QualType> member_type(EntityId c, NameId n) {
-    if (const ClassRec* cr = class_rec(c)) {
-      for (const auto& [name, t, te] : cr->types)
-        if (name == n) return t;
+    if (class_rec(c)) {
+      if (auto r = nested_member(c, n)) return r->first.type;
       return std::nullopt;
     }
     if (c == current_class)
@@ -719,17 +734,15 @@ public:
   // ([class.access]/4); diagnosed if not.
   bool type_member_access(const Scope& s, NameId n, u32 at) {
     if (!s.type || !types().is_class(*s.type) || types().is_dependent(*s.type)) return true;
-    EntityId c = types().class_of(*s.type);
-    if (const ClassRec* cr = class_rec(c))
-      for (const NestedType& t : cr->types)
-        if (t.name == n) {
-          if (defer_type_access && !accessible(c, cr->access_of(t.entity))) {
-            deferred_access_.push_back({c, t.entity, n, at});
-            return true;
-          }
-          return check_access(c, t.entity, n, at);
-        }
-    return true;
+    EntityId naming = types().class_of(*s.type);
+    auto r = nested_member(naming, n);
+    if (!r) return true;
+    auto [t, c] = *r;
+    if (defer_type_access && !accessible(c, class_rec(c)->access_of(t.entity), naming)) {
+      deferred_access_.push_back({c, t.entity, n, at});
+      return true;
+    }
+    return check_access(c, t.entity, n, at, naming);
   }
   // In a namespace-scope declaration, the types its decl-specifiers and declarator name are
   // checked once what it declares is known: a member's definition is in its class's scope, and
@@ -810,9 +823,7 @@ public:
   std::optional<QualType> nested_type(NameId cls, NameId name) {
     auto t = class_name(cls, true);
     if (!t || !types().is_class(*t)) return std::nullopt;
-    if (const ClassRec* cr = class_rec(types().class_of(*t)))
-      for (const auto& [n, nt, te] : cr->types)
-        if (n == name) return nt;
+    if (auto r = nested_member(types().class_of(*t), name)) return r->first.type;
     return std::nullopt;
   }
 
@@ -909,6 +920,7 @@ public:
       diag(name_at, Diag::ambiguous_member, name, Types::unqualified(ct));
       return fail;
     }
+    EntityId naming = c;
     // A member of a base: named through the base class subobject ([class.member.lookup]); a
     // static member needs no object, so not the conversion either.
     if (found->owner != c && found->member && found->member->is_static) {
@@ -919,8 +931,8 @@ public:
       ct = arrow ? types().pointee(object.type()) : object.type();
       c = found->owner;
     }
-    if (found->member && found->member->is_function) return bound_member(c, name, object, arrow, begin, end, name_at);
-    if (!check_access(c, found->member ? found->member->entity : found->field->entity, name, name_at)) return fail;
+    if (found->member && found->member->is_function) return bound_member(c, name, object, arrow, begin, end, name_at, naming);
+    if (!check_access(c, found->member ? found->member->entity : found->field->entity, name, name_at, naming)) return fail;
     if (found->member) {
       // A static data member: the object expression is evaluated, then discarded ([expr.ref]).
       const MemberDeclRec& m = *found->member;
@@ -1692,8 +1704,12 @@ public:
   // ([class.access.nest]), or in a friend of `c`: a function, or a class whose members are then
   // all friends ([class.friend]/2); a protected one also in a member or friend of a class derived
   // from `c` ([class.protected], without its restriction on the object expression yet).
-  bool accessible(EntityId c, ast::Access a) {
+  // `naming` is the class the member is named in ([class.access.base]/5), when it is a class
+  // derived from `c`: a protected member may then be named in its members and friends too.
+  bool accessible(EntityId c, ast::Access a, EntityId naming = EntityId::none) {
     if (a == ast::Access::public_ || a == ast::Access::none) return true;
+    if (a == ast::Access::protected_ && naming != EntityId::none && naming != c && accessible(naming, ast::Access::private_))
+      return true;
     const ClassRec* cr = class_rec(c);
     if (!cr) return true;
     auto befriended = [&](EntityId e) { return std::ranges::find(cr->friends, e) != cr->friends.end(); };
@@ -1707,12 +1723,13 @@ public:
     }
     return false;
   }
-  // Whether member `m` of class `c`, named `name` at `at`, is accessible here; diagnosed if not.
-  bool check_access(EntityId c, EntityId m, NameId name, u32 at) {
+  // Whether member `m` of class `c`, named `name` at `at` in class `naming`, is accessible here;
+  // diagnosed if not.
+  bool check_access(EntityId c, EntityId m, NameId name, u32 at, EntityId naming = EntityId::none) {
     const ClassRec* cr = class_rec(c);
     if (!cr) return true;
     ast::Access a = cr->access_of(m);
-    if (accessible(c, a)) return true;
+    if (accessible(c, a, naming)) return true;
     diag(at, a == ast::Access::protected_ ? Diag::protected_member : Diag::private_member, name, types().class_type(c));
     return false;
   }
@@ -1777,12 +1794,13 @@ public:
   // A member function named without a call yet: `a.f`, `p->f`, `f` or `S::f`, bound to its object
   // (none when there is none to bind, as in a static member function). Only a call may follow
   // ([expr.ref]/6.3.2).
-  Ex bound_member(EntityId c, NameId name, std::optional<Ex> object, bool arrow, u32 begin, u32 end, u32 name_at) {
+  Ex bound_member(EntityId c, NameId name, std::optional<Ex> object, bool arrow, u32 begin, u32 end, u32 name_at,
+                  EntityId naming = EntityId::none) {
     auto cands = member_functions(c, name);
     ExprInfo info{builtin(Builtin::bound_member), ValueCategory::prvalue, 0};
     Ex r = node(ast::Member{info, cands.front()->entity, ~u32{0}, arrow ? 1u : 0u, 0, object ? at(*object, begin) : Child{}},
                 begin, end, info);
-    bound_[std::to_underlying(r.id)] = {object, std::move(cands), c, name_at};
+    bound_[std::to_underlying(r.id)] = {object, std::move(cands), c, name_at, naming};
     return r;
   }
   bool is_bound_member(const Ex& e) { return e.ok() && types().is(e.type(), Builtin::bound_member); }
@@ -1792,15 +1810,22 @@ public:
   std::optional<Ex> class_member(EntityId c, NameId name, u32 begin, u32 end, u32 name_at) {
     auto f = find_member(c, name);
     if (!f) {
-      // The enumerators of an unscoped enumeration nested in the class are its members.
-      if (const ClassRec* cr = class_rec(c))
+      // The enumerators of an unscoped enumeration nested in the class are its members, and so
+      // members of its derived classes ([class.member.lookup]).
+      std::function<std::optional<Ex>(EntityId)> in = [&](EntityId k) -> std::optional<Ex> {
+        const ClassRec* cr = class_rec(k);
+        if (!cr) return std::nullopt;
         for (const auto& [n, t, te] : cr->types)
           if (is_unscoped_enum(t))
             if (auto r = find_enumerator(types().enum_of(t), name, begin, end)) {
-              if (!check_access(c, te, name, name_at)) return Ex{NodeId::none, begin, end};
+              if (!check_access(k, te, name, name_at, c)) return Ex{NodeId::none, begin, end};
               return r;
             }
-      return std::nullopt;
+        for (const BaseRec& b : cr->bases)
+          if (auto r = in(b.cls)) return r;
+        return std::nullopt;
+      };
+      return in(c);
     }
     Ex fail{NodeId::none, begin, end};
     if (f->ambiguous) {
@@ -1815,8 +1840,9 @@ public:
       Ex self = this_expr(begin, begin);
       return f->owner == current_class ? self : to_base(self, f->owner, name_at);
     };
+    EntityId naming = c;
     c = f->owner;
-    if (!(f->member && f->member->is_function) && !check_access(c, f->field ? f->field->entity : f->member->entity, name, name_at))
+    if (!(f->member && f->member->is_function) && !check_access(c, f->field ? f->field->entity : f->member->entity, name, name_at, naming))
       return fail;
     if (f->field) {
       if (!has_this) {
@@ -1834,7 +1860,7 @@ public:
     // A static member, data or function, is named like a namespace-scope entity
     // ([expr.prim.id.qual]): `S::f` can have its address taken or be called.
     if (!m.is_function || (m.is_static && member_functions(c, name).size() == 1)) {
-      if (m.is_function && !check_access(c, m.entity, name, name_at)) return fail;
+      if (m.is_function && !check_access(c, m.entity, name, name_at, naming)) return fail;
       if (!m.is_function) return static_member(c, m.entity, m.type, begin, end);
       ExprInfo info{m.type, ValueCategory::lvalue, 0};
       return node(ast::DeclRef{info, m.entity}, begin, end, info);
@@ -1844,7 +1870,7 @@ public:
       object = self_of();
       if (!object->ok()) return fail;
     }
-    return bound_member(c, name, object, true, begin, end, name_at);
+    return bound_member(c, name, object, true, begin, end, name_at, naming);
   }
 
   // A static data member of class `c`. Of the current instantiation of a class template, one whose
@@ -1918,7 +1944,7 @@ public:
     auto chosen = resolve(cands, args, begin, bound.cands.front()->name, object_cv);
     if (!chosen) return fail;
     const MemberDeclRec* d = bound.cands[*chosen];
-    if (!check_access(bound.cls, d->entity, d->name, bound.name_at)) return fail;
+    if (!check_access(bound.cls, d->entity, d->name, bound.name_at, bound.naming)) return fail;
     TypeRec fr = types().rec(d->type);
     auto children = call_args(fr, args, begin, paren_at);
     if (!children) return fail;
@@ -2310,8 +2336,9 @@ public:
       diag(at_, Diag::bind_drops_qualifiers, e.type(), r);
       return fail;
     }
-    // [dcl.init.ref]/5.1, 5.3: to the base class subobject of a glvalue of a derived class.
-    if (e.glvalue() && types().is_class(e.type()) && types().is_class(t) && !same_unqualified(e.type(), t) &&
+    // [dcl.init.ref]/5.1, 5.3: to the base class subobject of a derived class's object, a prvalue
+    // materialized first (and its lifetime extended with the reference's, [class.temporary]/6).
+    if (types().is_class(e.type()) && types().is_class(t) && !same_unqualified(e.type(), t) &&
         (direct_cat || rr.rvalue_ref || object_cv(t) == Cv::const_) &&
         !(rr.rvalue_ref && e.cat() == ValueCategory::lvalue)) {
       int paths = 0;
@@ -2320,6 +2347,7 @@ public:
           diag(at_, Diag::bind_drops_qualifiers, e.type(), r);
           return fail;
         }
+        if (!e.glvalue()) return to_base(materialize(e, Types::unqualified(e.type()), extend), types().class_of(t), at_);
         Ex b = to_base(e, types().class_of(t), at_);
         return b.ok() && extend ? extended(b) : b;
       }
@@ -2351,6 +2379,11 @@ public:
     if (auto p = as<ast::Paren>(e)) {
       Ex inner = extended({p->operand.id, e.begin + p->operand.at, e.end, {}});
       return node(ast::Paren{p->info, at(inner, e.begin)}, e.begin, e.end, p->info);
+    }
+    // Through a base class subobject (`const B& b = derived_glvalue_of_a_temporary`).
+    if (auto c = as<ast::ImplicitConversion>(e); c && c->conversion == ast::ConversionKind::derived_to_base) {
+      Ex inner = extended({c->operand.id, e.begin + c->operand.at, e.end, {}});
+      return node(ast::ImplicitConversion{c->info, c->conversion, c->function, at(inner, e.begin)}, e.begin, e.end, c->info);
     }
     if (auto m = as<ast::Member>(e); m && !m->arrow && !m->reference) {
       Ex inner = extended({m->object.id, e.begin + m->object.at, e.end, {}});
@@ -3098,9 +3131,12 @@ public:
     TypeRec r = types().rec(t);
     if (r.kind == TypeKind::array) return has_const_member(r.inner);
     if (r.kind != TypeKind::class_) return false;
-    if (const ClassRec* c = class_rec(r.entity))
+    if (const ClassRec* c = class_rec(r.entity)) {
+      for (const BaseRec& b : c->bases)
+        if (has_const_member(types().class_type(b.cls))) return true;
       for (const FieldRec& f : c->fields)
         if (Types::is_const(types().canonical(f.type)) || has_const_member(f.type)) return true;
+    }
     return false;
   }
   bool check_class_assignable(const Ex& l, u32 at_) {
@@ -3351,6 +3387,18 @@ public:
       bool equality = op == eq || op == ne;
       if (types().is_pointer(ta) && types().is_pointer(tc)) {
         QualType pa = types().pointee(ta), pc = types().pointee(tc);
+        // [expr.type]/4.6: a pointer to a derived class converted to one to its base class.
+        if (base_depth(pa, pc)) {
+          a = to_base(a, types().class_of(pc), op_at);
+          if (!a.ok()) return Ex{NodeId::none, begin, end};
+          ta = a.type();
+          pa = types().pointee(ta);
+        } else if (base_depth(pc, pa)) {
+          c = to_base(c, types().class_of(pa), op_at);
+          if (!c.ok()) return Ex{NodeId::none, begin, end};
+          tc = c.type();
+          pc = types().pointee(tc);
+        }
         if (Types::unqualified(pa) != Types::unqualified(pc)) return invalid();
         QualType composite = types().pointer(
             types().add_cv(Types::unqualified(pa), Cv(std::to_underlying(Types::cv(pa)) | std::to_underlying(Types::cv(pc)))));
@@ -3442,6 +3490,15 @@ public:
     Ex c = to_bool(cond, cond.begin);
     if (!c.ok()) return {NodeId::none, begin, end};
     ExprInfo info;
+    // [expr.cond]/4.1: glvalues of one category, of a class and its base class: the derived one
+    // converted to the base, as reference binding does.
+    if (t.glvalue() && t.cat() == f.cat() && types().is_class(t.type()) && types().is_class(f.type())) {
+      if (base_depth(t.type(), f.type()) && cv_within(object_cv(t.type()), object_cv(f.type())))
+        t = to_base(t, types().class_of(f.type()), q_at);
+      else if (base_depth(f.type(), t.type()) && cv_within(object_cv(f.type()), object_cv(t.type())))
+        f = to_base(f, types().class_of(t.type()), q_at);
+      if (!t.ok() || !f.ok()) return {NodeId::none, begin, end};
+    }
     if (t.glvalue() && t.cat() == f.cat() && t.type() == f.type()) {
       info = t.info;
     } else {
@@ -3459,6 +3516,14 @@ public:
       } else if (types().is_pointer(tb) && is_null_pointer_constant(t)) {
         a = convert_node(a, ast::ConversionKind::null_pointer, tb);
         info = {tb, ValueCategory::prvalue, 0};
+      } else if (types().is_pointer(ta) && types().is_pointer(tb) &&
+                 (base_depth(types().pointee(ta), types().pointee(tb)) || base_depth(types().pointee(tb), types().pointee(ta)))) {
+        // [expr.cond]/7.3: the composite pointer type, a pointer to the base class.
+        bool down = base_depth(types().pointee(ta), types().pointee(tb));
+        if (down) a = convert(a, tb, q_at);
+        else b = convert(b, ta, q_at);
+        if (!a.ok() || !b.ok()) return {NodeId::none, begin, end};
+        info = {down ? tb : ta, ValueCategory::prvalue, 0};
       } else if (types().is_pointer(ta) && types().is_pointer(tb) &&
                  (qualification_convertible(ta, tb) || qualification_convertible(tb, ta))) {
         QualType to = qualification_convertible(ta, tb) ? tb : ta;
@@ -3742,6 +3807,7 @@ private:
     std::vector<const MemberDeclRec*> cands;
     EntityId cls = EntityId::none;  // whose members they are, for access ([class.access]/4)
     u32 name_at = 0;
+    EntityId naming = EntityId::none;  // the class they were named in ([class.access.base]/5)
   };
   std::map<u32, Bound> bound_;                        // by draft bound-member Member
   std::set<u32> deleted_;                             // deleted functions named so far

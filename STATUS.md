@@ -1545,6 +1545,18 @@ What the process allocates, attributed to the engine's cells, in the trace and t
   - `tests/own/abi/inheritance.run.cpp`: layout, conversions and a Clang-defined base
     constructor and destructor, across ycxx and Clang objects.
   - Ten draft examples now pass.
+- From the review:
+  - A trivial copy of a record writes its nvsize bytes, none for an empty class
+    (`ir::TypeLayout::data`). A copy into a base subobject therefore leaves the derived
+    members in its tail padding alone.
+  - A base reference binds to the base subobject of a materialized derived prvalue.
+  - Types and enumerators of bases are found from derived classes, and while the class is
+    being defined (`Questions::defining_bases`).
+  - Protected members may be named through the naming class's friends.
+  - `?:` and `==` reach the composite base type.
+  - A base's const member deletes the copy assignment.
+  - Not yet: the implicit copy assignment does not call subobjects' `operator=` (#360), and bases'
+    injected-class-names (#361).
 
 ## Bootstrap workarounds
 

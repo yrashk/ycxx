@@ -580,6 +580,7 @@ ir::TypeLayout QueryLayout::type(QualType q) const {
     auto it = classes_.find(std::to_underlying(in.types.get<ast::TClass>(c).entity));
     ir::TypeLayout l{record, r->size, r->align, false, {}, it == classes_.end() || it->second->trivial_calls};
     l.empty = r->fields.empty();
+    l.data = r->placed.nvsize;
     // A floating member makes the class a candidate for the vector registers (AAPCS64 HFAs).
     for (const ir::SubObject& f : r->fields) {
       QualType ft = f.type;
