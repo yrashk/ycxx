@@ -252,6 +252,12 @@ class Browser {
       const std::optional<std::int32_t> held = rows.empty() ? std::nullopt : std::optional(rows[std::min(cursor_, rows.size() - 1)].node);
       tree_.set_hide_reused(!tree_.hide_reused());
       if (held) keep_selected(*held);
+    } else if (k == "s") {
+      // Memory first (#274): start order, then most allocated in the subtree, then most retained.
+      const auto rows = tree_.rows();
+      const std::optional<std::int32_t> held = rows.empty() ? std::nullopt : std::optional(rows[std::min(cursor_, rows.size() - 1)].node);
+      tree_.set_order(static_cast<Tree::Order>((std::to_underlying(tree_.order()) + 1) % 3));
+      if (held) keep_selected(*held);
     } else if (k == "o") {
       const auto rows = tree_.rows();
       const std::optional<std::int32_t> held = rows.empty() ? std::nullopt : std::optional(rows[std::min(cursor_, rows.size() - 1)].node);
@@ -424,7 +430,10 @@ class Browser {
       out += "  " + paint(outcome_sgr(o), std::format("{} {} {}", outcome_glyph(o, true), s.counts[i], outcome_name(o)));
     }
     out += paint("2", std::format("   {} events, {} workers, {}", s.events, s.workers, format_duration(s.span_ns)));
-    return out;
+    // Memory (#274): what the frames allocated and the cells retain; the process's, when known.
+    std::string mem = std::format("   {} allocated, {} retained", format_bytes(static_cast<std::int64_t>(s.alloc_bytes)), format_bytes(s.retained_bytes));
+    if (const auto m = tree_.memory()) mem += std::format(", process {} peak {}", format_bytes(m->process_current), format_bytes(m->process_peak));
+    return out + paint("2", mem);
   }
   std::string status_line() const {
     const auto tab = [&](View v, std::string_view name) { return view_ == v ? paint("1;4", name) : paint("2", name); };
@@ -433,6 +442,8 @@ class Browser {
     if (!filter_.empty()) out += std::format(" filter: {}", paint("1", filter_));
     out += std::format("  worker: {}", tree_.worker() ? paint("1", format_worker(*tree_.worker())) : std::string("all"));
     out += tree_.newest_first() ? "  newest first" : "  oldest first";
+    if (tree_.order() == Tree::Order::alloc) out += "  " + paint("1", "by bytes allocated");
+    else if (tree_.order() == Tree::Order::retained) out += "  " + paint("1", "by bytes retained");
     if (tree_.hide_reused()) out += "  " + paint("1", "reused hidden");
     if (feed_) out += "  " + paint("1;38;5;208", "● live") + paint("2", " " + feed_->source);
     else if (ended_) out += "  " + paint("2", "(the daemon has gone)");
@@ -440,7 +451,7 @@ class Browser {
   }
   std::string footer() const {
     if (view_ == View::tree)
-      return paint("2", " ↑↓/jk move  ⏎/space fold  ←→ close/open  e/E all  n next run  x next error  r reused  shift+J/K ]/[ pane  / filter  w/0-9/m/a worker  o order  v pane  t timeline  ? help  q quit");
+      return paint("2", " ↑↓/jk move  ⏎/space fold  ←→ close/open  e/E all  n next run  x next error  r reused  s sort  shift+J/K ]/[ pane  / filter  w/0-9/m/a worker  o order  v pane  t timeline  ? help  q quit");
     return paint("2", " ↑↓ lane  ←→/HL scrub  ⏎ open in tree  w/0-9/m/a worker  / filter  t tree  ? help  q quit");
   }
 
@@ -460,7 +471,7 @@ class Browser {
     out += name;
     out += ' ' + paint(event_sgr(e), outcome_name(e.outcome));
     if (e.end_ns != e.start_ns) out += paint("2", " " + format_duration(e.end_ns - e.start_ns));
-    out += paint("2", " " + format_workers(e));
+    out += paint("2", " " + format_workers(e) + memory_text(e, n.incl));
     if (e.repeat > 1) out += paint("2", std::format(" ×{}", e.repeat));
     if (!e.errors.empty()) {
       // The message from where it starts, bubbled up; `x` goes there.
@@ -528,6 +539,15 @@ class Browser {
     out.push_back(std::format(" below    {} cells, {} ran", n.subtree - 1, ran_below(n)));
     if (n.parent >= 0) out.push_back(" for      " + paint("2", cell_name(tree_.node(n.parent).ev)));
     out.emplace_back();
+    // Memory (#274): this frame's own, its subtree's, and what the cell retains.
+    if (e.alloc_bytes > 0 || n.incl.alloc > 0 || e.retained_bytes != 0) {
+      out.push_back(" " + paint("1;4", "memory"));
+      out.push_back(std::format(" alloc    {} in {} allocations", format_bytes(static_cast<std::int64_t>(e.alloc_bytes)), e.allocs));
+      out.push_back(std::format(" peak     {}", format_bytes(e.peak_bytes)));
+      out.push_back(std::format(" retains  {}", format_bytes(e.retained_bytes)));
+      out.push_back(std::format(" in all   {} allocated, {} retained", format_bytes(static_cast<std::int64_t>(n.incl.alloc)), format_bytes(n.incl.retained)));
+      out.emplace_back();
+    }
     if (!e.errors.empty()) {
       out.push_back(" " + paint("1;4;31", "errors"));
       for (const std::string& l : wrap(e.errors, rw)) out.push_back(" " + paint(error_sgr, l));
@@ -613,6 +633,7 @@ class Browser {
                                 "",
                                 paint("1", " Showing"),
                                 "  r hides reused cells (what ran stays), o flips the order",
+                                "  s sorts siblings: as they started, by bytes allocated below, by bytes retained",
                                 "",
                                 paint("1", " The pane on the right"),
                                 "  shift+J / shift+K a line (j/k move in the tree), ]/[ a page, }/{ end and top",
