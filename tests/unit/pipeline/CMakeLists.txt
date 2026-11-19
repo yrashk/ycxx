@@ -16,6 +16,9 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_
   add_test(NAME unit.linux_compile
     COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/linux_compile.py
             $<TARGET_FILE:ycxxc> ${CMAKE_C_COMPILER} ${CMAKE_READELF})
+  add_test(NAME unit.linux_executable
+    COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/linux_executable.py
+            $<TARGET_FILE:ycxxc> ${CMAKE_READELF})
   add_test(NAME unit.pipeline_elf_run
     COMMAND ${CMAKE_COMMAND} -DPIPELINE=$<TARGET_FILE:unit_pipeline_elf_executable>
             -P ${CMAKE_CURRENT_SOURCE_DIR}/elf_executable_run.cmake)

@@ -12,6 +12,7 @@ module;
 export module ycxx.pipeline:executable;
 
 import std;
+import ycxx.ast;
 import ycxx.engine;
 export import ycxx.link;
 import ycxx.link.elf;
@@ -115,6 +116,34 @@ const link::dylib& libsystem() {
 
 namespace {
 
+bool defines_global(const obj::symbol& symbol) {
+  return symbol.defined() && (symbol.bind == obj::binding::global || symbol.bind == obj::binding::hidden);
+}
+
+bool defines_symbol(const obj::object& object, std::string_view name) {
+  return std::ranges::any_of(object.symbols, [&](const obj::symbol& symbol) {
+    return defines_global(symbol) && symbol.name == name;
+  });
+}
+
+// The parser checks the ordinary C++ main. An asm label can give another function that symbol.
+bool has_valid_linux_main(const TranslationUnit& tu, ast::Interners& in) {
+  for (const Entity& entity : tu.entities) {
+    if (entity.asm_label != "main" || entity.linkage == ast::Linkage::internal) continue;
+    const auto def = std::ranges::find(tu.functions, entity.id, &FunctionDef::entity);
+    if (def == tu.functions.end()) continue;
+    const ast::QualType type = in.canonical(def->body.deduced ? def->body.deduced_type : def->decl.type);
+    if (!in.types.is<ast::TFunction>(type) || def->this_type) return false;
+    const auto f = in.types.get<ast::TFunction>(type);
+    if (f.variadic || in.canonical(f.ret) != ast::builtin(in, ast::Builtin::int_)) return false;
+    const auto params = in.seqs.elements(f.params);
+    if (params.empty()) return true;
+    const auto charpp = ast::pointer_to(in, ast::pointer_to(in, ast::builtin(in, ast::Builtin::char_)));
+    return params.size() == 2 && params[0] == ast::builtin(in, ast::Builtin::int_) && params[1] == charpp;
+  }
+  return true;
+}
+
 obj::object linux_startup() {
   obj::object startup;
   startup.name = "<ycxx Linux startup>";
@@ -148,7 +177,7 @@ std::expected<std::vector<std::uint8_t>, std::vector<link::error>> link_linux_ex
   const obj::object* main_object = nullptr;
   for (const auto& object : objects) {
     for (const auto& symbol : object.symbols) {
-      if (!symbol.defined() || (symbol.bind != obj::binding::global && symbol.bind != obj::binding::hidden)) continue;
+      if (!defines_global(symbol)) continue;
       if (symbol.name == "_start") return link_elf(objects, "_start");
       // Match the static linker's choice of the first weak definition or the strong definition.
       if (symbol.name == "main" && (!main || (main->weak && !symbol.weak))) {
@@ -235,6 +264,16 @@ engine::query_task<Linked> Link::run(engine::Ctx& cx, ProgramId p) {
   if (!image) {
     for (const link::error& e : image.error()) out.errors.push_back(e.message);
     co_return out;
+  }
+  if (!objects.empty() && objects.front().arch == obj::target::x86_64_linux &&
+      !std::ranges::any_of(objects, [](const obj::object& o) { return defines_symbol(o, "_start"); })) {
+    for (std::size_t i = 0; i < in.tus.size(); ++i) {
+      if (!defines_symbol(objects[i], "main")) continue;
+      const auto& tu = co_await cx.fetch<TuUnit>(in.tus[i]);
+      if (!has_valid_linux_main(tu, *universe().in))
+        out.errors.push_back(std::format("{}: Linux startup requires 'int main()' or 'int main(int, char**)'", tu.name));
+    }
+    if (!out.errors.empty()) co_return out;
   }
   out.image = std::move(*image);
   co_return out;

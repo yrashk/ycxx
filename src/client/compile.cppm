@@ -131,9 +131,10 @@ namespace {
 struct Options {
   enum class Stop { link, object, syntax, preprocess } stop = Stop::link;
   pp::Config pp;  // include paths, macros and target
+  bool nostdlib = false;
   std::optional<std::string> output;
   std::vector<std::string> sources;  // translation units
-  std::vector<std::string> objects;  // Mach-O objects, linked as they are
+  std::vector<std::string> objects;  // objects named on the command line
 };
 
 bool is_source(std::string_view f) {
@@ -153,6 +154,7 @@ std::expected<Options, std::string> parse_options(std::span<const std::string_vi
     if (a == "-c") o.stop = Options::Stop::object;
     else if (a == "-fsyntax-only") o.stop = Options::Stop::syntax;
     else if (a == "-E") o.stop = Options::Stop::preprocess;
+    else if (a == "-nostdlib") o.nostdlib = true;
     else if (a == "--target" || a.starts_with("--target=")) {
       if (a == "--target" && i + 1 == args.size()) return std::unexpected("argument to '--target' is missing");
       auto triple = a == "--target" ? args[++i] : a.substr(9);
@@ -190,11 +192,17 @@ std::expected<Options, std::string> parse_options(std::span<const std::string_vi
     else if (a.ends_with(".o")) o.objects.emplace_back(a);
     else o.sources.emplace_back(a);
   }
-  if (o.pp.target == &ast::x86_64_linux && o.stop == Options::Stop::link)
-    return std::unexpected(std::format("linking for target '{}' is not supported", o.pp.target->triple));
+  if (o.pp.target != &ast::x86_64_linux && o.nostdlib)
+    return std::unexpected("unsupported option '-nostdlib'");
   if (o.pp.call_triviality == ast::CallTriviality::apple && !o.pp.target->apple_calls)
     return std::unexpected("invalid value in '-fclass-call-abi=apple'");
   if (o.sources.empty() && o.objects.empty()) return std::unexpected("no input files");
+  if (o.pp.target == &ast::x86_64_linux && o.stop == Options::Stop::link) {
+    if (!o.objects.empty())
+      return std::unexpected(std::format("'{}': linking object files from disk is not supported for Linux", o.objects.front()));
+    if (!o.nostdlib)
+      return std::unexpected("hosted Linux linking is not supported. Use '-nostdlib' for a freestanding executable");
+  }
   if (o.output && o.stop == Options::Stop::object && o.sources.size() > 1)
     return std::unexpected("cannot specify '-o' with '-c' and several input files");
   for (const std::string& s : o.sources)

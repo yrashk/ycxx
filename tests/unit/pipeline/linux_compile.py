@@ -79,7 +79,6 @@ def main():
         (scope / 'unsupported.cpp').write_text('extern int g; int f() { return g; }\n')
         compile(target, '-c', 'unsupported.cpp', error='symbol address needs a direct RIP-relative reference')
         assert not (scope / 'unsupported.o').exists()
-        compile(target, 'source.cpp', error="linking for target 'x86_64-pc-linux-gnu' is not supported")
 
 
 if __name__ == '__main__':
