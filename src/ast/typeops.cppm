@@ -1,7 +1,7 @@
 // What sema asks of types and constants (docs/design/ast.md §5): checked constructors with the
 // construction-time rules of §5.4, the properties of the fundamental types on a target, integral
-// promotions ([conv.prom]), the usual arithmetic conversions ([expr.arith.conv]) and the integral
-// conversion of values ([conv.integral]).
+// promotions ([conv.prom]), the usual arithmetic conversions ([expr.arith.conv]), the integral
+// conversion of values ([conv.integral]) and floating constants ([basic.fundamental]).
 //
 // Types given to the classification and conversion functions may be sugared and cv-qualified;
 // results are canonical and cv-unqualified. `in.types.is<K>(q)` and `get<K>(q)` read `q`'s own
@@ -306,6 +306,48 @@ ConstId convert_integral(Interners& in, const Target& t, ConstId c, QualType to)
   pre(in.values.is<VInt>(c))
 {
   return int_value(in, t, to, int_bits(in, c));
+}
+
+// ---------------------------------------------------------------- floating constants
+
+// Whether ycxx computes with values of format `f`: those of the host's `float` and `double`, IEEE
+// binary32 and binary64, in round-to-nearest-even. Values of the other formats are not supported
+// yet (#336).
+constexpr bool computes(FloatFormat f) { return f == FloatFormat::binary32 || f == FloatFormat::binary64; }
+
+// The format of floating type `q` on target `t`.
+FloatFormat float_format(const Interners& in, const Target& t, QualType q) {
+  auto b = builtin_of(in, q);
+  contract_assert(b && is_floating(*b));
+  return t[*b].format;
+}
+
+// The value of floating type `q` encoded by `bits` in its format.
+ConstId float_value(Interners& in, const Target& t, QualType q, Bits128 bits) {
+  auto b = builtin_of(in, q);
+  contract_assert(b && is_floating(*b));
+  u32 width = t[*b].size * 8;
+  return in.intern_value(VFloat{builtin(in, *b), wrap(bits, width < 128 ? width : 128, false)});
+}
+
+// `v` as a value of floating type `q`, rounded to nearest, ties to even, when inexact
+// ([conv.double]: the choice is implementation-defined); a value beyond the type's finite range
+// becomes an infinity.
+ConstId float_value(Interners& in, const Target& t, QualType q, double v) {
+  FloatFormat f = float_format(in, t, q);
+  contract_assert(computes(f));
+  u64 bits = f == FloatFormat::binary32 ? std::bit_cast<std::uint32_t>(static_cast<float>(v)) : std::bit_cast<u64>(v);
+  return float_value(in, t, q, Bits128{bits, 0});
+}
+
+// The value of a floating constant of a format ycxx computes with, exactly, as a `double`.
+double float_double(const Interners& in, const Target& t, ConstId c) {
+  contract_assert(in.values.is<VFloat>(c));
+  VFloat v = in.values.get<VFloat>(c);
+  FloatFormat f = float_format(in, t, v.type);
+  contract_assert(computes(f));
+  if (f == FloatFormat::binary32) return std::bit_cast<float>(static_cast<std::uint32_t>(v.bits.lo));
+  return std::bit_cast<double>(v.bits.lo);
 }
 
 // ---------------------------------------------------------------- arrays

@@ -69,7 +69,10 @@ Clang 23 and GCC 16 (the probes at the end) and wrote this document.
     emits nothing; an instantiation re-analyses the body, so each specialization has its own
     closure. Step 3 instantiates a generic `operator()` by re-analysing the recorded token extent
     with its template parameters bound and the frame rebuilt from the record; the closure's
-    fields are fixed by the definition ([expr.prim.lambda.capture]/7).
+    fields are fixed by the definition ([expr.prim.lambda.capture]/7). Step 3 does this in a
+    `BodyAnalysis` over the enclosing item with the enclosing function's context, its constants
+    as locals, and `Sema::open_generic`; the definition registers itself with `Program` at its
+    `}` so a part being analysed can be instantiated from elsewhere.
 12. **Constant evaluation (step 3, #281):** closures are class objects; `function_ir` of an
     `operator()` is found through a map from entity to `ClosureDef`, filled at each `}`, so a
     lambda called in a constant expression of the same item works.

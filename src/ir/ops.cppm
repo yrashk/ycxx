@@ -171,6 +171,7 @@ export enum class Op : std::uint16_t {
   fmul [[=pure({V, V}, {V}).with({commutative})]],
   fdiv [[=pure({V, V}, {V})]],
   fneg [[=pure({V}, {V})]],
+  fabs [[=pure({V}, {V})]],  // the magnitude: the sign bit cleared, of a NaN too
   fcmp [[=pure({V, V}, {V}).imms({pred})]],
 
   // Conversions to the result type ([conv]).
