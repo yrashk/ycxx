@@ -10,7 +10,7 @@ tool), recompute only what that change can affect.
 
 ## Status
 
-**Pre-0.1** (as of 2026-11-18). ycxx compiles a substantial subset of C++ (C-like code, classes,
+**Pre-0.1** (as of 2026-11-19). ycxx compiles a substantial subset of C++ (C-like code, classes,
 templates and constant evaluation) on macOS arm64, from source to a signed, running executable,
 with no external compiler, assembler or linker. It does not compile real programs yet: the
 standard library is out of reach. The plan is in [DECISIONS.md](DECISIONS.md), the details of
@@ -33,7 +33,8 @@ build/bin/ycxx cxx hello.cpp -o hello && ./hello
 **Language.** Programs can use:
 - the fundamental integer and character types, pointers, arrays, references and enumerations,
   and the floating types as types (not yet their values);
-  all statements and operators; functions, recursion and overloading, operator functions included;
+  all operators, and the statements: `switch`, labels and `goto`, declarations in conditions,
+  and init-statements in `if` and `switch` (not yet range-based `for`); functions, recursion and overloading, operator functions included;
 - classes and unions: data and static members, member functions, constructors and destructors
   with RAII, aggregate and designated initialization, passing and returning them by value with
   Clang's calling convention, so ycxx and Clang objects call each other; access control
@@ -94,6 +95,8 @@ checked with the flags of its last build, or else with its line in the project's
 ### In progress
 
 - Standard headers, starting with `<cstdio>` ([#133](https://github.com/yrashk/ycxx/issues/133)).
+- ι: statements and declarations, the C++98/11 core: default arguments, block-scope statics,
+  range-based `for`, casts and arrays ([#337](https://github.com/yrashk/ycxx/issues/337)).
 
 Next come exceptions ([#89](https://github.com/yrashk/ycxx/issues/89)).
 

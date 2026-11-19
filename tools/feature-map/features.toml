@@ -973,8 +973,8 @@ probe = '''
 int main() { int s = 0; for (int i = 0; i < 5; ++i) { if (i == 3) continue; s += i; } int k = 2; switch (k) { case 2: s += 1; break; default: s = 0; } do { --s; } while (s > 7); if (s != 7) goto bad; return 0; bad: return 1; }
 '''
 status = 'partial'
-issues = [267, 299]
-note = '`switch` on a variable; declarations in conditions'
+issues = [341]
+note = 'a jump forward past a vacuously initialized declaration'
 
 [[feature]]
 id = 'stmt-range-for'
@@ -1001,8 +1001,7 @@ detect = '\b(?:if|switch)\s*(?:constexpr\s*)?\((?:[^;()]|\([^()]*\))*;'
 probe = '''
 int main() { if (int x = 2; x > 1) { switch (int y = x; y) { case 2: return 0; } } return 1; }
 '''
-status = 'missing'
-issues = [299]
+status = 'done'
 
 [[feature]]
 id = 'stmt-range-for-init'
@@ -1026,8 +1025,7 @@ std = 'C++23'
 probe = '''
 int main() { int r = 1; { r = 0; goto end; end: } for (using T = int; T i = 0;) {} return r; }
 '''
-status = 'missing'
-issues = [299]
+status = 'done'
 
 # --- Declarations and initialization -----------------------------------------------------------------
 
@@ -1990,13 +1988,14 @@ clauses = ['temp.arg.template']
 std = 'C++98'
 ftm = '__cpp_template_template_args'
 detect = '\btemplate\s*<[^;{]*\btemplate\s*<'
-issues = [208, 271, 272]
+issues = [271, 272]
 probe = '''
 template<class T> struct Box { T v; };
 template<template<class> class C> int f() { C<int> c{3}; return c.v; }
 int main() { return f<Box>() - 3; }
 '''
-status = 'missing'
+status = 'partial'
+note = 'constrained template template parameters; partial ordering'
 
 [[feature]]
 id = 'temp-variadic'
