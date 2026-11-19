@@ -466,7 +466,7 @@ struct EntityRec {
   ast::Linkage linkage = ast::Linkage::external;
   DeclId first{};  // internal linkage only
   EntityId scope = EntityId::none;
-  Fp128 head{};                          // a template's, or an unnamed namespace's unit
+  Fp128 head{};                          // a template head, scope discriminator or builtin class identity
   Fp128 constraints{};                   // a function template's constraints (ast.md §4.3)
   EntityId templ = EntityId::none;       // a specialization's template
   std::vector<ast::TemplateArg> args{};  // a specialization's template arguments
@@ -514,8 +514,8 @@ public:
         r.kind == EntityKind::namespace_)
       f = ast::mix(f, r.head);
     if (r.kind == EntityKind::function_template) f = ast::mix(f, r.constraints);
-    // A closure type has its signature and ordinal in its scope as its `head`
-    // (docs/design/closures.md).
+    // A closure's `head` includes its signature and ordinal in its scope (docs/design/closures.md).
+    // A compiler-owned class uses `head` to distinguish it from declarations of the same name.
     if (r.kind == EntityKind::class_) f = ast::mix(f, r.head);
     if (r.unnamed_type_ordinal)
       f = ast::mix(ast::mix(f, ast::seed("ycxx.sema.unnamed-type-in-class")), *r.unnamed_type_ordinal);
@@ -765,6 +765,9 @@ struct World {
   Entities entities{ins, types};
 
   explicit World(ast::Interners& i, const ast::Target& t = ast::aarch64_darwin) : ins(i), target(t) {
+    if (target.va_list == ast::VaList::sysv_x86_64)
+      sysv_va_list_tag_ = entities.entity({.kind = EntityKind::class_, .name = ins.names.intern("__va_list_tag"),
+                                          .head = ast::seed("ycxx.sema.builtin.sysv_va_list_tag")});
     types.class_name = [this](EntityId e) {
       const EntityRec& r = entities.rec(e);
       if (r.unnamed_type_ordinal) return std::string("(unnamed union)");
@@ -777,6 +780,37 @@ struct World {
     };
   }
   World(const World&) = delete;
+
+  QualType builtin_va_list() {
+    switch (target.va_list) {
+    case ast::VaList::char_pointer: return types.pointer(types.builtin(Builtin::char_));
+    case ast::VaList::sysv_x86_64: return types.array(types.class_type(sysv_va_list_tag_), 1);
+    }
+    std::unreachable();
+  }
+
+  void install_builtin_classes(Classes& classes) {
+    if (sysv_va_list_tag_ == EntityId::none) return;
+    // System V AMD64 psABI §3.5.7. The record is complete in every Linux translation unit and
+    // has no namespace declaration. Its ordinary class layout gives the array's size and alignment.
+    ClassRec rec;
+    rec.defined = true;
+    rec.move_usable = true;
+    QualType offset = types.builtin(Builtin::unsigned_int);
+    QualType area = types.pointer(types.builtin(Builtin::void_));
+    auto field = [&](std::string_view spelling, QualType type) {
+      NameId name = ins.names.intern(spelling);
+      EntityId entity = entities.entity({.kind = EntityKind::data_member, .name = name, .type = type,
+                                         .scope = sysv_va_list_tag_});
+      rec.fields.push_back({name, type, entity});
+    };
+    field("gp_offset", offset);
+    field("fp_offset", offset);
+    field("overflow_arg_area", area);
+    field("reg_save_area", area);
+    classes.publish(sysv_va_list_tag_, std::move(rec));
+  }
+
   // Whether a template argument depends on a template parameter; a pack, whether an element does.
   bool arg_dependent(const ast::TemplateArg& a) const {
     if (a.kind == ast::TemplateArgKind::type) return types.is_dependent(a.type);
@@ -784,6 +818,9 @@ struct World {
     if (a.kind == ast::TemplateArgKind::template_) return a.templ == EntityId::none;
     return std::ranges::any_of(ins.seqs.elements(a.elems), [&](const ast::TemplateArg& x) { return arg_dependent(x); });
   }
+
+private:
+  EntityId sysv_va_list_tag_ = EntityId::none;
 };
 
 }  // namespace ycxx::sema

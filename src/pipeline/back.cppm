@@ -34,11 +34,13 @@ import ycxx.ir;
 import ycxx.ir.l2;
 import ycxx.ir.lower;
 import ycxx.irgen;
+import ycxx.items;
 import ycxx.obj;
 import ycxx.pp;
 import ycxx.sema;
 import ycxx.target.aarch64;
 import ycxx.target.x86_64;
+import :lines;
 import :mangle;
 
 export namespace ycxx::pipeline {
@@ -155,8 +157,9 @@ struct TranslationUnit {
   std::vector<Variable> variables;     // the definitions
   EntityId main = EntityId::none;      // the program's `main`, if this unit defines it
   // Its initialization functions ([basic.start.dynamic]), in order, each with the entity of its
-  // `__mod_init_func` pointer.
+  // startup array slot.
   std::vector<std::pair<EntityId, EntityId>> init_functions;
+  std::optional<ast::Loc> namespace_destruction;  // first variable whose destructor runs at exit
   bool front_failed = false;           // the front end reported errors: nothing to compile
 };
 
@@ -165,6 +168,12 @@ struct TranslationUnit {
 struct BackError {
   std::optional<ast::Loc> at;
   std::string message;
+  std::optional<SourcePosition> source{};
+
+  std::string detail() const {
+    if (source && !source->where.empty()) return std::format("{}: {}", source->where, message);
+    return message;
+  }
 };
 
 // An L2 body as a value. Its origin map is a class, so the body is fingerprinted and serialized
@@ -435,7 +444,7 @@ struct FunctionGen {
   using Key = FnKey;
   using Value = Generated;
   static engine::query_task<Value> run(engine::Ctx& cx, FnKey k);
-  static std::string errors(const Value& v) { return v.error ? v.error->message : std::string(); }  // for traces
+  static std::string errors(const Value& v) { return v.error ? v.error->detail() : std::string(); }  // for traces
 };
 
 // `function_ir(F)`: the L1 body, which holds no position (optimization design §2.4).
@@ -448,7 +457,7 @@ struct FunctionIr {
   using Value = FunctionIrValue;
   static engine::query_task<Value> run(engine::Ctx& cx, FnKey k);
   static std::string show(const Value& v);  // the L1 text, for traces (#245)
-  static std::string errors(const Value& v) { return v.error ? v.error->message : std::string(); }
+  static std::string errors(const Value& v) { return v.error ? v.error->detail() : std::string(); }
 };
 
 // `function_debug(F)`: node id → `Loc`, and the variables.
@@ -468,7 +477,7 @@ struct Lower {
   using Value = Lowered;
   static engine::query_task<Value> run(engine::Ctx& cx, FnKey k);
   static std::string show(const Value& v);  // the L2 text, for traces (#245)
-  static std::string errors(const Value& v) { return v.error ? v.error->message : std::string(); }
+  static std::string errors(const Value& v) { return v.error ? v.error->detail() : std::string(); }
 };
 
 // `unit(F, ctx, inline_opts)`: the fingerprint of F's optimization unit, which is in the
@@ -481,7 +490,7 @@ struct UnitQ {
   using Key = FnKey;
   using Value = UnitRef;
   static engine::query_task<Value> run(engine::Ctx& cx, FnKey k);
-  static std::string errors(const Value& v) { return v.error ? v.error->message : std::string(); }  // for traces
+  static std::string errors(const Value& v) { return v.error ? v.error->detail() : std::string(); }  // for traces
 };
 
 struct OptKey {
@@ -536,7 +545,7 @@ struct Tu {
   static engine::query_task<Value> run(engine::Ctx& cx, TuId tu);
   static std::string errors(const Value& v) {  // for traces (#245)
     std::string out;
-    for (const BackError& e : v.errors) out += e.message + "\n";
+    for (const BackError& e : v.errors) out += e.detail() + "\n";
     return out;
   }
 };
@@ -581,6 +590,35 @@ const ast::Target& unit_target(engine::SyncCtx& cx, TuId tu) {
 
 obj::target object_target(const ast::Target& target) {
   return target.triple == ast::x86_64_linux.triple ? obj::target::x86_64_linux : obj::target::aarch64_macos;
+}
+
+// Source positions are dependencies only of queries that report an error.
+engine::query_task<std::optional<SourceLocations>> error_locations(engine::Ctx& cx, TuId tu) {
+  const TuSource& src = cx.fetch<TuSourceIn>(tu);
+  if (!src.file) co_return std::nullopt;
+  const pp::FileId file{*src.file};
+  const pp::Source& source = cx.fetch<pp::SourceOf>(file);
+  const pp::Region& region = co_await cx.fetch<pp::Pp>(file);
+  const items::Items& items = co_await cx.fetch<items::RegionItems>(file);
+  co_return SourceLocations(cx, source, file, region, items);
+}
+
+engine::query_task<BackError> located_error(engine::Ctx& cx, TuId tu, std::optional<ast::Loc> at, std::string message) {
+  BackError error{at, std::move(message)};
+  if (at)
+    if (auto locations = co_await error_locations(cx, tu)) error.source = locations->at(*universe().in, *at);
+  co_return error;
+}
+
+// A failed object build may have more than one error. Use one table per file for those that
+// arose here, and keep the positions already resolved by the cells that reported the others.
+engine::query_task<TuValue> locate_errors(engine::Ctx& cx, TuId tu, TuValue out) {
+  const auto needs_position = [](const BackError& e) { return e.at && !e.source; };
+  if (std::ranges::any_of(out.errors, needs_position))
+    if (auto locations = co_await error_locations(cx, tu))
+      for (BackError& e : out.errors)
+        if (needs_position(e)) e.source = locations->at(*universe().in, *e.at);
+  co_return out;
 }
 
 }  // namespace
@@ -847,7 +885,10 @@ engine::query_task<Generated> FunctionGen::run(engine::Ctx& cx, FnKey k) {
   input.atexit = d.atexit;
   input.dso = d.dso;
   auto f = irgen::function_ir(*universe().in, input, facts);
-  if (!f) co_return Generated{std::nullopt, BackError{ast::Loc{d.item, d.body_offset}, f.error()}};
+  if (!f) {
+    auto error = co_await located_error(cx, k.tu, ast::Loc{d.item, d.body_offset}, std::move(f.error()));
+    co_return Generated{std::nullopt, std::move(error)};
+  }
   co_return Generated{std::move(*f), std::nullopt};
 }
 
@@ -860,12 +901,12 @@ std::string unnamed(std::string text) {
 }  // namespace
 
 std::string FunctionIr::show(const FunctionIrValue& v) {
-  if (v.error) return "error: " + v.error->message;
+  if (v.error) return "error: " + v.error->detail();
   return v.body ? unnamed(ir::print(EntityId::none, *v.body)) : std::string();
 }
 
 std::string Lower::show(const Lowered& v) {
-  if (v.error) return "error: " + v.error->message;
+  if (v.error) return "error: " + v.error->detail();
   return v.body ? unnamed(l2::print(EntityId::none, v.body->f)) : std::string();
 }
 
@@ -891,21 +932,34 @@ engine::query_task<ir::FunctionDebug> FunctionDebug::run(engine::Ctx& cx, FnKey 
 
 namespace {
 
+bool linux_scalar(const QueryLayout& layout, QualType type) {
+  ir::TypeLayout l = layout.type(type);
+  return l.kind == ir::TypeKind::pointer || (l.kind == ir::TypeKind::integer && (l.size == 4 || l.size == 8));
+}
+
 // Lowering implements the Darwin aggregate calling convention. Check the original signature of
 // each function and call before lowering can erase an aggregate, narrow integer or ellipsis.
-std::string_view linux_signature_error(const ast::Interners& in, const QueryLayout& layout, QualType type) {
+std::string_view linux_signature_error(const ast::Interners& in, const QueryLayout& layout, QualType type,
+                                       bool allow_variadic = false) {
   QualType canonical = in.types.canon(type);
   if (!in.types.is<ast::TFunction>(canonical)) return "the function type is unavailable";
   auto f = in.types.get<ast::TFunction>(canonical);
-  if (f.variadic) return "variadic functions are not supported";
-  auto scalar = [&](QualType t) {
-    ir::TypeLayout l = layout.type(t);
-    return l.kind == ir::TypeKind::pointer || (l.kind == ir::TypeKind::integer && (l.size == 4 || l.size == 8));
-  };
-  if (layout.type(f.ret).kind != ir::TypeKind::void_ && !scalar(f.ret))
+  if (f.variadic && !allow_variadic) return "variadic functions are not supported";
+  if (layout.type(f.ret).kind != ir::TypeKind::void_ && !linux_scalar(layout, f.ret))
     return "only void, 32- and 64-bit integer, pointer and reference results are supported";
   for (QualType p : in.seqs.elements(f.params))
-    if (!scalar(p)) return "only 32- and 64-bit integer, pointer and reference parameters are supported";
+    if (!linux_scalar(layout, p)) return "only 32- and 64-bit integer, pointer and reference parameters are supported";
+  return {};
+}
+
+std::string_view linux_direct_call_error(const QueryLayout& layout, const ir::Function& body, ir::NodeId call) {
+  auto imms = body.imms_of(call);
+  // The L1 by-value bit identifies a class argument represented by a pointer.
+  if (imms[2]) return "aggregate arguments are not supported";
+  // The tail values have already undergone the default argument promotions ([expr.call]).
+  for (ir::ValueId v : body.operands_of(call).last(imms[1]))
+    if (!linux_scalar(layout, body.value(v).type.type))
+      return "only 32- and 64-bit integer and pointer ellipsis arguments are supported";
   return {};
 }
 
@@ -924,7 +978,8 @@ engine::query_task<Lowered> Lower::run(engine::Ctx& cx, FnKey k) {
     QualType type = def.body.deduced ? def.body.deduced_type : def.decl.type;
     if (auto error = linux_signature_error(in, layout, type); !error.empty()) {
       auto message = std::format("x86-64 System V ABI: {}", error);
-      co_return Lowered{std::nullopt, {}, BackError{ast::Loc{def.item, def.body_offset}, std::move(message)}};
+      auto located = co_await located_error(cx, k.tu, ast::Loc{def.item, def.body_offset}, std::move(message));
+      co_return Lowered{std::nullopt, {}, std::move(located)};
     }
     if (!f.body) co_return Lowered{std::nullopt, {}, f.error};
     const TranslationUnit& tu = co_await cx.fetch<TuUnit>(k.tu);
@@ -941,11 +996,14 @@ engine::query_task<Lowered> Lower::run(engine::Ctx& cx, FnKey k) {
         QualType ptr = body.value(body.operands_of(n)[1]).type.type;
         callee = ast::pointee_of(in, ptr);
       } else continue;
-      std::string_view error = callee ? linux_signature_error(in, layout, *callee) : "the function type is unavailable";
+      bool direct = op == ir::Op::call;
+      std::string_view error = callee ? linux_signature_error(in, layout, *callee, direct) : "the function type is unavailable";
+      if (direct && error.empty()) error = linux_direct_call_error(layout, body, n);
       if (error.empty()) continue;
       const ir::FunctionDebug& debug = co_await cx.fetch<FunctionDebug>(k);
       auto at = i < debug.loc.size() ? debug.loc[i] : ast::Loc{def.item, def.body_offset};
-      co_return Lowered{std::nullopt, {}, BackError{at, std::format("x86-64 System V ABI: call: {}", error)}};
+      auto located = co_await located_error(cx, k.tu, at, std::format("x86-64 System V ABI: call: {}", error));
+      co_return Lowered{std::nullopt, {}, std::move(located)};
     }
     config.int_arg_registers = 6;
     config.min_result_bits = 0;
@@ -956,7 +1014,8 @@ engine::query_task<Lowered> Lower::run(engine::Ctx& cx, FnKey k) {
     const ir::FunctionDebug& debug = co_await cx.fetch<FunctionDebug>(k);
     std::optional<ast::Loc> at;
     if (ir::raw(l2.error().node) < debug.loc.size()) at = debug.loc[ir::raw(l2.error().node)];
-    co_return Lowered{std::nullopt, {}, BackError{at, "lower: " + l2.error().message}};
+    auto error = co_await located_error(cx, k.tu, at, "lower: " + l2.error().message);
+    co_return Lowered{std::nullopt, {}, std::move(error)};
   }
   co_return Lowered{L2Body{std::move(*l2)}, {layout.strings().begin(), layout.strings().end()}, std::nullopt};
 }
@@ -1128,7 +1187,7 @@ std::expected<obj::object, aarch64::CodegenError> assemble_linux(
   using K = aarch64::DataKind;
   using S = obj::standard_section;
   for (auto [kind, section] : {std::pair{K::cstring, S::cstring}, {K::rodata, S::rodata}, {K::data_const, S::data_const},
-                               {K::data, S::data}, {K::bss, S::bss}}) {
+                               {K::data, S::data}, {K::bss, S::bss}, {K::init_func, S::init_array}}) {
     if (!std::ranges::contains(data, kind, &aarch64::DataDef::kind)) continue;
     const std::uint32_t index = o.add_section(section);
     obj::section& sec = o.sections[index];
@@ -1171,12 +1230,9 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
     errors.push_back({std::nullopt, "the translation unit has errors"});
     co_return out;
   }
-  if (linux && !tu.init_functions.empty()) {
-    const auto init = std::ranges::find(tu.functions, tu.init_functions.front().first, &FunctionDef::entity);
-    std::optional<ast::Loc> at;
-    if (init != tu.functions.end()) at = ast::Loc{init->item, init->body_offset};
-    errors.push_back({at, "namespace-scope dynamic initialization and destruction are not supported on x86-64 Linux"});
-    co_return out;
+  if (linux && tu.namespace_destruction) {
+    errors.push_back({tu.namespace_destruction, "namespace-scope destruction is not supported on x86-64 Linux"});
+    co_return co_await locate_errors(cx, id, std::move(out));
   }
   std::vector<FnKey> fns;
   for (const FunctionDef& f : tu.functions) fns.push_back({id, f.entity});
@@ -1223,7 +1279,7 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
   }
 
   std::vector<aarch64::Symbol> symbols;
-  // The pointers to the initialization functions that dyld calls before `main`, in order.
+  // The pointers to the initialization functions that startup calls before `main`, in order.
   for (std::size_t i = 0; i < tu.init_functions.size(); ++i) {
     auto [fn, slot] = tu.init_functions[i];
     data.push_back({slot, aarch64::DataKind::init_func, std::vector<std::uint8_t>(8, 0), 0, 8, {{0, fn, 0}}});
@@ -1326,14 +1382,14 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
                                          encoding, e->name.size(), e->name, disc),
                        obj::binding::local});
   }
-  if (!errors.empty()) co_return out;
+  if (!errors.empty()) co_return co_await locate_errors(cx, id, std::move(out));
 
   // Code: codegen(F) for every function, in definition order.
   auto ms = co_await cx.par_map<Codegen>(fns);
   for (std::size_t i = 0; i < fns.size(); ++i) {
     if (ms[i].get().ok()) continue;
     errors.push_back({ast::Loc{tu.functions[i].item, tu.functions[i].body_offset}, "codegen: " + ms[i].get().error});
-    co_return out;
+    co_return co_await locate_errors(cx, id, std::move(out));
   }
   auto o = [&] {
     if (linux) {
@@ -1350,7 +1406,7 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
     for (const FunctionDef& fn : tu.functions)
       if (fn.entity == o.error().entity) at = ast::Loc{fn.item, fn.body_offset};
     errors.push_back({at, "codegen: " + o.error().message});
-    co_return out;
+    co_return co_await locate_errors(cx, id, std::move(out));
   }
   out.object = std::move(*o);
   co_return out;

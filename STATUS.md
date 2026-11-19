@@ -564,9 +564,13 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   configuration. Darwin remains the default.
 - The scalar System V AMD64 backend in `src/target/x86_64/` supports 32- and 64-bit integer,
   pointer and reference parameters and results, plus void results. It handles direct and
-  indirect calls, stack arguments and RIP-relative data references within a unit. Floating-point,
-  aggregate and narrow integer arguments and results, and variadic calls, are outside this ABI
-  subset.
+  indirect calls, stack arguments and RIP-relative data references within a unit. Direct
+  variadic calls use the same registers and stack slots for promoted 32- and 64-bit integers
+  and pointers. The emitter clears EAX immediately before every direct call so a variadic callee
+  receives a zero vector-register count in AL, including with an empty ellipsis. Floating-point,
+  aggregate and narrow integer arguments and results remain outside this ABI subset. Variadic
+  definitions and calls through function pointers remain unsupported.
+  [#399](https://github.com/yrashk/ycxx/issues/399), [#196](https://github.com/yrashk/ycxx/issues/196)
 - `-c` writes deterministic ELF64 relocatable objects through `src/obj/elf.cppm`. The reader
   accepts the supported x86-64 `ET_REL` subset emitted by ycxx. The native ELF linker consumes
   the same in-memory objects, resolves absolute and PC-relative relocations, and writes a static
@@ -579,11 +583,17 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   value. The link query checks a source function's ABI when an asm label gives it the symbol
   `main`. A `main` supplied in an ELF object must already use one of those signatures. Hosted
   linking and general-purpose ELF object interoperability remain unsupported.
-- ELF code generation diagnoses translation units that require namespace-scope dynamic
-  initialization or destruction. Syntax-only analysis still accepts them.
+- ELF objects record namespace-scope initializer functions in `.init_array`, with 8-byte slots
+  and `R_X86_64_64` relocations. The linker places arrays consecutively in input order and checks
+  each slot resolves into executable input bytes. Generated startup calls the functions before
+  `main` ([basic.start.dynamic]). A custom `_start` with a nonempty array is a link error.
   [#387](https://github.com/yrashk/ycxx/issues/387)
-- Linux x86-64 CI runs `unit.linux_compile`, which links a ycxx-produced object with a native C
-  caller, and `unit.linux_executable` (`tests/unit/pipeline/linux_executable.py`), which runs
+- ELF code generation diagnoses namespace-scope objects that require destruction at exit, at
+  their declaration. Syntax-only analysis accepts them. [#400](https://github.com/yrashk/ycxx/issues/400)
+- Linux x86-64 CI runs `unit.linux_compile`, which links ycxx-produced objects with native C
+  callers and variadic callees. It checks namespace initialization, default promotions, register
+  and stack arguments, stack alignment and the incoming AL for both empty and nonempty ellipses.
+  `unit.linux_executable` (`tests/unit/pipeline/linux_executable.py`) runs
   source-only, object-only and mixed-input executables and checks exit status, `argc` and `argv`,
   diagnostics, and cold and daemon output. The linker and startup also have native CTest
   coverage, including execution of an explicit `_start`.
@@ -1392,8 +1402,8 @@ Fable decided the representation (ast.md §6.6); the Opus session wrote the code
   so the SDK's `sys/cdefs.h` no longer warns "Unsupported compiler detected". Not `__GNUG__`,
   `__clang__` or `__llvm__`. libycxx tests `__ycxx__` first (yrashk/libycxx#28).
 - What the SDK's `__GNUC__` paths then use, in the headers libycxx's C headers reach, is in
-  docs/EXTENSIONS.md. New: `__builtin_va_list`, the target's va_list type (`char*`;
-  `ast::Target::va_list`), found where lookup finds nothing else (`Sema::builtin_type_name`).
+  docs/EXTENSIONS.md. `__builtin_va_list` names the target's va_list type (`char*` on Darwin)
+  where lookup finds nothing else (`ast::Target::va_list`, `Sema::builtin_type_name`).
   The `__builtin_*` functions ycxx lacks (`__builtin_fabsf`, `__builtin_inff`, `__builtin_alloca`,
   `__builtin_offsetof`, …) are diagnosed as "built-in function '…' is not supported yet", their
   arguments skipped (`lex::lacking_builtins`, `Sema::unsupported_builtin`). Any other `__builtin_`
@@ -1417,6 +1427,13 @@ Fable decided the representation (ast.md §6.6); the Opus session wrote the code
   (was 1). `<cmath>` and `<cstdlib>` gain errors in the SDK's `__GNUC__` inline functions (local
   unions, floating-point operations, `__builtin_fabs*`), which already had thousands.
 
+## GNU pointer qualifiers in glibc declarations (#384)
+
+- The parser accepts `__restrict` and `__restrict__` after `*` in pointer declarators
+  ([dcl.ptr]), including the parameter declarations in glibc's `<stdio.h>`. Type construction
+  and alias analysis use the ordinary pointer rules. `unit.sema` covers both spellings and
+  invalid declarators. See `docs/EXTENSIONS.md`.
+
 ## Linux compiler resource `<stddef.h>` (#133)
 
 - For x86-64 Linux, `resources/linux/include` is searched after libycxx, so its `<stddef.h>`
@@ -1424,9 +1441,17 @@ Fable decided the representation (ast.md §6.6); the Opus session wrote the code
   request is consumed, and partial inclusions can precede libycxx's full `<cstddef>` inclusion.
   The full resource header supplies `max_align_t` with 16-byte alignment (AMD64 psABI §3.1.2).
   `unit.pp` exercises both paths through the configured header search.
-- glibc's `<stdio.h>` now reaches its `__need___va_list` request for `<stdarg.h>`. Compiling
-  `<stdio.h>` still needs a compiler resource `<stdarg.h>` and the System V `__builtin_va_list`
-  type (#133).
+
+## Linux compiler resource `<stdarg.h>` (#383)
+
+- Linux `__builtin_va_list` is an array of one compiler-owned record with the two unsigned
+  offsets and two pointers of the AMD64 psABI §3.5.7. Ordinary array and record semantics give it
+  size 24 and alignment 8 and adjust it to a pointer as a function parameter ([dcl.array],
+  [dcl.fct]). The builtin name also works with explicit global qualification.
+- The resource `<stdarg.h>` consumes each `__need___va_list` request and supplies the guarded
+  `__gnuc_va_list` typedef. A full include also supplies `va_list` ([cstdarg.syn]). glibc's
+  `<stdio.h>` preprocesses, and `unit.linux_stdarg` checks that path, both inclusion orders,
+  and type semantics. Variadic operations are tracked in #248.
 
 ## Templates, ζ step 8: template template parameters and `__make_integer_seq` (#88, #208, 2026-11-19)
 
@@ -1504,9 +1529,10 @@ request it serves.
 - Names: units and files by their file, functions by qualified name, requests and programs by
   their units and output (`Build(a.cpp → a)`).
 - Errors: a compile error is a value, so a kind says which of its values hold errors
-  (`errors(value)`; `Pp::diagnostic_errors` keeps error-severity diagnostics only, so a
-  `#warning` is none). Events carry the text; the cell where errors start (no child has any) is
+  (`errors(value)`). Events carry the text; the cell where errors start (no child has any) is
   marked, with its message, and every cell above names it (`error below:`, JSON `error_at`).
+  Preprocessing, front-end and back-end diagnostics include the source file, line and byte column
+  where available (#404). The trace keeps error-severity messages only, so a `#warning` is no error.
 - Values shown: L1 (`FunctionIr`), L2 (`Lower`), and assembly (`Codegen`, `Optimized`) from
   `aarch64::disassemble`, which decodes with the encoder's own form table.
 - `--trace-engine=json`: JSON Lines on stderr (events with values and errors, the diagnostics and
@@ -1896,6 +1922,43 @@ values, end to end; results match Clang's bit for bit.
   its entity's from the function's entry, so a jump past its declaration finds it.
 - Not yet: inline functions' statics are per unit (#124); static references (#367).
 - Tests: `tests/own/static-locals/` (spec-only, 19 tests, a Clang peer in `mixed.run.cpp`).
+
+## Range-based `for`, ι (#298, #337, 2026-11-19)
+
+- **Parser** (src/parse/parser.cppm `range_for`): `for ( init-statement_opt decl : initializer )`
+  (`range_for_ahead` finds the `:`, past `?:`) is built as [stmt.ranged] expands it, from existing
+  kinds: hidden locals `auto&& __range`, `auto __begin`, `auto __end` (`deduce_placeholder`),
+  then a `For` over `__begin != __end` and `++__begin` whose body declares the loop variable from
+  `*__begin`. An array supplies its begin and one-past-end pointers. A class supplies member calls
+  when member lookup finds both names, including inherited members. The fallback uses ordinary
+  lookup for `begin(__range)` and `end(__range)` until #165 supplies ADL-only lookup. The loop
+  variable and init-statement names are in the guarded scope ([basic.scope.block]/2). A dependent
+  range is expanded at instantiation.
+- Remaining work covers ADL-only nonmember lookup (#165), C++23 lifetime extension for
+  temporaries inside the range initializer (#376), braced ranges (#329), and sentinels that rely on
+  `!=` rewritten from `==` (#295). A constexpr reference requires a constexpr overloaded
+  dereference. Full constant evaluation of the class iterator still needs #25.
+- Tests: `tests/own/range-for/` (17 from the independent author and nine review regressions).
+
+## The address of an overload set, ι (#313, #337, 2026-11-19)
+
+- A pointer or reference target picks a free or static member function by its function type
+  ([over.over]). Targets include initializers, assignments, arguments and return values, and
+  casts. List-initialization applies the target to each scalar element, including elements of
+  an array with a deduced bound.
+- Function template deduction uses the entire target type ([temp.deduct.funcaddr]). Selection
+  checks associated constraints, prefers a non-template function, and partially orders
+  matching templates by their full function types. A call can also deduce fixed function or
+  function-pointer parameters by trying the non-template members of an overload set
+  ([temp.deduct.call]/6).
+- Related work covers pointers to non-static members (#238), `noexcept` function types (#219),
+  a template-id without a target type (#335), and function pointer or reference template
+  arguments (#406). A free immediate function selected from an overload is diagnosed outside an
+  immediate invocation or context. General immediate-function name validation is tracked in #102.
+- The Linux x86-64 backend can call through an address taken from an internal function. Emitting
+  addresses of externally linked functions on that target is tracked in #407.
+- Tests are in `tests/own/function-pointers/`, with draft examples for [over.over] and
+  [temp.deduct.call] enabled.
 
 ## Bootstrap workarounds
 

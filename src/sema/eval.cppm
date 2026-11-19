@@ -59,6 +59,16 @@ class Evaluator {
 public:
   Evaluator(Sema& s, Questions& q) : s_(&s), q_(&q) {}
 
+  // A direct call to a non-constexpr function cannot initialize a constexpr reference
+  // ([expr.const]). This also applies when its class argument cannot yet be evaluated (#25).
+  void check_constexpr_call(Ex e) {
+    EntityId f = EntityId::none;
+    if (auto call = s_->as<ast::Call>(e)) f = call->function;
+    if (auto call = s_->as<ast::MemberCall>(e)) f = call->function;
+    if (f != EntityId::none && !Sema::closure_member(s_->world(), f) && !q_->is_constexpr(f))
+      s_->diag(e.begin, Diag::not_constant, reason_arg({interp::Reason::not_constexpr, 0, {}}));
+  }
+
   // Evaluates `e` as a core constant expression of its type, then checks the result is a
   // permitted result of a constant expression ([expr.const]). `e` must be valid.
   Evaluated evaluate(Ex e) {

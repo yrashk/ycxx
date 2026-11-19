@@ -169,6 +169,53 @@ void rejects(std::span<const obj::object> objects, std::string_view reason, std:
   check(!result && result.error().contains(reason), reason);
 }
 
+void initializer_arrays(std::array<obj::object, 2> input) {
+  auto& [first, second] = input;
+  first.add_section(standard_section::init_array);
+  second.add_section(standard_section::init_array);
+  first.sections.back().emit64(0);
+  first.sections.back().relocate(reloc_kind::abs64, 1, 1);  // weak compute resolves to second's definition
+  const auto inner = second.define("inner", binding::local, 0, 1);
+  second.sections.back().emit64(0);
+  second.sections.back().relocate(reloc_kind::abs64, inner, -1);
+  const auto image = elf::link(input);
+  check(image.has_value(), image ? "link initializer arrays" : image.error());
+  if (image) {
+    const auto read_only = field(*image, 64 + 56 + 8, 8);
+    const auto compute = field(*image, 24, 8) + first.sections[0].size();
+    check(read_only + 56 <= image->size() && field(*image, read_only + 40, 8) == compute + 1 &&
+          field(*image, read_only + 48, 8) == compute, "array slots are contiguous and use selected definitions and addends");
+  }
+
+  const auto change = [&](auto mutation, std::string_view reason) {
+    auto bad = input;
+    mutation(bad[0], bad[1]);
+    rejects(bad, reason);
+  };
+  change([](auto& a, auto&) { a.sections.back().align_log2 = 4; }, "invalid .init_array alignment or size");
+  change([](auto& a, auto&) { a.sections.back().bytes.pop_back(); }, "invalid .init_array alignment or size");
+  change([](auto& a, auto&) { a.sections.back().relocs.clear(); }, ".init_array requires one relocation per slot");
+  change([](auto& a, auto&) { a.sections.back().relocs.front().kind = reloc_kind::x86_64_pc32; },
+         ".init_array requires an aligned R_X86_64_64 relocation per slot");
+  change([](auto& a, auto&) { a.sections.back().relocs.front().offset = 1; },
+         ".init_array requires an aligned R_X86_64_64 relocation per slot");
+  change([](auto& a, auto&) {
+    auto& s = a.sections.back();
+    s.emit64(0);
+    s.relocs.push_back(s.relocs.front());
+  }, "overlapping ELF relocations are unsupported");
+  change([](auto& a, auto&) { a.sections.back().relocs.front().symbol = a.reference("optional"); },
+         ".init_array relocation has no defined target");
+  const auto outside = ".init_array relocation target is outside its executable input section";
+  change([](auto&, auto& b) {
+    const auto compute = std::ranges::find(b.symbols, std::string("compute"), &obj::symbol::name);
+    compute->section = 2;  // strong data definition overrides a weak text definition
+  }, outside);
+  change([](auto& a, auto& b) { a.sections.back().relocs.front().addend = b.sections[0].size(); }, outside);
+  change([](auto& a, auto&) { a.sections.back().relocs.front().addend = std::numeric_limits<std::int64_t>::min(); }, outside);
+  change([](auto& a, auto&) { a.sections.back().relocs.front().addend = std::numeric_limits<std::int64_t>::max(); }, outside);
+}
+
 void diagnostics(const std::array<obj::object, 2>& good) {
   rejects(good, "entry symbol 'missing' is undefined", "missing");
   rejects(good, "entry symbol 'values' is not inside executable code", "values");
@@ -247,5 +294,6 @@ int main(int argc, char** argv) {
   }
   diagnostics(objects);
   alternate_layouts(objects);
+  initializer_arrays(objects);
   return ycxx::unit::result("unit.elf_link");
 }
