@@ -358,6 +358,7 @@ enum class EntityKind : u8 {
   function, variable, class_, data_member, constructor, destructor, enum_, enumerator, namespace_, function_template,
   class_template,
   variable_template,  // [temp.pre]: `(scope, name, head)`, as a function template's
+  alias_template,     // [temp.alias]: `(scope, name, head)`; its uses are the types it stands for
   type_alias  // a typedef-name or alias-declaration ([dcl.typedef]): `(scope, name)`
 };
 
@@ -411,7 +412,8 @@ public:
       f = ast::mix(f, types_->fp(types_->canonical(r.type)));
     if (r.kind == EntityKind::variable) f = ast::mix(f, std::to_underlying(r.lang));
     if (r.kind == EntityKind::function_template || r.kind == EntityKind::class_template ||
-        r.kind == EntityKind::variable_template || r.kind == EntityKind::namespace_) f = ast::mix(f, r.head);
+        r.kind == EntityKind::variable_template || r.kind == EntityKind::alias_template || r.kind == EntityKind::namespace_)
+      f = ast::mix(f, r.head);
     if (r.templ != EntityId::none) {
       f = ast::mix(f, ins_->entities.fp(r.templ));
       for (const ast::TemplateArg& a : r.args) f = mix_arg(f, a);

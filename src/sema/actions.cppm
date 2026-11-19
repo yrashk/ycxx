@@ -252,7 +252,7 @@ public:
       if (const ClassRec* cr = class_rec(current_class); cr && cr->defined) {
         for (const auto& [n, t] : cr->types)
           if (n == name) return t;
-      } else if (auto m = q_->earlier_member(name); m && m->kind == ast::DeclKind::enum_) {
+      } else if (auto m = q_->earlier_member(name); m && (m->kind == ast::DeclKind::enum_ || m->kind == ast::DeclKind::type_alias)) {
         return m->type;
       }
     }
@@ -305,6 +305,16 @@ public:
   // The class template unqualified lookup finds for `name`, which a `<` after it begins the
   // arguments of ([temp.names]/3); none if it finds anything else.
   std::optional<ast::DeclSema> class_template(NameId name) { return named_template(name, ast::DeclKind::class_); }
+  // A template-name that names a type with its arguments ([temp.names]): a class template, or an
+  // alias template ([temp.alias]).
+  std::optional<ast::DeclSema> type_template(NameId name) {
+    if (auto c = class_template(name)) return c;
+    return named_template(name, ast::DeclKind::type_alias);
+  }
+  std::optional<ast::DeclSema> namespace_type_template(EntityId ns, NameId name) {
+    if (auto c = namespace_class_template(ns, name)) return c;
+    return namespace_template(ns, name, ast::DeclKind::type_alias);
+  }
   // The variable template unqualified lookup finds for `name` ([temp.pre]/1), likewise.
   std::optional<ast::DeclSema> variable_template(NameId name) { return named_template(name, ast::DeclKind::variable); }
   // The template of kind `kind` unqualified lookup finds for `name`, with the default arguments of
@@ -364,10 +374,18 @@ public:
     return templates().specialize_class(templ, args);
   }
 
-  // `X<args>` naming a class template specialization ([temp.names], [temp.arg]).
+  // `X<args>` naming a class template specialization ([temp.names], [temp.arg]), or the type an
+  // alias template specialization stands for: its type with the arguments substituted
+  // ([temp.alias]/2).
   std::optional<QualType> class_template_id(const ast::DeclSema& tmpl, std::span<const TemplateArg> args, u32 at) {
     auto full = template_arguments(tmpl, args, at);
     if (!full) return std::nullopt;
+    if (tmpl.kind == ast::DeclKind::type_alias) {
+      std::vector<ast::TemplateParamSema> params = ins().seqs.elements(tmpl.template_params);
+      auto t = templates().substitute(tmpl.type, Bindings::of(params.empty() ? 0 : params[0].depth, *full));
+      if (!t) diag(at, Diag::template_args_mismatch, w_->entities.rec(tmpl.entity).name);
+      return t;
+    }
     return types().class_type(class_specialization(tmpl.entity, *full));
   }
 
@@ -1208,7 +1226,11 @@ public:
   // What the cell demands of the program (§B1.4), in program order.
   std::vector<Demand> demands;
 
-  Templates templates() { return Templates(*w_, classes()); }
+  Templates templates() {
+    Templates t(*w_, classes());
+    t.complete_class = [this](EntityId c) { return class_rec(c); };
+    return t;
+  }
   bool dependent(const Ex& e) {
     return e.ok() && ((e.info.flags & expr_flag::dependent) || types().is_dependent(e.type()));
   }

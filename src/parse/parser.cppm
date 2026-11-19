@@ -185,7 +185,7 @@ public:
       return q && kind(q->second) != Tk::l_paren && kind(q->second) != Tk::period && kind(q->second) != Tk::l_brace;
     }
     u32 next = 1;  // the token after the type's name: after `X<…>` for a class template
-    if (is(Tk::identifier) && kind(1) == Tk::less && s_->class_template(name_of(tok()))) next = past_template_args(1);
+    if (is(Tk::identifier) && kind(1) == Tk::less && s_->type_template(name_of(tok()))) next = past_template_args(1);
     else if (!is(Tk::identifier) || kind(1) == Tk::coloncolon || !s_->class_name(name_of(tok()))) return false;
     // `T(args).f()` and `T{…}.m` are expressions; `T (x);` declares x ([stmt.ambig]).
     if (kind(next) == Tk::l_brace) return false;
@@ -232,7 +232,7 @@ public:
   // name; the arguments are consumed.
   std::optional<QualType> class_template_type() {
     u32 at = pos();
-    auto tmpl = s_->class_template(name_of(tok()));
+    auto tmpl = s_->type_template(name_of(tok()));
     bump();
     auto args = template_argument_list();
     if (!tmpl || !args) return std::nullopt;
@@ -389,7 +389,7 @@ public:
             }
             goto done;
           }
-          if (kind(1) == Tk::less && s_->class_template(name_of(tok()))) {
+          if (kind(1) == Tk::less && s_->type_template(name_of(tok()))) {
             auto t = class_template_type();
             if (!t) {
               d.ok = false;
@@ -756,7 +756,7 @@ public:
     if (kind(j) != Tk::identifier || kind(j + 1) != Tk::less) return std::nullopt;
     if (in && !in->ns) return std::nullopt;  // member templates of classes come later (#88)
     NameId n = name_of(tok(j));
-    auto tmpl = in ? s_->namespace_class_template(*in->ns, n) : s_->class_template(n);
+    auto tmpl = in ? s_->namespace_type_template(*in->ns, n) : s_->type_template(n);
     if (!tmpl) return std::nullopt;
     u32 saved = i_;
     bool saved_half = half_;
@@ -818,7 +818,7 @@ public:
     if (k == Tk::r_paren || k == Tk::ellipsis || starts_decl_specifier(k)) return true;
     if ((k == Tk::identifier && kind(2) == Tk::coloncolon) || k == Tk::coloncolon)
       return qualified_type(1).has_value();  // `N::S`, `C::E`, `::S`
-    if (k == Tk::identifier && kind(2) == Tk::less && s_->class_template(name_of(tok(1)))) return true;
+    if (k == Tk::identifier && kind(2) == Tk::less && s_->type_template(name_of(tok(1)))) return true;
     return k == Tk::identifier && kind(2) != Tk::coloncolon && s_->class_name(name_of(tok(1))).has_value();
   }
 
@@ -1228,7 +1228,7 @@ public:
   }
   bool starts_type_id() {
     if (starts_decl_specifier(kind())) return !is(Tk::kw_static) && !is(Tk::kw_extern);
-    if (is(Tk::identifier) && kind(1) == Tk::less && s_->class_template(name_of(tok()))) return true;
+    if (is(Tk::identifier) && kind(1) == Tk::less && s_->type_template(name_of(tok()))) return true;
     if (qualified_ahead()) return qualified_type(0).has_value();
     return is(Tk::identifier) && kind(1) != Tk::coloncolon && s_->class_name(name_of(tok())).has_value();
   }
@@ -1778,7 +1778,7 @@ public:
       NameId n = name_of(tok());
       if (qualified_ahead()) return qualified_id(begin);
       // `X<args>(…)` and `X<args>{…}` for a class template X ([expr.type.conv]).
-      if (kind(1) == Tk::less && s_->class_template(n)) {
+      if (kind(1) == Tk::less && s_->type_template(n)) {
         auto t = class_template_type();
         if (!t) return {NodeId::none, begin, pos()};
         if (is(Tk::l_brace)) {

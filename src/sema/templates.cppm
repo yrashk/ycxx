@@ -94,7 +94,8 @@ public:
       if (!q) return std::nullopt;
       if (types().is_dependent(*q)) return types().add_cv(types().dep_name(*q, r.name), cv);
       if (!types().is_class(*q)) return std::nullopt;
-      const ClassRec* c = classes_->find(types().class_of(*q));
+      // The class must be complete: a specialization is instantiated for it ([temp.inst]/2).
+      const ClassRec* c = complete_class ? complete_class(types().class_of(*q)) : classes_->find(types().class_of(*q));
       if (!c) return std::nullopt;
       for (const auto& [n, mt] : c->types)
         if (n == r.name) return types().add_cv(mt, cv);
@@ -958,6 +959,13 @@ private:
 
   World* w_;
   const Classes* classes_;
+
+public:
+  // The record of a class that must be complete, instantiating it if it is a specialization; set
+  // by whoever asks at a point, which `classes_` alone does not know.
+  std::function<const ClassRec*(EntityId)> complete_class;
+
+private:
   // The template-head whose parameters a deduction deduces, and its packs whose leading elements
   // were specified explicitly ([temp.arg.explicit]/9).
   std::vector<ast::TemplateParamSema> head_;
