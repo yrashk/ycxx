@@ -205,7 +205,7 @@ def peer_objects(test, ctx, tr, timeout, work):
         clang = ctx.compilers['clang']
         need(clang, 'run')
         obj = Path(work) / (Path(name).stem + '.o')
-        r = run(tr, f'clang -c {name}', [clang.exe, '-std=c++26', '-c', name, '-o', str(obj)], timeout, cwd=test.path.parent)
+        r = run(tr, f'clang -c {name}', [clang.exe, '-std=c++26', '-fno-exceptions', '-c', name, '-o', str(obj)], timeout, cwd=test.path.parent)
         if r.status != 0:
             raise Unresolved(f'clang could not compile the peer {name} (exit {r.status})')
         objs.append(str(obj))

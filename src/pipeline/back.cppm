@@ -545,7 +545,16 @@ ir::TypeLayout QueryLayout::type(QualType q) const {
             in.canonical(in.types.is<ast::TLRef>(c) ? in.types.get<ast::TLRef>(c).referee : in.types.get<ast::TRRef>(c).referee)};
   if (auto r = class_layout(c)) {
     auto it = classes_.find(std::to_underlying(in.types.get<ast::TClass>(c).entity));
-    return {record, r->size, r->align, false, {}, it == classes_.end() || it->second->trivial_calls};
+    ir::TypeLayout l{record, r->size, r->align, false, {}, it == classes_.end() || it->second->trivial_calls};
+    l.empty = r->fields.empty();
+    // A floating member makes the class a candidate for the vector registers (AAPCS64 HFAs).
+    for (const ir::SubObject& f : r->fields) {
+      QualType ft = f.type;
+      while (in.types.is<ast::TArray>(in.types.canon(ft))) ft = in.types.get<ast::TArray>(in.types.canon(ft)).elem;
+      auto b = ast::builtin_of(in, ft);
+      l.floating = l.floating || (b && ast::is_floating(*b)) || type(ft).floating;
+    }
+    return l;
   }
   // An enumeration is laid out as its underlying type ([dcl.enum]/8).
   if (in.types.is<ast::TEnum>(c))

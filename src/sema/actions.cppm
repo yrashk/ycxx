@@ -1747,6 +1747,8 @@ public:
     EntityId c = types().class_of(ut);
     const ClassRec* cr = class_rec(c);
     if (!cr) return fail;
+    // [dcl.init.general]/17.6.1: a prvalue of the class itself initializes the object directly.
+    if (!list && args.size() == 1 && !args[0].glvalue() && initializes(ut, args[0])) return args[0];
     std::vector<Candidate> cands;
     std::vector<EntityId> ents;
     bool user_copy = false;
@@ -1781,6 +1783,9 @@ public:
         diag(args[i].begin, Diag::narrowing, value_type(args[i]), Types::unqualified(fr.params[i]));
         return fail;
       }
+      // A parameter of class type: a temporary the caller initializes and destroys ([expr.call]/7).
+      if (i < fr.params.size() && types().is_class(fr.params[i]) && !a.glvalue())
+        a = materialize(a, Types::unqualified(fr.params[i]), false, true);
       cs.push_back({a.id, a.begin >= begin ? a.begin - begin : 0});
     }
     ExprInfo info{ut, ValueCategory::prvalue, 0};
@@ -1829,10 +1834,10 @@ public:
   }
 
   // Temporary materialization ([conv.rval]) of the prvalue `v` as an object of type `t`.
-  Ex materialize(Ex v, QualType t, bool extended) {
+  Ex materialize(Ex v, QualType t, bool extended, bool argument = false) {
     if (!v.ok()) return v;
     ExprInfo info{t, ValueCategory::xvalue, 0};
-    return node(ast::Materialize{info, destructor_of(t), extended ? 1u : 0u, at(v, v.begin)}, v.begin, v.end, info);
+    return node(ast::Materialize{info, destructor_of(t), extended ? 1u : argument ? 2u : 0u, at(v, v.begin)}, v.begin, v.end, info);
   }
 
   // Binds a reference of type `r` to `e` ([dcl.init.ref]): directly to an lvalue (or, for an
@@ -2773,6 +2778,10 @@ public:
     Ex c = r;
     if (op == AsgOp::assign) {
       c = convert(r, lt, r.begin);
+      // A class result is a temporary the copy reads, destroyed with the full-expression
+      // ([expr.assign]/9, [class.temporary]/4).
+      if (c.ok() && types().is_class(lt) && !c.glvalue() && !dependent(c) && (as<ast::Call>(c) || as<ast::MemberCall>(c)))
+        c = materialize(c, Types::unqualified(lt), false);
     } else {
       Ex lv = rvalue(l);  // only to read its type; the IR loads the left operand itself
       QualType tl = lv.type();
@@ -3047,7 +3056,7 @@ public:
       // A parameter of class type is an object the caller initializes from the argument
       // ([expr.call]/7): a temporary, which the caller destroys (Itanium C++ ABI §3.1.2).
       if (i < params.size() && types().is_class(params[i]) && !dependent(a) && !a.glvalue())
-        a = materialize(a, Types::unqualified(params[i]), false);
+        a = materialize(a, Types::unqualified(params[i]), false, true);
       children.push_back(at(a, begin));
     }
     return children;

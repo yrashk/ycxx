@@ -585,8 +585,13 @@ class Gen {
       auto c = get<ast::CtorCall>(e);
       if (c.zero_first && !zeroed) unsupported(e, "value-initializing an object that is not new");
       std::vector<ValueId> args{p.ptr};
-      for (ast::Child arg : ast_.children(c.args)) args.push_back(argument(child(e, arg)));
-      call_fn(c.ctor, facts_.int_type(), args, 1, true);
+      uint32_t byval = 0;
+      for (ast::Child arg : ast_.children(c.args)) {
+        At x = child(e, arg);
+        if (argument_object(x)) byval |= 1u << args.size();
+        args.push_back(argument(x));
+      }
+      call_fn(c.ctor, facts_.int_type(), args, 1, true, byval);
       return;
     }
     if (is<ast::InitList>(e)) {
@@ -627,7 +632,7 @@ class Gen {
     std::uint64_t imms[] = {word(ty(p.type))};
     stateful(ir::Op::obj__begin, {}, ops, imms);
     Ending end{p, m.destructor, ir::Storage::temporary};
-    if (m.extended) scopes_.back().push_back(end);
+    if (m.extended == 1) scopes_.back().push_back(end);
     else if (temps_.empty()) unsupported(a, "outside a full-expression");
     else if (branches_ > 0 && m.destructor != ast::EntityId::none) unsupported(a, "with a destructor, created conditionally");
     else temps_.back().push_back(end);
@@ -1015,7 +1020,7 @@ class Gen {
     for (ast::Child arg : ast_.children(c.args)) {
       At x = child(a, arg);
       // An argument object of class type: sema materialized it ([expr.call]/7).
-      if (cls(info(x).type) == TypeClass::record && is<ast::Materialize>(strip_parens(x))) byval |= 1u << args.size();
+      if (argument_object(x)) byval |= 1u << args.size();
       args.push_back(argument(x));
     }
     return call_fn(c.function, result_type(c.info), args, 0, false, byval, into ? 1 : 0);
@@ -1029,7 +1034,7 @@ class Gen {
     uint32_t byval = 0;
     for (ast::Child arg : ast_.children(c.args)) {
       At x = child(a, arg);
-      if (cls(info(x).type) == TypeClass::record && is<ast::Materialize>(strip_parens(x))) byval |= 1u << args.size();
+      if (argument_object(x)) byval |= 1u << args.size();
       args.push_back(argument(x));
     }
     return call_fn(c.function, result_type(c.info), args, 1, false, byval, into ? 2 : 0);
@@ -1038,6 +1043,11 @@ class Gen {
   // ([stmt.return]); a call returning a reference to a class is a glvalue.
   bool class_prvalue(const ast::ExprInfo& i) {
     return i.category == ast::ValueCategory::prvalue && cls(i.type) == TypeClass::record;
+  }
+  // An argument object for a parameter of class type, which sema marks ([expr.call]/7).
+  bool argument_object(At x) {
+    x = strip_parens(x);
+    return is<ast::Materialize>(x) && get<ast::Materialize>(x).extended == 2;
   }
   At strip_parens(At a) {
     while (is<ast::Paren>(a)) a = child(a, get<ast::Paren>(a).operand);
@@ -1214,8 +1224,9 @@ class Gen {
   }
 
   // Assignment of a class object by its trivial copy assignment operator ([class.copy.assign]):
-  // from a glvalue, a copy of its object; from a braced list or a call, a copy of the temporary it
-  // initializes ([expr.assign]/9), which ends with the full-expression ([class.temporary]).
+  // from a glvalue, a copy of its object; from a braced list or a call's result, a copy of the
+  // temporary it initializes ([expr.assign]/9), which ends with the full-expression
+  // ([class.temporary]).
   Place assign_class(At a) {
     auto s = get<ast::Assign>(a);
     At rhs = child(a, s.rhs);
@@ -1223,9 +1234,13 @@ class Gen {
     std::optional<Place> temp;
     Place src;
     // A call's result is an object of its own, the temporary it initializes ([stmt.return]).
-    At r = strip_parens(rhs);
-    if (is<ast::InitList>(rhs) || is<ast::ValueInit>(rhs) ||
-        ((is<ast::Call>(r) || is<ast::MemberCall>(r)) && class_prvalue(info(r)))) {
+    if (is<ast::Materialize>(strip_parens(rhs))) {
+      // A call's result: the temporary sema made of it, ended with its destructor.
+      Place p = lvalue(child(a, s.lhs));
+      copy(p, materialize(strip_parens(rhs)));
+      return p;
+    }
+    if (is<ast::InitList>(rhs) || is<ast::ValueInit>(rhs)) {
       bool zeroed = value_initializes(rhs);
       temp = begin_object(t, zeroed ? ir::Init::zero : ir::Init::indeterminate, ir::Storage::temporary);
       initialize(*temp, rhs, zeroed);

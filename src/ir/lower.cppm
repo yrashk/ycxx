@@ -41,6 +41,8 @@ export struct TypeLayout {
   // Records: trivially copyable for calls ([class.temporary]/3): a trivial, non-deleted copy or
   // move constructor and destructor, so the target's convention may pass it in registers.
   bool trivial_calls = true;
+  bool empty = false;     // records: no non-static data members
+  bool floating = false;  // records: a floating member, at any depth
 };
 
 export struct SubObject {
@@ -247,7 +249,14 @@ class Lowering {
       bool result = entry && f_.result_param == j + 1, byval = entry && j < 32 && ((f_.byval_params >> j) & 1);
       ++j;
       if (result || byval) {
-        std::uint32_t words = in_registers(layout(cxx(p)).pointee);
+        QualType pc = layout(cxx(p)).pointee;
+        if (auto why = unpassable(pc)) return fail(*why);
+        if (ignored(pc)) {  // passed by nothing: an object of this frame stands for it
+          in_regs.push_back({p, 0, 0, result});
+          l2_of.push_back(-1);
+          continue;
+        }
+        std::uint32_t words = in_registers(pc);
         if (result && words) {
           in_regs.push_back({p, 0, words, true});
           l2_of.push_back(-1);
@@ -496,6 +505,11 @@ class Lowering {
           ValueId v = map_[raw(l1ops[i])];
           if (k >= 32) return fail("more than 32 arguments are not in the α subset");
           std::size_t at = ops.size() - (ind ? 2 : 1);  // the argument's L2 index
+          if (((byval >> k) & 1) || k + 1 == result_arg) {
+            QualType c = layout(cxx(l1ops[i])).pointee;
+            if (auto why = unpassable(c)) return fail(*why);
+            if (ignored(c)) continue;  // an empty class passes nothing, and returns nothing
+          }
           if (k + 1 == result_arg) {
             QualType c = layout(cxx(l1ops[i])).pointee;
             if (std::uint32_t words = in_registers(c)) {
@@ -612,6 +626,20 @@ class Lowering {
     TypeLayout l = layout(c);
     if (l.kind != TypeKind::record || !l.trivial_calls || l.size > config_.composite_in_registers) return 0;
     return std::uint32_t((l.size + 7) / 8);
+  }
+  // An empty class trivially copyable for calls is not passed at all, as Clang does on arm64
+  // macOS (#116).
+  bool ignored(QualType c) const {
+    TypeLayout l = layout(c);
+    return l.kind == TypeKind::record && l.trivial_calls && l.empty;
+  }
+  // Why a class cannot pass yet: a floating member, which makes it a homogeneous floating-point
+  // aggregate passed in the vector registers (AAPCS64 §6.8.2 C.2) once floating values exist (#201).
+  std::optional<std::string> unpassable(QualType c) const {
+    TypeLayout l = layout(c);
+    if (l.kind == TypeKind::record && l.trivial_calls && l.floating && l.size <= 32)
+      return "a class with floating members passed by value (AAPCS64 homogeneous aggregates, #201)";
+    return std::nullopt;
   }
   // A frame object of the ABI's own for a class object, whole words long, so its words can be
   // loaded and stored as such.

@@ -974,17 +974,21 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   `ir::Function::byval_params`/`result_param` mark both. A discarded class result is a temporary
   ([expr.context]/2); `f({…})` with one candidate and `return {…};` copy-list-initialize.
 - **`lower`** applies AAPCS64 (§6.8.2 C.10–C.12, §6.9): a class trivially copyable for calls
-  ([class.temporary]/3, `TypeLayout::trivial_calls`) of at most 16 bytes passes and returns in
-  one or two 8-byte registers; a larger or non-trivial one by address, an indirect result in x8
-  (`l2::Function::indirect_result`, the call's fourth immediate). A class needing more registers
-  than are left goes whole on the stack and leaves the rest unused (C.11).
+  ([class.temporary]/3, `sema::Classes::trivial_for_calls`, `TypeLayout::trivial_calls`) of at
+  most 16 bytes passes and returns in one or two 8-byte registers; a larger or non-trivial one by
+  address, an indirect result in x8 (`l2::Function::indirect_result`, the call's fourth
+  immediate). A class needing more registers than are left goes whole on the stack and leaves the
+  rest unused (C.11). An empty class passes nothing, as in Clang. A user-provided move
+  constructor makes a class non-trivial for calls, as in Clang 23 and GCC; Apple Clang 21
+  differs (#230).
 - **Mixed-object tests:** `PEER:` in a run test names a file Clang compiles and links with it
   (docs/TESTING.md). `tests/own/abi` checks 3- to 24-byte classes, a non-trivial one, member
   functions returning classes and exhausted registers, calling both ways.
-- Not yet: overloaded callees with braced arguments ([over.ics.list]), class arguments through
-  an ellipsis, calls through pointers returning classes, classes in constant evaluation (#25).
-- Tests: `tests/own/abi` (2), `tests/own/classes/s5-byvalue-lifetimes`; s1-byvalue-params and
-  -return pass.
+- Not yet: braced arguments to overload sets, templates and member calls (#231), class arguments
+  through an ellipsis and calls through pointers returning classes (#196), classes with
+  floating members (#201), classes in constant evaluation (#25).
+- Tests: `tests/own/abi` (3), `tests/own/classes/s5-byvalue-lifetimes`, `-temporaries`;
+  s1-byvalue-params and -return pass.
 
 ## Templates, ζ step 1: function templates (#88, 2026-11-18)
 
