@@ -129,6 +129,24 @@ class Parts(unittest.TestCase):
             self.assertEqual(toolchain.ycxx_features(d, 'linux-x86_64'), {'syntax'})
             self.assertRegex(toolchain.HOST, r'^\w+-\w+$')
 
+    def test_xfails_limited_to_hosts(self):
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            (d / 'tests' / 'features').mkdir(parents=True)
+            (d / 'tests' / 'features' / 'ycxx.xfail').write_text(
+                'own/common.accept.cpp common failure\n'
+                'own/scoped.accept.cpp@linux-x86_64 Linux failure\n'
+                'own/scoped.accept.cpp@darwin-arm64 Darwin failure\n'
+                'own/linux.accept.cpp@linux-x86_64 Linux only\n'
+            )
+            self.assertEqual(toolchain.ycxx_xfails(d, 'darwin-arm64'), {
+                'own/common.accept.cpp': 'common failure', 'own/scoped.accept.cpp': 'Darwin failure',
+            })
+            self.assertEqual(toolchain.ycxx_xfails(d, 'linux-x86_64'), {
+                'own/common.accept.cpp': 'common failure', 'own/scoped.accept.cpp': 'Linux failure',
+                'own/linux.accept.cpp': 'Linux only',
+            })
+
     def test_unsupported_keeps_a_failure(self):
         with tempfile.TemporaryDirectory() as d:
             state.State(d, 'b', 'clang').update({'a': ('FAIL', 1.0)}, 'c1')

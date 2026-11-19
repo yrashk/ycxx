@@ -130,17 +130,18 @@ def ycxx_features(repo, host=HOST):
     return feats
 
 
-def ycxx_xfails(repo):
-    """tests/features/ycxx.xfail: one `<test id> <reason>` per line, the tests ycxx is expected to
-    fail with the features it has, kept outside the test files because most are generated
-    (tests/draft). An XPASS fails the run, so a line goes when ycxx starts passing its test."""
+def ycxx_xfails(repo, host=HOST):
+    """Read `<test id>[@<host>] <reason>` from tests/features/ycxx.xfail. A host qualifier
+    limits the expected failure to that host using the same names as ycxx.txt."""
     path = repo / 'tests' / 'features' / 'ycxx.xfail'
     out = {}
     for line in path.read_text().splitlines() if path.is_file() else ():
         line = line.split('#', 1)[0].strip()
         if line:
-            test, _, why = line.partition(' ')
-            out[test] = why.strip() or '(no reason given)'
+            entry, _, why = line.partition(' ')
+            test, qualified, entry_host = entry.partition('@')
+            if not qualified or entry_host == host:
+                out[test] = why.strip() or '(no reason given)'
     return out
 
 
