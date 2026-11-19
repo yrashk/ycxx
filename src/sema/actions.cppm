@@ -95,6 +95,11 @@ public:
   // Whether checking normal form `c`'s satisfaction raised a hard error (an atom not of type
   // bool, not constant, or not supported): the expression that asked is then invalid.
   virtual bool satisfaction_failed(ConstId /*c*/) { return false; }
+  // A class template's static data member whose initializer is value-dependent; and a use of a
+  // specialization's static data member, which instantiates its initializer ([temp.inst]/3).
+  virtual bool value_dependent_member(EntityId /*v*/) { return false; }
+  // False when its initializer was in error, which was reported: what uses it says nothing more.
+  virtual bool use_static_member(EntityId /*v*/) { return true; }
   // Whether class `c`, complete or not, was declared with the class-key `union`.
   virtual bool is_union_class(EntityId /*c*/) { return false; }
   // In an instantiation: the pack expansions the definition of what it re-analyses recorded.
@@ -1703,6 +1708,7 @@ public:
     // ([expr.prim.id.qual]): `S::f` can have its address taken or be called.
     if (!m.is_function || (m.is_static && member_functions(c, name).size() == 1)) {
       if (m.is_function && !check_access(c, m.entity, name, name_at)) return fail;
+      if (!m.is_function) return static_member(c, m.entity, m.type, begin, end);
       ExprInfo info{m.type, ValueCategory::lvalue, 0};
       return node(ast::DeclRef{info, m.entity}, begin, end, info);
     }
@@ -1711,6 +1717,15 @@ public:
     return bound_member(c, name, object, true, begin, end, name_at);
   }
 
+  // A static data member of class `c`. Of the current instantiation of a class template, one whose
+  // initializer is value-dependent is value-dependent ([temp.dep.constexpr]/2.3); of a
+  // specialization, naming it instantiates its initializer ([temp.inst]/3).
+  Ex static_member(EntityId c, EntityId v, QualType t, u32 begin, u32 end) {
+    bool dep = types().is_dependent(types().class_type(c)) && q_->value_dependent_member(v);
+    if (!dep && !types().is_dependent(types().class_type(c)) && !q_->use_static_member(v)) return {NodeId::none, begin, end};
+    ExprInfo info{t, ValueCategory::lvalue, dep ? expr_flag::dependent : u8(0)};
+    return node(ast::DeclRef{info, v}, begin, end, info);
+  }
   // An enumerator ([dcl.enum]): a prvalue of its enumeration with its value.
   Ex enumerator(EntityId e, QualType t, u32 begin, u32 end) {
     auto v = q_->constant_value(e);
@@ -2253,13 +2268,16 @@ public:
             diag(begin, Diag::member_without_object, name);
             return {NodeId::none, begin, end};
           }
-          ExprInfo info{m->type, ValueCategory::lvalue, 0};
-          return node(ast::DeclRef{info, m->entity}, begin, end, info);
+          return static_member(current_class, m->entity, m->type, begin, end);
         }
     }
     std::vector<ast::DeclSema> found;
     for (auto p = own.rbegin(); p != own.rend(); ++p)
       if (p->name == name) found.push_back(p->sema);
+    // An earlier declarator of the member's own declaration (`static constexpr int a = 1, b = a;`).
+    if (found.size() == 1 && current_class != EntityId::none && found[0].kind == ast::DeclKind::variable &&
+        found[0].storage == ast::Storage::static_)
+      return static_member(current_class, found[0].entity, found[0].type, begin, end);
     bool any = !found.empty();
     if (found.empty())
       for (DeclId d : q_->visible_decls(name, directives())) {

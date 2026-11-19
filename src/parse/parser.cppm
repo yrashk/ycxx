@@ -8,12 +8,17 @@
 export module ycxx.parse:parser;
 
 import std;
+import ycxx.stack;
 import ycxx.ast;
 import ycxx.engine;
 import ycxx.pp;
 import ycxx.sema;
 
 export namespace ycxx::parse {
+
+// Thrown when the input nests deeper than half of the thread's stack allows (#187), after the
+// diagnostic; caught where an item's or a body's analysis begins, which then fails.
+struct TooDeep {};
 
 using lex::Tk;
 using lex::Tok;
@@ -127,6 +132,7 @@ public:
   NameId name_of(const Tok& t) { return s_->ins().names.intern(r_->name(t)); }
   // Moves to the region's token `i`, inside the part (past a class's member-specification).
   void seek(u32 i) { i_ = std::min(i, end_); }
+  u32 index() const { return i_; }  // the current token's index in the region, for `seek`
   const lex::Literal& literal() const { return r_->literal(tok()); }
   const lex::Literal& literal_at(u32 ahead) const { return r_->literal(tok(ahead)); }
 
@@ -170,8 +176,10 @@ public:
   }
 
   // Whether a declaration starts here: a decl-specifier keyword, or a name that denotes a class
-  // ([stmt.ambig]: what can be a declaration is one).
-  bool starts_declaration() {
+  // ([stmt.ambig]: what can be a declaration is one). In a `statement`, a member of a dependent
+  // class names a type only after `typename` ([temp.res.general]/4-5); a namespace-scope or member
+  // declaration may imply it.
+  bool starts_declaration(bool statement = false) {
     if (transform_trait_ahead()) return true;
     // [stmt.ambig]: `int(x) + 1;`, `int(3);` and `void();` are expressions; `int(x);`, `int(x) = 1;`
     // and `int(*f)(int);` declare.
@@ -190,7 +198,8 @@ public:
     if (starts_decl_specifier(kind())) return true;
     if (qualified_ahead()) {
       auto q = qualified_type(0);
-      return q && kind(q->second) != Tk::l_paren && kind(q->second) != Tk::period && kind(q->second) != Tk::l_brace;
+      return q && !(statement && s_->types().kind(q->first) == sema::TypeKind::dep_name) && kind(q->second) != Tk::l_paren &&
+             kind(q->second) != Tk::period && kind(q->second) != Tk::l_brace;
     }
     u32 next = 1;  // the token after the type's name: after `X<…>` for a class template
     if (is(Tk::identifier) && kind(1) == Tk::less && s_->type_template(name_of(tok()))) next = past_template_args(1);
@@ -1362,8 +1371,13 @@ public:
   bool starts_type_id() {
     if (transform_trait_ahead()) return true;
     if (starts_decl_specifier(kind())) return !is(Tk::kw_static) && !is(Tk::kw_extern);
+    // `X<args>::m` is a type only when m is: the nested name first. A member of a dependent class
+    // is a type only after `typename` ([temp.res.general]/4).
+    if (qualified_ahead()) {
+      auto q = qualified_type(0);
+      return q && s_->types().kind(q->first) != sema::TypeKind::dep_name;
+    }
     if (is(Tk::identifier) && kind(1) == Tk::less && s_->type_template(name_of(tok()))) return true;
-    if (qualified_ahead()) return qualified_type(0).has_value();
     return is(Tk::identifier) && kind(1) != Tk::coloncolon && s_->class_name(name_of(tok())).has_value();
   }
 
@@ -1926,7 +1940,15 @@ public:
   }
 
   // cast-expression ([expr.cast]); explicit type conversion is beyond the α subset.
+  // Diagnoses and abandons the item when the nesting is too deep for the stack (#187).
+  void deep_enough() {
+    if (!stack::deep()) return;
+    s_->diag(pos(), Diag::nested_too_deeply);
+    throw TooDeep{};
+  }
+
   Ex cast_expression() {
+    deep_enough();  // parentheses and casts nest through here
     if (is(Tk::l_paren)) {
       // `(T)e` ([expr.cast]), as static_cast performs it; a parenthesized expression otherwise.
       u32 back = i_, begin = pos();
@@ -1949,6 +1971,7 @@ public:
 
   // unary-expression ([expr.unary]).
   Ex unary_expression() {
+    deep_enough();  // `++`, `--` and `sizeof` take their operands through here
     u32 begin = pos();
     std::optional<ast::UnaryOp> op;
     switch (kind()) {
@@ -2316,6 +2339,7 @@ public:
   // braced-init-list ([dcl.init.general]): `{ initializer-clause, … }`, or with designators
   // `{ .m = e, .n{…} }` ([dcl.init.aggr]).
   std::unique_ptr<sema::Braced> braced_init_list() {
+    deep_enough();  // nested braced lists
     auto b = std::make_unique<sema::Braced>();
     b->begin = pos();
     expect(Tk::l_brace);
@@ -2441,6 +2465,7 @@ public:
   }
 
   Ex statement() {
+    deep_enough();  // blocks and the statements they hold nest through here
     u32 begin = pos();
     switch (kind()) {
     case Tk::l_brace: return compound_statement();
@@ -2559,7 +2584,7 @@ public:
       skip_statement();
       return {NodeId::none, begin, pos()};
     }
-    if (starts_declaration()) return declaration_statement();
+    if (starts_declaration(true)) return declaration_statement();
     Ex e = expression();
     if (!expect(Tk::semi)) skip_to_semi();
     e = s_->discarded(e);
@@ -2613,7 +2638,7 @@ public:
       skip_statement();
       return {NodeId::none, begin, pos()};
     }
-    if (starts_declaration()) {
+    if (starts_declaration(true)) {
       s_->diag(pos(), Diag::not_supported, kind());  // an init-statement or a declaration condition
       skip_param();
     }
@@ -2790,7 +2815,7 @@ public:
   // beyond the α subset.
   Ex condition() {
     if (!expect(Tk::l_paren)) return {};
-    if (starts_declaration()) {
+    if (starts_declaration(true)) {
       s_->diag(pos(), Diag::not_supported, kind());
       skip_param();
       expect(Tk::r_paren);
@@ -2836,7 +2861,7 @@ public:
     s_->push_scope();
     s_->guard_scope();  // [basic.scope.block]/2: the for-init's names are not redeclared in the body
     Ex init;
-    if (starts_declaration()) {
+    if (starts_declaration(true)) {
       init = declaration_statement();
     } else {
       u32 b = pos();

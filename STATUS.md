@@ -560,6 +560,18 @@ private daemons.
   `YCXX_CHAOS_SEED`; the daemon takes them from the client that starts it and reports `threads`
   in `ctl status`. Workers and the daemon's request threads have 256 MiB stacks (address space),
   above a main thread's 8 MiB (#178, #187).
+- Nesting too deep for the stack (#187): `ycxx.stack::deep()` says whether more than half of the
+  thread's stack is in use (pthreads, a partition per platform). The parser asks at
+  `cast_expression` (parentheses, casts), `unary_expression` (`++`, `--`, `sizeof`),
+  `braced_init_list` and `statement` (blocks), and at the
+  first deep one diagnoses "nested too deeply to analyse" and throws `parse::TooDeep`, which the
+  item's or body's analysis catches: the item fails, the unit has an error, the daemon lives.
+  Instantiations nest through those parses. `engine::Pool` takes a worker stack size (default
+  256 MiB); `unit.pipeline_incremental`'s `too_deep` runs 20,000-deep parentheses, blocks,
+  increments, `sizeof`s and braced lists on 1 MiB workers (without the guards: SIGBUS). Not yet:
+  declarators, template-ids, deep trees from flat chains, the passes after the parse, and a
+  diagnostic that does not depend on the stack's size (#260). The time to get that deep is
+  superlinear (#258).
 - Concurrent requests (#139, daemon design §4): a unit, a program and a request are named by what
   they are (`Session::unit`, `program`, `request`: path, working directory, configuration, object;
   units, objects, name), numbered by a registry whose values provide their inputs, so admitting a
@@ -667,7 +679,16 @@ in `lsp` frames (`LspOut`), the last of which carries LSP's exit status (1 after
   save), a unit and header opened through a symbolic link, a build sent during a `didChange`
   (the saved file's object, the buffer's diagnostics), 600-error answers crossing large edits,
   the exit status, and `ctl shutdown` with a session open.
-- Not yet: `compile_commands.json` (#167); stopping a diagnosis on a newer edit,
+- A document's command line (#167, §6.4): the last served `compile` request that compiled it,
+  else its entry in `compile_commands.json` at the scope's root (`arguments`, or `command` split
+  as a shell's words; its preprocessing options and template depth kept by
+  `compile::check_command`, another compiler's other options dropped; the file read again when
+  its identity changes; `@file` response files expanded relative to the entry's directory; a
+  header or C entry is no unit), else the file alone in its directory. `daemon.lsp`'s
+  `compile_commands` covers both forms, a response file, a header and a C file, a directory
+  spelled through a symbolic link, and a change (mutation-checked). Options `pp` does not take
+  yet (`-include`, `--sysroot`, …) are dropped (#251).
+- Not yet: stopping a diagnosis on a newer edit,
   `$/cancelRequest`, debouncing and interactive priority (#168); `buffers_in`, the disk-view
   assertion and one view per session (#169); go-to-definition from a declaration part (a
   parameter's type, a base) and of locals (#242); open documents as eviction roots (#17).
@@ -1279,6 +1300,31 @@ Fable decided the representation (ast.md §6.6); the Opus session wrote the code
   qualified by a namespace names an earlier declaration ([namespace.memdef]/3).
 - Tests: `tests/own/classes/s6-access-*` (four reject tests, two run tests); draft examples
   class.friend-1 and class.name-4 pass.
+
+## Templates, ζ step 7: static data members of class templates (#88, 2026-11-18)
+
+- A class template's static data members are declared with its other members. A specialization
+  declares them; the in-class initializer of one defined in the class (constexpr or inline) is
+  instantiated only when the member is used ([temp.inst]/3, `Program::member_value`), from the
+  extent the template's analysis recorded, under the nesting limit ([temp.inst]/16). Only the
+  members used are defined in the unit (`Program::used_members`); as with variable templates,
+  the definitions are not yet coalesced across units (#124).
+- In the template, a static member whose initializer is value-dependent is value-dependent
+  ([temp.dep.constexpr]/2.3); one whose initializer is not is a constant there. `static const T k
+  = 5;` is checked again in each specialization.
+- `X<args>::m` with a dependent qualifier names a value, not a type, in a statement, a condition, a
+  cast's parentheses or a template argument, unless `typename` says otherwise
+  ([temp.res.general]/4).
+- An explicitly specialized static data member, `template<> int A<char>::x = 0;`, defines it; one
+  that already has an in-class initializer cannot be given another.
+- A member whose initializer is in error is declared, and its uses report nothing more.
+- Tests: `tests/own/templates/s7-*` (11, agreeing with Clang and GCC),
+  `tests/incremental/templates/static-members.incr`; 1 more draft example passes.
+  `<cstdio>`: 18 → 16 errors.
+- Not yet: a definition outside the class, `template<class T> int X<T>::n = 5;`, reported as not
+  supported (#256); an array bound or template argument that is a dependent expression other than
+  a parameter (`int a[sizeof(T)]`, `F<N - 1>`, #209); `static_assert` in a member-specification
+  (#257); dynamic initialization of an inline static member. Found on the way: #262, #263, #264.
 
 ## `__GNUC__` and system-header warnings (#229, 2026-11-19)
 

@@ -96,6 +96,16 @@ std::vector<std::string> sources_of(const Request& r);
 // `r` does not compile `source`.
 std::optional<Request> check_one(const Request& r, std::string_view source);
 
+// The check of `source` (absolute) with another compiler's command line (`compile_commands.json`'s,
+// daemon design §6.4; `args` without the compiler's name), relative to `cwd`: its preprocessing
+// options and template depth, as for `check_one`; its other options are that compiler's.
+Request check_command(std::span<const std::string> args, std::string cwd, std::string_view source,
+                      std::vector<std::pair<std::string, std::string>> env);
+
+// Splits a response file's text into arguments: whitespace separates them, and quotes and
+// backslashes escape as in a shell's words.
+std::vector<std::string> split_words(std::string_view text);
+
 // Writes the outputs and prints stdout and stderr; the exit status. A failed write is reported on
 // stderr after the request's own diagnostics, with status 1.
 int finish(Done& d);
@@ -290,6 +300,66 @@ std::vector<std::string> sources_of(const Request& r) {
          std::ranges::to<std::vector>();
 }
 
+std::vector<std::string> split_words(std::string_view text) {
+  std::vector<std::string> out;
+  std::string cur;
+  bool in_word = false;
+  char quote = 0;
+  for (std::size_t i = 0; i < text.size(); ++i) {
+    char c = text[i];
+    if (quote) {
+      if (c == quote) quote = 0;
+      else if (c == '\\' && quote == '"' && i + 1 < text.size()) cur += text[++i];
+      else cur += c;
+    } else if (c == '\'' || c == '"') {
+      quote = c;
+      in_word = true;
+    } else if (c == '\\' && i + 1 < text.size()) {
+      cur += text[++i];
+      in_word = true;
+    } else if (std::isspace(static_cast<unsigned char>(c))) {
+      if (in_word) out.push_back(std::exchange(cur, {}));
+      in_word = false;
+    } else {
+      cur += c;
+      in_word = true;
+    }
+  }
+  if (in_word) out.push_back(cur);
+  return out;
+}
+
+namespace {
+
+// The arguments of `args` a check keeps: the preprocessing options, the template depth and the
+// class call ABI, and with `std` the language standard (ycxx's own command lines; another
+// compiler's may name one ycxx does not take).
+void checking_options(std::span<const std::string_view> args, bool std, std::vector<std::string>& out) {
+  pp::Config scratch;
+  for (std::size_t i = 0; i < args.size(); ++i) {
+    const std::size_t from = i;
+    if (auto taken = pp::take_option(args, i, scratch); taken && *taken) {
+      for (std::size_t k = from; k <= i; ++k) out.emplace_back(args[k]);
+    } else if (args[i] == "-o") {
+      ++i;
+    } else if ((std && args[i].starts_with("-std=")) || args[i].starts_with("-ftemplate-depth=") ||
+               args[i].starts_with("-fclass-call-abi=")) {
+      out.emplace_back(args[i]);
+    }
+  }
+}
+
+}  // namespace
+
+Request check_command(std::span<const std::string> args, std::string cwd, std::string_view source,
+                      std::vector<std::pair<std::string, std::string>> env) {
+  Request one{{}, std::move(cwd), std::move(env), 0};
+  checking_options(views(std::vector<std::string>(args.begin(), args.end())), false, one.argv);
+  one.argv.emplace_back("-fsyntax-only");
+  one.argv.emplace_back(source);
+  return one;
+}
+
 std::optional<Request> check_one(const Request& r, std::string_view source) {
   auto opts = parse_options(views(r.argv));
   if (!opts) return std::nullopt;
@@ -298,18 +368,7 @@ std::optional<Request> check_one(const Request& r, std::string_view source) {
   Request one{{}, r.cwd, r.env, r.build_time};
   // The preprocessing and language options, as given; the action, the output and the other
   // inputs are this request's own.
-  const std::vector<std::string_view> args = views(r.argv);
-  pp::Config scratch;
-  for (std::size_t i = 0; i < args.size(); ++i) {
-    const std::size_t from = i;
-    if (auto taken = pp::take_option(args, i, scratch); taken && *taken) {
-      for (std::size_t k = from; k <= i; ++k) one.argv.emplace_back(args[k]);
-    } else if (args[i] == "-o") {
-      ++i;
-    } else if (args[i].starts_with("-std=") || args[i].starts_with("-ftemplate-depth=") || args[i].starts_with("-fclass-call-abi=")) {
-      one.argv.emplace_back(args[i]);
-    }
-  }
+  checking_options(views(r.argv), true, one.argv);
   one.argv.emplace_back("-fsyntax-only");
   one.argv.push_back(*spelled);
   return one;
