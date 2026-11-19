@@ -808,8 +808,9 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   `StaticAssert` node); `if consteval` and `if !consteval` (`IfConsteval`, lowered to
   `consteval_br`).
 - Constant array bounds from const integral locals (#58), and address constants of variables and
-  functions (#57) as `VLvalue{VEntity, [], byte offset}` (`VEntity` is new in `ycxx.ast.values`).
-  The pipeline's data relocations for them wait for #101.
+  functions (#57) as `VLvalue{VEntity, [], byte offset}`. The pipeline emits data relocations
+  with the entity's symbol and byte addend on ELF and Mach-O, including references to symbols
+  defined in another translation unit (#101).
 - Errors say why: "not a constant expression: <the interpreter's reason>", located at the
   evaluated expression.
 - Tests: `tests/own/consteval` (spec-only); the draft's [dcl.constexpr]/5 ex. 3, [dcl.constinit]/3
@@ -1183,7 +1184,7 @@ template's tokens again with the arguments bound.
 - Tests: `tests/own/templates/c2-*` (spec-only, plus nine from the review): 44 of 47 pass; the other three need things
   outside templates: constexpr constructors and class objects in constant evaluation (#157,
   #25), aggregate initialization of reference members (#157), and namespace-scope references
-  (#101). 11 more draft examples pass. In a daemon session that compiles unrelated programs
+  (#367). 11 more draft examples pass. In a daemon session that compiles unrelated programs
   defining one class template differently, the first one's template record wins (#115).
 - Not yet (#88): member templates, nested classes in class templates, static data members of
   class templates, explicit and partial specializations, alias templates, packs, concepts,
@@ -1702,7 +1703,7 @@ What the process allocates, attributed to the engine's cells, in the trace and t
   lowering, AArch64 selection and the interpreter already had; constant evaluation calls through
   them too.
 - Tests: `tests/own/auto/` (46 spec-only, 4 more): 41 pass, 9 are XFAIL: structured bindings
-  (#285), a namespace-scope reference or address (#101), `static_cast<int&&>` (#199).
+  (#285), a namespace-scope reference (#367), `static_cast<int&&>` (#199).
   `p1-impl-mangle` checks the `Da`/`Dc` names against Clang objects.
 - Not yet: constrained `C auto`, `auto x = {…}`, `auto x(e)` at namespace scope, abbreviated
   function templates (#286); structured bindings (#285).

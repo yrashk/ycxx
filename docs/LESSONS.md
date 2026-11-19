@@ -227,6 +227,17 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
 
 ## Toolchain
 
+- **A sandbox command's `/dev/shm` is private to that command.** A compiler built there by one
+  command was inaccessible to the next.
+  - Do: build and test in the same command when using `/dev/shm`. Copy the binary and test logs
+    to the session's workspace before the command exits if another command needs them.
+  - Learned on #101.
+
+- **A module import added during a build can miss the dependency scan.** CMake scanned a test's
+  imports before an edit and GCC compiled it afterward, so its module mapper lacked the new import.
+  - Do: rerun Ninja in the same build directory after changing imports during a build.
+  - Learned on #101.
+
 - **Template code added to the engine can slow its hit paths without touching them.** #245's
   trace hooks were one branch each, yet `engine_bench` lost 6 ns a fetch hit and 6 ns a root get
   hit. The per-kind `describe` templates instantiated `std::format` in every engine user's unit,

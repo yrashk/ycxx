@@ -1,11 +1,13 @@
 // Unit tests of the pipeline (#43): the line table, linkage names, and the back half from
 // analysed bodies built with the AST builder (as sema builds them) through function_ir, lower,
-// codegen and ycxx's linker. On arm64 macOS the executables are run (`--run DIR`).
+// codegen and ycxx's linker, plus static data relocations from source. On arm64 macOS the
+// executables are run (`--run DIR`).
 import std;
 import ycxx.ast;
 import ycxx.ir;
 import ycxx.irgen;
 import ycxx.pipeline;
+import ycxx.pp;
 import ycxx.unit;
 
 namespace ast = ycxx::ast;
@@ -298,6 +300,52 @@ void hello() {
   program(w, "hello", 0, "hello, world\nbye\n");
 }
 
+void address_constants() {
+  // [basic.start.static], [expr.const]: the address of an entity with static storage duration,
+  // an array element, and a function declared in another unit.
+  const std::string source = R"cpp(
+extern "C" {
+  int value = 7;
+  int samples[3];
+  extern int foreign[4];
+  int next(int);
+  constinit int* address = &value;
+  constinit int* element = samples + 1;
+  extern constinit int* const foreign_element = foreign + 2;
+  constinit int (*callback)(int) = &next;
+}
+)cpp";
+  pl::Session s;
+  for (const ast::Target* target : {&ast::aarch64_darwin, &ast::x86_64_linux}) {
+    ycxx::pp::Config config;
+    config.target = target;
+    const pl::TuId tu{0};
+    s.set_source(tu, "addresses.cpp", source, "addresses.o", {}, config);
+    const pl::TuValue& result = s.get<pl::Tu>(tu);
+    check(result.object.has_value(), pl::Tu::errors(result));
+    if (!result.object) continue;
+
+    const auto& o = *result.object;
+    auto symbol = [&](std::string_view name) {
+      std::string spelled = target == &ast::aarch64_darwin ? std::format("_{}", name) : std::string(name);
+      return std::ranges::find(o.symbols, spelled, &ycxx::obj::symbol::name);
+    };
+    auto relocates = [&](std::string_view slot, std::string_view base, std::int64_t addend, bool defined) {
+      const auto from = symbol(slot), to = symbol(base);
+      if (from == o.symbols.end() || !from->defined() || to == o.symbols.end() || to->defined() != defined) return false;
+      const auto& section = o.sections[*from->section];
+      return std::ranges::any_of(section.relocs, [&](const ycxx::obj::reloc& r) {
+        return r.offset == from->offset && r.kind == ycxx::obj::reloc_kind::abs64 &&
+               r.symbol == std::uint32_t(to - o.symbols.begin()) && r.addend == addend;
+      });
+    };
+    check(relocates("address", "value", 0, true), "a pointer initialized with a variable's address");
+    check(relocates("element", "samples", 4, true), "an array element's address keeps its byte offset");
+    check(relocates("foreign_element", "foreign", 8, false), "a pointer to an element of an external array");
+    check(relocates("callback", "next", 0, false), "a pointer initialized with an external function's address");
+  }
+}
+
 void unsupported_is_an_error() {
   // A variable of a type the α subset has no data for is an error, not a crash.
   World w;
@@ -362,6 +410,7 @@ int main(int argc, char** argv) {
   alpha0();
   calls_and_globals();
   hello();
+  address_constants();
   unsupported_is_an_error();
   names_only_when_used();
   write_file_keeps_directories();

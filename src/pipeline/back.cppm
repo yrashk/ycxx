@@ -53,14 +53,14 @@ using ast::EntityId;
 using ast::QualType;
 
 // What the back end asks of constants beyond integers and null pointers (ast.md §5.5): string
-// literal objects and their addresses. The front end answers from its value interner; tests
+// literal objects and address constants. The front end answers from its value interner; tests
 // answer from tables.
 class Constants {
  public:
   virtual ~Constants() = default;
   // The code units of a string literal object, the terminating null included, one byte each.
   virtual std::optional<std::vector<std::uint8_t>> string_object(ConstId c) const = 0;
-  // An address constant: the string literal object it points into and the byte offset.
+  // An address constant: its base (`VString` or `VEntity`) and byte offset.
   struct Address {
     ConstId object = ConstId::none;
     std::int64_t offset = 0;
@@ -753,6 +753,8 @@ ir::SubObject QueryLayout::step(QualType q, ir::PathStep s) const {
 ConstLayout LayoutConstant::run(engine::SyncCtx&, ConstId c) {
   ast::Interners& in = *universe().in;
   if (auto a = universe().consts->address(c)) {
+    if (in.values.is<ast::VEntity>(a->object))
+      return {a->offset, in.values.get<ast::VEntity>(a->object).entity, {}};
     EntityId e = in.entities.add<EntityId>(ast::mix(ast::seed("ycxx.pipeline.string"), in.values.fp(a->object)));
     return {a->offset, e, a->object};
   }
