@@ -484,20 +484,26 @@ engine::query_task<Region> Pp::run(engine::Ctx& cx, FileId file) {
     HostScope scope(s.files, host);
     Preprocessed result = preprocess(s, src.config.view == View::editor ? std::string_view(own) : cx.fetch<FileText>(file), src.path);
     // Trace the errors at the same physical positions as the compiler's diagnostics (#404).
-    std::map<u16, std::vector<u32>> starts;
+    struct FileLines {
+      u32 size = 0;
+      std::vector<u32> starts;
+    };
+    std::map<u16, FileLines> files;
     for (const Diag& d : result.diags) {
       const lex::message info = lex::message_of(d.kind);
       if (info.severity != lex::Severity::error || info.text[0] == 0) continue;
-      auto it = starts.find(d.file);
-      if (it == starts.end()) {
+      auto [it, fresh] = files.try_emplace(d.file);
+      if (fresh) {
         const Files::Content* content = s.files.content(s.files.id(result.region.files[d.file]));
-        it = starts.emplace(d.file, content ? line_starts(content->text) : std::vector<u32>{}).first;
+        if (content) it->second = {static_cast<u32>(content->text.size()), line_starts(content->text)};
       }
-      if (!it->second.empty()) {
-        const auto line = std::ranges::upper_bound(it->second, d.offset);
+      const auto& [size, starts] = it->second;
+      if (!starts.empty()) {
+        const u32 offset = std::min(d.offset, size);
+        const auto line = std::ranges::upper_bound(starts, offset);
         const std::string& name = d.file == 0 ? src.path : result.region.file_names[d.file];
         std::format_to(std::back_inserter(result.region.error_details), "{}:{}:{}: ", name,
-                       line - it->second.begin(), d.offset - *(line - 1) + 1);
+                       line - starts.begin(), offset - *(line - 1) + 1);
       }
       result.region.error_details += lex::render(d.kind, d.args);
       result.region.error_details += '\n';

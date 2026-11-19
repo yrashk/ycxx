@@ -113,72 +113,9 @@ class ValueConstants final : public Constants {
   sema::World* w_;
 };
 
-// The file and byte offset of an item location (ast.md §8.3, steps 1–3).
-std::optional<pp::TokLoc> source_site(ast::Interners& in, const pp::Region& region, const items::Items& items, ast::Loc at);
-
-// File contents as this revision sees them. An open buffer takes precedence in the editor view.
-const std::optional<std::string>& source_content(engine::Ctx& cx, const pp::Source& source, std::string_view name);
-
-// Renders positions against the same source inputs as preprocessing. The table for a file is
-// built on its first diagnostic, then used for every diagnostic in that file.
-class SourceLocations {
- public:
-  SourceLocations(engine::Ctx& cx, const pp::Source& source, pp::FileId file, const pp::Region& region)
-      : cx_(cx), source_(source), file_(file), region_(region) {}
-
-  std::string at(pp::TokLoc loc);
-
- private:
-  engine::Ctx& cx_;
-  const pp::Source& source_;
-  pp::FileId file_;
-  const pp::Region& region_;
-  std::map<std::uint16_t, LineTable> lines_;
-};
-
 }  // namespace ycxx::pipeline
 
 namespace ycxx::pipeline {
-
-std::optional<pp::TokLoc> source_site(ast::Interners& in, const pp::Region& region, const items::Items& items, ast::Loc at) {
-  for (const items::Item& it : items.items) {
-    if (in.items.add<ast::ItemId>(it.id) != at.item) continue;
-    std::uint32_t tok = std::min<std::uint32_t>(it.begin + at.offset, static_cast<std::uint32_t>(region.locs.size() - 1));
-    return region.site(tok);
-  }
-  return std::nullopt;
-}
-
-const std::optional<std::string>& source_content(engine::Ctx& cx, const pp::Source& source, std::string_view name) {
-  std::filesystem::path p(name);
-  if (p.is_relative() && !source.cwd.empty()) p = std::filesystem::path(source.cwd) / p;
-  const pp::PathId id = pp::path_id(p.lexically_normal().generic_native_encoded_string());
-  if (source.config.view == pp::View::editor)
-    if (const auto& open = cx.fetch<pp::Buffer>(id)) return open;
-  return cx.fetch<pp::FileContent>(id);
-}
-
-std::string SourceLocations::at(pp::TokLoc loc) {
-  if (loc.file >= region_.files.size()) return {};
-  const bool main = loc.file == 0;
-  const std::string& name = main ? source_.path : region_.files[loc.file];
-  auto it = lines_.find(loc.file);
-  if (it == lines_.end()) {
-    if (main && source_.config.view == pp::View::disk)
-      it = lines_.try_emplace(loc.file, cx_.fetch<pp::FileText>(file_)).first;
-    else if (!main && name == "<built-in>") {
-      pp::Session& ps = pp::session_for(source_.config);
-      std::lock_guard lock(ps.mutex);
-      it = lines_.try_emplace(loc.file, ps.builtin_text()).first;
-    } else {
-      const auto& text = source_content(cx_, source_, name);
-      if (!text) return {};
-      it = lines_.try_emplace(loc.file, *text).first;
-    }
-  }
-  const LineColumn lc = it->second.line_column(loc.offset);
-  return std::format("{}:{}:{}", main ? name : region_.file_names[loc.file], lc.line, lc.column);
-}
 
 // A variable with static storage duration initialized or destroyed by code ([basic.start.dynamic],
 // [basic.start.term]): its initializer's tree in its declaration's item, if it is not constant.
@@ -568,7 +505,7 @@ engine::query_task<FrontResult> TuFront::run(engine::Ctx& cx, TuId tu) {
   const items::Items& items = co_await cx.fetch<items::RegionItems>(file);
   const std::vector<engine::Diagnostic>& lexed = co_await cx.fetch<engine::DiagsOf>(cx.cell_of<items::RegionItems>(file));
   FrontResult out;
-  SourceLocations locations(cx, unit_source, file, region);
+  SourceLocations locations(cx, unit_source, file, region, items);
   // `pp` reports at byte offsets in the file (`lex::file_level`).
   for (const engine::Diagnostic& d : lexed) {
     auto kind = lex::lex_diag_of(d.id);

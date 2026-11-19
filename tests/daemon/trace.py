@@ -135,9 +135,20 @@ def main(ycxx):
         traced_error('diagnostic.cpp', './diagnostic.h:3:10', missing, ('Build', 'TuFront'), '-fsyntax-only')
         header.write_text('\n#include "no-such-header.h"\n')
         traced_error('diagnostic.cpp', './diagnostic.h:2:10', 'file not found', ('Build', 'TuFront', 'Pp'), '-fsyntax-only')
-        header.write_text('\ndouble f(double x) {\n  return x;\n}\n')
+        # A malformed pasted token can be wider than the header text in which it originated.
+        header.write_text('#define A 0')
+        diagnostic.write_text('#include "diagnostic.h"\n#define P(a,b) a##b\n#define Q(a,b) P(a,b)\n'
+                              'int k=Q(A,777777777777777777777789);\n')
+        traced_error('diagnostic.cpp', './diagnostic.h:1:12', 'invalid preprocessing number',
+                     ('Build', 'TuFront', 'Pp'), '-fsyntax-only')
+        diagnostic.write_text('#include "diagnostic.h"\n')
+        definition = 'double f(double x) {\n  return x;\n}\n'
+        header.write_text('/*   */\n' + definition)
         traced_error('diagnostic.cpp', './diagnostic.h:2:20', 'x86-64 System V ABI:',
-                     ('Build',), '--target=x86_64-pc-linux-gnu', '-c')
+                     ('Build', 'Tu', 'Lower'), '--target=x86_64-pc-linux-gnu', '-c')
+        header.write_text('/*\n\n */\n' + definition)
+        traced_error('diagnostic.cpp', './diagnostic.h:4:20', 'x86-64 System V ABI:',
+                     ('Build', 'Tu', 'Lower'), '--target=x86_64-pc-linux-gnu', '-c')
         absent = cxx('--trace-engine=json', '-fsyntax-only', 'absent.cpp')
         records = [json.loads(l) for l in absent.stderr.splitlines() if l.strip()]
         check(absent.returncode == 1 and any(o.get('kind') == 'Build' and o.get('errors') == 'cannot read a source file\n' for o in records),

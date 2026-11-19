@@ -18,6 +18,7 @@ import ycxx.sema;
 import :back;
 import :front;
 import :executable;
+import :lines;
 
 namespace ycxx::pipeline {
 
@@ -437,20 +438,9 @@ engine::query_task<Built> Build::run(engine::Ctx& cx, RequestId r) {
       UnitBuilt& u = out.units[i];
       u.object = v.object;
       all = all && v.object.has_value();
-      std::optional<SourceLocations> locations;
       for (const BackError& e : v.errors) {
-        Message m{std::nullopt, true, e.message, {}};
-        if (e.at) {
-          const pp::FileId file{k.units[i].n};
-          const pp::Region& region = co_await cx.fetch<pp::Pp>(file);
-          const items::Items& items = co_await cx.fetch<items::RegionItems>(file);
-          if (const auto at = source_site(*universe().in, region, items, *e.at)) {
-            if (!locations) locations.emplace(cx, cx.fetch<pp::SourceOf>(file), file, region);
-            m.offset = at->offset;
-            m.where = locations->at(*at);
-          }
-        }
-        u.errors.push_back(std::move(m));
+        if (e.source) u.errors.push_back({e.source->offset, true, e.message, e.source->where});
+        else u.errors.push_back({std::nullopt, true, e.message, {}});
       }
     }
   }
