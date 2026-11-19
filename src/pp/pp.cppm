@@ -152,7 +152,8 @@ Source deserialize_from(engine::Source& in, std::type_identity<Source>) {
   s.config.angle_dirs = engine::deserialize<std::vector<std::string>>(in);
   s.config.system_from = static_cast<std::size_t>(engine::deserialize<std::uint64_t>(in));
   s.config.macros = engine::deserialize<std::vector<std::pair<std::string, std::optional<std::string>>>>(in);
-  if (engine::deserialize<std::string>(in) != ast::aarch64_darwin.triple) in.fail();  // the one target there is
+  if (auto target = ast::target_for_triple(engine::deserialize<std::string>(in))) s.config.target = target;
+  else in.fail();
   const auto view = engine::deserialize<std::uint64_t>(in);
   if (view > std::to_underlying(View::editor)) in.fail();
   s.config.view = static_cast<View>(view);
@@ -460,8 +461,8 @@ Config with_system_dirs(Config cfg, std::string_view cwd) {
     while (s.size() > 1 && s.ends_with('/')) s.pop_back();
     return s;
   };
-  std::vector<std::string> system;
-  for (const std::string& d : system_dirs()) system.push_back(normal(d));
+  auto dirs = system_dirs(*cfg.target);
+  auto system = dirs | std::views::transform(normal) | std::ranges::to<std::vector>();
   // A `-I` or `-isystem` directory that is a system directory is searched at the system
   // directory's place only. -isystem directories are system directories too: a `-I` directory
   // that is also an `-isystem` one is searched there, as a system directory (as Clang and GCC do).
@@ -479,7 +480,7 @@ Config with_system_dirs(Config cfg, std::string_view cwd) {
   }
   cfg.angle_dirs = std::move(kept);
   cfg.system_from = from;
-  for (std::string& d : system_dirs()) cfg.angle_dirs.push_back(std::move(d));
+  for (std::string& d : dirs) cfg.angle_dirs.push_back(std::move(d));
   return cfg;
 }
 

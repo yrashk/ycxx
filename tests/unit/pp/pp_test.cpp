@@ -2,6 +2,7 @@
 // reuse of regions whose traces verify, and incremental equals cold over edit sequences
 // (DECISIONS §4.2). `-E` output is compared with Clang's by the preprocess tests (tests/own/pp).
 import std;
+import ycxx.ast.target;
 import ycxx.engine;
 import ycxx.pp;
 import ycxx.unit;
@@ -81,6 +82,88 @@ void includes() {
   h.files["dir/main.cpp"] = "#include \"o.h\"\n#include \"o.h\"\n#pragma once\n";
   auto once = run(s, h, "dir/main.cpp");
   check(text(once.region) == "int o ;" && kinds(once) == std::vector{lex::LexDiag::pragma_once_in_main}, "#pragma once");
+}
+
+void linux_system_includes() {
+  pp::Config cfg;
+  cfg.target = &ast::x86_64_linux;
+  auto include = std::filesystem::path(pp::system_dirs(*cfg.target).back()).lexically_normal().generic_native_encoded_string();
+  auto multiarch = include + "/x86_64-linux-gnu";
+  cfg.angle_dirs = {multiarch, "user"};
+  cfg.system_from = 2;
+  cfg = pp::with_system_dirs(std::move(cfg));
+  check(cfg.system_from == 1 && cfg.angle_dirs.front() == "user",
+        "an explicit -I for the multiarch directory stays at its system location");
+
+  MemHost h;
+  h.files["main.cpp"] = "#include <multiarch.h>\n";
+  h.files[multiarch + "/multiarch.h"] = "int multiarch;\n#include_next <multiarch.h>\n";
+  h.files[include + "/multiarch.h"] = "int fallback;\n";
+  pp::Session s(h, cfg);
+  auto p = run(s, h);
+  check(p.diags.empty() && text(p.region) == "int multiarch ; int fallback ;",
+        "the Linux multiarch header comes first and include_next reaches usr/include");
+
+  auto darwin = pp::system_dirs(ast::aarch64_darwin);
+  check(std::ranges::none_of(darwin, [](const auto& dir) {
+          return dir.ends_with("/x86_64-linux-gnu") || dir.ends_with("/resources/linux/include");
+        }),
+        "Darwin does not search Linux's include directories");
+}
+
+void linux_stddef() {
+  pp::Config cfg;
+  cfg.target = &ast::x86_64_linux;
+  pp::DiskHost host;
+  pp::Session s(host, pp::with_system_dirs(std::move(cfg)));
+  auto partial = pp::preprocess(s, R"cpp(
+#define __need_size_t
+#include <stddef.h>
+#if defined(__need_size_t) || defined(NULL) || defined(offsetof)
+#error size_t request leaked other definitions
+#endif
+size_t first;
+#define __need_NULL
+#define __need_wchar_t
+#include <stddef.h>
+#if defined(__need_NULL) || defined(__need_wchar_t) || !defined(NULL) || defined(offsetof)
+#error combined request was not isolated
+#endif
+void* pointer = NULL;
+)cpp", "partial.cpp");
+  check(partial.diags.empty() &&
+            text(partial.region) == "typedef long unsigned int size_t ; size_t first ; void * pointer = nullptr ;",
+        "libycxx's wrapper forwards each partial request to the Linux resource header");
+
+  auto full = pp::preprocess(s, R"cpp(
+#define __need_size_t
+#include <stddef.h>
+#include <cstddef>
+#if !defined(NULL) || !defined(offsetof)
+#error full stddef.h did not define its macros
+#endif
+#undef NULL
+#define __need_NULL
+#include <stddef.h>
+#if defined(__need_NULL) || !defined(NULL)
+#error a partial stddef.h include must work after the full include
+#endif
+)cpp", "full.cpp");
+  check(full.diags.empty() && text(full.region).contains("} max_align_t ;"),
+        "libycxx's full cstddef finds max_align_t after a partial stddef.h include");
+}
+
+void source_target() {
+  for (auto target : {&ast::aarch64_darwin, &ast::x86_64_linux}) {
+    pp::Source source{"main.cpp", {}, {}};
+    source.config.target = target;
+    engine::Sink bytes;
+    engine::serialize(bytes, source);
+    engine::Source in(bytes.bytes());
+    auto restored = engine::deserialize<pp::Source>(in);
+    check(!in.failed() && in.done() && restored.config.target == target,
+          "a saved preprocessor source preserves its target");
+  }
 }
 
 void object_like() {
@@ -378,6 +461,9 @@ void pool() {
 
 int main() {
   includes();
+  linux_system_includes();
+  linux_stddef();
+  source_target();
   object_like();
   function_like();
   conditionals();
