@@ -227,10 +227,14 @@ class Emitter {
     auto ops = body_.operands_of(n);
     auto imms = body_.imms_of(n);
     auto args = ops.subspan(indirect ? 2 : 1);
+    auto signed_args = imms[indirect ? 0 : 1];
     for (std::size_t i = 0; i < args.size(); ++i) {
-      // The ABI leaves excess bits unspecified. Each frame slot already contains the low bits.
-      if (i < register_args) read(args[i], argument_regs[i]);
-      else {
+      if (i < register_args) {
+        // The psABI leaves excess bits unspecified, but optimized Clang callees can read
+        // 32 bits for narrow register arguments. Extend to that width for interoperability.
+        const auto width = l2::bytes(body_.type(args[i]));
+        e_.load(argument_regs[i], rbp, frame_.slots[raw(args[i])], width, (signed_args >> i) & 1);
+      } else {
         read(args[i]);
         e_.store(rsp, 8 * std::int32_t(i - register_args), rax, 8);
       }

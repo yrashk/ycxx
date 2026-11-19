@@ -20,7 +20,7 @@ verify_no_tail:
     testb %al, %al
     jne .Lbad_empty_tail
     xorl %eax, %eax
-    cmpl $29, %edi
+    cmpl $-29, %edi
     setne %al
     ret
 .Lbad_empty_tail:

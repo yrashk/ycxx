@@ -48,11 +48,11 @@ class Encoder {
     reg({0xf7}, is_signed ? 7 : 6, divisor, wide);  // idiv or div
   }
 
-  void load(Reg dst, Reg base, std::int32_t disp, unsigned width) {
-    // Narrow loads zero-extend into a 32-bit register, which also clears its high 32 bits.
+  void load(Reg dst, Reg base, std::int32_t disp, unsigned width, bool sign_extend = false) {
+    // Narrow loads extend into a 32-bit register, which also clears its high 32 bits.
     switch (width) {
-      case 1: memory({0x0f, 0xb6}, dst, base, disp, false); break;
-      case 2: memory({0x0f, 0xb7}, dst, base, disp, false); break;
+      case 1: memory({0x0f, std::uint8_t(sign_extend ? 0xbe : 0xb6)}, dst, base, disp, false); break;
+      case 2: memory({0x0f, std::uint8_t(sign_extend ? 0xbf : 0xb7)}, dst, base, disp, false); break;
       default: memory({0x8b}, dst, base, disp, width == 8); break;
     }
   }

@@ -61,6 +61,21 @@ def main():
              '-o', 'variadic'], scope, cold)
         run(['./variadic'], scope, cold)
 
+        for name in ('abi.hpp', 'caller.cpp', 'callee.cpp', 'boundaries.cpp', 'boundaries.s'):
+            name = f'linux_narrow_{name}'
+            shutil.copyfile(source_dir / name, scope / name)
+        for part in ('caller', 'callee'):
+            source = f'linux_narrow_{part}.cpp'
+            compile(target, '-c', source)
+            run([cc, '-std=c++20', '-O2', '-c', source, '-o', f'native_{part}.o'], scope, cold)
+        for caller, callee in (('linux_narrow_caller.o', 'native_callee.o'),
+                               ('native_caller.o', 'linux_narrow_callee.o')):
+            run([cc, caller, callee, '-o', 'narrow'], scope, cold)
+            run(['./narrow'], scope, cold)
+        compile(target, '-c', 'linux_narrow_boundaries.cpp')
+        run([cc, 'linux_narrow_boundaries.s', 'linux_narrow_boundaries.o', '-o', 'narrow_boundaries'], scope, cold)
+        run(['./narrow_boundaries'], scope, cold)
+
         compile('-c', 'source.cpp', '-o', 'cold-darwin.o')
         try:
             compile(target, '-c', 'source.cpp', '-o', 'warm-first-linux.o', env=daemon)
@@ -75,25 +90,28 @@ def main():
         finally:
             run([ycxx, 'ctl', 'shutdown'], scope, base)
 
+        parameters = 'only 8-, 16-, 32- and 64-bit integer, pointer and reference parameters'
+        results = 'only void, 8-, 16-, 32- and 64-bit integer, pointer and reference results'
         cases = (
-            ('double f(double x) { return x; }', 'only void, 32- and 64-bit integer'),
-            ('long double f(long double x) { return x; }', 'only void, 32- and 64-bit integer'),
-            ('int f(short x) { return x; }', 'only 32- and 64-bit integer'),
-            ('struct X { int x; }; int f(X x) { return x.x; }', 'only 32- and 64-bit integer'),
+            ('double f(double x) { return x; }', results),
+            ('long double f(long double x) { return x; }', results),
+            ('int f(bool x) { return x; }', parameters),
+            ('bool f(int x) { return x; }', results),
+            ('struct X { int x; }; int f(X x) { return x.x; }', parameters),
             ('struct X { int x; }; int g(X); int f() { return g(X{1}); }',
-             'call: only 32- and 64-bit integer'),
+             f'call: {parameters}'),
             ('struct X { int x; }; X g(int); int f() { X x = g(1); return x.x; }',
-             'call: only void, 32- and 64-bit integer'),
+             f'call: {results}'),
             ('int f(int, ...) { return 1; }', 'variadic functions'),
             ('int f(int (*g)(int, ...)) { return g(1); }', 'call: variadic functions'),
             ('int f(int (*g)(int, ...)) { return g(1, 2); }', 'call: variadic functions'),
-            ('int g(double, ...); int f() { return g(1.0); }', 'call: only 32- and 64-bit integer'),
-            ('int g(short, ...); int f() { return g(1); }', 'call: only 32- and 64-bit integer'),
-            ('double g(int, ...); int f() { return g(1); }', 'call: only void, 32- and 64-bit integer'),
+            ('int g(double, ...); int f() { return g(1.0); }', f'call: {parameters}'),
+            ('int g(bool, ...); int f() { return g(true); }', f'call: {parameters}'),
+            ('double g(int, ...); int f() { return g(1); }', f'call: {results}'),
             ('int g(int, ...); int f() { return g(1, 1.0f); }',
              'call: only 32- and 64-bit integer and pointer ellipsis arguments'),
             ('struct X { int x; }; int g(X, ...); int f() { return g(X{1}); }',
-             'call: only 32- and 64-bit integer'),
+             f'call: {parameters}'),
             ('struct X { int x; }; int g(int, ...); int f() { X x{1}; return g(1, x); }',
              'call: only 32- and 64-bit integer and pointer ellipsis arguments'),
         )

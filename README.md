@@ -54,9 +54,10 @@ build/bin/ycxx cxx --target=x86_64-pc-linux-gnu -nostdlib example.o -o example
 ./example
 ```
 
-Linux objects can make direct calls to variadic functions such as `printf` within the scalar
-INTEGER ABI subset. Use the host linker to link these objects with libc.
-[#399](https://github.com/yrashk/ycxx/issues/399)
+Linux objects pass and return 8-, 16-, 32- and 64-bit integers and enums, pointers and references.
+They can make direct variadic calls such as `printf` with promoted integer and pointer arguments.
+Use the host linker to link these objects with libc.
+[#412](https://github.com/yrashk/ycxx/issues/412), [#399](https://github.com/yrashk/ycxx/issues/399)
 
 **Language on macOS.** Programs can use:
 - the fundamental integer, character and floating types, pointers, arrays, references and
