@@ -24,7 +24,7 @@
 // the default target for pre-built units, bound by whoever owns them (`Universe`); handles in values are
 // numbers in those interners, so a cell's value is meaningful only with them (#17 persists them).
 //
-// The Linux ABI subset admits 32- and 64-bit integers and pointers in function signatures.
+// The Linux ABI subset admits scalar integer and pointer types in function signatures.
 export module ycxx.pipeline:back;
 
 import std;
@@ -950,23 +950,28 @@ engine::query_task<ir::FunctionDebug> FunctionDebug::run(engine::Ctx& cx, FnKey 
 
 namespace {
 
-bool linux_scalar(const QueryLayout& layout, QualType type) {
-  ir::TypeLayout l = layout.type(type);
+bool linux_ellipsis_scalar(ir::TypeLayout l) {
   return l.kind == ir::TypeKind::pointer || (l.kind == ir::TypeKind::integer && (l.size == 4 || l.size == 8));
 }
 
+bool linux_fixed_scalar(ir::TypeLayout l) {
+  return linux_ellipsis_scalar(l) || (l.kind == ir::TypeKind::integer && (l.size == 1 || l.size == 2));
+}
+
 // Lowering implements the Darwin aggregate calling convention. Check the original signature of
-// each function and call before lowering can erase an aggregate, narrow integer or ellipsis.
+// each function and call before lowering can erase a class or ellipsis.
 std::string_view linux_signature_error(const ast::Interners& in, const QueryLayout& layout, QualType type,
                                        bool allow_variadic = false) {
   QualType canonical = in.types.canon(type);
   if (!in.types.is<ast::TFunction>(canonical)) return "the function type is unavailable";
   auto f = in.types.get<ast::TFunction>(canonical);
   if (f.variadic && !allow_variadic) return "variadic functions are not supported";
-  if (layout.type(f.ret).kind != ir::TypeKind::void_ && !linux_scalar(layout, f.ret))
-    return "only void, 32- and 64-bit integer, pointer and reference results are supported";
+  ir::TypeLayout result = layout.type(f.ret);
+  if (result.kind != ir::TypeKind::void_ && !linux_fixed_scalar(result))
+    return "only void, 8-, 16-, 32- and 64-bit integer, pointer and reference results are supported";
   for (QualType p : in.seqs.elements(f.params))
-    if (!linux_scalar(layout, p)) return "only 32- and 64-bit integer, pointer and reference parameters are supported";
+    if (!linux_fixed_scalar(layout.type(p)))
+      return "only 8-, 16-, 32- and 64-bit integer, pointer and reference parameters are supported";
   return {};
 }
 
@@ -976,7 +981,7 @@ std::string_view linux_direct_call_error(const QueryLayout& layout, const ir::Fu
   if (imms[2]) return "aggregate arguments are not supported";
   // The tail values have already undergone the default argument promotions ([expr.call]).
   for (ir::ValueId v : body.operands_of(call).last(imms[1]))
-    if (!linux_scalar(layout, body.value(v).type.type))
+    if (!linux_ellipsis_scalar(layout.type(body.value(v).type.type)))
       return "only 32- and 64-bit integer and pointer ellipsis arguments are supported";
   return {};
 }
@@ -1024,7 +1029,9 @@ engine::query_task<Lowered> Lower::run(engine::Ctx& cx, FnKey k) {
       co_return Lowered{std::nullopt, {}, std::move(located)};
     }
     config.int_arg_registers = 6;
-    config.min_result_bits = 0;
+    // Extend outgoing narrow results for interoperability. Lowering truncates incoming results
+    // to the declared width, as the System V AMD64 psABI §3.2.3 leaves excess bits unspecified.
+    config.min_result_bits = 32;
   }
   auto l2 = ir::lower(*f.body, k.fn, layout, config);
   if (!l2) {
