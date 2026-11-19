@@ -3566,6 +3566,7 @@ public:
     expect(Tk::l_paren);
     s_->push_scope();
     s_->guard_scope();  // [basic.scope.block]/2: the for-init's names are not redeclared in the body
+    if (auto r = range_for_ahead()) return range_for(begin, *r);
     Ex init;
     skip_attributes();  // of a simple-declaration ([dcl.pre]/5)
     if (is(Tk::kw_using)) {
@@ -3597,6 +3598,176 @@ public:
     return s_->node(ast::For{sema::Sema::at(init, begin), sema::Sema::at(cond, begin), sema::Sema::at(inc, begin),
                              sema::Sema::at(body, begin)},
                     begin, pos());
+  }
+
+  // Whether a range-based `for` follows the `(` ([stmt.ranged]): a `:` before the `)`, outside
+  // brackets and not a `?:`'s, after at most one `;` (that of an init-statement); with whether
+  // there is that init-statement.
+  std::optional<bool> range_for_ahead() const {
+    int depth = 0, conditionals = 0;
+    bool init = false;
+    for (u32 j = 0;; ++j) {
+      switch (kind(j)) {
+      case Tk::eof: return std::nullopt;
+      case Tk::l_paren: case Tk::l_square: case Tk::l_brace: ++depth; break;
+      case Tk::r_paren: case Tk::r_square: case Tk::r_brace:
+        if (depth-- == 0) return std::nullopt;
+        break;
+      case Tk::question: if (depth == 0) ++conditionals; break;
+      case Tk::colon:
+        if (depth == 0 && conditionals > 0) --conditionals;
+        else if (depth == 0) return init;
+        break;
+      case Tk::semi:
+        if (depth == 0) {
+          if (init) return std::nullopt;
+          init = true;
+        }
+        break;
+      default: break;
+      }
+    }
+  }
+
+  // [stmt.ranged]: `for ( init-statement_opt for-range-declaration : for-range-initializer )
+  // statement` is the loop the draft expands it to, built from the existing kinds:
+  //   { init-statement  auto&& __range = initializer;  auto __begin = begin-expr;  auto __end = end-expr;
+  //     for ( ; __begin != __end; ++__begin ) { for-range-declaration = *__begin; statement } }
+  // where begin-expr is `__range` for an array, `__range.begin()` for a class with a member `begin`
+  // or `end`, and `begin(__range)` otherwise (as `end`). The for-init scope is open.
+  Ex range_for(u32 begin, bool has_init) {
+    std::vector<ast::Child> outer;
+    if (has_init) {
+      Ex init = init_statement();
+      if (init.ok()) outer.push_back(sema::Sema::at(init, begin));
+    }
+    skip_attributes();
+    u32 dbegin = pos();
+    DeclSpec spec = decl_specifiers();
+    Declarator d = declarator(spec.type, false);
+    if (!expect(Tk::colon) || !d.ok || !spec.ok) {
+      skip_rest();
+      s_->pop_scope();
+      return {NodeId::none, begin, pos()};
+    }
+    if (is(Tk::l_brace)) {  // a braced list deduces std::initializer_list (#329)
+      s_->diag(pos(), Diag::not_supported, Tk::l_brace);
+      skip_rest();
+      s_->pop_scope();
+      return {NodeId::none, begin, pos()};
+    }
+    Ex range = expression();
+    expect(Tk::r_paren);
+    sema::Types& types = s_->types();
+    auto finish_dependent = [&] {
+      // In a template's definition: the body is analysed with the variable's type as written;
+      // instantiations expand the loop.
+      s_->push_scope();
+      s_->declare_local(d.name, types.has_placeholder(d.type) ? s_->builtin(Builtin::dependent) : d.type, 0, d.name_at);
+      ++s_->loop_depth;
+      Ex body = substatement();
+      --s_->loop_depth;
+      s_->pop_scope();
+      s_->pop_scope();
+      if (body.ok()) outer.push_back(sema::Sema::at(body, begin));
+      return s_->node(ast::Compound{s_->builder().list(outer)}, begin, pos());
+    };
+    if (!range.ok()) {
+      s_->pop_scope();
+      return {NodeId::none, begin, pos()};
+    }
+    if (s_->dependent(range) || (types.is_dependent(d.type) && !types.has_placeholder(d.type))) return finish_dependent();
+    // auto&& __range = initializer;
+    auto hidden = [&](QualType declared, Ex e) -> std::optional<std::pair<u32, Ex>> {
+      auto t = s_->deduce_placeholder(declared, e, e.begin);
+      if (!t) return std::nullopt;
+      u32 l = s_->declare_local(s_->no_name(), *t, 0, e.begin, false);
+      Ex init = types.is_reference(*t) ? s_->bind_reference(e, *t, e.begin, true) : s_->convert(e, *t, e.begin);
+      if (!init.ok()) return std::nullopt;
+      ast::EntityId dtor = types.is_reference(*t) ? ast::EntityId::none : s_->destructor_of(*t);
+      Ex var = s_->node(ast::LocalVar{l, sema::Sema::at(init, e.begin), dtor}, e.begin, e.end);
+      s_->set_local_decl(l, var.id);
+      return std::pair{l, var};
+    };
+    auto r = hidden(types.rvalue_ref(types.placeholder(false)), range);
+    if (!r) {
+      s_->pop_scope();
+      return {NodeId::none, begin, pos()};
+    }
+    auto ref = [&](u32 l) { return s_->local_ref(l, range.begin, range.end); };
+    QualType ct = s_->local(r->first).type;
+    ct = types.referee(ct);
+    // begin-expr and end-expr ([stmt.ranged]/1).
+    Ex b, e;
+    NameId begin_name = s_->ins().names.intern("begin"), end_name = s_->ins().names.intern("end");
+    u32 at = range.begin, to = range.end;
+    if (types.is_array(ct)) {
+      if (types.rec(ct).bound_value == ast::ConstId::none) {
+        s_->diag(at, Diag::incomplete_type, ct);  // an array of unknown bound
+        s_->pop_scope();
+        return {NodeId::none, begin, pos()};
+      }
+      b = s_->rvalue(ref(r->first));
+      QualType size = s_->builtin(Builtin::unsigned_long);
+      Ex n = s_->literal(size, s_->world().values.integer(size, types.rec(ct).bound), ast::ValueCategory::prvalue, at, to);
+      e = s_->binary(sema::Sema::BinOp::add, s_->rvalue(ref(r->first)), n, at);
+    } else if (types.is_class(ct) && s_->require_complete(ct, at) && has_member_named(ct, begin_name, end_name)) {
+      b = s_->call(s_->member(ref(r->first), false, begin_name, to, at, at), {}, to, to);
+      e = s_->call(s_->member(ref(r->first), false, end_name, to, at, at), {}, to, to);
+    } else {
+      b = s_->call(s_->name_expr(begin_name, at, to, true), {ref(r->first)}, to, to);
+      e = s_->call(s_->name_expr(end_name, at, to, true), {ref(r->first)}, to, to);
+    }
+    auto bv = b.ok() ? hidden(types.placeholder(false), b) : std::nullopt;
+    auto ev = e.ok() ? hidden(types.placeholder(false), e) : std::nullopt;
+    if (!bv || !ev) {
+      s_->pop_scope();
+      return {NodeId::none, begin, pos()};
+    }
+    ast::Child decls[] = {sema::Sema::at(r->second, begin), sema::Sema::at(bv->second, begin), sema::Sema::at(ev->second, begin)};
+    outer.push_back(sema::Sema::at(s_->node(ast::DeclStmt{s_->builder().list(decls)}, at, to), begin));
+    Ex cond = s_->to_bool(s_->binary(sema::Sema::BinOp::ne, ref(bv->first), ref(ev->first), at), at);
+    Ex inc = s_->unary(ast::UnaryOp::pre_inc, ref(bv->first), at, to, at);
+    // { for-range-declaration = *__begin; statement }: declared in the guarded scope with the
+    // init-statement's names, neither is redeclared in the statement's outermost block
+    // ([basic.scope.block]/2).
+    Ex deref = s_->unary(ast::UnaryOp::deref, ref(bv->first), at, to, at);
+    if (spec.is_constexpr) d.type = types.add_cv(d.type, sema::Cv::const_);
+    u32 local = s_->declare_local(d.name, d.type, 0, d.name_at);
+    Ex init;
+    if (deref.ok() && types.has_placeholder(d.type)) {
+      if (auto t = s_->deduce_placeholder(d.type, deref, at)) {
+        d.type = *t;
+        s_->set_local_type(local, d.type);
+      } else {
+        deref = {};
+      }
+    }
+    if (deref.ok()) init = types.is_reference(d.type) ? s_->bind_reference(deref, d.type, at, true) : s_->convert(deref, d.type, at);
+    ast::EntityId dtor = types.is_reference(d.type) ? ast::EntityId::none : s_->destructor_of(d.type);
+    Ex var = s_->node(ast::LocalVar{local, sema::Sema::at(init, dbegin), dtor}, dbegin, d.name_at + 1);
+    s_->set_local_decl(local, var.id);
+    if (init.ok() || dtor != ast::EntityId::none) s_->set_initialized(local);
+    ++s_->loop_depth;
+    Ex body = substatement();
+    --s_->loop_depth;
+    s_->pop_scope();
+    if (!cond.ok() || !inc.ok() || !init.ok()) return {NodeId::none, begin, pos()};
+    ast::Child loop_var[] = {sema::Sema::at(var, dbegin)};
+    Ex decl = s_->node(ast::DeclStmt{s_->builder().list(loop_var)}, dbegin, d.name_at + 1);
+    ast::Child inner[] = {sema::Sema::at(decl, begin), sema::Sema::at(body, begin)};
+    Ex block = s_->node(ast::Compound{s_->builder().list(std::span(inner, body.ok() ? 2 : 1))}, begin, pos());
+    Ex loop = s_->node(ast::For{{}, sema::Sema::at(cond, begin), sema::Sema::at(inc, begin), sema::Sema::at(block, begin)}, begin, pos());
+    outer.push_back(sema::Sema::at(loop, begin));
+    return s_->node(ast::Compound{s_->builder().list(outer)}, begin, pos());
+  }
+  // Whether class `t` has a member named `a` or `b` ([stmt.ranged]/1.2: class member access lookup).
+  bool has_member_named(QualType t, NameId a, NameId b) {
+    const sema::ClassRec* c = s_->class_rec(s_->types().class_of(t));
+    if (!c) return false;
+    auto named = [&](NameId n) { return n == a || n == b; };
+    return std::ranges::any_of(c->members, [&](const sema::MemberDeclRec& m) { return named(m.name); }) ||
+           std::ranges::any_of(c->fields, [&](const sema::FieldRec& f) { return named(f.name); });
   }
 
   // [stmt.return]: the operand copy-initializes the result; a void function may return a void
