@@ -91,6 +91,12 @@ struct Entity {
   std::vector<std::uint8_t> template_same_heads{};  // by argument: see `TemplateSpec`
   // A GNU asm label: the symbol exactly as written (docs/EXTENSIONS.md); empty if none.
   std::string asm_label{};
+  // A static local ([stmt.dcl]/3), or with `guard` its guard variable: the function it is local
+  // to, whose <encoding> its <local-name> begins with, and its number among that function's
+  // statics of its name (Itanium C++ ABI §5.1.6, §3.3.3).
+  EntityId local_function = EntityId::none;
+  std::uint32_t discriminator = 0;
+  bool guard = false;
 };
 
 // A function definition: what `function_ir(F)` reads (irgen::FunctionInput, without a thunk's
@@ -102,6 +108,10 @@ struct FunctionDef {
   ast::ItemId item{};
   std::uint32_t body_offset = 0;  // the declaration part's length in tokens
   std::optional<QualType> this_type{};  // a non-static member function's
+  // Its static locals' guard variables and the runtime functions their initialization calls
+  // ([stmt.dcl]/3; irgen::FunctionInput).
+  std::vector<irgen::FunctionInput::StaticGuard> guards{};
+  EntityId guard_acquire = EntityId::none, guard_release = EntityId::none, atexit = EntityId::none, dso = EntityId::none;
 };
 
 // A variable definition at namespace scope with its constant initializer, or `ConstId::none` for
@@ -111,6 +121,7 @@ struct Variable {
   QualType type{};
   ConstId init = ConstId::none;
   std::optional<ast::Loc> at;  // its declarator, for diagnostics
+  bool dynamic = false;  // also initialized by code ([basic.start.dynamic]): writable, if const
 };
 
 // The classes and enumerations a unit defines, as `layout` reads them: a class's non-static data
@@ -143,6 +154,9 @@ struct TranslationUnit {
   std::vector<FunctionDef> functions;  // the definitions
   std::vector<Variable> variables;     // the definitions
   EntityId main = EntityId::none;      // the program's `main`, if this unit defines it
+  // Its initialization functions ([basic.start.dynamic]), in order, each with the entity of its
+  // `__mod_init_func` pointer.
+  std::vector<std::pair<EntityId, EntityId>> init_functions;
   bool front_failed = false;           // the front end reported errors: nothing to compile
 };
 
@@ -827,6 +841,11 @@ engine::query_task<Generated> FunctionGen::run(engine::Ctx& cx, FnKey k) {
   const FunctionDef& d = src.def;
   irgen::FunctionInput input{d.entity, d.decl, d.body, d.item, d.body_offset};
   input.this_type = d.this_type;
+  input.guards = d.guards;
+  input.guard_acquire = d.guard_acquire;
+  input.guard_release = d.guard_release;
+  input.atexit = d.atexit;
+  input.dso = d.dso;
   auto f = irgen::function_ir(*universe().in, input, facts);
   if (!f) co_return Generated{std::nullopt, BackError{ast::Loc{d.item, d.body_offset}, f.error()}};
   co_return Generated{std::move(*f), std::nullopt};
@@ -1152,6 +1171,13 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
     errors.push_back({std::nullopt, "the translation unit has errors"});
     co_return out;
   }
+  if (linux && !tu.init_functions.empty()) {
+    const auto init = std::ranges::find(tu.functions, tu.init_functions.front().first, &FunctionDef::entity);
+    std::optional<ast::Loc> at;
+    if (init != tu.functions.end()) at = ast::Loc{init->item, init->body_offset};
+    errors.push_back({at, "namespace-scope dynamic initialization and destruction are not supported on x86-64 Linux"});
+    co_return out;
+  }
   std::vector<FnKey> fns;
   for (const FunctionDef& f : tu.functions) fns.push_back({id, f.entity});
 
@@ -1187,7 +1213,7 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
     bool is_const = (std::to_underlying(ast::cv_of(in.canonical(v.type))) & 1) != 0;
     bool zero = b->relocs.empty() && std::ranges::all_of(b->bytes, [](std::uint8_t x) { return x == 0; });
     aarch64::DataDef d{v.entity, aarch64::DataKind::data, std::move(b->bytes), 0, layout.type(v.type).align, std::move(b->relocs)};
-    if (is_const) d.kind = d.relocs.empty() ? aarch64::DataKind::rodata : aarch64::DataKind::data_const;
+    if (is_const && !v.dynamic) d.kind = d.relocs.empty() ? aarch64::DataKind::rodata : aarch64::DataKind::data_const;
     else if (zero) {
       d.kind = aarch64::DataKind::bss;
       d.size = d.bytes.size();
@@ -1196,8 +1222,15 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
     data.push_back(std::move(d));
   }
 
-  // String literal objects, as `lower` and the variables met them ([lex.string]).
   std::vector<aarch64::Symbol> symbols;
+  // The pointers to the initialization functions that dyld calls before `main`, in order.
+  for (std::size_t i = 0; i < tu.init_functions.size(); ++i) {
+    auto [fn, slot] = tu.init_functions[i];
+    data.push_back({slot, aarch64::DataKind::init_func, std::vector<std::uint8_t>(8, 0), 0, 8, {{0, fn, 0}}});
+    symbols.push_back({slot, std::format("l_.init_func.{}", i), obj::binding::local});
+  }
+
+  // String literal objects, as `lower` and the variables met them ([lex.string]).
   std::uint32_t n = 0;
   for (auto [object, entity] : strings) {
     auto units = universe().consts->string_object(object);
@@ -1251,8 +1284,14 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
     }
     return n;
   };
+  std::vector<const Entity*> locals;  // named after their functions, below
+  std::map<std::uint32_t, std::string> mangled;  // by function entity
   for (const Entity& e : tu.entities) {
     if (!used.contains(ir::raw(e.id))) continue;
+    if (e.local_function != EntityId::none) {
+      locals.push_back(&e);
+      continue;
+    }
     // The complete-object constructor and destructor (C1, D1): with no virtual bases they are the
     // base-object ones too (#136).
     std::string name_ = e.special == Special::constructor ? "C1" : e.special == Special::destructor ? "D1" : e.name;
@@ -1263,8 +1302,28 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
       errors.push_back({e.at, std::format("the name of '{}': {} is not supported yet", e.name, name.error())});
       continue;
     }
+    mangled.emplace(ir::raw(e.id), *name);  // before an asm label: what its statics' names begin with
     if (!e.asm_label.empty()) name = e.asm_label;
     symbols.push_back({e.id, std::move(*name), e.linkage == ast::Linkage::internal ? obj::binding::local : obj::binding::global});
+  }
+  // A static local and its guard: `_ZZ <encoding> E <name> [_<n>]` and `_ZGV` before it, the
+  // function's own <encoding> taken from its symbol (Itanium C++ ABI §5.1.6, §5.1.4.6).
+  const std::string_view object_prefix = linux ? "" : "_";
+  for (const Entity* e : locals) {
+    auto f = mangled.find(ir::raw(e->local_function));
+    if (f == mangled.end()) {
+      errors.push_back({e->at, std::format("the name of the static local '{}': its function has no symbol", e->name)});
+      continue;
+    }
+    std::string_view function_symbol = f->second;
+    function_symbol.remove_prefix(object_prefix.size());
+    std::string encoding = function_symbol.starts_with("_Z") ? std::string(function_symbol.substr(2))
+                                                              : std::format("{}{}", function_symbol.size(), function_symbol);
+    std::uint32_t k = e->discriminator;
+    std::string disc = k == 0 ? "" : k <= 10 ? std::format("_{}", k - 1) : std::format("__{}_", k - 1);
+    symbols.push_back({e->id, std::format("{}{}{}E{}{}{}", object_prefix, e->guard ? "_ZGVZ" : "_ZZ",
+                                         encoding, e->name.size(), e->name, disc),
+                       obj::binding::local});
   }
   if (!errors.empty()) co_return out;
 

@@ -80,8 +80,9 @@ void nesting() {
         "namespace N");
   const Item& m = s[n.members[1]];
   check(m.scope == "N" && names(m) == v({"M"}) && s[m.members[0]].scope == "N::M", "nested scopes");
-  check(s.top(2).kind == ItemKind::namespace_def && names(s.top(2)) == v({"B"}) &&
-            s[s.top(2).members[0]].scope == "A::B" && tokens(s, s.top(2).qualifier_begin, s.top(2).qualifier_end) == "A ::",
+  // `namespace A::B` declares A, then B in A ([namespace.def], C++17).
+  check(s.top(2).kind == ItemKind::namespace_def && names(s.top(2)) == v({"A", "B"}) &&
+            s[s.top(2).members[0]].scope == "A::B",
         "namespace A::B");
   check(s[s.top(3).members[0]].scope == "(anonymous)", "unnamed namespace");
   check(s.top(4).kind == ItemKind::declaration, "a namespace alias is a declaration");

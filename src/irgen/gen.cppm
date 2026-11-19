@@ -72,6 +72,15 @@ struct FunctionInput {
   // A non-static member function's `this` type ([expr.prim.this]): its implicit object argument,
   // the entry block's first value parameter, before the declared ones (Itanium C++ ABI §3.1).
   std::optional<ast::QualType> this_type{};
+  // Its static locals initialized by code ([stmt.dcl]/3): each one's guard variable (Itanium C++
+  // ABI §3.3.3), and the runtime functions the guarded initialization calls.
+  struct StaticGuard {
+    ast::EntityId variable = ast::EntityId::none;
+    ast::EntityId guard = ast::EntityId::none;
+  };
+  std::span<const StaticGuard> guards{};
+  ast::EntityId guard_acquire = ast::EntityId::none, guard_release = ast::EntityId::none;
+  ast::EntityId atexit = ast::EntityId::none, dso = ast::EntityId::none;
 };
 
 struct FunctionIr {
@@ -168,6 +177,10 @@ class Gen {
   }
   ValueId constant(ast::QualType type, ast::ConstId c) { return pure(ir::Op::const_, type, {}, {word(c)}); }
   ValueId int_constant(ast::QualType type, std::int64_t v) { return constant(type, facts_.int_constant(type, v)); }
+  ValueId float_constant(ast::QualType type, double v) {
+    if (auto c = facts_.float_constant(type, v)) return constant(type, *c);
+    throw Unsupported{"an extended floating-point format"};
+  }
 
   // An access through a volatile glvalue is a side effect ([intro.execution]) and never constant.
   ir::Flags access_flags(ast::QualType t) {
@@ -340,6 +353,12 @@ class Gen {
       start_lifetime(p);
       slots_[i] = p;
     }
+    // Static locals: their objects are their entities', wherever control enters ([stmt.dcl]/3).
+    for (uint32_t i = params.size(); !fn_.thunk && i < slots_.size(); ++i) {
+      ast::LocalRec rec = in_.seqs.at(fn_.body.locals, i);
+      if (rec.entity != ast::EntityId::none && !facts_.is_reference(rec.type))
+        slots_[i] = Place{pure(ir::Op::global, facts_.pointer_to(rec.type), {}, {word(rec.entity)}), rec.type};
+    }
     // A thunk's locals: those with values are const objects; any other is an object whose
     // lifetime has ended, so evaluating a use of it fails, while naming it unevaluated does not.
     for (uint32_t i = 0; fn_.thunk && i < slots_.size(); ++i) {
@@ -425,12 +444,24 @@ class Gen {
   }
 
   // Positions every node emitted while `a` is generated at `a`, and restores the outer position.
+  // Inside another item's tree (`pinned_`), every node keeps the outer position.
   struct Position {
-    uint32_t& loc;
+    Gen& g;
     uint32_t saved;
-    Position(uint32_t& l, uint32_t at) : loc(l), saved(l) { loc = at; }
-    ~Position() { loc = saved; }
+    Position(Gen& gen, uint32_t at) : g(gen), saved(gen.loc_) {
+      if (g.pinned_ == 0) g.loc_ = at;
+    }
+    ~Position() { g.loc_ = saved; }
   };
+  template <class Body>
+  auto pinned(Body&& f) {
+    ++pinned_;
+    struct Unpin {
+      int& n;
+      ~Unpin() { --n; }
+    } unpin{pinned_};
+    return f();
+  }
 
   // A substatement is in a scope of its own even if it is not a compound statement ([stmt.pre]).
   void substmt(At a) {
@@ -442,7 +473,7 @@ class Gen {
   void stmt(At a) {
     if (a.id == NodeId::none) return;
     ensure_live();
-    Position here(loc_, a.offset);
+    Position here(*this, a.offset);
     if (is<ast::Compound>(a)) {
       auto s = get<ast::Compound>(a);
       push_scope();
@@ -471,7 +502,11 @@ class Gen {
     } else if (is<ast::DeclStmt>(a)) {
       for (ast::Child c : ast_.children(get<ast::DeclStmt>(a).decls)) {
         At v = child(a, c);
-        Position at(loc_, v.offset);
+        Position at(*this, v.offset);
+        if (is<ast::StaticVar>(v)) {
+          static_var(v);
+          continue;
+        }
         if (!is<ast::LocalVar>(v)) unsupported(v, "in a declaration statement");
         local_var(v);
       }
@@ -506,6 +541,8 @@ class Gen {
     } else if (is<ast::For>(a)) {
       auto f = get<ast::For>(a);
       loop(a, f.init, f.condition, f.increment, f.body, false);
+    } else if (is<ast::StaticInit>(a)) {
+      static_init(a);
     } else if (is<ast::Break>(a) || is<ast::Continue>(a)) {
       bool brk = is<ast::Break>(a);
       if (loops_.empty() || (!brk && !loops_.back().in_loop)) unsupported(a, "outside a loop");
@@ -560,6 +597,7 @@ class Gen {
     if (is<ast::ValueInit>(e)) return true;
     if (is<ast::CtorCall>(e)) return get<ast::CtorCall>(e).zero_first != 0;
     if (is<ast::Paren>(e)) return value_initializes(child(e, get<ast::Paren>(e).operand));
+    if (is<ast::DefaultArg>(e)) return value_initializes(child(e, get<ast::DefaultArg>(e).arg));
     if (!is<ast::InitList>(e)) return false;
     for (ast::Child c : ast_.children(get<ast::InitList>(e).elems))
       if (value_initializes(child(e, c))) return true;
@@ -586,8 +624,9 @@ class Gen {
   // Initializes the object at `p` from the prvalue `e` ([dcl.init]). In a `zeroed` object, a
   // value-initialized element is already zero.
   void initialize(const Place& p, At e, bool zeroed) {
-    Position here(loc_, e.offset);
+    Position here(*this, e.offset);
     if (is<ast::Paren>(e)) return initialize(p, child(e, get<ast::Paren>(e).operand), zeroed);
+    if (is<ast::DefaultArg>(e)) return pinned([&] { initialize(p, child(e, get<ast::DefaultArg>(e).arg), zeroed); });
     if (facts_.is_reference(p.type)) {
       store(p, lvalue(e).ptr);  // a reference member holds its object's address
       return;
@@ -675,7 +714,8 @@ class Gen {
   // The object a class prvalue is copied from: a glvalue of the class converted to a prvalue
   // ([conv.lval]), whose copy constructor is trivial.
   Place class_source(At e) {
-    while (is<ast::Paren>(e)) e = child(e, get<ast::Paren>(e).operand);
+    while (is<ast::Paren>(e) || is<ast::DefaultArg>(e))
+      e = child(e, is<ast::Paren>(e) ? get<ast::Paren>(e).operand : get<ast::DefaultArg>(e).arg);
     if (is<ast::ImplicitConversion>(e)) {
       auto c = get<ast::ImplicitConversion>(e);
       if (c.conversion == ast::ConversionKind::lvalue_to_rvalue) return lvalue(child(e, c.operand));
@@ -689,7 +729,7 @@ class Gen {
   }
   ValueId zero(ast::QualType t) {
     if (cls(t) == TypeClass::pointer) return constant(t, facts_.null_constant(t));
-    if (cls(t) == TypeClass::floating) return constant(t, facts_.float_constant(t, 0.0));
+    if (cls(t) == TypeClass::floating) return float_constant(t, 0.0);
     return int_constant(t, 0);
   }
 
@@ -738,12 +778,92 @@ class Gen {
     if (is<ast::CondDecl>(c)) {
       auto d = get<ast::CondDecl>(c);
       {
-        Position at(loc_, child(c, d.var).offset);
+        Position at(*this, child(c, d.var).offset);
         local_var(child(c, d.var));
       }
       return full_expression([&] { return rvalue(child(c, d.value)); });
     }
     return full_expression([&] { return rvalue(c); });
+  }
+
+  // [basic.start.dynamic]: the variable's object is initialized, then its destructor is registered
+  // with `__cxa_atexit(destructor, &object, &__dso_handle)` ([basic.start.term]).
+  void static_init(At a) {
+    auto si = get<ast::StaticInit>(a);
+    Place p{pure(ir::Op::global, facts_.pointer_to(si.type), {}, {word(si.variable)}), si.type};
+    if (si.init.id != NodeId::none) {
+      pinned([&] {
+        full_expression([&] {
+          initialize(p, child(a, si.init), false);
+          return 0;
+        });
+      });
+    }
+    if (si.destructor != ast::EntityId::none) at_exit(p, si.destructor, si.atexit, si.dso);
+  }
+  // Registers `destructor` to run on the object at `p` at exit with `__cxa_atexit(destructor,
+  // object, &__dso_handle)` ([basic.start.term]).
+  void at_exit(const Place& p, ast::EntityId destructor, ast::EntityId atexit_fn, ast::EntityId dso) {
+    ast::QualType vp = facts_.pointer_to(facts_.int_type());  // any object pointer: the callee takes void*
+    auto atexit = [&](ValueId object) {
+      ValueId args[] = {pure(ir::Op::func_addr, vp, {}, {word(destructor)}), object, pure(ir::Op::global, vp, {}, {word(dso)})};
+      call_fn(atexit_fn, facts_.int_type(), args, 0);
+    };
+    if (cls(p.type) != TypeClass::array) return atexit(p.ptr);
+    // An array's elements are each registered, the first first, so that the last is destroyed
+    // first: a loop over the innermost elements, from the first.
+    Place first = p;
+    std::uint64_t n = 1;
+    while (cls(first.type) == TypeClass::array) {
+      n *= facts_.bound(first.type);
+      first = subobject(first, ir::Step::elem, 0, facts_.element(first.type));
+    }
+    ast::QualType it = facts_.ptrdiff_type();
+    ir::BlockId head = new_block({it}), body = new_block(), done = new_block();
+    br(head, {int_constant(it, 0)});
+    enter(head);
+    ValueId i = b_.param(head, 1);
+    cond_br(pure(ir::Op::icmp, facts_.bool_type(), {i, int_constant(it, std::int64_t(n))}, {std::to_underlying(ir::Pred::slt)}),
+            edge(body), edge(done));
+    enter(body);
+    atexit(pure(ir::Op::ptr_add, facts_.pointer_to(first.type), {first.ptr, i}, {word(ty(first.type))}));
+    br(head, {arith(ast::BinaryOp::add, it, i, int_constant(it, 1))});
+    enter(done);
+  }
+
+  // [stmt.dcl]/3: a static local's object is its entity's. Unless constant-initialized with
+  // nothing to destroy, it is initialized the first time control passes here, once even with
+  // several threads: `if (__cxa_guard_acquire(&guard)) { init; atexit(destructor); __cxa_guard_release(&guard); }`
+  // (Itanium C++ ABI §3.3.3), the acquire called on every pass.
+  void static_var(At a) {
+    auto s = get<ast::StaticVar>(a);
+    ast::LocalRec rec = in_.seqs.at(fn_.body.locals, s.local);
+    if (s.destructor == ast::EntityId::none && (s.value != ast::ConstId::none || s.init.id == NodeId::none)) return;
+    auto g = std::ranges::find(fn_.guards, rec.entity, &FunctionInput::StaticGuard::variable);
+    if (g == fn_.guards.end() || fn_.guard_acquire == ast::EntityId::none) {
+      // For constant evaluation, which has no guards: passing here is not constant ([expr.const]).
+      emit(ir::Op::unreachable, {}, {}, {}, ir::bit(ir::Flag::not_constexpr));
+      live_ = false;
+      return;
+    }
+    // Keep the address defined at function entry so jumps may bypass this declaration.
+    const Place& p = *slots_[s.local];
+    ast::QualType vp = facts_.pointer_to(facts_.int_type());
+    ValueId guard[] = {pure(ir::Op::global, vp, {}, {word(g->guard)})};
+    ValueId first = *call_fn(fn_.guard_acquire, facts_.int_type(), guard, 0);
+    ValueId taken = pure(ir::Op::icmp, facts_.bool_type(), {first, int_constant(facts_.int_type(), 0)}, {std::to_underlying(ir::Pred::ne)});
+    ir::BlockId init_b = new_block(), join = new_block();
+    cond_br(taken, edge(init_b), edge(join));
+    enter(init_b);
+    if (s.init.id != NodeId::none && s.value == ast::ConstId::none)
+      full_expression([&] {
+        initialize(p, child(a, s.init), false);
+        return 0;
+      });
+    if (s.destructor != ast::EntityId::none) at_exit(p, s.destructor, fn_.atexit, fn_.dso);
+    call_fn(fn_.guard_release, facts_.int_type(), guard, 0, true);
+    br(join);
+    enter(join);
   }
 
   struct Loop {
@@ -942,7 +1062,7 @@ class Gen {
         continue;
       }
       enter(g->from);
-      Position at(loc_, g->loc);
+      Position at(*this, g->loc);
       jump_exits(g->at, g->path, g->scopes, l);
       br(l.block);
       g = gotos_.erase(g);
@@ -956,6 +1076,7 @@ class Gen {
   // ------------------------------------------------------------------ expressions
 
   ast::ExprInfo info(At a) {
+    if (a.id == NodeId::none) throw Unsupported{"an initializer that failed to be analysed"};
     ast::ExprInfo r{};
     ast::dispatch<ast::Nodes>(ast::kind_of(a.id), [&]<class T>(std::type_identity<T>) {
       if constexpr (requires(T t) { t.info; }) r = ast_.get<T>(a.id).info;
@@ -1018,12 +1139,13 @@ class Gen {
   }
 
   std::optional<ValueId> rvalue_or_void(At a) {
-    Position here(loc_, a.offset);
+    Position here(*this, a.offset);
     ast::ExprInfo ei = info(a);
     if (ei.category != ast::ValueCategory::prvalue) unsupported(a, "as a glvalue where a prvalue is expected");
     ast::QualType t = ei.type;
     if (is<ast::Literal>(a)) return constant(t, get<ast::Literal>(a).value);
     if (is<ast::Paren>(a)) return rvalue_or_void(child(a, get<ast::Paren>(a).operand));
+    if (is<ast::DefaultArg>(a)) return pinned([&] { return rvalue_or_void(child(a, get<ast::DefaultArg>(a).arg)); });
     if (is<ast::ImplicitConversion>(a)) return conversion(a);
     if (is<ast::Unary>(a)) return unary(a);
     if (is<ast::Binary>(a)) return binary(a);
@@ -1106,7 +1228,7 @@ class Gen {
       return pure(ir::Op::ptr_add, t, {old, one}, {word(ty(facts_.pointee(t)))});
     }
     if (cls(t) == TypeClass::floating)
-      return pure(inc ? ir::Op::fadd : ir::Op::fsub, t, {old, constant(t, facts_.float_constant(t, 1.0))});
+      return pure(inc ? ir::Op::fadd : ir::Op::fsub, t, {old, float_constant(t, 1.0)});
     if (cls(t) != TypeClass::integer) throw Unsupported{"++ or -- of a non-integer type"};
     ast::QualType p = facts_.promoted(t);
     ValueId v = same_type(p, t) ? old : pure(ir::Op::iconv, p, {old});
@@ -1397,7 +1519,7 @@ class Gen {
 
   // The object a glvalue designates ([basic.lval]).
   Place lvalue(At a) {
-    Position here(loc_, a.offset);
+    Position here(*this, a.offset);
     ast::ExprInfo ei = info(a);
     if (ei.category == ast::ValueCategory::prvalue) unsupported(a, "as a prvalue where a glvalue is expected");
     ast::QualType t = ei.type;
@@ -1425,6 +1547,7 @@ class Gen {
       return {constant(facts_.pointer_to(t), addr), t};
     }
     if (is<ast::Paren>(a)) return lvalue(child(a, get<ast::Paren>(a).operand));
+    if (is<ast::DefaultArg>(a)) return pinned([&] { return lvalue(child(a, get<ast::DefaultArg>(a).arg)); });
     if (is<ast::Unary>(a)) {
       auto u = get<ast::Unary>(a);
       At o = child(a, u.operand);
@@ -1577,6 +1700,7 @@ class Gen {
   std::vector<std::vector<Ending>> temps_;   // the open full-expressions' temporaries
   std::vector<At> epilogue_;                 // a destructor's DestroyMember statements
   int branches_ = 0;                         // conditionally evaluated operands entered
+  int pinned_ = 0;                           // depth inside trees from other items (`Position`)
 };
 
 template <Facts F>

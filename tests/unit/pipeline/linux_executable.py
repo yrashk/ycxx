@@ -76,6 +76,15 @@ int main(int argc, char* argv[]) {
         reject('bias.cpp', error="ELF entry symbol 'main' is undefined")
         reject('main.cpp', error="undefined symbol '_Z8add_biasi'")
         reject('trivial.cpp', 'main.cpp', 'bias.cpp', error="duplicate symbol 'main'")
+        source('dynamic_init.cpp', 'int f() { return 17; }\nstatic int x = f();\nint main() { return x; }')
+        dynamic_init_error = ('dynamic_init.cpp:2:1: error: namespace-scope dynamic initialization '
+                              'and destruction are not supported on x86-64 Linux')
+        compile(target, '-fsyntax-only', 'dynamic_init.cpp')
+        reject('dynamic_init.cpp', error=dynamic_init_error)
+        compile(target, '-c', 'dynamic_init.cpp', status=1, error=dynamic_init_error)
+        assert not (scope / 'dynamic_init.o').exists()
+        compile('-c', 'dynamic_init.cpp', '-o', 'darwin-dynamic.o')
+        assert b'__mod_init_func' in (scope / 'darwin-dynamic.o').read_bytes()
         compile(target, 'trivial.cpp', status=1, error='hosted Linux linking is not supported')
         compile(target, '-c', 'main.cpp')
         compile(target, '-c', 'bias.cpp')
@@ -90,6 +99,26 @@ int main(int argc, char* argv[]) {
         compile(target, '-c', 'start.cpp')
         compile(target, '-nostdlib', 'start.o', '-o', 'explicit-object-entry')
         compile(target, '-nostdlib', 'start.o', 'bad_alias.cpp', '-o', 'explicit-object-with-main')
+
+        source('static_locals.cpp', """namespace outer::inline inner {
+struct Counter { int value; };
+int tick() { static Counter count = {10}; return ++count.value; }
+}
+int main() { static int base = 20; return base + outer::tick() + outer::tick(); }""")
+        compile(target, '-c', 'static_locals.cpp')
+        symbols = run([readelf, '-Ws', 'static_locals.o'])
+        assert ' _ZZN5outer5inner4tickEvE5count\n' in symbols
+        assert ' _ZZ4mainE4base\n' in symbols
+        compile(target, '-nostdlib', 'static_locals.o', '-o', 'static-locals')
+        run(['./static-locals'], status=43)
+
+        source('guarded_static.cpp', 'int remember(int value) { static int first = value; return first; }\n'
+                                    'int main() { return remember(17) + remember(99); }')
+        compile(target, '-c', 'guarded_static.cpp')
+        symbols = run([readelf, '-Ws', 'guarded_static.o'])
+        assert ' _ZZ8rememberiE5first\n' in symbols
+        assert ' _ZGVZ8rememberiE5first\n' in symbols
+        reject('guarded_static.o', error="undefined symbol '__cxa_guard_acquire'")
 
         compile('-c', 'trivial.cpp', '-o', 'darwin.o')
         compile('darwin.o', '-o', 'darwin-object-program')
@@ -114,6 +143,7 @@ int main(int argc, char* argv[]) {
             compile(target, '-nostdlib', 'main.o', 'bias.o', '-o', 'object-program', env=daemon)
             run(['./object-program', 'A', '!'], status=106)
             reject('bad_alias.cpp', error=bad_abi, env=daemon)
+            reject('dynamic_init.cpp', error=dynamic_init_error, env=daemon)
         finally:
             run([ycxx, 'ctl', 'shutdown'], env=base)
 

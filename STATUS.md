@@ -579,6 +579,9 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   value. The link query checks a source function's ABI when an asm label gives it the symbol
   `main`. A `main` supplied in an ELF object must already use one of those signatures. Hosted
   linking and general-purpose ELF object interoperability remain unsupported.
+- ELF code generation diagnoses translation units that require namespace-scope dynamic
+  initialization or destruction. Syntax-only analysis still accepts them.
+  [#387](https://github.com/yrashk/ycxx/issues/387)
 - Linux x86-64 CI runs `unit.linux_compile`, which links a ycxx-produced object with a native C
   caller, and `unit.linux_executable` (`tests/unit/pipeline/linux_executable.py`), which runs
   source-only, object-only and mixed-input executables and checks exit status, `argc` and `argv`,
@@ -1812,6 +1815,82 @@ values, end to end; results match Clang's bit for bit.
   `if constexpr` (#344); constant evaluation of a switch on an enumeration (enumeration values, #25).
 - Tests: `tests/own/stmt/` (written spec-only, 23 run and 15 reject tests, and the split-off XFAILs
   for the above).
+
+## Default arguments, ι step 2 (#300, 2026-11-19)
+
+- **Declarations** (src/parse/parser.cppm `default_argument`, parse.cppm `merge_defaults`): a
+  default argument is analysed where it is written ([dcl.fct.default]/5) and kept, converted to the
+  parameter's type, as a `DefaultArg` tree in `ParamSema::default_arg`, the slot ast.md reserved.
+  Redeclarations at namespace scope inherit earlier defaults (`b_.adopt`), may not repeat one, and
+  leave none missing after one ([dcl.fct.default]/4). Members' are recorded in
+  `MemberDeclRec::defaults` by `class_content`.
+- **Calls** (src/sema/actions.cppm): `Candidate::defaults` and `required` make a candidate viable
+  with fewer arguments ([over.match.viable]/2); `Templates::deduce_call` skips defaulted trailing
+  parameters. `call_args` and `construct` adopt the chosen function's trees (`default_argument`),
+  so a constructor whose parameters all have defaults is a default constructor, and one with one
+  required parameter converts. `Sema::defaults_` records what lookup found per function.
+- **IR:** a `DefaultArg`'s nodes take the call's position (`Gen::pinned`), since its offsets are
+  its declaration's.
+- Each call takes the defaults its own lookup found (`Sema::defaults_` by DeclRef node), since
+  declarations in different scopes have their own. A copy or move constructor's other parameters
+  may have defaults. Defaults are rejected where [dcl.fct.default]/3–4 and [over.oper.general]
+  forbid them (`defaults_allowed`, `defaults_trail`).
+- Not yet: defaults that depend on template parameters (#356); a member's default naming a later
+  member, and defaults added by an out-of-class or qualified definition (#354); defaults added
+  after a using-declaration (#362, the oracles disagree).
+- Tests: `tests/own/default-args/` (spec-only: 16 run and 9 reject tests, some split out as XFAIL
+  for #354, #356, #357 and #102).
+
+## Dynamic initialization of namespace-scope variables, ι (#94, #337, 2026-11-19)
+
+- **Front** (src/parse/parse.cppm): a namespace-scope variable whose initializer is not a constant
+  expression keeps its initializer tree instead of an error (constexpr and constinit ones must
+  still be constant); `T x(args)` and default-initialization by a constructor (an object or an
+  array of them) are dynamic.
+- **The unit's initialization function** (src/pipeline/front.cppm `init_function`): one
+  `StaticInit` statement per such variable, in definition order ([basic.start.dynamic]/1), each
+  initializing the object from its declaration's tree (positions pinned, as for default
+  arguments) and registering the destructor with `__cxa_atexit(d, &object, &__dso_handle)`
+  ([basic.start.term]; each array element on its own). It has internal linkage and Clang's name,
+  `__GLOBAL__sub_I_<file>`; a pointer to it goes in `__DATA,__mod_init_func`
+  (`obj::standard_section::mod_init_func`, `aarch64::DataKind::init_func`), which dyld runs before
+  `main`. A dynamically initialized `const` variable is placed in writable data.
+- An initializer is dynamic when it is not a constant expression but the front end has code for
+  it (`sema::has_runtime_code`); one it has no code for, or a scalar's that hit the evaluator's
+  limits, is still an error. Class objects the interpreter cannot evaluate yet are initialized
+  dynamically even when constant by the draft (#25). Each declaration's variables get their own
+  function (`__GLOBAL__sub_I_<file>.<n>`), so an error points at it.
+- Not yet: references bound at run time (#367); inline variables and variable templates (#368);
+  default member initializers that are not constants (#118); array construction as a loop (#370).
+- Tests: `tests/own/dynamic-init/` (spec-only, 16 tests; a Clang peer with its own initializers
+  in `peer.run.cpp`).
+
+## Nested namespace definitions, ι (#153, #337, 2026-11-19)
+
+- `namespace a::b::c { }` (C++17) and `namespace a::inline b { }` (C++20), [namespace.def]: the
+  item splitter declares every component (`namespace_names`), the first in the enclosing namespace
+  and each later one in the one before it (`Program::name_scopes_`, read by `declared_in`); only a
+  component preceded by `inline` is transparent to lookup. `namespace_definition` gives each
+  component its declaration. Names mangle as Clang's (`tests/own/namespaces/nested-mangling`, with a
+  Clang peer).
+- Tests: `tests/own/namespaces/`.
+
+## Block-scope static variables, ι (#291, #337, 2026-11-19)
+
+- **Sema** (src/parse/parser.cppm `variable_node`, src/sema/actions.cppm `static_local`): a
+  `static` (or `constinit static`) block-scope variable is an entity local to its function or
+  lambda, numbered among its statics of that name (`EntityRec::ordinal`, also in its identity),
+  declared as a `StaticVar` node with the constant it is initialized with when there is one.
+- **Pipeline** (src/pipeline/front.cppm `static_locals`): each is a variable of the unit, with
+  its constant or zero; one initialized by code, or with a destructor, gets a guard variable
+  (8 bytes) and its function the runtime's entry points (`Runtime`). Names are Clang's: the
+  function's own symbol gives the <encoding> of `_ZZ<encoding>E<name>[_n]` and `_ZGVZ…` (back.cppm).
+  The Mach-O linker adds libc++abi (`__cxa_guard_*`) when the objects need it (`libcxxabi()`).
+- **IR** (src/irgen/gen.cppm `static_var`): `if (__cxa_guard_acquire(&g)) { init; at_exit(d);
+  __cxa_guard_release(&g); }`, the acquire called on every pass (#372); a static local's object is
+  its entity's from the function's entry, so a jump past its declaration finds it.
+- Not yet: inline functions' statics are per unit (#124); static references (#367).
+- Tests: `tests/own/static-locals/` (spec-only, 19 tests, a Clang peer in `mixed.run.cpp`).
 
 ## Bootstrap workarounds
 
