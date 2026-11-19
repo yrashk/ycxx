@@ -434,8 +434,8 @@ one import `ycxx.ast`; unit tests in `tests/unit/ast` (run by ctest, see docs/TE
   conversions ([expr.arith.conv]), integer constants and their integral conversion
   ([conv.integral], [conv.bool]).
 - Compaction keeps every type and constant, and rewrites the lists they hold.
-- Not yet: enums, member pointers, the dependent type kinds other than `TTemplateParam` and the
-  rest of `VDep*`, sugar other than typedefs. (Floating constants, `VFloat`: #336.)
+- Later slices add enumeration and member pointer types, more dependent types and constants, and
+  floating constants (`VFloat`, #336).
 
 ## Parser and sema for the α subset (#41)
 
@@ -1898,6 +1898,24 @@ values, end to end; results match Clang's bit for bit.
   its entity's from the function's entry, so a jump past its declaration finds it.
 - Not yet: inline functions' statics are per unit (#124); static references (#367).
 - Tests: `tests/own/static-locals/` (spec-only, 19 tests, a Clang peer in `mixed.run.cpp`).
+
+## Pointer-to-member types and declarators (#238)
+
+- Declarators build `TMemberPtr` ([dcl.mptr]), interning the owning class and member type as
+  separate components. The owner can be incomplete, a union, or dependent. Member function
+  types retain their cv-qualifiers, ref-qualifier and non-dependent exception specification.
+  The member-pointer traits distinguish these from ordinary pointers.
+- Substitution, deduction and pack tracking traverse both components ([temp.dep.type],
+  [temp.deduct.type]). A requires-expression checks substitution into its local parameter
+  declarations. The parameters have no storage and simple and compound requirements are
+  unevaluated operands ([expr.prim.req.general], [expr.prim.req.simple], [expr.prim.req.compound]).
+- The two libycxx `<cstdio>` requires-expressions using dependent member-pointer declarations
+  can be checked. Linux hosted header support still depends on #395, #396 and #398.
+- Object size and alignment follow Itanium C++ ABI §2.3 on the two supported targets. Forming
+  member addresses, `.*` and `->*`, conversions, dependent exception specifications and code
+  generation for member-pointer values remain open (#238, #219).
+- Tests in `tests/own/member-pointer/` cover declarations, type identity, dependent requirements
+  and invalid pointer-to-member types.
 
 ## Bootstrap workarounds
 

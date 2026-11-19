@@ -129,11 +129,16 @@ function body, through the daemon, without unsaved text ever reaching a build. E
 checked with the flags of its last build, or else with its line in the project's
 `compile_commands.json`.
 
+**Pointer-to-member declarations.** Data and function member-pointer types can appear in
+declarations, type traits and requires-expressions. [#238](https://github.com/yrashk/ycxx/issues/238)
+
 ### Not yet
 
 - The standard library and its headers. On macOS, C headers such as `<stdio.h>` compile without
-  warnings and `printf` runs. libycxx's `<cstdio>` still needs pointer-to-member types, and `<cmath>`
-  (which `<math.h>` includes) does not compile yet ([#349](https://github.com/yrashk/ycxx/issues/349)).
+  warnings and `printf` runs. libycxx's `<cstdio>` is still tracked under [#133](https://github.com/yrashk/ycxx/issues/133).
+  `<cmath>` (which `<math.h>` includes) does not compile yet. [#349](https://github.com/yrashk/ycxx/issues/349)
+- Taking member addresses, applying `.*` or `->*`, and code generation for member-pointer values.
+  [#238](https://github.com/yrashk/ycxx/issues/238)
 - Constexpr lambdas (the interpreter has no class objects yet), lambdas outside function bodies,
   structured bindings, virtual functions, virtual base classes, inheriting constructors, and bases
   of class templates.

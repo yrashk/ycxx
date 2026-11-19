@@ -201,7 +201,8 @@ public:
     if (starts_decl_specifier(kind())) return true;
     if (qualified_ahead()) {
       auto q = qualified_type(0);
-      return q && !(statement && s_->types().kind(q->first) == sema::TypeKind::dep_name) && kind(q->second) != Tk::l_paren &&
+      return q && !(statement && s_->types().kind(q->first) == sema::TypeKind::dep_name) &&
+             (kind(q->second) != Tk::l_paren || member_pointer_star(q->second + 1)) &&
              kind(q->second) != Tk::period && kind(q->second) != Tk::l_brace;
     }
     u32 next = 1;  // the token after the type's name: after `X<…>` for a class template
@@ -219,7 +220,8 @@ public:
     Tk after = kind(j + 1);
     // `T (*p)(args);` and `T (&r)[3];` declare: a ptr-operator begins a nested declarator, which a
     // parameter list or a bound may follow; `T(&x).m` is an expression.
-    if (kind(next + 1) == Tk::star || kind(next + 1) == Tk::amp || kind(next + 1) == Tk::ampamp)
+    if (kind(next + 1) == Tk::star || kind(next + 1) == Tk::amp || kind(next + 1) == Tk::ampamp ||
+        member_pointer_star(next + 1))
       return after != Tk::period && after != Tk::arrow;
     return after != Tk::period && after != Tk::arrow && after != Tk::l_paren && after != Tk::l_square;
   }
@@ -230,6 +232,47 @@ public:
     if (!is(Tk::identifier)) return false;
     if (kind(1) == Tk::coloncolon) return true;
     return kind(1) == Tk::less && kind(past_template_args(1)) == Tk::coloncolon;
+  }
+
+  // A ptr-operator can start with a nested-name-specifier. Find its `*` before doing lookup, so
+  // an invalid owner still consumes the operator rather than looking like a declarator-id.
+  std::optional<u32> member_pointer_star(u32 j) {
+    u32 start = j;
+    if (kind(j) == Tk::kw_decltype && kind(j + 1) == Tk::l_paren) {
+      u32 depth = 1;
+      j += 2;
+      for (; depth > 0 && i_ + j < end_; ++j) {
+        if (kind(j) == Tk::l_paren) ++depth;
+        else if (kind(j) == Tk::r_paren) --depth;
+      }
+      if (kind(j) != Tk::coloncolon) return std::nullopt;
+      ++j;
+    } else if (kind(j) == Tk::coloncolon) {
+      ++j;
+    }
+    while (kind(j) == Tk::identifier || kind(j) == Tk::kw_template) {
+      if (kind(j) == Tk::kw_template) ++j;
+      if (kind(j) != Tk::identifier) break;
+      u32 after = kind(j + 1) == Tk::less ? past_template_args(j + 1) : j + 1;
+      if (kind(after) != Tk::coloncolon) break;
+      j = after + 1;
+    }
+    if (j != start && kind(j) == Tk::star) return j;
+    return std::nullopt;
+  }
+
+  // `decltype(e)` [dcl.type.decltype], with `decltype` and `(` at the cursor.
+  std::optional<QualType> decltype_expression_type() {
+    bump();
+    bump();
+    int saved = std::exchange(angle_, 0);
+    ++s_->unevaluated;
+    Ex e = expression();
+    --s_->unevaluated;
+    angle_ = saved;
+    bool closed = expect(Tk::r_paren);
+    if (!e.ok() || !closed) return std::nullopt;
+    return s_->decltype_of(e, s_->as<ast::Paren>(e).has_value());
   }
 
   // The offset of the token after the template argument list whose `<` is at `j` ahead: angle
@@ -324,6 +367,7 @@ public:
         cls = s_->types().placeholder(false);
         break;
       case Tk::kw_decltype: {
+        if (any_type() && member_pointer_star(0)) goto done;
         // `decltype(auto)` ([dcl.spec.auto]) and `decltype(e)` ([dcl.type.decltype]).
         if (!any_type() && kind(1) == Tk::l_paren && kind(2) == Tk::kw_auto && kind(3) == Tk::r_paren) {
           cls = s_->types().placeholder(true);
@@ -342,18 +386,11 @@ public:
           d.ok = false;
           goto done;
         }
-        bump();
-        bump();
-        int saved = std::exchange(angle_, 0);
-        ++s_->unevaluated;
-        Ex e = expression();
-        --s_->unevaluated;
-        angle_ = saved;
-        if (!e.ok() || !expect(Tk::r_paren)) {
+        cls = decltype_expression_type();
+        if (!cls) {
           d.ok = false;
           goto done;
         }
-        cls = s_->decltype_of(e, s_->as<ast::Paren>(e).has_value());
         continue;
       }
       case Tk::kw_constexpr: once(d.is_constexpr, k); break;
@@ -559,6 +596,10 @@ public:
     std::vector<NameId> empty_packs;  // function parameter packs instantiated with no element
     bool variadic = false;
     sema::Cv cv = sema::Cv::none;  // a member function's cv-qualifier-seq ([dcl.fct])
+    ast::RefQual ref = ast::RefQual::none;
+    u32 ref_at = 0;
+    bool has_noexcept = false;
+    std::optional<Ex> noexcept_condition;
     u64 bound = 0;
     bool unknown_bound = false;  // `[]`: in a parameter, or the outermost bound of a variable
     // A value-dependent bound ([temp.dep.constexpr]): a template parameter's `VDepParam`.
@@ -566,10 +607,12 @@ public:
     std::optional<QualType> trailing;  // `-> T`: the trailing return type ([dcl.fct]/2)
   };
   struct Level {
-    // ptr-operators, outermost first ([dcl.ptr], [dcl.ref]): `*` with its cv, `&` or `&&`.
+    // ptr-operators, outermost first ([dcl.ptr], [dcl.mptr], [dcl.ref]).
     struct PtrOp {
       Tk op;
       sema::Cv cv;
+      u32 at;
+      std::optional<QualType> owner;
     };
     std::vector<PtrOp> pointers;
     std::unique_ptr<Level> inner;
@@ -587,17 +630,26 @@ public:
   };
 
   // declarator, or abstract-declarator when `abstract` ([dcl.decl.general], [dcl.name]).
-  Declarator declarator(QualType base, bool abstract) {
+  Declarator declarator(QualType base, bool abstract, bool typedef_ = false) {
     Declarator d;
     d.begin = pos();
     Level top = level(abstract, d.ok);
     top_ = &top;
     const Suffix* fn = nullptr;
-    d.type = build(top, base, fn, d);
+    d.type = build(top, base, fn, d, abstract || typedef_);
+    const bool function_type = s_->types().is_function(d.type);
     if (fn) {
-      d.function = true;
+      d.function = function_type;
+      // The declaring context also checks defaults in a nested function type.
       d.params = fn->params;
       d.variadic = fn->variadic;
+    }
+    if (!abstract && !typedef_ && function_type) {
+      ast::RefQual ref = s_->types().rec(d.type).fn_ref;
+      if (ref != ast::RefQual::none) {
+        s_->diag(fn ? fn->ref_at : d.name_at, Diag::not_supported, ref == ast::RefQual::lvalue ? Tk::amp : Tk::ampamp);
+        d.ok = false;
+      }
     }
     if (d.ok) {
       skip_attributes();
@@ -680,15 +732,37 @@ public:
 
   Level level(bool abstract, bool& ok) {
     Level l;
-    while (is(Tk::star) || is(Tk::amp) || is(Tk::ampamp)) {
+    for (;;) {
+      u32 at = pos();
       Tk op = kind();
+      std::optional<QualType> owner;
+      if (auto star = member_pointer_star(0)) {
+        u32 next = 0;
+        auto scope = nested_name(0, next, true);
+        if (scope && next == *star && scope->type && s_->types().valid_member_owner(*scope->type)) {
+          owner = scope->type;
+        } else {
+          s_->diag(at, Diag::member_pointer_owner);
+          ok = false;
+        }
+        for (u32 j = 0; j < *star; ++j) bump();
+        op = Tk::star;
+      } else if (op != Tk::star && op != Tk::amp && op != Tk::ampamp) {
+        break;
+      }
       bump();
+      if (op == Tk::star) skip_attributes();  // appertains to the pointer ([dcl.ptr], [dcl.mptr])
       int cv = 0;
       while (op == Tk::star && (is(Tk::kw_const) || is(Tk::kw_volatile))) {
-        cv |= is(Tk::kw_const) ? 1 : 2;
+        int bit = is(Tk::kw_const) ? 1 : 2;
+        if (cv & bit) {
+          s_->diag(pos(), Diag::duplicate_specifier, kind());
+          ok = false;
+        }
+        cv |= bit;
         bump();
       }
-      l.pointers.push_back({op, sema::Cv(cv)});
+      l.pointers.push_back({op, sema::Cv(cv), at, owner});
     }
     // A parameter pack's declarator ([dcl.fct]/23, [temp.param]/17): `T... x`, `Ts&&...`.
     if (abstract && packs_in_declarators_ && is(Tk::ellipsis)) {
@@ -747,7 +821,7 @@ public:
       }
       skip_attributes();  // appertaining to the declarator-id ([dcl.meaning.general]/1)
     } else if (is(Tk::l_paren) && (kind(1) == Tk::star || kind(1) == Tk::amp || kind(1) == Tk::ampamp ||
-                                   kind(1) == Tk::l_paren || kind(1) == Tk::identifier)) {
+                                   kind(1) == Tk::l_paren || kind(1) == Tk::identifier || member_pointer_star(1))) {
       // [dcl.ambig.res]: `(` begins a nested declarator when a parameter list cannot start here.
       bump();
       l.inner = std::make_unique<Level>(level(abstract, ok));
@@ -767,9 +841,15 @@ public:
           cv |= is(Tk::kw_const) ? 1 : 2;
           bump();
         }
-        l.suffixes.back().cv = sema::Cv(cv);
-        // A noexcept-specifier ([except.spec]): accepted, not yet part of the function type (#219).
+        Suffix& suffix = l.suffixes.back();
+        suffix.cv = sema::Cv(cv);
+        suffix.ref_at = pos();
+        if (accept(Tk::amp)) suffix.ref = ast::RefQual::lvalue;
+        else if (accept(Tk::ampamp)) suffix.ref = ast::RefQual::rvalue;
+        // Keep [except.spec] on function types spelled in type-ids and member-pointer
+        // declarators. Exception specifications of named functions are tracked by #219.
         if (is(Tk::kw_noexcept)) {
+          suffix.has_noexcept = true;
           bump();
           if (is(Tk::l_paren)) {
             int saved = std::exchange(angle_, 0);
@@ -777,6 +857,7 @@ public:
             Ex e = constant_expression();
             angle_ = saved;
             ok = e.ok() && expect(Tk::r_paren) && ok;
+            suffix.noexcept_condition = e;
           }
         }
         // A trailing return type ([dcl.fct]/2), with the parameters in scope ([basic.scope.param]).
@@ -793,7 +874,7 @@ public:
           }
           l.suffixes.back().trailing = *t;
         }
-        // ref-qualifiers and dynamic exception specifications are not supported yet.
+        // Dynamic exception specifications and repeated qualifiers are unsupported.
         if (is(Tk::amp) || is(Tk::ampamp) || is(Tk::kw_noexcept) || is(Tk::kw_throw) || is(Tk::arrow)) {
           s_->diag(pos(), Diag::not_supported, kind());
           ok = false;
@@ -842,10 +923,21 @@ public:
 
   // A nested-name-specifier ([expr.prim.id.qual]) at token `start` ahead: `::`, `N::`, `N::C::`,
   // resolved as it is read, without consuming it. `next` is where the name after it is.
-  std::optional<sema::Sema::Scope> nested_name(u32 start, u32& next) {
+  std::optional<sema::Sema::Scope> nested_name(u32 start, u32& next, bool member_pointer = false) {
     u32 j = start;
     std::optional<sema::Sema::Scope> s;
-    if (kind(j) == Tk::coloncolon) {
+    if (member_pointer && kind(j) == Tk::kw_decltype && kind(j + 1) == Tk::l_paren) {
+      u32 saved = i_;
+      const bool saved_half = half_;
+      i_ += j;
+      auto t = decltype_expression_type();
+      bool closed = is(Tk::coloncolon);
+      j = i_ - saved + 1;
+      i_ = saved;
+      half_ = saved_half;
+      if (!t || !closed) return std::nullopt;
+      s = sema::Sema::Scope{std::nullopt, *t};
+    } else if (kind(j) == Tk::coloncolon) {
       s = sema::Sema::global_scope();
       ++j;
     } else if (kind(j) == Tk::identifier && kind(j + 1) == Tk::coloncolon) {
@@ -859,8 +951,10 @@ public:
     }
     for (;;) {
       if (kind(j) == Tk::identifier && kind(j + 1) == Tk::coloncolon) {
-        auto m = s_->scope_member(*s, name_of(tok(j)));
+        NameId n = name_of(tok(j));
+        auto m = s_->scope_member(*s, n);
         if (!m) return std::nullopt;
+        if (member_pointer) s_->type_member_access(*s, n, pos() + j);
         s = m;
         j += 2;
       } else if (auto t = template_id_scope(s, j)) {
@@ -868,6 +962,10 @@ public:
       } else {
         break;
       }
+    }
+    if (member_pointer && kind(j) == Tk::star) {
+      next = j;
+      return s;
     }
     // `S::template f`: the name after the keyword ([temp.names]/3); `next` stays at the keyword.
     if (kind(j) == Tk::kw_template && kind(j + 1) == Tk::identifier) {
@@ -960,12 +1058,32 @@ public:
 
   std::int64_t i64_of(sema::ConstId c) { return s_->world().values.as_signed(c); }
 
+  static bool member_pointer_to_suffix(const Level& l) {
+    const Level* inner = l.inner.get();
+    while (inner && inner->pointers.empty() && inner->suffixes.empty()) inner = inner->inner.get();
+    return inner && !inner->pointers.empty() && inner->pointers.front().owner.has_value();
+  }
+
   // The type a declarator gives its name, built from the base type outwards ([dcl.meaning]).
-  QualType build(const Level& l, QualType t, const Suffix*& fn, Declarator& d) {
+  QualType build(const Level& l, QualType t, const Suffix*& fn, Declarator& d, bool spells_type) {
     for (const Level::PtrOp& p : l.pointers) {
-      // [dcl.ref]: no pointer to a reference, no reference to void.
+      if (p.owner) {
+        if (!s_->types().valid_member_type(t)) {
+          s_->diag(p.at, Diag::member_pointer_type, t);
+          d.ok = false;
+          return t;
+        }
+        t = s_->types().add_cv(s_->types().member_pointer(*p.owner, t), p.cv);
+        continue;
+      }
+      if (s_->types().is_cvref_function(t)) {
+        s_->diag(p.at, Diag::indirection_to_qualified_function, t);
+        d.ok = false;
+        return t;
+      }
+      // [dcl.ptr], [dcl.ref]: no pointer to a reference, no reference to void.
       if (s_->types().is_reference(t) && p.op == Tk::star) {
-        s_->diag(d.begin, Diag::invalid_array_element, t);
+        s_->diag(p.at, Diag::pointer_to_reference, t);
         d.ok = false;
         return t;
       }
@@ -995,8 +1113,25 @@ public:
         }
         std::vector<QualType> ps;
         for (const Param& p : s->params) ps.push_back(p.type);
-        t = s_->types().function(t, ps, s->variadic, linkage_, s->cv);
+        bool nonthrowing = false;
+        if (s->has_noexcept && (spells_type || l.inner)) {
+          nonthrowing = true;
+          if (s->noexcept_condition) {
+            Ex e = s_->to_bool(*s->noexcept_condition, s->noexcept_condition->begin);
+            sema::Evaluated result = sema::Evaluator(*s_, questions()).evaluate(e);
+            if (result.value) {
+              nonthrowing = s_->world().values.as_signed(*result.value) != 0;
+            } else {
+              if (result.dependent) s_->diag(e.begin, Diag::not_supported, Tk::kw_noexcept);
+              else if (e.ok()) s_->diag(e.begin, Diag::not_constant, result.reason);
+              d.ok = false;
+            }
+          }
+        }
+        t = s_->types().function(t, ps, s->variadic, linkage_, s->cv, s->ref, nonthrowing);
         fn = &*s;
+      } else if (s->unknown_bound && &*s == &l.suffixes.front() && member_pointer_to_suffix(l) && s_->types().is_object(t)) {
+        t = s_->types().array_unknown(t);
       } else if (s->unknown_bound && in_params_ > 0) {
         // In a parameter, [dcl.fct]/5 adjusts the array to a pointer: build the pointer at once.
         t = s_->types().pointer(t);
@@ -1020,7 +1155,7 @@ public:
         t = s_->types().array(t, s->bound);
       }
     }
-    if (l.inner) return build(*l.inner, t, fn, d);
+    if (l.inner) return build(*l.inner, t, fn, d, spells_type);
     d.name = l.name;
     d.named = l.named;
     d.name_at = l.name_at;
@@ -1090,7 +1225,14 @@ public:
       QualType t = d.type;
       // [dcl.fct]/5: arrays and functions decay; top-level cv is dropped.
       if (s_->types().is_array(t)) t = s_->types().pointer(s_->types().rec(t).inner);
-      else if (s_->types().is_function(t)) t = s_->types().pointer(t);
+      else if (s_->types().is_function(t)) {
+        if (s_->types().is_cvref_function(t)) {
+          s_->diag(at, Diag::indirection_to_qualified_function, t);
+          ok = false;
+        } else {
+          t = s_->types().pointer(t);
+        }
+      }
       if (s_->types().is_void(t)) {
         s_->diag(at, Diag::void_parameter);
         ok = false;
@@ -1457,7 +1599,7 @@ public:
       s_->diag(spec.begin, Diag::auto_not_allowed);
       return std::nullopt;
     }
-    return d.type;
+    return d.unknown_bound ? s_->types().array_unknown(d.type) : d.type;
   }
 
   // The value of a template argument for a non-type parameter of type `t`: a converted constant
@@ -1774,16 +1916,42 @@ public:
     u32 begin = pos();
     bump();
     s_->push_scope();
+    const bool templated = s_->templated();
+    const std::size_t param_diags = s_->diag_count();
+    const std::size_t first_local = s_->locals().size();
+    auto close_requires_scope = [&] {
+      s_->pop_scope();
+      s_->discard_local_declarations(first_local);
+    };
     bool ok = true;
     if (accept(Tk::l_paren)) {
-      Suffix params = parameter_list(ok);
-      for (const Param& p : params.params) s_->declare_local(p.name, p.type, sema::local_flag::parameter, p.at, false);
+      Suffix params = parameters(ok);
+      ok = ok && s_->diag_count() == param_diags;
+      for (const Param& p : params.params)
+        if (p.name != s_->no_name())
+          s_->declare_local(p.name, p.type, sema::local_flag::parameter | ast::local_flag::requires_parameter, p.at, false);
     }
-    const bool templated = s_->templated();
+    if (!expect(Tk::l_brace)) {
+      close_requires_scope();
+      return {NodeId::none, begin, pos()};
+    }
+    // [expr.prim.req.general]: substitution into the local parameter declarations can fail
+    // before a requirement is checked. Consume the body without analysing it in that case.
+    if (!ok) {
+      int depth = 1;
+      while (depth > 0 && !at_end()) {
+        if (is(Tk::l_brace)) ++depth;
+        else if (is(Tk::r_brace)) --depth;
+        bump();
+      }
+      close_requires_scope();
+      if (!templated) return {NodeId::none, begin, pos()};
+      s_->drop_failures(param_diags);
+      return s_->bool_literal(false, begin, pos());
+    }
     bool satisfied = true;
     bool dependent = false;
-    if (!expect(Tk::l_brace)) ok = false;
-    while (ok && !is(Tk::r_brace) && !at_end()) {
+    while (!is(Tk::r_brace) && !at_end()) {
       std::size_t n = s_->diag_count();
       u32 before = i_;
       bool failed = false;
@@ -1791,7 +1959,9 @@ public:
         auto t = type_id();
         if (t && s_->types().is_dependent(*t)) dependent = true;
       } else if (accept(Tk::l_brace)) {  // a compound-requirement
+        ++s_->unevaluated;
         Ex e = expression();
+        --s_->unevaluated;
         expect(Tk::r_brace);
         if (is(Tk::kw_noexcept)) {
           s_->diag(pos(), Diag::not_supported, Tk::kw_noexcept);
@@ -1822,7 +1992,9 @@ public:
         if (t == Truth::dependent) dependent = true;
         else if (t != Truth::yes) failed = true;
       } else {  // a simple-requirement
+        ++s_->unevaluated;
         Ex e = expression();
+        --s_->unevaluated;
         if (s_->dependent(e)) dependent = true;
       }
       if (!expect(Tk::semi)) skip_to_semi();
@@ -1833,8 +2005,7 @@ public:
       }
     }
     expect(Tk::r_brace);
-    s_->pop_scope();
-    if (!ok) return {NodeId::none, begin, pos()};
+    close_requires_scope();
     if (satisfied && dependent) return s_->dependent_node({}, begin, pos(), s_->builtin(Builtin::bool_));
     return s_->bool_literal(satisfied, begin, pos());
   }
@@ -2221,7 +2392,10 @@ public:
     }
     bump();
     bool is_incdec = *op == ast::UnaryOp::pre_inc || *op == ast::UnaryOp::pre_dec;
+    auto saved_address = address_operand_;
+    if (*op == ast::UnaryOp::address_of) address_operand_ = pos();
     Ex e = is_incdec ? unary_expression() : cast_expression();
+    address_operand_ = saved_address;
     return s_->unary(*op, e, begin, e.end > begin ? e.end : pos(), begin);
   }
 
@@ -2632,6 +2806,13 @@ public:
     u32 name_at = pos();
     NameId n = name_of(tok());
     bump();
+    auto scope_expr = [&] {
+      // [expr.unary.op]: `&C::m` can form a pointer to member. Parentheses or postfix
+      // operations make the operand something other than the qualified-id itself.
+      bool bare_address = address_operand_ == begin && !is(Tk::l_paren) && !is(Tk::l_square) &&
+                          !is(Tk::period) && !is(Tk::arrow) && !is(Tk::plusplus) && !is(Tk::minusminus);
+      return s_->scope_expr(*s, n, begin, name_at, pos(), bare_address);
+    };
     // `N::T(args)` or `N::T{…}` ([expr.type.conv]): a qualified type name, unless a function or
     // variable of the name hides it.
     if ((is(Tk::l_paren) || is(Tk::l_brace)) && !s_->scope_names_object(*s, n))
@@ -2651,15 +2832,14 @@ public:
       if (keyword || s_->scope_names_template(*s, n)) {
         auto args = template_argument_list();
         if (!args) return {NodeId::none, begin, pos()};
-        Ex r = s_->scope_expr(*s, n, begin, name_at, pos());
+        Ex r = scope_expr();
         if (r.ok() && !s_->dependent(r) && std::ranges::any_of(*args, [&](const ast::TemplateArg& a) { return s_->dependent(a); }))
           return s_->dependent_node({}, begin, pos());
         s_->explicit_template_args(r, std::move(*args));
         return r;
       }
-      return s_->scope_expr(*s, n, begin, name_at, pos());
     }
-    return s_->scope_expr(*s, n, begin, name_at, pos());
+    return scope_expr();
   }
 
   // ------------------------------------------------------------ [stmt]
@@ -3721,7 +3901,7 @@ public:
     if (spec.is_typedef) {
       // Block-scope typedef-names ([dcl.typedef]).
       do {
-        Declarator d = declarator(spec.type, false);
+        Declarator d = declarator(spec.type, false, true);
         if (!d.ok || !spec.ok || !d.named || d.unknown_bound) {
           if (d.ok && d.unknown_bound) s_->diag(d.name_at, Diag::not_supported, Tk::l_square);
           skip_to_semi();
@@ -3969,6 +4149,7 @@ public:
   bool body = false;  // the part is a function body, not a declaration part
 private:
   const Level* top_ = nullptr;  // the declarator being built
+  std::optional<u32> address_operand_;  // the token after an explicit unary `&`
 };
 
 }  // namespace ycxx::parse

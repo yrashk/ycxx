@@ -1613,7 +1613,7 @@ private:
     u32 declarators = 0;
     do {
       s_.defer_type_access = true;
-      parse::Declarator d = ps_.declarator(spec.type, false);
+      parse::Declarator d = ps_.declarator(spec.type, false, spec.is_typedef);
       // [dcl.spec.auto.general]: a function with a placeholder type is the only declarator.
       if (d.ok && s_.types().has_placeholder(spec.type) && s_.types().is_function(d.type) && (declarators > 0 || ps_.is(Tk::comma))) {
         s_.diag(d.name_at, Diag::auto_not_allowed);
@@ -2348,7 +2348,7 @@ private:
     spec.has_type = true;
     spec.is_typedef = td;
     do {
-      parse::Declarator d = ps_.declarator(spec.type, false);
+      parse::Declarator d = ps_.declarator(spec.type, false, spec.is_typedef);
       if (!d.ok || !d.named || !declare(spec, d, LangLinkage::cxx, false, false)) {
         bad();
         ps_.skip_to_semi();
@@ -2608,7 +2608,7 @@ private:
     spec.has_type = true;
     spec.is_typedef = td;
     do {
-      parse::Declarator d = ps_.declarator(spec.type, false);
+      parse::Declarator d = ps_.declarator(spec.type, false, spec.is_typedef);
       if (!d.ok || !d.named || cls != EntityId::none || !declare(spec, d, LangLinkage::cxx, false, false)) {
         bad();
         ps_.skip_to_semi();
@@ -2690,7 +2690,7 @@ private:
     // A member typedef ([class.mem], [dcl.typedef]): each declarator a type nested in the class.
     if (spec.is_typedef) {
       do {
-        parse::Declarator d = ps_.declarator(spec.type, false);
+        parse::Declarator d = ps_.declarator(spec.type, false, true);
         if (!d.ok || !d.named || d.qualified || !member_alias(c, d.name, d.name_at, d.type)) return bad();
       } while (ps_.accept(Tk::comma));
       if (!ps_.expect(Tk::semi)) bad();

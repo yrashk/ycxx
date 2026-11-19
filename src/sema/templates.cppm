@@ -117,12 +117,18 @@ public:
     case TypeKind::placeholder: return b.placeholder ? types().add_cv(*b.placeholder, cv) : t;
     case TypeKind::pointer: {
       auto p = substitute(r.inner, b);
-      if (!p || types().is_reference(*p)) return std::nullopt;
+      if (!p || types().is_reference(*p) || types().is_cvref_function(*p)) return std::nullopt;
       return types().add_cv(types().pointer(*p), cv);
+    }
+    case TypeKind::member_pointer: {
+      auto owner = substitute(r.member_owner, b);
+      auto member = substitute(r.inner, b);
+      if (!owner || !member || !types().valid_member_owner(*owner) || !types().valid_member_type(*member)) return std::nullopt;
+      return types().add_cv(types().member_pointer(*owner, *member), cv);
     }
     case TypeKind::reference: {
       auto p = substitute(r.inner, b);
-      if (!p || types().is_void(*p)) return std::nullopt;
+      if (!p || types().is_void(*p) || types().is_cvref_function(*p)) return std::nullopt;
       return r.rvalue_ref ? types().rvalue_ref(*p) : types().lvalue_ref(*p);  // collapsing ([dcl.ref])
     }
     case TypeKind::array: {
@@ -164,7 +170,7 @@ public:
         if (!s || types().is_void(*s)) return std::nullopt;
         ps.push_back(*s);
       }
-      return types().function(*ret, ps, r.variadic, r.linkage, r.fn_cv);
+      return types().function(*ret, ps, r.variadic, r.linkage, r.fn_cv, r.fn_ref, r.fn_noexcept);
     }
     case TypeKind::dep_spec: {
       // `TT<args>`: the specialization of TT's argument for the substituted arguments, or the
@@ -245,9 +251,9 @@ public:
       }
       return with_cv(x, keep);
     };
-    // Whether `x` can be referred to: not void, nor a function type with cv-qualifiers.
+    // Whether `x` can be referred to ([defns.referenceable]).
     auto referenceable = [&](QualType x) {
-      return !types().is_void(x) && !(types().is_function(x) && types().rec(x).fn_cv != Cv::none);
+      return !types().is_void(x) && !types().is_cvref_function(x);
     };
     switch (trait) {
     case remove_cv: return strip(c, Cv::none);
@@ -369,12 +375,17 @@ public:
       if (auto m = f(r.inner, r.name)) return types().add_cv(*m, cv);
       return t;
     case TypeKind::pointer: return types().add_cv(types().pointer(resolve_dep_names(r.inner, f)), cv);
+    case TypeKind::member_pointer: {
+      QualType owner = resolve_dep_names(r.member_owner, f), member = resolve_dep_names(r.inner, f);
+      if (!types().valid_member_owner(owner) || !types().valid_member_type(member)) return t;
+      return types().add_cv(types().member_pointer(owner, member), cv);
+    }
     case TypeKind::reference:
       return r.rvalue_ref ? types().rvalue_ref(resolve_dep_names(r.inner, f)) : types().lvalue_ref(resolve_dep_names(r.inner, f));
     case TypeKind::function: {
       std::vector<QualType> ps;
       for (QualType p : r.params) ps.push_back(resolve_dep_names(p, f));
-      return types().function(resolve_dep_names(r.inner, f), ps, r.variadic, r.linkage, r.fn_cv);
+      return types().function(resolve_dep_names(r.inner, f), ps, r.variadic, r.linkage, r.fn_cv, r.fn_ref, r.fn_noexcept);
     }
     default: return t;
     }
@@ -567,6 +578,10 @@ public:
     case TypeKind::reference:
     case TypeKind::dep_name:
     case TypeKind::transform: params_in(r.inner, out, nested); return;
+    case TypeKind::member_pointer:
+      params_in(r.member_owner, out, nested);
+      params_in(r.inner, out, nested);
+      return;
     case TypeKind::function:
       params_in(r.inner, out, nested);
       for (QualType p : r.params) params_in(p, out, nested);
@@ -686,6 +701,7 @@ public:
       return mentions(r.inner, depth);
     case TypeKind::pointer:
     case TypeKind::reference: return mentions(r.inner, depth);
+    case TypeKind::member_pointer: return mentions(r.member_owner, depth) || mentions(r.inner, depth);
     case TypeKind::function:
       return mentions(r.inner, depth) || std::ranges::any_of(r.params, [&](QualType p) { return mentions(p, depth); });
     default: return false;
@@ -754,6 +770,8 @@ public:
       // at a deeper level only below a const one ([conv.qual]).
       return deduce(pr.inner, ar.inner, depth, out,
                     {.more_cv = allow.qualification, .qualification = allow.qualification && Types::is_const(types().canonical(pr.inner))});
+    case TypeKind::member_pointer:
+      return deduce(pr.member_owner, ar.member_owner, depth, out) && deduce(pr.inner, ar.inner, depth, out);
     case TypeKind::reference: return pr.rvalue_ref == ar.rvalue_ref && deduce(pr.inner, ar.inner, depth, out);
     case TypeKind::array:
       // [temp.deduct.type]/8: `T[i]`, a non-type parameter deduced from the bound.
@@ -774,7 +792,8 @@ public:
       return pr.bound == ar.bound && pr.bound_value == ar.bound_value &&
              deduce(pr.inner, ar.inner, depth, out, {.more_cv = allow.more_cv});
     case TypeKind::function: {
-      if (pr.variadic != ar.variadic || pr.fn_cv != ar.fn_cv) return false;
+      if (pr.variadic != ar.variadic || pr.fn_cv != ar.fn_cv || pr.fn_ref != ar.fn_ref || pr.fn_noexcept != ar.fn_noexcept)
+        return false;
       if (!deduce(pr.inner, ar.inner, depth, out)) return false;
       std::vector<TemplateArg> ps, as;
       for (QualType q : pr.params) ps.push_back(type_arg(q));
@@ -918,6 +937,10 @@ public:
     case TypeKind::dep_name:
     case TypeKind::transform:
     case TypeKind::pack_expansion: pack_types_in(r.inner, out); return;
+    case TypeKind::member_pointer:
+      pack_types_in(r.member_owner, out);
+      pack_types_in(r.inner, out);
+      return;
     case TypeKind::function:
       pack_types_in(r.inner, out);
       for (QualType p : r.params) pack_types_in(p, out);

@@ -50,7 +50,7 @@ constexpr std::string_view spelling(Builtin b) {
 
 enum class TypeKind : u8 {
   builtin, pointer, array, function, class_, reference, enum_, template_param, dep_name, pack_expansion, transform,
-  placeholder, dep_spec, builtin_spec, other
+  placeholder, dep_spec, builtin_spec, member_pointer, other
 };
 
 // The canonical form of a type, read out by value.
@@ -58,12 +58,15 @@ struct TypeRec {
   TypeKind kind = TypeKind::other;
   Builtin builtin = Builtin::void_;
   QualType inner{};  // pointee, element or return type
+  QualType member_owner{};  // a pointer-to-member's class; `inner` is the member type
   u64 bound = 0;     // an array's
   std::vector<QualType> params;
   bool variadic = false;
   LangLinkage linkage = LangLinkage::cxx;
   EntityId entity = EntityId::none;  // a class's or an enumeration's
   Cv fn_cv = Cv::none;               // a member function type's cv-qualifier-seq
+  ast::RefQual fn_ref = ast::RefQual::none;
+  bool fn_noexcept = false;
   bool rvalue_ref = false;           // a reference's kind; `inner` is what it refers to
   ConstId bound_value = ConstId::none;  // an array's bound as a constant, possibly dependent
   NameId name{};                     // a dependent member type's name; `inner` is its qualifier
@@ -82,6 +85,22 @@ public:
 
   QualType builtin(Builtin b) { return ast::builtin(*ins_, b); }
   QualType pointer(QualType pointee) { return ast::pointer_to(*ins_, pointee); }
+  bool valid_member_owner(QualType owner) const { return is_class(owner) || is_dependent(owner); }
+  bool valid_member_type(QualType member) const { return !is_void(member) && !is_reference(member); }
+  // [dcl.mptr]: the nested-name-specifier names a possibly incomplete class; no member of that
+  // class need have this type. A typedef to a cv-qualified class still names that class.
+  QualType member_pointer(QualType owner, QualType member) {
+    QualType c = ins_->types.canon(member);
+    if (ins_->types.is<ast::TFunction>(c)) {
+      auto f = ins_->types.get<ast::TFunction>(c);
+      if (f.linkage == LangLinkage::c) {
+        // [dcl.link]: C language linkage is ignored for a class member function's type.
+        f.linkage = LangLinkage::cxx;
+        member = ins_->intern_type(f);
+      }
+    }
+    return ins_->intern_type(ast::TMemberPtr{unqualified(canonical(owner)), member});
+  }
   // An array whose bound is value-dependent ([temp.dep.constexpr]).
   QualType array_dependent(QualType elem, ConstId bound) { return ast::array_of(*ins_, *target_, elem, bound); }
   // An array of unknown bound, an incomplete type ([dcl.array]/6).
@@ -91,8 +110,9 @@ public:
   }
   // The parameters are adjusted by #33's `function_type` ([dcl.fct]).
   QualType function(QualType ret, std::span<const QualType> params, bool variadic, LangLinkage linkage,
-                    Cv cv = Cv::none) {
-    return ast::function_type(*ins_, ret, params, {.variadic = variadic, .cv = cv, .linkage = linkage});
+                    Cv cv = Cv::none, ast::RefQual ref = ast::RefQual::none, bool nonthrowing = false) {
+    return ast::function_type(*ins_, ret, params,
+                              {.variadic = variadic, .cv = cv, .ref = ref, .noexcept_ = nonthrowing, .linkage = linkage});
   }
   QualType class_type(EntityId c) { return ins_->intern_type(ast::TClass{c}); }
   QualType enum_type(EntityId e) { return ins_->intern_type(ast::TEnum{e}); }
@@ -114,6 +134,7 @@ public:
     switch (r.kind) {
     case TypeKind::placeholder: return true;
     case TypeKind::pointer:
+    case TypeKind::member_pointer:
     case TypeKind::reference:
     case TypeKind::array:
     case TypeKind::function: return has_placeholder(r.inner);
@@ -147,6 +168,11 @@ public:
     } else if (t.is<ast::TPointer>(c)) {
       r.kind = TypeKind::pointer;
       r.inner = t.get<ast::TPointer>(c).pointee;
+    } else if (t.is<ast::TMemberPtr>(c)) {
+      auto p = t.get<ast::TMemberPtr>(c);
+      r.kind = TypeKind::member_pointer;
+      r.inner = p.member;
+      r.member_owner = p.cls;
     } else if (t.is<ast::TArray>(c)) {
       auto a = t.get<ast::TArray>(c);
       r.kind = TypeKind::array;
@@ -161,6 +187,9 @@ public:
       r.variadic = f.variadic != 0;
       r.linkage = f.linkage;
       r.fn_cv = f.cv;
+      r.fn_ref = f.ref;
+      r.fn_noexcept = f.noexcept_ != ConstId::none && ins_->values.is<ast::VInt>(f.noexcept_) &&
+                      ast::int_bits(*ins_, f.noexcept_).lo != 0;
     } else if (t.is<ast::TClass>(c)) {
       r.kind = TypeKind::class_;
       r.entity = t.get<ast::TClass>(c).entity;
@@ -222,6 +251,7 @@ public:
       return is_dependent(r.inner) || (r.bound_value != ConstId::none && ins_->values.is_dependent(r.bound_value));
     case TypeKind::pointer:
     case TypeKind::reference: return is_dependent(r.inner);
+    case TypeKind::member_pointer: return is_dependent(r.member_owner) || is_dependent(r.inner);
     case TypeKind::function:
       return is_dependent(r.inner) || std::ranges::any_of(r.params, [&](QualType p) { return is_dependent(p); });
     case TypeKind::class_: return class_dependent && class_dependent(r.entity);
@@ -255,7 +285,14 @@ public:
     return b && (ast::is_integral(*b) || ast::is_standard_floating(*b));
   }
   bool is_pointer(QualType q) const { return ast::is_pointer(*ins_, q); }
+  bool is_member_pointer(QualType q) const { return ins_->types.is<ast::TMemberPtr>(ins_->types.canon(q)); }
   bool is_function(QualType q) const { return ast::is_function(*ins_, q); }
+  bool is_cvref_function(QualType q) const {
+    QualType c = ins_->types.canon(q);
+    if (!ins_->types.is<ast::TFunction>(c)) return false;
+    auto f = ins_->types.get<ast::TFunction>(c);
+    return f.cv != Cv::none || f.ref != ast::RefQual::none;
+  }
   bool is_array(QualType q) const { return ast::is_array(*ins_, q); }
   bool is_class(QualType q) const { return ins_->types.is<ast::TClass>(ins_->types.canon(q)); }
   bool is_reference(QualType q) const { return ast::is_reference(*ins_, q); }
@@ -276,7 +313,7 @@ public:
   // [basic.types.general]: arithmetic, enumeration, pointer, pointer-to-member and std::nullptr_t
   // types, cv-qualified or not.
   bool is_scalar(QualType q) const {
-    return is_arithmetic(q) || is_pointer(q) || is(q, Builtin::nullptr_t) || is_enum(q);
+    return is_arithmetic(q) || is_pointer(q) || is_member_pointer(q) || is(q, Builtin::nullptr_t) || is_enum(q);
   }
   // [basic.types.general]: an object type is not a function, reference or void type.
   bool is_object(QualType q) const { return !is_function(q) && !is_void(q) && !ast::is_reference(*ins_, q); }
@@ -303,8 +340,10 @@ private:
     switch (r.kind) {
     case TypeKind::builtin:
       return cvs + std::string(sema::spelling(r.builtin)) + (inner.empty() || inner[0] == '[' ? "" : " ") + inner;
-    case TypeKind::pointer: {
-      std::string p = "*" + (cvs.empty() ? "" : " " + cvs.substr(0, cvs.size() - 1)) + inner;
+    case TypeKind::pointer:
+    case TypeKind::member_pointer: {
+      std::string p = r.kind == TypeKind::member_pointer ? spell(r.member_owner) + "::*" : "*";
+      p += (cvs.empty() ? "" : " " + cvs.substr(0, cvs.size() - 1)) + inner;
       TypeKind k = kind(r.inner);
       if (k == TypeKind::array || k == TypeKind::function) p = "(" + p + ")";
       return spell(r.inner, p);
@@ -317,6 +356,8 @@ private:
       if (r.variadic) ps += r.params.empty() ? "..." : ", ...";
       std::string q = (std::to_underlying(r.fn_cv) & 1) ? " const" : "";
       if (std::to_underlying(r.fn_cv) & 2) q += " volatile";
+      if (r.fn_ref != ast::RefQual::none) q += r.fn_ref == ast::RefQual::lvalue ? " &" : " &&";
+      if (r.fn_noexcept) q += " noexcept";
       return spell(r.inner, inner + "(" + ps + ")" + q);
     }
     case TypeKind::reference: {

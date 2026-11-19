@@ -159,6 +159,16 @@ class Mangler {
         if (!p) return p;
         inner = "P" + *p;
         candidates_.push_back(full_key(bare));
+      } else if (in_.types.is<ast::TMemberPtr>(in_.types.canon(bare))) {
+        // <pointer-to-member-type> ::= M <class type> <member type> (Itanium §5.1.5.7).
+        if (auto s = find(full_key(bare))) return qualify(qualifiers, *s, q);
+        auto p = in_.types.get<ast::TMemberPtr>(in_.types.canon(bare));
+        auto owner = type(p.cls);
+        if (!owner) return owner;
+        auto member = type(p.member);
+        if (!member) return member;
+        inner = "M" + *owner + *member;
+        candidates_.push_back(full_key(bare));
       } else if (in_.types.is<ast::TLRef>(in_.types.canon(bare)) || in_.types.is<ast::TRRef>(in_.types.canon(bare))) {
         // <type> ::= R <type> | O <type>, a substitution candidate (§5.1.5.4).
         if (auto s = find(full_key(bare))) return *s;
@@ -263,13 +273,20 @@ class Mangler {
         else inner = p.index == 0 ? "T_" : std::format("T{}_", p.index - 1);
         candidates_.push_back(full_key(bare));
       } else if (in_.types.is<ast::TFunction>(in_.types.canon(bare))) {
-        // <function-type> ::= F [Y] <bare-function-type> E, a substitution candidate (§5.1.5.3).
+        // Function type qualifiers and the non-throwing exception specification are encoded
+        // before F, and the ref-qualifier before E (Itanium §5.1.5.3).
         if (auto s = find(full_key(bare))) return qualify(qualifiers, *s, q);
         auto f = in_.types.get<ast::TFunction>(in_.types.canon(bare));
-        if (f.cv != ast::Cv::none || f.linkage != ast::LangLinkage::cxx) return std::unexpected("a qualified or extern \"C\" function type");
+        if (f.linkage != ast::LangLinkage::cxx) return std::unexpected("an extern \"C\" function type");
         auto sig = signature(f, true);
         if (!sig) return sig;
-        inner = "F" + *sig + "E";
+        if (std::to_underlying(f.cv) & 2) inner += "V";
+        if (std::to_underlying(f.cv) & 1) inner += "K";
+        if (f.noexcept_ != ast::ConstId::none && in_.values.is<ast::VInt>(f.noexcept_) &&
+            ast::int_bits(in_, f.noexcept_).lo != 0) inner += "Do";
+        inner += "F" + *sig;
+        if (f.ref != ast::RefQual::none) inner += f.ref == ast::RefQual::lvalue ? "R" : "O";
+        inner += "E";
         candidates_.push_back(full_key(bare));
       } else if (in_.types.is<ast::TClass>(in_.types.canon(bare)) || in_.types.is<ast::TEnum>(in_.types.canon(bare))) {
         // <class-enum-type> ::= <name>: a global-namespace class is its <source-name>, a
@@ -568,6 +585,10 @@ class Mangler {
         in_.types.is<ast::TTransform>(c) || in_.types.is<ast::TDepSpec>(c) || in_.types.is<ast::TBuiltinSpec>(c))
       return true;
     if (in_.types.is<ast::TPointer>(c)) return dependent(in_.types.get<ast::TPointer>(c).pointee);
+    if (in_.types.is<ast::TMemberPtr>(c)) {
+      auto p = in_.types.get<ast::TMemberPtr>(c);
+      return dependent(p.cls) || dependent(p.member);
+    }
     if (in_.types.is<ast::TLRef>(c)) return dependent(in_.types.get<ast::TLRef>(c).referee);
     if (in_.types.is<ast::TRRef>(c)) return dependent(in_.types.get<ast::TRRef>(c).referee);
     if (in_.types.is<ast::TArray>(c)) return dependent(in_.types.get<ast::TArray>(c).elem);

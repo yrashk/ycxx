@@ -30,7 +30,7 @@ namespace ycxx::ir {
 
 // What `lower` needs from the `layout` query (AST design Part D) until types and constants (#33)
 // provide it. Each answer is a pure function of its key.
-export enum class TypeKind : std::uint8_t { void_, boolean, integer, pointer, array, record, function, other, floating };
+export enum class TypeKind : std::uint8_t { void_, boolean, integer, pointer, array, record, function, other, floating, member_pointer };
 
 export struct TypeLayout {
   TypeKind kind = TypeKind::other;
@@ -49,6 +49,7 @@ export struct TypeLayout {
   // Records: the bytes a trivial copy writes, nvsize (Itanium §2.4), none for an empty class: not
   // the tail padding a derived class's members may occupy when the object is a base subobject.
   std::uint64_t data = 0;
+  bool contains_member_pointer = false;  // a scalar member pointer or an aggregate containing one
 };
 
 export struct SubObject {
@@ -172,6 +173,7 @@ class Lowering {
     switch (l.kind) {
       case TypeKind::boolean: return T::i1;
       case TypeKind::pointer: return T::ptr;
+      case TypeKind::member_pointer: return std::unexpected("pointer-to-member values are not supported yet");
       case TypeKind::integer:
         if (auto i = l2::int_of_bits(l.size * 8); i && *i != T::i1) return *i;
         return std::unexpected(std::format("T{}: no integer type of {} bytes", raw(t), l.size));
@@ -503,6 +505,8 @@ class Lowering {
         if (storage != Storage::automatic && storage != Storage::temporary)
           return fail(std::format("{} storage is not in the α subset", ir::name_of(storage)));
         TypeLayout l = layout(QualType(std::uint32_t(imms[0])));
+        if (Init(imms[2]) != Init::indeterminate && l.contains_member_pointer)
+          return fail("zero-initializing a pointer-to-member object is not supported yet");
         ValueId p = emit1(Op2::alloca, T::ptr, {}, {l.size, l.align, raw(n)});
         ValueId s = in(n, 0);
         if (Init(imms[2]) != Init::indeterminate) s = zero(s, p, l, imms[0]);
