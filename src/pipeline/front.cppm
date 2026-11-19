@@ -258,6 +258,9 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
     tu.entities.back().asm_label = program.asm_label(e);
     if (r.templ != EntityId::none) {
       tu.entities.back().template_type = world.entities.rec(r.templ).type;
+      // A generic lambda's operator: its closure's record has the type with the head at depth 0.
+      if (sema::Sema::closure_member(world, r.templ))
+        tu.entities.back().template_type = world.entities.rec(world.entities.rec(r.templ).scope).type;
       tu.entities.back().template_args = r.args;
       // Only a function template's own arguments carry Clang's <template-param-decl> prefixes.
       if (world.entities.rec(r.templ).kind == sema::EntityKind::function_template)
@@ -282,42 +285,14 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
   // lambda; their bodies' offsets are the lambda's in the body's part, which begins at `offset`.
   auto closures_of = [&](const ast::BodySema& body, ast::ItemId item, std::uint32_t offset) {
     for (const ast::ClosureDef& c : ins.seqs.elements(body.closures)) {
-      if (world.types.is_dependent(c.call_type)) continue;
+      // A template's or a generic lambda's definition is not code; its instances are.
+      if ((c.flags & sema::closure_flag::pattern) || world.types.is_dependent(c.call_type)) continue;
       std::vector<ast::LocalRec> locals = ins.seqs.elements(c.locals);
-      std::size_t n = world.types.rec(c.call_type).params.size();
-      std::vector<ast::ParamSema> params;
-      for (std::size_t i = 0; i < n && i < locals.size(); ++i)
-        params.push_back({EntityId::none, locals[i].type, locals[i].name, ast::NodeId::none, 0});
-      auto member = [&](EntityId e, QualType t, std::uint16_t flags) {
-        ast::DeclSema d{};
-        d.entity = e;
-        d.type = t;
-        d.kind = ast::DeclKind::function;
-        d.linkage = world.entities.rec(e).linkage;
-        d.flags = std::uint16_t(flags | sema::decl_flag::member | sema::decl_flag::definition | sema::decl_flag::inline_);
-        d.attributes = ins.intern_seq(std::span<const ast::NodeId>{});
-        d.constraint = ast::NodeId::none;
-        d.constraints = ast::ConstId::none;
-        d.contracts = ast::NodeId::none;
-        d.params = ins.intern_seq(std::span<const ast::ParamSema>(params));
-        d.template_params = ins.intern_seq(std::span<const ast::TemplateParamSema>{});
-        return d;
-      };
-      auto body_of = [&](ast::NodeId tree, std::span<const ast::LocalRec> ls) {
-        return ast::BodySema{tree, ins.intern_seq(ls), ins.intern_seq(std::span<const ast::ExpansionRec>{}),
-                             ins.intern_seq(std::span<const std::uint32_t>{}), QualType{}, 0,
-                             ins.intern_seq(std::span<const ast::ClosureDef>{})};
-      };
-      QualType ct = world.types.class_type(c.closure);
-      if (!(c.flags & sema::closure_flag::mutable_)) ct = world.types.add_cv(ct, ast::Cv::const_);
-      ast::DeclSema call = member(c.call, c.call_type, 0);
-      declare(call, ast::Loc{item, offset + c.begin});
-      tu.functions.push_back({c.call, call, body_of(c.body, locals), item, offset + c.body_begin, world.types.pointer(ct)});
-      if (c.invoker != EntityId::none) {
-        ast::DeclSema inv = member(c.invoker, world.entities.rec(c.invoker).type, sema::decl_flag::static_);
-        declare(inv, ast::Loc{item, offset + c.begin});
-        tu.functions.push_back({c.invoker, inv, body_of(c.invoker_body, std::span(locals).first(std::min(n, locals.size()))), item,
-                                offset + c.body_begin, std::nullopt});
+      for (EntityId f : {c.call, c.invoker}) {
+        if (f == EntityId::none) continue;
+        sema::Sema::ClosureMember m = sema::Sema::closure_member_def(world, c, f, f == c.call ? c.body : c.invoker_body, locals);
+        declare(m.decl, ast::Loc{item, offset + c.begin});
+        tu.functions.push_back({f, m.decl, m.body, item, offset + c.body_begin, m.this_type});
       }
     }
   };
