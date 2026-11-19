@@ -189,6 +189,9 @@ enum class Diag : std::uint32_t {
   constraints_not_satisfied [[=message{Severity::error, "the constraints of '{0:n}' are not satisfied"}]],
   not_a_concept [[=message{Severity::error, "'{0:n}' is not a concept"}]],
   concept_constrained [[=message{Severity::error, "the concept '{0:n}' cannot have associated constraints"}]],
+  // A GNU built-in function the SDK's or libycxx's headers use and ycxx does not have yet
+  // (docs/EXTENSIONS.md), named where lookup finds nothing else.
+  builtin_unsupported [[=message{Severity::error, "built-in function '{0:n}' is not supported yet"}]],
 };
 
 // A `{N:r}` argument: why an evaluation was not constant. 0 is an expression the front end

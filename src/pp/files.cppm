@@ -124,6 +124,12 @@ struct Config {
   std::optional<ast::CallTriviality> call_triviality;
   ast::CallTriviality calls() const { return call_triviality.value_or(target->call_triviality); }
 
+  // Whether a file found in directory `found` (an index into quote then angle directories, as
+  // `Resolved::dir`) is a system header: found in a system directory, or included by a system
+  // header (`includer_system`), wherever found, as with Clang and GCC. Warnings from a system
+  // header are not reported (#229).
+  bool system_header(u32 found, bool includer_system) const;
+
   Fp128 fingerprint() const {
     Hasher h;
     h.bytes(target->triple).uint(u8(0)).uint(std::to_underlying(view));
@@ -158,6 +164,10 @@ struct Resolved {
   u32 dir = includer_dir;
   bool operator==(const Resolved&) const = default;
 };
+
+inline bool Config::system_header(u32 found, bool includer_system) const {
+  return includer_system || (found != includer_dir && found >= quote_dirs.size() + system_from);
+}
 
 // The search order of `form` for a file found in `found_dir` whose directory is `here`.
 std::optional<Resolved> resolve(Files& files, const Config& cfg, std::string_view header, IncludeForm form,

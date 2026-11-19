@@ -2139,6 +2139,17 @@ public:
     }
     case Tk::identifier: {
       NameId n = name_of(tok());
+      // A GNU built-in function ycxx does not have yet: its arguments, which may be types, are
+      // skipped (docs/EXTENSIONS.md).
+      if (kind(1) == Tk::l_paren && s_->unsupported_builtin(n)) {
+        s_->diag(begin, Diag::builtin_unsupported, n);
+        bump();
+        bump();
+        do skip_param();
+        while (accept(Tk::comma));
+        expect(Tk::r_paren);
+        return {NodeId::none, begin, pos()};
+      }
       // A type-testing built-in, `__is_same(T, U)` (docs/EXTENSIONS.md).
       if (kind(1) == Tk::l_paren)
         if (const lex::TypeTraitInfo* tr = s_->type_trait(n); tr && !tr->transforms) {

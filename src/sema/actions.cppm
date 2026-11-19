@@ -280,6 +280,7 @@ public:
         if (s.entity == EntityId::none || is_special(s)) continue;
         if (is_type(s.kind) || !elaborated) found = s;
       }
+    if (!found && !elaborated && aliases) return builtin_type_name(name);
     if (!found || !is_type(found->kind)) return std::nullopt;
     if (found->kind == ast::DeclKind::type_alias && !aliases) return std::nullopt;
     // A class template's name needs its arguments outside the template ([temp.names]).
@@ -288,6 +289,16 @@ public:
   }
   static bool is_type(ast::DeclKind k) {
     return k == ast::DeclKind::class_ || k == ast::DeclKind::enum_ || k == ast::DeclKind::type_alias;
+  }
+  // A typedef-name the implementation declares where nothing else does (docs/EXTENSIONS.md):
+  // `__builtin_va_list`, the type of the SDK's `__darwin_va_list` and libycxx's `va_list`.
+  std::optional<QualType> builtin_type_name(NameId name) {
+    if (ins().names.spelling(name) != "__builtin_va_list") return std::nullopt;
+    switch (target.va_list) {
+    case ast::VaList::char_pointer: return types().pointer(builtin(Builtin::char_));
+    case ast::VaList::sysv_x86_64: return std::nullopt;  // no `__va_list_tag` yet: not a type
+    }
+    std::unreachable();
   }
   // A block-scope typedef-name or alias-declaration ([dcl.typedef]); it may redeclare one of the
   // same block to the same type.
@@ -2265,6 +2276,29 @@ public:
     return (d.flags & (decl_flag::constructor | decl_flag::destructor)) != 0;
   }
 
+  // A name lookup found nothing for ([basic.lookup.unqual]). A GNU built-in function the headers
+  // use and ycxx lacks (`lex::lacking_builtins`) says that ycxx does not have it yet.
+  void undeclared(u32 at_, NameId name) {
+    diag(at_, lex::lacking_builtin(ins().names.spelling(name)) ? Diag::builtin_unsupported : Diag::undeclared, name);
+  }
+  // Whether `name` is a GNU built-in function ycxx does not have yet (`lex::lacking_builtins`,
+  // docs/EXTENSIONS.md) that no declaration in scope gives. Its call is diagnosed without parsing
+  // its arguments, which may be types (`__builtin_offsetof(T, m)`). Any other `__builtin_` name
+  // is an ordinary one.
+  bool unsupported_builtin(NameId name) {
+    if (!lex::lacking_builtin(ins().names.spelling(name))) return false;
+    for (const auto& scope : scopes_)
+      if (std::ranges::any_of(scope, [&](const auto& p) { return p.first == name; })) return false;
+    if (std::ranges::any_of(own, [&](const auto& p) { return p.name == name; })) return false;
+    if (std::ranges::any_of(block_usings_, [&](const BlockUsing& u) { return u.name == name; })) return false;
+    if (names_member(name)) return false;
+    for (DeclId d : q_->visible_decls(name, directives())) {
+      (void)d;
+      return false;
+    }
+    return true;
+  }
+
   // The expression naming what lookup found for `name` ([expr.prim.id]): one entity, or an
   // overload set.
   // `unqualified`: named by an unqualified-id, so a call may add argument-dependent lookup
@@ -2280,7 +2314,7 @@ public:
         ExprInfo info{builtin(Builtin::dependent), ValueCategory::lvalue, 0};
         return node(ast::DepName{info, name}, begin, end, info);
       }
-      if (!any) diag(begin, Diag::undeclared, name);
+      if (!any) undeclared(begin, name);
       return {NodeId::none, begin, end};
     }
     // Several functions: an overload set, resolved by the call ([over.match]); the latest
@@ -3168,7 +3202,7 @@ public:
     }
     if (unqualified && q_->dependent_call(callee.begin)) callee = with_adl(callee, *unqualified, args);
     if (auto d = as<ast::DepName>(callee)) {
-      diag(callee.begin, Diag::undeclared, d->name);
+      undeclared(callee.begin, d->name);
       return {NodeId::none, begin, end};
     }
     if (dependent(callee) || any_dependent(args)) return dependent_node(all, begin, end);

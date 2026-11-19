@@ -145,6 +145,13 @@ struct Passthrough {
   std::vector<PTok> tokens;
 };
 
+// Whether a diagnostic located in a system header is not reported: its warnings, as Clang and GCC
+// do (#229). Its errors are reported, and so is a `#warning`, which the header's author asked for
+// and Clang and GCC report from a system header too.
+constexpr bool hidden_in_system_header(lex::LexDiag kind) {
+  return lex::message_of(kind).severity == lex::Severity::warning && kind != lex::LexDiag::warning_directive;
+}
+
 // A diagnostic of phase 4 or earlier: a byte offset in a file of the region's file table.
 struct Diag {
   u16 file = 0;
@@ -199,6 +206,7 @@ struct FileRegion {
   };
   std::vector<Line> lines;
   bool fatal = false;        // preprocessing stopped (a missing include)
+  bool system = false;       // a system header's: its warnings are not reported (#229)
   u32 depth = 1;             // the deepest nesting of files below it, itself included
   // The include guard, when the file is one `#ifndef X` ... `#endif` group: included again where
   // X is defined, it is empty.

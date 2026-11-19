@@ -3,6 +3,7 @@
   accept       must compile (-fsyntax-only), with no error
   reject       must be rejected with errors exactly at the `//!` markers' locations (wording is
                never compared)
+               (either, with `//! warning` markers: warnings exactly at those, too)
   preprocess   -E output equal to the oracle's (Clang by default), after normalization
   run          builds and runs; exit status and, when given, stdout
   diff         the compiler under test agrees with Clang 23 and GCC 16 on the verdict, the
@@ -68,23 +69,60 @@ def rel(ctx, path):
 
 # --- accept / reject --------------------------------------------------------------------------
 
-def expected_errors(files):
+def expected_errors(files, severity='error'):
     """{(realpath, line, col or None)} from the `//!` markers of files (paths)."""
     return {(os.path.realpath(f), line, col) for f in files
-            for line, col in markers_in(Path(f).read_text(encoding='utf-8', errors='replace'))}
+            for line, col in markers_in(Path(f).read_text(encoding='utf-8', errors='replace'), severity)}
+
+
+def warning_problems(ctx, r, expected, cwd):
+    """With `//! warning` markers, the warnings must be exactly at them, as errors at `//! error`
+    markers; a test without them does not look at warnings."""
+    actual = toolchain.errors_in(r.stdout + r.stderr, cwd, toolchain.WARNING)
+    show = lambda f, l, c: f'{rel(ctx, f)}:{l}' + (f':{c}' if c else '')
+    problems = []
+    for f, l, c in sorted(expected, key=lambda e: (e[0], e[1], e[2] or 0)):
+        if not any(af == f and al == l and (c is None or ac == c) for af, al, ac in actual):
+            problems.append(f'expected a warning at {show(f, l, c)}: none reported')
+    for af, al, ac in actual:
+        if not any(f == af and l == al and (c is None or c == ac) for f, l, c in expected):
+            problems.append(f'unexpected warning at {show(af, al, ac)}')
+    return problems, actual
 
 
 QUOTED_INCLUDE = re.compile(r'^\s*#\s*include\s*"([^"]+)"', re.M)
+ANGLED_INCLUDE = re.compile(r'^\s*#\s*include\s*<([^>]+)>', re.M)
 
 
-def with_headers(path):
-    """The test file and the existing headers it includes with `#include "..."`, relative to it:
-    their `//!` markers expect errors located in the header."""
+def include_dirs(flags):
+    """The directories of `-I dir`, `-Idir`, `-isystem dir` and `-isystemdir` in flags."""
+    dirs, flags = [], list(flags)
+    for i, f in enumerate(flags):
+        for opt in ('-isystem', '-I'):
+            if f.startswith(opt):
+                d = f[len(opt):] or (flags[i + 1] if i + 1 < len(flags) else '')
+                if d:
+                    dirs.append(d)
+                break
+    return dirs
+
+
+def with_headers(path, flags=()):
+    """The test file and the existing headers it includes: with `#include "..."`, relative to it,
+    and with `#include <...>`, in an include directory of its FLAGS (relative to it). Their `//!`
+    markers expect errors located in the header."""
     files = [path]
-    for name in QUOTED_INCLUDE.findall(Path(path).read_text(encoding='utf-8', errors='replace')):
+    text = Path(path).read_text(encoding='utf-8', errors='replace')
+    for name in QUOTED_INCLUDE.findall(text):
         h = Path(path).parent / name
         if h.is_file():
             files.append(h)
+    for name in ANGLED_INCLUDE.findall(text):
+        for d in include_dirs(flags):
+            h = Path(path).parent / d / name
+            if h.is_file():
+                files.append(h)
+                break
     return files
 
 
@@ -112,7 +150,9 @@ def verdict_problems(ctx, r, expected, cwd):
 
 def run_verify(test, ctx, tr, flags, timeout):
     need(ctx.cut, 'syntax')
-    expected = expected_errors(with_headers(test.path))
+    files = with_headers(test.path, flags)
+    expected = expected_errors(files)
+    warnings = expected_errors(files, 'warning')
     if test.kind == 'accept' and expected:
         raise Unresolved('an accept test has //! error markers (make it a .reject.cpp)')
     if test.kind == 'reject' and not expected:
@@ -120,6 +160,10 @@ def run_verify(test, ctx, tr, flags, timeout):
     r = run(tr, 'syntax', ctx.cut.syntax(test.path, flags), timeout, cwd=test.path.parent)
     problems, actual = verdict_problems(ctx, r, expected, test.path.parent)
     tr.check(f'{len(expected)} error location(s) expected, {len(actual)} error(s) reported')
+    if warnings:
+        more, actual = warning_problems(ctx, r, warnings, test.path.parent)
+        tr.check(f'{len(warnings)} warning location(s) expected, {len(actual)} warning(s) reported')
+        problems += more
     if problems:
         raise (Crashed if crashed(r.status) else Failed)('; '.join(problems))
 
