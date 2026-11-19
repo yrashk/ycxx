@@ -189,7 +189,7 @@ public:
       if (types().is_array(x)) {
         TypeRec r = types().rec(x);
         QualType e = self(r.inner, keep);
-        return r.bound_value == ConstId::none ? types().array(e, 0) : types().array_dependent(e, r.bound_value);
+        return r.bound_value == ConstId::none ? types().array_unknown(e) : types().array_dependent(e, r.bound_value);
       }
       return with_cv(x, keep);
     };
@@ -217,7 +217,7 @@ public:
     case decay: {
       QualType x = types().canonical(types().referee(c));
       if (types().is_array(x)) return types().pointer(types().rec(x).inner);
-      if (types().is_function(x)) return types().pointer(x);
+      if (types().is_function(x)) return referenceable(x) ? types().pointer(x) : x;
       return Types::unqualified(x);
     }
     case underlying_type: {
@@ -628,7 +628,12 @@ public:
         if (tmp[k] && !out[k]) out[k] = tmp[k];
       }
       for (u16 k : packs) {
-        if (!tmp[k]) return false;
+        // A pattern that deduces no element of a pack is a non-deduced context for it
+        // ([temp.deduct.type]/5): another list deduces it, or nothing does.
+        if (!tmp[k]) {
+          if (j == skip && !explicit_packs_.contains(k)) return true;
+          return false;
+        }
         elems[k].push_back(is_expansion(a[j]) ? expansion_of(*tmp[k]) : *tmp[k]);
       }
     }

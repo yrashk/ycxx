@@ -106,7 +106,7 @@ public:
   QualType transform(u8 trait, QualType arg) { return ins_->intern_type(ast::TTransform{trait, arg}); }
   bool is_floating(QualType q) const {
     auto b = builtin_of(q);
-    return b && (*b == Builtin::float_ || *b == Builtin::double_ || *b == Builtin::long_double);
+    return b && ast::is_floating(*b);
   }
 
   TypeRec rec(QualType q) const {

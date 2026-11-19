@@ -1465,11 +1465,14 @@ private:
     }
     CondOp op = condition_operator(t.tok.payload);
     if (op == CondOp::has_attribute) return number_token(t, 0);
-    if (op == CondOp::has_builtin)
-      return number_token(t, operand.size() == 1 && operand[0].tok.kind == Tk::identifier &&
-                                     lex::type_trait(s_->spellings.name(operand[0].tok.payload)) != nullptr
-                                 ? 1
-                                 : 0);
+    if (op == CondOp::has_builtin) {
+      // Its operand is one identifier ([cpp.cond]-style, as GCC and Clang take it).
+      if (operand.size() != 1 || operand[0].tok.kind != Tk::identifier) {
+        report(f, operand.empty() ? t : operand.size() > 1 ? operand[1] : operand[0], lex::LexDiag::cond_expected_rparen);
+        return number_token(t, 0);
+      }
+      return number_token(t, lex::type_trait(s_->spellings.name(operand[0].tok.payload)) != nullptr ? 1 : 0);
+    }
     // [cpp.cond]/? the header, as for #include: a string literal, `<...>`, or tokens that become
     // one after replacement.
     if (operand.empty() || (operand[0].tok.kind != Tk::string_lit && operand[0].tok.kind != Tk::less))
