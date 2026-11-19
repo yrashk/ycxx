@@ -1483,6 +1483,10 @@ public:
   Ex member_call(Ex callee, std::vector<Ex> args, u32 end, u32 paren_at) {
     u32 begin = callee.begin;
     Ex fail{NodeId::none, begin, end};
+    if (auto b = std::ranges::find_if(args, [&](const Ex& a) { return is_braced(a); }); b != args.end()) {
+      diag(b->begin, Diag::not_supported, lex::Tk::l_brace);  // a braced list for a member function's parameter
+      return fail;
+    }
     auto m = *as<ast::Member>(callee);
     const Bound& bound = bound_.at(std::to_underlying(callee.id));
     std::optional<Ex> object = bound.object;
@@ -2145,6 +2149,10 @@ public:
       diag(e.begin, Diag::bound_member_not_called, w_->entities.rec(as<ast::Member>(e)->member).name);
       return {NodeId::none, e.begin, e.end};
     }
+    // A discarded prvalue of class type is materialized ([expr.context]/2), so a call's result
+    // has an object, destroyed with the full-expression.
+    if (e.ok() && !e.glvalue() && !dependent(e) && types().is_class(e.type()) && !as<ast::Materialize>(e))
+      return materialize(e, Types::unqualified(e.type()), false);
     return e;
   }
 
@@ -2880,6 +2888,19 @@ public:
       return {NodeId::none, begin, end};
     }
     if (dependent(callee) || any_dependent(args)) return dependent_node(all, begin, end);
+    // A braced list as an argument is copy-list-initialization of its parameter
+    // ([dcl.init.list]/1); overload resolution with one ([over.ics.list]) is not supported yet, so
+    // the callee must be one function.
+    auto braced = std::ranges::find_if(args, [&](const Ex& a) { return is_braced(a); });
+    if (braced != args.end() && types().is(callee.type(), Builtin::overload_set)) {
+      const std::vector<ast::DeclSema>& set = overloads_.at(std::to_underlying(callee.id));
+      if (set.size() != 1 || (set[0].flags & decl_flag::template_)) {
+        diag(braced->begin, Diag::not_supported, lex::Tk::l_brace);
+        return {NodeId::none, begin, end};
+      }
+      ExprInfo ci{set[0].type, ValueCategory::lvalue, 0};
+      callee = node(ast::DeclRef{ci, set[0].entity}, callee.begin, callee.end, ci);
+    }
     if (types().is(callee.type(), Builtin::overload_set)) {
       const std::vector<ast::DeclSema>& set = overloads_.at(std::to_underlying(callee.id));
       auto ex = explicit_args_.find(std::to_underlying(callee.id));
@@ -2992,6 +3013,16 @@ public:
     return r;
   }
 
+  // A braced-init-list as a call's argument: a placeholder, list-initializing its parameter once
+  // the callee is known (`call_args`).
+  Ex braced_argument(std::unique_ptr<Braced> b) {
+    ExprInfo info{builtin(Builtin::void_), ValueCategory::prvalue, 0};
+    Ex r = node(ast::ValueInit{info}, b->begin, b->end, info);
+    braced_args_[std::to_underlying(r.id)] = std::move(b);
+    return r;
+  }
+  bool is_braced(const Ex& e) const { return e.ok() && braced_args_.contains(std::to_underlying(e.id)); }
+
   // The arguments of a call to a function of type `fr`, each copy-initializing its parameter.
   std::optional<std::vector<Child>> call_args(const TypeRec& fr, std::span<const Ex> args, u32 begin, u32 paren_at) {
     std::vector<QualType> params = fr.params;  // copied: converting may intern new types
@@ -3005,8 +3036,18 @@ public:
     }
     std::vector<Child> children;
     for (std::size_t i = 0; i < args.size(); ++i) {
-      Ex a = i < params.size() ? convert(args[i], params[i], args[i].begin) : variadic_argument(args[i]);
+      if (is_braced(args[i]) && i >= params.size()) {
+        diag(args[i].begin, Diag::not_supported, lex::Tk::l_brace);  // [expr.call]/12: no list for an ellipsis
+        return std::nullopt;
+      }
+      Ex a = is_braced(args[i])      ? list_init(Types::unqualified(params[i]), *braced_args_.at(std::to_underlying(args[i].id)))
+             : i < params.size() ? convert(args[i], params[i], args[i].begin)
+                                 : variadic_argument(args[i]);
       if (!a.ok()) return std::nullopt;
+      // A parameter of class type is an object the caller initializes from the argument
+      // ([expr.call]/7): a temporary, which the caller destroys (Itanium C++ ABI §3.1.2).
+      if (i < params.size() && types().is_class(params[i]) && !dependent(a) && !a.glvalue())
+        a = materialize(a, Types::unqualified(params[i]), false);
       children.push_back(at(a, begin));
     }
     return children;
@@ -3091,6 +3132,7 @@ private:
     QualType type;
   };
   std::vector<BlockType> block_types_;
+  std::map<u32, std::unique_ptr<Braced>> braced_args_;  // by placeholder node: a braced list argument
   std::map<u32, QualType> declared_types_;  // by DeclRef node: the declared type of what it names
   std::map<u32, std::vector<ast::DeclSema>> overloads_;  // by draft overload-set DeclRef
   std::map<u32, std::vector<TemplateArg>> explicit_args_;  // by draft overload-set DeclRef

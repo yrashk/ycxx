@@ -117,6 +117,9 @@ struct ClassShape {
   EntityId entity = EntityId::none;
   std::vector<QualType> fields;
   bool union_ = false;  // every member at offset 0 ([class.union]/2)
+  // Trivially copyable for calls ([class.temporary]/3): no non-trivial copy constructor or
+  // destructor, and the copy not deleted, so the calling convention may pass it in registers.
+  bool trivial_calls = true;
 };
 struct EnumShape {
   EntityId entity = EntityId::none;
@@ -540,7 +543,10 @@ ir::TypeLayout QueryLayout::type(QualType q) const {
   if (in.types.is<ast::TLRef>(c) || in.types.is<ast::TRRef>(c))
     return {pointer, target.pointer_size, target.pointer_align, false,
             in.canonical(in.types.is<ast::TLRef>(c) ? in.types.get<ast::TLRef>(c).referee : in.types.get<ast::TRRef>(c).referee)};
-  if (auto r = class_layout(c)) return {record, r->size, r->align, false, {}};
+  if (auto r = class_layout(c)) {
+    auto it = classes_.find(std::to_underlying(in.types.get<ast::TClass>(c).entity));
+    return {record, r->size, r->align, false, {}, it == classes_.end() || it->second->trivial_calls};
+  }
   // An enumeration is laid out as its underlying type ([dcl.enum]/8).
   if (in.types.is<ast::TEnum>(c))
     if (auto it = enums_.find(std::to_underlying(in.types.get<ast::TEnum>(c).entity)); it != enums_.end()) return type(it->second);

@@ -124,6 +124,8 @@ class Gen {
     FunctionIr out;
     out.debug = debug_.remap(built->node_of, uint32_t(built->function.nodes.size()));
     out.body = std::move(built->function);
+    out.body.byval_params = byval_params_;
+    out.body.result_param = result_param_;
     return out;
   }
 
@@ -285,16 +287,29 @@ class Gen {
   void body() {
     ast::QualType fty = fn_.decl.type;
     auto params = in_.seqs.elements(fn_.decl.params);
+    // The entry's value parameters: `this`, then the address of the object a class result
+    // initializes ([stmt.return]), then the declared ones, a parameter of class type being the
+    // address of its object, which the caller initializes ([expr.call]/7).
     std::vector<ir::Ty> entry{ir::Ty::state()};
     if (fn_.this_type) entry.push_back(vty(*fn_.this_type));
-    for (const ast::ParamSema& p : params) {
-      if (cls(p.type) == TypeClass::record) throw Unsupported{"a parameter of class type"};
-      entry.push_back(vty(p.type));
+    ast::QualType rt = facts_.return_type(fty);
+    if (cls(rt) == TypeClass::record) {
+      entry.push_back(vty(facts_.pointer_to(rt)));
+      result_param_ = uint32_t(entry.size() - 1);  // 1 + its index among the value parameters
     }
-    if (cls(facts_.return_type(fty)) == TypeClass::record) throw Unsupported{"a function returning a class"};
+    for (const ast::ParamSema& p : params) {
+      if (cls(p.type) == TypeClass::record) {
+        entry.push_back(vty(facts_.pointer_to(p.type)));
+        byval_params_ |= 1u << (entry.size() - 2);
+      } else {
+        entry.push_back(vty(p.type));
+      }
+    }
+    if (entry.size() > 33) throw Unsupported{"more than 32 parameters"};
     enter(b_.add_block(entry));
-    uint32_t first = fn_.this_type ? 2 : 1;  // the first declared parameter's block parameter
+    uint32_t first = (fn_.this_type ? 2 : 1) + (result_param_ ? 1 : 0);  // the first declared parameter's block parameter
     if (fn_.this_type) this_ = b_.param(block_, 1);
+    if (result_param_) result_ = Place{b_.param(block_, result_param_), rt};
     loc_ = fn_.body_offset;
     push_scope();
     // The parameters are the first body locals (#41), named by `LocalRef` like the others.
@@ -304,6 +319,11 @@ class Gen {
       if (facts_.is_reference(params[i].type)) {
         // A reference parameter is the address of its object, not an object ([dcl.ref]).
         slots_[i] = Place{b_.param(block_, i + first), facts_.referee(params[i].type)};
+        continue;
+      }
+      if (cls(params[i].type) == TypeClass::record) {
+        // The caller's object: it begins and ends its lifetime there (Itanium C++ ABI §3.1.2).
+        slots_[i] = Place{b_.param(block_, i + first), params[i].type};
         continue;
       }
       Place p = begin_object(params[i].type, ir::Init::indeterminate);
@@ -449,8 +469,15 @@ class Gen {
       // A void operand is evaluated and the function returns nothing ([stmt.return]); a
       // reference result is the address of its object. The operand's temporaries end first.
       At value = child(a, r.value);
-      if (r.value.id != NodeId::none)
+      if (result_ && r.value.id != NodeId::none) {
+        // A class result initializes the caller's object ([stmt.return], [dcl.init.general]/16.6).
+        full_expression([&] {
+          initialize(*result_, value, false);
+          return 0;
+        });
+      } else if (r.value.id != NodeId::none) {
         v = full_expression([&] { return is_lvalue(value) ? std::optional(lvalue(value).ptr) : rvalue_or_void(value); });
+      }
       ret_(v);
     } else if (is<ast::If>(a)) {
       if_(a);
@@ -543,6 +570,14 @@ class Gen {
     if (is<ast::Paren>(e)) return initialize(p, child(e, get<ast::Paren>(e).operand), zeroed);
     if (facts_.is_reference(p.type)) {
       store(p, lvalue(e).ptr);  // a reference member holds its object's address
+      return;
+    }
+    if (is<ast::Call>(e) && class_prvalue(info(e))) {
+      call(e, p.ptr);  // the callee initializes the object ([stmt.return])
+      return;
+    }
+    if (is<ast::MemberCall>(e) && class_prvalue(info(e))) {
+      member_call(e, p.ptr);
       return;
     }
     if (is<ast::CtorCall>(e)) {
@@ -970,19 +1005,43 @@ class Gen {
   // A call to a named function ([expr.call]). The callee is not evaluated: naming a function has
   // no effect. Arguments are evaluated in order, which is one of the indeterminately sequenced
   // orders the clause allows.
-  std::optional<ValueId> call(At a) {
+  std::optional<ValueId> call(At a, std::optional<ValueId> into = std::nullopt) {
     auto c = get<ast::Call>(a);
     if (c.function == ast::EntityId::none) unsupported(a, "through a pointer");
+    if (class_prvalue(c.info) && !into) unsupported(a, "of class type outside an initialization");
     std::vector<ValueId> args;
-    for (ast::Child arg : ast_.children(c.args)) args.push_back(argument(child(a, arg)));
-    return call_fn(c.function, result_type(c.info), args, 0);
+    if (into) args.push_back(*into);
+    uint32_t byval = 0;
+    for (ast::Child arg : ast_.children(c.args)) {
+      At x = child(a, arg);
+      // An argument object of class type: sema materialized it ([expr.call]/7).
+      if (cls(info(x).type) == TypeClass::record && is<ast::Materialize>(strip_parens(x))) byval |= 1u << args.size();
+      args.push_back(argument(x));
+    }
+    return call_fn(c.function, result_type(c.info), args, 0, false, byval, into ? 1 : 0);
   }
   // A non-static member function's call: the object's address is the first argument.
-  std::optional<ValueId> member_call(At a) {
+  std::optional<ValueId> member_call(At a, std::optional<ValueId> into = std::nullopt) {
     auto c = get<ast::MemberCall>(a);
+    if (class_prvalue(c.info) && !into) unsupported(a, "of class type outside an initialization");
     std::vector<ValueId> args{rvalue(child(a, c.object))};
-    for (ast::Child arg : ast_.children(c.args)) args.push_back(argument(child(a, arg)));
-    return call_fn(c.function, result_type(c.info), args, 1);
+    if (into) args.push_back(*into);
+    uint32_t byval = 0;
+    for (ast::Child arg : ast_.children(c.args)) {
+      At x = child(a, arg);
+      if (cls(info(x).type) == TypeClass::record && is<ast::Materialize>(strip_parens(x))) byval |= 1u << args.size();
+      args.push_back(argument(x));
+    }
+    return call_fn(c.function, result_type(c.info), args, 1, false, byval, into ? 2 : 0);
+  }
+  // A call whose result is a class object of its own, which a hidden argument names
+  // ([stmt.return]); a call returning a reference to a class is a glvalue.
+  bool class_prvalue(const ast::ExprInfo& i) {
+    return i.category == ast::ValueCategory::prvalue && cls(i.type) == TypeClass::record;
+  }
+  At strip_parens(At a) {
+    while (is<ast::Paren>(a)) a = child(a, get<ast::Paren>(a).operand);
+    return a;
   }
   // The IR type of a call's result: a glvalue's is a pointer to its object ([expr.call]).
   ast::QualType result_type(const ast::ExprInfo& i) {
@@ -991,15 +1050,19 @@ class Gen {
   // A call to `f`. The first `implicit` arguments are not its parameters' (the object); the
   // arguments after its parameters are the ones its ellipsis matches ([expr.call]/12), which
   // sema already promoted.
+  // `byval` and `result_arg` are the call op's masks (ir/ops.cppm); a class result is written
+  // through the argument `result_arg` names and gives no value.
   std::optional<ValueId> call_fn(ast::EntityId f, ast::QualType result, std::span<const ValueId> args,
-                                 std::size_t implicit, bool void_ = false) {
+                                 std::size_t implicit, bool void_ = false, uint32_t byval = 0, uint32_t result_arg = 0) {
     std::vector<ir::Ty> results;
-    bool has_value = !void_ && cls(result) != TypeClass::void_;
+    if (args.size() > 32) throw Unsupported{"a call with more than 32 arguments"};
+    bool has_value = !void_ && !result_arg && cls(result) != TypeClass::void_;
     if (has_value) results.push_back(vty(result));
     std::size_t through_ellipsis = 0;
-    if (auto named = facts_.ellipsis_after(f); named && args.size() > implicit + *named)
-      through_ellipsis = args.size() - implicit - *named;
-    std::uint64_t imms[] = {word(f), through_ellipsis};
+    std::size_t hidden = implicit + (result_arg ? 1 : 0);
+    if (auto named = facts_.ellipsis_after(f); named && args.size() > hidden + *named)
+      through_ellipsis = args.size() - hidden - *named;
+    std::uint64_t imms[] = {word(f), through_ellipsis, byval, result_arg};
     ir::Flags flags = facts_.is_constexpr(f) ? 0 : ir::bit(ir::Flag::not_constexpr);
     ir::NodeId n = stateful(ir::Op::call, results, args, imms, flags);
     if (has_value) return b_.result(n, 1);
@@ -1151,7 +1214,7 @@ class Gen {
   }
 
   // Assignment of a class object by its trivial copy assignment operator ([class.copy.assign]):
-  // from a glvalue, a copy of its object; from a braced list, a copy of the temporary the list
+  // from a glvalue, a copy of its object; from a braced list or a call, a copy of the temporary it
   // initializes ([expr.assign]/9), which ends with the full-expression ([class.temporary]).
   Place assign_class(At a) {
     auto s = get<ast::Assign>(a);
@@ -1159,7 +1222,10 @@ class Gen {
     ast::QualType t = s.computation;
     std::optional<Place> temp;
     Place src;
-    if (is<ast::InitList>(rhs) || is<ast::ValueInit>(rhs)) {
+    // A call's result is an object of its own, the temporary it initializes ([stmt.return]).
+    At r = strip_parens(rhs);
+    if (is<ast::InitList>(rhs) || is<ast::ValueInit>(rhs) ||
+        ((is<ast::Call>(r) || is<ast::MemberCall>(r)) && class_prvalue(info(r)))) {
       bool zeroed = value_initializes(rhs);
       temp = begin_object(t, zeroed ? ir::Init::zero : ir::Init::indeterminate, ir::Storage::temporary);
       initialize(*temp, rhs, zeroed);
@@ -1197,6 +1263,8 @@ class Gen {
   std::vector<Loop> loops_;
   std::vector<std::optional<Place>> slots_;  // by local index
   std::optional<ValueId> this_;              // a non-static member function's `this`
+  std::optional<Place> result_;              // the object a class result initializes
+  uint32_t byval_params_ = 0, result_param_ = 0;  // as ir::Function's
   std::vector<std::vector<Ending>> temps_;   // the open full-expressions' temporaries
   std::vector<At> epilogue_;                 // a destructor's DestroyMember statements
   int branches_ = 0;                         // conditionally evaluated operands entered
