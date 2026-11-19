@@ -1237,6 +1237,24 @@ Fable decided the representation (ast.md §6.6); the Opus session wrote the code
   recorded discarded extents for `if constexpr` (#237); value-dependent mapping arguments (#209);
   `static_assert(false)` in a template that is never instantiated (#241).
 
+## Templates, ζ step 7: static data members of class templates (#88, 2026-11-18)
+
+- A class template's static data members are declared with its other members. A constexpr or
+  const integral one whose type or initializer depends on a template parameter gets its value in
+  each specialization, when the class is instantiated ([temp.inst]/3); in the template, a const
+  static member of the current instantiation is value-dependent ([temp.dep.constexpr]/2.3), so
+  partial specializations, constraints and `if constexpr` read each specialization's value.
+- Those defined in the class (constexpr or inline) are emitted for every specialization analysed
+  (`Program::member_instances`), so taking their address or binding a reference links; as with
+  variable templates, the definitions are not yet coalesced across units (#124).
+- An explicitly specialized static data member, `template<> int A<char>::x = 0;`, defines it.
+- A member whose initializer is in error is still declared, so its uses report nothing more.
+- Tests: `tests/own/templates/s7-*` (4, agreeing with Clang and GCC); 1 more draft example passes.
+  `<cstdio>`: 18 → 16 errors.
+- Not yet: a definition outside the class, `template<class T> int X<T>::n = 5;`, reported as not
+  supported (#256); an array bound or template argument that is a dependent expression other than
+  a parameter (`int a[sizeof(T)]`, `F<N - 1>`, #209); `static_assert` in a member-specification (#257).
+
 ## Bootstrap workarounds
 
 Places where ycxx's sources avoid or work around a C++26 feature because GCC 16 lacks it or

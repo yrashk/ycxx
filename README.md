@@ -42,9 +42,9 @@ build/bin/ycxx cxx hello.cpp -o hello && ./hello
   type-trait built-ins libycxx's headers use (`__is_same`, `__remove_cv`, …)
   ([docs/EXTENSIONS.md](docs/EXTENSIONS.md));
 - templates: function, class and variable templates, deduction, partial ordering, explicit and
-  partial specializations, parameter packs and fold expressions, alias templates, concepts and
-  requires-expressions in overload resolution, `if constexpr`, two-phase lookup, with Itanium
-  names identical to Clang's;
+  partial specializations, static constexpr members of class templates, parameter packs and
+  fold expressions, alias templates, concepts and requires-expressions in overload resolution,
+  `if constexpr`, two-phase lookup, with Itanium names identical to Clang's;
 - casts, `sizeof`/`alignof` of non-class types, and `decltype`;
 - constant evaluation on ycxx's own interpreter: `constexpr`, `consteval`, `constinit`,
   `static_assert` and `if consteval`, with errors that explain why something is not constant;
@@ -66,8 +66,7 @@ through the daemon, without unsaved text ever reaching a build.
 ### Not yet
 
 - The standard library and its headers. C headers such as `<stdio.h>` compile and `printf` runs;
-  libycxx's `<cstdio>` still needs static members of class templates, template template
-  parameters and pointer-to-member types.
+  libycxx's `<cstdio>` still needs template template parameters and pointer-to-member types.
 - Inheritance and virtual functions, `sizeof` of a class.
 - Access control: `private` and `protected` are not checked yet, so ycxx accepts code that
   uses private members ([#119](https://github.com/yrashk/ycxx/issues/119)).
@@ -80,7 +79,7 @@ through the daemon, without unsaved text ever reaching a build.
 ### In progress
 
 - Standard headers, starting with `<cstdio>` ([#133](https://github.com/yrashk/ycxx/issues/133)).
-- Templates: static members of class templates, then template template parameters
+- Templates: template template parameters and integer sequences
   ([#88](https://github.com/yrashk/ycxx/issues/88)).
 
 Next come exceptions ([#89](https://github.com/yrashk/ycxx/issues/89)).
