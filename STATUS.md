@@ -938,6 +938,29 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
 - A floating local no longer stops constant evaluation in its function (the thunk skips it).
 - Tests: `tests/own/unions` (7, three from the review). Six more draft examples pass.
 
+## `<cstdio>`, step 4c: operator functions; `<stdio.h>` compiles (#133, 2026-11-18)
+
+- **Operator functions** ([over.oper]): `operator@` declarator-ids for the overloadable
+  punctuators, `()` and `[]`, at namespace scope and as members; a non-member one needs a class or
+  enumeration parameter and the operator's arity, and `=`, `()`, `[]`, `->` are members only.
+  Itanium `<operator-name>` codes (`or`, `oR`, `co`, `ng`/`mi` by arity), checked against Clang's
+  symbols.
+- **[over.match.oper]:** a unary, binary or compound assignment operator with an operand of
+  class or enumeration type calls `operator@` when one is viable: the left operand's member, else
+  the non-members unqualified lookup and argument-dependent lookup find; else the built-in
+  operator. `a = b` calls a user-declared member `operator=`. Ranking against the built-in
+  candidates, postfix `++`/`--`, `()`, `[]`, `->` and conversion functions are #219.
+- `noexcept` and `noexcept(e)` on function declarators are accepted, not yet part of the type
+  (#219); `N::T(…)` and `N::T{…}` are functional casts.
+- `T (*p)(args);` with T a typedef-name declares p ([stmt.ambig]), in sema and in the splitter.
+- **`#include <stdio.h>`** (the SDK's) compiles, and `printf`, `puts`, `fputs` and `stdout` run
+  (`tests/own/headers/stdio.run.cpp`). `<cstdio>` still waits for libycxx's templates and
+  concepts (#88).
+- Member operators get the [over.oper] checks too; `S::operator@` and `N::operator@` define outside;
+  unary `*` and `&` call operator functions; a deleted or ambiguous choice is an error, not the
+  built-in operator. `N::T(…)` is a cast only when no function or variable hides N::T.
+- Tests: `tests/own/operators` (12, seven from the review), `tests/own/headers` (2).
+
 ## Templates, ζ step 1: function templates (#88, 2026-11-18)
 
 Instantiation follows ast.md §6.4 as amended by #88 (Fable's decision): declarations and
@@ -1121,6 +1144,22 @@ session's.*
   templates (`template<…> using __apply = …` in a class), with member
   templates; template template parameters (#208); value-dependent expressions as template
   arguments (#209).
+
+## Type-trait built-ins (#211, 2026-11-18)
+
+- `ycxx.lex:builtins` lists the type-trait built-ins ycxx implements (`lex::type_traits`): 29
+  predicates and 13 transformations, those libycxx probes and uses that ycxx's type system can
+  answer exactly. The preprocessor's `__has_builtin` answers 1 for exactly these, 0 for any other.
+- A predicate `__is_same(T, U)` is a `bool` prvalue constant (`Sema::trait_expr`), value-dependent
+  while a type is dependent. A transformation `__remove_cv(T)` is a type specifier
+  (`Templates::transform`); of a dependent type it is a `TTransform` that substitution applies and
+  deduction treats as a non-deduced context, mangled as Clang does (`u11__remove_cvIT_E`).
+- Listed in docs/EXTENSIONS.md. Tests: `tests/own/builtins/`. `<cstdio>`: 53 → 33 errors.
+- Not yet (#211 follow-up): the built-ins that need the object model, such as
+  `__is_constructible`, `__is_convertible`, `__is_assignable`, the `__is_trivially_*` and
+  `__is_nothrow_*` families, `__is_base_of`, `__is_standard_layout` and
+  `__reference_binds_to_temporary`; a value-dependent predicate as a template argument outside a
+  body (#209).
 
 ## Bootstrap workarounds
 

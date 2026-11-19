@@ -162,9 +162,17 @@ public:
     }
   }
 
+  // A type-transforming built-in here, `__remove_cv(`: its entry.
+  const lex::TypeTraitInfo* transform_trait_ahead(u32 j = 0) {
+    if (kind(j) != Tk::identifier || kind(j + 1) != Tk::l_paren) return nullptr;
+    const lex::TypeTraitInfo* t = s_->type_trait(name_of(tok(j)));
+    return t && t->transforms ? t : nullptr;
+  }
+
   // Whether a declaration starts here: a decl-specifier keyword, or a name that denotes a class
   // ([stmt.ambig]: what can be a declaration is one).
   bool starts_declaration() {
+    if (transform_trait_ahead()) return true;
     // [stmt.ambig]: `int(x) + 1;`, `int(3);` and `void();` are expressions; `int(x);`, `int(x) = 1;`
     // and `int(*f)(int);` declare.
     if (simple_type_keyword(kind()) && kind(1) == Tk::l_paren) {
@@ -197,6 +205,10 @@ public:
       if (k == Tk::r_paren && --depth == 0) break;
     }
     Tk after = kind(j + 1);
+    // `T (*p)(args);` and `T (&r)[3];` declare: a ptr-operator begins a nested declarator, which a
+    // parameter list or a bound may follow; `T(&x).m` is an expression.
+    if (kind(next + 1) == Tk::star || kind(next + 1) == Tk::amp || kind(next + 1) == Tk::ampamp)
+      return after != Tk::period && after != Tk::arrow;
     return after != Tk::period && after != Tk::arrow && after != Tk::l_paren && after != Tk::l_square;
   }
 
@@ -380,6 +392,23 @@ public:
       case Tk::coloncolon:
       case Tk::identifier:
         if (!any_type()) {
+          // A type-transforming built-in, `__remove_cv(T)` (docs/EXTENSIONS.md).
+          if (const lex::TypeTraitInfo* tr = transform_trait_ahead()) {
+            u32 at = pos();
+            bump();
+            bump();
+            auto t = type_id();
+            if (!t || !expect(Tk::r_paren)) {
+              d.ok = false;
+              goto done;
+            }
+            cls = s_->trait_type(tr->trait, *t, at);
+            if (!cls) {
+              d.ok = false;
+              goto done;
+            }
+            continue;
+          }
           if (qualified_ahead()) {
             // `N::C`, `::C`, `C::E`, `X<T>::E` ([dcl.type.simple]).
             if (auto q = qualified_type(0); q && kind(q->second) != Tk::l_paren) {
@@ -578,6 +607,16 @@ public:
       } while (depth > 0 && i_ + ahead < end_);
     }
   }
+  // [over.oper.general]/1: the punctuators an operator function may be named by.
+  static bool overloadable(Tk k) {
+    switch (k) {
+    case Tk::l_brace: case Tk::r_brace: case Tk::l_paren: case Tk::r_paren: case Tk::l_square: case Tk::r_square:
+    case Tk::semi: case Tk::colon: case Tk::coloncolon: case Tk::period: case Tk::question: case Tk::ellipsis:
+    case Tk::hash: case Tk::hashhash: case Tk::periodstar:
+      return false;
+    default: return true;
+    }
+  }
   // A GNU asm label after a declarator, `asm("…")`, `__asm("…")` or `__asm__("…")`: the
   // string, the symbol's name as the assembler sees it.
   std::string asm_label(bool& ok) {
@@ -634,7 +673,28 @@ public:
       for (u32 j = 0; j < next; ++j) bump();
       if (qualified_hook) qualified_hook(*sc);
     }
-    if (is(Tk::identifier)) {
+    if (!abstract && is(Tk::kw_operator)) {
+      // An operator-function-id ([over.oper.general]): `operator@`, named as the splitter spells
+      // it. Conversion functions, `new`, `delete` and `co_await` are not supported yet.
+      l.name_at = pos();
+      bump();
+      std::string spelled = "operator";
+      if ((is(Tk::l_paren) && kind(1) == Tk::r_paren) || (is(Tk::l_square) && kind(1) == Tk::r_square)) {
+        spelled += is(Tk::l_paren) ? "()" : "[]";
+        bump();
+        bump();
+      } else if (lex::is_punctuator(kind()) && overloadable(kind())) {
+        spelled += lex::spelling(kind());
+        bump();
+      } else {
+        s_->diag(pos(), Diag::not_supported, Tk::kw_operator);
+        ok = false;
+        return l;
+      }
+      l.name = s_->world().ins.names.intern(spelled);
+      l.named = true;
+      skip_attributes();
+    } else if (is(Tk::identifier)) {
       l.name = name_of(tok());
       l.named = true;
       l.name_at = pos();
@@ -668,7 +728,19 @@ public:
           bump();
         }
         l.suffixes.back().cv = sema::Cv(cv);
-        // ref-qualifiers, noexcept-specifiers and trailing return types are not supported yet.
+        // A noexcept-specifier ([except.spec]): accepted, not yet part of the function type (#219).
+        if (is(Tk::kw_noexcept)) {
+          bump();
+          if (is(Tk::l_paren)) {
+            int saved = std::exchange(angle_, 0);
+            bump();
+            Ex e = constant_expression();
+            angle_ = saved;
+            ok = e.ok() && expect(Tk::r_paren) && ok;
+          }
+        }
+        // ref-qualifiers, dynamic exception specifications and trailing return types are not
+        // supported yet.
         if (is(Tk::amp) || is(Tk::ampamp) || is(Tk::kw_noexcept) || is(Tk::kw_throw) || is(Tk::arrow)) {
           s_->diag(pos(), Diag::not_supported, kind());
           ok = false;
@@ -744,7 +816,7 @@ public:
         break;
       }
     }
-    if (kind(j) != Tk::identifier && kind(j) != Tk::tilde) return std::nullopt;
+    if (kind(j) != Tk::identifier && kind(j) != Tk::tilde && kind(j) != Tk::kw_operator) return std::nullopt;
     next = j;
     return s;
   }
@@ -819,6 +891,7 @@ public:
     if ((k == Tk::identifier && kind(2) == Tk::coloncolon) || k == Tk::coloncolon)
       return qualified_type(1).has_value();  // `N::S`, `C::E`, `::S`
     if (k == Tk::identifier && kind(2) == Tk::less && s_->type_template(name_of(tok(1)))) return true;
+    if (transform_trait_ahead(1)) return true;
     return k == Tk::identifier && kind(2) != Tk::coloncolon && s_->class_name(name_of(tok(1))).has_value();
   }
 
@@ -1227,6 +1300,7 @@ public:
     return args;
   }
   bool starts_type_id() {
+    if (transform_trait_ahead()) return true;
     if (starts_decl_specifier(kind())) return !is(Tk::kw_static) && !is(Tk::kw_extern);
     if (is(Tk::identifier) && kind(1) == Tk::less && s_->type_template(name_of(tok()))) return true;
     if (qualified_ahead()) return qualified_type(0).has_value();
@@ -1776,6 +1850,24 @@ public:
     }
     case Tk::identifier: {
       NameId n = name_of(tok());
+      // A type-testing built-in, `__is_same(T, U)` (docs/EXTENSIONS.md).
+      if (kind(1) == Tk::l_paren)
+        if (const lex::TypeTraitInfo* tr = s_->type_trait(n); tr && !tr->transforms) {
+          bump();
+          bump();
+          std::vector<QualType> args;
+          bool ok = true;
+          int saved = std::exchange(angle_, 0);
+          for (int i = 0; i < tr->arity; ++i) {
+            if (i > 0 && !expect(Tk::comma)) ok = false;
+            auto t = ok ? type_id() : std::nullopt;
+            if (!t) ok = false;
+            else args.push_back(*t);
+          }
+          angle_ = saved;
+          if (!expect(Tk::r_paren) || !ok) return {NodeId::none, begin, pos()};
+          return s_->trait_expr(tr->trait, args, begin, pos());
+        }
       if (qualified_ahead()) return qualified_id(begin);
       // `X<args>(…)` and `X<args>{…}` for a class template X ([expr.type.conv]).
       if (kind(1) == Tk::less && s_->type_template(n)) {
@@ -1991,6 +2083,10 @@ public:
     u32 name_at = pos();
     NameId n = name_of(tok());
     bump();
+    // `N::T(args)` or `N::T{…}` ([expr.type.conv]): a qualified type name, unless a function or
+    // variable of the name hides it.
+    if ((is(Tk::l_paren) || is(Tk::l_brace)) && !s_->scope_names_object(*s, n))
+      if (auto t = s_->scope_type(*s, n)) return type_conversion(*t, begin);
     if (is(Tk::less)) {
       // `N::v<args>`: a variable template of the namespace ([temp.names]/3).
       if (s->ns)

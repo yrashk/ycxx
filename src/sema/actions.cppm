@@ -90,6 +90,8 @@ public:
   // template's with the arguments substituted: an explicit specialization's, or a partial
   // specialization's that it is instantiated from ([temp.expl.spec], [temp.spec.partial]).
   virtual std::optional<QualType> specialization_type(EntityId /*v*/) { return std::nullopt; }
+  // Whether class `c`, complete or not, was declared with the class-key `union`.
+  virtual bool is_union_class(EntityId /*c*/) { return false; }
   // In an instantiation: the pack expansions the definition of what it re-analyses recorded.
   virtual const std::vector<Expansion>* pattern_expansions() { return nullptr; }
   virtual ~Questions() = default;
@@ -450,6 +452,89 @@ public:
     using_enums_.push_back({scopes_.size() - 1, types().enum_of(t)});
   }
 
+  // ------------------------------------------------------------ type-trait built-ins (docs/EXTENSIONS.md)
+
+  // The built-in `name` names, if it is one ycxx implements.
+  const lex::TypeTraitInfo* type_trait(NameId name) { return lex::type_trait(ins().names.spelling(name)); }
+  QualType innermost(QualType t) {
+    while (types().is_array(t)) t = types().canonical(types().rec(t).inner);
+    return t;
+  }
+  // Whether a class type is a union: by its class-key, which its first declaration's tokens say.
+  bool is_union_type(QualType t) {
+    if (!types().is_class(t)) return false;
+    if (const ClassRec* r = class_rec(types().class_of(t))) return r->union_;
+    return q_->is_union_class(types().class_of(t));
+  }
+  // `__trait(T)` that transforms a type ([meta.trans]): the type it gives.
+  std::optional<QualType> trait_type(lex::TypeTrait t, QualType arg, u32 at) {
+    auto r = templates().transform(t, arg);
+    if (!r) diag(at, Diag::trait_not_applicable, arg);
+    return r;
+  }
+  // `__trait(T…)` that tests types ([meta.unary], [meta.rel]): a `bool` prvalue, value-dependent
+  // while a type is dependent.
+  Ex trait_expr(lex::TypeTrait t, std::span<const QualType> args, u32 begin, u32 end) {
+    using enum lex::TypeTrait;
+    QualType b = builtin(Builtin::bool_);
+    if (std::ranges::any_of(args, [&](QualType a) { return types().is_dependent(a); })) return dependent_node({}, begin, end, b);
+    QualType x = args[0], c = types().canonical(x);
+    auto cls = [&]() -> const ClassRec* {
+      if (!types().is_class(c)) return nullptr;
+      if (!require_complete(c, begin)) return nullptr;
+      return class_rec(types().class_of(c));
+    };
+    bool v = false;
+    switch (t) {
+    case is_same: v = c == types().canonical(args[1]); break;
+    case is_void: v = types().is_void(c); break;
+    case is_integral: v = types().is_integral(c); break;
+    case is_floating_point: v = types().is_floating(c); break;
+    case is_arithmetic: v = types().is_integral(c) || types().is_floating(c); break;
+    case is_enum: v = types().is_enum(c); break;
+    case is_scoped_enum:
+      if (types().is_enum(c))
+        if (const EnumRec* e = enum_rec(types().enum_of(c))) v = e->scoped;
+      break;
+    // The class-key says whether a class is a union, complete or not ([class.pre]).
+    case is_class: v = types().is_class(c) && !is_union_type(c); break;
+    case is_union: v = is_union_type(c); break;
+    case is_pointer: v = types().is_pointer(c); break;
+    // ycxx has no pointers to members yet, nor virtual functions, abstract or final classes: these
+    // are false of every type it has.
+    case is_member_pointer:
+    case is_member_object_pointer:
+    case is_member_function_pointer:
+    case is_polymorphic:
+    case is_abstract:
+    case is_final:
+    case has_virtual_destructor: v = false; break;
+    case is_reference: v = types().is_reference(c); break;
+    case is_lvalue_reference: v = types().is_reference(c) && !types().rec(c).rvalue_ref; break;
+    case is_rvalue_reference: v = types().is_reference(c) && types().rec(c).rvalue_ref; break;
+    case is_array: v = types().is_array(c); break;
+    case is_bounded_array: v = types().is_array(c) && types().rec(c).bound_value != ConstId::none; break;
+    case is_unbounded_array: v = types().is_array(c) && types().rec(c).bound_value == ConstId::none; break;
+    case is_function: v = types().is_function(c); break;
+    case is_object: v = types().is_object(c); break;
+    // An array's cv-qualifiers are its elements' ([basic.type.qualifier]/3).
+    case is_const: v = Types::is_const(innermost(c)); break;
+    case is_volatile: v = Types::is_volatile(innermost(c)); break;
+    case is_empty:
+      // [meta.unary.prop]: a complete class, not a union, with no non-static data members.
+      if (is_union_type(c)) v = false;
+      else if (const ClassRec* r = cls()) v = r->fields.empty();
+      else if (types().is_class(c)) return {NodeId::none, begin, end};
+      break;
+    case is_aggregate:
+      if (types().is_class(c) && !cls()) return {NodeId::none, begin, end};
+      v = this->is_aggregate(c);
+      break;
+    default: break;
+    }
+    return bool_literal(v, begin, end);
+  }
+
   // ------------------------------------------------------------ qualified names ([basic.lookup.qual])
 
   // What a nested-name-specifier names: a namespace (none for the global one) or a class or
@@ -510,6 +595,18 @@ public:
       return std::nullopt;
     }
     return std::nullopt;
+  }
+  // Whether `S::n` names a function or variable, which hides a type of that name in its scope
+  // ([basic.scope.hiding]/2): `::stat(path, &buf)` calls the function.
+  bool scope_names_object(const Scope& s, NameId n) {
+    if (s.ns)
+      return std::ranges::any_of(q_->namespace_members(*s.ns, n), [](const ast::DeclSema& d) {
+        return d.kind == ast::DeclKind::function || d.kind == ast::DeclKind::variable;
+      });
+    if (s.type && types().is_class(*s.type))
+      if (const ClassRec* c = class_rec(types().class_of(*s.type)))
+        return std::ranges::any_of(c->members, [&](const MemberDeclRec& m) { return m.name == n; });
+    return false;
   }
   // `S::n` naming a type.
   std::optional<QualType> scope_type(const Scope& s, NameId n) {
@@ -2489,10 +2586,64 @@ public:
     return true;
   }
 
+  // [over.match.oper]: an operator with an operand of class or enumeration type calls an operator
+  // function when one is viable: a member `operator@` of the left operand's class, else the
+  // non-member ones that unqualified lookup and argument-dependent lookup find
+  // ([over.match.oper]/3). None viable: the built-in operator. (A member and a non-member are not
+  // yet ranked against each other, nor against the built-in candidates.)
+  std::optional<Ex> overloaded(std::string_view op, std::vector<Ex> operands, u32 begin, u32 end, u32 op_at) {
+    auto user_type = [&](const Ex& e) {
+      QualType t = types().referee(e.type());
+      return types().is_class(t) || types().is_enum(t);
+    };
+    if (std::ranges::none_of(operands, user_type) || any_dependent(operands)) return std::nullopt;
+    NameId name = ins().names.intern(std::string("operator") + std::string(op));
+    std::size_t n = diag_count();
+    QualType lt = types().referee(operands[0].type());
+    if (types().is_class(lt))
+      if (const ClassRec* c = class_rec(types().class_of(lt));
+          c && std::ranges::any_of(c->members, [&](const MemberDeclRec& m) { return m.name == name && m.is_function && !m.is_static; })) {
+        Ex m = member(operands[0], false, name, operands[0].end, op_at, op_at);
+        Ex r = m.ok() ? call(m, std::vector<Ex>(operands.begin() + 1, operands.end()), end, op_at) : m;
+        if (r.ok()) return Ex{r.id, begin, end, r.info};
+        truncate_diags(n);
+      }
+    std::vector<ast::DeclSema> set;
+    auto add = [&](const ast::DeclSema& d) {
+      if (d.kind == ast::DeclKind::function && d.entity != EntityId::none &&
+          !std::ranges::any_of(set, [&](const ast::DeclSema& x) { return x.entity == d.entity; }))
+        set.push_back(d);
+    };
+    for (const auto& o : own)
+      if (o.name == name) add(o.sema);
+    for (DeclId d : q_->visible_decls(name, directives())) add(q_->decl_sema(d));
+    for (const Ex& o : operands)
+      if (auto ns = associated_namespace(o.type()))
+        for (const ast::DeclSema& d : q_->namespace_members(*ns, name)) add(d);
+    if (set.empty()) return std::nullopt;
+    ExprInfo info{builtin(Builtin::overload_set), ValueCategory::lvalue, 0};
+    Ex callee = node(ast::DeclRef{info, set.front().entity}, begin, begin, info);
+    overloads_[std::to_underlying(callee.id)] = std::move(set);
+    Ex r = call(callee, std::move(operands), end, op_at);
+    if (!r.ok()) {
+      // A deleted or ambiguous choice makes the expression ill-formed ([over.match.oper]/3,
+      // [over.match.best]); only when no candidate is viable does the built-in operator apply.
+      for (std::size_t i = n; i < diags_->size(); ++i)
+        if ((*diags_)[i].id == diag_id(Diag::deleted_function) || (*diags_)[i].id == diag_id(Diag::ambiguous_call))
+          return Ex{NodeId::none, begin, end};
+      truncate_diags(n);
+      return std::nullopt;
+    }
+    return Ex{r.id, begin, end, r.info};
+  }
+
   Ex unary(ast::UnaryOp op, Ex e, u32 begin, u32 end, u32 op_at) {
     using enum ast::UnaryOp;
     if (!e.ok()) return {NodeId::none, begin, end};
     if (dependent(e)) return dependent_node({e}, begin, end);
+    static constexpr std::string_view unary_spellings[] = {"+", "-", "!", "~", "*", "&", "++", "--", "", ""};
+    if (std::string_view sp = unary_spellings[std::to_underlying(op)]; !sp.empty())
+      if (auto o = overloaded(sp, {e}, begin, end, op_at)) return *o;
     auto make = [&](Ex operand, QualType t, ValueCategory cat) {
       ExprInfo info{t, cat, 0};
       return node(ast::Unary{info, op, at(operand, begin)}, begin, end, info);
@@ -2561,6 +2712,9 @@ public:
     u32 begin = l.begin, end = r.end;
     if (!l.ok() || !r.ok()) return {NodeId::none, begin, end};
     if (dependent(l) || dependent(r)) return dependent_node({l, r}, begin, end);
+    static constexpr std::string_view binary_spellings[] = {"*", "/", "%", "+", "-", "<<", ">>", "<", ">", "<=", ">=",
+                                                            "==", "!=", "&", "^", "|", "&&", "||", ","};
+    if (auto o = overloaded(binary_spellings[std::to_underlying(op)], {l, r}, begin, end, op_at)) return *o;
     auto bin = [&](ast::BinaryOp k, Ex a, Ex c, QualType t) {
       ExprInfo info{t, ValueCategory::prvalue, 0};
       return node(ast::Binary{info, k, at(a, begin), at(c, begin)}, begin, end, info);
@@ -2687,6 +2841,9 @@ public:
     u32 begin = l.begin, end = r.end;
     if (!l.ok() || !r.ok()) return {NodeId::none, begin, end};
     if (dependent(l) || dependent(r)) return dependent_node({l, r}, begin, end, std::nullopt, ValueCategory::lvalue);
+    // `=` is a member only ([over.assign]); `operator_function_ok` rejects non-member ones.
+    static constexpr std::string_view assign_spellings[] = {"=", "*=", "/=", "%=", "+=", "-=", "<<=", ">>=", "&=", "^=", "|="};
+    if (auto o = overloaded(assign_spellings[std::to_underlying(op)], {l, r}, begin, end, op_at)) return *o;
     if (!check_modifiable(l, op_at) || !check_class_assignable(l, op_at)) return {NodeId::none, begin, end};
     QualType lt = l.type();
     QualType computation = Types::unqualified(lt);

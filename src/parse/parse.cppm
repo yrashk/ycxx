@@ -145,6 +145,20 @@ public:
         return k == lex::Tk::kw_union;
     return false;
   }
+  // Whether class `c` was declared with `union`, complete or not: the class-key of its first
+  // declaration before `item` (a specialization's, its template's).
+  bool is_union_class(EntityId c, u32 item) {
+    if (EntityId t = w_->entities.rec(c).templ; t != EntityId::none) c = t;
+    auto it = decls_.find(std::to_underlying(c));
+    if (it == decls_.end() || it->second.empty() || it->second.front().first > item) return false;
+    u32 k = it->second.front().first;
+    const items::Item& i = items_->items[k];
+    if (i.kind == ItemKind::class_def) return class_rec_is_union(k);
+    for (u32 t = i.end; t-- > i.begin;)
+      if (lex::Tk kk = r_->tokens[t].kind; kk == lex::Tk::kw_union || kk == lex::Tk::kw_struct || kk == lex::Tk::kw_class)
+        return kk == lex::Tk::kw_union;
+    return false;
+  }
   // An entity's GNU asm label: its symbol as written (docs/EXTENSIONS.md); empty if it has none.
   std::string asm_label(EntityId e) const {
     auto it = asm_labels_.find(std::to_underlying(e));
@@ -866,6 +880,7 @@ public:
   bool instantiation_gave_up() override { return p_->instantiation_gave_up(); }
   std::optional<QualType> specialization_type(EntityId v) override { return p_->specialization_type(v, point()); }
   const std::vector<sema::Expansion>* pattern_expansions() override { return at_point ? p_->expansions(item_, 0) : nullptr; }
+  bool is_union_class(EntityId c) override { return p_->is_union_class(c, point()); }
   std::optional<ast::DeclSema> earlier_member(ast::NameId name) override {
     const items::Item& it = p_->items().items[item_];
     if (it.parent == items::none || p_->items().items[it.parent].kind != ItemKind::class_def) return std::nullopt;
@@ -925,6 +940,7 @@ public:
   bool instantiation_gave_up() override { return p_->instantiation_gave_up(); }
   std::optional<QualType> specialization_type(EntityId v) override { return p_->specialization_type(v, p_->end()); }
   const std::vector<sema::Expansion>* pattern_expansions() override { return p_->expansions(item_, 1); }
+  bool is_union_class(EntityId c) override { return p_->is_union_class(c, p_->end()); }
   bool dependent_call(sema::u32 offset) override {
     return p_->dependent_call(item_, offset);
   }
@@ -1269,7 +1285,10 @@ private:
       // `class-key identifier ;` declares the class ([dcl.type.elab]); it stays incomplete until
       // its definition.
       ps_.bump();
-      if (spec.ok) decls_.push_back(class_decl(s_.types().class_of(spec.type), false));
+      if (spec.ok) {
+        decls_.push_back(class_decl(s_.types().class_of(spec.type), false));
+        p_->declared(decls_.back(), k_);  // its class-key says whether it is a union
+      }
       if (!spec.ok || sema::Types::cv(spec.type) != sema::Cv::none || spec.is_static || spec.is_extern) bad();
       return;
     }
@@ -1381,6 +1400,56 @@ private:
         return true;
       }
     return false;
+  }
+
+  // A member operator function ([over.oper.general]/7–10, [over.unary], [over.binary],
+  // [over.assign]): not static except `()` and `[]` ([over.call], [over.sub]), and with the
+  // operator's arity less the object.
+  bool member_operator_ok(const parse::Declarator& d, bool is_static) {
+    std::string_view n = p_->world().ins.names.spelling(d.name);
+    if (!n.starts_with("operator") || n.size() == 8) return true;
+    std::string_view op = n.substr(8);
+    if (op == "()" || op == "[]") return true;
+    if (is_static) {
+      s_.diag(d.name_at, Diag::operator_static, d.name);
+      return false;
+    }
+    std::size_t count = d.params.size();
+    bool ok = op == "->"                                  ? count == 0
+              : op == "~" || op == "!"                    ? count == 0
+              : op == "+" || op == "-" || op == "*" || op == "&" || op == "++" || op == "--" ? count <= 1
+                                                                                             : count == 1;
+    if (!ok) s_.diag(d.name_at, Diag::operator_arity, d.name);
+    return ok;
+  }
+
+  // A non-member operator function ([over.oper.general]/7–10): a parameter of class or enumeration
+  // type (or a reference to one), one or two of them, and not `=`, `()`, `[]` or `->`, which only
+  // a member may be.
+  bool operator_function_ok(const parse::Declarator& d) {
+    std::string_view n = p_->world().ins.names.spelling(d.name);
+    if (!n.starts_with("operator") || n.size() == 8) return true;
+    std::string_view op = n.substr(8);
+    sema::Types& types = s_.types();
+    if (op == "=" || op == "()" || op == "[]" || op == "->") {
+      s_.diag(d.name_at, Diag::operator_member_only, d.name);
+      return false;
+    }
+    std::size_t count = d.params.size();
+    bool unary_only = op == "~" || op == "!", binary_only = !(unary_only || op == "+" || op == "-" || op == "*" || op == "&" ||
+                                                              op == "++" || op == "--");
+    if (count == 0 || count > 2 || (unary_only && count != 1) || (binary_only && count != 2)) {
+      s_.diag(d.name_at, Diag::operator_arity, d.name);
+      return false;
+    }
+    if (!std::ranges::any_of(d.params, [&](const parse::Param& p) {
+          QualType t = types.referee(p.type);
+          return types.is_class(t) || types.is_enum(t) || types.is_dependent(t);
+        })) {
+      s_.diag(d.name_at, Diag::operator_needs_class, d.name);
+      return false;
+    }
+    return true;
   }
 
   // A typedef-name or alias-declaration at namespace scope ([dcl.typedef]). In its scope it may
@@ -2379,6 +2448,7 @@ private:
   bool member_function_or_static(const DeclSpec& spec, parse::Declarator& d, ast::DeclSema c) {
     sema::Types& types = s_.types();
     bool fn = types.is_function(d.type);
+    if (fn && !member_operator_ok(d, spec.is_static)) return false;
     bool is_def = it_->kind == ItemKind::function;
     ast::DeclSema sem = class_decl(c.entity, false);
     sem.type = d.type;
@@ -2656,6 +2726,7 @@ private:
           if (o.name == d.name && o.sema.kind != ast::DeclKind::class_) prior.push_back(o.sema);
         if (clashes_with_using(d.name, d.name_at, fn ? ast::DeclKind::function : ast::DeclKind::variable)) return false;
       }
+      if (fn && !d.qualified && !operator_function_ok(d)) return false;
       if (fn) {
         if (!explicit_lang && !prior.empty() && prior.back().kind == ast::DeclKind::function)
           lang = s_.world().entities.rec(prior.back().entity).lang;  // [dcl.link]/6: inherited

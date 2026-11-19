@@ -3,6 +3,7 @@
 export module ycxx.lex;
 
 export import :tok;
+export import :builtins;
 export import :unicode_tables;
 export import :unicode;
 export import :diag;
