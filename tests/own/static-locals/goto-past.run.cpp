@@ -2,6 +2,7 @@
 // is well-formed ([stmt.dcl]/2 restricts only automatic variables); the skipped variable is not
 // initialized then, and is initialized the first time control does pass through its
 // declaration ([stmt.dcl]/3).
+// XFAIL: ycxx needs `goto` (#267, PR #352), which this branch does not have yet
 // EXIT: 0
 int inits = 0;
 

@@ -3,6 +3,7 @@
 // control has never passed through their declarations. A goto may jump past a static block
 // variable's declaration ([stmt.dcl]/2 forbids that only for automatic variables). A static
 // block variable without an initializer is zero-initialized ([basic.start.static]/2).
+// XFAIL: ycxx needs `goto` (#267, PR #352), which this branch does not have yet
 // EXIT: 0
 int sum(bool skip) {
   if (skip) goto use;
