@@ -1376,8 +1376,8 @@ Fable decided the representation (ast.md §6.6); the Opus session wrote the code
   so the SDK's `sys/cdefs.h` no longer warns "Unsupported compiler detected". Not `__GNUG__`,
   `__clang__` or `__llvm__`. libycxx tests `__ycxx__` first (yrashk/libycxx#28).
 - What the SDK's `__GNUC__` paths then use, in the headers libycxx's C headers reach, is in
-  docs/EXTENSIONS.md. New: `__builtin_va_list`, the target's va_list type (`char*`;
-  `ast::Target::va_list`), found where lookup finds nothing else (`Sema::builtin_type_name`).
+  docs/EXTENSIONS.md. `__builtin_va_list` names the target's va_list type (`char*` on Darwin)
+  where lookup finds nothing else (`ast::Target::va_list`, `Sema::builtin_type_name`).
   The `__builtin_*` functions ycxx lacks (`__builtin_fabsf`, `__builtin_inff`, `__builtin_alloca`,
   `__builtin_offsetof`, …) are diagnosed as "built-in function '…' is not supported yet", their
   arguments skipped (`lex::lacking_builtins`, `Sema::unsupported_builtin`). Any other `__builtin_`
@@ -1408,9 +1408,17 @@ Fable decided the representation (ast.md §6.6); the Opus session wrote the code
   request is consumed, and partial inclusions can precede libycxx's full `<cstddef>` inclusion.
   The full resource header supplies `max_align_t` with 16-byte alignment (AMD64 psABI §3.1.2).
   `unit.pp` exercises both paths through the configured header search.
-- glibc's `<stdio.h>` now reaches its `__need___va_list` request for `<stdarg.h>`. Compiling
-  `<stdio.h>` still needs a compiler resource `<stdarg.h>` and the System V `__builtin_va_list`
-  type (#133).
+
+## Linux compiler resource `<stdarg.h>` (#383)
+
+- Linux `__builtin_va_list` is an array of one compiler-owned record with the two unsigned
+  offsets and two pointers of the AMD64 psABI §3.5.7. Ordinary array and record semantics give it
+  size 24 and alignment 8 and adjust it to a pointer as a function parameter ([dcl.array],
+  [dcl.fct]). The builtin name also works with explicit global qualification.
+- The resource `<stdarg.h>` consumes each `__need___va_list` request and supplies the guarded
+  `__gnuc_va_list` typedef. A full include also supplies `va_list` ([cstdarg.syn]). glibc's
+  `<stdio.h>` preprocesses, and `unit.linux_stdarg` checks that path, both inclusion orders,
+  and type semantics. Variadic operations are tracked in #248.
 
 ## Templates, ζ step 8: template template parameters and `__make_integer_seq` (#88, #208, 2026-11-19)
 

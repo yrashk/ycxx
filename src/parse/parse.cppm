@@ -56,6 +56,7 @@ public:
   Program(sema::World& w, const pp::Region& r, const items::Items& its, u32 template_depth = pp::Config::default_template_depth)
       : instantiation_limit(template_depth), w_(&w), r_(&r), items_(&its), item_cells_(its.items.size()), body_cells_(its.items.size()),
         class_cells_(its.items.size()) {
+    w.install_builtin_classes(classes_);
     for (const items::Item& it : its.items) {
       ItemId id = w.ins.items.add<ItemId>(it.id);
       ids_.push_back(id);
@@ -174,7 +175,8 @@ public:
     // A class template specialization is instantiated where it must be complete ([temp.inst]/2),
     // after its template's definition, unless it is explicitly specialized ([temp.expl.spec]).
     if (it == class_items_.end()) {
-      // A closure type is complete once its lambda's body ends, where its record is published.
+      // Built-in classes are complete from the start. A closure type is complete once its lambda's
+      // body ends, where its record is published.
       if (templ == EntityId::none && classes_.is_defined(c)) return true;
       if (templ == EntityId::none || explicitly_specialized(c, item)) return false;
       const sema::ClassRec* r = instantiate_class(c, item);
