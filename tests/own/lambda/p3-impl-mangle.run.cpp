@@ -10,12 +10,18 @@ inline int k() {
   auto c = [](auto x, auto& y) { return x + y; };
   return a(1) + int(b(2L, 3)) + c(1, z) + int(a(2L));
 }
+inline long packs() {
+  auto s = [](auto... xs) { return (xs + ... + 0); };
+  auto c = []<class... Ts>(Ts... xs) { return sizeof...(xs); };
+  auto m = [](int a, auto... rest) { return a * (1 + ... + rest); };
+  return s(1, 2L) + long(c(1, 'a')) + m(2, 3);
+}
 template<class T> int t(T v) {
   auto g = [v](auto x) { return x + v; };
   return g(1);
 }
 int peer_check();
 int main() {
-  if (k() != 15 || t(2) != 3) return 1;
+  if (k() != 15 || t(2) != 3 || packs() != 13) return 1;
   return peer_check();
 }

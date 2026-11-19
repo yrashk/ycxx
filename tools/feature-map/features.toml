@@ -857,8 +857,8 @@ std = 'C++14'
 ftm = '__cpp_generic_lambdas'
 detect = '(?:^|[=(,{;:?!]|\breturn)\s*\[[^\[\]]*\]\s*\([^)]*\bauto\b'
 status = 'partial'
-note = 'not yet parameter packs or conversion to a function pointer'
-issues = [350, 339]
+note = 'not yet conversion to a function pointer'
+issues = [339]
 probe = '''
 int main() { auto id = [](auto x) { return x; }; return id(0) + id('\0'); }
 '''
@@ -941,7 +941,8 @@ clauses = ['expr.prim.lambda.capture']
 std = 'C++20'
 ftm = '__cpp_init_captures'
 detect = '(?:^|[=(,{;:?!]|\breturn)\s*\[[^\[\]]*\.\.\.[^\[\]]*\]\s*[({<m]'
-status = 'missing'
+status = 'partial'
+note = '`[xs...]`; not yet init-capture packs `[...ys = xs]`'
 issues = [350]
 probe = '''
 template<class... T> int sum(T... t) { auto f = [...u = t] { return (0 + ... + u); }; return f(); }

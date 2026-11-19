@@ -59,6 +59,7 @@ struct GenericClosure {
   u16 flags = 0;
   std::vector<ast::LocalRec> consts;
   std::vector<ConstId> const_values;
+  std::vector<Expansion> expansions;  // the pack expansions of its body, which its specializations expand
 };
 
 // The enclosing function's template arguments and entity where a generic lambda is defined, for
@@ -1490,10 +1491,13 @@ public:
     if (!pattern_packs_.empty() && !std::ranges::contains(pattern_packs_.back(), r)) pattern_packs_.back().push_back(r);
   }
   // Whether this is an instantiation of a definition with expansions: where they are is known.
-  bool expansion_at_any() { return q_->pattern_expansions() != nullptr; }
+  bool expansion_at_any() { return pattern_expansions() != nullptr; }
+  // A generic lambda's specialization reads the expansions its definition recorded.
+  const std::vector<Expansion>* expansions_override = nullptr;
+  const std::vector<Expansion>* pattern_expansions() { return expansions_override ? expansions_override : q_->pattern_expansions(); }
   // The expansion of the definition at `begin`, in an instantiation.
   const Expansion* expansion_at(u32 begin) {
-    if (const std::vector<Expansion>* es = q_->pattern_expansions())
+    if (const std::vector<Expansion>* es = pattern_expansions())
       for (const Expansion& e : *es)
         if (e.begin == begin) return &e;
     return nullptr;
@@ -1534,23 +1538,24 @@ public:
   bool in_expansion() const { return !frames_.empty(); }
   // A function parameter pack of the function being instantiated: its name, and its parameters'
   // locals, one per element ([temp.variadic]/8).
-  void declare_param_pack(NameId name) { param_packs_.push_back({name, {}}); }
+  void declare_param_pack(NameId name) { param_packs_.push_back({name, {}, u32(lambdas_.size())}); }
   void declare_pack_element(NameId name, QualType type) {
     u32 l = declare_local(no_name(), type, local_flag::parameter, 0, false);
     locals_[l].name = name;
     auto it = std::ranges::find(param_packs_, name, &ParamPack::name);
     if (it == param_packs_.end()) {
-      param_packs_.push_back({name, {}});
+      param_packs_.push_back({name, {}, u32(lambdas_.size())});
       it = param_packs_.end() - 1;
     }
     it->locals.push_back(l);
   }
   // The local a function parameter pack's name stands for here: its element of the innermost
   // expansion naming it; none outside every expansion.
-  std::optional<u32> pack_element(NameId name, bool& is_pack) {
+  std::optional<u32> pack_element(NameId name, bool& is_pack, u32* ctx = nullptr) {
     auto it = std::ranges::find(param_packs_, name, &ParamPack::name);
     is_pack = it != param_packs_.end();
     if (!is_pack) return std::nullopt;
+    if (ctx) *ctx = it->ctx;
     note_pack({0, 0, name});
     for (auto f = frames_.rbegin(); f != frames_.rend(); ++f)
       if (std::ranges::contains(f->packs, PackRef{0, 0, name}))
@@ -1743,6 +1748,7 @@ public:
     u32 at = 0;
     Ex init;
     std::optional<std::pair<u32, u32>> source;  // (context, key) of a simple capture's entity
+    bool pack = false;  // `xs...`: each element of a function parameter pack ([expr.prim.lambda.capture]/17)
   };
   struct LambdaParam {
     NameId name{};
@@ -1855,6 +1861,16 @@ public:
   // is not an odr-use ([basic.def.odr]/5, [expr.prim.lambda.capture]/8).
   Ex captured(u32 ctx, u32 key, NameId name, u32 begin, u32 end) {
     if (ctx == lambdas_.size()) return source_expr(ctx, key, begin, end);
+    // A function parameter pack of a template's definition: its uses are expanded, and captured,
+    // in each instantiation ([temp.variadic], [expr.prim.lambda.capture]/17).
+    if (!(key & capture_bit) && types().kind(lambdas_[ctx].outer_locals[key].type) == TypeKind::pack_expansion) {
+      if (pattern_packs_.empty()) {
+        diag(begin, Diag::unexpanded_pack, name);
+        return {NodeId::none, begin, end};
+      }
+      note_pack({0, 0, name});
+      return dependent_node({}, begin, end);
+    }
     // In an unevaluated operand naming it is no odr-use: no capture ([expr.prim.lambda.capture]/8),
     // only its type, and for `decltype` its declared type.
     if (unevaluated > 0) {
@@ -2001,7 +2017,10 @@ public:
     Fp128 sig = ast::seed("ycxx.sema.closure");
     for (QualType p : types().rec(call_type).params) sig = ast::mix(sig, types().fp(types().canonical(p)));
     sig = ast::mix(sig, u64(spec.variadic));
-    for (const ast::TemplateParamSema& h : spec.head) sig = ast::mix(sig, u64(std::to_underlying(h.kind)) + 1);
+    // The <lambda-sig> declares the explicit template parameters only (`Ty`, `Tp`), so they and
+    // the invented ones of `auto` parameters make different signatures.
+    for (const ast::TemplateParamSema& h : spec.head)
+      if (h.name != no_name()) sig = ast::mix(sig, (u64(std::to_underlying(h.kind)) + 1) * 4 + u64(h.pack));
     u32 ordinal = 0;
     for (const auto& [sc, sg] : completed_closures_)
       if (sc == scope && sg == sig) ++ordinal;
@@ -2041,6 +2060,24 @@ public:
       }
     for (CaptureSpec& c : spec.captures) {
       using K = CaptureSpec::Kind;
+      if (c.pack) {
+        // A pack capture: each element of an instantiation's function parameter pack; in a
+        // template's definition, nothing yet.
+        auto it = std::ranges::find(param_packs_, c.name, &ParamPack::name);
+        if (it == param_packs_.end()) {
+          auto src = capture_source(c.name);
+          if (!src || src->second & capture_bit || types().kind(source_type(src->first, src->second)) != TypeKind::pack_expansion) {
+            diag(c.at, Diag::cannot_capture, c.name);
+            return false;
+          }
+          continue;
+        }
+        for (u32 l : it->locals) {
+          Ex src = captured(it->ctx, l, c.name, c.at, c.at + 1);
+          if (!src.ok() || !add_capture(f, it->ctx, l, c.name, c.kind == K::ref, src)) return false;
+        }
+        continue;
+      }
       if (!c.init.ok() && c.kind != K::this_ && c.kind != K::star_this) return false;
       bool twice = std::ranges::any_of(f.fields, [&](const FieldRec& x) { return x.name == c.name && c.name != no_name(); });
       if (twice || ((c.kind == K::this_ || c.kind == K::star_this) && f.this_field)) {
@@ -2184,7 +2221,10 @@ public:
       for (std::size_t i = 0; i < nparams && i < locals.size(); ++i) names.push_back(locals[i].name);
       std::vector<NameId> captures;
       for (const FieldRec& fd : fr.fields) captures.push_back(fd.name);
-      generic_closures_[std::to_underlying(fr.call)] = {fr.closure, fr.call, call_type, fr.head, names, captures, body_begin, flags, consts, values};
+      std::vector<Expansion> exps;
+      for (const Expansion& x : expansions)
+        if (x.begin >= body_begin && x.begin < end) exps.push_back(x);
+      generic_closures_[std::to_underlying(fr.call)] = {fr.closure, fr.call, call_type, fr.head, names, captures, body_begin, flags, consts, values, exps};
       q_->generic_defined(generic_closures_[std::to_underlying(fr.call)]);
     }
     std::vector<NameId> capture_names;
@@ -2233,6 +2273,7 @@ public:
     Ex ret = node(ast::Return{at(call, at_)}, at_, at_);
     return node(ast::Compound{b_->list(std::vector<Child>{at(ret, at_)})}, at_, at_).id;
   }
+  bool has_generic_lambdas() const { return !generic_closures_.empty(); }
   // Whether this is a template's definition (or a generic lambda's), not an instantiation.
   bool in_pattern() const { return templated() && !instantiating(); }
   // `t` with a generic lambda's template parameters (`head`, at its depth) at depth 0, as they
@@ -2314,8 +2355,20 @@ public:
     lambdas_.push_back(std::move(f));
     push_scope();
     guard_scope();
+    // The parameters: a pack's elements are its specialization's parameters at its place
+    // ([temp.variadic]/8).
     TypeRec r = types().rec(spec_type);
-    for (std::size_t i = 0; i < r.params.size(); ++i) declare_local(i < g.params.size() ? g.params[i] : no_name(), r.params[i], local_flag::parameter, 0, false);
+    TypeRec pat = types().rec(g.call_type);
+    std::size_t elems = r.params.size() + 1 >= pat.params.size() ? r.params.size() + 1 - pat.params.size() : 0;
+    for (std::size_t i = 0, k = 0; i < pat.params.size(); ++i) {
+      NameId n = i < g.params.size() ? g.params[i] : no_name();
+      if (types().kind(pat.params[i]) == TypeKind::pack_expansion) {
+        declare_param_pack(n);
+        for (std::size_t e = 0; e < elems && k < r.params.size(); ++e) declare_pack_element(n, r.params[k++]);
+        continue;
+      }
+      if (k < r.params.size()) declare_local(n, r.params[k++], local_flag::parameter, 0, false);
+    }
     const LambdaFrame& fr = lambdas_.back();
     for (u32 i = 0; i < fr.fields.size(); ++i)
       if (fr.fields[i].name != no_name() && (!fr.this_field || *fr.this_field != i)) scopes_.back().push_back({fr.fields[i].name, capture_bit | i});
@@ -3207,7 +3260,10 @@ public:
     // A function parameter pack of an instantiation, unless a block declares the name: its element
     // ([temp.variadic]/8).
     bool is_pack = false;
-    if (auto l = pack_element(name, is_pack)) {
+    u32 pack_ctx = 0;
+    if (auto l = pack_element(name, is_pack, &pack_ctx)) {
+      // An element of an enclosing function's pack, in a lambda: captured as any local is.
+      if (pack_ctx != lambdas_.size()) return captured(pack_ctx, *l, name, begin, end);
       ExprInfo info{types().referee(locals_[*l].type), ValueCategory::lvalue, 0};
       return node(ast::LocalRef{info, *l}, begin, end, info);
     }
@@ -4561,6 +4617,7 @@ private:
   struct ParamPack {
     NameId name;
     std::vector<u32> locals;
+    u32 ctx = 0;  // the context whose locals they are: the function's, or a lambda's
   };
   std::vector<ParamPack> param_packs_;
   std::vector<std::optional<ConstId>> local_values_;  // by local

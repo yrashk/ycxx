@@ -4124,8 +4124,10 @@ public:
     std::vector<sema::Expansion> none;
     std::vector<u32> no_calls;
     const bool keeps = templated && !inst_;
+    // A body with generic lambdas keeps its expansions too: their specializations expand them.
+    const bool keep_expansions = keeps || s_.has_generic_lambdas();
     const bool deduced = f && s_.return_deduced() && !keeps;
-    ast::BodySema v{root.id, b_.seq(std::span<const ast::LocalRec>(locals)), expansion_list(b_, keeps ? s_.expansions : none),
+    ast::BodySema v{root.id, b_.seq(std::span<const ast::LocalRec>(locals)), expansion_list(b_, keep_expansions ? s_.expansions : none),
                     b_.seq(std::span<const u32>(keeps ? s_.dependent_calls : no_calls)),
                     deduced ? s_.with_return(f->type, s_.return_type()) : s_.builtin(sema::Builtin::void_), u8(deduced),
                     b_.seq(std::span<const ast::ClosureDef>(s_.closures))};
@@ -4144,6 +4146,7 @@ public:
       u32 l = s_.declare_local(gi.g.consts[i].name, gi.g.consts[i].type, 0, 0, false);
       s_.set_local_value(l, gi.g.const_values[i]);
     }
+    if (!gi.g.expansions.empty()) s_.expansions_override = &gi.g.expansions;
     s_.open_generic(gi.g, gi.spec, gi.spec_type, gi.args);
     ps_.seek(it_->body_begin + gi.g.body_begin);
     Ex body = ps_.compound_statement();
@@ -4937,6 +4940,12 @@ sema::GenericResult Program::generic_instance(EntityId spec, const sema::Generic
       x.flags = c.flags;
       x.consts = w_->ins.seqs.elements(c.consts);
       x.captures = w_->ins.seqs.elements(c.captures);
+      for (const ast::ExpansionRec& e : w_->ins.seqs.elements(body->expansions)) {
+        if (e.begin < c.body_begin || e.begin >= c.end) continue;
+        sema::Expansion xe{e.begin, e.end, {}};
+        for (const ast::PackRefRec& pr : w_->ins.seqs.elements(e.packs)) xe.packs.push_back({pr.depth, pr.index, pr.fn});
+        x.expansions.push_back(std::move(xe));
+      }
       x.const_values = w_->ins.seqs.elements(c.const_values);
       g = std::move(x);
     }

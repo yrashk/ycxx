@@ -1088,7 +1088,8 @@ public:
         ok = false;
       }
       // `T...` with no pack in T is `T, ...` ([dcl.fct]/3).
-      if (d.pack && !s_->names_pack(t)) {
+      // A generic lambda's `auto... xs` names the pack its placeholder invents (lambda_expression).
+      if (d.pack && !s_->names_pack(t) && !(placeholder_params && s_->types().has_placeholder(t))) {
         if (d.named) {
           s_->diag(d.name_at, Diag::expansion_without_pack);
           ok = false;
@@ -2660,7 +2661,16 @@ public:
         c.at = pos();
         c.name = name_of(tok());
         bump();
-        if (is(Tk::ellipsis)) {  // a pack capture ([expr.prim.lambda.capture]/17)
+        if (is(Tk::ellipsis) && (kind(1) == Tk::comma || kind(1) == Tk::r_square)) {
+          // A pack capture `xs...` ([expr.prim.lambda.capture]/17): each element of the pack.
+          bump();
+          c.kind = ref ? K::ref : K::copy;
+          c.pack = true;
+          spec.captures.push_back(std::move(c));
+          if (!accept(Tk::comma)) break;
+          continue;
+        }
+        if (is(Tk::ellipsis)) {  // an init-capture pack `...xs = e` (#350)
           s_->diag(pos(), Diag::not_supported, Tk::ellipsis);
           return fail();
         }
@@ -2723,13 +2733,13 @@ public:
         if (!ok) return fail();
       }
       for (const Param& p : ps.params) {
-        if (p.pack) {  // a function parameter pack of a lambda (#281)
-          s_->diag(p.at, Diag::not_supported, Tk::ellipsis);
-          return fail();
-        }
         QualType t = p.type;
+        // A function parameter pack `auto... xs` or `Ts... xs` ([dcl.fct]/23): its pattern.
+        const bool pack = s_->types().kind(t) == sema::TypeKind::pack_expansion;
+        if (pack) t = s_->types().rec(t).inner;
         // A placeholder parameter declares an invented type parameter of the operator's
-        // template-head, appended to it ([expr.prim.lambda.closure]/7, [dcl.fct]/22).
+        // template-head, appended to it ([expr.prim.lambda.closure]/7, [dcl.fct]/22); a pack's
+        // is a template parameter pack.
         if (s_->types().has_placeholder(t)) {
           if (!head) {
             s_->template_scopes.emplace_back();
@@ -2740,7 +2750,8 @@ public:
           inv.kind = ast::TemplateArgKind::type;
           inv.depth = depth;
           inv.index = u16(s_->template_scopes.back().size());
-          inv.type = s_->types().template_param(depth, inv.index);
+          inv.pack = u8(pack);
+          inv.type = s_->types().template_param(depth, inv.index, pack);
           inv.default_ = {ast::TemplateArgKind::type, s_->builtin(Builtin::void_), sema::ConstId::none};
           inv.params = s_->world().ins.intern_seq(std::span<const ast::TemplateParamSema>{});
           s_->template_scopes.back().push_back(inv);
@@ -2753,6 +2764,7 @@ public:
           }
           t = *r;
         }
+        if (pack) t = s_->types().pack_expansion(t);
         spec.params.push_back({p.name, t, p.at});
       }
       spec.variadic = ps.variadic;
