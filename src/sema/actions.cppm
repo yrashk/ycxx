@@ -367,14 +367,10 @@ public:
     return k == ast::DeclKind::class_ || k == ast::DeclKind::enum_ || k == ast::DeclKind::type_alias;
   }
   // A typedef-name the implementation declares where nothing else does (docs/EXTENSIONS.md):
-  // `__builtin_va_list`, the type of the SDK's `__darwin_va_list` and libycxx's `va_list`.
+  // `__builtin_va_list`, the type used by the target's C headers and libycxx's `va_list`.
   std::optional<QualType> builtin_type_name(NameId name) {
     if (ins().names.spelling(name) != "__builtin_va_list") return std::nullopt;
-    switch (w_->target.va_list) {
-    case ast::VaList::char_pointer: return types().pointer(builtin(Builtin::char_));
-    case ast::VaList::sysv_x86_64: return std::nullopt;  // no `__va_list_tag` yet: not a type
-    }
-    std::unreachable();
+    return w_->builtin_va_list();
   }
   // A block-scope typedef-name or alias-declaration ([dcl.typedef]); it may redeclare one of the
   // same block to the same type.
@@ -774,11 +770,13 @@ public:
       if (auto t = member_type(types().class_of(*s.type), n)) return Scope{std::nullopt, *t};
     if (s.type && types().is_dependent(*s.type)) return Scope{std::nullopt, types().dep_name(*s.type, n)};
     if (s.ns) {
-      for (const ast::DeclSema& d : q_->namespace_members(*s.ns, n)) {
+      auto members = q_->namespace_members(*s.ns, n);
+      for (const ast::DeclSema& d : members) {
         if (d.kind == ast::DeclKind::namespace_) return Scope{d.entity, std::nullopt};
         if (is_type(d.kind)) return Scope{std::nullopt, d.type};
       }
-      return std::nullopt;
+      if (*s.ns == EntityId::none && members.empty())
+        if (auto t = builtin_type_name(n)) return Scope{std::nullopt, *t};
     }
     return std::nullopt;
   }
