@@ -64,8 +64,9 @@ INTEGER ABI subset. Use the host linker to link these objects with libc.
   conversions giving Clang's results bit for bit, and passing and returning them (classes of
   floating members included) by Clang's calling convention;
   all operators, and the statements: `switch`, labels and `goto`, declarations in conditions,
-  and init-statements in `if` and `switch` (not yet range-based `for`); functions with default
-  arguments, recursion and overloading, operator functions included;
+  and init-statements in `if` and `switch` (not yet range-based `for`). Functions support
+  default arguments, recursion, operator overloading and calls through pointers. A pointer or
+  reference target type can select a free or static member overload.
 - classes and unions: data and static members, member functions, constructors and destructors
   with RAII, aggregate and designated initialization, namespace-scope objects initialized by
   code before `main` and destroyed after it, block-scope `static` variables initialized once, passing and returning them by value with

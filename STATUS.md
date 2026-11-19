@@ -1903,6 +1903,26 @@ values, end to end; results match Clang's bit for bit.
 - Not yet: inline functions' statics are per unit (#124); static references (#367).
 - Tests: `tests/own/static-locals/` (spec-only, 19 tests, a Clang peer in `mixed.run.cpp`).
 
+## The address of an overload set, ι (#313, #337, 2026-11-19)
+
+- A pointer or reference target picks a free or static member function by its function type
+  ([over.over]). Targets include initializers, assignments, arguments and return values, and
+  casts. List-initialization applies the target to each scalar element, including elements of
+  an array with a deduced bound.
+- Function template deduction uses the entire target type ([temp.deduct.funcaddr]). Selection
+  checks associated constraints, prefers a non-template function, and partially orders
+  matching templates by their full function types. A call can also deduce fixed function or
+  function-pointer parameters by trying the non-template members of an overload set
+  ([temp.deduct.call]/6).
+- Related work covers pointers to non-static members (#238), `noexcept` function types (#219),
+  a template-id without a target type (#335), and function pointer or reference template
+  arguments (#406). A free immediate function selected from an overload is diagnosed outside an
+  immediate invocation or context. General immediate-function name validation is tracked in #102.
+- The Linux x86-64 backend can call through an address taken from an internal function. Emitting
+  addresses of externally linked functions on that target is tracked in #407.
+- Tests are in `tests/own/function-pointers/`, with draft examples for [over.over] and
+  [temp.deduct.call] enabled.
+
 ## Bootstrap workarounds
 
 Places where ycxx's sources avoid or work around a C++26 feature because GCC 16 lacks it or
