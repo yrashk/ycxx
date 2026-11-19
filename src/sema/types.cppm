@@ -600,6 +600,14 @@ public:
     if (!c) return false;
     return c->move_usable ? c->move_nontrivial : c->copy_ctor != EntityId::none;
   }
+  // Whether a `t` can be neither copied nor moved: its copy constructor deleted and no move
+  // constructor usable; for an array, its elements'.
+  bool unmovable(QualType t) const {
+    TypeRec r = types_->rec(t);
+    if (r.kind == TypeKind::array) return unmovable(r.inner);
+    const ClassRec* c = r.kind == TypeKind::class_ ? find(r.entity) : nullptr;
+    return c && c->copy_deleted && !c->move_usable;
+  }
   // Whether a `cls` is trivially copyable for the purposes of calls, by `rule` (ast::Target,
   // DECISIONS §1.6). Itanium ([class.temporary]/3, Itanium C++ ABI §3.1.2.3): its destructor and
   // every copy and move constructor trivial or deleted, and at least one of those constructors

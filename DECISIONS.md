@@ -43,7 +43,9 @@ reasoning; do not leave decisions only in issue threads.
 6. **Which classes pass in registers** (decided on #230). This is the rule for when a class is
    trivially copyable for the purposes of calls. Compilers disagree on it.
    - **Default, every target:** upstream Clang and GCC, the Itanium "non-trivial for the purposes
-     of calls" wording ([class.temporary]/3, Itanium C++ ABI §3.1.2.3).
+     of calls" wording ([class.temporary]/3, Itanium C++ ABI §3.1.2.3). Where they differ, upstream
+     Clang (the oracle) decides. They differ on a class whose member can be neither copied nor
+     moved.
    - **The switch, `-fclass-call-abi=apple`:** on arm64 Darwin, Apple Clang's behaviour, for code
      that links with Xcode-built objects. A class passes in registers when its destructor is
      trivial and its copy constructor is trivial or deleted, whatever its move constructors.
@@ -53,9 +55,9 @@ reasoning; do not leave decisions only in issue threads.
      offers the switch (`apple_calls`). The option is part of the compile configuration
      (`pp::Config::call_triviality`), so it enters the unit's fingerprint and the daemon's
      configuration.
-   - **Tests:** `tests/own/abi/call-triviality` checks the default against Clang 23 objects, and
-     passes under GCC too. `call-triviality-apple` checks the switch against Apple Clang objects
-     (`PEER-WITH: apple-clang`).
+   - **Tests:** `tests/own/abi/call-triviality` checks the default against Clang 23 objects. It is
+     an expected failure under GCC only because of those members. `call-triviality-apple` checks
+     the switch against Apple Clang objects (`PEER-WITH: apple-clang`).
    - *Reason:* the oracles and the ABI document agree on the default, and the switch serves code
      that must link with the platform's own objects.
 
