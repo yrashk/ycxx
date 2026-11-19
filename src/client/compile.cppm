@@ -226,18 +226,16 @@ std::optional<std::string> read_disk(const std::string& path) {
 // reads).
 class Renderer {
  public:
-  Renderer(std::string& err, std::string_view path, std::string_view text) : err_(&err), path_(path), lines_(text) {}
-  void at(std::uint32_t offset, bool error, std::string_view message) {
-    pipeline::LineColumn lc = lines_.line_column(offset);
-    std::format_to(std::back_inserter(*err_), "{}:{}:{}: {}: {}\n", path_, lc.line, lc.column, error ? "error" : "warning",
-                   message);
+  Renderer(std::string& err, std::string_view path) : err_(&err), path_(path) {}
+  void diagnostic(const pipeline::Message& m) {
+    std::format_to(std::back_inserter(*err_), "{}: {}: {}\n", m.where.empty() ? path_ : std::string_view(m.where),
+                   m.error ? "error" : "warning", m.text);
   }
   void file_level(std::string_view message) { std::format_to(std::back_inserter(*err_), "{}: error: {}\n", path_, message); }
 
  private:
   std::string* err_;
   std::string_view path_;
-  pipeline::LineTable lines_;
 };
 
 // The object a `-c` without `-o` writes: the source's file name with `.o`.
@@ -490,25 +488,19 @@ Done run(const Request& r, pp::Host& host, pipeline::Session& session, const Sto
   for (std::size_t i = 0; i < opts->sources.size(); ++i) {
     const pipeline::UnitBuilt& u = built->units[i];
     const std::string& path = opts->sources[i];
-    if (!u.text) {
+    if (!u.readable) {
       std::format_to(std::back_inserter(d.err), "ycxx: error: cannot read '{}'\n", path);
       failed = true;
       continue;
     }
-    Renderer render(d.err, path, *u.text);
-    for (const pipeline::Message& m : u.messages) {
-      if (m.where.empty()) render.at(m.offset, m.error, m.text);
-      else std::format_to(std::back_inserter(d.err), "{}: {}: {}\n", m.where, m.error ? "error" : "warning", m.text);
-    }
+    Renderer render(d.err, path);
+    for (const pipeline::Message& m : u.messages) render.diagnostic(m);
     if (u.front_failed) {
       failed = true;
       continue;
     }
     if (until == pipeline::Until::syntax) continue;
-    for (const auto& [at, message] : u.errors) {
-      if (at) render.at(*at, true, message);
-      else render.file_level(message);
-    }
+    for (const pipeline::Message& m : u.errors) render.diagnostic(m);
     if (!u.object) {
       failed = true;
       continue;

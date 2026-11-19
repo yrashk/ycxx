@@ -54,6 +54,10 @@ build/bin/ycxx cxx --target=x86_64-pc-linux-gnu -nostdlib example.o -o example
 ./example
 ```
 
+Linux objects can make direct calls to variadic functions such as `printf` within the scalar
+INTEGER ABI subset. Use the host linker to link these objects with libc.
+[#399](https://github.com/yrashk/ycxx/issues/399)
+
 **Language on macOS.** Programs can use:
 - the fundamental integer, character and floating types, pointers, arrays, references and
   enumerations; `float`, `double` and `long double` with literals, arithmetic, comparisons and
@@ -96,7 +100,8 @@ build/bin/ycxx cxx --target=x86_64-pc-linux-gnu -nostdlib example.o -o example
 
 **Preprocessing.** All of translation phase 4: includes, object-like and function-like
 macros, conditionals, `_Pragma` and the predefined macros. `ycxx cxx -E` matches Clang's output.
-`ycxx cxx -E --target=x86_64-linux-gnu` selects Linux macros and glibc's multiarch include path.
+`ycxx cxx -E --target=x86_64-linux-gnu` selects Linux macros and glibc's multiarch include path
+and preprocesses glibc's `<stdio.h>`. Linux `<stdarg.h>` supplies the `va_list` declaration.
 
 **Incremental builds through a resident daemon.** `ycxx cxx` hands its work to a per-project
 `ycxx daemon` (`YCXX_NO_DAEMON=1` runs in-process), which watches the files it has read and keeps
@@ -108,10 +113,11 @@ thread pool, and its output is byte for byte that of a cold, in-process build.
 prints every query the build went through as a colored tree on stderr: what ran, what was
 reused, verified green or cut off early, how long it took and on which worker, and how much
 memory each cell allocated and retains, with sums per subtree, per query kind and per build. A second build
-shows everything reused, and a compile error is marked red at the cell where it starts, its
-message bubbled up to the root. `--trace-engine=interactive` opens a browser of the trace after
-the compile: a tree with each function's IR and assembly, a timeline of the pool's workers, and
-filters. `--trace-engine=json` writes the whole trace as JSON Lines, for tools and agents.
+shows everything reused. A compile error is marked red at the cell where it starts, and its
+message is shown up to the root. Diagnostic details include the file, line and column where
+available. `--trace-engine=interactive` opens a browser of the trace after the compile: a tree
+with each function's IR and assembly, a timeline of the pool's workers, and filters.
+`--trace-engine=json` writes the whole trace as JSON Lines, for tools and agents.
 `ycxx cxx --watch` stays attached and builds again whenever a file the build read changes,
 headers included; with `--trace-engine` each rebuild shows what it re-ran, and
 `--trace-engine=interactive` keeps the browser open and adds each rebuild live. `ycxx ctl trace
@@ -126,8 +132,8 @@ checked with the flags of its last build, or else with its line in the project's
 
 ### Not yet
 
-- The standard library and its headers. C headers such as `<stdio.h>` compile without warnings
-  and `printf` runs; libycxx's `<cstdio>` still needs pointer-to-member types, and `<cmath>`
+- The standard library and its headers. On macOS, C headers such as `<stdio.h>` compile without
+  warnings and `printf` runs. libycxx's `<cstdio>` still needs pointer-to-member types, and `<cmath>`
   (which `<math.h>` includes) does not compile yet ([#349](https://github.com/yrashk/ycxx/issues/349)).
 - Constexpr lambdas (the interpreter has no class objects yet), lambdas outside function bodies,
   structured bindings, virtual functions, virtual base classes, inheriting constructors, and bases

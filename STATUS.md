@@ -564,9 +564,13 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   configuration. Darwin remains the default.
 - The scalar System V AMD64 backend in `src/target/x86_64/` supports 32- and 64-bit integer,
   pointer and reference parameters and results, plus void results. It handles direct and
-  indirect calls, stack arguments and RIP-relative data references within a unit. Floating-point,
-  aggregate and narrow integer arguments and results, and variadic calls, are outside this ABI
-  subset.
+  indirect calls, stack arguments and RIP-relative data references within a unit. Direct
+  variadic calls use the same registers and stack slots for promoted 32- and 64-bit integers
+  and pointers. The emitter clears EAX immediately before every direct call so a variadic callee
+  receives a zero vector-register count in AL, including with an empty ellipsis. Floating-point,
+  aggregate and narrow integer arguments and results remain outside this ABI subset. Variadic
+  definitions and calls through function pointers remain unsupported.
+  [#399](https://github.com/yrashk/ycxx/issues/399), [#196](https://github.com/yrashk/ycxx/issues/196)
 - `-c` writes deterministic ELF64 relocatable objects through `src/obj/elf.cppm`. The reader
   accepts the supported x86-64 `ET_REL` subset emitted by ycxx. The native ELF linker consumes
   the same in-memory objects, resolves absolute and PC-relative relocations, and writes a static
@@ -586,8 +590,10 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   [#387](https://github.com/yrashk/ycxx/issues/387)
 - ELF code generation diagnoses namespace-scope objects that require destruction at exit, at
   their declaration. Syntax-only analysis accepts them. [#400](https://github.com/yrashk/ycxx/issues/400)
-- Linux x86-64 CI runs `unit.linux_compile`, which links a ycxx-produced object with a native C
-  caller, and `unit.linux_executable` (`tests/unit/pipeline/linux_executable.py`), which runs
+- Linux x86-64 CI runs `unit.linux_compile`, which links ycxx-produced objects with native C
+  callers and variadic callees. It checks namespace initialization, default promotions, register
+  and stack arguments, stack alignment and the incoming AL for both empty and nonempty ellipses.
+  `unit.linux_executable` (`tests/unit/pipeline/linux_executable.py`) runs
   source-only, object-only and mixed-input executables and checks exit status, `argc` and `argv`,
   diagnostics, and cold and daemon output. The linker and startup also have native CTest
   coverage, including execution of an explicit `_start`.
@@ -1383,8 +1389,8 @@ Fable decided the representation (ast.md §6.6); the Opus session wrote the code
   so the SDK's `sys/cdefs.h` no longer warns "Unsupported compiler detected". Not `__GNUG__`,
   `__clang__` or `__llvm__`. libycxx tests `__ycxx__` first (yrashk/libycxx#28).
 - What the SDK's `__GNUC__` paths then use, in the headers libycxx's C headers reach, is in
-  docs/EXTENSIONS.md. New: `__builtin_va_list`, the target's va_list type (`char*`;
-  `ast::Target::va_list`), found where lookup finds nothing else (`Sema::builtin_type_name`).
+  docs/EXTENSIONS.md. `__builtin_va_list` names the target's va_list type (`char*` on Darwin)
+  where lookup finds nothing else (`ast::Target::va_list`, `Sema::builtin_type_name`).
   The `__builtin_*` functions ycxx lacks (`__builtin_fabsf`, `__builtin_inff`, `__builtin_alloca`,
   `__builtin_offsetof`, …) are diagnosed as "built-in function '…' is not supported yet", their
   arguments skipped (`lex::lacking_builtins`, `Sema::unsupported_builtin`). Any other `__builtin_`
@@ -1415,9 +1421,17 @@ Fable decided the representation (ast.md §6.6); the Opus session wrote the code
   request is consumed, and partial inclusions can precede libycxx's full `<cstddef>` inclusion.
   The full resource header supplies `max_align_t` with 16-byte alignment (AMD64 psABI §3.1.2).
   `unit.pp` exercises both paths through the configured header search.
-- glibc's `<stdio.h>` now reaches its `__need___va_list` request for `<stdarg.h>`. Compiling
-  `<stdio.h>` still needs a compiler resource `<stdarg.h>` and the System V `__builtin_va_list`
-  type (#133).
+
+## Linux compiler resource `<stdarg.h>` (#383)
+
+- Linux `__builtin_va_list` is an array of one compiler-owned record with the two unsigned
+  offsets and two pointers of the AMD64 psABI §3.5.7. Ordinary array and record semantics give it
+  size 24 and alignment 8 and adjust it to a pointer as a function parameter ([dcl.array],
+  [dcl.fct]). The builtin name also works with explicit global qualification.
+- The resource `<stdarg.h>` consumes each `__need___va_list` request and supplies the guarded
+  `__gnuc_va_list` typedef. A full include also supplies `va_list` ([cstdarg.syn]). glibc's
+  `<stdio.h>` preprocesses, and `unit.linux_stdarg` checks that path, both inclusion orders,
+  and type semantics. Variadic operations are tracked in #248.
 
 ## Templates, ζ step 8: template template parameters and `__make_integer_seq` (#88, #208, 2026-11-19)
 
@@ -1495,9 +1509,10 @@ request it serves.
 - Names: units and files by their file, functions by qualified name, requests and programs by
   their units and output (`Build(a.cpp → a)`).
 - Errors: a compile error is a value, so a kind says which of its values hold errors
-  (`errors(value)`; `Pp::diagnostic_errors` keeps error-severity diagnostics only, so a
-  `#warning` is none). Events carry the text; the cell where errors start (no child has any) is
+  (`errors(value)`). Events carry the text; the cell where errors start (no child has any) is
   marked, with its message, and every cell above names it (`error below:`, JSON `error_at`).
+  Preprocessing, front-end and back-end diagnostics include the source file, line and byte column
+  where available (#404). The trace keeps error-severity messages only, so a `#warning` is no error.
 - Values shown: L1 (`FunctionIr`), L2 (`Lower`), and assembly (`Codegen`, `Optimized`) from
   `aarch64::disassemble`, which decodes with the encoder's own form table.
 - `--trace-engine=json`: JSON Lines on stderr (events with values and errors, the diagnostics and
