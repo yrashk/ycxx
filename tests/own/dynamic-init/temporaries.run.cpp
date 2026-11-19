@@ -1,7 +1,7 @@
-// ι (#94), spec-only: a namespace-scope reference and pointer bound by a non-constant initializer
-// refer to what the function chose; a temporary created in a dynamic initializer is destroyed at
-// the end of that full-expression, before main ([basic.start.dynamic], [dcl.init.ref],
-// [class.temporary]).
+// ι (#94), spec-only: a namespace-scope pointer bound by a non-constant initializer points to
+// what the function chose; a temporary created in a dynamic initializer is destroyed at the end of
+// that full-expression, before main ([basic.start.dynamic], [class.temporary]). The reference
+// part is in references.run.cpp.
 // STDOUT: tTuUM
 // EXIT: 0
 extern "C" int putchar(int);
@@ -24,7 +24,6 @@ struct Temp {
   int get() const { return v * 2; }
 };
 
-int& ref = pick();
 int* ptr = choose();
 int from_temp = Temp(5).get();
 int from_temp2 = Temp(6).get() + from_temp;
@@ -32,11 +31,8 @@ int from_temp2 = Temp(6).get() + from_temp;
 int main() {
   putchar('M');
   putchar('\n');
-  if (&ref != &right) return 1;
-  if (ptr != &left) return 2;
-  ref = 20;
-  if (right != 20) return 3;
-  if (*ptr != 1) return 4;
+  if (ptr != &right) return 2;  // the first call picks `right`
+  if (*ptr != 2) return 4;
   if (from_temp != 10) return 5;
   if (from_temp2 != 22) return 6;
   return 0;
