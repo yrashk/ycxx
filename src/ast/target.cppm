@@ -71,33 +71,94 @@ struct Target {
   constexpr bool has(Builtin b) const { return (*this)[b].size != 0; }
 };
 
-// A class's layout (Itanium C++ ABI §2.4, [class.mem]; no bases or virtual functions yet): each
-// non-static data member, in declaration order, at the next offset its alignment allows; in a
-// union, every member at offset 0 ([class.union]/2); the size rounded up to the alignment; an
-// empty class has size 1 ([intro.object]/8). The one rule sema (`sizeof`, #194) and the back end
-// (`layout`) both read, from each member's size and alignment.
-struct FieldPlace {
-  std::uint64_t size = 0;
-  std::uint64_t align = 1;
+// A class's layout (Itanium C++ ABI §2.4, [class.mem], [class.derived]; no virtual bases or
+// virtual functions yet). The one rule sema (`sizeof`, #194) and the back end (`layout`) both
+// read, from what each component's own layout says of it (`Placed`):
+// - the non-virtual direct bases, in declaration order, then the non-static data members;
+// - an empty base at offset 0, or else where a non-empty one would go;
+// - a non-empty component at the class's data size so far (`dsize`, which leaves out the tail
+//   padding of a base or class that is not POD for layout), rounded up to its alignment;
+// - in each case moved on by its alignment while it would put two subobjects of one empty class
+//   type at one offset ([intro.object]/9);
+// - in a union, every member at offset 0 ([class.union]/2);
+// - the size rounded up to a non-zero multiple of the alignment.
+// "POD for layout" is Clang's: trivial and standard-layout ([class.prop]); GCC uses C++03's,
+// and differs for a class whose data members are all private.
+struct Placed {
+  std::uint64_t size = 0;   // sizeof
+  std::uint64_t align = 1;  // alignof
+  std::uint64_t nvsize = 0;  // as a base: without tail padding unless POD for layout
+  std::uint64_t nvalign = 1;
+  bool empty = false;  // an empty class ([class.prop], Itanium §1.1)
+  // Its subobjects of empty class type, by class entity and offset, itself included.
+  std::vector<std::pair<std::uint32_t, std::uint64_t>> empties;
 };
+// A scalar, pointer or reference member's.
+constexpr Placed scalar_placed(std::uint64_t size, std::uint64_t align) { return {size, align, size, align, false, {}}; }
+constexpr Placed array_placed(const Placed& e, std::uint64_t n) {
+  Placed out{e.size * n, e.align, e.size * n, e.align, false, {}};
+  for (std::uint64_t i = 0; i < n && !e.empties.empty(); ++i)
+    for (auto [t, at] : e.empties) out.empties.push_back({t, at + i * e.size});
+  return out;
+}
 struct RecordLayout {
   std::uint64_t size = 1;
   std::uint64_t align = 1;
-  std::vector<std::uint64_t> offsets;  // the members', in declaration order
+  std::uint64_t dsize = 0;
+  std::uint64_t nvsize = 0;
+  std::vector<std::uint64_t> base_offsets;  // the direct bases', in declaration order
+  std::vector<std::uint64_t> offsets;       // the members', in declaration order
+  Placed placed;                            // what it says of the class as a component
 };
-constexpr RecordLayout record_layout(std::span<const FieldPlace> fields, bool union_) {
+constexpr RecordLayout record_layout(std::span<const Placed> bases, std::span<const Placed> fields, bool union_, bool pod,
+                                     std::uint32_t self) {
   RecordLayout out;
-  std::uint64_t at = 0;
-  std::uint64_t end = 0;  // past the largest member of a union
-  for (const FieldPlace& f : fields) {
-    if (union_) at = 0;
-    at = (at + f.align - 1) / f.align * f.align;
-    out.offsets.push_back(at);
-    at += f.size;
-    end = std::max(end, at);
-    out.align = std::max(out.align, f.align);
+  std::uint64_t size = 0, align = 1, dsize = 0;
+  std::vector<std::pair<std::uint32_t, std::uint64_t>> empties;
+  auto conflicts = [&](const Placed& d, std::uint64_t at) {
+    for (auto [t, x] : d.empties)
+      for (auto [u, y] : empties)
+        if (t == u && at + x == y) return true;
+    return false;
+  };
+  auto place = [&](const Placed& d, bool base) {
+    std::uint64_t a = base ? d.nvalign : d.align;
+    std::uint64_t at = 0;
+    if (!(base && d.empty)) at = (dsize + a - 1) / a * a;
+    if (base && d.empty && conflicts(d, 0)) at = (dsize + a - 1) / a * a;
+    while (conflicts(d, at)) at += a;
+    for (auto [t, x] : d.empties) empties.push_back({t, at + x});
+    align = std::max(align, a);
+    if (base && d.empty) {
+      size = std::max(size, at + d.size);
+    } else {
+      std::uint64_t n = base ? d.nvsize : d.size;
+      size = std::max(size, at + n);
+      dsize = at + n;
+    }
+    return at;
+  };
+  for (const Placed& b : bases) out.base_offsets.push_back(place(b, true));
+  for (const Placed& f : fields) {
+    if (union_) {
+      out.offsets.push_back(0);
+      for (auto [t, x] : f.empties) empties.push_back({t, x});
+      size = std::max(size, f.size);
+      dsize = std::max(dsize, f.size);
+      align = std::max(align, f.align);
+      continue;
+    }
+    out.offsets.push_back(place(f, false));
   }
-  out.size = end == 0 ? 1 : (end + out.align - 1) / out.align * out.align;
+  bool empty = fields.empty() && std::ranges::all_of(bases, &Placed::empty);
+  std::uint64_t nvsize = size;
+  out.align = align;
+  out.size = size == 0 ? align : (size + align - 1) / align * align;
+  out.dsize = pod ? out.size : dsize;
+  out.nvsize = pod ? out.size : nvsize;
+  if (empty) out.dsize = out.nvsize = 0;  // nothing a copy writes, nothing a member cannot share
+  out.placed = {out.size, out.align, out.nvsize, out.align, empty, std::move(empties)};
+  if (empty) out.placed.empties.insert(out.placed.empties.begin(), {self, 0});
   return out;
 }
 

@@ -310,6 +310,43 @@ struct DeclStmt {
   ChildList decls;
 };
 
+// A condition that declares a variable ([stmt.pre]/4): the `LocalVar`, then the variable's value
+// converted to bool, or for a `switch` promoted ([stmt.switch]/5). It stands where the condition's
+// expression would.
+struct CondDecl {
+  Child var;
+  Child value;
+};
+
+// [stmt.switch]: `init` is a statement or none; `condition` is the promoted integral or
+// enumeration value (or a `CondDecl`). Its `Case` and `Default` labels are in `body`, outside any
+// nested switch.
+struct Switch {
+  Child init;
+  Child condition;
+  Child body;
+};
+
+// [stmt.label]: a case label, its value converted to the condition's type (none in a template's
+// definition while it is value-dependent), and the statement it labels, which is none at the end
+// of a compound statement.
+struct Case {
+  ConstId value;
+  Child stmt;
+};
+struct Default {
+  Child stmt;
+};
+// An identifier label; labels have function scope ([stmt.label]/2).
+struct Label {
+  NameId name;
+  Child stmt;
+};
+// [stmt.goto]
+struct Goto {
+  NameId label;
+};
+
 // ---------------------------------------------------------------- declarations (item trees)
 
 // One declarator of an item ([dcl.decl]): the ordinal of its record in `ItemSema::decls`, its
@@ -368,7 +405,7 @@ using Nodes = closed_list<Literal, DeclRef, Paren, Unary, Binary, OrderedBinary,
                           Conditional, While, Do, For, Break, Continue, DeclStmt, Declarator, DeclGroup,
                           IfConsteval, StaticAssert, Member, InitList, ValueInit, DefaultInit, This,
                           MemberCall, Materialize, CtorCall, MemberInit, Destructor, DestroyMember, Dependent,
-                          DepName, BuiltinCall, Lambda>;
+                          DepName, CondDecl, Switch, Case, Default, Label, Goto, BuiltinCall, Lambda>;
 
 static_assert(Nodes::size < max_node_kinds);
 
