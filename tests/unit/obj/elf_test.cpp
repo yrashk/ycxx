@@ -54,6 +54,10 @@ std::uint64_t field(std::span<const std::uint8_t> bytes, std::size_t offset, std
   return value;
 }
 
+void set_field(std::span<std::uint8_t> bytes, std::size_t offset, std::size_t width, std::uint64_t value) {
+  for (std::size_t i = 0; i < width; ++i) bytes[offset + i] = static_cast<std::uint8_t>(value >> (8 * i));
+}
+
 void inspect(std::span<const std::uint8_t> bytes) {
   const std::array<std::uint8_t, 7> ident{0x7f, 'E', 'L', 'F', 2, 1, 1};
   check(bytes.size() >= 64, "ELF64 file header");
@@ -125,6 +129,126 @@ void rejects(std::string_view reason, const obj::object& o) {
   check(!result && result.error().contains(reason), reason);
 }
 
+void read_fixture(const obj::object& input, std::span<const std::uint8_t> file) {
+  auto read = obj::elf::read_object(file, "read.o");
+  check(read.has_value(), read ? "read ELF fixture" : read.error());
+  if (!read) return;
+  auto expected = input;
+  expected.name = "read.o";
+  // The writer moves elf_local ahead of the nonlocal symbols.
+  std::rotate(expected.symbols.begin(), expected.symbols.begin() + 2, expected.symbols.begin() + 3);
+  expected.sections[0].relocs[0].symbol = 2;
+  expected.sections[0].relocs[1].symbol = 0;
+  expected.sections[2].relocs[0].symbol = 0;
+  check(*read == expected, "reader preserves standard sections, symbols and relocations in ELF order");
+  auto rewritten = obj::elf::write_object(*read);
+  check(rewritten && std::ranges::equal(*rewritten, file), "reader and writer round trip is byte identical");
+
+  // Put .text after the relocation headers, updating the section indices in its symbol and RELA table.
+  std::vector<std::uint8_t> reordered(file.begin(), file.end());
+  const auto shoff = field(file, 40, 8);
+  const auto symtab = field(file, shoff + 64 * 8 + 24, 8);
+  std::swap_ranges(reordered.begin() + shoff + 64, reordered.begin() + shoff + 64 * 2,
+                   reordered.begin() + shoff + 64 * 7);
+  set_field(reordered, symtab + 24 * 2 + 6, 2, 7);
+  set_field(reordered, shoff + 64 * 5 + 44, 4, 7);
+  std::rotate(expected.sections.begin(), expected.sections.begin() + 1, expected.sections.end());
+  for (auto& symbol : expected.symbols) {
+    if (symbol.section) symbol.section = (*symbol.section + 3) % 4;
+  }
+  read = obj::elf::read_object(reordered, expected.name);
+  check(read && *read == expected, "relocations and symbols follow ELF section indices across metadata headers");
+}
+
+void read_large_offsets() {
+  obj::object expected;
+  expected.name = "offsets.o";
+  expected.arch = obj::target::x86_64_linux;
+  auto strings = expected.add_section(obj::standard_section::cstring);
+  auto pointers = expected.add_section(obj::standard_section::data_const);
+  auto bss = expected.add_section(obj::standard_section::bss);
+  constexpr auto large_offset = (std::uint64_t{1} << 32) + 64;
+  expected.sections[strings].emit(std::array<std::uint8_t, 4>{'a', 0, 'b', 0});
+  expected.sections[bss].align(16);
+  expected.sections[bss].reserve_zerofill(large_offset);
+  auto local = expected.define("", obj::binding::local, strings, 2);
+  auto weak = expected.define("last", obj::binding::hidden, bss, large_offset);
+  expected.symbols[weak].weak = true;
+  auto& data = expected.sections[pointers];
+  data.emit64(0);
+  data.relocate(obj::reloc_kind::abs64, local, std::numeric_limits<std::int64_t>::min());
+  data.emit64(0);
+  data.relocate(obj::reloc_kind::abs64, weak, std::numeric_limits<std::int64_t>::max());
+
+  auto file = obj::elf::write_object(expected);
+  check(file && file->size() < 65536, "aligned BSS does not grow the file");
+  if (!file) return;
+  const auto shoff = field(*file, 40, 8);
+  check(field(*file, shoff + 3 * 64 + 24, 8) > file->size(), "BSS has a conceptual file offset");
+  auto read = obj::elf::read_object(*file, expected.name);
+  check(read && *read == expected,
+        "reader preserves BSS and symbol offsets above 32 bits, unnamed locals and full signed addends");
+}
+
+void reject_bad_files(std::span<const std::uint8_t> file) {
+  constexpr std::string_view diagnostic_name = "malformed.o";
+  auto reject = [&](std::span<const std::uint8_t> bytes, std::string_view reason) {
+    auto read = obj::elf::read_object(bytes, std::string(diagnostic_name));
+    check(!read && read.error().starts_with(diagnostic_name) && read.error().contains(reason), reason);
+  };
+  const auto shoff = field(file, 40, 8);
+  const auto shdr = [=](std::size_t i) { return shoff + 64 * i; };
+  const auto symtab = field(file, shdr(8) + 24, 8);
+  const auto strtab = field(file, shdr(9) + 24, 8);
+  const auto strsize = field(file, shdr(9) + 32, 8);
+  const auto rela = field(file, shdr(5) + 24, 8);
+  auto change = [&](std::size_t at, std::size_t width, std::uint64_t value, std::string_view reason) {
+    std::vector<std::uint8_t> bad(file.begin(), file.end());
+    set_field(bad, at, width, value);
+    reject(bad, reason);
+  };
+
+  reject(file.first(63), "truncated ELF header");
+  reject(file.first(file.size() - 1), "truncated ELF section header table");
+  change(5, 1, 2, "little-endian ELF64");
+  change(16, 2, 2, "relocatable ELF object");
+  change(18, 2, 183, "x86-64 relocatable ELF object");
+  change(40, 8, std::numeric_limits<std::uint64_t>::max() - 7, "invalid or truncated ELF section header table");
+  change(60, 2, 0, "extended ELF section numbering");
+  change(62, 2, 11, "invalid section name table index");
+  change(shdr(1), 4, 0xffffffff, "invalid name for ELF section");
+  change(shdr(1) + 8, 8, 0x406, "unsupported ELF section '.text'");
+  change(shdr(1) + 24, 8, 32, "overlapping ELF file sections");
+  change(shdr(1) + 32, 8, std::numeric_limits<std::uint64_t>::max(), "lies outside the file");
+  change(shdr(1) + 48, 8, 3, "unsupported alignment");
+  change(shdr(5) + 4, 4, 9, "unsupported ELF section '.rela.text'");
+  change(shdr(5) + 40, 4, 9, "invalid ELF relocation section");
+  change(shdr(5) + 44, 4, 4, "relocations in zero-fill sections");
+  change(shdr(5) + 56, 8, 8, "invalid ELF relocation section");
+  change(shdr(6) + 44, 4, 1, "multiple ELF relocation sections for one target section");
+  change(shdr(7) + 8, 8, 4, "unsupported ELF section '.note.GNU-stack'");
+  change(shdr(8) + 44, 4, 1, "local symbols must precede nonlocal symbols");
+  change(shdr(8) + 56, 8, 0, "invalid ELF symbol table");
+  change(strtab + strsize - 1, 1, 'a', "invalid ELF symbol name string table");
+  change(symtab, 1, 1, "invalid null ELF symbol");
+  change(symtab + 24, 4, strsize, "invalid name for ELF symbol");
+  change(symtab + 24 + 4, 1, 3, "unsupported type, size, binding or visibility");
+  change(symtab + 24 + 5, 1, 3, "unsupported type, size, binding or visibility");
+  change(symtab + 24 + 6, 2, 0xfff2, "unsupported section index");
+  change(symtab + 24 + 8, 8, 9, "out-of-section value");
+  change(rela, 8, std::uint64_t{1} << 32, "relocation offset exceeds 32 bits");
+  change(rela, 8, 17, "relocation lies outside its section");
+  change(rela + 8, 4, 9, "unsupported x86-64 relocation type");
+  change(rela + 12, 4, 0, "invalid ELF relocation symbol");
+  change(rela + 12, 4, 8, "invalid ELF relocation symbol");
+  change(rela + 24, 8, 5, "composed ELF relocations");
+
+  auto repeated_names = std::vector<std::uint8_t>(file.begin(), file.end());
+  const auto longest_name = field(file, symtab + 24 * 7, 4);
+  for (std::size_t i = 1; i < 7; ++i) set_field(repeated_names, symtab + 24 * i, 4, longest_name);
+  reject(repeated_names, "ELF symbol names exceed the string table size");
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -133,6 +257,8 @@ int main(int argc, char** argv) {
   check(file.has_value(), file ? "valid ELF fixture" : file.error());
   if (file) {
     inspect(*file);
+    read_fixture(o, *file);
+    reject_bad_files(*file);
     check(obj::elf::write_object(o) == file, "ELF emission is byte identical");
     if (argc == 2) {
       std::ofstream out(argv[1], std::ios::binary | std::ios::trunc);
@@ -141,6 +267,7 @@ int main(int argc, char** argv) {
       check(bool(out), "write ELF fixture");
     }
   }
+  read_large_offsets();
 
   auto bad = o;
   bad.arch = obj::target::aarch64_macos;

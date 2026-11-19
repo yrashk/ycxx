@@ -10,6 +10,10 @@ export namespace ycxx::obj::elf {
 // Returns a diagnostic if the in-memory object uses a feature outside this subset.
 std::expected<std::vector<std::uint8_t>, std::string> write_object(const object& o);
 
+// Read the x86-64 ELF64 relocatable subset emitted by write_object. The object keeps
+// file order for sections and symbols (excluding ELF metadata and the null symbol).
+std::expected<object, std::string> read_object(std::span<const std::uint8_t> file, std::string name);
+
 }  // namespace ycxx::obj::elf
 
 namespace ycxx::obj::elf {
@@ -20,8 +24,11 @@ constexpr std::uint16_t header_size = 64, section_header_size = 64;
 constexpr std::uint64_t symbol_size = 24, rela_size = 24;
 constexpr std::uint32_t sht_progbits = 1, sht_symtab = 2, sht_strtab = 3, sht_rela = 4, sht_nobits = 8;
 constexpr std::uint64_t shf_write = 1, shf_alloc = 2, shf_execinstr = 4, shf_info_link = 0x40;
+constexpr std::uint8_t stt_notype = 0, stb_local = 0, stb_global = 1, stb_weak = 2;
+constexpr std::uint8_t stv_default = 0, stv_hidden = 2;
 
 struct section_mapping {
+  standard_section kind;
   std::string_view segment;
   std::string_view section;
   std::string_view name;
@@ -30,19 +37,41 @@ struct section_mapping {
 };
 
 constexpr std::array standard_sections{
-    section_mapping{"__TEXT", "__text", ".text", sht_progbits, shf_alloc | shf_execinstr},
-    section_mapping{"__TEXT", "__cstring", ".rodata.str", sht_progbits, shf_alloc},
-    section_mapping{"__TEXT", "__const", ".rodata", sht_progbits, shf_alloc},
-    section_mapping{"__DATA", "__const", ".data.rel.ro", sht_progbits, shf_alloc | shf_write},
-    section_mapping{"__DATA", "__data", ".data", sht_progbits, shf_alloc | shf_write},
-    section_mapping{"__DATA", "__bss", ".bss", sht_nobits, shf_alloc | shf_write},
+    section_mapping{standard_section::text, "__TEXT", "__text", ".text", sht_progbits, shf_alloc | shf_execinstr},
+    section_mapping{standard_section::cstring, "__TEXT", "__cstring", ".rodata.str", sht_progbits, shf_alloc},
+    section_mapping{standard_section::rodata, "__TEXT", "__const", ".rodata", sht_progbits, shf_alloc},
+    section_mapping{standard_section::data_const, "__DATA", "__const", ".data.rel.ro", sht_progbits, shf_alloc | shf_write},
+    section_mapping{standard_section::data, "__DATA", "__data", ".data", sht_progbits, shf_alloc | shf_write},
+    section_mapping{standard_section::bss, "__DATA", "__bss", ".bss", sht_nobits, shf_alloc | shf_write},
 };
+
+struct relocation_mapping {
+  reloc_kind kind;
+  std::uint32_t type;
+  std::uint32_t width;
+};
+
+constexpr std::array relocations{
+    relocation_mapping{reloc_kind::abs64, 1, 8},         // R_X86_64_64
+    relocation_mapping{reloc_kind::x86_64_pc32, 2, 4},   // R_X86_64_PC32
+    relocation_mapping{reloc_kind::x86_64_plt32, 4, 4},  // R_X86_64_PLT32
+};
+
+constexpr std::array<std::uint8_t, 9> elf_ident{0x7f, 'E', 'L', 'F', 2, 1, 1, 0, 0};
 
 using bytes = std::vector<std::uint8_t>;
 
 template <std::unsigned_integral T>
 void append(bytes& out, T n) {
   for (std::size_t i = 0; i < sizeof(T); ++i) out.push_back(static_cast<std::uint8_t>(n >> (8 * i)));
+}
+
+// The caller first bounds the entire header or table entry containing the field.
+template <std::unsigned_integral T>
+T load(std::span<const std::uint8_t> record, std::size_t offset) {
+  std::uint64_t n = 0;
+  for (std::size_t i = 0; i < sizeof(T); ++i) n |= std::uint64_t{record[offset + i]} << (8 * i);
+  return static_cast<T>(n);
 }
 
 std::uint32_t append_name(bytes& table, std::string_view s) {
@@ -78,18 +107,27 @@ struct section_header {
   }
 };
 
-std::optional<std::uint32_t> elf_relocation(reloc_kind kind) {
-  switch (kind) {
-    case reloc_kind::abs64: return 1;          // R_X86_64_64
-    case reloc_kind::x86_64_pc32: return 2;    // R_X86_64_PC32
-    case reloc_kind::x86_64_plt32: return 4;   // R_X86_64_PLT32
-    default: return std::nullopt;
-  }
+bool all_zero(std::span<const std::uint8_t> record) {
+  return std::ranges::all_of(record, [](auto b) { return b == 0; });
+}
+
+bool valid_string_table(const section_header& header, std::span<const std::uint8_t> table) {
+  return header.type == sht_strtab && header.flags == 0 && header.link == 0 && header.info == 0 &&
+         header.entsize == 0 && !table.empty() && table.front() == 0 && table.back() == 0;
+}
+
+std::string_view string_data(std::span<const std::uint8_t> table) {
+  return {reinterpret_cast<const char*>(table.data()), table.size()};
+}
+
+std::string_view name_at(std::string_view table, std::uint32_t offset) {
+  const auto tail = table.substr(offset);
+  return tail.substr(0, tail.find('\0'));
 }
 
 void write_header(bytes& file, std::uint64_t shoff, std::uint16_t shnum, std::uint16_t shstrndx) {
-  bytes header{0x7f, 'E', 'L', 'F', 2, 1, 1};  // ELFCLASS64, ELFDATA2LSB, EV_CURRENT
-  header.resize(16, 0);                        // ELFOSABI_NONE and padding
+  bytes header(elf_ident.begin(), elf_ident.end());  // ELFCLASS64, ELFDATA2LSB, EV_CURRENT, ELFOSABI_NONE
+  header.resize(16, 0);
   append(header, et_rel);
   append(header, em_x86_64);
   append(header, std::uint32_t{1});            // e_version
@@ -175,9 +213,9 @@ std::expected<bytes, std::string> write_object(const object& o) {
 
       symbol_indices[i] = next_symbol++;
       append(symtab, append_name(strtab, s.name));
-      const std::uint8_t bind = local ? 0 : s.weak ? 2 : 1;  // STB_LOCAL, STB_WEAK, STB_GLOBAL
-      append(symtab, static_cast<std::uint8_t>(bind << 4));  // STT_NOTYPE
-      append(symtab, static_cast<std::uint8_t>(s.bind == binding::hidden ? 2 : 0));  // STV_HIDDEN or STV_DEFAULT
+      const auto bind = local ? stb_local : s.weak ? stb_weak : stb_global;
+      append(symtab, static_cast<std::uint8_t>(bind << 4 | stt_notype));
+      append(symtab, s.bind == binding::hidden ? stv_hidden : stv_default);
       append(symtab, static_cast<std::uint16_t>(s.defined() ? *s.section + 1 : 0));   // SHN_UNDEF is 0
       append(symtab, s.defined() ? s.offset : std::uint64_t{0});
       append(symtab, std::uint64_t{0});  // size unknown
@@ -190,14 +228,14 @@ std::expected<bytes, std::string> write_object(const object& o) {
     if (s.relocs.empty()) continue;
     bytes rela;
     for (const reloc& r : s.relocs) {
-      const auto type = elf_relocation(r.kind);
-      if (!type || r.minus) return fail(std::format("unsupported x86-64 relocation in section {}", section_names[i]));
-      const std::uint64_t width = r.kind == reloc_kind::abs64 ? 8 : 4;
-      if (r.offset > s.size() || width > s.size() - r.offset)
+      const auto mapping = std::ranges::find(relocations, r.kind, &relocation_mapping::kind);
+      if (mapping == relocations.end() || r.minus)
+        return fail(std::format("unsupported x86-64 relocation in section {}", section_names[i]));
+      if (r.offset > s.size() || mapping->width > s.size() - r.offset)
         return fail(std::format("relocation outside section {}", section_names[i]));
       if (r.symbol >= symbol_indices.size()) return fail(std::format("invalid relocation symbol in section {}", section_names[i]));
       append(rela, std::uint64_t{r.offset});
-      append(rela, std::uint64_t{symbol_indices[r.symbol]} << 32 | *type);
+      append(rela, std::uint64_t{symbol_indices[r.symbol]} << 32 | mapping->type);
       append(rela, static_cast<std::uint64_t>(r.addend));
     }
     add_section(std::format(".rela{}", section_names[i]),
@@ -219,6 +257,168 @@ std::expected<bytes, std::string> write_object(const object& o) {
   for (const section_header& header : sections) header.write(file);
   write_header(file, shoff, static_cast<std::uint16_t>(sections.size()), static_cast<std::uint16_t>(sections.size() - 1));
   return file;
+}
+
+std::expected<object, std::string> read_object(std::span<const std::uint8_t> file, std::string name) {
+  auto fail = [&](std::string_view reason) {
+    return std::unexpected(std::format("{}: {}", name.empty() ? "ELF object" : name, reason));
+  };
+  auto in_file = [&](std::uint64_t offset, std::uint64_t size) {
+    return offset <= file.size() && size <= file.size() - offset;
+  };
+  if (file.size() < header_size) return fail("truncated ELF header");
+  if (file.size() > std::numeric_limits<std::ptrdiff_t>::max()) return fail("ELF file is too large");
+  if (!std::ranges::equal(file.first(elf_ident.size()), elf_ident))
+    return fail("expected a little-endian ELF64 object with the System V ABI");
+  if (load<std::uint16_t>(file, 16) != et_rel || load<std::uint16_t>(file, 18) != em_x86_64)
+    return fail("expected an x86-64 relocatable ELF object (ET_REL)");
+  if (load<std::uint32_t>(file, 20) != 1 || load<std::uint16_t>(file, 52) != header_size ||
+      load<std::uint16_t>(file, 58) != section_header_size)
+    return fail("invalid ELF version or header size");
+  if (load<std::uint64_t>(file, 24) || load<std::uint64_t>(file, 32) ||
+      load<std::uint32_t>(file, 48) || load<std::uint16_t>(file, 56))
+    return fail("unsupported ELF entry point, program headers or machine flags");
+
+  const auto shoff = load<std::uint64_t>(file, 40);
+  const auto shnum = load<std::uint16_t>(file, 60);
+  const auto shstrndx = load<std::uint16_t>(file, 62);
+  if (shnum == 0 || shnum >= shn_loreserve || shstrndx >= shn_loreserve)
+    return fail("missing or extended ELF section numbering is unsupported");
+  if (shstrndx == 0 || shstrndx >= shnum) return fail("invalid section name table index");
+  const auto table_size = std::uint64_t{shnum} * section_header_size;
+  if (shoff < header_size || shoff % 8 != 0 || !in_file(shoff, table_size))
+    return fail("invalid or truncated ELF section header table");
+  if (!all_zero(file.subspan(shoff, section_header_size))) return fail("invalid null ELF section header");
+
+  std::vector<section_header> headers(shnum);
+  std::vector<std::pair<std::uint64_t, std::uint64_t>> ranges{{0, header_size}, {shoff, shoff + table_size}};
+  std::uint32_t symtab_index = 0;
+  for (std::uint32_t i = 1; i < shnum; ++i) {
+    const auto record = file.subspan(shoff + i * section_header_size, section_header_size);
+    auto& h = headers[i];
+    h = {.name = load<std::uint32_t>(record, 0), .type = load<std::uint32_t>(record, 4),
+         .flags = load<std::uint64_t>(record, 8), .offset = load<std::uint64_t>(record, 24),
+         .size = load<std::uint64_t>(record, 32), .link = load<std::uint32_t>(record, 40),
+         .info = load<std::uint32_t>(record, 44), .align = load<std::uint64_t>(record, 48),
+         .entsize = load<std::uint64_t>(record, 56)};
+    if (load<std::uint64_t>(record, 16) != 0) return fail(std::format("nonzero address for ELF section {}", i));
+    if (h.align != 0 && (!std::has_single_bit(h.align) ||
+                         std::countr_zero(h.align) >= std::numeric_limits<std::ptrdiff_t>::digits))
+      return fail(std::format("unsupported alignment for ELF section {}", i));
+    if (h.type != sht_nobits) {
+      if (!in_file(h.offset, h.size)) return fail(std::format("ELF section {} lies outside the file", i));
+      if (h.size != 0) ranges.emplace_back(h.offset, h.offset + h.size);
+    }
+    if (h.type == sht_symtab) {
+      if (symtab_index != 0) return fail("multiple ELF symbol tables are unsupported");
+      symtab_index = i;
+    }
+  }
+  std::ranges::sort(ranges);
+  for (std::size_t i = 1; i < ranges.size(); ++i)
+    if (ranges[i].first < ranges[i - 1].second) return fail("overlapping ELF file sections");
+  if (symtab_index == 0) return fail("missing ELF symbol table");
+
+  auto contents = [&](const section_header& h) { return file.subspan(h.offset, h.size); };
+  const auto& names_header = headers[shstrndx];
+  const auto& symtab = headers[symtab_index];
+  if (names_header.type != sht_strtab || !valid_string_table(names_header, contents(names_header)))
+    return fail("invalid ELF section name string table");
+  if (symtab.link == 0 || symtab.link >= shnum || headers[symtab.link].type != sht_strtab ||
+      !valid_string_table(headers[symtab.link], contents(headers[symtab.link])))
+    return fail("invalid ELF symbol name string table");
+  const auto names = string_data(contents(names_header));
+  const auto symbol_names = string_data(contents(headers[symtab.link]));
+
+  object o;
+  o.arch = target::x86_64_linux;
+  std::vector<std::optional<std::uint32_t>> sections(shnum);
+  for (std::uint32_t i = 1; i < shnum; ++i) {
+    const auto& h = headers[i];
+    if (h.name >= names.size()) return fail(std::format("invalid name for ELF section {}", i));
+    if (i == shstrndx || i == symtab_index || i == symtab.link || h.type == sht_rela) continue;
+    const auto section_name = name_at(names, h.name);
+    if (section_name == ".note.GNU-stack" && h.type == sht_progbits && h.flags == 0 &&
+        h.size == 0 && h.link == 0 && h.info == 0 && h.entsize == 0) continue;
+    const auto mapping = std::ranges::find(standard_sections, section_name, &section_mapping::name);
+    if (mapping == standard_sections.end() || h.type != mapping->type || h.flags != mapping->flags ||
+        h.link != 0 || h.info != 0 || h.entsize != 0)
+      return fail(std::format("unsupported ELF section '{}'", section_name));
+    auto s = section::standard(mapping->kind);
+    s.align_log2 = static_cast<std::uint8_t>(std::countr_zero(h.align == 0 ? std::uint64_t{1} : h.align));
+    if (h.type == sht_nobits) s.zerofill_size = h.size;
+    else s.emit(contents(h));
+    sections[i] = o.add_section(std::move(s));
+  }
+
+  const auto symbol_count = symtab.size / symbol_size;
+  if (symtab.flags != 0 || symtab.entsize != symbol_size || symtab.size % symbol_size != 0 ||
+      symbol_count == 0 || symbol_count > std::numeric_limits<std::uint32_t>::max() ||
+      symtab.info == 0 || symtab.info > symbol_count)
+    return fail("invalid ELF symbol table");
+  const auto symbol_table = contents(symtab);
+  if (!all_zero(symbol_table.first(symbol_size))) return fail("invalid null ELF symbol");
+  o.symbols.reserve(symbol_count - 1);
+  // The writer stores each name separately. Bound copying even if input names share suffixes.
+  auto remaining_name_bytes = symbol_names.size();
+  for (std::uint32_t i = 1; i < symbol_count; ++i) {
+    const auto record = symbol_table.subspan(symbol_size * i, symbol_size);
+    const auto name_index = load<std::uint32_t>(record, 0);
+    const auto bind = record[4] >> 4;
+    const auto visibility = record[5];
+    const auto index = load<std::uint16_t>(record, 6);
+    const auto value = load<std::uint64_t>(record, 8);
+    if (name_index >= symbol_names.size()) return fail(std::format("invalid name for ELF symbol {}", i));
+    const bool local = bind == stb_local;
+    if ((record[4] & 0xf) != stt_notype || load<std::uint64_t>(record, 16) != 0 || bind > stb_weak ||
+        (visibility != stv_default && (visibility != stv_hidden || local)))
+      return fail(std::format("unsupported type, size, binding or visibility for ELF symbol {}", i));
+    if ((i < symtab.info) != local) return fail("ELF local symbols must precede nonlocal symbols");
+    if (index == 0) {
+      if (local || value != 0) return fail(std::format("invalid undefined ELF symbol {}", i));
+    } else if (index >= shnum || !sections[index] || value > headers[index].size) {
+      return fail(std::format("unsupported section index or out-of-section value for ELF symbol {}", i));
+    }
+    const auto symbol_name = name_at(symbol_names, name_index);
+    if (symbol_name.size() > remaining_name_bytes) return fail("ELF symbol names exceed the string table size");
+    remaining_name_bytes -= symbol_name.size();
+    const auto model_binding = local ? binding::local : visibility == stv_hidden ? binding::hidden : binding::global;
+    o.add_symbol({std::string(symbol_name), model_binding, sections[index], value, bind == stb_weak});
+  }
+
+  std::vector<bool> has_relocations(shnum);
+  for (std::uint32_t i = 1; i < shnum; ++i) {
+    const auto& h = headers[i];
+    if (h.type != sht_rela) continue;
+    if (h.flags != shf_info_link || h.link != symtab_index || h.info >= shnum || !sections[h.info] ||
+        h.entsize != rela_size || h.size % rela_size != 0)
+      return fail(std::format("invalid ELF relocation section {}", i));
+    if (has_relocations[h.info]) return fail("multiple ELF relocation sections for one target section are unsupported");
+    has_relocations[h.info] = true;
+    auto& target_section = o.sections[*sections[h.info]];
+    if (target_section.is_zerofill()) return fail("ELF relocations in zero-fill sections are unsupported");
+    const auto table = contents(h);
+    std::optional<std::uint64_t> previous_offset;
+    for (std::size_t at = 0; at < table.size(); at += rela_size) {
+      const auto record = table.subspan(at, rela_size);
+      const auto site = load<std::uint64_t>(record, 0);
+      const auto type = load<std::uint32_t>(record, 8);
+      const auto symbol = load<std::uint32_t>(record, 12);
+      const auto mapping = std::ranges::find(relocations, type, &relocation_mapping::type);
+      if (mapping == relocations.end()) return fail(std::format("unsupported x86-64 relocation type {}", type));
+      if (symbol == 0 || symbol >= symbol_count) return fail("invalid ELF relocation symbol");
+      if (site > std::numeric_limits<std::uint32_t>::max()) return fail("ELF relocation offset exceeds 32 bits");
+      if (site > target_section.size() || mapping->width > target_section.size() - site)
+        return fail("ELF relocation lies outside its section");
+      if (site == previous_offset) return fail("composed ELF relocations are unsupported");
+      previous_offset = site;
+      target_section.relocs.push_back({static_cast<std::uint32_t>(site), mapping->kind, symbol - 1,
+                                       std::bit_cast<std::int64_t>(load<std::uint64_t>(record, 16)), std::nullopt});
+    }
+  }
+
+  o.name = std::move(name);
+  return o;
 }
 
 }  // namespace ycxx::obj::elf
