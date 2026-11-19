@@ -19,6 +19,26 @@ import :back;
 import :front;
 import :executable;
 
+namespace ycxx::pipeline {
+
+// The names of registered programs and requests, for traces (#245): process-wide, as the
+// numbers they name are a session's and the daemon has one.
+struct TraceNames {
+  using Table = std::map<std::uint32_t, std::string>;
+  std::mutex m;
+  Table programs, requests;
+};
+TraceNames& trace_names() {
+  static TraceNames n;
+  return n;
+}
+void name_for_trace(TraceNames::Table& t, std::uint32_t n, std::string name) {
+  std::lock_guard lock(trace_names().m);
+  t.insert_or_assign(n, std::move(name));
+}
+
+}  // namespace ycxx::pipeline
+
 export namespace ycxx::pipeline {
 
 // One request's work as one root (#139): its units' front ends, then their objects (or none, with
@@ -36,6 +56,8 @@ struct RequestId {
   std::uint32_t n = 0;
   bool operator==(const RequestId&) const = default;
 };
+// A request in engine traces (#245): its units and what it makes, `a.cpp b.cpp → a`.
+void trace_describe(std::string& out, RequestId r);
 struct [[=engine::input{engine::Durability::low}]] BuildIn {
   using Key = RequestId;
   using Value = BuildKey;
@@ -58,6 +80,20 @@ struct Build {
   using Key = RequestId;
   using Value = Built;
   static engine::query_task<Value> run(engine::Ctx& cx, RequestId r);
+  static std::string errors(const Value& v) {  // for traces (#245)
+    std::string out;
+    for (const UnitBuilt& u : v.units) {
+      if (!u.text) out += "cannot read a source file\n";
+      for (const Message& m : u.messages) {
+        if (m.error) out += m.text + "\n";
+      }
+      for (const auto& e : u.errors) out += e.second + "\n";
+    }
+    if (v.linked) {
+      for (const std::string& e : v.linked->errors) out += e + "\n";
+    }
+    return out;
+  }
 };
 
 // A unit named by what it is (#139, daemon design §4.4): its spelled path, the working directory
@@ -168,6 +204,7 @@ class Session {
     Bind bind(universe_);  // input values may hold handles, fingerprinted by their interners
     const pp::FileId file{tu.n};
     const bool disk = config.view == pp::View::disk;
+    pp::name_file(file, std::filesystem::path(path).filename().native_encoded_string());
     db_.set<pp::SourceOf>(file, {std::move(path), std::move(cwd), std::move(config)});
     if (disk) db_.set<pp::FileText>(file, std::move(text));
     db_.set<TuSourceIn>(tu, {std::move(object), tu.n, {}});
@@ -187,6 +224,7 @@ class Session {
     auto [it, fresh] = unit_numbers_.try_emplace(key, registry_base + static_cast<std::uint32_t>(named_.size()));
     if (fresh) {
       if (u.config.view == pp::View::disk) by_path_[absolute(u)].push_back(it->second);
+      pp::name_file(pp::FileId{it->second}, std::filesystem::path(u.path).filename().native_encoded_string());
       named_.push_back(std::move(u));
     }
     return TuId{it->second};
@@ -197,7 +235,10 @@ class Session {
     const Fp128 key = fingerprint(in);
     std::lock_guard lock(registry_m_);
     auto [it, fresh] = program_numbers_.try_emplace(key, registry_base + static_cast<std::uint32_t>(programs_.size()));
-    if (fresh) programs_.push_back(std::move(in));
+    if (fresh) {
+      name_for_trace(trace_names().programs, it->second, in.identifier);
+      programs_.push_back(std::move(in));
+    }
     return ProgramId{it->second};
   }
   // The request `k` names, likewise.
@@ -205,7 +246,20 @@ class Session {
     const Fp128 key = fingerprint(k);
     std::lock_guard lock(registry_m_);
     auto [it, fresh] = request_numbers_.try_emplace(key, static_cast<std::uint32_t>(requests_.size()));
-    if (fresh) requests_.push_back(std::move(k));
+    if (fresh) {
+      std::string name;
+      for (TuId u : k.units) {
+        if (!name.empty()) name += ' ';
+        if (u.n >= registry_base && u.n - registry_base < named_.size())
+          name += std::filesystem::path(named_[u.n - registry_base].path).filename().native_encoded_string();
+      }
+      if (k.until == Until::syntax) name += " -fsyntax-only";
+      else if (k.until == Until::object) name += " -c";
+      else if (k.program.n >= registry_base && k.program.n - registry_base < programs_.size())
+        name += " → " + programs_[k.program.n - registry_base].identifier;
+      name_for_trace(trace_names().requests, it->second, std::move(name));
+      requests_.push_back(std::move(k));
+    }
     return RequestId{it->second};
   }
   // How registered units' main files are read: from the disk unless the owner says otherwise
@@ -230,11 +284,11 @@ class Session {
   // the cell's.
   template <engine::MemoQuery Q>
   std::optional<typename Q::Value> run(const typename Q::Key& k, const std::function<bool()>& cancelled = {},
-                                       RunStats* stats = nullptr) {
+                                       RunStats* stats = nullptr, engine::Tracer* tracer = nullptr) {
     using V = typename Q::Value;
     if (!epochs_) {
       const engine::Stats before = db_.stats();
-      std::optional<V> v{get<Q>(k)};
+      std::optional<V> v{get<Q>(k, tracer)};
       if (stats) {
         const engine::Stats now = db_.stats();
         stats->engine.executed = now.executed - before.executed;
@@ -268,7 +322,7 @@ class Session {
     } in_flight{*this};
     auto ticket = epochs_->spawn<Q>(
         k, engine::Priority::interactive, [finish](const V& v) { finish([&](Wait& x) { x.value.emplace(v); }); },
-        [finish](std::exception_ptr e) { finish([&](Wait& x) { x.error = std::move(e); }); });
+        [finish](std::exception_ptr e) { finish([&](Wait& x) { x.error = std::move(e); }); }, tracer);
     std::unique_lock lock(w->m);
     while (!w->cv.wait_for(lock, std::chrono::milliseconds(50), [&] { return w->done; })) {
       if (!cancelled) continue;
@@ -276,7 +330,11 @@ class Session {
       const bool stop = cancelled();
       lock.lock();
       if (stop && !w->done) {
+        // Its frames stop at their next fetch; wait for them, so nothing they use (`tracer`) is
+        // gone while they run (#245). Unlocked: a completion takes `w->m`.
+        lock.unlock();
         ticket->cancel();
+        ticket->wait_idle();
         return std::nullopt;
       }
     }
@@ -299,11 +357,11 @@ class Session {
     return {};
   }
 
-  // A root request, with the session's universe bound.
+  // A root request, with the session's universe bound; `tracer` gets its events (#245).
   template <engine::MemoQuery Q>
-  decltype(auto) get(const typename Q::Key& k) {
+  decltype(auto) get(const typename Q::Key& k, engine::Tracer* tracer = nullptr) {
     Bind bind(universe_);
-    return db_.get<Q>(k);
+    return db_.get<Q>(k, tracer);
   }
 
   // The byte offset of a location in a source unit's main file.
@@ -402,5 +460,22 @@ engine::query_task<Built> Build::run(engine::Ctx& cx, RequestId r) {
   if (k.until == Until::link && all) out.linked = co_await cx.fetch<Link>(k.program);
   co_return out;
 }
+
+}  // namespace ycxx::pipeline
+
+namespace ycxx::pipeline {
+
+void trace_describe(std::string& out, TuId tu) { trace_describe(out, pp::FileId{tu.n}); }
+
+namespace {
+void describe_named(std::string& out, TraceNames::Table& t, std::uint32_t n) {
+  std::lock_guard lock(trace_names().m);
+  if (const auto it = t.find(n); it != t.end()) out += it->second;
+  else out += std::to_string(n);
+}
+}  // namespace
+
+void trace_describe(std::string& out, ProgramId p) { describe_named(out, trace_names().programs, p.n); }
+void trace_describe(std::string& out, RequestId r) { describe_named(out, trace_names().requests, r.n); }
 
 }  // namespace ycxx::pipeline

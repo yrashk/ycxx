@@ -20,11 +20,16 @@ inline constexpr std::array<std::string_view, 5> environment = {"SDKROOT", "DEVE
 
 // One request. `argv` follows the front's name, with response files expanded by the client;
 // relative paths in it are relative to `cwd`.
+// Whether a request's engine events go back to its client (#245): none, events, or events with
+// the values of the kinds that can show theirs.
+enum class Trace : std::uint8_t { off, events, values };
+
 struct Request {
   std::vector<std::string> argv;
   std::string cwd;
   std::vector<std::pair<std::string, std::string>> env;  // the set variables of `environment`
   std::int64_t build_time = 0;                           // the client's clock, seconds since the epoch
+  Trace trace = Trace::off;
 };
 
 // A file the client writes, at a path relative to its working directory.
@@ -43,6 +48,7 @@ struct Report {
   std::uint64_t regions_reused = 0;
   std::uint64_t executed = 0;   // engine cells executed and validated in this request's session
   std::uint64_t validated = 0;
+  std::uint64_t started_at = 0;  // the revision it started from: a later batch may not be in it (`--watch`)
 };
 
 struct Done {
@@ -79,9 +85,9 @@ struct Units {
 };
 
 // Runs a request in `session` (#63), reading files through `host` (which reads the view `units`
-// names). `stopped` is set when `stop` stopped it.
+// names). `stopped` is set when `stop` stopped it. `tracer` gets the events of its engine requests.
 Done run(const Request& r, pp::Host& host, pipeline::Session& session, const Stop& stop, bool& stopped,
-         Units units = {});
+         Units units = {}, engine::Tracer* tracer = nullptr);
 
 // The path a request's scope is found from (§2): its first source file, else its first input,
 // else nothing (the working directory). Relative to the request's `cwd`.
@@ -377,7 +383,7 @@ std::optional<Request> check_one(const Request& r, std::string_view source) {
 // The c++-compatible front: `[-c|-fsyntax-only|-E] [-o out] [-std=c++26] a.cpp...`. Exits 0 on
 // success and 1 on any error in the input or the command line.
 Done run(const Request& r, pp::Host& host, pipeline::Session& session, const Stop& stop, bool& stopped,
-         Units units) {
+         Units units, engine::Tracer* tracer) {
   Done d;
   stopped = false;
   auto opts = parse_options(views(r.argv));
@@ -447,7 +453,7 @@ Done run(const Request& r, pp::Host& host, pipeline::Session& session, const Sto
   }
   const pipeline::Until until = bad_object ? pipeline::Until::link : key.until;
   pipeline::RunStats rs;
-  std::optional<pipeline::Built> built = session.run<pipeline::Build>(session.request(std::move(key)), stop, &rs);
+  std::optional<pipeline::Built> built = session.run<pipeline::Build>(session.request(std::move(key)), stop, &rs, tracer);
   if (!built) {
     stopped = true;
     return d;

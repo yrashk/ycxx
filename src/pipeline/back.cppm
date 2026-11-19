@@ -360,6 +360,11 @@ struct FnKey {
   bool operator==(const FnKey&) const = default;
 };
 
+// Names in engine traces (#245): a unit by its source file, a function by its qualified name
+// (from the bound universe's sema records, else its handle).
+void trace_describe(std::string& out, TuId tu);
+void trace_describe(std::string& out, const FnKey& k);
+
 // The unit's definitions.
 struct TuUnit {
   using Key = TuId;
@@ -401,6 +406,7 @@ struct FunctionGen {
   using Key = FnKey;
   using Value = Generated;
   static engine::query_task<Value> run(engine::Ctx& cx, FnKey k);
+  static std::string errors(const Value& v) { return v.error ? v.error->message : std::string(); }  // for traces
 };
 
 // `function_ir(F)`: the L1 body, which holds no position (optimization design §2.4).
@@ -412,6 +418,8 @@ struct FunctionIr {
   using Key = FnKey;
   using Value = FunctionIrValue;
   static engine::query_task<Value> run(engine::Ctx& cx, FnKey k);
+  static std::string show(const Value& v);  // the L1 text, for traces (#245)
+  static std::string errors(const Value& v) { return v.error ? v.error->message : std::string(); }
 };
 
 // `function_debug(F)`: node id → `Loc`, and the variables.
@@ -430,6 +438,8 @@ struct Lower {
   using Key = FnKey;
   using Value = Lowered;
   static engine::query_task<Value> run(engine::Ctx& cx, FnKey k);
+  static std::string show(const Value& v);  // the L2 text, for traces (#245)
+  static std::string errors(const Value& v) { return v.error ? v.error->message : std::string(); }
 };
 
 // `unit(F, ctx, inline_opts)`: the fingerprint of F's optimization unit, which is in the
@@ -442,6 +452,7 @@ struct UnitQ {
   using Key = FnKey;
   using Value = UnitRef;
   static engine::query_task<Value> run(engine::Ctx& cx, FnKey k);
+  static std::string errors(const Value& v) { return v.error ? v.error->message : std::string(); }  // for traces
 };
 
 struct OptKey {
@@ -460,6 +471,8 @@ struct Optimized {
   using Key = OptKey;
   using Value = Machine;
   static engine::query_task<Value> run(engine::Ctx& cx, OptKey k);
+  static std::string show(const Value& v);  // the instruction words, for traces (#245)
+  static std::string errors(const Value& v) { return v.code ? std::string() : v.error; }
 };
 
 // `codegen(F)`: `best_available(unit, B, S)` (§A8.3; optimization design §7: S is consulted only
@@ -468,6 +481,8 @@ struct Codegen {
   using Key = FnKey;
   using Value = Machine;
   static engine::query_task<Value> run(engine::Ctx& cx, FnKey k);
+  static std::string show(const Value& v) { return Optimized::show(v); }
+  static std::string errors(const Value& v) { return Optimized::errors(v); }
 };
 
 // ---------------------------------------------------------------------------------------------
@@ -488,6 +503,11 @@ struct Tu {
   using Key = TuId;
   using Value = TuValue;
   static engine::query_task<Value> run(engine::Ctx& cx, TuId tu);
+  static std::string errors(const Value& v) {  // for traces (#245)
+    std::string out;
+    for (const BackError& e : v.errors) out += e.message + "\n";
+    return out;
+  }
 };
 
 // The objects of one translation unit, or what the α subset cannot compile yet: `tu(TU)` in an
@@ -617,6 +637,60 @@ static_assert(ir::layout_source<QueryLayout>);
 
 // Every function's source re-runs after any edit to the unit and scans it: quadratic in the
 // unit's functions per edit, cheap at α sizes (#121 indexes it).
+namespace {
+// An entity's qualified name from the bound universe's sema records, else its handle.
+std::string entity_name(EntityId e) {
+  std::string out;
+  const sema::World* w = universe().world;
+  const auto name = [&](this const auto& self, EntityId x, int depth) -> void {
+    const sema::EntityRec* r = w ? w->entities.find(x) : nullptr;
+    if (!r) {
+      std::format_to(std::back_inserter(out), "entity {}", std::to_underlying(x));
+      return;
+    }
+    if (r->scope != EntityId::none && depth < 8) {
+      self(r->scope, depth + 1);
+      out += "::";
+    }
+    out += w->ins.names.spelling(r->name);
+    // A specialization: its template arguments, so `Describe<int>` and `Describe<int*>` differ.
+    if (r->templ != EntityId::none) {
+      const auto arg = [&](this const auto& one, const ast::TemplateArg& a) -> std::string {
+        switch (a.kind) {
+          case ast::TemplateArgKind::type: return w->types.spell(a.type);
+          case ast::TemplateArgKind::value: {
+            const sema::ValueRec v = w->values.rec(a.value);
+            if (v.kind == sema::ValueKind::integer) return std::to_string(static_cast<std::int64_t>(v.bits));
+            if (v.kind == sema::ValueKind::null_pointer) return "nullptr";
+            return "…";
+          }
+          case ast::TemplateArgKind::pack: {
+            std::string p;
+            for (const ast::TemplateArg& x : w->ins.seqs.elements(a.elems)) p += (p.empty() ? "" : ", ") + one(x);
+            return p;
+          }
+        }
+        return "?";
+      };
+      out += '<';
+      bool first = true;
+      for (const ast::TemplateArg& a : r->args) {
+        const std::string text = arg(a);
+        if (text.empty()) continue;  // an empty pack
+        out += (first ? "" : ", ") + text;
+        first = false;
+      }
+      out += '>';
+    }
+  };
+  name(e, 0);
+  return out;
+}
+}  // namespace
+
+void trace_describe(std::string& out, const FnKey& k) { out += entity_name(k.fn); }
+
+
 engine::query_task<FunctionSource> FunctionSourceQ::run(engine::Ctx& cx, FnKey k) {
   const TranslationUnit& tu = co_await cx.fetch<TuUnit>(k.tu);
   FunctionSource out;
@@ -669,6 +743,30 @@ engine::query_task<Generated> FunctionGen::run(engine::Ctx& cx, FnKey k) {
   auto f = irgen::function_ir(*universe().in, input, facts);
   if (!f) co_return Generated{std::nullopt, BackError{ast::Loc{d.item, d.body_offset}, f.error()}};
   co_return Generated{std::move(*f), std::nullopt};
+}
+
+namespace {
+// A body's text without its `func @N` line's handle, which means nothing to a reader.
+std::string unnamed(std::string text) {
+  if (const std::size_t brace = text.find(" {"); text.starts_with("func @") && brace != std::string::npos) text.replace(0, brace, "func");
+  return text;
+}
+}  // namespace
+
+std::string FunctionIr::show(const FunctionIrValue& v) {
+  if (v.error) return "error: " + v.error->message;
+  return v.body ? unnamed(ir::print(EntityId::none, *v.body)) : std::string();
+}
+
+std::string Lower::show(const Lowered& v) {
+  if (v.error) return "error: " + v.error->message;
+  return v.body ? unnamed(l2::print(EntityId::none, v.body->f)) : std::string();
+}
+
+std::string Optimized::show(const Machine& m) {
+  if (!m.code) return m.error.empty() ? std::string() : "error: " + m.error;
+  return std::format("{} bytes, {} relocations\n", m.code->bytes.size(), m.code->relocs.size()) +
+         aarch64::disassemble(*m.code, [](EntityId e) { return entity_name(e); });
 }
 
 engine::query_task<FunctionIrValue> FunctionIr::run(engine::Ctx& cx, FnKey k) {

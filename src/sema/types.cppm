@@ -455,6 +455,8 @@ public:
   {
     return *recs_.find(std::to_underlying(e));
   }
+  // The record, if sema made the entity (the back end's string literal objects have none).
+  const EntityRec* find(EntityId e) const { return recs_.find(std::to_underlying(e)); }
 
 private:
   ast::Interners* ins_;
