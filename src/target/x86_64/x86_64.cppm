@@ -296,6 +296,16 @@ std::expected<void, std::string> Emitter::node(NodeId n) {
       read(ops[1], rcx);
       e_.reg({0x0f, 0xaf}, rax, rcx);  // imul
       break;
+    case Op::sdiv: case Op::udiv: case Op::srem: case Op::urem: {
+      Type type = body_.type(body_.result(n));
+      if (type != Type::i32 && type != Type::i64)
+        return at_node(n, op, "operation is outside the x86-64 integer subset");
+      read(ops[0]);
+      read(ops[1], rcx);
+      e_.divide(rcx, op == Op::sdiv || op == Op::srem, type == Type::i64);
+      if (op == Op::srem || op == Op::urem) e_.move(rax, rdx);
+      break;
+    }
     case Op::neg:
       read(ops[0]);
       e_.reg({0xf7}, 3, rax);
