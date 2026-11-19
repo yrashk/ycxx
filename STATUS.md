@@ -1886,15 +1886,19 @@ values, end to end; results match Clang's bit for bit.
 
 ## The address of an overload set, ι (#313, #337, 2026-11-19)
 
-- [over.over] (src/sema/actions.cppm `address_matches`, `overload_address`): `f` or `&f` naming an
-  overload set, converted to a pointer or reference to function type `F` (initialization,
-  assignment, an argument, a return, `static_cast` and C-style casts), is the function of type
-  `F`: a non-template one if there is one, else a template's specialization deduced from `F`
-  ([temp.deduct.funcaddr], `Templates::deduce_declaration`), demanded like a call's. In overload
-  resolution such an argument is an exact match when it names exactly one function of the
-  parameter's type.
-- Not yet: deducing a template parameter from an overload-set argument ([temp.deduct.call]/6).
-- Tests: `tests/own/function-pointers/`.
+- A pointer or reference target picks a free or static member function by its function type
+  ([over.over]). Targets include initializers, assignments, arguments and return values, and
+  casts. List-initialization applies the target to each scalar element, including elements of
+  an array with a deduced bound.
+- Function template deduction uses the entire target type ([temp.deduct.funcaddr]). Selection
+  checks associated constraints, prefers a non-template function, and partially orders
+  matching templates by their full function types. A call can also deduce fixed function or
+  function-pointer parameters by trying the non-template members of an overload set
+  ([temp.deduct.call]/6).
+- Related work covers pointers to non-static members (#238), `noexcept` function types (#219),
+  a template-id without a target type (#335), and function pointer or reference template
+  arguments (#406).
+- Tests are in `tests/own/function-pointers/`. The draft's first [over.over] example passes.
 
 ## Bootstrap workarounds
 

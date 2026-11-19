@@ -591,7 +591,6 @@ public:
     Declarator d;
     d.begin = pos();
     Level top = level(abstract, d.ok);
-    top_ = &top;
     const Suffix* fn = nullptr;
     d.type = build(top, base, fn, d);
     if (fn) {
@@ -1001,10 +1000,9 @@ public:
         // In a parameter, [dcl.fct]/5 adjusts the array to a pointer: build the pointer at once.
         t = s_->types().pointer(t);
       } else if (s->unknown_bound) {
-        // The outermost bound of a variable, which its initializer gives or which stays unknown
-        // (`extern T* a[];`: this level's pointers are the element's); any other is not
-        // supported yet.
-        if (&*s != &l.suffixes.front() || d.unknown_bound || &l != top_ || l.inner) {  // `(&r)[]`, `(*p)[]`
+        // Only the outermost array bound of the declared entity can be inferred from its
+        // initializer. It is the last suffix applied, at the level containing the declarator-id.
+        if (&*s != &l.suffixes.front() || d.unknown_bound || l.inner || !s_->types().is_object(t)) {
           s_->diag(d.begin, Diag::not_supported, Tk::l_square);
           d.ok = false;
         }
@@ -3967,8 +3965,6 @@ private:
   bool half_ = false;           // the current `>>` has had its first `>` taken by a template-id
 public:
   bool body = false;  // the part is a function body, not a declaration part
-private:
-  const Level* top_ = nullptr;  // the declarator being built
 };
 
 }  // namespace ycxx::parse

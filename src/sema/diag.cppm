@@ -191,6 +191,7 @@ enum class Diag : std::uint32_t {
   bind_to_rvalue [[=message{Severity::error, "a non-const lvalue reference to '{0:t}' cannot bind to a temporary"}]],
   bind_drops_qualifiers [[=message{Severity::error, "binding a reference to '{1:t}' to a value of type '{0:t}' drops qualifiers"}]],
   overload_address [[=message{Severity::error, "the address of the overloaded function '{0:n}' needs a target type"}]],
+  immediate_address [[=message{Severity::error, "the address of immediate function '{0:n}' requires an immediate function context"}]],
   overload_address_none [[=message{Severity::error, "no function '{0:n}' has the target type '{1:t}'"}]],
   overload_address_ambiguous [[=message{Severity::error, "the address of the overloaded function '{0:n}' is ambiguous"}]],
   ambiguous_name [[=message{Severity::error, "reference to '{0:n}' is ambiguous"}]],

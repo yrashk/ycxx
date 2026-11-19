@@ -489,8 +489,8 @@ int twice(int x) { return 2 * x; }
 int main() { int (*f)(int) = twice; return f(2) == 4 ? 0 : 1; }
 '''
 status = 'partial'
-issues = [196]
-note = 'calls through a pointer to a variadic function'
+issues = [196, 219, 287]
+note = 'variadic indirect calls, noexcept conversions and C language linkage'
 
 [[feature]]
 id = 'basic-rvalue-ref'
@@ -1871,7 +1871,9 @@ probe = '''
 int f(int) { return 1; } int f(long) { return 2; } int f(const char*) { return 3; }
 int main() { int (*p)(long) = f; return (f(1) == 1 && f(1L) == 2 && f("") == 3 && p(0) == 2) ? 0 : 1; }
 '''
-status = 'done'
+status = 'partial'
+issues = [219, 238, 335, 406]
+note = 'targeted free and static overloads work; remaining function-type and target forms'
 
 [[feature]]
 id = 'over-operators'

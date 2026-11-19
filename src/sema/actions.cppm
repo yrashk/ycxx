@@ -1327,7 +1327,7 @@ public:
   // An element copy-initialized from `e`, where a narrowing conversion is ill-formed
   // ([dcl.init.list]/7).
   Ex list_element(QualType t, Ex e) {
-    if (!e.ok()) return e;
+    if (!e.ok() || address_set(e)) return convert(e, t, e.begin);
     Ex from = rvalue(e);
     Ex r = convert(e, t, e.begin);
     if (r.ok() && narrows(from, t)) {
@@ -2972,7 +2972,27 @@ public:
       object = self_of();
       if (!object->ok()) return fail;
     }
-    return bound_member(c, name, object, true, begin, end, name_at, naming);
+    Ex set = bound_member(c, name, object, true, begin, end, name_at, naming);
+    // Only static members match ordinary function pointers or references ([over.over]). Keep
+    // the bound member for calls, whose candidate set also includes the non-static members.
+    const u32 key = std::to_underlying(set.id);
+    std::vector<ast::DeclSema> statics;
+    for (const MemberDeclRec* member : bound_.at(key).cands) {
+      if (!member->is_static) continue;
+      if (member->is_template) {
+        if (auto d = q_->template_decl(member->entity)) statics.push_back(*d);
+        continue;
+      }
+      ast::DeclSema d{};
+      d.entity = member->entity;
+      d.type = member->type;
+      d.kind = ast::DeclKind::function;
+      d.flags = member->is_deleted ? decl_flag::deleted : 0;
+      d.constraints = ConstId::none;
+      statics.push_back(d);
+    }
+    if (!statics.empty()) overloads_[key] = std::move(statics);
+    return set;
   }
 
   // A static data member of class `c`. Of the current instantiation of a class template, one whose
@@ -3041,7 +3061,7 @@ public:
     if (ex != explicit_args_.end()) explicit_args = ex->second;
     std::vector<ArgShape> shapes;
     for (const Ex& a : args)
-      shapes.push_back({a.type(), a.cat() == ValueCategory::lvalue, !types().is(a.type(), Builtin::overload_set) && !is_bound_member(a)});
+      shapes.push_back(argument_shape(a));
     std::vector<Candidate> cands;
     std::vector<const MemberDeclRec*> recs;
     std::deque<ast::DeclSema> patterns;
@@ -3210,11 +3230,13 @@ public:
     bool to_rvalue = false;   // to an rvalue
     int ref_cv = 0;           // the cv-qualifiers the referred-to type adds
     int base_depth = 0;       // a derived-to-base conversion's distance ([over.ics.rank]/4.4)
+    bool function_ref = false;  // binding to a function lvalue ([over.ics.rank]/3.2.4)
     bool operator<(const Ics& o) const {
       if (rank != o.rank) return rank < o.rank;
       if (base_depth && o.base_depth && base_depth != o.base_depth) return base_depth < o.base_depth;
       if (ref && o.ref) {
         if (to_rvalue && o.to_rvalue && rvalue_ref != o.rvalue_ref) return rvalue_ref;  // /3.2.3
+        if (function_ref && o.function_ref && rvalue_ref != o.rvalue_ref) return !rvalue_ref;  // /3.2.4
         return ref_cv < o.ref_cv;                                                         // /3.2.6
       }
       if (!ref && !o.ref) return sub < o.sub;
@@ -3255,19 +3277,29 @@ public:
 
   Ics ics(const Ex& a, QualType p) {
     if (!a.ok()) return {};
-    // An overload set converts to a pointer or reference to function when it names exactly one
-    // function of that type: an exact match ([over.ics.scs]/3, [over.over]).
-    if (auto f = address_target(p))
-      if (auto am = address_matches(a, *f)) return am->found.size() == 1 ? Ics{true, 0, 0} : Ics{};
+    // The target parameter can select a function from an overload set ([over.over]).
+    if (auto set = address_set(a)) {
+      auto f = address_target(p);
+      if (!f) return {};
+      auto matches = address_matches(*set, *f);
+      if (matches.size() != 1) return {};
+      QualType t = matches.front().type;
+      ExprInfo info = set->address ? ExprInfo{types().pointer(t), ValueCategory::prvalue, 0}
+                                   : ExprInfo{t, ValueCategory::lvalue, 0};
+      return ics({a.id, a.begin, a.end, info}, p);
+    }
     if (types().is_reference(p)) {
       TypeRec r = types().rec(p);
       QualType t = r.inner;
       // [dcl.init.ref]: a direct binding to an lvalue (or, for an rvalue reference, an xvalue)
       // of the type, no less qualified.
-      bool direct_cat = r.rvalue_ref ? a.cat() == ValueCategory::xvalue : a.cat() == ValueCategory::lvalue;
-      if (direct_cat && same_unqualified(a.type(), t) && cv_within(object_cv(a.type()), object_cv(t)))
-        return binding({true, 0, 0}, r.rvalue_ref, a.cat() != ValueCategory::lvalue,
-                       cv_bits(object_cv(t)) - cv_bits(object_cv(a.type())));
+      bool direct_cat = r.rvalue_ref && !types().is_function(t) ? a.cat() == ValueCategory::xvalue : a.cat() == ValueCategory::lvalue;
+      if (direct_cat && same_unqualified(a.type(), t) && cv_within(object_cv(a.type()), object_cv(t))) {
+        Ics v = binding({true, 0, 0}, r.rvalue_ref, a.cat() != ValueCategory::lvalue,
+                        cv_bits(object_cv(t)) - cv_bits(object_cv(a.type())));
+        v.function_ref = types().is_function(t);
+        return v;
+      }
       // [over.ics.ref]/1: binding to a base class subobject is a derived-to-base Conversion.
       if (int d = base_depth(a.type(), t); d && (direct_cat || (a.glvalue() && (r.rvalue_ref || object_cv(t) == Cv::const_))) &&
                                              cv_within(object_cv(a.type()), object_cv(t))) {
@@ -3424,7 +3456,8 @@ public:
   // an xvalue for an rvalue reference, else a prvalue.
   ExprInfo result_info(QualType r) {
     if (!types().is_reference(r)) return {Types::unqualified(r), ValueCategory::prvalue, 0};
-    return {types().referee(r), types().rec(r).rvalue_ref ? ValueCategory::xvalue : ValueCategory::lvalue, 0};
+    QualType t = types().referee(r);
+    return {t, types().rec(r).rvalue_ref && !types().is_function(t) ? ValueCategory::xvalue : ValueCategory::lvalue, 0};
   }
 
   // ------------------------------------------------------------ constructors and references
@@ -3451,7 +3484,7 @@ public:
     std::deque<ast::DeclSema> patterns;
     std::vector<ArgShape> shapes;
     for (const Ex& a : args)
-      shapes.push_back({a.type(), a.cat() == ValueCategory::lvalue, !types().is(a.type(), Builtin::overload_set) && !is_bound_member(a)});
+      shapes.push_back(argument_shape(a));
     for (const MemberDeclRec& m : cr->members)
       if (m.is_ctor && m.is_template) {
         // A constructor template: the specialization deduction gives ([temp.over]/1), never a
@@ -3504,12 +3537,10 @@ public:
     }
     std::vector<Child> cs;
     for (std::size_t i = 0; i < args.size(); ++i) {
-      Ex a = i < fr.params.size() ? convert(args[i], fr.params[i], args[i].begin) : variadic_argument(args[i]);
+      Ex a = i >= fr.params.size() ? variadic_argument(args[i])
+           : list                  ? list_element(fr.params[i], args[i])
+                                   : convert(args[i], fr.params[i], args[i].begin);
       if (!a.ok()) return fail;
-      if (list && i < fr.params.size() && narrows(rvalue(args[i]), fr.params[i])) {
-        diag(args[i].begin, Diag::narrowing, value_type(args[i]), Types::unqualified(fr.params[i]));
-        return fail;
-      }
       // A parameter of class type: a temporary the caller initializes and destroys ([expr.call]/7).
       if (i < fr.params.size() && types().is_class(fr.params[i]) && !a.glvalue())
         a = materialize(a, Types::unqualified(fr.params[i]), false, true);
@@ -3579,15 +3610,13 @@ public:
       return dependent_node({e}, e.begin, e.end, types().is_dependent(t) ? std::nullopt : std::optional(t),
                             types().rec(r).rvalue_ref ? ValueCategory::xvalue : ValueCategory::lvalue);
     }
-    if (auto f = address_target(r)) {  // a reference to function bound to an overload set ([over.over]/1)
-      if (auto o = overload_address(e, *f, at_)) e = *o;
-      if (!e.ok()) return e;
-    }
+    e = overload_address(e, r, at_);
+    if (!e.ok()) return e;
     if (is_bound_member(e) || types().is(e.type(), Builtin::overload_set)) return rvalue(e);
     TypeRec rr = types().rec(r);
     QualType t = rr.inner;
     Ex fail{NodeId::none, e.begin, e.end};
-    bool direct_cat = rr.rvalue_ref ? e.cat() == ValueCategory::xvalue : e.cat() == ValueCategory::lvalue;
+    bool direct_cat = rr.rvalue_ref && !types().is_function(t) ? e.cat() == ValueCategory::xvalue : e.cat() == ValueCategory::lvalue;
     if (direct_cat && same_unqualified(e.type(), t)) {
       if (cv_within(object_cv(e.type()), object_cv(t))) return extend ? extended(e) : e;
       diag(at_, Diag::bind_drops_qualifiers, e.type(), r);
@@ -4030,6 +4059,7 @@ public:
 
   // An expression statement's expression, a discarded-value expression ([expr.context]).
   Ex discarded(Ex e) {
+    if (address_set(e)) return rvalue(e);
     if (is_bound_member(e)) {
       diag(e.begin, Diag::bound_member_not_called, w_->entities.rec(as<ast::Member>(e)->member).name);
       return {NodeId::none, e.begin, e.end};
@@ -4072,92 +4102,140 @@ public:
     return node(ast::ImplicitConversion{info, k, EntityId::none, at(e, e.begin)}, e.begin, e.end, info);
   }
 
-  // The address of an overload set ([over.over]): the function type a target of type `to` takes,
-  // a pointer or a reference to function, or the function type itself.
+  // A target takes a function type ([over.over]), after removing a reference or pointer.
   std::optional<QualType> address_target(QualType to) {
-    QualType t = types().is_reference(to) ? types().referee(to) : Types::unqualified(to);
+    QualType t = types().referee(to);
     if (types().is_pointer(t)) t = types().pointee(t);
     if (!types().is_function(t)) return std::nullopt;
     return t;
   }
-  // `f` or `&f` naming an overload set, for a target of function type `fn`: the function of that
-  // type, a non-template one before a template's specialization deduced from it
-  // ([over.over]/2–5, [temp.deduct.funcaddr]); none if `e` is not an overload set.
-  // The functions of type `fn` that the overload set `e` names (`f` or `&f`), after [over.over]/4
-  // removes specializations when there is another; none if `e` is not an overload set.
+
+  struct AddressSet {
+    Ex name;
+    bool address;
+    const std::vector<ast::DeclSema>* decls;
+  };
+  // Recover the name of an overload set from `f`, `&f` or parentheses around either.
+  std::optional<AddressSet> address_set(Ex e) {
+    if (!e.ok()) return std::nullopt;
+    bool address = types().is_pointer(e.type()) && types().is(types().pointee(e.type()), Builtin::overload_set);
+    if (address) {
+      while (auto p = as<ast::Paren>(e)) e = {p->operand.id, e.begin + p->operand.at, e.end, p->info};
+      auto u = as<ast::Unary>(e);
+      if (!u || u->op != ast::UnaryOp::address_of) return std::nullopt;
+      const Builtin kind = bound_.contains(std::to_underlying(u->operand.id)) ? Builtin::bound_member : Builtin::overload_set;
+      e = {u->operand.id, e.begin + u->operand.at, e.end, ExprInfo{builtin(kind), ValueCategory::lvalue, 0}};
+    }
+    if (!types().is(e.type(), Builtin::overload_set) && !is_bound_member(e)) return std::nullopt;
+    auto it = overloads_.find(std::to_underlying(e.id));
+    if (it == overloads_.end()) return std::nullopt;
+    return AddressSet{e, address, &it->second};
+  }
+
+  ArgShape argument_shape(const Ex& a) {
+    auto set = address_set(a);
+    if (!set) return {a.type(), a.cat() == ValueCategory::lvalue, !is_bound_member(a) && !is_braced(a)};
+    ArgShape shape{a.type(), !set->address, false};
+    if (std::ranges::any_of(*set->decls, [](const ast::DeclSema& d) { return (d.flags & decl_flag::template_) != 0; }))
+      return shape;
+    for (const ast::DeclSema& d : *set->decls) {
+      if (!constraints_satisfied(d)) continue;
+      const auto ft = types().has_placeholder(types().rec(d.type).inner) ? q_->deduced_type(d.entity) : std::optional(d.type);
+      if (ft) shape.overloads.push_back(set->address ? types().pointer(*ft) : *ft);
+    }
+    return shape;
+  }
+
+  bool constraints_satisfied(const ast::DeclSema& d, std::span<const TemplateArg> args = {}) {
+    if (d.constraints == ConstId::none) return true;
+    std::vector<ast::TemplateParamSema> ps = ins().seqs.elements(d.template_params);
+    auto nf = templates().substitute_constraint(d.constraints, Bindings::of(ps.empty() ? 0 : ps[0].depth, args));
+    return nf && q_->satisfied(*nf).value_or(true);
+  }
+
   struct AddressMatch {
     EntityId entity;
     QualType type;
-    bool specialization;
+    const ast::DeclSema* decl;
   };
-  struct AddressMatches {
-    Ex set;
-    bool address = false;
-    NameId name{};
+  // The functions selected by type, constraints and partial ordering ([over.over]).
+  std::vector<AddressMatch> address_matches(const AddressSet& set, QualType fn) {
+    const auto ex = explicit_args_.find(std::to_underlying(set.name.id));
+    const bool explicit_id = ex != explicit_args_.end();
+    const std::span<const TemplateArg> args = explicit_id ? std::span<const TemplateArg>(ex->second) : std::span<const TemplateArg>();
+    const QualType target = types().canonical(fn);
     std::vector<AddressMatch> found;
-  };
-  std::optional<AddressMatches> address_matches(Ex e, QualType fn) {
-    AddressMatches m;
-    m.set = e;
-    if (types().is_pointer(e.type()) && types().is(types().pointee(e.type()), Builtin::overload_set)) {
-      auto u = as<ast::Unary>(e);
-      if (!u) return std::nullopt;
-      m.set = Ex{u->operand.id, e.begin, e.end, ExprInfo{builtin(Builtin::overload_set), ValueCategory::lvalue, 0}};
-      m.address = true;
-    }
-    if (!m.set.ok() || !types().is(m.set.type(), Builtin::overload_set)) return std::nullopt;
-    auto it = overloads_.find(std::to_underlying(m.set.id));
-    if (it == overloads_.end()) return std::nullopt;
-    const std::vector<ast::DeclSema> decls = it->second;
-    auto ex = explicit_args_.find(std::to_underlying(m.set.id));
-    std::span<const TemplateArg> explicit_args;
-    if (ex != explicit_args_.end()) explicit_args = ex->second;
-    m.name = w_->entities.rec(decls.front().entity).name;
-    std::vector<AddressMatch>& found = m.found;
-    for (const ast::DeclSema& d : decls) {
+    for (const ast::DeclSema& d : *set.decls) {
       if (!(d.flags & decl_flag::template_)) {
-        if (ex == explicit_args_.end() && types().canonical(d.type) == types().canonical(fn)) found.push_back({d.entity, d.type, false});
+        if (explicit_id || !constraints_satisfied(d)) continue;
+        const auto ft = types().has_placeholder(types().rec(d.type).inner) ? q_->deduced_type(d.entity) : std::optional(d.type);
+        if (ft && types().canonical(*ft) == target) found.push_back({d.entity, *ft, &d});
         continue;
       }
       Templates t = templates();
-      auto targs = t.deduce_declaration(d, fn, explicit_args);
-      if (!targs) continue;
-      auto st = t.specialization_type(d, *targs);
-      if (!st) continue;
-      found.push_back({specialization(d, *targs, *st), *st, true});
+      auto deduced = t.deduce_declaration(d, fn, args, true);
+      if (!deduced || !constraints_satisfied(d, *deduced)) continue;
+      auto ft = t.specialization_type(d, *deduced);
+      if (!ft) continue;
+      EntityId f = specialization(d, *deduced, *ft);
+      if (types().has_placeholder(types().rec(*ft).inner)) ft = q_->deduced_type(f);
+      if (ft && types().canonical(*ft) == target) found.push_back({f, *ft, &d});
     }
-    // [over.over]/4: a function that is not a specialization is preferred.
-    if (std::ranges::any_of(found, [](const AddressMatch& a) { return !a.specialization; }))
-      std::erase_if(found, [](const AddressMatch& a) { return a.specialization; });
-    return m;
+    auto better = [&](const AddressMatch& a, const AddressMatch& b) {
+      const bool at = (a.decl->flags & decl_flag::template_) != 0;
+      const bool bt = (b.decl->flags & decl_flag::template_) != 0;
+      if (at != bt) return !at;
+      Templates t = templates();
+      if (at) {
+        auto [ab, ba] = t.address_ordering(*a.decl, *b.decl);
+        if (ab != ba) return ab;
+        if (!ab || !equivalent_for_constraints(*a.decl, *b.decl)) return false;
+      }
+      return t.subsumes(a.decl->constraints, b.decl->constraints) && !t.subsumes(b.decl->constraints, a.decl->constraints);
+    };
+    std::vector<AddressMatch> remaining;
+    for (const AddressMatch& a : found)
+      if (std::ranges::none_of(found, [&](const AddressMatch& b) { return &a != &b && better(b, a); }))
+        remaining.push_back(a);
+    return remaining;
   }
-  std::optional<Ex> overload_address(Ex e, QualType fn, u32 at_) {
-    auto am = address_matches(e, fn);
-    if (!am) return std::nullopt;
-    const Ex& set = am->set;
-    const bool address = am->address;
-    const NameId name = am->name;
-    const std::vector<AddressMatch>& found = am->found;
+
+  Ex overload_address(Ex e, QualType to, u32 at_) {
+    auto set = address_set(e);
+    if (!set) return e;
+    auto fn = address_target(to);
+    if (!fn) return e;
+    auto found = address_matches(*set, *fn);
+    NameId name = w_->entities.rec(set->decls->front().entity).name;
+    Ex fail{NodeId::none, e.begin, e.end};
     if (found.empty()) {
-      diag(at_, Diag::overload_address_none, name, fn);
-      return Ex{NodeId::none, e.begin, e.end};
+      diag(at_, Diag::overload_address_none, name, *fn);
+      return fail;
     }
-    if (found.size() > 1) {
+    if (found.size() != 1) {
       diag(at_, Diag::overload_address_ambiguous, name);
-      return Ex{NodeId::none, e.begin, e.end};
+      return fail;
     }
-    const AddressMatch& m = found.front();
-    // A specialization whose address is taken is one whose definition the program requires
-    // ([temp.inst]/8).
-    if (m.specialization) demands.push_back({m.entity, ast::Loc{item_, loc_base_ + set.begin}});
-    if (deleted_.contains(std::to_underlying(m.entity))) {
-      diag(set.begin, Diag::deleted_function, name);
-      return Ex{NodeId::none, e.begin, e.end};
+    const AddressMatch& match = found.front();
+    if (auto it = bound_.find(std::to_underlying(set->name.id)); it != bound_.end()) {
+      const Bound& member = it->second;
+      if (!check_access(member.cls, match.decl->entity, name, member.name_at, member.naming)) return fail;
     }
-    ExprInfo info{m.type, ValueCategory::lvalue, 0};
-    Ex r = node(ast::DeclRef{info, m.entity}, set.begin, set.end, info);
-    if (!address) return r;
-    ExprInfo pi{types().pointer(m.type), ValueCategory::prvalue, 0};
+    if (match.decl->flags & decl_flag::deleted) {
+      diag(set->name.begin, Diag::deleted_function, name);
+      return fail;
+    }
+    if ((match.decl->flags & decl_flag::consteval_) && !immediate_context) {
+      diag(set->name.begin, Diag::immediate_address, name);
+      return fail;
+    }
+    // Taking a specialization's address demands its definition ([temp.inst]).
+    if (match.decl->flags & decl_flag::template_)
+      demands.push_back({match.entity, ast::Loc{item_, loc_base_ + set->name.begin}});
+    ExprInfo info{match.type, ValueCategory::lvalue, 0};
+    Ex r = node(ast::DeclRef{info, match.entity}, set->name.begin, set->name.end, info);
+    if (!set->address) return {r.id, e.begin, e.end, r.info};
+    ExprInfo pi{types().pointer(match.type), ValueCategory::prvalue, 0};
     return node(ast::Unary{pi, ast::UnaryOp::address_of, at(r, e.begin)}, e.begin, e.end, pi);
   }
 
@@ -4166,8 +4244,8 @@ public:
   Ex rvalue(Ex e) {
     if (auto c = e.ok() ? const_captures_.find(std::to_underlying(e.id)) : const_captures_.end(); c != const_captures_.end())
       return literal(Types::unqualified(e.type()), c->second, ValueCategory::prvalue, e.begin, e.end);
-    if (e.ok() && types().is(e.type(), Builtin::overload_set)) {
-      diag(e.begin, Diag::overload_address, w_->entities.rec(as<ast::DeclRef>(e)->entity).name);
+    if (auto set = address_set(e)) {
+      diag(e.begin, Diag::overload_address, w_->entities.rec(set->decls->front().entity).name);
       return {NodeId::none, e.begin, e.end};
     }
     if (is_bound_member(e)) {
@@ -4272,10 +4350,9 @@ public:
       if (types().is_reference(to)) return bind_reference(e, to, at_);
       return dependent_node({e}, e.begin, e.end, types().is_dependent(to) ? std::nullopt : std::optional(Types::unqualified(to)));
     }
-    if (auto f = address_target(to)) {
-      if (auto r = overload_address(e, *f, at_)) e = *r;
-      if (!e.ok()) return e;
-    }
+    if (types().is_reference(to)) return bind_reference(e, to, at_);
+    e = overload_address(e, to, at_);
+    if (!e.ok()) return e;
     QualType target = Types::unqualified(to);
     if (auto inv = closure_invoker(e.type(), target)) return invoker_pointer(e, *inv);
     if (types().is_array(target)) {
@@ -4285,7 +4362,6 @@ public:
     }
     // A class object is copy-initialized from an expression of its own class: a glvalue through
     // the (trivial, implicit) copy constructor, a prvalue directly ([dcl.init.general]/17.6).
-    if (types().is_reference(to)) return bind_reference(e, to, at_);
     if (types().is_class(target)) {
       if (!require_complete(target, at_)) return {NodeId::none, e.begin, e.end};
       if (initializes(target, e) && !e.glvalue()) return e;  // the prvalue initializes it directly
@@ -4311,6 +4387,7 @@ public:
     if (types().is_pointer(target) && is_null_pointer_constant(e))
       return convert_node(e, ast::ConversionKind::null_pointer, target);
     e = rvalue(e);
+    if (!e.ok()) return e;
     QualType from = e.type();
     // A std::nullptr_t object's value is a null pointer constant too ([conv.ptr]/1).
     if (e.ok() && types().is_pointer(target) && types().is(Types::unqualified(from), Builtin::nullptr_t))
@@ -4358,10 +4435,7 @@ public:
     if (!e.ok()) return e;
     if (dependent(e) || types().is_dependent(to))
       return dependent_node({e}, e.begin, e.end, types().is_dependent(to) ? std::nullopt : std::optional(Types::unqualified(to)));
-    if (auto f = address_target(to)) {  // [over.over]/1: a cast's target type
-      if (auto r = overload_address(e, *f, at_)) e = *r;
-      if (!e.ok()) return e;
-    }
+    if (address_set(e)) return convert(e, to, at_);  // [over.over]: a cast supplies a target type
     QualType target = Types::unqualified(to);
     if (types().is_void(target)) return convert_node(e, ast::ConversionKind::to_void, target);  // /6
     if (types().is_reference(to) || types().is_class(target) || types().is_array(target)) return convert(e, to, at_);
@@ -4827,6 +4901,8 @@ public:
       return make(o, types().pointee(o.type()), ValueCategory::lvalue);
     }
     case address_of:
+      if (is_bound_member(e) && address_set(e))
+        return make(e, types().pointer(builtin(Builtin::overload_set)), ValueCategory::prvalue);
       if (!e.glvalue()) {
         diag(op_at, Diag::not_lvalue_address, e.type());
         return {NodeId::none, begin, end};
@@ -5182,8 +5258,7 @@ public:
       if (ex != explicit_args_.end()) explicit_args = ex->second;
       std::vector<ArgShape> shapes;
       for (const Ex& a : args)
-        shapes.push_back({a.type(), a.cat() == ValueCategory::lvalue,
-                          !types().is(a.type(), Builtin::overload_set) && !is_bound_member(a)});
+        shapes.push_back(argument_shape(a));
       std::vector<Candidate> cands;
       std::vector<const ast::DeclSema*> decls;
       for (const ast::DeclSema& d : set) {
