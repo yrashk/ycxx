@@ -355,6 +355,11 @@ specified by the accepted [optimization design](docs/design/optimization.md) (#3
    - **Memory:** trees are built in the frame arena and interned when the frame commits, into
      per-kind pools, never a `std::tuple` over the kinds; keys are interned eagerly. *Reason:*
      speculative parses and deductions leave no garbage. (§9)
+   - **Closure types** ([expr.prim.lambda]) are unnamed class entities local to the enclosing
+     entity, numbered per signature in closing-brace order as the Itanium ABI names them; the
+     lambda's body is analysed inside the enclosing part, captures resolved through a frame per
+     lambda into fields of the closure, and its members emitted with that part (#280,
+     [closures.md](docs/design/closures.md), decided by Fable).
 10. **The resident daemon.** Specified by the accepted [daemon design](docs/design/daemon.md)
     (#83); the section references in this item point into it.
     - **One daemon per project root and ycxx binary.** The root is the first `.ycxx` or
