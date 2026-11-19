@@ -3915,6 +3915,9 @@ public:
       return s_->node(ast::Compound{s_->builder().list(outer)}, begin, pos());
     };
     if (!range.ok()) return finish_dependent(false);
+    // If this becomes the nonmember branch, its synthesized calls use the instantiation
+    // context as well as the lexical context ([temp.dep.candidate]).
+    if (types.is_dependent(range.type())) s_->dependent_calls.push_back(begin);
     if (s_->dependent(range) || (types.is_dependent(d.type) && !types.has_placeholder(d.type))) return finish_dependent(true);
     // auto&& __range = initializer;
     auto hidden = [&](QualType declared, Ex e) -> std::optional<std::pair<u32, Ex>> {
@@ -3949,9 +3952,8 @@ public:
       e = s_->call(s_->member(ref(r->first), false, end_name, to, at, at), {}, to, to);
     } else {
       if (types.is_class(ct) && !s_->require_complete(ct, at)) return finish_dependent(false);
-      // TODO(#165): [stmt.ranged] requires argument-dependent lookup without ordinary lookup.
-      b = s_->call(s_->name_expr(begin_name, at, to, true), {ref(r->first)}, to, to);
-      e = s_->call(s_->name_expr(end_name, at, to, true), {ref(r->first)}, to, to);
+      b = s_->adl_call(begin_name, ref(r->first), at, to, begin);
+      e = s_->adl_call(end_name, ref(r->first), at, to, begin);
     }
     auto bv = b.ok() ? hidden(types.placeholder(false), b) : std::nullopt;
     auto ev = e.ok() ? hidden(types.placeholder(false), e) : std::nullopt;
