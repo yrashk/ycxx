@@ -51,6 +51,12 @@ PathId path_id(std::string_view absolute);
 const std::string& path_of(PathId p);
 void hash_into(Hasher& h, PathId p) { h.bytes(path_of(p)).uint(u8(0)); }
 
+// Names in engine traces (#245): a path by its last two components, a driver's file by the name
+// it was given (`name_file`, process-wide), else its number.
+void name_file(FileId f, std::string name);
+void trace_describe(std::string& out, PathId p);
+void trace_describe(std::string& out, FileId f);
+
 // Phases 1–6 of one translation unit, as a function: `text` is the main file's, `path` its name
 // as given (it locates `#include "..."` and is its presumed name).
 Preprocessed preprocess(Session& s, std::string_view text, std::string_view path);
@@ -247,6 +253,16 @@ class HostScope {
   Host* old_;
 };
 
+// The names of the driver's files, for traces (#245).
+struct FileNames {
+  std::mutex m;
+  std::map<FileId, std::string> names;
+};
+FileNames& file_names() {
+  static FileNames n;
+  return n;
+}
+
 }  // namespace ycxx::pp
 
 export namespace ycxx::pp {
@@ -294,6 +310,27 @@ PathId path_id(std::string_view absolute) {
   p.spelled.emplace_back(absolute);
   p.ids.emplace(std::string(absolute), id);
   return id;
+}
+
+void name_file(FileId f, std::string name) {
+  FileNames& n = file_names();
+  std::lock_guard lock(n.m);
+  n.names.insert_or_assign(f, std::move(name));
+}
+
+void trace_describe(std::string& out, FileId f) {
+  FileNames& n = file_names();
+  std::lock_guard lock(n.m);
+  if (const auto it = n.names.find(f); it != n.names.end()) out += it->second;
+  else std::format_to(std::back_inserter(out), "file {}", std::to_underlying(f));
+}
+
+void trace_describe(std::string& out, PathId p) {
+  const std::string& path = path_of(p);
+  std::size_t cut = path.rfind('/');
+  if (cut != std::string::npos && cut > 0) cut = path.rfind('/', cut - 1);
+  if (cut == std::string::npos || cut == 0) out += path;
+  else out += "…" + path.substr(cut);
 }
 
 const std::string& path_of(PathId id) {

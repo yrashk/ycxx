@@ -61,6 +61,7 @@ class Session {
     Bind bind(universe_);  // input values may hold handles, fingerprinted by their interners
     const pp::FileId file{tu.n};
     const bool disk = config.view == pp::View::disk;
+    pp::name_file(file, std::filesystem::path(path).filename().native_encoded_string());
     db_.set<pp::SourceOf>(file, {std::move(path), std::move(cwd), std::move(config)});
     if (disk) db_.set<pp::FileText>(file, std::move(text));
     db_.set<TuSourceIn>(tu, {std::move(object), tu.n, {}});
@@ -70,11 +71,11 @@ class Session {
     db_.set<ProgramIn>(p, std::move(in));
   }
 
-  // A root request, with the session's universe bound.
+  // A root request, with the session's universe bound; `tracer` gets its events (#245).
   template <engine::MemoQuery Q>
-  decltype(auto) get(const typename Q::Key& k) {
+  decltype(auto) get(const typename Q::Key& k, engine::Tracer* tracer = nullptr) {
     Bind bind(universe_);
-    return db_.get<Q>(k);
+    return db_.get<Q>(k, tracer);
   }
 
   // The byte offset of a location in a source unit's main file.
@@ -96,5 +97,11 @@ class Session {
   engine::Pool* pool_ = nullptr;
   engine::Pool::Scope scope_;
 };
+
+}  // namespace ycxx::pipeline
+
+namespace ycxx::pipeline {
+
+void trace_describe(std::string& out, TuId tu) { trace_describe(out, pp::FileId{tu.n}); }
 
 }  // namespace ycxx::pipeline
