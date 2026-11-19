@@ -580,11 +580,19 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   `ET_EXEC` image with load segments and a non-executable stack.
 - `ycxx cxx --target=x86_64-pc-linux-gnu -nostdlib a.cpp b.cpp -o a` compiles and links C++
   sources in one invocation. Either source can also be compiled separately with `-c` and passed
-  as a `.o` input. The driver links compiled sources in command-line order, then disk objects in
-  command-line order. When the program supplies an explicit `_start`, that symbol is the entry.
-  Otherwise ycxx's startup calls `int main()` or `int main(int, char**)` and exits with the returned
-  value. The link query checks a source function's ABI when an asm label gives it the symbol
+  as a `.o` input. Links limited to sources and disk objects place compiled sources first. Each
+  group follows command-line order. When the program supplies an explicit `_start`, that symbol
+  is the entry. Otherwise ycxx's startup calls `int main()` or `int main(int, char**)` and exits
+  with the returned value. The link query checks a source function's ABI when an asm label gives it the symbol
   `main`. A `main` supplied in an ELF object must already use one of those signatures.
+- A static link can include explicit `.a` operands created by system `ar`. It follows operand order
+  across sources, objects and archives. Each archive supplies the earliest physical member
+  defining an unresolved nonweak symbol, repeating until no eligible member remains. Each
+  repeated operand searches the archive again at its new position. The driver snapshots the
+  archive and the link query validates its GNU index and reads only the selected ELF members.
+  This path requires a source or ordinary object and supports regular, indexed GNU archives
+  and empty archives. Other archive formats and combining archives with shared objects remain
+  part of [#388](https://github.com/yrashk/ycxx/issues/388).
 - `-nostdlib --dynamic-linker=/absolute/target/loader` with explicit shared objects writes a
   fixed-address, sectionless `ET_EXEC`. Libraries need a slash-free `DT_SONAME` and a SysV
   `DT_HASH`, and cannot have loader dependencies. The linker checks direct calls against their
@@ -612,7 +620,8 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   coverage, including execution of an explicit `_start`. `unit.linux_dynamic` links and runs a
   libc-free provider built by the host C compiler. It checks the ELF layout, argument passing,
   runtime rebinding, initialization and finalization, and reproducibility and invalidation in
-  the daemon.
+  the daemon. `unit.linux_archive` tests system `ar` inputs, extraction order, symbol binding,
+  malformed archives, and output parity and same-path replacement in the daemon.
 
 ## The resident daemon (#96, #97, 2026-11-18)
 

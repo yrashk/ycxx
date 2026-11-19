@@ -4,6 +4,8 @@ export module ycxx.link.elf;
 export import ycxx.obj;
 export import ycxx.link.elf.shared;
 import std;
+import ycxx.obj.archive;
+import ycxx.obj.elf;
 
 export namespace ycxx::link::elf {
 
@@ -11,6 +13,17 @@ struct dynamic_options {
   std::string interpreter;
   std::vector<shared_object> libraries;
 };
+
+struct archive_input {
+  std::string name;
+  std::string bytes;
+};
+
+using static_operand = std::variant<std::reference_wrapper<const obj::object>, std::reference_wrapper<const archive_input>>;
+
+// Include ordinary objects at their operand positions and select archive members in response
+// to outstanding nonweak references. The returned objects are ready for startup and layout.
+std::expected<std::vector<obj::object>, std::string> select_archive_members(std::span<const static_operand> operands);
 
 // Link in-memory x86-64 Linux objects. The caller supplies the entry definition in code and
 // handles process startup and exit. Only the standard sections and ABS64, PC32 and PLT32
@@ -65,6 +78,7 @@ constexpr std::array section_kinds{
 
 struct section_ref { std::size_t object, section; };
 struct definition { std::size_t object; const obj::symbol* symbol; };
+using definitions = std::map<std::string_view, definition, std::less<>>;
 
 struct load_segment {
   std::uint32_t flags;
@@ -111,6 +125,33 @@ std::unexpected<std::string> object_error(const obj::object& o, std::string_view
 
 std::unexpected<std::string> section_error(const obj::object& o, const obj::section& s, std::string_view reason) {
   return object_error(o, std::format("{},{}: {}", s.segment, s.name, reason));
+}
+
+std::expected<void, std::string> register_symbols(const obj::object& o, std::size_t oi, definitions& globals) {
+  for (const obj::symbol& s : o.symbols) {
+    if (s.bind != binding::local && s.bind != binding::global && s.bind != binding::hidden) {
+      return object_error(o, std::format("unsupported binding for symbol '{}'", s.name));
+    }
+    if ((s.name.empty() && s.bind != binding::local) || s.name.contains('\0')) {
+      return object_error(o, "invalid ELF symbol name");
+    }
+    if (s.bind == binding::local && (!s.defined() || s.weak)) {
+      return object_error(o, std::format("invalid local symbol '{}'", s.name));
+    }
+    if (!s.defined()) {
+      if (s.offset != 0) return object_error(o, std::format("undefined symbol '{}' has a section offset", s.name));
+      continue;
+    }
+    if (*s.section >= o.sections.size() || s.offset > o.sections[*s.section].size()) {
+      return object_error(o, std::format("symbol '{}' is outside its section", s.name));
+    }
+    if (s.bind == binding::local) continue;
+    auto [existing, inserted] = globals.try_emplace(s.name, definition{oi, &s});
+    if (inserted || s.weak) continue;
+    if (!existing->second.symbol->weak) return object_error(o, std::format("duplicate symbol '{}'", s.name));
+    existing->second = {oi, &s};
+  }
+  return {};
 }
 
 void write_word(std::span<std::uint8_t> out, std::uint64_t value) {
@@ -269,6 +310,65 @@ std::expected<void, std::string> write_dynamic(bytes& image, const dynamic_layou
 
 }  // namespace
 
+std::expected<std::vector<obj::object>, std::string> select_archive_members(std::span<const static_operand> operands) {
+  // Keep symbol names and addresses stable while adding objects.
+  std::deque<obj::object> objects;
+  definitions globals;
+  std::set<std::string_view, std::less<>> outstanding;
+  const auto include = [&](obj::object object, const auto& offer) -> std::expected<void, std::string> {
+    if (object.arch != obj::target::x86_64_linux) return object_error(object, "expected an x86-64 Linux object");
+    const auto& o = objects.emplace_back(std::move(object));
+    if (auto registered = register_symbols(o, objects.size() - 1, globals); !registered) return registered;
+    for (const auto& s : o.symbols) {
+      if (s.bind == binding::local) continue;
+      if (s.defined()) outstanding.erase(s.name);
+      else if (!s.weak && !globals.contains(s.name) && outstanding.emplace(s.name).second) offer(s.name);
+    }
+    return {};
+  };
+
+  for (const auto& operand : operands) {
+    if (const auto* ordinary = std::get_if<0>(&operand)) {
+      if (auto added = include(ordinary->get(), [](std::string_view) {}); !added)
+        return std::unexpected(added.error());
+      continue;
+    }
+    const auto& input = std::get<1>(operand).get();
+    auto archive = obj::archive::read(input.bytes, input.name);
+    if (!archive) return std::unexpected(archive.error());
+
+    // New unresolved references can select an earlier member. Queue each indexed candidate
+    // by its physical position and skip it if a preceding selection already resolved its name.
+    using candidate = std::pair<std::size_t, std::string_view>;
+    std::priority_queue<candidate, std::vector<candidate>, std::greater<>> candidates;
+    const auto offer = [&](std::string_view name) {
+      const auto [first, last] = archive->symbols.equal_range(name);
+      for (auto it = first; it != last; ++it) candidates.emplace(it->second, name);
+    };
+    for (const auto name : outstanding) offer(name);
+    std::vector<std::uint8_t> selected(archive->members.size());
+    while (!candidates.empty()) {
+      const auto [i, symbol] = candidates.top();
+      candidates.pop();
+      if (selected[i] || !outstanding.contains(symbol)) continue;
+      const auto& member = archive->members[i];
+      const auto name = std::format("{}({})", input.name, member.name);
+      const auto data = std::span(reinterpret_cast<const std::uint8_t*>(member.data.data()), member.data.size());
+      auto object = obj::elf::read_object(data, name);
+      if (!object) return std::unexpected(object.error());
+      if (!std::ranges::any_of(object->symbols, [&](const obj::symbol& s) {
+            return s.defined() && s.bind != binding::local && s.name == symbol;
+          })) {
+        return object_error(*object, std::format("archive index symbol '{}' is not defined by the member", symbol));
+      }
+      selected[i] = true;
+      if (auto added = include(std::move(*object), offer); !added)
+        return std::unexpected(added.error());
+    }
+  }
+  return std::vector<obj::object>(std::make_move_iterator(objects.begin()), std::make_move_iterator(objects.end()));
+}
+
 std::expected<bytes, std::string> link(std::span<const obj::object> objects, std::string_view entry,
                                      const dynamic_options* dynamic) {
   if (dynamic) {
@@ -285,7 +385,7 @@ std::expected<bytes, std::string> link(std::span<const obj::object> objects, std
   }
 
   std::array<std::vector<section_ref>, std::to_underlying(group::count)> sections;
-  std::map<std::string_view, definition, std::less<>> globals;
+  definitions globals;
   for (std::size_t oi = 0; oi < objects.size(); ++oi) {
     const auto& o = objects[oi];
     if (o.arch != obj::target::x86_64_linux) return object_error(o, "expected an x86-64 Linux object");
@@ -309,29 +409,8 @@ std::expected<bytes, std::string> link(std::span<const obj::object> objects, std
       }
       sections[std::to_underlying(kind->output)].push_back({oi, si});
     }
-    for (const obj::symbol& s : o.symbols) {
-      if (s.bind != binding::local && s.bind != binding::global && s.bind != binding::hidden) {
-        return object_error(o, std::format("unsupported binding for symbol '{}'", s.name));
-      }
-      if ((s.name.empty() && s.bind != binding::local) || s.name.contains('\0')) {
-        return object_error(o, "invalid ELF symbol name");
-      }
-      if (s.bind == binding::local && (!s.defined() || s.weak)) {
-        return object_error(o, std::format("invalid local symbol '{}'", s.name));
-      }
-      if (!s.defined()) {
-        if (s.offset != 0) return object_error(o, std::format("undefined symbol '{}' has a section offset", s.name));
-        continue;
-      }
-      if (*s.section >= o.sections.size() || s.offset > o.sections[*s.section].size()) {
-        return object_error(o, std::format("symbol '{}' is outside its section", s.name));
-      }
-      if (s.bind == binding::local) continue;
-      auto [existing, inserted] = globals.try_emplace(s.name, definition{oi, &s});
-      if (inserted || s.weak) continue;
-      if (!existing->second.symbol->weak) return object_error(o, std::format("duplicate symbol '{}'", s.name));
-      existing->second = {oi, &s};
-    }
+    if (auto registered = register_symbols(o, oi, globals); !registered)
+      return std::unexpected(registered.error());
   }
 
   import_indices imports;
