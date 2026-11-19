@@ -557,7 +557,7 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
 - Not yet: `ycxx cxx` through the daemon by default (#120), `#include` (#65), optimization
   levels and the other common options (`-O` is rejected, #81).
 
-## x86-64 ELF objects and freestanding executables (2026-11-19)
+## x86-64 ELF objects and executables (2026-11-19)
 
 - `--target=x86_64-pc-linux-gnu` (also `x86_64-linux-gnu`) selects Linux preprocessing,
   layout and code generation. The in-process driver and daemon keep the target in the unit
@@ -581,8 +581,17 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   command-line order. When the program supplies an explicit `_start`, that symbol is the entry.
   Otherwise ycxx's startup calls `int main()` or `int main(int, char**)` and exits with the returned
   value. The link query checks a source function's ABI when an asm label gives it the symbol
-  `main`. A `main` supplied in an ELF object must already use one of those signatures. Hosted
-  linking and general-purpose ELF object interoperability remain unsupported.
+  `main`. A `main` supplied in an ELF object must already use one of those signatures.
+- `-nostdlib --dynamic-linker=/absolute/target/loader` with explicit shared objects writes a
+  fixed-address, sectionless `ET_EXEC`. Libraries need a slash-free `DT_SONAME` and a SysV
+  `DT_HASH`, and cannot have loader dependencies. The linker checks direct calls against their
+  default-visible, unversioned global functions. One RX thunk and one eager `R_X86_64_GLOB_DAT`
+  relocation in RW storage serve each imported name. The loader runs provider initializers and
+  resolves the imports by SONAME. Startup runs the executable's initializers, calls `main`, and
+  calls the loader's termination callback before exiting with `main`'s result. The interpreter
+  path and ordered shared inputs, including provider content fingerprints, enter the `Link`
+  query. Target CRT selection, versioned imports and GNU-hash-only providers remain part of
+  [#390](https://github.com/yrashk/ycxx/issues/390).
 - ELF objects record namespace-scope initializer functions in `.init_array`, with 8-byte slots
   and `R_X86_64_64` relocations. The linker places arrays consecutively in input order and checks
   each slot resolves into executable input bytes. Generated startup calls the functions before
@@ -596,7 +605,10 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   `unit.linux_executable` (`tests/unit/pipeline/linux_executable.py`) runs
   source-only, object-only and mixed-input executables and checks exit status, `argc` and `argv`,
   diagnostics, and cold and daemon output. The linker and startup also have native CTest
-  coverage, including execution of an explicit `_start`.
+  coverage, including execution of an explicit `_start`. `unit.linux_dynamic` links and runs a
+  libc-free provider built by the host C compiler. It checks the ELF layout, argument passing,
+  runtime rebinding, initialization and finalization, and reproducibility and invalidation in
+  the daemon.
 
 ## The resident daemon (#96, #97, 2026-11-18)
 

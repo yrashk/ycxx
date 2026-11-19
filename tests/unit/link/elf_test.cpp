@@ -275,6 +275,71 @@ void diagnostics(const std::array<obj::object, 2>& good) {
   rejects(bad, "R_X86_64_PC32 displacement overflows for 'table'");
 }
 
+void dynamic_calls() {
+  obj::object input;
+  input.arch = obj::target::x86_64_linux;
+  const auto text = input.add_section(standard_section::text);
+  const auto data = input.add_section(standard_section::data);
+  input.define("_start", binding::global, text);
+  const auto function = input.reference("provided");
+  auto& code = input.sections[text];
+  code.emit32(0);  // padding for a test that patches the call opcode
+  code.emit(std::array<std::uint8_t, 5>{0xe8, 0, 0, 0, 0});
+  code.relocate(reloc_kind::x86_64_plt32, function, -4);
+  code.emit(std::array<std::uint8_t, 5>{0xe8, 0, 0, 0, 0});
+  code.relocate(reloc_kind::x86_64_plt32, function, -4);
+  input.sections[data].emit64(0);
+
+  const elf::dynamic_options options{"/target/ld.so", {{"leaf.so", "leaf.so.1", {{"provided", true}}, {}}}};
+  const auto image = elf::link(std::span(&input, 1), "_start", &options);
+  check(image.has_value(), image ? "link direct dynamic calls" : image.error());
+  if (image) {
+    const auto base = field(*image, 64 + 2 * 56 + 16, 8);
+    const auto entry = field(*image, 24, 8) - base;
+    const auto target = [&](std::uint64_t offset) {
+      return offset + 4 + std::bit_cast<std::int32_t>(static_cast<std::uint32_t>(field(*image, offset, 4)));
+    };
+    check(target(entry + 5) == entry + code.size() && target(entry + 10) == entry + code.size(),
+          "two calls to the same import resolve to one thunk");
+  }
+
+  const auto reject = [](const obj::object& o, const elf::dynamic_options& dyn, std::string_view reason) {
+    const auto result = elf::link(std::span(&o, 1), "_start", &dyn);
+    check(!result && result.error().contains(reason), reason);
+  };
+  const auto change = [&](auto mutation, std::string_view reason) {
+    auto bad = input;
+    mutation(bad.sections[text], bad.sections[data]);
+    reject(bad, options, reason);
+  };
+  constexpr std::string_view direct = "ELF import 'provided' requires a direct call with R_X86_64_PLT32";
+  change([](auto& c, auto&) { c.relocs.front().kind = reloc_kind::x86_64_pc32; }, direct);
+  change([](auto& c, auto&) { c.relocs.front().addend = 0; }, direct);
+  change([](auto& c, auto&) { c.bytes[4] = 0xe9; }, direct);  // jmp rel32
+  change([](auto& c, auto&) { c.relocs.front().offset = 0; }, direct);
+  change([](auto& c, auto&) { c.relocs.back().offset += 1; }, "ELF relocation is outside its section");
+  change([&](auto&, auto& d) { d.relocate(reloc_kind::abs64, function); }, direct);
+  change([&](auto& c, auto& d) {
+    d.bytes[0] = 0xe8;
+    d.relocs.push_back(c.relocs.front());
+    d.relocs.back().offset = 1;
+  }, direct);
+  change([](auto& c, auto&) { c.relocate(reloc_kind::x86_64_pc32, 0, 0, 1); },
+         "overlapping ELF relocations are unsupported");
+  change([](auto& c, auto&) { c.relocs.clear(); }, "has no direct call reference");
+
+  auto incompatible = options;
+  incompatible.libraries.insert(incompatible.libraries.begin(),
+                                {"data.so", "data.so.1", {{"provided", false}}, {}});
+  reject(input, incompatible, "unsupported ELF import 'provided'");
+  auto local = input;
+  local.symbols[function].section = text;
+  local.symbols[function].offset = 0;
+  local.sections[text].relocs.front().kind = reloc_kind::x86_64_pc32;
+  check(elf::link(std::span(&local, 1), "_start", &incompatible).has_value(),
+        "an object definition takes precedence over supplied libraries");
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -295,5 +360,6 @@ int main(int argc, char** argv) {
   diagnostics(objects);
   alternate_layouts(objects);
   initializer_arrays(objects);
+  dynamic_calls();
   return ycxx::unit::result("unit.elf_link");
 }
