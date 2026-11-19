@@ -58,11 +58,12 @@ enum class standard_section : std::uint8_t {
   data_const,  // __DATA,__const: read-only after load, may hold pointers (the linker puts it in __DATA_CONST)
   data,        // __DATA,__data: writable data
   bss,         // __DATA,__bss: zero-initialized data
+  mod_init_func,  // __DATA,__mod_init_func: pointers to the functions dyld runs before main
 };
 
 // How a relocation patches its site. S is the target symbol's address, A the addend, P the
 // site's address, M the address of `minus`, GOT(S) the address of S's GOT slot. Instruction
-// fields are those of the Arm ARM.
+// fields are defined by the Arm ARM or the System V AMD64 psABI.
 enum class reloc_kind : std::uint8_t {
   branch26,       // B, BL: imm26 = (S + A - P) >> 2; an imported S goes through a stub
   page21,         // ADRP: immhi:immlo = page(S + A) - page(P), in 4 KiB pages
@@ -72,6 +73,8 @@ enum class reloc_kind : std::uint8_t {
   abs64,          // 64-bit word: S + A, or S + A - M when `minus` is set
   abs32,          // 32-bit word: S + A - M; only differences fit
   got_rel32,      // 32-bit word: GOT(S) + A - P
+  x86_64_pc32,    // signed 32-bit displacement: S + A - P
+  x86_64_plt32,   // signed 32-bit displacement: PLT(S) + A - P
 };
 
 struct reloc {
@@ -141,7 +144,7 @@ struct symbol {
   bool operator==(const symbol&) const = default;
 };
 
-enum class target : std::uint8_t { aarch64_macos };
+enum class target : std::uint8_t { aarch64_macos, x86_64_linux };
 
 struct object {
   std::string name;  // for diagnostics: the file name or the TU
@@ -183,6 +186,7 @@ section section::standard(standard_section kind) {
     case standard_section::data_const: return {"__DATA", "__const", regular, 3, {}, 0, {}};
     case standard_section::data: return {"__DATA", "__data", regular, 0, {}, 0, {}};
     case standard_section::bss: return {"__DATA", "__bss", zerofill, 0, {}, 0, {}};
+    case standard_section::mod_init_func: return {"__DATA", "__mod_init_func", mod_init_func_pointers, 3, {}, 0, {}};
   }
   std::unreachable();
 }

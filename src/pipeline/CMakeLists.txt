@@ -8,4 +8,4 @@ target_sources(ycxxc_pipeline PUBLIC FILE_SET CXX_MODULES FILES
   executable.cppm
   session.cppm
   pipeline.cppm)
-target_link_libraries(ycxxc_pipeline PUBLIC ycxxc_parse ycxxc_irgen ycxxc_aarch64 ycxxc_link)
+target_link_libraries(ycxxc_pipeline PUBLIC ycxxc_parse ycxxc_irgen ycxxc_aarch64 ycxxc_x86_64 ycxxc_link)

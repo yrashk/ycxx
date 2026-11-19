@@ -123,12 +123,179 @@ std::uint32_t byte_offset(ast::Interners& in, const pp::Region& region, const it
   return 0;
 }
 
+// A variable with static storage duration initialized or destroyed by code ([basic.start.dynamic],
+// [basic.start.term]): its initializer's tree in its declaration's item, if it is not constant.
+struct Dynamic {
+  EntityId variable;
+  QualType type;
+  ast::NodeId init;
+  EntityId destructor;
+  std::uint32_t item;
+};
+
+// The C++ runtime's entry points the unit calls (Itanium C++ ABI §3.3), declared on first use.
+template <class Declare>
+struct Runtime {
+  sema::World& world;
+  Declare& declare;
+  EntityId atexit_ = EntityId::none, dso_ = EntityId::none, acquire_ = EntityId::none, release_ = EntityId::none;
+  EntityId declared(std::string_view n, QualType t, bool fn) {
+    EntityId e = world.entities.entity({fn ? sema::EntityKind::function : sema::EntityKind::variable, world.ins.names.intern(n), t,
+                                        ast::LangLinkage::c, ast::Linkage::external, {}, EntityId::none});
+    ast::DeclSema d{};
+    d.entity = e;
+    d.type = t;
+    declare(d, std::nullopt);
+    return e;
+  }
+  QualType vp() { return world.types.pointer(world.types.builtin(sema::Builtin::void_)); }
+  QualType int_() { return world.types.builtin(sema::Builtin::int_); }
+  // `int __cxa_atexit(void (*)(void*), void*, void*)` and `__dso_handle`.
+  EntityId atexit() {
+    if (atexit_ == EntityId::none) {
+      QualType v = vp();
+      QualType dtor = world.types.pointer(world.types.function(world.types.builtin(sema::Builtin::void_), std::span(&v, 1), false, ast::LangLinkage::c));
+      QualType ps[] = {dtor, v, v};
+      atexit_ = declared("__cxa_atexit", world.types.function(int_(), ps, false, ast::LangLinkage::c), true);
+    }
+    return atexit_;
+  }
+  EntityId dso() {
+    if (dso_ == EntityId::none) dso_ = declared("__dso_handle", world.types.builtin(sema::Builtin::char_), false);
+    return dso_;
+  }
+  // `int __cxa_guard_acquire(int64_t*)`, `void __cxa_guard_release(int64_t*)`.
+  EntityId acquire() {
+    if (acquire_ == EntityId::none) {
+      QualType g = world.types.pointer(world.types.builtin(sema::Builtin::long_long));
+      acquire_ = declared("__cxa_guard_acquire", world.types.function(int_(), std::span(&g, 1), false, ast::LangLinkage::c), true);
+    }
+    return acquire_;
+  }
+  EntityId release() {
+    if (release_ == EntityId::none) {
+      QualType g = world.types.pointer(world.types.builtin(sema::Builtin::long_long));
+      release_ = declared("__cxa_guard_release",
+                          world.types.function(world.types.builtin(sema::Builtin::void_), std::span(&g, 1), false, ast::LangLinkage::c), true);
+    }
+    return release_;
+  }
+};
+
+// A function's static locals ([stmt.dcl]/3): each a variable of the unit, initialized with its
+// constant if it has one, else zero; one initialized by code, or with a destructor, also gets a
+// guard variable, and the function the runtime entry points its initialization calls.
+template <class R>
+void static_locals(sema::World& world, TranslationUnit& tu, FunctionDef& f, R& runtime) {
+  ast::Interners& ins = world.ins;
+  for (const ast::LocalRec& l : ins.seqs.elements(f.body.locals)) {
+    if (l.entity == EntityId::none || l.decl == ast::NodeId::none || !ins.ast.is<ast::StaticVar>(l.decl)) continue;
+    auto s = ins.ast.get<ast::StaticVar>(l.decl);
+    bool code = s.destructor != EntityId::none || (s.value == ast::ConstId::none && s.init.id != ast::NodeId::none);
+    const sema::EntityRec& r = world.entities.rec(l.entity);
+    auto local = [&](EntityId e, QualType t, bool guard) {
+      tu.entities.push_back({e, std::string(ins.names.spelling(r.name)), t, false, ast::LangLinkage::cxx, ast::Linkage::internal,
+                             false, std::nullopt, EntityId::none, Special::none});
+      tu.entities.back().local_function = f.entity;
+      tu.entities.back().discriminator = r.ordinal;
+      tu.entities.back().guard = guard;
+    };
+    local(l.entity, l.type, false);
+    tu.variables.push_back({l.entity, l.type, s.value, std::nullopt, code});
+    if (!code) continue;
+    QualType gt = world.types.builtin(sema::Builtin::long_long);
+    sema::EntityRec gr{sema::EntityKind::variable, r.name, gt, ast::LangLinkage::cxx, ast::Linkage::none, {}, l.entity};
+    gr.head = ast::seed("ycxx.pipeline.static-guard");
+    EntityId g = world.entities.entity(std::move(gr));
+    local(g, gt, true);
+    tu.variables.push_back({g, gt, ast::ConstId::none, std::nullopt, true});
+    f.guards.push_back({l.entity, g});
+    f.guard_acquire = runtime.acquire();
+    f.guard_release = runtime.release();
+    if (s.destructor != EntityId::none) {
+      f.atexit = runtime.atexit();
+      f.dso = runtime.dso();
+    }
+  }
+}
+
+// The unit's initialization function, which dyld runs before `main` (`__mod_init_func`): each
+// dynamic initialization in definition order ([basic.start.dynamic]/1), each destructor registered
+// with `__cxa_atexit` (Itanium C++ ABI §3.3.5). Named like Clang's, with internal linkage.
+void init_function_def(parse::Program& program, sema::World& world, TranslationUnit& tu, EntityId fn, QualType fn_type, ast::NodeId root,
+                       std::uint32_t item);
+template <class Declare, class R>
+void init_function(parse::Program& program, sema::World& world, TranslationUnit& tu, std::span<const Dynamic> dynamic,
+                   Declare& declare, R& runtime, std::string_view source) {
+  if (dynamic.empty()) return;
+  ast::Interners& ins = world.ins;
+  sema::Types& types = world.types;
+  QualType void_ = types.builtin(sema::Builtin::void_);
+  QualType vp = types.pointer(void_);
+  auto entity = [&](sema::EntityKind kind, std::string_view n, QualType t, ast::LangLinkage lang, ast::Linkage linkage) {
+    return world.entities.entity({kind, ins.names.intern(n), t, lang, linkage, {}, EntityId::none});
+  };
+  auto symbol = [&](EntityId e, QualType t) {
+    ast::DeclSema d{};
+    d.entity = e;
+    d.type = t;
+    declare(d, std::nullopt);
+  };
+  EntityId atexit = runtime.atexit();
+  EntityId dso = runtime.dso();
+  QualType fn_type = types.function(void_, {}, false, ast::LangLinkage::cxx);
+  const std::string base = "__GLOBAL__sub_I_" + std::filesystem::path(source).filename().native_encoded_string();
+  // One function per declaration, so that what fails points at it; dyld runs them in order.
+  for (std::size_t first = 0, n = 0; first < dynamic.size(); ++n) {
+    std::size_t last = first;
+    while (last < dynamic.size() && dynamic[last].item == dynamic[first].item) ++last;
+    std::string fn_name = n == 0 ? base : std::format("{}.{}", base, n);
+    EntityId fn = entity(sema::EntityKind::function, fn_name, fn_type, ast::LangLinkage::cxx, ast::Linkage::internal);
+    symbol(fn, fn_type);
+    tu.entities.back().asm_label = fn_name;
+    ast::Builder b(ins);
+    std::vector<ast::Child> stmts;
+    for (const Dynamic& x : dynamic.subspan(first, last - first)) {
+      ast::Child init{x.init == ast::NodeId::none ? ast::NodeId::none : b.adopt(x.init), 0};
+      stmts.push_back({b.add(ast::StaticInit{x.variable, x.type, init, x.destructor, atexit, dso}, 0), 0});
+    }
+    ast::Child root = b.commit(ast::Child{b.add(ast::Compound{b.list(stmts)}, 0), 0});
+    init_function_def(program, world, tu, fn, fn_type, root.id, dynamic[first].item);
+    tu.init_functions.push_back({fn, entity(sema::EntityKind::variable, fn_name + ".ptr", vp, ast::LangLinkage::cxx, ast::Linkage::internal)});
+    first = last;
+  }
+}
+
+void init_function_def(parse::Program& program, sema::World& world, TranslationUnit& tu, EntityId fn, QualType fn_type, ast::NodeId root,
+                       std::uint32_t item) {
+  ast::Interners& ins = world.ins;
+  ast::DeclSema d{};
+  d.kind = ast::DeclKind::function;
+  d.type = fn_type;
+  d.linkage = ast::Linkage::internal;
+  d.storage = ast::Storage::static_;
+  d.access = ast::Access::public_;
+  d.flags = sema::decl_flag::definition;
+  d.attributes = ins.intern_seq(std::span<const ast::NodeId>{});
+  d.constraint = ast::NodeId::none;
+  d.constraints = ast::ConstId::none;
+  d.contracts = ast::NodeId::none;
+  d.params = ins.intern_seq(std::span<const ast::ParamSema>{});
+  d.template_params = ins.intern_seq(std::span<const ast::TemplateParamSema>{});
+  d.entity = fn;
+  ast::BodySema body{root, ins.intern_seq(std::span<const ast::LocalRec>{}), ins.intern_seq(std::span<const ast::ExpansionRec>{}),
+                     ins.intern_seq(std::span<const std::uint32_t>{})};
+  body.closures = ins.intern_seq(std::span<const ast::ClosureDef>{});
+  tu.functions.push_back({fn, d, body, program.id(item), 0, std::nullopt});
+}
+
 // The definitions and declarations of the global namespace, in item order.
 TranslationUnit unit_of(parse::Program& program, sema::World& world, const items::Items& items, std::string name) {
   ast::Interners& ins = world.ins;
   TranslationUnit tu;
   tu.name = std::move(name);
   std::set<std::uint32_t> seen;
+  std::vector<Dynamic> dynamic;
   // The type from the declaration, not the entity's record: a variable's type is not part of its
   // identity, so a record made before an edit may hold the old one (#115).
   // Whether a class is local to the unit ([basic.link]/4): it has internal linkage, as a closure
@@ -209,6 +376,7 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
       }
     }
   };
+  Runtime<decltype(declare)> runtime{world, declare};
   for (std::uint32_t k = 0; k < items.items.size(); ++k) {
     const items::Item& it = items.items[k];
     // Items of the global namespace, and the members of its classes.
@@ -256,8 +424,17 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
           !(d.flags & sema::decl_flag::definition))
         continue;
       tu.variables.push_back({d.entity, d.type, declarators[i]->value, at[i]});
+      // Not constant-initialized: initialized dynamically, in order ([basic.start.dynamic]); a
+      // destructor runs at exit ([basic.start.term]).
+      ast::NodeId init = declarators[i]->value == ast::ConstId::none ? declarators[i]->init.id : ast::NodeId::none;
+      EntityId dtor = world.types.is_reference(d.type) ? EntityId::none : program.classes().destructor_of(d.type);
+      if (init != ast::NodeId::none || dtor != EntityId::none) {
+        dynamic.push_back({d.entity, d.type, init, dtor, k});
+        tu.variables.back().dynamic = true;  // written at run time: by its initialization or its destructor
+      }
     }
   }
+  init_function(program, world, tu, dynamic, declare, runtime, program.region().files.at(0));
   // The function template specializations instantiated at the end of the unit ([temp.inst]), in
   // order of instantiation. A specialization that is only declared here is an external reference.
   for (const parse::Program::Instance* in : program.instances()) {
@@ -320,6 +497,7 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
     declare(s.decl, std::nullopt);
     tu.functions.push_back({s.decl.entity, s.decl, program.synthesized_body(i), program.id(s.item), 0, program.this_type(s.decl)});
   }
+  for (FunctionDef& f : tu.functions) static_locals(world, tu, f, runtime);
   return tu;
 }
 
@@ -327,7 +505,8 @@ engine::query_task<FrontResult> TuFront::run(engine::Ctx& cx, TuId tu) {
   const TuSource& src = cx.fetch<TuSourceIn>(tu);
   contract_assert(src.file.has_value());  // a unit given as definitions has no front end
   const pp::FileId file{*src.file};
-  sema::World& world = *universe().world;
+  const pp::Source& unit_source = cx.fetch<pp::SourceOf>(file);
+  sema::World& world = *universe().world_for(*unit_source.config.target);
   const pp::Region& region = co_await cx.fetch<pp::Pp>(file);
   const items::Items& items = co_await cx.fetch<items::RegionItems>(file);
   const std::vector<engine::Diagnostic>& lexed = co_await cx.fetch<engine::DiagsOf>(cx.cell_of<items::RegionItems>(file));
@@ -337,19 +516,18 @@ engine::query_task<FrontResult> TuFront::run(engine::Ctx& cx, TuId tu) {
   // position (#93). Phase 4's diagnostics (`kind`) may have a presumed line ([cpp.line]).
   auto where_in = [&](std::uint16_t f, std::uint32_t offset, std::optional<lex::LexDiag> kind) {
     const std::string& name = region.files[f];
-    const pp::Source& source = cx.fetch<pp::SourceOf>(file);
-    pp::Session& ps = pp::session_for(source.config);
+    pp::Session& ps = pp::session_for(unit_source.config);
     std::lock_guard lock(ps.mutex);
     std::string_view text;  // `<built-in>` is the session's
     if (name.starts_with('<')) {
       if (const pp::Files::Content* c = ps.files.content(ps.files.id(name))) text = c->text;
     } else {
       std::filesystem::path p(name);
-      if (p.is_relative() && !source.cwd.empty()) p = source.cwd / p;
+      if (p.is_relative() && !unit_source.cwd.empty()) p = unit_source.cwd / p;
       const pp::PathId id = pp::path_id(p.lexically_normal().generic_native_encoded_string());
       // The editor view reads an open buffer before the file (daemon design §6.1).
       const std::optional<std::string>* content = nullptr;
-      if (source.config.view == pp::View::editor) content = &cx.fetch<pp::Buffer>(id);
+      if (unit_source.config.view == pp::View::editor) content = &cx.fetch<pp::Buffer>(id);
       if (!content || !*content) content = &cx.fetch<pp::FileContent>(id);
       if (*content) text = **content;
     }
@@ -386,7 +564,6 @@ engine::query_task<FrontResult> TuFront::run(engine::Ctx& cx, TuId tu) {
     out.messages.push_back(std::move(m));
   }
   // The unit's language options: the instantiation limit (`-ftemplate-depth`).
-  const pp::Source& unit_source = cx.fetch<pp::SourceOf>(file);
   parse::Program program(world, region, items, unit_source.config.template_depth);
   program.analyze_all();
   // What an editor's position requests read (#170): where each entity is first declared, and the
@@ -514,16 +691,17 @@ engine::query_task<std::optional<FileOffset>> DefinitionAt::run(engine::Ctx& cx,
   }
   if (named == EntityId::none) co_return std::nullopt;
   // A function template's specialization is declared as its template.
+  const sema::World& world = *universe().world_for(*source.config.target);
   auto d = std::ranges::find(front.declared, named, &std::pair<EntityId, ast::Loc>::first);
   if (d == front.declared.end())
-    if (EntityId templ = universe().world->entities.rec(named).templ; templ != EntityId::none) {
+    if (EntityId templ = world.entities.rec(named).templ; templ != EntityId::none) {
       named = templ;
       d = std::ranges::find(front.declared, named, &std::pair<EntityId, ast::Loc>::first);
     }
   if (d == front.declared.end()) co_return std::nullopt;
   // Where it is first declared: its declarator's token in its item, moved to the declared name
   // (`*p` and `(*f)()` start before it), then that token's site.
-  const std::string_view name = in.names.spelling(universe().world->entities.rec(named).name);
+  const std::string_view name = in.names.spelling(world.entities.rec(named).name);
   for (const items::Item& it : items.items) {
     if (in.items.add<ast::ItemId>(it.id) != d->second.item) continue;
     std::size_t t = std::min<std::size_t>(it.begin + d->second.offset, region.locs.size() - 1);

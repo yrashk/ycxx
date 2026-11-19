@@ -62,6 +62,9 @@ struct Param {
   // one element of it (`element`).
   bool pack = false;
   bool element = false;
+  // Its default argument ([dcl.fct.default]): the initializer-clause converted to the parameter's
+  // type, analysed here; none if it has none.
+  NodeId default_arg = NodeId::none;
 };
 
 // What a declarator declares ([dcl.decl]): its name and type, and, for a function declarator,
@@ -1129,10 +1132,9 @@ public:
         s.variadic = true;
         break;
       }
-      if (is(Tk::equal)) {
-        s_->diag(pos(), Diag::not_supported, Tk::equal);  // default arguments
-        ok = false;
-        skip_param();
+      if (accept(Tk::equal)) {
+        s.params.back().default_arg = default_argument(t);
+        if (s.params.back().default_arg == NodeId::none) ok = false;  // diagnosed
       }
       if (!accept(Tk::comma)) break;
       if (is(Tk::ellipsis)) {
@@ -1153,6 +1155,33 @@ public:
         }
     return s;
   }
+  // A default argument ([dcl.fct.default]/1, /5): its names are bound and its copy-initialization
+  // of the parameter is checked here. A template's that depends on its parameters is kept as it
+  // is, and rejected where a call would use it.
+  NodeId default_argument(QualType t) {
+    // Not in the parameters of a parameter's own function type ([dcl.fct.default]/3).
+    if (in_params_ > 1) s_->diag(pos(), Diag::default_arg_not_allowed);
+    Ex e;
+    bool ref = s_->types().is_reference(t);
+    if (is(Tk::l_brace)) {
+      auto b = braced_init_list();
+      if (!b) return NodeId::none;
+      if (ref && b->clauses.size() == 1 && !b->clauses[0].list && !b->clauses[0].designated)
+        e = s_->bind_reference(b->clauses[0].expr, t, b->clauses[0].begin, false);
+      else
+        e = s_->list_init(sema::Types::unqualified(t), *b);
+    } else {
+      Ex a = assignment_expression();
+      if (!a.ok()) return NodeId::none;
+      e = s_->types().is_dependent(t) || s_->dependent(a) ? a
+          : ref                                             ? s_->bind_reference(a, t, a.begin, false)
+                                                            : s_->convert(a, t, a.begin);
+    }
+    if (!e.ok()) return NodeId::none;
+    if (s_->types().is_dependent(t) || s_->dependent(e)) e = s_->dependent_node({e}, e.begin, e.end);
+    return s_->node(ast::DefaultArg{e.info, sema::Sema::at(e, e.begin)}, e.begin, e.end, e.info).id;
+  }
+
   // Set while a lambda's parameters are read, which check their placeholders themselves.
   bool placeholder_params = false;
   void skip_param() {
@@ -3651,22 +3680,39 @@ public:
     return s_->node(ast::Return{sema::Sema::at(value, begin)}, begin, pos());
   }
 
+  // A block-scope variable's node: a `LocalVar`, or for a static one a `StaticVar`, an entity of its
+  // own initialized the first time control passes its declaration ([stmt.dcl]/3), with the
+  // constant it is initialized with when its initializer is a constant expression
+  // ([basic.start.static]).
+  Ex variable_node(const DeclSpec& spec, u32 local, Ex init, ast::EntityId dtor, u32 dbegin) {
+    if (!spec.is_static) return s_->node(ast::LocalVar{local, sema::Sema::at(init, dbegin), dtor}, dbegin, pos());
+    if (s_->types().is_reference(s_->local(local).type)) {
+      s_->diag(dbegin, Diag::not_supported, Tk::kw_static);  // a static reference (#367)
+      return {NodeId::none, dbegin, pos()};
+    }
+    s_->static_local(local);
+    ast::ConstId value = ast::ConstId::none;
+    if (init.ok() && !s_->dependent(init) && !s_->types().is_dependent(s_->local(local).type)) {
+      sema::Evaluator evaluator(*s_, questions());
+      sema::Evaluated v = s_->as<ast::InitList>(init) ? evaluator.evaluate_initializer(init) : evaluator.evaluate(init);
+      if (v.value) value = *v.value;
+      else if (spec.is_constinit && !v.dependent) s_->diag(init.begin, Diag::not_constant, v.reason);
+    }
+    s_->static_value(local, value == ast::ConstId::none ? std::nullopt : std::optional(value));
+    return s_->node(ast::StaticVar{local, sema::Sema::at(init, dbegin), value, dtor}, dbegin, pos());
+  }
+
   // A block-scope simple-declaration ([stmt.dcl], [dcl.pre]): each declarator is a local
   // variable, in scope from the end of its declarator ([basic.scope.pdecl]).
   Ex declaration_statement() {
     u32 begin = pos();
     DeclSpec spec = decl_specifiers();
-    if (spec.is_static || spec.is_extern || spec.is_inline) {
-      s_->diag(begin, Diag::not_supported,
-               spec.is_static ? Tk::kw_static : spec.is_extern ? Tk::kw_extern : Tk::kw_inline);
+    if (spec.is_extern || spec.is_inline) {
+      s_->diag(begin, Diag::not_supported, spec.is_extern ? Tk::kw_extern : Tk::kw_inline);
       skip_to_semi();
       return {NodeId::none, begin, pos()};
     }
-    if (spec.is_constinit) {
-      s_->diag(begin, Diag::constinit_automatic);  // [dcl.constinit]/1
-      skip_to_semi();
-      return {NodeId::none, begin, pos()};
-    }
+    if (spec.is_constinit && !spec.is_static) s_->diag(begin, Diag::constinit_automatic);  // [dcl.constinit]/1
     if (spec.is_consteval) {
       s_->diag(begin, Diag::consteval_not_function);
       skip_to_semi();
@@ -3732,7 +3778,7 @@ public:
           return {NodeId::none, begin, pos()};
         }
         ast::EntityId dtor = s_->types().is_reference(d.type) ? ast::EntityId::none : s_->destructor_of(d.type);
-        Ex var = s_->node(ast::LocalVar{local, sema::Sema::at(init, dbegin), dtor}, dbegin, pos());
+        Ex var = variable_node(spec, local, init, dtor, dbegin);
         s_->set_local_decl(local, var.id);
         vars.push_back(var);
         continue;
@@ -3816,10 +3862,12 @@ public:
       }
       // The destructor that ends the variable at scope exit ([stmt.dcl]); a reference has none.
       ast::EntityId dtor = s_->types().is_reference(d.type) ? ast::EntityId::none : s_->destructor_of(d.type);
-      Ex var = s_->node(ast::LocalVar{local, sema::Sema::at(init, dbegin), dtor}, dbegin, pos());
+      Ex var = variable_node(spec, local, init, dtor, dbegin);
       s_->set_local_decl(local, var.id);
-      // Default-initialization that initializes nothing is vacuous ([basic.life]/2).
-      if ((init.ok() && !s_->as<ast::DefaultInit>(init)) || dtor != ast::EntityId::none) s_->set_initialized(local);
+      // A jump may bypass a static declaration ([stmt.dcl]/2). Default-initialization that
+      // initializes nothing is vacuous ([basic.life]/2).
+      if (!spec.is_static && ((init.ok() && !s_->as<ast::DefaultInit>(init)) || dtor != ast::EntityId::none))
+        s_->set_initialized(local);
       vars.push_back(var);
     } while (accept(Tk::comma));
     if (!expect(Tk::semi)) skip_to_semi();

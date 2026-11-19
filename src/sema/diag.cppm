@@ -83,7 +83,15 @@ enum class Diag : std::uint32_t {
   function_initialized [[=message{Severity::error, "function '{0:n}' cannot have an initializer"}]],
   const_uninitialized [[=message{Severity::error, "const variable '{0:n}' must be initialized"}]],
   redefinition [[=message{Severity::error, "redefinition of '{0:n}'"}]],
+  default_arg_redefined [[=message{Severity::error, "redefinition of a default argument"}]],
+  default_arg_missing [[=message{Severity::error, "missing default argument on a parameter after one with a default"}]],
+  default_arg_dependent [[=message{Severity::error, "default arguments of templates are not supported yet"}]],
+  default_arg_template_redeclared [[=message{Severity::error, "a redeclaration of a function template cannot add default arguments"}]],
+  default_arg_not_allowed [[=message{Severity::error, "a default argument is not allowed here"}]],
   conflicting_declaration [[=message{Severity::error, "conflicting declaration of '{0:n}'"}]],
+  expected_namespace_name [[=message{Severity::error, "expected a namespace name"}]],
+  nested_namespace_inline [[=message{Severity::error, "a nested namespace definition cannot be 'inline'"}]],
+  nested_namespace_attributes [[=message{Severity::error, "a nested namespace definition takes no attributes"}]],
   overload_not_supported [[=message{Severity::error, "overloading '{0:n}' is not supported yet"}]],
   linkage_conflict [[=message{Severity::error, "'{0:n}' was declared with a different language linkage"}]],
   unknown_linkage [[=message{Severity::error, "unknown language linkage; only \"C\" and \"C++\" are known"}]],
@@ -238,6 +246,16 @@ constexpr std::uint64_t reason_arg(const interp::Failure& f) {
   return (f.arg << 8) | (std::uint64_t(std::to_underlying(f.reason)) + 1);
 }
 inline constexpr std::uint64_t reason_unsupported = 0;
+// Whether an expression that was not constant has run-time code: the front end made its IR, and
+// the evaluation stopped at what it does not or may not evaluate, not at one of its own limits or
+// an internal error. An initializer the interpreter cannot evaluate yet (a class temporary) is
+// then taken to be dynamic, even where a full evaluator would find it constant.
+constexpr bool has_runtime_code(std::uint64_t raw) {
+  if (raw == reason_unsupported) return false;
+  using enum interp::Reason;
+  interp::Reason r = interp::Reason(std::uint8_t((raw & 0xff) - 1));
+  return r != ill_formed && r != step_limit && r != depth_limit;
+}
 
 inline std::string spell_reason(std::uint64_t raw) {
   if (raw == reason_unsupported) return "the expression cannot be evaluated yet";

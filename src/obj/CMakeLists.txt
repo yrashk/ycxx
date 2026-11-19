@@ -1,5 +1,4 @@
-# ycxx.obj: the in-memory object file; ycxx.obj.macho: Mach-O constants and the MH_OBJECT writer
-# and reader (#42).
+# The in-memory object and its Mach-O and ELF64 readers and writers.
 add_library(ycxxc_obj STATIC)
-target_sources(ycxxc_obj PUBLIC FILE_SET CXX_MODULES FILES obj.cppm macho.cppm)
+target_sources(ycxxc_obj PUBLIC FILE_SET CXX_MODULES FILES obj.cppm macho.cppm elf.cppm)
 target_link_libraries(ycxxc_obj PUBLIC ycxxc_options)

@@ -138,7 +138,7 @@ public:
         if (ins().values.is_dependent(a->value)) return types().array_dependent(*e, a->value);  // a unique value
         if (!ins().values.is<ast::VInt>(a->value)) return std::nullopt;
         // [dcl.array]/1: the bound's value is greater than zero.
-        if (ast::is_signed(target, *types().builtin_of(a->type)) && ast::is_negative(ast::int_bits(ins(), a->value)))
+        if (ast::is_signed(w_->target, *types().builtin_of(a->type)) && ast::is_negative(ast::int_bits(ins(), a->value)))
           return std::nullopt;
         if (ast::int_bits(ins(), a->value) == ast::Bits128{}) return std::nullopt;
         return types().array_dependent(*e, a->value);
@@ -218,7 +218,7 @@ public:
     if (!nv || !ins().values.is<ast::VInt>(nv->value)) return std::nullopt;
     ast::Bits128 n = ast::int_bits(ins(), nv->value);
     auto bt = types().builtin_of(t);
-    if (bt && ast::is_signed(target, *bt) && ast::is_negative(n)) return std::nullopt;
+    if (bt && ast::is_signed(w_->target, *bt) && ast::is_negative(n)) return std::nullopt;
     constexpr u64 limit = u64(1) << 20;  // beyond any instantiation an implementation would finish
     if (n.hi != 0 || n.lo > limit) return std::nullopt;
     std::vector<TemplateArg> xs{type_arg(t)};
@@ -931,8 +931,10 @@ public:
   // The template arguments of the function template `tmpl` for a call with `args`, after the
   // explicitly specified `explicit_args` ([temp.arg.explicit]); none when deduction fails
   // ([temp.deduct.general]).
+  // `defaults` are its parameters' default arguments, by position ([dcl.fct.default]).
   std::optional<std::vector<TemplateArg>> deduce_call(const ast::DeclSema& tmpl, std::span<const ArgShape> args,
-                                                       std::span<const TemplateArg> explicit_args) {
+                                                       std::span<const TemplateArg> explicit_args,
+                                                       std::span<const ast::NodeId> defaults = {}) {
     std::vector<ast::TemplateParamSema> params = w_->ins.seqs.elements(tmpl.template_params);
     if (params.empty()) return std::nullopt;
     Deducing deducing(this, params);
@@ -947,14 +949,20 @@ public:
     const std::size_t fixed = trailing ? n - 1 : n;
     for (std::size_t i = 0; i < fixed; ++i)
       if (types().kind(f.params[i]) == TypeKind::pack_expansion) return std::nullopt;
-    if (args.size() < fixed || (args.size() > n && !trailing && !f.variadic) || (!trailing && args.size() < n))
-      return std::nullopt;
+    // Trailing parameters with default arguments need none ([temp.deduct.call]/1: only those with
+    // an argument take part).
+    // Before a trailing pack, the defaulted parameters just before it.
+    std::size_t defaulted = 0;
+    const std::size_t last = std::min(fixed, defaults.size());
+    while (defaulted < last && defaults[last - 1 - defaulted] != ast::NodeId::none) ++defaulted;
+    const std::size_t least = fixed - defaulted;  // with no pack, `fixed` is every parameter
+    if (args.size() < least || (args.size() > n && !trailing && !f.variadic)) return std::nullopt;
     // The explicitly specified arguments are substituted first ([temp.deduct.general]/2); packs
     // stay open, to be extended by deduction ([temp.arg.explicit]/9).
     Bindings given = bindings(depth, out);
     for (auto& a : given.levels[depth])
       if (a && a->kind == TemplateArgKind::pack) a = std::nullopt;
-    for (std::size_t i = 0; i < fixed; ++i) {
+    for (std::size_t i = 0; i < fixed && i < args.size(); ++i) {
       if (!args[i].deducible) continue;
       auto p0 = substitute(tmpl_param_type(tmpl, i), given);
       if (!p0) return std::nullopt;
@@ -1156,10 +1164,10 @@ public:
     t = types().canonical(Types::unqualified(t));
     if (types().is_dependent(t) || ins().values.is_dependent(a.value)) return TemplateArg{TemplateArgKind::value, t, a.value};
     if (types().is_integral(t) && ins().values.is<ast::VInt>(a.value)) {
-      ConstId c = ast::convert_integral(ins(), target, a.value, t);
-      ConstId back = ast::convert_integral(ins(), target, c, a.type);
+      ConstId c = ast::convert_integral(ins(), w_->target, a.value, t);
+      ConstId back = ast::convert_integral(ins(), w_->target, c, a.type);
       auto neg = [&](ConstId v, QualType of) {
-        return ast::is_signed(target, *types().builtin_of(of)) && ast::is_negative(ast::int_bits(ins(), v));
+        return ast::is_signed(w_->target, *types().builtin_of(of)) && ast::is_negative(ast::int_bits(ins(), v));
       };
       if (back != a.value || neg(c, t) != neg(a.value, a.type)) return std::nullopt;  // narrowing ([dcl.init.list]/7)
       return TemplateArg{TemplateArgKind::value, t, c};
