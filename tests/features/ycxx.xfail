@@ -66,7 +66,6 @@ draft/class/class.access.virt-1.reject.cpp errors elsewhere: 'class' not support
 draft/class/class.base.init-12.accept.cpp 'template' not supported yet
 draft/class/class.base.init-2.reject.cpp errors elsewhere: 'struct' not supported yet
 draft/class/class.base.init-3.reject.cpp errors elsewhere: 'struct' not supported yet
-draft/class/class.base.init-4.accept.cpp 'struct' not supported yet
 draft/class/class.base.init-5.reject.cpp errors elsewhere: 'struct' not supported yet
 draft/class/class.base.init-6.reject.cpp errors elsewhere: 'struct' not supported yet
 draft/class/class.base.init-8.reject.cpp errors elsewhere: 'struct' not supported yet
@@ -85,7 +84,6 @@ draft/class/class.conv.general-1.reject.cpp errors elsewhere: 'struct' not suppo
 draft/class/class.copy.assign-1.reject.cpp errors elsewhere: 'struct' not supported yet
 draft/class/class.copy.assign-2.accept.cpp 'struct' not supported yet
 draft/class/class.copy.assign-3.accept.cpp 'struct' not supported yet
-draft/class/class.copy.ctor-1.accept.cpp 'struct' not supported yet
 draft/class/class.copy.elision-1.reject.cpp errors elsewhere: 'class' not supported yet
 draft/class/class.copy.elision-2.reject.cpp errors elsewhere: 'class' not supported yet
 draft/class/class.dtor-1.accept.cpp 'struct' not supported yet
@@ -339,12 +337,10 @@ draft/over/over.call.func-1.reject.cpp errors elsewhere: 'struct' not supported 
 draft/over/over.call.object-1.accept.cpp 'operator' is not supported yet
 draft/over/over.ics.list-1.reject.cpp errors elsewhere: 'struct' not supported yet
 draft/over/over.ics.rank-1.accept.cpp preprocessing directives are not supported yet
-draft/over/over.ics.rank-10.accept.cpp 'struct' not supported yet
 draft/over/over.ics.rank-5.accept.cpp overloading 'f' not supported yet
 draft/over/over.ics.rank-7.accept.cpp 'struct' not supported yet
 draft/over/over.ics.rank-8.accept.cpp 'struct' not supported yet
 draft/over/over.ics.rank-9.reject.cpp errors elsewhere: preprocessing directives are not supported yet
-draft/over/over.ics.ref-1.accept.cpp 'struct' not supported yet
 draft/over/over.inc.default-2.reject.cpp errors elsewhere: 'struct' not supported yet
 draft/over/over.inc.general-1.accept.cpp 'struct' not supported yet
 draft/over/over.match.best.general-1.reject.cpp errors elsewhere: 'struct' not supported yet
