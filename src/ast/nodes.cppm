@@ -347,6 +347,14 @@ struct Goto {
   NameId label;
 };
 
+// A call's argument taken from its parameter's default argument ([dcl.fct.default]): the tree
+// analysed at the declaration, converted to the parameter's type. Its nodes are positioned at the
+// call, which is in another item.
+struct DefaultArg {
+  ExprInfo info;
+  [[=sequenced]] Child arg;
+};
+
 // ---------------------------------------------------------------- declarations (item trees)
 
 // One declarator of an item ([dcl.decl]): the ordinal of its record in `ItemSema::decls`, its
@@ -394,6 +402,21 @@ struct DestroyMember {
   EntityId destructor;
 };
 
+// The dynamic initialization of a namespace-scope variable ([basic.start.dynamic]), a statement
+// of the unit's initialization function: `init`, the variable's initializer from its declaration
+// (another item's tree, so its nodes take this node's position), initializes the object of
+// `variable`, of type `type`. Its `destructor`, if any, is then registered to run at exit
+// ([basic.start.term]) through `atexit` (`__cxa_atexit`) with `dso` (`__dso_handle`), the
+// image's handle (Itanium C++ ABI §3.3.5).
+struct StaticInit {
+  EntityId variable;
+  QualType type;
+  Child init;
+  EntityId destructor;
+  EntityId atexit;
+  EntityId dso;
+};
+
 struct Attribute {
   NameId scope;  // NameId of the attribute-namespace, or of "" for none
   NameId name;
@@ -405,7 +428,8 @@ using Nodes = closed_list<Literal, DeclRef, Paren, Unary, Binary, OrderedBinary,
                           Conditional, While, Do, For, Break, Continue, DeclStmt, Declarator, DeclGroup,
                           IfConsteval, StaticAssert, Member, InitList, ValueInit, DefaultInit, This,
                           MemberCall, Materialize, CtorCall, MemberInit, Destructor, DestroyMember, Dependent,
-                          DepName, CondDecl, Switch, Case, Default, Label, Goto, BuiltinCall, Lambda>;
+                          DepName, CondDecl, Switch, Case, Default, Label, Goto, BuiltinCall, Lambda, DefaultArg,
+                          StaticInit>;
 
 static_assert(Nodes::size < max_node_kinds);
 

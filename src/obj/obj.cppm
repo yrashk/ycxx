@@ -58,6 +58,7 @@ enum class standard_section : std::uint8_t {
   data_const,  // __DATA,__const: read-only after load, may hold pointers (the linker puts it in __DATA_CONST)
   data,        // __DATA,__data: writable data
   bss,         // __DATA,__bss: zero-initialized data
+  mod_init_func,  // __DATA,__mod_init_func: pointers to the functions dyld runs before main
 };
 
 // How a relocation patches its site. S is the target symbol's address, A the addend, P the
@@ -185,6 +186,7 @@ section section::standard(standard_section kind) {
     case standard_section::data_const: return {"__DATA", "__const", regular, 3, {}, 0, {}};
     case standard_section::data: return {"__DATA", "__data", regular, 0, {}, 0, {}};
     case standard_section::bss: return {"__DATA", "__bss", zerofill, 0, {}, 0, {}};
+    case standard_section::mod_init_func: return {"__DATA", "__mod_init_func", mod_init_func_pointers, 3, {}, 0, {}};
   }
   std::unreachable();
 }

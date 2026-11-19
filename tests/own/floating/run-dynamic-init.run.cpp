@@ -1,7 +1,6 @@
 // [basic.start.static], [basic.start.dynamic]: a global double initialized by a function call is
 // dynamically initialized before main; one initialized by a constant expression is constant
 // initialized, even when the dynamic one reads it.
-// XFAIL: ycxx dynamic initialization of namespace-scope variables (#94)
 // STDOUT: 0.75 2.25 1.5
 // EXIT: 0
 #include <stdio.h>

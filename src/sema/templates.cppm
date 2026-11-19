@@ -931,8 +931,10 @@ public:
   // The template arguments of the function template `tmpl` for a call with `args`, after the
   // explicitly specified `explicit_args` ([temp.arg.explicit]); none when deduction fails
   // ([temp.deduct.general]).
+  // `defaults` are its parameters' default arguments, by position ([dcl.fct.default]).
   std::optional<std::vector<TemplateArg>> deduce_call(const ast::DeclSema& tmpl, std::span<const ArgShape> args,
-                                                       std::span<const TemplateArg> explicit_args) {
+                                                       std::span<const TemplateArg> explicit_args,
+                                                       std::span<const ast::NodeId> defaults = {}) {
     std::vector<ast::TemplateParamSema> params = w_->ins.seqs.elements(tmpl.template_params);
     if (params.empty()) return std::nullopt;
     Deducing deducing(this, params);
@@ -947,14 +949,20 @@ public:
     const std::size_t fixed = trailing ? n - 1 : n;
     for (std::size_t i = 0; i < fixed; ++i)
       if (types().kind(f.params[i]) == TypeKind::pack_expansion) return std::nullopt;
-    if (args.size() < fixed || (args.size() > n && !trailing && !f.variadic) || (!trailing && args.size() < n))
-      return std::nullopt;
+    // Trailing parameters with default arguments need none ([temp.deduct.call]/1: only those with
+    // an argument take part).
+    // Before a trailing pack, the defaulted parameters just before it.
+    std::size_t defaulted = 0;
+    const std::size_t last = std::min(fixed, defaults.size());
+    while (defaulted < last && defaults[last - 1 - defaulted] != ast::NodeId::none) ++defaulted;
+    const std::size_t least = fixed - defaulted;  // with no pack, `fixed` is every parameter
+    if (args.size() < least || (args.size() > n && !trailing && !f.variadic)) return std::nullopt;
     // The explicitly specified arguments are substituted first ([temp.deduct.general]/2); packs
     // stay open, to be extended by deduction ([temp.arg.explicit]/9).
     Bindings given = bindings(depth, out);
     for (auto& a : given.levels[depth])
       if (a && a->kind == TemplateArgKind::pack) a = std::nullopt;
-    for (std::size_t i = 0; i < fixed; ++i) {
+    for (std::size_t i = 0; i < fixed && i < args.size(); ++i) {
       if (!args[i].deducible) continue;
       auto p0 = substitute(tmpl_param_type(tmpl, i), given);
       if (!p0) return std::nullopt;
