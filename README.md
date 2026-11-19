@@ -59,6 +59,13 @@ its analysis between commands. A repeated build re-runs nothing, and an edit re-
 it affects, through code generation and the link. The daemon serves concurrent requests on a
 thread pool, and its output is byte for byte that of a cold, in-process build.
 
+**See what the engine does.** `ycxx cxx --trace-engine a.cpp` (or `YCXX_TRACE_ENGINE=stream`)
+prints every query the build went through as a colored tree on stderr: what ran, what was
+reused, verified green or cut off early, how long it took and on which worker. A second build
+shows everything reused. `--trace-engine=interactive` opens a browser of the trace after the
+compile: a tree with each function's IR, a timeline of the pool's workers, and filters.
+`ycxx ctl trace [--interactive]` attaches to the daemon and shows every request it serves, live.
+
 **Editor diagnostics.** `ycxx lsp` is a language server that reports ycxx's errors as you type,
 through the daemon, without unsaved text ever reaching a build.
 
