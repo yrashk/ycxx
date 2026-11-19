@@ -1,6 +1,7 @@
 // #337 (ι): a declaration in a while condition is initialized on every iteration and destroyed
 // at the end of each iteration, before the next test ([stmt.while]/2, [stmt.pre]/5); break and
 // continue destroy it too.
+// XFAIL: ycxx needs `explicit operator bool()`, a conversion function (#339)
 // EXIT: 0
 int remaining = 5;
 int next() { return remaining--; }

@@ -2,6 +2,7 @@
 // of the whole statement, so it is destroyed after whichever branch runs, including the else
 // branch ([stmt.if]/4, [stmt.switch]/3, [stmt.for]); with a condition object too, they are
 // destroyed in reverse order.
+// XFAIL: ycxx needs `explicit operator bool()`, a conversion function (#339)
 // EXIT: 0
 int trail = 0;
 void record(int digit) { trail = trail * 10 + digit; }

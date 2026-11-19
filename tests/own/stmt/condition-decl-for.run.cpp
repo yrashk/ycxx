@@ -1,6 +1,7 @@
 // #337 (ι): a declaration as the condition of a for statement ([stmt.for]/1, [stmt.pre]/4): it
 // is initialized before each test, its name is in scope in the body, and a class object there is
 // destroyed at the end of each iteration.
+// XFAIL: ycxx needs `explicit operator bool()`, a conversion function (#339)
 // EXIT: 0
 int remaining = 4;
 int h() { return remaining--; }

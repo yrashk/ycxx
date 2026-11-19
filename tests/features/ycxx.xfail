@@ -168,7 +168,6 @@ draft/dcl/dcl.attr.annotation-4.reject.cpp errors elsewhere: 'template' not supp
 draft/dcl/dcl.attr.fallthrough-1.reject.cpp errors elsewhere: '(' not supported yet
 draft/dcl/dcl.attr.grammar-1.reject.cpp errors elsewhere: '[' not supported yet
 draft/dcl/dcl.attr.grammar-2.reject.cpp errors elsewhere: '[' not supported yet
-draft/dcl/dcl.attr.likelihood-1.accept.cpp '[' not supported yet
 draft/dcl/dcl.attr.nodiscard-1.accept.cpp 'struct' not supported yet
 draft/dcl/dcl.attr.noreturn-1.accept.cpp '[' not supported yet
 draft/dcl/dcl.constexpr-1.reject.cpp errors elsewhere: '&' not supported yet
