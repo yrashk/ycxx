@@ -1,4 +1,4 @@
-# Each probe built and run by ycxx b3d4cd6cba69 and by an oracle (feature-map probe).
+# Each probe built and run by ycxx 0c80fcf2277a and by an oracle (feature-map probe).
 feature	oracle	ycxx	first_error
 lex-core	gcc	pass	
 lex-digraph	gcc	pass	
@@ -52,11 +52,11 @@ lambda-template	gcc	fail	'[' is not supported yet
 lambda-unevaluated	gcc	fail	'[' is not supported yet
 lambda-pack-capture	gcc	fail	'[' is not supported yet
 lambda-static	gcc	fail	'[' is not supported yet
-stmt-core	gcc	fail	not a constant expression: read of a variable that is not usable in constant expressions
+stmt-core	gcc	pass	
 stmt-range-for	gcc	fail	expected ';'
-stmt-if-init	gcc	fail	'int' is not supported yet
-stmt-range-for-init	gcc	fail	expected an expression
-stmt-cpp23	gcc	fail	expected '('
+stmt-if-init	gcc	pass	
+stmt-range-for-init	gcc	fail	expected '='
+stmt-cpp23	gcc	pass	
 dcl-core	gcc	pass	
 dcl-default-args	gcc	fail	'=' is not supported yet
 dcl-variadic-fn	gcc	fail	file not found
@@ -138,7 +138,7 @@ const-virtual	gcc	fail	a declaration needs a type specifier
 const-cpp20-relax	gcc	fail	not a constant expression: the interpreter does not evaluate 'alloc' yet
 const-cpp23-relax	gcc	fail	'static' is not supported yet
 const-void-ptr	gcc	pass	
-const-exceptions	gcc	fail	expected '('
+const-exceptions	gcc	fail	'try' is not supported yet
 const-static-assert-msg	gcc	fail	expected a string literal
 reflect-core	gcc	fail	'^^' is not supported yet
 reflect-meta	gcc	fail	expected ')'

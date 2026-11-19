@@ -254,7 +254,7 @@ export enum class Op : std::uint16_t {
   meta__effect [[=state({S, Vs}, {S, V}).imms({entity})]],  // define_aggregate and other injections
 
   // Terminators.
-  br [[=control({}, {}, 1)]],
+  br [[=control({}, {}, 1).accepts({not_constexpr})]],  // not_constexpr: a `goto` ([expr.const])
   cond_br [[=control({V}, {}, 2)]],                      // true, false
   switch_ [[=control({V}, {}, 1, true).imms({consts})]],  // default, then one per case value
   ret [[=control({S, Vs}, {}, 0)]],

@@ -1545,12 +1545,14 @@ What the process allocates, attributed to the engine's cells, in the trace and t
   `while`, `for` and `switch`; `if` and `switch` (and `if constexpr`) take an init-statement,
   including an alias-declaration (C++23). `Sema::initialized_in_scope` lists the variables whose
   initialization is not vacuous; a `goto` or a case label that would enter their scope is an error
-  ([stmt.dcl]/2), and labels are checked when the body ends (`Sema::check_labels`).
+  ([stmt.dcl]/2), and labels are checked when the body ends (`Sema::check_labels`). A substatement
+  of `if constexpr` or `if consteval` is a `jump_barrier`, which no jump may enter ([stmt.if]/2, /4).
 - **IR** (src/irgen/gen.cppm): a switch is a chain of `icmp`/`cond_br` over its case values found
   in the body first (`case_labels`), since L1's `switch_` op has no lowering yet (#342). A `goto`
   ends the objects of the scopes it leaves and those begun after a label it jumps back to
   ([stmt.jump]/2); a `goto` before its label branches to a block filled in when the label is
-  placed. A condition's variable lives one iteration of a loop, through a `for`'s increment.
+  placed. A condition's variable lives one iteration of a loop, through a `for`'s increment. A
+  goto's `br` carries `not_constexpr`, so constant evaluation of it fails ([expr.const]).
 - Not yet: a jump forward past a vacuous declaration (#341); `switch` on a class with a conversion
   function and `explicit operator bool` conditions (#339); a declaration as the condition of
   `if constexpr` (#344); constant evaluation of a switch on an enumeration (enumeration values, #25).

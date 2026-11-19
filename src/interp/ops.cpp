@@ -410,7 +410,10 @@ struct Ops {
 
   // ---------------------------------------------------------------- terminators
 
-  static Flow br(M& m, Frame& f, N n) { return m.jump(f, n, 0); }
+  static Flow br(M& m, Frame& f, N n) {
+    if (constant(m) && has(f, n, ir::Flag::not_constexpr)) return m.fail(Reason::goto_);  // [expr.const]
+    return m.jump(f, n, 0);
+  }
   static Flow cond_br(M& m, Frame& f, N n) {
     Value c = m.operand(f, n, 0);
     if (c.kind != VKind::integer) return m.fail(Reason::ill_formed);

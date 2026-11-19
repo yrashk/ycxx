@@ -1251,6 +1251,7 @@ public:
     std::erase_if(block_aliases_, [&](const auto& u) { return u.depth >= inner; });
     std::erase_if(block_types_, [&](const auto& u) { return u.depth >= inner; });
     if (!guarded_.empty() && guarded_.back() == scopes_.size() - 1) guarded_.pop_back();
+    std::erase_if(barriers_, [&](const auto& b) { return b.first >= inner; });
     scopes_.pop_back();
   }
   std::size_t scope_depth() const { return scopes_.size(); }
@@ -1718,14 +1719,18 @@ public:
     if (initialized_.size() <= local) initialized_.resize(local + 1);
     initialized_[local] = true;
   }
-  // Those of them in scope here, in declaration order.
+  // Those of them in scope here, in declaration order, then the barriers open here.
   std::vector<u32> initialized_in_scope() const {
     std::vector<u32> r;
     for (const auto& s : scopes_)
       for (const auto& [name, l] : s)
         if (l < initialized_.size() && initialized_[l]) r.push_back(l);
+    for (const auto& [depth, id] : barriers_) r.push_back(id);
     return r;
   }
+  // Makes the innermost scope one no jump may enter, as if it began with an initialized variable:
+  // a substatement of `if constexpr` or `if consteval` ([stmt.if]/2, /4).
+  void jump_barrier() { barriers_.push_back({scopes_.size() - 1, 0x80000000u | next_barrier_++}); }
   // Whether a jump from a point where `from` are in scope to one where `to` are bypasses one.
   static bool bypasses(std::span<const u32> from, std::span<const u32> to) {
     return std::ranges::any_of(to, [&](u32 l) { return !std::ranges::contains(from, l); });
@@ -3772,6 +3777,8 @@ private:
   std::vector<ParamPack> param_packs_;
   std::vector<std::optional<ConstId>> local_values_;  // by local
   std::vector<bool> initialized_;                     // by local (`set_initialized`)
+  std::vector<std::pair<std::size_t, u32>> barriers_; // (scope depth, id), `jump_barrier`
+  u32 next_barrier_ = 0;
   struct LabelPoint {
     NameId name;
     u32 at;

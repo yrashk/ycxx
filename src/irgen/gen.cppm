@@ -203,9 +203,9 @@ class Gen {
     s.args.insert(s.args.end(), values);
     return s;
   }
-  void br(ir::BlockId to, std::initializer_list<ValueId> values = {}) {
+  void br(ir::BlockId to, std::initializer_list<ValueId> values = {}, ir::Flags flags = 0) {
     ir::SuccRef s[] = {edge(to, values)};
-    emit(ir::Op::br, {}, {}, {}, 0, s);
+    emit(ir::Op::br, {}, {}, {}, flags, s);
     live_ = false;
   }
   void cond_br(ValueId c, ir::SuccRef t, ir::SuccRef f) {
@@ -902,11 +902,11 @@ class Gen {
     LabelInfo& l = label_info(g.label);
     if (l.placed) {
       jump_exits(a, scope_ids_, scopes_, l);
-      br(l.block);
+      br(l.block, {}, ir::bit(ir::Flag::not_constexpr));  // a goto is never constant ([expr.const])
       return;
     }
     ir::BlockId from = new_block();
-    br(from);
+    br(from, {}, ir::bit(ir::Flag::not_constexpr));
     gotos_.push_back({a, g.label, from, scope_ids_, scopes_, loc_});
   }
   void label(At a) {

@@ -2798,6 +2798,16 @@ public:
     return s_->node(ast::Case{value, sema::Sema::at(st, begin)}, begin, pos());
   }
 
+  // A substatement of `if constexpr` or `if consteval`: a goto, case or default label outside it
+  // may not jump into it ([stmt.if]/2, /4).
+  Ex guarded_substatement() {
+    s_->push_scope();
+    s_->jump_barrier();
+    Ex r = substatement();
+    s_->pop_scope();
+    return r;
+  }
+
   // [stmt.goto]
   Ex goto_statement() {
     u32 begin = pos();
@@ -2890,9 +2900,9 @@ public:
       // Which branch returns is known only to an instantiation: neither deduces a placeholder
       // return type here ([dcl.spec.auto.general]/12).
       ++s_->no_return_deduction;
-      Ex then_ = substatement();
+      Ex then_ = guarded_substatement();
       Ex else_;
-      if (accept(Tk::kw_else)) else_ = substatement();
+      if (accept(Tk::kw_else)) else_ = guarded_substatement();
       --s_->no_return_deduction;
       s_->pop_scope();
       return s_->node(ast::If{sema::Sema::at(init, begin), sema::Sema::at(cond, begin), sema::Sema::at(then_, begin),
@@ -2904,16 +2914,16 @@ public:
       std::size_t n = s_->demands.size();
       // Its return statements deduce nothing: a discarded statement's are not used ([stmt.if]/2).
       ++s_->no_return_deduction;
-      substatement();
+      guarded_substatement();
       --s_->no_return_deduction;
       s_->demands.resize(n);
     };
     Ex kept;
-    if (*take) kept = substatement();
+    if (*take) kept = guarded_substatement();
     else discarded();
     if (accept(Tk::kw_else)) {
       if (*take) discarded();
-      else kept = substatement();
+      else kept = guarded_substatement();
     }
     s_->pop_scope();
     if (init.ok()) {
@@ -2935,6 +2945,26 @@ public:
         bump();
       } while (depth > 0 && !at_end());
     };
+    if (u32 n = past_attributes(0); n != 0)
+      for (u32 j = 0; j < n; ++j) bump();
+    // A labeled statement: past its labels ([stmt.label]).
+    if ((is(Tk::identifier) || is(Tk::kw_default)) && kind(1) == Tk::colon) {
+      bump();
+      bump();
+      if (!is(Tk::r_brace)) skip_substatement();
+      return;
+    }
+    if (is(Tk::kw_case)) {
+      int depth = 0;
+      while (!at_end() && !(depth == 0 && is(Tk::colon))) {
+        if (is(Tk::l_paren) || is(Tk::l_square)) ++depth;
+        if (is(Tk::r_paren) || is(Tk::r_square)) --depth;
+        bump();
+      }
+      accept(Tk::colon);
+      if (!is(Tk::r_brace)) skip_substatement();
+      return;
+    }
     switch (kind()) {
     case Tk::l_brace: skip_statement(); return;
     case Tk::kw_if:
@@ -2975,7 +3005,7 @@ public:
         return {NodeId::none, pos(), pos()};
       }
       s_->immediate_context += immediate;
-      Ex b = compound_statement();
+      Ex b = guarded_substatement();
       s_->immediate_context -= immediate;
       return b;
     };
@@ -3087,6 +3117,7 @@ public:
   // ([stmt.pre]/4–/6), whose value is the variable's.
   Ex condition_operand(CondKind k, Ex& value) {
     auto converted = [&](Ex e, u32 at) { return k == CondKind::boolean ? s_->to_bool(e, at) : s_->switch_condition(e, at); };
+    skip_attributes();  // of the declaration ([stmt.pre]/1)
     if (!condition_declaration_ahead()) {
       Ex e = expression();
       return value = converted(e, e.begin);
@@ -3151,12 +3182,16 @@ public:
       case Tk::l_brace: if (depth == 0) return true; ++depth; break;
       case Tk::l_paren: case Tk::l_square: ++depth; break;
       case Tk::r_paren: case Tk::r_square: case Tk::r_brace:
-        if (depth-- == 0) return false;
+        // `T x)`: a declaration missing its initializer, which `condition_operand` reports.
+        if (depth-- == 0) return j >= 2 && kind(j - 1) == Tk::identifier && kind(j - 2) != Tk::l_paren;
         break;
       default: break;
       }
     }
   }
+
+  // `using identifier attribute-specifier-seq_opt =`: an alias-declaration ([dcl.pre]).
+  bool alias_declaration_ahead() { return kind(1) == Tk::identifier && kind(past_attributes(2)) == Tk::equal; }
 
   // Whether an init-statement comes before the condition: a `;` before the closing `)`.
   bool init_statement_ahead() const {
@@ -3180,7 +3215,14 @@ public:
   // alias-declaration, each with its `;`.
   Ex init_statement() {
     u32 begin = pos();
+    if (is(Tk::kw_using) && !alias_declaration_ahead()) {
+      s_->diag(begin, Diag::expected_expression);  // [stmt.pre]: not a using-directive or -declaration
+      skip_to_semi();
+      accept(Tk::semi);
+      return {NodeId::none, begin, pos()};
+    }
     if (is(Tk::kw_using)) return statement();
+    skip_attributes();  // of the simple-declaration ([dcl.pre]/5)
     if (starts_declaration(true)) return declaration_statement();
     Ex e = is(Tk::semi) ? Ex{} : s_->discarded(expression());
     if (!expect(Tk::semi)) skip_to_semi();
@@ -3237,8 +3279,9 @@ public:
     s_->push_scope();
     s_->guard_scope();  // [basic.scope.block]/2: the for-init's names are not redeclared in the body
     Ex init;
+    skip_attributes();  // of a simple-declaration ([dcl.pre]/5)
     if (is(Tk::kw_using)) {
-      init = statement();  // an alias-declaration (C++23)
+      init = init_statement();  // an alias-declaration (C++23)
     } else if (starts_declaration(true)) {
       init = declaration_statement();
     } else {
