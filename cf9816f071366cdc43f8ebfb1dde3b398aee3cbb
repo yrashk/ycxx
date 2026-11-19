@@ -1,0 +1,33 @@
+November 19 Claude recovery handoff
+
+Recovery issue: https://github.com/yrashk/ycxx/issues/377
+Repository: yrashk/ycxx
+Handoff branch: handoff-nov-19/test-driver-91e731
+Original branch: refs/heads/claude/inheritance-308
+Original directory: /Users/yrashk/Projects/ycxx/.claude/worktrees/test-driver-91e731
+Original HEAD: cf9816f071366cdc43f8ebfb1dde3b398aee3cbb
+Snapshot tip: cf9816f071366cdc43f8ebfb1dde3b398aee3cbb
+Snapshot kind: original commit; no worktree changes added
+Task: Inheritance and first-standard-header session
+Issues: https://github.com/yrashk/ycxx/issues/308, https://github.com/yrashk/ycxx/issues/133
+Commits absent from current origin/main at inventory: 0
+
+Claude chat summaries (one entry per matched chat):
+
+Session 78c92e1c-c2b0-411e-8751-ece613146472
+Log: /Users/yrashk/.claude/projects/-Users-yrashk-Projects-ycxx--claude-worktrees-test-driver-91e731/78c92e1c-c2b0-411e-8751-ece613146472.jsonl
+Log SHA-256: c13afeeca52c1d61fd1be548cf96e8c187c2de42f15028e72b3d1b3b96f2defc
+This earlier chat implemented the L1 IR for #23 / PR #36: reflection-derived op specifications and evaluator hooks, canonical builders, verification, fingerprints, origin maps and a test text format. Review findings in the verifier were fixed with regressions. It reported 22 unit tests and tools/test --fast passing after conversion to real AST handles. GCC defaulted-friend comparison crashes were reduced and documented as bootstrap workarounds. The final head was 0c086b1; CI could not be checked because of an API rate limit. Later object-model work supersedes this checkpoint.
+
+Session c372cc1c-41e9-4839-a90b-834b203c57fa
+Log: /Users/yrashk/.claude/projects/-Users-yrashk-Projects-ycxx--claude-worktrees-test-driver-91e731/c372cc1c-41e9-4839-a90b-834b203c57fa.jsonl
+Log SHA-256: 9663d8e5d82eba12e1d0c17ac19a11c303535f1e805c893a8fbd2c58974e7414
+This earlier chat implemented the real test driver for PR #20: policy self-tests, build staging, feature classification and rediscovery of ycxx after a fresh build. The last report said CI was green on Linux and macOS after merging main, with core tests unsupported while the compiler was still bootstrapping. It noted that oracle provisioning would need enabling for differential CI. This is historical context, not an outstanding request to change the preserved head.
+
+Session 8470e1c3-e4cd-46d7-88dd-2ee857bbd29a
+Log: /Users/yrashk/.claude/projects/-Users-yrashk-Projects-ycxx--claude-worktrees-test-driver-91e731/8470e1c3-e4cd-46d7-88dd-2ee857bbd29a.jsonl
+Log SHA-256: 30f0e80c7e2bcbe13d7bb8d3ad866a3e264cf8dcc28e1c359cc4647a3782d8c5
+The object-model session progressed through classes, standard-header semantic analysis and inheritance #308. Its latest work was PR #364 for non-virtual single/multiple inheritance. It merged main including #369, removed the two obsolete generated feature-map files, retained the partial inheritance TOML row, and combined generic-lambda member-call logic with access-through-named-class checks. It reported tools/test --fast passing (927 pass, 570 expected failures) and feature-map check passing at cf9816f. Inheriting constructors with #136 had not started; the plan was a fresh branch after #364 merged. That remaining goal stays on #308.
+
+Recovery next step: read the linked issue, compare this snapshot with current main and the implementation/test-author counterparts, finish unfinished review work, run required checks in a new worktree, and continue toward a green PR. Notify original issues when starting the parallel continuation; after the PR is green, link it there and explicitly take over from the previous agent. Amend WIP snapshots as the work continues, preserving/rewriting the note onto the new tip.
+Validation: preservation session verified source HEAD/index/status unchanged and snapshot tree equality. Historical test statements above are reports from Claude logs, not new test runs. No compiler implementation sources were consulted to summarize these chats.
