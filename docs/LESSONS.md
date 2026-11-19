@@ -485,12 +485,12 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
     built-ins), teach `items.cppm`'s declarator scan and its function detection, and test a
     namespace-scope typedef, variable and function template whose type begins with it.
   - Learned on #211.
-- **The Clang oracle is upstream Clang (the driver's toolchain), not `/usr/bin/clang++`.** Apple
+- **The Clang oracle is upstream Clang (the driver's toolchain), not the platform's Apple Clang.** Apple
   Clang and upstream Clang differ in ABI corners: on arm64 macOS, Apple Clang 21 passes a class
   with a user-provided move constructor in registers, while Clang 23 and GCC pass it by address
   (#230). Mixed-object checks done by hand against Apple Clang all passed, then the `PEER:` test
   crashed under the driver.
-  - Do: for ABI checks, compile with the driver's Clang (`tools/test` prints its path; see
-    `tests/driver/kinds.py`), and try GCC too. When two compilers disagree, cross-link their
-    objects to find out which convention each one uses.
+  - Do: check ABI behaviour against the platform compiler, Apple Clang on macOS, which `PEER:`
+    uses (DECISIONS §1.6), and against the oracles. When they disagree, cross-link their
+    objects to find out which convention each one uses, then ask for a per-target decision.
   - Learned on #116.
