@@ -405,6 +405,11 @@ libycxx's process (`deps/libycxx/DECISIONS.md` §6) applies, adapted:
      optimizer's work list.
 5. **One test driver** (as libycxx's `tools/test`): traceable transcripts for passing tests too,
    with HTML and Markdown reports.
+6. **A new test or check is seen failing before it is trusted.** Break the code it guards, or
+   revert the fix, and watch it turn red. Choose a break that some test input must reach, at the
+   layer the data actually flows through. A test that passes at once may test nothing. Checks
+   that could not fail were found on #19, #33, #96/#97, #247 and #261 (LESSONS, "Evidence and
+   tests").
 
 ## 6. Coordination
 
@@ -527,9 +532,17 @@ its way out has learned something the next session should not have to rediscover
    PR or as a direct commit to `main`.
 4. **Read before starting.** Sessions read `docs/LESSONS.md` along with this file. A situation it
    covers is handled its way, or the entry is corrected if it turned out to be wrong.
-5. **Consolidate.** A lesson that recurs is promoted to a rule here or in `AGENTS.md`, and its
-   entry points at the rule. Entries that stop applying are deleted. Keep the list short enough to
-   read in full.
+5. **Consolidate, regularly and deliberately.** At least once a day of active work, the
+   coordinator reads `docs/LESSONS.md` for lessons to promote to a rule here or in `AGENTS.md`.
+   - **Promote a lesson when it has high impact.** It recurred, or one occurrence lost work or
+     hours, and the rule it gives is short and checkable.
+   - **Promote few at a time.** Each rule cites the entries it comes from, and those entries then
+     point at it.
+   - **When unsure, ask.** If it is unclear whether a lesson should bind every session, or its rule
+     would add cost to every change, open an issue labelled `status:needs-decision` and ask the
+     maintainers instead of promoting it.
+   - **Prune the list.** Delete entries that stop applying and merge duplicates. Keep the list
+     short enough to read in full.
 6. **Break bureaucracy loops.** Process exists to catch bugs and to keep work recoverable. A step
    that does neither is waste, and loops of such steps are the biggest time sink agents have.
    Signs of a loop:
