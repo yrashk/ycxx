@@ -568,6 +568,11 @@ public:
   // A namespace-scope variable as the interpreter sees it at `item`: its type and, if it is usable
   // in constant expressions, its value.
   std::optional<interp::GlobalVar> global(EntityId v, u32 item) {
+    // A static local: usable in constant expressions when const and constant-initialized
+    // ([expr.const]); reading or writing another is not constant.
+    if (auto s = static_locals_.find(std::to_underlying(v)); s != static_locals_.end())
+      return interp::GlobalVar{s->second.first, s->second.second,
+                               s->second.second.has_value() && sema::Types::is_const(s->second.first)};
     variable_instance(v, item);
     auto d = declaration(v, item);
     if (!d || d->kind != ast::DeclKind::variable) return std::nullopt;
@@ -588,6 +593,7 @@ public:
     u32 end = 0;
     bool braced = false;
   };
+  std::map<u32, std::pair<QualType, std::optional<ConstId>>> static_locals_;  // by entity (`global`)
   void set_dmi(EntityId field, Dmi d) { dmis_[std::to_underlying(field)] = d; }
   std::optional<Dmi> dmi(EntityId field) const {
     auto it = dmis_.find(std::to_underlying(field));
@@ -1086,6 +1092,7 @@ public:
     p_->use_member(v);
     return !p_->member_failed(v);
   }
+  void static_local(EntityId v, QualType t, std::optional<ConstId> value) override { p_->static_locals_[std::to_underlying(v)] = {t, value}; }
   std::optional<ast::DeclSema> earlier_member(ast::NameId name) override {
     const items::Item& it = p_->items().items[item_];
     if (it.parent == items::none || p_->items().items[it.parent].kind != ItemKind::class_def) return std::nullopt;
@@ -1171,6 +1178,7 @@ public:
     p_->use_member(v);
     return !p_->member_failed(v);
   }
+  void static_local(EntityId v, QualType t, std::optional<ConstId> value) override { p_->static_locals_[std::to_underlying(v)] = {t, value}; }
   bool dependent_call(sema::u32 offset) override {
     return p_->dependent_call(item_, offset);
   }

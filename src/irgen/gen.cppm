@@ -788,7 +788,12 @@ class Gen {
     slots_[s.local] = p;
     if (s.destructor == ast::EntityId::none && (s.value != ast::ConstId::none || s.init.id == NodeId::none)) return;
     auto g = std::ranges::find(fn_.guards, rec.entity, &FunctionInput::StaticGuard::variable);
-    if (g == fn_.guards.end() || fn_.guard_acquire == ast::EntityId::none) unsupported(a, "without a guard variable");
+    if (g == fn_.guards.end() || fn_.guard_acquire == ast::EntityId::none) {
+      // For constant evaluation, which has no guards: passing here is not constant ([expr.const]).
+      emit(ir::Op::unreachable, {}, {}, {}, ir::bit(ir::Flag::not_constexpr));
+      live_ = false;
+      return;
+    }
     ast::QualType vp = facts_.pointer_to(facts_.int_type());
     ValueId guard[] = {pure(ir::Op::global, vp, {}, {word(g->guard)})};
     ValueId first = *call_fn(fn_.guard_acquire, facts_.int_type(), guard, 0);
@@ -847,6 +852,7 @@ class Gen {
   // ------------------------------------------------------------------ expressions
 
   ast::ExprInfo info(At a) {
+    if (a.id == NodeId::none) throw Unsupported{"an initializer that failed to be analysed"};
     ast::ExprInfo r{};
     ast::dispatch<ast::Nodes>(ast::kind_of(a.id), [&]<class T>(std::type_identity<T>) {
       if constexpr (requires(T t) { t.info; }) r = ast_.get<T>(a.id).info;

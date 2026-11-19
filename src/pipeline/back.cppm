@@ -1073,6 +1073,7 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
     return n;
   };
   std::vector<const Entity*> locals;  // named after their functions, below
+  std::map<std::uint32_t, std::string> mangled;  // by function entity
   for (const Entity& e : tu.entities) {
     if (!used.contains(ir::raw(e.id))) continue;
     if (e.local_function != EntityId::none) {
@@ -1089,18 +1090,19 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
       errors.push_back({e.at, std::format("the name of '{}': {} is not supported yet", e.name, name.error())});
       continue;
     }
+    mangled.emplace(ir::raw(e.id), *name);  // before an asm label: what its statics' names begin with
     if (!e.asm_label.empty()) name = e.asm_label;
     symbols.push_back({e.id, std::move(*name), e.linkage == ast::Linkage::internal ? obj::binding::local : obj::binding::global});
   }
   // A static local and its guard: `_ZZ <encoding> E <name> [_<n>]` and `_ZGV` before it, the
   // function's own <encoding> taken from its symbol (Itanium C++ ABI §5.1.6, §5.1.4.6).
   for (const Entity* e : locals) {
-    auto f = std::ranges::find(symbols, e->local_function, &aarch64::Symbol::entity);
-    if (f == symbols.end()) {
+    auto f = mangled.find(ir::raw(e->local_function));
+    if (f == mangled.end()) {
       errors.push_back({e->at, std::format("the name of the static local '{}': its function has no symbol", e->name)});
       continue;
     }
-    std::string_view fs = f->name;
+    std::string_view fs = f->second;
     std::string encoding = fs.starts_with("__Z") ? std::string(fs.substr(3))  // `_` + `_Z` + encoding
                                                  : std::format("{}{}", fs.size() - 1, fs.substr(1));  // C linkage, `main`
     std::uint32_t k = e->discriminator;

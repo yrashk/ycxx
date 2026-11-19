@@ -3400,6 +3400,7 @@ public:
       if (v.value) value = *v.value;
       else if (spec.is_constinit && !v.dependent) s_->diag(init.begin, Diag::not_constant, v.reason);
     }
+    s_->static_value(local, value == ast::ConstId::none ? std::nullopt : std::optional(value));
     return s_->node(ast::StaticVar{local, sema::Sema::at(init, dbegin), value, dtor}, dbegin, pos());
   }
 
