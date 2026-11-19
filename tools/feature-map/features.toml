@@ -526,8 +526,8 @@ clauses = ['basic.lookup.argdep']
 std = 'C++98'
 core = true
 status = 'partial'
-issues = [165]
-note = 'ADL for non-template calls'
+issues = [165, 259]
+note = 'ordinary namespace calls, inline namespaces and ordinary class bases work. Remaining cases include hidden friends, block function declarations, class template arguments, overload sets and template-ids'
 probe = '''
 namespace n { struct S {}; int f(S) { return 0; } }
 int main() { n::S s; return f(s); }
@@ -994,8 +994,8 @@ probe = '''
 struct R { int a[3]; int* begin() { return a; } int* end() { return a + 3; } };
 int main() { int s = 0; int arr[2] = {4, 5}; for (int x : arr) s += x; R r{{1, 2, 3}}; for (int& x : r) s += x; return s == 15 ? 0 : 1; }
 '''
-issues = [165, 295, 329, 376]
-note = 'ADL-only non-member lookup, rewritten sentinel comparisons, braced ranges and C++23 temporary lifetimes'
+issues = [295, 329, 376]
+note = 'rewritten sentinel comparisons, braced ranges and C++23 temporary lifetimes'
 
 [[feature]]
 id = 'stmt-if-init'
