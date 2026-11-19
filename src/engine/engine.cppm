@@ -688,7 +688,7 @@ private:
   std::exception_ptr error_;
   // Rounds after the first look again at cells this frame computed or claimed, which are not
   // reuses: only cells another frame owned are noted then, by position in `waited_` (the first
-  // 64; past them, none).
+  // 64; past them, every cell is noted again).
   std::uint32_t round_ = 0;
   std::uint64_t waited_ = 0;
 };
@@ -1517,6 +1517,11 @@ public:
     Stats stats() const noexcept { return counters_.stats(); }
     // How many times an epoch's stop interrupted it and it was respawned.
     std::size_t restarts() const noexcept { return restarts_.load(std::memory_order_relaxed); }
+    // Waits until no run of it is in flight: after `cancel`, nothing it started still runs, so
+    // what its runs use (a tracer, #245) may go. A respawn after `cancel` starts stopped.
+    void wait_idle() const noexcept {
+      for (std::uint32_t n; (n = in_flight_.load(std::memory_order_acquire)) != 0;) in_flight_.wait(n, std::memory_order_acquire);
+    }
 
   private:
     friend class Epochs;
@@ -1524,6 +1529,7 @@ public:
     Counters counters_;
     std::uint64_t executed_at_restart_ = 0;
     std::atomic<std::size_t> restarts_{0};
+    std::atomic<std::uint32_t> in_flight_{0};  // runs spawned and not yet completed
     std::function<void()> launch_;  // spawns it into the current epoch
   };
 
@@ -1556,10 +1562,25 @@ public:
     auto callbacks = std::make_shared<std::pair<F, G>>(std::move(on_value), std::move(on_error));
     ticket->launch_ = [this, t = ticket.get(), k, p, callbacks, tracer] {
       std::shared_ptr<Ticket> self = t->shared_from_this();
+      // The run's end, last: `self` keeps the ticket alive while a waiter is woken.
+      const auto ended = [](const std::shared_ptr<Ticket>& s) noexcept {
+        s->in_flight_.fetch_sub(1, std::memory_order_acq_rel);
+        s->in_flight_.notify_all();
+      };
+      t->in_flight_.fetch_add(1, std::memory_order_acq_rel);
       ex::spawn(db_->request<Q>(k, p, &t->counters_, tracer) |
-                    ex::then([callbacks](const typename Q::Value& v) mutable { callbacks->first(v); }) |
-                    ex::upon_error([callbacks](std::exception_ptr e) mutable noexcept { callbacks->second(std::move(e)); }) |
-                    ex::upon_stopped([this, self]() noexcept { interrupted(self); }),
+                    ex::then([callbacks, self, ended](const typename Q::Value& v) mutable {
+                      callbacks->first(v);
+                      ended(self);
+                    }) |
+                    ex::upon_error([callbacks, self, ended](std::exception_ptr e) mutable noexcept {
+                      callbacks->second(std::move(e));
+                      ended(self);
+                    }) |
+                    ex::upon_stopped([this, self, ended]() noexcept {
+                      interrupted(self);
+                      ended(self);
+                    }),
                 scope_->get_token(), ex::prop(std::get_stop_token, t->client_.get_token()));
     };
     std::lock_guard lock(m_);
@@ -1711,7 +1732,7 @@ std::coroutine_handle<> Settle::step() noexcept {
       try {
         const std::size_t claimed = children.size();
         const std::uint64_t bit = i < 64 ? std::uint64_t{1} << i : 0;
-        const bool quiet = round_ > 0 && !(waited_ & bit);
+        const bool quiet = round_ > 0 && bit != 0 && !(waited_ & bit);  // past 64: never quiet
         if (db.try_settle(cells_[i], *frame_, children, quiet) == Db::Settled::busy) {
           busy.push_back(cells_[i]);
           busy_at_.push_back(i);

@@ -212,7 +212,10 @@ class Tree {
   void add(std::span<const Event> batch, std::uint64_t group = 0) {
     for (const Event& given : batch) {
       Event e = given;
-      if (std::to_underlying(e.outcome) >= outcome_count) e.outcome = Outcome::failed;  // from the wire
+      // From the wire: an outcome and workers in range (lanes are indexed by worker).
+      if (std::to_underlying(e.outcome) >= outcome_count) e.outcome = Outcome::failed;
+      e.worker = std::clamp(e.worker, -1, max_worker);
+      e.end_worker = std::clamp(e.end_worker, -1, max_worker);
       if (e.parent == 0 || !by_id_.contains(e.parent)) e.parent = group;
       const auto at = static_cast<std::int32_t>(nodes_.size());
       Node n;
@@ -316,6 +319,7 @@ class Tree {
   }
 
   static constexpr std::uint32_t open_depth = 2;
+  static constexpr std::int32_t max_worker = 1023;
 
  private:
   static std::string lower(std::string_view s) {

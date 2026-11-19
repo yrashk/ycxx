@@ -27,6 +27,7 @@ export namespace ycxx::trace {
 struct Feed {
   int fd = -1;
   std::function<bool()> pump;
+  std::string source;  // what it watches, for the status line (`daemon of /path/to/project`)
 };
 
 // Whether `fd` is a terminal that may get colors: a TTY, and `NO_COLOR` not set (no-color.org).
@@ -335,6 +336,7 @@ class Browser {
   void jump_to_slice() {
     const Timeline tl = timeline(tree_, lane_columns());
     if (lane_ >= tl.lanes.size()) return;
+    if (lane_ >= tl.lanes.size() || time_ >= tl.lanes[lane_].size()) return;  // the terminal shrank
     const std::int32_t node = tl.lanes[lane_][time_];
     if (node < 0) return;
     view_ = View::tree;
@@ -387,7 +389,7 @@ class Browser {
     if (prompt_) return std::format(" filter: {}", typed_);
     if (!filter_.empty()) out += std::format(" filter: {}", paint("1", filter_));
     out += std::format("  worker: {}", tree_.worker() ? paint("1", format_worker(*tree_.worker())) : std::string("all"));
-    if (feed_) out += "  " + paint("1;31", "● live");
+    if (feed_) out += "  " + paint("1;31", "● live") + paint("2", " " + feed_->source);
     else if (ended_) out += "  " + paint("2", "(the daemon has gone)");
     return out;
   }
@@ -409,8 +411,14 @@ class Browser {
     out += ' ' + paint(outcome_sgr(e.outcome), outcome_name(e.outcome));
     if (e.end_ns != e.start_ns) out += paint("2", " " + format_duration(e.end_ns - e.start_ns));
     out += paint("2", " " + format_workers(e));
-    if (!n.expanded && n.children.size() > 0) out += paint("2", std::format("  [{} below, {} ran]", n.subtree - 1, n.executions - (e.outcome == Outcome::executed || e.outcome == Outcome::cutoff)));
+    if (!n.expanded && n.children.size() > 0) out += paint("2", std::format("  [{} below, {} ran]", n.subtree - 1, ran_below(n)));
     return out;
+  }
+
+  // Executions under a node, not counting its own (a request's node is no execution).
+  static std::uint64_t ran_below(const Tree::Node& n) {
+    const bool own = !n.group && (n.ev.outcome == Outcome::executed || n.ev.outcome == Outcome::cutoff);
+    return n.executions - (own ? 1 : 0);
   }
 
   std::vector<std::string> tree_body() {
@@ -454,7 +462,7 @@ class Browser {
     out.push_back(std::format(" took     {}", e.end_ns == e.start_ns ? std::string("(instant)") : format_duration(e.end_ns - e.start_ns)));
     out.push_back(std::format(" worker   {}", format_workers(e)));
     out.push_back(std::format(" depth    {}", e.depth));
-    out.push_back(std::format(" below    {} cells, {} ran", n.subtree - 1, n.executions - (e.outcome == Outcome::executed || e.outcome == Outcome::cutoff)));
+    out.push_back(std::format(" below    {} cells, {} ran", n.subtree - 1, ran_below(n)));
     if (n.parent >= 0) out.push_back(" for      " + paint("2", cell_name(tree_.node(n.parent).ev)));
     out.emplace_back();
     if (!e.value.empty()) {

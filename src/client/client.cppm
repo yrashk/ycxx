@@ -133,6 +133,14 @@ class TraceOut {
     events(b.events);
   }
   void total(std::uint64_t ns) { total_ = ns; }
+  // A new run of the request (a retry, or the in-process fallback): its trace starts afresh, as
+  // event numbers restart in another engine.
+  void restart(std::string_view why) {
+    std::println(std::cerr, "ycxx: {}: tracing it again", why);
+    tree_ = {};
+    stream_.reset();
+    total_.reset();
+  }
 
   // After the compile: the stream's summary, or the browser (the stream, without a terminal).
   void finish() {
@@ -155,15 +163,17 @@ class TraceOut {
 
 // The request through the daemon; why not, if it could not be answered there. A daemon that
 // closed the connection without an answer is started again and asked once more (§7.2).
-std::expected<compile::Done, std::string> through_daemon(const compile::Request& r, bool verbose, TraceOut* traced) {
+// `on_trace` gets the request's trace batches; `on_retry` is called before asking a new daemon.
+using OnTrace = std::function<void(daemon::TraceBatch&&)>;
+std::expected<compile::Done, std::string> through_daemon(const compile::Request& r, bool verbose, const OnTrace& on_trace = {},
+                                                         const std::function<void()>& on_retry = {}) {
   std::string root = daemon::root_for(compile::first_input(r.argv), r.cwd);
   std::string why;
   for (int attempt = 0; attempt < 2; ++attempt) {
+    if (attempt > 0 && on_retry) on_retry();
     auto c = daemon::reach(root, true);
     if (!c) return std::unexpected(c.error());
-    auto d = daemon::request_compile(*c, r, [&](daemon::TraceBatch&& b) {
-      if (traced) traced->batch(std::move(b));
-    });
+    auto d = daemon::request_compile(*c, r, on_trace);
     if (d) {
       if (verbose)
         std::println(std::cerr, "ycxx: answered by daemon {} for {} at revision {} ({} restarts, {} pp regions reused)",
@@ -174,6 +184,11 @@ std::expected<compile::Done, std::string> through_daemon(const compile::Request&
     if (!d.error().lost) break;
   }
   return std::unexpected(why);
+}
+
+// Seconds since the epoch: a request's `build_time`.
+std::int64_t now_seconds() {
+  return std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();
 }
 
 }  // namespace
@@ -202,8 +217,7 @@ int cxx(std::span<const std::string_view> args) {
   }
   if (forced_off) use = Use::off;
 
-  compile::Request r{std::move(argv), cwd_now(), compile::environment_now(),
-                     std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count()};
+  compile::Request r{std::move(argv), cwd_now(), compile::environment_now(), now_seconds()};
   std::optional<TraceOut> traced;
   if (trace_mode != TraceMode::off) {
     traced.emplace(trace_mode);
@@ -216,13 +230,18 @@ int cxx(std::span<const std::string_view> args) {
     return status;
   };
   if (use != Use::off) {
-    auto d = through_daemon(r, verbose, traced ? &*traced : nullptr);
+    auto d = through_daemon(r, verbose, [&](daemon::TraceBatch&& b) {
+      if (traced) traced->batch(std::move(b));
+    }, [&] {
+      if (traced) traced->restart("the daemon was lost; asking a new one");
+    });
     if (d) return finish(*d);
     if (use == Use::require) {
       std::println(std::cerr, "ycxx: error: the daemon is required (YCXX_DAEMON=require) but failed: {}", d.error());
       return 2;
     }
     if (verbose) std::println(std::cerr, "ycxx: running in-process: {}", d.error());
+    if (traced) traced->restart("running in-process");
   }
   pp::DiskHost disk;
   const compile::Threads t = compile::threads();
@@ -294,12 +313,14 @@ int watch(daemon::Connection& c, bool interactive) {
                        if (b->end) tree.close_group(group_of(b->request), b->ended_ns);
                        else tree.add(b->events, group_of(b->request));
                        return true;
-                     }};
+                     },
+                     std::format("daemon of {} (builds of files under it; --root picks another)", c.welcome.root)};
     trace::browse(tree, &feed);
     return 0;
   }
   const trace::Style style{trace::colors_for(1), true};
-  std::println("ycxx: watching the daemon of {} (pid {}); ^C to stop", c.welcome.root, c.welcome.daemon_pid);
+  std::println("ycxx: watching the daemon of {} (pid {}): builds of files under it; ^C to stop", c.welcome.root,
+               c.welcome.daemon_pid);
   std::cout.flush();  // a pipe buffers: whoever reads it knows the watch is attached
   std::map<std::uint64_t, trace::Stream> requests;
   std::uint64_t last = 0;
@@ -316,7 +337,9 @@ int watch(daemon::Connection& c, bool interactive) {
       it->second.batch(b->events);
     }
   }
-  std::println("ycxx: the daemon has gone");
+  // A watcher more than 64 MiB behind is dropped while the daemon lives on.
+  if (daemon::reach(c.welcome.root, false)) std::println("ycxx: the daemon dropped this watch: it fell too far behind");
+  else std::println("ycxx: the daemon has gone");
   return 0;
 }
 

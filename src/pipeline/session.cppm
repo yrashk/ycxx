@@ -316,7 +316,11 @@ class Session {
       const bool stop = cancelled();
       lock.lock();
       if (stop && !w->done) {
+        // Its frames stop at their next fetch; wait for them, so nothing they use (`tracer`) is
+        // gone while they run (#245). Unlocked: a completion takes `w->m`.
+        lock.unlock();
         ticket->cancel();
+        ticket->wait_idle();
         return std::nullopt;
       }
     }

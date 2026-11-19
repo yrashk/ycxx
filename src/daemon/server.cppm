@@ -309,10 +309,10 @@ class Server {
 
   // ---- Traces (#245)
 
-  // An attached `ycxx ctl trace`.
-  // An attached `ycxx ctl trace`. Requests queue its frames; its own connection thread writes
-  // them, so a watcher that stops reading never slows a build: past `max_queued` bytes it is
-  // dropped instead.
+  // Where a request's trace frames go: an attached `ycxx ctl trace`, or the client of a traced
+  // `compile`. Requests queue frames; the connection's own thread writes them, so a reader that
+  // stops reading never blocks a pool worker. A watcher more than `max_queued` bytes behind is
+  // dropped (a frame is always taken into an empty queue, whatever its size).
   struct Watching {
     static constexpr std::size_t max_queued = std::size_t{64} << 20;
     int fd = -1;
@@ -322,74 +322,97 @@ class Server {
     std::deque<std::vector<std::byte>> queue;  // under m
     std::size_t queued = 0;                    // bytes, under m
     bool gone = false;                         // under m
-    // Queues a frame; false once it is gone.
-    bool push(std::vector<std::byte> frame) {
+    bool dropped = false;                      // gone for falling behind; under m
+    void push(std::vector<std::byte> frame) {
       std::lock_guard g(m);
-      if (gone) return false;
-      if (queued + frame.size() > max_queued) {
-        gone = true;
+      if (gone) return;
+      if (!queue.empty() && queued + frame.size() > max_queued) {
+        gone = dropped = true;
         cv.notify_all();
-        return false;
+        return;
       }
       queued += frame.size();
       queue.push_back(std::move(frame));
       cv.notify_all();
-      return true;
+    }
+    // Writes what is queued, on the calling thread; false once it is gone.
+    bool flush() {
+      std::unique_lock g(m);
+      if (gone) return false;
+      std::deque<std::vector<std::byte>> frames;
+      frames.swap(queue);
+      queued = 0;
+      g.unlock();
+      bool ok = true;
+      for (const auto& f : frames) ok = ok && write_all(fd, f);
+      g.lock();
+      if (!ok) gone = true;
+      return ok;
     }
   };
 
   // One request's trace: a collector whose batches go to the request's client, when it asked,
-  // and to each watcher attached when it started. Ends with an `end` batch, before the answer.
+  // and to each watcher attached when it started. `finish` adds the `end` batch; the client's
+  // frames are written by its connection thread (`flush_client`), before the answer.
   class RequestTrace {
    public:
     RequestTrace(Server& s, int client, bool values, std::string label, std::vector<std::shared_ptr<Watching>> watchers)
-        : server_(&s), client_(client), watchers_(std::move(watchers)) {
+        : server_(&s), watchers_(std::move(watchers)) {
+      if (client >= 0) {
+        client_ = std::make_shared<Watching>();
+        client_->fd = client;
+      }
       batch_.request = s.trace_requests_.fetch_add(1, std::memory_order_relaxed) + 1;
       batch_.label = std::move(label);
       batch_.started_ns = s.trace_clock();
       for (const auto& w : watchers_) values = values || w->values;
       collector_.emplace([this](std::span<const trace::Event> events) { deliver(events); }, values, s.trace_origin_);
     }
-    ~RequestTrace() {
+    RequestTrace(const RequestTrace&) = delete;
+    engine::Tracer* tracer() { return &*collector_; }
+
+    // Once the request's frames have all finished (it completed, or `Session::run` waited for
+    // its cancelled runs): orphans, then the `end` batch.
+    void finish() {
       collector_->finish();
       batch_.end = true;
       batch_.ended_ns = server_->trace_clock();
       deliver({});
     }
-    RequestTrace(const RequestTrace&) = delete;
-    engine::Tracer* tracer() { return &*collector_; }
+    // On the client's connection thread.
+    void flush_client() {
+      if (client_) client_->flush();
+    }
 
    private:
-    // Under the collector's lock, or after the request's frames have all finished.
+    // Under the collector's lock, or from `finish`.
     void deliver(std::span<const trace::Event> events) {
       batch_.events.assign(events.begin(), events.end());
-      // The client reads its answer's frames as they come; a hang-up stops the request anyway.
-      if (client_ >= 0) send(client_, Kind::trace, batch_);
-      if (watchers_.empty()) return;
       engine::Sink body;
       engine::serialize(body, batch_);
       const std::vector<std::byte> frame = encode_frame(Kind::trace, body.bytes());
+      if (client_) client_->push(frame);
       for (const auto& w : watchers_) w->push(frame);
     }
 
     Server* server_;
-    int client_;
+    std::shared_ptr<Watching> client_;
     std::vector<std::shared_ptr<Watching>> watchers_;
     TraceBatch batch_;
     std::optional<trace::Collector> collector_;
   };
 
   // A request's trace when its client asked for one or someone watches; nothing otherwise, so an
-  // untraced request costs nothing.
+  // untraced request costs nothing. Watchers that are gone are skipped, not removed: their own
+  // threads remove them, and the stop must still find them to shut them down.
   std::unique_ptr<RequestTrace> trace_for(int client, compile::Trace asked, std::string label) {
     std::vector<std::shared_ptr<Watching>> watchers;
     {
       std::lock_guard g(watch_mu_);
-      std::erase_if(watchers_, [](const auto& w) {
-        std::lock_guard g(w->m);
-        return w->gone;
-      });
-      watchers = watchers_;
+      for (const auto& w : watchers_) {
+        std::lock_guard l(w->m);
+        if (!w->gone) watchers.push_back(w);
+      }
     }
     if (asked == compile::Trace::off && watchers.empty()) return nullptr;
     return std::make_unique<RequestTrace>(*this, asked == compile::Trace::off ? -1 : client, asked == compile::Trace::values,
@@ -410,31 +433,29 @@ class Server {
     w->fd = fd;
     w->values = r.values;
     {
+      // Registered under the stop's own lock, so the stop either refuses it or shuts it down.
       std::lock_guard g(conn_mu_);
-      if (lsp_closed_) return;  // the daemon is stopping
-    }
-    if (!send(fd, Kind::watch, WatchAck{})) return;
-    {
-      std::lock_guard g(watch_mu_);
+      if (lsp_closed_) return;
+      std::lock_guard l(watch_mu_);
       watchers_.push_back(w);
     }
     log("a trace watcher attached");
-    // Writes what requests queued until the watcher hangs up (it sends nothing, so a readable
-    // socket is its hang-up, or the stop's shutdown), a write fails, or it fell too far behind.
-    std::unique_lock g(w->m);
-    while (!w->gone) {
-      w->cv.wait_for(g, std::chrono::milliseconds(250), [&] { return w->gone || !w->queue.empty(); });
-      std::deque<std::vector<std::byte>> frames;
-      frames.swap(w->queue);
-      w->queued = 0;
-      g.unlock();
-      bool ok = !hung_up(fd);
-      for (const auto& f : frames) ok = ok && write_all(fd, f);
-      g.lock();
-      if (!ok) w->gone = true;
+    // The ack first, then what requests queue, until the watcher hangs up (it sends nothing, so a
+    // readable socket is its hang-up, or the stop's shutdown), a write fails, or it falls behind.
+    bool ok = send(fd, Kind::watch, WatchAck{});
+    while (ok) {
+      {
+        std::unique_lock g(w->m);
+        w->cv.wait_for(g, std::chrono::milliseconds(250), [&] { return w->gone || !w->queue.empty(); });
+      }
+      ok = !hung_up(fd) && w->flush();
     }
-    const bool dropped = !w->queue.empty() || w->queued > 0;
-    g.unlock();
+    bool dropped = false;
+    {
+      std::lock_guard g(w->m);
+      w->gone = true;
+      dropped = w->dropped;
+    }
     {
       std::lock_guard l(watch_mu_);
       std::erase(watchers_, w);
@@ -452,8 +473,12 @@ class Server {
       ++stats_.live;
     }
     auto traced = trace_for(fd, r.trace, label_of("cxx", r));
-    auto done = run_compile(fd, r, traced ? traced->tracer() : nullptr);
-    traced.reset();  // its last batch before the answer
+    auto done = run_compile(fd, r, traced.get());
+    if (traced) {
+      traced->finish();
+      if (done) traced->flush_client();  // its last batches before the answer
+      traced.reset();
+    }
     {
       std::lock_guard g(stats_mu_);
       --stats_.live;
@@ -576,7 +601,7 @@ class Server {
       auto traced = trace_for(-1, compile::Trace::off, "lsp " + *c.path);
       const compile::Done d =
           compile::run(c.request, overlay_, session(), {}, stopped, {pp::View::editor}, traced ? traced->tracer() : nullptr);
-      traced.reset();
+      if (traced) traced->finish();
       {
         std::lock_guard g(stats_mu_);
         ++stats_.diagnoses;
@@ -628,7 +653,7 @@ class Server {
   // One request, spawned into the engine's open epoch (§4.3); nothing if the client hung up.
   // Requests run at once: a batch that arrives meanwhile is applied once the quantum allows, and
   // restarts every running request where it stopped (§4.1).
-  std::optional<compile::Done> run_compile(int fd, const compile::Request& r, engine::Tracer* tracer) {
+  std::optional<compile::Done> run_compile(int fd, const compile::Request& r, RequestTrace* traced) {
     compile::Report report;
     table_.set_cwd(r.cwd);  // for this thread's reads (`-E`)
     {
@@ -649,6 +674,7 @@ class Server {
     bool cancelled = false;
     compile::Stop tick = [&] {
       if (hung_up(fd)) return cancelled = true;
+      if (traced) traced->flush_client();  // the trace so far, from this thread (never a worker's)
       if (watcher_) {
         std::unique_lock strand(strand_mu_, std::try_to_lock);
         if (strand && admission_.may_apply(Clock::now())) {
@@ -661,7 +687,7 @@ class Server {
       return false;
     };
     bool stopped = false;
-    compile::Done d = compile::run(r, table_, session(), tick, stopped, {}, tracer);
+    compile::Done d = compile::run(r, table_, session(), tick, stopped, {}, traced ? traced->tracer() : nullptr);
     if (stopped) {
       log("a client hung up: its request stopped");
       return std::nullopt;
