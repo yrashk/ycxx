@@ -595,7 +595,10 @@ std::expected<std::string, std::string> mangled_specialization(const ast::Intern
   auto sig = m.signature(in.types.get<ast::TFunction>(c), true);
   if (!sig) return sig;
   // In a namespace, a <nested-name> ending in the template-args (§5.1.5.3).
-  return scope != ast::EntityId::none ? std::format("_ZN{}{}E{}", *n, *args, *sig) : "_Z" + *n + *args + *sig;
+  // A member function template's cv-qualifiers, after the `N` (§5.1.5.3).
+  ast::Cv fcv = in.types.get<ast::TFunction>(c).cv;
+  std::string cv = std::string(std::to_underlying(fcv) & 2 ? "V" : "") + (std::to_underlying(fcv) & 1 ? "K" : "");
+  return scope != ast::EntityId::none ? std::format("_ZN{}{}{}E{}", cv, *n, *args, *sig) : "_Z" + *n + *args + *sig;
 }
 
 std::expected<std::string, std::string> symbol_name(const ast::Interners& in, std::string_view name, ast::QualType type,

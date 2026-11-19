@@ -522,6 +522,7 @@ struct MemberDeclRec {
   bool is_ctor = false;
   bool is_dtor = false;
   bool is_deleted = false;
+  bool is_template = false;  // a member function template ([temp.mem])
 };
 
 struct NestedType {

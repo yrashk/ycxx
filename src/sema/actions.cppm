@@ -877,6 +877,19 @@ public:
   }
 
   // [expr.ref]: `object.name`, or `object->name` with `arrow`.
+  // Whether `object.name` names a member function template ([temp.names]/3): the object's class
+  // has one of that name.
+  bool names_member_template(const Ex& object, bool arrow, NameId name) {
+    if (!object.ok() || dependent(object)) return false;
+    QualType t = arrow ? types().pointee(object.type()) : object.type();
+    if (!types().is_class(t)) return false;
+    const ClassRec* c = class_rec(types().class_of(t));
+    return c && std::ranges::any_of(c->members, [&](const MemberDeclRec& m) { return m.name == name && m.is_template; });
+  }
+  // Explicit template arguments for member `e`'s function templates ([temp.arg.explicit]).
+  void explicit_template_args(const Ex& e, std::vector<TemplateArg> args) {
+    if (e.ok() && is_bound_member(e)) explicit_args_[std::to_underlying(e.id)] = std::move(args);
+  }
   Ex member(Ex object, bool arrow, NameId name, u32 end, u32 op_at, u32 name_at) {
     u32 begin = object.begin;
     Ex fail{NodeId::none, begin, end};
@@ -1781,8 +1794,9 @@ public:
     }
     const MemberDeclRec& m = *f->member;
     // A static member, data or function, is named like a namespace-scope entity
-    // ([expr.prim.id.qual]): `S::f` can have its address taken or be called.
-    if (!m.is_function || (m.is_static && member_functions(c, name).size() == 1)) {
+    // ([expr.prim.id.qual]): `S::f` can have its address taken or be called. A member function
+    // template is a set to deduce from, as overloads are.
+    if (!m.is_function || (m.is_static && !m.is_template && member_functions(c, name).size() == 1)) {
       if (m.is_function && !check_access(c, m.entity, name, name_at)) return fail;
       if (!m.is_function) return static_member(c, m.entity, m.type, begin, end);
       ExprInfo info{m.type, ValueCategory::lvalue, 0};
@@ -1851,27 +1865,68 @@ public:
     // The object's cv-qualifiers, which a non-static member function must have ([class.this]).
     std::optional<Cv> object_cv;
     if (object) object_cv = Types::cv(m.arrow ? types().pointee(object->type()) : object->type());
+    // The candidates: each member function, and of each member function template the
+    // specialization deduction gives ([temp.over]/1, [temp.mem]); explicit template arguments name
+    // only templates ([temp.arg.explicit]).
+    auto ex = explicit_args_.find(std::to_underlying(callee.id));
+    std::span<const TemplateArg> explicit_args;
+    if (ex != explicit_args_.end()) explicit_args = ex->second;
+    std::vector<ArgShape> shapes;
+    for (const Ex& a : args)
+      shapes.push_back({a.type(), a.cat() == ValueCategory::lvalue, !types().is(a.type(), Builtin::overload_set) && !is_bound_member(a)});
     std::vector<Candidate> cands;
-    for (const MemberDeclRec* c : bound.cands)
-      cands.push_back({c->entity, c->type, c->is_static, c->is_deleted});
-    // [class.this]: a non-static member function needs the object's cv-qualifiers.
-    if (object_cv && std::ranges::none_of(bound.cands, [&](const MemberDeclRec* c) {
-          return c->is_static || cv_within(*object_cv, types().rec(c->type).fn_cv);
-        })) {
-      diag(begin, Diag::const_member_call, bound.cands.front()->name);
+    std::vector<const MemberDeclRec*> recs;
+    std::deque<ast::DeclSema> patterns;
+    for (const MemberDeclRec* c : bound.cands) {
+      if (!c->is_template) {
+        if (ex != explicit_args_.end()) continue;
+        cands.push_back({c->entity, c->type, c->is_static, c->is_deleted});
+        recs.push_back(c);
+        continue;
+      }
+      auto tmpl = q_->template_decl(c->entity);
+      if (!tmpl) continue;
+      const ast::DeclSema& td = patterns.emplace_back(*tmpl);
+      Templates t = templates();
+      auto targs = t.deduce_call(td, shapes, explicit_args);
+      if (!targs) continue;
+      if (td.constraints != ConstId::none) {
+        std::vector<ast::TemplateParamSema> ps = ins().seqs.elements(td.template_params);
+        auto nf = t.substitute_constraint(td.constraints, Bindings::of(ps.empty() ? 0 : ps[0].depth, *targs));
+        auto sat = nf ? q_->satisfied(*nf) : std::optional<bool>(false);
+        if (sat && !*sat) continue;
+      }
+      auto st = t.specialization_type(td, *targs);
+      if (!st) continue;
+      cands.push_back({specialization(td, *targs, *st), *st, c->is_static, c->is_deleted, &td});
+      recs.push_back(c);
+    }
+    NameId name = bound.cands.front()->name;
+    if (cands.empty()) {
+      diag(begin, Diag::no_viable_function, name);
       return fail;
     }
-    auto chosen = resolve(cands, args, begin, bound.cands.front()->name, object_cv);
+    // [class.this]: a non-static member function needs the object's cv-qualifiers.
+    if (object_cv && std::ranges::none_of(cands, [&](const Candidate& c) {
+          return c.no_object || cv_within(*object_cv, types().rec(c.type).fn_cv);
+        })) {
+      diag(begin, Diag::const_member_call, name);
+      return fail;
+    }
+    auto chosen = resolve(cands, args, begin, name, object_cv);
     if (!chosen) return fail;
-    const MemberDeclRec* d = bound.cands[*chosen];
+    const MemberDeclRec* d = recs[*chosen];
+    const Candidate& k = cands[*chosen];
     if (!check_access(bound.cls, d->entity, d->name, bound.name_at)) return fail;
-    TypeRec fr = types().rec(d->type);
+    // A specialization called is one whose definition the program requires ([temp.inst]/8).
+    if (k.pattern) demands.push_back({k.entity, ast::Loc{item_, loc_base_ + begin}});
+    TypeRec fr = types().rec(k.type);
     auto children = call_args(fr, args, begin, paren_at);
     if (!children) return fail;
     ExprInfo info = result_info(fr.inner);
     if (d->is_static) {
       // The object expression is evaluated, then discarded ([expr.ref]).
-      Ex call = node(ast::Call{info, d->entity, at(callee, begin), b_->list(*children)}, begin, end, info);
+      Ex call = node(ast::Call{info, k.entity, at(callee, begin), b_->list(*children)}, begin, end, info);
       if (!object) return call;
       Ex discarded = convert_node(*object, ast::ConversionKind::to_void, builtin(Builtin::void_));
       return node(ast::OrderedBinary{info, ast::OrderedOp::comma, at(discarded, begin), at(call, begin)}, begin, end, info);
@@ -1889,7 +1944,7 @@ public:
       ExprInfo pi{types().pointer(o.type()), ValueCategory::prvalue, 0};
       o = node(ast::Unary{pi, ast::UnaryOp::address_of, at(o, o.begin)}, o.begin, o.end, pi);
     }
-    return node(ast::MemberCall{info, d->entity, at(o, begin), b_->list(*children)}, begin, end, info);
+    return node(ast::MemberCall{info, k.entity, at(o, begin), b_->list(*children)}, begin, end, info);
   }
 
   // ------------------------------------------------------------ overload resolution ([over.match])

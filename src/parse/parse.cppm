@@ -2390,6 +2390,16 @@ private:
       return;
     }
     if (ps_.is(Tk::kw_friend)) return friend_declaration();
+    // A member template ([temp.mem]): its head one level inside the class's.
+    if (ps_.is(Tk::kw_template)) {
+      if (ps_.kind(1) != Tk::less) {
+        s_.diag(ps_.pos(), Diag::not_supported, Tk::kw_template);  // an explicit instantiation (#315)
+        return bad();
+      }
+      if (!ps_.template_head(u16(p_->enclosing_heads(k_).size()))) return bad();
+      head_requires_clause();
+      member_template_ = true;
+    }
     bool dtor = ps_.is(Tk::tilde) && ps_.kind(1) == Tk::identifier && ps_.name_of(ps_.tok(1)) == cname;
     if (dtor || (ps_.is(Tk::identifier) && ps_.kind(1) == Tk::l_paren && ps_.name_of(ps_.tok()) == cname))
       return special_member(c, !dtor);
@@ -2896,8 +2906,23 @@ private:
       std::vector<ast::ParamSema> params;
       for (const parse::Param& p : d.params) params.push_back({EntityId::none, p.type, p.name, NodeId::none, p.element ? sema::param_flag::pack_element : u16(0)});
       sem.params = b_.seq(std::span<const ast::ParamSema>(params));
-      sem.entity = s_.world().entities.entity(
-          {sema::EntityKind::function, d.name, d.type, LangLinkage::cxx, ast::Linkage::external, {}, c.entity});
+      if (member_template_) {
+        // A member function template: its head, positional, and constraints are part of it
+        // ([temp.over.link]).
+        sem.template_params = b_.seq(std::span<const ast::TemplateParamSema>(s_.template_scopes.back()));
+        flags |= sema::decl_flag::template_;
+        sema::EntityRec e{sema::EntityKind::function_template, d.name, d.type, LangLinkage::cxx, ast::Linkage::external, {}, c.entity};
+        e.head = head_fp(s_.template_scopes.back());
+        sem.constraints = associated_constraints();
+        e.constraints = constraints_fp_;
+        sem.entity = s_.world().entities.entity(e);
+      } else {
+        sem.entity = s_.world().entities.entity(
+            {sema::EntityKind::function, d.name, d.type, LangLinkage::cxx, ast::Linkage::external, {}, c.entity});
+      }
+    } else if (member_template_) {
+      s_.diag(d.name_at, Diag::not_supported, Tk::kw_template);  // a static data member template
+      return false;
     } else {
       // A static data member: a declaration, unless inline or constexpr ([class.static.data]).
       // One that is const integral or constexpr may give its value in the class, and is then
@@ -3044,6 +3069,8 @@ private:
     for (const ast::TemplateParamSema& p : ps) {
       f = ast::mix(ast::mix(f, std::to_underlying(p.kind)), p.pack);
       if (p.kind == ast::TemplateArgKind::value) f = ast::mix(f, s_.types().fp(s_.types().canonical(p.type)));
+      // A template template parameter's own head ([temp.over.link]/6).
+      if (p.kind == ast::TemplateArgKind::template_) f = ast::mix(f, head_fp(s_.world().ins.seqs.elements(p.params)));
     }
     return f;
   }
@@ -3609,6 +3636,8 @@ private:
   // Analysing a member item again for one static data member's value (`Program::member_value`):
   // the ordinal of the declarator whose initializer is instantiated.
   std::optional<u32> member_value_;
+  // The member declaration being analysed is a member template's ([temp.mem]).
+  bool member_template_ = false;
   bool single_linkage_spec_ = false;  // `extern "C" declaration` without braces
   bool template_ = false;             // the declaration is a template-declaration ([temp.pre])
   bool explicit_ = false;             // an explicit specialization ([temp.expl.spec])
@@ -3701,7 +3730,8 @@ Program::ClassContent Program::class_content(u32 item, const std::function<const
         member_decls_[std::to_underlying(d.entity)] = {id(m), ast::make_decl_ord(ast::DeclClass::syntactic, i)};
         statics.push_back({w_->entities.rec(d.entity).name, d.entity, d.type, d.kind == ast::DeclKind::function,
                            (d.flags & sema::decl_flag::static_) != 0, (d.flags & sema::decl_flag::constructor) != 0,
-                           (d.flags & sema::decl_flag::destructor) != 0, (d.flags & sema::decl_flag::deleted) != 0});
+                           (d.flags & sema::decl_flag::destructor) != 0, (d.flags & sema::decl_flag::deleted) != 0,
+                           (d.flags & sema::decl_flag::template_) != 0});
       }
     }
   }

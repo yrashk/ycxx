@@ -2170,8 +2170,10 @@ public:
         // [expr.ref]: `E1.id-expression` and `E1->id-expression`.
         bool arrow = is(Tk::arrow);
         bump();
+        // `E.template f<args>`: the name is a member template's ([temp.names]/3).
+        bool keyword = accept(Tk::kw_template);
         if (!is(Tk::identifier)) {
-          if (is(Tk::kw_template) || is(Tk::tilde) || is(Tk::coloncolon) || is(Tk::kw_operator))
+          if (is(Tk::tilde) || is(Tk::coloncolon) || is(Tk::kw_operator))
             s_->diag(pos(), Diag::not_supported, kind());
           else
             s_->diag(pos(), Diag::expected_unqualified_id);
@@ -2181,7 +2183,15 @@ public:
         u32 name_at = pos();
         NameId n = name_of(tok());
         bump();
+        // A member template's explicit template arguments ([temp.arg.explicit]): after `template`,
+        // or where the member found is a template ([temp.names]/3).
+        std::optional<std::vector<ast::TemplateArg>> targs;
+        if (is(Tk::less) && (keyword || s_->names_member_template(e, arrow, n))) {
+          targs = template_argument_list();
+          if (!targs) return {NodeId::none, e.begin, pos()};
+        }
         e = s_->member(e, arrow, n, pos(), at, name_at);
+        if (targs) s_->explicit_template_args(e, std::move(*targs));
         break;
       }
       default: return e;
