@@ -1,0 +1,9 @@
+Namespace dynamic initialization continuation for #94, #337 and #371
+
+The original implementation and chat summary are preserved on 48e743b922b42f5740dcc1d73d1ba3dc8c485715. The isolated handoff branch merges main 193ed1c7bb85e306cd18a5d40ae7eceda8c97466 after #363.
+
+The AST retains the statement and default-argument nodes alongside StaticInit. The IR uses the same scoped source-position pin for both kinds of adopted tree. The default-argument by-value regression now checks a default evaluated during namespace initialization. Four newly passing draft examples have their expected-failure entries removed.
+
+Linux tools/test --fast passed at this tip with GCC 16.2.0 and CMake 4.4.5. All 45 CTests passed. The language suite reported 637 passes, 500 expected failures and 471 unsupported cases. Clang 23.1.6 and GCC 16.2.0 both ran the combined regression successfully. ycxx produced the expected ARM64 Mach-O initialization relocation and constructor calls. Native macOS runtime CI and feature-map probes remain to be checked.
+
+Recovery issue https://github.com/yrashk/ycxx/issues/377
