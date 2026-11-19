@@ -37,13 +37,18 @@ export std::expected<MFunction, std::string> select(const l2::Function& f, std::
                                                     const CallingConvention& cc = apple_arm64,
                                                     const Table& table = patterns());
 
+// The condition a predicate holds under after a compare. The plain predicates are `fcmp`'s
+// (integers and pointers use the signed and unsigned ones): FCMP sets NZCV to 0011 for unordered
+// operands, so `lt` is MI and `le` LS, which unordered fails, as do GT and GE; `ne` holds then.
 export constexpr Cond cond_of(ir::Pred p) {
   using enum ir::Pred;
   switch (p) {
     case eq: return Cond::eq;
     case ne: return Cond::ne;
-    case slt: case lt: return Cond::lt;
-    case sle: case le: return Cond::le;
+    case slt: return Cond::lt;
+    case lt: return Cond::mi;
+    case sle: return Cond::le;
+    case le: return Cond::ls;
     case sgt: case gt: return Cond::gt;
     case sge: case ge: return Cond::ge;
     case ult: return Cond::lo;
@@ -214,8 +219,18 @@ class Selector {
     return here;
   }
 
+  // The argument registers of `t`'s class, and the results'.
+  std::span<const R> arg_regs(Type t) const { return l2::is_float(t) ? std::span<const R>(cc_.fp_args) : cc_.int_args; }
+  std::span<const R> result_regs(Type t) const {
+    return l2::is_float(t) ? std::span<const R>(cc_.fp_results) : std::span<const R>(cc_.int_results).first(cc_.max_results);
+  }
+
+  // Integer and floating arguments take the next register of their class, then stack slots in
+  // argument order; once a class's registers are used up, its later arguments go on the stack
+  // too (AAPCS64 C.3, C.11).
   void params() {
-    std::uint32_t i = 0, stack = 0, k = 0;
+    std::uint32_t stack = 0, k = 0;
+    std::array<std::uint32_t, 2> next{};  // integer, floating
     for (ValueId p : f_.params_of(BlockId(0))) {
       Type t = f_.type(p);
       if (t == Type::state) continue;
@@ -224,8 +239,9 @@ class Selector {
         emit(mov(MOp::vreg(v), MOp::preg(cc_.indirect_result)));
         continue;
       }
-      if (i < cc_.int_args.size()) {
-        emit(mov(MOp::vreg(v), MOp::preg(cc_.int_args[i])));
+      std::uint32_t& i = next[l2::is_float(t)];
+      if (i < arg_regs(t).size()) {
+        emit(mov(MOp::vreg(v), MOp::preg(arg_regs(t)[i])));
       } else {
         std::uint32_t at = stack_slot(stack, t);
         emit({Form::LDRui, true, log2_bytes(t), 3, {MOp::vreg(v), MOp::preg(R::fp), MOp::imm(cc_.frame_record + at)}});
@@ -284,7 +300,17 @@ class Selector {
     std::size_t named = cc_.variadic_slot ? args.size() - through_ellipsis : args.size();
     auto is_signed = [&](std::size_t i) { return i < 64 && ((sext >> i) & 1); };
     std::uint32_t stack = 0;
-    for (std::size_t i = cc_.int_args.size(); i < named; ++i) {
+    std::array<std::uint32_t, 2> next{};  // integer, floating registers taken, as in `params`
+    std::vector<std::pair<R, std::uint32_t>> in_regs;
+    for (std::size_t i = 0; i < named; ++i) {
+      std::uint32_t& r = next[l2::is_float(args[i].second)];
+      if (r < arg_regs(args[i].second).size()) {
+        // Extended to the register width by signedness.
+        auto [v, t] = args[i];
+        in_regs.push_back({arg_regs(t)[r++], l2::is_float(t) ? v : extend(v, t, cc_.reg_arg_bits, is_signed(i))});
+        continue;
+      }
+      ++r;
       std::uint32_t at = stack_slot(stack, args[i].second);
       std::uint32_t v = args[i].first;
       if (args[i].second == Type::i1) {  // a bool's byte is 0 or 1; bits above bit 0 are unspecified
@@ -302,27 +328,31 @@ class Selector {
       stack += size;
     }
     m_.outgoing = std::max(m_.outgoing, (stack + cc_.stack_align - 1) / cc_.stack_align * cc_.stack_align);
-    for (std::size_t i = 0; i < named && i < cc_.int_args.size(); ++i) {
-      auto [v, t] = args[i];
-      // Extended to the register width by signedness.
-      emit(mov(MOp::preg(cc_.int_args[i]), MOp::vreg(extend(v, t, cc_.reg_arg_bits, is_signed(i)))));
-    }
+    for (auto [r, v] : in_regs) emit(mov(MOp::preg(r), MOp::vreg(v)));
     if (indirect_reg != nil) emit(mov(MOp::preg(cc_.indirect_result), MOp::vreg(indirect_reg)));
     if (ind) emit({Form::BLR, true, 3, 1, {MOp::vreg(target)}});
     else emit({Form::BL, true, 3, 1, {{MK::sym, std::int64_t(f_.imms_of(n)[0])}}});
-    if (nd.nres > 1 + cc_.max_results) return fail("more results than the calling convention returns in registers");
+    std::array<std::uint32_t, 2> taken{};
     for (std::uint32_t r = 1; r < nd.nres; ++r) {
       ValueId v = f_.result(n, r);
-      std::uint32_t d = new_vreg(f_.type(v));
+      Type t = f_.type(v);
+      std::uint32_t& i = taken[l2::is_float(t)];
+      if (i >= result_regs(t).size()) return fail("more results than the calling convention returns in registers");
+      std::uint32_t d = new_vreg(t);
       vreg_of_[raw(v)] = d;
-      emit(mov(MOp::vreg(d), MOp::preg(cc_.int_results[r - 1])));
+      emit(mov(MOp::vreg(d), MOp::preg(result_regs(t)[i++])));
     }
   }
 
   void ret(NodeId n) {
     auto ops = f_.operands_of(n);
-    if (ops.size() > 1 + cc_.max_results) return fail("more results than the calling convention returns in registers");
-    for (std::size_t r = 1; r < ops.size(); ++r) emit(mov(MOp::preg(cc_.int_results[r - 1]), MOp::vreg(vreg(ops[r]))));
+    std::array<std::uint32_t, 2> taken{};
+    for (std::size_t r = 1; r < ops.size(); ++r) {
+      Type t = f_.type(ops[r]);
+      std::uint32_t& i = taken[l2::is_float(t)];
+      if (i >= result_regs(t).size()) return fail("more results than the calling convention returns in registers");
+      emit(mov(MOp::preg(result_regs(t)[i++]), MOp::vreg(vreg(ops[r]))));
+    }
     emit({Form::RETp, true, 3, 0, {}});
   }
 
@@ -335,7 +365,8 @@ class Selector {
       case l2::Op::const_: return {Bind::K::imm, std::int64_t(im[0])};
       case l2::Op::symbol: return {Bind::K::entity, std::int64_t(im[0])};
       case l2::Op::alloca: return {Bind::K::frame, frame_of_[raw(n)]};
-      case l2::Op::icmp: return {Bind::K::pred, std::int64_t(im[0])};
+      case l2::Op::icmp:
+      case l2::Op::fcmp: return {Bind::K::pred, std::int64_t(im[0])};
       default: return {};
     }
   }
@@ -382,10 +413,16 @@ class Selector {
   }
 
   bool holds(const PCond& c, const Binds& b, NodeId root) const {
+    if (c.var == root_var) {  // ?d: the root's result
+      Type t = f_.type(f_.result(root));
+      return c.kind == CKind::f32 ? t == Type::f32 : c.kind == CKind::f64 ? t == Type::f64 : false;
+    }
     const Bind& x = b[c.var];
     std::int64_t v = x.v;
     auto type = [&] { return f_.type(ValueId(std::uint32_t(v))); };
     switch (c.kind) {
+      case CKind::f32: return x.k == Bind::K::value && type() == Type::f32;
+      case CKind::f64: return x.k == Bind::K::value && type() == Type::f64;
       case CKind::uimm12: return x.k == Bind::K::imm && v >= 0 && v < 4096;
       case CKind::nuimm12: return x.k == Bind::K::imm && v < 0 && v > -4096;
       case CKind::nonneg: return x.k == Bind::K::imm && v >= 0 && v < (std::int64_t(1) << 24);
@@ -433,7 +470,8 @@ class Selector {
     std::array<std::uint32_t, 16> regs{};
     for (std::uint8_t i = 0; i < p.nvars; ++i)
       if (b[i].k == Bind::K::value) regs[i] = vreg(ValueId(std::uint32_t(b[i].v)));
-    Type temp_type = d != nil ? m_.vregs[d] : Type::i64;
+    // Temporaries hold integers or addresses: of the root's type, unless that is floating.
+    Type temp_type = d != nil && !l2::is_float(m_.vregs[d]) ? m_.vregs[d] : Type::i64;
     std::array<std::uint32_t, 4> temps;
     temps.fill(nil);
     for (std::uint16_t k = 0; k < p.ninsts; ++k) {
@@ -441,6 +479,9 @@ class Selector {
       const FormSpec& fs = spec_of(r.form);
       MInst in{r.form, false, 3, std::uint8_t(r.ops.size), {}};
       std::optional<std::uint32_t> succ;
+      // The width: of the integer registers, or of the floating ones when there are none (a
+      // conversion's floating operand has its precision in the form).
+      bool any_int = false, int_wide = false, fp_wide = false;
       for (std::uint8_t i = 0; i < r.ops.size; ++i) {
         const ROp& o = r.ops.at[i];
         Role role = fs.ops.at[i].role;
@@ -477,8 +518,14 @@ class Selector {
         bool reg_role = role == Role::def || role == Role::use;
         if (reg_role != (m.kind == MK::vreg || m.kind == MK::preg) && o.kind != RKind::succ)
           return fail(std::format("pattern {}: operand {} of {} has the wrong kind", p.name, i, info(r.form).name));
-        if (m.kind == MK::vreg && l2::bits(m_.vregs[m.v]) == 64) in.wide = true;
+        if (m.kind == MK::vreg) {
+          Type t = m_.vregs[m.v];
+          bool w = l2::bits(t) == 64;
+          if (l2::is_float(t)) fp_wide |= w;
+          else any_int = true, int_wide |= w;
+        }
       }
+      in.wide = any_int ? int_wide : fp_wide;
       if (d != nil && r.form == Form::MOVi) in.wide = l2::bits(m_.vregs[d]) == 64;
       if (fs.size == Size::mem || r.form == Form::LDRfi || r.form == Form::STRfi)
         in.access = log2_bytes(m_.vregs[in.ops[0].v]);

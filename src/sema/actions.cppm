@@ -1304,11 +1304,19 @@ public:
   }
 
   // [dcl.init.list]/7: an integral conversion to a type that cannot represent every value of the
-  // source type, unless the source is a constant whose value fits; a pointer to bool.
+  // source type, unless the source is a constant whose value fits; a pointer to bool; the
+  // conversions of /7.1–7.3 between floating and other types.
   bool narrows(const Ex& from, QualType to) {
     if (!from.ok() || dependent(from) || types().is_dependent(to)) return false;
     auto a = types().builtin_of(from.type()), b = types().builtin_of(to);
     if (types().is_pointer(from.type()) && b == Builtin::bool_) return true;
+    // An unscoped enumeration's value is read as its underlying type's: the interpreter has no
+    // enumeration-typed values (#25), and an enumerator converted so is an integer literal.
+    if (b && ast::is_floating(*b) && is_unscoped_enum(from.type())) {
+      QualType u = underlying_of(from.type());
+      return narrows_floating(convert_node(from, ast::ConversionKind::integral, u), *types().builtin_of(u), *b);
+    }
+    if (a && b && (ast::is_floating(*a) || ast::is_floating(*b))) return narrows_floating(from, *a, *b);
     if (!a || !b || !ast::is_integral(*a) || !ast::is_integral(*b) || *a == *b) return false;
     IntShape sa = shape(*a), sb = shape(*b);
     if (*b == Builtin::bool_) sb = {1, false};
@@ -1326,6 +1334,34 @@ public:
     std::int64_t value = std::int64_t(raw | ~mask);
     std::int64_t min = sb.bits >= 64 ? std::numeric_limits<std::int64_t>::min() : -(std::int64_t{1} << (sb.bits - 1));
     return value < min;
+  }
+
+  // [dcl.init.list]/7.1–7.3 for a conversion from `a` to `b`, one of them floating.
+  bool narrows_floating(const Ex& from, Builtin a, Builtin b) {
+    if (ast::is_integral(b)) return true;  // /7.1: floating to integer (bool is an integer type)
+    auto v = constant_of ? constant_of(from) : std::nullopt;
+    if (ast::is_floating(a)) {
+      // /7.2: to a type of lesser rank, unless the source is constant and either its converted
+      // value is finite and did not overflow, or the values before and after are not finite.
+      if (ast::float_rank_compare(target, b, a) >= 0) return false;
+      if (!v || w_->values.rec(*v).kind != ValueKind::floating) return true;
+      double x = w_->values.rec(*v).real;
+      double y = w_->values.rec(w_->values.floating(builtin(b), x)).real;
+      return std::isfinite(x) != std::isfinite(y);
+    }
+    // /7.3: an integer to a floating type, unless the source is constant and its value converts
+    // back unchanged: its significant bits fit the type's precision (the exponent range of every
+    // supported format covers 128-bit integers). Integer types are at most 64 bits wide here: a
+    // 128-bit one would need the constant's high word.
+    if (!v || w_->values.rec(*v).kind != ValueKind::integer) return true;
+    IntShape sa = shape(a);
+    if (a == Builtin::bool_) sa = {1, false};
+    u64 raw = w_->values.rec(*v).bits & (sa.bits >= 64 ? ~u64{0} : (u64{1} << sa.bits) - 1);
+    if (sa.is_signed && sa.bits < 64 && ((raw >> (sa.bits - 1)) & 1)) raw |= ~((u64{1} << sa.bits) - 1);
+    u64 magnitude = sa.is_signed && std::int64_t(raw) < 0 ? u64(0) - raw : raw;
+    if (magnitude == 0) return false;
+    u32 significant = u32(std::bit_width(magnitude) - std::countr_zero(magnitude));
+    return significant > ast::shape_of(target[b].format).precision;
   }
 
   // ------------------------------------------------------------ scopes and locals (§4.4)
@@ -3030,7 +3066,7 @@ public:
     if (types().is_enum(to)) return {};
     if (types().is_enum(from)) {
       if (!is_unscoped_enum(from)) return {};
-      if (types().is(to, Builtin::bool_)) return {true, 2, 0};
+      if (types().is(to, Builtin::bool_) || types().is_floating(to)) return {true, 2, 0};  // [conv.fpint]
       if (!types().is_integral(to)) return {};
       // [conv.prom]/4, [over.ics.rank]/4.2: with a fixed type, to it is the better promotion.
       if (const EnumRec* er = enum_rec(types().enum_of(from)); er && er->fixed) {
@@ -3050,6 +3086,10 @@ public:
       return pointer_convertible(from, to) ? Ics{true, 2, 0} : Ics{};
     }
     if (types().is(to, Builtin::bool_) && (types().is_arithmetic(from) || types().is_pointer(from))) return {true, 2, 0};
+    // [conv.fpprom]: float to double is a promotion; the other floating-point and
+    // floating-integral conversions are conversions ([over.ics.scs]).
+    if (types().is_arithmetic(from) && types().is_arithmetic(to) && (types().is_floating(from) || types().is_floating(to)))
+      return {true, types().is(from, Builtin::float_) && types().is(to, Builtin::double_) ? 1 : 2, 0};
     if (types().is_integral(from) && types().is_integral(to)) {
       bool promotion = builtin(promoted(*types().builtin_of(from))) == to && !types().is(from, *types().builtin_of(to));
       return {true, promotion ? 1 : 2, 0};
@@ -3451,18 +3491,75 @@ public:
   // docs/EXTENSIONS.md) that no declaration in scope gives. Its call is diagnosed without parsing
   // its arguments, which may be types (`__builtin_offsetof(T, m)`). Any other `__builtin_` name
   // is an ordinary one.
-  bool unsupported_builtin(NameId name) {
-    if (!lex::lacking_builtin(ins().names.spelling(name))) return false;
+  bool unsupported_builtin(NameId name) { return lex::lacking_builtin(ins().names.spelling(name)) && !declared(name); }
+  // Whether a declaration in scope gives `name`, hiding the built-in function of that name.
+  bool declared(NameId name) {
     for (const auto& scope : scopes_)
-      if (std::ranges::any_of(scope, [&](const auto& p) { return p.first == name; })) return false;
-    if (std::ranges::any_of(own, [&](const auto& p) { return p.name == name; })) return false;
-    if (std::ranges::any_of(block_usings_, [&](const BlockUsing& u) { return u.name == name; })) return false;
-    if (names_member(name)) return false;
+      if (std::ranges::any_of(scope, [&](const auto& p) { return p.first == name; })) return true;
+    if (std::ranges::any_of(own, [&](const auto& p) { return p.name == name; })) return true;
+    if (std::ranges::any_of(block_usings_, [&](const BlockUsing& u) { return u.name == name; })) return true;
+    if (names_member(name)) return true;
     for (DeclId d : q_->visible_decls(name, directives())) {
       (void)d;
-      return false;
+      return true;
     }
-    return true;
+    return false;
+  }
+
+  // A built-in function ycxx implements (`lex::builtin_functions`) that no declaration hides.
+  const lex::BuiltinFunctionInfo* builtin_function(NameId name) {
+    const lex::BuiltinFunctionInfo* b = lex::builtin_function(ins().names.spelling(name));
+    return b && !declared(name) ? b : nullptr;
+  }
+  // A call of one (docs/EXTENSIONS.md): `__builtin_inf*` and `__builtin_huge_val*` are +infinity
+  // and `__builtin_nan*` a quiet NaN, constants of their type; `__builtin_fabs*` a `BuiltinCall`.
+  Ex builtin_call(const lex::BuiltinFunctionInfo& b, std::vector<Ex> args, u32 begin, u32 end) {
+    using enum lex::BuiltinFunction;
+    QualType t = builtin(b.type == 'f' ? Builtin::float_ : b.type == 'l' ? Builtin::long_double : Builtin::double_);
+    std::size_t want = b.function == fabs || b.function == nan ? 1 : 0;
+    if (args.size() != want) {
+      diag(begin, args.size() < want ? Diag::too_few_arguments : Diag::too_many_arguments, u64(want), u64(args.size()));
+      return {NodeId::none, begin, end};
+    }
+    if (std::ranges::any_of(args, [](const Ex& a) { return !a.ok(); })) return {NodeId::none, begin, end};
+    switch (b.function) {
+      case inf:
+      case huge_val:
+        return literal(t, w_->values.floating(t, std::numeric_limits<double>::infinity()), ValueCategory::prvalue, begin, end);
+      case nan: {
+        // The payload is a string literal's contents read as `strtoull` reads them: decimal, octal
+        // after `0`, hexadecimal after `0x`; empty is 0. It fills the significand below the quiet bit.
+        Ex a = args[0];
+        while (auto p = as<ast::Paren>(a)) a = {p->operand.id, a.begin + p->operand.at, a.end};
+        auto lit = as<ast::Literal>(a);
+        std::optional<u64> payload;
+        if (lit && w_->values.rec(lit->value).kind == ValueKind::string) {
+          std::string_view s = w_->values.rec(lit->value).units;
+          if (s.ends_with('\0')) s.remove_suffix(1);
+          int base = s.starts_with("0x") || s.starts_with("0X") ? 16 : s.starts_with('0') ? 8 : 10;
+          if (base == 16) s.remove_prefix(2);
+          u64 v = 0;
+          auto r = std::from_chars(s.data(), s.data() + s.size(), v, base);
+          if (s.empty() || (r.ec == std::errc{} && r.ptr == s.data() + s.size())) payload = v;
+        }
+        if (!payload) {
+          diag(args[0].begin, Diag::builtin_nan_string);
+          return {NodeId::none, begin, end};
+        }
+        bool single = ast::float_format(ins(), target, t) == ast::FloatFormat::binary32;
+        u64 bits = single ? 0x7fc00000u | (*payload & 0x3fffffu) : 0x7ff8000000000000u | (*payload & 0x7ffffffffffffu);
+        return literal(t, ast::float_value(ins(), target, t, ast::Bits128{bits, 0}), ValueCategory::prvalue, begin, end);
+      }
+      case fabs: {
+        if (dependent(args[0])) return dependent_node({args[0]}, begin, end, t);
+        Ex x = convert(args[0], t, args[0].begin);
+        if (!x.ok()) return {NodeId::none, begin, end};
+        ExprInfo info{t, ValueCategory::prvalue, 0};
+        std::vector<ast::Child> children{at(x, begin)};
+        return node(ast::BuiltinCall{info, u8(fabs), b_->list(children)}, begin, end, info);
+      }
+    }
+    std::unreachable();
   }
 
   // The expression naming what lookup found for `name` ([expr.prim.id]): one entity, or an
@@ -3578,6 +3675,22 @@ public:
     }
     QualType t = builtin(chosen);
     return literal(t, w_->values.integer(t, lit.value), ValueCategory::prvalue, begin, end);
+  }
+
+  // [lex.fcon]: `double`, or `float` or `long double` by the suffix. The lexer rounded the value to
+  // binary32 or binary64, the formats of these types on the target; the extended types' suffixes
+  // (`f16`, `bf16`, …) have no values yet (#336).
+  Ex float_literal(const lex::Literal& lit, u32 begin, u32 end) {
+    using enum lex::FloatSuffix;
+    lex::FloatSuffix suffix = lit.float_suffix;
+    Builtin k = suffix == f ? Builtin::float_ : suffix == l ? Builtin::long_double : Builtin::double_;
+    ast::FloatFormat want = suffix == f ? ast::FloatFormat::binary32 : ast::FloatFormat::binary64;
+    if ((suffix != none && suffix != f && suffix != l) || target[k].format != want) {
+      diag(begin, Diag::extended_float_not_supported);
+      return {NodeId::none, begin, end};
+    }
+    QualType t = builtin(k);
+    return literal(t, ast::float_value(ins(), target, t, ast::Bits128{lit.value, 0}), ValueCategory::prvalue, begin, end);
   }
 
   // [lex.ccon]: an ordinary character literal has type char; a multicharacter one, int.
@@ -3724,6 +3837,21 @@ public:
     return convert_node(e, ast::ConversionKind::integral, builtin(p));
   }
 
+  // The conversion of a prvalue of arithmetic or unscoped enumeration type to arithmetic type `to`:
+  // boolean to bool ([conv.bool]), else integral ([conv.integral], [conv.prom]), floating
+  // ([conv.double], [conv.fpprom]) or floating-integral ([conv.fpint]). An enumerator goes through
+  // its integer value: enumeration-typed constants stay out of the IR's arithmetic.
+  Ex arithmetic_conversion(Ex e, QualType to) {
+    using enum ast::ConversionKind;
+    bool from_floating = types().is_floating(e.type()), to_floating = types().is_floating(to);
+    if (to_floating && types().is_enum(e.type()) && as<ast::Literal>(e)) e = convert_node(e, integral, underlying_of(e.type()));
+    ast::ConversionKind k = types().is(to, Builtin::bool_) ? boolean
+                          : from_floating && to_floating   ? floating
+                          : from_floating || to_floating   ? floating_integral
+                                                           : integral;
+    return convert_node(e, k, to);
+  }
+
   // Enumerations ([dcl.enum]).
   bool is_unscoped_enum(QualType t) {
     if (!types().is_enum(t)) return false;
@@ -3804,17 +3932,13 @@ public:
       if (e.ok()) diag(at_, Diag::no_conversion, from, to);
       return {NodeId::none, e.begin, e.end};
     }
-    if (e.ok() && is_unscoped_enum(from) && types().is_arithmetic(target))
-      return convert_node(e, types().is(target, Builtin::bool_) ? ast::ConversionKind::boolean : ast::ConversionKind::integral, target);
+    if (e.ok() && is_unscoped_enum(from) && types().is_arithmetic(target)) return arithmetic_conversion(e, target);
     if (types().is_void(from)) {
       diag(at_, Diag::void_value);
       return {NodeId::none, e.begin, e.end};
     }
     if (from == target) return e;
-    if (types().is_arithmetic(from) && types().is_arithmetic(target)) {
-      if (types().is(target, Builtin::bool_)) return convert_node(e, ast::ConversionKind::boolean, target);
-      return convert_node(e, ast::ConversionKind::integral, target);
-    }
+    if (types().is_arithmetic(from) && types().is_arithmetic(target)) return arithmetic_conversion(e, target);
     if (types().is(target, Builtin::bool_) && (types().is_pointer(from) || types().is(from, Builtin::nullptr_t))) {
       if (types().is_pointer(from)) return convert_node(e, ast::ConversionKind::boolean, target);
     }
@@ -3841,6 +3965,24 @@ public:
     QualType from = Types::unqualified(v.type());
     // /10: an integral or enumeration value to an enumeration; /9: a scoped enumeration's to an
     // integral type.
+    // /10 also: a floating value, through the underlying type. A constant is folded, as an integer
+    // literal is below, when its truncated value fits.
+    if (types().is_enum(target) && types().is_floating(from)) {
+      QualType u = underlying_of(target);
+      auto c = constant_of ? constant_of(v) : std::nullopt;
+      if (c && w_->values.rec(*c).kind == ValueKind::floating && types().builtin_of(u)) {
+        double x = std::trunc(w_->values.rec(*c).real);
+        IntShape sh = shape(*types().builtin_of(u));
+        double top = std::ldexp(1.0, int(sh.is_signed ? sh.bits - 1 : sh.bits));
+        if (sh.is_signed ? x >= -top && x < top : x > -1 && x < top)
+          return literal(target, w_->values.integer(u, sh.is_signed ? u64(i64(x)) : u64(x)), ValueCategory::prvalue, v.begin, v.end);
+      }
+      // An underlying `bool` is reached by [conv.fpint]'s truncation too, through int, not by
+      // [conv.bool].
+      Ex i = types().is(u, Builtin::bool_) ? arithmetic_conversion(arithmetic_conversion(v, builtin(Builtin::int_)), u)
+                                           : arithmetic_conversion(v, u);
+      return convert_node(i, ast::ConversionKind::integral, target);
+    }
     if (types().is_enum(target) && (types().is_integral(from) || types().is_enum(from))) {
       if (types().canonical(from) == types().canonical(target)) return v;
       // A constant (an enumerator, a literal) is folded to the enumeration's constant: the
@@ -3850,8 +3992,10 @@ public:
                        v.begin, v.end);
       return convert_node(v, ast::ConversionKind::integral, target);
     }
-    if (is_scoped_enum(from) && types().is_arithmetic(target))
-      return convert_node(v, types().is(target, Builtin::bool_) ? ast::ConversionKind::boolean : ast::ConversionKind::integral, target);
+    if (is_scoped_enum(from) && types().is_arithmetic(target)) {
+      if (types().is_floating(target)) v = arithmetic_conversion(v, underlying_of(from));
+      return arithmetic_conversion(v, target);
+    }
     // /14: a pointer to cv void to a pointer to an object type at least as cv-qualified.
     if (types().is_pointer(from) && types().is_pointer(target) && types().is_void(types().pointee(from)) &&
         types().is_object(types().pointee(target)) && cv_within(object_cv(types().pointee(from)), object_cv(types().pointee(target))))
@@ -4050,14 +4194,15 @@ public:
     return {NodeId::none, e.begin, e.end};
   }
 
-  // [expr.arith.conv] for integral operands: both are promoted and converted to the common type.
+  // [expr.arith.conv]: both operands are promoted and converted to the common type, a floating
+  // type if either is one.
   QualType arithmetic_conversions(Ex& a, Ex& c) {
     a = promote(a);
     c = promote(c);
     Builtin k = common_integer(*types().builtin_of(a.type()), *types().builtin_of(c.type()));
     QualType t = builtin(k);
-    if (a.type() != t) a = convert_node(a, ast::ConversionKind::integral, t);
-    if (c.type() != t) c = convert_node(c, ast::ConversionKind::integral, t);
+    if (a.type() != t) a = arithmetic_conversion(a, t);
+    if (c.type() != t) c = arithmetic_conversion(c, t);
     return t;
   }
 
@@ -4286,6 +4431,8 @@ public:
         if (types().is_enum(a.type()) && types().is_enum(c.type()) &&
             types().canonical(Types::unqualified(a.type())) != types().canonical(Types::unqualified(c.type())))
           return invalid();  // P2864: arithmetic between different enumerations is ill-formed
+        if (types().is_floating(a.type()) || types().is_floating(c.type()))
+          return invalid();  // [expr.arith.conv]/1: and between an enumeration and a floating type
         if (types().is_enum(a.type())) a = promote(a);
         if (types().is_enum(c.type())) c = promote(c);
       }
@@ -4383,6 +4530,11 @@ public:
     } else {
       Ex lv = rvalue(l);  // only to read its type; the IR loads the left operand itself
       QualType tl = lv.type();
+      // [expr.arith.conv]/1: an enumeration and a floating type do not mix.
+      if ((types().is_enum(tl) && types().is_floating(r.type())) || (types().is_floating(tl) && types().is_enum(r.type()))) {
+        diag(op_at, Diag::invalid_operands, lt, r.type());
+        return {NodeId::none, begin, end};
+      }
       Ex rv = is_unscoped_enum(r.type()) ? promote(r) : rvalue(r);  // [conv.prom]
       if (!rv.ok()) return {NodeId::none, begin, end};
       QualType tr = rv.type();
@@ -4685,11 +4837,12 @@ public:
     return children;
   }
 
-  // [expr.call]/12: an argument matched by the ellipsis gets the lvalue conversions and the
-  // integral promotions; std::nullptr_t becomes void*; void is no value.
+  // [expr.call]/12: an argument matched by the ellipsis gets the lvalue conversions, the integral
+  // promotions and the floating-point promotion; std::nullptr_t becomes void*; void is no value.
   Ex variadic_argument(Ex e) {
     e = promote(e);
     if (!e.ok()) return e;
+    if (types().is(e.type(), Builtin::float_)) return convert_node(e, ast::ConversionKind::floating, builtin(Builtin::double_));
     if (types().is_void(e.type())) {
       diag(e.begin, Diag::void_value);
       return {NodeId::none, e.begin, e.end};

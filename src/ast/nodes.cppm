@@ -115,13 +115,24 @@ struct Call {
   [[=indeterminately_sequenced(1)]] ChildList args;
 };
 
+// A call of a built-in function whose value is computed, not a constant (`lex::BuiltinFunction`:
+// `__builtin_fabs(x)`), its arguments converted to its parameters' types (docs/EXTENSIONS.md).
+struct BuiltinCall {
+  ExprInfo info;
+  u8 function;  // a lex::BuiltinFunction
+  [[=indeterminately_sequenced]] ChildList args;
+};
+
 // The standard conversions ([conv]) and the others an implicit conversion sequence is made of.
 // `integral` covers integral promotions ([conv.prom]) and conversions ([conv.integral]), told
-// apart by the types; `to_void` is a discarded-value expression's conversion ([expr.context]).
+// apart by the types, and `floating` floating-point promotions ([conv.fpprom]) and conversions
+// ([conv.double]); `floating_integral` goes either way between the two ([conv.fpint]); `to_void`
+// is a discarded-value expression's conversion ([expr.context]).
 enum class ConversionKind : u8 {
   lvalue_to_rvalue, integral, floating_integral, user_defined, derived_to_base,
   array_to_pointer, function_to_pointer, qualification, boolean, null_pointer, to_void,
   pointer,  // [conv.ptr]: an object pointer to `cv void*`
+  floating,
 };
 
 // An implicit conversion: a node of width zero beyond its operand (§3.3), naming its function for
@@ -357,7 +368,7 @@ using Nodes = closed_list<Literal, DeclRef, Paren, Unary, Binary, OrderedBinary,
                           Conditional, While, Do, For, Break, Continue, DeclStmt, Declarator, DeclGroup,
                           IfConsteval, StaticAssert, Member, InitList, ValueInit, DefaultInit, This,
                           MemberCall, Materialize, CtorCall, MemberInit, Destructor, DestroyMember, Dependent,
-                          DepName, Lambda>;
+                          DepName, BuiltinCall, Lambda>;
 
 static_assert(Nodes::size < max_node_kinds);
 

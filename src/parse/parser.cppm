@@ -1295,9 +1295,12 @@ public:
     // [temp.param]/7: a structural type; class types are not supported yet.
     if (!s_->types().is_integral(t) && !s_->types().is_pointer(t) && !s_->types().is_reference(t) &&
         !s_->types().is(t, Builtin::nullptr_t) && !s_->types().is_dependent(t)) {
-      bool later = s_->types().is_class(t) || s_->types().kind(t) == sema::TypeKind::enum_;  // structural, not supported yet
+      bool later = s_->types().is_class(t) || s_->types().kind(t) == sema::TypeKind::enum_ ||
+                   s_->types().is_floating(t);  // structural, not supported yet (floating: #317)
       s_->diag(at, later ? Diag::not_supported : Diag::invalid_template_parameter_type,
-               s_->types().is_class(t) ? Tk::kw_class : Tk::kw_enum);
+               s_->types().is_class(t)      ? Tk::kw_class
+               : s_->types().is_floating(t) ? (s_->types().is(t, Builtin::float_) ? Tk::kw_float : Tk::kw_double)
+                                            : Tk::kw_enum);
       ok = false;
       return std::nullopt;
     }
@@ -2334,6 +2337,19 @@ public:
         expect(Tk::r_paren);
         return {NodeId::none, begin, pos()};
       }
+      // A built-in function ycxx implements, `__builtin_fabs(x)` (docs/EXTENSIONS.md).
+      if (kind(1) == Tk::l_paren)
+        if (const lex::BuiltinFunctionInfo* bf = s_->builtin_function(n)) {
+          bump();
+          bump();
+          std::vector<Ex> args;
+          if (!is(Tk::r_paren))
+            do args.push_back(assignment_expression());
+            while (accept(Tk::comma));
+          if (!expect(Tk::r_paren)) return {NodeId::none, begin, pos()};
+          Ex r = s_->builtin_call(*bf, std::move(args), begin, pos());
+          return {r.id, begin, pos(), r.info};
+        }
       // A type-testing built-in, `__is_same(T, U)` (docs/EXTENSIONS.md).
       if (kind(1) == Tk::l_paren)
         if (const lex::TypeTraitInfo* tr = s_->type_trait(n); tr && !tr->transforms) {
@@ -2423,10 +2439,16 @@ public:
       Ex r = s_->static_cast_to(e, *t, begin);
       return {r.id, begin, pos(), r.info};
     }
-    case Tk::float_lit:
-      s_->diag(begin, Diag::float_literal_not_supported);
+    case Tk::float_lit: {
+      const lex::Literal& l = literal();
       bump();
-      return {NodeId::none, begin, pos()};
+      if (l.ud_suffix != lex::no_name) {
+        s_->diag(begin, Diag::not_supported, Tk::float_lit);
+        return {NodeId::none, begin, pos()};
+      }
+      if (l.bad) return {NodeId::none, begin, pos()};
+      return s_->float_literal(l, begin, pos());
+    }
     case Tk::l_square:
       // [dcl.attr.grammar]/7: `[[` begins an attribute-specifier only, never a lambda.
       if (kind(1) == Tk::l_square) {

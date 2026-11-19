@@ -220,9 +220,8 @@ clauses = ['lex.fcon']
 std = 'C++17'
 ftm = '__cpp_hex_float'
 detect = '''\b0[xX][\dA-Fa-f']*\.?[\dA-Fa-f']*[pP][+-]?\d'''
-status = 'missing'
-issues = [201]
-note = 'floating values'
+status = 'done'
+issues = [336]
 probe = '''
 int main() { double d = 0x1.8p1; return d == 3.0 ? 0 : 1; }
 '''
@@ -447,9 +446,8 @@ group = 'basic'
 clauses = ['basic.fundamental', 'lex.fcon', 'conv.fpprom', 'conv.double', 'conv.fpint']
 std = 'C++98'
 detect = '\b(?:float|double)\b'
-status = 'missing'
-issues = [201]
-note = 'floating types exist as types only'
+status = 'done'
+issues = [336]
 probe = '''
 int main() { double d = 1.5; float f = 2.0f; d = d * f + 0.5; return (int)d == 3 ? 0 : 1; }
 '''
@@ -462,7 +460,7 @@ clauses = ['basic.extended.fp', 'lex.fcon', 'conv.rank']
 std = 'C++23'
 detect = '\b(?:std::)?b?float(?:16|32|64|128)_t\b|\b\d[\d.]*(?:f16|f32|f64|f128|bf16|F16|F32|F64|F128|BF16)\b'
 status = 'missing'
-issues = [201]
+issues = [351]
 probe = '''
 int main() { decltype(1.0f32) x = 1.5f32; return x > 1 ? 0 : 1; }
 '''
@@ -1072,7 +1070,7 @@ std = 'C++98'
 detect = ',\s*\.\.\.\s*\)|\bva_(?:start|arg|list)\b'
 status = 'partial'
 issues = [196]
-note = 'definitions (`va_start`), floating arguments, calls through pointers'
+note = 'definitions (`va_start`), calls through pointers'
 probe = '''
 #include <stdarg.h>
 int sum(int n, ...) { va_list ap; va_start(ap, n); int s = 0; for (int i = 0; i < n; ++i) s += va_arg(ap, int); va_end(ap); return s; }

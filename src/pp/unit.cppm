@@ -1481,7 +1481,7 @@ private:
         return number_token(t, 0);
       }
       std::string_view name = s_->spellings.name(operand[0].tok.payload);
-      return number_token(t, lex::type_trait(name) != nullptr || lex::builtin_template(name) ? 1 : 0);
+      return number_token(t, lex::type_trait(name) || lex::builtin_template(name) || lex::builtin_function(name) ? 1 : 0);
     }
     // [cpp.cond]/? the header, as for #include: a string literal, `<...>`, or tokens that become
     // one after replacement.

@@ -347,6 +347,16 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
     check fail (DECISIONS §5.6).
   - Learned on #282.
 
+- **Start the spec-only test author at the slice's first commit, briefed on every step.** On #336
+  the author wrote 84 tests from the draft while the back end was being written, checked against
+  both oracles. Run against ycxx they found two front-end bugs no hand probe had (arithmetic
+  between an enumeration and a floating type accepted; `static_cast<E>(-2.9)` not constant), a
+  lexer error the draft's own example contradicts (an overflowing literal is an infinity), and
+  that `<math.h>` is libycxx's wrapper of `<cmath>`, so no `<math.h>` test can pass until #349.
+  - Do: launch the author in its own worktree before writing the back end; cherry-pick its commit
+    and triage each failure as a bug, a missing feature (XFAIL with the issue) or a test that leans
+    on an unrelated gap (move that line into a function).
+  - Learned on #336.
 - **Test a long-lived connection's lifetime before the review.** Both P0s of #99 were in the
   LSP tunnel, and the functional tests could not have shown either:
   - a one-thread copy loop deadlocked once a large answer and a large edit crossed;
