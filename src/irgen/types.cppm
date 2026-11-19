@@ -43,6 +43,7 @@ class TypeFacts {
       if (*b == ast::Builtin::void_) return TypeClass::void_;
       if (*b == ast::Builtin::bool_) return TypeClass::bool_;
       if (ast::is_integral(*b)) return TypeClass::integer;
+      if (ast::is_floating(*b)) return TypeClass::floating;
       return TypeClass::other;
     }
     if (in_->types.is<ast::TPointer>(c)) return TypeClass::pointer;
@@ -97,6 +98,7 @@ class TypeFacts {
     if (in_->types.is<ast::TEnum>(c)) q = enum_underlying(in_->types.get<ast::TEnum>(c).entity);  // its value's type
     return ast::int_value(*in_, *target_, canonical(q), v);
   }
+  ast::ConstId float_constant(ast::QualType q, double v) { return ast::float_value(*in_, *target_, canonical(q), v); }
   ast::ConstId null_constant(ast::QualType) { return in_->intern_value(ast::VNullptr{}); }
 
  private:

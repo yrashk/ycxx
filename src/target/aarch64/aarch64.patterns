@@ -17,7 +17,11 @@
 # Conditions: uimm12(?c) is 0..4095; nuimm12(?c) is -4095..-1; uoff(?c) is an offset an unsigned
 # scaled load or store of the root's access size reaches; nonneg(?c) is 0..2^24; local(?e) is an
 # entity this unit defines, extern(?e) one it does not; wide(?x) is a type of 32 or 64 bits,
-# narrow(?x) a narrower one; signed(?p) and unsigned(?p) sort predicates (eq and ne are unsigned).
+# narrow(?x) a narrower one; signed(?p) and unsigned(?p) sort predicates (eq and ne are unsigned);
+# f32(?x) and f64(?x) are the floating types, and f32(?d), f64(?d) test the root's result.
+#
+# A floating value's register is a SIMD&FP register. Frame layout gives a form whose register is
+# one its floating counterpart (a load or store, CSEL, a move, a constant: emit.cppm).
 #
 # The maximal-munch selector takes, at each tree root, the matching pattern that covers the most
 # nodes, then the cheapest (cost defaults to the number of instructions), then the first listed.
@@ -70,6 +74,27 @@ pattern icmp_unarrow : (icmp ?p ?a ?b)  => UBFM ?t0 ?a #0 msb(?a) ; UBFM ?t1 ?b 
 pattern select_cmp   : (select (icmp ?p ?x ?y) ?a ?b)   => SUBSrr zr ?x ?y ; CSEL ?d ?a ?b ?p   where wide(?x)
 pattern select       : (select ?c ?a ?b)                => TST1 ?c ; CSEL ?d ?a ?b ne
 
+# Floating point (C7.2), single or double precision by the operands' type. The plain predicates
+# of fcmp map to the conditions that are false for unordered operands, but for ne (select.cppm).
+pattern fadd         : (fadd ?a ?b)                     => FADD ?d ?a ?b
+pattern fsub         : (fsub ?a ?b)                     => FSUB ?d ?a ?b
+pattern fmul         : (fmul ?a ?b)                     => FMUL ?d ?a ?b
+pattern fdiv         : (fdiv ?a ?b)                     => FDIV ?d ?a ?b
+pattern fneg         : (fneg ?a)                        => FNEG ?d ?a
+pattern fabs         : (fabs ?a)                        => FABS ?d ?a
+pattern fcmp         : (fcmp ?p ?a ?b)                  => FCMP ?a ?b ; CSET ?d ?p
+pattern select_fcmp  : (select (fcmp ?p ?x ?y) ?a ?b)   => FCMP ?x ?y ; CSEL ?d ?a ?b ?p
+pattern fpext        : (fpext ?a)                       => FCVTsd ?d ?a
+pattern fptrunc      : (fptrunc ?a)                     => FCVTds ?d ?a
+pattern fptosi_s     : (fptosi ?a)                      => FCVTZSs ?d ?a                        where f32(?a)
+pattern fptosi_d     : (fptosi ?a)                      => FCVTZSd ?d ?a                        where f64(?a)
+pattern fptoui_s     : (fptoui ?a)                      => FCVTZUs ?d ?a                        where f32(?a)
+pattern fptoui_d     : (fptoui ?a)                      => FCVTZUd ?d ?a                        where f64(?a)
+pattern sitofp_s     : (sitofp ?a)                      => SCVTFs ?d ?a                         where f32(?d)
+pattern sitofp_d     : (sitofp ?a)                      => SCVTFd ?d ?a                         where f64(?d)
+pattern uitofp_s     : (uitofp ?a)                      => UCVTFs ?d ?a                         where f32(?d)
+pattern uitofp_d     : (uitofp ?a)                      => UCVTFd ?d ?a                         where f64(?d)
+
 # Width changes. A truncation is a copy: the bits above the new width become unspecified.
 pattern zext         : (zext ?a)                        => UBFM ?d ?a #0 msb(?a)
 pattern sext         : (sext ?a)                        => SBFM ?d ?a #0 msb(?a)
@@ -98,5 +123,6 @@ pattern store        : (store ?p ?v)                              => STRui ?v ?p
 pattern br           : (br)                                   => B ^0
 pattern cond_br_cmpi : (cond_br (icmp ?p ?a (const ?c)))      => SUBSri zr ?a ?c ; Bcc ?p ^0 ; B ^1    where wide(?a), uimm12(?c)
 pattern cond_br_cmp  : (cond_br (icmp ?p ?a ?b))              => SUBSrr zr ?a ?b ; Bcc ?p ^0 ; B ^1    where wide(?a)
+pattern cond_br_fcmp : (cond_br (fcmp ?p ?a ?b))              => FCMP ?a ?b ; Bcc ?p ^0 ; B ^1
 pattern cond_br      : (cond_br ?c)                           => TST1 ?c ; Bcc ne ^0 ; B ^1
 pattern unreachable  : (unreachable)                          => BRK #1

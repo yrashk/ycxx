@@ -115,6 +115,7 @@ private:
     using K = interp::Result::Kind;
     switch (r.kind) {
     case K::integer: return {vs.integer(r.type, r.bits), 0, true};
+    case K::floating: return {ast::float_value(s_->ins(), target, r.type, ast::Bits128{r.bits, 0}), 0, true};
     case K::null: return {vs.null_pointer(r.type), 0, true};
     case K::function: return {vs.address(r.type, vs.entity(r.entity), 0), 0, true};
     case K::address:
