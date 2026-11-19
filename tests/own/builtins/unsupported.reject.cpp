@@ -7,6 +7,7 @@ struct S {
 };
 unsigned long at() { return __builtin_offsetof(S, b); } //! error
 int big() { return __builtin_constant_p(1) ? 1 : 0; } //! error
+int unknown() { return __builtin_no_such_thing(1); } //! error
 int __builtin_ours(int x) { return x; }
 int ours() { return __builtin_ours(2); }
 struct M {

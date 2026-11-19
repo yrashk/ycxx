@@ -1247,7 +1247,8 @@ Fable decided the representation (ast.md §6.6); the Opus session wrote the code
   `ast::Target::va_list`), found where lookup finds nothing else (`Sema::builtin_type_name`).
   The `__builtin_*` functions ycxx lacks (`__builtin_fabsf`, `__builtin_inff`, `__builtin_alloca`,
   `__builtin_offsetof`, …) are diagnosed as "built-in function '…' is not supported yet", their
-  arguments skipped (`Sema::unsupported_builtin`).
+  arguments skipped (`lex::lacking_builtins`, `Sema::unsupported_builtin`). Any other `__builtin_`
+  name is an ordinary one, so a requires-expression probing it is unsatisfied.
 - Warnings located in a system header are not reported; errors are, and so is `#warning`, as
   with Clang and GCC. A system header is one found in a system directory (a `-I` directory that
   is also an `-isystem` one is dropped from the `-I` list), or one a system header includes
@@ -1263,7 +1264,7 @@ Fable decided the representation (ast.md §6.6); the Opus session wrote the code
 - Tests: `tests/own/pp/predefined-gnuc.pp.cpp`, `tests/own/headers/system-warnings.accept.cpp`,
   `tests/own/headers/stdio-no-warnings.accept.cpp` (`<stdio.h>` with no warning; darwin only
   until Linux searches glibc's multiarch directory, #252), `tests/own/headers/system-error.reject.cpp`,
-  `tests/own/builtins/va-list.run.cpp`, `tests/own/builtins/unsupported.reject.cpp`. `<cstdio>`: 25 errors before and after, and no warning
+  `tests/own/builtins/va-list.run.cpp`, `tests/own/builtins/unsupported.reject.cpp`, `tests/own/builtins/unknown-probe.accept.cpp`. `<cstdio>`: 25 errors before and after, and no warning
   (was 1). `<cmath>` and `<cstdlib>` gain errors in the SDK's `__GNUC__` inline functions (local
   unions, floating-point operations, `__builtin_fabs*`), which already had thousands.
 

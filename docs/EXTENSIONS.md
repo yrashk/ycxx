@@ -29,6 +29,11 @@ use, in the headers libycxx's C library headers reach (`<cstdio>`, `<cstdlib>`, 
 | `__builtin_offsetof` | `sys/_types.h`'s `__offsetof`, libycxx's `offsetof` | Not yet: diagnosed as above where a program uses `offsetof`, its arguments (a type first) skipped | — |
 | `__builtin_expect` | the SDK's `assert.h`'s `assert` | Not yet: diagnosed as above where a program uses `assert`, which did not compile before #229 either (its other path calls `abort` undeclared; this one also needs `__func__`, [dcl.fct.def.general], which ycxx does not have yet) | — |
 
+The built-in functions marked "not yet" are listed in one table, `lex::lacking_builtins`
+(#248). Only those are diagnosed as not supported: any other `__builtin_` name is an ordinary
+name, undeclared unless declared, so a requires-expression that probes it is unsatisfied, as
+libycxx's in-language probes need (`tests/own/builtins/unknown-probe.accept.cpp`).
+
 The other `__GNUC__` tests in those headers select nothing new for ycxx: `sys/cdefs.h`'s
 `#warning "Unsupported compiler detected"` goes; `__signed` is `sys/cdefs.h`'s macro for
 `signed`; `__header_inline` is `inline` in C++; `__deprecated_msg`, the availability macros and the

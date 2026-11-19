@@ -2200,16 +2200,17 @@ public:
     return (d.flags & (decl_flag::constructor | decl_flag::destructor)) != 0;
   }
 
-  // A name lookup found nothing for ([basic.lookup.unqual]). A GNU built-in function's name says
-  // that ycxx does not have it yet (docs/EXTENSIONS.md).
+  // A name lookup found nothing for ([basic.lookup.unqual]). A GNU built-in function the headers
+  // use and ycxx lacks (`lex::lacking_builtins`) says that ycxx does not have it yet.
   void undeclared(u32 at_, NameId name) {
-    diag(at_, ins().names.spelling(name).starts_with("__builtin_") ? Diag::builtin_unsupported : Diag::undeclared, name);
+    diag(at_, lex::lacking_builtin(ins().names.spelling(name)) ? Diag::builtin_unsupported : Diag::undeclared, name);
   }
-  // Whether `name` is a GNU built-in function ycxx does not have yet (docs/EXTENSIONS.md): a
-  // `__builtin_` name no declaration in scope gives. Its call is diagnosed without parsing its
-  // arguments, which may be types (`__builtin_offsetof(T, m)`, `__builtin_va_arg(ap, T)`).
+  // Whether `name` is a GNU built-in function ycxx does not have yet (`lex::lacking_builtins`,
+  // docs/EXTENSIONS.md) that no declaration in scope gives. Its call is diagnosed without parsing
+  // its arguments, which may be types (`__builtin_offsetof(T, m)`). Any other `__builtin_` name
+  // is an ordinary one.
   bool unsupported_builtin(NameId name) {
-    if (!ins().names.spelling(name).starts_with("__builtin_")) return false;
+    if (!lex::lacking_builtin(ins().names.spelling(name))) return false;
     for (const auto& scope : scopes_)
       if (std::ranges::any_of(scope, [&](const auto& p) { return p.first == name; })) return false;
     if (std::ranges::any_of(own, [&](const auto& p) { return p.name == name; })) return false;
