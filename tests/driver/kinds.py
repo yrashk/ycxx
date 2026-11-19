@@ -13,7 +13,7 @@
 execute() returns (result code, transcript, steps). Codes are lit's: PASS, FAIL, XFAIL, XPASS,
 UNSUPPORTED, UNRESOLVED (the test itself is malformed, or the oracles disagree), TIMEOUT.
 """
-import difflib, os, re, shutil, sys
+import difflib, os, re, shutil, subprocess, sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -197,17 +197,29 @@ def build_and_run(c, src, ctx, tr, flags, timeout, work, tag='', label='', env=N
     return True, r.status, r.stdout
 
 
+def platform_compiler(ctx):
+    """The compiler whose objects users link on this host, which sets the calling convention ycxx
+    must match there (DECISIONS §1.6): Apple Clang on Darwin, GCC elsewhere."""
+    if sys.platform == 'darwin':
+        r = subprocess.run(['xcrun', '--find', 'clang++'], capture_output=True, text=True)
+        if r.returncode == 0 and r.stdout.strip():
+            return 'apple-clang', r.stdout.strip()
+        raise Unresolved('Apple Clang (xcrun clang++) is not available for a PEER file')
+    gcc = ctx.compilers['gcc']
+    need(gcc, 'run')
+    return 'gcc', gcc.exe
+
+
 def peer_objects(test, ctx, tr, timeout, work):
-    """The test's PEER files, each compiled by Clang to an object linked with the test: a
-    mixed-object ABI test (DECISIONS §5.4)."""
+    """The test's PEER files, each compiled by the platform compiler to an object linked with the
+    test: a mixed-object ABI test (DECISIONS §1.6, §5.4)."""
     objs = []
     for name in (v.strip() for v in test.directives.get('PEER', [])):
-        clang = ctx.compilers['clang']
-        need(clang, 'run')
+        who, exe = platform_compiler(ctx)
         obj = Path(work) / (Path(name).stem + '.o')
-        r = run(tr, f'clang -c {name}', [clang.exe, '-std=c++26', '-fno-exceptions', '-c', name, '-o', str(obj)], timeout, cwd=test.path.parent)
+        r = run(tr, f'{who} -c {name}', [exe, '-std=c++26', '-fno-exceptions', '-c', name, '-o', str(obj)], timeout, cwd=test.path.parent)
         if r.status != 0:
-            raise Unresolved(f'clang could not compile the peer {name} (exit {r.status})')
+            raise Unresolved(f'{who} could not compile the peer {name} (exit {r.status})')
         objs.append(str(obj))
     return objs
 

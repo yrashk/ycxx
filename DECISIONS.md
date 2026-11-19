@@ -40,6 +40,20 @@ reasoning; do not leave decisions only in issue threads.
    - *Reason:* a header that tests for a compiler or a feature must get the truth about ycxx.
    - *Rejected:* mimicking Clang (its extensions would all be owed at once), and defining every
      feature-test macro now (libycxx would enable code sema cannot compile).
+6. **Calling convention per target** (decided on #116, #230). Where compilers disagree on how
+   classes pass, each target follows the compiler whose objects its users link. It is a rule of
+   the target, not a global choice.
+   - **Data:** `ast::Target::call_triviality` says when a class is trivially copyable for the
+     purposes of calls and so passes in registers.
+   - **arm64 Darwin** follows Apple Clang (`apple`): a trivial destructor and a copy constructor
+     that is trivial or deleted, whatever the move constructors. Apple Clang 21 passes move-only
+     and deleted-copy classes in registers. Upstream Clang 23 and GCC 16 pass them by address.
+   - **Linux targets** follow GCC and the Itanium "non-trivial for the purposes of calls" wording
+     (`itanium`, [class.temporary]/3).
+   - **Tests:** `PEER:` files are compiled by the platform compiler (Apple Clang on macOS, GCC
+     elsewhere). `tests/own/abi/call-triviality` covers each kind of class. Under `--cxx gcc`
+     and `--cxx clang` it is an expected failure on Darwin.
+   - *Reason:* ycxx objects must link with the libraries and objects on the user's system.
 
 ## 2. Provenance
 
