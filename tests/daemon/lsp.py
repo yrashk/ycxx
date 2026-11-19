@@ -186,6 +186,39 @@ def editing(env):
     expect(ed.finish(), 0, '`ycxx lsp` after shutdown and exit')
 
 
+def compile_commands(env):
+    """A document no build compiled is checked with its line in `compile_commands.json` at the
+    scope's root (#167, daemon design §6.4): `arguments` or `command`, another compiler's options
+    ignored, read again when the file changes."""
+    d = Path(os.path.realpath(env.scope)) / 'listed'
+    (d / 'src').mkdir(parents=True)
+    (d / 'include').mkdir()
+    (d / 'include' / 'x.h').write_text('#define X 1\n')
+    a, b = d / 'src' / 'a.cpp', d / 'src' / 'b.cpp'
+    a.write_text('#include "x.h"\nint main() { return X - 1; }\n')
+    b.write_text('int main() { return Y - 2; }\n')
+    db = Path(os.path.realpath(env.scope)) / 'compile_commands.json'
+    ed = Editor(env, d)
+    # Without the database: checked alone, the include is not found.
+    ed.open(a, a.read_text())
+    expect(len(ed.diagnostics(a, 1, 'a.cpp alone') or []), 1, 'a unit checked alone misses its include directory')
+    db.write_text(json.dumps([
+        {'directory': str(d), 'file': 'src/a.cpp',
+         'arguments': ['clang++', '-std=c++17', '-Wall', '-O2', '-Iinclude', '-c', 'src/a.cpp', '-o', 'a.o']},
+        {'directory': str(d), 'file': str(b), 'command': 'g++ -Wextra -DY=2 -c "src/b.cpp" -o b.o'},
+    ]))
+    ed.change(a, a.read_text(), 2)
+    expect(ed.diagnostics(a, 2, 'a.cpp listed'), [], 'a unit with its `arguments` line')
+    ed.open(b, b.read_text())
+    expect(ed.diagnostics(b, 1, 'b.cpp listed'), [], 'a unit with its `command` line')
+    # The database changes: Y's definition goes, and b.cpp is checked with the new line.
+    db.write_text(json.dumps([{'directory': str(d), 'file': 'src/b.cpp', 'arguments': ['c++', '-c', 'src/b.cpp']}]))
+    ed.change(b, b.read_text(), 2)
+    expect(len(ed.diagnostics(b, 2, 'b.cpp relisted') or []), 1, 'the database read again after a change')
+    expect(ed.finish(), 0, '`ycxx lsp` after shutdown and exit')
+    db.unlink()
+
+
 def symlinked(env):
     d = project(env, 'symlinked')
     link = Path(env.runtime) / 'link'  # removed with the runtime directory
@@ -282,7 +315,7 @@ def main():
         if env.cxx(['-fsyntax-only', 'first.cpp'], env.scope, env.daemon)[0] != 0 or env.pid() is None:
             fail('the first request through the daemon failed: no test can run')
             return 1
-        for test in (editing, symlinked, concurrent_build, crossing, exit_status):
+        for test in (editing, compile_commands, symlinked, concurrent_build, crossing, exit_status):
             t0 = time.monotonic()
             pid = env.pid()
             if pid is None:
@@ -298,7 +331,7 @@ def main():
     if failures:
         print(f'daemon.lsp: {len(failures)} failure(s)', file=sys.stderr)
         return 1
-    print('daemon.lsp: editing, a symlinked path, a concurrent build, crossing messages, exit status and shutdown')
+    print('daemon.lsp: editing, compile_commands.json, a symlinked path, a concurrent build, crossing messages, exit status and shutdown')
     return 0
 
 
