@@ -492,6 +492,12 @@ struct MemberDeclRec {
   bool is_deleted = false;
 };
 
+struct NestedType {
+  NameId name{};
+  QualType type{};
+  EntityId entity = EntityId::none;
+};
+
 struct ClassRec {
   bool defined = false;
   bool union_ = false;  // a union ([class.union]): its members share its storage
@@ -508,9 +514,20 @@ struct ClassRec {
   // whether it is then not trivial (user-provided, or implicit and a member's move is not).
   bool move_usable = false;
   bool move_nontrivial = false;
-  // Nested enumerations ([class.mem]): their types by name, and the unscoped ones' enumerators,
-  // which are members of the class.
-  std::vector<std::pair<NameId, QualType>> types;
+  // Nested enumerations and type aliases ([class.mem]): their types by name, with their entities;
+  // the unscoped enumerations' enumerators are members of the class.
+  std::vector<NestedType> types;
+  // Each member's access ([class.access.spec]), by entity: data members, member functions,
+  // constructors, static data members and nested types.
+  std::vector<std::pair<EntityId, ast::Access>> access;
+  // Its friends ([class.friend]): functions and classes, by entity.
+  std::vector<EntityId> friends;
+
+  ast::Access access_of(EntityId e) const {
+    for (const auto& [m, a] : access)
+      if (m == e) return a;
+    return ast::Access::public_;
+  }
 };
 
 // An enumeration ([dcl.enum]): scoped or not, its underlying type (fixed, or chosen to hold its

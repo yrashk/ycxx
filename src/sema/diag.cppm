@@ -120,6 +120,9 @@ enum class Diag : std::uint32_t {
   // [class], [class.mem], [expr.ref], [dcl.init.aggr], [dcl.init.list]
   incomplete_type [[=message{Severity::error, "'{0:t}' is an incomplete type"}]],
   no_member [[=message{Severity::error, "no member named '{0:n}' in '{1:t}'"}]],
+  // [class.access]
+  private_member [[=message{Severity::error, "'{0:n}' is a private member of '{1:t}'"}]],
+  protected_member [[=message{Severity::error, "'{0:n}' is a protected member of '{1:t}'"}]],
   member_of_non_class [[=message{Severity::error, "member reference base type '{0:t}' is not a class"}]],
   arrow_of_non_pointer [[=message{Severity::error, "'->' needs a pointer to a class; '{0:t}' is not one"}]],
   redeclared_member [[=message{Severity::error, "redeclaration of member '{0:n}'"}]],
@@ -149,6 +152,7 @@ enum class Diag : std::uint32_t {
   overload_address [[=message{Severity::error, "the address of the overloaded function '{0:n}' is not supported yet"}]],
   ambiguous_name [[=message{Severity::error, "reference to '{0:n}' is ambiguous"}]],
   no_namespace_member [[=message{Severity::error, "no member named '{0:n}' in the namespace"}]],
+  no_friend_match [[=message{Severity::error, "friend declaration of '{0:n}' matches no earlier declaration"}]],
   not_a_namespace [[=message{Severity::error, "'{0:n}' is not a namespace or class"}]],
   static_outside_class [[=message{Severity::error, "'static' can only be specified inside the class definition"}]],
   no_member_declared [[=message{Severity::error, "'{1:t}' declares no member '{0:n}' with this type"}]],
