@@ -11,6 +11,7 @@ export module ycxx.ast.types;
 import std;
 import ycxx.ast.handles;
 import ycxx.ast.schema;
+import ycxx.ast.records;
 
 export namespace ycxx::ast {
 
@@ -134,6 +135,24 @@ struct TTransform {
   QualType arg;
 };
 
+// `TT<args>` where TT is a template template parameter, by position ([temp.param], [temp.dep.type]):
+// known once TT is bound, when it is the specialization of TT's argument for `args`
+// (*#88 step 8, Fable's decision*).
+struct TDepSpec {
+  u16 depth;
+  u16 index;
+  u8 pack;
+  SeqId<TemplateArg> args;
+};
+
+// A built-in template applied to dependent arguments, `__make_integer_seq<Seq, T, N>`
+// (docs/EXTENSIONS.md): `which` is a `BuiltinTemplate`; substitution applies it.
+enum class BuiltinTemplate : u8 { make_integer_seq };
+struct TBuiltinSpec {
+  u8 which;
+  SeqId<TemplateArg> args;
+};
+
 // ---------------------------------------------------------------- sugar kinds
 
 // A use of a typedef-name or alias-declaration. The alias's template arguments come with alias
@@ -144,7 +163,7 @@ struct STypedef {
 };
 
 using TypeKinds = closed_list<TBuiltin, TPointer, TLRef, TRRef, TArray, TFunction, TClass, TEnum, STypedef, TTemplateParam,
-                              TDepName, TPackExpansion, TTransform>;
+                              TDepName, TPackExpansion, TTransform, TDepSpec, TBuiltinSpec>;
 
 template <class T>
 constexpr bool is_type_kind = TypeKinds::contains<T>;

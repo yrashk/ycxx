@@ -71,6 +71,36 @@ struct Target {
   constexpr bool has(Builtin b) const { return (*this)[b].size != 0; }
 };
 
+// A class's layout (Itanium C++ ABI §2.4, [class.mem]; no bases or virtual functions yet): each
+// non-static data member, in declaration order, at the next offset its alignment allows; in a
+// union, every member at offset 0 ([class.union]/2); the size rounded up to the alignment; an
+// empty class has size 1 ([intro.object]/8). The one rule sema (`sizeof`, #194) and the back end
+// (`layout`) both read, from each member's size and alignment.
+struct FieldPlace {
+  std::uint64_t size = 0;
+  std::uint64_t align = 1;
+};
+struct RecordLayout {
+  std::uint64_t size = 1;
+  std::uint64_t align = 1;
+  std::vector<std::uint64_t> offsets;  // the members', in declaration order
+};
+constexpr RecordLayout record_layout(std::span<const FieldPlace> fields, bool union_) {
+  RecordLayout out;
+  std::uint64_t at = 0;
+  std::uint64_t end = 0;  // past the largest member of a union
+  for (const FieldPlace& f : fields) {
+    if (union_) at = 0;
+    at = (at + f.align - 1) / f.align * f.align;
+    out.offsets.push_back(at);
+    at += f.size;
+    end = std::max(end, at);
+    out.align = std::max(out.align, f.align);
+  }
+  out.size = end == 0 ? 1 : (end + out.align - 1) / out.align * out.align;
+  return out;
+}
+
 namespace detail {
 
 struct LayoutEntry {

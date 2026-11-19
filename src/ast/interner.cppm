@@ -533,10 +533,14 @@ private:
 // The process-wide interners (§9.1). A member's name is the `interner` enumerator that handle
 // enums name in their annotation; `fp(h)` finds the member by reflection.
 struct Interners {
-  // The empty template argument list is list 0, the `elems` of every argument that is no pack.
+  // The empty template argument list is list 0, the `elems` of every argument that is no pack; the
+  // empty template-head is list 0, the `params` of every template parameter that is no template
+  // template parameter.
   Interners() {
     [[maybe_unused]] SeqId<TemplateArg> empty = intern_seq(std::span<const TemplateArg>{});
     contract_assert(empty.index == 0);
+    [[maybe_unused]] SeqId<TemplateParamSema> no_head = intern_seq(std::span<const TemplateParamSema>{});
+    contract_assert(no_head.index == 0);
   }
   Names names;
   FpTable tokens;    // placeholder until #18

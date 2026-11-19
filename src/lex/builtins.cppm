@@ -90,6 +90,12 @@ inline constexpr std::array<std::string_view, 16> lacking_builtins{
 };
 constexpr bool lacking_builtin(std::string_view name) { return std::ranges::contains(lacking_builtins, name); }
 
+// The built-in templates ycxx implements (docs/EXTENSIONS.md): Clang's
+// `__make_integer_seq<Seq, T, N>`, `Seq<T, 0, …, N-1>`, which libycxx's `make_integer_sequence`
+// uses when `__has_builtin` says it exists.
+inline constexpr std::array<std::string_view, 1> builtin_templates{"__make_integer_seq"};
+constexpr bool builtin_template(std::string_view name) { return std::ranges::contains(builtin_templates, name); }
+
 // The first spelling of `t`, Clang's where GCC spells it differently.
 constexpr const TypeTraitInfo& type_trait_info(TypeTrait t) {
   for (const TypeTraitInfo& i : type_traits)

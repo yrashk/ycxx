@@ -574,3 +574,18 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
   - Do: when a decision names other compilers' behaviour, write the test first and run it with
     `tools/test --cxx clang` and `--cxx gcc`, then implement what they do.
   - Learned on #229.
+- **`ycxx cxx` runs through a resident daemon, which outlives a rebuild.** After #139 made the daemon
+  the default, a hand-run `ycxx cxx` after `cmake --build` could be answered by a daemon started
+  from the previous binary, and a debug print went to the daemon's stderr, not the terminal: a
+  trace that never fired looked like code that never ran. `tools/test` is not affected.
+  - Do: run hand checks with `YCXX_NO_DAEMON=1`, and stop your worktree's daemons
+    (`pkill -f '<worktree>/build/bin/ycxx daemon'`) after rebuilding.
+  - Learned on #88 step 8.
+- **A handle's `{}` is index 0, a real entity or list, not `none`.** `EntityId{}` in a new
+  `TemplateArg::templ` field made every dependent template argument name entity 0, which was the
+  first class template declared, so `W<Box>` became `W`'s own current instantiation and was never
+  instantiated. `ConstId{}` did the same in step 6, and an empty `SeqId<TemplateParamSema>` crashed
+  until list 0 was interned as the empty one.
+  - Do: give a new handle field `= X::none` (or intern the empty list as index 0 in `Interners()`),
+    and test with the argument declared first in the file.
+  - Learned on #88 steps 6 and 8.
