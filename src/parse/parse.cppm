@@ -3575,6 +3575,22 @@ private:
     const bool pattern = template_ && !var_ && !fn;
     Ex init;
     sema::ConstId value = sema::ConstId::none;
+    // An initializer that is not a constant expression initializes the variable dynamically
+    // ([basic.start.dynamic]), by the unit's initialization function, unless it must be constant
+    // ([dcl.constexpr], [dcl.constinit]) or is not supported yet: a reference's (#367), an inline
+    // variable's or a variable template's (#368), and a scalar's the front end has no code for.
+    auto dynamic_ok = [&](u32 at, std::uint64_t reason) {
+      if (spec.is_constexpr || spec.is_constinit) {
+        s_.diag(at, Diag::not_constant, reason);
+        return false;
+      }
+      bool object = types.is_class(element_type(d.type)) || types.is_array(d.type);  // evaluated in parts, if at all
+      if (types.is_reference(d.type) || spec.is_inline || var_ || template_ || (!object && !sema::has_runtime_code(reason))) {
+        s_.diag(at, Diag::nonconstant_initializer, reason);
+        return false;
+      }
+      return true;
+    };
     if (fn && has_init && !is_function_def) {
       s_.diag(ps_.pos(), Diag::function_initialized, d.name);
       ps_.skip_to_semi();
@@ -3588,11 +3604,9 @@ private:
         if (auto v = constant_initializer(init)) {
           value = *v;
           if (spec.is_constexpr) p_->set_constant(sem.entity, *v, k_);
-        } else if (spec.is_constexpr || spec.is_constinit) {
-          s_.diag(b->begin, Diag::not_constant, sema::reason_unsupported);
-        } else if (types.is_reference(d.type) || spec.is_inline) {
-          s_.diag(b->begin, Diag::nonconstant_initializer, sema::reason_unsupported);  // #367, #368
-        }  // else dynamic initialization ([basic.start.dynamic]): the unit's initialization function
+        } else {
+          dynamic_ok(b->begin, sema::Evaluator(s_, q_).evaluate(init).reason);
+        }
       }
     } else if (!fn && (early_expr || ps_.accept(Tk::equal))) {
       {
@@ -3615,16 +3629,14 @@ private:
             if (spec.is_constexpr || (sema::Types::is_const(d.type) && !sema::Types::is_volatile(d.type) &&
                                       types.is_integral(d.type)))
               p_->set_constant(sem.entity, *v.value, k_);
-          } else if (spec.is_constexpr || spec.is_constinit) {
-            s_.diag(e.begin, Diag::not_constant, v.reason);
-          } else if (types.is_reference(d.type) || spec.is_inline) {
-            // A reference variable's object (#367); an inline variable is initialized once (#368).
-            s_.diag(e.begin, Diag::nonconstant_initializer, v.reason);
-          }  // else dynamic initialization ([basic.start.dynamic]): the unit's initialization function
+          } else {
+            dynamic_ok(e.begin, v.reason);
+          }
         }
       }
-    } else if (!fn && ps_.is(Tk::l_paren) && !pattern) {
-      // Direct-initialization ([dcl.init.general]): `T x(args)`, constant or dynamic.
+    } else if (!fn && ps_.is(Tk::l_paren)) {
+      // Direct-initialization ([dcl.init.general]): `T x(args)`, constant or dynamic; a pattern's
+      // is evaluated in its specializations.
       u32 open = ps_.pos();
       ps_.bump();
       std::vector<Ex> args;
@@ -3632,19 +3644,22 @@ private:
         do args.push_back(ps_.assignment_expression());
         while (ps_.accept(Tk::comma));
       if (!ps_.expect(Tk::r_paren)) ps_.skip_to_semi();
+      else if (pattern) {}
       else if (types.is_class(d.type)) init = s_.construct(d.type, std::move(args), open, ps_.pos());
       else if (args.size() == 1 && !types.is_array(d.type) && !types.is_reference(d.type))
         init = s_.convert(args[0], d.type, open);
       else s_.diag(open, Diag::not_supported, Tk::l_paren);  // a list for a scalar or an array
-      if (init.ok() && !types.is_class(d.type) && !types.is_reference(d.type)) {
+      if (init.ok() && !types.is_class(d.type)) {
         sema::Evaluated v = sema::Evaluator(s_, q_).evaluate(init);
-        if (v.value) value = *v.value;
-        else if (spec.is_constexpr || spec.is_constinit) s_.diag(open, Diag::not_constant, v.reason);
-        else if (spec.is_inline) s_.diag(open, Diag::nonconstant_initializer, v.reason);  // #368
-      } else if (init.ok() && (spec.is_constexpr || spec.is_constinit)) {
-        s_.diag(open, Diag::not_constant, sema::reason_unsupported);
-      } else if (init.ok() && spec.is_inline) {
-        s_.diag(open, Diag::nonconstant_initializer, sema::reason_unsupported);  // #368
+        if (v.value) {
+          value = *v.value;
+          if (spec.is_constexpr || (sema::Types::is_const(d.type) && !sema::Types::is_volatile(d.type) && types.is_integral(d.type)))
+            p_->set_constant(sem.entity, *v.value, k_);
+        } else {
+          dynamic_ok(open, v.reason);
+        }
+      } else if (init.ok()) {
+        dynamic_ok(open, sema::reason_unsupported);
       }
     } else if (pattern) {
       // Its specializations' types are complete, or not ([temp.inst]/7).
@@ -3654,14 +3669,13 @@ private:
       // Default-initialization by a constructor, of an object or each element: dynamic
       // ([basic.start.dynamic]).
       init = s_.default_init(d.type, d.name_at, ps_.pos());
-      if (spec.is_inline) s_.diag(d.name_at, Diag::nonconstant_initializer, sema::reason_unsupported);  // #368
+      if (init.ok()) dynamic_ok(d.name_at, sema::reason_unsupported);
     } else if (!fn && definition && s_.has_member_inits(d.type)) {
       // Zero-initialization, then the default member initializers ([basic.start.static]), or, if
       // they are not constant, dynamic initialization ([basic.start.dynamic]).
       Ex di = s_.default_init(d.type, d.name_at, ps_.pos());
       if (auto v = di.ok() ? constant_initializer(di) : std::nullopt) value = *v;
-      else if (di.ok() && spec.is_inline) s_.diag(d.name_at, Diag::nonconstant_initializer, sema::reason_unsupported);  // #368
-      else init = di;
+      else if (di.ok() && dynamic_ok(d.name_at, sema::reason_unsupported)) init = di;
     } else if (!fn && d.qualified) {
       // [class.static.data]/4: the definition of a member initialized in its class repeats no
       // initializer, and has the class's value.
@@ -4810,7 +4824,21 @@ void Program::instantiate_all() {
       if (member_patterns_.contains(std::to_underlying(e))) work.push_back({e, ast::Loc{at, 0}});
   };
   for (u32 k = 0; k < items_->items.size(); ++k) {
-    if (item_cells_[k]) work.insert(work.end(), item_cells_[k]->demands.begin(), item_cells_[k]->demands.end());
+    if (item_cells_[k]) {
+      work.insert(work.end(), item_cells_[k]->demands.begin(), item_cells_[k]->demands.end());
+      // A namespace-scope variable's initializer, and its destructor ([basic.start.term]), are code
+      // of the unit's initialization function.
+      if (!templated_body(k) && !in_class_[k]) {
+        required_members(item_cells_[k]->value.tree, id(k));
+        for (const ast::DeclSema& d : w_->ins.seqs.elements(item_cells_[k]->value.decls))
+          if (d.kind == ast::DeclKind::variable && d.entity != EntityId::none && (d.flags & sema::decl_flag::definition)) {
+            QualType t = d.type;
+            while (w_->types.is_array(t)) t = w_->types.rec(t).inner;
+            EntityId dtor = w_->types.is_class(t) ? classes_.destructor_of(t) : EntityId::none;
+            if (member_patterns_.contains(std::to_underlying(dtor))) work.push_back({dtor, ast::Loc{id(k), 0}});
+          }
+      }
+    }
     if (body_cells_[k]) {
       work.insert(work.end(), body_cells_[k]->demands.begin(), body_cells_[k]->demands.end());
       if (!templated_body(k)) required_members(body_cells_[k]->value.tree, id(k));

@@ -83,6 +83,7 @@ class TypeFacts {
     return std::uint32_t(in_->seqs.elements(f.params).size());
   }
   ast::QualType int_type() { return ast::builtin(*in_, ast::Builtin::int_); }
+  ast::QualType bool_type() { return ast::builtin(*in_, ast::Builtin::bool_); }
   ast::QualType ptrdiff_type() { return ast::builtin(*in_, target_->ptrdiff_type); }
 
  private:

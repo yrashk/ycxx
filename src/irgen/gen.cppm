@@ -727,19 +727,31 @@ class Gen {
       --pinned_;
     }
     if (si.destructor == ast::EntityId::none) return;
-    // An array's elements are each registered, the first first, so the last is destroyed first.
-    auto each = [&](this auto& self, const Place& o) -> void {
-      if (cls(o.type) == TypeClass::array) {
-        ast::QualType e = facts_.element(o.type);
-        for (std::uint64_t i = 0; i < facts_.bound(o.type); ++i) self(subobject(o, ir::Step::elem, uint32_t(i), e));
-        return;
-      }
-      ast::QualType vp = facts_.pointer_to(facts_.int_type());  // any object pointer: the callee takes void*
-      ValueId args[] = {pure(ir::Op::func_addr, vp, {}, {word(si.destructor)}), o.ptr,
-                        pure(ir::Op::global, vp, {}, {word(si.dso)})};
+    ast::QualType vp = facts_.pointer_to(facts_.int_type());  // any object pointer: the callee takes void*
+    auto atexit = [&](ValueId object) {
+      ValueId args[] = {pure(ir::Op::func_addr, vp, {}, {word(si.destructor)}), object, pure(ir::Op::global, vp, {}, {word(si.dso)})};
       call_fn(si.atexit, facts_.int_type(), args, 0);
     };
-    each(p);
+    if (cls(p.type) != TypeClass::array) return atexit(p.ptr);
+    // An array's elements are each registered, the first first, so that the last is destroyed
+    // first: a loop over the innermost elements, from the first.
+    Place first = p;
+    std::uint64_t n = 1;
+    while (cls(first.type) == TypeClass::array) {
+      n *= facts_.bound(first.type);
+      first = subobject(first, ir::Step::elem, 0, facts_.element(first.type));
+    }
+    ast::QualType it = facts_.ptrdiff_type();
+    ir::BlockId head = new_block({it}), body = new_block(), done = new_block();
+    br(head, {int_constant(it, 0)});
+    enter(head);
+    ValueId i = b_.param(head, 1);
+    cond_br(pure(ir::Op::icmp, facts_.bool_type(), {i, int_constant(it, std::int64_t(n))}, {std::to_underlying(ir::Pred::slt)}),
+            edge(body), edge(done));
+    enter(body);
+    atexit(pure(ir::Op::ptr_add, facts_.pointer_to(first.type), {first.ptr, i}, {word(ty(first.type))}));
+    br(head, {arith(ast::BinaryOp::add, it, i, int_constant(it, 1))});
+    enter(done);
   }
 
   struct Loop {

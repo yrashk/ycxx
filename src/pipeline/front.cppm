@@ -136,9 +136,11 @@ struct Dynamic {
 // The unit's initialization function, which dyld runs before `main` (`__mod_init_func`): each
 // dynamic initialization in definition order ([basic.start.dynamic]/1), each destructor registered
 // with `__cxa_atexit` (Itanium C++ ABI §3.3.5). Named like Clang's, with internal linkage.
+void init_function_def(parse::Program& program, sema::World& world, TranslationUnit& tu, EntityId fn, QualType fn_type, ast::NodeId root,
+                       std::uint32_t item);
 template <class Declare>
 void init_function(parse::Program& program, sema::World& world, TranslationUnit& tu, std::span<const Dynamic> dynamic,
-                   Declare& declare) {
+                   Declare& declare, std::string_view source) {
   if (dynamic.empty()) return;
   ast::Interners& ins = world.ins;
   sema::Types& types = world.types;
@@ -160,20 +162,33 @@ void init_function(parse::Program& program, sema::World& world, TranslationUnit&
   EntityId dso = entity(sema::EntityKind::variable, "__dso_handle", types.builtin(sema::Builtin::char_), ast::LangLinkage::c,
                         ast::Linkage::external);
   QualType fn_type = types.function(void_, {}, false, ast::LangLinkage::cxx);
-  std::string fn_name = "__GLOBAL__sub_I_" + std::filesystem::path(tu.name).filename().native_encoded_string();
-  EntityId fn = entity(sema::EntityKind::function, fn_name, fn_type, ast::LangLinkage::cxx, ast::Linkage::internal);
+  const std::string base = "__GLOBAL__sub_I_" + std::filesystem::path(source).filename().native_encoded_string();
   symbol(atexit, world.entities.rec(atexit).type);
   symbol(dso, world.entities.rec(dso).type);
-  symbol(fn, fn_type);
-  tu.entities.back().asm_label = fn_name;
-
-  ast::Builder b(ins);
-  std::vector<ast::Child> stmts;
-  for (const Dynamic& x : dynamic) {
-    ast::Child init{x.init == ast::NodeId::none ? ast::NodeId::none : b.adopt(x.init), 0};
-    stmts.push_back({b.add(ast::StaticInit{x.variable, x.type, init, x.destructor, atexit, dso}, 0), 0});
+  // One function per declaration, so that what fails points at it; dyld runs them in order.
+  for (std::size_t first = 0, n = 0; first < dynamic.size(); ++n) {
+    std::size_t last = first;
+    while (last < dynamic.size() && dynamic[last].item == dynamic[first].item) ++last;
+    std::string fn_name = n == 0 ? base : std::format("{}.{}", base, n);
+    EntityId fn = entity(sema::EntityKind::function, fn_name, fn_type, ast::LangLinkage::cxx, ast::Linkage::internal);
+    symbol(fn, fn_type);
+    tu.entities.back().asm_label = fn_name;
+    ast::Builder b(ins);
+    std::vector<ast::Child> stmts;
+    for (const Dynamic& x : dynamic.subspan(first, last - first)) {
+      ast::Child init{x.init == ast::NodeId::none ? ast::NodeId::none : b.adopt(x.init), 0};
+      stmts.push_back({b.add(ast::StaticInit{x.variable, x.type, init, x.destructor, atexit, dso}, 0), 0});
+    }
+    ast::Child root = b.commit(ast::Child{b.add(ast::Compound{b.list(stmts)}, 0), 0});
+    init_function_def(program, world, tu, fn, fn_type, root.id, dynamic[first].item);
+    tu.init_functions.push_back({fn, entity(sema::EntityKind::variable, fn_name + ".ptr", vp, ast::LangLinkage::cxx, ast::Linkage::internal)});
+    first = last;
   }
-  ast::Child root = b.commit(ast::Child{b.add(ast::Compound{b.list(stmts)}, 0), 0});
+}
+
+void init_function_def(parse::Program& program, sema::World& world, TranslationUnit& tu, EntityId fn, QualType fn_type, ast::NodeId root,
+                       std::uint32_t item) {
+  ast::Interners& ins = world.ins;
   ast::DeclSema d{};
   d.kind = ast::DeclKind::function;
   d.type = fn_type;
@@ -188,12 +203,10 @@ void init_function(parse::Program& program, sema::World& world, TranslationUnit&
   d.params = ins.intern_seq(std::span<const ast::ParamSema>{});
   d.template_params = ins.intern_seq(std::span<const ast::TemplateParamSema>{});
   d.entity = fn;
-  ast::BodySema body{root.id, ins.intern_seq(std::span<const ast::LocalRec>{}), ins.intern_seq(std::span<const ast::ExpansionRec>{}),
+  ast::BodySema body{root, ins.intern_seq(std::span<const ast::LocalRec>{}), ins.intern_seq(std::span<const ast::ExpansionRec>{}),
                      ins.intern_seq(std::span<const std::uint32_t>{})};
   body.closures = ins.intern_seq(std::span<const ast::ClosureDef>{});
-  tu.functions.push_back({fn, d, body, program.id(dynamic.front().item), 0, std::nullopt});
-  tu.init_function = fn;
-  tu.init_slot = entity(sema::EntityKind::variable, fn_name + ".ptr", vp, ast::LangLinkage::cxx, ast::Linkage::internal);
+  tu.functions.push_back({fn, d, body, program.id(item), 0, std::nullopt});
 }
 
 // The definitions and declarations of the global namespace, in item order.
@@ -361,11 +374,11 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
       EntityId dtor = world.types.is_reference(d.type) ? EntityId::none : program.classes().destructor_of(d.type);
       if (init != ast::NodeId::none || dtor != EntityId::none) {
         dynamic.push_back({d.entity, d.type, init, dtor, k});
-        tu.variables.back().dynamic = init != ast::NodeId::none;
+        tu.variables.back().dynamic = true;  // written at run time: by its initialization or its destructor
       }
     }
   }
-  init_function(program, world, tu, dynamic, declare);
+  init_function(program, world, tu, dynamic, declare, program.region().files.at(0));
   // The function template specializations instantiated at the end of the unit ([temp.inst]), in
   // order of instantiation. A specialization that is only declared here is an external reference.
   for (const parse::Program::Instance* in : program.instances()) {

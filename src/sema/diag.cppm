@@ -220,6 +220,16 @@ constexpr std::uint64_t reason_arg(const interp::Failure& f) {
   return (f.arg << 8) | (std::uint64_t(std::to_underlying(f.reason)) + 1);
 }
 inline constexpr std::uint64_t reason_unsupported = 0;
+// Whether an expression that was not constant has run-time code: the front end made its IR, and
+// the evaluation stopped at what it does not or may not evaluate, not at one of its own limits or
+// an internal error. An initializer the interpreter cannot evaluate yet (a class temporary) is
+// then taken to be dynamic, even where a full evaluator would find it constant.
+constexpr bool has_runtime_code(std::uint64_t raw) {
+  if (raw == reason_unsupported) return false;
+  using enum interp::Reason;
+  interp::Reason r = interp::Reason(std::uint8_t((raw & 0xff) - 1));
+  return r != ill_formed && r != step_limit && r != depth_limit;
+}
 
 inline std::string spell_reason(std::uint64_t raw) {
   if (raw == reason_unsupported) return "the expression cannot be evaluated yet";
