@@ -77,6 +77,9 @@ ELF and Mach-O objects support static pointer initializers naming variables, arr
 or functions. The referenced symbol may be defined in a separate translation unit.
 [#101](https://github.com/yrashk/ycxx/issues/101)
 
+The ELF linker can consume the GNU-built libycxx static linkage-marker object.
+[#419](https://github.com/yrashk/ycxx/issues/419)
+
 **Language on macOS.** Programs can use:
 - the fundamental integer, character and floating types, pointers, arrays, references and
   enumerations; `float`, `double` and `long double` with literals, arithmetic, comparisons and

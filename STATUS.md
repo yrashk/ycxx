@@ -578,6 +578,11 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   accepts the supported x86-64 `ET_REL` subset emitted by ycxx. The native ELF linker consumes
   the same in-memory objects, resolves absolute and PC-relative relocations, and writes a static
   `ET_EXEC` image with load segments and a non-executable stack.
+- The ELF reader accepts the GNU-built libycxx static linkage-marker object. It reads sized
+  object symbols and local section symbols, preserves the marker's hidden binding, and maps
+  `.data.rel.ro.local` to the existing read-only output for relocated pointers. It validates and
+  discards file symbols, ordinary nonallocated DWARF and comment sections, and an empty
+  non-executable GNU stack marker. [#419](https://github.com/yrashk/ycxx/issues/419)
 - `ycxx cxx --target=x86_64-pc-linux-gnu -nostdlib a.cpp b.cpp -o a` compiles and links C++
   sources in one invocation. Either source can also be compiled separately with `-c` and passed
   as a `.o` input. Links limited to sources and disk objects place compiled sources first. Each
