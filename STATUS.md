@@ -1016,8 +1016,8 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   arguments, including complete ordinary classes' bases and the inline namespace set. Pointer,
   reference, array, function and pointer-to-member types contribute through their component types.
   Member-pointer values still need #411.
-- Each associated namespace search uses declarations that inhabit the scope and precede the
-  call. It uses namespace using-declarations' fixed targets and the latest redeclaration found
+- Each associated namespace search uses preceding declarations that bind names in the scope.
+  It uses namespace using-declarations' fixed targets and the latest redeclaration found
   for each function. Using-directives do not contribute to ADL. Sema merges the candidates with
   ordinary lookup before overload resolution, then deduces the selected function's return type
   if needed. Class members and nonfunctions suppress ADL. A block using-declaration that names

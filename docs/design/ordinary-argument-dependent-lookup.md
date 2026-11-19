@@ -14,10 +14,12 @@ Keep the ordinary callee if ADL changes no candidate or usable default arguments
 query a deduced return type only after choosing its function.
 
 The semantic context answers a separate question for functions named in an associated
-namespace. Search the namespace that the declarations inhabit and the inline namespace set
-of its innermost non-inline ancestor. A namespace using-declaration supplies the targets
-visible at its own locus. Repeated declarations of an entity contribute the latest one that
-this search finds. Ordinary qualified lookup may follow using-directives, including implicit
+namespace. Search for names bound in its innermost non-inline ancestor and that ancestor's
+inline namespace set. A qualified definition binds its name in its target scope
+([dcl.meaning.general]). A namespace using-declaration supplies the targets visible at its
+own locus. Repeated declarations of an entity contribute the latest one that this search
+finds. Defaults added only in qualified definitions remain under #354. Ordinary qualified
+lookup may follow using-directives, including implicit
 using-directives from unnamed namespaces. An ordinary call searches at its lexical
 item, including that item where a body can see its own declaration. A nondependent call in a
 template keeps that point during instantiation. For a dependent call, add the results at

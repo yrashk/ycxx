@@ -273,8 +273,9 @@ public:
   // The declarations of `name` that are members of namespace `path` ([namespace.memdef]) before
   // the point: of its own definitions, and, unless `inhabit`, of its inline and unnamed members.
   // A using-declaration's name stands for what it introduces (query-engine.md, "Using-declarations").
+  // The ADL search uses `bound_functions` to check where direct declarations bind their names.
   std::vector<DeclId> declared_in(std::string_view name, const std::string& path, u32 item, bool self,
-                                  bool inhabit = false) {
+                                  bool inhabit = false, bool bound_functions = false) {
     std::vector<DeclId> r;
     for (auto [j, k] : named(name)) {
       if (j >= item + (self ? 1 : 0)) break;
@@ -292,10 +293,27 @@ public:
       }
       // A scoped enumeration's enumerators are in its own scope ([dcl.enum]/11); the declarators
       // after its braces are not.
-      if (!(n.flags & (items::name_flag::friend_ | items::name_flag::specialization)) &&
-          !(it.kind == ItemKind::enum_def && n.ordinal > 0 && !(n.flags & items::name_flag::enumerator) &&
-            it.begin + n.offset < it.brace_end))
-        r.push_back({ids_[j], ast::make_decl_ord(ast::DeclClass::syntactic, n.ordinal)});
+      if ((n.flags & (items::name_flag::friend_ | items::name_flag::specialization)) ||
+          (it.kind == ItemKind::enum_def && n.ordinal > 0 && !(n.flags & items::name_flag::enumerator) &&
+           it.begin + n.offset < it.brace_end))
+        continue;
+      DeclId id{ids_[j], ast::make_decl_ord(ast::DeclClass::syntactic, n.ordinal)};
+      if (bound_functions) {
+        // A qualified definition can inhabit this namespace while binding its name elsewhere
+        // ([dcl.meaning.general]). Targets of using-declarators were collected above.
+        auto d = decl_sema(id);
+        if (!d || d->entity == EntityId::none || d->kind != ast::DeclKind::function ||
+            (d->flags & sema::decl_flag::member))
+          continue;
+        // The entity of a function with C language linkage uses the global namespace in its
+        // identity. A qualified definition already has a declaration in its target namespace.
+        if (d->flags & sema::decl_flag::lang_c) {
+          if (it.qualifier_begin != items::none) continue;
+        } else if (namespace_path(w_->entities.rec(d->entity).scope) != path) {
+          continue;
+        }
+      }
+      r.push_back(id);
     }
     for (const Directive& d : directives_)
       if (d.alias && d.item < item + (self ? 1 : 0) && d.at == path && w_->ins.names.spelling(*d.alias) == name)
@@ -320,7 +338,7 @@ public:
     std::vector<DeclId> decls;
     std::string_view spelling = w_->ins.names.spelling(name);
     for (std::size_t i = 0; i < scopes.size(); ++i) {
-      auto own = declared_in(spelling, scopes[i], item, self, true);
+      auto own = declared_in(spelling, scopes[i], item, self, /*inhabit=*/true, /*bound_functions=*/true);
       decls.insert(decls.end(), own.begin(), own.end());
       if (auto children = inline_namespaces_.find(scopes[i]); children != inline_namespaces_.end())
         for (const InlineNamespace& child : children->second)
