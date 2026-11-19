@@ -115,6 +115,12 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
     template. Do: combine the new construct with each neighbouring one it can nest in or call
     (lambdas in templates and templates in lambdas) before the review.
   - Learned on #279; confirmed on #280 and #281.
+- **A reviewer running your binary blocks your rebuilds.** On #337 the reviewer probed with the
+  worktree's `build/bin/ycxx`, so the next step could not be built for 15 minutes.
+  - Do: build the next step into a build directory in the scratchpad
+    (`YCXX_BUILD_DIR=<scratchpad>/build-b tools/build --no-tests`, about 30 s from a warm cache) and
+    run tests with `YCXX=<that>/bin/ycxx tools/test --state <scratchpad>/state-b …`.
+  - Learned on #337.
 
 ## Working with Fable subagents
 
@@ -319,6 +325,12 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
   - Do: give predicate helpers `const&` parameters, and answer them from data that is already
     computed (`types.canon(q)`), not from functions that may intern.
   - Learned on #33.
+- **Undo a mutation with the inverse edit, not `git checkout <file>`.** On #337 a mutation was
+  reverted with `git checkout src/interp/ops.cpp`, which also dropped the uncommitted fix it was
+  testing; only `git status` afterwards showed it.
+  - Do: commit (or stash with a tag) before mutating, or undo with the same `sed` reversed, and
+    check `git diff --stat` after.
+  - Learned on #337.
 - **A mutation that changes nothing proves nothing.** On #33 the first mutation of
   `usual_arithmetic` (`>=` to `>` on rank) was equivalent for the standard integer types, and the
   suite rightly stayed green.

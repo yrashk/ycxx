@@ -976,8 +976,8 @@ probe = '''
 int main() { int s = 0; for (int i = 0; i < 5; ++i) { if (i == 3) continue; s += i; } int k = 2; switch (k) { case 2: s += 1; break; default: s = 0; } do { --s; } while (s > 7); if (s != 7) goto bad; return 0; bad: return 1; }
 '''
 status = 'partial'
-issues = [267, 299]
-note = '`switch` on a variable; declarations in conditions'
+issues = [341]
+note = 'a jump forward past a vacuously initialized declaration'
 
 [[feature]]
 id = 'stmt-range-for'
@@ -1004,8 +1004,7 @@ detect = '\b(?:if|switch)\s*(?:constexpr\s*)?\((?:[^;()]|\([^()]*\))*;'
 probe = '''
 int main() { if (int x = 2; x > 1) { switch (int y = x; y) { case 2: return 0; } } return 1; }
 '''
-status = 'missing'
-issues = [299]
+status = 'done'
 
 [[feature]]
 id = 'stmt-range-for-init'
@@ -1029,8 +1028,7 @@ std = 'C++23'
 probe = '''
 int main() { int r = 1; { r = 0; goto end; end: } for (using T = int; T i = 0;) {} return r; }
 '''
-status = 'missing'
-issues = [299]
+status = 'done'
 
 # --- Declarations and initialization -----------------------------------------------------------------
 
@@ -1059,8 +1057,9 @@ probe = '''
 int f(int a, int b = 2) { return a + b; }
 int main() { return f(1) == 3 ? 0 : 1; }
 '''
-status = 'missing'
-issues = [300]
+status = 'partial'
+issues = [356, 354]
+note = 'defaults that depend on template parameters; members in complete-class context'
 
 [[feature]]
 id = 'dcl-variadic-fn'
@@ -1748,13 +1747,14 @@ group = 'class'
 clauses = ['class.derived', 'class.derived.general', 'class.mi', 'class.access.base']
 std = 'C++98'
 detect = '\b(?:class|struct)\s+\w+(?:\s+final)?\s*:\s*(?!:)'
-status = 'missing'
+status = 'partial'
 probe = '''
 struct A { int a = 1; }; struct B { int b = 2; }; struct D : A, B { int d = 3; };
 int sum(const B& b) { return b.b; }
 int main() { D d; A* pa = &d; return pa->a + sum(d) + d.d - 6; }
 '''
-issues = [308, 136]
+issues = [308]
+note = 'bases of class templates; the object-expression rule of `[class.protected]`'
 
 [[feature]]
 id = 'class-virtual'

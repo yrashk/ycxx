@@ -461,7 +461,7 @@ one import `ycxx.ast`; unit tests in `tests/unit/ast` (run by ctest, see docs/TE
   directives, …), with its first diagnostic as the reason; an XPASS fails the run, and an XFAIL
   never covers a crash. No draft example crashes or hangs ycxx.
 - Not yet: overloading, classes, namespaces, templates, references, floating types, casts,
-  `sizeof`, `switch`, braced initialization, dynamic initialization at namespace scope, default
+  `sizeof`, braced initialization, dynamic initialization at namespace scope, default
   arguments, block-scope statics.
 
 ## IR generation, α subset (#24, 2026-11-18)
@@ -502,6 +502,8 @@ one import `ycxx.ast`; unit tests in `tests/unit/ast` (run by ctest, see docs/TE
   - `is_constexpr` over real entities (the front end reports none yet);
   - classes, arrays as objects, cleanups, EH (`invoke`), coroutines, static locals, calls
     through pointers, `switch` and `goto`. (Floating point: #336.)
+
+    through pointers, floating point.
 
 ## The pipeline: `ycxx cxx a.cpp -o a` (#43, 2026-11-18)
 
@@ -862,7 +864,7 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
 - Linkage names of enumerations, nested ones included, match Clang's.
 - Tests: `tests/own/classes/s4-*enum*`, `s4-scoped-enum`, `s4-unscoped-enum` (spec-only, plus two
   from the review): 7 of 7.
-- Not yet: opaque enum declarations (`enum E : int;`), unnamed enumerations, `switch`, `E{}` and
+- Not yet: opaque enum declarations (`enum E : int;`), unnamed enumerations, `E{}` and
   `E(v)` as expressions, enumerations in a block (#117), constexpr enumeration objects (#25).
 
 ## Classes, δ step 4b: namespaces (#86, 2026-11-18)
@@ -1504,6 +1506,62 @@ What the process allocates, attributed to the engine's cells, in the trace and t
 - Not yet: drift of retained bytes over a long daemon session, a peak per request, and small
   inexactness (#284).
 
+## Inheritance, step 1: non-virtual bases (#308, 2026-11-19)
+
+- **Base-clauses** (`base_clause` in parse.cppm): each base is a complete class other than the
+  class itself, named once, and not a union. Its access defaults to private for `class` and public
+  for `struct`. `Program::set_bases` records the bases when the class head is analysed, and
+  `class_def` copies them into `ClassRec::bases`. Not yet: virtual bases (#310) and bases of
+  class templates.
+- **Layout** (`ast::record_layout`, Itanium C++ ABI §2.4):
+  - bases first, in declaration order; an empty base at offset 0 unless another subobject of its
+    type is there;
+  - a component placed at the data size so far, so a class that is not POD for layout leaves its
+    tail padding to the derived class's members.
+  - "POD for layout" is Clang's (trivial and standard-layout, `ClassRec::pod`). GCC's is C++03's
+    and differs for a class whose data members are all private.
+  - Sema (`Sema::class_layout`) and the back end (`ClassShape::bases`, `pod`) read the same rule.
+  - `ir::Step::base` names a direct base by its class entity; `QueryLayout::step` gives its
+    offset.
+- **Lookup** (`Sema::find_member`, [class.member.lookup]): a member of the class, else of its
+  bases. One found in two base subobjects is ambiguous unless it is one static member. The object
+  expression or `this` is converted to the declaring class (`Sema::to_base`).
+- **Conversions** ([conv.ptr]/3, [dcl.init.ref]/5, [over.best.ics]/6): `derived_to_base`
+  conversions, one per direct base on the way. A pointer conversion keeps a null pointer null
+  (`ptr_cmp` and `select`). A base class object is copied from the derived object's subobject.
+  Each conversion ranks as a Conversion, and the nearest base wins (`Ics::base_depth`,
+  [over.ics.rank]/4.4). The base must be unambiguous and accessible.
+- **Access** ([class.access.base]): a member of a base is reached through the conversion, whose
+  every step must be accessible. A protected member may be named in members and friends of
+  derived classes (not yet [class.protected]'s rule on the object expression).
+- **Special members:**
+  - Bases are initialized first, from mem-initializers naming them or by default
+    (`MemberInit` with field `~0u`), and destroyed after the members (`DestroyMember` with field
+    `~0u`).
+  - An aggregate's elements are its bases, then its members (`TypeFacts::bases_of` for irgen).
+  - The implicit destructor and copy and move constructors account for the bases.
+- **Tests:**
+  - `tests/own/inherit/`: layout, members and conversions, construction order, lookup and
+    access rejects.
+  - `tests/own/abi/inheritance.run.cpp`: layout, conversions and a Clang-defined base
+    constructor and destructor, across ycxx and Clang objects.
+  - Ten draft examples now pass.
+- From the review:
+  - A trivial copy of a record writes its nvsize bytes, none for an empty class
+    (`ir::TypeLayout::data`). A copy into a base subobject therefore leaves the derived
+    members in its tail padding alone.
+  - A base reference binds to the base subobject of a materialized derived prvalue.
+  - Types and enumerators of bases are found from derived classes, and while the class is
+    being defined (`Questions::defining_bases`).
+  - Protected members may be named through the naming class's friends.
+  - `?:` and `==` reach the composite base type.
+  - A base's const member deletes the copy assignment.
+  - Merged with floating point: a non-empty base's members count toward a homogeneous
+    floating-point aggregate, and a class whose data is all in its bases is not empty for the
+    calling convention.
+  - Not yet: the implicit copy assignment does not call subobjects' `operator=` (#360), and bases'
+    injected-class-names (#361).
+
 ## Templates, ζ step 9: member function templates (#88, #314, 2026-11-19)
 
 - **Member function templates** ([temp.mem]) of classes and class templates: their head one level
@@ -1676,6 +1734,54 @@ values, end to end; results match Clang's bit for bit.
   instantiation's function parameter pack, as a capture-default does for the elements used.
 - Not yet: init-capture packs `[...ys = xs]`, requires-clauses, static and consteval lambdas
   (#350).
+
+## Statements, ι step 1: `switch`, labels, `goto`, conditions (#337, 2026-11-19)
+
+- **Parser and sema** (src/parse/parser.cppm): `switch`, `case`, `default`, identifier labels and
+  `goto` ([stmt.switch], [stmt.label], [stmt.goto]); a label may end a compound statement (C++23).
+  Case values are converted constant expressions of the promoted condition type, checked for
+  narrowing and duplicates. A condition may declare a variable (`CondDecl`, [stmt.pre]/4) in `if`,
+  `while`, `for` and `switch`; `if` and `switch` (and `if constexpr`) take an init-statement,
+  including an alias-declaration (C++23). `Sema::initialized_in_scope` lists the variables whose
+  initialization is not vacuous; a `goto` or a case label that would enter their scope is an error
+  ([stmt.dcl]/2), and labels are checked when the body ends (`Sema::check_labels`). A substatement
+  of `if constexpr` or `if consteval` is a `jump_barrier`, which no jump may enter ([stmt.if]/2, /4).
+- **IR** (src/irgen/gen.cppm): a switch is a chain of `icmp`/`cond_br` over its case values found
+  in the body first (`case_labels`), since L1's `switch_` op has no lowering yet (#342). A `goto`
+  ends the objects of the scopes it leaves and those begun after a label it jumps back to
+  ([stmt.jump]/2); a `goto` before its label branches to a block filled in when the label is
+  placed. A condition's variable lives one iteration of a loop, through a `for`'s increment. A
+  goto's `br` carries `not_constexpr`, so constant evaluation of it fails ([expr.const]).
+- Not yet: a jump forward past a vacuous declaration (#341); `switch` on a class with a conversion
+  function and `explicit operator bool` conditions (#339); a declaration as the condition of
+  `if constexpr` (#344); constant evaluation of a switch on an enumeration (enumeration values, #25).
+- Tests: `tests/own/stmt/` (written spec-only, 23 run and 15 reject tests, and the split-off XFAILs
+  for the above).
+
+## Default arguments, ι step 2 (#300, 2026-11-19)
+
+- **Declarations** (src/parse/parser.cppm `default_argument`, parse.cppm `merge_defaults`): a
+  default argument is analysed where it is written ([dcl.fct.default]/5) and kept, converted to the
+  parameter's type, as a `DefaultArg` tree in `ParamSema::default_arg`, the slot ast.md reserved.
+  Redeclarations at namespace scope inherit earlier defaults (`b_.adopt`), may not repeat one, and
+  leave none missing after one ([dcl.fct.default]/4). Members' are recorded in
+  `MemberDeclRec::defaults` by `class_content`.
+- **Calls** (src/sema/actions.cppm): `Candidate::defaults` and `required` make a candidate viable
+  with fewer arguments ([over.match.viable]/2); `Templates::deduce_call` skips defaulted trailing
+  parameters. `call_args` and `construct` adopt the chosen function's trees (`default_argument`),
+  so a constructor whose parameters all have defaults is a default constructor, and one with one
+  required parameter converts. `Sema::defaults_` records what lookup found per function.
+- **IR:** a `DefaultArg`'s nodes take the call's position (`Gen::pinned`), since its offsets are
+  its declaration's.
+- Each call takes the defaults its own lookup found (`Sema::defaults_` by DeclRef node), since
+  declarations in different scopes have their own. A copy or move constructor's other parameters
+  may have defaults. Defaults are rejected where [dcl.fct.default]/3–4 and [over.oper.general]
+  forbid them (`defaults_allowed`, `defaults_trail`).
+- Not yet: defaults that depend on template parameters (#356); a member's default naming a later
+  member, and defaults added by an out-of-class or qualified definition (#354); defaults added
+  after a using-declaration (#362, the oracles disagree).
+- Tests: `tests/own/default-args/` (spec-only: 16 run and 9 reject tests, some split out as XFAIL
+  for #354, #356, #357 and #102).
 
 ## Dynamic initialization of namespace-scope variables, ι (#94, #337, 2026-11-19)
 

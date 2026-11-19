@@ -62,6 +62,9 @@ struct Param {
   // one element of it (`element`).
   bool pack = false;
   bool element = false;
+  // Its default argument ([dcl.fct.default]): the initializer-clause converted to the parameter's
+  // type, analysed here; none if it has none.
+  NodeId default_arg = NodeId::none;
 };
 
 // What a declarator declares ([dcl.decl]): its name and type, and, for a function declarator,
@@ -1129,10 +1132,9 @@ public:
         s.variadic = true;
         break;
       }
-      if (is(Tk::equal)) {
-        s_->diag(pos(), Diag::not_supported, Tk::equal);  // default arguments
-        ok = false;
-        skip_param();
+      if (accept(Tk::equal)) {
+        s.params.back().default_arg = default_argument(t);
+        if (s.params.back().default_arg == NodeId::none) ok = false;  // diagnosed
       }
       if (!accept(Tk::comma)) break;
       if (is(Tk::ellipsis)) {
@@ -1153,6 +1155,33 @@ public:
         }
     return s;
   }
+  // A default argument ([dcl.fct.default]/1, /5): its names are bound and its copy-initialization
+  // of the parameter is checked here. A template's that depends on its parameters is kept as it
+  // is, and rejected where a call would use it.
+  NodeId default_argument(QualType t) {
+    // Not in the parameters of a parameter's own function type ([dcl.fct.default]/3).
+    if (in_params_ > 1) s_->diag(pos(), Diag::default_arg_not_allowed);
+    Ex e;
+    bool ref = s_->types().is_reference(t);
+    if (is(Tk::l_brace)) {
+      auto b = braced_init_list();
+      if (!b) return NodeId::none;
+      if (ref && b->clauses.size() == 1 && !b->clauses[0].list && !b->clauses[0].designated)
+        e = s_->bind_reference(b->clauses[0].expr, t, b->clauses[0].begin, false);
+      else
+        e = s_->list_init(sema::Types::unqualified(t), *b);
+    } else {
+      Ex a = assignment_expression();
+      if (!a.ok()) return NodeId::none;
+      e = s_->types().is_dependent(t) || s_->dependent(a) ? a
+          : ref                                             ? s_->bind_reference(a, t, a.begin, false)
+                                                            : s_->convert(a, t, a.begin);
+    }
+    if (!e.ok()) return NodeId::none;
+    if (s_->types().is_dependent(t) || s_->dependent(e)) e = s_->dependent_node({e}, e.begin, e.end);
+    return s_->node(ast::DefaultArg{e.info, sema::Sema::at(e, e.begin)}, e.begin, e.end, e.info).id;
+  }
+
   // Set while a lambda's parameters are read, which check their placeholders themselves.
   bool placeholder_params = false;
   void skip_param() {
@@ -2907,7 +2936,7 @@ public:
       bool brk = is(Tk::kw_break);
       bump();
       expect(Tk::semi);
-      if (s_->loop_depth == 0) {
+      if (s_->loop_depth == 0 && (!brk || s_->switches.empty())) {
         s_->diag(begin, brk ? Diag::break_outside_loop : Diag::continue_outside_loop);
         return {NodeId::none, begin, pos()};
       }
@@ -2915,11 +2944,10 @@ public:
       return s_->node(ast::Continue{}, begin, pos());
     }
     case Tk::kw_return: return return_statement();
-    case Tk::kw_switch:
+    case Tk::kw_switch: return switch_statement();
     case Tk::kw_case:
-    case Tk::kw_default:
-    case Tk::kw_goto:
-    case Tk::kw_try:
+    case Tk::kw_default: return case_label();
+    case Tk::kw_goto: return goto_statement();
     case Tk::kw_static_assert: return static_assert_declaration();
     case Tk::kw_namespace:
       if (kind(1) == Tk::identifier && kind(2) == Tk::equal) {
@@ -2992,6 +3020,7 @@ public:
       s_->diag(begin, Diag::not_supported, kind());
       skip_statement();
       return {NodeId::none, begin, pos()};
+    case Tk::kw_try:
     case Tk::kw_co_return:
     case Tk::kw_asm:
     case Tk::kw_contract_assert:
@@ -3008,9 +3037,13 @@ public:
       return statement();
     }
     if (is(Tk::identifier) && kind(1) == Tk::colon) {
-      s_->diag(begin, Diag::not_supported, Tk::colon);  // labels
-      skip_statement();
-      return {NodeId::none, begin, pos()};
+      // [stmt.label]: an identifier label.
+      NameId n = name_of(tok());
+      bump();
+      bump();
+      s_->define_label(n, begin);
+      Ex st = labeled_statement();
+      return s_->node(ast::Label{n, sema::Sema::at(st, begin)}, begin, pos());
     }
     if (starts_declaration(true)) return declaration_statement();
     Ex e = expression();
@@ -3032,6 +3065,103 @@ public:
     skip_to_semi();
   }
 
+  // The statement a label labels ([stmt.label]); none when the label ends a compound statement
+  // (C++23).
+  Ex labeled_statement() { return is(Tk::r_brace) ? Ex{} : statement(); }
+
+  // `case constant-expression :` and `default :` ([stmt.label], [stmt.switch]). The value is a
+  // converted constant expression of the condition's promoted type ([stmt.switch]/2).
+  Ex case_label() {
+    u32 begin = pos();
+    bool dflt = is(Tk::kw_default);
+    bump();
+    sema::Sema::SwitchScope* sw = s_->switches.empty() ? nullptr : &s_->switches.back();
+    if (!sw) s_->diag(begin, Diag::case_outside_switch, dflt ? Tk::kw_default : Tk::kw_case);
+    ast::ConstId value = ast::ConstId::none;
+    if (!dflt) {
+      Ex e = conditional_expression();
+      if (sw && !sw->dependent && e.ok() && !s_->dependent(e)) {
+        Ex from = s_->rvalue(e);
+        Ex c = s_->convert(e, sw->type, e.begin);
+        if (c.ok() && s_->narrows(from, sw->type)) {
+          s_->diag(e.begin, Diag::narrowing, from.type(), sw->type);
+        } else if (c.ok()) {
+          // An enumeration's value is its underlying type's (the interpreter has no enumeration
+          // objects yet, #25), as `function_ir` compares it.
+          if (s_->types().is_enum(sw->type))
+            c = s_->convert_node(s_->rvalue(c), ast::ConversionKind::integral, s_->underlying_of(sw->type));
+          sema::Evaluated v = sema::Evaluator(*s_, questions()).evaluate(c);
+          if (v.value) value = *v.value;
+          else if (!v.dependent) s_->diag(e.begin, Diag::not_constant, v.reason);
+        }
+      }
+      if (value != ast::ConstId::none) {
+        if (std::ranges::contains(sw->values, value)) s_->diag(begin, Diag::duplicate_case);
+        sw->values.push_back(value);
+      }
+    } else if (sw) {
+      if (sw->has_default) s_->diag(begin, Diag::duplicate_default);
+      sw->has_default = true;
+    }
+    if (!expect(Tk::colon)) {
+      skip_statement();
+      return {NodeId::none, begin, pos()};
+    }
+    // [stmt.dcl]/2: the switch jumps here, so no initialization may be bypassed.
+    if (sw && sema::Sema::bypasses(sw->initialized, s_->initialized_in_scope())) s_->diag(begin, Diag::jump_past_init);
+    Ex st = labeled_statement();
+    if (!sw) return st;
+    if (dflt) return s_->node(ast::Default{sema::Sema::at(st, begin)}, begin, pos());
+    return s_->node(ast::Case{value, sema::Sema::at(st, begin)}, begin, pos());
+  }
+
+  // A substatement of `if constexpr` or `if consteval`: a goto, case or default label outside it
+  // may not jump into it ([stmt.if]/2, /4).
+  Ex guarded_substatement() {
+    s_->push_scope();
+    s_->jump_barrier();
+    Ex r = substatement();
+    s_->pop_scope();
+    return r;
+  }
+
+  // [stmt.goto]
+  Ex goto_statement() {
+    u32 begin = pos();
+    bump();
+    if (!is(Tk::identifier)) {
+      s_->diag(pos(), Diag::expected_unqualified_id);
+      skip_to_semi();
+      return {NodeId::none, begin, pos()};
+    }
+    NameId n = name_of(tok());
+    bump();
+    if (!expect(Tk::semi)) skip_to_semi();
+    s_->use_label(n, begin);
+    return s_->node(ast::Goto{n}, begin, pos());
+  }
+
+  // [stmt.switch]: `switch ( init-statement_opt condition ) statement`. The init-statement's and
+  // the condition's names are in scope in the statement, and not redeclared in its outermost
+  // block ([basic.scope.block]/2).
+  Ex switch_statement() {
+    u32 begin = pos();
+    bump();
+    s_->push_scope();
+    s_->guard_scope();
+    Condition c = condition(true, CondKind::switch_);
+    sema::Sema::SwitchScope sw;
+    sw.dependent = !c.value.ok() || s_->dependent(c.value);
+    if (!sw.dependent) sw.type = c.value.type();
+    sw.initialized = s_->initialized_in_scope();
+    s_->switches.push_back(std::move(sw));
+    Ex body = substatement();
+    s_->switches.pop_back();
+    s_->pop_scope();
+    return s_->node(ast::Switch{sema::Sema::at(c.init, begin), sema::Sema::at(c.node, begin), sema::Sema::at(body, begin)},
+                    begin, pos());
+  }
+
   // [stmt.if]
   Ex if_statement() {
     u32 begin = pos();
@@ -3044,12 +3174,14 @@ public:
       return {NodeId::none, begin, pos()};
     }
     s_->push_scope();  // [stmt.pre]: the condition's scope covers both substatements
-    Ex cond = condition();
+    s_->guard_scope();
+    Condition c = condition(true);
     Ex then_ = substatement();
     Ex else_;
     if (accept(Tk::kw_else)) else_ = substatement();
     s_->pop_scope();
-    return s_->node(ast::If{{}, sema::Sema::at(cond, begin), sema::Sema::at(then_, begin), sema::Sema::at(else_, begin)},
+    return s_->node(ast::If{sema::Sema::at(c.init, begin), sema::Sema::at(c.node, begin), sema::Sema::at(then_, begin),
+                            sema::Sema::at(else_, begin)},
                     begin, pos());
   }
 
@@ -3066,8 +3198,10 @@ public:
       skip_statement();
       return {NodeId::none, begin, pos()};
     }
+    Ex init;
+    if (init_statement_ahead()) init = init_statement();
     if (starts_declaration(true)) {
-      s_->diag(pos(), Diag::not_supported, kind());  // an init-statement or a declaration condition
+      s_->diag(pos(), Diag::not_supported, kind());  // a declaration condition
       skip_param();
     }
     Ex e = expression();
@@ -3083,12 +3217,13 @@ public:
       // Which branch returns is known only to an instantiation: neither deduces a placeholder
       // return type here ([dcl.spec.auto.general]/12).
       ++s_->no_return_deduction;
-      Ex then_ = substatement();
+      Ex then_ = guarded_substatement();
       Ex else_;
-      if (accept(Tk::kw_else)) else_ = substatement();
+      if (accept(Tk::kw_else)) else_ = guarded_substatement();
       --s_->no_return_deduction;
       s_->pop_scope();
-      return s_->node(ast::If{{}, sema::Sema::at(cond, begin), sema::Sema::at(then_, begin), sema::Sema::at(else_, begin)},
+      return s_->node(ast::If{sema::Sema::at(init, begin), sema::Sema::at(cond, begin), sema::Sema::at(then_, begin),
+                              sema::Sema::at(else_, begin)},
                       begin, pos());
     }
     auto discarded = [&] {
@@ -3096,18 +3231,23 @@ public:
       std::size_t n = s_->demands.size();
       // Its return statements deduce nothing: a discarded statement's are not used ([stmt.if]/2).
       ++s_->no_return_deduction;
-      substatement();
+      guarded_substatement();
       --s_->no_return_deduction;
       s_->demands.resize(n);
     };
     Ex kept;
-    if (*take) kept = substatement();
+    if (*take) kept = guarded_substatement();
     else discarded();
     if (accept(Tk::kw_else)) {
       if (*take) discarded();
-      else kept = substatement();
+      else kept = guarded_substatement();
     }
     s_->pop_scope();
+    if (init.ok()) {
+      // The init-statement runs whichever branch is kept ([stmt.if]/4).
+      ast::Child cs[] = {sema::Sema::at(init, begin), sema::Sema::at(kept, begin)};
+      return s_->node(ast::Compound{s_->builder().list(std::span(cs, kept.ok() ? 2 : 1))}, begin, pos());
+    }
     if (kept.ok()) return kept;
     return s_->node(ast::Compound{s_->builder().list({})}, begin, pos());
   }
@@ -3122,6 +3262,26 @@ public:
         bump();
       } while (depth > 0 && !at_end());
     };
+    if (u32 n = past_attributes(0); n != 0)
+      for (u32 j = 0; j < n; ++j) bump();
+    // A labeled statement: past its labels ([stmt.label]).
+    if ((is(Tk::identifier) || is(Tk::kw_default)) && kind(1) == Tk::colon) {
+      bump();
+      bump();
+      if (!is(Tk::r_brace)) skip_substatement();
+      return;
+    }
+    if (is(Tk::kw_case)) {
+      int depth = 0;
+      while (!at_end() && !(depth == 0 && is(Tk::colon))) {
+        if (is(Tk::l_paren) || is(Tk::l_square)) ++depth;
+        if (is(Tk::r_paren) || is(Tk::r_square)) --depth;
+        bump();
+      }
+      accept(Tk::colon);
+      if (!is(Tk::r_brace)) skip_substatement();
+      return;
+    }
     switch (kind()) {
     case Tk::l_brace: skip_statement(); return;
     case Tk::kw_if:
@@ -3162,7 +3322,7 @@ public:
         return {NodeId::none, pos(), pos()};
       }
       s_->immediate_context += immediate;
-      Ex b = compound_statement();
+      Ex b = guarded_substatement();
       s_->immediate_context -= immediate;
       return b;
     };
@@ -3249,20 +3409,151 @@ public:
     return s_->literal(call.type(), *v.value, ast::ValueCategory::prvalue, call.begin, call.end);
   }
 
-  // `( condition )` ([stmt.pre]), converted to bool. A condition that declares a variable is
-  // beyond the α subset.
-  Ex condition() {
-    if (!expect(Tk::l_paren)) return {};
-    if (starts_declaration(true)) {
-      s_->diag(pos(), Diag::not_supported, kind());
-      skip_param();
-      expect(Tk::r_paren);
-      return {};
-    }
-    Ex e = expression();
-    Ex c = s_->to_bool(e, e.begin);
+  // A condition ([stmt.pre]) and the init-statement before it, if any: `node` is what the
+  // statement holds (the converted value, or a `CondDecl`), `value` the converted value.
+  enum class CondKind { boolean, switch_ };
+  struct Condition {
+    Ex init;
+    Ex node;
+    Ex value;
+  };
+
+  // `( init-statement_opt condition )`, the init-statement only where `with_init` allows one (`if`,
+  // `switch`). The value is contextually converted to bool, or for a switch promoted
+  // ([stmt.switch]/5).
+  Condition condition(bool with_init, CondKind k = CondKind::boolean) {
+    Condition c;
+    if (!expect(Tk::l_paren)) return c;
+    if (with_init && init_statement_ahead()) c.init = init_statement();
+    c.node = condition_operand(k, c.value);
     expect(Tk::r_paren);
     return c;
+  }
+
+  // The condition itself: an expression, or a declaration of a variable with an initializer
+  // ([stmt.pre]/4–/6), whose value is the variable's.
+  Ex condition_operand(CondKind k, Ex& value) {
+    auto converted = [&](Ex e, u32 at) { return k == CondKind::boolean ? s_->to_bool(e, at) : s_->switch_condition(e, at); };
+    skip_attributes();  // of the declaration ([stmt.pre]/1)
+    if (!condition_declaration_ahead()) {
+      Ex e = expression();
+      return value = converted(e, e.begin);
+    }
+    u32 begin = pos();
+    DeclSpec spec = decl_specifiers();
+    // [stmt.pre]/5: only type-specifiers and `constexpr`.
+    if (spec.is_static || spec.is_extern || spec.is_inline || spec.is_typedef || spec.is_consteval || spec.is_constinit) {
+      s_->diag(spec.begin, Diag::condition_specifier,
+               spec.is_static ? Tk::kw_static : spec.is_extern ? Tk::kw_extern : spec.is_inline ? Tk::kw_inline
+               : spec.is_typedef ? Tk::kw_typedef : spec.is_consteval ? Tk::kw_consteval : Tk::kw_constinit);
+      skip_param();
+      return {NodeId::none, begin, pos()};
+    }
+    Declarator d = declarator(spec.type, false);
+    if (!d.ok || !spec.ok) {
+      skip_param();
+      return {NodeId::none, begin, pos()};
+    }
+    if (s_->types().is_function(d.type) || s_->types().is_array(d.type) || d.unknown_bound) {
+      s_->diag(d.name_at, Diag::condition_declarator);
+      skip_param();
+      return {NodeId::none, begin, pos()};
+    }
+    if (spec.is_constexpr) d.type = s_->types().add_cv(d.type, sema::Cv::const_);
+    u32 local = s_->declare_local(d.name, d.type, 0, d.name_at);
+    Ex init;
+    if (is(Tk::l_brace) || (is(Tk::equal) && kind(1) == Tk::l_brace)) {
+      accept(Tk::equal);
+      auto b = braced_init_list();
+      if (s_->types().is_reference(d.type) && b->clauses.size() == 1 && !b->clauses[0].list && !b->clauses[0].designated)
+        init = s_->bind_reference(b->clauses[0].expr, d.type, b->clauses[0].begin, true);
+      else
+        init = s_->list_init(d.type, *b);
+    } else if (accept(Tk::equal)) {
+      Ex e = assignment_expression();
+      init = s_->types().is_reference(d.type) ? s_->bind_reference(e, d.type, e.begin, true) : s_->convert(e, d.type, e.begin);
+    } else {
+      expect(Tk::equal);  // [stmt.pre]: a declaration in a condition has an initializer
+      skip_param();
+      return {NodeId::none, begin, pos()};
+    }
+    if (!s_->types().is_reference(d.type)) constant_local(local, d.type, spec.is_constexpr, init);
+    ast::EntityId dtor = s_->types().is_reference(d.type) ? ast::EntityId::none : s_->destructor_of(d.type);
+    Ex var = s_->node(ast::LocalVar{local, sema::Sema::at(init, begin), dtor}, begin, pos());
+    s_->set_local_decl(local, var.id);
+    if (init.ok() || dtor != ast::EntityId::none) s_->set_initialized(local);
+    value = converted(s_->local_ref(local, d.name_at, pos()), d.name_at);
+    if (!init.ok() || !value.ok()) return {NodeId::none, begin, pos()};
+    return s_->node(ast::CondDecl{sema::Sema::at(var, begin), sema::Sema::at(value, begin)}, begin, pos());
+  }
+
+  // Whether the condition declares a variable: what can be a declaration ([stmt.ambig]) and has
+  // the initializer one needs, `=` or `{` outside brackets, so `T(1)` is an expression.
+  bool condition_declaration_ahead() {
+    if (!starts_declaration(true)) return false;
+    int depth = 0;
+    for (u32 j = 0;; ++j) {
+      switch (kind(j)) {
+      case Tk::eof: case Tk::semi: return false;
+      case Tk::equal: if (depth == 0) return true; break;
+      case Tk::l_brace: if (depth == 0) return true; ++depth; break;
+      case Tk::l_paren: case Tk::l_square: ++depth; break;
+      case Tk::r_paren: case Tk::r_square: case Tk::r_brace:
+        // `T x)`: a declaration missing its initializer, which `condition_operand` reports.
+        if (depth-- == 0) return j >= 2 && kind(j - 1) == Tk::identifier && kind(j - 2) != Tk::l_paren;
+        break;
+      default: break;
+      }
+    }
+  }
+
+  // `using identifier attribute-specifier-seq_opt =`: an alias-declaration ([dcl.pre]).
+  bool alias_declaration_ahead() { return kind(1) == Tk::identifier && kind(past_attributes(2)) == Tk::equal; }
+
+  // Whether an init-statement comes before the condition: a `;` before the closing `)`.
+  bool init_statement_ahead() const {
+    int depth = 0;
+    for (u32 j = 0;; ++j) {
+      switch (kind(j)) {
+      case Tk::eof: return false;
+      case Tk::l_paren: case Tk::l_square: case Tk::l_brace: ++depth; break;
+      case Tk::r_paren: case Tk::r_square: case Tk::r_brace:
+        if (depth-- == 0) return false;
+        break;
+      case Tk::semi:
+        if (depth == 0) return true;
+        break;
+      default: break;
+      }
+    }
+  }
+
+  // [stmt.pre]: an init-statement is an expression-statement, a simple-declaration or (C++23) an
+  // alias-declaration, each with its `;`.
+  Ex init_statement() {
+    u32 begin = pos();
+    if (is(Tk::kw_using) && !alias_declaration_ahead()) {
+      s_->diag(begin, Diag::expected_expression);  // [stmt.pre]: not a using-directive or -declaration
+      skip_to_semi();
+      accept(Tk::semi);
+      return {NodeId::none, begin, pos()};
+    }
+    if (is(Tk::kw_using)) return statement();
+    skip_attributes();  // of the simple-declaration ([dcl.pre]/5)
+    if (starts_declaration(true)) return declaration_statement();
+    Ex e = is(Tk::semi) ? Ex{} : s_->discarded(expression());
+    if (!expect(Tk::semi)) skip_to_semi();
+    return s_->node(ast::ExprStmt{sema::Sema::at(e, begin)}, begin, pos());
+  }
+
+  // A local usable in constant expressions ([expr.const]): constexpr, or a const integral one
+  // with a constant initializer; a constexpr one must have one ([dcl.constexpr]).
+  void constant_local(u32 local, QualType t, bool is_constexpr, Ex init) {
+    bool usable_kind = sema::Types::is_const(t) && !sema::Types::is_volatile(t) && s_->types().is_integral(t);
+    if (!init.ok() || !(is_constexpr || usable_kind)) return;
+    sema::Evaluated v = sema::Evaluator(*s_, questions()).evaluate(init);
+    if (v.value) s_->set_local_value(local, *v.value);
+    else if (is_constexpr && !v.dependent) s_->diag(init.begin, Diag::not_constant, v.reason);
   }
 
   // [stmt.while]
@@ -3270,12 +3561,13 @@ public:
     u32 begin = pos();
     bump();
     s_->push_scope();
-    Ex cond = condition();
+    s_->guard_scope();
+    Condition c = condition(false);
     ++s_->loop_depth;
     Ex body = substatement();
     --s_->loop_depth;
     s_->pop_scope();
-    return s_->node(ast::While{sema::Sema::at(cond, begin), sema::Sema::at(body, begin)}, begin, pos());
+    return s_->node(ast::While{sema::Sema::at(c.node, begin), sema::Sema::at(body, begin)}, begin, pos());
   }
 
   // [stmt.do]
@@ -3286,7 +3578,12 @@ public:
     Ex body = substatement();
     --s_->loop_depth;
     expect(Tk::kw_while);
-    Ex cond = condition();
+    Ex cond;
+    if (expect(Tk::l_paren)) {  // [stmt.do]: an expression, never a declaration
+      Ex e = expression();
+      cond = s_->to_bool(e, e.begin);
+      expect(Tk::r_paren);
+    }
     expect(Tk::semi);
     return s_->node(ast::Do{sema::Sema::at(body, begin), sema::Sema::at(cond, begin)}, begin, pos());
   }
@@ -3299,7 +3596,10 @@ public:
     s_->push_scope();
     s_->guard_scope();  // [basic.scope.block]/2: the for-init's names are not redeclared in the body
     Ex init;
-    if (starts_declaration(true)) {
+    skip_attributes();  // of a simple-declaration ([dcl.pre]/5)
+    if (is(Tk::kw_using)) {
+      init = init_statement();  // an alias-declaration (C++23)
+    } else if (starts_declaration(true)) {
       init = declaration_statement();
     } else {
       u32 b = pos();
@@ -3313,11 +3613,8 @@ public:
       expect(Tk::semi);
       init = s_->node(ast::ExprStmt{sema::Sema::at(e, b)}, b, pos());
     }
-    Ex cond;
-    if (!is(Tk::semi)) {
-      Ex e = expression();
-      cond = s_->to_bool(e, e.begin);
-    }
+    Ex cond, value;
+    if (!is(Tk::semi)) cond = condition_operand(CondKind::boolean, value);
     expect(Tk::semi);
     Ex inc;
     if (!is(Tk::r_paren)) inc = expression();
@@ -3495,15 +3792,7 @@ public:
           init = s_->bind_reference(b->clauses[0].expr, d.type, b->clauses[0].begin, true);
         else
           init = s_->list_init(d.type, *b);
-        // As for `= e` below: a constexpr local, or a const integral one with a constant
-        // initializer, is usable in constant expressions ([expr.const]).
-        bool usable_kind = sema::Types::is_const(d.type) && !sema::Types::is_volatile(d.type) &&
-                           s_->types().is_integral(d.type);
-        if (init.ok() && (spec.is_constexpr || usable_kind)) {
-          sema::Evaluated v = sema::Evaluator(*s_, questions()).evaluate(init);
-          if (v.value) s_->set_local_value(local, *v.value);
-          else if (spec.is_constexpr && !v.dependent) s_->diag(b->begin, Diag::not_constant, v.reason);
-        }
+        constant_local(local, d.type, spec.is_constexpr, init);
       } else if (accept(Tk::equal)) {
         Ex e = assignment_expression();
         if (s_->types().is_array(d.type)) {
@@ -3513,15 +3802,7 @@ public:
           init = s_->bind_reference(e, d.type, e.begin, true);
         } else {
           init = s_->convert(e, d.type, e.begin);
-          // A constexpr variable, or a const integral one with a constant initializer, is usable
-          // in constant expressions ([expr.const]); a constexpr one must have one ([dcl.constexpr]).
-          bool usable_kind = sema::Types::is_const(d.type) && !sema::Types::is_volatile(d.type) &&
-                             s_->types().is_integral(d.type);
-          if (init.ok() && (spec.is_constexpr || usable_kind)) {
-            sema::Evaluated v = sema::Evaluator(*s_, questions()).evaluate(init);
-            if (v.value) s_->set_local_value(local, *v.value);
-            else if (spec.is_constexpr && !v.dependent) s_->diag(e.begin, Diag::not_constant, v.reason);
-          }
+          constant_local(local, d.type, spec.is_constexpr, init);
         }
       } else if (is(Tk::l_paren)) {
         // Direct-initialization ([dcl.init.general]): `T x(args)`.
@@ -3566,6 +3847,8 @@ public:
       ast::EntityId dtor = s_->types().is_reference(d.type) ? ast::EntityId::none : s_->destructor_of(d.type);
       Ex var = s_->node(ast::LocalVar{local, sema::Sema::at(init, dbegin), dtor}, dbegin, pos());
       s_->set_local_decl(local, var.id);
+      // Default-initialization that initializes nothing is vacuous ([basic.life]/2).
+      if ((init.ok() && !s_->as<ast::DefaultInit>(init)) || dtor != ast::EntityId::none) s_->set_initialized(local);
       vars.push_back(var);
     } while (accept(Tk::comma));
     if (!expect(Tk::semi)) skip_to_semi();

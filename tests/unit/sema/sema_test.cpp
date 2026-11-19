@@ -161,10 +161,10 @@ void diagnostics() {
   check(a.ins.names.spelling(ast::NameId(ast::u32(ds[0].args[0].raw))) == "x", "the name is the argument");
   check(ds[1].id == sema::diag_id(sema::Diag::return_value_in_void), "return 1 in a void function");
   check(a.p->byte_offset(ds[0].at) == 22, "rendered to the byte offset of x");
-  // Beyond the subset: one diagnostic for the class (base classes are not supported yet), none for
-  // its members, and no crash while its declared names get placeholder records.
-  Analysed c("struct B {}; struct S : B { int x; }; int y = 1;");
-  check(c.diags().size() == 1 && c.diags()[0].id == sema::diag_id(sema::Diag::not_supported), "base class: one diagnostic");
+  // Beyond the subset: one diagnostic for the class (virtual bases are not supported yet), none
+  // for its members, and no crash while its declared names get placeholder records.
+  Analysed c("struct B {}; struct S : virtual B { int x; }; int y = 1;");
+  check(c.diags().size() == 1 && c.diags()[0].id == sema::diag_id(sema::Diag::not_supported), "virtual base: one diagnostic");
   // A struct's member missing its `;` is one diagnostic, in the member's item.
   Analysed d("struct S { int x }; int y = 1;");
   check(d.diags().size() == 1 && d.diags()[0].id == sema::diag_id(sema::Diag::expected_token), "struct: one diagnostic");

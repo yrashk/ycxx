@@ -203,9 +203,9 @@ class Gen {
     s.args.insert(s.args.end(), values);
     return s;
   }
-  void br(ir::BlockId to, std::initializer_list<ValueId> values = {}) {
+  void br(ir::BlockId to, std::initializer_list<ValueId> values = {}, ir::Flags flags = 0) {
     ir::SuccRef s[] = {edge(to, values)};
-    emit(ir::Op::br, {}, {}, {}, 0, s);
+    emit(ir::Op::br, {}, {}, {}, flags, s);
     live_ = false;
   }
   void cond_br(ValueId c, ir::SuccRef t, ir::SuccRef f) {
@@ -276,10 +276,18 @@ class Gen {
     for (auto t = ts.rbegin(); t != ts.rend(); ++t) end_lifetime(*t);
     return r;
   }
-  void push_scope() { scopes_.emplace_back(); }
+  void push_scope() {
+    scopes_.emplace_back();
+    scope_ids_.push_back(next_scope_++);
+  }
   void pop_scope() {
     if (live_) exit_scopes(scopes_.size() - 1);
+    drop_scope();
+  }
+  // Closes the innermost scope whose objects every path has already ended.
+  void drop_scope() {
     scopes_.pop_back();
+    scope_ids_.pop_back();
   }
 
   // ------------------------------------------------------------------ the function
@@ -355,6 +363,7 @@ class Gen {
       slots_[i] = p;
     }
     stmt({fn_.body.tree, fn_.body_offset});
+    if (!gotos_.empty()) throw Unsupported{"a goto to a label that is not defined"};  // sema rejects it
     if (live_) {
       // Flowing off the end ([stmt.return]): `main` returns 0 ([basic.start.main]); any other
       // function that returns a value has undefined behaviour.
@@ -383,7 +392,9 @@ class Gen {
     // A destructor's members are destroyed after its body, on every way out ([class.dtor]/13).
     for (At m : epilogue_) {
       auto d = get<ast::DestroyMember>(m);
-      destroy(subobject({*this_, {}}, ir::Step::field, d.field, d.type), d.destructor);
+      destroy(d.field == ~0u ? subobject({*this_, {}}, ir::Step::base, std::to_underlying(facts_.class_entity(d.type)), d.type)
+                             : subobject({*this_, {}}, ir::Step::field, d.field, d.type),
+              d.destructor);
     }
     std::vector<ValueId> ops{state_};
     if (v) ops.push_back(*v);
@@ -423,6 +434,15 @@ class Gen {
     }
     ~Position() { g.loc_ = saved; }
   };
+  template <class Body>
+  auto pinned(Body&& f) {
+    ++pinned_;
+    struct Unpin {
+      int& n;
+      ~Unpin() { --n; }
+    } unpin{pinned_};
+    return f();
+  }
 
   // A substatement is in a scope of its own even if it is not a compound statement ([stmt.pre]).
   void substmt(At a) {
@@ -449,7 +469,9 @@ class Gen {
       // [class.base.init]: the member subobject of `*this`.
       auto m = get<ast::MemberInit>(a);
       if (!this_) unsupported(a, "outside a constructor");
-      Place p = subobject({*this_, {}}, ir::Step::field, m.field, m.type);
+      // A field of `~0u` is the base class subobject of type `type`.
+      Place p = m.field == ~0u ? subobject({*this_, {}}, ir::Step::base, std::to_underlying(facts_.class_entity(m.type)), m.type)
+                               : subobject({*this_, {}}, ir::Step::field, m.field, m.type);
       full_expression([&] {
         initialize(p, child(a, m.init), false);
         return 0;
@@ -500,10 +522,18 @@ class Gen {
       static_init(a);
     } else if (is<ast::Break>(a) || is<ast::Continue>(a)) {
       bool brk = is<ast::Break>(a);
-      if (loops_.empty()) unsupported(a, "outside a loop");
+      if (loops_.empty() || (!brk && !loops_.back().in_loop)) unsupported(a, "outside a loop");
       const Loop& l = loops_.back();
-      exit_scopes(l.depth);
+      exit_scopes(brk ? l.depth : l.continue_depth);
       br(brk ? l.exit : l.next);
+    } else if (is<ast::Switch>(a)) {
+      switch_(a);
+    } else if (is<ast::Case>(a) || is<ast::Default>(a)) {
+      case_label(a);
+    } else if (is<ast::Label>(a)) {
+      label(a);
+    } else if (is<ast::Goto>(a)) {
+      goto_(a);
     } else {
       unsupported(a);
     }
@@ -544,6 +574,7 @@ class Gen {
     if (is<ast::ValueInit>(e)) return true;
     if (is<ast::CtorCall>(e)) return get<ast::CtorCall>(e).zero_first != 0;
     if (is<ast::Paren>(e)) return value_initializes(child(e, get<ast::Paren>(e).operand));
+    if (is<ast::DefaultArg>(e)) return value_initializes(child(e, get<ast::DefaultArg>(e).arg));
     if (!is<ast::InitList>(e)) return false;
     for (ast::Child c : ast_.children(get<ast::InitList>(e).elems))
       if (value_initializes(child(e, c))) return true;
@@ -572,6 +603,7 @@ class Gen {
   void initialize(const Place& p, At e, bool zeroed) {
     Position here(*this, e.offset);
     if (is<ast::Paren>(e)) return initialize(p, child(e, get<ast::Paren>(e).operand), zeroed);
+    if (is<ast::DefaultArg>(e)) return pinned([&] { initialize(p, child(e, get<ast::DefaultArg>(e).arg), zeroed); });
     if (facts_.is_reference(p.type)) {
       store(p, lvalue(e).ptr);  // a reference member holds its object's address
       return;
@@ -600,10 +632,14 @@ class Gen {
     }
     if (is<ast::InitList>(e)) {
       bool array = cls(p.type) == TypeClass::array;
+      // A class's elements are its direct bases, then its members ([dcl.init.aggr]/2).
+      std::vector<ast::EntityId> bases = array ? std::vector<ast::EntityId>{} : facts_.bases_of(facts_.class_entity(p.type));
       uint32_t i = 0;
       for (ast::Child c : ast_.children(get<ast::InitList>(e).elems)) {
         At x = child(e, c);
-        initialize(subobject(p, array ? ir::Step::elem : ir::Step::field, i++, info(x).type), x, zeroed);
+        if (i < bases.size()) initialize(subobject(p, ir::Step::base, std::to_underlying(bases[i]), info(x).type), x, zeroed);
+        else initialize(subobject(p, array ? ir::Step::elem : ir::Step::field, i - uint32_t(bases.size()), info(x).type), x, zeroed);
+        ++i;
       }
       return;
     }
@@ -655,7 +691,8 @@ class Gen {
   // The object a class prvalue is copied from: a glvalue of the class converted to a prvalue
   // ([conv.lval]), whose copy constructor is trivial.
   Place class_source(At e) {
-    while (is<ast::Paren>(e)) e = child(e, get<ast::Paren>(e).operand);
+    while (is<ast::Paren>(e) || is<ast::DefaultArg>(e))
+      e = child(e, is<ast::Paren>(e) ? get<ast::Paren>(e).operand : get<ast::DefaultArg>(e).arg);
     if (is<ast::ImplicitConversion>(e)) {
       auto c = get<ast::ImplicitConversion>(e);
       if (c.conversion == ast::ConversionKind::lvalue_to_rvalue) return lvalue(child(e, c.operand));
@@ -677,7 +714,7 @@ class Gen {
     auto s = get<ast::If>(a);
     push_scope();
     stmt(child(a, s.init));
-    ValueId c = full_expression([&] { return rvalue(child(a, s.condition)); });
+    ValueId c = condition(child(a, s.condition));
     ir::BlockId then_b = new_block(), join = new_block();
     ir::BlockId else_b = s.else_.id != NodeId::none ? new_block() : join;
     cond_br(c, edge(then_b), edge(else_b));
@@ -713,18 +750,31 @@ class Gen {
     enter(join);
   }
 
+  // A condition's value ([stmt.pre]); a variable it declares begins in the current scope first.
+  ValueId condition(At c) {
+    if (is<ast::CondDecl>(c)) {
+      auto d = get<ast::CondDecl>(c);
+      {
+        Position at(*this, child(c, d.var).offset);
+        local_var(child(c, d.var));
+      }
+      return full_expression([&] { return rvalue(child(c, d.value)); });
+    }
+    return full_expression([&] { return rvalue(c); });
+  }
+
   // [basic.start.dynamic]: the variable's object is initialized, then its destructor is registered
   // with `__cxa_atexit(destructor, &object, &__dso_handle)` ([basic.start.term]).
   void static_init(At a) {
     auto si = get<ast::StaticInit>(a);
     Place p{pure(ir::Op::global, facts_.pointer_to(si.type), {}, {word(si.variable)}), si.type};
     if (si.init.id != NodeId::none) {
-      ++pinned_;  // the initializer's offsets are its declaration's
-      full_expression([&] {
-        initialize(p, child(a, si.init), false);
-        return 0;
+      pinned([&] {
+        full_expression([&] {
+          initialize(p, child(a, si.init), false);
+          return 0;
+        });
       });
-      --pinned_;
     }
     if (si.destructor == ast::EntityId::none) return;
     ast::QualType vp = facts_.pointer_to(facts_.int_type());  // any object pointer: the callee takes void*
@@ -755,40 +805,210 @@ class Gen {
   }
 
   struct Loop {
-    ir::BlockId next, exit;  // where `continue` and `break` go
-    std::size_t depth;       // the scopes open outside the body
+    ir::BlockId next, exit;     // where `continue` and `break` go
+    std::size_t depth;          // the scopes `break` leaves open
+    std::size_t continue_depth; // the scopes `continue` leaves open
+    bool in_loop = true;        // false for a switch outside every loop: no `continue`
   };
 
   // `while`, `do` and `for` ([stmt.iter]): the condition block, the body, then for `for` the
-  // increment block, which `continue` reaches.
+  // increment block, which `continue` reaches. A variable the condition declares lives for one
+  // iteration ([stmt.while]/2), through the increment ([stmt.for]/1): `break` and a false
+  // condition end it, `continue` goes to the block that ends it.
   void loop(At a, ast::Child init, ast::Child cond, ast::Child incr, ast::Child body, bool body_first) {
     push_scope();  // a for-init-statement's scope ([stmt.for])
     if (init.id != NodeId::none) stmt(child(a, init));
+    bool decl = cond.id != NodeId::none && is<ast::CondDecl>(child(a, cond));
     ir::BlockId head = new_block(), body_b = new_block(), exit = new_block();
-    ir::BlockId next = incr.id != NodeId::none ? new_block() : head;
+    ir::BlockId next = incr.id != NodeId::none || decl ? new_block() : head;
     br(body_first ? body_b : head);
     enter(head);
+    std::size_t outer = scopes_.size();
+    if (decl) push_scope();
     if (cond.id != NodeId::none) {
-      ValueId c = full_expression([&] { return rvalue(child(a, cond)); });
-      cond_br(c, edge(body_b), edge(exit));
+      ValueId c = condition(child(a, cond));
+      ir::BlockId out = decl ? new_block() : exit;
+      cond_br(c, edge(body_b), edge(out));
+      if (decl) {
+        enter(out);
+        exit_scopes(outer);
+        br(exit);
+      }
     } else {
       br(body_b);
     }
     enter(body_b);
-    loops_.push_back({next, exit, scopes_.size()});
+    loops_.push_back({next, exit, outer, scopes_.size()});
     substmt(child(a, body));
     loops_.pop_back();
     if (live_) br(next);
-    if (incr.id != NodeId::none) {
+    if (next != head) {
       enter(next);
-      full_expression([&] {
-        discard(child(a, incr));
-        return 0;
-      });
+      if (incr.id != NodeId::none)
+        full_expression([&] {
+          discard(child(a, incr));
+          return 0;
+        });
+      exit_scopes(outer);
       br(head);
     }
+    if (decl) drop_scope();
     enter(exit);
     pop_scope();
+  }
+
+  // [stmt.switch]: the condition is compared with each case value in turn, then control goes to
+  // `default`, or past the statement. The case labels are found in the body first, since the
+  // comparisons come before it.
+  struct Cases {
+    std::size_t depth;  // the scopes open at the jump
+    std::vector<std::pair<At, ir::BlockId>> blocks;
+  };
+  void switch_(At a) {
+    auto s = get<ast::Switch>(a);
+    push_scope();
+    stmt(child(a, s.init));
+    At cond = child(a, s.condition);
+    ast::QualType t = is<ast::CondDecl>(cond) ? info(child(cond, get<ast::CondDecl>(cond).value)).type : info(cond).type;
+    ValueId c = condition(cond);
+    std::vector<At> labels;
+    case_labels(child(a, s.body), labels);
+    ir::BlockId exit = new_block(), dflt = exit;
+    Cases cs{scopes_.size(), {}};
+    for (At l : labels) {
+      cs.blocks.push_back({l, new_block()});
+      if (is<ast::Default>(l)) dflt = cs.blocks.back().second;
+    }
+    for (auto& [l, b] : cs.blocks) {
+      if (!is<ast::Case>(l)) continue;
+      ValueId eq = pure(ir::Op::icmp, facts_.bool_type(), {c, constant(t, get<ast::Case>(l).value)},
+                        {std::to_underlying(ir::Pred::eq)});
+      ir::BlockId more = new_block({t});
+      cond_br(eq, edge(b), edge(more, {c}));
+      enter(more);
+      c = b_.param(more, 1);
+    }
+    br(dflt);
+    cases_.push_back(std::move(cs));
+    if (loops_.empty()) loops_.push_back({exit, exit, scopes_.size(), scopes_.size(), false});
+    else loops_.push_back({loops_.back().next, exit, scopes_.size(), loops_.back().continue_depth, loops_.back().in_loop});
+    substmt(child(a, s.body));
+    loops_.pop_back();
+    cases_.pop_back();
+    if (live_) br(exit);
+    enter(exit);
+    pop_scope();
+  }
+  // The case and default labels of a switch's body, in order, outside nested switches.
+  void case_labels(At a, std::vector<At>& out) {
+    if (a.id == NodeId::none) return;
+    auto sub = [&](ast::Child c) { case_labels(child(a, c), out); };
+    if (is<ast::Compound>(a)) {
+      for (ast::Child c : ast_.children(get<ast::Compound>(a).stmts)) sub(c);
+    } else if (is<ast::Case>(a)) {
+      out.push_back(a);
+      sub(get<ast::Case>(a).stmt);
+    } else if (is<ast::Default>(a)) {
+      out.push_back(a);
+      sub(get<ast::Default>(a).stmt);
+    } else if (is<ast::Label>(a)) {
+      sub(get<ast::Label>(a).stmt);
+    } else if (is<ast::If>(a)) {
+      sub(get<ast::If>(a).then_);
+      sub(get<ast::If>(a).else_);
+    } else if (is<ast::IfConsteval>(a)) {
+      sub(get<ast::IfConsteval>(a).then_);
+      sub(get<ast::IfConsteval>(a).else_);
+    } else if (is<ast::While>(a)) {
+      sub(get<ast::While>(a).body);
+    } else if (is<ast::Do>(a)) {
+      sub(get<ast::Do>(a).body);
+    } else if (is<ast::For>(a)) {
+      sub(get<ast::For>(a).body);
+    }
+  }
+  void case_label(At a) {
+    if (cases_.empty()) unsupported(a, "outside a switch");
+    const Cases& cs = cases_.back();
+    auto b = std::ranges::find_if(cs.blocks, [&](const auto& p) { return p.first.id == a.id && p.first.offset == a.offset; });
+    if (b == cs.blocks.end()) unsupported(a, "not found in its switch");
+    // Sema rejects a jump past an initialization ([stmt.dcl]/2); one past a vacuous one would leave
+    // the object without storage on this path.
+    for (std::size_t d = cs.depth; d < scopes_.size(); ++d)
+      if (!scopes_[d].empty()) unsupported(a, "past a declaration");
+    if (live_) br(b->second);
+    enter(b->second);
+    stmt(child(a, is<ast::Case>(a) ? get<ast::Case>(a).stmt : get<ast::Default>(a).stmt));
+  }
+
+  // Labels and `goto` ([stmt.label], [stmt.goto]). A jump ends the objects of the scopes it
+  // leaves, and, in the scopes it stays in, those begun after the label ([stmt.jump]/2). A goto
+  // before its label branches to a block of its own, filled once the label is placed.
+  struct LabelInfo {
+    ir::BlockId block;
+    bool placed = false;
+    std::vector<std::uint32_t> path;  // the ids of the scopes open at the label, outermost first
+    std::vector<std::size_t> counts;  // how many objects each had begun there
+  };
+  struct PendingGoto {
+    At at;
+    ast::NameId label;
+    ir::BlockId from;
+    std::vector<std::uint32_t> path;
+    std::vector<std::vector<Ending>> scopes;
+    uint32_t loc;
+  };
+  LabelInfo& label_info(ast::NameId n) {
+    auto [it, fresh] = labels_.try_emplace(n);
+    if (fresh) it->second.block = new_block();
+    return it->second;
+  }
+  void jump_exits(At a, std::span<const std::uint32_t> path, std::span<const std::vector<Ending>> scopes, const LabelInfo& l) {
+    std::size_t k = 0;
+    while (k < path.size() && k < l.path.size() && path[k] == l.path[k]) ++k;
+    // Entering a scope past an object: as for `case_label`.
+    for (std::size_t d = 0; d < l.path.size(); ++d)
+      if (l.counts[d] > (d < k ? scopes[d].size() : 0)) unsupported(a, "past a declaration");
+    for (std::size_t i = scopes.size(); i-- > 0;)
+      for (std::size_t j = scopes[i].size(); j-- > (i < k ? l.counts[i] : 0);) end_lifetime(scopes[i][j]);
+  }
+  void goto_(At a) {
+    auto g = get<ast::Goto>(a);
+    LabelInfo& l = label_info(g.label);
+    if (l.placed) {
+      jump_exits(a, scope_ids_, scopes_, l);
+      br(l.block, {}, ir::bit(ir::Flag::not_constexpr));  // a goto is never constant ([expr.const])
+      return;
+    }
+    ir::BlockId from = new_block();
+    br(from, {}, ir::bit(ir::Flag::not_constexpr));
+    gotos_.push_back({a, g.label, from, scope_ids_, scopes_, loc_});
+  }
+  void label(At a) {
+    auto s = get<ast::Label>(a);
+    LabelInfo& l = label_info(s.name);
+    if (live_) br(l.block);
+    enter(l.block);
+    l.placed = true;
+    l.path = scope_ids_;
+    l.counts.clear();
+    for (const auto& sc : scopes_) l.counts.push_back(sc.size());
+    ValueId state = state_;
+    for (auto g = gotos_.begin(); g != gotos_.end();) {
+      if (g->label != s.name) {
+        ++g;
+        continue;
+      }
+      enter(g->from);
+      Position at(*this, g->loc);
+      jump_exits(g->at, g->path, g->scopes, l);
+      br(l.block);
+      g = gotos_.erase(g);
+    }
+    block_ = l.block;
+    state_ = state;
+    live_ = true;
+    stmt(child(a, s.stmt));
   }
 
   // ------------------------------------------------------------------ expressions
@@ -862,6 +1082,7 @@ class Gen {
     ast::QualType t = ei.type;
     if (is<ast::Literal>(a)) return constant(t, get<ast::Literal>(a).value);
     if (is<ast::Paren>(a)) return rvalue_or_void(child(a, get<ast::Paren>(a).operand));
+    if (is<ast::DefaultArg>(a)) return pinned([&] { return rvalue_or_void(child(a, get<ast::DefaultArg>(a).arg)); });
     if (is<ast::ImplicitConversion>(a)) return conversion(a);
     if (is<ast::Unary>(a)) return unary(a);
     if (is<ast::Binary>(a)) return binary(a);
@@ -903,6 +1124,18 @@ class Gen {
         ValueId v = rvalue(from);
         if (same_type(info(from).type, t)) return v;
         return pure(ir::Op::ptr_cast, t, {v}, {word(ty(t))});
+      }
+      case ast::ConversionKind::derived_to_base: {
+        // A pointer to a derived class's object to its direct base's ([conv.ptr]/3): the base
+        // subobject's address, a null pointer to a null pointer.
+        ValueId v = rvalue(from);
+        ast::QualType b = facts_.pointee(t);
+        std::uint64_t path[] = {1, ir::encode({ir::Step::base, std::to_underlying(c.function)})};
+        ValueId moved = pure(ir::Op::ptr_member, t, {v}, {word(ty(b)), path[0], path[1]});
+        ast::QualType ft = info(from).type;
+        ValueId null = pure(ir::Op::ptr_cmp, ast::builtin(facts_.interners(), ast::Builtin::bool_), {v, constant(ft, facts_.null_constant(ft))},
+                            {std::to_underlying(ir::Pred::eq)});
+        return pure(ir::Op::select, t, {null, constant(t, facts_.null_constant(t)), moved});
       }
       case ast::ConversionKind::to_void:
         discard(from);
@@ -1232,6 +1465,12 @@ class Gen {
       if (i >= slots_.size() || !slots_[i]) unsupported(a, "naming a local that is not declared yet");
       return *slots_[i];
     }
+    // A derived class's object as its direct base's ([conv.ptr]/3, [dcl.init.ref]): the base
+    // subobject, named by the base class's entity.
+    if (is<ast::ImplicitConversion>(a) && get<ast::ImplicitConversion>(a).conversion == ast::ConversionKind::derived_to_base) {
+      auto c = get<ast::ImplicitConversion>(a);
+      return subobject(lvalue(child(a, c.operand)), ir::Step::base, std::to_underlying(c.function), t);
+    }
     if (is<ast::DeclRef>(a)) {
       ast::EntityId e = get<ast::DeclRef>(a).entity;
       // A function designator's address is the function's ([conv.func], [expr.unary.op]).
@@ -1245,6 +1484,7 @@ class Gen {
       return {constant(facts_.pointer_to(t), addr), t};
     }
     if (is<ast::Paren>(a)) return lvalue(child(a, get<ast::Paren>(a).operand));
+    if (is<ast::DefaultArg>(a)) return pinned([&] { return lvalue(child(a, get<ast::DefaultArg>(a).arg)); });
     if (is<ast::Unary>(a)) {
       auto u = get<ast::Unary>(a);
       At o = child(a, u.operand);
@@ -1384,7 +1624,12 @@ class Gen {
   bool live_ = false;
   uint32_t loc_ = 0;
   std::vector<std::vector<Ending>> scopes_;
+  std::vector<std::uint32_t> scope_ids_;  // parallel to scopes_, for jumps (`LabelInfo`)
+  std::uint32_t next_scope_ = 0;
   std::vector<Loop> loops_;
+  std::vector<Cases> cases_;                       // the switches being generated, innermost last
+  std::map<ast::NameId, LabelInfo> labels_;
+  std::vector<PendingGoto> gotos_;                 // before their labels
   std::vector<std::optional<Place>> slots_;  // by local index
   std::optional<ValueId> this_;              // a non-static member function's `this`
   std::optional<Place> result_;              // the object a class result initializes
@@ -1392,7 +1637,7 @@ class Gen {
   std::vector<std::vector<Ending>> temps_;   // the open full-expressions' temporaries
   std::vector<At> epilogue_;                 // a destructor's DestroyMember statements
   int branches_ = 0;                         // conditionally evaluated operands entered
-  int pinned_ = 0;                           // inside another item's tree: positions stay
+  int pinned_ = 0;                           // depth inside trees from other items (`Position`)
 };
 
 template <Facts F>
