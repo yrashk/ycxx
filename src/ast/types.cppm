@@ -127,6 +127,13 @@ struct TPackExpansion {
   QualType pattern;
 };
 
+// A type-transforming built-in applied to a dependent type, `__remove_cv(T)` (docs/EXTENSIONS.md):
+// `trait` is a `lex::TypeTrait`; substitution applies it.
+struct TTransform {
+  u8 trait;
+  QualType arg;
+};
+
 // ---------------------------------------------------------------- sugar kinds
 
 // A use of a typedef-name or alias-declaration. The alias's template arguments come with alias
@@ -137,7 +144,7 @@ struct STypedef {
 };
 
 using TypeKinds = closed_list<TBuiltin, TPointer, TLRef, TRRef, TArray, TFunction, TClass, TEnum, STypedef, TTemplateParam,
-                              TDepName, TPackExpansion>;
+                              TDepName, TPackExpansion, TTransform>;
 
 template <class T>
 constexpr bool is_type_kind = TypeKinds::contains<T>;

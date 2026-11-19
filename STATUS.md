@@ -544,9 +544,11 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
 
 ## The resident daemon (#96, #97, 2026-11-18)
 
-`ycxx daemon` serves `ycxx cxx`, per `docs/design/daemon.md`. It is opt-in, with `YCXX_DAEMON=1`
-or `--daemon`: requests run one at a time in it until #120 (#15, #95). Without it, `ycxx cxx` runs
-the same handler in-process.
+`ycxx daemon` serves `ycxx cxx`, per `docs/design/daemon.md`, by default (#139):
+`YCXX_NO_DAEMON=1`, `--no-daemon` or `YCXX_DAEMON=0` turn it off, and any failure to use it falls
+back to running the same handler in-process. Requests run in it at once. The test driver runs
+ycxx in-process unless `YCXX_TEST_DAEMON=1`; the daemon's own tests and the `.incr` suite start
+private daemons.
 
 - `ycxx.compile` (`src/client/compile.cppm`): the c++-compatible request handler, which was the
   body of `client::cxx`. It takes argv, cwd, the environment table and the client's clock. It
@@ -613,14 +615,9 @@ the same handler in-process.
     daemon mid-request (the client retries), a restart, and concurrent clients.
   - All run on macOS and Linux.
 - Not yet:
-  - concurrent requests, cell-level restarts, and the daemon as the default (#139, which needs
-    requests as root keys and a front end on a pool, #107);
   - `progress` messages and `build_time` (#140);
-  - the persistent cache handoff and the file table in it (#17);
-  - the β tests that need those: the cache across a restart (#17), every answer at 1 and P
-    threads and requests that overlap (#139).
-  - The engine counts in a report are the session's `Db::stats()` deltas, which are exact while
-    requests run one at a time; per-request `Counters` come with #139.
+  - the persistent cache handoff and the file table in it (#17), and the β test that needs it:
+    the cache across a restart.
 
 ## The LSP front and the editor view (#99, 2026-11-18)
 
@@ -804,6 +801,11 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   enumerator values from constant expressions (narrowing into a fixed type diagnosed), unscoped
   enumerators in the enclosing scope and clashes with other declarations, `E::e`, enumerations
   nested in classes (`C::E`, `C::e`), `using enum` in a block, `enum E` elaborated specifiers.
+  Without a fixed type the underlying type is the Itanium compilers' (#220): `unsigned int` or
+  `unsigned long` when no enumerator is negative, else `int` or `long`, the narrower that holds
+  every value (`tests/own/classes/s4-enum-*`, symbols checked against Clang's). It promotes to
+  the type its values need ([conv.prom]/3, `EnumRec::promotion`), and an implicit enumerator
+  whose value outgrows its predecessor's type gets a wider one ([dcl.enum]/5).
 - Conversions: an unscoped enumeration promotes ([conv.prom]/4) and converts to integers and
   bool; nothing converts implicitly to an enumeration except its own type; a scoped one
   compares only with its own type; `E e{n}` for a fixed underlying type ([dcl.init.list]/3.8).
@@ -1173,6 +1175,22 @@ session's.*
   templates (`template<…> using __apply = …` in a class), with member
   templates; template template parameters (#208); value-dependent expressions as template
   arguments (#209).
+
+## Type-trait built-ins (#211, 2026-11-18)
+
+- `ycxx.lex:builtins` lists the type-trait built-ins ycxx implements (`lex::type_traits`): 29
+  predicates and 13 transformations, those libycxx probes and uses that ycxx's type system can
+  answer exactly. The preprocessor's `__has_builtin` answers 1 for exactly these, 0 for any other.
+- A predicate `__is_same(T, U)` is a `bool` prvalue constant (`Sema::trait_expr`), value-dependent
+  while a type is dependent. A transformation `__remove_cv(T)` is a type specifier
+  (`Templates::transform`); of a dependent type it is a `TTransform` that substitution applies and
+  deduction treats as a non-deduced context, mangled as Clang does (`u11__remove_cvIT_E`).
+- Listed in docs/EXTENSIONS.md. Tests: `tests/own/builtins/`. `<cstdio>`: 53 → 33 errors.
+- Not yet (#211 follow-up): the built-ins that need the object model, such as
+  `__is_constructible`, `__is_convertible`, `__is_assignable`, the `__is_trivially_*` and
+  `__is_nothrow_*` families, `__is_base_of`, `__is_standard_layout` and
+  `__reference_binds_to_temporary`; a value-dependent predicate as a template argument outside a
+  body (#209).
 
 ## Bootstrap workarounds
 

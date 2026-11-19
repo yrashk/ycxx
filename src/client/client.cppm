@@ -20,20 +20,25 @@ int control(std::span<const std::string_view> args);
 namespace ycxx::client {
 namespace {
 
-// Whether `cxx` uses the daemon. Off by default until requests run concurrently in it (#15, #63):
-// a build's parallel compiles would otherwise queue behind one another. `YCXX_DAEMON=1` or
-// `--daemon` turn it on, `YCXX_DAEMON=require` or `--daemon=require` (the tests' hook) make a
-// failure to use it an error instead of an in-process run, and `YCXX_NO_DAEMON=1` or `--no-daemon`
-// turn it off whatever else says.
+// Whether `cxx` uses the daemon: by default, since requests run concurrently in it (#139), with
+// an in-process run as the fallback on any failure (daemon design §7.2). `YCXX_DAEMON=0` (or `off`,
+// `no`, `false`) turns it off, `YCXX_DAEMON=require` or `--daemon=require` (the tests' hook) make a
+// failure to use it an error instead of an in-process run, and `YCXX_NO_DAEMON` set to anything
+// but those, or `--no-daemon`, turns it off whatever else says.
 enum class Use { off, on, require };
 
+// A value that means "no": unset, empty, `0`, `off`, `no`, `false`.
+bool falsy(std::string_view v) { return v.empty() || v == "0" || v == "off" || v == "no" || v == "false"; }
+
 Use use_from_environment() {
-  if (const char* e = std::getenv("YCXX_NO_DAEMON"); e && std::string_view(e) == "1") return Use::off;
+  if (const char* e = std::getenv("YCXX_NO_DAEMON"); e && !falsy(e)) return Use::off;
   const char* e = std::getenv("YCXX_DAEMON");
   std::string_view v = e ? e : "";
   if (v == "require") return Use::require;
-  if (v == "1" || v == "on") return Use::on;
-  return Use::off;
+  if (e && *e && falsy(v)) return Use::off;
+  if (!v.empty() && v != "1" && v != "on" && v != "yes" && v != "true")
+    std::println(std::cerr, "ycxx: warning: YCXX_DAEMON='{}' is not one of 0, off, 1, on, require: using the daemon", v);
+  return Use::on;
 }
 
 // Splits a response file's text into arguments: whitespace separates them, and quotes and
@@ -113,7 +118,8 @@ std::expected<compile::Done, std::string> through_daemon(const compile::Request&
 // `--daemon`, `--daemon=require`, `--no-daemon`; `-v` says whether and where the daemon answered.
 int cxx(std::span<const std::string_view> args) {
   Use use = use_from_environment();
-  bool forced_off = use == Use::off && std::getenv("YCXX_NO_DAEMON") != nullptr;
+  const char* no = std::getenv("YCXX_NO_DAEMON");
+  bool forced_off = no && !falsy(no);
   bool verbose = false;
   std::vector<std::string> argv;
   for (std::string_view a : args) {

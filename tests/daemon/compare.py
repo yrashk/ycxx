@@ -131,6 +131,18 @@ def main():
             return 1
         same_daemon('the first request')
 
+        # The daemon is the default (#139): with neither YCXX_DAEMON nor YCXX_NO_DAEMON, the same
+        # daemon answers; YCXX_DAEMON=0 runs in-process.
+        plain = dict(base, YCXX_THREADS='8', YCXX_CHAOS_SEED='7')
+        r = subprocess.run([ycxx, 'cxx', '-v', '-c', 'first.cpp', '-o', 'first.o'], cwd=scope, env=plain, capture_output=True, timeout=300)
+        if r.returncode != 0 or b'answered by daemon' not in r.stderr:
+            fail(f'by default ycxx cxx did not go through the daemon: {r.stderr!r:.300}')
+        r = subprocess.run([ycxx, 'cxx', '-v', '-c', 'first.cpp', '-o', 'first.o'], cwd=scope, env=dict(plain, YCXX_DAEMON='0'),
+                           capture_output=True, timeout=300)
+        if r.returncode != 0 or b'answered by daemon' in r.stderr:
+            fail(f'YCXX_DAEMON=0 still went through the daemon: {r.stderr!r:.300}')
+        same_daemon('the default')
+
         # 1. The own suites, each test in each action: slice and smoke whole, a fixed eighth of the
         # others (by name hash), or all with --all.
         tests = []

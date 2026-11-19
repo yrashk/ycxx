@@ -38,7 +38,8 @@ build/bin/ycxx cxx hello.cpp -o hello && ./hello
   with RAII, aggregate and designated initialization, passing and returning them by value with
   Clang's calling convention, so ycxx and Clang objects call each other;
 - namespaces, typedefs and alias declarations, `using` declarations and directives;
-- `[[…]]` attributes, and the GNU attributes and `asm` labels the macOS SDK's headers use
+- `[[…]]` attributes, the GNU attributes and `asm` labels the macOS SDK's headers use, and the
+  type-trait built-ins libycxx's headers use (`__is_same`, `__remove_cv`, …)
   ([docs/EXTENSIONS.md](docs/EXTENSIONS.md));
 - templates: function, class and variable templates, deduction, partial ordering, explicit and
   partial specializations, parameter packs and fold expressions, alias templates, two-phase
@@ -52,11 +53,13 @@ build/bin/ycxx cxx hello.cpp -o hello && ./hello
 **Preprocessing.** All of translation phase 4: includes, object-like and function-like
 macros, conditionals, `_Pragma` and the predefined macros. `ycxx cxx -E` matches Clang's output.
 
-**Incremental builds through a resident daemon** (opt-in with `YCXX_DAEMON=1`). `ycxx cxx`
-hands its work to a per-project `ycxx daemon`, which watches the files it has read and keeps
+**Incremental builds through a resident daemon.** `ycxx cxx` hands its work to a per-project
+`ycxx daemon` (`YCXX_NO_DAEMON=1` runs in-process), which watches the files it has read and keeps
 its analysis between commands. A repeated build re-runs nothing, and an edit re-runs only what
-it affects, through code generation and the link. The daemon serves concurrent requests on a
-thread pool, and its output is byte for byte that of a cold, in-process build.
+it affects, through code generation and the link. The daemon compiles on a thread pool but
+serves one request at a time for now (concurrent requests:
+[#226](https://github.com/yrashk/ycxx/pull/226)), and its output is byte for byte that of a
+cold, in-process build.
 
 **Editor diagnostics.** `ycxx lsp` is a language server that reports ycxx's errors as you type,
 through the daemon, without unsaved text ever reaching a build.
@@ -66,17 +69,17 @@ through the daemon, without unsaved text ever reaching a build.
 - The standard library and its headers. C headers such as `<stdio.h>` compile and `printf` runs;
   libycxx's `<cstdio>` still needs parameter packs and concepts.
 - Inheritance and virtual functions, `sizeof` of a class.
+- Access control: `private` and `protected` are not checked yet, so ycxx accepts code that
+  uses private members ([#119](https://github.com/yrashk/ycxx/issues/119)).
 - Concepts, member templates, template template parameters, `if constexpr`.
 - Floating-point arithmetic, exceptions, and optimization (`-O`).
-- The daemon as the default, and go-to-definition in the language server.
+- Go-to-definition in the language server.
 - Linux and x86-64 output.
 
 ### In progress
 
 - Standard headers, starting with `<cstdio>` ([#133](https://github.com/yrashk/ycxx/issues/133)).
 - Templates: parameter packs, then concepts ([#88](https://github.com/yrashk/ycxx/issues/88)).
-- The resident daemon as the default, after ThreadSanitizer
-  ([#84](https://github.com/yrashk/ycxx/issues/84)).
 
 Next come exceptions ([#89](https://github.com/yrashk/ycxx/issues/89)).
 

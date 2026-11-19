@@ -90,6 +90,8 @@ public:
   // template's with the arguments substituted: an explicit specialization's, or a partial
   // specialization's that it is instantiated from ([temp.expl.spec], [temp.spec.partial]).
   virtual std::optional<QualType> specialization_type(EntityId /*v*/) { return std::nullopt; }
+  // Whether class `c`, complete or not, was declared with the class-key `union`.
+  virtual bool is_union_class(EntityId /*c*/) { return false; }
   // In an instantiation: the pack expansions the definition of what it re-analyses recorded.
   virtual const std::vector<Expansion>* pattern_expansions() { return nullptr; }
   virtual ~Questions() = default;
@@ -448,6 +450,89 @@ public:
       return;
     }
     using_enums_.push_back({scopes_.size() - 1, types().enum_of(t)});
+  }
+
+  // ------------------------------------------------------------ type-trait built-ins (docs/EXTENSIONS.md)
+
+  // The built-in `name` names, if it is one ycxx implements.
+  const lex::TypeTraitInfo* type_trait(NameId name) { return lex::type_trait(ins().names.spelling(name)); }
+  QualType innermost(QualType t) {
+    while (types().is_array(t)) t = types().canonical(types().rec(t).inner);
+    return t;
+  }
+  // Whether a class type is a union: by its class-key, which its first declaration's tokens say.
+  bool is_union_type(QualType t) {
+    if (!types().is_class(t)) return false;
+    if (const ClassRec* r = class_rec(types().class_of(t))) return r->union_;
+    return q_->is_union_class(types().class_of(t));
+  }
+  // `__trait(T)` that transforms a type ([meta.trans]): the type it gives.
+  std::optional<QualType> trait_type(lex::TypeTrait t, QualType arg, u32 at) {
+    auto r = templates().transform(t, arg);
+    if (!r) diag(at, Diag::trait_not_applicable, arg);
+    return r;
+  }
+  // `__trait(T…)` that tests types ([meta.unary], [meta.rel]): a `bool` prvalue, value-dependent
+  // while a type is dependent.
+  Ex trait_expr(lex::TypeTrait t, std::span<const QualType> args, u32 begin, u32 end) {
+    using enum lex::TypeTrait;
+    QualType b = builtin(Builtin::bool_);
+    if (std::ranges::any_of(args, [&](QualType a) { return types().is_dependent(a); })) return dependent_node({}, begin, end, b);
+    QualType x = args[0], c = types().canonical(x);
+    auto cls = [&]() -> const ClassRec* {
+      if (!types().is_class(c)) return nullptr;
+      if (!require_complete(c, begin)) return nullptr;
+      return class_rec(types().class_of(c));
+    };
+    bool v = false;
+    switch (t) {
+    case is_same: v = c == types().canonical(args[1]); break;
+    case is_void: v = types().is_void(c); break;
+    case is_integral: v = types().is_integral(c); break;
+    case is_floating_point: v = types().is_floating(c); break;
+    case is_arithmetic: v = types().is_integral(c) || types().is_floating(c); break;
+    case is_enum: v = types().is_enum(c); break;
+    case is_scoped_enum:
+      if (types().is_enum(c))
+        if (const EnumRec* e = enum_rec(types().enum_of(c))) v = e->scoped;
+      break;
+    // The class-key says whether a class is a union, complete or not ([class.pre]).
+    case is_class: v = types().is_class(c) && !is_union_type(c); break;
+    case is_union: v = is_union_type(c); break;
+    case is_pointer: v = types().is_pointer(c); break;
+    // ycxx has no pointers to members yet, nor virtual functions, abstract or final classes: these
+    // are false of every type it has.
+    case is_member_pointer:
+    case is_member_object_pointer:
+    case is_member_function_pointer:
+    case is_polymorphic:
+    case is_abstract:
+    case is_final:
+    case has_virtual_destructor: v = false; break;
+    case is_reference: v = types().is_reference(c); break;
+    case is_lvalue_reference: v = types().is_reference(c) && !types().rec(c).rvalue_ref; break;
+    case is_rvalue_reference: v = types().is_reference(c) && types().rec(c).rvalue_ref; break;
+    case is_array: v = types().is_array(c); break;
+    case is_bounded_array: v = types().is_array(c) && types().rec(c).bound_value != ConstId::none; break;
+    case is_unbounded_array: v = types().is_array(c) && types().rec(c).bound_value == ConstId::none; break;
+    case is_function: v = types().is_function(c); break;
+    case is_object: v = types().is_object(c); break;
+    // An array's cv-qualifiers are its elements' ([basic.type.qualifier]/3).
+    case is_const: v = Types::is_const(innermost(c)); break;
+    case is_volatile: v = Types::is_volatile(innermost(c)); break;
+    case is_empty:
+      // [meta.unary.prop]: a complete class, not a union, with no non-static data members.
+      if (is_union_type(c)) v = false;
+      else if (const ClassRec* r = cls()) v = r->fields.empty();
+      else if (types().is_class(c)) return {NodeId::none, begin, end};
+      break;
+    case is_aggregate:
+      if (types().is_class(c) && !cls()) return {NodeId::none, begin, end};
+      v = this->is_aggregate(c);
+      break;
+    default: break;
+    }
+    return bool_literal(v, begin, end);
   }
 
   // ------------------------------------------------------------ qualified names ([basic.lookup.qual])
@@ -1638,7 +1723,10 @@ public:
         if (builtin(promoted(*types().builtin_of(*er->underlying))) == to) return {true, 1, 1};
         return {true, 2, 0};
       }
-      bool promotion = builtin(promoted(*types().builtin_of(underlying_of(from)))) == to;
+      // [conv.prom]/3: without one, to the type its values need.
+      const EnumRec* er = enum_rec(types().enum_of(from));
+      QualType p = er && er->promotion ? *er->promotion : builtin(promoted(*types().builtin_of(underlying_of(from))));
+      bool promotion = types().canonical(p) == types().canonical(to);
       return {true, promotion ? 1 : 2, 0};
     }
     if (types().is_pointer(from) && types().is_pointer(to))
@@ -2229,8 +2317,11 @@ public:
   Ex promote(Ex e) {
     e = rvalue(e);
     if (!e.ok() || dependent(e)) return e;
-    // [conv.prom]/4: an unscoped enumeration promotes as its underlying type does.
+    // [conv.prom]/3: an unscoped enumeration without a fixed type promotes to the type its values
+    // need; /4: one with a fixed type promotes as its underlying type does.
     if (is_unscoped_enum(e.type())) {
+      if (const EnumRec* r = enum_rec(types().enum_of(e.type())); r && r->promotion)
+        return convert_node(e, ast::ConversionKind::integral, *r->promotion);
       QualType u = underlying_of(e.type());
       return convert_node(e, ast::ConversionKind::integral, builtin(promoted(*types().builtin_of(u))));
     }

@@ -122,6 +122,14 @@ struct RegionItems {
 
 namespace ycxx::items {
 
+// `__remove_cv` and the other type-transforming built-ins at token `j`: a type specifier with its
+// operand in parentheses (docs/EXTENSIONS.md), not a declarator-id.
+bool is_transform_trait(const pp::Region& r, u32 j) {
+  if (j >= r.tokens.size() || r.tokens[j].kind != Tk::identifier) return false;
+  const lex::TypeTraitInfo* t = lex::type_trait(r.name(r.tokens[j]));
+  return t && t->transforms;
+}
+
 using namespace lex;
 
 bool is_class_key(Tk k) { return k == Tk::kw_class || k == Tk::kw_struct || k == Tk::kw_union; }
@@ -150,6 +158,7 @@ public:
 private:
   Tk kind(u32 j) const { return j < r_.tokens.size() ? r_.tokens[j].kind : Tk::eof; }
   bool is_name(u32 j, std::string_view s) const { return kind(j) == Tk::identifier && r_.name(r_.tokens[j]) == s; }
+  bool transform_trait(u32 j) const { return is_transform_trait(r_, j); }
   Item& at(u32 k) { return out_.items[k]; }
   u32 add(u32 parent, const std::string& scope) {
     Item it;
@@ -410,8 +419,9 @@ void Splitter::general(u32 k) {
           prev != Tk::kw_sizeof && prev != Tk::kw_alignof && prev != Tk::kw_explicit && prev != Tk::kw_typeid &&
           prev != Tk::kw_static_assert && prev != Tk::kw_asm && prev != Tk::kw_requires &&
           !(prev == Tk::kw_operator) &&
-          // a GNU attribute or asm label (docs/EXTENSIONS.md)
-          !(j > at(k).begin && (is_name(j - 1, "__attribute__") || is_name(j - 1, "__asm") || is_name(j - 1, "__asm__")))) {
+          // a GNU attribute or asm label, or a type-transforming built-in (docs/EXTENSIONS.md)
+          !(j > at(k).begin && (is_name(j - 1, "__attribute__") || is_name(j - 1, "__asm") || is_name(j - 1, "__asm__") ||
+                                transform_trait(j - 1)))) {
         params = true;
       }
       j = match(j);
@@ -550,6 +560,7 @@ private:
   Tk kind(u32 j) const { return j < r_.tokens.size() ? r_.tokens[j].kind : Tk::eof; }
   std::string_view name(u32 j) const { return r_.name(r_.tokens[j]); }
   bool is_name(u32 j, std::string_view s) const { return kind(j) == Tk::identifier && name(j) == s; }
+  bool transform_trait(u32 j) const { return is_transform_trait(r_, j); }
   u32 match(u32 j) const {
     int depth = 0;
     for (; kind(j) != Tk::eof; ++j) {
@@ -841,7 +852,7 @@ private:
       } else if (((t == Tk::kw_decltype || t == Tk::kw_alignas || t == Tk::kw_noexcept || t == Tk::kw_explicit ||
                    t == Tk::kw_sizeof) &&
                   kind(n + 1) == Tk::l_paren) ||
-                 gnu_extension(n)) {
+                 gnu_extension(n) || (transform_trait(n) && kind(n + 1) == Tk::l_paren)) {
         n = match(n + 1);
       } else if (t == Tk::identifier || t == Tk::coloncolon) {
         if (t == Tk::coloncolon || kind(n + 1) == Tk::coloncolon || (kind(n + 1) == Tk::less && angle_then_scope(n + 1, to))) {

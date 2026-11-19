@@ -1406,14 +1406,16 @@ private:
   }
 
   // The operators of a #if expression that are not macros ([cpp.cond]/1).
-  enum class CondOp { none, defined, has_include, has_include_next, has_embed, has_attribute };
+  enum class CondOp { none, defined, has_include, has_include_next, has_embed, has_attribute, has_builtin };
   CondOp condition_operator(u32 name) const {
     std::string_view n = s_->spellings.name(name);
     if (n == "__has_include") return CondOp::has_include;
     if (n == "__has_include_next") return CondOp::has_include_next;
     if (n == "__has_embed") return CondOp::has_embed;
-    // DECISIONS §1.5: ycxx's tables have no attribute, builtin or feature yet.
-    if (n == "__has_cpp_attribute" || n == "__has_attribute" || n == "__has_c_attribute" || n == "__has_builtin" ||
+    // DECISIONS §1.5: `__has_builtin` answers from ycxx's table of the built-ins it implements
+    // (lex::type_traits); its tables have no attribute or feature yet.
+    if (n == "__has_builtin") return CondOp::has_builtin;
+    if (n == "__has_cpp_attribute" || n == "__has_attribute" || n == "__has_c_attribute" ||
         n == "__has_feature" || n == "__has_extension")
       return CondOp::has_attribute;
     return CondOp::none;
@@ -1463,6 +1465,14 @@ private:
     }
     CondOp op = condition_operator(t.tok.payload);
     if (op == CondOp::has_attribute) return number_token(t, 0);
+    if (op == CondOp::has_builtin) {
+      // Its operand is one identifier ([cpp.cond]-style, as GCC and Clang take it).
+      if (operand.size() != 1 || operand[0].tok.kind != Tk::identifier) {
+        report(f, operand.empty() ? t : operand.size() > 1 ? operand[1] : operand[0], lex::LexDiag::cond_expected_rparen);
+        return number_token(t, 0);
+      }
+      return number_token(t, lex::type_trait(s_->spellings.name(operand[0].tok.payload)) != nullptr ? 1 : 0);
+    }
     // [cpp.cond]/? the header, as for #include: a string literal, `<...>`, or tokens that become
     // one after replacement.
     if (operand.empty() || (operand[0].tok.kind != Tk::string_lit && operand[0].tok.kind != Tk::less))

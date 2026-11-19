@@ -7,6 +7,7 @@ export module ycxx.sema:types;
 import std;
 import ycxx.ast;
 import ycxx.ast.store;
+import ycxx.lex;
 
 export namespace ycxx::sema {
 
@@ -50,7 +51,9 @@ constexpr std::string_view spelling(Builtin b) {
 
 // ---------------------------------------------------------------- types
 
-enum class TypeKind : u8 { builtin, pointer, array, function, class_, reference, enum_, template_param, dep_name, pack_expansion, other };
+enum class TypeKind : u8 {
+  builtin, pointer, array, function, class_, reference, enum_, template_param, dep_name, pack_expansion, transform, other
+};
 
 // The canonical form of a type, read out by value.
 struct TypeRec {
@@ -69,6 +72,7 @@ struct TypeRec {
   u16 depth = 0;                     // a template parameter's position ([temp.param])
   u16 index = 0;
   bool pack = false;
+  u8 trait = 0;  // a transform's `lex::TypeTrait`
 };
 
 class Types {
@@ -98,6 +102,12 @@ public:
   }
   // `pattern...` ([temp.variadic]).
   QualType pack_expansion(QualType pattern) { return ins_->intern_type(ast::TPackExpansion{pattern}); }
+  // `__trait(arg)` of a dependent `arg` (docs/EXTENSIONS.md).
+  QualType transform(u8 trait, QualType arg) { return ins_->intern_type(ast::TTransform{trait, arg}); }
+  bool is_floating(QualType q) const {
+    auto b = builtin_of(q);
+    return b && ast::is_floating(*b);
+  }
 
   TypeRec rec(QualType q) const {
     const ast::Types& t = ins_->types;
@@ -137,6 +147,10 @@ public:
       r.kind = TypeKind::dep_name;
       r.inner = t.get<ast::TDepName>(c).qualifier;
       r.name = t.get<ast::TDepName>(c).name;
+    } else if (t.is<ast::TTransform>(c)) {
+      r.kind = TypeKind::transform;
+      r.inner = t.get<ast::TTransform>(c).arg;
+      r.trait = t.get<ast::TTransform>(c).trait;
     } else if (t.is<ast::TPackExpansion>(c)) {
       r.kind = TypeKind::pack_expansion;
       r.inner = t.get<ast::TPackExpansion>(c).pattern;
@@ -157,7 +171,8 @@ public:
     switch (r.kind) {
     case TypeKind::template_param:
     case TypeKind::dep_name:
-    case TypeKind::pack_expansion: return true;
+    case TypeKind::pack_expansion:
+    case TypeKind::transform: return true;
     case TypeKind::builtin: return r.builtin == Builtin::dependent;
     case TypeKind::array:
       return is_dependent(r.inner) || (r.bound_value != ConstId::none && ins_->values.is_dependent(r.bound_value));
@@ -273,6 +288,9 @@ private:
       // Parameters are positional in the type (ast.md §5.1).
       return cvs + std::format("type-parameter-{}-{}", r.depth, r.index) + (inner.empty() || inner[0] == '[' ? "" : " ") + inner;
     case TypeKind::pack_expansion: return spell(r.inner) + "..." + (inner.empty() ? "" : " " + inner);
+    case TypeKind::transform:
+      return cvs + std::string(lex::type_trait_info(lex::TypeTrait(r.trait)).name) + "(" + spell(r.inner) + ")" +
+             (inner.empty() ? "" : " " + inner);
     case TypeKind::other: return "<type>";
     }
     return {};
@@ -502,6 +520,9 @@ struct EnumRec {
   bool scoped = false;
   bool fixed = false;
   std::optional<QualType> underlying;
+  // Without a fixed type, what it promotes to ([conv.prom]/3): the first of int, unsigned int,
+  // long, unsigned long that holds all its values, which may differ from `underlying`.
+  std::optional<QualType> promotion;
   std::vector<EnumeratorRec> enumerators;
 };
 

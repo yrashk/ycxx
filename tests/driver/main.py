@@ -284,6 +284,12 @@ def main(argv=None):
 
 def _main(argv):
     args = parse_args(sys.argv[1:] if argv is None else argv)
+    # ycxx runs in-process for every test unless asked otherwise: a daemon is the default for
+    # `ycxx cxx` (#139), and a test run must neither depend on nor leave one behind. The daemon's
+    # own tests and the .incr suite start private daemons; YCXX_TEST_DAEMON=1 sends every test
+    # through the user's.
+    if os.environ.get('YCXX_TEST_DAEMON') != '1':
+        os.environ['YCXX_NO_DAEMON'] = '1'
     ui = UI()
     started = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
     t_start = time.monotonic()

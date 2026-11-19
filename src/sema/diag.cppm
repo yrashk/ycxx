@@ -41,6 +41,7 @@ enum class Diag : std::uint32_t {
   operator_arity [[=message{Severity::error, "'{0:n}' has the wrong number of parameters"}]],
   operator_needs_class [[=message{Severity::error, "'{0:n}' needs a parameter of class or enumeration type"}]],
   operator_static [[=message{Severity::error, "'{0:n}' cannot be a static member function"}]],
+  enum_no_type [[=message{Severity::error, "no integral type can hold every value of '{0:n}'"}]],
   expected_statement [[=message{Severity::error, "expected a statement"}]],
   expected_declaration [[=message{Severity::error, "expected a declaration"}]],
   expected_type_specifier [[=message{Severity::error, "expected a type specifier"}]],
@@ -177,6 +178,7 @@ enum class Diag : std::uint32_t {
   empty_fold [[=message{Severity::error, "a fold over an empty pack needs an initial value for this operator"}]],
   pack_not_last [[=message{Severity::error, "a template parameter pack is followed by a parameter that is neither deduced nor defaulted"}]],
   member_named_as_class [[=message{Severity::error, "a member type cannot have the name of its class '{0:n}'"}]],
+  trait_not_applicable [[=message{Severity::error, "this type trait does not apply to '{0:t}'"}]],
 };
 
 // A `{N:r}` argument: why an evaluation was not constant. 0 is an expression the front end
