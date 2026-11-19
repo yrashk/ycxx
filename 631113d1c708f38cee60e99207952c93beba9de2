@@ -1,0 +1,9 @@
+Block-scope static continuation for #291, #337 and #375
+
+The original implementation and chat summary remain on 3b2559e6d8571a79be8d54affffa3d078ec4c4b4. This continuation includes recovered namespace initialization #385 on main 656326acb81b86ded4043d32e39d2d155b2c1ff4.
+
+Both goto tests are enabled. Jump checking tracks automatic declarations, and IR uses each static local's entry-block address on paths that may bypass its declaration. Static brace-list initializers reuse the existing aggregate constant-evaluation logic. Constant initialization is visible from a skipped declaration and dynamic initialization remains guarded on the first pass.
+
+Linux tools/test --fast passed on byte-identical tree c7d046310ef836ff0e7ecfbee72262257763c3d9 with GCC 16.2.0 and CMake 4.4.5. All 45 CTests passed. The language suite recorded 647 passes, 496 expected failures and 488 unsupported cases. Clang 23.1.6 and GCC 16.2.0 ran the selected static cases. ycxx emitted ARM64 Mach-O showing the specified array data, guards, startup entries, and destructor relocations. Native macOS runtime CI and feature-map probes remain to be checked.
+
+Recovery issue https://github.com/yrashk/ycxx/issues/377
