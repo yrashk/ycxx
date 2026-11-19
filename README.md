@@ -54,6 +54,16 @@ build/bin/ycxx cxx --target=x86_64-pc-linux-gnu -nostdlib example.o -o example
 ./example
 ```
 
+An explicit dynamic link uses ycxx's startup and the target loader. Supply the absolute target
+interpreter path and explicit, self-contained shared objects with a SysV hash and a slash-free
+SONAME. The executable can directly call their exported, unversioned functions. The loader must
+be able to find each SONAME when the executable runs. [#390](https://github.com/yrashk/ycxx/issues/390)
+
+```sh
+build/bin/ycxx cxx --target=x86_64-pc-linux-gnu -nostdlib --dynamic-linker="$target_loader" \
+  example.cpp "$target_library" -o example
+```
+
 Linux objects can make direct calls to variadic functions such as `printf` within the scalar
 INTEGER ABI subset. Use the host linker to link these objects with libc.
 [#399](https://github.com/yrashk/ycxx/issues/399)
@@ -147,7 +157,8 @@ checked with the flags of its last build, or else with its line in the project's
 - Member class and alias templates, conversion function templates, and constraints on class
   templates and their members.
 - Exceptions, optimization (`-O`), and the extended floating-point types (`std::float16_t`, …).
-- Hosted linking and general-purpose ELF object interoperability for x86-64 Linux.
+- Automatic Linux CRT and library selection and general-purpose ELF object interoperability.
+  [#390](https://github.com/yrashk/ycxx/issues/390)
 - Namespace-scope destruction for x86-64 Linux. [#400](https://github.com/yrashk/ycxx/issues/400)
 
 ### In progress

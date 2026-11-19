@@ -9,6 +9,7 @@ else()
 endif()
 
 ycxxc_unit_test(elf_link elf_test.cpp ycxxc_link)
+ycxxc_unit_test(elf_shared elf_shared_test.cpp ycxxc_link)
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$"
    AND NOT CMAKE_CROSSCOMPILING)
   find_program(YCXXC_READELF NAMES readelf llvm-readelf)

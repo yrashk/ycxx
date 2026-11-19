@@ -132,9 +132,10 @@ struct Options {
   enum class Stop { link, object, syntax, preprocess } stop = Stop::link;
   pp::Config pp;  // include paths, macros and target
   bool nostdlib = false;
-  std::optional<std::string> output;
+  std::optional<std::string> output, interpreter;
   std::vector<std::string> sources;  // translation units
   std::vector<std::string> objects;  // objects named on the command line
+  std::vector<std::string> libraries;  // shared objects in command-line order
 };
 
 bool is_source(std::string_view f) {
@@ -143,9 +144,16 @@ bool is_source(std::string_view f) {
   return false;
 }
 
+bool is_shared_object(std::string_view f) {
+  const auto slash = f.rfind('/');
+  if (slash != std::string_view::npos) f.remove_prefix(slash + 1);
+  return f.ends_with(".so") || f.contains(".so.");
+}
+
 // Parses the arguments, or says why it cannot.
 std::expected<Options, std::string> parse_options(std::span<const std::string_view> args) {
   Options o;
+  std::vector<std::string_view> other_inputs;
   for (std::size_t i = 0; i < args.size(); ++i) {
     std::string_view a = args[i];
     auto pp_option = pp::take_option(args, i, o.pp);
@@ -155,7 +163,13 @@ std::expected<Options, std::string> parse_options(std::span<const std::string_vi
     else if (a == "-fsyntax-only") o.stop = Options::Stop::syntax;
     else if (a == "-E") o.stop = Options::Stop::preprocess;
     else if (a == "-nostdlib") o.nostdlib = true;
-    else if (a == "--target" || a.starts_with("--target=")) {
+    else if (a == "--dynamic-linker" || a.starts_with("--dynamic-linker=")) {
+      if (a == "--dynamic-linker" && (i + 1 == args.size() || args[i + 1].starts_with('-')))
+        return std::unexpected("argument to '--dynamic-linker' is missing");
+      if (o.interpreter) return std::unexpected("duplicate '--dynamic-linker' option");
+      constexpr std::string_view prefix = "--dynamic-linker=";
+      o.interpreter = a == "--dynamic-linker" ? args[++i] : a.substr(prefix.size());
+    } else if (a == "--target" || a.starts_with("--target=")) {
       if (a == "--target" && i + 1 == args.size()) return std::unexpected("argument to '--target' is missing");
       auto triple = a == "--target" ? args[++i] : a.substr(9);
       const ast::Target* target = ast::target_for_triple(triple);
@@ -190,19 +204,33 @@ std::expected<Options, std::string> parse_options(std::span<const std::string_vi
       continue;
     else if (a.starts_with("-") && a != "-") return std::unexpected(std::format("unsupported option '{}'", a));
     else if (a.ends_with(".o")) o.objects.emplace_back(a);
-    else o.sources.emplace_back(a);
+    else if (is_source(a)) o.sources.emplace_back(a);
+    else other_inputs.push_back(a);
+  }
+  const bool linux_link = o.pp.target == &ast::x86_64_linux && o.stop == Options::Stop::link;
+  if (o.interpreter && !linux_link)
+    return std::unexpected("'--dynamic-linker' requires an x86-64 Linux executable link");
+  for (std::string_view path : other_inputs) {
+    if (is_shared_object(path) || o.interpreter) o.libraries.emplace_back(path);
+    else return std::unexpected(std::format("'{}': unknown kind of input file", path));
+  }
+  if (!o.libraries.empty() && !linux_link)
+    return std::unexpected("shared object inputs require an x86-64 Linux executable link");
+  if (o.interpreter || !o.libraries.empty()) {
+    if (!o.nostdlib) return std::unexpected("explicit Linux dynamic linking requires '-nostdlib'");
+    if (!o.interpreter || !o.interpreter->starts_with('/') || o.interpreter->contains('\0'))
+      return std::unexpected("Linux dynamic linking requires an absolute '--dynamic-linker' path");
+    if (o.libraries.empty()) return std::unexpected("Linux dynamic linking requires an explicit shared object");
   }
   if (o.pp.target != &ast::x86_64_linux && o.nostdlib)
     return std::unexpected("unsupported option '-nostdlib'");
   if (o.pp.call_triviality == ast::CallTriviality::apple && !o.pp.target->apple_calls)
     return std::unexpected("invalid value in '-fclass-call-abi=apple'");
   if (o.sources.empty() && o.objects.empty()) return std::unexpected("no input files");
-  if (o.pp.target == &ast::x86_64_linux && o.stop == Options::Stop::link && !o.nostdlib)
+  if (linux_link && !o.nostdlib)
     return std::unexpected("hosted Linux linking is not supported. Use '-nostdlib' for a freestanding executable");
   if (o.output && o.stop == Options::Stop::object && o.sources.size() > 1)
     return std::unexpected("cannot specify '-o' with '-c' and several input files");
-  for (const std::string& s : o.sources)
-    if (!is_source(s)) return std::unexpected(std::format("'{}': unknown kind of input file", s));
   return o;
 }
 
@@ -367,7 +395,7 @@ void checking_options(std::span<const std::string_view> args, bool std, std::vec
       ++i;
     } else if (args[i].starts_with("--target=") && ast::target_for_triple(args[i].substr(9))) {
       out.emplace_back(args[i]);
-    } else if (args[i] == "-o") {
+    } else if (args[i] == "-o" || args[i] == "--dynamic-linker") {
       ++i;
     } else if ((std && args[i].starts_with("-std=")) || args[i].starts_with("-ftemplate-depth=") ||
                args[i].starts_with("-fclass-call-abi=")) {
@@ -449,9 +477,8 @@ Done run(const Request& r, pp::Host& host, pipeline::Session& session, const Sto
   for (const std::string& s : opts->sources)
     key.units.push_back(session.unit({s, r.cwd, config, object_name(s).native_encoded_string()}));
   std::filesystem::path out = opts->output.value_or("a.out");
-  // A command-line object that cannot be used is reported after the units' diagnostics, and only
-  // when they compiled; the units are then built without the link.
-  std::optional<std::string> bad_object;
+  // An unusable link input is reported after the units' diagnostics, and only when they compiled.
+  std::optional<std::string> bad_input;
   if (key.until == pipeline::Until::link) {
     std::vector<obj::object> objects;
     const bool linux_target = opts->pp.target == &ast::x86_64_linux;
@@ -459,21 +486,40 @@ Done run(const Request& r, pp::Host& host, pipeline::Session& session, const Sto
     for (const std::string& path : opts->objects) {
       auto text = read_disk(in_cwd(r, path));
       if (!text) {
-        bad_object = std::format("cannot read '{}'", path);
+        bad_input = std::format("cannot read '{}'", path);
         break;
       }
       std::vector<std::uint8_t> bytes(text->begin(), text->end());
       auto o = linux_target ? obj::elf::read_object(bytes, path) : obj::macho::read_object(bytes, path);
       if (!o) {
-        bad_object = o.error();
+        bad_input = o.error();
         break;
       }
       objects.push_back(std::move(*o));
     }
-    if (bad_object) key.until = pipeline::Until::object;
-    else key.program = session.program({key.units, std::move(objects), out.filename().native_encoded_string()});
+    std::optional<link::elf::dynamic_options> dynamic;
+    if (!bad_input && opts->interpreter) {
+      dynamic.emplace(link::elf::dynamic_options{*opts->interpreter, {}});
+      for (const std::string& path : opts->libraries) {
+        auto text = read_disk(in_cwd(r, path));
+        if (!text) {
+          bad_input = std::format("cannot read '{}'", path);
+          break;
+        }
+        const std::span bytes(reinterpret_cast<const std::uint8_t*>(text->data()), text->size());
+        auto library = link::elf::read_shared_object(bytes, path);
+        if (!library) {
+          bad_input = library.error();
+          break;
+        }
+        dynamic->libraries.push_back(std::move(*library));
+      }
+    }
+    if (bad_input) key.until = pipeline::Until::object;
+    else key.program = session.program(
+        {key.units, std::move(objects), out.filename().native_encoded_string(), std::move(dynamic)});
   }
-  const pipeline::Until until = bad_object ? pipeline::Until::link : key.until;
+  const pipeline::Until until = bad_input ? pipeline::Until::link : key.until;
   pipeline::RunStats rs;
   std::optional<pipeline::Built> built = session.run<pipeline::Build>(session.request(std::move(key)), stop, &rs, tracer);
   if (!built) {
@@ -522,8 +568,8 @@ Done run(const Request& r, pp::Host& host, pipeline::Session& session, const Sto
     if (failed) d.exit_status = 1;
     return d;
   }
-  if (bad_object) {
-    fail(d, *bad_object);
+  if (bad_input) {
+    fail(d, *bad_input);
     return d;
   }
   const pipeline::Linked& image = *built->linked;
