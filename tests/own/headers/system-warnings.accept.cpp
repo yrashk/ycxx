@@ -1,9 +1,8 @@
-// #229: warnings from system headers are not reported, as Clang and GCC do: the SDK's <stdio.h>
-// compiles with no warning, and so do a header found through -isystem and the headers it
-// includes, from its own directory or through -I. A user header's warning is, and so is that of a
-// system header's macro used here: the markers below and in inputs/user-warning.h.
+// #229: warnings from system headers are not reported, as Clang and GCC do: a header found through
+// -isystem, the headers it includes (from its own directory or through -I) give none. A user
+// header's warning is reported, and so is that of a system header's macro used here: the markers
+// below and in inputs/user-warning.h. (The SDK's <stdio.h>: stdio-no-warnings.accept.cpp.)
 // FLAGS: -isystem inputs/sys -I inputs/user
-#include <stdio.h>
 #include <noisy.h>
 #include "inputs/user-warning.h"
 
