@@ -216,7 +216,7 @@ std::int64_t now_seconds() {
 // of daemon `instance` (0: no build was answered) (#245): how many batches changed something (0: the daemon stopped, so the next
 // build starts a new one), or nothing when it cannot be asked or was interrupted.
 std::optional<std::uint64_t> await_change(const std::string& root, std::uint64_t since, std::uint64_t instance, Interrupt& cut,
-                                          bool json = false) {
+                                          bool json = false, const std::function<void(std::vector<std::string>)>& on_watching = {}) {
   auto c = daemon::reach(root, true);
   if (!c) {
     const std::string why = "--watch: cannot reach the daemon: " + c.error();
@@ -225,7 +225,7 @@ std::optional<std::uint64_t> await_change(const std::string& root, std::uint64_t
     return std::nullopt;
   }
   if (!cut.enter(c->fd.get())) return std::nullopt;
-  auto changed = daemon::await_change(*c, since, instance);
+  auto changed = daemon::await_change(*c, since, instance, on_watching);
   cut.leave();
   if (cut.is_stopped()) return std::nullopt;
   return changed.value_or(0);
@@ -271,16 +271,33 @@ int watch_builds(compile::Request r, bool verbose, TraceMode mode) {
       } else {
         std::println(std::cerr, "ycxx: error: the daemon could not build it: {}", d.error());
       }
-      if (json) std::println(std::cerr, R"({{"watching":"the files it read"}})");
-      else std::println(std::cerr, "ycxx: watching the files it read; ^C to stop");
-      changed = await_change(root, revision, instance, cut, mode == TraceMode::json);
+      changed = await_change(root, revision, instance, cut, json, [&](std::vector<std::string> paths) {
+        if (json) {
+          std::string list;
+          for (const std::string& p : paths) list += (list.empty() ? "" : ",") + trace::json_string(p);
+          std::println(std::cerr, R"({{"watching":[{}]}})", list);
+          return;
+        }
+        // The project's files by name; the others (system headers) counted.
+        std::vector<std::string> own;
+        std::size_t others = 0;
+        for (const std::string& p : paths) {
+          if (p.starts_with(root + "/")) own.push_back(p.substr(root.size() + 1));
+          else ++others;
+        }
+        std::string list;
+        for (const std::string& p : own) list += (list.empty() ? "" : ", ") + p;
+        std::println(std::cerr, "ycxx: watching {}{}{}; ^C to stop", list.empty() ? "no file of the project" : list,
+                     others ? std::format(" and {} other file{} (system headers)", others, others == 1 ? "" : "s") : "",
+                     "");
+      });
       if (!changed) return 1;
     }
   }
 
   // The browser on this thread, the builds on another; what they find crosses in `items`.
   struct Item {
-    enum { trace, done } what = trace;
+    enum { trace, done, files } what = trace;
     std::uint64_t build = 0;
     std::uint64_t space = 0;      // the build's event numbers, apart from every other run's
     std::uint64_t offset_ns = 0;  // the build's start, since the first's, on this process's clock
@@ -333,7 +350,11 @@ int watch_builds(compile::Request r, bool verbose, TraceMode mode) {
         done.text = "the daemon could not build it: " + d.error();
       }
       post(std::move(done));
-      changed = await_change(root, revision, instance, cut);
+      changed = await_change(root, revision, instance, cut, false, [&](std::vector<std::string> paths) {
+        std::string text = std::format("\n\nwatching {} files:\n", paths.size());
+        for (const std::string& p : paths) text += "  " + p + "\n";
+        post({Item::files, n, run, offset, {}, label, std::move(text)});
+      });
       if (!changed) break;
     }
     std::lock_guard g(shared.m);
@@ -360,6 +381,10 @@ int watch_builds(compile::Request r, bool verbose, TraceMode mode) {
                        if (i.what == Item::done) {
                          open(i, i.offset_ns);  // a build that sent no trace still shows its diagnostics
                          tree.annotate(id, std::move(i.text));
+                         continue;
+                       }
+                       if (i.what == Item::files) {
+                         tree.annotate(id, std::move(i.text), true);
                          continue;
                        }
                        // Times from the build's own start, placed at its start on this clock; event

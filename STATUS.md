@@ -1374,7 +1374,7 @@ request it serves.
   entries), and builds again. With the stream each build is traced under a header; with the
   browser the builds run on a thread of their own and each is a live node holding its
   diagnostics. A daemon that stops leaves the wait unanswered, and the next build starts a new
-  one.
+  one. The wait first lists the files it watches (`watching`: the file table's existing entries).
 - Tests: `unit.trace` (a golden stream of a unit built cold, again and after a whitespace edit;
   the collector under 8 threads; the tree, filters, summary and timeline); `daemon.trace` (traced
   builds through the daemon, a watcher, a stalled watcher beside 40 builds, shutdown). The

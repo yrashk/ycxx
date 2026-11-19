@@ -106,6 +106,8 @@ struct [[=engine::input{engine::Durability::low}]] FileText {
 struct [[=engine::input{engine::Durability::low}]] FileContent {
   using Key = PathId;
   using Value = std::optional<std::string>;
+  // For traces (#245): an include search's probe often finds nothing.
+  static std::string show(const Value& v) { return v ? std::format("{} bytes", v->size()) : std::string("absent"); }
 };
 
 // The text of an editor's open buffer at a path, or nothing when none is open (daemon design §6.1):
@@ -344,12 +346,29 @@ void trace_describe(std::string& out, FileId f) {
   else std::format_to(std::back_inserter(out), "file {}", std::to_underlying(f));
 }
 
+// The whole path, so the include search's probes of one name in several directories differ,
+// with its long prefixes named: an SDK (`<sdk>/usr/include/stdio.h`), a toolchain, the home.
 void trace_describe(std::string& out, PathId p) {
-  const std::string& path = path_of(p);
-  std::size_t cut = path.rfind('/');
-  if (cut != std::string::npos && cut > 0) cut = path.rfind('/', cut - 1);
-  if (cut == std::string::npos || cut == 0) out += path;
-  else out += "…" + path.substr(cut);
+  std::string_view path = path_of(p);
+  if (const std::size_t sdk = path.find(".sdk/"); sdk != std::string_view::npos) {
+    out += "<sdk>";
+    out += path.substr(sdk + 4);
+    return;
+  }
+  for (std::string_view tc : {".xctoolchain/", "/CommandLineTools/"}) {
+    if (const std::size_t at = path.find(tc); at != std::string_view::npos) {
+      out += "<toolchain>/";
+      out += path.substr(at + tc.size());
+      return;
+    }
+  }
+  if (const char* home = std::getenv("HOME"); home && *home && path.starts_with(home) && path.size() > std::strlen(home) &&
+                                               path[std::strlen(home)] == '/') {
+    out += "~";
+    out += path.substr(std::strlen(home));
+    return;
+  }
+  out += path;
 }
 
 const std::string& path_of(PathId id) {

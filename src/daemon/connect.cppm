@@ -38,7 +38,9 @@ std::expected<void, std::string> watch_traces(Connection& c, bool values);
 std::optional<TraceBatch> next_trace(Connection& c);
 // Waits until a file some build read changes after revision `since` of daemon `pid` (#245); how
 // many batches changed something, or why there is no answer (the daemon stopped).
-std::expected<std::uint64_t, std::string> await_change(Connection& c, std::uint64_t since, std::uint64_t instance);
+// `on_watching` gets the files it waits on, first.
+std::expected<std::uint64_t, std::string> await_change(Connection& c, std::uint64_t since, std::uint64_t instance,
+                                                      const std::function<void(std::vector<std::string>)>& on_watching = {});
 std::expected<Status, std::string> request_status(Connection& c);
 // Turns the connection into an LSP tunnel (§6.4): copies `in` to the daemon and the daemon's
 // answers to `out` until the session ends; its exit status, or why there is none.
@@ -157,9 +159,14 @@ std::optional<TraceBatch> next_trace(Connection& c) {
   return decode<TraceBatch>(*f);
 }
 
-std::expected<std::uint64_t, std::string> await_change(Connection& c, std::uint64_t since, std::uint64_t instance) {
+std::expected<std::uint64_t, std::string> await_change(Connection& c, std::uint64_t since, std::uint64_t instance,
+                                                      const std::function<void(std::vector<std::string>)>& on_watching) {
   if (!send(c.fd.get(), Kind::await_change, AwaitChange{since, instance})) return std::unexpected("cannot send the request");
   auto f = receive(c.fd.get());
+  if (f && f->kind == Kind::watching) {
+    if (auto w = decode<WatchedFiles>(*f); w && on_watching) on_watching(std::move(w->paths));
+    f = receive(c.fd.get());
+  }
   if (!f) return std::unexpected("the daemon closed the connection: " + f.error());
   if (f->kind != Kind::changed) return std::unexpected("unexpected answer");
   auto ch = decode<Changed>(*f);

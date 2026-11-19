@@ -307,8 +307,11 @@ class Tree {
     nodes_.push_back(std::move(n));
   }
   // Text for a request's node (`--watch`: its diagnostics), shown in the detail pane.
-  void annotate(std::uint64_t id, std::string text) {
-    if (const auto it = by_id_.find(id); it != by_id_.end()) nodes_[it->second].ev.value = std::move(text);
+  void annotate(std::uint64_t id, std::string text, bool append = false) {
+    if (const auto it = by_id_.find(id); it != by_id_.end()) {
+      std::string& v = nodes_[it->second].ev.value;
+      v = append ? v + text : std::move(text);
+    }
   }
   // A request's end: its span, and its outcome: executed if anything under it ran.
   void close_group(std::uint64_t id, std::uint64_t end_ns) {

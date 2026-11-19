@@ -488,6 +488,7 @@ class Server {
     }
     // No build answered (refused, failed): wait from now, never answer at once.
     const std::uint64_t since = r.instance == 0 ? revision() : r.since;
+    send(fd, Kind::watching, WatchedFiles{table_.present_keys()});
     // Without a watcher a batch is a rescan of the whole table: less often.
     const auto every = watcher_ ? std::chrono::milliseconds(150) : std::chrono::milliseconds(1000);
     do {

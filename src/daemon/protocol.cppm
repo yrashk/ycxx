@@ -13,8 +13,8 @@ import :posix;
 export namespace ycxx::daemon {
 
 enum class Kind : std::uint16_t { hello = 1, welcome, compile, done, status, status_reply, shutdown, bye, lsp, refused, trace, watch,
-                                  await_change, changed };
-inline constexpr Kind last_kind = Kind::changed;
+                                  await_change, changed, watching };
+inline constexpr Kind last_kind = Kind::watching;
 
 struct Hello {
   std::uint64_t build_hash = 0;
@@ -68,6 +68,10 @@ struct AwaitChange {
 struct Changed {
   std::uint64_t revisions = 0;  // batches applied since; 0 when another daemon answered
 };
+// Sent first by an `await_change` that waits: the files whose change would answer it.
+struct WatchedFiles {
+  std::vector<std::string> paths;  // absolute, existing files builds have read
+};
 struct StatusRequest {};
 struct ShutdownRequest {};
 struct Bye {};
@@ -114,6 +118,7 @@ inline constexpr Fp128 schema_hash = [] {
   engine::fold_schema<TraceBatch>(h);
   engine::fold_schema<WatchRequest>(h);
   engine::fold_schema<Changed>(h);
+  engine::fold_schema<WatchedFiles>(h);
   return h.finish();
 }();
 
