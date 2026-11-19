@@ -152,7 +152,7 @@ struct Body {
                        w.in.intern_seq(std::span<const ast::ParamSema>(ps)),
                        w.in.intern_seq(std::span<const ast::TemplateParamSema>{})};
     auto locs = b.seq(std::span<const ast::LocalRec>(locals));
-    ast::BodySema body = b.commit(ast::BodySema{tree, locs});
+    ast::BodySema body = b.commit(ast::BodySema{tree, locs, b.seq(std::span<const ast::ExpansionRec>{}), b.seq(std::span<const ast::u32>{})});
     w.tu.functions.push_back({f, decl, body, w.in.items.add<ast::ItemId>(ast::seed("test item")), 0});
   }
 };
@@ -203,6 +203,16 @@ void mangling() {
         "an integral argument is an <expr-primary>, n for negative");
   check(spec("p", w.fn(w.void_t, {ast::pointer_to(w.in, w.fn(t0, {t0}))}), {type_arg(w.int_t)}) == "__Z1pIiEvPFT_S0_E",
         "a function type is F…E");
+  // Parameter packs: an argument pack is J…E, a pack expansion in the signature Dp (§5.1.5.7);
+  // `template<class... Ts> int count(Ts...)`, checked against Clang's symbols.
+  QualType pack0 = w.in.intern_type(ast::TTemplateParam{0, 0, 1});
+  QualType dp = w.in.intern_type(ast::TPackExpansion{pack0});
+  auto pack_arg = [&](std::vector<ast::TemplateArg> elems) {
+    return ast::TemplateArg{ast::TemplateArgKind::pack, {}, ast::ConstId::none, w.in.intern_seq(std::span<const ast::TemplateArg>(elems))};
+  };
+  check(spec("count", w.fn(w.int_t, {dp}), {pack_arg({type_arg(w.int_t), type_arg(w.char_t)})}) == "__Z5countIJicEEiDpT_",
+        "an argument pack is J…E, an expansion Dp");
+  check(spec("count", w.fn(w.int_t, {dp}), {pack_arg({})}) == "__Z5countIJEEiDpT_", "an empty pack is JE");
 }
 
 // ------------------------------------------------------------------ programs

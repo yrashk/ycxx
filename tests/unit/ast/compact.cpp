@@ -30,12 +30,13 @@ int main() {
     NodeId call = b.add(Call{rv, f_e, {f, 0}, b.list({{one, 2}, {two, 4}})}, 6);
     NodeId local = b.add(LocalVar{0, {call, 2}, EntityId::none}, 9);
     body = b.commit(BodySema{b.add(Compound{b.list({{local, 1}})}, 11),
-                             b.seq({LocalRec{in.names.intern("v"), int_t, EntityId::none, local, 0}})});
+                             b.seq({LocalRec{in.names.intern("v"), int_t, EntityId::none, local, 0}}),
+                             b.seq(std::span<const ExpansionRec>{}), b.seq(std::span<const u32>{})});
     DeclSema d{f_e, int_t, DeclKind::function, Linkage::external, Storage::none, Access::none, 0,
                b.seq<NodeId>({}), NodeId::none, NodeId::none,
                b.seq({ParamSema{EntityId::none, int_t, in.names.intern("p"), two, 0}}),
                b.seq(std::span<const TemplateParamSema>{})};
-    item = b.commit(ItemSema{call, b.seq({d})});
+    item = b.commit(ItemSema{call, b.seq({d}), b.seq(std::span<const ExpansionRec>{})});
   }
   Fp128 body_fp = in.ast.fp(body.tree), call_fp = in.ast.fp(item.tree);
   Fp128 locals_fp = in.fp(body.locals), decls_fp = in.fp(item.decls);
