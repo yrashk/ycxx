@@ -7,3 +7,12 @@ if(APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "arm64|aarch64")
 else()
   add_test(NAME unit.link COMMAND unit_link)
 endif()
+
+ycxxc_unit_test(elf_link elf_test.cpp ycxxc_link)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$"
+   AND NOT CMAKE_CROSSCOMPILING)
+  find_program(YCXXC_READELF NAMES readelf llvm-readelf)
+  add_test(NAME unit.elf_link_exec
+    COMMAND ${CMAKE_COMMAND} -DLINKER=$<TARGET_FILE:unit_elf_link> -DREADELF=${YCXXC_READELF}
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/elf_exec.cmake)
+endif()
