@@ -1116,7 +1116,10 @@ session's.*
   class templates. `Templates::complete_class` completes a class that substituting
   `typename X<T>::type` needs, instantiating a specialization.
 - Tests: `tests/own/templates/a5-*`; 2 more draft examples pass. `<cstdio>`: 78 → 53 errors.
-- Not yet: member alias templates (`template<…> using __apply = …` in a class), with member
+- Also: `C::T` inside the class (being defined or instantiated) and in its out-of-class member
+  definitions names its member type, as the current instantiation's ([temp.dep.type]/1).
+- Not yet: access, hiding and qualified functional casts of member types (#216); member alias
+  templates (`template<…> using __apply = …` in a class), with member
   templates; template template parameters (#208); value-dependent expressions as template
   arguments (#209).
 

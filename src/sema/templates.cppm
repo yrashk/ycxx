@@ -94,8 +94,14 @@ public:
       if (!q) return std::nullopt;
       if (types().is_dependent(*q)) return types().add_cv(types().dep_name(*q, r.name), cv);
       if (!types().is_class(*q)) return std::nullopt;
-      // The class must be complete: a specialization is instantiated for it ([temp.inst]/2).
-      const ClassRec* c = complete_class ? complete_class(types().class_of(*q)) : classes_->find(types().class_of(*q));
+      // Asked at a point: the class completed there, a specialization instantiated for it
+      // ([temp.inst]/2), or the members a class being defined has declared so far.
+      if (member_type) {
+        auto t = member_type(types().class_of(*q), r.name);
+        if (!t) return std::nullopt;
+        return types().add_cv(*t, cv);
+      }
+      const ClassRec* c = classes_->find(types().class_of(*q));
       if (!c) return std::nullopt;
       for (const auto& [n, mt] : c->types)
         if (n == r.name) return types().add_cv(mt, cv);
@@ -219,6 +225,27 @@ public:
       return w_->values.integer(types().builtin(Builtin::unsigned_long), ins().seqs.size(a->elems));
     }
     return v;
+  }
+
+  // `t` with each `typename Q::n` that `f(Q, n)` resolves replaced by what it gives: a member of the
+  // current instantiation named with a qualifier, found ([temp.dep.type]/1).
+  QualType resolve_dep_names(QualType t, const std::function<std::optional<QualType>(QualType, NameId)>& f) {
+    TypeRec r = types().rec(t);
+    Cv cv = Types::cv(types().canonical(t));
+    switch (r.kind) {
+    case TypeKind::dep_name:
+      if (auto m = f(r.inner, r.name)) return types().add_cv(*m, cv);
+      return t;
+    case TypeKind::pointer: return types().add_cv(types().pointer(resolve_dep_names(r.inner, f)), cv);
+    case TypeKind::reference:
+      return r.rvalue_ref ? types().rvalue_ref(resolve_dep_names(r.inner, f)) : types().lvalue_ref(resolve_dep_names(r.inner, f));
+    case TypeKind::function: {
+      std::vector<QualType> ps;
+      for (QualType p : r.params) ps.push_back(resolve_dep_names(p, f));
+      return types().function(resolve_dep_names(r.inner, f), ps, r.variadic, r.linkage, r.fn_cv);
+    }
+    default: return t;
+    }
   }
 
   // ------------------------------------------------------------ packs ([temp.variadic])
@@ -961,9 +988,9 @@ private:
   const Classes* classes_;
 
 public:
-  // The record of a class that must be complete, instantiating it if it is a specialization; set
-  // by whoever asks at a point, which `classes_` alone does not know.
-  std::function<const ClassRec*(EntityId)> complete_class;
+  // The type member of a class with a name, as lookup at a point finds it; set by whoever asks at
+  // a point, which `classes_` alone does not know.
+  std::function<std::optional<QualType>(EntityId, NameId)> member_type;
 
 private:
   // The template-head whose parameters a deduction deduces, and its packs whose leading elements

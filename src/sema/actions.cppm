@@ -383,7 +383,8 @@ public:
     if (tmpl.kind == ast::DeclKind::type_alias) {
       std::vector<ast::TemplateParamSema> params = ins().seqs.elements(tmpl.template_params);
       auto t = templates().substitute(tmpl.type, Bindings::of(params.empty() ? 0 : params[0].depth, *full));
-      if (!t) diag(at, Diag::template_args_mismatch, w_->entities.rec(tmpl.entity).name);
+      // Past the nesting limit, which was diagnosed, it says nothing more ([temp.inst]/16).
+      if (!t && !q_->instantiation_gave_up()) diag(at, Diag::template_args_mismatch, w_->entities.rec(tmpl.entity).name);
       return t;
     }
     return types().class_type(class_specialization(tmpl.entity, *full));
@@ -479,9 +480,27 @@ public:
     return std::nullopt;
   }
   // A later component: a namespace or type member of a namespace, or a type nested in a class.
+  // A type member `n` of class `c` ([class.member.lookup], types): from its record where it is
+  // complete, a specialization instantiated for it; or, in the class being defined or
+  // instantiated, among the members declared so far ([basic.scope.class]).
+  std::optional<QualType> member_type(EntityId c, NameId n) {
+    if (const ClassRec* cr = class_rec(c)) {
+      for (const auto& [name, t] : cr->types)
+        if (name == n) return t;
+      return std::nullopt;
+    }
+    if (c == current_class)
+      if (auto m = q_->earlier_member(n); m && (m->kind == ast::DeclKind::enum_ || m->kind == ast::DeclKind::type_alias))
+        return m->type;
+    return std::nullopt;
+  }
+
   std::optional<Scope> scope_member(const Scope& s, NameId n) {
-    // A member of a dependent type is looked up when the template is instantiated
-    // ([temp.dep.type]/7): a dependent type here.
+    // A member of the class whose member-specification this is (the current instantiation in a
+    // template) is found where it is declared ([temp.dep.type]/1); a member of another dependent
+    // type is looked up when the template is instantiated ([temp.dep.type]/7): a dependent type.
+    if (s.type && types().is_class(*s.type) && (!types().is_dependent(*s.type) || types().class_of(*s.type) == current_class))
+      if (auto t = member_type(types().class_of(*s.type), n)) return Scope{std::nullopt, *t};
     if (s.type && types().is_dependent(*s.type)) return Scope{std::nullopt, types().dep_name(*s.type, n)};
     if (s.ns) {
       for (const ast::DeclSema& d : q_->namespace_members(*s.ns, n)) {
@@ -490,10 +509,6 @@ public:
       }
       return std::nullopt;
     }
-    if (s.type && types().is_class(*s.type))
-      if (const ClassRec* cr = class_rec(types().class_of(*s.type)))
-        for (const auto& [name, t] : cr->types)
-          if (name == n) return Scope{std::nullopt, t};
     return std::nullopt;
   }
   // `S::n` naming a type.
@@ -1228,7 +1243,7 @@ public:
 
   Templates templates() {
     Templates t(*w_, classes());
-    t.complete_class = [this](EntityId c) { return class_rec(c); };
+    t.member_type = [this](EntityId c, NameId n) { return member_type(c, n); };
     return t;
   }
   bool dependent(const Ex& e) {

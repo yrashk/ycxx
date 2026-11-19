@@ -2102,6 +2102,15 @@ private:
   // A typedef-name or alias-declaration that is a member of class `c` ([class.mem],
   // [dcl.typedef]): a type of the class's scope, `C::name` outside it.
   bool member_alias(const ast::DeclSema& c, NameId name, u32 at, QualType type) {
+    // [temp.local]/6: not a template parameter's name; [class.mem.general]: not the class's.
+    if (s_.template_param(name)) {
+      s_.diag(at, Diag::redeclared_local, name);
+      return false;
+    }
+    if (name == s_.world().entities.rec(c.entity).name) {
+      s_.diag(at, Diag::member_named_as_class, name);
+      return false;
+    }
     if (member_declared(name)) {
       s_.diag(at, Diag::redeclared_member, name);
       return false;
@@ -2303,6 +2312,15 @@ private:
       s_.diag(d.qualifier_at, Diag::not_supported, Tk::kw_template);
       return false;
     }
+    // `typename C<U>::T` in the definition names the class's own member type T ([temp.dep.type]/1).
+    EntityId cls = s_.types().class_of(*t);
+    QualType own = s_.templates().resolve_dep_names(sem.type, [&](QualType q, NameId n) -> std::optional<QualType> {
+      if (!s_.types().is_class(q) || s_.types().class_of(q) != cls) return std::nullopt;
+      for (const auto& [name, mt] : cr->types)
+        if (name == n) return mt;
+      return std::nullopt;
+    });
+    if (s_.types().canonical(own) != s_.types().canonical(sem.type)) sem.type = own;
     const sema::MemberDeclRec* m = nullptr;
     for (const sema::MemberDeclRec& r : cr->members)
       if (r.name == d.name && r.is_function == fn && s_.types().canonical(r.type) == s_.types().canonical(sem.type)) m = &r;
