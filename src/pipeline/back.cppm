@@ -671,6 +671,8 @@ std::string entity_name(EntityId e) {
             for (const ast::TemplateArg& x : w->ins.seqs.elements(a.elems)) p += (p.empty() ? "" : ", ") + one(x);
             return p;
           }
+          case ast::TemplateArgKind::template_:
+            return a.templ != EntityId::none ? std::string(w->ins.names.spelling(w->entities.rec(a.templ).name)) : w->types.spell(a.type);
         }
         return "?";
       };
