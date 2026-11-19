@@ -1561,6 +1561,41 @@ What the process allocates, attributed to the engine's cells, in the trace and t
 - Not yet: constrained `C auto`, `auto x = {…}`, `auto x(e)` at namespace scope, abbreviated
   function templates (#286); structured bindings (#285).
 
+## Lambdas, θ step 2 (#280, 2026-11-19)
+
+The closure-type design is [docs/design/closures.md](docs/design/closures.md) (decided by Fable,
+checked against Clang 23 and GCC 16 probes).
+
+- **Closure types:** unnamed `class_` entities whose scope is the enclosing function (or the
+  enclosing lambda's `operator()`), with the call operator's declared type and an ordinal per
+  signature in closing-brace order (`EntityRec::ordinal`, mixed into the identity through
+  `head`). Each is complete once its lambda's body ends, when its `ClassRec` is published with
+  the implicit special members `special_members` gives (non-trivial copies and destructors of
+  captures included). A capturing closure's default constructor is deleted.
+- **Analysis** (`Sema::open_lambda`, `close_lambda`, the `LambdaFrame` stack): the body is
+  parsed inside the enclosing part with its own locals; a name that resolves to an enclosing
+  function's local or an init-capture is captured by every lambda between, by copy or by
+  reference, explicitly or by the capture-default, outermost first; a constant usable in
+  constant expressions is its value, not a capture. `this` and `*this`, init-captures, `mutable`,
+  trailing return types and deduced return types (step 1). Captures are `Member`s of `This` in
+  the body, and the lambda-expression is a `Lambda` node of `MemberInit`s. `BodySema::closures`
+  keeps each `ClosureDef`.
+- **Calls:** a class object's `operator()` is found and called ([over.call.object]); a member
+  function called on a prvalue object materializes it. A captureless closure converts to a
+  pointer to function through its static invoker (assignment, arguments, unary `+`).
+- **Emission and ABI:** the front end emits each closure's `operator()` and invoker with the
+  body that has it. Mangling: `<local-name>`s with `Ul <lambda-sig> E [n] _`, the invoker
+  `8__invoke`, closure types as template arguments; a specialization for a TU-local closure is
+  TU-local. Names and capture layout are checked against Clang objects (`p2-impl-mangle`).
+- Tests: `tests/own/lambda/` (56 spec-only, 1 ABI): 55 pass, 2 XFAIL (default arguments #300,
+  block-scope statics #291).
+- Not yet: lambdas outside function bodies (#338); generic lambdas, template lambdas, pack
+  captures and constexpr lambdas (#281); the conversion function's own symbol, conversions in
+  contextual and operator contexts, invokers for class or variadic parameters (#339); arrays of
+  non-trivially-copyable classes captured by copy (#353); weak definitions of closure members in
+  inline functions (#124). A constant named by a lambda with a capture-default is captured, where
+  Clang captures it only when it is odr-used (a layout difference for such closures, #355).
+
 ## Nested namespace definitions, ι (#153, #337, 2026-11-19)
 
 - `namespace a::b::c { }` (C++17) and `namespace a::inline b { }` (C++20), [namespace.def]: the

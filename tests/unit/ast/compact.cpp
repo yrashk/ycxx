@@ -31,7 +31,8 @@ int main() {
     NodeId local = b.add(LocalVar{0, {call, 2}, EntityId::none}, 9);
     body = b.commit(BodySema{b.add(Compound{b.list({{local, 1}})}, 11),
                              b.seq({LocalRec{in.names.intern("v"), int_t, EntityId::none, local, 0}}),
-                             b.seq(std::span<const ExpansionRec>{}), b.seq(std::span<const u32>{})});
+                             b.seq(std::span<const ExpansionRec>{}), b.seq(std::span<const u32>{}), QualType{}, 0,
+                             b.seq(std::span<const ClosureDef>{})});
     DeclSema d{f_e, int_t, DeclKind::function, Linkage::external, Storage::none, Access::none, 0,
                b.seq<NodeId>({}), NodeId::none, ConstId::none, NodeId::none,
                b.seq({ParamSema{EntityId::none, int_t, in.names.intern("p"), two, 0}}),

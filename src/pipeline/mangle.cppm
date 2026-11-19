@@ -16,26 +16,6 @@ export namespace ycxx::pipeline {
 
 namespace ast = ycxx::ast;
 
-// Fails, naming the type, on what the α subset does not mangle yet.
-// How a class, enumeration or namespace is named: its identifier ("(anonymous)" for an unnamed
-// namespace), and the class or namespace it is in, or none for the global namespace.
-struct ClassName {
-  std::string name;
-  ast::EntityId scope = ast::EntityId::none;
-  // A class template specialization's template and arguments (§5.1.5.7).
-  ast::EntityId templ = ast::EntityId::none;
-  std::vector<ast::TemplateArg> args;
-  bool is_class = false;  // a class, not a namespace: its member functions have `this`
-};
-using ClassNames = std::function<ClassName(ast::EntityId)>;
-
-// `scope` is the class or namespace a function is a member of, none for the global namespace;
-// a scoped name is a <nested-name> (§5.1.5.3).
-std::expected<std::string, std::string> mangled_function(const ast::Interners& in, std::string_view name,
-                                                         ast::QualType type, const ClassNames& classes = {},
-                                                         ast::EntityId scope = ast::EntityId::none,
-                                                         bool special = false);
-
 // A function template specialization (§5.1.2, §5.1.5): its <template-args>, then its template's
 // signature, return type first, with each template parameter as a <template-param> (§5.1.5.8).
 // `pattern` is the template's function type; `args` the specialization's arguments.
@@ -49,6 +29,42 @@ struct TemplateSpec {
   // Clang writes no `Tt` for it.
   std::vector<std::uint8_t> same_heads{};
 };
+// A function a closure type is local to: what its <encoding> is mangled from, as for its symbol.
+struct LocalFunction {
+  std::string name;
+  ast::QualType type{};
+  ast::EntityId scope = ast::EntityId::none;
+  bool special = false;
+  std::optional<TemplateSpec> spec;
+};
+
+// Fails, naming the type, on what the α subset does not mangle yet.
+// How a class, enumeration or namespace is named: its identifier ("(anonymous)" for an unnamed
+// namespace), and the class or namespace it is in, or none for the global namespace.
+struct ClassName {
+  std::string name;
+  ast::EntityId scope = ast::EntityId::none;
+  // A class template specialization's template and arguments (§5.1.5.7).
+  ast::EntityId templ = ast::EntityId::none;
+  std::vector<ast::TemplateArg> args;
+  bool is_class = false;  // a class, not a namespace: its member functions have `this`
+  // A closure type (docs/design/closures.md): its function call operator's declared type, whose
+  // parameters are its <lambda-sig>, its number among its context's closures of that signature,
+  // and the function it is local to (`scope`), as a <local-name> (§5.1.6, §5.1.8).
+  bool closure = false;
+  ast::QualType closure_type{};
+  std::uint32_t closure_number = 0;
+  std::shared_ptr<const LocalFunction> local{};
+};
+using ClassNames = std::function<ClassName(ast::EntityId)>;
+
+// `scope` is the class or namespace a function is a member of, none for the global namespace;
+// a scoped name is a <nested-name> (§5.1.5.3).
+std::expected<std::string, std::string> mangled_function(const ast::Interners& in, std::string_view name,
+                                                         ast::QualType type, const ClassNames& classes = {},
+                                                         ast::EntityId scope = ast::EntityId::none,
+                                                         bool special = false);
+
 // `special`: `name` is a <ctor-dtor-name> (`C1`), a constructor template's specialization.
 std::expected<std::string, std::string> mangled_specialization(const ast::Interners& in, std::string_view name,
                                                                const TemplateSpec& spec, const ClassNames& classes = {},
@@ -109,6 +125,8 @@ std::string substitution(std::size_t index) {
   } while (n);
   return "S" + digits + "_";
 }
+
+std::optional<std::string_view> operator_code(std::string_view op, std::size_t arity);
 
 class Mangler {
  public:
@@ -276,6 +294,17 @@ class Mangler {
     std::uint64_t key = (std::uint64_t{1} << 32) | std::to_underlying(e);
     if (auto s = find(key)) return *s;
     ClassName n = classes_ ? classes_(e) : ClassName{};
+    if (n.closure) {
+      // A closure type as a type: the <local-name> `Z <encoding> E <closure-type-name>` (§5.1.6).
+      if (!n.local) return std::unexpected("a closure type whose function is unknown");
+      auto l = local_encoding(*n.local);
+      if (!l) return l;
+      auto sig = signature(in_.types.get<ast::TFunction>(in_.types.canon(n.closure_type)), false);
+      if (!sig) return sig;
+      std::string r = "Z" + *l + "EUl" + *sig + "E" + (n.closure_number ? std::to_string(n.closure_number - 1) : "") + "_";
+      candidates_.push_back(key);
+      return r;
+    }
     if (n.name.empty()) return std::unexpected("a class whose name is unknown");
     if (n.templ != ast::EntityId::none) {
       // <unscoped-template-name> <template-args>, or inside a namespace a <nested-name> ending in
@@ -299,6 +328,16 @@ class Mangler {
     std::uint64_t key = (std::uint64_t{1} << 32) | std::to_underlying(e);
     if (auto s = find(key)) return *s;
     ClassName n = classes_ ? classes_(e) : ClassName{};
+    if (n.closure) {
+      // <closure-type-name> ::= Ul <lambda-sig> E [<number>] _, its parameter types or `v`; the
+      // n-th closure of one signature in its context is numbered n − 2 (§5.1.8). Its context is
+      // the <local-name> before the nested-name it begins.
+      auto sig = signature(in_.types.get<ast::TFunction>(in_.types.canon(n.closure_type)), false);
+      if (!sig) return sig;
+      std::string r = "Ul" + *sig + "E" + (n.closure_number ? std::to_string(n.closure_number - 1) : "") + "_";
+      candidates_.push_back(key);
+      return r;
+    }
     if (n.name.empty()) return std::unexpected("a scope whose name is unknown");
     if (n.templ != ast::EntityId::none) return specialization_prefix(e, n);
     std::string r;
@@ -311,6 +350,78 @@ class Mangler {
     candidates_.push_back(key);
     return r;
   }
+  // A function's <encoding> (§5.1.2), without `_Z`: its <name>, a <nested-name> in a class or
+  // namespace, then its parameter types. A member of a closure type is in a <local-name>, the
+  // closure's function's <encoding> first (§5.1.6).
+  std::expected<std::string, std::string> encoding(std::string_view name, ast::QualType type, ast::EntityId scope, bool special) {
+    ast::QualType c = in_.types.canon(type);
+    if (!in_.types.is<ast::TFunction>(c)) return std::unexpected("not a function type");
+    auto f = in_.types.get<ast::TFunction>(c);
+    // An <operator-name> (§5.1.5.1) or a <source-name>; `+`, `-`, `*` and `&` mangle by arity,
+    // `this` counted for a member.
+    ClassName sc = scope != ast::EntityId::none && classes_ ? classes_(scope) : ClassName{};
+    std::size_t arity = in_.seqs.size(f.params) + (sc.is_class ? 1 : 0);
+    std::string unqualified = std::format("{}{}", name.size(), name);
+    if (name.starts_with("operator") && name.size() > 8) {
+      auto code = operator_code(name.substr(8), arity);
+      if (!code) return std::unexpected(std::format("the operator function '{}'", name));
+      unqualified = *code;
+    }
+    std::string out = unqualified;
+    if (scope != ast::EntityId::none) {
+      std::string local;
+      if (sc.closure) {
+        if (!sc.local) return std::unexpected("a closure type whose function is unknown");
+        auto l = local_encoding(*sc.local);
+        if (!l) return l;
+        local = "Z" + *l + "E";
+      }
+      // <nested-name> ::= N [<CV-qualifiers>] <prefix> <unqualified-name> E, the member function's
+      // cv-qualifiers in the order r V K (§5.1.5.3).
+      auto p = prefix(scope);
+      if (!p) return p;
+      std::string cv = std::string(std::to_underlying(f.cv) & 2 ? "V" : "") + (std::to_underlying(f.cv) & 1 ? "K" : "");
+      // A <ctor-dtor-name> (`C1`, `D1`) stands as it is; other names are <source-name>s.
+      out = local + std::format("N{}{}{}E", cv, *p, special ? std::string(name) : unqualified);
+    }
+    auto sig = signature(f, false);
+    if (!sig) return sig;
+    return out + *sig;
+  }
+  // A function template specialization's <encoding>, without `_Z` (§5.1.2).
+  // `special`: `name` is a <ctor-dtor-name> (`C1`), a constructor template's specialization.
+  std::expected<std::string, std::string> specialization_encoding(std::string_view name, const TemplateSpec& spec, ast::EntityId scope,
+                                                                  bool special = false) {
+    // Template parameters are mangled relative to the specialization's own head (a member
+    // template's is inside its class's), for its encoding only.
+    ast::u16 saved = own_depth;
+    if (!spec.params.empty()) own_depth = spec.params[0].depth;
+    auto r = specialization_encoding_at(name, spec, scope, special);
+    own_depth = saved;
+    return r;
+  }
+  std::expected<std::string, std::string> specialization_encoding_at(std::string_view name, const TemplateSpec& spec, ast::EntityId scope,
+                                                                     bool special) {
+    ast::QualType c = in_.types.canon(spec.pattern);
+    auto n = template_name(name, scope, special);
+    if (!n) return n;
+    auto args = spec.params.empty() ? template_args(spec.args) : own_template_args(spec.args, spec.params, spec.same_heads);
+    if (!args) return args;
+    // A variable template specialization: its name and arguments, no type (§5.1.2).
+    if (!in_.types.is<ast::TFunction>(c)) return scope != ast::EntityId::none ? std::format("N{}{}E", *n, *args) : *n + *args;
+    auto sig = signature(in_.types.get<ast::TFunction>(c), !special);  // a constructor has no return type
+    if (!sig) return sig;
+    // In a namespace, a <nested-name> ending in the template-args (§5.1.5.3); a member function
+    // template's cv-qualifiers after the `N`.
+    ast::Cv fcv = in_.types.get<ast::TFunction>(c).cv;
+    std::string cv = std::string(std::to_underlying(fcv) & 2 ? "V" : "") + (std::to_underlying(fcv) & 1 ? "K" : "");
+    return scope != ast::EntityId::none ? std::format("N{}{}{}E{}", cv, *n, *args, *sig) : *n + *args + *sig;
+  }
+  std::expected<std::string, std::string> local_encoding(const LocalFunction& f) {
+    if (f.spec) return specialization_encoding(f.name, *f.spec, f.scope);
+    return encoding(f.name, f.type, f.scope, f.special);
+  }
+
   // <bare-function-type>: the return type when `with_return`, then the parameter types, `v` for
   // none (§5.1.5.3).
   std::expected<std::string, std::string> signature(const ast::TFunction& f, bool with_return) {
@@ -559,59 +670,19 @@ std::optional<std::string_view> operator_code(std::string_view op, std::size_t a
 std::expected<std::string, std::string> mangled_function(const ast::Interners& in, std::string_view name,
                                                          ast::QualType type, const ClassNames& classes,
                                                          ast::EntityId scope, bool special) {
-  ast::QualType c = in.types.canon(type);
-  if (!in.types.is<ast::TFunction>(c)) return std::unexpected("not a function type");
-  auto f = in.types.get<ast::TFunction>(c);
   Mangler m(in, classes);
-  // An <operator-name> (§5.1.5.1) or a <source-name>; `+`, `-`, `*` and `&` mangle by arity, `this`
-  // counted for a member.
-  std::size_t arity = in.seqs.size(f.params) + (scope != ast::EntityId::none && classes && classes(scope).is_class ? 1 : 0);
-  std::string unqualified = std::format("{}{}", name.size(), name);
-  if (name.starts_with("operator") && name.size() > 8) {
-    auto code = operator_code(name.substr(8), arity);
-    if (!code) return std::unexpected(std::format("the operator function '{}'", name));
-    unqualified = *code;
-  }
-  std::string out = "_Z" + unqualified;
-  if (scope != ast::EntityId::none) {
-    // <nested-name> ::= N [<CV-qualifiers>] <prefix> <unqualified-name> E, the member function's
-    // cv-qualifiers in the order r V K (§5.1.5.3).
-    auto prefix = m.prefix(scope);
-    if (!prefix) return prefix;
-    std::string cv = std::string(std::to_underlying(f.cv) & 2 ? "V" : "") + (std::to_underlying(f.cv) & 1 ? "K" : "");
-    // A <ctor-dtor-name> (`C1`, `D1`) stands as it is; other names are <source-name>s.
-    out = special ? std::format("_ZN{}{}{}E", cv, *prefix, name) : std::format("_ZN{}{}{}E", cv, *prefix, unqualified);
-  }
-  auto params = in.seqs.elements(f.params);
-  if (params.empty() && !f.variadic) out += "v";
-  for (ast::QualType p : params) {
-    auto s = m.type(p);
-    if (!s) return s;
-    out += *s;
-  }
-  if (f.variadic) out += "z";
-  return out;
+  auto e = m.encoding(name, type, scope, special);
+  if (!e) return e;
+  return "_Z" + *e;
 }
 
 std::expected<std::string, std::string> mangled_specialization(const ast::Interners& in, std::string_view name,
                                                                const TemplateSpec& spec, const ClassNames& classes,
                                                                ast::EntityId scope, bool special) {
-  ast::QualType c = in.types.canon(spec.pattern);
   Mangler m(in, classes);
-  if (!spec.params.empty()) m.own_depth = spec.params[0].depth;
-  auto n = m.template_name(name, scope, special);
-  if (!n) return n;
-  auto args = spec.params.empty() ? m.template_args(spec.args) : m.own_template_args(spec.args, spec.params, spec.same_heads);
-  if (!args) return args;
-  // A variable template specialization: its name and arguments, no type (§5.1.2).
-  if (!in.types.is<ast::TFunction>(c)) return scope != ast::EntityId::none ? std::format("_ZN{}{}E", *n, *args) : "_Z" + *n + *args;
-  auto sig = m.signature(in.types.get<ast::TFunction>(c), !special);  // a constructor has no return type
-  if (!sig) return sig;
-  // In a namespace, a <nested-name> ending in the template-args (§5.1.5.3).
-  // A member function template's cv-qualifiers, after the `N` (§5.1.5.3).
-  ast::Cv fcv = in.types.get<ast::TFunction>(c).cv;
-  std::string cv = std::string(std::to_underlying(fcv) & 2 ? "V" : "") + (std::to_underlying(fcv) & 1 ? "K" : "");
-  return scope != ast::EntityId::none ? std::format("_ZN{}{}{}E{}", cv, *n, *args, *sig) : "_Z" + *n + *args + *sig;
+  auto e = m.specialization_encoding(name, spec, scope, special);
+  if (!e) return e;
+  return "_Z" + *e;
 }
 
 std::expected<std::string, std::string> symbol_name(const ast::Interners& in, std::string_view name, ast::QualType type,
