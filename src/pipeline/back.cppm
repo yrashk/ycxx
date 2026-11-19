@@ -1019,22 +1019,41 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
     used.insert(ir::raw(d.entity));
     for (const aarch64::DataReloc& r : d.relocs) used.insert(ir::raw(r.target));
   }
+  // The functions closure types are local to, by entity (docs/design/closures.md).
+  std::map<std::uint32_t, const Entity*> by_id;
+  for (const Entity& e : tu.entities) by_id.emplace(ir::raw(e.id), &e);
+  auto spec_of = [](const Entity& e) {
+    return TemplateSpec{e.template_type.value_or(e.type), e.template_args, e.template_params, e.template_same_heads};
+  };
+  ClassNames names = [&](EntityId c) {
+    const sema::World* w = universe().world;
+    if (!w) return ClassName{};
+    const sema::EntityRec& r = w->entities.rec(c);
+    ClassName n{std::string(w->ins.names.spelling(r.name)), r.scope, r.templ, r.args,
+                r.kind == sema::EntityKind::class_ || r.kind == sema::EntityKind::class_template};
+    if (r.kind == sema::EntityKind::class_ && n.name.empty() && r.scope != EntityId::none) {
+      auto f = by_id.find(ir::raw(r.scope));
+      n.closure = true;
+      n.closure_type = r.type;
+      n.closure_number = r.ordinal;
+      if (f != by_id.end()) {
+        const Entity& fe = *f->second;
+        std::string fname = fe.special == Special::constructor ? "C1" : fe.special == Special::destructor ? "D1" : fe.name;
+        n.local = std::make_shared<const LocalFunction>(LocalFunction{
+            fname, fe.type, fe.scope, fe.special != Special::none,
+            fe.template_type ? std::optional(spec_of(fe)) : std::nullopt});
+      }
+    }
+    return n;
+  };
   for (const Entity& e : tu.entities) {
     if (!used.contains(ir::raw(e.id))) continue;
     // The complete-object constructor and destructor (C1, D1): with no virtual bases they are the
     // base-object ones too (#136).
     std::string name_ = e.special == Special::constructor ? "C1" : e.special == Special::destructor ? "D1" : e.name;
     TemplateSpec spec{e.template_type.value_or(e.type), e.template_args, e.template_params, e.template_same_heads};
-    auto name = symbol_name(
-        in, name_, e.type, e.is_function, e.lang,
-        [](EntityId c) {
-          const sema::World* w = universe().world;
-          if (!w) return ClassName{};
-          const sema::EntityRec& r = w->entities.rec(c);
-          return ClassName{std::string(w->ins.names.spelling(r.name)), r.scope, r.templ, r.args,
-                           r.kind == sema::EntityKind::class_ || r.kind == sema::EntityKind::class_template};
-        },
-        e.scope, e.special != Special::none, e.template_type ? &spec : nullptr);
+    auto name = symbol_name(in, name_, e.type, e.is_function, e.lang, names, e.scope, e.special != Special::none,
+                            e.template_type ? &spec : nullptr);
     if (!name) {
       errors.push_back({e.at, std::format("the name of '{}': {} is not supported yet", e.name, name.error())});
       continue;

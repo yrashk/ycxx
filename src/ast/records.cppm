@@ -148,6 +148,29 @@ struct LocalRec {
   constexpr bool operator==(const LocalRec&) const = default;
 };
 
+// A lambda-expression's closure type and its members' definitions, made by the analysis of the
+// part it is in (docs/design/closures.md): the closure class, its function call operator (its
+// type with the return type deduced, its body and the body's own locals, parameters first), and
+// for a captureless lambda the static invoker and the conversion function to a pointer to
+// function ([expr.prim.lambda.closure]/8–9). `begin`, `body_begin` and `end` are the lambda's
+// token offsets in the part: its `[`, its body's `{`, and just past its `}`.
+struct ClosureDef {
+  EntityId closure;
+  EntityId call;
+  QualType call_type;
+  NodeId body;
+  SeqId<LocalRec> locals;
+  EntityId invoker;
+  EntityId conversion;
+  NodeId invoker_body;
+  NodeId conversion_body;
+  u32 begin;
+  u32 body_begin;
+  u32 end;
+  u16 flags;  // closure_flag
+  constexpr bool operator==(const ClosureDef&) const = default;
+};
+
 // A templated body keeps what its instantiations need of it (§6.4): its pack expansions, and the
 // offsets of its calls that were dependent ([temp.dep.candidate]).
 struct BodySema {
@@ -159,13 +182,15 @@ struct BodySema {
   // with the return type its body deduced, when `deduced` is set.
   QualType deduced_type{};
   u8 deduced = 0;
+  // Its lambdas' closures, in the order their bodies end (docs/design/closures.md).
+  SeqId<ClosureDef> closures{};
   constexpr bool operator==(const BodySema&) const = default;
 };
 
 // The element types of the `seqs` interner: one pool each, indexed by position in this list.
 using SeqElements = closed_list<NodeId, EntityId, QualType, NameId, ParamSema, DeclSema, BaseSpec,
                                 MemberRec, LocalRec, u8, u32, ConstId, TemplateArg, TemplateParamSema, PackRefRec,
-                                ExpansionRec>;
+                                ExpansionRec, ClosureDef>;
 
 static_assert(std::ranges::all_of(SeqElements::infos, [](std::meta::info t) {
   if (std::meta::is_class_type(t)) return check_record(t);

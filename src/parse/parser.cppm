@@ -342,7 +342,9 @@ public:
         bump();
         bump();
         int saved = std::exchange(angle_, 0);
+        ++s_->unevaluated;
         Ex e = expression();
+        --s_->unevaluated;
         angle_ = saved;
         if (!e.ok() || !expect(Tk::r_paren)) {
           d.ok = false;
@@ -2164,7 +2166,9 @@ public:
         s_->diag(pos(), Diag::expected_type_specifier);
         return {NodeId::none, begin, pos()};
       }
+      ++s_->unevaluated;
       Ex e = unary_expression();
+      --s_->unevaluated;
       if (!e.ok()) return {NodeId::none, begin, pos()};
       Ex r = s_->size_of(e.type(), false, begin, pos());
       return {r.id, begin, pos(), r.info};
@@ -2422,6 +2426,13 @@ public:
       bump();
       return {NodeId::none, begin, pos()};
     case Tk::l_square:
+      // [dcl.attr.grammar]/7: `[[` begins an attribute-specifier only, never a lambda.
+      if (kind(1) == Tk::l_square) {
+        s_->diag(begin, Diag::not_supported, Tk::l_square);
+        bump();
+        return {NodeId::none, begin, pos()};
+      }
+      return lambda_expression();
     case Tk::kw_operator:
     case Tk::tilde:
     case Tk::kw_typeid:
@@ -2618,6 +2629,184 @@ public:
     return s_->node(ast::Compound{s_->builder().list(cs)}, begin, pos());
   }
 
+
+  // lambda-expression ([expr.prim.lambda]): its introducer and declarator, read in the enclosing
+  // context, then its compound-statement as the body of the closure's function call operator.
+  Ex lambda_expression() {
+    using K = sema::Sema::CaptureSpec::Kind;
+    sema::Sema::LambdaSpec spec;
+    spec.begin = pos();
+    bump();
+    bool intro = true;  // still in the lambda-introducer, whose `]` recovery skips first
+    auto fail = [&] {
+      if (intro) {
+        for (int depth = 0; !at_end(); bump()) {
+          if (is(Tk::l_square)) ++depth;
+          if (is(Tk::r_square) && depth-- == 0) {
+            bump();
+            break;
+          }
+          if (is(Tk::semi) || is(Tk::l_brace)) break;
+        }
+      }
+      skip_to_brace_end_of_lambda();
+      return Ex{NodeId::none, spec.begin, pos()};
+    };
+    // lambda-capture ([expr.prim.lambda.capture]): a capture-default, then captures.
+    if (!is(Tk::r_square)) spec.has_capture = true;
+    if ((is(Tk::equal) || is(Tk::amp)) && (kind(1) == Tk::comma || kind(1) == Tk::r_square)) {
+      spec.default_capture = is(Tk::equal) ? 1 : 2;
+      bump();
+      if (is(Tk::comma)) bump();
+    }
+    while (!is(Tk::r_square) && !at_end()) {
+      sema::Sema::CaptureSpec c;
+      c.at = pos();
+      if (is(Tk::kw_this)) {
+        c.kind = K::this_;
+        c.name = s_->world().ins.names.intern("this");
+        bump();
+      } else if (is(Tk::star) && kind(1) == Tk::kw_this) {
+        c.kind = K::star_this;
+        c.name = s_->world().ins.names.intern("this");
+        bump();
+        bump();
+      } else {
+        bool ref = accept(Tk::amp);
+        if (!is(Tk::identifier)) {
+          s_->diag(pos(), is(Tk::ellipsis) ? Diag::not_supported : Diag::expected_unqualified_id, kind());
+          return fail();
+        }
+        c.at = pos();
+        c.name = name_of(tok());
+        bump();
+        if (is(Tk::ellipsis)) {  // a pack capture ([expr.prim.lambda.capture]/17)
+          s_->diag(pos(), Diag::not_supported, Tk::ellipsis);
+          return fail();
+        }
+        if (is(Tk::equal) || is(Tk::l_brace) || is(Tk::l_paren)) {
+          // An init-capture: `x = e`, `x{e}`, `x(e)` ([expr.prim.lambda.capture]/6).
+          c.kind = ref ? K::init_ref : K::init_copy;
+          if (accept(Tk::equal)) {
+            c.init = assignment_expression();
+          } else {
+            bool brace = is(Tk::l_brace);
+            bump();
+            c.init = assignment_expression();
+            if (!expect(brace ? Tk::r_brace : Tk::r_paren)) return fail();
+          }
+        } else {
+          c.kind = ref ? K::ref : K::copy;
+          // [expr.prim.lambda.capture]/2: with `&` a simple capture is not by reference, with `=`
+          // not by copy.
+          if ((spec.default_capture == 2 && ref) || (spec.default_capture == 1 && !ref)) {
+            s_->diag(c.at, Diag::capture_redundant, c.name);
+            return fail();
+          }
+          c.source = s_->capture_source(c.name);
+          if (!c.source) {
+            s_->diag(c.at, Diag::cannot_capture, c.name);
+            return fail();
+          }
+          c.init = s_->captured(c.source->first, c.source->second, c.name, c.at, c.at + 1);
+        }
+      }
+      spec.captures.push_back(std::move(c));
+      if (!accept(Tk::comma)) break;
+      if (is(Tk::r_square)) {  // a capture follows a comma ([expr.prim.lambda.capture]/1)
+        s_->diag(pos(), Diag::expected_unqualified_id);
+        return fail();
+      }
+    }
+    if (!expect(Tk::r_square)) return fail();
+    intro = false;
+    if (is(Tk::less)) {  // a template-parameter-list: step 3 (#281)
+      s_->diag(pos(), Diag::not_supported, Tk::less);
+      return fail();
+    }
+    // lambda-declarator ([expr.prim.lambda.general]): parameters, specifiers, trailing return type;
+    // without parameters, it may still have specifiers (C++23).
+    if (is(Tk::l_paren) || is(Tk::kw_mutable) || is(Tk::kw_constexpr) || is(Tk::kw_noexcept) || is(Tk::arrow) ||
+        is(Tk::kw_static) || is(Tk::kw_consteval)) {
+      Suffix ps;
+      if (accept(Tk::l_paren)) {
+        bool ok = true;
+        placeholder_params = true;
+        ps = parameters(ok);
+        placeholder_params = false;
+        if (!ok) return fail();
+      }
+      for (const Param& p : ps.params) {
+        if (p.pack || s_->types().has_placeholder(p.type)) {  // generic lambdas: step 3 (#281)
+          s_->diag(p.at, Diag::not_supported, Tk::kw_auto);
+          return fail();
+        }
+        spec.params.push_back({p.name, p.type, p.at});
+      }
+      spec.variadic = ps.variadic;
+      bool constexpr_ = false;
+      for (;;) {
+        // [expr.prim.lambda.general]/3: each lambda-specifier at most once.
+        if ((is(Tk::kw_mutable) && spec.mutable_) || (is(Tk::kw_constexpr) && constexpr_)) {
+          s_->diag(pos(), Diag::duplicate_specifier, kind());
+          return fail();
+        }
+        if (accept(Tk::kw_mutable)) spec.mutable_ = true;
+        else if (accept(Tk::kw_constexpr)) {
+          constexpr_ = true;
+        } else if (is(Tk::kw_consteval) || is(Tk::kw_static)) {
+          s_->diag(pos(), Diag::not_supported, kind());
+          return fail();
+        } else break;
+      }
+      if (is(Tk::kw_noexcept)) {  // accepted, not part of the type yet (#219)
+        bump();
+        if (is(Tk::l_paren)) {
+          bump();
+          Ex e = constant_expression();
+          if (!e.ok() || !expect(Tk::r_paren)) return fail();
+        }
+      }
+      skip_attributes();
+      if (accept(Tk::arrow)) {
+        s_->push_scope();
+        for (const Param& p : ps.params)
+          if (p.name != s_->no_name()) s_->declare_local(p.name, p.type, sema::local_flag::parameter, p.at, false);
+        auto t = type_id();
+        s_->pop_scope();
+        if (!t) return fail();
+        spec.trailing = *t;
+      }
+    }
+    if (!is(Tk::l_brace)) {
+      s_->diag(pos(), Diag::expected_token, Tk::l_brace);
+      return fail();
+    }
+    if (!s_->open_lambda(std::move(spec))) {
+      skip_to_brace_end();
+      return Ex{NodeId::none, spec.begin, pos()};
+    }
+    u32 body_begin = pos();
+    int saved = std::exchange(angle_, 0);
+    Ex body = compound_statement();
+    angle_ = saved;
+    return s_->close_lambda(body, body_begin, pos());
+  }
+  // After an error in a lambda's introducer or declarator: past its body, if it has one.
+  void skip_to_brace_end_of_lambda() {
+    int depth = 0;
+    while (!at_end()) {
+      Tk k = kind();
+      if (k == Tk::l_paren || k == Tk::l_square) ++depth;
+      if ((k == Tk::r_paren || k == Tk::r_square) && --depth < 0) return;
+      if (depth == 0 && (k == Tk::semi || k == Tk::comma)) return;
+      if (k == Tk::l_brace) {
+        skip_to_brace_end();
+        return;
+      }
+      bump();
+    }
+  }
 
   // A substatement that is not a compound-statement has its own block scope ([stmt.pre]).
   Ex substatement() {
@@ -3289,6 +3478,8 @@ public:
         init = s_->default_init(d.type, d.name_at, pos());  // checked when the template is instantiated
       } else if (!s_->require_complete(d.type, d.name_at)) {
         // Default-initialization needs a complete object type ([dcl.init.general]).
+      } else if (s_->default_deleted(d.type)) {
+        s_->diag(d.name_at, Diag::deleted_constructor, d.type);
       } else if (s_->has_member_inits(d.type)) {
         init = s_->default_init(d.type, d.name_at, pos());
       } else if (spec.is_constexpr) {

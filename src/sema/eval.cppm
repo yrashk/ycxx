@@ -84,7 +84,7 @@ public:
     irgen::FunctionInput input{EntityId::none, thunk,
                                ast::BodySema{ret, in.intern_seq(std::span<const ast::LocalRec>(locals)),
                                              in.intern_seq(std::span<const ast::ExpansionRec>{}), in.intern_seq(std::span<const u32>{}),
-                                             ast::QualType{}, 0},
+                                             ast::QualType{}, 0, in.intern_seq(std::span<const ast::ClosureDef>{})},
                                s_->item(), 0, true, s_->local_values()};
     EvalFacts facts(s_->world(), *q_);
     auto body = irgen::function_ir(in, input, facts);

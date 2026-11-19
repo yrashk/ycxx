@@ -52,6 +52,9 @@ build/bin/ycxx cxx hello.cpp -o hello && ./hello
   `__make_integer_seq`;
 - placeholder types: `auto` and `decltype(auto)` variables (`const auto&`, `auto*`, `auto&&`),
   deduced and trailing return types, in templates too;
+- lambdas in function bodies: captures by copy and by reference, capture-defaults, `this` and
+  `*this`, init-captures, `mutable`, conversion to a pointer to function, and closures passed to
+  and called from function templates, with Clang's names for closure types;
 - casts, `sizeof`/`alignof` (classes included), `decltype`, and calls through pointers to
   functions;
 - constant evaluation on ycxx's own interpreter: `constexpr`, `consteval`, `constinit`,
@@ -92,8 +95,8 @@ checked with the flags of its last build, or else with its line in the project's
 
 - The standard library and its headers. C headers such as `<stdio.h>` compile without warnings
   and `printf` runs; libycxx's `<cstdio>` still needs pointer-to-member types.
-- Lambdas, structured bindings, virtual functions, virtual base classes, inheriting constructors,
-  and bases of class templates.
+- Generic and constexpr lambdas, lambdas outside function bodies, structured bindings, virtual
+  functions, virtual base classes, inheriting constructors, and bases of class templates.
 - Member class and alias templates, conversion function templates, and constraints on class
   templates and their members.
 - Floating-point arithmetic, exceptions, and optimization (`-O`).
@@ -102,8 +105,8 @@ checked with the flags of its last build, or else with its line in the project's
 ### In progress
 
 - Standard headers, starting with `<cstdio>` ([#133](https://github.com/yrashk/ycxx/issues/133)).
-- `auto` and lambdas: placeholder types are done; lambdas and generic lambdas are next
-  ([#278](https://github.com/yrashk/ycxx/issues/278)).
+- `auto` and lambdas: placeholder types and lambdas are done; generic and constexpr lambdas are
+  next ([#278](https://github.com/yrashk/ycxx/issues/278)).
 
 Next come exceptions ([#89](https://github.com/yrashk/ycxx/issues/89)).
 
