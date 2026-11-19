@@ -3836,10 +3836,8 @@ void Program::special_members(u32 item, EntityId cls, sema::ClassRec& rec) {
   // [class.copy.ctor]/8, 10–11: the implicit move constructor, declared without a user-declared
   // copy or move constructor or destructor, is not trivial when a member's move is not.
   if (!user_copy && !user_move && user_dtor == EntityId::none) {
-    rec.move_usable = !rec.copy_deleted ||
-                      std::ranges::none_of(rec.fields, [&](const sema::FieldRec& f) {
-                        const sema::ClassRec* m = types.is_class(f.type) ? classes_.find(types.class_of(f.type)) : nullptr;
-                        return m && m->copy_deleted && !m->move_usable;
+    rec.move_usable = !rec.copy_deleted || std::ranges::none_of(rec.fields, [&](const sema::FieldRec& f) {
+                        return !types.is_reference(f.type) && classes_.unmovable(f.type);
                       });
     rec.move_nontrivial = std::ranges::any_of(rec.fields, [&](const sema::FieldRec& f) {
       return !types.is_reference(f.type) && classes_.move_nontrivial(f.type);

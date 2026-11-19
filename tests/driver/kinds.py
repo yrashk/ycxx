@@ -14,7 +14,7 @@
 execute() returns (result code, transcript, steps). Codes are lit's: PASS, FAIL, XFAIL, XPASS,
 UNSUPPORTED, UNRESOLVED (the test itself is malformed, or the oracles disagree), TIMEOUT.
 """
-import difflib, os, re, shutil, sys
+import difflib, os, re, shutil, subprocess, sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -241,17 +241,32 @@ def build_and_run(c, src, ctx, tr, flags, timeout, work, tag='', label='', env=N
     return True, r.status, r.stdout
 
 
-def peer_objects(test, ctx, tr, timeout, work):
-    """The test's PEER files, each compiled by Clang to an object linked with the test: a
-    mixed-object ABI test (DECISIONS §5.4)."""
-    objs = []
-    for name in (v.strip() for v in test.directives.get('PEER', [])):
+def peer_compiler(test, ctx):
+    """The compiler of a test's PEER files: the oracle Clang, or Apple Clang with
+    `PEER-WITH: apple-clang`, for `-fclass-call-abi=apple` (DECISIONS §1.6)."""
+    who = test.one('PEER-WITH', 'clang').strip()
+    if who == 'clang':
         clang = ctx.compilers['clang']
         need(clang, 'run')
+        return 'clang', clang.exe
+    if who == 'apple-clang':
+        r = subprocess.run(['xcrun', '--find', 'clang++'], capture_output=True, text=True) if sys.platform == 'darwin' else None
+        if r is None or r.returncode != 0 or not r.stdout.strip():
+            raise Unresolved('PEER-WITH: apple-clang needs Apple Clang (xcrun clang++)')
+        return 'apple-clang', r.stdout.strip()
+    raise Unresolved(f'unknown PEER-WITH: {who}')
+
+
+def peer_objects(test, ctx, tr, timeout, work):
+    """The test's PEER files, each compiled by the peer compiler to an object linked with the
+    test: a mixed-object ABI test (DECISIONS §5.4)."""
+    objs = []
+    for name in (v.strip() for v in test.directives.get('PEER', [])):
+        who, exe = peer_compiler(test, ctx)
         obj = Path(work) / (Path(name).stem + '.o')
-        r = run(tr, f'clang -c {name}', [clang.exe, '-std=c++26', '-fno-exceptions', '-c', name, '-o', str(obj)], timeout, cwd=test.path.parent)
+        r = run(tr, f'{who} -c {name}', [exe, '-std=c++26', '-fno-exceptions', '-c', name, '-o', str(obj)], timeout, cwd=test.path.parent)
         if r.status != 0:
-            raise Unresolved(f'clang could not compile the peer {name} (exit {r.status})')
+            raise Unresolved(f'{who} could not compile the peer {name} (exit {r.status})')
         objs.append(str(obj))
     return objs
 

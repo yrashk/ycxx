@@ -123,9 +123,10 @@ or reject test with any warning marker must get warnings exactly at its warning 
   pass is XPASS, which fails the run, so the mark goes when the cause does.
 - `FLAGS: -O2`, `TIMEOUT: 120` (seconds per command), `TIER: nightly`.
 - Run tests: `EXIT: 3` (default 0); `STDOUT: line` (repeatable), or a `<test>.stdout` file.
-  `PEER: name.cpp` (repeatable): Clang compiles `name.cpp`, next to the test and not a test itself,
-  to an object linked with the test: a mixed-object ABI test (DECISIONS §5.4). The peer can call
-  back into the test's functions.
+  `PEER: name.cpp` (repeatable): the oracle Clang compiles `name.cpp`, next to the test and not a
+  test itself, to an object linked with the test: a mixed-object ABI test (DECISIONS §5.4). The
+  peer can call back into the test's functions. `PEER-WITH: apple-clang` compiles the peers with
+  Apple Clang (`xcrun clang++`) instead, for tests of `-fclass-call-abi=apple` (§1.6).
 - Preprocess tests: `ORACLE: gcc` (default Clang); `PP-COMPARE: exact` keeps whitespace
   (default: line markers and blank lines dropped, whitespace runs collapsed).
 - Diff tests: `DIFF: run` (default: verdict, exit status and stdout), `verdict` or `preprocess`.

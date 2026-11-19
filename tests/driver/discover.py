@@ -17,7 +17,7 @@ KINDS = {  # file suffix -> kind
 SUITE_STAGE = {'draft': 'core', 'own': 'core', 'diff': 'wider', 'incremental': 'wider'}
 NOT_SUITES = {'driver', 'features', 'bootstrap'}  # bootstrap: #4's toolchain smoke test, run by tools/build
 
-DIRECTIVE = re.compile(r'^\s*//\s*(REQUIRES|XFAIL|FLAGS|TIMEOUT|EXIT|STDOUT|PP-COMPARE|ORACLE|DIFF|ACTION|MAIN|TIER|PEER):(.*)$')
+DIRECTIVE = re.compile(r'^\s*//\s*(REQUIRES|XFAIL|FLAGS|TIMEOUT|EXIT|STDOUT|PP-COMPARE|ORACLE|DIFF|ACTION|MAIN|TIER|PEER|PEER-WITH):(.*)$')
 # An expected error: `//! error` on its line, `//! error@+1` / `@-2` relative, `@12` absolute,
 # and an optional column, `//! error@+1:5`. `//! warning` expects a warning the same way.
 MARKER = re.compile(r'//!\s*(error|warning)(?:@([+-]?\d+))?(?::(\d+))?')

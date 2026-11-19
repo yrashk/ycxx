@@ -134,6 +134,7 @@ void serialize_into(engine::Sink& out, const Source& s) {
   engine::serialize(out, std::string(s.config.target->triple));
   engine::serialize(out, static_cast<std::uint64_t>(s.config.view));
   engine::serialize(out, static_cast<std::uint64_t>(s.config.template_depth));
+  engine::serialize(out, static_cast<std::uint64_t>(s.config.call_triviality ? 1 + std::to_underlying(*s.config.call_triviality) : 0));
 }
 Source deserialize_from(engine::Source& in, std::type_identity<Source>) {
   Source s;
@@ -148,6 +149,9 @@ Source deserialize_from(engine::Source& in, std::type_identity<Source>) {
   if (view > std::to_underlying(View::editor)) in.fail();
   s.config.view = static_cast<View>(view);
   s.config.template_depth = static_cast<std::uint32_t>(engine::deserialize<std::uint64_t>(in));
+  const auto calls = engine::deserialize<std::uint64_t>(in);
+  if (calls > 1 + std::to_underlying(ast::CallTriviality::apple)) in.fail();
+  if (calls != 0) s.config.call_triviality = static_cast<ast::CallTriviality>(calls - 1);
   return s;
 }
 

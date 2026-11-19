@@ -509,7 +509,8 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
   crashed under the driver.
   - Do: for ABI checks, compile with the driver's Clang (`tools/test` prints its path; see
     `tests/driver/kinds.py`), and try GCC too. When two compilers disagree, cross-link their
-    objects to find out which convention each one uses.
+    objects to find out which convention each one uses, and ask for a decision (#230 chose the
+    oracles by default, with `-fclass-call-abi=apple` for Apple Clang).
   - Learned on #116.
 - **A recovery loop that may consume nothing hangs only on real headers.** The requires-expression
   loop skipped to `;` after a failed requirement; at a `}` that consumed nothing, so 17 draft
