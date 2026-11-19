@@ -1348,6 +1348,7 @@ private:
         if (!ps_.template_head(1)) return bad();
         head_requires_clause();
         member_template_ = true;
+        two_heads_ = true;
       }
       ps_.skip_attributes();
       template_ = true;
@@ -2413,6 +2414,14 @@ private:
         return bad();
       }
       if (!ps_.template_head(u16(p_->enclosing_heads(k_).size()))) return bad();
+      // [temp.local]/6: a member template's parameter does not take the class template's names.
+      for (std::size_t h = 0; h + 1 < s_.template_scopes.size(); ++h)
+        for (const ast::TemplateParamSema& outer : s_.template_scopes[h])
+          for (const ast::TemplateParamSema& own : s_.template_scopes.back())
+            if (own.name == outer.name && own.name != s_.no_name()) {
+              s_.diag(0, Diag::redeclared_local, own.name);
+              return bad();
+            }
       head_requires_clause();
       member_template_ = true;
     }
@@ -3299,6 +3308,12 @@ private:
       // ([temp.mem.func]), not a template of its own; the head is its body's. The qualifier names
       // the current instantiation: X's own parameters, in order, as its arguments ([temp.dep.type]).
       bool class_member = false;
+      // [temp.mem]/1: two heads only before a member template of a class template.
+      if (two_heads_ && !(fn && d.qualified && d.scope.type && s_.types().is_class(*d.scope.type) &&
+                          s_.world().entities.rec(s_.types().class_of(*d.scope.type)).templ != EntityId::none)) {
+        s_.diag(d.name_at, Diag::extraneous_template_head);
+        return false;
+      }
       if (template_ && d.qualified && d.scope.type && s_.types().is_class(*d.scope.type)) {
         const sema::EntityRec& c = s_.world().entities.rec(s_.types().class_of(*d.scope.type));
         if (c.templ == EntityId::none) {
@@ -3705,6 +3720,8 @@ private:
   std::optional<u32> member_value_;
   // The member declaration being analysed is a member template's ([temp.mem]).
   bool member_template_ = false;
+  // The declaration has two template-heads: a member template of a class template's definition.
+  bool two_heads_ = false;
   bool single_linkage_spec_ = false;  // `extern "C" declaration` without braces
   bool template_ = false;             // the declaration is a template-declaration ([temp.pre])
   bool explicit_ = false;             // an explicit specialization ([temp.expl.spec])
