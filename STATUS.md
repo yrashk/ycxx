@@ -586,9 +586,10 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   fixed-address, sectionless `ET_EXEC`. Libraries need a slash-free `DT_SONAME` and a SysV
   `DT_HASH`, and cannot have loader dependencies. The linker checks direct calls against their
   default-visible, unversioned global functions. One RX thunk and one eager `R_X86_64_GLOB_DAT`
-  relocation in RW storage serve each imported name. The loader runs provider initializers and
-  resolves the imports by SONAME. Startup runs the executable's initializers, calls `main`, and
-  calls the loader's termination callback before exiting with `main`'s result. The interpreter
+  relocation in RW storage serve each imported name. The loader finds libraries by SONAME,
+  binds imported names, and runs provider initializers. Startup runs the executable's
+  initializers, calls `main`, and calls the loader's termination callback before exiting with
+  `main`'s result. The interpreter
   path and ordered shared inputs, including provider content fingerprints, enter the `Link`
   query. Target CRT selection, versioned imports and GNU-hash-only providers remain part of
   [#390](https://github.com/yrashk/ycxx/issues/390).

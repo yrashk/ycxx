@@ -51,7 +51,7 @@ struct ProgramInputs {
   std::vector<TuId> tus;
   std::vector<obj::object> objects;
   std::string identifier;
-  std::optional<link::elf::dynamic_options> dynamic;
+  std::optional<link::elf::dynamic_options> dynamic = std::nullopt;
 };
 struct [[=engine::input{engine::Durability::low}]] ProgramIn {
   using Key = ProgramId;
