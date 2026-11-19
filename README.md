@@ -124,6 +124,8 @@ checked with the flags of its last build, or else with its line in the project's
   templates and their members.
 - Exceptions, optimization (`-O`), and the extended floating-point types (`std::float16_t`, …).
 - Hosted linking and general-purpose ELF object interoperability for x86-64 Linux.
+- Namespace-scope dynamic initialization and destruction for x86-64 Linux.
+  [#387](https://github.com/yrashk/ycxx/issues/387)
 
 ### In progress
 

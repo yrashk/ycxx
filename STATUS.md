@@ -579,6 +579,9 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   value. The link query checks a source function's ABI when an asm label gives it the symbol
   `main`. A `main` supplied in an ELF object must already use one of those signatures. Hosted
   linking and general-purpose ELF object interoperability remain unsupported.
+- ELF code generation diagnoses translation units that require namespace-scope dynamic
+  initialization or destruction. Syntax-only analysis still accepts them.
+  [#387](https://github.com/yrashk/ycxx/issues/387)
 - Linux x86-64 CI runs `unit.linux_compile`, which links a ycxx-produced object with a native C
   caller, and `unit.linux_executable` (`tests/unit/pipeline/linux_executable.py`), which runs
   source-only, object-only and mixed-input executables and checks exit status, `argc` and `argv`,

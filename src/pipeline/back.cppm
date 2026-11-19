@@ -1156,6 +1156,13 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
     errors.push_back({std::nullopt, "the translation unit has errors"});
     co_return out;
   }
+  if (linux && !tu.init_functions.empty()) {
+    const auto init = std::ranges::find(tu.functions, tu.init_functions.front().first, &FunctionDef::entity);
+    std::optional<ast::Loc> at;
+    if (init != tu.functions.end()) at = ast::Loc{init->item, init->body_offset};
+    errors.push_back({at, "namespace-scope dynamic initialization and destruction are not supported on x86-64 Linux"});
+    co_return out;
+  }
   std::vector<FnKey> fns;
   for (const FunctionDef& f : tu.functions) fns.push_back({id, f.entity});
 

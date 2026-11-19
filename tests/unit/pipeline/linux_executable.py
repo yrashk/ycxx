@@ -76,6 +76,15 @@ int main(int argc, char* argv[]) {
         reject('bias.cpp', error="ELF entry symbol 'main' is undefined")
         reject('main.cpp', error="undefined symbol '_Z8add_biasi'")
         reject('trivial.cpp', 'main.cpp', 'bias.cpp', error="duplicate symbol 'main'")
+        source('dynamic_init.cpp', 'int f() { return 17; }\nstatic int x = f();\nint main() { return x; }')
+        dynamic_init_error = ('dynamic_init.cpp:2:1: error: namespace-scope dynamic initialization '
+                              'and destruction are not supported on x86-64 Linux')
+        compile(target, '-fsyntax-only', 'dynamic_init.cpp')
+        reject('dynamic_init.cpp', error=dynamic_init_error)
+        compile(target, '-c', 'dynamic_init.cpp', status=1, error=dynamic_init_error)
+        assert not (scope / 'dynamic_init.o').exists()
+        compile('-c', 'dynamic_init.cpp', '-o', 'darwin-dynamic.o')
+        assert b'__mod_init_func' in (scope / 'darwin-dynamic.o').read_bytes()
         compile(target, 'trivial.cpp', status=1, error='hosted Linux linking is not supported')
         compile(target, '-c', 'main.cpp')
         compile(target, '-c', 'bias.cpp')
@@ -114,6 +123,7 @@ int main(int argc, char* argv[]) {
             compile(target, '-nostdlib', 'main.o', 'bias.o', '-o', 'object-program', env=daemon)
             run(['./object-program', 'A', '!'], status=106)
             reject('bad_alias.cpp', error=bad_abi, env=daemon)
+            reject('dynamic_init.cpp', error=dynamic_init_error, env=daemon)
         finally:
             run([ycxx, 'ctl', 'shutdown'], env=base)
 
