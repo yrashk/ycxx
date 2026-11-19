@@ -2703,7 +2703,7 @@ public:
   }
 
   // `sizeof` and `alignof` of a type ([expr.sizeof], [expr.alignof]), a `size_t` prvalue; zero
-  // after a diagnostic. A class's layout is the back end's (#194).
+  // after a diagnostic.
   Ex size_of(QualType t, bool align, u32 begin, u32 end) {
     QualType st = builtin(target.size_type);
     if (types().is_dependent(t)) return dependent_node({}, begin, end, st);
@@ -2716,7 +2716,8 @@ public:
     }
     return literal(st, w_->values.integer(st, *n), ValueCategory::prvalue, begin, end);
   }
-  // A complete non-class object type's size or alignment, from the target.
+  // A complete object type's size or alignment: from the target, and for a class by
+  // `ast::record_layout` over its members' (#194), the rule the back end lays it out by.
   std::optional<u64> layout_of(QualType t, bool align) {
     TypeRec r = types().rec(t);
     switch (r.kind) {
@@ -2730,7 +2731,20 @@ public:
       auto e = layout_of(r.inner, align);
       return e && !align ? std::optional<u64>(*e * r.bound) : e;
     }
-    default: return std::nullopt;  // void, functions, classes (#194)
+    case TypeKind::reference: return align ? target.pointer_align : target.pointer_size;  // a member's
+    case TypeKind::class_: {
+      const ClassRec* c = is_complete(t) ? class_rec(types().class_of(t)) : nullptr;
+      if (!c) return std::nullopt;
+      std::vector<ast::FieldPlace> places;
+      for (const FieldRec& f : c->fields) {
+        auto s = layout_of(f.type, false), a = layout_of(f.type, true);
+        if (!s || !a) return std::nullopt;
+        places.push_back({*s, *a});
+      }
+      ast::RecordLayout l = ast::record_layout(places, c->union_);
+      return align ? l.align : l.size;
+    }
+    default: return std::nullopt;  // void, functions
     }
   }
 
