@@ -585,14 +585,22 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   is the entry. Otherwise ycxx's startup calls `int main()` or `int main(int, char**)` and exits
   with the returned value. The link query checks a source function's ABI when an asm label gives it the symbol
   `main`. A `main` supplied in an ELF object must already use one of those signatures.
-- A static link can include explicit `.a` operands created by system `ar`. It follows operand order
-  across sources, objects and archives. Each archive supplies the earliest physical member
+- A static link can include explicit `.a` operands created by `ycxx archive` or system `ar`.
+  It follows operand order across sources, objects and archives. Each archive supplies the earliest physical member
   defining an unresolved nonweak symbol, repeating until no eligible member remains. Each
   repeated operand searches the archive again at its new position. The driver snapshots the
   archive and the link query validates its GNU index and reads only the selected ELF members.
   This path requires a source or ordinary object and supports regular, indexed GNU archives
   and empty archives. Other archive formats and combining archives with shared objects remain
   part of [#388](https://github.com/yrashk/ycxx/issues/388).
+- `ycxx archive -o lib.a [--] [object ...]` creates or replaces a regular GNU archive in process.
+  It validates each member with the existing ELF object reader, copies its bytes, and indexes
+  named nonlocal definitions, including weak and hidden definitions. Member basenames and
+  duplicate definitions follow operand order. The format uses a 32-bit GNU index, deterministic
+  metadata, and an optional long-name table. An empty input list writes a zero-entry index.
+  The command stages replacement beside the output after validating all inputs. Mach-O archive
+  production remains part of [#389](https://github.com/yrashk/ycxx/issues/389). The supported
+  external ELF object subset is tracked in [#419](https://github.com/yrashk/ycxx/issues/419).
 - `-nostdlib --dynamic-linker=/absolute/target/loader` with explicit shared objects writes a
   fixed-address, sectionless `ET_EXEC`. Libraries need a slash-free `DT_SONAME` and a SysV
   `DT_HASH`, and cannot have loader dependencies. The linker checks direct calls against their
@@ -622,6 +630,9 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   runtime rebinding, initialization and finalization, and reproducibility and invalidation in
   the daemon. `unit.linux_archive` tests system `ar` inputs, extraction order, symbol binding,
   malformed archives, and output parity and same-path replacement in the daemon.
+  `unit.linux_archive_output` checks byte layout, deterministic member metadata, atomic
+  replacement, and native and external archive consumption. It runs the system `ar`, `nm` and
+  linker and also exercises `llvm-ar`, `llvm-nm` and `ld.lld` when available.
 
 ## The resident daemon (#96, #97, 2026-11-18)
 
