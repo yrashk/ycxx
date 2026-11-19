@@ -1484,6 +1484,14 @@ private:
     return true;
   }
 
+  // Whether integral type `t` represents `v` (`big`: the unsigned value of v's bits, 2^63 or more).
+  bool holds(QualType t, std::int64_t v, bool big) {
+    sema::IntShape sh = sema::shape(*s_.types().builtin_of(t));
+    if (big) return !sh.is_signed && sh.bits == 64;
+    if (sh.is_signed) return sh.bits >= 64 || (v >= -(std::int64_t(1) << (sh.bits - 1)) && v < (std::int64_t(1) << (sh.bits - 1)));
+    return v >= 0 && (sh.bits >= 64 || v < (std::int64_t(1) << sh.bits));
+  }
+
   // `typedef class-specifier X …;` with an unnamed class or enumeration: X names it for linkage
   // purposes ([dcl.typedef]/9), and so is its name here; the declarator after the braces.
   std::optional<std::pair<NameId, u32>> typedef_name_after_braces() {
@@ -1905,7 +1913,7 @@ private:
     }
     if (cls == EntityId::none && clashes_with_using(name, name_at, ast::DeclKind::enum_, t)) return bad();
     // Built here and published once complete (#156); the list sees it as it grows.
-    sema::EnumRec er{scoped, fixed.has_value(), fixed.value_or(s_.builtin(sema::Builtin::int_)), {}};
+    sema::EnumRec er{scoped, fixed.has_value(), fixed.value_or(s_.builtin(sema::Builtin::int_)), std::nullopt, {}};
     p_->defining_enum_ = {e, &er};
     ast::DeclSema sem = class_decl(e, true);
     sem.kind = ast::DeclKind::enum_;
@@ -1917,10 +1925,12 @@ private:
     // The enumerators: each the previous one's value plus one, or its initializer's, a converted
     // constant expression of the underlying type when it is fixed ([dcl.enum]/5).
     std::int64_t next = 0;
+    bool next_big = false;  // `next` is an unsigned value of 2^63 or more, its bits in `next`
     // Before the closing brace an enumerator has its initializer's type, or the previous one's,
     // or the fixed underlying type ([dcl.enum]/5); its value is kept until the type is chosen.
     QualType prev_type = fixed.value_or(s_.builtin(sema::Builtin::int_));
     std::vector<std::int64_t> values;
+    std::vector<bool> big;  // per value: unsigned, 2^63 or more (its bits are in `values`)
     while (!ps_.is(Tk::r_brace) && !ps_.at_end()) {
       if (!ps_.is(Tk::identifier)) {
         s_.diag(ps_.pos(), Diag::expected_unqualified_id);
@@ -1931,6 +1941,20 @@ private:
       ps_.bump();
       ps_.skip_attributes();  // an enumerator's attribute-specifier-seq ([dcl.enum]/1)
       std::int64_t value = next;
+      bool value_big = next_big;
+      if (!ps_.is(Tk::equal) && !values.empty() && big.back() && values.back() == -1) {
+        s_.diag(en_at, Diag::enum_no_type, name);  // [dcl.enum]/5: no type holds the incremented value
+        value_big = false;
+      }
+      // [dcl.enum]/5: an incremented value the previous enumerator's type cannot represent has a
+      // type that can: the first of int, unsigned int, long, unsigned long that holds it.
+      if (!ps_.is(Tk::equal) && !fixed && !values.empty() && !holds(prev_type, value, value_big)) {
+        for (sema::Builtin b : {sema::Builtin::int_, sema::Builtin::unsigned_int, sema::Builtin::long_, sema::Builtin::unsigned_long})
+          if (holds(s_.builtin(b), value, value_big)) {
+            prev_type = s_.builtin(b);
+            break;
+          }
+      }
       if (!ps_.is(Tk::equal) && fixed && !values.empty()) {
         // An implicit value must fit the fixed type too.
         QualType ll = s_.builtin(sema::Builtin::long_long);
@@ -1948,6 +1972,7 @@ private:
           sema::u64 bits = s_.world().values.rec(*c).bits;
           value = sh.is_signed && sh.bits < 64 && ((bits >> (sh.bits - 1)) & 1) ? std::int64_t(bits | ~((sema::u64{1} << sh.bits) - 1))
                                                                                : std::int64_t(bits);
+          value_big = !sh.is_signed && (bits >> 63) != 0;
           if (fixed) {
             Ex lit = s_.literal(v.type(), *c, ast::ValueCategory::prvalue, x.begin, x.end);
             if (s_.narrows(lit, *fixed)) s_.diag(x.begin, Diag::narrowing, v.type(), *fixed);
@@ -1956,7 +1981,9 @@ private:
           }
         }
       }
-      next = value + 1;
+      // The next implicit value, past INT64_MAX into the unsigned values.
+      next_big = value_big || value == std::numeric_limits<std::int64_t>::max();
+      next = std::int64_t(sema::u64(value) + 1);
       // [basic.scope.scope]: an unscoped enumerator is declared in the enclosing scope.
       if (!scoped && cls == EntityId::none)
         for (DeclId p : q_.visible_decls(en))
@@ -1969,6 +1996,7 @@ private:
       p_->set_constant(x, s_.world().values.integer(prev_type, sema::u64(value)), k_);
       er.enumerators.push_back({en, x, ConstId::none});
       values.push_back(value);
+      big.push_back(value_big);
       ast::DeclSema xs = class_decl(e, true);
       xs.kind = ast::DeclKind::enumerator;
       xs.type = t;
@@ -1983,14 +2011,41 @@ private:
       }
     }
     // [dcl.enum]/7: without a fixed type, the type holds every value, and is no larger than int
-    // unless a value fits neither int nor unsigned int.
-    if (!fixed && !values.empty()) {
-      auto [lo, hi] = std::ranges::minmax(values);
+    // unless a value fits neither int nor unsigned int; which one is the implementation's. As the
+    // Itanium C++ ABI compilers choose (#220): with no negative value, `unsigned int` if every
+    // value fits, else `unsigned long`; else `int` if every value fits, else `long`. An empty
+    // enumeration has the values of `unsigned int`.
+    if (!fixed) {
       using sema::Builtin;
-      Builtin u = lo >= std::numeric_limits<std::int32_t>::min() && hi <= std::numeric_limits<std::int32_t>::max() ? Builtin::int_
-                  : lo >= 0 && hi <= std::int64_t(std::numeric_limits<std::uint32_t>::max())                     ? Builtin::unsigned_int
-                                                                                                                 : Builtin::long_;
+      bool negative = false;
+      for (std::size_t i = 0; i < values.size(); ++i) negative = negative || (values[i] < 0 && !big[i]);
+      Builtin u = Builtin::unsigned_int;
+      if (!negative) {
+        sema::u64 hi = 0;
+        for (std::int64_t v : values) hi = std::max(hi, sema::u64(v));
+        if (hi > std::numeric_limits<std::uint32_t>::max()) u = Builtin::unsigned_long;
+      } else if (std::ranges::contains(big, true)) {
+        s_.diag(name_at, Diag::enum_no_type, name);  // [dcl.enum]/7: no integral type holds them all
+        u = Builtin::long_;
+      } else {
+        auto [lo, hi] = std::ranges::minmax(values);
+        u = lo >= std::numeric_limits<std::int32_t>::min() && hi <= std::numeric_limits<std::int32_t>::max() ? Builtin::int_
+                                                                                                             : Builtin::long_;
+      }
       er.underlying = s_.builtin(u);
+      // [conv.prom]/3: the first of int, unsigned int, long, unsigned long that holds every
+      // value of the enumeration (its range, [dcl.enum]/8: these hold it when they hold the
+      // enumerators).
+      Builtin p = Builtin::unsigned_long;
+      for (Builtin c : {Builtin::int_, Builtin::unsigned_int, Builtin::long_, Builtin::unsigned_long}) {
+        bool all = true;
+        for (std::size_t i = 0; i < values.size(); ++i) all = all && holds(s_.builtin(c), values[i], big[i]);
+        if (all) {
+          p = c;
+          break;
+        }
+      }
+      er.promotion = s_.builtin(p);
     }
     // Past the closing brace an enumerator has the enumeration's type ([dcl.enum]/5), in the
     // declarators that follow too.
