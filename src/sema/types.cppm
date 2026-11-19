@@ -455,6 +455,8 @@ struct EntityRec {
   // A closure type's number among its context's closures of its signature (ast.md §4.3); its
   // `type` is its function call operator's declared type (docs/design/closures.md).
   u32 ordinal = 0;
+  // A generic closure's explicit template parameters, which its name declares (`Ty`, `Tn`).
+  std::vector<ast::TemplateParamSema> closure_head{};
 };
 
 class Entities {
@@ -549,6 +551,9 @@ struct MemberDeclRec {
   bool is_ctor = false;
   bool is_dtor = false;
   bool is_deleted = false;
+  // A member function template's template-head: so far only a generic lambda's function call
+  // operator ([expr.prim.lambda.closure]/7).
+  std::vector<ast::TemplateParamSema> head{};
 };
 
 struct NestedType {

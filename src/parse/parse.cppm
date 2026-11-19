@@ -544,6 +544,18 @@ public:
     special_members(item, c, r);
     return classes_.publish(c, std::move(r));
   }
+  interp::Callee closure_ir(EntityId f, u32 item);
+  // A generic lambda's function call operator specialized ([temp.inst]): its body re-analysed
+  // from the lambda's tokens with the arguments bound, an `Instance`; its type with the return
+  // type deduced, none when it fails.
+  struct GenericInst {
+    sema::GenericClosure g;
+    EntityId spec;
+    QualType spec_type;
+    std::vector<ast::TemplateArg> args;
+  };
+  sema::GenericResult generic_instance(EntityId spec, const sema::GenericClosure* known, u32 point);
+
   // The function type a definition before `item` deduced for `f` ([dcl.spec.auto.general]/11).
   std::optional<QualType> deduced_type(EntityId f, u32 item);
   // A namespace-scope variable as the interpreter sees it at `item`: its type and, if it is usable
@@ -607,6 +619,15 @@ public:
     ast::DeclSema decl;
     sema::Bindings args;
   };
+  // The bodies being analysed, innermost last: each function's item and its instantiation, which a
+  // generic lambda defined there and specialized there is instantiated in.
+  struct Running {
+    EntityId function;
+    u32 item;
+    std::optional<Instantiation> inst;
+  };
+  std::vector<Running> running_bodies_;
+  std::map<u32, sema::GenericClosure> generic_defs_;  // generic lambdas defined so far, by operator
   // What instantiating a class template specialization analyses each member item with: the
   // specialization, and the arguments bound to the template's parameters.
   struct ClassInstantiation {
@@ -666,6 +687,8 @@ public:
     ast::DeclSema decl;
     Result<ast::BodySema> body;
     bool failed = false;
+    // A generic lambda operator's: the instantiation of the function its lambda is in, if any.
+    std::optional<Instantiation> enclosing{};
   };
   // The instance of a specialization, instantiated on first request; none when its template has
   // no definition, or the instantiations nest too deeply ([temp.inst]/16).
@@ -968,6 +991,7 @@ private:
   std::vector<engine::Diagnostic> end_diags_;    // the END phase's own
   std::vector<EntityId> required_;
   std::map<u32, std::optional<irgen::FunctionIr>> instance_irs_;  // by specialization
+  std::map<u32, std::optional<irgen::FunctionIr>> closure_irs_;  // by closure member
 
 public:
   // The class a class item defines, none if its head failed. The class's own declarators ask it
@@ -1031,6 +1055,10 @@ public:
   }
   interp::Callee function_ir(EntityId f) override { return p_->function_ir(f, point()); }
   std::optional<QualType> deduced_type(EntityId f) override { return p_->deduced_type(f, point()); }
+  sema::GenericResult generic_instance(EntityId spec, const sema::GenericClosure* known, const sema::GenericBinding&) override {
+    return p_->generic_instance(spec, known, point());
+  }
+  void generic_defined(const sema::GenericClosure& g) override { p_->generic_defs_[std::to_underlying(g.call)] = g; }
   std::optional<interp::GlobalVar> global(EntityId v) override { return p_->global(v, point()); }
   bool is_constexpr(EntityId f) override { return p_->is_constexpr(f, point()); }
   bool is_complete(EntityId c) override {
@@ -1113,6 +1141,10 @@ public:
   ast::DeclSema decl_sema(DeclId d) override { return at_.decl_sema(d); }
   interp::Callee function_ir(EntityId f) override { return p_->function_ir(f, p_->end()); }
   std::optional<QualType> deduced_type(EntityId f) override { return p_->deduced_type(f, p_->end()); }
+  sema::GenericResult generic_instance(EntityId spec, const sema::GenericClosure* known, const sema::GenericBinding&) override {
+    return p_->generic_instance(spec, known, p_->end());
+  }
+  void generic_defined(const sema::GenericClosure& g) override { p_->generic_defs_[std::to_underlying(g.call)] = g; }
   std::optional<interp::GlobalVar> global(EntityId v) override { return p_->global(v, p_->end()); }
   bool is_constexpr(EntityId f) override { return p_->is_constexpr(f, p_->end()); }
   bool is_complete(EntityId c) override { return p_->is_complete(c, p_->end(), true, true); }
@@ -3991,8 +4023,11 @@ public:
   // `inst` analyses the body as an instantiation of the function template the item defines
   // (ast.md §6.4 as amended by #88): with the specialization's declaration, and the template
   // arguments bound to the template's parameters.
-  BodyAnalysis(Program& p, u32 item, std::optional<Program::Instantiation> inst = std::nullopt)
-      : p_(&p), k_(item), it_(&p.items().items[item]), b_(p.world().ins, &p.arena_),
+  // `generic` analyses only a generic lambda's body in the item's, as a specialization of its
+  // function call operator (docs/design/closures.md, decision 11).
+  BodyAnalysis(Program& p, u32 item, std::optional<Program::Instantiation> inst = std::nullopt,
+               std::optional<Program::GenericInst> generic = std::nullopt)
+      : generic_(std::move(generic)), p_(&p), k_(item), it_(&p.items().items[item]), b_(p.world().ins, &p.arena_),
         q_(inst ? std::unique_ptr<sema::Questions>(std::make_unique<AtInstantiation>(p, item))
                 : std::unique_ptr<sema::Questions>(std::make_unique<AtItem>(p, item, true))),
         s_(p.world(), b_, *q_, out_.diags, p.id(item), it_->body_begin - it_->begin),
@@ -4047,6 +4082,12 @@ public:
         scope = p_->world().entities.rec(scope).scope;
       }
       if (p_->is_namespace(scope)) at_->from = p_->namespace_path(scope);
+      if (generic_) return generic_body();
+      p_->running_bodies_.push_back({f->entity, k_, inst_});
+      struct Pop {
+        Program* p;
+        ~Pop() { p->running_bodies_.pop_back(); }
+      } pop{p_};
       // The parameters are the first locals, in their own scope ([basic.scope.param]).
       s_.push_scope();
       s_.guard_scope();
@@ -4090,6 +4131,32 @@ public:
                     b_.seq(std::span<const ast::ClosureDef>(s_.closures))};
     out_.value = b_.commit(v);
     if (!keeps) out_.demands = std::move(s_.demands);
+    return std::move(out_);
+  }
+
+  // A generic lambda's body as its operator's specialization: the enclosing function's constants
+  // it names are this context's locals; the closure's frame, the head's arguments and the
+  // parameters come from `open_generic`. The tree's root is at the lambda's `{`.
+  Result<ast::BodySema> generic_body() {
+    const Program::GenericInst& gi = *generic_;
+    s_.push_scope();
+    for (std::size_t i = 0; i < gi.g.consts.size() && i < gi.g.const_values.size(); ++i) {
+      u32 l = s_.declare_local(gi.g.consts[i].name, gi.g.consts[i].type, 0, 0, false);
+      s_.set_local_value(l, gi.g.const_values[i]);
+    }
+    s_.open_generic(gi.g, gi.spec, gi.spec_type, gi.args);
+    ps_.seek(it_->body_begin + gi.g.body_begin);
+    Ex body = ps_.compound_statement();
+    auto r = s_.close_generic(body, ps_.pos());
+    s_.pop_scope();
+    Ex root;
+    if (r && body.ok()) root = s_.node(ast::Compound{b_.list(std::vector<ast::Child>{sema::Sema::at(body, 0)})}, 0, body.end);
+    std::vector<ast::LocalRec> locals = r ? r->locals : std::vector<ast::LocalRec>{};
+    std::vector<sema::Expansion> none;
+    out_.value = b_.commit(ast::BodySema{root.id, b_.seq(std::span<const ast::LocalRec>(locals)), expansion_list(b_, none),
+                                         b_.seq(std::span<const u32>{}), r ? r->type : s_.builtin(sema::Builtin::void_), u8(r.has_value()),
+                                         b_.seq(std::span<const ast::ClosureDef>(s_.closures))});
+    out_.demands = std::move(s_.demands);
     return std::move(out_);
   }
 
@@ -4199,6 +4266,7 @@ private:
     return init;
   }
 
+  std::optional<Program::GenericInst> generic_;
   Program* p_;
   u32 k_;
   const items::Item* it_;
@@ -4694,6 +4762,7 @@ void Program::instantiate_all() {
 }
 
 interp::Callee Program::function_ir(EntityId f, u32 item) {
+  if (sema::Sema::closure_member(*w_, f)) return closure_ir(f, item);
   interp::Callee c;
   c.is_constexpr = is_constexpr(f, item);
   // A function template specialization needed for constant evaluation is instantiated where it
@@ -4746,6 +4815,163 @@ interp::Callee Program::function_ir(EntityId f, u32 item) {
   if (!ir) c.unsupported = true;
   else c.body = &ir->body;
   return c;
+}
+
+// A closure member's L1 ([expr.prim.lambda.closure]/5: constexpr when it can be), from the body
+// that has its lambda: a function defined before `item`, or a specialization instantiated here.
+interp::Callee Program::closure_ir(EntityId f, u32 item) {
+  interp::Callee r;
+  r.is_constexpr = true;
+  const u32 key = std::to_underlying(f);
+  if (auto it = closure_irs_.find(key); it != closure_irs_.end()) {
+    if (!it->second) r.unsupported = true;
+    else r.body = &it->second->body;
+    return r;
+  }
+  // The function whose body has the lambda: past the operators of enclosing lambdas.
+  EntityId fn = w_->entities.rec(w_->entities.rec(f).scope).scope;
+  while (sema::Sema::closure_member(*w_, fn)) fn = w_->entities.rec(w_->entities.rec(fn).scope).scope;
+  const ast::BodySema* body = nullptr;
+  u32 k = 0;
+  if (const sema::EntityRec& fr = w_->entities.rec(fn); (fr.templ != EntityId::none && !explicitly_specialized(fn, item)) ||
+                                                         member_patterns_.contains(std::to_underlying(fn))) {
+    const Instance* in = instance(fn, item);
+    if (!in || in->failed) return r;
+    body = &in->body.value;
+    k = in->item;
+  } else {
+    auto def = definitions_.find(std::to_underlying(fn));
+    if (def == definitions_.end() || def->second >= item) return r;
+    k = def->second;
+    body = &analyze_body(k).value;
+  }
+  for (const ast::ClosureDef& c : w_->ins.seqs.elements(body->closures)) {
+    if (c.call != f && c.invoker != f) continue;
+    const items::Item& it = items_->items[k];
+    sema::Sema::ClosureMember m =
+        sema::Sema::closure_member_def(*w_, c, f, c.call == f ? c.body : c.invoker_body, w_->ins.seqs.elements(c.locals));
+    irgen::FunctionInput input{f, m.decl, m.body, id(k), it.body_begin - it.begin + c.body_begin, false, {}, m.this_type};
+    AtItem q(*this, k, true);
+    sema::EvalFacts facts(*w_, q);
+    std::optional<irgen::FunctionIr> ir;
+    if (auto x = irgen::function_ir(w_->ins, input, facts)) ir = std::move(*x);
+    auto& slot = closure_irs_[key] = std::move(ir);
+    if (!slot) r.unsupported = true;
+    else r.body = &slot->body;
+    return r;
+  }
+  return r;
+}
+
+sema::GenericResult Program::generic_instance(EntityId spec, const sema::GenericClosure* known, u32 point) {
+  const u32 key = std::to_underlying(spec);
+  const sema::EntityRec sr = w_->entities.rec(spec);
+  if (auto it = instance_index_.find(key); it != instance_index_.end()) {
+    const Instance& in = instances_[it->second];
+    if (in.failed || !in.body.value.deduced) return {std::nullopt, true};
+    return {in.body.value.deduced_type};
+  }
+  // Called in its own body: known if its return type is declared, not deduced.
+  if (instantiating_.contains(key))
+    return {w_->types.has_placeholder(w_->types.rec(sr.type).inner) ? std::nullopt : std::optional(sr.type)};
+  EntityId closure = w_->entities.rec(sr.templ).scope;
+  EntityId fn = w_->entities.rec(closure).scope;
+  // The body that defines the lambda: one being analysed, else a definition before the point or
+  // a specialization's instance.
+  std::optional<u32> k;
+  std::optional<Instantiation> enclosing;
+  std::optional<sema::GenericClosure> g;
+  if (!known)
+    if (auto d = generic_defs_.find(std::to_underlying(sr.templ)); d != generic_defs_.end()) known = &d->second;
+  if (known) {
+    g = *known;
+    for (auto r = running_bodies_.rbegin(); r != running_bodies_.rend() && !k; ++r)
+      if (r->function == fn) {
+        k = r->item;
+        enclosing = r->inst;
+      }
+  }
+  if (!k) {
+    const ast::BodySema* body = nullptr;
+    // In a lambda: in the instance of an enclosing generic lambda's operator, or in the body of
+    // the function the enclosing lambdas are in.
+    if (sema::Sema::closure_member(*w_, fn)) {
+      if (auto it = instance_index_.find(std::to_underlying(fn)); it != instance_index_.end()) {
+        const Instance& oi = instances_[it->second];
+        body = &oi.body.value;
+        k = oi.item;
+        enclosing = oi.enclosing;
+      } else {
+        while (sema::Sema::closure_member(*w_, fn)) fn = w_->entities.rec(w_->entities.rec(fn).scope).scope;
+      }
+    }
+    if (body) {
+    } else if (const sema::EntityRec& fr = w_->entities.rec(fn); fr.templ != EntityId::none || member_patterns_.contains(std::to_underlying(fn))) {
+      const Instance* in = instance(fn, point);
+      if (!in || in->failed) return {std::nullopt, in != nullptr};
+      k = in->item;
+      body = &in->body.value;
+      if (fr.templ != EntityId::none) {
+        ast::DeclSema t = w_->ins.seqs.at(item_sema(*k).value.decls, 0);
+        std::vector<ast::TemplateParamSema> head = w_->ins.seqs.elements(t.template_params);
+        enclosing = Instantiation{in->decl, sema::Bindings::of(head.empty() ? 0 : head[0].depth, fr.args)};
+      } else {
+        enclosing = Instantiation{in->decl, class_args_.at(std::to_underlying(member_patterns_.at(std::to_underlying(fn)).spec))};
+      }
+    } else {
+      auto def = definitions_.find(std::to_underlying(fn));
+      if (def == definitions_.end() || def->second >= point) return {};
+      k = def->second;
+      body = &analyze_body(*k).value;
+    }
+    for (const ast::ClosureDef& c : w_->ins.seqs.elements(body->closures)) {
+      if (c.call != sr.templ) continue;
+      sema::GenericClosure x;
+      x.closure = c.closure;
+      x.call = c.call;
+      x.call_type = c.call_type;
+      x.head = w_->ins.seqs.elements(c.template_params);
+      std::vector<ast::LocalRec> locals = w_->ins.seqs.elements(c.locals);
+      for (std::size_t i = 0; i < w_->types.rec(c.call_type).params.size() && i < locals.size(); ++i) x.params.push_back(locals[i].name);
+      x.body_begin = c.body_begin;
+      x.flags = c.flags;
+      x.consts = w_->ins.seqs.elements(c.consts);
+      x.captures = w_->ins.seqs.elements(c.captures);
+      x.const_values = w_->ins.seqs.elements(c.const_values);
+      g = std::move(x);
+    }
+  }
+  if (!k || !g) return {};
+  if (too_deep(instantiating_.size(), *k)) return {std::nullopt, true};
+  instantiating_.insert(key);
+  Instance in{spec, *k, {}, {}, false, enclosing};
+  in.body = BodyAnalysis(*this, *k, enclosing, GenericInst{*g, spec, sr.type, sr.args}).run();
+  instantiating_.erase(key);
+  in.failed = !in.body.diags.empty() || !in.body.value.deduced;
+  // Its declaration, as the closure's other members': a member, inline and constexpr when it can be.
+  ast::DeclSema d{};
+  d.entity = spec;
+  d.type = in.body.value.deduced ? in.body.value.deduced_type : sr.type;
+  d.kind = ast::DeclKind::function;
+  d.linkage = sr.linkage;
+  d.flags = sema::u16(sema::decl_flag::member | sema::decl_flag::definition | sema::decl_flag::inline_);
+  d.attributes = w_->ins.intern_seq(std::span<const NodeId>{});
+  d.constraint = NodeId::none;
+  d.constraints = ast::ConstId::none;
+  d.contracts = NodeId::none;
+  std::vector<ast::ParamSema> params;
+  std::vector<ast::LocalRec> locals = w_->ins.seqs.elements(in.body.value.locals);
+  for (std::size_t i = 0; i < w_->types.rec(d.type).params.size() && i < locals.size(); ++i)
+    params.push_back({EntityId::none, locals[i].type, locals[i].name, NodeId::none, 0});
+  d.params = w_->ins.intern_seq(std::span<const ast::ParamSema>(params));
+  d.template_params = w_->ins.intern_seq(std::span<const ast::TemplateParamSema>{});
+  in.decl = d;
+  instance_index_.emplace(key, instances_.size());
+  instances_.push_back(std::move(in));
+  instance_order_.push_back(&instances_.back());
+  const Instance& r = instances_.back();
+  if (r.failed) return {std::nullopt, !r.body.diags.empty()};
+  return {r.body.value.deduced_type};
 }
 
 std::optional<QualType> Program::deduced_type(EntityId f, u32 item) {
