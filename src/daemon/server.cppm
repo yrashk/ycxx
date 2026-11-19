@@ -13,6 +13,9 @@
 // An `lsp` connection is an LSP session (§6.4): its documents' buffers are the engine's editor
 // view, and each diagnosis is one more request admitted the same way, checking the document's
 // translation unit with the command line a served `compile` gave it.
+//
+// A `watch` connection (#245) receives the engine trace of every request served from then on;
+// a `compile` that asks for its trace receives its own, before its answer.
 export module ycxx.daemon:server;
 
 import std;
@@ -21,6 +24,7 @@ import ycxx.engine;
 import ycxx.lsp;
 import ycxx.pipeline;
 import ycxx.pp;
+import ycxx.trace;
 import :posix;
 import :os;
 import :scope;
@@ -139,6 +143,10 @@ class Server {
     std::unique_lock g(conn_mu_);
     lsp_closed_ = true;
     for (int fd : lsp_fds_) shutdown_both(fd);
+    {
+      std::lock_guard w(watch_mu_);
+      for (const auto& watcher : watchers_) shutdown_both(watcher->fd);
+    }
     conn_cv_.wait(g, [&] { return connections_ == 0; });
     log("exited");
     return 0;
@@ -230,7 +238,7 @@ class Server {
       send(fd, Kind::refused, Refused{"a different ycxx build"});
       return;
     }
-    if (!send(fd, Kind::welcome, Welcome{my_pid(), paths_.root})) return;
+    if (!send(fd, Kind::welcome, Welcome{my_pid(), paths_.root, instance_})) return;
     auto frame = receive(fd);
     if (!frame) return;
     switch (frame->kind) {
@@ -245,6 +253,12 @@ class Server {
         return;
       case Kind::lsp:
         serve_lsp(fd);
+        return;
+      case Kind::watch:
+        if (auto r = decode<WatchRequest>(*frame)) serve_watch(fd, *r);
+        return;
+      case Kind::await_change:
+        if (auto r = decode<AwaitChange>(*frame)) serve_await_change(fd, *r);
         return;
       case Kind::compile:
         if (auto r = decode<compile::Request>(*frame)) serve_compile(fd, *r);
@@ -296,6 +310,204 @@ class Server {
     return changed;
   }
 
+  // ---- Traces (#245)
+
+  // Where a request's trace frames go: an attached `ycxx ctl trace`, or the client of a traced
+  // `compile`. Requests queue frames; the connection's own thread writes them, so a reader that
+  // stops reading never blocks a pool worker. A watcher more than `max_queued` bytes behind is
+  // dropped (a frame is always taken into an empty queue, whatever its size).
+  struct Watching {
+    static constexpr std::size_t max_queued = std::size_t{64} << 20;
+    int fd = -1;
+    bool values = false;
+    std::size_t cap = max_queued;  // the requesting client's has none: its own thread drains it
+    std::mutex m;
+    std::condition_variable cv;
+    std::deque<std::vector<std::byte>> queue;  // under m
+    std::size_t queued = 0;                    // bytes, under m
+    bool gone = false;                         // under m
+    bool dropped = false;                      // gone for falling behind; under m
+    void push(std::vector<std::byte> frame) {
+      std::lock_guard g(m);
+      if (gone) return;
+      if (!queue.empty() && queued + frame.size() > cap) {
+        gone = dropped = true;
+        cv.notify_all();
+        return;
+      }
+      queued += frame.size();
+      queue.push_back(std::move(frame));
+      cv.notify_all();
+    }
+    // Writes what is queued, on the calling thread; false once it is gone.
+    bool flush() {
+      std::unique_lock g(m);
+      if (gone) return false;
+      std::deque<std::vector<std::byte>> frames;
+      frames.swap(queue);
+      queued = 0;
+      g.unlock();
+      bool ok = true;
+      for (const auto& f : frames) ok = ok && write_all(fd, f);
+      g.lock();
+      if (!ok) gone = true;
+      return ok;
+    }
+  };
+
+  // One request's trace: a collector whose batches go to the request's client, when it asked,
+  // and to each watcher attached when it started. `finish` adds the `end` batch; the client's
+  // frames are written by its connection thread (`flush_client`), before the answer.
+  class RequestTrace {
+   public:
+    RequestTrace(Server& s, int client, bool values, std::string label, std::vector<std::shared_ptr<Watching>> watchers)
+        : server_(&s), watchers_(std::move(watchers)) {
+      if (client >= 0) {
+        client_ = std::make_shared<Watching>();
+        client_->fd = client;
+        client_->cap = std::numeric_limits<std::size_t>::max();  // bounded by the request itself
+      }
+      batch_.request = s.trace_requests_.fetch_add(1, std::memory_order_relaxed) + 1;
+      batch_.label = std::move(label);
+      batch_.started_ns = s.trace_clock();
+      for (const auto& w : watchers_) values = values || w->values;
+      collector_.emplace([this](std::span<const trace::Event> events) { deliver(events); }, values, s.trace_origin_);
+    }
+    RequestTrace(const RequestTrace&) = delete;
+    engine::Tracer* tracer() { return &*collector_; }
+
+    // Once the request's frames have all finished (it completed, or `Session::run` waited for
+    // its cancelled runs): orphans, then the `end` batch.
+    void finish() {
+      collector_->finish();
+      batch_.end = true;
+      batch_.ended_ns = server_->trace_clock();
+      deliver({});
+    }
+    // On the client's connection thread.
+    void flush_client() {
+      if (client_) client_->flush();
+    }
+
+   private:
+    // Under the collector's lock, or from `finish`.
+    void deliver(std::span<const trace::Event> events) {
+      batch_.events.assign(events.begin(), events.end());
+      engine::Sink body;
+      engine::serialize(body, batch_);
+      const std::vector<std::byte> frame = encode_frame(Kind::trace, body.bytes());
+      if (client_) client_->push(frame);
+      for (const auto& w : watchers_) w->push(frame);
+    }
+
+    Server* server_;
+    std::shared_ptr<Watching> client_;
+    std::vector<std::shared_ptr<Watching>> watchers_;
+    TraceBatch batch_;
+    std::optional<trace::Collector> collector_;
+  };
+
+  // A request's trace when its client asked for one or someone watches; nothing otherwise, so an
+  // untraced request costs nothing. Watchers that are gone are skipped, not removed: their own
+  // threads remove them, and the stop must still find them to shut them down.
+  std::unique_ptr<RequestTrace> trace_for(int client, compile::Trace asked, std::string label) {
+    std::vector<std::shared_ptr<Watching>> watchers;
+    {
+      std::lock_guard g(watch_mu_);
+      for (const auto& w : watchers_) {
+        std::lock_guard l(w->m);
+        if (!w->gone) watchers.push_back(w);
+      }
+    }
+    if (asked == compile::Trace::off && watchers.empty()) return nullptr;
+    return std::make_unique<RequestTrace>(*this, asked == compile::Trace::off ? -1 : client, asked == compile::Trace::values,
+                                          std::move(label), std::move(watchers));
+  }
+  std::uint64_t trace_clock() const {
+    return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - trace_origin_).count());
+  }
+  static std::string label_of(std::string_view front, const compile::Request& r) {
+    std::string out(front);
+    for (const std::string& a : r.argv) out += " " + a;
+    return out;
+  }
+
+  // Attaches a watcher until it hangs up or the daemon stops (which shuts its socket).
+  void serve_watch(int fd, const WatchRequest& r) {
+    auto w = std::make_shared<Watching>();
+    w->fd = fd;
+    w->values = r.values;
+    {
+      // Registered under the stop's own lock, so the stop either refuses it or shuts it down.
+      std::lock_guard g(conn_mu_);
+      if (lsp_closed_) return;
+      std::lock_guard l(watch_mu_);
+      watchers_.push_back(w);
+    }
+    log("a trace watcher attached");
+    // The ack first, then what requests queue, until the watcher hangs up (it sends nothing, so a
+    // readable socket is its hang-up, or the stop's shutdown), a write fails, or it falls behind.
+    bool ok = send(fd, Kind::watch, WatchAck{});
+    while (ok) {
+      {
+        std::unique_lock g(w->m);
+        w->cv.wait_for(g, std::chrono::milliseconds(250), [&] { return w->gone || !w->queue.empty(); });
+      }
+      ok = !hung_up(fd) && w->flush();
+    }
+    bool dropped = false;
+    {
+      std::lock_guard g(w->m);
+      w->gone = true;
+      dropped = w->dropped;
+    }
+    {
+      std::lock_guard l(watch_mu_);
+      std::erase(watchers_, w);
+    }
+    log(dropped ? "a trace watcher fell behind and was dropped" : "a trace watcher detached");
+  }
+
+  // `ycxx cxx --watch` between builds (#245): answers once the revision is past the one the last
+  // build started from, whoever applied the batch (another request, the LSP, or this wait, which
+  // applies batches as a request's tick would). Ends unanswered on a hang-up or the stop, which
+  // shuts it down like an LSP session.
+  void serve_await_change(int fd, const AwaitChange& r) {
+    const auto revision = [&] {
+      std::lock_guard g(stats_mu_);
+      return stats_.revision;
+    };
+    if (r.instance != 0 && r.instance != instance_) {
+      send(fd, Kind::changed, Changed{0});  // another daemon's build: this one has not seen these files
+      return;
+    }
+    {
+      std::lock_guard g(conn_mu_);
+      if (lsp_closed_) return;
+      lsp_fds_.insert(fd);
+    }
+    // No build answered (refused, failed): wait from now, never answer at once.
+    const std::uint64_t since = r.instance == 0 ? revision() : r.since;
+    send(fd, Kind::watching, WatchedFiles{table_.present_keys()});
+    // Without a watcher a batch is a rescan of the whole table: less often.
+    const auto every = watcher_ ? std::chrono::milliseconds(150) : std::chrono::milliseconds(1000);
+    do {
+      if (const std::uint64_t now = revision(); now > since) {
+        send(fd, Kind::changed, Changed{now - since});
+        break;
+      }
+      {
+        std::lock_guard g(conn_mu_);
+        if (lsp_closed_) break;
+      }
+      std::unique_lock strand(strand_mu_, std::try_to_lock);
+      if (strand && (running_ == 0 || admission_.may_apply(Clock::now())) && apply_batch(false) > 0)
+        admission_.applied(Clock::now());
+    } while (!wait_readable(fd, every));
+    std::lock_guard g(conn_mu_);
+    lsp_fds_.erase(fd);
+  }
+
   void serve_compile(int fd, const compile::Request& r) {
     if (r.env != env_) {
       send(fd, Kind::refused, Refused{"the environment differs from the daemon's"});
@@ -305,7 +517,13 @@ class Server {
       std::lock_guard g(stats_mu_);
       ++stats_.live;
     }
-    auto done = run_compile(fd, r);
+    auto traced = trace_for(fd, r.trace, label_of("cxx", r));
+    auto done = run_compile(fd, r, traced.get());
+    if (traced) {
+      traced->finish();
+      if (done) traced->flush_client();  // its last batches before the answer
+      traced.reset();
+    }
     {
       std::lock_guard g(stats_mu_);
       --stats_.live;
@@ -536,7 +754,10 @@ class Server {
     for (const Check& c : checks) {
       overlay_.cwd = c.request.cwd;
       bool stopped = false;
-      const compile::Done d = compile::run(c.request, overlay_, session(), {}, stopped, {pp::View::editor});
+      auto traced = trace_for(-1, compile::Trace::off, "lsp " + *c.path);
+      const compile::Done d =
+          compile::run(c.request, overlay_, session(), {}, stopped, {pp::View::editor}, traced ? traced->tracer() : nullptr);
+      if (traced) traced->finish();
       {
         std::lock_guard g(stats_mu_);
         ++stats_.diagnoses;
@@ -588,12 +809,14 @@ class Server {
   // One request, spawned into the engine's open epoch (§4.3); nothing if the client hung up.
   // Requests run at once: a batch that arrives meanwhile is applied once the quantum allows, and
   // restarts every running request where it stopped (§4.1).
-  std::optional<compile::Done> run_compile(int fd, const compile::Request& r) {
+  std::optional<compile::Done> run_compile(int fd, const compile::Request& r, RequestTrace* traced) {
     compile::Report report;
     table_.set_cwd(r.cwd);  // for this thread's reads (`-E`)
     {
       std::lock_guard strand(strand_mu_);
       report.inputs_changed += catch_up();
+      std::lock_guard g(stats_mu_);
+      report.started_at = stats_.revision;  // what `--watch` waits past: never a batch it missed
     }
     struct Running {
       Server& s;
@@ -609,6 +832,7 @@ class Server {
     bool cancelled = false;
     compile::Stop tick = [&] {
       if (hung_up(fd)) return cancelled = true;
+      if (traced) traced->flush_client();  // the trace so far, from this thread (never a worker's)
       if (watcher_) {
         std::unique_lock strand(strand_mu_, std::try_to_lock);
         if (strand && admission_.may_apply(Clock::now())) {
@@ -621,7 +845,7 @@ class Server {
       return false;
     };
     bool stopped = false;
-    compile::Done d = compile::run(r, table_, session(), tick, stopped);
+    compile::Done d = compile::run(r, table_, session(), tick, stopped, {}, traced ? traced->tracer() : nullptr);
     if (stopped) {
       log("a client hung up: its request stopped");
       return std::nullopt;
@@ -636,6 +860,7 @@ class Server {
     }
     std::lock_guard g(stats_mu_);
     d.report.revision = stats_.revision;
+    d.report.started_at = report.started_at;
     d.report.inputs_changed = report.inputs_changed;
     stats_.quantum_ms = quantum;
     stats_.entries = table_.size();
@@ -773,6 +998,14 @@ class Server {
 
   std::mutex stats_mu_;
   Status stats_;
+
+  std::mutex watch_mu_;
+  std::vector<std::shared_ptr<Watching>> watchers_;  // under watch_mu_
+  std::atomic<std::uint64_t> trace_requests_{0};
+  const Clock::time_point trace_origin_ = Clock::now();  // the clock of every trace's events
+  // This start of the daemon, for `--watch` (a pid may be reused by a later daemon).
+  const std::uint64_t instance_ = static_cast<std::uint64_t>(std::chrono::system_clock::now().time_since_epoch().count()) ^
+                                  (static_cast<std::uint64_t>(my_pid()) << 40);
   std::uint64_t running_ = 0;  // compile requests admitted and not yet answered; on the strand
 };
 

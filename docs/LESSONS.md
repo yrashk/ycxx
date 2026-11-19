@@ -185,6 +185,25 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
 
 ## Toolchain
 
+- **Template code added to the engine can slow its hit paths without touching them.** #245's
+  trace hooks were one branch each, yet `engine_bench` lost 6 ns a fetch hit and 6 ns a root get
+  hit. The per-kind `describe` templates instantiated `std::format` in every engine user's unit,
+  and GCC then stopped inlining `Hasher::uint` into `cell_for` (it appeared as `.isra.0` calls).
+  `inline`, `noinline` on the hooks and forced alignment changed nothing; moving the formatting
+  out of line did.
+  - Do: for engine changes, compare `engine_bench` in Release against the base commit, taking the
+    minimum of ten interleaved runs (the machine is shared). To isolate, build the base's file in
+    your build directory. To find the cause, look for calls in the hot function that the base
+    inlined (`objdump --disassemble-symbols=…`, then grep `bl`).
+  - Do: keep per-kind template code small; put formatting and strings in non-template functions.
+  - Learned on #245.
+- **macOS's `poll` does not support devices.** It flags `/dev/tty` `POLLNVAL` at once, so a TUI
+  that polled the terminal and a socket fell into a blocking read and saw the socket only after
+  a key.
+  - Do: wait on a terminal with `select`. Drive a TUI in tests with Python's `pty.fork`, a set
+    window size, and keys written with pauses; the last frame is after the last `ESC [ H`.
+  - Learned on #245.
+
 - **Reduce a compiler crash from the build system's exact command, with a script.** A GCC ICE
   under CMake seemed to vanish when re-run by hand. Two things cost about 20 minutes of
   bisecting:

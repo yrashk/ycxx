@@ -1357,6 +1357,61 @@ Fable decided the representation (ast.md §6.6); the Opus session wrote the code
   (was 1). `<cmath>` and `<cstdlib>` gain errors in the SDK's `__GNUC__` inline functions (local
   unions, floating-point operations, `__builtin_fabs*`), which already had thousands.
 
+## The engine trace (#245, 2026-11-19)
+
+`ycxx cxx --trace-engine[=stream|interactive]` (or `YCXX_TRACE_ENGINE`) shows what a request
+did in the query engine; `ycxx ctl trace [--interactive]` attaches to the daemon and shows every
+request it serves.
+
+- Engine (`src/engine/engine.cppm`): a request may carry an `engine::Tracer` (`Db::get`,
+  `Db::request`, `Epochs::spawn`), held on its `Root` like its `Counters`, so concurrent requests
+  never mix and a request keeps one trace through its restarts. Every activity on a cell goes
+  through one call, `Db::note`, which counts `Stats` and gives the tracer its event, so the two
+  cannot disagree: executed, cutoff (re-executed, value unchanged), verified (green after its
+  dependencies), reused (verified at this revision), durable (the shortcut), input (a first
+  read), recomputed, waited (contended), failed; with the parent's event, start and end times and
+  the workers it started and ended on. Frames note before they publish, so children precede
+  parents. Re-checks after a wait note only cells another frame owned (`Stats.hits` too). Keys render through a kind's `describe`, a key type's `trace_describe`
+  (ADL), or their fields by reflection; values through a kind's `show`, when asked.
+- Cost when off: one load and branch at each hook; `engine_bench` (Release, minimum of ten runs)
+  measures the hit paths as before (41.4 ns a fetch hit, 16.9 ns a root `get` hit). Formatting
+  stays out of the per-kind templates: in them it grew every engine user's unit until GCC stopped
+  inlining the key hashing (+6 ns a hit).
+- `ycxx.trace` (`src/trace/`): the collector (complete subtrees in pre-order, under a lock), the
+  stream renderer (colors on a terminal without `NO_COLOR`, glyphs, indentation by demand), and
+  the browser's model: the tree, filters (`words`, `is:<outcome>`, `w:<worker>`), the summary and
+  the workers' timeline. `:browse` is the full-screen termios browser: tree with a detail pane
+  (the value: L1 for `FunctionIr`, L2 for `Lower`, instruction words for `Codegen`), timeline
+  with a time cursor, worker selection, live feed.
+- Names: units and files by their file, functions by qualified name, requests and programs by
+  their units and output (`Build(a.cpp → a)`).
+- Errors: a compile error is a value, so a kind says which of its values hold errors
+  (`errors(value)`; `Pp::diagnostic_errors` keeps error-severity diagnostics only, so a
+  `#warning` is none). Events carry the text; the cell where errors start (no child has any) is
+  marked, with its message, and every cell above names it (`error below:`, JSON `error_at`).
+- Values shown: L1 (`FunctionIr`), L2 (`Lower`), and assembly (`Codegen`, `Optimized`) from
+  `aarch64::disassemble`, which decodes with the encoder's own form table.
+- `--trace-engine=json`: JSON Lines on stderr (events with values and errors, the diagnostics and
+  exit status, a summary); every line parses. `ctl trace --json` likewise.
+- An input's first read is `input`, later reads `reused`; identical instants in a row under one
+  parent are folded (`×3`, JSON `repeat`).
+- Daemon: a `compile` that asks gets `trace` frames before its answer, written by its connection
+  thread; a `watch` connection gets every request's, through a queue its own thread writes (a
+  watcher 64 MiB behind is dropped), and is shut down with the daemon. A cancelled request's runs
+  are waited for (`Epochs::Ticket::wait_idle`), so nothing they use goes before they end.
+- `ycxx cxx --watch`: builds, then sends `await_change`, which the daemon answers once a batch
+  changes a file-table entry (a file some build read; build outputs and other files are not
+  entries), and builds again. With the stream each build is traced under a header; with the
+  browser the builds run on a thread of their own and each is a live node holding its
+  diagnostics. A daemon that stops leaves the wait unanswered, and the next build starts a new
+  one. The wait first lists the files it watches (`watching`: the file table's existing entries).
+- Tests: `unit.trace` (a golden stream of a unit built cold, again and after a whitespace edit;
+  the collector under 8 threads; the tree, filters, summary and timeline); `daemon.trace` (traced
+  builds through the daemon, a watcher, a stalled watcher beside 40 builds, shutdown). The
+  browser's key handling is untested.
+- Not yet: the analysed tree as a value, and stages linked to source (#254); per-resumption
+  spans, so a frame's waits are not drawn as work (#255).
+
 ## Bootstrap workarounds
 
 Places where ycxx's sources avoid or work around a C++26 feature because GCC 16 lacks it or

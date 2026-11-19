@@ -78,6 +78,16 @@ class FileTable final : public pp::Host {
     return entries_.size();
   }
 
+  // The files builds have read that exist (`--watch` lists them, #245), in key order.
+  std::vector<std::string> present_keys() const {
+    std::lock_guard g(mu_);
+    std::vector<std::string> out;
+    for (const auto& [key, e] : entries_) {
+      if (e.present) out.push_back(key);
+    }
+    return out;
+  }
+
   // The keys of the entries changed by the batches and rescans since the last call.
   std::vector<std::string> take_changed() {
     std::lock_guard g(mu_);

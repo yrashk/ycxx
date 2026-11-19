@@ -7,11 +7,14 @@ export module ycxx.daemon:protocol;
 import std;
 import ycxx.engine;
 import ycxx.compile;
+import ycxx.trace;
 import :posix;
 
 export namespace ycxx::daemon {
 
-enum class Kind : std::uint16_t { hello = 1, welcome, compile, done, status, status_reply, shutdown, bye, lsp, refused };
+enum class Kind : std::uint16_t { hello = 1, welcome, compile, done, status, status_reply, shutdown, bye, lsp, refused, trace, watch,
+                                  await_change, changed, watching };
+inline constexpr Kind last_kind = Kind::watching;
 
 struct Hello {
   std::uint64_t build_hash = 0;
@@ -22,6 +25,7 @@ struct Hello {
 struct Welcome {
   std::int64_t daemon_pid = 0;
   std::string root;
+  std::uint64_t instance = 0;  // this daemon's start, unlike a pid never reused (`--watch`, #245)
 };
 // A request the daemon will not serve, and why; the client then runs it in-process (§7.1).
 struct Refused {
@@ -35,6 +39,38 @@ struct LspOut {
   std::string bytes;
   bool end = false;
   std::int32_t exit_status = 0;
+};
+// A request's engine events (#245), a complete subtree per batch (`trace::Collector`): to the
+// client of a `compile` that asked, before its `done`, and to every watcher. A request's last
+// batch has no events and `end` set.
+struct TraceBatch {
+  std::uint64_t request = 0;      // the daemon's number for the request
+  std::string label;              // what it is: `cxx a.cpp -o a`, `lsp a.cpp`
+  std::uint64_t started_ns = 0;   // its start, on the events' clock (the daemon's)
+  std::vector<trace::Event> events;
+  bool end = false;
+  std::uint64_t ended_ns = 0;     // with `end`
+};
+// `watch{values}` (#245) attaches to the daemon: answered by an empty `watch`, then a `trace`
+// frame for each batch of every request it serves, until either end closes the connection.
+struct WatchRequest {
+  bool values = false;
+};
+struct WatchAck {};
+// `await_change` (`ycxx cxx --watch`, #245) is answered by `changed` once the file table's revision
+// is past `since`: a batch changed a file some build read, whichever request applied it. Another
+// daemon's build is answered at once (its revisions are not comparable); with no answered build,
+// the wait starts from now. The connection closes unanswered when the daemon stops.
+struct AwaitChange {
+  std::uint64_t since = 0;     // the revision the last build started from (`Report::started_at`)
+  std::uint64_t instance = 0;  // the daemon that answered it (`Welcome::instance`); 0: none did
+};
+struct Changed {
+  std::uint64_t revisions = 0;  // batches applied since; 0 when another daemon answered
+};
+// Sent first by an `await_change` that waits: the files whose change would answer it.
+struct WatchedFiles {
+  std::vector<std::string> paths;  // absolute, existing files builds have read
 };
 struct StatusRequest {};
 struct ShutdownRequest {};
@@ -79,6 +115,10 @@ inline constexpr Fp128 schema_hash = [] {
   engine::fold_schema<Status>(h);
   engine::fold_schema<compile::Request>(h);
   engine::fold_schema<compile::Done>(h);
+  engine::fold_schema<TraceBatch>(h);
+  engine::fold_schema<WatchRequest>(h);
+  engine::fold_schema<Changed>(h);
+  engine::fold_schema<WatchedFiles>(h);
   return h.finish();
 }();
 
@@ -113,7 +153,7 @@ std::expected<Frame, std::string> receive(int fd) {
   auto len = h.uint<std::uint32_t>();
   auto kind = h.uint<std::uint16_t>();
   if (len > max_frame) return std::unexpected("frame too large");
-  if (kind < std::to_underlying(Kind::hello) || kind > std::to_underlying(Kind::refused)) return std::unexpected("unknown message kind");
+  if (kind < std::to_underlying(Kind::hello) || kind > std::to_underlying(last_kind)) return std::unexpected("unknown message kind");
   Frame f{static_cast<Kind>(kind), std::vector<std::byte>(len)};
   if (!read_exact(fd, f.body)) return std::unexpected("connection closed in a frame");
   return f;
