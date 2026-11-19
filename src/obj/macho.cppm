@@ -129,8 +129,9 @@ constexpr void store64(std::span<std::uint8_t> b, std::size_t at, std::uint64_t 
 // The minimum OS version written into objects' LC_BUILD_VERSION, as xxxx.yy.zz nibbles.
 inline constexpr std::uint32_t default_min_os = 0x000c0000;  // macOS 12.0
 
-// Preconditions, checked by contract assertions (codegen bugs, not input errors): addends of
-// branch26, page21 and pageoff12 fit ARM64_RELOC_ADDEND's 24 bits; GOT loads have no addend.
+// Preconditions, checked by contract assertions (codegen bugs, not input errors): the object and
+// relocations target arm64 macOS; addends of branch26, page21 and pageoff12 fit
+// ARM64_RELOC_ADDEND's 24 bits; GOT loads have no addend.
 std::vector<std::uint8_t> write_object(const object& o);
 std::expected<object, std::string> read_object(std::span<const std::uint8_t> bytes, std::string name);
 
@@ -178,6 +179,7 @@ sorted_symbols sort_symbols(const object& o) {
 }  // namespace
 
 std::vector<std::uint8_t> write_object(const object& o) {
+  contract_assert(o.arch == target::aarch64_macos);
   const auto syms = sort_symbols(o);
   const std::size_t nsect = o.sections.size();
 
@@ -251,6 +253,10 @@ std::vector<std::uint8_t> write_object(const object& o) {
           else store32(contents[i], r.offset, static_cast<std::uint32_t>(r.addend));
           break;
         }
+        case reloc_kind::x86_64_pc32:
+        case reloc_kind::x86_64_plt32:
+          contract_assert(false && "x86-64 relocation in an arm64 Mach-O object");
+          std::unreachable();
       }
     }
   }
