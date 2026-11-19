@@ -1,0 +1,152 @@
+# Each probe built and run by ycxx 17d28f3602dc and by an oracle (feature-map probe).
+feature	oracle	ycxx	first_error
+lex-core	gcc	pass	
+lex-digraph	gcc	pass	
+lex-long-long	gcc	pass	
+lex-nullptr	gcc	pass	
+lex-raw-string	gcc	pass	
+lex-unicode-literals	gcc	fail	'' is not supported yet
+lex-char8	gcc	pass	
+lex-binary	gcc	pass	
+lex-digit-sep	gcc	pass	
+lex-hex-float	gcc	fail	floating-point literals are not supported yet
+lex-udl	gcc	fail	'operator' is not supported yet
+lex-size-t-suffix	gcc	pass	
+lex-escapes	gcc	pass	
+lex-unicode-ident	gcc	pass	
+cpp-macros	gcc	pass	
+cpp-predefined	gcc	pass	
+cpp-variadic-macros	gcc	pass	
+cpp-va-opt	gcc	pass	
+cpp-embed	gcc	fail	an array bound must be a positive integral constant expression
+basic-integral	gcc	pass	
+basic-float	gcc	fail	floating-point literals are not supported yet
+basic-ext-fp	gcc	fail	floating-point literals are not supported yet
+basic-ptr-arr-ref	gcc	pass	
+basic-fnptr	gcc	fail	function_ir: Call through a pointer is not supported yet
+basic-rvalue-ref	gcc	fail	an rvalue reference to 'S' cannot bind to an lvalue
+basic-adl	gcc	fail	use of undeclared identifier 'f'
+basic-inline-vars	gcc	pass	
+basic-object-lifetime	gcc	pass	
+basic-elision	gcc	pass	
+basic-static-local	gcc	fail	'static' is not supported yet
+basic-dynamic-init	gcc	fail	dynamic initialization of a namespace-scope variable is not supported yet: call to a function that is not constexpr
+basic-thread-local	gcc	fail	'thread_local' is not supported yet
+basic-new-delete	gcc	fail	'new' is not supported yet
+basic-aligned-new	gcc	fail	'alignas' is not supported yet
+expr-core	gcc	pass	
+expr-casts	gcc	fail	'const_cast' is not supported yet
+expr-rtti	gcc	fail	'virtual' is not supported yet
+expr-mptr	gcc	fail	'S' is not a namespace or class
+expr-list-init	gcc	pass	
+expr-spaceship	gcc	fail	expected ')'
+expr-auto-cast	gcc	fail	'auto' is not supported yet
+expr-multidim-subscript	gcc	fail	invalid operands to binary expression ('M' and 'int')
+expr-pack-index	gcc	fail	the parameter pack 't' is used without '...'
+lambda-basic	gcc	fail	'[' is not supported yet
+lambda-generic	gcc	fail	'auto' is not supported yet
+lambda-init-capture	gcc	fail	'auto' is not supported yet
+lambda-constexpr	gcc	fail	'auto' is not supported yet
+lambda-capture-this	gcc	fail	'auto' is not supported yet
+lambda-template	gcc	fail	'auto' is not supported yet
+lambda-unevaluated	gcc	fail	'[' is not supported yet
+lambda-pack-capture	gcc	fail	'auto' is not supported yet
+lambda-static	gcc	fail	'auto' is not supported yet
+stmt-core	gcc	fail	not a constant expression: read of a variable that is not usable in constant expressions
+stmt-range-for	gcc	fail	expected ';'
+stmt-if-init	gcc	fail	'int' is not supported yet
+stmt-range-for-init	gcc	fail	expected an expression
+stmt-cpp23	gcc	fail	expected '('
+dcl-core	gcc	pass	
+dcl-default-args	gcc	fail	'=' is not supported yet
+dcl-variadic-fn	gcc	fail	file not found
+dcl-aggregate	gcc	pass	
+dcl-aggregate-ext	gcc	fail	':' is not supported yet
+dcl-designated	gcc	pass	
+dcl-auto	gcc	fail	'auto' is not supported yet
+dcl-decltype	gcc	pass	
+dcl-trailing-return	gcc	fail	'auto' is not supported yet
+dcl-return-deduction	gcc	fail	'auto' is not supported yet
+dcl-structured-bindings	gcc	fail	'auto' is not supported yet
+dcl-structured-bindings-26	gcc	fail	'auto' is not supported yet
+dcl-enum	gcc	pass	
+dcl-scoped-enum	gcc	fail	'enum' is not supported yet
+dcl-using-enum	gcc	fail	'using' is not supported yet
+dcl-namespaces	gcc	pass	
+dcl-inline-ns	gcc	pass	
+dcl-nested-ns	gcc	fail	'a' is not a namespace or class
+dcl-static-assert	gcc	pass	
+dcl-asm	gcc	fail	'asm' is not supported yet
+dcl-linkage-spec	gcc	pass	
+dcl-default-delete	gcc	fail	'=' is not supported yet
+dcl-delete-reason	gcc	pass	
+dcl-placeholder-var	gcc	fail	redefinition of '_'
+attr-syntax	gcc	pass	
+attr-alignas	gcc	fail	'alignas' is not supported yet
+attr-no-unique-address	gcc	fail	'[' is not supported yet
+attr-assume	gcc	pass	
+class-core	gcc	pass	
+class-nested	gcc	fail	'struct' is not supported yet
+class-ctor-dtor	gcc	pass	
+class-copy-move	gcc	pass	
+class-conv	gcc	fail	'explicit' is not supported yet
+class-explicit-bool	gcc	fail	'explicit' is not supported yet
+class-delegating-ctor	gcc	fail	no member named 'S' in 'S'
+class-inheriting-ctor	gcc	fail	':' is not supported yet
+class-nsdmi	gcc	fail	'=' is not supported yet
+class-bitfields	gcc	fail	':' is not supported yet
+class-unions	gcc	fail	'union' is not supported yet
+class-local	gcc	fail	'struct' is not supported yet
+class-access	gcc	pass	
+class-friends	gcc	fail	'friend' is not supported yet
+class-inheritance	gcc	fail	':' is not supported yet
+class-virtual	gcc	fail	'virtual' is not supported yet
+class-virtual-base	gcc	fail	':' is not supported yet
+class-ref-qual	gcc	fail	'&' is not supported yet
+class-deducing-this	gcc	fail	expected ';'
+class-defaulted-cmp	gcc	fail	'=' is not supported yet
+class-cond-trivial	gcc	fail	redeclaration of member '~W'
+class-static-op	gcc	fail	invalid operands to binary expression ('F' and 'int')
+over-resolution	gcc	fail	the address of the overloaded function 'f' is not supported yet
+over-operators	gcc	fail	invalid operands to binary expression ('V' and 'int')
+temp-fn	gcc	pass	
+temp-class	gcc	pass	
+temp-member	gcc	fail	'template' is not supported yet
+temp-spec	gcc	pass	
+temp-explicit-inst	gcc	fail	'template' is not supported yet
+temp-res	gcc	fail	function_ir: Dependent is not supported yet
+temp-ttp	gcc	fail	'template' is not supported yet
+temp-variadic	gcc	pass	
+temp-var	gcc	pass	
+temp-fold	gcc	pass	
+temp-ctad	gcc	fail	'' is not supported yet
+temp-auto-nttp	gcc	fail	'auto' is not supported yet
+temp-class-nttp	gcc	fail	'class' is not supported yet
+concepts-def	gcc	pass	
+concepts-constraints	gcc	pass	
+concepts-abbreviated	gcc	fail	'(' is not supported yet
+except-core	gcc	fail	'throw' is not supported yet
+except-noexcept	gcc	fail	'noexcept' is not supported yet
+coroutines	gcc	fail	expected ')'
+modules	clang	fail	'export' is not supported yet
+const-constexpr	gcc	fail	expected an identifier
+const-consteval	gcc	pass	
+const-consteval-propagation	gcc	fail	not a constant expression: read of a variable that is not usable in constant expressions
+const-constinit	gcc	pass	
+const-dynamic-alloc	gcc	fail	'new' is not supported yet
+const-virtual	gcc	fail	a declaration needs a type specifier
+const-cpp20-relax	gcc	fail	not a constant expression: the interpreter does not evaluate 'alloc' yet
+const-cpp23-relax	gcc	fail	'static' is not supported yet
+const-void-ptr	gcc	pass	
+const-exceptions	gcc	fail	expected '('
+const-static-assert-msg	gcc	fail	expected a string literal
+reflect-core	gcc	fail	'auto' is not supported yet
+reflect-meta	gcc	fail	expected ')'
+stmt-expansion	gcc	fail	'template' is not supported yet
+contracts	gcc	fail	unexpected identifier 'pre'
+lib-initializer-list	gcc	fail	expected ')'
+lib-type-traits	gcc	pass	
+lib-source-location	gcc	fail	use of undeclared identifier '__builtin_LINE'
+lib-utility-builtins	gcc	fail	expected an expression
+lib-numeric-builtins	gcc	fail	use of undeclared identifier '__builtin_popcount'
+lib-atomic	gcc	fail	use of undeclared identifier '__ATOMIC_SEQ_CST'

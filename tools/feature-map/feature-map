@@ -1,0 +1,642 @@
+#!/usr/bin/env python3
+"""The C++26 feature map (docs/feature-map.md, #282): every language feature ycxx must support,
+ranked by age and by how often real code uses it, with its status on main.
+
+    tools/feature-map/feature-map fetch     download the corpus at its pinned commits
+    tools/feature-map/feature-map count     run the usage detectors over the corpus -> counts.tsv
+    tools/feature-map/feature-map probe     compile and run each feature's probe with ycxx (and
+                                            check the probe itself with Clang or GCC) -> probes.tsv
+    tools/feature-map/feature-map render    features.toml + counts.tsv + probes.tsv
+                                            -> docs/feature-map.md (the default)
+    tools/feature-map/feature-map issue     print the tracking issue's body (the same tables)
+    tools/feature-map/feature-map check     fail if the data and the probes disagree
+
+Inputs:
+- features.toml: one [[feature]] per feature a user would name, with its clauses (stable names
+  from the pinned draft, tests/draft/PINS), the standard it first appeared in, its feature-test
+  macro, its usage detector, its status and issues, and a probe program.
+- The corpus: libycxx itself, ycxx's own sources, and the real-world projects libycxx tests
+  against (deps/libycxx/tests/realworld/*/manifest, each pinned to a commit). It is downloaded
+  into build/feature-map-corpus (or --corpus DIR), never into the source tree.
+
+The detectors are regular expressions over the corpus's C++ files with comments and literals
+blanked out (strip()). They are cheap and approximate: a count is a lower bound for features
+whose spelling varies, and it can include false positives for short spellings. Each detector is
+in features.toml next to its feature, so a count can be checked by running it by hand.
+
+Priority (rank()) puts older and more used features first:
+    score = usage + age
+    usage = log10(1 + uses per million lines) + projects using it / projects   (0 to ~5)
+    age   = 0.5 per standard revision before C++26 (C++98 = 3.5, C++26 = 0)
+A feature without a detector is used by every program (it is the language's core) and gets the
+corpus's highest usage.
+"""
+import argparse, concurrent.futures, io, math, os, re, subprocess, sys, tarfile, tempfile
+import urllib.request
+
+if sys.version_info < (3, 11):
+    sys.exit('tools/feature-map/feature-map needs Python 3.11 or later (tomllib)')
+import tomllib
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+REPO = HERE.parent.parent
+FEATURES = HERE / 'features.toml'
+COUNTS = HERE / 'counts.tsv'
+CORPUS_TSV = HERE / 'corpus.tsv'
+PROBES = HERE / 'probes.tsv'
+DOC = REPO / 'docs' / 'feature-map.md'
+REALWORLD = REPO / 'deps' / 'libycxx' / 'tests' / 'realworld'
+DEFAULT_CORPUS = REPO / 'build' / 'feature-map-corpus'
+
+STANDARDS = ['C++98', 'C++11', 'C++14', 'C++17', 'C++20', 'C++23', 'C++26']
+STATUSES = ('done', 'partial', 'missing')
+
+
+# --- data -------------------------------------------------------------------------------------
+
+def load_features():
+    data = tomllib.loads(FEATURES.read_text())
+    groups = {g['id']: g for g in data['group']}
+    feats = data['feature']
+    seen = set()
+    for f in feats:
+        where = f'features.toml: {f.get("id")}'
+        for k in ('id', 'name', 'group', 'clauses', 'std', 'status'):
+            if k not in f:
+                sys.exit(f'{where}: missing {k}')
+        if f['id'] in seen:
+            sys.exit(f'{where}: duplicate id')
+        seen.add(f['id'])
+        if f['group'] not in groups:
+            sys.exit(f'{where}: unknown group {f["group"]}')
+        if f['std'] not in STANDARDS:
+            sys.exit(f'{where}: unknown standard {f["std"]}')
+        if f['status'] not in STATUSES:
+            sys.exit(f'{where}: unknown status {f["status"]}')
+    return groups, feats
+
+
+def read_tsv(path):
+    if not path.exists():
+        return []
+    lines = [l for l in path.read_text().splitlines() if l and not l.startswith('#')]
+    head = lines[0].split('\t')
+    return [dict(zip(head, l.split('\t'))) for l in lines[1:]]
+
+
+def write_tsv(path, comment, head, rows):
+    with path.open('w') as out:
+        for c in comment:
+            out.write(f'# {c}\n')
+        out.write('\t'.join(head) + '\n')
+        for r in rows:
+            out.write('\t'.join(str(r[h]) for h in head) + '\n')
+
+
+# --- corpus -----------------------------------------------------------------------------------
+
+def manifests():
+    """[(name, url, commit)] of the pinned real-world projects."""
+    out = []
+    for m in sorted(REALWORLD.glob('*/manifest')):
+        kv = {}
+        for line in m.read_text().splitlines():
+            k, sep, v = line.partition('=')
+            if sep and not line.lstrip().startswith('#'):
+                kv[k.strip()] = v.strip()
+        if 'url' in kv and 'commit' in kv:
+            out.append((m.parent.name, kv['url'], kv['commit']))
+    return out
+
+
+def github_repo(url):
+    m = re.match(r'https://github\.com/([^/]+/[^/.]+?)(?:\.git)?/?$', url)
+    return m.group(1) if m else None
+
+
+def fetch_one(corpus, name, url, commit):
+    dest = corpus / name
+    if (dest / '.complete').read_text().strip() == commit if (dest / '.complete').exists() else False:
+        return f'{name}: cached'
+    repo = github_repo(url)
+    tar_url = f'https://codeload.github.com/{repo}/tar.gz/{commit}'
+    with urllib.request.urlopen(tar_url) as r:
+        data = r.read()
+    with tarfile.open(fileobj=io.BytesIO(data), mode='r:gz') as tar:
+        for m in tar.getmembers():
+            rel = m.name.split('/', 1)[1] if '/' in m.name else ''
+            if m.isfile() and is_source(Path(rel)):
+                out = dest / rel
+                out.parent.mkdir(parents=True, exist_ok=True)
+                out.write_bytes(tar.extractfile(m).read())
+    (dest / '.complete').write_text(commit + '\n')
+    return f'{name}: {commit[:12]}'
+
+
+def cmd_fetch(args):
+    corpus = Path(args.corpus)
+    corpus.mkdir(parents=True, exist_ok=True)
+    with concurrent.futures.ThreadPoolExecutor(8) as pool:
+        futs = [pool.submit(fetch_one, corpus, *m) for m in manifests()]
+        futs.append(pool.submit(fetch_clauses, corpus))
+        for f in concurrent.futures.as_completed(futs):
+            print(f.result())
+
+
+# C++ sources: by extension, plus the extensionless standard headers of libycxx's include/.
+SOURCE_EXT = {'.h', '.hh', '.hpp', '.hxx', '.h++', '.ipp', '.inl', '.tcc', '.tpp', '.cpp', '.cc',
+              '.cxx', '.c++', '.cppm', '.ixx', '.mpp'}
+# Copies of code counted elsewhere, and code that is not the project's own.
+EXCLUDE_DIRS = {'.git', 'third_party', 'thirdparty', '3rdparty', 'third-party', 'external',
+                'extern', 'vendor', 'vendored', 'deps', '3rd-party', 'bundled', 'single_include', 'singleheader',
+                'amalgamated', 'build', 'node_modules'}
+
+
+def is_source(rel):
+    if any(p.lower() in EXCLUDE_DIRS for p in rel.parts[:-1]):
+        return False
+    return rel.suffix.lower() in SOURCE_EXT
+
+
+def corpus_projects(corpus):
+    """[(name, commit, [files])]: the fetched projects, libycxx and ycxx's own sources."""
+    out = []
+    for name, _, commit in manifests():
+        root = corpus / name
+        if not (root / '.complete').exists():
+            sys.exit(f'{name} is not fetched; run tools/feature-map/feature-map fetch')
+        out.append((name, commit, sorted(p for p in root.rglob('*') if p.is_file() and p.name != '.complete')))
+    lib = REPO / 'deps' / 'libycxx'
+    lib_commit = git_head(lib)
+    lib_files = [p for d in ('include', 'src', 'modules') for p in sorted((lib / d).rglob('*'))
+                 if p.is_file() and (is_source(p.relative_to(lib)) or (d == 'include' and not p.suffix))]
+    out.append(('libycxx', lib_commit, lib_files))
+    own = [p for p in sorted((REPO / 'src').rglob('*')) if p.is_file() and is_source(p.relative_to(REPO))]
+    out.append(('ycxx', git_head(REPO), own))
+    return out
+
+
+def git_head(path):
+    p = subprocess.run(['git', '-C', str(path), 'rev-parse', 'HEAD'], capture_output=True, text=True)
+    return p.stdout.strip() or 'unknown'
+
+
+# --- stripping ----------------------------------------------------------------------------------
+
+# One alternation, scanned left to right: comments, raw strings, ordinary strings and character
+# literals, and pp-numbers (so that a digit separator is not taken for a character literal).
+_TOKEN = re.compile(r'''
+    (?P<diag>^[ \t]*\#[ \t]*(?:error|warning)\b[^\n]*)
+  | (?P<line>//[^\n]*)
+  | (?P<block>/\*.*?\*/)
+  | (?P<raw>(?:u8|u|U|L)?R"(?P<delim>[^()\\ \n]{0,16})\((?P<rawbody>.*?)\)(?P=delim)")
+  | (?P<str>(?:u8|u|U|L)?"(?P<strbody>(?:[^"\\\n]|\\.)*)")
+  | (?P<chr>(?:u8|u|U|L)?'(?P<chrbody>(?:[^'\\\n]|\\.)*)')
+  | (?P<num>\.?\d(?:[\w.]|'[\w]|[eEpP][+-])*)
+''', re.S | re.X | re.M)
+
+
+def strip(text, keep_literals=False):
+    """text with comments blanked and, unless keep_literals, literal contents blanked. Line
+    structure is kept, so `^` anchors and directives still work."""
+    def sub(m):
+        if m.group('line') is not None:
+            return ''
+        if m.group('diag') is not None:
+            return m.group(0)[:m.group(0).index('#') + 1] + 'error'
+        if m.group('block') is not None:
+            return '\n' * m.group(0).count('\n') or ' '
+        if m.group('num') is not None or keep_literals:
+            return m.group(0)
+        for g, q in (('raw', '"'), ('str', '"'), ('chr', "'")):
+            if m.group(g) is not None:
+                whole = m.group(0)
+                prefix = whole[:whole.index(q)]
+                return prefix + q + q + '\n' * whole.count('\n')
+        return m.group(0)
+    return _TOKEN.sub(sub, text)
+
+
+# --- counting -----------------------------------------------------------------------------------
+
+# Copies inside a project of code the project also has elsewhere (amalgamations), by project.
+EXCLUDE_PATHS = {'catch2': ('extras/',), 'doctest': ('doctest/parts/',)}
+
+
+def count_file(args):
+    path, detectors = args
+    try:
+        raw = path.read_text(errors='replace')
+    except OSError:
+        return None
+    code, text = strip(raw), strip(raw, keep_literals=True)
+    lines = raw.count('\n') + 1
+    return lines, {fid: len(rx.findall(text if use_text else code)) for fid, rx, use_text in detectors}
+
+
+def cmd_count(args):
+    _, feats = load_features()
+    detectors = [(f['id'], re.compile(f['detect']), bool(f.get('text'))) for f in feats if f.get('detect')]
+    projects = corpus_projects(Path(args.corpus))
+    counts = {f['id']: {} for f in feats if f.get('detect')}
+    corpus_rows = []
+    with concurrent.futures.ProcessPoolExecutor() as pool:
+        for name, commit, files in projects:
+            skip = EXCLUDE_PATHS.get(name, ())
+            files = [p for p in files if not any(f'/{name}/{s}' in p.as_posix() for s in skip)
+                     and (name in ('libycxx', 'ycxx') or is_source(p.relative_to(Path(args.corpus) / name)))]
+            n_lines = 0
+            per = {fid: 0 for fid in counts}
+            for res in pool.map(count_file, [(p, detectors) for p in files], chunksize=16):
+                if res is None:
+                    continue
+                n_lines += res[0]
+                for fid, n in res[1].items():
+                    per[fid] += n
+            for fid, n in per.items():
+                counts[fid][name] = n
+            corpus_rows.append({'project': name, 'commit': commit, 'files': len(files), 'lines': n_lines})
+            print(f'{name}: {len(files)} files, {n_lines} lines', file=sys.stderr)
+    names = [r['project'] for r in corpus_rows]
+    write_tsv(CORPUS_TSV, ['The corpus counted by tools/feature-map/feature-map count.'],
+              ['project', 'commit', 'files', 'lines'], corpus_rows)
+    write_tsv(COUNTS, ['Uses of each feature per project: matches of its detector (features.toml).'],
+              ['feature'] + names, [{'feature': fid, **per} for fid, per in counts.items()])
+
+
+# --- the draft's clauses ------------------------------------------------------------------------
+
+CLAUSES = HERE / 'clauses.tsv'
+PINS = REPO / 'tests' / 'draft' / 'PINS'
+# The core-language chapters of the draft, whose every clause the map must cover (cmd_check).
+CORE_TEX = ('lex', 'basic', 'expressions', 'statements', 'declarations', 'modules', 'classes',
+            'overloading', 'templates', 'exceptions', 'preprocessor')
+# Core clauses that are not features: general text, and headings over clauses mapped elsewhere.
+NOT_FEATURES = {'basic.exec', 'intro.multithread.general', 'basic.contract.general', 'conv.general',
+                'stmt.select.general', 'stmt.iter.general', 'stmt.jump.general', 'stmt.dcl'}
+
+
+def draft_pin():
+    for line in PINS.read_text().splitlines():
+        k, sep, v = line.partition('=')
+        if sep and k.strip() == 'draft':
+            return v.split()[0]
+    sys.exit(f'{PINS}: no draft pin')
+
+
+def fetch_clauses(corpus):
+    """Write clauses.tsv: every clause of the pinned draft's core chapters, with its parent."""
+    sha = draft_pin()
+    url = f'https://codeload.github.com/cplusplus/draft/tar.gz/{sha}'
+    with urllib.request.urlopen(url) as r:
+        data = r.read()
+    rows, stack = [], []
+    with tarfile.open(fileobj=io.BytesIO(data), mode='r:gz') as tar:
+        members = {m.name.split('/', 1)[1]: m for m in tar.getmembers() if '/' in m.name}
+        for chapter in CORE_TEX:
+            tex = tar.extractfile(members[f'source/{chapter}.tex']).read().decode()
+            for m in re.finditer(r'\\rSec(\d)\[([^\]]+)\]\{((?:[^{}]|\{[^{}]*\})*)\}', tex):
+                level, name = int(m.group(1)), m.group(2)
+                title = re.sub(r'\\\w+\{([^{}]*)\}', r'\1', m.group(3)).replace('\t', ' ')
+                del stack[level:]
+                parent = stack[-1] if stack else ''
+                stack.append(name)
+                rows.append({'clause': name, 'level': level, 'parent': parent, 'chapter': chapter, 'title': title})
+    write_tsv(CLAUSES, [f'The core clauses of the draft at {sha} (tests/draft/PINS), written by `feature-map fetch`.'],
+              ['clause', 'level', 'parent', 'chapter', 'title'], rows)
+    return f'draft: {sha[:12]}, {len(rows)} clauses'
+
+
+def clause_tree():
+    rows = read_tsv(CLAUSES)
+    return {r['clause']: r['parent'] for r in rows}
+
+
+def owners(feats, parents):
+    """{clause: [feature ids]} for the most specific listed ancestor of every core clause."""
+    listed = {}
+    for f in feats:
+        for c in f['clauses']:
+            listed.setdefault(c.rstrip('*'), []).append(f['id'])
+    out = {}
+    for c in parents:
+        a = c
+        while a and a not in listed:
+            a = parents.get(a, '')
+        # A clause several features cite (such as [dcl.fct]) is credited to none of them: its
+        # examples test whichever of them they happen to use.
+        if a and len(listed[a]) == 1:
+            out[c] = listed[a]
+    return out
+
+
+# --- draft examples -----------------------------------------------------------------------------
+
+def draft_examples():
+    """{clause: (passing, total)} for ycxx on tests/draft (a test passes unless ycxx.xfail lists it)."""
+    xfail = set()
+    for line in (REPO / 'tests' / 'features' / 'ycxx.xfail').read_text().splitlines():
+        line = line.split('#', 1)[0].strip()
+        if line:
+            xfail.add(line.split()[0])
+    out = {}
+    for t in sorted((REPO / 'tests' / 'draft').rglob('*.cpp')):
+        m = re.match(r'(.+)-\d+\.(?:accept|reject)\.cpp$', t.name)
+        if not m:
+            continue
+        rel = 'draft/' + t.relative_to(REPO / 'tests' / 'draft').as_posix()
+        ok, total = out.get(m.group(1), (0, 0))
+        out[m.group(1)] = (ok + (rel not in xfail), total + 1)
+    return out
+
+
+# --- probes -------------------------------------------------------------------------------------
+
+def run(cmd, cwd, env=None, timeout=60):
+    try:
+        p = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout,
+                           env={**os.environ, **(env or {})})
+        return p.returncode, (p.stderr + p.stdout)
+    except subprocess.TimeoutExpired:
+        return -1, 'timeout'
+    except OSError as e:
+        return 127, str(e)
+
+
+def first_error(text):
+    for line in text.splitlines():
+        if ': error: ' in line:
+            return line.split(': error: ', 1)[1].strip()
+    return text.strip().splitlines()[-1] if text.strip() else ''
+
+
+def probe_one(f, tools, ycxx):
+    """(oracle verdict, ycxx verdict, ycxx's first error) for one feature's probe."""
+    compile_only = bool(f.get('compile_only'))
+    with tempfile.TemporaryDirectory() as d:
+        src = Path(d) / f'{f["id"]}.cpp'
+        src.write_text(f['probe'].lstrip('\n'))
+        oracle = 'none'
+        for name, exe, flags in tools:
+            out = Path(d) / name
+            code, _ = run([exe, '-std=c++26', *flags, *(['-c'] if compile_only else []), src.name, '-o', out.name], d)
+            if code == 0 and (compile_only or run([str(out)], d)[0] == 0):
+                oracle = name
+                break
+        code, msg = run([ycxx, 'cxx', *(['-c'] if compile_only else []), src.name, '-o', 'y.out'], d,
+                        env={'YCXX_NO_DAEMON': '1'})
+        if code != 0:
+            return oracle, 'fail', first_error(msg)
+        if compile_only:
+            return oracle, 'pass', ''
+        rc, msg = run([str(Path(d) / 'y.out')], d)
+        return oracle, ('pass' if rc == 0 else 'fail'), ('' if rc == 0 else f'exit status {rc}')
+
+
+def cmd_probe(args):
+    if not os.access(args.ycxx, os.X_OK):
+        sys.exit(f'{args.ycxx} is not executable: build it (tools/build) or pass --ycxx')
+    sys.path.insert(0, str(REPO))
+    from tests.driver import toolchain
+    found = toolchain.discover(REPO)
+    tools = [(n, found[n].exe, fl) for n, fl in (('gcc', ['-freflection', '-fcontracts']), ('clang', []))
+             if found[n].available]
+    _, feats = load_features()
+    only = set(args.only.split(',')) if args.only else None
+    old = {r['feature']: r for r in read_tsv(PROBES)}
+    todo = [f for f in feats if f.get('probe') and (only is None or f['id'] in only)]
+    with concurrent.futures.ThreadPoolExecutor(8) as pool:
+        for f, (oracle, verdict, why) in zip(todo, pool.map(lambda f: probe_one(f, tools, args.ycxx), todo)):
+            old[f['id']] = {'feature': f['id'], 'oracle': oracle, 'ycxx': verdict, 'first_error': why.replace('\t', ' ')}
+            print(f'{f["id"]}: oracle {oracle}, ycxx {verdict} {why}', file=sys.stderr)
+    rows = [old[f['id']] for f in feats if f['id'] in old and f.get('probe')]
+    write_tsv(PROBES, [f'Each probe built and run by ycxx {git_head(REPO)[:12]} and by an oracle (feature-map probe).'],
+              ['feature', 'oracle', 'ycxx', 'first_error'], rows)
+
+
+# --- ranking ------------------------------------------------------------------------------------
+
+def rank(feats):
+    """{id: {...}} with uses, per_mloc, projects, score; and the corpus size."""
+    corpus = read_tsv(CORPUS_TSV)
+    lines = sum(int(r['lines']) for r in corpus) or 1
+    n_proj = len(corpus) or 1
+    counts = {r['feature']: r for r in read_tsv(COUNTS)}
+    out = {}
+    for f in feats:
+        c = counts.get(f['id'])
+        if c and f.get('detect'):
+            per = {k: int(v) for k, v in c.items() if k != 'feature'}
+            uses = sum(per.values())
+            projects = sum(1 for v in per.values() if v)
+            per_mloc = uses * 1e6 / lines
+            usage = math.log10(1 + per_mloc) + projects / n_proj
+            out[f['id']] = {'uses': uses, 'per_mloc': per_mloc, 'projects': projects, 'usage': usage}
+        else:
+            out[f['id']] = {'uses': None, 'per_mloc': None, 'projects': None, 'usage': None}
+    measured = [r['usage'] for r in out.values() if r['usage'] is not None]
+    top = max(measured, default=0)
+    median = sorted(measured)[len(measured) // 2] if measured else 0
+    for f in feats:
+        r = out[f['id']]
+        if r['usage'] is None:
+            r['usage'] = top if f.get('core') else median
+        r['age'] = 0.5 * (len(STANDARDS) - 1 - STANDARDS.index(f['std']))
+        r['score'] = r['usage'] + r['age']
+    order = sorted(feats, key=lambda f: (-out[f['id']]['score'], f['id']))
+    for i, f in enumerate(order, 1):
+        out[f['id']]['rank'] = i
+    return out, corpus
+
+
+# --- rendering ----------------------------------------------------------------------------------
+
+STATUS_MARK = {'done': 'done', 'partial': 'partial', 'missing': '**missing**'}
+REPO_URL = 'https://github.com/yrashk/ycxx'
+
+
+def fmt_uses(r):
+    if r['uses'] is None:
+        return 'core' if r.get('core') else 'n/m'
+    return f'{r["uses"]:,} ({r["projects"]})'
+
+
+def fmt_clauses(cl, limit=None):
+    shown = cl if limit is None or len(cl) <= limit else cl[:limit]
+    out = ', '.join(f'[{c.rstrip("*")}]' + ('*' if c.endswith('*') else '') for c in shown)
+    return out + (f', … (+{len(cl) - limit})' if shown is not cl else '')
+
+
+def fmt_issues(f, link):
+    return ', '.join((f'[#{n}]({REPO_URL}/issues/{n})' if link else f'#{n}') for n in f.get('issues', []))
+
+
+def draft_cell(f, owned, examples):
+    ok = total = 0
+    for c, ids in owned.items():
+        if f['id'] in ids and c in examples:
+            ok += examples[c][0]
+            total += examples[c][1]
+    return f'{ok}/{total}' if total else ''
+
+
+def tables(groups, feats, ranks, owned, examples, link, clause_limit):
+    out = []
+    for gid, g in groups.items():
+        rows = sorted((f for f in feats if f['group'] == gid), key=lambda f: ranks[f['id']]['rank'])
+        if not rows:
+            continue
+        out += [f'### {g["name"]}', '',
+                '| # | Feature | Clauses | Std | Uses (projects) | Draft examples | Status | Issues |',
+                '|--:|---|---|---|--:|--:|---|---|']
+        for f in rows:
+            r = ranks[f['id']] | {'core': f.get('core')}
+            status = STATUS_MARK[f['status']] + (f' — {f["note"]}' if f.get('note') else '')
+            out.append(f'| {r["rank"]} | {f["name"]} | {fmt_clauses(f["clauses"], clause_limit)} | {f["std"][3:]} '
+                       f'| {fmt_uses(r)} | {draft_cell(f, owned, examples)} | {status} | {fmt_issues(f, link)} |')
+        out.append('')
+    return out
+
+
+def work_list(feats, ranks, link):
+    todo = sorted((f for f in feats if f['status'] != 'done'), key=lambda f: ranks[f['id']]['rank'])
+    out = ['| # | Feature | Std | Uses (projects) | Status | Issues |', '|--:|---|---|--:|---|---|']
+    for f in todo:
+        r = ranks[f['id']] | {'core': f.get('core')}
+        out.append(f'| {r["rank"]} | {f["name"]} | {f["std"][3:]} | {fmt_uses(r)} | {f["status"]} | {fmt_issues(f, link)} |')
+    return out
+
+
+def summary(feats):
+    by = {s: sum(1 for f in feats if f['status'] == s) for s in STATUSES}
+    return f'{len(feats)} features: {by["done"]} done, {by["partial"]} partial, {by["missing"]} missing.'
+
+
+def build(link, clause_limit):
+    groups, feats = load_features()
+    ranks, corpus = rank(feats)
+    owned = owners(feats, clause_tree())
+    examples = draft_examples()
+    lines = sum(int(r['lines']) for r in corpus)
+    corpus_line = ', '.join(f'{r["project"]} `{r["commit"][:10]}`' for r in corpus)
+    return groups, feats, ranks, owned, examples, lines, corpus_line
+
+
+HOW = """\
+- **Feature:** one row per feature a user would name, from the pinned draft's core clauses
+  ([lex] to [cpp]) and the library pieces the compiler provides. `feature-map check` fails when
+  a core clause of the draft is not covered by some row.
+- **Clauses:** stable names in the pinned draft. `[x]*` is the clause and all its subclauses;
+  a plain `[x]` is that clause's own text.
+- **Std:** the revision the feature first appeared in. Later extensions are their own rows.
+- **Uses (projects):** matches of the feature's detector (a regular expression over code with
+  comments and literals blanked, in features.toml) over the corpus, and how many of its
+  {n} projects use it. *core*: every program uses it. *n/m*: not measured (no reliable
+  detector); ranked at the median.
+- **Draft examples:** of the draft's examples (tests/draft) in clauses only this feature cites,
+  how many ycxx passes. An example often needs other features too, so a done feature can have
+  failing examples.
+- **Status:** on `main`, judged from a probe program (`feature-map probe`), tests/own, the draft
+  examples, STATUS.md and the open issues. *partial* means the common case works.
+- **#:** the priority rank: older and more used first (`score = usage + age`, see
+  tools/feature-map/feature-map).
+"""
+
+
+def cmd_render(args):
+    groups, feats, ranks, owned, examples, lines, corpus_line = build(link=True, clause_limit=None)
+    out = ['# The C++26 feature map', '',
+           'Every language feature ycxx must support, ranked by age and by how often real code uses it,',
+           'with its status on `main` and its issue. Generated by '
+           '[`tools/feature-map/feature-map`](../tools/feature-map/feature-map) from',
+           '[`features.toml`](../tools/feature-map/features.toml); edit that, then run the script. '
+           f'Tracked in [#{TRACKING}]({REPO_URL}/issues/{TRACKING}).', '',
+           summary(feats), '',
+           '## How to read it', '', HOW.format(n=len(read_tsv(CORPUS_TSV))),
+           f'Corpus: {lines:,} lines in {corpus_line}.', '',
+           '## Work list', '', 'Every feature not done, most important first.', '',
+           *work_list(feats, ranks, link=True), '',
+           '## By group', '',
+           *tables(groups, feats, ranks, owned, examples, link=True, clause_limit=None)]
+    DOC.write_text('\n'.join(out).rstrip() + '\n')
+    print(f'wrote {DOC.relative_to(REPO)}: {summary(feats)}', file=sys.stderr)
+
+
+TRACKING = 282
+
+
+def cmd_issue(args):
+    groups, feats, ranks, owned, examples, lines, corpus_line = build(link=False, clause_limit=3)
+    out = ['The path to full C++26: every language feature ycxx must support, ranked (older and more used',
+           'first), with its status on `main` and its issue. Generated by `tools/feature-map/feature-map issue`',
+           'from `tools/feature-map/features.toml`; the full table with every clause and the method is',
+           f'[docs/feature-map.md]({REPO_URL}/blob/main/docs/feature-map.md).', '',
+           '**A PR that completes or advances a feature updates its row in features.toml and reruns the',
+           'script (DECISIONS §6.9).**', '',
+           summary(feats) + f' Usage over {lines:,} lines of {len(read_tsv(CORPUS_TSV))} projects.', '',
+           *tables(groups, feats, ranks, owned, examples, link=False, clause_limit=3)]
+    print('\n'.join(out).rstrip())
+
+
+def cmd_check(args):
+    groups, feats = load_features()
+    bad = []
+    for f in feats:
+        if f['status'] != 'done' and not f.get('issues'):
+            bad.append(f'{f["id"]}: {f["status"]} without an issue')
+    parents = clause_tree()
+    known = set(parents)
+    children = {}
+    for c, par in parents.items():
+        children.setdefault(par, []).append(c)
+    listed = {c.rstrip('*') for f in feats for c in f['clauses']}
+    subtrees = {c[:-1] for f in feats for c in f['clauses'] if c.endswith('*')}
+
+    # Every leaf clause is cited by some feature (a heading citing it does not count, or [class]
+    # would cover all of [class.*]); a heading is covered when all its subclauses are.
+    def covered(c):
+        a = c
+        while a:
+            if a in subtrees:
+                return True
+            a = parents.get(a, '')
+        kids = children.get(c, [])
+        if not kids:
+            return c in listed or c in NOT_FEATURES
+        return all(covered(k) for k in kids)
+    for c in parents:
+        if not children.get(c) and not covered(c):
+            bad.append(f'[{c}] is cited by no feature')
+    for c in sorted(listed - known):
+        if not re.match(r'(?:support|meta|cmp|numeric|bit|ptr|specialized|utility|atomics)\b', c):
+            bad.append(f'[{c}] is cited but is not a clause of the pinned draft')
+    probes = {r['feature']: r for r in read_tsv(PROBES)}
+    for f in feats:
+        p = probes.get(f['id'])
+        if not p:
+            continue
+        if p['oracle'] == 'none':
+            bad.append(f'{f["id"]}: no oracle accepts the probe')
+        elif p['ycxx'] == 'pass' and f['status'] == 'missing':
+            bad.append(f'{f["id"]}: marked missing, but its probe passes')
+        elif p['ycxx'] == 'fail' and f['status'] == 'done':
+            bad.append(f'{f["id"]}: marked done, but its probe fails: {p["first_error"]}')
+    for b in bad:
+        print(b)
+    sys.exit(1 if bad else 0)
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument('command', nargs='?', default='render',
+                    choices=['fetch', 'count', 'probe', 'render', 'issue', 'check'])
+    ap.add_argument('--corpus', default=str(DEFAULT_CORPUS), help='where the corpus is downloaded')
+    ap.add_argument('--ycxx', default=str(REPO / 'build' / 'bin' / 'ycxx'), help='the ycxx to probe')
+    ap.add_argument('--only', help='probe only these feature ids (comma-separated)')
+    args = ap.parse_args()
+    globals()['cmd_' + args.command](args)
+
+
+if __name__ == '__main__':
+    main()
