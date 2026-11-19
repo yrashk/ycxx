@@ -3645,8 +3645,20 @@ Program::ClassContent Program::class_content(u32 item, const std::function<const
   std::vector<sema::FieldRec>& fields = out.fields;
   std::vector<sema::MemberDeclRec>& statics = out.statics;
   std::vector<sema::NestedType>& nested = out.nested;
-  // [class.access.spec]: members of a class defined with `class` are private by default.
-  ast::Access access = r_->tokens[it.begin].kind == lex::Tk::kw_class ? ast::Access::private_ : ast::Access::public_;
+  // [class.access.spec]: members of a class defined with `class` are private by default. The
+  // class-key follows any template heads: past each `template <…>`.
+  u32 key = it.begin;
+  while (key < it.brace_begin && r_->tokens[key].kind == lex::Tk::kw_template) {
+    int depth = 0;
+    for (++key; key < it.brace_begin; ++key) {
+      lex::Tk k = r_->tokens[key].kind;
+      if (k == lex::Tk::less) ++depth;
+      else if (k == lex::Tk::greater && --depth == 0) break;
+      else if (k == lex::Tk::greatergreater && (depth -= 2) <= 0) break;
+    }
+    ++key;
+  }
+  ast::Access access = r_->tokens[key].kind == lex::Tk::kw_class ? ast::Access::private_ : ast::Access::public_;
   for (u32 m : it.members) {
     const items::Item& mi = items_->items[m];
     if (mi.kind == ItemKind::access_spec) {

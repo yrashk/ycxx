@@ -1298,7 +1298,7 @@ Fable decided the representation (ast.md §6.6); the Opus session wrote the code
   (`Sema::defer_type_access`, `settle_type_access`): a member's definition outside its class and
   a friend's declaration may name the class's private types ([class.access]/6–7). A friend
   qualified by a namespace names an earlier declaration ([namespace.memdef]/3).
-- Tests: `tests/own/classes/s6-access-*` (four reject tests, two run tests); draft examples
+- Tests: `tests/own/classes/s6-access-*` (five reject tests, two run tests); draft examples
   class.friend-1 and class.name-4 pass.
 
 ## Templates, ζ step 7: static data members of class templates (#88, 2026-11-18)
