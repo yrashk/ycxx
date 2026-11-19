@@ -246,10 +246,13 @@ std::int64_t now_seconds() {
 // Waits, through the daemon of `root`, until a file some build read changes after revision `since`
 // of daemon `instance` (0: no build was answered) (#245): how many batches changed something (0: the daemon stopped, so the next
 // build starts a new one), or nothing when it cannot be asked or was interrupted.
-std::optional<std::uint64_t> await_change(const std::string& root, std::uint64_t since, std::uint64_t instance, Interrupt& cut) {
+std::optional<std::uint64_t> await_change(const std::string& root, std::uint64_t since, std::uint64_t instance, Interrupt& cut,
+                                          bool json = false) {
   auto c = daemon::reach(root, true);
   if (!c) {
-    std::println(std::cerr, "ycxx: error: --watch: cannot reach the daemon: {}", c.error());
+    const std::string why = "--watch: cannot reach the daemon: " + c.error();
+    if (json) std::println(std::cerr, R"({{"error":{}}})", trace::json_string(why));
+    else std::println(std::cerr, "ycxx: error: {}", why);
     return std::nullopt;
   }
   if (!cut.enter(c->fd.get())) return std::nullopt;
@@ -301,7 +304,7 @@ int watch_builds(compile::Request r, bool verbose, TraceMode mode) {
       }
       if (json) std::println(std::cerr, R"({{"watching":"the files it read"}})");
       else std::println(std::cerr, "ycxx: watching the files it read; ^C to stop");
-      changed = await_change(root, revision, instance, cut);
+      changed = await_change(root, revision, instance, cut, mode == TraceMode::json);
       if (!changed) return 1;
     }
   }
@@ -473,7 +476,9 @@ int cxx(std::span<const std::string_view> args) {
     });
     if (d) return finish(*d);
     if (use == Use::require) {
-      std::println(std::cerr, "ycxx: error: the daemon is required (YCXX_DAEMON=require) but failed: {}", d.error());
+      const std::string why = "the daemon is required (YCXX_DAEMON=require) but failed: " + d.error();
+      if (trace_mode == TraceMode::json) std::println(std::cerr, R"({{"error":{}}})", trace::json_string(why));
+      else std::println(std::cerr, "ycxx: error: {}", why);
       return 2;
     }
     if (verbose) std::println(std::cerr, "ycxx: running in-process: {}", d.error());

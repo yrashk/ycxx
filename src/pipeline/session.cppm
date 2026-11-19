@@ -83,6 +83,7 @@ struct Build {
   static std::string errors(const Value& v) {  // for traces (#245)
     std::string out;
     for (const UnitBuilt& u : v.units) {
+      if (!u.text) out += "cannot read a source file\n";
       for (const Message& m : u.messages) {
         if (m.error) out += m.text + "\n";
       }

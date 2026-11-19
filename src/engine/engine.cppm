@@ -326,6 +326,7 @@ struct TraceEvent {
   std::int32_t end_worker = -1;
   std::string value;  // the kind's `show(value)`, when the tracer asks for values
   std::string errors;  // the errors its value holds (`errors(value)`), or its diagnostics; empty: none
+  std::uint64_t cell = 0;  // the cell's identity (its key's fingerprint), the same in every event of it
 };
 
 // Receives a request's events, on any worker, concurrently. A frame reports before it publishes,
@@ -2428,7 +2429,9 @@ void Db::trace(Tracer* t, const Frame* by, CellId c, Outcome o, const Span* span
   ev.end_worker = span ? worker_now() : now.worker;
   try {
     ev.key = describe(c);
-    if (o != Outcome::failed && e.has_value) {
+    ev.cell = e.key_fp.lo ^ e.key_fp.hi;
+    // Only a cell that is done (not one another frame is computing) is read.
+    if (o != Outcome::failed && o != Outcome::waited && o != Outcome::recomputed && e.has_value) {
       if (t->values()) ev.value = table.show(e.slot);
       ev.errors = table.errors(e.slot, e.diags);  // the kind's say: its diagnostics may be warnings
     }

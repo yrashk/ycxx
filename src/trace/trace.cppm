@@ -75,6 +75,7 @@ class Collector final : public engine::Tracer {
     ev.end_worker = e.end_worker;
     ev.value = e.value;
     ev.errors = e.errors;
+    ev.cell = e.cell;
     return ev;
   }
 
@@ -110,7 +111,7 @@ class Collector final : public engine::Tracer {
   }
 
   static bool same_instant(const Event& a, const Event& b) {
-    return a.kind == b.kind && a.key == b.key && a.outcome == b.outcome && a.errors == b.errors && a.start_ns == a.end_ns;
+    return a.cell == b.cell && a.kind == b.kind && a.outcome == b.outcome && a.errors == b.errors && a.start_ns == a.end_ns;
   }
 
   Sink sink_;

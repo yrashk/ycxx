@@ -351,7 +351,7 @@ class Browser {
     const auto from = static_cast<std::size_t>(rows[cursor_].node);
     for (std::size_t k = 1; k <= nodes.size(); ++k) {
       const auto i = static_cast<std::int32_t>((from + k) % nodes.size());
-      if (tree_.error_here(i)) {
+      if (tree_.error_here(i) && tree_.matches(nodes[static_cast<std::size_t>(i)].ev)) {
         select(i);
         return;
       }

@@ -324,6 +324,8 @@ std::string disassemble(const MachineCode& m, const std::function<std::string(ir
       return reg_name(R(n), x);
     };
     std::string mn = mnemonic(form);
+    // A byte or halfword access says so (`ldrb`, `strh`); the register is then a w register.
+    if (s.size == Size::mem && access < 2) mn += access == 0 ? "b" : "h";
     std::vector<std::string> ops;
     std::string mem_base, mem_off;
     for (const Opnd& o : s.ops.view()) {
@@ -340,7 +342,11 @@ std::string disassemble(const MachineCode& m, const std::function<std::string(ir
             case Field::hw:
               if (field(o.field)) ops.back() += std::format(", lsl #{}", field(o.field) * 16);
               break;
-            case Field::tbit: ops.push_back(std::format("#{}", (w >> 31) << 5 | ((w >> 19) & 31))); break;
+            case Field::tbit:
+              // b5 clear tests a w register.
+              if ((w >> 31) == 0 && !ops.empty() && ops.back().starts_with('x')) ops.back()[0] = 'w';
+              ops.push_back(std::format("#{}", (w >> 31) << 5 | ((w >> 19) & 31)));
+              break;
             default: ops.push_back(std::format("#{}", field(o.field)));
           }
           break;
@@ -360,14 +366,21 @@ std::string disassemble(const MachineCode& m, const std::function<std::string(ir
           break;
         }
         case Role::cond:
-          if (o.field == Field::bcond) mn += "." + std::string(cond_names[field(o.field)]);
-          else ops.push_back(std::string(cond_names[field(o.field) & 15]));
+        {
+          const std::uint32_t c = field(o.field);
+          const std::string name = c < std::size(cond_names) ? std::string(cond_names[c]) : "nv";
+          if (o.field == Field::bcond) mn += "." + name;
+          else ops.push_back(name);
+        }
           break;
         case Role::frame: break;
       }
     }
     if (form.ends_with("12") && form.starts_with("ADDri") ) ops.back() += ", lsl #12";
     else if (form.ends_with("12") && form.starts_with("SUBri")) ops.back() += ", lsl #12";
+    if (form == "TST1") {  // ANDS wzr, Wn, #1: a 32-bit test of bit 0
+      ops = {"w" + ops.front().substr(1), "#1"};
+    }
     if (memory) {
       const std::string addr = mem_off.empty() ? std::format("[{}]", mem_base) : std::format("[{}, {}]", mem_base, mem_off);
       if (form.ends_with("pre")) ops.push_back(addr + "!");

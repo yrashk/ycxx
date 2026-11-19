@@ -26,6 +26,7 @@ struct Event {
   std::string value;   // the kind's `show`, when values were asked for
   std::string errors;  // the errors its value holds, one a line; empty: none
   std::uint32_t repeat = 1;  // identical instants in a row under one parent, shown once (`×3`)
+  std::uint64_t cell = 0;    // the cell's identity: equal in every event of one cell
   bool operator==(const Event&) const = default;
 };
 
@@ -81,7 +82,8 @@ constexpr std::string_view outcome_glyph(Outcome o, bool unicode) {
   }
   return "?";
 }
-// SGR parameters: executed bold green, cutoff yellow, verified green, reused bright green,
+// SGR parameters: executed bold green, cutoff yellow, verified green, reused light gray (it did
+// nothing),
 // durable blue, inputs dim, recomputed bright yellow, waited cyan, failed bold magenta. A cell
 // whose value holds errors is red whatever its outcome (`event_sgr`).
 inline constexpr std::string_view error_sgr = "1;31";
@@ -91,7 +93,7 @@ constexpr std::string_view outcome_sgr(Outcome o) {
     case Outcome::executed: return "1;32";
     case Outcome::cutoff: return "33";
     case Outcome::verified: return "32";
-    case Outcome::reused: return "92";
+    case Outcome::reused: return "37";
     case Outcome::durable: return "34";
     case Outcome::input: return "90";
     case Outcome::recomputed: return "93";
@@ -188,13 +190,22 @@ struct Origins {
   std::vector<bool> here;
   std::vector<std::optional<std::size_t>> at;
 };
+// An outcome that computed the value (or checked it): where an error can be said to start. A
+// reuse of the same cell elsewhere is red, but not a second origin.
+constexpr bool computed(Outcome o) { return o == Outcome::executed || o == Outcome::cutoff || o == Outcome::verified; }
+
 Origins error_origins(std::span<const Event> events) {
   Origins o{std::vector<bool>(events.size(), false), std::vector<std::optional<std::size_t>>(events.size())};
+  std::set<std::uint64_t> computed_cells;
+  for (const Event& e : events) {
+    if (computed(e.outcome) && !e.errors.empty()) computed_cells.insert(e.cell);
+  }
   for (std::size_t i = 0; i < events.size(); ++i) {
     if (events[i].errors.empty()) continue;
     bool below = false;
     for (std::size_t j = i + 1; j < events.size() && events[j].depth > events[i].depth; ++j) below = below || !events[j].errors.empty();
-    o.here[i] = !below;
+    // A reused cell is an origin only when no event here computed it (a rebuild that reused all).
+    o.here[i] = !below && (computed(events[i].outcome) || !computed_cells.contains(events[i].cell));
   }
   for (std::size_t i = 0; i < events.size(); ++i) {
     if (events[i].errors.empty() || o.here[i]) continue;
@@ -333,6 +344,7 @@ class Tree {
         roots_.push_back(at);
       }
       by_id_.emplace(e.id, at);
+      if (computed(e.outcome) && !e.errors.empty()) computed_with_errors_.insert(e.cell);
       nodes_.push_back(std::move(n));
       for (std::int32_t p = nodes_[at].parent; p >= 0; p = nodes_[p].parent) {
         ++nodes_[p].subtree;
@@ -348,18 +360,18 @@ class Tree {
   // The first node under `i` where errors start (pre-order), if any: what bubbles up to `i`.
   std::optional<std::int32_t> error_origin_below(std::int32_t i) const {
     for (std::int32_t c : nodes_[i].children) {
-      if (nodes_[c].ev.errors.empty()) continue;
       if (error_here(c)) return c;
       if (auto deeper = error_origin_below(c)) return deeper;
     }
     return std::nullopt;
   }
 
-  // Errors start at node `i`: its value holds some, and no child's does.
+  // Errors start at node `i`: its value holds some, nothing below it does, and it computed the
+  // value (a reuse is an origin only when no node computed that cell), as the stream decides.
   bool error_here(std::int32_t i) const {
     const Node& n = nodes_[i];
-    if (n.ev.errors.empty()) return false;
-    return std::ranges::none_of(n.children, [&](std::int32_t c) { return !nodes_[c].ev.errors.empty(); });
+    if (n.ev.errors.empty() || errors_below(i)) return false;
+    return computed(n.ev.outcome) || !computed_with_errors_.contains(n.ev.cell);
   }
 
   void toggle(std::int32_t i) {
@@ -447,6 +459,9 @@ class Tree {
     for (char& c : out) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
     return out;
   }
+  bool errors_below(std::int32_t i) const {
+    return std::ranges::any_of(nodes_[i].children, [&](std::int32_t c) { return !nodes_[c].ev.errors.empty() || errors_below(c); });
+  }
   bool hidden(std::int32_t i) const {
     const Node& n = nodes_[i];
     return hide_reused_ && !n.group && n.children.empty() && n.ev.outcome == Outcome::reused;
@@ -476,6 +491,7 @@ class Tree {
   std::vector<std::int32_t> roots_;
   bool newest_first_ = false;
   bool hide_reused_ = false;
+  std::set<std::uint64_t> computed_with_errors_;  // cells some node computed with errors
   std::unordered_map<std::uint64_t, std::int32_t> by_id_;
   std::vector<std::string> words_;
   std::optional<std::int32_t> worker_;
