@@ -7,6 +7,15 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
 
 ## Orchestration and sessions
 
+- **Don't commit a generated file that every feature PR regenerates.** Under the first §6.9, each
+  feature PR committed the feature map's `probes.tsv` and rendered table. With five slices
+  running, every merge to `main` made the other open PRs conflict in both files, and #358, #352,
+  #364 and #359 each needed an extra merge round and CI run within an hour.
+  - Do: commit only the hand-edited source (here a row in `features.toml`), and let CI generate
+    the rest and check it, publishing the result as an artifact or an issue body. A merge driver
+    cannot regenerate data that needs a build, and `merge=ours` keeps it silently stale.
+  - Rule: DECISIONS §6.9. Learned on #366.
+
 - **A session cannot run on a model above its parent's.** A session asked to run on Fable
   silently started on Opus.
   - Do: run sessions on Opus and reach Fable through Agent subagents with `model: "fable"`.
