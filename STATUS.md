@@ -810,6 +810,11 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   enumerator values from constant expressions (narrowing into a fixed type diagnosed), unscoped
   enumerators in the enclosing scope and clashes with other declarations, `E::e`, enumerations
   nested in classes (`C::E`, `C::e`), `using enum` in a block, `enum E` elaborated specifiers.
+  Without a fixed type the underlying type is the Itanium compilers' (#220): `unsigned int` or
+  `unsigned long` when no enumerator is negative, else `int` or `long`, the narrower that holds
+  every value (`tests/own/classes/s4-enum-*`, symbols checked against Clang's). It promotes to
+  the type its values need ([conv.prom]/3, `EnumRec::promotion`), and an implicit enumerator
+  whose value outgrows its predecessor's type gets a wider one ([dcl.enum]/5).
 - Conversions: an unscoped enumeration promotes ([conv.prom]/4) and converts to integers and
   bool; nothing converts implicitly to an enumeration except its own type; a scoped one
   compares only with its own type; `E e{n}` for a fixed underlying type ([dcl.init.list]/3.8).
