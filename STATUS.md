@@ -178,8 +178,8 @@ What is true of the code today. Work in progress and its owners are tracked in
     (`tools/unicode/ucd/`). Unicode License v3 in `src/lex/LICENSE.unicode`.
 - `ycxx.pp`: phase 4 since #85; see "Preprocessor" below.
 - Measured (Release, Apple M-series, `lex_bench`): about 25 MB/s, 110 ns per token. Not tuned.
-- Not yet: `long double` and the extended floating types' values (left to the
-  target), the type of an integer literal (sema, #33).
+- Not yet: the extended floating types' values (#351); `long double`'s are binary64's, the
+  target's (sema checks the format); the type of an integer literal (sema, #33).
 
 ## Preprocessor (#85, 2026-11-18)
 
@@ -429,7 +429,7 @@ one import `ycxx.ast`; unit tests in `tests/unit/ast` (run by ctest, see docs/TE
   ([conv.integral], [conv.bool]).
 - Compaction keeps every type and constant, and rewrites the lists they hold.
 - Not yet: enums, member pointers, the dependent type kinds other than `TTemplateParam` and the
-  rest of `VDep*`, floating constants, sugar other than typedefs.
+  rest of `VDep*`, sugar other than typedefs. (Floating constants, `VFloat`: #336.)
 
 ## Parser and sema for the α subset (#41)
 
@@ -503,7 +503,7 @@ one import `ycxx.ast`; unit tests in `tests/unit/ast` (run by ctest, see docs/TE
   - `function_ir` and `function_debug` keyed by a context (they are keyed by unit and entity, #16);
   - `is_constexpr` over real entities (the front end reports none yet);
   - classes, arrays as objects, cleanups, EH (`invoke`), coroutines, static locals, calls
-    through pointers, floating point, `switch` and `goto`.
+    through pointers, `switch` and `goto`. (Floating point: #336.)
 
 ## The pipeline: `ycxx cxx a.cpp -o a` (#43, 2026-11-18)
 
@@ -737,8 +737,9 @@ in `lsp` frames (`LspOut`), the last of which carries LSP's exit status (1 after
   writes to objects from outside the evaluation, volatile accesses, non-constexpr and undefined
   callees, `reinterpret_cast`-like ops and `asm`.
 - The dispatch table is `ir::eval_table<Ops, …>()` with `complete`: every op has a handler. Ops
-  outside the α slice (floating point, aggregates and `copy`, unions, dynamic storage, virtual
-  calls, atomics, EH, coroutines, reflection) fail with `Reason::unsupported`, naming the op.
+  outside the α slice (aggregates and `copy`, unions, dynamic storage, virtual calls, atomics,
+  EH, coroutines, reflection) fail with `Reason::unsupported`, naming the op. (Floating point
+  is evaluated since #336.)
 - Not yet: whole-program runs with a host I/O interface, records and the under-construction state
   of [class.cdtor] (#25).
 
@@ -1037,8 +1038,8 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   classes, and each kind of class for calls (trivially copyable, non-trivial copy or destructor,
   move-only, deleted copy, a move-only member) under both settings, calling both ways.
 - Not yet: braced arguments to overload sets, templates and member calls (#231), class arguments
-  through an ellipsis and calls through pointers returning classes (#196), classes with
-  floating members (#201), classes in constant evaluation (#25).
+  through an ellipsis and calls through pointers returning classes (#196), classes in constant
+  evaluation (#25). (Classes with floating members: #336.)
 - Tests: `tests/own/abi` (5), `tests/own/classes/s5-byvalue-lifetimes`, `-temporaries`;
   s1-byvalue-params and -return pass.
 
@@ -1504,6 +1505,54 @@ What the process allocates, attributed to the engine's cells, in the trace and t
   (the JSON memory schema, the stream's summary, `ctl status`).
 - Not yet: drift of retained bytes over a long daemon session, a peak per request, and small
   inexactness (#284).
+
+## Floating point, the μ slice (#336, 2026-11-19)
+
+`float`, `double` and `long double` (binary32, binary64 and binary64 on arm64 Darwin) have
+values, end to end; results match Clang's bit for bit.
+
+- **Literals** ([lex.fcon]): decimal and hexadecimal, rounded to nearest by the lexer (`l`'s in
+  binary64 too); one beyond the type's range is an infinity with a warning, as [lex.fcon]/4's
+  example and Clang and GCC have it. The `f16`/`bf16` suffixes and the extended types are #351.
+- **Constants:** `ast::VFloat{type, bits}`, the encoding in the type's format; `ast::float_value`,
+  `float_double` and `computes(format)` in `ycxx.ast.typeops`; `sema::ValueRec::real`.
+- **Sema:** `is_arithmetic` includes the standard floating types; `ConversionKind::floating` for
+  [conv.fpprom] and [conv.double] beside `floating_integral` ([conv.fpint]), chosen by
+  `Sema::arithmetic_conversion` wherever an arithmetic conversion is made; the usual arithmetic
+  conversions, overload ranks (float to double a promotion), the ellipsis's float-to-double
+  promotion, narrowing ([dcl.init.list]/7.1–7.3, with constant values), `static_cast` between
+  floating, integer and enumeration types; an enumeration with a floating operand is ill-formed
+  ([expr.arith.conv]/1); `%`, shifts, `~` and subscripts reject floating operands.
+- **Constant evaluation:** the interpreter computes in binary32 and binary64 (`float_arith`,
+  `float_compare`, `float_convert`). In constant mode a division by zero, a NaN result and a
+  conversion to an integer that cannot hold the value are not constant (as Clang; GCC accepts a
+  NaN operand); an overflow to infinity is (as Clang; GCC rejects it).
+- **L1/L2:** L1's `fadd`…`fcmp`, `fconv`, `f2i`, `i2f` and the new `fabs`; L2 gains `f32`, `f64`,
+  `fadd`, `fsub`, `fmul`, `fdiv`, `fneg`, `fabs`, `fcmp` (plain predicates: ordered but `ne`),
+  `fpext`, `fptrunc`, `fptosi`, `fptoui`, `sitofp`, `uitofp`. `lower` extends a narrow integer to
+  32 bits before converting it, converts to bool by `fcmp ne 0`, and splits a homogeneous
+  floating-point aggregate (`TypeLayout::hfa`, 1–4 members of one floating type, through arrays,
+  member classes and unions) into one value per member.
+- **AArch64:** `R::v0`–`v31`; the FP forms (C7.2) with their own size rules (`Size::ftype`,
+  `sfft`); the pattern conditions `f32(?x)`, `f64(?x)` and `?d` for the root; FCMP's plain
+  predicates map to conditions false for unordered operands (`lt` is MI, `le` LS). Floating
+  arguments take v0–v7 counted apart from x0–x7, then the stack in argument order; results come
+  back in v0 (an HFA's in v0–v3); an HFA that does not fit goes whole on the stack (AAPCS64 C.3);
+  variadic doubles take 8-byte stack slots. The slot allocator passes floating values through
+  v16–v19; frame layout gives a form its FP counterpart when its register is a V register
+  (loads, stores, CSEL, moves, constants built in x16 and moved by FMOV). The internal
+  disassembler names S and D registers.
+- **Built-ins** (docs/EXTENSIONS.md): `__builtin_fabs*` (`ast::BuiltinCall`, FABS),
+  `__builtin_inf*`, `__builtin_huge_val*` and `__builtin_nan*` (constants); `__has_builtin`
+  answers 1.
+- `#include <cmath>`: 4,415 errors before, 4,343 after; it still does not compile (#349).
+- Tests: `tests/own/floating` (84, spec-only: literals, conversions, constant evaluation, run
+  tests printing with `printf`, mixed-object tests with Clang peers for scalars, many arguments,
+  HFAs, structs and variadic callees, and `<math.h>`); 13 are XFAIL on other features (#25, #94,
+  #117/#349, #196, #267, #291, #298, #307). Breaking HFA passing or the `lt` condition turns
+  them red. `unit.aarch64`: the FP encodings against the Arm ARM. Four draft examples pass.
+- Not yet: the extended floating-point types (#351), floating non-type template parameters
+  (#317), `-ffast-math`-style options, and `<cmath>` (#349).
 
 ## Bootstrap workarounds
 

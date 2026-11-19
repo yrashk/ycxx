@@ -10,7 +10,7 @@ tool), recompute only what that change can affect.
 
 ## Status
 
-**Pre-0.1** (as of 2026-11-18). ycxx compiles a substantial subset of C++ (C-like code, classes,
+**Pre-0.1** (as of 2026-11-19). ycxx compiles a substantial subset of C++ (C-like code, classes,
 templates and constant evaluation) on macOS arm64, from source to a signed, running executable,
 with no external compiler, assembler or linker. It does not compile real programs yet: the
 standard library is out of reach. The plan is in [DECISIONS.md](DECISIONS.md), the details of
@@ -31,8 +31,10 @@ build/bin/ycxx cxx hello.cpp -o hello && ./hello
 ```
 
 **Language.** Programs can use:
-- the fundamental integer and character types, pointers, arrays, references and enumerations,
-  and the floating types as types (not yet their values);
+- the fundamental integer, character and floating types, pointers, arrays, references and
+  enumerations; `float`, `double` and `long double` with literals, arithmetic, comparisons and
+  conversions giving Clang's results bit for bit, and passing and returning them (classes of
+  floating members included) by Clang's calling convention;
   all statements and operators; functions, recursion and overloading, operator functions included;
 - classes and unions: data and static members, member functions, constructors and destructors
   with RAII, aggregate and designated initialization, passing and returning them by value with
@@ -51,7 +53,8 @@ build/bin/ycxx cxx hello.cpp -o hello && ./hello
 - constant evaluation on ycxx's own interpreter: `constexpr`, `consteval`, `constinit`,
   `static_assert` and `if consteval`, with errors that explain why something is not constant;
 - `extern "C"` functions from libSystem, including `printf` with integers, characters,
-  pointers and strings as arguments.
+  floating values, pointers and strings as arguments, and the SDK `<math.h>`'s built-ins
+  (`__builtin_fabs`, `__builtin_inf`, `__builtin_huge_val`, `__builtin_nan`).
 
 **Preprocessing.** All of translation phase 4: includes, object-like and function-like
 macros, conditionals, `_Pragma` and the predefined macros. `ycxx cxx -E` matches Clang's output.
@@ -85,10 +88,11 @@ checked with the flags of its last build, or else with its line in the project's
 ### Not yet
 
 - The standard library and its headers. C headers such as `<stdio.h>` compile without warnings
-  and `printf` runs; libycxx's `<cstdio>` still needs pointer-to-member types.
+  and `printf` runs; libycxx's `<cstdio>` still needs pointer-to-member types, and `<cmath>`
+  (which `<math.h>` includes) does not compile yet ([#349](https://github.com/yrashk/ycxx/issues/349)).
 - Inheritance and virtual functions.
 - Member templates, and constraints on class templates and their members.
-- Floating-point arithmetic, exceptions, and optimization (`-O`).
+- Exceptions, optimization (`-O`), and the extended floating-point types (`std::float16_t`, …).
 - Linux and x86-64 output.
 
 ### In progress
