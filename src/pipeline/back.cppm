@@ -883,7 +883,8 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
           const sema::World* w = universe().world;
           if (!w) return ClassName{};
           const sema::EntityRec& r = w->entities.rec(c);
-          return ClassName{std::string(w->ins.names.spelling(r.name)), r.scope, r.templ, r.args};
+          return ClassName{std::string(w->ins.names.spelling(r.name)), r.scope, r.templ, r.args,
+                           r.kind == sema::EntityKind::class_ || r.kind == sema::EntityKind::class_template};
         },
         e.scope, e.special != Special::none, e.template_type ? &spec : nullptr);
     if (!name) {

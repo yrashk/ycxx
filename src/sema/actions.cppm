@@ -2452,10 +2452,59 @@ public:
     return true;
   }
 
+  // [over.match.oper]: an operator with an operand of class or enumeration type calls an operator
+  // function when one is viable: a member `operator@` of the left operand's class, else the
+  // non-member ones that unqualified lookup and argument-dependent lookup find
+  // ([over.match.oper]/3). None viable: the built-in operator. (A member and a non-member are not
+  // yet ranked against each other, nor against the built-in candidates.)
+  std::optional<Ex> overloaded(std::string_view op, std::vector<Ex> operands, u32 begin, u32 end, u32 op_at) {
+    auto user_type = [&](const Ex& e) {
+      QualType t = types().referee(e.type());
+      return types().is_class(t) || types().is_enum(t);
+    };
+    if (std::ranges::none_of(operands, user_type) || any_dependent(operands)) return std::nullopt;
+    NameId name = ins().names.intern(std::string("operator") + std::string(op));
+    std::size_t n = diag_count();
+    QualType lt = types().referee(operands[0].type());
+    if (types().is_class(lt))
+      if (const ClassRec* c = class_rec(types().class_of(lt));
+          c && std::ranges::any_of(c->members, [&](const MemberDeclRec& m) { return m.name == name && m.is_function && !m.is_static; })) {
+        Ex m = member(operands[0], false, name, operands[0].end, op_at, op_at);
+        Ex r = m.ok() ? call(m, std::vector<Ex>(operands.begin() + 1, operands.end()), end, op_at) : m;
+        if (r.ok()) return Ex{r.id, begin, end, r.info};
+        truncate_diags(n);
+      }
+    std::vector<ast::DeclSema> set;
+    auto add = [&](const ast::DeclSema& d) {
+      if (d.kind == ast::DeclKind::function && d.entity != EntityId::none &&
+          !std::ranges::any_of(set, [&](const ast::DeclSema& x) { return x.entity == d.entity; }))
+        set.push_back(d);
+    };
+    for (const auto& o : own)
+      if (o.name == name) add(o.sema);
+    for (DeclId d : q_->visible_decls(name, directives())) add(q_->decl_sema(d));
+    for (const Ex& o : operands)
+      if (auto ns = associated_namespace(o.type()))
+        for (const ast::DeclSema& d : q_->namespace_members(*ns, name)) add(d);
+    if (set.empty()) return std::nullopt;
+    ExprInfo info{builtin(Builtin::overload_set), ValueCategory::lvalue, 0};
+    Ex callee = node(ast::DeclRef{info, set.front().entity}, begin, begin, info);
+    overloads_[std::to_underlying(callee.id)] = std::move(set);
+    Ex r = call(callee, std::move(operands), end, op_at);
+    if (!r.ok()) {
+      truncate_diags(n);
+      return std::nullopt;
+    }
+    return Ex{r.id, begin, end, r.info};
+  }
+
   Ex unary(ast::UnaryOp op, Ex e, u32 begin, u32 end, u32 op_at) {
     using enum ast::UnaryOp;
     if (!e.ok()) return {NodeId::none, begin, end};
     if (dependent(e)) return dependent_node({e}, begin, end);
+    static constexpr std::string_view unary_spellings[] = {"+", "-", "!", "~", "", "", "++", "--", "", ""};
+    if (std::string_view sp = unary_spellings[std::to_underlying(op)]; !sp.empty())
+      if (auto o = overloaded(sp, {e}, begin, end, op_at)) return *o;
     auto make = [&](Ex operand, QualType t, ValueCategory cat) {
       ExprInfo info{t, cat, 0};
       return node(ast::Unary{info, op, at(operand, begin)}, begin, end, info);
@@ -2524,6 +2573,9 @@ public:
     u32 begin = l.begin, end = r.end;
     if (!l.ok() || !r.ok()) return {NodeId::none, begin, end};
     if (dependent(l) || dependent(r)) return dependent_node({l, r}, begin, end);
+    static constexpr std::string_view binary_spellings[] = {"*", "/", "%", "+", "-", "<<", ">>", "<", ">", "<=", ">=",
+                                                            "==", "!=", "&", "^", "|", "&&", "||", ","};
+    if (auto o = overloaded(binary_spellings[std::to_underlying(op)], {l, r}, begin, end, op_at)) return *o;
     auto bin = [&](ast::BinaryOp k, Ex a, Ex c, QualType t) {
       ExprInfo info{t, ValueCategory::prvalue, 0};
       return node(ast::Binary{info, k, at(a, begin), at(c, begin)}, begin, end, info);
@@ -2650,6 +2702,9 @@ public:
     u32 begin = l.begin, end = r.end;
     if (!l.ok() || !r.ok()) return {NodeId::none, begin, end};
     if (dependent(l) || dependent(r)) return dependent_node({l, r}, begin, end, std::nullopt, ValueCategory::lvalue);
+    // `=` is a member only ([over.assign]); `operator_function_ok` rejects non-member ones.
+    static constexpr std::string_view assign_spellings[] = {"=", "*=", "/=", "%=", "+=", "-=", "<<=", ">>=", "&=", "^=", "|="};
+    if (auto o = overloaded(assign_spellings[std::to_underlying(op)], {l, r}, begin, end, op_at)) return *o;
     if (!check_modifiable(l, op_at) || !check_class_assignable(l, op_at)) return {NodeId::none, begin, end};
     QualType lt = l.type();
     QualType computation = Types::unqualified(lt);

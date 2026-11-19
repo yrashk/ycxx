@@ -33,7 +33,7 @@ build/bin/ycxx cxx hello.cpp -o hello && ./hello
 **Language.** Programs can use:
 - the fundamental integer and character types, pointers, arrays, references and enumerations,
   and the floating types as types (not yet their values);
-  all statements and operators; functions, recursion and overloading;
+  all statements and operators; functions, recursion and overloading, operator functions included;
 - classes and unions: data and static members, member functions, constructors and destructors
   with RAII, aggregate and designated initialization;
 - namespaces, typedefs and alias declarations, `using` declarations and directives;
@@ -62,7 +62,8 @@ through the daemon, without unsaved text ever reaching a build.
 
 ### Not yet
 
-- The standard library and its headers. `<cstdio>` preprocesses but does not yet pass sema.
+- The standard library and its headers. C headers such as `<stdio.h>` compile and `printf` runs;
+  libycxx's `<cstdio>` still needs parameter packs and concepts.
 - Inheritance and virtual functions, passing classes by value, `sizeof` of a class.
 - Concepts, member and alias templates, template template parameters, `if constexpr`.
 - Floating-point arithmetic, exceptions, and optimization (`-O`).

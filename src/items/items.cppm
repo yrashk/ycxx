@@ -886,7 +886,10 @@ private:
         }
         cand_end = n;
       } else if (t == Tk::l_paren) {
-        if (cand != none && n == cand_end) {
+        // A parameter list follows the declarator-id; `T (*p)(…)`, where a ptr-operator follows
+        // the `(`, is a grouping parenthesis around the declarator ([dcl.ambig.res]).
+        bool ptr = kind(n + 1) == Tk::star || kind(n + 1) == Tk::amp || kind(n + 1) == Tk::ampamp;
+        if (cand != none && n == cand_end && !ptr) {
           function = true;
           break;
         }
