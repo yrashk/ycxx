@@ -215,11 +215,15 @@ class Selector {
   }
 
   void params() {
-    std::uint32_t i = 0, stack = 0;
+    std::uint32_t i = 0, stack = 0, k = 0;
     for (ValueId p : f_.params_of(BlockId(0))) {
       Type t = f_.type(p);
       if (t == Type::state) continue;
       std::uint32_t v = vreg_of_[raw(p)];
+      if (++k == f_.indirect_result) {  // the address of the indirect result comes apart
+        emit(mov(MOp::vreg(v), MOp::preg(cc_.indirect_result)));
+        continue;
+      }
       if (i < cc_.int_args.size()) {
         emit(mov(MOp::vreg(v), MOp::preg(cc_.int_args[i])));
       } else {
@@ -261,9 +265,18 @@ class Selector {
     auto imms = f_.imms_of(n);
     bool ind = nd.op == l2::Op::call_ind;
     std::uint32_t target = ind ? vreg(ops[1]) : nil;
-    std::uint64_t sext = imms[ind ? 0 : 1];
+    std::uint64_t sext = 0, sext_l2 = imms[ind ? 0 : 1];
+    std::uint64_t indirect = imms[ind ? 2 : 3];
+    std::uint32_t indirect_reg = nil;
     std::vector<std::pair<std::uint32_t, Type>> args;
-    for (std::size_t i = ind ? 2 : 1; i < ops.size(); ++i) args.push_back({vreg(ops[i]), f_.type(ops[i])});
+    for (std::size_t i = ind ? 2 : 1, k = 0; i < ops.size(); ++i, ++k) {
+      if (k + 1 == indirect) {  // the indirect result's address goes apart (AAPCS64 §6.9: x8)
+        indirect_reg = vreg(ops[i]);
+        continue;
+      }
+      if ((sext_l2 >> k) & 1) sext |= std::uint64_t(1) << args.size();
+      args.push_back({vreg(ops[i]), f_.type(ops[i])});
+    }
     // The arguments the callee's ellipsis matches are the last ones; the convention may place
     // them apart from the named ones.
     std::size_t through_ellipsis = imms[ind ? 1 : 2];
@@ -294,6 +307,7 @@ class Selector {
       // Extended to the register width by signedness.
       emit(mov(MOp::preg(cc_.int_args[i]), MOp::vreg(extend(v, t, cc_.reg_arg_bits, is_signed(i)))));
     }
+    if (indirect_reg != nil) emit(mov(MOp::preg(cc_.indirect_result), MOp::vreg(indirect_reg)));
     if (ind) emit({Form::BLR, true, 3, 1, {MOp::vreg(target)}});
     else emit({Form::BL, true, 3, 1, {{MK::sym, std::int64_t(f_.imms_of(n)[0])}}});
     if (nd.nres > 1 + cc_.max_results) return fail("more results than the calling convention returns in registers");
@@ -301,14 +315,14 @@ class Selector {
       ValueId v = f_.result(n, r);
       std::uint32_t d = new_vreg(f_.type(v));
       vreg_of_[raw(v)] = d;
-      emit(mov(MOp::vreg(d), MOp::preg(cc_.int_result)));
+      emit(mov(MOp::vreg(d), MOp::preg(cc_.int_results[r - 1])));
     }
   }
 
   void ret(NodeId n) {
     auto ops = f_.operands_of(n);
     if (ops.size() > 1 + cc_.max_results) return fail("more results than the calling convention returns in registers");
-    if (ops.size() == 2) emit(mov(MOp::preg(cc_.int_result), MOp::vreg(vreg(ops[1]))));
+    for (std::size_t r = 1; r < ops.size(); ++r) emit(mov(MOp::preg(cc_.int_results[r - 1]), MOp::vreg(vreg(ops[r]))));
     emit({Form::RETp, true, 3, 0, {}});
   }
 

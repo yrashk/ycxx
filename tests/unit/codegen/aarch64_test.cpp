@@ -211,7 +211,7 @@ func @6 {
 ^0(%s: !state):
   %g: T9 = const [#2130706688]
   %e: T6 = ptr_member %g [T5, /e0]
-  %s1: !state, %r: T1 = call %s, %e [@101, 0]
+  %s1: !state, %r: T1 = call %s, %e [@101, 0, 0, 0]
   %z: T1 = const [#0]
   ret %s1, %z
 }
@@ -298,7 +298,7 @@ void test_programs(const std::filesystem::path& dir) {
 func @1 {
 ^0(%s: !state):
   %five: T1 = const [#5]
-  %s1: !state, %r: T1 = call %s, %five [@2, 0]
+  %s1: !state, %r: T1 = call %s, %five [@2, 0, 0, 0]
   ret %s1, %r
 }
 func @2 {
@@ -310,7 +310,7 @@ func @2 {
   ret %s, %one
 ^2:
   %m: T1 = sub nsw %n, %one
-  %s3: !state, %r: T1 = call %s, %m [@2, 0]
+  %s3: !state, %r: T1 = call %s, %m [@2, 0, 0, 0]
   %p: T1 = mul nsw %n, %r
   ret %s3, %p
 }
@@ -386,7 +386,7 @@ func @1 {
   %s1: !state = store %s, %g, %n [T1, /]
   %m: T15 = global [@201]
   %p: T6 = load %s1, %m [T6, /]
-  %s2: !state, %x: T1 = call %s1, %p [@101, 0]
+  %s2: !state, %x: T1 = call %s1, %p [@101, 0, 0, 0]
   %r: T1 = load %s2, %g [T1, /]
   ret %s2, %r
 }
@@ -413,13 +413,13 @@ func @1 {
   cond_br %more ^2, ^3
 ^2:
   %w: T1 = iconv %ch
-  %a1: !state, %r: T1 = call %a, %w [@102, 0]
+  %a1: !state, %r: T1 = call %a, %w [@102, 0, 0, 0]
   %one: T1 = const [#1]
   %q: T6 = ptr_add %p, %one [T5]
   br ^1(%a1, %q)
 ^3:
   %nl: T1 = const [#10]
-  %a2: !state, %r2: T1 = call %a, %nl [@102, 0]
+  %a2: !state, %r2: T1 = call %a, %nl [@102, 0, 0, 0]
   %zero: T1 = const [#0]
   ret %a2, %zero
 }
@@ -619,30 +619,30 @@ Gen harness() {
       body += std::format("  %v{}: T3 = const [#{}]\n", i, i + 1);
       args += std::format(", %v{}", i);
     }
-    body += std::format("  %s1: !state, %r: T3 = call %s{} [@900, 0]\n  ret %s1, %r\n", args);
+    body += std::format("  %s1: !state, %r: T3 = call %s{} [@900, 0, 0, 0]\n  ret %s1, %r\n", args);
     custom(g, "call10", body, "long t_call10(void)", "t_call10() == 385L");
   }
   custom(g, "callmix",
          "^0(%s: !state):\n  %z: T1 = const [#0]\n  %c: T5 = const [#4294967293]\n  %h: T13 = const [#4294967096]\n"
          "  %u: T10 = const [#250]\n  %b: T2 = const [#1]\n"
-         "  %s1: !state, %r: T3 = call %s, %c, %z, %z, %z, %z, %z, %z, %z, %c, %h, %u, %b [@901, 0]\n  ret %s1, %r\n",
+         "  %s1: !state, %r: T3 = call %s, %c, %z, %z, %z, %z, %z, %z, %z, %c, %h, %u, %b [@901, 0, 0, 0]\n  ret %s1, %r\n",
          "long t_callmix(void)", "t_callmix() == 2 * -3L * 1000000 - 200L * 1000 + 250 + 1");
   // A variadic callee (Apple: what the ellipsis matches goes on the stack, 8-byte slots, after the
   // named stack arguments: here the named `signed char` and `int` take bytes 0 and 4).
   custom(g, "callvar",
          "^0(%s: !state):\n  %z: T1 = const [#0]\n  %c: T5 = const [#4294967293]\n  %n: T1 = const [#4]\n"
          "  %m: T1 = const [#4294967295]\n  %l: T3 = const [#2]\n  %i: T1 = const [#3]\n  %p: T3 = const [#4]\n"
-         "  %s1: !state, %r: T3 = call %s, %z, %z, %z, %z, %z, %z, %z, %z, %c, %n, %m, %l, %i, %p [@903, 4]\n"
+         "  %s1: !state, %r: T3 = call %s, %z, %z, %z, %z, %z, %z, %z, %z, %c, %n, %m, %l, %i, %p [@903, 4, 0, 0]\n"
          "  ret %s1, %r\n",
          "long t_callvar(void)", "t_callvar() == (((-3L * 10 - 1) * 10 + 2) * 10 + 3) * 10 + 4");
   custom(g, "callvar_regs",
          "^0(%s: !state):\n  %n: T1 = const [#3]\n  %m: T1 = const [#4294967295]\n  %l: T3 = const [#2]\n"
          "  %i: T1 = const [#7]\n"
-         "  %s1: !state, %r: T3 = call %s, %n, %m, %l, %i [@904, 3]\n  ret %s1, %r\n",
+         "  %s1: !state, %r: T3 = call %s, %n, %m, %l, %i [@904, 3, 0, 0]\n  ret %s1, %r\n",
          "long t_callvar_regs(void)", "t_callvar_regs() == ((-1L * 10) + 2) * 10 + 7");
   // Through a function pointer.
   custom(g, "apply",
-         "^0(%s: !state, %f: T18, %x: T1):\n  %s1: !state, %r: T1 = call_ind %s, %f, %x [0]\n  ret %s1, %r\n",
+         "^0(%s: !state, %f: T18, %x: T1):\n  %s1: !state, %r: T1 = call_ind %s, %f, %x [0, 0, 0]\n  ret %s1, %r\n",
          "int t_apply(int (*)(int), int)", "t_apply(c_twice, 21) == 42");
   // The address of a function defined elsewhere comes through the GOT.
   custom(g, "fptr", "^0(%s: !state):\n  %f: T18 = func_addr [@902]\n  ret %s, %f\n", "int (*t_fptr(void))(int)",
