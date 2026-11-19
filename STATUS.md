@@ -1702,6 +1702,20 @@ values, end to end; results match Clang's bit for bit.
 - Tests: `tests/own/stmt/` (written spec-only, 23 run and 15 reject tests, and the split-off XFAILs
   for the above).
 
+## Range-based `for`, ι (#298, #337, 2026-11-19)
+
+- **Parser** (src/parse/parser.cppm `range_for`): `for ( init-statement_opt decl : initializer )`
+  (`range_for_ahead` finds the `:`, past `?:`) is built as [stmt.ranged] expands it, from existing
+  kinds: hidden locals `auto&& __range`, `auto __begin`, `auto __end` (`deduce_placeholder`),
+  then a `For` over `__begin != __end` and `++__begin` whose body declares the loop variable from
+  `*__begin`. begin-expr is `__range` for an array, `__range.begin()` when the class has a member
+  `begin` or `end`, else `begin(__range)` by ordinary lookup. The loop variable and the
+  init-statement's names are in the guarded scope ([basic.scope.block]/2). In a template's
+  definition, a dependent range leaves the loop to the instantiation.
+- Not yet: `begin`/`end` found only by argument-dependent lookup (#165); temporaries in the
+  range-initializer living to the loop's end (C++23, #376); a braced range (#329).
+- Tests: `tests/own/range-for/` (spec-only, 17 tests).
+
 ## Bootstrap workarounds
 
 Places where ycxx's sources avoid or work around a C++26 feature because GCC 16 lacks it or
