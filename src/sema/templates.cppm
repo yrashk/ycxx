@@ -138,7 +138,7 @@ public:
         if (ins().values.is_dependent(a->value)) return types().array_dependent(*e, a->value);  // a unique value
         if (!ins().values.is<ast::VInt>(a->value)) return std::nullopt;
         // [dcl.array]/1: the bound's value is greater than zero.
-        if (ast::is_signed(target, *types().builtin_of(a->type)) && ast::is_negative(ast::int_bits(ins(), a->value)))
+        if (ast::is_signed(w_->target, *types().builtin_of(a->type)) && ast::is_negative(ast::int_bits(ins(), a->value)))
           return std::nullopt;
         if (ast::int_bits(ins(), a->value) == ast::Bits128{}) return std::nullopt;
         return types().array_dependent(*e, a->value);
@@ -218,7 +218,7 @@ public:
     if (!nv || !ins().values.is<ast::VInt>(nv->value)) return std::nullopt;
     ast::Bits128 n = ast::int_bits(ins(), nv->value);
     auto bt = types().builtin_of(t);
-    if (bt && ast::is_signed(target, *bt) && ast::is_negative(n)) return std::nullopt;
+    if (bt && ast::is_signed(w_->target, *bt) && ast::is_negative(n)) return std::nullopt;
     constexpr u64 limit = u64(1) << 20;  // beyond any instantiation an implementation would finish
     if (n.hi != 0 || n.lo > limit) return std::nullopt;
     std::vector<TemplateArg> xs{type_arg(t)};
@@ -1164,10 +1164,10 @@ public:
     t = types().canonical(Types::unqualified(t));
     if (types().is_dependent(t) || ins().values.is_dependent(a.value)) return TemplateArg{TemplateArgKind::value, t, a.value};
     if (types().is_integral(t) && ins().values.is<ast::VInt>(a.value)) {
-      ConstId c = ast::convert_integral(ins(), target, a.value, t);
-      ConstId back = ast::convert_integral(ins(), target, c, a.type);
+      ConstId c = ast::convert_integral(ins(), w_->target, a.value, t);
+      ConstId back = ast::convert_integral(ins(), w_->target, c, a.type);
       auto neg = [&](ConstId v, QualType of) {
-        return ast::is_signed(target, *types().builtin_of(of)) && ast::is_negative(ast::int_bits(ins(), v));
+        return ast::is_signed(w_->target, *types().builtin_of(of)) && ast::is_negative(ast::int_bits(ins(), v));
       };
       if (back != a.value || neg(c, t) != neg(a.value, a.type)) return std::nullopt;  // narrowing ([dcl.init.list]/7)
       return TemplateArg{TemplateArgKind::value, t, c};

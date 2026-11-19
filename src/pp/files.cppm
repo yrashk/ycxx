@@ -111,7 +111,7 @@ struct Config {
   // `-D name[=value]` (value "1" when absent) and `-U name`, in command-line order: a definition
   // has a value, an undefinition none.
   std::vector<std::pair<std::string, std::optional<std::string>>> macros;
-  // The target, whose macros are predefined (:predefined).
+  // The target selects predefined macros (:predefined) and system include directories (:system).
   const ast::Target* target = &ast::aarch64_darwin;
   // The root of every prefix (§6.1): an editor-view region is never a disk-view one's.
   View view = View::disk;

@@ -202,7 +202,8 @@ What is true of the code today. Work in progress and its owners are tracked in
 - Directives:
   - `#include` in both forms and the macro-replaced form, and `#include_next`;
   - search directories from `-I`, `-isystem` and `-iquote`, then libycxx's headers and the
-    SDK's (`:system`, configured by CMake);
+    target's system headers (`:system`, configured by CMake). For x86-64 Linux, ycxx's resource
+    headers (#133) precede the SDK's `usr/include/x86_64-linux-gnu` and `usr/include` (#252);
   - `#define` and `#undef` with the redefinition check, rescanning and painting
     ([cpp.rescan]);
   - function-like macros (`:unit`'s `invocation`, `substitute`, `paste`): arguments across
@@ -221,13 +222,14 @@ What is true of the code today. Work in progress and its owners are tracked in
 - Predefined macros (`:predefined`, DECISIONS §1.5):
   - `__ycxx__` and its version, `__GNUC__` 4.2.1 (#229), and the draft's macros;
   - a feature-test table, with lexer features only;
-  - the target's macros, generated from `ast::Target` and checked against Clang
-    (`tests/own/pp/predefined-target.pp.cpp`);
+  - the target's macros, generated from `ast::Target` and checked against Clang on AArch64
+    Darwin and x86-64 Linux (`tests/own/pp/predefined-target*.pp.cpp`, #132);
   - `__LINE__`, `__FILE__`, `__COUNTER__`, `__DATE__` and `__TIME__`.
 - `#include <cstdio>` preprocesses until libycxx's `#error` for unknown compilers
   (yrashk/libycxx#17).
 - `ycxx cxx -E` prints what Clang's `-E` would, by Clang's line and spacing rules. `preprocess`
-  is in `tests/features/ycxx.txt`. Diagnostics in included files name their file.
+  is in `tests/features/ycxx.txt`. Diagnostics in included files name their file. Darwin is the
+  default target. `-E --target=x86_64-linux-gnu` (also `x86_64-pc-linux-gnu`) selects Linux.
 - Tests:
   - `tests/own/pp` (by spec-only authors): 103 tests (`-E`, reject and accept), the draft's
     [cpp.scope], [cpp.subst], [cpp.stringize] and [cpp.concat] examples among them;
@@ -352,6 +354,12 @@ stay open for the rest.
 - Not yet: the allocation
   validator and dependence checker (#29), SSA linear scan, list scheduling, unwind info and DWARF,
   a measured `cost_model` (#9), defining a variadic function (`va_start`), more than one result, frame objects aligned above 16 bytes.
+
+## System V AMD64 scalar integer division
+
+- The x86-64 emitter supports L2 `sdiv`, `udiv`, `srem` and `urem` for `i32` and `i64`.
+  `unit.x86_64` lowers C++ functions using `/` and `%` and runs them on Linux x86-64. It checks
+  signed boundary values, unsigned high bits and the existing diagnostic for narrower L2 types.
 
 ## AST core (#32)
 
@@ -530,13 +538,13 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
     node.
   - `:mangle`: Itanium names for global-namespace functions over fundamental, pointer and cv types
     with substitutions; `main`, `extern "C"` functions and variables are not mangled (#64).
-  - `:executable`: `link(P)`, the query over a program's `tu` objects and the `.o` inputs, with
-    libSystem's exports from `$SDKROOT`, else `xcrun --show-sdk-path`, else the Command Line Tools'
-    SDK, looked up once per process outside the engine.
+  - `:executable` provides `link(P)`, the query over a program's `tu` objects. The Darwin link
+    also takes `.o` files and libSystem's exports from `$SDKROOT`, else `xcrun --show-sdk-path`,
+    else the Command Line Tools' SDK, looked up once per process outside the engine.
   - `:lines`: a minimal line table for rendering (#34 owns the full one).
-- `ycxx cxx` (also `ycxx -…` with an option first): `-o`, `-c`, `-fsyntax-only`, `-std=c++26`;
-  `.o` inputs are linked as they are. Errors are `path:line:col: error: message` on stderr; exit 0
-  on success, 1 on any error in the input or the command line.
+- `ycxx cxx` (also `ycxx -…` with an option first) takes `-o`, `-c`, `-fsyntax-only` and
+  `-std=c++26`. Errors are `path:line:col: error: message` on stderr. It exits 0 on success and 1
+  on any error in the input or the command line.
 - `tests/features/ycxx.txt` lists `syntax` and `run darwin-arm64`: a feature can be limited to
   hosts. CI's macOS job runs the slice before its tier, with `--no-unsupported`.
 - `unit.pipeline`: the line table, linkage names, and the back half from hand-built analysed
@@ -548,6 +556,37 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   entities differently (mutating `tu` to order by handle makes it fail).
 - Not yet: `ycxx cxx` through the daemon by default (#120), `#include` (#65), optimization
   levels and the other common options (`-O` is rejected, #81).
+
+## x86-64 ELF objects and freestanding executables (2026-11-19)
+
+- `--target=x86_64-pc-linux-gnu` (also `x86_64-linux-gnu`) selects Linux preprocessing,
+  layout and code generation. The in-process driver and daemon keep the target in the unit
+  configuration. Darwin remains the default.
+- The scalar System V AMD64 backend in `src/target/x86_64/` supports 32- and 64-bit integer,
+  pointer and reference parameters and results, plus void results. It handles direct and
+  indirect calls, stack arguments and RIP-relative data references within a unit. Floating-point,
+  aggregate and narrow integer arguments and results, and variadic calls, are outside this ABI
+  subset.
+- `-c` writes deterministic ELF64 relocatable objects through `src/obj/elf.cppm`. The reader
+  accepts the supported x86-64 `ET_REL` subset emitted by ycxx. The native ELF linker consumes
+  the same in-memory objects, resolves absolute and PC-relative relocations, and writes a static
+  `ET_EXEC` image with load segments and a non-executable stack.
+- `ycxx cxx --target=x86_64-pc-linux-gnu -nostdlib a.cpp b.cpp -o a` compiles and links C++
+  sources in one invocation. Either source can also be compiled separately with `-c` and passed
+  as a `.o` input. The driver links compiled sources in command-line order, then disk objects in
+  command-line order. When the program supplies an explicit `_start`, that symbol is the entry.
+  Otherwise ycxx's startup calls `int main()` or `int main(int, char**)` and exits with the returned
+  value. The link query checks a source function's ABI when an asm label gives it the symbol
+  `main`. A `main` supplied in an ELF object must already use one of those signatures. Hosted
+  linking and general-purpose ELF object interoperability remain unsupported.
+- ELF code generation diagnoses translation units that require namespace-scope dynamic
+  initialization or destruction. Syntax-only analysis still accepts them.
+  [#387](https://github.com/yrashk/ycxx/issues/387)
+- Linux x86-64 CI runs `unit.linux_compile`, which links a ycxx-produced object with a native C
+  caller, and `unit.linux_executable` (`tests/unit/pipeline/linux_executable.py`), which runs
+  source-only, object-only and mixed-input executables and checks exit status, `argc` and `argv`,
+  diagnostics, and cold and daemon output. The linker and startup also have native CTest
+  coverage, including execution of an explicit `_start`.
 
 ## The resident daemon (#96, #97, 2026-11-18)
 
@@ -1359,8 +1398,8 @@ Fable decided the representation (ast.md §6.6); the Opus session wrote the code
 - The test driver checks warnings where a test has `//! warning` markers (docs/TESTING.md), and
   reads markers in headers a test includes with `<...>` from its `FLAGS` directories.
 - Tests: `tests/own/pp/predefined-gnuc.pp.cpp`, `tests/own/headers/system-warnings.accept.cpp`,
-  `tests/own/headers/stdio-no-warnings.accept.cpp` (`<stdio.h>` with no warning; darwin only
-  until Linux searches glibc's multiarch directory, #252), `tests/own/headers/system-error.reject.cpp`,
+  `tests/own/headers/stdio-no-warnings.accept.cpp` (`<stdio.h>` with no warning on Darwin),
+  `tests/own/headers/system-error.reject.cpp`,
   `tests/own/builtins/va-list.run.cpp`, `tests/own/builtins/unsupported.reject.cpp`, `tests/own/builtins/unknown-probe.accept.cpp`. `<cstdio>`: 25 errors before and after, and no warning
   (was 1). `<cmath>` and `<cstdlib>` gain errors in the SDK's `__GNUC__` inline functions (local
   unions, floating-point operations, `__builtin_fabs*`), which already had thousands.
@@ -1371,6 +1410,17 @@ Fable decided the representation (ast.md §6.6); the Opus session wrote the code
   ([dcl.ptr]), including the parameter declarations in glibc's `<stdio.h>`. Type construction
   and alias analysis use the ordinary pointer rules. `unit.sema` covers both spellings and
   invalid declarators. See `docs/EXTENSIONS.md`.
+
+## Linux compiler resource `<stddef.h>` (#133)
+
+- For x86-64 Linux, `resources/linux/include` is searched after libycxx, so its `<stddef.h>`
+  forwards glibc's `__need_size_t`, `__need_wchar_t` and `__need_NULL` requests to ycxx. Each
+  request is consumed, and partial inclusions can precede libycxx's full `<cstddef>` inclusion.
+  The full resource header supplies `max_align_t` with 16-byte alignment (AMD64 psABI §3.1.2).
+  `unit.pp` exercises both paths through the configured header search.
+- glibc's `<stdio.h>` now reaches its `__need___va_list` request for `<stdarg.h>`. Compiling
+  `<stdio.h>` still needs a compiler resource `<stdarg.h>` and the System V `__builtin_va_list`
+  type (#133).
 
 ## Templates, ζ step 8: template template parameters and `__make_integer_seq` (#88, #208, 2026-11-19)
 
@@ -1834,7 +1884,7 @@ values, end to end; results match Clang's bit for bit.
   its constant or zero; one initialized by code, or with a destructor, gets a guard variable
   (8 bytes) and its function the runtime's entry points (`Runtime`). Names are Clang's: the
   function's own symbol gives the <encoding> of `_ZZ<encoding>E<name>[_n]` and `_ZGVZ…` (back.cppm).
-  The linker adds libc++abi (`__cxa_guard_*`) when the objects need it (`libcxxabi()`).
+  The Mach-O linker adds libc++abi (`__cxa_guard_*`) when the objects need it (`libcxxabi()`).
 - **IR** (src/irgen/gen.cppm `static_var`): `if (__cxa_guard_acquire(&g)) { init; at_exit(d);
   __cxa_guard_release(&g); }`, the acquire called on every pass (#372); a static local's object is
   its entity's from the function's entry, so a jump past its declaration finds it.
