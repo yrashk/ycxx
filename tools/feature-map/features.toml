@@ -606,7 +606,7 @@ int get() { static int v = init(); return v; }
 int main() { get(); return (get() == 1 && calls == 1) ? 0 : 1; }
 '''
 issues = [124, 372]
-note = 'inline functions\' statics are per unit; the guard is always called'
+note = "inline functions' statics are per unit; the guard is always called"
 
 [[feature]]
 id = 'basic-dynamic-init'
