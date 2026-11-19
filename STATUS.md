@@ -1506,6 +1506,62 @@ What the process allocates, attributed to the engine's cells, in the trace and t
 - Not yet: drift of retained bytes over a long daemon session, a peak per request, and small
   inexactness (#284).
 
+## Inheritance, step 1: non-virtual bases (#308, 2026-11-19)
+
+- **Base-clauses** (`base_clause` in parse.cppm): each base is a complete class other than the
+  class itself, named once, and not a union. Its access defaults to private for `class` and public
+  for `struct`. `Program::set_bases` records the bases when the class head is analysed, and
+  `class_def` copies them into `ClassRec::bases`. Not yet: virtual bases (#310) and bases of
+  class templates.
+- **Layout** (`ast::record_layout`, Itanium C++ ABI §2.4):
+  - bases first, in declaration order; an empty base at offset 0 unless another subobject of its
+    type is there;
+  - a component placed at the data size so far, so a class that is not POD for layout leaves its
+    tail padding to the derived class's members.
+  - "POD for layout" is Clang's (trivial and standard-layout, `ClassRec::pod`). GCC's is C++03's
+    and differs for a class whose data members are all private.
+  - Sema (`Sema::class_layout`) and the back end (`ClassShape::bases`, `pod`) read the same rule.
+  - `ir::Step::base` names a direct base by its class entity; `QueryLayout::step` gives its
+    offset.
+- **Lookup** (`Sema::find_member`, [class.member.lookup]): a member of the class, else of its
+  bases. One found in two base subobjects is ambiguous unless it is one static member. The object
+  expression or `this` is converted to the declaring class (`Sema::to_base`).
+- **Conversions** ([conv.ptr]/3, [dcl.init.ref]/5, [over.best.ics]/6): `derived_to_base`
+  conversions, one per direct base on the way. A pointer conversion keeps a null pointer null
+  (`ptr_cmp` and `select`). A base class object is copied from the derived object's subobject.
+  Each conversion ranks as a Conversion, and the nearest base wins (`Ics::base_depth`,
+  [over.ics.rank]/4.4). The base must be unambiguous and accessible.
+- **Access** ([class.access.base]): a member of a base is reached through the conversion, whose
+  every step must be accessible. A protected member may be named in members and friends of
+  derived classes (not yet [class.protected]'s rule on the object expression).
+- **Special members:**
+  - Bases are initialized first, from mem-initializers naming them or by default
+    (`MemberInit` with field `~0u`), and destroyed after the members (`DestroyMember` with field
+    `~0u`).
+  - An aggregate's elements are its bases, then its members (`TypeFacts::bases_of` for irgen).
+  - The implicit destructor and copy and move constructors account for the bases.
+- **Tests:**
+  - `tests/own/inherit/`: layout, members and conversions, construction order, lookup and
+    access rejects.
+  - `tests/own/abi/inheritance.run.cpp`: layout, conversions and a Clang-defined base
+    constructor and destructor, across ycxx and Clang objects.
+  - Ten draft examples now pass.
+- From the review:
+  - A trivial copy of a record writes its nvsize bytes, none for an empty class
+    (`ir::TypeLayout::data`). A copy into a base subobject therefore leaves the derived
+    members in its tail padding alone.
+  - A base reference binds to the base subobject of a materialized derived prvalue.
+  - Types and enumerators of bases are found from derived classes, and while the class is
+    being defined (`Questions::defining_bases`).
+  - Protected members may be named through the naming class's friends.
+  - `?:` and `==` reach the composite base type.
+  - A base's const member deletes the copy assignment.
+  - Merged with floating point: a non-empty base's members count toward a homogeneous
+    floating-point aggregate, and a class whose data is all in its bases is not empty for the
+    calling convention.
+  - Not yet: the implicit copy assignment does not call subobjects' `operator=` (#360), and bases'
+    injected-class-names (#361).
+
 ## Templates, ζ step 9: member function templates (#88, #314, 2026-11-19)
 
 - **Member function templates** ([temp.mem]) of classes and class templates: their head one level

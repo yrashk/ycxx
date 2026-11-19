@@ -46,6 +46,9 @@ export struct TypeLayout {
   // any depth and through arrays, all of one floating type `hfa_bytes` bytes wide; 0 otherwise.
   std::uint8_t hfa = 0;
   std::uint8_t hfa_bytes = 0;
+  // Records: the bytes a trivial copy writes, nvsize (Itanium §2.4), none for an empty class: not
+  // the tail padding a derived class's members may occupy when the object is a base subobject.
+  std::uint64_t data = 0;
 };
 
 export struct SubObject {
@@ -522,6 +525,7 @@ class Lowering {
         // A trivial copy ([class.copy.ctor], [basic.types.general]): the object's bytes, in the
         // widest chunks its alignment allows.
         TypeLayout l = layout(QualType(std::uint32_t(imms[0])));
+        if (l.kind == TypeKind::record) l.size = l.data;
         out(n, 0, copy_bytes(in(n, 0), in(n, 1), in(n, 2), l, imms[0]));
         return {};
       }

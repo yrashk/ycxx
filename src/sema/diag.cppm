@@ -146,6 +146,13 @@ enum class Diag : std::uint32_t {
   // [class], [class.mem], [expr.ref], [dcl.init.aggr], [dcl.init.list]
   incomplete_type [[=message{Severity::error, "'{0:t}' is an incomplete type"}]],
   no_member [[=message{Severity::error, "no member named '{0:n}' in '{1:t}'"}]],
+  // [class.derived], [class.mi]
+  base_not_class [[=message{Severity::error, "a base must be a class; '{0:t}' is not one"}]],
+  duplicate_base [[=message{Severity::error, "base class '{0:t}' named more than once"}]],
+  union_with_base [[=message{Severity::error, "a union cannot have base classes"}]],
+  ambiguous_base [[=message{Severity::error, "'{0:t}' is an ambiguous base of '{1:t}'"}]],
+  inaccessible_base [[=message{Severity::error, "'{0:t}' is an inaccessible base of '{1:t}'"}]],
+  ambiguous_member [[=message{Severity::error, "member '{0:n}' found in more than one base of '{1:t}'"}]],
   // [class.access]
   private_member [[=message{Severity::error, "'{0:n}' is a private member of '{1:t}'"}]],
   protected_member [[=message{Severity::error, "'{0:n}' is a protected member of '{1:t}'"}]],

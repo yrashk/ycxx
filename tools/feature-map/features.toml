@@ -1745,13 +1745,14 @@ group = 'class'
 clauses = ['class.derived', 'class.derived.general', 'class.mi', 'class.access.base']
 std = 'C++98'
 detect = '\b(?:class|struct)\s+\w+(?:\s+final)?\s*:\s*(?!:)'
-status = 'missing'
+status = 'partial'
 probe = '''
 struct A { int a = 1; }; struct B { int b = 2; }; struct D : A, B { int d = 3; };
 int sum(const B& b) { return b.b; }
 int main() { D d; A* pa = &d; return pa->a + sum(d) + d.d - 6; }
 '''
-issues = [308, 136]
+issues = [308]
+note = 'bases of class templates; the object-expression rule of `[class.protected]`'
 
 [[feature]]
 id = 'class-virtual'
