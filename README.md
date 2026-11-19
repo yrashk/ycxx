@@ -42,9 +42,10 @@ build/bin/ycxx cxx hello.cpp -o hello && ./hello
 
 **Compile for x86-64 Linux.** Select `--target=x86_64-pc-linux-gnu` to compile with the scalar
 System V AMD64 backend. Use `-c` to write an ELF object, or `-nostdlib` to link C++ sources,
-ycxx-generated `.o` files, or a mixture into a static executable. The startup calls `int main()`
-or `int main(int, char**)` and passes its return value to Linux as the exit status. A program can
-also supply its own `_start`. For example, given `example.cpp` containing
+ycxx-generated `.o` files, or a mixture into a static executable. The startup runs namespace-scope
+initializers, then calls `int main()` or `int main(int, char**)` and passes its return value to Linux
+as the exit status. A program without such initializers can supply its own `_start`. Given
+`example.cpp` containing
 `int main() { return 0; }`, run the following on x86-64 Linux.
 
 ```sh
@@ -141,8 +142,7 @@ checked with the flags of its last build, or else with its line in the project's
   templates and their members.
 - Exceptions, optimization (`-O`), and the extended floating-point types (`std::float16_t`, …).
 - Hosted linking and general-purpose ELF object interoperability for x86-64 Linux.
-- Namespace-scope dynamic initialization and destruction for x86-64 Linux.
-  [#387](https://github.com/yrashk/ycxx/issues/387)
+- Namespace-scope destruction for x86-64 Linux. [#400](https://github.com/yrashk/ycxx/issues/400)
 
 ### In progress
 

@@ -43,6 +43,17 @@ def main():
         run([cc, 'consumer.c', 'source.o', '-o', 'consumer'], scope, cold)
         run(['./consumer'], scope, cold)
 
+        (scope / 'init.cpp').write_text('static int produce() { return 17; }\n'
+                                       'static const int value = produce();\n'
+                                       'extern "C" int initialized() { return value; }\n')
+        (scope / 'init-consumer.c').write_text('int initialized(void);\n'
+                                              'int main(void) { return initialized() != 17; }\n')
+        compile(target, '-c', 'init.cpp')
+        output = run([readelf, '-SW', '-Wr', 'init.o'], scope, cold)
+        assert 'INIT_ARRAY' in output and '.rela.init_array' in output and 'R_X86_64_64' in output
+        run([cc, 'init-consumer.c', 'init.o', '-o', 'init-consumer'], scope, cold)
+        run(['./init-consumer'], scope, cold)
+
         for name in ('linux_variadic.cpp', 'linux_variadic_peer.c', 'linux_variadic_entry.s'):
             shutil.copyfile(source_dir / name, scope / name)
         compile(target, '-c', 'linux_variadic.cpp')
@@ -97,7 +108,7 @@ def main():
         compile(target, '-fsyntax-only', 'unsupported.cpp', error='the expression cannot be evaluated yet')
         (scope / 'unsupported.cpp').write_text('struct Box { long double value; }; Box box{};\n')
         compile(target, '-fsyntax-only', 'unsupported.cpp')
-        compile(target, '-c', 'unsupported.cpp', error='namespace-scope dynamic initialization')
+        compile(target, '-c', 'unsupported.cpp', error='an extended floating-point format is not supported yet')
         for body in ('static long double x{}; return sizeof(x);', 'static long double x; ++x; return 0;'):
             (scope / 'unsupported.cpp').write_text(f'int f() {{ {body} }}\n')
             compile(target, '-fsyntax-only', 'unsupported.cpp')

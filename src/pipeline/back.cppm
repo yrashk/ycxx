@@ -157,8 +157,9 @@ struct TranslationUnit {
   std::vector<Variable> variables;     // the definitions
   EntityId main = EntityId::none;      // the program's `main`, if this unit defines it
   // Its initialization functions ([basic.start.dynamic]), in order, each with the entity of its
-  // `__mod_init_func` pointer.
+  // startup array slot.
   std::vector<std::pair<EntityId, EntityId>> init_functions;
+  std::optional<ast::Loc> namespace_destruction;  // first variable whose destructor runs at exit
   bool front_failed = false;           // the front end reported errors: nothing to compile
 };
 
@@ -1186,7 +1187,7 @@ std::expected<obj::object, aarch64::CodegenError> assemble_linux(
   using K = aarch64::DataKind;
   using S = obj::standard_section;
   for (auto [kind, section] : {std::pair{K::cstring, S::cstring}, {K::rodata, S::rodata}, {K::data_const, S::data_const},
-                               {K::data, S::data}, {K::bss, S::bss}}) {
+                               {K::data, S::data}, {K::bss, S::bss}, {K::init_func, S::init_array}}) {
     if (!std::ranges::contains(data, kind, &aarch64::DataDef::kind)) continue;
     const std::uint32_t index = o.add_section(section);
     obj::section& sec = o.sections[index];
@@ -1229,11 +1230,8 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
     errors.push_back({std::nullopt, "the translation unit has errors"});
     co_return out;
   }
-  if (linux && !tu.init_functions.empty()) {
-    const auto init = std::ranges::find(tu.functions, tu.init_functions.front().first, &FunctionDef::entity);
-    std::optional<ast::Loc> at;
-    if (init != tu.functions.end()) at = ast::Loc{init->item, init->body_offset};
-    errors.push_back({at, "namespace-scope dynamic initialization and destruction are not supported on x86-64 Linux"});
+  if (linux && tu.namespace_destruction) {
+    errors.push_back({tu.namespace_destruction, "namespace-scope destruction is not supported on x86-64 Linux"});
     co_return co_await locate_errors(cx, id, std::move(out));
   }
   std::vector<FnKey> fns;
@@ -1281,7 +1279,7 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
   }
 
   std::vector<aarch64::Symbol> symbols;
-  // The pointers to the initialization functions that dyld calls before `main`, in order.
+  // The pointers to the initialization functions that startup calls before `main`, in order.
   for (std::size_t i = 0; i < tu.init_functions.size(); ++i) {
     auto [fn, slot] = tu.init_functions[i];
     data.push_back({slot, aarch64::DataKind::init_func, std::vector<std::uint8_t>(8, 0), 0, 8, {{0, fn, 0}}});
