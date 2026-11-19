@@ -105,8 +105,52 @@ void linux_system_includes() {
         "the Linux multiarch header comes first and include_next reaches usr/include");
 
   auto darwin = pp::system_dirs(ast::aarch64_darwin);
-  check(std::ranges::none_of(darwin, [](const auto& dir) { return dir.ends_with("/x86_64-linux-gnu"); }),
-        "Darwin does not search Linux's multiarch directory");
+  check(std::ranges::none_of(darwin, [](const auto& dir) {
+          return dir.ends_with("/x86_64-linux-gnu") || dir.ends_with("/resources/linux/include");
+        }),
+        "Darwin does not search Linux's include directories");
+}
+
+void linux_stddef() {
+  pp::Config cfg;
+  cfg.target = &ast::x86_64_linux;
+  pp::DiskHost host;
+  pp::Session s(host, pp::with_system_dirs(std::move(cfg)));
+  auto partial = pp::preprocess(s, R"cpp(
+#define __need_size_t
+#include <stddef.h>
+#if defined(__need_size_t) || defined(NULL) || defined(offsetof)
+#error size_t request leaked other definitions
+#endif
+size_t first;
+#define __need_NULL
+#define __need_wchar_t
+#include <stddef.h>
+#if defined(__need_NULL) || defined(__need_wchar_t) || !defined(NULL) || defined(offsetof)
+#error combined request was not isolated
+#endif
+void* pointer = NULL;
+)cpp", "partial.cpp");
+  check(partial.diags.empty() &&
+            text(partial.region) == "typedef long unsigned int size_t ; size_t first ; void * pointer = nullptr ;",
+        "libycxx's wrapper forwards each partial request to the Linux resource header");
+
+  auto full = pp::preprocess(s, R"cpp(
+#define __need_size_t
+#include <stddef.h>
+#include <cstddef>
+#if !defined(NULL) || !defined(offsetof)
+#error full stddef.h did not define its macros
+#endif
+#undef NULL
+#define __need_NULL
+#include <stddef.h>
+#if defined(__need_NULL) || !defined(NULL)
+#error a partial stddef.h include must work after the full include
+#endif
+)cpp", "full.cpp");
+  check(full.diags.empty() && text(full.region).contains("} max_align_t ;"),
+        "libycxx's full cstddef finds max_align_t after a partial stddef.h include");
 }
 
 void source_target() {
@@ -418,6 +462,7 @@ void pool() {
 int main() {
   includes();
   linux_system_includes();
+  linux_stddef();
   source_target();
   object_like();
   function_like();
