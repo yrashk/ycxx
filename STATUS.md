@@ -1912,8 +1912,8 @@ values, end to end; results match Clang's bit for bit.
 - The two libycxx `<cstdio>` requires-expressions using dependent member-pointer declarations
   can be checked. Linux hosted header support still depends on #395, #396 and #398.
 - Object size and alignment follow Itanium C++ ABI §2.3 on the two supported targets. Forming
-  member addresses, `.*` and `->*`, conversions, dependent exception specifications and code
-  generation for member-pointer values remain open (#238, #219).
+  member addresses, `.*` and `->*`, conversions, and code generation for member-pointer values
+  remain open (#411). Dependent exception specifications are tracked in #219.
 - Tests in `tests/own/member-pointer/` cover declarations, type identity, dependent requirements
   and invalid pointer-to-member types.
 

@@ -138,7 +138,7 @@ declarations, type traits and requires-expressions. [#238](https://github.com/yr
   warnings and `printf` runs. libycxx's `<cstdio>` is still tracked under [#133](https://github.com/yrashk/ycxx/issues/133).
   `<cmath>` (which `<math.h>` includes) does not compile yet. [#349](https://github.com/yrashk/ycxx/issues/349)
 - Taking member addresses, applying `.*` or `->*`, and code generation for member-pointer values.
-  [#238](https://github.com/yrashk/ycxx/issues/238)
+  [#411](https://github.com/yrashk/ycxx/issues/411)
 - Constexpr lambdas (the interpreter has no class objects yet), lambdas outside function bodies,
   structured bindings, virtual functions, virtual base classes, inheriting constructors, and bases
   of class templates.
