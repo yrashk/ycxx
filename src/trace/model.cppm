@@ -268,6 +268,10 @@ class Tree {
     bool match;  // matches the filter itself (else shown as an ancestor of a match)
   };
 
+  // Hides reused cells (leaves only: a request's node stays), to see what ran.
+  void set_hide_reused(bool on) noexcept { hide_reused_ = on; }
+  bool hide_reused() const noexcept { return hide_reused_; }
+
   // Top-level nodes newest first (the live views' default: the latest request on top).
   void set_newest_first(bool on) noexcept { newest_first_ = on; }
   bool newest_first() const noexcept { return newest_first_; }
@@ -443,13 +447,18 @@ class Tree {
     for (char& c : out) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
     return out;
   }
+  bool hidden(std::int32_t i) const {
+    const Node& n = nodes_[i];
+    return hide_reused_ && !n.group && n.children.empty() && n.ev.outcome == Outcome::reused;
+  }
   void walk(std::int32_t i, std::uint32_t depth, std::vector<Row>& out) const {
+    if (hidden(i)) return;
     out.push_back({i, depth, true});
     if (!nodes_[i].expanded) return;
     for (std::int32_t c : nodes_[i].children) walk(c, depth + 1, out);
   }
   void walk_filtered(std::int32_t i, std::uint32_t depth, const std::vector<char>& keep, std::vector<Row>& out) const {
-    if (!keep[i]) return;
+    if (!keep[i] || hidden(i)) return;
     out.push_back({i, depth, keep[i] == 2});
     for (std::int32_t c : nodes_[i].children) {
       if (keep[i] == 2 && nodes_[i].expanded) walk(c, depth + 1, out);
@@ -466,6 +475,7 @@ class Tree {
   std::vector<Node> nodes_;
   std::vector<std::int32_t> roots_;
   bool newest_first_ = false;
+  bool hide_reused_ = false;
   std::unordered_map<std::uint64_t, std::int32_t> by_id_;
   std::vector<std::string> words_;
   std::optional<std::int32_t> worker_;

@@ -224,6 +224,12 @@ void tree() {
   check(g.node(g.rows().front().node).ev.key == "#1 cxx a.cpp", "oldest first by default");
   g.set_newest_first(true);
   check(g.node(g.rows().front().node).ev.key == "#2 cxx a.cpp" && g.rows().size() == 3, "newest first, the latest open");
+  g.set_hide_reused(true);
+  check(g.rows().size() == 3, "a reused request's node stays");
+  g.set_expanded(0, true);
+  check(g.rows().size() == 3, "its reused cells are hidden");
+  g.set_hide_reused(false);
+  check(g.rows().size() == 4, "and shown again");
 }
 
 void lines() {

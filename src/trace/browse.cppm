@@ -247,7 +247,12 @@ class Browser {
     else if (k == "a") pick_worker(std::nullopt);
     else if (k.size() == 1 && std::isdigit(static_cast<unsigned char>(k[0]))) pick_worker(k[0] - '0');
     else if (k == "m") pick_worker(-1);
-    else if (k == "o") {
+    else if (k == "r") {
+      const auto rows = tree_.rows();
+      const std::optional<std::int32_t> held = rows.empty() ? std::nullopt : std::optional(rows[std::min(cursor_, rows.size() - 1)].node);
+      tree_.set_hide_reused(!tree_.hide_reused());
+      if (held) keep_selected(*held);
+    } else if (k == "o") {
       const auto rows = tree_.rows();
       const std::optional<std::int32_t> held = rows.empty() ? std::nullopt : std::optional(rows[std::min(cursor_, rows.size() - 1)].node);
       tree_.set_newest_first(!tree_.newest_first());
@@ -428,13 +433,14 @@ class Browser {
     if (!filter_.empty()) out += std::format(" filter: {}", paint("1", filter_));
     out += std::format("  worker: {}", tree_.worker() ? paint("1", format_worker(*tree_.worker())) : std::string("all"));
     out += tree_.newest_first() ? "  newest first" : "  oldest first";
+    if (tree_.hide_reused()) out += "  " + paint("1", "reused hidden");
     if (feed_) out += "  " + paint("1;38;5;208", "● live") + paint("2", " " + feed_->source);
     else if (ended_) out += "  " + paint("2", "(the daemon has gone)");
     return out;
   }
   std::string footer() const {
     if (view_ == View::tree)
-      return paint("2", " ↑↓/jk move  ⏎/space fold  ←→ close/open  e/E all  n next run  x next error  shift+J/K ]/[ pane  / filter  w/0-9/m/a worker  o order  v pane  t timeline  ? help  q quit");
+      return paint("2", " ↑↓/jk move  ⏎/space fold  ←→ close/open  e/E all  n next run  x next error  r reused  shift+J/K ]/[ pane  / filter  w/0-9/m/a worker  o order  v pane  t timeline  ? help  q quit");
     return paint("2", " ↑↓ lane  ←→/HL scrub  ⏎ open in tree  w/0-9/m/a worker  / filter  t tree  ? help  q quit");
   }
 
@@ -604,6 +610,9 @@ class Browser {
                                 "  words      match kind or key, all of them",
                                 "  is:exec    an outcome (any prefix)",
                                 "  w:3 w:main a worker",
+                                "",
+                                paint("1", " Showing"),
+                                "  r hides reused cells (what ran stays), o flips the order",
                                 "",
                                 paint("1", " The pane on the right"),
                                 "  shift+J / shift+K a line (j/k move in the tree), ]/[ a page, }/{ end and top",
