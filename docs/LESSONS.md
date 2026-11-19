@@ -600,3 +600,9 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
   - Do: give a new handle field `= X::none` (or intern the empty list as index 0 in `Interners()`),
     and test with the argument declared first in the file.
   - Learned on #88 steps 6 and 8.
+- **An issue body rewritten through a pipe can come out empty, and `gh issue edit` takes it.**
+  `gh issue view … | sed … > body.md && gh issue edit --body-file body.md` blanked #88's body once:
+  the view returned nothing that time, and the `&&` only checked the redirection.
+  - Do: write the new body to a file, check it is not empty (`test -s body.md`, or read it), then
+    edit; or write the whole body from what you know rather than editing the old one in a pipe.
+  - Learned on #88 step 9.
