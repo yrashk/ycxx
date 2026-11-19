@@ -21,6 +21,9 @@ reasoning; do not leave decisions only in issue threads.
      explicit shared objects, the target interpreter and a fixed-address executable. Native
      direct function imports use eager GOT relocations. Target CRT and normal hosted process
      startup follow under #390.
+   - Linux x86-64 [archive inputs](docs/design/linux-static-archives.md) start with explicit
+     indexed GNU archives in static executable links. The linker extracts only members needed
+     by outstanding symbols and preserves archive operand order (#388).
 4. **Optimization is designed in from the start, and delivered after correctness.** The first
    back end aims for correct, debuggable code of roughly `-O0`/`-O1` quality. The architecture
    (§4.8) is laid out from day one for optimization by search, solvers and measured cost models,
