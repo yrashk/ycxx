@@ -423,8 +423,8 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
 - **ycxx's ThreadSanitizer build runs on a Mac in the `gcc:16` image.** The arm64 image's GCC
   16.2 ships libtsan, and Docker Desktop's VM has `vm.mmap_rnd_bits` at 18, under TSan's limit of
   28. Install cmake and ninja-build, mount the checkout, keep the build in a Docker volume, and run
-  `YCXX_TSAN_BUILD_DIR=/build tools/tsan`. It took about 25 minutes, against an hour of building
-  GCC on a CI cache miss before the first result.
+  `YCXX_TSAN_BUILD_DIR=/build tools/tsan`. It took about 25 minutes. The CI job's first run took 47 (17 of them
+  building GCC on the cache miss), and a dispatch round trip costs more than a local rerun.
   - Do: run tools/tsan this way before dispatching the nightly job. A canary keeps a clean run
     honest: reintroduce a known race (here, the deque's fence-based push) and see the test fail.
   - Learned on #105.

@@ -99,7 +99,7 @@ jobs:
 
   # ThreadSanitizer (#105): ycxx and libycxx instrumented, the unit tests once and the concurrent
   # ones repeated (tools/tsan). On the bare runner with a GCC built with libtsan (the action's
-  # comment says why not the container); building that GCC takes about an hour on a cache miss.
+  # comment says why not the container); building that GCC takes about 17 minutes on a cache miss.
   tsan:
     needs: changed
     if: needs.changed.outputs.run == 'true'
