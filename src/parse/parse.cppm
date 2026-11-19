@@ -795,10 +795,11 @@ public:
   const u32 instantiation_limit;  // [temp.inst]/16 ([implimits]: at least 1024)
   // Whether an instantiation `depth` deep may not begin: the limit; reported once, at item `k`. The
   // stack is guarded in the parse of each instantiation's body (`Parser::deep_enough`, #187).
-  bool too_deep(std::size_t depth, u32 k) {
+  // `offset`: where in item `k` to report it.
+  bool too_deep(std::size_t depth, u32 k, u32 offset = 0) {
     if (depth < instantiation_limit) return false;
     if (!depth_reported_)
-      end_diags_.push_back({engine::Loc{std::to_underlying(id(k)), 0}, sema::diag_id(sema::Diag::instantiation_depth),
+      end_diags_.push_back({engine::Loc{std::to_underlying(id(k)), offset}, sema::diag_id(sema::Diag::instantiation_depth),
                             {engine::diag_arg(instantiation_limit)}});
     depth_reported_ = true;
     return true;
@@ -4141,10 +4142,17 @@ public:
   // parameters come from `open_generic`. The tree's root is at the lambda's `{`.
   Result<ast::BodySema> generic_body() {
     const Program::GenericInst& gi = *generic_;
+    p_->running_bodies_.push_back({gi.spec, k_, inst_});
+    struct Pop {
+      Program* p;
+      ~Pop() { p->running_bodies_.pop_back(); }
+    } pop{p_};
     s_.push_scope();
-    for (std::size_t i = 0; i < gi.g.consts.size() && i < gi.g.const_values.size(); ++i) {
+    for (const auto& [n, t] : gi.g.aliases) s_.local_type_alias(n, t, 0);
+    // Innermost first: the first of a name is the one its definition saw.
+    for (std::size_t i = std::min(gi.g.consts.size(), gi.g.const_values.size()); i-- > 0;) {
       u32 l = s_.declare_local(gi.g.consts[i].name, gi.g.consts[i].type, 0, 0, false);
-      s_.set_local_value(l, gi.g.const_values[i]);
+      if (gi.g.const_values[i] != ast::ConstId::none) s_.set_local_value(l, gi.g.const_values[i]);
     }
     if (!gi.g.expansions.empty()) s_.expansions_override = &gi.g.expansions;
     s_.open_generic(gi.g, gi.spec, gi.spec_type, gi.args);
@@ -4831,6 +4839,24 @@ interp::Callee Program::closure_ir(EntityId f, u32 item) {
     else r.body = &it->second->body;
     return r;
   }
+  // A generic lambda's operator specialized: its instance's body.
+  if (auto it = instance_index_.find(key); it != instance_index_.end()) {
+    const Instance& in = instances_[it->second];
+    if (in.failed) {
+      r.unsupported = true;
+      return r;
+    }
+    const items::Item& itm = items_->items[in.item];
+    irgen::FunctionInput input{f, in.decl, in.body.value, id(in.item), itm.body_begin - itm.begin, false, {}, this_type(in.decl)};
+    AtItem q(*this, in.item, true);
+    sema::EvalFacts facts(*w_, q);
+    std::optional<irgen::FunctionIr> ir;
+    if (auto x = irgen::function_ir(w_->ins, input, facts)) ir = std::move(*x);
+    auto& slot = closure_irs_[key] = std::move(ir);
+    if (!slot) r.unsupported = true;
+    else r.body = &slot->body;
+    return r;
+  }
   // The function whose body has the lambda: past the operators of enclosing lambdas.
   EntityId fn = w_->entities.rec(w_->entities.rec(f).scope).scope;
   while (sema::Sema::closure_member(*w_, fn)) fn = w_->entities.rec(w_->entities.rec(fn).scope).scope;
@@ -4863,6 +4889,7 @@ interp::Callee Program::closure_ir(EntityId f, u32 item) {
     else r.body = &slot->body;
     return r;
   }
+  r.unsupported = true;  // its lambda is not in that body: an evaluation cannot go on
   return r;
 }
 
@@ -4888,11 +4915,17 @@ sema::GenericResult Program::generic_instance(EntityId spec, const sema::Generic
     if (auto d = generic_defs_.find(std::to_underlying(sr.templ)); d != generic_defs_.end()) known = &d->second;
   if (known) {
     g = *known;
-    for (auto r = running_bodies_.rbegin(); r != running_bodies_.rend() && !k; ++r)
-      if (r->function == fn) {
-        k = r->item;
-        enclosing = r->inst;
-      }
+    // The body being analysed that has it: its function's, or an enclosing lambda's
+    // specialization's, or, past enclosing lambdas' operators, the function's.
+    for (EntityId e = fn; !k;) {
+      for (auto r = running_bodies_.rbegin(); r != running_bodies_.rend() && !k; ++r)
+        if (r->function == e) {
+          k = r->item;
+          enclosing = r->inst;
+        }
+      if (k || !sema::Sema::closure_member(*w_, e)) break;
+      e = w_->entities.rec(w_->entities.rec(e).scope).scope;
+    }
   }
   if (!k) {
     const ast::BodySema* body = nullptr;
@@ -4951,7 +4984,9 @@ sema::GenericResult Program::generic_instance(EntityId spec, const sema::Generic
     }
   }
   if (!k || !g) return {};
-  if (too_deep(instantiating_.size(), *k)) return {std::nullopt, true};
+  // Reported at the lambda's body, which nests ([temp.inst]/16).
+  if (too_deep(instantiating_.size(), *k, items_->items[*k].body_begin - items_->items[*k].begin + g->body_begin))
+    return {std::nullopt, true};
   instantiating_.insert(key);
   Instance in{spec, *k, {}, {}, false, enclosing};
   in.body = BodyAnalysis(*this, *k, enclosing, GenericInst{*g, spec, sr.type, sr.args}).run();

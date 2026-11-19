@@ -20,8 +20,15 @@ template<class T> int t(T v) {
   auto g = [v](auto x) { return x + v; };
   return g(1);
 }
+inline int heads() {
+  auto d = [](auto x) { return x; };
+  auto e = []<class T>(T x) { return x; };
+  auto f = [](auto x) { return x + 1; };
+  auto u = []<class = int>(int x) { return x; };
+  return d(1) + e(1) + f(1) + u(1);
+}
 int peer_check();
 int main() {
-  if (k() != 15 || t(2) != 3 || packs() != 13) return 1;
+  if (k() != 15 || t(2) != 3 || packs() != 13 || heads() != 5) return 1;
   return peer_check();
 }

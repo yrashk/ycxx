@@ -60,6 +60,12 @@ struct GenericClosure {
   std::vector<ast::LocalRec> consts;
   std::vector<ConstId> const_values;
   std::vector<Expansion> expansions;  // the pack expansions of its body, which its specializations expand
+  // Where it is defined: the template-heads around it and their arguments, and the block-scope
+  // type aliases its body can name.
+  std::vector<std::vector<ast::TemplateParamSema>> scopes;
+  Bindings args;
+  std::vector<std::pair<NameId, QualType>> aliases;
+  bool erroneous = false;  // its definition was diagnosed: its specializations say nothing more
 };
 
 // The enclosing function's template arguments and entity where a generic lambda is defined, for
@@ -225,6 +231,7 @@ inline constexpr u16 friend_ = 32768;  // a friend declaration ([class.friend]):
 namespace closure_flag {
 inline constexpr u16 mutable_ = 1;      // its function call operator is not const
 inline constexpr u16 captureless = 2;   // no lambda-capture: it converts to a pointer to function
+inline constexpr u16 pattern = 4;       // in a template's or a generic lambda's definition: not code
 }
 
 // What a cell demands of the program besides its value (query-engine.md §B1.4): a function
@@ -1356,6 +1363,9 @@ public:
   void put_scopes(Scopes s) { scopes_ = std::move(s); }
 
   NameId no_name() { return ins().names.intern(""); }
+  // The name of a template parameter a placeholder parameter invents ([dcl.fct]/22): a keyword,
+  // which no lookup finds.
+  NameId invented_name() { return ins().names.intern("auto"); }
 
   // ------------------------------------------------------------ templates ([temp.param], [temp.res])
 
@@ -1796,6 +1806,9 @@ public:
     std::optional<u32> this_field;
     bool star_this = false;
     std::vector<ast::TemplateParamSema> head;  // a generic lambda's
+    std::size_t diags_at = 0;  // the diagnostics before its body
+    std::vector<std::vector<ast::TemplateParamSema>> outer_scopes;  // a specialization's enclosing state
+    Bindings outer_args;
     // The enclosing context's state.
     std::vector<ast::LocalRec> outer_locals;
     std::vector<std::optional<ConstId>> outer_values;
@@ -2020,7 +2033,7 @@ public:
     // The <lambda-sig> declares the explicit template parameters only (`Ty`, `Tp`), so they and
     // the invented ones of `auto` parameters make different signatures.
     for (const ast::TemplateParamSema& h : spec.head)
-      if (h.name != no_name()) sig = ast::mix(sig, (u64(std::to_underlying(h.kind)) + 1) * 4 + u64(h.pack));
+      if (h.name != invented_name()) sig = ast::mix(sig, (u64(std::to_underlying(h.kind)) + 1) * 4 + u64(h.pack));
     u32 ordinal = 0;
     for (const auto& [sc, sg] : completed_closures_)
       if (sc == scope && sg == sig) ++ordinal;
@@ -2031,7 +2044,7 @@ public:
     cr.head = ast::mix(sig, u64(ordinal));
     cr.ordinal = ordinal;
     for (const ast::TemplateParamSema& h : spec.head)
-      if (h.name != no_name()) cr.closure_head.push_back(h);
+      if (h.name != invented_name()) cr.closure_head.push_back(h);
     LambdaFrame f;
     f.closure = w_->entities.entity(std::move(cr));
     f.call = w_->entities.entity({EntityKind::function, ins().names.intern("operator()"), call_type, LangLinkage::cxx, linkage, {}, f.closure});
@@ -2044,6 +2057,7 @@ public:
     f.mutable_ = spec.mutable_;
     f.ordinal = ordinal;
     f.head = spec.head;
+    f.diags_at = diag_count();
     QualType ct = types().class_type(f.closure);
     f.this_type = types().pointer(spec.mutable_ ? ct : types().add_cv(ct, Cv::const_));
     // [expr.prim.lambda.capture]/5: nor a template parameter's.
@@ -2204,18 +2218,27 @@ public:
       }
     }
     q_->publish_class(fr.closure, std::move(rec));
-    u16 flags = u16((fr.mutable_ ? closure_flag::mutable_ : 0) | (captureless ? closure_flag::captureless : 0));
+    u16 flags = u16((fr.mutable_ ? closure_flag::mutable_ : 0) | (captureless ? closure_flag::captureless : 0) |
+                    (generic || in_pattern() ? closure_flag::pattern : 0));
     // The enclosing function's constants a generic body names stand as their values when it is
     // instantiated, where that function's locals are gone.
+    // The enclosing context's locals visible here, innermost first and one per name: constants
+    // with their values, the others for unevaluated operands; and its type aliases.
     std::vector<ast::LocalRec> consts;
     std::vector<ConstId> values;
-    if (generic)  // the enclosing context's, restored above
-      for (std::size_t i = 0; i < locals_.size() && i < local_values_.size(); ++i)
-        if (local_values_[i] && locals_[i].name != no_name()) {
-          consts.push_back(locals_[i]);
+    std::vector<std::pair<NameId, QualType>> aliases;
+    if (generic) {
+      std::set<u32> seen;
+      for (std::size_t d = scopes_.size(); d-- > 0 && context_of(d) == lambdas_.size();)
+        for (auto p = scopes_[d].rbegin(); p != scopes_[d].rend(); ++p) {
+          if ((p->second & capture_bit) || p->first == no_name() || !seen.insert(std::to_underlying(p->first)).second) continue;
+          consts.push_back(locals_[p->second]);
           consts.back().decl = NodeId::none;
-          values.push_back(*local_values_[i]);
+          values.push_back(p->second < local_values_.size() && local_values_[p->second] ? *local_values_[p->second] : ConstId::none);
         }
+      for (const BlockType& t : block_types_)
+        if (t.depth < scopes_.size()) aliases.push_back({t.name, t.type});
+    }
     if (generic) {
       std::vector<NameId> names;
       for (std::size_t i = 0; i < nparams && i < locals.size(); ++i) names.push_back(locals[i].name);
@@ -2224,7 +2247,9 @@ public:
       std::vector<Expansion> exps;
       for (const Expansion& x : expansions)
         if (x.begin >= body_begin && x.begin < end) exps.push_back(x);
-      generic_closures_[std::to_underlying(fr.call)] = {fr.closure, fr.call, call_type, fr.head, names, captures, body_begin, flags, consts, values, exps};
+      std::vector<std::vector<ast::TemplateParamSema>> outer(template_scopes.begin(), template_scopes.end() - (template_scopes.empty() ? 0 : 1));
+      generic_closures_[std::to_underlying(fr.call)] = {fr.closure, fr.call, call_type, fr.head, names, captures, body_begin, flags, consts,
+                                                         values, exps, outer, template_args, aliases, diag_count() > fr.diags_at};
       q_->generic_defined(generic_closures_[std::to_underlying(fr.call)]);
     }
     std::vector<NameId> capture_names;
@@ -2309,6 +2334,9 @@ public:
     if (!lambdas_.empty() && lambdas_.back().call == spec && return_deduced_) return GenericCall{spec, with_return(*st, return_type_)};
     const GenericClosure* known = nullptr;
     if (auto g = generic_closures_.find(std::to_underlying(m.entity)); g != generic_closures_.end()) known = &g->second;
+    if (known && known->erroneous) return std::nullopt;  // its definition's errors say it
+    // Its definition is required ([temp.inst]/8): emitted, and what it requires with it.
+    demands.push_back({spec, ast::Loc{item_, loc_base_ + at_}});
     GenericBinding binding{template_args, current_function};
     GenericResult t = q_->generic_instance(spec, known, binding);
     if (!t.type) {
@@ -2323,11 +2351,14 @@ public:
   // by name), the head bound, its parameters declared. The enclosing function's constants are the
   // current context's locals.
   void open_generic(const GenericClosure& g, EntityId spec, QualType spec_type, std::span<const TemplateArg> args) {
+    LambdaFrame f;
+    // The template-heads around its definition, with their arguments, then its own.
+    f.outer_scopes = std::exchange(template_scopes, g.scopes);
+    f.outer_args = std::exchange(template_args, g.args);
     template_scopes.push_back(g.head);
     u16 depth = g.head.empty() ? 0 : g.head[0].depth;
     if (template_args.levels.size() <= depth) template_args.levels.resize(depth + 1);
     template_args.levels[depth].assign(args.begin(), args.end());
-    LambdaFrame f;
     f.closure = g.closure;
     f.call = spec;
     f.call_type = spec_type;
@@ -2397,7 +2428,8 @@ public:
     return_seen_ = fr.return_seen;
     no_return_deduction = fr.no_return_deduction;
     loop_depth = fr.loop_depth;
-    template_scopes.pop_back();
+    template_scopes = std::move(fr.outer_scopes);
+    template_args = std::move(fr.outer_args);
     return r;
   }
 

@@ -198,7 +198,8 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
   // lambda; their bodies' offsets are the lambda's in the body's part, which begins at `offset`.
   auto closures_of = [&](const ast::BodySema& body, ast::ItemId item, std::uint32_t offset) {
     for (const ast::ClosureDef& c : ins.seqs.elements(body.closures)) {
-      if (world.types.is_dependent(c.call_type)) continue;
+      // A template's or a generic lambda's definition is not code; its instances are.
+      if ((c.flags & sema::closure_flag::pattern) || world.types.is_dependent(c.call_type)) continue;
       std::vector<ast::LocalRec> locals = ins.seqs.elements(c.locals);
       for (EntityId f : {c.call, c.invoker}) {
         if (f == EntityId::none) continue;

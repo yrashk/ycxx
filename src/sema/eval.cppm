@@ -68,7 +68,8 @@ public:
       l.decl = NodeId::none;  // drafts of the enclosing frame
       // In a template's definition a local of dependent type has no object yet; a non-dependent
       // expression cannot name it, so it stands as an `int` outside its lifetime.
-      if (s_->types().is_dependent(l.type)) l.type = s_->builtin(Builtin::int_);
+      // So does a variable whose initializer is being read to deduce its placeholder type.
+      if (s_->types().is_dependent(l.type) || s_->types().has_placeholder(l.type)) l.type = s_->builtin(Builtin::int_);
     }
     ast::DeclSema thunk{};
     thunk.entity = EntityId::none;

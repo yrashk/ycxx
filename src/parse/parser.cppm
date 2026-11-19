@@ -2746,7 +2746,7 @@ public:
             head = true;
           }
           ast::TemplateParamSema inv{};
-          inv.name = s_->no_name();
+          inv.name = s_->invented_name();
           inv.kind = ast::TemplateArgKind::type;
           inv.depth = depth;
           inv.index = u16(s_->template_scopes.back().size());
