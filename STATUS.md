@@ -726,7 +726,7 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   evaluated expression.
 - Tests: `tests/own/consteval` (spec-only); the draft's [dcl.constexpr]/5 ex. 3, [dcl.constinit]/3
   ex. 1 and [stmt.if]/4 ex. 3 pass.
-- Not yet (#102): naming a consteval function outside a call, `if constexpr`, static_assert
+- Not yet (#102): naming a consteval function outside a call, static_assert
   messages that are constant expressions, notes along the call chain, block-scope static constexpr
   variables.
 
@@ -968,8 +968,8 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   (#219); `N::T(…)` and `N::T{…}` are functional casts.
 - `T (*p)(args);` with T a typedef-name declares p ([stmt.ambig]), in sema and in the splitter.
 - **`#include <stdio.h>`** (the SDK's) compiles, and `printf`, `puts`, `fputs` and `stdout` run
-  (`tests/own/headers/stdio.run.cpp`). `<cstdio>` still waits for libycxx's templates and
-  concepts (#88).
+  (`tests/own/headers/stdio.run.cpp`). `<cstdio>` still waits for static members of class
+  templates and template template parameters (#88) and pointer-to-member types (#238).
 - Member operators get the [over.oper] checks too; `S::operator@` and `N::operator@` define outside;
   unary `*` and `&` call operator functions; a deleted or ambiguous choice is an error, not the
   built-in operator. `N::T(…)` is a cast only when no function or variable hides N::T.
@@ -1200,6 +1200,42 @@ session's.*
   `__is_nothrow_*` families, `__is_base_of`, `__is_standard_layout` and
   `__reference_binds_to_temporary`; a value-dependent predicate as a template argument outside a
   body (#209).
+
+## Templates, ζ step 6: concepts and `if constexpr` (#88, 2026-11-18)
+
+Fable decided the representation (ast.md §6.6); the Opus session wrote the code.
+- **Concept definitions** ([temp.concept]) are `concept_` entities whose `DeclSema.constraints` is
+  the normal form of their constraint-expression. A concept-id `C<args>` is a `bool` constant, or
+  value-dependent while an argument is.
+- **Associated constraints** of function templates ([temp.constr.decl]): type-constraints
+  (`template<C T>`, `template<C<U> T>`), the head's requires-clause and the trailing one, in
+  normal form ([temp.constr.normal]): `VConstraint` conjunctions and disjunctions over `VAtom`s,
+  each the atom's tokens and a mapping of the parameters it names.
+- **Satisfaction** ([temp.constr.sat]): an atom is re-analysed from its tokens with its mapping
+  bound, its function parameters declared and argument-dependent lookup at the point of the
+  check; an error there makes it unsatisfied, a non-`bool` or non-constant result and "not
+  supported" are hard errors (`survives_substitution`), so a missing feature never picks another
+  overload. Results are memoized per atom (`Program::atom_satisfied`).
+- **Overload resolution** drops candidates whose constraints are not satisfied
+  ([over.match.viable]/3) and, between templates that are otherwise equally specialized, prefers
+  the one whose constraints subsume the other's ([temp.constr.order], [temp.func.order]/6).
+  Declarations whose clauses differ are distinct overloads; equivalent clauses (as tokens, with
+  parameters by position) redeclare.
+- **Requires-expressions** ([expr.prim.req]) with parameters and simple, type, compound (with a
+  return-type-requirement, also a qualified concept) and nested requirements, checked in place:
+  false in a templated entity when a requirement is invalid, ill-formed elsewhere.
+- **`if constexpr`** ([stmt.if]/2): the condition is evaluated as it is parsed; an
+  instantiation skips the discarded branch, and outside templates its odr-uses demand nothing.
+- Also: the stand-in `Program` indexes declared names, so a namespace-scope lookup visits only
+  its own name's items (draft tests including libycxx headers: 8 s → 5 s); floating literals
+  report "not supported" instead of "expected '<'".
+- Tests: `tests/own/templates/c6-*` (18, agreeing with Clang and GCC); 6 more draft examples
+  pass. `<cstdio>`: 33 → 18 errors.
+- Not yet: constraints on class and variable templates, partial specializations and members,
+  constrained packs, fold-expanded constraints, `C auto`, `noexcept` in compound requirements
+  (#234); re-verification of satisfaction at END (#235); Itanium constraint mangling (#236);
+  recorded discarded extents for `if constexpr` (#237); value-dependent mapping arguments (#209);
+  `static_assert(false)` in a template that is never instantiated (#241).
 
 ## `__GNUC__` and system-header warnings (#229, 2026-11-19)
 

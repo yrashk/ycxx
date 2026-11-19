@@ -50,6 +50,7 @@ enum class Diag : std::uint32_t {
   unexpected_token [[=message{Severity::error, "unexpected '{0:k}'"}]],
   unexpected_identifier [[=message{Severity::error, "unexpected identifier '{0:n}'"}]],
   not_supported [[=message{Severity::error, "'{0:k}' is not supported yet"}]],
+  float_literal_not_supported [[=message{Severity::error, "floating-point literals are not supported yet"}]],
   // [dcl.spec], [dcl.type]
   duplicate_specifier [[=message{Severity::error, "duplicate '{0:k}'"}]],
   conflicting_specifiers [[=message{Severity::error, "'{0:k}' cannot be combined with the other type specifiers"}]],
@@ -179,6 +180,11 @@ enum class Diag : std::uint32_t {
   pack_not_last [[=message{Severity::error, "a template parameter pack is followed by a parameter that is neither deduced nor defaulted"}]],
   member_named_as_class [[=message{Severity::error, "a member type cannot have the name of its class '{0:n}'"}]],
   trait_not_applicable [[=message{Severity::error, "this type trait does not apply to '{0:t}'"}]],
+  constraint_not_bool [[=message{Severity::error, "an atomic constraint must be of type bool, not '{0:t}'"}]],
+  constraint_not_constant [[=message{Severity::error, "an atomic constraint is not a constant expression: {0:r}"}]],
+  constraints_not_satisfied [[=message{Severity::error, "the constraints of '{0:n}' are not satisfied"}]],
+  not_a_concept [[=message{Severity::error, "'{0:n}' is not a concept"}]],
+  concept_constrained [[=message{Severity::error, "the concept '{0:n}' cannot have associated constraints"}]],
   // A GNU built-in function the SDK's or libycxx's headers use and ycxx does not have yet
   // (docs/EXTENSIONS.md), named where lookup finds nothing else.
   builtin_unsupported [[=message{Severity::error, "built-in function '{0:n}' is not supported yet"}]],
@@ -218,6 +224,25 @@ constexpr message message_of(Diag d) {
     if (d == [:e:]) m = std::meta::extract<message>(std::meta::annotations_of_with_type(e, ^^message)[0]);
   }
   return m;
+}
+
+// Whether a diagnostic is a limit of ycxx's rather than of the program: something not supported
+// yet, or the instantiation depth. Where an error means "not satisfied" (a requirement, an atomic
+// constraint, [temp.constr.atomic]/3) such a diagnostic stays an error, so a missing feature never
+// silently picks another overload.
+constexpr bool is_limit(engine::DiagId id) {
+  auto d = sema_diag_of(id);
+  if (!d) return false;
+  if (*d == Diag::instantiation_depth) return true;
+  message m = message_of(*d);
+  return std::string_view(m.text).contains("not supported");
+}
+// Whether a diagnostic stays an error where a substitution failure means "not satisfied": a limit
+// of ycxx's, an atomic constraint that is not a `bool` constant ([temp.constr.atomic]/3), or a
+// return-type-requirement that names no concept, ill-formed whatever the arguments.
+constexpr bool survives_substitution(engine::DiagId id) {
+  return is_limit(id) || id == diag_id(Diag::constraint_not_bool) || id == diag_id(Diag::constraint_not_constant) ||
+         id == diag_id(Diag::not_a_concept);
 }
 
 constexpr std::string_view diag_name(Diag d) {
