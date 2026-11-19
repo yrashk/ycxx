@@ -25,17 +25,17 @@ class LineTable {
   }
 
   // An offset past the end is the end of the file.
-  // The byte offset of a 1-based line and byte column, clamped to the text: the inverse of
-  // `line_column`.
-  std::uint32_t offset_of(std::uint32_t line, std::uint32_t column) const {
-    const auto l = std::clamp<std::size_t>(line, 1, starts_.size()) - 1;
-    return std::min(size_, starts_[l] + (column ? column - 1 : 0));
-  }
   LineColumn line_column(std::uint32_t offset) const {
     offset = std::min(offset, size_);
     auto it = std::ranges::upper_bound(starts_, offset);
     auto line = static_cast<std::uint32_t>(it - starts_.begin());
     return {line, offset - starts_[line - 1] + 1};
+  }
+  // The byte offset of a 1-based line and byte column, clamped to the text: the inverse of
+  // `line_column`.
+  std::uint32_t offset_of(std::uint32_t line, std::uint32_t column) const {
+    const auto l = std::clamp<std::size_t>(line, 1, starts_.size()) - 1;
+    return std::min(size_, starts_[l] + (column ? column - 1 : 0));
   }
 
  private:

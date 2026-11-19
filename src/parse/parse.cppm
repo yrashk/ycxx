@@ -655,6 +655,10 @@ public:
   }
   // An item at namespace scope: in no class, whichever namespaces enclose it.
   bool in_global_scope(u32 k) const { return !in_class_[k]; }
+  // What analysis reached, without analysing more (#170): an item's semantics and its body, if
+  // analysed.
+  const ast::ItemSema* analysed_item(u32 k) const { return item_cells_[k] ? &item_cells_[k]->value : nullptr; }
+  const ast::BodySema* analysed_body(u32 k) const { return body_cells_[k] ? &body_cells_[k]->value : nullptr; }
   std::vector<engine::Diagnostic> diagnostics() const {
     std::vector<engine::Diagnostic> r;
     for (u32 k = 0; k < items_->items.size(); ++k) {

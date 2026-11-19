@@ -418,13 +418,20 @@ class Server {
     pipeline::LineTable lines(*text);
     overlay_.open = &spelled;
     overlay_.cwd = request->cwd;
+    struct Reset {
+      Overlay& o;
+      ~Reset() { o.open = nullptr; }
+    } reset{overlay_};
     auto found = compile::definition(*request, overlay_, session(), real, lines.offset_of(at.line, at.column), {pp::View::editor});
-    overlay_.open = nullptr;
     if (!found) return std::nullopt;
     const std::optional<std::string> target = text_of(found->path);
     if (!target) return std::nullopt;
     const pipeline::LineColumn lc = pipeline::LineTable(*target).line_column(found->offset);
-    return lsp::Location{found->path, lc.line, lc.column};
+    // Under the editor's own name for an open document, as diagnostics are.
+    std::string path = found->path;
+    for (const auto& [name, _] : open)
+      if (canonical(name) == path) path = name;
+    return lsp::Location{std::move(path), lc.line, lc.column};
   }
 
   // The diagnostics of the documents at `paths`, each unit checked in the editor view with `open`

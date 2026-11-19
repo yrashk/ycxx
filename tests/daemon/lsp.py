@@ -212,30 +212,60 @@ def definitions(env):
     # `return g() - 1;`: `g` is at character 20 of line 1; h.hpp declares it at 0:4.
     expect(definition(1, 20, 'F12 on g'), (header.as_uri(), 0, 4), 'a call of a function its header declares')
     expect(definition(1, 4, 'F12 on main\'s name'), None, 'a declaration\'s own name, not yet')
-    # Unsaved text: a function defined above `main`, then called.
-    ed.change(unit, '#include "h.hpp"\nint k() { return 2; }\nint main() { return k() - 2; }\n', 2)
-    expect(ed.diagnostics(unit, 2, 'a new function'), [], 'the unsaved unit is clean')
-    expect(definition(2, 20, 'F12 on k'), (unit.as_uri(), 1, 4), 'a function defined in unsaved text')
+    # Unsaved text: a function defined above `main`, then called; a call's argument names no
+    # function (a local, a literal); a pointer's declarator starts before its name; a call of a
+    # function template lands on the template.
+    version = 1
 
-    # A header the editor has not opened, with a warning in it.
+    def edit(text, what):
+        nonlocal version
+        version += 1
+        ed.change(unit, text, version)
+        expect(ed.diagnostics(unit, version, what), [], f'{what}: the unsaved unit is clean')
+        return text.splitlines()
+
+    def at(lines, line, word, nth=0):
+        """The position of the `nth` occurrence of `word` on `line`."""
+        i = -1
+        for _ in range(nth + 1):
+            i = lines[line].index(word, i + 1)
+        return line, i
+
+    lines = edit('#include "h.hpp"\nint k(int x) { return x; }\nint main() { int y = 1; return k(y) + k(7) - 8; }\n', 'k')
+    expect(definition(*at(lines, 2, 'k('), 'F12 on k'), (unit.as_uri(), *at(lines, 1, 'k')), 'a function defined in unsaved text')
+    expect(definition(*at(lines, 2, 'y)'), 'F12 on an argument'), None, 'a local passed to a call: not the callee')
+    expect(definition(*at(lines, 2, '7'), 'F12 on a literal'), None, 'a literal passed to a call: not the callee')
+    expect(definition(*at(lines, 2, ' + '), 'F12 on whitespace'), None, 'whitespace between names: nothing')
+    lines = edit('#include "h.hpp"\nint *gp = 0;\nint main() { return gp ? 1 : 0; }\n', 'gp')
+    expect(definition(*at(lines, 2, 'gp'), 'F12 on gp'), (unit.as_uri(), *at(lines, 1, 'gp')), 'a pointer: its name, not its `*`')
+    lines = edit('template <class T> T id(T x) { return x; }\nint main() { return id(0); }\n', 'id')
+    expect(definition(*at(lines, 1, 'id'), 'F12 on id'), (unit.as_uri(), *at(lines, 0, 'id')), 'a call of a function template')
+
+    # A header the editor has not opened, with a warning in it: published under the header, then
+    # cleared once the unit no longer includes it.
     (d / 'inc' / 'w.hpp').write_text('// a header\n#warning from the header\n')
     warned = d / 'inc' / 'w.hpp'
-    ed.change(unit, '#include "w.hpp"\nint main() { return 0; }\n', 3)
-    m = ed.wait(lambda m: m.get('method') == 'textDocument/publishDiagnostics' and m['params']['uri'] == warned.as_uri(),
-                'a header\'s warning')
-    got = [] if m is None else [(x['range']['start']['line'], x['severity']) for x in m['params']['diagnostics']]
-    expect(got, [(1, 2)], 'a warning in a header that is not open')
+
+    def header_messages(what):
+        m = ed.wait(lambda m: m.get('method') == 'textDocument/publishDiagnostics' and m['params']['uri'] == warned.as_uri(),
+                    what)
+        return None if m is None else [(x['range']['start']['line'], x['severity']) for x in m['params']['diagnostics']]
+
+    version += 1
+    ed.change(unit, '#include "w.hpp"\nint main() { return 0; }\n', version)
+    expect(header_messages('a header\'s warning'), [(1, 2)], 'a warning in a header that is not open')
+    version += 1
+    ed.change(unit, GOOD, version)
+    expect(header_messages('the header\'s warning cleared'), [], 'the header\'s warning once nothing includes it')
     # Open and unsaved, the header's warning moves down two lines: it is rendered in the buffer.
+    version += 1
+    ed.change(unit, '#include "w.hpp"\nint main() { return 0; }\n', version)
     ed.open(warned, '// a header\n\n\n#warning from the header\n', 1)
     m = ed.wait(lambda m: m.get('method') == 'textDocument/publishDiagnostics' and m['params']['uri'] == warned.as_uri() and
                 m['params'].get('version') == 1, 'the open header\'s warning')
     got = [] if m is None else [(x['range']['start']['line'], x['severity']) for x in m['params']['diagnostics']]
     expect(got, [(3, 2)], 'a header\'s warning rendered in its unsaved buffer')
     ed.notify('textDocument/didClose', {'textDocument': {'uri': warned.as_uri()}})
-    ed.change(unit, GOOD, 4)
-    m = ed.wait(lambda m: m.get('method') == 'textDocument/publishDiagnostics' and m['params']['uri'] == warned.as_uri(),
-                'the header\'s warning cleared')
-    expect(None if m is None else m['params']['diagnostics'], [], 'the header\'s warning once nothing includes it')
     expect(ed.finish(), 0, '`ycxx lsp` after shutdown and exit')
 
 

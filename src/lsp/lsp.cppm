@@ -336,7 +336,14 @@ private:
         if (fresh) t->second = read_disk(d.path);
         if (t->second) character = utf16_column(*t->second, d.line, d.column);
       }
-      found[d.path].push_back({{{line, character}, {line, character}}, d.severity, "ycxx", d.message});
+      // Once, though several documents include the file and report it.
+      std::vector<LspDiagnostic>& list = found[d.path];
+      const LspDiagnostic x{{{line, character}, {line, character}}, d.severity, "ycxx", d.message};
+      if (std::ranges::none_of(list, [&](const LspDiagnostic& y) {
+            return y.range.start.line == line && y.range.start.character == character && y.severity == x.severity &&
+                   y.message == x.message;
+          }))
+        list.push_back(x);
     }
     for (const std::string& path : paths) send_diagnostics(path, std::move(found[path]));
     std::set<std::string> elsewhere;

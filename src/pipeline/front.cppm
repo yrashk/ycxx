@@ -299,12 +299,15 @@ engine::query_task<FrontResult> TuFront::run(engine::Ctx& cx, TuId tu) {
   parse::Program program(world, region, items, unit_source.config.template_depth);
   program.analyze_all();
   // What an editor's position requests read (#170): where each entity is first declared, and the
-  // bodies, whether or not the unit has errors.
+  // bodies, whether or not the unit has errors; only what the analysis reached, which analysing
+  // more would change (its diagnostics).
   {
     std::set<std::uint32_t> seen;
     for (std::uint32_t k = 0; k < items.items.size(); ++k) {
       const items::Item& it = items.items[k];
-      const ast::ItemSema& is = program.item_sema(k).value;
+      const ast::ItemSema* analysed = program.analysed_item(k);
+      if (!analysed) continue;
+      const ast::ItemSema& is = *analysed;
       const std::vector<ast::DeclSema> decls = world.ins.seqs.elements(is.decls);
       std::vector<std::uint32_t> at(decls.size(), 0);
       if (is.tree != ast::NodeId::none && world.ins.ast.is<ast::DeclGroup>(is.tree))
@@ -315,9 +318,8 @@ engine::query_task<FrontResult> TuFront::run(engine::Ctx& cx, TuId tu) {
       for (std::size_t i = 0; i < decls.size(); ++i)
         if (decls[i].entity != EntityId::none && seen.insert(std::to_underlying(decls[i].entity)).second)
           out.declared.emplace_back(decls[i].entity, ast::Loc{program.id(k), at[i]});
-      if (it.kind == items::ItemKind::function && it.has_body())
-        if (ast::NodeId tree = program.analyze_body(k).value.tree; tree != ast::NodeId::none)
-          out.bodies.push_back({program.id(k), it.decl_length(), tree});
+      if (const ast::BodySema* body = program.analysed_body(k); body && body->tree != ast::NodeId::none && it.has_body())
+        out.bodies.push_back({program.id(k), it.decl_length(), body->tree});
     }
   }
   for (const engine::Diagnostic& d : program.diagnostics()) {
@@ -391,7 +393,10 @@ engine::query_task<std::optional<FileOffset>> DefinitionAt::run(engine::Ctx& cx,
     if (l.file != *f || l.offset > k.offset) continue;
     if (!tok || region.site(*tok).offset < l.offset) tok = t;
   }
-  if (!tok) co_return std::nullopt;
+  // A name: an identifier the cursor is on (a macro's tokens sit at its name, of another length).
+  if (!tok || region.tokens[*tok].kind != lex::Tk::identifier) co_return std::nullopt;
+  if (region.locs[*tok].expansion == 0 && k.offset >= region.locs[*tok].offset + region.name(region.tokens[*tok]).size())
+    co_return std::nullopt;
   // The innermost item holding it (items are in preorder), and the body that is that item's.
   std::optional<std::uint32_t> item;
   for (std::uint32_t i = 0; i < items.items.size(); ++i)
@@ -402,21 +407,40 @@ engine::query_task<std::optional<FileOffset>> DefinitionAt::run(engine::Ctx& cx,
   EntityId named = EntityId::none;
   for (const BodyAt& b : front.bodies) {
     if (b.item != id) continue;
+    // The innermost node, through the nodes that wrap a name without being one (an implicit
+    // conversion, parentheses); a call names its function only from its callee.
     ast::Red(in.ast, b.tree, b.offset).find(at, [&](const ast::Red& r) {
-      for (const ast::Red* n = &r; n && named == EntityId::none; n = n->parent()) {
+      const ast::Red* from = nullptr;
+      for (const ast::Red* n = &r; n; from = n, n = n->parent()) {
         if (n->is<ast::DeclRef>()) named = n->get<ast::DeclRef>().entity;
         else if (n->is<ast::Member>()) named = n->get<ast::Member>().member;
-        else if (n->is<ast::Call>()) named = n->get<ast::Call>().function;
+        else if (n->is<ast::Call>() && from && from->id() == n->get<ast::Call>().callee.id) named = n->get<ast::Call>().function;
+        else if (n->is<ast::ImplicitConversion>() || n->is<ast::Paren>()) continue;
+        break;
       }
     });
   }
   if (named == EntityId::none) co_return std::nullopt;
-  // Where it is first declared: its item's token, then that token's site.
+  // A function template's specialization is declared as its template.
   auto d = std::ranges::find(front.declared, named, &std::pair<EntityId, ast::Loc>::first);
+  if (d == front.declared.end())
+    if (EntityId templ = universe().world->entities.rec(named).templ; templ != EntityId::none) {
+      named = templ;
+      d = std::ranges::find(front.declared, named, &std::pair<EntityId, ast::Loc>::first);
+    }
   if (d == front.declared.end()) co_return std::nullopt;
+  // Where it is first declared: its declarator's token in its item, moved to the declared name
+  // (`*p` and `(*f)()` start before it), then that token's site.
+  const std::string_view name = in.names.spelling(universe().world->entities.rec(named).name);
   for (const items::Item& it : items.items) {
     if (in.items.add<ast::ItemId>(it.id) != d->second.item) continue;
-    const pp::TokLoc l = region.site(std::min<std::size_t>(it.begin + d->second.offset, region.locs.size() - 1));
+    std::size_t t = std::min<std::size_t>(it.begin + d->second.offset, region.locs.size() - 1);
+    for (std::size_t u = t; u < it.end && u + 1 < region.tokens.size(); ++u)
+      if (region.tokens[u].kind == lex::Tk::identifier && region.name(region.tokens[u]) == name) {
+        t = u;
+        break;
+      }
+    const pp::TokLoc l = region.site(t);
     if (region.files[l.file].starts_with('<')) co_return std::nullopt;
     co_return FileOffset{absolute(region.files[l.file]), l.offset};
   }
