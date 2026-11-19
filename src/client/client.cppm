@@ -94,11 +94,12 @@ std::string cwd_now() {
 
 // `--trace-engine[=stream|interactive]` (#245): what the request's engine did, as an indented
 // log on stderr as it happens, or browsed after the compile.
-enum class TraceMode { off, stream, interactive };
+enum class TraceMode { off, stream, interactive, json };
 
 std::optional<TraceMode> trace_mode_named(std::string_view a) {
   if (a == "--trace-engine" || a == "--trace-engine=stream") return TraceMode::stream;
   if (a == "--trace-engine=interactive") return TraceMode::interactive;
+  if (a == "--trace-engine=json") return TraceMode::json;
   return std::nullopt;
 }
 
@@ -109,19 +110,21 @@ TraceMode trace_mode_from_environment() {
   const std::string_view v = e ? e : "";
   if (falsy(v)) return TraceMode::off;
   if (v == "interactive") return TraceMode::interactive;
+  if (v == "json") return TraceMode::json;
   if (v != "stream" && v != "1" && v != "on")
-    std::println(std::cerr, "ycxx: warning: YCXX_TRACE_ENGINE='{}' is not one of stream, interactive, 0: streaming", v);
+    std::println(std::cerr, "ycxx: warning: YCXX_TRACE_ENGINE='{}' is not one of stream, interactive, json, 0: streaming", v);
   return TraceMode::stream;
 }
 
 // Where a request's trace goes: printed batch by batch, or gathered for the browser.
 class TraceOut {
  public:
-  explicit TraceOut(TraceMode mode) : mode_(mode), stream_(std::cerr, {trace::colors_for(2), true}) {}
+  explicit TraceOut(TraceMode mode)
+      : mode_(mode), stream_(std::cerr, {mode != TraceMode::json && trace::colors_for(2), true, mode == TraceMode::json}) {}
 
   void events(std::span<const trace::Event> batch) {
-    if (mode_ == TraceMode::stream) stream_.batch(batch);
-    else tree_.add(batch);
+    if (mode_ == TraceMode::interactive) tree_.add(batch);
+    else stream_.batch(batch);
   }
   // From the daemon: times on its clock, made relative to the request's start.
   void batch(daemon::TraceBatch&& b) {
@@ -136,7 +139,8 @@ class TraceOut {
   // A new run of the request (a retry, or the in-process fallback): its trace starts afresh, as
   // event numbers restart in another engine.
   void restart(std::string_view why) {
-    std::println(std::cerr, "ycxx: {}: tracing it again", why);
+    if (mode_ == TraceMode::json) std::println(std::cerr, R"({{"restart":{}}})", trace::json_string(why));
+    else std::println(std::cerr, "ycxx: {}: tracing it again", why);
     tree_ = {};
     stream_.reset();
     total_.reset();
@@ -192,10 +196,10 @@ struct Interrupt {
 };
 
 // `on_trace` gets the request's trace batches; `on_retry` is called before asking a new daemon.
-// `pid`, when given, is set to the daemon that answered; `cut`, when given, can interrupt it.
+// `instance`, when given, is set to the daemon that answered (`Welcome::instance`); `cut`, when given, can interrupt it.
 using OnTrace = std::function<void(daemon::TraceBatch&&)>;
 std::expected<compile::Done, std::string> through_daemon(const compile::Request& r, bool verbose, const OnTrace& on_trace = {},
-                                                         const std::function<void()>& on_retry = {}, std::int64_t* pid = nullptr,
+                                                         const std::function<void()>& on_retry = {}, std::uint64_t* instance = nullptr,
                                                          Interrupt* cut = nullptr) {
   std::string root = daemon::root_for(compile::first_input(r.argv), r.cwd);
   std::string why;
@@ -208,7 +212,7 @@ std::expected<compile::Done, std::string> through_daemon(const compile::Request&
     auto d = daemon::request_compile(*c, r, on_trace);
     if (cut) cut->leave();
     if (d) {
-      if (pid) *pid = c->welcome.daemon_pid;
+      if (instance) *instance = c->welcome.instance;
       if (verbose)
         std::println(std::cerr, "ycxx: answered by daemon {} for {} at revision {} ({} restarts, {} pp regions reused)",
                      c->welcome.daemon_pid, c->welcome.root, d->report.revision, d->report.restarts, d->report.regions_reused);
@@ -220,22 +224,36 @@ std::expected<compile::Done, std::string> through_daemon(const compile::Request&
   return std::unexpected(why);
 }
 
+// `compile::finish` for `--trace-engine=json`, where every stderr line is JSON: outputs written,
+// stdout as it is, the diagnostics and exit status as one line.
+int finish_json(compile::Done& d) {
+  for (const compile::Output& o : d.outputs) {
+    if (auto err = pipeline::write_file(o.path, o.bytes, o.executable)) {
+      d.err += std::format("ycxx: error: {}\n", *err);
+      d.exit_status = 1;
+    }
+  }
+  std::cout << d.out << std::flush;
+  std::println(std::cerr, R"({{"exit_status":{},"diagnostics":{}}})", d.exit_status, trace::json_string(d.err));
+  return d.exit_status;
+}
+
 // Seconds since the epoch: a request's `build_time`.
 std::int64_t now_seconds() {
   return std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();
 }
 
 // Waits, through the daemon of `root`, until a file some build read changes after revision `since`
-// of daemon `pid` (#245): how many batches changed something (0: the daemon stopped, so the next
+// of daemon `instance` (0: no build was answered) (#245): how many batches changed something (0: the daemon stopped, so the next
 // build starts a new one), or nothing when it cannot be asked or was interrupted.
-std::optional<std::uint64_t> await_change(const std::string& root, std::uint64_t since, std::int64_t pid, Interrupt& cut) {
+std::optional<std::uint64_t> await_change(const std::string& root, std::uint64_t since, std::uint64_t instance, Interrupt& cut) {
   auto c = daemon::reach(root, true);
   if (!c) {
     std::println(std::cerr, "ycxx: error: --watch: cannot reach the daemon: {}", c.error());
     return std::nullopt;
   }
   if (!cut.enter(c->fd.get())) return std::nullopt;
-  auto changed = daemon::await_change(*c, since, pid);
+  auto changed = daemon::await_change(*c, since, instance);
   cut.leave();
   if (cut.is_stopped()) return std::nullopt;
   return changed.value_or(0);
@@ -256,27 +274,34 @@ int watch_builds(compile::Request r, bool verbose, TraceMode mode) {
   };
   if (mode != TraceMode::interactive || !trace::is_terminal(0)) {
     std::optional<std::uint64_t> changed;
+    const TraceMode each = mode == TraceMode::json ? TraceMode::json : TraceMode::stream;
     for (std::uint64_t n = 1;; ++n) {
-      std::println(std::cerr, "\n── {}", build_label(n, changed));
+      if (mode == TraceMode::json) std::println(std::cerr, R"({{"build":{},"label":{}}})", n, trace::json_string(build_label(n, changed)));
+      else std::println(std::cerr, "\n── {}", build_label(n, changed));
       r.build_time = now_seconds();
       std::optional<TraceOut> traced;
-      if (mode != TraceMode::off) traced.emplace(TraceMode::stream);
-      std::int64_t pid = 0;
+      if (mode != TraceMode::off) traced.emplace(each);
+      std::uint64_t instance = 0;
       std::uint64_t revision = 0;
       auto d = through_daemon(r, verbose, [&](daemon::TraceBatch&& b) {
         if (traced) traced->batch(std::move(b));
       }, [&] {
         if (traced) traced->restart("the daemon was lost; asking a new one");
-      }, &pid);
+      }, &instance);
+      const bool json = mode == TraceMode::json;
       if (d) {
-        revision = d->report.revision;
-        compile::finish(*d);
+        revision = d->report.started_at;
+        if (json) finish_json(*d);
+        else compile::finish(*d);
         if (traced) traced->finish();
+      } else if (json) {
+        std::println(std::cerr, R"({{"error":{}}})", trace::json_string("the daemon could not build it: " + d.error()));
       } else {
         std::println(std::cerr, "ycxx: error: the daemon could not build it: {}", d.error());
       }
-      std::println(std::cerr, "ycxx: watching the files it read; ^C to stop");
-      changed = await_change(root, revision, pid, cut);
+      if (json) std::println(std::cerr, R"({{"watching":"the files it read"}})");
+      else std::println(std::cerr, "ycxx: watching the files it read; ^C to stop");
+      changed = await_change(root, revision, instance, cut);
       if (!changed) return 1;
     }
   }
@@ -319,14 +344,14 @@ int watch_builds(compile::Request r, bool verbose, TraceMode mode) {
       const auto offset = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - first).count());
       // Event numbers restart in another engine (a retry, a new daemon): each run gets a space.
       std::uint64_t run = n << 2;
-      std::int64_t pid = 0;
+      std::uint64_t instance = 0;
       auto d = through_daemon(r, verbose, [&](daemon::TraceBatch&& b) {
         post({Item::trace, n, run, offset, std::move(b), label, {}});
-      }, [&] { ++run; }, &pid, &cut);
+      }, [&] { ++run; }, &instance, &cut);
       Item done{Item::done, n, run, offset, {}, label, {}};
       std::uint64_t revision = 0;
       if (d) {
-        revision = d->report.revision;
+        revision = d->report.started_at;
         for (const compile::Output& o : d->outputs) {
           if (auto err = pipeline::write_file(o.path, o.bytes, o.executable)) done.text += std::format("ycxx: error: {}\n", *err);
         }
@@ -336,7 +361,7 @@ int watch_builds(compile::Request r, bool verbose, TraceMode mode) {
         done.text = "the daemon could not build it: " + d.error();
       }
       post(std::move(done));
-      changed = await_change(root, revision, pid, cut);
+      changed = await_change(root, revision, instance, cut);
       if (!changed) break;
     }
     std::lock_guard g(shared.m);
@@ -408,7 +433,7 @@ int cxx(std::span<const std::string_view> args) {
   for (std::string_view a : args) {
     if (auto m = trace_mode_named(a)) trace_mode = *m;
     else if (a.starts_with("--trace-engine=")) {
-      std::println(std::cerr, "ycxx: error: unknown trace mode in '{}' (stream or interactive)", a);
+      std::println(std::cerr, "ycxx: error: unknown trace mode in '{}' (stream, interactive or json)", a);
       return 1;
     } else if (a == "--watch") watch = true;
     else if (a == "--no-daemon") forced_off = true;
@@ -426,17 +451,17 @@ int cxx(std::span<const std::string_view> args) {
       return 2;
     }
     if (trace_mode != TraceMode::off)
-      r.trace = trace_mode == TraceMode::interactive ? compile::Trace::values : compile::Trace::events;
+      r.trace = trace_mode == TraceMode::stream ? compile::Trace::events : compile::Trace::values;
     return watch_builds(std::move(r), verbose, trace_mode);
   }
   std::optional<TraceOut> traced;
   if (trace_mode != TraceMode::off) {
     traced.emplace(trace_mode);
     // The browser shows values; the stream does not, and skips rendering them.
-    r.trace = trace_mode == TraceMode::interactive ? compile::Trace::values : compile::Trace::events;
+    r.trace = trace_mode == TraceMode::stream ? compile::Trace::events : compile::Trace::values;
   }
   const auto finish = [&](compile::Done& d) {
-    const int status = compile::finish(d);
+    const int status = trace_mode == TraceMode::json ? finish_json(d) : compile::finish(d);
     if (traced) traced->finish();
     return status;
   };
@@ -499,8 +524,8 @@ namespace {
 
 // `ycxx ctl trace` (#245): every request the daemon serves from now on, as a stream on stdout or,
 // with `--interactive` on a terminal, a browser that grows as requests come, one node each.
-int watch(daemon::Connection& c, bool interactive) {
-  if (auto ok = daemon::watch_traces(c, interactive); !ok) {
+int watch(daemon::Connection& c, bool interactive, bool json) {
+  if (auto ok = daemon::watch_traces(c, interactive || json); !ok) {
     std::println(std::cerr, "ycxx: {}", ok.error());
     return 1;
   }
@@ -529,16 +554,19 @@ int watch(daemon::Connection& c, bool interactive) {
     trace::browse(tree, &feed);
     return 0;
   }
-  const trace::Style style{trace::colors_for(1), true};
-  std::println("ycxx: watching the daemon of {} (pid {}): builds of files under it; ^C to stop", c.welcome.root,
-               c.welcome.daemon_pid);
+  const trace::Style style{!json && trace::colors_for(1), true, json};
+  if (json) std::println(R"({{"watching":{},"pid":{}}})", trace::json_string(c.welcome.root), c.welcome.daemon_pid);
+  else std::println("ycxx: watching the daemon of {} (pid {}): builds of files under it; ^C to stop", c.welcome.root, c.welcome.daemon_pid);
   std::cout.flush();  // a pipe buffers: whoever reads it knows the watch is attached
   std::map<std::uint64_t, trace::Stream> requests;
   std::uint64_t last = 0;
   while (auto b = daemon::next_trace(c)) {
     rebase(*b);
     auto [it, fresh] = requests.try_emplace(b->request, std::cout, style);
-    if (fresh || last != b->request) it->second.note(std::format("── #{} {}", b->request, b->label));
+    if (fresh || last != b->request) {
+      if (json) std::println(R"({{"request":{},"label":{}}})", b->request, trace::json_string(b->label));
+      else it->second.note(std::format("── #{} {}", b->request, b->label));
+    }
     last = b->request;
     if (b->end) {
       it->second.summary(b->ended_ns - std::min(b->ended_ns, b->started_ns));
@@ -549,7 +577,9 @@ int watch(daemon::Connection& c, bool interactive) {
     }
   }
   // A watcher more than 64 MiB behind is dropped while the daemon lives on.
-  if (daemon::reach(c.welcome.root, false)) std::println("ycxx: the daemon dropped this watch: it fell too far behind");
+  const bool alive = static_cast<bool>(daemon::reach(c.welcome.root, false));
+  if (json) std::println(R"({{"ended":{}}})", alive ? R"("dropped: this watch fell too far behind")" : R"("the daemon has gone")");
+  else if (alive) std::println("ycxx: the daemon dropped this watch: it fell too far behind");
   else std::println("ycxx: the daemon has gone");
   return 0;
 }
@@ -560,15 +590,16 @@ int watch(daemon::Connection& c, bool interactive) {
 // working directory's), never starting one.
 int control(std::span<const std::string_view> args) {
   std::optional<std::string> command, root;
-  bool interactive = false;
+  bool interactive = false, json = false;
   for (std::size_t i = 0; i < args.size(); ++i) {
     if (args[i] == "--root" && i + 1 < args.size()) root = std::string(args[++i]);
     else if (args[i] == "--interactive") interactive = true;
+    else if (args[i] == "--json") json = true;
     else if (!command) command = std::string(args[i]);
     else command.reset(), i = args.size();
   }
   if (!command || (*command != "status" && *command != "shutdown" && *command != "trace")) {
-    std::println(std::cerr, "usage: ycxx ctl status|shutdown|trace [--root DIR] [--interactive]");
+    std::println(std::cerr, "usage: ycxx ctl status|shutdown|trace [--root DIR] [--interactive|--json]");
     return 2;
   }
   std::string scope = root ? daemon::real_path(*root).value_or(*root) : daemon::root_for(std::nullopt, cwd_now());
@@ -577,7 +608,7 @@ int control(std::span<const std::string_view> args) {
     std::println(std::cerr, "ycxx: no daemon for {}: {}", scope, c.error());
     return 1;
   }
-  if (*command == "trace") return watch(*c, interactive);
+  if (*command == "trace") return watch(*c, interactive, json);
   if (*command == "shutdown") {
     auto ok = daemon::request_shutdown(*c);
     if (!ok) std::println(std::cerr, "ycxx: {}", ok.error());

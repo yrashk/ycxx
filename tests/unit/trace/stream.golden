@@ -1,16 +1,16 @@
 ## cold
 * TuFront(golden.cpp) executed
-.   TuSourceIn(golden.cpp) input
+=   TuSourceIn(golden.cpp) reused
 *   Pp(golden.cpp) executed
-.     SourceOf(golden.cpp) input
-.     FileText(golden.cpp) input
+=     SourceOf(golden.cpp) reused
+=     FileText(golden.cpp) reused
 *   RegionItems(golden.cpp) executed
 =     Pp(golden.cpp) reused
 *   DiagsOf(RegionItems(golden.cpp)) executed
-.   SourceOf(golden.cpp) input
+=   SourceOf(golden.cpp) reused
 * Tu(golden.cpp) executed
 *   TuUnit(golden.cpp) executed
-.     TuSourceIn(golden.cpp) input
+=     TuSourceIn(golden.cpp) reused
 =     TuFront(golden.cpp) reused
 *   Lower(square) executed
 *     FunctionIr(square) executed
@@ -18,7 +18,7 @@
 *         FunctionSourceQ(square) executed
 =           TuUnit(golden.cpp) reused
 *         UnitShapes(golden.cpp) executed
-.           TuSourceIn(golden.cpp) input
+=           TuSourceIn(golden.cpp) reused
 =           TuFront(golden.cpp) reused
 =     UnitShapes(golden.cpp) reused
 *   Lower(main) executed
@@ -38,39 +38,39 @@
 =       Lower(square) reused
 *       TuDefined(golden.cpp) executed
 =         TuUnit(golden.cpp) reused
-.     OptLevel(aarch64_macos) input
+=     OptLevel(aarch64_macos) reused
 *     Optimized({fc7746fd, aarch64_macos, 0}) executed
-.       CostModelIn(aarch64_macos) input
+=       CostModelIn(aarch64_macos) reused
 *   Codegen(main) executed
 *     UnitQ(main) executed
 =       Lower(main) reused
 =       TuDefined(golden.cpp) reused
-.     OptLevel(aarch64_macos) input
+=     OptLevel(aarch64_macos) reused
 *     Optimized({8321e894, aarch64_macos, 0}) executed
-.       CostModelIn(aarch64_macos) input
+=       CostModelIn(aarch64_macos) reused
 * Link(0) executed
-.   ProgramIn(0) input
+=   ProgramIn(0) reused
 +   Tu(golden.cpp) verified
 +     TuUnit(golden.cpp) verified
-.       TuSourceIn(golden.cpp) input
+=       TuSourceIn(golden.cpp) reused
 +       TuFront(golden.cpp) verified
-.         TuSourceIn(golden.cpp) input
+=         TuSourceIn(golden.cpp) reused
 +         Pp(golden.cpp) verified
-.           SourceOf(golden.cpp) input
-.           FileText(golden.cpp) input
+=           SourceOf(golden.cpp) reused
+=           FileText(golden.cpp) reused
 +         RegionItems(golden.cpp) verified
 =           Pp(golden.cpp) reused
 +         DiagsOf(RegionItems(golden.cpp)) verified
 =           RegionItems(golden.cpp) reused
 =           Pp(golden.cpp) reused
-.         SourceOf(golden.cpp) input
+=         SourceOf(golden.cpp) reused
 +     Lower(square) verified
 +       FunctionIr(square) verified
 +         FunctionGen(square) verified
 +           FunctionSourceQ(square) verified
 =             TuUnit(golden.cpp) reused
 +           UnitShapes(golden.cpp) verified
-.             TuSourceIn(golden.cpp) input
+=             TuSourceIn(golden.cpp) reused
 =             TuFront(golden.cpp) reused
 =       UnitShapes(golden.cpp) reused
 +     Lower(main) verified
@@ -88,15 +88,15 @@
 =         Lower(square) reused
 +         TuDefined(golden.cpp) verified
 =           TuUnit(golden.cpp) reused
-.       OptLevel(aarch64_macos) input
+=       OptLevel(aarch64_macos) reused
 #       Optimized({fc7746fd, aarch64_macos, 0}) durable
 +     Codegen(main) verified
 +       UnitQ(main) verified
 =         Lower(main) reused
 =         TuDefined(golden.cpp) reused
-.       OptLevel(aarch64_macos) input
+=       OptLevel(aarch64_macos) reused
 #       Optimized({8321e894, aarch64_macos, 0}) durable
-trace: 25 executed, 20 verified, 29 reused, 4 durable, 19 input
+trace: 25 executed, 20 verified, 48 reused, 4 durable
 ## again: the request's own cells are reused
 = TuFront(golden.cpp) reused
 = Tu(golden.cpp) reused
@@ -104,24 +104,23 @@ trace: 25 executed, 20 verified, 29 reused, 4 durable, 19 input
 trace: 3 reused
 ## a whitespace edit: pp runs, the front end cuts off, the rest is verified
 ~ TuFront(golden.cpp) cutoff
-.   TuSourceIn(golden.cpp) input
+=   TuSourceIn(golden.cpp) reused
 *   Pp(golden.cpp) executed
-.     SourceOf(golden.cpp) input
-.     FileText(golden.cpp) input
-.     SourceOf(golden.cpp) input
-.     FileText(golden.cpp) input
-.   TuSourceIn(golden.cpp) input
+=     SourceOf(golden.cpp) reused
+=     FileText(golden.cpp) reused
+=     SourceOf(golden.cpp) reused
+=     FileText(golden.cpp) reused
+=   TuSourceIn(golden.cpp) reused
 =   Pp(golden.cpp) reused
 ~   RegionItems(golden.cpp) cutoff
-=     Pp(golden.cpp) reused
-=     Pp(golden.cpp) reused
+=     Pp(golden.cpp) reused ×2
 ~   DiagsOf(RegionItems(golden.cpp)) cutoff
 =     RegionItems(golden.cpp) reused
 =     Pp(golden.cpp) reused
-.   SourceOf(golden.cpp) input
+=   SourceOf(golden.cpp) reused
 + Tu(golden.cpp) verified
 +   TuUnit(golden.cpp) verified
-.     TuSourceIn(golden.cpp) input
+=     TuSourceIn(golden.cpp) reused
 =     TuFront(golden.cpp) reused
 +   Lower(square) verified
 +     FunctionIr(square) verified
@@ -129,7 +128,7 @@ trace: 3 reused
 +         FunctionSourceQ(square) verified
 =           TuUnit(golden.cpp) reused
 +         UnitShapes(golden.cpp) verified
-.           TuSourceIn(golden.cpp) input
+=           TuSourceIn(golden.cpp) reused
 =           TuFront(golden.cpp) reused
 =     UnitShapes(golden.cpp) reused
 +   Lower(main) verified
@@ -147,15 +146,15 @@ trace: 3 reused
 =       Lower(square) reused
 +       TuDefined(golden.cpp) verified
 =         TuUnit(golden.cpp) reused
-.     OptLevel(aarch64_macos) input
+=     OptLevel(aarch64_macos) reused
 #     Optimized({fc7746fd, aarch64_macos, 0}) durable
 +   Codegen(main) verified
 +     UnitQ(main) verified
 =       Lower(main) reused
 =       TuDefined(golden.cpp) reused
-.     OptLevel(aarch64_macos) input
+=     OptLevel(aarch64_macos) reused
 #     Optimized({8321e894, aarch64_macos, 0}) durable
 + Link(0) verified
-.   ProgramIn(0) input
+=   ProgramIn(0) reused
 =   Tu(golden.cpp) reused
-trace: 1 executed, 3 cutoff, 17 verified, 18 reused, 4 durable, 12 input
+trace: 1 executed, 3 cutoff, 17 verified, 29 reused, 4 durable

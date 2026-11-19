@@ -45,6 +45,14 @@ struct TuFront {
   using Key = TuId;
   using Value = FrontResult;
   static engine::query_task<Value> run(engine::Ctx& cx, TuId tu);
+  // For traces (#245): its error messages, one a line.
+  static std::string errors(const Value& v) {
+    std::string out;
+    for (const Message& m : v.messages) {
+      if (m.error) out += (m.where.empty() ? std::format("at byte {}: ", m.offset) : m.where + ": ") + m.text + "\n";
+    }
+    return out;
+  }
 };
 
 // String literal objects and their addresses, from the values interner (`VString`, `VLvalue`).

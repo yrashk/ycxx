@@ -10,10 +10,12 @@
   the daemon shuts down.
 - A watcher that stops reading never slows builds, and does not keep the daemon from stopping
   (LESSONS: a long-lived connection's lifetime).
+- `--trace-engine=json`: every stderr line is a JSON object (events with their values, the
+  diagnostics and exit status, the summary), for tools and agents.
 - `ycxx cxx --watch --trace-engine` builds again when a header the build read changes, and only
   then: an unrelated file changes nothing.
 """
-import os, subprocess, sys, tempfile, threading, time, shutil
+import json, os, subprocess, sys, tempfile, threading, time, shutil
 from pathlib import Path
 
 failures = []
@@ -90,6 +92,23 @@ def main(ycxx):
         check(third.returncode == 0, 'the edited traced build')
         check(any(' cutoff' in l for l in lines(third.stderr)), 'a whitespace edit shows early cutoff')
         check(not any('Lower(square) executed' in l for l in lines(third.stderr)), 'a whitespace edit does not lower again')
+
+        js = cxx('--trace-engine=json', 'a.cpp', '-o', 'a')
+        check(js.returncode == 0, f'a JSON trace: {js.stderr[-300:]}')
+        try:
+            objs = [json.loads(l) for l in js.stderr.splitlines() if l.strip()]
+        except ValueError as e:
+            objs = []
+            fail(f'every line of a JSON trace is JSON: {e}: {js.stderr[:300]}')
+        events = [o for o in objs if 'kind' in o]
+        check(any(o['kind'] == 'Build' and o['outcome'] in ('reused', 'executed') for o in events), 'the JSON trace has the root')
+        check(all({'id', 'parent', 'depth', 'outcome', 'duration_ns', 'worker'} <= o.keys() for o in events), 'each event has its fields')
+        check(sum('summary' in o for o in objs) == 1 and sum('exit_status' in o for o in objs) == 1, 'one summary, one exit status')
+        src.write_text(SOURCE.replace('x * x', 'x * x * 3'))
+        js2 = cxx('--trace-engine=json', 'a.cpp', '-o', 'a')
+        values = [json.loads(l) for l in js2.stderr.splitlines() if '"value"' in l]
+        check(any(v['kind'] == 'FunctionIr' and 'mul' in v['value'] for v in values), 'a re-run function shows its IR')
+        src.write_text(EDITED)
 
         bad = cxx('--trace-engine=sideways', 'a.cpp')
         check(bad.returncode == 1 and 'unknown trace mode' in bad.stderr, 'an unknown mode is an error')

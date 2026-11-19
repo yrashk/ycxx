@@ -265,6 +265,7 @@ class Browser {
     else if (k == "e") tree_.expand_all(true);
     else if (k == "E") tree_.expand_all(false), cursor_ = 0;
     else if (k == "n") next_execution(rows);
+    else if (k == "x") next_error(rows);
     if (k != "J" && k != "K") detail_scroll_ = 0;
   }
   void timeline_key(const std::string& k) {
@@ -332,6 +333,18 @@ class Browser {
     const auto rows = tree_.rows();
     for (std::size_t i = 0; i < rows.size(); ++i) {
       if (rows[i].node == node) cursor_ = i;
+    }
+  }
+  // The next node where errors start, after the selection (wrapping), opening the tree to it.
+  void next_error(const std::vector<Tree::Row>& rows) {
+    const auto nodes = tree_.nodes();
+    const auto from = static_cast<std::size_t>(rows[cursor_].node);
+    for (std::size_t k = 1; k <= nodes.size(); ++k) {
+      const auto i = static_cast<std::int32_t>((from + k) % nodes.size());
+      if (tree_.error_here(i)) {
+        select(i);
+        return;
+      }
     }
   }
   void select(std::int32_t node) {
@@ -410,13 +423,13 @@ class Browser {
     if (!filter_.empty()) out += std::format(" filter: {}", paint("1", filter_));
     out += std::format("  worker: {}", tree_.worker() ? paint("1", format_worker(*tree_.worker())) : std::string("all"));
     out += tree_.newest_first() ? "  newest first" : "  oldest first";
-    if (feed_) out += "  " + paint("1;31", "● live") + paint("2", " " + feed_->source);
+    if (feed_) out += "  " + paint("1;38;5;208", "● live") + paint("2", " " + feed_->source);
     else if (ended_) out += "  " + paint("2", "(the daemon has gone)");
     return out;
   }
   std::string footer() const {
     if (view_ == View::tree)
-      return paint("2", " ↑↓/jk move  ⏎/space fold  ←→ close/open  e/E all  n next run  / filter  w/0-9/m/a worker  o order  v pane  t timeline  ? help  q quit");
+      return paint("2", " ↑↓/jk move  ⏎/space fold  ←→ close/open  e/E all  n next run  x next error  / filter  w/0-9/m/a worker  o order  v pane  t timeline  ? help  q quit");
     return paint("2", " ↑↓ lane  ←→/HL scrub  ⏎ open in tree  w/0-9/m/a worker  / filter  t tree  ? help  q quit");
   }
 
@@ -425,13 +438,24 @@ class Browser {
     const Event& e = n.ev;
     std::string out(2 * r.depth, ' ');
     out += n.children.empty() ? "  " : (n.expanded ? "▾ " : "▸ ");
-    out += paint(outcome_sgr(e.outcome), outcome_glyph(e.outcome, true));
+    if (tree_.error_here(r.node)) {
+      // Where the errors start: the whole line on red, and the first message on it.
+      return out + paint(error_here_sgr, std::format("{} {} {} ← {}", outcome_glyph(e.outcome, true), cell_name(e), outcome_name(e.outcome),
+                                                     first_line(e.errors)));
+    }
+    out += paint(event_sgr(e), outcome_glyph(e.outcome, true));
     out += ' ';
     const std::string name = std::format("{}{}", paint(r.match ? "1" : "2", e.kind), e.key.empty() ? "" : std::format("({})", e.key));
     out += name;
-    out += ' ' + paint(outcome_sgr(e.outcome), outcome_name(e.outcome));
+    out += ' ' + paint(event_sgr(e), outcome_name(e.outcome));
     if (e.end_ns != e.start_ns) out += paint("2", " " + format_duration(e.end_ns - e.start_ns));
     out += paint("2", " " + format_workers(e));
+    if (e.repeat > 1) out += paint("2", std::format(" ×{}", e.repeat));
+    if (!e.errors.empty()) {
+      // The message from where it starts, bubbled up; `x` goes there.
+      const auto at = tree_.error_origin_below(r.node);
+      out += paint(error_sgr, std::format("  (error below: {})", first_line(at ? tree_.node(*at).ev.errors : e.errors)));
+    }
     if (!n.expanded && n.children.size() > 0) out += paint("2", std::format("  [{} below, {} ran]", n.subtree - 1, ran_below(n)));
     return out;
   }
@@ -476,7 +500,7 @@ class Browser {
     out.push_back(" " + paint("1", e.kind));
     for (const std::string& l : wrap(e.key.empty() ? "(no key)" : e.key, rw)) out.push_back(" " + l);
     out.emplace_back();
-    out.push_back(" " + paint(outcome_sgr(e.outcome), std::format("{} {}", outcome_glyph(e.outcome, true), outcome_name(e.outcome))));
+    out.push_back(" " + paint(event_sgr(e), std::format("{} {}", outcome_glyph(e.outcome, true), outcome_name(e.outcome))));
     for (const std::string& l : wrap(outcome_meaning(e.outcome), rw)) out.push_back(" " + paint("2", l));
     out.emplace_back();
     out.push_back(std::format(" started  {}", format_duration(e.start_ns)));
@@ -486,6 +510,11 @@ class Browser {
     out.push_back(std::format(" below    {} cells, {} ran", n.subtree - 1, ran_below(n)));
     if (n.parent >= 0) out.push_back(" for      " + paint("2", cell_name(tree_.node(n.parent).ev)));
     out.emplace_back();
+    if (!e.errors.empty()) {
+      out.push_back(" " + paint("1;4;31", "errors"));
+      for (const std::string& l : wrap(e.errors, rw)) out.push_back(" " + paint(error_sgr, l));
+      out.emplace_back();
+    }
     if (!e.value.empty()) {
       out.push_back(" " + paint("1;4", "value") + paint("2", "  (J/K scroll)"));
       for (const std::string& l : wrap(e.value, rw)) out.push_back(" " + l);
@@ -516,7 +545,7 @@ class Browser {
         const Event& e = tree_.node(node).ev;
         // Deeper cells darker: the shade says how far down the demand chain the worker was.
         const std::string_view block = e.depth == 0 ? "█" : e.depth == 1 ? "▓" : e.depth == 2 ? "▒" : "░";
-        line += paint(std::format("{}{}", outcome_sgr(e.outcome), cur ? ";7" : ""), block);
+        line += paint(std::format("{}{}", event_sgr(e), cur ? ";7" : ""), block);
       }
       out.push_back(std::move(line));
     }
@@ -533,8 +562,8 @@ class Browser {
         for (std::int32_t p = node; p >= 0; p = tree_.node(p).parent) chain.push_back(tree_.node(p).ev.kind);
         std::ranges::reverse(chain);
         const Event& e = tree_.node(node).ev;
-        line += paint(outcome_sgr(e.outcome), outcome_glyph(e.outcome, true)) + " " + cell_name(e) + " " +
-                paint(outcome_sgr(e.outcome), outcome_name(e.outcome)) + paint("2", "   " + (chain | std::views::join_with(std::string_view(" › ")) | std::ranges::to<std::string>()));
+        line += paint(event_sgr(e), outcome_glyph(e.outcome, true)) + " " + cell_name(e) + " " +
+                paint(event_sgr(e), outcome_name(e.outcome)) + paint("2", "   " + (chain | std::views::join_with(std::string_view(" › ")) | std::ranges::to<std::string>()));
       }
       out.push_back(std::move(line));
     }

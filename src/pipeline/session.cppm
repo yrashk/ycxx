@@ -80,6 +80,19 @@ struct Build {
   using Key = RequestId;
   using Value = Built;
   static engine::query_task<Value> run(engine::Ctx& cx, RequestId r);
+  static std::string errors(const Value& v) {  // for traces (#245)
+    std::string out;
+    for (const UnitBuilt& u : v.units) {
+      for (const Message& m : u.messages) {
+        if (m.error) out += m.text + "\n";
+      }
+      for (const auto& e : u.errors) out += e.second + "\n";
+    }
+    if (v.linked) {
+      for (const std::string& e : v.linked->errors) out += e + "\n";
+    }
+    return out;
+  }
 };
 
 // A unit named by what it is (#139, daemon design §4.4): its spelled path, the working directory

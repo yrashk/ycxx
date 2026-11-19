@@ -74,6 +74,7 @@ class Collector final : public engine::Tracer {
     ev.worker = e.worker;
     ev.end_worker = e.end_worker;
     ev.value = e.value;
+    ev.errors = e.errors;
     return ev;
   }
 
@@ -91,10 +92,25 @@ class Collector final : public engine::Tracer {
     auto kids = children_.extract(id);
     if (kids.empty()) return;
     std::ranges::sort(kids.mapped());
+    std::optional<std::size_t> last;  // the previous child, if it can take a repeat
     for (std::uint64_t k : kids.mapped()) {
       auto node = pending_.extract(k);
-      if (!node.empty()) gather(std::move(node.mapped()), depth + 1, out);
+      if (node.empty()) continue;
+      Event& e = node.mapped();
+      // An instant just like the previous child (the same cell read again) is counted, not listed.
+      const bool instant = e.start_ns == e.end_ns && !children_.contains(e.id);
+      if (instant && last && same_instant(out[*last], e)) {
+        ++out[*last].repeat;
+        continue;
+      }
+      const std::size_t at = out.size();
+      gather(std::move(e), depth + 1, out);
+      last = instant && out.size() == at + 1 ? std::optional(at) : std::nullopt;
     }
+  }
+
+  static bool same_instant(const Event& a, const Event& b) {
+    return a.kind == b.kind && a.key == b.key && a.outcome == b.outcome && a.errors == b.errors && a.start_ns == a.end_ns;
   }
 
   Sink sink_;

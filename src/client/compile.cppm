@@ -47,6 +47,7 @@ struct Report {
   std::uint64_t regions_reused = 0;
   std::uint64_t executed = 0;   // engine cells executed and validated in this request's session
   std::uint64_t validated = 0;
+  std::uint64_t started_at = 0;  // the revision it started from: a later batch may not be in it (`--watch`)
 };
 
 struct Done {

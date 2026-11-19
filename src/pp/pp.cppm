@@ -167,6 +167,21 @@ struct Pp {
   using Key = FileId;
   using Value = Region;
   static engine::query_task<Value> run(engine::Ctx& cx, Key file);
+  // For traces (#245): its error-severity diagnostics, rendered; a `#warning` is no error.
+  static std::string diagnostic_errors(std::span<const engine::Diagnostic> ds) {
+    std::string out;
+    for (const engine::Diagnostic& d : ds) {
+      const auto raw = std::to_underlying(d.id);
+      if (raw < lex::lex_diag_base) continue;
+      const auto kind = lex::LexDiag(raw - lex::lex_diag_base);
+      const lex::message m = lex::message_of(kind);
+      if (m.severity != lex::Severity::error || m.text[0] == 0) continue;
+      std::vector<u64> args;
+      for (const engine::DiagArg& a : d.args) args.push_back(a.raw);
+      out += lex::render(kind, args) + "\n";
+    }
+    return out;
+  }
 };
 
 }  // namespace ycxx::pp

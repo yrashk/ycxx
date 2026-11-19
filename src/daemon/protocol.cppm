@@ -25,6 +25,7 @@ struct Hello {
 struct Welcome {
   std::int64_t daemon_pid = 0;
   std::string root;
+  std::uint64_t instance = 0;  // this daemon's start, unlike a pid never reused (`--watch`, #245)
 };
 // A request the daemon will not serve, and why; the client then runs it in-process (§7.1).
 struct Refused {
@@ -57,15 +58,15 @@ struct WatchRequest {
 };
 struct WatchAck {};
 // `await_change` (`ycxx cxx --watch`, #245) is answered by `changed` once the file table's revision
-// is past `since`: a batch changed a file some build read, whichever request applied it. A
-// different daemon (`daemon_pid`) answers at once: its revisions are not comparable. The
-// connection closes unanswered when the daemon stops.
+// is past `since`: a batch changed a file some build read, whichever request applied it. Another
+// daemon's build is answered at once (its revisions are not comparable); with no answered build,
+// the wait starts from now. The connection closes unanswered when the daemon stops.
 struct AwaitChange {
-  std::uint64_t since = 0;    // the revision the last build was answered at (`Report::revision`)
-  std::int64_t daemon_pid = 0;  // the daemon that answered it
+  std::uint64_t since = 0;     // the revision the last build started from (`Report::started_at`)
+  std::uint64_t instance = 0;  // the daemon that answered it (`Welcome::instance`); 0: none did
 };
 struct Changed {
-  std::uint64_t revisions = 0;  // batches applied since
+  std::uint64_t revisions = 0;  // batches applied since; 0 when another daemon answered
 };
 struct StatusRequest {};
 struct ShutdownRequest {};

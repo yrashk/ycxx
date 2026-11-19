@@ -238,7 +238,7 @@ class Server {
       send(fd, Kind::refused, Refused{"a different ycxx build"});
       return;
     }
-    if (!send(fd, Kind::welcome, Welcome{my_pid(), paths_.root})) return;
+    if (!send(fd, Kind::welcome, Welcome{my_pid(), paths_.root, instance_})) return;
     auto frame = receive(fd);
     if (!frame) return;
     switch (frame->kind) {
@@ -469,29 +469,42 @@ class Server {
   }
 
   // `ycxx cxx --watch` between builds (#245): answers once the revision is past the one the last
-  // build saw, whoever applied the batch (another request, the LSP, or this wait, which applies
-  // batches as a request's tick would). Ends unanswered on a hang-up or the stop.
+  // build started from, whoever applied the batch (another request, the LSP, or this wait, which
+  // applies batches as a request's tick would). Ends unanswered on a hang-up or the stop, which
+  // shuts it down like an LSP session.
   void serve_await_change(int fd, const AwaitChange& r) {
     const auto revision = [&] {
       std::lock_guard g(stats_mu_);
       return stats_.revision;
     };
+    if (r.instance != 0 && r.instance != instance_) {
+      send(fd, Kind::changed, Changed{0});  // another daemon's build: this one has not seen these files
+      return;
+    }
+    {
+      std::lock_guard g(conn_mu_);
+      if (lsp_closed_) return;
+      lsp_fds_.insert(fd);
+    }
+    // No build answered (refused, failed): wait from now, never answer at once.
+    const std::uint64_t since = r.instance == 0 ? revision() : r.since;
     // Without a watcher a batch is a rescan of the whole table: less often.
     const auto every = watcher_ ? std::chrono::milliseconds(150) : std::chrono::milliseconds(1000);
-    const std::uint64_t since = r.daemon_pid == my_pid() ? r.since : 0;  // another daemon's: all is new
     do {
-      if (const std::uint64_t now = revision(); now > since || r.daemon_pid != my_pid()) {
-        send(fd, Kind::changed, Changed{now - std::min(now, since)});
-        return;
+      if (const std::uint64_t now = revision(); now > since) {
+        send(fd, Kind::changed, Changed{now - since});
+        break;
       }
       {
         std::lock_guard g(conn_mu_);
-        if (lsp_closed_) return;
+        if (lsp_closed_) break;
       }
       std::unique_lock strand(strand_mu_, std::try_to_lock);
       if (strand && (running_ == 0 || admission_.may_apply(Clock::now())) && apply_batch(false) > 0)
         admission_.applied(Clock::now());
     } while (!wait_readable(fd, every));
+    std::lock_guard g(conn_mu_);
+    lsp_fds_.erase(fd);
   }
 
   void serve_compile(int fd, const compile::Request& r) {
@@ -690,6 +703,8 @@ class Server {
     {
       std::lock_guard strand(strand_mu_);
       report.inputs_changed += catch_up();
+      std::lock_guard g(stats_mu_);
+      report.started_at = stats_.revision;  // what `--watch` waits past: never a batch it missed
     }
     struct Running {
       Server& s;
@@ -733,6 +748,7 @@ class Server {
     }
     std::lock_guard g(stats_mu_);
     d.report.revision = stats_.revision;
+    d.report.started_at = report.started_at;
     d.report.inputs_changed = report.inputs_changed;
     stats_.quantum_ms = quantum;
     stats_.entries = table_.size();
@@ -868,6 +884,9 @@ class Server {
   std::vector<std::shared_ptr<Watching>> watchers_;  // under watch_mu_
   std::atomic<std::uint64_t> trace_requests_{0};
   const Clock::time_point trace_origin_ = Clock::now();  // the clock of every trace's events
+  // This start of the daemon, for `--watch` (a pid may be reused by a later daemon).
+  const std::uint64_t instance_ = static_cast<std::uint64_t>(std::chrono::system_clock::now().time_since_epoch().count()) ^
+                                  (static_cast<std::uint64_t>(my_pid()) << 40);
   std::uint64_t running_ = 0;  // compile requests admitted and not yet answered; on the strand
 };
 

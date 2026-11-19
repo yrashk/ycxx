@@ -325,6 +325,7 @@ struct TraceEvent {
   std::int32_t worker = -1;
   std::int32_t end_worker = -1;
   std::string value;  // the kind's `show(value)`, when the tracer asks for values
+  std::string errors;  // the errors its value holds (`errors(value)`), or its diagnostics; empty: none
 };
 
 // Receives a request's events, on any worker, concurrently. A frame reports before it publishes,
@@ -351,6 +352,18 @@ concept DescribedKey = requires(const typename Q::Key& k) {
 template <class Q>
 concept ShownValue = requires(const typename Q::Value& v) {
   { Q::show(v) } -> std::convertible_to<std::string>;
+};
+// A kind whose values can hold errors (a compile error is a value, not a failed execution) says
+// which, `static std::string errors(const Value&)`, empty for none: traces mark the cell.
+template <class Q>
+concept ErrorsInValue = requires(const typename Q::Value& v) {
+  { Q::errors(v) } -> std::convertible_to<std::string>;
+};
+// One whose diagnostics (`SyncCtx::diag`) mix errors and warnings says which are errors, and how
+// they read: `static std::string diagnostic_errors(std::span<const Diagnostic>)`.
+template <class Q>
+concept ErrorsInDiagnostics = requires(std::span<const Diagnostic> ds) {
+  { Q::diagnostic_errors(ds) } -> std::convertible_to<std::string>;
 };
 
 // A key type may name itself in traces with `trace_describe(std::string&, const T&)`, found by
@@ -687,9 +700,15 @@ private:
   std::uint32_t error_at_ = ~0u;        // the held error's position; cells from it on are not settled
   std::exception_ptr error_;
   // Rounds after the first look again at cells this frame computed or claimed, which are not
-  // reuses: only cells another frame owned are noted then, a bit per position in `waited_`.
+  // reuses: only cells another frame owned are noted then, a bit per position: in `waited_` for
+  // the first 64 (no allocation for the common small group), in `waited_more_` past them.
   std::uint32_t round_ = 0;
-  std::vector<std::uint64_t> waited_;
+  std::uint64_t waited_ = 0;
+  std::vector<std::uint64_t> waited_more_;
+  bool waited(std::uint32_t i) const noexcept {
+    const std::uint64_t bit = std::uint64_t{1} << (i % 64);
+    return (i < 64 ? waited_ : waited_more_[i / 64 - 1]) & bit;
+  }
 };
 
 // A fingerprint as a hash table key: already uniform, never `std::hash` (§A5.1).
@@ -714,6 +733,7 @@ struct KindTableBase {
   // For traces (#245): the key in a slot, and the value in it, if any.
   virtual std::string describe(std::uint32_t slot) = 0;
   virtual std::string show(std::uint32_t slot) = 0;
+  virtual std::string errors(std::uint32_t slot, std::span<const Diagnostic> diags) = 0;
   std::string_view name;
   Fp128 seed;
   Counters counters;
@@ -763,6 +783,14 @@ struct KindTable final : KindTableBase {
       if (const auto& v = slots[slot].value) return std::string(Q::show(*v));
     }
     return {};
+  }
+  std::string errors(std::uint32_t slot, std::span<const Diagnostic> diags) override {
+    std::string out;
+    if constexpr (ErrorsInValue<Q>) {
+      if (const auto& v = slots[slot].value) out = Q::errors(*v);
+    }
+    if constexpr (ErrorsInDiagnostics<Q>) out += Q::diagnostic_errors(diags);
+    return out;
   }
   // Set at quiescence, called by any worker (daemon design §5.1).
   [[no_unique_address]] std::conditional_t<InputKind<Q>, std::function<provided<Value>(const Key&)>, std::monostate> provider;
@@ -1726,16 +1754,16 @@ std::coroutine_handle<> Settle::step() noexcept {
     busy_at_.clear();
     // Only the cells before a held error are settled: it is reported once they are verified.
     const auto limit = static_cast<std::uint32_t>(std::min<std::size_t>(cells_.size(), error_at_));
-    std::vector<std::uint64_t> waited((cells_.size() + 63) / 64);
+    std::uint64_t waited = 0;
+    std::vector<std::uint64_t> waited_more(cells_.size() > 64 ? (cells_.size() - 1) / 64 : 0);
     for (std::uint32_t i = 0; i < limit; ++i) {
       try {
         const std::size_t claimed = children.size();
-        const std::uint64_t bit = std::uint64_t{1} << (i % 64);
-        const bool quiet = round_ > 0 && !(waited_[i / 64] & bit);
+        const bool quiet = round_ > 0 && !this->waited(i);
         if (db.try_settle(cells_[i], *frame_, children, quiet) == Db::Settled::busy) {
           busy.push_back(cells_[i]);
           busy_at_.push_back(i);
-          if (children.size() == claimed) waited[i / 64] |= bit;
+          if (children.size() == claimed) (i < 64 ? waited : waited_more[i / 64 - 1]) |= std::uint64_t{1} << (i % 64);
         }
       } catch (...) {
         // A cheap cell failed on this stack (an exception from its query, or a cycle).
@@ -1743,7 +1771,8 @@ std::coroutine_handle<> Settle::step() noexcept {
         break;
       }
     }
-    waited_ = std::move(waited);
+    waited_ = waited;
+    waited_more_ = std::move(waited_more);
     ++round_;
     // Claimed cells always get their frames started: something may already wait on them. Pushed
     // in reverse, so this worker takes the first next.
@@ -2392,14 +2421,17 @@ void Db::trace(Tracer* t, const Frame* by, CellId c, Outcome o, const Span* span
   ev.id = now.id;
   ev.parent = now.parent;
   ev.kind = table.name;
-  ev.outcome = e.input && o == Outcome::reused ? Outcome::input : o;
+  ev.outcome = o;  // an input read again is `reused`: only its first read (`input`) fetched it
   ev.start = now.start;
   ev.end = span ? std::chrono::steady_clock::now() : now.start;
   ev.worker = now.worker;
   ev.end_worker = span ? worker_now() : now.worker;
   try {
     ev.key = describe(c);
-    if (t->values() && o != Outcome::failed && e.has_value) ev.value = table.show(e.slot);
+    if (o != Outcome::failed && e.has_value) {
+      if (t->values()) ev.value = table.show(e.slot);
+      ev.errors = table.errors(e.slot, e.diags);  // the kind's say: its diagnostics may be warnings
+    }
   } catch (...) {
     ev.key = "?";  // a describer that throws loses its text, never the event
   }

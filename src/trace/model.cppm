@@ -23,7 +23,9 @@ struct Event {
   std::uint64_t end_ns = 0;
   std::int32_t worker = -1;  // the pool worker; -1 the requesting thread
   std::int32_t end_worker = -1;
-  std::string value;  // the kind's `show`, when values were asked for
+  std::string value;   // the kind's `show`, when values were asked for
+  std::string errors;  // the errors its value holds, one a line; empty: none
+  std::uint32_t repeat = 1;  // identical instants in a row under one parent, shown once (`×3`)
   bool operator==(const Event&) const = default;
 };
 
@@ -79,17 +81,20 @@ constexpr std::string_view outcome_glyph(Outcome o, bool unicode) {
   }
   return "?";
 }
-// SGR parameters: executed red, cutoff yellow, verified green, reused bright green, durable
-// blue, inputs dim, recomputed bright red, waited cyan, failed bold magenta.
+// SGR parameters: executed bold green, cutoff yellow, verified green, reused bright green,
+// durable blue, inputs dim, recomputed bright yellow, waited cyan, failed bold magenta. A cell
+// whose value holds errors is red whatever its outcome (`event_sgr`).
+inline constexpr std::string_view error_sgr = "1;31";
+inline constexpr std::string_view error_here_sgr = "1;97;41";
 constexpr std::string_view outcome_sgr(Outcome o) {
   switch (o) {
-    case Outcome::executed: return "31";
+    case Outcome::executed: return "1;32";
     case Outcome::cutoff: return "33";
     case Outcome::verified: return "32";
     case Outcome::reused: return "92";
     case Outcome::durable: return "34";
     case Outcome::input: return "90";
-    case Outcome::recomputed: return "91";
+    case Outcome::recomputed: return "93";
     case Outcome::waited: return "36";
     case Outcome::failed: return "1;35";
   }
@@ -129,6 +134,7 @@ std::string format_workers(const Event& e) {
 struct Style {
   bool color = false;
   bool times = true;
+  bool json = false;  // JSON Lines instead of text (`--trace-engine=json`)
 };
 
 std::string sgr(const Style& s, std::string_view params, std::string_view text) {
@@ -141,19 +147,97 @@ std::string cell_name(const Event& e) { return e.key.empty() ? e.kind : std::for
 
 // The stream's line: glyph, indentation by depth, the cell, its outcome, and its time and worker.
 //   ●   Tu(a.cpp) executed 1.24ms w2
-std::string stream_line(const Event& e, const Style& s) {
-  std::string out = sgr(s, outcome_sgr(e.outcome), outcome_glyph(e.outcome, s.color));
+std::string_view event_sgr(const Event& e) { return e.errors.empty() ? outcome_sgr(e.outcome) : error_sgr; }
+
+// `here`: the errors start at this cell (none of its children has any), so the whole line is
+// marked, and its messages follow on their own lines.
+std::string stream_line(const Event& e, const Style& s, bool here = false, std::string_view below = {}) {
+  std::string out = sgr(s, event_sgr(e), outcome_glyph(e.outcome, s.color));
   out += ' ';
   out.append(2 * e.depth, ' ');
-  out += sgr(s, "1", e.kind);
-  if (!e.key.empty()) out += std::format("({})", e.key);
-  out += ' ';
-  out += sgr(s, outcome_sgr(e.outcome), outcome_name(e.outcome));
+  std::string body = sgr(s, here ? "" : "1", e.kind);
+  if (!e.key.empty()) body += std::format("({})", e.key);
+  body += ' ';
+  body += here ? std::string(outcome_name(e.outcome)) : sgr(s, event_sgr(e), outcome_name(e.outcome));
   if (s.times) {
     const bool instant = e.end_ns == e.start_ns;
-    out += sgr(s, "2", instant ? std::format(" {}", format_workers(e)) : std::format(" {} {}", format_duration(e.end_ns - e.start_ns), format_workers(e)));
+    const std::string t = instant ? std::format(" {}", format_workers(e)) : std::format(" {} {}", format_duration(e.end_ns - e.start_ns), format_workers(e));
+    body += here ? t : sgr(s, "2", t);
+  }
+  if (e.repeat > 1) body += here ? std::format(" ×{}", e.repeat) : sgr(s, "2", std::format(" ×{}", e.repeat));
+  if (!e.errors.empty()) body += here ? " ← error here" : std::format(" (error below: {})", below);
+  out += here ? sgr(s, error_here_sgr, body) : body;
+  if (here) {
+    for (auto line : e.errors | std::views::split('\n')) {
+      if (line.empty()) continue;
+      out += '\n';
+      out.append(2 * e.depth + 4, ' ');
+      out += sgr(s, error_sgr, std::format("error: {}", std::string_view(line.begin(), line.end())));
+    }
   }
   return out;
+}
+
+// The first line of an error text.
+std::string_view first_line(std::string_view s) { return s.substr(0, s.find('\n')); }
+
+// Where errors start in a pre-order batch: `here` for an event with errors of its own and none
+// below it; for one with errors below, `at` is the first such origin under it, so its message
+// bubbles up to every ancestor.
+struct Origins {
+  std::vector<bool> here;
+  std::vector<std::optional<std::size_t>> at;
+};
+Origins error_origins(std::span<const Event> events) {
+  Origins o{std::vector<bool>(events.size(), false), std::vector<std::optional<std::size_t>>(events.size())};
+  for (std::size_t i = 0; i < events.size(); ++i) {
+    if (events[i].errors.empty()) continue;
+    bool below = false;
+    for (std::size_t j = i + 1; j < events.size() && events[j].depth > events[i].depth; ++j) below = below || !events[j].errors.empty();
+    o.here[i] = !below;
+  }
+  for (std::size_t i = 0; i < events.size(); ++i) {
+    if (events[i].errors.empty() || o.here[i]) continue;
+    for (std::size_t j = i + 1; j < events.size() && events[j].depth > events[i].depth; ++j) {
+      if (o.here[j]) {
+        o.at[i] = j;
+        break;
+      }
+    }
+  }
+  return o;
+}
+
+// A JSON string literal: quotes, backslashes and control characters escaped; UTF-8 as it is.
+std::string json_string(std::string_view s) {
+  std::string out = "\"";
+  for (const char c : s) {
+    switch (c) {
+      case '"': out += "\\\""; break;
+      case '\\': out += "\\\\"; break;
+      case '\n': out += "\\n"; break;
+      case '\t': out += "\\t"; break;
+      case '\r': out += "\\r"; break;
+      default:
+        if (static_cast<unsigned char>(c) < 0x20) std::format_to(std::back_inserter(out), "\\u{:04x}", static_cast<unsigned>(c));
+        else out += c;
+    }
+  }
+  return out + "\"";
+}
+
+// One event as a JSON object on one line (`--trace-engine=json`, JSON Lines): the tree is in
+// `id`/`parent`, the depth is given, and `value` is there when the kind showed one.
+std::string json_line(const Event& e, bool here = false, std::optional<std::uint64_t> at = std::nullopt, std::string_view request = {}) {
+  std::string out = std::format(R"({{"id":{},"parent":{},"depth":{},"kind":{},"key":{},"outcome":"{}","start_ns":{},"duration_ns":{},"worker":{},"end_worker":{})",
+                                e.id, e.parent, e.depth, json_string(e.kind), json_string(e.key), outcome_name(e.outcome), e.start_ns,
+                                e.end_ns - std::min(e.end_ns, e.start_ns), e.worker, e.end_worker);
+  if (!request.empty()) out += ",\"request\":" + json_string(request);
+  if (!e.value.empty()) out += ",\"value\":" + json_string(e.value);
+  if (!e.errors.empty()) out += std::format(R"(,"errors":{},"error_here":{})", json_string(e.errors), here);
+  if (at) out += std::format(R"(,"error_at":{})", *at);
+  if (e.repeat > 1) out += std::format(R"(,"repeat":{})", e.repeat);
+  return out + "}";
 }
 
 // Counts per outcome and the span of the trace.
@@ -217,6 +301,9 @@ class Tree {
       Node& n = nodes_[it->second];
       n.ev.end_ns = std::max(n.ev.start_ns, end_ns);
       n.ev.outcome = n.executions > 0 ? Outcome::executed : Outcome::reused;
+      // Red too when its build's values hold errors (they are shown below it).
+      if (std::ranges::any_of(n.children, [&](std::int32_t c) { return !nodes_[c].ev.errors.empty(); }))
+        n.ev.errors = "the build has errors";
     }
   }
 
@@ -253,6 +340,23 @@ class Tree {
   std::span<const Node> nodes() const noexcept { return nodes_; }
   const Node& node(std::int32_t i) const { return nodes_[i]; }
   std::span<const std::int32_t> roots() const noexcept { return roots_; }
+
+  // The first node under `i` where errors start (pre-order), if any: what bubbles up to `i`.
+  std::optional<std::int32_t> error_origin_below(std::int32_t i) const {
+    for (std::int32_t c : nodes_[i].children) {
+      if (nodes_[c].ev.errors.empty()) continue;
+      if (error_here(c)) return c;
+      if (auto deeper = error_origin_below(c)) return deeper;
+    }
+    return std::nullopt;
+  }
+
+  // Errors start at node `i`: its value holds some, and no child's does.
+  bool error_here(std::int32_t i) const {
+    const Node& n = nodes_[i];
+    if (n.ev.errors.empty()) return false;
+    return std::ranges::none_of(n.children, [&](std::int32_t c) { return !nodes_[c].ev.errors.empty(); });
+  }
 
   void toggle(std::int32_t i) {
     if (!nodes_[i].children.empty()) nodes_[i].expanded = !nodes_[i].expanded;
@@ -388,8 +492,12 @@ class Stream {
   Stream(std::ostream& out, Style style) : out_(&out), style_(style) {}
   void batch(std::span<const Event> events) {
     std::string text;
-    for (const Event& e : events) {
-      text += stream_line(e, style_);
+    const Origins o = error_origins(events);
+    for (std::size_t i = 0; i < events.size(); ++i) {
+      const Event& e = events[i];
+      const std::optional<std::uint64_t> at = o.at[i] ? std::optional(events[*o.at[i]].id) : std::nullopt;
+      const std::string_view below = o.at[i] ? first_line(events[*o.at[i]].errors) : first_line(e.errors);
+      text += style_.json ? json_line(e, o.here[i], at) : stream_line(e, style_, o.here[i], below);
       text += '\n';
       if (std::to_underlying(e.outcome) < outcome_count) ++summary_.counts[std::to_underlying(e.outcome)];
       ++summary_.events;
@@ -398,7 +506,10 @@ class Stream {
     *out_ << text << std::flush;
   }
   // A line of its own (a watched request's start and end).
-  void note(std::string_view text) { *out_ << sgr(style_, "1;2", text) << '\n' << std::flush; }
+  void note(std::string_view text) {
+    if (style_.json) *out_ << R"({"note":)" << json_string(text) << "}\n" << std::flush;
+    else *out_ << sgr(style_, "1;2", text) << '\n' << std::flush;
+  }
   // `trace: 3 executed, 1 cutoff, 9 reused in 1.24ms` (without the time when times are off).
   std::string summary_line(std::optional<std::uint64_t> total_ns = std::nullopt) const {
     std::string out = "trace:";
@@ -413,7 +524,16 @@ class Stream {
     if (style_.times) out += sgr(style_, "2", std::format(" in {}", format_duration(total_ns.value_or(summary_.span_ns))));
     return out;
   }
-  void summary(std::optional<std::uint64_t> total_ns = std::nullopt) { *out_ << summary_line(total_ns) << '\n' << std::flush; }
+  // `{"summary":{"executed":3,…,"events":12,"total_ns":…}}` in JSON.
+  std::string summary_json(std::optional<std::uint64_t> total_ns = std::nullopt) const {
+    std::string out = R"({"summary":{)";
+    for (std::uint8_t i = 0; i < outcome_count; ++i)
+      std::format_to(std::back_inserter(out), R"("{}":{},)", outcome_name(static_cast<Outcome>(i)), summary_.counts[i]);
+    return out + std::format(R"("events":{},"total_ns":{}}}}})", summary_.events, total_ns.value_or(summary_.span_ns));
+  }
+  void summary(std::optional<std::uint64_t> total_ns = std::nullopt) {
+    *out_ << (style_.json ? summary_json(total_ns) : summary_line(total_ns)) << '\n' << std::flush;
+  }
   void reset() { summary_ = {}; }
 
  private:
