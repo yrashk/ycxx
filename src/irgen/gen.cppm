@@ -813,6 +813,10 @@ class Gen {
     if (is<ast::OrderedBinary>(a)) return ordered(a);
     if (is<ast::Call>(a)) return call(a);
     if (is<ast::MemberCall>(a)) return member_call(a);
+    if (is<ast::BuiltinCall>(a)) {  // `__builtin_fabs` (lex::BuiltinFunction::fabs), the one there is
+      auto b = get<ast::BuiltinCall>(a);
+      return pure(ir::Op::fabs, t, {rvalue(child(a, *ast_.children(b.args).begin()))});
+    }
     if (is<ast::This>(a)) {
       if (!this_) unsupported(a, "outside a non-static member function");
       return *this_;

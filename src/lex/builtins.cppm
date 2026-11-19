@@ -78,15 +78,42 @@ constexpr const TypeTraitInfo* type_trait(std::string_view name) {
     if (t.name == name) return &t;
   return nullptr;
 }
+// The GNU built-in functions ycxx implements (docs/EXTENSIONS.md): the floating ones the SDK's
+// `<math.h>` calls. `type` is the floating type they take and give: 'f' float, 'd' double, 'l' long
+// double. `__builtin_inf*` and `__builtin_huge_val*` are +infinity, `__builtin_nan*(s)` the quiet
+// NaN whose payload `s` spells (as `strtoull` reads it), `__builtin_fabs*(x)` |x|.
+enum class BuiltinFunction : std::uint8_t { fabs, inf, huge_val, nan };
+struct BuiltinFunctionInfo {
+  std::string_view name;
+  BuiltinFunction function;
+  char type;
+};
+inline constexpr std::array builtin_functions{
+    BuiltinFunctionInfo{"__builtin_fabsf", BuiltinFunction::fabs, 'f'},
+    BuiltinFunctionInfo{"__builtin_fabs", BuiltinFunction::fabs, 'd'},
+    BuiltinFunctionInfo{"__builtin_fabsl", BuiltinFunction::fabs, 'l'},
+    BuiltinFunctionInfo{"__builtin_inff", BuiltinFunction::inf, 'f'},
+    BuiltinFunctionInfo{"__builtin_inf", BuiltinFunction::inf, 'd'},
+    BuiltinFunctionInfo{"__builtin_infl", BuiltinFunction::inf, 'l'},
+    BuiltinFunctionInfo{"__builtin_huge_valf", BuiltinFunction::huge_val, 'f'},
+    BuiltinFunctionInfo{"__builtin_huge_val", BuiltinFunction::huge_val, 'd'},
+    BuiltinFunctionInfo{"__builtin_huge_vall", BuiltinFunction::huge_val, 'l'},
+    BuiltinFunctionInfo{"__builtin_nanf", BuiltinFunction::nan, 'f'},
+    BuiltinFunctionInfo{"__builtin_nan", BuiltinFunction::nan, 'd'},
+    BuiltinFunctionInfo{"__builtin_nanl", BuiltinFunction::nan, 'l'},
+};
+constexpr const BuiltinFunctionInfo* builtin_function(std::string_view name) {
+  for (const BuiltinFunctionInfo& b : builtin_functions)
+    if (b.name == name) return &b;
+  return nullptr;
+}
+
 // The GNU built-in functions the SDK's and libycxx's headers call and ycxx does not have yet
 // (docs/EXTENSIONS.md, #248): a call of one is diagnosed as not supported, its arguments skipped.
 // Any other `__builtin_` name is an ordinary name, undeclared unless declared, so a
 // requires-expression probing it is unsatisfied ([expr.prim.req]).
-inline constexpr std::array<std::string_view, 16> lacking_builtins{
-    "__builtin_fabsf",     "__builtin_fabs",       "__builtin_fabsl",       "__builtin_inff",
-    "__builtin_inf",       "__builtin_infl",       "__builtin_huge_valf",   "__builtin_huge_val",
-    "__builtin_huge_vall", "__builtin_nanf",       "__builtin_nan",         "__builtin_nanl",
-    "__builtin_alloca",    "__builtin_constant_p", "__builtin_offsetof",    "__builtin_expect",
+inline constexpr std::array<std::string_view, 4> lacking_builtins{
+    "__builtin_alloca", "__builtin_constant_p", "__builtin_offsetof", "__builtin_expect",
 };
 constexpr bool lacking_builtin(std::string_view name) { return std::ranges::contains(lacking_builtins, name); }
 

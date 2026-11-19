@@ -762,14 +762,14 @@ Machine::Flow Machine::float_shape(QualType t, const Shape*& s) {
   return Flow::next;
 }
 
-// fadd, fsub, fmul, fdiv, fneg. In constant mode ([expr.const], [expr.pre]/4), a division by zero
+// fadd, fsub, fmul, fdiv, fneg, fabs. In constant mode ([expr.const], [expr.pre]/4), a division by zero
 // ([expr.mul]/4) and a NaN result, which is not mathematically defined, are not constant; an
 // overflow to an infinity is, as in Clang. In runtime mode the operations are IEEE's.
 Machine::Flow Machine::float_arith(Frame& f, NodeId n) {
   const ir::Node& nd = f.fn->node(n);
   const Shape* s;
   if (Flow fl = float_shape(result_type(f, n), s); fl != Flow::next) return fl;
-  Value a = operand(f, n, 0), b = nd.op == Op::fneg ? a : operand(f, n, 1);
+  Value a = operand(f, n, 0), b = nd.op == Op::fneg || nd.op == Op::fabs ? a : operand(f, n, 1);
   if (a.kind != VKind::floating || b.kind != VKind::floating) return fail(Reason::ill_formed);
   auto compute = [&](auto x, auto y) -> Flow {
     using T = decltype(x);
@@ -783,6 +783,7 @@ Machine::Flow Machine::float_arith(Frame& f, NodeId n) {
       r = x / y;
       break;
     case Op::fneg: r = -x; break;
+    case Op::fabs: r = std::fabs(x); break;
     default: return unsupported(n);
     }
     if (config_.mode == Mode::constant && std::isnan(r)) return fail(Reason::float_nan);

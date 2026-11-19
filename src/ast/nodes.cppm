@@ -115,6 +115,14 @@ struct Call {
   [[=indeterminately_sequenced(1)]] ChildList args;
 };
 
+// A call of a built-in function whose value is computed, not a constant (`lex::BuiltinFunction`:
+// `__builtin_fabs(x)`), its arguments converted to its parameters' types (docs/EXTENSIONS.md).
+struct BuiltinCall {
+  ExprInfo info;
+  u8 function;  // a lex::BuiltinFunction
+  [[=indeterminately_sequenced]] ChildList args;
+};
+
 // The standard conversions ([conv]) and the others an implicit conversion sequence is made of.
 // `integral` covers integral promotions ([conv.prom]) and conversions ([conv.integral]), told
 // apart by the types, and `floating` floating-point promotions ([conv.fpprom]) and conversions
@@ -352,7 +360,7 @@ using Nodes = closed_list<Literal, DeclRef, Paren, Unary, Binary, OrderedBinary,
                           Conditional, While, Do, For, Break, Continue, DeclStmt, Declarator, DeclGroup,
                           IfConsteval, StaticAssert, Member, InitList, ValueInit, DefaultInit, This,
                           MemberCall, Materialize, CtorCall, MemberInit, Destructor, DestroyMember, Dependent,
-                          DepName>;
+                          DepName, BuiltinCall>;
 
 static_assert(Nodes::size < max_node_kinds);
 

@@ -100,6 +100,7 @@ struct Ops {
   static Flow fmul(M& m, Frame& f, N n) { return m.float_arith(f, n); }
   static Flow fdiv(M& m, Frame& f, N n) { return m.float_arith(f, n); }
   static Flow fneg(M& m, Frame& f, N n) { return m.float_arith(f, n); }
+  static Flow fabs(M& m, Frame& f, N n) { return m.float_arith(f, n); }
   static Flow fcmp(M& m, Frame& f, N n) { return m.float_compare(f, n); }
 
   // ---------------------------------------------------------------- conversions

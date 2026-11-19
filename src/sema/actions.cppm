@@ -2413,18 +2413,75 @@ public:
   // docs/EXTENSIONS.md) that no declaration in scope gives. Its call is diagnosed without parsing
   // its arguments, which may be types (`__builtin_offsetof(T, m)`). Any other `__builtin_` name
   // is an ordinary one.
-  bool unsupported_builtin(NameId name) {
-    if (!lex::lacking_builtin(ins().names.spelling(name))) return false;
+  bool unsupported_builtin(NameId name) { return lex::lacking_builtin(ins().names.spelling(name)) && !declared(name); }
+  // Whether a declaration in scope gives `name`, hiding the built-in function of that name.
+  bool declared(NameId name) {
     for (const auto& scope : scopes_)
-      if (std::ranges::any_of(scope, [&](const auto& p) { return p.first == name; })) return false;
-    if (std::ranges::any_of(own, [&](const auto& p) { return p.name == name; })) return false;
-    if (std::ranges::any_of(block_usings_, [&](const BlockUsing& u) { return u.name == name; })) return false;
-    if (names_member(name)) return false;
+      if (std::ranges::any_of(scope, [&](const auto& p) { return p.first == name; })) return true;
+    if (std::ranges::any_of(own, [&](const auto& p) { return p.name == name; })) return true;
+    if (std::ranges::any_of(block_usings_, [&](const BlockUsing& u) { return u.name == name; })) return true;
+    if (names_member(name)) return true;
     for (DeclId d : q_->visible_decls(name, directives())) {
       (void)d;
-      return false;
+      return true;
     }
-    return true;
+    return false;
+  }
+
+  // A built-in function ycxx implements (`lex::builtin_functions`) that no declaration hides.
+  const lex::BuiltinFunctionInfo* builtin_function(NameId name) {
+    const lex::BuiltinFunctionInfo* b = lex::builtin_function(ins().names.spelling(name));
+    return b && !declared(name) ? b : nullptr;
+  }
+  // A call of one (docs/EXTENSIONS.md): `__builtin_inf*` and `__builtin_huge_val*` are +infinity
+  // and `__builtin_nan*` a quiet NaN, constants of their type; `__builtin_fabs*` a `BuiltinCall`.
+  Ex builtin_call(const lex::BuiltinFunctionInfo& b, std::vector<Ex> args, u32 begin, u32 end) {
+    using enum lex::BuiltinFunction;
+    QualType t = builtin(b.type == 'f' ? Builtin::float_ : b.type == 'l' ? Builtin::long_double : Builtin::double_);
+    std::size_t want = b.function == fabs || b.function == nan ? 1 : 0;
+    if (args.size() != want) {
+      diag(begin, args.size() < want ? Diag::too_few_arguments : Diag::too_many_arguments, u64(want), u64(args.size()));
+      return {NodeId::none, begin, end};
+    }
+    if (std::ranges::any_of(args, [](const Ex& a) { return !a.ok(); })) return {NodeId::none, begin, end};
+    switch (b.function) {
+      case inf:
+      case huge_val:
+        return literal(t, w_->values.floating(t, std::numeric_limits<double>::infinity()), ValueCategory::prvalue, begin, end);
+      case nan: {
+        // The payload is a string literal's contents read as `strtoull` reads them: decimal, octal
+        // after `0`, hexadecimal after `0x`; empty is 0. It fills the significand below the quiet bit.
+        Ex a = args[0];
+        while (auto p = as<ast::Paren>(a)) a = {p->operand.id, a.begin + p->operand.at, a.end};
+        auto lit = as<ast::Literal>(a);
+        std::optional<u64> payload;
+        if (lit && w_->values.rec(lit->value).kind == ValueKind::string) {
+          std::string_view s = w_->values.rec(lit->value).units;
+          if (s.ends_with('\0')) s.remove_suffix(1);
+          int base = s.starts_with("0x") || s.starts_with("0X") ? 16 : s.starts_with('0') ? 8 : 10;
+          if (base == 16) s.remove_prefix(2);
+          u64 v = 0;
+          auto r = std::from_chars(s.data(), s.data() + s.size(), v, base);
+          if (s.empty() || (r.ec == std::errc{} && r.ptr == s.data() + s.size())) payload = v;
+        }
+        if (!payload) {
+          diag(args[0].begin, Diag::builtin_nan_string);
+          return {NodeId::none, begin, end};
+        }
+        bool single = ast::float_format(ins(), target, t) == ast::FloatFormat::binary32;
+        u64 bits = single ? 0x7fc00000u | (*payload & 0x3fffffu) : 0x7ff8000000000000u | (*payload & 0x7ffffffffffffu);
+        return literal(t, ast::float_value(ins(), target, t, ast::Bits128{bits, 0}), ValueCategory::prvalue, begin, end);
+      }
+      case fabs: {
+        if (dependent(args[0])) return dependent_node({args[0]}, begin, end, t);
+        Ex x = convert(args[0], t, args[0].begin);
+        if (!x.ok()) return {NodeId::none, begin, end};
+        ExprInfo info{t, ValueCategory::prvalue, 0};
+        std::vector<ast::Child> children{at(x, begin)};
+        return node(ast::BuiltinCall{info, u8(fabs), b_->list(children)}, begin, end, info);
+      }
+    }
+    std::unreachable();
   }
 
   // The expression naming what lookup found for `name` ([expr.prim.id]): one entity, or an
@@ -2821,9 +2878,20 @@ public:
     QualType from = Types::unqualified(v.type());
     // /10: an integral or enumeration value to an enumeration; /9: a scoped enumeration's to an
     // integral type.
-    // /10 also: a floating value, through the underlying type.
-    if (types().is_enum(target) && types().is_floating(from))
-      return convert_node(arithmetic_conversion(v, underlying_of(target)), ast::ConversionKind::integral, target);
+    // /10 also: a floating value, through the underlying type. A constant is folded, as an integer
+    // literal is below, when its truncated value fits.
+    if (types().is_enum(target) && types().is_floating(from)) {
+      QualType u = underlying_of(target);
+      auto c = constant_of ? constant_of(v) : std::nullopt;
+      if (c && w_->values.rec(*c).kind == ValueKind::floating && types().builtin_of(u)) {
+        double x = std::trunc(w_->values.rec(*c).real);
+        IntShape sh = shape(*types().builtin_of(u));
+        double top = std::ldexp(1.0, int(sh.is_signed ? sh.bits - 1 : sh.bits));
+        if (sh.is_signed ? x >= -top && x < top : x > -1 && x < top)
+          return literal(target, w_->values.integer(u, sh.is_signed ? u64(i64(x)) : u64(x)), ValueCategory::prvalue, v.begin, v.end);
+      }
+      return convert_node(arithmetic_conversion(v, u), ast::ConversionKind::integral, target);
+    }
     if (types().is_enum(target) && (types().is_integral(from) || types().is_enum(from))) {
       if (types().canonical(from) == types().canonical(target)) return v;
       // A constant (an enumerator, a literal) is folded to the enumeration's constant: the
@@ -3182,6 +3250,8 @@ public:
         if (types().is_enum(a.type()) && types().is_enum(c.type()) &&
             types().canonical(Types::unqualified(a.type())) != types().canonical(Types::unqualified(c.type())))
           return invalid();  // P2864: arithmetic between different enumerations is ill-formed
+        if (types().is_floating(a.type()) || types().is_floating(c.type()))
+          return invalid();  // [expr.arith.conv]/1: and between an enumeration and a floating type
         if (types().is_enum(a.type())) a = promote(a);
         if (types().is_enum(c.type())) c = promote(c);
       }

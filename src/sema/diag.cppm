@@ -194,6 +194,7 @@ enum class Diag : std::uint32_t {
   // A GNU built-in function the SDK's or libycxx's headers use and ycxx does not have yet
   // (docs/EXTENSIONS.md), named where lookup finds nothing else.
   builtin_unsupported [[=message{Severity::error, "built-in function '{0:n}' is not supported yet"}]],
+  builtin_nan_string [[=message{Severity::error, "the argument of __builtin_nan must be a string literal spelling an integer"}]],
 };
 
 // A `{N:r}` argument: why an evaluation was not constant. 0 is an expression the front end

@@ -2252,6 +2252,19 @@ public:
         expect(Tk::r_paren);
         return {NodeId::none, begin, pos()};
       }
+      // A built-in function ycxx implements, `__builtin_fabs(x)` (docs/EXTENSIONS.md).
+      if (kind(1) == Tk::l_paren)
+        if (const lex::BuiltinFunctionInfo* bf = s_->builtin_function(n)) {
+          bump();
+          bump();
+          std::vector<Ex> args;
+          if (!is(Tk::r_paren))
+            do args.push_back(assignment_expression());
+            while (accept(Tk::comma));
+          if (!expect(Tk::r_paren)) return {NodeId::none, begin, pos()};
+          Ex r = s_->builtin_call(*bf, std::move(args), begin, pos());
+          return {r.id, begin, pos(), r.info};
+        }
       // A type-testing built-in, `__is_same(T, U)` (docs/EXTENSIONS.md).
       if (kind(1) == Tk::l_paren)
         if (const lex::TypeTraitInfo* tr = s_->type_trait(n); tr && !tr->transforms) {
