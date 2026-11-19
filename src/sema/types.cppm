@@ -53,7 +53,7 @@ constexpr std::string_view spelling(Builtin b) {
 
 enum class TypeKind : u8 {
   builtin, pointer, array, function, class_, reference, enum_, template_param, dep_name, pack_expansion, transform,
-  dep_spec, builtin_spec, other
+  placeholder, dep_spec, builtin_spec, other
 };
 
 // The canonical form of a type, read out by value.
@@ -75,6 +75,7 @@ struct TypeRec {
   bool pack = false;
   u8 trait = 0;  // a transform's `lex::TypeTrait`; a built-in specialization's `ast::BuiltinTemplate`
   ast::SeqId<ast::TemplateArg> args{};  // a dependent or built-in specialization's arguments
+  bool decltype_auto = false;  // a placeholder's: `decltype(auto)`, not `auto`
 };
 
 class Types {
@@ -106,6 +107,21 @@ public:
   QualType pack_expansion(QualType pattern) { return ins_->intern_type(ast::TPackExpansion{pattern}); }
   // `__trait(arg)` of a dependent `arg` (docs/EXTENSIONS.md).
   QualType transform(u8 trait, QualType arg) { return ins_->intern_type(ast::TTransform{trait, arg}); }
+  // `auto` or `decltype(auto)` ([dcl.spec.auto]).
+  QualType placeholder(bool decltype_auto) { return ins_->intern_type(ast::TAuto{u8(decltype_auto)}); }
+  // Whether a declared type holds a placeholder still to be deduced ([dcl.type.auto.deduct]): as
+  // the type, or as what it points or refers to, an array's element or a function's return type.
+  bool has_placeholder(QualType q) const {
+    TypeRec r = rec(q);
+    switch (r.kind) {
+    case TypeKind::placeholder: return true;
+    case TypeKind::pointer:
+    case TypeKind::reference:
+    case TypeKind::array:
+    case TypeKind::function: return has_placeholder(r.inner);
+    default: return false;
+    }
+  }
   // `TT<args>` of a template template parameter, and `__make_integer_seq<args>` while dependent.
   QualType dep_spec(u16 depth, u16 index, bool pack, std::span<const ast::TemplateArg> args) {
     return ins_->intern_type(ast::TDepSpec{depth, index, u8(pack), ins_->intern_seq(args)});
@@ -165,6 +181,9 @@ public:
       r.kind = TypeKind::transform;
       r.inner = t.get<ast::TTransform>(c).arg;
       r.trait = t.get<ast::TTransform>(c).trait;
+    } else if (t.is<ast::TAuto>(c)) {
+      r.kind = TypeKind::placeholder;
+      r.decltype_auto = t.get<ast::TAuto>(c).decltype_auto != 0;
     } else if (t.is<ast::TDepSpec>(c)) {
       auto d = t.get<ast::TDepSpec>(c);
       r.kind = TypeKind::dep_spec;
@@ -321,6 +340,8 @@ private:
     case TypeKind::transform:
       return cvs + std::string(lex::type_trait_info(lex::TypeTrait(r.trait)).name) + "(" + spell(r.inner) + ")" +
              (inner.empty() ? "" : " " + inner);
+    case TypeKind::placeholder:
+      return cvs + (r.decltype_auto ? "decltype(auto)" : "auto") + (inner.empty() || inner[0] == '[' ? "" : " ") + inner;
     case TypeKind::dep_spec:
     case TypeKind::builtin_spec: {
       std::string name = r.kind == TypeKind::builtin_spec ? std::string("__make_integer_seq")

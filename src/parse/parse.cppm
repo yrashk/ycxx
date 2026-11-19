@@ -474,8 +474,24 @@ public:
       return d ? std::optional(d->type) : std::nullopt;
     }
     std::optional<Chosen> c = choose_partial(v, point);
-    if (!c || c->ambiguous) return std::nullopt;
-    return templates().substitute(w_->ins.seqs.at(item_sema(c->item).value.decls, 0).type, c->args);
+    if (c && c->ambiguous) return std::nullopt;
+    // A placeholder type is what the specialization's instantiation deduced ([dcl.spec.auto]).
+    auto deduced = [&]() -> std::optional<QualType> {
+      if (const VarInstance* in = variable_instance(v, point))
+        for (const ast::DeclSema& d : w_->ins.seqs.elements(in->cell.value.decls))
+          if (d.entity == v) return d.type;
+      return std::nullopt;
+    };
+    if (!c) {
+      auto t = var_templates_.find(std::to_underlying(w_->entities.rec(v).templ));
+      if (t != var_templates_.end() && t->second < point && w_->ins.seqs.size(item_sema(t->second).value.decls) > 0 &&
+          w_->types.has_placeholder(w_->ins.seqs.at(item_sema(t->second).value.decls, 0).type))
+        return deduced();
+      return std::nullopt;
+    }
+    auto t = templates().substitute(w_->ins.seqs.at(item_sema(c->item).value.decls, 0).type, c->args);
+    if (t && w_->types.has_placeholder(*t)) return deduced();
+    return t;
   }
   // At the end of the unit, it is said where the demand being instantiated came from.
   void ambiguous_partial(EntityId spec, u32 point) {
@@ -519,6 +535,8 @@ public:
   // `function_ir(F)` for a function defined in an item before `item` ([expr.const]: a function
   // defined later is not defined at the point of evaluation).
   interp::Callee function_ir(EntityId f, u32 item);
+  // The function type a definition before `item` deduced for `f` ([dcl.spec.auto.general]/11).
+  std::optional<QualType> deduced_type(EntityId f, u32 item);
   // A namespace-scope variable as the interpreter sees it at `item`: its type and, if it is usable
   // in constant expressions, its value.
   std::optional<interp::GlobalVar> global(EntityId v, u32 item) {
@@ -1002,6 +1020,7 @@ public:
     return invalid_decl();
   }
   interp::Callee function_ir(EntityId f) override { return p_->function_ir(f, point()); }
+  std::optional<QualType> deduced_type(EntityId f) override { return p_->deduced_type(f, point()); }
   std::optional<interp::GlobalVar> global(EntityId v) override { return p_->global(v, point()); }
   bool is_constexpr(EntityId f) override { return p_->is_constexpr(f, point()); }
   bool is_complete(EntityId c) override {
@@ -1082,6 +1101,7 @@ public:
   std::vector<ast::DeclSema> namespace_members(EntityId ns, ast::NameId name) override { return at_.namespace_members(ns, name); }
   ast::DeclSema decl_sema(DeclId d) override { return at_.decl_sema(d); }
   interp::Callee function_ir(EntityId f) override { return p_->function_ir(f, p_->end()); }
+  std::optional<QualType> deduced_type(EntityId f) override { return p_->deduced_type(f, p_->end()); }
   std::optional<interp::GlobalVar> global(EntityId v) override { return p_->global(v, p_->end()); }
   bool is_constexpr(EntityId f) override { return p_->is_constexpr(f, p_->end()); }
   bool is_complete(EntityId c) override { return p_->is_complete(c, p_->end(), true, true); }
@@ -1478,9 +1498,19 @@ private:
       return;
     }
     bool is_function_def = it_->kind == ItemKind::function;
+    u32 declarators = 0;
     do {
       s_.defer_type_access = true;
       parse::Declarator d = ps_.declarator(spec.type, false);
+      // [dcl.spec.auto.general]: a function with a placeholder type is the only declarator.
+      if (d.ok && s_.types().has_placeholder(spec.type) && s_.types().is_function(d.type) && (declarators > 0 || ps_.is(Tk::comma))) {
+        s_.diag(d.name_at, Diag::auto_not_allowed);
+        s_.settle_type_access(EntityId::none);
+        bad();
+        ps_.skip_to_semi();
+        return;
+      }
+      ++declarators;
       bool declared = d.ok && spec.ok && d.named && declare(spec, d, lang, explicit_lang, is_function_def);
       s_.settle_type_access(EntityId::none);  // what `declare` did not settle
       if (!declared) {
@@ -1644,6 +1674,10 @@ private:
   // only redeclare a typedef-name, class or enumeration as the type it already is (/5, /6).
   bool declare_alias(NameId name, u32 at, QualType type) {
     sema::Types& types = s_.types();
+    if (types.has_placeholder(type)) {  // [dcl.spec.auto.general]/6: no placeholder in a typedef
+      s_.diag(at, Diag::auto_not_allowed);
+      return false;
+    }
     auto clashes = [&](const ast::DeclSema& o) {
       bool same_type = (o.kind == ast::DeclKind::type_alias || o.kind == ast::DeclKind::class_ || o.kind == ast::DeclKind::enum_) &&
                        types.canonical(o.type) == types.canonical(type);
@@ -2451,6 +2485,11 @@ private:
         s_.diag(ps_.is(Tk::colon) ? ps_.pos() : spec.begin, Diag::not_supported, ps_.is(Tk::colon) ? Tk::colon : Tk::kw_constexpr);
         return bad();
       }
+      // [dcl.spec.auto.general]: a non-static data member's type has no placeholder.
+      if (types.has_placeholder(d.type)) {
+        s_.diag(d.name_at, Diag::auto_not_allowed);
+        return bad();
+      }
       // [class.mem.general]: a non-static data member has a complete object type; the class is
       // incomplete inside its own member-specification.
       if (types.is_void(d.type)) {
@@ -2581,6 +2620,10 @@ private:
   // A typedef-name or alias-declaration that is a member of class `c` ([class.mem],
   // [dcl.typedef]): a type of the class's scope, `C::name` outside it.
   bool member_alias(const ast::DeclSema& c, NameId name, u32 at, QualType type) {
+    if (s_.types().has_placeholder(type)) {  // [dcl.spec.auto.general]/6
+      s_.diag(at, Diag::auto_not_allowed);
+      return false;
+    }
     // [temp.local]/6: not a template parameter's name; [class.mem.general]: not the class's.
     if (s_.template_param(name)) {
       s_.diag(at, Diag::redeclared_local, name);
@@ -2905,6 +2948,16 @@ private:
       sem.kind = ast::DeclKind::variable;
       sem.storage = ast::Storage::static_;
       if (spec.is_constexpr) d.type = types.add_cv(d.type, sema::Cv::const_);
+      // A placeholder type is deduced from the initializer in the class ([dcl.type.auto.deduct]),
+      // read here, before the member is declared.
+      std::optional<Ex> early;
+      if (types.has_placeholder(d.type)) {
+        std::unique_ptr<sema::Braced> list;
+        if (ps_.is(Tk::l_brace) || !deduce_variable(d, list, early) || list) {
+          if (ps_.is(Tk::l_brace)) s_.diag(ps_.pos(), Diag::not_supported, Tk::l_brace);
+          return false;
+        }
+      }
       sem.type = d.type;
       if (spec.is_inline || spec.is_constexpr) flags |= sema::decl_flag::definition;
       sem.entity = s_.world().entities.entity(
@@ -2921,7 +2974,7 @@ private:
       // [temp.inst]/3: a class template specialization declares its static data members; the
       // initializer of one defined in the class (inline or constexpr) is instantiated when the
       // member is used (`Program::member_value`), from the extent the template's analysis recorded.
-      if (inst_ && (spec.is_inline || spec.is_constexpr) && ps_.is(Tk::equal) && member_value_ != ordinal) {
+      if (inst_ && !early && (spec.is_inline || spec.is_constexpr) && ps_.is(Tk::equal) && member_value_ != ordinal) {
         if (auto end = p_->static_init_end(k_, ordinal)) {
           ps_.seek(*end);
           p_->lazy_member(sem.entity, k_, ordinal, *inst_);
@@ -2929,8 +2982,8 @@ private:
           return true;
         }
       }
-      if (ps_.accept(Tk::equal)) {
-        Ex e = ps_.assignment_expression();
+      if (early || ps_.accept(Tk::equal)) {
+        Ex e = early ? *early : ps_.assignment_expression();
         if (!inst_) p_->set_static_init_end(k_, ordinal, ps_.index());
         init = s_.convert(e, d.type, e.begin);
         if (!init.ok()) {
@@ -3111,6 +3164,9 @@ private:
     }
     bool fn = types.is_function(d.type);
     if (!fn && spec.is_constexpr) d.type = types.add_cv(d.type, sema::Cv::const_);  // [dcl.constexpr]
+    // A placeholder type, deduced from the initializer ([dcl.type.auto.deduct]): `= e` or `{e}`.
+    std::optional<Ex> early_expr;
+    if (!fn && types.has_placeholder(d.type) && !deduce_variable(d, early, early_expr, template_ && !var_)) return false;
     ast::DeclSema sem{};
     sem.kind = fn ? ast::DeclKind::function : ast::DeclKind::variable;
     sem.type = d.type;
@@ -3147,7 +3203,7 @@ private:
     bool deleted = fn && deleted_body();
     if (deleted) is_function_def = true;
     if (deleted) flags |= sema::decl_flag::deleted;
-    bool has_init = !deleted && (early || ps_.is(Tk::equal) || ps_.is(Tk::l_brace) || (!fn && ps_.is(Tk::l_paren)));
+    bool has_init = !deleted && (early || early_expr || ps_.is(Tk::equal) || ps_.is(Tk::l_brace) || (!fn && ps_.is(Tk::l_paren)));
     bool definition = fn ? is_function_def || deleted : !((spec.is_extern || single_linkage_spec_) && !has_init);
     if (definition) flags |= sema::decl_flag::definition;
     if (!fn && types.is_void(d.type)) {
@@ -3411,9 +3467,9 @@ private:
                   sema::reason_unsupported);
         }
       }
-    } else if (!fn && ps_.accept(Tk::equal)) {
+    } else if (!fn && (early_expr || ps_.accept(Tk::equal))) {
       {
-        Ex e = ps_.assignment_expression();
+        Ex e = early_expr ? *early_expr : ps_.assignment_expression();
         init = s_.convert(e, d.type, e.begin);
         if (init.ok() && !pattern) {
           // [basic.start.static]: constant initialization, or dynamic, which the α subset lacks.
@@ -3472,6 +3528,50 @@ private:
     return true;
   }
 
+  // Variable `d` declared with a placeholder type: its initializer parsed (`= e` into `expr`,
+  // `{e}` into `list`) and its type deduced from it ([dcl.type.auto.deduct]); several declarators
+  // deduce one type for the placeholder (/2). False after a diagnosed error.
+  // A variable template's definition (`pattern`) keeps the placeholder while its initializer is
+  // dependent: each specialization deduces its own type (`Program::specialization_type`).
+  bool deduce_variable(parse::Declarator& d, std::unique_ptr<sema::Braced>& list, std::optional<Ex>& expr, bool pattern = false) {
+    Ex e;
+    if (ps_.is(Tk::equal) && ps_.kind(1) != Tk::l_brace) {
+      ps_.bump();
+      e = ps_.assignment_expression();
+      expr = e;
+    } else if (ps_.is(Tk::l_brace)) {
+      list = ps_.braced_init_list();
+      if (list->clauses.size() != 1 || list->clauses[0].list || list->clauses[0].designated) {
+        s_.diag(list->begin, Diag::auto_list, sema::u64(list->clauses.size()));
+        return false;
+      }
+      e = list->clauses[0].expr;
+    } else if (ps_.is(Tk::equal) || ps_.is(Tk::l_paren)) {
+      // `= {…}` deduces std::initializer_list; `(e)` is not supported at namespace scope yet.
+      s_.diag(ps_.pos() + (ps_.is(Tk::equal) ? 1 : 0), Diag::not_supported, ps_.is(Tk::equal) ? Tk::l_brace : Tk::l_paren);
+      return false;
+    } else {
+      s_.diag(d.name_at, Diag::auto_uninitialized, d.name);
+      return false;
+    }
+    if (!e.ok()) return false;
+    QualType r{};
+    auto t = s_.deduce_placeholder(d.type, e, e.begin, &r);
+    if (!t) return false;
+    sema::Types& types = s_.types();
+    if (auto_replaced_ && !types.is_dependent(r) && !types.is_dependent(*auto_replaced_) &&
+        types.canonical(*auto_replaced_) != types.canonical(r)) {
+      s_.diag(d.name_at, Diag::auto_inconsistent, d.type, r, *auto_replaced_);
+      return false;
+    }
+    auto_replaced_ = r;
+    if (types.is_void(*t)) {
+      s_.diag(d.name_at, Diag::void_variable, d.name);
+      return false;
+    }
+    if (!(pattern && types.is_dependent(*t))) d.type = *t;
+    return true;
+  }
   // The declarator of an explicit specialization ([temp.expl.spec]): `sem` becomes the declaration
   // of the specialization of the function or variable template it names. A function template's
   // arguments are deduced from the declared type ([temp.deduct.decl]), after any given; of several
@@ -3611,6 +3711,7 @@ private:
   // the ordinal of the declarator whose initializer is instantiated.
   std::optional<u32> member_value_;
   bool single_linkage_spec_ = false;  // `extern "C" declaration` without braces
+  std::optional<QualType> auto_replaced_;  // what the declarators' placeholder deduced
   bool template_ = false;             // the declaration is a template-declaration ([temp.pre])
   bool explicit_ = false;             // an explicit specialization ([temp.expl.spec])
   ConstId head_requires_ = ConstId::none;      // the template-head's requires-clause, in normal form
@@ -3898,7 +3999,7 @@ public:
       // Diagnosed: the body fails, its scopes unwound with the parse; it holds nothing.
       std::vector<sema::Expansion> none;
       out_.value = b_.commit(ast::BodySema{NodeId::none, b_.seq(std::span<const ast::LocalRec>{}), expansion_list(b_, none),
-                                           b_.seq(std::span<const u32>{})});
+                                           b_.seq(std::span<const u32>{}), QualType{}, 0});
       out_.demands.clear();
       return std::move(out_);
     }
@@ -3952,6 +4053,9 @@ public:
       } else {
         root = ps_.compound_statement();
         if (!ps_.at_end()) s_.diag(ps_.pos(), sema::Diag::unexpected_token, ps_.kind());
+        // No return statement deduces the placeholder as `return;` would ([dcl.type.auto.deduct]/2).
+        if (root.ok() && s_.deduces_return() && !s_.return_deduced() && !s_.return_seen() && !templated_pattern())
+          if (!s_.deduce_return(nullptr, ps_.pos() > 0 ? ps_.pos() - 1 : 0)) root = {};
       }
       s_.pop_scope();
       if (root.ok() && ctor) root = constructor_body(std::move(inits), root);
@@ -3964,11 +4068,21 @@ public:
     std::vector<sema::Expansion> none;
     std::vector<u32> no_calls;
     const bool keeps = templated && !inst_;
+    const bool deduced = f && s_.return_deduced() && !keeps;
     ast::BodySema v{root.id, b_.seq(std::span<const ast::LocalRec>(locals)), expansion_list(b_, keeps ? s_.expansions : none),
-                    b_.seq(std::span<const u32>(keeps ? s_.dependent_calls : no_calls))};
+                    b_.seq(std::span<const u32>(keeps ? s_.dependent_calls : no_calls)),
+                    deduced ? s_.with_return(f->type, s_.return_type()) : s_.builtin(sema::Builtin::void_), u8(deduced)};
     out_.value = b_.commit(v);
     if (!keeps) out_.demands = std::move(s_.demands);
     return std::move(out_);
+  }
+
+  // Whether the body is a template's definition, not an instantiation of it.
+  bool templated_pattern() {
+    if (inst_) return false;
+    const ast::ItemSema& is = p_->item_sema(k_).value;
+    bool own = p_->world().ins.seqs.size(is.decls) > 0 && p_->world().ins.seqs.size(p_->world().ins.seqs.at(is.decls, 0).template_params) > 0;
+    return own || !p_->enclosing_heads(k_).empty();
   }
 
   // A destructor's body ([class.dtor]/13): `body`, then its members destroyed, the last first.
@@ -4221,7 +4335,8 @@ const ast::BodySema& Program::synthesized_body(std::size_t i) {
   }
   std::vector<ast::LocalRec> locals(sm.locals().begin(), sm.locals().end());
   return synth_bodies_[i] = b.commit(ast::BodySema{root.id, b.seq(std::span<const ast::LocalRec>(locals)),
-                                                   b.seq(std::span<const ast::ExpansionRec>{}), b.seq(std::span<const u32>{})});
+                                                   b.seq(std::span<const ast::ExpansionRec>{}), b.seq(std::span<const u32>{}),
+                                                   QualType{}, 0});
 }
 
 const Result<ast::BodySema>& Program::analyze_body(u32 item) {
@@ -4400,6 +4515,7 @@ const Program::Instance* Program::instance(EntityId spec, u32 point) {
       instantiating_.insert(key);
       in.body = BodyAnalysis(*this, k, Instantiation{*decl, std::move(args)}).run();
       instantiating_.erase(key);
+      if (in.body.value.deduced) in.decl.type = in.body.value.deduced_type;
     }
     instance_index_.emplace(key, instances_.size());
     instances_.push_back(std::move(in));
@@ -4451,6 +4567,7 @@ const Program::Instance* Program::instance(EntityId spec, u32 point) {
     instantiating_.insert(key);
     in.body = BodyAnalysis(*this, k, Instantiation{decl, std::move(args)}).run();
     instantiating_.erase(key);
+    if (in.body.value.deduced) in.decl.type = in.body.value.deduced_type;
   }
   instance_index_.emplace(key, instances_.size());
   instances_.push_back(std::move(in));
@@ -4599,6 +4716,7 @@ interp::Callee Program::function_ir(EntityId f, u32 item) {
     const ast::ItemSema& is = item_sema(k).value;
     if (body.diags.empty() && body.value.tree != NodeId::none && w_->ins.seqs.size(is.decls) > 0) {
       ast::DeclSema d = w_->ins.seqs.at(is.decls, 0);
+      if (body.value.deduced) d.type = body.value.deduced_type;
       const items::Item& it = items_->items[k];
       irgen::FunctionInput input{d.entity, d, body.value, id(k), it.body_begin - it.begin};
       input.this_type = this_type(d);
@@ -4612,6 +4730,29 @@ interp::Callee Program::function_ir(EntityId f, u32 item) {
   if (!ir) c.unsupported = true;
   else c.body = &ir->body;
   return c;
+}
+
+std::optional<QualType> Program::deduced_type(EntityId f, u32 item) {
+  // A function template specialization's is its instantiation's, instantiated where it is needed
+  // ([temp.inst]/8); its template must be defined before the point.
+  if (EntityId templ = w_->entities.rec(f).templ; templ != EntityId::none && !explicitly_specialized(f, item)) {
+    auto def = definitions_.find(std::to_underlying(templ));
+    if (def == definitions_.end() || def->second >= item) return std::nullopt;
+    const Instance* in = instance(f, item);
+    if (!in || in->failed || !in->body.value.deduced) return std::nullopt;
+    return in->body.value.deduced_type;
+  }
+  // A member function of a class template specialization, instantiated likewise.
+  if (member_patterns_.contains(std::to_underlying(f))) {
+    const Instance* in = instance(f, item);
+    if (!in || in->failed || !in->body.value.deduced) return std::nullopt;
+    return in->body.value.deduced_type;
+  }
+  auto def = definitions_.find(std::to_underlying(f));
+  if (def == definitions_.end() || def->second >= item) return std::nullopt;
+  const Result<ast::BodySema>& body = analyze_body(def->second);
+  if (!body.value.deduced) return std::nullopt;
+  return body.value.deduced_type;
 }
 
 // ---------------------------------------------------------------- one file, for the driver

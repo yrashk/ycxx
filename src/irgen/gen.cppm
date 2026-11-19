@@ -1042,9 +1042,16 @@ class Gen {
   // orders the clause allows.
   std::optional<ValueId> call(At a, std::optional<ValueId> into = std::nullopt) {
     auto c = get<ast::Call>(a);
-    if (c.function == ast::EntityId::none) unsupported(a, "through a pointer");
     if (class_prvalue(c.info) && !into) unsupported(a, "of class type outside an initialization");
     std::vector<ValueId> args;
+    // A call through a pointer to function ([expr.call]/1): the callee, a prvalue pointer, is
+    // evaluated first, then the arguments ([expr.call]/7).
+    std::optional<ast::QualType> through;
+    if (c.function == ast::EntityId::none) {
+      At callee = child(a, c.callee);
+      through = facts_.pointee(info(callee).type);
+      args.push_back(rvalue(callee));
+    }
     if (into) args.push_back(*into);
     uint32_t byval = 0;
     for (ast::Child arg : ast_.children(c.args)) {
@@ -1053,7 +1060,24 @@ class Gen {
       if (argument_object(x)) byval |= 1u << args.size();
       args.push_back(argument(x));
     }
+    if (through) return call_pointer(*through, result_type(c.info), args, byval, into ? 1 : 0);
     return call_fn(c.function, result_type(c.info), args, 0, false, byval, into ? 1 : 0);
+  }
+  // A call through a function pointer, `args[0]`, of function type `fn`: `call_fn`'s `call_ind`.
+  // The masks count the pointer as no argument.
+  std::optional<ValueId> call_pointer(ast::QualType fn, ast::QualType result, std::span<const ValueId> args, uint32_t byval,
+                                      uint32_t result_arg) {
+    std::vector<ir::Ty> results;
+    if (args.size() > 33) throw Unsupported{"a call with more than 32 arguments"};
+    bool has_value = !result_arg && cls(result) != TypeClass::void_;
+    if (has_value) results.push_back(vty(result));
+    auto f = in_.types.get<ast::TFunction>(in_.types.canon(fn));
+    std::size_t named = in_.seqs.size(f.params), passed = args.size() - 1 - (result_arg ? 1 : 0);
+    std::size_t through_ellipsis = f.variadic && passed > named ? passed - named : 0;
+    std::uint64_t imms[] = {through_ellipsis, byval >> 1, result_arg};
+    ir::NodeId n = stateful(ir::Op::call_ind, results, args, imms);
+    if (has_value) return b_.result(n, 1);
+    return std::nullopt;
   }
   // A non-static member function's call: the object's address is the first argument.
   std::optional<ValueId> member_call(At a, std::optional<ValueId> into = std::nullopt) {

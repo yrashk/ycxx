@@ -1,6 +1,5 @@
 // [conv.func], [expr.call], [dcl.fct]: calls through pointers to functions taking and returning
 // double and float, from a table and as arguments.
-// XFAIL: ycxx calls through a function pointer (#196)
 // STDOUT: 3.5 -0.5 3 0.75
 // STDOUT: 6.25 0.5
 // EXIT: 0

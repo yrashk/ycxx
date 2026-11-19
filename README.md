@@ -49,7 +49,10 @@ build/bin/ycxx cxx hello.cpp -o hello && ./hello
   fold expressions, alias templates, template template parameters, concepts and
   requires-expressions in overload resolution, `if constexpr`, two-phase lookup, with Itanium
   names identical to Clang's; Clang's `__make_integer_seq`;
-- casts, `sizeof`/`alignof` (classes included), and `decltype`;
+- placeholder types: `auto` and `decltype(auto)` variables (`const auto&`, `auto*`, `auto&&`),
+  deduced and trailing return types, in templates too;
+- casts, `sizeof`/`alignof` (classes included), `decltype`, and calls through pointers to
+  functions;
 - constant evaluation on ycxx's own interpreter: `constexpr`, `consteval`, `constinit`,
   `static_assert` and `if consteval`, with errors that explain why something is not constant;
 - `extern "C"` functions from libSystem, including `printf` with integers, characters,
@@ -90,7 +93,7 @@ checked with the flags of its last build, or else with its line in the project's
 - The standard library and its headers. C headers such as `<stdio.h>` compile without warnings
   and `printf` runs; libycxx's `<cstdio>` still needs pointer-to-member types, and `<cmath>`
   (which `<math.h>` includes) does not compile yet ([#349](https://github.com/yrashk/ycxx/issues/349)).
-- Inheritance and virtual functions.
+- Lambdas, structured bindings, and inheritance and virtual functions.
 - Member templates, and constraints on class templates and their members.
 - Exceptions, optimization (`-O`), and the extended floating-point types (`std::float16_t`, …).
 - Linux and x86-64 output.
@@ -98,6 +101,8 @@ checked with the flags of its last build, or else with its line in the project's
 ### In progress
 
 - Standard headers, starting with `<cstdio>` ([#133](https://github.com/yrashk/ycxx/issues/133)).
+- `auto` and lambdas: placeholder types are done; lambdas and generic lambdas are next
+  ([#278](https://github.com/yrashk/ycxx/issues/278)).
 
 Next come exceptions ([#89](https://github.com/yrashk/ycxx/issues/89)).
 

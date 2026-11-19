@@ -57,6 +57,16 @@ enum class Diag : std::uint32_t {
   conflicting_specifiers [[=message{Severity::error, "'{0:k}' cannot be combined with the other type specifiers"}]],
   storage_class_conflict [[=message{Severity::error, "a declaration has at most one storage class specifier"}]],
   missing_type_specifier [[=message{Severity::error, "a declaration needs a type specifier"}]],
+  // [dcl.spec.auto]
+  auto_uninitialized [[=message{Severity::error, "'{0:n}' has a placeholder type and no initializer to deduce it from"}]],
+  auto_deduction_failed [[=message{Severity::error, "cannot deduce '{0:t}' from an initializer of type '{1:t}'"}]],
+  auto_inconsistent [[=message{Severity::error, "'{0:t}' deduced as '{1:t}' here and as '{2:t}' before"}]],
+  auto_list [[=message{Severity::error, "cannot deduce a placeholder type from a braced list of {0} elements"}]],
+  auto_used_in_initializer [[=message{Severity::error, "'{0:n}' is used in its own initializer, which deduces its type"}]],
+  auto_undeduced [[=message{Severity::error, "'{0:n}' is used before its return type is deduced"}]],
+  decltype_auto_alone [[=message{Severity::error, "'decltype(auto)' must be the whole declared type"}]],
+  auto_not_allowed [[=message{Severity::error, "a placeholder type is not allowed here"}]],
+  trailing_return_needs_auto [[=message{Severity::error, "a function with a trailing return type is declared with 'auto' alone"}]],
   // [dcl.decl], [dcl.fct], [dcl.init]
   void_variable [[=message{Severity::error, "variable '{0:n}' has incomplete type 'void'"}]],
   void_parameter [[=message{Severity::error, "a parameter cannot have type 'void'"}]],

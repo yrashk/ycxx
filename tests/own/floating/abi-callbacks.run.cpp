@@ -1,7 +1,6 @@
 // [conv.func], [expr.call]: pointers to functions with float and double parameters and results,
 // passed across objects: the peer calls the test's functions through them, and the test calls
 // the peer's.
-// XFAIL: ycxx calls through a function pointer (#196)
 // PEER: abi-callbacks-peer.cpp
 // EXIT: 0
 typedef double (*BinOp)(double, double);
