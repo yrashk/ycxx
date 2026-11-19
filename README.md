@@ -37,7 +37,8 @@ build/bin/ycxx cxx hello.cpp -o hello && ./hello
 - classes and unions: data and static members, member functions, constructors and destructors
   with RAII, aggregate and designated initialization;
 - namespaces, typedefs and alias declarations, `using` declarations and directives;
-- `[[…]]` attributes, and the GNU attributes and `asm` labels the macOS SDK's headers use
+- `[[…]]` attributes, the GNU attributes and `asm` labels the macOS SDK's headers use, and the
+  type-trait built-ins libycxx's headers use (`__is_same`, `__remove_cv`, …)
   ([docs/EXTENSIONS.md](docs/EXTENSIONS.md));
 - templates: function, class and variable templates, deduction, partial ordering, explicit and
   partial specializations, parameter packs and fold expressions, alias templates, two-phase
