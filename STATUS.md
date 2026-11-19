@@ -1271,6 +1271,31 @@ Fable decided the representation (ast.md §6.6); the Opus session wrote the code
   recorded discarded extents for `if constexpr` (#237); value-dependent mapping arguments (#209);
   `static_assert(false)` in a template that is never instantiated (#241).
 
+## Templates, ζ step 7: static data members of class templates (#88, 2026-11-18)
+
+- A class template's static data members are declared with its other members. A specialization
+  declares them; the in-class initializer of one defined in the class (constexpr or inline) is
+  instantiated only when the member is used ([temp.inst]/3, `Program::member_value`), from the
+  extent the template's analysis recorded, under the nesting limit ([temp.inst]/16). Only the
+  members used are defined in the unit (`Program::used_members`); as with variable templates,
+  the definitions are not yet coalesced across units (#124).
+- In the template, a static member whose initializer is value-dependent is value-dependent
+  ([temp.dep.constexpr]/2.3); one whose initializer is not is a constant there. `static const T k
+  = 5;` is checked again in each specialization.
+- `X<args>::m` with a dependent qualifier names a value, not a type, in a statement, a condition, a
+  cast's parentheses or a template argument, unless `typename` says otherwise
+  ([temp.res.general]/4).
+- An explicitly specialized static data member, `template<> int A<char>::x = 0;`, defines it; one
+  that already has an in-class initializer cannot be given another.
+- A member whose initializer is in error is declared, and its uses report nothing more.
+- Tests: `tests/own/templates/s7-*` (11, agreeing with Clang and GCC),
+  `tests/incremental/templates/static-members.incr`; 1 more draft example passes.
+  `<cstdio>`: 18 → 16 errors.
+- Not yet: a definition outside the class, `template<class T> int X<T>::n = 5;`, reported as not
+  supported (#256); an array bound or template argument that is a dependent expression other than
+  a parameter (`int a[sizeof(T)]`, `F<N - 1>`, #209); `static_assert` in a member-specification
+  (#257); dynamic initialization of an inline static member. Found on the way: #262, #263, #264.
+
 ## `__GNUC__` and system-header warnings (#229, 2026-11-19)
 
 - ycxx predefines `__GNUC__` 4.2.1, as Clang does (`:predefined`; DECISIONS §1.5, revising #112),

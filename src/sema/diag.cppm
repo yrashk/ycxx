@@ -51,6 +51,7 @@ enum class Diag : std::uint32_t {
   unexpected_identifier [[=message{Severity::error, "unexpected identifier '{0:n}'"}]],
   not_supported [[=message{Severity::error, "'{0:k}' is not supported yet"}]],
   float_literal_not_supported [[=message{Severity::error, "floating-point literals are not supported yet"}]],
+  static_member_definition_not_supported [[=message{Severity::error, "defining a static data member of a class template outside the class is not supported yet"}]],
   // [dcl.spec], [dcl.type]
   duplicate_specifier [[=message{Severity::error, "duplicate '{0:k}'"}]],
   conflicting_specifiers [[=message{Severity::error, "'{0:k}' cannot be combined with the other type specifiers"}]],
