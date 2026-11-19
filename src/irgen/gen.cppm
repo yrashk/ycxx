@@ -834,8 +834,6 @@ class Gen {
   void static_var(At a) {
     auto s = get<ast::StaticVar>(a);
     ast::LocalRec rec = in_.seqs.at(fn_.body.locals, s.local);
-    Place p{pure(ir::Op::global, facts_.pointer_to(rec.type), {}, {word(rec.entity)}), rec.type};
-    slots_[s.local] = p;
     if (s.destructor == ast::EntityId::none && (s.value != ast::ConstId::none || s.init.id == NodeId::none)) return;
     auto g = std::ranges::find(fn_.guards, rec.entity, &FunctionInput::StaticGuard::variable);
     if (g == fn_.guards.end() || fn_.guard_acquire == ast::EntityId::none) {
@@ -844,6 +842,8 @@ class Gen {
       live_ = false;
       return;
     }
+    // Keep the address defined at function entry so jumps may bypass this declaration.
+    const Place& p = *slots_[s.local];
     ast::QualType vp = facts_.pointer_to(facts_.int_type());
     ValueId guard[] = {pure(ir::Op::global, vp, {}, {word(g->guard)})};
     ValueId first = *call_fn(fn_.guard_acquire, facts_.int_type(), guard, 0);
