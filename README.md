@@ -52,8 +52,8 @@ build/bin/ycxx cxx hello.cpp -o hello && ./hello
 **Preprocessing.** All of translation phase 4: includes, object-like and function-like
 macros, conditionals, `_Pragma` and the predefined macros. `ycxx cxx -E` matches Clang's output.
 
-**Incremental builds through a resident daemon** (opt-in with `YCXX_DAEMON=1`). `ycxx cxx`
-hands its work to a per-project `ycxx daemon`, which watches the files it has read and keeps
+**Incremental builds through a resident daemon.** `ycxx cxx` hands its work to a per-project
+`ycxx daemon` (`YCXX_NO_DAEMON=1` runs in-process), which watches the files it has read and keeps
 its analysis between commands. A repeated build re-runs nothing, and an edit re-runs only what
 it affects, through code generation and the link. The daemon serves concurrent requests on a
 thread pool, and its output is byte for byte that of a cold, in-process build.
@@ -68,15 +68,13 @@ through the daemon, without unsaved text ever reaching a build.
 - Inheritance and virtual functions, passing classes by value, `sizeof` of a class.
 - Concepts, member templates, template template parameters, `if constexpr`.
 - Floating-point arithmetic, exceptions, and optimization (`-O`).
-- The daemon as the default, and go-to-definition in the language server.
+- Go-to-definition in the language server.
 - Linux and x86-64 output.
 
 ### In progress
 
 - Standard headers, starting with `<cstdio>` ([#133](https://github.com/yrashk/ycxx/issues/133)).
 - Templates: parameter packs, then concepts ([#88](https://github.com/yrashk/ycxx/issues/88)).
-- The resident daemon as the default, after ThreadSanitizer
-  ([#84](https://github.com/yrashk/ycxx/issues/84)).
 
 Next come exceptions ([#89](https://github.com/yrashk/ycxx/issues/89)).
 
