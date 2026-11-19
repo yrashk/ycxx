@@ -1383,6 +1383,56 @@ private:
     return false;
   }
 
+  // A member operator function ([over.oper.general]/7–10, [over.unary], [over.binary],
+  // [over.assign]): not static except `()` and `[]` ([over.call], [over.sub]), and with the
+  // operator's arity less the object.
+  bool member_operator_ok(const parse::Declarator& d, bool is_static) {
+    std::string_view n = p_->world().ins.names.spelling(d.name);
+    if (!n.starts_with("operator") || n.size() == 8) return true;
+    std::string_view op = n.substr(8);
+    if (op == "()" || op == "[]") return true;
+    if (is_static) {
+      s_.diag(d.name_at, Diag::operator_static, d.name);
+      return false;
+    }
+    std::size_t count = d.params.size();
+    bool ok = op == "->"                                  ? count == 0
+              : op == "~" || op == "!"                    ? count == 0
+              : op == "+" || op == "-" || op == "*" || op == "&" || op == "++" || op == "--" ? count <= 1
+                                                                                             : count == 1;
+    if (!ok) s_.diag(d.name_at, Diag::operator_arity, d.name);
+    return ok;
+  }
+
+  // A non-member operator function ([over.oper.general]/7–10): a parameter of class or enumeration
+  // type (or a reference to one), one or two of them, and not `=`, `()`, `[]` or `->`, which only
+  // a member may be.
+  bool operator_function_ok(const parse::Declarator& d) {
+    std::string_view n = p_->world().ins.names.spelling(d.name);
+    if (!n.starts_with("operator") || n.size() == 8) return true;
+    std::string_view op = n.substr(8);
+    sema::Types& types = s_.types();
+    if (op == "=" || op == "()" || op == "[]" || op == "->") {
+      s_.diag(d.name_at, Diag::operator_member_only, d.name);
+      return false;
+    }
+    std::size_t count = d.params.size();
+    bool unary_only = op == "~" || op == "!", binary_only = !(unary_only || op == "+" || op == "-" || op == "*" || op == "&" ||
+                                                              op == "++" || op == "--");
+    if (count == 0 || count > 2 || (unary_only && count != 1) || (binary_only && count != 2)) {
+      s_.diag(d.name_at, Diag::operator_arity, d.name);
+      return false;
+    }
+    if (!std::ranges::any_of(d.params, [&](const parse::Param& p) {
+          QualType t = types.referee(p.type);
+          return types.is_class(t) || types.is_enum(t) || types.is_dependent(t);
+        })) {
+      s_.diag(d.name_at, Diag::operator_needs_class, d.name);
+      return false;
+    }
+    return true;
+  }
+
   // A typedef-name or alias-declaration at namespace scope ([dcl.typedef]). In its scope it may
   // only redeclare a typedef-name, class or enumeration as the type it already is (/5, /6).
   bool declare_alias(NameId name, u32 at, QualType type) {
@@ -2379,6 +2429,7 @@ private:
   bool member_function_or_static(const DeclSpec& spec, parse::Declarator& d, ast::DeclSema c) {
     sema::Types& types = s_.types();
     bool fn = types.is_function(d.type);
+    if (fn && !member_operator_ok(d, spec.is_static)) return false;
     bool is_def = it_->kind == ItemKind::function;
     ast::DeclSema sem = class_decl(c.entity, false);
     sem.type = d.type;
@@ -2656,6 +2707,7 @@ private:
           if (o.name == d.name && o.sema.kind != ast::DeclKind::class_) prior.push_back(o.sema);
         if (clashes_with_using(d.name, d.name_at, fn ? ast::DeclKind::function : ast::DeclKind::variable)) return false;
       }
+      if (fn && !d.qualified && !operator_function_ok(d)) return false;
       if (fn) {
         if (!explicit_lang && !prior.empty() && prior.back().kind == ast::DeclKind::function)
           lang = s_.world().entities.rec(prior.back().entity).lang;  // [dcl.link]/6: inherited

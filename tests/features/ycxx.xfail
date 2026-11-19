@@ -43,7 +43,6 @@ draft/basic/class.member.lookup-3.reject.cpp errors elsewhere: 'struct' not supp
 draft/basic/class.member.lookup-4.reject.cpp errors elsewhere: 'struct' not supported yet
 draft/basic/class.member.lookup-5.reject.cpp errors elsewhere: 'struct' not supported yet
 draft/basic/class.qual-1.reject.cpp errors elsewhere: 'struct' not supported yet
-draft/basic/class.temporary-1.accept.cpp 'class' not supported yet
 draft/basic/class.temporary-4.accept.cpp 'struct' not supported yet
 draft/basic/class.temporary-5.accept.cpp preprocessing directives are not supported yet
 draft/basic/class.temporary-6.accept.cpp 'struct' not supported yet
@@ -228,7 +227,6 @@ draft/dcl/dcl.init.list-4.accept.cpp preprocessing directives are not supported 
 draft/dcl/dcl.init.list-5.accept.cpp preprocessing directives are not supported yet
 draft/dcl/dcl.init.list-6.reject.cpp errors elsewhere: 'struct' not supported yet
 draft/dcl/dcl.init.list-9.reject.cpp errors elsewhere: preprocessing directives are not supported yet
-draft/dcl/dcl.init.ref-1.accept.cpp 'noexcept' not supported yet
 draft/dcl/dcl.init.ref-2.reject.cpp errors elsewhere: '&' not supported yet
 draft/dcl/dcl.init.ref-3.accept.cpp 'double' not supported yet
 draft/dcl/dcl.init.ref-5.reject.cpp errors elsewhere: 'struct' not supported yet

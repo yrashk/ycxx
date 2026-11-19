@@ -941,6 +941,29 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
 - A floating local no longer stops constant evaluation in its function (the thunk skips it).
 - Tests: `tests/own/unions` (7, three from the review). Six more draft examples pass.
 
+## `<cstdio>`, step 4c: operator functions; `<stdio.h>` compiles (#133, 2026-11-18)
+
+- **Operator functions** ([over.oper]): `operator@` declarator-ids for the overloadable
+  punctuators, `()` and `[]`, at namespace scope and as members; a non-member one needs a class or
+  enumeration parameter and the operator's arity, and `=`, `()`, `[]`, `->` are members only.
+  Itanium `<operator-name>` codes (`or`, `oR`, `co`, `ng`/`mi` by arity), checked against Clang's
+  symbols.
+- **[over.match.oper]:** a unary, binary or compound assignment operator with an operand of
+  class or enumeration type calls `operator@` when one is viable: the left operand's member, else
+  the non-members unqualified lookup and argument-dependent lookup find; else the built-in
+  operator. `a = b` calls a user-declared member `operator=`. Ranking against the built-in
+  candidates, postfix `++`/`--`, `()`, `[]`, `->` and conversion functions are #219.
+- `noexcept` and `noexcept(e)` on function declarators are accepted, not yet part of the type
+  (#219); `N::T(…)` and `N::T{…}` are functional casts.
+- `T (*p)(args);` with T a typedef-name declares p ([stmt.ambig]), in sema and in the splitter.
+- **`#include <stdio.h>`** (the SDK's) compiles, and `printf`, `puts`, `fputs` and `stdout` run
+  (`tests/own/headers/stdio.run.cpp`). `<cstdio>` still waits for libycxx's templates and
+  concepts (#88).
+- Member operators get the [over.oper] checks too; `S::operator@` and `N::operator@` define outside;
+  unary `*` and `&` call operator functions; a deleted or ambiguous choice is an error, not the
+  built-in operator. `N::T(…)` is a cast only when no function or variable hides N::T.
+- Tests: `tests/own/operators` (12, seven from the review), `tests/own/headers` (2).
+
 ## Templates, ζ step 1: function templates (#88, 2026-11-18)
 
 Instantiation follows ast.md §6.4 as amended by #88 (Fable's decision): declarations and

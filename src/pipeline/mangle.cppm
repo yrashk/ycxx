@@ -24,6 +24,7 @@ struct ClassName {
   // A class template specialization's template and arguments (§5.1.5.7).
   ast::EntityId templ = ast::EntityId::none;
   std::vector<ast::TemplateArg> args;
+  bool is_class = false;  // a class, not a namespace: its member functions have `this`
 };
 using ClassNames = std::function<ClassName(ast::EntityId)>;
 
@@ -393,6 +394,26 @@ class Mangler {
   std::vector<std::uint64_t> candidates_;  // in order of completion
 };
 
+// Itanium §5.1.5.1 <operator-name>: the code of `operator<op>` taking `arity` operands.
+std::optional<std::string_view> operator_code(std::string_view op, std::size_t arity) {
+  static constexpr std::pair<std::string_view, std::string_view> binary[] = {
+      {"+", "pl"},  {"-", "mi"},   {"*", "ml"},   {"&", "an"},  {"/", "dv"},  {"%", "rm"},  {"|", "or"},
+      {"^", "eo"},  {"=", "aS"},   {"+=", "pL"},  {"-=", "mI"}, {"*=", "mL"}, {"/=", "dV"}, {"%=", "rM"},
+      {"&=", "aN"}, {"|=", "oR"},  {"^=", "eO"},  {"<<", "ls"}, {">>", "rs"}, {"<<=", "lS"}, {">>=", "rS"},
+      {"==", "eq"}, {"!=", "ne"},  {"<", "lt"},   {">", "gt"},  {"<=", "le"}, {">=", "ge"}, {"<=>", "ss"},
+      {"&&", "aa"}, {"||", "oo"},  {",", "cm"},   {"->*", "pm"}, {"->", "pt"}, {"()", "cl"}, {"[]", "ix"},
+      {"!", "nt"},  {"~", "co"},   {"++", "pp"},  {"--", "mm"}};
+  if (arity == 1) {
+    if (op == "+") return "ps";
+    if (op == "-") return "ng";
+    if (op == "*") return "de";
+    if (op == "&") return "ad";
+  }
+  for (auto [s, code] : binary)
+    if (s == op) return code;
+  return std::nullopt;
+}
+
 std::expected<std::string, std::string> mangled_function(const ast::Interners& in, std::string_view name,
                                                          ast::QualType type, const ClassNames& classes,
                                                          ast::EntityId scope, bool special) {
@@ -400,7 +421,16 @@ std::expected<std::string, std::string> mangled_function(const ast::Interners& i
   if (!in.types.is<ast::TFunction>(c)) return std::unexpected("not a function type");
   auto f = in.types.get<ast::TFunction>(c);
   Mangler m(in, classes);
-  std::string out = std::format("_Z{}{}", name.size(), name);
+  // An <operator-name> (§5.1.5.1) or a <source-name>; `+`, `-`, `*` and `&` mangle by arity, `this`
+  // counted for a member.
+  std::size_t arity = in.seqs.size(f.params) + (scope != ast::EntityId::none && classes && classes(scope).is_class ? 1 : 0);
+  std::string unqualified = std::format("{}{}", name.size(), name);
+  if (name.starts_with("operator") && name.size() > 8) {
+    auto code = operator_code(name.substr(8), arity);
+    if (!code) return std::unexpected(std::format("the operator function '{}'", name));
+    unqualified = *code;
+  }
+  std::string out = "_Z" + unqualified;
   if (scope != ast::EntityId::none) {
     // <nested-name> ::= N [<CV-qualifiers>] <prefix> <unqualified-name> E, the member function's
     // cv-qualifiers in the order r V K (§5.1.5.3).
@@ -408,7 +438,7 @@ std::expected<std::string, std::string> mangled_function(const ast::Interners& i
     if (!prefix) return prefix;
     std::string cv = std::string(std::to_underlying(f.cv) & 2 ? "V" : "") + (std::to_underlying(f.cv) & 1 ? "K" : "");
     // A <ctor-dtor-name> (`C1`, `D1`) stands as it is; other names are <source-name>s.
-    out = special ? std::format("_ZN{}{}{}E", cv, *prefix, name) : std::format("_ZN{}{}{}{}E", cv, *prefix, name.size(), name);
+    out = special ? std::format("_ZN{}{}{}E", cv, *prefix, name) : std::format("_ZN{}{}{}E", cv, *prefix, unqualified);
   }
   auto params = in.seqs.elements(f.params);
   if (params.empty() && !f.variadic) out += "v";
