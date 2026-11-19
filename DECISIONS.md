@@ -19,8 +19,9 @@ reasoning; do not leave decisions only in issue threads.
    before the next one starts.
    - The first Linux x86-64 [dynamic link](docs/design/linux-dynamic-executable.md) uses
      explicit shared objects, the target interpreter and a fixed-address executable. Native
-     direct function imports use eager GOT relocations. Target CRT and normal hosted process
-     startup follow under #390.
+     direct function imports use eager GOT relocations. Provider discovery uses GNU hash when
+     available and otherwise uses SysV hash. Target CRT, versioned imports, provider dependencies
+     and normal hosted process startup follow under #390.
    - Linux x86-64 [archive inputs](docs/design/linux-static-archives.md) start with explicit
      indexed GNU archives in static executable links. The linker extracts only members needed
      by outstanding symbols and preserves archive operand order (#388).
