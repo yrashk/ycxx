@@ -477,3 +477,11 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
     built-ins), teach `items.cppm`'s declarator scan and its function detection, and test a
     namespace-scope typedef, variable and function template whose type begins with it.
   - Learned on #211.
+- **A stacked PR merges into its base branch, not main, unless retargeted.** #198 was opened on
+  #191's branch. When #191 merged to main, #198 kept that base, and its merge went into the dead
+  branch: main never got concurrent requests, and #224 (the daemon as the default) passed its
+  tests on a main without them.
+  - Do: when a stacked PR's base merges, retarget it to `main` at once (`gh pr edit N --base
+    main`), and before building on a merged step, check `git merge-base --is-ancestor <its merge
+    commit> origin/main`.
+  - Learned on #139.
