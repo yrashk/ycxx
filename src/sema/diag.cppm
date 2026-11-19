@@ -151,6 +151,7 @@ enum class Diag : std::uint32_t {
   overload_address [[=message{Severity::error, "the address of the overloaded function '{0:n}' is not supported yet"}]],
   ambiguous_name [[=message{Severity::error, "reference to '{0:n}' is ambiguous"}]],
   no_namespace_member [[=message{Severity::error, "no member named '{0:n}' in the namespace"}]],
+  no_friend_match [[=message{Severity::error, "friend declaration of '{0:n}' matches no earlier declaration"}]],
   not_a_namespace [[=message{Severity::error, "'{0:n}' is not a namespace or class"}]],
   static_outside_class [[=message{Severity::error, "'static' can only be specified inside the class definition"}]],
   no_member_declared [[=message{Severity::error, "'{1:t}' declares no member '{0:n}' with this type"}]],

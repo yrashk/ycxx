@@ -704,8 +704,34 @@ public:
     EntityId c = types().class_of(*s.type);
     if (const ClassRec* cr = class_rec(c))
       for (const NestedType& t : cr->types)
-        if (t.name == n) return check_access(c, t.entity, n, at);
+        if (t.name == n) {
+          if (defer_type_access && !accessible(c, cr->access_of(t.entity))) {
+            deferred_access_.push_back({c, t.entity, n, at});
+            return true;
+          }
+          return check_access(c, t.entity, n, at);
+        }
     return true;
+  }
+  // In a namespace-scope declaration, the types its decl-specifiers and declarator name are
+  // checked once what it declares is known: a member's definition is in its class's scope, and
+  // a friend's declaration may name the class's private types ([class.access]/6–7). `declared`
+  // is the function or variable declared, none when it is not known.
+  bool defer_type_access = false;
+  void settle_type_access(EntityId declared) {
+    defer_type_access = false;
+    EntityId saved = current_function;
+    if (declared != EntityId::none) current_function = declared;
+    for (const DeferredAccess& d : deferred_access_) check_access(d.cls, d.member, d.name, d.at);
+    current_function = saved;
+    deferred_access_.clear();
+  }
+  // The function `N::name` of type `t` declared in namespace `ns`, if any ([namespace.memdef]/3:
+  // a qualified friend refers to an earlier declaration).
+  std::optional<EntityId> namespace_function(EntityId ns, NameId name, QualType t) {
+    for (const ast::DeclSema& d : q_->namespace_members(ns, name))
+      if (d.kind == ast::DeclKind::function && types().canonical(d.type) == types().canonical(t)) return d.entity;
+    return std::nullopt;
   }
   // `S::n` naming a type.
   std::optional<QualType> scope_type(const Scope& s, NameId n) {
@@ -3372,6 +3398,12 @@ private:
   std::vector<std::optional<ConstId>> local_values_;  // by local
   std::set<u32> consteval_;                           // consteval functions named so far
   std::map<u32, std::vector<Ex>> list_elems_;         // by draft InitList
+  struct DeferredAccess {
+    EntityId cls, member;
+    NameId name;
+    u32 at;
+  };
+  std::vector<DeferredAccess> deferred_access_;
   struct Bound {
     std::optional<Ex> object;
     std::vector<const MemberDeclRec*> cands;

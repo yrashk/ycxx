@@ -1345,8 +1345,10 @@ private:
         s_.diag(ps_.pos(), Diag::expected_declaration);
       return bad();
     }
+    s_.defer_type_access = true;
     DeclSpec spec = ps_.decl_specifiers();
     if (spec.elaborated && ps_.is(Tk::semi)) {
+      s_.settle_type_access(EntityId::none);
       // `class-key identifier ;` declares the class ([dcl.type.elab]); it stays incomplete until
       // its definition.
       ps_.bump();
@@ -1359,8 +1361,11 @@ private:
     }
     bool is_function_def = it_->kind == ItemKind::function;
     do {
+      s_.defer_type_access = true;
       parse::Declarator d = ps_.declarator(spec.type, false);
-      if (!d.ok || !spec.ok || !d.named || !declare(spec, d, lang, explicit_lang, is_function_def)) {
+      bool declared = d.ok && spec.ok && d.named && declare(spec, d, lang, explicit_lang, is_function_def);
+      s_.settle_type_access(EntityId::none);  // what `declare` did not settle
+      if (!declared) {
         // Later declarators keep their skeleton ordinals with placeholder records.
         bad();
         if (!is_function_def) ps_.skip_to_semi();
@@ -2428,7 +2433,15 @@ private:
     }
     sem.kind = ast::DeclKind::function;
     sem.type = d.type;
-    if (d.qualified) {
+    if (d.qualified && d.scope.ns) {
+      // `friend R ::f(…);`, `friend R N::f(…);`: a function the namespace declared earlier.
+      auto f = s_.namespace_function(*d.scope.ns, d.name, d.type);
+      if (!f) {
+        s_.diag(d.name_at, Diag::no_friend_match, d.name);
+        return bad();
+      }
+      sem.entity = *f;
+    } else if (d.qualified) {
       // A member function of another, complete class: its declaration with this type.
       if (!d.scope.type || !types.is_class(*d.scope.type) || !s_.require_complete(*d.scope.type, d.qualifier_at)) return bad();
       EntityId other = types.class_of(*d.scope.type);
@@ -3128,6 +3141,7 @@ private:
         // The rest of the declarator, its initializer included, is in the class's scope
         // ([basic.scope.class]).
         s_.current_class = s_.world().entities.rec(sem.entity).scope;
+        s_.settle_type_access(sem.entity);
       } else if (!prior.empty()) {
         const ast::DeclSema& p = prior.back();
         if ((p.kind == ast::DeclKind::function) != fn || p.kind == ast::DeclKind::type_alias) {
@@ -3192,6 +3206,7 @@ private:
         e.constraints = constraints_fp_;
         sem.entity = s_.world().entities.entity(e);
       }
+      s_.settle_type_access(sem.entity);
 
     }
     if (fn && p_->world().ins.names.spelling(d.name) == "main") check_main(spec, sem, d, lang);
