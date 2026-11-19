@@ -951,7 +951,7 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   `(T)e`, as static_cast does them ([expr.type.conv]/2, [expr.cast]/4). Downcasts and the
   const_cast and reinterpret_cast parts of a C-style cast are not supported yet.
 - **sizeof, alignof** of fundamental, pointer, enumeration and array types and of an expression,
-  from `ast::Target`; a class's is #194 (sema has no `layout(C)` yet).
+  from `ast::Target`; a class's since #194, below.
 - **decltype(e)** ([dcl.type.decltype]): an unparenthesized id-expression or member access names
   its declared type, else the expression's type and value category. `decltype(auto)` is not
   supported yet.
@@ -1387,6 +1387,22 @@ Fable decided the representation (ast.md §6.7); the Opus session wrote the code
   [temp.arg.template]/4, and `__make_integer_seq` as an argument (#272); the diagnostics of a
   template-id before `::` whose arguments do not fit (#275); member templates and `Q::template M`
   as an argument.
+
+## sizeof and alignof of classes (#194, 2026-11-19)
+
+- One layout rule, two readers: `ast::record_layout` (src/ast/target.cppm) gives a class's member
+  offsets, size and alignment from its members' sizes and alignments (Itanium C++ ABI §2.4, no
+  bases or virtual functions yet). The back end's `QueryLayout::class_layout` reads it with the
+  unit's `ClassShape`; `Sema::layout_of` reads it with the complete class's `ClassRec`, from which
+  the shapes are built. A reference member is laid out as a pointer. Each reader computes a
+  class's layout once (`Sema::class_places_`, `QueryLayout::class_layouts_` and `records_`), so
+  nested classes cost linear time.
+- Bases, a vptr and empty-base placement extend `record_layout`'s input when inheritance and
+  virtual functions arrive.
+- Tests: `tests/own/classes/s7-sizeof-class.accept.cpp` (padding, nesting, arrays, unions,
+  references, empty and template classes), `s7-sizeof-incomplete.reject.cpp`,
+  `s7-sizeof-deep.run.cpp` (22 levels of nesting), `tests/own/abi/sizeof-class.run.cpp` (agrees
+  with Clang's sizes and member offsets).
 
 ## The engine trace (#245, 2026-11-19)
 

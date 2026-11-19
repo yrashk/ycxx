@@ -47,7 +47,7 @@ build/bin/ycxx cxx hello.cpp -o hello && ./hello
   fold expressions, alias templates, template template parameters, concepts and
   requires-expressions in overload resolution, `if constexpr`, two-phase lookup, with Itanium
   names identical to Clang's; Clang's `__make_integer_seq`;
-- casts, `sizeof`/`alignof` of non-class types, and `decltype`;
+- casts, `sizeof`/`alignof` (classes included), and `decltype`;
 - constant evaluation on ycxx's own interpreter: `constexpr`, `consteval`, `constinit`,
   `static_assert` and `if consteval`, with errors that explain why something is not constant;
 - `extern "C"` functions from libSystem, including `printf` with integers, characters,
@@ -84,7 +84,7 @@ checked with the flags of its last build, or else with its line in the project's
 
 - The standard library and its headers. C headers such as `<stdio.h>` compile without warnings
   and `printf` runs; libycxx's `<cstdio>` still needs pointer-to-member types.
-- Inheritance and virtual functions, `sizeof` of a class.
+- Inheritance and virtual functions.
 - Member templates, and constraints on class templates and their members.
 - Floating-point arithmetic, exceptions, and optimization (`-O`).
 - Linux and x86-64 output.

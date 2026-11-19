@@ -36,6 +36,10 @@ Work that never reaches `main` is lost. Twice, finished and reviewed work landed
   from `main` with a new PR.
 - After your PR merges, confirm its commits are on `main`
   (`git merge-base --is-ancestor <sha> origin/main`) before you report it done.
+- A PR is merged only once it has passed tests merged with the current `main`. That means CI ran
+  after the last merge to `main`, or the merger ran `tools/test --fast` on the PR merged with
+  `main`. A clean textual merge proves nothing: #250 merged cleanly with #243 and broke its
+  concepts test (LESSONS).
 
 ## While working
 
