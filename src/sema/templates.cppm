@@ -155,20 +155,22 @@ public:
       auto ret = substitute(r.inner, b);
       if (!ret || types().is_array(*ret) || types().is_function(*ret)) return std::nullopt;
       std::vector<QualType> ps;
+      auto append_parameter = [&](QualType p) {
+        if (types().is_void(p) || types().is_cvref_function(p)) return false;
+        ps.push_back(types().is_function(p) ? types().pointer(p) : p);
+        return true;
+      };
       for (QualType p : r.params) {
         // A function parameter pack's type: one parameter for each element ([temp.variadic]/8).
         if (types().kind(p) == TypeKind::pack_expansion) {
           auto xs = substitute_expansion(type_arg(p), b);
           if (!xs) return std::nullopt;
-          for (const TemplateArg& x : *xs) {
-            if (types().is_void(x.type)) return std::nullopt;
-            ps.push_back(x.type);
-          }
+          for (const TemplateArg& x : *xs)
+            if (!append_parameter(x.type)) return std::nullopt;
           continue;
         }
         auto s = substitute(p, b);
-        if (!s || types().is_void(*s)) return std::nullopt;
-        ps.push_back(*s);
+        if (!s || !append_parameter(*s)) return std::nullopt;
       }
       return types().function(*ret, ps, r.variadic, r.linkage, r.fn_cv, r.fn_ref, r.fn_noexcept);
     }

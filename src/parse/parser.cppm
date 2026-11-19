@@ -1114,7 +1114,7 @@ public:
         std::vector<QualType> ps;
         for (const Param& p : s->params) ps.push_back(p.type);
         bool nonthrowing = false;
-        if (s->has_noexcept && (spells_type || l.inner)) {
+        if (s->has_noexcept && (member_pointer_to_suffix(l) || (spells_type && !l.inner))) {
           nonthrowing = true;
           if (s->noexcept_condition) {
             Ex operand = s_->rvalue(*s->noexcept_condition);
