@@ -229,6 +229,134 @@ void read_init_array() {
   rejects("invalid ELF .init_array flags, alignment or size", input);
 }
 
+void read_gnu_marker() {
+  // A small ET_REL with the forms used by the GNU-built libycxx linkage marker.
+  enum { rodata = 1, debug_info, debug_str, comment, data, stack, rela_data, rela_debug, symtab, strtab, shstrtab };
+  constexpr std::array<std::string_view, shstrtab + 1> names{
+      "", ".rodata", ".debug_info", ".debug_str", ".comment", ".data.rel.ro.local", ".note.GNU-stack",
+      ".rela.data.rel.ro.local", ".rela.debug_info", ".symtab", ".strtab", ".shstrtab"};
+  std::vector<std::uint8_t> file(64);
+  std::vector<std::uint8_t> headers(64 * names.size());
+  std::vector<std::uint8_t> section_names{0};
+  auto add = [&](std::size_t i, std::uint32_t type, std::uint64_t flags, std::vector<std::uint8_t> bytes,
+                 std::uint64_t align = 1, std::uint64_t entsize = 0, std::uint32_t link = 0, std::uint32_t info = 0) {
+    file.resize((file.size() + align - 1) & ~(align - 1));
+    const auto offset = file.size();
+    auto header = std::span(headers).subspan(64 * i, 64);
+    set_field(header, 0, 4, section_names.size());
+    section_names.insert(section_names.end(), names[i].begin(), names[i].end());
+    section_names.push_back(0);
+    set_field(header, 4, 4, type);
+    set_field(header, 8, 8, flags);
+    set_field(header, 24, 8, offset);
+    set_field(header, 32, 8, bytes.size());
+    set_field(header, 40, 4, link);
+    set_field(header, 44, 4, info);
+    set_field(header, 48, 8, align);
+    set_field(header, 56, 8, entsize);
+    file.insert(file.end(), bytes.begin(), bytes.end());
+    return offset;
+  };
+  add(rodata, 1, 2, {7, 9});
+  add(debug_info, 1, 0, std::vector<std::uint8_t>(12));
+  add(debug_str, 1, 0x30, {'d', 0}, 1, 1);
+  add(comment, 1, 0x30, {'c', 0}, 1, 1);
+  add(data, 1, 3, std::vector<std::uint8_t>(16), 8);
+  add(stack, 1, 0, {});
+
+  std::vector<std::uint8_t> relas(48);
+  auto set_rela = [&](std::size_t i, std::uint64_t site, std::uint32_t type, std::uint32_t symbol, std::uint64_t addend = 0) {
+    auto record = std::span(relas).subspan(24 * i, 24);
+    set_field(record, 0, 8, site);
+    set_field(record, 8, 4, type);
+    set_field(record, 12, 4, symbol);
+    set_field(record, 16, 8, addend);
+  };
+  set_rela(0, 0, 1, 5);
+  set_rela(1, 8, 1, 2, 1);
+  const auto runtime_relocations = add(rela_data, 4, 0x40, relas, 8, 24, symtab, data);
+  set_rela(0, 0, 10, 3);
+  set_rela(1, 4, 1, 5);
+  const auto debug_relocations = add(rela_debug, 4, 0x40, relas, 8, 24, symtab, debug_info);
+
+  std::vector<std::uint8_t> symbols(6 * 24);
+  std::vector<std::uint8_t> symbol_names{0};
+  auto set_symbol = [&](std::size_t i, std::string_view name, std::uint8_t info, std::uint8_t visibility,
+                        std::uint16_t section, std::uint64_t value, std::uint64_t size) {
+    auto record = std::span(symbols).subspan(24 * i, 24);
+    if (!name.empty()) {
+      set_field(record, 0, 4, symbol_names.size());
+      symbol_names.insert(symbol_names.end(), name.begin(), name.end());
+      symbol_names.push_back(0);
+    }
+    record[4] = info;
+    record[5] = visibility;
+    set_field(record, 6, 2, section);
+    set_field(record, 8, 8, value);
+    set_field(record, 16, 8, size);
+  };
+  set_symbol(1, "marker.cpp", 4, 0, 0xfff1, 0, 0);  // local FILE with SHN_ABS
+  set_symbol(2, "", 3, 0, rodata, 0, 0);           // retained SECTION
+  set_symbol(3, "", 3, 0, debug_str, 0, 0);        // discarded SECTION
+  set_symbol(4, "anchor", 1, 0, data, 0, 16);      // local OBJECT
+  set_symbol(5, "marker", 0x11, 2, rodata, 1, 1);  // hidden global OBJECT
+  const auto symbol_table = add(symtab, 2, 0, std::move(symbols), 8, 24, strtab, 5);
+  add(strtab, 3, 0, std::move(symbol_names));
+  add(shstrtab, 3, 0, {});
+  set_field(headers, shstrtab * 64 + 32, 8, section_names.size());
+  file.insert(file.end(), section_names.begin(), section_names.end());
+
+  file.resize((file.size() + 7) & ~std::size_t{7});
+  const auto shoff = file.size();
+  file.insert(file.end(), headers.begin(), headers.end());
+  const std::array<std::uint8_t, 7> ident{0x7f, 'E', 'L', 'F', 2, 1, 1};
+  std::ranges::copy(ident, file.begin());
+  set_field(file, 16, 2, 1);
+  set_field(file, 18, 2, 62);
+  set_field(file, 20, 4, 1);
+  set_field(file, 40, 8, shoff);
+  set_field(file, 52, 2, 64);
+  set_field(file, 58, 2, 64);
+  set_field(file, 60, 2, names.size());
+  set_field(file, 62, 2, shstrtab);
+
+  obj::object expected;
+  expected.name = "marker.o";
+  expected.arch = obj::target::x86_64_linux;
+  const auto read_only = expected.add_section(obj::standard_section::rodata);
+  const auto pointers = expected.add_section(obj::standard_section::data_const);
+  expected.sections[read_only].emit(std::array<std::uint8_t, 2>{7, 9});
+  const auto section_base = expected.define("", obj::binding::local, read_only, 0);
+  expected.define("anchor", obj::binding::local, pointers);
+  const auto marker = expected.define("marker", obj::binding::hidden, read_only, 1);
+  auto& pointer_data = expected.sections[pointers];
+  pointer_data.emit64(0);
+  pointer_data.relocate(obj::reloc_kind::abs64, marker);
+  pointer_data.emit64(0);
+  pointer_data.relocate(obj::reloc_kind::abs64, section_base, 1);
+  auto read = obj::elf::read_object(file, expected.name);
+  check(read && *read == expected, read ? "GNU ELF keeps runtime section and symbol indices" : read.error());
+
+  auto reject = [&](std::size_t offset, std::size_t width, std::uint64_t value, std::string_view reason) {
+    auto bad = file;
+    set_field(bad, offset, width, value);
+    const auto result = obj::elf::read_object(bad, expected.name);
+    check(!result && result.error().contains(reason), reason);
+  };
+  reject(shoff + 64 * data + 8, 8, 7, "unsupported ELF section '.data.rel.ro.local'");
+  reject(shoff + 64 * debug_info + 8, 8, 2, "unsupported ELF section '.debug_info'");
+  reject(shoff + 64 * comment + 8, 8, 0x31, "unsupported ELF section '.comment'");
+  reject(shoff + 64 * rela_debug + 40, 4, strtab, "invalid ELF relocation section");
+  reject(symbol_table + 24 + 6, 2, rodata, "invalid ELF file symbol");
+  reject(symbol_table + 3 * 24 + 6, 2, shstrtab, "unsupported section index");
+  reject(symbol_table + 5 * 24 + 16, 8, 2, "out-of-section value or size");
+  reject(debug_relocations, 8, 9, "ELF relocation lies outside its section");
+  reject(debug_relocations + 12, 4, 6, "invalid ELF relocation symbol");
+  reject(runtime_relocations + 8, 4, 10, "unsupported x86-64 relocation type");
+  reject(runtime_relocations + 12, 4, 1, "invalid ELF relocation symbol");  // FILE
+  reject(runtime_relocations + 12, 4, 3, "invalid ELF relocation symbol");  // DWARF section
+}
+
 void reject_bad_files(std::span<const std::uint8_t> file) {
   constexpr std::string_view diagnostic_name = "malformed.o";
   auto reject = [&](std::span<const std::uint8_t> bytes, std::string_view reason) {
@@ -271,7 +399,7 @@ void reject_bad_files(std::span<const std::uint8_t> file) {
   change(strtab + strsize - 1, 1, 'a', "invalid ELF symbol name string table");
   change(symtab, 1, 1, "invalid null ELF symbol");
   change(symtab + 24, 4, strsize, "invalid name for ELF symbol");
-  change(symtab + 24 + 4, 1, 3, "unsupported type, size, binding or visibility");
+  change(symtab + 24 + 4, 1, 6, "unsupported type, size, binding or visibility");  // STT_TLS
   change(symtab + 24 + 5, 1, 3, "unsupported type, size, binding or visibility");
   change(symtab + 24 + 6, 2, 0xfff2, "unsupported section index");
   change(symtab + 24 + 8, 8, 9, "out-of-section value");
@@ -308,6 +436,7 @@ int main(int argc, char** argv) {
   }
   read_large_offsets();
   read_init_array();
+  read_gnu_marker();
 
   auto bad = o;
   bad.arch = obj::target::aarch64_macos;
