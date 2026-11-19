@@ -281,8 +281,7 @@ engine::query_task<FrontResult> TuFront::run(engine::Ctx& cx, TuId tu) {
     ClassShape& shape = out.shapes.classes.emplace_back(ClassShape{c, {}});
     for (const sema::FieldRec& f : classes.rec(c).fields) shape.fields.push_back(f.type);
     shape.union_ = classes.rec(c).union_;
-    // As Clang and GCC pass them (#116); Apple Clang differs for a user-provided move constructor.
-    shape.trivial_calls = classes.trivial_for_calls(c);
+    shape.trivial_calls = classes.trivial_for_calls(c, unit_source.config.calls());
   }
   for (EntityId e : classes.enums()) out.shapes.enums.push_back({e, classes.underlying(e)});
   co_return out;
