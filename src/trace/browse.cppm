@@ -196,7 +196,9 @@ enum class View { tree, timeline };
 
 class Browser {
  public:
-  Browser(Tree& tree, Terminal& term, Feed* feed) : tree_(tree), term_(term), feed_(feed) {}
+  Browser(Tree& tree, Terminal& term, Feed* feed) : tree_(tree), term_(term), feed_(feed) {
+    if (feed_) tree_.set_newest_first(true);  // live: the latest request on top
+  }
 
   void run() {
     while (true) {
@@ -204,7 +206,12 @@ class Browser {
       const std::string k = term_.key(feed_ ? feed_->fd : -1);
       if (k.empty()) {
         // Live: new events; the selection stays where it was.
+        // At the top, the view follows what comes; elsewhere the selected node stays selected.
+        const auto before = tree_.rows();
+        const std::optional<std::int32_t> held =
+            cursor_ > 0 && cursor_ < before.size() ? std::optional(before[cursor_].node) : std::nullopt;
         if (!feed_->pump()) feed_ = nullptr, ended_ = true;
+        if (held) keep_selected(*held);
         continue;
       }
       if (prompt_) {
@@ -235,6 +242,12 @@ class Browser {
     else if (k == "a") pick_worker(std::nullopt);
     else if (k.size() == 1 && std::isdigit(static_cast<unsigned char>(k[0]))) pick_worker(k[0] - '0');
     else if (k == "m") pick_worker(-1);
+    else if (k == "o") {
+      const auto rows = tree_.rows();
+      const std::optional<std::int32_t> held = rows.empty() ? std::nullopt : std::optional(rows[std::min(cursor_, rows.size() - 1)].node);
+      tree_.set_newest_first(!tree_.newest_first());
+      if (held) keep_selected(*held);
+    }
   }
   void tree_key(const std::string& k) {
     const auto rows = tree_.rows();
@@ -314,6 +327,13 @@ class Browser {
       }
     }
   }
+  // The row of `node`, if shown, becomes the selection.
+  void keep_selected(std::int32_t node) {
+    const auto rows = tree_.rows();
+    for (std::size_t i = 0; i < rows.size(); ++i) {
+      if (rows[i].node == node) cursor_ = i;
+    }
+  }
   void select(std::int32_t node) {
     tree_.reveal(node);
     const auto rows = tree_.rows();
@@ -389,13 +409,14 @@ class Browser {
     if (prompt_) return std::format(" filter: {}", typed_);
     if (!filter_.empty()) out += std::format(" filter: {}", paint("1", filter_));
     out += std::format("  worker: {}", tree_.worker() ? paint("1", format_worker(*tree_.worker())) : std::string("all"));
+    out += tree_.newest_first() ? "  newest first" : "  oldest first";
     if (feed_) out += "  " + paint("1;31", "● live") + paint("2", " " + feed_->source);
     else if (ended_) out += "  " + paint("2", "(the daemon has gone)");
     return out;
   }
   std::string footer() const {
     if (view_ == View::tree)
-      return paint("2", " ↑↓/jk move  ⏎/space fold  ←→ close/open  e/E all  n next run  / filter  w/0-9/m/a worker  v pane  t timeline  ? help  q quit");
+      return paint("2", " ↑↓/jk move  ⏎/space fold  ←→ close/open  e/E all  n next run  / filter  w/0-9/m/a worker  o order  v pane  t timeline  ? help  q quit");
     return paint("2", " ↑↓ lane  ←→/HL scrub  ⏎ open in tree  w/0-9/m/a worker  / filter  t tree  ? help  q quit");
   }
 

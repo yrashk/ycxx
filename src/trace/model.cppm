@@ -184,8 +184,16 @@ class Tree {
     bool match;  // matches the filter itself (else shown as an ancestor of a match)
   };
 
-  // A request's node (`ctl trace`), under which `add(batch, id)` puts its top-level events.
+  // Top-level nodes newest first (the live views' default: the latest request on top).
+  void set_newest_first(bool on) noexcept { newest_first_ = on; }
+  bool newest_first() const noexcept { return newest_first_; }
+
+  // A request's node (`ctl trace`, `--watch`), under which `add(batch, id)` puts its top-level
+  // events. It opens folded the earlier requests', so the latest is the one shown whole.
   void open_group(std::uint64_t id, std::string label, std::uint64_t start_ns) {
+    for (std::int32_t r : roots_) {
+      if (nodes_[r].group) nodes_[r].expanded = false;
+    }
     Node n;
     n.ev.id = id;
     n.ev.kind = "request";
@@ -295,7 +303,7 @@ class Tree {
   std::vector<Row> rows() const {
     std::vector<Row> out;
     if (!filtering()) {
-      for (std::int32_t r : roots_) walk(r, 0, out);
+      for (std::int32_t r : ordered_roots()) walk(r, 0, out);
       return out;
     }
     std::vector<char> keep(nodes_.size(), 0);  // 1: an ancestor of a match, 2: a match
@@ -304,7 +312,7 @@ class Tree {
       keep[i] = 2;
       for (std::int32_t p = nodes_[i].parent; p >= 0 && !keep[p]; p = nodes_[p].parent) keep[p] = 1;
     }
-    for (std::int32_t r : roots_) walk_filtered(r, 0, keep, out);
+    for (std::int32_t r : ordered_roots()) walk_filtered(r, 0, keep, out);
     return out;
   }
 
@@ -345,8 +353,15 @@ class Tree {
     }
   }
 
+  std::vector<std::int32_t> ordered_roots() const {
+    std::vector<std::int32_t> out = roots_;
+    if (newest_first_) std::ranges::reverse(out);
+    return out;
+  }
+
   std::vector<Node> nodes_;
   std::vector<std::int32_t> roots_;
+  bool newest_first_ = false;
   std::unordered_map<std::uint64_t, std::int32_t> by_id_;
   std::vector<std::string> words_;
   std::optional<std::int32_t> worker_;

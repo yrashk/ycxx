@@ -217,6 +217,13 @@ void tree() {
   check(g.roots().size() == 1 && g.node(0).group && g.node(0).children.size() == 1, "a request holds its events");
   check(g.node(0).ev.outcome == Outcome::reused && g.node(0).ev.end_ns == 50, "a request that ran nothing is reused");
   check(g.summary().events == 1, "requests are not counted as events");
+  const std::uint64_t r2 = (std::uint64_t{1} << 63) | 2;
+  g.open_group(r2, "#2 cxx a.cpp", 60);
+  g.add(std::vector<Event>{ev(20, 0, "Tu", "a.cpp", Outcome::executed)}, r2);
+  check(!g.node(0).expanded && g.node(2).expanded, "a new request folds the earlier ones");
+  check(g.node(g.rows().front().node).ev.key == "#1 cxx a.cpp", "oldest first by default");
+  g.set_newest_first(true);
+  check(g.node(g.rows().front().node).ev.key == "#2 cxx a.cpp" && g.rows().size() == 3, "newest first, the latest open");
 }
 
 void lines() {
