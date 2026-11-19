@@ -372,6 +372,17 @@ struct StaticInit {
   EntityId dso;
 };
 
+// A block-scope variable with static storage duration ([stmt.dcl]/3): `BodySema::locals[local]`
+// names its entity. `value` is the constant it is initialized with ([basic.start.static]);
+// otherwise `init`, if any, initializes it the first time control passes here, once, under its
+// guard, and then `destructor`, if any, is registered to run at exit ([basic.start.term]).
+struct StaticVar {
+  u32 local;
+  Child init;
+  ConstId value;
+  EntityId destructor;
+};
+
 struct Attribute {
   NameId scope;  // NameId of the attribute-namespace, or of "" for none
   NameId name;
@@ -383,7 +394,7 @@ using Nodes = closed_list<Literal, DeclRef, Paren, Unary, Binary, OrderedBinary,
                           Conditional, While, Do, For, Break, Continue, DeclStmt, Declarator, DeclGroup,
                           IfConsteval, StaticAssert, Member, InitList, ValueInit, DefaultInit, This,
                           MemberCall, Materialize, CtorCall, MemberInit, Destructor, DestroyMember, Dependent,
-                          DepName, BuiltinCall, Lambda, StaticInit>;
+                          DepName, BuiltinCall, Lambda, StaticInit, StaticVar>;
 
 static_assert(Nodes::size < max_node_kinds);
 

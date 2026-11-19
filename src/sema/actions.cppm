@@ -1405,6 +1405,19 @@ public:
     return index;
   }
   void set_local_decl(u32 local, NodeId decl) { locals_[local].decl = decl; }
+  // A static block-scope variable's entity ([stmt.dcl]/3): local to the function, or the lambda,
+  // being defined, numbered among its statics of that name as Itanium discriminates them
+  // (§5.1.6), with no linkage.
+  void static_local(u32 local) {
+    ast::LocalRec& l = locals_[local];
+    EntityId scope = lambdas_.empty() ? current_function : lambdas_.back().call;
+    u32 ordinal = u32(std::ranges::count_if(statics_, [&](const auto& s) { return s.first == scope && s.second == l.name; }));
+    statics_.push_back({scope, l.name});
+    EntityRec r{EntityKind::variable, l.name, l.type, LangLinkage::cxx, ast::Linkage::none, {}, scope};
+    r.head = ast::mix(ast::seed("ycxx.sema.static-local"), u64(ordinal));
+    r.ordinal = ordinal;
+    l.entity = w_->entities.entity(std::move(r));
+  }
   // An array of unknown bound gets its bound from its initializer ([dcl.array]/8).
   void set_local_type(u32 local, QualType t) { locals_[local].type = t; }
   // A local usable in constant expressions ([expr.const]): constexpr, or const integral with a
@@ -4874,6 +4887,7 @@ private:
   ast::ItemId item_;
   u32 loc_base_;
   std::vector<ast::LocalRec> locals_;
+  std::vector<std::pair<EntityId, NameId>> statics_;  // the static locals so far: (function, name)
   // Packs ([temp.variadic]): the expansions being instantiated, innermost last, each with the
   // element its pattern is read for; the packs each operand being read names; and the function
   // parameter packs of the function being instantiated.

@@ -3383,22 +3383,37 @@ public:
     return s_->node(ast::Return{sema::Sema::at(value, begin)}, begin, pos());
   }
 
+  // A block-scope variable's node: a `LocalVar`, or for a static one a `StaticVar`, an entity of its
+  // own initialized the first time control passes its declaration ([stmt.dcl]/3), with the
+  // constant it is initialized with when its initializer is a constant expression
+  // ([basic.start.static]).
+  Ex variable_node(const DeclSpec& spec, u32 local, Ex init, ast::EntityId dtor, u32 dbegin) {
+    if (!spec.is_static) return s_->node(ast::LocalVar{local, sema::Sema::at(init, dbegin), dtor}, dbegin, pos());
+    if (s_->types().is_reference(s_->local(local).type)) {
+      s_->diag(dbegin, Diag::not_supported, Tk::kw_static);  // a static reference (#367)
+      return {NodeId::none, dbegin, pos()};
+    }
+    s_->static_local(local);
+    ast::ConstId value = ast::ConstId::none;
+    if (init.ok() && !s_->dependent(init) && !s_->types().is_dependent(s_->local(local).type)) {
+      sema::Evaluated v = sema::Evaluator(*s_, questions()).evaluate(init);
+      if (v.value) value = *v.value;
+      else if (spec.is_constinit && !v.dependent) s_->diag(init.begin, Diag::not_constant, v.reason);
+    }
+    return s_->node(ast::StaticVar{local, sema::Sema::at(init, dbegin), value, dtor}, dbegin, pos());
+  }
+
   // A block-scope simple-declaration ([stmt.dcl], [dcl.pre]): each declarator is a local
   // variable, in scope from the end of its declarator ([basic.scope.pdecl]).
   Ex declaration_statement() {
     u32 begin = pos();
     DeclSpec spec = decl_specifiers();
-    if (spec.is_static || spec.is_extern || spec.is_inline) {
-      s_->diag(begin, Diag::not_supported,
-               spec.is_static ? Tk::kw_static : spec.is_extern ? Tk::kw_extern : Tk::kw_inline);
+    if (spec.is_extern || spec.is_inline) {
+      s_->diag(begin, Diag::not_supported, spec.is_extern ? Tk::kw_extern : Tk::kw_inline);
       skip_to_semi();
       return {NodeId::none, begin, pos()};
     }
-    if (spec.is_constinit) {
-      s_->diag(begin, Diag::constinit_automatic);  // [dcl.constinit]/1
-      skip_to_semi();
-      return {NodeId::none, begin, pos()};
-    }
+    if (spec.is_constinit && !spec.is_static) s_->diag(begin, Diag::constinit_automatic);  // [dcl.constinit]/1
     if (spec.is_consteval) {
       s_->diag(begin, Diag::consteval_not_function);
       skip_to_semi();
@@ -3464,7 +3479,7 @@ public:
           return {NodeId::none, begin, pos()};
         }
         ast::EntityId dtor = s_->types().is_reference(d.type) ? ast::EntityId::none : s_->destructor_of(d.type);
-        Ex var = s_->node(ast::LocalVar{local, sema::Sema::at(init, dbegin), dtor}, dbegin, pos());
+        Ex var = variable_node(spec, local, init, dtor, dbegin);
         s_->set_local_decl(local, var.id);
         vars.push_back(var);
         continue;
@@ -3564,7 +3579,7 @@ public:
       }
       // The destructor that ends the variable at scope exit ([stmt.dcl]); a reference has none.
       ast::EntityId dtor = s_->types().is_reference(d.type) ? ast::EntityId::none : s_->destructor_of(d.type);
-      Ex var = s_->node(ast::LocalVar{local, sema::Sema::at(init, dbegin), dtor}, dbegin, pos());
+      Ex var = variable_node(spec, local, init, dtor, dbegin);
       s_->set_local_decl(local, var.id);
       vars.push_back(var);
     } while (accept(Tk::comma));

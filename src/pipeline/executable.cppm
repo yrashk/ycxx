@@ -110,10 +110,35 @@ const link::dylib& libsystem() {
   return lib;
 }
 
+// /usr/lib/libc++abi.dylib, the C++ ABI runtime (`__cxa_guard_acquire`, Itanium C++ ABI §3.3.3),
+// with its exports from the SDK's stub; none without one.
+const std::optional<link::dylib>& libcxxabi() {
+  static const std::optional<link::dylib> lib = []() -> std::optional<link::dylib> {
+    if (const auto& sdk = sdk_path()) {
+      std::ifstream in(*sdk / "usr/lib/libc++abi.tbd", std::ios::binary);
+      if (in) {
+        std::string text{std::istreambuf_iterator<char>(in), {}};
+        return link::dylib{"/usr/lib/libc++abi.dylib", link::tbd_exports(text), 0x08981b00, 0x00010000};  // 2200.27, 1.0
+      }
+    }
+    return std::nullopt;
+  }();
+  return lib;
+}
+
 std::expected<std::vector<std::uint8_t>, std::vector<link::error>> link_executable(std::span<const obj::object> objects,
                                                                                    std::string identifier) {
   link::options opts;
   opts.dylibs = {libsystem()};
+  // libc++abi when the objects need a name only it exports.
+  const auto& abi = libcxxabi();
+  const auto& sys = libsystem().exports;
+  if (abi && sys && std::ranges::any_of(objects, [&](const obj::object& o) {
+        return std::ranges::any_of(o.symbols, [&](const obj::symbol& s) {
+          return !s.defined() && !sys->contains(s.name) && abi->exports->contains(s.name);
+        });
+      }))
+    opts.dylibs.push_back(*abi);
   opts.identifier = std::move(identifier);
   return link::link(objects, opts);
 }

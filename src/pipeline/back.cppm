@@ -90,6 +90,12 @@ struct Entity {
   std::vector<std::uint8_t> template_same_heads{};  // by argument: see `TemplateSpec`
   // A GNU asm label: the symbol exactly as written (docs/EXTENSIONS.md); empty if none.
   std::string asm_label{};
+  // A static local ([stmt.dcl]/3), or with `guard` its guard variable: the function it is local
+  // to, whose <encoding> its <local-name> begins with, and its number among that function's
+  // statics of its name (Itanium C++ ABI §5.1.6, §3.3.3).
+  EntityId local_function = EntityId::none;
+  std::uint32_t discriminator = 0;
+  bool guard = false;
 };
 
 // A function definition: what `function_ir(F)` reads (irgen::FunctionInput, without a thunk's
@@ -101,6 +107,10 @@ struct FunctionDef {
   ast::ItemId item{};
   std::uint32_t body_offset = 0;  // the declaration part's length in tokens
   std::optional<QualType> this_type{};  // a non-static member function's
+  // Its static locals' guard variables and the runtime functions their initialization calls
+  // ([stmt.dcl]/3; irgen::FunctionInput).
+  std::vector<irgen::FunctionInput::StaticGuard> guards{};
+  EntityId guard_acquire = EntityId::none, guard_release = EntityId::none, atexit = EntityId::none, dso = EntityId::none;
 };
 
 // A variable definition at namespace scope with its constant initializer, or `ConstId::none` for
@@ -771,6 +781,11 @@ engine::query_task<Generated> FunctionGen::run(engine::Ctx& cx, FnKey k) {
   const FunctionDef& d = src.def;
   irgen::FunctionInput input{d.entity, d.decl, d.body, d.item, d.body_offset};
   input.this_type = d.this_type;
+  input.guards = d.guards;
+  input.guard_acquire = d.guard_acquire;
+  input.guard_release = d.guard_release;
+  input.atexit = d.atexit;
+  input.dso = d.dso;
   auto f = irgen::function_ir(*universe().in, input, facts);
   if (!f) co_return Generated{std::nullopt, BackError{ast::Loc{d.item, d.body_offset}, f.error()}};
   co_return Generated{std::move(*f), std::nullopt};
@@ -1057,8 +1072,13 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
     }
     return n;
   };
+  std::vector<const Entity*> locals;  // named after their functions, below
   for (const Entity& e : tu.entities) {
     if (!used.contains(ir::raw(e.id))) continue;
+    if (e.local_function != EntityId::none) {
+      locals.push_back(&e);
+      continue;
+    }
     // The complete-object constructor and destructor (C1, D1): with no virtual bases they are the
     // base-object ones too (#136).
     std::string name_ = e.special == Special::constructor ? "C1" : e.special == Special::destructor ? "D1" : e.name;
@@ -1071,6 +1091,22 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
     }
     if (!e.asm_label.empty()) name = e.asm_label;
     symbols.push_back({e.id, std::move(*name), e.linkage == ast::Linkage::internal ? obj::binding::local : obj::binding::global});
+  }
+  // A static local and its guard: `_ZZ <encoding> E <name> [_<n>]` and `_ZGV` before it, the
+  // function's own <encoding> taken from its symbol (Itanium C++ ABI §5.1.6, §5.1.4.6).
+  for (const Entity* e : locals) {
+    auto f = std::ranges::find(symbols, e->local_function, &aarch64::Symbol::entity);
+    if (f == symbols.end()) {
+      errors.push_back({e->at, std::format("the name of the static local '{}': its function has no symbol", e->name)});
+      continue;
+    }
+    std::string_view fs = f->name;
+    std::string encoding = fs.starts_with("__Z") ? std::string(fs.substr(3))  // `_` + `_Z` + encoding
+                                                 : std::format("{}{}", fs.size() - 1, fs.substr(1));  // C linkage, `main`
+    std::uint32_t k = e->discriminator;
+    std::string disc = k == 0 ? "" : k <= 10 ? std::format("_{}", k - 1) : std::format("__{}_", k - 1);
+    symbols.push_back({e->id, std::format("_{}Z{}E{}{}{}", e->guard ? "_ZGV" : "_Z", encoding, e->name.size(), e->name, disc),
+                       obj::binding::local});
   }
   if (!errors.empty()) co_return out;
 

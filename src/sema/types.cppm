@@ -505,6 +505,8 @@ public:
         r.kind == EntityKind::function_template)
       f = ast::mix(f, types_->fp(types_->canonical(r.type)));
     if (r.kind == EntityKind::variable) f = ast::mix(f, std::to_underlying(r.lang));
+    // A static local's number among its function's statics of its name ([stmt.dcl]/3).
+    if (r.kind == EntityKind::variable && r.head != Fp128{}) f = ast::mix(f, r.head);
     if (r.kind == EntityKind::function_template || r.kind == EntityKind::class_template ||
         r.kind == EntityKind::variable_template || r.kind == EntityKind::alias_template || r.kind == EntityKind::concept_ ||
         r.kind == EntityKind::namespace_)
