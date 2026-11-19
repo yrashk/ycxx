@@ -964,8 +964,14 @@ public:
     bool member = it_->parent != items::none && p_->items().items[it_->parent].kind == ItemKind::class_def;
     switch (it_->kind) {
     case ItemKind::empty:
-    case ItemKind::access_spec:
-    case ItemKind::linkage_block: break;  // its members are items of their own
+    case ItemKind::access_spec: break;
+    case ItemKind::stray:  // a `}` that closes nothing ([gram]: no declaration begins with it)
+      s_.diag(0, Diag::extraneous_brace);
+      bad();
+      break;
+    case ItemKind::linkage_block:  // its members are items of their own
+      braces_closed();
+      break;
     case ItemKind::declaration:
       if (member) member_declaration();
       else declaration();
@@ -1470,7 +1476,9 @@ private:
     p_->current_instantiation(pattern, k_, sem);
     ps_.seek(it_->brace_end);
     q_.own_class_complete = true;
-    if (!ps_.accept(Tk::semi)) {
+    if (ps_.at_end()) {
+      ps_.expect(Tk::semi);  // the `;` is missing ([class.pre]/1)
+    } else if (!ps_.accept(Tk::semi)) {
       s_.diag(ps_.pos(), Diag::not_supported, ps_.kind());  // declarators after a partial specialization
       bad();
     }
@@ -1669,6 +1677,10 @@ private:
     ps_.seek(it_->brace_end);
     q_.own_class_complete = true;
     if (ps_.accept(Tk::semi)) return;
+    if (ps_.at_end()) {  // the `;` is missing; the definition stands ([class.pre]/1)
+      ps_.expect(Tk::semi);
+      return;
+    }
     DeclSpec spec;
     spec.begin = at;
     spec.type = sem.type;
@@ -1758,6 +1770,7 @@ private:
       NameId en = ps_.name_of(ps_.tok());
       u32 en_at = ps_.pos();
       ps_.bump();
+      ps_.skip_attributes();  // an enumerator's attribute-specifier-seq ([dcl.enum]/1)
       std::int64_t value = next;
       if (!ps_.is(Tk::equal) && fixed && !values.empty()) {
         // An implicit value must fit the fixed type too.
@@ -1804,7 +1817,11 @@ private:
       decls_.push_back(xs);
       xs.type = prev_type;  // inside the list
       s_.own.push_back({en, xs});
-      if (!ps_.accept(Tk::comma)) break;
+      if (!ps_.accept(Tk::comma)) {
+        // [dcl.enum]/1: the enumerator-list is comma-separated.
+        if (!ps_.is(Tk::r_brace) && !ps_.at_end()) s_.diag(ps_.pos(), Diag::expected_token, Tk::comma);
+        break;
+      }
     }
     // [dcl.enum]/7: without a fixed type, the type holds every value, and is no larger than int
     // unless a value fits neither int nor unsigned int.
@@ -1828,6 +1845,12 @@ private:
     p_->classes_.publish_enum(e, std::move(er));
     ps_.seek(it_->brace_end);
     if (ps_.accept(Tk::semi)) return;
+    // The item ended at the brace: the `;` is missing, and the definition stands
+    // ([class.pre]/1, [dcl.enum]/1).
+    if (ps_.at_end()) {
+      ps_.expect(Tk::semi);
+      return;
+    }
     DeclSpec spec;
     spec.begin = at;
     spec.type = t;
@@ -1852,6 +1875,12 @@ private:
     ast::DeclSema c = class_decl(ce, true);
     s_.current_class = ce;  // names in a member declaration are looked up in the class first
     if (ps_.accept(Tk::semi)) return;
+    // An access-specifier missing its `:` ([class.access.spec]/1).
+    if ((ps_.is(Tk::kw_public) || ps_.is(Tk::kw_protected) || ps_.is(Tk::kw_private)) && ps_.kind(1) != Tk::colon) {
+      ps_.bump();
+      ps_.expect(Tk::colon);
+      return bad();
+    }
     // A constructor or destructor ([class.ctor], [class.dtor]): the class's name, or `~` and it,
     // then a parameter list.
     NameId cname = p_->world().entities.rec(ce).name;
@@ -2035,7 +2064,24 @@ private:
   }
 
   // `namespace N { … }` ([namespace.def]): the namespace its members belong to.
+  // A namespace's or linkage block's `}` ([namespace.def], [dcl.link]): the splitter cut the item
+  // at the end of the file without one.
+  void braces_closed() {
+    const pp::Region& r = p_->region();
+    if (it_->brace_end <= it_->brace_begin) return;
+    int depth = 0;
+    for (u32 t = it_->brace_begin; t < it_->brace_end; ++t) {
+      Tk k = r.tokens[t].kind;
+      depth += k == Tk::l_brace ? 1 : k == Tk::r_brace ? -1 : 0;
+    }
+    if (depth > 0) {
+      ps_.seek(it_->brace_end);
+      ps_.expect(Tk::r_brace);
+    }
+  }
+
   void namespace_definition() {
+    braces_closed();
     if (it_->names.empty()) return;  // an unnamed namespace declares no name
     // [basic.scope.scope]/4, [namespace.def]: a namespace name names nothing else in its scope.
     NameId name = p_->world().ins.names.intern(it_->names.back().name);

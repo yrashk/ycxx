@@ -368,6 +368,20 @@ u32 Splitter::ctor_initializer(u32 j) {
   return j;
 }
 
+// Whether a token can begin a declaration but not continue the declarators after a class or
+// enum body (`struct S { … } const s;` continues; `struct S { … } int main()` does not).
+bool begins_declaration_only(Tk t) {
+  switch (t) {
+  case Tk::kw_void: case Tk::kw_bool: case Tk::kw_char: case Tk::kw_char8_t: case Tk::kw_char16_t:
+  case Tk::kw_char32_t: case Tk::kw_wchar_t: case Tk::kw_short: case Tk::kw_int: case Tk::kw_long:
+  case Tk::kw_signed: case Tk::kw_unsigned: case Tk::kw_float: case Tk::kw_double: case Tk::kw_auto:
+  case Tk::kw_struct: case Tk::kw_class: case Tk::kw_union: case Tk::kw_enum: case Tk::kw_namespace:
+  case Tk::kw_template: case Tk::kw_using: case Tk::kw_static_assert: case Tk::kw_export:
+    return true;
+  default: return false;
+  }
+}
+
 // Any other item: a declaration, or a definition of a function, class or enum.
 void Splitter::general(u32 k) {
   u32 j = i_;
@@ -483,6 +497,12 @@ void Splitter::general(u32 k) {
           if (!inner.empty()) inner += "::";
           inner += class_scope(class_key, j);
           j = nested(k, j, inner);
+        }
+        // A `;` missing after the body ([class.pre], [dcl.enum]): what follows can only begin a
+        // new declaration, so the item ends at the brace and its analysis reports the `;`.
+        if (begins_declaration_only(kind(j))) {
+          at(k).end = i_ = j;
+          return;
         }
         class_key = none;
         base_clause = false;
