@@ -669,8 +669,18 @@ in `lsp` frames (`LspOut`), the last of which carries LSP's exit status (1 after
   the exit status, and `ctl shutdown` with a session open.
 - Not yet: `compile_commands.json` (#167); stopping a diagnosis on a newer edit,
   `$/cancelRequest`, debouncing and interactive priority (#168); `buffers_in`, the disk-view
-  assertion and one view per session (#169); go-to-definition and diagnostics inside headers
-  (#170, after #34); open documents as eviction roots (#17).
+  assertion and one view per session (#169); go-to-definition from a declaration part (a
+  parameter's type, a base) and of locals (#242); open documents as eviction roots (#17).
+- Go-to-definition and headers' diagnostics (#170): `textDocument/definition` asks the daemon
+  (`lsp::Define`), which checks the document's unit in the editor view and runs
+  `pipeline::DefinitionAt{unit, file, offset}`: the offset's token in the region (its site, a
+  macro's at its name), the innermost item, the node `ast::Red::find` reaches in that item's
+  function body, and the entity a `DeclRef`, `Member` or `Call` there names; then that entity's
+  first declaration (`FrontResult::declared`, kept with errors too) mapped back to a file and an
+  offset. Diagnostics located in a file the editor has not opened are published under it and
+  cleared when no document reports them; a header's message is rendered against its open buffer
+  in the editor view. `daemon.lsp`'s `definitions` covers a header's function, unsaved text, a
+  header's warning shown, moved by an unsaved edit, and cleared (mutation-checked).
 
 ## The L1 interpreter (#25, 2026-11-18)
 

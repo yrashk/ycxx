@@ -100,6 +100,11 @@ std::optional<Request> check_one(const Request& r, std::string_view source);
 // stderr after the request's own diagnostics, with status 1.
 int finish(Done& d);
 
+// Go-to-definition (#170): in the unit of `r`'s first source, the place where the entity named at
+// byte `offset` of `file` (absolute: the source or a header it includes) is first declared.
+std::optional<pipeline::FileOffset> definition(const Request& r, pp::Host& host, pipeline::Session& session,
+                                               const std::string& file, std::uint32_t offset, Units units = {});
+
 }  // namespace ycxx::compile
 
 namespace ycxx::compile {
@@ -440,6 +445,19 @@ Done run(const Request& r, pp::Host& host, pipeline::Session& session, const Sto
   }
   d.outputs.push_back({out.native_encoded_string(), image.image, true});
   return d;
+}
+
+std::optional<pipeline::FileOffset> definition(const Request& r, pp::Host& host, pipeline::Session& session,
+                                               const std::string& file, std::uint32_t offset, Units units) {
+  auto opts = parse_options(views(r.argv));
+  if (!opts || opts->sources.empty()) return std::nullopt;
+  pp::Config config = pp::with_system_dirs(opts->pp);
+  config.view = units.view;
+  pp::configure(config, host);
+  const std::string& s = opts->sources.front();
+  const pipeline::TuId tu = session.unit({s, r.cwd, config, object_name(s).native_encoded_string()});
+  auto found = session.run<pipeline::DefinitionAt>({tu, pp::path_id(file), offset});
+  return found ? *found : std::nullopt;
 }
 
 int finish(Done& d) {
