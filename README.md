@@ -45,7 +45,8 @@ build/bin/ycxx cxx hello.cpp -o hello && ./hello
   (`public`, `protected`, `private`) and friend functions and classes;
 - single and multiple inheritance (not virtual): base classes laid out as Clang does, member
   lookup through bases, derived-to-base conversions, base initializers;
-- namespaces, typedefs and alias declarations, `using` declarations and directives;
+- namespaces, nested (`namespace a::b`) and inline ones, typedefs and alias declarations,
+  `using` declarations and directives;
 - `[[…]]` attributes, the GNU attributes and `asm` labels the macOS SDK's headers use, and the
   type-trait built-ins libycxx's headers use (`__is_same`, `__remove_cv`, …)
   ([docs/EXTENSIONS.md](docs/EXTENSIONS.md));

@@ -74,7 +74,6 @@ public:
   // enclosing namespace ([namespace.def]/7, [namespace.unnamed]).
 
   const std::string& ns_of(u32 k) const { return ns_of_[k]; }
-  const std::string& inner_of(u32 k) const { return inner_of_[k]; }
   bool in_class(u32 k) const { return in_class_[k]; }
   // The entity of namespace `path`, none for the global one.
   EntityId namespace_entity(const std::string& path) {
@@ -278,7 +277,9 @@ public:
       if (j >= item + (self ? 1 : 0)) break;
       const items::Item& it = items_->items[j];
       const items::DeclName& n = it.names[k];
-      if (in_class_[j] || (ns_of_[j] != path && (inhabit || eff_ns_[j] != path))) continue;
+      const bool nested = it.kind == ItemKind::namespace_def;  // only these have per-name scopes
+      const std::string& ns = nested ? name_ns(j, k) : ns_of_[j];
+      if (in_class_[j] || (ns != path && (inhabit || (nested ? name_eff_ns(j, k) : eff_ns_[j]) != path))) continue;
       if (n.flags & items::name_flag::unknown) {
         if (std::ranges::find(running_, j) != running_.end()) continue;
         item_sema(j);  // resolves its targets
@@ -919,6 +920,17 @@ private:
   std::map<u32, Dmi> dmis_;                       // by field entity
   std::map<u32, std::vector<sema::BaseRec>> class_bases_;  // by class entity
   std::vector<std::string> ns_of_, eff_ns_;       // by item
+  // A namespace definition's components' namespaces, as declared and for lookup, by name
+  // (`namespace a::b` declares `a` in the enclosing namespace and `b` in `a`).
+  std::map<u32, std::vector<std::pair<std::string, std::string>>> name_scopes_;
+  const std::string& name_ns(u32 item, u32 name) const {
+    auto it = name_scopes_.find(item);
+    return it != name_scopes_.end() && name < it->second.size() ? it->second[name].first : ns_of_[item];
+  }
+  const std::string& name_eff_ns(u32 item, u32 name) const {
+    auto it = name_scopes_.find(item);
+    return it != name_scopes_.end() && name < it->second.size() ? it->second[name].second : eff_ns_[item];
+  }
   std::vector<std::string> inner_of_;             // by namespace definition item: the namespace
   std::vector<bool> in_class_;                    // by item
   // By declared name: (item, index in its names), in order; a lookup visits only its own name's.
@@ -946,21 +958,39 @@ private:
         eff_ns_[k] = ns ? inner_eff[p] : eff_ns_[p];
       }
       if (its[k].kind != ItemKind::namespace_def) continue;
-      // The identifiers of `namespace a::b`, or none for an unnamed one; `inline` makes it
-      // transparent to lookup.
+      // The identifiers of `namespace a::inline b`, or none for an unnamed one; `inline` before
+      // a component makes it transparent to lookup ([namespace.def]/7). Component i is declared
+      // in the namespace the ones before it name.
+      std::vector<std::pair<std::string, bool>> names;
       bool is_inline = false;
-      std::vector<std::string> names;
       for (u32 t = its[k].begin; t < its[k].brace_begin; ++t) {
+        // Past attributes, `[[…]]` and `__attribute__((…))`.
+        if (r_->tokens[t].kind == lex::Tk::l_square || r_->tokens[t].kind == lex::Tk::l_paren) {
+          int depth = 0;
+          for (; t < its[k].brace_begin; ++t) {
+            lex::Tk x = r_->tokens[t].kind;
+            depth += (x == lex::Tk::l_square || x == lex::Tk::l_paren) - (x == lex::Tk::r_square || x == lex::Tk::r_paren);
+            if (depth == 0) break;
+          }
+          continue;
+        }
+        if (r_->tokens[t].kind == lex::Tk::identifier && t + 1 < its[k].brace_begin && r_->tokens[t + 1].kind == lex::Tk::l_paren)
+          continue;  // `__attribute__`, whose parentheses come next
         if (r_->tokens[t].kind == lex::Tk::kw_inline) is_inline = true;
-        if (r_->tokens[t].kind == lex::Tk::identifier) names.push_back(std::string(r_->name(r_->tokens[t])));
+        if (r_->tokens[t].kind == lex::Tk::identifier) {
+          names.push_back({std::string(r_->name(r_->tokens[t])), is_inline});
+          is_inline = false;
+        }
       }
       bool anonymous = names.empty();
-      if (anonymous) names.push_back("(anonymous)");
+      if (anonymous) names.push_back({"(anonymous)", true});
       inner_of_[k] = ns_of_[k];
       inner_eff[k] = eff_ns_[k];
-      for (const std::string& n : names) inner_of_[k] += (inner_of_[k].empty() ? "" : "::") + n;
-      if (!is_inline && !anonymous)
-        for (const std::string& n : names) inner_eff[k] += (inner_eff[k].empty() ? "" : "::") + n;
+      for (const auto& [n, inl] : names) {
+        if (!anonymous) name_scopes_[k].push_back({inner_of_[k], inner_eff[k]});
+        inner_of_[k] += (inner_of_[k].empty() ? "" : "::") + n;
+        if (!inl) inner_eff[k] += (inner_eff[k].empty() ? "" : "::") + n;
+      }
     }
     for (u32 k = 0; k < its.size(); ++k) {
       if (in_class_[k] || its[k].kind != ItemKind::declaration) continue;
@@ -2960,20 +2990,87 @@ private:
 
   void namespace_definition() {
     braces_closed();
+    if (!namespace_head_ok()) return bad();
     if (it_->names.empty()) return;  // an unnamed namespace declares no name
     // [basic.scope.scope]/4, [namespace.def]: a namespace name names nothing else in its scope.
-    NameId name = p_->world().ins.names.intern(it_->names.back().name);
+    NameId name = p_->world().ins.names.intern(it_->names.front().name);
     for (DeclId p : q_.visible_decls(name))
       if (auto ds = p_->decl_sema(p); ds && ds->entity != EntityId::none && ds->kind != ast::DeclKind::namespace_ &&
                                       same_scope(*ds)) {
-        s_.diag(it_->names.back().offset, Diag::conflicting_declaration, name);
+        s_.diag(it_->names.front().offset, Diag::conflicting_declaration, name);
         return bad();
       }
-    EntityId e = p_->namespace_entity(p_->inner_of(k_));
-    ast::DeclSema sem = class_decl(e, true);
-    sem.kind = ast::DeclKind::namespace_;
-    sem.type = s_.builtin(sema::Builtin::void_);
-    decls_.push_back(sem);
+    // `namespace a::b`: one declaration of each namespace it names ([namespace.def]/2); a later
+    // component names nothing else in the namespace before it either.
+    std::string path = p_->ns_of(k_);
+    for (const items::DeclName& n : it_->names) {
+      if (&n != &it_->names.front())
+        for (DeclId p : p_->declared_in(n.name, path, k_, false, true))
+          if (auto ds = p_->decl_sema(p); ds && ds->entity != EntityId::none && ds->kind != ast::DeclKind::namespace_) {
+            s_.diag(n.offset, Diag::conflicting_declaration, p_->world().ins.names.intern(n.name));
+            return bad();
+          }
+      path += (path.empty() ? "" : "::") + n.name;
+      ast::DeclSema sem = class_decl(p_->namespace_entity(path), true);
+      sem.kind = ast::DeclKind::namespace_;
+      sem.type = s_.builtin(sema::Builtin::void_);
+      decls_.push_back(sem);
+    }
+  }
+
+  // The head of a namespace definition ([namespace.def.general]): `inline_opt namespace attributes_opt
+  // identifier_opt attributes_opt {`, or a nested-namespace-definition, `namespace a :: inline_opt b
+  // … {`, which has no attributes and no leading `inline`.
+  bool namespace_head_ok() {
+    const pp::Region& r = p_->region();
+    const u32 end = it_->brace_begin;
+    u32 t = it_->begin;
+    auto k = [&](u32 j) { return j < end ? r.tokens[j].kind : Tk::l_brace; };
+    auto fail = [&](u32 j, Diag d) {
+      s_.diag(std::min(j, end) - it_->begin, d);
+      return false;
+    };
+    auto attributes = [&] {
+      bool any = false;
+      for (;;) {
+        u32 open = k(t) == Tk::l_square ? t
+                   : k(t) == Tk::identifier && r.name(r.tokens[t]) == "__attribute__" && k(t + 1) == Tk::l_paren ? t + 1
+                                                                                                                 : end;
+        if (open == end) return any;
+        int depth = 0;
+        for (t = open; t < end; ++t) {
+          Tk x = k(t);
+          depth += (x == Tk::l_square || x == Tk::l_paren) - (x == Tk::r_square || x == Tk::r_paren);
+          if (depth == 0) break;
+        }
+        ++t;
+        any = true;
+      }
+    };
+    if (k(t) == Tk::kw_export) ++t;
+    bool leading_inline = k(t) == Tk::kw_inline;
+    if (leading_inline) ++t;
+    if (k(t) != Tk::kw_namespace) return true;
+    ++t;
+    bool before = attributes();
+    if (t == end) return true;  // an unnamed namespace
+    if (k(t) != Tk::identifier) return fail(t, Diag::expected_namespace_name);
+    ++t;
+    if (k(t) == Tk::coloncolon) {
+      if (before) return fail(it_->begin, Diag::nested_namespace_attributes);
+      if (leading_inline) return fail(it_->begin, Diag::nested_namespace_inline);
+      while (k(t) == Tk::coloncolon) {
+        ++t;
+        if (k(t) == Tk::kw_inline) ++t;
+        if (k(t) != Tk::identifier) return fail(t, Diag::expected_namespace_name);
+        ++t;
+      }
+      if (t != end) return fail(t, Diag::nested_namespace_attributes);
+      return true;
+    }
+    attributes();
+    if (t != end) return fail(t, Diag::expected_namespace_name);
+    return true;
   }
 
   // An array's innermost element type; any other type itself.
