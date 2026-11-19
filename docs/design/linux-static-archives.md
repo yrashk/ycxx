@@ -85,7 +85,8 @@ Write a regular GNU archive with a `/` index first, even when it has zero entrie
 big-endian 32-bit entry count, a member-header offset per entry and the NUL-terminated names in
 the same order. Include each named nonlocal definition, including weak and hidden definitions.
 Preserve repeated definitions across members. The order is operand order, then ELF symbol-table
-order within each member. Undefined and local symbols do not get index entries.
+order within each member. Omit undefined and local symbols from the index. Reject nonlocal ELF
+symbols with empty names so a member has the names needed for static symbol resolution.
 
 Keep ordinary members in operand order with their basenames, including duplicates. Use the GNU
 `//` table for names of 16 or more bytes, names containing whitespace, and names with reserved

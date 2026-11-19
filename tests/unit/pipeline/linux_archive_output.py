@@ -134,7 +134,13 @@ _start:
         (scope / 'new\nline.o').write_bytes(payloads[0])
         with (scope / 'oversized.o').open('wb') as f:
             f.truncate(10_000_000_000)  # Sparse; the member's size field has 10 digits.
+        for part, data in (('defined', payloads[0]), ('undefined', payloads[2])):
+            path = scope / f'unnamed-{part}.o'
+            path.write_bytes(data)
+            symbol_attributes(path, 'tail', unnamed=True)
         for later, error in (('bad.o', b'truncated ELF header'),
+                             ('unnamed-defined.o', b'unnamed-defined.o: empty name for nonlocal ELF symbol'),
+                             ('unnamed-undefined.o', b'unnamed-undefined.o: empty name for nonlocal ELF symbol'),
                              ('wrong-target.o', b'expected an x86-64 relocatable ELF object'),
                              ('new\nline.o', b'cannot represent member basename'),
                              ('oversized.o', b'archive member size exceeds 10 decimal digits'),

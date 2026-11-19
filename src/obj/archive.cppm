@@ -218,7 +218,10 @@ std::expected<std::string, std::string> write(std::span<const member_input> inpu
     auto object = elf::read_object(bytes, std::string(input.path));
     if (!object) return std::unexpected(std::move(object.error()));
     for (auto& symbol : object->symbols) {
-      if (!symbol.defined() || symbol.bind == binding::local || symbol.name.empty()) continue;
+      if (symbol.bind == binding::local) continue;
+      if (symbol.name.empty())
+        return std::unexpected(std::format("{}: empty name for nonlocal ELF symbol", input.path));
+      if (!symbol.defined()) continue;
       constexpr auto overhead = word_size + 1;  // offset and name terminator
       const auto remaining = max_member_size - index_size;
       if (count == max_index_word || remaining < overhead || symbol.name.size() > remaining - overhead)
