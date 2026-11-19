@@ -10,9 +10,13 @@ endif()
 # The pipeline's cells (#63): what a second build and an edit re-execute, and incremental == cold.
 ycxxc_unit_test(pipeline_incremental incremental_test.cpp ycxxc_pipeline)
 
+ycxxc_unit_test(pipeline_elf_executable elf_executable_test.cpp ycxxc_pipeline)
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$"
    AND NOT CMAKE_CROSSCOMPILING)
   add_test(NAME unit.linux_compile
     COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/linux_compile.py
             $<TARGET_FILE:ycxxc> ${CMAKE_C_COMPILER} ${CMAKE_READELF})
+  add_test(NAME unit.pipeline_elf_run
+    COMMAND ${CMAKE_COMMAND} -DPIPELINE=$<TARGET_FILE:unit_pipeline_elf_executable>
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/elf_executable_run.cmake)
 endif()

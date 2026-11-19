@@ -1,7 +1,8 @@
-// Linking a program (#43): the objects and libSystem, through ycxx's linker (ycxx.link), into a
-// signed arm64 macOS executable. Imports are checked against the export list of the SDK's
-// `usr/lib/libSystem.B.tbd`. The SDK is `$SDKROOT`, else what `xcrun --show-sdk-path` prints,
-// else the Command Line Tools' SDK; it is looked up and its export list read once per process.
+// Linking a program (#43) through ycxx's linkers. x86-64 Linux produces a static ELF executable.
+// arm64 macOS links the objects and libSystem into a signed Mach-O executable. Imports are checked
+// against the export list of the SDK's `usr/lib/libSystem.B.tbd`. The SDK is `$SDKROOT`, else what
+// `xcrun --show-sdk-path` prints, else the Command Line Tools' SDK. The SDK is located and its
+// export list read once per process.
 //
 // `link(P)` is the engine query over a program's translation units: their `tu(TU)` objects, in
 // command-line order, then the objects given as files. The SDK is read outside the engine, once
@@ -13,6 +14,7 @@ export module ycxx.pipeline:executable;
 import std;
 import ycxx.engine;
 export import ycxx.link;
+import ycxx.link.elf;
 import :back;
 
 export namespace ycxx::pipeline {
@@ -24,7 +26,8 @@ const std::optional<std::filesystem::path>& sdk_path();
 // accepted (the loader then reports a missing one).
 const link::dylib& libsystem();
 
-// The executable's bytes, or the linker's errors. `identifier` names the code signature.
+// The executable's bytes, or the linker's errors. `identifier` names the Mach-O code signature.
+// Linux objects define `_start` or use the pipeline's freestanding startup with `main`.
 std::expected<std::vector<std::uint8_t>, std::vector<link::error>> link_executable(std::span<const obj::object> objects,
                                                                                    std::string identifier);
 
@@ -110,8 +113,77 @@ const link::dylib& libsystem() {
   return lib;
 }
 
+namespace {
+
+obj::object linux_startup() {
+  obj::object startup;
+  startup.name = "<ycxx Linux startup>";
+  startup.arch = obj::target::x86_64_linux;
+  const auto text = startup.add_section(obj::standard_section::text);
+  startup.define("_start", obj::binding::hidden, text);
+  auto& code = startup.sections[text];
+  // The AMD64 psABI initial stack has 16-byte alignment, then argc and argv at offsets 0 and 8.
+  // Leave %rsp in place so the call also meets the System V function-entry alignment rule.
+  code.emit(std::array<std::uint8_t, 15>{
+      0x31, 0xed,                // xor ebp, ebp
+      0x8b, 0x3c, 0x24,          // mov edi, [rsp]
+      0x48, 0x8d, 0x74, 0x24, 8, // lea rsi, [rsp + 8]
+      0xe8, 0, 0, 0, 0});       // call main
+  code.relocate(obj::reloc_kind::x86_64_plt32, startup.reference("main"), -4);
+  code.emit(std::array<std::uint8_t, 9>{
+      0x89, 0xc7,        // mov edi, eax
+      0xb8, 60, 0, 0, 0, // mov eax, 60 (Linux exit)
+      0x0f, 0x05});      // syscall
+  return startup;
+}
+
+std::expected<std::vector<std::uint8_t>, std::vector<link::error>> link_linux_executable(
+    std::span<const obj::object> objects) {
+  const auto link_elf = [](std::span<const obj::object> input, std::string_view entry) {
+    return link::elf::link(input, entry).transform_error([](std::string message) {
+      return std::vector<link::error>{{std::move(message)}};
+    });
+  };
+  const obj::symbol* main = nullptr;
+  const obj::object* main_object = nullptr;
+  for (const auto& object : objects) {
+    for (const auto& symbol : object.symbols) {
+      if (!symbol.defined() || (symbol.bind != obj::binding::global && symbol.bind != obj::binding::hidden)) continue;
+      if (symbol.name == "_start") return link_elf(objects, "_start");
+      // Match the static linker's choice of the first weak definition or the strong definition.
+      if (symbol.name == "main" && (!main || (main->weak && !symbol.weak))) {
+        main = &symbol;
+        main_object = &object;
+      }
+    }
+  }
+
+  // Let the ELF linker diagnose missing or invalid definitions, along with any other input errors.
+  if (!main || *main->section >= main_object->sections.size()) return link_elf(objects, "main");
+  const auto& section = main_object->sections[*main->section];
+  if (section.segment != "__TEXT" || section.name != "__text" || main->offset >= section.size())
+    return link_elf(objects, "main");
+
+  // The object model only describes the code symbol. The source caller checks main's type.
+  std::vector<obj::object> with_startup(objects.begin(), objects.end());
+  with_startup.push_back(linux_startup());
+  return link_elf(with_startup, "_start");
+}
+
+}  // namespace
+
 std::expected<std::vector<std::uint8_t>, std::vector<link::error>> link_executable(std::span<const obj::object> objects,
                                                                                    std::string identifier) {
+  const auto target = objects.empty() ? obj::target::aarch64_macos : objects.front().arch;
+  for (const auto& object : objects) {
+    if (object.arch != obj::target::aarch64_macos && object.arch != obj::target::x86_64_linux)
+      return std::unexpected(std::vector<link::error>{{std::format("{}: unsupported executable object target", object.name)}});
+    if (object.arch != target)
+      return std::unexpected(std::vector<link::error>{{
+          std::format("{}: cannot mix arm64 Mach-O and x86-64 Linux objects", object.name)}});
+  }
+  if (target == obj::target::x86_64_linux) return link_linux_executable(objects);
+
   link::options opts;
   opts.dylibs = {libsystem()};
   opts.identifier = std::move(identifier);
