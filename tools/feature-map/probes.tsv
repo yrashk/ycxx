@@ -1,4 +1,4 @@
-# Each probe built and run by ycxx 17d28f3602dc and by an oracle (feature-map probe).
+# Each probe built and run by ycxx 529aab8f39b3 and by an oracle (feature-map probe).
 feature	oracle	ycxx	first_error
 lex-core	gcc	pass	
 lex-digraph	gcc	pass	
@@ -99,7 +99,7 @@ class-unions	gcc	fail	'union' is not supported yet
 class-local	gcc	fail	'struct' is not supported yet
 class-access	gcc	pass	
 class-friends	gcc	fail	'friend' is not supported yet
-class-inheritance	gcc	fail	':' is not supported yet
+class-inheritance	gcc	pass	
 class-virtual	gcc	fail	'virtual' is not supported yet
 class-virtual-base	gcc	fail	':' is not supported yet
 class-ref-qual	gcc	fail	'&' is not supported yet

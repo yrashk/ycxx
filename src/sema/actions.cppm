@@ -909,8 +909,11 @@ public:
       diag(name_at, Diag::ambiguous_member, name, Types::unqualified(ct));
       return fail;
     }
-    // A member of a base: named through the base class subobject ([class.member.lookup]).
-    if (found->owner != c) {
+    // A member of a base: named through the base class subobject ([class.member.lookup]); a
+    // static member needs no object, so not the conversion either.
+    if (found->owner != c && found->member && found->member->is_static) {
+      c = found->owner;
+    } else if (found->owner != c) {
       object = to_base(object, found->owner, name_at);
       if (!object.ok()) return fail;
       ct = arrow ? types().pointee(object.type()) : object.type();

@@ -37,7 +37,9 @@ build/bin/ycxx cxx hello.cpp -o hello && ./hello
 - classes and unions: data and static members, member functions, constructors and destructors
   with RAII, aggregate and designated initialization, passing and returning them by value with
   Clang's calling convention, so ycxx and Clang objects call each other; access control
-  (`public`, `private`) and friend functions and classes;
+  (`public`, `protected`, `private`) and friend functions and classes;
+- single and multiple inheritance (not virtual): base classes laid out as Clang does, member
+  lookup through bases, derived-to-base conversions, base initializers;
 - namespaces, typedefs and alias declarations, `using` declarations and directives;
 - `[[…]]` attributes, the GNU attributes and `asm` labels the macOS SDK's headers use, and the
   type-trait built-ins libycxx's headers use (`__is_same`, `__remove_cv`, …)
@@ -86,7 +88,7 @@ checked with the flags of its last build, or else with its line in the project's
 
 - The standard library and its headers. C headers such as `<stdio.h>` compile without warnings
   and `printf` runs; libycxx's `<cstdio>` still needs pointer-to-member types.
-- Inheritance and virtual functions.
+- Virtual functions, virtual base classes, inheriting constructors, and bases of class templates.
 - Member templates, and constraints on class templates and their members.
 - Floating-point arithmetic, exceptions, and optimization (`-O`).
 - Linux and x86-64 output.
