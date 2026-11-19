@@ -344,6 +344,7 @@ public:
     }
   }
   void set_constant(EntityId e, ConstId c, u32 item) { constants_[std::to_underlying(e)] = {item, c}; }
+  bool has_constant(EntityId e) const { return constants_.contains(std::to_underlying(e)); }
   // The current instantiation of the class template item `item` defines ([temp.dep.type]): the
   // class its members belong to while the template is analysed.
   void current_instantiation(EntityId spec, u32 item, const ast::DeclSema& head) {
@@ -503,6 +504,7 @@ public:
   }
   std::optional<ConstId> constant_value(EntityId e, u32 item) {
     variable_instance(e, item);
+    member_value(e);
     auto it = constants_.find(std::to_underlying(e));
     if (it == constants_.end() || it->second.first > item) return std::nullopt;
     return it->second.second;
@@ -579,6 +581,49 @@ public:
     sema::Bindings args;
     u32 point;  // the item whose demand instantiates it ([temp.point])
   };
+  // Static data members of class templates ([temp.inst]/3). The template's analysis records where
+  // each in-class initializer ends; a specialization declares the member and skips it
+  // (`lazy_member`); its value is instantiated on first use (`member_value`), and the members used
+  // are defined in the unit (`used_members`).
+  void set_static_init_end(u32 item, u32 ordinal, u32 end) { static_init_ends_[{item, ordinal}] = end; }
+  std::optional<u32> static_init_end(u32 item, u32 ordinal) {
+    item_sema(item);  // the template's analysis records it
+    auto it = static_init_ends_.find({item, ordinal});
+    if (it == static_init_ends_.end()) return std::nullopt;
+    return it->second;
+  }
+  struct LazyMember {
+    u32 item;
+    u32 ordinal;
+    ClassInstantiation inst;
+    enum class State : u8 { pending, running, done } state = State::pending;
+  };
+  void lazy_member(EntityId e, u32 item, u32 ordinal, const ClassInstantiation& inst) {
+    lazy_members_.try_emplace(std::to_underlying(e), LazyMember{item, ordinal, inst});
+  }
+  bool is_lazy_member(EntityId e) const { return lazy_members_.contains(std::to_underlying(e)); }
+  void member_value(EntityId e);
+  void use_member(EntityId e) {
+    if (!is_lazy_member(e) || std::ranges::contains(used_members_, e)) return;
+    used_members_.push_back(e);
+    member_value(e);
+  }
+  std::span<const EntityId> used_members() const { return used_members_; }
+  // Whether a member's initializer was instantiated and gave no value: its error was reported.
+  bool member_failed(EntityId e) const {
+    auto it = lazy_members_.find(std::to_underlying(e));
+    return it != lazy_members_.end() && it->second.state == LazyMember::State::done && !has_constant(e) &&
+           !member_inits_.contains(std::to_underlying(e));
+  }
+  // A used member's initial value, which a member not usable in constant expressions has too.
+  void set_member_init(EntityId e, ConstId v) { member_inits_[std::to_underlying(e)] = v; }
+  ConstId member_init(EntityId e) const {
+    auto it = member_inits_.find(std::to_underlying(e));
+    return it == member_inits_.end() ? ConstId::none : it->second;
+  }
+  // A template's static data member whose value depends on its arguments ([temp.dep.constexpr]).
+  void value_dependent_member(EntityId e) { value_dependent_members_.insert(std::to_underlying(e)); }
+  bool is_value_dependent_member(EntityId e) const { return value_dependent_members_.contains(std::to_underlying(e)); }
   // `instantiate_fn(spec, END)` (query-engine.md §B6.2): the template's definition item, the
   // specialization's declaration and its body. `failed` when the template's definition had
   // errors already: nothing more is said about it.
@@ -871,6 +916,7 @@ private:
   std::set<u32> var_instantiating_;
 
   bool depth_reported_ = false;
+  u32 members_running_ = 0;  // static data member initializers being instantiated, nested
   std::vector<engine::Diagnostic> end_diags_;    // the END phase's own
   std::vector<EntityId> required_;
   std::map<u32, std::optional<irgen::FunctionIr>> instance_irs_;  // by specialization
@@ -886,6 +932,11 @@ public:
 
 private:
   std::vector<u32> running_;
+  std::map<std::pair<u32, u32>, u32> static_init_ends_;  // by (member item, ordinal): its initializer's end
+  std::map<u32, LazyMember> lazy_members_;                 // by member entity
+  std::vector<EntityId> used_members_;                     // in order of first use
+  std::set<u32> value_dependent_members_;
+  std::map<u32, ConstId> member_inits_;  // by lazily initialized member
   std::map<u32, std::pair<u32, ConstId>> constants_;                // by entity: (item, value)
   std::map<u32, std::vector<std::pair<u32, ast::DeclSema>>> decls_;  // by entity: (item, record)
   std::map<u32, u32> definitions_;               // by function entity: its defining item
@@ -942,6 +993,11 @@ public:
   bool is_union_class(EntityId c) override { return p_->is_union_class(c, point()); }
   std::optional<bool> satisfied(ConstId c) override { return p_->satisfied(c, point()); }
   bool satisfaction_failed(ConstId c) override { return p_->satisfaction_failed(c); }
+  bool value_dependent_member(EntityId v) override { return p_->is_value_dependent_member(v); }
+  bool use_static_member(EntityId v) override {
+    p_->use_member(v);
+    return !p_->member_failed(v);
+  }
   std::optional<ast::DeclSema> earlier_member(ast::NameId name) override {
     const items::Item& it = p_->items().items[item_];
     if (it.parent == items::none || p_->items().items[it.parent].kind != ItemKind::class_def) return std::nullopt;
@@ -1015,6 +1071,11 @@ public:
   bool is_union_class(EntityId c) override { return p_->is_union_class(c, p_->end()); }
   std::optional<bool> satisfied(ConstId c) override { return p_->satisfied(c, p_->end()); }
   bool satisfaction_failed(ConstId c) override { return p_->satisfaction_failed(c); }
+  bool value_dependent_member(EntityId v) override { return p_->is_value_dependent_member(v); }
+  bool use_static_member(EntityId v) override {
+    p_->use_member(v);
+    return !p_->member_failed(v);
+  }
   bool dependent_call(sema::u32 offset) override {
     return p_->dependent_call(item_, offset);
   }
@@ -1090,6 +1151,12 @@ public:
         return std::nullopt;
       return s_.types().class_type(class_entity(n));
     };
+  }
+
+  // Analyses a member item of a class template specialization again, instantiating the
+  // initializer of its static data member with declarator `ordinal` ([temp.inst]/3).
+  ItemAnalysis(Program& p, u32 item, Program::ClassInstantiation inst, u32 ordinal) : ItemAnalysis(p, item, std::move(inst)) {
+    member_value_ = ordinal;
   }
 
   // `var` analyses a variable template's definition for the specialization it names, with the
@@ -2622,6 +2689,12 @@ private:
     // and replaces the member the class's instantiation declared or defined ([temp.expl.spec]).
     if (explicit_) {
       auto latest = p_->declaration(m->entity, k_);
+      // A static data member initialized in its class has its initializer ([class.static.data]/4);
+      // a specialization cannot give it another.
+      if (!fn && has_init && ((mem->flags & sema::decl_flag::definition) || p_->is_lazy_member(m->entity) || p_->has_constant(m->entity))) {
+        s_.diag(d.name_at, Diag::redefinition, d.name);
+        return false;
+      }
       if (definition && latest && (latest->flags & sema::decl_flag::specialization) && (latest->flags & sema::decl_flag::definition)) {
         s_.diag(d.name_at, Diag::redefinition, d.name);
         return false;
@@ -2711,40 +2784,69 @@ private:
       sem.entity = s_.world().entities.entity(
           {sema::EntityKind::variable, d.name, d.type, LangLinkage::cxx, ast::Linkage::external, {}, c.entity});
       // A member whose initializer is in error is still declared, so its uses say nothing more.
+      const u32 ordinal = u32(decls_.size());
       auto declare_member = [&](ConstId v, const Ex& e) {
         sem.flags = flags;
         s_.own.push_back({d.name, sem});
-        p_->declared(sem, k_);
-        declarators_.push_back(s_.node(ast::Declarator{u32(decls_.size()), sema::Sema::at(e, d.begin), v}, d.begin, ps_.pos()));
+        if (!member_value_) p_->declared(sem, k_);
+        declarators_.push_back(s_.node(ast::Declarator{ordinal, sema::Sema::at(e, d.begin), v}, d.begin, ps_.pos()));
         decls_.push_back(sem);
       };
+      // [temp.inst]/3: a class template specialization declares its static data members; the
+      // initializer of one defined in the class (inline or constexpr) is instantiated when the
+      // member is used (`Program::member_value`), from the extent the template's analysis recorded.
+      if (inst_ && (spec.is_inline || spec.is_constexpr) && ps_.is(Tk::equal) && member_value_ != ordinal) {
+        if (auto end = p_->static_init_end(k_, ordinal)) {
+          ps_.seek(*end);
+          p_->lazy_member(sem.entity, k_, ordinal, *inst_);
+          declare_member(ConstId::none, {});
+          return true;
+        }
+      }
       if (ps_.accept(Tk::equal)) {
         Ex e = ps_.assignment_expression();
+        if (!inst_) p_->set_static_init_end(k_, ordinal, ps_.index());
         init = s_.convert(e, d.type, e.begin);
         if (!init.ok()) {
           declare_member(ConstId::none, {});
           return false;
         }
+        // Of a dependent type, it may be integral in a specialization, which checks it again.
         bool usable = spec.is_constexpr || (sema::Types::is_const(d.type) && !sema::Types::is_volatile(d.type) &&
-                                            types.is_integral(d.type));
+                                            (types.is_integral(d.type) || types.is_dependent(d.type)));
         // In a class template, a value-dependent initializer is evaluated in each specialization
-        // ([temp.inst]/3: the static data member is instantiated with the class's declarations).
-        if (usable && (s_.dependent(init) || types.is_dependent(d.type))) {
+        // that uses the member; the template's own uses of it are value-dependent
+        // ([temp.dep.constexpr]/2.3, `Sema::static_member`).
+        if (s_.dependent(init) || types.is_dependent(d.type)) {
+          if (usable) p_->value_dependent_member(sem.entity);
           declare_member(ConstId::none, {});
           return true;
         }
-        sema::Evaluated v = usable ? sema::Evaluator(s_, q_).evaluate(init) : sema::Evaluated{};
+        // An inline one that is not usable in constant expressions is still constant-initialized
+        // when it can be ([basic.start.static]); dynamic initialization is not supported yet.
+        if (!usable && !spec.is_inline) {
+          s_.diag(e.begin, Diag::not_supported, Tk::equal);
+          declare_member(ConstId::none, {});
+          return false;
+        }
+        sema::Evaluated v = sema::Evaluator(s_, q_).evaluate(init);
         if (!v.value) {
-          s_.diag(e.begin, usable ? Diag::not_constant : Diag::not_supported, usable ? v.reason : u64(Tk::equal));
+          s_.diag(e.begin, usable ? Diag::not_constant : Diag::nonconstant_initializer, v.reason);
           declare_member(ConstId::none, {});
           return false;
         }
         value = *v.value;
-        p_->set_constant(sem.entity, value, k_);
+        if (usable) p_->set_constant(sem.entity, value, k_);
+        if (member_value_) p_->set_member_init(sem.entity, value);
       } else if (spec.is_constexpr) {
         s_.diag(d.name_at, Diag::constexpr_uninitialized, d.name);
         declare_member(ConstId::none, {});
         return false;
+      } else if (spec.is_inline && !types.is_dependent(d.type) && s_.has_member_inits(d.type)) {
+        // Default-initialized, as a namespace-scope variable is: its constructor or default member
+        // initializers ([dcl.init.general]/7, [basic.start.static]).
+        if (!s_.require_complete(d.type, d.name_at)) return false;
+        value = *constant_initializer(s_.default_init(d.type, d.name_at, ps_.pos()));
       }
       declare_member(value, init);
       return true;
@@ -3376,6 +3478,9 @@ private:
   NodeId tree_ = NodeId::none;  // the root when it is not a DeclGroup (a static_assert)
   std::optional<Program::ClassInstantiation> inst_;
   std::optional<Program::VarInstantiation> var_;
+  // Analysing a member item again for one static data member's value (`Program::member_value`):
+  // the ordinal of the declarator whose initializer is instantiated.
+  std::optional<u32> member_value_;
   bool single_linkage_spec_ = false;  // `extern "C" declaration` without braces
   bool template_ = false;             // the declaration is a template-declaration ([temp.pre])
   bool explicit_ = false;             // an explicit specialization ([temp.expl.spec])
@@ -3593,6 +3698,31 @@ std::optional<bool> Program::atom_satisfied(ConstId c, u32 point) {
     if (!std::ranges::contains(end_diags_, d) && !std::ranges::contains(seen, d)) end_diags_.push_back(std::move(d));
   atoms_[key] = r;
   return r;
+}
+
+void Program::member_value(EntityId e) {
+  auto it = lazy_members_.find(std::to_underlying(e));
+  if (it == lazy_members_.end() || it->second.state != LazyMember::State::pending) return;
+  it->second.state = LazyMember::State::running;  // a use in its own initializer finds no value
+  LazyMember m = it->second;
+  // [temp.inst]/16: initializers instantiated through each other are limited as classes are; past
+  // the limit, reported once, nothing more is instantiated.
+  if (depth_reported_ || members_running_ >= instantiation_limit) {
+    if (!depth_reported_)
+      end_diags_.push_back({engine::Loc{std::to_underlying(id(m.item)), 0}, sema::diag_id(sema::Diag::instantiation_depth),
+                            {engine::diag_arg(instantiation_limit)}});
+    depth_reported_ = true;
+    lazy_members_.at(std::to_underlying(e)).state = LazyMember::State::done;
+    return;
+  }
+  ++members_running_;
+  Result<ast::ItemSema> r = ItemAnalysis(*this, m.item, m.inst, m.ordinal).run();
+  --members_running_;
+  // What the template's definition diagnosed it says once, there.
+  if (item_sema(m.item).diags.empty())
+    for (engine::Diagnostic& d : r.diags)
+      if (!std::ranges::contains(end_diags_, d)) end_diags_.push_back(std::move(d));
+  lazy_members_.at(std::to_underlying(e)).state = LazyMember::State::done;
 }
 
 // ---------------------------------------------------------------- analyze_body

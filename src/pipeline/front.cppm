@@ -184,7 +184,7 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
     }
   }
   // The static data members of class template specializations that are defined in the class
-  // (constexpr or inline, [class.static.data]/4), with their constants.
+  // (constexpr or inline, [class.static.data]/4) and used, with their constants.
   for (const parse::Program::MemberInstance& m : program.member_instances()) {
     if (!m.cell->diags.empty() || world.types.is_dependent(world.types.class_type(m.spec))) continue;
     const ast::ItemSema& is = m.cell->value;
@@ -194,9 +194,15 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
       if (dr.decl >= ins.seqs.size(is.decls)) continue;
       ast::DeclSema d = ins.seqs.at(is.decls, dr.decl);
       if (d.kind != ast::DeclKind::variable || d.entity == EntityId::none || !(d.flags & sema::decl_flag::definition)) continue;
+      // One whose initializer waits for a use is defined when it was used ([temp.inst]/3).
+      ast::ConstId value = dr.value;
+      if (program.is_lazy_member(d.entity)) {
+        if (!std::ranges::contains(program.used_members(), d.entity)) continue;
+        value = program.member_init(d.entity);
+      }
       ast::Loc at{program.id(m.item), c.at};
       declare(d, at);
-      tu.variables.push_back({d.entity, d.type, dr.value, at});
+      tu.variables.push_back({d.entity, d.type, value, at});
     }
   }
   for (EntityId spec : program.required()) {

@@ -95,6 +95,11 @@ public:
   // Whether checking normal form `c`'s satisfaction raised a hard error (an atom not of type
   // bool, not constant, or not supported): the expression that asked is then invalid.
   virtual bool satisfaction_failed(ConstId /*c*/) { return false; }
+  // A class template's static data member whose initializer is value-dependent; and a use of a
+  // specialization's static data member, which instantiates its initializer ([temp.inst]/3).
+  virtual bool value_dependent_member(EntityId /*v*/) { return false; }
+  // False when its initializer was in error, which was reported: what uses it says nothing more.
+  virtual bool use_static_member(EntityId /*v*/) { return true; }
   // Whether class `c`, complete or not, was declared with the class-key `union`.
   virtual bool is_union_class(EntityId /*c*/) { return false; }
   // In an instantiation: the pack expansions the definition of what it re-analyses recorded.
@@ -1627,11 +1632,12 @@ public:
     return bound_member(c, name, object, true, begin, end);
   }
 
-  // A static data member of class `c`. Of the current instantiation of a class template, a const
-  // one is value-dependent: its initializer may be ([temp.dep.constexpr]/2.3), and its value is
-  // known in each specialization.
+  // A static data member of class `c`. Of the current instantiation of a class template, one whose
+  // initializer is value-dependent is value-dependent ([temp.dep.constexpr]/2.3); of a
+  // specialization, naming it instantiates its initializer ([temp.inst]/3).
   Ex static_member(EntityId c, EntityId v, QualType t, u32 begin, u32 end) {
-    bool dep = Types::is_const(t) && types().is_dependent(types().class_type(c));
+    bool dep = types().is_dependent(types().class_type(c)) && q_->value_dependent_member(v);
+    if (!dep && !types().is_dependent(types().class_type(c)) && !q_->use_static_member(v)) return {NodeId::none, begin, end};
     ExprInfo info{t, ValueCategory::lvalue, dep ? expr_flag::dependent : u8(0)};
     return node(ast::DeclRef{info, v}, begin, end, info);
   }
@@ -2181,6 +2187,10 @@ public:
     std::vector<ast::DeclSema> found;
     for (auto p = own.rbegin(); p != own.rend(); ++p)
       if (p->name == name) found.push_back(p->sema);
+    // An earlier declarator of the member's own declaration (`static constexpr int a = 1, b = a;`).
+    if (found.size() == 1 && current_class != EntityId::none && found[0].kind == ast::DeclKind::variable &&
+        found[0].storage == ast::Storage::static_)
+      return static_member(current_class, found[0].entity, found[0].type, begin, end);
     bool any = !found.empty();
     if (found.empty())
       for (DeclId d : q_->visible_decls(name, directives())) {
