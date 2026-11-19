@@ -614,8 +614,9 @@ group = 'basic'
 clauses = ['basic.start', 'basic.start.main', 'basic.start.static', 'basic.start.dynamic', 'basic.start.term']
 std = 'C++98'
 core = true
-status = 'missing'
-issues = [94]
+status = 'partial'
+issues = [367, 368]
+note = 'references bound at run time; inline variables'
 probe = '''
 int f() { return 42; }
 int g = f();

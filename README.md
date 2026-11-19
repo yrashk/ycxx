@@ -39,7 +39,8 @@ build/bin/ycxx cxx hello.cpp -o hello && ./hello
   and init-statements in `if` and `switch` (not yet range-based `for`); functions with default
   arguments, recursion and overloading, operator functions included;
 - classes and unions: data and static members, member functions, constructors and destructors
-  with RAII, aggregate and designated initialization, passing and returning them by value with
+  with RAII, aggregate and designated initialization, namespace-scope objects initialized by
+  code before `main` and destroyed after it, passing and returning them by value with
   Clang's calling convention, so ycxx and Clang objects call each other; access control
   (`public`, `protected`, `private`) and friend functions and classes;
 - single and multiple inheritance (not virtual): base classes laid out as Clang does, member
