@@ -408,6 +408,66 @@ void records() {
   }
 }
 
+void unnamed_union_members() {
+  const std::string value = "union { unsigned code; char bytes[12]; } value, mirror;\n";
+  const std::string spare = "union { unsigned code; char bytes[12]; } spare;\n";
+  const std::string rest = R"cpp(
+  short suffix;
+} State;
+typedef struct { union { unsigned code; char bytes[12]; } value; } Other;
+extern State state;
+extern Other other;
+static_assert(sizeof(State) == 44 && alignof(State) == 4);
+static_assert(sizeof(decltype(state.value)) == 12 && alignof(decltype(state.value)) == 4);
+static_assert(__is_union(decltype(state.value)));
+static_assert(__is_same(decltype(state.value), decltype(state.mirror)));
+static_assert(!__is_same(decltype(state.value), decltype(state.spare)));
+static_assert(!__is_same(decltype(state.value), decltype(other.value)));
+void value_type(decltype(state.value)*) {}
+void spare_type(decltype(state.spare)*) {}
+int main() {
+  State s{};
+  s.value.code = 7;
+  s.mirror.code = 3;
+  s.spare.code = 9;
+  return s.value.code + s.mirror.code + s.spare.code - 19;
+}
+)cpp";
+  pl::Session s;
+  for (bool swapped : {false, true}) {
+    std::string text = "typedef struct { char prefix;\n" + (swapped ? spare + value : value + spare) + rest;
+    build(s, text);
+    constexpr pl::TuId peer{1};
+    s.set_source(peer, "union-peer.cpp", text, "union-peer.o");
+    const auto& front = s.get<pl::TuFront>(tu);
+    check(!front.has_errors(), pl::TuFront::errors(front));
+    const auto& peer_front = s.get<pl::TuFront>(peer);
+    check(!peer_front.has_errors() && front.shapes.classes.size() == 5 &&
+              std::ranges::equal(front.shapes.classes, peer_front.shapes.classes, {}, &pl::ClassShape::entity, &pl::ClassShape::entity),
+          "unnamed nested union identities correspond across translation units");
+    const auto& result = s.get<pl::Tu>(tu);
+    check(result.object.has_value(), pl::Tu::errors(result));
+    if (!result.object) continue;
+    const char* first = swapped ? "__Z10spare_typePN5StateUt_E" : "__Z10value_typePN5StateUt_E";
+    const char* second = swapped ? "__Z10value_typePN5StateUt0_E" : "__Z10spare_typePN5StateUt0_E";
+    check(std::ranges::contains(result.object->symbols, first, &ycxx::obj::symbol::name) &&
+              std::ranges::contains(result.object->symbols, second, &ycxx::obj::symbol::name),
+          "unnamed sibling union types mangle in lexical order");
+    const pl::Linked& l = s.get<pl::Link>(program);
+    check(l.errors.empty() && l.image == cold(text), "after changing union order, incremental equals cold");
+  }
+
+  for (const std::string source : {
+           "struct S { union { int variant; } member; }; int get(S* s) { return s->variant; }",
+           "struct S { union { int variant; }; };",
+           "class S { union { int variant; } member; }; int get(S* s) { return s->member.variant; }",
+           "struct S { union { int& variant; } member; };",
+           "struct S { union { int f() { return 0; } int variant; } member; };"}) {
+    build(s, source);
+    check(s.get<pl::TuFront>(tu).has_errors(), source);
+  }
+}
+
 // Nesting too deep for the stack (#187): on workers with 1 MiB stacks, 20,000 nested parentheses,
 // blocks, increments, `sizeof`s and braced lists are diagnosed, not a crash, and the session goes
 // on. The rest of the pipeline is #260.
@@ -443,6 +503,7 @@ int main() {
   pooled();
   pooled_units();
   records();
+  unnamed_union_members();
   too_deep();
   return ycxx::unit::result("unit.pipeline_incremental");
 }

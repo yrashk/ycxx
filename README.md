@@ -38,7 +38,8 @@ build/bin/ycxx cxx hello.cpp -o hello && ./hello
   all operators, and the statements: `switch`, labels and `goto`, declarations in conditions,
   and init-statements in `if` and `switch` (not yet range-based `for`); functions with default
   arguments, recursion and overloading, operator functions included;
-- classes and unions: data and static members, member functions, constructors and destructors
+- classes and unions: data and static members, named data members of unnamed union type,
+  member functions, constructors and destructors
   with RAII, aggregate and designated initialization, namespace-scope objects initialized by
   code before `main` and destroyed after it, block-scope `static` variables initialized once, passing and returning them by value with
   Clang's calling convention, so ycxx and Clang objects call each other; access control

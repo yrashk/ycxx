@@ -336,6 +336,12 @@ The records of §B1.5, made concrete:
   `VDep*` constants or `VNone` ([temp.over.link] makes them part of correspondence);
 - specialization: `(template, canonical arguments)`;
 - internal linkage or unnamed: `(scope, name or none, first DeclId)`;
+- an unnamed class type defined in a class scope and used to declare a named data member:
+  `(enclosing class, unnamed type kind, lexical ordinal)`. The ordinal counts unnamed class and
+  enumeration definitions in that scope in declaration order (Itanium ABI §5.1.5.5). A linkage
+  name from a typedef ([dcl.typedef]) uses its name. This identity corresponds across translation
+  units ([basic.def.odr]/18). The splitter also uses the ordinal to distinguish the unnamed
+  definition and its members when sibling definitions have identical tokens (Astra, #203).
 - **local** entities (block-scope classes, lambdas' closure types, block-scope statics):
   `(enclosing entity, kind, name or none, ordinal among same-kind, same-name locals in token
   order)`. This follows the Itanium ABI's discriminators, so a local entity's mangled name is a
