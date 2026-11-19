@@ -310,8 +310,8 @@ u32 Splitter::item(u32 parent, const std::string& scope) {
     // `namespace N = M;` is an alias: a declaration.
     u32 h = ns + 1;
     while (kind(h) == Tk::identifier || kind(h) == Tk::coloncolon || kind(h) == Tk::kw_inline ||
-           (kind(h) == Tk::l_square && kind(h + 1) == Tk::l_square)) {
-      h = kind(h) == Tk::l_square ? match(h) : h + 1;
+           (kind(h) == Tk::l_square && kind(h + 1) == Tk::l_square) || (kind(h) == Tk::l_paren && kind(h - 1) == Tk::identifier)) {
+      h = kind(h) == Tk::l_square || kind(h) == Tk::l_paren ? match(h) : h + 1;  // `__attribute__((…))` too
     }
     if (kind(h) == Tk::l_brace) {
       at(k).kind = ItemKind::namespace_def;
@@ -644,21 +644,18 @@ private:
     }
   }
 
+  // `namespace a::b::c` (C++17, [namespace.def]) declares each component in the one before it, the
+  // first in the enclosing namespace.
   void namespace_names(u32 k) {
     Item& it = out_.items[k];
-    u32 last = none;
-    u32 first = none;
     for (u32 n = it.begin; n < it.brace_begin; ++n) {
-      if (kind(n) != Tk::identifier) continue;
-      if (first == none) first = n;
-      last = n;
+      // Past attributes: `[[…]]`, and GNU `__attribute__((…))` (docs/EXTENSIONS.md).
+      if (kind(n) == Tk::l_square || (kind(n) == Tk::identifier && kind(n + 1) == Tk::l_paren)) {
+        n = match(kind(n) == Tk::l_square ? n : n + 1) - 1;  // the loop steps past the closer
+        continue;
+      }
+      if (kind(n) == Tk::identifier) add(k, std::string(name(n)), n, name_flag::namespace_ | name_flag::definition);
     }
-    if (last == none) return;
-    if (first != last) {
-      it.qualifier_begin = first;
-      it.qualifier_end = last;
-    }
-    add(k, std::string(name(last)), last, name_flag::namespace_ | name_flag::definition);
   }
 
   void class_names(u32 k) {
