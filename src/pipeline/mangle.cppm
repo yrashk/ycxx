@@ -283,7 +283,7 @@ class Mangler {
         if (std::to_underlying(f.cv) & 2) inner += "V";
         if (std::to_underlying(f.cv) & 1) inner += "K";
         if (f.noexcept_ != ast::ConstId::none && in_.values.is<ast::VInt>(f.noexcept_) &&
-            ast::int_bits(in_, f.noexcept_).lo != 0) inner += "Do";
+            in_.values.get<ast::VInt>(f.noexcept_).bits.lo != 0) inner += "Do";
         inner += "F" + *sig;
         if (f.ref != ast::RefQual::none) inner += f.ref == ast::RefQual::lvalue ? "R" : "O";
         inner += "E";

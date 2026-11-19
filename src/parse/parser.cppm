@@ -1117,10 +1117,15 @@ public:
         if (s->has_noexcept && (spells_type || l.inner)) {
           nonthrowing = true;
           if (s->noexcept_condition) {
-            Ex e = s_->to_bool(*s->noexcept_condition, s->noexcept_condition->begin);
+            Ex operand = s_->rvalue(*s->noexcept_condition);
+            Ex e = s_->to_bool(operand, operand.begin);
             sema::Evaluated result = sema::Evaluator(*s_, questions()).evaluate(e);
             if (result.value) {
               nonthrowing = s_->world().values.as_signed(*result.value) != 0;
+              if (s_->narrows(operand, e.type())) {
+                s_->diag(operand.begin, Diag::noexcept_narrowing, operand.type());
+                d.ok = false;
+              }
             } else {
               if (result.dependent) s_->diag(e.begin, Diag::not_supported, Tk::kw_noexcept);
               else if (e.ok()) s_->diag(e.begin, Diag::not_constant, result.reason);
