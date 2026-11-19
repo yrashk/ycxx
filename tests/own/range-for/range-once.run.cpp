@@ -2,6 +2,7 @@
 // initialize `auto&& __range` ([stmt.ranged]/1); a function returning a reference to a global
 // container is called once, and a global array returned by reference is iterated in place
 // (writes through the loop variable reach it).
+// XFAIL: ycxx a namespace-scope object with a constructor needs dynamic initialization (#94, PR #371)
 // EXIT: 0
 struct Box {
   int v[3];

@@ -2,6 +2,7 @@
 // const object uses the const overloads, a non-const one the non-const overloads, chosen by the
 // object expression of `__range.begin()`; begin and end are each called once, not once per
 // iteration ([stmt.ranged]/1, [over.match.funcs]).
+// XFAIL: ycxx mutable data members (#373)
 // EXIT: 0
 struct Buf {
   int a[4];

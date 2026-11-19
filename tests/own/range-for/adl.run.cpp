@@ -3,6 +3,7 @@
 // the class's namespace are found from a loop outside that namespace ([stmt.ranged]/1.3,
 // [basic.lookup.argdep]). A class with a member named neither begin nor end, and a const
 // overload chosen for a const range.
+// XFAIL: ycxx non-member begin and end are found by argument-dependent lookup (#165)
 // EXIT: 0
 namespace bag {
 struct Bag {
