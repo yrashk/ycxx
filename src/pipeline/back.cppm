@@ -114,6 +114,7 @@ struct FunctionDef {
   // ([stmt.dcl]/3; irgen::FunctionInput).
   std::vector<irgen::FunctionInput::StaticGuard> guards{};
   EntityId guard_acquire = EntityId::none, guard_release = EntityId::none, atexit = EntityId::none, dso = EntityId::none;
+  bool weak_elf = false;  // an ordinary external inline definition in the GNU ELF subset (#422)
 };
 
 // A variable definition at namespace scope with its constant initializer, or `ConstId::none` for
@@ -1188,6 +1189,7 @@ namespace {
 struct LinuxFunction {
   EntityId entity;
   const x86_64::MachineCode* code;
+  bool weak;
 };
 
 std::expected<obj::object, aarch64::CodegenError> assemble_linux(
@@ -1209,8 +1211,10 @@ std::expected<obj::object, aarch64::CodegenError> assemble_linux(
       if (sym == symbol_of.end()) return missing(f.entity);
       sec.align(4);
       const std::size_t base = sec.bytes.size();
-      o.symbols[sym->second].section = text;
-      o.symbols[sym->second].offset = base;
+      auto& symbol = o.symbols[sym->second];
+      symbol.section = text;
+      symbol.offset = base;
+      symbol.weak = f.weak && symbol.bind == obj::binding::global;
       sec.emit(f.code->bytes);
       for (const auto& r : f.code->relocs) {
         auto target = symbol_of.find(r.target);
@@ -1432,7 +1436,8 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
   auto o = [&] {
     if (linux) {
       std::vector<LinuxFunction> code;
-      for (std::size_t i = 0; i < fns.size(); ++i) code.push_back({fns[i].fn, &*ms[i].get().linux_code});
+      for (std::size_t i = 0; i < fns.size(); ++i)
+        code.push_back({fns[i].fn, &*ms[i].get().linux_code, tu.functions[i].weak_elf});
       return assemble_linux(tu.name, code, data, symbols);
     }
     std::vector<aarch64::CompiledFunction> code;

@@ -77,6 +77,9 @@ ELF and Mach-O objects support static pointer initializers naming variables, arr
 or functions. The referenced symbol may be defined in a separate translation unit.
 [#101](https://github.com/yrashk/ycxx/issues/101)
 
+On x86-64 Linux, direct calls and saved pointers across translation units share one address for
+simple external inline functions. [#422](https://github.com/yrashk/ycxx/issues/422)
+
 The ELF linker can consume the GNU-built libycxx static linkage-marker object.
 [#419](https://github.com/yrashk/ycxx/issues/419)
 

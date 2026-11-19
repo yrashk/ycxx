@@ -184,6 +184,7 @@ void static_locals(sema::World& world, TranslationUnit& tu, FunctionDef& f, R& r
   ast::Interners& ins = world.ins;
   for (const ast::LocalRec& l : ins.seqs.elements(f.body.locals)) {
     if (l.entity == EntityId::none || l.decl == ast::NodeId::none || !ins.ast.is<ast::StaticVar>(l.decl)) continue;
+    f.weak_elf = false;  // The function and its statics need group selection (#422).
     auto s = ins.ast.get<ast::StaticVar>(l.decl);
     bool code = s.destructor != EntityId::none || (s.value == ast::ConstId::none && s.init.id != ast::NodeId::none);
     const sema::EntityRec& r = world.entities.rec(l.entity);
@@ -288,7 +289,9 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
   ast::Interners& ins = world.ins;
   TranslationUnit tu;
   tu.name = std::move(name);
+  const bool linux = world.target.triple == ast::x86_64_linux.triple;
   std::set<std::uint32_t> seen;
+  std::set<EntityId> inline_declarations;
   std::vector<Dynamic> dynamic;
   // The type from the declaration, not the entity's record: a variable's type is not part of its
   // identity, so a record made before an edit may hold the old one (#115).
@@ -311,7 +314,10 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
   };
   auto declare = [&](const ast::DeclSema& d, std::optional<ast::Loc> at) {
     EntityId e = d.entity;
-    if (e == EntityId::none || !seen.insert(std::to_underlying(e)).second) return;
+    if (e == EntityId::none) return;
+    // Any reachable declaration can mark the function inline ([dcl.inline]).
+    if (linux && d.kind == ast::DeclKind::function && (d.flags & sema::decl_flag::inline_)) inline_declarations.insert(e);
+    if (!seen.insert(std::to_underlying(e)).second) return;
     const sema::EntityRec& r = world.entities.rec(e);
     if (r.kind == sema::EntityKind::class_ || r.kind == sema::EntityKind::data_member || r.kind == sema::EntityKind::type_alias ||
         r.kind == sema::EntityKind::enum_ || r.kind == sema::EntityKind::enumerator ||
@@ -408,6 +414,11 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
       ast::DeclSema d = decls[0];
       if (body.deduced) d.type = body.deduced_type;
       tu.functions.push_back({d.entity, d, body, program.id(k), it.body_begin - it.begin, program.this_type(d)});
+      const auto& entity = world.entities.rec(d.entity);
+      tu.functions.back().weak_elf = inline_declarations.contains(d.entity) && entity.kind == sema::EntityKind::function &&
+                                    entity.linkage == ast::Linkage::external && entity.templ == EntityId::none &&
+                                    tu.main != d.entity && ins.seqs.size(body.closures) == 0 &&
+                                    program.asm_label(d.entity).empty();
       closures_of(body, program.id(k), it.body_begin - it.begin);
       continue;
     }
