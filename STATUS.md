@@ -1602,7 +1602,7 @@ values, end to end; results match Clang's bit for bit.
   `__builtin_inf*`, `__builtin_huge_val*` and `__builtin_nan*` (constants); `__has_builtin`
   answers 1.
 - `#include <cmath>`: 4,415 errors before, 4,343 after; it still does not compile (#349).
-- Tests: `tests/own/floating` (84, spec-only: literals, conversions, constant evaluation, run
+- Tests: `tests/own/floating` (84 spec-only, and 4 from the review: literals, conversions, constant evaluation, run
   tests printing with `printf`, mixed-object tests with Clang peers for scalars, many arguments,
   HFAs, structs and variadic callees, and `<math.h>`); 11 are XFAIL on other features (#25, #94,
   #117/#349, #196, #267, #291, #298, #307). Breaking HFA passing or the `lt` condition turns
