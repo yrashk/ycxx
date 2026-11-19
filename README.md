@@ -64,9 +64,10 @@ INTEGER ABI subset. Use the host linker to link these objects with libc.
   conversions giving Clang's results bit for bit, and passing and returning them (classes of
   floating members included) by Clang's calling convention;
   all operators, and the statements: `switch`, labels and `goto`, declarations in conditions,
-  and init-statements in `if` and `switch` (not yet range-based `for`). Functions support
-  default arguments, recursion, operator overloading and calls through pointers. A pointer or
-  reference target type can select a free or static member overload.
+  init-statements in `if` and `switch`, and range-based `for` over arrays or classes with
+  `begin` and `end`, with optional init-statements. Functions support default arguments,
+  recursion, operator overloading and calls through pointers. A pointer or reference target type
+  can select a free or static member overload.
 - classes and unions: data and static members, member functions, constructors and destructors
   with RAII, aggregate and designated initialization, namespace-scope objects initialized by
   code before `main` and destroyed after it, block-scope `static` variables initialized once, passing and returning them by value with
@@ -149,7 +150,7 @@ checked with the flags of its last build, or else with its line in the project's
 
 - Standard headers, starting with `<cstdio>` ([#133](https://github.com/yrashk/ycxx/issues/133)).
 - ι: statements and declarations, the C++98/11 core: default arguments, block-scope statics,
-  range-based `for`, casts and arrays ([#337](https://github.com/yrashk/ycxx/issues/337)).
+  casts and arrays ([#337](https://github.com/yrashk/ycxx/issues/337)).
 - `auto` and lambdas ([#278](https://github.com/yrashk/ycxx/issues/278)): placeholder types,
   lambdas and generic lambdas are done; constexpr lambdas wait on class objects in the
   interpreter ([#262](https://github.com/yrashk/ycxx/issues/262)).

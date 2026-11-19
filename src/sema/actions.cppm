@@ -1008,6 +1008,18 @@ public:
       diag(name_at, Diag::ambiguous_member, name, Types::unqualified(ct));
       return fail;
     }
+    if (found->nested_type != EntityId::none) {
+      if (found->enumerator == EntityId::none) {
+        diag(name_at, Diag::type_as_expression, name);
+        return fail;
+      }
+      if (!check_access(found->owner, found->nested_type, name, name_at, c)) return fail;
+      Ex value = enumerator(found->enumerator, types().enum_type(found->nested_type), name_at, end);
+      if (!value.ok()) return fail;
+      Ex discarded = convert_node(object, ast::ConversionKind::to_void, builtin(Builtin::void_));
+      return node(ast::OrderedBinary{value.info, ast::OrderedOp::comma, at(discarded, begin), at(value, begin)},
+                  begin, end, value.info);
+    }
     EntityId naming = c;
     // A member of a base: named through the base class subobject ([class.member.lookup]); a
     // static member needs no object, so not the conversion either.
@@ -2853,16 +2865,22 @@ public:
     return node(ast::This{info}, begin, end, info);
   }
 
-  // A member of class `c` named `name` ([class.member.lookup]): a non-static data member, or a
-  // member function or static data member, of `c` or else of its bases (`owner` declares it).
-  // Found in more than one base subobject it is `ambiguous`, unless it is one static member.
+  // A member of class `c` named `name` ([class.member.lookup]), declared by `owner`.
+  // Finding a type or enumerator in the class hides a base-class function with that name too.
   struct Found {
     const FieldRec* field = nullptr;
     u32 index = 0;
     const MemberDeclRec* member = nullptr;
     EntityId owner = EntityId::none;
     bool ambiguous = false;
-    EntityId entity() const { return field ? field->entity : member->entity; }
+    EntityId nested_type = EntityId::none;
+    EntityId enumerator = EntityId::none;
+    EntityId entity() const {
+      if (field) return field->entity;
+      if (member) return member->entity;
+      return enumerator == EntityId::none ? nested_type : enumerator;
+    }
+    bool needs_object() const { return field || (member && !member->is_static); }
   };
   std::optional<Found> find_member(EntityId c, NameId name) {
     const ClassRec* cr = class_rec(c);
@@ -2871,6 +2889,16 @@ public:
       if (cr->fields[i].name == name) return Found{&cr->fields[i], i, nullptr, c};
     for (const MemberDeclRec& m : cr->members)
       if (m.name == name && !m.is_ctor && !m.is_dtor) return Found{nullptr, 0, &m, c};
+    for (const NestedType& nested : cr->types)
+      if (nested.name == name) return Found{.owner = c, .nested_type = nested.entity};
+    for (const NestedType& nested : cr->types) {
+      // A type alias does not introduce the enumerators of the enumeration it names.
+      if (!types().is_enum(nested.type) || types().enum_of(nested.type) != nested.entity) continue;
+      const EnumRec* e = enum_rec(nested.entity);
+      if (!e || e->scoped) continue;
+      for (const EnumeratorRec& value : e->enumerators)
+        if (value.name == name) return Found{.owner = c, .nested_type = nested.entity, .enumerator = value.entity};
+    }
     std::optional<Found> r;
     for (const BaseRec& b : cr->bases) {
       auto f = find_member(b.cls, name);
@@ -2878,13 +2906,14 @@ public:
       if (f->ambiguous) return f;
       if (!r) {
         r = f;
-      } else if (r->entity() != f->entity() || !r->member || !r->member->is_static) {
+      } else if (r->entity() != f->entity() || r->needs_object()) {
         r->ambiguous = true;
         return r;
       }
     }
     return r;
   }
+
   // The member functions of `c` named `name`: an overload set ([over.match.funcs]).
   std::vector<const MemberDeclRec*> member_functions(EntityId c, NameId name) {
     std::vector<const MemberDeclRec*> r;
@@ -2919,28 +2948,19 @@ public:
   // or a qualified name `C::name`: none if `c` has no such member.
   std::optional<Ex> class_member(EntityId c, NameId name, u32 begin, u32 end, u32 name_at) {
     auto f = find_member(c, name);
-    if (!f) {
-      // The enumerators of an unscoped enumeration nested in the class are its members, and so
-      // members of its derived classes ([class.member.lookup]).
-      std::function<std::optional<Ex>(EntityId)> in = [&](EntityId k) -> std::optional<Ex> {
-        const ClassRec* cr = class_rec(k);
-        if (!cr) return std::nullopt;
-        for (const auto& [n, t, te] : cr->types)
-          if (is_unscoped_enum(t))
-            if (auto r = find_enumerator(types().enum_of(t), name, begin, end)) {
-              if (!check_access(k, te, name, name_at, c)) return Ex{NodeId::none, begin, end};
-              return r;
-            }
-        for (const BaseRec& b : cr->bases)
-          if (auto r = in(b.cls)) return r;
-        return std::nullopt;
-      };
-      return in(c);
-    }
+    if (!f) return std::nullopt;
     Ex fail{NodeId::none, begin, end};
     if (f->ambiguous) {
       diag(name_at, Diag::ambiguous_member, name, types().class_type(c));
       return fail;
+    }
+    if (f->nested_type != EntityId::none) {
+      if (f->enumerator == EntityId::none) {
+        diag(name_at, Diag::type_as_expression, name);
+        return fail;
+      }
+      if (!check_access(f->owner, f->nested_type, name, name_at, c)) return fail;
+      return enumerator(f->enumerator, types().enum_type(f->nested_type), begin, end);
     }
     // `this` names the member when the class is the current class or one of its bases.
     bool has_this = this_type && current_class != EntityId::none &&

@@ -1903,6 +1903,23 @@ values, end to end; results match Clang's bit for bit.
 - Not yet: inline functions' statics are per unit (#124); static references (#367).
 - Tests: `tests/own/static-locals/` (spec-only, 19 tests, a Clang peer in `mixed.run.cpp`).
 
+## Range-based `for`, ι (#298, #337, 2026-11-19)
+
+- **Parser** (src/parse/parser.cppm `range_for`): `for ( init-statement_opt decl : initializer )`
+  (`range_for_ahead` finds the `:`, past `?:`) is built as [stmt.ranged] expands it, from existing
+  kinds: hidden locals `auto&& __range`, `auto __begin`, `auto __end` (`deduce_placeholder`),
+  then a `For` over `__begin != __end` and `++__begin` whose body declares the loop variable from
+  `*__begin`. An array supplies its begin and one-past-end pointers. A class supplies member calls
+  when member lookup finds both names, including inherited members. The fallback uses ordinary
+  lookup for `begin(__range)` and `end(__range)` until #165 supplies ADL-only lookup. The loop
+  variable and init-statement names are in the guarded scope ([basic.scope.block]/2). A dependent
+  range is expanded at instantiation.
+- Remaining work covers ADL-only nonmember lookup (#165), C++23 lifetime extension for
+  temporaries inside the range initializer (#376), braced ranges (#329), and sentinels that rely on
+  `!=` rewritten from `==` (#295). A constexpr reference requires a constexpr overloaded
+  dereference. Full constant evaluation of the class iterator still needs #25.
+- Tests: `tests/own/range-for/` (17 from the independent author and nine review regressions).
+
 ## The address of an overload set, ι (#313, #337, 2026-11-19)
 
 - A pointer or reference target picks a free or static member function by its function type

@@ -988,12 +988,13 @@ clauses = ['stmt.ranged']
 std = 'C++11'
 ftm = '__cpp_range_based_for'
 detect = '\bfor\s*\((?:[^;()]|\([^()]*\))*?[^:]:(?!:)'
-status = 'missing'
+status = 'partial'
 probe = '''
-struct R { int a[3] = {1, 2, 3}; int* begin() { return a; } int* end() { return a + 3; } };
-int main() { int s = 0; int arr[2] = {4, 5}; for (int x : arr) s += x; R r; for (int& x : r) s += x; return s == 15 ? 0 : 1; }
+struct R { int a[3]; int* begin() { return a; } int* end() { return a + 3; } };
+int main() { int s = 0; int arr[2] = {4, 5}; for (int x : arr) s += x; R r{{1, 2, 3}}; for (int& x : r) s += x; return s == 15 ? 0 : 1; }
 '''
-issues = [298]
+issues = [165, 295, 329, 376]
+note = 'ADL-only non-member lookup, rewritten sentinel comparisons, braced ranges and C++23 temporary lifetimes'
 
 [[feature]]
 id = 'stmt-if-init'
@@ -1014,11 +1015,10 @@ group = 'stmt'
 clauses = ['stmt.ranged']
 std = 'C++20'
 detect = '\bfor\s*\((?:[^;()]|\([^()]*\))*;(?:[^;()]|\([^()]*\))*?[^:]:(?!:)'
-status = 'missing'
+status = 'done'
 probe = '''
 int main() { int s = 0; for (int a[2] = {1, 2}; int x : a) s += x; return s == 3 ? 0 : 1; }
 '''
-issues = [298]
 
 [[feature]]
 id = 'stmt-cpp23'
