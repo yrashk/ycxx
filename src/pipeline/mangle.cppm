@@ -303,6 +303,11 @@ class Mangler {
         auto i = in_.values.get<ast::VDepParam>(pat).index;
         return i == 0 ? std::string("XspT_E") : std::format("XspT{}_E", i - 1);
       }
+      // `sizeof...(P)` of a template parameter pack: `sZ <template-param>` (§5.1.6).
+      if (in_.values.is<ast::VDepSizeofPack>(a.value) && in_.values.get<ast::VDepSizeofPack>(a.value).depth == 0) {
+        auto i = in_.values.get<ast::VDepSizeofPack>(a.value).index;
+        return i == 0 ? std::string("XsZT_E") : std::format("XsZT{}_E", i - 1);
+      }
       // A template parameter as an argument: an <expression>, `X T_ E` (§5.1.5.7, §5.1.6).
       if (in_.values.is<ast::VDepParam>(a.value) && in_.values.get<ast::VDepParam>(a.value).depth == 0) {
         auto i = in_.values.get<ast::VDepParam>(a.value).index;

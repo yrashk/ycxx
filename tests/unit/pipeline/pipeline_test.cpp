@@ -152,7 +152,7 @@ struct Body {
                        w.in.intern_seq(std::span<const ast::ParamSema>(ps)),
                        w.in.intern_seq(std::span<const ast::TemplateParamSema>{})};
     auto locs = b.seq(std::span<const ast::LocalRec>(locals));
-    ast::BodySema body = b.commit(ast::BodySema{tree, locs});
+    ast::BodySema body = b.commit(ast::BodySema{tree, locs, b.seq(std::span<const ast::ExpansionRec>{}), b.seq(std::span<const ast::u32>{})});
     w.tu.functions.push_back({f, decl, body, w.in.items.add<ast::ItemId>(ast::seed("test item")), 0});
   }
 };

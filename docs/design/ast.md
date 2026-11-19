@@ -603,7 +603,9 @@ tree at the pattern's offsets. Where the pattern's expansions are, and which pac
 read from the definition's analysis, like its dependent calls; nothing is discovered by
 re-parsing. A function parameter pack is N parameters sharing the pattern's name, each with its
 element index. Folds nest the element trees ([temp.variadic]). Equal diagnostics from the
-elements of one instantiation are reported once.
+elements of one instantiation are reported once. (*The one independent check, a second Fable subagent, found one P1: the expansions and dependent
+calls were a side table of the stand-in `Program`; `ItemSema.expansions`, `BodySema.expansions` and
+`BodySema.dependent_calls` now carry them. Its P2s are applied or filed on #210.*)
 
 Default arguments of a function template specialization have several points of instantiation
 ([temp.inst]/13, [temp.point]/7): `default_arg(spec, i, ctx)` is an `instantiated` demand entry,

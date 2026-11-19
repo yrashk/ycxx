@@ -74,9 +74,29 @@ struct DeclSema {
   constexpr bool operator==(const DeclSema&) const = default;
 };
 
+// A pack a pattern names ([temp.variadic]): a template parameter pack by depth and index, or a
+// function parameter pack by name (`fn`).
+struct PackRefRec {
+  u16 depth;
+  u16 index;
+  NameId fn;
+  constexpr bool operator==(const PackRefRec&) const = default;
+};
+// A pack expansion of a templated definition, by the part offsets of its pattern (`begin`, and
+// just past it, `end`), with the packs it names: its instantiations read the pattern once per
+// element (§6.4).
+struct ExpansionRec {
+  u32 begin;
+  u32 end;
+  SeqId<PackRefRec> packs;
+  constexpr bool operator==(const ExpansionRec&) const = default;
+};
+
+// A templated declaration part keeps its pack expansions (§6.4); others have none.
 struct ItemSema {
   NodeId tree;
   SeqId<DeclSema> decls;
+  SeqId<ExpansionRec> expansions;
   constexpr bool operator==(const ItemSema&) const = default;
 };
 
@@ -117,15 +137,20 @@ struct LocalRec {
   constexpr bool operator==(const LocalRec&) const = default;
 };
 
+// A templated body keeps what its instantiations need of it (§6.4): its pack expansions, and the
+// offsets of its calls that were dependent ([temp.dep.candidate]).
 struct BodySema {
   NodeId tree;
   SeqId<LocalRec> locals;
+  SeqId<ExpansionRec> expansions;
+  SeqId<u32> dependent_calls;
   constexpr bool operator==(const BodySema&) const = default;
 };
 
 // The element types of the `seqs` interner: one pool each, indexed by position in this list.
 using SeqElements = closed_list<NodeId, EntityId, QualType, NameId, ParamSema, DeclSema, BaseSpec,
-                                MemberRec, LocalRec, u8, u32, ConstId, TemplateArg, TemplateParamSema>;
+                                MemberRec, LocalRec, u8, u32, ConstId, TemplateArg, TemplateParamSema, PackRefRec,
+                                ExpansionRec>;
 
 static_assert(std::ranges::all_of(SeqElements::infos, [](std::meta::info t) {
   if (std::meta::is_class_type(t)) return check_record(t);

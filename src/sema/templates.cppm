@@ -237,7 +237,13 @@ public:
     }
     return r;
   }
+  // A pack of `elems`, each canonical as identity compares them (ast.md §5.6).
   TemplateArg pack(std::span<const TemplateArg> elems) {
+    for (const TemplateArg& e : elems) {
+      // BOOTSTRAP: contracts: a predicate naming a member goes through a local (STATUS).
+      bool canonical = e.kind == TemplateArgKind::value || types().canonical(e.type) == e.type;
+      contract_assert(canonical);
+    }
     return {TemplateArgKind::pack, QualType{}, ConstId::none, ins().intern_seq(elems)};
   }
   std::vector<TemplateArg> elements(const TemplateArg& a) { return ins().seqs.elements(a.elems); }

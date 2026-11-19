@@ -588,14 +588,37 @@ public:
   std::span<const EntityId> required() const { return required_; }
   // The calls of a template's body that were dependent at its definition, by the template's item
   // ([temp.dep.candidate]); its instantiations add argument-dependent lookup to them.
-  std::map<u32, std::vector<u32>> dependent_calls_;
-  // The pack expansions of a templated definition, by (item, part): 0 its declaration part, 1 its
-  // body (ast.md §6.4), for the instantiations that read their patterns once per element.
-  std::map<std::pair<u32, u32>, std::vector<sema::Expansion>> expansions_;
-  const std::vector<sema::Expansion>* expansions(u32 item, u32 part) const {
-    auto it = expansions_.find({item, part});
-    return it == expansions_.end() ? nullptr : &it->second;
+  // Whether a call of the templated body of `item` at `offset` was dependent, read from the
+  // body's analysis (ast.md §6.4).
+  bool dependent_call(u32 item, u32 offset) {
+    const ast::BodySema& b = analyze_body(item).value;
+    for (u32 o : w_->ins.seqs.elements(b.dependent_calls))
+      if (o == offset) return true;
+    return false;
   }
+  // The pack expansions of a templated definition's part (0 its declaration part, 1 its body), read
+  // from that part's analysis (ast.md §6.4), for the instantiations that read their patterns once
+  // per element. A cache of the values.
+  const std::vector<sema::Expansion>* expansions(u32 item, u32 part) {
+    auto key = std::pair(item, part);
+    if (auto it = expansions_.find(key); it != expansions_.end()) return it->second.empty() ? nullptr : &it->second;
+    ast::SeqId<ast::ExpansionRec> list = part == 0 ? item_sema(item).value.expansions : analyze_body(item).value.expansions;
+    std::vector<sema::Expansion> out;
+    for (const ast::ExpansionRec& e : w_->ins.seqs.elements(list)) {
+      sema::Expansion x{e.begin, e.end, {}};
+      for (const ast::PackRefRec& r : w_->ins.seqs.elements(e.packs)) x.packs.push_back({r.depth, r.index, r.fn});
+      out.push_back(std::move(x));
+    }
+    auto& v = expansions_[key] = std::move(out);
+    return v.empty() ? nullptr : &v;
+  }
+  // Whether the body of `item` is a template's definition or a member of one: a pattern.
+  bool templated_body(u32 item) {
+    const ast::ItemSema& is = item_sema(item).value;
+    bool templ = w_->ins.seqs.size(is.decls) > 0 && w_->ins.seqs.size(w_->ins.seqs.at(is.decls, 0).template_params) > 0;
+    return templ || !enclosing_heads(item).empty();
+  }
+  std::map<std::pair<u32, u32>, std::vector<sema::Expansion>> expansions_;
   u32 end() const { return static_cast<u32>(items_->items.size()); }
   const u32 instantiation_limit;  // [temp.inst]/16 ([implimits]: at least 1024)
   bool instantiation_gave_up() const { return depth_reported_; }
@@ -898,8 +921,7 @@ public:
   std::optional<QualType> specialization_type(EntityId v) override { return p_->specialization_type(v, p_->end()); }
   const std::vector<sema::Expansion>* pattern_expansions() override { return p_->expansions(item_, 1); }
   bool dependent_call(sema::u32 offset) override {
-    auto it = p_->dependent_calls_.find(item_);
-    return it != p_->dependent_calls_.end() && std::ranges::contains(it->second, offset);
+    return p_->dependent_call(item_, offset);
   }
   // [basic.lookup.argdep]/4: the namespace's own members, using-directives ignored.
   std::vector<ast::DeclSema> members_at_instantiation(EntityId ns, ast::NameId name) override {
@@ -918,6 +940,17 @@ private:
 };
 
 // ---------------------------------------------------------------- item_sema
+
+// A part's pack expansions as the records its value keeps (ast.md §6.4).
+ast::SeqId<ast::ExpansionRec> expansion_list(ast::Builder& b, const std::vector<sema::Expansion>& es) {
+  std::vector<ast::ExpansionRec> out;
+  for (const sema::Expansion& e : es) {
+    std::vector<ast::PackRefRec> packs;
+    for (const sema::PackRef& r : e.packs) packs.push_back({r.depth, r.index, r.fn});
+    out.push_back({e.begin, e.end, b.seq(std::span<const ast::PackRefRec>(packs))});
+  }
+  return b.seq(std::span<const ast::ExpansionRec>(out));
+}
 
 // [dcl.link]: the language linkage a linkage-specification's string names.
 std::optional<LangLinkage> linkage_named(const pp::Region& r, u32 tok) {
@@ -1006,10 +1039,10 @@ public:
       for (const Ex& d : declarators_) cs.push_back(sema::Sema::at(d, 0));
       root = s_.node(ast::DeclGroup{b_.list(cs)}, 0, it_->decl_length()).id;
     }
-    ast::ItemSema v{root, b_.seq(std::span<const ast::DeclSema>(decls_))};
+    std::vector<sema::Expansion> none;
+    ast::ItemSema v{root, b_.seq(std::span<const ast::DeclSema>(decls_)), expansion_list(b_, inst_ || var_ ? none : s_.expansions)};
     out_.value = b_.commit(v);
     out_.demands = std::move(s_.demands);
-    if (!inst_ && !var_ && !s_.expansions.empty()) p_->expansions_[{k_, 0}] = std::move(s_.expansions);
     return std::move(out_);
   }
 
@@ -3054,17 +3087,16 @@ public:
       if (root.ok() && (f->flags & sema::decl_flag::destructor)) root = destructor_body(s_, s_.current_class, root);
     }
     std::vector<ast::LocalRec> locals(s_.locals().begin(), s_.locals().end());
-    ast::BodySema v{root.id, b_.seq(std::span<const ast::LocalRec>(locals))};
-    out_.value = b_.commit(v);
     // A template's definition demands nothing; its instantiations do. What it keeps for them is
-    // which calls were dependent ([temp.dep.candidate]).
+    // which calls were dependent ([temp.dep.candidate]) and its pack expansions (ast.md §6.4).
     bool templated = (pattern && p_->world().ins.seqs.size(pattern->template_params) > 0) || !p_->enclosing_heads(k_).empty();
-    if (templated && !inst_) {
-      p_->dependent_calls_[k_] = std::move(s_.dependent_calls);
-      if (!s_.expansions.empty()) p_->expansions_[{k_, 1}] = std::move(s_.expansions);
-    } else {
-      out_.demands = std::move(s_.demands);
-    }
+    std::vector<sema::Expansion> none;
+    std::vector<u32> no_calls;
+    const bool keeps = templated && !inst_;
+    ast::BodySema v{root.id, b_.seq(std::span<const ast::LocalRec>(locals)), expansion_list(b_, keeps ? s_.expansions : none),
+                    b_.seq(std::span<const u32>(keeps ? s_.dependent_calls : no_calls))};
+    out_.value = b_.commit(v);
+    if (!keeps) out_.demands = std::move(s_.demands);
     return std::move(out_);
   }
 
@@ -3304,7 +3336,8 @@ const ast::BodySema& Program::synthesized_body(std::size_t i) {
     root = BodyAnalysis::destructor_body(sm, cls, body);
   }
   std::vector<ast::LocalRec> locals(sm.locals().begin(), sm.locals().end());
-  return synth_bodies_[i] = b.commit(ast::BodySema{root.id, b.seq(std::span<const ast::LocalRec>(locals))});
+  return synth_bodies_[i] = b.commit(ast::BodySema{root.id, b.seq(std::span<const ast::LocalRec>(locals)),
+                                                   b.seq(std::span<const ast::ExpansionRec>{}), b.seq(std::span<const u32>{})});
 }
 
 const Result<ast::BodySema>& Program::analyze_body(u32 item) {
@@ -3611,7 +3644,7 @@ void Program::instantiate_all() {
     if (item_cells_[k]) work.insert(work.end(), item_cells_[k]->demands.begin(), item_cells_[k]->demands.end());
     if (body_cells_[k]) {
       work.insert(work.end(), body_cells_[k]->demands.begin(), body_cells_[k]->demands.end());
-      if (dependent_calls_.find(k) == dependent_calls_.end()) required_members(body_cells_[k]->value.tree, id(k));
+      if (!templated_body(k)) required_members(body_cells_[k]->value.tree, id(k));
     }
   }
   // The synthesized special members' bodies, those of classes instantiated as the worklist runs
