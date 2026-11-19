@@ -327,9 +327,8 @@ std::vector<std::string> split_words(std::string_view text) {
 namespace {
 
 // The arguments of `args` a check keeps: the preprocessing options, the template depth and the
-// class call ABI, and
-// with `std` the language standard (ycxx's own command lines; another compiler's may name one ycxx
-// does not take).
+// class call ABI, and with `std` the language standard (ycxx's own command lines; another
+// compiler's may name one ycxx does not take).
 void checking_options(std::span<const std::string_view> args, bool std, std::vector<std::string>& out) {
   pp::Config scratch;
   for (std::size_t i = 0; i < args.size(); ++i) {
