@@ -367,7 +367,7 @@ public:
   // `__builtin_va_list`, the type of the SDK's `__darwin_va_list` and libycxx's `va_list`.
   std::optional<QualType> builtin_type_name(NameId name) {
     if (ins().names.spelling(name) != "__builtin_va_list") return std::nullopt;
-    switch (target.va_list) {
+    switch (w_->target.va_list) {
     case ast::VaList::char_pointer: return types().pointer(builtin(Builtin::char_));
     case ast::VaList::sysv_x86_64: return std::nullopt;  // no `__va_list_tag` yet: not a type
     }
@@ -1349,10 +1349,10 @@ public:
     }
     if (a && b && (ast::is_floating(*a) || ast::is_floating(*b))) return narrows_floating(from, *a, *b);
     if (!a || !b || !ast::is_integral(*a) || !ast::is_integral(*b) || *a == *b) return false;
-    IntShape sa = shape(*a), sb = shape(*b);
+    IntShape sa = shape(w_->target, *a), sb = shape(w_->target, *b);
     if (*b == Builtin::bool_) sb = {1, false};
     if (*a == Builtin::bool_) sa = {1, false};
-    if (ast::represents(target, *b, sa.bits, sa.is_signed) || (*b == Builtin::bool_ && *a == Builtin::bool_)) return false;
+    if (ast::represents(w_->target, *b, sa.bits, sa.is_signed) || (*b == Builtin::bool_ && *a == Builtin::bool_)) return false;
     auto v = constant_of ? constant_of(from) : std::nullopt;
     if (!v || w_->values.rec(*v).kind != ValueKind::integer) return true;
     // The constant, read in the source type, must lie in the target type's range.
@@ -1374,8 +1374,8 @@ public:
     if (ast::is_floating(a)) {
       // /7.2: to a type of lesser rank, unless the source is constant and either its converted
       // value is finite and did not overflow, or the values before and after are not finite.
-      if (ast::float_rank_compare(target, b, a) >= 0) return false;
-      if (!v || w_->values.rec(*v).kind != ValueKind::floating) return true;
+      if (ast::float_rank_compare(w_->target, b, a) >= 0) return false;
+      if (!v || !ast::computes(w_->target[b].format) || w_->values.rec(*v).kind != ValueKind::floating) return true;
       double x = w_->values.rec(*v).real;
       double y = w_->values.rec(w_->values.floating(builtin(b), x)).real;
       return std::isfinite(x) != std::isfinite(y);
@@ -1385,14 +1385,14 @@ public:
     // supported format covers 128-bit integers). Integer types are at most 64 bits wide here: a
     // 128-bit one would need the constant's high word.
     if (!v || w_->values.rec(*v).kind != ValueKind::integer) return true;
-    IntShape sa = shape(a);
+    IntShape sa = shape(w_->target, a);
     if (a == Builtin::bool_) sa = {1, false};
     u64 raw = w_->values.rec(*v).bits & (sa.bits >= 64 ? ~u64{0} : (u64{1} << sa.bits) - 1);
     if (sa.is_signed && sa.bits < 64 && ((raw >> (sa.bits - 1)) & 1)) raw |= ~((u64{1} << sa.bits) - 1);
     u64 magnitude = sa.is_signed && std::int64_t(raw) < 0 ? u64(0) - raw : raw;
     if (magnitude == 0) return false;
     u32 significant = u32(std::bit_width(magnitude) - std::countr_zero(magnitude));
-    return significant > ast::shape_of(target[b].format).precision;
+    return significant > ast::shape_of(w_->target[b].format).precision;
   }
 
   // ------------------------------------------------------------ scopes and locals (§4.4)
@@ -3234,12 +3234,12 @@ public:
       // [conv.prom]/4, [over.ics.rank]/4.2: with a fixed type, to it is the better promotion.
       if (const EnumRec* er = enum_rec(types().enum_of(from)); er && er->fixed) {
         if (types().canonical(*er->underlying) == types().canonical(to)) return {true, 1, 0};
-        if (builtin(promoted(*types().builtin_of(*er->underlying))) == to) return {true, 1, 1};
+        if (builtin(sema::promoted(w_->target, *types().builtin_of(*er->underlying))) == to) return {true, 1, 1};
         return {true, 2, 0};
       }
       // [conv.prom]/3: without one, to the type its values need.
       const EnumRec* er = enum_rec(types().enum_of(from));
-      QualType p = er && er->promotion ? *er->promotion : builtin(promoted(*types().builtin_of(underlying_of(from))));
+      QualType p = er && er->promotion ? *er->promotion : builtin(sema::promoted(w_->target, *types().builtin_of(underlying_of(from))));
       bool promotion = types().canonical(p) == types().canonical(to);
       return {true, promotion ? 1 : 2, 0};
     }
@@ -3260,7 +3260,7 @@ public:
     if (types().is_arithmetic(from) && types().is_arithmetic(to) && (types().is_floating(from) || types().is_floating(to)))
       return {true, types().is(from, Builtin::float_) && types().is(to, Builtin::double_) ? 1 : 2, 0};
     if (types().is_integral(from) && types().is_integral(to)) {
-      bool promotion = builtin(promoted(*types().builtin_of(from))) == to && !types().is(from, *types().builtin_of(to));
+      bool promotion = builtin(sema::promoted(w_->target, *types().builtin_of(from))) == to && !types().is(from, *types().builtin_of(to));
       return {true, promotion ? 1 : 2, 0};
     }
     return {};
@@ -3705,7 +3705,12 @@ public:
   // and `__builtin_nan*` a quiet NaN, constants of their type; `__builtin_fabs*` a `BuiltinCall`.
   Ex builtin_call(const lex::BuiltinFunctionInfo& b, std::vector<Ex> args, u32 begin, u32 end) {
     using enum lex::BuiltinFunction;
-    QualType t = builtin(b.type == 'f' ? Builtin::float_ : b.type == 'l' ? Builtin::long_double : Builtin::double_);
+    Builtin kind = b.type == 'f' ? Builtin::float_ : b.type == 'l' ? Builtin::long_double : Builtin::double_;
+    if (!ast::computes(w_->target[kind].format)) {
+      diag(begin, Diag::extended_float_not_supported);
+      return {NodeId::none, begin, end};
+    }
+    QualType t = builtin(kind);
     std::size_t want = b.function == fabs || b.function == nan ? 1 : 0;
     if (args.size() != want) {
       diag(begin, args.size() < want ? Diag::too_few_arguments : Diag::too_many_arguments, u64(want), u64(args.size()));
@@ -3736,9 +3741,9 @@ public:
           diag(args[0].begin, Diag::builtin_nan_string);
           return {NodeId::none, begin, end};
         }
-        bool single = ast::float_format(ins(), target, t) == ast::FloatFormat::binary32;
+        bool single = ast::float_format(ins(), w_->target, t) == ast::FloatFormat::binary32;
         u64 bits = single ? 0x7fc00000u | (*payload & 0x3fffffu) : 0x7ff8000000000000u | (*payload & 0x7ffffffffffffu);
-        return literal(t, ast::float_value(ins(), target, t, ast::Bits128{bits, 0}), ValueCategory::prvalue, begin, end);
+        return literal(t, ast::float_value(ins(), w_->target, t, ast::Bits128{bits, 0}), ValueCategory::prvalue, begin, end);
       }
       case fabs: {
         if (dependent(args[0])) return dependent_node({args[0]}, begin, end, t);
@@ -3849,7 +3854,7 @@ public:
     Builtin chosen = Builtin::long_long;
     bool fits = false;
     for (Builtin k : list) {
-      IntShape s = shape(k);
+      IntShape s = shape(w_->target, k);
       u64 max = s.is_signed ? (u64{1} << (s.bits - 1)) - 1 : (s.bits == 64 ? ~u64{0} : (u64{1} << s.bits) - 1);
       if (!lit.overflow && lit.value <= max) {
         chosen = k;
@@ -3875,12 +3880,12 @@ public:
     lex::FloatSuffix suffix = lit.float_suffix;
     Builtin k = suffix == f ? Builtin::float_ : suffix == l ? Builtin::long_double : Builtin::double_;
     ast::FloatFormat want = suffix == f ? ast::FloatFormat::binary32 : ast::FloatFormat::binary64;
-    if ((suffix != none && suffix != f && suffix != l) || target[k].format != want) {
+    if ((suffix != none && suffix != f && suffix != l) || w_->target[k].format != want) {
       diag(begin, Diag::extended_float_not_supported);
       return {NodeId::none, begin, end};
     }
     QualType t = builtin(k);
-    return literal(t, ast::float_value(ins(), target, t, ast::Bits128{lit.value, 0}), ValueCategory::prvalue, begin, end);
+    return literal(t, ast::float_value(ins(), w_->target, t, ast::Bits128{lit.value, 0}), ValueCategory::prvalue, begin, end);
   }
 
   // [lex.ccon]: an ordinary character literal has type char; a multicharacter one, int.
@@ -4018,11 +4023,11 @@ public:
       if (const EnumRec* r = enum_rec(types().enum_of(e.type())); r && r->promotion)
         return convert_node(e, ast::ConversionKind::integral, *r->promotion);
       QualType u = underlying_of(e.type());
-      return convert_node(e, ast::ConversionKind::integral, builtin(promoted(*types().builtin_of(u))));
+      return convert_node(e, ast::ConversionKind::integral, builtin(sema::promoted(w_->target, *types().builtin_of(u))));
     }
     auto b = types().builtin_of(e.type());
     if (!b || !is_integral(*b)) return e;
-    Builtin p = promoted(*b);
+    Builtin p = sema::promoted(w_->target, *b);
     if (p == *b) return e;
     return convert_node(e, ast::ConversionKind::integral, builtin(p));
   }
@@ -4181,7 +4186,7 @@ public:
       auto c = constant_of ? constant_of(v) : std::nullopt;
       if (c && w_->values.rec(*c).kind == ValueKind::floating && types().builtin_of(u)) {
         double x = std::trunc(w_->values.rec(*c).real);
-        IntShape sh = shape(*types().builtin_of(u));
+        IntShape sh = shape(w_->target, *types().builtin_of(u));
         double top = std::ldexp(1.0, int(sh.is_signed ? sh.bits - 1 : sh.bits));
         if (sh.is_signed ? x >= -top && x < top : x > -1 && x < top)
           return literal(target, w_->values.integer(u, sh.is_signed ? u64(i64(x)) : u64(x)), ValueCategory::prvalue, v.begin, v.end);
@@ -4215,7 +4220,7 @@ public:
   // `sizeof` and `alignof` of a type ([expr.sizeof], [expr.alignof]), a `size_t` prvalue; zero
   // after a diagnostic.
   Ex size_of(QualType t, bool align, u32 begin, u32 end) {
-    QualType st = builtin(target.size_type);
+    QualType st = builtin(w_->target.size_type);
     if (types().is_dependent(t)) return dependent_node({}, begin, end, st);
     t = types().referee(t);  // [expr.sizeof]/2, [expr.alignof]/3
     std::optional<u64> n = layout_of(t, align);
@@ -4239,10 +4244,10 @@ public:
     TypeRec r = types().rec(t);
     switch (r.kind) {
     case TypeKind::builtin:
-      if (!target.has(r.builtin) || r.builtin == Builtin::void_) return std::nullopt;
-      return ast::scalar_placed(target[r.builtin].size, target[r.builtin].align);
+      if (!w_->target.has(r.builtin) || r.builtin == Builtin::void_) return std::nullopt;
+      return ast::scalar_placed(w_->target[r.builtin].size, w_->target[r.builtin].align);
     case TypeKind::pointer:
-    case TypeKind::reference: return ast::scalar_placed(target.pointer_size, target.pointer_align);  // a reference member's
+    case TypeKind::reference: return ast::scalar_placed(w_->target.pointer_size, w_->target.pointer_align);  // a reference member's
     case TypeKind::enum_: return is_complete(t) ? place_of(underlying_of(t)) : std::nullopt;
     case TypeKind::array: {
       if (r.bound_value == ConstId::none) return std::nullopt;
@@ -4481,7 +4486,7 @@ public:
   QualType arithmetic_conversions(Ex& a, Ex& c) {
     a = promote(a);
     c = promote(c);
-    Builtin k = common_integer(*types().builtin_of(a.type()), *types().builtin_of(c.type()));
+    Builtin k = common_integer(w_->target, *types().builtin_of(a.type()), *types().builtin_of(c.type()));
     QualType t = builtin(k);
     if (a.type() != t) a = arithmetic_conversion(a, t);
     if (c.type() != t) c = arithmetic_conversion(c, t);
@@ -4840,10 +4845,12 @@ public:
       if (types().is_arithmetic(tl) && types().is_arithmetic(tr) &&
           (!integral_only || (types().is_integral(tl) && types().is_integral(tr)))) {
         if (shift) {
-          computation = builtin(promoted(*types().builtin_of(tl)));
+          computation = builtin(sema::promoted(w_->target, *types().builtin_of(tl)));
           c = promote(rv);
         } else {
-          Builtin common = common_integer(promoted(*types().builtin_of(tl)), promoted(*types().builtin_of(tr)));
+          Builtin left = sema::promoted(w_->target, *types().builtin_of(tl));
+          Builtin right = sema::promoted(w_->target, *types().builtin_of(tr));
+          Builtin common = common_integer(w_->target, left, right);
           computation = builtin(common);
           c = convert(rv, computation, r.begin);
         }

@@ -22,7 +22,7 @@ export namespace ycxx::sema {
 // The facts `function_ir` needs (ycxx.irgen:facts), over sema's world and questions.
 class EvalFacts : public irgen::TypeFacts {
 public:
-  EvalFacts(World& w, Questions& q) : TypeFacts(w.ins, sema::target), w_(&w), q_(&q) {
+  EvalFacts(World& w, Questions& q) : TypeFacts(w.ins, w.target), w_(&w), q_(&q) {
     enum_underlying = [&q](EntityId e) {
       if (const EnumRec* r = q.defining_enum(e); r && r->underlying) return *r->underlying;
       return q.classes().underlying(e);
@@ -91,7 +91,7 @@ public:
     auto body = irgen::function_ir(in, input, facts);
     if (!body) return {};
     Host host{q_, this};
-    interp::Outcome out = interp::evaluate(host, in, target, body->body, EntityId::none, {}).run();
+    interp::Outcome out = interp::evaluate(host, in, s_->world().target, body->body, EntityId::none, {}).run();
     if (out.status != interp::Outcome::Status::value && q_->instantiation_gave_up())
       return {std::nullopt, reason_unsupported, false, true};
     if (out.status != interp::Outcome::Status::value) {
@@ -126,7 +126,7 @@ private:
     using K = interp::Result::Kind;
     switch (r.kind) {
     case K::integer: return {vs.integer(r.type, r.bits), 0, true};
-    case K::floating: return {ast::float_value(s_->ins(), target, r.type, ast::Bits128{r.bits, 0}), 0, true};
+    case K::floating: return {ast::float_value(s_->ins(), s_->world().target, r.type, ast::Bits128{r.bits, 0}), 0, true};
     case K::null: return {vs.null_pointer(r.type), 0, true};
     case K::function: return {vs.address(r.type, vs.entity(r.entity), 0), 0, true};
     case K::address:

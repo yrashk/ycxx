@@ -6,6 +6,7 @@ export module ycxx.compile;
 
 import std;
 import ycxx.obj.macho;
+import ycxx.obj.elf;
 import ycxx.pipeline;
 import ycxx.engine;
 import ycxx.pp;
@@ -189,8 +190,8 @@ std::expected<Options, std::string> parse_options(std::span<const std::string_vi
     else if (a.ends_with(".o")) o.objects.emplace_back(a);
     else o.sources.emplace_back(a);
   }
-  if (o.pp.target != &ast::aarch64_darwin && o.stop != Options::Stop::preprocess)
-    return std::unexpected(std::format("target '{}' only supports preprocessing (-E)", o.pp.target->triple));
+  if (o.pp.target == &ast::x86_64_linux && o.stop == Options::Stop::link)
+    return std::unexpected(std::format("linking for target '{}' is not supported", o.pp.target->triple));
   if (o.pp.call_triviality == ast::CallTriviality::apple && !o.pp.target->apple_calls)
     return std::unexpected("invalid value in '-fclass-call-abi=apple'");
   if (o.sources.empty() && o.objects.empty()) return std::unexpected("no input files");
@@ -356,6 +357,14 @@ void checking_options(std::span<const std::string_view> args, bool std, std::vec
     const std::size_t from = i;
     if (auto taken = pp::take_option(args, i, scratch); taken && *taken) {
       for (std::size_t k = from; k <= i; ++k) out.emplace_back(args[k]);
+    } else if (args[i] == "--target" && i + 1 < args.size()) {
+      if (ast::target_for_triple(args[i + 1])) {
+        out.emplace_back(args[i]);
+        out.emplace_back(args[i + 1]);
+      }
+      ++i;
+    } else if (args[i].starts_with("--target=") && ast::target_for_triple(args[i].substr(9))) {
+      out.emplace_back(args[i]);
     } else if (args[i] == "-o") {
       ++i;
     } else if ((std && args[i].starts_with("-std=")) || args[i].starts_with("-ftemplate-depth=") ||
@@ -378,7 +387,7 @@ Request check_command(std::span<const std::string> args, std::string cwd, std::s
 
 std::optional<Request> check_one(const Request& r, std::string_view source) {
   auto opts = parse_options(views(r.argv));
-  if (!opts || opts->pp.target != &ast::aarch64_darwin) return std::nullopt;
+  if (!opts) return std::nullopt;
   auto spelled = std::ranges::find_if(opts->sources, [&](const std::string& s) { return absolute_in(r, s) == source; });
   if (spelled == opts->sources.end()) return std::nullopt;
   Request one{{}, r.cwd, r.env, r.build_time};
@@ -501,7 +510,15 @@ Done run(const Request& r, pp::Host& host, pipeline::Session& session, const Sto
     }
     if (until == pipeline::Until::object) {
       std::string o = opts->output ? *opts->output : object_name(path).native_encoded_string();
-      d.outputs.push_back({std::move(o), obj::macho::write_object(*u.object), false});
+      if (u.object->arch == obj::target::x86_64_linux) {
+        auto bytes = obj::elf::write_object(*u.object);
+        if (!bytes) {
+          render.file_level(bytes.error());
+          failed = true;
+          continue;
+        }
+        d.outputs.push_back({std::move(o), std::move(*bytes), false});
+      } else d.outputs.push_back({std::move(o), obj::macho::write_object(*u.object), false});
     }
   }
   if (failed || until != pipeline::Until::link) {
@@ -525,7 +542,7 @@ Done run(const Request& r, pp::Host& host, pipeline::Session& session, const Sto
 std::optional<pipeline::FileOffset> definition(const Request& r, pp::Host& host, pipeline::Session& session,
                                                const std::string& file, std::uint32_t offset, Units units) {
   auto opts = parse_options(views(r.argv));
-  if (!opts || opts->pp.target != &ast::aarch64_darwin || opts->sources.empty()) return std::nullopt;
+  if (!opts || opts->sources.empty()) return std::nullopt;
   pp::Config config = pp::with_system_dirs(opts->pp);
   config.view = units.view;
   pp::configure(config, host);
