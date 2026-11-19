@@ -854,8 +854,9 @@ clauses = ['expr.prim.lambda.closure']
 std = 'C++14'
 ftm = '__cpp_generic_lambdas'
 detect = '(?:^|[=(,{;:?!]|\breturn)\s*\[[^\[\]]*\]\s*\([^)]*\bauto\b'
-status = 'missing'
-issues = [281]
+status = 'partial'
+note = 'not yet conversion to a function pointer'
+issues = [339]
 probe = '''
 int main() { auto id = [](auto x) { return x; }; return id(0) + id('\0'); }
 '''
@@ -882,7 +883,7 @@ clauses = ['expr.prim.lambda.closure', 'dcl.constexpr']
 std = 'C++17'
 detect = '\]\s*\([^)]*\)\s*(?:mutable\s+)?(?:constexpr|consteval)\b'
 status = 'missing'
-issues = [281]
+issues = [262, 102]
 probe = '''
 int main() { constexpr auto sq = [](int x) { return x * x; }; static_assert(sq(3) == 9); return 0; }
 '''
@@ -909,8 +910,9 @@ group = 'lambda'
 clauses = ['expr.prim.lambda']
 std = 'C++20'
 detect = '(?:^|[=(,{;:?!]|\breturn)\s*\[[^\[\]]*\]\s*<'
-status = 'missing'
-issues = [281]
+status = 'partial'
+note = 'not yet explicit template arguments or requires-clauses'
+issues = [347, 350]
 probe = '''
 int main() { auto f = []<class T>(T x) { return sizeof(T) + x; }; return f(0) == sizeof(int) ? 0 : 1; }
 '''
@@ -937,8 +939,9 @@ clauses = ['expr.prim.lambda.capture']
 std = 'C++20'
 ftm = '__cpp_init_captures'
 detect = '(?:^|[=(,{;:?!]|\breturn)\s*\[[^\[\]]*\.\.\.[^\[\]]*\]\s*[({<m]'
-status = 'missing'
-issues = [281]
+status = 'partial'
+note = '`[xs...]`; not yet init-capture packs `[...ys = xs]`'
+issues = [350]
 probe = '''
 template<class... T> int sum(T... t) { auto f = [...u = t] { return (0 + ... + u); }; return f(); }
 int main() { return sum(1, 2, -3); }
@@ -953,7 +956,7 @@ std = 'C++23'
 ftm = '__cpp_static_call_operator'
 detect = '\bstatic\s+[\w:<>&* ]*operator\s*\(\s*\)\s*\(|\]\s*(?:\([^)]*\))?\s*static\b'
 status = 'missing'
-issues = [281]
+issues = [350]
 probe = '''
 struct F { static int operator()(int x) { return x; } };
 int main() { auto l = [](int x) static { return x; }; return F{}(0) + l(0); }

@@ -93,6 +93,20 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
   - Rule: AGENTS.md, "PRs and branches".
   - Learned on #229, 2026-11-19.
 
+- **A new deduction or template mechanism meets the old features in the review.** Both P0s of
+  #334 (`auto`) were interactions: a return in a discarded `if constexpr` branch deduced the
+  type, and `&` of an overload set reached deduction and crashed. The P1s were the same kind
+  (a member of a class template named in its definition, a variable template's dependent
+  initializer).
+  - Do: before the review, run every new deduction through discarded statements, overload
+    sets and their addresses, the current instantiation's members, and a template's definition
+    versus its instantiation, and give each a test.
+  - The same held for lambdas (#280, #281): the P0s and P1s were odr-use of constants, arrays of
+    classes, a plain lambda inside a generic one, and a generic lambda calling a function
+    template. Do: combine the new construct with each neighbouring one it can nest in or call
+    (lambdas in templates and templates in lambdas) before the review.
+  - Learned on #279; confirmed on #280 and #281.
+
 ## Working with Fable subagents
 
 - **Agree the contract between parts before splitting a design.** #1's engine part and C++ part

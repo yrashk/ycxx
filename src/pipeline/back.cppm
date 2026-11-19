@@ -1035,6 +1035,7 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
       n.closure = true;
       n.closure_type = r.type;
       n.closure_number = r.ordinal;
+      n.closure_head = r.closure_head;
       if (f != by_id.end()) {
         const Entity& fe = *f->second;
         std::string fname = fe.special == Special::constructor ? "C1" : fe.special == Special::destructor ? "D1" : fe.name;

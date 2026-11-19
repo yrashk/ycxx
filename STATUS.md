@@ -1645,6 +1645,40 @@ values, end to end; results match Clang's bit for bit.
 - Not yet: the extended floating-point types (#351), floating non-type template parameters
   (#317), `-ffast-math`-style options, and `<cmath>` (#349).
 
+## Generic lambdas, θ step 3 (#281, 2026-11-19)
+
+- **Definition:** `auto` parameters invent type parameters appended to the lambda's
+  template-head, after any explicit `[]<class T>` ones ([expr.prim.lambda.closure]/7); the head
+  is pushed onto the template scopes, so the body is analysed as a template's definition, and the
+  call operator keeps its declared type. Its record's `MemberDeclRec::head` makes it a template;
+  `ClosureDef` keeps the head and the enclosing function's constants the body names
+  (`consts`). The closure's name has the head at depth 0 and Clang's `Ty`/`Tn` declarations for
+  explicit parameters (`EntityRec::closure_head`).
+- **Calls:** `member_call` deduces each template operator's arguments (`Templates::deduce_call`)
+  and asks `Questions::generic_instance` for the specialization, which `Program` instantiates
+  where it is named ([temp.inst]/8): a `BodyAnalysis` in generic mode re-analyses the lambda's
+  body tokens with the arguments bound and the closure's frame rebuilt from its record
+  (`Sema::open_generic`, `close_generic`), deducing the return type. Generic lambdas defined in
+  the part being analysed are found through `generic_defined`; ones nested in another generic
+  lambda through that lambda's instance. A recursive call through a `self` parameter sees the
+  type its first return deduced. The instances are `Program::instances()`, emitted as the
+  others, mangled as member template specializations in a <local-name>.
+- **Constant evaluation of closures:** `Questions::function_ir` of a closure member is answered
+  (`Evaluator::closure_callee` for the part being analysed, `Program::closure_ir` otherwise),
+  and closure members are constexpr; the interpreter does not evaluate class objects yet (#262),
+  so constexpr lambdas wait on it.
+- Tests: `tests/own/lambda/p3-*` (33 spec-only + 6 own, one an ABI test against Clang objects):
+  all but 12 pass; those are XFAIL (constexpr lambdas #262, default arguments #300,
+  `static_cast<T&&>` and dependent `decltype` #199, a generic lambda's conversion #339, explicit
+  template arguments #347).
+- **Packs:** `auto... xs` invents a template parameter pack and `[]<class... Ts>(Ts... xs)`
+  declares one; a specialization's parameters are the pack's elements (`open_generic`), and the
+  body's expansions are those its definition recorded (`GenericClosure::expansions`, kept in the
+  enclosing body's `BodySema`). `[xs...]` and `[&xs...]` capture each element of an
+  instantiation's function parameter pack, as a capture-default does for the elements used.
+- Not yet: init-capture packs `[...ys = xs]`, requires-clauses, static and consteval lambdas
+  (#350).
+
 ## Bootstrap workarounds
 
 Places where ycxx's sources avoid or work around a C++26 feature because GCC 16 lacks it or
