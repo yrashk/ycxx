@@ -21,8 +21,10 @@ class FileTable final : public pp::Host {
   // after the read is always seen (§5.5).
   explicit FileTable(std::function<void(const std::string&)> watch) : watch_(std::move(watch)) {}
 
-  // The directory relative paths of the current request are relative to.
-  void set_cwd(std::string cwd) { cwd_ = std::move(cwd); }
+  // The directory relative paths are relative to, for reads on this thread: the request's that
+  // runs on it. Requests run at once, each on its own thread (#139); the engine's reads use
+  // absolute paths.
+  void set_cwd(std::string dir) { cwd() = std::move(dir); }
 
   // Safe to call from any thread (a provider may run on any worker).
   std::optional<std::string> read(const std::string& path) override {
@@ -85,11 +87,16 @@ class FileTable final : public pp::Host {
   // The absolute key of a path of the current request.
   std::string absolute(const std::string& path) const {
     std::filesystem::path p(path);
-    if (p.is_relative() && !cwd_.empty()) p = std::filesystem::path(cwd_) / p;
+    if (p.is_relative() && !cwd().empty()) p = std::filesystem::path(cwd()) / p;
     return p.lexically_normal().generic_native_encoded_string();
   }
 
  private:
+  static std::string& cwd() {
+    static thread_local std::string c;
+    return c;
+  }
+
   struct Entry {
     bool present = false;
     std::optional<Identity> id;
@@ -223,7 +230,6 @@ class FileTable final : public pp::Host {
 
   mutable std::mutex mu_;
   std::function<void(const std::string&)> watch_;
-  std::string cwd_;
   std::vector<std::string> changed_;
   std::map<std::string, Entry> entries_;
   std::map<std::string, std::set<std::string>> by_real_;  // real name -> keys (§5.5)

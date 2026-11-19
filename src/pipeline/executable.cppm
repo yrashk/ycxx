@@ -38,6 +38,8 @@ struct ProgramId {
   std::uint32_t n = 0;
   bool operator==(const ProgramId&) const = default;
 };
+// A program in engine traces (#245): its output's name, once a session has named it.
+void trace_describe(std::string& out, ProgramId p);
 // What a program is linked from: translation units, in command-line order, then objects read from
 // files; `identifier` names the code signature.
 struct ProgramInputs {

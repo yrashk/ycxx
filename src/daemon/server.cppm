@@ -274,6 +274,7 @@ class Server {
     s.watcher = watcher_state_;
     s.idle_exit_s = static_cast<std::uint64_t>(o_.idle_exit.count());
     s.threads = threads_.count;
+    s.peak_running = session().peak_requests();  // through the once: `session_` may be being made
     return s;
   }
 
@@ -527,9 +528,12 @@ class Server {
       spelled.insert_or_assign(canonical(path), text);
       spelled.insert_or_assign(path, text);
     }
-    std::unique_lock engine(engine_mu_);
-    catch_up();
-    set_buffers(spelled);
+    std::lock_guard lsp(lsp_mu_);  // the overlay is one diagnosis's
+    {
+      std::lock_guard strand(strand_mu_);
+      catch_up();
+      set_buffers(spelled);
+    }
     overlay_.open = &spelled;
     struct Reset {
       Overlay& o;
@@ -537,12 +541,11 @@ class Server {
     } reset{overlay_};
     std::vector<lsp::Diagnostic> found;
     for (const Check& c : checks) {
-      table_.set_cwd(c.request.cwd);
       overlay_.cwd = c.request.cwd;
       bool stopped = false;
       auto traced = trace_for(-1, compile::Trace::off, "lsp " + *c.path);
-      const compile::Done d = compile::run(c.request, overlay_, session(), {}, stopped, {pp::View::editor, editor_unit(c.real)},
-                                           traced ? traced->tracer() : nullptr);
+      const compile::Done d =
+          compile::run(c.request, overlay_, session(), {}, stopped, {pp::View::editor}, traced ? traced->tracer() : nullptr);
       traced.reset();
       {
         std::lock_guard g(stats_mu_);
@@ -561,87 +564,96 @@ class Server {
   }
 
   // The editor's buffers become the `pp::Buffer` inputs (§6.1): an open one set, a closed one
-  // cleared. An unchanged one keeps its value, so nothing that read it turns red. Under engine_mu_.
+  // cleared. An unchanged one keeps its value, so nothing that read it turns red. A change stops
+  // and restarts the running requests (§4.1). On the strand.
   void set_buffers(const lsp::Buffers& open) {
-    engine::Db& db = session().db();
-    for (auto it = buffers_.begin(); it != buffers_.end();) {
-      if (open.contains(*it)) {
-        ++it;
-        continue;
-      }
-      db.set<pp::Buffer>(pp::path_id(*it), std::nullopt);
-      it = buffers_.erase(it);
-    }
+    std::vector<std::pair<std::string, std::optional<std::string>>> sets;
+    for (const std::string& b : buffers_)
+      if (!open.contains(b)) sets.emplace_back(b, std::nullopt);
     for (const auto& [path, text] : open) {
-      db.set<pp::Buffer>(pp::path_id(path), text);
-      buffers_.insert(path);
+      auto it = buffer_texts_.find(path);
+      if (it == buffer_texts_.end() || it->second != text) sets.emplace_back(path, text);
+    }
+    if (sets.empty()) return;
+    restarted(session().apply([&](engine::Db& db) {
+      for (const auto& [path, text] : sets) db.set<pp::Buffer>(pp::path_id(path), text);
+    }));
+    for (const auto& [path, text] : sets) {
+      if (text) {
+        buffers_.insert(path);
+        buffer_texts_.insert_or_assign(path, *text);
+      } else {
+        buffers_.erase(path);
+        buffer_texts_.erase(path);
+      }
     }
   }
 
-  // An editor-view unit's number, one per document for the daemon's life, apart from every
-  // disk-view number (a build numbers its units from 0).
-  std::uint32_t editor_unit(const std::string& path) {
-    auto [it, _] = editor_units_.try_emplace(path, (1u << 31) + static_cast<std::uint32_t>(editor_units_.size()));
-    return it->second;
+  // The admission quantum after a batch stopped running requests (§4.2): it doubles when one of
+  // them had stored no cell since its previous start. On the strand.
+  void restarted(const engine::Epochs::Applied& a) {
+    if (a.respawned > 0) admission_.restarted(a.starved == 0);
   }
 
-  // One request, admitted into the engine; nothing if the client hung up.
+  // One request, spawned into the engine's open epoch (§4.3); nothing if the client hung up.
+  // Requests run at once: a batch that arrives meanwhile is applied once the quantum allows, and
+  // restarts every running request where it stopped (§4.1).
   std::optional<compile::Done> run_compile(int fd, const compile::Request& r, engine::Tracer* tracer) {
-    std::unique_lock engine(engine_mu_, std::defer_lock);
-    while (!engine.try_lock_for(std::chrono::milliseconds(50)))
-      if (hung_up(fd)) return std::nullopt;
-
     compile::Report report;
-    report.inputs_changed += catch_up();
-    table_.set_cwd(r.cwd);
-
-    for (;;) {
-      bool cancelled = false;
-      Events::Batch pending;
-      compile::Stop stop = [&] {
-        if (hung_up(fd)) return cancelled = true;
-        // A batch that reaches the table stops the request, once the quantum allows (§4.2).
-        Events::Batch more = events_->drain();
-        pending.paths.append_range(more.paths);
-        pending.overflow = pending.overflow || more.overflow;
-        if ((pending.overflow || table_.knows_any(pending.paths)) && admission_.may_apply(Clock::now())) return true;
-        return false;
-      };
-      bool stopped = false;
-      compile::Done d = compile::run(r, table_, session(), stop, stopped, {}, tracer);
-      if (!stopped) {
-        // The only live root stored its answer: the quantum returns to the floor (§4.2).
-        admission_.progressed();
-        requeue(std::move(pending));
-        std::lock_guard g(stats_mu_);
-        report.revision = stats_.revision;
-        d.report.restarts = report.restarts;
-        d.report.revision = report.revision;
-        d.report.inputs_changed = report.inputs_changed;
-        stats_.quantum_ms = static_cast<std::uint64_t>(admission_.quantum().count());
-        stats_.entries = table_.size();
-        return d;
-      }
-      if (cancelled) {
-        requeue(std::move(pending));
-        log("a client hung up: its request stopped");
-        return std::nullopt;
-      }
-      // Restart at the new revision: what was not yet applied goes back in the queue and is
-      // applied as the next batch.
-      requeue(std::move(pending));
-      // A restart runs the request from its first unit, so nothing it finished survives: it never
-      // counts as progress, and the quantum doubles until it outlasts a whole run (§4.2). With
-      // cells that survive restarts (#120) progress becomes "stored a cell".
-      admission_.restarted(false);
-      report.inputs_changed += apply_batch(false);
-      admission_.applied(Clock::now());
-      ++report.restarts;
+    table_.set_cwd(r.cwd);  // for this thread's reads (`-E`)
+    {
+      std::lock_guard strand(strand_mu_);
+      report.inputs_changed += catch_up();
     }
+    struct Running {
+      Server& s;
+      explicit Running(Server& s) : s(s) {
+        std::lock_guard g(s.strand_mu_);
+        ++s.running_;
+      }
+      ~Running() {
+        std::lock_guard g(s.strand_mu_);
+        --s.running_;
+      }
+    } running{*this};
+    bool cancelled = false;
+    compile::Stop tick = [&] {
+      if (hung_up(fd)) return cancelled = true;
+      if (watcher_) {
+        std::unique_lock strand(strand_mu_, std::try_to_lock);
+        if (strand && admission_.may_apply(Clock::now())) {
+          if (const std::size_t changed = apply_batch(false); changed > 0) {
+            report.inputs_changed += changed;
+            admission_.applied(Clock::now());
+          }
+        }
+      }
+      return false;
+    };
+    bool stopped = false;
+    compile::Done d = compile::run(r, table_, session(), tick, stopped, {}, tracer);
+    if (stopped) {
+      log("a client hung up: its request stopped");
+      return std::nullopt;
+    }
+    std::uint64_t quantum = 0;
+    {
+      // The quantum returns to the floor once every live root has stored its answer (§4.2): when
+      // the last running request completes. One finishing beside a starved one does not.
+      std::lock_guard strand(strand_mu_);
+      if (running_ == 1) admission_.progressed();
+      quantum = static_cast<std::uint64_t>(admission_.quantum().count());
+    }
+    std::lock_guard g(stats_mu_);
+    d.report.revision = stats_.revision;
+    d.report.inputs_changed = report.inputs_changed;
+    stats_.quantum_ms = quantum;
+    stats_.entries = table_.size();
+    return d;
   }
 
   // Freshness (§5.4): every change made before the request was sent is queued, then applied as a
-  // batch; the entries it changed. Under engine_mu_.
+  // batch; the entries it changed. On the strand.
   std::size_t catch_up() {
     bool rescan = false;
     if (watcher_) {
@@ -662,13 +674,12 @@ class Server {
   // provided from the table (§5.1), and a batch sets the ones it changed, so an edit invalidates
   // exactly the cells that read the file and a repeated request executes nothing.
   pipeline::Session& session() {
-    if (!session_) {
-      if (!pool_) pool_ = std::make_unique<engine::Pool>(threads_.count, threads_.chaos_seed);
+    std::call_once(session_once_, [this] {
+      pool_ = std::make_unique<engine::Pool>(threads_.count, threads_.chaos_seed);
       session_ = std::make_unique<pipeline::Session>(*pool_);
-      provided_.clear();
-      buffers_.clear();
       session_->db().set_provider<pp::FileContent>([this](pp::PathId id) { return provide(id); });
-    }
+      session_->set_reader([this](const std::string& path) { return table_.read(path); });
+    });
     return *session_;
   }
 
@@ -685,18 +696,22 @@ class Server {
     return {table_.read(key), system ? engine::Durability::high : engine::Durability::low};
   }
 
-  // At quiescence: the provided inputs whose entries a batch changed get their new values.
+  // The provided inputs whose entries a batch changed get their new values, and the main files of
+  // the units named so far theirs: at quiescence, stopping and restarting the running requests
+  // (§4.1). On the strand.
   void set_changed_inputs() {
     std::vector<std::string> changed = table_.take_changed();
-    if (!session_) return;
-    std::lock_guard g(provided_mu_);
-    for (const std::string& key : changed)
-      if (provided_.contains(key)) session_->db().set<pp::FileContent>(pp::path_id(key), table_.read(key));
-  }
-
-  void requeue(Events::Batch b) {
-    for (std::string& p : b.paths) events_->push(std::move(p));
-    if (b.overflow) events_->overflow();
+    if (changed.empty()) return;
+    std::vector<std::string> provided;
+    {
+      std::lock_guard g(provided_mu_);
+      for (const std::string& key : changed)
+        if (provided_.contains(key)) provided.push_back(key);
+    }
+    restarted(session().apply([&](engine::Db& db) {
+      for (const std::string& key : provided) db.set<pp::FileContent>(pp::path_id(key), table_.read(key));
+      for (const std::string& key : changed) session_->set_main_file(key, table_.read(key));
+    }));
   }
 
   ServerOptions o_;
@@ -710,10 +725,14 @@ class Server {
   std::string watcher_state_;
   FileTable table_;
   Admission admission_;
-  std::timed_mutex engine_mu_;  // one request in the engine at a time (#15 lifts this)
+  // The edit strand (§4.1): batches, the editor's buffers and the admission quantum, one at a
+  // time. Requests run concurrently, outside it.
+  std::mutex strand_mu_;
+  std::mutex lsp_mu_;  // one diagnosis at a time: the overlay is its
   const compile::Threads threads_ = compile::threads();
-  std::unique_ptr<engine::Pool> pool_;           // under engine_mu_; outlives the session
-  std::unique_ptr<pipeline::Session> session_;  // under engine_mu_
+  std::once_flag session_once_;
+  std::unique_ptr<engine::Pool> pool_;           // outlives the session
+  std::unique_ptr<pipeline::Session> session_;  // created once, for the daemon's life
   std::mutex provided_mu_;
   std::set<std::string> provided_;  // the table keys provided to session_'s FileContent cells
   std::vector<std::string> system_dirs_;
@@ -737,9 +756,9 @@ class Server {
    private:
     FileTable* table_;
   };
-  Overlay overlay_{table_};                          // under engine_mu_
-  std::set<std::string> buffers_;                    // the paths whose `pp::Buffer` is set; under engine_mu_
-  std::map<std::string, std::uint32_t> editor_units_;  // under engine_mu_
+  Overlay overlay_{table_};                     // under lsp_mu_
+  std::set<std::string> buffers_;               // the paths whose `pp::Buffer` is set; on the strand
+  std::map<std::string, std::string> buffer_texts_;  // their texts; on the strand
   struct Command {
     std::shared_ptr<const compile::Request> request;
     std::string source;  // as `request` names it, absolute
@@ -762,6 +781,7 @@ class Server {
   std::vector<std::shared_ptr<Watching>> watchers_;  // under watch_mu_
   std::atomic<std::uint64_t> trace_requests_{0};
   const Clock::time_point trace_origin_ = Clock::now();  // the clock of every trace's events
+  std::uint64_t running_ = 0;  // compile requests admitted and not yet answered; on the strand
 };
 
 }  // namespace

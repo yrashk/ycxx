@@ -356,6 +356,11 @@ concept ShownValue = requires(const typename Q::Value& v) {
 template <class T>
 concept TraceDescribed = requires(std::string& out, const T& v) { trace_describe(out, v); };
 
+// Out of line, so what each kind instantiates for traces stays small: formatting in templates
+// grew every engine user's unit until GCC stopped inlining the hit path's hashing (#245, +6 ns).
+void describe_number(std::string& out, std::uint64_t v, bool negative);
+void describe_fp(std::string& out, const Fp128& f);
+
 // A key's fields by reflection, for kinds with no `describe`: `{1, 2}`, a lone field bare.
 template <class T>
 void describe_into(std::string& out, const T& v) {
@@ -368,13 +373,14 @@ void describe_into(std::string& out, const T& v) {
         return;
       }
     }
-    std::format_to(std::back_inserter(out), "{}", std::to_underlying(v));
+    describe_into(out, std::to_underlying(v));
   } else if constexpr (std::is_same_v<T, bool>) {
     out += v ? "true" : "false";
   } else if constexpr (std::is_integral_v<T>) {
-    std::format_to(std::back_inserter(out), "{}", v);
+    if constexpr (std::is_signed_v<T>) describe_number(out, v < 0 ? 0 - static_cast<std::uint64_t>(v) : static_cast<std::uint64_t>(v), v < 0);
+    else describe_number(out, v, false);
   } else if constexpr (std::is_same_v<T, Fp128>) {
-    std::format_to(std::back_inserter(out), "{:08x}", static_cast<std::uint32_t>(v.hi >> 32));
+    describe_fp(out, v);
   } else {
     if constexpr (members_of<T>().size() == 1) {
       describe_into(out, v.[:members_of<T>()[0]:]);
@@ -678,9 +684,10 @@ private:
   std::uint32_t error_at_ = ~0u;        // the held error's position; cells from it on are not settled
   std::exception_ptr error_;
   // Traced requests only (#245): rounds after the first look again at cells this frame computed
-  // or claimed, which are not reuses; only cells another frame owned (`waited_`) are traced then.
+  // or claimed, which are not reuses; only cells another frame owned are traced then, by position
+  // in `waited_` (the first 64; past them, none). Plain words, so an untraced fetch pays nothing.
   std::uint32_t round_ = 0;
-  std::vector<CellId> waited_;
+  std::uint64_t waited_ = 0;
 };
 
 // A fingerprint as a hash table key: already uniform, never `std::hash` (§A5.1).
@@ -1014,14 +1021,15 @@ private:
   void count(Counter what, const Root* root, CellId c, std::uint64_t n = 1) noexcept;
   void observe() noexcept { observed_.store(true, std::memory_order_relaxed); }
 
-  // Tracing (#245). Every hook first asks `tracer_of`, so an untraced request pays one load.
-  static Tracer* tracer_of(const Frame* f) noexcept;
+  // Tracing (#245). Every hook first asks `tracer_of`, so an untraced request pays one load and
+  // a branch; what builds events is cold and out of line, so the hot paths stay small.
+  static Tracer* tracer_of(const Frame* f) noexcept { return f && f->root ? f->root->tracer : nullptr; }
   // A cell's key as traces show it.
   std::string describe(CellId c) const;
-  Span open_span() noexcept;
+  [[gnu::cold, gnu::noinline]] Span open_span() noexcept;
   std::int32_t worker_now() const noexcept;
   // Reports cell `c` to `t`: an instant, or the end of `span`'s work.
-  void trace(Tracer* t, std::uint64_t parent, CellId c, Outcome o, const Span* span = nullptr) noexcept;
+  [[gnu::cold, gnu::noinline]] void trace(Tracer* t, std::uint64_t parent, CellId c, Outcome o, const Span* span = nullptr) noexcept;
 
   Arena<Cell> cells_;
   mutable std::array<std::atomic<KindTableBase*>, max_kinds> tables_{};
@@ -1540,14 +1548,15 @@ public:
   // A request in the current epoch: `on_value(const Value&)` when it completes with a value,
   // `on_error(std::exception_ptr)` on an internal error; when an epoch's stop interrupts it, it
   // runs again in the next epoch. Neither callback may call back into this object.
+  // `tracer`, when given, gets the request's events, through every restart (#245).
   template <MemoQuery Q, class F, class G>
-  std::shared_ptr<Ticket> spawn(const typename Q::Key& k, Priority p, F on_value, G on_error) {
+  std::shared_ptr<Ticket> spawn(const typename Q::Key& k, Priority p, F on_value, G on_error, Tracer* tracer = nullptr) {
     namespace ex = std::execution;
     auto ticket = std::make_shared<Ticket>();
     auto callbacks = std::make_shared<std::pair<F, G>>(std::move(on_value), std::move(on_error));
-    ticket->launch_ = [this, t = ticket.get(), k, p, callbacks] {
+    ticket->launch_ = [this, t = ticket.get(), k, p, callbacks, tracer] {
       std::shared_ptr<Ticket> self = t->shared_from_this();
-      ex::spawn(db_->request<Q>(k, p, &t->counters_) |
+      ex::spawn(db_->request<Q>(k, p, &t->counters_, tracer) |
                     ex::then([callbacks](const typename Q::Value& v) mutable { callbacks->first(v); }) |
                     ex::upon_error([callbacks](std::exception_ptr e) mutable noexcept { callbacks->second(std::move(e)); }) |
                     ex::upon_stopped([this, self]() noexcept { interrupted(self); }),
@@ -1698,15 +1707,16 @@ std::coroutine_handle<> Settle::step() noexcept {
     // Only the cells before a held error are settled: it is reported once they are verified.
     const auto limit = static_cast<std::uint32_t>(std::min<std::size_t>(cells_.size(), error_at_));
     const bool traced = Db::tracer_of(frame_) != nullptr;
-    std::vector<CellId> waited;
+    std::uint64_t waited = 0;
     for (std::uint32_t i = 0; i < limit; ++i) {
       try {
         const std::size_t claimed = children.size();
-        const bool quiet = traced && round_ > 0 && !std::ranges::contains(waited_, cells_[i]);
+        const std::uint64_t bit = i < 64 ? std::uint64_t{1} << i : 0;
+        const bool quiet = traced && round_ > 0 && !(waited_ & bit);
         if (db.try_settle(cells_[i], *frame_, children, quiet) == Db::Settled::busy) {
           busy.push_back(cells_[i]);
           busy_at_.push_back(i);
-          if (traced && children.size() == claimed) waited.push_back(cells_[i]);
+          if (traced && children.size() == claimed) waited |= bit;
         }
       } catch (...) {
         // A cheap cell failed on this stack (an exception from its query, or a cycle).
@@ -1714,7 +1724,7 @@ std::coroutine_handle<> Settle::step() noexcept {
         break;
       }
     }
-    if (traced) waited_ = std::move(waited);
+    waited_ = waited;
     ++round_;
     // Claimed cells always get their frames started: something may already wait on them. Pushed
     // in reverse, so this worker takes the first next.
@@ -2326,8 +2336,6 @@ void Db::count(Counter what, const Root* root, CellId c, std::uint64_t n) noexce
   if (per_kind_.load(std::memory_order_relaxed)) tables_[cells_[c].kind].load(std::memory_order_acquire)->counters.add(what, n, stripe);
 }
 
-Tracer* Db::tracer_of(const Frame* f) noexcept { return f && f->root ? f->root->tracer : nullptr; }
-
 Span Db::open_span() noexcept {
   Span s;
   s.id = trace_ids_.fetch_add(1, std::memory_order_relaxed);
@@ -2364,6 +2372,12 @@ void Db::trace(Tracer* t, std::uint64_t parent, CellId c, Outcome o, const Span*
   }
   t->event(std::move(ev));
 }
+
+void describe_number(std::string& out, std::uint64_t v, bool negative) {
+  if (negative) out += '-';
+  out += std::to_string(v);
+}
+void describe_fp(std::string& out, const Fp128& f) { std::format_to(std::back_inserter(out), "{:08x}", static_cast<std::uint32_t>(f.hi >> 32)); }
 
 std::string Db::describe(CellId c) const {
   const Cell& e = cells_[c];
