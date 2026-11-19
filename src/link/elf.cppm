@@ -455,6 +455,9 @@ std::expected<bytes, std::string> link(std::span<const obj::object> objects, std
         const auto& symbol = o.symbols[r.symbol];
         const auto def = resolve(oi, symbol);
         const auto imported = def ? imports.end() : imports.find(symbol.name);
+        if (!def && imported == imports.end() && dynamic && symbol.weak && symbol.bind == binding::global &&
+            provided_symbol(*dynamic, symbol.name))
+          return section_error(o, s, std::format("weak ELF import '{}' is unsupported", symbol.name));
         if (imported != imports.end() &&
             (r.kind != reloc_kind::x86_64_plt32 || r.addend != -4 || symbol.bind != binding::global ||
              !executable(s) || r.offset == 0 || s.bytes[r.offset - 1] != 0xe8))

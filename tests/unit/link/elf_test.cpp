@@ -328,6 +328,18 @@ void dynamic_calls() {
          "overlapping ELF relocations are unsupported");
   change([](auto& c, auto&) { c.relocs.clear(); }, "has no direct call reference");
 
+  auto weak = input;
+  weak.symbols[function].weak = true;
+  reject(weak, options, "weak ELF import 'provided' is unsupported");
+  auto unused_weak = weak;
+  unused_weak.sections[text].relocs.clear();
+  check(elf::link(std::span(&unused_weak, 1), "_start", &options).has_value(),
+        "a weak name with no reference does not require dynamic binding");
+  auto no_definition = options;
+  no_definition.libraries[0].exports.clear();
+  check(elf::link(std::span(&weak, 1), "_start", &no_definition).has_value(),
+        "a weak name missing from explicit providers keeps the unresolved zero value");
+
   auto incompatible = options;
   incompatible.libraries.insert(incompatible.libraries.begin(),
                                 {"data.so", "data.so.1", {{"provided", false}}, {}});

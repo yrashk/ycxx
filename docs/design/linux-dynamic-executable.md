@@ -52,8 +52,9 @@ unresolved symbol, accept a producer-subset `R_X86_64_PLT32` displacement in an 
 section at a direct call, with addend −4. Check a full four-byte displacement immediately
 after the `E8` opcode within the section. This check covers the supported ycxx object subset.
 Reject incompatible references to the same imported name, including address-taking through
-an absolute or ordinary PC-relative fixup. The external function-address path has its own
-issue [#407](https://github.com/yrashk/ycxx/issues/407).
+an absolute or ordinary PC-relative fixup. Weak-only references to a supplied definition are
+also outside this slice. The external function-address path has its own issue
+[#407](https://github.com/yrashk/ycxx/issues/407).
 
 Allocate one RX thunk and one aligned RW address slot per imported name. Resolve the call
 with the signed 32-bit `L + A - P` displacement to its thunk. The thunk tail-jumps through
