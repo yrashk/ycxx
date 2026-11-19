@@ -780,7 +780,7 @@ public:
           s_->push_scope();
           for (const Param& p : l.suffixes.back().params)
             if (p.name != s_->no_name()) s_->declare_local(p.name, p.type, sema::local_flag::parameter, p.at, false);
-          auto t = type_id();
+          auto t = type_id(true);
           s_->pop_scope();
           if (!t) {
             ok = false;
@@ -1134,8 +1134,19 @@ public:
       }
     }
     ok = expect(Tk::r_paren) && ok;
+    // A placeholder parameter makes an abbreviated function template ([dcl.fct]/22, #286), or a
+    // generic lambda (#281); in a function type it is not allowed ([dcl.spec.auto.general]/2).
+    if (!placeholder_params)
+      for (const Param& p : s.params)
+        if (s_->types().has_placeholder(p.type)) {
+          s_->diag(p.at, Diag::not_supported, Tk::kw_auto);
+          ok = false;
+          break;
+        }
     return s;
   }
+  // Set while a lambda's parameters are read, which check their placeholders themselves.
+  bool placeholder_params = false;
   void skip_param() {
     int depth = 0;
     while (!at_end()) {
@@ -1390,13 +1401,19 @@ public:
   }
 
   // A type-id ([dcl.name]): a decl-specifier-seq and an abstract declarator.
-  std::optional<QualType> type_id() {
+  // A placeholder is allowed only where `placeholder_ok` says (a trailing return type,
+  // [dcl.spec.auto.general]/3): not in a template argument, a cast or an alias ([dcl.spec.auto.general]/6).
+  std::optional<QualType> type_id(bool placeholder_ok = false) {
     DeclSpec spec = decl_specifiers();
     if (!spec.ok) return std::nullopt;
     Declarator d = declarator(spec.type, true);
     if (!d.ok) return std::nullopt;
     if (d.named) {
       s_->diag(d.name_at, Diag::unexpected_identifier, d.name);
+      return std::nullopt;
+    }
+    if (!placeholder_ok && s_->types().has_placeholder(d.type)) {
+      s_->diag(spec.begin, Diag::auto_not_allowed);
       return std::nullopt;
     }
     return d.type;
@@ -2775,9 +2792,13 @@ public:
       else if (!v.dependent) s_->diag(e.begin, Diag::not_constant, v.reason);
     }
     if (!take) {  // dependent, or in error: both branches, as an ordinary `if`
+      // Which branch returns is known only to an instantiation: neither deduces a placeholder
+      // return type here ([dcl.spec.auto.general]/12).
+      ++s_->no_return_deduction;
       Ex then_ = substatement();
       Ex else_;
       if (accept(Tk::kw_else)) else_ = substatement();
+      --s_->no_return_deduction;
       s_->pop_scope();
       return s_->node(ast::If{{}, sema::Sema::at(cond, begin), sema::Sema::at(then_, begin), sema::Sema::at(else_, begin)},
                       begin, pos());
@@ -2785,7 +2806,10 @@ public:
     auto discarded = [&] {
       if (s_->instantiating()) return skip_substatement();
       std::size_t n = s_->demands.size();
+      // Its return statements deduce nothing: a discarded statement's are not used ([stmt.if]/2).
+      ++s_->no_return_deduction;
       substatement();
+      --s_->no_return_deduction;
       s_->demands.resize(n);
     };
     Ex kept;
@@ -2903,8 +2927,10 @@ public:
     if (!expect(Tk::semi)) skip_to_semi();
     if (!cond.ok() || !ok) return {NodeId::none, begin, pos()};
     sema::Evaluated v = sema::Evaluator(*s_, questions()).evaluate(cond);
-    if (v.dependent) {
+    if (v.dependent && s_->templated()) {
       // Checked when the template is instantiated ([dcl.pre]/10).
+    } else if (v.dependent) {
+      s_->diag(e.begin, Diag::not_constant, sema::reason_unsupported);  // nothing outside a template depends
     } else if (!v.value) {
       s_->diag(e.begin, Diag::not_constant, v.reason);
     } else if (s_->world().values.rec(*v.value).bits == 0) {
@@ -3143,6 +3169,8 @@ public:
         u32 local = s_->declare_local(d.name, d.type, 0, d.name_at);
         Ex init = placeholder_variable(d, local, spec.is_constexpr, replaced);
         if (!init.ok()) {
+          // Its uses say nothing more ([temp.dep.expr]: as a dependent name would).
+          if (s_->types().has_placeholder(s_->local(local).type)) s_->set_local_type(local, s_->builtin(Builtin::dependent));
           skip_to_semi();
           return {NodeId::none, begin, pos()};
         }

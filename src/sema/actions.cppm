@@ -1650,12 +1650,17 @@ public:
     return_type_ = t;
     declared_return_ = t;
     return_deduced_ = false;
+    return_seen_ = false;
   }
   QualType return_type() const { return return_type_; }
   // A declared return type holding a placeholder ([dcl.spec.auto.general]/3): each return
   // statement deduces it, and the first one's deduction is the return type from then on (/11).
   bool deduces_return() const { return w_->types.has_placeholder(declared_return_); }
   bool return_deduced() const { return return_deduced_; }
+  // Whether a return statement was seen, deducing or failing to.
+  bool return_seen() const { return return_seen_; }
+  // Inside a discarded statement or a dependent `if constexpr`: returns deduce nothing.
+  u32 no_return_deduction = 0;
   // What `return e;` (`e` none for `return;` or the end of the body) deduces: the return type,
   // or none after a diagnosed error. In a template's definition a type-dependent `e` deduces
   // nothing; each instantiation does ([dcl.spec.auto.general]/12).
@@ -1672,6 +1677,10 @@ public:
     } else {
       t = deduce_placeholder(declared_return_, *e, at_, &replaced);
     }
+    // In a discarded statement, or a branch of a dependent `if constexpr`, the operand is checked
+    // against what it alone deduces.
+    if (no_return_deduction > 0) return !t || types().is_dependent(*t) || !return_deduced_ ? t : std::optional(return_type_);
+    return_seen_ = true;
     if (!t || types().is_dependent(*t)) return t;
     if (return_deduced_ && types().canonical(*t) != types().canonical(return_type_)) {
       diag(at_, Diag::auto_inconsistent, declared_return_, *t, return_type_);
@@ -1689,6 +1698,9 @@ public:
     if (f == current_function && return_deduced_) return with_return(t, return_type_);
     if (f != current_function)
       if (auto d = q_->deduced_type(f)) return *d;
+    // In a template's definition, naming a member of the current instantiation (or anything else
+    // undeduced) is type-dependent: each instantiation deduces it ([temp.dep.expr]/3).
+    if (templated() && !instantiating()) return with_return(t, builtin(Builtin::dependent));
     diag(at_, Diag::auto_undeduced, w_->entities.rec(f).name);
     return std::nullopt;
   }
@@ -2917,6 +2929,13 @@ public:
       if (replaced) *replaced = builtin(Builtin::dependent);
       return builtin(Builtin::dependent);
     }
+    // An overload set, or its address, deduces nothing ([temp.deduct.call]/6); a template-id
+    // naming one specialization is not resolved yet (#335).
+    if (types().is(e.type(), Builtin::overload_set) || is_bound_member(e) ||
+        (types().is_pointer(e.type()) && types().is(types().pointee(e.type()), Builtin::overload_set))) {
+      diag(at_, Diag::auto_deduction_failed, t, e.type());
+      return std::nullopt;
+    }
     if (types().kind(t) == TypeKind::placeholder && types().rec(t).decltype_auto) {
       if (Types::cv(types().canonical(t)) != Cv::none) {  // [dcl.type.auto.deduct]/5: the placeholder alone
         diag(at_, Diag::decltype_auto_alone);
@@ -3734,6 +3753,7 @@ private:
   QualType return_type_{};
   QualType declared_return_{};
   bool return_deduced_ = false;
+  bool return_seen_ = false;
 };
 
 }  // namespace ycxx::sema

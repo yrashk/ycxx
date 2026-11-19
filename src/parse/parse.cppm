@@ -474,8 +474,24 @@ public:
       return d ? std::optional(d->type) : std::nullopt;
     }
     std::optional<Chosen> c = choose_partial(v, point);
-    if (!c || c->ambiguous) return std::nullopt;
-    return templates().substitute(w_->ins.seqs.at(item_sema(c->item).value.decls, 0).type, c->args);
+    if (c && c->ambiguous) return std::nullopt;
+    // A placeholder type is what the specialization's instantiation deduced ([dcl.spec.auto]).
+    auto deduced = [&]() -> std::optional<QualType> {
+      if (const VarInstance* in = variable_instance(v, point))
+        for (const ast::DeclSema& d : w_->ins.seqs.elements(in->cell.value.decls))
+          if (d.entity == v) return d.type;
+      return std::nullopt;
+    };
+    if (!c) {
+      auto t = var_templates_.find(std::to_underlying(w_->entities.rec(v).templ));
+      if (t != var_templates_.end() && t->second < point && w_->ins.seqs.size(item_sema(t->second).value.decls) > 0 &&
+          w_->types.has_placeholder(w_->ins.seqs.at(item_sema(t->second).value.decls, 0).type))
+        return deduced();
+      return std::nullopt;
+    }
+    auto t = templates().substitute(w_->ins.seqs.at(item_sema(c->item).value.decls, 0).type, c->args);
+    if (t && w_->types.has_placeholder(*t)) return deduced();
+    return t;
   }
   // At the end of the unit, it is said where the demand being instantiated came from.
   void ambiguous_partial(EntityId spec, u32 point) {
@@ -1482,9 +1498,19 @@ private:
       return;
     }
     bool is_function_def = it_->kind == ItemKind::function;
+    u32 declarators = 0;
     do {
       s_.defer_type_access = true;
       parse::Declarator d = ps_.declarator(spec.type, false);
+      // [dcl.spec.auto.general]: a function with a placeholder type is the only declarator.
+      if (d.ok && s_.types().has_placeholder(spec.type) && s_.types().is_function(d.type) && (declarators > 0 || ps_.is(Tk::comma))) {
+        s_.diag(d.name_at, Diag::auto_not_allowed);
+        s_.settle_type_access(EntityId::none);
+        bad();
+        ps_.skip_to_semi();
+        return;
+      }
+      ++declarators;
       bool declared = d.ok && spec.ok && d.named && declare(spec, d, lang, explicit_lang, is_function_def);
       s_.settle_type_access(EntityId::none);  // what `declare` did not settle
       if (!declared) {
@@ -2459,6 +2485,11 @@ private:
         s_.diag(ps_.is(Tk::colon) ? ps_.pos() : spec.begin, Diag::not_supported, ps_.is(Tk::colon) ? Tk::colon : Tk::kw_constexpr);
         return bad();
       }
+      // [dcl.spec.auto.general]: a non-static data member's type has no placeholder.
+      if (types.has_placeholder(d.type)) {
+        s_.diag(d.name_at, Diag::auto_not_allowed);
+        return bad();
+      }
       // [class.mem.general]: a non-static data member has a complete object type; the class is
       // incomplete inside its own member-specification.
       if (types.is_void(d.type)) {
@@ -2589,6 +2620,10 @@ private:
   // A typedef-name or alias-declaration that is a member of class `c` ([class.mem],
   // [dcl.typedef]): a type of the class's scope, `C::name` outside it.
   bool member_alias(const ast::DeclSema& c, NameId name, u32 at, QualType type) {
+    if (s_.types().has_placeholder(type)) {  // [dcl.spec.auto.general]/6
+      s_.diag(at, Diag::auto_not_allowed);
+      return false;
+    }
     // [temp.local]/6: not a template parameter's name; [class.mem.general]: not the class's.
     if (s_.template_param(name)) {
       s_.diag(at, Diag::redeclared_local, name);
@@ -3131,7 +3166,7 @@ private:
     if (!fn && spec.is_constexpr) d.type = types.add_cv(d.type, sema::Cv::const_);  // [dcl.constexpr]
     // A placeholder type, deduced from the initializer ([dcl.type.auto.deduct]): `= e` or `{e}`.
     std::optional<Ex> early_expr;
-    if (!fn && types.has_placeholder(d.type) && !deduce_variable(d, early, early_expr)) return false;
+    if (!fn && types.has_placeholder(d.type) && !deduce_variable(d, early, early_expr, template_ && !var_)) return false;
     ast::DeclSema sem{};
     sem.kind = fn ? ast::DeclKind::function : ast::DeclKind::variable;
     sem.type = d.type;
@@ -3168,7 +3203,7 @@ private:
     bool deleted = fn && deleted_body();
     if (deleted) is_function_def = true;
     if (deleted) flags |= sema::decl_flag::deleted;
-    bool has_init = !deleted && (early || ps_.is(Tk::equal) || ps_.is(Tk::l_brace) || (!fn && ps_.is(Tk::l_paren)));
+    bool has_init = !deleted && (early || early_expr || ps_.is(Tk::equal) || ps_.is(Tk::l_brace) || (!fn && ps_.is(Tk::l_paren)));
     bool definition = fn ? is_function_def || deleted : !((spec.is_extern || single_linkage_spec_) && !has_init);
     if (definition) flags |= sema::decl_flag::definition;
     if (!fn && types.is_void(d.type)) {
@@ -3496,7 +3531,9 @@ private:
   // Variable `d` declared with a placeholder type: its initializer parsed (`= e` into `expr`,
   // `{e}` into `list`) and its type deduced from it ([dcl.type.auto.deduct]); several declarators
   // deduce one type for the placeholder (/2). False after a diagnosed error.
-  bool deduce_variable(parse::Declarator& d, std::unique_ptr<sema::Braced>& list, std::optional<Ex>& expr) {
+  // A variable template's definition (`pattern`) keeps the placeholder while its initializer is
+  // dependent: each specialization deduces its own type (`Program::specialization_type`).
+  bool deduce_variable(parse::Declarator& d, std::unique_ptr<sema::Braced>& list, std::optional<Ex>& expr, bool pattern = false) {
     Ex e;
     if (ps_.is(Tk::equal) && ps_.kind(1) != Tk::l_brace) {
       ps_.bump();
@@ -3532,7 +3569,7 @@ private:
       s_.diag(d.name_at, Diag::void_variable, d.name);
       return false;
     }
-    d.type = *t;
+    if (!(pattern && types.is_dependent(*t))) d.type = *t;
     return true;
   }
   // The declarator of an explicit specialization ([temp.expl.spec]): `sem` becomes the declaration
@@ -4016,7 +4053,7 @@ public:
         root = ps_.compound_statement();
         if (!ps_.at_end()) s_.diag(ps_.pos(), sema::Diag::unexpected_token, ps_.kind());
         // No return statement deduces the placeholder as `return;` would ([dcl.type.auto.deduct]/2).
-        if (root.ok() && s_.deduces_return() && !s_.return_deduced() && !templated_pattern())
+        if (root.ok() && s_.deduces_return() && !s_.return_deduced() && !s_.return_seen() && !templated_pattern())
           if (!s_.deduce_return(nullptr, ps_.pos() > 0 ? ps_.pos() - 1 : 0)) root = {};
       }
       s_.pop_scope();
