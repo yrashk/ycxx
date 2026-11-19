@@ -15,6 +15,7 @@ export import ycxx.hash;
 export import :serial;
 export import :pool;
 export import :arena;
+import ycxx.memory;
 import std;
 
 export namespace ycxx::engine {
@@ -302,6 +303,38 @@ private:
   std::array<Stripe, stripes> stripes_{};
 };
 
+// What one kind's cells retain (#274): the bytes their values hold (`TraceEvent::retained_bytes`
+// summed over the kind; below zero only when frames freed what others allocated), and how many
+// hold a value.
+struct KindMemory {
+  std::string_view kind;
+  std::int64_t retained = 0;
+  std::uint64_t values = 0;
+};
+
+// The heap bytes a value holds, by walking it: what `Db::set` records for an input made outside
+// any frame (#274). Strings and vectors count their capacity, beyond a string's inline buffer;
+// optionals and aggregates their members; anything else (scalars, handles) nothing.
+template <class T>
+std::uint64_t heap_footprint(const T& v) {
+  if constexpr (std::is_same_v<T, std::string>) {
+    static const std::size_t inline_capacity = std::string().capacity();
+    return v.capacity() > inline_capacity ? v.capacity() + 1 : 0;
+  } else if constexpr (requires { typename T::value_type; v.capacity(); v.begin(); }) {
+    std::uint64_t n = v.capacity() * sizeof(typename T::value_type);
+    for (const auto& x : v) n += heap_footprint(x);
+    return n;
+  } else if constexpr (requires { v.has_value(); *v; }) {
+    return v.has_value() ? heap_footprint(*v) : 0;
+  } else if constexpr (std::is_class_v<T> && std::is_aggregate_v<T>) {
+    std::uint64_t n = 0;
+    template for (constexpr auto m : members_of<T>()) n += heap_footprint(v.[:m:]);
+    return n;
+  } else {
+    return 0;
+  }
+}
+
 // What the engine did with one cell (#245): `Stats`'s counts, one cell at a time, through
 // `Db::note`. `cutoff` is an execution whose value did not change; `input` an input read for the
 // first time (counted nowhere; later reads are `reused`); `recomputed` a cheap cell computed
@@ -327,6 +360,13 @@ struct TraceEvent {
   std::string value;  // the kind's `show(value)`, when the tracer asks for values
   std::string errors;  // the errors its value holds (`errors(value)`), or its diagnostics; empty: none
   std::uint64_t cell = 0;  // the cell's identity (its key's fingerprint), the same in every event of it
+  // Memory (#274), host-specific like times: what the frame that ended here allocated while it ran
+  // (bytes and count; 0 for an instant), the high-water mark of its net bytes during the run, and
+  // what the cell retains (its last run's net bytes when it stored its value, or its input's size).
+  std::uint64_t alloc_bytes = 0;
+  std::uint64_t allocs = 0;
+  std::int64_t peak_bytes = 0;
+  std::int64_t retained_bytes = 0;
 };
 
 // Receives a request's events, on any worker, concurrently. A frame reports before it publishes,
@@ -462,6 +502,7 @@ struct Cell {
   bool has_value = false;
   std::atomic<bool> observed{false};  // an input read since it was last set, reset or provided
   std::uint32_t runs = 0;
+  std::int64_t retained = 0;  // bytes its value holds (#274): see `Db::retain`
   Fp128 key_fp;             // kind seed and key
   Fp128 fp;                 // value, diagnostics, demand list and has_diags (§A1.5)
   std::vector<std::uint32_t> deps;
@@ -474,6 +515,19 @@ struct Cell {
 // Dependency lists are flat u32s; the first member of each group carries the high bit (§A3.6).
 inline constexpr std::uint32_t group_start = 0x80000000u;
 
+// Memory (#274). Each frame has a `memory::Usage`, which is the thread-local target of the
+// allocation functions while the frame's own code runs: the target is set where that code starts
+// or resumes (`run_frame` and after each of its awaits; `Settle::resume`, through which every
+// wait ends and a query body resumes; a cheap execution or validation on the stack), and cleared
+// after each work item and before anything that lets another worker resume the frame (publishing
+// a wait, pushing the frame's own task, `finish`). A fetch that needs no wait stays on the thread
+// and its target, so the hit path pays nothing. So a frame's numbers follow it from worker to
+// worker, and only one thread counts into it at a time. Engine objects that one frame makes and
+// another frees (a child's coroutine frame, a `Wait`) count for nobody, and so do the engine's
+// tables. A cell retains what its runs left alive, interned trees included, paid for by the
+// first cell to allocate them: each run adds its net bytes, which count the old value it
+// replaced (`store`, `retain`).
+//
 // A traced frame's event (#245): its id (0: untraced, or a root), when and on which worker it
 // started.
 struct Span {
@@ -502,6 +556,7 @@ struct Frame {
   std::coroutine_handle<> task;      // the execution's own coroutine (§A3.1)
   std::exception_ptr error;          // the internal error it ended with
   bool stopped = false;              // it was cancelled (§A4.1)
+  memory::Usage mem;                 // what it allocates while it runs (#274)
 
   // Records one group in argument order, a cell already recorded keeping its first position, and
   // returns each member's position.
@@ -580,6 +635,9 @@ struct Root {
 
   void hold() noexcept { holds.fetch_add(1, std::memory_order_relaxed); }
   void release() noexcept {
+    // The request may end here and its frame with it, while this thread still counts for that
+    // frame (a root's settling); its receiver may run here too (#274).
+    memory::exchange_target(nullptr);
     if (holds.fetch_sub(1, std::memory_order_acq_rel) == 1) complete();
   }
   // Called once, by whoever releases last; the request may be destroyed by it.
@@ -636,7 +694,10 @@ struct Wait final : Task {
   }
   void try_resume() noexcept;
   void release() noexcept {
-    if (refs.fetch_sub(1, std::memory_order_acq_rel) == 1) delete this;
+    if (refs.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+      memory::Target none(nullptr);  // made by one frame, freed by whichever resolves last
+      delete this;
+    }
   }
   static void go(Task* t) noexcept;
 
@@ -729,8 +790,9 @@ struct KindTableBase {
   // Runs a claimed cheap cell's query on this stack and publishes it. A validation that turned red
   // passes its `span`, so a traced cell is one event.
   virtual void execute_sync(Db& db, CellId c, std::uint64_t restore, const Frame* chain, const Span* span) = 0;
-  // Gives a claimed input cell without a value its provider's value, and publishes it.
-  virtual void provide(Db& db, CellId c) = 0;
+  // Gives a claimed input cell without a value its provider's value, and publishes it; returns
+  // what the provider allocated.
+  virtual memory::Snapshot provide(Db& db, CellId c) = 0;
   // For traces (#245): the key in a slot, and the value in it, if any.
   virtual std::string describe(std::uint32_t slot) = 0;
   virtual std::string show(std::uint32_t slot) = 0;
@@ -738,6 +800,9 @@ struct KindTableBase {
   std::string_view name;
   Fp128 seed;
   Counters counters;
+  // What its cells retain (#274), and how many hold a value.
+  std::atomic<std::int64_t> retained{0};
+  std::atomic<std::uint64_t> values{0};
 };
 
 template <class K>
@@ -768,7 +833,7 @@ struct KindTable final : KindTableBase {
   std::coroutine_handle<> make_frame(Db& db, CellId c, std::uint32_t id, Root& root, bool validate, std::uint64_t old,
                                      std::uint64_t parent) override;
   void execute_sync(Db& db, CellId c, std::uint64_t restore, const Frame* chain, const Span* span) override;
-  void provide(Db& db, CellId c) override;
+  memory::Snapshot provide(Db& db, CellId c) override;
   std::string describe(std::uint32_t slot) override {
     const Key& k = slots[slot].key;
     if constexpr (DescribedKey<Q>) {
@@ -926,6 +991,8 @@ public:
   // Counts per query kind as well (the daemon's debug builds, daemon design §8.1), by kind name.
   void count_per_kind(bool on) noexcept { per_kind_.store(on, std::memory_order_relaxed); }
   std::vector<std::pair<std::string_view, Stats>> stats_per_kind() const;
+  // What each kind's cells retain (#274), by kind name; kinds with no cells are left out.
+  std::vector<KindMemory> memory_per_kind() const;
   Pool* pool() const noexcept { return pool_; }
   // How many times a cell's query has run; 0 for a cell that does not exist.
   template <MemoQuery Q>
@@ -1011,7 +1078,7 @@ private:
   bool ensure_sync(CellId c, const Frame* chain, bool quiet = false);
   bool ensure_input(CellId c, const Frame* chain, bool quiet = false);
   template <InputKind Q>
-  void provide(CellId c);
+  memory::Snapshot provide(CellId c);
   void validate_sync(CellId c, std::uint64_t old, const Frame* chain);
   template <CheapQuery Q>
   typename Q::Value fetch_cheap(CellId c, Frame& f);
@@ -1053,7 +1120,9 @@ private:
   // as an event. `by` is the frame that asked: an instant event under its own; with `span`, the
   // frame whose own work this ends. `direct` is a tracer for a request with no frame (a root
   // `get` hit). The trace and `Stats` come from the same calls, so they cannot disagree.
-  void note(Outcome what, const Frame* by, CellId c, const Span* span = nullptr, Tracer* direct = nullptr) noexcept;
+  // `used` is what an input's provider allocated, for its `input` event.
+  void note(Outcome what, const Frame* by, CellId c, const Span* span = nullptr, Tracer* direct = nullptr,
+            const memory::Snapshot* used = nullptr) noexcept;
   void observe() noexcept { observed_.store(true, std::memory_order_relaxed); }
 
   // Tracing (#245): a frame opens a span when its request is traced; what builds events is cold
@@ -1064,7 +1133,11 @@ private:
   [[gnu::cold, gnu::noinline]] Span open_span() noexcept;
   std::int32_t worker_now() const noexcept;
   // Reports cell `c` to `t`: an instant, or the end of `span`'s work.
-  [[gnu::cold, gnu::noinline]] void trace(Tracer* t, const Frame* by, CellId c, Outcome o, const Span* span) noexcept;
+  [[gnu::cold, gnu::noinline]] void trace(Tracer* t, const Frame* by, CellId c, Outcome o, const Span* span,
+                                          const memory::Snapshot* used) noexcept;
+  // Records what a cell's value retains (#274), in the cell and its kind's sum.
+  // `first`: its first value.
+  void retain(Cell& e, std::int64_t bytes, bool first) noexcept;
 
   Arena<Cell> cells_;
   mutable std::array<std::atomic<KindTableBase*>, max_kinds> tables_{};
@@ -1436,8 +1509,12 @@ struct Request : Root, Settle {
       const bool one_at_a_time = before == std::thread::id{} || before == std::this_thread::get_id();
       contract_assert(one_at_a_time);
     }
-    (void)start(std::span<const CellId>(&cell, 1));
-    d.drain();
+    {
+      // The root's own settling counts into its frame, not into whatever the caller counts into.
+      memory::Target mine(&frame.mem);
+      (void)start(std::span<const CellId>(&cell, 1));
+      d.drain();
+    }
     if (!d.pool_) d.driver_.store(before, std::memory_order_relaxed);
   }
 
@@ -1723,6 +1800,7 @@ bool Settle::consume(Wait& w) noexcept {
 }
 
 std::coroutine_handle<> Settle::resume(Wait& w) noexcept {
+  memory::exchange_target(&frame_->mem);  // the wait is over: the frame's work goes on here
   if (consume(w)) {
     frame_->stopped = true;
     return failed();
@@ -1735,7 +1813,11 @@ bool Settle::suspend(std::coroutine_handle<> h, std::span<const CellId> cells) n
   const Priority prio = frame_->root->priority;
   const std::coroutine_handle<> next = start(cells);
   if (next == h) return false;
-  if (next) db.push(next, prio);
+  if (next) {
+    // `next` may be this frame's own task, which another worker may run once it is pushed.
+    memory::exchange_target(nullptr);
+    db.push(next, prio);
+  }
   return true;
 }
 
@@ -1795,7 +1877,11 @@ std::coroutine_handle<> Settle::step() noexcept {
       frame_->error = error;
       return failed();
     }
-    Wait* w = new Wait(db, *this, busy.size(), prio);
+    Wait* w = nullptr;
+    {
+      memory::Target none(nullptr);  // freed by whichever resolves it last
+      w = new Wait(db, *this, busy.size(), prio);
+    }
     std::size_t unlinked = 0;
     for (std::uint32_t i = 0; i < busy.size(); ++i) {
       Waiter& l = w->links[i];
@@ -1822,7 +1908,11 @@ std::coroutine_handle<> Settle::step() noexcept {
     w->on_stop.emplace(token, Wait::OnStop{w});
     start_children();
     std::uint8_t expected = Wait::suspending;
+    // Once the wait is published another worker may resume the frame: this thread stops counting
+    // for it first.
+    memory::Usage* const mine = memory::exchange_target(nullptr);
     if (w->phase.compare_exchange_strong(expected, Wait::waiting, std::memory_order_acq_rel, std::memory_order_acquire)) return {};
+    memory::exchange_target(mine);
     // Everything resolved (or a stop arrived) while linking: carry on here.
     if (consume(*w)) {
       frame_->stopped = true;
@@ -1834,6 +1924,7 @@ std::coroutine_handle<> Settle::step() noexcept {
 
 bool stop_awaitable::await_suspend(std::coroutine_handle<>) noexcept {
   frame_->stopped = true;
+  memory::exchange_target(nullptr);
   frame_->db->push(frame_->task, frame_->root->priority);
   return true;
 }
@@ -1935,8 +2026,10 @@ bool Db::ensure_input(CellId c, const Frame* chain, bool quiet) {
       case State::empty:
         if (!e.word.compare_exchange_strong(w, make_word(State::running, 0, 0), std::memory_order_seq_cst)) continue;
         reopen(e);
-        tables_[e.kind].load(std::memory_order_acquire)->provide(*this, c);
-        if (!quiet) note(Outcome::input, chain, c);
+        {
+          const memory::Snapshot used = tables_[e.kind].load(std::memory_order_acquire)->provide(*this, c);
+          if (!quiet) note(Outcome::input, chain, c, nullptr, nullptr, &used);
+        }
         return true;
       case State::running:
       case State::validating:
@@ -2005,6 +2098,7 @@ void Db::validate_sync(CellId c, std::uint64_t old, const Frame* chain) {
   const Revision since = verified_of(old);
   bool changed = false;
   Durability d = Durability::high;
+  memory::Target mine(&vf.mem);
   try {
     for (std::size_t k = 0; k < e.deps.size() && !changed;) {
       do {
@@ -2044,6 +2138,7 @@ void Db::execute_sync(CellId c, std::uint64_t restore, const Frame* chain, const
       f.span.parent = chain->span.id;
     }
     std::optional<typename Q::Value> v;
+    memory::Target mine(&f.mem);  // its own numbers, not its caller's
     try {
       SyncCtx cx(*this, f);
       v.emplace(Q::run(cx, key_of<Q>(c)));
@@ -2096,12 +2191,15 @@ std::coroutine_handle<> Db::start_frame(CellId c, std::uint32_t id, Root& root, 
                                         std::uint64_t parent) {
   root.hold();
   live_.fetch_add(1, std::memory_order_relaxed);
+  memory::Target none(nullptr);  // the child's coroutine frame: freed by the child, as it ends
   return tables_[cells_[c].kind].load(std::memory_order_acquire)->make_frame(*this, c, id, root, validate, old, parent);
 }
 
 // The end of a frame: its id goes back, the live count drops, and last its request's hold,
 // which may complete the request (after that nothing of the Db may be touched).
 void Db::finish(Frame& f) noexcept {
+  // The frame is ending, and releasing the request may run its receiver on this thread.
+  memory::exchange_target(nullptr);
   give_id(f.id);
   Root* root = f.root;
   if (live_.fetch_sub(1, std::memory_order_acq_rel) == 1) live_.notify_all();
@@ -2142,6 +2240,7 @@ frame_task Db::run_frame(Db& db, CellId c, std::uint32_t id, Root& root, bool va
   f.cell = c;
   f.id = id;
   f.task = co_await own_handle{};
+  memory::exchange_target(&f.mem);
   // Opened when the frame first runs, not when it was queued; reported before `finish`, which may
   // end the request and its tracer with it.
   if (root.tracer) {
@@ -2166,6 +2265,7 @@ frame_task Db::run_frame(Db& db, CellId c, std::uint32_t id, Root& root, bool va
         ++k;
       } while (k < e.deps.size() && !(e.deps[k] & group_start));
       co_await settle_group(f, group);
+      memory::exchange_target(&f.mem);
       if (f.error || f.stopped) {
         db.note(Outcome::failed, &f, c, &f.span);
         db.abort(c, restore, f.error);
@@ -2204,13 +2304,19 @@ frame_task Db::run_frame(Db& db, CellId c, std::uint32_t id, Root& root, bool va
     }
     if (body) {
       co_await run_body<typename Q::Value>{body->h_};
+      memory::exchange_target(&f.mem);
       // Resumed by the body's return, or by a fetch that was stopped or failed (which leaves the
       // body suspended; destroying `body` destroys it and every helper it awaits).
       if (!f.error && !f.stopped) {
         if (body->h_.promise().error) {
           f.error = body->h_.promise().error;
         } else {
-          db.store<Q>(c, std::move(*body->h_.promise().value), f);
+          // The body's coroutine frame and the frame's index go before `store` measures what the
+          // run left alive.
+          typename Q::Value v = std::move(*body->h_.promise().value);
+          body.reset();
+          std::unordered_map<CellId, std::uint32_t>().swap(f.recorded);
+          db.store<Q>(c, std::move(v), f);
           db.publish(c);
           db.finish(f);
           co_return;
@@ -2240,9 +2346,13 @@ void KindTable<Q>::execute_sync(Db& db, CellId c, std::uint64_t restore, const F
 }
 
 template <MemoQuery Q>
-void KindTable<Q>::provide(Db& db, CellId c) {
-  if constexpr (InputKind<Q>) db.provide<Q>(c);
-  else contract_assert(false);  // only inputs are provided
+memory::Snapshot KindTable<Q>::provide(Db& db, CellId c) {
+  if constexpr (InputKind<Q>) {
+    return db.provide<Q>(c);
+  } else {
+    contract_assert(false);  // only inputs are provided
+    return {};
+  }
 }
 
 template <MemoQuery Q>
@@ -2260,15 +2370,22 @@ void Db::store(CellId c, typename Q::Value v, Frame& f) {
   const Fp128 fp = h.finish();
   ++e.runs;
   const bool changed = !(e.has_value && fp == e.fp);
+  const bool first = !e.has_value;
   if (changed) {
     table<Q>().slots[e.slot].value = std::move(v);
     e.fp = fp;
     e.changed_at = revision();
     e.has_value = true;
+  } else {
+    (void)typename Q::Value(std::move(v));  // early cutoff keeps the old value: the new one goes now
   }
   e.deps = std::move(f.deps);
   e.diags = std::move(f.diags);
   e.demands = std::move(f.demands);
+  // What the cell retains moves by the run's net bytes, which by now count the old value and
+  // lists it freed (a delta, from Fable's review on #274): trees the first run interned stay this
+  // cell's, a cutoff's discarded value counts nothing, and a value replaced counts once.
+  retain(e, e.retained + f.mem.net.load(std::memory_order_relaxed), first);
   e.durability.store(f.durability, std::memory_order_relaxed);
   e.has_diags = has_diags;
   contract_assert(e.changed_at <= revision());
@@ -2366,10 +2483,11 @@ void Db::drain() noexcept {
     const Work w = local_.back();
     local_.pop_back();
     w();
+    memory::exchange_target(nullptr);  // whatever frame it ran counts no more here (#274)
   }
 }
 
-void Db::note(Outcome what, const Frame* by, CellId c, const Span* span, Tracer* direct) noexcept {
+void Db::note(Outcome what, const Frame* by, CellId c, const Span* span, Tracer* direct, const memory::Snapshot* used) noexcept {
   const Root* root = by ? by->root : nullptr;
   // The counts of `Stats` each outcome makes; an execution that cut off early is both.
   std::array<Counter, 2> counts{};
@@ -2394,7 +2512,7 @@ void Db::note(Outcome what, const Frame* by, CellId c, const Span* span, Tracer*
       if (kind) kind->counters.add(counts[i], 1, stripe);
     }
   }
-  if (Tracer* t = root ? root->tracer : direct) [[unlikely]] trace(t, by, c, what, span);
+  if (Tracer* t = root ? root->tracer : direct) [[unlikely]] trace(t, by, c, what, span, used);
 }
 
 Span Db::open_span() noexcept {
@@ -2412,7 +2530,9 @@ std::int32_t Db::worker_now() const noexcept {
   return -1;
 }
 
-void Db::trace(Tracer* t, const Frame* by, CellId c, Outcome o, const Span* span) noexcept {
+void Db::trace(Tracer* t, const Frame* by, CellId c, Outcome o, const Span* span, const memory::Snapshot* used) noexcept {
+  // The trace's own strings count for nobody: a traced run measures as an untraced one.
+  memory::Target none(nullptr);
   // With a span, the event of that frame's own work; else an instant under the asking frame's.
   Span now = span ? *span : open_span();
   if (!span) now.parent = by ? by->span.id : 0;
@@ -2427,6 +2547,12 @@ void Db::trace(Tracer* t, const Frame* by, CellId c, Outcome o, const Span* span
   ev.end = span ? std::chrono::steady_clock::now() : now.start;
   ev.worker = now.worker;
   ev.end_worker = span ? worker_now() : now.worker;
+  // A frame's own run; an input's provider; an instant allocated nothing.
+  const memory::Snapshot run = span && by ? memory::snapshot(by->mem) : used ? *used : memory::Snapshot{};
+  ev.alloc_bytes = run.allocated;
+  ev.allocs = run.count;
+  ev.peak_bytes = run.peak;
+  if (o != Outcome::failed && o != Outcome::waited && o != Outcome::recomputed && e.has_value) ev.retained_bytes = e.retained;
   try {
     ev.key = describe(c);
     ev.cell = e.key_fp.lo ^ e.key_fp.hi;
@@ -2439,6 +2565,23 @@ void Db::trace(Tracer* t, const Frame* by, CellId c, Outcome o, const Span* span
     ev.key = "?";  // a describer that throws loses its text, never the event
   }
   t->event(std::move(ev));
+}
+
+void Db::retain(Cell& e, std::int64_t bytes, bool first) noexcept {
+  KindTableBase& k = *tables_[e.kind].load(std::memory_order_acquire);
+  k.retained.fetch_add(bytes - e.retained, std::memory_order_relaxed);
+  if (first) k.values.fetch_add(1, std::memory_order_relaxed);
+  e.retained = bytes;
+}
+
+std::vector<KindMemory> Db::memory_per_kind() const {
+  std::vector<KindMemory> out;
+  for (const auto& t : tables_) {
+    if (const KindTableBase* k = t.load(std::memory_order_acquire))
+      out.push_back({k->name, k->retained.load(std::memory_order_relaxed), k->values.load(std::memory_order_relaxed)});
+  }
+  std::ranges::sort(out, {}, &KindMemory::kind);
+  return out;
 }
 
 void describe_number(std::string& out, std::uint64_t v, bool negative) {
@@ -2500,6 +2643,7 @@ KindTable<Q>& Db::table() const {
   contract_assert(s < max_kinds);
   KindTableBase* t = tables_[s].load(std::memory_order_acquire);
   if (!t) {
+    memory::Target none(nullptr);  // the engine's own tables count for no cell (#274)
     auto fresh = std::make_unique<KindTable<Q>>();
     fresh->name = kind_name<Q>();
     fresh->seed = kind_seed<Q>();
@@ -2523,6 +2667,7 @@ CellId Db::cell_for(const typename Q::Key& k) {
   auto& shard = t.shard_of(k);
   std::lock_guard lock(shard.m);
   if (const auto it = shard.index.find(k); it != shard.index.end()) return it->second;
+  memory::Target none(nullptr);  // a new entry in the engine's tables counts for no cell (#274)
   const std::uint32_t slot = t.slots.emplace(k);
   const CellId c = cells_.emplace();
   contract_assert(c < group_start);
@@ -2666,6 +2811,7 @@ bool Db::set(const typename Q::Key& k, typename Q::Value v) {
   e.observed.store(false, std::memory_order_relaxed);
   Revision r = revision();
   if (observed_.exchange(false, std::memory_order_relaxed)) revision_.store(++r, std::memory_order_relaxed);
+  retain(e, static_cast<std::int64_t>(heap_footprint(v)), !e.has_value);  // made outside any frame: measured by walking it
   table<Q>().slots[e.slot].value = std::move(v);
   e.fp = fp;
   e.has_value = true;
@@ -2684,12 +2830,15 @@ void Db::set_provider(F fn) {
 }
 
 template <InputKind Q>
-void Db::provide(CellId c) {
+memory::Snapshot Db::provide(CellId c) {
   Cell& e = cells_[c];
   const auto& provider = table<Q>().provider;
   contract_assert(static_cast<bool>(provider));  // an input is set or provided before it is read
   std::optional<provided<typename Q::Value>> got;
+  // The provider's allocations are the input's, not the reader's.
+  memory::Usage used;
   try {
+    memory::Target mine(&used);
     got.emplace(provider(key_of<Q>(c)));
   } catch (...) {
     abort(c, make_word(State::empty, 0, 0), std::current_exception());
@@ -2697,11 +2846,13 @@ void Db::provide(CellId c) {
   }
   // The first value of the cell: nothing depended on it, so no `last_changed` moves (§5.1).
   e.fp = fingerprint(got->value);
+  retain(e, used.net.load(std::memory_order_relaxed), !e.has_value);
   table<Q>().slots[e.slot].value = std::move(got->value);
   e.durability.store(got->durability, std::memory_order_relaxed);
   e.changed_at = revision();
   e.has_value = true;
   publish(c);
+  return memory::snapshot(used);
 }
 
 template <InputKind Q>
@@ -2718,6 +2869,7 @@ bool Db::reset_unobserved(const typename Q::Key& k, typename Q::Value v) {
   }
   const Fp128 fp = fingerprint(v);
   if (!e.has_value || fp != e.fp) {
+    retain(e, static_cast<std::int64_t>(heap_footprint(v)), !e.has_value);
     table<Q>().slots[e.slot].value = std::move(v);
     e.fp = fp;
     e.has_value = true;

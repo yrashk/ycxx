@@ -2,6 +2,7 @@
 # executable. src/driver picks the front from the command line; src/daemon and src/client hold
 # the fronts themselves.
 # Libraries, lowest first.
+add_subdirectory(memory)
 add_subdirectory(hash)
 add_subdirectory(stack)
 add_subdirectory(ast)
@@ -36,4 +37,4 @@ target_link_libraries(ycxxc_lib PUBLIC ycxxc_options ycxxc_daemon)
 
 add_executable(ycxxc main.cpp)
 set_target_properties(ycxxc PROPERTIES OUTPUT_NAME ycxx RUNTIME_OUTPUT_DIRECTORY ${PROJECT_BINARY_DIR}/bin)
-target_link_libraries(ycxxc PRIVATE ycxxc_lib)
+target_link_libraries(ycxxc PRIVATE ycxxc_lib ycxxc_new)

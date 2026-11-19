@@ -15,6 +15,7 @@
 // distribution of schedules, not one schedule (#19 keeps the open item).
 export module ycxx.engine:pool;
 
+import ycxx.memory;
 import std;
 
 export namespace ycxx::engine {
@@ -458,6 +459,8 @@ void Pool::loop(unsigned index) noexcept {
         entered = sc;
       }
       w();
+      // Whatever frame it ran counts no more on this worker (#274): the next may be another's.
+      memory::exchange_target(nullptr);
       continue;
     }
     if (stopping_.load(std::memory_order_acquire)) break;
