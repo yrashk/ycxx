@@ -55,10 +55,8 @@ macros, conditionals, `_Pragma` and the predefined macros. `ycxx cxx -E` matches
 **Incremental builds through a resident daemon.** `ycxx cxx` hands its work to a per-project
 `ycxx daemon` (`YCXX_NO_DAEMON=1` runs in-process), which watches the files it has read and keeps
 its analysis between commands. A repeated build re-runs nothing, and an edit re-runs only what
-it affects, through code generation and the link. The daemon compiles on a thread pool but
-serves one request at a time for now (concurrent requests:
-[#226](https://github.com/yrashk/ycxx/pull/226)), and its output is byte for byte that of a
-cold, in-process build.
+it affects, through code generation and the link. The daemon serves concurrent requests on a
+thread pool, and its output is byte for byte that of a cold, in-process build.
 
 **Editor diagnostics.** `ycxx lsp` is a language server that reports ycxx's errors as you type,
 through the daemon, without unsaved text ever reaching a build.
