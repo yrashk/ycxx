@@ -1,0 +1,23 @@
+November 19 Claude recovery handoff
+
+Recovery issue: https://github.com/yrashk/ycxx/issues/377
+Repository: yrashk/ycxx
+Handoff branch: handoff-nov-19/iota-dyninit-94
+Original branch: refs/heads/claude/iota-dyninit-94
+Original directory: (branch-only checkpoint; see session log paths)
+Original HEAD: 48e743b922b42f5740dcc1d73d1ba3dc8c485715
+Snapshot tip: 48e743b922b42f5740dcc1d73d1ba3dc8c485715
+Snapshot kind: original commit; no worktree changes added
+Task: Namespace dynamic initialization before stacked block statics
+Issues: https://github.com/yrashk/ycxx/issues/94, https://github.com/yrashk/ycxx/issues/337
+Commits absent from current origin/main at inventory: 7
+
+Claude chat summaries (one entry per matched chat):
+
+Session 1ff784fd-aecf-4cb4-960d-801372a86eab
+Log: /Users/yrashk/.claude/projects/-Users-yrashk-Projects-ycxx--claude-worktrees-distracted-elgamal-87617d/1ff784fd-aecf-4cb4-960d-801372a86eab.jsonl
+Log SHA-256: e6a6748d7a87ba9ce6d5820849064cb9ae7f9267cced0329397caa474017b6b8
+The iota session implemented statements and declarations across #337, namespace dynamic initialization #94, block statics #291, overload-set addresses #313, default arguments #300 and range-for #298. It used independent spec-only test authors. The latest narrative switches back to range-for after #352 merged: review found two P1 and five P2 findings, with fixes in progress for begin/end member discovery and discarded class prvalues. Remaining adjacent problems were routed to #157 (comma and class prvalues), #165 (ADL-only lookup) and #295 (rewritten != for sentinels). The session stopped at a Claude spending limit while preparing the fast-suite run. Revalidate the captured changes and finish the review fixes before publishing.
+
+Recovery next step: read the linked issue, compare this snapshot with current main and the implementation/test-author counterparts, finish unfinished review work, run required checks in a new worktree, and continue toward a green PR. Notify original issues when starting the parallel continuation; after the PR is green, link it there and explicitly take over from the previous agent. Amend WIP snapshots as the work continues, preserving/rewriting the note onto the new tip.
+Validation: preservation session verified source HEAD/index/status unchanged and snapshot tree equality. Historical test statements above are reports from Claude logs, not new test runs. No compiler implementation sources were consulted to summarize these chats.
