@@ -204,6 +204,7 @@ namespace expr_flag {
 // Type- or value-dependent ([temp.dep.expr], [temp.dep.constexpr]): its type or value depends on
 // a template parameter, so it is analysed when the template is instantiated.
 inline constexpr u8 dependent = 1;
+inline constexpr u8 immediate_address = 2;  // checked after immediate invocations are folded
 }
 
 // Flags of `LocalRec::flags` and `DeclSema::flags`.
@@ -2774,6 +2775,20 @@ public:
   // invocation, evaluated where it appears.
   u32 immediate_context = 0;
   bool is_consteval(EntityId f) const { return consteval_.contains(std::to_underlying(f)); }
+  // An immediate function may be named within an immediate invocation ([expr.const]). Wait
+  // until the completed tree, where a folded invocation no longer contains the address operand.
+  void check_immediate_addresses(NodeId root, u32 offset = 0) {
+    if (!has_immediate_addresses_ || root == NodeId::none) return;
+    auto check = [&](this const auto& self, const ast::Red& node) -> void {
+      if (node.is<ast::DeclRef>()) {
+        auto ref = node.get<ast::DeclRef>();
+        if (ref.info.flags & expr_flag::immediate_address)
+          diag(node.offset(), Diag::immediate_address, w_->entities.rec(ref.entity).name);
+      }
+      node.for_each_child(self);
+    };
+    check(ast::Red(ins().ast, root, offset));
+  }
 
   // Names the current item has declared so far in its declaration part; visible after their
   // declarators ([basic.scope.pdecl]).
@@ -4226,7 +4241,9 @@ public:
     // Taking a specialization's address demands its definition ([temp.inst]).
     if (match.decl->flags & decl_flag::template_)
       demands.push_back({match.entity, ast::Loc{item_, loc_base_ + set->name.begin}});
-    ExprInfo info{match.type, ValueCategory::lvalue, 0};
+    const bool immediate = (match.decl->flags & decl_flag::consteval_) && !immediate_context;
+    has_immediate_addresses_ = has_immediate_addresses_ || immediate;
+    ExprInfo info{match.type, ValueCategory::lvalue, immediate ? expr_flag::immediate_address : u8(0)};
     Ex r = node(ast::DeclRef{info, match.entity}, set->name.begin, set->name.end, info);
     if (!set->address) return {r.id, e.begin, e.end, r.info};
     ExprInfo pi{types().pointer(match.type), ValueCategory::prvalue, 0};
@@ -5507,6 +5524,7 @@ private:
     std::vector<u32> initialized;  // in scope at the label, or at the `goto`
   };
   std::vector<LabelPoint> labels_, gotos_;
+  bool has_immediate_addresses_ = false;
   std::set<u32> consteval_;                           // consteval functions named so far
   std::map<u32, std::vector<Ex>> list_elems_;         // by draft InitList
   struct DeferredAccess {

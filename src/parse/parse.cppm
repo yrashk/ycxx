@@ -1375,6 +1375,7 @@ public:
     std::vector<sema::Expansion> none;
     ast::ItemSema v{root, b_.seq(std::span<const ast::DeclSema>(decls_)), expansion_list(b_, inst_ || var_ ? none : s_.expansions)};
     out_.value = b_.commit(v);
+    s_.check_immediate_addresses(out_.value.tree);
     out_.demands = std::move(s_.demands);
     return std::move(out_);
   }
@@ -4530,6 +4531,7 @@ public:
                     deduced ? s_.with_return(f->type, s_.return_type()) : s_.builtin(sema::Builtin::void_), u8(deduced),
                     b_.seq(std::span<const ast::ClosureDef>(s_.closures))};
     out_.value = b_.commit(v);
+    s_.check_immediate_addresses(out_.value.tree, root.begin);
     if (!keeps) out_.demands = std::move(s_.demands);
     return std::move(out_);
   }
@@ -4564,6 +4566,7 @@ public:
     out_.value = b_.commit(ast::BodySema{root.id, b_.seq(std::span<const ast::LocalRec>(locals)), expansion_list(b_, none),
                                          b_.seq(std::span<const u32>{}), r ? r->type : s_.builtin(sema::Builtin::void_), u8(r.has_value()),
                                          b_.seq(std::span<const ast::ClosureDef>(s_.closures))});
+    s_.check_immediate_addresses(out_.value.tree, root.begin);
     out_.demands = std::move(s_.demands);
     return std::move(out_);
   }
