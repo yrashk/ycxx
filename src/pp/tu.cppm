@@ -32,6 +32,8 @@ struct Flat {
   std::vector<Continuation> continuations;
   FileId main{};
   // The files included as system headers, whose phase 5 and 6 warnings are not reported (#229).
+  // By file: a header without a guard included both as a system header and not is taken for one
+  // in both places.
   std::set<FileId> system;
 };
 
@@ -192,9 +194,23 @@ Preprocessed to_region(Session& s, const Flat& flat) {
   const std::vector<PTok>& pp = flat.tokens;
   auto report_at = [&](std::size_t i) {
     return [&, i](u32 offset, lex::LexDiag d, u64 a, u64 b) {
-      // Where the token is spelled: in a macro's definition for one the macro produced.
-      if (hidden_in_system_header(d) && flat.system.contains(flat.files[pp[i].loc.file])) return;
-      diags.emplace_back(u64(i) * 2 + 1, Diag{pp[i].loc.file, pp[i].loc.offset + offset, d, {a, b}, 0, std::nullopt});
+      Diag at{pp[i].loc.file, pp[i].loc.offset + offset, d, {a, b}, 0, std::nullopt};
+      // A warning is hidden where its token's outermost expansion is in a system header, as Clang
+      // and GCC decide. One spelled in a system header's macro and expanded elsewhere is reported
+      // where the macro is used.
+      if (hidden_in_system_header(d)) {
+        TokLoc l = pp[i].loc;
+        while (l.expansion != 0) {
+          const Expansion& e = flat.expansions[l.expansion];
+          l = TokLoc{e.site_file, e.parent, e.site_offset};
+        }
+        if (flat.system.contains(flat.files[l.file])) return;
+        if (flat.system.contains(flat.files[at.file])) {
+          at.file = l.file;
+          at.offset = l.offset;
+        }
+      }
+      diags.emplace_back(u64(i) * 2 + 1, at);
     };
   };
   auto literal = [&](u32 id) {

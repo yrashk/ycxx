@@ -2105,6 +2105,8 @@ public:
     for (const auto& scope : scopes_)
       if (std::ranges::any_of(scope, [&](const auto& p) { return p.first == name; })) return false;
     if (std::ranges::any_of(own, [&](const auto& p) { return p.name == name; })) return false;
+    if (std::ranges::any_of(block_usings_, [&](const BlockUsing& u) { return u.name == name; })) return false;
+    if (names_member(name)) return false;
     for (DeclId d : q_->visible_decls(name, directives())) {
       (void)d;
       return false;

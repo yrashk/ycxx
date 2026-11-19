@@ -121,9 +121,9 @@ struct Config {
   static constexpr std::uint32_t default_template_depth = 900;
 
   // Whether a file found in directory `found` (an index into quote then angle directories, as
-  // `Resolved::dir`) is a system header: found in a system directory. One found in its includer's
-  // directory is one when its includer is (`includer_system`). Warnings from a system header are
-  // not reported (#229).
+  // `Resolved::dir`) is a system header: found in a system directory, or included by a system
+  // header (`includer_system`), wherever found, as with Clang and GCC. Warnings from a system
+  // header are not reported (#229).
   bool system_header(u32 found, bool includer_system) const;
 
   Fp128 fingerprint() const {
@@ -161,8 +161,7 @@ struct Resolved {
 };
 
 inline bool Config::system_header(u32 found, bool includer_system) const {
-  if (found == includer_dir) return includer_system;
-  return found >= quote_dirs.size() + system_from;
+  return includer_system || (found != includer_dir && found >= quote_dirs.size() + system_from);
 }
 
 // The search order of `form` for a file found in `found_dir` whose directory is `here`.

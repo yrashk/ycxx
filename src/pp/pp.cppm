@@ -388,11 +388,15 @@ Config with_system_dirs(Config cfg, std::string_view cwd) {
   std::vector<std::string> system;
   for (const std::string& d : system_dirs()) system.push_back(normal(d));
   // A `-I` or `-isystem` directory that is a system directory is searched at the system
-  // directory's place only. -isystem directories are system directories too.
+  // directory's place only. -isystem directories are system directories too: a `-I` directory
+  // that is also an `-isystem` one is searched there, as a system directory (as Clang and GCC do).
+  std::vector<std::string> isystem;
+  for (u32 i = cfg.system_from; i < cfg.angle_dirs.size(); ++i) isystem.push_back(normal(cfg.angle_dirs[i]));
   std::vector<std::string> kept;
   u32 from = cfg.system_from;
   for (u32 i = 0; i < cfg.angle_dirs.size(); ++i) {
-    if (std::ranges::contains(system, normal(cfg.angle_dirs[i]))) {
+    if (std::ranges::contains(system, normal(cfg.angle_dirs[i])) ||
+        (i < cfg.system_from && std::ranges::contains(isystem, normal(cfg.angle_dirs[i])))) {
       if (i < cfg.system_from) --from;
       continue;
     }

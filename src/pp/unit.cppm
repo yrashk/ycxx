@@ -224,6 +224,7 @@ private:
         empty->file_names = {key.presumed};
         empty->trace = {Question{Ask::defined, *r->guard, 0, 0, 0, Fp128{1, 0}}};
         empty->guard = r->guard;
+        empty->system = system;
         it->second.push_back(empty);
         reuse(*empty);
         ++s_->stats.reused;

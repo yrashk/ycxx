@@ -1213,15 +1213,20 @@ session's.*
   `__builtin_offsetof`, …) are diagnosed as "built-in function '…' is not supported yet", their
   arguments skipped (`Sema::unsupported_builtin`).
 - Warnings located in a system header are not reported; errors are, and so is `#warning`, as
-  with Clang and GCC. A system header is one found in a system directory, or from one in its own
-  directory (`Config::system_header`, `Frame::system`, part of a region's cache key). Phase 4's
-  warnings are dropped when the region finishes, phases 5 and 6's when flattened (`Flat::system`).
-  Sema has no warnings yet; when it gets some, it needs the region's system files too.
+  with Clang and GCC. A system header is one found in a system directory (a `-I` directory that
+  is also an `-isystem` one is dropped from the `-I` list), or one a system header includes
+  (`Config::system_header`, `Frame::system`, part of a region's cache key). Phase 4's warnings
+  are dropped when the region finishes; phases 5 and 6's when flattened (`Flat::system`), by
+  their token's outermost expansion site, and one spelled in a system header's macro is reported
+  where the macro is used. Sema has no warnings yet; when it gets some, it needs the region's
+  system files too.
+  - Not yet: `Flat::system` is by file, so a header without a guard included both as a system
+    header and not has phases 5 and 6's warnings hidden in both.
 - The test driver checks warnings where a test has `//! warning` markers (docs/TESTING.md), and
   reads markers in headers a test includes with `<...>` from its `FLAGS` directories.
 - Tests: `tests/own/pp/predefined-gnuc.pp.cpp`, `tests/own/headers/system-warnings.accept.cpp`
   (`<stdio.h>` with no warning), `tests/own/headers/system-error.reject.cpp`,
-  `tests/own/builtins/va-list.run.cpp`. `<cstdio>`: 25 errors before and after, and no warning
+  `tests/own/builtins/va-list.run.cpp`, `tests/own/builtins/unsupported.reject.cpp`. `<cstdio>`: 25 errors before and after, and no warning
   (was 1). `<cmath>` and `<cstdlib>` gain errors in the SDK's `__GNUC__` inline functions (local
   unions, floating-point operations, `__builtin_fabs*`), which already had thousands.
 

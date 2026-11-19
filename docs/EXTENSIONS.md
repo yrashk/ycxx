@@ -26,7 +26,8 @@ use, in the headers libycxx's C library headers reach (`<cstdio>`, `<cstdlib>`, 
 | `__builtin_huge_val`, `__builtin_huge_valf`, `__builtin_huge_vall`, `__builtin_nanf` | `math.h`'s `HUGE_VAL`, `HUGE_VALF`, `HUGE_VALL`, `NAN` | Not yet (#201): diagnosed as above where a program uses the macro | — |
 | `__builtin_alloca` | `alloca.h`'s `alloca` | Not yet: diagnosed as above where a program calls `alloca` | — |
 | `__builtin_constant_p` | `libkern/_OSByteOrder.h`'s `__DARWIN_OSSwapInt16/32/64` (`ntohs`, `htonl`, …) | Not yet: diagnosed as above where a program uses the macros | — |
-| `__builtin_offsetof` | `sys/_types.h`'s `__offsetof`, libycxx's `offsetof` | Not yet: a parse error where a program uses `offsetof` (its first argument is a type) | — |
+| `__builtin_offsetof` | `sys/_types.h`'s `__offsetof`, libycxx's `offsetof` | Not yet: diagnosed as above where a program uses `offsetof`, its arguments (a type first) skipped | — |
+| `__builtin_expect` | the SDK's `assert.h`'s `assert` | Not yet: diagnosed as above where a program uses `assert`, which did not compile before #229 either (its other path calls `abort` undeclared; this one also needs `__func__`, [dcl.fct.def.general], which ycxx does not have yet) | — |
 
 The other `__GNUC__` tests in those headers select nothing new for ycxx: `sys/cdefs.h`'s
 `#warning "Unsupported compiler detected"` goes; `__signed` is `sys/cdefs.h`'s macro for

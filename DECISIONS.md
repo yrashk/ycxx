@@ -40,8 +40,10 @@ reasoning; do not leave decisions only in issue threads.
        else needs yet.
    - **System headers:** a warning located in a system header is not reported, as Clang and GCC
      do (#229). A system header is one found in a system directory (`-isystem`, libycxx's, the
-     SDK's), or found from such a header in its own directory. Errors are always reported, and
-     so is `#warning`, which Clang and GCC report from a system header too.
+     SDK's; a `-I` directory that is also one of these counts as one), or one a system header
+     includes, wherever it is found. A warning on a token a system header's macro produced is
+     reported where the macro is used, and hidden where that is in a system header. Errors are
+     always reported, and so is `#warning`, which Clang and GCC report from a system header too.
    - **Probes:** `__has_feature`, `__has_extension`, `__has_attribute`, `__has_cpp_attribute`
      and `__has_builtin` answer truthfully from ycxx's own tables, 0 until implemented. Headers
      take the paths those answers select, and an extension they turn out to need goes to
