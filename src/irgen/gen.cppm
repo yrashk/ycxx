@@ -425,12 +425,25 @@ class Gen {
   }
 
   // Positions every node emitted while `a` is generated at `a`, and restores the outer position.
+  // Inside a default argument (`pinned_`), whose tree is another declaration's, every node keeps
+  // the call's position.
   struct Position {
-    uint32_t& loc;
+    Gen& g;
     uint32_t saved;
-    Position(uint32_t& l, uint32_t at) : loc(l), saved(l) { loc = at; }
-    ~Position() { loc = saved; }
+    Position(Gen& gen, uint32_t at) : g(gen), saved(gen.loc_) {
+      if (g.pinned_ == 0) g.loc_ = at;
+    }
+    ~Position() { g.loc_ = saved; }
   };
+  template <class Body>
+  auto pinned(Body&& f) {
+    ++pinned_;
+    struct Unpin {
+      int& n;
+      ~Unpin() { --n; }
+    } unpin{pinned_};
+    return f();
+  }
 
   // A substatement is in a scope of its own even if it is not a compound statement ([stmt.pre]).
   void substmt(At a) {
@@ -442,7 +455,7 @@ class Gen {
   void stmt(At a) {
     if (a.id == NodeId::none) return;
     ensure_live();
-    Position here(loc_, a.offset);
+    Position here(*this, a.offset);
     if (is<ast::Compound>(a)) {
       auto s = get<ast::Compound>(a);
       push_scope();
@@ -471,7 +484,7 @@ class Gen {
     } else if (is<ast::DeclStmt>(a)) {
       for (ast::Child c : ast_.children(get<ast::DeclStmt>(a).decls)) {
         At v = child(a, c);
-        Position at(loc_, v.offset);
+        Position at(*this, v.offset);
         if (!is<ast::LocalVar>(v)) unsupported(v, "in a declaration statement");
         local_var(v);
       }
@@ -560,6 +573,7 @@ class Gen {
     if (is<ast::ValueInit>(e)) return true;
     if (is<ast::CtorCall>(e)) return get<ast::CtorCall>(e).zero_first != 0;
     if (is<ast::Paren>(e)) return value_initializes(child(e, get<ast::Paren>(e).operand));
+    if (is<ast::DefaultArg>(e)) return value_initializes(child(e, get<ast::DefaultArg>(e).arg));
     if (!is<ast::InitList>(e)) return false;
     for (ast::Child c : ast_.children(get<ast::InitList>(e).elems))
       if (value_initializes(child(e, c))) return true;
@@ -586,8 +600,9 @@ class Gen {
   // Initializes the object at `p` from the prvalue `e` ([dcl.init]). In a `zeroed` object, a
   // value-initialized element is already zero.
   void initialize(const Place& p, At e, bool zeroed) {
-    Position here(loc_, e.offset);
+    Position here(*this, e.offset);
     if (is<ast::Paren>(e)) return initialize(p, child(e, get<ast::Paren>(e).operand), zeroed);
+    if (is<ast::DefaultArg>(e)) return pinned([&] { initialize(p, child(e, get<ast::DefaultArg>(e).arg), zeroed); });
     if (facts_.is_reference(p.type)) {
       store(p, lvalue(e).ptr);  // a reference member holds its object's address
       return;
@@ -675,7 +690,8 @@ class Gen {
   // The object a class prvalue is copied from: a glvalue of the class converted to a prvalue
   // ([conv.lval]), whose copy constructor is trivial.
   Place class_source(At e) {
-    while (is<ast::Paren>(e)) e = child(e, get<ast::Paren>(e).operand);
+    while (is<ast::Paren>(e) || is<ast::DefaultArg>(e))
+      e = child(e, is<ast::Paren>(e) ? get<ast::Paren>(e).operand : get<ast::DefaultArg>(e).arg);
     if (is<ast::ImplicitConversion>(e)) {
       auto c = get<ast::ImplicitConversion>(e);
       if (c.conversion == ast::ConversionKind::lvalue_to_rvalue) return lvalue(child(e, c.operand));
@@ -738,7 +754,7 @@ class Gen {
     if (is<ast::CondDecl>(c)) {
       auto d = get<ast::CondDecl>(c);
       {
-        Position at(loc_, child(c, d.var).offset);
+        Position at(*this, child(c, d.var).offset);
         local_var(child(c, d.var));
       }
       return full_expression([&] { return rvalue(child(c, d.value)); });
@@ -942,7 +958,7 @@ class Gen {
         continue;
       }
       enter(g->from);
-      Position at(loc_, g->loc);
+      Position at(*this, g->loc);
       jump_exits(g->at, g->path, g->scopes, l);
       br(l.block);
       g = gotos_.erase(g);
@@ -1018,12 +1034,13 @@ class Gen {
   }
 
   std::optional<ValueId> rvalue_or_void(At a) {
-    Position here(loc_, a.offset);
+    Position here(*this, a.offset);
     ast::ExprInfo ei = info(a);
     if (ei.category != ast::ValueCategory::prvalue) unsupported(a, "as a glvalue where a prvalue is expected");
     ast::QualType t = ei.type;
     if (is<ast::Literal>(a)) return constant(t, get<ast::Literal>(a).value);
     if (is<ast::Paren>(a)) return rvalue_or_void(child(a, get<ast::Paren>(a).operand));
+    if (is<ast::DefaultArg>(a)) return pinned([&] { return rvalue_or_void(child(a, get<ast::DefaultArg>(a).arg)); });
     if (is<ast::ImplicitConversion>(a)) return conversion(a);
     if (is<ast::Unary>(a)) return unary(a);
     if (is<ast::Binary>(a)) return binary(a);
@@ -1397,7 +1414,7 @@ class Gen {
 
   // The object a glvalue designates ([basic.lval]).
   Place lvalue(At a) {
-    Position here(loc_, a.offset);
+    Position here(*this, a.offset);
     ast::ExprInfo ei = info(a);
     if (ei.category == ast::ValueCategory::prvalue) unsupported(a, "as a prvalue where a glvalue is expected");
     ast::QualType t = ei.type;
@@ -1425,6 +1442,7 @@ class Gen {
       return {constant(facts_.pointer_to(t), addr), t};
     }
     if (is<ast::Paren>(a)) return lvalue(child(a, get<ast::Paren>(a).operand));
+    if (is<ast::DefaultArg>(a)) return pinned([&] { return lvalue(child(a, get<ast::DefaultArg>(a).arg)); });
     if (is<ast::Unary>(a)) {
       auto u = get<ast::Unary>(a);
       At o = child(a, u.operand);
@@ -1577,6 +1595,7 @@ class Gen {
   std::vector<std::vector<Ending>> temps_;   // the open full-expressions' temporaries
   std::vector<At> epilogue_;                 // a destructor's DestroyMember statements
   int branches_ = 0;                         // conditionally evaluated operands entered
+  int pinned_ = 0;                           // default arguments entered (`Position`)
 };
 
 template <Facts F>

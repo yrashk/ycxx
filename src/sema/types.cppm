@@ -573,6 +573,7 @@ struct MemberDeclRec {
   // A generic lambda's function call operator's template-head ([expr.prim.lambda.closure]/7):
   // its definition is its lambda's, not an item's.
   std::vector<ast::TemplateParamSema> head{};
+  std::vector<ast::NodeId> defaults;  // a function's default arguments by parameter, or empty
 };
 
 struct NestedType {
