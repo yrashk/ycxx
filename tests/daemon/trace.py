@@ -130,7 +130,8 @@ def main(ycxx):
                 time.sleep(0.1)
             return False
 
-        check(wait_for('watching the files it read'), f'--watch builds once and waits: {"".join(log)[-400:]}')
+        check(wait_for('ycxx: watching '), f'--watch builds once and waits: {"".join(log)[-400:]}')
+        check(any('ycxx: watching' in l and 'k.h' in l for l in log), 'it lists the header it watches')
         (scope / 'unrelated.txt').write_text('x')
         time.sleep(2)
         check(not any('── build 2' in l for l in log), 'a file no build read starts no build')
@@ -140,7 +141,7 @@ def main(ycxx):
         second = ''.join(log[next(i for i, l in enumerate(log) if '── build 2' in l):])
         check('Lower(k) executed' in second or 'FunctionIr(k) executed' in second, f'k is built again: {second[:600]}')
         # An edit that another client's build applies first still starts a build here.
-        check(wait_for('watching the files it read', times=2), 'the rebuild waits again')
+        check(wait_for('ycxx: watching ', times=2), 'the rebuild waits again')
         (scope / 'k.h').write_text('inline int k() { return 1; }\n')
         other = cxx('a.cpp', '-o', 'other')
         check(other.returncode == 0, 'another client builds meanwhile')
