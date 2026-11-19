@@ -118,9 +118,11 @@ struct [[=dependent]] VDepSizeofPack {
 // ---------------------------------------------------------------- constraints ([temp.constr])
 // *#88 step 6, Fable's decision.*
 
-// A type as a value: a type parameter's argument in an atomic constraint's parameter mapping.
+// A type as a value: a type parameter's argument in an atomic constraint's parameter mapping, its
+// cv-qualifiers apart.
 struct VType {
-  QualType type;
+  QualType type;  // unqualified, as types in values are
+  u8 cv;
 };
 
 // An atomic constraint ([temp.constr.atomic]): the appearance of its expression (the item that

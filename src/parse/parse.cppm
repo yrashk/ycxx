@@ -61,6 +61,8 @@ public:
       ids_.push_back(id);
       index_.emplace(std::to_underlying(id), static_cast<u32>(ids_.size() - 1));
     }
+    for (u32 j = 0; j < its.items.size(); ++j)
+      for (u32 k = 0; k < its.items[j].names.size(); ++k) by_name_[its.items[j].names[k].name].push_back({j, k});
     namespaces();
   }
 
@@ -247,17 +249,22 @@ public:
   // `name`; an inline or unnamed member namespace's are not among them ([basic.scope.scope]/4).
   std::vector<DeclId> used_in(std::string_view name, const std::string& path, u32 item) {
     std::vector<DeclId> r;
-    for (u32 j = 0; j < item; ++j) {
-      const items::Item& it = items_->items[j];
+    for (auto [j, k] : named(name)) {
+      if (j >= item) break;
+      const items::DeclName& n = items_->items[j].names[k];
       if (in_class_[j] || ns_of_[j] != path) continue;
-      for (const items::DeclName& n : it.names)
-        if (n.name == name && (n.flags & items::name_flag::unknown) && std::ranges::find(running_, j) == running_.end()) {
-          item_sema(j);
-          if (auto t = using_targets_.find({j, n.ordinal}); t != using_targets_.end())
-            r.insert(r.end(), t->second.begin(), t->second.end());
-        }
+      if ((n.flags & items::name_flag::unknown) && std::ranges::find(running_, j) == running_.end()) {
+        item_sema(j);
+        if (auto t = using_targets_.find({j, n.ordinal}); t != using_targets_.end())
+          r.insert(r.end(), t->second.begin(), t->second.end());
+      }
     }
     return r;
+  }
+  // The names items declare under `name`, as (item, index in its names), in order.
+  std::span<const std::pair<u32, u32>> named(std::string_view name) const {
+    auto f = by_name_.find(name);
+    return f == by_name_.end() ? std::span<const std::pair<u32, u32>>{} : std::span{f->second};
   }
   // The declarations of `name` that are members of namespace `path` ([namespace.memdef]) before
   // the point: of its own definitions, and, unless `inhabit`, of its inline and unnamed members.
@@ -265,24 +272,24 @@ public:
   std::vector<DeclId> declared_in(std::string_view name, const std::string& path, u32 item, bool self,
                                   bool inhabit = false) {
     std::vector<DeclId> r;
-    for (u32 j = 0; j < item + (self ? 1 : 0); ++j) {
+    for (auto [j, k] : named(name)) {
+      if (j >= item + (self ? 1 : 0)) break;
       const items::Item& it = items_->items[j];
+      const items::DeclName& n = it.names[k];
       if (in_class_[j] || (ns_of_[j] != path && (inhabit || eff_ns_[j] != path))) continue;
-      for (const items::DeclName& n : it.names) {
-        if (n.name == name && (n.flags & items::name_flag::unknown)) {
-          if (std::ranges::find(running_, j) != running_.end()) continue;
-          item_sema(j);  // resolves its targets
-          if (auto t = using_targets_.find({j, n.ordinal}); t != using_targets_.end())
-            r.insert(r.end(), t->second.begin(), t->second.end());
-          continue;
-        }
-        // A scoped enumeration's enumerators are in its own scope ([dcl.enum]/11); the declarators
-        // after its braces are not.
-        if (n.name == name && !(n.flags & (items::name_flag::friend_ | items::name_flag::specialization)) &&
-            !(it.kind == ItemKind::enum_def && n.ordinal > 0 && !(n.flags & items::name_flag::enumerator) &&
-              it.begin + n.offset < it.brace_end))
-          r.push_back({ids_[j], ast::make_decl_ord(ast::DeclClass::syntactic, n.ordinal)});
+      if (n.flags & items::name_flag::unknown) {
+        if (std::ranges::find(running_, j) != running_.end()) continue;
+        item_sema(j);  // resolves its targets
+        if (auto t = using_targets_.find({j, n.ordinal}); t != using_targets_.end())
+          r.insert(r.end(), t->second.begin(), t->second.end());
+        continue;
       }
+      // A scoped enumeration's enumerators are in its own scope ([dcl.enum]/11); the declarators
+      // after its braces are not.
+      if (!(n.flags & (items::name_flag::friend_ | items::name_flag::specialization)) &&
+          !(it.kind == ItemKind::enum_def && n.ordinal > 0 && !(n.flags & items::name_flag::enumerator) &&
+            it.begin + n.offset < it.brace_end))
+        r.push_back({ids_[j], ast::make_decl_ord(ast::DeclClass::syntactic, n.ordinal)});
     }
     for (const Directive& d : directives_)
       if (d.alias && d.item < item + (self ? 1 : 0) && d.at == path && w_->ins.names.spelling(*d.alias) == name)
@@ -416,6 +423,32 @@ public:
     return Chosen{best->p->item, sema::Bindings::of(best->params[0].depth, best->args), false, best->p->defined};
   }
   // An ambiguous choice of partial specialization, said once for each specialization.
+  // ------------------------------------------------------------ constraints ([temp.constr])
+
+  // Whether normal form `c` is satisfied at `point` ([temp.constr.sat]): a conjunction when both
+  // are, a disjunction when either is, an atom by `atom_satisfied`; none while an atom's mapping
+  // still names a template parameter.
+  std::optional<bool> satisfied(ConstId c, u32 point) {
+    if (c == ConstId::none) return true;
+    if (w_->ins.values.is<ast::VConstraint>(c)) {
+      auto v = w_->ins.values.get<ast::VConstraint>(c);
+      bool any_unknown = false;
+      for (ConstId o : w_->ins.seqs.elements(v.operands)) {
+        auto r = satisfied(o, point);
+        if (!r) any_unknown = true;
+        else if (*r == (v.op == 1)) return *r;  // a false conjunct, a true disjunct
+      }
+      if (any_unknown) return std::nullopt;
+      return v.op == 0;
+    }
+    return atom_satisfied(c, point);
+  }
+  // An atomic constraint's satisfaction ([temp.constr.atomic]/3), memoized (`atoms_`): the first
+  // evaluation is the program's (/3: a different result elsewhere is ill-formed, no diagnostic
+  // required).
+  std::optional<bool> atom_satisfied(ConstId c, u32 point);
+  std::map<u32, std::optional<bool>> atoms_;
+
   // The type of variable template specialization `v` at `point` when it is not its template's:
   // its explicit specialization's, or that of the partial specialization it is instantiated
   // from, with that one's arguments.
@@ -739,6 +772,8 @@ private:
   std::vector<std::string> ns_of_, eff_ns_;       // by item
   std::vector<std::string> inner_of_;             // by namespace definition item: the namespace
   std::vector<bool> in_class_;                    // by item
+  // By declared name: (item, index in its names), in order; a lookup visits only its own name's.
+  std::unordered_map<std::string_view, std::vector<std::pair<u32, u32>>> by_name_;
   std::map<std::string, EntityId> ns_entities_;
   std::map<u32, std::string> ns_paths_;           // by namespace entity
   std::vector<Directive> directives_;
@@ -837,6 +872,7 @@ private:
 
   friend class ItemAnalysis;
   friend class AtItem;
+  friend class AtomAnalysis;
   friend class BodyAnalysis;
 };
 
@@ -882,6 +918,7 @@ public:
   std::optional<QualType> specialization_type(EntityId v) override { return p_->specialization_type(v, point()); }
   const std::vector<sema::Expansion>* pattern_expansions() override { return at_point ? p_->expansions(item_, 0) : nullptr; }
   bool is_union_class(EntityId c) override { return p_->is_union_class(c, point()); }
+  std::optional<bool> satisfied(ConstId c) override { return p_->satisfied(c, point()); }
   std::optional<ast::DeclSema> earlier_member(ast::NameId name) override {
     const items::Item& it = p_->items().items[item_];
     if (it.parent == items::none || p_->items().items[it.parent].kind != ItemKind::class_def) return std::nullopt;
@@ -942,6 +979,7 @@ public:
   std::optional<QualType> specialization_type(EntityId v) override { return p_->specialization_type(v, p_->end()); }
   const std::vector<sema::Expansion>* pattern_expansions() override { return p_->expansions(item_, 1); }
   bool is_union_class(EntityId c) override { return p_->is_union_class(c, p_->end()); }
+  std::optional<bool> satisfied(ConstId c) override { return p_->satisfied(c, p_->end()); }
   bool dependent_call(sema::u32 offset) override {
     return p_->dependent_call(item_, offset);
   }
@@ -1153,9 +1191,12 @@ private:
         return bad();
       }
       if (!ps_.template_head(0)) return bad();
+      head_requires_clause();
       ps_.skip_attributes();
       template_ = true;
       ps_.template_ids_in_declarators = true;  // `template<…> T v<args>`: a partial specialization
+      // `template<…> concept C = constraint-expression;` ([temp.concept]).
+      if (ps_.is(Tk::kw_concept)) return concept_definition();
       // `template<…> struct X;` declares a class template ([temp.class]), defined later.
       if ((ps_.is(Tk::kw_struct) || ps_.is(Tk::kw_class)) && ps_.kind(1) == Tk::identifier && ps_.kind(2) == Tk::semi) {
         NameId name = ps_.name_of(ps_.tok(1));
@@ -1706,6 +1747,94 @@ private:
     p_->declared(sem, k_);
     return true;
   }
+  // A template-head's requires-clause ([temp.pre]/9), after it: its normal form, and its tokens'
+  // fingerprint for the declaration's identity.
+  void head_requires_clause() {
+    if (!ps_.is(Tk::kw_requires)) return;
+    ps_.bump();
+    u32 begin = ps_.pos();
+    head_requires_ = ps_.constraint_expression(true);
+    constraints_fp_ = ast::mix(constraints_fp_, clause_fp(begin, ps_.pos()));
+  }
+  // A declarator's trailing requires-clause ([dcl.decl]/4).
+  void trailing_requires_clause() {
+    if (!ps_.is(Tk::kw_requires)) return;
+    ps_.bump();
+    u32 begin = ps_.pos();
+    trailing_requires_ = ps_.constraint_expression(true);
+    constraints_fp_ = ast::mix(ast::mix(constraints_fp_, u64(1)), clause_fp(begin, ps_.pos()));
+  }
+  // The fingerprint of a clause's tokens with each template parameter as its position: equal for
+  // equivalent clauses of redeclarations ([temp.over.link]/5, as tokens, not as expressions).
+  sema::Fp128 clause_fp(u32 begin, u32 end) {
+    sema::Fp128 f = ast::seed("ycxx.parse.clause");
+    const pp::Region& r = p_->region();
+    for (u32 j = it_->begin + begin; j < it_->begin + end; ++j) {
+      const lex::Tok& t = r.tokens[j];
+      if (t.kind == Tk::identifier) {
+        NameId n = s_.world().ins.names.intern(r.name(t));
+        if (const ast::TemplateParamSema* p = s_.template_param(n)) {
+          f = ast::mix(ast::mix(ast::mix(f, u64(0xA11)), u64(p->depth)), u64(p->index));
+          continue;
+        }
+      }
+      f = ast::mix(f, std::to_underlying(t.kind));
+      std::string_view sp = r.spelling(t);
+      f = ast::mix(f, s_.world().ins.names.fp(s_.world().ins.names.intern(sp)));
+    }
+    return f;
+  }
+  // The declaration's associated constraints ([temp.constr.decl]/3): its head's type-constraints
+  // in order, its head's requires-clause, its trailing requires-clause; with their fingerprint.
+  ConstId associated_constraints() {
+    sema::Templates t = s_.templates();
+    ConstId c = ConstId::none;
+    for (ConstId tc : s_.head_constraints) {
+      c = t.constraint_op(0, c, tc);
+      constraints_fp_ = ast::mix(constraints_fp_, s_.world().ins.values.fp(tc));
+    }
+    c = t.constraint_op(0, c, head_requires_);
+    return t.constraint_op(0, c, trailing_requires_);
+  }
+  // `template<…> concept C = constraint-expression;` ([temp.concept]): C's normal form is its
+  // constraint-expression's. A concept has no associated constraints of its own, and its name
+  // is the only one of its kind in its scope ([temp.concept]/4, /5).
+  void concept_definition() {
+    ps_.bump();
+    if (!ps_.is(Tk::identifier)) {
+      s_.diag(ps_.pos(), Diag::expected_unqualified_id);
+      return bad();
+    }
+    NameId name = ps_.name_of(ps_.tok());
+    u32 name_at = ps_.pos();
+    ps_.bump();
+    ps_.skip_attributes();
+    if (!ps_.expect(Tk::equal)) return bad();
+    if (!s_.head_constraints.empty() || head_requires_ != ConstId::none) {
+      s_.diag(name_at, Diag::concept_constrained, name);
+      return bad();
+    }
+    ConstId nf = ps_.constraint_expression(false);
+    if (!ps_.expect(Tk::semi)) return bad();
+    for (DeclId p : q_.visible_decls(name))
+      if (auto ds = p_->decl_sema(p); ds && ds->entity != EntityId::none && same_scope(*ds)) {
+        s_.diag(name_at, Diag::conflicting_declaration, name);
+        return bad();
+      }
+    const std::vector<ast::TemplateParamSema>& head = s_.template_scopes.back();
+    sema::EntityRec e{sema::EntityKind::concept_, name, {}, LangLinkage::cxx, ast::Linkage::none, {}, ns_entity()};
+    e.head = head_fp(head);
+    ast::DeclSema sem = class_decl(s_.world().entities.entity(e), true);
+    sem.kind = ast::DeclKind::concept_;
+    sem.type = s_.builtin(sema::Builtin::bool_);
+    sem.linkage = ast::Linkage::none;
+    sem.flags = u16(sema::decl_flag::template_ | sema::decl_flag::definition);
+    sem.template_params = b_.seq(std::span<const ast::TemplateParamSema>(head));
+    sem.constraints = nf;
+    decls_.push_back(sem);
+    s_.own.push_back({name, sem});
+    p_->declared(sem, k_);
+  }
   // Whether a template-head's pack, if any, is its last parameter ([temp.param]).
   static bool pack_last(std::span<const ast::TemplateParamSema> head) {
     for (std::size_t i = 0; i + 1 < head.size(); ++i)
@@ -1791,6 +1920,7 @@ private:
         return bad();
       }
       if (!ps_.template_head(0)) return bad();
+      head_requires_clause();
       template_ = true;
     }
     u32 at = ps_.pos();
@@ -2782,6 +2912,8 @@ private:
           }
         sem.template_params = b_.seq(std::span<const ast::TemplateParamSema>(s_.template_scopes.front()));
         flags |= sema::decl_flag::template_;
+        if (fn) trailing_requires_clause();
+        sem.constraints = associated_constraints();
         // [temp.param]: a variable template's pack is last; a function template's is followed only
         // by parameters with a default or deduced from its parameter-type-list.
         const std::vector<ast::TemplateParamSema>& head = s_.template_scopes.front();
@@ -2820,7 +2952,8 @@ private:
           if (p.kind != ast::DeclKind::function || (p.flags & sema::decl_flag::lang_c) || lang == LangLinkage::c) return false;
           // A template and a function, or templates whose heads differ, are overloads ([temp.over.link]).
           if ((p.flags & sema::decl_flag::template_) != (flags & sema::decl_flag::template_) ||
-              head_fp(p_->world().ins.seqs.elements(p.template_params)) != head)
+              head_fp(p_->world().ins.seqs.elements(p.template_params)) != head ||
+              s_.world().entities.rec(p.entity).constraints != constraints_fp_)
             return true;
           sema::TypeRec a = types.rec(p.type), c = types.rec(sem.type);
           // A function template's return type is part of its signature ([defns.signature.templ]).
@@ -2898,6 +3031,7 @@ private:
                           {p_->id(k_), ast::make_decl_ord(ast::DeclClass::syntactic, ord)},
                           lang == LangLinkage::c ? EntityId::none : ns_entity()};
         e.head = head;
+        e.constraints = constraints_fp_;
         sem.entity = s_.world().entities.entity(e);
       }
 
@@ -3129,6 +3263,9 @@ private:
   bool single_linkage_spec_ = false;  // `extern "C" declaration` without braces
   bool template_ = false;             // the declaration is a template-declaration ([temp.pre])
   bool explicit_ = false;             // an explicit specialization ([temp.expl.spec])
+  ConstId head_requires_ = ConstId::none;      // the template-head's requires-clause, in normal form
+  ConstId trailing_requires_ = ConstId::none;  // the declarator's
+  sema::Fp128 constraints_fp_{};               // their tokens' fingerprint, for identity
 };
 
 const Result<ast::ItemSema>& Program::item_sema(u32 item) {
@@ -3241,6 +3378,87 @@ const Result<ast::ClassDef>& Program::class_def(u32 item) {
   running_.pop_back();
   class_cells_[item] = std::move(out);
   return *class_cells_[item];
+}
+
+// ---------------------------------------------------------------- constraint satisfaction
+
+// An atomic constraint's expression analysed for its satisfaction ([temp.constr.atomic]/3): its
+// tokens read again in the item that contains them, with the atom's parameter mapping bound, its
+// diagnostics in a sink of its own. Fable's decision on #88 step 6: an error there means the
+// substitution failed, so the atom is not satisfied; a compiler limitation is a hard error, never
+// an unsatisfied constraint; a well-formed result that is not a constant of type bool is a hard
+// error. What it instantiates keeps its own diagnostics in its own cell.
+class AtomAnalysis {
+public:
+  AtomAnalysis(Program& p, const ast::VAtom& a, u32 point)
+      : p_(&p), k_(p.index(a.item)), it_(&p.items().items[k_]), b_(p.world().ins, &p.arena_), q_(p, k_, false),
+        s_(p.world(), b_, q_, sink_, a.item, a.begin), ps_(p.region(), it_->begin + a.begin, it_->begin + a.end, s_), atom_(a) {
+    ps_.set_questions(q_);
+    q_.at_point = point;
+  }
+
+  // Satisfied or not; hard errors go to `hard`.
+  bool run(std::vector<engine::Diagnostic>& hard) {
+    auto& ins = p_->world().ins;
+    for (auto& head : p_->enclosing_heads(k_)) s_.template_scopes.push_back(std::move(head));
+    const ast::ItemSema& is = p_->item_sema(k_).value;
+    if (ins.seqs.size(is.decls) > 0) {
+      ast::DeclSema d = ins.seqs.at(is.decls, 0);
+      if (ins.seqs.size(d.template_params) > 0) s_.template_scopes.push_back(ins.seqs.elements(d.template_params));
+    }
+    sema::Templates t = s_.templates();
+    s_.template_args.levels.resize(atom_.depth + 1);
+    for (ConstId e : ins.seqs.elements(atom_.mapping))
+      s_.template_args.levels[atom_.depth].push_back(e == ConstId::none ? std::nullopt : std::optional(t.mapping_arg(e)));
+    Ex e = ps_.expression();
+    auto hard_id = [](engine::DiagId id) {
+      return id == sema::diag_id(Diag::not_supported) || id == sema::diag_id(Diag::instantiation_depth);
+    };
+    bool failed = !e.ok() || !ps_.at_end();
+    for (const engine::Diagnostic& d : sink_) {
+      if (hard_id(d.id)) hard.push_back(d);
+      failed = true;
+    }
+    if (failed) return false;
+    QualType ty = sema::Types::unqualified(s_.types().canonical(s_.rvalue(e).type()));
+    if (!s_.types().is(ty, sema::Builtin::bool_)) {
+      s_.diag(0, Diag::constraint_not_bool, ty);
+      hard.insert(hard.end(), sink_.begin(), sink_.end());
+      return false;
+    }
+    sema::Evaluated v = sema::Evaluator(s_, q_).evaluate(s_.rvalue(e));
+    if (!v.value) {
+      s_.diag(0, Diag::not_constant, v.reason);
+      hard.push_back(sink_.back());
+      return false;
+    }
+    return p_->world().values.as_signed(*v.value) != 0;
+  }
+
+private:
+  Program* p_;
+  u32 k_;
+  const items::Item* it_;
+  std::vector<engine::Diagnostic> sink_;
+  ast::Builder b_;
+  AtItem q_;
+  sema::Sema s_;
+  Parser ps_;
+  ast::VAtom atom_;
+};
+
+std::optional<bool> Program::atom_satisfied(ConstId c, u32 point) {
+  const u32 key = std::to_underlying(c);
+  if (auto it = atoms_.find(key); it != atoms_.end()) return it->second;
+  sema::Templates t(*w_, classes_);
+  if (t.constraint_dependent(c)) return std::nullopt;
+  atoms_[key] = true;  // its own evaluation asks for itself only through a cycle, which [temp.constr.atomic] does not satisfy
+  std::vector<engine::Diagnostic> hard;
+  bool r = AtomAnalysis(*this, w_->ins.values.get<ast::VAtom>(c), point).run(hard);
+  for (engine::Diagnostic& d : hard)
+    if (!std::ranges::contains(end_diags_, d)) end_diags_.push_back(std::move(d));
+  atoms_[key] = r;
+  return r;
 }
 
 // ---------------------------------------------------------------- analyze_body

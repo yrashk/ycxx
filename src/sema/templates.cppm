@@ -312,6 +312,119 @@ public:
     }
   }
 
+  // ------------------------------------------------------------ constraints ([temp.constr])
+
+  // `l op r` of two normal forms (`op` 0: conjunction, 1: disjunction); either may be none.
+  ConstId constraint_op(u8 op, ConstId l, ConstId r) {
+    if (l == ConstId::none) return r;
+    if (r == ConstId::none) return l;
+    std::array<ConstId, 2> xs{l, r};
+    return ins().intern_value(ast::VConstraint{op, ins().intern_seq(std::span<const ConstId>(xs))});
+  }
+  // A mapping entry as a template argument, and back.
+  TemplateArg mapping_arg(ConstId v) {
+    if (ins().values.is<ast::VType>(v)) {
+      auto t = ins().values.get<ast::VType>(v);
+      return type_arg(types().add_cv(t.type, Cv(t.cv)));
+    }
+    return {TemplateArgKind::value, QualType{}, v};
+  }
+  ConstId mapping_value(const TemplateArg& a) {
+    if (a.kind == TemplateArgKind::type) {
+      QualType c = types().canonical(a.type);
+      return ins().intern_value(ast::VType{Types::unqualified(c), u8(std::to_underlying(Types::cv(c)))});
+    }
+    return a.value;
+  }
+  // A normal form with the parameters `b` binds replaced in its atoms' mappings
+  // ([temp.constr.normal]/1.4); none when a mapping cannot be formed, which in a concept-id is
+  // ill-formed.
+  std::optional<ConstId> substitute_constraint(ConstId c, const Bindings& b) {
+    if (c == ConstId::none) return c;
+    if (ins().values.is<ast::VConstraint>(c)) {
+      auto v = ins().values.get<ast::VConstraint>(c);
+      std::vector<ConstId> ops;
+      for (ConstId o : ins().seqs.elements(v.operands)) {
+        auto s = substitute_constraint(o, b);
+        if (!s) return std::nullopt;
+        ops.push_back(*s);
+      }
+      return ins().intern_value(ast::VConstraint{v.op, ins().intern_seq(std::span<const ConstId>(ops))});
+    }
+    auto a = ins().values.get<ast::VAtom>(c);
+    std::vector<ConstId> m;
+    for (ConstId e : ins().seqs.elements(a.mapping)) {
+      if (e == ConstId::none) {
+        m.push_back(e);
+        continue;
+      }
+      auto s = substitute_arg(mapping_arg(e), b);
+      if (!s) return std::nullopt;
+      m.push_back(mapping_value(*s));
+    }
+    a.mapping = ins().intern_seq(std::span<const ConstId>(m));
+    return ins().intern_value(a);
+  }
+  // Whether an atom's mapping still names a template parameter: its satisfaction waits for them.
+  bool constraint_dependent(ConstId c) {
+    if (c == ConstId::none) return false;
+    if (ins().values.is<ast::VConstraint>(c))
+      return std::ranges::any_of(ins().seqs.elements(ins().values.get<ast::VConstraint>(c).operands),
+                                 [&](ConstId o) { return constraint_dependent(o); });
+    for (ConstId e : ins().seqs.elements(ins().values.get<ast::VAtom>(c).mapping))
+      if (e != ConstId::none && w_->arg_dependent(mapping_arg(e))) return true;
+    return false;
+  }
+  // Whether normal form `p` subsumes `q` ([temp.constr.order]/1): each disjunctive clause of p's
+  // disjunctive normal form subsumes each conjunctive clause of q's conjunctive normal form, a
+  // clause subsuming another when they share an atom. Past a fixed number of clauses neither
+  // subsumes, deterministically.
+  bool subsumes(ConstId p, ConstId q) {
+    if (q == ConstId::none) return true;
+    if (p == ConstId::none) return false;
+    auto dnf = clauses(p, 1);
+    auto cnf = clauses(q, 0);
+    if (!dnf || !cnf) return false;
+    for (const auto& pi : *dnf)
+      for (const auto& qj : *cnf)
+        if (std::ranges::none_of(pi, [&](ConstId a) { return std::ranges::contains(qj, a); })) return false;
+    return true;
+  }
+
+private:
+  // The clauses of `c`'s disjunctive (`outer` 1) or conjunctive (`outer` 0) normal form, each a
+  // set of atoms; none past the budget.
+  std::optional<std::vector<std::vector<ConstId>>> clauses(ConstId c, u8 outer) {
+    constexpr std::size_t budget = 65536;
+    if (ins().values.is<ast::VAtom>(c)) return std::vector<std::vector<ConstId>>{{c}};
+    auto v = ins().values.get<ast::VConstraint>(c);
+    std::vector<std::vector<ConstId>> acc;
+    bool first = true;
+    for (ConstId o : ins().seqs.elements(v.operands)) {
+      auto sub = clauses(o, outer);
+      if (!sub) return std::nullopt;
+      if (v.op == outer) {  // the outer operator: the clauses side by side
+        acc.insert(acc.end(), sub->begin(), sub->end());
+      } else if (first) {  // the inner operator: every combination
+        acc = std::move(*sub);
+      } else {
+        std::vector<std::vector<ConstId>> next;
+        for (const auto& x : acc)
+          for (const auto& y : *sub) {
+            std::vector<ConstId> z = x;
+            for (ConstId a : y)
+              if (!std::ranges::contains(z, a)) z.push_back(a);
+            next.push_back(std::move(z));
+          }
+        acc = std::move(next);
+      }
+      first = false;
+      if (acc.size() > budget) return std::nullopt;
+    }
+    return acc;
+  }
+
+public:
   // ------------------------------------------------------------ packs ([temp.variadic])
 
   // A template-head's parameters as arguments, as the current instantiation and the primary
