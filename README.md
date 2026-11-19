@@ -99,7 +99,8 @@ INTEGER ABI subset. Use the host linker to link these objects with libc.
 
 **Preprocessing.** All of translation phase 4: includes, object-like and function-like
 macros, conditionals, `_Pragma` and the predefined macros. `ycxx cxx -E` matches Clang's output.
-`ycxx cxx -E --target=x86_64-linux-gnu` selects Linux macros and glibc's multiarch include path.
+`ycxx cxx -E --target=x86_64-linux-gnu` selects Linux macros and glibc's multiarch include path
+and preprocesses glibc's `<stdio.h>`. Linux `<stdarg.h>` supplies the `va_list` declaration.
 
 **Incremental builds through a resident daemon.** `ycxx cxx` hands its work to a per-project
 `ycxx daemon` (`YCXX_NO_DAEMON=1` runs in-process), which watches the files it has read and keeps
@@ -129,8 +130,8 @@ checked with the flags of its last build, or else with its line in the project's
 
 ### Not yet
 
-- The standard library and its headers. C headers such as `<stdio.h>` compile without warnings
-  and `printf` runs; libycxx's `<cstdio>` still needs pointer-to-member types, and `<cmath>`
+- The standard library and its headers. On macOS, C headers such as `<stdio.h>` compile without
+  warnings and `printf` runs. libycxx's `<cstdio>` still needs pointer-to-member types, and `<cmath>`
   (which `<math.h>` includes) does not compile yet ([#349](https://github.com/yrashk/ycxx/issues/349)).
 - Constexpr lambdas (the interpreter has no class objects yet), lambdas outside function bodies,
   structured bindings, virtual functions, virtual base classes, inheriting constructors, and bases

@@ -1071,7 +1071,7 @@ std = 'C++98'
 detect = ',\s*\.\.\.\s*\)|\bva_(?:start|arg|list)\b'
 status = 'partial'
 issues = [196, 399]
-note = 'Linux x86-64 direct scalar INTEGER calls. Variadic definitions (`va_start`) and calls through pointers pending.'
+note = 'Linux x86-64 supports the compiler resource `<stdarg.h>` and System V `va_list` declarations (#383), plus direct scalar INTEGER calls. SSE arguments (#399), variadic definitions (`va_start`), and calls through pointers (#196) remain open.'
 probe = '''
 #include <stdarg.h>
 int sum(int n, ...) { va_list ap; va_start(ap, n); int s = 0; for (int i = 0; i < n; ++i) s += va_arg(ap, int); va_end(ap); return s; }
