@@ -202,7 +202,7 @@ public:
              kind(q->second) != Tk::period && kind(q->second) != Tk::l_brace;
     }
     u32 next = 1;  // the token after the type's name: after `X<…>` for a class template
-    if (is(Tk::identifier) && kind(1) == Tk::less && s_->type_template(name_of(tok()))) next = past_template_args(1);
+    if (is(Tk::identifier) && kind(1) == Tk::less && s_->names_type_template(name_of(tok()))) next = past_template_args(1);
     else if (!is(Tk::identifier) || kind(1) == Tk::coloncolon || !s_->class_name(name_of(tok()))) return false;
     // `T(args).f()` and `T{…}.m` are expressions; `T (x);` declares x ([stmt.ambig]).
     if (kind(next) == Tk::l_brace) return false;
@@ -253,10 +253,14 @@ public:
   // name; the arguments are consumed.
   std::optional<QualType> class_template_type() {
     u32 at = pos();
-    auto tmpl = s_->type_template(name_of(tok()));
+    NameId name = name_of(tok());
+    const ast::TemplateParamSema* tt = s_->template_template_param(name);
+    auto tmpl = tt ? std::nullopt : s_->type_template(name);
     bump();
     auto args = template_argument_list();
-    if (!tmpl || !args) return std::nullopt;
+    if (!args) return std::nullopt;
+    if (tt) return s_->template_param_id(*tt, *args, at);  // `TT<args>` ([temp.param])
+    if (!tmpl) return s_->builtin_template_id(name, *args, at);  // `__make_integer_seq<…>`
     return s_->class_template_id(*tmpl, *args, at);
   }
 
@@ -427,7 +431,7 @@ public:
             }
             goto done;
           }
-          if (kind(1) == Tk::less && s_->type_template(name_of(tok()))) {
+          if (kind(1) == Tk::less && s_->names_type_template(name_of(tok()))) {
             auto t = class_template_type();
             if (!t) {
               d.ok = false;
@@ -837,8 +841,10 @@ public:
     if (kind(j) != Tk::identifier || kind(j + 1) != Tk::less) return std::nullopt;
     if (in && !in->ns) return std::nullopt;  // member templates of classes come later (#88)
     NameId n = name_of(tok(j));
-    auto tmpl = in ? s_->namespace_type_template(*in->ns, n) : s_->type_template(n);
-    if (!tmpl) return std::nullopt;
+    const ast::TemplateParamSema* tt = in ? nullptr : s_->template_template_param(n);
+    auto tmpl = in || !tt ? (in ? s_->namespace_type_template(*in->ns, n) : s_->type_template(n)) : std::nullopt;
+    bool builtin = !in && !tt && !tmpl && s_->builtin_template(n);  // `__make_integer_seq<…>::`
+    if (!tmpl && !tt && !builtin) return std::nullopt;
     u32 saved = i_;
     bool saved_half = half_;
     std::size_t diags = s_->diag_count();
@@ -848,7 +854,8 @@ public:
     bool closed = scope ? !half_ && kind() == Tk::coloncolon : true;
     bool ended_half = half_;  // the list ended in the first half of a `>>`
     std::optional<QualType> t;
-    if (args && closed) t = s_->class_template_id(*tmpl, *args, 0);
+    if (args && closed)
+      t = tt ? s_->template_param_id(*tt, *args, 0) : builtin ? s_->builtin_template_id(n, *args, 0) : s_->class_template_id(*tmpl, *args, 0);
     i_ = saved;
     half_ = saved_half;
     if (!scope) qualified_half_ = ended_half;
@@ -901,7 +908,7 @@ public:
     if (k == Tk::r_paren || k == Tk::ellipsis || starts_decl_specifier(k)) return true;
     if ((k == Tk::identifier && kind(2) == Tk::coloncolon) || k == Tk::coloncolon)
       return qualified_type(1).has_value();  // `N::S`, `C::E`, `::S`
-    if (k == Tk::identifier && kind(2) == Tk::less && s_->type_template(name_of(tok(1)))) return true;
+    if (k == Tk::identifier && kind(2) == Tk::less && s_->names_type_template(name_of(tok(1)))) return true;
     if (transform_trait_ahead(1)) return true;
     return k == Tk::identifier && kind(2) != Tk::coloncolon && s_->class_name(name_of(tok(1))).has_value();
   }
@@ -1135,11 +1142,7 @@ public:
     bool type_param = (is(Tk::kw_class) || is(Tk::kw_typename)) &&
                       (kind(1) == Tk::comma || kind(1) == Tk::greater || kind(1) == Tk::equal || kind(1) == Tk::ellipsis ||
                        (kind(1) == Tk::identifier && kind(2) != Tk::coloncolon));
-    if (is(Tk::kw_template)) {
-      s_->diag(pos(), Diag::not_supported, Tk::kw_template);  // template template parameters
-      ok = false;
-      return std::nullopt;
-    }
+    if (is(Tk::kw_template)) return template_template_parameter(p, ok);
     // A type-constraint ([temp.param]/2): `C T`, `C<args> T`, `N::C T`: a type parameter whose
     // constraint is `C<T, args…>` ([temp.constr.decl]/3).
     u32 concept_name = 0;
@@ -1250,6 +1253,80 @@ public:
     return p;
   }
 
+  // A template template parameter ([temp.param]/1): `template<…> class TT = X`, `template<…>
+  // class... TTs`. Its own head is at the next depth, in scope only in that head.
+  std::optional<ast::TemplateParamSema> template_template_parameter(ast::TemplateParamSema p, bool& ok) {
+    std::vector<sema::ConstId> constraints = s_->head_constraints;
+    bool head = template_head(u16(p.depth + 1));
+    std::vector<ast::TemplateParamSema> inner = std::move(s_->template_scopes.back());
+    s_->template_scopes.pop_back();
+    if (!head) {
+      ok = false;
+      return std::nullopt;
+    }
+    // A constrained head needs [temp.arg.template]/3's constraint check (#271).
+    if (!s_->head_constraints.empty() || is(Tk::kw_requires)) {
+      s_->diag(pos(), Diag::not_supported, Tk::kw_requires);
+      ok = false;
+      return std::nullopt;
+    }
+    s_->head_constraints = std::move(constraints);
+    if (!accept(Tk::kw_class) && !accept(Tk::kw_typename)) {
+      expect(Tk::kw_class);
+      ok = false;
+      return std::nullopt;
+    }
+    p.kind = ast::TemplateArgKind::template_;
+    p.params = s_->world().ins.intern_seq(std::span<const ast::TemplateParamSema>(inner));
+    if (accept(Tk::ellipsis)) p.pack = 1;
+    p.type = s_->types().template_param(p.depth, p.index, p.pack != 0);
+    if (is(Tk::identifier)) {
+      p.name = name_of(tok());
+      bump();
+    }
+    if (!p.pack && accept(Tk::equal)) {
+      auto a = template_name_argument();
+      if (!a) {
+        ok = false;
+        return std::nullopt;
+      }
+      p.has_default = 1;
+      p.default_ = *a;
+    }
+    return p;
+  }
+  // Whether a template argument here is a template-name alone ([temp.arg.template]/1): one naming
+  // a class or alias template, or a template template parameter, followed by the argument's end.
+  bool template_name_ahead() {
+    u32 at = 0;
+    std::optional<ast::TemplateArg> a;
+    if (qualified_ahead()) {
+      auto sc = nested_name(0, at);
+      if (!sc || !sc->ns || kind(at) != Tk::identifier) return false;
+      a = s_->template_name_arg(sc->ns, name_of(tok(at)));
+    } else if (is(Tk::identifier)) {
+      a = s_->template_name_arg(std::nullopt, name_of(tok()));
+    }
+    Tk k = kind(at + 1);
+    return a && (k == Tk::comma || k == Tk::greater || k == Tk::greatergreater || k == Tk::ellipsis);
+  }
+  // A template argument that is a template-name, `X` or `N::X` ([temp.arg.template]/1): none, with
+  // nothing read, otherwise.
+  std::optional<ast::TemplateArg> template_name_argument() {
+    std::optional<ast::TemplateArg> a;
+    u32 at = 0;
+    if (qualified_ahead()) {
+      auto sc = nested_name(0, at);
+      if (!sc || !sc->ns || kind(at) != Tk::identifier) return std::nullopt;
+      a = s_->template_name_arg(sc->ns, name_of(tok(at)));
+    } else if (is(Tk::identifier)) {
+      a = s_->template_name_arg(std::nullopt, name_of(tok()));
+    }
+    if (!a) return std::nullopt;
+    for (u32 j = 0; j <= at; ++j) bump();
+    return a;
+  }
+
   // A type-constraint's concept here, before a parameter's name: `C T`, `C<…> T`, `N::C T`.
   // `name` is set to the offset of the concept's name.
   std::optional<ast::DeclSema> type_constraint_ahead(u32& name) {
@@ -1330,7 +1407,9 @@ public:
           u32 at;
           ~EndPattern() { s->end_pattern(expanded, at, at, false); }
         } end_pattern{s_, false, arg_at};
-        if (starts_type_id()) {
+        if (template_name_ahead()) {
+          args.push_back(*template_name_argument());
+        } else if (starts_type_id()) {
           auto t = type_id();
           if (!t) ok = false;
           else args.push_back({ast::TemplateArgKind::type, s_->types().canonical(*t), sema::ConstId::none});
@@ -1377,7 +1456,7 @@ public:
       auto q = qualified_type(0);
       return q && s_->types().kind(q->first) != sema::TypeKind::dep_name;
     }
-    if (is(Tk::identifier) && kind(1) == Tk::less && s_->type_template(name_of(tok()))) return true;
+    if (is(Tk::identifier) && kind(1) == Tk::less && s_->names_type_template(name_of(tok()))) return true;
     return is(Tk::identifier) && kind(1) != Tk::coloncolon && s_->class_name(name_of(tok())).has_value();
   }
 
@@ -2193,7 +2272,7 @@ public:
         }
       if (qualified_ahead()) return qualified_id(begin);
       // `X<args>(…)` and `X<args>{…}` for a class template X ([expr.type.conv]).
-      if (kind(1) == Tk::less && s_->type_template(n)) {
+      if (kind(1) == Tk::less && s_->names_type_template(n)) {
         auto t = class_template_type();
         if (!t) return {NodeId::none, begin, pos()};
         if (is(Tk::l_brace)) {

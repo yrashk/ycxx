@@ -1357,6 +1357,37 @@ Fable decided the representation (ast.md §6.6); the Opus session wrote the code
   (was 1). `<cmath>` and `<cstdlib>` gain errors in the SDK's `__GNUC__` inline functions (local
   unions, floating-point operations, `__builtin_fabs*`), which already had thousands.
 
+## Templates, ζ step 8: template template parameters and `__make_integer_seq` (#88, #208, 2026-11-19)
+
+Fable decided the representation (ast.md §6.7); the Opus session wrote the code.
+- **Template template parameters** ([temp.param]/1): `template<…> class TT`, with a default and as
+  a pack; their own head is a parameter list one level deeper (`TemplateParamSema.params`).
+- **Template arguments that are templates** ([temp.arg.template]): a class or alias template, a
+  template template parameter, `N::X`; `TemplateArg::templ`. An argument template fits a
+  parameter when the parameter's own arguments, made unique, fit its head with its defaults
+  (P0522), a trailing pack taking every remaining parameter of its kind: `template<class> class`
+  takes `template<class, class = int> class`, `template<class U, U...> class` takes
+  `template<class T, int...> class`, and `template<class...> class` takes `template<class, class>
+  class`. A class template's injected-class-name is the template for a template parameter and
+  the class for a type one ([temp.local]/1).
+- **`TT<args>`** is a dependent type (`TDepSpec`), completed by the defaults of TT's own head,
+  until TT is bound, then its template's specialization or alias (`Templates::apply_template`); TT
+  is deduced from a class template specialization and from a template argument
+  ([temp.deduct.type]/8), also in partial specializations and as a pack.
+- **`__make_integer_seq<Seq, T, N>`**, Clang's built-in (docs/EXTENSIONS.md), with
+  `__has_builtin(__make_integer_seq)` answering 1: libycxx's `make_integer_sequence` now reaches it.
+- **Mangling** as Clang's: a template argument by its name, `T_I…E`, `18__make_integer_seq`, and
+  Clang's `Tn`, `Tp`, `Tt…E` and `TL…_` prefixes on a function template's own arguments (for a
+  pack, by its first element or its emptiness), which also corrects `template<class T, T N>`
+  specializations (`_Z1fIiTnT_Li3EEiv`).
+- Tests: `tests/own/templates/t8-*` (15, 8 from the review; a PEER test links Clang's
+  definitions), 3 more draft examples pass. `<cstdio>`: 16 → 8 errors, all pointer-to-member types (#238).
+- Not yet: constrained template template parameters (#271); partial ordering of partial
+  specializations through template template parameters with different heads, the last step of
+  [temp.arg.template]/4, and `__make_integer_seq` as an argument (#272); the diagnostics of a
+  template-id before `::` whose arguments do not fit (#275); member templates and `Q::template M`
+  as an argument.
+
 ## sizeof and alignof of classes (#194, 2026-11-19)
 
 - One layout rule, two readers: `ast::record_layout` (src/ast/target.cppm) gives a class's member
@@ -1433,6 +1464,11 @@ request it serves.
 Places where ycxx's sources avoid or work around a C++26 feature because GCC 16 lacks it or
 miscompiles it (DECISIONS §3.2). Each is removed once ycxx compiles itself.
 
+- **No `std::vector<bool>` in the back end's unit records** (`pipeline::Entity::template_same_heads`,
+  `TemplateSpec::same_heads`, `std::vector<std::uint8_t>`).
+  - Cause: GCC 16.2 writes a module unit exporting a struct with a `std::vector<bool>` member that
+    its importers cannot read ("failed to read compiled module cluster: Bad file data").
+  - Fix: belongs in GCC. Use `std::vector<bool>` when ycxx compiles itself.
 - **Defaulted comparisons are members, not hidden friends** (`src/ast`, `src/ir`, `ycxx.hash`'s `Fp128`).
   - Cause: GCC 16.2 crashes (segfault) in an importer that compares two values of an exported
     struct whose defaulted `operator==` is a friend, with or without `-freflection` (found by

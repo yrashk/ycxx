@@ -97,6 +97,8 @@ public:
   virtual bool satisfaction_failed(ConstId /*c*/) { return false; }
   // A class template's static data member whose initializer is value-dependent; and a use of a
   // specialization's static data member, which instantiates its initializer ([temp.inst]/3).
+  // The declaration of template `t` here: its head and, for an alias template, its type.
+  virtual std::optional<ast::DeclSema> template_decl(EntityId /*t*/) { return std::nullopt; }
   virtual bool value_dependent_member(EntityId /*v*/) { return false; }
   // False when its initializer was in error, which was reported: what uses it says nothing more.
   virtual bool use_static_member(EntityId /*v*/) { return true; }
@@ -1304,6 +1306,79 @@ public:
         if (p.name == name) return &p;  // an unnamed parameter's name is never looked up
     return nullptr;
   }
+  // `TT<args>` of template template parameter `p` ([temp.names]): bound, the specialization of its
+  // argument; otherwise a dependent type.
+  std::optional<QualType> template_param_id(const ast::TemplateParamSema& p, std::span<const TemplateArg> args, u32 at) {
+    // The arguments fit the parameter's own head, whose defaults complete them, whatever template
+    // it is bound to ([temp.arg]/4, [temp.arg.template]); a pack parameter's arguments grouped, as
+    // Itanium mangles them (`T_IclE`, `T_IcJEE`).
+    std::vector<ast::TemplateParamSema> head = ins().seqs.elements(p.params);
+    Templates t = templates();
+    std::vector<std::optional<TemplateArg>> out(head.size());
+    std::optional<std::vector<TemplateArg>> full;
+    if (t.explicit_into(head, args, out)) full = t.complete(ast::DeclSema{}, head, out);
+    if (!full) {
+      diag(at, Diag::template_args_mismatch, p.name);
+      return std::nullopt;
+    }
+    if (auto a = bound_arg(p); a && a->kind == ast::TemplateArgKind::template_) {
+      if (a->templ != EntityId::none) {
+        auto d = q_->template_decl(a->templ);
+        if (!d) return std::nullopt;
+        return class_template_id(*d, t.flatten(*full), at);
+      }
+      TypeRec r = types().rec(a->type);
+      return types().dep_spec(r.depth, r.index, r.pack, *full);
+    }
+    return types().dep_spec(p.depth, p.index, p.pack != 0, *full);
+  }
+  // The template template parameter `name` names here, if it does.
+  const ast::TemplateParamSema* template_template_param(NameId name) const {
+    const ast::TemplateParamSema* p = template_param(name);
+    return p && p->kind == ast::TemplateArgKind::template_ ? p : nullptr;
+  }
+  // Whether `name` names a template whose template-id is a type: a class or alias template, or a
+  // template template parameter.
+  bool names_type_template(NameId name) {
+    return template_template_param(name) || type_template(name) || builtin_template(name);
+  }
+  // `__make_integer_seq` (docs/EXTENSIONS.md), unless something declared hides it.
+  bool builtin_template(NameId name) {
+    if (!lex::builtin_template(ins().names.spelling(name))) return false;
+    return !template_param(name) && q_->visible_decls(name, directives()).empty();
+  }
+  // `__make_integer_seq<Seq, T, N>`: `Seq<T, 0, 1, …, N-1>` for a template Seq, an integral type T
+  // other than bool and a value N of type T that is not negative; while an argument is dependent, a
+  // dependent type.
+  std::optional<QualType> builtin_template_id(NameId name, std::span<const TemplateArg> args, u32 at) {
+    bool ok = args.size() == 3 && args[0].kind == ast::TemplateArgKind::template_ &&
+              args[1].kind == ast::TemplateArgKind::type && args[2].kind == ast::TemplateArgKind::value;
+    auto t = ok ? templates().builtin_template(ast::BuiltinTemplate::make_integer_seq, args) : std::nullopt;
+    if (!t) diag(at, Diag::template_args_mismatch, name);
+    return t;
+  }
+
+  // A template-name as a template argument ([temp.arg.template]/1): a class or alias template, in
+  // namespace `ns` or found by unqualified lookup, or a template template parameter (its argument
+  // when bound).
+  std::optional<TemplateArg> template_name_arg(std::optional<EntityId> ns, NameId name) {
+    if (!ns)
+      if (const ast::TemplateParamSema* p = template_param(name)) {
+        if (p->kind != ast::TemplateArgKind::template_) return std::nullopt;
+        if (auto a = bound_arg(*p)) return a;
+        return TemplateArg{ast::TemplateArgKind::template_, p->type, ConstId::none};
+      }
+    // In a class template, its injected-class-name is the template as a template argument and the
+    // class (the current instantiation, or the specialization) as a type one ([temp.local]/1).
+    if (!ns && current_class != EntityId::none) {
+      const EntityRec& c = w_->entities.rec(current_class);
+      if (c.templ != EntityId::none && c.name == name && !local_named(name))
+        return TemplateArg{ast::TemplateArgKind::template_, types().class_type(current_class), ConstId::none, {}, c.templ};
+    }
+    auto t = ns ? namespace_type_template(*ns, name) : type_template(name);
+    if (!t) return std::nullopt;
+    return TemplateArg{ast::TemplateArgKind::template_, QualType{}, ConstId::none, {}, t->entity};
+  }
   // The argument a template parameter named here stands for: its argument, or for a pack the
   // element of the innermost expansion naming it ([temp.variadic]/5). A pack outside every
   // expansion is unexpanded: none, as an unbound parameter is, and noted for the expansion that
@@ -1491,6 +1566,7 @@ public:
   Templates templates() {
     Templates t(*w_, classes());
     t.member_type = [this](EntityId c, NameId n) { return member_type(c, n); };
+    t.template_decl = [this](EntityId tmpl) { return q_->template_decl(tmpl); };
     return t;
   }
   bool dependent(const Ex& e) {

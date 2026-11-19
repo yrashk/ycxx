@@ -23,13 +23,17 @@ enum class Access : u8 { none, public_, protected_, private_ };
 // A template argument (§5.6): a type, or a value converted to its parameter's type
 // ([temp.arg.nontype]); `type` is canonical, and a value's is the value's type. A pack parameter's
 // argument is a `pack` of its elements, types or values, never packs; while dependent an element
-// may be an expansion (`TPackExpansion`, `VDepExpansion`) ([temp.variadic]).
-enum class TemplateArgKind : u8 { type, value, pack };
+// may be an expansion (`TPackExpansion`, `VDepExpansion`) ([temp.variadic]). A `template_`
+// argument (*amended by #88 step 8, Fable's decision*) is a class or alias template, `templ`;
+// while dependent it is a template template parameter's `TTemplateParam` or a `TDepName` in
+// `type` ([temp.arg.template]).
+enum class TemplateArgKind : u8 { type, value, pack, template_ };
 struct TemplateArg {
   TemplateArgKind kind;
   QualType type;
   ConstId value;              // none for a type
   SeqId<TemplateArg> elems{};  // a pack's elements; the empty list (index 0) otherwise
+  EntityId templ = EntityId::none;  // a template_ argument's template; none while dependent
   constexpr bool operator==(const TemplateArg&) const = default;
 };
 
@@ -43,8 +47,12 @@ struct TemplateParamSema {
   u8 has_default;
   u16 depth;
   u16 index;
-  QualType type;     // a type parameter's own `TTemplateParam`; a non-type parameter's type
+  QualType type;     // a type or template template parameter's own `TTemplateParam`; a non-type
+                     // parameter's type
   TemplateArg default_;
+  // A template template parameter's own template-head ([temp.param]/1), its parameters at
+  // `depth + 1`; empty otherwise.
+  SeqId<TemplateParamSema> params{};
   constexpr bool operator==(const TemplateParamSema&) const = default;
 };
 
