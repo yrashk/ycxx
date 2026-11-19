@@ -119,6 +119,10 @@ struct Config {
   // template instantiations ([temp.inst]/16, [implimits]).
   std::uint32_t template_depth = default_template_depth;
   static constexpr std::uint32_t default_template_depth = 900;
+  // An ABI option the unit's front end reads: `-fclass-call-abi=itanium|apple`, which classes pass
+  // in registers (DECISIONS §1.6). None: the target's default.
+  std::optional<ast::CallTriviality> call_triviality;
+  ast::CallTriviality calls() const { return call_triviality.value_or(target->call_triviality); }
 
   Fp128 fingerprint() const {
     Hasher h;
@@ -132,6 +136,7 @@ struct Config {
       if (value) h.bytes(*value).uint(u8(0));
     }
     if (template_depth != default_template_depth) h.uint(u8(2)).uint(template_depth);
+    if (call_triviality) h.uint(u8(3)).uint(std::to_underlying(*call_triviality));
     return h.finish();
   }
 };

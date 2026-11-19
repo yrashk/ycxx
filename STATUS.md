@@ -669,8 +669,18 @@ in `lsp` frames (`LspOut`), the last of which carries LSP's exit status (1 after
   the exit status, and `ctl shutdown` with a session open.
 - Not yet: `compile_commands.json` (#167); stopping a diagnosis on a newer edit,
   `$/cancelRequest`, debouncing and interactive priority (#168); `buffers_in`, the disk-view
-  assertion and one view per session (#169); go-to-definition and diagnostics inside headers
-  (#170, after #34); open documents as eviction roots (#17).
+  assertion and one view per session (#169); go-to-definition from a declaration part (a
+  parameter's type, a base) and of locals (#242); open documents as eviction roots (#17).
+- Go-to-definition and headers' diagnostics (#170): `textDocument/definition` asks the daemon
+  (`lsp::Define`), which checks the document's unit in the editor view and runs
+  `pipeline::DefinitionAt{unit, file, offset}`: the offset's token in the region (its site, a
+  macro's at its name), the innermost item, the node `ast::Red::find` reaches in that item's
+  function body, and the entity a `DeclRef`, `Member` or `Call` there names; then that entity's
+  first declaration (`FrontResult::declared`, kept with errors too) mapped back to a file and an
+  offset. Diagnostics located in a file the editor has not opened are published under it and
+  cleared when no document reports them; a header's message is rendered against its open buffer
+  in the editor view. `daemon.lsp`'s `definitions` covers a header's function, unsaved text, a
+  header's warning shown, moved by an unsaved edit, and cleared (mutation-checked).
 
 ## The L1 interpreter (#25, 2026-11-18)
 
@@ -989,16 +999,19 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   most 16 bytes passes and returns in one or two 8-byte registers; a larger or non-trivial one by
   address, an indirect result in x8 (`l2::Function::indirect_result`, the call's fourth
   immediate). A class needing more registers than are left goes whole on the stack and leaves the
-  rest unused (C.11). An empty class passes nothing, as in Clang. A user-provided move
-  constructor makes a class non-trivial for calls, as in Clang 23 and GCC; Apple Clang 21
-  differs (#230).
-- **Mixed-object tests:** `PEER:` in a run test names a file Clang compiles and links with it
-  (docs/TESTING.md). `tests/own/abi` checks 3- to 24-byte classes, a non-trivial one, member
-  functions returning classes and exhausted registers, calling both ways.
+  rest unused (C.11). An empty class passes nothing, as in Clang. Which classes are trivial for
+  calls follows upstream Clang and GCC by default (Itanium, `ClassRec::move_usable`,
+  `move_nontrivial`). `-fclass-call-abi=apple` selects Apple Clang's rule on arm64 Darwin
+  (`ast::Target::call_triviality`, `pp::Config::call_triviality`, DECISIONS §1.6).
+- **Mixed-object tests:** `PEER:` in a run test names a file the oracle Clang compiles and links
+  with it, or Apple Clang with `PEER-WITH: apple-clang` (docs/TESTING.md). `tests/own/abi`
+  checks 3- to 24-byte classes, member functions returning classes, exhausted registers, empty
+  classes, and each kind of class for calls (trivially copyable, non-trivial copy or destructor,
+  move-only, deleted copy, a move-only member) under both settings, calling both ways.
 - Not yet: braced arguments to overload sets, templates and member calls (#231), class arguments
   through an ellipsis and calls through pointers returning classes (#196), classes with
   floating members (#201), classes in constant evaluation (#25).
-- Tests: `tests/own/abi` (3), `tests/own/classes/s5-byvalue-lifetimes`, `-temporaries`;
+- Tests: `tests/own/abi` (5), `tests/own/classes/s5-byvalue-lifetimes`, `-temporaries`;
   s1-byvalue-params and -return pass.
 
 ## Templates, ζ step 1: function templates (#88, 2026-11-18)
