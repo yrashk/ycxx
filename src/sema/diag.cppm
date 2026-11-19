@@ -119,6 +119,9 @@ enum class Diag : std::uint32_t {
   // [class], [class.mem], [expr.ref], [dcl.init.aggr], [dcl.init.list]
   incomplete_type [[=message{Severity::error, "'{0:t}' is an incomplete type"}]],
   no_member [[=message{Severity::error, "no member named '{0:n}' in '{1:t}'"}]],
+  // [class.access]
+  private_member [[=message{Severity::error, "'{0:n}' is a private member of '{1:t}'"}]],
+  protected_member [[=message{Severity::error, "'{0:n}' is a protected member of '{1:t}'"}]],
   member_of_non_class [[=message{Severity::error, "member reference base type '{0:t}' is not a class"}]],
   arrow_of_non_pointer [[=message{Severity::error, "'->' needs a pointer to a class; '{0:t}' is not one"}]],
   redeclared_member [[=message{Severity::error, "redeclaration of member '{0:n}'"}]],

@@ -753,7 +753,7 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
 - Tests: `tests/own/classes/s1-*` (spec-only, plus seven from the review). 21 of 27 pass; the others wait for classes by value
   (#116), local classes (#117), non-constant default member initializers (#118) and records in
   the interpreter (#25).
-- Not yet: unions, bit-fields, constructors, bases, access checking (#119).
+- Not yet: unions, bit-fields, constructors, bases (access checking came with #119).
 
 ## Classes, δ step 2: member functions and `this` (#86, 2026-11-18)
 
@@ -1236,6 +1236,32 @@ Fable decided the representation (ast.md §6.6); the Opus session wrote the code
   (#234); re-verification of satisfaction at END (#235); Itanium constraint mangling (#236);
   recorded discarded extents for `if constexpr` (#237); value-dependent mapping arguments (#209);
   `static_assert(false)` in a template that is never instantiated (#241).
+
+## Access control and friends (#119, 2026-11-18)
+
+- **Records:** `ClassRec::access` holds each member's access by entity: data members, member
+  functions, constructors, static data members, and nested enumerations and type aliases
+  (`NestedType::entity`). The default is private for `class` and public for `struct`
+  ([class.access.spec]). `ClassRec::friends` holds the friends' entities.
+- **Friend declarations** (`friend_declaration` in parse.cppm, `decl_flag::friend_`) are not
+  members, and declare no name for ordinary lookup ([class.friend]/7). Three kinds:
+  - `friend class X;`: the class lookup finds, else the namespace-scope class the declaration
+    introduces;
+  - `friend R f(…);`: the function of the enclosing namespace with that name and type, the same
+    entity its namespace-scope declarations name;
+  - `friend R C::g(…);`: a member function of another complete class.
+- **Checks** (`Sema::accessible`, `check_access`): a private or protected member may be named in
+  a member function or default member initializer of its class, in the class's scope (the
+  initializer of a static data member defined outside it), or in a friend function or friend
+  class (`Sema::current_function`). It is checked when named through `.` and `->`, by qualified
+  and unqualified names, as a static member, enumerator or nested type, for the member function
+  overload resolution chooses ([class.access]/4), and for the constructor an initialization
+  chooses. Protected is checked as private until base classes exist.
+- Not yet (#259): friend function definitions and argument-dependent lookup of friends, friends
+  in templates, destructor access, the wording for private member operators, elaborated types
+  in member parameters.
+- Tests: `tests/own/classes/s6-access-*` (three reject tests, one run test); draft examples
+  class.friend-1 and class.name-4 pass.
 
 ## Bootstrap workarounds
 

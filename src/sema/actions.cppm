@@ -163,6 +163,7 @@ inline constexpr u16 implicit = 2048;  // an implicitly declared special member 
 inline constexpr u16 template_ = 4096;  // a template ([temp.pre]); its head is `template_params`
 inline constexpr u16 specialization = 8192;  // an explicit specialization ([temp.expl.spec])
 inline constexpr u16 partial = 16384;  // a partial specialization ([temp.spec.partial]), with `template_`
+inline constexpr u16 friend_ = 32768;  // a friend declaration ([class.friend]): `entity` is the friend
 }
 
 // What a cell demands of the program besides its value (query-engine.md §B1.4): a function
@@ -264,7 +265,7 @@ public:
     // A type nested in the class whose scope this is ([basic.scope.class]).
     if (current_class != EntityId::none) {
       if (const ClassRec* cr = class_rec(current_class); cr && cr->defined) {
-        for (const auto& [n, t] : cr->types)
+        for (const auto& [n, t, te] : cr->types)
           if (n == name) return t;
       } else if (auto m = q_->earlier_member(name); m && (m->kind == ast::DeclKind::enum_ || m->kind == ast::DeclKind::type_alias)) {
         return m->type;
@@ -658,7 +659,7 @@ public:
   // instantiated, among the members declared so far ([basic.scope.class]).
   std::optional<QualType> member_type(EntityId c, NameId n) {
     if (const ClassRec* cr = class_rec(c)) {
-      for (const auto& [name, t] : cr->types)
+      for (const auto& [name, t, te] : cr->types)
         if (name == n) return t;
       return std::nullopt;
     }
@@ -696,6 +697,16 @@ public:
         return std::ranges::any_of(c->members, [&](const MemberDeclRec& m) { return m.name == n; });
     return false;
   }
+  // Whether the type `S::n`, named at `at`, is accessible here: a nested type of a class
+  // ([class.access]/4); diagnosed if not.
+  bool type_member_access(const Scope& s, NameId n, u32 at) {
+    if (!s.type || !types().is_class(*s.type) || types().is_dependent(*s.type)) return true;
+    EntityId c = types().class_of(*s.type);
+    if (const ClassRec* cr = class_rec(c))
+      for (const NestedType& t : cr->types)
+        if (t.name == n) return check_access(c, t.entity, n, at);
+    return true;
+  }
   // `S::n` naming a type.
   std::optional<QualType> scope_type(const Scope& s, NameId n) {
     auto m = scope_member(s, n);
@@ -716,7 +727,7 @@ public:
         return {NodeId::none, begin, end};
       }
       if (!require_complete(*s.type, begin)) return {NodeId::none, begin, end};
-      if (auto r = class_member(types().class_of(*s.type), n, begin, end)) return *r;
+      if (auto r = class_member(types().class_of(*s.type), n, begin, end, name_at)) return *r;
       diag(name_at, Diag::no_member, n, *s.type);
       return {NodeId::none, begin, end};
     }
@@ -756,7 +767,7 @@ public:
     auto t = class_name(cls, true);
     if (!t || !types().is_class(*t)) return std::nullopt;
     if (const ClassRec* cr = class_rec(types().class_of(*t)))
-      for (const auto& [n, nt] : cr->types)
+      for (const auto& [n, nt, te] : cr->types)
         if (n == name) return nt;
     return std::nullopt;
   }
@@ -850,7 +861,8 @@ public:
       diag(name_at, Diag::no_member, name, Types::unqualified(ct));
       return fail;
     }
-    if (found->member && found->member->is_function) return bound_member(c, name, object, arrow, begin, end);
+    if (found->member && found->member->is_function) return bound_member(c, name, object, arrow, begin, end, name_at);
+    if (!check_access(c, found->member ? found->member->entity : found->field->entity, name, name_at)) return fail;
     if (found->member) {
       // A static data member: the object expression is evaluated, then discarded ([expr.ref]).
       const MemberDeclRec& m = *found->member;
@@ -1534,6 +1546,36 @@ public:
   // outside a non-static member function ([expr.prim.this]).
   EntityId current_class = EntityId::none;
   std::optional<QualType> this_type;
+  // The function whose body is being analysed, none outside one: a friend of a class may name its
+  // private members ([class.friend]/2).
+  EntityId current_function = EntityId::none;
+
+  // [class.access]/1–2: whether a member of class `c` with access `a` can be named here. A public
+  // one anywhere; a private or protected one (no base classes yet) in a member of `c` or of a
+  // class nested in it ([class.access.nest]), or in a friend of `c`: a function, or a class whose
+  // members are then all friends ([class.friend]/2).
+  bool accessible(EntityId c, ast::Access a) {
+    if (a == ast::Access::public_ || a == ast::Access::none) return true;
+    const ClassRec* cr = class_rec(c);
+    if (!cr) return true;
+    auto befriended = [&](EntityId e) { return std::ranges::find(cr->friends, e) != cr->friends.end(); };
+    if (current_function != EntityId::none && befriended(current_function)) return true;
+    for (EntityId k = current_class; k != EntityId::none; k = w_->entities.rec(k).scope) {
+      const EntityRec& r = w_->entities.rec(k);
+      if (r.kind != EntityKind::class_ && r.kind != EntityKind::class_template) break;
+      if (k == c || befriended(k)) return true;
+    }
+    return false;
+  }
+  // Whether member `m` of class `c`, named `name` at `at`, is accessible here; diagnosed if not.
+  bool check_access(EntityId c, EntityId m, NameId name, u32 at) {
+    const ClassRec* cr = class_rec(c);
+    if (!cr) return true;
+    ast::Access a = cr->access_of(m);
+    if (accessible(c, a)) return true;
+    diag(at, a == ast::Access::protected_ ? Diag::protected_member : Diag::private_member, name, types().class_type(c));
+    return false;
+  }
 
   Ex this_expr(u32 begin, u32 end) {
     if (!this_type) {
@@ -1579,30 +1621,35 @@ public:
   // A member function named without a call yet: `a.f`, `p->f`, `f` or `S::f`, bound to its object
   // (none when there is none to bind, as in a static member function). Only a call may follow
   // ([expr.ref]/6.3.2).
-  Ex bound_member(EntityId c, NameId name, std::optional<Ex> object, bool arrow, u32 begin, u32 end) {
+  Ex bound_member(EntityId c, NameId name, std::optional<Ex> object, bool arrow, u32 begin, u32 end, u32 name_at) {
     auto cands = member_functions(c, name);
     ExprInfo info{builtin(Builtin::bound_member), ValueCategory::prvalue, 0};
     Ex r = node(ast::Member{info, cands.front()->entity, ~u32{0}, arrow ? 1u : 0u, 0, object ? at(*object, begin) : Child{}},
                 begin, end, info);
-    bound_[std::to_underlying(r.id)] = {object, std::move(cands)};
+    bound_[std::to_underlying(r.id)] = {object, std::move(cands), c, name_at};
     return r;
   }
   bool is_bound_member(const Ex& e) { return e.ok() && types().is(e.type(), Builtin::bound_member); }
 
   // The implicit member access `name` inside a member function of `c` ([class.mfct.non.static]),
   // or a qualified name `C::name`: none if `c` has no such member.
-  std::optional<Ex> class_member(EntityId c, NameId name, u32 begin, u32 end) {
+  std::optional<Ex> class_member(EntityId c, NameId name, u32 begin, u32 end, u32 name_at) {
     auto f = find_member(c, name);
     if (!f) {
       // The enumerators of an unscoped enumeration nested in the class are its members.
       if (const ClassRec* cr = class_rec(c))
-        for (const auto& [n, t] : cr->types)
+        for (const auto& [n, t, te] : cr->types)
           if (is_unscoped_enum(t))
-            if (auto r = find_enumerator(types().enum_of(t), name, begin, end)) return r;
+            if (auto r = find_enumerator(types().enum_of(t), name, begin, end)) {
+              if (!check_access(c, te, name, name_at)) return Ex{NodeId::none, begin, end};
+              return r;
+            }
       return std::nullopt;
     }
     Ex fail{NodeId::none, begin, end};
     bool has_this = this_type && current_class == c;
+    if (!(f->member && f->member->is_function) && !check_access(c, f->field ? f->field->entity : f->member->entity, name, name_at))
+      return fail;
     if (f->field) {
       if (!has_this) {
         diag(begin, Diag::member_without_object, name);
@@ -1618,12 +1665,13 @@ public:
     // A static member, data or function, is named like a namespace-scope entity
     // ([expr.prim.id.qual]): `S::f` can have its address taken or be called.
     if (!m.is_function || (m.is_static && member_functions(c, name).size() == 1)) {
+      if (m.is_function && !check_access(c, m.entity, name, name_at)) return fail;
       ExprInfo info{m.type, ValueCategory::lvalue, 0};
       return node(ast::DeclRef{info, m.entity}, begin, end, info);
     }
     std::optional<Ex> object;
     if (has_this) object = this_expr(begin, begin);
-    return bound_member(c, name, object, true, begin, end);
+    return bound_member(c, name, object, true, begin, end, name_at);
   }
 
   // An enumerator ([dcl.enum]): a prvalue of its enumeration with its value.
@@ -1654,7 +1702,7 @@ public:
       return fail;
     }
     if (!require_complete(*t, begin)) return fail;
-    if (auto r = class_member(types().class_of(*t), name, begin, end)) return *r;
+    if (auto r = class_member(types().class_of(*t), name, begin, end, name_at)) return *r;
     diag(name_at, Diag::no_member, name, *t);
     return fail;
   }
@@ -1688,6 +1736,7 @@ public:
     auto chosen = resolve(cands, args, begin, bound.cands.front()->name, object_cv);
     if (!chosen) return fail;
     const MemberDeclRec* d = bound.cands[*chosen];
+    if (!check_access(bound.cls, d->entity, d->name, bound.name_at)) return fail;
     TypeRec fr = types().rec(d->type);
     auto children = call_args(fr, args, begin, paren_at);
     if (!children) return fail;
@@ -1964,6 +2013,7 @@ public:
     auto chosen = resolve(cands, args, begin, no_name(), std::nullopt, ut);
     if (!chosen) return fail;
     const Candidate& k = cands[*chosen];
+    if (k.entity != EntityId::none && !check_access(c, k.entity, w_->entities.rec(c).name, begin)) return fail;
     TypeRec fr = types().rec(k.type);
     if (k.entity == EntityId::none) {
       // Trivial: a copy of the argument's object, or nothing to construct.
@@ -2159,7 +2209,7 @@ public:
     }
     // The class's members, in a member function's body ([basic.scope.class]).
     if (current_class != EntityId::none) {
-      if (auto r = class_member(current_class, name, begin, end)) return *r;
+      if (auto r = class_member(current_class, name, begin, end, begin)) return *r;
       if (!class_rec(current_class))
         if (auto m = q_->earlier_member(name)) {
           if (m->kind != ast::DeclKind::variable) {
@@ -3325,6 +3375,8 @@ private:
   struct Bound {
     std::optional<Ex> object;
     std::vector<const MemberDeclRec*> cands;
+    EntityId cls = EntityId::none;  // whose members they are, for access ([class.access]/4)
+    u32 name_at = 0;
   };
   std::map<u32, Bound> bound_;                        // by draft bound-member Member
   std::set<u32> deleted_;                             // deleted functions named so far

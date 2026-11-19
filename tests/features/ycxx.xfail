@@ -106,7 +106,6 @@ draft/class/class.free-1.reject.cpp errors elsewhere: preprocessing directives a
 draft/class/class.free-2.accept.cpp preprocessing directives are not supported yet
 draft/class/class.free-3.accept.cpp preprocessing directives are not supported yet
 draft/class/class.free-4.accept.cpp preprocessing directives are not supported yet
-draft/class/class.friend-1.accept.cpp 'class' not supported yet
 draft/class/class.friend-2.accept.cpp 'class' not supported yet
 draft/class/class.friend-3.reject.cpp errors elsewhere: 'class' not supported yet
 draft/class/class.friend-4.reject.cpp errors elsewhere: 'class' not supported yet
@@ -126,7 +125,6 @@ draft/class/class.mfct-2.accept.cpp 'typedef' not supported yet
 draft/class/class.mi-1.accept.cpp 'class' not supported yet
 draft/class/class.mi-2.reject.cpp errors elsewhere: 'class' not supported yet
 draft/class/class.name-3.accept.cpp 'struct' not supported yet
-draft/class/class.name-4.accept.cpp 'class' not supported yet
 draft/class/class.name-5.accept.cpp 'struct' not supported yet
 draft/class/class.nest-1.reject.cpp errors elsewhere: 'struct' not supported yet
 draft/class/class.nest-2.accept.cpp 'struct' not supported yet

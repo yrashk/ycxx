@@ -616,7 +616,8 @@ public:
     std::vector<ast::MemberRec> members;
     std::vector<sema::FieldRec> fields;
     std::vector<sema::MemberDeclRec> statics;
-    std::vector<std::pair<NameId, QualType>> nested;
+    std::vector<sema::NestedType> nested;
+    std::vector<EntityId> friends;
   };
   ClassContent class_content(u32 item, const std::function<const ast::ItemSema&(u32)>& sema_of);
   // `instantiate_class(spec)` ([temp.inst]/2, §B6.2): the class record of a class template
@@ -2265,6 +2266,7 @@ private:
       if (!ps_.expect(Tk::semi)) bad();
       return;
     }
+    if (ps_.is(Tk::kw_friend)) return friend_declaration();
     bool dtor = ps_.is(Tk::tilde) && ps_.kind(1) == Tk::identifier && ps_.name_of(ps_.tok(1)) == cname;
     if (dtor || (ps_.is(Tk::identifier) && ps_.kind(1) == Tk::l_paren && ps_.name_of(ps_.tok()) == cname))
       return special_member(c, !dtor);
@@ -2375,6 +2377,79 @@ private:
       decls_.push_back(sem);
     } while (ps_.accept(Tk::comma));
     if (!ps_.expect(Tk::semi)) bad();
+  }
+
+  // A friend declaration in class `c` ([class.friend]): `friend class X;` or `friend X;`, a class
+  // (declared in the enclosing namespace when lookup finds none, [dcl.type.elab]/4), or a function
+  // declaration, of a namespace-scope function or of another class's member. The friend is not a
+  // member, and the declaration makes no name visible to ordinary lookup ([class.friend]/7).
+  void friend_declaration() {
+    u32 friend_at = ps_.pos();
+    ps_.bump();
+    if (it_->kind == ItemKind::function) {
+      s_.diag(friend_at, Diag::not_supported, Tk::kw_friend);  // a friend function's definition (#259)
+      return bad();
+    }
+    if (ps_.is(Tk::kw_template) || !p_->enclosing_heads(k_).empty() || inst_) {
+      s_.diag(friend_at, Diag::not_supported, Tk::kw_friend);  // in or of a template (#259)
+      return bad();
+    }
+    sema::Types& types = s_.types();
+    ast::DeclSema sem = class_decl(EntityId::none, false);
+    sem.flags = sema::decl_flag::friend_;
+    // `friend class X;`: the class lookup finds, else one the declaration introduces in the
+    // innermost enclosing namespace ([dcl.type.elab]/4, [namespace.memdef]/3).
+    if ((ps_.is(Tk::kw_class) || ps_.is(Tk::kw_struct)) && ps_.kind(1) == Tk::identifier && ps_.kind(2) == Tk::semi) {
+      NameId n = ps_.name_of(ps_.tok(1));
+      auto t = s_.class_name(n, false);
+      sem.entity = t && types.is_class(*t) ? types.class_of(*t) : class_entity(n);
+      decls_.push_back(sem);
+      ps_.bump();
+      ps_.bump();
+      ps_.bump();
+      return;
+    }
+    DeclSpec spec = ps_.decl_specifiers();
+    if (!spec.ok) return bad();
+    if (ps_.accept(Tk::semi)) {
+      if (!types.is_class(spec.type)) {
+        s_.diag(spec.begin, Diag::not_supported, Tk::kw_friend);  // a friend that is not a class
+        return bad();
+      }
+      sem.entity = types.class_of(spec.type);
+      decls_.push_back(sem);
+      return;
+    }
+    parse::Declarator d = ps_.declarator(spec.type, false);
+    if (!d.ok || !d.named) return bad();
+    if (!types.is_function(d.type) || !ps_.is(Tk::semi)) {
+      s_.diag(d.name_at, Diag::not_supported, Tk::kw_friend);  // only function declarations
+      return bad();
+    }
+    sem.kind = ast::DeclKind::function;
+    sem.type = d.type;
+    if (d.qualified) {
+      // A member function of another, complete class: its declaration with this type.
+      if (!d.scope.type || !types.is_class(*d.scope.type) || !s_.require_complete(*d.scope.type, d.qualifier_at)) return bad();
+      EntityId other = types.class_of(*d.scope.type);
+      const sema::ClassRec* r = p_->classes_.find(other);
+      const sema::MemberDeclRec* m = nullptr;
+      if (r)
+        for (const sema::MemberDeclRec& x : r->members)
+          if (x.name == d.name && x.is_function && types.canonical(x.type) == types.canonical(d.type)) m = &x;
+      if (!m) {
+        s_.diag(d.name_at, Diag::no_member_declared, d.name, *d.scope.type);
+        return bad();
+      }
+      sem.entity = m->entity;
+    } else {
+      // The function of the innermost enclosing namespace with this name and type
+      // ([namespace.memdef]/3), whose namespace-scope declarations name the same entity.
+      sem.entity = s_.world().entities.entity(
+          {sema::EntityKind::function, d.name, d.type, LangLinkage::cxx, ast::Linkage::external, {}, ns_entity()});
+    }
+    decls_.push_back(sem);
+    ps_.expect(Tk::semi);
   }
 
   // A typedef-name or alias-declaration that is a member of class `c` ([class.mem],
@@ -2594,7 +2669,7 @@ private:
     EntityId cls = s_.types().class_of(*t);
     QualType own = s_.templates().resolve_dep_names(sem.type, [&](QualType q, NameId n) -> std::optional<QualType> {
       if (!s_.types().is_class(q) || s_.types().class_of(q) != cls) return std::nullopt;
-      for (const auto& [name, mt] : cr->types)
+      for (const auto& [name, mt, me] : cr->types)
         if (name == n) return mt;
       return std::nullopt;
     });
@@ -3386,7 +3461,7 @@ Program::ClassContent Program::class_content(u32 item, const std::function<const
   const items::Item& it = items_->items[item];
   std::vector<sema::FieldRec>& fields = out.fields;
   std::vector<sema::MemberDeclRec>& statics = out.statics;
-  std::vector<std::pair<NameId, QualType>>& nested = out.nested;
+  std::vector<sema::NestedType>& nested = out.nested;
   // [class.access.spec]: members of a class defined with `class` are private by default.
   ast::Access access = r_->tokens[it.begin].kind == lex::Tk::kw_class ? ast::Access::private_ : ast::Access::public_;
   for (u32 m : it.members) {
@@ -3408,12 +3483,17 @@ Program::ClassContent Program::class_content(u32 item, const std::function<const
     for (u32 i = 0; i < w_->ins.seqs.size(ms.decls); ++i) {
       ast::DeclSema d = w_->ins.seqs.at(ms.decls, i);
       if (d.entity == EntityId::none) continue;
+      // A friend declaration names a function or class that is not a member ([class.friend]/1).
+      if (d.flags & sema::decl_flag::friend_) {
+        if (std::ranges::find(out.friends, d.entity) == out.friends.end()) out.friends.push_back(d.entity);
+        continue;
+      }
       members.push_back({{id(m), ast::make_decl_ord(ast::DeclClass::syntactic, i)}, d.entity, access});
       if (d.kind == ast::DeclKind::data_member)
         fields.push_back({w_->entities.rec(d.entity).name, d.type, d.entity, inits.contains(i) ? inits[i] : ConstId::none,
                         dmis_.contains(std::to_underlying(d.entity))});
       else if (d.kind == ast::DeclKind::enum_ || d.kind == ast::DeclKind::type_alias)
-        nested.push_back({w_->entities.rec(d.entity).name, d.type});
+        nested.push_back({w_->entities.rec(d.entity).name, d.type, d.entity});
       else if (d.kind == ast::DeclKind::function || d.kind == ast::DeclKind::variable) {
         member_decls_[std::to_underlying(d.entity)] = {id(m), ast::make_decl_ord(ast::DeclClass::syntactic, i)};
         statics.push_back({w_->entities.rec(d.entity).name, d.entity, d.type, d.kind == ast::DeclKind::function,
@@ -3438,7 +3518,7 @@ const Result<ast::ClassDef>& Program::class_def(u32 item) {
   std::vector<ast::MemberRec>& members = c.members;
   std::vector<sema::FieldRec>& fields = c.fields;
   std::vector<sema::MemberDeclRec>& statics = c.statics;
-  std::vector<std::pair<NameId, QualType>>& nested = c.nested;
+  std::vector<sema::NestedType>& nested = c.nested;
   if (cls && *cls != EntityId::none) {
     // Every unit that defines the class builds its own record (#115), and synthesizes the special
     // members its own object needs.
@@ -3447,6 +3527,8 @@ const Result<ast::ClassDef>& Program::class_def(u32 item) {
     rec.fields = std::move(fields);
     rec.members = std::move(statics);
     rec.types = std::move(nested);
+    for (const ast::MemberRec& m : members) rec.access.push_back({m.entity, m.access});
+    rec.friends = std::move(c.friends);
     special_members(item, *cls, rec);
     rec.defined = true;
     classes_.publish(*cls, std::move(rec));
@@ -3600,6 +3682,7 @@ public:
       // A member function's body sees its class's members ([basic.scope.class]) and `this`; a
       // body is looked up in the namespace of what it defines ([basic.lookup.unqual]/9).
       EntityId scope = p_->world().entities.rec(f->entity).scope;
+      s_.current_function = f->entity;
       if (f->flags & sema::decl_flag::member) {
         s_.current_class = scope;
         s_.this_type = p_->this_type(*f);
@@ -3971,6 +4054,8 @@ const sema::ClassRec* Program::instantiate_class(EntityId spec, u32 point) {
   built.fields = std::move(c.fields);
   built.members = std::move(c.statics);
   built.types = std::move(c.nested);
+  for (const ast::MemberRec& m : c.members) built.access.push_back({m.entity, m.access});
+  built.friends = std::move(c.friends);
   special_members(k, spec, built);
   built.defined = true;
   return &classes_.publish(spec, std::move(built));

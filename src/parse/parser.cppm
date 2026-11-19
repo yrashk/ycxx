@@ -345,7 +345,7 @@ public:
         // until the template is instantiated.
         u32 at = pos();
         bump();
-        auto q = qualified_ahead() ? qualified_type(0) : std::nullopt;
+        auto q = qualified_ahead() ? qualified_type(0, true) : std::nullopt;
         if (!q || any_type()) {
           s_->diag(at, Diag::expected_type_specifier);
           d.ok = false;
@@ -411,7 +411,7 @@ public:
           }
           if (qualified_ahead()) {
             // `N::C`, `::C`, `C::E`, `X<T>::E` ([dcl.type.simple]).
-            if (auto q = qualified_type(0); q && kind(q->second) != Tk::l_paren) {
+            if (auto q = qualified_type(0, true); q && kind(q->second) != Tk::l_paren) {
               cls = q->first;
               take_qualified(q->second);
               continue;
@@ -860,7 +860,8 @@ public:
   }
 
   // A qualified type name at token `start`: its type and the tokens it takes.
-  std::optional<std::pair<QualType, u32>> qualified_type(u32 start) {
+  // `checked`: the name is taken here, so its access is checked ([class.access]/4).
+  std::optional<std::pair<QualType, u32>> qualified_type(u32 start, bool checked = false) {
     u32 next = 0;
     auto s = nested_name(start, next);
     if (!s || kind(next) != Tk::identifier || kind(next + 1) == Tk::coloncolon) return std::nullopt;
@@ -872,6 +873,7 @@ public:
     }
     auto t = s_->scope_type(*s, name_of(tok(next)));
     if (!t) return std::nullopt;
+    if (checked) s_->type_member_access(*s, name_of(tok(next)), pos() + next);  // the type stands either way
     return std::pair{*t, next + 1 - start};
   }
   // Called once a qualified declarator-id is read, before its parameters, so they are looked up
