@@ -83,7 +83,8 @@ public:
     thunk.template_params = in.intern_seq(std::span<const ast::TemplateParamSema>{});
     irgen::FunctionInput input{EntityId::none, thunk,
                                ast::BodySema{ret, in.intern_seq(std::span<const ast::LocalRec>(locals)),
-                                             in.intern_seq(std::span<const ast::ExpansionRec>{}), in.intern_seq(std::span<const u32>{})},
+                                             in.intern_seq(std::span<const ast::ExpansionRec>{}), in.intern_seq(std::span<const u32>{}),
+                                             ast::QualType{}, 0},
                                s_->item(), 0, true, s_->local_values()};
     EvalFacts facts(s_->world(), *q_);
     auto body = irgen::function_ir(in, input, facts);

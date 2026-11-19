@@ -1558,6 +1558,62 @@ What the process allocates, attributed to the engine's cells, in the trace and t
   - Not yet: the implicit copy assignment does not call subobjects' `operator=` (#360), and bases'
     injected-class-names (#361).
 
+## Templates, ζ step 9: member function templates (#88, #314, 2026-11-19)
+
+- **Member function templates** ([temp.mem]) of classes and class templates: their head one level
+  inside the class's; a call through an object or the class (`s.get(1)`, `S::st(1L)`) deduces
+  their specializations as a call of a namespace-scope template does, overloads with ordinary
+  members included; explicit arguments after `.f<…>`, `S::f<…>`, `N::f<…>`, an unqualified
+  member template, or `.template f<…>` / `X::template f<…>`. Members overload on template-ness,
+  template-head and constraints ([temp.over.link]/4-6).
+- A class template specialization's member template binds the class's arguments as its
+  enclosing level when it is instantiated.
+- **Constructor templates**, `template<class It> V(It, It)`: function templates named as their
+  class whose specializations are constructors; never `S(S)` ([class.copy.ctor]/5).
+- **Definitions outside the class**, `template<class T> R S::f(T)` and `template<class U>
+  template<class T> R W<U>::f(T)`, whose body is in the scope of both heads (`Program::outer_heads_`),
+  matching a member template by its head and constraints; two heads before anything else are an
+  error.
+- Mangled as Clang: `_ZNK1S3getIiEET_S1_`, `_ZN1WIiE1fIcEEiT_`, `_ZN1SC1IiEET_` (the member's own
+  parameters `T_` at any depth; a constructor without a return type).
+- Tests: `tests/own/templates/m9-*` (13, 8 from the review; a PEER test links Clang's
+  definitions); 5 more draft examples pass. Feature map: `temp-member` partial.
+- Not yet (#340): member class and alias templates (nested classes, #306), conversion function
+  templates (#339), trailing requires-clauses on member templates, static data member templates,
+  `&S::get<int>`, explicit specializations of member templates; a non-type default depending on
+  the class's parameter (#209). Found on the way: #345.
+
+## Placeholder types, θ step 1 (#279, 2026-11-19)
+
+- **Types:** `TAuto{decltype_auto}` in `types` (ast.md §5.1's `TAuto`, without a type-constraint
+  yet), `TypeKind::placeholder` in sema; `Types::has_placeholder` finds one under pointers,
+  references, arrays and a function's return type. The parser reads `auto` and `decltype(auto)`
+  as type specifiers, and trailing return types `auto f() -> T` ([dcl.fct]/2) with the
+  parameters in scope.
+- **Deduction** (`Sema::deduce_placeholder`, [dcl.type.auto.deduct]): `decltype(auto)` is the
+  initializer's decltype, alone or diagnosed; `auto` in any declarator form is replaced by an
+  invented type parameter (`Bindings::placeholder`) and deduced by `Templates::call_pair` and
+  `deduce`, as from a call. A type-dependent initializer deduces `Builtin::dependent`, and each
+  instantiation deduces again.
+- **Variables:** block scope (`= e`, `(e)`, `{e}`; the name is declared first, so its own
+  initializer cannot use it), namespace scope and variable templates (`= e`, `{e}`), static data
+  members; several declarators must deduce one type.
+- **Deduced return types:** each `return` deduces and the first fixes the type for the rest of
+  the body ([dcl.spec.auto.general]/11); no return deduces `void`. `BodySema` carries the deduced
+  function type (`deduced`, `deduced_type`). Naming the function (`Sema::deduced_function`) asks
+  `Questions::deduced_type`: a definition before the point, or a function template or class
+  template member specialization instantiated where it is named ([temp.inst]/8); its own body
+  sees the type once a return deduced it. The back end and the interpreter get the deduced type
+  with the body. Mangling keeps a template's declared placeholder as `Da`/`Dc`.
+- **Calls through pointers to functions:** irgen emits `call_ind` (`Gen::call_pointer`), which
+  lowering, AArch64 selection and the interpreter already had; constant evaluation calls through
+  them too.
+- Tests: `tests/own/auto/` (46 spec-only, 4 more): 41 pass, 9 are XFAIL: structured bindings
+  (#285), a namespace-scope reference or address (#101), `static_cast<int&&>` (#199).
+  `p1-impl-mangle` checks the `Da`/`Dc` names against Clang objects.
+- Not yet: constrained `C auto`, `auto x = {…}`, `auto x(e)` at namespace scope, abbreviated
+  function templates (#286); structured bindings (#285).
+
 ## Bootstrap workarounds
 
 Places where ycxx's sources avoid or work around a C++26 feature because GCC 16 lacks it or

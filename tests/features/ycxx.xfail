@@ -82,14 +82,12 @@ draft/class/class.conv.ctor-1.accept.cpp 'struct' not supported yet
 draft/class/class.conv.ctor-2.reject.cpp errors elsewhere: 'struct' not supported yet
 draft/class/class.conv.fct-1.reject.cpp errors elsewhere: 'struct' not supported yet
 draft/class/class.conv.fct-5.reject.cpp errors elsewhere: 'struct' not supported yet
-draft/class/class.conv.fct-6.reject.cpp errors elsewhere: 'struct' not supported yet
 draft/class/class.conv.general-1.reject.cpp errors elsewhere: 'struct' not supported yet
 draft/class/class.copy.assign-1.reject.cpp errors elsewhere: 'struct' not supported yet
 draft/class/class.copy.assign-2.accept.cpp 'struct' not supported yet
 draft/class/class.copy.assign-3.accept.cpp 'struct' not supported yet
 draft/class/class.copy.ctor-1.accept.cpp 'struct' not supported yet
 draft/class/class.copy.ctor-2.accept.cpp 'struct' not supported yet
-draft/class/class.copy.ctor-5.accept.cpp 'struct' not supported yet
 draft/class/class.copy.elision-1.reject.cpp errors elsewhere: 'class' not supported yet
 draft/class/class.copy.elision-2.reject.cpp errors elsewhere: 'class' not supported yet
 draft/class/class.dtor-1.accept.cpp 'struct' not supported yet
@@ -169,7 +167,6 @@ draft/dcl/dcl.contract.func-3.reject.cpp errors elsewhere: 'template' not suppor
 draft/dcl/dcl.contract.res-1.accept.cpp unexpected identifier 'post'
 draft/dcl/dcl.contract.res-2.accept.cpp 'struct' not supported yet
 draft/dcl/dcl.contract.res-3.reject.cpp errors elsewhere: 'auto' not supported yet
-draft/dcl/dcl.decl.general-1.reject.cpp errors elsewhere: expected ';'
 draft/dcl/dcl.enum-1.reject.cpp errors elsewhere: 'struct' not supported yet
 draft/dcl/dcl.enum-2.accept.cpp 'enum' not supported yet
 draft/dcl/dcl.fct-1.reject.cpp errors elsewhere: preprocessing directives are not supported yet
@@ -178,7 +175,6 @@ draft/dcl/dcl.fct-5.reject.cpp errors elsewhere: preprocessing directives are no
 draft/dcl/dcl.fct.def.coroutine-2.accept.cpp preprocessing directives are not supported yet
 draft/dcl/dcl.fct.def.default-1.reject.cpp errors elsewhere: 'struct' not supported yet
 draft/dcl/dcl.fct.def.default-2.accept.cpp 'struct' not supported yet
-draft/dcl/dcl.fct.def.delete-1.accept.cpp 'struct' not supported yet
 draft/dcl/dcl.fct.def.delete-2.reject.cpp errors elsewhere: preprocessing directives are not supported yet
 draft/dcl/dcl.fct.def.delete-3.reject.cpp errors elsewhere: 'struct' not supported yet
 draft/dcl/dcl.fct.def.general-2.reject.cpp errors elsewhere: 'struct' not supported yet
@@ -232,8 +228,6 @@ draft/dcl/dcl.ref-3.accept.cpp '&' not supported yet
 draft/dcl/dcl.ref-4.accept.cpp 'typedef' not supported yet
 draft/dcl/dcl.spec.auto.general-1.reject.cpp errors elsewhere: 'auto' not supported yet
 draft/dcl/dcl.spec.auto.general-2.reject.cpp errors elsewhere: preprocessing directives are not supported yet
-draft/dcl/dcl.spec.auto.general-3.reject.cpp errors elsewhere: 'auto' not supported yet
-draft/dcl/dcl.spec.auto.general-4.reject.cpp errors elsewhere: 'auto' not supported yet
 draft/dcl/dcl.spec.auto.general-5.accept.cpp 'auto' not supported yet
 draft/dcl/dcl.spec.auto.general-6.accept.cpp 'template' not supported yet
 draft/dcl/dcl.spec.auto.general-7.reject.cpp errors elsewhere: 'auto' not supported yet
@@ -488,7 +482,6 @@ draft/temp/temp.friend-1.accept.cpp 'template' not supported yet
 draft/temp/temp.friend-2.accept.cpp 'class' not supported yet
 draft/temp/temp.friend-3.accept.cpp 'class' not supported yet
 draft/temp/temp.friend-4.reject.cpp errors elsewhere: 'template' not supported yet
-draft/temp/temp.func.order-1.accept.cpp 'struct' not supported yet
 draft/temp/temp.func.order-3.accept.cpp 'template' not supported yet
 draft/temp/temp.func.order-4.reject.cpp errors elsewhere: 'template' not supported yet
 draft/temp/temp.func.order-6.accept.cpp 'template' not supported yet
@@ -505,7 +498,6 @@ draft/temp/temp.local-3.reject.cpp errors elsewhere: 'template' not supported ye
 draft/temp/temp.local-4.reject.cpp errors elsewhere: 'template' not supported yet
 draft/temp/temp.local-5.reject.cpp errors elsewhere: 'template' not supported yet
 draft/temp/temp.local-6.accept.cpp 'struct' not supported yet
-draft/temp/temp.mem-1.accept.cpp 'template' not supported yet
 draft/temp/temp.mem-2.reject.cpp errors elsewhere: 'template' not supported yet
 draft/temp/temp.mem-3.accept.cpp 'template' not supported yet
 draft/temp/temp.mem-4.reject.cpp errors elsewhere: 'template' not supported yet
@@ -555,7 +547,6 @@ own/classes/s1-default-member-init.run.cpp a default member initializer naming a
 own/classes/s1-elaborated.run.cpp block-scope elaborated type specifier (#117)
 own/classes/s1-locals-scopes.run.cpp local classes (#117)
 own/classes/s2-constexpr-members.run.cpp classes in constant evaluation (#25)
-own/templates/f1-deduce-function.run.cpp function_ir: a call through a pointer to function is not supported yet (#24)
 own/templates/c2-constexpr-members.run.cpp constexpr constructors (#157) and class objects in constant evaluation (#25)
 own/templates/c2-dependent-members.run.cpp aggregate initialization of a reference member: function_ir rejects the bound glvalue, for any class (#157)
 own/templates/c2-distinct-types.reject.cpp a namespace-scope reference bound to a variable is not a constant initializer yet, for any class (#101)
