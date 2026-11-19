@@ -1484,6 +1484,14 @@ private:
     return true;
   }
 
+  // Whether integral type `t` represents `v` (`big`: the unsigned value of v's bits, 2^63 or more).
+  bool holds(QualType t, std::int64_t v, bool big) {
+    sema::IntShape sh = sema::shape(*s_.types().builtin_of(t));
+    if (big) return !sh.is_signed && sh.bits == 64;
+    if (sh.is_signed) return sh.bits >= 64 || (v >= -(std::int64_t(1) << (sh.bits - 1)) && v < (std::int64_t(1) << (sh.bits - 1)));
+    return v >= 0 && (sh.bits >= 64 || v < (std::int64_t(1) << sh.bits));
+  }
+
   // `typedef class-specifier X …;` with an unnamed class or enumeration: X names it for linkage
   // purposes ([dcl.typedef]/9), and so is its name here; the declarator after the braces.
   std::optional<std::pair<NameId, u32>> typedef_name_after_braces() {
@@ -1905,7 +1913,7 @@ private:
     }
     if (cls == EntityId::none && clashes_with_using(name, name_at, ast::DeclKind::enum_, t)) return bad();
     // Built here and published once complete (#156); the list sees it as it grows.
-    sema::EnumRec er{scoped, fixed.has_value(), fixed.value_or(s_.builtin(sema::Builtin::int_)), {}};
+    sema::EnumRec er{scoped, fixed.has_value(), fixed.value_or(s_.builtin(sema::Builtin::int_)), std::nullopt, {}};
     p_->defining_enum_ = {e, &er};
     ast::DeclSema sem = class_decl(e, true);
     sem.kind = ast::DeclKind::enum_;
@@ -1934,6 +1942,19 @@ private:
       ps_.skip_attributes();  // an enumerator's attribute-specifier-seq ([dcl.enum]/1)
       std::int64_t value = next;
       bool value_big = next_big;
+      if (!ps_.is(Tk::equal) && !values.empty() && big.back() && values.back() == -1) {
+        s_.diag(en_at, Diag::enum_no_type, name);  // [dcl.enum]/5: no type holds the incremented value
+        value_big = false;
+      }
+      // [dcl.enum]/5: an incremented value the previous enumerator's type cannot represent has a
+      // type that can: the first of int, unsigned int, long, unsigned long that holds it.
+      if (!ps_.is(Tk::equal) && !fixed && !values.empty() && !holds(prev_type, value, value_big)) {
+        for (sema::Builtin b : {sema::Builtin::int_, sema::Builtin::unsigned_int, sema::Builtin::long_, sema::Builtin::unsigned_long})
+          if (holds(s_.builtin(b), value, value_big)) {
+            prev_type = s_.builtin(b);
+            break;
+          }
+      }
       if (!ps_.is(Tk::equal) && fixed && !values.empty()) {
         // An implicit value must fit the fixed type too.
         QualType ll = s_.builtin(sema::Builtin::long_long);
@@ -2012,6 +2033,19 @@ private:
                                                                                                              : Builtin::long_;
       }
       er.underlying = s_.builtin(u);
+      // [conv.prom]/3: the first of int, unsigned int, long, unsigned long that holds every
+      // value of the enumeration (its range, [dcl.enum]/8: these hold it when they hold the
+      // enumerators).
+      Builtin p = Builtin::unsigned_long;
+      for (Builtin c : {Builtin::int_, Builtin::unsigned_int, Builtin::long_, Builtin::unsigned_long}) {
+        bool all = true;
+        for (std::size_t i = 0; i < values.size(); ++i) all = all && holds(s_.builtin(c), values[i], big[i]);
+        if (all) {
+          p = c;
+          break;
+        }
+      }
+      er.promotion = s_.builtin(p);
     }
     // Past the closing brace an enumerator has the enumeration's type ([dcl.enum]/5), in the
     // declarators that follow too.
