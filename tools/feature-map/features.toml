@@ -1873,7 +1873,7 @@ int main() { int (*p)(long) = f; return (f(1) == 1 && f(1L) == 2 && f("") == 3 &
 '''
 status = 'partial'
 issues = [219, 238, 335, 406]
-note = 'targeted free and static overloads work; remaining function-type and target forms'
+note = 'function qualifiers, member pointers and template argument targets'
 
 [[feature]]
 id = 'over-operators'

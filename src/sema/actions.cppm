@@ -3450,8 +3450,8 @@ public:
     return c;
   }
 
-  // What a call to a function returning `r` is ([expr.call]): an lvalue for an lvalue reference,
-  // an xvalue for an rvalue reference, else a prvalue.
+  // A call returning a reference to a function is an lvalue. For object references the category
+  // follows the reference kind ([expr.call]).
   ExprInfo result_info(QualType r) {
     if (!types().is_reference(r)) return {Types::unqualified(r), ValueCategory::prvalue, 0};
     QualType t = types().referee(r);
@@ -4221,10 +4221,6 @@ public:
     }
     if (match.decl->flags & decl_flag::deleted) {
       diag(set->name.begin, Diag::deleted_function, name);
-      return fail;
-    }
-    if ((match.decl->flags & decl_flag::consteval_) && !immediate_context) {
-      diag(set->name.begin, Diag::immediate_address, name);
       return fail;
     }
     // Taking a specialization's address demands its definition ([temp.inst]).
