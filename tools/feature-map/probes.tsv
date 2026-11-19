@@ -1,4 +1,4 @@
-# Each probe built and run by ycxx dab7fadf6a86 and by an oracle (feature-map probe).
+# Each probe built and run by ycxx 4bc8c0dc7641 and by an oracle (feature-map probe).
 feature	oracle	ycxx	first_error
 lex-core	gcc	pass	
 lex-digraph	gcc	pass	
@@ -111,7 +111,7 @@ over-resolution	gcc	fail	the address of the overloaded function 'f' is not suppo
 over-operators	gcc	fail	invalid operands to binary expression ('V' and 'int')
 temp-fn	gcc	pass	
 temp-class	gcc	pass	
-temp-member	gcc	fail	'template' is not supported yet
+temp-member	gcc	pass	
 temp-spec	gcc	pass	
 temp-explicit-inst	gcc	fail	'template' is not supported yet
 temp-res	gcc	fail	function_ir: Dependent is not supported yet

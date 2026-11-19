@@ -866,6 +866,11 @@ public:
         break;
       }
     }
+    // `S::template f`: the name after the keyword ([temp.names]/3); `next` stays at the keyword.
+    if (kind(j) == Tk::kw_template && kind(j + 1) == Tk::identifier) {
+      next = j;
+      return s;
+    }
     if (kind(j) != Tk::identifier && kind(j) != Tk::tilde && kind(j) != Tk::kw_operator) return std::nullopt;
     next = j;
     return s;
@@ -2235,8 +2240,10 @@ public:
         // [expr.ref]: `E1.id-expression` and `E1->id-expression`.
         bool arrow = is(Tk::arrow);
         bump();
+        // `E.template f<args>`: the name is a member template's ([temp.names]/3).
+        bool keyword = accept(Tk::kw_template);
         if (!is(Tk::identifier)) {
-          if (is(Tk::kw_template) || is(Tk::tilde) || is(Tk::coloncolon) || is(Tk::kw_operator))
+          if (is(Tk::tilde) || is(Tk::coloncolon) || is(Tk::kw_operator))
             s_->diag(pos(), Diag::not_supported, kind());
           else
             s_->diag(pos(), Diag::expected_unqualified_id);
@@ -2246,7 +2253,15 @@ public:
         u32 name_at = pos();
         NameId n = name_of(tok());
         bump();
+        // A member template's explicit template arguments ([temp.arg.explicit]): after `template`,
+        // or where the member found is a template ([temp.names]/3).
+        std::optional<std::vector<ast::TemplateArg>> targs;
+        if (is(Tk::less) && (keyword || s_->names_member_template(e, arrow, n))) {
+          targs = template_argument_list();
+          if (!targs) return {NodeId::none, e.begin, pos()};
+        }
         e = s_->member(e, arrow, n, pos(), at, name_at);
+        if (targs) s_->explicit_template_args(e, std::move(*targs));
         break;
       }
       default: return e;
@@ -2552,6 +2567,9 @@ public:
   Ex qualified_id(u32 begin) {
     u32 next = 0;
     auto s = nested_name(0, next);
+    // `S::template f<args>`: f names a template ([temp.names]/3).
+    bool keyword = s && kind(next) == Tk::kw_template && kind(next + 1) == Tk::identifier;
+    if (keyword) ++next;
     if (!s || kind(next) != Tk::identifier) {
       s_->diag(begin, Diag::not_a_namespace, is(Tk::identifier) ? name_of(tok()) : s_->no_name());
       while (is(Tk::identifier) || is(Tk::coloncolon)) bump();
@@ -2575,12 +2593,18 @@ public:
             return s_->dependent_node({}, begin, pos());
           return s_->variable_template_id(*v, *args, begin, pos());
         }
-      Ex r = s_->scope_expr(*s, n, begin, name_at, pos());
-      if (r.ok() && s_->types().is(r.type(), Builtin::overload_set)) {
-        s_->diag(pos(), Diag::not_supported, Tk::less);  // qualified template-ids (#88)
-        return {NodeId::none, begin, pos()};
+      // `S::f<args>`: a member template of class S or a function template of namespace S, with
+      // explicit arguments ([temp.arg.explicit]).
+      if (keyword || s_->scope_names_template(*s, n)) {
+        auto args = template_argument_list();
+        if (!args) return {NodeId::none, begin, pos()};
+        Ex r = s_->scope_expr(*s, n, begin, name_at, pos());
+        if (r.ok() && !s_->dependent(r) && std::ranges::any_of(*args, [&](const ast::TemplateArg& a) { return s_->dependent(a); }))
+          return s_->dependent_node({}, begin, pos());
+        s_->explicit_template_args(r, std::move(*args));
+        return r;
       }
-      return r;
+      return s_->scope_expr(*s, n, begin, name_at, pos());
     }
     return s_->scope_expr(*s, n, begin, name_at, pos());
   }
