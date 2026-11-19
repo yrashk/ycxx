@@ -1,4 +1,5 @@
-// The other side of call-triviality.run.cpp, compiled by the platform compiler.
+// The other side of call-triviality.run.cpp (compiled by Clang) and call-triviality-apple.run.cpp
+// (compiled by Apple Clang).
 struct TC { int v; TC(int x) : v(x) {} };
 struct NC { int v; NC(int x) : v(x) {} NC(const NC& o) : v(o.v) {} };
 struct ND { int v; ND(int x) : v(x) {} ~ND() {} };

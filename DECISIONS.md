@@ -40,20 +40,24 @@ reasoning; do not leave decisions only in issue threads.
    - *Reason:* a header that tests for a compiler or a feature must get the truth about ycxx.
    - *Rejected:* mimicking Clang (its extensions would all be owed at once), and defining every
      feature-test macro now (libycxx would enable code sema cannot compile).
-6. **Calling convention per target** (decided on #116, #230). Where compilers disagree on how
-   classes pass, each target follows the compiler whose objects its users link. It is a rule of
-   the target, not a global choice.
-   - **Data:** `ast::Target::call_triviality` says when a class is trivially copyable for the
-     purposes of calls and so passes in registers.
-   - **arm64 Darwin** follows Apple Clang (`apple`): a trivial destructor and a copy constructor
-     that is trivial or deleted, whatever the move constructors. Apple Clang 21 passes move-only
-     and deleted-copy classes in registers. Upstream Clang 23 and GCC 16 pass them by address.
-   - **Linux targets** follow GCC and the Itanium "non-trivial for the purposes of calls" wording
-     (`itanium`, [class.temporary]/3).
-   - **Tests:** `PEER:` files are compiled by the platform compiler (Apple Clang on macOS, GCC
-     elsewhere). `tests/own/abi/call-triviality` covers each kind of class. Under `--cxx gcc`
-     and `--cxx clang` it is an expected failure on Darwin.
-   - *Reason:* ycxx objects must link with the libraries and objects on the user's system.
+6. **Which classes pass in registers** (decided on #230). This is the rule for when a class is
+   trivially copyable for the purposes of calls. Compilers disagree on it.
+   - **Default, every target:** upstream Clang and GCC, the Itanium "non-trivial for the purposes
+     of calls" wording ([class.temporary]/3, Itanium C++ ABI §3.1.2.3).
+   - **The switch, `-fclass-call-abi=apple`:** on arm64 Darwin, Apple Clang's behaviour, for code
+     that links with Xcode-built objects. A class passes in registers when its destructor is
+     trivial and its copy constructor is trivial or deleted, whatever its move constructors.
+     Apple Clang 21 passes move-only and deleted-copy classes in registers; Clang 23 and GCC 16
+     pass them by address.
+   - **Data:** `ast::Target` carries each target's default (`call_triviality`) and whether it
+     offers the switch (`apple_calls`). The option is part of the compile configuration
+     (`pp::Config::call_triviality`), so it enters the unit's fingerprint and the daemon's
+     configuration.
+   - **Tests:** `tests/own/abi/call-triviality` checks the default against Clang 23 objects, and
+     passes under GCC too. `call-triviality-apple` checks the switch against Apple Clang objects
+     (`PEER-WITH: apple-clang`).
+   - *Reason:* the oracles and the ABI document agree on the default, and the switch serves code
+     that must link with the platform's own objects.
 
 ## 2. Provenance
 

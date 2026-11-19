@@ -1,11 +1,9 @@
-// #116 (DECISIONS §1.6): which classes pass in registers on arm64 Darwin, as Apple Clang has it:
-// those with a trivial destructor and a copy constructor trivial or deleted, whatever their move
-// constructors. A trivially copyable class (TC), a move-only one (MV), one with its copy deleted
-// (DC), with its copy deleted and a move (DM), and one with a move-only member (WM) go in
-// registers. A non-trivial copy constructor (NC) or destructor (ND) sends a class by address.
-// Each passes from ycxx to the peer, back from the peer to ycxx, and returns from the peer.
-// XFAIL: gcc GCC follows the Itanium rule: MV, DC, DM and WM go by address
-// XFAIL: clang upstream Clang follows the Itanium rule: MV, DC, DM and WM go by address
+// #116, #230 (DECISIONS §1.6): which classes pass in registers by default, as upstream Clang and
+// GCC have it ([class.temporary]/3, Itanium C++ ABI §3.1.2.3). A trivially copyable class (TC)
+// goes in registers. A non-trivial copy constructor (NC) or destructor (ND), a user-provided move
+// constructor (MV, DM) or a member with one (WM), and every copy and move deleted (DC) send a
+// class by address. Each passes from ycxx to the peer, back from the peer to ycxx, and returns
+// from the peer.
 // PEER: call-triviality-peer.cpp
 // EXIT: 0
 struct TC { int v; TC(int x) : v(x) {} };

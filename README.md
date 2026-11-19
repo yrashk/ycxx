@@ -21,7 +21,7 @@ the code in [STATUS.md](STATUS.md), and the work in
 ### What you can do today
 
 **Compile and run programs.** `ycxx cxx a.cpp -o a` (also `-c`, `-fsyntax-only`, `-E`, `-I`,
-`-D`, `-std=c++26`) builds an executable with ycxx's own front end, IR, AArch64 code generator
+`-D`, `-std=c++26`, and `-fclass-call-abi=apple` to pass classes as Apple Clang does) builds an executable with ycxx's own front end, IR, AArch64 code generator
 and Mach-O linker. It also links object files from Clang or GCC. Errors are reported as
 `file:line:col: error: …`.
 

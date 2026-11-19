@@ -1,4 +1,4 @@
-// The other side of empty-classes.run.cpp, compiled by the platform compiler.
+// The other side of empty-classes.run.cpp, compiled by Clang.
 struct E {};
 int peer_e(int a, E e, int b) { return a * 10 + b; }
 E peer_make_e(int) { return E{}; }

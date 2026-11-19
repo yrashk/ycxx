@@ -981,19 +981,18 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   address, an indirect result in x8 (`l2::Function::indirect_result`, the call's fourth
   immediate). A class needing more registers than are left goes whole on the stack and leaves the
   rest unused (C.11). An empty class passes nothing, as in Clang. Which classes are trivial for
-  calls is the target's rule (`ast::Target::call_triviality`, DECISIONS §1.6). arm64 Darwin
-  follows Apple Clang, so move-only and deleted-copy classes pass in registers. `itanium`
-  (for the Linux targets) also tracks move constructors (`ClassRec::move_usable`,
-  `move_nontrivial`).
-- **Mixed-object tests:** `PEER:` in a run test names a file the platform compiler (Apple Clang on
-  macOS) compiles and links with it (docs/TESTING.md). `tests/own/abi` checks 3- to 24-byte
-  classes, member functions returning classes, exhausted registers, empty classes, and each
-  kind of class for calls (trivially copyable, non-trivial copy or destructor, move-only,
-  deleted copy, a move-only member), calling both ways.
+  calls follows upstream Clang and GCC by default (Itanium, `ClassRec::move_usable`,
+  `move_nontrivial`). `-fclass-call-abi=apple` selects Apple Clang's rule on arm64 Darwin
+  (`ast::Target::call_triviality`, `pp::Config::call_triviality`, DECISIONS §1.6).
+- **Mixed-object tests:** `PEER:` in a run test names a file the oracle Clang compiles and links
+  with it, or Apple Clang with `PEER-WITH: apple-clang` (docs/TESTING.md). `tests/own/abi`
+  checks 3- to 24-byte classes, member functions returning classes, exhausted registers, empty
+  classes, and each kind of class for calls (trivially copyable, non-trivial copy or destructor,
+  move-only, deleted copy, a move-only member) under both settings, calling both ways.
 - Not yet: braced arguments to overload sets, templates and member calls (#231), class arguments
   through an ellipsis and calls through pointers returning classes (#196), classes with
   floating members (#201), classes in constant evaluation (#25).
-- Tests: `tests/own/abi` (4), `tests/own/classes/s5-byvalue-lifetimes`, `-temporaries`;
+- Tests: `tests/own/abi` (5), `tests/own/classes/s5-byvalue-lifetimes`, `-temporaries`;
   s1-byvalue-params and -return pass.
 
 ## Templates, ζ step 1: function templates (#88, 2026-11-18)

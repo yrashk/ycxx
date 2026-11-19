@@ -43,8 +43,9 @@ struct BuiltinLayout {
 
 // When a class is trivially copyable for the purposes of calls, so that it passes in registers
 // (DECISIONS §1.6). `itanium`: [class.temporary]/3 and the Itanium C++ ABI, as GCC and upstream
-// Clang have it. `apple`: as Apple Clang has it on arm64 Darwin, a trivial destructor and a
-// copy constructor trivial or deleted, whatever the move constructors.
+// Clang have it, the default everywhere. `apple`: as Apple Clang has it on arm64 Darwin, a trivial
+// destructor and a copy constructor trivial or deleted, whatever the move constructors; selected
+// by `-fclass-call-abi=apple` on a target that offers it.
 enum class CallTriviality : u8 { itanium, apple };
 
 struct Target {
@@ -58,7 +59,8 @@ struct Target {
   Builtin char32_underlying;  // uint_least32_t
   Builtin size_type;
   Builtin ptrdiff_type;
-  CallTriviality call_triviality;
+  CallTriviality call_triviality;  // the default
+  bool apple_calls;                 // whether `-fclass-call-abi=apple` is offered
 
   constexpr BuiltinLayout operator[](Builtin b) const { return layout[std::to_underlying(b)]; }
   constexpr bool has(Builtin b) const { return (*this)[b].size != 0; }
@@ -113,7 +115,8 @@ inline constexpr Target aarch64_darwin{
     .char32_underlying = Builtin::unsigned_int,
     .size_type = Builtin::unsigned_long,
     .ptrdiff_type = Builtin::long_,
-    .call_triviality = CallTriviality::apple,
+    .call_triviality = CallTriviality::itanium,
+    .apple_calls = true,
 };
 
 // x86_64-linux-gnu (System V): `long double` is the x87 80-bit format in 16 bytes.
@@ -130,6 +133,7 @@ inline constexpr Target x86_64_linux{
     .size_type = Builtin::unsigned_long,
     .ptrdiff_type = Builtin::long_,
     .call_triviality = CallTriviality::itanium,
+    .apple_calls = false,
 };
 
 }  // namespace ycxx::ast
