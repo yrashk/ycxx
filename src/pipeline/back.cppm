@@ -110,6 +110,7 @@ struct Variable {
   QualType type{};
   ConstId init = ConstId::none;
   std::optional<ast::Loc> at;  // its declarator, for diagnostics
+  bool dynamic = false;  // also initialized by code ([basic.start.dynamic]): writable, if const
 };
 
 // The classes and enumerations a unit defines, as `layout` reads them: a class's non-static data
@@ -142,6 +143,9 @@ struct TranslationUnit {
   std::vector<FunctionDef> functions;  // the definitions
   std::vector<Variable> variables;     // the definitions
   EntityId main = EntityId::none;      // the program's `main`, if this unit defines it
+  // Its initialization functions ([basic.start.dynamic]), in order, each with the entity of its
+  // `__mod_init_func` pointer.
+  std::vector<std::pair<EntityId, EntityId>> init_functions;
   bool front_failed = false;           // the front end reported errors: nothing to compile
 };
 
@@ -1016,7 +1020,7 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
     bool is_const = (std::to_underlying(ast::cv_of(in.canonical(v.type))) & 1) != 0;
     bool zero = b->relocs.empty() && std::ranges::all_of(b->bytes, [](std::uint8_t x) { return x == 0; });
     aarch64::DataDef d{v.entity, aarch64::DataKind::data, std::move(b->bytes), 0, layout.type(v.type).align, std::move(b->relocs)};
-    if (is_const) d.kind = d.relocs.empty() ? aarch64::DataKind::rodata : aarch64::DataKind::data_const;
+    if (is_const && !v.dynamic) d.kind = d.relocs.empty() ? aarch64::DataKind::rodata : aarch64::DataKind::data_const;
     else if (zero) {
       d.kind = aarch64::DataKind::bss;
       d.size = d.bytes.size();
@@ -1025,8 +1029,15 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
     data.push_back(std::move(d));
   }
 
-  // String literal objects, as `lower` and the variables met them ([lex.string]).
   std::vector<aarch64::Symbol> symbols;
+  // The pointers to the initialization functions that dyld calls before `main`, in order.
+  for (std::size_t i = 0; i < tu.init_functions.size(); ++i) {
+    auto [fn, slot] = tu.init_functions[i];
+    data.push_back({slot, aarch64::DataKind::init_func, std::vector<std::uint8_t>(8, 0), 0, 8, {{0, fn, 0}}});
+    symbols.push_back({slot, std::format("l_.init_func.{}", i), obj::binding::local});
+  }
+
+  // String literal objects, as `lower` and the variables met them ([lex.string]).
   std::uint32_t n = 0;
   for (auto [object, entity] : strings) {
     auto units = universe().consts->string_object(object);

@@ -1781,7 +1781,31 @@ values, end to end; results match Clang's bit for bit.
   member, and defaults added by an out-of-class or qualified definition (#354); defaults added
   after a using-declaration (#362, the oracles disagree).
 - Tests: `tests/own/default-args/` (spec-only: 16 run and 9 reject tests, some split out as XFAIL
-  for #354, #356, #357, #102 and #94).
+  for #354, #356, #357 and #102).
+
+## Dynamic initialization of namespace-scope variables, ι (#94, #337, 2026-11-19)
+
+- **Front** (src/parse/parse.cppm): a namespace-scope variable whose initializer is not a constant
+  expression keeps its initializer tree instead of an error (constexpr and constinit ones must
+  still be constant); `T x(args)` and default-initialization by a constructor (an object or an
+  array of them) are dynamic.
+- **The unit's initialization function** (src/pipeline/front.cppm `init_function`): one
+  `StaticInit` statement per such variable, in definition order ([basic.start.dynamic]/1), each
+  initializing the object from its declaration's tree (positions pinned, as for default
+  arguments) and registering the destructor with `__cxa_atexit(d, &object, &__dso_handle)`
+  ([basic.start.term]; each array element on its own). It has internal linkage and Clang's name,
+  `__GLOBAL__sub_I_<file>`; a pointer to it goes in `__DATA,__mod_init_func`
+  (`obj::standard_section::mod_init_func`, `aarch64::DataKind::init_func`), which dyld runs before
+  `main`. A dynamically initialized `const` variable is placed in writable data.
+- An initializer is dynamic when it is not a constant expression but the front end has code for
+  it (`sema::has_runtime_code`); one it has no code for, or a scalar's that hit the evaluator's
+  limits, is still an error. Class objects the interpreter cannot evaluate yet are initialized
+  dynamically even when constant by the draft (#25). Each declaration's variables get their own
+  function (`__GLOBAL__sub_I_<file>.<n>`), so an error points at it.
+- Not yet: references bound at run time (#367); inline variables and variable templates (#368);
+  default member initializers that are not constants (#118); array construction as a loop (#370).
+- Tests: `tests/own/dynamic-init/` (spec-only, 16 tests; a Clang peer with its own initializers
+  in `peer.run.cpp`).
 
 ## Bootstrap workarounds
 
