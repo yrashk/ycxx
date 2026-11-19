@@ -39,14 +39,14 @@
 *       TuDefined(golden.cpp) executed
 =         TuUnit(golden.cpp) reused
 =     OptLevel(aarch64_macos) reused
-*     Optimized({fc7746fd, aarch64_macos, 0}) executed
+*     Optimized({<fp>, aarch64_macos, 0}) executed
 =       CostModelIn(aarch64_macos) reused
 *   Codegen(main) executed
 *     UnitQ(main) executed
 =       Lower(main) reused
 =       TuDefined(golden.cpp) reused
 =     OptLevel(aarch64_macos) reused
-*     Optimized({8321e894, aarch64_macos, 0}) executed
+*     Optimized({<fp>, aarch64_macos, 0}) executed
 =       CostModelIn(aarch64_macos) reused
 * Link(0) executed
 =   ProgramIn(0) reused
@@ -89,13 +89,13 @@
 +         TuDefined(golden.cpp) verified
 =           TuUnit(golden.cpp) reused
 =       OptLevel(aarch64_macos) reused
-#       Optimized({fc7746fd, aarch64_macos, 0}) durable
+#       Optimized({<fp>, aarch64_macos, 0}) durable
 +     Codegen(main) verified
 +       UnitQ(main) verified
 =         Lower(main) reused
 =         TuDefined(golden.cpp) reused
 =       OptLevel(aarch64_macos) reused
-#       Optimized({8321e894, aarch64_macos, 0}) durable
+#       Optimized({<fp>, aarch64_macos, 0}) durable
 trace: 25 executed, 20 verified, 48 reused, 4 durable
 ## again: the request's own cells are reused
 = TuFront(golden.cpp) reused
@@ -147,13 +147,13 @@ trace: 3 reused
 +       TuDefined(golden.cpp) verified
 =         TuUnit(golden.cpp) reused
 =     OptLevel(aarch64_macos) reused
-#     Optimized({fc7746fd, aarch64_macos, 0}) durable
+#     Optimized({<fp>, aarch64_macos, 0}) durable
 +   Codegen(main) verified
 +     UnitQ(main) verified
 =       Lower(main) reused
 =       TuDefined(golden.cpp) reused
 =     OptLevel(aarch64_macos) reused
-#     Optimized({8321e894, aarch64_macos, 0}) durable
+#     Optimized({<fp>, aarch64_macos, 0}) durable
 + Link(0) verified
 =   ProgramIn(0) reused
 =   Tu(golden.cpp) reused

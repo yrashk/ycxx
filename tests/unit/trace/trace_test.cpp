@@ -52,7 +52,8 @@ void golden(const std::string& path, bool update) {
   build(s, v0, "cold", got);
   build(s, v0, "again: the request's own cells are reused", got);
   build(s, v1, "a whitespace edit: pp runs, the front end cuts off, the rest is verified", got);
-  const std::string text = got.str();
+  // Fingerprints in keys (an optimization unit's) differ between hosts: the golden holds a mask.
+  const std::string text = std::regex_replace(got.str(), std::regex(R"(\{[0-9a-f]{8},)"), "{<fp>,");
   // What the feature is for: the second build reuses everything and executes nothing.
   const std::size_t again = text.find("## again"), edit = text.find("## a whitespace");
   const std::string second = text.substr(again, edit - again);
