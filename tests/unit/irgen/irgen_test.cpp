@@ -205,7 +205,8 @@ struct Body {
 
   ast::BodySema finish(NodeId tree) {
     auto locs = b.seq(std::span<const ast::LocalRec>(locals));
-    return b.commit(ast::BodySema{tree, locs, b.seq(std::span<const ast::ExpansionRec>{}), b.seq(std::span<const ast::u32>{})});
+    return b.commit(ast::BodySema{tree, locs, b.seq(std::span<const ast::ExpansionRec>{}), b.seq(std::span<const ast::u32>{}), ast::QualType{}, 0,
+                                  b.seq(std::span<const ast::ClosureDef>{})});
   }
 };
 

@@ -603,6 +603,15 @@ class Gen {
       }
       return;
     }
+    if (is<ast::Lambda>(e)) {
+      // A closure object: each capture's member initialized in order ([expr.prim.lambda.capture]/15).
+      for (ast::Child c : ast_.children(get<ast::Lambda>(e).inits)) {
+        At x = child(e, c);
+        auto m = get<ast::MemberInit>(x);
+        initialize(subobject(p, ir::Step::field, m.field, m.type), child(x, m.init), zeroed);
+      }
+      return;
+    }
     if (is<ast::DefaultInit>(e)) return;
     if (is<ast::ValueInit>(e)) {
       if (zeroed) return;
