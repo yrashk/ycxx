@@ -1408,6 +1408,7 @@ public:
     std::erase_if(block_aliases_, [&](const auto& u) { return u.depth >= inner; });
     std::erase_if(block_types_, [&](const auto& u) { return u.depth >= inner; });
     if (!guarded_.empty() && guarded_.back() == scopes_.size() - 1) guarded_.pop_back();
+    std::erase_if(barriers_, [&](const auto& b) { return b.first >= inner; });
     scopes_.pop_back();
   }
   std::size_t scope_depth() const { return scopes_.size(); }
@@ -2671,6 +2672,74 @@ public:
     return types().function(ret, r.params, r.variadic, r.linkage, r.fn_cv);
   }
   u32 loop_depth = 0;
+
+  // ------------------------------------------------------------ jumps ([stmt.jump], [stmt.dcl]/2)
+
+  // A block-scope variable whose initialization is not vacuous ([basic.life]/2): a jump may leave
+  // its scope, but never enter it past its declaration ([stmt.dcl]/2).
+  void set_initialized(u32 local) {
+    if (initialized_.size() <= local) initialized_.resize(local + 1);
+    initialized_[local] = true;
+  }
+  // Those of them in scope here, in declaration order, then the barriers open here.
+  std::vector<u32> initialized_in_scope() const {
+    std::vector<u32> r;
+    for (const auto& s : scopes_)
+      for (const auto& [name, l] : s)
+        if (l < initialized_.size() && initialized_[l]) r.push_back(l);
+    for (const auto& [depth, id] : barriers_) r.push_back(id);
+    return r;
+  }
+  // Makes the innermost scope one no jump may enter, as if it began with an initialized variable:
+  // a substatement of `if constexpr` or `if consteval` ([stmt.if]/2, /4).
+  void jump_barrier() { barriers_.push_back({scopes_.size() - 1, 0x80000000u | next_barrier_++}); }
+  // Whether a jump from a point where `from` are in scope to one where `to` are bypasses one.
+  static bool bypasses(std::span<const u32> from, std::span<const u32> to) {
+    return std::ranges::any_of(to, [&](u32 l) { return !std::ranges::contains(from, l); });
+  }
+
+  // The switch statements being analysed, innermost last ([stmt.switch]): the condition's type
+  // after promotion, the variables in scope at the jump to a label, and the labels so far.
+  struct SwitchScope {
+    QualType type;
+    bool dependent = false;
+    std::vector<u32> initialized;
+    std::vector<ConstId> values;
+    bool has_default = false;
+  };
+  std::vector<SwitchScope> switches;
+
+  // [stmt.switch]/2, /5: a switch's condition has integral or enumeration type, and is promoted.
+  Ex switch_condition(Ex e, u32 at_) {
+    e = rvalue(e);
+    if (!e.ok() || dependent(e)) return e;
+    if (!types().is_integral(e.type()) && !types().is_enum(e.type())) {
+      diag(at_, Diag::switch_not_integral, e.type());
+      return {NodeId::none, e.begin, e.end};
+    }
+    return promote(e);
+  }
+
+  // Labels and `goto`s ([stmt.label], [stmt.goto]): a label has function scope, so uses are
+  // checked when the body ends (`check_labels`).
+  void define_label(NameId name, u32 at_) {
+    if (std::ranges::any_of(labels_, [&](const LabelPoint& l) { return l.name == name; })) diag(at_, Diag::redefined_label, name);
+    else labels_.push_back({name, at_, initialized_in_scope()});
+  }
+  void use_label(NameId name, u32 at_) { gotos_.push_back({name, at_, initialized_in_scope()}); }
+  void check_labels() {
+    for (const LabelPoint& g : gotos_) {
+      auto l = std::ranges::find(labels_, g.name, &LabelPoint::name);
+      if (l == labels_.end()) diag(g.at, Diag::undeclared_label, g.name);
+      else if (bypasses(g.initialized, l->initialized)) diag(g.at, Diag::jump_past_init);
+    }
+  }
+
+  // A reference to block-scope variable `local` ([expr.prim.id.unqual]).
+  Ex local_ref(u32 local, u32 begin, u32 end) {
+    ExprInfo info{types().referee(locals_[local].type), ValueCategory::lvalue, 0};
+    return node(ast::LocalRef{info, local}, begin, end, info);
+  }
   // Inside an immediate function context ([expr.const]): a consteval function's body, or the
   // consteval branch of `if consteval`. A call to a consteval function elsewhere is an immediate
   // invocation, evaluated where it appears.
@@ -5135,6 +5204,15 @@ private:
   };
   std::vector<ParamPack> param_packs_;
   std::vector<std::optional<ConstId>> local_values_;  // by local
+  std::vector<bool> initialized_;                     // by local (`set_initialized`)
+  std::vector<std::pair<std::size_t, u32>> barriers_; // (scope depth, id), `jump_barrier`
+  u32 next_barrier_ = 0;
+  struct LabelPoint {
+    NameId name;
+    u32 at;
+    std::vector<u32> initialized;  // in scope at the label, or at the `goto`
+  };
+  std::vector<LabelPoint> labels_, gotos_;
   std::set<u32> consteval_;                           // consteval functions named so far
   std::map<u32, std::vector<Ex>> list_elems_;         // by draft InitList
   struct DeferredAccess {

@@ -35,7 +35,8 @@ build/bin/ycxx cxx hello.cpp -o hello && ./hello
   enumerations; `float`, `double` and `long double` with literals, arithmetic, comparisons and
   conversions giving Clang's results bit for bit, and passing and returning them (classes of
   floating members included) by Clang's calling convention;
-  all statements and operators; functions, recursion and overloading, operator functions included;
+  all operators, and the statements: `switch`, labels and `goto`, declarations in conditions,
+  and init-statements in `if` and `switch` (not yet range-based `for`); functions, recursion and overloading, operator functions included;
 - classes and unions: data and static members, member functions, constructors and destructors
   with RAII, aggregate and designated initialization, passing and returning them by value with
   Clang's calling convention, so ycxx and Clang objects call each other; access control
@@ -111,6 +112,8 @@ checked with the flags of its last build, or else with its line in the project's
 ### In progress
 
 - Standard headers, starting with `<cstdio>` ([#133](https://github.com/yrashk/ycxx/issues/133)).
+- ι: statements and declarations, the C++98/11 core: default arguments, block-scope statics,
+  range-based `for`, casts and arrays ([#337](https://github.com/yrashk/ycxx/issues/337)).
 - `auto` and lambdas ([#278](https://github.com/yrashk/ycxx/issues/278)): placeholder types,
   lambdas and generic lambdas are done; constexpr lambdas wait on class objects in the
   interpreter ([#262](https://github.com/yrashk/ycxx/issues/262)).

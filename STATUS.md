@@ -461,7 +461,7 @@ one import `ycxx.ast`; unit tests in `tests/unit/ast` (run by ctest, see docs/TE
   directives, …), with its first diagnostic as the reason; an XPASS fails the run, and an XFAIL
   never covers a crash. No draft example crashes or hangs ycxx.
 - Not yet: overloading, classes, namespaces, templates, references, floating types, casts,
-  `sizeof`, `switch`, braced initialization, dynamic initialization at namespace scope, default
+  `sizeof`, braced initialization, dynamic initialization at namespace scope, default
   arguments, block-scope statics.
 
 ## IR generation, α subset (#24, 2026-11-18)
@@ -502,6 +502,8 @@ one import `ycxx.ast`; unit tests in `tests/unit/ast` (run by ctest, see docs/TE
   - `is_constexpr` over real entities (the front end reports none yet);
   - classes, arrays as objects, cleanups, EH (`invoke`), coroutines, static locals, calls
     through pointers, `switch` and `goto`. (Floating point: #336.)
+
+    through pointers, floating point.
 
 ## The pipeline: `ycxx cxx a.cpp -o a` (#43, 2026-11-18)
 
@@ -862,7 +864,7 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
 - Linkage names of enumerations, nested ones included, match Clang's.
 - Tests: `tests/own/classes/s4-*enum*`, `s4-scoped-enum`, `s4-unscoped-enum` (spec-only, plus two
   from the review): 7 of 7.
-- Not yet: opaque enum declarations (`enum E : int;`), unnamed enumerations, `switch`, `E{}` and
+- Not yet: opaque enum declarations (`enum E : int;`), unnamed enumerations, `E{}` and
   `E(v)` as expressions, enumerations in a block (#117), constexpr enumeration objects (#25).
 
 ## Classes, δ step 4b: namespaces (#86, 2026-11-18)
@@ -1732,6 +1734,29 @@ values, end to end; results match Clang's bit for bit.
   instantiation's function parameter pack, as a capture-default does for the elements used.
 - Not yet: init-capture packs `[...ys = xs]`, requires-clauses, static and consteval lambdas
   (#350).
+
+## Statements, ι step 1: `switch`, labels, `goto`, conditions (#337, 2026-11-19)
+
+- **Parser and sema** (src/parse/parser.cppm): `switch`, `case`, `default`, identifier labels and
+  `goto` ([stmt.switch], [stmt.label], [stmt.goto]); a label may end a compound statement (C++23).
+  Case values are converted constant expressions of the promoted condition type, checked for
+  narrowing and duplicates. A condition may declare a variable (`CondDecl`, [stmt.pre]/4) in `if`,
+  `while`, `for` and `switch`; `if` and `switch` (and `if constexpr`) take an init-statement,
+  including an alias-declaration (C++23). `Sema::initialized_in_scope` lists the variables whose
+  initialization is not vacuous; a `goto` or a case label that would enter their scope is an error
+  ([stmt.dcl]/2), and labels are checked when the body ends (`Sema::check_labels`). A substatement
+  of `if constexpr` or `if consteval` is a `jump_barrier`, which no jump may enter ([stmt.if]/2, /4).
+- **IR** (src/irgen/gen.cppm): a switch is a chain of `icmp`/`cond_br` over its case values found
+  in the body first (`case_labels`), since L1's `switch_` op has no lowering yet (#342). A `goto`
+  ends the objects of the scopes it leaves and those begun after a label it jumps back to
+  ([stmt.jump]/2); a `goto` before its label branches to a block filled in when the label is
+  placed. A condition's variable lives one iteration of a loop, through a `for`'s increment. A
+  goto's `br` carries `not_constexpr`, so constant evaluation of it fails ([expr.const]).
+- Not yet: a jump forward past a vacuous declaration (#341); `switch` on a class with a conversion
+  function and `explicit operator bool` conditions (#339); a declaration as the condition of
+  `if constexpr` (#344); constant evaluation of a switch on an enumeration (enumeration values, #25).
+- Tests: `tests/own/stmt/` (written spec-only, 23 run and 15 reject tests, and the split-off XFAILs
+  for the above).
 
 ## Bootstrap workarounds
 

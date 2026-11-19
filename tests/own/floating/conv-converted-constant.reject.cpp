@@ -2,7 +2,6 @@
 // [class.bit]: a converted constant expression of integral type allows no floating-integral
 // conversion, so a floating array bound, case label, enumerator value or bit-field width is
 // ill-formed even when its value is integral; a switch condition cannot be floating.
-// XFAIL: ycxx switch statements (#267) and bit-fields (#307)
 int a[2.0]; //! error
 enum E { e1 = 1.0 }; //! error
 struct S { int bits : 3.0; }; //! error
