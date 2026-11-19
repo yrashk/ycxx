@@ -236,8 +236,13 @@ class Browser {
     else if (k == "/") prompt_ = true, typed_ = filter_;
     else if (k == "?") help_ = true;
     else if (k == "v") detail_ = !detail_;
+    // The pane: J/K a line, ]/[ a page, }/{ its end and top (clamped when drawn).
     else if (k == "J") ++detail_scroll_;
     else if (k == "K") detail_scroll_ = detail_scroll_ > 0 ? detail_scroll_ - 1 : 0;
+    else if (k == "]") detail_scroll_ += body_height() - 1;
+    else if (k == "[") detail_scroll_ = detail_scroll_ > body_height() - 1 ? detail_scroll_ - (body_height() - 1) : 0;
+    else if (k == "}") detail_scroll_ = std::numeric_limits<std::size_t>::max() / 2;
+    else if (k == "{") detail_scroll_ = 0;
     else if (k == "w") cycle_worker();
     else if (k == "a") pick_worker(std::nullopt);
     else if (k.size() == 1 && std::isdigit(static_cast<unsigned char>(k[0]))) pick_worker(k[0] - '0');
@@ -266,7 +271,7 @@ class Browser {
     else if (k == "E") tree_.expand_all(false), cursor_ = 0;
     else if (k == "n") next_execution(rows);
     else if (k == "x") next_error(rows);
-    if (k != "J" && k != "K") detail_scroll_ = 0;
+    if (k != "J" && k != "K" && k != "]" && k != "[" && k != "}" && k != "{") detail_scroll_ = 0;
   }
   void timeline_key(const std::string& k) {
     const std::size_t lanes = static_cast<std::size_t>(tree_.summary().workers) + 1;
@@ -429,7 +434,7 @@ class Browser {
   }
   std::string footer() const {
     if (view_ == View::tree)
-      return paint("2", " ↑↓/jk move  ⏎/space fold  ←→ close/open  e/E all  n next run  x next error  / filter  w/0-9/m/a worker  o order  v pane  t timeline  ? help  q quit");
+      return paint("2", " ↑↓/jk move  ⏎/space fold  ←→ close/open  e/E all  n next run  x next error  J/K ]/[ pane  / filter  w/0-9/m/a worker  o order  v pane  t timeline  ? help  q quit");
     return paint("2", " ↑↓ lane  ←→/HL scrub  ⏎ open in tree  w/0-9/m/a worker  / filter  t tree  ? help  q quit");
   }
 
@@ -483,11 +488,18 @@ class Browser {
     if (!split()) return left;
     const std::vector<std::string> right = rows.empty() ? std::vector<std::string>{} : detail(tree_.node(rows[cursor_].node));
     const std::size_t lw = left_width(), rw = width() - lw - 1;
+    // A pane longer than the screen keeps its last line for where it is and how to move.
+    const bool long_pane = right.size() > hgt && hgt > 1;
+    const std::size_t shown = long_pane ? hgt - 1 : hgt;
+    detail_scroll_ = right.size() > shown ? std::min(detail_scroll_, right.size() - shown) : 0;
     std::vector<std::string> out;
     for (std::size_t i = 0; i < hgt; ++i) {
       std::string l = i < left.size() ? left[i] : std::string();
       const std::size_t at = i + detail_scroll_;
-      const std::string r = at < right.size() ? right[at] : std::string();
+      std::string r = at < right.size() ? right[at] : std::string();
+      if (long_pane && i == hgt - 1)
+        r = paint("2;7", std::format(" lines {}–{} of {}   J/K line  ]/[ page  }}/{{ end/top ", detail_scroll_ + 1,
+                                     detail_scroll_ + shown, right.size()));
       out.push_back(fit(l, lw) + paint("2", "│") + fit(r, rw));
     }
     return out;
@@ -516,7 +528,7 @@ class Browser {
       out.emplace_back();
     }
     if (!e.value.empty()) {
-      out.push_back(" " + paint("1;4", "value") + paint("2", "  (J/K scroll)"));
+      out.push_back(" " + paint("1;4", "value"));
       for (const std::string& l : wrap(e.value, rw)) out.push_back(" " + l);
     } else {
       out.push_back(paint("2", " no value shown for this kind"));
@@ -592,6 +604,9 @@ class Browser {
                                 "  words      match kind or key, all of them",
                                 "  is:exec    an outcome (any prefix)",
                                 "  w:3 w:main a worker",
+                                "",
+                                paint("1", " The pane on the right"),
+                                "  J/K a line, ]/[ a page, }/{ end and top",
                                 "",
                                 paint("1", " Workers"),
                                 "  w cycles, 0-9 picks, m the requesting thread, a all",
