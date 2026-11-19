@@ -64,7 +64,10 @@ prints every query the build went through as a colored tree on stderr: what ran,
 reused, verified green or cut off early, how long it took and on which worker. A second build
 shows everything reused. `--trace-engine=interactive` opens a browser of the trace after the
 compile: a tree with each function's IR, a timeline of the pool's workers, and filters.
-`ycxx ctl trace [--interactive]` attaches to the daemon and shows every request it serves, live.
+`ycxx cxx --watch` stays attached and builds again whenever a file the build read changes,
+headers included; with `--trace-engine` each rebuild shows what it re-ran, and
+`--trace-engine=interactive` keeps the browser open and adds each rebuild live. `ycxx ctl trace
+[--interactive]` attaches to the daemon and shows every request it serves.
 
 **Editor diagnostics.** `ycxx lsp` is a language server that reports ycxx's errors as you type,
 through the daemon, without unsaved text ever reaching a build.

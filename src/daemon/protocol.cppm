@@ -12,8 +12,9 @@ import :posix;
 
 export namespace ycxx::daemon {
 
-enum class Kind : std::uint16_t { hello = 1, welcome, compile, done, status, status_reply, shutdown, bye, lsp, refused, trace, watch };
-inline constexpr Kind last_kind = Kind::watch;
+enum class Kind : std::uint16_t { hello = 1, welcome, compile, done, status, status_reply, shutdown, bye, lsp, refused, trace, watch,
+                                  await_change, changed };
+inline constexpr Kind last_kind = Kind::changed;
 
 struct Hello {
   std::uint64_t build_hash = 0;
@@ -55,6 +56,13 @@ struct WatchRequest {
   bool values = false;
 };
 struct WatchAck {};
+// `await_change{}` (`ycxx cxx --watch`, #245) is answered by `changed` once a batch changes a file
+// some build read (the file table's entries), however long that takes; the connection closes
+// unanswered when the daemon stops.
+struct AwaitChange {};
+struct Changed {
+  std::uint64_t entries = 0;  // file-table entries the batch changed
+};
 struct StatusRequest {};
 struct ShutdownRequest {};
 struct Bye {};
@@ -100,6 +108,7 @@ inline constexpr Fp128 schema_hash = [] {
   engine::fold_schema<compile::Done>(h);
   engine::fold_schema<TraceBatch>(h);
   engine::fold_schema<WatchRequest>(h);
+  engine::fold_schema<Changed>(h);
   return h.finish();
 }();
 

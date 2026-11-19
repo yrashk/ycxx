@@ -10,6 +10,8 @@
   the daemon shuts down.
 - A watcher that stops reading never slows builds, and does not keep the daemon from stopping
   (LESSONS: a long-lived connection's lifetime).
+- `ycxx cxx --watch --trace-engine` builds again when a header the build read changes, and only
+  then: an unrelated file changes nothing.
 """
 import os, subprocess, sys, tempfile, threading, time, shutil
 from pathlib import Path
@@ -91,6 +93,35 @@ def main(ycxx):
 
         bad = cxx('--trace-engine=sideways', 'a.cpp')
         check(bad.returncode == 1 and 'unknown trace mode' in bad.stderr, 'an unknown mode is an error')
+
+        # --watch: a build, then one per change of a file the build read.
+        (scope / 'k.h').write_text('inline int k() { return 1; }\n')
+        src.write_text('#include "k.h"\n' + SOURCE.replace('- 9', '- 8 - k()'))
+        wp = subprocess.Popen([ycxx, 'cxx', '--watch', '--trace-engine', 'a.cpp', '-o', 'w'], cwd=scope, env=daemon,
+                              stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+        watchers.append(wp)
+        log = []
+        threading.Thread(target=lambda: log.extend(iter(wp.stderr.readline, '')), daemon=True).start()
+
+        def wait_for(what, timeout=60):
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline:
+                if sum(what in l for l in log) > 0:
+                    return True
+                time.sleep(0.1)
+            return False
+
+        check(wait_for('watching the files it read'), f'--watch builds once and waits: {"".join(log)[-400:]}')
+        (scope / 'unrelated.txt').write_text('x')
+        time.sleep(2)
+        check(not any('── build 2' in l for l in log), 'a file no build read starts no build')
+        (scope / 'k.h').write_text('inline int k() { return 0; }\n')
+        check(wait_for('── build 2'), f'a header the build read starts a build: {"".join(log)[-400:]}')
+        check(wait_for('trace: ') and sum('trace: ' in l for l in log) >= 2, 'the rebuild is traced')
+        second = ''.join(log[next(i for i, l in enumerate(log) if '── build 2' in l):])
+        check('Lower(k) executed' in second or 'FunctionIr(k) executed' in second, f'k is built again: {second[:600]}')
+        wp.kill()
+        wp.wait(timeout=20)
 
         # A stalled watcher: `ctl trace` writing into a pipe nobody reads, so it stops reading too.
         stalled = subprocess.Popen([ycxx, 'ctl', 'trace'], cwd=scope, env=base, stdout=subprocess.PIPE,

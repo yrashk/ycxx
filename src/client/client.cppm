@@ -191,25 +191,172 @@ std::int64_t now_seconds() {
   return std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();
 }
 
+// Waits, through the daemon of `root`, until a file some build read changes (#245); false when
+// it cannot be asked. A daemon that stops answers nothing: the next build starts a new one.
+// `current` holds the connection's descriptor while it waits, under `m`, for a stopper.
+bool await_change(const std::string& root, std::mutex& m, int& current) {
+  auto c = daemon::reach(root, true);
+  if (!c) {
+    std::println(std::cerr, "ycxx: error: --watch: cannot reach the daemon: {}", c.error());
+    return false;
+  }
+  {
+    std::lock_guard g(m);
+    current = c->fd.get();
+  }
+  (void)daemon::await_change(*c);
+  std::lock_guard g(m);
+  current = -1;  // before the connection closes, so a stopper never shuts a reused descriptor
+  return true;
+}
+
+// `ycxx cxx --watch` (#245): builds, then waits for the daemon to see a file some build read
+// change, and builds again, until interrupted. The daemon is what watches the files, so it is
+// required. With the stream, each build prints its trace under a header; with the browser, the
+// builds run on a thread of their own and each becomes a node of a live tree, holding its
+// diagnostics.
+int watch_builds(compile::Request r, bool verbose, TraceMode mode) {
+  const std::string root = daemon::root_for(compile::first_input(r.argv), r.cwd);
+  std::mutex m;
+  int current = -1;
+  const auto build_label = [](std::uint64_t n, std::uint64_t changed) {
+    return n == 1 ? std::string("build 1") : std::format("build {}, after {} file{} changed", n, changed, changed == 1 ? "" : "s");
+  };
+  if (mode != TraceMode::interactive || !trace::is_terminal(0)) {
+    std::uint64_t changed = 0;
+    for (std::uint64_t n = 1;; ++n) {
+      std::println(std::cerr, "\n── {}", build_label(n, changed));
+      r.build_time = now_seconds();
+      std::optional<TraceOut> traced;
+      if (mode != TraceMode::off) traced.emplace(TraceMode::stream);
+      auto d = through_daemon(r, verbose, [&](daemon::TraceBatch&& b) {
+        if (traced) traced->batch(std::move(b));
+      }, [&] {
+        if (traced) traced->restart("the daemon was lost; asking a new one");
+      });
+      if (d) {
+        compile::finish(*d);
+        if (traced) traced->finish();
+      } else {
+        std::println(std::cerr, "ycxx: error: the daemon could not build it: {}", d.error());
+      }
+      std::println(std::cerr, "ycxx: watching the files it read; ^C to stop");
+      if (!await_change(root, m, current)) return 1;
+      changed = 1;
+    }
+  }
+
+  // The browser on this thread, the builds on another; what they find crosses in `items`.
+  struct Item {
+    enum { trace, done } what = trace;
+    std::uint64_t build = 0;
+    daemon::TraceBatch batch;
+    std::string text;  // with `done`: the build's diagnostics and outputs' errors
+  };
+  struct Shared {
+    std::mutex m;
+    std::deque<Item> items;
+    bool ended = false;
+  } shared;
+  auto wake = daemon::make_pipe();
+  if (!wake) {
+    std::println(std::cerr, "ycxx: error: {}", wake.error());
+    return 1;
+  }
+  const int wake_w = wake->second.get();
+  const auto post = [&](Item i) {
+    {
+      std::lock_guard g(shared.m);
+      shared.items.push_back(std::move(i));
+    }
+    char c = 'w';
+    daemon::write_all(wake_w, std::as_bytes(std::span(&c, 1)));
+  };
+  std::atomic<bool> stop{false};
+  std::jthread builder([&] {
+    for (std::uint64_t n = 1; !stop.load(); ++n) {
+      r.build_time = now_seconds();
+      auto d = through_daemon(r, verbose, [&](daemon::TraceBatch&& b) { post({Item::trace, n, std::move(b), {}}); });
+      Item done{Item::done, n, {}, {}};
+      if (d) {
+        for (const compile::Output& o : d->outputs) {
+          if (auto err = pipeline::write_file(o.path, o.bytes, o.executable)) done.text += std::format("ycxx: error: {}\n", *err);
+        }
+        done.text = d->out + d->err + done.text;
+        if (done.text.empty()) done.text = d->exit_status == 0 ? "built, no diagnostics" : "failed";
+      } else {
+        done.text = "the daemon could not build it: " + d.error();
+      }
+      post(std::move(done));
+      if (stop.load() || !await_change(root, m, current)) break;
+    }
+    std::lock_guard g(shared.m);
+    shared.ended = true;
+  });
+
+  trace::Tree tree;
+  std::optional<std::uint64_t> base;  // times count from the first build's start
+  const auto group_of = [](std::uint64_t build) { return (std::uint64_t{1} << 63) | build; };
+  std::set<std::uint64_t> opened;
+  trace::Feed feed{wake->first.get(), [&] {
+                     daemon::drain(wake->first.get());
+                     std::deque<Item> items;
+                     bool ended = false;
+                     {
+                       std::lock_guard g(shared.m);
+                       items.swap(shared.items);
+                       ended = shared.ended;
+                     }
+                     for (Item& i : items) {
+                       const std::uint64_t id = group_of(i.build);
+                       if (i.what == Item::done) {
+                         tree.annotate(id, std::move(i.text));
+                         continue;
+                       }
+                       daemon::TraceBatch& b = i.batch;
+                       if (!base) base = b.started_ns;
+                       b.started_ns -= std::min(b.started_ns, *base);
+                       b.ended_ns -= std::min(b.ended_ns, *base);
+                       trace::rebase(b.events, *base);
+                       if (opened.insert(i.build).second) tree.open_group(id, build_label(i.build, i.build > 1), b.started_ns);
+                       if (b.end) tree.close_group(id, b.ended_ns);
+                       else tree.add(b.events, id);
+                     }
+                     return !ended;
+                   },
+                   std::format("rebuilding on every change of the files it reads ({})", root)};
+  trace::browse(tree, &feed);
+  // Stops the builder: its wait is shut down; a build in flight finishes first.
+  stop.store(true);
+  {
+    std::lock_guard g(m);
+    if (current >= 0) daemon::shutdown_both(current);
+  }
+  return 0;
+}
+
 }  // namespace
 
 // The c++-compatible front (compile.cppm has the options). Hidden options for the daemon:
 // `--daemon`, `--daemon=require`, `--no-daemon`; `-v` says whether and where the daemon answered.
 // `--trace-engine[=stream|interactive]` shows what went through the engine (#245); through the
-// daemon, so a second run shows what its warm engine reused.
+// daemon, so a second run shows what its warm engine reused. `--watch` builds again whenever a
+// file the build read changes.
 int cxx(std::span<const std::string_view> args) {
   Use use = use_from_environment();
   const char* no = std::getenv("YCXX_NO_DAEMON");
   bool forced_off = no && !falsy(no);
   bool verbose = false;
   TraceMode trace_mode = trace_mode_from_environment();
+  bool watch = false;
   std::vector<std::string> argv;
   for (std::string_view a : args) {
     if (auto m = trace_mode_named(a)) trace_mode = *m;
     else if (a.starts_with("--trace-engine=")) {
       std::println(std::cerr, "ycxx: error: unknown trace mode in '{}' (stream or interactive)", a);
       return 1;
-    } else if (a == "--no-daemon") forced_off = true;
+    } else if (a == "--watch") watch = true;
+    else if (a == "--no-daemon") forced_off = true;
     else if (a == "--daemon") use = use == Use::require ? use : Use::on;
     else if (a == "--daemon=require") use = Use::require;
     else if (a == "-v") verbose = true;
@@ -218,6 +365,15 @@ int cxx(std::span<const std::string_view> args) {
   if (forced_off) use = Use::off;
 
   compile::Request r{std::move(argv), cwd_now(), compile::environment_now(), now_seconds()};
+  if (watch) {
+    if (use == Use::off) {
+      std::println(std::cerr, "ycxx: error: --watch needs the daemon, which watches the files (YCXX_NO_DAEMON or --no-daemon is set)");
+      return 2;
+    }
+    if (trace_mode != TraceMode::off)
+      r.trace = trace_mode == TraceMode::interactive ? compile::Trace::values : compile::Trace::events;
+    return watch_builds(std::move(r), verbose, trace_mode);
+  }
   std::optional<TraceOut> traced;
   if (trace_mode != TraceMode::off) {
     traced.emplace(trace_mode);

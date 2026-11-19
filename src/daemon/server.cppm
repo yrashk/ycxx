@@ -257,6 +257,9 @@ class Server {
       case Kind::watch:
         if (auto r = decode<WatchRequest>(*frame)) serve_watch(fd, *r);
         return;
+      case Kind::await_change:
+        serve_await_change(fd);
+        return;
       case Kind::compile:
         if (auto r = decode<compile::Request>(*frame)) serve_compile(fd, *r);
         return;
@@ -461,6 +464,25 @@ class Server {
       std::erase(watchers_, w);
     }
     log(dropped ? "a trace watcher fell behind and was dropped" : "a trace watcher detached");
+  }
+
+  // `ycxx cxx --watch` between builds (#245): applies batches as a request's tick would, and
+  // answers once one changed a file-table entry. Ends unanswered on a hang-up or the stop.
+  void serve_await_change(int fd) {
+    while (!wait_readable(fd, std::chrono::milliseconds(150))) {
+      {
+        std::lock_guard g(conn_mu_);
+        if (lsp_closed_) return;
+      }
+      std::unique_lock strand(strand_mu_, std::try_to_lock);
+      if (!strand || (running_ > 0 && !admission_.may_apply(Clock::now()))) continue;
+      if (const std::size_t changed = apply_batch(false); changed > 0) {
+        admission_.applied(Clock::now());
+        strand.unlock();
+        send(fd, Kind::changed, Changed{changed});
+        return;
+      }
+    }
   }
 
   void serve_compile(int fd, const compile::Request& r) {

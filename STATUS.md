@@ -1229,9 +1229,16 @@ request it serves.
   with a time cursor, worker selection, live feed.
 - Names: units and files by their file, functions by qualified name, requests and programs by
   their units and output (`Build(a.cpp → a)`).
-- Daemon: a `compile` that asks gets `trace` frames before its answer; a `watch` connection gets
-  every request's, through a queue its own thread writes (a watcher 64 MiB behind is dropped), and
-  is shut down with the daemon.
+- Daemon: a `compile` that asks gets `trace` frames before its answer, written by its connection
+  thread; a `watch` connection gets every request's, through a queue its own thread writes (a
+  watcher 64 MiB behind is dropped), and is shut down with the daemon. A cancelled request's runs
+  are waited for (`Epochs::Ticket::wait_idle`), so nothing they use goes before they end.
+- `ycxx cxx --watch`: builds, then sends `await_change`, which the daemon answers once a batch
+  changes a file-table entry (a file some build read; build outputs and other files are not
+  entries), and builds again. With the stream each build is traced under a header; with the
+  browser the builds run on a thread of their own and each is a live node holding its
+  diagnostics. A daemon that stops leaves the wait unanswered, and the next build starts a new
+  one.
 - Tests: `unit.trace` (a golden stream of a unit built cold, again and after a whitespace edit;
   the collector under 8 threads; the tree, filters, summary and timeline); `daemon.trace` (traced
   builds through the daemon, a watcher, a stalled watcher beside 40 builds, shutdown). The
