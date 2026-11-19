@@ -60,7 +60,8 @@ it affects, through code generation and the link. The daemon serves concurrent r
 thread pool, and its output is byte for byte that of a cold, in-process build.
 
 **Editor diagnostics.** `ycxx lsp` is a language server that reports ycxx's errors as you type,
-through the daemon, without unsaved text ever reaching a build.
+through the daemon, without unsaved text ever reaching a build. Each file is checked with the
+flags of its last build, or else with its line in the project's `compile_commands.json`.
 
 ### Not yet
 
