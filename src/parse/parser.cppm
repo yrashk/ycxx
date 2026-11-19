@@ -1124,7 +1124,10 @@ public:
         s.variadic = true;
         break;
       }
-      if (accept(Tk::equal)) s.params.back().default_arg = default_argument(t);
+      if (accept(Tk::equal)) {
+        s.params.back().default_arg = default_argument(t);
+        if (s.params.back().default_arg == NodeId::none) ok = false;  // diagnosed
+      }
       if (!accept(Tk::comma)) break;
       if (is(Tk::ellipsis)) {
         bump();
