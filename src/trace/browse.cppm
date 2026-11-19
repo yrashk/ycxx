@@ -434,7 +434,7 @@ class Browser {
   }
   std::string footer() const {
     if (view_ == View::tree)
-      return paint("2", " ↑↓/jk move  ⏎/space fold  ←→ close/open  e/E all  n next run  x next error  J/K ]/[ pane  / filter  w/0-9/m/a worker  o order  v pane  t timeline  ? help  q quit");
+      return paint("2", " ↑↓/jk move  ⏎/space fold  ←→ close/open  e/E all  n next run  x next error  shift+J/K ]/[ pane  / filter  w/0-9/m/a worker  o order  v pane  t timeline  ? help  q quit");
     return paint("2", " ↑↓ lane  ←→/HL scrub  ⏎ open in tree  w/0-9/m/a worker  / filter  t tree  ? help  q quit");
   }
 
@@ -498,7 +498,7 @@ class Browser {
       const std::size_t at = i + detail_scroll_;
       std::string r = at < right.size() ? right[at] : std::string();
       if (long_pane && i == hgt - 1)
-        r = paint("2;7", std::format(" lines {}–{} of {}   J/K line  ]/[ page  }}/{{ end/top ", detail_scroll_ + 1,
+        r = paint("2;7", std::format(" lines {}–{} of {}   shift+J/K line  ]/[ page  }}/{{ end/top ", detail_scroll_ + 1,
                                      detail_scroll_ + shown, right.size()));
       out.push_back(fit(l, lw) + paint("2", "│") + fit(r, rw));
     }
@@ -606,7 +606,7 @@ class Browser {
                                 "  w:3 w:main a worker",
                                 "",
                                 paint("1", " The pane on the right"),
-                                "  J/K a line, ]/[ a page, }/{ end and top",
+                                "  shift+J / shift+K a line (j/k move in the tree), ]/[ a page, }/{ end and top",
                                 "",
                                 paint("1", " Workers"),
                                 "  w cycles, 0-9 picks, m the requesting thread, a all",
