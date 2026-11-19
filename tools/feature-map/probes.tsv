@@ -1,4 +1,4 @@
-# Each probe built and run by ycxx 0c80fcf2277a and by an oracle (feature-map probe).
+# Each probe built and run by ycxx d572660f18b4 and by an oracle (feature-map probe).
 feature	oracle	ycxx	first_error
 lex-core	gcc	pass	
 lex-digraph	gcc	pass	
@@ -58,7 +58,7 @@ stmt-if-init	gcc	pass
 stmt-range-for-init	gcc	fail	expected '='
 stmt-cpp23	gcc	pass	
 dcl-core	gcc	pass	
-dcl-default-args	gcc	fail	'=' is not supported yet
+dcl-default-args	gcc	pass	
 dcl-variadic-fn	gcc	fail	file not found
 dcl-aggregate	gcc	pass	
 dcl-aggregate-ext	gcc	fail	':' is not supported yet
