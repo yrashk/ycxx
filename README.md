@@ -58,9 +58,9 @@ build/bin/ycxx cxx --target=x86_64-pc-linux-gnu -nostdlib example.o -o example
   enumerations; `float`, `double` and `long double` with literals, arithmetic, comparisons and
   conversions giving Clang's results bit for bit, and passing and returning them (classes of
   floating members included) by Clang's calling convention;
-  all operators, and the statements: `switch`, labels and `goto`, declarations in conditions,
-  init-statements in `if`, `switch` and range-based `for`; functions with default
-  arguments, recursion and overloading, operator functions included;
+  `switch`, labels and `goto`, declarations in conditions, init-statements in `if` and `switch`,
+  and range-based `for` over arrays or classes with `begin` and `end`, with optional
+  init-statements; operators and functions with default arguments, recursion and overloading;
 - classes and unions: data and static members, member functions, constructors and destructors
   with RAII, aggregate and designated initialization, namespace-scope objects initialized by
   code before `main` and destroyed after it, block-scope `static` variables initialized once, passing and returning them by value with

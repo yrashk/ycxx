@@ -3604,13 +3604,7 @@ public:
       init = declaration_statement();
     } else {
       u32 b = pos();
-      Ex e = is(Tk::semi) ? Ex{} : expression();
-      if (is(Tk::colon)) {
-        s_->diag(pos(), Diag::not_supported, Tk::colon);  // range-based for
-        skip_to_semi();
-        s_->pop_scope();
-        return {NodeId::none, begin, pos()};
-      }
+      Ex e = is(Tk::semi) ? Ex{} : s_->discarded(expression());
       expect(Tk::semi);
       init = s_->node(ast::ExprStmt{sema::Sema::at(e, b)}, b, pos());
     }
@@ -3618,7 +3612,7 @@ public:
     if (!is(Tk::semi)) cond = condition_operand(CondKind::boolean, value);
     expect(Tk::semi);
     Ex inc;
-    if (!is(Tk::r_paren)) inc = expression();
+    if (!is(Tk::r_paren)) inc = s_->discarded(expression());  // a discarded-value expression ([stmt.for])
     expect(Tk::r_paren);
     ++s_->loop_depth;
     Ex body = substatement();
@@ -3638,6 +3632,11 @@ public:
     for (u32 j = 0;; ++j) {
       switch (kind(j)) {
       case Tk::eof: return std::nullopt;
+      case Tk::kw_enum: case Tk::kw_struct: case Tk::kw_class: case Tk::kw_union:
+        // Skip a base-clause or enum-base directly after the type name. An elaborated
+        // type followed by a declarator (`struct T& x : range`) still starts a range-for.
+        if (depth == 0 && kind(j + 1) == Tk::identifier && kind(j + 2) == Tk::colon) j += 2;
+        break;
       case Tk::l_paren: case Tk::l_square: case Tk::l_brace: ++depth; break;
       case Tk::r_paren: case Tk::r_square: case Tk::r_brace:
         if (depth-- == 0) return std::nullopt;
@@ -3662,8 +3661,9 @@ public:
   // statement` is the loop the draft expands it to, built from the existing kinds:
   //   { init-statement  auto&& __range = initializer;  auto __begin = begin-expr;  auto __end = end-expr;
   //     for ( ; __begin != __end; ++__begin ) { for-range-declaration = *__begin; statement } }
-  // where begin-expr is `__range` for an array, `__range.begin()` for a class with a member `begin`
-  // or `end`, and `begin(__range)` otherwise (as `end`). The for-init scope is open.
+  // where begin-expr is `__range` for an array, `__range.begin()` for a class whose member lookup
+  // finds both `begin` and `end` (P0962), and `begin(__range)` otherwise (as `end`). The for-init
+  // scope is open.
   Ex range_for(u32 begin, bool has_init) {
     std::vector<ast::Child> outer;
     if (has_init) {
@@ -3673,6 +3673,12 @@ public:
     skip_attributes();
     u32 dbegin = pos();
     DeclSpec spec = decl_specifiers();
+    // [stmt.pre]/5 (as for a condition): only type-specifiers and `constexpr`.
+    if (spec.is_static || spec.is_extern || spec.is_inline || spec.is_typedef || spec.is_consteval || spec.is_constinit) {
+      s_->diag(spec.begin, Diag::condition_specifier,
+               spec.is_static ? Tk::kw_static : spec.is_extern ? Tk::kw_extern : spec.is_inline ? Tk::kw_inline
+               : spec.is_typedef ? Tk::kw_typedef : spec.is_consteval ? Tk::kw_consteval : Tk::kw_constinit);
+    }
     Declarator d = declarator(spec.type, false);
     if (!expect(Tk::colon) || !d.ok || !spec.ok) {
       skip_rest();
@@ -3688,24 +3694,21 @@ public:
     Ex range = expression();
     expect(Tk::r_paren);
     sema::Types& types = s_->types();
-    auto finish_dependent = [&] {
-      // In a template's definition: the body is analysed with the variable's type as written;
-      // instantiations expand the loop.
-      s_->push_scope();
+    // In a template's definition, or after an error in the header: the body is analysed with the
+    // variable's type as written (dependent if a placeholder), in the guarded scope; an
+    // instantiation expands the loop.
+    auto finish_dependent = [&](bool ok) -> Ex {
       s_->declare_local(d.name, types.has_placeholder(d.type) ? s_->builtin(Builtin::dependent) : d.type, 0, d.name_at);
       ++s_->loop_depth;
       Ex body = substatement();
       --s_->loop_depth;
       s_->pop_scope();
-      s_->pop_scope();
+      if (!ok) return {NodeId::none, begin, pos()};
       if (body.ok()) outer.push_back(sema::Sema::at(body, begin));
       return s_->node(ast::Compound{s_->builder().list(outer)}, begin, pos());
     };
-    if (!range.ok()) {
-      s_->pop_scope();
-      return {NodeId::none, begin, pos()};
-    }
-    if (s_->dependent(range) || (types.is_dependent(d.type) && !types.has_placeholder(d.type))) return finish_dependent();
+    if (!range.ok()) return finish_dependent(false);
+    if (s_->dependent(range) || (types.is_dependent(d.type) && !types.has_placeholder(d.type))) return finish_dependent(true);
     // auto&& __range = initializer;
     auto hidden = [&](QualType declared, Ex e) -> std::optional<std::pair<u32, Ex>> {
       auto t = s_->deduce_placeholder(declared, e, e.begin);
@@ -3719,10 +3722,7 @@ public:
       return std::pair{l, var};
     };
     auto r = hidden(types.rvalue_ref(types.placeholder(false)), range);
-    if (!r) {
-      s_->pop_scope();
-      return {NodeId::none, begin, pos()};
-    }
+    if (!r) return finish_dependent(false);
     auto ref = [&](u32 l) { return s_->local_ref(l, range.begin, range.end); };
     QualType ct = s_->local(r->first).type;
     ct = types.referee(ct);
@@ -3731,32 +3731,28 @@ public:
     NameId begin_name = s_->ins().names.intern("begin"), end_name = s_->ins().names.intern("end");
     u32 at = range.begin, to = range.end;
     if (types.is_array(ct)) {
-      if (types.rec(ct).bound_value == ast::ConstId::none) {
-        s_->diag(at, Diag::incomplete_type, ct);  // an array of unknown bound
-        s_->pop_scope();
-        return {NodeId::none, begin, pos()};
-      }
+      if (!s_->require_complete(ct, at)) return finish_dependent(false);
       b = s_->rvalue(ref(r->first));
       QualType size = s_->builtin(Builtin::unsigned_long);
       Ex n = s_->literal(size, s_->world().values.integer(size, types.rec(ct).bound), ast::ValueCategory::prvalue, at, to);
       e = s_->binary(sema::Sema::BinOp::add, s_->rvalue(ref(r->first)), n, at);
-    } else if (types.is_class(ct) && s_->require_complete(ct, at) && has_member_named(ct, begin_name, end_name)) {
+    } else if (types.is_class(ct) && s_->find_member(types.class_of(ct), begin_name) &&
+               s_->find_member(types.class_of(ct), end_name)) {
       b = s_->call(s_->member(ref(r->first), false, begin_name, to, at, at), {}, to, to);
       e = s_->call(s_->member(ref(r->first), false, end_name, to, at, at), {}, to, to);
     } else {
+      if (types.is_class(ct) && !s_->require_complete(ct, at)) return finish_dependent(false);
+      // TODO(#165): [stmt.ranged] requires argument-dependent lookup without ordinary lookup.
       b = s_->call(s_->name_expr(begin_name, at, to, true), {ref(r->first)}, to, to);
       e = s_->call(s_->name_expr(end_name, at, to, true), {ref(r->first)}, to, to);
     }
     auto bv = b.ok() ? hidden(types.placeholder(false), b) : std::nullopt;
     auto ev = e.ok() ? hidden(types.placeholder(false), e) : std::nullopt;
-    if (!bv || !ev) {
-      s_->pop_scope();
-      return {NodeId::none, begin, pos()};
-    }
+    if (!bv || !ev) return finish_dependent(false);
     ast::Child decls[] = {sema::Sema::at(r->second, begin), sema::Sema::at(bv->second, begin), sema::Sema::at(ev->second, begin)};
     outer.push_back(sema::Sema::at(s_->node(ast::DeclStmt{s_->builder().list(decls)}, at, to), begin));
     Ex cond = s_->to_bool(s_->binary(sema::Sema::BinOp::ne, ref(bv->first), ref(ev->first), at), at);
-    Ex inc = s_->unary(ast::UnaryOp::pre_inc, ref(bv->first), at, to, at);
+    Ex inc = s_->discarded(s_->unary(ast::UnaryOp::pre_inc, ref(bv->first), at, to, at));
     // { for-range-declaration = *__begin; statement }: declared in the guarded scope with the
     // init-statement's names, neither is redeclared in the statement's outermost block
     // ([basic.scope.block]/2).
@@ -3770,9 +3766,18 @@ public:
         s_->set_local_type(local, d.type);
       } else {
         deref = {};
+        s_->set_local_type(local, s_->builtin(Builtin::dependent));  // its uses say nothing more
       }
     }
     if (deref.ok()) init = types.is_reference(d.type) ? s_->bind_reference(deref, d.type, at, true) : s_->convert(deref, d.type, at);
+    if (!types.is_reference(d.type)) {
+      constant_local(local, d.type, spec.is_constexpr, init);
+    } else if (init.ok() && spec.is_constexpr) {
+      // A built-in dereference reads the non-constexpr iterator even for a reference.
+      // For a class iterator, check the direct call while full evaluation waits for #25.
+      if (types.is_pointer(s_->local(bv->first).type)) constant_local(local, d.type, true, init);
+      else sema::Evaluator(*s_, questions()).check_constexpr_call(deref);
+    }
     ast::EntityId dtor = types.is_reference(d.type) ? ast::EntityId::none : s_->destructor_of(d.type);
     Ex var = s_->node(ast::LocalVar{local, sema::Sema::at(init, dbegin), dtor}, dbegin, d.name_at + 1);
     s_->set_local_decl(local, var.id);
@@ -3789,14 +3794,6 @@ public:
     Ex loop = s_->node(ast::For{{}, sema::Sema::at(cond, begin), sema::Sema::at(inc, begin), sema::Sema::at(block, begin)}, begin, pos());
     outer.push_back(sema::Sema::at(loop, begin));
     return s_->node(ast::Compound{s_->builder().list(outer)}, begin, pos());
-  }
-  // Whether class `t` has a member named `a` or `b` ([stmt.ranged]/1.2: class member access lookup).
-  bool has_member_named(QualType t, NameId a, NameId b) {
-    const sema::ClassRec* c = s_->class_rec(s_->types().class_of(t));
-    if (!c) return false;
-    auto named = [&](NameId n) { return n == a || n == b; };
-    return std::ranges::any_of(c->members, [&](const sema::MemberDeclRec& m) { return named(m.name); }) ||
-           std::ranges::any_of(c->fields, [&](const sema::FieldRec& f) { return named(f.name); });
   }
 
   // [stmt.return]: the operand copy-initializes the result; a void function may return a void
