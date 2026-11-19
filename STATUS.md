@@ -561,18 +561,23 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   indirect calls, stack arguments and RIP-relative data references within a unit. Floating-point,
   aggregate and narrow integer arguments and results, and variadic calls, are outside this ABI
   subset.
-- `-c` writes deterministic ELF64 relocatable objects through `ycxx.obj.elf`. The native ELF
-  linker consumes the same in-memory objects, resolves absolute and PC-relative relocations,
-  and writes a static `ET_EXEC` image with load segments and a non-executable stack.
+- `-c` writes deterministic ELF64 relocatable objects through `src/obj/elf.cppm`. The reader
+  accepts the supported x86-64 `ET_REL` subset emitted by ycxx. The native ELF linker consumes
+  the same in-memory objects, resolves absolute and PC-relative relocations, and writes a static
+  `ET_EXEC` image with load segments and a non-executable stack.
 - `ycxx cxx --target=x86_64-pc-linux-gnu -nostdlib a.cpp b.cpp -o a` compiles and links C++
-  sources in one invocation. When the program supplies an explicit `_start`, that symbol is the
-  entry. Otherwise ycxx's startup calls `int main()` or `int main(int, char**)` and exits with the
-  returned value. The link query checks a source function's ABI when an asm label gives it the
-  symbol `main`. Hosted linking and linking `.o` files from disk remain unsupported.
+  sources in one invocation. Either source can also be compiled separately with `-c` and passed
+  as a `.o` input. The driver links compiled sources in command-line order, then disk objects in
+  command-line order. When the program supplies an explicit `_start`, that symbol is the entry.
+  Otherwise ycxx's startup calls `int main()` or `int main(int, char**)` and exits with the returned
+  value. The link query checks a source function's ABI when an asm label gives it the symbol
+  `main`. A `main` supplied in an ELF object must already use one of those signatures. Hosted
+  linking and general-purpose ELF object interoperability remain unsupported.
 - Linux x86-64 CI runs `unit.linux_compile`, which links a ycxx-produced object with a native C
-  caller, and `unit.linux_executable`, which runs single- and multi-unit executables and checks
-  exit status, `argc` and `argv`, diagnostics, and cold and daemon output. The linker and
-  startup also have native CTest coverage, including execution of an explicit `_start`.
+  caller, and `unit.linux_executable` (`tests/unit/pipeline/linux_executable.py`), which runs
+  source-only, object-only and mixed-input executables and checks exit status, `argc` and `argv`,
+  diagnostics, and cold and daemon output. The linker and startup also have native CTest
+  coverage, including execution of an explicit `_start`.
 
 ## The resident daemon (#96, #97, 2026-11-18)
 

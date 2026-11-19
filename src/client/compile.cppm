@@ -197,12 +197,8 @@ std::expected<Options, std::string> parse_options(std::span<const std::string_vi
   if (o.pp.call_triviality == ast::CallTriviality::apple && !o.pp.target->apple_calls)
     return std::unexpected("invalid value in '-fclass-call-abi=apple'");
   if (o.sources.empty() && o.objects.empty()) return std::unexpected("no input files");
-  if (o.pp.target == &ast::x86_64_linux && o.stop == Options::Stop::link) {
-    if (!o.objects.empty())
-      return std::unexpected(std::format("'{}': linking object files from disk is not supported for Linux", o.objects.front()));
-    if (!o.nostdlib)
-      return std::unexpected("hosted Linux linking is not supported. Use '-nostdlib' for a freestanding executable");
-  }
+  if (o.pp.target == &ast::x86_64_linux && o.stop == Options::Stop::link && !o.nostdlib)
+    return std::unexpected("hosted Linux linking is not supported. Use '-nostdlib' for a freestanding executable");
   if (o.output && o.stop == Options::Stop::object && o.sources.size() > 1)
     return std::unexpected("cannot specify '-o' with '-c' and several input files");
   for (const std::string& s : o.sources)
@@ -460,6 +456,7 @@ Done run(const Request& r, pp::Host& host, pipeline::Session& session, const Sto
   std::optional<std::string> bad_object;
   if (key.until == pipeline::Until::link) {
     std::vector<obj::object> objects;
+    const bool linux_target = opts->pp.target == &ast::x86_64_linux;
     // Objects named on the command line are read as they are, never through the file table (§5.2).
     for (const std::string& path : opts->objects) {
       auto text = read_disk(in_cwd(r, path));
@@ -468,7 +465,7 @@ Done run(const Request& r, pp::Host& host, pipeline::Session& session, const Sto
         break;
       }
       std::vector<std::uint8_t> bytes(text->begin(), text->end());
-      auto o = obj::macho::read_object(bytes, path);
+      auto o = linux_target ? obj::elf::read_object(bytes, path) : obj::macho::read_object(bytes, path);
       if (!o) {
         bad_object = o.error();
         break;

@@ -31,14 +31,15 @@ build/bin/ycxx cxx hello.cpp -o hello && ./hello
 ```
 
 **Compile for x86-64 Linux.** Select `--target=x86_64-pc-linux-gnu` to compile with the scalar
-System V AMD64 backend. Use `-c` to write an ELF object, or `-nostdlib` to link one or more C++
-source files into a static executable. The startup code calls `int main()` or
-`int main(int, char**)` and passes its return value to Linux as the exit status. A program can
+System V AMD64 backend. Use `-c` to write an ELF object, or `-nostdlib` to link C++ sources,
+ycxx-generated `.o` files, or a mixture into a static executable. The startup calls `int main()`
+or `int main(int, char**)` and passes its return value to Linux as the exit status. A program can
 also supply its own `_start`. For example, given `example.cpp` containing
 `int main() { return 0; }`, run the following on x86-64 Linux.
 
 ```sh
-build/bin/ycxx cxx --target=x86_64-pc-linux-gnu -nostdlib example.cpp -o example
+build/bin/ycxx cxx --target=x86_64-pc-linux-gnu -c example.cpp
+build/bin/ycxx cxx --target=x86_64-pc-linux-gnu -nostdlib example.o -o example
 ./example
 ```
 
@@ -120,7 +121,7 @@ checked with the flags of its last build, or else with its line in the project's
 - Member class and alias templates, conversion function templates, and constraints on class
   templates and their members.
 - Exceptions, optimization (`-O`), and the extended floating-point types (`std::float16_t`, …).
-- Hosted linking and linking object files from disk for x86-64 Linux.
+- Hosted linking and general-purpose ELF object interoperability for x86-64 Linux.
 
 ### In progress
 
