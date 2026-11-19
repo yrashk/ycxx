@@ -1,0 +1,23 @@
+November 19 Claude recovery handoff
+
+Recovery issue: https://github.com/yrashk/ycxx/issues/377
+Repository: yrashk/ycxx
+Handoff branch: handoff-nov-19/agent-a5402cf59b161d7c9
+Original branch: refs/heads/worktree-agent-a5402cf59b161d7c9
+Original directory: /Users/yrashk/Projects/ycxx/.claude/worktrees/agent-a5402cf59b161d7c9
+Original HEAD: f0941bd5e53720adbbe0c7bc29ea3634cc96638e
+Snapshot tip: f0941bd5e53720adbbe0c7bc29ea3634cc96638e
+Snapshot kind: original commit; no worktree changes added
+Task: Spec-only floating-point tests
+Issues: https://github.com/yrashk/ycxx/issues/336, https://github.com/yrashk/ycxx/issues/201
+Commits absent from current origin/main at inventory: 1
+
+Claude chat summaries (one entry per matched chat):
+
+Session agent-a5402cf59b161d7c9
+Log: /Users/yrashk/.claude/projects/-Users-yrashk-Projects-ycxx--claude-worktrees-friendly-lehmann-453d92/d77c9847-b507-44b9-ba26-fff91d2fe677/subagents/agent-a5402cf59b161d7c9.jsonl
+Log SHA-256: 994c653c87968ede31fcccc635fc64e2f3de8a4572b8c13f48bb05d0a43a20b7
+Independent spec-only test author for floating-point tests (#336, #201). The brief prohibited reading ycxx implementation and other compilers’ sources, and used the draft/cppreference with compiler black-box checks. The preserved commit contains this author’s test deliverables, separate from the parent implementation branch. Read its tests as requirements and compare with tests already on main before cherry-picking; a standalone test-author checkpoint does not imply the feature implementation is present.
+
+Recovery next step: read the linked issue, compare this snapshot with current main and the implementation/test-author counterparts, finish unfinished review work, run required checks in a new worktree, and continue toward a green PR. Notify original issues when starting the parallel continuation; after the PR is green, link it there and explicitly take over from the previous agent. Amend WIP snapshots as the work continues, preserving/rewriting the note onto the new tip.
+Validation: preservation session verified source HEAD/index/status unchanged and snapshot tree equality. Historical test statements above are reports from Claude logs, not new test runs. No compiler implementation sources were consulted to summarize these chats.
