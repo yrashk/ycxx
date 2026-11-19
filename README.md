@@ -68,6 +68,8 @@ through the daemon, without unsaved text ever reaching a build.
 - The standard library and its headers. C headers such as `<stdio.h>` compile and `printf` runs;
   libycxx's `<cstdio>` still needs parameter packs and concepts.
 - Inheritance and virtual functions, passing classes by value, `sizeof` of a class.
+- Access control: `private` and `protected` are not checked yet, so ycxx accepts code that
+  uses private members ([#119](https://github.com/yrashk/ycxx/issues/119)).
 - Concepts, member templates, template template parameters, `if constexpr`.
 - Floating-point arithmetic, exceptions, and optimization (`-O`).
 - Go-to-definition in the language server.
