@@ -315,6 +315,17 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
 
 ## Evidence and tests
 
+- **A feature probe must use nothing but the feature.** On #282, 40 of the first 150 probes failed
+  on something else: `auto` to hold a lambda, a nested `struct`, a default argument, `alignas`.
+  Each would have filed the wrong status and the wrong failing example.
+  - Do: write a probe from features already known to work, and confirm each failure with a
+    one-line micro-probe of the feature alone before recording it. ycxx's first error names the
+    construct it stopped at, which shows at once whether that is the feature under test.
+  - The same pass found that a coverage check walking up to cited ancestors could not fail
+    (`[class]` covered every `[class.*]`): mutate the data (rename a cited clause) to see the
+    check fail (DECISIONS §5.6).
+  - Learned on #282.
+
 - **Test a long-lived connection's lifetime before the review.** Both P0s of #99 were in the
   LSP tunnel, and the functional tests could not have shown either:
   - a one-thread copy loop deadlocked once a large answer and a large edit crossed;
