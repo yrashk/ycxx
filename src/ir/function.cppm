@@ -91,6 +91,12 @@ export constexpr std::span<const TyKind> implicit_params(Op op, std::uint32_t su
 }
 
 export struct Function {
+  // The entry block's parameters that are the addresses of objects of class type: a mask over
+  // the value parameters (after `!state`) that are parameters of class type ([expr.call]/7), and
+  // 1 + the index of the one the class result initializes ([stmt.return]), 0 if none. As the
+  // call op's.
+  std::uint32_t byval_params = 0;
+  std::uint32_t result_param = 0;
   std::vector<Block> blocks;
   std::vector<Node> nodes;
   std::vector<Value> values;

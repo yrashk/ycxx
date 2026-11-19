@@ -38,6 +38,11 @@ export struct TypeLayout {
   std::uint32_t align = 1;
   bool is_signed = false;  // integers
   QualType pointee{};      // pointers: the pointed-to type
+  // Records: trivially copyable for calls ([class.temporary]/3): a trivial, non-deleted copy or
+  // move constructor and destructor, so the target's convention may pass it in registers.
+  bool trivial_calls = true;
+  bool empty = false;     // records: no non-static data members
+  bool floating = false;  // records: a floating member, at any depth
 };
 
 export struct SubObject {
@@ -64,6 +69,14 @@ concept layout_source = requires(const L& l, QualType t, PathStep s, ConstId c) 
 // Target facts `lower` reads (the `config` query).
 export struct LowerConfig {
   std::uint32_t min_result_bits = 32;  // narrower integer results are returned extended to this
+  // A class trivially copyable for calls of at most this many bytes passes and returns in that
+  // many 8-byte integer registers, rounded up; any other class by the address of an object
+  // (AAPCS64 §6.8.2 rules B.3, C.10–C.12, §6.9; Itanium C++ ABI §3.1.2).
+  std::uint32_t composite_in_registers = 16;
+  // The integer argument registers. A class that needs more of them than are left goes whole on
+  // the stack, and the registers left go unused (AAPCS64 C.11): `lower` fills them with words no
+  // one reads.
+  std::uint32_t int_arg_registers = 8;
 };
 
 export struct LowerError {
@@ -91,7 +104,9 @@ class Lowering {
       if (block_map_[raw(b)] == none) continue;
       if (auto e = block(b); !e) return std::unexpected(e.error());
     }
-    return b_.finish(results_.value_or(std::vector<l2::Type>{}));
+    l2::Function out = b_.finish(results_.value_or(std::vector<l2::Type>{}));
+    out.indirect_result = indirect_result_;
+    return out;
   }
 
  private:
@@ -107,6 +122,10 @@ class Lowering {
   std::vector<std::uint32_t> block_map_;
   std::optional<std::vector<T>> results_;
   NodeId at_{};                   // the L1 node being lowered
+  // The class result: returned in registers from this frame object, or passed indirectly.
+  std::optional<ValueId> result_object_;
+  std::uint32_t result_words_ = 0, indirect_result_ = 0;
+  std::uint32_t frame_objects_ = 0;  // the ABI's own frame objects, numbered apart from L1's allocs
 
   // Blocks reachable from the entry, `consteval_br` taking only its runtime edge.
   void reachable() {
@@ -209,20 +228,77 @@ class Lowering {
   }
 
   std::expected<void, LowerError> block(BlockId b) {
+    bool entry = raw(b) == 0;
     std::vector<T> params;
+    // An entry parameter of class type, or the class result, passed in registers: its words.
+    struct InRegisters {
+      ValueId l1;
+      std::uint32_t first, words;
+      bool result;
+    };
+    std::vector<InRegisters> in_regs;
+    std::vector<std::int64_t> l2_of;  // per L1 parameter: its L2 parameter, or -1
+    std::uint32_t j = 0;              // the value parameter's index
     for (ValueId p : f_.params_of(b)) {
       if (f_.value(p).type.kind == TyKind::state) {
+        l2_of.push_back(std::int64_t(params.size()));
         params.push_back(T::state);
         continue;
       }
       if (f_.value(p).type.kind != TyKind::cxx) return fail("exception and coroutine values are not in the α subset");
+      bool result = entry && f_.result_param == j + 1, byval = entry && j < 32 && ((f_.byval_params >> j) & 1);
+      ++j;
+      if (result || byval) {
+        QualType pc = layout(cxx(p)).pointee;
+        if (auto why = unpassable(pc)) return fail(*why);
+        if (ignored(pc)) {  // passed by nothing: an object of this frame stands for it
+          in_regs.push_back({p, 0, 0, result});
+          l2_of.push_back(-1);
+          continue;
+        }
+        std::uint32_t words = in_registers(pc);
+        if (result && words) {
+          in_regs.push_back({p, 0, words, true});
+          l2_of.push_back(-1);
+          continue;
+        }
+        if (byval && words) {
+          pad_registers(params.size() - 1 - (indirect_result_ ? 1 : 0), words, [&] { params.push_back(T::i64); });
+          in_regs.push_back({p, std::uint32_t(params.size()), words, false});
+          l2_of.push_back(-1);
+          for (std::uint32_t w = 0; w < words; ++w) params.push_back(T::i64);
+          continue;
+        }
+        if (result) indirect_result_ = std::uint32_t(params.size());  // 1 + its index past `!state`
+      }
       auto t = type_of(cxx(p));
       if (!t) return fail(t.error());
+      l2_of.push_back(std::int64_t(params.size()));
       params.push_back(*t);
     }
     BlockId nb = b_.begin_block(params);
     std::uint32_t i = 0;
-    for (ValueId p : f_.params_of(b)) map_[raw(p)] = b_.param(nb, i++);
+    for (ValueId p : f_.params_of(b)) {
+      if (l2_of[i] >= 0) map_[raw(p)] = b_.param(nb, std::uint32_t(l2_of[i]));
+      ++i;
+    }
+    if (!in_regs.empty()) {
+      // The objects the words fill, or the class result's object, in this frame.
+      ValueId state = map_[raw(*f_.params_of(b).begin())];
+      for (const InRegisters& r : in_regs) {
+        TypeLayout l = layout(layout(cxx(r.l1)).pointee);
+        ValueId obj = frame_object(l);
+        if (r.result) {
+          result_object_ = obj;
+          result_words_ = r.words;
+        } else {
+          for (std::uint32_t w = 0; w < r.words; ++w)
+            state = store_word(state, add_offset(obj, 8 * w), b_.param(nb, r.first + w));
+        }
+        map_[raw(r.l1)] = obj;
+      }
+      map_[raw(*f_.params_of(b).begin())] = state;
+    }
     for (NodeId n : f_.nodes_of(b)) {
       at_ = n;
       if (auto e = node(n); !e) return e;
@@ -420,13 +496,43 @@ class Lowering {
         auto l1ops = f_.operands_of(n);
         if (ind) ops.push_back(in(n, 1));
         std::uint64_t sext = 0;
+        std::uint64_t byval = imms[ind ? 1 : 2], result_arg = imms[ind ? 2 : 3];
+        std::uint32_t indirect = 0;           // L2's: 1 + the index of the indirect result's address
+        std::optional<ValueId> result_dst;    // a class result in registers: where it goes
+        std::uint32_t result_words = 0;
+        ValueId state = in(n, 0);
         for (std::size_t i = ind ? 2 : 1, k = 0; i < l1ops.size(); ++i, ++k) {
           ValueId v = map_[raw(l1ops[i])];
           if (k >= 32) return fail("more than 32 arguments are not in the α subset");
-          if (b_.peek().type(v) != T::i1 && b_.peek().type(v) != T::ptr && is_signed(l1ops[i])) sext |= 1u << k;
+          std::size_t at = ops.size() - (ind ? 2 : 1);  // the argument's L2 index
+          if (((byval >> k) & 1) || k + 1 == result_arg) {
+            QualType c = layout(cxx(l1ops[i])).pointee;
+            if (auto why = unpassable(c)) return fail(*why);
+            if (ignored(c)) continue;  // an empty class passes nothing, and returns nothing
+          }
+          if (k + 1 == result_arg) {
+            QualType c = layout(cxx(l1ops[i])).pointee;
+            if (std::uint32_t words = in_registers(c)) {
+              result_dst = v;
+              result_words = words;
+              continue;
+            }
+            indirect = std::uint32_t(at + 1);
+          } else if ((byval >> k) & 1) {
+            // A class argument in registers: its object's words (AAPCS64 C.10). The object is a
+            // temporary, whose frame object `frame_object` rounds to whole words.
+            if (std::uint32_t words = in_registers(layout(cxx(l1ops[i])).pointee)) {
+              pad_registers(at - (indirect ? 1 : 0), words, [&] { ops.push_back(constant(T::i64, 0)); });
+              for (std::uint32_t w = 0; w < words; ++w) ops.push_back(load_word(state, add_offset(v, 8 * w)));
+              continue;
+            }
+          }
+          if (b_.peek().type(v) != T::i1 && b_.peek().type(v) != T::ptr && is_signed(l1ops[i])) sext |= 1u << at;
           ops.push_back(v);
         }
+        if (ops.size() - (ind ? 2 : 1) > 32) return fail("more than 32 argument registers are not in the α subset");
         std::vector<T> res{T::state};
+        for (std::uint32_t w = 0; w < result_words; ++w) res.push_back(T::i64);
         std::vector<std::optional<T>> narrow;
         for (std::uint32_t i = 1; i < nd.nres; ++i) {
           auto t = type_of(cxx(l1_result(n, i)));
@@ -440,8 +546,18 @@ class Lowering {
         if (!ind) im.push_back(imms[0]);
         im.push_back(sext);
         im.push_back(imms[ind ? 0 : 1]);  // the arguments the ellipsis matches
+        im.push_back(indirect);
         NodeId c = b_.emit(ind ? Op2::call_ind : Op2::call, res, ops, im, 0, {}, o);
-        out(n, 0, b_.peek().result(c));
+        ValueId after = b_.peek().result(c);
+        if (result_dst) {
+          // The class result's words, stored into the caller's object without writing past it.
+          TypeLayout l = layout(layout(cxx(l1ops[(ind ? 2 : 1) + result_arg - 1])).pointee);
+          for (std::uint32_t w = 0; w < result_words; ++w)
+            after = store_piece(after, *result_dst, 8 * w, std::min<std::uint64_t>(8, l.size - 8 * w), b_.peek().result(c, 1 + w));
+          out(n, 0, after);
+          return {};
+        }
+        out(n, 0, after);
         for (std::uint32_t i = 1; i < nd.nres; ++i) {
           ValueId v = b_.peek().result(c, i);
           // Only the result's own bits are read: a bool is bit 0, whatever the callee left above it.
@@ -471,6 +587,11 @@ class Lowering {
         std::vector<ValueId> ops{in(n, 0)};
         std::vector<T> types;
         auto l1ops = f_.operands_of(n);
+        // A class result in registers: its object's words (AAPCS64 §6.9).
+        for (std::uint32_t w = 0; w < result_words_; ++w) {
+          ops.push_back(load_word(in(n, 0), add_offset(*result_object_, 8 * w)));
+          types.push_back(T::i64);
+        }
         for (std::size_t i = 1; i < l1ops.size(); ++i) {
           ValueId v = map_[raw(l1ops[i])];
           T t = b_.peek().type(v);
@@ -491,6 +612,64 @@ class Lowering {
       }
       default: return fail(std::format("`{}` is not in the α subset", info(nd.op).name));
     }
+  }
+
+  // AAPCS64 C.11: when `words` registers are wanted after `used` and fewer are left, those left
+  // are skipped, `add` filling each with a word no one reads.
+  template <class Add>
+  void pad_registers(std::size_t used, std::uint32_t words, Add&& add) const {
+    if (used < config_.int_arg_registers && used + words > config_.int_arg_registers)
+      for (std::size_t r = used; r < config_.int_arg_registers; ++r) add();
+  }
+  // How many 8-byte registers an object of class `c` passes in, 0 for by address (LowerConfig).
+  std::uint32_t in_registers(QualType c) const {
+    TypeLayout l = layout(c);
+    if (l.kind != TypeKind::record || !l.trivial_calls || l.size > config_.composite_in_registers) return 0;
+    return std::uint32_t((l.size + 7) / 8);
+  }
+  // An empty class trivially copyable for calls is not passed at all, as Clang does on arm64
+  // macOS (#116).
+  bool ignored(QualType c) const {
+    TypeLayout l = layout(c);
+    return l.kind == TypeKind::record && l.trivial_calls && l.empty;
+  }
+  // Why a class cannot pass yet: a floating member, which makes it a homogeneous floating-point
+  // aggregate passed in the vector registers (AAPCS64 §6.8.2 C.2) once floating values exist (#201).
+  std::optional<std::string> unpassable(QualType c) const {
+    TypeLayout l = layout(c);
+    if (l.kind == TypeKind::record && l.trivial_calls && l.floating && l.size <= 32)
+      return "a class with floating members passed by value (AAPCS64 homogeneous aggregates, #201)";
+    return std::nullopt;
+  }
+  // A frame object of the ABI's own for a class object, whole words long, so its words can be
+  // loaded and stored as such.
+  ValueId frame_object(const TypeLayout& l) {
+    std::uint64_t size = (l.size + 7) / 8 * 8;
+    return emit1(Op2::alloca, T::ptr, {}, {size, std::max<std::uint32_t>(l.align, 8), 0x80000000u + frame_objects_++});
+  }
+  ValueId load_word(ValueId s, ValueId p) {
+    auto o = origin();
+    return b_.value(Op2::load, T::i64, {s, p}, {0}, 0, o);
+  }
+  ValueId store_word(ValueId s, ValueId p, ValueId v) { return store_piece(s, p, 0, 8, v); }
+  // Stores the low `size` bytes of the 64-bit word `v` at `p + off`, little-endian, in pieces
+  // that do not write past them.
+  ValueId store_piece(ValueId s, ValueId p, std::uint64_t off, std::uint64_t size, ValueId v) {
+    std::uint64_t done = 0;
+    while (done < size) {
+      std::uint64_t w = 8;
+      while (w > size - done) w /= 2;
+      ValueId piece = done ? emit1(Op2::lshr, T::i64, {v, constant(T::i64, std::int64_t(8 * done))}) : v;
+      T t = *l2::int_of_bits(w * 8);
+      if (t != T::i64) piece = emit1(Op2::trunc, t, {piece});
+      auto o = origin();
+      T st[] = {T::state};
+      ValueId ops[] = {s, add_offset(p, off + done), piece};
+      std::uint64_t im[] = {0};
+      s = b_.peek().result(b_.emit(Op2::store, st, ops, im, 0, {}, o));
+      done += w;
+    }
+    return s;
   }
 
   // Copies the object at `src` to `dst`, chunk by chunk.

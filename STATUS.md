@@ -975,6 +975,32 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   built-in operator. `N::T(…)` is a cast only when no function or variable hides N::T.
 - Tests: `tests/own/operators` (12, seven from the review), `tests/own/headers` (2).
 
+## Object model, step 1: classes by value (#116, 2026-11-18)
+
+- **L1:** a parameter of class type is the address of an object the caller initializes
+  ([expr.call]/7); sema materializes the argument, so the caller destroys it at the end of the
+  full-expression (Itanium C++ ABI §3.1.2). A class result is written through a hidden argument,
+  the address of the object the call initializes ([stmt.return]): the caller's variable, member or
+  temporary, so returning a prvalue copies nothing. The call op's two new immediates and
+  `ir::Function::byval_params`/`result_param` mark both. A discarded class result is a temporary
+  ([expr.context]/2); `f({…})` with one candidate and `return {…};` copy-list-initialize.
+- **`lower`** applies AAPCS64 (§6.8.2 C.10–C.12, §6.9): a class trivially copyable for calls
+  ([class.temporary]/3, `sema::Classes::trivial_for_calls`, `TypeLayout::trivial_calls`) of at
+  most 16 bytes passes and returns in one or two 8-byte registers; a larger or non-trivial one by
+  address, an indirect result in x8 (`l2::Function::indirect_result`, the call's fourth
+  immediate). A class needing more registers than are left goes whole on the stack and leaves the
+  rest unused (C.11). An empty class passes nothing, as in Clang. A user-provided move
+  constructor makes a class non-trivial for calls, as in Clang 23 and GCC; Apple Clang 21
+  differs (#230).
+- **Mixed-object tests:** `PEER:` in a run test names a file Clang compiles and links with it
+  (docs/TESTING.md). `tests/own/abi` checks 3- to 24-byte classes, a non-trivial one, member
+  functions returning classes and exhausted registers, calling both ways.
+- Not yet: braced arguments to overload sets, templates and member calls (#231), class arguments
+  through an ellipsis and calls through pointers returning classes (#196), classes with
+  floating members (#201), classes in constant evaluation (#25).
+- Tests: `tests/own/abi` (3), `tests/own/classes/s5-byvalue-lifetimes`, `-temporaries`;
+  s1-byvalue-params and -return pass.
+
 ## Templates, ζ step 1: function templates (#88, 2026-11-18)
 
 Instantiation follows ast.md §6.4 as amended by #88 (Fable's decision): declarations and

@@ -197,8 +197,24 @@ def build_and_run(c, src, ctx, tr, flags, timeout, work, tag='', label='', env=N
     return True, r.status, r.stdout
 
 
+def peer_objects(test, ctx, tr, timeout, work):
+    """The test's PEER files, each compiled by Clang to an object linked with the test: a
+    mixed-object ABI test (DECISIONS §5.4)."""
+    objs = []
+    for name in (v.strip() for v in test.directives.get('PEER', [])):
+        clang = ctx.compilers['clang']
+        need(clang, 'run')
+        obj = Path(work) / (Path(name).stem + '.o')
+        r = run(tr, f'clang -c {name}', [clang.exe, '-std=c++26', '-fno-exceptions', '-c', name, '-o', str(obj)], timeout, cwd=test.path.parent)
+        if r.status != 0:
+            raise Unresolved(f'clang could not compile the peer {name} (exit {r.status})')
+        objs.append(str(obj))
+    return objs
+
+
 def run_run(test, ctx, tr, flags, timeout, work):
     need(ctx.cut, 'run')
+    flags = [*flags, *peer_objects(test, ctx, tr, timeout, work)]
     ok, st, out = build_and_run(ctx.cut, test.path, ctx, tr, flags, timeout, work)
     if not ok:
         raise Failed(f'did not compile (exit {st})')

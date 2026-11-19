@@ -520,7 +520,7 @@ void recursion_and_promotions() {
         b.bin(ast::BinaryOp::mul, w.int_t, rn(), b.call(f, w.int_t, {b.bin(ast::BinaryOp::sub, w.int_t, rn(), b.lit(w.int_t, "1"))}))))}));
     FunctionIr r = generate(w, {f, w.fn_ii, {{n, w.int_t}}}, body);
     std::string got = w.text(f, r.body);
-    check(got.contains("= call %") && got.contains("[@fact, 0]") && !got.contains("not_constexpr"),
+    check(got.contains("= call %") && got.contains("[@fact, 0, 0, 0]") && !got.contains("not_constexpr"),
           "a call to a constexpr function is not flagged:\n" + got);
     check(got.contains("mul nsw") && got.contains("sub nsw"), "signed arithmetic is nsw:\n" + got);
     // `n * fact(n - 1)`: what `fact` does is indeterminately sequenced with the read of n, not
@@ -578,7 +578,7 @@ func @main {
 ^0(%0: !state):
   %1: const_char[6]* = const [#&"hello"]
   %2: const_char* = ptr_member %1 [char, /e0]
-  %3: !state, %4: int = call not_constexpr %0, %2 [@puts, 0]
+  %3: !state, %4: int = call not_constexpr %0, %2 [@puts, 0, 0, 0]
   %5: int = const [#0]
   ret %3, %5
 }
@@ -608,11 +608,11 @@ func @main {
   %2: const_char* = ptr_member %1 [char, /e0]
   %3: int = const [#1]
   %4: long = const [#2]
-  %5: !state, %6: int = call not_constexpr %0, %2, %3, %4 [@printf, 2]
+  %5: !state, %6: int = call not_constexpr %0, %2, %3, %4 [@printf, 2, 0, 0]
   %7: const_char* = const [#null]
   %8: int = const [#3]
   %9: int = const [#4]
-  %10: !state, %11: int = call not_constexpr %5, %7, %8, %9 [@m, 1]
+  %10: !state, %11: int = call not_constexpr %5, %7, %8, %9 [@m, 1, 0, 0]
   %12: int = const [#0]
   ret %10, %12
 }
@@ -846,7 +846,7 @@ void void_return() {
   expect(w, {h, w.fn_v, {}}, body, R"(
 func @h {
 ^0(%0: !state):
-  %1: !state = call not_constexpr %0 [@g, 0]
+  %1: !state = call not_constexpr %0 [@g, 0, 0, 0]
   ret %1
 }
 )");
