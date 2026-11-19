@@ -1645,6 +1645,25 @@ values, end to end; results match Clang's bit for bit.
 - Not yet: the extended floating-point types (#351), floating non-type template parameters
   (#317), `-ffast-math`-style options, and `<cmath>` (#349).
 
+## Dynamic initialization of namespace-scope variables, ι (#94, #337, 2026-11-19)
+
+- **Front** (src/parse/parse.cppm): a namespace-scope variable whose initializer is not a constant
+  expression keeps its initializer tree instead of an error (constexpr and constinit ones must
+  still be constant); `T x(args)` and default-initialization by a constructor (an object or an
+  array of them) are dynamic.
+- **The unit's initialization function** (src/pipeline/front.cppm `init_function`): one
+  `StaticInit` statement per such variable, in definition order ([basic.start.dynamic]/1), each
+  initializing the object from its declaration's tree (positions pinned, as for default
+  arguments) and registering the destructor with `__cxa_atexit(d, &object, &__dso_handle)`
+  ([basic.start.term]; each array element on its own). It has internal linkage and Clang's name,
+  `__GLOBAL__sub_I_<file>`; a pointer to it goes in `__DATA,__mod_init_func`
+  (`obj::standard_section::mod_init_func`, `aarch64::DataKind::init_func`), which dyld runs before
+  `main`. A dynamically initialized `const` variable is placed in writable data.
+- Not yet: references bound at run time (#367); inline variables (#368); default member
+  initializers that are not constants (#118).
+- Tests: `tests/own/dynamic-init/` (spec-only, 16 tests; a Clang peer with its own initializers
+  in `peer.run.cpp`).
+
 ## Bootstrap workarounds
 
 Places where ycxx's sources avoid or work around a C++26 feature because GCC 16 lacks it or

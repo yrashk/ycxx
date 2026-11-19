@@ -1,4 +1,4 @@
-# Each probe built and run by ycxx ae1bd8d2eb28 and by an oracle (feature-map probe).
+# Each probe built and run by ycxx 9bc426dbf1f0 and by an oracle (feature-map probe).
 feature	oracle	ycxx	first_error
 lex-core	gcc	pass	
 lex-digraph	gcc	pass	
@@ -30,7 +30,7 @@ basic-inline-vars	gcc	pass
 basic-object-lifetime	gcc	pass	
 basic-elision	gcc	pass	
 basic-static-local	gcc	fail	'static' is not supported yet
-basic-dynamic-init	gcc	fail	dynamic initialization of a namespace-scope variable is not supported yet: call to a function that is not constexpr
+basic-dynamic-init	gcc	pass	
 basic-thread-local	gcc	fail	'thread_local' is not supported yet
 basic-new-delete	gcc	fail	'new' is not supported yet
 basic-aligned-new	gcc	fail	'alignas' is not supported yet
@@ -124,7 +124,7 @@ temp-auto-nttp	gcc	fail	a non-type template parameter must have a structural typ
 temp-class-nttp	gcc	fail	'class' is not supported yet
 concepts-def	gcc	pass	
 concepts-constraints	gcc	pass	
-concepts-abbreviated	gcc	fail	'(' is not supported yet
+concepts-abbreviated	gcc	fail	reference to 'Int' is ambiguous
 except-core	gcc	fail	'throw' is not supported yet
 except-noexcept	gcc	fail	'noexcept' is not supported yet
 coroutines	gcc	fail	expected ')'
