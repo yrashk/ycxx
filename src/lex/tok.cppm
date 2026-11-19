@@ -171,6 +171,9 @@ enum class Tk : u8 {
   kw_volatile,
   kw_wchar_t,
   kw_while,
+  // GNU pointer qualifiers (docs/EXTENSIONS.md).
+  kw___restrict,
+  kw___restrict__,
 };
 
 // Token flags. `line_start` and `space_before` describe whitespace and are not part of an item's

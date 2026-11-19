@@ -1365,6 +1365,13 @@ Fable decided the representation (ast.md §6.6); the Opus session wrote the code
   (was 1). `<cmath>` and `<cstdlib>` gain errors in the SDK's `__GNUC__` inline functions (local
   unions, floating-point operations, `__builtin_fabs*`), which already had thousands.
 
+## GNU pointer qualifiers in glibc declarations (#384)
+
+- The parser accepts `__restrict` and `__restrict__` after `*` in pointer declarators
+  ([dcl.ptr]), including the parameter declarations in glibc's `<stdio.h>`. Type construction
+  and alias analysis use the ordinary pointer rules. `unit.sema` covers both spellings and
+  invalid declarators. See `docs/EXTENSIONS.md`.
+
 ## Templates, ζ step 8: template template parameters and `__make_integer_seq` (#88, #208, 2026-11-19)
 
 Fable decided the representation (ast.md §6.7); the Opus session wrote the code.

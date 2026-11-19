@@ -570,6 +570,7 @@ public:
     struct PtrOp {
       Tk op;
       sema::Cv cv;
+      std::optional<u32> restrict_at;
     };
     std::vector<PtrOp> pointers;
     std::unique_ptr<Level> inner;
@@ -684,11 +685,21 @@ public:
       Tk op = kind();
       bump();
       int cv = 0;
-      while (op == Tk::star && (is(Tk::kw_const) || is(Tk::kw_volatile))) {
-        cv |= is(Tk::kw_const) ? 1 : 2;
+      std::optional<u32> restrict_at;
+      while (op == Tk::star) {
+        if (is(Tk::kw_const)) cv |= 1;
+        else if (is(Tk::kw_volatile)) cv |= 2;
+        else if (is(Tk::kw___restrict) || is(Tk::kw___restrict__)) {
+          if (restrict_at) {
+            s_->diag(pos(), Diag::duplicate_specifier, kind());
+            ok = false;
+          } else {
+            restrict_at = pos();
+          }
+        } else break;
         bump();
       }
-      l.pointers.push_back({op, sema::Cv(cv)});
+      l.pointers.push_back({op, sema::Cv(cv), restrict_at});
     }
     // A parameter pack's declarator ([dcl.fct]/23, [temp.param]/17): `T... x`, `Ts&&...`.
     if (abstract && packs_in_declarators_ && is(Tk::ellipsis)) {
@@ -973,6 +984,11 @@ public:
         s_->diag(d.begin, Diag::void_variable, s_->no_name());
         d.ok = false;
         return t;
+      }
+      // GNU restrict is accepted on pointer declarators without changing the built type.
+      if (p.restrict_at && s_->types().is_function(t)) {
+        s_->diag(*p.restrict_at, Diag::restrict_function_pointer);
+        d.ok = false;
       }
       if (p.op == Tk::star) t = s_->types().add_cv(s_->types().pointer(t), p.cv);
       else t = p.op == Tk::amp ? s_->types().lvalue_ref(t) : s_->types().rvalue_ref(t);
