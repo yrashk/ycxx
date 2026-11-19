@@ -62,6 +62,10 @@ def main():
             ('long double f(long double x) { return x; }', 'only void, 32- and 64-bit integer'),
             ('int f(short x) { return x; }', 'only 32- and 64-bit integer'),
             ('struct X { int x; }; int f(X x) { return x.x; }', 'only 32- and 64-bit integer'),
+            ('struct X { int x; }; int g(X); int f() { return g(X{1}); }',
+             'call: only 32- and 64-bit integer'),
+            ('struct X { int x; }; X g(int); int f() { X x = g(1); return x.x; }',
+             'call: only void, 32- and 64-bit integer'),
             ('int g(int, ...); int f() { return g(1); }', 'call: variadic functions'),
             ('int f(int (*g)(int, ...)) { return g(1); }', 'call: variadic functions'),
         )
