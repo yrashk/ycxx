@@ -891,21 +891,34 @@ engine::query_task<ir::FunctionDebug> FunctionDebug::run(engine::Ctx& cx, FnKey 
 
 namespace {
 
+bool linux_scalar(const QueryLayout& layout, QualType type) {
+  ir::TypeLayout l = layout.type(type);
+  return l.kind == ir::TypeKind::pointer || (l.kind == ir::TypeKind::integer && (l.size == 4 || l.size == 8));
+}
+
 // Lowering implements the Darwin aggregate calling convention. Check the original signature of
 // each function and call before lowering can erase an aggregate, narrow integer or ellipsis.
-std::string_view linux_signature_error(const ast::Interners& in, const QueryLayout& layout, QualType type) {
+std::string_view linux_signature_error(const ast::Interners& in, const QueryLayout& layout, QualType type,
+                                       bool allow_variadic = false) {
   QualType canonical = in.types.canon(type);
   if (!in.types.is<ast::TFunction>(canonical)) return "the function type is unavailable";
   auto f = in.types.get<ast::TFunction>(canonical);
-  if (f.variadic) return "variadic functions are not supported";
-  auto scalar = [&](QualType t) {
-    ir::TypeLayout l = layout.type(t);
-    return l.kind == ir::TypeKind::pointer || (l.kind == ir::TypeKind::integer && (l.size == 4 || l.size == 8));
-  };
-  if (layout.type(f.ret).kind != ir::TypeKind::void_ && !scalar(f.ret))
+  if (f.variadic && !allow_variadic) return "variadic functions are not supported";
+  if (layout.type(f.ret).kind != ir::TypeKind::void_ && !linux_scalar(layout, f.ret))
     return "only void, 32- and 64-bit integer, pointer and reference results are supported";
   for (QualType p : in.seqs.elements(f.params))
-    if (!scalar(p)) return "only 32- and 64-bit integer, pointer and reference parameters are supported";
+    if (!linux_scalar(layout, p)) return "only 32- and 64-bit integer, pointer and reference parameters are supported";
+  return {};
+}
+
+std::string_view linux_direct_call_error(const QueryLayout& layout, const ir::Function& body, ir::NodeId call) {
+  auto imms = body.imms_of(call);
+  // The L1 by-value bit identifies a class argument represented by a pointer.
+  if (imms[2]) return "aggregate arguments are not supported";
+  // The tail values have already undergone the default argument promotions ([expr.call]).
+  for (ir::ValueId v : body.operands_of(call).last(imms[1]))
+    if (!linux_scalar(layout, body.value(v).type.type))
+      return "only 32- and 64-bit integer and pointer ellipsis arguments are supported";
   return {};
 }
 
@@ -941,7 +954,9 @@ engine::query_task<Lowered> Lower::run(engine::Ctx& cx, FnKey k) {
         QualType ptr = body.value(body.operands_of(n)[1]).type.type;
         callee = ast::pointee_of(in, ptr);
       } else continue;
-      std::string_view error = callee ? linux_signature_error(in, layout, *callee) : "the function type is unavailable";
+      bool direct = op == ir::Op::call;
+      std::string_view error = callee ? linux_signature_error(in, layout, *callee, direct) : "the function type is unavailable";
+      if (direct && error.empty()) error = linux_direct_call_error(layout, body, n);
       if (error.empty()) continue;
       const ir::FunctionDebug& debug = co_await cx.fetch<FunctionDebug>(k);
       auto at = i < debug.loc.size() ? debug.loc[i] : ast::Loc{def.item, def.body_offset};

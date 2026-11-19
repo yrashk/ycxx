@@ -1,4 +1,4 @@
-"""Compile a C++ unit into ELF and consume it with a native C caller."""
+"""Exchange scalar System V AMD64 calls between ycxx and native ELF objects."""
 
 import os
 from pathlib import Path
@@ -43,6 +43,13 @@ def main():
         run([cc, 'consumer.c', 'source.o', '-o', 'consumer'], scope, cold)
         run(['./consumer'], scope, cold)
 
+        for name in ('linux_variadic.cpp', 'linux_variadic_peer.c', 'linux_variadic_entry.s'):
+            shutil.copyfile(source_dir / name, scope / name)
+        compile(target, '-c', 'linux_variadic.cpp')
+        run([cc, 'linux_variadic_peer.c', 'linux_variadic_entry.s', 'linux_variadic.o',
+             '-o', 'variadic'], scope, cold)
+        run(['./variadic'], scope, cold)
+
         compile('-c', 'source.cpp', '-o', 'cold-darwin.o')
         try:
             compile(target, '-c', 'source.cpp', '-o', 'warm-first-linux.o', env=daemon)
@@ -66,8 +73,18 @@ def main():
              'call: only 32- and 64-bit integer'),
             ('struct X { int x; }; X g(int); int f() { X x = g(1); return x.x; }',
              'call: only void, 32- and 64-bit integer'),
-            ('int g(int, ...); int f() { return g(1); }', 'call: variadic functions'),
+            ('int f(int, ...) { return 1; }', 'variadic functions'),
             ('int f(int (*g)(int, ...)) { return g(1); }', 'call: variadic functions'),
+            ('int f(int (*g)(int, ...)) { return g(1, 2); }', 'call: variadic functions'),
+            ('int g(double, ...); int f() { return g(1.0); }', 'call: only 32- and 64-bit integer'),
+            ('int g(short, ...); int f() { return g(1); }', 'call: only 32- and 64-bit integer'),
+            ('double g(int, ...); int f() { return g(1); }', 'call: only void, 32- and 64-bit integer'),
+            ('int g(int, ...); int f() { return g(1, 1.0f); }',
+             'call: only 32- and 64-bit integer and pointer ellipsis arguments'),
+            ('struct X { int x; }; int g(X, ...); int f() { return g(X{1}); }',
+             'call: only 32- and 64-bit integer'),
+            ('struct X { int x; }; int g(int, ...); int f() { X x{1}; return g(1, x); }',
+             'call: only 32- and 64-bit integer and pointer ellipsis arguments'),
         )
         for source, error in cases:
             (scope / 'unsupported.cpp').write_text(source + '\n')

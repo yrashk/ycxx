@@ -564,9 +564,13 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   configuration. Darwin remains the default.
 - The scalar System V AMD64 backend in `src/target/x86_64/` supports 32- and 64-bit integer,
   pointer and reference parameters and results, plus void results. It handles direct and
-  indirect calls, stack arguments and RIP-relative data references within a unit. Floating-point,
-  aggregate and narrow integer arguments and results, and variadic calls, are outside this ABI
-  subset.
+  indirect calls, stack arguments and RIP-relative data references within a unit. Direct
+  variadic calls use the same registers and stack slots for promoted 32- and 64-bit integers
+  and pointers. The emitter clears EAX immediately before every direct call so a variadic callee
+  receives a zero vector-register count in AL, including with an empty ellipsis. Floating-point,
+  aggregate and narrow integer arguments and results remain outside this ABI subset. Variadic
+  definitions and calls through function pointers remain unsupported.
+  [#399](https://github.com/yrashk/ycxx/issues/399), [#196](https://github.com/yrashk/ycxx/issues/196)
 - `-c` writes deterministic ELF64 relocatable objects through `src/obj/elf.cppm`. The reader
   accepts the supported x86-64 `ET_REL` subset emitted by ycxx. The native ELF linker consumes
   the same in-memory objects, resolves absolute and PC-relative relocations, and writes a static
@@ -582,8 +586,10 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
 - ELF code generation diagnoses translation units that require namespace-scope dynamic
   initialization or destruction. Syntax-only analysis still accepts them.
   [#387](https://github.com/yrashk/ycxx/issues/387)
-- Linux x86-64 CI runs `unit.linux_compile`, which links a ycxx-produced object with a native C
-  caller, and `unit.linux_executable` (`tests/unit/pipeline/linux_executable.py`), which runs
+- Linux x86-64 CI runs `unit.linux_compile`, which links ycxx-produced objects with native C
+  callers and variadic callees. It checks default promotions, register and stack arguments,
+  stack alignment and the incoming AL for both empty and nonempty ellipses.
+  `unit.linux_executable` (`tests/unit/pipeline/linux_executable.py`) runs
   source-only, object-only and mixed-input executables and checks exit status, `argc` and `argv`,
   diagnostics, and cold and daemon output. The linker and startup also have native CTest
   coverage, including execution of an explicit `_start`.
