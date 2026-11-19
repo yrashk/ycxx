@@ -63,6 +63,14 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
   took one commit, and every slice test passed on the first run.
   - Learned on #43.
 
+- **A stacked PR merges into its base branch, not main.** #198 was stacked on #191's branch. The
+  coordinator merged #191, then merged #198 without checking its base, so #198 landed in the
+  already-merged branch and never reached main. The β epic was closed and the README described
+  concurrency that main did not have, until the daemon session noticed (#226).
+  - Do: before merging, check `baseRefName` is `main`, and retarget a stacked PR once its base
+    merges. After merging, confirm the merge commit is an ancestor of origin/main.
+  - Learned on #139, 2026-11-18.
+
 ## Working with Fable subagents
 
 - **Agree the contract between parts before splitting a design.** #1's engine part and C++ part
@@ -477,3 +485,20 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
     built-ins), teach `items.cppm`'s declarator scan and its function detection, and test a
     namespace-scope typedef, variable and function template whose type begins with it.
   - Learned on #211.
+- **A stacked PR merges into its base branch, not main, unless retargeted.** #198 was opened on
+  #191's branch. When #191 merged to main, #198 kept that base, and its merge went into the dead
+  branch: main never got concurrent requests, and #224 (the daemon as the default) passed its
+  tests on a main without them.
+  - Do: when a stacked PR's base merges, retarget it to `main` at once (`gh pr edit N --base
+    main`), and before building on a merged step, check `git merge-base --is-ancestor <its merge
+    commit> origin/main`.
+  - Learned on #139.
+- **The Clang oracle is upstream Clang (the driver's toolchain), not `/usr/bin/clang++`.** Apple
+  Clang and upstream Clang differ in ABI corners: on arm64 macOS, Apple Clang 21 passes a class
+  with a user-provided move constructor in registers, while Clang 23 and GCC pass it by address
+  (#230). Mixed-object checks done by hand against Apple Clang all passed, then the `PEER:` test
+  crashed under the driver.
+  - Do: for ABI checks, compile with the driver's Clang (`tools/test` prints its path; see
+    `tests/driver/kinds.py`), and try GCC too. When two compilers disagree, cross-link their
+    objects to find out which convention each one uses.
+  - Learned on #116.

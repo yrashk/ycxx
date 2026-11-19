@@ -90,7 +90,7 @@ struct List {
 };
 
 export using Sig = List<Arg, 4>;
-export using ImmSig = List<Imm, 3>;
+export using ImmSig = List<Imm, 4>;
 
 export struct OpSpec {
   NodeClass cls = NodeClass::pure;
@@ -213,10 +213,14 @@ export enum class Op : std::uint16_t {
   rtti__dyncast [[=state({S, V}, {V}).imms({type})]],
 
   // Calls without an unwind edge: the callee cannot throw, or the exception leaves the function.
-  // The u32 is how many of the last arguments the callee's ellipsis matches ([expr.call]/12);
-  // they already have the default argument promotions. A target may pass them differently.
-  call [[=state({S, Vs}, {S, Vs}).imms({entity, u32}).accepts({not_constexpr})]],
-  call_ind [[=state({S, V, Vs}, {S, Vs}).imms({u32}).accepts({not_constexpr})]],
+  // The first u32 is how many of the last arguments the callee's ellipsis matches
+  // ([expr.call]/12); they already have the default argument promotions. A target may pass them
+  // differently. The second is a mask of the arguments that are the addresses of argument objects
+  // of class type, which a parameter of class type is ([expr.call]/7); the third is 1 + the
+  // index of the argument that is the address of the object a class result initializes
+  // ([stmt.return]), 0 if none. `lower` passes both as the target's calling convention does.
+  call [[=state({S, Vs}, {S, Vs}).imms({entity, u32, u32, u32}).accepts({not_constexpr})]],
+  call_ind [[=state({S, V, Vs}, {S, Vs}).imms({u32, u32, u32}).accepts({not_constexpr})]],
   builtin [[=state({S, Vs}, {S, Vs}).imms({u32})]],
   asm_ [[=state({S, Vs}, {S, Vs}).imms({constant}).with({nonconstant})]],
 

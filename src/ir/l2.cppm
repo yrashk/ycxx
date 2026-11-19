@@ -80,11 +80,11 @@ using List = ir::List<T, N>;
 export struct Spec {
   NodeClass cls = NodeClass::pure;
   List<Arg, 4> in, out;
-  List<Imm, 3> imm;
+  List<Imm, 4> imm;
   std::uint8_t succ = 0;
   Flags flags = 0;
 
-  constexpr Spec imms(List<Imm, 3> i) const { auto s = *this; s.imm = i; return s; }
+  constexpr Spec imms(List<Imm, 4> i) const { auto s = *this; s.imm = i; return s; }
   constexpr Spec accepts(std::initializer_list<Flag> fs) const {
     auto s = *this;
     for (Flag f : fs) s.flags |= bit(f);
@@ -150,9 +150,11 @@ export enum class Op : std::uint16_t {
   store [[=state({S, V, V}, {S}).imms({alias}).accepts({volatile_})]],
   // Calls. The first u32 is a mask of the arguments that are signed: an argument narrower than
   // the slot the calling convention gives it is extended to it, sign-extended where its bit is
-  // set. The second is how many of the last arguments the callee's ellipsis matches (L1's).
-  call [[=state({S, Vs}, {S, Vs}).imms({entity, u32, u32})]],
-  call_ind [[=state({S, V, Vs}, {S, Vs}).imms({u32, u32})]],
+  // set. The second is how many of the last arguments the callee's ellipsis matches (L1's). The
+  // third is 1 + the index of the argument that is the address of an indirect result, which the
+  // calling convention passes apart (AArch64: x8), 0 if none.
+  call [[=state({S, Vs}, {S, Vs}).imms({entity, u32, u32, u32})]],
+  call_ind [[=state({S, V, Vs}, {S, Vs}).imms({u32, u32, u32})]],
 
   // Terminators.
   br [[=control({}, 1)]],
@@ -223,6 +225,9 @@ export struct Function {
   std::vector<std::uint64_t> imms;
   std::vector<ir::Succ> succs;
   std::vector<Type> results;
+  // 1 + the index among the entry's value parameters of the address of an indirect result, as
+  // the call op's third u32; 0 if none.
+  std::uint32_t indirect_result = 0;
   ir::OriginMap origins;  // node → the L1 nodes it came from
 
   bool operator==(const Function&) const = default;

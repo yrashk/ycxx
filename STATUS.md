@@ -560,6 +560,15 @@ private daemons.
   `YCXX_CHAOS_SEED`; the daemon takes them from the client that starts it and reports `threads`
   in `ctl status`. Workers and the daemon's request threads have 256 MiB stacks (address space),
   above a main thread's 8 MiB (#178, #187).
+- Concurrent requests (#139, daemon design §4): a unit, a program and a request are named by what
+  they are (`Session::unit`, `program`, `request`: path, working directory, configuration, object;
+  units, objects, name), numbered by a registry whose values provide their inputs, so admitting a
+  request sets nothing and needs no quiescence. A request is one root, `Build` (front ends, then
+  objects or the link), spawned into the engine's `Epochs` by `Session::run`, so a batch that
+  stops it restarts the whole root at cell level and the answer is of one revision. Batches,
+  editor buffers and the admission quantum are the daemon's edit strand; a batch applies through
+  `Session::apply` before a request and, once the quantum allows, while requests run. A hang-up
+  cancels the request's ticket. `ctl status` reports `peak_running`.
 - The daemon keeps one `Session` for its life (#120). Its `pp::FileContent` cells are provided
   from the file table, with the toolchain and sysroot as `high` durability. A batch sets the
   provided entries it changed, at quiescence. A repeated request executes nothing
@@ -801,6 +810,11 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   enumerator values from constant expressions (narrowing into a fixed type diagnosed), unscoped
   enumerators in the enclosing scope and clashes with other declarations, `E::e`, enumerations
   nested in classes (`C::E`, `C::e`), `using enum` in a block, `enum E` elaborated specifiers.
+  Without a fixed type the underlying type is the Itanium compilers' (#220): `unsigned int` or
+  `unsigned long` when no enumerator is negative, else `int` or `long`, the narrower that holds
+  every value (`tests/own/classes/s4-enum-*`, symbols checked against Clang's). It promotes to
+  the type its values need ([conv.prom]/3, `EnumRec::promotion`), and an implicit enumerator
+  whose value outgrows its predecessor's type gets a wider one ([dcl.enum]/5).
 - Conversions: an unscoped enumeration promotes ([conv.prom]/4) and converts to integers and
   bool; nothing converts implicitly to an enumeration except its own type; a scoped one
   compares only with its own type; `E e{n}` for a fixed underlying type ([dcl.init.list]/3.8).
@@ -960,6 +974,32 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   unary `*` and `&` call operator functions; a deleted or ambiguous choice is an error, not the
   built-in operator. `N::T(…)` is a cast only when no function or variable hides N::T.
 - Tests: `tests/own/operators` (12, seven from the review), `tests/own/headers` (2).
+
+## Object model, step 1: classes by value (#116, 2026-11-18)
+
+- **L1:** a parameter of class type is the address of an object the caller initializes
+  ([expr.call]/7); sema materializes the argument, so the caller destroys it at the end of the
+  full-expression (Itanium C++ ABI §3.1.2). A class result is written through a hidden argument,
+  the address of the object the call initializes ([stmt.return]): the caller's variable, member or
+  temporary, so returning a prvalue copies nothing. The call op's two new immediates and
+  `ir::Function::byval_params`/`result_param` mark both. A discarded class result is a temporary
+  ([expr.context]/2); `f({…})` with one candidate and `return {…};` copy-list-initialize.
+- **`lower`** applies AAPCS64 (§6.8.2 C.10–C.12, §6.9): a class trivially copyable for calls
+  ([class.temporary]/3, `sema::Classes::trivial_for_calls`, `TypeLayout::trivial_calls`) of at
+  most 16 bytes passes and returns in one or two 8-byte registers; a larger or non-trivial one by
+  address, an indirect result in x8 (`l2::Function::indirect_result`, the call's fourth
+  immediate). A class needing more registers than are left goes whole on the stack and leaves the
+  rest unused (C.11). An empty class passes nothing, as in Clang. A user-provided move
+  constructor makes a class non-trivial for calls, as in Clang 23 and GCC; Apple Clang 21
+  differs (#230).
+- **Mixed-object tests:** `PEER:` in a run test names a file Clang compiles and links with it
+  (docs/TESTING.md). `tests/own/abi` checks 3- to 24-byte classes, a non-trivial one, member
+  functions returning classes and exhausted registers, calling both ways.
+- Not yet: braced arguments to overload sets, templates and member calls (#231), class arguments
+  through an ellipsis and calls through pointers returning classes (#196), classes with
+  floating members (#201), classes in constant evaluation (#25).
+- Tests: `tests/own/abi` (3), `tests/own/classes/s5-byvalue-lifetimes`, `-temporaries`;
+  s1-byvalue-params and -return pass.
 
 ## Templates, ζ step 1: function templates (#88, 2026-11-18)
 
@@ -1179,7 +1219,8 @@ miscompiles it (DECISIONS §3.2). Each is removed once ycxx compiles itself.
     in-class member functions are not affected.
   - Fix: belongs in GCC.
 - **A contract predicate inside a lambda that names a member of the enclosing class goes through
-  a local `bool`** (`src/ast` interner, builder, compaction).
+  a local `bool`, or a member's precondition** (`src/ast` interner, builder, compaction;
+  `pipeline::Session`'s registry providers).
   - Cause: in such a predicate GCC 16.2 takes `this` to be the closure object, so the member
     read is garbage. The lambda's own captures read correctly, and so does the same expression
     in the lambda body. It happens in a plain TU, with generic or plain lambdas, `contract_assert`

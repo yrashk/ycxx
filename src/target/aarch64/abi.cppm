@@ -32,8 +32,11 @@ export struct RegClass {
 
 export struct CallingConvention {
   std::array<R, 8> int_args{R::x0, R::x1, R::x2, R::x3, R::x4, R::x5, R::x6, R::x7};
-  R int_result = R::x0;
-  std::uint32_t max_results = 1;
+  // Results in x0 and x1, a trivially copyable class of up to 16 bytes taking both (AAPCS64
+  // §6.9); a larger or non-trivial one goes to memory whose address the caller passes in x8.
+  std::array<R, 2> int_results{R::x0, R::x1};
+  std::uint32_t max_results = 2;
+  R indirect_result = R::x8;
   std::uint32_t stack_align = 16;
   bool natural_stack_args = true;     // Apple: stack arguments packed by their own size
   std::uint32_t reg_arg_bits = 32;    // narrower register arguments are extended to this

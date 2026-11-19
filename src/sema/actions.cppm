@@ -1568,6 +1568,10 @@ public:
   Ex member_call(Ex callee, std::vector<Ex> args, u32 end, u32 paren_at) {
     u32 begin = callee.begin;
     Ex fail{NodeId::none, begin, end};
+    if (auto b = std::ranges::find_if(args, [&](const Ex& a) { return is_braced(a); }); b != args.end()) {
+      diag(b->begin, Diag::not_supported, lex::Tk::l_brace);  // a braced list for a member function's parameter
+      return fail;
+    }
     auto m = *as<ast::Member>(callee);
     const Bound& bound = bound_.at(std::to_underlying(callee.id));
     std::optional<Ex> object = bound.object;
@@ -1719,7 +1723,10 @@ public:
         if (builtin(promoted(*types().builtin_of(*er->underlying))) == to) return {true, 1, 1};
         return {true, 2, 0};
       }
-      bool promotion = builtin(promoted(*types().builtin_of(underlying_of(from)))) == to;
+      // [conv.prom]/3: without one, to the type its values need.
+      const EnumRec* er = enum_rec(types().enum_of(from));
+      QualType p = er && er->promotion ? *er->promotion : builtin(promoted(*types().builtin_of(underlying_of(from))));
+      bool promotion = types().canonical(p) == types().canonical(to);
       return {true, promotion ? 1 : 2, 0};
     }
     if (types().is_pointer(from) && types().is_pointer(to))
@@ -1828,6 +1835,8 @@ public:
     EntityId c = types().class_of(ut);
     const ClassRec* cr = class_rec(c);
     if (!cr) return fail;
+    // [dcl.init.general]/17.6.1: a prvalue of the class itself initializes the object directly.
+    if (!list && args.size() == 1 && !args[0].glvalue() && initializes(ut, args[0])) return args[0];
     std::vector<Candidate> cands;
     std::vector<EntityId> ents;
     bool user_copy = false;
@@ -1862,6 +1871,9 @@ public:
         diag(args[i].begin, Diag::narrowing, value_type(args[i]), Types::unqualified(fr.params[i]));
         return fail;
       }
+      // A parameter of class type: a temporary the caller initializes and destroys ([expr.call]/7).
+      if (i < fr.params.size() && types().is_class(fr.params[i]) && !a.glvalue())
+        a = materialize(a, Types::unqualified(fr.params[i]), false, true);
       cs.push_back({a.id, a.begin >= begin ? a.begin - begin : 0});
     }
     ExprInfo info{ut, ValueCategory::prvalue, 0};
@@ -1910,10 +1922,10 @@ public:
   }
 
   // Temporary materialization ([conv.rval]) of the prvalue `v` as an object of type `t`.
-  Ex materialize(Ex v, QualType t, bool extended) {
+  Ex materialize(Ex v, QualType t, bool extended, bool argument = false) {
     if (!v.ok()) return v;
     ExprInfo info{t, ValueCategory::xvalue, 0};
-    return node(ast::Materialize{info, destructor_of(t), extended ? 1u : 0u, at(v, v.begin)}, v.begin, v.end, info);
+    return node(ast::Materialize{info, destructor_of(t), extended ? 1u : argument ? 2u : 0u, at(v, v.begin)}, v.begin, v.end, info);
   }
 
   // Binds a reference of type `r` to `e` ([dcl.init.ref]): directly to an lvalue (or, for an
@@ -2230,6 +2242,10 @@ public:
       diag(e.begin, Diag::bound_member_not_called, w_->entities.rec(as<ast::Member>(e)->member).name);
       return {NodeId::none, e.begin, e.end};
     }
+    // A discarded prvalue of class type is materialized ([expr.context]/2), so a call's result
+    // has an object, destroyed with the full-expression.
+    if (e.ok() && !e.glvalue() && !dependent(e) && types().is_class(e.type()) && !as<ast::Materialize>(e))
+      return materialize(e, Types::unqualified(e.type()), false);
     return e;
   }
 
@@ -2301,8 +2317,11 @@ public:
   Ex promote(Ex e) {
     e = rvalue(e);
     if (!e.ok() || dependent(e)) return e;
-    // [conv.prom]/4: an unscoped enumeration promotes as its underlying type does.
+    // [conv.prom]/3: an unscoped enumeration without a fixed type promotes to the type its values
+    // need; /4: one with a fixed type promotes as its underlying type does.
     if (is_unscoped_enum(e.type())) {
+      if (const EnumRec* r = enum_rec(types().enum_of(e.type())); r && r->promotion)
+        return convert_node(e, ast::ConversionKind::integral, *r->promotion);
       QualType u = underlying_of(e.type());
       return convert_node(e, ast::ConversionKind::integral, builtin(promoted(*types().builtin_of(u))));
     }
@@ -2850,6 +2869,10 @@ public:
     Ex c = r;
     if (op == AsgOp::assign) {
       c = convert(r, lt, r.begin);
+      // A class result is a temporary the copy reads, destroyed with the full-expression
+      // ([expr.assign]/9, [class.temporary]/4).
+      if (c.ok() && types().is_class(lt) && !c.glvalue() && !dependent(c) && (as<ast::Call>(c) || as<ast::MemberCall>(c)))
+        c = materialize(c, Types::unqualified(lt), false);
     } else {
       Ex lv = rvalue(l);  // only to read its type; the IR loads the left operand itself
       QualType tl = lv.type();
@@ -2965,6 +2988,19 @@ public:
       return {NodeId::none, begin, end};
     }
     if (dependent(callee) || any_dependent(args)) return dependent_node(all, begin, end);
+    // A braced list as an argument is copy-list-initialization of its parameter
+    // ([dcl.init.list]/1); overload resolution with one ([over.ics.list]) is not supported yet, so
+    // the callee must be one function.
+    auto braced = std::ranges::find_if(args, [&](const Ex& a) { return is_braced(a); });
+    if (braced != args.end() && types().is(callee.type(), Builtin::overload_set)) {
+      const std::vector<ast::DeclSema>& set = overloads_.at(std::to_underlying(callee.id));
+      if (set.size() != 1 || (set[0].flags & decl_flag::template_)) {
+        diag(braced->begin, Diag::not_supported, lex::Tk::l_brace);
+        return {NodeId::none, begin, end};
+      }
+      ExprInfo ci{set[0].type, ValueCategory::lvalue, 0};
+      callee = node(ast::DeclRef{ci, set[0].entity}, callee.begin, callee.end, ci);
+    }
     if (types().is(callee.type(), Builtin::overload_set)) {
       const std::vector<ast::DeclSema>& set = overloads_.at(std::to_underlying(callee.id));
       auto ex = explicit_args_.find(std::to_underlying(callee.id));
@@ -3077,6 +3113,16 @@ public:
     return r;
   }
 
+  // A braced-init-list as a call's argument: a placeholder, list-initializing its parameter once
+  // the callee is known (`call_args`).
+  Ex braced_argument(std::unique_ptr<Braced> b) {
+    ExprInfo info{builtin(Builtin::void_), ValueCategory::prvalue, 0};
+    Ex r = node(ast::ValueInit{info}, b->begin, b->end, info);
+    braced_args_[std::to_underlying(r.id)] = std::move(b);
+    return r;
+  }
+  bool is_braced(const Ex& e) const { return e.ok() && braced_args_.contains(std::to_underlying(e.id)); }
+
   // The arguments of a call to a function of type `fr`, each copy-initializing its parameter.
   std::optional<std::vector<Child>> call_args(const TypeRec& fr, std::span<const Ex> args, u32 begin, u32 paren_at) {
     std::vector<QualType> params = fr.params;  // copied: converting may intern new types
@@ -3090,8 +3136,18 @@ public:
     }
     std::vector<Child> children;
     for (std::size_t i = 0; i < args.size(); ++i) {
-      Ex a = i < params.size() ? convert(args[i], params[i], args[i].begin) : variadic_argument(args[i]);
+      if (is_braced(args[i]) && i >= params.size()) {
+        diag(args[i].begin, Diag::not_supported, lex::Tk::l_brace);  // [expr.call]/12: no list for an ellipsis
+        return std::nullopt;
+      }
+      Ex a = is_braced(args[i])      ? list_init(Types::unqualified(params[i]), *braced_args_.at(std::to_underlying(args[i].id)))
+             : i < params.size() ? convert(args[i], params[i], args[i].begin)
+                                 : variadic_argument(args[i]);
       if (!a.ok()) return std::nullopt;
+      // A parameter of class type is an object the caller initializes from the argument
+      // ([expr.call]/7): a temporary, which the caller destroys (Itanium C++ ABI §3.1.2).
+      if (i < params.size() && types().is_class(params[i]) && !dependent(a) && !a.glvalue())
+        a = materialize(a, Types::unqualified(params[i]), false, true);
       children.push_back(at(a, begin));
     }
     return children;
@@ -3176,6 +3232,7 @@ private:
     QualType type;
   };
   std::vector<BlockType> block_types_;
+  std::map<u32, std::unique_ptr<Braced>> braced_args_;  // by placeholder node: a braced list argument
   std::map<u32, QualType> declared_types_;  // by DeclRef node: the declared type of what it names
   std::map<u32, std::vector<ast::DeclSema>> overloads_;  // by draft overload-set DeclRef
   std::map<u32, std::vector<TemplateArg>> explicit_args_;  // by draft overload-set DeclRef

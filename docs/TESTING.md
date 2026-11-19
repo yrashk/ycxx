@@ -118,6 +118,9 @@ must get an error and every error must be expected. Markers in a header the test
   pass is XPASS, which fails the run, so the mark goes when the cause does.
 - `FLAGS: -O2`, `TIMEOUT: 120` (seconds per command), `TIER: nightly`.
 - Run tests: `EXIT: 3` (default 0); `STDOUT: line` (repeatable), or a `<test>.stdout` file.
+  `PEER: name.cpp` (repeatable): Clang compiles `name.cpp`, next to the test and not a test itself,
+  to an object linked with the test: a mixed-object ABI test (DECISIONS §5.4). The peer can call
+  back into the test's functions.
 - Preprocess tests: `ORACLE: gcc` (default Clang); `PP-COMPARE: exact` keeps whitespace
   (default: line markers and blank lines dropped, whitespace runs collapsed).
 - Diff tests: `DIFF: run` (default: verdict, exit status and stdout), `verdict` or `preprocess`.

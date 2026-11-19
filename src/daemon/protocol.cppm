@@ -50,6 +50,7 @@ struct Status {
   std::uint64_t cancelled = 0;  // stopped by a client's hang-up
   std::uint64_t restarts = 0;
   std::uint64_t live = 0;  // compile requests in flight or waiting
+  std::uint64_t peak_running = 0;  // the most requests whose roots were in the engine at once
   std::uint64_t entries = 0;   // file-table entries
   std::uint64_t batches = 0;   // batches applied
   std::uint64_t inputs_changed = 0;

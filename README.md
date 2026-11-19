@@ -35,7 +35,8 @@ build/bin/ycxx cxx hello.cpp -o hello && ./hello
   and the floating types as types (not yet their values);
   all statements and operators; functions, recursion and overloading, operator functions included;
 - classes and unions: data and static members, member functions, constructors and destructors
-  with RAII, aggregate and designated initialization;
+  with RAII, aggregate and designated initialization, passing and returning them by value with
+  Clang's calling convention, so ycxx and Clang objects call each other;
 - namespaces, typedefs and alias declarations, `using` declarations and directives;
 - `[[…]]` attributes, the GNU attributes and `asm` labels the macOS SDK's headers use, and the
   type-trait built-ins libycxx's headers use (`__is_same`, `__remove_cv`, …)
@@ -65,7 +66,9 @@ through the daemon, without unsaved text ever reaching a build.
 
 - The standard library and its headers. C headers such as `<stdio.h>` compile and `printf` runs;
   libycxx's `<cstdio>` still needs parameter packs and concepts.
-- Inheritance and virtual functions, passing classes by value, `sizeof` of a class.
+- Inheritance and virtual functions, `sizeof` of a class.
+- Access control: `private` and `protected` are not checked yet, so ycxx accepts code that
+  uses private members ([#119](https://github.com/yrashk/ycxx/issues/119)).
 - Concepts, member templates, template template parameters, `if constexpr`.
 - Floating-point arithmetic, exceptions, and optimization (`-O`).
 - Go-to-definition in the language server.

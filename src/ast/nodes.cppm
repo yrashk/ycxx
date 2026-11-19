@@ -149,7 +149,8 @@ struct Member {
 // Temporary materialization ([conv.rval], [class.temporary]): a temporary object initialized from
 // the prvalue `operand`, as an xvalue. It is destroyed by `destructor` (none if trivial) at the end
 // of the full-expression, or, with `extended` 1, when the reference it was bound to goes out of
-// scope ([class.temporary]/6).
+// scope ([class.temporary]/6). `extended` 2 marks a call's argument object for a parameter of class
+// type ([expr.call]/7), passed by value; it too ends with the full-expression.
 struct Materialize {
   ExprInfo info;
   EntityId destructor;
