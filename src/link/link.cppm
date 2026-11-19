@@ -718,6 +718,10 @@ private:
               else mo::store32(out.bytes, at, static_cast<std::uint32_t>(v));
               break;
             }
+            case reloc_kind::x86_64_pc32:
+            case reloc_kind::x86_64_plt32:
+              fail(std::format("{}: x86-64 relocation in an arm64 Mach-O object", where));
+              break;
           }
         }
       }
@@ -1096,6 +1100,10 @@ private:
 }  // namespace
 
 std::expected<std::vector<std::uint8_t>, std::vector<error>> link(std::span<const obj::object> objects, const options& opts) {
+  for (const obj::object& o : objects) {
+    if (o.arch != obj::target::aarch64_macos)
+      return std::unexpected(std::vector<error>{{std::format("{}: expected an arm64 Mach-O object", o.name)}});
+  }
   return linker(objects, opts).run();
 }
 

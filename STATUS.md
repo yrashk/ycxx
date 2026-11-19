@@ -202,7 +202,8 @@ What is true of the code today. Work in progress and its owners are tracked in
 - Directives:
   - `#include` in both forms and the macro-replaced form, and `#include_next`;
   - search directories from `-I`, `-isystem` and `-iquote`, then libycxx's headers and the
-    SDK's (`:system`, configured by CMake);
+    target's system headers (`:system`, configured by CMake). For x86-64 Linux, ycxx's resource
+    headers (#133) precede the SDK's `usr/include/x86_64-linux-gnu` and `usr/include` (#252);
   - `#define` and `#undef` with the redefinition check, rescanning and painting
     ([cpp.rescan]);
   - function-like macros (`:unit`'s `invocation`, `substitute`, `paste`): arguments across
@@ -221,13 +222,14 @@ What is true of the code today. Work in progress and its owners are tracked in
 - Predefined macros (`:predefined`, DECISIONS §1.5):
   - `__ycxx__` and its version, `__GNUC__` 4.2.1 (#229), and the draft's macros;
   - a feature-test table, with lexer features only;
-  - the target's macros, generated from `ast::Target` and checked against Clang
-    (`tests/own/pp/predefined-target.pp.cpp`);
+  - the target's macros, generated from `ast::Target` and checked against Clang on AArch64
+    Darwin and x86-64 Linux (`tests/own/pp/predefined-target*.pp.cpp`, #132);
   - `__LINE__`, `__FILE__`, `__COUNTER__`, `__DATE__` and `__TIME__`.
 - `#include <cstdio>` preprocesses until libycxx's `#error` for unknown compilers
   (yrashk/libycxx#17).
 - `ycxx cxx -E` prints what Clang's `-E` would, by Clang's line and spacing rules. `preprocess`
-  is in `tests/features/ycxx.txt`. Diagnostics in included files name their file.
+  is in `tests/features/ycxx.txt`. Diagnostics in included files name their file. Darwin is the
+  default target. `-E --target=x86_64-linux-gnu` (also `x86_64-pc-linux-gnu`) selects Linux.
 - Tests:
   - `tests/own/pp` (by spec-only authors): 103 tests (`-E`, reject and accept), the draft's
     [cpp.scope], [cpp.subst], [cpp.stringize] and [cpp.concat] examples among them;
@@ -352,6 +354,12 @@ stay open for the rest.
 - Not yet: the allocation
   validator and dependence checker (#29), SSA linear scan, list scheduling, unwind info and DWARF,
   a measured `cost_model` (#9), defining a variadic function (`va_start`), more than one result, frame objects aligned above 16 bytes.
+
+## System V AMD64 scalar integer division
+
+- The x86-64 emitter supports L2 `sdiv`, `udiv`, `srem` and `urem` for `i32` and `i64`.
+  `unit.x86_64` lowers C++ functions using `/` and `%` and runs them on Linux x86-64. It checks
+  signed boundary values, unsigned high bits and the existing diagnostic for narrower L2 types.
 
 ## AST core (#32)
 
@@ -530,13 +538,13 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
     node.
   - `:mangle`: Itanium names for global-namespace functions over fundamental, pointer and cv types
     with substitutions; `main`, `extern "C"` functions and variables are not mangled (#64).
-  - `:executable`: `link(P)`, the query over a program's `tu` objects and the `.o` inputs, with
-    libSystem's exports from `$SDKROOT`, else `xcrun --show-sdk-path`, else the Command Line Tools'
-    SDK, looked up once per process outside the engine.
+  - `:executable` provides `link(P)`, the query over a program's `tu` objects. The Darwin link
+    also takes `.o` files and libSystem's exports from `$SDKROOT`, else `xcrun --show-sdk-path`,
+    else the Command Line Tools' SDK, looked up once per process outside the engine.
   - `:lines`: a minimal line table for rendering (#34 owns the full one).
-- `ycxx cxx` (also `ycxx -…` with an option first): `-o`, `-c`, `-fsyntax-only`, `-std=c++26`;
-  `.o` inputs are linked as they are. Errors are `path:line:col: error: message` on stderr; exit 0
-  on success, 1 on any error in the input or the command line.
+- `ycxx cxx` (also `ycxx -…` with an option first) takes `-o`, `-c`, `-fsyntax-only` and
+  `-std=c++26`. Errors are `path:line:col: error: message` on stderr. It exits 0 on success and 1
+  on any error in the input or the command line.
 - `tests/features/ycxx.txt` lists `syntax` and `run darwin-arm64`: a feature can be limited to
   hosts. CI's macOS job runs the slice before its tier, with `--no-unsupported`.
 - `unit.pipeline`: the line table, linkage names, and the back half from hand-built analysed
@@ -548,6 +556,37 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   entities differently (mutating `tu` to order by handle makes it fail).
 - Not yet: `ycxx cxx` through the daemon by default (#120), `#include` (#65), optimization
   levels and the other common options (`-O` is rejected, #81).
+
+## x86-64 ELF objects and freestanding executables (2026-11-19)
+
+- `--target=x86_64-pc-linux-gnu` (also `x86_64-linux-gnu`) selects Linux preprocessing,
+  layout and code generation. The in-process driver and daemon keep the target in the unit
+  configuration. Darwin remains the default.
+- The scalar System V AMD64 backend in `src/target/x86_64/` supports 32- and 64-bit integer,
+  pointer and reference parameters and results, plus void results. It handles direct and
+  indirect calls, stack arguments and RIP-relative data references within a unit. Floating-point,
+  aggregate and narrow integer arguments and results, and variadic calls, are outside this ABI
+  subset.
+- `-c` writes deterministic ELF64 relocatable objects through `src/obj/elf.cppm`. The reader
+  accepts the supported x86-64 `ET_REL` subset emitted by ycxx. The native ELF linker consumes
+  the same in-memory objects, resolves absolute and PC-relative relocations, and writes a static
+  `ET_EXEC` image with load segments and a non-executable stack.
+- `ycxx cxx --target=x86_64-pc-linux-gnu -nostdlib a.cpp b.cpp -o a` compiles and links C++
+  sources in one invocation. Either source can also be compiled separately with `-c` and passed
+  as a `.o` input. The driver links compiled sources in command-line order, then disk objects in
+  command-line order. When the program supplies an explicit `_start`, that symbol is the entry.
+  Otherwise ycxx's startup calls `int main()` or `int main(int, char**)` and exits with the returned
+  value. The link query checks a source function's ABI when an asm label gives it the symbol
+  `main`. A `main` supplied in an ELF object must already use one of those signatures. Hosted
+  linking and general-purpose ELF object interoperability remain unsupported.
+- ELF code generation diagnoses translation units that require namespace-scope dynamic
+  initialization or destruction. Syntax-only analysis still accepts them.
+  [#387](https://github.com/yrashk/ycxx/issues/387)
+- Linux x86-64 CI runs `unit.linux_compile`, which links a ycxx-produced object with a native C
+  caller, and `unit.linux_executable` (`tests/unit/pipeline/linux_executable.py`), which runs
+  source-only, object-only and mixed-input executables and checks exit status, `argc` and `argv`,
+  diagnostics, and cold and daemon output. The linker and startup also have native CTest
+  coverage, including execution of an explicit `_start`.
 
 ## The resident daemon (#96, #97, 2026-11-18)
 
@@ -1359,11 +1398,22 @@ Fable decided the representation (ast.md §6.6); the Opus session wrote the code
 - The test driver checks warnings where a test has `//! warning` markers (docs/TESTING.md), and
   reads markers in headers a test includes with `<...>` from its `FLAGS` directories.
 - Tests: `tests/own/pp/predefined-gnuc.pp.cpp`, `tests/own/headers/system-warnings.accept.cpp`,
-  `tests/own/headers/stdio-no-warnings.accept.cpp` (`<stdio.h>` with no warning; darwin only
-  until Linux searches glibc's multiarch directory, #252), `tests/own/headers/system-error.reject.cpp`,
+  `tests/own/headers/stdio-no-warnings.accept.cpp` (`<stdio.h>` with no warning on Darwin),
+  `tests/own/headers/system-error.reject.cpp`,
   `tests/own/builtins/va-list.run.cpp`, `tests/own/builtins/unsupported.reject.cpp`, `tests/own/builtins/unknown-probe.accept.cpp`. `<cstdio>`: 25 errors before and after, and no warning
   (was 1). `<cmath>` and `<cstdlib>` gain errors in the SDK's `__GNUC__` inline functions (local
   unions, floating-point operations, `__builtin_fabs*`), which already had thousands.
+
+## Linux compiler resource `<stddef.h>` (#133)
+
+- For x86-64 Linux, `resources/linux/include` is searched after libycxx, so its `<stddef.h>`
+  forwards glibc's `__need_size_t`, `__need_wchar_t` and `__need_NULL` requests to ycxx. Each
+  request is consumed, and partial inclusions can precede libycxx's full `<cstddef>` inclusion.
+  The full resource header supplies `max_align_t` with 16-byte alignment (AMD64 psABI §3.1.2).
+  `unit.pp` exercises both paths through the configured header search.
+- glibc's `<stdio.h>` now reaches its `__need___va_list` request for `<stdarg.h>`. Compiling
+  `<stdio.h>` still needs a compiler resource `<stdarg.h>` and the System V `__builtin_va_list`
+  type (#133).
 
 ## Templates, ζ step 8: template template parameters and `__make_integer_seq` (#88, #208, 2026-11-19)
 
@@ -1757,6 +1807,82 @@ values, end to end; results match Clang's bit for bit.
   `if constexpr` (#344); constant evaluation of a switch on an enumeration (enumeration values, #25).
 - Tests: `tests/own/stmt/` (written spec-only, 23 run and 15 reject tests, and the split-off XFAILs
   for the above).
+
+## Default arguments, ι step 2 (#300, 2026-11-19)
+
+- **Declarations** (src/parse/parser.cppm `default_argument`, parse.cppm `merge_defaults`): a
+  default argument is analysed where it is written ([dcl.fct.default]/5) and kept, converted to the
+  parameter's type, as a `DefaultArg` tree in `ParamSema::default_arg`, the slot ast.md reserved.
+  Redeclarations at namespace scope inherit earlier defaults (`b_.adopt`), may not repeat one, and
+  leave none missing after one ([dcl.fct.default]/4). Members' are recorded in
+  `MemberDeclRec::defaults` by `class_content`.
+- **Calls** (src/sema/actions.cppm): `Candidate::defaults` and `required` make a candidate viable
+  with fewer arguments ([over.match.viable]/2); `Templates::deduce_call` skips defaulted trailing
+  parameters. `call_args` and `construct` adopt the chosen function's trees (`default_argument`),
+  so a constructor whose parameters all have defaults is a default constructor, and one with one
+  required parameter converts. `Sema::defaults_` records what lookup found per function.
+- **IR:** a `DefaultArg`'s nodes take the call's position (`Gen::pinned`), since its offsets are
+  its declaration's.
+- Each call takes the defaults its own lookup found (`Sema::defaults_` by DeclRef node), since
+  declarations in different scopes have their own. A copy or move constructor's other parameters
+  may have defaults. Defaults are rejected where [dcl.fct.default]/3–4 and [over.oper.general]
+  forbid them (`defaults_allowed`, `defaults_trail`).
+- Not yet: defaults that depend on template parameters (#356); a member's default naming a later
+  member, and defaults added by an out-of-class or qualified definition (#354); defaults added
+  after a using-declaration (#362, the oracles disagree).
+- Tests: `tests/own/default-args/` (spec-only: 16 run and 9 reject tests, some split out as XFAIL
+  for #354, #356, #357 and #102).
+
+## Dynamic initialization of namespace-scope variables, ι (#94, #337, 2026-11-19)
+
+- **Front** (src/parse/parse.cppm): a namespace-scope variable whose initializer is not a constant
+  expression keeps its initializer tree instead of an error (constexpr and constinit ones must
+  still be constant); `T x(args)` and default-initialization by a constructor (an object or an
+  array of them) are dynamic.
+- **The unit's initialization function** (src/pipeline/front.cppm `init_function`): one
+  `StaticInit` statement per such variable, in definition order ([basic.start.dynamic]/1), each
+  initializing the object from its declaration's tree (positions pinned, as for default
+  arguments) and registering the destructor with `__cxa_atexit(d, &object, &__dso_handle)`
+  ([basic.start.term]; each array element on its own). It has internal linkage and Clang's name,
+  `__GLOBAL__sub_I_<file>`; a pointer to it goes in `__DATA,__mod_init_func`
+  (`obj::standard_section::mod_init_func`, `aarch64::DataKind::init_func`), which dyld runs before
+  `main`. A dynamically initialized `const` variable is placed in writable data.
+- An initializer is dynamic when it is not a constant expression but the front end has code for
+  it (`sema::has_runtime_code`); one it has no code for, or a scalar's that hit the evaluator's
+  limits, is still an error. Class objects the interpreter cannot evaluate yet are initialized
+  dynamically even when constant by the draft (#25). Each declaration's variables get their own
+  function (`__GLOBAL__sub_I_<file>.<n>`), so an error points at it.
+- Not yet: references bound at run time (#367); inline variables and variable templates (#368);
+  default member initializers that are not constants (#118); array construction as a loop (#370).
+- Tests: `tests/own/dynamic-init/` (spec-only, 16 tests; a Clang peer with its own initializers
+  in `peer.run.cpp`).
+
+## Nested namespace definitions, ι (#153, #337, 2026-11-19)
+
+- `namespace a::b::c { }` (C++17) and `namespace a::inline b { }` (C++20), [namespace.def]: the
+  item splitter declares every component (`namespace_names`), the first in the enclosing namespace
+  and each later one in the one before it (`Program::name_scopes_`, read by `declared_in`); only a
+  component preceded by `inline` is transparent to lookup. `namespace_definition` gives each
+  component its declaration. Names mangle as Clang's (`tests/own/namespaces/nested-mangling`, with a
+  Clang peer).
+- Tests: `tests/own/namespaces/`.
+
+## Block-scope static variables, ι (#291, #337, 2026-11-19)
+
+- **Sema** (src/parse/parser.cppm `variable_node`, src/sema/actions.cppm `static_local`): a
+  `static` (or `constinit static`) block-scope variable is an entity local to its function or
+  lambda, numbered among its statics of that name (`EntityRec::ordinal`, also in its identity),
+  declared as a `StaticVar` node with the constant it is initialized with when there is one.
+- **Pipeline** (src/pipeline/front.cppm `static_locals`): each is a variable of the unit, with
+  its constant or zero; one initialized by code, or with a destructor, gets a guard variable
+  (8 bytes) and its function the runtime's entry points (`Runtime`). Names are Clang's: the
+  function's own symbol gives the <encoding> of `_ZZ<encoding>E<name>[_n]` and `_ZGVZ…` (back.cppm).
+  The Mach-O linker adds libc++abi (`__cxa_guard_*`) when the objects need it (`libcxxabi()`).
+- **IR** (src/irgen/gen.cppm `static_var`): `if (__cxa_guard_acquire(&g)) { init; at_exit(d);
+  __cxa_guard_release(&g); }`, the acquire called on every pass (#372); a static local's object is
+  its entity's from the function's entry, so a jump past its declaration finds it.
+- Not yet: inline functions' statics are per unit (#124); static references (#367).
+- Tests: `tests/own/static-locals/` (spec-only, 19 tests, a Clang peer in `mixed.run.cpp`).
 
 ## Range-based `for`, ι (#298, #337, 2026-11-19)
 

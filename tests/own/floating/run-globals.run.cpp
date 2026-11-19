@@ -1,7 +1,6 @@
 // [basic.start.static], [dcl.init]: floating globals and arrays of doubles with static storage
 // duration, constant-initialized, zero-initialized or partly initialized, read and written at run
 // time; a static local double keeps its value between calls.
-// XFAIL: ycxx block-scope static variables ('static' is not supported yet, #291)
 // STDOUT: 2.5 0.1 0 -1e+300
 // STDOUT: 1 2 3.5 0 0 sum=6.5
 // STDOUT: 0.5 1 1.5

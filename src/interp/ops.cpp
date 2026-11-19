@@ -467,7 +467,9 @@ struct Ops {
     return Flow::returned;
   }
 
-  static Flow unreachable(M& m, Frame&, N) { return m.fail(Reason::unreachable); }
+  static Flow unreachable(M& m, Frame& f, N n) {
+    return m.fail(has(f, n, ir::Flag::not_constexpr) ? Reason::static_definition : Reason::unreachable);
+  }
   static Flow invoke(M& m, Frame&, N n) { return m.unsupported(n); }
   static Flow invoke_ind(M& m, Frame&, N n) { return m.unsupported(n); }
   static Flow throw_(M& m, Frame&, N n) { return m.unsupported(n); }
