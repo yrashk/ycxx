@@ -5197,7 +5197,8 @@ public:
     if (inst_) f = inst_->decl;
     Ex root;
     if (f && f->entity != EntityId::none && f->kind == ast::DeclKind::function && !(f->flags & sema::decl_flag::deleted)) {
-      s_.set_return_type(s_.types().rec(f->type).inner);
+      const auto signature = s_.types().rec(f->type);
+      s_.set_return_type(signature.inner);
       // A consteval function's body is an immediate function context ([expr.const]).
       if (f->flags & sema::decl_flag::consteval_) s_.immediate_context = 1;
       // A template's body is in the scope of its template-head ([basic.scope.temp]); an
@@ -5210,6 +5211,7 @@ public:
       // body is looked up in the namespace of what it defines ([basic.lookup.unqual]/9).
       EntityId scope = p_->world().entities.rec(f->entity).scope;
       s_.current_function = f->entity;
+      s_.variadic_function_body = signature.variadic;
       // Its closures' members are defined wherever it is: an inline function, a member defined in
       // its class, or a specialization ([dcl.inline], [temp.inst]).
       s_.function_inline = (f->flags & sema::decl_flag::inline_) || inst_ ||

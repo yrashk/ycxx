@@ -63,6 +63,14 @@ class Encoder {
     memory({std::uint8_t(width == 1 ? 0x88 : 0x89)}, src, base, disp, width == 8);
   }
 
+  void store_immediate32(Reg base, std::int32_t disp, std::uint32_t value) {
+    memory({0xc7}, 0, base, disp, false);
+    immediate(value, 4);
+  }
+
+  // MOVAPS to a 16-byte-aligned variadic register-save slot. This is the only XMM form used.
+  void store_xmm(Reg base, std::int32_t disp, unsigned xmm) { memory({0x0f, 0x29}, xmm, base, disp, false); }
+
   void address(Reg dst, Reg base, std::int32_t disp) { memory({0x8d}, dst, base, disp, true); }
 
   std::size_t displacement() {
@@ -90,7 +98,11 @@ class Encoder {
   }
 
   void memory(std::initializer_list<std::uint8_t> opcode, Reg reg, Reg base, std::int32_t disp, bool wide) {
-    unsigned r = number(reg), b = number(base);
+    memory(opcode, number(reg), base, disp, wide);
+  }
+
+  void memory(std::initializer_list<std::uint8_t> opcode, unsigned r, Reg base, std::int32_t disp, bool wide) {
+    unsigned b = number(base);
     rex(wide, r, b);
     emit(opcode);
     emit({std::uint8_t(0x80 | ((r & 7) << 3) | (b & 7))});

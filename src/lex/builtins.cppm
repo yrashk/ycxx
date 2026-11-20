@@ -108,6 +108,19 @@ constexpr const BuiltinFunctionInfo* builtin_function(std::string_view name) {
   return nullptr;
 }
 
+// The variadic builtins have their own argument grammar: va_arg takes a type-id.
+enum class VaBuiltin : std::uint8_t { start, legacy_start, arg, copy, end };
+
+constexpr std::optional<VaBuiltin> va_builtin(std::string_view name) {
+  using enum VaBuiltin;
+  if (name == "__builtin_c23_va_start") return start;
+  if (name == "__builtin_va_start") return legacy_start;
+  if (name == "__builtin_va_arg") return arg;
+  if (name == "__builtin_va_copy") return copy;
+  if (name == "__builtin_va_end") return end;
+  return std::nullopt;
+}
+
 // The GNU built-in functions the SDK's and libycxx's headers call and ycxx does not have yet
 // (docs/EXTENSIONS.md, #248): a call of one is diagnosed as not supported, its arguments skipped.
 // Any other `__builtin_` name is an ordinary name, undeclared unless declared, so a

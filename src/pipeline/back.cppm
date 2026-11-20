@@ -996,7 +996,7 @@ std::string_view linux_signature_error(const ast::Interners& in, const QueryLayo
   QualType canonical = in.types.canon(type);
   if (!in.types.is<ast::TFunction>(canonical)) return "the function type is unavailable";
   auto f = in.types.get<ast::TFunction>(canonical);
-  if (f.variadic && !allow_variadic) return "variadic functions are not supported";
+  if (f.variadic && !allow_variadic) return "only ordinary free variadic definitions are supported";
   allow_aggregates = allow_aggregates && !f.variadic;
   auto supported = [&](ir::TypeLayout l) {
     return linux_fixed_scalar(l) || (allow_aggregates && l.sysv_integer_eightbytes);
@@ -1046,9 +1046,9 @@ engine::query_task<Lowered> Lower::run(engine::Ctx& cx, FnKey k) {
       return !e.template_type && !layout.is_class(e.scope);
     };
     auto fn = std::ranges::find(tu.entities, k.fn, &Entity::id);
-    bool allow_aggregates = !def.this_type && fn != tu.entities.end() && ordinary_free_function(*fn);
+    bool ordinary = !def.this_type && fn != tu.entities.end() && ordinary_free_function(*fn);
     QualType type = def.body.deduced ? def.body.deduced_type : def.decl.type;
-    if (auto error = linux_signature_error(in, layout, type, false, allow_aggregates); !error.empty()) {
+    if (auto error = linux_signature_error(in, layout, type, ordinary, ordinary); !error.empty()) {
       auto message = std::format("x86-64 System V ABI: {}", error);
       auto located = co_await located_error(cx, k.tu, ast::Loc{def.item, def.body_offset}, std::move(message));
       co_return Lowered{std::nullopt, {}, std::move(located)};

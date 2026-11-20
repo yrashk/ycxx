@@ -2922,6 +2922,31 @@ public:
     }
   }
 
+  Ex va_expression(lex::VaBuiltin op, u32 begin) {
+    bump();  // builtin name
+    bump();  // (
+    int saved = std::exchange(angle_, 0);
+    Ex cursor = assignment_expression();
+    std::optional<Ex> source;
+    std::optional<QualType> fetch;
+    bool ok = true;
+    using enum lex::VaBuiltin;
+    if (op == arg || op == copy || op == legacy_start) {
+      ok = expect(Tk::comma);
+      if (ok && op == arg) {
+        fetch = type_id();
+        ok = fetch.has_value();
+      } else if (ok) {
+        Ex second = assignment_expression();
+        ok = second.ok();
+        if (op == copy) source = second;
+      }
+    }
+    angle_ = saved;
+    if (!expect(Tk::r_paren) || !ok) return {NodeId::none, begin, pos()};
+    return s_->va_call(op, cursor, source, fetch, begin, pos());
+  }
+
   // primary-expression ([expr.prim]).
   Ex primary_expression() {
     u32 begin = pos();
@@ -2985,6 +3010,8 @@ public:
         expect(Tk::r_paren);
         return {NodeId::none, begin, pos()};
       }
+      if (kind(1) == Tk::l_paren)
+        if (auto op = s_->va_builtin(n)) return va_expression(*op, begin);
       // A built-in function ycxx implements, `__builtin_fabs(x)` (docs/EXTENSIONS.md).
       if (kind(1) == Tk::l_paren)
         if (const lex::BuiltinFunctionInfo* bf = s_->builtin_function(n)) {
