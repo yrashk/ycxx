@@ -490,7 +490,7 @@ int main() { int (*f)(int) = twice; return f(2) == 4 ? 0 : 1; }
 '''
 status = 'partial'
 issues = [196, 219, 287, 407]
-note = 'variadic indirect calls, noexcept conversions, C language linkage and external ELF addresses'
+note = 'variadic calls with floating-point or aggregate types, noexcept conversions, C language linkage and external ELF addresses'
 
 [[feature]]
 id = 'basic-rvalue-ref'
@@ -1077,7 +1077,7 @@ std = 'C++98'
 detect = ',\s*\.\.\.\s*\)|\bva_(?:start|arg|list)\b'
 status = 'partial'
 issues = [196, 399]
-note = 'Linux x86-64 supports the compiler resource `<stdarg.h>` and System V `va_list` declarations (#383), plus direct scalar INTEGER calls. SSE arguments (#399), variadic definitions (`va_start`), and calls through pointers (#196) remain open.'
+note = 'Linux x86-64 supports `<stdarg.h>` and System V `va_list` declarations (#383) and direct and indirect scalar INTEGER calls. SSE arguments (#399), aggregate variadic calls, and variadic definitions including `va_start` (#196) remain open.'
 probe = '''
 #include <stdarg.h>
 int sum(int n, ...) { va_list ap; va_start(ap, n); int s = 0; for (int i = 0; i < n; ++i) s += va_arg(ap, int); va_end(ap); return s; }

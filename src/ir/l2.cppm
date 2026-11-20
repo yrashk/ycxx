@@ -174,7 +174,8 @@ export enum class Op : std::uint16_t {
   // third is 1 + the index of the argument that is the address of an indirect result, which the
   // calling convention passes apart (AArch64: x8), 0 if none.
   call [[=state({S, Vs}, {S, Vs}).imms({entity, u32, u32, u32})]],
-  call_ind [[=state({S, V, Vs}, {S, Vs}).imms({u32, u32, u32})]],
+  // `variadic` keeps the indirect callee type's calling convention when the tail is empty.
+  call_ind [[=state({S, V, Vs}, {S, Vs}).imms({u32, u32, u32}).accepts({variadic})]],
 
   // Terminators.
   br [[=control({}, 1)]],

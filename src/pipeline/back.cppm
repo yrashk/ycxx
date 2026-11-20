@@ -1016,13 +1016,15 @@ std::string_view linux_signature_error(const ast::Interners& in, const QueryLayo
   return {};
 }
 
-std::string_view linux_direct_call_error(const QueryLayout& layout, const ir::Function& body, ir::NodeId call) {
+std::string_view linux_ellipsis_error(const QueryLayout& layout, const ir::Function& body, ir::NodeId call) {
+  const bool indirect = body.node(call).op == ir::Op::call_ind;
   auto imms = body.imms_of(call);
+  auto ellipsis = imms[indirect ? 0 : 1], byval = imms[indirect ? 1 : 2];
   // The tail values have already undergone the default argument promotions ([expr.call]).
   // The by-value bits distinguish class objects from genuine pointer arguments.
-  auto args = body.operands_of(call).subspan(1);
-  for (std::size_t i = args.size() - imms[1]; i < args.size(); ++i)
-    if (((imms[2] >> i) & 1) || !linux_ellipsis_scalar(layout.type(body.value(args[i]).type.type)))
+  auto args = body.operands_of(call).subspan(indirect ? 2 : 1);
+  for (std::size_t i = args.size() - ellipsis; i < args.size(); ++i)
+    if (((byval >> i) & 1) || !linux_ellipsis_scalar(layout.type(body.value(args[i]).type.type)))
       return "only 32- and 64-bit integer and pointer ellipsis arguments are supported";
   return {};
 }
@@ -1071,7 +1073,7 @@ engine::query_task<Lowered> Lower::run(engine::Ctx& cx, FnKey k) {
         QualType ptr = body.value(body.operands_of(n)[1]).type.type;
         callee = ast::pointee_of(in, ptr);
       } else continue;
-      std::string_view error = callee ? linux_signature_error(in, layout, *callee, direct, aggregate_callee)
+      std::string_view error = callee ? linux_signature_error(in, layout, *callee, true, aggregate_callee)
                                       : "the function type is unavailable";
       if (direct && callee && !error.empty()) {
         // The declaration can still have a placeholder return type. Read the signature already
@@ -1080,7 +1082,7 @@ engine::query_task<Lowered> Lower::run(engine::Ctx& cx, FnKey k) {
         if (definition != tu.functions.end() && definition->body.deduced)
           error = linux_signature_error(in, layout, definition->body.deduced_type, true, aggregate_callee);
       }
-      if (direct && error.empty()) error = linux_direct_call_error(layout, body, n);
+      if (error.empty()) error = linux_ellipsis_error(layout, body, n);
       if (error.empty()) continue;
       const ir::FunctionDebug& debug = co_await cx.fetch<FunctionDebug>(k);
       auto at = i < debug.loc.size() ? debug.loc[i] : ast::Loc{def.item, def.body_offset};
