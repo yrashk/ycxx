@@ -3051,6 +3051,15 @@ private:
       if (!flags) return bad();
       return special_member(c, true, *flags);
     }
+    if (ps_.is(Tk::l_square) && ps_.kind(1) == Tk::l_square) {
+      u32 attrs_at = ps_.pos();
+      if (!ps_.skip_balanced_attributes()) return bad();  // [class.mem.general]
+      // [class.access.spec]: an access label has no attribute-specifier-seq.
+      if (ps_.is(Tk::kw_public) || ps_.is(Tk::kw_protected) || ps_.is(Tk::kw_private)) {
+        s_.diag(attrs_at, Diag::attributes_not_allowed);
+        return bad();
+      }
+    }
     if (!Parser::starts_decl_specifier(ps_.kind()) && !ps_.starts_declaration()) {
       s_.diag(ps_.pos(), lex::is_keyword(ps_.kind()) || ps_.is(Tk::l_square) || ps_.is(Tk::coloncolon) || ps_.is(Tk::tilde)
                              ? Diag::not_supported

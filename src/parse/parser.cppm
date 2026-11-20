@@ -831,6 +831,40 @@ public:
       } while (depth > 0 && i_ + ahead < end_);
     }
   }
+  // [dcl.attr.grammar]: each attribute argument must have balanced tokens.
+  bool skip_balanced_attributes() {
+    const u32 count = past_attributes(0);
+    std::vector<Tk> closing;
+    for (u32 offset = 0; offset < count; ++offset) {
+      switch (Tk token = kind(offset)) {
+      case Tk::l_square: closing.push_back(Tk::r_square); break;
+      case Tk::l_paren: closing.push_back(Tk::r_paren); break;
+      case Tk::l_brace: closing.push_back(Tk::r_brace); break;
+      case Tk::l_splice: closing.push_back(Tk::r_splice); break;
+      case Tk::r_square:
+      case Tk::r_paren:
+      case Tk::r_brace:
+      case Tk::r_splice:
+        if (closing.empty()) {
+          s_->diag(pos() + offset, Diag::unexpected_token, token);
+          return false;
+        }
+        if (token != closing.back()) {
+          s_->diag(pos() + offset, Diag::expected_token, closing.back());
+          return false;
+        }
+        closing.pop_back();
+        break;
+      default: break;
+      }
+    }
+    if (!closing.empty()) {
+      s_->diag(pos() + count - 1, Diag::expected_token, closing.back());
+      return false;
+    }
+    seek(index() + count);
+    return true;
+  }
   // [over.oper.general]/1: the punctuators an operator function may be named by.
   static bool overloadable(Tk k) {
     switch (k) {

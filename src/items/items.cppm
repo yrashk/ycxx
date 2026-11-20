@@ -352,7 +352,9 @@ u32 Splitter::item(u32 parent, const std::string& scope, u32& unnamed_types) {
   }
   if ((kind(j) == Tk::kw_public || kind(j) == Tk::kw_protected || kind(j) == Tk::kw_private) &&
       kind(j + 1) == Tk::colon) {
-    at(k).kind = ItemKind::access_spec;
+    // Keep a prefixed label separate from the following member for declaration diagnostics.
+    bool prefixed_member = j != at(k).begin && parent != none && at(parent).kind == ItemKind::class_def;
+    at(k).kind = prefixed_member ? ItemKind::declaration : ItemKind::access_spec;
     at(k).end = i_ = j + 2;
     return k;
   }
