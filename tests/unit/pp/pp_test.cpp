@@ -408,6 +408,57 @@ void incremental_equals_cold() {
   check(warm.stats.reused > 0, "the warm session reused regions");
 }
 
+// A resource-only edit must invalidate a cached embed and a separately cached probe.
+void embed_resources() {
+  MemHost host;
+  host.files["main.cpp"] = "#include \"data.h\"\n#include \"probe.h\"\n";
+  host.files["data.h"] = "#embed \"data.bin\" if_empty(empty)\n";
+  host.files["probe.h"] = R"cpp(
+#if __has_embed("data.bin") == __STDC_EMBED_FOUND__
+found
+#elif __has_embed("data.bin") == __STDC_EMBED_EMPTY__
+zero
+#else
+missing
+#endif
+)cpp";
+  pp::Session warm(host);
+  auto check_state = [&](std::string_view expected) {
+    warm.files.new_generation();
+    auto result = run(warm, host);
+    pp::Session cold(host);
+    auto fresh = run(cold, host);
+    check(text(result.region) == expected, "resource bytes and availability reflect the current generation");
+    check(result.region == fresh.region && result.diags == fresh.diags, "embed incremental equals cold");
+    return result;
+  };
+
+  host.files["data.bin"] = std::string("\0\xff", 2);
+  auto nonempty = check_state("0 , 255 found");
+  const auto& r = nonempty.region;
+  check(r.locs[0].expansion != 0 &&
+            r.expansions[r.locs[0].expansion].kind == pp::ExpansionKind::embed &&
+            r.files[r.expansions[r.locs[0].expansion].definition_file] == "data.bin" &&
+            r.files[r.site(0).file] == "data.h",
+        "the emitted byte refers to the directive and its resource");
+  host.files["data.bin"] = "BC";
+  check_state("66 , 67 found");
+  host.files["data.bin"].clear();
+  check_state("empty zero");
+  host.files.erase("data.bin");
+  check(kinds(check_state("missing")) == std::vector{lex::LexDiag::embed_not_found}, "a removed resource is diagnosed");
+  host.files["data.bin"] = "D";
+  check_state("68 found");
+  host.files["present.h"] = "";
+  host.files["data.bin"] = std::string("\0\xff", 2);
+  warm.files.new_generation();
+  auto [printed, diagnostics] = pp::preprocess_to_text(warm, R"cpp(int data[] = {
+#embed "data.bin" limit(1 + __has_include("present.h"))
+};
+)cpp", "print.cpp");
+  check(diagnostics.empty() && printed == "# 1 \"print.cpp\"\nint data[] = {0, 255 };\n", "embed -E follows Clang's byte spacing");
+}
+
 void spacing() {
   using pp::detail::separate;
   check(separate("", "-", "-") && separate("", "<", ":") && separate("", "/", "*") && separate("", "x", "y"), "pastes");
@@ -471,6 +522,7 @@ int main() {
   reuse();
   roots_and_depth();
   incremental_equals_cold();
+  embed_resources();
   spacing();
   pool();
   return unit::result("unit.pp");

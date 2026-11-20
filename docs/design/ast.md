@@ -961,8 +961,8 @@ preprocesses differently per TU is shown in the chosen TU's view; the client can
   `pp` for `__LINE__` and `__FILE__` (§B9).
 - **`__LINE__`, `__COUNTER__`:** the produced token's expansion has kind builtin, with the site at
   the macro token.
-- **`#embed`** ([cpp.embed]): *one* token carrying the resource's bytes, expanded by the parser
-  where an initializer or expression list is accepted. `prefix`, `suffix` and `if_empty` yield
+- **`#embed`** ([cpp.embed]): *one* phase-4 token carrying the resource's bytes, expanded to integer and comma tokens
+  when the parser's input is materialized. `prefix`, `suffix` and `if_empty` yield
   ordinary tokens around it. Its `TokLoc` is the directive, with an expansion of kind embed whose
   definition file is the resource.
 - **`##`** ([cpp.concat]): the pasted token's spelling is the first operand's, with an expansion

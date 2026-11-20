@@ -112,6 +112,15 @@ enum class LexDiag : u32 {
   module_name_end [[=message{Severity::error, "a module name must be followed by ';' or '['"}]],
   // [cpp.pragma]
   pragma_once_in_main [[=message{Severity::warning, "#pragma once in main file"}]],
+  // [cpp.embed]
+  embed_bad_parameter [[=message{Severity::error, "invalid embed parameter"}]],
+  embed_duplicate_parameter [[=message{Severity::error, "duplicate embed parameter"}]],
+  embed_unsupported_parameter [[=message{Severity::error, "unsupported embed parameter"}]],
+  embed_negative [[=message{Severity::error, "embed limit or offset must be nonnegative"}]],
+  embed_cond_operator [[=message{Severity::error, "conditional operator is not permitted in this embed operand"}]],
+  embed_parameter_macro [[=message{Severity::error, "standard embed parameter name used as a macro in __has_embed"}]],
+  embed_in_arguments [[=message{Severity::error, "#embed within macro arguments is not supported"}]],
+  embed_not_found [[=message{Severity::error, "embed resource not found"}]],
 };
 
 // A diagnostic as the lexer produces it, before it reaches a query's context.

@@ -174,6 +174,7 @@ enum class Tk : u8 {
   // GNU pointer qualifiers (docs/EXTENSIONS.md).
   kw___restrict,
   kw___restrict__,
+  embed,  // a phase-4 resource, unpacked when materializing parser tokens
 };
 
 // Token flags. `line_start` and `space_before` describe whitespace and are not part of an item's
@@ -192,6 +193,7 @@ inline constexpr u8 whitespace = line_start | space_before;
 // A token (§8.1): no location. The payload is
 // - for `identifier` (and pp-only `header_name`), the index of its spelling in the region's names;
 // - for literals and `pp_number`, the index of its entry in the region's literals;
+// - for phase-4-only `embed`, the session's interned resource bytes;
 // - 0 otherwise.
 struct Tok {
   Tk kind = Tk::eof;
@@ -234,17 +236,17 @@ inline constexpr std::array<std::string_view, tk_count> tk_names = [] {
 constexpr std::string_view spelling(Tk k) { return tk_spellings[std::to_underlying(k)]; }
 constexpr std::string_view name(Tk k) { return tk_names[std::to_underlying(k)]; }
 
-constexpr bool is_keyword(Tk k) { return k >= Tk::kw_alignas; }
+constexpr bool is_keyword(Tk k) { return k >= Tk::kw_alignas && k <= Tk::kw___restrict__; }
 constexpr bool is_punctuator(Tk k) { return k >= Tk::l_brace && k <= Tk::hashhash; }
 constexpr bool is_literal(Tk k) { return k >= Tk::int_lit && k <= Tk::string_lit; }
 constexpr bool is_pp_only(Tk k) {
-  return k == Tk::pp_number || k == Tk::header_name || k == Tk::pp_other || k == Tk::hash || k == Tk::hashhash;
+  return k == Tk::pp_number || k == Tk::header_name || k == Tk::pp_other || k == Tk::embed || k == Tk::hash || k == Tk::hashhash;
 }
 
 // The keyword spelled `s`, if any ([lex.key]).
 constexpr std::optional<Tk> keyword(std::string_view s) {
   constexpr auto table = [] {
-    std::array<std::pair<std::string_view, Tk>, tk_count - std::to_underlying(Tk::kw_alignas)> t{};
+    std::array<std::pair<std::string_view, Tk>, std::to_underlying(Tk::kw___restrict__) - std::to_underlying(Tk::kw_alignas) + 1> t{};
     for (std::size_t i = 0; i < t.size(); ++i) {
       Tk k = Tk(std::to_underlying(Tk::kw_alignas) + i);
       t[i] = {tk_spellings[std::to_underlying(k)], k};
