@@ -95,9 +95,10 @@ Ordinary namespace-scope references to supported scalar and array storage can bi
 or during ordered startup initialization. On Linux, generated code can access bindings and
 referents with internal linkage. [#367](https://github.com/yrashk/ycxx/issues/367)
 
-Linux x86-64 programs can read, write and take the address of data defined in another
-translation unit. Native static executables and host-linked objects support those addresses.
-[#414](https://github.com/yrashk/ycxx/issues/414)
+Linux x86-64 programs can read and write data and take the address of data and ordinary
+functions defined in another translation unit. Native static executables and host-linked objects
+support those addresses. [#414](https://github.com/yrashk/ycxx/issues/414)
+· [#407](https://github.com/yrashk/ycxx/issues/407)
 
 On x86-64 Linux, direct calls and saved pointers across translation units share one address for
 simple external inline functions. [#422](https://github.com/yrashk/ycxx/issues/422)

@@ -595,16 +595,17 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   start inside executable code, and its declared extent must fit in its section. The object
   fingerprint includes this metadata.
   [#428](https://github.com/yrashk/ycxx/issues/428) · [#391](https://github.com/yrashk/ycxx/issues/391)
-- Runtime addresses of default-visible Linux data use `R_X86_64_REX_GOTPCRELX`, including
-  declarations defined in another object. The native static linker checks and relaxes the
-  RIP-relative MOV to LEA after resolving the symbol. System linkers can preserve GOT binding.
-  Static pointer initializers continue to use absolute relocations with their byte addends.
-  `unit.linux_compile` checks address identity, nonzero offsets, writes, archive extraction,
-  BSS, and system-linker preemption. `unit.elf_link` checks malformed instructions, overlapping
-  relocations, weak resolution and displacement range. Native dynamic data addresses and
-  external function addresses follow [#390](https://github.com/yrashk/ycxx/issues/390) and
-  [#407](https://github.com/yrashk/ycxx/issues/407).
+- Runtime addresses of default-visible Linux data and ordinary functions use
+  `R_X86_64_REX_GOTPCRELX`, including declarations defined in another object. The native static
+  linker checks and relaxes the RIP-relative MOV to LEA after resolving the symbol. System linkers
+  can preserve GOT binding. Static pointer initializers use absolute relocations with their byte
+  addends. `unit.linux_compile` checks data identity, offsets, writes, BSS, and preemption.
+  `unit.linux_function_addresses` checks function identity, indirect calls, archive extraction,
+  weak definition precedence, and system-linker preemption and aliases. `unit.elf_link` checks
+  malformed instructions, overlapping relocations and displacement range. Native dynamic addresses
+  follow [#390](https://github.com/yrashk/ycxx/issues/390).
   [Design](docs/design/linux-external-data-addresses.md) · [#414](https://github.com/yrashk/ycxx/issues/414)
+  · [#407](https://github.com/yrashk/ycxx/issues/407)
 - Simple external inline function definitions use weak ELF symbols. The unit combines inline
   flags from reachable declarations, including `constexpr` functions and ordinary members
   defined in their class. Calls and statically initialized pointers in different units resolve
@@ -2122,8 +2123,8 @@ values, end to end; results match Clang's bit for bit.
   a template-id without a target type (#335), and function pointer or reference template
   arguments (#406). A free immediate function selected from an overload is diagnosed outside an
   immediate invocation or context. General immediate-function name validation is tracked in #102.
-- The Linux x86-64 backend can call through an address taken from an internal function. Emitting
-  addresses of externally linked functions on that target is tracked in #407.
+- The Linux x86-64 backend supports calling through the address of an ordinary function with
+  internal or external linkage. [#407](https://github.com/yrashk/ycxx/issues/407)
 - Tests are in `tests/own/function-pointers/`, with draft examples for [over.over] and
   [temp.deduct.call] enabled.
 

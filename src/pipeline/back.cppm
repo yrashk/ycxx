@@ -231,8 +231,8 @@ L2Body deserialize_from(engine::Source& in, std::type_identity<L2Body>) {
 // §2.4, so that `optimized` is keyed by what it compiles, not by where it came from.
 struct OptUnit {
   L2Body body;
-  std::vector<ir::EntityId> local;  // the entities it refers to that this TU defines, sorted by handle
-  std::vector<ir::EntityId> external_data;  // data references using the ELF GOT, sorted by handle
+  std::vector<ir::EntityId> local;  // directly addressable references, sorted by handle
+  std::vector<ir::EntityId> got_symbols;  // addresses using the ELF GOT, sorted by handle
   // The inline candidates and callee summaries of §2.4 come with level 1.
 };
 class UnitStore {
@@ -1062,21 +1062,27 @@ engine::query_task<Lowered> Lower::run(engine::Ctx& cx, FnKey k) {
 }
 
 // The entities a function's code refers to (`symbol` and `call` operands).
-std::vector<ir::EntityId> references(const l2::Function& body) {
-  std::vector<ir::EntityId> out;
+struct SymbolReference {
+  ir::EntityId entity;
+  l2::Op op;
+};
+
+std::vector<SymbolReference> references(const l2::Function& body) {
+  std::vector<SymbolReference> out;
   for (std::uint32_t n = 0; n < body.nodes.size(); ++n) {
     l2::Op op = body.nodes[n].op;
-    if (op == l2::Op::symbol || op == l2::Op::call) out.push_back(ir::EntityId(std::uint32_t(body.imms_of(ir::NodeId(n))[0])));
+    if (op == l2::Op::symbol || op == l2::Op::call)
+      out.push_back({ir::EntityId(std::uint32_t(body.imms_of(ir::NodeId(n))[0])), op});
   }
   return out;
 }
 
 struct SymbolAddresses {
-  std::vector<EntityId> direct, external_data;
+  std::vector<EntityId> direct, got;
 };
 
-// ELF default-visible definitions can be preempted. Its data declarations use the GOT, and
-// internal definitions can use the symbol itself in a direct displacement.
+// ELF default-visible symbols can be preempted, so their addresses use the GOT.
+// Internal definitions can use the symbol itself in a direct displacement.
 struct TuSymbolAddresses {
   using Key = TuId;
   using Value = SymbolAddresses;
@@ -1095,9 +1101,9 @@ struct TuSymbolAddresses {
     for (const Variable& v : u.variables) add(v.entity);
     if (linux) {
       for (const Entity& e : u.entities)
-        if (!e.is_function && (e.linkage == ast::Linkage::external || e.linkage == ast::Linkage::module))
-          out.external_data.push_back(e.id);
-      std::ranges::sort(out.external_data);
+        if (e.linkage == ast::Linkage::external || e.linkage == ast::Linkage::module)
+          out.got.push_back(e.id);
+      std::ranges::sort(out.got);
     }
     std::ranges::sort(out.direct);
     co_return out;
@@ -1109,13 +1115,13 @@ engine::query_task<UnitRef> UnitQ::run(engine::Ctx& cx, FnKey k) {
   if (!lowered.body) co_return UnitRef{std::nullopt, lowered.error};
   // Which references can be addressed directly, including the function's string literals.
   OptUnit u{*lowered.body, {}, {}};
-  for (ir::EntityId e : references(u.body.f)) {
+  for (auto [e, op] : references(u.body.f)) {
     if (std::ranges::binary_search(symbols.direct, e) || std::ranges::contains(lowered.strings, e, &StringUse::entity))
       u.local.push_back(e);
-    else if (std::ranges::binary_search(symbols.external_data, e))
-      u.external_data.push_back(e);
+    else if (op == l2::Op::symbol && std::ranges::binary_search(symbols.got, e))
+      u.got_symbols.push_back(e);
   }
-  for (auto* ids : {&u.local, &u.external_data}) {
+  for (auto* ids : {&u.local, &u.got_symbols}) {
     std::ranges::sort(*ids);
     ids->erase(std::ranges::unique(*ids).begin(), ids->end());
   }
@@ -1127,7 +1133,7 @@ engine::query_task<Machine> Optimized::run(engine::Ctx& cx, OptKey k) {
   const OptUnit& u = universe().units->at(k.unit);
   // Level 0: `lower` already ran (it made the unit); selection and stack slots (§O7).
   if (k.target == obj::target::x86_64_linux) {
-    auto m = x86_64::compile_function(u.body.f, u.local, u.external_data);
+    auto m = x86_64::compile_function(u.body.f, u.local, u.got_symbols);
     if (!m) co_return Machine{std::nullopt, m.error()};
     co_return Machine{std::nullopt, {}, std::move(*m)};
   }
@@ -1400,7 +1406,7 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
   {
     const auto ls = co_await cx.par_map<Lower>(lowered);  // all hits
     for (const Lowered& l : ls) {
-      for (ir::EntityId e : references(l.body->f)) used.insert(ir::raw(e));
+      for (const auto& ref : references(l.body->f)) used.insert(ir::raw(ref.entity));
     }
   }
   for (const FnKey& f : lowered) used.insert(ir::raw(f.fn));
