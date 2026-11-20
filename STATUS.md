@@ -1666,6 +1666,16 @@ Fable decided the representation (ast.md §6.6); the Opus session wrote the code
   `<stdio.h>` preprocesses, and `unit.linux_stdarg` checks that path, both inclusion orders,
   and type semantics. Variadic operations are tracked in #248.
 
+## Linux resource `<float.h>` and `<limits.h>` (#475)
+
+- Direct `<float.h>` shares the target's floating-point macros with the pinned libycxx
+  `<cfloat>` ([cfloat.syn]). The resource uses the macro-only provider for C linkage.
+- Linux `<limits.h>` supplies the compiler's target-dependent integer limits and widths
+  from libycxx's macro-only `<climits>` provider before entering glibc's header. The resource scopes glibc's
+  continuation marker to that inclusion and lets glibc supply the locale bound and POSIX
+  limits. Other libc providers keep their normal `<limits.h>`, and the resource can
+  supply compiler limits when a sysroot has no provider ([climits.syn]).
+
 ## Templates, ζ step 8: template template parameters and `__make_integer_seq` (#88, #208, 2026-11-19)
 
 Fable decided the representation (ast.md §6.7); the Opus session wrote the code.
