@@ -419,7 +419,7 @@ public:
 
   // decl-specifier-seq ([dcl.spec.general]) with the simple-type-specifiers of [dcl.type.simple],
   // class names and elaborated-type-specifiers ([dcl.type.elab]), and the cv-qualifiers.
-  DeclSpec decl_specifiers(bool in_type_id = false) {
+  DeclSpec decl_specifiers(bool in_type_id = false, std::optional<u32>* friend_at = nullptr) {
     DeclSpec d;
     d.begin = pos();
     int n_char = 0, n_short = 0, n_int = 0, n_long = 0, n_signed = 0, n_unsigned = 0, n_void = 0, n_bool = 0;
@@ -460,6 +460,11 @@ public:
         once(d.is_extern, k);
         break;
       case Tk::kw_inline: once(d.is_inline, k); break;
+      case Tk::kw_friend:
+        if (!friend_at) goto done;
+        if (*friend_at) s_->diag(pos(), Diag::duplicate_specifier, k);
+        else *friend_at = pos();
+        break;
       case Tk::kw_auto:
         // A placeholder type ([dcl.spec.auto]), deduced from an initializer or a return statement.
         if (any_type()) {

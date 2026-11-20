@@ -536,7 +536,7 @@ std = 'C++98'
 core = true
 status = 'partial'
 issues = [165, 259]
-note = 'ordinary namespace calls, inline namespaces, class bases and class template type arguments work. Remaining cases include hidden friends, block function declarations, template template arguments, dependent-call type arguments, overload sets and template-ids'
+note = 'ordinary namespace calls, ordinary non-template hidden friends, inline namespaces, class bases and class template type arguments work. Remaining cases include hidden friend operators and templates, block function declarations, template template arguments, dependent-call type arguments, overload sets and template-ids'
 probe = '''
 namespace n { struct S {}; int f(S) { return 0; } }
 int main() { n::S s; return f(s); }
@@ -1758,7 +1758,7 @@ std = 'C++98'
 detect = '\bfriend\b'
 status = 'partial'
 issues = [259]
-note = 'friend definitions, friends in templates'
+note = 'C-linkage friend definitions, hidden friend operators, default arguments in friend declarations, and friends in templates'
 probe = '''
 class C { int p = 2; friend int peek(const C& c) { return c.p; } };
 int main() { C c; return peek(c) - 2; }

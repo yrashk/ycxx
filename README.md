@@ -169,7 +169,9 @@ definitions for runtime construction. [#157](https://github.com/yrashk/ycxx/issu
   with RAII, aggregate and designated initialization, namespace-scope objects initialized by
   code before `main` and destroyed after it, block-scope `static` variables initialized once, passing and returning them by value with
   Clang's calling convention, so ycxx and Clang objects call each other; access control
-  (`public`, `protected`, `private`) and friend functions and classes;
+  (`public`, `protected`, `private`) and friend functions and classes. Ordinary unqualified
+  friend definitions in non-template namespace-scope classes are found by argument-dependent
+  lookup or through a matching namespace declaration. [#259](https://github.com/yrashk/ycxx/issues/259)
 - named `int` and `unsigned int` bit-fields of width 1 through 32 in ordinary unpacked,
   non-template classes without bases;
 - single and multiple inheritance (not virtual): base classes laid out as Clang does, member

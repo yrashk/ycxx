@@ -699,6 +699,8 @@ struct ClassRec {
   std::vector<std::pair<EntityId, ast::Access>> access;
   // Its friends ([class.friend]): functions and classes, by entity.
   std::vector<EntityId> friends;
+  // The unqualified friend function declarations ADL can find through this class.
+  std::vector<ast::MemberRec> adl_friends;
 
   ast::Access access_of(EntityId e) const {
     for (const auto& [m, a] : access)
