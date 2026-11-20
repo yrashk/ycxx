@@ -580,6 +580,12 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   accepts the supported x86-64 `ET_REL` subset emitted by ycxx. The native ELF linker consumes
   the same in-memory objects, resolves absolute and PC-relative relocations, and writes a static
   `ET_EXEC` image with load segments and a non-executable stack.
+- Simple external inline function definitions use weak ELF symbols. The unit combines inline
+  flags from reachable declarations, including `constexpr` functions and ordinary members
+  defined in their class. Calls and statically initialized pointers in different units resolve
+  to one definition. `unit.linux_inline` checks symbol bindings, address identity, archive
+  extraction, and both operand orders with the native and host linkers.
+  [Design](docs/design/linux-inline-functions.md) · [#422](https://github.com/yrashk/ycxx/issues/422)
 - The ELF reader accepts the GNU-built libycxx static linkage-marker object. It reads sized
   object symbols and local section symbols, preserves the marker's hidden binding, and maps
   `.data.rel.ro.local` to the existing read-only output for relocated pointers. It validates and
@@ -892,7 +898,7 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   Itanium ABI passes it. Linkage names are `<nested-name>`s with the member's cv-qualifiers,
   checked against Clang's symbols.
 - Tests: `tests/own/classes/s2-*` (spec-only, plus three from the review): 12 of 13 pass; the constexpr one waits for records
-  in the interpreter (#25). In-class member functions are not weak definitions yet (#124).
+  in the interpreter (#25). Mach-O still needs weak definitions for in-class member functions (#124).
 - Not yet: ref-qualifiers, `= default`.
 
 ## Classes, δ step 3: constructors, destructors, references, overloading (#86, 2026-11-18)
