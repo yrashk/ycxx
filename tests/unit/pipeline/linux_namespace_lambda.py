@@ -41,7 +41,7 @@ def main():
             return {line.split()[-1]: line.split()[4] for line in run([readelf, '-Ws', path]).stdout.splitlines()
                     if line.lstrip().split(':', 1)[0].isdigit() and len(line.split()) == 8}
 
-        for name in ('runtime', 'constinit', 'invoker'):
+        for name in ('runtime', 'constinit', 'constexpr', 'invoker'):
             native(f'{name}.cpp')
         compile('-fsyntax-only', 'scope.cpp')
         # Internal referents keep the native probe independent of external ELF data addressing (#414).

@@ -4091,7 +4091,7 @@ private:
       if (init.ok()) {
         // The captureless prvalue has no fields to initialize. Keep a constant of the complete
         // closure type so the ordinary variable path allocates its addressable storage.
-        value = p_->world().ins.intern_value(ast::VAggregate{types.canonical(d.type), b_.seq(std::span<const ConstId>{})});
+        value = p_->world().values.aggregate(d.type, {});
         if (spec.is_constexpr) p_->set_constant(sem.entity, value, k_);
       }
     } else if (!fn && (early || ps_.is(Tk::l_brace) || (ps_.is(Tk::equal) && ps_.kind(1) == Tk::l_brace))) {
