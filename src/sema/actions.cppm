@@ -213,6 +213,7 @@ inline constexpr u8 immediate_address = 2;  // checked after immediate invocatio
 // Flags of `LocalRec::flags` and `DeclSema::flags`.
 namespace local_flag {
 inline constexpr u16 parameter = 1;
+inline constexpr u16 default_argument_parameter = 8;
 }
 namespace param_flag {
 inline constexpr u16 pack_element = 1;  // an element of a function parameter pack ([temp.variadic]/8)
@@ -3875,9 +3876,16 @@ public:
     for (std::size_t d = scopes_.size(); d-- > 0;) {
       for (auto p = scopes_[d].rbegin(); p != scopes_[d].rend(); ++p)
         if (p->first == name) {
+          u32 ctx = context_of(d);
+          if (!(p->second & capture_bit)) {
+            const ast::LocalRec& local = ctx == lambdas_.size() ? locals_[p->second] : lambdas_[ctx].outer_locals[p->second];
+            if (!unevaluated && (local.flags & local_flag::default_argument_parameter)) {
+              diag(begin, Diag::parameter_in_default_argument, name);
+              return {NodeId::none, begin, end};
+            }
+          }
           // A local of an enclosing function, or an init-capture: through the lambdas' captures.
-          if (u32 ctx = context_of(d); ctx != lambdas_.size() || (p->second & capture_bit))
-            return captured(ctx, p->second, name, begin, end);
+          if (ctx != lambdas_.size() || (p->second & capture_bit)) return captured(ctx, p->second, name, begin, end);
           const ast::LocalRec& l = locals_[p->second];
           // A variable whose type its own initializer deduces ([dcl.spec.auto.general]/11).
           if (types().has_placeholder(l.type)) {

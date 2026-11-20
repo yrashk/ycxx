@@ -126,6 +126,7 @@ enum class Diag : std::uint32_t {
   const_uninitialized [[=message{Severity::error, "const variable '{0:n}' must be initialized"}]],
   redefinition [[=message{Severity::error, "redefinition of '{0:n}'"}]],
   default_arg_redefined [[=message{Severity::error, "redefinition of a default argument"}]],
+  parameter_in_default_argument [[=message{Severity::error, "parameter '{0:n}' may not appear in a potentially evaluated default argument"}]],
   default_arg_missing [[=message{Severity::error, "missing default argument on a parameter after one with a default"}]],
   default_arg_dependent [[=message{Severity::error, "default arguments of templates are not supported yet"}]],
   default_arg_template_redeclared [[=message{Severity::error, "a redeclaration of a function template cannot add default arguments"}]],

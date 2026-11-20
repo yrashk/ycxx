@@ -730,16 +730,19 @@ struct EnumRec {
 // see different definitions (one session serving several programs, or an edit), so each unit has
 // its own table, built as it analyses the definitions, and gives it to the back end with its
 // definitions (`pipeline::FrontResult::shapes`). A record is built privately and published once
-// complete; until then a class has no record.
+// its declaration and layout information is complete. Member defaults can finish against that record.
 class Classes {
 public:
   explicit Classes(ast::Interners& ins, Types& types) : ins_(&ins), types_(&types) {}
   Classes(const Classes&) = delete;
 
   // `r`, a definition's record, unless one is published already; the published one.
-  const ClassRec& publish(EntityId c, ClassRec r) {
+  const ClassRec& publish(EntityId c, ClassRec r, const std::function<void(ClassRec&)>& finish = {}) {
     auto [it, fresh] = recs_.try_emplace(std::to_underlying(c), std::move(r));
-    if (fresh) class_order_.push_back(c);
+    if (fresh) {
+      class_order_.push_back(c);
+      if (finish) finish(it->second);
+    }
     return it->second;
   }
   // The opaque form supplies the type's shape. A definition also supplies its enumerators.
