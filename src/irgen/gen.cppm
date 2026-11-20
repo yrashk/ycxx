@@ -88,6 +88,23 @@ struct FunctionIr {
   ir::FunctionDebug debug;  // keyed by `body`'s node ids
 };
 
+// Namespace-scope reference initialization cannot extend the lifetime of a temporary in the
+// startup function's frame (#367).
+bool materializes_temporary(const ast::Ast& ast, ast::NodeId n) {
+  if (n == ast::NodeId::none) return false;
+  if (ast.is<ast::Materialize>(n)) return true;
+  bool found = false;
+  ast::dispatch<ast::Nodes>(ast::kind_of(n), [&]<class T>(std::type_identity<T>) {
+    T v = ast.get<T>(n);
+    ast::for_each_ref(v, [&]<class H>(const H& h) {
+      if constexpr (std::is_same_v<H, ast::NodeId>) found = found || materializes_temporary(ast, h);
+      else if constexpr (std::is_same_v<H, ast::ChildList>)
+        for (ast::Child c : ast.children(h)) found = found || materializes_temporary(ast, c.id);
+    });
+  });
+  return found;
+}
+
 // Fails, naming the construct, on what the α slice does not generate yet.
 template <Facts F>
 std::expected<FunctionIr, std::string> function_ir(const ast::Interners& in, const FunctionInput& fn, F& facts);
@@ -814,6 +831,8 @@ class Gen {
     auto si = get<ast::StaticInit>(a);
     Place p{pure(ir::Op::global, facts_.pointer_to(si.type), {}, {word(si.variable)}), si.type};
     if (si.init.id != NodeId::none) {
+      if (facts_.is_reference(si.type) && materializes_temporary(ast_, si.init.id))
+        throw Unsupported{"a materialized temporary in a namespace-scope reference initializer"};
       pinned([&] {
         full_expression([&] {
           initialize(p, child(a, si.init), false);
@@ -1568,11 +1587,14 @@ class Gen {
       }
     }
     if (is<ast::DeclRef>(a)) {
-      ast::EntityId e = get<ast::DeclRef>(a).entity;
+      auto d = get<ast::DeclRef>(a);
+      ast::QualType ptr = facts_.pointer_to(t);
+      // A namespace-scope reference's symbol holds its referent's address ([dcl.ref]).
+      if (d.reference) return {load({pure(ir::Op::global, facts_.pointer_to(ptr), {}, {word(d.entity)}), ptr}), t};
       // A function designator's address is the function's ([conv.func], [expr.unary.op]).
-      if (cls(t) == TypeClass::function) return {pure(ir::Op::func_addr, facts_.pointer_to(t), {}, {word(e)}), t};
+      if (cls(t) == TypeClass::function) return {pure(ir::Op::func_addr, ptr, {}, {word(d.entity)}), t};
       // A namespace-scope variable: its address is a constant of the entity ([basic.stc.static]).
-      return {pure(ir::Op::global, facts_.pointer_to(t), {}, {word(e)}), t};
+      return {pure(ir::Op::global, ptr, {}, {word(d.entity)}), t};
     }
     if (is<ast::Literal>(a)) {
       // A string literal names a static array object ([lex.string]).

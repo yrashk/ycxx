@@ -316,7 +316,7 @@ public:
 
   // decl-specifier-seq ([dcl.spec.general]) with the simple-type-specifiers of [dcl.type.simple],
   // class names and elaborated-type-specifiers ([dcl.type.elab]), and the cv-qualifiers.
-  DeclSpec decl_specifiers() {
+  DeclSpec decl_specifiers(bool in_type_id = false) {
     DeclSpec d;
     d.begin = pos();
     int n_char = 0, n_short = 0, n_int = 0, n_long = 0, n_signed = 0, n_unsigned = 0, n_void = 0, n_bool = 0;
@@ -487,7 +487,8 @@ public:
           }
           if (qualified_ahead()) {
             // `N::C`, `::C`, `C::E`, `X<T>::E` ([dcl.type.simple]).
-            if (auto q = qualified_type(0, true); q && kind(q->second) != Tk::l_paren) {
+            // In a type-id, the following `(` can start an abstract declarator ([dcl.name]).
+            if (auto q = qualified_type(0, true); q && (in_type_id || kind(q->second) != Tk::l_paren)) {
               cls = q->first;
               take_qualified(q->second);
               continue;
@@ -830,9 +831,11 @@ public:
         if (!l.template_args) ok = false;
       }
       skip_attributes();  // appertaining to the declarator-id ([dcl.meaning.general]/1)
-    } else if (is(Tk::l_paren) && (kind(1) == Tk::star || kind(1) == Tk::amp || kind(1) == Tk::ampamp ||
-                                   kind(1) == Tk::l_paren || kind(1) == Tk::identifier || member_pointer_star(1))) {
-      // [dcl.ambig.res]: `(` begins a nested declarator when a parameter list cannot start here.
+    } else if (is(Tk::l_paren) &&
+               (kind(1) == Tk::star || kind(1) == Tk::amp || kind(1) == Tk::ampamp || kind(1) == Tk::l_paren ||
+                (kind(1) == Tk::identifier && (!abstract || !params_ahead())) || member_pointer_star(1))) {
+      // In an abstract declarator, a type-name after `(` begins a parameter declaration
+      // instead of naming the entity declared ([dcl.ambig.res]).
       bump();
       l.inner = std::make_unique<Level>(level(abstract, ok));
       ok = expect(Tk::r_paren) && ok;
@@ -1606,11 +1609,11 @@ public:
     return s_->concept_named(name_of(tok()));
   }
 
-  // A type-id ([dcl.name]): a decl-specifier-seq and an abstract declarator.
+  // A type-id ([dcl.name]): a type-specifier-seq and an optional abstract declarator.
   // A placeholder is allowed only where `placeholder_ok` says (a trailing return type,
   // [dcl.spec.auto.general]/3): not in a template argument, a cast or an alias ([dcl.spec.auto.general]/6).
   std::optional<QualType> type_id(bool placeholder_ok = false) {
-    DeclSpec spec = decl_specifiers();
+    DeclSpec spec = decl_specifiers(/*in_type_id=*/true);
     if (!spec.ok) return std::nullopt;
     Declarator d = declarator(spec.type, true);
     if (!d.ok) return std::nullopt;
