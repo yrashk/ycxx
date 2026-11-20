@@ -1013,17 +1013,25 @@ engine::query_task<Lowered> Lower::run(engine::Ctx& cx, FnKey k) {
     for (std::size_t i = 0; i < body.nodes.size(); ++i) {
       const auto n = ir::NodeId(static_cast<std::uint32_t>(i));
       const ir::Op op = body.node(n).op;
+      const bool direct = op == ir::Op::call;
       std::optional<QualType> callee;
-      if (op == ir::Op::call) {
-        const auto id = EntityId(static_cast<std::uint32_t>(body.imms_of(n)[0]));
-        auto e = std::ranges::find(tu.entities, id, &Entity::id);
+      EntityId callee_id = EntityId::none;
+      if (direct) {
+        callee_id = EntityId(static_cast<std::uint32_t>(body.imms_of(n)[0]));
+        auto e = std::ranges::find(tu.entities, callee_id, &Entity::id);
         if (e != tu.entities.end()) callee = e->type;
       } else if (op == ir::Op::call_ind) {
         QualType ptr = body.value(body.operands_of(n)[1]).type.type;
         callee = ast::pointee_of(in, ptr);
       } else continue;
-      bool direct = op == ir::Op::call;
       std::string_view error = callee ? linux_signature_error(in, layout, *callee, direct) : "the function type is unavailable";
+      if (direct && callee && !error.empty()) {
+        // The declaration can still have a placeholder return type. Read the signature already
+        // deduced in this unit without depending on the callee's lowering ([dcl.spec.auto]).
+        const auto definition = std::ranges::find(tu.functions, callee_id, &FunctionDef::entity);
+        if (definition != tu.functions.end() && definition->body.deduced)
+          error = linux_signature_error(in, layout, definition->body.deduced_type, true);
+      }
       if (direct && error.empty()) error = linux_direct_call_error(layout, body, n);
       if (error.empty()) continue;
       const ir::FunctionDebug& debug = co_await cx.fetch<FunctionDebug>(k);

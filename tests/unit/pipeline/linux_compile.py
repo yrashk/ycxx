@@ -146,9 +146,15 @@ system_leaf:
 
         parameters = 'only bool, 8-, 16-, 32- and 64-bit integer, pointer and reference parameters'
         results = 'only void, bool, 8-, 16-, 32- and 64-bit integer, pointer and reference results'
+        for name in ('direct-results', 'explicit-results'):
+            source = source_dir / 'deduced-results' / f'{name}.cpp'
+            compile(target, '-nostdlib', source, '-o', name)
+            run([f'./{name}'], scope, cold)
         cases = (
             ('double f(double x) { return x; }', results),
             ('long double f(long double x) { return x; }', results),
+            ('auto f() { return 1.0; }', results),
+            ('struct X { int x; }; auto f() { return X{1}; }', results),
             ('struct X { int x; }; int f(X x) { return x.x; }', parameters),
             ('struct X { int x; }; int g(X); int f() { return g(X{1}); }',
              f'call: {parameters}'),

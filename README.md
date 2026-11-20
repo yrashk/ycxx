@@ -80,6 +80,9 @@ Use the host linker to link these objects with libc.
 [#417](https://github.com/yrashk/ycxx/issues/417), [#412](https://github.com/yrashk/ycxx/issues/412),
 [#399](https://github.com/yrashk/ycxx/issues/399)
 
+Direct calls on x86-64 Linux support those result types when deduced from `auto` or
+`decltype(auto)`. [#441](https://github.com/yrashk/ycxx/issues/441)
+
 ELF and Mach-O objects support static pointer initializers naming variables, array elements,
 or functions. The referenced symbol may be defined in a separate translation unit.
 [#101](https://github.com/yrashk/ycxx/issues/101)
