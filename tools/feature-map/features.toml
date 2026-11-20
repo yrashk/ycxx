@@ -523,8 +523,9 @@ group = 'basic'
 clauses = ['basic.pre', 'basic.def', 'basic.scope*', 'basic.lookup*', 'class.member.lookup', 'basic.lookup.unqual', 'basic.lookup.qual', 'class.qual', 'namespace.qual', 'basic.lookup.elab', 'basic.lookup.udir']
 std = 'C++98'
 core = true
-status = 'done'
-issues = [216]
+status = 'partial'
+issues = [216, 361]
+note = 'ordinary member bodies support unqualified injected class names through nonvirtual bases. Qualified inherited injected class names remain open'
 
 [[feature]]
 id = 'basic-adl'
