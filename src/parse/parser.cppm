@@ -202,7 +202,8 @@ public:
     if (qualified_ahead()) {
       auto q = qualified_type(0);
       return q && !(statement && s_->types().kind(q->first) == sema::TypeKind::dep_name) &&
-             (kind(q->second) != Tk::l_paren || member_pointer_star(q->second + 1)) &&
+             (kind(q->second) != Tk::l_paren || member_pointer_star(q->second + 1) ||
+              function_pointer_declarator_ahead(q->second, statement)) &&
              kind(q->second) != Tk::period && kind(q->second) != Tk::l_brace;
     }
     u32 next = 1;  // the token after the type's name: after `X<…>` for a class template
@@ -224,6 +225,60 @@ public:
         member_pointer_star(next + 1))
       return after != Tk::period && after != Tk::arrow;
     return after != Tk::period && after != Tk::arrow && after != Tk::l_paren && after != Tk::l_square;
+  }
+
+  // Return the token after a parenthesized group, or the end of the token range.
+  u32 past_parentheses(u32 open) const {
+    u32 depth = 1;
+    for (u32 j = open + 1; i_ + j < end_; ++j) {
+      if (kind(j) == Tk::l_paren) ++depth;
+      if (kind(j) == Tk::r_paren && --depth == 0) return j + 1;
+    }
+    return end_ - i_;
+  }
+
+  // A qualified type followed by `(*name)(parameters)` can start a declaration
+  // ([stmt.ambig]). Keep a functional conversion followed by a call and an operator
+  // on the expression path.
+  bool function_pointer_declarator_ahead(u32 open, bool statement = false) {
+    u32 next = open + 1;
+    u32 groups = 1;
+    bool pointer = false;
+    bool member_pointer = false;
+    for (;;) {
+      if (kind(next) == Tk::l_paren) {
+        ++groups;
+        ++next;
+        continue;
+      }
+      if (auto star = member_pointer_star(next)) {
+        next = *star;
+        member_pointer = true;
+      }
+      if (kind(next) != Tk::star) break;
+      pointer = true;
+      next = past_attributes(next + 1);
+      while (kind(next) == Tk::kw_const || kind(next) == Tk::kw_volatile ||
+             kind(next) == Tk::kw___restrict || kind(next) == Tk::kw___restrict__)
+        ++next;
+    }
+    if (!pointer || kind(next) != Tk::identifier) return false;
+    next = past_attributes(next + 1);
+    for (; groups != 0; --groups, ++next)
+      if (kind(next) != Tk::r_paren) return false;
+
+    if (kind(next) != Tk::l_paren || !params_ahead(next, statement)) return false;
+    u32 after = past_parentheses(next);
+    if (member_pointer && (kind(after) == Tk::amp || kind(after) == Tk::ampamp)) ++after;
+    switch (kind(after)) {
+    case Tk::semi: case Tk::comma: case Tk::equal: case Tk::l_brace:
+    case Tk::kw_noexcept: case Tk::kw_const: case Tk::kw_volatile:
+      return true;
+    case Tk::r_paren:
+      return !statement;  // the end of an enclosing parameter list
+    default:
+      return false;
+    }
   }
 
   // Whether a qualified name starts here: `::`, `N::`, or `X<…>::` ([basic.lookup.qual]).
@@ -487,8 +542,9 @@ public:
           }
           if (qualified_ahead()) {
             // `N::C`, `::C`, `C::E`, `X<T>::E` ([dcl.type.simple]).
-            // In a type-id, the following `(` can start an abstract declarator ([dcl.name]).
-            if (auto q = qualified_type(0, true); q && (in_type_id || kind(q->second) != Tk::l_paren)) {
+            if (auto q = qualified_type(0, true);
+                q && (in_type_id || kind(q->second) != Tk::l_paren ||
+                      function_pointer_declarator_ahead(q->second))) {
               cls = q->first;
               take_qualified(q->second);
               continue;
@@ -1058,15 +1114,27 @@ public:
 
   // Whether the `(` here begins a parameter-declaration-clause rather than an initializer
   // ([dcl.ambig.res]: what can be a declaration is one).
-  bool params_ahead() {
-    if (past_attributes(1) != 1) return true;  // a parameter's attributes ([dcl.fct]/3)
-    Tk k = kind(1);
+  bool params_ahead(u32 open = 0, bool statement = false) {
+    u32 first = open + 1;
+    if (past_attributes(first) != first) return true;  // a parameter's attributes ([dcl.fct]/3)
+    // In statement lookahead, a type followed by ( or { can instead construct an argument
+    // to a call on the result of a functional conversion.
+    auto can_start_parameter = [&](u32 after_type) {
+      return !statement || (kind(after_type) != Tk::l_paren && kind(after_type) != Tk::l_brace);
+    };
+    Tk k = kind(first);
+    Tk next = kind(first + 1);
+    if (simple_type_keyword(k)) return can_start_parameter(first + 1);
     if (k == Tk::r_paren || k == Tk::ellipsis || starts_decl_specifier(k)) return true;
-    if ((k == Tk::identifier && kind(2) == Tk::coloncolon) || k == Tk::coloncolon)
-      return qualified_type(1).has_value();  // `N::S`, `C::E`, `::S`
-    if (k == Tk::identifier && kind(2) == Tk::less && s_->names_type_template(name_of(tok(1)))) return true;
-    if (transform_trait_ahead(1)) return true;
-    return k == Tk::identifier && kind(2) != Tk::coloncolon && s_->class_name(name_of(tok(1))).has_value();
+    if ((k == Tk::identifier && next == Tk::coloncolon) || k == Tk::coloncolon) {
+      auto q = qualified_type(first);  // `N::S`, `C::E`, `::S`
+      return q && can_start_parameter(first + q->second);
+    }
+    if (k == Tk::identifier && next == Tk::less && s_->names_type_template(name_of(tok(first))))
+      return !statement || can_start_parameter(past_template_args(first + 1));
+    if (transform_trait_ahead(first)) return true;
+    return k == Tk::identifier && next != Tk::coloncolon && s_->class_name(name_of(tok(first))).has_value() &&
+           can_start_parameter(first + 1);
   }
 
   std::int64_t i64_of(sema::ConstId c) { return s_->world().values.as_signed(c); }
