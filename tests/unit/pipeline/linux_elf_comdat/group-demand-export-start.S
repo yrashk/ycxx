@@ -2,7 +2,7 @@
 .globl _start
 .type _start,@function
 _start:
-    call read_discarded_export
+    call discarded_export_reader
     movl %eax, %edi
     movl $60, %eax
     syscall

@@ -10,9 +10,9 @@ discarded_export:
 
 /* This ordinary text and relocation survive even when B loses. */
 .text
-.globl read_discarded_export
-.type read_discarded_export,@function
-read_discarded_export:
+.globl discarded_export_reader
+.type discarded_export_reader,@function
+discarded_export_reader:
     movl discarded_export(%rip), %eax
     ret
-.size read_discarded_export, .-read_discarded_export
+.size discarded_export_reader, .-discarded_export_reader
