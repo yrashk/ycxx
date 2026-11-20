@@ -58,6 +58,12 @@ result, one- and two-word stack arguments, use of the remaining GPR after rollba
 stack neighbors, and alias isolation. The existing tests cover the scalar,
 variadic and Darwin controls.
 
+The pointer-record fixtures check a one-eightbyte record, both orders of a two-eightbyte
+pointer/count record, full register exhaustion and rollback with one register available.
+They check pointer identity, pointee writes and by-value independence across the call.
+A separate native fixture passes a preformed empty list by value with the pinned libycxx
+header. Nonempty list formation continues under [#329](https://github.com/yrashk/ycxx/issues/329).
+
 Indirect and variadic ABI work continues in [#196](https://github.com/yrashk/ycxx/issues/196).
 Classes with floating-point members are tracked in
 [#336](https://github.com/yrashk/ycxx/issues/336). Broader aggregate classification
