@@ -214,6 +214,7 @@ inline constexpr u8 immediate_address = 2;  // checked after immediate invocatio
 namespace local_flag {
 inline constexpr u16 parameter = 1;
 inline constexpr u16 default_argument_parameter = 8;
+inline constexpr u16 value_dependent = 16;
 }
 namespace param_flag {
 inline constexpr u16 pack_element = 1;  // an element of a function parameter pack ([temp.variadic]/8)
@@ -1565,6 +1566,7 @@ public:
   // A local usable in constant expressions ([expr.const]): constexpr, or const integral with a
   // constant initializer; its value.
   void set_local_value(u32 local, ConstId v) { local_values_[local] = v; }
+  void set_local_value_dependent(u32 local) { locals_[local].flags |= local_flag::value_dependent; }
   std::span<const std::optional<ConstId>> local_values() const { return local_values_; }
   const ast::LocalRec& local(u32 i) const { return locals_[i]; }
   // [dcl.type.decltype]/1: a binding gives its referenced type; its reference slot is internal.
@@ -2079,7 +2081,8 @@ public:
   Ex source_expr(u32 ctx, u32 key, u32 begin, u32 end) {
     if (key & capture_bit) return field_expr(ctx - 1, key & ~capture_bit, begin, end);
     const ast::LocalRec& l = ctx == lambdas_.size() ? locals_[key] : lambdas_[ctx].outer_locals[key];
-    ExprInfo info{types().referee(l.type), ValueCategory::lvalue, 0};
+    u8 flags = l.flags & local_flag::value_dependent ? expr_flag::dependent : 0;
+    ExprInfo info{types().referee(l.type), ValueCategory::lvalue, flags};
     return node(ast::LocalRef{info, key}, begin, end, info);
   }
   // The type of what `source_expr` names, as an expression has it.
@@ -2904,8 +2907,7 @@ public:
 
   // A reference to block-scope variable `local` ([expr.prim.id.unqual]).
   Ex local_ref(u32 local, u32 begin, u32 end) {
-    ExprInfo info{types().referee(locals_[local].type), ValueCategory::lvalue, 0};
-    return node(ast::LocalRef{info, local}, begin, end, info);
+    return source_expr(static_cast<u32>(lambdas_.size()), local, begin, end);
   }
   // Inside an immediate function context ([expr.const]): a consteval function's body, or the
   // consteval branch of `if consteval`. A call to a consteval function elsewhere is an immediate
@@ -3987,8 +3989,7 @@ public:
             note_pack({0, 0, name});
             return dependent_node({}, begin, end);
           }
-          ExprInfo info{types().referee(l.type), ValueCategory::lvalue, 0};  // [expr.type]: a reference names its object
-          return node(ast::LocalRef{info, p->second}, begin, end, info);
+          return local_ref(p->second, begin, end);
         }
       if (std::ranges::any_of(block_types_, [&](const BlockType& t) { return t.depth == d && t.name == name; })) {
         diag(begin, Diag::type_as_expression, name);  // [expr.prim.id]: a type is not an expression
