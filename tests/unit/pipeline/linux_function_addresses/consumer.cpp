@@ -1,10 +1,12 @@
-using Step = int (*)(int);
-
 extern "C" int external_step(int value);
+using Step = decltype(&external_step);
+
 extern "C" Step provider_address();
 extern "C" int provider_call(int value);
 
+extern "C" {
 static int local_step(int value) { return value + 2; }
+}
 
 #ifndef EXPECT_STEP
 #define EXPECT_STEP 1

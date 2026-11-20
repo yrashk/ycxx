@@ -255,7 +255,7 @@ def main():
         source('data.cpp', 'extern "C" int exported_data(); int main() { return exported_data(); }')
         reject(*options, 'data.cpp', 'link/leaf.input', error="unsupported ELF import 'exported_data'")
         source('function-address.cpp', 'extern "C" int step(int, int);\n'
-               'int main() { int (*pointer)(int, int) = &step; return pointer(7, 8); }')
+               'int main() { auto pointer = &step; return pointer(7, 8); }')
         reject(*options, 'function-address.cpp', 'link/leaf.input',
                error="native dynamic ELF GOT address for 'step' is unsupported")
         source('script.so', 'GROUP ( link/leaf.input )')
