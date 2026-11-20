@@ -111,6 +111,8 @@ object. [#428](https://github.com/yrashk/ycxx/issues/428), [#419](https://github
   by argument-dependent lookup. Unqualified calls can find and rank functions in associated
   namespaces. Functions support default arguments, recursion, operator overloading and calls
   through pointers. A pointer or reference target type can select a free or static member overload.
+  A qualified namespace function definition can inherit C language linkage from its declaration.
+  [#426](https://github.com/yrashk/ycxx/issues/426)
 - classes and unions: data and static members, named data members of unnamed union type,
   member functions, constructors and destructors
   with RAII, aggregate and designated initialization, namespace-scope objects initialized by

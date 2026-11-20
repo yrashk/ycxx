@@ -1350,7 +1350,9 @@ detect = '\bextern\s+""'
 status = 'done'
 probe = '''
 extern "C" int abs(int);
-int main() { return abs(-3) == 3 ? 0 : 1; }
+namespace api { extern "C" int twice(int); }
+int api::twice(int x) { return 2 * x; }
+int main() { return api::twice(abs(-3)) == 6 ? 0 : 1; }
 '''
 
 [[feature]]
