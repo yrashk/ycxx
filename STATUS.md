@@ -2200,6 +2200,14 @@ values, end to end; results match Clang's bit for bit.
   [conv.qual]). Nested array dimensions and comparisons between `const` and `volatile` arrays
   use the same rule.
 
+## Composite types involving pointers to void (#59)
+
+- Equality, ordering and conditional expressions combine a pointer to cv-qualified `void` and
+  a pointer to an object or `void` into a pointer to `void` with the union of the pointee
+  qualifiers ([expr.type], [expr.eq], [expr.rel], [expr.cond]).
+- Converting a pointer to an array to a pointer to `void` preserves the array's element
+  qualifiers ([basic.type.qualifier], [conv.ptr]).
+
 ## Bootstrap workarounds
 
 Places where ycxx's sources avoid or work around a C++26 feature because GCC 16 lacks it or
