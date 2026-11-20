@@ -500,7 +500,10 @@ std::expected<object, std::string> read_object(std::span<const std::uint8_t> fil
   for (std::uint32_t i = 1; i < shnum; ++i) {
     const auto& h = headers[i];
     if (h.type != sht_rela) continue;
-    if ((h.flags & ~shf_group) != shf_info_link || h.link != symtab_index || h.info >= shnum ||
+    const auto flags = h.flags & ~shf_group;
+    // SHT_RELA specifies the target in sh_info even if a grouped entry omits SHF_INFO_LINK.
+    const bool valid_flags = flags == shf_info_link || (group_owners[i] != 0 && flags == 0);
+    if (!valid_flags || h.link != symtab_index || h.info >= shnum ||
         (!sections[h.info] && !debug_sections[h.info]) || h.entsize != rela_size || h.size % rela_size != 0)
       return fail(std::format("invalid ELF relocation section {}", i));
     if (group_owners[i] != group_owners[h.info])

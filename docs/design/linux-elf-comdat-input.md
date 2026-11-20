@@ -10,7 +10,8 @@ The ET_REL reader validates each descriptor's linked table, signature and flags 
 normalizing section indices. Every member has `SHF_GROUP`, follows its descriptor and
 belongs to exactly one group. The reader retains already supported allocatable section
 kinds with conventional names or grouped name suffixes. An `SHT_RELA` section and its
-target must have the same owner. A relocation may reference a grouped local or section
+target must have the same owner. The `SHT_RELA` type identifies the target through `sh_info`
+with either convention for `SHF_INFO_LINK` on grouped entries. A relocation may reference a grouped local or section
 symbol only from another member of its group. The reader validates those rules in every
 candidate, including groups that will later lose selection.
 
