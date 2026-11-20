@@ -1216,6 +1216,7 @@ std::expected<obj::object, aarch64::CodegenError> assemble_linux(
       symbol.section = text;
       symbol.offset = base;
       symbol.weak = f.weak && symbol.bind == obj::binding::global;
+      symbol.function_size = f.code->bytes.size();
       sec.emit(f.code->bytes);
       for (const auto& r : f.code->relocs) {
         auto target = symbol_of.find(r.target);
