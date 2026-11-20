@@ -178,6 +178,19 @@ system_leaf:
              '-o', 'variadic'], scope, cold)
         run(['./variadic'], scope, cold)
 
+        indirect_caller = 'indirect-variadic.accept.cpp'
+        caller_source = source_dir.parents[1] / 'own' / 'function-pointers' / indirect_caller
+        shutil.copyfile(caller_source, scope / indirect_caller)
+        for source in (source_dir / 'linux_indirect_variadic').iterdir():
+            shutil.copyfile(source, scope / source.name)
+        compile(target, '-c', indirect_caller, '-o', 'indirect-caller.o')
+        compile(target, '-c', 'indirect-variadic-control.accept.cpp', '-o', 'indirect-controls.o')
+        run([cc, '-std=c++20', '-O2', '-c', 'indirect-variadic-provider.cpp', '-o', 'indirect-provider.o'],
+            scope, cold)
+        run([cc, 'indirect-variadic-witness.S', 'indirect-provider.o', 'indirect-caller.o',
+             'indirect-controls.o', '-o', 'indirect-variadic'], scope, cold)
+        run(['./indirect-variadic'], scope, cold)
+
         for name in ('abi.hpp', 'caller.cpp', 'callee.cpp', 'boundaries.cpp', 'boundaries.s'):
             name = f'linux_narrow_{name}'
             shutil.copyfile(source_dir / name, scope / name)
@@ -308,8 +321,13 @@ system_leaf:
             ('struct X { int a; }; struct B { static int g(X); }; int f() { return B::g(X{1}); }',
              f'call: {parameters}'),
             ('int f(int, ...) { return 1; }', 'variadic functions'),
-            ('int f(int (*g)(int, ...)) { return g(1); }', 'call: variadic functions'),
-            ('int f(int (*g)(int, ...)) { return g(1, 2); }', 'call: variadic functions'),
+            ('int f(int (*g)(double, ...)) { return g(1.0); }', f'call: {parameters}'),
+            ('int f(double (*g)(int, ...)) { return g(1) > 0.0; }', f'call: {results}'),
+            ('int f(int (*g)(int, ...)) { return g(1, 0.75); }',
+             'call: only 32- and 64-bit integer and pointer ellipsis arguments'),
+            ('struct X { int x; }; int f(int (*g)(X, ...)) { return g(X{1}); }', f'call: {parameters}'),
+            ('struct X { int x; }; int f(int (*g)(int, ...), X x) { return g(2, x); }',
+             'call: only 32- and 64-bit integer and pointer ellipsis arguments'),
             ('int g(double, ...); int f() { return g(1.0); }', f'call: {parameters}'),
             ('double g(int, ...); int f() { return g(1); }', f'call: {results}'),
             ('int g(int, ...); int f() { return g(1, 1.0f); }',

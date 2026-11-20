@@ -764,7 +764,8 @@ class Lowering {
         im.push_back(sext);
         im.push_back(imms[ind ? 0 : 1]);  // the arguments the ellipsis matches
         im.push_back(indirect);
-        NodeId c = b_.emit(ind ? Op2::call_ind : Op2::call, res, ops, im, 0, {}, o);
+        Flags flags = nd.flags & bit(Flag::variadic);
+        NodeId c = b_.emit(ind ? Op2::call_ind : Op2::call, res, ops, im, flags, {}, o);
         ValueId after = b_.peek().result(c);
         if (result_dst) {
           for (std::uint32_t w = 0; w < result_pieces.words; ++w)

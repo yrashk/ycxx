@@ -67,7 +67,7 @@ export struct PathStep {
 
 // Per-node flags (§2.3: `nsw`/`nuw`/`exact` on arithmetic; `volatile` and non-constexpr callees
 // make an operation non-constant). The enumerator is the bit position.
-export enum class Flag : std::uint8_t { nsw, nuw, exact, volatile_, not_constexpr };
+export enum class Flag : std::uint8_t { nsw, nuw, exact, volatile_, not_constexpr, variadic };
 export using Flags = std::uint8_t;
 export constexpr Flags bit(Flag f) { return Flags(1u << std::to_underlying(f)); }
 
@@ -223,7 +223,8 @@ export enum class Op : std::uint16_t {
   // index of the argument that is the address of the object a class result initializes
   // ([stmt.return]), 0 if none. `lower` passes both as the target's calling convention does.
   call [[=state({S, Vs}, {S, Vs}).imms({entity, u32, u32, u32}).accepts({not_constexpr})]],
-  call_ind [[=state({S, V, Vs}, {S, Vs}).imms({u32, u32, u32}).accepts({not_constexpr})]],
+  // `variadic` records the callee type even when the ellipsis matches zero arguments.
+  call_ind [[=state({S, V, Vs}, {S, Vs}).imms({u32, u32, u32}).accepts({not_constexpr, variadic})]],
   builtin [[=state({S, Vs}, {S, Vs}).imms({u32})]],
   asm_ [[=state({S, Vs}, {S, Vs}).imms({constant}).with({nonconstant})]],
 

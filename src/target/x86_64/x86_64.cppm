@@ -128,7 +128,8 @@ std::expected<Frame, std::string> layout(const l2::Function& body) {
         bool indirect = nd.op == Op::call_ind;
         if (indirect && body.type(body.operands_of(n)[1]) != Type::ptr)
           return at_node(n, nd.op, "an indirect callee must be a pointer");
-        if (indirect && imms[1]) return at_node(n, nd.op, "indirect variadic calls are outside the scalar ABI subset");
+        if (indirect && imms[1] && !(nd.flags & ir::bit(ir::Flag::variadic)))
+          return at_node(n, nd.op, "ellipsis arguments on a nonvariadic indirect call");
         if (imms[indirect ? 2 : 3] || nd.nres > (indirect ? 2u : 3u))
           return at_node(n, nd.op, "unsupported INTEGER ABI result placement");
         std::size_t args = nd.nopnd - (indirect ? 2 : 1);
@@ -228,7 +229,8 @@ class Emitter {
   }
 
   void call(NodeId n) {
-    bool indirect = body_.node(n).op == Op::call_ind;
+    const auto& node = body_.node(n);
+    bool indirect = node.op == Op::call_ind;
     auto ops = body_.operands_of(n);
     auto imms = body_.imms_of(n);
     auto args = ops.subspan(indirect ? 2 : 1);
@@ -245,8 +247,13 @@ class Emitter {
       }
     }
     if (indirect) {
-      read(ops[1]);
-      e_.reg({0xff}, 2, rax, false);  // call rax
+      const bool variadic = node.flags & ir::bit(ir::Flag::variadic);
+      // R11 is caller-saved and holds no argument. Variadic calls reserve AL for the vector
+      // register count (AMD64 psABI §3.2.3), so their callee address needs a separate register.
+      Reg target = variadic ? r11 : rax;
+      read(ops[1], target);
+      if (variadic) e_.reg({0x31}, rax, rax, false);  // xor eax, eax
+      e_.reg({0xff}, 2, target, false);  // call r/m64
     } else {
       // AL gives the vector register count for variadic calls (AMD64 psABI §3.2.3).
       // L2's ellipsis count can be zero for a variadic call, so set AL for every direct call.
@@ -254,8 +261,8 @@ class Emitter {
       e_.emit({0xe8});  // call rel32
       relocation(RelocKind::plt32, ir::EntityId(std::uint32_t(imms[0])));
     }
-    if (body_.node(n).nres > 1) write(body_.result(n, 1));
-    if (body_.node(n).nres > 2) {
+    if (node.nres > 1) write(body_.result(n, 1));
+    if (node.nres > 2) {
       e_.move(rax, rdx);
       write(body_.result(n, 2));
     }

@@ -285,7 +285,7 @@ void rejection() {
     auto n = b.emit(Op::call_ind, results, call, imms);
     ir::ValueId ret[] = {b.peek().result(n), b.peek().result(n, 1)};
     b.emit(Op::ret, {}, ret);
-    expect_error(b.finish({i32}), "indirect variadic calls");
+    expect_error(b.finish({i32}), "ellipsis arguments on a nonvariadic indirect call");
   }
   {
     l2::Builder b;

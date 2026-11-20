@@ -1583,7 +1583,8 @@ class Gen {
     std::size_t named = in_.seqs.size(f.params), passed = args.size() - 1 - (result_arg ? 1 : 0);
     std::size_t through_ellipsis = f.variadic && passed > named ? passed - named : 0;
     std::uint64_t imms[] = {through_ellipsis, byval >> 1, result_arg};
-    ir::NodeId n = stateful(ir::Op::call_ind, results, args, imms);
+    ir::Flags flags = f.variadic ? ir::bit(ir::Flag::variadic) : 0;
+    ir::NodeId n = stateful(ir::Op::call_ind, results, args, imms, flags);
     if (has_value) return b_.result(n, 1);
     return std::nullopt;
   }

@@ -578,10 +578,10 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   Narrow register arguments and results are extended to 32 bits when sent for interoperability.
   Incoming values use their declared width in registers and stack slots (AMD64 psABI §3.2.3).
   A `bool` uses the byte value 0 or 1.
-  Direct variadic calls use the same registers and stack slots for promoted 32- and 64-bit integers
-  and pointers. The emitter clears EAX immediately before every direct call so a variadic callee
-  receives a zero vector-register count in AL, including with an empty ellipsis. Variadic
-  definitions and variadic calls through function pointers remain unsupported.
+  Direct and function-pointer variadic calls use the same registers and stack slots for promoted
+  32- and 64-bit integers and pointers. Both forms set AL to zero even with an empty ellipsis.
+  Indirect variadic calls keep their target in R11. SSE arguments, aggregate variadic calls and
+  variadic definitions are tracked under #399 and #196.
   [#417](https://github.com/yrashk/ycxx/issues/417), [#412](https://github.com/yrashk/ycxx/issues/412),
   [#399](https://github.com/yrashk/ycxx/issues/399),
   [#196](https://github.com/yrashk/ycxx/issues/196)
@@ -676,7 +676,8 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   their declaration. Syntax-only analysis accepts them. [#400](https://github.com/yrashk/ycxx/issues/400)
 - Linux x86-64 CI runs `unit.linux_compile`, which links ycxx-produced objects with native C
   callers and variadic callees. It checks namespace initialization, default promotions, register
-  and stack arguments, stack alignment and the incoming AL for both empty and nonempty ellipses.
+  and stack arguments, stack alignment, pointer identity and the incoming AL for empty and
+  nonempty ellipses.
   `unit.linux_executable` (`tests/unit/pipeline/linux_executable.py`) runs
   source-only, object-only and mixed-input executables and checks exit status, `argc` and `argv`,
   diagnostics, and cold and daemon output. The linker and startup also have native CTest

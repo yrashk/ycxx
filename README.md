@@ -78,11 +78,10 @@ build/bin/ycxx cxx --target=x86_64-pc-linux-gnu -nostdlib --dynamic-linker="$tar
 ```
 
 Linux objects pass and return `bool`, 8-, 16-, 32- and 64-bit integers and enums, pointers and
-references. They can make direct variadic calls such as `printf` with promoted integer and pointer
-arguments.
-Use the host linker to link these objects with libc.
+references. Direct and function-pointer variadic calls accept promoted integer and pointer
+arguments. Use the host linker to link these objects with libc.
 [#417](https://github.com/yrashk/ycxx/issues/417), [#412](https://github.com/yrashk/ycxx/issues/412),
-[#399](https://github.com/yrashk/ycxx/issues/399)
+[#399](https://github.com/yrashk/ycxx/issues/399), [#196](https://github.com/yrashk/ycxx/issues/196)
 
 Direct calls on x86-64 Linux support those result types when deduced from `auto` or
 `decltype(auto)`. [#441](https://github.com/yrashk/ycxx/issues/441)

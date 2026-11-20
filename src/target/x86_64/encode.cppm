@@ -6,7 +6,7 @@ import std;
 
 namespace ycxx::x86_64 {
 
-enum class Reg : std::uint8_t { rax, rcx, rdx, rsp = 4, rbp, rsi, rdi, r8, r9 };
+enum class Reg : std::uint8_t { rax, rcx, rdx, rsp = 4, rbp, rsi, rdi, r8, r9, r11 = 11 };
 
 class Encoder {
  public:
