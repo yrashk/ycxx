@@ -422,7 +422,7 @@ struct ValueRec {
   QualType type{};
   u64 bits = 0;
   double real = 0;
-  std::string units;
+  std::vector<u32> units;
   ConstId base = ConstId::none;
   i64 offset = 0;
 };
@@ -435,10 +435,22 @@ public:
   ConstId integer(QualType t, u64 bits) { return ast::int_value(*ins_, *target_, t, ast::Bits128{bits, 0}); }
   // A value of standard floating type `t`: `v` rounded to its format ([conv.double]).
   ConstId floating(QualType t, double v) { return ast::float_value(*ins_, *target_, t, v); }
-  // A string literal object of array type `t` holding `units`, one byte per code unit.
-  ConstId string(QualType t, std::string units) {
-    std::vector<u8> us(units.begin(), units.end());
-    return ins_->intern_value(ast::VString{t, ins_->intern_seq(std::span<const u8>(us))});
+  // A string literal object of array type `t`, including its terminating code unit.
+  ConstId string(QualType t, std::span<const u32> units) {
+    return ins_->intern_value(ast::VString{t, ins_->intern_seq(units)});
+  }
+  // The bytes of a narrow string for consumers that interpret it as text.
+  std::optional<std::string> narrow_string(ConstId c) const {
+    if (!ins_->values.is<ast::VString>(c)) return std::nullopt;
+    auto s = ins_->values.get<ast::VString>(c);
+    auto a = ins_->types.get<ast::TArray>(ins_->types.canon(s.type));
+    auto b = ast::builtin_of(*ins_, a.elem);
+    if (b != Builtin::char_ && b != Builtin::char8_t_) return std::nullopt;
+    auto units = ins_->seqs.elements(s.units);
+    std::string text;
+    text.reserve(units.size());
+    for (u32 unit : units) text.push_back(static_cast<char>(unit));
+    return text;
   }
   ConstId address(QualType, ConstId base, i64 offset) {
     return ins_->intern_value(ast::VLvalue{base, ins_->intern_seq(std::span<const u32>{}), offset});
@@ -469,7 +481,7 @@ public:
       auto s = v.get<ast::VString>(c);
       r.kind = ValueKind::string;
       r.type = s.type;
-      for (u8 u : ins_->seqs.elements(s.units)) r.units.push_back(static_cast<char>(u));
+      r.units = ins_->seqs.elements(s.units);
     } else if (v.is<ast::VLvalue>(c)) {
       auto l = v.get<ast::VLvalue>(c);
       r.kind = ValueKind::address;

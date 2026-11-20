@@ -892,15 +892,17 @@ public:
 
   // [dcl.init.string]/1: the code units, terminating null included, of string literal `e` when it
   // can initialize an array of `elem`: an ordinary literal one of char, signed char or unsigned
-  // char, a UTF-8 literal one of char8_t, char or unsigned char.
-  std::optional<std::string> string_units(QualType elem, Ex e) {
+  // char, a UTF-8 literal one of char8_t, char or unsigned char, and UTF-16 and UTF-32 literals
+  // arrays of their respective element types.
+  std::optional<std::vector<u32>> string_units(QualType elem, Ex e) {
     if (!e.ok() || !types().is_array(e.type())) return std::nullopt;
     auto lit = as<ast::Literal>(e);
     auto src = types().builtin_of(Types::unqualified(types().rec(e.type()).inner));
     auto dst = types().builtin_of(Types::unqualified(elem));
     if (!lit || !src || !dst) return std::nullopt;
-    bool fits = (*src == Builtin::char_ && (*dst == Builtin::char_ || *dst == Builtin::signed_char || *dst == Builtin::unsigned_char)) ||
-                (*src == Builtin::char8_t_ && (*dst == Builtin::char8_t_ || *dst == Builtin::char_ || *dst == Builtin::unsigned_char));
+    using enum Builtin;
+    bool fits = *src == *dst || (*src == char_ && (*dst == signed_char || *dst == unsigned_char)) ||
+                (*src == char8_t_ && (*dst == char_ || *dst == unsigned_char));
     if (!fits) return std::nullopt;
     return w_->values.rec(lit->value).units;
   }
@@ -923,8 +925,8 @@ public:
     Braced b;
     b.begin = e.begin;
     b.end = e.end;
-    for (char u : *units)
-      b.clauses.push_back({literal(elem, w_->values.integer(elem, static_cast<unsigned char>(u)), ValueCategory::prvalue, e.begin, e.end),
+    for (u32 u : *units)
+      b.clauses.push_back({literal(elem, w_->values.integer(elem, u), ValueCategory::prvalue, e.begin, e.end),
                            nullptr, {}, false, e.begin});
     return list_init(t, b);
   }
@@ -3990,8 +3992,8 @@ public:
         while (auto p = as<ast::Paren>(a)) a = {p->operand.id, a.begin + p->operand.at, a.end};
         auto lit = as<ast::Literal>(a);
         std::optional<u64> payload;
-        if (lit && w_->values.rec(lit->value).kind == ValueKind::string) {
-          std::string_view s = w_->values.rec(lit->value).units;
+        if (auto text = lit ? w_->values.narrow_string(lit->value) : std::nullopt) {
+          std::string_view s = *text;
           if (s.ends_with('\0')) s.remove_suffix(1);
           int base = s.starts_with("0x") || s.starts_with("0X") ? 16 : s.starts_with('0') ? 8 : 10;
           if (base == 16) s.remove_prefix(2);
@@ -4158,31 +4160,35 @@ public:
     return literal(t, ast::float_value(ins(), w_->target, t, ast::Bits128{lit.value, 0}), ValueCategory::prvalue, begin, end);
   }
 
-  // [lex.ccon]: an ordinary character literal has type char; a multicharacter one, int.
-  Ex char_literal(const lex::Literal& l, u32 begin, u32 end) {
+  static constexpr Builtin literal_character_type(lex::Encoding encoding) {
     using enum lex::Encoding;
-    Builtin k = Builtin::char_;
-    if (l.multichar) k = Builtin::int_;
-    else if (l.encoding == utf8) k = Builtin::char8_t_;
-    else if (l.encoding == utf16) k = Builtin::char16_t_;
-    else if (l.encoding == utf32) k = Builtin::char32_t_;
-    else if (l.encoding == wide) k = Builtin::wchar_t_;
-    QualType t = builtin(k);
+    switch (encoding) {
+      case ordinary: return Builtin::char_;
+      case utf8: return Builtin::char8_t_;
+      case utf16: return Builtin::char16_t_;
+      case utf32: return Builtin::char32_t_;
+      case wide: return Builtin::wchar_t_;
+    }
+    std::unreachable();
+  }
+
+  // [lex.ccon]: a character literal has the type given by its encoding; a multicharacter one, int.
+  Ex char_literal(const lex::Literal& l, u32 begin, u32 end) {
+    QualType t = builtin(l.multichar ? Builtin::int_ : literal_character_type(l.encoding));
     return literal(t, w_->values.integer(t, l.value), ValueCategory::prvalue, begin, end);
   }
 
-  // [lex.string]: an lvalue of type array of N const char, N counting the terminating null.
+  // [lex.string]: an lvalue array of const code units, including the terminating null.
   Ex string_literal(const lex::Literal& l, u32 begin, u32 end) {
-    if (l.encoding != lex::Encoding::ordinary && l.encoding != lex::Encoding::utf8) {
+    if (l.encoding == lex::Encoding::wide) {
       diag(begin, Diag::not_supported, lex::Tk::string_lit);
       return {NodeId::none, begin, end};
     }
-    std::string units;
-    for (u32 u : l.units) units.push_back(static_cast<char>(u));
-    units.push_back('\0');
-    Builtin elem = l.encoding == lex::Encoding::utf8 ? Builtin::char8_t_ : Builtin::char_;
+    std::vector<u32> units = l.units;
+    units.push_back(0);
+    Builtin elem = literal_character_type(l.encoding);
     QualType t = types().array(types().add_cv(builtin(elem), Cv::const_), units.size());
-    return literal(t, w_->values.string(t, std::move(units)), ValueCategory::lvalue, begin, end);
+    return literal(t, w_->values.string(t, units), ValueCategory::lvalue, begin, end);
   }
 
   Ex bool_literal(bool v, u32 begin, u32 end) {

@@ -90,15 +90,15 @@ struct World {
     QualType hi_t = arr(cchar_t, 3);
     type("cchar[3]", hi_t);
     type("cchar[3]*", ast::pointer_to(in, hi_t));
-    std::array<std::uint8_t, 3> units{'h', 'i', 0};
-    hi = in.intern_value(ast::VString{hi_t, in.intern_seq(std::span<const std::uint8_t>(units))});
+    std::array<std::uint32_t, 3> units{'h', 'i', 0};
+    hi = in.intern_value(ast::VString{hi_t, in.intern_seq(std::span<const std::uint32_t>(units))});
     ConstId addr = in.intern_value(ast::VLvalue{hi, in.intern_seq(std::span<const std::uint32_t>{}), 0});
     keys["{s}"] = std::format("#{}", std::to_underlying(addr));
-    std::array<std::uint8_t, 3> xy{'x', 'y', 0};
-    ConstId xy_s = in.intern_value(ast::VString{hi_t, in.intern_seq(std::span<const std::uint8_t>(xy))});
+    std::array<std::uint32_t, 3> xy{'x', 'y', 0};
+    ConstId xy_s = in.intern_value(ast::VString{hi_t, in.intern_seq(std::span<const std::uint32_t>(xy))});
     keys["{s2}"] = std::format("#{}", std::to_underlying(in.intern_value(ast::VLvalue{xy_s, in.intern_seq(std::span<const std::uint32_t>{}), 0})));
-    std::array<std::uint8_t, 3> ci{'c', 'i', 0};
-    ConstId ci_s = in.intern_value(ast::VString{hi_t, in.intern_seq(std::span<const std::uint8_t>(ci))});
+    std::array<std::uint32_t, 3> ci{'c', 'i', 0};
+    ConstId ci_s = in.intern_value(ast::VString{hi_t, in.intern_seq(std::span<const std::uint32_t>(ci))});
     keys["{s3}"] = std::format("#{}", std::to_underlying(in.intern_value(ast::VLvalue{ci_s, in.intern_seq(std::span<const std::uint32_t>{}), 0})));
     keys["{null}"] = std::format("#{}", std::to_underlying(in.intern_value(ast::VNullptr{})));
   }

@@ -943,7 +943,7 @@ public:
     if (how == 'n') return std::string(w_->ins.names.spelling(ast::NameId(u32(raw))));
     if (how == 'r') return sema::spell_reason(raw);
     if (how == 'c') {
-      std::string t = w_->values.rec(ConstId(u32(raw))).units;
+      std::string t = w_->values.narrow_string(ConstId(u32(raw))).value_or("");
       if (!t.empty() && t.back() == '\0') t.pop_back();  // the terminating null
       return t;
     }

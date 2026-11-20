@@ -84,6 +84,10 @@ ELF and Mach-O objects support static pointer initializers naming variables, arr
 or functions. The referenced symbol may be defined in a separate translation unit.
 [#101](https://github.com/yrashk/ycxx/issues/101)
 
+Both targets support UTF-16 and UTF-32 string literals (`u` and `U`), including raw strings,
+constant evaluation, and initialization of matching character arrays.
+[#288](https://github.com/yrashk/ycxx/issues/288)
+
 Ordinary namespace-scope references to supported scalar and array storage can bind at compile time
 or during ordered startup initialization. On Linux, generated code can access bindings and
 referents with internal linkage. [#367](https://github.com/yrashk/ycxx/issues/367)
