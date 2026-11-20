@@ -81,7 +81,9 @@ build/bin/ycxx cxx --target=x86_64-pc-linux-gnu -nostdlib --dynamic-linker="$tar
 
 Linux objects pass and return `bool`, 8-, 16-, 32- and 64-bit integers and enums, pointers and
 references. Direct and function-pointer variadic calls accept promoted integer and pointer
-arguments. Use the host linker to link these objects with libc.
+arguments. Ordinary free variadic definitions with scalar INTEGER signatures support
+`<cstdarg>` and can forward a System V `va_list` to a separately compiled consumer.
+Use the host linker to link these objects with libc.
 [#417](https://github.com/yrashk/ycxx/issues/417), [#412](https://github.com/yrashk/ycxx/issues/412),
 [#399](https://github.com/yrashk/ycxx/issues/399), [#196](https://github.com/yrashk/ycxx/issues/196)
 
