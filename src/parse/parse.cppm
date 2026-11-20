@@ -943,7 +943,7 @@ public:
     if (how == 'n') return std::string(w_->ins.names.spelling(ast::NameId(u32(raw))));
     if (how == 'r') return sema::spell_reason(raw);
     if (how == 'c') {
-      std::string t = w_->values.rec(ConstId(u32(raw))).units;
+      std::string t = w_->values.narrow_string(ConstId(u32(raw))).value_or("");
       if (!t.empty() && t.back() == '\0') t.pop_back();  // the terminating null
       return t;
     }
@@ -1415,7 +1415,7 @@ public:
       else declaration();
       break;
     case ItemKind::enum_def:
-      enum_definition(member ? (inst_ ? inst_->spec : p_->class_entity(it_->parent)) : EntityId::none);
+      enum_declaration(member ? (inst_ ? inst_->spec : p_->class_entity(it_->parent)) : EntityId::none);
       break;
     case ItemKind::namespace_def: namespace_definition(); break;
     case ItemKind::class_def:
@@ -1603,6 +1603,23 @@ private:
       if (!ps_.at_end()) s_.diag(ps_.pos(), Diag::unexpected_token, ps_.kind());
       return;
     }
+    if (!template_ && !explicit_ && ps_.is(Tk::kw_enum)) {
+      bool scoped = ps_.kind(1) == Tk::kw_class || ps_.kind(1) == Tk::kw_struct;
+      u32 name = ps_.past_attributes(scoped ? 2 : 1);
+      bool qualified = ps_.kind(name) == Tk::coloncolon;
+      if (qualified) ++name;
+      while (ps_.kind(name) == Tk::identifier && ps_.kind(name + 1) == Tk::coloncolon) {
+        qualified = true;
+        name += 2;
+      }
+      if (ps_.kind(name) == Tk::identifier && (ps_.kind(name + 1) == Tk::semi || ps_.kind(name + 1) == Tk::colon)) {
+        if (qualified) {
+          s_.diag(ps_.pos() + name, Diag::qualified_opaque_enum);  // [dcl.enum]: except explicit specializations
+          return bad();
+        }
+        return enum_declaration(EntityId::none);
+      }
+    }
     // `using namespace N;` and `namespace A = N;` at namespace scope ([namespace.udir],
     // [namespace.alias]).
     if (ps_.is(Tk::kw_using) && ps_.kind(1) == Tk::kw_namespace) {
@@ -1673,6 +1690,20 @@ private:
     }
     s_.defer_type_access = true;
     DeclSpec spec = ps_.decl_specifiers();
+    if (spec.ok && spec.elaborated && s_.types().is_enum(spec.type)) {
+      EntityId e = s_.types().enum_of(spec.type);
+      if (!ps_.is(Tk::semi) || s_.world().entities.rec(e).scope == ns_entity()) {
+        s_.settle_type_access(EntityId::none);
+        s_.diag(spec.class_at, Diag::conflicting_declaration, spec.class_name);
+        return bad();
+      }
+      // A standalone class declaration in an inner namespace introduces a name there.
+      spec.type = s_.types().class_type(class_entity(spec.class_name));
+      if (clashes_with_using(spec.class_name, spec.class_at, ast::DeclKind::class_, spec.type)) {
+        s_.settle_type_access(EntityId::none);
+        return bad();
+      }
+    }
     if (spec.elaborated && ps_.is(Tk::semi)) {
       s_.settle_type_access(EntityId::none);
       // `class-key identifier ;` declares the class ([dcl.type.elab]); it stays incomplete until
@@ -2393,10 +2424,15 @@ private:
       return bad();
     }
     for (DeclId p : q_.visible_decls(name))
-      if (auto ds = p_->decl_sema(p); ds && ds->kind == ast::DeclKind::class_ && (ds->flags & sema::decl_flag::definition) &&
-                                      same_scope(*ds)) {
-        s_.diag(name_at, Diag::class_redefinition, name);
-        return bad();
+      if (auto ds = p_->decl_sema(p); ds && ds->entity != EntityId::none && same_scope(*ds)) {
+        if (ds->kind == ast::DeclKind::enum_) {
+          s_.diag(name_at, Diag::conflicting_declaration, name);
+          return bad();
+        }
+        if (ds->kind == ast::DeclKind::class_ && (ds->flags & sema::decl_flag::definition)) {
+          s_.diag(name_at, Diag::class_redefinition, name);
+          return bad();
+        }
       }
     if (template_ ? alias_clash(name, std::nullopt) : alias_clash(name, s_.types().class_type(class_entity(name)))) {
       s_.diag(name_at, Diag::conflicting_declaration, name);
@@ -2512,11 +2548,46 @@ private:
     return true;
   }
 
-  // An enumeration's definition ([dcl.enum]): `enum [class|struct] E [: T] { e [= c], … }`, then
-  // declarators. In a class (`cls`) it is a member, and so are an unscoped one's enumerators.
-  void enum_definition(EntityId cls) {
+  // [dcl.enum]: an opaque declaration or a definition of an enumeration in this namespace.
+  bool enum_redeclaration_ok(NameId name, u32 at, bool scoped, std::optional<QualType> fixed, bool definition) {
+    sema::Types& types = s_.types();
+    for (DeclId p : q_.visible_decls(name)) {
+      auto ds = p_->decl_sema(p);
+      if (!ds || ds->entity == EntityId::none || !same_scope(*ds)) continue;
+      if (ds->kind == ast::DeclKind::class_ || ds->kind == ast::DeclKind::namespace_) {
+        s_.diag(at, Diag::conflicting_declaration, name);
+        return false;
+      }
+      if (ds->kind != ast::DeclKind::enum_) continue;
+      const sema::EnumRec* old = p_->classes_.find_enum(ds->entity);
+      if (!old) continue;
+      if (old->scoped != scoped) {
+        s_.diag(at, Diag::enum_scope_mismatch, name);
+        return false;
+      }
+      if (old->fixed && !fixed) {
+        s_.diag(at, Diag::enum_base_required, name);
+        return false;
+      }
+      if (old->fixed != fixed.has_value() ||
+          (fixed && old->underlying && types.canonical(*old->underlying) != types.canonical(*fixed))) {
+        s_.diag(at, Diag::enum_base_mismatch, name);
+        return false;
+      }
+      if (definition && (ds->flags & sema::decl_flag::definition)) {
+        s_.diag(at, Diag::enum_redefinition, name);
+        return false;
+      }
+    }
+    return true;
+  }
+
+  // An enumeration definition, or a namespace-scope opaque declaration ([dcl.enum]). A definition
+  // can have declarators after the enumerator list. In a class (`cls`), it is a member.
+  void enum_declaration(EntityId cls) {
     sema::Types& types = s_.types();
     u32 at = ps_.pos();
+    bool definition = it_->kind == ItemKind::enum_def;
     bool td = cls == EntityId::none && ps_.accept(Tk::kw_typedef);  // `typedef enum … { … } E;`
     if (!ps_.is(Tk::kw_enum)) {
       s_.diag(ps_.pos(), Diag::not_supported, ps_.kind());
@@ -2524,6 +2595,7 @@ private:
     }
     ps_.bump();
     bool scoped = ps_.accept(Tk::kw_class) || ps_.accept(Tk::kw_struct);
+    ps_.skip_attributes();
     auto named = td ? typedef_name_after_braces() : std::nullopt;
     if (!ps_.is(Tk::identifier) && !named) {
       s_.diag(ps_.pos(), Diag::not_supported, ps_.kind());  // unnamed enumerations
@@ -2536,22 +2608,22 @@ private:
     if (ps_.accept(Tk::colon)) {
       // [dcl.enum]/2: a fixed underlying type, an integral type.
       DeclSpec u = ps_.decl_specifiers();
-      if (!u.ok || !types.is_integral(u.type)) return bad();
+      if (!u.ok) return bad();
+      if (!types.is_integral(u.type) || u.is_static || u.is_extern || u.is_inline || u.is_typedef ||
+          u.is_constexpr || u.is_consteval || u.is_constinit) {
+        s_.diag(u.begin, Diag::enum_base_not_integral);
+        return bad();
+      }
       fixed = sema::Types::unqualified(u.type);
     } else if (scoped) {
       fixed = s_.builtin(sema::Builtin::int_);  // [dcl.enum]/5: int unless given
     }
-    if (!ps_.is(Tk::l_brace)) {
-      s_.diag(ps_.pos(), Diag::not_supported, ps_.kind());  // opaque enum declarations
+    if (!definition && !fixed) {
+      s_.diag(name_at, Diag::enum_base_required, name);
       return bad();
     }
-    if (cls == EntityId::none)
-      for (DeclId p : q_.visible_decls(name))
-        if (auto ds = p_->decl_sema(p); ds && (ds->kind == ast::DeclKind::enum_ || ds->kind == ast::DeclKind::class_) &&
-                                        same_scope(*ds)) {
-          s_.diag(name_at, Diag::class_redefinition, name);
-          return bad();
-        }
+    if (!ps_.expect(definition ? Tk::l_brace : Tk::semi)) return bad();
+    if (cls == EntityId::none && !enum_redeclaration_ok(name, name_at, scoped, fixed, definition)) return bad();
     EntityId e = s_.world().entities.entity(
         {sema::EntityKind::enum_, name, {}, LangLinkage::cxx, ast::Linkage::external, {}, cls != EntityId::none ? cls : ns_entity()});
     QualType t = types.enum_type(e);
@@ -2560,16 +2632,19 @@ private:
       return bad();
     }
     if (cls == EntityId::none && clashes_with_using(name, name_at, ast::DeclKind::enum_, t)) return bad();
-    // Built here and published once complete (#156); the list sees it as it grows.
-    sema::EnumRec er{scoped, fixed.has_value(), fixed.value_or(s_.builtin(sema::Builtin::int_)), std::nullopt, {}};
-    p_->defining_enum_ = {e, &er};
-    ast::DeclSema sem = class_decl(e, true);
+    sema::EnumRec er{scoped, fixed.has_value(), definition, fixed.value_or(s_.builtin(sema::Builtin::int_)), std::nullopt, {}};
+    ast::DeclSema sem = class_decl(e, definition);
     sem.kind = ast::DeclKind::enum_;
     sem.type = t;
     decls_.push_back(sem);
     s_.own.push_back({name, sem});
     p_->declared(sem, k_);
-    ps_.bump();
+    if (!definition) {
+      p_->classes_.publish_enum(e, std::move(er));
+      return;
+    }
+    // The enumerator list sees the definition's record as the list grows (#156).
+    p_->defining_enum_ = {e, &er};
     // The enumerators: each the previous one's value plus one, or its initializer's, a converted
     // constant expression of the underlying type when it is fixed ([dcl.enum]/5).
     std::int64_t next = 0;

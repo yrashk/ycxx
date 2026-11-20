@@ -52,7 +52,7 @@
 =     SourceOf(golden.cpp) reused
 *     UnitQ(square) executed
 =       Lower(square) reused
-*       TuDefined(golden.cpp) executed
+*       TuSymbolAddresses(golden.cpp) executed
 =         TuUnit(golden.cpp) reused
 =         TuSourceIn(golden.cpp) reused
 =         SourceOf(golden.cpp) reused
@@ -64,7 +64,7 @@
 =     SourceOf(golden.cpp) reused
 *     UnitQ(main) executed
 =       Lower(main) reused
-=       TuDefined(golden.cpp) reused
+=       TuSymbolAddresses(golden.cpp) reused
 =     OptLevel(aarch64_macos) reused
 *     Optimized({<fp>, aarch64_macos, 0}) executed
 =       CostModelIn(aarch64_macos) reused
@@ -122,7 +122,7 @@
 =       SourceOf(golden.cpp) reused
 +       UnitQ(square) verified
 =         Lower(square) reused
-+         TuDefined(golden.cpp) verified
++         TuSymbolAddresses(golden.cpp) verified
 =           TuUnit(golden.cpp) reused
 =           TuSourceIn(golden.cpp) reused
 =           SourceOf(golden.cpp) reused
@@ -133,7 +133,7 @@
 =       SourceOf(golden.cpp) reused
 +       UnitQ(main) verified
 =         Lower(main) reused
-=         TuDefined(golden.cpp) reused
+=         TuSymbolAddresses(golden.cpp) reused
 =       OptLevel(aarch64_macos) reused
 #       Optimized({<fp>, aarch64_macos, 0}) durable
 trace: 25 executed, 20 verified, 88 reused, 4 durable
@@ -201,7 +201,7 @@ trace: 3 reused
 =     SourceOf(golden.cpp) reused
 +     UnitQ(square) verified
 =       Lower(square) reused
-+       TuDefined(golden.cpp) verified
++       TuSymbolAddresses(golden.cpp) verified
 =         TuUnit(golden.cpp) reused
 =         TuSourceIn(golden.cpp) reused
 =         SourceOf(golden.cpp) reused
@@ -212,7 +212,7 @@ trace: 3 reused
 =     SourceOf(golden.cpp) reused
 +     UnitQ(main) verified
 =       Lower(main) reused
-=       TuDefined(golden.cpp) reused
+=       TuSymbolAddresses(golden.cpp) reused
 =     OptLevel(aarch64_macos) reused
 #     Optimized({<fp>, aarch64_macos, 0}) durable
 + Link(0) verified

@@ -493,7 +493,7 @@ std::optional<u32> Machine::literal_object(ConstId s) {
   if (a.kind != Kind::array) return std::nullopt;
   const Shape e = shape(a.inner);
   if (e.kind != Kind::integer) return std::nullopt;
-  std::vector<u8> units = in_->seqs.elements(str.units);
+  auto units = in_->seqs.elements(str.units);
   if (units.size() != a.bound) return std::nullopt;
   u32 o = make_object(str.type, Origin::literal);
   objects_[o].read_only = true;

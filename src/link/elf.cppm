@@ -26,8 +26,9 @@ using static_operand = std::variant<std::reference_wrapper<const obj::object>, s
 std::expected<std::vector<obj::object>, std::string> select_archive_members(std::span<const static_operand> operands);
 
 // Link in-memory x86-64 Linux objects. The caller supplies the entry definition in code and
-// handles process startup and exit. Only the standard sections and ABS64, PC32 and PLT32
-// relocations are supported. The ET_EXEC image has load segments and a non-executable stack.
+// handles process startup and exit. Standard sections support ABS64, PC32 and PLT32
+// relocations. Static links also relax canonical REX_GOTPCRELX address loads.
+// The ET_EXEC image has load segments and a non-executable stack.
 // It has no section table. `entry` names a nonlocal symbol. Dynamic links support direct calls
 // to functions provided by the supplied libraries.
 std::expected<std::vector<std::uint8_t>, std::string> link(std::span<const obj::object> objects,
@@ -85,11 +86,23 @@ struct load_segment {
   std::uint64_t offset, file_size, memory_size;
 };
 
+enum class patch_kind { ordinary, import_call, relax_got };
+
 struct patch {
   std::uint64_t offset, value;
   std::size_t width;
   section_ref source;
-  bool direct_import;
+  patch_kind kind;
+  std::string_view symbol;
+
+  std::size_t prefix_size() const {
+    switch (kind) {
+      case patch_kind::ordinary: return 0;
+      case patch_kind::import_call: return 1;
+      case patch_kind::relax_got: return 3;
+    }
+    std::unreachable();
+  }
 };
 
 using import_indices = std::map<std::string_view, std::uint32_t, std::less<>>;
@@ -118,6 +131,13 @@ std::optional<std::uint32_t> displacement(std::uint64_t target, std::uint64_t pc
 }
 
 bool executable(const obj::section& s) { return s.segment == "__TEXT" && s.name == "__text"; }
+
+// AMD64 psABI B.2: the relaxed LEA uses the MOV's destination register and RIP-relative operand.
+bool canonical_got_load(const obj::section& s, const obj::reloc& r) {
+  if (!executable(s) || r.offset < 3 || r.addend != -4) return false;
+  const auto rex = s.bytes[r.offset - 3];
+  return (rex == 0x48 || rex == 0x4c) && s.bytes[r.offset - 2] == 0x8b && (s.bytes[r.offset - 1] & 0xc7) == 0x05;
+}
 
 std::unexpected<std::string> object_error(const obj::object& o, std::string_view reason) {
   return std::unexpected(std::format("{}: {}", o.name.empty() ? "ELF input" : o.name, reason));
@@ -407,6 +427,14 @@ std::expected<bytes, std::string> link(std::span<const obj::object> objects, std
         if (s.relocs.size() != s.size() / 8)
           return section_error(o, s, ".init_array requires one relocation per slot");
       }
+      if (dynamic) {
+        for (const auto& r : s.relocs) {
+          if (r.kind != reloc_kind::x86_64_rex_gotpcrelx) continue;
+          if (r.symbol >= o.symbols.size()) return section_error(o, s, "invalid ELF relocation symbol index");
+          return section_error(o, s, std::format("native dynamic ELF data address for '{}' is unsupported",
+                                                  o.symbols[r.symbol].name));
+        }
+      }
       sections[std::to_underlying(kind->output)].push_back({oi, si});
     }
     if (auto registered = register_symbols(o, oi, globals); !registered)
@@ -519,8 +547,9 @@ std::expected<bytes, std::string> link(std::span<const obj::object> objects, std
       const bool is_init_array = s.is_init_array();
       for (const auto& r : s.relocs) {
         const bool absolute = r.kind == reloc_kind::abs64;
+        const bool got = r.kind == reloc_kind::x86_64_rex_gotpcrelx;
         if (r.minus) return section_error(o, s, "ELF symbol-difference relocations are unsupported");
-        if (!absolute && r.kind != reloc_kind::x86_64_pc32 && r.kind != reloc_kind::x86_64_plt32) {
+        if (!absolute && !got && r.kind != reloc_kind::x86_64_pc32 && r.kind != reloc_kind::x86_64_plt32) {
           return section_error(o, s, "unsupported x86-64 ELF relocation kind");
         }
         if (is_init_array && (!absolute || r.offset % 8 != 0))
@@ -533,6 +562,15 @@ std::expected<bytes, std::string> link(std::span<const obj::object> objects, std
         const auto offset = offsets[oi][si] + r.offset;
         const auto& symbol = o.symbols[r.symbol];
         const auto def = resolve(oi, symbol);
+        if (got) {
+          // The undefined-symbol scan above has already rejected missing strong definitions.
+          if (!def)
+            return section_error(o, s, std::format("R_X86_64_REX_GOTPCRELX for undefined weak symbol '{}' is unsupported",
+                                                    symbol.name));
+          if (!canonical_got_load(s, r))
+            return section_error(o, s, std::format("R_X86_64_REX_GOTPCRELX for '{}' requires a canonical "
+                                                    "64-bit RIP-relative MOV with addend -4", symbol.name));
+        }
         const auto imported = def ? imports.end() : imports.find(symbol.name);
         if (!def && imported == imports.end() && dynamic && symbol.weak && symbol.bind == binding::global &&
             provided_symbol(*dynamic, symbol.name))
@@ -559,15 +597,18 @@ std::expected<bytes, std::string> link(std::span<const obj::object> objects, std
         }
         auto value = target + static_cast<std::uint64_t>(r.addend);  // R_X86_64_64: S + A modulo 2^64
         if (!absolute) {
-          // S + A - P, with an imported call targeting its thunk (L) instead of S.
+          // Static GOT loads relax to the symbol. An imported call targets its thunk instead.
           const auto delta = displacement(target, image_base + offset, r.addend);
           if (!delta) {
-            const auto kind = r.kind == reloc_kind::x86_64_pc32 ? "R_X86_64_PC32" : "R_X86_64_PLT32";
+            const auto kind = got ? "R_X86_64_REX_GOTPCRELX"
+                                 : r.kind == reloc_kind::x86_64_pc32 ? "R_X86_64_PC32" : "R_X86_64_PLT32";
             return section_error(o, s, std::format("{} displacement overflows for '{}'", kind, symbol.name));
           }
           value = *delta;
         }
-        patches.push_back({offset, value, width, {oi, si}, imported != imports.end()});
+        const auto kind = got ? patch_kind::relax_got
+                              : imported != imports.end() ? patch_kind::import_call : patch_kind::ordinary;
+        patches.push_back({offset, value, width, {oi, si}, kind, symbol.name});
       }
     }
   }
@@ -576,14 +617,22 @@ std::expected<bytes, std::string> link(std::span<const obj::object> objects, std
       return std::unexpected(std::format("ELF import '{}' has no direct call reference", name));
   }
   std::ranges::stable_sort(patches, {}, &patch::offset);
-  std::uint64_t previous_end = 0;
+  const patch* previous = nullptr;
   for (const auto& p : patches) {
-    // An otherwise adjacent fixup cannot overwrite the opcode of an imported call.
-    if (p.offset - p.direct_import < previous_end) {
+    // Protect the opcode of an imported call and the full MOV being relaxed.
+    if (previous && p.offset - p.prefix_size() < previous->offset + previous->width) {
+      const auto* got = p.kind == patch_kind::relax_got ? &p
+                      : previous->kind == patch_kind::relax_got ? previous : nullptr;
+      if (got) {
+        const auto& o = objects[got->source.object];
+        return section_error(o, o.sections[got->source.section],
+                             std::format("overlapping ELF relocations are unsupported for R_X86_64_REX_GOTPCRELX of '{}'",
+                                         got->symbol));
+      }
       const auto& o = objects[p.source.object];
       return section_error(o, o.sections[p.source.section], "overlapping ELF relocations are unsupported");
     }
-    previous_end = p.offset + p.width;
+    previous = &p;
   }
 
   auto image = write_headers(address(start->second), program_count, loads, layout ? &*layout : nullptr,
@@ -597,7 +646,10 @@ std::expected<bytes, std::string> link(std::span<const obj::object> objects, std
       if (!s.bytes.empty()) std::ranges::copy(s.bytes, image.data() + offsets[oi][si]);
     }
   }
-  for (const auto& p : patches) write_word(std::span(image).subspan(p.offset, p.width), p.value);
+  for (const auto& p : patches) {
+    if (p.kind == patch_kind::relax_got) image[p.offset - 2] = 0x8d;  // MOV -> LEA
+    write_word(std::span(image).subspan(p.offset, p.width), p.value);
+  }
   if (layout) {
     auto written = write_dynamic(image, *layout, *dynamic);
     if (!written) return std::unexpected(written.error());

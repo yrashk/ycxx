@@ -170,9 +170,8 @@ detect = '''\b(?:u8|u|U)R?(?:""|'{2})|\bchar(?:16|32)_t\b'''
 probe = '''
 int main() { const char16_t* s = u"ab"; char32_t c = U'x'; return (s[1] == u'b' && c == 120) ? 0 : 1; }
 '''
-status = 'partial'
+status = 'done'
 issues = [288]
-note = '`u"…"` and `U"…"` strings'
 
 [[feature]]
 id = 'lex-char8'
@@ -502,7 +501,7 @@ ftm = '__cpp_rvalue_references'
 detect = '\bstd::(?:move|forward)\b|\w&&(?=\s*[\w,)>.])'
 status = 'partial'
 issues = [199, 290]
-note = '`static_cast<T&&>`; `S b(S(1))` is misparsed'
+note = 'reference downcasts and the `S b(S(1))` initializer ambiguity'
 probe = '''
 struct S { int v; S(int x) : v(x) {} S(S&& o) : v(o.v) { o.v = 0; } };
 int main() { int&& r = 1; S a(1); S b(static_cast<S&&>(a)); return (r == 1 && b.v == 1 && a.v == 0) ? 0 : 1; }
@@ -723,7 +722,7 @@ std = 'C++98'
 detect = '\b(?:static|const|reinterpret)_cast\s*<'
 status = 'partial'
 issues = [199, 59]
-note = 'casts involving `void*` and `std::nullptr_t`'
+note = 'downcasts, `const_cast`, `reinterpret_cast`, and some `void*` and `std::nullptr_t` conversions'
 probe = '''
 int main() { long l = 5; int i = static_cast<int>(l); const int* c = &i; int* m = const_cast<int*>(c); char* b = reinterpret_cast<char*>(m); return (i == 5 && (int)l == int(l) && b) ? 0 : 1; }
 '''
@@ -767,11 +766,12 @@ ftm = '__cpp_initializer_lists'
 detect = '[\w>]\{|=\s*\{|\breturn\s*\{|\(\s*\{|,\s*\{'
 status = 'partial'
 issues = [231]
-note = 'braced arguments to overload sets, templates and member calls'
+note = 'free non-template overloads can rank braced arguments for arithmetic and flat ordinary aggregate targets. Further list conversions, templates and member calls remain'
 probe = '''
 struct P { int x, y; };
 int f(P p) { return p.x + p.y; }
-int main() { int i{1}; P p{2, 3}; return (f({1, -2}) == -1 && i + p.x == 3) ? 0 : 1; }
+int f(long n) { return static_cast<int>(n); }
+int main() { int i{1}; P p{2, 3}; return (f({1, -2}) == -1 && f({2}) == 2 && i + p.x == 3) ? 0 : 1; }
 '''
 
 [[feature]]
@@ -1043,7 +1043,8 @@ clauses = ['dcl', 'dcl.pre', 'dcl.spec', 'dcl.spec.general', 'dcl.stc', 'dcl.fct
 std = 'C++98'
 core = true
 status = 'done'
-issues = [179, 180, 222]
+issues = [179, 180, 222, 433]
+note = 'includes named function-pointer declarations with qualified return types'
 probe = '''
 typedef unsigned long ul; const volatile int cv = 1; char s[] = "ab";
 int main() { ul x = cv; int* const p = nullptr; return (x == 1 && sizeof s == 3 && !p) ? 0 : 1; }
@@ -1233,13 +1234,16 @@ clauses = ['dcl.enum']
 std = 'C++11'
 detect = '\benum\s+(?:class|struct)\b|\benum\s+\w+\s*:\s*[\w:]'
 probe = '''
-enum class E : unsigned char { a, b };
+enum class E : unsigned char;
 enum struct F;
-int main() { E e = E::b; return static_cast<int>(e) == 1 && sizeof(E) == 1 ? 0 : 1; }
+static_assert(sizeof(E) == sizeof(unsigned char));
+static_assert(sizeof(F) == sizeof(int));
+enum class E : unsigned char { a, b };
+int main() { E e = E::b; return static_cast<int>(e) == 1 ? 0 : 1; }
 '''
 status = 'partial'
 issues = [157]
-note = 'opaque enum declarations'
+note = 'opaque enum declarations in classes and blocks'
 
 [[feature]]
 id = 'dcl-using-enum'
