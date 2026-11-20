@@ -233,12 +233,13 @@ clauses = ['lex.ext', 'over.literal']
 std = 'C++11'
 ftm = '__cpp_user_defined_literals'
 detect = '''\boperator\s*""\s*\w+|""_\w+|\b\d[\w']*_\w+\b|\b\d+(?:ms|us|ns|min|h|s|sv)\b|""(?:s|sv)\b'''
-status = 'missing'
+status = 'partial'
 probe = '''
 constexpr unsigned long long operator""_k(unsigned long long v) { return v * 1000; }
 int main() { return 2_k == 2000 ? 0 : 1; }
 '''
 issues = [289]
+note = 'Cooked integer calls through namespace literal operators. Raw, floating-point, character, string and template calls remain.'
 
 [[feature]]
 id = 'lex-size-t-suffix'

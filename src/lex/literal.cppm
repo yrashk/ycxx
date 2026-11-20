@@ -39,6 +39,15 @@ void evaluate_char(Literal& l, R&& report);
 template <class R>
 void concatenate_strings(std::span<Literal*> run, R&& report);
 
+// The shared lookup spelling of a literal-operator-id ([over.literal]).
+inline constexpr std::string_view literal_operator_prefix = "operator\"\"";
+
+std::string literal_operator_name(std::string_view suffix) {
+  std::string name(literal_operator_prefix);
+  name += suffix;
+  return name;
+}
+
 // The code units a sequence of characters encodes to.
 void encode(Encoding e, char32_t c, std::vector<u32>& out);
 
