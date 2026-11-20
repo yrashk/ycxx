@@ -1,6 +1,7 @@
 // The standalone native archive front (#389).
 module;
-#include <stdlib.h>
+#include <errno.h>
+#include <sys/stat.h>
 export module ycxx.driver.archive;
 
 import std;
@@ -33,6 +34,18 @@ std::expected<std::string, std::string> read_input(std::string_view name) {
   return bytes;
 }
 
+std::optional<std::filesystem::path> private_staging_directory(const std::filesystem::path& parent) try {
+  std::random_device random;
+  for (int attempt = 0; attempt < 16; ++attempt) {
+    auto directory = parent / std::format(".ycxx-archive-{:08x}{:08x}", random(), random());
+    if (::mkdir(directory.c_str(), 0700) == 0) return directory;
+    if (errno != EEXIST) break;
+  }
+  return std::nullopt;
+} catch (const std::system_error&) {
+  return std::nullopt;
+}
+
 bool replace_output(const std::filesystem::path& path, std::string_view bytes) {
   using std::filesystem::file_type;
   std::error_code ec;
@@ -42,10 +55,9 @@ bool replace_output(const std::filesystem::path& path, std::string_view bytes) {
 
   // Stage the new file beside its destination. A private directory lets the file use the
   // usual creation permissions while keeping simultaneous writers' temporary names distinct.
-  auto temp = (path.parent_path() / ".ycxx-archive-XXXXXX").native_encoded_string();
-  if (!::mkdtemp(temp.data())) return false;
-  const std::filesystem::path directory(temp);
-  const auto peer = directory / "archive";
+  const auto directory = private_staging_directory(path.parent_path());
+  if (!directory) return false;
+  const auto peer = *directory / "archive";
   std::ofstream file(peer, std::ios::binary);
   if (file) {
     file.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
@@ -54,7 +66,7 @@ bool replace_output(const std::filesystem::path& path, std::string_view bytes) {
   if (file) std::filesystem::rename(peer, path, ec);
   const bool replaced = file && !ec;
   if (!replaced) std::filesystem::remove(peer, ec);
-  std::filesystem::remove(directory, ec);
+  std::filesystem::remove(*directory, ec);
   return replaced;
 }
 
