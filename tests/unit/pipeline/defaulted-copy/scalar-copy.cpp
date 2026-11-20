@@ -1,5 +1,7 @@
 #include "scalar-copy.hpp"
 
+Scalar::Scalar(int input) : value(input) {}
+
 int main(int argc, char**) {
     const int input = argc % 7;
     const Scalar source(input);

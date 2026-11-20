@@ -4,7 +4,7 @@
 struct Scalar {
     int value;
 
-    Scalar(int input) noexcept : value(input) {}
+    Scalar(int input);
     constexpr Scalar(const Scalar&) noexcept = default;
 };
 

@@ -1,5 +1,7 @@
 #include "scalar-copy.hpp"
 
+Scalar::Scalar(int input) : value(input) {}
+
 Scalar peer_adjust(Scalar input);
 
 Scalar main_adjust(Scalar input) {
