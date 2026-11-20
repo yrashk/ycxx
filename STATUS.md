@@ -1083,6 +1083,11 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   functional casts `T(e)` for keyword types, enumerations and typedef-names, and C-style casts
   `(T)e`, as static_cast does them ([expr.type.conv]/2, [expr.cast]/4). Downcasts and the
   const_cast and reinterpret_cast parts of a C-style cast are not supported yet.
+- `static_cast<T&&>` gives a compatible object lvalue the target type and xvalue category for
+  reference binding, `decltype` and overload resolution. The cast designates the same object or
+  an accessible, unambiguous base subobject. A compatible bit-field is read into a temporary.
+  The tests in `tests/own/casts` cover identity, qualification, overloads and direct reference
+  initialization. [#199](https://github.com/yrashk/ycxx/issues/199)
 - **sizeof, alignof** of fundamental, pointer, enumeration and array types and of an expression,
   from `ast::Target`; a class's since #194, below.
 - **decltype(e)** ([dcl.type.decltype]): an unparenthesized id-expression or member access names
@@ -1777,8 +1782,8 @@ What the process allocates, attributed to the engine's cells, in the trace and t
 - **Calls through pointers to functions:** irgen emits `call_ind` (`Gen::call_pointer`), which
   lowering, AArch64 selection and the interpreter already had; constant evaluation calls through
   them too.
-- Tests: `tests/own/auto/` (46 spec-only, 4 more): 41 pass, 9 are XFAIL: structured bindings
-  (#285), a namespace-scope reference (#367), `static_cast<int&&>` (#199).
+- Tests: `tests/own/auto/` (46 spec-only, 4 more): 42 pass, 8 are XFAIL: structured bindings
+  (#285) and a namespace-scope reference (#367).
   `p1-impl-mangle` checks the `Da`/`Dc` names against Clang objects.
 - Not yet: constrained `C auto`, `auto x = {…}`, `auto x(e)` at namespace scope, abbreviated
   function templates (#286); structured bindings (#285).
@@ -1889,8 +1894,8 @@ values, end to end; results match Clang's bit for bit.
   and closure members are constexpr; the interpreter does not evaluate class objects yet (#262),
   so constexpr lambdas wait on it.
 - Tests: `tests/own/lambda/p3-*` (33 spec-only + 6 own, one an ABI test against Clang objects):
-  all but 12 pass; those are XFAIL (constexpr lambdas #262, default arguments #300,
-  `static_cast<T&&>` and dependent `decltype` #199, a generic lambda's conversion #339, explicit
+  all but 11 pass; those are XFAIL (constexpr lambdas #262, default arguments #300,
+  dependent `decltype` #199, a generic lambda's conversion #339, explicit
   template arguments #347).
 - **Packs:** `auto... xs` invents a template parameter pack and `[]<class... Ts>(Ts... xs)`
   declares one; a specialization's parameters are the pack's elements (`open_generic`), and the

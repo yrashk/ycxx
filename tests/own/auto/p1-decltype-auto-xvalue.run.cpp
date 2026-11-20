@@ -1,6 +1,5 @@
 // θ step 1 (#279), spec-only (split from p1-decltype-auto-var): `decltype(auto)` from a call
 // returning an rvalue reference keeps it ([dcl.type.auto.deduct], [dcl.type.decltype]).
-// XFAIL: ycxx static_cast to an rvalue reference of an lvalue, #199
 template<class A, class B> struct same { static constexpr bool value = false; };
 template<class A> struct same<A, A> { static constexpr bool value = true; };
 

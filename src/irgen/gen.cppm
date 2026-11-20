@@ -1552,9 +1552,20 @@ class Gen {
     }
     // A derived class's object as its direct base's ([conv.ptr]/3, [dcl.init.ref]): the base
     // subobject, named by the base class's entity.
-    if (is<ast::ImplicitConversion>(a) && get<ast::ImplicitConversion>(a).conversion == ast::ConversionKind::derived_to_base) {
-      auto c = get<ast::ImplicitConversion>(a);
-      return subobject(lvalue(child(a, c.operand)), ir::Step::base, std::to_underlying(c.function), t);
+    if (is<ast::ImplicitConversion>(a)) {
+      const auto c = get<ast::ImplicitConversion>(a);
+      if (c.conversion == ast::ConversionKind::derived_to_base)
+        return subobject(lvalue(child(a, c.operand)), ir::Step::base, std::to_underlying(c.function), t);
+      if (c.conversion == ast::ConversionKind::qualification) {
+        // An explicit xvalue cast preserves storage while carrying the target type's qualifiers.
+        Place p = lvalue(child(a, c.operand));
+        if (!same_type(p.type, t)) {
+          const auto ptr_type = facts_.pointer_to(t);
+          p.ptr = pure(ir::Op::ptr_cast, ptr_type, {p.ptr}, {word(ty(ptr_type))});
+        }
+        p.type = t;
+        return p;
+      }
     }
     if (is<ast::DeclRef>(a)) {
       ast::EntityId e = get<ast::DeclRef>(a).entity;
