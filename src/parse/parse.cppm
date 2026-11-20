@@ -633,7 +633,13 @@ public:
     auto d = declaration(v, item);
     if (!d || d->kind != ast::DeclKind::variable) return std::nullopt;
     auto c = constant_value(v, item);
-    return interp::GlobalVar{d->type, c, c.has_value()};
+    QualType type = d->type;
+    if (w_->types.is_reference(type) && !w_->types.is_function(w_->types.referee(type))) {
+      const sema::EntityRec& entity = w_->entities.rec(v);
+      bool in_namespace = entity.scope == EntityId::none || w_->entities.rec(entity.scope).kind == sema::EntityKind::namespace_;
+      if (in_namespace && entity.templ == EntityId::none) type = w_->types.pointer(w_->types.referee(type));
+    }
+    return interp::GlobalVar{type, c, c.has_value()};
   }
   bool is_constexpr(EntityId f, u32 item) {
     // A specialization is as its template is declared, unless explicitly specialized ([temp.expl.spec]/14).
@@ -3739,6 +3745,9 @@ private:
     bool has_init = !deleted && (early || early_expr || ps_.is(Tk::equal) || ps_.is(Tk::l_brace) || (!fn && ps_.is(Tk::l_paren)));
     bool definition = fn ? is_function_def || deleted : !((spec.is_extern || single_linkage_spec_) && !has_init);
     if (definition) flags |= sema::decl_flag::definition;
+    const bool reference = types.is_reference(d.type);
+    const bool ordinary_reference = reference && !types.is_function(types.referee(d.type)) &&
+                                    !(d.qualified && d.scope.type) && !template_ && !var_ && !explicit_;
     if (!fn && types.is_void(d.type)) {
       s_.diag(d.name_at, Diag::void_variable, d.name);
       return false;
@@ -4016,19 +4025,29 @@ private:
     sema::ConstId value = sema::ConstId::none;
     // An initializer that is not a constant expression initializes the variable dynamically
     // ([basic.start.dynamic]), by the unit's initialization function, unless it must be constant
-    // ([dcl.constexpr], [dcl.constinit]) or is not supported yet: a reference's (#367), an inline
-    // variable's or a variable template's (#368), and a scalar's the front end has no code for.
+    // ([dcl.constexpr], [dcl.constinit]) or is not supported yet: an inline variable's or a
+    // variable template's (#368), and a scalar's the front end has no code for.
     auto dynamic_ok = [&](u32 at, std::uint64_t reason) {
       if (spec.is_constexpr || spec.is_constinit) {
         s_.diag(at, Diag::not_constant, reason);
         return false;
       }
       bool object = types.is_class(element_type(d.type)) || types.is_array(d.type);  // evaluated in parts, if at all
-      if (types.is_reference(d.type) || spec.is_inline || var_ || template_ || (!object && !sema::has_runtime_code(reason))) {
+      if ((reference && !ordinary_reference) || spec.is_inline || var_ || template_ ||
+          (!object && !sema::has_runtime_code(reason))) {
         s_.diag(at, Diag::nonconstant_initializer, reason);
         return false;
       }
       return true;
+    };
+    auto evaluate_reference = [&](u32 at) {
+      sema::Evaluated v = sema::Evaluator(s_, q_).evaluate_reference_initializer(init);
+      if (v.value) {
+        value = *v.value;
+        p_->set_constant(sem.entity, value, k_);  // a reference is potentially constant ([expr.const.init])
+      } else if (!v.dependent) {
+        dynamic_ok(at, v.reason);
+      }
     };
     if (fn && has_init && !is_function_def) {
       s_.diag(ps_.pos(), Diag::function_initialized, d.name);
@@ -4040,7 +4059,9 @@ private:
       auto b = early ? std::move(early) : ps_.braced_init_list();
       init = s_.list_init(d.type, *b);
       if (init.ok() && !pattern) {
-        if (auto v = constant_initializer(init)) {
+        if (ordinary_reference) {
+          evaluate_reference(b->begin);
+        } else if (auto v = constant_initializer(init)) {
           value = *v;
           if (spec.is_constexpr) p_->set_constant(sem.entity, *v, k_);
         } else {
@@ -4051,8 +4072,10 @@ private:
       {
         Ex e = early_expr ? *early_expr : ps_.assignment_expression();
         init = s_.convert(e, d.type, e.begin);
-        if (init.ok() && !pattern) {
-          // [basic.start.static]: constant initialization, or dynamic, which the α subset lacks.
+        if (init.ok() && !pattern && ordinary_reference) {
+          evaluate_reference(e.begin);
+        } else if (init.ok() && !pattern) {
+          // [basic.start.static]: constant or dynamic initialization.
           // A constexpr or constinit variable must be constant-initialized ([dcl.constexpr],
           // [dcl.constinit]); a constexpr one, and a const integral one that is, are usable in
           // constant expressions ([expr.const]).
@@ -4085,10 +4108,12 @@ private:
       if (!ps_.expect(Tk::r_paren)) ps_.skip_to_semi();
       else if (pattern) {}
       else if (types.is_class(d.type)) init = s_.construct(d.type, std::move(args), open, ps_.pos());
-      else if (args.size() == 1 && !types.is_array(d.type) && !types.is_reference(d.type))
+      else if (args.size() == 1 && !types.is_array(d.type) && (!reference || ordinary_reference))
         init = s_.convert(args[0], d.type, open);
       else s_.diag(open, Diag::not_supported, Tk::l_paren);  // a list for a scalar or an array
-      if (init.ok() && !types.is_class(d.type)) {
+      if (init.ok() && ordinary_reference) {
+        evaluate_reference(open);
+      } else if (init.ok() && !types.is_class(d.type)) {
         sema::Evaluated v = sema::Evaluator(s_, q_).evaluate(init);
         if (v.value) {
           value = *v.value;
@@ -4102,6 +4127,8 @@ private:
       }
     } else if (pattern) {
       // Its specializations' types are complete, or not ([temp.inst]/7).
+    } else if (ordinary_reference && definition) {
+      s_.diag(d.name_at, Diag::reference_uninitialized);  // [dcl.ref]/5
     } else if (!fn && definition && !s_.require_complete(d.type, d.name_at)) {
       // A definition needs a complete object type ([basic.def]).
     } else if (!fn && definition && !types.is_dependent(d.type) && s_.has_user_ctors(element_type(d.type))) {

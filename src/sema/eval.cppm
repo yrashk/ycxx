@@ -73,15 +73,26 @@ public:
       s_->diag(e.begin, Diag::not_constant, reason_arg({interp::Reason::not_constexpr, 0, {}}));
   }
 
-  // Evaluates `e` as a core constant expression of its type, then checks the result is a
-  // permitted result of a constant expression ([expr.const]). `e` must be valid.
-  Evaluated evaluate(Ex e) {
+  Evaluated evaluate(Ex e) { return evaluate(e, false); }
+  Evaluated evaluate_reference_initializer(Ex e) { return evaluate(e, true); }
+
+private:
+  // Evaluates `e` as a core constant expression, then checks the result is a permitted result
+  // ([expr.const]). The result for a reference initializer is a pointer to the bound object.
+  Evaluated evaluate(Ex e, bool reference_initializer) {
     if (!e.ok()) return {};
     if (s_->dependent(e)) return {std::nullopt, reason_unsupported, false, true};
-    if (e.glvalue()) e = s_->rvalue(e);
+    if (reference_initializer) {
+      if (!e.glvalue()) return {};
+      // The built-in address of the bound glvalue, without resolving operator& ([dcl.init.ref]).
+      ExprInfo info{s_->types().pointer(e.type()), ValueCategory::prvalue, 0};
+      e = s_->node(ast::Unary{info, ast::UnaryOp::address_of, Sema::at(e, e.begin)}, e.begin, e.end, info);
+    } else if (e.glvalue()) e = s_->rvalue(e);
     if (!e.ok()) return {};
     ast::Interners& in = s_->ins();
     ast::Child root = s_->builder().commit(ast::Child{e.id, 0});
+    if (reference_initializer && irgen::materializes_temporary(in.ast, root.id))
+      return {std::nullopt, reason_arg({interp::Reason::local_address, 0, {}})};
     NodeId ret = in.intern(ast::Return{root}, e.width());
     std::vector<ast::LocalRec> locals(s_->locals().begin(), s_->locals().end());
     for (ast::LocalRec& l : locals) {
@@ -112,15 +123,25 @@ public:
       // In the thunk's own frame, the only objects outside their lifetime are the enclosing
       // function's locals that are not usable in constant expressions.
       interp::Failure f = out.failure;
+      // A missing interpreter operation may hide a binding that requires static initialization.
+      if (reference_initializer && (f.reason == interp::Reason::unsupported || f.reason == interp::Reason::unsupported_constant ||
+                                    f.reason == interp::Reason::callee_unsupported))
+        return {};
       if (f.reason == interp::Reason::outside_lifetime && !f.stack.empty() && f.stack[0].function == EntityId::none)
         f.reason = interp::Reason::not_usable;
       return {std::nullopt, reason_arg(f)};
     }
     if (out.values.empty() && s_->types().is_void(e.type())) return {std::nullopt, 0, true};
     if (out.values.size() != 1) return {};
-    return constant(out.values[0]);
+    const interp::Result& value = out.values[0];
+    if (reference_initializer && value.kind == interp::Result::Kind::null)
+      return {std::nullopt, reason_arg({interp::Reason::null_access, 0, {}})};
+    if (reference_initializer && value.past)
+      return {std::nullopt, reason_arg({interp::Reason::past_end_access, 0, {}})};
+    return constant(value);
   }
 
+public:
   // An aggregate initializer is constant when each of its elements is constant ([expr.const]).
   Evaluated evaluate_initializer(Ex e) {
     if (s_->as<ast::InitList>(e)) {
