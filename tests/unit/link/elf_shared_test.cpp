@@ -95,7 +95,8 @@ int main() {
   rejects(input, ph_dynamic, 4, 3, "position-independent executable");
   rejects(input, ph_dynamic + 16, 8, base + dynamic + 1, "mapped PT_DYNAMIC");
   rejects(input, dynamic + 96, 8, 99, "no DT_NULL terminator");
-  rejects(input, dynamic, 8, 0x6ffffef5, "GNU-hash-only");
+  // A SysV fixture relabeled as GNU has no room for the GNU header, Bloom word and bucket.
+  rejects(input, dynamic, 8, 0x6ffffef5, "DT_GNU_HASH dimensions");
   rejects(input, dynamic, 8, 1, "dependencies are unsupported");
   rejects(input, dynamic, 8, 0x6ffffff0, "versioned ELF shared object symbols");
   rejects(input, dynamic + 72, 8, 16, "symbol table metadata");
