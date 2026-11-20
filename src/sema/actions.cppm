@@ -1792,6 +1792,11 @@ public:
   bool dependent(const Braced& b) {
     return std::ranges::any_of(b.clauses, [&](const Braced::Clause& c) { return c.list ? dependent(*c.list) : dependent(c.expr); });
   }
+  bool type_dependent(const Braced& b) {
+    return std::ranges::any_of(b.clauses, [&](const Braced::Clause& c) {
+      return c.list ? type_dependent(*c.list) : c.expr.ok() && types().is_dependent(c.expr.type());
+    });
+  }
   // A dependent construct over `ops` in [begin, end): of type `t` when only its value depends on
   // a template parameter, else of the dependent type.
   Ex dependent_node(std::span<const Ex> ops, u32 begin, u32 end, std::optional<QualType> t = std::nullopt,
@@ -3278,6 +3283,8 @@ public:
   // conversion, then a tie-break among exact matches (an added qualification, or a reference
   // to a more cv-qualified type, is worse); `viable` false when there is none.
   struct Ics {
+    static constexpr int user_defined = 3;
+    static constexpr int ellipsis = 4;
     bool viable = false;
     int rank = 0;
     int sub = 0;              // a qualification conversion among exact matches ([over.ics.rank]/3.2.5)
@@ -3383,7 +3390,7 @@ public:
     }
     if (types().is_pointer(to) && is_null_pointer_constant(a)) return {true, 2, 0};
     // A user-defined conversion: a closure's to a pointer to function ([over.best.ics]/2).
-    if (closure_invoker(a.type(), to)) return {true, 3, 0};
+    if (closure_invoker(a.type(), to)) return {true, Ics::user_defined, 0};
     QualType from = value_type(a);
     if (types().is_class(from) || types().is_void(from)) return {};
     if (types().canonical(from) == types().canonical(to)) return {true, 0, 0};
@@ -3427,15 +3434,54 @@ public:
     return {};
   }
 
+  // [over.ics.list]: rank a braced argument before initializing the selected parameter.
+  // A disengaged result is a list conversion this slice does not classify.
+  std::optional<Ics> list_ics(const Braced& list, QualType parameter) {
+    const bool flat = std::ranges::none_of(list.clauses, [](const Braced::Clause& c) { return c.list || c.designated; });
+    if (types().is_scalar(parameter)) {
+      if (!flat || list.clauses.size() > 1) return Ics{};
+      if (!types().is_arithmetic(parameter)) return std::nullopt;
+      if (list.clauses.empty()) return Ics{true};
+      const Ex& expr = list.clauses.front().expr;
+      if (expr.ok() && types().is_class(expr.type())) return std::nullopt;
+      return ics(expr, parameter);
+    }
+    if (!flat || !types().is_class(parameter)) return std::nullopt;
+    EntityId entity = types().class_of(parameter);
+    if (w_->entities.rec(entity).templ != EntityId::none) return std::nullopt;
+    const ClassRec* record = class_rec(entity);
+    if (!record || record->union_ || record->closure || record->user_ctors || !record->bases.empty() ||
+        !std::ranges::all_of(record->fields, [&](const FieldRec& f) {
+          return types().is_arithmetic(f.type) && record->access_of(f.entity) == ast::Access::public_;
+        }))
+      return std::nullopt;
+    // A single class-valued clause can instead use the same-class or base conversion.
+    for (const Braced::Clause& c : list.clauses) {
+      if (!c.expr.ok()) return Ics{};
+      if (!types().is_arithmetic(c.expr.type())) return std::nullopt;
+    }
+    if (list.clauses.size() > record->fields.size()) return Ics{};
+    for (std::size_t i = 0; i < list.clauses.size(); ++i)
+      if (!ics(list.clauses[i].expr, record->fields[i].type).viable) return Ics{};
+    // The field conversions establish viability. Their ranks and narrowing do not rank the list.
+    return Ics{true, Ics::user_defined};
+  }
+
   // The best viable candidate for `args` ([over.match.best]), diagnosed at `at` when there is
   // none or more than one, or when it is deleted. `object_cv` is the implicit object's, for
   // non-static member functions.
   std::optional<std::size_t> resolve(std::span<const Candidate> cands, std::span<const Ex> args, u32 at, NameId name,
-                                     std::optional<Cv> object_cv, std::optional<QualType> ctor_of = std::nullopt) {
+                                     std::optional<Cv> object_cv, std::optional<QualType> ctor_of = std::nullopt,
+                                     std::span<const Braced* const> lists = {}) {
     std::vector<std::pair<std::size_t, std::vector<Ics>>> viable;
+    const Braced* first_list = lists.empty() ? nullptr : *std::ranges::find_if(lists, [](const Braced* list) { return list; });
+    const Braced* unsupported = nullptr;
     for (std::size_t i = 0; i < cands.size(); ++i) {
       TypeRec fr = types().rec(cands[i].type);
-      if (args.size() < cands[i].required(fr.params.size()) || (args.size() > fr.params.size() && !fr.variadic)) continue;
+      const bool template_list = first_list && cands[i].pattern;
+      const bool pack = template_list && !fr.params.empty() && types().kind(fr.params.back()) == TypeKind::pack_expansion;
+      const std::size_t fixed = fr.params.size() - (pack ? 1 : 0);
+      if (args.size() < cands[i].required(fixed) || (args.size() > fixed && !fr.variadic && !pack)) continue;
       std::vector<Ics> seq;
       // The implicit object parameter, first: the object must not be more cv-qualified.
       if (!cands[i].no_object && object_cv) {
@@ -3446,11 +3492,41 @@ public:
       }
       bool ok = true;
       for (std::size_t k = 0; k < args.size() && ok; ++k) {
-        Ics c = k < fr.params.size() ? ics(args[k], fr.params[k]) : Ics{true, 3, 0};  // the ellipsis
+        Ics c{true};
+        if (k >= fixed) {
+          c.rank = Ics::ellipsis;
+        } else if ((!first_list || !lists[k]) && (!template_list || !types().is_dependent(fr.params[k]))) {
+          c = ics(args[k], fr.params[k]);
+        }
         ok = c.viable;
         seq.push_back(c);
       }
-      if (ok) viable.push_back({i, std::move(seq)});
+      if (!ok) continue;
+      // A candidate excluded by any argument cannot affect selection, even when another
+      // argument's list conversion is outside the supported subset.
+      const Braced* unknown = template_list ? first_list : nullptr;
+      if (first_list && !template_list) {
+        for (std::size_t k = 0; k < args.size() && k < fixed && ok; ++k) {
+          if (!lists[k]) continue;
+          auto c = list_ics(*lists[k], fr.params[k]);
+          if (c) {
+            ok = c->viable;
+            seq[k + 1] = *c;
+          } else if (!unknown) {
+            unknown = lists[k];
+          }
+        }
+      }
+      if (!ok) continue;
+      if (unknown) {
+        if (!unsupported || unknown->begin < unsupported->begin) unsupported = unknown;
+      } else {
+        viable.push_back({i, std::move(seq)});
+      }
+    }
+    if (unsupported) {
+      diag(unsupported->begin, Diag::not_supported, lex::Tk::l_brace);
+      return std::nullopt;
     }
     auto report = [&](Diag fn, Diag ctor) {
       if (ctor_of) diag(at, ctor, Types::unqualified(*ctor_of));
@@ -5338,32 +5414,32 @@ public:
       all.insert(all.end(), args.begin(), args.end());
       return dependent_node(all, begin, end);
     }
-    // A braced list as an argument is copy-list-initialization of its parameter
-    // ([dcl.init.list]/1); overload resolution with one ([over.ics.list]) is not supported yet, so
-    // the callee must be one function.
+    // Keep the direct initialization path for a sole known function
+    // ([dcl.init.list]/1).
     auto braced = std::ranges::find_if(args, [&](const Ex& a) { return is_braced(a); });
     if (braced != args.end() && types().is(callee.type(), Builtin::overload_set)) {
       const std::vector<ast::DeclSema>& set = overloads_.at(std::to_underlying(callee.id));
-      if (set.size() != 1 || (set[0].flags & decl_flag::template_)) {
-        diag(braced->begin, Diag::not_supported, lex::Tk::l_brace);
-        return {NodeId::none, begin, end};
+      if (set.size() == 1 && !(set[0].flags & decl_flag::template_)) {
+        auto st = deduced_function(set[0].entity, set[0].type, callee.begin);
+        if (!st) return {NodeId::none, begin, end};
+        defaults = found_defaults(set[0]);
+        if (set[0].flags & decl_flag::consteval_) consteval_.insert(std::to_underlying(set[0].entity));
+        if (set[0].flags & decl_flag::deleted) deleted_.insert(std::to_underlying(set[0].entity));
+        ExprInfo ci{*st, ValueCategory::lvalue, 0};
+        callee = node(ast::DeclRef{ci, set[0].entity}, callee.begin, callee.end, ci);
       }
-      auto st = deduced_function(set[0].entity, set[0].type, callee.begin);
-      if (!st) return {NodeId::none, begin, end};
-      defaults = found_defaults(set[0]);
-      if (set[0].flags & decl_flag::consteval_) consteval_.insert(std::to_underlying(set[0].entity));
-      if (set[0].flags & decl_flag::deleted) deleted_.insert(std::to_underlying(set[0].entity));
-      ExprInfo ci{*st, ValueCategory::lvalue, 0};
-      callee = node(ast::DeclRef{ci, set[0].entity}, callee.begin, callee.end, ci);
     }
     if (types().is(callee.type(), Builtin::overload_set)) {
       const std::vector<ast::DeclSema>& set = overloads_.at(std::to_underlying(callee.id));
       auto ex = explicit_args_.find(std::to_underlying(callee.id));
       std::span<const TemplateArg> explicit_args;
       if (ex != explicit_args_.end()) explicit_args = ex->second;
+      std::vector<const Braced*> lists;
+      if (braced != args.end())
+        for (const Ex& a : args) lists.push_back(braced_list(a));
       std::vector<ArgShape> shapes;
-      for (const Ex& a : args)
-        shapes.push_back(argument_shape(a));
+      if (lists.empty())
+        for (const Ex& a : args) shapes.push_back(argument_shape(a));
       std::vector<Candidate> cands;
       std::vector<const ast::DeclSema*> decls;
       for (const ast::DeclSema& d : set) {
@@ -5372,6 +5448,13 @@ public:
           // Explicit template arguments name only templates ([temp.arg.explicit]).
           if (ex != explicit_args_.end()) continue;
           cands.push_back({d.entity, d.type, true, deleted, nullptr, found_defaults(d)});
+          decls.push_back(&d);
+          continue;
+        }
+        if (!lists.empty()) {
+          // General deduction from a braced list is deferred (#231). Keep a possible
+          // candidate so it cannot disappear before viability is checked.
+          cands.push_back({d.entity, d.type, true, deleted, &d, found_defaults(d)});
           decls.push_back(&d);
           continue;
         }
@@ -5393,7 +5476,7 @@ public:
         cands.push_back({specialization(d, *targs, *st), *st, true, deleted, &d, found_defaults(d)});
         decls.push_back(&d);
       }
-      auto chosen = resolve(cands, args, callee.begin, w_->entities.rec(set.front().entity).name, std::nullopt);
+      auto chosen = resolve(cands, args, callee.begin, w_->entities.rec(set.front().entity).name, std::nullopt, std::nullopt, lists);
       if (!chosen) return {NodeId::none, begin, end};
       const ast::DeclSema& d = *decls[*chosen];
       const Candidate& k = cands[*chosen];
@@ -5575,12 +5658,20 @@ public:
   }
 
   Ex braced_argument(std::unique_ptr<Braced> b) {
-    ExprInfo info{builtin(Builtin::void_), ValueCategory::prvalue, 0};
+    // The placeholder carries the list's dependency for [temp.dep] and [temp.dep.expr].
+    const bool type_dep = type_dependent(*b);
+    ExprInfo info{builtin(type_dep ? Builtin::dependent : Builtin::void_), ValueCategory::prvalue,
+                  type_dep || dependent(*b) ? expr_flag::dependent : u8(0)};
     Ex r = node(ast::ValueInit{info}, b->begin, b->end, info);
     braced_args_[std::to_underlying(r.id)] = std::move(b);
     return r;
   }
-  bool is_braced(const Ex& e) const { return e.ok() && braced_args_.contains(std::to_underlying(e.id)); }
+  const Braced* braced_list(const Ex& e) const {
+    if (!e.ok()) return nullptr;
+    auto it = braced_args_.find(std::to_underlying(e.id));
+    return it == braced_args_.end() ? nullptr : it->second.get();
+  }
+  bool is_braced(const Ex& e) const { return braced_list(e) != nullptr; }
 
   // The arguments of a call to a function of type `fr`, each copy-initializing its parameter.
   // A parameter without an argument takes its default argument ([dcl.fct.default], [expr.call]/5).
