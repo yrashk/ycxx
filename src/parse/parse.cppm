@@ -1742,14 +1742,20 @@ private:
       if (!ps_.expect(Tk::semi)) bad();
       return;
     }
-    if (ps_.qualified_ahead()) {
+    const u32 ctor_at = constructor_start();
+    if (ctor_at == 0 ? ps_.qualified_ahead() : qualified_constructor_ahead(ctor_at)) {
       u32 next = 0;
-      auto sc = ps_.nested_name(0, next);
+      auto sc = ps_.nested_name(ctor_at, next);
       if (sc && sc->type && s_.types().is_class(*sc->type)) {
         NameId cname = p_->world().entities.rec(s_.types().class_of(*sc->type)).name;
         bool ctor = ps_.kind(next) == Tk::identifier && ps_.name_of(ps_.tok(next)) == cname && ps_.kind(next + 1) == Tk::l_paren;
-        bool dtor = ps_.kind(next) == Tk::tilde && ps_.kind(next + 1) == Tk::identifier && ps_.name_of(ps_.tok(next + 1)) == cname;
-        if (ctor || dtor) return out_of_class_special(*sc->type, next);
+        bool dtor = ctor_at == 0 && ps_.kind(next) == Tk::tilde && ps_.kind(next + 1) == Tk::identifier &&
+                    ps_.name_of(ps_.tok(next + 1)) == cname;
+        if (ctor || dtor) {
+          auto flags = constructor_flags(ctor_at);
+          if (!flags) return bad();
+          return out_of_class_special(*sc->type, next - ctor_at, *flags);
+        }
       }
     }
     if (!ps_.starts_declaration()) {
@@ -2977,9 +2983,15 @@ private:
         if (found) return false;
         return std::nullopt;
       };
-    bool dtor = ps_.is(Tk::tilde) && ps_.kind(1) == Tk::identifier && ps_.name_of(ps_.tok(1)) == cname;
-    if (dtor || (ps_.is(Tk::identifier) && ps_.kind(1) == Tk::l_paren && ps_.name_of(ps_.tok()) == cname))
-      return special_member(c, !dtor);
+    if (ps_.is(Tk::tilde) && ps_.kind(1) == Tk::identifier && ps_.name_of(ps_.tok(1)) == cname)
+      return special_member(c, false, 0);
+    const u32 ctor_at = constructor_start();
+    if (ps_.kind(ctor_at) == Tk::identifier && ps_.kind(ctor_at + 1) == Tk::l_paren &&
+        ps_.name_of(ps_.tok(ctor_at)) == cname && (ctor_at == 0 || ps_.params_ahead(ctor_at + 1))) {
+      auto flags = constructor_flags(ctor_at);
+      if (!flags) return bad();
+      return special_member(c, true, *flags);
+    }
     if (!Parser::starts_decl_specifier(ps_.kind()) && !ps_.starts_declaration()) {
       s_.diag(ps_.pos(), lex::is_keyword(ps_.kind()) || ps_.is(Tk::l_square) || ps_.is(Tk::coloncolon) || ps_.is(Tk::tilde)
                              ? Diag::not_supported
@@ -3339,7 +3351,6 @@ private:
     return true;
   }
 
-  // A constructor or destructor defined outside its class: `N::C::C(…)`, `C::~C()`.
   // Whether member `r` is what a definition outside the class defines: a member template when
   // the definition's innermost head is the member's own, with an equivalent head and
   // constraints ([temp.over.link]/4-6), otherwise a member that is no template.
@@ -3349,15 +3360,24 @@ private:
     const sema::EntityRec& e = p_->world().entities.rec(r.entity);
     return e.head == head_fp(s_.template_scopes.back()) && e.constraints == constraints_fp_;
   }
-  void out_of_class_special(QualType cls, u32 next) {
+  // A constructor or destructor defined outside its class: `N::C::C(…)`, `C::~C()`.
+  void out_of_class_special(QualType cls, u32 next, u16 flags) {
     EntityId c = s_.types().class_of(cls);
     for (u32 j = 0; j < next; ++j) ps_.bump();
     bool ctor = !ps_.is(Tk::tilde);
     u32 name_at = ps_.pos();
     if (!ctor) ps_.bump();
     ps_.bump();
+    EntityId owner = s_.world().entities.rec(c).scope;
+    if (flags & sema::decl_flag::constexpr_) {
+      while (!p_->is_namespace(owner)) owner = s_.world().entities.rec(owner).scope;
+      if (!Program::encloses(p_->ns_of(k_), p_->namespace_path(owner))) {
+        s_.diag(name_at, Diag::constructor_namespace);
+        return bad();
+      }
+    }
     s_.current_class = c;
-    q_.from = p_->namespace_path(s_.world().entities.rec(c).scope);
+    q_.from = p_->namespace_path(owner);
     bool ok = true;
     auto fs = ps_.function_suffix(ok);
     if (!ok) return bad();
@@ -3381,13 +3401,18 @@ private:
     auto md = p_->member_decl(m->entity);
     auto mem = md ? p_->decl_sema(*md) : std::nullopt;
     if (!mem || it_->kind != ItemKind::function) return bad();
+    if ((mem->flags & sema::decl_flag::constexpr_) != (flags & sema::decl_flag::constexpr_)) {
+      s_.diag(name_at, Diag::constexpr_redeclared, m->name);
+      return bad();
+    }
+    if ((flags & sema::decl_flag::constexpr_) && !finish_constructor_declarator(false)) return bad();
     if (mem->flags & sema::decl_flag::definition) {
       s_.diag(name_at, Diag::redefinition, m->name);
       return bad();
     }
     // Its record, rebuilt in this frame (the declaration's lists belong to the class's item).
     ast::DeclSema sem = *mem;
-    sem.flags |= sema::decl_flag::definition;
+    sem.flags |= flags | sema::decl_flag::definition;
     sem.attributes = b_.seq(std::span<const NodeId>{});
     std::vector<ast::ParamSema> params;
     for (const parse::Param& p : fs.params) params.push_back({EntityId::none, p.type, p.name, p.default_arg, p.element ? sema::param_flag::pack_element : u16(0)});
@@ -3509,9 +3534,62 @@ private:
     return t;
   }
 
+  // [class.ctor.general]: a constructor has no return type. Look past the supported specifiers
+  // before ordinary declaration parsing can read the constructor's name as a type.
+  u32 constructor_start() {
+    u32 next = ps_.past_attributes(0);
+    while (ps_.kind(next) == Tk::kw_constexpr || ps_.kind(next) == Tk::kw_inline || ps_.kind(next) == Tk::kw_static)
+      next = ps_.past_attributes(next + 1);
+    return next;
+  }
+
+  // Check the shape of a qualified constructor before looking up its scope. A declaration with
+  // a qualified return type normally has a declarator between that type and the parameter list.
+  bool qualified_constructor_ahead(u32 next) {
+    if (!ps_.qualified_ahead(next)) return false;
+    if (ps_.kind(next) == Tk::coloncolon) ++next;
+    while (ps_.kind(next) == Tk::identifier) {
+      u32 after = next + 1;
+      if (ps_.kind(after) == Tk::less) after = ps_.past_template_args(after);
+      if (ps_.kind(after) != Tk::coloncolon) break;
+      next = after + 1;
+    }
+    return ps_.kind(next) == Tk::identifier && ps_.kind(next + 1) == Tk::l_paren;
+  }
+
+  std::optional<u16> constructor_flags(u32 count) {
+    using namespace sema::decl_flag;
+    u16 flags = 0;
+    u32 end = ps_.pos() + count;
+    while (ps_.pos() < end) {
+      if (ps_.skip_attributes()) continue;
+      Tk kind = ps_.kind();
+      if (kind == Tk::kw_static) {
+        s_.diag(ps_.pos(), Diag::static_constructor);
+        return std::nullopt;
+      }
+      u16 flag = kind == Tk::kw_constexpr ? constexpr_ : inline_;
+      if (flags & flag) s_.diag(ps_.pos(), Diag::duplicate_specifier, kind);
+      flags |= flag;
+      ps_.bump();
+    }
+    if (flags & constexpr_) flags |= inline_;  // [dcl.constexpr]
+    return flags;
+  }
+
+  // The declarator's tokens end at the body. An in-class definition can spell bare noexcept;
+  // named exception specifications beyond that spelling are tracked in #219.
+  bool finish_constructor_declarator(bool in_class) {
+    ps_.skip_attributes();
+    if (in_class && ps_.accept(Tk::kw_noexcept)) ps_.skip_attributes();
+    if (ps_.at_end()) return true;
+    s_.diag(ps_.pos(), Diag::not_supported, ps_.kind());
+    return false;
+  }
+
   // A constructor or destructor declared in class `c` ([class.ctor], [class.dtor]), possibly
   // deleted ([dcl.fct.def.delete]).
-  void special_member(const ast::DeclSema& c, bool ctor) {
+  void special_member(const ast::DeclSema& c, bool ctor, u16 flags) {
     sema::Types& types = s_.types();
     u32 name_at = ps_.pos();
     if (!ctor) ps_.bump();
@@ -3521,6 +3599,12 @@ private:
     bool ok = true;
     auto fs = ps_.function_suffix(ok);
     if (!ok) return bad();
+    if (ctor && (fs.cv != sema::Cv::none || ps_.is(Tk::amp) || ps_.is(Tk::ampamp))) {
+      s_.diag(name_at, Diag::qualified_constructor);
+      return bad();
+    }
+    if ((flags & sema::decl_flag::constexpr_) && it_->has_body() && !finish_constructor_declarator(true))
+      return bad();
     if (!ctor && (!fs.params.empty() || fs.variadic)) {
       s_.diag(name_at, Diag::not_supported, Tk::tilde);  // [class.dtor]/1: a destructor has no parameters
       return bad();
@@ -3528,7 +3612,7 @@ private:
     std::vector<QualType> ps;
     for (const parse::Param& p : fs.params) ps.push_back(p.type);
     QualType type = types.function(s_.builtin(sema::Builtin::void_), ps, fs.variadic, LangLinkage::cxx, fs.cv);
-    u16 flags = sema::decl_flag::member | (ctor ? sema::decl_flag::constructor : sema::decl_flag::destructor);
+    flags |= sema::decl_flag::member | (ctor ? sema::decl_flag::constructor : sema::decl_flag::destructor);
     if (it_->kind == ItemKind::function) flags |= sema::decl_flag::definition | sema::decl_flag::inline_;
     if (deleted_body()) {
       flags |= sema::decl_flag::deleted | sema::decl_flag::definition;

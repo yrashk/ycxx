@@ -994,6 +994,10 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   declaration order, `Destructor`/`DestroyMember` for members after the body. Implicit copy
   constructors and destructors that are not trivial are synthesized (`Program::synthesized`).
   A class with user-declared constructors is not an aggregate.
+  Ordinary constructor declarations and definitions accept `constexpr`, and the specifier is
+  checked across an out-of-class definition ([dcl.constexpr], #157). These constructors use the
+  ordinary runtime construction path. Constant evaluation of class objects is tracked in #25,
+  and named exception specifications are tracked in #219.
 - **Cleanups** (ast.md §3.7.3 as revised by #135): `LocalVar::destructor`; `function_ir` runs
   destructors on every scope exit from its own scope stack (block end, `return`, `break`,
   `continue`) and ends a full-expression's temporaries at its end. Statements carry no cleanup
@@ -1002,7 +1006,7 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
 - Tests: `tests/own/classes/s3-*` (spec-only, plus two from the review): 16 of 16 pass. 10 more draft examples pass.
 - Not yet: temporaries with destructors created in a conditional operand, value-initializing a
   member subobject whose class has an implicit constructor, delegating constructors, `explicit`,
-  `= default`, out-of-class constructor definitions.
+  `= default`.
 
 ## Classes, δ step 4a: enumerations (#86, 2026-11-18)
 
