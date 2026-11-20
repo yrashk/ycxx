@@ -1869,6 +1869,12 @@ canonical function type, template head)`; for specializations, `(template entity
 arguments)`. Entity ids never change when a redeclaration is added. They key everything
 program-wide: `class_def`, `layout`, `function_ir`, `instantiate_*`, `satisfies`, ODR.
 
+A function with C language linkage can have declarations in several namespaces ([dcl.link]).
+The entity's shared identity does not supply its declarations' namespace for lookup. For a
+qualified namespace definition, the earlier member supplies both the target namespace and any
+inherited language linkage. Body lookup starts in the target namespace. The definition does
+not introduce a name into its lexical namespace ([dcl.meaning.general], [basic.lookup.unqual]).
+
 Entities with internal linkage, members of unnamed namespaces and local entities get ids that are
 **TU-free**: `(scope entity, name, declaration id of the first declaration)` for the first two
 (the unnamed namespace itself is identified by the declaration id of its first
