@@ -243,7 +243,7 @@ class Emitter {
     read(cursor, rcx);
     // By this point each named parameter occupies exactly one INTEGER slot. RBP+16
     // steps over the saved frame pointer and return address to the incoming stack slots.
-    const auto named = body_.params_of(BlockId(0)).size() - 1;
+    const auto named = std::size_t(body_.params_of(BlockId(0)).size()) - 1;
     const auto named_in_registers = std::min(named, register_args);
     e_.store_immediate32(rcx, gp_offset_field, named_in_registers * gp_slot);
     e_.store_immediate32(rcx, fp_offset_field, gp_save_size);
