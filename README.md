@@ -130,7 +130,8 @@ operators with an `unsigned long long` parameter, including constant evaluation.
   init-statements in `if` and `switch`, and range-based `for` with optional init-statements.
   Ranges can be arrays or classes with member `begin` and `end` or free `begin` and `end` found
   by argument-dependent lookup. Unqualified calls can find and rank functions in associated
-  namespaces. Functions support default arguments, recursion, operator overloading and calls
+  namespaces, including those of class template type arguments in ordinary calls. Functions
+  support default arguments, recursion, operator overloading and calls
   through pointers. Overloaded free functions can take braced arguments for arithmetic parameters
   and ordinary aggregates with arithmetic fields. A pointer or reference target type can select
   a free or static member overload.

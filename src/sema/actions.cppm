@@ -5758,24 +5758,49 @@ public:
 
   // [basic.lookup.argdep]/3: the associated namespaces of the argument types. The namespace
   // query adds each nearest non-inline ancestor and its inline namespace set.
-  std::vector<EntityId> associated_namespaces(std::span<const Ex> args, bool at_instantiation) {
+  std::vector<EntityId> associated_namespaces(std::span<const Ex> args, bool at_instantiation, bool ordinary_call) {
     std::vector<EntityId> namespaces;
-    std::vector<QualType> seen;
+    auto add_namespace = [&](EntityId entity) {
+      EntityId ns = enclosing_namespace(entity);
+      if (!std::ranges::contains(namespaces, ns)) namespaces.push_back(ns);
+    };
+    // [basic.lookup.argdep]/3: bases contribute their entities. Expanding a base's template
+    // arguments requires a separate occurrence of its type in the argument walk.
+    std::vector<EntityId> base_walk;
+    auto collect_bases = [&](this auto&& visit, EntityId cls) -> void {
+      if (!ordinary_call && w_->entities.rec(cls).templ != EntityId::none) return;
+      if (std::ranges::contains(base_walk, cls)) return;
+      base_walk.push_back(cls);
+      if (const ClassRec* c = q_->adl_class(cls, at_instantiation)) {
+        for (const BaseRec& b : c->bases) {
+          add_namespace(b.cls);
+          visit(b.cls);
+        }
+      }
+    };
+    std::vector<QualType> expanded_types;
     auto collect = [&](this auto&& visit, QualType t) -> void {
       t = Types::unqualified(types().canonical(t));
-      if (std::ranges::contains(seen, t)) return;
-      seen.push_back(t);
+      if (std::ranges::contains(expanded_types, t)) return;
+      expanded_types.push_back(t);
       TypeRec r = types().rec(t);
       switch (r.kind) {
       case TypeKind::class_:
       case TypeKind::enum_: {
-        EntityId ns = enclosing_namespace(r.entity);
-        if (!std::ranges::contains(namespaces, ns)) namespaces.push_back(ns);
-        // Ordinary classes may contribute bases when complete. Instantiating a class template
-        // for ADL and associating its template arguments are tracked in #165.
-        if (r.kind == TypeKind::class_ && w_->entities.rec(r.entity).templ == EntityId::none)
-          if (const ClassRec* c = q_->adl_class(r.entity, at_instantiation))
-            for (const BaseRec& b : c->bases) visit(types().class_type(b.cls));
+        // An enclosing class contributes the same namespace as its class or enum member.
+        add_namespace(r.entity);
+        if (r.kind == TypeKind::class_) collect_bases(r.entity);
+        if (!ordinary_call) break;
+        const EntityRec& entity = w_->entities.rec(r.entity);
+        auto visit_type_arg = [&](const TemplateArg& arg) {
+          if (arg.kind == ast::TemplateArgKind::type) visit(arg.type);
+        };
+        for (const TemplateArg& arg : entity.args) {
+          if (arg.kind == ast::TemplateArgKind::pack)
+            std::ranges::for_each(ins().seqs.elements(arg.elems), visit_type_arg);
+          else
+            visit_type_arg(arg);
+        }
         break;
       }
       case TypeKind::function:
@@ -5807,7 +5832,7 @@ public:
       return std::ranges::count_if(found_defaults(d), [](NodeId n) { return n != NodeId::none; });
     };
     auto add = [&](bool at_instantiation) {
-      for (EntityId ns : associated_namespaces(args, at_instantiation)) {
+      for (EntityId ns : associated_namespaces(args, at_instantiation, !dependent_call)) {
         for (const ast::DeclSema& d : q_->adl_functions(ns, name, at_instantiation)) {
           auto prior = std::ranges::find(set, d.entity, &ast::DeclSema::entity);
           if (prior == set.end()) {
