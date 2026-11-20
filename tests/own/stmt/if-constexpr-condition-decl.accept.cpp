@@ -25,3 +25,18 @@ constexpr int with_init() {
 }
 
 static_assert(with_init() == 13);
+
+// A value-dependent init-statement can initialize a placeholder decision variable.
+template<int N>
+constexpr int with_dependent_init() {
+  if constexpr (constexpr int base = N; constexpr auto selected = base) {
+    static_assert(base == N && selected == N);
+    return base + selected;
+  } else {
+    static_assert(base == 0 && selected == 0);
+    return base + selected - 1;
+  }
+}
+
+static_assert(with_dependent_init<4>() == 8);
+static_assert(with_dependent_init<0>() == -1);
