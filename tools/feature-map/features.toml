@@ -553,7 +553,8 @@ std = 'C++17'
 ftm = '__cpp_inline_variables'
 detect = '\binline\s+(?:static\s+)?(?:const(?:expr)?\s+)?[\w:<>,]+\s+\w+\s*(?:=|\{|;)|\bstatic\s+(?:constexpr\s+)?inline\s+(?!\w+\s*\()'
 status = 'partial'
-issues = [124]
+issues = [124, 368, 422, 432]
+note = 'x86-64 ELF shares constant-initialized external namespace variables with relocation-free initial values. Broader inline data and group selection remain'
 probe = '''
 inline int counter = 41;
 struct S { static inline int n = 1; };
@@ -617,7 +618,7 @@ std = 'C++98'
 core = true
 status = 'partial'
 issues = [367, 368]
-note = 'references bound at run time; inline variables'
+note = 'function references and reference lifetime extension; inline and templated dynamic initialization'
 probe = '''
 int f() { return 42; }
 int g = f();
@@ -1265,7 +1266,8 @@ clauses = ['basic.namespace', 'basic.namespace.general', 'namespace.def', 'names
 std = 'C++98'
 detect = '\bnamespace\b'
 status = 'done'
-issues = [153]
+issues = [153, 64]
+note = 'Itanium linkage names abbreviate the global std namespace as St.'
 probe = '''
 namespace a { namespace b { int v = 1; } } namespace { int w = 1; }
 namespace ab = a::b; using ab::v;
@@ -1307,6 +1309,8 @@ std = 'C++11'
 ftm = '__cpp_alias_templates'
 detect = '\busing\s+\w+\s*(?:\[\[[^\]]*\]\]\s*)?=(?!=)'
 status = 'done'
+issues = [216]
+note = 'includes function type-ids with qualified return types'
 
 [[feature]]
 id = 'dcl-static-assert'

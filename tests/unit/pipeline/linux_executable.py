@@ -111,6 +111,35 @@ int main(int argc, char** argv) {
         compile('-c', 'init-first.cpp', '-o', 'darwin-dynamic.o')
         assert b'__mod_init_func' in (scope / 'darwin-dynamic.o').read_bytes()
 
+        tests = Path(__file__).resolve().parents[2]
+        reference_fixtures = tests / 'own' / 'dynamic-init'
+        for fixture in ('constant', 'ordered', 'constinit', 'constexpr-address', 'extern'):
+            path = str(reference_fixtures / f'reference-{fixture}.run.cpp')
+            compile(target, '-c', path, '-o', 'reference.o')
+            compile(target, '-nostdlib', 'reference.o', '-o', 'reference')
+            run(['./reference'])
+            relocations = run([readelf, '-Wr', 'reference.o'])
+            if fixture == 'constant':
+                data = relocations.split("'.rela.data'", 1)[1].split('\n\n', 1)[0]
+                assert sum('R_X86_64_64' in line and line.rstrip().endswith('targetE + 0')
+                           for line in data.splitlines()) == 2
+            if fixture == 'constinit':
+                assert "'.rela.init_array'" not in relocations
+            if fixture == 'ordered':
+                assert "'.rela.init_array'" in relocations
+                assert 'R_X86_64_64' in relocations and '__GLOBAL__sub_I_' in relocations
+        temporary = str(tests / 'draft' / 'basic' / 'class.temporary-3.accept.cpp')
+        compile(target, '-fsyntax-only', temporary)
+        compile(target, '-c', temporary, '-o', 'reference-temporary.o', status=1,
+                error='a materialized temporary in a namespace-scope reference initializer')
+        assert not (scope / 'reference-temporary.o').exists()
+        source('reference-declaration-compat.cpp', """static constexpr int storage = 3;
+struct C { static const int& member; };
+const int& C::member = storage;
+template<class T> const int& variable = storage;
+int read() { return variable<int>; }""")
+        compile(target, '-fsyntax-only', 'reference-declaration-compat.cpp')
+
         source('teardown.cpp', """struct Hook { int value; ~Hook(); };
 Hook::~Hook() { value = 0; }
 int seed() { return 7; }

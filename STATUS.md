@@ -601,6 +601,14 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   to one definition. `unit.linux_inline` checks symbol bindings, address identity, archive
   extraction, and both operand orders with the native and host linkers.
   [Design](docs/design/linux-inline-functions.md) · [#422](https://github.com/yrashk/ycxx/issues/422)
+- Constant-initialized and zero-initialized external inline namespace variables use weak ELF
+  definitions when their initial values need no relocations. This includes explicitly inline
+  full variable-template specializations with builtin type arguments. Static addresses and
+  writes in multiple units resolve to the same object. The two-unit `<cstddef>` probe links
+  through the pinned GNU `libycxx.a`. Group selection and dynamic inline initialization remain
+  tracked separately. [Design](docs/design/linux-inline-variables.md)
+  · [#432](https://github.com/yrashk/ycxx/issues/432) · [#422](https://github.com/yrashk/ycxx/issues/422)
+  · [#368](https://github.com/yrashk/ycxx/issues/368)
 - The ELF reader accepts the GNU-built libycxx static linkage-marker object. It reads sized
   object symbols and local section symbols, preserves the marker's hidden binding, and maps
   `.data.rel.ro.local` to the existing read-only output for relocated pointers. It validates and
@@ -1002,12 +1010,17 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   ([basic.lookup.unqual]/9).
 - Linkage names: `<nested-name>`s with namespace prefixes as substitution candidates, and
   `_GLOBAL__N_1` for the unnamed namespace, checked against Clang's symbols.
+- The Itanium ABI abbreviates the global `std` namespace as `St` without assigning it a
+  numbered substitution (§5.1.5 and §5.1.10). Direct members use unscoped encodings
+  and deeper members keep `N…E`. The Linux mixed-object test links calls through the pinned
+  libycxx `<cstddef>` byte operator with matching GCC and Clang symbols (#64).
 - Tests: `tests/own/classes/s4-namespace*`, `s4-using` (spec-only, plus one from the review): 5
   of 5. Seven more draft examples pass.
 - A linkage-specification with one declaration (`extern "C" int v;`) declares as if `extern`
   were given ([dcl.link]/7); a variable with C language linkage is one in every namespace.
 - Not yet (#153): `using N::f;` at namespace scope, `N::S{…}` as an expression, some clashes
-  with namespace names and using-declarations, `std::` abbreviations in linkage names.
+  with namespace names and using-declarations, remaining standard-library linkage
+  abbreviations such as `Sa`.
 
 ## `<cstdio>`, step 1: typedef-names and alias-declarations (#133, 2026-11-18)
 
@@ -1370,6 +1383,9 @@ session's.*
 - Tests: `tests/own/templates/a5-*`; 2 more draft examples pass. `<cstdio>`: 78 → 53 errors.
 - Also: `C::T` inside the class (being defined or instantiated) and in its out-of-class member
   definitions names its member type, as the current instantiation's ([temp.dep.type]/1).
+- Function type-ids accept a qualified return type (`using F = n::R (*)();`). An identifier
+  known to name a type can start the parameter list of an abstract declarator, as in
+  `struct S { using F = S(S); };` ([dcl.name], [dcl.fct], [dcl.ambig.res], #216).
 - Not yet: access, hiding and qualified functional casts of member types (#216); member alias
   templates (`template<…> using __apply = …` in a class), with member
   templates; template template parameters (#208); value-dependent expressions as template
@@ -1787,8 +1803,8 @@ What the process allocates, attributed to the engine's cells, in the trace and t
 - **Calls through pointers to functions:** irgen emits `call_ind` (`Gen::call_pointer`), which
   lowering, AArch64 selection and the interpreter already had; constant evaluation calls through
   them too.
-- Tests: `tests/own/auto/` (46 spec-only, 4 more): 41 pass, 9 are XFAIL: structured bindings
-  (#285), a namespace-scope reference (#367), `static_cast<int&&>` (#199).
+- Tests: `tests/own/auto/` (46 spec-only, 4 more): 42 pass, 8 are XFAIL: structured bindings
+  (#285), `static_cast<int&&>` (#199).
   `p1-impl-mangle` checks the `Da`/`Dc` names against Clang objects.
 - Not yet: constrained `C auto`, `auto x = {…}`, `auto x(e)` at namespace scope, abbreviated
   function templates (#286); structured bindings (#285).
@@ -1977,10 +1993,19 @@ values, end to end; results match Clang's bit for bit.
   limits, is still an error. Class objects the interpreter cannot evaluate yet are initialized
   dynamically even when constant by the draft (#25). Each declaration's variables get their own
   function (`__GLOBAL__sub_I_<file>.<n>`), so an error points at it.
-- Not yet: references bound at run time (#367); inline variables and variable templates (#368);
+- Namespace-scope references to supported scalar and array storage use a pointer-sized slot
+  ([dcl.ref], [dcl.init.ref]). A constant binding uses a symbol-plus-addend relocation and
+  exposes the referent's address in constant evaluation ([expr.const.init]). A dynamic binding
+  stores the selected address at the declaration's position in the unit's initialization order.
+  Later reads, writes and address-taking use that address. An `extern` declaration without an
+  initializer reserves no storage. See [the design](docs/design/namespace-references.md) (#367).
+- Remaining reference cases include function bindings, lifetime extension, guarded statics and
+  class or base subobject addresses outside the constant evaluator's model (#25, #367).
+- Not yet: inline variables and variable templates (#368);
   default member initializers that are not constants (#118); array construction as a loop (#370).
-- Tests: `tests/own/dynamic-init/` (spec-only, 16 tests; a Clang peer with its own initializers
-  in `peer.run.cpp`).
+- Tests: `tests/own/dynamic-init/` (spec-only), including a Clang peer with its own initializers
+  in `peer.run.cpp`. The Linux executable test runs the scalar reference fixtures with internal
+  linkage and checks their ELF relocations.
 
 ## Nested namespace definitions, ι (#153, #337, 2026-11-19)
 

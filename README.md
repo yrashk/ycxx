@@ -54,6 +54,9 @@ build/bin/ycxx cxx --target=x86_64-pc-linux-gnu -nostdlib example.o -o example
 ./example
 ```
 
+For mixed Linux objects, the pinned libycxx `<cstddef>` byte operator uses the same Itanium
+linkage name in ycxx, GCC and Clang. [#64](https://github.com/yrashk/ycxx/issues/64)
+
 **Package Linux objects into a static library.** `ycxx archive -o libexample.a example.o`
 creates or replaces a deterministic indexed GNU archive from supported x86-64 ELF objects.
 Static links accept these archives and compatible archives from system `ar`. Place an archive
@@ -81,12 +84,20 @@ ELF and Mach-O objects support static pointer initializers naming variables, arr
 or functions. The referenced symbol may be defined in a separate translation unit.
 [#101](https://github.com/yrashk/ycxx/issues/101)
 
+Ordinary namespace-scope references to supported scalar and array storage can bind at compile time
+or during ordered startup initialization. On Linux, generated code can access bindings and
+referents with internal linkage. [#367](https://github.com/yrashk/ycxx/issues/367)
+
 Linux x86-64 programs can read, write and take the address of data defined in another
 translation unit. Native static executables and host-linked objects support those addresses.
 [#414](https://github.com/yrashk/ycxx/issues/414)
 
 On x86-64 Linux, direct calls and saved pointers across translation units share one address for
 simple external inline functions. [#422](https://github.com/yrashk/ycxx/issues/422)
+
+External inline namespace variables with relocation-free static initializers share one object
+across x86-64 ELF translation units. This lets two freestanding units using libycxx `<cstddef>`
+link with the pinned static library. [#432](https://github.com/yrashk/ycxx/issues/432)
 
 ycxx ELF objects record function types and code sizes. The ELF linker accepts supported
 system-assembled objects with function symbols and the GNU-built libycxx static linkage-marker
@@ -113,7 +124,8 @@ object. [#428](https://github.com/yrashk/ycxx/issues/428), [#419](https://github
   non-template classes without bases;
 - single and multiple inheritance (not virtual): base classes laid out as Clang does, member
   lookup through bases, derived-to-base conversions, base initializers;
-- namespaces, nested (`namespace a::b`) and inline ones, typedefs and alias declarations,
+- namespaces, nested (`namespace a::b`) and inline ones, typedefs and aliases, including
+  function type aliases and function pointer aliases with qualified return types,
   `using` declarations and directives;
 - `[[…]]` attributes, the GNU attributes and `asm` labels the macOS SDK's headers use, the
   GNU pointer qualifiers glibc uses, and the type-trait built-ins libycxx's headers use
