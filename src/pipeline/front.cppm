@@ -426,7 +426,7 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
       continue;
     closures_of(is.closures, program.id(k), 0);
     if (it.kind == items::ItemKind::function && it.has_body() && !decls.empty() && decls[0].entity != EntityId::none &&
-        !(decls[0].flags & sema::decl_flag::deleted)) {
+        !(decls[0].flags & sema::decl_flag::deleted) && !program.defaulted_copy_definition(k, decls[0])) {
       // A placeholder return type is the one its body deduced ([dcl.spec.auto]).
       const ast::BodySema& body = program.analyze_body(k).value;
       ast::DeclSema d = decls[0];
@@ -724,6 +724,7 @@ engine::query_task<FrontResult> TuFront::run(engine::Ctx& cx, TuId tu) {
     for (const sema::BaseRec& b : classes.rec(c).bases) shape.bases.push_back(b.cls);
     shape.trivial_calls = classes.trivial_for_calls(c, unit_source.config.calls());
     shape.layout_uncertain = uncertain.contains(c);
+    shape.copy_abi_unknown = classes.rec(c).defaulted_copy == sema::CopyState::unsupported;
   }
   for (EntityId e : classes.enums()) out.shapes.enums.push_back({e, classes.underlying(e)});
   co_return out;

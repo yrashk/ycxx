@@ -125,6 +125,21 @@ public:
   const Result<ast::ItemSema>& item_sema(u32 item);
   std::optional<ast::DeclSema> decl_sema(DeclId d);
   const Result<ast::BodySema>& analyze_body(u32 item);
+
+  bool defaulted_body(u32 item) const {
+    const auto& it = items_->items[item];
+    return it.body_end - it.body_begin == 3 &&
+           r_->tokens[it.body_begin].kind == lex::Tk::equal &&
+           r_->tokens[it.body_begin + 1].kind == lex::Tk::kw_default &&
+           r_->tokens[it.body_begin + 2].kind == lex::Tk::semi;
+  }
+  // The supported in-class defaulted constructor has a definition, but no token body to analyse.
+  bool defaulted_copy_definition(u32 item, const ast::DeclSema& d) const {
+    const auto& it = items_->items[item];
+    return d.entity != EntityId::none && (d.flags & sema::decl_flag::constructor) &&
+           it.parent != items::none && items_->items[it.parent].kind == ItemKind::class_def &&
+           defaulted_body(item);
+  }
   // `class_def(C)` (ast.md §3.6) of the class item `item`: the records of its members, each its
   // own item, analysed at the class's prefix (§4.2). It also fills this unit's class table
   // (`classes`), which member lookup and the layout read until #33 has them.
@@ -720,6 +735,7 @@ public:
   // Its body, analysed on first use.
   const ast::BodySema& synthesized_body(std::size_t i);
   void special_members(u32 item, EntityId cls, sema::ClassRec& rec);
+  void defaulted_copy(EntityId cls, sema::ClassRec& rec, std::span<const QualType> subobjects, bool implicit);
   Ex copy_from(sema::Sema& sm, Ex src, QualType t);
 
   // The type of `this` in a non-static member function ([expr.prim.this]): a pointer to its class,
@@ -3579,9 +3595,11 @@ private:
 
   // The declarator's tokens end at the body. An in-class definition can spell bare noexcept;
   // named exception specifications beyond that spelling are tracked in #219.
-  bool finish_constructor_declarator(bool in_class) {
+  bool finish_constructor_declarator(bool in_class, bool* written_noexcept = nullptr) {
     ps_.skip_attributes();
-    if (in_class && ps_.accept(Tk::kw_noexcept)) ps_.skip_attributes();
+    const bool bare_noexcept = in_class && ps_.accept(Tk::kw_noexcept);
+    if (bare_noexcept) ps_.skip_attributes();
+    if (written_noexcept) *written_noexcept = bare_noexcept;
     if (ps_.at_end()) return true;
     s_.diag(ps_.pos(), Diag::not_supported, ps_.kind());
     return false;
@@ -3603,15 +3621,39 @@ private:
       s_.diag(name_at, Diag::qualified_constructor);
       return bad();
     }
-    if ((flags & sema::decl_flag::constexpr_) && it_->has_body() && !finish_constructor_declarator(true))
+    const bool defaulted_copy = p_->defaulted_body(k_);
+    bool written_noexcept = false;
+    if (defaulted_copy) {
+      // [dcl.fct.def.default]: first declaration of an ordinary copy constructor.
+      if (!finish_constructor_declarator(true, &written_noexcept)) return bad();
+      auto copy_reference = [&] {
+        if (fs.params.size() != 1 || fs.variadic) return false;
+        const parse::Param& p = fs.params.front();
+        if (p.default_arg != NodeId::none || p.default_tokens) return false;
+        const auto ref = types.rec(p.type);
+        return ref.kind == sema::TypeKind::reference && !ref.rvalue_ref &&
+               !sema::Types::is_volatile(types.canonical(ref.inner)) &&
+               sema::Types::unqualified(types.canonical(ref.inner)) == types.canonical(c.type);
+      };
+      if (!ctor || member_template_ || !s_.template_scopes.empty() || inst_ ||
+          !p_->is_namespace(p_->world().entities.rec(c.entity).scope) || !copy_reference()) {
+        s_.diag(name_at, Diag::defaulted_copy_declaration);
+        return bad();
+      }
+      // A first-declaration defaulted special member is inline and, when constexpr-suitable,
+      // implicitly constexpr ([dcl.fct.def.default]).
+      flags |= sema::decl_flag::constexpr_ | sema::decl_flag::inline_;
+    } else if ((flags & sema::decl_flag::constexpr_) && it_->has_body() && !finish_constructor_declarator(true)) {
       return bad();
+    }
     if (!ctor && (!fs.params.empty() || fs.variadic)) {
       s_.diag(name_at, Diag::not_supported, Tk::tilde);  // [class.dtor]/1: a destructor has no parameters
       return bad();
     }
     std::vector<QualType> ps;
     for (const parse::Param& p : fs.params) ps.push_back(p.type);
-    QualType type = types.function(s_.builtin(sema::Builtin::void_), ps, fs.variadic, LangLinkage::cxx, fs.cv);
+    QualType type = types.function(s_.builtin(sema::Builtin::void_), ps, fs.variadic, LangLinkage::cxx, fs.cv,
+                                   ast::RefQual::none, written_noexcept);
     flags |= sema::decl_flag::member | (ctor ? sema::decl_flag::constructor : sema::decl_flag::destructor);
     if (it_->kind == ItemKind::function) flags |= sema::decl_flag::definition | sema::decl_flag::inline_;
     if (deleted_body()) {
@@ -3647,14 +3689,20 @@ private:
       sem.entity = s_.world().entities.entity({ctor ? sema::EntityKind::constructor : sema::EntityKind::destructor, name, type,
                                               LangLinkage::cxx, ast::Linkage::external, {}, c.entity});
     }
-    // One declaration of each ([class.mem.general]/5).
+    // One declaration of each ([class.mem.general]/5). An exception specification cannot
+    // distinguish overloads of a constructor ([over.load]).
     for (u32 m : p_->items().items[it_->parent].members) {
       if (m == k_) break;
-      for (const ast::DeclSema& o : p_->world().ins.seqs.elements(earlier(m).decls))
-        if (o.entity == sem.entity) {
+      for (const ast::DeclSema& o : p_->world().ins.seqs.elements(earlier(m).decls)) {
+        const bool redeclared_copy =
+            ctor && !member_template_ && (o.flags & sema::decl_flag::constructor) &&
+            !(o.flags & sema::decl_flag::template_) && (defaulted_copy || p_->defaulted_copy_definition(m, o)) &&
+            same_function_parameters(o.type, sem.type);
+        if (o.entity == sem.entity || redeclared_copy) {
           s_.diag(name_at, Diag::redeclared_member, name);
           return bad();
         }
+      }
     }
     remember_member_defaults(sem.entity, fs.params);
     p_->declared(sem, k_);
@@ -5115,7 +5163,8 @@ public:
     std::optional<ast::DeclSema> pattern = f;
     if (inst_) f = inst_->decl;
     Ex root;
-    if (f && f->entity != EntityId::none && f->kind == ast::DeclKind::function && !(f->flags & sema::decl_flag::deleted)) {
+    if (f && f->entity != EntityId::none && f->kind == ast::DeclKind::function &&
+        !(f->flags & sema::decl_flag::deleted) && !p_->defaulted_copy_definition(k_, *f)) {
       const auto signature = s_.types().rec(f->type);
       s_.set_return_type(signature.inner);
       // A consteval function's body is an immediate function context ([expr.const]).
@@ -5384,6 +5433,125 @@ private:
 
 // ---------------------------------------------------------------- special members ([special])
 
+// [class.copy.ctor]: the supported defaulted copy forms initialize each member from the
+// corresponding glvalue. Classify those operations before permitting a trivial representation
+// copy, including when the defaulted copy is selected by another class's implicit constructor.
+void Program::defaulted_copy(EntityId cls, sema::ClassRec& rec, std::span<const QualType> subobjects, bool implicit) {
+  using enum sema::CopyState;
+  auto& types = w_->types;
+  for (const auto& m : rec.members)
+    if (m.is_ctor)
+      if (const auto d = member_decl(m.entity); d && defaulted_body(index(d->item)))
+        rec.defaulted_copy_declarations.push_back(m.entity);
+  const bool written = !rec.defaulted_copy_declarations.empty();
+  const auto declared = written
+      ? std::ranges::find(rec.members, rec.defaulted_copy_declarations.front(), &sema::MemberDeclRec::entity)
+      : rec.members.end();
+  auto element = [&](QualType t) {
+    t = types.canonical(t);
+    while (types.is_array(t)) t = types.add_cv(types.rec(t).inner, sema::Types::cv(t));
+    return t;
+  };
+  auto depends_on_defaulting = [&](QualType t) { return classes_.defaulted_copy_of(t) != ordinary; };
+  if (!written && (!implicit || std::ranges::none_of(subobjects, depends_on_defaulting))) return;
+
+  auto copy_parameter = [&](const sema::MemberDeclRec& m, EntityId owner) -> std::optional<QualType> {
+    if (!m.is_ctor || m.is_template) return std::nullopt;
+    const auto f = types.rec(m.type);
+    if (f.params.empty()) return std::nullopt;
+    const auto r = types.rec(f.params.front());
+    if (r.kind != sema::TypeKind::reference || r.rvalue_ref ||
+        sema::Types::unqualified(types.canonical(r.inner)) != types.class_type(owner))
+      return std::nullopt;
+    return types.canonical(r.inner);
+  };
+  const bool written_const = written && sema::Types::is_const(*copy_parameter(*declared, cls));
+  const auto outside_scope = [&](EntityId type, const sema::ClassRec& shape) {
+    const auto& entity = w_->entities.rec(type);
+    return shape.union_ || shape.closure || !shape.bases.empty() ||
+           entity.templ != EntityId::none || entity.kind != sema::EntityKind::class_ || !is_namespace(entity.scope);
+  };
+  auto finalize = [&](sema::CopyState status, bool source_const) {
+    rec.defaulted_copy = status;
+    rec.defaulted_copy_const = source_const;
+    rec.copy_deleted = status == deleted;
+    if (written) {
+      if (rec.copy_ctor == declared->entity) rec.copy_ctor = EntityId::none;
+      if (status == deleted) declared->is_deleted = true;
+    }
+  };
+  if (outside_scope(cls, rec) ||
+      (written && std::ranges::count_if(rec.members, [&](const auto& m) { return copy_parameter(m, cls).has_value(); }) != 1)) {
+    finalize(unsupported, !written || written_const);
+    return;
+  }
+
+  struct Subobject {
+    sema::CopyState state;
+    bool takes_const = true;
+  };
+  // The enclosing class is an ordinary namespace-scope class without bases. A subobject's
+  // non-public operation is accessible only through friendship in this subset.
+  const EntityId ctor = written ? declared->entity : EntityId::none;
+  auto inaccessible = [&](const sema::ClassRec& leaf, EntityId e) {
+    const ast::Access access = leaf.access_of(e);
+    return access != ast::Access::public_ && access != ast::Access::none &&
+           !std::ranges::contains(leaf.friends, cls) &&
+           (ctor == EntityId::none || !std::ranges::contains(leaf.friends, ctor));
+  };
+  auto inspect = [&](QualType type, bool from_const) -> Subobject {
+    QualType t = element(type);
+    const auto r = types.rec(t);
+    if (r.kind == sema::TypeKind::reference) return {r.rvalue_ref ? deleted : trivial};
+    if (sema::Types::is_volatile(t)) return {unsupported};
+    switch (r.kind) {
+      case sema::TypeKind::builtin: return {w_->target[r.builtin].size ? trivial : unsupported};
+      case sema::TypeKind::enum_: case sema::TypeKind::pointer: return {trivial};
+      case sema::TypeKind::class_: break;
+      default: return {unsupported};
+    }
+    const auto* leaf = classes_.find(r.entity);
+    if (!leaf || !leaf->defined || outside_scope(r.entity, *leaf)) return {unsupported};
+
+    const sema::MemberDeclRec* copy = nullptr;
+    bool takes_const = leaf->defaulted_copy_const;
+    bool unusable_destructor = false;
+    for (const auto& m : leaf->members) {
+      if (m.is_ctor && m.is_template) return {unsupported};
+      if (auto ref = copy_parameter(m, r.entity)) {
+        // Only a single ordinary copy taking one class reference can be classified here.
+        if (copy || types.rec(m.type).params.size() != 1 || sema::Types::is_volatile(*ref)) return {unsupported};
+        copy = &m;
+        takes_const = sema::Types::is_const(*ref);
+      }
+      if (m.is_dtor) unusable_destructor |= m.is_deleted || inaccessible(*leaf, m.entity);
+    }
+    if (unusable_destructor || (!takes_const && (from_const || sema::Types::is_const(t))) ||
+        (copy ? copy->is_deleted || inaccessible(*leaf, copy->entity) : leaf->copy_deleted))
+      return {deleted, takes_const};
+    if (copy) return {std::ranges::contains(leaf->defaulted_copy_declarations, copy->entity)
+                          ? leaf->defaulted_copy : nontrivial, takes_const};
+    if (leaf->defaulted_copy != ordinary) return {leaf->defaulted_copy, takes_const};
+    return {leaf->copy_ctor == EntityId::none ? trivial : unsupported, takes_const};
+  };
+
+  auto members = [&](bool from_const) {
+    Subobject result{trivial};
+    for (QualType t : subobjects) {
+      const auto member = inspect(t, from_const);
+      result.state = std::max(result.state, member.state);
+      result.takes_const &= member.takes_const;
+    }
+    return result;
+  };
+  const auto mutable_source = members(false);
+  const bool const_source = written ? written_const : mutable_source.takes_const;
+  const auto result = const_source
+      ? (mutable_source.takes_const ? members(true).state : deleted)
+      : mutable_source.state;
+  finalize(result, const_source);
+}
+
 void Program::special_members(u32 item, EntityId cls, sema::ClassRec& rec) {
   sema::Types& types = w_->types;
   QualType ct = types.class_type(cls);
@@ -5450,6 +5618,7 @@ void Program::special_members(u32 item, EntityId cls, sema::ClassRec& rec) {
   std::vector<QualType> subobjects;
   for (const sema::BaseRec& b : rec.bases) subobjects.push_back(types.class_type(b.cls));
   for (const sema::FieldRec& f : rec.fields) subobjects.push_back(f.type);
+  defaulted_copy(cls, rec, subobjects, !user_copy && !user_move);
   // [class.dtor]/8: the implicit destructor is not trivial when a base's or member's is not.
   if (user_dtor != EntityId::none) rec.destructor = user_dtor;
   else if (std::ranges::any_of(subobjects, [&](QualType t) { return classes_.destructor_of(t) != EntityId::none; }))
@@ -5458,7 +5627,7 @@ void Program::special_members(u32 item, EntityId cls, sema::ClassRec& rec) {
   // trivial when a member's is not.
   // [class.copy.ctor]/6: a user-declared move constructor deletes the implicit copy constructor.
   if (!user_copy && user_move) rec.copy_deleted = true;
-  if (!user_copy && !user_move) {
+  if (!user_copy && !user_move && rec.defaulted_copy == sema::CopyState::ordinary) {
     bool nontrivial = false;
     for (QualType t : subobjects) {
       if (types.is_reference(t)) continue;
@@ -5499,7 +5668,7 @@ void Program::special_members(u32 item, EntityId cls, sema::ClassRec& rec) {
     return r && (!r->fields.empty() || !r->pod);
   });
   rec.pod = !rec.user_ctors && user_dtor == EntityId::none && rec.destructor == EntityId::none &&
-            rec.copy_ctor == EntityId::none && !rec.copy_deleted && !user_move && !user_assign &&
+            !rec.copy_nontrivial() && !rec.copy_deleted && !user_move && !user_assign &&
             std::ranges::none_of(rec.fields, &sema::FieldRec::dmi) && one_access &&
             std::ranges::all_of(rec.fields, [&](const sema::FieldRec& f) { return pod_type(f.type); }) &&
             std::ranges::all_of(rec.bases, [&](const sema::BaseRec& b) { return pod_type(types.class_type(b.cls)); }) &&

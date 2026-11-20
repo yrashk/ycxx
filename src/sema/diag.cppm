@@ -288,6 +288,8 @@ enum class Diag : std::uint32_t {
   va_start_context [[=message{Severity::error, "va_start requires an enclosing variadic function"}]],
   va_list_operand [[=message{Severity::error, "expected a mutable va_list cursor, got '{0:t}'"}]],
   va_arg_type [[=message{Severity::error, "va_arg type '{0:t}' is outside the supported x86-64 System V integer and pointer subset"}]],
+  defaulted_copy_declaration [[=message{Severity::error, "only an ordinary in-class copy constructor taking C& or const C& can be explicitly defaulted here"}]],
+  defaulted_copy_unsupported [[=message{Severity::error, "defaulted copy construction of '{0:t}' is not supported for this class"}]],
 };
 
 // A `{N:r}` argument: why an evaluation was not constant. 0 is an expression the front end
