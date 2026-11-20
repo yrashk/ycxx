@@ -124,6 +124,8 @@ public:
   // also at the point of instantiation ([temp.dep.candidate]).
   virtual std::vector<ast::DeclSema> adl_functions(EntityId ns, NameId name, bool at_instantiation) = 0;
   virtual const ClassRec* adl_class(EntityId c, bool at_instantiation) = 0;
+  // Earlier friend declarations in a class whose member list is still being read.
+  virtual std::vector<DeclId> earlier_adl_friends(EntityId, NameId) { return {}; }
   // In an instantiation, whether the call at `offset` was dependent in the template definition.
   virtual bool dependent_call(u32 /*offset*/) { return false; }
   // Whether instantiation has given up at its nesting limit, which was diagnosed ([temp.inst]/16):
@@ -6113,13 +6115,19 @@ public:
       auto associations = adl_associations(args, at_instantiation, !dependent_call);
       for (EntityId ns : associations.namespaces)
         for (const ast::DeclSema& d : q_->adl_functions(ns, name, at_instantiation)) add_candidate(d);
+      auto add_friend = [&](DeclId f) {
+        if (auto d = q_->decl_sema(f); d.entity != EntityId::none) add_candidate(d);
+      };
       // [basic.lookup.argdep]/4: a reachable associated class contributes the friends it
       // declared, even when their namespace has yet to bind the name for ordinary lookup.
-      for (EntityId cls : associations.classes)
-        if (const ClassRec* rec = q_->adl_class(cls, at_instantiation))
+      for (EntityId cls : associations.classes) {
+        if (const ClassRec* rec = q_->adl_class(cls, at_instantiation)) {
           for (const ast::MemberRec& f : rec->adl_friends)
-            if (w_->entities.rec(f.entity).name == name)
-              if (auto d = q_->decl_sema(f.decl); d.entity != EntityId::none) add_candidate(d);
+            if (w_->entities.rec(f.entity).name == name) add_friend(f.decl);
+        } else if (!at_instantiation) {
+          for (DeclId f : q_->earlier_adl_friends(cls, name)) add_friend(f);
+        }
+      }
     };
     add(false);
     if (dependent_call) add(true);

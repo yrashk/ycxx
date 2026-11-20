@@ -278,11 +278,14 @@ public:
   // [basic.scope.scope], [basic.link]: friend declarations can correspond in their target
   // namespace without binding the name there. Read earlier source items even if nothing else
   // has asked for the containing class yet.
-  std::vector<DeclId> hidden_friends_before(std::string_view name, u32 item) {
+  std::vector<DeclId> hidden_friends_before(std::string_view name, u32 item,
+                                           std::optional<u32> enclosing_class = std::nullopt) {
     std::vector<DeclId> result;
     for (auto [j, k] : named(name)) {
       if (j >= item) break;
-      const items::DeclName& n = items_->items[j].names[k];
+      const items::Item& candidate = items_->items[j];
+      if (enclosing_class && candidate.parent != *enclosing_class) continue;
+      const items::DeclName& n = candidate.names[k];
       if (!(n.flags & items::name_flag::friend_) || ns_of_[j] != ns_of_[item] || !namespace_class_friend(j)) continue;
       DeclId d{id(j), ast::make_decl_ord(ast::DeclClass::syntactic, n.ordinal)};
       if (decl_sema(d) && ordinary_friend_items_.contains(j)) result.push_back(d);
@@ -1168,6 +1171,16 @@ public:
 private:
   std::vector<u32> running_;
   std::set<u32> ordinary_friend_items_;  // the source item of each supported unqualified friend
+  bool friend_body_ready(u32 definition) const {
+    if (!ordinary_friend_items_.contains(definition)) return true;
+    const u32 parent = items_->items[definition].parent;
+    if (classes_.is_defined(class_entities_.at(parent))) return true;
+    // Earlier friends can be found inside the member list. A deduction or constant evaluation
+    // there cannot ask for the body while that body's complete class is still being assembled.
+    return std::ranges::none_of(running_, [&](u32 item) {
+      return item == parent || items_->items[item].parent == parent;
+    });
+  }
   std::map<EntityId, std::vector<std::optional<std::pair<u32, u32>>>> member_default_tokens_;
   void bind_member_defaults(EntityId cls, sema::ClassRec& rec, Result<ast::ClassDef>& out);
   std::map<u32, std::vector<std::vector<ast::TemplateParamSema>>> outer_heads_;  // by item
@@ -1219,6 +1232,11 @@ public:
   const sema::ClassRec* adl_class(EntityId c, bool at_instantiation) override {
     bool complete = at_instantiation ? is_complete(c) : is_complete_at_item(c);
     return complete ? p_->classes().find(c) : nullptr;
+  }
+  std::vector<DeclId> earlier_adl_friends(EntityId c, NameId name) override {
+    const auto def = p_->class_items_.find(std::to_underlying(c));
+    if (def == p_->class_items_.end() || p_->items().items[item_].parent != def->second) return {};
+    return p_->hidden_friends_before(p_->world().ins.names.spelling(name), item_, def->second);
   }
   // The namespace unqualified lookup starts in: the item's, or the one a qualified declarator
   // names ([basic.lookup.unqual]/9).
@@ -2936,7 +2954,10 @@ private:
       if (!ps_.expect(Tk::semi)) bad();
       return;
     }
-    if (ps_.is(Tk::kw_friend)) return friend_declaration();
+    if (ps_.is(Tk::kw_friend) || std::ranges::any_of(it_->names, [](const items::DeclName& n) {
+          return (n.flags & items::name_flag::friend_) != 0;
+        }))
+      return friend_declaration();
     // A member template ([temp.mem]): its head one level inside the class's.
     if (ps_.is(Tk::kw_template)) {
       if (ps_.kind(1) != Tk::less) {
@@ -3150,11 +3171,14 @@ private:
   // declaration, of a namespace-scope function or of another class's member. The friend is not a
   // member, and the declaration makes no name visible to ordinary lookup ([class.friend]/7).
   void friend_declaration() {
-    u32 friend_at = ps_.pos();
-    ps_.bump();
+    std::optional<u32> friend_at;
+    if (ps_.is(Tk::kw_friend)) {
+      friend_at = ps_.pos();
+      ps_.bump();
+    }
     const bool definition = it_->kind == ItemKind::function;
     if (ps_.is(Tk::kw_template) || !p_->enclosing_heads(k_).empty() || inst_) {
-      s_.diag(friend_at, Diag::not_supported, Tk::kw_friend);  // in or of a template (#259)
+      s_.diag(friend_at.value_or(ps_.pos()), Diag::not_supported, Tk::kw_friend);  // in or of a template (#259)
       return bad();
     }
     sema::Types& types = s_.types();
@@ -3162,7 +3186,8 @@ private:
     sem.flags = sema::decl_flag::friend_;
     // `friend class X;`: the class lookup finds, else one the declaration introduces in the
     // innermost enclosing namespace ([dcl.type.elab]/4, [namespace.memdef]/3).
-    if ((ps_.is(Tk::kw_class) || ps_.is(Tk::kw_struct)) && ps_.kind(1) == Tk::identifier && ps_.kind(2) == Tk::semi) {
+    if (friend_at && (ps_.is(Tk::kw_class) || ps_.is(Tk::kw_struct)) && ps_.kind(1) == Tk::identifier &&
+        ps_.kind(2) == Tk::semi) {
       NameId n = ps_.name_of(ps_.tok(1));
       auto t = s_.class_name(n, false);
       sem.entity = t && types.is_class(*t) ? types.class_of(*t) : class_entity(n);
@@ -3172,8 +3197,8 @@ private:
       ps_.bump();
       return;
     }
-    DeclSpec spec = ps_.decl_specifiers();
-    if (!spec.ok) return bad();
+    DeclSpec spec = ps_.decl_specifiers(false, &friend_at);
+    if (!spec.ok || !friend_at) return bad();
     if (ps_.accept(Tk::semi)) {
       if (!types.is_class(spec.type)) {
         s_.diag(spec.begin, Diag::not_supported, Tk::kw_friend);  // a friend that is not a class
@@ -3200,7 +3225,7 @@ private:
     }
     if (ordinary) {
       if (c_context) {
-        s_.diag(friend_at, Diag::friend_c_linkage);
+        s_.diag(*friend_at, Diag::friend_c_linkage);
         return bad();
       }
       // [dcl.fct.default]/4 imposes separate requirements on defaults written in a friend.
@@ -3208,7 +3233,7 @@ private:
           std::ranges::any_of(d.params, [](const parse::Param& p) {
             return p.default_arg != NodeId::none || p.default_tokens.has_value();
           })) {
-        s_.diag(friend_at, Diag::not_supported, Tk::kw_friend);
+        s_.diag(*friend_at, Diag::not_supported, Tk::kw_friend);
         return bad();
       }
       if (!declare(spec, std::move(d), LangLinkage::cxx, false, definition, /*ordinary_friend=*/true)) return bad();
@@ -5923,7 +5948,7 @@ interp::Callee Program::function_ir(EntityId f, u32 item) {
     return c;
   }
   auto def = definitions_.find(std::to_underlying(f));
-  if (def == definitions_.end() || def->second >= item) return c;
+  if (def == definitions_.end() || def->second >= item || !friend_body_ready(def->second)) return c;
   u32 k = def->second;
   if (!irs_.contains(k)) {
     // A body with errors has no L1: the evaluation stops at the call.
@@ -6155,7 +6180,7 @@ std::optional<QualType> Program::deduced_type(EntityId f, u32 item) {
     return in->body.value.deduced_type;
   }
   auto def = definitions_.find(std::to_underlying(f));
-  if (def == definitions_.end() || def->second >= item) return std::nullopt;
+  if (def == definitions_.end() || def->second >= item || !friend_body_ready(def->second)) return std::nullopt;
   const Result<ast::BodySema>& body = analyze_body(def->second);
   if (!body.value.deduced) return std::nullopt;
   return body.value.deduced_type;

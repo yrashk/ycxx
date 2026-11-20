@@ -1121,7 +1121,9 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   a namespace function permits ADL. Qualified and parenthesized calls use ordinary lookup.
 - A reachable associated class contributes its ordinary unqualified friend function
   declarations, including declarations whose function is defined in another class. A matching
-  namespace declaration binds the name for ordinary lookup at its own point. [#259](https://github.com/yrashk/ycxx/issues/259)
+  namespace declaration binds the name for ordinary lookup at its own point. While reading a
+  class member declaration, ADL can use earlier friend signatures from that class.
+  [#259](https://github.com/yrashk/ycxx/issues/259)
 - A nondependent call in a template uses its lexical lookup point. Dependent calls also use the
   existing point of instantiation ([temp.dep.candidate]). Per-name incremental scheduling
   remains under #16.
