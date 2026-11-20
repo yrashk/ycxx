@@ -104,7 +104,6 @@ struct Result {
   ConstId literal{};         // address within a string literal object
   std::vector<PathStep> path;
   bool past = false;
-  bool past_constexpr_subarray = false;
   i64 offset = 0;            // address: in bytes from the start of the object
   bool operator==(const Result&) const = default;
 };
@@ -224,7 +223,7 @@ private:
   std::optional<u32> literal_object(ConstId s);
   Flow global_object(EntityId e, u32& out);
   Flow address(u32 obj, QualType pointee, i64 offset, Value& out);
-  Flow erased_address(u32 obj, std::span<const u32> indices, i64 offset, Value& out);
+  Flow address_from_path(u32 obj, QualType pointee, std::span<const u32> indices, i64 offset, Value& out);
   i64 offset_of(const Value& p);
   bool may_overlap(const Value& a, const Value& b);
 
@@ -544,8 +543,8 @@ std::optional<u32> Machine::literal_object(ConstId s) {
 }
 
 // A constant as a value of type `type`: an integer, a null pointer, or an address: of a function,
-// or of an object (a string literal object or a global variable) plus a byte offset, as a pointer
-// to the object or to a subobject of it. A global's object may first need the host.
+// or of an object (a string literal object or a global variable), with its byte offset and
+// subobject path when stored. A global's object may first need the host.
 Machine::Flow Machine::constant(ConstId c, QualType type, Value& out) {
   const ast::Values& vs = in_->values;
   const Shape& s = shape(type);
@@ -566,8 +565,6 @@ Machine::Flow Machine::constant(ConstId c, QualType type, Value& out) {
   if (!vs.is<ast::VLvalue>(c) || s.kind != Kind::pointer || s.is_nullptr) return fail(Reason::unsupported_constant);
   auto l = vs.get<ast::VLvalue>(c);
   auto indices = in_->seqs.elements(l.path);
-  bool erased = ast::is_void(*in_, s.inner);
-  if (!erased && !indices.empty()) return fail(Reason::unsupported_constant);
   u32 o = 0;
   if (vs.is<ast::VString>(l.base)) {
     auto lit = literal_object(l.base);
@@ -584,18 +581,21 @@ Machine::Flow Machine::constant(ConstId c, QualType type, Value& out) {
   } else {
     return fail(Reason::unsupported_constant);
   }
-  return erased ? erased_address(o, indices, l.offset, out) : address(o, s.inner, l.offset, out);
+  if (!indices.empty() || ast::is_void(*in_, s.inner))
+    return address_from_path(o, s.inner, indices, l.offset, out);
+  return address(o, s.inner, l.offset, out);
 }
 
-// An erased pointer retains its array path and offset ([conv.ptr]). A remaining offset equal to
-// the designated object's size represents the one-past pointer for an object treated as an array
-// of one. A path ending at an array's bound already represents one past that array.
-Machine::Flow Machine::erased_address(u32 obj, std::span<const u32> indices, i64 offset, Value& out) {
+// A path ending at an array's bound represents one past that array ([expr.add]). An offset
+// one object size beyond a designated object gives the singleton's one-past position.
+Machine::Flow Machine::address_from_path(u32 obj, QualType pointee, std::span<const u32> indices, i64 offset,
+                                         Value& out) {
   Value pointer{VKind::object, false, obj, 0};
   for (u32 index : indices) pointer.bits = child(u32(pointer.bits), {ir::Step::elem, index});
   bool past = false;
   auto place = resolve(pointer, {}, past);
-  if (!place || offset < 0) return fail(Reason::unsupported_constant);
+  if (!place || offset < 0 || (!ast::is_void(*in_, pointee) && !similar(place->type, pointee)))
+    return fail(Reason::unsupported_constant);
   i64 start = offset_of(pointer);
   if (offset != start) {
     if (past || offset < start || u64(offset - start) != shape(place->type).size)
@@ -1095,8 +1095,7 @@ std::vector<Result> Machine::results() const {
       r.past = v.past;
       r.offset = m.offset_of(v);
       bool past = false;
-      if (r.base == Base::global && ob.usable && r.path.size() > 1 && m.resolve(v, {}, past))
-        r.past_constexpr_subarray = past;
+      if (!r.path.empty() && m.resolve(v, {}, past)) r.past = past;
       break;
     }
     }

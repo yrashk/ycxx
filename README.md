@@ -120,7 +120,8 @@ operators with an `unsigned long long` parameter, including constant evaluation.
 [#289](https://github.com/yrashk/ycxx/issues/289)
 
 Both targets support typed constant addresses and reads within named namespace-scope constexpr
-arrays of supported scalar types, including nested arrays. [#111](https://github.com/yrashk/ycxx/issues/111)
+arrays of supported scalar types, including arithmetic on saved pointers just past a nested row.
+[#111](https://github.com/yrashk/ycxx/issues/111)
 
 **Language on macOS.** Programs can use:
 - the fundamental integer, character and floating types, pointers, arrays, references and
