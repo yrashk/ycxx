@@ -602,16 +602,17 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   start inside executable code, and its declared extent must fit in its section. The object
   fingerprint includes this metadata.
   [#428](https://github.com/yrashk/ycxx/issues/428) · [#391](https://github.com/yrashk/ycxx/issues/391)
-- Runtime addresses of default-visible Linux data use `R_X86_64_REX_GOTPCRELX`, including
-  declarations defined in another object. The native static linker checks and relaxes the
-  RIP-relative MOV to LEA after resolving the symbol. System linkers can preserve GOT binding.
-  Static pointer initializers continue to use absolute relocations with their byte addends.
-  `unit.linux_compile` checks address identity, nonzero offsets, writes, archive extraction,
-  BSS, and system-linker preemption. `unit.elf_link` checks malformed instructions, overlapping
-  relocations, weak resolution and displacement range. Native dynamic data addresses and
-  external function addresses follow [#390](https://github.com/yrashk/ycxx/issues/390) and
-  [#407](https://github.com/yrashk/ycxx/issues/407).
+- Runtime addresses of default-visible Linux data and ordinary functions use
+  `R_X86_64_REX_GOTPCRELX`, including declarations defined in another object. The native static
+  linker checks and relaxes the RIP-relative MOV to LEA after resolving the symbol. System linkers
+  can preserve GOT binding. Static pointer initializers use absolute relocations with their byte
+  addends. `unit.linux_compile` checks data identity, offsets, writes, BSS, and preemption.
+  `unit.linux_function_addresses` checks function identity, indirect calls, archive extraction,
+  weak definition precedence, and system-linker preemption and aliases. `unit.elf_link` checks
+  malformed instructions, overlapping relocations and displacement range. Native dynamic addresses
+  follow [#390](https://github.com/yrashk/ycxx/issues/390).
   [Design](docs/design/linux-external-data-addresses.md) · [#414](https://github.com/yrashk/ycxx/issues/414)
+  · [#407](https://github.com/yrashk/ycxx/issues/407)
 - Simple external inline function definitions use weak ELF symbols. The unit combines inline
   flags from reachable declarations, including `constexpr` functions and ordinary members
   defined in their class. Calls and statically initialized pointers in different units resolve
@@ -1045,6 +1046,9 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
 - A qualified namespace function definition inherits C language linkage from a matching prior
   member declaration and uses its target namespace for body lookup. Ordinary and argument-dependent
   calls find the prior declaration and use the same unmangled symbol as C callers (#426).
+- An unqualified namespace function redeclaration inherits C language linkage from its corresponding
+  earlier declaration in the same namespace. Adjusted parameter types identify the redeclaration
+  among overloads ([basic.scope.scope], [basic.link], [dcl.link], #455).
 - A second definition of the same ordinary external C-linkage function in a translation unit is
   diagnosed across namespaces. Compatible declarations share the one definition and address
   ([dcl.link], [basic.def.odr], #446).
@@ -2173,8 +2177,8 @@ values, end to end; results match Clang's bit for bit.
   a template-id without a target type (#335), and function pointer or reference template
   arguments (#406). A free immediate function selected from an overload is diagnosed outside an
   immediate invocation or context. General immediate-function name validation is tracked in #102.
-- The Linux x86-64 backend can call through an address taken from an internal function. Emitting
-  addresses of externally linked functions on that target is tracked in #407.
+- The Linux x86-64 backend supports calling through the address of an ordinary function with
+  internal or external linkage. [#407](https://github.com/yrashk/ycxx/issues/407)
 - Tests are in `tests/own/function-pointers/`, with draft examples for [over.over] and
   [temp.deduct.call] enabled.
 
@@ -2210,6 +2214,26 @@ values, end to end; results match Clang's bit for bit.
   qualifiers ([expr.type], [expr.eq], [expr.rel], [expr.cond]).
 - Converting a pointer to an array to a pointer to `void` preserves the array's element
   qualifiers ([basic.type.qualifier], [conv.ptr]).
+
+## Ordinary scalar allocation and deallocation (#293)
+
+- [expr.new] and [expr.delete] support complete, default-aligned integral and ordinary pointer
+  objects. The result of `new` is a prvalue pointer to the allocated type, with its cv-qualifiers.
+  Omitted initialization leaves the bytes alone, empty parentheses or braces give zero or null,
+  and explicit initializers use the scalar conversion and list-narrowing rules.
+- The ordinary global declarations of `operator new` and both `operator delete` overloads use the
+  target's `sizeof` result type. Written declarations and definitions of those signatures share
+  the same entities as implicit declarations. Allocation passes `sizeof(T)`, and single-object
+  delete evaluates its operand once and passes its address and `sizeof(T)` to the sized global
+  deallocator when non-null. The scoped spellings use the same functions. Global lookup and
+  sized dispatch follow Astra's independent draft and Itanium ABI review on #293.
+- Native lowering supports initializers proven nonthrowing from the analyzed expression tree.
+  Initializers that need an exception cleanup edge and constant evaluation of allocation remain
+  in #293. Namespace-scope allocation uses the existing dynamic initialization path. The issue
+  also tracks class, array, enumeration, floating-point, placement and over-aligned allocation,
+  and other allocation-function declarations.
+- Spec-only tests in `tests/own/scalar-allocation/` cover types, initialization, a typed null, and
+  invalid operands. A separate provider checks the address and size passed to deallocation.
 
 ## Bootstrap workarounds
 

@@ -1218,6 +1218,11 @@ class Gen {
     if (is<ast::Unary>(a)) return unary(a);
     if (is<ast::Binary>(a)) return binary(a);
     if (is<ast::OrderedBinary>(a)) return ordered(a);
+    if (is<ast::NewObject>(a)) return new_object(a);
+    if (is<ast::DeleteObject>(a)) {
+      delete_object(a);
+      return std::nullopt;
+    }
     if (is<ast::Call>(a)) return call(a);
     if (is<ast::MemberCall>(a)) return member_call(a);
     if (is<ast::BuiltinCall>(a)) {  // `__builtin_fabs` (lex::BuiltinFunction::fabs), the one there is
@@ -1454,6 +1459,57 @@ class Gen {
         return rvalue_or_void(r);
       default: unsupported(a, "pointer-to-member access");
     }
+  }
+
+  // The scalar initialization may run after storage is acquired only when it cannot throw.
+  // Calls and temporaries need an exception analysis or an EH cleanup edge ([expr.new]).
+  bool nonthrowing_initializer(At a) {
+    if (is<ast::ImplicitConversion>(a) &&
+        get<ast::ImplicitConversion>(a).conversion == ast::ConversionKind::user_defined) return false;
+    if (!(is<ast::Literal>(a) || is<ast::DeclRef>(a) || is<ast::LocalRef>(a) || is<ast::This>(a) ||
+          is<ast::ValueInit>(a) || is<ast::DefaultInit>(a) || is<ast::Paren>(a) || is<ast::Unary>(a) ||
+          is<ast::Binary>(a) || is<ast::OrderedBinary>(a) || is<ast::Assign>(a) || is<ast::Conditional>(a) ||
+          is<ast::Subscript>(a) || is<ast::Member>(a) || is<ast::ImplicitConversion>(a) || is<ast::BuiltinCall>(a)))
+      return false;
+    bool proven = true;
+    ast::Red(ast_, a.id).for_each_child([&](const ast::Red& c) {
+      proven = proven && nonthrowing_initializer({c.id(), 0});
+    });
+    return proven;
+  }
+
+  ValueId new_object(At a) {
+    auto n = get<ast::NewObject>(a);
+    At init = child(a, n.init);
+    if (!fn_.thunk && !nonthrowing_initializer(init))
+      throw Unsupported{"cleanup for a potentially throwing new-initializer"};
+    ValueId storage = rvalue(child(a, n.allocation));
+    ast::QualType p = n.info.type;
+    ValueId object = pure(ir::Op::ptr_cast, p, {storage}, {word(ty(p))});
+    // Constant evaluation stops at the non-constexpr allocation call. This lets an ordinary
+    // namespace-scope initializer fall back to runtime without evaluating the new-initializer.
+    if (fn_.thunk) return object;
+    ast::QualType t = facts_.pointee(p);
+    initialize({object, t}, init, false);
+    ValueId objects[] = {object};
+    std::uint64_t types[] = {word(ty(t))};
+    stateful(ir::Op::obj__begin, {}, objects, types);
+    return object;
+  }
+
+  void delete_object(At a) {
+    if (fn_.thunk) unsupported(a, "in constant evaluation");
+    auto d = get<ast::DeleteObject>(a);
+    ValueId addr = rvalue(child(a, d.address));
+    ValueId nonnull = pure(ir::Op::tobool, facts_.bool_type(), {addr});
+    ir::BlockId release = new_block(), join = new_block();
+    cond_br(nonnull, edge(release), edge(join));
+    enter(release);
+    stateful(ir::Op::obj__end, {}, std::span(&addr, 1));
+    ValueId args[] = {addr, rvalue(child(a, d.size))};
+    call_fn(d.function, d.info.type, args, 0);
+    br(join);
+    enter(join);
   }
 
   // A call to a named function ([expr.call]). The callee is not evaluated: naming a function has

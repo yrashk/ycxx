@@ -99,9 +99,10 @@ Ordinary namespace-scope references to supported scalar and array storage can bi
 or during ordered startup initialization. On Linux, generated code can access bindings and
 referents with internal linkage. [#367](https://github.com/yrashk/ycxx/issues/367)
 
-Linux x86-64 programs can read, write and take the address of data defined in another
-translation unit. Native static executables and host-linked objects support those addresses.
-[#414](https://github.com/yrashk/ycxx/issues/414)
+Linux x86-64 programs can read and write data and take the address of data and ordinary
+functions defined in another translation unit. Native static executables and host-linked objects
+support those addresses. [#414](https://github.com/yrashk/ycxx/issues/414)
+· [#407](https://github.com/yrashk/ycxx/issues/407)
 
 On x86-64 Linux, direct calls and saved pointers across translation units share one address for
 simple external inline functions. [#422](https://github.com/yrashk/ycxx/issues/422)
@@ -135,8 +136,13 @@ operators with an `unsigned long long` parameter, including constant evaluation.
   through pointers. Overloaded free functions can take braced arguments for arithmetic parameters
   and ordinary aggregates with arithmetic fields. A pointer or reference target type can select
   a free or static member overload.
-  A qualified namespace function definition can inherit C language linkage from its declaration.
-  [#426](https://github.com/yrashk/ycxx/issues/426)
+  Namespace function definitions can inherit C language linkage from a matching earlier
+  declaration, including definitions written inside their namespace and qualified definitions
+  outside it. [#426](https://github.com/yrashk/ycxx/issues/426),
+  [#455](https://github.com/yrashk/ycxx/issues/455)
+- ordinary scalar `new` and single-object `delete` for integral and pointer objects, including
+  cv-qualified objects. Allocating expressions use the global Itanium allocation functions.
+  [#293](https://github.com/yrashk/ycxx/issues/293)
 - classes and unions: data and static members, named data members of unnamed union type,
   member functions, constructors and destructors
   with RAII, aggregate and designated initialization, namespace-scope objects initialized by

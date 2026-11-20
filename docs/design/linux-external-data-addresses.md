@@ -1,10 +1,7 @@
 # Linux x86-64 external data addresses
 
 [#414](https://github.com/yrashk/ycxx/issues/414) covers taking the runtime address of a
-default-visible data definition or an external data declaration. Use the translation unit's
-entity declarations to distinguish data from functions. Include the referenced data IDs in the
-optimization unit fingerprint alongside directly addressable symbols. External function addresses
-remain under [#407](https://github.com/yrashk/ycxx/issues/407).
+default-visible data definition or an external data declaration.
 
 Emit a 64-bit RIP-relative MOV with `R_X86_64_REX_GOTPCRELX` (42) and addend −4. The ELF
 symbol keeps its ordinary binding, so system linkers can allocate a GOT entry or relax the
@@ -28,6 +25,21 @@ pointers, archive member extraction, and malformed relocation shapes. Native and
 tests exercise definitions from ycxx objects and host objects. A system DSO preemption test
 checks that the object form leaves binding to the system linker and loader.
 
-Astra reviewed the distinction between producer GOT semantics and native static relaxation.
-[AMD64 psABI §§4.4, B.2](https://gitlab.com/x86-psABIs/x86-64-ABI/-/jobs/artifacts/master/raw/x86-64-ABI/abi.pdf?job=build)
+## Function addresses
+
+The same relocation applies when `&f`, function-to-pointer conversion or a reference binding
+forms a runtime address for an ordinary default-visible function, including a definition in the
+same translation unit. Use the entity selected by overload resolution and retain its ELF symbol
+name through relocation. Same-named references follow the system linker's function-address
+rules. Two aliases for one body may bind independently. Direct calls keep `R_X86_64_PLT32`.
+
+The optimization unit fingerprint includes the GOT symbol IDs used by address expressions.
+The native static linker applies the same checked relaxation after choosing the definition from
+objects and archives. It diagnoses a GOT load for an unresolved weak symbol. Native dynamic
+imports and special bindings such as IFUNC remain with [#390](https://github.com/yrashk/ycxx/issues/390).
+[#407](https://github.com/yrashk/ycxx/issues/407)
+
+Astra reviewed producer GOT semantics and native static relaxation for both data and ordinary
+function addresses.
+[AMD64 psABI §§4.4.1, 5.2, B.2](https://gitlab.com/x86-psABIs/x86-64-ABI/-/jobs/artifacts/master/raw/x86-64-ABI/abi.pdf?job=build)
 · [ELF gABI symbol table](https://gabi.xinuos.com/elf/05-symtab.html)
