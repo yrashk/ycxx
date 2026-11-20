@@ -136,12 +136,8 @@ private:
     const interp::Result& value = out.values[0];
     if (reference_initializer && value.kind == interp::Result::Kind::null)
       return {std::nullopt, reason_arg({interp::Reason::null_access, 0, {}})};
-    if (reference_initializer && (value.past || value.past_constexpr_subarray))
+    if (reference_initializer && value.past)
       return {std::nullopt, reason_arg({interp::Reason::past_end_access, 0, {}})};
-    // A typed address is stored as a byte offset. One past a nested array can share an offset
-    // with the first element of the next array, which it cannot designate ([basic.compound]).
-    if (value.past_constexpr_subarray && !s_->types().is_void(s_->types().pointee(value.type)))
-      return {std::nullopt, reason_arg({interp::Reason::unsupported_constant, 0, {}})};
     return constant(value);
   }
 
@@ -212,9 +208,10 @@ private:
         return {std::nullopt, reason_arg({interp::Reason::local_address, 0, {}})};
       ConstId base = r.base == interp::Base::literal ? r.literal : vs.entity(r.entity);
       std::vector<u32> path;
-      // [conv.ptr]: erasure preserves the pointer value. Its type no longer identifies the
-      // subobject at the recorded offset, such as an array or its first element.
-      if (s_->types().is_pointer(r.type) && s_->types().is_void(s_->types().pointee(r.type))) {
+      // Named arrays and erased pointers retain their domain even at a shared byte offset
+      // ([basic.compound], [conv.ptr]).
+      bool erased = s_->types().is_pointer(r.type) && s_->types().is_void(s_->types().pointee(r.type));
+      if (r.base == interp::Base::global || erased) {
         for (ir::PathStep step : r.path) {
           if (step.step != ir::Step::elem)
             return {std::nullopt, reason_arg({interp::Reason::unsupported_constant, 0, {}})};
