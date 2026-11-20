@@ -4991,7 +4991,19 @@ public:
 
   bool pointer_convertible(QualType from, QualType to) {
     QualType a = types().pointee(from), b = types().pointee(to);
-    return types().is_void(b) && types().is_object(a) && cv_within(Types::cv(a), Types::cv(b));
+    return types().is_void(b) && types().is_object(a) && cv_within(object_cv(a), object_cv(b));
+  }
+
+  // [expr.type]: combine the pointee cv-qualifiers of a pointer to void and a
+  // pointer to an object or void.
+  std::optional<QualType> composite_void_pointer(QualType a, QualType b) {
+    if (!types().is_pointer(a) || !types().is_pointer(b)) return std::nullopt;
+    a = types().pointee(a);
+    b = types().pointee(b);
+    if (!types().is_void(a)) std::swap(a, b);
+    if (!types().is_void(a) || (!types().is_void(b) && !types().is_object(b))) return std::nullopt;
+    Cv cv = Cv(std::to_underlying(object_cv(a)) | std::to_underlying(object_cv(b)));
+    return types().pointer(types().add_cv(builtin(Builtin::void_), cv));
   }
 
   // [conv.qual]: pointers of equal depth to the same type, where each level of `to` holds the
@@ -5333,6 +5345,12 @@ public:
         diag(op_at, Diag::member_pointer_values);
         return {NodeId::none, begin, end};
       }
+      if (auto to = composite_void_pointer(ta, tc)) {
+        a = convert(a, *to, op_at);
+        c = convert(c, *to, op_at);
+        if (!a.ok() || !c.ok()) return {NodeId::none, begin, end};
+        return bin(k, a, c, b);
+      }
       if (types().is_pointer(ta) && types().is_pointer(tc)) {
         QualType pa = types().pointee(ta), pc = types().pointee(tc);
         // [expr.type]/4.6: a pointer to a derived class converted to one to its base class.
@@ -5485,6 +5503,11 @@ public:
       } else if (types().is_pointer(tb) && is_null_pointer_constant(t)) {
         a = convert_node(a, ast::ConversionKind::null_pointer, tb);
         info = {tb, ValueCategory::prvalue, 0};
+      } else if (auto to = composite_void_pointer(ta, tb)) {
+        a = convert(a, *to, q_at);
+        b = convert(b, *to, q_at);
+        if (!a.ok() || !b.ok()) return {NodeId::none, begin, end};
+        info = {*to, ValueCategory::prvalue, 0};
       } else if (types().is_pointer(ta) && types().is_pointer(tb) &&
                  (base_depth(types().pointee(ta), types().pointee(tb)) || base_depth(types().pointee(tb), types().pointee(ta)))) {
         // [expr.cond]/7.3: the composite pointer type, a pointer to the base class.

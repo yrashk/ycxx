@@ -116,9 +116,10 @@ object. [#428](https://github.com/yrashk/ycxx/issues/428), [#419](https://github
   `double` and `long double` with literals, arithmetic, comparisons and
   conversions giving Clang's results bit for bit, and passing and returning them (classes of
   floating members included) by Clang's calling convention;
-  operators including equality and ordering of pointers to matching complete arrays whose
-  elements differ in `const` or `volatile` qualification, and the statements: `switch`, labels
-  and `goto`, declarations in conditions,
+  equality and ordering of pointers to matching complete arrays whose elements differ in
+  `const` or `volatile` qualification. Comparisons and conditional expressions involving
+  object pointers and `void` pointers combine the pointee qualifiers. Statements include
+  `switch`, labels and `goto`, declarations in conditions,
   init-statements in `if` and `switch`, and range-based `for` with optional init-statements.
   Ranges can be arrays or classes with member `begin` and `end` or free `begin` and `end` found
   by argument-dependent lookup. Unqualified calls can find and rank functions in associated
