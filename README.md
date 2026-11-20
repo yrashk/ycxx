@@ -20,7 +20,7 @@ The final Linux x86-64 self-check uses the freestanding support in [#380](https:
 
 ## Status
 
-**Pre-0.1** (as of 2026-11-19). ycxx compiles a substantial subset of C++ (C-like code, classes,
+**Pre-0.1** (as of 2026-11-20). ycxx compiles a substantial subset of C++ (C-like code, classes,
 templates and constant evaluation) on macOS arm64, from source to a signed, running executable,
 with no external compiler, assembler or linker. It also builds static executables from a
 freestanding C++ subset for x86-64 Linux. The standard library is out of reach. The plan is in
@@ -80,13 +80,23 @@ Use the host linker to link these objects with libc.
 [#417](https://github.com/yrashk/ycxx/issues/417), [#412](https://github.com/yrashk/ycxx/issues/412),
 [#399](https://github.com/yrashk/ycxx/issues/399)
 
+Direct calls on x86-64 Linux support those result types when deduced from `auto` or
+`decltype(auto)`. [#441](https://github.com/yrashk/ycxx/issues/441)
+
 ELF and Mach-O objects support static pointer initializers naming variables, array elements,
 or functions. The referenced symbol may be defined in a separate translation unit.
 [#101](https://github.com/yrashk/ycxx/issues/101)
 
+Both targets support UTF-16 and UTF-32 string literals (`u` and `U`), including raw strings,
+constant evaluation, and initialization of matching character arrays.
+[#288](https://github.com/yrashk/ycxx/issues/288)
+
 Ordinary namespace-scope references to supported scalar and array storage can bind at compile time
 or during ordered startup initialization. On Linux, generated code can access bindings and
-referents with internal linkage. [#367](https://github.com/yrashk/ycxx/issues/367),
+referents with internal linkage. [#367](https://github.com/yrashk/ycxx/issues/367)
+
+Linux x86-64 programs can read, write and take the address of data defined in another
+translation unit. Native static executables and host-linked objects support those addresses.
 [#414](https://github.com/yrashk/ycxx/issues/414)
 
 On x86-64 Linux, direct calls and saved pointers across translation units share one address for
@@ -102,7 +112,8 @@ object. [#428](https://github.com/yrashk/ycxx/issues/428), [#419](https://github
 
 **Language on macOS.** Programs can use:
 - the fundamental integer, character and floating types, pointers, arrays, references and
-  enumerations; `float`, `double` and `long double` with literals, arithmetic, comparisons and
+  enumerations, including opaque declarations of named enums in their namespaces; `float`,
+  `double` and `long double` with literals, arithmetic, comparisons and
   conversions giving Clang's results bit for bit, and passing and returning them (classes of
   floating members included) by Clang's calling convention;
   all operators, and the statements: `switch`, labels and `goto`, declarations in conditions,
@@ -110,7 +121,9 @@ object. [#428](https://github.com/yrashk/ycxx/issues/428), [#419](https://github
   Ranges can be arrays or classes with member `begin` and `end` or free `begin` and `end` found
   by argument-dependent lookup. Unqualified calls can find and rank functions in associated
   namespaces. Functions support default arguments, recursion, operator overloading and calls
-  through pointers. A pointer or reference target type can select a free or static member overload.
+  through pointers. Overloaded free functions can take braced arguments for arithmetic parameters
+  and ordinary aggregates with arithmetic fields. A pointer or reference target type can select
+  a free or static member overload.
   A qualified namespace function definition can inherit C language linkage from its declaration.
   [#426](https://github.com/yrashk/ycxx/issues/426)
 - classes and unions: data and static members, named data members of unnamed union type,
@@ -124,8 +137,9 @@ object. [#428](https://github.com/yrashk/ycxx/issues/428), [#419](https://github
 - single and multiple inheritance (not virtual): base classes laid out as Clang does, member
   lookup through bases, derived-to-base conversions, base initializers;
 - namespaces, nested (`namespace a::b`) and inline ones, typedefs and aliases, including
-  function type aliases and function pointer aliases with qualified return types,
-  `using` declarations and directives;
+  function type and function pointer aliases with qualified return types, `using` declarations
+  and directives;
+- named function-pointer declarations with qualified return types;
 - `[[…]]` attributes, the GNU attributes and `asm` labels the macOS SDK's headers use, the
   GNU pointer qualifiers glibc uses, and the type-trait built-ins libycxx's headers use
   (`__is_same`, `__remove_cv`, …)
@@ -142,8 +156,10 @@ object. [#428](https://github.com/yrashk/ycxx/issues/428), [#419](https://github
   `*this`, init-captures, `mutable`, conversion to a pointer to function, generic lambdas (`auto`
   parameters) and template lambdas (`[]<class T>`), and closures passed to and called from
   function templates, with Clang's names for closure types;
-- casts, `sizeof`/`alignof` (classes included), `decltype`, and calls through pointers to
-  functions;
+- noncapturing, non-generic lambdas as initializers of internal-linkage namespace variables,
+  with addressable static storage and scalar calls ([#338](https://github.com/yrashk/ycxx/issues/338));
+- casts, including `static_cast<T&&>` from a compatible object lvalue, `sizeof`/`alignof`
+  (classes included), `decltype`, and calls through pointers to functions. [#199](https://github.com/yrashk/ycxx/issues/199)
 - constant evaluation on ycxx's own interpreter: `constexpr`, `consteval`, `constinit`,
   `static_assert` and `if consteval`, with errors that explain why something is not constant;
 - `extern "C"` functions from libSystem, including `printf` with integers, characters,
@@ -192,7 +208,8 @@ declarations, type traits and requires-expressions. [#238](https://github.com/yr
   `<cmath>` (which `<math.h>` includes) does not compile yet. [#349](https://github.com/yrashk/ycxx/issues/349)
 - Taking member addresses, applying `.*` or `->*`, and code generation for member-pointer values.
   [#411](https://github.com/yrashk/ycxx/issues/411)
-- Constexpr lambdas (the interpreter has no class objects yet), lambdas outside function bodies,
+- Constexpr lambdas (the interpreter has no class objects yet), further lambda declaration
+  contexts ([#338](https://github.com/yrashk/ycxx/issues/338)),
   structured bindings, virtual functions, virtual base classes, inheriting constructors, and bases
   of class templates.
 - Member class and alias templates, conversion function templates, and constraints on class

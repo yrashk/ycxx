@@ -720,6 +720,7 @@ private:
             }
             case reloc_kind::x86_64_pc32:
             case reloc_kind::x86_64_plt32:
+            case reloc_kind::x86_64_rex_gotpcrelx:
               fail(std::format("{}: x86-64 relocation in an arm64 Mach-O object", where));
               break;
           }

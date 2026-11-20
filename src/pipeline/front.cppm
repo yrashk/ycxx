@@ -97,10 +97,12 @@ struct DefinitionAt {
 class ValueConstants final : public Constants {
  public:
   explicit ValueConstants(sema::World& w) : w_(&w) {}
-  std::optional<std::vector<std::uint8_t>> string_object(ConstId c) const override {
+  std::optional<StringObject> string_object(ConstId c) const override {
     sema::ValueRec r = w_->values.rec(c);
     if (r.kind != sema::ValueKind::string) return std::nullopt;
-    return std::vector<std::uint8_t>(r.units.begin(), r.units.end());
+    auto element = w_->types.builtin_of(w_->types.rec(r.type).inner);
+    if (!element) return std::nullopt;
+    return StringObject{*element, std::move(r.units)};
   }
   std::optional<Address> address(ConstId c) const override {
     sema::ValueRec r = w_->values.rec(c);
@@ -362,11 +364,10 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
         }
     }
   };
-  // A body's closures' members (docs/design/closures.md, decision 10): each function call
-  // operator, and a captureless lambda's static invoker, defined with the body that has the
-  // lambda; their bodies' offsets are the lambda's in the body's part, which begins at `offset`.
-  auto closures_of = [&](const ast::BodySema& body, ast::ItemId item, std::uint32_t offset) {
-    for (const ast::ClosureDef& c : ins.seqs.elements(body.closures)) {
+  // A part's closure members (docs/design/closures.md, decision 10). Their offsets are relative
+  // to the enclosing declaration or body part, which begins at `offset` in the item.
+  auto closures_of = [&](ast::SeqId<ast::ClosureDef> closures, ast::ItemId item, std::uint32_t offset) {
+    for (const ast::ClosureDef& c : ins.seqs.elements(closures)) {
       // A template's or a generic lambda's definition is not code; its instances are.
       if ((c.flags & sema::closure_flag::pattern) || world.types.is_dependent(c.call_type)) continue;
       std::vector<ast::LocalRec> locals = ins.seqs.elements(c.locals);
@@ -423,6 +424,7 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
     // instances are, below.
     if (!decls.empty() && ((decls[0].flags & sema::decl_flag::template_) || ins.seqs.size(decls[0].template_params) > 0))
       continue;
+    closures_of(is.closures, program.id(k), 0);
     if (it.kind == items::ItemKind::function && it.has_body() && !decls.empty() && decls[0].entity != EntityId::none &&
         !(decls[0].flags & sema::decl_flag::deleted)) {
       // A placeholder return type is the one its body deduced ([dcl.spec.auto]).
@@ -435,7 +437,7 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
                                     entity.linkage == ast::Linkage::external && entity.templ == EntityId::none &&
                                     tu.main != d.entity && ins.seqs.size(body.closures) == 0 &&
                                     program.asm_label(d.entity).empty();
-      closures_of(body, program.id(k), it.body_begin - it.begin);
+      closures_of(body.closures, program.id(k), it.body_begin - it.begin);
       continue;
     }
     // Variable definitions, with the constants their declarators were initialized with.
@@ -466,7 +468,7 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
     declare(in->decl, ast::Loc{program.id(in->item), 0});  // errors in its name point at the template
     tu.functions.push_back({in->spec, in->decl, in->body.value, program.id(in->item), it.body_begin - it.begin,
                             program.this_type(in->decl)});
-    closures_of(in->body.value, program.id(in->item), it.body_begin - it.begin);
+    closures_of(in->body.value.closures, program.id(in->item), it.body_begin - it.begin);
   }
   // The variable template specializations instantiated ([temp.inst]/7), with their constants.
   for (const parse::Program::VarInstance& v : program.variable_instances()) {

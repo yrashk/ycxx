@@ -9,11 +9,11 @@ import ycxx.ir.l2;
 
 namespace ycxx::x86_64 {
 
-export enum class RelocKind : std::uint8_t { pc32, plt32 };
+export enum class RelocKind : std::uint8_t { pc32, plt32, rex_gotpcrelx };
 
 export struct Reloc {
   std::uint32_t offset;  // disp32 field, relative to the function's first byte
-  RelocKind kind;        // R_X86_64_PC32 or R_X86_64_PLT32 in ELF
+  RelocKind kind;
   ir::EntityId target;
   std::int64_t addend;
   bool operator==(const Reloc&) const = default;
@@ -30,9 +30,11 @@ export struct MachineCode {
 // distinctions between scalar and class arguments or results. A variadic definition or
 // indirect call with an empty ellipsis cannot be identified from L2 alone. Pass
 // the entities whose addresses may be resolved directly by a signed RIP-relative displacement
-// (e.g. local definitions in the small code model) in `direct_symbols`.
+// (e.g. local definitions in the small code model) in `direct_symbols`. Pass default-visible
+// data symbols in `external_data` so their addresses load through the ELF GOT.
 export std::expected<MachineCode, std::string> compile_function(const l2::Function& body,
-                                                                std::span<const ir::EntityId> direct_symbols = {});
+                                                                std::span<const ir::EntityId> direct_symbols = {},
+                                                                std::span<const ir::EntityId> external_data = {});
 
 namespace {
 
@@ -144,8 +146,10 @@ std::expected<Frame, std::string> layout(const l2::Function& body) {
 
 class Emitter {
  public:
-  Emitter(const l2::Function& body, const Frame& frame, std::span<const ir::EntityId> direct_symbols)
-      : body_(body), frame_(frame), direct_symbols_(direct_symbols), block_offsets_(body.blocks.size()) {}
+  Emitter(const l2::Function& body, const Frame& frame, std::span<const ir::EntityId> direct_symbols,
+          std::span<const ir::EntityId> external_data)
+      : body_(body), frame_(frame), direct_symbols_(direct_symbols), external_data_(external_data),
+        block_offsets_(body.blocks.size()) {}
 
   std::expected<MachineCode, std::string> run() {
     e_.emit({0x55});  // push rbp
@@ -172,6 +176,7 @@ class Emitter {
   const l2::Function& body_;
   const Frame& frame_;
   std::span<const ir::EntityId> direct_symbols_;
+  std::span<const ir::EntityId> external_data_;
   MachineCode out_;
   Encoder e_{out_.bytes};
   std::vector<std::size_t> block_offsets_;
@@ -288,10 +293,15 @@ std::expected<void, std::string> Emitter::node(NodeId n) {
       break;
     case Op::symbol: {
       auto target = ir::EntityId(std::uint32_t(imms[0]));
-      if (!std::ranges::contains(direct_symbols_, target))
+      if (std::ranges::contains(direct_symbols_, target)) {
+        e_.emit({0x48, 0x8d, 0x05});  // lea rax, [rip + disp32]
+        relocation(RelocKind::pc32, target);
+      } else if (std::ranges::contains(external_data_, target)) {
+        e_.emit({0x48, 0x8b, 0x05});  // mov rax, [rip + GOT slot]
+        relocation(RelocKind::rex_gotpcrelx, target);
+      } else {
         return at_node(n, op, "symbol address needs a direct RIP-relative reference");
-      e_.emit({0x48, 0x8d, 0x05});  // lea rax, [rip + disp32]
-      relocation(RelocKind::pc32, target);
+      }
       break;
     }
     case Op::alloca: e_.address(rax, rbp, frame_.objects[raw(n)]); break;
@@ -394,11 +404,12 @@ std::expected<void, std::string> Emitter::node(NodeId n) {
 }  // namespace
 
 std::expected<MachineCode, std::string> compile_function(const l2::Function& body,
-                                                         std::span<const ir::EntityId> direct_symbols) {
+                                                         std::span<const ir::EntityId> direct_symbols,
+                                                         std::span<const ir::EntityId> external_data) {
   if (auto valid = l2::verify(body); !valid) return std::unexpected(valid.error());
   auto frame = layout(body);
   if (!frame) return std::unexpected(frame.error());
-  return Emitter(body, *frame, direct_symbols).run();
+  return Emitter(body, *frame, direct_symbols, external_data).run();
 }
 
 }  // namespace ycxx::x86_64
