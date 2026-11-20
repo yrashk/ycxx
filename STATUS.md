@@ -1659,9 +1659,9 @@ Fable decided the representation (ast.md §6.6); the Opus session wrote the code
 ## Linux resource `<float.h>` and `<limits.h>` (#475)
 
 - Direct `<float.h>` shares the target's floating-point macros with the pinned libycxx
-  `<cfloat>` ([cfloat.syn]).
+  `<cfloat>` ([cfloat.syn]). The resource uses the macro-only provider for C linkage.
 - Linux `<limits.h>` supplies the compiler's target-dependent integer limits and widths
-  from libycxx `<climits>` before entering glibc's header. The resource scopes glibc's
+  from libycxx's macro-only `<climits>` provider before entering glibc's header. The resource scopes glibc's
   continuation marker to that inclusion and lets glibc supply the locale bound and POSIX
   limits. Other libc providers keep their normal `<limits.h>`, and the resource can
   supply compiler limits when a sysroot has no provider ([climits.syn]).
