@@ -2714,6 +2714,9 @@ public:
   // operator()'s locals, which constant evaluation reads before the part is committed.
   std::vector<ast::ClosureDef> closures;
   std::vector<std::vector<ast::LocalRec>> closure_locals;
+  static bool closure_has_code(const World& w, const ast::ClosureDef& c) {
+    return !(c.flags & closure_flag::pattern) && !w.types.is_dependent(c.call_type);
+  }
   // A member of a closure type: its function call operator or static invoker, constexpr when it
   // can be ([expr.prim.lambda.closure]/5: the operator is constexpr if it satisfies the
   // requirements; a constant evaluation that it does not satisfy fails anyway).

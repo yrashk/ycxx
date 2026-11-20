@@ -5288,6 +5288,7 @@ void Program::special_members(u32 item, EntityId cls, sema::ClassRec& rec) {
   QualType ct = types.class_type(cls);
   bool user_copy = false;
   bool user_move = false;
+  bool user_move_for_assignment = false;
   EntityId user_dtor = EntityId::none;
   for (const sema::MemberDeclRec& m : rec.members) {
     if (m.is_dtor) user_dtor = m.entity;
@@ -5305,6 +5306,7 @@ void Program::special_members(u32 item, EntityId cls, sema::ClassRec& rec) {
         types.canonical(sema::Types::unqualified(types.referee(fr.params[0]))) == types.canonical(ct)) {
       if (types.rec(fr.params[0]).rvalue_ref) {
         user_move = true;  // a move constructor, user-provided unless deleted (no `= default` yet)
+        user_move_for_assignment |= !m.is_template;
         rec.move_usable = !m.is_deleted;
         rec.move_nontrivial = !m.is_deleted;
         continue;
@@ -5403,7 +5405,7 @@ void Program::special_members(u32 item, EntityId cls, sema::ClassRec& rec) {
             std::ranges::all_of(rec.fields, [&](const sema::FieldRec& f) { return pod_type(f.type); }) &&
             std::ranges::all_of(rec.bases, [&](const sema::BaseRec& b) { return pod_type(types.class_type(b.cls)); }) &&
             (rec.fields.empty() || !data_in_bases);
-  declare_copy_assignment(item, cls, rec, user_move);
+  declare_copy_assignment(item, cls, rec, user_move_for_assignment);
 }
 
 void Program::declare_copy_assignment(u32 item, EntityId cls, sema::ClassRec& rec, bool user_move) {
@@ -5945,13 +5947,22 @@ void Program::instantiate_all() {
       if (member_patterns_.contains(std::to_underlying(e))) work.push_back({e, ast::Loc{at, 0}});
     }
   };
+  const auto required_part = [&](NodeId root, ast::SeqId<ast::ClosureDef> closures, ItemId at) {
+    required_members(root, at);
+    for (const auto& closure : w_->ins.seqs.elements(closures)) {
+      if (!sema::Sema::closure_has_code(*w_, closure)) continue;
+      required_members(closure.body, at);
+      required_members(closure.invoker_body, at);
+    }
+  };
   for (u32 k = 0; k < items_->items.size(); ++k) {
     if (item_cells_[k]) {
       work.insert(work.end(), item_cells_[k]->demands.begin(), item_cells_[k]->demands.end());
       // A namespace-scope variable's initializer, and its destructor ([basic.start.term]), are code
       // of the unit's initialization function.
       if (!templated_body(k) && !in_class_[k]) {
-        required_members(item_cells_[k]->value.tree, id(k));
+        const auto& part = item_cells_[k]->value;
+        required_part(part.tree, part.closures, id(k));
         for (const ast::DeclSema& d : w_->ins.seqs.elements(item_cells_[k]->value.decls))
           if (d.kind == ast::DeclKind::variable && d.entity != EntityId::none && (d.flags & sema::decl_flag::definition)) {
             QualType t = d.type;
@@ -5965,7 +5976,8 @@ void Program::instantiate_all() {
       work.insert(work.end(), class_cells_[k]->demands.begin(), class_cells_[k]->demands.end());
     if (body_cells_[k]) {
       work.insert(work.end(), body_cells_[k]->demands.begin(), body_cells_[k]->demands.end());
-      if (!templated_body(k)) required_members(body_cells_[k]->value.tree, id(k));
+      const auto& part = body_cells_[k]->value;
+      if (!templated_body(k)) required_part(part.tree, part.closures, id(k));
     }
   }
   // The synthesized special members' bodies, those of classes instantiated as the worklist runs
@@ -6008,7 +6020,7 @@ void Program::instantiate_all() {
       work.push_back(d);
       depth.push_back(depth[i] + 1);
     }
-    required_members(in->body.value.tree, id(in->item));
+    required_part(in->body.value.tree, in->body.value.closures, id(in->item));
     walk_synthesized();
     depth.resize(work.size(), depth[i] + 1);
   }
