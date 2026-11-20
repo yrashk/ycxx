@@ -1829,6 +1829,10 @@ What the process allocates, attributed to the engine's cells, in the trace and t
   template member specialization instantiated where it is named ([temp.inst]/8); its own body
   sees the type once a return deduced it. The back end and the interpreter get the deduced type
   with the body. Mangling keeps a template's declared placeholder as `Da`/`Dc`.
+- **Linux direct calls:** the AMD64 ABI check uses the callee definition's deduced signature
+  when the declaration still needs its result type. The definition is already in the translation
+  unit. Calls can return supported `auto` and `decltype(auto)` results, including references and
+  pointers. [#441](https://github.com/yrashk/ycxx/issues/441)
 - **Calls through pointers to functions:** irgen emits `call_ind` (`Gen::call_pointer`), which
   lowering, AArch64 selection and the interpreter already had; constant evaluation calls through
   them too.
