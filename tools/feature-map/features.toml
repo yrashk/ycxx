@@ -1620,8 +1620,9 @@ struct S { int v; S(int x) : v(x) {} explicit operator bool() const { return v !
 int f(S s) { return s.v; }
 int main() { S s = 3; int i = s; return (s && f(2) == 2 && i == 3) ? 0 : 1; }
 '''
-status = 'missing'
-issues = [157, 219]
+status = 'partial'
+issues = [157, 219, 339]
+note = 'In-class conversion-function declarations can use dependent class aliases as targets'
 
 [[feature]]
 id = 'class-explicit-bool'

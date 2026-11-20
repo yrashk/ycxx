@@ -971,6 +971,10 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   data members (in-class `static const`/`constexpr` values, out-of-class definitions) are entities
   scoped to their class (`EntityRec::scope`); `class_def` lists them in `ClassRec::members`.
   A qualified declarator `C::m` defines the member C declares with that type.
+- In-class conversion-function declarations ([class.conv.fct], #339) can use a class alias
+  as the target, including a dependent alias in a class template. The canonical target type
+  and the member function's qualifiers distinguish declarations. General conversion
+  selection remains tracked in #339.
 - Bodies of member functions are complete-class contexts: class member lookup comes before
   namespace lookup, and their class is complete there. `This` and implicit member access
   (`Member` on `this`), bound member functions (a `Member` of type `bound_member` that only a call
