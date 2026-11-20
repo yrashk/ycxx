@@ -136,8 +136,34 @@ enum class binding : std::uint8_t {
   hidden,  // resolved across objects, not exported (Mach-O private extern)
 };
 
+// Generated names own their spelling. ELF input names can share one immutable string table.
+class symbol_name {
+  struct table_slice {
+    std::shared_ptr<const std::string> table;
+    std::size_t offset, length;
+  };
+  std::variant<std::string, table_slice> storage_;
+
+public:
+  symbol_name() = default;
+  symbol_name(std::string name) : storage_(std::move(name)) {}
+  symbol_name(const char* name) : symbol_name(std::string(name)) {}
+  symbol_name(std::shared_ptr<const std::string> table, std::size_t offset, std::size_t length)
+    pre(table && offset <= table->size() && length <= table->size() - offset)
+    : storage_(table_slice{std::move(table), offset, length}) {}
+
+  std::string_view view() const noexcept {
+    if (const auto* owned = std::get_if<std::string>(&storage_)) return *owned;
+    const auto& slice = std::get<table_slice>(storage_);
+    return slice.table ? std::string_view(slice.table->data() + slice.offset, slice.length) : std::string_view{};
+  }
+  // The structural fingerprint treats a name as text, regardless of its storage.
+  operator std::string_view() const noexcept { return view(); }
+  bool operator==(const symbol_name& other) const noexcept { return view() == other.view(); }
+};
+
 struct symbol {
-  std::string name;
+  symbol_name name;
   binding bind = binding::global;
   std::optional<std::uint32_t> section;  // index into `object::sections`; none: undefined
   std::uint64_t offset = 0;              // in the section
@@ -145,6 +171,7 @@ struct symbol {
   // Present for an ELF function definition. Zero records an unknown byte extent.
   std::optional<std::uint64_t> function_size = std::nullopt;
 
+  std::string_view name_view() const noexcept { return name.view(); }
   bool defined() const noexcept { return section.has_value(); }
   bool operator==(const symbol&) const = default;
 };
@@ -153,7 +180,7 @@ enum class target : std::uint8_t { aarch64_macos, x86_64_linux };
 
 // An input ELF COMDAT group after relocation sections have been attached to their targets.
 struct comdat_group {
-  std::string signature;
+  symbol_name signature;
   std::vector<std::uint32_t> members;  // indices into object::sections
 
   bool operator==(const comdat_group&) const = default;
@@ -183,7 +210,7 @@ struct object {
   // The undefined symbol `name`, added on first use.
   std::uint32_t reference(std::string_view name) {
     for (std::uint32_t i = 0; i < symbols.size(); ++i) {
-      if (!symbols[i].defined() && symbols[i].name == name) return i;
+      if (!symbols[i].defined() && symbols[i].name_view() == name) return i;
     }
     return add_symbol({std::string(name), binding::global, std::nullopt, 0, false});
   }

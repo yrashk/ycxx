@@ -308,21 +308,22 @@ private:
       for (std::uint32_t j = 0; j < o.symbols.size(); ++j) {
         const auto& s = o.symbols[j];
         if (!s.defined()) continue;
+        const auto name = s.name_view();
         if (*s.section >= o.sections.size()) {
-          fail(std::format("{}: symbol {} names a bad section", o.name, s.name));
+          fail(std::format("{}: symbol {} names a bad section", o.name, name));
           continue;
         }
         if (s.bind == obj::binding::local || dropped(o.sections[*s.section])) continue;
         if (is_common(o, s)) {
-          auto& al = common_align_[s.name];
+          auto& al = common_align_[name];
           al = std::max(al, o.sections[*s.section].align_log2);
         }
-        auto [it, inserted] = globals_.try_emplace(s.name, symref{i, j});
+        auto [it, inserted] = globals_.try_emplace(name, symref{i, j});
         if (inserted) continue;
         const auto& prev_obj = objs_[it->second.obj];
         const auto& prev = prev_obj.symbols[it->second.sym];
         if (prev.weak && !s.weak) it->second = {i, j};
-        else if (!prev.weak && !s.weak) fail(std::format("duplicate symbol {} in {} and {}", s.name, prev_obj.name, o.name));
+        else if (!prev.weak && !s.weak) fail(std::format("duplicate symbol {} in {} and {}", name, prev_obj.name, o.name));
         else if (prev.weak && s.weak && is_common(o, s) && is_common(prev_obj, prev) &&
                  o.sections[*s.section].size() > prev_obj.sections[*prev.section].size()) {
           it->second = {i, j};  // tentative definitions merge to the largest
@@ -335,8 +336,9 @@ private:
     std::map<std::string, std::pair<bool, std::uint32_t>, std::less<>> undefined;
     for (std::uint32_t i = 0; i < objs_.size(); ++i) {
       for (const auto& s : objs_[i].symbols) {
-        if (s.defined() || globals_.contains(s.name) || synthetic(s.name)) continue;
-        auto [it, inserted] = undefined.try_emplace(s.name, s.weak, i);
+        const auto name = s.name_view();
+        if (s.defined() || globals_.contains(name) || synthetic(name)) continue;
+        auto [it, inserted] = undefined.try_emplace(name, s.weak, i);
         if (!inserted) it->second.first = it->second.first && s.weak;
       }
     }
@@ -364,9 +366,10 @@ private:
     const auto& s = objs_[oi].symbols[si];
     symref def{oi, si};
     if (!s.defined() || s.bind != obj::binding::local) {
-      if (auto it = globals_.find(s.name); it != globals_.end()) def = it->second;
-      else if (synthetic(s.name)) return defined_at{image_base};
-      else return imported{import_index_.at(s.name)};
+      const auto name = s.name_view();
+      if (auto it = globals_.find(name); it != globals_.end()) def = it->second;
+      else if (synthetic(name)) return defined_at{image_base};
+      else return imported{import_index_.at(name)};
     }
     const auto& d = objs_[def.obj].symbols[def.sym];
     const auto& p = *placed_[def.obj][*d.section];
@@ -376,9 +379,10 @@ private:
   got_target got_key(std::uint32_t oi, std::uint32_t si) const {
     const auto& s = objs_[oi].symbols[si];
     if (s.defined() && s.bind == obj::binding::local) return {false, oi, si};
-    if (auto it = globals_.find(s.name); it != globals_.end()) return {false, it->second.obj, it->second.sym};
-    if (synthetic(s.name)) return {false, synthetic_obj, 0};
-    return {true, import_index_.at(s.name), 0};
+    const auto name = s.name_view();
+    if (auto it = globals_.find(name); it != globals_.end()) return {false, it->second.obj, it->second.sym};
+    if (synthetic(name)) return {false, synthetic_obj, 0};
+    return {true, import_index_.at(name), 0};
   }
 
   // 2. Output sections, contributions, stubs and GOT slots.
@@ -430,7 +434,7 @@ private:
         std::uint8_t align = s.align_log2;
         for (const auto& sym : o.symbols) {
           if (sym.section == j && sym.bind != obj::binding::local && is_common(o, sym)) {
-            if (auto c = common_align_.find(sym.name); c != common_align_.end()) align = std::max(align, c->second);
+            if (auto c = common_align_.find(sym.name_view()); c != common_align_.end()) align = std::max(align, c->second);
           }
         }
         const std::uint64_t a = std::uint64_t{1} << align;
@@ -488,14 +492,15 @@ private:
   bool check_placed(std::uint32_t oi, std::uint32_t si) {
     const auto& o = objs_[oi];
     const auto& s = o.symbols[si];
+    const auto name = s.name_view();
     if (!s.defined()) return true;
     if (*s.section >= o.sections.size()) {
-      fail(std::format("{}: symbol {} names a bad section", o.name, s.name));
+      fail(std::format("{}: symbol {} names a bad section", o.name, name));
       return false;
     }
-    if (s.bind == obj::binding::local ? !placed_[oi][*s.section] : !globals_.contains(s.name)) {
+    if (s.bind == obj::binding::local ? !placed_[oi][*s.section] : !globals_.contains(name)) {
       const auto& sec = o.sections[*s.section];
-      fail(std::format("{}: relocation refers to {} in the discarded section {},{}", o.name, s.name, sec.segment, sec.name));
+      fail(std::format("{}: relocation refers to {} in the discarded section {},{}", o.name, name, sec.segment, sec.name));
       return false;
     }
     return true;
@@ -638,7 +643,7 @@ private:
           auto set_insn = [&](std::uint32_t v) { mo::store32(out.bytes, at, v); };
           auto needs_definition = [&] {
             if (def) return true;
-            fail(std::format("{}: {} is imported and must be reached through the GOT", where, o.symbols[r.symbol].name));
+            fail(std::format("{}: {} is imported and must be reached through the GOT", where, o.symbols[r.symbol].name_view()));
             return false;
           };
           switch (r.kind) {
@@ -823,17 +828,18 @@ private:
     for (std::uint32_t i = 0; i < objs_.size(); ++i) {
       for (std::uint32_t j = 0; j < objs_[i].symbols.size(); ++j) {
         const auto& s = objs_[i].symbols[j];
-        if (!s.defined() || !placed_[i][*s.section] || s.name.empty()) continue;
-        if (s.bind == obj::binding::local && (s.name[0] == 'l' || s.name[0] == 'L')) continue;  // temporary labels
+        const auto name = s.name_view();
+        if (!s.defined() || !placed_[i][*s.section] || name.empty()) continue;
+        if (s.bind == obj::binding::local && (name[0] == 'l' || name[0] == 'L')) continue;  // temporary labels
         if (s.bind != obj::binding::local) {
-          const auto it = globals_.find(s.name);
+          const auto it = globals_.find(name);
           if (it == globals_.end() || it->second != symref{i, j}) continue;
         }
         const std::uint64_t a = std::get<defined_at>(resolve_symbol(i, j)).addr;
         const auto sect = static_cast<std::uint8_t>(placed_[i][*s.section]->out + 1);
         // A merged tentative definition is an ordinary definition in the executable.
         const bool weak = s.weak && !is_common(objs_[i], s);
-        const sym_entry e{s.name, mo::n_sect, sect, static_cast<std::uint16_t>(weak ? mo::n_weak_def : 0), a};
+        const sym_entry e{std::string(name), mo::n_sect, sect, static_cast<std::uint16_t>(weak ? mo::n_weak_def : 0), a};
         if (s.bind == obj::binding::global) extdefs.push_back({e.name, static_cast<std::uint8_t>(mo::n_sect | mo::n_ext), e.sect, e.desc, e.value});
         else locals.push_back(e);
       }

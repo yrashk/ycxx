@@ -329,7 +329,7 @@ extern "C" {
     const auto& o = *result.object;
     auto symbol = [&](std::string_view name) {
       std::string spelled = target == &ast::aarch64_darwin ? std::format("_{}", name) : std::string(name);
-      return std::ranges::find(o.symbols, spelled, &ycxx::obj::symbol::name);
+      return std::ranges::find(o.symbols, std::string_view(spelled), &ycxx::obj::symbol::name_view);
     };
     auto relocates = [&](std::string_view slot, std::string_view base, std::int64_t addend, bool defined) {
       const auto from = symbol(slot), to = symbol(base);

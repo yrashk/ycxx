@@ -125,7 +125,7 @@ bool all_zero(std::span<const std::uint8_t> record) {
 
 bool valid_string_table(const section_header& header, std::span<const std::uint8_t> table) {
   return header.type == sht_strtab && header.flags == 0 && header.link == 0 && header.info == 0 &&
-         header.entsize == 0 && !table.empty() && table.front() == 0 && table.back() == 0;
+         header.entsize == 0 && (table.empty() || (table.front() == 0 && table.back() == 0));
 }
 
 bool plain_metadata(const section_header& header) {
@@ -226,21 +226,22 @@ std::expected<bytes, std::string> write_object(const object& o) {
     for (std::size_t i = 0; i < o.symbols.size(); ++i) {
       const symbol& s = o.symbols[i];
       if ((s.bind == binding::local) != local) continue;
-      if (s.name.find('\0') != s.name.npos) return fail("ELF symbol name contains a NUL byte");
-      if (s.name.size() >= std::numeric_limits<std::uint32_t>::max() - strtab.size())
+      const auto name = s.name_view();
+      if (name.contains('\0')) return fail("ELF symbol name contains a NUL byte");
+      if (name.size() >= std::numeric_limits<std::uint32_t>::max() - strtab.size())
         return fail("ELF symbol string table is too large");
-      if (local && (s.weak || !s.defined())) return fail(std::format("invalid local symbol '{}'", s.name));
+      if (local && (s.weak || !s.defined())) return fail(std::format("invalid local symbol '{}'", name));
       if (s.defined() && (*s.section >= o.sections.size() || s.offset > o.sections[*s.section].size()))
-        return fail(std::format("symbol '{}' is outside its section", s.name));
+        return fail(std::format("symbol '{}' is outside its section", name));
       if (s.function_size) {
         if (!s.defined() || !sections[*s.section + 1].contains_code_at(s.offset))
-          return fail(std::format("function symbol '{}' is not in executable code", s.name));
+          return fail(std::format("function symbol '{}' is not in executable code", name));
         if (*s.function_size > sections[*s.section + 1].size - s.offset)
-          return fail(std::format("function symbol '{}' is outside its section", s.name));
+          return fail(std::format("function symbol '{}' is outside its section", name));
       }
 
       symbol_indices[i] = next_symbol++;
-      append(symtab, append_name(strtab, s.name));
+      append(symtab, append_name(strtab, name));
       const auto bind = local ? stb_local : s.weak ? stb_weak : stb_global;
       append(symtab, static_cast<std::uint8_t>(bind << 4 | (s.function_size ? stt_func : stt_notype)));
       append(symtab, s.bind == binding::hidden ? stv_hidden : stv_default);
@@ -350,7 +351,7 @@ std::expected<object, std::string> read_object(std::span<const std::uint8_t> fil
   auto contents = [&](const section_header& h) { return file.subspan(h.offset, h.size); };
   const auto& names_header = headers[shstrndx];
   const auto& symtab = headers[symtab_index];
-  if (names_header.type != sht_strtab || !valid_string_table(names_header, contents(names_header)))
+  if (names_header.size == 0 || !valid_string_table(names_header, contents(names_header)))
     return fail("invalid ELF section name string table");
   if (symtab.link == 0 || symtab.link >= shnum || headers[symtab.link].type != sht_strtab ||
       !valid_string_table(headers[symtab.link], contents(headers[symtab.link])))
@@ -365,12 +366,31 @@ std::expected<object, std::string> read_object(std::span<const std::uint8_t> fil
   const auto symbol_table = contents(symtab);
   if (!all_zero(symbol_table.first(symbol_size))) return fail("invalid null ELF symbol");
 
+  const auto name_storage = std::make_shared<const std::string>(symbol_names);
+  std::vector<std::size_t> name_lengths(symbol_count);
+  {
+    struct name_index { std::uint32_t offset, symbol; };
+    std::vector<name_index> named;
+    for (std::uint32_t i = 1; i < symbol_count; ++i) {
+      const auto offset = load<std::uint32_t>(symbol_table, symbol_size * i);
+      if (offset != 0 && offset < symbol_names.size()) named.push_back({offset, i});
+    }
+    std::ranges::sort(named, {}, &name_index::offset);
+    std::size_t end = 0;
+    for (const auto [offset, symbol] : named) {
+      if (offset > end) end = symbol_names.find('\0', offset);
+      name_lengths[symbol] = end - offset;
+    }
+  }
+  const auto read_name = [&](std::uint32_t symbol, std::uint32_t offset) {
+    return offset == 0 ? symbol_name{} : symbol_name(name_storage, offset, name_lengths[symbol]);
+  };
+
   object o;
   o.arch = target::x86_64_linux;
   // Keep section-header identities until group flags and the relocation domain are validated.
   std::vector<std::uint32_t> group_owners(shnum);
   std::vector<bool> signature_symbols(symbol_count);
-  auto signature_name_bytes = symbol_names.size();
   for (std::uint32_t i = 1; i < shnum; ++i) {
     const auto& h = headers[i];
     if (h.type != sht_group) continue;
@@ -381,13 +401,10 @@ std::expected<object, std::string> read_object(std::span<const std::uint8_t> fil
     const auto name_index = load<std::uint32_t>(symbol_table, symbol_size * h.info);
     if (name_index >= symbol_names.size() || symbol_names[name_index] == '\0')
       return fail(std::format("invalid ELF group signature name in section {}", i));
-    const auto signature = name_at(symbol_names, name_index);
-    if (signature.size() > signature_name_bytes) return fail("ELF group signatures exceed the string table size");
-    signature_name_bytes -= signature.size();
     signature_symbols[h.info] = true;
     const auto words = contents(h);
     if (load<std::uint32_t>(words, 0) != grp_comdat) return fail(std::format("unsupported ELF group flags in section {}", i));
-    o.comdat_groups.push_back({std::string(signature), {}});
+    o.comdat_groups.push_back({read_name(h.info, name_index), {}});
     for (std::size_t offset = 4; offset < words.size(); offset += 4) {
       const auto member = load<std::uint32_t>(words, offset);
       if (member <= i || member >= shnum || (headers[member].flags & shf_group) == 0 || group_owners[member] != 0)
@@ -434,7 +451,8 @@ std::expected<object, std::string> read_object(std::span<const std::uint8_t> fil
   }
 
   for (const auto& group : o.comdat_groups)
-    if (group.members.empty()) return fail(std::format("ELF COMDAT group '{}' has no content sections", group.signature));
+    if (group.members.empty())
+      return fail(std::format("ELF COMDAT group '{}' has no content sections", group.signature.view()));
   o.symbols.reserve(symbol_count - 1);
   struct input_symbol {
     std::optional<std::uint32_t> retained;
@@ -442,8 +460,6 @@ std::expected<object, std::string> read_object(std::span<const std::uint8_t> fil
     std::uint32_t local_group = 0;
   };
   std::vector<input_symbol> symbols(symbol_count);
-  // The writer stores each name separately. Bound copying even if input names share suffixes.
-  auto remaining_name_bytes = symbol_names.size();
   for (std::uint32_t i = 1; i < symbol_count; ++i) {
     const auto record = symbol_table.subspan(symbol_size * i, symbol_size);
     const auto name_index = load<std::uint32_t>(record, 0);
@@ -453,7 +469,7 @@ std::expected<object, std::string> read_object(std::span<const std::uint8_t> fil
     const auto index = load<std::uint16_t>(record, 6);
     const auto value = load<std::uint64_t>(record, 8);
     const auto size = load<std::uint64_t>(record, 16);
-    if (name_index >= symbol_names.size()) return fail(std::format("invalid name for ELF symbol {}", i));
+    if (name_index != 0 && name_index >= symbol_names.size()) return fail(std::format("invalid name for ELF symbol {}", i));
     const bool local = bind == stb_local;
     if ((type != stt_notype && type != stt_object && type != stt_func && type != stt_section && type != stt_file) ||
         (type != stt_object && type != stt_func && size != 0) || bind > stb_weak ||
@@ -461,7 +477,7 @@ std::expected<object, std::string> read_object(std::span<const std::uint8_t> fil
       return fail(std::format("unsupported type, size, binding or visibility for ELF symbol {}", i));
     if ((i < symtab.info) != local) return fail("ELF local symbols must precede nonlocal symbols");
     if (type == stt_file) {
-      if (!local || index != shn_abs || value != 0 || symbol_names[name_index] == '\0')
+      if (!local || index != shn_abs || value != 0 || name_index == 0 || symbol_names[name_index] == '\0')
         return fail(std::format("invalid ELF file symbol {}", i));
       continue;
     }
@@ -487,11 +503,8 @@ std::expected<object, std::string> read_object(std::span<const std::uint8_t> fil
         return fail(std::format("ELF function symbol {} is not in executable code", i));
       function_size = size;
     }
-    const auto symbol_name = name_at(symbol_names, name_index);
-    if (symbol_name.size() > remaining_name_bytes) return fail("ELF symbol names exceed the string table size");
-    remaining_name_bytes -= symbol_name.size();
     const auto model_binding = local ? binding::local : visibility == stv_hidden ? binding::hidden : binding::global;
-    symbols[i].retained = o.add_symbol({std::string(symbol_name), model_binding, sections[index], value, bind == stb_weak,
+    symbols[i].retained = o.add_symbol({read_name(i, name_index), model_binding, sections[index], value, bind == stb_weak,
                                        function_size});
     if (local) symbols[i].local_group = group_owners[index];
   }

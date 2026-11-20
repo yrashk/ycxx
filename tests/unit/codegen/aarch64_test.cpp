@@ -255,8 +255,8 @@ void test_determinism() {
   }
   check(a->sections.size() == 2 && a->sections[0].name == "__text" && a->sections[1].name == "__cstring",
         "text, then cstring");
-  check(a->symbols.size() == 3 && a->symbols[0].name == "_main" && a->symbols[1].name == "l_.str.100" &&
-            a->symbols[2].name == "_puts" && !a->symbols[2].defined(),
+  check(a->symbols.size() == 3 && a->symbols[0].name_view() == "_main" && a->symbols[1].name_view() == "l_.str.100" &&
+            a->symbols[2].name_view() == "_puts" && !a->symbols[2].defined(),
         "defined symbols in entity order, then references in order of use");
   auto bytes = obj::macho::write_object(*a);
   auto back = obj::macho::read_object(bytes, "hello.o");

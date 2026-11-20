@@ -163,7 +163,7 @@ sorted_symbols sort_symbols(const object& o) {
     else if (sym.bind == binding::local) s.order.push_back(i);
     else ext.push_back(i);
   }
-  auto by_name = [&](std::uint32_t a, std::uint32_t b) { return o.symbols[a].name < o.symbols[b].name; };
+  auto by_name = [&](std::uint32_t a, std::uint32_t b) { return o.symbols[a].name_view() < o.symbols[b].name_view(); };
   std::ranges::stable_sort(ext, by_name);
   std::ranges::stable_sort(undef, by_name);
   s.nlocal = static_cast<std::uint32_t>(s.order.size());
@@ -268,7 +268,7 @@ std::vector<std::uint8_t> write_object(const object& o) {
   strtab.u8(0);
   std::vector<std::uint32_t> strx(syms.order.size());
   for (std::size_t f = 0; f < syms.order.size(); ++f) {
-    const auto& name = o.symbols[syms.order[f]].name;
+    const auto name = o.symbols[syms.order[f]].name_view();
     if (name.empty()) continue;
     strx[f] = static_cast<std::uint32_t>(strtab.size());
     strtab.raw(name);
@@ -453,15 +453,18 @@ std::expected<object, std::string> read_object(std::span<const std::uint8_t> b, 
     const std::uint64_t value = load64(b, s + 8);
     if (type & n_stab) continue;
     if (strx >= strsize && strx != 0) return fail("symbol name lies outside the string table");
+    std::string name;
+    for (std::size_t k = stroff + strx; strx != 0 && k < stroff + strsize && b[k] != 0; ++k)
+      name.push_back(static_cast<char>(b[k]));
     symbol sym;
-    for (std::size_t k = stroff + strx; strx != 0 && k < stroff + strsize && b[k] != 0; ++k) sym.name.push_back(static_cast<char>(b[k]));
+    sym.name = std::move(name);
     sym.bind = !(type & n_ext) ? binding::local : (type & n_pext) ? binding::hidden : binding::global;
     switch (type & n_type) {
       case n_undf:
         if (value != 0) {
           // A tentative definition (common symbol): a weak definition alone in a zero-fill
           // __DATA,__common section, which the linker merges to the largest size.
-          if (!(type & n_ext)) return fail(std::format("common symbol {} is not external", sym.name));
+          if (!(type & n_ext)) return fail(std::format("common symbol {} is not external", sym.name_view()));
           auto common = section::standard(standard_section::bss);
           common.name = "__common";
           common.align_log2 = static_cast<std::uint8_t>((desc >> 8) & 0x0f);  // GET_COMM_ALIGN
@@ -473,12 +476,12 @@ std::expected<object, std::string> read_object(std::span<const std::uint8_t> b, 
         sym.weak = (desc & n_weak_ref) != 0;
         break;
       case n_sect:
-        if (sect == 0 || sect > raw.size()) return fail(std::format("symbol {} has a bad section", sym.name));
+        if (sect == 0 || sect > raw.size()) return fail(std::format("symbol {} has a bad section", sym.name_view()));
         sym.section = sect - 1u;
         sym.offset = value - raw[sect - 1].addr;
         sym.weak = (desc & n_weak_def) != 0;
         break;
-      default: return fail(std::format("symbol {}: absolute and indirect symbols are not supported", sym.name));
+      default: return fail(std::format("symbol {}: absolute and indirect symbols are not supported", sym.name_view()));
     }
     model_index[i] = o.add_symbol(std::move(sym));
   }

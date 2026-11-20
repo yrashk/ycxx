@@ -152,26 +152,27 @@ std::unexpected<std::string> section_error(const obj::object& o, const obj::sect
 
 std::expected<void, std::string> register_symbols(const obj::object& o, std::size_t oi, definitions& globals) {
   for (const obj::symbol& s : o.symbols) {
+    const auto name = s.name_view();
     if (s.bind != binding::local && s.bind != binding::global && s.bind != binding::hidden) {
-      return object_error(o, std::format("unsupported binding for symbol '{}'", s.name));
+      return object_error(o, std::format("unsupported binding for symbol '{}'", name));
     }
-    if ((s.name.empty() && s.bind != binding::local) || s.name.contains('\0')) {
+    if ((name.empty() && s.bind != binding::local) || name.contains('\0')) {
       return object_error(o, "invalid ELF symbol name");
     }
     if (s.bind == binding::local && (!s.defined() || s.weak)) {
-      return object_error(o, std::format("invalid local symbol '{}'", s.name));
+      return object_error(o, std::format("invalid local symbol '{}'", name));
     }
     if (!s.defined()) {
-      if (s.offset != 0) return object_error(o, std::format("undefined symbol '{}' has a section offset", s.name));
+      if (s.offset != 0) return object_error(o, std::format("undefined symbol '{}' has a section offset", name));
       continue;
     }
     if (*s.section >= o.sections.size() || s.offset > o.sections[*s.section].size()) {
-      return object_error(o, std::format("symbol '{}' is outside its section", s.name));
+      return object_error(o, std::format("symbol '{}' is outside its section", name));
     }
     if (s.bind == binding::local) continue;
-    auto [existing, inserted] = globals.try_emplace(s.name, definition{oi, &s});
+    auto [existing, inserted] = globals.try_emplace(name, definition{oi, &s});
     if (inserted || s.weak) continue;
-    if (!existing->second.symbol->weak) return object_error(o, std::format("duplicate symbol '{}'", s.name));
+    if (!existing->second.symbol->weak) return object_error(o, std::format("duplicate symbol '{}'", name));
     existing->second = {oi, &s};
   }
   return {};
@@ -345,8 +346,9 @@ std::expected<std::vector<obj::object>, std::string> select_archive_members(std:
     if (auto registered = register_symbols(o, objects.size() - 1, globals); !registered) return registered;
     for (const auto& s : o.symbols) {
       if (s.bind == binding::local) continue;
-      if (s.defined()) outstanding.erase(s.name);
-      else if (!s.weak && !globals.contains(s.name) && outstanding.emplace(s.name).second) offer(s.name);
+      const auto name = s.name_view();
+      if (s.defined()) outstanding.erase(name);
+      else if (!s.weak && !globals.contains(name) && outstanding.emplace(name).second) offer(name);
     }
     return {};
   };
@@ -381,7 +383,7 @@ std::expected<std::vector<obj::object>, std::string> select_archive_members(std:
       auto object = obj::elf::read_object(data, name);
       if (!object) return std::unexpected(object.error());
       if (!std::ranges::any_of(object->symbols, [&](const obj::symbol& s) {
-            return s.defined() && s.bind != binding::local && s.name == symbol;
+            return s.defined() && s.bind != binding::local && s.name_view() == symbol;
           })) {
         return object_error(*object, std::format("archive index symbol '{}' is not defined by the member", symbol));
       }
@@ -402,7 +404,7 @@ std::expected<void, std::string> select_comdat_groups(std::span<obj::object> obj
     std::vector<std::uint8_t> omitted(o.sections.size());
     bool any_omitted = false;
     for (const auto& group : o.comdat_groups) {
-      const bool duplicate = !signatures.insert(group.signature).second;
+      const bool duplicate = !signatures.insert(group.signature.view()).second;
       for (const auto section : group.members) {
         if (section >= omitted.size()) return object_error(o, "invalid ELF COMDAT member index");
         omitted[section] = duplicate;
@@ -436,7 +438,7 @@ std::expected<void, std::string> select_comdat_groups(std::span<obj::object> obj
     for (std::size_t si = 0; si < o.symbols.size(); ++si) {
       auto& s = o.symbols[si];
       if (s.section) {
-        if (*s.section >= omitted.size()) return object_error(o, std::format("symbol '{}' is outside its section", s.name));
+        if (*s.section >= omitted.size()) return object_error(o, std::format("symbol '{}' is outside its section", s.name_view()));
         if (omitted[*s.section]) {
           if ((uses[si] & live_use) == 0) continue;
           if (s.bind == binding::local)
@@ -508,7 +510,7 @@ std::expected<bytes, std::string> link(std::span<const obj::object> objects, std
           if (r.kind != reloc_kind::x86_64_rex_gotpcrelx) continue;
           if (r.symbol >= o.symbols.size()) return section_error(o, s, "invalid ELF relocation symbol index");
           return section_error(o, s, std::format("native dynamic ELF GOT address for '{}' is unsupported",
-                                                  o.symbols[r.symbol].name));
+                                                  o.symbols[r.symbol].name_view()));
         }
       }
       sections[std::to_underlying(kind->output)].push_back({oi, si});
@@ -520,15 +522,16 @@ std::expected<bytes, std::string> link(std::span<const obj::object> objects, std
   import_indices imports;
   for (const auto& o : objects) {
     for (const auto& s : o.symbols) {
-      if (s.defined() || s.weak || globals.contains(s.name)) continue;
+      const auto name = s.name_view();
+      if (s.defined() || s.weak || globals.contains(name)) continue;
       if (!dynamic || s.bind != binding::global)
-        return object_error(o, std::format("undefined symbol '{}'", s.name));
-      if (imports.contains(s.name)) continue;
-      const auto* provider = provided_symbol(*dynamic, s.name);
-      if (!provider) return object_error(o, std::format("undefined symbol '{}'", s.name));
+        return object_error(o, std::format("undefined symbol '{}'", name));
+      if (imports.contains(name)) continue;
+      const auto* provider = provided_symbol(*dynamic, name);
+      if (!provider) return object_error(o, std::format("undefined symbol '{}'", name));
       if (!provider->supported_function)
-        return object_error(o, std::format("unsupported ELF import '{}': expected a default-visible global function", s.name));
-      imports.try_emplace(s.name);
+        return object_error(o, std::format("unsupported ELF import '{}': expected a default-visible global function", name));
+      imports.try_emplace(name);
     }
   }
 
@@ -609,7 +612,7 @@ std::expected<bytes, std::string> link(std::span<const obj::object> objects, std
   };
   auto resolve = [&](std::size_t oi, const obj::symbol& s) -> std::optional<definition> {
     if (s.bind == binding::local) return definition{oi, &s};
-    const auto global = globals.find(s.name);
+    const auto global = globals.find(s.name_view());
     if (global == globals.end()) return std::nullopt;
     return global->second;
   };
@@ -637,24 +640,25 @@ std::expected<bytes, std::string> link(std::span<const obj::object> objects, std
         if (r.symbol >= o.symbols.size()) return section_error(o, s, "invalid ELF relocation symbol index");
         const auto offset = offsets[oi][si] + r.offset;
         const auto& symbol = o.symbols[r.symbol];
+        const auto name = symbol.name_view();
         const auto def = resolve(oi, symbol);
         if (got) {
           // The undefined-symbol scan above has already rejected missing strong definitions.
           if (!def)
             return section_error(o, s, std::format("R_X86_64_REX_GOTPCRELX for undefined weak symbol '{}' is unsupported",
-                                                    symbol.name));
+                                                    name));
           if (!canonical_got_load(s, r))
             return section_error(o, s, std::format("R_X86_64_REX_GOTPCRELX for '{}' requires a canonical "
-                                                    "64-bit RIP-relative MOV with addend -4", symbol.name));
+                                                    "64-bit RIP-relative MOV with addend -4", name));
         }
-        const auto imported = def ? imports.end() : imports.find(symbol.name);
+        const auto imported = def ? imports.end() : imports.find(name);
         if (!def && imported == imports.end() && dynamic && symbol.weak && symbol.bind == binding::global &&
-            provided_symbol(*dynamic, symbol.name))
-          return section_error(o, s, std::format("weak ELF import '{}' is unsupported", symbol.name));
+            provided_symbol(*dynamic, name))
+          return section_error(o, s, std::format("weak ELF import '{}' is unsupported", name));
         if (imported != imports.end() &&
             (r.kind != reloc_kind::x86_64_plt32 || r.addend != -4 || symbol.bind != binding::global ||
              !executable(s) || r.offset == 0 || s.bytes[r.offset - 1] != 0xe8))
-          return section_error(o, s, std::format("ELF import '{}' requires a direct call with R_X86_64_PLT32", symbol.name));
+          return section_error(o, s, std::format("ELF import '{}' requires a direct call with R_X86_64_PLT32", name));
         if (is_init_array) {
           if (!def) return section_error(o, s, ".init_array relocation has no defined target");
           const auto& code = objects[def->object].sections[*def->symbol->section];
@@ -678,13 +682,13 @@ std::expected<bytes, std::string> link(std::span<const obj::object> objects, std
           if (!delta) {
             const auto kind = got ? "R_X86_64_REX_GOTPCRELX"
                                  : r.kind == reloc_kind::x86_64_pc32 ? "R_X86_64_PC32" : "R_X86_64_PLT32";
-            return section_error(o, s, std::format("{} displacement overflows for '{}'", kind, symbol.name));
+            return section_error(o, s, std::format("{} displacement overflows for '{}'", kind, name));
           }
           value = *delta;
         }
         const auto kind = got ? patch_kind::relax_got
                               : imported != imports.end() ? patch_kind::import_call : patch_kind::ordinary;
-        patches.push_back({offset, value, width, {oi, si}, kind, symbol.name});
+        patches.push_back({offset, value, width, {oi, si}, kind, name});
       }
     }
   }
