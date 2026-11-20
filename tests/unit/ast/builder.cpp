@@ -41,7 +41,8 @@ int main() {
     DeclSema d{f_e, int_t, DeclKind::function, Linkage::external, Storage::none, Access::none, 0,
                b.seq({attr}), NodeId::none, ConstId::none, NodeId::none, params, b.seq(std::span<const TemplateParamSema>{})};
     check(in.ast.node_count() == 0, "in.ast.node_count() == 0");  // nothing interned before commit
-    item = b.commit(ItemSema{call, b.seq({d}), b.seq(std::span<const ExpansionRec>{})});
+    item = b.commit(ItemSema{call, b.seq({d}), b.seq(std::span<const ExpansionRec>{}),
+                             b.seq(std::span<const ClosureDef>{})});
   }
 
   // Exactly what the item reaches was interned: literal 1, f, the call, the attribute.

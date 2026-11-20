@@ -37,7 +37,8 @@ int main() {
                b.seq<NodeId>({}), NodeId::none, ConstId::none, NodeId::none,
                b.seq({ParamSema{EntityId::none, int_t, in.names.intern("p"), two, 0}}),
                b.seq(std::span<const TemplateParamSema>{})};
-    item = b.commit(ItemSema{call, b.seq({d}), b.seq(std::span<const ExpansionRec>{})});
+    item = b.commit(ItemSema{call, b.seq({d}), b.seq(std::span<const ExpansionRec>{}),
+                             b.seq(std::span<const ClosureDef>{})});
   }
   Fp128 body_fp = in.ast.fp(body.tree), call_fp = in.ast.fp(item.tree);
   Fp128 locals_fp = in.fp(body.locals), decls_fp = in.fp(item.decls);
