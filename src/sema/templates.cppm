@@ -721,8 +721,10 @@ public:
     QualType pc = types().canonical(p), ac = types().canonical(a);
     Cv cp = Types::cv(pc), ca = Types::cv(ac);
     TypeRec pr = types().rec(pc);
-    // `typename Q::n` is a non-deduced context ([temp.deduct.type]/5.1), as is a built-in's result.
+    // `typename Q::n` and dependent decltype operands are non-deduced contexts
+    // ([temp.deduct.type]/5), as is a built-in's result.
     if (pr.kind == TypeKind::dep_name || pr.kind == TypeKind::transform) return true;
+    if (partial_deduction_ && pr.kind == TypeKind::builtin && pr.builtin == Builtin::dependent) return true;
     if (pr.kind == TypeKind::template_param && pr.depth == depth) {
       // `cv T` from `cv' A`: T is A without cv, or with the cv `cv'` has beyond `cv`.
       if (!within(cp, ca) && !allow.more_cv) return false;
@@ -1296,20 +1298,17 @@ public:
 
   // ------------------------------------------------------------ partial specializations ([temp.spec.partial])
 
-  // The arguments of a partial specialization's parameters `params`, whose template arguments are
-  // `pattern`, for which it matches the specialization with `args` ([temp.spec.partial.match]/2):
-  // deduced from them, and substituting back to them; none if it does not match.
-  std::optional<std::vector<TemplateArg>> match_partial(std::span<const ast::TemplateParamSema> params,
+  // Deduce a partial specialization's parameters from `args`. Its pattern must still be substituted
+  // with those bindings and compared with `args` before it matches ([temp.spec.partial.match]/2).
+  std::optional<std::vector<TemplateArg>> deduce_partial(std::span<const ast::TemplateParamSema> params,
                                                         std::span<const TemplateArg> pattern, std::span<const TemplateArg> args) {
     if (params.empty()) return std::nullopt;
-    Deducing deducing(this, params);
+    Deducing deducing(this, params, true);
     u16 depth = params[0].depth;
     std::vector<std::optional<TemplateArg>> out(params.size());
     if (!deduce_args(pattern, args, depth, out) || std::ranges::any_of(out, [](const auto& a) { return !a; })) return std::nullopt;
     std::vector<TemplateArg> r;
     for (const auto& a : out) r.push_back(*a);
-    auto back = substitute_args(pattern, Bindings::of(depth, r));
-    if (!back || !std::ranges::equal(*back, args)) return std::nullopt;
     return r;
   }
   // Whether partial specialization 1 (`p1`, `a1`) is more specialized than 2 ([temp.spec.partial.order]):
@@ -1324,7 +1323,7 @@ public:
   // `args` with a unique value for each.
   bool deducible(std::span<const ast::TemplateParamSema> params, std::span<const TemplateArg> args) {
     if (params.empty()) return false;
-    Deducing deducing(this, params);
+    Deducing deducing(this, params, true);
     auto unique = substitute_args(args, unique_bindings(params));
     std::vector<std::optional<TemplateArg>> out(params.size());
     return unique && deduce_args(args, *unique, params[0].depth, out) && std::ranges::all_of(out, [](const auto& a) { return a.has_value(); });
@@ -1332,10 +1331,12 @@ public:
   bool at_least_as_specialized(std::span<const ast::TemplateParamSema> p1, std::span<const TemplateArg> a1,
                                std::span<const ast::TemplateParamSema> p2, std::span<const TemplateArg> a2) {
     if (p1.empty() || p2.empty()) return false;
-    Deducing deducing(this, p2);
     auto unique = substitute_args(a1, unique_bindings(p1));
-    std::vector<std::optional<TemplateArg>> out(p2.size());
-    return unique && deduce_args(a2, *unique, p2[0].depth, out);
+    if (!unique) return false;
+    auto deduced = deduce_partial(p2, a2, *unique);
+    if (!deduced) return false;
+    auto back = substitute_args(a2, Bindings::of(p2[0].depth, *deduced));
+    return back && std::ranges::equal(*back, *unique);
   }
 
   // ------------------------------------------------------------ partial ordering ([temp.func.order])
@@ -1499,19 +1500,23 @@ private:
   // were specified explicitly ([temp.arg.explicit]/9).
   std::vector<ast::TemplateParamSema> head_;
   std::set<u16> explicit_packs_;
+  bool partial_deduction_ = false;
   // Sets `head_` (and clears the explicit packs) for one deduction.
   struct Deducing {
     Templates* t;
     std::vector<ast::TemplateParamSema> saved;
     std::set<u16> saved_explicit;
-    Deducing(Templates* t, std::span<const ast::TemplateParamSema> head)
-        : t(t), saved(std::move(t->head_)), saved_explicit(std::move(t->explicit_packs_)) {
+    bool saved_partial;
+    Deducing(Templates* t, std::span<const ast::TemplateParamSema> head, bool partial = false)
+        : t(t), saved(std::move(t->head_)), saved_explicit(std::move(t->explicit_packs_)),
+          saved_partial(std::exchange(t->partial_deduction_, partial)) {
       t->head_.assign(head.begin(), head.end());
       t->explicit_packs_.clear();
     }
     ~Deducing() {
       t->head_ = std::move(saved);
       t->explicit_packs_ = std::move(saved_explicit);
+      t->partial_deduction_ = saved_partial;
     }
   };
 };
