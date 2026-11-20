@@ -92,7 +92,8 @@ jobs:
       - name: Tests (tools/test, ${{ env.TIER }} tier)
         run: |
           if [ "$TIER" = pr ]; then
-            tools/test --fast -j ${{ matrix.host.jobs }}
+            # tools/build above already ran the bootstrap smoke test and the other CTests.
+            tools/test -x policy failed affected core -j ${{ matrix.host.jobs }}
           else
             tools/test --tier main -j ${{ matrix.host.jobs }}
           fi
