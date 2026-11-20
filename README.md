@@ -137,6 +137,9 @@ definitions for runtime construction. [#157](https://github.com/yrashk/ycxx/issu
 In-class conversion functions can name a class type alias as their conversion target,
 including a dependent alias in a class template. [#339](https://github.com/yrashk/ycxx/issues/339)
 
+Both targets accept leading `[[…]]` attributes on ordinary data and function member declarations.
+[#190](https://github.com/yrashk/ycxx/issues/190)
+
 **Language on macOS.** Programs can use:
 - the fundamental integer, character and floating types, pointers, arrays, references and
   enumerations, including opaque declarations of named enums in their namespaces; `float`,

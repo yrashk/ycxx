@@ -1432,7 +1432,7 @@ issues = [302]
 
 [[feature]]
 id = 'attr-syntax'
-name = 'Attribute syntax (`[[…]]`, `using` prefix, on namespaces and enumerators)'
+name = 'Attribute syntax (`[[…]]`, `using` prefix, on namespaces, enumerators and members)'
 group = 'attr'
 clauses = ['dcl.attr', 'dcl.attr.grammar']
 std = 'C++11'
@@ -1443,6 +1443,7 @@ issues = [190]
 probe = '''
 namespace [[deprecated]] old {} enum E { a [[maybe_unused]] };
 [[using gnu: unused]] static int x;
+struct S { [[nodiscard]] int value() const { return 1; } };
 int main() { return 0; }
 '''
 
