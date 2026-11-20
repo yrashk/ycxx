@@ -562,22 +562,35 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
 - `--target=x86_64-pc-linux-gnu` (also `x86_64-linux-gnu`) selects Linux preprocessing,
   layout and code generation. The in-process driver and daemon keep the target in the unit
   configuration. Darwin remains the default.
-- The scalar System V AMD64 backend in `src/target/x86_64/` supports 8-, 16-, 32- and 64-bit
+- The scalar System V AMD64 backend in `src/target/x86_64/` supports `bool` and 8-, 16-, 32- and 64-bit
   integer and enum parameters and results, plus pointers, references and void results. It handles
   direct and indirect calls, stack arguments and RIP-relative data references within a unit.
   Narrow register arguments and results are extended to 32 bits when sent for interoperability.
   Incoming values use their declared width in registers and stack slots (AMD64 psABI §3.2.3).
+  A `bool` uses the byte value 0 or 1.
   Direct variadic calls use the same registers and stack slots for promoted 32- and 64-bit integers
   and pointers. The emitter clears EAX immediately before every direct call so a variadic callee
-  receives a zero vector-register count in AL, including with an empty ellipsis. Bool, floating-point
+  receives a zero vector-register count in AL, including with an empty ellipsis. Floating-point
   and aggregate arguments and results remain outside this ABI subset. Variadic definitions and
   variadic calls through function pointers remain unsupported.
-  [#412](https://github.com/yrashk/ycxx/issues/412), [#399](https://github.com/yrashk/ycxx/issues/399),
+  [#417](https://github.com/yrashk/ycxx/issues/417), [#412](https://github.com/yrashk/ycxx/issues/412),
+  [#399](https://github.com/yrashk/ycxx/issues/399),
   [#196](https://github.com/yrashk/ycxx/issues/196)
 - `-c` writes deterministic ELF64 relocatable objects through `src/obj/elf.cppm`. The reader
   accepts the supported x86-64 `ET_REL` subset emitted by ycxx. The native ELF linker consumes
   the same in-memory objects, resolves absolute and PC-relative relocations, and writes a static
   `ET_EXEC` image with load segments and a non-executable stack.
+- Simple external inline function definitions use weak ELF symbols. The unit combines inline
+  flags from reachable declarations, including `constexpr` functions and ordinary members
+  defined in their class. Calls and statically initialized pointers in different units resolve
+  to one definition. `unit.linux_inline` checks symbol bindings, address identity, archive
+  extraction, and both operand orders with the native and host linkers.
+  [Design](docs/design/linux-inline-functions.md) · [#422](https://github.com/yrashk/ycxx/issues/422)
+- The ELF reader accepts the GNU-built libycxx static linkage-marker object. It reads sized
+  object symbols and local section symbols, preserves the marker's hidden binding, and maps
+  `.data.rel.ro.local` to the existing read-only output for relocated pointers. It validates and
+  discards file symbols, ordinary nonallocated DWARF and comment sections, and an empty
+  non-executable GNU stack marker. [#419](https://github.com/yrashk/ycxx/issues/419)
 - `ycxx cxx --target=x86_64-pc-linux-gnu -nostdlib a.cpp b.cpp -o a` compiles and links C++
   sources in one invocation. Either source can also be compiled separately with `-c` and passed
   as a `.o` input. Links limited to sources and disk objects place compiled sources first. Each
@@ -896,7 +909,7 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   Itanium ABI passes it. Linkage names are `<nested-name>`s with the member's cv-qualifiers,
   checked against Clang's symbols.
 - Tests: `tests/own/classes/s2-*` (spec-only, plus three from the review): 12 of 13 pass; the constexpr one waits for records
-  in the interpreter (#25). In-class member functions are not weak definitions yet (#124).
+  in the interpreter (#25). Mach-O still needs weak definitions for in-class member functions (#124).
 - Not yet: ref-qualifiers, `= default`.
 
 ## Classes, δ step 3: constructors, destructors, references, overloading (#86, 2026-11-18)

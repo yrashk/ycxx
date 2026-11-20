@@ -70,14 +70,22 @@ build/bin/ycxx cxx --target=x86_64-pc-linux-gnu -nostdlib --dynamic-linker="$tar
   example.cpp "$target_library" -o example
 ```
 
-Linux objects pass and return 8-, 16-, 32- and 64-bit integers and enums, pointers and references.
-They can make direct variadic calls such as `printf` with promoted integer and pointer arguments.
+Linux objects pass and return `bool`, 8-, 16-, 32- and 64-bit integers and enums, pointers and
+references. They can make direct variadic calls such as `printf` with promoted integer and pointer
+arguments.
 Use the host linker to link these objects with libc.
-[#412](https://github.com/yrashk/ycxx/issues/412), [#399](https://github.com/yrashk/ycxx/issues/399)
+[#417](https://github.com/yrashk/ycxx/issues/417), [#412](https://github.com/yrashk/ycxx/issues/412),
+[#399](https://github.com/yrashk/ycxx/issues/399)
 
 ELF and Mach-O objects support static pointer initializers naming variables, array elements,
 or functions. The referenced symbol may be defined in a separate translation unit.
 [#101](https://github.com/yrashk/ycxx/issues/101)
+
+On x86-64 Linux, direct calls and saved pointers across translation units share one address for
+simple external inline functions. [#422](https://github.com/yrashk/ycxx/issues/422)
+
+The ELF linker can consume the GNU-built libycxx static linkage-marker object.
+[#419](https://github.com/yrashk/ycxx/issues/419)
 
 **Language on macOS.** Programs can use:
 - the fundamental integer, character and floating types, pointers, arrays, references and

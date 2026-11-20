@@ -114,6 +114,7 @@ struct FunctionDef {
   // ([stmt.dcl]/3; irgen::FunctionInput).
   std::vector<irgen::FunctionInput::StaticGuard> guards{};
   EntityId guard_acquire = EntityId::none, guard_release = EntityId::none, atexit = EntityId::none, dso = EntityId::none;
+  bool weak_elf = false;  // an ordinary external inline definition in the GNU ELF subset (#422)
 };
 
 // A variable definition at namespace scope with its constant initializer, or `ConstId::none` for
@@ -955,7 +956,8 @@ bool linux_ellipsis_scalar(ir::TypeLayout l) {
 }
 
 bool linux_fixed_scalar(ir::TypeLayout l) {
-  return linux_ellipsis_scalar(l) || (l.kind == ir::TypeKind::integer && (l.size == 1 || l.size == 2));
+  return l.kind == ir::TypeKind::boolean || linux_ellipsis_scalar(l) ||
+         (l.kind == ir::TypeKind::integer && (l.size == 1 || l.size == 2));
 }
 
 // Lowering implements the Darwin aggregate calling convention. Check the original signature of
@@ -968,10 +970,10 @@ std::string_view linux_signature_error(const ast::Interners& in, const QueryLayo
   if (f.variadic && !allow_variadic) return "variadic functions are not supported";
   ir::TypeLayout result = layout.type(f.ret);
   if (result.kind != ir::TypeKind::void_ && !linux_fixed_scalar(result))
-    return "only void, 8-, 16-, 32- and 64-bit integer, pointer and reference results are supported";
+    return "only void, bool, 8-, 16-, 32- and 64-bit integer, pointer and reference results are supported";
   for (QualType p : in.seqs.elements(f.params))
     if (!linux_fixed_scalar(layout.type(p)))
-      return "only 8-, 16-, 32- and 64-bit integer, pointer and reference parameters are supported";
+      return "only bool, 8-, 16-, 32- and 64-bit integer, pointer and reference parameters are supported";
   return {};
 }
 
@@ -1188,6 +1190,7 @@ namespace {
 struct LinuxFunction {
   EntityId entity;
   const x86_64::MachineCode* code;
+  bool weak;
 };
 
 std::expected<obj::object, aarch64::CodegenError> assemble_linux(
@@ -1209,8 +1212,10 @@ std::expected<obj::object, aarch64::CodegenError> assemble_linux(
       if (sym == symbol_of.end()) return missing(f.entity);
       sec.align(4);
       const std::size_t base = sec.bytes.size();
-      o.symbols[sym->second].section = text;
-      o.symbols[sym->second].offset = base;
+      auto& symbol = o.symbols[sym->second];
+      symbol.section = text;
+      symbol.offset = base;
+      symbol.weak = f.weak && symbol.bind == obj::binding::global;
       sec.emit(f.code->bytes);
       for (const auto& r : f.code->relocs) {
         auto target = symbol_of.find(r.target);
@@ -1432,7 +1437,8 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
   auto o = [&] {
     if (linux) {
       std::vector<LinuxFunction> code;
-      for (std::size_t i = 0; i < fns.size(); ++i) code.push_back({fns[i].fn, &*ms[i].get().linux_code});
+      for (std::size_t i = 0; i < fns.size(); ++i)
+        code.push_back({fns[i].fn, &*ms[i].get().linux_code, tu.functions[i].weak_elf});
       return assemble_linux(tu.name, code, data, symbols);
     }
     std::vector<aarch64::CompiledFunction> code;
