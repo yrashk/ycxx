@@ -157,6 +157,8 @@ arrays of supported scalar types, including arithmetic on saved pointers just pa
   [#293](https://github.com/yrashk/ycxx/issues/293)
 - pointers and references to arrays of unknown bound, and template partial specializations
   that match unknown-bound array types. [#222](https://github.com/yrashk/ycxx/issues/222)
+- implicit lvalue copy assignment for ordinary classes without bases, including class members
+  with their own assignment operators. [#360](https://github.com/yrashk/ycxx/issues/360)
 - classes and unions: data and static members, named data members of unnamed union type,
   member functions, constructors and destructors
   with RAII, aggregate and designated initialization, namespace-scope objects initialized by
