@@ -696,7 +696,7 @@ public:
     bool has_noexcept = false;
     std::optional<Ex> noexcept_condition;
     u64 bound = 0;
-    bool unknown_bound = false;  // `[]`: in a parameter, or the outermost bound of a variable
+    bool unknown_bound = false;  // an array suffix with an omitted bound ([dcl.array])
     // A value-dependent bound ([temp.dep.constexpr]): a template parameter's `VDepParam`.
     std::optional<sema::ConstId> dependent_bound;
     std::optional<QualType> trailing;  // `-> T`: the trailing return type ([dcl.fct]/2)
@@ -732,6 +732,15 @@ public:
     Level top = level(abstract, d.ok);
     const Suffix* fn = nullptr;
     d.type = build(top, base, fn, d, abstract || typedef_);
+    const bool spelled_unknown_bound = std::exchange(d.unknown_bound, false);
+    if (d.ok && !abstract && spelled_unknown_bound && s_->types().is_array(d.type)) {
+      const sema::TypeRec array = s_->types().rec(d.type);
+      if (array.bound_value == sema::ConstId::none) {
+        // An outer object-array bound can be supplied by its initializer ([dcl.array]).
+        d.unknown_bound = true;
+        d.type = array.inner;
+      }
+    }
     const bool function_type = s_->types().is_function(d.type);
     if (fn) {
       d.function = function_type;
@@ -1310,26 +1319,18 @@ public:
         }
         t = s_->types().function(t, ps, s->variadic, linkage_, s->cv, s->ref, nonthrowing);
         fn = &*s;
-      } else if (s->unknown_bound && &*s == &l.suffixes.front() && member_pointer_to_suffix(l) && s_->types().is_object(t)) {
-        t = s_->types().array_unknown(t);
-      } else if (s->unknown_bound && in_params_ > 0) {
-        // In a parameter, [dcl.fct]/5 adjusts the array to a pointer: build the pointer at once.
-        t = s_->types().pointer(t);
-      } else if (s->unknown_bound) {
-        // Only the outermost array bound of the declared entity can be inferred from its
-        // initializer. It is the last suffix applied, at the level containing the declarator-id.
-        if (&*s != &l.suffixes.front() || d.unknown_bound || l.inner || !s_->types().is_object(t)) {
-          s_->diag(d.begin, Diag::not_supported, Tk::l_square);
-          d.ok = false;
-        }
-        d.unknown_bound = true;
-      } else if (s->dependent_bound && s_->types().is_object(t)) {
-        t = s_->types().array_dependent(t, *s->dependent_bound);
-      } else if (!s_->types().is_object(t) || s->bound == 0) {
-        // [dcl.array]: the element type is an object type; an array of functions or of void is
-        // ill-formed.
-        if (s->bound != 0) s_->diag(d.begin, Diag::invalid_array_element, t);
+      } else if (!s->unknown_bound && !s->dependent_bound && s->bound == 0) {
+        d.ok = false;  // the bound was diagnosed when parsed
+      } else if (!s_->types().is_object(t) ||
+                 (s_->types().is_array(t) && s_->types().rec(t).bound_value == sema::ConstId::none)) {
+        // [dcl.array]: an element cannot be a reference, a function, void or an unknown-bound array.
+        s_->diag(d.begin, Diag::invalid_array_element, t);
         d.ok = false;
+      } else if (s->unknown_bound) {
+        d.unknown_bound = true;
+        t = s_->types().array_unknown(t);
+      } else if (s->dependent_bound) {
+        t = s_->types().array_dependent(t, *s->dependent_bound);
       } else {
         t = s_->types().array(t, s->bound);
       }
@@ -1778,7 +1779,7 @@ public:
       s_->diag(spec.begin, Diag::auto_not_allowed);
       return std::nullopt;
     }
-    return d.unknown_bound ? s_->types().array_unknown(d.type) : d.type;
+    return d.type;
   }
 
   // The value of a template argument for a non-type parameter of type `t`: a converted constant

@@ -1122,6 +1122,11 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   their bound from the literal when it is left out; `extern T a[];`, an incomplete type
   (`Types::array_unknown`), completed by a later declaration with a bound ([basic.link]/11);
   arrays of pointers of unknown bound.
+- Unknown bounds survive abstract and grouped declarators, including pointer and reference
+  parameters. A parameter whose completed type is an array still adjusts to a pointer. Template
+  substitution preserves the omitted bound, so partial specializations match `T[]`
+  ([dcl.array], [dcl.fct], [temp.deduct.type], #222). The Itanium `A_` form carries omitted
+  bounds into ELF and Mach-O symbol names.
 - `__FLT_EVAL_METHOD__` is predefined (0), as Clang has it for the target.
 - Attributes are also accepted after a declarator-id, on parameters, alias-declarations and
   statements, and in the GNU form on class heads and after template-heads. A string literal
@@ -1130,8 +1135,7 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   being dropped.
 - Tests: `tests/own/decls` (11, three from the review). Five more draft examples pass.
 - Not yet: `sizeof`, `alignof`, `decltype`, `static_cast` and other casts, operator functions,
-  unions (the next steps of #133); a reference or pointer to an array of unknown bound; asm labels
-  on class members and the other gaps of #190.
+  unions (the next steps of #133); asm labels on class members and the other gaps of #190.
 
 ## `<cstdio>`, step 4a: casts, sizeof, alignof, decltype (#133, 2026-11-18)
 
