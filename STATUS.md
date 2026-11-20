@@ -2211,6 +2211,26 @@ values, end to end; results match Clang's bit for bit.
 - Converting a pointer to an array to a pointer to `void` preserves the array's element
   qualifiers ([basic.type.qualifier], [conv.ptr]).
 
+## Ordinary scalar allocation and deallocation (#293)
+
+- [expr.new] and [expr.delete] support complete, default-aligned integral and ordinary pointer
+  objects. The result of `new` is a prvalue pointer to the allocated type, with its cv-qualifiers.
+  Omitted initialization leaves the bytes alone, empty parentheses or braces give zero or null,
+  and explicit initializers use the scalar conversion and list-narrowing rules.
+- The ordinary global declarations of `operator new` and both `operator delete` overloads use the
+  target's `sizeof` result type. Written declarations and definitions of those signatures share
+  the same entities as implicit declarations. Allocation passes `sizeof(T)`, and single-object
+  delete evaluates its operand once and passes its address and `sizeof(T)` to the sized global
+  deallocator when non-null. The scoped spellings use the same functions. Global lookup and
+  sized dispatch follow Astra's independent draft and Itanium ABI review on #293.
+- Native lowering supports initializers proven nonthrowing from the analyzed expression tree.
+  Initializers that need an exception cleanup edge and constant evaluation of allocation remain
+  in #293. Namespace-scope allocation uses the existing dynamic initialization path. The issue
+  also tracks class, array, enumeration, floating-point, placement and over-aligned allocation,
+  and other allocation-function declarations.
+- Spec-only tests in `tests/own/scalar-allocation/` cover types, initialization, a typed null, and
+  invalid operands. A separate provider checks the address and size passed to deallocation.
+
 ## Bootstrap workarounds
 
 Places where ycxx's sources avoid or work around a C++26 feature because GCC 16 lacks it or

@@ -92,6 +92,8 @@ public:
   // names join the lookup where [namespace.udir]/2 puts them.
   virtual std::vector<DeclId> visible_decls(NameId name, std::span<const EntityId> directives = {}) = 0;
   virtual ast::DeclSema decl_sema(DeclId d) = 0;
+  // A use of a global allocation function that may lack a written declaration in the unit.
+  virtual void use_allocation_function(EntityId) {}
   // What a constant evaluation fetches (§B7): `function_ir` of a function defined before the
   // current point ([expr.const]), and a namespace-scope variable as the interpreter sees it.
   virtual interp::Callee function_ir(EntityId f) = 0;
@@ -4787,6 +4789,112 @@ public:
     if (converted.ok() && converted.info.bit_width)
       return convert_node(converted, ast::ConversionKind::integral, converted.type());
     return converted;
+  }
+
+  // [basic.stc.dynamic] makes the ordinary declarations visible even without a header.
+  Ex allocation_name_expr(AllocationFunction f, u32 begin, u32 end) {
+    const NameId name = ins().names.intern(allocation_name(f));
+    std::vector<ast::DeclSema> found;
+    for (const ast::DeclSema& d : w_->allocation_functions()) {
+      if (w_->entities.rec(d.entity).name != name) continue;
+      q_->use_allocation_function(d.entity);
+      found.push_back(d);
+    }
+    auto written = q_->namespace_members(EntityId::none, name);
+    found.insert(found.end(), written.begin(), written.end());
+    return decls_expr(std::move(found), true, name, begin, end);
+  }
+
+  // [expr.new]: initialize the object after the call to the global allocation function.
+  Ex new_object(QualType t, const std::optional<std::vector<Ex>>& args, const Braced* braces, u32 begin, u32 end) {
+    Ex fail{NodeId::none, begin, end};
+    if (types().has_placeholder(t) || types().is_dependent(t)) {
+      diag(begin, Diag::not_supported, lex::Tk::kw_new);
+      return fail;
+    }
+    if (!types().is_object(t)) {
+      diag(begin, Diag::new_requires_object, t);
+      return fail;
+    }
+    if (types().is_class(t) && !require_complete(t, begin)) return fail;
+    if (!scalar_allocation_type(t)) {
+      diag(begin, Diag::not_supported, lex::Tk::kw_new);
+      return fail;
+    }
+
+    Ex init;
+    if (braces) {
+      init = list_init(t, *braces);
+    } else if (!args) {
+      if (Types::is_const(types().canonical(t))) {
+        diag(begin, Diag::new_const_uninitialized, t);
+        return fail;
+      }
+      init = default_init(t, end, end);
+    } else if (args->empty()) {
+      init = value_init(t, end, end);
+    } else {
+      if (args->size() != 1) {
+        diag((*args)[1].begin, Diag::too_many_initializers, t);
+        return fail;
+      }
+      const Ex& value = args->front();
+      if (!value.ok()) return fail;
+      if (is_braced(value)) {
+        diag(value.begin, Diag::braces_for_scalar, t);
+        return fail;
+      }
+      // [dcl.init.general]: direct-initialization of bool from std::nullptr_t yields false.
+      init = types().is(t, Builtin::bool_) && types().is(value.type(), Builtin::nullptr_t)
+          ? to_bool(value, value.begin) : convert(value, t, value.begin);
+    }
+    if (!init.ok()) return fail;
+    QualType pointer = types().pointer(t);
+    if (dependent(init)) return dependent_node({init}, begin, end, pointer);
+
+    Ex size = size_of(t, false, begin, begin);
+    ast::DeclSema f = w_->allocation_function(AllocationFunction::allocate);
+    q_->use_allocation_function(f.entity);
+    ExprInfo fn_info{f.type, ValueCategory::lvalue, 0};
+    Ex callee = node(ast::DeclRef{fn_info, f.entity}, begin, begin, fn_info);
+    ExprInfo call_info{types().rec(f.type).inner, ValueCategory::prvalue, 0};
+    Child sizes[] = {at(size, begin)};
+    Ex allocation = node(ast::Call{call_info, f.entity, at(callee, begin), b_->list(sizes)}, begin, begin, call_info);
+    ExprInfo info{pointer, ValueCategory::prvalue, 0};
+    return node(ast::NewObject{info, at(allocation, begin), at(init, begin)}, begin, end, info);
+  }
+
+  // [expr.delete]: cv-qualifiers are ignored when passing the address to the global deallocator.
+  Ex delete_object(Ex e, u32 begin, u32 end) {
+    Ex fail{NodeId::none, begin, end};
+    if (!e.ok()) return fail;
+    QualType v = builtin(Builtin::void_);
+    if (dependent(e)) return dependent_node({e}, begin, end, v);
+    if (types().is_class(e.type()) || types().is_array(e.type())) {
+      diag(begin, Diag::not_supported, lex::Tk::kw_delete);  // only pointer operands in this slice
+      return fail;
+    }
+    if (!types().is_pointer(e.type()) || !types().is_object(types().pointee(e.type()))) {
+      diag(begin, Diag::delete_requires_pointer, e.type());
+      return fail;
+    }
+    QualType t = types().pointee(e.type());
+    if (types().is_class(t) && !require_complete(t, begin)) return fail;
+    if (!scalar_allocation_type(t)) {
+      diag(begin, Diag::not_supported, lex::Tk::kw_delete);
+      return fail;
+    }
+    Ex addr = convert_node(rvalue(e), ast::ConversionKind::pointer, types().pointer(v));
+    if (!addr.ok()) return fail;
+    Ex size = size_of(t, false, begin, begin);
+    EntityId f = w_->allocation_function(AllocationFunction::deallocate_sized).entity;
+    q_->use_allocation_function(f);
+    ExprInfo info{v, ValueCategory::prvalue, 0};
+    return node(ast::DeleteObject{info, f, at(addr, begin), at(size, begin)}, begin, end, info);
+  }
+
+  bool scalar_allocation_type(QualType t) {
+    return types().is_integral(t) || types().is_pointer(t);
   }
 
   // `sizeof` and `alignof` of a type ([expr.sizeof], [expr.alignof]), a `size_t` prvalue; zero

@@ -239,6 +239,14 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
   - Run `tools/test --fast` with per-command network access and `TMPDIR=/dev/shm`.
   - Learned on #216.
 
+- **Linux native mixed-object checks need host objects in the linker's supported ELF subset.**
+  A GCC allocation provider emitted an unsupported absolute relocation, and a Clang provider
+  emitted `.llvm_addrsig`. A constant pointer global also landed in GCC's `.data.rel.local`.
+  - Do: build header-free peers with `-fPIE -fno-exceptions -fno-asynchronous-unwind-tables
+    -fno-unwind-tables` and add `-fno-addrsig` for Clang. Form a local object's address where it
+    is used. Compile a C++ peer's `main` in hosted mode to retain the ELF entry symbol.
+  - Learned on #293. The wider object input work is tracked in #390.
+
 - **A module import added during a build can miss the dependency scan.** CMake scanned a test's
   imports before an edit and GCC compiled it afterward, so its module mapper lacked the new import.
   - Do: rerun Ninja in the same build directory after changing imports during a build.
@@ -654,6 +662,13 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
   - Do: run hand checks with `YCXX_NO_DAEMON=1`, and stop your worktree's daemons
     (`pkill -f '<worktree>/build/bin/ycxx daemon'`) after rebuilding.
   - Learned on #88 step 8.
+- **Eager implicit declarations can change traces for unrelated source.** Installing allocation
+  functions in the shared world interned a `noexcept(true)` value before sema saw any source.
+  The ordinary trace's constant IDs shifted even though its source and queries stayed the same.
+  - Do: construct the same canonical entities through the existing thread-safe interners when
+    sema needs them, and collect the declarations used by each unit for code generation.
+  - Learned on #293.
+
 - **A handle's `{}` is index 0, a real entity or list, not `none`.** `EntityId{}` in a new
   `TemplateArg::templ` field made every dependent template argument name entity 0, which was the
   first class template declared, so `W<Box>` became `W`'s own current instantiation and was never
