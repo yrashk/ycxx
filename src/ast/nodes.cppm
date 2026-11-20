@@ -151,10 +151,11 @@ enum class ConversionKind : u8 {
   pointer,  // [conv.ptr]: an object pointer to `cv void*`
   floating,
   array_copy,  // [dcl.struct.bind]: initialize the hidden array, element by element
+  base_to_derived,  // [expr.static.cast]: undo a direct base adjustment
 };
 
-// An implicit conversion: a node of width zero beyond its operand (§3.3), naming its function for
-// a user-defined conversion.
+// A conversion node of width zero beyond its operand (§3.3). `function` names a user-defined
+// conversion function or the direct base class in a class adjustment.
 struct ImplicitConversion {
   ExprInfo info;
   ConversionKind conversion;

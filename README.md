@@ -182,8 +182,10 @@ arrays of supported scalar types, including nested arrays. [#111](https://github
   function templates, with Clang's names for closure types;
 - noncapturing, non-generic lambdas as initializers of internal-linkage namespace variables,
   with addressable static storage and scalar calls ([#338](https://github.com/yrashk/ycxx/issues/338));
-- casts, including `static_cast<T&&>` from a compatible object lvalue, `sizeof`/`alignof`
-  (classes included), `decltype`, and calls through pointers to functions. [#199](https://github.com/yrashk/ycxx/issues/199)
+- casts, including `static_cast<T&&>` from a compatible object lvalue and runtime `static_cast`
+  downcasts of object pointers and lvalue references through accessible, unambiguous
+  nonvirtual base paths, `sizeof`/`alignof` (classes included), `decltype`, and calls
+  through pointers to functions. [#199](https://github.com/yrashk/ycxx/issues/199)
 - constant evaluation on ycxx's own interpreter: `constexpr`, `consteval`, `constinit`,
   `static_assert` and `if consteval`, with errors that explain why something is not constant.
   Namespace-scope `constexpr` pointers to `void` can retain scalar and array element addresses.
