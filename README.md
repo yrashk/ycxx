@@ -90,7 +90,8 @@ object. [#428](https://github.com/yrashk/ycxx/issues/428), [#419](https://github
 
 **Language on macOS.** Programs can use:
 - the fundamental integer, character and floating types, pointers, arrays, references and
-  enumerations; `float`, `double` and `long double` with literals, arithmetic, comparisons and
+  enumerations, including opaque declarations of named enums in their namespaces; `float`,
+  `double` and `long double` with literals, arithmetic, comparisons and
   conversions giving Clang's results bit for bit, and passing and returning them (classes of
   floating members included) by Clang's calling convention;
   all operators, and the statements: `switch`, labels and `goto`, declarations in conditions,
