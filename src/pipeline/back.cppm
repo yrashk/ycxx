@@ -717,17 +717,21 @@ ir::TypeLayout QueryLayout::type(QualType q) const {
   return {};
 }
 
-// System V AMD64 psABI §3.2.3. Only flat records of ordinary integral members participate.
+// System V AMD64 psABI §3.2.3. Flat records of integral or ordinary object-pointer members.
 // Padding leaves the corresponding eightbyte class unchanged (initially NO_CLASS).
 std::uint8_t QueryLayout::sysv_integer_eightbytes(const ClassShape& shape, const ClassLayout& l) const {
   if (!shape.trivial_calls || shape.layout_uncertain || shape.union_ || !shape.bases.empty() || !shape.bit_widths.empty() ||
       l.fields.empty() || l.size > 16 || l.align > 8) return 0;
+  const ast::Interners& in = *universe().in;
   std::uint64_t end = 0;
   std::uint8_t mask = 0;
   for (const ir::SubObject& f : l.fields) {
-    auto b = ast::builtin_of(*universe().in, f.type);
-    if (!b || !ast::is_integral(*b)) return 0;
-    const ast::BuiltinLayout field = (*target_)[*b];
+    ast::BuiltinLayout field;
+    if (auto b = ast::builtin_of(in, f.type); b && ast::is_integral(*b))
+      field = (*target_)[*b];
+    else if (ast::is_pointer(in, f.type) && !ast::is_function(in, ast::pointee_of(in, f.type)))
+      field = {target_->pointer_size, target_->pointer_align};
+    else return 0;
     if (!field.size || field.size > 8 || field.align > l.align || f.offset % field.align ||
         f.offset < end || f.offset + field.size > l.size) return 0;
     end = f.offset + field.size;

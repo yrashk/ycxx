@@ -85,10 +85,9 @@ def external_data_addresses(compile, target, source_dir, scope, cold, cc, readel
     run(['./interposer'], scope, cold)
 
 
-def integer_aggregate_calls(compile, target, source_dir, scope, cold, cc):
-    sources = source_dir / 'linux_integer_aggregates'
-    for part in ('provider', 'client'):
-        source = sources / f'{part}.cpp'
+def integer_aggregate_calls(compile, target, sources, scope, cold, cc, provider, client):
+    for part, name in (('provider', provider), ('client', client)):
+        source = sources / f'{name}.cpp'
         compile(target, '-c', source, '-o', f'aggregate-{part}.o')
         run([cc, '-std=c++26', '-O2', '-fno-pie', '-c', source, '-o', f'host-{part}.o'], scope, cold)
     compile(target, '-nostdlib', 'aggregate-provider.o', 'aggregate-client.o', '-o', 'aggregate-native')
@@ -99,8 +98,9 @@ def integer_aggregate_calls(compile, target, source_dir, scope, cold, cc):
 
 
 def main():
-    ycxx, cc, readelf, ar = sys.argv[1:]
+    ycxx, cc, readelf, ar, libycxx_source = sys.argv[1:]
     source_dir = Path(__file__).resolve().parent
+    libycxx = Path(libycxx_source)
     target = '--target=x86_64-pc-linux-gnu'
     with tempfile.TemporaryDirectory(prefix='ycxx-linux-') as temp, tempfile.TemporaryDirectory(prefix='yd-') as runtime:
         scope = Path(temp)
@@ -248,7 +248,14 @@ system_leaf:
             source = source_dir / 'deduced-results' / f'{name}.cpp'
             compile(target, '-nostdlib', source, '-o', name)
             run([f'./{name}'], scope, cold)
-        integer_aggregate_calls(compile, target, source_dir, scope, cold, cc)
+        aggregates = source_dir / 'linux_integer_aggregates'
+        integer_aggregate_calls(compile, target, aggregates, scope, cold, cc, 'provider', 'client')
+        integer_aggregate_calls(compile, target, aggregates, scope, cold, cc,
+                                'pointer-aggregate-peer', 'pointer-aggregate-main')
+        compile(target, '-isystem', libycxx / 'include', '-nostdlib',
+                aggregates / 'pointer-aggregate-empty-list.cpp', libycxx / 'src/runtime/linkage/static.cpp',
+                '-o', 'aggregate-empty-list')
+        run(['./aggregate-empty-list'], scope, cold)
         (scope / 'packing.cpp').write_text(
             '#pragma pack(push, 1)\n'
             'struct Capped { char a; int b; };\n'
