@@ -54,6 +54,9 @@ build/bin/ycxx cxx --target=x86_64-pc-linux-gnu -nostdlib example.o -o example
 ./example
 ```
 
+For mixed Linux objects, the pinned libycxx `<cstddef>` byte operator uses the same Itanium
+linkage name in ycxx, GCC and Clang. [#64](https://github.com/yrashk/ycxx/issues/64)
+
 **Package Linux objects into a static library.** `ycxx archive -o libexample.a example.o`
 creates or replaces a deterministic indexed GNU archive from supported x86-64 ELF objects.
 Static links accept these archives and compatible archives from system `ar`. Place an archive

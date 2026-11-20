@@ -60,8 +60,8 @@ struct ClassName {
 };
 using ClassNames = std::function<ClassName(ast::EntityId)>;
 
-// `scope` is the class or namespace a function is a member of, none for the global namespace;
-// a scoped name is a <nested-name> (§5.1.5.3).
+// `scope` is the class or namespace a function is a member of, none for the global namespace.
+// Direct members of ::std use an <unscoped-name> with St (§5.1.5 and §5.1.10).
 std::expected<std::string, std::string> mangled_function(const ast::Interners& in, std::string_view name,
                                                          ast::QualType type, const ClassNames& classes = {},
                                                          ast::EntityId scope = ast::EntityId::none,
@@ -327,17 +327,16 @@ class Mangler {
     }
     if (n.name.empty() && !n.unnamed_type_ordinal) return std::unexpected("a class whose name is unknown");
     if (n.templ != ast::EntityId::none) {
-      // <unscoped-template-name> <template-args>, or inside a namespace a <nested-name> ending in
-      // them: the template's name and the specialization are candidates (§5.1.5.3, §5.1.10).
+      // The template's name and the specialization are candidates (§5.1.5.3, §5.1.10).
       auto r = specialization_prefix(e, n);
       if (!r) return r;
-      return n.scope != ast::EntityId::none ? "N" + *r + "E" : *r;
+      return delimit_name(*r, n.scope);
     }
     std::string r = class_component(n);
     if (n.scope != ast::EntityId::none) {
       auto p = prefix(n.scope);
       if (!p) return p;
-      r = "N" + *p + r + "E";
+      r = delimit_name(*p + r, n.scope);
     }
     candidates_.push_back(key);
     return r;
@@ -348,6 +347,8 @@ class Mangler {
     std::uint64_t key = (std::uint64_t{1} << 32) | std::to_underlying(e);
     if (auto s = find(key)) return *s;
     ClassName n = classes_ ? classes_(e) : ClassName{};
+    // The predefined abbreviation for ::std never gets a numbered substitution (§5.1.10).
+    if (is_global_std(n)) return "St";
     if (n.closure) {
       // <closure-type-name> ::= Ul <lambda-sig> E [<number>] _, its parameter types or `v`; the
       // n-th closure of one signature in its context is numbered n − 2 (§5.1.8). Its context is
@@ -369,6 +370,11 @@ class Mangler {
     r += class_component(n);
     candidates_.push_back(key);
     return r;
+  }
+  // Global names and direct members of ::std are <unscoped-name>s (§5.1.5).
+  std::string delimit_name(std::string components, ast::EntityId scope) const {
+    if (scope == ast::EntityId::none || (classes_ && is_global_std(classes_(scope)))) return components;
+    return "N" + components + "E";
   }
   // <unnamed-type-name> ::= Ut [<number>] _ (Itanium ABI §5.1.5.5).
   static std::string class_component(const ClassName& n) {
@@ -421,7 +427,7 @@ class Mangler {
       if (!p) return p;
       std::string cv = std::string(std::to_underlying(f.cv) & 2 ? "V" : "") + (std::to_underlying(f.cv) & 1 ? "K" : "");
       // A <ctor-dtor-name> (`C1`, `D1`) stands as it is; other names are <source-name>s.
-      out = local + std::format("N{}{}{}E", cv, *p, special ? std::string(name) : unqualified);
+      out = local + delimit_name(cv + *p + (special ? std::string(name) : unqualified), scope);
     }
     auto sig = signature(f, false);
     if (!sig) return sig;
@@ -476,14 +482,13 @@ class Mangler {
     auto args = spec.params.empty() ? template_args(spec.args) : own_template_args(spec.args, spec.params, spec.same_heads);
     if (!args) return args;
     // A variable template specialization: its name and arguments, no type (§5.1.2).
-    if (!in_.types.is<ast::TFunction>(c)) return scope != ast::EntityId::none ? std::format("N{}{}E", *n, *args) : *n + *args;
+    if (!in_.types.is<ast::TFunction>(c)) return delimit_name(*n + *args, scope);
     auto sig = signature(in_.types.get<ast::TFunction>(c), !special);  // a constructor has no return type
     if (!sig) return sig;
-    // In a namespace, a <nested-name> ending in the template-args (§5.1.5.3); a member function
-    // template's cv-qualifiers after the `N`.
+    // In a <nested-name>, a member function template's cv-qualifiers follow the `N`.
     ast::Cv fcv = in_.types.get<ast::TFunction>(c).cv;
     std::string cv = std::string(std::to_underlying(fcv) & 2 ? "V" : "") + (std::to_underlying(fcv) & 1 ? "K" : "");
-    return scope != ast::EntityId::none ? std::format("N{}{}{}E{}", cv, *n, *args, *sig) : *n + *args + *sig;
+    return delimit_name(cv + *n + *args, scope) + *sig;
   }
   std::expected<std::string, std::string> local_encoding(const LocalFunction& f) {
     if (f.spec) return specialization_encoding(f.name, *f.spec, f.scope);
@@ -578,7 +583,7 @@ class Mangler {
     if (n.scope != ast::EntityId::none) {
       auto p = prefix(n.scope);
       if (!p) return p;
-      r = "N" + *p + source_name(n.name) + "E";
+      r = delimit_name(*p + source_name(n.name), n.scope);
     } else {
       r = source_name(n.name);
     }
@@ -698,6 +703,10 @@ class Mangler {
 
  private:
 
+  static bool is_global_std(const ClassName& scope) {
+    return !scope.is_class && scope.scope == ast::EntityId::none && scope.name == "std";
+  }
+
   // A qualified type is a candidate of its own, after its unqualified part.
   std::string qualify(const std::string& qualifiers, const std::string& inner, ast::QualType q) {
     if (qualifiers.empty()) return inner;
@@ -768,11 +777,11 @@ std::expected<std::string, std::string> symbol_name(const ast::Interners& in, st
     return prefix + *m;
   }
   if (scope != ast::EntityId::none && !is_function) {
-    // A static data member or a namespace's variable: a <nested-name> (§5.1.2).
+    // A static data member or a namespace's variable (§5.1.2).
     Mangler m(in, classes);
     auto scope_name = m.prefix(scope);
     if (!scope_name) return scope_name;
-    return std::format("{}_ZN{}{}{}E", prefix, *scope_name, name.size(), name);
+    return prefix + "_Z" + m.delimit_name(*scope_name + Mangler::source_name(name), scope);
   }
   // [basic.start.main]: only the global namespace's `main` is the program's.
   if (!is_function || (name == "main" && scope == ast::EntityId::none) || lang == ast::LangLinkage::c)
