@@ -3712,9 +3712,18 @@ private:
       return spec.is_static || Program::unnamed(p_->ns_of(k_)) ||
              (!fn && sema::Types::is_const(d.type) && !spec.is_extern && !spec.is_inline && !template_ && !explicit_);
     };
+    const auto declaration_entity = [&](sema::EntityKind kind, QualType type, ast::Linkage linkage, sema::Fp128 head) {
+      sema::EntityRec record{kind, d.name, type, lang, linkage,
+          {p_->id(k_), ast::make_decl_ord(ast::DeclClass::syntactic, ord)},
+          lang == LangLinkage::c ? EntityId::none : ns_entity()};
+      record.head = head;
+      record.constraints = constraints_fp_;
+      return record;
+    };
     // The first declaration-owned closure is the initializer of an ordinary internal variable.
     // Its identity is the final variable's. Its EntityRec is published after deduction.
     std::optional<Ex> closure_init;
+    EntityId closure_owner = EntityId::none;
     if (!fn && types.kind(d.type) == sema::TypeKind::placeholder && !template_ && !var_ && !explicit_ &&
         !d.qualified && d.name != s_.no_name() && !spec.is_inline && !spec.is_extern &&
         lang == LangLinkage::cxx && has_internal_linkage() && (ps_.is(Tk::equal) || ps_.is(Tk::l_brace))) {
@@ -3722,9 +3731,9 @@ private:
       while (ps_.kind(start) == Tk::l_paren) ++start;
       if (ps_.kind(start) == Tk::l_square && ps_.kind(start + 1) != Tk::l_square) {
         const auto ns = ns_entity();
-        const auto owner = s_.world().entities.identity({sema::EntityKind::variable, d.name, d.type,
-            lang, ast::Linkage::internal, {p_->id(k_), ast::make_decl_ord(ast::DeclClass::syntactic, ord)}, ns});
-        s_.namespace_lambda = sema::Sema::NamespaceLambda{owner, ns, d.name, ps_.pos() + start};
+        const auto record = declaration_entity(sema::EntityKind::variable, d.type, ast::Linkage::internal, head_fp({}));
+        closure_owner = s_.world().entities.identity(record);
+        s_.namespace_lambda = sema::Sema::NamespaceLambda{closure_owner, ns, d.name, ps_.pos() + start};
       }
     }
     // A placeholder type, deduced from the initializer ([dcl.type.auto.deduct]): `= e` or `{e}`.
@@ -4024,18 +4033,9 @@ private:
       } else {
         if (fn && !defaults_trail(params, d.params, d.name_at)) return false;
         // A function with C language linkage is one function in whichever namespace ([dcl.link]).
-        sema::EntityRec e{template_ ? (fn ? sema::EntityKind::function_template : sema::EntityKind::variable_template)
-                          : fn      ? sema::EntityKind::function
-                                    : sema::EntityKind::variable,
-                          d.name,
-                          sem.type,
-                          lang,
-                          sem.linkage,
-                          {p_->id(k_), ast::make_decl_ord(ast::DeclClass::syntactic, ord)},
-                          lang == LangLinkage::c ? EntityId::none : ns_entity()};
-        e.head = head;
-        e.constraints = constraints_fp_;
-        sem.entity = s_.world().entities.entity(e);
+        const auto kind = template_ ? (fn ? sema::EntityKind::function_template : sema::EntityKind::variable_template)
+                                    : (fn ? sema::EntityKind::function : sema::EntityKind::variable);
+        sem.entity = s_.world().entities.entity(declaration_entity(kind, sem.type, sem.linkage, head));
       }
       s_.settle_type_access(sem.entity);
       if (fn) {  // for a later declarator of this declaration (`merge_defaults`)
@@ -4086,6 +4086,7 @@ private:
       s_.diag(ps_.pos(), Diag::function_initialized, d.name);
       ps_.skip_to_semi();
     } else if (closure_init) {
+      contract_assert(sem.entity == closure_owner);
       init = s_.convert(*closure_init, d.type, closure_init->begin);
       if (init.ok()) {
         // The captureless prvalue has no fields to initialize. Keep a constant of the complete
