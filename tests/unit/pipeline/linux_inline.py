@@ -104,6 +104,16 @@ def main():
             run(host_cxx, '-no-pie', *objects, '-o', 'host-program')
             run('./host-program')
 
+        assignment = fixtures / 'inline-assignment'
+        for name in ('main', 'peer'):
+            obj = f'assignment-{name}.o'
+            compile(assignment / f'{name}.cpp', obj)
+            entry = symbols(obj)['_ZN1HaSERKS_']
+            assert entry[4] == 'WEAK' and entry[6] != 'UND', entry
+        for objects in (('assignment-main.o', 'assignment-peer.o'), ('assignment-peer.o', 'assignment-main.o')):
+            link(*objects)
+            run('./program')
+
         (Path(temp) / 'data-controls.cpp').write_text('''
 constexpr int ordinary_constant = 7;
 extern constexpr int external_constant = 9;

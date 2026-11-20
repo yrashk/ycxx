@@ -143,8 +143,9 @@ definitions for runtime construction. [#157](https://github.com/yrashk/ycxx/issu
   equality and ordering of pointers to matching complete arrays whose elements differ in
   `const` or `volatile` qualification. Comparisons and conditional expressions involving
   object pointers and `void` pointers combine the pointee qualifiers. Statements include
-  `switch`, labels and `goto` (including jumps past vacuous initialization), declarations in conditions,
-  init-statements in `if` and `switch`, and range-based `for` with optional init-statements.
+  `switch`, labels and `goto` (including jumps past vacuous initialization), declarations in conditions
+  including `if constexpr`, init-statements in `if` and `switch`, and range-based `for` with optional
+  init-statements.
   Ranges can be arrays or classes with member `begin` and `end` or free `begin` and `end` found
   by argument-dependent lookup. Unqualified calls can find and rank functions in associated
   namespaces, including those of class template type arguments in ordinary calls. Functions
@@ -164,6 +165,8 @@ definitions for runtime construction. [#157](https://github.com/yrashk/ycxx/issu
   [#293](https://github.com/yrashk/ycxx/issues/293)
 - pointers and references to arrays of unknown bound, and template partial specializations
   that match unknown-bound array types. [#222](https://github.com/yrashk/ycxx/issues/222)
+- implicit lvalue copy assignment for ordinary classes without bases, including class members
+  with their own assignment operators. [#360](https://github.com/yrashk/ycxx/issues/360)
 - classes and unions: data and static members, named data members of unnamed union type,
   member functions, constructors and destructors
   with RAII, aggregate and designated initialization, namespace-scope objects initialized by

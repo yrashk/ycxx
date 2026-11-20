@@ -1901,7 +1901,18 @@ What the process allocates, attributed to the engine's cells, in the trace and t
     type through multiple base subobjects is accessible when any of its lookup paths is
     accessible. Distinct competing types are ambiguous. Qualified and elaborated forms are
     tracked in #361. See [the lookup design](docs/design/injected-class-names.md).
-  - Implicit copy assignment's calls to subobject `operator=` remain tracked in #360.
+  - Nontrivial copy assignment of base subobjects remains tracked in #360.
+
+## Implicit copy assignment of class members (#360, 2026-11-20)
+
+- Ordinary non-template classes without bases use member overload resolution for assignment.
+  An implicitly declared copy derives its parameter qualifiers from the subobjects' signatures.
+  Its synthesized body assigns scalar and class members in declaration order and returns
+  `*this`. Unusable subobject assignments are diagnosed on use. Operator notation sequences
+  the right operand first, including when it calls an explicit overload.
+- Proven trivial operations still use the existing representation copy. The remaining special
+  member, implicit move, and nontrivial base, array and union cases stay in #244 and #360.
+  [Design](docs/design/implicit-copy-assignment.md)
 
 ## Templates, ζ step 9: member function templates (#88, #314, 2026-11-19)
 
@@ -2108,9 +2119,11 @@ values, end to end; results match Clang's bit for bit.
   `goto` ([stmt.switch], [stmt.label], [stmt.goto]); a label may end a compound statement (C++23).
   Case values are converted constant expressions of the promoted condition type, checked for
   narrowing and duplicates. A condition may declare a variable (`CondDecl`, [stmt.pre]/4) in `if`,
-  `while`, `for` and `switch`; `if` and `switch` (and `if constexpr`) take an init-statement,
-  including an alias-declaration (C++23). `Sema::initialized_in_scope` lists the variables whose
-  initialization is not vacuous; a `goto` or a case label that would enter their scope is an error
+  `if constexpr`, `while`, `for` and `switch`. An `if` or `switch` init-statement can also use an
+  alias-declaration (C++23). For `if constexpr` (#344), the converted condition must be constant,
+  and initialization of the decision variable precedes its use in the selected arm.
+  `Sema::initialized_in_scope` lists the variables whose initialization is not vacuous;
+  a `goto` or a case label that would enter their scope is an error
   ([stmt.dcl]/2), and labels are checked when the body ends (`Sema::check_labels`). A substatement
   of `if constexpr` or `if consteval` is a `jump_barrier`, which no jump may enter ([stmt.if]/2, /4).
 - **IR** (src/irgen/gen.cppm): a switch is a chain of `icmp`/`cond_br` over its case values found
@@ -2123,9 +2136,8 @@ values, end to end; results match Clang's bit for bit.
   A condition's variable lives one iteration of a loop, through a `for`'s increment. A
   goto's `br` carries `not_constexpr`, so constant evaluation of it fails ([expr.const]).
 - Not yet: a jump past a vacuously initialized class with a nontrivial destructor (#477);
-  `switch` on a class with a conversion
-  function and `explicit operator bool` conditions (#339); a declaration as the condition of
-  `if constexpr` (#344); constant evaluation of a switch on an enumeration (enumeration values, #25).
+  `switch` on a class with a conversion function and `explicit operator bool` conditions (#339);
+  constant evaluation of a switch on an enumeration (enumeration values, #25).
 - Tests: `tests/own/stmt/` (written spec-only, 23 run and 15 reject tests, and the split-off XFAILs
   for the above).
 
