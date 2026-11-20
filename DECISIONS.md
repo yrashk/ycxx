@@ -208,6 +208,9 @@ specified by the accepted [optimization design](docs/design/optimization.md) (#3
      the namespaces associated with argument types at the lexical point. Dependent calls also
      use the existing instantiation context. The search supplies candidates to overload
      resolution and provides the ADL-only fallback for range-based `for` (#165).
+   - [Braced arguments](docs/design/braced-overload-resolution.md) contribute conversion sequences
+     before overload selection. Parameter initialization and narrowing checks apply to the
+     selected function (#231).
    - **Identity without positions.** Items are cut from the preprocessed tokens before parsing.
      Their ids exclude bodies and positions, and locations are `(item, offset)`. Declaration ids
      and structural entity ids are separate. *Reason:* edits elsewhere disturb no keys. (§B1, §B2)
