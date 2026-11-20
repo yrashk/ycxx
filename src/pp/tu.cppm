@@ -181,6 +181,97 @@ Flat flatten(Session& s, const Tree& t) {
   return out;
 }
 
+namespace detail {
+
+// Track only whether natural record layout is certain. This does not apply pragma packing
+// to layout or diagnose the directive. Unknown extensions can affect both the current
+// setting and the saved settings; an explicit reset establishes the default again.
+class PackPragmas {
+ public:
+  PackPragmas(Session& s, const Flat& flat, Region& region) : s_(&s), flat_(&flat), region_(&region) {}
+
+  void advance(std::size_t i) {
+    while (next_ < flat_->passthrough.size() && flat_->passthrough[next_].first <= i) {
+      const auto& line = flat_->passthrough[next_++].second;
+      if (line.size() < 3 || !name(line[2], "pack")) continue;
+      bool before = capped_;
+      change(std::span(line).subspan(3));
+      auto at = u32(region_->tokens.size());
+      if (!before && capped_) begin_ = at;
+      if (before && !capped_) close(at);
+    }
+  }
+
+  void finish() {
+    if (capped_) close(u32(region_->tokens.size()));
+  }
+
+ private:
+  Session* s_;
+  const Flat* flat_;
+  Region* region_;
+  std::size_t next_ = 0;
+  u32 begin_ = 0;
+  bool capped_ = false, unknown_stack_ = false;
+  std::vector<std::uint8_t> saved_;
+
+  bool name(const PTok& p, std::string_view value) const {
+    return p.tok.kind == Tk::identifier && s_->spellings.name(p.tok.payload) == value;
+  }
+
+  std::optional<bool> cap(const PTok& p) const {
+    if (p.tok.kind != Tk::pp_number) return std::nullopt;
+    std::string_view n = s_->spellings.literal(p.tok.payload).spelling;
+    if (n == "0") return false;
+    if (n == "1" || n == "2" || n == "4" || n == "8" || n == "16") return true;
+    return std::nullopt;
+  }
+
+  void close(u32 at) {
+    if (begin_ != at) region_->possibly_packed.emplace_back(begin_, at);
+  }
+
+  void change(std::span<const PTok> tokens) {
+    if (tokens.size() >= 2 && tokens.front().tok.kind == Tk::l_paren && tokens.back().tok.kind == Tk::r_paren) {
+      auto args = tokens.subspan(1, tokens.size() - 2);
+      if (args.empty()) {
+        capped_ = false;
+        return;
+      }
+      if (args.size() == 1) {
+        if (auto setting = cap(args[0])) capped_ = *setting;
+        else if (name(args[0], "push")) saved_.push_back(capped_);
+        else if (name(args[0], "pop")) {
+          if (saved_.empty()) capped_ = capped_ || unknown_stack_;
+          else {
+            capped_ = saved_.back();
+            saved_.pop_back();
+          }
+        } else {
+          unknown();
+        }
+        return;
+      }
+      if (args.size() == 3 && name(args[0], "push") && args[1].tok.kind == Tk::comma) {
+        if (auto setting = cap(args[2])) {
+          saved_.push_back(capped_);
+          capped_ = *setting;
+          return;
+        }
+      }
+    }
+    unknown();
+  }
+
+  void unknown() {
+    capped_ = true;
+    unknown_stack_ = true;
+    saved_.clear();
+  }
+};
+
+}  // namespace detail
+
 // Phases 5 and 6 ([lex.phases]) over the flattened tokens: string-literal concatenation, then
 // pp-tokens become tokens (keywords, classified numbers, evaluated character literals).
 Preprocessed to_region(Session& s, const Flat& flat) {
@@ -223,7 +314,9 @@ Preprocessed to_region(Session& s, const Flat& flat) {
     r.tokens.push_back(t);
     r.locs.push_back(p.loc);
   };
+  detail::PackPragmas pack(s, flat, r);
   for (std::size_t i = 0; i < pp.size(); ++i) {
+    pack.advance(i);
     const PTok& p = pp[i];
     Tok tok = p.tok;
     switch (tok.kind) {
@@ -256,6 +349,7 @@ Preprocessed to_region(Session& s, const Flat& flat) {
         report_at(i + k)(offset, d, a, b);
       });
       for (std::size_t k = i; k <= j; ++k) {
+        pack.advance(k);
         Tok t = pp[k].tok;
         t.payload = ids[k - i];
         if (k > i) t.flags |= tok_flag::continued;
@@ -279,6 +373,7 @@ Preprocessed to_region(Session& s, const Flat& flat) {
     default: emit(tok, p); break;
     }
   }
+  pack.finish();
   const Files::Content* main = s.files.content(flat.main);
   r.tokens.push_back(Tok{Tk::eof, tok_flag::line_start, 0});
   r.locs.push_back({0, 0, main ? static_cast<u32>(main->text.size()) : 0});

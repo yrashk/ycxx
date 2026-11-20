@@ -236,6 +236,23 @@ system_leaf:
             compile(target, '-nostdlib', source, '-o', name)
             run([f'./{name}'], scope, cold)
         integer_aggregate_calls(compile, target, source_dir, scope, cold, cc)
+        (scope / 'packing.cpp').write_text(
+            '#pragma pack(push, 1)\n'
+            'struct Capped { char a; int b; };\n'
+            'int read_reference(const Capped& x) { return x.b; }\n'
+            '#pragma pack(pop)\n'
+            'struct Popped { char a; int b; };\n'
+            'Popped unrelated __attribute__((aligned(32)));\n'
+            'int read_popped(Popped x) { return x.b; }\n'
+            '#pragma pack(push, label, 1)\n'
+            'struct Uncertain { char a; int b; };\n'
+            '#pragma pack()\n'
+            'struct Reset { char a; int b; };\n'
+            'int read_reset(Reset x) { return x.b; }\n'
+            'int main() { return read_popped({1, 20}) + read_reset({2, 22}) - 42; }\n')
+        compile(target, '-nostdlib', 'packing.cpp', '-o', 'packing')
+        run(['./packing'], scope, cold)
+        assert '#pragma pack' in compile(target, '-E', 'packing.cpp')
         aggregate_parameter = 'unsupported aggregate parameter layout'
         aggregate_result = 'unsupported aggregate result layout'
         cases = (
@@ -252,6 +269,20 @@ system_leaf:
             ('struct X { int a : 3; }; int f(X x) { return x.a; }', aggregate_parameter),
             ('union X { int a; unsigned b; }; int f(X x) { return x.a; }', aggregate_parameter),
             ('struct X { int a; ~X(); }; int f(X x) { return x.a; }', aggregate_parameter),
+            ('struct __attribute__((packed)) X { char a; int b; }; int f(X x) { return x.b; }',
+             aggregate_parameter),
+            ('#define PACKED [[gnu::packed]]\n'
+             'struct X { char a; int b PACKED; }; int f(X x) { return x.b; }', aggregate_parameter),
+            ('typedef int Low __attribute__((aligned(1))); using Alias = Low;\n'
+             'struct X { char a; Alias b; }; int f(X x) { return x.b; }',
+             aggregate_parameter),
+            ('#pragma pack(push, 1)\nstruct X { char a; int b; };\n#pragma pack(pop)\n'
+             'int f(X x) { return x.b; }', aggregate_parameter),
+            ('#define PACK _Pragma("pack(push, label, 1)")\nPACK\n'
+             'struct X { char a; int b; };\n#pragma pack()\nint f(X x) { return x.b; }',
+             aggregate_parameter),
+            ('struct X { char a;\n#pragma pack(1)\nint b;\n#pragma pack()\n};\n'
+             'int f(X x) { return x.b; }', aggregate_parameter),
             ('struct X { double a; }; int g(X); int f() { return g(X{1.0}); }',
              f'call: {aggregate_parameter}'),
             ('struct X { long a, b, c; }; X g(); long f() { X x = g(); return x.a; }',

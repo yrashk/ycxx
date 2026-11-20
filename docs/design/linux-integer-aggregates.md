@@ -9,6 +9,12 @@ classes or arrays, and fields requiring other ABI classes. Aggregate calls throu
 function pointer, calls with an ellipsis, and member or template functions stay outside
 this slice.
 
+The front end records when a layout attribute or active packing directive makes the
+computed natural layout uncertain. The by-value ABI check rejects those shapes even
+if their computed offsets fit, since a peer can apply the layout directive. This check
+uses the pragma state at the definition, including simple push/pop and explicit reset.
+Actual packed layout remains tracked in [#307](https://github.com/yrashk/ycxx/issues/307).
+
 Astra checked the scope and calling convention against the public
 [System V AMD64 psABI](https://gitlab.com/x86-psABIs/x86-64-ABI) §§3.2.2–3.2.3,
 the [Itanium C++ ABI](https://itanium-cxx-abi.github.io/cxx-abi/abi.html)

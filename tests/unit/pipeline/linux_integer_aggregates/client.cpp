@@ -1,5 +1,7 @@
 #include "shapes.hpp"
 
+struct Guard { Three x; unsigned canary; };
+
 static auto deduced(Pair p) { return Pair{p.b, p.a}; }
 
 static int registers() {
@@ -18,7 +20,6 @@ static int partial_words() {
   src[1] = rotate(src[1]);
   if (src[1].a != 0x9a || src[1].b != 0x81 || src[1].c != 0xe3 ||
       src[2].a != 6 || src[0].c != 3) return 6;
-  struct Guard { Three x; unsigned canary; };
   Guard t = {{-129, 0x23456789, -12345}, 0x9aafe863U};
   t.x = shift(t.x);
   if (t.x.a != -12345 || t.x.b != -127 || t.x.c != 0x23456788 || t.canary != 0x9aafe863U) return 7;

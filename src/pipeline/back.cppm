@@ -146,6 +146,7 @@ struct ClassShape {
   // destructor, and the copy not deleted, so the calling convention may pass it in registers.
   bool trivial_calls = true;
   std::vector<std::uint8_t> bit_widths{};  // parallel to fields, empty for ordinary records
+  bool layout_uncertain = false;  // source packing or alignment that native layout does not apply
 };
 struct EnumShape {
   EntityId entity = EntityId::none;
@@ -719,7 +720,7 @@ ir::TypeLayout QueryLayout::type(QualType q) const {
 // System V AMD64 psABI §3.2.3. Only flat records of ordinary integral members participate.
 // Padding leaves the corresponding eightbyte class unchanged (initially NO_CLASS).
 std::uint8_t QueryLayout::sysv_integer_eightbytes(const ClassShape& shape, const ClassLayout& l) const {
-  if (!shape.trivial_calls || shape.union_ || !shape.bases.empty() || !shape.bit_widths.empty() ||
+  if (!shape.trivial_calls || shape.layout_uncertain || shape.union_ || !shape.bases.empty() || !shape.bit_widths.empty() ||
       l.fields.empty() || l.size > 16 || l.align > 8) return 0;
   std::uint64_t end = 0;
   std::uint8_t mask = 0;
