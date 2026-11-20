@@ -9,7 +9,9 @@ import tempfile
 
 
 def main():
-    ycxx, host_cxx = sys.argv[1:]
+    ycxx, host_cxx, libycxx_source = sys.argv[1:]
+    libycxx = Path(libycxx_source)
+    includes = ('-isystem', libycxx / 'include')
     source_dir = Path(__file__).resolve().parent / 'linux_variadic_definitions'
     linux = '--target=x86_64-linux-gnu'
     darwin = '--target=arm64-apple-darwin'
@@ -32,16 +34,22 @@ def main():
                 assert result.returncode != 0 and error in result.stderr, (args, result.stdout, result.stderr)
             return result.stderr
 
-        for source in ('integer-varargs.run.cpp', 'zero-fixed-varargs.run.cpp',
-                       'cstdarg-discarded-arguments.accept.cpp', 'cstdarg-no-named.accept.cpp'):
+        for source in ('integer-varargs.run.cpp', 'zero-fixed-varargs.run.cpp'):
             run(ycxx, 'cxx', linux, '-nostdlib', source, '-o', 'native')
             run('./native')
 
-        for callee, driver in (('host-double-callee.cpp', 'host-double-driver.cpp'),
-                               ('cstdarg-wrapper.cpp', 'cstdarg-host.cpp')):
-            run(ycxx, 'cxx', linux, '-c', callee, '-o', 'callee.o')
+        # The pinned libycxx header references its runtime's static linkage guard.
+        run(host_cxx, '-std=c++26', '-fno-pie', *includes, '-c',
+            libycxx / 'src/runtime/linkage/static.cpp', '-o', 'linkage.o')
+        for source in ('cstdarg-discarded-arguments.accept.cpp', 'cstdarg-no-named.accept.cpp'):
+            run(ycxx, 'cxx', linux, *includes, '-nostdlib', source, 'linkage.o', '-o', 'native')
+            run('./native')
+
+        for callee, driver, runtime in (('host-double-callee.cpp', 'host-double-driver.cpp', ()),
+                                        ('cstdarg-wrapper.cpp', 'cstdarg-host.cpp', ('linkage.o',))):
+            run(ycxx, 'cxx', linux, *includes, '-c', callee, '-o', 'callee.o')
             for mode in ('-O0', '-O2'):
-                run(host_cxx, '-std=c++26', mode, driver, 'callee.o', '-o', 'mixed')
+                run(host_cxx, '-std=c++26', mode, driver, 'callee.o', *runtime, '-o', 'mixed')
                 run('./mixed')
 
         rejected = 'nonvariadic-va-start.reject.cpp'
@@ -64,7 +72,7 @@ def main():
         )
         for source, message in invalid:
             (scope / 'invalid.cpp').write_text('#include <cstdarg>\n' + source + '\n')
-            run(ycxx, 'cxx', linux, '-fsyntax-only', 'invalid.cpp', error=message)
+            run(ycxx, 'cxx', linux, *includes, '-fsyntax-only', 'invalid.cpp', error=message)
 
         # Edit one unit across the register/stack boundary and compare outputs at each revision.
         edit = scope / 'edit.cpp'
@@ -77,7 +85,7 @@ def main():
                             '  int result = va_arg(ap, int); va_end(ap); return result;\n'
                             '}\n'
                             f'int main() {{ return first({arguments}, 59) != 59; }}\n')
-            args = (ycxx, 'cxx', linux, '-nostdlib', edit.name, '-o')
+            args = (ycxx, 'cxx', linux, *includes, '-nostdlib', edit.name, 'linkage.o', '-o')
             run(*args, 'fresh')
             run('./fresh')
             for _ in range(2):
@@ -97,7 +105,7 @@ int target_control() { return 42; }
         run(*args, 'darwin-fresh.o')
         run(*args, 'darwin-resident.o', env=daemon)
         assert (scope / 'darwin-resident.o').read_bytes() == (scope / 'darwin-fresh.o').read_bytes()
-        run(ycxx, 'cxx', linux, '-nostdlib', edit.name, '-o', 'resident', env=daemon)
+        run(ycxx, 'cxx', linux, *includes, '-nostdlib', edit.name, 'linkage.o', '-o', 'resident', env=daemon)
         assert (scope / 'resident').read_bytes() == (scope / 'fresh').read_bytes()
 
 
