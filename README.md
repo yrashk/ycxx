@@ -200,7 +200,8 @@ definitions for runtime construction. [#157](https://github.com/yrashk/ycxx/issu
   with addressable static storage and scalar calls ([#338](https://github.com/yrashk/ycxx/issues/338));
 - casts, including `static_cast<T&&>` from a compatible object lvalue and runtime `static_cast`
   downcasts of object pointers and lvalue references through accessible, unambiguous
-  nonvirtual base paths, `sizeof`/`alignof` (classes included), `decltype`, and calls
+  nonvirtual base paths, `sizeof`/`alignof` (classes included), direct-member `offsetof`
+  for ordinary standard-layout classes, `decltype`, and calls
   through pointers to functions. [#199](https://github.com/yrashk/ycxx/issues/199)
 - constant evaluation on ycxx's own interpreter: `constexpr`, `consteval`, `constinit`,
   `static_assert` and `if consteval`, with errors that explain why something is not constant.

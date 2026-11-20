@@ -102,6 +102,8 @@ public:
   // Whether class `c` is complete at the current point ([class.mem.general]): its definition
   // precedes the point and does not enclose it.
   virtual bool is_complete(EntityId c) = 0;
+  // Whether a class's defining declarations use the natural layout we can compute.
+  virtual bool natural_record_layout(EntityId) { return false; }
   // Inside the enumerator list of an enumeration this unit is defining: its record so far, which
   // is published only after the list (#156).
   virtual const EnumRec* defining_enum(EntityId) { return nullptr; }
@@ -4074,7 +4076,7 @@ public:
   }
   // Whether `name` is a GNU built-in function ycxx does not have yet (`lex::lacking_builtins`,
   // docs/EXTENSIONS.md) that no declaration in scope gives. Its call is diagnosed without parsing
-  // its arguments, which may be types (`__builtin_offsetof(T, m)`). Any other `__builtin_` name
+  // its arguments. Any other `__builtin_` name
   // is an ordinary one.
   bool unsupported_builtin(NameId name) { return lex::lacking_builtin(ins().names.spelling(name)) && !declared(name); }
   // Whether a declaration in scope gives `name`, hiding the built-in function of that name.
@@ -4095,6 +4097,9 @@ public:
   const lex::BuiltinFunctionInfo* builtin_function(NameId name) {
     const lex::BuiltinFunctionInfo* b = lex::builtin_function(ins().names.spelling(name));
     return b && !declared(name) ? b : nullptr;
+  }
+  bool builtin_offsetof(NameId name) {
+    return ins().names.spelling(name) == lex::builtin_offsetof_name && !declared(name);
   }
   // A call of one (docs/EXTENSIONS.md): `__builtin_inf*` and `__builtin_huge_val*` are +infinity
   // and `__builtin_nan*` a quiet NaN, constants of their type; `__builtin_fabs*` a `BuiltinCall`.
@@ -5031,6 +5036,48 @@ public:
     }
     return literal(st, w_->values.integer(st, *n), ValueCategory::prvalue, begin, end);
   }
+  // The supported direct-member slice of [support.types.layout]. Its result uses the
+  // same target record offsets as code generation and the target's size_t.
+  Ex offset_of(QualType t, NameId name, u32 begin, u32 end, u32 name_at) {
+    QualType size = builtin(w_->target.size_type);
+    if (types().is_dependent(t)) return dependent_node({}, begin, end, size);
+    Ex fail{NodeId::none, begin, end};
+    EntityId cls = types().is_class(t) ? types().class_of(t) : EntityId::none;
+    const ClassRec* record = cls != EntityId::none ? class_rec(cls) : nullptr;
+    if (!record) {
+      diag(begin, Diag::offsetof_type, t);
+      return fail;
+    }
+    auto member = direct_member(cls, *record, name);
+    if (!member || !member->field) {
+      diag(name_at, Diag::offsetof_member, name, t);
+      return fail;
+    }
+    if (!check_access(cls, member->field->entity, name, name_at)) return fail;
+    if (member->field->bit_width != 0) {
+      diag(name_at, Diag::offsetof_bit_field);
+      return fail;
+    }
+    std::set<EntityId> checked;
+    auto ordinary = [&](this const auto& self, EntityId c) -> bool {
+      if (!checked.insert(c).second) return true;
+      const ClassRec* r = class_rec(c);
+      if (!r || !r->bases.empty() || r->closure || !q_->natural_record_layout(c)) return false;
+      return std::ranges::all_of(r->fields, [&](const FieldRec& f) {
+        QualType field = f.type;
+        while (types().is_array(field)) field = types().rec(field).inner;
+        return r->access_of(f.entity) == r->access_of(r->fields.front().entity) && !types().is_reference(field) &&
+               (!types().is_class(field) || self(types().class_of(field)));
+      });
+    };
+    auto layout = ordinary(cls) ? class_layout(cls) : std::nullopt;
+    if (!layout) {
+      diag(begin, Diag::offsetof_layout, t);
+      return fail;
+    }
+    return literal(size, w_->values.integer(size, layout->offsets[member->index]), ValueCategory::prvalue, begin, end);
+  }
+
   // A complete object type's size or alignment: from the target, and for a class by
   // `ast::record_layout` over its members' (#194), the rule the back end lays it out by.
   std::optional<u64> layout_of(QualType t, bool align) {

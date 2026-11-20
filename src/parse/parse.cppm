@@ -1201,6 +1201,23 @@ public:
   const sema::EnumRec* defining_enum(EntityId e) override {
     return p_->defining_enum_.first == e ? p_->defining_enum_.second : nullptr;
   }
+  bool natural_record_layout(EntityId c) override {
+    auto definition = p_->class_items_.find(std::to_underlying(c));
+    auto pattern = definition != p_->class_items_.end() ? std::optional(definition->second) : p_->class_pattern_item(c);
+    if (!pattern) return false;
+    const auto& all = p_->items().items;
+    const items::Item& item = all[*pattern];
+    const pp::Region& region = p_->region();
+    const auto& ranges = region.possibly_packed;
+    auto packing = std::ranges::upper_bound(ranges, item.begin, {}, [](const auto& range) { return range.second; });
+    if (packing != ranges.end() && packing->first < item.brace_end) return false;
+    if (items::layout_attribute(region, item.begin, item.brace_begin) ||
+        items::layout_attribute(region, item.brace_end, item.end, true)) return false;
+    return std::ranges::none_of(item.members, [&](u32 pos) {
+      const items::Item& member = all[pos];
+      return member.kind == items::ItemKind::declaration && items::layout_attribute(region, member.begin, member.end);
+    });
+  }
   std::vector<DeclId> visible_decls(ast::NameId name, std::span<const EntityId> directives = {}) override {
     std::vector<std::string> paths;
     for (EntityId ns : directives) paths.push_back(p_->namespace_path(ns));
