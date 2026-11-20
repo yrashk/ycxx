@@ -501,7 +501,7 @@ ftm = '__cpp_rvalue_references'
 detect = '\bstd::(?:move|forward)\b|\w&&(?=\s*[\w,)>.])'
 status = 'partial'
 issues = [199, 290]
-note = 'reference downcasts and the `S b(S(1))` initializer ambiguity'
+note = 'rvalue-reference downcasts and the `S b(S(1))` initializer ambiguity'
 probe = '''
 struct S { int v; S(int x) : v(x) {} S(S&& o) : v(o.v) { o.v = 0; } };
 int main() { int&& r = 1; S a(1); S b(static_cast<S&&>(a)); return (r == 1 && b.v == 1 && a.v == 0) ? 0 : 1; }
@@ -722,7 +722,7 @@ std = 'C++98'
 detect = '\b(?:static|const|reinterpret)_cast\s*<'
 status = 'partial'
 issues = [199, 59]
-note = 'downcasts, `const_cast`, `reinterpret_cast`, and some `void*` and `std::nullptr_t` conversions'
+note = 'rvalue-reference, C-style and functional downcasts, `const_cast`, `reinterpret_cast`, and some `void*` and `std::nullptr_t` conversions'
 probe = '''
 int main() { long l = 5; int i = static_cast<int>(l); const int* c = &i; int* m = const_cast<int*>(c); char* b = reinterpret_cast<char*>(m); return (i == 5 && (int)l == int(l) && b) ? 0 : 1; }
 '''

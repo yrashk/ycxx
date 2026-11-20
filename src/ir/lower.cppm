@@ -546,6 +546,11 @@ class Lowering {
         out(n, 0, add_offset(in(n, 0), offset(base, path_at(imms, 1))));
         return {};
       }
+      case Op::ptr_derived: {
+        QualType derived{std::uint32_t(imms[0])};
+        out(n, 0, add_offset(in(n, 0), -offset(derived, path_at(imms, 1))));
+        return {};
+      }
 
       case Op::alloc: {
         auto storage = Storage(imms[1]);

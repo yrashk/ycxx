@@ -19,8 +19,8 @@
 // Immediates and result types, as lower (#26) reads them:
 // - `alloc [T, …]` allocates a T and yields a pointer to T; `load`/`store [T, path]` access a T at
 //   `path` below the pointer's pointee; `ptr_member [T, path]` yields a pointer to the subobject,
-//   of type T (array-to-pointer is `ptr_member [elem, /e0]`); `ptr_add`/`ptr_diff [T]` step by
-//   elements of type T.
+//   of type T (array-to-pointer is `ptr_member [elem, /e0]`); `ptr_derived [T, path]` undoes
+//   a base path within T; `ptr_add`/`ptr_diff [T]` step by elements of type T.
 // - `global [@v]` is a pointer to the variable; `const_ [#c]` has the constant's type, and a string
 //   literal's address is a `const_` of its VLvalue, of type pointer to the array.
 // - `ptr_add`'s index is an integer of any type, widened by its signedness (lower does this);
@@ -659,6 +659,38 @@ class Gen {
     return {pure(ir::Op::ptr_member, facts_.pointer_to(t), {p.ptr}, {word(ty(t)), path[0], path[1]}), t};
   }
 
+  // The enclosing object recovered by undoing a checked nonvirtual base path ([expr.static.cast]).
+  ValueId derived_address(At a, ast::QualType derived, bool pointer) {
+    ast::QualType result = facts_.pointer_to(derived);
+    std::vector<std::uint64_t> imms{word(ty(derived)), 0};
+    do {
+      const auto c = get<ast::ImplicitConversion>(a);
+      imms.push_back(ir::encode({ir::Step::base, std::to_underlying(c.function)}));
+      a = child(a, c.operand);
+    } while (is<ast::ImplicitConversion>(a) &&
+             get<ast::ImplicitConversion>(a).conversion == ast::ConversionKind::base_to_derived);
+    imms[1] = imms.size() - 2;
+    auto adjust = [&](ValueId base) {
+      ir::Ty results[] = {vty(result)};
+      ValueId operands[] = {base};
+      return b_.result(emit(ir::Op::ptr_derived, results, operands, imms));
+    };
+    if (!pointer) return adjust(address(a));
+
+    // Test the evaluated pointer once. Only the non-null path has a base subobject to adjust.
+    ast::QualType from = info(a).type;
+    ValueId base = rvalue(a);
+    ValueId null = pure(ir::Op::ptr_cmp, facts_.bool_type(), {base, constant(from, facts_.null_constant(from))},
+                        {std::to_underlying(ir::Pred::eq)});
+    ValueId null_result = constant(result, facts_.null_constant(result));
+    ir::BlockId nonnull = new_block({from}), join = new_block({result});
+    cond_br(null, edge(join, {null_result}), edge(nonnull, {base}));
+    enter(nonnull);
+    br(join, {adjust(b_.param(nonnull, 1))});
+    enter(join);
+    return b_.param(join, 1);
+  }
+
   // [dcl.struct.bind]/1: copy in element order and retain each access's own cv-qualifiers.
   void copy_array(const Place& dst, const Place& src) {
     Place dst_first = subobject(dst, ir::Step::elem, 0, facts_.element(dst.type));
@@ -1268,6 +1300,7 @@ class Gen {
                             {std::to_underlying(ir::Pred::eq)});
         return pure(ir::Op::select, t, {null, constant(t, facts_.null_constant(t)), moved});
       }
+      case ast::ConversionKind::base_to_derived: return derived_address(a, facts_.pointee(t), /*pointer=*/true);
       case ast::ConversionKind::to_void:
         discard(from);
         return std::nullopt;
@@ -1602,6 +1635,8 @@ class Gen {
       const auto c = get<ast::ImplicitConversion>(a);
       if (c.conversion == ast::ConversionKind::derived_to_base)
         return subobject(lvalue(child(a, c.operand)), ir::Step::base, std::to_underlying(c.function), t);
+      if (c.conversion == ast::ConversionKind::base_to_derived)
+        return {derived_address(a, t, /*pointer=*/false), t};
       if (c.conversion == ast::ConversionKind::qualification) {
         // An explicit xvalue cast preserves storage while carrying the target type's qualifiers.
         Place p = lvalue(child(a, c.operand));

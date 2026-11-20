@@ -3850,7 +3850,8 @@ public:
     }
     // Through a base subobject or an identity-preserving glvalue cast ([class.temporary]/6).
     if (auto c = as<ast::ImplicitConversion>(e); c &&
-        (c->conversion == ast::ConversionKind::derived_to_base || c->conversion == ast::ConversionKind::qualification)) {
+        (c->conversion == ast::ConversionKind::derived_to_base || c->conversion == ast::ConversionKind::base_to_derived ||
+         c->conversion == ast::ConversionKind::qualification)) {
       Ex inner = extended({c->operand.id, e.begin + c->operand.at, e.end, {}});
       return node(ast::ImplicitConversion{c->info, c->conversion, c->function, at(inner, e.begin)}, e.begin, e.end, c->info);
     }
@@ -4655,10 +4656,38 @@ public:
     return convert_node(e, ast::ConversionKind::qualification, target, ValueCategory::xvalue);
   }
 
+  // [expr.static.cast]: reverse a valid conversion from the complete derived class to its
+  // base. `base_clause` admits only nonvirtual bases. A separate result for a failed applicable
+  // cast keeps the usual cast rules available for other operands.
+  std::optional<Ex> cast_base_to_derived(Ex e, QualType target, bool pointer, u32 at_) {
+    QualType from = pointer ? types().pointee(e.type()) : e.type();
+    QualType to = pointer ? types().pointee(target) : target;
+    if (!types().is_class(from) || !types().is_class(to) || same_unqualified(from, to) ||
+        !cv_within(object_cv(from), object_cv(to)) || !is_complete(to))
+      return std::nullopt;
+    EntityId d = types().class_of(to), b = types().class_of(from);
+    int paths = 0;
+    auto path = base_path(d, b, paths);
+    if (!path) return std::nullopt;
+    if (!check_base_path(to, b, path, paths, at_)) return Ex{NodeId::none, e.begin, e.end};
+    // Build the conversions in evaluation order, starting with B and undoing one edge at a time.
+    for (std::size_t i = path->size(); i-- > 0;) {
+      QualType result = target;
+      if (i != 0) {
+        QualType parent = types().add_cv(types().class_type((*path)[i - 1]), object_cv(to));
+        result = pointer ? types().pointer(parent) : parent;
+      }
+      ExprInfo info{result, e.cat(), 0};
+      e = node(ast::ImplicitConversion{info, ast::ConversionKind::base_to_derived, (*path)[i], at(e, e.begin)},
+               e.begin, e.end, info);
+    }
+    return e;
+  }
+
   // A conversion as `static_cast<to>(e)` performs it ([expr.static.cast]); a cast in functional
-  // notation or a cast-expression is one when static_cast applies ([expr.type.conv]/2,
-  // [expr.cast]/4). Downcasts and the const_cast and reinterpret_cast parts are not supported yet.
-  Ex static_cast_to(Ex e, QualType to, u32 at_) {
+  // notation or a cast-expression is one when the supported static_cast rules apply
+  // ([expr.type.conv]/2, [expr.cast]/4). The downcast slice is for named static_cast expressions.
+  Ex static_cast_to(Ex e, QualType to, u32 at_, bool allow_downcast = false) {
     if (!e.ok()) return e;
     if (dependent(e) || types().is_dependent(to))
       return dependent_node({e}, e.begin, e.end, types().is_dependent(to) ? std::nullopt : std::optional(Types::unqualified(to)));
@@ -4669,6 +4698,8 @@ public:
       const TypeRec ref = types().rec(to);
       if (ref.rvalue_ref && e.cat() == ValueCategory::lvalue && types().is_object(ref.inner)) {
         if (auto cast = cast_lvalue_to_xvalue(e, to, ref.inner, at_)) return *cast;
+      } else if (allow_downcast && !ref.rvalue_ref && e.cat() == ValueCategory::lvalue) {
+        if (auto cast = cast_base_to_derived(e, ref.inner, /*pointer=*/false, at_)) return *cast;
       }
       return convert(e, to, at_);
     }
@@ -4676,6 +4707,9 @@ public:
     Ex v = rvalue(e);
     if (!v.ok()) return v;
     QualType from = Types::unqualified(v.type());
+    if (allow_downcast && types().is_pointer(from) && types().is_pointer(target)) {
+      if (auto cast = cast_base_to_derived(v, target, /*pointer=*/true, at_)) return *cast;
+    }
     // /10: an integral or enumeration value to an enumeration; /9: a scoped enumeration's to an
     // integral type.
     // /10 also: a floating value, through the underlying type. A constant is folded, as an integer
@@ -4958,33 +4992,39 @@ public:
     auto p = base_path(d, b, paths);
     return p && paths == 1 ? int(p->size()) : 0;
   }
-  // `e`, a glvalue of class type or a pointer to one, converted to its base class `b`
-  // ([conv.ptr]/3, [dcl.init.ref]/5, [expr.static.cast]): one derived-to-base conversion per
-  // direct base on the way, the cv-qualifiers kept. The base must be unambiguous and accessible
-  // here ([class.access.base]/4); diagnosed at `at_` if not.
-  Ex to_base(Ex e, EntityId b, u32 at_) {
-    bool pointer = types().is_pointer(e.type());
-    QualType ct = pointer ? types().pointee(e.type()) : e.type();
-    Cv cv = Types::cv(ct);
-    EntityId d = types().class_of(ct);
-    int paths = 0;
-    auto path = base_path(d, b, paths);
+  // Check ambiguity before looking at the access of any edge ([class.access.base]/4).
+  bool check_base_path(QualType ct, EntityId b, const std::optional<std::vector<EntityId>>& path, int paths, u32 at_) {
     if (!path || paths != 1) {
       diag(at_, Diag::ambiguous_base, types().class_type(b), Types::unqualified(ct));
-      return {NodeId::none, e.begin, e.end};
+      return false;
     }
-    EntityId from = d;
+    EntityId from = types().class_of(ct);
     for (EntityId step : *path) {
       const ClassRec* r = class_rec(from);
       auto x = std::ranges::find(r->bases, step, &BaseRec::cls);
       if (!accessible(from, x->access)) {
         diag(at_, Diag::inaccessible_base, types().class_type(b), Types::unqualified(ct));
-        return {NodeId::none, e.begin, e.end};
+        return false;
       }
+      from = step;
+    }
+    return true;
+  }
+
+  // `e`, a glvalue of class type or a pointer to one, converted to its base class `b`
+  // ([conv.ptr]/3, [dcl.init.ref]/5, [expr.static.cast]): one derived-to-base conversion per
+  // direct base on the way, the cv-qualifiers kept.
+  Ex to_base(Ex e, EntityId b, u32 at_) {
+    bool pointer = types().is_pointer(e.type());
+    QualType ct = pointer ? types().pointee(e.type()) : e.type();
+    Cv cv = Types::cv(ct);
+    int paths = 0;
+    auto path = base_path(types().class_of(ct), b, paths);
+    if (!check_base_path(ct, b, path, paths, at_)) return {NodeId::none, e.begin, e.end};
+    for (EntityId step : *path) {
       QualType st = types().add_cv(types().class_type(step), cv);
       ExprInfo info{pointer ? types().pointer(st) : st, pointer ? ValueCategory::prvalue : e.cat(), 0};
       e = node(ast::ImplicitConversion{info, ast::ConversionKind::derived_to_base, step, at(e, e.begin)}, e.begin, e.end, info);
-      from = step;
     }
     return e;
   }
