@@ -1066,7 +1066,7 @@ int main() { return f(1) == 3 ? 0 : 1; }
 '''
 status = 'partial'
 issues = [356, 354]
-note = 'defaults that depend on template parameters; members in complete-class context'
+note = 'Ordinary non-template member defaults use complete-class lookup. Dependent defaults, out-of-class additions and defaults on qualified namespace definitions remain'
 
 [[feature]]
 id = 'dcl-variadic-fn'
