@@ -20,7 +20,7 @@ The final Linux x86-64 self-check uses the freestanding support in [#380](https:
 
 ## Status
 
-**Pre-0.1** (as of 2026-11-19). ycxx compiles a substantial subset of C++ (C-like code, classes,
+**Pre-0.1** (as of 2026-11-20). ycxx compiles a substantial subset of C++ (C-like code, classes,
 templates and constant evaluation) on macOS arm64, from source to a signed, running executable,
 with no external compiler, assembler or linker. It also builds static executables from a
 freestanding C++ subset for x86-64 Linux. The standard library is out of reach. The plan is in
@@ -98,7 +98,9 @@ object. [#428](https://github.com/yrashk/ycxx/issues/428), [#419](https://github
   Ranges can be arrays or classes with member `begin` and `end` or free `begin` and `end` found
   by argument-dependent lookup. Unqualified calls can find and rank functions in associated
   namespaces. Functions support default arguments, recursion, operator overloading and calls
-  through pointers. A pointer or reference target type can select a free or static member overload.
+  through pointers. Overloaded free functions can take braced arguments for arithmetic parameters
+  and ordinary aggregates with arithmetic fields. A pointer or reference target type can select
+  a free or static member overload.
 - classes and unions: data and static members, named data members of unnamed union type,
   member functions, constructors and destructors
   with RAII, aggregate and designated initialization, namespace-scope objects initialized by

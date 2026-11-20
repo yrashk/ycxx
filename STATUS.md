@@ -1175,11 +1175,25 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   checks 3- to 24-byte classes, member functions returning classes, exhausted registers, empty
   classes, and each kind of class for calls (trivially copyable, non-trivial copy or destructor,
   move-only, deleted copy, a move-only member) under both settings, calling both ways.
-- Not yet: braced arguments to overload sets, templates and member calls (#231), class arguments
-  through an ellipsis and calls through pointers returning classes (#196), classes in constant
-  evaluation (#25). (Classes with floating members: #336.)
+- Class arguments through an ellipsis and calls through pointers returning classes remain in
+  #196, and classes in constant evaluation remain in #25. (Classes with floating members: #336.)
 - Tests: `tests/own/abi` (5), `tests/own/classes/s5-byvalue-lifetimes`, `-temporaries`;
   s1-byvalue-params and -return pass.
+
+## Braced arguments in free function overload resolution (#231, 2026-11-20)
+
+- Free non-template candidates can rank a braced argument as a conversion sequence. An empty
+  list has identity rank for an arithmetic parameter and a single expression uses its ordinary
+  sequence. A flat positional arithmetic list for an ordinary aggregate with public arithmetic
+  fields contributes one user-defined sequence, ranked ahead of ellipsis ([over.ics.list],
+  [over.ics.rank]). Typed sibling arguments still participate in ADL.
+- The selected function's arguments use the existing list-initialization path, which checks
+  narrowing and initializes omitted fields. A dependent list defers call analysis. Candidates
+  with unsupported conversions that remain plausible after checking arity and other arguments
+  produce an unsupported diagnostic.
+- Constructors, member overloads, template deduction, class-valued clauses, and general
+  reference, array, aggregate, and `std::initializer_list` cases remain under #231.
+- Tests: `tests/own/braced-overloads/`.
 
 ## Templates, ζ step 1: function templates (#88, 2026-11-18)
 

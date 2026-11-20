@@ -766,11 +766,12 @@ ftm = '__cpp_initializer_lists'
 detect = '[\w>]\{|=\s*\{|\breturn\s*\{|\(\s*\{|,\s*\{'
 status = 'partial'
 issues = [231]
-note = 'braced arguments to overload sets, templates and member calls'
+note = 'free non-template overloads can rank braced arguments for arithmetic and flat ordinary aggregate targets. Further list conversions, templates and member calls remain'
 probe = '''
 struct P { int x, y; };
 int f(P p) { return p.x + p.y; }
-int main() { int i{1}; P p{2, 3}; return (f({1, -2}) == -1 && i + p.x == 3) ? 0 : 1; }
+int f(long n) { return static_cast<int>(n); }
+int main() { int i{1}; P p{2, 3}; return (f({1, -2}) == -1 && f({2}) == 2 && i + p.x == 3) ? 0 : 1; }
 '''
 
 [[feature]]
