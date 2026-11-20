@@ -1396,7 +1396,7 @@ int main() { S s; return s.v - 1; }
 '''
 status = 'partial'
 issues = [157, 244]
-note = '`= default`'
+note = 'First-declaration in-class copy constructors support trivial member copies and deletion. Other explicitly defaulted forms and nontrivial copy bodies remain open.'
 
 [[feature]]
 id = 'dcl-delete-reason'

@@ -1006,6 +1006,14 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   checked across an out-of-class definition ([dcl.constexpr], #157). These constructors use the
   ordinary runtime construction path. Constant evaluation of class objects is tracked in #25,
   and named exception specifications are tracked in #219.
+- A first-declaration in-class `C(C&) = default` or `C(const C&) = default` is a declared copy
+  constructor, including with `constexpr` or bare `noexcept`. It participates in overload
+  selection, access checking and deletion. For ordinary namespace-scope records without
+  bases, copies proven trivial use the existing representation copy and the usual by-value
+  ABI. This includes supported scalar fields, lvalue references, arrays, and class members
+  with a proven trivial selected copy. A selected nontrivial or unsupported defaulted copy
+  is diagnosed at use. Native by-value boundaries require a known copy classification.
+  [Design](docs/design/defaulted-copy-constructors.md) · [#157](https://github.com/yrashk/ycxx/issues/157)
 - **Cleanups** (ast.md §3.7.3 as revised by #135): `LocalVar::destructor`; `function_ir` runs
   destructors on every scope exit from its own scope stack (block end, `return`, `break`,
   `continue`) and ends a full-expression's temporaries at its end. Statements carry no cleanup
@@ -1014,7 +1022,7 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
 - Tests: `tests/own/classes/s3-*` (spec-only, plus two from the review): 16 of 16 pass. 10 more draft examples pass.
 - Not yet: temporaries with destructors created in a conditional operand, value-initializing a
   member subobject whose class has an implicit constructor, delegating constructors, `explicit`,
-  `= default`.
+  and other `= default` forms (#157, #244).
 
 ## Classes, δ step 4a: enumerations (#86, 2026-11-18)
 

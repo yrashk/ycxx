@@ -132,7 +132,9 @@ arrays of supported scalar types, including arithmetic on saved pointers just pa
 [#111](https://github.com/yrashk/ycxx/issues/111)
 
 Both targets support `constexpr` constructors in class definitions and plain out-of-class
-definitions for runtime construction. [#157](https://github.com/yrashk/ycxx/issues/157)
+definitions for runtime construction. An ordinary class can explicitly default its copy
+constructor as its first declaration and use it for trivial member copies.
+[#157](https://github.com/yrashk/ycxx/issues/157)
 
 **Language on macOS.** Programs can use:
 - the fundamental integer, character and floating types, pointers, arrays, references and
