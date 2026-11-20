@@ -1,4 +1,4 @@
-ycxxc_unit_test(elf elf_test.cpp ycxxc_obj)
+ycxxc_unit_test(elf elf_test.cpp ycxxc_obj ycxxc_hash)
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$"
    AND NOT CMAKE_CROSSCOMPILING)
   add_test(NAME unit.elf_consumer

@@ -637,6 +637,10 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   `.data.rel.ro.local` to the existing read-only output for relocated pointers. It validates and
   discards file symbols, ordinary nonallocated DWARF and comment sections, and an empty
   non-executable GNU stack marker. [#419](https://github.com/yrashk/ycxx/issues/419)
+- ELF symbol names and COMDAT signatures can use shared suffixes and repeated string-table
+  indices. Normalized names share immutable table bytes across object copies and moves, and
+  equality and fingerprints follow their spelling. Invalid offsets and missing boundary NULs
+  are diagnosed. [Design](docs/design/elf-symbol-names.md) · [#484](https://github.com/yrashk/ycxx/issues/484)
 - `ycxx cxx --target=x86_64-pc-linux-gnu -nostdlib a.cpp b.cpp -o a` compiles and links C++
   sources in one invocation. Either source can also be compiled separately with `-c` and passed
   as a `.o` input. Links limited to sources and disk objects place compiled sources first. Each

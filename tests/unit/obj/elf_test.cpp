@@ -1,6 +1,7 @@
 // The ELF gABI layout and the System V AMD64 relocation definitions. The code bytes in the
 // fixture are hand-encoded from the Intel SDM.
 import std;
+import ycxx.hash;
 import ycxx.obj.elf;
 import ycxx.unit;
 
@@ -143,6 +144,7 @@ void read_fixture(const obj::object& input, std::span<const std::uint8_t> file) 
   expected.sections[0].relocs[1].symbol = 0;
   expected.sections[2].relocs[0].symbol = 0;
   check(*read == expected, "reader preserves standard sections, symbols and relocations in ELF order");
+  check(ycxx::fingerprint(*read) == ycxx::fingerprint(expected), "owned and ELF-backed names fingerprint by spelling");
   auto rewritten = obj::elf::write_object(*read);
   check(rewritten && std::ranges::equal(*rewritten, file), "reader and writer round trip is byte identical");
 
@@ -160,6 +162,74 @@ void read_fixture(const obj::object& input, std::span<const std::uint8_t> file) 
   }
   read = obj::elf::read_object(reordered, expected.name);
   check(read && *read == expected, "relocations and symbols follow ELF section indices across metadata headers");
+}
+
+void read_shared_names() {
+  constexpr std::size_t length = 8192;
+  const std::string text(length, 'x');
+  auto retained = [&]() -> std::vector<obj::symbol> {
+    obj::object input;
+    input.arch = obj::target::x86_64_linux;
+    const auto section = input.add_section(obj::standard_section::text);
+    input.define(text, obj::binding::local, section);
+    for (std::size_t i = 0; i <= length; ++i) input.define("", obj::binding::local, section);
+    auto file = obj::elf::write_object(input);
+    check(file.has_value(), file ? "write one long ELF name" : file.error());
+    if (!file) return {};
+
+    const auto shoff = field(*file, 40, 8);
+    const auto symtab_header = shoff + 64 * (field(*file, 60, 2) - 3);
+    const auto symtab = field(*file, symtab_header + 24, 8);
+    const auto strtab_header = shoff + 64 * field(*file, symtab_header + 40, 4);
+    const auto strtab = field(*file, strtab_header + 24, 8);
+    const auto strsize = field(*file, strtab_header + 32, 8);
+    check(strsize == length + 2, "one stored string with its boundary NULs");
+    for (std::size_t i = 1; i <= length; ++i) set_field(*file, symtab + 24 * i, 4, i);
+    set_field(*file, symtab + 24 * (length + 1), 4, 1);  // repeat an earlier offset
+    set_field(*file, symtab + 24 * (length + 2), 4, strsize - 1);  // name at a terminal NUL
+
+    auto parsed = obj::elf::read_object(*file, "suffix.o");
+    check(parsed.has_value(), parsed ? "read shared ELF suffix names" : parsed.error());
+    if (!parsed) return {};
+    auto other = obj::elf::read_object(*file, "suffix.o");
+    check(other && *other == *parsed && ycxx::fingerprint(other->symbols.front().name) ==
+              ycxx::fingerprint(parsed->symbols.front().name),
+          "equal names from independently owned tables compare and fingerprint by spelling");
+
+    auto bad = *file;
+    set_field(bad, symtab + 24, 4, strsize);
+    auto invalid = obj::elf::read_object(bad, "bad-offset.o");
+    check(!invalid && invalid.error().contains("invalid name for ELF symbol 1"), "reject an offset one past the table");
+    bad = *file;
+    bad[strtab + strsize - 1] = 'x';
+    invalid = obj::elf::read_object(bad, "bad-termination.o");
+    check(!invalid && invalid.error().contains("invalid ELF symbol name string table"), "reject a missing terminal NUL");
+    bad = *file;
+    set_field(bad, strtab_header + 32, 8, 0);
+    for (std::size_t i = 1; i <= length + 2; ++i) set_field(bad, symtab + 24 * i, 4, 0);
+    auto empty = obj::elf::read_object(bad, "empty-string-table.o");
+    check(empty && std::ranges::all_of(empty->symbols, [](const auto& s) { return s.name_view().empty(); }),
+          "zero name indices are valid in an empty symbol string table");
+    set_field(bad, symtab + 24, 4, 1);
+    invalid = obj::elf::read_object(bad, "bad-empty-offset.o");
+    check(!invalid && invalid.error().contains("invalid name for ELF symbol 1"), "reject a nonzero index in an empty table");
+
+    auto copied = *parsed;
+    return std::move(copied.symbols);
+  }();
+  if (retained.empty()) return;
+  auto moved = std::move(retained);
+  moved.reserve(moved.size() + 1);
+  const auto first = moved.front().name_view();
+  check(first == text, "ELF names survive input and object destruction and vector moves");
+  if (first.size() != length || moved.size() != length + 2) return;
+  bool shared = true;
+  for (std::size_t i = 0; i < length; ++i) {
+    const auto suffix = moved[i].name_view();
+    shared &= suffix.data() == first.data() + i && suffix.size() == length - i;
+  }
+  check(shared && moved[length].name_view().data() == first.data() && moved.back().name_view().empty(),
+        "different suffixes and repeated offsets share backing bytes");
 }
 
 void read_large_offsets() {
@@ -482,10 +552,6 @@ void reject_bad_files(std::span<const std::uint8_t> file) {
   change(rela + 12, 4, 8, "invalid ELF relocation symbol");
   change(rela + 24, 8, 5, "composed ELF relocations");
 
-  auto repeated_names = std::vector<std::uint8_t>(file.begin(), file.end());
-  const auto longest_name = field(file, symtab + 24 * 7, 4);
-  for (std::size_t i = 1; i < 7; ++i) set_field(repeated_names, symtab + 24 * i, 4, longest_name);
-  reject(repeated_names, "ELF symbol names exceed the string table size");
 }
 
 }  // namespace
@@ -507,6 +573,7 @@ int main(int argc, char** argv) {
     }
   }
   read_large_offsets();
+  read_shared_names();
   read_function_symbols();
   read_init_array();
   read_gnu_marker();
