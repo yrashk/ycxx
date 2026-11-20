@@ -2020,7 +2020,7 @@ template<class T> decltype(T().missing(), 1) h(int) { return 1; }
 template<class T> int h(long) { return 0; }
 int main() { return g(1) + h<int>(0); }
 '''
-note = 'Class and variable partial matches check substituted arguments in lexical order. Expression SFINAE, dependent operand identity and template `static_assert(false)` remain.'
+note = 'Class and variable partial matches check substituted arguments in lexical order. Template static assertion failures are diagnosed at instantiation. Expression SFINAE and dependent operand identity remain.'
 
 [[feature]]
 id = 'temp-ttp'

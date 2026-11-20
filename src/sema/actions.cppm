@@ -647,6 +647,12 @@ public:
   u32 loc_base() const { return loc_base_; }
   // Whether this is a templated context: a template's definition or one of its instantiations.
   bool templated() const { return !template_scopes.empty() || instantiating(); }
+  // A generic lambda can still be in its definition while its enclosing function is instantiated.
+  bool in_template_definition() const {
+    return std::ranges::any_of(template_scopes | std::views::join, [&](const ast::TemplateParamSema& p) {
+      return !template_args.at(p.depth, p.index);
+    });
+  }
   // The concept unqualified lookup finds for `name`.
   std::optional<ast::DeclSema> concept_named(NameId name) { return named_template(name, ast::DeclKind::concept_); }
   // The type-constraints of the template-head being read, in normal form ([temp.constr.decl]/3).

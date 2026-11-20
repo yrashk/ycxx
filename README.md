@@ -190,7 +190,8 @@ definitions for runtime construction. [#157](https://github.com/yrashk/ycxx/issu
   members of class templates, member function and
   constructor templates, parameter packs and fold expressions, alias templates, template
   template parameters, concepts and requires-expressions in overload resolution,
-  `if constexpr`, two-phase lookup, with Itanium names identical to Clang's; Clang's
+  `if constexpr`, deferred template static assertion failures, and two-phase lookup, with
+  Itanium names identical to Clang's; Clang's
   `__make_integer_seq`;
 - placeholder types: `auto` and `decltype(auto)` variables (`const auto&`, `auto*`, `auto&&`),
   deduced and trailing return types, in templates too;
