@@ -109,7 +109,8 @@ object. [#428](https://github.com/yrashk/ycxx/issues/428), [#419](https://github
   non-template classes without bases;
 - single and multiple inheritance (not virtual): base classes laid out as Clang does, member
   lookup through bases, derived-to-base conversions, base initializers;
-- namespaces, nested (`namespace a::b`) and inline ones, typedefs and alias declarations,
+- namespaces, nested (`namespace a::b`) and inline ones, typedefs and aliases, including
+  function type aliases and function pointer aliases with qualified return types,
   `using` declarations and directives;
 - `[[…]]` attributes, the GNU attributes and `asm` labels the macOS SDK's headers use, the
   GNU pointer qualifiers glibc uses, and the type-trait built-ins libycxx's headers use

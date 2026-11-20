@@ -1307,6 +1307,8 @@ std = 'C++11'
 ftm = '__cpp_alias_templates'
 detect = '\busing\s+\w+\s*(?:\[\[[^\]]*\]\]\s*)?=(?!=)'
 status = 'done'
+issues = [216]
+note = 'includes function type-ids with qualified return types'
 
 [[feature]]
 id = 'dcl-static-assert'
