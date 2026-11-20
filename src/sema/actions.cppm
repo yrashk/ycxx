@@ -851,6 +851,8 @@ public:
       diag(name_at, Diag::no_member, n, *s.type);
       return {NodeId::none, begin, end};
     }
+    if (namespace_lambda && namespace_lambda->name == n && namespace_lambda->scope == *s.ns)
+      return undeduced_namespace_lambda(n, name_at, end);
     std::vector<ast::DeclSema> found = q_->namespace_members(*s.ns, n);
     if (found.empty()) {
       diag(name_at, Diag::no_namespace_member, n);
@@ -2170,6 +2172,16 @@ public:
   bool open_lambda(LambdaSpec spec) {
     // The enclosing entity: the function, or the enclosing lambda's operator().
     EntityId scope = lambdas_.empty() ? current_function : lambdas_.back().call;
+    const bool in_initializer = scope == EntityId::none && namespace_lambda && namespace_lambda->begin == spec.begin;
+    if (in_initializer) {
+      if (spec.default_capture || spec.has_capture || !spec.head.empty()) {
+        diag(spec.begin, spec.default_capture ? Diag::namespace_lambda_capture_default
+                         : spec.has_capture ? Diag::namespace_lambda_init_capture
+                                            : Diag::namespace_lambda_generic);
+        return false;
+      }
+      scope = namespace_lambda->owner;
+    }
     if (scope == EntityId::none) {
       diag(spec.begin, Diag::not_supported, lex::Tk::l_square);  // a lambda outside a function body
       return false;
@@ -2190,7 +2202,7 @@ public:
     u32 ordinal = 0;
     for (const auto& [sc, sg] : completed_closures_)
       if (sc == scope && sg == sig) ++ordinal;
-    ast::Linkage linkage = closure_linkage(scope);
+    ast::Linkage linkage = in_initializer ? ast::Linkage::internal : closure_linkage(scope);
     // Its record's type, which names it (the <lambda-sig>), has a generic lambda's parameters at
     // depth 0, as the innermost template's are mangled.
     EntityRec cr{EntityKind::class_, no_name(), rebased(call_type, spec.head), LangLinkage::cxx, linkage, {}, scope};
@@ -2840,6 +2852,17 @@ public:
   // The function whose body is being analysed, none outside one: a friend of a class may name its
   // private members ([class.friend]/2).
   EntityId current_function = EntityId::none;
+  struct NamespaceLambda {
+    EntityId owner, scope;
+    NameId name;
+    u32 begin;
+  };
+  std::optional<NamespaceLambda> namespace_lambda;
+
+  Ex undeduced_namespace_lambda(NameId name, u32 begin, u32 end) {
+    diag(begin, Diag::auto_used_in_initializer, name);
+    return {NodeId::none, begin, end};
+  }
 
   // [class.access]/1–2: whether a member of class `c` with access `a` can be named here. A public
   // one anywhere; a private or protected one in a member of `c` or of a class nested in it
@@ -3919,6 +3942,8 @@ public:
           return static_member(current_class, m->entity, m->type, begin, end);
         }
     }
+    if (namespace_lambda && namespace_lambda->name == name)
+      return undeduced_namespace_lambda(name, begin, end);
     std::vector<ast::DeclSema> found;
     for (auto p = own.rbegin(); p != own.rend(); ++p)
       if (p->name == name) found.push_back(p->sema);
