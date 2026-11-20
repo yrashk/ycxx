@@ -1,7 +1,10 @@
 // Regular SVR4/GNU ar containers, from ar(5). The reader leaves member payloads opaque.
+// The writer uses the x86-64 ELF object reader to validate members and build the symbol index.
 export module ycxx.obj.archive;
 
 import std;
+import ycxx.obj;
+import ycxx.obj.elf;
 
 export namespace ycxx::obj::archive {
 
@@ -18,12 +21,21 @@ struct contents {
 
 std::expected<contents, std::string> read(std::string_view bytes, std::string_view name);
 
+inline constexpr std::uint64_t max_member_size = 9'999'999'999;  // 10 decimal digits
+
+struct member_input {
+  std::string_view path, data;
+};
+
+std::expected<std::string, std::string> write(std::span<const member_input> inputs);
+
 }  // namespace ycxx::obj::archive
 
 namespace ycxx::obj::archive {
 namespace {
 
-constexpr std::size_t header_size = 60, word_size = 4;
+constexpr std::string_view magic = "!<arch>\n";
+constexpr std::size_t header_size = 60, name_size = 16, word_size = 4;
 
 std::string_view trim_padding(std::string_view field) {
   while (field.ends_with(' ')) field.remove_suffix(1);
@@ -57,7 +69,6 @@ std::expected<contents, std::string> read(std::string_view bytes, std::string_vi
   const auto fail = [&](std::string_view reason) {
     return std::unexpected(std::format("{}: {}", name, reason));
   };
-  constexpr std::string_view magic = "!<arch>\n";
   if (bytes.starts_with("!<thin>\n")) return fail("thin archives are unsupported");
   if (!bytes.starts_with(magic)) return fail("expected a regular GNU archive");
 
@@ -67,7 +78,7 @@ std::expected<contents, std::string> read(std::string_view bytes, std::string_vi
     if (bytes.size() - offset < header_size) return fail("truncated archive member header");
     const auto header = bytes.substr(offset, header_size);
     if (header.substr(58) != "`\n") return fail("invalid archive member header trailer");
-    const auto field = trim_padding(header.substr(0, 16));
+    const auto field = trim_padding(header.substr(0, name_size));
     const auto size = decimal(trim_padding(header.substr(48, 10)));
     if (!size) return fail("invalid archive member size");
     const auto start = offset + header_size;
@@ -139,6 +150,112 @@ std::expected<contents, std::string> read(std::string_view bytes, std::string_vi
     names.remove_prefix(end + 1);
   }
   if (names.find_first_not_of('\0') != std::string_view::npos) return fail("invalid archive index padding");
+  return result;
+}
+
+namespace {
+
+struct indexed_member {
+  std::string field;
+  std::string_view data;
+  std::vector<std::string> symbols;
+  std::uint32_t offset = 0;
+};
+
+constexpr std::uint64_t packed_size(std::uint64_t size) { return header_size + size + size % 2; }
+
+void append_header(std::string& out, std::string_view field, std::uint64_t size, std::string_view mode)
+  pre(field.size() <= name_size && size <= max_member_size)
+{
+  out.append(field).append(name_size - field.size(), ' ');
+  std::format_to(std::back_inserter(out), "{:<12}{:<6}{:<6}{:<8}{:<10}`\n", 0, 0, 0, mode, size);
+}
+
+void append_word(std::string& out, std::uint32_t word) {
+  for (int shift = 24; shift >= 0; shift -= 8) out.push_back(static_cast<char>(word >> shift));
+}
+
+void align_member(std::string& out, std::uint64_t size) {
+  if (size % 2 != 0) out.push_back('\n');
+}
+
+void append_member(std::string& out, std::string_view field, std::string_view data, std::string_view mode) {
+  append_header(out, field, data.size(), mode);
+  out.append(data);
+  align_member(out, data.size());
+}
+
+}  // namespace
+
+std::expected<std::string, std::string> write(std::span<const member_input> inputs) {
+  constexpr auto max_index_word = std::numeric_limits<std::uint32_t>::max();
+  std::vector<indexed_member> members;
+  members.reserve(inputs.size());
+  std::string long_names;
+  std::uint32_t count = 0;
+  std::uint64_t index_size = word_size;
+  for (const auto& input : inputs) {
+    if (input.data.size() > max_member_size)
+      return std::unexpected(std::format("{}: archive member size exceeds 10 decimal digits", input.path));
+    auto name = input.path;
+    if (const auto slash = name.find_last_of('/'); slash != std::string_view::npos) name.remove_prefix(slash + 1);
+    if (name.empty() || name.contains('\0') || name.contains('\n'))
+      return std::unexpected(std::format("{}: cannot represent member basename in a GNU archive", input.path));
+
+    indexed_member member{.field = {}, .data = input.data, .symbols = {}};
+    if (name.size() >= name_size || name.find_first_of(" \t\r\v\f") != std::string_view::npos ||
+        name == "#1" || bsd_member(name)) {
+      const auto remaining = max_member_size - long_names.size();
+      if (remaining < 2 || name.size() > remaining - 2)
+        return std::unexpected("archive long-name table exceeds 10 decimal digits");
+      member.field = std::format("/{}", long_names.size());
+      long_names.append(name).append("/\n");
+    } else {
+      member.field = std::string(name).append("/");
+    }
+
+    const auto bytes = std::span(reinterpret_cast<const std::uint8_t*>(input.data.data()), input.data.size());
+    auto object = elf::read_object(bytes, std::string(input.path));
+    if (!object) return std::unexpected(std::move(object.error()));
+    for (auto& symbol : object->symbols) {
+      if (symbol.bind == binding::local) continue;
+      if (symbol.name.empty())
+        return std::unexpected(std::format("{}: empty name for nonlocal ELF symbol", input.path));
+      if (!symbol.defined()) continue;
+      constexpr auto overhead = word_size + 1;  // offset and name terminator
+      const auto remaining = max_member_size - index_size;
+      if (count == max_index_word || remaining < overhead || symbol.name.size() > remaining - overhead)
+        return std::unexpected("archive symbol index exceeds the GNU 32-bit index format");
+      ++count;
+      index_size += overhead + symbol.name.size();
+      member.symbols.push_back(std::move(symbol.name));
+    }
+    members.push_back(std::move(member));
+  }
+
+  // Layout includes every ordinary header, even for members with no index entry.
+  // Each addend is bounded by the corresponding header's size field.
+  auto size = magic.size() + packed_size(index_size);
+  if (!long_names.empty()) size += packed_size(long_names.size());
+  for (auto& member : members) {
+    if (size > max_index_word) return std::unexpected("archive member header offset exceeds 32 bits");
+    member.offset = static_cast<std::uint32_t>(size);
+    size += packed_size(member.data.size());
+  }
+
+  std::string result;
+  if (size > result.max_size()) return std::unexpected("archive exceeds the maximum output size");
+  result.reserve(size);
+  result.append(magic);
+  append_header(result, "/", index_size, "0");
+  append_word(result, count);
+  for (const auto& member : members)
+    for (std::size_t i = 0; i < member.symbols.size(); ++i) append_word(result, member.offset);
+  for (const auto& member : members)
+    for (const auto& symbol : member.symbols) result.append(symbol).push_back('\0');
+  align_member(result, index_size);
+  if (!long_names.empty()) append_member(result, "//", long_names, "0");
+  for (const auto& member : members) append_member(result, member.field, member.data, "644");
   return result;
 }
 

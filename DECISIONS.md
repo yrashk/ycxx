@@ -25,6 +25,11 @@ reasoning; do not leave decisions only in issue threads.
    - Linux x86-64 [archive inputs](docs/design/linux-static-archives.md) start with explicit
      indexed GNU archives in static executable links. The linker extracts only members needed
      by outstanding symbols and preserves archive operand order (#388).
+   - Linux x86-64 [archive production](docs/design/linux-static-archives.md#native-archive-production)
+     uses the standalone `ycxx archive -o` front to create or replace a deterministic regular
+     GNU archive in process. It validates inputs with the ELF object reader, retains the original
+     payloads in operand order and indexes named nonlocal definitions, including weak and hidden
+     definitions. Astra reviewed the design (#389).
 4. **Optimization is designed in from the start, and delivered after correctness.** The first
    back end aims for correct, debuggable code of roughly `-O0`/`-O1` quality. The architecture
    (§4.8) is laid out from day one for optimization by search, solvers and measured cost models,

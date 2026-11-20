@@ -7,10 +7,11 @@ import std;
 import ycxx.version;
 import ycxx.daemon;
 import ycxx.client;
+import ycxx.driver.archive;
 
 namespace ycxx::driver {
 
-enum class front { daemon, cxx, lsp, ctl };
+enum class front { daemon, cxx, lsp, ctl, archive };
 
 int run_front(front f, std::span<const std::string_view> args) {
   switch (f) {
@@ -18,6 +19,7 @@ int run_front(front f, std::span<const std::string_view> args) {
     case front::cxx: return client::cxx(args);
     case front::lsp: return client::lsp(args);
     case front::ctl: return client::control(args);
+    case front::archive: return run_archive(args);
   }
   std::unreachable();
 }

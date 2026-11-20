@@ -15,8 +15,8 @@ def archive_member(name, data):
     return header.encode('ascii') + data + (b'\n' if len(data) % 2 else b'')
 
 
-def symbol_attributes(path, symbol, *, weak=False, hidden=False):
-    """Set binding and visibility on an existing ELF symbol."""
+def symbol_attributes(path, symbol, *, weak=False, hidden=False, unnamed=False):
+    """Change attributes on an existing ELF symbol."""
     data = bytearray(path.read_bytes())
     shoff = struct.unpack_from('<Q', data, 40)[0]
     shentsize, shnum = struct.unpack_from('<HH', data, 58)
@@ -35,6 +35,8 @@ def symbol_attributes(path, symbol, *, weak=False, hidden=False):
         data[entry + 4] = (data[entry + 4] & 15) | (2 << 4)  # STB_WEAK
     if hidden:
         data[entry + 5] = 2  # STV_HIDDEN
+    if unnamed:
+        struct.pack_into('<I', data, entry, 0)  # st_name points to the null string
     path.write_bytes(data)
 
 

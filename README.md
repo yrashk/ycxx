@@ -54,9 +54,11 @@ build/bin/ycxx cxx --target=x86_64-pc-linux-gnu -nostdlib example.o -o example
 ./example
 ```
 
-Static links also accept indexed GNU `.a` archives made by the system `ar` from supported ELF
-objects. Place an archive after the inputs that reference its members, and include at least one
-source or ordinary object. [#388](https://github.com/yrashk/ycxx/issues/388)
+**Package Linux objects into a static library.** `ycxx archive -o libexample.a example.o`
+creates or replaces a deterministic indexed GNU archive from supported x86-64 ELF objects.
+Static links accept these archives and compatible archives from system `ar`. Place an archive
+after the inputs that reference its members, and include at least one source or ordinary object.
+[#389](https://github.com/yrashk/ycxx/issues/389), [#388](https://github.com/yrashk/ycxx/issues/388)
 
 An explicit dynamic link uses ycxx's startup and the target loader. Supply the absolute target
 interpreter path and explicit, self-contained shared objects with GNU or SysV hash tables and

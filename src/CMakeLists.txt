@@ -33,8 +33,9 @@ target_sources(ycxxc_lib PUBLIC FILE_SET CXX_MODULES
   FILES
     ${CMAKE_CURRENT_BINARY_DIR}/version.cppm
     driver/driver.cppm
+    driver/archive.cppm
     client/client.cppm)
-target_link_libraries(ycxxc_lib PUBLIC ycxxc_options ycxxc_daemon)
+target_link_libraries(ycxxc_lib PUBLIC ycxxc_options ycxxc_daemon ycxxc_obj)
 
 add_executable(ycxxc main.cpp)
 set_target_properties(ycxxc PROPERTIES OUTPUT_NAME ycxx RUNTIME_OUTPUT_DIRECTORY ${PROJECT_BINARY_DIR}/bin)
