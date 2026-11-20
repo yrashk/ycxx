@@ -279,6 +279,12 @@ public:
     diags_->push_back(std::move(x));
   }
   std::size_t diag_count() const { return diags_->size(); }
+  bool has_error_since(std::size_t begin) const {
+    return std::ranges::any_of(std::span(*diags_).subspan(begin), [](const engine::Diagnostic& d) {
+      auto kind = sema_diag_of(d.id);
+      return kind && message_of(*kind).severity == lex::Severity::error;
+    });
+  }
   // Drops the diagnostics after the first `n`: a part analysed again where it was diagnosed already.
   void truncate_diags(std::size_t n) { diags_->resize(n); }
   // Drops the diagnostics after the first `n` but those that `survives_substitution` keeps: a

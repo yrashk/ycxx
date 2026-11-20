@@ -91,7 +91,7 @@ struct Declarator {
   // ([temp.expl.spec]/1); `f<>` has none.
   std::optional<std::vector<ast::TemplateArg>> template_args;
   u32 template_args_at = 0;
-  std::optional<u32> replay_template_args_at;  // written arguments with a dependent decltype operand
+  std::optional<u32> replay_template_args_at;  // written arguments with deferred substitution checks
   // A GNU asm label, `__asm("_fopen")`: the symbol as written (docs/EXTENSIONS.md); empty if none.
   std::string asm_label;
   bool pack = false;  // `T... x`: a declarator-id after an ellipsis ([dcl.fct]/23, [temp.param]/17)
@@ -365,7 +365,7 @@ public:
     angle_ = saved;
     bool closed = expect(Tk::r_paren);
     if (!e.ok() || !closed) return std::nullopt;
-    if (s_->dependent(e)) ++dependent_decltypes_;
+    if (s_->dependent(e)) ++deferred_argument_checks_;
     return s_->decltype_of(e, s_->as<ast::Paren>(e).has_value());
   }
 
@@ -401,7 +401,15 @@ public:
     if (!args) return std::nullopt;
     if (tt) return s_->template_param_id(*tt, *args, at);  // `TT<args>` ([temp.param])
     if (!tmpl) return s_->builtin_template_id(name, *args, at);  // `__make_integer_seq<…>`
-    return s_->class_template_id(*tmpl, *args, at);
+    return type_template_id(*tmpl, *args, at);
+  }
+
+  std::optional<QualType> type_template_id(const ast::DeclSema& tmpl, std::span<const ast::TemplateArg> args, u32 at) {
+    // An alias can erase a dependent argument from the resulting type, but the written argument
+    // still has to be valid when substituted ([temp.alias]).
+    if (tmpl.kind == ast::DeclKind::type_alias && std::ranges::any_of(args, [&](const auto& a) { return s_->dependent(a); }))
+      ++deferred_argument_checks_;
+    return s_->class_template_id(tmpl, args, at);
   }
 
   // What an elaborated-type-specifier naming no declared class does: at namespace scope it
@@ -865,7 +873,7 @@ public:
       std::optional<QualType> owner;
       if (auto star = member_pointer_star(0)) {
         u32 next = 0;
-        auto scope = nested_name(0, next, true);
+        auto scope = nested_name(0, next, /*member_pointer=*/true, substituting_partial_arguments);
         if (scope && next == *star && scope->type && s_->types().valid_member_owner(*scope->type)) {
           owner = scope->type;
         } else {
@@ -1093,7 +1101,8 @@ public:
 
   // A nested-name-specifier ([expr.prim.id.qual]) at token `start` ahead: `::`, `N::`, `N::C::`,
   // resolved as it is read, without consuming it. `next` is where the name after it is.
-  std::optional<sema::Sema::Scope> nested_name(u32 start, u32& next, bool member_pointer = false) {
+  std::optional<sema::Sema::Scope> nested_name(u32 start, u32& next, bool member_pointer = false,
+                                               bool checked = false) {
     u32 j = start;
     std::optional<sema::Sema::Scope> s;
     if (member_pointer && kind(j) == Tk::kw_decltype && kind(j + 1) == Tk::l_paren) {
@@ -1114,7 +1123,7 @@ public:
       s = s_->scope_named(name_of(tok(j)));
       if (!s) return std::nullopt;
       j += 2;
-    } else if (auto t = template_id_scope(std::nullopt, j)) {
+    } else if (auto t = template_id_scope(std::nullopt, j, /*scope=*/true, checked)) {
       s = t;
     } else {
       return std::nullopt;
@@ -1124,10 +1133,10 @@ public:
         NameId n = name_of(tok(j));
         auto m = s_->scope_member(*s, n);
         if (!m) return std::nullopt;
-        if (member_pointer) s_->type_member_access(*s, n, pos() + j);
+        if (member_pointer || checked) check_type_access(*s, n, pos() + j);
         s = m;
         j += 2;
-      } else if (auto t = template_id_scope(s, j)) {
+      } else if (auto t = template_id_scope(s, j, /*scope=*/true, checked)) {
         s = t;
       } else {
         break;
@@ -1148,9 +1157,9 @@ public:
   }
   // A component `X<args>::` at `j` ahead naming a class template specialization, found by
   // unqualified lookup or in namespace `in` ([temp.names]); `j` moves past the `::`. The arguments
-  // are parsed ahead of the tokens being taken and then left, with what they said dropped:
-  // nested names are read ahead before the parse commits to them.
-  std::optional<sema::Sema::Scope> template_id_scope(std::optional<sema::Sema::Scope> in, u32& j, bool scope = true) {
+  // are parsed ahead of the tokens being taken. A speculative lookup discards its diagnostics.
+  std::optional<sema::Sema::Scope> template_id_scope(std::optional<sema::Sema::Scope> in, u32& j, bool scope = true,
+                                                     bool checked = false) {
     if (kind(j) != Tk::identifier || kind(j + 1) != Tk::less) return std::nullopt;
     if (in && !in->ns) return std::nullopt;  // member templates of classes come later (#88)
     NameId n = name_of(tok(j));
@@ -1168,11 +1177,11 @@ public:
     bool ended_half = half_;  // the list ended in the first half of a `>>`
     std::optional<QualType> t;
     if (args && closed)
-      t = tt ? s_->template_param_id(*tt, *args, 0) : builtin ? s_->builtin_template_id(n, *args, 0) : s_->class_template_id(*tmpl, *args, 0);
+      t = tt ? s_->template_param_id(*tt, *args, 0) : builtin ? s_->builtin_template_id(n, *args, 0) : type_template_id(*tmpl, *args, 0);
     i_ = saved;
     half_ = saved_half;
     if (!scope) qualified_half_ = ended_half;
-    s_->truncate_diags(diags);
+    if (!checked) s_->truncate_diags(diags);
     if (!t) return std::nullopt;
     j = scope ? after + 1 : after;
     return sema::Sema::Scope{std::nullopt, *t};
@@ -1192,18 +1201,23 @@ public:
   // `checked`: the name is taken here, so its access is checked ([class.access]/4).
   std::optional<std::pair<QualType, u32>> qualified_type(u32 start, bool checked = false) {
     u32 next = 0;
-    auto s = nested_name(start, next);
+    bool check_qualifier = checked && substituting_partial_arguments;
+    auto s = nested_name(start, next, /*member_pointer=*/false, check_qualifier);
     if (!s || kind(next) != Tk::identifier || kind(next + 1) == Tk::coloncolon) return std::nullopt;
     // `N::X<args>`: a class template specialization named in a namespace ([temp.names]).
     qualified_half_ = false;
     if (kind(next + 1) == Tk::less && s->ns) {
       u32 j = next;
-      if (auto t = template_id_scope(s, j, false)) return std::pair{*t->type, j - start};
+      if (auto t = template_id_scope(s, j, /*scope=*/false, check_qualifier)) return std::pair{*t->type, j - start};
     }
     auto t = s_->scope_type(*s, name_of(tok(next)));
     if (!t) return std::nullopt;
-    if (checked) s_->type_member_access(*s, name_of(tok(next)), pos() + next);  // the type stands either way
+    if (checked) check_type_access(*s, name_of(tok(next)), pos() + next);
     return std::pair{*t, next + 1 - start};
+  }
+  void check_type_access(const sema::Sema::Scope& scope, NameId name, u32 at) {
+    if (scope.type && s_->types().is_dependent(*scope.type)) ++deferred_argument_checks_;
+    s_->type_member_access(scope, name, at);
   }
   // Called once a qualified declarator-id is read, before its parameters, so they are looked up
   // in the scope it names ([basic.scope.namespace], [class.mfct]).
@@ -1833,7 +1847,7 @@ public:
   // that can be a type-id is one ([temp.arg.general]/2).
   std::optional<std::vector<ast::TemplateArg>> template_argument_list(std::optional<u32>* replay_at = nullptr) {
     u32 begin = pos();
-    u32 decltypes = dependent_decltypes_;
+    u32 deferred = deferred_argument_checks_;
     if (!expect(Tk::less)) return std::nullopt;
     std::vector<ast::TemplateArg> args;
     bool ok = true;
@@ -1841,6 +1855,7 @@ public:
     if (!is(Tk::greater) && !is(Tk::greatergreater)) {
       do {
         u32 arg_at = pos();
+        std::size_t diags = s_->diag_count();
         struct Unframe {
           sema::Sema* s;
           decltype(s->hide_frames()) saved;
@@ -1865,14 +1880,14 @@ public:
           else args.push_back({ast::TemplateArgKind::type, s_->types().canonical(*t), sema::ConstId::none});
         } else {
           Ex e = conditional_expression();
-          if (!e.ok()) {
+          if (e.ok()) {
+            // Converted to its parameter's type when the template is known ([temp.arg.nontype]).
+            auto v = template_value(e, sema::Types::unqualified(s_->rvalue(e).type()));
+            if (!v) ok = false;
+            else args.push_back({ast::TemplateArgKind::value, s_->types().canonical(sema::Types::unqualified(s_->rvalue(e).type())), *v});
+          } else {
             ok = false;
-            continue;
           }
-          // Converted to its parameter's type when the template is known ([temp.arg.nontype]).
-          auto v = template_value(e, sema::Types::unqualified(s_->rvalue(e).type()));
-          if (!v) ok = false;
-          else args.push_back({ast::TemplateArgKind::value, s_->types().canonical(sema::Types::unqualified(s_->rvalue(e).type())), *v});
         }
         // `pattern...`: a pack expansion ([temp.variadic]/5), expanded where its packs are bound.
         if (ok && is(Tk::ellipsis)) {
@@ -1881,10 +1896,16 @@ public:
           if (!s_->names_pack(args.back())) {
             s_->diag(at, Diag::expansion_without_pack);
             ok = false;
-            continue;
+          } else {
+            args.back() = s_->templates().expansion_of(args.back());
+            end_pattern.expanded = true;
           }
-          args.back() = s_->templates().expansion_of(args.back());
-          end_pattern.expanded = true;
+        }
+        // Substitution stops at the first failure ([temp.deduct.general]). A later argument may
+        // instantiate another template and produce a hard error even during candidate matching.
+        if (substituting_partial_arguments && (!ok || s_->has_error_since(diags))) {
+          --angle_;
+          return std::nullopt;
         }
       } while (accept(Tk::comma));
     }
@@ -1895,7 +1916,7 @@ public:
     if (is(Tk::greatergreater) && !half_) half_ = true;
     else if (!expect(Tk::greater)) return std::nullopt;
     if (!ok) return std::nullopt;
-    if (replay_at && decltypes != dependent_decltypes_) *replay_at = begin;
+    if (replay_at && deferred != deferred_argument_checks_) *replay_at = begin;
     return args;
   }
   bool starts_type_id() {
@@ -3118,7 +3139,7 @@ public:
   // A qualified-id ([expr.prim.id.qual]): `N::x`, `::x`, `C::m`, `E::e`, `N::C::f`.
   Ex qualified_id(u32 begin) {
     u32 next = 0;
-    auto s = nested_name(0, next);
+    auto s = nested_name(0, next, /*member_pointer=*/false, substituting_partial_arguments);
     // `S::template f<args>`: f names a template ([temp.names]/3).
     bool keyword = s && kind(next) == Tk::kw_template && kind(next + 1) == Tk::identifier;
     if (keyword) ++next;
@@ -3152,7 +3173,10 @@ public:
     // `N::T(args)` or `N::T{…}` ([expr.type.conv]): a qualified type name, unless a function or
     // variable of the name hides it.
     if ((is(Tk::l_paren) || is(Tk::l_brace)) && !s_->scope_names_object(*s, n))
-      if (auto t = s_->scope_type(*s, n)) return type_conversion(*t, begin);
+      if (auto t = s_->scope_type(*s, n)) {
+        if (substituting_partial_arguments) s_->type_member_access(*s, n, name_at);
+        return type_conversion(*t, begin);
+      }
     if (is(Tk::less)) {
       // `N::v<args>`: a variable template of the namespace ([temp.names]/3).
       if (s->ns)
@@ -4738,10 +4762,11 @@ private:
   LangLinkage linkage_ = LangLinkage::cxx;
   int in_params_ = 0;
   int angle_ = 0;               // inside a template argument or parameter list, outside parentheses
-  u32 dependent_decltypes_ = 0;  // tracks dependent operands even when decltype yields a fixed type
+  u32 deferred_argument_checks_ = 0;  // checks a dependent canonical argument may not retain
   bool half_ = false;           // the current `>>` has had its first `>` taken by a template-id
 public:
   bool body = false;  // the part is a function body, not a declaration part
+  bool substituting_partial_arguments = false;
 private:
   std::optional<u32> address_operand_;  // the token after an explicit unary `&`
 };

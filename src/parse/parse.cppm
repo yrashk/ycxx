@@ -1138,7 +1138,7 @@ private:
   std::map<u32, u32> class_points_;              // by class template specialization: its point of instantiation
   u32 spec_scan_ = 0;                            // the items `specializations_before` has analysed
   std::map<u32, std::vector<Partial>> partials_;  // by template entity, in order of declaration
-  std::map<u32, PartialReplay> partial_replays_; // by item containing a dependent decltype argument
+  std::map<u32, PartialReplay> partial_replays_; // by item with deferred checks in its template arguments
   std::set<u32> partial_matching_;              // specializations whose arguments are being substituted
   std::set<u32> ambiguous_;                      // specializations whose choice was diagnosed
   engine::Loc end_at_{};                         // the END worklist's demand being instantiated
@@ -5408,12 +5408,14 @@ std::optional<std::vector<ast::TemplateArg>> Program::substitute_partial_args(
   auto replay = partial_replays_.find(item);
   if (replay == partial_replays_.end()) return s.templates().substitute_args(pattern, args);
 
-  // A decltype operand can be dependent even when its type is known. Re-analyse the written
-  // arguments with the deduced bindings so checks in the operand still run ([temp.deduct.general]).
+  // The canonical type can lose a dependent decltype operand or alias argument. A dependent
+  // qualified type also needs access checking. Re-analyse the written arguments with the deduced
+  // bindings so these checks run at substitution ([temp.deduct.general]).
   const PartialReplay& source = replay->second;
   const items::Item& it = items_->items[item];
   Parser ps(*r_, it.begin, it.begin + it.decl_length(), s);
   ps.set_questions(q);
+  ps.substituting_partial_arguments = true;
   ps.seek(it.begin + source.begin);
   q.instantiation_calls = source.dependent_calls;
   s.template_scopes.emplace_back(params.begin(), params.end());
@@ -5424,13 +5426,11 @@ std::optional<std::vector<ast::TemplateArg>> Program::substitute_partial_args(
   } catch (const TooDeep&) {
     // The parser diagnosed the stack limit in this operand.
   }
+  if (s.has_error_since(0)) back.reset();
   for (const engine::Diagnostic& d : sink) {
-    auto kind = sema::sema_diag_of(d.id);
-    if (!kind || sema::message_of(*kind).severity != lex::Severity::error) continue;
-    back.reset();
     // Only immediate-context errors make a candidate fail silently. Instantiations triggered
     // during this check record their own diagnostics in their own cells.
-    if ((sema::survives_substitution(d.id) || *kind == Diag::nested_too_deeply) &&
+    if ((sema::survives_substitution(d.id) || d.id == sema::diag_id(Diag::nested_too_deeply)) &&
         !std::ranges::contains(end_diags_, d)) end_diags_.push_back(d);
   }
   return back;
