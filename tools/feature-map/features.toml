@@ -1265,7 +1265,8 @@ clauses = ['basic.namespace', 'basic.namespace.general', 'namespace.def', 'names
 std = 'C++98'
 detect = '\bnamespace\b'
 status = 'done'
-issues = [153]
+issues = [153, 64]
+note = 'Itanium linkage names abbreviate the global std namespace as St.'
 probe = '''
 namespace a { namespace b { int v = 1; } } namespace { int w = 1; }
 namespace ab = a::b; using ab::v;

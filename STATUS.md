@@ -992,12 +992,17 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   ([basic.lookup.unqual]/9).
 - Linkage names: `<nested-name>`s with namespace prefixes as substitution candidates, and
   `_GLOBAL__N_1` for the unnamed namespace, checked against Clang's symbols.
+- The Itanium ABI abbreviates the global `std` namespace as `St` without assigning it a
+  numbered substitution (§5.1.5 and §5.1.10). Direct members use unscoped encodings
+  and deeper members keep `N…E`. The Linux mixed-object test links calls through the pinned
+  libycxx `<cstddef>` byte operator with matching GCC and Clang symbols (#64).
 - Tests: `tests/own/classes/s4-namespace*`, `s4-using` (spec-only, plus one from the review): 5
   of 5. Seven more draft examples pass.
 - A linkage-specification with one declaration (`extern "C" int v;`) declares as if `extern`
   were given ([dcl.link]/7); a variable with C language linkage is one in every namespace.
 - Not yet (#153): `using N::f;` at namespace scope, `N::S{…}` as an expression, some clashes
-  with namespace names and using-declarations, `std::` abbreviations in linkage names.
+  with namespace names and using-declarations, remaining standard-library linkage
+  abbreviations such as `Sa`.
 
 ## `<cstdio>`, step 1: typedef-names and alias-declarations (#133, 2026-11-18)
 
