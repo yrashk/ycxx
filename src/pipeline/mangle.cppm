@@ -743,6 +743,8 @@ class Mangler {
 
 // Itanium §5.1.5.1 <operator-name>: the code of `operator<op>` taking `arity` operands.
 std::optional<std::string_view> operator_code(std::string_view op, std::size_t arity) {
+  if (op == " new") return "nw";
+  if (op == " delete") return "dl";
   static constexpr std::pair<std::string_view, std::string_view> binary[] = {
       {"+", "pl"},  {"-", "mi"},   {"*", "ml"},   {"&", "an"},  {"/", "dv"},  {"%", "rm"},  {"|", "or"},
       {"^", "eo"},  {"=", "aS"},   {"+=", "pL"},  {"-=", "mI"}, {"*=", "mL"}, {"/=", "dV"}, {"%=", "rM"},

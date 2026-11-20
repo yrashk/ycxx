@@ -139,6 +139,9 @@ operators with an `unsigned long long` parameter, including constant evaluation.
   declaration, including definitions written inside their namespace and qualified definitions
   outside it. [#426](https://github.com/yrashk/ycxx/issues/426),
   [#455](https://github.com/yrashk/ycxx/issues/455)
+- ordinary scalar `new` and single-object `delete` for integral and pointer objects, including
+  cv-qualified objects. Allocating expressions use the global Itanium allocation functions.
+  [#293](https://github.com/yrashk/ycxx/issues/293)
 - classes and unions: data and static members, named data members of unnamed union type,
   member functions, constructors and destructors
   with RAII, aggregate and designated initialization, namespace-scope objects initialized by
