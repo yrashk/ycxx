@@ -501,8 +501,8 @@ std = 'C++11'
 ftm = '__cpp_rvalue_references'
 detect = '\bstd::(?:move|forward)\b|\w&&(?=\s*[\w,)>.])'
 status = 'partial'
-issues = [199, 290]
-note = 'reference downcasts and the `S b(S(1))` initializer ambiguity'
+issues = [199]
+note = 'reference downcasts'
 probe = '''
 struct S { int v; S(int x) : v(x) {} S(S&& o) : v(o.v) { o.v = 0; } };
 int main() { int&& r = 1; S a(1); S b(static_cast<S&&>(a)); return (r == 1 && b.v == 1 && a.v == 0) ? 0 : 1; }

@@ -1454,6 +1454,8 @@ session's.*
 - Named function-pointer declarations accept qualified return types, including at block scope
   ([dcl.ptr], [dcl.fct], [stmt.ambig], #433). A grouped pointer can name an existing namespace member,
   and a block declaration can take an unnamed function-pointer parameter (#449).
+- Parenthesized direct initialization accepts functional conversions with a braced operand or an
+  initial literal, including `S b(S(1));` and `S b(S{1});` ([dcl.ambig.res], #290).
 - Not yet: access, hiding and qualified functional casts of member types (#216); member alias
   templates (`template<…> using __apply = …` in a class), with member
   templates; template template parameters (#208); value-dependent expressions as template

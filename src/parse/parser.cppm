@@ -1186,14 +1186,22 @@ public:
   bool params_ahead(u32 open = 0, bool statement = false) {
     u32 first = open + 1;
     if (past_attributes(first) != first) return true;  // a parameter's attributes ([dcl.fct]/3)
-    // In statement lookahead, a type followed by ( or { can instead construct an argument
-    // to a call on the result of a functional conversion.
     auto can_start_parameter = [&](u32 after_type) {
-      if (!statement) return true;
-      if (kind(after_type) == Tk::l_paren)
+      Tk following = kind(after_type);
+      if (following == Tk::l_brace) return false;  // `T{args}` is a functional conversion.
+      if (following != Tk::l_paren) return true;
+      if (statement)
         // An unnamed grouped pointer such as `int (*)(int)` cannot be a cast operand.
         return function_pointer_declarator_ahead(after_type, PointerLookahead::abstract);
-      return kind(after_type) != Tk::l_brace;
+
+      // `T(1)` and `T(-1)` cannot be parameter declarations. Keep the declaration reading for
+      // `T()` and `T(name)`, where the parentheses can form part of a declarator.
+      u32 operand = after_type + 1;
+      while (kind(operand) == Tk::l_paren) ++operand;
+      Tk first_operand = kind(operand);
+      return !lex::is_literal(first_operand) && first_operand != Tk::kw_true &&
+             first_operand != Tk::kw_false && first_operand != Tk::kw_nullptr &&
+             first_operand != Tk::plus && first_operand != Tk::minus;
     };
     Tk k = kind(first);
     Tk next = kind(first + 1);
@@ -1204,7 +1212,7 @@ public:
       return q && can_start_parameter(first + q->second);
     }
     if (k == Tk::identifier && next == Tk::less && s_->names_type_template(name_of(tok(first))))
-      return !statement || can_start_parameter(past_template_args(first + 1));
+      return can_start_parameter(past_template_args(first + 1));
     if (transform_trait_ahead(first)) return true;
     return k == Tk::identifier && next != Tk::coloncolon && s_->class_name(name_of(tok(first))).has_value() &&
            can_start_parameter(first + 1);
