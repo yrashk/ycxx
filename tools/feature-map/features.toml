@@ -2308,7 +2308,7 @@ clauses = ['dcl.constexpr', 'expr.const', 'expr.const.general', 'expr.const.core
 std = 'C++11'
 ftm = '__cpp_constexpr'
 detect = '\bconstexpr\b'
-issues = [102, 262]
+issues = [102, 157, 262]
 probe = '''
 constexpr int fact(int n) { int r = 1; for (int i = 2; i <= n; ++i) r *= i; return r; }
 struct P { int x; constexpr P(int v) : x(v) {} };
@@ -2317,7 +2317,7 @@ static_assert(p.x == 24);
 int main() { return 0; }
 '''
 status = 'partial'
-note = '`constexpr` variables of class type'
+note = '`constexpr` constructor declarations and runtime calls work. Class-typed constant evaluation is partial.'
 
 [[feature]]
 id = 'const-consteval'

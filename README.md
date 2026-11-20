@@ -124,6 +124,9 @@ Both targets support typed constant addresses and reads within named namespace-s
 arrays of supported scalar types, including arithmetic on saved pointers just past a nested row.
 [#111](https://github.com/yrashk/ycxx/issues/111)
 
+Both targets support `constexpr` constructors in class definitions and plain out-of-class
+definitions for runtime construction. [#157](https://github.com/yrashk/ycxx/issues/157)
+
 **Language on macOS.** Programs can use:
 - the fundamental integer, character and floating types, pointers, arrays, references and
   enumerations, including opaque declarations of named enums in their namespaces; `float`,
