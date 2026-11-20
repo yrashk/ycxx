@@ -1283,7 +1283,12 @@ public:
         items::layout_attribute(region, item.brace_end, item.end, true)) return false;
     return std::ranges::none_of(item.members, [&](u32 pos) {
       const items::Item& member = all[pos];
-      return member.kind == items::ItemKind::declaration && items::layout_attribute(region, member.begin, member.end);
+      if (member.kind != items::ItemKind::declaration || !items::layout_attribute(region, member.begin, member.end))
+        return false;
+      const auto* analysed = p_->analysed_item(pos);
+      return !analysed || std::ranges::any_of(p_->world().ins.seqs.elements(analysed->decls), [](const ast::DeclSema& d) {
+        return d.kind == ast::DeclKind::data_member;
+      });
     });
   }
   std::vector<DeclId> visible_decls(ast::NameId name, std::span<const EntityId> directives = {}) override {
