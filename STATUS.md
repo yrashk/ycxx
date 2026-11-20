@@ -1419,6 +1419,8 @@ session's.*
 - Function type-ids accept a qualified return type (`using F = n::R (*)();`). An identifier
   known to name a type can start the parameter list of an abstract declarator, as in
   `struct S { using F = S(S); };` ([dcl.name], [dcl.fct], [dcl.ambig.res], #216).
+- Named function-pointer declarations accept qualified return types, including at block scope
+  ([dcl.ptr], [dcl.fct], [stmt.ambig], #433).
 - Not yet: access, hiding and qualified functional casts of member types (#216); member alias
   templates (`template<…> using __apply = …` in a class), with member
   templates; template template parameters (#208); value-dependent expressions as template
