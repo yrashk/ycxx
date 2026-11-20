@@ -825,6 +825,18 @@ private:
   std::vector<EntityId> class_order_, enum_order_;
 };
 
+// The ordinary single-object allocation functions implicitly declared at global scope
+// ([basic.stc.dynamic]). Their types use the target's size_t, like sizeof.
+enum class AllocationFunction : u8 { allocate, deallocate, deallocate_sized };
+
+constexpr std::string_view allocation_name(AllocationFunction f) {
+  return f == AllocationFunction::allocate ? "operator new" : "operator delete";
+}
+
+constexpr bool is_allocation_name(std::string_view n) {
+  return n == allocation_name(AllocationFunction::allocate) || n == allocation_name(AllocationFunction::deallocate);
+}
+
 // What the front end shares process-wide (§9.1): the AST core's interners, and sema's views.
 // Class and enumeration records are each unit's (`Classes`).
 struct World {
@@ -838,6 +850,28 @@ struct World {
     if (target.va_list == ast::VaList::sysv_x86_64)
       sysv_va_list_tag_ = entities.entity({.kind = EntityKind::class_, .name = ins.names.intern("__va_list_tag"),
                                           .head = ast::seed("ycxx.sema.builtin.sysv_va_list_tag")});
+    QualType size = types.builtin(target.size_type), v = types.builtin(Builtin::void_), vp = types.pointer(v);
+    QualType sized_delete[] = {vp, size};
+    auto allocation = [&](AllocationFunction f, QualType result, std::span<const QualType> params) {
+      QualType type = types.function(result, params, false, LangLinkage::cxx, Cv::none, ast::RefQual::none,
+                                     f != AllocationFunction::allocate);
+      NameId name = ins.names.intern(allocation_name(f));
+      ast::DeclSema d{};
+      d.entity = entities.entity({.kind = EntityKind::function, .name = name, .type = type});
+      d.type = type;
+      d.kind = ast::DeclKind::function;
+      d.linkage = ast::Linkage::external;
+      d.attributes = ins.intern_seq(std::span<const ast::NodeId>{});
+      d.constraint = ast::NodeId::none;
+      d.constraints = ConstId::none;
+      d.contracts = ast::NodeId::none;
+      d.params = ins.intern_seq(std::span<const ast::ParamSema>{});
+      d.template_params = ins.intern_seq(std::span<const ast::TemplateParamSema>{});
+      allocation_functions_[std::to_underlying(f)] = d;
+    };
+    allocation(AllocationFunction::allocate, vp, std::span(&size, 1));
+    allocation(AllocationFunction::deallocate, v, std::span(&vp, 1));
+    allocation(AllocationFunction::deallocate_sized, v, sized_delete);
     types.class_name = [this](EntityId e) {
       const EntityRec& r = entities.rec(e);
       if (r.unnamed_type_ordinal) return std::string("(unnamed union)");
@@ -850,6 +884,11 @@ struct World {
     };
   }
   World(const World&) = delete;
+
+  const ast::DeclSema& allocation_function(AllocationFunction f) const {
+    return allocation_functions_[std::to_underlying(f)];
+  }
+  std::span<const ast::DeclSema> allocation_functions() const { return allocation_functions_; }
 
   QualType builtin_va_list() {
     switch (target.va_list) {
@@ -890,6 +929,7 @@ struct World {
   }
 
 private:
+  std::array<ast::DeclSema, 3> allocation_functions_{};
   EntityId sysv_va_list_tag_ = EntityId::none;
 };
 

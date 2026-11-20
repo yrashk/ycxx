@@ -1924,6 +1924,7 @@ private:
     std::string_view n = p_->world().ins.names.spelling(d.name);
     if (!n.starts_with("operator") || n.size() == 8) return true;
     std::string_view op = n.substr(8);
+    if (sema::is_allocation_name(n)) return true;  // checked against the implicit declarations
     sema::Types& types = s_.types();
     if (op == "=" || op == "()" || op == "[]" || op == "->") {
       s_.diag(d.name_at, Diag::operator_member_only, d.name);
@@ -2886,6 +2887,10 @@ private:
     do {
       parse::Declarator d = ps_.declarator(spec.type, false);
       if (!d.ok || !d.named) return bad();
+      if (sema::is_allocation_name(s_.ins().names.spelling(d.name))) {
+        s_.diag(d.name_at, Diag::allocation_declaration, d.name);
+        return bad();
+      }
       if (!d.asm_label.empty()) {
         s_.diag(d.name_at, Diag::not_supported, Tk::kw_asm);  // a member's asm label
         return bad();
@@ -3740,6 +3745,18 @@ private:
                bool is_function_def) {
     sema::Types& types = s_.types();
     if (!defaults_allowed(d.params, types.is_function(d.type) && !spec.is_typedef, d.name)) return false;
+    std::string_view name = s_.ins().names.spelling(d.name);
+    if (sema::is_allocation_name(name)) {
+      auto matches = [&](const ast::DeclSema& f) {
+        return s_.world().entities.rec(f.entity).name == d.name && types.canonical(f.type) == types.canonical(d.type);
+      };
+      if (!d.function || d.qualified || ns_entity() != EntityId::none || lang != LangLinkage::cxx || template_ ||
+          explicit_ || spec.is_static || spec.is_inline || spec.is_typedef || spec.is_constexpr || spec.is_consteval ||
+          deleted_body() || !d.asm_label.empty() || !std::ranges::any_of(s_.world().allocation_functions(), matches)) {
+        s_.diag(d.name_at, Diag::allocation_declaration, d.name);
+        return false;
+      }
+    }
     if (spec.is_typedef) {
       if (is_function_def) {  // [dcl.typedef]/1: a typedef declares no function definition
         s_.diag(spec.begin, Diag::typedef_definition);
@@ -3879,7 +3896,7 @@ private:
           return false;
         }
         std::vector<QualType> ps = r.params;
-        sem.type = types.function(r.inner, ps, r.variadic, lang, r.fn_cv);
+        sem.type = types.function(r.inner, ps, r.variadic, lang, r.fn_cv, r.fn_ref, r.fn_noexcept);
         if (lang == LangLinkage::c) flags |= sema::decl_flag::lang_c;
         if (r.variadic) flags |= sema::decl_flag::variadic;
         for (const parse::Param& p : d.params) params.push_back({EntityId::none, p.type, p.name, p.default_arg, p.element ? sema::param_flag::pack_element : u16(0)});

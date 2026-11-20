@@ -787,8 +787,8 @@ public:
   }
   std::string_view name_spelling() const { return r_->name(tok()); }
 
-  Level level(bool abstract, bool& ok) {
-    Level l;
+  // Shared by a declarator and the ptr-operators of an unparenthesized new-type-id.
+  void pointer_operators(Level& l, bool& ok) {
     for (;;) {
       u32 at = pos();
       Tk op = kind();
@@ -831,6 +831,19 @@ public:
       }
       l.pointers.push_back({op, sema::Cv(cv), at, owner, restrict_at});
     }
+  }
+
+  bool allocation_operator_ahead(u32 ahead = 0) const {
+    return kind(ahead) == Tk::kw_operator && (kind(ahead + 1) == Tk::kw_new || kind(ahead + 1) == Tk::kw_delete);
+  }
+
+  static sema::AllocationFunction allocation_operator(Tk k) {
+    return k == Tk::kw_new ? sema::AllocationFunction::allocate : sema::AllocationFunction::deallocate;
+  }
+
+  Level level(bool abstract, bool& ok) {
+    Level l;
+    pointer_operators(l, ok);
     // A parameter pack's declarator ([dcl.fct]/23, [temp.param]/17): `T... x`, `Ts&&...`.
     if (abstract && packs_in_declarators_ && is(Tk::ellipsis)) {
       bump();
@@ -856,13 +869,21 @@ public:
     }
     if (!abstract && is(Tk::kw_operator)) {
       // An operator-function-id ([over.oper.general]): `operator@`, named as the splitter spells
-      // it. Conversion functions, `new`, `delete` and `co_await` are not supported yet.
+      // it. Only the ordinary global single-object forms of the allocation operators are supported.
       l.name_at = pos();
       bump();
       std::string spelled = "operator";
       if ((is(Tk::l_paren) && kind(1) == Tk::r_paren) || (is(Tk::l_square) && kind(1) == Tk::r_square)) {
         spelled += is(Tk::l_paren) ? "()" : "[]";
         bump();
+        bump();
+      } else if (is(Tk::kw_new) || is(Tk::kw_delete)) {
+        spelled = sema::allocation_name(allocation_operator(kind()));
+        if (kind(1) == Tk::l_square && kind(2) == Tk::r_square) {
+          s_->diag(pos(), Diag::not_supported, kind());  // operator new[] and operator delete[]
+          ok = false;
+          return l;
+        }
         bump();
       } else if (lex::is_punctuator(kind()) && overloadable(kind())) {
         spelled += lex::spelling(kind());
@@ -1203,8 +1224,12 @@ public:
         }
         std::vector<QualType> ps;
         for (const Param& p : s->params) ps.push_back(p.type);
-        bool nonthrowing = false;
-        if (s->has_noexcept && (member_pointer_to_suffix(l) || (spells_type && !l.inner))) {
+        std::string_view name = l.named ? s_->ins().names.spelling(l.name) : std::string_view{};
+        bool allocation = sema::is_allocation_name(name);
+        // [basic.stc.dynamic.deallocation]: a deallocation function without an explicit
+        // exception specification is non-throwing.
+        bool nonthrowing = name == sema::allocation_name(sema::AllocationFunction::deallocate) && !s->has_noexcept;
+        if (s->has_noexcept && (allocation || member_pointer_to_suffix(l) || (spells_type && !l.inner))) {
           nonthrowing = true;
           if (s->noexcept_condition) {
             Ex operand = s_->rvalue(*s->noexcept_condition);
@@ -2415,6 +2440,89 @@ public:
     return unary_expression();
   }
 
+  // Ordinary new-expressions ([expr.new]). A parenthesized type-id uses the abstract declarator;
+  // a bare new-type-id greedily takes ptr-operators and cannot have function suffixes.
+  Ex new_expression(u32 begin) {
+    bump();  // new, after an optional ::
+    std::optional<QualType> type;
+    bool excluded = false;
+    if (is(Tk::l_paren)) {
+      u32 past = i_ + past_parentheses(0);
+      bump();
+      if (starts_type_id()) {
+        type = type_id(/*placeholder_ok=*/true);
+        if (!expect(Tk::r_paren) || !type) return {NodeId::none, begin, pos()};
+      } else {
+        excluded = true;  // placement arguments
+        i_ = past;
+        if (accept(Tk::l_paren)) {
+          type = type_id(/*placeholder_ok=*/true);
+          if (!expect(Tk::r_paren) || !type) return {NodeId::none, begin, pos()};
+        }
+      }
+    }
+    if (!type) {
+      DeclSpec spec = decl_specifiers(/*in_type_id=*/true);
+      if (!spec.ok) return {NodeId::none, begin, pos()};
+      if (spec.is_static || spec.is_extern || spec.is_constexpr || spec.is_consteval || spec.is_constinit ||
+          spec.is_inline || spec.is_typedef) {
+        s_->diag(spec.begin, Diag::expected_type_specifier);
+        return {NodeId::none, begin, pos()};
+      }
+      Level l;
+      Declarator d;
+      d.begin = pos();
+      pointer_operators(l, d.ok);
+      const Suffix* fn = nullptr;
+      type = build(l, spec.type, fn, d, true);
+      if (!d.ok) return {NodeId::none, begin, pos()};
+      while (is(Tk::l_square) && kind(1) != Tk::l_square) {
+        excluded = true;  // array new
+        bump();
+        int saved = std::exchange(angle_, 0);
+        if (!is(Tk::r_square)) expression();
+        angle_ = saved;
+        if (!expect(Tk::r_square)) return {NodeId::none, begin, pos()};
+        skip_attributes();
+      }
+    }
+
+    std::unique_ptr<sema::Braced> braces;
+    std::optional<std::vector<Ex>> args;
+    if (is(Tk::l_brace)) {
+      braces = braced_init_list();
+    } else if (accept(Tk::l_paren)) {
+      args.emplace();
+      int saved = std::exchange(angle_, 0);
+      if (!is(Tk::r_paren))
+        do {
+          args->push_back(is(Tk::l_brace) ? s_->braced_argument(braced_init_list()) : assignment_expression());
+        } while (accept(Tk::comma));
+      angle_ = saved;
+      if (!expect(Tk::r_paren)) return {NodeId::none, begin, pos()};
+    }
+    if (excluded) {
+      s_->diag(begin, Diag::not_supported, Tk::kw_new);
+      return {NodeId::none, begin, pos()};
+    }
+    return s_->new_object(*type, args, braces.get(), begin, pos());
+  }
+
+  Ex delete_expression(u32 begin) {
+    bump();  // delete, after an optional ::
+    bool array = is(Tk::l_square) && kind(1) == Tk::r_square;
+    if (array) {
+      bump();
+      bump();
+    }
+    Ex operand = cast_expression();
+    if (array) {
+      s_->diag(begin, Diag::not_supported, Tk::kw_delete);
+      return {NodeId::none, begin, pos()};
+    }
+    return s_->delete_object(operand, begin, pos());
+  }
+
   // unary-expression ([expr.unary]).
   Ex unary_expression() {
     deep_enough();  // `++`, `--` and `sizeof` take their operands through here
@@ -2476,8 +2584,12 @@ public:
       Ex r = s_->size_of(e.type(), false, begin, pos());
       return {r.id, begin, pos(), r.info};
     }
-    case Tk::kw_new:
-    case Tk::kw_delete:
+    case Tk::coloncolon:
+      if (kind(1) != Tk::kw_new && kind(1) != Tk::kw_delete) return postfix_expression();
+      bump();
+      return is(Tk::kw_new) ? new_expression(begin) : delete_expression(begin);
+    case Tk::kw_new: return new_expression(begin);
+    case Tk::kw_delete: return delete_expression(begin);
     case Tk::kw_co_await:
     case Tk::kw_noexcept:
     case Tk::caretcaret: {
@@ -2724,7 +2836,10 @@ public:
       }
       return s_->name_expr(n, begin, pos(), is(Tk::l_paren));
     }
-    case Tk::coloncolon: return qualified_id(begin);
+    case Tk::coloncolon:
+      if (!allocation_operator_ahead(1)) return qualified_id(begin);
+      bump();
+      return allocation_function_id(begin);
     case Tk::kw_this: bump(); return s_->this_expr(begin, pos());
     case Tk::kw_requires: return requires_expression();
     case Tk::kw_static_cast: {
@@ -2759,6 +2874,8 @@ public:
       }
       return lambda_expression();
     case Tk::kw_operator:
+      if (allocation_operator_ahead()) return allocation_function_id(begin);
+      [[fallthrough]];
     case Tk::tilde:
     case Tk::kw_typeid:
     case Tk::kw_dynamic_cast:
@@ -2778,6 +2895,19 @@ public:
       return {NodeId::none, begin, begin};
     }
   }
+  Ex allocation_function_id(u32 begin) {
+    bump();  // operator
+    Tk k = kind();
+    bump();
+    if (is(Tk::l_square) && kind(1) == Tk::r_square) {
+      bump();
+      bump();
+      s_->diag(begin, Diag::not_supported, k);
+      return {NodeId::none, begin, pos()};
+    }
+    return s_->allocation_name_expr(allocation_operator(k), begin, pos());
+  }
+
   static bool simple_type_keyword(Tk k) {
     switch (k) {
     case Tk::kw_void: case Tk::kw_bool: case Tk::kw_char: case Tk::kw_char8_t: case Tk::kw_char16_t:
