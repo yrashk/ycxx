@@ -1159,6 +1159,10 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   initializes a character-array element of an aggregate. A default member initializer that is
   not a scalar constant, in a class without constructors, is now diagnosed (#118) instead of
   being dropped.
+- Leading standard attributes on ordinary data members and member functions are accepted
+  ([class.mem.general], #190). The parser diagnoses unbalanced arguments in these prefixes
+  ([dcl.attr.grammar]) and attributes before access labels ([class.access.spec]). Other attribute
+  placements still have the balance gap tracked in #190. Attribute effects remain tracked in #305.
 - Tests: `tests/own/decls` (11, three from the review). Five more draft examples pass.
 - Not yet: `sizeof`, `alignof`, `decltype`, `static_cast` and other casts, operator functions,
   unions (the next steps of #133); asm labels on class members and the other gaps of #190.
