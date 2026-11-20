@@ -126,6 +126,8 @@ object. [#428](https://github.com/yrashk/ycxx/issues/428), [#419](https://github
   a free or static member overload.
   A qualified namespace function definition can inherit C language linkage from its declaration.
   [#426](https://github.com/yrashk/ycxx/issues/426)
+- pointers and references to arrays of unknown bound, and template partial specializations
+  that match unknown-bound array types. [#222](https://github.com/yrashk/ycxx/issues/222)
 - classes and unions: data and static members, named data members of unnamed union type,
   member functions, constructors and destructors
   with RAII, aggregate and designated initialization, namespace-scope objects initialized by
