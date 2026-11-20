@@ -60,6 +60,8 @@ for calls. [Linux integer aggregate ABI](docs/design/linux-integer-aggregates.md
 
 For mixed Linux objects, the pinned libycxx `<cstddef>` byte operator uses the same Itanium
 linkage name in ycxx, GCC and Clang. [#64](https://github.com/yrashk/ycxx/issues/64)
+Static links of explicit x86-64 ELF objects keep the first COMDAT group for each signature, including
+its code, data and relocations. [#422](https://github.com/yrashk/ycxx/issues/422)
 
 **Package Linux objects into a static library.** `ycxx archive -o libexample.a example.o`
 creates or replaces a deterministic indexed GNU archive from supported x86-64 ELF objects.
