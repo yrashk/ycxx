@@ -140,6 +140,14 @@ struct BuiltinCall {
   [[=indeterminately_sequenced]] ChildList args;
 };
 
+// Variadic operations ([cstdarg.syn]). Operands are the normalized cursor addresses.
+enum class VaOp : u8 { start, arg, copy, end };
+struct VariadicBuiltin {
+  ExprInfo info;
+  VaOp op;
+  [[=indeterminately_sequenced]] ChildList args;
+};
+
 // The standard conversions ([conv]) and the others an implicit conversion sequence is made of.
 // `integral` covers integral promotions ([conv.prom]) and conversions ([conv.integral]), told
 // apart by the types, and `floating` floating-point promotions ([conv.fpprom]) and conversions
@@ -459,7 +467,7 @@ using Nodes = closed_list<Literal, DeclRef, Paren, Unary, Binary, OrderedBinary,
                           IfConsteval, StaticAssert, Member, InitList, ValueInit, DefaultInit, This,
                           MemberCall, Materialize, CtorCall, MemberInit, Destructor, DestroyMember, Dependent,
                           DepName, CondDecl, Switch, Case, Default, Label, Goto, BuiltinCall, Lambda, DefaultArg,
-                          StaticInit, StaticVar, NewObject, DeleteObject>;
+                          StaticInit, StaticVar, NewObject, DeleteObject, VariadicBuiltin>;
 
 static_assert(Nodes::size < max_node_kinds);
 

@@ -49,6 +49,13 @@ using enum Reg;
 constexpr Reg argument_regs[] = {rdi, rsi, rdx, rcx, r8, r9};
 constexpr std::size_t register_args = std::size(argument_regs);
 
+// AMD64 psABI §3.5.7: the va_list fields and the entry register save area.
+constexpr std::int32_t gp_offset_field = 0, fp_offset_field = 4;
+constexpr std::int32_t overflow_arg_area_field = 8, reg_save_area_field = 16;
+constexpr std::int32_t gp_slot = 8, xmm_slot = 16, xmm_register_args = 8;
+constexpr std::int32_t gp_save_size = register_args * gp_slot;
+constexpr std::int32_t reg_save_size = gp_save_size + xmm_register_args * xmm_slot;
+
 constexpr std::uint64_t align_up(std::uint64_t size, std::uint64_t align) {
   return (size + align - 1) & ~(align - 1);
 }
@@ -78,6 +85,7 @@ struct Frame {
   std::vector<std::int32_t> slots;
   std::vector<std::int32_t> objects;
   std::uint64_t size = 0;
+  std::int32_t variadic_save = 0;  // RBP-relative, present only for an executing va_start
 };
 
 std::expected<Frame, std::string> layout(const l2::Function& body) {
@@ -124,6 +132,11 @@ std::expected<Frame, std::string> layout(const l2::Function& body) {
         if (frame.size > max_frame) return at_node(n, nd.op, "x86-64 frame exceeds the single-page limit");
         frame.objects[raw(n)] = -std::int32_t(frame.size);
       }
+      if (nd.op == Op::va_start && !frame.variadic_save) {
+        frame.size = align_up(frame.size + reg_save_size, xmm_slot);
+        if (frame.size > max_frame) return at_node(n, nd.op, "x86-64 frame exceeds the single-page limit");
+        frame.variadic_save = -std::int32_t(frame.size);
+      }
       if (nd.op == Op::call || nd.op == Op::call_ind) {
         bool indirect = nd.op == Op::call_ind;
         if (indirect && body.type(body.operands_of(n)[1]) != Type::ptr)
@@ -158,6 +171,8 @@ class Emitter {
       e_.reg({0x81}, 5, rsp);  // sub rsp, imm32
       e_.immediate(frame_.size, 4);
     }
+    if (frame_.variadic_save && !save_variadic_registers())
+      return std::unexpected("x86-64 register-save branch displacement out of range");
     parameters();
     for (BlockId b : body_.block_ids()) {
       block_offsets_[raw(b)] = e_.offset();
@@ -210,6 +225,59 @@ class Emitter {
     e_.emit({shift});
     e_.reg({0xc1}, 7, reg);  // sar
     e_.emit({shift});
+  }
+
+  bool save_variadic_registers() {
+    for (std::size_t i = 0; i < register_args; ++i)
+      e_.store(rbp, frame_.variadic_save + std::int32_t(i) * gp_slot, argument_regs[i], gp_slot);
+    // AL may overestimate the count (AMD64 psABI §3.2.3). A nonzero value can be
+    // handled by saving all eight registers for a va_list consumed by an external callee.
+    e_.emit({0x84, 0xc0, 0x0f, 0x84});  // test al, al; jz rel32
+    auto skip = e_.displacement();
+    for (std::int32_t i = 0; i < xmm_register_args; ++i)
+      e_.store_xmm(rbp, frame_.variadic_save + gp_save_size + i * xmm_slot, i);
+    return e_.patch_relative(skip, e_.offset());
+  }
+
+  void va_start(ValueId cursor) {
+    read(cursor, rcx);
+    // By this point each named parameter occupies exactly one INTEGER slot. RBP+16
+    // steps over the saved frame pointer and return address to the incoming stack slots.
+    const auto named = std::size_t(body_.params_of(BlockId(0)).size()) - 1;
+    const auto named_in_registers = std::min(named, register_args);
+    e_.store_immediate32(rcx, gp_offset_field, named_in_registers * gp_slot);
+    e_.store_immediate32(rcx, fp_offset_field, gp_save_size);
+    e_.address(rax, rbp, 16 + std::int32_t(named - named_in_registers) * gp_slot);
+    e_.store(rcx, overflow_arg_area_field, rax, 8);
+    e_.address(rax, rbp, frame_.variadic_save);
+    e_.store(rcx, reg_save_area_field, rax, 8);
+  }
+
+  bool va_arg(ValueId cursor, ValueId result) {
+    read(cursor, rdx);
+    e_.load(rax, rdx, gp_offset_field, 4);
+    e_.reg({0x83}, 7, rax, false);  // cmp eax, imm8
+    e_.immediate(gp_save_size, 1);
+    e_.emit({0x0f, 0x83});  // jae rel32
+    auto overflow = e_.displacement();
+
+    e_.load(rcx, rdx, reg_save_area_field, 8);
+    e_.reg({0x01}, rax, rcx);  // add rcx, rax
+    e_.reg({0x83}, 0, rax, false);  // add eax, imm8
+    e_.immediate(gp_slot, 1);
+    e_.store(rdx, gp_offset_field, rax, 4);
+    e_.emit({0xe9});  // jmp rel32
+    auto fetched = e_.displacement();
+
+    if (!e_.patch_relative(overflow, e_.offset())) return false;
+    e_.load(rcx, rdx, overflow_arg_area_field, 8);
+    e_.address(rax, rcx, gp_slot);
+    e_.store(rdx, overflow_arg_area_field, rax, 8);
+    if (!e_.patch_relative(fetched, e_.offset())) return false;
+
+    e_.load(rax, rcx, 0, l2::bytes(body_.type(result)));
+    write(result);
+    return true;
   }
 
   void parameters() {
@@ -380,6 +448,12 @@ std::expected<void, std::string> Emitter::node(NodeId n) {
       read(ops[1], rcx);
       read(ops[2]);
       e_.store(rcx, 0, rax, l2::bytes(body_.type(ops[2])));
+      return {};
+    case Op::va_start:
+      va_start(ops[1]);
+      return {};
+    case Op::va_arg:
+      if (!va_arg(ops[1], body_.result(n, 1))) return at_node(n, op, "conditional branch displacement out of range");
       return {};
     case Op::call: case Op::call_ind:
       call(n);

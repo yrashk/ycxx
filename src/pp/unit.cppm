@@ -16,6 +16,7 @@
 export module ycxx.pp:unit;
 
 import std;
+import ycxx.ast.target;
 import ycxx.hash;
 import ycxx.lex;
 import :spell;
@@ -1506,7 +1507,9 @@ private:
         return number_token(t, 0);
       }
       std::string_view name = s_->spellings.name(operand[0].tok.payload);
-      return number_token(t, lex::type_trait(name) || lex::builtin_template(name) || lex::builtin_function(name) ? 1 : 0);
+      const bool variadic = s_->config.target->va_list == ast::VaList::sysv_x86_64 && lex::va_builtin(name);
+      const bool supported = lex::type_trait(name) || lex::builtin_template(name) || lex::builtin_function(name) || variadic;
+      return number_token(t, supported ? 1 : 0);
     }
     // [cpp.cond]/? the header, as for #include: a string literal, `<...>`, or tokens that become
     // one after replacement.

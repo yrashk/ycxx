@@ -2775,6 +2775,7 @@ public:
     return_seen_ = false;
   }
   QualType return_type() const { return return_type_; }
+  bool variadic_function_body = false;  // BodyAnalysis's function, excluding nested lambda bodies
   // A declared return type holding a placeholder ([dcl.spec.auto.general]/3): each return
   // statement deduces it, and the first one's deduction is the return type from then on (/11).
   bool deduces_return() const { return w_->types.has_placeholder(declared_return_); }
@@ -4150,6 +4151,66 @@ public:
       }
     }
     std::unreachable();
+  }
+
+  std::optional<lex::VaBuiltin> va_builtin(NameId name) {
+    if (w_->target.va_list != ast::VaList::sysv_x86_64) return std::nullopt;
+    auto b = lex::va_builtin(ins().names.spelling(name));
+    return b && !declared(name) ? b : std::nullopt;
+  }
+
+  Ex va_call(lex::VaBuiltin builtin_op, Ex cursor, std::optional<Ex> source,
+             std::optional<QualType> fetch, u32 begin, u32 end) {
+    const bool starts = builtin_op == lex::VaBuiltin::start || builtin_op == lex::VaBuiltin::legacy_start;
+    const Ex invalid{NodeId::none, begin, end};
+    if (starts) {
+      const bool variadic = lambdas_.empty() ? variadic_function_body : types().rec(lambdas_.back().call_type).variadic;
+      if (!variadic) {
+        diag(begin, Diag::va_start_context);
+        return invalid;
+      }
+    }
+    if (!cursor.ok() || (source && !source->ok())) return invalid;
+    QualType result = builtin(Builtin::void_);
+    if (fetch) {
+      result = Types::unqualified(types().canonical(*fetch));
+      if (!types().is_dependent(result) && !types().is_pointer(result)) {
+        auto b = types().builtin_of(result);
+        if (b != Builtin::int_ && b != Builtin::unsigned_int && b != Builtin::long_ &&
+            b != Builtin::unsigned_long && b != Builtin::long_long && b != Builtin::unsigned_long_long) {
+          diag(begin, Diag::va_arg_type, *fetch);
+          return invalid;
+        }
+      }
+    }
+
+    // A local va_list decays to a pointer to its single record; an adjusted parameter is
+    // already a pointer. The pointee's identity and cv-qualifiers must match in either case.
+    const QualType array = w_->builtin_va_list();
+    const QualType pointer = types().pointer(types().rec(array).inner);
+    auto normalize = [&](Ex e) {
+      if (dependent(e)) return e;
+      Ex p = rvalue(e);
+      if (p.ok() && types().canonical(p.type()) != pointer) {
+        diag(e.begin, Diag::va_list_operand, e.type());
+        return Ex{NodeId::none, e.begin, e.end};
+      }
+      return p;
+    };
+    cursor = normalize(cursor);
+    if (source) source = normalize(*source);
+    if (!cursor.ok() || (source && !source->ok())) return invalid;
+
+    std::vector<Ex> args{cursor};
+    if (source) args.push_back(*source);
+    if (types().is_dependent(result) || std::ranges::any_of(args, [&](Ex e) { return dependent(e); }))
+      return dependent_node(args, begin, end, result);
+    std::vector<ast::Child> children;
+    for (Ex e : args) children.push_back(at(e, begin));
+    ast::VaOp op = starts ? ast::VaOp::start :
+                   fetch ? ast::VaOp::arg : source ? ast::VaOp::copy : ast::VaOp::end;
+    ExprInfo info{result, ValueCategory::prvalue, 0};
+    return node(ast::VariadicBuiltin{info, op, b_->list(children)}, begin, end, info);
   }
 
   // The expression naming what lookup found for `name` ([expr.prim.id]): one entity, or an
