@@ -133,6 +133,12 @@ int main(int argc, char** argv) {
         compile(target, '-c', temporary, '-o', 'reference-temporary.o', status=1,
                 error='a materialized temporary in a namespace-scope reference initializer')
         assert not (scope / 'reference-temporary.o').exists()
+        source('reference-declaration-compat.cpp', """static constexpr int storage = 3;
+struct C { static const int& member; };
+const int& C::member = storage;
+template<class T> const int& variable = storage;
+int read() { return variable<int>; }""")
+        compile(target, '-fsyntax-only', 'reference-declaration-compat.cpp')
 
         source('teardown.cpp', """struct Hook { int value; ~Hook(); };
 Hook::~Hook() { value = 0; }

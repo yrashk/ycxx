@@ -28,9 +28,10 @@ the sequencing for later initializers in the same translation unit.
 This slice covers scalar and array storage supported by the address evaluator
 and dynamic binding expressions yielding existing storage. Class and base
 subobject addresses that need additional interpreter layout remain under #25
-and #367. Function reference declarations retain their existing semantic
-handling. Runtime support for function references, namespace-scope lifetime
-extension and guarded static references remain under #367. A binding involving
+and #367. Function references, static reference members and reference variable
+templates retain their existing declaration handling. Runtime support for
+function references, namespace-scope lifetime extension and guarded static
+references remain under #367. A binding involving
 a materialized temporary requires lifetime support at object emission.
 Inline and templated dynamic initialization remains under #368,
 destruction on Linux under #400, and references requiring external ELF code

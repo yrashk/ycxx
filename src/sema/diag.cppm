@@ -203,7 +203,6 @@ enum class Diag : std::uint32_t {
   ambiguous_constructor [[=message{Severity::error, "constructing '{0:t}' is ambiguous"}]],
   deleted_constructor [[=message{Severity::error, "constructing '{0:t}' calls a deleted constructor"}]],
   reference_uninitialized [[=message{Severity::error, "a reference must be initialized"}]],
-  namespace_reference_member [[=message{Severity::error, "an out-of-class definition of a static reference member is not supported yet"}]],
   bind_to_lvalue [[=message{Severity::error, "an rvalue reference to '{0:t}' cannot bind to an lvalue"}]],
   bind_to_rvalue [[=message{Severity::error, "a non-const lvalue reference to '{0:t}' cannot bind to a temporary"}]],
   bind_drops_qualifiers [[=message{Severity::error, "binding a reference to '{1:t}' to a value of type '{0:t}' drops qualifiers"}]],
