@@ -567,6 +567,8 @@ std::set<EntityId> uncertain_record_layouts(parse::Program& program, sema::World
   const auto& region = program.region();
   const auto& items = program.items().items;
   std::set<EntityId> records;
+  std::set<EntityId> annotated_tags;
+  std::set<std::uint32_t> uncertain_definitions;
   // Sema erases alias types. Remember affected spellings across alias declarations so a
   // scalar alias that changed layout also makes records using it uncertain.
   std::set<std::string_view> aliases;
@@ -595,16 +597,29 @@ std::set<EntityId> uncertain_record_layouts(parse::Program& program, sema::World
         : layout_attribute(region, item.begin, item.end) || uncertain_alias(item);
     bool annotated = record_annotated || (definition && layout_attribute(region, item.brace_end, item.end));
     if (!packed && !annotated) continue;
+    if (definition && (packed || record_annotated)) uncertain_definitions.insert(k);
     for (auto d : world.ins.seqs.elements(analysed->decls)) {
       if (d.entity == EntityId::none) continue;
-      if (d.kind == ast::DeclKind::class_ && (packed || record_annotated)) records.insert(d.entity);
-      if (annotated && d.kind == ast::DeclKind::data_member)
+      if (d.kind == ast::DeclKind::class_ && (packed || record_annotated)) {
+        records.insert(d.entity);
+        if (!definition) annotated_tags.insert(d.entity);
+      }
+      if (annotated && d.kind == ast::DeclKind::data_member) {
         records.insert(world.entities.rec(d.entity).scope);
+        if (item.parent != items::none) uncertain_definitions.insert(item.parent);
+      }
       if (annotated && d.kind == ast::DeclKind::type_alias) {
         if (world.types.is_class(d.type)) records.insert(world.types.class_of(d.type));
         else aliases.insert(world.ins.names.spelling(world.entities.rec(d.entity).name));
       }
     }
+  }
+  // Instantiated classes have their own entities. Their packing and field declarations
+  // come from the selected pattern, which may be a partial specialization.
+  for (EntityId c : program.classes().classes()) {
+    auto pattern = program.class_pattern_item(c);
+    if (pattern && (uncertain_definitions.contains(*pattern) || annotated_tags.contains(world.entities.rec(c).templ)))
+      records.insert(c);
   }
   return records;
 }

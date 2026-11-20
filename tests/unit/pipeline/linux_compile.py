@@ -248,7 +248,10 @@ system_leaf:
             '#pragma pack()\n'
             'struct Reset { char a; int b; };\n'
             'int read_reset(Reset x) { return x.b; }\n'
-            'int main() { return read_popped({1, 20}) + read_reset({2, 22}) - 42; }\n')
+            'template<class T> struct __attribute__((packed)) Chosen { char a; T b; };\n'
+            'template<class T> struct Chosen<T*> { char a; int b; };\n'
+            'int read_selected(Chosen<int*> x) { return x.b; }\n'
+            'int main() { return read_popped({1, 10}) + read_reset({2, 12}) + read_selected({3, 20}) - 42; }\n')
         compile(target, '-nostdlib', 'packing.cpp', '-o', 'packing')
         run(['./packing'], scope, cold)
         assert '#pragma pack' in compile(target, '-E', 'packing.cpp')
@@ -284,6 +287,18 @@ system_leaf:
              aggregate_parameter),
             ('struct X { char a;\n#pragma pack(1)\nint b;\n#pragma pack()\n};\n'
              'int f(X x) { return x.b; }', aggregate_parameter),
+            ('template<class T> struct __attribute__((packed)) X { char a; T b; };\n'
+             'int f(X<int> x) { return x.b; }', aggregate_parameter),
+            ('template<class T> [[gnu::packed]] struct X;\n'
+             'template<class T> struct X { char a; T b; };\n'
+             'int f(X<int> x) { return x.b; }', aggregate_parameter),
+            ('#pragma pack(push, 1)\ntemplate<class T> struct X { char a; T b; };\n'
+             '#pragma pack(pop)\nint f(X<int> x) { return x.b; }', aggregate_parameter),
+            ('template<class T> struct X { char a; T b [[gnu::packed]]; };\n'
+             'int f(X<int> x) { return x.b; }', aggregate_parameter),
+            ('template<class T> struct X { char a; T b; };\n'
+             'template<class T> struct __attribute__((packed)) X<T*> { char a; int b; };\n'
+             'int f(X<int*> x) { return x.b; }', aggregate_parameter),
             ('struct X { double a; }; int g(X); int f() { return g(X{1.0}); }',
              f'call: {aggregate_parameter}'),
             ('struct X { long a, b, c; }; X g(); long f() { X x = g(); return x.a; }',

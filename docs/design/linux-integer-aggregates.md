@@ -13,6 +13,7 @@ The front end records when a layout attribute or active packing directive makes 
 computed natural layout uncertain. The by-value ABI check rejects those shapes even
 if their computed offsets fit, since a peer can apply the layout directive. This check
 uses the pragma state at the definition, including simple push/pop and explicit reset.
+For an instantiated record it reads the source of the selected template pattern.
 Actual packed layout remains tracked in [#307](https://github.com/yrashk/ycxx/issues/307).
 
 Astra checked the scope and calling convention against the public
