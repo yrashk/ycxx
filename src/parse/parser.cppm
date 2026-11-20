@@ -267,7 +267,7 @@ public:
     for (; groups != 0; --groups, ++next)
       if (kind(next) != Tk::r_paren) return false;
 
-    if (kind(next) != Tk::l_paren || !params_ahead(next, statement)) return false;
+    if (kind(next) != Tk::l_paren || (statement && !params_ahead(next, /*statement=*/true))) return false;
     u32 after = past_parentheses(next);
     if (member_pointer && (kind(after) == Tk::amp || kind(after) == Tk::ampamp)) ++after;
     switch (kind(after)) {
