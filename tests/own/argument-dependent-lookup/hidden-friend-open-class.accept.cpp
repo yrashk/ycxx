@@ -10,3 +10,10 @@ struct Defined {
     int method() { return after_method(this); }
     friend int after_method(Defined*) { return 29; }
 };
+
+struct Deduced {
+    friend auto completed(Deduced*) { return 37; }
+};
+
+using Completed = decltype(completed(static_cast<Deduced*>(nullptr)));
+static_assert(static_cast<Completed>(37) == 37);

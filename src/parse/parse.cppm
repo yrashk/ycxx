@@ -1169,6 +1169,7 @@ public:
   }
 
 private:
+  static constexpr u32 class_def_key(u32 item) { return item | 0x80000000u; }
   std::vector<u32> running_;
   std::set<u32> ordinary_friend_items_;  // the source item of each supported unqualified friend
   bool friend_body_ready(u32 definition) const {
@@ -1177,8 +1178,9 @@ private:
     if (classes_.is_defined(class_entities_.at(parent))) return true;
     // Earlier friends can be found inside the member list. A deduction or constant evaluation
     // there cannot ask for the body while that body's complete class is still being assembled.
-    return std::ranges::none_of(running_, [&](u32 item) {
-      return item == parent || items_->items[item].parent == parent;
+    return std::ranges::none_of(running_, [&](u32 key) {
+      if (key == class_def_key(parent)) return true;
+      return key < items_->items.size() && (key == parent || items_->items[key].parent == parent);
     });
   }
   std::map<EntityId, std::vector<std::optional<std::pair<u32, u32>>>> member_default_tokens_;
@@ -4833,7 +4835,7 @@ Program::ClassContent Program::class_content(u32 item, const std::function<const
 
 const Result<ast::ClassDef>& Program::class_def(u32 item) {
   if (class_cells_[item]) return *class_cells_[item];
-  u32 key = item | 0x80000000u;  // apart from item_sema(item), which may be running and ask for it
+  u32 key = class_def_key(item);  // apart from item_sema(item), which may be running and ask for it
   contract_assert(std::ranges::find(running_, key) == running_.end());
   running_.push_back(key);
   Result<ast::ClassDef> out;
@@ -5574,7 +5576,7 @@ const sema::ClassRec* Program::instantiate_class(EntityId spec, u32 point) {
   // Defined before the point ([temp.inst]/2): not inside its own definition, which is not complete there.
   if (point <= last_member(k)) return nullptr;
   // Not inside its own template's definition, which is not complete there ([temp.inst]/2).
-  if (std::ranges::find(running_, k | 0x80000000u) != running_.end() || std::ranges::find(running_, k) != running_.end())
+  if (std::ranges::find(running_, class_def_key(k)) != running_.end() || std::ranges::find(running_, k) != running_.end())
     return nullptr;
   // [temp.inst]/16: nested instantiations are limited, as functions' are.
   if (too_deep(classes_instantiating_.size(), k)) return nullptr;
