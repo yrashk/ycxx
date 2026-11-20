@@ -87,7 +87,7 @@ std::expected<Frame, std::string> layout(const l2::Function& body) {
   if (body.indirect_result || body.results.size() > 2)
     return std::unexpected("only up to two INTEGER result registers are supported");
   for (Type t : body.results)
-    if (t == Type::state || l2::is_float(t)) return std::unexpected("unsupported INTEGER ABI result type");
+    if (t == Type::state || l2::is_float(t)) return std::unexpected("unsupported scalar ABI result type");
 
   Frame frame;
   frame.slots.resize(body.values.size());
