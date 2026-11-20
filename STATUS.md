@@ -598,8 +598,9 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   [#399](https://github.com/yrashk/ycxx/issues/399),
   [#196](https://github.com/yrashk/ycxx/issues/196)
 - Direct fixed-prototype calls to ordinary free functions support nonempty naturally aligned
-  flat integral records that are trivial for calls, up to 16 bytes and alignment eight. The
-  AMD64 INTEGER eightbytes follow from the laid-out fields. If an entire argument cannot
+  flat records with integral or ordinary object-pointer fields that are trivial for calls,
+  up to 16 bytes and alignment eight. The AMD64 INTEGER eightbytes follow from the laid-out
+  fields. If an entire argument cannot
   fit in the remaining registers, it goes by value on the stack and later arguments can use
   the remaining registers. One- and two-eightbyte results use RAX and RDX. The mixed-object
   tests exercise both directions and check by-value object identity. Source packing and
