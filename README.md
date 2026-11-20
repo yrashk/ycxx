@@ -173,7 +173,8 @@ operators with an `unsigned long long` parameter, including constant evaluation.
 - casts, including `static_cast<T&&>` from a compatible object lvalue, `sizeof`/`alignof`
   (classes included), `decltype`, and calls through pointers to functions. [#199](https://github.com/yrashk/ycxx/issues/199)
 - constant evaluation on ycxx's own interpreter: `constexpr`, `consteval`, `constinit`,
-  `static_assert` and `if consteval`, with errors that explain why something is not constant;
+  `static_assert` and `if consteval`, with errors that explain why something is not constant.
+  Namespace-scope `constexpr` pointers to `void` can retain scalar and array element addresses.
 - `extern "C"` functions from libSystem, including `printf` with integers, characters,
   floating values, pointers and strings as arguments, and the SDK `<math.h>`'s built-ins
   (`__builtin_fabs`, `__builtin_inf`, `__builtin_huge_val`, `__builtin_nan`).

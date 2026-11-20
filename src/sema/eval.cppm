@@ -203,13 +203,22 @@ private:
     case K::floating: return {ast::float_value(s_->ins(), s_->world().target, r.type, ast::Bits128{r.bits, 0}), 0, true};
     case K::null: return {vs.null_pointer(r.type), 0, true};
     case K::function: return {vs.address(r.type, vs.entity(r.entity), 0), 0, true};
-    case K::address:
-      switch (r.base) {
-      case interp::Base::literal: return {vs.address(r.type, r.literal, r.offset), 0, true};
-      case interp::Base::global: return {vs.address(r.type, vs.entity(r.entity), r.offset), 0, true};
-      case interp::Base::local:
+    case K::address: {
+      if (r.base == interp::Base::local)
         return {std::nullopt, reason_arg({interp::Reason::local_address, 0, {}})};
+      ConstId base = r.base == interp::Base::literal ? r.literal : vs.entity(r.entity);
+      std::vector<u32> path;
+      // [conv.ptr]: erasure preserves the pointer value. Its type no longer identifies the
+      // subobject at the recorded offset, such as an array or its first element.
+      if (s_->types().is_pointer(r.type) && s_->types().is_void(s_->types().pointee(r.type))) {
+        for (ir::PathStep step : r.path) {
+          if (step.step != ir::Step::elem)
+            return {std::nullopt, reason_arg({interp::Reason::unsupported_constant, 0, {}})};
+          path.push_back(step.index);
+        }
       }
+      return {vs.address(r.type, base, r.offset, path), 0, true};
+    }
     }
     return {};
   }

@@ -898,9 +898,12 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   `StaticAssert` node); `if consteval` and `if !consteval` (`IfConsteval`, lowered to
   `consteval_br`).
 - Constant array bounds from const integral locals (#58), and address constants of variables and
-  functions (#57) as `VLvalue{VEntity, [], byte offset}`. The pipeline emits data relocations
+  functions (#57) as `VLvalue{VEntity, path, byte offset}`. The pipeline emits data relocations
   with the entity's symbol and byte addend on ELF and Mach-O, including references to symbols
   defined in another translation unit (#101).
+- Constant evaluation can read namespace-scope `constexpr` pointers erased to `void`
+  ([expr.const], [conv.ptr], #102). The interpreter reconstructs the original scalar or array
+  subobject path, including one-past addresses, from the constant's path and byte offset.
 - Errors say why: "not a constant expression: <the interpreter's reason>", located at the
   evaluated expression.
 - Tests: `tests/own/consteval` (spec-only); the draft's [dcl.constexpr]/5 ex. 3, [dcl.constinit]/3
