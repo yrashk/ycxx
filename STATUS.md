@@ -2037,7 +2037,8 @@ values, end to end; results match Clang's bit for bit.
   function-scope binding so fallthrough and jumps share uses and scope cleanup at the label.
   A condition's variable lives one iteration of a loop, through a `for`'s increment. A
   goto's `br` carries `not_constexpr`, so constant evaluation of it fails ([expr.const]).
-- Not yet: `switch` on a class with a conversion
+- Not yet: a jump past a vacuously initialized class with a nontrivial destructor (#477);
+  `switch` on a class with a conversion
   function and `explicit operator bool` conditions (#339); a declaration as the condition of
   `if constexpr` (#344); constant evaluation of a switch on an enumeration (enumeration values, #25).
 - Tests: `tests/own/stmt/` (written spec-only, 23 run and 15 reject tests, and the split-off XFAILs

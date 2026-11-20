@@ -137,7 +137,9 @@ struct Unsupported {
 template <Facts F>
 class Gen {
  public:
-  Gen(const ast::Interners& in, const FunctionInput& fn, F& facts) : in_(in), ast_(in.ast), fn_(fn), facts_(facts) {}
+  Gen(const ast::Interners& in, const FunctionInput& fn, F& facts,
+      const std::set<uint32_t>* planned_bypasses = nullptr)
+      : in_(in), ast_(in.ast), fn_(fn), facts_(facts), planned_bypasses_(planned_bypasses) {}
 
   std::expected<FunctionIr, std::string> run() {
     try {
@@ -145,6 +147,9 @@ class Gen {
     } catch (const Unsupported& u) {
       return std::unexpected(std::format("function_ir: {} is not supported yet", u.what));
     }
+    // Only functions with actual bypasses need a second emission, with their bindings available
+    // from the entry block. Discover them from the same scope transitions used by final emission.
+    if (!bypassed_locals_.empty()) return Gen(in_, fn_, facts_, &bypassed_locals_).run();
     auto built = b_.finish();
     if (!built) return std::unexpected("function_ir: " + built.error());
     FunctionIr out;
@@ -278,7 +283,7 @@ class Gen {
     Place place;
     ast::EntityId destructor = ast::EntityId::none;
     ir::Storage storage = ir::Storage::automatic;
-    std::optional<Place> binding = {};  // holds the address of the current instance after a jump
+    std::optional<uint32_t> vacuous_local = {};  // a declaration a jump can bypass
   };
   void begin_lifetime(const Place& p) {
     ValueId ops[] = {p.ptr};
@@ -286,13 +291,14 @@ class Gen {
     stateful(ir::Op::obj__begin, {}, ops, imms);
   }
   void start_lifetime(const Place& p, ast::EntityId destructor = ast::EntityId::none,
-                      std::optional<Place> binding = {}) {
+                      std::optional<uint32_t> vacuous_local = {}) {
     begin_lifetime(p);
-    scopes_.back().push_back({p, destructor, ir::Storage::automatic, binding});
+    scopes_.back().push_back({p, destructor, ir::Storage::automatic, vacuous_local});
   }
   void end_lifetime(const Ending& e) {
     Place p = e.place;
-    if (e.binding) p.ptr = load(*e.binding);
+    if (e.vacuous_local)
+      if (auto b = jump_bindings_.find(*e.vacuous_local); b != jump_bindings_.end()) p.ptr = load(b->second);
     if (e.destructor != ast::EntityId::none) destroy(p, e.destructor);
     ValueId ops[] = {p.ptr};
     stateful(ir::Op::obj__end, {}, ops);
@@ -301,10 +307,14 @@ class Gen {
   }
   void begin_bypassed(At at, const Ending& e) {
     // Sema has rejected bypassing nonvacuous initialization ([stmt.dcl]/2).
-    if (!e.binding) unsupported(at, "past a declaration");
+    if (!e.vacuous_local) unsupported(at, "past a declaration");
+    if (!planned_bypasses_) {
+      bypassed_locals_.insert(*e.vacuous_local);
+      return;
+    }
     Place p = begin_object(e.place.type, ir::Init::erroneous);
     begin_lifetime(p);
-    store(*e.binding, p.ptr);
+    store(jump_bindings_.at(*e.vacuous_local), p.ptr);
   }
   // Calls `destructor` on the object at `p`; an array's elements, the last first ([class.dtor]).
   void destroy(const Place& p, ast::EntityId destructor) {
@@ -428,7 +438,15 @@ class Gen {
       }
       slots_[i] = p;
     }
-    if (slots_.size() > params.size()) prepare_jump_bindings();
+    // The binding dominates every jump target. The object itself gets fresh storage each time
+    // its lifetime begins ([stmt.dcl]/2).
+    if (planned_bypasses_)
+      for (uint32_t local : *planned_bypasses_) {
+        ast::QualType type = in_.seqs.at(fn_.body.locals, local).type;
+        Place binding = begin_object(facts_.pointer_to(type), ir::Init::indeterminate);
+        start_lifetime(binding);
+        jump_bindings_.emplace(local, binding);
+      }
     stmt({fn_.body.tree, fn_.body_offset});
     if (!gotos_.empty()) throw Unsupported{"a goto to a label that is not defined"};  // sema rejects it
     if (live_) {
@@ -517,41 +535,6 @@ class Gen {
     push_scope();
     stmt(a);
     pop_scope();
-  }
-
-  // A case or goto target can be reached without executing a declaration. Use one binding
-  // per potentially bypassed local, live across every scope a jump may enter. The object
-  // itself still gets fresh storage each time its lifetime begins ([stmt.dcl]/2).
-  void prepare_jump_bindings() {
-    if (fn_.body.tree == NodeId::none) return;
-    std::vector<std::pair<uint32_t, uint32_t>> vacuous;
-    std::map<ast::NameId, uint32_t> labels;
-    std::vector<ast::NameId> targets;
-    uint32_t last_target = 0;
-    auto walk = [&](this const auto& self, const ast::Red& node) -> void {
-      if (node.is<ast::Goto>()) targets.push_back(node.get<ast::Goto>().label);
-      if (node.is<ast::Label>()) labels.emplace(node.get<ast::Label>().name, node.offset());
-      if (node.is<ast::Case>() || node.is<ast::Default>()) last_target = std::max(last_target, node.offset());
-      if (node.is<ast::LocalVar>()) {
-        auto v = node.get<ast::LocalVar>();
-        if (v.destructor == ast::EntityId::none &&
-            (v.init.id == NodeId::none || ast_.is<ast::DefaultInit>(v.init.id)))
-          vacuous.emplace_back(v.local, node.offset());
-      }
-      node.for_each_child(self);
-    };
-    walk(ast::Red(ast_, fn_.body.tree, fn_.body_offset));
-    for (ast::NameId name : targets)
-      if (auto l = labels.find(name); l != labels.end()) last_target = std::max(last_target, l->second);
-    for (auto [local, at] : vacuous) {
-      if (at >= last_target) continue;
-      ast::QualType type = in_.seqs.at(fn_.body.locals, local).type;
-      if (facts_.is_reference(type)) continue;
-      Position position(*this, at);
-      Place binding = begin_object(facts_.pointer_to(type), ir::Init::indeterminate);
-      start_lifetime(binding);
-      jump_bindings_.emplace(local, binding);
-    }
   }
 
   void stmt(At a) {
@@ -668,17 +651,14 @@ class Gen {
     // The name is in scope in its own initializer ([basic.scope.pdecl]); reading it there reads an
     // object whose lifetime has not begun.
     slots_[v.local] = p;
-    std::optional<Place> binding;
-    if (auto i = jump_bindings_.find(v.local); i != jump_bindings_.end()) {
-      binding = i->second;
-      store(*binding, p.ptr);
-    }
+    if (auto b = jump_bindings_.find(v.local); b != jump_bindings_.end()) store(b->second, p.ptr);
     if (has_init)
       full_expression([&] {
         initialize(p, child(a, v.init), zeroed);
         return 0;
       });
-    start_lifetime(p, v.destructor, binding);
+    bool vacuous = v.destructor == ast::EntityId::none && (!has_init || is<ast::DefaultInit>(child(a, v.init)));
+    start_lifetime(p, v.destructor, vacuous ? std::optional(v.local) : std::nullopt);
   }
 
   // Whether initializer `e` value-initializes some element (`ValueInit`), so the object is
@@ -1895,6 +1875,8 @@ class Gen {
   std::map<ast::NameId, LabelInfo> labels_;
   std::vector<PendingGoto> gotos_;                 // before their labels
   std::vector<std::optional<Place>> slots_;  // by local index
+  const std::set<uint32_t>* planned_bypasses_;
+  std::set<uint32_t> bypassed_locals_;       // discovered from scope transitions during first emission
   std::map<uint32_t, Place> jump_bindings_;  // local index to the address of its current instance
   std::optional<ValueId> this_;              // a non-static member function's `this`
   std::optional<Place> result_;              // the object a class result initializes

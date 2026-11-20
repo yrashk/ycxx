@@ -982,8 +982,8 @@ probe = '''
 int main() { int s = 0; for (int i = 0; i < 5; ++i) { if (i == 3) continue; s += i; } int k = 2; switch (k) { case 2: s += 1; break; default: s = 0; } do { --s; } while (s > 7); if (s != 7) goto bad; return 0; bad: return 1; }
 '''
 status = 'partial'
-issues = [341]
-note = 'a jump forward past a vacuously initialized declaration'
+issues = [477]
+note = 'jumps past vacuously initialized locals work for objects with trivial destruction'
 
 [[feature]]
 id = 'stmt-range-for'
