@@ -94,6 +94,8 @@ public:
   virtual ast::DeclSema decl_sema(DeclId d) = 0;
   // A use of a global allocation function that may lack a written declaration in the unit.
   virtual void use_allocation_function(EntityId) {}
+  // Check the selected implicitly declared copy assignment against its subobjects.
+  virtual CopyAssignment require_copy_assignment(EntityId) { return CopyAssignment::unsupported; }
   // What a constant evaluation fetches (§B7): `function_ir` of a function defined before the
   // current point ([expr.const]), and a namespace-scope variable as the interpreter sees it.
   virtual interp::Callee function_ir(EntityId f) = 0;
@@ -2718,6 +2720,9 @@ public:
   // operator()'s locals, which constant evaluation reads before the part is committed.
   std::vector<ast::ClosureDef> closures;
   std::vector<std::vector<ast::LocalRec>> closure_locals;
+  static bool closure_has_code(const World& w, const ast::ClosureDef& c) {
+    return !(c.flags & closure_flag::pattern) && !w.types.is_dependent(c.call_type);
+  }
   // A member of a closure type: its function call operator or static invoker, constexpr when it
   // can be ([expr.prim.lambda.closure]/5: the operator is constexpr if it satisfies the
   // requirements; a constant evaluation that it does not satisfy fails anyway).
@@ -3222,7 +3227,7 @@ public:
   // A call of a member function ([expr.call], [over.match.funcs]): a static one is an ordinary
   // call; a non-static one passes its object, which must be at least as cv-qualified as the
   // function ([class.this]).
-  Ex member_call(Ex callee, std::vector<Ex> args, u32 end, u32 paren_at) {
+  Ex member_call(Ex callee, std::vector<Ex> args, u32 end, u32 paren_at, bool assignment_notation = false) {
     u32 begin = callee.begin;
     Ex fail{NodeId::none, begin, end};
     if (auto b = std::ranges::find_if(args, [&](const Ex& a) { return is_braced(a); }); b != args.end()) {
@@ -3248,7 +3253,10 @@ public:
     std::vector<const MemberDeclRec*> recs;
     std::deque<ast::DeclSema> patterns;
     std::vector<std::vector<TemplateArg>> deduced;  // a generic lambda operator's arguments, by candidate
+    const bool lvalue_assignment = object && (m.arrow || object->cat() == ValueCategory::lvalue) &&
+                                   ins().names.spelling(bound.cands.front()->name) == "operator=";
     for (const MemberDeclRec* c : bound.cands) {
+      if (lvalue_assignment && types().rec(c->type).fn_ref == ast::RefQual::rvalue) continue;
       if (!c->head.empty()) {
         // A generic lambda's function call operator, a template whose definition is its lambda's:
         // the specialization deduction gives ([temp.over]/1), instantiated by `generic_call`.
@@ -3305,11 +3313,39 @@ public:
       diag(begin, Diag::const_member_call, name);
       return fail;
     }
+    // A sole trivial implicit copy can bind to a temporary made by a converting constructor.
+    // Prepare that conversion before ranking the reference binding. With competing assignment
+    // candidates, their user-defined conversions need to be ranked together.
+    if (assignment_notation && lvalue_assignment && args.size() == 1 && recs.size() == 1 &&
+        recs.front()->implicit_assignment == CopyAssignment::trivial) {
+      const QualType parameter = types().rec(cands.front().type).params.front();
+      const QualType target = types().referee(parameter);
+      Ex& source = args.front();
+      if (object_cv == Cv::none && !same_unqualified(source.type(), target) && !ics(source, parameter).viable) {
+        const ClassRec* cls = class_rec(bound.cls);
+        if (cls && cls->user_ctors && this->object_cv(target) == Cv::const_) {
+          source = convert(source, Types::unqualified(target), source.begin);
+          if (!source.ok()) return fail;
+        }
+      }
+    }
     auto chosen = resolve(cands, args, begin, name, object_cv);
     if (!chosen) return fail;
     const MemberDeclRec* d = recs[*chosen];
     const Candidate& k = cands[*chosen];
     if (!check_access(bound.cls, d->entity, d->name, bound.name_at, bound.naming)) return fail;
+    const auto implicit = d->implicit_assignment;
+    if (implicit != CopyAssignment::none) {
+      QualType ct = types().class_type(bound.cls);
+      if (!usable_copy_assignment(implicit, ct, paren_at)) return fail;
+      if (implicit == CopyAssignment::memberwise &&
+          (!lvalue_assignment || args[0].cat() != ValueCategory::lvalue || !same_unqualified(args[0].type(), ct))) {
+        diag(paren_at, Diag::unsupported_copy_assignment, ct);
+        return fail;
+      }
+      if ((implicit != CopyAssignment::trivial || !assignment_notation) &&
+          !usable_copy_assignment(q_->require_copy_assignment(d->entity), ct, paren_at)) return fail;
+    }
     EntityId fe = k.entity;
     std::optional<QualType> dt;
     if (!d->head.empty()) {
@@ -3339,11 +3375,21 @@ public:
       return fail;
     }
     Ex o = *object;
+    if (assignment_notation && implicit == CopyAssignment::trivial) {
+      // The chosen reference argument already designates the source object. Assignment does not
+      // initialize a new class value, even when the copy constructor is deleted.
+      return node(ast::Assign{info, ast::AssignOp::trivial_class_copy, at(o, begin), children->front(), info.type},
+                  begin, end, info);
+    }
     if (!m.arrow) {
       // A prvalue object is materialized: the call's object is a temporary ([class.temporary]/2).
       if (!o.glvalue()) o = materialize(o, o.type(), false);
       ExprInfo pi{types().pointer(o.type()), ValueCategory::prvalue, 0};
       o = node(ast::Unary{pi, ast::UnaryOp::address_of, at(o, o.begin)}, o.begin, o.end, pi);
+    }
+    if (assignment_notation) {
+      contract_assert(children->size() == 1);
+      return node(ast::AssignmentCall{info, fe, children->front(), at(o, begin)}, begin, end, info);
     }
     return node(ast::MemberCall{info, fe, at(o, begin), b_->list(*children)}, begin, end, info);
   }
@@ -5419,28 +5465,19 @@ public:
     return types().is_pointer(t) && types().is_object(types().pointee(t)) && is_complete(types().pointee(t));
   }
 
-  // [class.copy.assign]/7: the implicit copy assignment of a class with a const member (or one
-  // whose own is deleted) is deleted.
-  bool has_const_member(QualType t) {
-    TypeRec r = types().rec(t);
-    if (r.kind == TypeKind::array) return has_const_member(r.inner);
-    if (r.kind != TypeKind::class_) return false;
-    if (const ClassRec* c = class_rec(r.entity)) {
-      for (const BaseRec& b : c->bases)
-        if (has_const_member(types().class_type(b.cls))) return true;
-      for (const FieldRec& f : c->fields)
-        if (Types::is_const(types().canonical(f.type)) || has_const_member(f.type)) return true;
+  bool usable_copy_assignment(CopyAssignment state, QualType type, u32 at_) {
+    switch (state) {
+    case CopyAssignment::trivial:
+    case CopyAssignment::memberwise: return true;
+    case CopyAssignment::const_member: diag(at_, Diag::const_member_assign, type); break;
+    case CopyAssignment::deleted:
+      if (const ClassRec* r = class_rec(types().class_of(type)); r && r->closure && r->default_deleted)
+        diag(at_, Diag::closure_assignment, type);
+      else diag(at_, Diag::deleted_function, ins().names.intern("operator="));
+      break;
+    case CopyAssignment::none:
+    case CopyAssignment::unsupported: diag(at_, Diag::unsupported_copy_assignment, type); break;
     }
-    return false;
-  }
-  bool check_class_assignable(const Ex& l, u32 at_) {
-    if (types().is_class(l.type()))
-      if (const ClassRec* r = class_rec(types().class_of(l.type())); r && r->closure && r->default_deleted) {
-        diag(at_, Diag::closure_assignment, Types::unqualified(l.type()));
-        return false;
-      }
-    if (!types().is_class(l.type()) || !has_const_member(l.type())) return true;
-    diag(at_, Diag::const_member_assign, Types::unqualified(l.type()));
     return false;
   }
 
@@ -5765,19 +5802,20 @@ public:
     u32 begin = l.begin, end = r.end;
     if (!l.ok() || !r.ok()) return {NodeId::none, begin, end};
     if (dependent(l) || dependent(r)) return dependent_node({l, r}, begin, end, std::nullopt, ValueCategory::lvalue);
+    if (op == AsgOp::assign && types().is_class(l.type())) {
+      NameId name = ins().names.intern("operator=");
+      Ex callee = member(l, false, name, l.end, op_at, op_at);
+      return callee.ok() ? member_call(callee, {r}, end, op_at, true) : Ex{NodeId::none, begin, end};
+    }
     // `=` is a member only ([over.assign]); `operator_function_ok` rejects non-member ones.
     static constexpr std::string_view assign_spellings[] = {"=", "*=", "/=", "%=", "+=", "-=", "<<=", ">>=", "&=", "^=", "|="};
     if (auto o = overloaded(assign_spellings[std::to_underlying(op)], {l, r}, begin, end, op_at)) return *o;
-    if (!check_modifiable(l, op_at) || !check_class_assignable(l, op_at)) return {NodeId::none, begin, end};
+    if (!check_modifiable(l, op_at)) return {NodeId::none, begin, end};
     QualType lt = l.type();
     QualType computation = Types::unqualified(lt);
     Ex c = r;
     if (op == AsgOp::assign) {
       c = convert(r, lt, r.begin);
-      // A class result is a temporary the copy reads, destroyed with the full-expression
-      // ([expr.assign]/9, [class.temporary]/4).
-      if (c.ok() && types().is_class(lt) && !c.glvalue() && !dependent(c) && (as<ast::Call>(c) || as<ast::MemberCall>(c)))
-        c = materialize(c, Types::unqualified(lt), false);
     } else {
       Ex lv = rvalue(l);  // only to read its type; the IR loads the left operand itself
       QualType tl = lv.type();
@@ -5821,11 +5859,23 @@ public:
   Ex assign_list(Ex l, const Braced& b, u32 op_at) {
     u32 begin = l.begin, end = b.end;
     if (l.ok() && (dependent(l) || dependent(b))) return dependent_node({l}, begin, end, std::nullopt, ValueCategory::lvalue);
-    if (!l.ok() || !check_modifiable(l, op_at) || !check_class_assignable(l, op_at)) return {NodeId::none, begin, end};
+    if (!l.ok() || !check_modifiable(l, op_at)) return {NodeId::none, begin, end};
+    const bool class_copy = types().is_class(l.type());
+    if (class_copy) {
+      if (!require_complete(l.type(), op_at)) return {NodeId::none, begin, end};
+      const auto* cls = class_rec(types().class_of(l.type()));
+      const auto* copy = cls ? cls->implicit_copy_assignment() : nullptr;
+      CopyAssignment state = CopyAssignment::unsupported;
+      if (copy && std::ranges::count(cls->members, copy->name, &MemberDeclRec::name) == 1)
+        state = copy->implicit_assignment == CopyAssignment::memberwise ? CopyAssignment::unsupported
+                                                                    : copy->implicit_assignment;
+      if (!usable_copy_assignment(state, Types::unqualified(l.type()), op_at)) return {NodeId::none, begin, end};
+    }
     Ex c = list_init(Types::unqualified(l.type()), b);
     if (!c.ok()) return {NodeId::none, begin, end};
     ExprInfo info{l.type(), ValueCategory::lvalue, 0, l.info.bit_width};
-    return node(ast::Assign{info, ast::AssignOp::assign, at(l, begin), at(c, begin), Types::unqualified(l.type())},
+    auto op = class_copy ? ast::AssignOp::trivial_class_copy : ast::AssignOp::assign;
+    return node(ast::Assign{info, op, at(l, begin), at(c, begin), Types::unqualified(l.type())},
                 begin, end, info);
   }
 

@@ -69,6 +69,7 @@ public:
     EntityId f = EntityId::none;
     if (auto call = s_->as<ast::Call>(e)) f = call->function;
     if (auto call = s_->as<ast::MemberCall>(e)) f = call->function;
+    if (auto call = s_->as<ast::AssignmentCall>(e)) f = call->function;
     if (f != EntityId::none && !Sema::closure_member(s_->world(), f) && !q_->is_constexpr(f))
       s_->diag(e.begin, Diag::not_constant, reason_arg({interp::Reason::not_constexpr, 0, {}}));
   }
