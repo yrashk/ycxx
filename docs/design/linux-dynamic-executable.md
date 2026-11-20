@@ -29,13 +29,25 @@ path working through their existing entry points.
 ## ELF inputs and output
 
 An input library is little-endian ELF64 `ET_DYN` for `EM_X86_64`. Read its mapped dynamic
-table and resolve virtual addresses through file-backed `PT_LOAD` ranges. `DT_HASH.nchain`
-bounds `DT_SYMTAB`. Validate table entry widths, file and virtual address bounds, hash and
-symbol indices, and strings within `DT_STRSZ`. Diagnose GNU-hash-only providers in the first
-slice. Use externally visible, defined, unversioned `STB_GLOBAL`/`STT_FUNC` exports with default
-visibility. The first slice uses self-contained providers and rejects their `DT_NEEDED` entries.
+table and resolve virtual addresses through file-backed `PT_LOAD` ranges. Use externally
+visible, defined, unversioned `STB_GLOBAL`/`STT_FUNC` exports with default visibility.
+This path uses self-contained providers and rejects their `DT_NEEDED` entries.
 Versioned imports, IFUNC, TLS, imported data, transitive dependencies and callbacks through
 executable exports remain part of the broader shared-library input work in #390.
+
+The GNU loader uses `DT_GNU_HASH` when a provider supplies both hash tables. Use that same
+table for discovery. For a SysV-only provider, `DT_HASH.nchain` bounds `DT_SYMTAB` and the
+SysV chains determine discovery. Section headers are optional for either format.
+
+For GNU hashing, validate the mapped header, power-of-two Bloom word count, shift, and
+bucket indices. The greatest nonzero bucket start and its end-marked chain determine the
+exclusive end of the hashed `DT_SYMTAB` suffix. Bound this walk by the file-backed range
+and any independent count from `DT_HASH.nchain` or `DT_SYMTABSZ`. Validate that the buckets
+cover the suffix once, in order, and that each symbol's name, stored hash, bucket and Bloom
+bits agree. All-zero buckets have no discoverable exports. Their symbol origin can precede
+the end of the dynamic symbol table when the provider has undefined symbols. Astra reviewed
+this count derivation and confirmed the empty-table case with the system toolchain.
+[GNU hash ABI](https://sourceware.org/gnu-gabi/program-loading-and-dynamic-linking.txt)
 
 Produce fixed-address `ET_EXEC`. Map the ELF and program headers. Place `PT_PHDR` and the
 NUL-terminated `PT_INTERP` before the load headers, keeping `PT_LOAD` entries in ascending
@@ -83,11 +95,14 @@ driver path. Program destructor registration remains tracked by #400.
   rerun via a test-scoped search path. Use a second implementation with the same SONAME
   to confirm runtime binding. Exercise loader initialization and termination with observable
   fixture effects and verify executable initialization precedes `main` exactly once.
+- Use GNU-only and dual-hash leaf providers with the section table removed and execute through
+  the recorded interpreter. Check bucket collisions, an empty GNU hash with an undefined
+  symbol, and diagnostics for malformed Bloom, bucket, chain and symbol metadata.
 - Inspect ELF, program headers, dynamic tables and relocations with `readelf`. Run rejected
   input tests for bad bounds, unsupported providers, missing definitions, wrong relocation
   forms and incomplete options. Compare in-process and daemon outputs and retain the
   static Linux and Darwin regression checks.
-- Continue #390 with target CRT objects, versioned imports, GNU-hash providers, normal
+- Continue #390 with target CRT objects, versioned imports, provider dependencies, normal
   library discovery and process exit through the C runtime. Validate redirected stdio
   flushing and constructor order through the hosted driver. Archive input #388 and native
   shared-library creation #391 have separate interoperability gates.

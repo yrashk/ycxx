@@ -54,14 +54,16 @@ build/bin/ycxx cxx --target=x86_64-pc-linux-gnu -nostdlib example.o -o example
 ./example
 ```
 
-Static links also accept indexed GNU `.a` archives made by the system `ar` from supported ELF
-objects. Place an archive after the inputs that reference its members, and include at least one
-source or ordinary object. [#388](https://github.com/yrashk/ycxx/issues/388)
+**Package Linux objects into a static library.** `ycxx archive -o libexample.a example.o`
+creates or replaces a deterministic indexed GNU archive from supported x86-64 ELF objects.
+Static links accept these archives and compatible archives from system `ar`. Place an archive
+after the inputs that reference its members, and include at least one source or ordinary object.
+[#389](https://github.com/yrashk/ycxx/issues/389), [#388](https://github.com/yrashk/ycxx/issues/388)
 
 An explicit dynamic link uses ycxx's startup and the target loader. Supply the absolute target
-interpreter path and explicit, self-contained shared objects with a SysV hash and a slash-free
-SONAME. The executable can directly call their exported, unversioned functions. The loader must
-be able to find each SONAME when the executable runs. [#390](https://github.com/yrashk/ycxx/issues/390)
+interpreter path and explicit, self-contained shared objects with GNU or SysV hash tables and
+slash-free SONAMEs. The executable can directly call their exported, unversioned functions. The
+loader must be able to find each SONAME when the executable runs. [#390](https://github.com/yrashk/ycxx/issues/390)
 
 ```sh
 build/bin/ycxx cxx --target=x86_64-pc-linux-gnu -nostdlib --dynamic-linker="$target_loader" \
@@ -87,8 +89,9 @@ referents with internal linkage. [#367](https://github.com/yrashk/ycxx/issues/36
 On x86-64 Linux, direct calls and saved pointers across translation units share one address for
 simple external inline functions. [#422](https://github.com/yrashk/ycxx/issues/422)
 
-The ELF linker can consume the GNU-built libycxx static linkage-marker object.
-[#419](https://github.com/yrashk/ycxx/issues/419)
+ycxx ELF objects record function types and code sizes. The ELF linker accepts supported
+system-assembled objects with function symbols and the GNU-built libycxx static linkage-marker
+object. [#428](https://github.com/yrashk/ycxx/issues/428), [#419](https://github.com/yrashk/ycxx/issues/419)
 
 **Language on macOS.** Programs can use:
 - the fundamental integer, character and floating types, pointers, arrays, references and
@@ -96,10 +99,11 @@ The ELF linker can consume the GNU-built libycxx static linkage-marker object.
   conversions giving Clang's results bit for bit, and passing and returning them (classes of
   floating members included) by Clang's calling convention;
   all operators, and the statements: `switch`, labels and `goto`, declarations in conditions,
-  init-statements in `if` and `switch`, and range-based `for` over arrays or classes with
-  `begin` and `end`, with optional init-statements. Functions support default arguments,
-  recursion, operator overloading and calls through pointers. A pointer or reference target type
-  can select a free or static member overload.
+  init-statements in `if` and `switch`, and range-based `for` with optional init-statements.
+  Ranges can be arrays or classes with member `begin` and `end` or free `begin` and `end` found
+  by argument-dependent lookup. Unqualified calls can find and rank functions in associated
+  namespaces. Functions support default arguments, recursion, operator overloading and calls
+  through pointers. A pointer or reference target type can select a free or static member overload.
 - classes and unions: data and static members, named data members of unnamed union type,
   member functions, constructors and destructors
   with RAII, aggregate and designated initialization, namespace-scope objects initialized by

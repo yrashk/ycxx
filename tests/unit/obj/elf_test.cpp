@@ -109,6 +109,8 @@ void inspect(std::span<const std::uint8_t> bytes) {
     return;
   }
   check(field(bytes, symbols + 1 * 24 + 4, 1) == 0 && field(bytes, symbols + 1 * 24 + 6, 2) == 2, "local data symbol");
+  check(field(bytes, symbols + 2 * 24 + 4, 1) == 0x10 && field(bytes, symbols + 2 * 24 + 16, 8) == 0,
+        "untyped code symbol stays STT_NOTYPE with zero size");
   check(field(bytes, symbols + 4 * 24 + 4, 1) == 0x20 && field(bytes, symbols + 4 * 24 + 6, 2) == 0, "weak undefined symbol");
   check(field(bytes, symbols + 5 * 24 + 5, 1) == 2, "hidden global symbol");
 
@@ -188,6 +190,76 @@ void read_large_offsets() {
   auto read = obj::elf::read_object(*file, expected.name);
   check(read && *read == expected,
         "reader preserves BSS and symbol offsets above 32 bits, unnamed locals and full signed addends");
+}
+
+void read_function_symbols() {
+  obj::object input;
+  input.name = "functions.o";
+  input.arch = obj::target::x86_64_linux;
+  const auto text = input.add_section(obj::standard_section::text);
+  const auto data = input.add_section(obj::standard_section::data);
+  const auto local = input.define("local", obj::binding::local, text, 0);
+  const auto weak = input.define("weak_hidden", obj::binding::hidden, text, 1);
+  const auto reference = input.reference("reference");
+  input.symbols[local].function_size = 0;
+  input.symbols[weak].function_size = 6;
+  input.symbols[weak].weak = true;
+  input.symbols[reference].weak = true;
+  // A ret, followed by mov eax, 42 and ret.
+  input.sections[text].emit(std::array<std::uint8_t, 7>{0xc3, 0xb8, 42, 0, 0, 0, 0xc3});
+  input.sections[data].emit64(0);
+  input.sections[data].relocate(obj::reloc_kind::abs64, weak);
+  input.sections[data].emit64(0);
+  input.sections[data].relocate(obj::reloc_kind::abs64, reference);
+
+  const auto file = obj::elf::write_object(input);
+  check(file.has_value(), file ? "write ELF function definitions" : file.error());
+  if (!file) return;
+  const auto symtab = field(*file, field(*file, 40, 8) + 5 * 64 + 24, 8);
+  const auto local_record = symtab + 24;
+  const auto weak_record = symtab + 2 * 24;
+  const auto reference_record = symtab + 3 * 24;
+  check(field(*file, local_record + 4, 1) == 0x02 && field(*file, local_record + 16, 8) == 0,
+        "local STT_FUNC with unknown size");
+  check(field(*file, weak_record + 4, 1) == 0x22 && field(*file, weak_record + 5, 1) == 2 &&
+        field(*file, weak_record + 6, 2) == 1 && field(*file, weak_record + 8, 8) == 1 &&
+        field(*file, weak_record + 16, 8) == 6, "weak hidden STT_FUNC with exact section and extent");
+  const auto read = obj::elf::read_object(*file, input.name);
+  check(read && *read == input, "round-trip function metadata, bindings, and relocation indices");
+  check(read && obj::elf::write_object(*read) == file, "rewrite ELF function definitions byte for byte");
+
+  auto typed_reference = *file;
+  set_field(typed_reference, reference_record + 4, 1, 0x22);
+  const auto read_reference = obj::elf::read_object(typed_reference, input.name);
+  check(read_reference && *read_reference == input, "undefined STT_FUNC follows ordinary weak reference semantics");
+
+  const auto reject = [&](std::size_t at, std::size_t width, std::uint64_t value, std::string_view reason) {
+    auto bad = *file;
+    set_field(bad, at, width, value);
+    const auto result = obj::elf::read_object(bad, input.name);
+    check(!result && result.error().contains(reason), reason);
+  };
+  reject(weak_record + 6, 2, 2, "not in executable code");
+  reject(weak_record + 16, 8, 7, "out-of-section value or size");
+  reject(weak_record + 16, 8, std::numeric_limits<std::uint64_t>::max(), "out-of-section value or size");
+  reject(local_record + 8, 8, input.sections[text].size(), "not in executable code");
+  set_field(typed_reference, reference_record + 16, 8, 1);
+  const auto bad_reference = obj::elf::read_object(typed_reference, input.name);
+  check(!bad_reference && bad_reference.error().contains("invalid undefined ELF symbol"),
+        "reject an undefined function with a nonzero extent");
+
+  auto bad = input;
+  bad.symbols[weak].section = data;
+  rejects("not in executable code", bad);
+  bad = input;
+  bad.symbols[weak].function_size = std::numeric_limits<std::uint64_t>::max();
+  rejects("outside its section", bad);
+  bad = input;
+  bad.symbols[local].offset = input.sections[text].size();
+  rejects("not in executable code", bad);
+  bad = input;
+  bad.symbols[reference].function_size = 0;
+  rejects("not in executable code", bad);
 }
 
 void read_init_array() {
@@ -435,6 +507,7 @@ int main(int argc, char** argv) {
     }
   }
   read_large_offsets();
+  read_function_symbols();
   read_init_array();
   read_gnu_marker();
 
