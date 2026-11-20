@@ -92,6 +92,8 @@ public:
   // names join the lookup where [namespace.udir]/2 puts them.
   virtual std::vector<DeclId> visible_decls(NameId name, std::span<const EntityId> directives = {}) = 0;
   virtual ast::DeclSema decl_sema(DeclId d) = 0;
+  // A use of a global allocation function that may lack a written declaration in the unit.
+  virtual void use_allocation_function(EntityId) {}
   // What a constant evaluation fetches (§B7): `function_ir` of a function defined before the
   // current point ([expr.const]), and a namespace-scope variable as the interpreter sees it.
   virtual interp::Callee function_ir(EntityId f) = 0;
@@ -4187,6 +4189,75 @@ public:
     return literal(t, w_->values.integer(t, lit.value), ValueCategory::prvalue, begin, end);
   }
 
+  enum class LiteralOperatorForm { invalid, integer, raw, other };
+
+  // [over.literal]: check the adjusted parameter types, including types named by aliases.
+  LiteralOperatorForm literal_operator_form(QualType t) {
+    using enum LiteralOperatorForm;
+    using enum Builtin;
+    auto f = types().rec(t);
+    if (f.kind != TypeKind::function || f.variadic || f.params.empty() || f.params.size() > 2) return invalid;
+    QualType first = f.params.front();
+    constexpr std::array characters{char_, wchar_t_, char8_t_, char16_t_, char32_t_};
+    auto character = [&](QualType q) {
+      auto kind = types().builtin_of(q);
+      return kind && std::ranges::contains(characters, *kind);
+    };
+    if (f.params.size() == 1) {
+      if (types().is(first, unsigned_long_long)) return integer;
+      if (types().is(first, long_double) || character(first)) return other;
+    }
+    if (!types().is_pointer(first)) return invalid;
+    QualType elem = types().pointee(first);
+    if (Types::cv(types().canonical(elem)) != Cv::const_) return invalid;
+    if (f.params.size() == 1) return types().is(elem, char_) ? raw : invalid;
+    return character(elem) && types().is(f.params[1], w_->target.size_type) ? other : invalid;
+  }
+
+  bool numeric_literal_template(std::span<const ast::TemplateParamSema> head) {
+    return head.size() == 1 && head[0].kind == ast::TemplateArgKind::value && head[0].pack && types().is(head[0].type, Builtin::char_);
+  }
+
+  // [lex.ext]: ordinary lookup selects the integer call form before the value is checked as nULL.
+  Ex integer_user_literal(NameId name, const lex::Literal& lit, u32 begin, u32 end) {
+    Ex callee = name_expr(name, begin, end, true);
+    if (!callee.ok()) return callee;
+    Ex fail{NodeId::none, begin, end};
+    if (as<ast::DepName>(callee)) {
+      undeclared(begin, name);
+      return fail;
+    }
+    bool cooked = false, raw = false, numeric_template = false;
+    auto record = [&](QualType type) {
+      auto form = literal_operator_form(type);
+      cooked |= form == LiteralOperatorForm::integer;
+      raw |= form == LiteralOperatorForm::raw;
+    };
+    if (auto it = overloads_.find(std::to_underlying(callee.id)); it != overloads_.end()) {
+      for (const ast::DeclSema& d : it->second) {
+        if (d.flags & decl_flag::template_) numeric_template |= numeric_literal_template(ins().seqs.elements(d.template_params));
+        else record(d.type);
+      }
+    } else {
+      record(callee.type());
+    }
+    if (!cooked) {
+      if (raw && numeric_template) diag(begin, Diag::integer_literal_operator_conflict);
+      else if (raw || numeric_template) diag(begin, Diag::integer_literal_operator_unsupported);
+      else diag(begin, Diag::integer_literal_operator_missing, name);
+      return fail;
+    }
+    if (lit.overflow) {
+      diag(begin, Diag::integer_literal_too_large);
+      return fail;
+    }
+    lex::Literal arg;
+    arg.base = lit.base;
+    arg.int_suffix = lex::IntSuffix::ull;
+    arg.value = lit.value;
+    return call(callee, {integer_literal(arg, begin, end)}, end, begin);
+  }
+
   // [lex.fcon]: `double`, or `float` or `long double` by the suffix. The lexer rounded the value to
   // binary32 or binary64, the formats of these types on the target; the extended types' suffixes
   // (`f16`, `bf16`, …) have no values yet (#336).
@@ -4754,6 +4825,112 @@ public:
     return converted;
   }
 
+  // [basic.stc.dynamic] makes the ordinary declarations visible even without a header.
+  Ex allocation_name_expr(AllocationFunction f, u32 begin, u32 end) {
+    const NameId name = ins().names.intern(allocation_name(f));
+    std::vector<ast::DeclSema> found;
+    for (const ast::DeclSema& d : w_->allocation_functions()) {
+      if (w_->entities.rec(d.entity).name != name) continue;
+      q_->use_allocation_function(d.entity);
+      found.push_back(d);
+    }
+    auto written = q_->namespace_members(EntityId::none, name);
+    found.insert(found.end(), written.begin(), written.end());
+    return decls_expr(std::move(found), true, name, begin, end);
+  }
+
+  // [expr.new]: initialize the object after the call to the global allocation function.
+  Ex new_object(QualType t, const std::optional<std::vector<Ex>>& args, const Braced* braces, u32 begin, u32 end) {
+    Ex fail{NodeId::none, begin, end};
+    if (types().has_placeholder(t) || types().is_dependent(t)) {
+      diag(begin, Diag::not_supported, lex::Tk::kw_new);
+      return fail;
+    }
+    if (!types().is_object(t)) {
+      diag(begin, Diag::new_requires_object, t);
+      return fail;
+    }
+    if (types().is_class(t) && !require_complete(t, begin)) return fail;
+    if (!scalar_allocation_type(t)) {
+      diag(begin, Diag::not_supported, lex::Tk::kw_new);
+      return fail;
+    }
+
+    Ex init;
+    if (braces) {
+      init = list_init(t, *braces);
+    } else if (!args) {
+      if (Types::is_const(types().canonical(t))) {
+        diag(begin, Diag::new_const_uninitialized, t);
+        return fail;
+      }
+      init = default_init(t, end, end);
+    } else if (args->empty()) {
+      init = value_init(t, end, end);
+    } else {
+      if (args->size() != 1) {
+        diag((*args)[1].begin, Diag::too_many_initializers, t);
+        return fail;
+      }
+      const Ex& value = args->front();
+      if (!value.ok()) return fail;
+      if (is_braced(value)) {
+        diag(value.begin, Diag::braces_for_scalar, t);
+        return fail;
+      }
+      // [dcl.init.general]: direct-initialization of bool from std::nullptr_t yields false.
+      init = types().is(t, Builtin::bool_) && types().is(value.type(), Builtin::nullptr_t)
+          ? to_bool(value, value.begin) : convert(value, t, value.begin);
+    }
+    if (!init.ok()) return fail;
+    QualType pointer = types().pointer(t);
+    if (dependent(init)) return dependent_node({init}, begin, end, pointer);
+
+    Ex size = size_of(t, false, begin, begin);
+    ast::DeclSema f = w_->allocation_function(AllocationFunction::allocate);
+    q_->use_allocation_function(f.entity);
+    ExprInfo fn_info{f.type, ValueCategory::lvalue, 0};
+    Ex callee = node(ast::DeclRef{fn_info, f.entity}, begin, begin, fn_info);
+    ExprInfo call_info{types().rec(f.type).inner, ValueCategory::prvalue, 0};
+    Child sizes[] = {at(size, begin)};
+    Ex allocation = node(ast::Call{call_info, f.entity, at(callee, begin), b_->list(sizes)}, begin, begin, call_info);
+    ExprInfo info{pointer, ValueCategory::prvalue, 0};
+    return node(ast::NewObject{info, at(allocation, begin), at(init, begin)}, begin, end, info);
+  }
+
+  // [expr.delete]: cv-qualifiers are ignored when passing the address to the global deallocator.
+  Ex delete_object(Ex e, u32 begin, u32 end) {
+    Ex fail{NodeId::none, begin, end};
+    if (!e.ok()) return fail;
+    QualType v = builtin(Builtin::void_);
+    if (dependent(e)) return dependent_node({e}, begin, end, v);
+    if (types().is_class(e.type()) || types().is_array(e.type())) {
+      diag(begin, Diag::not_supported, lex::Tk::kw_delete);  // only pointer operands in this slice
+      return fail;
+    }
+    if (!types().is_pointer(e.type()) || !types().is_object(types().pointee(e.type()))) {
+      diag(begin, Diag::delete_requires_pointer, e.type());
+      return fail;
+    }
+    QualType t = types().pointee(e.type());
+    if (types().is_class(t) && !require_complete(t, begin)) return fail;
+    if (!scalar_allocation_type(t)) {
+      diag(begin, Diag::not_supported, lex::Tk::kw_delete);
+      return fail;
+    }
+    Ex addr = convert_node(rvalue(e), ast::ConversionKind::pointer, types().pointer(v));
+    if (!addr.ok()) return fail;
+    Ex size = size_of(t, false, begin, begin);
+    EntityId f = w_->allocation_function(AllocationFunction::deallocate_sized).entity;
+    q_->use_allocation_function(f);
+    ExprInfo info{v, ValueCategory::prvalue, 0};
+    return node(ast::DeleteObject{info, f, at(addr, begin), at(size, begin)}, begin, end, info);
+  }
+
+  bool scalar_allocation_type(QualType t) {
+    return types().is_integral(t) || types().is_pointer(t);
+  }
+
   // `sizeof` and `alignof` of a type ([expr.sizeof], [expr.alignof]), a `size_t` prvalue; zero
   // after a diagnostic.
   Ex size_of(QualType t, bool align, u32 begin, u32 end) {
@@ -5031,7 +5208,19 @@ public:
 
   bool pointer_convertible(QualType from, QualType to) {
     QualType a = types().pointee(from), b = types().pointee(to);
-    return types().is_void(b) && types().is_object(a) && cv_within(Types::cv(a), Types::cv(b));
+    return types().is_void(b) && types().is_object(a) && cv_within(object_cv(a), object_cv(b));
+  }
+
+  // [expr.type]: combine the pointee cv-qualifiers of a pointer to void and a
+  // pointer to an object or void.
+  std::optional<QualType> composite_void_pointer(QualType a, QualType b) {
+    if (!types().is_pointer(a) || !types().is_pointer(b)) return std::nullopt;
+    a = types().pointee(a);
+    b = types().pointee(b);
+    if (!types().is_void(a)) std::swap(a, b);
+    if (!types().is_void(a) || (!types().is_void(b) && !types().is_object(b))) return std::nullopt;
+    Cv cv = Cv(std::to_underlying(object_cv(a)) | std::to_underlying(object_cv(b)));
+    return types().pointer(types().add_cv(builtin(Builtin::void_), cv));
   }
 
   // [conv.qual]: pointers of equal depth to the same type, where each level of `to` holds the
@@ -5373,6 +5562,12 @@ public:
         diag(op_at, Diag::member_pointer_values);
         return {NodeId::none, begin, end};
       }
+      if (auto to = composite_void_pointer(ta, tc)) {
+        a = convert(a, *to, op_at);
+        c = convert(c, *to, op_at);
+        if (!a.ok() || !c.ok()) return {NodeId::none, begin, end};
+        return bin(k, a, c, b);
+      }
       if (types().is_pointer(ta) && types().is_pointer(tc)) {
         QualType pa = types().pointee(ta), pc = types().pointee(tc);
         // [expr.type]/4.6: a pointer to a derived class converted to one to its base class.
@@ -5525,6 +5720,11 @@ public:
       } else if (types().is_pointer(tb) && is_null_pointer_constant(t)) {
         a = convert_node(a, ast::ConversionKind::null_pointer, tb);
         info = {tb, ValueCategory::prvalue, 0};
+      } else if (auto to = composite_void_pointer(ta, tb)) {
+        a = convert(a, *to, q_at);
+        b = convert(b, *to, q_at);
+        if (!a.ok() || !b.ok()) return {NodeId::none, begin, end};
+        info = {*to, ValueCategory::prvalue, 0};
       } else if (types().is_pointer(ta) && types().is_pointer(tb) &&
                  (base_depth(types().pointee(ta), types().pointee(tb)) || base_depth(types().pointee(tb), types().pointee(ta)))) {
         // [expr.cond]/7.3: the composite pointer type, a pointer to the base class.

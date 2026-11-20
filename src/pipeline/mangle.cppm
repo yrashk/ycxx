@@ -194,9 +194,10 @@ class Mangler {
                    in_.values.get<ast::VDepParam>(a.bound).depth == 0) {
           auto i = in_.values.get<ast::VDepParam>(a.bound).index;
           dim = i == 0 ? "T_" : std::format("T{}_", i - 1);
-        } else {
+        } else if (a.bound != ast::ConstId::none) {
           return std::unexpected("an array of unknown or dependent bound");
         }
+        // An incomplete array omits the dimension. It still has the `A_` prefix (§5.1.5.6).
         auto e = type(a.elem);
         if (!e) return e;
         inner = std::format("A{}_{}", dim, *e);
@@ -416,7 +417,9 @@ class Mangler {
     ClassName sc = scope != ast::EntityId::none && classes_ ? classes_(scope) : ClassName{};
     std::size_t arity = in_.seqs.size(f.params) + (sc.is_class ? 1 : 0);
     std::string unqualified = std::format("{}{}", name.size(), name);
-    if (name.starts_with("operator") && name.size() > 8) {
+    if (name.starts_with(lex::literal_operator_prefix)) {
+      unqualified = "li" + source_name(name.substr(lex::literal_operator_prefix.size()));
+    } else if (name.starts_with("operator") && name.size() > 8) {
       auto code = operator_code(name.substr(8), arity);
       if (!code) return std::unexpected(std::format("the operator function '{}'", name));
       unqualified = *code;
@@ -675,7 +678,9 @@ class Mangler {
       if (!p) return p;
       r = *p;
     }
-    r += special ? std::string(name) : source_name(name);
+    if (special) r += name;
+    else if (name.starts_with(lex::literal_operator_prefix)) r += "li" + source_name(name.substr(lex::literal_operator_prefix.size()));
+    else r += source_name(name);
     candidates_.push_back((std::uint64_t{2} << 32) | candidates_.size());
     return r;
   }
@@ -739,6 +744,8 @@ class Mangler {
 
 // Itanium §5.1.5.1 <operator-name>: the code of `operator<op>` taking `arity` operands.
 std::optional<std::string_view> operator_code(std::string_view op, std::size_t arity) {
+  if (op == " new") return "nw";
+  if (op == " delete") return "dl";
   static constexpr std::pair<std::string_view, std::string_view> binary[] = {
       {"+", "pl"},  {"-", "mi"},   {"*", "ml"},   {"&", "an"},  {"/", "dv"},  {"%", "rm"},  {"|", "or"},
       {"^", "eo"},  {"=", "aS"},   {"+=", "pL"},  {"-=", "mI"}, {"*=", "mL"}, {"/=", "dV"}, {"%=", "rM"},

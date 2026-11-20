@@ -67,7 +67,7 @@ struct Value {
 // `constant_value(V, ctx)` for one usable in constant expressions).
 struct GlobalVar {
   QualType type{};                // as declared, cv included
-  std::optional<ConstId> value;   // its value when constant-initialized (a scalar); else zero
+  std::optional<ConstId> value;   // its value when constant-initialized; else zero
   bool usable = false;            // usable in constant expressions ([expr.const])
 };
 
@@ -104,6 +104,7 @@ struct Result {
   ConstId literal{};         // address within a string literal object
   std::vector<PathStep> path;
   bool past = false;
+  bool past_constexpr_subarray = false;
   i64 offset = 0;            // address: in bytes from the start of the object
   bool operator==(const Result&) const = default;
 };
@@ -215,6 +216,7 @@ private:
 
   u32 make_object(QualType t, Origin o);
   void fill_zero(QualType t, u32 cell);
+  bool fill_array_constant(QualType t, u32 cell, ConstId value);
   std::optional<Place> resolve(const Value& p, std::span<const u64> extra, bool& past);
   Flow locate(const Value& p, std::span<const u64> extra, QualType t, Use use, bool volatile_, Place& out);
   Flow note_access(const Place& p, bool write);
@@ -222,6 +224,7 @@ private:
   std::optional<u32> literal_object(ConstId s);
   Flow global_object(EntityId e, u32& out);
   Flow address(u32 obj, QualType pointee, i64 offset, Value& out);
+  Flow erased_address(u32 obj, std::span<const u32> indices, i64 offset, Value& out);
   i64 offset_of(const Value& p);
   bool may_overlap(const Value& a, const Value& b);
 
@@ -408,6 +411,40 @@ void Machine::fill_zero(QualType t, u32 cell) {
   cells_[cell].v = s.kind == Kind::pointer ? Value::null() : s.kind == Kind::floating ? Value::floating(0) : Value::integer(0);
 }
 
+// [dcl.init.aggr]: each nested array supplies a value for every element. Leave pointer and
+// other scalar constants to the usual lazy load, which can ask the host for another global.
+bool Machine::fill_array_constant(QualType t, u32 cell, ConstId value) {
+  const ast::Values& vs = in_->values;
+  const Shape& s = shape(t);
+  switch (s.kind) {
+  case Kind::array: {
+    if (!vs.is<ast::VAggregate>(value)) return false;
+    auto aggregate = vs.get<ast::VAggregate>(value);
+    auto elements = in_->seqs.elements(aggregate.elems);
+    if (!similar(t, aggregate.type) || elements.size() != s.bound) return false;
+    u32 leaves = u32(shape(s.inner).leaves);
+    for (ConstId element : elements) {
+      if (!fill_array_constant(s.inner, cell, element)) return false;
+      cell += leaves;
+    }
+    return true;
+  }
+  case Kind::integer:
+    if (!vs.is<ast::VInt>(value) || !similar(t, vs.get<ast::VInt>(value).type)) return false;
+    break;
+  case Kind::floating:
+    if (!vs.is<ast::VFloat>(value) || !similar(t, vs.get<ast::VFloat>(value).type)) return false;
+    break;
+  case Kind::pointer:
+    if (!vs.is<ast::VNullptr>(value) && (s.is_nullptr || !vs.is<ast::VLvalue>(value))) return false;
+    break;
+  default:
+    return false;
+  }
+  cells_[cell] = {Life::alive, Fill::constant, {VKind::none, false, 0, std::to_underlying(value)}};
+  return true;
+}
+
 // The subobject `p` designates, followed by `extra`. `past` is set when it is one past the end
 // of an object; then the place is the object it is past. None when the path does not fit the
 // object's type.
@@ -528,7 +565,9 @@ Machine::Flow Machine::constant(ConstId c, QualType type, Value& out) {
   }
   if (!vs.is<ast::VLvalue>(c) || s.kind != Kind::pointer || s.is_nullptr) return fail(Reason::unsupported_constant);
   auto l = vs.get<ast::VLvalue>(c);
-  if (!in_->seqs.elements(l.path).empty()) return fail(Reason::unsupported_constant);
+  auto indices = in_->seqs.elements(l.path);
+  bool erased = ast::is_void(*in_, s.inner);
+  if (!erased && !indices.empty()) return fail(Reason::unsupported_constant);
   u32 o = 0;
   if (vs.is<ast::VString>(l.base)) {
     auto lit = literal_object(l.base);
@@ -545,7 +584,26 @@ Machine::Flow Machine::constant(ConstId c, QualType type, Value& out) {
   } else {
     return fail(Reason::unsupported_constant);
   }
-  return address(o, s.inner, l.offset, out);
+  return erased ? erased_address(o, indices, l.offset, out) : address(o, s.inner, l.offset, out);
+}
+
+// An erased pointer retains its array path and offset ([conv.ptr]). A remaining offset equal to
+// the designated object's size represents the one-past pointer for an object treated as an array
+// of one. A path ending at an array's bound already represents one past that array.
+Machine::Flow Machine::erased_address(u32 obj, std::span<const u32> indices, i64 offset, Value& out) {
+  Value pointer{VKind::object, false, obj, 0};
+  for (u32 index : indices) pointer.bits = child(u32(pointer.bits), {ir::Step::elem, index});
+  bool past = false;
+  auto place = resolve(pointer, {}, past);
+  if (!place || offset < 0) return fail(Reason::unsupported_constant);
+  i64 start = offset_of(pointer);
+  if (offset != start) {
+    if (past || offset < start || u64(offset - start) != shape(place->type).size)
+      return fail(Reason::unsupported_constant);
+    pointer.past = true;
+  }
+  out = pointer;
+  return Flow::next;
 }
 
 // A pointer to `pointee` at `offset` bytes into object `obj`: down through array elements until
@@ -583,7 +641,7 @@ Machine::Flow Machine::address(u32 obj, QualType pointee, i64 offset, Value& out
 }
 
 // The object of a namespace-scope variable, made on first use from what the host says of it. Its
-// value, if it has one, is decoded when it is first read: it may be the address of another global.
+// scalar values are decoded when first read: a value may be the address of another global.
 Machine::Flow Machine::global_object(EntityId e, u32& out) {
   if (auto it = globals_.find(std::to_underlying(e)); it != globals_.end()) {
     out = it->second;
@@ -598,18 +656,23 @@ Machine::Flow Machine::global_object(EntityId e, u32& out) {
   if (!info->second) return fail(Reason::ill_formed);
   const GlobalVar g = *info->second;
   const Shape s = shape(g.type);
-  if (s.leaves == 0 || (g.value && (s.leaves != 1 || s.kind == Kind::array))) return fail(Reason::unsupported_constant);
+  constexpr u64 max_cells = std::numeric_limits<u32>::max();
+  if (s.leaves == 0 || s.leaves > max_cells || cells_.size() > max_cells - s.leaves ||
+      (g.value && s.kind != Kind::array && s.leaves != 1))
+    return fail(Reason::unsupported_constant);
   u32 o = make_object(g.type, Origin::global);
   Object& ob = objects_[o];
   ob.entity = e;
   ob.outside = true;
   ob.usable = g.usable;
-  for (u32 c = ob.cell0; c < ob.cell0 + ob.ncells; ++c) cells_[c].life = Life::alive;
-  if (g.value) {
-    cells_[ob.cell0].fill = Fill::constant;
-    cells_[ob.cell0].v = {VKind::none, false, 0, std::to_underlying(*g.value)};
-  } else if (config_.mode == Mode::runtime || !g.usable) {
-    fill_zero(g.type, ob.cell0);  // static storage is zero-initialized ([basic.start.static])
+  if (g.value && s.kind == Kind::array) {
+    if (!fill_array_constant(g.type, ob.cell0, *g.value)) return fail(Reason::unsupported_constant);
+  } else if (g.value) {
+    cells_[ob.cell0] = {Life::alive, Fill::constant, {VKind::none, false, 0, std::to_underlying(*g.value)}};
+  } else {
+    for (u32 c = ob.cell0; c < ob.cell0 + ob.ncells; ++c) cells_[c].life = Life::alive;
+    if (config_.mode == Mode::runtime || !g.usable)
+      fill_zero(g.type, ob.cell0);  // static storage is zero-initialized ([basic.start.static])
   }
   globals_.emplace(std::to_underlying(e), o);
   out = o;
@@ -1022,6 +1085,7 @@ std::vector<Result> Machine::results() const {
     case VKind::null: r.kind = Result::Kind::null; break;
     case VKind::function: r.kind = Result::Kind::function; r.entity = EntityId(v.ref); break;
     case VKind::object: {
+      Machine& m = *const_cast<Machine*>(this);
       const Object& ob = objects_[v.ref];
       r.kind = Result::Kind::address;
       r.base = ob.origin == Origin::global ? Base::global : ob.origin == Origin::literal ? Base::literal : Base::local;
@@ -1029,7 +1093,10 @@ std::vector<Result> Machine::results() const {
       r.literal = ob.literal;
       r.path = steps_of(u32(v.bits));
       r.past = v.past;
-      r.offset = const_cast<Machine*>(this)->offset_of(v);
+      r.offset = m.offset_of(v);
+      bool past = false;
+      if (r.base == Base::global && ob.usable && r.path.size() > 1 && m.resolve(v, {}, past))
+        r.past_constexpr_subarray = past;
       break;
     }
     }

@@ -116,6 +116,22 @@ struct Call {
   [[=indeterminately_sequenced(1)]] ChildList args;
 };
 
+// An ordinary scalar new-expression ([expr.new]): allocation is sequenced before initialization.
+struct NewObject {
+  ExprInfo info;
+  [[=sequenced(0)]] Child allocation;
+  [[=sequenced(1)]] Child init;
+};
+
+// Single-object delete of a complete scalar ([expr.delete]): the operand has been converted
+// to void*. The deallocation function is called only when the address is non-null.
+struct DeleteObject {
+  ExprInfo info;
+  EntityId function;
+  [[=sequenced(0)]] Child address;
+  [[=sequenced(1)]] Child size;
+};
+
 // A call of a built-in function whose value is computed, not a constant (`lex::BuiltinFunction`:
 // `__builtin_fabs(x)`), its arguments converted to its parameters' types (docs/EXTENSIONS.md).
 struct BuiltinCall {
@@ -443,7 +459,7 @@ using Nodes = closed_list<Literal, DeclRef, Paren, Unary, Binary, OrderedBinary,
                           IfConsteval, StaticAssert, Member, InitList, ValueInit, DefaultInit, This,
                           MemberCall, Materialize, CtorCall, MemberInit, Destructor, DestroyMember, Dependent,
                           DepName, CondDecl, Switch, Case, Default, Label, Goto, BuiltinCall, Lambda, DefaultArg,
-                          StaticInit, StaticVar>;
+                          StaticInit, StaticVar, NewObject, DeleteObject>;
 
 static_assert(Nodes::size < max_node_kinds);
 

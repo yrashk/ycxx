@@ -452,8 +452,8 @@ public:
     for (u32 unit : units) text.push_back(static_cast<char>(unit));
     return text;
   }
-  ConstId address(QualType, ConstId base, i64 offset) {
-    return ins_->intern_value(ast::VLvalue{base, ins_->intern_seq(std::span<const u32>{}), offset});
+  ConstId address(QualType, ConstId base, i64 offset, std::span<const u32> path = {}) {
+    return ins_->intern_value(ast::VLvalue{base, ins_->intern_seq(path), offset});
   }
   ConstId null_pointer(QualType) { return ins_->intern_value(ast::VNullptr{}); }
   // A declared object or function as the base of an address (§5.5).
@@ -830,6 +830,18 @@ private:
   std::vector<EntityId> class_order_, enum_order_;
 };
 
+// The ordinary single-object allocation functions implicitly declared at global scope
+// ([basic.stc.dynamic]). Their types use the target's size_t, like sizeof.
+enum class AllocationFunction : u8 { allocate, deallocate, deallocate_sized };
+
+constexpr std::string_view allocation_name(AllocationFunction f) {
+  return f == AllocationFunction::allocate ? "operator new" : "operator delete";
+}
+
+constexpr bool is_allocation_name(std::string_view n) {
+  return n == allocation_name(AllocationFunction::allocate) || n == allocation_name(AllocationFunction::deallocate);
+}
+
 // What the front end shares process-wide (§9.1): the AST core's interners, and sema's views.
 // Class and enumeration records are each unit's (`Classes`).
 struct World {
@@ -855,6 +867,36 @@ struct World {
     };
   }
   World(const World&) = delete;
+
+  // The interners give repeated requests and written declarations the same identity. Construct
+  // the implicit declaration on demand, so a unit that never names it needs no shared state.
+  ast::DeclSema allocation_function(AllocationFunction f) {
+    QualType size = types.builtin(target.size_type);
+    QualType void_type = types.builtin(Builtin::void_);
+    QualType void_pointer = types.pointer(void_type);
+    const bool allocating = f == AllocationFunction::allocate;
+    QualType params[] = {allocating ? size : void_pointer, size};
+    auto count = f == AllocationFunction::deallocate_sized ? 2u : 1u;
+    QualType type = types.function(allocating ? void_pointer : void_type, std::span(params).first(count),
+                                   false, LangLinkage::cxx, Cv::none, ast::RefQual::none, !allocating);
+    ast::DeclSema d{};
+    d.entity = entities.entity({.kind = EntityKind::function, .name = ins.names.intern(allocation_name(f)), .type = type});
+    d.type = type;
+    d.kind = ast::DeclKind::function;
+    d.linkage = ast::Linkage::external;
+    d.attributes = ins.intern_seq(std::span<const ast::NodeId>{});
+    d.constraint = ast::NodeId::none;
+    d.constraints = ConstId::none;
+    d.contracts = ast::NodeId::none;
+    d.params = ins.intern_seq(std::span<const ast::ParamSema>{});
+    d.template_params = ins.intern_seq(std::span<const ast::TemplateParamSema>{});
+    return d;
+  }
+
+  auto allocation_functions() {
+    using enum AllocationFunction;
+    return std::array{allocation_function(allocate), allocation_function(deallocate), allocation_function(deallocate_sized)};
+  }
 
   QualType builtin_va_list() {
     switch (target.va_list) {
