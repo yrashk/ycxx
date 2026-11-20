@@ -1180,6 +1180,18 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   built-in operator. `N::T(…)` is a cast only when no function or variable hides N::T.
 - Tests: `tests/own/operators` (12, seven from the review), `tests/own/headers` (2).
 
+## Cooked integer user-defined literals (#289, 2026-11-20)
+
+- A literal operator name has its own lookup spelling derived from the suffix identifier
+  ([over.literal]). Compact and deprecated separated spellings name the same function.
+- An integer user-defined literal uses ordinary unqualified lookup at its point of use. When
+  the visible set contains an operator with an `unsigned long long` parameter, the existing
+  integer conversion rules build the argument and ordinary overload resolution builds the
+  call ([lex.ext], [lex.icon]). The call can run or be evaluated as a constant expression.
+- The Itanium mangler emits the `li` operator code followed by the suffix's source-name.
+  Tests in `tests/own/cooked-literals` cover lookup, integer forms, rejection, and a peer object.
+- #289 tracks the remaining literal call forms, including raw and numeric template calls.
+
 ## Object model, step 1: classes by value (#116, 2026-11-18)
 
 - **L1:** a parameter of class type is the address of an object the caller initializes

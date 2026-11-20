@@ -4142,6 +4142,75 @@ public:
     return literal(t, w_->values.integer(t, lit.value), ValueCategory::prvalue, begin, end);
   }
 
+  enum class LiteralOperatorForm { invalid, integer, raw, other };
+
+  // [over.literal]: check the adjusted parameter types, including types named by aliases.
+  LiteralOperatorForm literal_operator_form(QualType t) {
+    using enum LiteralOperatorForm;
+    using enum Builtin;
+    auto f = types().rec(t);
+    if (f.kind != TypeKind::function || f.variadic || f.params.empty() || f.params.size() > 2) return invalid;
+    QualType first = f.params.front();
+    constexpr std::array characters{char_, wchar_t_, char8_t_, char16_t_, char32_t_};
+    auto character = [&](QualType q) {
+      auto kind = types().builtin_of(q);
+      return kind && std::ranges::contains(characters, *kind);
+    };
+    if (f.params.size() == 1) {
+      if (types().is(first, unsigned_long_long)) return integer;
+      if (types().is(first, long_double) || character(first)) return other;
+    }
+    if (!types().is_pointer(first)) return invalid;
+    QualType elem = types().pointee(first);
+    if (Types::cv(types().canonical(elem)) != Cv::const_) return invalid;
+    if (f.params.size() == 1) return types().is(elem, char_) ? raw : invalid;
+    return character(elem) && types().is(f.params[1], w_->target.size_type) ? other : invalid;
+  }
+
+  bool numeric_literal_template(std::span<const ast::TemplateParamSema> head) {
+    return head.size() == 1 && head[0].kind == ast::TemplateArgKind::value && head[0].pack && types().is(head[0].type, Builtin::char_);
+  }
+
+  // [lex.ext]: ordinary lookup selects the integer call form before the value is checked as nULL.
+  Ex integer_user_literal(NameId name, const lex::Literal& lit, u32 begin, u32 end) {
+    Ex callee = name_expr(name, begin, end, true);
+    if (!callee.ok()) return callee;
+    Ex fail{NodeId::none, begin, end};
+    if (as<ast::DepName>(callee)) {
+      undeclared(begin, name);
+      return fail;
+    }
+    bool cooked = false, raw = false, numeric_template = false;
+    auto record = [&](QualType type) {
+      auto form = literal_operator_form(type);
+      cooked |= form == LiteralOperatorForm::integer;
+      raw |= form == LiteralOperatorForm::raw;
+    };
+    if (auto it = overloads_.find(std::to_underlying(callee.id)); it != overloads_.end()) {
+      for (const ast::DeclSema& d : it->second) {
+        if (d.flags & decl_flag::template_) numeric_template |= numeric_literal_template(ins().seqs.elements(d.template_params));
+        else record(d.type);
+      }
+    } else {
+      record(callee.type());
+    }
+    if (!cooked) {
+      if (raw && numeric_template) diag(begin, Diag::integer_literal_operator_conflict);
+      else if (raw || numeric_template) diag(begin, Diag::integer_literal_operator_unsupported);
+      else diag(begin, Diag::integer_literal_operator_missing, name);
+      return fail;
+    }
+    if (lit.overflow) {
+      diag(begin, Diag::integer_literal_too_large);
+      return fail;
+    }
+    lex::Literal arg;
+    arg.base = lit.base;
+    arg.int_suffix = lex::IntSuffix::ull;
+    arg.value = lit.value;
+    return call(callee, {integer_literal(arg, begin, end)}, end, begin);
+  }
+
   // [lex.fcon]: `double`, or `float` or `long double` by the suffix. The lexer rounded the value to
   // binary32 or binary64, the formats of these types on the target; the extended types' suffixes
   // (`f16`, `bf16`, …) have no values yet (#336).

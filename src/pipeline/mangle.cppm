@@ -407,7 +407,9 @@ class Mangler {
     ClassName sc = scope != ast::EntityId::none && classes_ ? classes_(scope) : ClassName{};
     std::size_t arity = in_.seqs.size(f.params) + (sc.is_class ? 1 : 0);
     std::string unqualified = std::format("{}{}", name.size(), name);
-    if (name.starts_with("operator") && name.size() > 8) {
+    if (name.starts_with(lex::literal_operator_prefix)) {
+      unqualified = "li" + source_name(name.substr(lex::literal_operator_prefix.size()));
+    } else if (name.starts_with("operator") && name.size() > 8) {
       auto code = operator_code(name.substr(8), arity);
       if (!code) return std::unexpected(std::format("the operator function '{}'", name));
       unqualified = *code;
@@ -666,7 +668,9 @@ class Mangler {
       if (!p) return p;
       r = *p;
     }
-    r += special ? std::string(name) : source_name(name);
+    if (special) r += name;
+    else if (name.starts_with(lex::literal_operator_prefix)) r += "li" + source_name(name.substr(lex::literal_operator_prefix.size()));
+    else r += source_name(name);
     candidates_.push_back((std::uint64_t{2} << 32) | candidates_.size());
     return r;
   }

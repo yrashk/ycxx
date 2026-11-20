@@ -27,6 +27,24 @@ using lex::Tok;
 using lex::u32;
 using lex::u8;
 
+struct LiteralOperatorId {
+  std::string_view suffix;
+  u32 end;  // the first token after the id
+};
+
+// [over.literal]: an empty ordinary string, with its suffix attached or written as an identifier.
+std::optional<LiteralOperatorId> literal_operator_id(const pp::Region& r, u32 begin, u32 limit) {
+  if (begin + 1 >= limit || r.tokens[begin].kind != Tk::kw_operator || r.tokens[begin + 1].kind != Tk::string_lit)
+    return std::nullopt;
+  const lex::Literal& l = r.literal(r.tokens[begin + 1]);
+  if (l.bad || l.encoding != lex::Encoding::ordinary || !l.units.empty()) return std::nullopt;
+  u32 end = begin + 2;
+  while (end < limit && r.tokens[end].has(lex::tok_flag::continued)) ++end;
+  if (l.ud_suffix != lex::no_name) return LiteralOperatorId{r.names[l.ud_suffix], end};
+  if (end < limit && r.tokens[end].kind == Tk::identifier) return LiteralOperatorId{r.name(r.tokens[end]), end + 1};
+  return std::nullopt;
+}
+
 enum class ItemKind : u8 {
   empty,           // `;`
   declaration,     // a declaration ending in `;`: variables, function declarations, aliases, …
@@ -767,12 +785,20 @@ private:
       }
       // A using-declaration: the last name of each declarator.
       u32 last = none;
+      std::string spelled;
       for (u32 j = s + 1; j <= limit; ++j) {
         if (j == limit || kind(j) == Tk::comma) {
-          if (last != none) add(k, std::string(name(last)), last, name_flag::unknown);
+          if (last != none) add(k, std::move(spelled), last, name_flag::unknown);
           last = none;
         } else if (kind(j) == Tk::identifier) {
           last = j;
+          spelled = name(j);
+        } else if (kind(j) == Tk::kw_operator) {
+          if (auto id = literal_operator_id(r_, j, limit)) {
+            last = j;
+            spelled = lex::literal_operator_name(id->suffix);
+            j = id->end - 1;
+          }
         } else if (kind(j) == Tk::less) {
           j = match_angle(j, limit) - 1;
         }
@@ -894,6 +920,11 @@ private:
         qual_begin = qual;
         qual_end = n;
         qual = none;
+        if (auto id = literal_operator_id(r_, n, to)) {
+          spelled = lex::literal_operator_name(id->suffix);
+          n = cand_end = id->end;
+          continue;
+        }
         ++n;
         if ((kind(n) == Tk::l_paren && kind(n + 1) == Tk::r_paren) ||
             (kind(n) == Tk::l_square && kind(n + 1) == Tk::r_square)) {
