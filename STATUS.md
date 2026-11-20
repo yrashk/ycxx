@@ -1119,13 +1119,15 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   ordinary lookup before overload resolution, then deduces the selected function's return type
   if needed. Class members and nonfunctions suppress ADL. A block using-declaration that names
   a namespace function permits ADL. Qualified and parenthesized calls use ordinary lookup.
+- A reachable associated class contributes its ordinary unqualified friend function
+  declarations, including declarations whose function is defined in another class. A matching
+  namespace declaration binds the name for ordinary lookup at its own point. [#259](https://github.com/yrashk/ycxx/issues/259)
 - A nondependent call in a template uses its lexical lookup point. Dependent calls also use the
   existing point of instantiation ([temp.dep.candidate]). Per-name incremental scheduling
   remains under #16.
 - Remaining work in #165 includes declarations of functions in blocks, exact lookup for
   operators, template template arguments, dependent-call template argument associations,
-  overload-set arguments and complete unqualified template-id lookup. Hidden friends are tracked
-  in #259.
+  overload-set arguments and complete unqualified template-id lookup.
 - Tests: `tests/own/argument-dependent-lookup/` and `tests/own/range-for/adl*.run.cpp`.
 
 ## `<cstdio>`, step 3: attributes, asm labels, string-initialized arrays (#133, 2026-11-18)
@@ -1557,6 +1559,12 @@ Fable decided the representation (ast.md §6.6); the Opus session wrote the code
   - `friend R f(…);`: the function of the enclosing namespace with that name and type, the same
     entity its namespace-scope declarations name;
   - `friend R C::g(…);`: a member function of another complete class.
+- An ordinary unqualified friend definition in a non-template namespace-scope class defines a
+  namespace function, implicitly inline in the global module. Its body sees the completed
+  class, including later members and types, with no implicit object parameter. A declaration in
+  another class can grant the same entity access. Linux uses the existing weak-ELF path for
+  supported external inline functions. [#259](https://github.com/yrashk/ycxx/issues/259) ·
+  [#422](https://github.com/yrashk/ycxx/issues/422)
 - **Checks** (`Sema::accessible`, `check_access`): a private or protected member may be named in
   a member function or default member initializer of its class, in the class's scope (the
   initializer of a static data member defined outside it), or in a friend function or friend
@@ -1564,9 +1572,10 @@ Fable decided the representation (ast.md §6.6); the Opus session wrote the code
   and unqualified names, as a static member, enumerator or nested type, for the member function
   overload resolution chooses ([class.access]/4), and for the constructor an initialization
   chooses. Protected is checked as private until base classes exist.
-- Not yet (#259): friend function definitions and argument-dependent lookup of friends, friends
-  in templates, destructor access, the wording for private member operators, elaborated types
-  in member parameters.
+- C-linkage friend definitions, hidden friend operators, defaults written on friend declarations,
+  friends in templates, destructor access, private member operator wording, and elaborated types
+  in member parameters remain under [#259](https://github.com/yrashk/ycxx/issues/259).
+  Darwin cross-object inline coalescing is tracked under [#124](https://github.com/yrashk/ycxx/issues/124).
 - A namespace-scope declaration's qualified types are checked once what it declares is known
   (`Sema::defer_type_access`, `settle_type_access`): a member's definition outside its class and
   a friend's declaration may name the class's private types ([class.access]/6–7). A friend

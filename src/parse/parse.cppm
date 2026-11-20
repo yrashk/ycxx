@@ -275,6 +275,25 @@ public:
     auto f = by_name_.find(name);
     return f == by_name_.end() ? std::span<const std::pair<u32, u32>>{} : std::span{f->second};
   }
+  // [basic.scope.scope], [basic.link]: friend declarations can correspond in their target
+  // namespace without binding the name there. Read earlier source items even if nothing else
+  // has asked for the containing class yet.
+  std::vector<DeclId> hidden_friends_before(std::string_view name, u32 item) {
+    std::vector<DeclId> result;
+    for (auto [j, k] : named(name)) {
+      if (j >= item) break;
+      const items::DeclName& n = items_->items[j].names[k];
+      if (!(n.flags & items::name_flag::friend_) || ns_of_[j] != ns_of_[item] || !namespace_class_friend(j)) continue;
+      DeclId d{id(j), ast::make_decl_ord(ast::DeclClass::syntactic, n.ordinal)};
+      if (decl_sema(d) && ordinary_friend_items_.contains(j)) result.push_back(d);
+    }
+    return result;
+  }
+  bool namespace_class_friend(u32 item) const {
+    u32 parent = items_->items[item].parent;
+    return parent != items::none && items_->items[parent].kind == ItemKind::class_def &&
+           in_global_scope(parent) && items_->items[parent].template_depth == 0;
+  }
   // The declarations of `name` that are members of namespace `path` ([namespace.memdef]) before
   // the point: of its own definitions, and, unless `inhabit`, of its inline and unnamed members.
   // A using-declaration's name stands for what it introduces (query-engine.md, "Using-declarations").
@@ -830,6 +849,7 @@ public:
     std::vector<sema::MemberDeclRec> statics;
     std::vector<sema::NestedType> nested;
     std::vector<EntityId> friends;
+    std::vector<ast::MemberRec> adl_friends;
   };
   ClassContent class_content(u32 item, const std::function<const ast::ItemSema&(u32)>& sema_of);
   // `instantiate_class(spec)` ([temp.inst]/2, §B6.2): the class record of a class template
@@ -1147,6 +1167,7 @@ public:
 
 private:
   std::vector<u32> running_;
+  std::set<u32> ordinary_friend_items_;  // the source item of each supported unqualified friend
   std::map<EntityId, std::vector<std::optional<std::pair<u32, u32>>>> member_default_tokens_;
   void bind_member_defaults(EntityId cls, sema::ClassRec& rec, Result<ast::ClassDef>& out);
   std::map<u32, std::vector<std::vector<ast::TemplateParamSema>>> outer_heads_;  // by item
@@ -1254,7 +1275,8 @@ public:
                                     ? p_->class_member_sema(m, instantiating)
                                     : p_->item_sema(m).value;
       for (const ast::DeclSema& d : p_->world().ins.seqs.elements(ms.decls))
-        if (d.entity != EntityId::none && d.kind != ast::DeclKind::class_ && p_->world().entities.rec(d.entity).name == name)
+        if (d.entity != EntityId::none && d.kind != ast::DeclKind::class_ && !(d.flags & sema::decl_flag::friend_) &&
+            p_->world().entities.rec(d.entity).name == name)
           r = d;
     }
     return r;
@@ -3130,10 +3152,7 @@ private:
   void friend_declaration() {
     u32 friend_at = ps_.pos();
     ps_.bump();
-    if (it_->kind == ItemKind::function) {
-      s_.diag(friend_at, Diag::not_supported, Tk::kw_friend);  // a friend function's definition (#259)
-      return bad();
-    }
+    const bool definition = it_->kind == ItemKind::function;
     if (ps_.is(Tk::kw_template) || !p_->enclosing_heads(k_).empty() || inst_) {
       s_.diag(friend_at, Diag::not_supported, Tk::kw_friend);  // in or of a template (#259)
       return bad();
@@ -3169,9 +3188,33 @@ private:
     if (literal_operator_named(d.name) &&
         (!defaults_allowed(d.params, types.is_function(d.type), d.name) || !literal_operator_ok(spec, d, LangLinkage::cxx, false)))
       return bad();
-    if (!types.is_function(d.type) || !ps_.is(Tk::semi)) {
-      s_.diag(d.name_at, Diag::not_supported, Tk::kw_friend);  // only function declarations
+    const bool c_context = enclosing_linkage() == LangLinkage::c;
+    const bool ordinary = (definition || !c_context) && !d.qualified && !d.template_args && p_->namespace_class_friend(k_) &&
+                          p_->region().tokens[it_->begin + d.name_at].kind == Tk::identifier;
+    if (!types.is_function(d.type) ||
+        (definition ? !ordinary || !d.function || !ps_.at_end() || !it_->has_body() ||
+                        p_->region().tokens[it_->body_begin].kind != Tk::l_brace
+                    : !ps_.is(Tk::semi))) {
+      s_.diag(d.name_at, Diag::not_supported, Tk::kw_friend);
       return bad();
+    }
+    if (ordinary) {
+      if (c_context) {
+        s_.diag(friend_at, Diag::friend_c_linkage);
+        return bad();
+      }
+      // [dcl.fct.default]/4 imposes separate requirements on defaults written in a friend.
+      if (spec.is_static || spec.is_extern || spec.is_typedef ||
+          std::ranges::any_of(d.params, [](const parse::Param& p) {
+            return p.default_arg != NodeId::none || p.default_tokens.has_value();
+          })) {
+        s_.diag(friend_at, Diag::not_supported, Tk::kw_friend);
+        return bad();
+      }
+      if (!declare(spec, std::move(d), LangLinkage::cxx, false, definition, /*ordinary_friend=*/true)) return bad();
+      p_->ordinary_friend_items_.insert(k_);
+      if (!definition) ps_.expect(Tk::semi);
+      return;
     }
     sem.kind = ast::DeclKind::function;
     sem.type = d.type;
@@ -3896,7 +3939,7 @@ private:
   // One init-declarator at namespace scope.
   // One init-declarator at namespace scope; false after an error that leaves no record.
   bool declare(const DeclSpec& spec, parse::Declarator d, LangLinkage lang, bool explicit_lang,
-               bool is_function_def) {
+               bool is_function_def, bool ordinary_friend = false) {
     sema::Types& types = s_.types();
     if (!defaults_allowed(d.params, types.is_function(d.type) && !spec.is_typedef, d.name)) return false;
     if (literal_operator_named(d.name) && !literal_operator_ok(spec, d, lang, template_)) return false;
@@ -4007,8 +4050,8 @@ private:
     sem.contracts = NodeId::none;
     sem.attributes = b_.seq(std::span<const NodeId>{});
     sem.template_params = b_.seq(std::span<const ast::TemplateParamSema>{});
-    u16 flags = 0;
-    if (spec.is_inline) flags |= sema::decl_flag::inline_;
+    u16 flags = ordinary_friend ? sema::decl_flag::friend_ : 0;
+    if (spec.is_inline || (ordinary_friend && is_function_def)) flags |= sema::decl_flag::inline_;
     if (spec.is_constexpr) flags |= sema::decl_flag::constexpr_;
     if (spec.is_constinit && fn) {
       s_.diag(spec.begin, Diag::constinit_function);  // [dcl.constinit]/1
@@ -4068,7 +4111,18 @@ private:
       // A class and a variable or function may share a name; the class is hidden
       // ([basic.scope.scope]/4, [basic.scope.hiding]/2), so it is not an earlier declaration.
       if (!d.qualified) {
-        for (DeclId p : q_.visible_decls(d.name)) {
+        auto candidates = ordinary_friend ? p_->declared_in(name, p_->ns_of(k_), k_, false, /*inhabit=*/true)
+                                          : q_.visible_decls(d.name);
+        if (ordinary_friend || p_->in_global_scope(k_)) {
+          auto hidden = p_->hidden_friends_before(name, k_);
+          if (!hidden.empty()) {
+            candidates.insert(candidates.end(), hidden.begin(), hidden.end());
+            std::ranges::sort(candidates, {}, [&](DeclId decl) {
+              return std::pair{p_->index(decl.item), ast::number_of(decl.ord)};
+            });
+          }
+        }
+        for (DeclId p : candidates) {
           auto ds = p_->decl_sema(p);
           if (!ds || ds->entity == EntityId::none || ds->kind == ast::DeclKind::class_ ||
               ds->kind == ast::DeclKind::namespace_ || ds->kind == ast::DeclKind::enum_)
@@ -4095,6 +4149,10 @@ private:
                      !(p.flags & sema::decl_flag::template_) && same_function_parameters(p.type, d.type);
             }))
           lang = LangLinkage::c;  // [dcl.link]/6: inherited from a corresponding declaration
+        if (ordinary_friend && is_function_def && lang == LangLinkage::c) {
+          s_.diag(d.name_at, Diag::friend_c_linkage);
+          return false;
+        }
         const sema::TypeRec& r = types.rec(d.type);
         if (r.fn_cv != sema::Cv::none && !d.qualified) {
           s_.diag(d.name_at, Diag::cv_on_non_member);  // [dcl.fct]/6
@@ -4247,9 +4305,10 @@ private:
           s_.diag(d.name_at, Diag::conflicting_declaration, d.name);
           return false;
         }
-        const bool c_redeclaration = fn && ((p.flags & sema::decl_flag::lang_c) || lang == LangLinkage::c);
-        const QualType prior_type = c_redeclaration ? types.canonical(p.type) : p.type;
-        const QualType current_type = c_redeclaration ? types.canonical(sem.type) : sem.type;
+        const bool canonical_match = fn && (ordinary_friend || (p.flags & (sema::decl_flag::friend_ | sema::decl_flag::lang_c)) ||
+                                            lang == LangLinkage::c);
+        const QualType prior_type = canonical_match ? types.canonical(p.type) : p.type;
+        const QualType current_type = canonical_match ? types.canonical(sem.type) : sem.type;
         if (fn && prior_type != current_type) {
           const sema::TypeRec& a = types.rec(prior_type);
           const sema::TypeRec& c = types.rec(current_type);
@@ -4323,7 +4382,8 @@ private:
     // The initializer ([dcl.init]); the name is in scope from the end of its declarator.
     // An explicit or partial specialization, or an instantiation, declares no name: the
     // template's name still names the template in its initializer.
-    if (!var_ && !(sem.flags & (sema::decl_flag::specialization | sema::decl_flag::partial))) s_.own.push_back({d.name, sem});
+    if (!var_ && !(sem.flags & (sema::decl_flag::specialization | sema::decl_flag::partial | sema::decl_flag::friend_)))
+      s_.own.push_back({d.name, sem});
     p_->declared(sem, k_);
     // A variable template's initializer is a pattern ([temp.res]): its specializations' are evaluated.
     const bool pattern = template_ && !var_ && !fn;
@@ -4721,6 +4781,8 @@ Program::ClassContent Program::class_content(u32 item, const std::function<const
       // A friend declaration names a function or class that is not a member ([class.friend]/1).
       if (d.flags & sema::decl_flag::friend_) {
         if (std::ranges::find(out.friends, d.entity) == out.friends.end()) out.friends.push_back(d.entity);
+        if (ordinary_friend_items_.contains(m))
+          out.adl_friends.push_back({{id(m), ast::make_decl_ord(ast::DeclClass::syntactic, i)}, d.entity, ast::Access::none});
         continue;
       }
       members.push_back({{id(m), ast::make_decl_ord(ast::DeclClass::syntactic, i)}, d.entity, access});
@@ -4771,6 +4833,7 @@ const Result<ast::ClassDef>& Program::class_def(u32 item) {
     if (auto b = class_bases_.find(std::to_underlying(*cls)); b != class_bases_.end()) rec.bases = b->second;
     for (const ast::MemberRec& m : members) rec.access.push_back({m.entity, m.access});
     rec.friends = std::move(c.friends);
+    rec.adl_friends = c.adl_friends;
     special_members(item, *cls, rec);
     rec.defined = true;
     // Default arguments are checked with the full member set, before function bodies are read.
@@ -4781,7 +4844,7 @@ const Result<ast::ClassDef>& Program::class_def(u32 item) {
   ast::Builder b(w_->ins, &arena_);
   def.bases = b.seq(std::span<const ast::BaseSpec>{});
   def.members = b.seq(std::span<const ast::MemberRec>(members));
-  def.friends = b.seq(std::span<const ast::MemberRec>{});
+  def.friends = b.seq(std::span<const ast::MemberRec>(c.adl_friends));
   def.synthesized = b.seq(std::span<const ast::DeclSema>{});
   def.nested = b.seq(std::span<const EntityId>{});
   out.value = b.commit(def);
@@ -5024,6 +5087,12 @@ public:
         s_.current_class = scope;
         s_.this_type = p_->this_type(*f);
         scope = p_->world().entities.rec(scope).scope;
+      } else if (f->flags & sema::decl_flag::friend_) {
+        // [class.mem.general]: the body is a complete-class context even though the
+        // function belongs to the namespace and has no implicit object parameter.
+        s_.current_class = p_->class_entity(it_->parent);
+        p_->is_complete(s_.current_class, k_, true);
+        at_->completing_class = s_.current_class;
       }
       if ((f->flags & sema::decl_flag::lang_c) && !(f->flags & sema::decl_flag::member)) {
         if (auto target = p_->qualified_c_functions_.find({k_, 0}); target != p_->qualified_c_functions_.end())

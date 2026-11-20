@@ -62,6 +62,16 @@ def main():
             run(host_cxx, '-no-pie', *objects, '-o', 'host-program')
             run('./host-program', 'one', 'two')
 
+        friend = fixtures / 'inline-friend'
+        for name in ('main', 'peer'):
+            obj = f'friend-{name}.o'
+            compile(friend / f'{name}.cpp', obj)
+            entry = symbols(obj)['_ZN14inline_address4readERKNS_4ItemE']
+            assert entry[4] == 'WEAK' and entry[6] != 'UND', entry
+        for objects in (('friend-main.o', 'friend-peer.o'), ('friend-peer.o', 'friend-main.o')):
+            link(*objects)
+            run('./program')
+
         for name in ('strong1', 'strong2'):
             source = f'{name}.cpp'
             text = 'int ordinary(int value) { return value; }\n'
