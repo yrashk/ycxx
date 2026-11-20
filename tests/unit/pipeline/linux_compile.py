@@ -270,6 +270,8 @@ system_leaf:
             ('struct X { int a; ~X(); }; int f(X x) { return x.a; }', aggregate_parameter),
             ('struct __attribute__((packed)) X { char a; int b; }; int f(X x) { return x.b; }',
              aggregate_parameter),
+            ('struct X [[gnu::packed]];\nstruct X { char a; int b; }; int f(X x) { return x.b; }',
+             aggregate_parameter),
             ('#define PACKED [[gnu::packed]]\n'
              'struct X { char a; int b PACKED; }; int f(X x) { return x.b; }', aggregate_parameter),
             ('typedef int Low __attribute__((aligned(1))); using Alias = Low;\n'
