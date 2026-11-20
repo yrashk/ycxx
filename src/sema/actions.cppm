@@ -104,6 +104,7 @@ public:
   virtual bool is_complete(EntityId c) = 0;
   // Whether a class's defining declarations use the natural layout we can compute.
   virtual bool natural_record_layout(EntityId) { return false; }
+  virtual std::set<EntityId> uncertain_record_layouts() { return {}; }
   // Inside the enumerator list of an enumeration this unit is defining: its record so far, which
   // is published only after the list (#156).
   virtual const EnumRec* defining_enum(EntityId) { return nullptr; }
@@ -5058,11 +5059,12 @@ public:
       diag(name_at, Diag::offsetof_bit_field);
       return fail;
     }
+    const auto uncertain = q_->uncertain_record_layouts();
     std::set<EntityId> checked;
     auto ordinary = [&](this const auto& self, EntityId c) -> bool {
       if (!checked.insert(c).second) return true;
       const ClassRec* r = class_rec(c);
-      if (!r || !r->bases.empty() || r->closure || !q_->natural_record_layout(c)) return false;
+      if (!r || !r->bases.empty() || r->closure || uncertain.contains(c) || !q_->natural_record_layout(c)) return false;
       return std::ranges::all_of(r->fields, [&](const FieldRec& f) {
         QualType field = f.type;
         while (types().is_array(field)) field = types().rec(field).inner;
