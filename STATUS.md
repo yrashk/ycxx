@@ -580,12 +580,19 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   A `bool` uses the byte value 0 or 1.
   Direct variadic calls use the same registers and stack slots for promoted 32- and 64-bit integers
   and pointers. The emitter clears EAX immediately before every direct call so a variadic callee
-  receives a zero vector-register count in AL, including with an empty ellipsis. Floating-point
-  and aggregate arguments and results remain outside this ABI subset. Variadic definitions and
-  variadic calls through function pointers remain unsupported.
+  receives a zero vector-register count in AL, including with an empty ellipsis. Variadic
+  definitions and variadic calls through function pointers remain unsupported.
   [#417](https://github.com/yrashk/ycxx/issues/417), [#412](https://github.com/yrashk/ycxx/issues/412),
   [#399](https://github.com/yrashk/ycxx/issues/399),
   [#196](https://github.com/yrashk/ycxx/issues/196)
+- Direct fixed-prototype calls to ordinary free functions support nonempty naturally aligned
+  flat integral records that are trivial for calls, up to 16 bytes and alignment eight. The
+  AMD64 INTEGER eightbytes follow from the laid-out fields. If an entire argument cannot
+  fit in the remaining registers, it goes by value on the stack and later arguments can use
+  the remaining registers. One- and two-eightbyte results use RAX and RDX. The mixed-object
+  tests exercise both directions and check by-value object identity. Source packing and
+  alignment directives with uncertain layout exclude the record from this by-value ABI.
+  [Design](docs/design/linux-integer-aggregates.md) · [#440](https://github.com/yrashk/ycxx/issues/440)
 - `-c` writes deterministic ELF64 relocatable objects through `src/obj/elf.cppm`. The reader
   accepts the supported x86-64 `ET_REL` subset emitted by ycxx. The native ELF linker consumes
   the same in-memory objects, resolves absolute and PC-relative relocations, and writes a static
@@ -2195,6 +2202,14 @@ values, end to end; results match Clang's bit for bit.
   the element cv-qualifiers in the composite pointer type ([expr.eq], [expr.rel], [expr.type],
   [conv.qual]). Nested array dimensions and comparisons between `const` and `volatile` arrays
   use the same rule.
+
+## Composite types involving pointers to void (#59)
+
+- Equality, ordering and conditional expressions combine a pointer to cv-qualified `void` and
+  a pointer to an object or `void` into a pointer to `void` with the union of the pointee
+  qualifiers ([expr.type], [expr.eq], [expr.rel], [expr.cond]).
+- Converting a pointer to an array to a pointer to `void` preserves the array's element
+  qualifiers ([basic.type.qualifier], [conv.ptr]).
 
 ## Bootstrap workarounds
 

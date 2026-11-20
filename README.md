@@ -40,7 +40,7 @@ tools/build
 build/bin/ycxx cxx hello.cpp -o hello && ./hello
 ```
 
-**Compile for x86-64 Linux.** Select `--target=x86_64-pc-linux-gnu` to compile with the scalar
+**Compile for x86-64 Linux.** Select `--target=x86_64-pc-linux-gnu` to compile with the
 System V AMD64 backend. Use `-c` to write an ELF object, or `-nostdlib` to link C++ sources,
 ycxx-generated `.o` files, or a mixture into a static executable. The startup runs namespace-scope
 initializers, then calls `int main()` or `int main(int, char**)` and passes its return value to Linux
@@ -53,6 +53,10 @@ build/bin/ycxx cxx --target=x86_64-pc-linux-gnu -c example.cpp
 build/bin/ycxx cxx --target=x86_64-pc-linux-gnu -nostdlib example.o -o example
 ./example
 ```
+
+Fixed-prototype direct calls to free functions support passing and returning nonempty flat
+records of integral fields by value. The record can occupy up to 16 bytes and must be trivial
+for calls. [Linux integer aggregate ABI](docs/design/linux-integer-aggregates.md)
 
 For mixed Linux objects, the pinned libycxx `<cstddef>` byte operator uses the same Itanium
 linkage name in ycxx, GCC and Clang. [#64](https://github.com/yrashk/ycxx/issues/64)
@@ -120,9 +124,10 @@ operators with an `unsigned long long` parameter, including constant evaluation.
   `double` and `long double` with literals, arithmetic, comparisons and
   conversions giving Clang's results bit for bit, and passing and returning them (classes of
   floating members included) by Clang's calling convention;
-  operators including equality and ordering of pointers to matching complete arrays whose
-  elements differ in `const` or `volatile` qualification, and the statements: `switch`, labels
-  and `goto`, declarations in conditions,
+  equality and ordering of pointers to matching complete arrays whose elements differ in
+  `const` or `volatile` qualification. Comparisons and conditional expressions involving
+  object pointers and `void` pointers combine the pointee qualifiers. Statements include
+  `switch`, labels and `goto`, declarations in conditions,
   init-statements in `if` and `switch`, and range-based `for` with optional init-statements.
   Ranges can be arrays or classes with member `begin` and `end` or free `begin` and `end` found
   by argument-dependent lookup. Unqualified calls can find and rank functions in associated

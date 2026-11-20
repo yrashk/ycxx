@@ -131,6 +131,11 @@ public:
   const Result<ast::ClassDef>& class_def(u32 item);
   // The records of the classes and enumerations this unit has analysed.
   const sema::Classes& classes() const { return classes_; }
+  // The defining pattern selected for an instantiated class, including a partial specialization.
+  std::optional<u32> class_pattern_item(EntityId c) const {
+    auto it = class_patterns_.find(std::to_underlying(c));
+    return it == class_patterns_.end() ? std::nullopt : std::optional(it->second);
+  }
   // This unit's declaration of member `e` in its class, once the class is analysed here.
   std::optional<DeclId> member_decl(EntityId e) const {
     auto it = member_decls_.find(std::to_underlying(e));
