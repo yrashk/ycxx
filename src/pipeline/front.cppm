@@ -514,7 +514,7 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
     d.type = world.entities.rec(spec).type;
     declare(d, std::nullopt);
   }
-  // The implicitly defined special members that are not trivial ([class.copy.ctor], [class.dtor]).
+  // The implicitly defined special members needed by this unit ([special]).
   for (std::size_t i = 0; i < program.synthesized().size(); ++i) {
     const parse::Program::Synthesized& s = program.synthesized()[i];
     // A class template's current instantiation is not code ([temp.dep.type]).

@@ -766,7 +766,7 @@ class Gen {
       call(e, p.ptr);  // the callee initializes the object ([stmt.return])
       return;
     }
-    if (is<ast::MemberCall>(e) && class_prvalue(info(e))) {
+    if (member_call_expression(e) && class_prvalue(info(e))) {
       member_call(e, p.ptr);
       return;
     }
@@ -1296,7 +1296,7 @@ class Gen {
       return std::nullopt;
     }
     if (is<ast::Call>(a)) return call(a);
-    if (is<ast::MemberCall>(a)) return member_call(a);
+    if (member_call_expression(a)) return member_call(a);
     if (is<ast::BuiltinCall>(a)) {  // `__builtin_fabs` (lex::BuiltinFunction::fabs), the one there is
       auto b = get<ast::BuiltinCall>(a);
       return pure(ir::Op::fabs, t, {rvalue(child(a, *ast_.children(b.args).begin()))});
@@ -1628,8 +1628,22 @@ class Gen {
     if (has_value) return b_.result(n, 1);
     return std::nullopt;
   }
-  // A non-static member function's call: the object's address is the first argument.
+  bool member_call_expression(At a) {
+    return is<ast::MemberCall>(a) || is<ast::AssignmentCall>(a);
+  }
+  // A non-static member function's call: the object's address is the first ABI argument.
   std::optional<ValueId> member_call(At a, std::optional<ValueId> into = std::nullopt) {
+    if (is<ast::AssignmentCall>(a)) {
+      auto c = get<ast::AssignmentCall>(a);
+      if (class_prvalue(c.info) && !into) unsupported(a, "of class type outside an initialization");
+      At rhs = child(a, c.rhs);
+      ValueId value = argument(rhs);
+      std::vector<ValueId> args{rvalue(child(a, c.object))};
+      if (into) args.push_back(*into);
+      const uint32_t byval = argument_object(rhs) ? 1u << args.size() : 0;
+      args.push_back(value);
+      return call_fn(c.function, result_type(c.info), args, 1, false, byval, into ? 2 : 0);
+    }
     auto c = get<ast::MemberCall>(a);
     if (class_prvalue(c.info) && !into) unsupported(a, "of class type outside an initialization");
     std::vector<ValueId> args{rvalue(child(a, c.object))};
@@ -1797,7 +1811,7 @@ class Gen {
       return {load(ref), t};
     }
     if (is<ast::Materialize>(a)) return materialize(a);
-    if (is<ast::Call>(a) || is<ast::MemberCall>(a)) {
+    if (is<ast::Call>(a) || member_call_expression(a)) {
       auto v = is<ast::Call>(a) ? call(a) : member_call(a);
       return {*v, t};  // a call returning a reference designates the object it refers to
     }
@@ -1858,18 +1872,15 @@ class Gen {
   // ([class.temporary]).
   Place assign_class(At a) {
     auto s = get<ast::Assign>(a);
+    if (s.op != ast::AssignOp::trivial_class_copy) unsupported(a, "without proven trivial copy assignment");
     At rhs = child(a, s.rhs);
     ast::QualType t = s.computation;
     std::optional<Place> temp;
     Place src;
     // A call's result is an object of its own, the temporary it initializes ([stmt.return]).
-    if (is<ast::Materialize>(strip_parens(rhs))) {
-      // A call's result: the temporary sema made of it, ended with its destructor.
-      Place p = lvalue(child(a, s.lhs));
-      copy(p, materialize(strip_parens(rhs)));
-      return p;
-    }
-    if (is<ast::InitList>(rhs) || is<ast::ValueInit>(rhs)) {
+    if (is_lvalue(rhs)) {
+      src = lvalue(rhs);
+    } else if (is<ast::InitList>(rhs) || is<ast::ValueInit>(rhs)) {
       bool zeroed = value_initializes(rhs);
       temp = begin_object(t, zeroed ? ir::Init::zero : ir::Init::indeterminate, ir::Storage::temporary);
       initialize(*temp, rhs, zeroed);

@@ -216,6 +216,7 @@ enum class Diag : std::uint32_t {
   bad_designator [[=message{Severity::error, "designator '{0:n}' does not name a later member of '{1:t}'"}]],
   not_a_type [[=message{Severity::error, "'{0:n}' does not name a class"}]],
   const_member_assign [[=message{Severity::error, "'{0:t}' has a const member, so its copy assignment is deleted"}]],
+  unsupported_copy_assignment [[=message{Severity::error, "implicit copy assignment of '{0:t}' is unsupported for this operation"}]],
   mixed_designators [[=message{Severity::error, "either every initializer clause is designated or none is"}]],
   unknown_bound_member [[=message{Severity::error, "a non-static data member cannot be an array of unknown bound"}]],
   class_redefinition [[=message{Severity::error, "redefinition of class '{0:n}'"}]],
