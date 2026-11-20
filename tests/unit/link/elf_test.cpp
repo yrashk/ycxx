@@ -275,6 +275,84 @@ void diagnostics(const std::array<obj::object, 2>& good) {
   rejects(bad, "R_X86_64_PC32 displacement overflows for 'table'");
 }
 
+void relax_data_addresses() {
+  std::array<obj::object, 2> input;
+  auto& [user, provider] = input;
+  user.arch = provider.arch = obj::target::x86_64_linux;
+  const auto text = user.add_section(standard_section::text);
+  const auto weak_data = user.add_section(standard_section::data);
+  user.define("_start", binding::global, text);
+  const auto value = user.define("value", binding::global, weak_data);
+  user.symbols[value].weak = true;
+  user.sections[weak_data].emit32(1);
+  auto& code = user.sections[text];
+  code.emit64(0x9090909090909090);
+  code.emit(std::array<std::uint8_t, 7>{0x4c, 0x8b, 0x15, 0, 0, 0, 0});  // mov r10, [rip + GOT slot]
+  code.relocate(reloc_kind::x86_64_rex_gotpcrelx, value, -4);
+  code.emit32(0x90909090);
+  const auto data = provider.add_section(standard_section::data);
+  provider.sections[data].emit32(0);
+  provider.define("value", binding::global, data);
+  provider.sections[data].emit32(2);
+
+  const auto image = elf::link(input);
+  check(image.has_value(), image ? "link a canonical GOT load" : image.error());
+  if (image) {
+    const auto entry = field(*image, 24, 8);
+    const auto text_base = field(*image, 64 + 16, 8);
+    const auto data_base = field(*image, 64 + 56 + 16, 8);
+    const auto start = entry - text_base;
+    const auto displacement = std::bit_cast<std::int32_t>(static_cast<std::uint32_t>(field(*image, start + 11, 4)));
+    check(field(*image, start + 8, 3) == 0x158d4c, "GOT load becomes LEA to the same extended register");
+    check(entry + 15 + displacement == data_base + 8, "relaxed displacement uses the winning strong definition");
+  }
+
+  const auto change = [&](auto mutation, std::string_view reason) {
+    auto bad = input;
+    mutation(bad[0], bad[1]);
+    rejects(bad, reason);
+  };
+  constexpr auto shape = "R_X86_64_REX_GOTPCRELX for 'value' requires a canonical 64-bit RIP-relative MOV with addend -4";
+  change([](auto& o, auto&) { o.sections[0].bytes[8] = 0x44; }, shape);
+  change([](auto& o, auto&) { o.sections[0].bytes[9] = 0x8d; }, shape);
+  change([](auto& o, auto&) { o.sections[0].bytes[10] = 0x14; }, shape);
+  change([](auto& o, auto&) { o.sections[0].relocs.front().offset = 2; }, shape);
+  change([](auto& o, auto&) { o.sections[0].relocs.front().addend = 0; }, shape);
+  change([=](auto& o, auto&) { o.sections[0].relocate(reloc_kind::x86_64_pc32, value, -4, 7); },
+         "overlapping ELF relocations are unsupported for R_X86_64_REX_GOTPCRELX of 'value'");
+  change([=](auto& o, auto&) { o.sections[0].relocate(reloc_kind::x86_64_pc32, value, -4, 13); },
+         "overlapping ELF relocations are unsupported for R_X86_64_REX_GOTPCRELX of 'value'");
+  auto adjacent = input;
+  adjacent[0].sections[0].relocate(reloc_kind::x86_64_pc32, value, -4, 4);
+  check(elf::link(adjacent).has_value(), "a fixup ending at the MOV prefix is adjacent");
+  change([=](auto& o, auto& p) { o.symbols[value].section.reset(); p.symbols.clear(); },
+         "R_X86_64_REX_GOTPCRELX for undefined weak symbol 'value' is unsupported");
+  change([=](auto& o, auto& p) {
+    o.symbols[value].section.reset();
+    o.symbols[value].weak = false;
+    p.symbols.clear();
+  }, "undefined symbol 'value'");
+  change([](auto&, auto& p) {
+    constexpr auto far = std::uint64_t{1} << 31;
+    const auto bss = p.add_section(standard_section::bss);
+    p.sections[bss].reserve_zerofill(far + 4);
+    p.symbols.front().section = bss;
+    p.symbols.front().offset = far;
+  }, "R_X86_64_REX_GOTPCRELX displacement overflows for 'value'");
+
+  const elf::dynamic_options options{"/ld.so", {{"data.so", "data.so", {{"value", false}}, {}}}};
+  const auto dynamic = elf::link(input, "_start", &options);
+  check(!dynamic && dynamic.error().contains("native dynamic ELF data address for 'value' is unsupported"),
+        "native dynamic data addresses require data binding rules");
+  auto imported = input;
+  imported[0].symbols[value].section.reset();
+  imported[0].symbols[value].weak = false;
+  imported[1].symbols.clear();
+  const auto dso_data = elf::link(imported, "_start", &options);
+  check(!dso_data && dso_data.error().contains("native dynamic ELF data address for 'value' is unsupported"),
+        "native dynamic data imports have a data-specific diagnostic");
+}
+
 void dynamic_calls() {
   obj::object input;
   input.arch = obj::target::x86_64_linux;
@@ -372,6 +450,7 @@ int main(int argc, char** argv) {
   diagnostics(objects);
   alternate_layouts(objects);
   initializer_arrays(objects);
+  relax_data_addresses();
   dynamic_calls();
   return ycxx::unit::result("unit.elf_link");
 }

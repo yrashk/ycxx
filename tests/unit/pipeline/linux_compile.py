@@ -18,8 +18,75 @@ def run(args, cwd, env, error=None):
     raise AssertionError(f'{args} exited {result.returncode}\n{result.stdout}{result.stderr}')
 
 
+def external_data_addresses(compile, target, source_dir, scope, cold, cc, readelf, ar):
+    for source in (source_dir / 'linux_external_data').iterdir():
+        shutil.copyfile(source, scope / source.name)
+    for part in ('consumer', 'provider'):
+        compile(target, '-c', f'{part}.cpp', '-o', f'data-{part}.o')
+
+    def native(*inputs):
+        compile(target, '-nostdlib', *inputs, '-o', 'data-native')
+        run(['./data-native'], scope, cold)
+
+    for inputs in (('data-consumer.o', 'data-provider.o'), ('data-provider.o', 'data-consumer.o'),
+                   ('consumer.cpp', 'provider.cpp')):
+        native(*inputs)
+    run([ar, 'rcs', 'data-provider.a', 'data-provider.o'], scope, cold)
+    native('data-consumer.o', 'data-provider.a')
+
+    output = run([readelf, '-Wr', 'data-consumer.o'], scope, cold)
+    records = [line.split() for line in output.splitlines() if 'R_X86_64_' in line]
+    got = [r for r in records if r[2] == 'R_X86_64_REX_GOTPCRELX']
+    pointers = {tuple(r[4:]) for r in records if r[2] == 'R_X86_64_64'}
+    assert {r[4] for r in got} == {'_ZN4data6scalarE', '_ZN4data7numbersE', '_ZN4data6recordE'}, output
+    assert all(int(r[1], 16) & 0xffffffff == 42 and r[5:] == ['-', '4'] for r in got), output
+    assert {('_ZN4data6scalarE', '+', '0'), ('_ZN4data7numbersE', '+', '8')} <= pointers, output
+
+    for mode, code in (('-no-pie', '-fno-pie'), ('-pie', '-fPIE')):
+        for part in ('consumer', 'provider'):
+            run([cc, '-std=c++20', '-O2', code, '-c', f'{part}.cpp', '-o', f'data-host-{part}.o'], scope, cold)
+        for inputs in (('data-consumer.o', 'data-host-provider.o'), ('data-host-provider.o', 'data-consumer.o'),
+                       ('data-host-consumer.o', 'data-provider.o'), ('data-provider.o', 'data-host-consumer.o')):
+            run([cc, mode, *inputs, '-o', 'data-system'], scope, cold)
+            run(['./data-system'], scope, cold)
+
+    (scope / 'same-data.cpp').write_text('int bss_value; static int local_value = 3;\n'
+                                         'int* address_of_bss() { return &bss_value; }\n'
+                                         'int main() { if (*address_of_bss() != 0) return 1;\n'
+                                         '  *address_of_bss() = 41; return bss_value + local_value != 44; }\n')
+    compile(target, '-c', 'same-data.cpp')
+    output = run([readelf, '-Ws', '-Wr', 'same-data.o'], scope, cold)
+    assert 'R_X86_64_REX_GOTPCRELX' in output and 'R_X86_64_PC32' in output, output
+    native('same-data.o')
+
+    (scope / 'host-data.c').write_text('int host_data = 51;\n')
+    (scope / 'host-data-user.cpp').write_text('extern "C" int host_data;\n'
+                                              'int main() { return *(&host_data) != 51; }\n')
+    run([cc, '-c', 'host-data.c'], scope, cold)
+    native('host-data-user.cpp', 'host-data.o')
+    compile(target, '-c', 'host-data-user.cpp')
+    compile(target, '-nostdlib', 'host-data-user.o', '-o', 'missing',
+            error="undefined symbol 'host_data'")
+    assert not (scope / 'missing').exists()
+
+    (scope / 'interposable.cpp').write_text('extern "C" {\n'
+                                             'int binding_slot = 12;\n'
+                                             'int* slot_address() { return &binding_slot; }\n'
+                                             '}\n')
+    (scope / 'interposer.c').write_text('int binding_slot = 42; int* slot_address(void);\n'
+                                         'int main(void) {\n'
+                                         '  int* p = slot_address(); if (p != &binding_slot || *p != 42) return 1;\n'
+                                         '  *p = 58; return binding_slot != 58;\n'
+                                         '}\n')
+    compile(target, '-c', 'interposable.cpp')
+    run([cc, '-shared', '-Wl,-soname,libinterposable.so', 'interposable.o', '-o', 'libinterposable.so'], scope, cold)
+    run([cc, '-fPIE', '-pie', '-rdynamic', 'interposer.c', './libinterposable.so', '-Wl,-rpath,$ORIGIN',
+         '-o', 'interposer'], scope, cold)
+    run(['./interposer'], scope, cold)
+
+
 def main():
-    ycxx, cc, readelf = sys.argv[1:]
+    ycxx, cc, readelf, ar = sys.argv[1:]
     source_dir = Path(__file__).resolve().parent
     target = '--target=x86_64-pc-linux-gnu'
     with tempfile.TemporaryDirectory(prefix='ycxx-linux-') as temp, tempfile.TemporaryDirectory(prefix='yd-') as runtime:
@@ -93,6 +160,7 @@ def main():
                  '-o', 'bool_abi'], scope, cold)
             run(['./bool_abi'], scope, cold)
 
+        external_data_addresses(compile, target, source_dir, scope, cold, cc, readelf, ar)
         compile('-c', 'source.cpp', '-o', 'cold-darwin.o')
         try:
             compile(target, '-c', 'source.cpp', '-o', 'warm-first-linux.o', env=daemon)
@@ -104,6 +172,10 @@ def main():
             assert (scope / 'warm-darwin.o').read_bytes() == macho
             assert (scope / 'warm-first-linux.o').read_bytes() == elf
             assert (scope / 'warm-linux.o').read_bytes() == elf
+            compile(target, '-c', 'consumer.cpp', '-o', 'warm-data.o', env=daemon)
+            assert (scope / 'warm-data.o').read_bytes() == (scope / 'data-consumer.o').read_bytes()
+            compile(target, '-nostdlib', 'warm-data.o', 'data-provider.a', '-o', 'data-warm', env=daemon)
+            run(['./data-warm'], scope, cold)
         finally:
             run([ycxx, 'ctl', 'shutdown'], scope, base)
 
@@ -147,7 +219,7 @@ def main():
             compile(target, '-c', 'unsupported.cpp', error='an extended floating-point format is not supported yet')
         (scope / 'storage.cpp').write_text('int f() { static long double x; return sizeof(x); }\n')
         compile(target, '-c', 'storage.cpp')
-        (scope / 'unsupported.cpp').write_text('extern int g; int f() { return g; }\n')
+        (scope / 'unsupported.cpp').write_text('using Fn = int(); extern Fn g; Fn* f() { return &g; }\n')
         compile(target, '-c', 'unsupported.cpp', error='symbol address needs a direct RIP-relative reference')
         assert not (scope / 'unsupported.o').exists()
 

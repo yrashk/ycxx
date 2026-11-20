@@ -227,6 +227,7 @@ L2Body deserialize_from(engine::Source& in, std::type_identity<L2Body>) {
 struct OptUnit {
   L2Body body;
   std::vector<ir::EntityId> local;  // the entities it refers to that this TU defines, sorted by handle
+  std::vector<ir::EntityId> external_data;  // data references using the ELF GOT, sorted by handle
   // The inline candidates and callee summaries of §2.4 come with level 1.
 };
 class UnitStore {
@@ -1057,39 +1058,54 @@ std::vector<ir::EntityId> references(const l2::Function& body) {
   return out;
 }
 
-// The unit's definitions code generation can address directly. ELF default-visibility global
-// symbols may be preempted, so only internal definitions can use RIP-relative addressing here.
-struct TuDefined {
+struct SymbolAddresses {
+  std::vector<EntityId> direct, external_data;
+};
+
+// ELF default-visible definitions can be preempted. Its data declarations use the GOT, and
+// internal definitions can use the symbol itself in a direct displacement.
+struct TuSymbolAddresses {
   using Key = TuId;
-  using Value = std::vector<EntityId>;  // sorted by handle
+  using Value = SymbolAddresses;
   static engine::query_task<Value> run(engine::Ctx& cx, TuId tu) {
     const TranslationUnit& u = co_await cx.fetch<TuUnit>(tu);
     const bool linux = object_target(unit_target(cx, tu)) == obj::target::x86_64_linux;
-    std::vector<EntityId> out;
+    Value out;
     auto add = [&](EntityId id) {
       if (linux) {
         auto e = std::ranges::find(u.entities, id, &Entity::id);
         if (e == u.entities.end() || e->linkage != ast::Linkage::internal) return;
       }
-      out.push_back(id);
+      out.direct.push_back(id);
     };
     for (const FunctionDef& f : u.functions) add(f.entity);
     for (const Variable& v : u.variables) add(v.entity);
-    std::ranges::sort(out);
+    if (linux) {
+      for (const Entity& e : u.entities)
+        if (!e.is_function && (e.linkage == ast::Linkage::external || e.linkage == ast::Linkage::module))
+          out.external_data.push_back(e.id);
+      std::ranges::sort(out.external_data);
+    }
+    std::ranges::sort(out.direct);
     co_return out;
   }
 };
 
 engine::query_task<UnitRef> UnitQ::run(engine::Ctx& cx, FnKey k) {
-  auto [lowered, defined] = co_await cx.par_fetch(engine::q<Lower>{k}, engine::q<TuDefined>{k.tu});
+  auto [lowered, symbols] = co_await cx.par_fetch(engine::q<Lower>{k}, engine::q<TuSymbolAddresses>{k.tu});
   if (!lowered.body) co_return UnitRef{std::nullopt, lowered.error};
   // Which references can be addressed directly, including the function's string literals.
-  OptUnit u{*lowered.body, {}};
-  for (ir::EntityId e : references(u.body.f))
-    if (std::ranges::binary_search(defined, e) || std::ranges::contains(lowered.strings, e, &StringUse::entity))
+  OptUnit u{*lowered.body, {}, {}};
+  for (ir::EntityId e : references(u.body.f)) {
+    if (std::ranges::binary_search(symbols.direct, e) || std::ranges::contains(lowered.strings, e, &StringUse::entity))
       u.local.push_back(e);
-  std::ranges::sort(u.local, {}, [](ir::EntityId e) { return ir::raw(e); });
-  u.local.erase(std::ranges::unique(u.local).begin(), u.local.end());
+    else if (std::ranges::binary_search(symbols.external_data, e))
+      u.external_data.push_back(e);
+  }
+  for (auto* ids : {&u.local, &u.external_data}) {
+    std::ranges::sort(*ids);
+    ids->erase(std::ranges::unique(*ids).begin(), ids->end());
+  }
   co_return UnitRef{universe().units->add(std::move(u)), std::nullopt};
 }
 
@@ -1098,7 +1114,7 @@ engine::query_task<Machine> Optimized::run(engine::Ctx& cx, OptKey k) {
   const OptUnit& u = universe().units->at(k.unit);
   // Level 0: `lower` already ran (it made the unit); selection and stack slots (§O7).
   if (k.target == obj::target::x86_64_linux) {
-    auto m = x86_64::compile_function(u.body.f, u.local);
+    auto m = x86_64::compile_function(u.body.f, u.local, u.external_data);
     if (!m) co_return Machine{std::nullopt, m.error()};
     co_return Machine{std::nullopt, {}, std::move(*m)};
   }
@@ -1193,6 +1209,15 @@ struct LinuxFunction {
   bool weak;
 };
 
+obj::reloc_kind linux_relocation(x86_64::RelocKind kind) {
+  switch (kind) {
+    case x86_64::RelocKind::pc32: return obj::reloc_kind::x86_64_pc32;
+    case x86_64::RelocKind::plt32: return obj::reloc_kind::x86_64_plt32;
+    case x86_64::RelocKind::rex_gotpcrelx: return obj::reloc_kind::x86_64_rex_gotpcrelx;
+  }
+  std::unreachable();
+}
+
 std::expected<obj::object, aarch64::CodegenError> assemble_linux(
     const std::string& name, std::span<const LinuxFunction> functions,
     std::span<const aarch64::DataDef> data, std::span<const aarch64::Symbol> symbols) {
@@ -1220,10 +1245,9 @@ std::expected<obj::object, aarch64::CodegenError> assemble_linux(
       for (const auto& r : f.code->relocs) {
         auto target = symbol_of.find(r.target);
         if (target == symbol_of.end()) return missing(r.target);
-        auto kind = r.kind == x86_64::RelocKind::pc32 ? obj::reloc_kind::x86_64_pc32 : obj::reloc_kind::x86_64_plt32;
         if (base + r.offset > std::numeric_limits<std::uint32_t>::max())
           return std::unexpected(aarch64::CodegenError{f.entity, "a text relocation exceeds the object offset limit"});
-        sec.relocate(kind, target->second, r.addend, static_cast<std::uint32_t>(base + r.offset));
+        sec.relocate(linux_relocation(r.kind), target->second, r.addend, static_cast<std::uint32_t>(base + r.offset));
       }
     }
   }

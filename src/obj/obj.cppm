@@ -76,6 +76,7 @@ enum class reloc_kind : std::uint8_t {
   got_rel32,      // 32-bit word: GOT(S) + A - P
   x86_64_pc32,    // signed 32-bit displacement: S + A - P
   x86_64_plt32,   // signed 32-bit displacement: PLT(S) + A - P
+  x86_64_rex_gotpcrelx,  // signed RIP-relative displacement to a relaxable GOT load
 };
 
 struct reloc {

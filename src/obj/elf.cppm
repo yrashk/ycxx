@@ -60,6 +60,7 @@ constexpr std::array relocations{
     relocation_mapping{reloc_kind::abs64, 1, 8},         // R_X86_64_64
     relocation_mapping{reloc_kind::x86_64_pc32, 2, 4},   // R_X86_64_PC32
     relocation_mapping{reloc_kind::x86_64_plt32, 4, 4},  // R_X86_64_PLT32
+    relocation_mapping{reloc_kind::x86_64_rex_gotpcrelx, 42, 4},  // R_X86_64_REX_GOTPCRELX
 };
 constexpr std::uint32_t r_x86_64_32 = 10;  // only needed in discarded DWARF sections
 
