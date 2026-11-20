@@ -3,8 +3,10 @@
 template<int N>
 constexpr int adjust() {
   if constexpr (constexpr int value = N) {
+    static_assert(value != 0);
     return value + 4;
   } else {
+    static_assert(value == 0);
     return value - 5;
   }
 }
