@@ -205,6 +205,7 @@ definitions for runtime construction. [#157](https://github.com/yrashk/ycxx/issu
   nonvirtual base paths, `sizeof`/`alignof` (classes included), direct-member `offsetof`
   for ordinary standard-layout classes, `decltype`, and calls
   through pointers to functions. [#199](https://github.com/yrashk/ycxx/issues/199)
+  [#248](https://github.com/yrashk/ycxx/issues/248)
 - constant evaluation on ycxx's own interpreter: `constexpr`, `consteval`, `constinit`,
   `static_assert` and `if consteval`, with errors that explain why something is not constant.
   Namespace-scope `constexpr` pointers to `void` can retain scalar and array element addresses.
