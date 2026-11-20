@@ -110,6 +110,10 @@ ycxx ELF objects record function types and code sizes. The ELF linker accepts su
 system-assembled objects with function symbols and the GNU-built libycxx static linkage-marker
 object. [#428](https://github.com/yrashk/ycxx/issues/428), [#419](https://github.com/yrashk/ycxx/issues/419)
 
+Both targets support cooked integer user-defined literals through namespace-scope literal
+operators with an `unsigned long long` parameter, including constant evaluation.
+[#289](https://github.com/yrashk/ycxx/issues/289)
+
 **Language on macOS.** Programs can use:
 - the fundamental integer, character and floating types, pointers, arrays, references and
   enumerations, including opaque declarations of named enums in their namespaces; `float`,
