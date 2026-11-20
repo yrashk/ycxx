@@ -1044,8 +1044,8 @@ clauses = ['dcl', 'dcl.pre', 'dcl.spec', 'dcl.spec.general', 'dcl.stc', 'dcl.fct
 std = 'C++98'
 core = true
 status = 'done'
-issues = [179, 180, 222, 433]
-note = 'includes named function-pointer declarations with qualified return types'
+issues = [179, 180, 222, 433, 449]
+note = 'includes grouped function-pointer declarations with qualified names and nested pointer parameters'
 probe = '''
 typedef unsigned long ul; const volatile int cv = 1; char s[] = "ab";
 int main() { ul x = cv; int* const p = nullptr; return (x == 1 && sizeof s == 3 && !p) ? 0 : 1; }
