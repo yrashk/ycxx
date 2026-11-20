@@ -24,6 +24,9 @@ reasoning; do not leave decisions only in issue threads.
    - Linux x86-64 [archive inputs](docs/design/linux-static-archives.md) start with explicit
      indexed GNU archives in static executable links. The linker extracts only members needed
      by outstanding symbols and preserves archive operand order (#388).
+   - Linux x86-64 [external data addresses](docs/design/linux-external-data-addresses.md) use
+     a GOT relocation in relocatable objects. The native static linker relaxes the validated
+     RIP-relative load to a direct address after symbol resolution (#414).
 4. **Optimization is designed in from the start, and delivered after correctness.** The first
    back end aims for correct, debuggable code of roughly `-O0`/`-O1` quality. The architecture
    (§4.8) is laid out from day one for optimization by search, solvers and measured cost models,
