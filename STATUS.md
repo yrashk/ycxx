@@ -607,16 +607,17 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   and empty archives. Other archive formats and combining archives with shared objects remain
   part of [#388](https://github.com/yrashk/ycxx/issues/388).
 - `-nostdlib --dynamic-linker=/absolute/target/loader` with explicit shared objects writes a
-  fixed-address, sectionless `ET_EXEC`. Libraries need a slash-free `DT_SONAME` and a SysV
-  `DT_HASH`, and cannot have loader dependencies. The linker checks direct calls against their
+  fixed-address, sectionless `ET_EXEC`. Libraries need a slash-free `DT_SONAME`, GNU or SysV hash
+  metadata, and no loader dependencies. Provider discovery uses GNU hash on dual-table libraries
+  and works without input section headers. The linker checks direct calls against their
   default-visible, unversioned global functions. One RX thunk and one eager `R_X86_64_GLOB_DAT`
   relocation in RW storage serve each imported name. The loader finds libraries by SONAME,
   binds imported names, and runs provider initializers. Startup runs the executable's
   initializers, calls `main`, and calls the loader's termination callback before exiting with
   `main`'s result. The interpreter
   path and ordered shared inputs, including provider content fingerprints, enter the `Link`
-  query. Target CRT selection, versioned imports and GNU-hash-only providers remain part of
-  [#390](https://github.com/yrashk/ycxx/issues/390).
+  query. Target CRT selection, versioned imports, provider dependencies and library discovery
+  remain part of [#390](https://github.com/yrashk/ycxx/issues/390).
 - ELF objects record namespace-scope initializer functions in `.init_array`, with 8-byte slots
   and `R_X86_64_64` relocations. The linker places arrays consecutively in input order and checks
   each slot resolves into executable input bytes. Generated startup calls the functions before

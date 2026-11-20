@@ -59,9 +59,9 @@ objects. Place an archive after the inputs that reference its members, and inclu
 source or ordinary object. [#388](https://github.com/yrashk/ycxx/issues/388)
 
 An explicit dynamic link uses ycxx's startup and the target loader. Supply the absolute target
-interpreter path and explicit, self-contained shared objects with a SysV hash and a slash-free
-SONAME. The executable can directly call their exported, unversioned functions. The loader must
-be able to find each SONAME when the executable runs. [#390](https://github.com/yrashk/ycxx/issues/390)
+interpreter path and explicit, self-contained shared objects with GNU or SysV hash tables and
+slash-free SONAMEs. The executable can directly call their exported, unversioned functions. The
+loader must be able to find each SONAME when the executable runs. [#390](https://github.com/yrashk/ycxx/issues/390)
 
 ```sh
 build/bin/ycxx cxx --target=x86_64-pc-linux-gnu -nostdlib --dynamic-linker="$target_loader" \
