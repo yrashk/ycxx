@@ -463,6 +463,8 @@ canonical only (diagnostics lose the user's spelling). This revises the first br
   Parameter adjustment uses the completed declarator type, so a pointer or reference keeps
   its array operand. A named object's omitted outermost bound is resolved by its initializer
   or declaration rules. Template substitution preserves absent bounds ([temp.deduct.type]).
+  In a linkage name, an absent bound emits `A_` followed by the element type.
+  [Itanium C++ ABI §5.1.5.6](https://itanium-cxx-abi.github.io/cxx-abi/abi.html#mangle.array-type)
 - Reference collapsing ([dcl.ref]) in the constructor of reference types.
 - cv applied through a typedef to a reference or function type is dropped by `with_cv`.
 - A non-dependent `decltype(e)` is resolved at construction and kept as `SDecltype` sugar.

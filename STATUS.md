@@ -1108,7 +1108,8 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
 - Unknown bounds survive abstract and grouped declarators, including pointer and reference
   parameters. A parameter whose completed type is an array still adjusts to a pointer. Template
   substitution preserves the omitted bound, so partial specializations match `T[]`
-  ([dcl.array], [dcl.fct], [temp.deduct.type], #222).
+  ([dcl.array], [dcl.fct], [temp.deduct.type], #222). The Itanium `A_` form carries omitted
+  bounds into ELF and Mach-O symbol names.
 - `__FLT_EVAL_METHOD__` is predefined (0), as Clang has it for the target.
 - Attributes are also accepted after a declarator-id, on parameters, alias-declarations and
   statements, and in the GNU form on class heads and after template-heads. A string literal
