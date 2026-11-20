@@ -271,7 +271,11 @@ public:
     if (context != PointerLookahead::abstract) {
       if (qualified_ahead(next)) {
         u32 name = next;
-        if (!nested_name(next, name)) return false;
+        // A template argument in the scope can itself read a qualified type name.
+        bool saved_half = qualified_half_;
+        auto scope = nested_name(next, name);
+        qualified_half_ = saved_half;
+        if (!scope) return false;
         next = name;
       }
       if (kind(next) != Tk::identifier) return false;
@@ -557,7 +561,8 @@ public:
             // `N::C`, `::C`, `C::E`, `X<T>::E` ([dcl.type.simple]).
             if (auto q = qualified_type(0, true);
                 q && (in_type_id || kind(q->second) != Tk::l_paren ||
-                      function_pointer_declarator_ahead(q->second))) {
+                      function_pointer_declarator_ahead(q->second) ||
+                      (in_params_ > 0 && function_pointer_declarator_ahead(q->second, PointerLookahead::abstract)))) {
               cls = q->first;
               take_qualified(q->second);
               continue;
