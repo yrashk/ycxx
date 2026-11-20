@@ -281,14 +281,14 @@ enum class Diag : std::uint32_t {
   constraints_not_satisfied [[=message{Severity::error, "the constraints of '{0:n}' are not satisfied"}]],
   not_a_concept [[=message{Severity::error, "'{0:n}' is not a concept"}]],
   concept_constrained [[=message{Severity::error, "the concept '{0:n}' cannot have associated constraints"}]],
-  // A GNU built-in function the SDK's or libycxx's headers use and ycxx does not have yet
-  // (docs/EXTENSIONS.md), named where lookup finds nothing else.
-  builtin_unsupported [[=message{Severity::error, "built-in function '{0:n}' is not supported yet"}]],
-  builtin_nan_string [[=message{Severity::error, "the argument of __builtin_nan must be a string literal spelling an integer"}]],
   offsetof_type [[=message{Severity::error, "offsetof requires a complete class type, but '{0:t}' is not one"}]],
   offsetof_member [[=message{Severity::error, "offsetof requires a direct non-static data member named '{0:n}' in '{1:t}'"}]],
   offsetof_bit_field [[=message{Severity::error, "offsetof cannot be applied to a bit-field"}]],
   offsetof_layout [[=message{Severity::error, "offsetof requires an ordinary standard-layout class with supported layout; '{0:t}' is not one"}]],
+  // A GNU built-in function the SDK's or libycxx's headers use and ycxx does not have yet
+  // (docs/EXTENSIONS.md), named where lookup finds nothing else.
+  builtin_unsupported [[=message{Severity::error, "built-in function '{0:n}' is not supported yet"}]],
+  builtin_nan_string [[=message{Severity::error, "the argument of __builtin_nan must be a string literal spelling an integer"}]],
 };
 
 // A `{N:r}` argument: why an evaluation was not constant. 0 is an expression the front end

@@ -108,9 +108,6 @@ constexpr const BuiltinFunctionInfo* builtin_function(std::string_view name) {
   return nullptr;
 }
 
-// A built-in with a type operand and a member designator rather than a call argument list.
-inline constexpr std::string_view builtin_offsetof_name = "__builtin_offsetof";
-
 // The GNU built-in functions the SDK's and libycxx's headers call and ycxx does not have yet
 // (docs/EXTENSIONS.md, #248): a call of one is diagnosed as not supported, its arguments skipped.
 // Any other `__builtin_` name is an ordinary name, undeclared unless declared, so a
@@ -119,6 +116,9 @@ inline constexpr std::array<std::string_view, 3> lacking_builtins{
     "__builtin_alloca", "__builtin_constant_p", "__builtin_expect",
 };
 constexpr bool lacking_builtin(std::string_view name) { return std::ranges::contains(lacking_builtins, name); }
+
+// A built-in with a type operand and a member designator rather than a call argument list.
+inline constexpr std::string_view builtin_offsetof_name = "__builtin_offsetof";
 
 // The built-in templates ycxx implements (docs/EXTENSIONS.md): Clang's
 // `__make_integer_seq<Seq, T, N>`, `Seq<T, 0, …, N-1>`, which libycxx's `make_integer_sequence`

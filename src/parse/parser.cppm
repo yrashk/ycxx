@@ -2825,6 +2825,25 @@ public:
     return s_->unary(*op, e, begin, e.end > begin ? e.end : pos(), begin);
   }
 
+  // [support.types.layout]: a type-id and a direct non-static data member.
+  Ex offsetof_expression(u32 begin) {
+    bump();  // builtin name
+    bump();  // '('
+    int saved = std::exchange(angle_, 0);
+    auto type = type_id();
+    angle_ = saved;
+    if (!type || !expect(Tk::comma)) return {NodeId::none, begin, pos()};
+    if (!is(Tk::identifier)) {
+      expect(Tk::identifier);
+      return {NodeId::none, begin, pos()};
+    }
+    u32 member_at = pos();
+    NameId member = name_of(tok());
+    bump();
+    if (!expect(Tk::r_paren)) return {NodeId::none, begin, pos()};
+    return s_->offset_of(*type, member, begin, pos(), member_at);
+  }
+
   // postfix-expression ([expr.post]).
   Ex postfix_expression() {
     Ex e = primary_expression();
@@ -2901,25 +2920,6 @@ public:
       default: return e;
       }
     }
-  }
-
-  // [support.types.layout]: a type-id and a direct non-static data member.
-  Ex offsetof_expression(u32 begin) {
-    bump();  // builtin name
-    bump();  // '('
-    int saved = std::exchange(angle_, 0);
-    auto type = type_id();
-    angle_ = saved;
-    if (!type || !expect(Tk::comma)) return {NodeId::none, begin, pos()};
-    if (!is(Tk::identifier)) {
-      expect(Tk::identifier);
-      return {NodeId::none, begin, pos()};
-    }
-    u32 member_at = pos();
-    NameId member = name_of(tok());
-    bump();
-    if (!expect(Tk::r_paren)) return {NodeId::none, begin, pos()};
-    return s_->offset_of(*type, member, begin, pos(), member_at);
   }
 
   // primary-expression ([expr.prim]).

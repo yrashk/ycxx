@@ -1505,8 +1505,8 @@ private:
         report(f, operand.empty() ? t : operand.size() > 1 ? operand[1] : operand[0], lex::LexDiag::cond_expected_rparen);
         return number_token(t, 0);
       }
+      if (s_->spellings.name(operand[0].tok.payload) == lex::builtin_offsetof_name) return number_token(t, 1);
       std::string_view name = s_->spellings.name(operand[0].tok.payload);
-      if (name == lex::builtin_offsetof_name) return number_token(t, 1);
       return number_token(t, lex::type_trait(name) || lex::builtin_template(name) || lex::builtin_function(name) ? 1 : 0);
     }
     // [cpp.cond]/? the header, as for #include: a string literal, `<...>`, or tokens that become
