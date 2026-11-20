@@ -2171,6 +2171,13 @@ values, end to end; results match Clang's bit for bit.
 - Tests in `tests/own/member-pointer/` cover declarations, type identity, dependent requirements
   and invalid pointer-to-member types.
 
+## Comparisons of pointers to qualified arrays (#445)
+
+- Equality and relational comparisons of pointers to complete arrays of the same shape combine
+  the element cv-qualifiers in the composite pointer type ([expr.eq], [expr.rel], [expr.type],
+  [conv.qual]). Nested array dimensions and comparisons between `const` and `volatile` arrays
+  use the same rule.
+
 ## Bootstrap workarounds
 
 Places where ycxx's sources avoid or work around a C++26 feature because GCC 16 lacks it or
