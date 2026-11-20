@@ -78,10 +78,13 @@ def main():
             native('expect-override.o', *inputs)
         invoke(cc, '-fPIC', '-fno-asynchronous-unwind-tables', '-DIFUNC_STEP', '-c', fixtures / 'override.c',
                '-o', 'ifunc.o')
+        # Use the System V EI_OSABI so the native reader reaches symbol type validation.
+        with (scope / 'ifunc.o').open('r+b') as obj:
+            obj.seek(7)
+            obj.write(b'\0')
         native('consumer.o', 'ifunc.o', error='unsupported type, size, binding or visibility for ELF symbol')
 
-        invoke(cc, '-fPIC', '-O0', '-fno-asynchronous-unwind-tables', '-c', fixtures / 'undefined_weak.c',
-               '-o', 'undefined-weak.o')
+        invoke(cc, '-c', fixtures / 'undefined_weak.s', '-o', 'undefined-weak.o')
         check_relocations('undefined-weak.o', 'missing_weak', got)
         native('undefined-weak.o', error="R_X86_64_REX_GOTPCRELX for undefined weak symbol 'missing_weak' is unsupported")
         invoke(cc, '-pie', 'undefined-weak.o', '-o', 'system')
