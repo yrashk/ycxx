@@ -2547,6 +2547,11 @@ pruned by decl-reachability ([module.global.frag]). Header units ([module.import
 in an isolated context (command-line macros only) whose macro delta is imported; the region is
 then shared like any other.
 
+Within a TU, declarations in different namespaces can name the same C-linkage function
+([dcl.link]). Its definition checks the shared entity at the declaration point ([basic.def.odr]).
+The stand-in uses known definitions and, when needed, resolves earlier namespace function items
+indexed under the same spelling. The check is independent of ordinary namespace lookup.
+
 ODR ([basic.def.odr]) as a by-product: every entity-keyed query (`class_def`, `layout`,
 `function_ir` of an inline function, `instantiate_*`, `satisfies`, `constant_value` of an inline
 variable) can yield two different results for one index only when two TUs saw different
