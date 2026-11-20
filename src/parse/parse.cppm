@@ -2075,6 +2075,13 @@ private:
   // Whether an earlier declaration found by lookup is in this item's own scope, the only one a
   // declaration here can redeclare or clash with.
   bool same_scope(const ast::DeclSema& d) { return s_.world().entities.rec(d.entity).scope == ns_entity(); }
+  bool same_function_parameters(QualType a, QualType b) {
+    const auto& types = s_.types();
+    const auto& interner = s_.world().ins.types;
+    const auto first = interner.get<ast::TFunction>(types.canonical(a));
+    const auto second = interner.get<ast::TFunction>(types.canonical(b));
+    return first.params == second.params && first.variadic == second.variadic && first.cv == second.cv;
+  }
   // The arguments of a partial specialization of `tmpl` ([temp.spec.partial]), given as `args`:
   // completed, and checked against [temp.spec.partial]/9; none, diagnosed, if they break it.
   std::optional<std::vector<ast::TemplateArg>> partial_arguments(const ast::DeclSema& tmpl, std::span<const ast::TemplateArg> args,
@@ -3999,21 +4006,33 @@ private:
       // A class and a variable or function may share a name; the class is hidden
       // ([basic.scope.scope]/4, [basic.scope.hiding]/2), so it is not an earlier declaration.
       if (!d.qualified) {
-        for (DeclId p : q_.visible_decls(d.name))
-          if (auto ds = p_->decl_sema(p); ds && ds->entity != EntityId::none && ds->kind != ast::DeclKind::class_ &&
-                                          ds->kind != ast::DeclKind::namespace_ && ds->kind != ast::DeclKind::enum_ &&
-                                          (same_scope(*ds) || lang == LangLinkage::c)) {
-            prior.push_back(*ds);
-            interned_prior.push_back(*ds);
-          }
+        for (DeclId p : q_.visible_decls(d.name)) {
+          auto ds = p_->decl_sema(p);
+          if (!ds || ds->entity == EntityId::none || ds->kind == ast::DeclKind::class_ ||
+              ds->kind == ast::DeclKind::namespace_ || ds->kind == ast::DeclKind::enum_)
+            continue;
+          const bool ordinary_function = fn && !template_ && ds->kind == ast::DeclKind::function;
+          const bool prior_c = ds->flags & sema::decl_flag::lang_c;
+          // C-linkage function identities are shared across namespaces ([dcl.link]). For a
+          // redeclaration in the same target scope, use the declaration's namespace ([basic.link]).
+          const bool same_target = ordinary_function && prior_c
+              ? p_->ns_of(p_->index(p.item)) == p_->ns_of(k_)
+              : same_scope(*ds);
+          if (!same_target && (lang != LangLinkage::c || (ordinary_function && !prior_c))) continue;
+          prior.push_back(*ds);
+          interned_prior.push_back(*ds);
+        }
         for (const auto& o : s_.own)
           if (o.name == d.name && o.sema.kind != ast::DeclKind::class_) prior.push_back(o.sema);
         if (clashes_with_using(d.name, d.name_at, fn ? ast::DeclKind::function : ast::DeclKind::variable)) return false;
       }
       if (fn && !d.qualified && !operator_function_ok(d)) return false;
       if (fn) {
-        if (!explicit_lang && !prior.empty() && prior.back().kind == ast::DeclKind::function)
-          lang = s_.world().entities.rec(prior.back().entity).lang;  // [dcl.link]/6: inherited
+        if (!explicit_lang && !template_ && std::ranges::any_of(prior, [&](const ast::DeclSema& p) {
+              return p.kind == ast::DeclKind::function && (p.flags & sema::decl_flag::lang_c) &&
+                     !(p.flags & sema::decl_flag::template_) && same_function_parameters(p.type, d.type);
+            }))
+          lang = LangLinkage::c;  // [dcl.link]/6: inherited from a corresponding declaration
         const sema::TypeRec& r = types.rec(d.type);
         if (r.fn_cv != sema::Cv::none && !d.qualified) {
           s_.diag(d.name_at, Diag::cv_on_non_member);  // [dcl.fct]/6
@@ -4126,12 +4145,15 @@ private:
       // language linkage aside, [dcl.link]).
       if (fn)
         std::erase_if(prior, [&](const ast::DeclSema& p) {
-          if (p.kind != ast::DeclKind::function || (p.flags & sema::decl_flag::lang_c) || lang == LangLinkage::c) return false;
+          if (p.kind != ast::DeclKind::function) return false;
+          const bool prior_c = p.flags & sema::decl_flag::lang_c;
+          if (prior_c && lang == LangLinkage::c) return false;  // [dcl.link]/7
           // A template and a function, or templates whose heads differ, are overloads ([temp.over.link]).
           if ((p.flags & sema::decl_flag::template_) != (flags & sema::decl_flag::template_) ||
               head_fp(p_->world().ins.seqs.elements(p.template_params)) != head ||
               s_.world().entities.rec(p.entity).constraints != constraints_fp_)
             return true;
+          if (prior_c || lang == LangLinkage::c) return !same_function_parameters(p.type, sem.type);
           sema::TypeRec a = types.rec(p.type), c = types.rec(sem.type);
           // A function template's return type is part of its signature ([defns.signature.templ]).
           if ((flags & sema::decl_flag::template_) && types.canonical(a.inner) != types.canonical(c.inner)) return true;
@@ -4163,9 +4185,12 @@ private:
           s_.diag(d.name_at, Diag::conflicting_declaration, d.name);
           return false;
         }
-        if (fn && p.type != sem.type) {
-          const sema::TypeRec& a = types.rec(p.type);
-          const sema::TypeRec& c = types.rec(sem.type);
+        const bool c_redeclaration = fn && ((p.flags & sema::decl_flag::lang_c) || lang == LangLinkage::c);
+        const QualType prior_type = c_redeclaration ? types.canonical(p.type) : p.type;
+        const QualType current_type = c_redeclaration ? types.canonical(sem.type) : sem.type;
+        if (fn && prior_type != current_type) {
+          const sema::TypeRec& a = types.rec(prior_type);
+          const sema::TypeRec& c = types.rec(current_type);
           if (a.params == c.params && a.variadic == c.variadic && a.inner == c.inner)
             s_.diag(d.name_at, Diag::linkage_conflict, d.name);
           else if (a.params == c.params && a.variadic == c.variadic)

@@ -1042,6 +1042,9 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
 - A qualified namespace function definition inherits C language linkage from a matching prior
   member declaration and uses its target namespace for body lookup. Ordinary and argument-dependent
   calls find the prior declaration and use the same unmangled symbol as C callers (#426).
+- An unqualified namespace function redeclaration inherits C language linkage from its corresponding
+  earlier declaration in the same namespace. Adjusted parameter types identify the redeclaration
+  among overloads ([basic.scope.scope], [basic.link], [dcl.link], #455).
 - A second definition of the same ordinary external C-linkage function in a translation unit is
   diagnosed across namespaces. Compatible declarations share the one definition and address
   ([dcl.link], [basic.def.odr], #446).
