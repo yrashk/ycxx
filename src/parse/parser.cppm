@@ -66,6 +66,7 @@ struct Param {
   // Its default argument ([dcl.fct.default]): the initializer-clause converted to the parameter's
   // type, analysed here; none if it has none.
   NodeId default_arg = NodeId::none;
+  std::optional<std::pair<u32, u32>> default_tokens{};
 };
 
 // What a declarator declares ([dcl.decl]): its name and type, and, for a function declarator,
@@ -742,6 +743,17 @@ public:
       }
     }
     const bool function_type = s_->types().is_function(d.type);
+    if (member_template_name) {
+      for (const Level* level = &top; level; level = level->inner.get())
+        for (const Suffix& suffix : level->suffixes) {
+          if (&suffix == fn && !abstract && !typedef_ && function_type) continue;
+          for (const Param& param : suffix.params)
+            if (param.default_tokens) {
+              s_->diag(param.at, Diag::default_arg_not_allowed);
+              d.ok = false;
+            }
+        }
+    }
     if (fn) {
       d.function = function_type;
       // The declaring context also checks defaults in a nested function type.
@@ -1475,8 +1487,15 @@ public:
         break;
       }
       if (accept(Tk::equal)) {
-        s.params.back().default_arg = default_argument(t);
-        if (s.params.back().default_arg == NodeId::none) ok = false;  // diagnosed
+        if (member_template_name && !placeholder_params && in_params_ == 1) {
+          u32 begin = index();
+          std::map<u32, bool> template_probes;
+          scan_member_default(s.params, template_probes);
+          s.params.back().default_tokens = {begin, index()};
+        } else {
+          s.params.back().default_arg = default_argument(t);
+          if (s.params.back().default_arg == NodeId::none) ok = false;  // diagnosed
+        }
       }
       if (!accept(Tk::comma)) break;
       if (is(Tk::ellipsis)) {
@@ -1497,6 +1516,94 @@ public:
         }
     return s;
   }
+  // The splitter's classification of a name declared anywhere in the enclosing class.
+  std::function<std::optional<bool>(NameId)> member_template_name;
+
+  // Capture the initializer-clause before its complete-class lookup context is available.
+  bool scan_member_default(std::span<const Param> params, std::map<u32, bool>& template_probes,
+                           bool template_probe = false) {
+    deep_enough();
+    std::vector<Tk> closes;
+    unsigned angles = template_probe ? 1 : 0;
+    unsigned conditionals = 0;
+    while (!at_end()) {
+      Tk k = kind();
+      if (closes.empty()) {
+        if (k == Tk::r_paren || k == Tk::r_brace || k == Tk::semi) break;
+        if (k == Tk::question) ++conditionals;
+        if (k == Tk::colon && conditionals != 0) --conditionals;
+        if (conditionals == 0 && ((k == Tk::comma && angles == 0) || (template_probe && k == Tk::equal))) break;
+        if (angles != 0 && (k == Tk::greater || k == Tk::greatergreater)) {
+          unsigned closed = k == Tk::greater ? 1 : 2;
+          angles -= std::min(angles, closed);
+          if (template_probe && angles == 0) return true;
+        }
+        if (auto args = member_default_template_args(params, template_probes)) {
+          seek(index() + *args + 1);
+          ++angles;
+          continue;
+        }
+      }
+      if (k == Tk::l_paren) closes.push_back(Tk::r_paren);
+      if (k == Tk::l_square) closes.push_back(Tk::r_square);
+      if (k == Tk::l_brace) closes.push_back(Tk::r_brace);
+      if (!closes.empty() && k == closes.back()) closes.pop_back();
+      bump();
+    }
+    return false;
+  }
+
+  std::optional<u32> member_default_template_args(std::span<const Param> params, std::map<u32, bool>& template_probes) {
+    if (is(Tk::kw_static_cast) && kind(1) == Tk::less) return 1;
+    if (is(Tk::kw_template) && kind(1) == Tk::identifier && kind(2) == Tk::less) return 2;
+    if ((is(Tk::period) || is(Tk::arrow)) && kind(1) == Tk::identifier && kind(2) == Tk::less) {
+      // Lookup of a template through an object needs the type of the expression. A balanced
+      // template-id cannot cross the '=' of a following defaulted parameter.
+      u32 start = index();
+      auto [probe, fresh] = template_probes.try_emplace(start, false);
+      if (fresh) {
+        seek(start + 3);
+        probe->second = scan_member_default(params, template_probes, true);
+        seek(start);
+      }
+      if (probe->second) return 2;
+    }
+    if ((is(Tk::identifier) && kind(1) == Tk::coloncolon) || is(Tk::coloncolon)) {
+      u32 name = 0;
+      // Resolve the non-template prefix only. Forming a specialization here could try to
+      // evaluate arguments before the enclosing class is complete.
+      std::optional<sema::Sema::Scope> scope;
+      if (is(Tk::coloncolon)) {
+        scope = sema::Sema::global_scope();
+        name = 1;
+      }
+      while (kind(name) == Tk::identifier && kind(name + 1) == Tk::coloncolon) {
+        NameId qualifier = name_of(tok(name));
+        scope = scope ? s_->scope_member(*scope, qualifier) : s_->scope_named(qualifier);
+        if (!scope) return std::nullopt;
+        name += 2;
+      }
+      bool keyword = kind(name) == Tk::kw_template;
+      if (keyword) ++name;
+      if (kind(name) != Tk::identifier || kind(name + 1) != Tk::less) return std::nullopt;
+      NameId n = name_of(tok(name));
+      if (keyword) return name + 1;
+      if (scope && (s_->scope_names_template(*scope, n) ||
+                    (scope->type && s_->types().is_class(*scope->type) &&
+                     s_->types().class_of(*scope->type) == s_->current_class && member_template_name(n).value_or(false)) ||
+                    (scope->ns && (s_->namespace_template(*scope->ns, n, ast::DeclKind::variable) ||
+                                   s_->namespace_type_template(*scope->ns, n)))))
+        return name + 1;
+      return std::nullopt;
+    }
+    if (!is(Tk::identifier) || kind(1) != Tk::less) return std::nullopt;
+    NameId n = name_of(tok());
+    if (std::ranges::contains(params, n, &Param::name)) return std::nullopt;
+    auto member = member_template_name(n);
+    if (member ? *member : (s_->is_template_name(n) || s_->names_type_template(n))) return 1;
+    return std::nullopt;
+  }
+
   // A default argument ([dcl.fct.default]/1, /5): its names are bound and its copy-initialization
   // of the parameter is checked here. A template's that depends on its parameters is kept as it
   // is, and rejected where a call would use it.

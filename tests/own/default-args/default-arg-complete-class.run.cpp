@@ -1,7 +1,6 @@
 // ι (#300): a default argument of a member function is a complete-class context: it can name a
 // static data member, an enumerator and a static member function declared after the function
 // in the class ([class.mem.general] (complete-class context), [dcl.fct.default]/1, /9).
-// XFAIL: ycxx a member default argument is analysed before the class is complete (#354)
 // EXIT: 0
 struct Late {
   int add(int n = step) { return base_value() + n; }

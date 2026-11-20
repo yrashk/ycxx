@@ -2082,8 +2082,9 @@ values, end to end; results match Clang's bit for bit.
   default argument is analysed where it is written ([dcl.fct.default]/5) and kept, converted to the
   parameter's type, as a `DefaultArg` tree in `ParamSema::default_arg`, the slot ast.md reserved.
   Redeclarations at namespace scope inherit earlier defaults (`b_.adopt`), may not repeat one, and
-  leave none missing after one ([dcl.fct.default]/4). Members' are recorded in
-  `MemberDeclRec::defaults` by `class_content`.
+  leave none missing after one ([dcl.fct.default]/4). Ordinary member defaults written in a
+  non-template class are replayed in the complete-class context ([class.mem.general]) and kept
+  in `MemberDeclRec::defaults` (#354).
 - **Calls** (src/sema/actions.cppm): `Candidate::defaults` and `required` make a candidate viable
   with fewer arguments ([over.match.viable]/2); `Templates::deduce_call` skips defaulted trailing
   parameters. `call_args` and `construct` adopt the chosen function's trees (`default_argument`),
@@ -2095,11 +2096,9 @@ values, end to end; results match Clang's bit for bit.
   declarations in different scopes have their own. A copy or move constructor's other parameters
   may have defaults. Defaults are rejected where [dcl.fct.default]/3–4 and [over.oper.general]
   forbid them (`defaults_allowed`, `defaults_trail`).
-- Not yet: defaults that depend on template parameters (#356); a member's default naming a later
-  member, and defaults added by an out-of-class or qualified definition (#354); defaults added
-  after a using-declaration (#362, the oracles disagree).
-- Tests: `tests/own/default-args/` (spec-only: 16 run and 9 reject tests, some split out as XFAIL
-  for #354, #356, #357 and #102).
+- Not yet: defaults that depend on template parameters (#356); defaults added by an out-of-class
+  or qualified definition (#354); defaults added after a using-declaration (#362, the oracles disagree).
+- Tests: `tests/own/default-args/` (spec-only, with XFAILs for #354, #356, #357 and #102).
 
 ## Dynamic initialization of namespace-scope variables, ι (#94, #337, 2026-11-19)
 
