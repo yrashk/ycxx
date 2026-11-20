@@ -246,7 +246,6 @@ draft/expr/conv.lval-1.accept.cpp 'struct' not supported yet
 draft/expr/expr.add-1.accept.cpp '{' not supported yet
 draft/expr/expr.await-1.reject.cpp errors elsewhere: preprocessing directives are not supported yet
 draft/expr/expr.call-4.accept.cpp preprocessing directives are not supported yet
-draft/expr/expr.call-5.accept.cpp 'struct' not supported yet
 draft/expr/expr.cast-1.reject.cpp errors elsewhere: 'struct' not supported yet
 draft/expr/expr.const.cast-1.accept.cpp 'typedef' not supported yet
 draft/expr/expr.const.const-1.reject.cpp errors elsewhere: 'template' is not supported yet
@@ -290,7 +289,6 @@ draft/expr/expr.prim.lambda.capture-4.accept.cpp preprocessing directives are no
 draft/expr/expr.prim.lambda.capture-6.reject.cpp errors elsewhere: 'auto' not supported yet
 draft/expr/expr.prim.lambda.capture-7.reject.cpp errors elsewhere: '=' not supported yet
 draft/expr/expr.prim.lambda.capture-9.accept.cpp '[' is not supported yet
-draft/expr/expr.prim.lambda.closure-10.accept.cpp 'struct' not supported yet
 draft/expr/expr.prim.lambda.closure-2.reject.cpp errors elsewhere: 'struct' not supported yet
 draft/expr/expr.prim.lambda.closure-3.reject.cpp errors elsewhere: 'auto' not supported yet
 draft/expr/expr.prim.lambda.closure-6.reject.cpp errors elsewhere: 'auto' not supported yet
