@@ -8,8 +8,9 @@ import tempfile
 
 
 def main():
-    ycxx, host_cxx, readelf, libycxx_include = sys.argv[1:]
+    ycxx, host_cxx, readelf, libycxx_source = sys.argv[1:]
     fixture = Path(__file__).resolve().parent / 'std-mangling'
+    libycxx = Path(libycxx_source)
     env = dict(os.environ, LC_ALL='C', YCXX_NO_DAEMON='1', YCXX_THREADS='1')
     with tempfile.TemporaryDirectory(prefix='ycxx-std-mangling-', dir='.') as temp:
         def run(*args):
@@ -23,18 +24,20 @@ def main():
                     if len(row := line.split()) == 8 and row[0].endswith(':')}
 
         compiler = (ycxx, 'cxx', '--target=x86_64-pc-linux-gnu')
-        includes = ('-isystem', libycxx_include)
+        includes = ('-isystem', libycxx / 'include')
         run(*compiler, *includes, '-c', fixture / 'byte.cpp', '-o', 'byte.o')
-        run(host_cxx, '-std=c++26', '-O0', '-fno-pie', *includes,
-            '-c', fixture / 'peer.cpp', '-o', 'peer.o')
+        host_compile = (host_cxx, '-std=c++26', '-O0', '-fno-pie', *includes, '-c')
+        run(*host_compile, fixture / 'peer.cpp', '-o', 'peer.o')
         byte_operator = '_ZStorSt4byteS_'
         for obj in ('byte.o', 'peer.o'):
             symbol = symbols(obj).get(byte_operator)
             assert symbol and symbol[4] == 'WEAK' and symbol[6] != 'UND', (obj, symbol)
             relocations = (line.split() for line in run(readelf, '-Wr', obj).splitlines())
             assert any(byte_operator in row and 'R_X86_64_PLT32' in row for row in relocations), obj
+        # libycxx's <cstddef> references the static linkage guard defined by its runtime.
+        run(*host_compile, libycxx / 'src/runtime/linkage/static.cpp', '-o', 'linkage.o')
         for objects in (('byte.o', 'peer.o'), ('peer.o', 'byte.o')):
-            run(host_cxx, '-no-pie', *objects, '-o', 'program')
+            run(host_cxx, '-no-pie', *objects, 'linkage.o', '-o', 'program')
             run('./program', 'one', 'two', 'three', 'four')
 
         run(*compiler, '-c', fixture / 'names.cpp', '-o', 'names.o')
