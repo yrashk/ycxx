@@ -591,6 +591,14 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   to one definition. `unit.linux_inline` checks symbol bindings, address identity, archive
   extraction, and both operand orders with the native and host linkers.
   [Design](docs/design/linux-inline-functions.md) · [#422](https://github.com/yrashk/ycxx/issues/422)
+- Constant-initialized and zero-initialized external inline namespace variables use weak ELF
+  definitions when their initial values need no relocations. This includes explicitly inline
+  full variable-template specializations with builtin type arguments. Static addresses and
+  writes in multiple units resolve to the same object. The two-unit `<cstddef>` probe links
+  through the pinned GNU `libycxx.a`. Group selection and dynamic inline initialization remain
+  tracked separately. [Design](docs/design/linux-inline-variables.md)
+  · [#432](https://github.com/yrashk/ycxx/issues/432) · [#422](https://github.com/yrashk/ycxx/issues/422)
+  · [#368](https://github.com/yrashk/ycxx/issues/368)
 - The ELF reader accepts the GNU-built libycxx static linkage-marker object. It reads sized
   object symbols and local section symbols, preserves the marker's hidden binding, and maps
   `.data.rel.ro.local` to the existing read-only output for relocated pointers. It validates and

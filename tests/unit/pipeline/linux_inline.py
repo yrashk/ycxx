@@ -1,7 +1,8 @@
-"""Resolve calls and saved addresses to one external inline function on x86-64 Linux."""
+"""Resolve external inline functions and variables across x86-64 ELF objects."""
 
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
@@ -9,7 +10,8 @@ import tempfile
 
 def main():
     ycxx, host_cxx, readelf, ar = sys.argv[1:]
-    fixture = Path(__file__).resolve().parent / 'inline-odr'
+    fixtures = Path(__file__).resolve().parent
+    fixture = fixtures / 'inline-odr'
     target = '--target=x86_64-pc-linux-gnu'
     env = dict(os.environ, LC_ALL='C', YCXX_NO_DAEMON='1', YCXX_THREADS='1')
     with tempfile.TemporaryDirectory(prefix='ycxx-inline-', dir='.') as temp:
@@ -26,13 +28,16 @@ def main():
         def link(*inputs, status=0, error=''):
             run(ycxx, 'cxx', target, '-nostdlib', *inputs, '-o', 'program', status=status, error=error)
 
+        def symbols(obj):
+            return {row[-1]: row for line in run(readelf, '-Ws', obj).splitlines()
+                    if len(row := line.split()) == 8 and row[0].endswith(':')}
+
         inline_symbols = ('_Z12inline_firsti', '_Z12inline_lateri', '_ZN9Operation6memberEi',
                           '_ZN14DeclaredMember6memberEi', '_Z15implicit_inlinei')
         for name in ('main', 'peer'):
             obj = f'{name}.o'
             compile(fixture / f'{name}.cpp', obj)
-            table = {row[-1]: row for line in run(readelf, '-Ws', obj).splitlines()
-                     if len(row := line.split()) == 8 and row[0].endswith(':')}
+            table = symbols(obj)
             for symbol in inline_symbols:
                 assert table[symbol][4] == 'WEAK' and table[symbol][6] != 'UND', table[symbol]
             ordinary = table[f'_Z17{name}_direct_callsi']
@@ -65,6 +70,48 @@ def main():
             (Path(temp) / source).write_text(text)
             compile(source, f'{name}.o')
         link('strong1.o', 'strong2.o', status=1, error="duplicate symbol '_Z8ordinaryi'")
+
+        data = fixtures / 'inline-data'
+        data_sections = {'_ZN4data11initializedE': '.data', '_ZN4data16zero_initializedE': '.bss',
+                         '_ZN4data9immutableE': '.rodata', '_ZN4data10redeclaredE': '.data',
+                         '_ZN4data11specializedIiEE': '.data'}
+        for name in ('main', 'peer'):
+            obj = f'data-{name}.o'
+            compile(data / f'{name}.cpp', obj)
+            table = symbols(obj)
+            sections = dict(re.findall(r'\[\s*(\d+)\]\s+(\.[^\s]+)', run(readelf, '-WS', obj)))
+            relocations = run(readelf, '-Wr', obj).splitlines()
+            for symbol, section in data_sections.items():
+                entry = table[symbol]
+                assert entry[4] == 'WEAK' and sections.get(entry[6]) == section, entry
+                assert any('R_X86_64_64' in line.split() and symbol in line.split() for line in relocations), symbol
+
+        for objects in (('data-main.o', 'data-peer.o'), ('data-peer.o', 'data-main.o')):
+            link(*objects)
+            run('./program')
+        run(host_cxx, '-std=c++20', '-O0', '-fno-pie', '-c', data / 'peer.cpp', '-o', 'host-data-peer.o')
+        for objects in (('data-main.o', 'host-data-peer.o'), ('host-data-peer.o', 'data-main.o')):
+            run(host_cxx, '-no-pie', *objects, '-o', 'host-program')
+            run('./host-program')
+
+        (Path(temp) / 'data-controls.cpp').write_text('''
+constexpr int ordinary_constant = 7;
+extern constexpr int external_constant = 9;
+static inline int local_inline = 11;
+int backing = 13;
+inline int* relocated = &backing;
+template<class T> inline int specialized = 17;
+template<> int specialized<int> = 19;
+struct NamedType {};
+template<> inline int specialized<NamedType> = 23;
+''')
+        compile('data-controls.cpp', 'data-controls.o')
+        table = symbols('data-controls.o')
+        for name in ('ordinary_constant', 'local_inline'):
+            assert table[name][4] == 'LOCAL', table[name]
+        for name in ('external_constant', 'backing', 'relocated',
+                     '_Z11specializedIiE', '_Z11specializedI9NamedTypeE'):
+            assert table[name][4] == 'GLOBAL' and table[name][6] != 'UND', table[name]
 
 
 if __name__ == '__main__':

@@ -553,7 +553,8 @@ std = 'C++17'
 ftm = '__cpp_inline_variables'
 detect = '\binline\s+(?:static\s+)?(?:const(?:expr)?\s+)?[\w:<>,]+\s+\w+\s*(?:=|\{|;)|\bstatic\s+(?:constexpr\s+)?inline\s+(?!\w+\s*\()'
 status = 'partial'
-issues = [124]
+issues = [124, 368, 422, 432]
+note = 'x86-64 ELF shares constant-initialized external namespace variables with relocation-free initial values. Broader inline data and group selection remain'
 probe = '''
 inline int counter = 41;
 struct S { static inline int n = 1; };

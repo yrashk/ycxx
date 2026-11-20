@@ -315,8 +315,10 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
   auto declare = [&](const ast::DeclSema& d, std::optional<ast::Loc> at) {
     EntityId e = d.entity;
     if (e == EntityId::none) return;
-    // Any reachable declaration can mark the function inline ([dcl.inline]).
-    if (linux && d.kind == ast::DeclKind::function && (d.flags & sema::decl_flag::inline_)) inline_declarations.insert(e);
+    // Any reachable declaration can mark the entity inline ([dcl.inline]).
+    if (linux && (d.flags & sema::decl_flag::inline_) &&
+        (d.kind == ast::DeclKind::function || d.kind == ast::DeclKind::variable))
+      inline_declarations.insert(e);
     if (!seen.insert(std::to_underlying(e)).second) return;
     const sema::EntityRec& r = world.entities.rec(e);
     if (r.kind == sema::EntityKind::class_ || r.kind == sema::EntityKind::data_member || r.kind == sema::EntityKind::type_alias ||
@@ -377,6 +379,20 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
     }
   };
   Runtime<decltype(declare)> runtime{world, declare};
+  auto weak_inline_variable = [&](const ast::DeclSema& d) {
+    if (!inline_declarations.contains(d.entity)) return false;
+    const auto& entity = world.entities.rec(d.entity);
+    if (entity.linkage != ast::Linkage::external || !program.is_namespace(entity.scope) ||
+        d.storage == ast::Storage::thread_local_ || world.types.is_reference(d.type) ||
+        internal_type(d.type) || !program.asm_label(d.entity).empty())
+      return false;
+    // The inline declaration belongs to the specialization itself ([temp.expl.spec]).
+    // Builtin type arguments identify the same specialization in every translation unit.
+    return entity.templ == EntityId::none || ((d.flags & sema::decl_flag::specialization) &&
+        std::ranges::all_of(entity.args, [&](const ast::TemplateArg& arg) {
+          return arg.kind == ast::TemplateArgKind::type && world.types.builtin_of(arg.type).has_value();
+        }));
+  };
   for (std::uint32_t k = 0; k < items.items.size(); ++k) {
     const items::Item& it = items.items[k];
     // Items of the global namespace, and the members of its classes.
@@ -429,6 +445,7 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
           !(d.flags & sema::decl_flag::definition))
         continue;
       tu.variables.push_back({d.entity, d.type, declarators[i]->value, at[i]});
+      tu.variables.back().weak_elf = weak_inline_variable(d);
       // Not constant-initialized: initialized dynamically, in order ([basic.start.dynamic]); a
       // destructor runs at exit ([basic.start.term]).
       ast::NodeId init = declarators[i]->value == ast::ConstId::none ? declarators[i]->init.id : ast::NodeId::none;
