@@ -337,9 +337,6 @@ system_leaf:
             compile(target, '-c', 'unsupported.cpp', error='an extended floating-point format is not supported yet')
         (scope / 'storage.cpp').write_text('int f() { static long double x; return sizeof(x); }\n')
         compile(target, '-c', 'storage.cpp')
-        (scope / 'unsupported.cpp').write_text('using Fn = int(); extern Fn g; Fn* f() { return &g; }\n')
-        compile(target, '-c', 'unsupported.cpp', error='symbol address needs a direct RIP-relative reference')
-        assert not (scope / 'unsupported.o').exists()
 
 
 if __name__ == '__main__':

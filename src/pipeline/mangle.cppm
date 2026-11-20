@@ -194,9 +194,10 @@ class Mangler {
                    in_.values.get<ast::VDepParam>(a.bound).depth == 0) {
           auto i = in_.values.get<ast::VDepParam>(a.bound).index;
           dim = i == 0 ? "T_" : std::format("T{}_", i - 1);
-        } else {
+        } else if (a.bound != ast::ConstId::none) {
           return std::unexpected("an array of unknown or dependent bound");
         }
+        // An incomplete array omits the dimension. It still has the `A_` prefix (§5.1.5.6).
         auto e = type(a.elem);
         if (!e) return e;
         inner = std::format("A{}_{}", dim, *e);
@@ -743,6 +744,8 @@ class Mangler {
 
 // Itanium §5.1.5.1 <operator-name>: the code of `operator<op>` taking `arity` operands.
 std::optional<std::string_view> operator_code(std::string_view op, std::size_t arity) {
+  if (op == " new") return "nw";
+  if (op == " delete") return "dl";
   static constexpr std::pair<std::string_view, std::string_view> binary[] = {
       {"+", "pl"},  {"-", "mi"},   {"*", "ml"},   {"&", "an"},  {"/", "dv"},  {"%", "rm"},  {"|", "or"},
       {"^", "eo"},  {"=", "aS"},   {"+=", "pL"},  {"-=", "mI"}, {"*=", "mL"}, {"/=", "dV"}, {"%=", "rM"},

@@ -30,10 +30,10 @@ export struct MachineCode {
 // L2 can erase the distinction between scalar and class arguments or results. Pass
 // the entities whose addresses may be resolved directly by a signed RIP-relative displacement
 // (e.g. local definitions in the small code model) in `direct_symbols`. Pass default-visible
-// data symbols in `external_data` so their addresses load through the ELF GOT.
+// symbols in `got_symbols` so their addresses load through the ELF GOT.
 export std::expected<MachineCode, std::string> compile_function(const l2::Function& body,
                                                                 std::span<const ir::EntityId> direct_symbols = {},
-                                                                std::span<const ir::EntityId> external_data = {});
+                                                                std::span<const ir::EntityId> got_symbols = {});
 
 namespace {
 
@@ -146,8 +146,8 @@ std::expected<Frame, std::string> layout(const l2::Function& body) {
 class Emitter {
  public:
   Emitter(const l2::Function& body, const Frame& frame, std::span<const ir::EntityId> direct_symbols,
-          std::span<const ir::EntityId> external_data)
-      : body_(body), frame_(frame), direct_symbols_(direct_symbols), external_data_(external_data),
+          std::span<const ir::EntityId> got_symbols)
+      : body_(body), frame_(frame), direct_symbols_(direct_symbols), got_symbols_(got_symbols),
         block_offsets_(body.blocks.size()) {}
 
   std::expected<MachineCode, std::string> run() {
@@ -175,7 +175,7 @@ class Emitter {
   const l2::Function& body_;
   const Frame& frame_;
   std::span<const ir::EntityId> direct_symbols_;
-  std::span<const ir::EntityId> external_data_;
+  std::span<const ir::EntityId> got_symbols_;
   MachineCode out_;
   Encoder e_{out_.bytes};
   std::vector<std::size_t> block_offsets_;
@@ -299,11 +299,11 @@ std::expected<void, std::string> Emitter::node(NodeId n) {
       if (std::ranges::contains(direct_symbols_, target)) {
         e_.emit({0x48, 0x8d, 0x05});  // lea rax, [rip + disp32]
         relocation(RelocKind::pc32, target);
-      } else if (std::ranges::contains(external_data_, target)) {
+      } else if (std::ranges::contains(got_symbols_, target)) {
         e_.emit({0x48, 0x8b, 0x05});  // mov rax, [rip + GOT slot]
         relocation(RelocKind::rex_gotpcrelx, target);
       } else {
-        return at_node(n, op, "symbol address needs a direct RIP-relative reference");
+        return at_node(n, op, "symbol address needs a direct or GOT-relative reference");
       }
       break;
     }
@@ -409,11 +409,11 @@ std::expected<void, std::string> Emitter::node(NodeId n) {
 
 std::expected<MachineCode, std::string> compile_function(const l2::Function& body,
                                                          std::span<const ir::EntityId> direct_symbols,
-                                                         std::span<const ir::EntityId> external_data) {
+                                                         std::span<const ir::EntityId> got_symbols) {
   if (auto valid = l2::verify(body); !valid) return std::unexpected(valid.error());
   auto frame = layout(body);
   if (!frame) return std::unexpected(frame.error());
-  return Emitter(body, *frame, direct_symbols, external_data).run();
+  return Emitter(body, *frame, direct_symbols, got_symbols).run();
 }
 
 }  // namespace ycxx::x86_64

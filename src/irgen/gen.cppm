@@ -19,8 +19,8 @@
 // Immediates and result types, as lower (#26) reads them:
 // - `alloc [T, …]` allocates a T and yields a pointer to T; `load`/`store [T, path]` access a T at
 //   `path` below the pointer's pointee; `ptr_member [T, path]` yields a pointer to the subobject,
-//   of type T (array-to-pointer is `ptr_member [elem, /e0]`); `ptr_add`/`ptr_diff [T]` step by
-//   elements of type T.
+//   of type T (array-to-pointer is `ptr_member [elem, /e0]`); `ptr_derived [T, path]` undoes
+//   a base path within T; `ptr_add`/`ptr_diff [T]` step by elements of type T.
 // - `global [@v]` is a pointer to the variable; `const_ [#c]` has the constant's type, and a string
 //   literal's address is a `const_` of its VLvalue, of type pointer to the array.
 // - `ptr_add`'s index is an integer of any type, widened by its signedness (lower does this);
@@ -659,6 +659,38 @@ class Gen {
     return {pure(ir::Op::ptr_member, facts_.pointer_to(t), {p.ptr}, {word(ty(t)), path[0], path[1]}), t};
   }
 
+  // The enclosing object recovered by undoing a checked nonvirtual base path ([expr.static.cast]).
+  ValueId derived_address(At a, ast::QualType derived, bool pointer) {
+    ast::QualType result = facts_.pointer_to(derived);
+    std::vector<std::uint64_t> imms{word(ty(derived)), 0};
+    do {
+      const auto c = get<ast::ImplicitConversion>(a);
+      imms.push_back(ir::encode({ir::Step::base, std::to_underlying(c.function)}));
+      a = child(a, c.operand);
+    } while (is<ast::ImplicitConversion>(a) &&
+             get<ast::ImplicitConversion>(a).conversion == ast::ConversionKind::base_to_derived);
+    imms[1] = imms.size() - 2;
+    auto adjust = [&](ValueId base) {
+      ir::Ty results[] = {vty(result)};
+      ValueId operands[] = {base};
+      return b_.result(emit(ir::Op::ptr_derived, results, operands, imms));
+    };
+    if (!pointer) return adjust(address(a));
+
+    // Test the evaluated pointer once. Only the non-null path has a base subobject to adjust.
+    ast::QualType from = info(a).type;
+    ValueId base = rvalue(a);
+    ValueId null = pure(ir::Op::ptr_cmp, facts_.bool_type(), {base, constant(from, facts_.null_constant(from))},
+                        {std::to_underlying(ir::Pred::eq)});
+    ValueId null_result = constant(result, facts_.null_constant(result));
+    ir::BlockId nonnull = new_block({from}), join = new_block({result});
+    cond_br(null, edge(join, {null_result}), edge(nonnull, {base}));
+    enter(nonnull);
+    br(join, {adjust(b_.param(nonnull, 1))});
+    enter(join);
+    return b_.param(join, 1);
+  }
+
   // [dcl.struct.bind]/1: copy in element order and retain each access's own cv-qualifiers.
   void copy_array(const Place& dst, const Place& src) {
     Place dst_first = subobject(dst, ir::Step::elem, 0, facts_.element(dst.type));
@@ -1218,6 +1250,11 @@ class Gen {
     if (is<ast::Unary>(a)) return unary(a);
     if (is<ast::Binary>(a)) return binary(a);
     if (is<ast::OrderedBinary>(a)) return ordered(a);
+    if (is<ast::NewObject>(a)) return new_object(a);
+    if (is<ast::DeleteObject>(a)) {
+      delete_object(a);
+      return std::nullopt;
+    }
     if (is<ast::Call>(a)) return call(a);
     if (is<ast::MemberCall>(a)) return member_call(a);
     if (is<ast::BuiltinCall>(a)) {  // `__builtin_fabs` (lex::BuiltinFunction::fabs), the one there is
@@ -1268,6 +1305,7 @@ class Gen {
                             {std::to_underlying(ir::Pred::eq)});
         return pure(ir::Op::select, t, {null, constant(t, facts_.null_constant(t)), moved});
       }
+      case ast::ConversionKind::base_to_derived: return derived_address(a, facts_.pointee(t), /*pointer=*/true);
       case ast::ConversionKind::to_void:
         discard(from);
         return std::nullopt;
@@ -1456,6 +1494,57 @@ class Gen {
     }
   }
 
+  // The scalar initialization may run after storage is acquired only when it cannot throw.
+  // Calls and temporaries need an exception analysis or an EH cleanup edge ([expr.new]).
+  bool nonthrowing_initializer(At a) {
+    if (is<ast::ImplicitConversion>(a) &&
+        get<ast::ImplicitConversion>(a).conversion == ast::ConversionKind::user_defined) return false;
+    if (!(is<ast::Literal>(a) || is<ast::DeclRef>(a) || is<ast::LocalRef>(a) || is<ast::This>(a) ||
+          is<ast::ValueInit>(a) || is<ast::DefaultInit>(a) || is<ast::Paren>(a) || is<ast::Unary>(a) ||
+          is<ast::Binary>(a) || is<ast::OrderedBinary>(a) || is<ast::Assign>(a) || is<ast::Conditional>(a) ||
+          is<ast::Subscript>(a) || is<ast::Member>(a) || is<ast::ImplicitConversion>(a) || is<ast::BuiltinCall>(a)))
+      return false;
+    bool proven = true;
+    ast::Red(ast_, a.id).for_each_child([&](const ast::Red& c) {
+      proven = proven && nonthrowing_initializer({c.id(), 0});
+    });
+    return proven;
+  }
+
+  ValueId new_object(At a) {
+    auto n = get<ast::NewObject>(a);
+    At init = child(a, n.init);
+    if (!fn_.thunk && !nonthrowing_initializer(init))
+      throw Unsupported{"cleanup for a potentially throwing new-initializer"};
+    ValueId storage = rvalue(child(a, n.allocation));
+    ast::QualType p = n.info.type;
+    ValueId object = pure(ir::Op::ptr_cast, p, {storage}, {word(ty(p))});
+    // Constant evaluation stops at the non-constexpr allocation call. This lets an ordinary
+    // namespace-scope initializer fall back to runtime without evaluating the new-initializer.
+    if (fn_.thunk) return object;
+    ast::QualType t = facts_.pointee(p);
+    initialize({object, t}, init, false);
+    ValueId objects[] = {object};
+    std::uint64_t types[] = {word(ty(t))};
+    stateful(ir::Op::obj__begin, {}, objects, types);
+    return object;
+  }
+
+  void delete_object(At a) {
+    if (fn_.thunk) unsupported(a, "in constant evaluation");
+    auto d = get<ast::DeleteObject>(a);
+    ValueId addr = rvalue(child(a, d.address));
+    ValueId nonnull = pure(ir::Op::tobool, facts_.bool_type(), {addr});
+    ir::BlockId release = new_block(), join = new_block();
+    cond_br(nonnull, edge(release), edge(join));
+    enter(release);
+    stateful(ir::Op::obj__end, {}, std::span(&addr, 1));
+    ValueId args[] = {addr, rvalue(child(a, d.size))};
+    call_fn(d.function, d.info.type, args, 0);
+    br(join);
+    enter(join);
+  }
+
   // A call to a named function ([expr.call]). The callee is not evaluated: naming a function has
   // no effect. Arguments are evaluated in order, which is one of the indeterminately sequenced
   // orders the clause allows.
@@ -1602,6 +1691,8 @@ class Gen {
       const auto c = get<ast::ImplicitConversion>(a);
       if (c.conversion == ast::ConversionKind::derived_to_base)
         return subobject(lvalue(child(a, c.operand)), ir::Step::base, std::to_underlying(c.function), t);
+      if (c.conversion == ast::ConversionKind::base_to_derived)
+        return {derived_address(a, t, /*pointer=*/false), t};
       if (c.conversion == ast::ConversionKind::qualification) {
         // An explicit xvalue cast preserves storage while carrying the target type's qualifiers.
         Place p = lvalue(child(a, c.operand));

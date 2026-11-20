@@ -856,6 +856,7 @@ public:
   std::span<const Instance* const> instances() const { return instance_order_; }
   // Every specialization whose definition the unit requires, in order of first demand.
   std::span<const EntityId> required() const { return required_; }
+  std::span<const EntityId> implicit_allocation_functions() const { return implicit_allocation_functions_; }
   // The calls of a template's body that were dependent at its definition, by the template's item
   // ([temp.dep.candidate]); its instantiations add argument-dependent lookup to them.
   // Whether a call of the templated body of `item` at `offset` was dependent, read from the
@@ -1131,6 +1132,7 @@ private:
   u32 members_running_ = 0;  // static data member initializers being instantiated, nested
   std::vector<engine::Diagnostic> end_diags_;    // the END phase's own
   std::vector<EntityId> required_;
+  std::vector<EntityId> implicit_allocation_functions_;  // in order of first use
   std::map<u32, std::optional<irgen::FunctionIr>> instance_irs_;  // by specialization
   std::map<u32, std::optional<irgen::FunctionIr>> closure_irs_;  // by closure member
 
@@ -1201,6 +1203,10 @@ public:
   ast::DeclSema decl_sema(DeclId d) override {
     if (auto s = p_->decl_sema(d)) return *s;
     return invalid_decl();
+  }
+  void use_allocation_function(EntityId f) override {
+    auto& functions = p_->implicit_allocation_functions_;
+    if (!std::ranges::contains(functions, f)) functions.push_back(f);
   }
   interp::Callee function_ir(EntityId f) override { return p_->function_ir(f, point()); }
   std::optional<QualType> deduced_type(EntityId f) override { return p_->deduced_type(f, point()); }
@@ -1297,6 +1303,7 @@ public:
     return is_complete(c) ? p_->classes().find(c) : nullptr;
   }
   ast::DeclSema decl_sema(DeclId d) override { return at_.decl_sema(d); }
+  void use_allocation_function(EntityId f) override { at_.use_allocation_function(f); }
   interp::Callee function_ir(EntityId f) override { return p_->function_ir(f, p_->end()); }
   std::optional<QualType> deduced_type(EntityId f) override { return p_->deduced_type(f, p_->end()); }
   sema::GenericResult generic_instance(EntityId spec, const sema::GenericClosure* known, const sema::GenericBinding&) override {
@@ -1953,6 +1960,7 @@ private:
     std::string_view n = p_->world().ins.names.spelling(d.name);
     if (!n.starts_with("operator") || n.size() == 8 || n.starts_with(lex::literal_operator_prefix)) return true;
     std::string_view op = n.substr(8);
+    if (sema::is_allocation_name(n)) return true;  // checked against the implicit declarations
     sema::Types& types = s_.types();
     if (op == "=" || op == "()" || op == "[]" || op == "->") {
       s_.diag(d.name_at, Diag::operator_member_only, d.name);
@@ -2075,6 +2083,13 @@ private:
   // Whether an earlier declaration found by lookup is in this item's own scope, the only one a
   // declaration here can redeclare or clash with.
   bool same_scope(const ast::DeclSema& d) { return s_.world().entities.rec(d.entity).scope == ns_entity(); }
+  bool same_function_parameters(QualType a, QualType b) {
+    const auto& types = s_.types();
+    const auto& interner = s_.world().ins.types;
+    const auto first = interner.get<ast::TFunction>(types.canonical(a));
+    const auto second = interner.get<ast::TFunction>(types.canonical(b));
+    return first.params == second.params && first.variadic == second.variadic && first.cv == second.cv;
+  }
   // The arguments of a partial specialization of `tmpl` ([temp.spec.partial]), given as `args`:
   // completed, and checked against [temp.spec.partial]/9; none, diagnosed, if they break it.
   std::optional<std::vector<ast::TemplateArg>> partial_arguments(const ast::DeclSema& tmpl, std::span<const ast::TemplateArg> args,
@@ -2942,6 +2957,10 @@ private:
       if (!d.ok || !d.named) return bad();
       if (literal_operator_named(d.name)) {
         s_.diag(d.name_at, Diag::literal_operator_scope);
+        return bad();
+      }
+      if (sema::is_allocation_name(s_.ins().names.spelling(d.name))) {
+        s_.diag(d.name_at, Diag::allocation_declaration, d.name);
         return bad();
       }
       if (!d.asm_label.empty()) {
@@ -3843,6 +3862,18 @@ private:
     sema::Types& types = s_.types();
     if (!defaults_allowed(d.params, types.is_function(d.type) && !spec.is_typedef, d.name)) return false;
     if (literal_operator_named(d.name) && !literal_operator_ok(spec, d, lang, template_)) return false;
+    std::string_view name = s_.ins().names.spelling(d.name);
+    if (sema::is_allocation_name(name)) {
+      auto matches = [&](const ast::DeclSema& f) {
+        return s_.world().entities.rec(f.entity).name == d.name && types.canonical(f.type) == types.canonical(d.type);
+      };
+      if (!d.function || d.qualified || ns_entity() != EntityId::none || lang != LangLinkage::cxx || template_ ||
+          explicit_ || spec.is_static || spec.is_inline || spec.is_typedef || spec.is_constexpr || spec.is_consteval ||
+          deleted_body() || !d.asm_label.empty() || !std::ranges::any_of(s_.world().allocation_functions(), matches)) {
+        s_.diag(d.name_at, Diag::allocation_declaration, d.name);
+        return false;
+      }
+    }
     if (spec.is_typedef) {
       if (is_function_def) {  // [dcl.typedef]/1: a typedef declares no function definition
         s_.diag(spec.begin, Diag::typedef_definition);
@@ -3999,28 +4030,40 @@ private:
       // A class and a variable or function may share a name; the class is hidden
       // ([basic.scope.scope]/4, [basic.scope.hiding]/2), so it is not an earlier declaration.
       if (!d.qualified) {
-        for (DeclId p : q_.visible_decls(d.name))
-          if (auto ds = p_->decl_sema(p); ds && ds->entity != EntityId::none && ds->kind != ast::DeclKind::class_ &&
-                                          ds->kind != ast::DeclKind::namespace_ && ds->kind != ast::DeclKind::enum_ &&
-                                          (same_scope(*ds) || lang == LangLinkage::c)) {
-            prior.push_back(*ds);
-            interned_prior.push_back(*ds);
-          }
+        for (DeclId p : q_.visible_decls(d.name)) {
+          auto ds = p_->decl_sema(p);
+          if (!ds || ds->entity == EntityId::none || ds->kind == ast::DeclKind::class_ ||
+              ds->kind == ast::DeclKind::namespace_ || ds->kind == ast::DeclKind::enum_)
+            continue;
+          const bool ordinary_function = fn && !template_ && ds->kind == ast::DeclKind::function;
+          const bool prior_c = ds->flags & sema::decl_flag::lang_c;
+          // C-linkage function identities are shared across namespaces ([dcl.link]). For a
+          // redeclaration in the same target scope, use the declaration's namespace ([basic.link]).
+          const bool same_target = ordinary_function && prior_c
+              ? p_->ns_of(p_->index(p.item)) == p_->ns_of(k_)
+              : same_scope(*ds);
+          if (!same_target && (lang != LangLinkage::c || (ordinary_function && !prior_c))) continue;
+          prior.push_back(*ds);
+          interned_prior.push_back(*ds);
+        }
         for (const auto& o : s_.own)
           if (o.name == d.name && o.sema.kind != ast::DeclKind::class_) prior.push_back(o.sema);
         if (clashes_with_using(d.name, d.name_at, fn ? ast::DeclKind::function : ast::DeclKind::variable)) return false;
       }
       if (fn && !d.qualified && !operator_function_ok(d)) return false;
       if (fn) {
-        if (!explicit_lang && !prior.empty() && prior.back().kind == ast::DeclKind::function)
-          lang = s_.world().entities.rec(prior.back().entity).lang;  // [dcl.link]/6: inherited
+        if (!explicit_lang && !template_ && std::ranges::any_of(prior, [&](const ast::DeclSema& p) {
+              return p.kind == ast::DeclKind::function && (p.flags & sema::decl_flag::lang_c) &&
+                     !(p.flags & sema::decl_flag::template_) && same_function_parameters(p.type, d.type);
+            }))
+          lang = LangLinkage::c;  // [dcl.link]/6: inherited from a corresponding declaration
         const sema::TypeRec& r = types.rec(d.type);
         if (r.fn_cv != sema::Cv::none && !d.qualified) {
           s_.diag(d.name_at, Diag::cv_on_non_member);  // [dcl.fct]/6
           return false;
         }
         std::vector<QualType> ps = r.params;
-        sem.type = types.function(r.inner, ps, r.variadic, lang, r.fn_cv);
+        sem.type = types.function(r.inner, ps, r.variadic, lang, r.fn_cv, r.fn_ref, r.fn_noexcept);
         if (lang == LangLinkage::c) flags |= sema::decl_flag::lang_c;
         if (r.variadic) flags |= sema::decl_flag::variadic;
         for (const parse::Param& p : d.params) params.push_back({EntityId::none, p.type, p.name, p.default_arg, p.element ? sema::param_flag::pack_element : u16(0)});
@@ -4126,12 +4169,15 @@ private:
       // language linkage aside, [dcl.link]).
       if (fn)
         std::erase_if(prior, [&](const ast::DeclSema& p) {
-          if (p.kind != ast::DeclKind::function || (p.flags & sema::decl_flag::lang_c) || lang == LangLinkage::c) return false;
+          if (p.kind != ast::DeclKind::function) return false;
+          const bool prior_c = p.flags & sema::decl_flag::lang_c;
+          if (prior_c && lang == LangLinkage::c) return false;  // [dcl.link]/7
           // A template and a function, or templates whose heads differ, are overloads ([temp.over.link]).
           if ((p.flags & sema::decl_flag::template_) != (flags & sema::decl_flag::template_) ||
               head_fp(p_->world().ins.seqs.elements(p.template_params)) != head ||
               s_.world().entities.rec(p.entity).constraints != constraints_fp_)
             return true;
+          if (prior_c || lang == LangLinkage::c) return !same_function_parameters(p.type, sem.type);
           sema::TypeRec a = types.rec(p.type), c = types.rec(sem.type);
           // A function template's return type is part of its signature ([defns.signature.templ]).
           if ((flags & sema::decl_flag::template_) && types.canonical(a.inner) != types.canonical(c.inner)) return true;
@@ -4163,9 +4209,12 @@ private:
           s_.diag(d.name_at, Diag::conflicting_declaration, d.name);
           return false;
         }
-        if (fn && p.type != sem.type) {
-          const sema::TypeRec& a = types.rec(p.type);
-          const sema::TypeRec& c = types.rec(sem.type);
+        const bool c_redeclaration = fn && ((p.flags & sema::decl_flag::lang_c) || lang == LangLinkage::c);
+        const QualType prior_type = c_redeclaration ? types.canonical(p.type) : p.type;
+        const QualType current_type = c_redeclaration ? types.canonical(sem.type) : sem.type;
+        if (fn && prior_type != current_type) {
+          const sema::TypeRec& a = types.rec(prior_type);
+          const sema::TypeRec& c = types.rec(current_type);
           if (a.params == c.params && a.variadic == c.variadic && a.inner == c.inner)
             s_.diag(d.name_at, Diag::linkage_conflict, d.name);
           else if (a.params == c.params && a.variadic == c.variadic)

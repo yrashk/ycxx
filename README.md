@@ -99,9 +99,10 @@ Ordinary namespace-scope references to supported scalar and array storage can bi
 or during ordered startup initialization. On Linux, generated code can access bindings and
 referents with internal linkage. [#367](https://github.com/yrashk/ycxx/issues/367)
 
-Linux x86-64 programs can read, write and take the address of data defined in another
-translation unit. Native static executables and host-linked objects support those addresses.
-[#414](https://github.com/yrashk/ycxx/issues/414)
+Linux x86-64 programs can read and write data and take the address of data and ordinary
+functions defined in another translation unit. Native static executables and host-linked objects
+support those addresses. [#414](https://github.com/yrashk/ycxx/issues/414)
+· [#407](https://github.com/yrashk/ycxx/issues/407)
 
 On x86-64 Linux, direct calls and saved pointers across translation units share one address for
 simple external inline functions. [#422](https://github.com/yrashk/ycxx/issues/422)
@@ -118,25 +119,38 @@ Both targets support cooked integer user-defined literals through namespace-scop
 operators with an `unsigned long long` parameter, including constant evaluation.
 [#289](https://github.com/yrashk/ycxx/issues/289)
 
+Both targets support typed constant addresses and reads within named namespace-scope constexpr
+arrays of supported scalar types, including nested arrays. [#111](https://github.com/yrashk/ycxx/issues/111)
+
 **Language on macOS.** Programs can use:
 - the fundamental integer, character and floating types, pointers, arrays, references and
   enumerations, including opaque declarations of named enums in their namespaces; `float`,
   `double` and `long double` with literals, arithmetic, comparisons and
   conversions giving Clang's results bit for bit, and passing and returning them (classes of
   floating members included) by Clang's calling convention;
-  operators including equality and ordering of pointers to matching complete arrays whose
-  elements differ in `const` or `volatile` qualification, and the statements: `switch`, labels
-  and `goto`, declarations in conditions,
+  equality and ordering of pointers to matching complete arrays whose elements differ in
+  `const` or `volatile` qualification. Comparisons and conditional expressions involving
+  object pointers and `void` pointers combine the pointee qualifiers. Statements include
+  `switch`, labels and `goto`, declarations in conditions,
   init-statements in `if` and `switch`, and range-based `for` with optional init-statements.
   Ranges can be arrays or classes with member `begin` and `end` or free `begin` and `end` found
   by argument-dependent lookup. Unqualified calls can find and rank functions in associated
   namespaces, including those of class template type arguments in ordinary calls. Functions
-  support default arguments, recursion, operator overloading and calls
-  through pointers. Overloaded free functions can take braced arguments for arithmetic parameters
+  support default arguments, recursion, operator overloading and calls through pointers.
+  Nonmember operators can be called explicitly by name, including with namespace qualification.
+  [#219](https://github.com/yrashk/ycxx/issues/219)
+  Overloaded free functions can take braced arguments for arithmetic parameters
   and ordinary aggregates with arithmetic fields. A pointer or reference target type can select
   a free or static member overload.
-  A qualified namespace function definition can inherit C language linkage from its declaration.
-  [#426](https://github.com/yrashk/ycxx/issues/426)
+  Namespace function definitions can inherit C language linkage from a matching earlier
+  declaration, including definitions written inside their namespace and qualified definitions
+  outside it. [#426](https://github.com/yrashk/ycxx/issues/426),
+  [#455](https://github.com/yrashk/ycxx/issues/455)
+- ordinary scalar `new` and single-object `delete` for integral and pointer objects, including
+  cv-qualified objects. Allocating expressions use the global Itanium allocation functions.
+  [#293](https://github.com/yrashk/ycxx/issues/293)
+- pointers and references to arrays of unknown bound, and template partial specializations
+  that match unknown-bound array types. [#222](https://github.com/yrashk/ycxx/issues/222)
 - classes and unions: data and static members, named data members of unnamed union type,
   member functions, constructors and destructors
   with RAII, aggregate and designated initialization, namespace-scope objects initialized by
@@ -152,6 +166,7 @@ operators with an `unsigned long long` parameter, including constant evaluation.
   and directives;
 - named function-pointer declarations with qualified return types, qualified names in grouped
   declarators, and unnamed function-pointer parameters;
+- parenthesized direct initialization from functional conversions such as `S b(S(1));`;
 - `[[…]]` attributes, the GNU attributes and `asm` labels the macOS SDK's headers use, the
   GNU pointer qualifiers glibc uses, and the type-trait built-ins libycxx's headers use
   (`__is_same`, `__remove_cv`, …)
@@ -170,10 +185,13 @@ operators with an `unsigned long long` parameter, including constant evaluation.
   function templates, with Clang's names for closure types;
 - noncapturing, non-generic lambdas as initializers of internal-linkage namespace variables,
   with addressable static storage and scalar calls ([#338](https://github.com/yrashk/ycxx/issues/338));
-- casts, including `static_cast<T&&>` from a compatible object lvalue, `sizeof`/`alignof`
-  (classes included), `decltype`, and calls through pointers to functions. [#199](https://github.com/yrashk/ycxx/issues/199)
+- casts, including `static_cast<T&&>` from a compatible object lvalue and runtime `static_cast`
+  downcasts of object pointers and lvalue references through accessible, unambiguous
+  nonvirtual base paths, `sizeof`/`alignof` (classes included), `decltype`, and calls
+  through pointers to functions. [#199](https://github.com/yrashk/ycxx/issues/199)
 - constant evaluation on ycxx's own interpreter: `constexpr`, `consteval`, `constinit`,
-  `static_assert` and `if consteval`, with errors that explain why something is not constant;
+  `static_assert` and `if consteval`, with errors that explain why something is not constant.
+  Namespace-scope `constexpr` pointers to `void` can retain scalar and array element addresses.
 - `extern "C"` functions from libSystem, including `printf` with integers, characters,
   floating values, pointers and strings as arguments, and the SDK `<math.h>`'s built-ins
   (`__builtin_fabs`, `__builtin_inf`, `__builtin_huge_val`, `__builtin_nan`).

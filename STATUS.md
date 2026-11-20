@@ -602,16 +602,17 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   start inside executable code, and its declared extent must fit in its section. The object
   fingerprint includes this metadata.
   [#428](https://github.com/yrashk/ycxx/issues/428) · [#391](https://github.com/yrashk/ycxx/issues/391)
-- Runtime addresses of default-visible Linux data use `R_X86_64_REX_GOTPCRELX`, including
-  declarations defined in another object. The native static linker checks and relaxes the
-  RIP-relative MOV to LEA after resolving the symbol. System linkers can preserve GOT binding.
-  Static pointer initializers continue to use absolute relocations with their byte addends.
-  `unit.linux_compile` checks address identity, nonzero offsets, writes, archive extraction,
-  BSS, and system-linker preemption. `unit.elf_link` checks malformed instructions, overlapping
-  relocations, weak resolution and displacement range. Native dynamic data addresses and
-  external function addresses follow [#390](https://github.com/yrashk/ycxx/issues/390) and
-  [#407](https://github.com/yrashk/ycxx/issues/407).
+- Runtime addresses of default-visible Linux data and ordinary functions use
+  `R_X86_64_REX_GOTPCRELX`, including declarations defined in another object. The native static
+  linker checks and relaxes the RIP-relative MOV to LEA after resolving the symbol. System linkers
+  can preserve GOT binding. Static pointer initializers use absolute relocations with their byte
+  addends. `unit.linux_compile` checks data identity, offsets, writes, BSS, and preemption.
+  `unit.linux_function_addresses` checks function identity, indirect calls, archive extraction,
+  weak definition precedence, and system-linker preemption and aliases. `unit.elf_link` checks
+  malformed instructions, overlapping relocations and displacement range. Native dynamic addresses
+  follow [#390](https://github.com/yrashk/ycxx/issues/390).
   [Design](docs/design/linux-external-data-addresses.md) · [#414](https://github.com/yrashk/ycxx/issues/414)
+  · [#407](https://github.com/yrashk/ycxx/issues/407)
 - Simple external inline function definitions use weak ELF symbols. The unit combines inline
   flags from reachable declarations, including `constexpr` functions and ordinary members
   defined in their class. Calls and statically initialized pointers in different units resolve
@@ -897,10 +898,18 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
 - `static_assert(e)` and `static_assert(e, "message")` at namespace and block scope (the
   `StaticAssert` node); `if consteval` and `if !consteval` (`IfConsteval`, lowered to
   `consteval_br`).
+- In-bounds typed addresses of elements and rows of named namespace-scope constexpr arrays
+  ([conv.array], [expr.const], #111). The interpreter initializes scalar cells from the nested
+  aggregate value on first use. A read decodes the cell, and addresses retain the named object's
+  identity and byte offset. Serializing a typed pointer one past a nested subarray still needs
+  subobject provenance (#111).
 - Constant array bounds from const integral locals (#58), and address constants of variables and
-  functions (#57) as `VLvalue{VEntity, [], byte offset}`. The pipeline emits data relocations
+  functions (#57) as `VLvalue{VEntity, path, byte offset}`. The pipeline emits data relocations
   with the entity's symbol and byte addend on ELF and Mach-O, including references to symbols
   defined in another translation unit (#101).
+- Constant evaluation can read namespace-scope `constexpr` pointers erased to `void`
+  ([expr.const], [conv.ptr], #102). The interpreter reconstructs the original scalar or array
+  subobject path, including one-past addresses, from the constant's path and byte offset.
 - Errors say why: "not a constant expression: <the interpreter's reason>", located at the
   evaluated expression.
 - Tests: `tests/own/consteval` (spec-only); the draft's [dcl.constexpr]/5 ex. 3, [dcl.constinit]/3
@@ -1042,6 +1051,9 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
 - A qualified namespace function definition inherits C language linkage from a matching prior
   member declaration and uses its target namespace for body lookup. Ordinary and argument-dependent
   calls find the prior declaration and use the same unmangled symbol as C callers (#426).
+- An unqualified namespace function redeclaration inherits C language linkage from its corresponding
+  earlier declaration in the same namespace. Adjusted parameter types identify the redeclaration
+  among overloads ([basic.scope.scope], [basic.link], [dcl.link], #455).
 - A second definition of the same ordinary external C-linkage function in a translation unit is
   diagnosed across namespaces. Compatible declarations share the one definition and address
   ([dcl.link], [basic.def.odr], #446).
@@ -1118,6 +1130,11 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   their bound from the literal when it is left out; `extern T a[];`, an incomplete type
   (`Types::array_unknown`), completed by a later declaration with a bound ([basic.link]/11);
   arrays of pointers of unknown bound.
+- Unknown bounds survive abstract and grouped declarators, including pointer and reference
+  parameters. A parameter whose completed type is an array still adjusts to a pointer. Template
+  substitution preserves the omitted bound, so partial specializations match `T[]`
+  ([dcl.array], [dcl.fct], [temp.deduct.type], #222). The Itanium `A_` form carries omitted
+  bounds into ELF and Mach-O symbol names.
 - `__FLT_EVAL_METHOD__` is predefined (0), as Clang has it for the target.
 - Attributes are also accepted after a declarator-id, on parameters, alias-declarations and
   statements, and in the GNU form on class heads and after template-heads. A string literal
@@ -1126,16 +1143,20 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   being dropped.
 - Tests: `tests/own/decls` (11, three from the review). Five more draft examples pass.
 - Not yet: `sizeof`, `alignof`, `decltype`, `static_cast` and other casts, operator functions,
-  unions (the next steps of #133); a reference or pointer to an array of unknown bound; asm labels
-  on class members and the other gaps of #190.
+  unions (the next steps of #133); asm labels on class members and the other gaps of #190.
 
 ## `<cstdio>`, step 4a: casts, sizeof, alignof, decltype (#133, 2026-11-18)
 
 - **Casts:** `static_cast` ([expr.static.cast]): the implicit conversions, to `void`, between
   integers and enumerations (scoped ones too), and from `cv void*` to an object pointer;
   functional casts `T(e)` for keyword types, enumerations and typedef-names, and C-style casts
-  `(T)e`, as static_cast does them ([expr.type.conv]/2, [expr.cast]/4). Downcasts and the
-  const_cast and reinterpret_cast parts of a C-style cast are not supported yet.
+  `(T)e`, as static_cast does them ([expr.type.conv]/2, [expr.cast]/4).
+- Runtime `static_cast<D*>` and `static_cast<D&>` undo an accessible, unambiguous nonvirtual
+  base conversion to complete `D`, preserving null pointers and lvalue storage. The target
+  can add cv-qualifiers. Rvalue-reference, C-style and functional downcasts, and the
+  const_cast and reinterpret_cast parts of C-style casts are tracked in
+  [#199](https://github.com/yrashk/ycxx/issues/199). Constant evaluation of a base
+  adjustment in a downcast is tracked in [#102](https://github.com/yrashk/ycxx/issues/102).
 - `static_cast<T&&>` gives a compatible object lvalue the target type and xvalue category for
   reference binding, `decltype` and overload resolution. The cast designates the same object or
   an accessible, unambiguous base subobject. A compatible bit-field is read into a temporary.
@@ -1208,7 +1229,11 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
 - Member operators get the [over.oper] checks too; `S::operator@` and `N::operator@` define outside;
   unary `*` and `&` call operator functions; a deleted or ambiguous choice is an error, not the
   built-in operator. `N::T(…)` is a cast only when no function or variable hides N::T.
-- Tests: `tests/own/operators` (12, seven from the review), `tests/own/headers` (2).
+- Ordinary nonmember operators can be called explicitly as `operator+(a, b)`, `::operator+(a, b)`
+  or `N::operator+(a, b)`. Unqualified calls use ordinary lookup and argument-dependent lookup.
+  Qualified calls use namespace lookup. An unqualified member operator name can also use the
+  implicit object, including in a lambda that captures `this`. [#219](https://github.com/yrashk/ycxx/issues/219)
+- Tests: `tests/own/operators` and `tests/own/headers`.
 
 ## Cooked integer user-defined literals (#289, 2026-11-20)
 
@@ -1450,6 +1475,8 @@ session's.*
 - Named function-pointer declarations accept qualified return types, including at block scope
   ([dcl.ptr], [dcl.fct], [stmt.ambig], #433). A grouped pointer can name an existing namespace member,
   and a block declaration can take an unnamed function-pointer parameter (#449).
+- Parenthesized direct initialization accepts functional conversions with a braced operand or an
+  initial literal, including `S b(S(1));` and `S b(S{1});` ([dcl.ambig.res], #290).
 - Not yet: access, hiding and qualified functional casts of member types (#216); member alias
   templates (`template<…> using __apply = …` in a class), with member
   templates; template template parameters (#208); value-dependent expressions as template
@@ -2173,8 +2200,8 @@ values, end to end; results match Clang's bit for bit.
   a template-id without a target type (#335), and function pointer or reference template
   arguments (#406). A free immediate function selected from an overload is diagnosed outside an
   immediate invocation or context. General immediate-function name validation is tracked in #102.
-- The Linux x86-64 backend can call through an address taken from an internal function. Emitting
-  addresses of externally linked functions on that target is tracked in #407.
+- The Linux x86-64 backend supports calling through the address of an ordinary function with
+  internal or external linkage. [#407](https://github.com/yrashk/ycxx/issues/407)
 - Tests are in `tests/own/function-pointers/`, with draft examples for [over.over] and
   [temp.deduct.call] enabled.
 
@@ -2202,6 +2229,34 @@ values, end to end; results match Clang's bit for bit.
   the element cv-qualifiers in the composite pointer type ([expr.eq], [expr.rel], [expr.type],
   [conv.qual]). Nested array dimensions and comparisons between `const` and `volatile` arrays
   use the same rule.
+
+## Composite types involving pointers to void (#59)
+
+- Equality, ordering and conditional expressions combine a pointer to cv-qualified `void` and
+  a pointer to an object or `void` into a pointer to `void` with the union of the pointee
+  qualifiers ([expr.type], [expr.eq], [expr.rel], [expr.cond]).
+- Converting a pointer to an array to a pointer to `void` preserves the array's element
+  qualifiers ([basic.type.qualifier], [conv.ptr]).
+
+## Ordinary scalar allocation and deallocation (#293)
+
+- [expr.new] and [expr.delete] support complete, default-aligned integral and ordinary pointer
+  objects. The result of `new` is a prvalue pointer to the allocated type, with its cv-qualifiers.
+  Omitted initialization leaves the bytes alone, empty parentheses or braces give zero or null,
+  and explicit initializers use the scalar conversion and list-narrowing rules.
+- The ordinary global declarations of `operator new` and both `operator delete` overloads use the
+  target's `sizeof` result type. Written declarations and definitions of those signatures share
+  the same entities as implicit declarations. Allocation passes `sizeof(T)`, and single-object
+  delete evaluates its operand once and passes its address and `sizeof(T)` to the sized global
+  deallocator when non-null. The scoped spellings use the same functions. Global lookup and
+  sized dispatch follow Astra's independent draft and Itanium ABI review on #293.
+- Native lowering supports initializers proven nonthrowing from the analyzed expression tree.
+  Initializers that need an exception cleanup edge and constant evaluation of allocation remain
+  in #293. Namespace-scope allocation uses the existing dynamic initialization path. The issue
+  also tracks class, array, enumeration, floating-point, placement and over-aligned allocation,
+  and other allocation-function declarations.
+- Spec-only tests in `tests/own/scalar-allocation/` cover types, initialization, a typed null, and
+  invalid operands. A separate provider checks the address and size passed to deallocation.
 
 ## Bootstrap workarounds
 

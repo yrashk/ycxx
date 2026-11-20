@@ -92,6 +92,8 @@ public:
   // names join the lookup where [namespace.udir]/2 puts them.
   virtual std::vector<DeclId> visible_decls(NameId name, std::span<const EntityId> directives = {}) = 0;
   virtual ast::DeclSema decl_sema(DeclId d) = 0;
+  // A use of a global allocation function that may lack a written declaration in the unit.
+  virtual void use_allocation_function(EntityId) {}
   // What a constant evaluation fetches (§B7): `function_ir` of a function defined before the
   // current point ([expr.const]), and a namespace-scope variable as the interpreter sees it.
   virtual interp::Callee function_ir(EntityId f) = 0;
@@ -3850,7 +3852,8 @@ public:
     }
     // Through a base subobject or an identity-preserving glvalue cast ([class.temporary]/6).
     if (auto c = as<ast::ImplicitConversion>(e); c &&
-        (c->conversion == ast::ConversionKind::derived_to_base || c->conversion == ast::ConversionKind::qualification)) {
+        (c->conversion == ast::ConversionKind::derived_to_base || c->conversion == ast::ConversionKind::base_to_derived ||
+         c->conversion == ast::ConversionKind::qualification)) {
       Ex inner = extended({c->operand.id, e.begin + c->operand.at, e.end, {}});
       return node(ast::ImplicitConversion{c->info, c->conversion, c->function, at(inner, e.begin)}, e.begin, e.end, c->info);
     }
@@ -4724,10 +4727,38 @@ public:
     return convert_node(e, ast::ConversionKind::qualification, target, ValueCategory::xvalue);
   }
 
+  // [expr.static.cast]: reverse a valid conversion from the complete derived class to its
+  // base. `base_clause` admits only nonvirtual bases. A separate result for a failed applicable
+  // cast keeps the usual cast rules available for other operands.
+  std::optional<Ex> cast_base_to_derived(Ex e, QualType target, bool pointer, u32 at_) {
+    QualType from = pointer ? types().pointee(e.type()) : e.type();
+    QualType to = pointer ? types().pointee(target) : target;
+    if (!types().is_class(from) || !types().is_class(to) || same_unqualified(from, to) ||
+        !cv_within(object_cv(from), object_cv(to)) || !is_complete(to))
+      return std::nullopt;
+    EntityId d = types().class_of(to), b = types().class_of(from);
+    int paths = 0;
+    auto path = base_path(d, b, paths);
+    if (!path) return std::nullopt;
+    if (!check_base_path(to, b, path, paths, at_)) return Ex{NodeId::none, e.begin, e.end};
+    // Build the conversions in evaluation order, starting with B and undoing one edge at a time.
+    for (std::size_t i = path->size(); i-- > 0;) {
+      QualType result = target;
+      if (i != 0) {
+        QualType parent = types().add_cv(types().class_type((*path)[i - 1]), object_cv(to));
+        result = pointer ? types().pointer(parent) : parent;
+      }
+      ExprInfo info{result, e.cat(), 0};
+      e = node(ast::ImplicitConversion{info, ast::ConversionKind::base_to_derived, (*path)[i], at(e, e.begin)},
+               e.begin, e.end, info);
+    }
+    return e;
+  }
+
   // A conversion as `static_cast<to>(e)` performs it ([expr.static.cast]); a cast in functional
-  // notation or a cast-expression is one when static_cast applies ([expr.type.conv]/2,
-  // [expr.cast]/4). Downcasts and the const_cast and reinterpret_cast parts are not supported yet.
-  Ex static_cast_to(Ex e, QualType to, u32 at_) {
+  // notation or a cast-expression is one when the supported static_cast rules apply
+  // ([expr.type.conv]/2, [expr.cast]/4). The downcast slice is for named static_cast expressions.
+  Ex static_cast_to(Ex e, QualType to, u32 at_, bool allow_downcast = false) {
     if (!e.ok()) return e;
     if (dependent(e) || types().is_dependent(to))
       return dependent_node({e}, e.begin, e.end, types().is_dependent(to) ? std::nullopt : std::optional(Types::unqualified(to)));
@@ -4738,6 +4769,8 @@ public:
       const TypeRec ref = types().rec(to);
       if (ref.rvalue_ref && e.cat() == ValueCategory::lvalue && types().is_object(ref.inner)) {
         if (auto cast = cast_lvalue_to_xvalue(e, to, ref.inner, at_)) return *cast;
+      } else if (allow_downcast && !ref.rvalue_ref && e.cat() == ValueCategory::lvalue) {
+        if (auto cast = cast_base_to_derived(e, ref.inner, /*pointer=*/false, at_)) return *cast;
       }
       return convert(e, to, at_);
     }
@@ -4745,6 +4778,9 @@ public:
     Ex v = rvalue(e);
     if (!v.ok()) return v;
     QualType from = Types::unqualified(v.type());
+    if (allow_downcast && types().is_pointer(from) && types().is_pointer(target)) {
+      if (auto cast = cast_base_to_derived(v, target, /*pointer=*/true, at_)) return *cast;
+    }
     // /10: an integral or enumeration value to an enumeration; /9: a scoped enumeration's to an
     // integral type.
     // /10 also: a floating value, through the underlying type. A constant is folded, as an integer
@@ -4787,6 +4823,112 @@ public:
     if (converted.ok() && converted.info.bit_width)
       return convert_node(converted, ast::ConversionKind::integral, converted.type());
     return converted;
+  }
+
+  // [basic.stc.dynamic] makes the ordinary declarations visible even without a header.
+  Ex allocation_name_expr(AllocationFunction f, u32 begin, u32 end) {
+    const NameId name = ins().names.intern(allocation_name(f));
+    std::vector<ast::DeclSema> found;
+    for (const ast::DeclSema& d : w_->allocation_functions()) {
+      if (w_->entities.rec(d.entity).name != name) continue;
+      q_->use_allocation_function(d.entity);
+      found.push_back(d);
+    }
+    auto written = q_->namespace_members(EntityId::none, name);
+    found.insert(found.end(), written.begin(), written.end());
+    return decls_expr(std::move(found), true, name, begin, end);
+  }
+
+  // [expr.new]: initialize the object after the call to the global allocation function.
+  Ex new_object(QualType t, const std::optional<std::vector<Ex>>& args, const Braced* braces, u32 begin, u32 end) {
+    Ex fail{NodeId::none, begin, end};
+    if (types().has_placeholder(t) || types().is_dependent(t)) {
+      diag(begin, Diag::not_supported, lex::Tk::kw_new);
+      return fail;
+    }
+    if (!types().is_object(t)) {
+      diag(begin, Diag::new_requires_object, t);
+      return fail;
+    }
+    if (types().is_class(t) && !require_complete(t, begin)) return fail;
+    if (!scalar_allocation_type(t)) {
+      diag(begin, Diag::not_supported, lex::Tk::kw_new);
+      return fail;
+    }
+
+    Ex init;
+    if (braces) {
+      init = list_init(t, *braces);
+    } else if (!args) {
+      if (Types::is_const(types().canonical(t))) {
+        diag(begin, Diag::new_const_uninitialized, t);
+        return fail;
+      }
+      init = default_init(t, end, end);
+    } else if (args->empty()) {
+      init = value_init(t, end, end);
+    } else {
+      if (args->size() != 1) {
+        diag((*args)[1].begin, Diag::too_many_initializers, t);
+        return fail;
+      }
+      const Ex& value = args->front();
+      if (!value.ok()) return fail;
+      if (is_braced(value)) {
+        diag(value.begin, Diag::braces_for_scalar, t);
+        return fail;
+      }
+      // [dcl.init.general]: direct-initialization of bool from std::nullptr_t yields false.
+      init = types().is(t, Builtin::bool_) && types().is(value.type(), Builtin::nullptr_t)
+          ? to_bool(value, value.begin) : convert(value, t, value.begin);
+    }
+    if (!init.ok()) return fail;
+    QualType pointer = types().pointer(t);
+    if (dependent(init)) return dependent_node({init}, begin, end, pointer);
+
+    Ex size = size_of(t, false, begin, begin);
+    ast::DeclSema f = w_->allocation_function(AllocationFunction::allocate);
+    q_->use_allocation_function(f.entity);
+    ExprInfo fn_info{f.type, ValueCategory::lvalue, 0};
+    Ex callee = node(ast::DeclRef{fn_info, f.entity}, begin, begin, fn_info);
+    ExprInfo call_info{types().rec(f.type).inner, ValueCategory::prvalue, 0};
+    Child sizes[] = {at(size, begin)};
+    Ex allocation = node(ast::Call{call_info, f.entity, at(callee, begin), b_->list(sizes)}, begin, begin, call_info);
+    ExprInfo info{pointer, ValueCategory::prvalue, 0};
+    return node(ast::NewObject{info, at(allocation, begin), at(init, begin)}, begin, end, info);
+  }
+
+  // [expr.delete]: cv-qualifiers are ignored when passing the address to the global deallocator.
+  Ex delete_object(Ex e, u32 begin, u32 end) {
+    Ex fail{NodeId::none, begin, end};
+    if (!e.ok()) return fail;
+    QualType v = builtin(Builtin::void_);
+    if (dependent(e)) return dependent_node({e}, begin, end, v);
+    if (types().is_class(e.type()) || types().is_array(e.type())) {
+      diag(begin, Diag::not_supported, lex::Tk::kw_delete);  // only pointer operands in this slice
+      return fail;
+    }
+    if (!types().is_pointer(e.type()) || !types().is_object(types().pointee(e.type()))) {
+      diag(begin, Diag::delete_requires_pointer, e.type());
+      return fail;
+    }
+    QualType t = types().pointee(e.type());
+    if (types().is_class(t) && !require_complete(t, begin)) return fail;
+    if (!scalar_allocation_type(t)) {
+      diag(begin, Diag::not_supported, lex::Tk::kw_delete);
+      return fail;
+    }
+    Ex addr = convert_node(rvalue(e), ast::ConversionKind::pointer, types().pointer(v));
+    if (!addr.ok()) return fail;
+    Ex size = size_of(t, false, begin, begin);
+    EntityId f = w_->allocation_function(AllocationFunction::deallocate_sized).entity;
+    q_->use_allocation_function(f);
+    ExprInfo info{v, ValueCategory::prvalue, 0};
+    return node(ast::DeleteObject{info, f, at(addr, begin), at(size, begin)}, begin, end, info);
+  }
+
+  bool scalar_allocation_type(QualType t) {
+    return types().is_integral(t) || types().is_pointer(t);
   }
 
   // `sizeof` and `alignof` of a type ([expr.sizeof], [expr.alignof]), a `size_t` prvalue; zero
@@ -5027,40 +5169,58 @@ public:
     auto p = base_path(d, b, paths);
     return p && paths == 1 ? int(p->size()) : 0;
   }
-  // `e`, a glvalue of class type or a pointer to one, converted to its base class `b`
-  // ([conv.ptr]/3, [dcl.init.ref]/5, [expr.static.cast]): one derived-to-base conversion per
-  // direct base on the way, the cv-qualifiers kept. The base must be unambiguous and accessible
-  // here ([class.access.base]/4); diagnosed at `at_` if not.
-  Ex to_base(Ex e, EntityId b, u32 at_) {
-    bool pointer = types().is_pointer(e.type());
-    QualType ct = pointer ? types().pointee(e.type()) : e.type();
-    Cv cv = Types::cv(ct);
-    EntityId d = types().class_of(ct);
-    int paths = 0;
-    auto path = base_path(d, b, paths);
+  // Check ambiguity before looking at the access of any edge ([class.access.base]/4).
+  bool check_base_path(QualType ct, EntityId b, const std::optional<std::vector<EntityId>>& path, int paths, u32 at_) {
     if (!path || paths != 1) {
       diag(at_, Diag::ambiguous_base, types().class_type(b), Types::unqualified(ct));
-      return {NodeId::none, e.begin, e.end};
+      return false;
     }
-    EntityId from = d;
+    EntityId from = types().class_of(ct);
     for (EntityId step : *path) {
       const ClassRec* r = class_rec(from);
       auto x = std::ranges::find(r->bases, step, &BaseRec::cls);
       if (!accessible(from, x->access)) {
         diag(at_, Diag::inaccessible_base, types().class_type(b), Types::unqualified(ct));
-        return {NodeId::none, e.begin, e.end};
+        return false;
       }
+      from = step;
+    }
+    return true;
+  }
+
+  // `e`, a glvalue of class type or a pointer to one, converted to its base class `b`
+  // ([conv.ptr]/3, [dcl.init.ref]/5, [expr.static.cast]): one derived-to-base conversion per
+  // direct base on the way, the cv-qualifiers kept.
+  Ex to_base(Ex e, EntityId b, u32 at_) {
+    bool pointer = types().is_pointer(e.type());
+    QualType ct = pointer ? types().pointee(e.type()) : e.type();
+    Cv cv = Types::cv(ct);
+    int paths = 0;
+    auto path = base_path(types().class_of(ct), b, paths);
+    if (!check_base_path(ct, b, path, paths, at_)) return {NodeId::none, e.begin, e.end};
+    for (EntityId step : *path) {
       QualType st = types().add_cv(types().class_type(step), cv);
       ExprInfo info{pointer ? types().pointer(st) : st, pointer ? ValueCategory::prvalue : e.cat(), 0};
       e = node(ast::ImplicitConversion{info, ast::ConversionKind::derived_to_base, step, at(e, e.begin)}, e.begin, e.end, info);
-      from = step;
     }
     return e;
   }
 
   bool pointer_convertible(QualType from, QualType to) {
     QualType a = types().pointee(from), b = types().pointee(to);
-    return types().is_void(b) && types().is_object(a) && cv_within(Types::cv(a), Types::cv(b));
+    return types().is_void(b) && types().is_object(a) && cv_within(object_cv(a), object_cv(b));
+  }
+
+  // [expr.type]: combine the pointee cv-qualifiers of a pointer to void and a
+  // pointer to an object or void.
+  std::optional<QualType> composite_void_pointer(QualType a, QualType b) {
+    if (!types().is_pointer(a) || !types().is_pointer(b)) return std::nullopt;
+    a = types().pointee(a);
+    b = types().pointee(b);
+    if (!types().is_void(a)) std::swap(a, b);
+    if (!types().is_void(a) || (!types().is_void(b) && !types().is_object(b))) return std::nullopt;
+    Cv cv = Cv(std::to_underlying(object_cv(a)) | std::to_underlying(object_cv(b)));
+    return types().pointer(types().add_cv(builtin(Builtin::void_), cv));
   }
 
   // [conv.qual]: pointers of equal depth to the same type, where each level of `to` holds the
@@ -5402,6 +5562,12 @@ public:
         diag(op_at, Diag::member_pointer_values);
         return {NodeId::none, begin, end};
       }
+      if (auto to = composite_void_pointer(ta, tc)) {
+        a = convert(a, *to, op_at);
+        c = convert(c, *to, op_at);
+        if (!a.ok() || !c.ok()) return {NodeId::none, begin, end};
+        return bin(k, a, c, b);
+      }
       if (types().is_pointer(ta) && types().is_pointer(tc)) {
         QualType pa = types().pointee(ta), pc = types().pointee(tc);
         // [expr.type]/4.6: a pointer to a derived class converted to one to its base class.
@@ -5554,6 +5720,11 @@ public:
       } else if (types().is_pointer(tb) && is_null_pointer_constant(t)) {
         a = convert_node(a, ast::ConversionKind::null_pointer, tb);
         info = {tb, ValueCategory::prvalue, 0};
+      } else if (auto to = composite_void_pointer(ta, tb)) {
+        a = convert(a, *to, q_at);
+        b = convert(b, *to, q_at);
+        if (!a.ok() || !b.ok()) return {NodeId::none, begin, end};
+        info = {*to, ValueCategory::prvalue, 0};
       } else if (types().is_pointer(ta) && types().is_pointer(tb) &&
                  (base_depth(types().pointee(ta), types().pointee(tb)) || base_depth(types().pointee(tb), types().pointee(ta)))) {
         // [expr.cond]/7.3: the composite pointer type, a pointer to the base class.
