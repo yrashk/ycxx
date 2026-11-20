@@ -198,7 +198,6 @@ draft/dcl/dcl.init.ref-3.accept.cpp dynamic initialization of a namespace-scope 
 draft/dcl/dcl.init.ref-5.reject.cpp errors elsewhere: 'struct' not supported yet
 draft/dcl/dcl.init.ref-6.reject.cpp errors elsewhere: 'struct' not supported yet
 draft/dcl/dcl.link-2.accept.cpp 'typedef' not supported yet
-draft/dcl/dcl.link-4.reject.cpp errors elsewhere: 'namespace' not supported yet
 draft/dcl/dcl.link-5.reject.cpp errors elsewhere: conflicting declaration of 'f'
 draft/dcl/dcl.meaning.general-1.reject.cpp errors elsewhere: 'namespace' not supported yet
 draft/dcl/dcl.meaning.general-2.reject.cpp errors elsewhere: 'namespace' not supported yet

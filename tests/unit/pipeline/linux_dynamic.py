@@ -254,6 +254,10 @@ def main():
         reject(*options, 'start.cpp', 'link/extra.so', error="a custom '_start' is unsupported for dynamic ELF linking")
         source('data.cpp', 'extern "C" int exported_data(); int main() { return exported_data(); }')
         reject(*options, 'data.cpp', 'link/leaf.input', error="unsupported ELF import 'exported_data'")
+        source('function-address.cpp', 'extern "C" int step(int, int);\n'
+               'int main() { auto pointer = &step; return pointer(7, 8); }')
+        reject(*options, 'function-address.cpp', 'link/leaf.input',
+               error="native dynamic ELF GOT address for 'step' is unsupported")
         source('script.so', 'GROUP ( link/leaf.input )')
         reject(*options, 'main.cpp', 'script.so', error='expected a little-endian x86-64 ELF shared object')
         provider('no-soname.so', None)

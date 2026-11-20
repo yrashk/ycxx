@@ -222,6 +222,7 @@ private:
   std::optional<u32> literal_object(ConstId s);
   Flow global_object(EntityId e, u32& out);
   Flow address(u32 obj, QualType pointee, i64 offset, Value& out);
+  Flow erased_address(u32 obj, std::span<const u32> indices, i64 offset, Value& out);
   i64 offset_of(const Value& p);
   bool may_overlap(const Value& a, const Value& b);
 
@@ -528,7 +529,9 @@ Machine::Flow Machine::constant(ConstId c, QualType type, Value& out) {
   }
   if (!vs.is<ast::VLvalue>(c) || s.kind != Kind::pointer || s.is_nullptr) return fail(Reason::unsupported_constant);
   auto l = vs.get<ast::VLvalue>(c);
-  if (!in_->seqs.elements(l.path).empty()) return fail(Reason::unsupported_constant);
+  auto indices = in_->seqs.elements(l.path);
+  bool erased = ast::is_void(*in_, s.inner);
+  if (!erased && !indices.empty()) return fail(Reason::unsupported_constant);
   u32 o = 0;
   if (vs.is<ast::VString>(l.base)) {
     auto lit = literal_object(l.base);
@@ -545,7 +548,26 @@ Machine::Flow Machine::constant(ConstId c, QualType type, Value& out) {
   } else {
     return fail(Reason::unsupported_constant);
   }
-  return address(o, s.inner, l.offset, out);
+  return erased ? erased_address(o, indices, l.offset, out) : address(o, s.inner, l.offset, out);
+}
+
+// An erased pointer retains its array path and offset ([conv.ptr]). A remaining offset equal to
+// the designated object's size represents the one-past pointer for an object treated as an array
+// of one. A path ending at an array's bound already represents one past that array.
+Machine::Flow Machine::erased_address(u32 obj, std::span<const u32> indices, i64 offset, Value& out) {
+  Value pointer{VKind::object, false, obj, 0};
+  for (u32 index : indices) pointer.bits = child(u32(pointer.bits), {ir::Step::elem, index});
+  bool past = false;
+  auto place = resolve(pointer, {}, past);
+  if (!place || offset < 0) return fail(Reason::unsupported_constant);
+  i64 start = offset_of(pointer);
+  if (offset != start) {
+    if (past || offset < start || u64(offset - start) != shape(place->type).size)
+      return fail(Reason::unsupported_constant);
+    pointer.past = true;
+  }
+  out = pointer;
+  return Flow::next;
 }
 
 // A pointer to `pointee` at `offset` bytes into object `obj`: down through array elements until

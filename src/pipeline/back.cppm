@@ -86,7 +86,7 @@ struct Entity {
   ast::Linkage linkage = ast::Linkage::external;
   bool is_constexpr = false;
   std::optional<ast::Loc> at;  // its first declarator, for diagnostics
-  EntityId scope = EntityId::none;  // the class of a member
+  EntityId scope = EntityId::none;  // the enclosing namespace or class
   Special special = Special::none;  // a constructor or destructor
   // A function template specialization: its template's function type and its template arguments,
   // which its name encodes (Itanium §5.1.5.7–8).
@@ -146,6 +146,7 @@ struct ClassShape {
   // destructor, and the copy not deleted, so the calling convention may pass it in registers.
   bool trivial_calls = true;
   std::vector<std::uint8_t> bit_widths{};  // parallel to fields, empty for ordinary records
+  bool layout_uncertain = false;  // source packing or alignment that native layout does not apply
 };
 struct EnumShape {
   EntityId entity = EntityId::none;
@@ -231,8 +232,8 @@ L2Body deserialize_from(engine::Source& in, std::type_identity<L2Body>) {
 // §2.4, so that `optimized` is keyed by what it compiles, not by where it came from.
 struct OptUnit {
   L2Body body;
-  std::vector<ir::EntityId> local;  // the entities it refers to that this TU defines, sorted by handle
-  std::vector<ir::EntityId> external_data;  // data references using the ELF GOT, sorted by handle
+  std::vector<ir::EntityId> local;  // directly addressable references, sorted by handle
+  std::vector<ir::EntityId> got_symbols;  // addresses using the ELF GOT, sorted by handle
   // The inline candidates and callee summaries of §2.4 come with level 1.
 };
 class UnitStore {
@@ -375,6 +376,7 @@ class QueryLayout {
   }
   ir::TypeLayout type(QualType q) const;
   ir::SubObject step(QualType q, ir::PathStep s) const;
+  bool is_class(EntityId e) const { return classes_.contains(std::to_underlying(e)); }
   ir::ConstValue constant(ConstId c) const {
     ConstLayout v = cx_->fetch<LayoutConstant>(c);
     if (!v.base) return v.bits;
@@ -385,6 +387,7 @@ class QueryLayout {
 
  private:
   std::optional<ClassLayout> class_layout(QualType c) const;
+  std::uint8_t sysv_integer_eightbytes(const ClassShape& shape, const ClassLayout& layout) const;
   ast::Placed placed(QualType t) const;
 
   engine::SyncCtx* cx_;
@@ -667,13 +670,15 @@ ir::TypeLayout QueryLayout::type(QualType q) const {
     if (auto done = records_.find(std::to_underlying(in.types.get<ast::TClass>(c).entity)); done != records_.end()) return done->second;
   if (auto r = class_layout(c)) {
     auto it = classes_.find(std::to_underlying(in.types.get<ast::TClass>(c).entity));
-    ir::TypeLayout l{record, r->size, r->align, false, {}, it == classes_.end() || it->second->trivial_calls};
+    ir::TypeLayout l{record, r->size, r->align, false, {}, it->second->trivial_calls};
     l.empty = r->placed.empty;  // no data members, in it or its bases
     l.data = r->placed.nvsize;
+    if (target.triple == ast::x86_64_linux.triple)
+      l.sysv_integer_eightbytes = sysv_integer_eightbytes(*it->second, *r);
     // A homogeneous floating-point aggregate (AAPCS64 §5.9.5): every member, through arrays and
     // member classes, of one floating type, 1 to 4 of them; a union's members overlap, so it has
     // as many as its largest.
-    bool union_ = it != classes_.end() && it->second->union_;
+    bool union_ = it->second->union_;
     std::uint32_t count = 0;
     std::uint8_t bytes = 0;
     // Its non-empty bases' members count as its own (AAPCS64 §5.9.5, as Clang has it).
@@ -710,6 +715,25 @@ ir::TypeLayout QueryLayout::type(QualType q) const {
   if (in.types.is<ast::TEnum>(c))
     if (auto it = enums_.find(std::to_underlying(in.types.get<ast::TEnum>(c).entity)); it != enums_.end()) return type(it->second);
   return {};
+}
+
+// System V AMD64 psABI §3.2.3. Only flat records of ordinary integral members participate.
+// Padding leaves the corresponding eightbyte class unchanged (initially NO_CLASS).
+std::uint8_t QueryLayout::sysv_integer_eightbytes(const ClassShape& shape, const ClassLayout& l) const {
+  if (!shape.trivial_calls || shape.layout_uncertain || shape.union_ || !shape.bases.empty() || !shape.bit_widths.empty() ||
+      l.fields.empty() || l.size > 16 || l.align > 8) return 0;
+  std::uint64_t end = 0;
+  std::uint8_t mask = 0;
+  for (const ir::SubObject& f : l.fields) {
+    auto b = ast::builtin_of(*universe().in, f.type);
+    if (!b || !ast::is_integral(*b)) return 0;
+    const ast::BuiltinLayout field = (*target_)[*b];
+    if (!field.size || field.size > 8 || field.align > l.align || f.offset % field.align ||
+        f.offset < end || f.offset + field.size > l.size) return 0;
+    end = f.offset + field.size;
+    mask |= std::uint8_t((1u << (f.offset / 8)) | (1u << ((end - 1) / 8)));
+  }
+  return mask;
 }
 
 // A class's layout (`ast::record_layout`, the rule sema's `sizeof` reads too). Its members are the
@@ -966,30 +990,39 @@ bool linux_fixed_scalar(ir::TypeLayout l) {
          (l.kind == ir::TypeKind::integer && (l.size == 1 || l.size == 2));
 }
 
-// Lowering implements the Darwin aggregate calling convention. Check the original signature of
-// each function and call before lowering can erase a class or ellipsis.
+// Check the original signature of each function and call before lowering erases the types.
 std::string_view linux_signature_error(const ast::Interners& in, const QueryLayout& layout, QualType type,
-                                       bool allow_variadic = false) {
+                                       bool allow_variadic, bool allow_aggregates) {
   QualType canonical = in.types.canon(type);
   if (!in.types.is<ast::TFunction>(canonical)) return "the function type is unavailable";
   auto f = in.types.get<ast::TFunction>(canonical);
   if (f.variadic && !allow_variadic) return "variadic functions are not supported";
+  allow_aggregates = allow_aggregates && !f.variadic;
+  auto supported = [&](ir::TypeLayout l) {
+    return linux_fixed_scalar(l) || (allow_aggregates && l.sysv_integer_eightbytes);
+  };
   ir::TypeLayout result = layout.type(f.ret);
-  if (result.kind != ir::TypeKind::void_ && !linux_fixed_scalar(result))
+  if (result.kind != ir::TypeKind::void_ && !supported(result)) {
+    if (allow_aggregates && result.kind == ir::TypeKind::record) return "unsupported aggregate result layout";
     return "only void, bool, 8-, 16-, 32- and 64-bit integer, pointer and reference results are supported";
-  for (QualType p : in.seqs.elements(f.params))
-    if (!linux_fixed_scalar(layout.type(p)))
+  }
+  for (QualType p : in.seqs.elements(f.params)) {
+    ir::TypeLayout parameter = layout.type(p);
+    if (!supported(parameter)) {
+      if (allow_aggregates && parameter.kind == ir::TypeKind::record) return "unsupported aggregate parameter layout";
       return "only bool, 8-, 16-, 32- and 64-bit integer, pointer and reference parameters are supported";
+    }
+  }
   return {};
 }
 
 std::string_view linux_direct_call_error(const QueryLayout& layout, const ir::Function& body, ir::NodeId call) {
   auto imms = body.imms_of(call);
-  // The L1 by-value bit identifies a class argument represented by a pointer.
-  if (imms[2]) return "aggregate arguments are not supported";
   // The tail values have already undergone the default argument promotions ([expr.call]).
-  for (ir::ValueId v : body.operands_of(call).last(imms[1]))
-    if (!linux_ellipsis_scalar(layout.type(body.value(v).type.type)))
+  // The by-value bits distinguish class objects from genuine pointer arguments.
+  auto args = body.operands_of(call).subspan(1);
+  for (std::size_t i = args.size() - imms[1]; i < args.size(); ++i)
+    if (((imms[2] >> i) & 1) || !linux_ellipsis_scalar(layout.type(body.value(args[i]).type.type)))
       return "only 32- and 64-bit integer and pointer ellipsis arguments are supported";
   return {};
 }
@@ -1006,14 +1039,19 @@ engine::query_task<Lowered> Lower::run(engine::Ctx& cx, FnKey k) {
   if (linux) {
     const ast::Interners& in = *universe().in;
     const FunctionDef& def = (co_await cx.fetch<FunctionSourceQ>(k)).def;
+    const TranslationUnit& tu = co_await cx.fetch<TuUnit>(k.tu);
+    auto ordinary_free_function = [&](const Entity& e) {
+      return !e.template_type && !layout.is_class(e.scope);
+    };
+    auto fn = std::ranges::find(tu.entities, k.fn, &Entity::id);
+    bool allow_aggregates = !def.this_type && fn != tu.entities.end() && ordinary_free_function(*fn);
     QualType type = def.body.deduced ? def.body.deduced_type : def.decl.type;
-    if (auto error = linux_signature_error(in, layout, type); !error.empty()) {
+    if (auto error = linux_signature_error(in, layout, type, false, allow_aggregates); !error.empty()) {
       auto message = std::format("x86-64 System V ABI: {}", error);
       auto located = co_await located_error(cx, k.tu, ast::Loc{def.item, def.body_offset}, std::move(message));
       co_return Lowered{std::nullopt, {}, std::move(located)};
     }
     if (!f.body) co_return Lowered{std::nullopt, {}, f.error};
-    const TranslationUnit& tu = co_await cx.fetch<TuUnit>(k.tu);
     const ir::Function& body = *f.body;
     for (std::size_t i = 0; i < body.nodes.size(); ++i) {
       const auto n = ir::NodeId(static_cast<std::uint32_t>(i));
@@ -1021,21 +1059,26 @@ engine::query_task<Lowered> Lower::run(engine::Ctx& cx, FnKey k) {
       const bool direct = op == ir::Op::call;
       std::optional<QualType> callee;
       EntityId callee_id = EntityId::none;
+      bool aggregate_callee = false;
       if (direct) {
         callee_id = EntityId(static_cast<std::uint32_t>(body.imms_of(n)[0]));
         auto e = std::ranges::find(tu.entities, callee_id, &Entity::id);
-        if (e != tu.entities.end()) callee = e->type;
+        if (e != tu.entities.end()) {
+          callee = e->type;
+          aggregate_callee = ordinary_free_function(*e);
+        }
       } else if (op == ir::Op::call_ind) {
         QualType ptr = body.value(body.operands_of(n)[1]).type.type;
         callee = ast::pointee_of(in, ptr);
       } else continue;
-      std::string_view error = callee ? linux_signature_error(in, layout, *callee, direct) : "the function type is unavailable";
+      std::string_view error = callee ? linux_signature_error(in, layout, *callee, direct, aggregate_callee)
+                                      : "the function type is unavailable";
       if (direct && callee && !error.empty()) {
         // The declaration can still have a placeholder return type. Read the signature already
         // deduced in this unit without depending on the callee's lowering ([dcl.spec.auto]).
         const auto definition = std::ranges::find(tu.functions, callee_id, &FunctionDef::entity);
         if (definition != tu.functions.end() && definition->body.deduced)
-          error = linux_signature_error(in, layout, definition->body.deduced_type, true);
+          error = linux_signature_error(in, layout, definition->body.deduced_type, true, aggregate_callee);
       }
       if (direct && error.empty()) error = linux_direct_call_error(layout, body, n);
       if (error.empty()) continue;
@@ -1044,6 +1087,7 @@ engine::query_task<Lowered> Lower::run(engine::Ctx& cx, FnKey k) {
       auto located = co_await located_error(cx, k.tu, at, std::format("x86-64 System V ABI: call: {}", error));
       co_return Lowered{std::nullopt, {}, std::move(located)};
     }
+    config.sysv_amd64 = true;
     config.int_arg_registers = 6;
     // Extend outgoing narrow results for interoperability. Lowering truncates incoming results
     // to the declared width, as the System V AMD64 psABI §3.2.3 leaves excess bits unspecified.
@@ -1062,21 +1106,27 @@ engine::query_task<Lowered> Lower::run(engine::Ctx& cx, FnKey k) {
 }
 
 // The entities a function's code refers to (`symbol` and `call` operands).
-std::vector<ir::EntityId> references(const l2::Function& body) {
-  std::vector<ir::EntityId> out;
+struct SymbolReference {
+  ir::EntityId entity;
+  l2::Op op;
+};
+
+std::vector<SymbolReference> references(const l2::Function& body) {
+  std::vector<SymbolReference> out;
   for (std::uint32_t n = 0; n < body.nodes.size(); ++n) {
     l2::Op op = body.nodes[n].op;
-    if (op == l2::Op::symbol || op == l2::Op::call) out.push_back(ir::EntityId(std::uint32_t(body.imms_of(ir::NodeId(n))[0])));
+    if (op == l2::Op::symbol || op == l2::Op::call)
+      out.push_back({ir::EntityId(std::uint32_t(body.imms_of(ir::NodeId(n))[0])), op});
   }
   return out;
 }
 
 struct SymbolAddresses {
-  std::vector<EntityId> direct, external_data;
+  std::vector<EntityId> direct, got;
 };
 
-// ELF default-visible definitions can be preempted. Its data declarations use the GOT, and
-// internal definitions can use the symbol itself in a direct displacement.
+// ELF default-visible symbols can be preempted, so their addresses use the GOT.
+// Internal definitions can use the symbol itself in a direct displacement.
 struct TuSymbolAddresses {
   using Key = TuId;
   using Value = SymbolAddresses;
@@ -1095,9 +1145,9 @@ struct TuSymbolAddresses {
     for (const Variable& v : u.variables) add(v.entity);
     if (linux) {
       for (const Entity& e : u.entities)
-        if (!e.is_function && (e.linkage == ast::Linkage::external || e.linkage == ast::Linkage::module))
-          out.external_data.push_back(e.id);
-      std::ranges::sort(out.external_data);
+        if (e.linkage == ast::Linkage::external || e.linkage == ast::Linkage::module)
+          out.got.push_back(e.id);
+      std::ranges::sort(out.got);
     }
     std::ranges::sort(out.direct);
     co_return out;
@@ -1109,13 +1159,13 @@ engine::query_task<UnitRef> UnitQ::run(engine::Ctx& cx, FnKey k) {
   if (!lowered.body) co_return UnitRef{std::nullopt, lowered.error};
   // Which references can be addressed directly, including the function's string literals.
   OptUnit u{*lowered.body, {}, {}};
-  for (ir::EntityId e : references(u.body.f)) {
+  for (auto [e, op] : references(u.body.f)) {
     if (std::ranges::binary_search(symbols.direct, e) || std::ranges::contains(lowered.strings, e, &StringUse::entity))
       u.local.push_back(e);
-    else if (std::ranges::binary_search(symbols.external_data, e))
-      u.external_data.push_back(e);
+    else if (op == l2::Op::symbol && std::ranges::binary_search(symbols.got, e))
+      u.got_symbols.push_back(e);
   }
-  for (auto* ids : {&u.local, &u.external_data}) {
+  for (auto* ids : {&u.local, &u.got_symbols}) {
     std::ranges::sort(*ids);
     ids->erase(std::ranges::unique(*ids).begin(), ids->end());
   }
@@ -1127,7 +1177,7 @@ engine::query_task<Machine> Optimized::run(engine::Ctx& cx, OptKey k) {
   const OptUnit& u = universe().units->at(k.unit);
   // Level 0: `lower` already ran (it made the unit); selection and stack slots (§O7).
   if (k.target == obj::target::x86_64_linux) {
-    auto m = x86_64::compile_function(u.body.f, u.local, u.external_data);
+    auto m = x86_64::compile_function(u.body.f, u.local, u.got_symbols);
     if (!m) co_return Machine{std::nullopt, m.error()};
     co_return Machine{std::nullopt, {}, std::move(*m)};
   }
@@ -1400,7 +1450,7 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
   {
     const auto ls = co_await cx.par_map<Lower>(lowered);  // all hits
     for (const Lowered& l : ls) {
-      for (ir::EntityId e : references(l.body->f)) used.insert(ir::raw(e));
+      for (const auto& ref : references(l.body->f)) used.insert(ir::raw(ref.entity));
     }
   }
   for (const FnKey& f : lowered) used.insert(ir::raw(f.fn));

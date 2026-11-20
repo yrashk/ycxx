@@ -233,12 +233,13 @@ clauses = ['lex.ext', 'over.literal']
 std = 'C++11'
 ftm = '__cpp_user_defined_literals'
 detect = '''\boperator\s*""\s*\w+|""_\w+|\b\d[\w']*_\w+\b|\b\d+(?:ms|us|ns|min|h|s|sv)\b|""(?:s|sv)\b'''
-status = 'missing'
+status = 'partial'
 probe = '''
 constexpr unsigned long long operator""_k(unsigned long long v) { return v * 1000; }
 int main() { return 2_k == 2000 ? 0 : 1; }
 '''
 issues = [289]
+note = 'Cooked integer calls through namespace literal operators. Raw, floating-point, character, string and template calls remain.'
 
 [[feature]]
 id = 'lex-size-t-suffix'
@@ -508,8 +509,8 @@ std = 'C++11'
 ftm = '__cpp_rvalue_references'
 detect = '\bstd::(?:move|forward)\b|\w&&(?=\s*[\w,)>.])'
 status = 'partial'
-issues = [199, 290]
-note = 'reference downcasts and the `S b(S(1))` initializer ambiguity'
+issues = [199]
+note = 'reference downcasts'
 probe = '''
 struct S { int v; S(int x) : v(x) {} S(S&& o) : v(o.v) { o.v = 0; } };
 int main() { int&& r = 1; S a(1); S b(static_cast<S&&>(a)); return (r == 1 && b.v == 1 && a.v == 0) ? 0 : 1; }
@@ -653,7 +654,8 @@ group = 'basic'
 clauses = ['expr.new', 'expr.delete', 'basic.stc.dynamic*', 'dcl.fct.def.replace']
 std = 'C++98'
 detect = '\bnew\s+[\w:(]|\bdelete\s*(?:\[\s*\])?\s*[\w(*]'
-status = 'missing'
+status = 'partial'
+note = 'ordinary global scalar new and single-object delete for integral and pointer objects; class and array allocation, placement, and exception cleanup remain'
 probe = '''
 struct S { int v; S(int x) : v(x) {} };
 int main() { S* p = new S(5); int r = p->v; delete p; int* a = new int[3]; delete[] a; return r == 5 ? 0 : 1; }
@@ -683,7 +685,8 @@ clauses = ['basic.stc.dynamic.deallocation']
 std = 'C++14'
 ftm = '__cpp_sized_deallocation'
 detect = '\boperator\s+delete\s*(?:\[\s*\])?\s*\([^)]*,\s*(?:std::)?size_t'
-status = 'missing'
+status = 'partial'
+note = 'ordinary global sized delete for complete integral and pointer objects'
 issues = [293]
 
 [[feature]]
@@ -1197,11 +1200,17 @@ clauses = ['dcl.struct.bind']
 std = 'C++17'
 ftm = '__cpp_structured_bindings'
 detect = '\bauto\s*(?:const\s*)?&{0,2}\s*\['
-status = 'missing'
+status = 'partial'
 issues = [285]
+note = 'Block-scope bindings for arrays with scalar elements. Class and tuple-like bindings remain.'
 probe = '''
-struct P { int x, y; };
-int main() { P p{1, 2}; auto [a, b] = p; int arr[2] = {3, 4}; auto& [c, d] = arr; return a + b + c + d - 10; }
+int main() {
+  int arr[2] = {3, 4};
+  auto [a, b] = arr;
+  auto& [c, d] = arr;
+  d = 5;
+  return a + b + c + d - 15;
+}
 '''
 
 [[feature]]
@@ -1362,9 +1371,13 @@ detect = '\bextern\s+""'
 status = 'done'
 probe = '''
 extern "C" int abs(int);
-namespace api { extern "C" int twice(int); }
+namespace api {
+extern "C" int twice(int);
+extern "C" int plus_one(int);
+int plus_one(int x) { return x + 1; }
+}
 int api::twice(int x) { return 2 * x; }
-int main() { return api::twice(abs(-3)) == 6 ? 0 : 1; }
+int main() { return api::plus_one(api::twice(abs(-3))) == 7 ? 0 : 1; }
 '''
 
 [[feature]]

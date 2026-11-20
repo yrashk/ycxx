@@ -1,6 +1,5 @@
 // θ step 1 (#279), spec-only: `auto [a, b] = arr;` copies the array and binds each name to an element of
 // the copy; the names have the element type ([dcl.struct.bind], [dcl.type.decltype]).
-// XFAIL: ycxx structured bindings, #285
 template<class A, class B> struct same { static constexpr bool value = false; };
 template<class A> struct same<A, A> { static constexpr bool value = true; };
 

@@ -1875,6 +1875,12 @@ qualified namespace definition, the earlier member supplies both the target name
 inherited language linkage. Body lookup starts in the target namespace. The definition does
 not introduce a name into its lexical namespace ([dcl.meaning.general], [basic.lookup.unqual]).
 
+An unqualified namespace function declaration inherits C language linkage from a corresponding
+earlier declaration in its target namespace ([basic.link], [dcl.link]). The declaration's
+namespace and canonical adjusted parameter types determine correspondence at its locus
+([basic.scope.scope]). The complete function type, including the return type, is then checked
+as part of redeclaration validation.
+
 Entities with internal linkage, members of unnamed namespaces and local entities get ids that are
 **TU-free**: `(scope entity, name, declaration id of the first declaration)` for the first two
 (the unnamed namespace itself is identified by the declaration id of its first
@@ -2552,6 +2558,11 @@ visibility and reachability ([module.interface], [module.reach]); the global mod
 pruned by decl-reachability ([module.global.frag]). Header units ([module.import]/5) are `pp` runs
 in an isolated context (command-line macros only) whose macro delta is imported; the region is
 then shared like any other.
+
+Within a TU, declarations in different namespaces can name the same C-linkage function
+([dcl.link]). Its definition checks the shared entity at the declaration point ([basic.def.odr]).
+The stand-in uses known definitions and, when needed, resolves earlier namespace function items
+indexed under the same spelling. The check is independent of ordinary namespace lookup.
 
 ODR ([basic.def.odr]) as a by-product: every entity-keyed query (`class_def`, `layout`,
 `function_ir` of an inline function, `instantiate_*`, `satisfies`, `constant_value` of an inline

@@ -1,6 +1,5 @@
 // θ step 1 (#279), spec-only: `auto& [x, y] = arr;` binds the names to the array's own elements, so
 // assignment through them modifies the array ([dcl.struct.bind]).
-// XFAIL: ycxx structured bindings, #285
 int main() {
   int arr[2] = {1, 2};
   auto& [x, y] = arr;
