@@ -74,7 +74,7 @@ struct OrderedBinary {
 
 // Simple and compound assignment: the right operand is sequenced before the left
 // ([expr.assign]).
-enum class AssignOp : u8 { assign, mul, div, rem, add, sub, shl, shr, bit_and, bit_xor, bit_or };
+enum class AssignOp : u8 { assign, mul, div, rem, add, sub, shl, shr, bit_and, bit_xor, bit_or, trivial_class_copy };
 
 // For a compound assignment `E1 op= E2` ([expr.assign]), `computation` is the type `E1 op E2`
 // is computed in: the common type of the usual arithmetic conversions, the promoted type of `E1`
@@ -82,6 +82,8 @@ enum class AssignOp : u8 { assign, mul, div, rem, add, sub, shl, shr, bit_and, b
 // it (or, for a shift, promoted; for a pointer, an integer), and the result is converted back to
 // `E1`'s type. A simple assignment's `rhs` is converted to `E1`'s type, and `computation` is
 // `E1`'s type too.
+// A `trivial_class_copy` is an assignment whose implicit operator and representation copy
+// were checked by sema. The right side can designate its source object directly.
 struct Assign {
   ExprInfo info;
   AssignOp op;
@@ -220,6 +222,15 @@ struct MemberCall {
   EntityId function;
   [[=sequenced(0)]] Child object;
   [[=indeterminately_sequenced(1)]] ChildList args;
+};
+
+// Assignment notation calls a member function with the argument sequenced before its object
+// ([expr.assign], [over.match.oper]). `object` is the implicit pointer argument.
+struct AssignmentCall {
+  ExprInfo info;
+  EntityId function;
+  [[=sequenced(0)]] Child rhs;
+  [[=sequenced(1)]] Child object;
 };
 
 // List-initialization of an aggregate ([dcl.init.aggr]), as analysed: one element per array
@@ -467,7 +478,7 @@ using Nodes = closed_list<Literal, DeclRef, Paren, Unary, Binary, OrderedBinary,
                           IfConsteval, StaticAssert, Member, InitList, ValueInit, DefaultInit, This,
                           MemberCall, Materialize, CtorCall, MemberInit, Destructor, DestroyMember, Dependent,
                           DepName, CondDecl, Switch, Case, Default, Label, Goto, BuiltinCall, Lambda, DefaultArg,
-                          StaticInit, StaticVar, NewObject, DeleteObject, VariadicBuiltin>;
+                          StaticInit, StaticVar, NewObject, DeleteObject, VariadicBuiltin, AssignmentCall>;
 
 static_assert(Nodes::size < max_node_kinds);
 
