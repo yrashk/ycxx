@@ -53,7 +53,8 @@ def main():
             pid, = (line.removeprefix('pid: ') for line in status.splitlines() if line.startswith('pid: '))
             return int(pid)
 
-        for name in ('group-a', 'group-b', 'group-start', 'strong-a', 'strong-b',
+        for name in ('group-a', 'group-b', 'group-start', 'strong-a', 'strong-b', 'group-b-ghost',
+                     'group-b-discarded-export', 'group-demand-export-start',
                      'startup-group-winning', 'startup-group-losing'):
             run([cc, '-c', fixtures / f'{name}.S', '-o', f'{name}.o'])
 
@@ -69,6 +70,12 @@ def main():
         main = fixtures / 'startup-main.cpp'
         link(main, 'startup-group-winning.o', 'startup-group-losing.o', result=23)
         link(main, 'startup-group-losing.o', 'startup-group-winning.o', result=99)
+        assert link('group-start.o', 'group-a.o', 'group-b-ghost.o', result=23) == first
+        reject('group-start.o', 'group-b-ghost.o', 'group-a.o', error="undefined symbol 'ghost'")
+        start = 'group-demand-export-start.o'
+        export = 'group-b-discarded-export.o'
+        link(start, export, 'group-a.o', result=91)
+        reject(start, 'group-a.o', export, error="undefined symbol 'discarded_export'")
 
         run([sys.executable, fixtures / 'invalid-member-index.py', 'group-a.o', 'invalid-member.o'])
         reject('group-start.o', 'group-b.o', 'invalid-member.o', error='invalid ELF group member')
