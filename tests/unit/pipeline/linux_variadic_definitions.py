@@ -34,14 +34,14 @@ def main():
                 assert result.returncode != 0 and error in result.stderr, (args, result.stdout, result.stderr)
             return result.stderr
 
-        for source in ('integer-varargs.run.cpp', 'zero-fixed-varargs.run.cpp'):
+        for source in ('integer-varargs.cpp', 'zero-fixed-varargs.cpp'):
             run(ycxx, 'cxx', linux, '-nostdlib', source, '-o', 'native')
             run('./native')
 
         # The pinned libycxx header references its runtime's static linkage guard.
         run(ycxx, 'cxx', linux, *includes, '-c',
             libycxx / 'src/runtime/linkage/static.cpp', '-o', 'linkage.o')
-        for source in ('cstdarg-discarded-arguments.accept.cpp', 'cstdarg-no-named.accept.cpp'):
+        for source in ('cstdarg-discarded-arguments.cpp', 'cstdarg-no-named.cpp'):
             run(ycxx, 'cxx', linux, *includes, '-nostdlib', source, 'linkage.o', '-o', 'native')
             run('./native')
 
@@ -52,7 +52,7 @@ def main():
                 run(host_cxx, '-std=c++26', mode, '-no-pie', driver, 'callee.o', *linkage, '-o', 'mixed')
                 run('./mixed')
 
-        rejected = 'nonvariadic-va-start.reject.cpp'
+        rejected = 'nonvariadic-va-start.cpp'
         args = (ycxx, 'cxx', linux, '-fsyntax-only', rejected)
         expected = 'va_start requires an enclosing variadic function'
         plain = run(*args, error=expected)

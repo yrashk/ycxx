@@ -517,6 +517,11 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
   - Do: for partitioning, ordering or filtering code, check the invariant (every item once,
     nothing lost) through the real entry point, with state that makes the stages interact.
   - Learned on #5.
+- **CTest fixtures can also be discovered by `tools/test`.** The affected stage recognized
+  `.accept.cpp`, `.reject.cpp` and `.run.cpp` under `tests/unit/` and ran Linux fixtures with the
+  default Darwin target, after their Linux CTest passed.
+  - Do: give CTest-only C++ fixtures plain `.cpp` names and check discovery before the full gate.
+  - Learned on #196.
 
 - **A harness check must be able to fail: mutate where the data actually flows.** On #19, a
   mutation dropping the engine's file-input dependencies did not bite, because headers reach the
