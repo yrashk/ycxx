@@ -452,8 +452,8 @@ public:
     for (u32 unit : units) text.push_back(static_cast<char>(unit));
     return text;
   }
-  ConstId address(QualType, ConstId base, i64 offset) {
-    return ins_->intern_value(ast::VLvalue{base, ins_->intern_seq(std::span<const u32>{}), offset});
+  ConstId address(QualType, ConstId base, i64 offset, std::span<const u32> path = {}) {
+    return ins_->intern_value(ast::VLvalue{base, ins_->intern_seq(path), offset});
   }
   ConstId null_pointer(QualType) { return ins_->intern_value(ast::VNullptr{}); }
   // A declared object or function as the base of an address (§5.5).

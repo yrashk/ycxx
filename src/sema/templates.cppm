@@ -71,8 +71,8 @@ public:
 
   // `t` with the parameters `b` binds replaced by their arguments. None when that forms a type
   // that cannot exist ([temp.deduct.general]/11): a pointer to a reference, a reference to void, an
-  // array of void, references or functions, a function returning an array or a function, a
-  // parameter of type void. A type parameter's cv-qualifiers are added to its argument
+  // array of void, references, functions or unknown-bound arrays, a function returning an array
+  // or a function, or a parameter of type void. A type parameter's cv-qualifiers are added to its argument
   // ([dcl.type.cv]: on a reference they are dropped).
   std::optional<QualType> substitute(QualType t, const Bindings& b) {
     TypeRec r = types().rec(t);
@@ -134,8 +134,10 @@ public:
     }
     case TypeKind::array: {
       auto e = substitute(r.inner, b);
-      if (!e || !types().is_object(*e)) return std::nullopt;
-      if (r.bound_value != ConstId::none && ins().values.is_dependent(r.bound_value)) {
+      if (!e || !types().is_object(*e) || (types().is_array(*e) && types().rec(*e).bound_value == ConstId::none))
+        return std::nullopt;
+      if (r.bound_value == ConstId::none) return types().array_unknown(*e);
+      if (ins().values.is_dependent(r.bound_value)) {
         // A bound that is a non-type parameter; one that is any other dependent expression is
         // known only to an instantiation of the body (#88).
         auto p = ins().values.get<ast::VDepParam>(r.bound_value);

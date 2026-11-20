@@ -902,10 +902,18 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
 - `static_assert(e)` and `static_assert(e, "message")` at namespace and block scope (the
   `StaticAssert` node); `if consteval` and `if !consteval` (`IfConsteval`, lowered to
   `consteval_br`).
+- In-bounds typed addresses of elements and rows of named namespace-scope constexpr arrays
+  ([conv.array], [expr.const], #111). The interpreter initializes scalar cells from the nested
+  aggregate value on first use. A read decodes the cell, and addresses retain the named object's
+  identity and byte offset. Serializing a typed pointer one past a nested subarray still needs
+  subobject provenance (#111).
 - Constant array bounds from const integral locals (#58), and address constants of variables and
-  functions (#57) as `VLvalue{VEntity, [], byte offset}`. The pipeline emits data relocations
+  functions (#57) as `VLvalue{VEntity, path, byte offset}`. The pipeline emits data relocations
   with the entity's symbol and byte addend on ELF and Mach-O, including references to symbols
   defined in another translation unit (#101).
+- Constant evaluation can read namespace-scope `constexpr` pointers erased to `void`
+  ([expr.const], [conv.ptr], #102). The interpreter reconstructs the original scalar or array
+  subobject path, including one-past addresses, from the constant's path and byte offset.
 - Errors say why: "not a constant expression: <the interpreter's reason>", located at the
   evaluated expression.
 - Tests: `tests/own/consteval` (spec-only); the draft's [dcl.constexpr]/5 ex. 3, [dcl.constinit]/3
@@ -1123,6 +1131,11 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   their bound from the literal when it is left out; `extern T a[];`, an incomplete type
   (`Types::array_unknown`), completed by a later declaration with a bound ([basic.link]/11);
   arrays of pointers of unknown bound.
+- Unknown bounds survive abstract and grouped declarators, including pointer and reference
+  parameters. A parameter whose completed type is an array still adjusts to a pointer. Template
+  substitution preserves the omitted bound, so partial specializations match `T[]`
+  ([dcl.array], [dcl.fct], [temp.deduct.type], #222). The Itanium `A_` form carries omitted
+  bounds into ELF and Mach-O symbol names.
 - `__FLT_EVAL_METHOD__` is predefined (0), as Clang has it for the target.
 - Attributes are also accepted after a declarator-id, on parameters, alias-declarations and
   statements, and in the GNU form on class heads and after template-heads. A string literal
@@ -1131,8 +1144,7 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   being dropped.
 - Tests: `tests/own/decls` (11, three from the review). Five more draft examples pass.
 - Not yet: `sizeof`, `alignof`, `decltype`, `static_cast` and other casts, operator functions,
-  unions (the next steps of #133); a reference or pointer to an array of unknown bound; asm labels
-  on class members and the other gaps of #190.
+  unions (the next steps of #133); asm labels on class members and the other gaps of #190.
 
 ## `<cstdio>`, step 4a: casts, sizeof, alignof, decltype (#133, 2026-11-18)
 
@@ -1455,6 +1467,8 @@ session's.*
 - Named function-pointer declarations accept qualified return types, including at block scope
   ([dcl.ptr], [dcl.fct], [stmt.ambig], #433). A grouped pointer can name an existing namespace member,
   and a block declaration can take an unnamed function-pointer parameter (#449).
+- Parenthesized direct initialization accepts functional conversions with a braced operand or an
+  initial literal, including `S b(S(1));` and `S b(S{1});` ([dcl.ambig.res], #290).
 - Not yet: access, hiding and qualified functional casts of member types (#216); member alias
   templates (`template<…> using __apply = …` in a class), with member
   templates; template template parameters (#208); value-dependent expressions as template

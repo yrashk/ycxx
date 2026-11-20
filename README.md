@@ -40,6 +40,9 @@ tools/build
 build/bin/ycxx cxx hello.cpp -o hello && ./hello
 ```
 
+**Preprocess binary resources.** Both targets support `#embed` and `__has_embed` with the standard
+parameters. [#125](https://github.com/yrashk/ycxx/issues/125)
+
 **Compile for x86-64 Linux.** Select `--target=x86_64-pc-linux-gnu` to compile with the
 System V AMD64 backend. Use `-c` to write an ELF object, or `-nostdlib` to link C++ sources,
 ycxx-generated `.o` files, or a mixture into a static executable. The startup runs namespace-scope
@@ -119,6 +122,9 @@ Both targets support cooked integer user-defined literals through namespace-scop
 operators with an `unsigned long long` parameter, including constant evaluation.
 [#289](https://github.com/yrashk/ycxx/issues/289)
 
+Both targets support typed constant addresses and reads within named namespace-scope constexpr
+arrays of supported scalar types, including nested arrays. [#111](https://github.com/yrashk/ycxx/issues/111)
+
 **Language on macOS.** Programs can use:
 - the fundamental integer, character and floating types, pointers, arrays, references and
   enumerations, including opaque declarations of named enums in their namespaces; `float`,
@@ -143,6 +149,8 @@ operators with an `unsigned long long` parameter, including constant evaluation.
 - ordinary scalar `new` and single-object `delete` for integral and pointer objects, including
   cv-qualified objects. Allocating expressions use the global Itanium allocation functions.
   [#293](https://github.com/yrashk/ycxx/issues/293)
+- pointers and references to arrays of unknown bound, and template partial specializations
+  that match unknown-bound array types. [#222](https://github.com/yrashk/ycxx/issues/222)
 - classes and unions: data and static members, named data members of unnamed union type,
   member functions, constructors and destructors
   with RAII, aggregate and designated initialization, namespace-scope objects initialized by
@@ -158,8 +166,7 @@ operators with an `unsigned long long` parameter, including constant evaluation.
   and directives;
 - named function-pointer declarations with qualified return types, qualified names in grouped
   declarators, and unnamed function-pointer parameters;
-- binary resource inclusion with `#embed` and availability checks with `__has_embed`, including
-  the standard parameters ([#125](https://github.com/yrashk/ycxx/issues/125));
+- parenthesized direct initialization from functional conversions such as `S b(S(1));`;
 - `[[…]]` attributes, the GNU attributes and `asm` labels the macOS SDK's headers use, the
   GNU pointer qualifiers glibc uses, and the type-trait built-ins libycxx's headers use
   (`__is_same`, `__remove_cv`, …)
@@ -181,7 +188,8 @@ operators with an `unsigned long long` parameter, including constant evaluation.
 - casts, including `static_cast<T&&>` from a compatible object lvalue, `sizeof`/`alignof`
   (classes included), `decltype`, and calls through pointers to functions. [#199](https://github.com/yrashk/ycxx/issues/199)
 - constant evaluation on ycxx's own interpreter: `constexpr`, `consteval`, `constinit`,
-  `static_assert` and `if consteval`, with errors that explain why something is not constant;
+  `static_assert` and `if consteval`, with errors that explain why something is not constant.
+  Namespace-scope `constexpr` pointers to `void` can retain scalar and array element addresses.
 - `extern "C"` functions from libSystem, including `printf` with integers, characters,
   floating values, pointers and strings as arguments, and the SDK `<math.h>`'s built-ins
   (`__builtin_fabs`, `__builtin_inf`, `__builtin_huge_val`, `__builtin_nan`).

@@ -474,7 +474,15 @@ std = 'C++98'
 core = true
 status = 'done'
 probe = '''
-int main() { int a[3] = {1, 2, 3}; int* p = a + 1; int& r = a[2]; r = *p; return a[2] == 2 ? 0 : 1; }
+int main() {
+  int a[3] = {1, 2, 3};
+  int* p = a + 1;
+  int& r = a[2];
+  int (*unknown)[] = 0;
+  r = *p;
+  if (unknown) return 1;
+  return a[2] == 2 ? 0 : 1;
+}
 '''
 
 [[feature]]
@@ -501,8 +509,8 @@ std = 'C++11'
 ftm = '__cpp_rvalue_references'
 detect = '\bstd::(?:move|forward)\b|\w&&(?=\s*[\w,)>.])'
 status = 'partial'
-issues = [199, 290]
-note = 'reference downcasts and the `S b(S(1))` initializer ambiguity'
+issues = [199]
+note = 'reference downcasts'
 probe = '''
 struct S { int v; S(int x) : v(x) {} S(S&& o) : v(o.v) { o.v = 0; } };
 int main() { int&& r = 1; S a(1); S b(static_cast<S&&>(a)); return (r == 1 && b.v == 1 && a.v == 0) ? 0 : 1; }

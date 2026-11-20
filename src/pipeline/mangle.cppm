@@ -194,9 +194,10 @@ class Mangler {
                    in_.values.get<ast::VDepParam>(a.bound).depth == 0) {
           auto i = in_.values.get<ast::VDepParam>(a.bound).index;
           dim = i == 0 ? "T_" : std::format("T{}_", i - 1);
-        } else {
+        } else if (a.bound != ast::ConstId::none) {
           return std::unexpected("an array of unknown or dependent bound");
         }
+        // An incomplete array omits the dimension. It still has the `A_` prefix (§5.1.5.6).
         auto e = type(a.elem);
         if (!e) return e;
         inner = std::format("A{}_{}", dim, *e);
