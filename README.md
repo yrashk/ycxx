@@ -172,7 +172,8 @@ arrays of supported scalar types, including nested arrays. [#111](https://github
   (`__is_same`, `__remove_cv`, …)
   ([docs/EXTENSIONS.md](docs/EXTENSIONS.md));
 - templates: function, class and variable templates, deduction, partial ordering, explicit and
-  partial specializations, static constexpr members of class templates, member function and
+  partial specializations with substitution checks for dependent type arguments, static constexpr
+  members of class templates, member function and
   constructor templates, parameter packs and fold expressions, alias templates, template
   template parameters, concepts and requires-expressions in overload resolution,
   `if constexpr`, two-phase lookup, with Itanium names identical to Clang's; Clang's

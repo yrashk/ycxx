@@ -1397,6 +1397,11 @@ template's tokens again with the arguments bound.
   templates), and diagnoses an ambiguity. The partial specialization's members are analysed as
   those of the specialization of its own parameters, and may be defined outside it
   ([temp.spec.partial.member]). Its arguments are checked against [temp.spec.partial.general]/9.1–9.3.
+- **Substitution during matching** (#263): the deduced bindings must reproduce the supplied
+  arguments. Matching rechecks a dependent `decltype` operand from the written arguments,
+  including when its type was already known. Immediate-context errors discard the candidate
+  ([temp.deduct.general]). Instantiations triggered by the check retain their own diagnostics.
+  Tests: `tests/own/templates/sfinae-partial-*`.
 - **Determinism:** before a specialization's pattern is chosen, `specializations_before(point)`
   analyses every explicit and partial specialization item before the point, so the choice does
   not depend on which cells ran first (§A1).

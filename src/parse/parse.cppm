@@ -449,6 +449,11 @@ public:
     EntityId entity;
     bool defined;
   };
+  struct PartialReplay {
+    u32 begin;
+    ast::DeclSema primary;
+    std::vector<u32> dependent_calls;
+  };
   // Whether class `c` is the pattern of a partial specialization defined before `item`, whose
   // members may be defined outside it ([temp.spec.partial.member]).
   bool partial_pattern(EntityId c, u32 item) {
@@ -467,11 +472,24 @@ public:
     bool ambiguous = false;
     bool defined = true;  // a partial specialization only declared leaves the specialization incomplete
   };
+  std::optional<std::vector<ast::TemplateArg>> substitute_partial_args(
+      u32 item, u32 point, std::span<const ast::TemplateParamSema> params, std::span<const ast::TemplateArg> pattern,
+      sema::Bindings args);
   std::optional<Chosen> choose_partial(EntityId spec, u32 point) {
     specializations_before(point);
     const sema::EntityRec rec = w_->entities.rec(spec);
     auto it = partials_.find(std::to_underlying(rec.templ));
     if (it == partials_.end()) return std::nullopt;
+    if (too_deep(partial_matching_.size(), it->second.front().item)) return std::nullopt;
+    const u32 key = std::to_underlying(spec);
+    partial_matching_.insert(key);
+    struct Matching {
+      std::set<u32>& active;
+      u32 key;
+      ~Matching() { active.erase(key); }
+    } matching{partial_matching_, key};
+    // Substitution can instantiate a class and discover more partial specializations.
+    const std::vector<Partial> candidates = it->second;
     sema::Templates t = templates();
     struct Match {
       const Partial* p;
@@ -479,11 +497,15 @@ public:
       std::vector<ast::TemplateArg> pattern, args;
     };
     std::vector<Match> matches;
-    for (const Partial& p : it->second) {
+    for (const Partial& p : candidates) {
       if (p.item >= point) continue;
       std::vector<ast::TemplateParamSema> params = w_->ins.seqs.elements(w_->ins.seqs.at(item_sema(p.item).value.decls, 0).template_params);
       std::vector<ast::TemplateArg> pattern = w_->entities.rec(p.entity).args;
-      if (auto a = t.match_partial(params, pattern, rec.args)) matches.push_back({&p, std::move(params), std::move(pattern), std::move(*a)});
+      auto a = t.deduce_partial(params, pattern, rec.args);
+      if (!a) continue;
+      auto back = substitute_partial_args(p.item, point, params, pattern, sema::Bindings::of(params[0].depth, *a));
+      if (back && std::ranges::equal(*back, rec.args))
+        matches.push_back({&p, std::move(params), std::move(pattern), std::move(*a)});
     }
     if (matches.empty()) return std::nullopt;
     auto best = std::ranges::find_if(matches, [&](const Match& m) {
@@ -538,6 +560,7 @@ public:
       auto d = declaration(v, point);
       return d ? std::optional(d->type) : std::nullopt;
     }
+    if (partial_matching_.contains(std::to_underlying(v))) return std::nullopt;
     std::optional<Chosen> c = choose_partial(v, point);
     if (c && c->ambiguous) return std::nullopt;
     // A placeholder type is what the specialization's instantiation deduced ([dcl.spec.auto]).
@@ -1115,6 +1138,8 @@ private:
   std::map<u32, u32> class_points_;              // by class template specialization: its point of instantiation
   u32 spec_scan_ = 0;                            // the items `specializations_before` has analysed
   std::map<u32, std::vector<Partial>> partials_;  // by template entity, in order of declaration
+  std::map<u32, PartialReplay> partial_replays_; // by item containing a dependent decltype argument
+  std::set<u32> partial_matching_;              // specializations whose arguments are being substituted
   std::set<u32> ambiguous_;                      // specializations whose choice was diagnosed
   engine::Loc end_at_{};                         // the END worklist's demand being instantiated
 public:
@@ -1263,10 +1288,10 @@ public:
   // at its point of instantiation ([temp.point]); lookup stays at the item.
   std::optional<u32> at_point;
   EntityId instantiating = EntityId::none;  // the class specialization whose member this is
-  // Checking an atomic constraint: the offsets of its calls that were dependent where it appears,
+  // In a re-analysed operand: the offsets of calls that were dependent where it appears,
   // which argument-dependent lookup at the point of use completes ([temp.dep.candidate]).
-  std::vector<u32> atom_calls;
-  bool dependent_call(sema::u32 offset) override { return std::ranges::contains(atom_calls, offset); }
+  std::vector<u32> instantiation_calls;
+  bool dependent_call(sema::u32 offset) override { return std::ranges::contains(instantiation_calls, offset); }
 
 private:
   u32 point() const { return at_point ? *at_point : item_; }
@@ -2151,10 +2176,12 @@ private:
       s_.diag(name_at, Diag::not_a_template, name);
       return std::nullopt;
     }
-    auto args = ps_.template_argument_list();
+    std::optional<u32> replay_at;
+    auto args = ps_.template_argument_list(&replay_at);
     if (!args) return std::nullopt;
     auto full = partial_arguments(*tmpl, *args, name_at);
     if (!full) return std::nullopt;
+    if (replay_at) p_->partial_replays_.emplace(k_, Program::PartialReplay{*replay_at, *tmpl, s_.dependent_calls});
     return s_.class_specialization(tmpl->entity, *full);
   }
   // `template<…> class-key X<args> { … }`: a partial specialization of class template X
@@ -2206,6 +2233,8 @@ private:
       s_.diag(d.name_at, Diag::redefinition, d.name);
       return false;
     }
+    if (d.replay_template_args_at)
+      p_->partial_replays_.emplace(k_, Program::PartialReplay{*d.replay_template_args_at, *tmpl, s_.dependent_calls});
     return true;
   }
 
@@ -4764,7 +4793,7 @@ public:
         s_(p.world(), b_, q_, sink_, a.item, a.begin), ps_(p.region(), it_->begin + a.begin, it_->begin + a.end, s_), atom_(a) {
     ps_.set_questions(q_);
     q_.at_point = point;
-    q_.atom_calls = p.world().ins.seqs.elements(a.calls);
+    q_.instantiation_calls = p.world().ins.seqs.elements(a.calls);
   }
 
   // Satisfied or not; hard errors go to `hard`.
@@ -5368,6 +5397,45 @@ const Result<ast::BodySema>& Program::analyze_body(u32 item) {
 
 // ---------------------------------------------------------------- instantiation (#88)
 
+std::optional<std::vector<ast::TemplateArg>> Program::substitute_partial_args(
+    u32 item, u32 point, std::span<const ast::TemplateParamSema> params, std::span<const ast::TemplateArg> pattern,
+    sema::Bindings args) {
+  std::vector<engine::Diagnostic> sink;
+  ast::Builder b(w_->ins, &arena_);
+  AtItem q(*this, item, false);
+  q.at_point = point;
+  sema::Sema s(*w_, b, q, sink, id(item), 0);
+  auto replay = partial_replays_.find(item);
+  if (replay == partial_replays_.end()) return s.templates().substitute_args(pattern, args);
+
+  // A decltype operand can be dependent even when its type is known. Re-analyse the written
+  // arguments with the deduced bindings so checks in the operand still run ([temp.deduct.general]).
+  const PartialReplay& source = replay->second;
+  const items::Item& it = items_->items[item];
+  Parser ps(*r_, it.begin, it.begin + it.decl_length(), s);
+  ps.set_questions(q);
+  ps.seek(it.begin + source.begin);
+  q.instantiation_calls = source.dependent_calls;
+  s.template_scopes.emplace_back(params.begin(), params.end());
+  s.template_args = std::move(args);
+  std::optional<std::vector<ast::TemplateArg>> back;
+  try {
+    if (auto written = ps.template_argument_list()) back = s.template_arguments(source.primary, *written, source.begin);
+  } catch (const TooDeep&) {
+    // The parser diagnosed the stack limit in this operand.
+  }
+  for (const engine::Diagnostic& d : sink) {
+    auto kind = sema::sema_diag_of(d.id);
+    if (!kind || sema::message_of(*kind).severity != lex::Severity::error) continue;
+    back.reset();
+    // Only immediate-context errors make a candidate fail silently. Instantiations triggered
+    // during this check record their own diagnostics in their own cells.
+    if ((sema::survives_substitution(d.id) || *kind == Diag::nested_too_deeply) &&
+        !std::ranges::contains(end_diags_, d)) end_diags_.push_back(d);
+  }
+  return back;
+}
+
 const sema::ClassRec* Program::instantiate_class(EntityId spec, u32 point) {
   const u32 key = std::to_underlying(spec);
   // This unit's instantiation: its member records, member patterns and diagnostics are the
@@ -5376,7 +5444,8 @@ const sema::ClassRec* Program::instantiate_class(EntityId spec, u32 point) {
   // first needed.
   if (classes_instantiated_.contains(key)) return point > last_member(class_patterns_.at(key)) ? classes_.find(spec) : nullptr;
   const sema::EntityRec rec = w_->entities.rec(spec);
-  if (w_->types.is_dependent(w_->types.class_type(spec)) || classes_instantiating_.contains(key)) return nullptr;
+  if (w_->types.is_dependent(w_->types.class_type(spec)) || classes_instantiating_.contains(key) || partial_matching_.contains(key))
+    return nullptr;
   // Its pattern: the partial specialization that matches it, else the template's definition.
   std::optional<Chosen> partial = choose_partial(spec, point);
   if (partial && (partial->ambiguous || !partial->defined)) {
@@ -5451,7 +5520,7 @@ const Program::VarInstance* Program::variable_instance(EntityId v, u32 point) {
   if (auto it = var_index_.find(key); it != var_index_.end())
     return var_instances_[it->second].item < point ? &var_instances_[it->second] : nullptr;
   const sema::EntityRec& rec = w_->entities.rec(v);
-  if (rec.kind != sema::EntityKind::variable || rec.templ == EntityId::none || var_instantiating_.contains(key) ||
+  if (rec.kind != sema::EntityKind::variable || rec.templ == EntityId::none || var_instantiating_.contains(key) || partial_matching_.contains(key) ||
       explicitly_specialized(v, point))
     return nullptr;
   // Its pattern, a partial specialization that matches it or the template, must be defined before

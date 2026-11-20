@@ -91,6 +91,7 @@ struct Declarator {
   // ([temp.expl.spec]/1); `f<>` has none.
   std::optional<std::vector<ast::TemplateArg>> template_args;
   u32 template_args_at = 0;
+  std::optional<u32> replay_template_args_at;  // written arguments with a dependent decltype operand
   // A GNU asm label, `__asm("_fopen")`: the symbol as written (docs/EXTENSIONS.md); empty if none.
   std::string asm_label;
   bool pack = false;  // `T... x`: a declarator-id after an ellipsis ([dcl.fct]/23, [temp.param]/17)
@@ -364,6 +365,7 @@ public:
     angle_ = saved;
     bool closed = expect(Tk::r_paren);
     if (!e.ok() || !closed) return std::nullopt;
+    if (s_->dependent(e)) ++dependent_decltypes_;
     return s_->decltype_of(e, s_->as<ast::Paren>(e).has_value());
   }
 
@@ -721,6 +723,7 @@ public:
     sema::Sema::Scope scope{};
     std::optional<std::vector<ast::TemplateArg>> template_args;
     u32 template_args_at = 0;
+    std::optional<u32> replay_template_args_at;
     bool pack = false;
     std::vector<Suffix> suffixes;
   };
@@ -981,7 +984,7 @@ public:
       // A template-id: the declarator of an explicit specialization ([temp.expl.spec]).
       if (!abstract && is(Tk::less) && template_ids_in_declarators && s_->is_template_name(l.name)) {
         l.template_args_at = pos();
-        l.template_args = template_argument_list();
+        l.template_args = template_argument_list(&l.replay_template_args_at);
         if (!l.template_args) ok = false;
       }
       skip_attributes();  // appertaining to the declarator-id ([dcl.meaning.general]/1)
@@ -1365,6 +1368,7 @@ public:
     d.scope = l.scope;
     d.template_args = l.template_args;
     d.template_args_at = l.template_args_at;
+    d.replay_template_args_at = l.replay_template_args_at;
     d.pack = l.pack;
     return t;
   }
@@ -1827,7 +1831,9 @@ public:
 
   // A template-argument-list ([temp.arg.general]) after a template-name, from its `<`. An argument
   // that can be a type-id is one ([temp.arg.general]/2).
-  std::optional<std::vector<ast::TemplateArg>> template_argument_list() {
+  std::optional<std::vector<ast::TemplateArg>> template_argument_list(std::optional<u32>* replay_at = nullptr) {
+    u32 begin = pos();
+    u32 decltypes = dependent_decltypes_;
     if (!expect(Tk::less)) return std::nullopt;
     std::vector<ast::TemplateArg> args;
     bool ok = true;
@@ -1889,6 +1895,7 @@ public:
     if (is(Tk::greatergreater) && !half_) half_ = true;
     else if (!expect(Tk::greater)) return std::nullopt;
     if (!ok) return std::nullopt;
+    if (replay_at && decltypes != dependent_decltypes_) *replay_at = begin;
     return args;
   }
   bool starts_type_id() {
@@ -4731,6 +4738,7 @@ private:
   LangLinkage linkage_ = LangLinkage::cxx;
   int in_params_ = 0;
   int angle_ = 0;               // inside a template argument or parameter list, outside parentheses
+  u32 dependent_decltypes_ = 0;  // tracks dependent operands even when decltype yields a fixed type
   bool half_ = false;           // the current `>>` has had its first `>` taken by a template-id
 public:
   bool body = false;  // the part is a function body, not a declaration part
