@@ -1838,8 +1838,12 @@ What the process allocates, attributed to the engine's cells, in the trace and t
   - Merged with floating point: a non-empty base's members count toward a homogeneous
     floating-point aggregate, and a class whose data is all in its bases is not empty for the
     calling convention.
-  - Not yet: the implicit copy assignment does not call subobjects' `operator=` (#360), and bases'
-    injected-class-names (#361).
+  - For ordinary non-template member bodies, unqualified type lookup finds injected class names
+    in the class and its nonvirtual bases before searching the enclosing namespace. The same
+    type through multiple base subobjects is accessible when any of its lookup paths is
+    accessible. Distinct competing types are ambiguous. Qualified and elaborated forms are
+    tracked in #361. See [the lookup design](docs/design/injected-class-names.md).
+  - Implicit copy assignment's calls to subobject `operator=` remain tracked in #360.
 
 ## Templates, ζ step 9: member function templates (#88, #314, 2026-11-19)
 

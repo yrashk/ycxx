@@ -160,7 +160,8 @@ arrays of supported scalar types, including nested arrays. [#111](https://github
 - named `int` and `unsigned int` bit-fields of width 1 through 32 in ordinary unpacked,
   non-template classes without bases;
 - single and multiple inheritance (not virtual): base classes laid out as Clang does, member
-  lookup through bases, derived-to-base conversions, base initializers;
+  lookup through bases, derived-to-base conversions and base initializers. Unqualified
+  injected class names in ordinary member bodies respect base access.
 - namespaces, nested (`namespace a::b`) and inline ones, typedefs and aliases, including
   function type and function pointer aliases with qualified return types, `using` declarations
   and directives;

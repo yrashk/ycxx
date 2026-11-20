@@ -317,7 +317,8 @@ public:
   // the name is not declared, or a variable or function hides it ([basic.scope.hiding]). With
   // `elaborated`, non-type declarations are ignored ([basic.lookup.elab]).
   // A typedef-name too, unless `aliases` is false (after a class-key, [dcl.type.elab]/2).
-  std::optional<QualType> class_name(NameId name, bool elaborated = false, bool aliases = true) {
+  std::optional<QualType> class_name(NameId name, bool elaborated = false, bool aliases = true,
+                                    std::optional<u32> type_at = std::nullopt) {
     // Innermost block first: a block-scope typedef-name, or a local that hides the type.
     for (std::size_t d = scopes_.size(); d-- > 0;) {
       for (auto t = block_types_.rbegin(); t != block_types_.rend(); ++t)
@@ -338,10 +339,13 @@ public:
     if (current_class != EntityId::none) {
       const EntityRec& c = w_->entities.rec(current_class);
       if (c.templ != EntityId::none && c.name == name) return types().class_type(current_class);
-    }
-    // A type nested in the class whose scope this is ([basic.scope.class]).
-    if (current_class != EntityId::none) {
+      // A type nested in the class whose scope this is ([basic.scope.class]).
       if (const ClassRec* cr = class_rec(current_class); cr && cr->defined) {
+        if (!elaborated && current_function != EntityId::none && !scopes_.empty() && !templated() &&
+            c.kind == EntityKind::class_ && c.templ == EntityId::none && (c.name == name || !cr->bases.empty())) {
+          auto hit = class_body_type(*cr, name, type_at);
+          if (hit.found) return hit.type;
+        }
         if (auto r = nested_member(current_class, name)) return r->first.type;
       } else if (auto m = q_->earlier_member(name); m && (m->kind == ast::DeclKind::enum_ || m->kind == ast::DeclKind::type_alias)) {
         return m->type;
@@ -369,6 +373,70 @@ public:
   }
   static bool is_type(ast::DeclKind k) {
     return k == ast::DeclKind::class_ || k == ast::DeclKind::enum_ || k == ast::DeclKind::type_alias;
+  }
+
+  struct ClassBodyType {
+    bool found = false;
+    std::optional<QualType> type;
+  };
+
+  // [class.pre], [class.member.lookup]: an ordinary class's injected name stops the search on
+  // that branch. In a nonvirtual graph, distinct base branches cannot dominate one another.
+  ClassBodyType class_body_type(const ClassRec& root, NameId name, std::optional<u32> type_at) {
+    struct Edge {
+      EntityId derived;
+      ast::Access access;
+    };
+    struct Hit {
+      std::optional<QualType> type;
+      EntityId owner;
+      ast::Access access;
+      bool injected;
+      std::vector<Edge> path;
+    };
+    std::vector<Hit> hits;
+    std::vector<Edge> path;
+    auto collect = [&](this auto&& visit, EntityId cls, const ClassRec& cr) -> void {
+      const EntityRec& c = w_->entities.rec(cls);
+      if (c.kind == EntityKind::class_ && c.templ == EntityId::none && c.name == name) {
+        hits.push_back({types().class_type(cls), cls, ast::Access::public_, true, path});
+        return;
+      }
+      if (auto member = direct_member(cls, cr, name)) {
+        auto nested = std::ranges::find(cr.types, name, &NestedType::name);
+        if (member->nested_type != EntityId::none && member->enumerator == EntityId::none && nested != cr.types.end())
+          hits.push_back({nested->type, cls, cr.access_of(nested->entity), false, path});
+        else
+          hits.push_back({std::nullopt, cls, ast::Access::public_, false, path});
+        return;
+      }
+      for (const BaseRec& b : cr.bases) {
+        if (const ClassRec* base = class_rec(b.cls)) {
+          if (type_at) path.push_back({cls, b.access});
+          visit(b.cls, *base);
+          if (type_at) path.pop_back();
+        }
+      }
+    };
+    collect(current_class, root);
+    if (hits.empty()) return {};
+    auto first = std::ranges::find_if(hits, [](const Hit& h) { return h.type.has_value(); });
+    if (first == hits.end()) return {true, std::nullopt};
+    // Apply the lookup-set and access checks to names with an injected-class-name candidate.
+    // Ordinary nested member access is handled by its existing lookup paths.
+    if (type_at && std::ranges::any_of(hits, &Hit::injected)) {
+      QualType selected = types().canonical(*first->type);
+      if (std::ranges::any_of(hits, [&](const Hit& h) { return !h.type || types().canonical(*h.type) != selected; })) {
+        diag(*type_at, Diag::ambiguous_member, name, types().class_type(current_class));
+      } else if (!std::ranges::any_of(hits, [&](const Hit& h) {
+                   return accessible(h.owner, h.access, current_class) && std::ranges::all_of(h.path, [&](const Edge& edge) {
+                     return accessible(edge.derived, edge.access);
+                   });
+                 })) {
+        diag(*type_at, Diag::inaccessible_base, *first->type, types().class_type(current_class));
+      }
+    }
+    return {true, first->type};
   }
   // A typedef-name the implementation declares where nothing else does (docs/EXTENSIONS.md):
   // `__builtin_va_list`, the type used by the target's C headers and libycxx's `va_list`.
@@ -2936,16 +3004,14 @@ public:
     }
     bool needs_object() const { return field || (member && !member->is_static); }
   };
-  std::optional<Found> find_member(EntityId c, NameId name) {
-    const ClassRec* cr = class_rec(c);
-    if (!cr) return std::nullopt;
-    for (u32 i = 0; i < cr->fields.size(); ++i)
-      if (cr->fields[i].name == name) return Found{&cr->fields[i], i, nullptr, c};
-    for (const MemberDeclRec& m : cr->members)
+  std::optional<Found> direct_member(EntityId c, const ClassRec& cr, NameId name) {
+    for (u32 i = 0; i < cr.fields.size(); ++i)
+      if (cr.fields[i].name == name) return Found{&cr.fields[i], i, nullptr, c};
+    for (const MemberDeclRec& m : cr.members)
       if (m.name == name && !m.is_ctor && !m.is_dtor) return Found{nullptr, 0, &m, c};
-    for (const NestedType& nested : cr->types)
+    for (const NestedType& nested : cr.types)
       if (nested.name == name) return Found{.owner = c, .nested_type = nested.entity};
-    for (const NestedType& nested : cr->types) {
+    for (const NestedType& nested : cr.types) {
       // A type alias does not introduce the enumerators of the enumeration it names.
       if (!types().is_enum(nested.type) || types().enum_of(nested.type) != nested.entity) continue;
       const EnumRec* e = enum_rec(nested.entity);
@@ -2953,6 +3019,12 @@ public:
       for (const EnumeratorRec& value : e->enumerators)
         if (value.name == name) return Found{.owner = c, .nested_type = nested.entity, .enumerator = value.entity};
     }
+    return std::nullopt;
+  }
+  std::optional<Found> find_member(EntityId c, NameId name) {
+    const ClassRec* cr = class_rec(c);
+    if (!cr) return std::nullopt;
+    if (auto member = direct_member(c, *cr, name)) return member;
     std::optional<Found> r;
     for (const BaseRec& b : cr->bases) {
       auto f = find_member(b.cls, name);

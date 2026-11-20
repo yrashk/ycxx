@@ -599,7 +599,7 @@ public:
             continue;  // the arguments are consumed
           }
           if (kind(1) != Tk::coloncolon)
-            if (auto t = s_->class_name(name_of(tok()))) {
+            if (auto t = s_->class_name(name_of(tok()), false, true, pos())) {
               cls = t;
               break;
             }
@@ -2882,7 +2882,7 @@ public:
         return {r.id, begin, pos(), r.info};
       }
       if ((kind(1) == Tk::l_paren || kind(1) == Tk::l_brace))
-        if (auto t = s_->class_name(n)) {
+        if (auto t = s_->class_name(n, false, true, pos())) {
           // `T(args)` or `T{…}` ([expr.type.conv]), T a type name: a class, an enumeration, a
           // typedef-name or a template parameter.
           bump();
