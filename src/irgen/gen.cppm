@@ -1452,13 +1452,16 @@ class Gen {
   }
 
   ValueId new_object(At a) {
-    if (fn_.thunk) unsupported(a, "in constant evaluation");
     auto n = get<ast::NewObject>(a);
     At init = child(a, n.init);
-    if (!nonthrowing_initializer(init)) throw Unsupported{"cleanup for a potentially throwing new-initializer"};
+    if (!fn_.thunk && !nonthrowing_initializer(init))
+      throw Unsupported{"cleanup for a potentially throwing new-initializer"};
     ValueId storage = rvalue(child(a, n.allocation));
     ast::QualType p = n.info.type;
     ValueId object = pure(ir::Op::ptr_cast, p, {storage}, {word(ty(p))});
+    // Constant evaluation stops at the non-constexpr allocation call. This lets an ordinary
+    // namespace-scope initializer fall back to runtime without evaluating the new-initializer.
+    if (fn_.thunk) return object;
     ast::QualType t = facts_.pointee(p);
     initialize({object, t}, init, false);
     ValueId objects[] = {object};

@@ -662,6 +662,13 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
   - Do: run hand checks with `YCXX_NO_DAEMON=1`, and stop your worktree's daemons
     (`pkill -f '<worktree>/build/bin/ycxx daemon'`) after rebuilding.
   - Learned on #88 step 8.
+- **Eager implicit declarations can change traces for unrelated source.** Installing allocation
+  functions in the shared world interned a `noexcept(true)` value before sema saw any source.
+  The ordinary trace's constant IDs shifted even though its source and queries stayed the same.
+  - Do: construct the same canonical entities through the existing thread-safe interners when
+    sema needs them, and collect the declarations used by each unit for code generation.
+  - Learned on #293.
+
 - **A handle's `{}` is index 0, a real entity or list, not `none`.** `EntityId{}` in a new
   `TemplateArg::templ` field made every dependent template argument name entity 0, which was the
   first class template declared, so `W<Box>` became `W`'s own current instantiation and was never

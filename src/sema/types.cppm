@@ -850,28 +850,6 @@ struct World {
     if (target.va_list == ast::VaList::sysv_x86_64)
       sysv_va_list_tag_ = entities.entity({.kind = EntityKind::class_, .name = ins.names.intern("__va_list_tag"),
                                           .head = ast::seed("ycxx.sema.builtin.sysv_va_list_tag")});
-    QualType size = types.builtin(target.size_type), v = types.builtin(Builtin::void_), vp = types.pointer(v);
-    QualType sized_delete[] = {vp, size};
-    auto allocation = [&](AllocationFunction f, QualType result, std::span<const QualType> params) {
-      QualType type = types.function(result, params, false, LangLinkage::cxx, Cv::none, ast::RefQual::none,
-                                     f != AllocationFunction::allocate);
-      NameId name = ins.names.intern(allocation_name(f));
-      ast::DeclSema d{};
-      d.entity = entities.entity({.kind = EntityKind::function, .name = name, .type = type});
-      d.type = type;
-      d.kind = ast::DeclKind::function;
-      d.linkage = ast::Linkage::external;
-      d.attributes = ins.intern_seq(std::span<const ast::NodeId>{});
-      d.constraint = ast::NodeId::none;
-      d.constraints = ConstId::none;
-      d.contracts = ast::NodeId::none;
-      d.params = ins.intern_seq(std::span<const ast::ParamSema>{});
-      d.template_params = ins.intern_seq(std::span<const ast::TemplateParamSema>{});
-      allocation_functions_[std::to_underlying(f)] = d;
-    };
-    allocation(AllocationFunction::allocate, vp, std::span(&size, 1));
-    allocation(AllocationFunction::deallocate, v, std::span(&vp, 1));
-    allocation(AllocationFunction::deallocate_sized, v, sized_delete);
     types.class_name = [this](EntityId e) {
       const EntityRec& r = entities.rec(e);
       if (r.unnamed_type_ordinal) return std::string("(unnamed union)");
@@ -885,10 +863,35 @@ struct World {
   }
   World(const World&) = delete;
 
-  const ast::DeclSema& allocation_function(AllocationFunction f) const {
-    return allocation_functions_[std::to_underlying(f)];
+  // The interners give repeated requests and written declarations the same identity. Construct
+  // the implicit declaration on demand, so a unit that never names it needs no shared state.
+  ast::DeclSema allocation_function(AllocationFunction f) {
+    QualType size = types.builtin(target.size_type);
+    QualType void_type = types.builtin(Builtin::void_);
+    QualType void_pointer = types.pointer(void_type);
+    const bool allocating = f == AllocationFunction::allocate;
+    QualType params[] = {allocating ? size : void_pointer, size};
+    auto count = f == AllocationFunction::deallocate_sized ? 2u : 1u;
+    QualType type = types.function(allocating ? void_pointer : void_type, std::span(params).first(count),
+                                   false, LangLinkage::cxx, Cv::none, ast::RefQual::none, !allocating);
+    ast::DeclSema d{};
+    d.entity = entities.entity({.kind = EntityKind::function, .name = ins.names.intern(allocation_name(f)), .type = type});
+    d.type = type;
+    d.kind = ast::DeclKind::function;
+    d.linkage = ast::Linkage::external;
+    d.attributes = ins.intern_seq(std::span<const ast::NodeId>{});
+    d.constraint = ast::NodeId::none;
+    d.constraints = ConstId::none;
+    d.contracts = ast::NodeId::none;
+    d.params = ins.intern_seq(std::span<const ast::ParamSema>{});
+    d.template_params = ins.intern_seq(std::span<const ast::TemplateParamSema>{});
+    return d;
   }
-  std::span<const ast::DeclSema> allocation_functions() const { return allocation_functions_; }
+
+  auto allocation_functions() {
+    using enum AllocationFunction;
+    return std::array{allocation_function(allocate), allocation_function(deallocate), allocation_function(deallocate_sized)};
+  }
 
   QualType builtin_va_list() {
     switch (target.va_list) {
@@ -929,7 +932,6 @@ struct World {
   }
 
 private:
-  std::array<ast::DeclSema, 3> allocation_functions_{};
   EntityId sysv_va_list_tag_ = EntityId::none;
 };
 

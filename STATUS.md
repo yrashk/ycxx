@@ -2159,8 +2159,9 @@ values, end to end; results match Clang's bit for bit.
   sized dispatch follow Astra's independent draft and Itanium ABI review on #293.
 - Native lowering supports initializers proven nonthrowing from the analyzed expression tree.
   Initializers that need an exception cleanup edge and constant evaluation of allocation remain
-  in #293. The issue also tracks class, array, enumeration, floating-point, placement and
-  over-aligned allocation, and other allocation-function declarations.
+  in #293. Namespace-scope allocation uses the existing dynamic initialization path. The issue
+  also tracks class, array, enumeration, floating-point, placement and over-aligned allocation,
+  and other allocation-function declarations.
 - Spec-only tests in `tests/own/scalar-allocation/` cover types, initialization, a typed null, and
   invalid operands. A separate provider checks the address and size passed to deallocation.
 

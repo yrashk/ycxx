@@ -92,6 +92,8 @@ public:
   // names join the lookup where [namespace.udir]/2 puts them.
   virtual std::vector<DeclId> visible_decls(NameId name, std::span<const EntityId> directives = {}) = 0;
   virtual ast::DeclSema decl_sema(DeclId d) = 0;
+  // A use of a global allocation function that may lack a written declaration in the unit.
+  virtual void use_allocation_function(EntityId) {}
   // What a constant evaluation fetches (§B7): `function_ir` of a function defined before the
   // current point ([expr.const]), and a namespace-scope variable as the interpreter sees it.
   virtual interp::Callee function_ir(EntityId f) = 0;
@@ -4688,8 +4690,11 @@ public:
   Ex allocation_name_expr(AllocationFunction f, u32 begin, u32 end) {
     const NameId name = ins().names.intern(allocation_name(f));
     std::vector<ast::DeclSema> found;
-    for (const ast::DeclSema& d : w_->allocation_functions())
-      if (w_->entities.rec(d.entity).name == name) found.push_back(d);
+    for (const ast::DeclSema& d : w_->allocation_functions()) {
+      if (w_->entities.rec(d.entity).name != name) continue;
+      q_->use_allocation_function(d.entity);
+      found.push_back(d);
+    }
     auto written = q_->namespace_members(EntityId::none, name);
     found.insert(found.end(), written.begin(), written.end());
     return decls_expr(std::move(found), true, name, begin, end);
@@ -4743,7 +4748,8 @@ public:
     if (dependent(init)) return dependent_node({init}, begin, end, pointer);
 
     Ex size = size_of(t, false, begin, begin);
-    const ast::DeclSema& f = w_->allocation_function(AllocationFunction::allocate);
+    ast::DeclSema f = w_->allocation_function(AllocationFunction::allocate);
+    q_->use_allocation_function(f.entity);
     ExprInfo fn_info{f.type, ValueCategory::lvalue, 0};
     Ex callee = node(ast::DeclRef{fn_info, f.entity}, begin, begin, fn_info);
     ExprInfo call_info{types().rec(f.type).inner, ValueCategory::prvalue, 0};
@@ -4777,6 +4783,7 @@ public:
     if (!addr.ok()) return fail;
     Ex size = size_of(t, false, begin, begin);
     EntityId f = w_->allocation_function(AllocationFunction::deallocate_sized).entity;
+    q_->use_allocation_function(f);
     ExprInfo info{v, ValueCategory::prvalue, 0};
     return node(ast::DeleteObject{info, f, at(addr, begin), at(size, begin)}, begin, end, info);
   }

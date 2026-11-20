@@ -835,6 +835,7 @@ public:
   std::span<const Instance* const> instances() const { return instance_order_; }
   // Every specialization whose definition the unit requires, in order of first demand.
   std::span<const EntityId> required() const { return required_; }
+  std::span<const EntityId> implicit_allocation_functions() const { return implicit_allocation_functions_; }
   // The calls of a template's body that were dependent at its definition, by the template's item
   // ([temp.dep.candidate]); its instantiations add argument-dependent lookup to them.
   // Whether a call of the templated body of `item` at `offset` was dependent, read from the
@@ -1108,6 +1109,7 @@ private:
   u32 members_running_ = 0;  // static data member initializers being instantiated, nested
   std::vector<engine::Diagnostic> end_diags_;    // the END phase's own
   std::vector<EntityId> required_;
+  std::vector<EntityId> implicit_allocation_functions_;  // in order of first use
   std::map<u32, std::optional<irgen::FunctionIr>> instance_irs_;  // by specialization
   std::map<u32, std::optional<irgen::FunctionIr>> closure_irs_;  // by closure member
 
@@ -1178,6 +1180,10 @@ public:
   ast::DeclSema decl_sema(DeclId d) override {
     if (auto s = p_->decl_sema(d)) return *s;
     return invalid_decl();
+  }
+  void use_allocation_function(EntityId f) override {
+    auto& functions = p_->implicit_allocation_functions_;
+    if (!std::ranges::contains(functions, f)) functions.push_back(f);
   }
   interp::Callee function_ir(EntityId f) override { return p_->function_ir(f, point()); }
   std::optional<QualType> deduced_type(EntityId f) override { return p_->deduced_type(f, point()); }
@@ -1274,6 +1280,7 @@ public:
     return is_complete(c) ? p_->classes().find(c) : nullptr;
   }
   ast::DeclSema decl_sema(DeclId d) override { return at_.decl_sema(d); }
+  void use_allocation_function(EntityId f) override { at_.use_allocation_function(f); }
   interp::Callee function_ir(EntityId f) override { return p_->function_ir(f, p_->end()); }
   std::optional<QualType> deduced_type(EntityId f) override { return p_->deduced_type(f, p_->end()); }
   sema::GenericResult generic_instance(EntityId spec, const sema::GenericClosure* known, const sema::GenericBinding&) override {

@@ -525,7 +525,12 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
   for (FunctionDef& f : tu.functions) static_locals(world, tu, f, runtime);
   // Written declarations have already supplied their locations and definitions. For the
   // remaining implicit declarations, a code reference alone emits an undefined symbol.
-  for (const ast::DeclSema& d : world.allocation_functions()) declare(d, std::nullopt);
+  for (EntityId e : program.implicit_allocation_functions()) {
+    ast::DeclSema d{};
+    d.entity = e;
+    d.type = world.entities.rec(e).type;
+    declare(d, std::nullopt);
+  }
   return tu;
 }
 
