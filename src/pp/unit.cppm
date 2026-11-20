@@ -486,12 +486,13 @@ private:
   }
 
   // The rest of a directive's line; the next line's first token stays pending.
-  std::vector<PTok> rest_of_line(Frame& f, bool conditional = false) {
+  std::vector<PTok> rest_of_line(Frame& f, bool header_probes = false) {
     std::vector<PTok> out;
     for (;;) {
-      const bool resource = conditional && out.size() >= 2 && out.back().tok.kind == Tk::l_paren &&
-                            is_name(out[out.size() - 2], "__has_embed");
-      PTok t = lex_next(f, resource);
+      const bool after_probe = header_probes && out.size() >= 2 && out.back().tok.kind == Tk::l_paren &&
+                               (is_name(out[out.size() - 2], "__has_embed") ||
+                                is_name(out[out.size() - 2], "__has_include"));
+      PTok t = lex_next(f, after_probe);
       if (!same_line(t)) {
         f.pending.push_front(t);
         return out;
@@ -565,12 +566,22 @@ private:
     return t;
   }
 
+  // The identifiers protected by [cpp.pre] and [cpp.cond] during embed replacement.
+  static bool embed_macro_name(std::string_view name) {
+    return name == "limit" || name == "prefix" || name == "suffix" || name == "if_empty";
+  }
+
   // The next fully replaced token.
   PTok next(Frame& f) {
     for (;;) {
       PTok t = read(f);
-      if (t.tok.kind != Tk::identifier || t.painted) return t;
+      if (t.tok.kind != Tk::identifier) return t;
       std::string_view name = s_->spellings.name(t.tok.payload);
+      if (f.in_embed_probe && embed_macro_name(name) && is_defined(t.tok.payload)) {
+        report(f, t, lex::LexDiag::embed_parameter_macro);
+        return t;
+      }
+      if (t.painted) return t;
       if (f.in_condition && (name == "defined" || condition_operator(t.tok.payload) != CondOp::none)) {
         if (!f.in_embed_probe) return condition(f, t);
         report(f, t, lex::LexDiag::embed_cond_operator);
@@ -584,10 +595,6 @@ private:
       }
       std::shared_ptr<const MacroDef> def = lookup(t.tok.payload);
       if (!def) return t;
-      if (f.in_embed_probe && (name == "limit" || name == "prefix" || name == "suffix" || name == "if_empty")) {
-        report(f, t, lex::LexDiag::embed_parameter_macro);
-        return t;
-      }
       if (def->dynamic != MacroDef::Dynamic::none) return dynamic(f, t, *def);
       if (f.active.contains(def->name)) {
         t.painted = true;
@@ -1337,7 +1344,7 @@ private:
       extra_tokens(f, rest_of_line(f), 0);
       c.in_else = true;
     } else {
-      rest_of_line(f);  // not evaluated: a group was taken
+      rest_of_line(f, word == "elif");  // not evaluated: a group was taken
     }
     skip_groups(f);
   }
@@ -1354,9 +1361,8 @@ private:
         f.pending.push_front(t);
         return;
       }
-      auto skip_line = [&] { rest_of_line(f); };
       if (t.tok.kind != Tk::hash || !t.tok.has(tok_flag::line_start)) {
-        skip_line();
+        rest_of_line(f);
         continue;
       }
       PTok d = lex_next(f);
@@ -1365,6 +1371,17 @@ private:
         continue;
       }
       std::string_view word = d.tok.kind == Tk::identifier ? s_->spellings.name(d.tok.payload) : std::string_view();
+      auto skip_line = [&] {
+        if (word == "embed") {
+          // Phase 3 must still see the header name: a slash inside it cannot open a comment.
+          PTok header = lex_next(f, true);
+          if (!same_line(header)) {
+            f.pending.push_front(header);
+            return;
+          }
+        }
+        rest_of_line(f, word == "if" || word == "elif" || word == "embed");
+      };
       if (word == "if" || word == "ifdef" || word == "ifndef") {
         ++depth;
         skip_line();
@@ -1397,7 +1414,7 @@ private:
         }
         continue;
       }
-      std::vector<PTok> line = rest_of_line(f, word == "elif" && !c.taken);
+      std::vector<PTok> line = rest_of_line(f, word == "elif");
       if (c.taken) continue;  // [cpp.cond]/? not evaluated once a group was included
       bool v = word == "elif" ? evaluate(f, d, std::move(line)) : test_defined(f, d, line, word == "elifndef");
       if (v) {
@@ -1462,14 +1479,14 @@ private:
       }
       return number_token(t, is_defined(a.tok.payload) ? 1 : 0);
     }
+    CondOp op = condition_operator(t.tok.payload);
+    if (op == CondOp::has_embed) return has_embed(f, t);
     // `__has_x ( balanced tokens )`.
     PTok open = read(f);
     if (open.tok.kind != Tk::l_paren) {
       report(f, open.tok.kind == Tk::eof ? t : open, lex::LexDiag::cond_expected_lparen);
       return number_token(t, 0);
     }
-    CondOp op = condition_operator(t.tok.payload);
-    if (op == CondOp::has_embed) return has_embed(f, t);
     std::vector<PTok> operand;
     for (std::size_t depth = 0;;) {
       PTok a = read(f);
@@ -1499,6 +1516,10 @@ private:
     std::string spelled = header_spelling(operand, used);
     if (spelled.empty()) {
       report(f, operand.empty() ? t : operand[0], lex::LexDiag::include_expected);
+      return number_token(t, 0);
+    }
+    if (used != operand.size()) {
+      report(f, operand[used], lex::LexDiag::extra_tokens);
       return number_token(t, 0);
     }
     IncludeForm form{spelled.starts_with('<'), op == CondOp::has_include_next};
@@ -1582,6 +1603,15 @@ private:
         result.supported = false;
         continue;
       }
+      if (*parameter == EmbedParam::prefix || *parameter == EmbedParam::suffix || *parameter == EmbedParam::if_empty) {
+        for (const PTok& token : argument) {
+          if (token.tok.kind == Tk::header_name || is_name(token, "__has_include") ||
+              is_name(token, "__has_embed") || is_name(token, "__has_cpp_attribute")) {
+            report(f, token, lex::LexDiag::embed_cond_operator);
+            return std::nullopt;
+          }
+        }
+      }
       if (!seen.insert(*parameter).second) {
         report(f, at, lex::LexDiag::embed_duplicate_parameter);
         return std::nullopt;
@@ -1597,7 +1627,7 @@ private:
           return std::nullopt;
         }
         for (const PTok& tok : argument) {
-          if (is_name(tok, "defined")) {
+          if (*parameter == EmbedParam::limit && is_name(tok, "defined")) {
             report(f, tok, lex::LexDiag::embed_cond_operator);
             return std::nullopt;
           }
@@ -1652,25 +1682,23 @@ private:
     return EmbedResource{resolved->file, bytes.substr(0, params.limit)};
   }
 
-  // [cpp.cond]: replace the probe operand once, retaining a directly written header name.
+  static bool valid_embed_name(std::string_view spelled) {
+    return spelled.size() >= 3 && spelled.find(spelled.front() == '<' ? '>' : '"', 1) == spelled.size() - 1;
+  }
+
+  // [cpp.cond]: replace the operand once. Directly written resource names are already
+  // header-name tokens; the interiors of macro-produced <...> token sequences are replaced.
   PTok has_embed(Frame& f, const PTok& t) {
-    std::vector<PTok> line;
-    PTok first = read(f);
-    if (first.tok.kind == Tk::less) {
-      do {
-        line.push_back(first);
-        first = read(f);
-      } while (first.tok.kind != Tk::greater && first.tok.kind != Tk::eof);
-      if (first.tok.kind == Tk::greater) {
-        line.push_back(first);
-        first = read(f);
-      }
-    } else if (first.tok.kind == Tk::string_lit || first.tok.kind == Tk::header_name) {
-      line.push_back(first);
-      first = read(f);
+    const bool saved = std::exchange(f.in_condition, false);
+    PTok open = next(f);
+    f.in_condition = saved;
+    if (open.tok.kind != Tk::l_paren) {
+      report(f, open.tok.kind == Tk::eof ? t : open, lex::LexDiag::cond_expected_lparen);
+      return number_token(t, 0);
     }
-    if (first.tok.kind != Tk::eof) f.contexts.push_back(Context{{first}, 0, std::nullopt, false});
+    std::vector<PTok> line;
     f.in_embed_probe = true;
+    bool angle = false;
     std::size_t depth = 0;
     for (;;) {
       PTok at = next(f);
@@ -1679,17 +1707,22 @@ private:
         report(f, t, lex::LexDiag::cond_expected_rparen);
         return number_token(t, 0);
       }
-      if (at.tok.kind == Tk::r_paren) {
-        if (depth == 0) break;
-        --depth;
+      if (line.empty() && at.tok.kind == Tk::less) angle = true;
+      if (angle) {
+        if (at.tok.kind == Tk::greater) angle = false;
+      } else {
+        if (at.tok.kind == Tk::r_paren) {
+          if (depth == 0) break;
+          --depth;
+        }
+        if (at.tok.kind == Tk::l_paren) ++depth;
       }
-      if (at.tok.kind == Tk::l_paren) ++depth;
       line.push_back(at);
     }
     f.in_embed_probe = false;
     std::size_t used = 0;
     std::string spelled = header_spelling(line, used);
-    if (spelled.size() < 3) {
+    if (!valid_embed_name(spelled)) {
       report(f, line.empty() ? t : line[0], lex::LexDiag::include_expected);
       return number_token(t, 0);
     }
@@ -1701,25 +1734,26 @@ private:
 
   // [cpp.embed]: a direct resource name is lexed as such; otherwise replace the entire line.
   void embed(Frame& f, const PTok& intro, const PTok& d) {
+    PTok header = lex_next(f, true);
+    const bool direct = header.tok.kind == Tk::header_name && same_line(header);
+    if (!direct) f.pending.push_front(header);
+    std::vector<PTok> line = rest_of_line(f, true);
     if (f.collecting > 0) {
       report(f, d, lex::LexDiag::embed_in_arguments);
-      rest_of_line(f);
       return;
     }
-    PTok header = lex_next(f, true);
-    std::string spelled;
-    std::vector<PTok> line;
-    std::size_t used = 0;
-    if (header.tok.kind == Tk::header_name && same_line(header)) {
-      spelled = s_->spellings.name(header.tok.payload);
-      line = expand_line(f, rest_of_line(f));
-    } else {
-      f.pending.push_front(header);
-      line = expand_line(f, rest_of_line(f));
-      spelled = header_spelling(line, used);
-      if (!line.empty()) header = line[0];
+    for (const PTok& token : line) {
+      if (token.tok.kind == Tk::identifier && embed_macro_name(s_->spellings.name(token.tok.payload)) &&
+          is_defined(token.tok.payload)) {
+        report(f, token, lex::LexDiag::embed_parameter_macro);
+        return;
+      }
     }
-    if (spelled.size() < 3) {
+    line = expand_line(f, std::move(line), direct ? LineMode::embed_params : LineMode::embed_name);
+    std::size_t used = 0;
+    std::string spelled = direct ? std::string(s_->spellings.name(header.tok.payload)) : header_spelling(line, used);
+    if (!direct && !line.empty()) header = line[0];
+    if (!valid_embed_name(spelled)) {
       report(f, same_line(header) ? header : d, lex::LexDiag::include_expected);
       return;
     }
@@ -1995,17 +2029,37 @@ private:
     f.out.includes.push_back(Include{at, end, std::move(child), std::move(bounds)});
   }
 
+  enum class LineMode { normal, embed_name, embed_params };
+
   // A directive's tokens, fully macro-replaced; replacement does not read past them.
-  std::vector<PTok> expand_line(Frame& f, std::vector<PTok> toks) {
+  std::vector<PTok> expand_line(Frame& f, std::vector<PTok> toks, LineMode mode = LineMode::normal) {
     auto saved = std::exchange(f.contexts, {});
     bool space = std::exchange(f.pending_space, false);
     f.contexts.push_back(Context{std::move(toks), 0, std::nullopt, true});
     std::vector<PTok> out;
+    const bool condition = f.in_condition;
+    bool angle = false, offset = false;
+    std::size_t depth = 0;
     for (;;) {
       PTok t = next(f);
-      if (t.tok.kind == Tk::eof) break;
+      Tk kind = t.tok.kind;
+      if (kind == Tk::eof) break;
+      if (mode == LineMode::embed_name) {
+        if (out.empty()) angle = kind == Tk::less;
+        if (!angle || kind == Tk::greater) mode = LineMode::embed_params;
+      } else if (mode == LineMode::embed_params) {
+        if (depth == 0) {
+          // Offset uses [cpp.cond], including a defined operand protected from macro replacement.
+          // Limit's explicit ban on defined is checked when its expression is parsed.
+          if (kind == Tk::l_paren) f.in_condition = offset;
+          offset = is_name(t, "offset") && (out.empty() || out.back().tok.kind != Tk::coloncolon);
+        }
+        if (kind == Tk::l_paren) ++depth;
+        if (kind == Tk::r_paren && depth != 0 && --depth == 0) f.in_condition = condition;
+      }
       out.push_back(t);
     }
+    f.in_condition = condition;
     // Pop the barrier and whatever replacement ended with it.
     while (!f.contexts.empty()) {
       Context& c = f.contexts.back();

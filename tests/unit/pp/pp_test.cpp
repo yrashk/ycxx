@@ -449,6 +449,39 @@ missing
   check(kinds(check_state("missing")) == std::vector{lex::LexDiag::embed_not_found}, "a removed resource is diagnosed");
   host.files["data.bin"] = "D";
   check_state("68 found");
+  pp::Config config;
+  config.angle_dirs = {"."};
+  pp::Session angles(host, config);
+  auto macro_angle = pp::preprocess(angles, R"cpp(
+#define PATH data.bin
+#define PROBE __has_embed
+#define OPEN (
+#define CLOSE )
+#if PROBE OPEN <PATH> CLOSE == __STDC_EMBED_FOUND__
+yes
+#endif
+#define INDEX offset
+#embed "data.bin" INDEX(defined(PATH)) if_empty(empty)
+)cpp", "angle.cpp");
+  check(macro_angle.diags.empty() && text(macro_angle.region) == "yes empty",
+        "probe delimiters and an angle operand can come from macros, and offset evaluates defined");
+
+  auto invalid = pp::preprocess(warm, R"cpp(
+#define prefix suffix
+#embed "data.bin" prefix(, 0)
+)cpp", "invalid.cpp");
+  check(kinds(invalid) == std::vector{lex::LexDiag::embed_parameter_macro},
+        "a standard parameter name used as a macro is diagnosed before replacement");
+
+  auto contextual = pp::preprocess(angles, R"cpp(
+#if 0
+#embed <unused/*name>
+#endif
+#embed "data.bin" limit(__has_include(<missing)header>)) if_empty(17)
+)cpp", "contextual.cpp");
+  check(contextual.diags.empty() && text(contextual.region) == "17",
+        "contextual header names preserve lexer state and are opaque to operator delimiters");
+
   host.files["present.h"] = "";
   host.files["data.bin"] = std::string("\0\xff", 2);
   warm.files.new_generation();

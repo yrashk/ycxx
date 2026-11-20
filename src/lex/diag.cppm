@@ -118,7 +118,7 @@ enum class LexDiag : u32 {
   embed_unsupported_parameter [[=message{Severity::error, "unsupported embed parameter"}]],
   embed_negative [[=message{Severity::error, "embed limit or offset must be nonnegative"}]],
   embed_cond_operator [[=message{Severity::error, "conditional operator is not permitted in this embed operand"}]],
-  embed_parameter_macro [[=message{Severity::error, "standard embed parameter name used as a macro in __has_embed"}]],
+  embed_parameter_macro [[=message{Severity::error, "standard embed parameter name used as a macro in an embed operand"}]],
   embed_in_arguments [[=message{Severity::error, "#embed within macro arguments is not supported"}]],
   embed_not_found [[=message{Severity::error, "embed resource not found"}]],
 };
