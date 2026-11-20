@@ -18,3 +18,15 @@ struct StaticConstructor {
 struct QualifiedConstructor {
   constexpr QualifiedConstructor() const {}  //! error
 };
+
+struct OutRef { constexpr OutRef(); };
+constexpr OutRef::OutRef() & {}  //! error
+
+struct OutReturn { constexpr OutReturn(); };
+constexpr OutReturn::OutReturn() -> void {}  //! error
+
+struct InlineReturn { constexpr InlineReturn() -> void {} };  //! error
+struct InlineRef { constexpr InlineRef() noexcept & {} };  //! error
+
+namespace A { struct Misplaced { constexpr Misplaced(); }; }
+namespace B { constexpr A::Misplaced::Misplaced() {} }  //! error

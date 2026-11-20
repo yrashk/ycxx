@@ -11,6 +11,11 @@ struct Separate {
 
 constexpr Separate::Separate(int input) : member(input) {}
 
+namespace Outer {
+namespace Inner { struct Nested { constexpr Nested(); }; }
+constexpr Inner::Nested::Nested() {}
+}
+
 void construct(int input) {
   Empty empty;
   Separate separate(input);

@@ -3339,8 +3339,16 @@ private:
     u32 name_at = ps_.pos();
     if (!ctor) ps_.bump();
     ps_.bump();
+    EntityId owner = s_.world().entities.rec(c).scope;
+    if (flags & sema::decl_flag::constexpr_) {
+      while (!p_->is_namespace(owner)) owner = s_.world().entities.rec(owner).scope;
+      if (!Program::encloses(p_->ns_of(k_), p_->namespace_path(owner))) {
+        s_.diag(name_at, Diag::constructor_namespace);
+        return bad();
+      }
+    }
     s_.current_class = c;
-    q_.from = p_->namespace_path(s_.world().entities.rec(c).scope);
+    q_.from = p_->namespace_path(owner);
     bool ok = true;
     auto fs = ps_.function_suffix(ok);
     if (!ok) return bad();
@@ -3368,10 +3376,7 @@ private:
       s_.diag(name_at, Diag::constexpr_redeclared, m->name);
       return bad();
     }
-    if ((flags & sema::decl_flag::constexpr_) && ps_.is(Tk::kw_noexcept)) {
-      s_.diag(ps_.pos(), Diag::not_supported, Tk::kw_noexcept);  // named exception specifications (#219)
-      return bad();
-    }
+    if ((flags & sema::decl_flag::constexpr_) && !finish_constructor_declarator(false)) return bad();
     if (mem->flags & sema::decl_flag::definition) {
       s_.diag(name_at, Diag::redefinition, m->name);
       return bad();
@@ -3543,6 +3548,16 @@ private:
     return flags;
   }
 
+  // The declarator's tokens end at the body. An in-class definition can spell bare noexcept;
+  // named exception specifications beyond that spelling are tracked in #219.
+  bool finish_constructor_declarator(bool in_class) {
+    ps_.skip_attributes();
+    if (in_class && ps_.accept(Tk::kw_noexcept)) ps_.skip_attributes();
+    if (ps_.at_end()) return true;
+    s_.diag(ps_.pos(), Diag::not_supported, ps_.kind());
+    return false;
+  }
+
   // A constructor or destructor declared in class `c` ([class.ctor], [class.dtor]), possibly
   // deleted ([dcl.fct.def.delete]).
   void special_member(const ast::DeclSema& c, bool ctor, u16 flags) {
@@ -3559,6 +3574,8 @@ private:
       s_.diag(name_at, Diag::qualified_constructor);
       return bad();
     }
+    if ((flags & sema::decl_flag::constexpr_) && it_->has_body() && !finish_constructor_declarator(true))
+      return bad();
     if (!ctor && (!fs.params.empty() || fs.variadic)) {
       s_.diag(name_at, Diag::not_supported, Tk::tilde);  // [class.dtor]/1: a destructor has no parameters
       return bad();
