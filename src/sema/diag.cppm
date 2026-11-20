@@ -285,6 +285,7 @@ enum class Diag : std::uint32_t {
   offsetof_member [[=message{Severity::error, "offsetof requires a direct non-static data member named '{0:n}' in '{1:t}'"}]],
   offsetof_bit_field [[=message{Severity::error, "offsetof cannot be applied to a bit-field"}]],
   offsetof_layout [[=message{Severity::error, "offsetof requires an ordinary standard-layout class with supported layout; '{0:t}' is not one"}]],
+  nested_enum_declarator_unsupported [[=message{Severity::error, "member declarators after a nested enum definition are not supported yet"}]],
   // A GNU built-in function the SDK's or libycxx's headers use and ycxx does not have yet
   // (docs/EXTENSIONS.md), named where lookup finds nothing else.
   builtin_unsupported [[=message{Severity::error, "built-in function '{0:n}' is not supported yet"}]],

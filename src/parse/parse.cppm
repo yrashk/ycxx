@@ -2996,7 +2996,7 @@ private:
       return;
     }
     if (cls != EntityId::none) {
-      s_.diag(ps_.pos(), Diag::not_supported, ps_.kind());  // declarators after a nested enum definition
+      s_.diag(ps_.pos(), Diag::nested_enum_declarator_unsupported);
       ps_.skip_to_semi();
       return bad();
     }
