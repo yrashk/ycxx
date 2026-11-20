@@ -51,6 +51,8 @@ export struct TypeLayout {
   // the tail padding a derived class's members may occupy when the object is a base subobject.
   std::uint64_t data = 0;
   bool contains_member_pointer = false;  // a scalar member pointer or an aggregate containing one
+  // Records: the bits of each INTEGER eightbyte in the supported AMD64 slice, zero otherwise.
+  std::uint8_t sysv_integer_eightbytes = 0;
 };
 
 export struct SubObject {
@@ -90,6 +92,8 @@ export struct LowerConfig {
   // The floating-point argument registers, likewise for a homogeneous floating-point aggregate,
   // which passes and returns one member per register (AAPCS64 C.2–C.3, §6.9).
   std::uint32_t float_arg_registers = 8;
+  // Use the System V AMD64 integer aggregate classification and argument placement.
+  bool sysv_amd64 = false;
 };
 
 export struct LowerError {
@@ -104,6 +108,33 @@ std::expected<l2::Function, LowerError> lower(const Function& f, EntityId name, 
 }  // namespace ycxx::ir
 
 namespace ycxx::ir {
+
+// System V AMD64 psABI §3.2.3: reserve all of an argument's INTEGER registers or put
+// the entire argument on the stack. The flat L2 list has a register prefix and a
+// stack suffix, each in argument order. A skipped register has no source index.
+class Amd64Arguments {
+ public:
+  explicit Amd64Arguments(std::uint32_t limit) : limit_(limit) {}
+
+  bool fits(std::uint32_t words) const { return registers_.size() + words <= limit_; }
+
+  void add(std::uint32_t first, std::uint32_t words, bool in_registers) {
+    auto& locations = in_registers ? registers_ : stack_;
+    for (std::uint32_t w = 0; w < words; ++w) locations.push_back(first + w);
+  }
+
+  std::uint32_t next_register() const { return std::uint32_t(registers_.size()); }
+
+  std::vector<std::uint32_t> order() && {
+    if (!stack_.empty()) registers_.resize(limit_, none);
+    registers_.insert(registers_.end(), stack_.begin(), stack_.end());
+    return std::move(registers_);
+  }
+
+ private:
+  std::uint32_t limit_;
+  std::vector<std::uint32_t> registers_, stack_;
+};
 
 template <layout_source L>
 class Lowering {
@@ -126,6 +157,21 @@ class Lowering {
   using T = l2::Type;
   using Op2 = l2::Op;
 
+  struct ClassPieces {
+    std::uint32_t words = 0;
+    T type = T::i64;
+    std::uint64_t size = 0;
+    std::uint8_t sysv_chunks = 0;
+
+    std::uint64_t offset(std::uint32_t word) const {
+      // A single INTEGER eightbyte can follow an initial NO_CLASS eightbyte.
+      return (word + (sysv_chunks == 2 ? 1 : 0)) * l2::bytes(type);
+    }
+    std::uint64_t width(std::uint32_t word) const {
+      return std::min<std::uint64_t>(l2::bytes(type), size - offset(word));
+    }
+  };
+
   const Function& f_;
   EntityId name_;
   const L& layout_;
@@ -138,7 +184,7 @@ class Lowering {
   // The class result: returned in registers from this frame object, or passed indirectly.
   std::optional<ValueId> result_object_;
   std::uint32_t indirect_result_ = 0;
-  std::vector<T> result_regs_;  // the registers' types: i64 words, or an HFA's members
+  ClassPieces result_pieces_;
   std::uint32_t frame_objects_ = 0;  // the ABI's own frame objects, numbered apart from L1's allocs
 
   // Blocks reachable from the entry, `consteval_br` taking only its runtime edge.
@@ -293,16 +339,17 @@ class Lowering {
 
   std::expected<void, LowerError> block(BlockId b) {
     bool entry = raw(b) == 0;
+    bool place_amd64 = entry && config_.sysv_amd64 && f_.byval_params;
     std::vector<T> params;
-    // An entry parameter of class type, or the class result, passed in registers: its words or
-    // its HFA members, each of type `piece`.
-    struct InRegisters {
+    // Words that fill a by-value parameter, or a local destination for a class result.
+    struct ClassObject {
       ValueId l1;
-      std::uint32_t first, words;
+      std::uint32_t first;
       bool result;
-      T piece = T::i64;
+      ClassPieces pieces;
     };
-    std::vector<InRegisters> in_regs;
+    std::vector<ClassObject> objects;
+    Amd64Arguments amd64_args(config_.int_arg_registers);
     std::vector<std::int64_t> l2_of;  // per L1 parameter: its L2 parameter, or -1
     std::uint32_t j = 0;              // the value parameter's index
     for (ValueId p : f_.params_of(b)) {
@@ -317,48 +364,66 @@ class Lowering {
       if (result || byval) {
         QualType pc = layout(cxx(p)).pointee;
         if (ignored(pc)) {  // passed by nothing: an object of this frame stands for it
-          in_regs.push_back({p, 0, 0, result});
+          objects.push_back({p, 0, result, {}});
           l2_of.push_back(-1);
           continue;
         }
-        auto [words, piece] = in_registers(pc);
-        if (result && words) {
-          in_regs.push_back({p, 0, words, true, piece});
+        ClassPieces pieces = class_pieces(pc, byval ? &amd64_args : nullptr, std::uint32_t(params.size()));
+        if (config_.sysv_amd64 && !pieces.words) return fail("unsupported System V AMD64 aggregate");
+        if (result && pieces.words) {
+          objects.push_back({p, 0, true, pieces});
           l2_of.push_back(-1);
           continue;
         }
-        if (byval && words) {
-          pad_registers(used(params, piece, 1, indirect_result_), words, piece, [&] { params.push_back(piece); });
-          in_regs.push_back({p, std::uint32_t(params.size()), words, false, piece});
+        if (byval && pieces.words) {
+          if (!config_.sysv_amd64) {
+            const T piece = pieces.type;
+            pad_registers(used(params, piece, 1, indirect_result_), pieces.words, piece,
+                          [&] { params.push_back(piece); });
+          }
+          objects.push_back({p, std::uint32_t(params.size()), false, pieces});
           l2_of.push_back(-1);
-          for (std::uint32_t w = 0; w < words; ++w) params.push_back(piece);
+          params.insert(params.end(), pieces.words, pieces.type);
           continue;
         }
         if (result) indirect_result_ = std::uint32_t(params.size());  // 1 + its index past `!state`
       }
       auto t = type_of(cxx(p));
       if (!t) return fail(t.error());
+      if (place_amd64)
+        amd64_args.add(std::uint32_t(params.size()), 1, amd64_args.fits(1));
       l2_of.push_back(std::int64_t(params.size()));
       params.push_back(*t);
     }
+    std::vector<std::uint32_t> index;
+    if (place_amd64) {
+      index.resize(params.size());
+      std::vector<T> ordered{T::state};
+      for (std::uint32_t i : std::move(amd64_args).order()) {
+        if (i != none) index[i] = std::uint32_t(ordered.size());
+        ordered.push_back(i == none ? T::i64 : params[i]);
+      }
+      params = std::move(ordered);
+    }
     BlockId nb = b_.begin_block(params);
+    auto param = [&](std::uint32_t i) { return b_.param(nb, index.empty() ? i : index[i]); };
     std::uint32_t i = 0;
     for (ValueId p : f_.params_of(b)) {
-      if (l2_of[i] >= 0) map_[raw(p)] = b_.param(nb, std::uint32_t(l2_of[i]));
+      if (l2_of[i] >= 0) map_[raw(p)] = param(std::uint32_t(l2_of[i]));
       ++i;
     }
-    if (!in_regs.empty()) {
+    if (!objects.empty()) {
       // The objects the words fill, or the class result's object, in this frame.
       ValueId state = map_[raw(*f_.params_of(b).begin())];
-      for (const InRegisters& r : in_regs) {
+      for (const ClassObject& r : objects) {
         TypeLayout l = layout(layout(cxx(r.l1)).pointee);
         ValueId obj = frame_object(l);
         if (r.result) {
           result_object_ = obj;
-          result_regs_.assign(r.words, r.piece);
+          result_pieces_ = r.pieces;
         } else {
-          for (std::uint32_t w = 0; w < r.words; ++w)
-            state = store_reg(state, obj, w, r.piece, b_.param(nb, r.first + w));
+          for (std::uint32_t w = 0; w < r.pieces.words; ++w)
+            state = store_class_piece(state, obj, r.pieces, w, param(r.first + w), config_.sysv_amd64);
         }
         map_[raw(r.l1)] = obj;
       }
@@ -621,12 +686,13 @@ class Lowering {
         std::vector<ValueId> ops{in(n, 0)};
         auto l1ops = f_.operands_of(n);
         if (ind) ops.push_back(in(n, 1));
+        Amd64Arguments amd64_args(config_.int_arg_registers);
         std::uint64_t sext = 0;
         std::uint64_t byval = imms[ind ? 1 : 2], result_arg = imms[ind ? 2 : 3];
+        bool place_amd64 = config_.sysv_amd64 && byval;
         std::uint32_t indirect = 0;           // L2's: 1 + the index of the indirect result's address
         std::optional<ValueId> result_dst;    // a class result in registers: where it goes
-        std::uint32_t result_words = 0;
-        T result_piece = T::i64;
+        ClassPieces result_pieces;
         ValueId state = in(n, 0);
         for (std::size_t i = ind ? 2 : 1, k = 0; i < l1ops.size(); ++i, ++k) {
           ValueId v = map_[raw(l1ops[i])];
@@ -636,30 +702,49 @@ class Lowering {
           if ((((byval >> k) & 1) || k + 1 == result_arg) && ignored(layout(cxx(l1ops[i])).pointee)) continue;
           if (k + 1 == result_arg) {
             QualType c = layout(cxx(l1ops[i])).pointee;
-            if (auto [words, piece] = in_registers(c); words) {
+            result_pieces = class_pieces(c);
+            if (result_pieces.words) {
               result_dst = v;
-              result_words = words;
-              result_piece = piece;
               continue;
             }
+            if (config_.sysv_amd64) return fail("unsupported System V AMD64 aggregate result");
             indirect = std::uint32_t(at + 1);
           } else if ((byval >> k) & 1) {
-            // A class argument in registers: its object's words (AAPCS64 C.10), or its members
-            // when it is an HFA (C.2). The object is a temporary, whose frame object
-            // `frame_object` rounds to whole words.
-            if (auto [words, piece] = in_registers(layout(cxx(l1ops[i])).pointee); words) {
-              std::span<const ValueId> args(ops.begin() + (ind ? 2 : 1), ops.end());
-              pad_registers(used(args, piece, 0, indirect), words, piece, [&] { ops.push_back(constant(piece, 0)); });
-              for (std::uint32_t w = 0; w < words; ++w) ops.push_back(load_reg(state, v, w, piece));
+            // A class argument represented by pieces of its caller-owned object.
+            ClassPieces pieces = class_pieces(layout(cxx(l1ops[i])).pointee, &amd64_args, std::uint32_t(ops.size()));
+            if (pieces.words) {
+              if (!config_.sysv_amd64) {
+                const T piece = pieces.type;
+                std::span<const ValueId> args(ops.begin() + (ind ? 2 : 1), ops.end());
+                pad_registers(used(args, piece, 0, indirect), pieces.words, piece,
+                              [&] { ops.push_back(constant(piece, 0)); });
+              }
+              for (std::uint32_t w = 0; w < pieces.words; ++w)
+                ops.push_back(load_class_piece(state, v, pieces, w));
               continue;
             }
+            if (config_.sysv_amd64) return fail("unsupported System V AMD64 aggregate argument");
           }
-          if (b_.peek().type(v) != T::i1 && b_.peek().type(v) != T::ptr && is_signed(l1ops[i])) sext |= 1u << at;
+          bool signed_arg = b_.peek().type(v) != T::i1 && b_.peek().type(v) != T::ptr && is_signed(l1ops[i]);
+          if (place_amd64) {
+            bool in_registers = amd64_args.fits(1);
+            if (in_registers && signed_arg) sext |= std::uint64_t{1} << amd64_args.next_register();
+            amd64_args.add(std::uint32_t(ops.size()), 1, in_registers);
+          } else if (at < 32 && signed_arg) {
+            sext |= std::uint64_t{1} << at;
+          }
           ops.push_back(v);
         }
-        if (ops.size() - (ind ? 2 : 1) > 32) return fail("more than 32 argument registers are not in the α subset");
+        if (place_amd64) {
+          std::vector<ValueId> ordered(ops.begin(), ops.begin() + (ind ? 2 : 1));
+          for (std::uint32_t i : std::move(amd64_args).order())
+            ordered.push_back(i == none ? constant(T::i64, 0) : ops[i]);
+          ops = std::move(ordered);
+        } else if (ops.size() - (ind ? 2 : 1) > 32) {
+          return fail("more than 32 argument registers are not in the α subset");
+        }
         std::vector<T> res{T::state};
-        for (std::uint32_t w = 0; w < result_words; ++w) res.push_back(result_piece);
+        res.insert(res.end(), result_pieces.words, result_pieces.type);
         std::vector<std::optional<T>> narrow;
         for (std::uint32_t i = 1; i < nd.nres; ++i) {
           auto t = type_of(cxx(l1_result(n, i)));
@@ -677,13 +762,8 @@ class Lowering {
         NodeId c = b_.emit(ind ? Op2::call_ind : Op2::call, res, ops, im, 0, {}, o);
         ValueId after = b_.peek().result(c);
         if (result_dst) {
-          // The class result's words, stored into the caller's object without writing past it, or
-          // its HFA members.
-          TypeLayout l = layout(layout(cxx(l1ops[(ind ? 2 : 1) + result_arg - 1])).pointee);
-          for (std::uint32_t w = 0; w < result_words; ++w)
-            after = result_piece == T::i64
-                        ? store_piece(after, *result_dst, 8 * w, std::min<std::uint64_t>(8, l.size - 8 * w), b_.peek().result(c, 1 + w))
-                        : store_reg(after, *result_dst, w, result_piece, b_.peek().result(c, 1 + w));
+          for (std::uint32_t w = 0; w < result_pieces.words; ++w)
+            after = store_class_piece(after, *result_dst, result_pieces, w, b_.peek().result(c, 1 + w), true);
           out(n, 0, after);
           return {};
         }
@@ -717,10 +797,10 @@ class Lowering {
         std::vector<ValueId> ops{in(n, 0)};
         std::vector<T> types;
         auto l1ops = f_.operands_of(n);
-        // A class result in registers: its object's words or HFA members (AAPCS64 §6.9).
-        for (std::uint32_t w = 0; w < result_regs_.size(); ++w) {
-          ops.push_back(load_reg(in(n, 0), *result_object_, w, result_regs_[w]));
-          types.push_back(result_regs_[w]);
+        // A class result in registers: its object's words or HFA members.
+        for (std::uint32_t w = 0; w < result_pieces_.words; ++w) {
+          ops.push_back(load_class_piece(in(n, 0), *result_object_, result_pieces_, w));
+          types.push_back(result_pieces_.type);
         }
         for (std::size_t i = 1; i < l1ops.size(); ++i) {
           ValueId v = map_[raw(l1ops[i])];
@@ -766,43 +846,67 @@ class Lowering {
     }
     return n;
   }
-  // How a class `c` passes in registers: in that many 8-byte integer registers, or a homogeneous
-  // floating-point aggregate in one floating register per member; 0 for by address (LowerConfig;
-  // AAPCS64 B.3, C.2, C.10).
-  std::pair<std::uint32_t, T> in_registers(QualType c) const {
+  // An AMD64 record's INTEGER eightbytes, or its full stack representation. On AAPCS64
+  // a small record uses integer words or, for an HFA, one floating register per member.
+  ClassPieces class_pieces(QualType c, Amd64Arguments* args = nullptr, std::uint32_t first = 0) const {
     TypeLayout l = layout(c);
-    if (l.kind != TypeKind::record || !l.trivial_calls) return {0, T::i64};
-    if (l.hfa) return {l.hfa, l.hfa_bytes == 4 ? T::f32 : T::f64};
-    if (l.size > config_.composite_in_registers) return {0, T::i64};
-    return {std::uint32_t((l.size + 7) / 8), T::i64};
+    if (l.kind != TypeKind::record || !l.trivial_calls) return {};
+    auto words = std::uint32_t((l.size + 7) / 8);
+    if (config_.sysv_amd64) {
+      std::uint8_t chunks = l.sysv_integer_eightbytes;
+      if (!chunks) return {};
+      auto registers = std::uint32_t(std::popcount(chunks));
+      if (!args) return {registers, T::i64, l.size, chunks};
+      bool in_registers = args->fits(registers);
+      if (!in_registers) chunks = std::uint8_t((1u << words) - 1);
+      std::uint32_t passed_words = in_registers ? registers : words;
+      args->add(first, passed_words, in_registers);
+      return {passed_words, T::i64, l.size, chunks};
+    }
+    if (l.hfa) return {l.hfa, l.hfa_bytes == 4 ? T::f32 : T::f64, l.size};
+    if (l.size > config_.composite_in_registers) return {};
+    return {words, T::i64, l.size};
   }
   // An empty class trivially copyable for calls is not passed at all, as Clang does on arm64
   // macOS (#116).
   bool ignored(QualType c) const {
     TypeLayout l = layout(c);
-    return l.kind == TypeKind::record && l.trivial_calls && l.empty;
+    return !config_.sysv_amd64 && l.kind == TypeKind::record && l.trivial_calls && l.empty;
   }
-  // A frame object of the ABI's own for a class object, whole words long, so its words can be
-  // loaded and stored as such.
+  // An ABI-local class object. AAPCS64 rounds it up to permit full-word accesses.
   ValueId frame_object(const TypeLayout& l) {
-    std::uint64_t size = (l.size + 7) / 8 * 8;
-    return emit1(Op2::alloca, T::ptr, {}, {size, std::max<std::uint32_t>(l.align, 8), 0x80000000u + frame_objects_++});
+    std::uint64_t size = config_.sysv_amd64 ? l.size : (l.size + 7) / 8 * 8;
+    std::uint32_t align = config_.sysv_amd64 ? l.align : std::max<std::uint32_t>(l.align, 8);
+    return emit1(Op2::alloca, T::ptr, {}, {size, align, 0x80000000u + frame_objects_++});
   }
-  ValueId load_word(ValueId s, ValueId p) {
-    auto o = origin();
-    return b_.value(Op2::load, T::i64, {s, p}, {0}, 0, o);
+  // Pack a possibly partial AMD64 eightbyte, keeping every access within the object.
+  ValueId load_class_piece(ValueId s, ValueId obj, const ClassPieces& pieces, std::uint32_t i) {
+    const auto offset = pieces.offset(i);
+    if (!config_.sysv_amd64 || pieces.width(i) == 8)
+      return emit1(Op2::load, pieces.type, {s, add_offset(obj, offset)}, {0});
+    ValueId word{};
+    const auto size = pieces.width(i);
+    for (std::uint64_t done = 0; done < size;) {
+      const auto width = std::bit_floor(size - done);
+      T t = *l2::int_of_bits(width * 8);
+      ValueId piece = emit1(Op2::load, t, {s, add_offset(obj, offset + done)}, {0});
+      piece = resize(piece, T::i64, false);
+      if (!done) word = piece;
+      else {
+        piece = emit1(Op2::shl, T::i64, {piece, constant(T::i64, 8 * done)});
+        word = emit1(Op2::or_, T::i64, {word, piece});
+      }
+      done += width;
+    }
+    return word;
   }
-  ValueId store_word(ValueId s, ValueId p, ValueId v) { return store_piece(s, p, 0, 8, v); }
-  // The `i`-th register's worth of a class object at `obj`: an 8-byte word, or an HFA member.
-  ValueId load_reg(ValueId s, ValueId obj, std::uint32_t i, T piece) {
-    auto o = origin();
-    return b_.value(Op2::load, piece, {s, add_offset(obj, i * (piece == T::i64 ? 8 : l2::bytes(piece)))}, {0}, 0, o);
-  }
-  ValueId store_reg(ValueId s, ValueId obj, std::uint32_t i, T piece, ValueId v) {
-    if (piece == T::i64) return store_word(s, add_offset(obj, 8 * i), v);
+  ValueId store_class_piece(ValueId s, ValueId obj, const ClassPieces& pieces, std::uint32_t i, ValueId v,
+                            bool bounded) {
+    const auto offset = pieces.offset(i);
+    if (pieces.type == T::i64) return store_piece(s, obj, offset, bounded ? pieces.width(i) : 8, v);
     auto o = origin();
     T st[] = {T::state};
-    ValueId ops[] = {s, add_offset(obj, i * l2::bytes(piece)), v};
+    ValueId ops[] = {s, add_offset(obj, offset), v};
     std::uint64_t im[] = {0};
     return b_.peek().result(b_.emit(Op2::store, st, ops, im, 0, {}, o));
   }

@@ -244,6 +244,9 @@ struct Region {
   std::vector<Expansion> expansions{Expansion{}};
   // Engine trace details, rendered while the source files of this preprocessing run are open.
   std::string error_details;
+  // Token ranges where a pack pragma can change a record's layout. Layout still uses its
+  // ordinary rules. ABI features that require known natural layout can reject these ranges.
+  std::vector<std::pair<u32, u32>> possibly_packed;
   bool operator==(const Region&) const = default;
 
   std::size_t size() const { return tokens.size(); }
