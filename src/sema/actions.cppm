@@ -3306,6 +3306,22 @@ public:
       diag(begin, Diag::const_member_call, name);
       return fail;
     }
+    // A sole trivial implicit copy can bind to a temporary made by a converting constructor.
+    // Prepare that conversion before ranking the reference binding. With competing assignment
+    // candidates, their user-defined conversions need to be ranked together.
+    if (assignment_notation && lvalue_assignment && args.size() == 1 && recs.size() == 1 &&
+        recs.front()->implicit_assignment == CopyAssignment::trivial) {
+      const QualType parameter = types().rec(cands.front().type).params.front();
+      const QualType target = types().referee(parameter);
+      Ex& source = args.front();
+      if (object_cv == Cv::none && !same_unqualified(source.type(), target) && !ics(source, parameter).viable) {
+        const ClassRec* cls = class_rec(bound.cls);
+        if (cls && cls->user_ctors && this->object_cv(target) == Cv::const_) {
+          source = convert(source, Types::unqualified(target), source.begin);
+          if (!source.ok()) return fail;
+        }
+      }
+    }
     auto chosen = resolve(cands, args, begin, name, object_cv);
     if (!chosen) return fail;
     const MemberDeclRec* d = recs[*chosen];
