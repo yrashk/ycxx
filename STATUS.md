@@ -1207,7 +1207,8 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   built-in operator. `N::T(…)` is a cast only when no function or variable hides N::T.
 - Ordinary nonmember operators can be called explicitly as `operator+(a, b)`, `::operator+(a, b)`
   or `N::operator+(a, b)`. Unqualified calls use ordinary lookup and argument-dependent lookup.
-  Qualified calls use namespace lookup. [#219](https://github.com/yrashk/ycxx/issues/219)
+  Qualified calls use namespace lookup. An unqualified member operator name can also use the
+  implicit object, including in a lambda that captures `this`. [#219](https://github.com/yrashk/ycxx/issues/219)
 - Tests: `tests/own/operators` and `tests/own/headers`.
 
 ## Cooked integer user-defined literals (#289, 2026-11-20)
