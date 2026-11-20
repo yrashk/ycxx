@@ -205,7 +205,7 @@ draft/dcl/dcl.meaning.general-3.reject.cpp errors elsewhere: 'namespace' not sup
 draft/dcl/dcl.pre-3.reject.cpp errors elsewhere: preprocessing directives are not supported yet
 draft/dcl/dcl.pre-6.reject.cpp errors elsewhere: preprocessing directives are not supported yet
 draft/dcl/dcl.ref-3.accept.cpp '&' not supported yet
-draft/dcl/dcl.spec.auto.general-2.reject.cpp errors elsewhere: preprocessing directives are not supported yet
+draft/dcl/dcl.spec.auto.general-2.reject.cpp@linux-x86_64 the default Darwin target cannot find system <stddef.h> on Linux
 draft/dcl/dcl.spec.auto.general-5.accept.cpp 'auto' not supported yet
 draft/dcl/dcl.spec.auto.general-7.reject.cpp errors elsewhere: 'auto' not supported yet
 draft/dcl/dcl.spec.auto.general-8.accept.cpp 'template' not supported yet
