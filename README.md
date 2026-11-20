@@ -137,7 +137,8 @@ object. [#428](https://github.com/yrashk/ycxx/issues/428), [#419](https://github
 - namespaces, nested (`namespace a::b`) and inline ones, typedefs and aliases, including
   function type and function pointer aliases with qualified return types, `using` declarations
   and directives;
-- named function-pointer declarations with qualified return types;
+- named function-pointer declarations with qualified return types, qualified names in grouped
+  declarators, and unnamed function-pointer parameters;
 - `[[…]]` attributes, the GNU attributes and `asm` labels the macOS SDK's headers use, the
   GNU pointer qualifiers glibc uses, and the type-trait built-ins libycxx's headers use
   (`__is_same`, `__remove_cv`, …)
