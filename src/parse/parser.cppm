@@ -711,8 +711,8 @@ public:
     d.begin = pos();
     Level top = level(abstract, d.ok);
     const Suffix* fn = nullptr;
-    bool spelled_unknown_bound = false;
-    d.type = build(top, base, fn, d, abstract || typedef_, spelled_unknown_bound);
+    d.type = build(top, base, fn, d, abstract || typedef_);
+    const bool spelled_unknown_bound = std::exchange(d.unknown_bound, false);
     if (d.ok && !abstract && spelled_unknown_bound && s_->types().is_array(d.type)) {
       const sema::TypeRec array = s_->types().rec(d.type);
       if (array.bound_value == sema::ConstId::none) {
@@ -1177,8 +1177,7 @@ public:
   }
 
   // The type a declarator gives its name, built from the base type outwards ([dcl.meaning]).
-  QualType build(const Level& l, QualType t, const Suffix*& fn, Declarator& d, bool spells_type,
-                 bool& spelled_unknown_bound) {
+  QualType build(const Level& l, QualType t, const Suffix*& fn, Declarator& d, bool spells_type) {
     for (const Level::PtrOp& p : l.pointers) {
       if (p.owner) {
         if (p.restrict_at) {
@@ -1265,7 +1264,7 @@ public:
         s_->diag(d.begin, Diag::invalid_array_element, t);
         d.ok = false;
       } else if (s->unknown_bound) {
-        spelled_unknown_bound = true;
+        d.unknown_bound = true;
         t = s_->types().array_unknown(t);
       } else if (s->dependent_bound) {
         t = s_->types().array_dependent(t, *s->dependent_bound);
@@ -1273,7 +1272,7 @@ public:
         t = s_->types().array(t, s->bound);
       }
     }
-    if (l.inner) return build(*l.inner, t, fn, d, spells_type, spelled_unknown_bound);
+    if (l.inner) return build(*l.inner, t, fn, d, spells_type);
     d.name = l.name;
     d.named = l.named;
     d.name_at = l.name_at;
