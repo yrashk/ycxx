@@ -5347,9 +5347,19 @@ public:
           tc = c.type();
           pc = types().pointee(tc);
         }
-        if (Types::unqualified(pa) != Types::unqualified(pc)) return invalid();
-        QualType composite = types().pointer(
-            types().add_cv(Types::unqualified(pa), Cv(std::to_underlying(Types::cv(pa)) | std::to_underlying(Types::cv(pc)))));
+        QualType unqualified = Types::unqualified(pa);
+        Cv ca = Types::cv(pa), cc = Types::cv(pc);
+        if (unqualified != Types::unqualified(pc)) {
+          // [expr.type], [conv.qual]: complete arrays of the same shape combine the
+          // cv-qualifiers of their elements, including through nested array dimensions.
+          if (!types().is_array(pa)) return invalid();
+          unqualified = object_unqualified(pa);
+          if (unqualified != object_unqualified(pc) || !is_complete(pa)) return invalid();
+          ca = object_cv(pa);
+          cc = object_cv(pc);
+        }
+        Cv cv = Cv(std::to_underlying(ca) | std::to_underlying(cc));
+        QualType composite = types().pointer(types().add_cv(unqualified, cv));
         if (ta != composite) a = convert_node(a, ast::ConversionKind::qualification, composite);
         if (tc != composite) c = convert_node(c, ast::ConversionKind::qualification, composite);
         return bin(k, a, c, b);
