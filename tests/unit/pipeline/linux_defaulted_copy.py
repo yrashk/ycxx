@@ -52,6 +52,20 @@ def main():
         compile(linux, '-fsyntax-only', 'nontrivial-member-copy.cpp', status=1,
                 error="defaulted copy construction of 'W' is not supported")
 
+        # An implicit member copy does not prove triviality for the enclosing defaulted copy.
+        dependency = 'struct Leaf { %s; };\nstruct Wrapper { Leaf leaf; Wrapper(const Wrapper&) = default; };\n'
+        copy = 'void copy(const Wrapper& source) { Wrapper destination(source); }\n'
+        for member, expected in (('int&& ref', 'deleted constructor'),
+                                 ('volatile int value', "defaulted copy construction of 'Wrapper' is not supported")):
+            (scope / 'implicit-leaf.cpp').write_text((dependency % member) + copy)
+            compile(linux, '-fsyntax-only', 'implicit-leaf.cpp', status=1, error=expected)
+
+        (scope / 'uncertain-abi.cpp').write_text(
+            (dependency % 'volatile int value') + 'int read(Wrapper object) { return object.leaf.value; }\n')
+        for target in (linux, darwin):
+            compile(target, '-fsyntax-only', 'uncertain-abi.cpp')
+            compile(target, '-c', 'uncertain-abi.cpp', status=1, error='defaulted copy ABI classification is unavailable')
+
         for part in ('main', 'peer'):
             compile(linux, '-c', f'copy-abi-{part}.cpp', '-o', f'copy-{part}.o')
         compile(linux, '-nostdlib', 'copy-main.o', 'copy-peer.o', '-o', 'native')

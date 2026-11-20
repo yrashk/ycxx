@@ -5480,75 +5480,91 @@ void Program::defaulted_copy(EntityId cls, sema::ClassRec& rec, std::span<const 
       if (status == deleted) declared->is_deleted = true;
     }
   };
-  if (outside_scope(cls, rec) ||
+  const auto constructor_template = [](const sema::MemberDeclRec& m) { return m.is_ctor && m.is_template; };
+  if (outside_scope(cls, rec) || std::ranges::any_of(rec.members, constructor_template) ||
       (written && std::ranges::count_if(rec.members, [&](const auto& m) { return copy_parameter(m, cls).has_value(); }) != 1)) {
     finalize(unsupported, !written || written_const);
     return;
   }
 
   struct Subobject {
-    sema::CopyState state;
+    sema::CopyState from_mutable;
+    sema::CopyState from_const;
     bool takes_const = true;
   };
-  // The enclosing class is an ordinary namespace-scope class without bases. A subobject's
-  // non-public operation is accessible only through friendship in this subset.
-  const EntityId ctor = written ? declared->entity : EntityId::none;
-  auto inaccessible = [&](const sema::ClassRec& leaf, EntityId e) {
+  const auto uniform = [](sema::CopyState result) { return Subobject{result, result}; };
+  const auto combine = [](Subobject& result, Subobject member) {
+    result.from_mutable = std::max(result.from_mutable, member.from_mutable);
+    result.from_const = std::max(result.from_const, member.from_const);
+    result.takes_const &= member.takes_const;
+  };
+  // Each enclosing class examined here is an ordinary namespace-scope class without bases.
+  // A non-public subobject operation is accessible only through friendship in this subset.
+  const auto inaccessible = [](const sema::ClassRec& leaf, EntityId e, EntityId owner, EntityId ctor) {
     const ast::Access access = leaf.access_of(e);
     return access != ast::Access::public_ && access != ast::Access::none &&
-           !std::ranges::contains(leaf.friends, cls) &&
+           !std::ranges::contains(leaf.friends, owner) &&
            (ctor == EntityId::none || !std::ranges::contains(leaf.friends, ctor));
   };
-  auto inspect = [&](QualType type, bool from_const) -> Subobject {
+  const auto inspect = [&](this const auto& self, QualType type, EntityId owner, EntityId ctor) -> Subobject {
     QualType t = element(type);
     const auto r = types.rec(t);
-    if (r.kind == sema::TypeKind::reference) return {r.rvalue_ref ? deleted : trivial};
-    if (sema::Types::is_volatile(t)) return {unsupported};
+    if (r.kind == sema::TypeKind::reference) return uniform(r.rvalue_ref ? deleted : trivial);
+    if (sema::Types::is_volatile(t)) return uniform(unsupported);
     switch (r.kind) {
-      case sema::TypeKind::builtin: return {w_->target[r.builtin].size ? trivial : unsupported};
-      case sema::TypeKind::enum_: case sema::TypeKind::pointer: return {trivial};
+      case sema::TypeKind::builtin: return uniform(w_->target[r.builtin].size ? trivial : unsupported);
+      case sema::TypeKind::enum_: case sema::TypeKind::pointer: return uniform(trivial);
       case sema::TypeKind::class_: break;
-      default: return {unsupported};
+      default: return uniform(unsupported);
     }
     const auto* leaf = classes_.find(r.entity);
-    if (!leaf || !leaf->defined || outside_scope(r.entity, *leaf)) return {unsupported};
+    if (!leaf || !leaf->defined || outside_scope(r.entity, *leaf)) return uniform(unsupported);
 
     const sema::MemberDeclRec* copy = nullptr;
     bool takes_const = leaf->defaulted_copy_const;
     bool unusable_destructor = false;
     for (const auto& m : leaf->members) {
-      if (m.is_ctor && m.is_template) return {unsupported};
+      if (constructor_template(m)) return uniform(unsupported);
       if (auto ref = copy_parameter(m, r.entity)) {
         // Only a single ordinary copy taking one class reference can be classified here.
-        if (copy || types.rec(m.type).params.size() != 1 || sema::Types::is_volatile(*ref)) return {unsupported};
+        const auto f = types.rec(m.type);
+        if (copy || f.params.size() != 1 || f.variadic || sema::Types::is_volatile(*ref)) return uniform(unsupported);
         copy = &m;
         takes_const = sema::Types::is_const(*ref);
       }
-      if (m.is_dtor) unusable_destructor |= m.is_deleted || inaccessible(*leaf, m.entity);
+      if (m.is_dtor) unusable_destructor |= m.is_deleted || inaccessible(*leaf, m.entity, owner, ctor);
     }
-    if (unusable_destructor || (!takes_const && (from_const || sema::Types::is_const(t))) ||
-        (copy ? copy->is_deleted || inaccessible(*leaf, copy->entity) : leaf->copy_deleted))
-      return {deleted, takes_const};
-    if (copy) return {std::ranges::contains(leaf->defaulted_copy_declarations, copy->entity)
-                          ? leaf->defaulted_copy : nontrivial, takes_const};
-    if (leaf->defaulted_copy != ordinary) return {leaf->defaulted_copy, takes_const};
-    return {leaf->copy_ctor == EntityId::none ? trivial : unsupported, takes_const};
+
+    sema::CopyState operation;
+    if (copy) {
+      operation = nontrivial;
+      if (std::ranges::contains(leaf->defaulted_copy_declarations, copy->entity)) operation = leaf->defaulted_copy;
+      if (copy->is_deleted || inaccessible(*leaf, copy->entity, owner, ctor)) operation = deleted;
+    } else if (leaf->defaulted_copy != ordinary) {
+      operation = leaf->defaulted_copy;
+    } else {
+      // Legacy implicit-copy records do not prove triviality. Classify the implicit copy in
+      // this leaf's context, including its own fields' access, volatile types and references.
+      auto fields = uniform(trivial);
+      for (const auto& field : leaf->fields)
+        combine(fields, self(field.type, r.entity, EntityId::none));
+      takes_const = fields.takes_const;
+      operation = takes_const ? fields.from_const : fields.from_mutable;
+      if (leaf->copy_deleted) operation = deleted;
+    }
+    if (unusable_destructor) operation = deleted;
+
+    const auto const_result = takes_const ? operation : deleted;
+    return {sema::Types::is_const(t) ? const_result : operation, const_result, takes_const};
   };
 
-  auto members = [&](bool from_const) {
-    Subobject result{trivial};
-    for (QualType t : subobjects) {
-      const auto member = inspect(t, from_const);
-      result.state = std::max(result.state, member.state);
-      result.takes_const &= member.takes_const;
-    }
-    return result;
-  };
-  const auto mutable_source = members(false);
-  const bool const_source = written ? written_const : mutable_source.takes_const;
+  const EntityId ctor = written ? declared->entity : EntityId::none;
+  auto members = uniform(trivial);
+  for (QualType t : subobjects) combine(members, inspect(t, cls, ctor));
+  const bool const_source = written ? written_const : members.takes_const;
   const auto result = const_source
-      ? (mutable_source.takes_const ? members(true).state : deleted)
-      : mutable_source.state;
+      ? (members.takes_const ? members.from_const : deleted)
+      : members.from_mutable;
   finalize(result, const_source);
 }
 
