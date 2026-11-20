@@ -128,7 +128,7 @@ operators with an `unsigned long long` parameter, including constant evaluation.
   equality and ordering of pointers to matching complete arrays whose elements differ in
   `const` or `volatile` qualification. Comparisons and conditional expressions involving
   object pointers and `void` pointers combine the pointee qualifiers. Statements include
-  `switch`, labels and `goto`, declarations in conditions,
+  `switch`, labels and `goto` (including jumps past vacuous initialization), declarations in conditions,
   init-statements in `if` and `switch`, and range-based `for` with optional init-statements.
   Ranges can be arrays or classes with member `begin` and `end` or free `begin` and `end` found
   by argument-dependent lookup. Unqualified calls can find and rank functions in associated

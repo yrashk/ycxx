@@ -2032,9 +2032,12 @@ values, end to end; results match Clang's bit for bit.
   in the body first (`case_labels`), since L1's `switch_` op has no lowering yet (#342). A `goto`
   ends the objects of the scopes it leaves and those begun after a label it jumps back to
   ([stmt.jump]/2); a `goto` before its label branches to a block filled in when the label is
-  placed. A condition's variable lives one iteration of a loop, through a `for`'s increment. A
+  placed. Jump and switch dispatch edges that bypass a vacuous declaration allocate storage
+  and start its lifetime ([stmt.dcl]/2, #341). The active object's address is kept in a
+  function-scope binding so fallthrough and jumps share uses and scope cleanup at the label.
+  A condition's variable lives one iteration of a loop, through a `for`'s increment. A
   goto's `br` carries `not_constexpr`, so constant evaluation of it fails ([expr.const]).
-- Not yet: a jump forward past a vacuous declaration (#341); `switch` on a class with a conversion
+- Not yet: `switch` on a class with a conversion
   function and `explicit operator bool` conditions (#339); a declaration as the condition of
   `if constexpr` (#344); constant evaluation of a switch on an enumeration (enumeration values, #25).
 - Tests: `tests/own/stmt/` (written spec-only, 23 run and 15 reject tests, and the split-off XFAILs
