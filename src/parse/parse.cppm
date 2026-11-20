@@ -298,20 +298,22 @@ public:
            it.begin + n.offset < it.brace_end))
         continue;
       DeclId id{ids_[j], ast::make_decl_ord(ast::DeclClass::syntactic, n.ordinal)};
+      // A C-linkage definition qualified into another namespace does not bind a lexical name.
+      // Its earlier declaration is indexed in the target namespace.
+      const bool qualified = it.qualifier_begin < it.qualifier_end;
+      auto d = bound_functions || qualified ? decl_sema(id) : std::nullopt;
+      if (qualified)
+        if (auto target = qualified_c_functions_.find({j, n.ordinal});
+            target != qualified_c_functions_.end() && target->second != ns)
+          continue;
       if (bound_functions) {
         // A qualified definition can inhabit this namespace while binding its name elsewhere
         // ([dcl.meaning.general]). Targets of using-declarators were collected above.
-        auto d = decl_sema(id);
         if (!d || d->entity == EntityId::none || d->kind != ast::DeclKind::function ||
             (d->flags & sema::decl_flag::member))
           continue;
-        // The entity of a function with C language linkage uses the global namespace in its
-        // identity. A qualified definition already has a declaration in its target namespace.
-        if (d->flags & sema::decl_flag::lang_c) {
-          if (it.qualifier_begin != items::none) continue;
-        } else if (namespace_path(w_->entities.rec(d->entity).scope) != path) {
+        if (!(d->flags & sema::decl_flag::lang_c) && namespace_path(w_->entities.rec(d->entity).scope) != path)
           continue;
-        }
       }
       r.push_back(id);
     }
@@ -326,14 +328,7 @@ public:
   std::vector<ast::DeclSema> adl_functions(EntityId ns, ast::NameId name, u32 item, bool self) {
     const u32 limit = item + (self ? 1 : 0);
     std::string path = namespace_path(ns);
-    while (!path.empty()) {
-      std::string parent = parent_of(path);
-      auto inlines = inline_namespaces_.find(parent);
-      if (inlines == inline_namespaces_.end()) break;
-      auto child = std::ranges::find(inlines->second, path, &InlineNamespace::path);
-      if (child == inlines->second.end() || child->item >= limit) break;
-      path = std::move(parent);
-    }
+    while (is_inline_namespace(path, limit)) path = parent_of(path);
     std::vector<std::string> scopes{std::move(path)};
     std::vector<DeclId> decls;
     std::string_view spelling = w_->ins.names.spelling(name);
@@ -357,6 +352,13 @@ public:
   static std::string parent_of(const std::string& p) {
     auto cut = p.rfind("::");
     return cut == std::string::npos ? "" : p.substr(0, cut);
+  }
+  bool is_inline_namespace(const std::string& path, u32 limit) const {
+    if (path.empty()) return false;
+    auto inlines = inline_namespaces_.find(parent_of(path));
+    if (inlines == inline_namespaces_.end()) return false;
+    auto child = std::ranges::find(inlines->second, path, &InlineNamespace::path);
+    return child != inlines->second.end() && child->item < limit;
   }
   static bool encloses(const std::string& outer, const std::string& inner) {
     return outer.empty() || inner == outer || inner.starts_with(outer + "::");
@@ -1006,6 +1008,8 @@ private:
   std::map<u32, std::string> ns_paths_;           // by namespace entity
   struct InlineNamespace { std::string path; u32 item; };
   std::map<std::string, std::vector<InlineNamespace>> inline_namespaces_;  // by enclosing namespace
+  // The target namespace of a qualified C-linkage function, by (item, declarator ordinal).
+  std::map<std::pair<u32, u32>, std::string> qualified_c_functions_;
   std::vector<Directive> directives_;
 
   // Each item's namespace, from the namespace definitions that enclose it; and the using-
@@ -1457,20 +1461,21 @@ public:
 
 private:
   // The language linkage of the enclosing linkage-specifications ([dcl.link]): the innermost.
-  LangLinkage enclosing_linkage() {
+  std::optional<LangLinkage> enclosing_linkage() {
     for (u32 j = it_->parent; j != items::none; j = p_->items().items[j].parent) {
       const items::Item& outer = p_->items().items[j];
       if (outer.kind == ItemKind::linkage_block)
         if (auto l = linkage_named(p_->region(), outer.begin + 1)) return *l;
     }
-    return LangLinkage::cxx;
+    return std::nullopt;
   }
 
   // A simple-declaration or the declaration part of a function-definition ([dcl.pre],
   // [dcl.fct.def.general]), possibly after `extern "C"` ([dcl.link]).
   void declaration() {
-    LangLinkage lang = enclosing_linkage();
-    bool explicit_lang = lang != LangLinkage::cxx;
+    const auto enclosing = enclosing_linkage();
+    LangLinkage lang = enclosing.value_or(LangLinkage::cxx);
+    bool explicit_lang = enclosing.has_value();
     u32 attrs_at = ps_.pos();
     // [dcl.link]: a linkage-specification has no attribute-specifier-seq.
     // (GNU attributes there are accepted, as GCC and Clang do.)
@@ -3140,16 +3145,49 @@ private:
            r.tokens[it_->body_begin + 1].kind == Tk::kw_delete;
   }
 
-  // `N::x` outside N: the definition of a member N declares ([namespace.memdef]/2), with its
-  // entity.
-  bool define_namespace_member(const parse::Declarator& d, ast::DeclSema& sem, bool fn, bool definition) {
+  // A qualified definition of a namespace member redeclares an earlier declaration in its
+  // target namespace or inline namespace set ([dcl.meaning.general], [basic.scope.scope]).
+  bool define_namespace_member(const parse::Declarator& d, ast::DeclSema& sem, bool fn, bool definition,
+                               u32 ordinal, bool explicit_lang) {
+    const std::string ns = p_->namespace_path(*d.scope.ns);
+    const QualType type = s_.types().canonical(sem.type);
     std::optional<ast::DeclSema> mem;
-    for (DeclId p : p_->declared_in(p_->world().ins.names.spelling(d.name), p_->namespace_path(*d.scope.ns), k_, false))
-      if (auto ds = p_->decl_sema(p); ds && ds->entity != EntityId::none && (ds->kind == ast::DeclKind::function) == fn &&
-                                      (!fn || s_.types().canonical(ds->type) == s_.types().canonical(sem.type)))
-        mem = ds;
+    std::optional<std::string> c_namespace;
+    bool linkage_conflict = false;
+    for (DeclId p : p_->declared_in(p_->world().ins.names.spelling(d.name), ns, k_, false)) {
+      auto ds = p_->decl_sema(p);
+      if (!ds || ds->entity == EntityId::none || (ds->kind == ast::DeclKind::function) != fn) continue;
+      const QualType prior_type = s_.types().canonical(ds->type);
+      std::optional<std::string> target;
+      if (fn && ((ds->flags | sem.flags) & sema::decl_flag::lang_c)) {
+        if ((ds->flags | sem.flags) & sema::decl_flag::template_) continue;
+        // A using-declaration can expose a name without making the function a member. The
+        // C-linkage entity's shared identity cannot identify the earlier declaration's scope.
+        const std::string& owner = p_->ns_of(p_->index(p.item));
+        std::string candidate = owner;
+        while (candidate != ns && p_->is_inline_namespace(candidate, k_)) candidate = Program::parent_of(candidate);
+        if (candidate != ns || !Program::encloses(p_->ns_of(k_), owner)) continue;
+        if (type != prior_type) {
+          // Match the whole function type with only its outer language linkage substituted.
+          // An unspecified linkage inherits that of this redeclaration ([dcl.link]).
+          auto& ins = p_->world().ins;
+          auto inherited = ins.types.get<ast::TFunction>(type);
+          inherited.linkage = ins.types.get<ast::TFunction>(prior_type).linkage;
+          if (ins.intern_type(inherited) != prior_type) continue;
+          if (explicit_lang) {
+            linkage_conflict = true;
+            continue;
+          }
+        }
+        target = owner;
+      } else if (fn && type != prior_type) {
+        continue;
+      }
+      mem = ds;
+      c_namespace = std::move(target);
+    }
     if (!mem) {
-      s_.diag(d.name_at, Diag::no_namespace_member, d.name);
+      s_.diag(d.name_at, linkage_conflict ? Diag::linkage_conflict : Diag::no_namespace_member, d.name);
       return false;
     }
     auto latest = p_->declaration(mem->entity, k_);
@@ -3159,6 +3197,11 @@ private:
     }
     sem.entity = mem->entity;
     sem.linkage = mem->linkage;
+    if (c_namespace && (mem->flags & sema::decl_flag::lang_c)) {
+      sem.type = mem->type;
+      sem.flags |= sema::decl_flag::lang_c;
+      p_->qualified_c_functions_.emplace(std::pair{k_, ordinal}, std::move(*c_namespace));
+    }
     return true;
   }
 
@@ -3405,7 +3448,6 @@ private:
   // static data member C declares ([class.mfct], [class.static.data]), with its entity and flags.
   bool define_member(const DeclSpec& spec, const parse::Declarator& d, ast::DeclSema& sem, bool fn, bool definition,
                      bool has_init) {
-    if (d.scope.ns) return define_namespace_member(d, sem, fn, definition);
     if (spec.is_static) {
       s_.diag(spec.begin, Diag::static_outside_class);  // [class.static.mfct], [class.static.data]
       return false;
@@ -4044,11 +4086,15 @@ private:
         });
 
       if (d.qualified) {
-        if (!define_member(spec, d, sem, fn, definition, has_init)) return false;
-        // `R N::f(…)`: the namespace's earlier declarations' default arguments ([dcl.fct.default]/4).
-        if (fn && d.scope.ns) {
-          if (!merge_defaults(params, q_.namespace_members(*d.scope.ns, d.name), sem.entity, d)) return false;
-          sem.params = b_.seq(std::span<const ast::ParamSema>(params));
+        if (d.scope.ns) {
+          if (!define_namespace_member(d, sem, fn, definition, ord, explicit_lang)) return false;
+          // `R N::f(…)`: the namespace's earlier declarations' default arguments ([dcl.fct.default]/4).
+          if (fn) {
+            if (!merge_defaults(params, q_.namespace_members(*d.scope.ns, d.name), sem.entity, d)) return false;
+            sem.params = b_.seq(std::span<const ast::ParamSema>(params));
+          }
+        } else if (!define_member(spec, d, sem, fn, definition, has_init)) {
+          return false;
         }
         // The rest of the declarator, its initializer included, is in the class's scope
         // ([basic.scope.class]).
@@ -4778,7 +4824,12 @@ public:
         s_.this_type = p_->this_type(*f);
         scope = p_->world().entities.rec(scope).scope;
       }
-      if (p_->is_namespace(scope)) at_->from = p_->namespace_path(scope);
+      if ((f->flags & sema::decl_flag::lang_c) && !(f->flags & sema::decl_flag::member)) {
+        if (auto target = p_->qualified_c_functions_.find({k_, 0}); target != p_->qualified_c_functions_.end())
+          at_->from = target->second;
+      } else if (p_->is_namespace(scope)) {
+        at_->from = p_->namespace_path(scope);
+      }
       if (generic_) return generic_body();
       p_->running_bodies_.push_back({f->entity, k_, inst_});
       struct Pop {
