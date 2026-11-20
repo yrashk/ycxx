@@ -183,6 +183,9 @@ checked with the flags of its last build, or else with its line in the project's
 **Pointer-to-member declarations.** Data and function member-pointer types can appear in
 declarations, type traits and requires-expressions. [#238](https://github.com/yrashk/ycxx/issues/238)
 
+**Array structured bindings.** Local bindings can copy scalar-element arrays or alias their
+elements, including whole rows of multidimensional arrays. [#285](https://github.com/yrashk/ycxx/issues/285)
+
 ### Not yet
 
 - The standard library and its headers. On macOS, C headers such as `<stdio.h>` compile without
@@ -191,8 +194,8 @@ declarations, type traits and requires-expressions. [#238](https://github.com/yr
 - Taking member addresses, applying `.*` or `->*`, and code generation for member-pointer values.
   [#411](https://github.com/yrashk/ycxx/issues/411)
 - Constexpr lambdas (the interpreter has no class objects yet), lambdas outside function bodies,
-  structured bindings, virtual functions, virtual base classes, inheriting constructors, and bases
-  of class templates.
+  member and tuple-like structured bindings, virtual functions, virtual base classes, inheriting
+  constructors, and bases of class templates.
 - Member class and alias templates, conversion function templates, and constraints on class
   templates and their members.
 - Exceptions, optimization (`-O`), and the extended floating-point types (`std::float16_t`, …).

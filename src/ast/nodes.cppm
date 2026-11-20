@@ -134,6 +134,7 @@ enum class ConversionKind : u8 {
   array_to_pointer, function_to_pointer, qualification, boolean, null_pointer, to_void,
   pointer,  // [conv.ptr]: an object pointer to `cv void*`
   floating,
+  array_copy,  // [dcl.struct.bind]: initialize the hidden array, element by element
 };
 
 // An implicit conversion: a node of width zero beyond its operand (§3.3), naming its function for

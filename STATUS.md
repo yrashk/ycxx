@@ -1783,6 +1783,11 @@ What the process allocates, attributed to the engine's cells, in the trace and t
 - **Variables:** block scope (`= e`, `(e)`, `{e}`; the name is declared first, so its own
   initializer cannot use it), namespace scope and variable templates (`= e`, `{e}`), static data
   members; several declarators must deduce one type.
+- **Array structured bindings** ([dcl.struct.bind], #285): a block-scope declaration evaluates
+  its initializer once and binds the names to elements or whole rows of the hidden array.
+  Value bindings copy scalar elements in order and take cv from the declaration (CWG 2506).
+  Reference bindings deduce and bind to the initializer with ordinary reference rules.
+  `decltype(x)` gives the element type, and `decltype((x))` gives its lvalue reference.
 - **Deduced return types:** each `return` deduces and the first fixes the type for the rest of
   the body ([dcl.spec.auto.general]/11); no return deduces `void`. `BodySema` carries the deduced
   function type (`deduced`, `deduced_type`). Naming the function (`Sema::deduced_function`) asks
@@ -1793,11 +1798,12 @@ What the process allocates, attributed to the engine's cells, in the trace and t
 - **Calls through pointers to functions:** irgen emits `call_ind` (`Gen::call_pointer`), which
   lowering, AArch64 selection and the interpreter already had; constant evaluation calls through
   them too.
-- Tests: `tests/own/auto/` (46 spec-only, 4 more): 42 pass, 8 are XFAIL: structured bindings
+- Tests: `tests/own/auto/` (49 spec-only, 4 more): 47 pass, 6 are XFAIL: member structured bindings
   (#285), `static_cast<int&&>` (#199).
   `p1-impl-mangle` checks the `Da`/`Dc` names against Clang objects.
 - Not yet: constrained `C auto`, `auto x = {…}`, `auto x(e)` at namespace scope, abbreviated
-  function templates (#286); structured bindings (#285).
+  function templates (#286); member and tuple-like bindings and other declaration contexts
+  (#285), binding packs (#279).
 
 ## Lambdas, θ step 2 (#280, 2026-11-19)
 

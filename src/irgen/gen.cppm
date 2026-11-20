@@ -659,6 +659,28 @@ class Gen {
     return {pure(ir::Op::ptr_member, facts_.pointer_to(t), {p.ptr}, {word(ty(t)), path[0], path[1]}), t};
   }
 
+  // [dcl.struct.bind]/1: copy in element order and retain each access's own cv-qualifiers.
+  void copy_array(const Place& dst, const Place& src) {
+    Place dst_first = subobject(dst, ir::Step::elem, 0, facts_.element(dst.type));
+    Place src_first = subobject(src, ir::Step::elem, 0, facts_.element(src.type));
+    ast::QualType index_type = facts_.ptrdiff_type();
+    ValueId count = int_constant(index_type, std::int64_t(facts_.bound(dst.type)));
+    ir::BlockId head = new_block({index_type}), body = new_block(), done = new_block();
+    br(head, {int_constant(index_type, 0)});
+    enter(head);
+    ValueId index = b_.param(head, 1);
+    cond_br(pure(ir::Op::icmp, facts_.bool_type(), {index, count}, {std::to_underlying(ir::Pred::slt)}), edge(body), edge(done));
+    enter(body);
+    auto element = [&](const Place& first) -> Place {
+      return {pure(ir::Op::ptr_add, facts_.pointer_to(first.type), {first.ptr, index}, {word(ty(first.type))}), first.type};
+    };
+    Place dst_element = element(dst_first), src_element = element(src_first);
+    if (cls(dst_element.type) == TypeClass::array) copy_array(dst_element, src_element);
+    else store(dst_element, load(src_element));
+    br(head, {arith(ast::BinaryOp::add, index_type, index, int_constant(index_type, 1))});
+    enter(done);
+  }
+
   // Initializes the object at `p` from the prvalue `e` ([dcl.init]). In a `zeroed` object, a
   // value-initialized element is already zero.
   void initialize(const Place& p, At e, bool zeroed) {
@@ -668,6 +690,11 @@ class Gen {
     if (facts_.is_reference(p.type)) {
       store(p, address(e));  // a reference member holds its object's address
       return;
+    }
+    if (is<ast::ImplicitConversion>(e)) {
+      auto c = get<ast::ImplicitConversion>(e);
+      if (c.conversion == ast::ConversionKind::array_copy)
+        return copy_array(p, lvalue(child(e, c.operand)));
     }
     if (is<ast::Call>(e) && class_prvalue(info(e))) {
       call(e, p.ptr);  // the callee initializes the object ([stmt.return])

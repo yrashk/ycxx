@@ -1480,6 +1480,10 @@ public:
   void set_local_value(u32 local, ConstId v) { local_values_[local] = v; }
   std::span<const std::optional<ConstId>> local_values() const { return local_values_; }
   const ast::LocalRec& local(u32 i) const { return locals_[i]; }
+  // [dcl.type.decltype]/1: a binding gives its referenced type; its reference slot is internal.
+  QualType local_declared_type(const ast::LocalRec& local) {
+    return local.flags & ast::local_flag::structured_binding ? types().referee(local.type) : local.type;
+  }
   std::span<const ast::LocalRec> locals() const { return locals_; }
   // After the scope of a requires-expression ends, its parameters leave no runtime locals.
   void discard_local_declarations(std::size_t first) {
@@ -2012,10 +2016,16 @@ public:
   // lambda from `ctx` inwards, or, for a constant of an enclosing function, its value: naming it
   // is not an odr-use ([basic.def.odr]/5, [expr.prim.lambda.capture]/8).
   Ex captured(u32 ctx, u32 key, NameId name, u32 begin, u32 end) {
+    const ast::LocalRec* local = nullptr;
+    if (!(key & capture_bit)) local = ctx == lambdas_.size() ? &locals_[key] : &lambdas_[ctx].outer_locals[key];
+    if (local && (local->flags & ast::local_flag::structured_binding) && types().has_placeholder(local->type)) {
+      diag(begin, Diag::auto_used_in_initializer, name);
+      return {NodeId::none, begin, end};
+    }
     if (ctx == lambdas_.size()) return source_expr(ctx, key, begin, end);
     // A function parameter pack of a template's definition: its uses are expanded, and captured,
     // in each instantiation ([temp.variadic], [expr.prim.lambda.capture]/17).
-    if (!(key & capture_bit) && types().kind(lambdas_[ctx].outer_locals[key].type) == TypeKind::pack_expansion) {
+    if (local && types().kind(local->type) == TypeKind::pack_expansion) {
       if (pattern_packs_.empty()) {
         diag(begin, Diag::unexpanded_pack, name);
         return {NodeId::none, begin, end};
@@ -2025,16 +2035,14 @@ public:
     }
     // A static local is no local entity, so it is named, never captured
     // ([expr.prim.lambda.capture]/7, [basic.pre]/7).
-    if (!(key & capture_bit) && lambdas_[ctx].outer_locals[key].entity != EntityId::none) {
-      const ast::LocalRec& l = lambdas_[ctx].outer_locals[key];
-      ExprInfo info{types().referee(l.type), ValueCategory::lvalue, 0};
-      return node(ast::DeclRef{info, l.entity}, begin, end, info);
+    if (local && local->entity != EntityId::none) {
+      ExprInfo info{types().referee(local->type), ValueCategory::lvalue, 0};
+      return node(ast::DeclRef{info, local->entity}, begin, end, info);
     }
     // In an unevaluated operand naming it is no odr-use: no capture ([expr.prim.lambda.capture]/8),
     // only its type, and for `decltype` its declared type.
     if (unevaluated > 0) {
-      QualType declared = key & capture_bit ? lambdas_[ctx - 1].fields[key & ~capture_bit].type
-                                            : lambdas_[ctx].outer_locals[key].type;
+      QualType declared = local ? local_declared_type(*local) : lambdas_[ctx - 1].fields[key & ~capture_bit].type;
       ExprInfo info{types().referee(declared), ValueCategory::lvalue, 0};
       Ex e = node(ast::Dependent{info, b_->list(std::vector<Child>{})}, begin, end, info);
       declared_types_[std::to_underlying(e.id)] = declared;
@@ -3711,6 +3719,8 @@ public:
     }
     if (e.glvalue() && same_unqualified(e.type(), t) && cv_within(object_cv(e.type()), object_cv(t)))
       return extend ? extended(e) : e;
+    if (!e.glvalue() && types().is_array(t) && same_unqualified(e.type(), t) && cv_within(object_cv(e.type()), object_cv(t)))
+      return materialize(e, t, extend);  // [dcl.init.ref]/5.3: a reference-compatible array prvalue
     Ex v = convert(e, Types::unqualified(t), at_);
     if (!v.ok() || v.glvalue()) return v;
     return materialize(v, t, extend);
@@ -4707,12 +4717,44 @@ public:
     }
   }
 
+  // [dcl.struct.bind]/1, /2, /6: the hidden entity is an array copy or an ordinary
+  // deduced reference to the initializer. The copy takes its cv from the declaration.
+  std::optional<std::pair<QualType, Ex>> array_binding(QualType declared, Ex source, u64 names, u32 at_) {
+    if (!source.ok()) return std::nullopt;
+    QualType array = source.type();
+    if (dependent(source) || !types().is_array(array)) {
+      diag(at_, Diag::binding_unsupported_type, array);
+      return std::nullopt;
+    }
+    if (!require_complete(array, at_)) return std::nullopt;
+    if (u64 bound = types().rec(array).bound; names != bound) {
+      diag(at_, Diag::binding_arity, names, bound);
+      return std::nullopt;
+    }
+    QualType leaf = array;
+    while (types().is_array(leaf)) leaf = types().rec(leaf).inner;
+    if (!types().is_scalar(leaf) || types().is_member_pointer(leaf)) {
+      diag(at_, Diag::binding_unsupported_type, array);
+      return std::nullopt;
+    }
+    if (types().is_reference(declared)) {
+      auto ref = deduce_placeholder(declared, source, source.begin);
+      if (!ref) return std::nullopt;
+      Ex init = bind_reference(source, *ref, source.begin, true);
+      if (!init.ok()) return std::nullopt;
+      return std::pair{*ref, init};
+    }
+    QualType type = types().add_cv(object_unqualified(array), Types::cv(declared));
+    if (!source.glvalue()) source = materialize(source, array, false);
+    return std::pair{type, convert_node(source, ast::ConversionKind::array_copy, type)};
+  }
+
   // [dcl.type.decltype]/1: an unparenthesized id-expression or member access names its entity's
   // declared type; any other expression has its type, as `T&&` for an xvalue and `T&` for an
   // lvalue.
   QualType decltype_of(Ex e, bool parenthesized) {
     if (!parenthesized) {
-      if (auto l = as<ast::LocalRef>(e)) return locals_[l->local].type;
+      if (auto l = as<ast::LocalRef>(e)) return local_declared_type(locals_[l->local]);
       if (as<ast::Dependent>(e))
         if (auto it = declared_types_.find(std::to_underlying(e.id)); it != declared_types_.end()) return it->second;
       // The declared type: the declaration's that named the entity (a static data member's is
