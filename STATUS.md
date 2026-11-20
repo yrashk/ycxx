@@ -1205,7 +1205,10 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
 - Member operators get the [over.oper] checks too; `S::operator@` and `N::operator@` define outside;
   unary `*` and `&` call operator functions; a deleted or ambiguous choice is an error, not the
   built-in operator. `N::T(…)` is a cast only when no function or variable hides N::T.
-- Tests: `tests/own/operators` (12, seven from the review), `tests/own/headers` (2).
+- Ordinary nonmember operators can be called explicitly as `operator+(a, b)`, `::operator+(a, b)`
+  or `N::operator+(a, b)`. Unqualified calls use ordinary lookup and argument-dependent lookup.
+  Qualified calls use namespace lookup. [#219](https://github.com/yrashk/ycxx/issues/219)
+- Tests: `tests/own/operators` and `tests/own/headers`.
 
 ## Cooked integer user-defined literals (#289, 2026-11-20)
 

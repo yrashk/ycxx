@@ -804,6 +804,26 @@ public:
     default: return true;
     }
   }
+  std::string_view paired_operator_suffix(u32 ahead = 0) const {
+    if (kind(ahead) == Tk::l_paren && kind(ahead + 1) == Tk::r_paren) return "()";
+    if (kind(ahead) == Tk::l_square && kind(ahead + 1) == Tk::r_square) return "[]";
+    return {};
+  }
+  std::string_view punctuator_operator_suffix(u32 ahead) const {
+    if (auto pair = paired_operator_suffix(ahead); !pair.empty()) return pair;
+    Tk k = kind(ahead);
+    return lex::is_punctuator(k) && overloadable(k) ? lex::spelling(k) : std::string_view{};
+  }
+  // A name in an id-expression, including the punctuator part of an ordinary operator-function-id.
+  std::optional<NameId> expression_id(std::string_view operator_suffix) {
+    if (operator_suffix.empty()) return lookup_id();
+    bump();  // operator
+    bump();
+    if (operator_suffix == "()" || operator_suffix == "[]") bump();
+    std::string name = "operator";
+    name += operator_suffix;
+    return s_->ins().names.intern(name);
+  }
   // A GNU asm label after a declarator, `asm("…")`, `__asm("…")` or `__asm__("…")`: the
   // string, the symbol's name as the assembler sees it.
   std::string asm_label(bool& ok) {
@@ -908,8 +928,8 @@ public:
       l.name_at = pos();
       bump();
       std::string spelled = "operator";
-      if ((is(Tk::l_paren) && kind(1) == Tk::r_paren) || (is(Tk::l_square) && kind(1) == Tk::r_square)) {
-        spelled += is(Tk::l_paren) ? "()" : "[]";
+      if (auto pair = paired_operator_suffix(); !pair.empty()) {
+        spelled += pair;
         bump();
         bump();
       } else if (lex::is_punctuator(kind()) && overloadable(kind())) {
@@ -2811,8 +2831,8 @@ public:
       }
       return lambda_expression();
     case Tk::kw_operator:
-      if (literal_operator_ahead()) {
-        auto n = lookup_id();
+      if (auto suffix = punctuator_operator_suffix(1); !suffix.empty() || literal_operator_ahead()) {
+        auto n = expression_id(suffix);
         if (!n) return {NodeId::none, begin, pos()};
         if (is(Tk::less) && s_->is_template_name(*n)) {
           s_->diag(begin, Diag::not_supported, Tk::kw_operator);
@@ -2957,15 +2977,17 @@ public:
     // `S::template f<args>`: f names a template ([temp.names]/3).
     bool keyword = s && kind(next) == Tk::kw_template && kind(next + 1) == Tk::identifier;
     if (keyword) ++next;
-    if (!s || !lookup_id_ahead(next)) {
+    std::string_view suffix;
+    if (s && s->ns && kind(next) == Tk::kw_operator) suffix = punctuator_operator_suffix(next + 1);
+    if (!s || (suffix.empty() && !lookup_id_ahead(next))) {
       s_->diag(begin, Diag::not_a_namespace, is(Tk::identifier) ? name_of(tok()) : s_->no_name());
       while (is(Tk::identifier) || is(Tk::coloncolon)) bump();
       return {NodeId::none, begin, pos()};
     }
     for (u32 j = 0; j < next; ++j) bump();
     u32 name_at = pos();
-    bool literal_operator = literal_operator_ahead();
-    auto name = lookup_id();
+    bool operator_name = !suffix.empty() || literal_operator_ahead();
+    auto name = expression_id(suffix);
     if (!name) return {NodeId::none, begin, pos()};
     NameId n = *name;
     auto scope_expr = [&] {
@@ -2975,7 +2997,7 @@ public:
                           !is(Tk::period) && !is(Tk::arrow) && !is(Tk::plusplus) && !is(Tk::minusminus);
       return s_->scope_expr(*s, n, begin, name_at, pos(), bare_address);
     };
-    if (literal_operator) {
+    if (operator_name) {
       if (is(Tk::less) && s_->scope_names_template(*s, n)) {
         s_->diag(name_at, Diag::not_supported, Tk::kw_operator);
         return {NodeId::none, begin, pos()};
