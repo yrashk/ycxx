@@ -591,6 +591,20 @@ public:
       if (k <= item) r = d;
     return r;
   }
+  // A previous definition of this entity in this TU ([basic.def.odr]). C language linkage
+  // can make a definition in another namespace correspond without ordinary lookup finding it.
+  bool function_defined_before(EntityId e, u32 item) {
+    if (auto known = definitions_.find(std::to_underlying(e)); known != definitions_.end() && known->second < item)
+      return true;
+    for (auto [j, k] : named(w_->ins.names.spelling(w_->entities.rec(e).name))) {
+      if (j >= item) break;
+      const items::Item& it = items_->items[j];
+      if (!in_global_scope(j) || it.kind != ItemKind::function) continue;
+      DeclId id{ids_[j], ast::make_decl_ord(ast::DeclClass::syntactic, it.names[k].ordinal)};
+      if (auto d = decl_sema(id); d && d->entity == e && (d->flags & sema::decl_flag::definition)) return true;
+    }
+    return false;
+  }
   std::optional<ConstId> constant_value(EntityId e, u32 item) {
     variable_instance(e, item);
     member_value(e);
@@ -4203,6 +4217,14 @@ private:
         for (const ast::ParamSema& p : params) own.push_back(p.default_arg);
       }
 
+    }
+    // [dcl.link]/7: a function with C language linkage can have declarations in distinct
+    // namespaces. Apply [basic.def.odr] to their shared entity before publishing the definition.
+    if (fn && definition && sem.linkage == ast::Linkage::external &&
+        (sem.flags & (sema::decl_flag::lang_c | sema::decl_flag::member | sema::decl_flag::template_)) ==
+            sema::decl_flag::lang_c && p_->function_defined_before(sem.entity, k_)) {
+      s_.diag(d.name_at, Diag::redefinition, d.name);
+      return false;
     }
     if (fn && p_->world().ins.names.spelling(d.name) == "main") check_main(spec, sem, d, lang);
 

@@ -1035,6 +1035,9 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
 - A qualified namespace function definition inherits C language linkage from a matching prior
   member declaration and uses its target namespace for body lookup. Ordinary and argument-dependent
   calls find the prior declaration and use the same unmangled symbol as C callers (#426).
+- A second definition of the same ordinary external C-linkage function in a translation unit is
+  diagnosed across namespaces. Compatible declarations share the one definition and address
+  ([dcl.link], [basic.def.odr], #446).
 - Not yet (#153): `using N::f;` at namespace scope, `N::S{…}` as an expression, some clashes
   with namespace names and using-declarations, remaining standard-library linkage
   abbreviations such as `Sa`.
