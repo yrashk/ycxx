@@ -1543,6 +1543,8 @@ Fable decided the representation (ast.md §6.6); the Opus session wrote the code
   false in a templated entity when a requirement is invalid, ill-formed elsewhere.
 - **`if constexpr`** ([stmt.if]/2): the condition is evaluated as it is parsed; an
   instantiation skips the discarded branch, and outside templates its odr-uses demand nothing.
+- **`static_assert` in a template definition** (#241, P2593, [dcl.pre]): a non-dependent condition
+  must be a constant expression. A false result is diagnosed when the assertion is instantiated.
 - Also: the stand-in `Program` indexes declared names, so a namespace-scope lookup visits only
   its own name's items (draft tests including libycxx headers: 8 s → 5 s); floating literals
   report "not supported" instead of "expected '<'".
@@ -1551,8 +1553,7 @@ Fable decided the representation (ast.md §6.6); the Opus session wrote the code
 - Not yet: constraints on class and variable templates, partial specializations and members,
   constrained packs, fold-expanded constraints, `C auto`, `noexcept` in compound requirements
   (#234); re-verification of satisfaction at END (#235); Itanium constraint mangling (#236);
-  recorded discarded extents for `if constexpr` (#237); value-dependent mapping arguments (#209);
-  `static_assert(false)` in a template that is never instantiated (#241).
+  recorded discarded extents for `if constexpr` (#237); value-dependent mapping arguments (#209).
 
 ## Access control and friends (#119, 2026-11-18)
 

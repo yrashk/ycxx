@@ -3985,8 +3985,9 @@ public:
     if (accept(Tk::r_paren)) skip_to_semi();
   }
 
-  // `static_assert ( constant-expression , string-literal opt ) ;` ([dcl.pre]): the condition,
-  // contextually converted to bool, must be a constant expression whose value is true.
+  // `static_assert ( constant-expression , string-literal opt ) ;` ([dcl.pre]). The condition,
+  // contextually converted to bool, must be a constant expression. A false value has no effect
+  // in a template definition (P2593).
   Ex static_assert_declaration() {
     u32 begin = pos();
     bump();
@@ -4023,13 +4024,13 @@ public:
     if (!cond.ok() || !ok) return {NodeId::none, begin, pos()};
     sema::Evaluated v = sema::Evaluator(*s_, questions()).evaluate(cond);
     if (v.dependent && (s_->templated() || questions().instantiation_gave_up())) {
-      // Checked when the template is instantiated ([dcl.pre]/10); or past the nesting limit,
-      // which was diagnosed.
+      // The instantiation checks a dependent condition ([dcl.pre]). Exceeding the nesting limit
+      // has already produced a diagnostic.
     } else if (v.dependent) {
       s_->diag(e.begin, Diag::not_constant, sema::reason_unsupported);  // nothing outside a template depends
     } else if (!v.value) {
       s_->diag(e.begin, Diag::not_constant, v.reason);
-    } else if (s_->world().values.rec(*v.value).bits == 0) {
+    } else if (!s_->in_template_definition() && s_->world().values.rec(*v.value).bits == 0) {
       if (message == sema::ConstId::none) s_->diag(begin, Diag::static_assert_failed);
       else s_->diag(begin, Diag::static_assert_failed_message, message);
     }
