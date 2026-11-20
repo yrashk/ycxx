@@ -19,6 +19,9 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_
   add_test(NAME unit.linux_executable
     COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/linux_executable.py
             $<TARGET_FILE:ycxxc> ${CMAKE_READELF})
+  add_test(NAME unit.linux_namespace_lambda
+    COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/linux_namespace_lambda.py
+            $<TARGET_FILE:ycxxc> ${CMAKE_READELF})
   add_test(NAME unit.linux_archive
     COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/linux_archive.py
             $<TARGET_FILE:ycxxc> ${CMAKE_AR})

@@ -844,7 +844,7 @@ std = 'C++11'
 ftm = '__cpp_lambdas'
 detect = '(?:^|[=(,{;:?!]|\breturn)\s*\[[^\[\]]*\]\s*(?:\(|\{|<|mutable\b|->|constexpr\b|noexcept\b)'
 status = 'partial'
-note = 'in function bodies; at namespace scope and in member initializers not yet'
+note = 'function bodies and captureless non-generic initializers of internal namespace variables'
 issues = [338]
 probe = '''
 int main() { int k = 2; int s = 0; [&] { ++s; }(); return ([k](int x) { return x + k; }(1) == 3 && s == 1) ? 0 : 1; }

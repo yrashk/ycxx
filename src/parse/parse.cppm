@@ -1444,9 +1444,13 @@ public:
       root = s_.node(ast::DeclGroup{b_.list(cs)}, 0, it_->decl_length()).id;
     }
     std::vector<sema::Expansion> none;
-    ast::ItemSema v{root, b_.seq(std::span<const ast::DeclSema>(decls_)), expansion_list(b_, inst_ || var_ ? none : s_.expansions)};
+    ast::ItemSema v{root, b_.seq(std::span<const ast::DeclSema>(decls_)), expansion_list(b_, inst_ || var_ ? none : s_.expansions),
+                    b_.seq(std::span<const ast::ClosureDef>(s_.closures))};
     out_.value = b_.commit(v);
     s_.check_immediate_addresses(out_.value.tree);
+    if (!s_.closures.empty()) s_.check_labels();
+    for (const ast::ClosureDef& c : p_->world().ins.seqs.elements(out_.value.closures))
+      s_.check_immediate_addresses(c.body, c.body_begin);
     out_.demands = std::move(s_.demands);
     return std::move(out_);
   }
@@ -3703,19 +3707,48 @@ private:
     }
     bool fn = types.is_function(d.type);
     if (!fn && spec.is_constexpr) d.type = types.add_cv(d.type, sema::Cv::const_);  // [dcl.constexpr]
+    // [basic.link]/3–4: static, certain const declarations, and names in unnamed namespaces.
+    const auto has_internal_linkage = [&] {
+      return spec.is_static || Program::unnamed(p_->ns_of(k_)) ||
+             (!fn && sema::Types::is_const(d.type) && !spec.is_extern && !spec.is_inline && !template_ && !explicit_);
+    };
+    // The first declaration-owned closure is the initializer of an ordinary internal variable.
+    // Its identity is the final variable's. Its EntityRec is published after deduction.
+    std::optional<Ex> closure_init;
+    if (!fn && types.kind(d.type) == sema::TypeKind::placeholder && !template_ && !var_ && !explicit_ &&
+        !d.qualified && d.name != s_.no_name() && !spec.is_inline && !spec.is_extern &&
+        lang == LangLinkage::cxx && has_internal_linkage() && (ps_.is(Tk::equal) || ps_.is(Tk::l_brace))) {
+      u32 start = 1;
+      while (ps_.kind(start) == Tk::l_paren) ++start;
+      if (ps_.kind(start) == Tk::l_square && ps_.kind(start + 1) != Tk::l_square) {
+        const auto ns = ns_entity();
+        const auto owner = s_.world().entities.identity({sema::EntityKind::variable, d.name, d.type,
+            lang, ast::Linkage::internal, {p_->id(k_), ast::make_decl_ord(ast::DeclClass::syntactic, ord)}, ns});
+        s_.namespace_lambda = sema::Sema::NamespaceLambda{owner, ns, d.name, ps_.pos() + start};
+      }
+    }
     // A placeholder type, deduced from the initializer ([dcl.type.auto.deduct]): `= e` or `{e}`.
     std::optional<Ex> early_expr;
-    if (!fn && types.has_placeholder(d.type) && !deduce_variable(d, early, early_expr, template_ && !var_)) return false;
+    if (!fn && types.has_placeholder(d.type)) {
+      bool deduced = deduce_variable(d, early, early_expr, template_ && !var_);
+      if (s_.namespace_lambda && deduced) {
+        Ex e = early_expr ? *early_expr : early->clauses.front().expr;
+        closure_init = e;
+        while (auto p = s_.as<ast::Paren>(e))
+          e = s_.extended({p->operand.id, e.begin + p->operand.at, e.end});
+        if (!s_.as<ast::Lambda>(e)) {
+          s_.diag(e.begin, Diag::namespace_lambda_init);
+          deduced = false;
+        }
+      }
+      s_.namespace_lambda.reset();
+      if (!deduced) return false;
+    }
     ast::DeclSema sem{};
     sem.kind = fn ? ast::DeclKind::function : ast::DeclKind::variable;
     sem.type = d.type;
     sem.storage = spec.is_static ? ast::Storage::static_ : spec.is_extern ? ast::Storage::extern_ : ast::Storage::none;
-    // [basic.link]/3: `static`, and a non-volatile const variable that is not a template and not
-    // declared extern or inline, give internal linkage.
-    bool internal = spec.is_static ||
-                    (!fn && sema::Types::is_const(d.type) && !spec.is_extern && !spec.is_inline && !template_ && !explicit_);
-    // [basic.link]/4: the members of an unnamed namespace have internal linkage.
-    sem.linkage = internal || Program::unnamed(p_->ns_of(k_)) ? ast::Linkage::internal : ast::Linkage::external;
+    sem.linkage = has_internal_linkage() ? ast::Linkage::internal : ast::Linkage::external;
     sem.access = ast::Access::none;
     sem.constraint = NodeId::none;
     sem.constraints = ast::ConstId::none;
@@ -4052,6 +4085,14 @@ private:
     if (fn && has_init && !is_function_def) {
       s_.diag(ps_.pos(), Diag::function_initialized, d.name);
       ps_.skip_to_semi();
+    } else if (closure_init) {
+      init = s_.convert(*closure_init, d.type, closure_init->begin);
+      if (init.ok()) {
+        // The captureless prvalue has no fields to initialize. Keep a constant of the complete
+        // closure type so the ordinary variable path allocates its addressable storage.
+        value = p_->world().ins.intern_value(ast::VAggregate{types.canonical(d.type), b_.seq(std::span<const ConstId>{})});
+        if (spec.is_constexpr) p_->set_constant(sem.entity, value, k_);
+      }
     } else if (!fn && (early || ps_.is(Tk::l_brace) || (ps_.is(Tk::equal) && ps_.kind(1) == Tk::l_brace))) {
       // List-initialization; constant initialization when every element is a constant
       // ([basic.start.static]).

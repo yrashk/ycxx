@@ -1827,12 +1827,28 @@ checked against Clang 23 and GCC 16 probes).
   TU-local. Names and capture layout are checked against Clang objects (`p2-impl-mangle`).
 - Tests: `tests/own/lambda/` (56 spec-only, 1 ABI): 55 pass, 2 XFAIL (default arguments #300,
   block-scope statics #291).
-- Not yet: lambdas outside function bodies (#338); generic lambdas, template lambdas, pack
+- Not yet: further lambda declaration contexts ([#338](https://github.com/yrashk/ycxx/issues/338));
+  generic lambdas, template lambdas, pack
   captures and constexpr lambdas (#281); the conversion function's own symbol, conversions in
   contextual and operator contexts, invokers for class or variadic parameters (#339); arrays of
   non-trivially-copyable classes captured by copy (#353); weak definitions of closure members in
   inline functions (#124). A constant named by a lambda with a capture-default is captured, where
   Clang captures it only when it is odr-used (a layout difference for such closures, #355).
+
+## Namespace variable lambdas (#338)
+
+- A named internal-linkage namespace variable with a deduced type can be initialized by a
+  noncapturing, non-generic lambda. The declarator's identity owns the closure before deduction,
+  and its entity record is published with the resolved type. Its body looks up names in the
+  enclosing namespace. Use of the owner during deduction diagnoses an undeduced placeholder.
+- `ItemSema` records the closure members. The front end emits the call operator and scalar
+  invoker through the body closure path. Their local symbols use the variable's Itanium
+  `<closure-prefix>`. The completed empty closure occupies static storage and supports
+  `constinit`.
+- `unit.linux_namespace_lambda` checks runtime namespace lookup, static storage, function pointer
+  conversion, local names across objects, and daemon edits with a cold comparison. Other
+  declaration contexts and namespace init-captures remain under
+  [#338](https://github.com/yrashk/ycxx/issues/338).
 
 ## Floating point, the μ slice (#336, 2026-11-19)
 

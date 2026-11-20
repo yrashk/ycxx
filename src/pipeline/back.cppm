@@ -1362,7 +1362,7 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
     used.insert(ir::raw(d.entity));
     for (const aarch64::DataReloc& r : d.relocs) used.insert(ir::raw(r.target));
   }
-  // The functions closure types are local to, by entity (docs/design/closures.md).
+  // The declarations that own closure types, by entity (docs/design/closures.md).
   std::map<std::uint32_t, const Entity*> by_id;
   for (const Entity& e : tu.entities) by_id.emplace(ir::raw(e.id), &e);
   auto spec_of = [](const Entity& e) {
@@ -1383,10 +1383,14 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
       n.closure_head = r.closure_head;
       if (f != by_id.end()) {
         const Entity& fe = *f->second;
-        std::string fname = fe.special == Special::constructor ? "C1" : fe.special == Special::destructor ? "D1" : fe.name;
-        n.local = std::make_shared<const LocalFunction>(LocalFunction{
-            fname, fe.type, fe.scope, fe.special != Special::none,
-            fe.template_type ? std::optional(spec_of(fe)) : std::nullopt});
+        if (fe.is_function) {
+          std::string fname = fe.special == Special::constructor ? "C1" : fe.special == Special::destructor ? "D1" : fe.name;
+          n.local = std::make_shared<const LocalFunction>(LocalFunction{
+              fname, fe.type, fe.scope, fe.special != Special::none,
+              fe.template_type ? std::optional(spec_of(fe)) : std::nullopt});
+        } else {
+          n.closure_variable = fe.id;
+        }
       }
     }
     return n;

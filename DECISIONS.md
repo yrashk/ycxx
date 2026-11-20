@@ -377,6 +377,8 @@ specified by the accepted [optimization design](docs/design/optimization.md) (#3
      lambda's body is analysed inside the enclosing part, captures resolved through a frame per
      lambda into fields of the closure, and its members emitted with that part (#280,
      [closures.md](docs/design/closures.md), decided by Fable).
+     An internal namespace variable can own a captureless closure. Its declarator anchors the
+     identity before type deduction, and the declaration part carries its members (#338).
 10. **The resident daemon.** Specified by the accepted [daemon design](docs/design/daemon.md)
     (#83); the section references in this item point into it.
     - **One daemon per project root and ycxx binary.** The root is the first `.ycxx` or

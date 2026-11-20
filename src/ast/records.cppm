@@ -104,14 +104,6 @@ struct ExpansionRec {
   constexpr bool operator==(const ExpansionRec&) const = default;
 };
 
-// A templated declaration part keeps its pack expansions (§6.4); others have none.
-struct ItemSema {
-  NodeId tree;
-  SeqId<DeclSema> decls;
-  SeqId<ExpansionRec> expansions;
-  constexpr bool operator==(const ItemSema&) const = default;
-};
-
 struct BaseSpec {
   QualType type;
   Access access;
@@ -181,6 +173,15 @@ struct ClosureDef {
   SeqId<ConstId> const_values;
   SeqId<NameId> captures;  // the names its body knows its closure's fields by
   constexpr bool operator==(const ClosureDef&) const = default;
+};
+
+// A declaration part keeps its pack expansions (§6.4) and completed lambdas.
+struct ItemSema {
+  NodeId tree;
+  SeqId<DeclSema> decls;
+  SeqId<ExpansionRec> expansions;
+  SeqId<ClosureDef> closures{};
+  constexpr bool operator==(const ItemSema&) const = default;
 };
 
 // A templated body keeps what its instantiations need of it (§6.4): its pack expansions, and the

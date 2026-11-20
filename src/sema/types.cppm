@@ -551,7 +551,8 @@ public:
   }
   explicit Entities(ast::Interners& ins, Types& types) : ins_(&ins), types_(&types) {}
 
-  EntityId entity(EntityRec r) {
+  // A variable initializer can name the declarator as a closure owner before its type is known.
+  EntityId identity(const EntityRec& r) {
     Fp128 f = ast::seed("ycxx.sema.Entity");
     f = ast::mix(f, std::to_underlying(r.kind));
     f = ast::mix(f, ins_->names.fp(r.name));
@@ -580,7 +581,11 @@ public:
     f = ast::mix(f, std::to_underlying(r.linkage));
     if (r.linkage == ast::Linkage::internal)
       f = ast::mix(ast::mix(f, ins_->items.fp(r.first.item)), std::to_underlying(r.first.ord));
-    EntityId e = ins_->entities.add<EntityId>(f);
+    return ins_->entities.add<EntityId>(f);
+  }
+
+  EntityId entity(EntityRec r) {
+    EntityId e = identity(r);
     // The interner is shared: the back end adds entities of its own (string literal objects), which
     // have no record here, so records are indexed by handle with gaps. Equal identities have equal
     // records, so the first publication is as good as any (#156).

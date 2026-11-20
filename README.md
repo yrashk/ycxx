@@ -140,6 +140,8 @@ object. [#428](https://github.com/yrashk/ycxx/issues/428), [#419](https://github
   `*this`, init-captures, `mutable`, conversion to a pointer to function, generic lambdas (`auto`
   parameters) and template lambdas (`[]<class T>`), and closures passed to and called from
   function templates, with Clang's names for closure types;
+- noncapturing, non-generic lambdas as initializers of internal-linkage namespace variables,
+  with addressable static storage and scalar calls ([#338](https://github.com/yrashk/ycxx/issues/338));
 - casts, `sizeof`/`alignof` (classes included), `decltype`, and calls through pointers to
   functions;
 - constant evaluation on ycxx's own interpreter: `constexpr`, `consteval`, `constinit`,
@@ -190,7 +192,8 @@ declarations, type traits and requires-expressions. [#238](https://github.com/yr
   `<cmath>` (which `<math.h>` includes) does not compile yet. [#349](https://github.com/yrashk/ycxx/issues/349)
 - Taking member addresses, applying `.*` or `->*`, and code generation for member-pointer values.
   [#411](https://github.com/yrashk/ycxx/issues/411)
-- Constexpr lambdas (the interpreter has no class objects yet), lambdas outside function bodies,
+- Constexpr lambdas (the interpreter has no class objects yet), further lambda declaration
+  contexts ([#338](https://github.com/yrashk/ycxx/issues/338)),
   structured bindings, virtual functions, virtual base classes, inheriting constructors, and bases
   of class templates.
 - Member class and alias templates, conversion function templates, and constraints on class
