@@ -369,7 +369,7 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
   auto closures_of = [&](ast::SeqId<ast::ClosureDef> closures, ast::ItemId item, std::uint32_t offset) {
     for (const ast::ClosureDef& c : ins.seqs.elements(closures)) {
       // A template's or a generic lambda's definition is not code; its instances are.
-      if ((c.flags & sema::closure_flag::pattern) || world.types.is_dependent(c.call_type)) continue;
+      if (!sema::Sema::closure_has_code(world, c)) continue;
       std::vector<ast::LocalRec> locals = ins.seqs.elements(c.locals);
       for (EntityId f : {c.call, c.invoker}) {
         if (f == EntityId::none) continue;
@@ -514,13 +514,15 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
     d.type = world.entities.rec(spec).type;
     declare(d, std::nullopt);
   }
-  // The implicitly defined special members that are not trivial ([class.copy.ctor], [class.dtor]).
+  // The implicitly defined special members needed by this unit ([special]).
   for (std::size_t i = 0; i < program.synthesized().size(); ++i) {
     const parse::Program::Synthesized& s = program.synthesized()[i];
+    const EntityId cls = world.entities.rec(s.decl.entity).scope;
     // A class template's current instantiation is not code ([temp.dep.type]).
-    if (world.types.is_dependent(world.types.class_type(world.entities.rec(s.decl.entity).scope))) continue;
+    if (world.types.is_dependent(world.types.class_type(cls))) continue;
     declare(s.decl, std::nullopt);
     tu.functions.push_back({s.decl.entity, s.decl, program.synthesized_body(i), program.id(s.item), 0, program.this_type(s.decl)});
+    tu.functions.back().weak_elf = linux && s.kind == parse::Program::SpecialMember::copy_assignment && !internal_class(cls);
   }
   for (FunctionDef& f : tu.functions) static_locals(world, tu, f, runtime);
   // Written declarations have already supplied their locations and definitions. For the
