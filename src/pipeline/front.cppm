@@ -530,7 +530,7 @@ namespace {
 
 // The parser skips attributes whose layout semantics we do not implement. Find those
 // that could change a record or field even though its computed offsets look natural.
-bool layout_attribute(const pp::Region& region, std::uint32_t begin, std::uint32_t end) {
+bool layout_attribute(const pp::Region& region, std::uint32_t begin, std::uint32_t end, bool leading_only = false) {
   using enum lex::Tk;
   for (std::uint32_t i = begin; i < end; ++i) {
     auto tok = region.tokens[i];
@@ -539,7 +539,10 @@ bool layout_attribute(const pp::Region& region, std::uint32_t begin, std::uint32
     const auto next = region.tokens[i + 1].kind;
     bool bracket = tok.kind == l_square && next == l_square;
     bool gnu = tok.kind == identifier && next == l_paren && region.name(tok) == "__attribute__";
-    if (!bracket && !gnu) continue;
+    if (!bracket && !gnu) {
+      if (leading_only) return false;
+      continue;
+    }
     if (gnu) ++i;
     const auto open = bracket ? l_square : l_paren;
     const auto close = bracket ? r_square : r_paren;
@@ -584,13 +587,17 @@ std::set<EntityId> uncertain_record_layouts(parse::Program& program, sema::World
     const auto& ranges = region.possibly_packed;
     auto pack = std::ranges::upper_bound(ranges, item.begin, {}, [](const auto& range) { return range.second; });
     bool packed = definition && pack != ranges.end() && pack->first < item.brace_end;
-    bool annotated = definition
-        ? layout_attribute(region, item.begin, item.brace_begin) || layout_attribute(region, item.brace_end, item.end)
+    // The attributes immediately after the type's closing brace can still apply to
+    // the type. Those within a following declarator apply to the declared name.
+    bool record_annotated = definition
+        ? layout_attribute(region, item.begin, item.brace_begin) ||
+          layout_attribute(region, item.brace_end, item.end, true)
         : layout_attribute(region, item.begin, item.end) || uncertain_alias(item);
+    bool annotated = record_annotated || (definition && layout_attribute(region, item.brace_end, item.end));
     if (!packed && !annotated) continue;
     for (auto d : world.ins.seqs.elements(analysed->decls)) {
       if (d.entity == EntityId::none) continue;
-      if (d.kind == ast::DeclKind::class_) records.insert(d.entity);
+      if (d.kind == ast::DeclKind::class_ && (packed || record_annotated)) records.insert(d.entity);
       if (annotated && d.kind == ast::DeclKind::data_member)
         records.insert(world.entities.rec(d.entity).scope);
       if (annotated && d.kind == ast::DeclKind::type_alias) {
