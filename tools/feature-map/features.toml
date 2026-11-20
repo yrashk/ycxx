@@ -535,7 +535,7 @@ std = 'C++98'
 core = true
 status = 'partial'
 issues = [165, 259]
-note = 'ordinary namespace calls, inline namespaces and ordinary class bases work. Remaining cases include hidden friends, block function declarations, class template arguments, overload sets and template-ids'
+note = 'ordinary namespace calls, inline namespaces, class bases and class template type arguments work. Remaining cases include hidden friends, block function declarations, template template arguments, dependent-call type arguments, overload sets and template-ids'
 probe = '''
 namespace n { struct S {}; int f(S) { return 0; } }
 int main() { n::S s; return f(s); }

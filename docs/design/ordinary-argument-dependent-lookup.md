@@ -29,11 +29,21 @@ query-engine scheduling and execution counts remain under #16.
 Compute associations from the argument types. Follow arrays, references and pointers to
 their element or referred-to type, function types to parameters and return type, and
 pointer-to-member types to the owner and member type. Classes and enums contribute their
-nearest namespace. A complete ordinary class also contributes its direct and indirect bases.
+nearest namespace. A class complete at the lookup point also contributes its direct and
+indirect bases.
+
+Astra checked the ordinary-call extension for class template type arguments against
+[basic.lookup.argdep]. Expand a specialization's canonical type arguments, including defaults
+and the type elements of packs. Visit types independently of the classes collected through base
+and enclosing-class relationships. Those relationships contribute the classes' namespaces, and
+an explicit type occurrence triggers template argument expansion. An incomplete specialization
+still contributes its known type arguments. The dependent-call lookup continues with its existing
+definition and instantiation scopes.
+
 Member-pointer association works on types in unevaluated operands (#238). Runtime values
-remain under #411. Block-scope function declarations, exact operator lookup, class template
-arguments, overload-set arguments and the complete unqualified template-id rules remain under
-#165. Hidden friends are #259.
+remain under #411. Block-scope function declarations, exact operator lookup, the association
+rules for template template arguments and overload sets, and the complete unqualified
+template-id rules remain under #165. Hidden friends are #259.
 
 For a range-based `for`, an array supplies its own bounds and a class with both member names
 supplies the member calls. The fallback forms the `begin` and `end` calls with an empty ordinary

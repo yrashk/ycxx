@@ -1098,9 +1098,11 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
 ## Argument-dependent lookup for unqualified calls (#165, 2026-11-19)
 
 - [basic.lookup.argdep] finds functions in the namespaces associated with class and enumeration
-  arguments, including complete ordinary classes' bases and the inline namespace set. Pointer,
+  arguments, including classes' bases at the lookup point and the inline namespace set. Pointer,
   reference, array, function and pointer-to-member types contribute through their component types.
-  Member-pointer values still need #411.
+  Ordinary calls expand class specializations' canonical template type arguments, including
+  defaults and type packs. Reaching a class as a base or owner contributes its namespace.
+  A separate occurrence of its type expands its arguments. Member-pointer values still need #411.
 - Each associated namespace search uses preceding declarations that bind names in the scope.
   It uses namespace using-declarations' fixed targets and the latest redeclaration found
   for each function. Using-directives do not contribute to ADL. Sema merges the candidates with
@@ -1111,8 +1113,9 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   existing point of instantiation ([temp.dep.candidate]). Per-name incremental scheduling
   remains under #16.
 - Remaining work in #165 includes declarations of functions in blocks, exact lookup for
-  operators, association through class template arguments and overload-set arguments, and
-  complete unqualified template-id lookup. Hidden friends are tracked in #259.
+  operators, template template arguments, dependent-call template argument associations,
+  overload-set arguments and complete unqualified template-id lookup. Hidden friends are tracked
+  in #259.
 - Tests: `tests/own/argument-dependent-lookup/` and `tests/own/range-for/adl*.run.cpp`.
 
 ## `<cstdio>`, step 3: attributes, asm labels, string-initialized arrays (#133, 2026-11-18)
