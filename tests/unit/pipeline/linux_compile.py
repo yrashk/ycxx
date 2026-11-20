@@ -1,4 +1,4 @@
-"""Exchange scalar System V AMD64 calls between ycxx and native ELF objects."""
+"""Exchange System V AMD64 calls between ycxx and native ELF objects."""
 
 import os
 from pathlib import Path
@@ -83,6 +83,19 @@ def external_data_addresses(compile, target, source_dir, scope, cold, cc, readel
     run([cc, '-fPIE', '-pie', '-rdynamic', 'interposer.c', './libinterposable.so', '-Wl,-rpath,$ORIGIN',
          '-o', 'interposer'], scope, cold)
     run(['./interposer'], scope, cold)
+
+
+def integer_aggregate_calls(compile, target, source_dir, scope, cold, cc):
+    sources = source_dir / 'linux_integer_aggregates'
+    for part in ('provider', 'client'):
+        source = sources / f'{part}.cpp'
+        compile(target, '-c', source, '-o', f'aggregate-{part}.o')
+        run([cc, '-std=c++26', '-O2', '-fno-pie', '-c', source, '-o', f'host-{part}.o'], scope, cold)
+    compile(target, '-nostdlib', 'aggregate-provider.o', 'aggregate-client.o', '-o', 'aggregate-native')
+    run(['./aggregate-native'], scope, cold)
+    for inputs in (('aggregate-provider.o', 'host-client.o'), ('host-provider.o', 'aggregate-client.o')):
+        run([cc, '-no-pie', *inputs, '-o', 'aggregate-mixed'], scope, cold)
+        run(['./aggregate-mixed'], scope, cold)
 
 
 def main():
@@ -222,16 +235,31 @@ system_leaf:
             source = source_dir / 'deduced-results' / f'{name}.cpp'
             compile(target, '-nostdlib', source, '-o', name)
             run([f'./{name}'], scope, cold)
+        integer_aggregate_calls(compile, target, source_dir, scope, cold, cc)
+        aggregate_parameter = 'unsupported aggregate parameter layout'
+        aggregate_result = 'unsupported aggregate result layout'
         cases = (
             ('double f(double x) { return x; }', results),
             ('long double f(long double x) { return x; }', results),
             ('auto f() { return 1.0; }', results),
-            ('struct X { int x; }; auto f() { return X{1}; }', results),
-            ('struct X { int x; }; int f(X x) { return x.x; }', parameters),
-            ('struct X { int x; }; int g(X); int f() { return g(X{1}); }',
+            ('struct X { double x; }; auto f() { return X{1.0}; }', aggregate_result),
+            ('struct X { long a, b, c; }; int f(X) { return 1; }', aggregate_parameter),
+            ('struct X {}; int f(X) { return 1; }', aggregate_parameter),
+            ('struct X { double a; int b; }; int f(X x) { return x.b; }', aggregate_parameter),
+            ('struct X { int a[2]; }; int f(X x) { return x.a[0]; }', aggregate_parameter),
+            ('struct M { int a; }; struct X { M m; }; int f(X x) { return x.m.a; }', aggregate_parameter),
+            ('struct B { int a; }; struct X : B { int b; }; int f(X x) { return x.b; }', aggregate_parameter),
+            ('struct X { int a : 3; }; int f(X x) { return x.a; }', aggregate_parameter),
+            ('union X { int a; unsigned b; }; int f(X x) { return x.a; }', aggregate_parameter),
+            ('struct X { int a; ~X(); }; int f(X x) { return x.a; }', aggregate_parameter),
+            ('struct X { double a; }; int g(X); int f() { return g(X{1.0}); }',
+             f'call: {aggregate_parameter}'),
+            ('struct X { long a, b, c; }; X g(); long f() { X x = g(); return x.a; }',
+             f'call: {aggregate_result}'),
+            ('struct X { int a; }; int f(int (*g)(X)) { return g(X{1}); }', f'call: {parameters}'),
+            ('struct X { int a; }; int f(X (*g)()) { X x = g(); return x.a; }', f'call: {results}'),
+            ('struct X { int a; }; struct B { static int g(X); }; int f() { return B::g(X{1}); }',
              f'call: {parameters}'),
-            ('struct X { int x; }; X g(int); int f() { X x = g(1); return x.x; }',
-             f'call: {results}'),
             ('int f(int, ...) { return 1; }', 'variadic functions'),
             ('int f(int (*g)(int, ...)) { return g(1); }', 'call: variadic functions'),
             ('int f(int (*g)(int, ...)) { return g(1, 2); }', 'call: variadic functions'),
