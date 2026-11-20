@@ -898,6 +898,11 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
 - `static_assert(e)` and `static_assert(e, "message")` at namespace and block scope (the
   `StaticAssert` node); `if consteval` and `if !consteval` (`IfConsteval`, lowered to
   `consteval_br`).
+- In-bounds typed addresses of elements and rows of named namespace-scope constexpr arrays
+  ([conv.array], [expr.const], #111). The interpreter initializes scalar cells from the nested
+  aggregate value on first use. A read decodes the cell, and addresses retain the named object's
+  identity and byte offset. Serializing a typed pointer one past a nested subarray still needs
+  subobject provenance (#111).
 - Constant array bounds from const integral locals (#58), and address constants of variables and
   functions (#57) as `VLvalue{VEntity, path, byte offset}`. The pipeline emits data relocations
   with the entity's symbol and byte addend on ELF and Mach-O, including references to symbols
