@@ -26,6 +26,7 @@ struct Literal {
 struct DeclRef {
   ExprInfo info;
   EntityId entity;
+  bool reference = false;  // the entity holds the address of the object this expression denotes
 };
 
 // A name that resolved to a block-scope variable or a parameter: an index into

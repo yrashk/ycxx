@@ -617,7 +617,7 @@ std = 'C++98'
 core = true
 status = 'partial'
 issues = [367, 368]
-note = 'references bound at run time; inline variables'
+note = 'function references and reference lifetime extension; inline and templated dynamic initialization'
 probe = '''
 int f() { return 42; }
 int g = f();

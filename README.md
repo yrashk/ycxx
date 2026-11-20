@@ -79,6 +79,11 @@ ELF and Mach-O objects support static pointer initializers naming variables, arr
 or functions. The referenced symbol may be defined in a separate translation unit.
 [#101](https://github.com/yrashk/ycxx/issues/101)
 
+Ordinary namespace-scope references to supported scalar and array storage can bind at compile time
+or during ordered startup initialization. On Linux, generated code can access bindings and
+referents with internal linkage. [#367](https://github.com/yrashk/ycxx/issues/367),
+[#414](https://github.com/yrashk/ycxx/issues/414)
+
 On x86-64 Linux, direct calls and saved pointers across translation units share one address for
 simple external inline functions. [#422](https://github.com/yrashk/ycxx/issues/422)
 

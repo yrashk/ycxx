@@ -3993,7 +3993,8 @@ public:
       dt = *t;
     }
     ExprInfo info{types().referee(dt), ValueCategory::lvalue, 0};
-    Ex r = node(ast::DeclRef{info, d.entity}, begin, end, info);
+    bool object_reference = types().is_reference(dt) && !types().is_function(info.type);
+    Ex r = node(ast::DeclRef{info, d.entity, object_reference}, begin, end, info);
     if (unqualified && d.kind == ast::DeclKind::function) unqualified_[std::to_underlying(r.id)] = {d};
     if (d.kind == ast::DeclKind::function)
       if (auto ds = found_defaults(d); !ds.empty()) defaults_[std::to_underlying(r.id)] = std::move(ds);
@@ -4110,7 +4111,7 @@ public:
   // The value of a static data member of integral type usable in constant expressions.
   std::optional<ConstId> static_constant(const Ex& e) {
     auto d = as<ast::DeclRef>(e);
-    if (!d || !types().is_integral(e.type()) || Types::is_volatile(e.type()) ||
+    if (!d || d->reference || !types().is_integral(e.type()) || Types::is_volatile(e.type()) ||
         w_->entities.rec(d->entity).scope == EntityId::none)
       return std::nullopt;
     return q_->constant_value(d->entity);

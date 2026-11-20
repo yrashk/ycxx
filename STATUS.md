@@ -1740,8 +1740,8 @@ What the process allocates, attributed to the engine's cells, in the trace and t
 - **Calls through pointers to functions:** irgen emits `call_ind` (`Gen::call_pointer`), which
   lowering, AArch64 selection and the interpreter already had; constant evaluation calls through
   them too.
-- Tests: `tests/own/auto/` (46 spec-only, 4 more): 41 pass, 9 are XFAIL: structured bindings
-  (#285), a namespace-scope reference (#367), `static_cast<int&&>` (#199).
+- Tests: `tests/own/auto/` (46 spec-only, 4 more): 42 pass, 8 are XFAIL: structured bindings
+  (#285), `static_cast<int&&>` (#199).
   `p1-impl-mangle` checks the `Da`/`Dc` names against Clang objects.
 - Not yet: constrained `C auto`, `auto x = {…}`, `auto x(e)` at namespace scope, abbreviated
   function templates (#286); structured bindings (#285).
@@ -1930,10 +1930,19 @@ values, end to end; results match Clang's bit for bit.
   limits, is still an error. Class objects the interpreter cannot evaluate yet are initialized
   dynamically even when constant by the draft (#25). Each declaration's variables get their own
   function (`__GLOBAL__sub_I_<file>.<n>`), so an error points at it.
-- Not yet: references bound at run time (#367); inline variables and variable templates (#368);
+- Namespace-scope references to supported scalar and array storage use a pointer-sized slot
+  ([dcl.ref], [dcl.init.ref]). A constant binding uses a symbol-plus-addend relocation and
+  exposes the referent's address in constant evaluation ([expr.const.init]). A dynamic binding
+  stores the selected address at the declaration's position in the unit's initialization order.
+  Later reads, writes and address-taking use that address. An `extern` declaration without an
+  initializer reserves no storage. See [the design](docs/design/namespace-references.md) (#367).
+- Remaining reference cases include function bindings, lifetime extension, guarded statics and
+  class or base subobject addresses outside the constant evaluator's model (#25, #367).
+- Not yet: inline variables and variable templates (#368);
   default member initializers that are not constants (#118); array construction as a loop (#370).
-- Tests: `tests/own/dynamic-init/` (spec-only, 16 tests; a Clang peer with its own initializers
-  in `peer.run.cpp`).
+- Tests: `tests/own/dynamic-init/` (spec-only), including a Clang peer with its own initializers
+  in `peer.run.cpp`. The Linux executable test runs the scalar reference fixtures with internal
+  linkage and checks their ELF relocations.
 
 ## Nested namespace definitions, ι (#153, #337, 2026-11-19)
 
