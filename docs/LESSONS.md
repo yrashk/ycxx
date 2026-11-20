@@ -233,6 +233,12 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
     to the session's workspace before the command exits if another command needs them.
   - Learned on #101.
 
+- **The managed Linux sandbox can affect daemon tests.** The default sandbox denies Unix socket
+  bind or connect, and the sandbox's `/tmp/.git` placeholder can make root discovery pick
+  `/tmp` for a test that expects to fall back to its home scope.
+  - Run `tools/test --fast` with per-command network access and `TMPDIR=/dev/shm`.
+  - Learned on #216.
+
 - **A module import added during a build can miss the dependency scan.** CMake scanned a test's
   imports before an edit and GCC compiled it afterward, so its module mapper lacked the new import.
   - Do: rerun Ninja in the same build directory after changing imports during a build.

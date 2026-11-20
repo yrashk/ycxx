@@ -1360,6 +1360,9 @@ session's.*
 - Tests: `tests/own/templates/a5-*`; 2 more draft examples pass. `<cstdio>`: 78 → 53 errors.
 - Also: `C::T` inside the class (being defined or instantiated) and in its out-of-class member
   definitions names its member type, as the current instantiation's ([temp.dep.type]/1).
+- Function type-ids accept a qualified return type (`using F = n::R (*)();`). An identifier
+  known to name a type can start the parameter list of an abstract declarator, as in
+  `struct S { using F = S(S); };` ([dcl.name], [dcl.fct], [dcl.ambig.res], #216).
 - Not yet: access, hiding and qualified functional casts of member types (#216); member alias
   templates (`template<…> using __apply = …` in a class), with member
   templates; template template parameters (#208); value-dependent expressions as template
