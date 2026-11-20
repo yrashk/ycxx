@@ -97,10 +97,12 @@ struct DefinitionAt {
 class ValueConstants final : public Constants {
  public:
   explicit ValueConstants(sema::World& w) : w_(&w) {}
-  std::optional<std::vector<std::uint8_t>> string_object(ConstId c) const override {
+  std::optional<StringObject> string_object(ConstId c) const override {
     sema::ValueRec r = w_->values.rec(c);
     if (r.kind != sema::ValueKind::string) return std::nullopt;
-    return std::vector<std::uint8_t>(r.units.begin(), r.units.end());
+    auto element = w_->types.builtin_of(w_->types.rec(r.type).inner);
+    if (!element) return std::nullopt;
+    return StringObject{*element, std::move(r.units)};
   }
   std::optional<Address> address(ConstId c) const override {
     sema::ValueRec r = w_->values.rec(c);

@@ -20,7 +20,7 @@ The final Linux x86-64 self-check uses the freestanding support in [#380](https:
 
 ## Status
 
-**Pre-0.1** (as of 2026-11-19). ycxx compiles a substantial subset of C++ (C-like code, classes,
+**Pre-0.1** (as of 2026-11-20). ycxx compiles a substantial subset of C++ (C-like code, classes,
 templates and constant evaluation) on macOS arm64, from source to a signed, running executable,
 with no external compiler, assembler or linker. It also builds static executables from a
 freestanding C++ subset for x86-64 Linux. The standard library is out of reach. The plan is in
@@ -83,6 +83,10 @@ Use the host linker to link these objects with libc.
 ELF and Mach-O objects support static pointer initializers naming variables, array elements,
 or functions. The referenced symbol may be defined in a separate translation unit.
 [#101](https://github.com/yrashk/ycxx/issues/101)
+
+Both targets support UTF-16 and UTF-32 string literals (`u` and `U`), including raw strings,
+constant evaluation, and initialization of matching character arrays.
+[#288](https://github.com/yrashk/ycxx/issues/288)
 
 On x86-64 Linux, direct calls and saved pointers across translation units share one address for
 simple external inline functions. [#422](https://github.com/yrashk/ycxx/issues/422)

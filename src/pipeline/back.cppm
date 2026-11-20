@@ -58,8 +58,12 @@ using ast::QualType;
 class Constants {
  public:
   virtual ~Constants() = default;
-  // The code units of a string literal object, the terminating null included, one byte each.
-  virtual std::optional<std::vector<std::uint8_t>> string_object(ConstId c) const = 0;
+  // The element type and code units of a string literal object, including the terminating null.
+  struct StringObject {
+    ast::Builtin element;
+    std::vector<std::uint32_t> units;
+  };
+  virtual std::optional<StringObject> string_object(ConstId c) const = 0;
   // An address constant: its base (`VString` or `VEntity`) and byte offset.
   struct Address {
     ConstId object = ConstId::none;
@@ -1333,12 +1337,22 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
   // String literal objects, as `lower` and the variables met them ([lex.string]).
   std::uint32_t n = 0;
   for (auto [object, entity] : strings) {
-    auto units = universe().consts->string_object(object);
-    if (!units) {
+    auto str = universe().consts->string_object(object);
+    if (!str) {
       errors.push_back({std::nullopt, "an address constant whose object is not a string literal"});
       continue;
     }
-    data.push_back({entity, aarch64::DataKind::cstring, std::move(*units), 0, 1, {}});
+    const ast::BuiltinLayout layout = target[str->element];
+    std::vector<std::uint8_t> bytes;
+    bytes.reserve(str->units.size() * layout.size);
+    for (std::uint32_t unit : str->units) {
+      // Both targets store the least-significant byte first.
+      for (std::uint8_t i = 0; i < layout.size; ++i, unit >>= 8)
+        bytes.push_back(std::uint8_t(unit));
+    }
+    // The cstring section is reserved for strings with one-byte code units.
+    auto kind = layout.size == 1 ? aarch64::DataKind::cstring : aarch64::DataKind::rodata;
+    data.push_back({entity, kind, std::move(bytes), 0, layout.align, {}});
     symbols.push_back({entity, std::format("{}.str.{}", linux ? ".L" : "l_", n++), obj::binding::local});
   }
 
