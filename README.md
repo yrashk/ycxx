@@ -91,10 +91,11 @@ The ELF linker can consume the GNU-built libycxx static linkage-marker object.
   conversions giving Clang's results bit for bit, and passing and returning them (classes of
   floating members included) by Clang's calling convention;
   all operators, and the statements: `switch`, labels and `goto`, declarations in conditions,
-  init-statements in `if` and `switch`, and range-based `for` over arrays or classes with
-  `begin` and `end`, with optional init-statements. Functions support default arguments,
-  recursion, operator overloading and calls through pointers. A pointer or reference target type
-  can select a free or static member overload.
+  init-statements in `if` and `switch`, and range-based `for` with optional init-statements.
+  Ranges can be arrays or classes with member `begin` and `end` or free `begin` and `end` found
+  by argument-dependent lookup. Unqualified calls can find and rank functions in associated
+  namespaces. Functions support default arguments, recursion, operator overloading and calls
+  through pointers. A pointer or reference target type can select a free or static member overload.
 - classes and unions: data and static members, named data members of unnamed union type,
   member functions, constructors and destructors
   with RAII, aggregate and designated initialization, namespace-scope objects initialized by

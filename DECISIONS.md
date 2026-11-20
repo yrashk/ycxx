@@ -198,6 +198,10 @@ specified by the accepted [optimization design](docs/design/optimization.md) (#3
      answers as values: names in one scope at one point, member lookup, ADL, completeness, one
      macro, one include resolution. Overload resolution is keyed by candidate set and argument
      shapes. *Reason:* adding a declaration invalidates only the answers it could change. (§B2–§B9)
+   - [Argument-dependent lookup](docs/design/ordinary-argument-dependent-lookup.md) searches
+     the namespaces associated with argument types at the lexical point. Dependent calls also
+     use the existing instantiation context. The search supplies candidates to overload
+     resolution and provides the ADL-only fallback for range-based `for` (#165).
    - **Identity without positions.** Items are cut from the preprocessed tokens before parsing.
      Their ids exclude bodies and positions, and locations are `(item, offset)`. Declaration ids
      and structural entity ids are separate. *Reason:* edits elsewhere disturb no keys. (§B1, §B2)

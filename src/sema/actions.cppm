@@ -117,15 +117,16 @@ public:
   // ([namespace.qual]).
   virtual std::optional<EntityId> namespace_named(NameId name, std::span<const EntityId> directives = {}) = 0;
   virtual std::vector<ast::DeclSema> namespace_members(EntityId ns, NameId name) = 0;
-  // In an instantiation: whether the call whose callee begins at `offset` was dependent in the
-  // template's definition, and the members of namespace `ns` named `name` that are visible at the
-  // point of instantiation, which argument-dependent lookup searches ([temp.dep.candidate]).
-  // Outside one, false and none.
+  // [basic.lookup.argdep]: functions in one associated namespace's inline namespace set, and
+  // a class's record if complete there. Ask at the lexical point, and for a dependent call
+  // also at the point of instantiation ([temp.dep.candidate]).
+  virtual std::vector<ast::DeclSema> adl_functions(EntityId ns, NameId name, bool at_instantiation) = 0;
+  virtual const ClassRec* adl_class(EntityId c, bool at_instantiation) = 0;
+  // In an instantiation, whether the call at `offset` was dependent in the template definition.
   virtual bool dependent_call(u32 /*offset*/) { return false; }
   // Whether instantiation has given up at its nesting limit, which was diagnosed ([temp.inst]/16):
   // what fails because of it says nothing more.
   virtual bool instantiation_gave_up() { return false; }
-  virtual std::vector<ast::DeclSema> members_at_instantiation(EntityId /*ns*/, NameId) { return {}; }
   // The type of variable template specialization `v` at the current point when it is not the
   // template's with the arguments substituted: an explicit specialization's, or a partial
   // specialization's that it is instantiated from ([temp.expl.spec], [temp.spec.partial]).
@@ -3939,8 +3940,8 @@ public:
 
   // The expression naming what lookup found for `name` ([expr.prim.id]): one entity, or an
   // overload set.
-  // `unqualified`: named by an unqualified-id, so a call may add argument-dependent lookup
-  // ([basic.lookup.argdep]/1); what was found is kept for it.
+  // `unqualified`: an unqualified-id looked up at namespace scope or introduced by a block
+  // using-declaration. Calls may add ADL when every result is a namespace function.
   Ex decls_expr(std::vector<ast::DeclSema> found, bool any, NameId name, u32 begin, u32 end, bool callee = false,
                 bool unqualified = false) {
     std::erase_if(found, [](const ast::DeclSema& d) { return d.kind == ast::DeclKind::namespace_; });
@@ -3961,6 +3962,11 @@ public:
     std::vector<ast::DeclSema> set;
     for (auto o = found.rbegin(); o != found.rend(); ++o)
       if (!std::ranges::any_of(set, [&](const ast::DeclSema& x) { return x.entity == o->entity; })) set.push_back(*o);
+    bool adl = unqualified && std::ranges::all_of(set, [&](const ast::DeclSema& x) {
+      if (x.kind != ast::DeclKind::function) return false;
+      EntityId scope = w_->entities.rec(x.entity).scope;
+      return scope == EntityId::none || w_->entities.rec(scope).kind == EntityKind::namespace_;
+    });
     bool templ = std::ranges::any_of(set, [](const ast::DeclSema& x) { return (x.flags & decl_flag::template_) != 0; });
     if (set.size() > 1 || templ) {
       if (!std::ranges::all_of(set, [](const ast::DeclSema& x) { return x.kind == ast::DeclKind::function; })) {
@@ -3969,7 +3975,7 @@ public:
       }
       ExprInfo info{builtin(Builtin::overload_set), ValueCategory::lvalue, 0};
       Ex r = node(ast::DeclRef{info, d.entity}, begin, end, info);
-      if (unqualified) unqualified_[std::to_underlying(r.id)] = set;
+      if (adl) unqualified_[std::to_underlying(r.id)] = set;
       overloads_[std::to_underlying(r.id)] = std::move(set);
       return r;
     }
@@ -3987,14 +3993,14 @@ public:
       return {NodeId::none, begin, end};
     }
     QualType dt = d.type;
-    if (d.kind == ast::DeclKind::function) {
+    if (d.kind == ast::DeclKind::function && !(adl && callee)) {
       auto t = deduced_function(d.entity, d.type, begin);
       if (!t) return {NodeId::none, begin, end};
       dt = *t;
     }
     ExprInfo info{types().referee(dt), ValueCategory::lvalue, 0};
     Ex r = node(ast::DeclRef{info, d.entity}, begin, end, info);
-    if (unqualified && d.kind == ast::DeclKind::function) unqualified_[std::to_underlying(r.id)] = {d};
+    if (adl) unqualified_[std::to_underlying(r.id)] = {d};
     if (d.kind == ast::DeclKind::function)
       if (auto ds = found_defaults(d); !ds.empty()) defaults_[std::to_underlying(r.id)] = std::move(ds);
     declared_types_[std::to_underlying(r.id)] = dt;
@@ -5303,34 +5309,35 @@ public:
   // [expr.call]: a call to a named function or through a pointer to function. Each argument
   // copy-initializes its parameter; arguments matching a C-style ellipsis get the default
   // argument promotions.
-  Ex call(Ex callee, std::vector<Ex> args, u32 end, u32 paren_at) {
+  Ex call(Ex callee, std::vector<Ex> args, u32 end, u32 paren_at, std::optional<u32> lookup_at = std::nullopt) {
     u32 begin = callee.begin;
     std::vector<NodeId> defaults;  // the chosen function's default arguments
     if (!callee.ok() || std::ranges::any_of(args, [](const Ex& a) { return !a.ok(); })) return {NodeId::none, begin, end};
     // A member function called with a dependent argument is resolved when the template is
     // instantiated ([temp.dep.expr]).
-    if (is_bound_member(callee) && any_dependent(args)) {
-      std::vector<Ex> ops{callee};
-      ops.insert(ops.end(), args.begin(), args.end());
-      return dependent_node(ops, begin, end);
-    }
-    if (is_bound_member(callee)) return member_call(callee, std::move(args), end, paren_at);
+    bool dependent_args = any_dependent(args);
+    if (is_bound_member(callee) && !dependent_args) return member_call(callee, std::move(args), end, paren_at);
     // [temp.dep.candidate]: an unqualified call with a type-dependent argument is resolved when the
     // template is instantiated, among what lookup finds at the definition and argument-dependent
     // lookup finds at the point of instantiation.
     std::optional<NameId> unqualified = unqualified_name(callee);
-    std::vector<Ex> all{callee};
-    all.insert(all.end(), args.begin(), args.end());
-    if (unqualified && any_dependent(args)) {
-      dependent_calls.push_back(callee.begin);
+    if (unqualified) {
+      u32 offset = lookup_at.value_or(callee.begin);
+      if (std::ranges::any_of(args, [&](const Ex& a) { return types().is_dependent(a.type()); })) {
+        dependent_calls.push_back(offset);
+      } else {
+        callee = with_adl(callee, *unqualified, args, q_->dependent_call(offset));
+        if (auto d = as<ast::DepName>(callee)) {
+          undeclared(callee.begin, d->name);
+          return {NodeId::none, begin, end};
+        }
+      }
+    }
+    if (dependent(callee) || dependent_args) {
+      std::vector<Ex> all{callee};
+      all.insert(all.end(), args.begin(), args.end());
       return dependent_node(all, begin, end);
     }
-    if (unqualified && q_->dependent_call(callee.begin)) callee = with_adl(callee, *unqualified, args);
-    if (auto d = as<ast::DepName>(callee)) {
-      undeclared(callee.begin, d->name);
-      return {NodeId::none, begin, end};
-    }
-    if (dependent(callee) || any_dependent(args)) return dependent_node(all, begin, end);
     // A braced list as an argument is copy-list-initialization of its parameter
     // ([dcl.init.list]/1); overload resolution with one ([over.ics.list]) is not supported yet, so
     // the callee must be one function.
@@ -5343,6 +5350,9 @@ public:
       }
       auto st = deduced_function(set[0].entity, set[0].type, callee.begin);
       if (!st) return {NodeId::none, begin, end};
+      defaults = found_defaults(set[0]);
+      if (set[0].flags & decl_flag::consteval_) consteval_.insert(std::to_underlying(set[0].entity));
+      if (set[0].flags & decl_flag::deleted) deleted_.insert(std::to_underlying(set[0].entity));
       ExprInfo ci{*st, ValueCategory::lvalue, 0};
       callee = node(ast::DeclRef{ci, set[0].entity}, callee.begin, callee.end, ci);
     }
@@ -5399,6 +5409,14 @@ public:
       // One function: still not callable when deleted ([dcl.fct.def.delete]).
       diag(callee.begin, Diag::deleted_function, w_->entities.rec(d->entity).name);
       return {NodeId::none, begin, end};
+    } else if (d && unqualified && types().has_placeholder(types().rec(callee.type()).inner)) {
+      // A sole ordinary function's return type can be deduced now that ADL has supplied no
+      // other candidate. Keep the lookup's defaults when rewriting the reference.
+      auto dt = deduced_function(d->entity, callee.type(), callee.begin);
+      if (!dt) return {NodeId::none, begin, end};
+      defaults = defaults_of(callee, d->entity);
+      ExprInfo ci{*dt, ValueCategory::lvalue, 0};
+      callee = node(ast::DeclRef{ci, d->entity}, callee.begin, callee.end, ci);
     }
     // A call of a class object calls its `operator()` ([over.call.object]); surrogate call
     // functions (conversions to pointers to functions) are not considered yet.
@@ -5436,52 +5454,109 @@ public:
     return node(ast::Call{info, function, at(callee, begin), b_->list(*children)}, begin, end, info);
   }
 
-  // The name of a callee named by an unqualified-id: an undeclared name, an overload set, or a
-  // function that is not a class member ([basic.lookup.argdep]/1: not parenthesized, not
-  // qualified).
+  // The unqualified-id of a callee that permits ADL ([basic.lookup.argdep]/1). A qualified or
+  // parenthesized callee has no such entry.
   std::optional<NameId> unqualified_name(const Ex& callee) {
     if (auto d = as<ast::DepName>(callee)) return d->name;
     auto r = as<ast::DeclRef>(callee);
     if (!r || !unqualified_.contains(std::to_underlying(callee.id))) return std::nullopt;
-    const EntityRec& e = w_->entities.rec(r->entity);
-    if (e.scope != EntityId::none && w_->entities.rec(e.scope).kind == EntityKind::class_) return std::nullopt;
-    return e.name;
+    return w_->entities.rec(r->entity).name;
   }
 
-  // The namespace associated with a type ([basic.lookup.argdep]/3): the innermost namespace
-  // enclosing its class or enumeration, through pointers, arrays and references; none for a
-  // fundamental type. The global namespace is `EntityId::none`.
-  std::optional<EntityId> associated_namespace(QualType t) {
-    TypeRec r = types().rec(t);
-    while (r.kind == TypeKind::pointer || r.kind == TypeKind::array || r.kind == TypeKind::reference) r = types().rec(r.inner);
-    if (r.kind != TypeKind::class_ && r.kind != TypeKind::enum_) return std::nullopt;
-    EntityId s = w_->entities.rec(r.entity).scope;
+  EntityId enclosing_namespace(EntityId entity) {
+    EntityId s = w_->entities.rec(entity).scope;
     while (s != EntityId::none && w_->entities.rec(s).kind != EntityKind::namespace_) s = w_->entities.rec(s).scope;
     return s;
   }
 
-  // The callee of a call that was dependent in the template's definition, in an instantiation:
-  // the functions the definition found, with those named `name` that argument-dependent lookup
-  // finds in the arguments' associated namespaces at the point of instantiation
-  // ([temp.dep.candidate], [basic.lookup.argdep]/4).
-  Ex with_adl(Ex callee, NameId name, std::span<const Ex> args) {
+  // The namespace found by the existing operator lookup.
+  std::optional<EntityId> associated_namespace(QualType t) {
+    TypeRec r = types().rec(t);
+    while (r.kind == TypeKind::pointer || r.kind == TypeKind::array || r.kind == TypeKind::reference) r = types().rec(r.inner);
+    if (r.kind != TypeKind::class_ && r.kind != TypeKind::enum_) return std::nullopt;
+    return enclosing_namespace(r.entity);
+  }
+
+  // [basic.lookup.argdep]/3: the associated namespaces of the argument types. The namespace
+  // query adds each nearest non-inline ancestor and its inline namespace set.
+  std::vector<EntityId> associated_namespaces(std::span<const Ex> args, bool at_instantiation) {
     std::vector<EntityId> namespaces;
-    for (const Ex& a : args)
-      if (auto ns = associated_namespace(a.type()); ns && !std::ranges::contains(namespaces, *ns)) namespaces.push_back(*ns);
-    if (namespaces.empty()) return callee;
+    std::vector<QualType> seen;
+    auto collect = [&](this auto&& visit, QualType t) -> void {
+      t = Types::unqualified(types().canonical(t));
+      if (std::ranges::contains(seen, t)) return;
+      seen.push_back(t);
+      TypeRec r = types().rec(t);
+      switch (r.kind) {
+      case TypeKind::class_:
+      case TypeKind::enum_: {
+        EntityId ns = enclosing_namespace(r.entity);
+        if (!std::ranges::contains(namespaces, ns)) namespaces.push_back(ns);
+        // Ordinary classes may contribute bases when complete. Instantiating a class template
+        // for ADL and associating its template arguments are tracked in #165.
+        if (r.kind == TypeKind::class_ && w_->entities.rec(r.entity).templ == EntityId::none)
+          if (const ClassRec* c = q_->adl_class(r.entity, at_instantiation))
+            for (const BaseRec& b : c->bases) visit(types().class_type(b.cls));
+        break;
+      }
+      case TypeKind::function:
+        for (QualType p : r.params) visit(p);
+        visit(r.inner);
+        break;
+      case TypeKind::member_pointer:
+        visit(r.member_owner);
+        visit(r.inner);
+        break;
+      case TypeKind::pointer:
+      case TypeKind::array:
+      case TypeKind::reference:
+        visit(r.inner);
+        break;
+      default: break;
+      }
+    };
+    for (const Ex& a : args) collect(a.type());
+    return namespaces;
+  }
+
+  // Merge the ordinary candidates with ADL before overload resolution ([over.call.func]).
+  Ex with_adl(Ex callee, NameId name, std::span<const Ex> args, bool dependent_call) {
     std::vector<ast::DeclSema> set;
     if (auto it = unqualified_.find(std::to_underlying(callee.id)); it != unqualified_.end()) set = it->second;
-    for (EntityId ns : namespaces)
-      for (const ast::DeclSema& d : q_->members_at_instantiation(ns, name))
-        if (d.kind == ast::DeclKind::function && !std::ranges::any_of(set, [&](const ast::DeclSema& x) { return x.entity == d.entity; }))
-          set.push_back(d);
-    if (set.empty()) return callee;
+    bool changed = false;
+    auto default_count = [&](const ast::DeclSema& d) {
+      return std::ranges::count_if(found_defaults(d), [](NodeId n) { return n != NodeId::none; });
+    };
+    auto add = [&](bool at_instantiation) {
+      for (EntityId ns : associated_namespaces(args, at_instantiation)) {
+        for (const ast::DeclSema& d : q_->adl_functions(ns, name, at_instantiation)) {
+          auto prior = std::ranges::find(set, d.entity, &ast::DeclSema::entity);
+          if (prior == set.end()) {
+            set.push_back(d);
+            changed = true;
+          } else if (d.params != prior->params && default_count(d) > default_count(*prior)) {
+            *prior = d;
+            changed = true;
+          }
+        }
+      }
+    };
+    add(false);
+    if (dependent_call) add(true);
+    if (!changed) return callee;
     ExprInfo info{builtin(Builtin::overload_set), ValueCategory::lvalue, 0};
     Ex r = node(ast::DeclRef{info, set.front().entity}, callee.begin, callee.end, info);
     if (auto ex = explicit_args_.find(std::to_underlying(callee.id)); ex != explicit_args_.end())
       explicit_args_[std::to_underlying(r.id)] = ex->second;
     overloads_[std::to_underlying(r.id)] = std::move(set);
     return r;
+  }
+
+  // The synthesized begin/end calls in [stmt.ranged] start with no ordinary candidates.
+  Ex adl_call(NameId name, Ex arg, u32 begin, u32 end, u32 lookup_at) {
+    ExprInfo info{builtin(Builtin::dependent), ValueCategory::lvalue, 0};
+    Ex callee = node(ast::DepName{info, name}, begin, end, info);
+    return call(callee, {arg}, end, end, lookup_at);
   }
 
   // A braced-init-list as a call's argument: a placeholder, list-initializing its parameter once

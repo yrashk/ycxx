@@ -19,7 +19,6 @@ draft/basic/basic.life-2.accept.cpp preprocessing directives are not supported y
 draft/basic/basic.life-4.accept.cpp preprocessing directives are not supported yet
 draft/basic/basic.life-5.accept.cpp preprocessing directives are not supported yet
 draft/basic/basic.link-1.accept.cpp 'extern' not supported yet
-draft/basic/basic.lookup.argdep-1.reject.cpp errors elsewhere: 'namespace' not supported yet
 draft/basic/basic.lookup.argdep-3.accept.cpp 'namespace' not supported yet
 draft/basic/basic.lookup.elab-1.reject.cpp errors elsewhere: 'struct' not supported yet
 draft/basic/basic.lookup.qual.general-1.reject.cpp errors elsewhere: 'class' not supported yet

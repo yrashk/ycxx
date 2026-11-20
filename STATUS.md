@@ -1016,6 +1016,26 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
 - Not yet (#153): enumerators through `using E::e;` (/7), a function target with the same
   parameter types as a function of the scope (/14), `typename` with dependent names (ζ).
 
+## Argument-dependent lookup for unqualified calls (#165, 2026-11-19)
+
+- [basic.lookup.argdep] finds functions in the namespaces associated with class and enumeration
+  arguments, including complete ordinary classes' bases and the inline namespace set. Pointer,
+  reference, array, function and pointer-to-member types contribute through their component types.
+  Member-pointer values still need #411.
+- Each associated namespace search uses preceding declarations that bind names in the scope.
+  It uses namespace using-declarations' fixed targets and the latest redeclaration found
+  for each function. Using-directives do not contribute to ADL. Sema merges the candidates with
+  ordinary lookup before overload resolution, then deduces the selected function's return type
+  if needed. Class members and nonfunctions suppress ADL. A block using-declaration that names
+  a namespace function permits ADL. Qualified and parenthesized calls use ordinary lookup.
+- A nondependent call in a template uses its lexical lookup point. Dependent calls also use the
+  existing point of instantiation ([temp.dep.candidate]). Per-name incremental scheduling
+  remains under #16.
+- Remaining work in #165 includes declarations of functions in blocks, exact lookup for
+  operators, association through class template arguments and overload-set arguments, and
+  complete unqualified template-id lookup. Hidden friends are tracked in #259.
+- Tests: `tests/own/argument-dependent-lookup/` and `tests/own/range-for/adl*.run.cpp`.
+
 ## `<cstdio>`, step 3: attributes, asm labels, string-initialized arrays (#133, 2026-11-18)
 
 - **Attributes:** `[[…]]` attribute-specifiers on declarations, class heads and statements, and
@@ -1189,8 +1209,8 @@ template's tokens again with the arguments bound.
   template-ids (`N::f<int>`), a non-type parameter's default or a signature's bound that is a
   dependent expression other than a parameter (not supported, pending `VDepOp`), dependent
   qualified names (`typename T::x`, with the `SSubst` sugar of ast.md §6.4), deduction from an
-  overload set argument ([temp.deduct.call]/6), "required from here" notes. Argument-dependent
-  lookup runs for dependent calls in instantiations only (#165). Coalesced (weak) definitions of specializations are #124.
+  overload set argument ([temp.deduct.call]/6), "required from here" notes. Coalesced (weak)
+  definitions of specializations are #124.
 
 ## Templates, ζ step 2: class templates (#88, 2026-11-18)
 
@@ -1986,12 +2006,12 @@ values, end to end; results match Clang's bit for bit.
   kinds: hidden locals `auto&& __range`, `auto __begin`, `auto __end` (`deduce_placeholder`),
   then a `For` over `__begin != __end` and `++__begin` whose body declares the loop variable from
   `*__begin`. An array supplies its begin and one-past-end pointers. A class supplies member calls
-  when member lookup finds both names, including inherited members. The fallback uses ordinary
-  lookup for `begin(__range)` and `end(__range)` until #165 supplies ADL-only lookup. The loop
+  when member lookup finds both names, including inherited members. The fallback finds
+  `begin(__range)` and `end(__range)` through ADL alone (#165). The loop
   variable and init-statement names are in the guarded scope ([basic.scope.block]/2). A dependent
   range is expanded at instantiation.
-- Remaining work covers ADL-only nonmember lookup (#165), C++23 lifetime extension for
-  temporaries inside the range initializer (#376), braced ranges (#329), and sentinels that rely on
+- Remaining work covers C++23 lifetime extension for temporaries inside the range initializer
+  (#376), braced ranges (#329), and sentinels that rely on
   `!=` rewritten from `==` (#295). A constexpr reference requires a constexpr overloaded
   dereference. Full constant evaluation of the class iterator still needs #25.
 - Tests: `tests/own/range-for/` (17 from the independent author and nine review regressions).

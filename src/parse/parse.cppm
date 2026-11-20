@@ -273,8 +273,9 @@ public:
   // The declarations of `name` that are members of namespace `path` ([namespace.memdef]) before
   // the point: of its own definitions, and, unless `inhabit`, of its inline and unnamed members.
   // A using-declaration's name stands for what it introduces (query-engine.md, "Using-declarations").
+  // The ADL search uses `bound_functions` to check where direct declarations bind their names.
   std::vector<DeclId> declared_in(std::string_view name, const std::string& path, u32 item, bool self,
-                                  bool inhabit = false) {
+                                  bool inhabit = false, bool bound_functions = false) {
     std::vector<DeclId> r;
     for (auto [j, k] : named(name)) {
       if (j >= item + (self ? 1 : 0)) break;
@@ -292,15 +293,66 @@ public:
       }
       // A scoped enumeration's enumerators are in its own scope ([dcl.enum]/11); the declarators
       // after its braces are not.
-      if (!(n.flags & (items::name_flag::friend_ | items::name_flag::specialization)) &&
-          !(it.kind == ItemKind::enum_def && n.ordinal > 0 && !(n.flags & items::name_flag::enumerator) &&
-            it.begin + n.offset < it.brace_end))
-        r.push_back({ids_[j], ast::make_decl_ord(ast::DeclClass::syntactic, n.ordinal)});
+      if ((n.flags & (items::name_flag::friend_ | items::name_flag::specialization)) ||
+          (it.kind == ItemKind::enum_def && n.ordinal > 0 && !(n.flags & items::name_flag::enumerator) &&
+           it.begin + n.offset < it.brace_end))
+        continue;
+      DeclId id{ids_[j], ast::make_decl_ord(ast::DeclClass::syntactic, n.ordinal)};
+      if (bound_functions) {
+        // A qualified definition can inhabit this namespace while binding its name elsewhere
+        // ([dcl.meaning.general]). Targets of using-declarators were collected above.
+        auto d = decl_sema(id);
+        if (!d || d->entity == EntityId::none || d->kind != ast::DeclKind::function ||
+            (d->flags & sema::decl_flag::member))
+          continue;
+        // The entity of a function with C language linkage uses the global namespace in its
+        // identity. A qualified definition already has a declaration in its target namespace.
+        if (d->flags & sema::decl_flag::lang_c) {
+          if (it.qualifier_begin != items::none) continue;
+        } else if (namespace_path(w_->entities.rec(d->entity).scope) != path) {
+          continue;
+        }
+      }
+      r.push_back(id);
     }
     for (const Directive& d : directives_)
       if (d.alias && d.item < item + (self ? 1 : 0) && d.at == path && w_->ins.names.spelling(*d.alias) == name)
         r.push_back({ids_[d.item], ast::make_decl_ord(ast::DeclClass::syntactic, 0)});
     return r;
+  }
+  // [basic.lookup.argdep]/4: search the innermost non-inline namespace and its inline namespace
+  // set. In each namespace search only its own declarations, including using-declarator targets
+  // fixed at their locus ([basic.lookup.general], [namespace.udecl]).
+  std::vector<ast::DeclSema> adl_functions(EntityId ns, ast::NameId name, u32 item, bool self) {
+    const u32 limit = item + (self ? 1 : 0);
+    std::string path = namespace_path(ns);
+    while (!path.empty()) {
+      std::string parent = parent_of(path);
+      auto inlines = inline_namespaces_.find(parent);
+      if (inlines == inline_namespaces_.end()) break;
+      auto child = std::ranges::find(inlines->second, path, &InlineNamespace::path);
+      if (child == inlines->second.end() || child->item >= limit) break;
+      path = std::move(parent);
+    }
+    std::vector<std::string> scopes{std::move(path)};
+    std::vector<DeclId> decls;
+    std::string_view spelling = w_->ins.names.spelling(name);
+    for (std::size_t i = 0; i < scopes.size(); ++i) {
+      auto own = declared_in(spelling, scopes[i], item, self, /*inhabit=*/true, /*bound_functions=*/true);
+      decls.insert(decls.end(), own.begin(), own.end());
+      if (auto children = inline_namespaces_.find(scopes[i]); children != inline_namespaces_.end())
+        for (const InlineNamespace& child : children->second)
+          if (child.item < limit) scopes.push_back(child.path);
+    }
+    // A using-declarator contributes the original declarations. Prefer the latest redeclaration
+    // actually found for each function, which also has the defaults known at that declaration.
+    std::ranges::sort(decls, {}, [&](DeclId d) { return std::pair{index(d.item), ast::number_of(d.ord)}; });
+    std::vector<ast::DeclSema> result;
+    for (DeclId d : decls | std::views::reverse)
+      if (auto s = decl_sema(d); s && s->entity != EntityId::none && s->kind == ast::DeclKind::function &&
+          !std::ranges::contains(result, s->entity, &ast::DeclSema::entity))
+        result.push_back(*s);
+    return result;
   }
   static std::string parent_of(const std::string& p) {
     auto cut = p.rfind("::");
@@ -946,6 +998,8 @@ private:
   std::unordered_map<std::string_view, std::vector<std::pair<u32, u32>>> by_name_;
   std::map<std::string, EntityId> ns_entities_;
   std::map<u32, std::string> ns_paths_;           // by namespace entity
+  struct InlineNamespace { std::string path; u32 item; };
+  std::map<std::string, std::vector<InlineNamespace>> inline_namespaces_;  // by enclosing namespace
   std::vector<Directive> directives_;
 
   // Each item's namespace, from the namespace definitions that enclose it; and the using-
@@ -996,8 +1050,16 @@ private:
       inner_of_[k] = ns_of_[k];
       inner_eff[k] = eff_ns_[k];
       for (const auto& [n, inl] : names) {
-        if (!anonymous) name_scopes_[k].push_back({inner_of_[k], inner_eff[k]});
+        const std::string parent = inner_of_[k];
+        if (!anonymous) name_scopes_[k].push_back({parent, inner_eff[k]});
         inner_of_[k] += (inner_of_[k].empty() ? "" : "::") + n;
+        // An unnamed namespace is transparent to ordinary lookup even without `inline`.
+        // Only explicitly inline namespaces form the set used by ADL.
+        if (anonymous ? is_inline : inl) {
+          auto& children = inline_namespaces_[parent];
+          if (!std::ranges::contains(children, inner_of_[k], &InlineNamespace::path))
+            children.push_back({inner_of_[k], k});
+        }
         if (!inl) inner_eff[k] += (inner_eff[k].empty() ? "" : "::") + n;
       }
     }
@@ -1097,6 +1159,13 @@ public:
       if (auto s = p_->decl_sema(d); s && s->entity != EntityId::none) r.push_back(*s);
     return r;
   }
+  std::vector<ast::DeclSema> adl_functions(EntityId ns, ast::NameId name, bool at_instantiation) override {
+    return at_instantiation ? p_->adl_functions(ns, name, point(), false) : p_->adl_functions(ns, name, item_, self_);
+  }
+  const sema::ClassRec* adl_class(EntityId c, bool at_instantiation) override {
+    bool complete = at_instantiation ? is_complete(c) : p_->is_complete(c, item_, self_, own_class_complete);
+    return complete ? p_->classes().find(c) : nullptr;
+  }
   // The namespace unqualified lookup starts in: the item's, or the one a qualified declarator
   // names ([basic.lookup.unqual]/9).
   std::string from;
@@ -1163,13 +1232,6 @@ public:
   // which argument-dependent lookup at the point of use completes ([temp.dep.candidate]).
   std::vector<u32> atom_calls;
   bool dependent_call(sema::u32 offset) override { return std::ranges::contains(atom_calls, offset); }
-  std::vector<ast::DeclSema> members_at_instantiation(EntityId ns, ast::NameId name) override {
-    std::vector<ast::DeclSema> r;
-    if (atom_calls.empty()) return r;
-    for (DeclId d : p_->declared_in(p_->world().ins.names.spelling(name), p_->namespace_path(ns), point(), false))
-      if (auto s = p_->decl_sema(d); s && s->entity != EntityId::none) r.push_back(*s);
-    return r;
-  }
 
 private:
   u32 point() const { return at_point ? *at_point : item_; }
@@ -1198,6 +1260,13 @@ public:
     return at_.namespace_named(name, directives);
   }
   std::vector<ast::DeclSema> namespace_members(EntityId ns, ast::NameId name) override { return at_.namespace_members(ns, name); }
+  std::vector<ast::DeclSema> adl_functions(EntityId ns, ast::NameId name, bool at_instantiation) override {
+    return at_instantiation ? p_->adl_functions(ns, name, p_->end(), false) : at_.adl_functions(ns, name, false);
+  }
+  const sema::ClassRec* adl_class(EntityId c, bool at_instantiation) override {
+    if (!at_instantiation) return at_.adl_class(c, false);
+    return is_complete(c) ? p_->classes().find(c) : nullptr;
+  }
   ast::DeclSema decl_sema(DeclId d) override { return at_.decl_sema(d); }
   interp::Callee function_ir(EntityId f) override { return p_->function_ir(f, p_->end()); }
   std::optional<QualType> deduced_type(EntityId f) override { return p_->deduced_type(f, p_->end()); }
@@ -1225,13 +1294,6 @@ public:
   void static_local(EntityId v, QualType t, std::optional<ConstId> value) override { p_->static_locals_[std::to_underlying(v)] = {t, value}; }
   bool dependent_call(sema::u32 offset) override {
     return p_->dependent_call(item_, offset);
-  }
-  // [basic.lookup.argdep]/4: the namespace's own members, using-directives ignored.
-  std::vector<ast::DeclSema> members_at_instantiation(EntityId ns, ast::NameId name) override {
-    std::vector<ast::DeclSema> r;
-    for (DeclId d : p_->declared_in(p_->world().ins.names.spelling(name), p_->namespace_path(ns), p_->end(), false))
-      if (auto s = p_->decl_sema(d); s && s->entity != EntityId::none) r.push_back(*s);
-    return r;
   }
 
   AtItem& pattern_context() { return at_; }
