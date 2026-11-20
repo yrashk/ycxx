@@ -685,7 +685,7 @@ class Lowering {
           T result[] = {T::state};
           out(n, 0, b_.peek().result(b_.emit(Op2::va_start, result, ops, {}, 0, {}, o)));
         } else {
-          auto fetch = type_of(cxx(f_.result(n, 1)));
+          auto fetch = type_of(cxx(f_.results_of(n)[1]));
           if (!fetch) return fail(fetch.error());
           T results[] = {T::state, *fetch};
           auto m = b_.emit(Op2::va_arg, results, ops, {}, 0, {}, o);
@@ -697,7 +697,7 @@ class Lowering {
       case Op::va_copy: {
         if (!config_.sysv_amd64) return fail("variadic cursors require System V AMD64");
         QualType cursor = layout(cxx(f_.operands_of(n)[1])).pointee;
-        out(n, 0, copy_bytes(in(n, 0), in(n, 1), in(n, 2), layout(cursor), raw(cursor)));
+        out(n, 0, copy_bytes(in(n, 0), in(n, 1), in(n, 2), layout(cursor), 0));
         return {};
       }
       case Op::va_end:

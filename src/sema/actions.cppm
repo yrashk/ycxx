@@ -4075,8 +4075,7 @@ public:
 
   Ex va_call(lex::VaBuiltin builtin_op, Ex cursor, std::optional<Ex> source,
              std::optional<QualType> fetch, u32 begin, u32 end) {
-    using enum lex::VaBuiltin;
-    const bool starts = builtin_op == start || builtin_op == legacy_start;
+    const bool starts = builtin_op == lex::VaBuiltin::start || builtin_op == lex::VaBuiltin::legacy_start;
     const Ex invalid{NodeId::none, begin, end};
     if (starts) {
       const bool variadic = lambdas_.empty() ? variadic_function_body : types().rec(lambdas_.back().call_type).variadic;
