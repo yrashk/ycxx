@@ -431,7 +431,7 @@ std::expected<bytes, std::string> link(std::span<const obj::object> objects, std
         for (const auto& r : s.relocs) {
           if (r.kind != reloc_kind::x86_64_rex_gotpcrelx) continue;
           if (r.symbol >= o.symbols.size()) return section_error(o, s, "invalid ELF relocation symbol index");
-          return section_error(o, s, std::format("native dynamic ELF data address for '{}' is unsupported",
+          return section_error(o, s, std::format("native dynamic ELF GOT address for '{}' is unsupported",
                                                   o.symbols[r.symbol].name));
         }
       }

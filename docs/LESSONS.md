@@ -230,8 +230,9 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
 - **A sandbox command's `/dev/shm` is private to that command.** A compiler built there by one
   command was inaccessible to the next.
   - Do: build and test in the same command when using `/dev/shm`. Copy the binary and test logs
-    to the session's workspace before the command exits if another command needs them.
-  - Learned on #101.
+    to the session's workspace before the command exits if another command needs them. Keep the
+    build shell alive after a failed check if a retry needs the existing build.
+  - Learned on #101 and #407.
 
 - **The managed Linux sandbox can affect daemon tests.** The default sandbox denies Unix socket
   bind or connect, and the sandbox's `/tmp/.git` placeholder can make root discovery pick

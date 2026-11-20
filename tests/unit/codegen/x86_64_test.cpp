@@ -107,7 +107,8 @@ extern "C" long* address() { return &payload; }
         "pointer arithmetic, byte stores and pointer returns retain their widths");
 
   auto no_address = compile(session, "address");
-  check(!no_address && no_address.error().contains("direct RIP-relative"), "require a directly addressable symbol");
+  check(!no_address && no_address.error().contains("direct or GOT-relative reference"),
+        "require a binding for the symbol address");
 
   // Inspect the relocation fields and then bind them to nearby test addresses. The patch uses
   // ELF's S + A - P rule, which must land on the symbol when AMD64 adds the end of the field.

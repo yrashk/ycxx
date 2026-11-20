@@ -342,15 +342,15 @@ void relax_data_addresses() {
 
   const elf::dynamic_options options{"/ld.so", {{"data.so", "data.so", {{"value", false}}, {}}}};
   const auto dynamic = elf::link(input, "_start", &options);
-  check(!dynamic && dynamic.error().contains("native dynamic ELF data address for 'value' is unsupported"),
+  check(!dynamic && dynamic.error().contains("native dynamic ELF GOT address for 'value' is unsupported"),
         "native dynamic data addresses require data binding rules");
   auto imported = input;
   imported[0].symbols[value].section.reset();
   imported[0].symbols[value].weak = false;
   imported[1].symbols.clear();
   const auto dso_data = elf::link(imported, "_start", &options);
-  check(!dso_data && dso_data.error().contains("native dynamic ELF data address for 'value' is unsupported"),
-        "native dynamic data imports have a data-specific diagnostic");
+  check(!dso_data && dso_data.error().contains("native dynamic ELF GOT address for 'value' is unsupported"),
+        "native dynamic data imports through the GOT are unsupported");
 }
 
 void dynamic_calls() {
