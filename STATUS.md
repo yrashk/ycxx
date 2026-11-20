@@ -997,8 +997,12 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
 - Linkage names of enumerations, nested ones included, match Clang's.
 - Tests: `tests/own/classes/s4-*enum*`, `s4-scoped-enum`, `s4-unscoped-enum` (spec-only, plus two
   from the review): 7 of 7.
-- Not yet: opaque enum declarations (`enum E : int;`), unnamed enumerations, `E{}` and
-  `E(v)` as expressions, enumerations in a block (#117), constexpr enumeration objects (#25).
+- Namespace-scope opaque enum declarations ([dcl.enum], #157) supply a complete enum type with a
+  fixed underlying type before the enumerator list. Omitted scoped bases default to `int`. Unscoped opaque
+  declarations spell their base. Compatible redeclarations and a later definition in the same
+  namespace share the nominal type, and the enumerators become visible at the definition.
+- Not yet: opaque declarations in classes or blocks, unnamed enumerations, `E{}` and `E(v)` as
+  expressions (#157), enumerations in a block (#117), constexpr enumeration objects (#25).
 
 ## Classes, δ step 4b: namespaces (#86, 2026-11-18)
 

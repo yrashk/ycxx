@@ -3077,7 +3077,13 @@ public:
   std::optional<Ex> find_enumerator(EntityId e, NameId name, u32 begin, u32 end) {
     if (const EnumRec* r = enum_rec(e))
       for (const EnumeratorRec& x : r->enumerators)
-        if (x.name == name) return enumerator(x.entity, types().enum_type(e), begin, end);
+        if (x.name == name) {
+          // A definition may have been analyzed for a later point. Its enumerator is only
+          // visible where the constant is available.
+          Ex value = enumerator(x.entity, types().enum_type(e), begin, end);
+          if (value.ok()) return value;
+          break;
+        }
     return std::nullopt;
   }
 

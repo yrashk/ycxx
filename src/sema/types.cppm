@@ -712,6 +712,7 @@ struct EnumeratorRec {
 struct EnumRec {
   bool scoped = false;
   bool fixed = false;
+  bool defined = false;  // whether a definition supplied the enumerator list
   std::optional<QualType> underlying;
   // Without a fixed type, what it promotes to ([conv.prom]/3): the first of int, unsigned int,
   // long, unsigned long that holds all its values, which may differ from `underlying`.
@@ -736,9 +737,11 @@ public:
     if (fresh) class_order_.push_back(c);
     return it->second;
   }
+  // The opaque form supplies the type's shape. A definition also supplies its enumerators.
   const EnumRec& publish_enum(EntityId e, EnumRec r) {
     auto [it, fresh] = enums_.try_emplace(std::to_underlying(e), std::move(r));
     if (fresh) enum_order_.push_back(e);
+    else if (!it->second.defined && r.defined) it->second = std::move(r);
     return it->second;
   }
   // The classes and enumerations with records, in the order they were published.

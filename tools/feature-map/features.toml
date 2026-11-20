@@ -1233,13 +1233,16 @@ clauses = ['dcl.enum']
 std = 'C++11'
 detect = '\benum\s+(?:class|struct)\b|\benum\s+\w+\s*:\s*[\w:]'
 probe = '''
-enum class E : unsigned char { a, b };
+enum class E : unsigned char;
 enum struct F;
-int main() { E e = E::b; return static_cast<int>(e) == 1 && sizeof(E) == 1 ? 0 : 1; }
+static_assert(sizeof(E) == sizeof(unsigned char));
+static_assert(sizeof(F) == sizeof(int));
+enum class E : unsigned char { a, b };
+int main() { E e = E::b; return static_cast<int>(e) == 1 ? 0 : 1; }
 '''
 status = 'partial'
 issues = [157]
-note = 'opaque enum declarations'
+note = 'opaque enum declarations in classes and blocks'
 
 [[feature]]
 id = 'dcl-using-enum'
