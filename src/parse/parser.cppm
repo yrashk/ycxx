@@ -201,9 +201,10 @@ public:
     if (starts_decl_specifier(kind())) return true;
     if (qualified_ahead()) {
       auto q = qualified_type(0);
+      auto context = statement ? PointerLookahead::statement : PointerLookahead::declaration;
       return q && !(statement && s_->types().kind(q->first) == sema::TypeKind::dep_name) &&
              (kind(q->second) != Tk::l_paren || member_pointer_star(q->second + 1) ||
-              function_pointer_declarator_ahead(q->second, statement)) &&
+              function_pointer_declarator_ahead(q->second, context)) &&
              kind(q->second) != Tk::period && kind(q->second) != Tk::l_brace;
     }
     u32 next = 1;  // the token after the type's name: after `X<…>` for a class template
@@ -237,10 +238,14 @@ public:
     return end_ - i_;
   }
 
+  enum class PointerLookahead { declaration, statement, abstract };
+
   // A qualified type followed by `(*name)(parameters)` can start a declaration
   // ([stmt.ambig]). Keep a functional conversion followed by a call and an operator
   // on the expression path.
-  bool function_pointer_declarator_ahead(u32 open, bool statement = false) {
+  bool function_pointer_declarator_ahead(u32 open, PointerLookahead context = PointerLookahead::declaration) {
+    if (kind(open) != Tk::l_paren) return false;
+    bool statement = context == PointerLookahead::statement;
     u32 next = open + 1;
     u32 groups = 1;
     bool pointer = false;
@@ -262,8 +267,20 @@ public:
              kind(next) == Tk::kw___restrict || kind(next) == Tk::kw___restrict__)
         ++next;
     }
-    if (!pointer || kind(next) != Tk::identifier) return false;
-    next = past_attributes(next + 1);
+    if (!pointer) return false;
+    if (context != PointerLookahead::abstract) {
+      if (qualified_ahead(next)) {
+        u32 name = next;
+        // A template argument in the scope can itself read a qualified type name.
+        bool saved_half = qualified_half_;
+        auto scope = nested_name(next, name);
+        qualified_half_ = saved_half;
+        if (!scope) return false;
+        next = name;
+      }
+      if (kind(next) != Tk::identifier) return false;
+      next = past_attributes(next + 1);
+    }
     for (; groups != 0; --groups, ++next)
       if (kind(next) != Tk::r_paren) return false;
 
@@ -282,11 +299,11 @@ public:
   }
 
   // Whether a qualified name starts here: `::`, `N::`, or `X<…>::` ([basic.lookup.qual]).
-  bool qualified_ahead() {
-    if (is(Tk::coloncolon)) return true;
-    if (!is(Tk::identifier)) return false;
-    if (kind(1) == Tk::coloncolon) return true;
-    return kind(1) == Tk::less && kind(past_template_args(1)) == Tk::coloncolon;
+  bool qualified_ahead(u32 start = 0) {
+    if (kind(start) == Tk::coloncolon) return true;
+    if (kind(start) != Tk::identifier) return false;
+    if (kind(start + 1) == Tk::coloncolon) return true;
+    return kind(start + 1) == Tk::less && kind(past_template_args(start + 1)) == Tk::coloncolon;
   }
 
   // A ptr-operator can start with a nested-name-specifier. Find its `*` before doing lookup, so
@@ -544,7 +561,8 @@ public:
             // `N::C`, `::C`, `C::E`, `X<T>::E` ([dcl.type.simple]).
             if (auto q = qualified_type(0, true);
                 q && (in_type_id || kind(q->second) != Tk::l_paren ||
-                      function_pointer_declarator_ahead(q->second))) {
+                      function_pointer_declarator_ahead(q->second) ||
+                      (in_params_ > 0 && function_pointer_declarator_ahead(q->second, PointerLookahead::abstract)))) {
               cls = q->first;
               take_qualified(q->second);
               continue;
@@ -1120,7 +1138,11 @@ public:
     // In statement lookahead, a type followed by ( or { can instead construct an argument
     // to a call on the result of a functional conversion.
     auto can_start_parameter = [&](u32 after_type) {
-      return !statement || (kind(after_type) != Tk::l_paren && kind(after_type) != Tk::l_brace);
+      if (!statement) return true;
+      if (kind(after_type) == Tk::l_paren)
+        // An unnamed grouped pointer such as `int (*)(int)` cannot be a cast operand.
+        return function_pointer_declarator_ahead(after_type, PointerLookahead::abstract);
+      return kind(after_type) != Tk::l_brace;
     };
     Tk k = kind(first);
     Tk next = kind(first + 1);

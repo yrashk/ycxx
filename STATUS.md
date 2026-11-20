@@ -1420,7 +1420,8 @@ session's.*
   known to name a type can start the parameter list of an abstract declarator, as in
   `struct S { using F = S(S); };` ([dcl.name], [dcl.fct], [dcl.ambig.res], #216).
 - Named function-pointer declarations accept qualified return types, including at block scope
-  ([dcl.ptr], [dcl.fct], [stmt.ambig], #433).
+  ([dcl.ptr], [dcl.fct], [stmt.ambig], #433). A grouped pointer can name an existing namespace member,
+  and a block declaration can take an unnamed function-pointer parameter (#449).
 - Not yet: access, hiding and qualified functional casts of member types (#216); member alias
   templates (`template<…> using __apply = …` in a class), with member
   templates; template template parameters (#208); value-dependent expressions as template
