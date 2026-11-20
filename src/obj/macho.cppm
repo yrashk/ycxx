@@ -255,6 +255,7 @@ std::vector<std::uint8_t> write_object(const object& o) {
         }
         case reloc_kind::x86_64_pc32:
         case reloc_kind::x86_64_plt32:
+        case reloc_kind::x86_64_rex_gotpcrelx:
           contract_assert(false && "x86-64 relocation in an arm64 Mach-O object");
           std::unreachable();
       }

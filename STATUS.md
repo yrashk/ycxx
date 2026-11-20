@@ -585,6 +585,16 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   start inside executable code, and its declared extent must fit in its section. The object
   fingerprint includes this metadata.
   [#428](https://github.com/yrashk/ycxx/issues/428) · [#391](https://github.com/yrashk/ycxx/issues/391)
+- Runtime addresses of default-visible Linux data use `R_X86_64_REX_GOTPCRELX`, including
+  declarations defined in another object. The native static linker checks and relaxes the
+  RIP-relative MOV to LEA after resolving the symbol. System linkers can preserve GOT binding.
+  Static pointer initializers continue to use absolute relocations with their byte addends.
+  `unit.linux_compile` checks address identity, nonzero offsets, writes, archive extraction,
+  BSS, and system-linker preemption. `unit.elf_link` checks malformed instructions, overlapping
+  relocations, weak resolution and displacement range. Native dynamic data addresses and
+  external function addresses follow [#390](https://github.com/yrashk/ycxx/issues/390) and
+  [#407](https://github.com/yrashk/ycxx/issues/407).
+  [Design](docs/design/linux-external-data-addresses.md) · [#414](https://github.com/yrashk/ycxx/issues/414)
 - Simple external inline function definitions use weak ELF symbols. The unit combines inline
   flags from reachable declarations, including `constexpr` functions and ordinary members
   defined in their class. Calls and statically initialized pointers in different units resolve
