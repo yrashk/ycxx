@@ -217,6 +217,8 @@ std::expected<std::string, std::string> write(std::span<const member_input> inpu
     const auto bytes = std::span(reinterpret_cast<const std::uint8_t*>(input.data.data()), input.data.size());
     auto object = elf::read_object(bytes, std::string(input.path));
     if (!object) return std::unexpected(std::move(object.error()));
+    if (!object->comdat_groups.empty())
+      return std::unexpected(std::format("{}: ELF COMDAT groups are unsupported in native archive production", input.path));
     for (auto& symbol : object->symbols) {
       if (symbol.bind == binding::local) continue;
       if (symbol.name.empty())
