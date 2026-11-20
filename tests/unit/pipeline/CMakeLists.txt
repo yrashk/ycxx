@@ -34,6 +34,9 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_
   add_test(NAME unit.linux_inline
     COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/linux_inline.py
             $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER} ${CMAKE_READELF} ${CMAKE_AR})
+  add_test(NAME unit.linux_elf_comdat
+    COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/linux_elf_comdat.py
+            $<TARGET_FILE:ycxxc> ${CMAKE_C_COMPILER} ${CMAKE_AR})
   add_test(NAME unit.linux_std_mangling
     COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/linux_std_mangling.py
             $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER} ${CMAKE_READELF}

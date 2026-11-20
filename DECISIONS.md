@@ -34,6 +34,10 @@ reasoning; do not leave decisions only in issue threads.
      relocation in relocatable objects for data and ordinary functions. The native static linker
      relaxes the validated RIP-relative load to a direct address after symbol resolution
      (#414, #407).
+   - Linux x86-64 [COMDAT inputs](docs/design/linux-elf-comdat-input.md) keep the first whole
+     ELF group per signature in explicit-input static links. Selection precedes startup, layout
+     and relocation. Astra reviewed the ELF validation, symbol handling and link mode boundary
+     (#422).
 4. **Optimization is designed in from the start, and delivered after correctness.** The first
    back end aims for correct, debuggable code of roughly `-O0`/`-O1` quality. The architecture
    (§4.8) is laid out from day one for optimization by search, solvers and measured cost models,

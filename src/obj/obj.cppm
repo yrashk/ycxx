@@ -151,11 +151,20 @@ struct symbol {
 
 enum class target : std::uint8_t { aarch64_macos, x86_64_linux };
 
+// An input ELF COMDAT group after relocation sections have been attached to their targets.
+struct comdat_group {
+  std::string signature;
+  std::vector<std::uint32_t> members;  // indices into object::sections
+
+  bool operator==(const comdat_group&) const = default;
+};
+
 struct object {
   std::string name;  // for diagnostics: the file name or the TU
   target arch = target::aarch64_macos;
   std::vector<section> sections;
   std::vector<symbol> symbols;
+  std::vector<comdat_group> comdat_groups;
 
   std::uint32_t add_section(section s) {
     sections.push_back(std::move(s));

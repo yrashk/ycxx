@@ -25,8 +25,11 @@ using static_operand = std::variant<std::reference_wrapper<const obj::object>, s
 // to outstanding nonweak references. The returned objects are ready for startup and layout.
 std::expected<std::vector<obj::object>, std::string> select_archive_members(std::span<const static_operand> operands);
 
+// Remove duplicate COMDAT groups before examining startup symbols and assigning addresses.
+std::expected<void, std::string> select_comdat_groups(std::span<obj::object> objects, bool dynamic);
+
 // Link in-memory x86-64 Linux objects. The caller supplies the entry definition in code and
-// handles process startup and exit. Standard sections support ABS64, PC32 and PLT32
+// handles process startup and exit, after selecting any COMDAT groups. Standard sections support ABS64, PC32 and PLT32
 // relocations. Static links also relax canonical REX_GOTPCRELX address loads.
 // The ET_EXEC image has load segments and a non-executable stack.
 // It has no section table. `entry` names a nonlocal symbol. Dynamic links support direct calls
@@ -337,6 +340,7 @@ std::expected<std::vector<obj::object>, std::string> select_archive_members(std:
   std::set<std::string_view, std::less<>> outstanding;
   const auto include = [&](obj::object object, const auto& offer) -> std::expected<void, std::string> {
     if (object.arch != obj::target::x86_64_linux) return object_error(object, "expected an x86-64 Linux object");
+    if (!object.comdat_groups.empty()) return object_error(object, "ELF COMDAT groups are unsupported in archive links");
     const auto& o = objects.emplace_back(std::move(object));
     if (auto registered = register_symbols(o, objects.size() - 1, globals); !registered) return registered;
     for (const auto& s : o.symbols) {
@@ -389,6 +393,77 @@ std::expected<std::vector<obj::object>, std::string> select_archive_members(std:
   return std::vector<obj::object>(std::make_move_iterator(objects.begin()), std::make_move_iterator(objects.end()));
 }
 
+std::expected<void, std::string> select_comdat_groups(std::span<obj::object> objects, bool dynamic) {
+  std::set<std::string_view> signatures;
+  for (auto& o : objects) {
+    if (o.comdat_groups.empty()) continue;
+    if (dynamic) return object_error(o, "ELF COMDAT groups are unsupported in dynamic links");
+
+    std::vector<std::uint8_t> omitted(o.sections.size());
+    bool any_omitted = false;
+    for (const auto& group : o.comdat_groups) {
+      const bool duplicate = !signatures.insert(group.signature).second;
+      for (const auto section : group.members) {
+        if (section >= omitted.size()) return object_error(o, "invalid ELF COMDAT member index");
+        omitted[section] = duplicate;
+      }
+      any_omitted |= duplicate;
+    }
+    if (!any_omitted) continue;
+
+    constexpr std::uint8_t live_use = 1, omitted_use = 2;
+    std::vector<std::uint8_t> uses(o.symbols.size());
+    for (std::size_t si = 0; si < o.sections.size(); ++si) {
+      const auto& s = o.sections[si];
+      for (const auto& r : s.relocs) {
+        if (r.symbol >= uses.size()) return section_error(o, s, "invalid ELF relocation symbol index");
+        uses[r.symbol] |= omitted[si] ? omitted_use : live_use;
+      }
+    }
+
+    std::vector<std::uint32_t> section_indices(o.sections.size());
+    std::vector<obj::section> sections;
+    sections.reserve(o.sections.size());
+    for (std::size_t si = 0; si < o.sections.size(); ++si) {
+      if (omitted[si]) continue;
+      section_indices[si] = static_cast<std::uint32_t>(sections.size());
+      sections.push_back(std::move(o.sections[si]));
+    }
+
+    std::vector<std::optional<std::uint32_t>> symbol_indices(o.symbols.size());
+    std::vector<obj::symbol> symbols;
+    symbols.reserve(o.symbols.size());
+    for (std::size_t si = 0; si < o.symbols.size(); ++si) {
+      auto& s = o.symbols[si];
+      if (s.section) {
+        if (*s.section >= omitted.size()) return object_error(o, std::format("symbol '{}' is outside its section", s.name));
+        if (omitted[*s.section]) {
+          if ((uses[si] & live_use) == 0) continue;
+          if (s.bind == binding::local)
+            return object_error(o, "ELF relocation references a local symbol in a discarded group");
+          s.section.reset();
+          s.offset = 0;
+          s.function_size.reset();
+        } else {
+          s.section = section_indices[*s.section];
+        }
+      } else if (uses[si] == omitted_use) {
+        // This final link needs no definition for a reference that only discarded bytes used.
+        continue;
+      }
+      symbol_indices[si] = static_cast<std::uint32_t>(symbols.size());
+      symbols.push_back(std::move(s));
+    }
+    for (auto& s : sections)
+      for (auto& r : s.relocs) r.symbol = *symbol_indices[r.symbol];
+    o.sections = std::move(sections);
+    o.symbols = std::move(symbols);
+  }
+  // The signature registry refers to the input objects until selection is complete.
+  for (auto& o : objects) o.comdat_groups.clear();
+  return {};
+}
+
 std::expected<bytes, std::string> link(std::span<const obj::object> objects, std::string_view entry,
                                      const dynamic_options* dynamic) {
   if (dynamic) {
@@ -409,6 +484,7 @@ std::expected<bytes, std::string> link(std::span<const obj::object> objects, std
   for (std::size_t oi = 0; oi < objects.size(); ++oi) {
     const auto& o = objects[oi];
     if (o.arch != obj::target::x86_64_linux) return object_error(o, "expected an x86-64 Linux object");
+    if (!o.comdat_groups.empty()) return object_error(o, "select ELF COMDAT groups before layout");
     for (std::size_t si = 0; si < o.sections.size(); ++si) {
       const auto& s = o.sections[si];
       const auto kind = std::ranges::find_if(section_kinds, [&](const section_kind& k) {

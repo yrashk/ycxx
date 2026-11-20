@@ -294,7 +294,14 @@ std::expected<std::vector<std::uint8_t>, std::vector<link::error>> link_executab
       return std::unexpected(std::vector<link::error>{{
           std::format("{}: cannot mix arm64 Mach-O and x86-64 Linux objects", object.name)}});
   }
-  if (target == obj::target::x86_64_linux) return link_linux_executable(objects, dynamic);
+  if (target == obj::target::x86_64_linux) {
+    if (std::ranges::none_of(objects, [](const obj::object& o) { return !o.comdat_groups.empty(); }))
+      return link_linux_executable(objects, dynamic);
+    std::vector<obj::object> selected(objects.begin(), objects.end());
+    if (auto selection = link::elf::select_comdat_groups(selected, dynamic != nullptr); !selection)
+      return std::unexpected(std::vector<link::error>{{std::move(selection.error())}});
+    return link_linux_executable(selected, dynamic);
+  }
   if (dynamic) return std::unexpected(std::vector<link::error>{{"dynamic ELF options require x86-64 Linux objects"}});
 
   link::options opts;
@@ -375,6 +382,10 @@ engine::query_task<Linked> Link::run(engine::Ctx& cx, ProgramId p) {
     objects.reserve(in.tus.size() + in.objects.size());
     for (const TuValue& t : tus) objects.push_back(*t.object);
     objects.append_range(in.objects);
+  }
+  if (auto selection = link::elf::select_comdat_groups(objects, in.dynamic.has_value()); !selection) {
+    out.errors.push_back(std::move(selection.error()));
+    co_return out;
   }
   auto image = link_executable(objects, in.identifier, in.dynamic ? &*in.dynamic : nullptr);
   if (!image) {

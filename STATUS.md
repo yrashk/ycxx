@@ -597,6 +597,11 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   accepts the supported x86-64 `ET_REL` subset emitted by ycxx. The native ELF linker consumes
   the same in-memory objects, resolves absolute and PC-relative relocations, and writes a static
   `ET_EXEC` image with load segments and a non-executable stack.
+- Explicit native static links keep the first input ELF COMDAT group for each signature. The reader
+  validates group membership, including relocation sections, and selection precedes startup and
+  layout. `unit.linux_elf_comdat` checks whole-group selection, retained references, startup and
+  same-path daemon changes to the signature. COMDAT emission, archive and dynamic linking stay in
+  [#422](https://github.com/yrashk/ycxx/issues/422). [Design](docs/design/linux-elf-comdat-input.md)
 - ELF function definitions carry `STT_FUNC` and their emitted code size. The reader retains
   both for supported system relocatables and accepts zero as an unknown size. A function must
   start inside executable code, and its declared extent must fit in its section. The object
@@ -623,7 +628,7 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   definitions when their initial values need no relocations. This includes explicitly inline
   full variable-template specializations with builtin type arguments. Static addresses and
   writes in multiple units resolve to the same object. The two-unit `<cstddef>` probe links
-  through the pinned GNU `libycxx.a`. Group selection and dynamic inline initialization remain
+  through the pinned GNU `libycxx.a`. Group emission and dynamic inline initialization remain
   tracked separately. [Design](docs/design/linux-inline-variables.md)
   · [#432](https://github.com/yrashk/ycxx/issues/432) · [#422](https://github.com/yrashk/ycxx/issues/422)
   · [#368](https://github.com/yrashk/ycxx/issues/368)

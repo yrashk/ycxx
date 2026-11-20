@@ -12,7 +12,7 @@ std::expected<std::vector<std::uint8_t>, std::string> write_object(const object&
 
 // Read the x86-64 ELF64 relocatable subset emitted by write_object and the GNU forms
 // used by libycxx's static linkage marker. Preserve defined function types and sizes.
-// Retained sections and symbols keep file order.
+// Retained sections and symbols keep file order. Preserve COMDAT signatures and member sections.
 std::expected<object, std::string> read_object(std::span<const std::uint8_t> file, std::string name);
 
 }  // namespace ycxx::obj::elf
@@ -25,9 +25,9 @@ constexpr std::uint16_t shn_abs = 0xfff1;
 constexpr std::uint16_t header_size = 64, section_header_size = 64;
 constexpr std::uint64_t symbol_size = 24, rela_size = 24;
 constexpr std::uint32_t sht_progbits = 1, sht_symtab = 2, sht_strtab = 3, sht_rela = 4, sht_nobits = 8;
-constexpr std::uint32_t sht_init_array = 14;
+constexpr std::uint32_t sht_init_array = 14, sht_group = 17, grp_comdat = 1;
 constexpr std::uint64_t shf_write = 1, shf_alloc = 2, shf_execinstr = 4, shf_info_link = 0x40;
-constexpr std::uint64_t shf_merge = 0x10, shf_strings = 0x20;
+constexpr std::uint64_t shf_merge = 0x10, shf_strings = 0x20, shf_group = 0x200;
 constexpr std::uint8_t stt_notype = 0, stt_object = 1, stt_func = 2, stt_section = 3, stt_file = 4;
 constexpr std::uint8_t stb_local = 0, stb_global = 1, stb_weak = 2;
 constexpr std::uint8_t stv_default = 0, stv_hidden = 2;
@@ -169,6 +169,7 @@ std::expected<bytes, std::string> write_object(const object& o) {
     return std::unexpected(std::format("{}: {}", o.name.empty() ? "ELF object" : o.name, reason));
   };
   if (o.arch != target::x86_64_linux) return fail("expected an x86-64 Linux object");
+  if (!o.comdat_groups.empty()) return fail("ELF COMDAT group emission is unsupported");
 
   // The null section, .note.GNU-stack, .symtab, .strtab and .shstrtab are always present.
   const std::size_t count = 5 + o.sections.size() + std::ranges::count_if(o.sections, [](const section& s) {
@@ -356,15 +357,56 @@ std::expected<object, std::string> read_object(std::span<const std::uint8_t> fil
     return fail("invalid ELF symbol name string table");
   const auto names = string_data(contents(names_header));
   const auto symbol_names = string_data(contents(headers[symtab.link]));
+  const auto symbol_count = symtab.size / symbol_size;
+  if (symtab.flags != 0 || symtab.entsize != symbol_size || symtab.size % symbol_size != 0 ||
+      symbol_count == 0 || symbol_count > std::numeric_limits<std::uint32_t>::max() ||
+      symtab.info == 0 || symtab.info > symbol_count)
+    return fail("invalid ELF symbol table");
+  const auto symbol_table = contents(symtab);
+  if (!all_zero(symbol_table.first(symbol_size))) return fail("invalid null ELF symbol");
 
   object o;
   o.arch = target::x86_64_linux;
+  // Keep section-header identities until group flags and the relocation domain are validated.
+  std::vector<std::uint32_t> group_owners(shnum);
+  std::vector<bool> signature_symbols(symbol_count);
+  auto signature_name_bytes = symbol_names.size();
+  for (std::uint32_t i = 1; i < shnum; ++i) {
+    const auto& h = headers[i];
+    if (h.type != sht_group) continue;
+    if (h.flags != 0 || h.link != symtab_index || h.entsize != 4 || h.size < 8 || h.size % 4 != 0 ||
+        (h.align != 0 && h.offset % h.align != 0))
+      return fail(std::format("invalid ELF group section {}", i));
+    if (h.info == 0 || h.info >= symbol_count) return fail(std::format("invalid ELF group signature index in section {}", i));
+    const auto name_index = load<std::uint32_t>(symbol_table, symbol_size * h.info);
+    if (name_index >= symbol_names.size() || symbol_names[name_index] == '\0')
+      return fail(std::format("invalid ELF group signature name in section {}", i));
+    const auto signature = name_at(symbol_names, name_index);
+    if (signature.size() > signature_name_bytes) return fail("ELF group signatures exceed the string table size");
+    signature_name_bytes -= signature.size();
+    signature_symbols[h.info] = true;
+    const auto words = contents(h);
+    if (load<std::uint32_t>(words, 0) != grp_comdat) return fail(std::format("unsupported ELF group flags in section {}", i));
+    o.comdat_groups.push_back({std::string(signature), {}});
+    for (std::size_t offset = 4; offset < words.size(); offset += 4) {
+      const auto member = load<std::uint32_t>(words, offset);
+      if (member <= i || member >= shnum || (headers[member].flags & shf_group) == 0 || group_owners[member] != 0)
+        return fail(std::format("invalid ELF group member {} in section {}", member, i));
+      const auto type = headers[member].type;
+      if (type != sht_progbits && type != sht_nobits && type != sht_init_array && type != sht_rela)
+        return fail(std::format("unsupported ELF group member type in section {}", member));
+      group_owners[member] = static_cast<std::uint32_t>(o.comdat_groups.size());
+    }
+  }
   std::vector<std::optional<std::uint32_t>> sections(shnum);
   std::vector<bool> debug_sections(shnum);
   for (std::uint32_t i = 1; i < shnum; ++i) {
     const auto& h = headers[i];
     if (h.name >= names.size()) return fail(std::format("invalid name for ELF section {}", i));
-    if (i == shstrndx || i == symtab_index || i == symtab.link || h.type == sht_rela) continue;
+    const auto owner = group_owners[i];
+    if ((h.flags & shf_group) != 0 && owner == 0)
+      return fail(std::format("ELF section {} has SHF_GROUP without a group", i));
+    if (i == shstrndx || i == symtab_index || i == symtab.link || h.type == sht_rela || h.type == sht_group) continue;
     const auto section_name = name_at(names, h.name);
     if (section_name == ".note.GNU-stack" && h.type == sht_progbits && h.flags == 0 &&
         h.size == 0 && h.link == 0 && h.info == 0 && h.entsize == 0) continue;
@@ -373,8 +415,12 @@ std::expected<object, std::string> read_object(std::span<const std::uint8_t> fil
       continue;
     }
     const auto canonical_name = section_name == ".data.rel.ro.local" ? ".data.rel.ro" : section_name;
-    const auto mapping = std::ranges::find(standard_sections, canonical_name, &section_mapping::name);
-    if (mapping == standard_sections.end() || h.type != mapping->type || h.flags != mapping->flags ||
+    const auto mapping = std::ranges::find_if(standard_sections, [&](const section_mapping& candidate) {
+      return canonical_name == candidate.name ||
+             (owner != 0 && candidate.type != sht_init_array && canonical_name.starts_with(candidate.name) &&
+              canonical_name.size() > candidate.name.size() + 1 && canonical_name[candidate.name.size()] == '.');
+    });
+    if (mapping == standard_sections.end() || h.type != mapping->type || (h.flags & ~shf_group) != mapping->flags ||
         h.link != 0 || h.info != 0 || (h.entsize != 0 && !(h.type == sht_init_array && h.entsize == 8)))
       return fail(std::format("unsupported ELF section '{}'", section_name));
     if (h.type == sht_init_array && (h.align != 8 || h.size % 8 != 0))
@@ -384,19 +430,16 @@ std::expected<object, std::string> read_object(std::span<const std::uint8_t> fil
     if (h.type == sht_nobits) s.zerofill_size = h.size;
     else s.emit(contents(h));
     sections[i] = o.add_section(std::move(s));
+    if (owner != 0) o.comdat_groups[owner - 1].members.push_back(*sections[i]);
   }
 
-  const auto symbol_count = symtab.size / symbol_size;
-  if (symtab.flags != 0 || symtab.entsize != symbol_size || symtab.size % symbol_size != 0 ||
-      symbol_count == 0 || symbol_count > std::numeric_limits<std::uint32_t>::max() ||
-      symtab.info == 0 || symtab.info > symbol_count)
-    return fail("invalid ELF symbol table");
-  const auto symbol_table = contents(symtab);
-  if (!all_zero(symbol_table.first(symbol_size))) return fail("invalid null ELF symbol");
+  for (const auto& group : o.comdat_groups)
+    if (group.members.empty()) return fail(std::format("ELF COMDAT group '{}' has no content sections", group.signature));
   o.symbols.reserve(symbol_count - 1);
   struct input_symbol {
     std::optional<std::uint32_t> retained;
     bool debug = false;
+    std::uint32_t local_group = 0;
   };
   std::vector<input_symbol> symbols(symbol_count);
   // The writer stores each name separately. Bound copying even if input names share suffixes.
@@ -422,6 +465,9 @@ std::expected<object, std::string> read_object(std::span<const std::uint8_t> fil
         return fail(std::format("invalid ELF file symbol {}", i));
       continue;
     }
+    // A local name can serve only as the signature, without denoting allocatable bytes.
+    if (signature_symbols[i] && local && type == stt_notype && value == 0 &&
+        (index == shn_abs || (index < shnum && headers[index].type == sht_group))) continue;
     if (type == stt_section) {
       if (!local || name_index != 0 || index == 0 || value != 0)
         return fail(std::format("invalid ELF section symbol {}", i));
@@ -447,15 +493,21 @@ std::expected<object, std::string> read_object(std::span<const std::uint8_t> fil
     const auto model_binding = local ? binding::local : visibility == stv_hidden ? binding::hidden : binding::global;
     symbols[i].retained = o.add_symbol({std::string(symbol_name), model_binding, sections[index], value, bind == stb_weak,
                                        function_size});
+    if (local) symbols[i].local_group = group_owners[index];
   }
 
   std::vector<bool> has_relocations(shnum);
   for (std::uint32_t i = 1; i < shnum; ++i) {
     const auto& h = headers[i];
     if (h.type != sht_rela) continue;
-    if (h.flags != shf_info_link || h.link != symtab_index || h.info >= shnum ||
+    const auto flags = h.flags & ~shf_group;
+    // SHT_RELA specifies the target in sh_info even if a grouped entry omits SHF_INFO_LINK.
+    const bool valid_flags = flags == shf_info_link || (group_owners[i] != 0 && flags == 0);
+    if (!valid_flags || h.link != symtab_index || h.info >= shnum ||
         (!sections[h.info] && !debug_sections[h.info]) || h.entsize != rela_size || h.size % rela_size != 0)
       return fail(std::format("invalid ELF relocation section {}", i));
+    if (group_owners[i] != group_owners[h.info])
+      return fail(std::format("ELF relocation section {} and its target have different groups", i));
     if (has_relocations[h.info]) return fail("multiple ELF relocation sections for one target section are unsupported");
     has_relocations[h.info] = true;
     const bool debug = debug_sections[h.info];
@@ -473,6 +525,8 @@ std::expected<object, std::string> read_object(std::span<const std::uint8_t> fil
         return fail(std::format("unsupported x86-64 relocation type {}", type));
       if (symbol >= symbol_count || (!symbols[symbol].retained && !(debug && symbols[symbol].debug)))
         return fail("invalid ELF relocation symbol");
+      if (symbols[symbol].local_group != 0 && symbols[symbol].local_group != group_owners[i])
+        return fail(std::format("ELF relocation section {} references a local symbol in a different group", i));
       if (site > std::numeric_limits<std::uint32_t>::max()) return fail("ELF relocation offset exceeds 32 bits");
       const auto width = mapping == relocations.end() ? 4u : mapping->width;
       if (site > target_header.size || width > target_header.size - site)

@@ -550,7 +550,7 @@ std = 'C++98'
 core = true
 status = 'partial'
 issues = [124, 193, 422]
-note = 'x86-64 ELF weak definitions for ordinary external inline functions. ELF groups, Mach-O weak definitions and internal-linkage mangling remain'
+note = 'x86-64 ELF weak definitions for ordinary external inline functions and COMDAT input selection in explicit static links. COMDAT emission, grouped archive and dynamic links, Mach-O weak definitions and internal-linkage mangling remain'
 
 [[feature]]
 id = 'basic-inline-vars'
