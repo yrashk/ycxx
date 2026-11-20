@@ -698,6 +698,11 @@ struct ClassRec {
   // whether it is then not trivial (user-provided, or implicit and a member's move is not).
   bool move_usable = false;
   bool move_nontrivial = false;
+  bool copy_nontrivial() const {
+    return copy_ctor != EntityId::none || defaulted_copy == CopyState::nontrivial ||
+           defaulted_copy == CopyState::unsupported;
+  }
+
   // Nested enumerations and type aliases ([class.mem]): their types by name, with their entities;
   // the unscoped enumerations' enumerators are members of the class.
   std::vector<NestedType> types;
@@ -706,11 +711,6 @@ struct ClassRec {
   std::vector<std::pair<EntityId, ast::Access>> access;
   // Its friends ([class.friend]): functions and classes, by entity.
   std::vector<EntityId> friends;
-
-  bool copy_nontrivial() const {
-    return copy_ctor != EntityId::none || defaulted_copy == CopyState::nontrivial ||
-           defaulted_copy == CopyState::unsupported;
-  }
 
   ast::Access access_of(EntityId e) const {
     for (const auto& [m, a] : access)

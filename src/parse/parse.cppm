@@ -735,7 +735,6 @@ public:
   // Its body, analysed on first use.
   const ast::BodySema& synthesized_body(std::size_t i);
   void special_members(u32 item, EntityId cls, sema::ClassRec& rec);
-  void defaulted_copy(EntityId cls, sema::ClassRec& rec, std::span<const QualType> subobjects, bool implicit);
   Ex copy_from(sema::Sema& sm, Ex src, QualType t);
 
   // The type of `this` in a non-static member function ([expr.prim.this]): a pointer to its class,
@@ -1033,6 +1032,7 @@ private:
   // item of this unit (#156).
   std::map<u32, DeclId> member_decls_;
   sema::Classes classes_{w_->ins, w_->types};  // this unit's class and enumeration records (#115)
+  void defaulted_copy(EntityId cls, sema::ClassRec& rec, std::span<const QualType> subobjects, bool implicit);
   // The enumeration whose enumerator list is being analysed, and its record so far.
   std::pair<EntityId, const sema::EnumRec*> defining_enum_{EntityId::none, nullptr};
   // What each namespace-scope using-declaration introduces, by (item, name ordinal): the

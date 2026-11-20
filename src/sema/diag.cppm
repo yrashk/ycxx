@@ -229,6 +229,8 @@ enum class Diag : std::uint32_t {
   no_viable_constructor [[=message{Severity::error, "no matching constructor for '{0:t}'"}]],
   ambiguous_constructor [[=message{Severity::error, "constructing '{0:t}' is ambiguous"}]],
   deleted_constructor [[=message{Severity::error, "constructing '{0:t}' calls a deleted constructor"}]],
+  defaulted_copy_declaration [[=message{Severity::error, "only an ordinary in-class copy constructor taking C& or const C& can be explicitly defaulted here"}]],
+  defaulted_copy_unsupported [[=message{Severity::error, "defaulted copy construction of '{0:t}' is not supported for this class"}]],
   reference_uninitialized [[=message{Severity::error, "a reference must be initialized"}]],
   bind_to_lvalue [[=message{Severity::error, "an rvalue reference to '{0:t}' cannot bind to an lvalue"}]],
   bind_to_rvalue [[=message{Severity::error, "a non-const lvalue reference to '{0:t}' cannot bind to a temporary"}]],
@@ -288,8 +290,6 @@ enum class Diag : std::uint32_t {
   va_start_context [[=message{Severity::error, "va_start requires an enclosing variadic function"}]],
   va_list_operand [[=message{Severity::error, "expected a mutable va_list cursor, got '{0:t}'"}]],
   va_arg_type [[=message{Severity::error, "va_arg type '{0:t}' is outside the supported x86-64 System V integer and pointer subset"}]],
-  defaulted_copy_declaration [[=message{Severity::error, "only an ordinary in-class copy constructor taking C& or const C& can be explicitly defaulted here"}]],
-  defaulted_copy_unsupported [[=message{Severity::error, "defaulted copy construction of '{0:t}' is not supported for this class"}]],
 };
 
 // A `{N:r}` argument: why an evaluation was not constant. 0 is an expression the front end
