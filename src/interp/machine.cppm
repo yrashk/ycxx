@@ -104,6 +104,7 @@ struct Result {
   ConstId literal{};         // address within a string literal object
   std::vector<PathStep> path;
   bool past = false;
+  bool past_constexpr_subarray = false;
   i64 offset = 0;            // address: in bytes from the start of the object
   bool operator==(const Result&) const = default;
 };
@@ -633,7 +634,9 @@ Machine::Flow Machine::global_object(EntityId e, u32& out) {
   if (!info->second) return fail(Reason::ill_formed);
   const GlobalVar g = *info->second;
   const Shape s = shape(g.type);
-  if (s.leaves == 0 || s.leaves > std::numeric_limits<u32>::max() - cells_.size())
+  constexpr u64 max_cells = std::numeric_limits<u32>::max();
+  if (s.leaves == 0 || s.leaves > max_cells || cells_.size() > max_cells - s.leaves ||
+      (g.value && s.kind != Kind::array && s.leaves != 1))
     return fail(Reason::unsupported_constant);
   u32 o = make_object(g.type, Origin::global);
   Object& ob = objects_[o];
@@ -643,9 +646,7 @@ Machine::Flow Machine::global_object(EntityId e, u32& out) {
   if (g.value && s.kind == Kind::array) {
     if (!fill_array_constant(g.type, ob.cell0, *g.value)) return fail(Reason::unsupported_constant);
   } else if (g.value) {
-    cells_[ob.cell0].life = Life::alive;
-    cells_[ob.cell0].fill = Fill::constant;
-    cells_[ob.cell0].v = {VKind::none, false, 0, std::to_underlying(*g.value)};
+    cells_[ob.cell0] = {Life::alive, Fill::constant, {VKind::none, false, 0, std::to_underlying(*g.value)}};
   } else {
     for (u32 c = ob.cell0; c < ob.cell0 + ob.ncells; ++c) cells_[c].life = Life::alive;
     if (config_.mode == Mode::runtime || !g.usable)
@@ -1062,6 +1063,7 @@ std::vector<Result> Machine::results() const {
     case VKind::null: r.kind = Result::Kind::null; break;
     case VKind::function: r.kind = Result::Kind::function; r.entity = EntityId(v.ref); break;
     case VKind::object: {
+      Machine& m = *const_cast<Machine*>(this);
       const Object& ob = objects_[v.ref];
       r.kind = Result::Kind::address;
       r.base = ob.origin == Origin::global ? Base::global : ob.origin == Origin::literal ? Base::literal : Base::local;
@@ -1069,7 +1071,10 @@ std::vector<Result> Machine::results() const {
       r.literal = ob.literal;
       r.path = steps_of(u32(v.bits));
       r.past = v.past;
-      r.offset = const_cast<Machine*>(this)->offset_of(v);
+      r.offset = m.offset_of(v);
+      bool past = false;
+      if (r.base == Base::global && ob.usable && r.path.size() > 1 && m.resolve(v, {}, past))
+        r.past_constexpr_subarray = past;
       break;
     }
     }

@@ -136,8 +136,12 @@ private:
     const interp::Result& value = out.values[0];
     if (reference_initializer && value.kind == interp::Result::Kind::null)
       return {std::nullopt, reason_arg({interp::Reason::null_access, 0, {}})};
-    if (reference_initializer && value.past)
+    if (reference_initializer && (value.past || value.past_constexpr_subarray))
       return {std::nullopt, reason_arg({interp::Reason::past_end_access, 0, {}})};
+    // A typed address is stored as a byte offset. One past a nested array can share an offset
+    // with the first element of the next array, which it cannot designate ([basic.compound]).
+    if (value.past_constexpr_subarray && !s_->types().is_void(s_->types().pointee(value.type)))
+      return {std::nullopt, reason_arg({interp::Reason::unsupported_constant, 0, {}})};
     return constant(value);
   }
 
