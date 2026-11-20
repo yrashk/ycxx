@@ -137,7 +137,7 @@ bool defines_global(const obj::symbol& symbol) {
 
 bool defines_symbol(const obj::object& object, std::string_view name) {
   return std::ranges::any_of(object.symbols, [&](const obj::symbol& symbol) {
-    return defines_global(symbol) && symbol.name == name;
+    return defines_global(symbol) && symbol.name_view() == name;
   });
 }
 
@@ -237,9 +237,10 @@ std::expected<std::vector<std::uint8_t>, std::vector<link::error>> link_linux_ex
     }
     for (const auto& symbol : object.symbols) {
       if (!defines_global(symbol)) continue;
-      if (symbol.name == "_start") custom_start = true;
+      const auto name = symbol.name_view();
+      if (name == "_start") custom_start = true;
       // Match the static linker's choice of the first weak definition or the strong definition.
-      if (symbol.name == "main" && (!main || (main->weak && !symbol.weak))) {
+      if (name == "main" && (!main || (main->weak && !symbol.weak))) {
         main = &symbol;
         main_object = &object;
       }
@@ -311,7 +312,7 @@ std::expected<std::vector<std::uint8_t>, std::vector<link::error>> link_executab
   const auto& sys = libsystem().exports;
   if (abi && sys && std::ranges::any_of(objects, [&](const obj::object& o) {
         return std::ranges::any_of(o.symbols, [&](const obj::symbol& s) {
-          return !s.defined() && !sys->contains(s.name) && abi->exports->contains(s.name);
+          return !s.defined() && !sys->contains(s.name_view()) && abi->exports->contains(s.name_view());
         });
       }))
     opts.dylibs.push_back(*abi);

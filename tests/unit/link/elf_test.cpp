@@ -208,7 +208,7 @@ void initializer_arrays(std::array<obj::object, 2> input) {
          ".init_array relocation has no defined target");
   const auto outside = ".init_array relocation target is outside its executable input section";
   change([](auto&, auto& b) {
-    const auto compute = std::ranges::find(b.symbols, std::string("compute"), &obj::symbol::name);
+    const auto compute = std::ranges::find(b.symbols, std::string_view("compute"), &obj::symbol::name_view);
     compute->section = 2;  // strong data definition overrides a weak text definition
   }, outside);
   change([](auto& a, auto& b) { a.sections.back().relocs.front().addend = b.sections[0].size(); }, outside);

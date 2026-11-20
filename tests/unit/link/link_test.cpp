@@ -209,13 +209,13 @@ std::string describe(const obj::object& o) {
     out += std::format("section {},{} flags={:#x} align={} size={} bytes={}\n", s.segment, s.name, s.flags, s.align_log2, s.size(),
                        s.bytes);
     for (const auto& r : s.relocs) {
-      out += std::format("  reloc {} {} {} {} {}\n", r.offset, std::to_underlying(r.kind), o.symbols[r.symbol].name, r.addend,
-                         r.minus ? o.symbols[*r.minus].name : "-");
+      out += std::format("  reloc {} {} {} {} {}\n", r.offset, std::to_underlying(r.kind), o.symbols[r.symbol].name_view(), r.addend,
+                         r.minus ? o.symbols[*r.minus].name_view() : "-");
     }
   }
   std::vector<std::string> syms;
   for (const auto& s : o.symbols) {
-    syms.push_back(std::format("symbol {} {} {} {} {}", s.name, std::to_underlying(s.bind), s.section.value_or(~0u), s.offset, s.weak));
+    syms.push_back(std::format("symbol {} {} {} {} {}", s.name_view(), std::to_underlying(s.bind), s.section.value_or(~0u), s.offset, s.weak));
   }
   std::ranges::sort(syms);
   for (const auto& s : syms) out += s + "\n";

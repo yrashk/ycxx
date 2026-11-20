@@ -117,7 +117,9 @@ link with the pinned static library. [#432](https://github.com/yrashk/ycxx/issue
 
 ycxx ELF objects record function types and code sizes. The ELF linker accepts supported
 system-assembled objects with function symbols and the GNU-built libycxx static linkage-marker
-object. [#428](https://github.com/yrashk/ycxx/issues/428), [#419](https://github.com/yrashk/ycxx/issues/419)
+object. Symbol names can share suffixes in an input string table.
+[#428](https://github.com/yrashk/ycxx/issues/428), [#419](https://github.com/yrashk/ycxx/issues/419),
+[#484](https://github.com/yrashk/ycxx/issues/484)
 
 Both targets support cooked integer user-defined literals through namespace-scope literal
 operators with an `unsigned long long` parameter, including constant evaluation.

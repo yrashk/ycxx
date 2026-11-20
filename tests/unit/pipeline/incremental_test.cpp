@@ -443,7 +443,7 @@ int main() {
   check(result.object.has_value(), pl::Tu::errors(result));
   if (!result.object) return;
   auto bytes_of = [](const auto& obj, std::string_view name) -> std::span<const std::uint8_t> {
-    auto sym = std::ranges::find(obj.symbols, name, &ycxx::obj::symbol::name);
+    auto sym = std::ranges::find(obj.symbols, name, &ycxx::obj::symbol::name_view);
     if (sym == obj.symbols.end() || !sym->section) return {};
     return std::span(obj.sections[*sym->section].bytes).subspan(sym->offset);
   };
@@ -505,8 +505,8 @@ int main() {
     if (!result.object) continue;
     const char* first = swapped ? "__Z10spare_typePN5StateUt_E" : "__Z10value_typePN5StateUt_E";
     const char* second = swapped ? "__Z10value_typePN5StateUt0_E" : "__Z10spare_typePN5StateUt0_E";
-    check(std::ranges::contains(result.object->symbols, first, &ycxx::obj::symbol::name) &&
-              std::ranges::contains(result.object->symbols, second, &ycxx::obj::symbol::name),
+    check(std::ranges::contains(result.object->symbols, std::string_view(first), &ycxx::obj::symbol::name_view) &&
+              std::ranges::contains(result.object->symbols, std::string_view(second), &ycxx::obj::symbol::name_view),
           "unnamed sibling union types mangle in lexical order");
     const pl::Linked& l = s.get<pl::Link>(program);
     check(l.errors.empty() && l.image == cold(text), "after changing union order, incremental equals cold");

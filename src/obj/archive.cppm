@@ -158,7 +158,7 @@ namespace {
 struct indexed_member {
   std::string field;
   std::string_view data;
-  std::vector<std::string> symbols;
+  std::vector<symbol_name> symbols;
   std::uint32_t offset = 0;
 };
 
@@ -221,15 +221,16 @@ std::expected<std::string, std::string> write(std::span<const member_input> inpu
       return std::unexpected(std::format("{}: ELF COMDAT groups are unsupported in native archive production", input.path));
     for (auto& symbol : object->symbols) {
       if (symbol.bind == binding::local) continue;
-      if (symbol.name.empty())
+      const auto name_size = symbol.name_view().size();
+      if (name_size == 0)
         return std::unexpected(std::format("{}: empty name for nonlocal ELF symbol", input.path));
       if (!symbol.defined()) continue;
       constexpr auto overhead = word_size + 1;  // offset and name terminator
       const auto remaining = max_member_size - index_size;
-      if (count == max_index_word || remaining < overhead || symbol.name.size() > remaining - overhead)
+      if (count == max_index_word || remaining < overhead || name_size > remaining - overhead)
         return std::unexpected("archive symbol index exceeds the GNU 32-bit index format");
       ++count;
-      index_size += overhead + symbol.name.size();
+      index_size += overhead + name_size;
       member.symbols.push_back(std::move(symbol.name));
     }
     members.push_back(std::move(member));
@@ -254,7 +255,7 @@ std::expected<std::string, std::string> write(std::span<const member_input> inpu
   for (const auto& member : members)
     for (std::size_t i = 0; i < member.symbols.size(); ++i) append_word(result, member.offset);
   for (const auto& member : members)
-    for (const auto& symbol : member.symbols) result.append(symbol).push_back('\0');
+    for (const auto& symbol : member.symbols) result.append(symbol.view()).push_back('\0');
   align_member(result, index_size);
   if (!long_names.empty()) append_member(result, "//", long_names, "0");
   for (const auto& member : members) append_member(result, member.field, member.data, "644");
