@@ -104,7 +104,7 @@ public:
   virtual bool is_complete(EntityId c) = 0;
   // Whether a class's defining declarations use the natural layout we can compute.
   virtual bool natural_record_layout(EntityId) { return false; }
-  virtual std::set<EntityId> uncertain_record_layouts() { return {}; }
+  virtual std::set<EntityId> uncertain_object_layouts() { return {}; }
   // Inside the enumerator list of an enumeration this unit is defining: its record so far, which
   // is published only after the list (#156).
   virtual const EnumRec* defining_enum(EntityId) { return nullptr; }
@@ -5120,7 +5120,7 @@ public:
       diag(name_at, Diag::offsetof_bit_field);
       return fail;
     }
-    const auto uncertain = q_->uncertain_record_layouts();
+    const auto uncertain = q_->uncertain_object_layouts();
     std::set<EntityId> checked;
     auto ordinary = [&](this const auto& self, EntityId c) -> bool {
       if (!checked.insert(c).second) return true;
@@ -5130,7 +5130,8 @@ public:
         QualType field = f.type;
         while (types().is_array(field)) field = types().rec(field).inner;
         return r->access_of(f.entity) == r->access_of(r->fields.front().entity) && !types().is_reference(field) &&
-               (!types().is_class(field) || self(types().class_of(field)));
+               (!types().is_class(field) || self(types().class_of(field))) &&
+               (!types().is_enum(field) || !uncertain.contains(types().enum_of(field)));
       });
     };
     auto layout = ordinary(cls) ? class_layout(cls) : std::nullopt;

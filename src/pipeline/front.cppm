@@ -611,7 +611,7 @@ engine::query_task<FrontResult> TuFront::run(engine::Ctx& cx, TuId tu) {
   // The unit's own records of its classes and enumerations (#115).
   const sema::Classes& classes = program.classes();
   const auto uncertain = unit_source.config.target->triple == ast::x86_64_linux.triple
-      ? program.uncertain_record_layouts()
+      ? program.uncertain_object_layouts()
       : std::set<EntityId>{};
   for (EntityId c : classes.classes()) {
     ClassShape& shape = out.shapes.classes.emplace_back(ClassShape{c, {}, {}});
