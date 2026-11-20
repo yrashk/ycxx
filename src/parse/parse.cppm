@@ -2995,6 +2995,11 @@ private:
       ps_.expect(Tk::semi);
       return;
     }
+    if (cls != EntityId::none) {
+      s_.diag(ps_.pos(), Diag::not_supported, ps_.kind());  // declarators after a nested enum definition
+      ps_.skip_to_semi();
+      return bad();
+    }
     DeclSpec spec;
     spec.begin = at;
     spec.type = t;
@@ -3002,7 +3007,7 @@ private:
     spec.is_typedef = td;
     do {
       parse::Declarator d = ps_.declarator(spec.type, false, spec.is_typedef);
-      if (!d.ok || !d.named || cls != EntityId::none || !declare(spec, d, LangLinkage::cxx, false, false)) {
+      if (!d.ok || !d.named || !declare(spec, d, LangLinkage::cxx, false, false)) {
         bad();
         ps_.skip_to_semi();
         return;
