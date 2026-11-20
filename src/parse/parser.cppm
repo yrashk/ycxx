@@ -835,9 +835,11 @@ public:
       case Tk::l_square: closing.push_back(Tk::r_square); break;
       case Tk::l_paren: closing.push_back(Tk::r_paren); break;
       case Tk::l_brace: closing.push_back(Tk::r_brace); break;
+      case Tk::l_splice: closing.push_back(Tk::r_splice); break;
       case Tk::r_square:
       case Tk::r_paren:
       case Tk::r_brace:
+      case Tk::r_splice:
         if (closing.empty()) {
           s_->diag(pos() + offset, Diag::unexpected_token, token);
           return false;
