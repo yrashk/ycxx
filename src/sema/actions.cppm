@@ -1312,7 +1312,7 @@ public:
     }
     // A reference from one element ([dcl.init.list]/3.10).
     if (types().is_reference(t) && b.clauses.size() == 1 && !b.clauses[0].list && !b.clauses[0].designated)
-      return bind_reference(b.clauses[0].expr, t, b.clauses[0].begin);
+      return list_element(t, b.clauses[0].expr);
     if (is_aggregate(t)) {
       std::size_t next = 0;
       Ex r = aggregate(t, b, next, b.begin, b.end);
@@ -1439,8 +1439,9 @@ public:
     if (!e.ok() || address_set(e)) return convert(e, t, e.begin);
     Ex from = rvalue(e);
     Ex r = convert(e, t, e.begin);
-    if (r.ok() && narrows(from, t)) {
-      diag(e.begin, Diag::narrowing, from.type(), Types::unqualified(t));
+    QualType target = types().is_reference(t) ? types().referee(t) : t;
+    if (r.ok() && narrows(from, target)) {
+      diag(e.begin, Diag::narrowing, from.type(), Types::unqualified(target));
       return {NodeId::none, e.begin, e.end};
     }
     return r;
