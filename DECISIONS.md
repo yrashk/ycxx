@@ -364,6 +364,8 @@ specified by the accepted [optimization design](docs/design/optimization.md) (#3
    - **Implicit copy assignment** of ordinary class members uses member overload selection and
      a synthesized body when required. The AST preserves operand order and carries the proof
      for trivial class copies. Astra reviewed the [assignment design](docs/design/implicit-copy-assignment.md) (#360).
+     The same signature classifier supplies the effects of user-declared assignment on
+     implicit constructors and call triviality (#244).
    - **Identities.** `DeclId = (ItemId, ordinal)` for written, synthesized and injected
      declarations, none inside bodies; structural `EntityId`s that include module attachment and
      trailing requires-clauses, with local entities numbered as the Itanium ABI does. *Reason:*
