@@ -1023,6 +1023,8 @@ public:
   }
 
 private:
+  std::optional<QualType> assignment_parameter(const sema::MemberDeclRec& member, QualType owner) const;
+
   enum class State : u8 { empty, running, done };
   template <class V>
   struct Cell {
@@ -5494,17 +5496,36 @@ private:
 
 // ---------------------------------------------------------------- special members ([special])
 
+std::optional<QualType> Program::assignment_parameter(const sema::MemberDeclRec& member, QualType owner) const {
+  if (!member.is_function || member.is_static || member.is_template ||
+      w_->ins.names.spelling(member.name) != "operator=")
+    return std::nullopt;
+  const auto& types = w_->types;
+  const sema::TypeRec function = types.rec(member.type);
+  if (function.params.size() != 1 || function.variadic) return std::nullopt;
+  const QualType parameter = function.params.front();
+  const QualType type = types.is_reference(parameter) ? types.referee(parameter) : parameter;
+  if (sema::Types::unqualified(types.canonical(type)) != owner) return std::nullopt;
+  return parameter;
+}
+
 void Program::special_members(u32 item, EntityId cls, sema::ClassRec& rec) {
   sema::Types& types = w_->types;
   QualType ct = types.class_type(cls);
   bool user_copy = false;
   bool user_move = false;
-  bool user_move_for_assignment = false;
+  bool user_copy_assignment = false;
+  bool user_move_assignment = false;
   EntityId user_dtor = EntityId::none;
   for (const sema::MemberDeclRec& m : rec.members) {
+    if (const auto parameter = assignment_parameter(m, ct)) {
+      if (types.rec(*parameter).rvalue_ref) user_move_assignment = true;
+      else user_copy_assignment = true;
+    }
     if (m.is_dtor) user_dtor = m.entity;
     if (!m.is_ctor) continue;
     rec.user_ctors = true;
+    if (m.is_template) continue;
     sema::TypeRec fr = types.rec(m.type);
     // [class.copy.ctor]/1–3: the first parameter a reference to the class, any others defaulted.
     std::size_t required = fr.params.size();
@@ -5517,7 +5538,6 @@ void Program::special_members(u32 item, EntityId cls, sema::ClassRec& rec) {
         types.canonical(sema::Types::unqualified(types.referee(fr.params[0]))) == types.canonical(ct)) {
       if (types.rec(fr.params[0]).rvalue_ref) {
         user_move = true;  // a move constructor, user-provided unless deleted (no `= default` yet)
-        user_move_for_assignment |= !m.is_template;
         rec.move_usable = !m.is_deleted;
         rec.move_nontrivial = !m.is_deleted;
         continue;
@@ -5568,9 +5588,11 @@ void Program::special_members(u32 item, EntityId cls, sema::ClassRec& rec) {
     rec.destructor = synthesize(false);
   // [class.copy.ctor]/10–11: the implicit copy constructor is deleted with a member's, and not
   // trivial when a member's is not.
-  // [class.copy.ctor]/6: a user-declared move constructor deletes the implicit copy constructor.
-  if (!user_copy && user_move) rec.copy_deleted = true;
-  if (!user_copy && !user_move) {
+  // [class.copy.ctor]/6: either user-declared move operation deletes the otherwise implicit copy.
+  const bool deletes_implicit_copy = user_move || user_move_assignment;
+  const bool implicit_copy = !user_copy && !deletes_implicit_copy;
+  if (!user_copy && deletes_implicit_copy) rec.copy_deleted = true;
+  if (implicit_copy) {
     bool nontrivial = false;
     for (QualType t : subobjects) {
       if (types.is_reference(t)) continue;
@@ -5580,9 +5602,8 @@ void Program::special_members(u32 item, EntityId cls, sema::ClassRec& rec) {
     }
     if (!rec.copy_deleted && nontrivial) rec.copy_ctor = synthesize(true);
   }
-  // [class.copy.ctor]/8, 10–11: the implicit move constructor, declared without a user-declared
-  // copy or move constructor or destructor, is not trivial when a member's move is not.
-  if (!user_copy && !user_move && user_dtor == EntityId::none) {
+  // [class.copy.ctor]/8, 10–11: implicit move requires no user-declared copy, move or destructor.
+  if (implicit_copy && !user_copy_assignment && user_dtor == EntityId::none) {
     rec.move_usable = !rec.copy_deleted || std::ranges::none_of(subobjects, [&](QualType t) {
                         return !types.is_reference(t) && classes_.unmovable(t);
                       });
@@ -5616,7 +5637,7 @@ void Program::special_members(u32 item, EntityId cls, sema::ClassRec& rec) {
             std::ranges::all_of(rec.fields, [&](const sema::FieldRec& f) { return pod_type(f.type); }) &&
             std::ranges::all_of(rec.bases, [&](const sema::BaseRec& b) { return pod_type(types.class_type(b.cls)); }) &&
             (rec.fields.empty() || !data_in_bases);
-  declare_copy_assignment(item, cls, rec, user_move_for_assignment);
+  if (!user_copy_assignment) declare_copy_assignment(item, cls, rec, deletes_implicit_copy);
 }
 
 void Program::declare_copy_assignment(u32 item, EntityId cls, sema::ClassRec& rec, bool user_move) {
@@ -5625,21 +5646,6 @@ void Program::declare_copy_assignment(u32 item, EntityId cls, sema::ClassRec& re
   const QualType ct = types.class_type(cls);
   if (types.is_dependent(ct)) return;
   const NameId name = w_->ins.names.intern("operator=");
-  const auto parameter = [&](const sema::MemberDeclRec& m, QualType owner) -> std::optional<QualType> {
-    if (m.name != name || !m.is_function || m.is_static || m.is_template) return std::nullopt;
-    const auto fn = types.rec(m.type);
-    if (fn.params.size() != 1 || fn.variadic) return std::nullopt;
-    const QualType p = fn.params.front();
-    const QualType t = types.is_reference(p) ? types.referee(p) : p;
-    return sema::Types::unqualified(types.canonical(t)) == owner ? std::optional(p) : std::nullopt;
-  };
-  const auto move_parameter = [&](QualType p) { return types.is_reference(p) && types.rec(p).rvalue_ref; };
-  for (const auto& m : rec.members) {
-    if (auto p = parameter(m, ct)) {
-      if (!move_parameter(*p)) return;  // a user-declared copy assignment
-      user_move = true;
-    }
-  }
 
   bool const_parameter = true;
   bool trivial = true;
@@ -5673,8 +5679,8 @@ void Program::declare_copy_assignment(u32 item, EntityId cls, sema::ClassRec& re
     }
     const QualType owner = sema::Types::unqualified(t);
     const_parameter &= std::ranges::any_of(sub->members, [&](const sema::MemberDeclRec& m) {
-      auto p = parameter(m, owner);
-      return p && !move_parameter(*p) &&
+      const auto p = assignment_parameter(m, owner);
+      return p && !types.rec(*p).rvalue_ref &&
              (!types.is_reference(*p) || sema::Types::is_const(types.canonical(types.referee(*p))));
     });
     const auto* copy = sub->implicit_copy_assignment();
