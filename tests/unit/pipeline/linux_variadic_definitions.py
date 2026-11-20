@@ -39,17 +39,17 @@ def main():
             run('./native')
 
         # The pinned libycxx header references its runtime's static linkage guard.
-        run(host_cxx, '-std=c++26', '-fno-pie', *includes, '-c',
+        run(ycxx, 'cxx', linux, *includes, '-c',
             libycxx / 'src/runtime/linkage/static.cpp', '-o', 'linkage.o')
         for source in ('cstdarg-discarded-arguments.accept.cpp', 'cstdarg-no-named.accept.cpp'):
             run(ycxx, 'cxx', linux, *includes, '-nostdlib', source, 'linkage.o', '-o', 'native')
             run('./native')
 
-        for callee, driver, runtime in (('host-double-callee.cpp', 'host-double-driver.cpp', ()),
+        for callee, driver, linkage in (('host-double-callee.cpp', 'host-double-driver.cpp', ()),
                                         ('cstdarg-wrapper.cpp', 'cstdarg-host.cpp', ('linkage.o',))):
             run(ycxx, 'cxx', linux, *includes, '-c', callee, '-o', 'callee.o')
             for mode in ('-O0', '-O2'):
-                run(host_cxx, '-std=c++26', mode, '-no-pie', driver, 'callee.o', *runtime, '-o', 'mixed')
+                run(host_cxx, '-std=c++26', mode, '-no-pie', driver, 'callee.o', *linkage, '-o', 'mixed')
                 run('./mixed')
 
         rejected = 'nonvariadic-va-start.reject.cpp'
