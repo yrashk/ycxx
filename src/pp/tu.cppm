@@ -315,6 +315,7 @@ Preprocessed to_region(Session& s, const Flat& flat) {
     r.locs.push_back(p.loc);
   };
   detail::PackPragmas pack(s, flat, r);
+  std::array<std::optional<u32>, 256> byte_literals;
   for (std::size_t i = 0; i < pp.size(); ++i) {
     pack.advance(i);
     const PTok& p = pp[i];
@@ -325,6 +326,24 @@ Preprocessed to_region(Session& s, const Flat& flat) {
       if (auto k = lex::keyword(name)) tok = Tok{*k, tok.flags, 0};
       else tok.payload = tables.name(name);
       emit(tok, p);
+      break;
+    }
+    case Tk::embed: {
+      // Materialize ordinary parser tokens so embeds work wherever an integer or comma
+      // is allowed, including a single literal in an expression.
+      bool first = true;
+      for (unsigned char byte : s.spellings.resource(tok.payload)) {
+        if (!first) emit(Tok{Tk::comma, 0, 0}, p);
+        if (!byte_literals[byte]) {
+          Literal l;
+          l.spelling = std::to_string(byte);
+          l.value = byte;
+          l.base = byte == 0 ? 8 : 10;
+          byte_literals[byte] = tables.literal(std::move(l));
+        }
+        emit(Tok{Tk::int_lit, first ? tok.flags : u8(0), *byte_literals[byte]}, p);
+        first = false;
+      }
       break;
     }
     case Tk::pp_number:
@@ -511,13 +530,29 @@ std::string print(Session& s, const Flat& flat) {
     });
   };
   std::size_t pass = 0;
+  bool after_embed = false;
+  u32 joined_line = 0;
+  bool prev_resource = false;
   auto print_tok = [&](const PTok& t, bool directive_start) {
     TokLoc at = site(t.loc);
     auto [line, column] = line_of(at.file, at.offset);
+    u32 expansion = t.loc.expansion;
+    while (expansion != 0 && flat.expansions[expansion].kind != ExpansionKind::embed)
+      expansion = flat.expansions[expansion].parent;
+    const bool embed = expansion != 0;
+    const bool resource = t.tok.kind == Tk::embed;
+    const bool join = !directive_start && static_cast<int>(at.file) == cur_file &&
+                      (embed || after_embed || line == joined_line);
+    const bool begins_after_embed = !embed && after_embed && join;
+    if (begins_after_embed) joined_line = line;
+    else if (!join) joined_line = 0;
     if (directive_start) {
       // A directive starts its own line; in the middle of one (a _Pragma), as Clang prints it,
       // after a marker for the same line.
       if (!line_empty || static_cast<int>(at.file) != cur_file || line != cur_line) marker(at.file, line);
+    } else if (join) {
+      // Clang prints an embed's replacement at the current output position, followed
+      // by the first following source line before resuming normal line placement.
     } else if (static_cast<int>(at.file) == cur_file && line > cur_line && line <= cont_line) {
       // Still on the line of an invocation that ended on a later line, as Clang prints it.
     } else if (static_cast<int>(at.file) != cur_file || line != cur_line) {
@@ -525,17 +560,26 @@ std::string print(Session& s, const Flat& flat) {
       move_to(at.file, line);
     }
     fire();
-    std::string text = spelling(t.tok, s.spellings);
+    std::string_view bytes = resource ? std::as_const(s.spellings).resource(t.tok.payload) : std::string_view{};
+    std::string text = resource ? std::to_string(static_cast<unsigned char>(bytes.front())) : spelling(t.tok, s.spellings);
     if (line_empty) {
-      if (!directive_start) out.append(column > 1 ? column - 1 : 0, ' ');
+      if (!directive_start && !embed) out.append(column > 1 ? column - 1 : 0, ' ');
     } else {
       bool adjacent = t.loc.expansion == 0 && prev_loc.expansion == 0 && t.loc.file == prev_loc.file &&
                       t.loc.offset == prev_end;
-      bool space = t.tok.has(tok_flag::space_before);
+      bool space = (!resource && t.tok.has(tok_flag::space_before)) ||
+                   (!resource && prev_resource && (embed || begins_after_embed));
       if (!space && !adjacent) space = detail::separate(prev2, prev, text);
       if (space) out += ' ';
     }
     out += text;
+    for (unsigned char byte : resource ? bytes.substr(1) : std::string_view{}) {
+      text = std::to_string(byte);
+      out += ", ";
+      out += text;
+    }
+    after_embed = embed;
+    prev_resource = resource;
     line_empty = false;
     prev2 = std::exchange(prev, text);
     prev_loc = t.loc;

@@ -224,14 +224,19 @@ What is true of the code today. Work in progress and its owners are tracked in
   - conditional inclusion (`#if`/`#ifdef`/`#ifndef`/`#elif`/`#elifdef`/`#elifndef`/`#else`/
     `#endif`). Lexer diagnostics on skipped lines are dropped. `#if` expressions are evaluated
     in `intmax_t`/`uintmax_t` (`:cond`), with `defined`, `__has_include`,
-    `__has_include_next`, `__has_embed` (`limit` only), and the `__has_*` probes answering 0;
+    `__has_include_next`, `__has_embed`, and the `__has_*` probes answering 0;
   - `#line` (presumed lines and names), `#error`, `#warning`, `_Pragma`, `#pragma once`
     (other pragmas pass through to `-E`), and the null directive;
   - module and import lines go on to phase 7, their keywords flagged `tok_flag::directive`.
-    Header-unit imports and `#embed` are diagnosed as unsupported.
+    Header-unit imports are diagnosed as unsupported.
+  - `#embed` and `__has_embed` with `limit`, `offset`, `prefix`, `suffix` and `if_empty` (#125).
+    Resources use the include search paths and are tracked by resolution and content. A nonempty
+    embed is one byte-carrying phase-4 token with an expansion that names the resource. It yields
+    integer and comma tokens in the parser's input. Unsupported scoped parameters are diagnosed
+    on the directive and cause a probe to return `__STDC_EMBED_NOT_FOUND__` (#473).
 - Predefined macros (`:predefined`, DECISIONS §1.5):
   - `__ycxx__` and its version, `__GNUC__` 4.2.1 (#229), and the draft's macros;
-  - a feature-test table, with lexer features only;
+  - a feature-test table, including `__cpp_pp_embed`;
   - the target's macros, generated from `ast::Target` and checked against Clang on AArch64
     Darwin and x86-64 Linux (`tests/own/pp/predefined-target*.pp.cpp`, #132);
   - `__LINE__`, `__FILE__`, `__COUNTER__`, `__DATE__` and `__TIME__`.
@@ -255,7 +260,6 @@ What is true of the code today. Work in progress and its owners are tracked in
     The daemon provides it from its file table instead.
   - `unit.pipeline_incremental` checks header edits and two directories.
 - Not yet:
-  - `#embed` (#125);
   - items cut per region; a header's items carry the main file's identity (#126);
   - sema diagnostics in headers, and presumed `#line` locations outside phase 4 (#34).
 

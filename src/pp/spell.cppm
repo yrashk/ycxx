@@ -30,6 +30,10 @@ public:
   }
   std::string_view name(u32 id) const { return name_text_[id]; }
 
+  // Byte strings are interned as-is, separately identified by Tk::embed.
+  u32 resource(std::string_view bytes) { return name(bytes); }
+  std::string_view resource(u32 id) const { return name(id); }
+
   // A literal or pp-number, as the lexer recorded it (spelling, ud-suffix as a name id, encoding,
   // raw, bad); keyed by its spelling, of which those are functions.
   u32 literal(Literal l) {

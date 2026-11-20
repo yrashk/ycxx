@@ -18,21 +18,27 @@ public:
   Condition(std::span<const PTok> toks, const Spellings& s, bool char_signed, Report report)
       : toks_(toks), s_(&s), char_signed_(char_signed), report_(std::move(report)) {}
 
-  // The value, or nothing after reporting why there is none.
-  std::optional<bool> run() {
-    auto v = conditional(true);
-    if (!v) return std::nullopt;
-    if (pos_ < toks_.size()) return fail(toks_[pos_], lex::LexDiag::cond_bad_token);
-    return v->bits != 0;
-  }
-
-private:
   // A value of type `intmax_t` or `uintmax_t` ([cpp.cond]/14), as its bits.
   struct Value {
     std::uint64_t bits = 0;
     bool uns = false;
   };
 
+  // The value, or nothing after reporting why there is none.
+  std::optional<Value> value() {
+    auto v = conditional(true);
+    if (!v) return std::nullopt;
+    if (pos_ < toks_.size()) return fail(toks_[pos_], lex::LexDiag::cond_bad_token);
+    return v;
+  }
+
+  std::optional<bool> run() {
+    auto v = value();
+    if (!v) return std::nullopt;
+    return v->bits != 0;
+  }
+
+private:
   std::nullopt_t fail(const PTok& at, lex::LexDiag d) {
     if (!failed_) report_(at, d);
     failed_ = true;

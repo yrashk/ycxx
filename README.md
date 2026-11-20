@@ -40,6 +40,9 @@ tools/build
 build/bin/ycxx cxx hello.cpp -o hello && ./hello
 ```
 
+**Preprocess binary resources.** Both targets support `#embed` and `__has_embed` with the standard
+parameters. [#125](https://github.com/yrashk/ycxx/issues/125)
+
 **Compile for x86-64 Linux.** Select `--target=x86_64-pc-linux-gnu` to compile with the
 System V AMD64 backend. Use `-c` to write an ELF object, or `-nostdlib` to link C++ sources,
 ycxx-generated `.o` files, or a mixture into a static executable. The startup runs namespace-scope

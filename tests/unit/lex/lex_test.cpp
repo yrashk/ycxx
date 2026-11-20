@@ -121,9 +121,11 @@ void identifiers_and_keywords() {
   check(kinds(k.region) == std::vector{Tk::kw_int, Tk::kw_contract_assert, Tk::kw_co_await, Tk::kw_char8_t,
                                        Tk::identifier, Tk::identifier, Tk::identifier},
         "keywords; identifiers with special meaning stay identifiers");
-  for (std::size_t i = std::to_underlying(Tk::kw_alignas); i < lex::tk_count; ++i) {
-    auto one = pp::preprocess(lex::spelling(Tk(i)));
-    check(kinds(one.region) == std::vector{Tk(i)}, "every keyword");
+  for (std::size_t i = 0; i < lex::tk_count; ++i) {
+    Tk kind = Tk(i);
+    if (!lex::name(kind).starts_with("kw_")) continue;
+    auto one = pp::preprocess(lex::spelling(kind));
+    check(kinds(one.region) == std::vector{kind}, "every keyword");
   }
   auto alt = pp::preprocess("and and_eq bitand bitor compl not not_eq or or_eq xor xor_eq");
   check(kinds(alt.region) == std::vector{Tk::ampamp, Tk::ampequal, Tk::amp, Tk::pipe, Tk::tilde, Tk::exclaim,
