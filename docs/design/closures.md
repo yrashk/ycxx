@@ -79,6 +79,21 @@ Clang 23 and GCC 16 (the probes at the end) and wrote this document.
 13. **Incrementality:** an earlier lambda of the same signature shifts later closures' ids, as
     ast.md §4.5 says of local ids; the mangled names change with it, by the ABI.
 
+## Namespace variable initializers (#338)
+
+The first declaration slice gives a named internal-linkage namespace variable its own
+noncapturing, non-generic closure. Intern the variable's identity before placeholder deduction
+and publish its resolved entity record through the ordinary declaration path. The initializer
+uses the namespace for lexical lookup. Lookup of the variable itself during deduction diagnoses
+use of an undeduced placeholder.
+
+The declaration part keeps its `ClosureDef`s in `ItemSema`. The compiler emits their functions
+through the existing closure member path, with the variable's `<closure-prefix>` for naming.
+A captureless closure initializer contributes a constant empty aggregate and complete object
+storage. Calls to the operator and scalar invoker use the existing implicit object pointer.
+Astra checked this application of the closure design. Other contexts and init-captures remain
+under [#338](https://github.com/yrashk/ycxx/issues/338).
+
 ## Probes (Clang 23, GCC 16; 2026-11-19)
 
 - Numbering per signature: in `inline void f()`, `[]{}`, `[](int){}`, `[]{}` are `UlvE_`,

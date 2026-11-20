@@ -74,7 +74,7 @@ struct VNullptr {};
 // null included. String literals are identified by content, not by an entity (§3.7.9).
 struct VString {
   QualType type;
-  SeqId<u8> units;
+  SeqId<u32> units;
 };
 
 // A declared object or function, as the base of an address (§5.5).

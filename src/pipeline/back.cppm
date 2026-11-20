@@ -58,8 +58,12 @@ using ast::QualType;
 class Constants {
  public:
   virtual ~Constants() = default;
-  // The code units of a string literal object, the terminating null included, one byte each.
-  virtual std::optional<std::vector<std::uint8_t>> string_object(ConstId c) const = 0;
+  // The element type and code units of a string literal object, including the terminating null.
+  struct StringObject {
+    ast::Builtin element;
+    std::vector<std::uint32_t> units;
+  };
+  virtual std::optional<StringObject> string_object(ConstId c) const = 0;
   // An address constant: its base (`VString` or `VEntity`) and byte offset.
   struct Address {
     ConstId object = ConstId::none;
@@ -228,6 +232,7 @@ L2Body deserialize_from(engine::Source& in, std::type_identity<L2Body>) {
 struct OptUnit {
   L2Body body;
   std::vector<ir::EntityId> local;  // the entities it refers to that this TU defines, sorted by handle
+  std::vector<ir::EntityId> external_data;  // data references using the ELF GOT, sorted by handle
   // The inline candidates and callee summaries of §2.4 come with level 1.
 };
 class UnitStore {
@@ -1013,17 +1018,25 @@ engine::query_task<Lowered> Lower::run(engine::Ctx& cx, FnKey k) {
     for (std::size_t i = 0; i < body.nodes.size(); ++i) {
       const auto n = ir::NodeId(static_cast<std::uint32_t>(i));
       const ir::Op op = body.node(n).op;
+      const bool direct = op == ir::Op::call;
       std::optional<QualType> callee;
-      if (op == ir::Op::call) {
-        const auto id = EntityId(static_cast<std::uint32_t>(body.imms_of(n)[0]));
-        auto e = std::ranges::find(tu.entities, id, &Entity::id);
+      EntityId callee_id = EntityId::none;
+      if (direct) {
+        callee_id = EntityId(static_cast<std::uint32_t>(body.imms_of(n)[0]));
+        auto e = std::ranges::find(tu.entities, callee_id, &Entity::id);
         if (e != tu.entities.end()) callee = e->type;
       } else if (op == ir::Op::call_ind) {
         QualType ptr = body.value(body.operands_of(n)[1]).type.type;
         callee = ast::pointee_of(in, ptr);
       } else continue;
-      bool direct = op == ir::Op::call;
       std::string_view error = callee ? linux_signature_error(in, layout, *callee, direct) : "the function type is unavailable";
+      if (direct && callee && !error.empty()) {
+        // The declaration can still have a placeholder return type. Read the signature already
+        // deduced in this unit without depending on the callee's lowering ([dcl.spec.auto]).
+        const auto definition = std::ranges::find(tu.functions, callee_id, &FunctionDef::entity);
+        if (definition != tu.functions.end() && definition->body.deduced)
+          error = linux_signature_error(in, layout, definition->body.deduced_type, true);
+      }
       if (direct && error.empty()) error = linux_direct_call_error(layout, body, n);
       if (error.empty()) continue;
       const ir::FunctionDebug& debug = co_await cx.fetch<FunctionDebug>(k);
@@ -1058,39 +1071,54 @@ std::vector<ir::EntityId> references(const l2::Function& body) {
   return out;
 }
 
-// The unit's definitions code generation can address directly. ELF default-visibility global
-// symbols may be preempted, so only internal definitions can use RIP-relative addressing here.
-struct TuDefined {
+struct SymbolAddresses {
+  std::vector<EntityId> direct, external_data;
+};
+
+// ELF default-visible definitions can be preempted. Its data declarations use the GOT, and
+// internal definitions can use the symbol itself in a direct displacement.
+struct TuSymbolAddresses {
   using Key = TuId;
-  using Value = std::vector<EntityId>;  // sorted by handle
+  using Value = SymbolAddresses;
   static engine::query_task<Value> run(engine::Ctx& cx, TuId tu) {
     const TranslationUnit& u = co_await cx.fetch<TuUnit>(tu);
     const bool linux = object_target(unit_target(cx, tu)) == obj::target::x86_64_linux;
-    std::vector<EntityId> out;
+    Value out;
     auto add = [&](EntityId id) {
       if (linux) {
         auto e = std::ranges::find(u.entities, id, &Entity::id);
         if (e == u.entities.end() || e->linkage != ast::Linkage::internal) return;
       }
-      out.push_back(id);
+      out.direct.push_back(id);
     };
     for (const FunctionDef& f : u.functions) add(f.entity);
     for (const Variable& v : u.variables) add(v.entity);
-    std::ranges::sort(out);
+    if (linux) {
+      for (const Entity& e : u.entities)
+        if (!e.is_function && (e.linkage == ast::Linkage::external || e.linkage == ast::Linkage::module))
+          out.external_data.push_back(e.id);
+      std::ranges::sort(out.external_data);
+    }
+    std::ranges::sort(out.direct);
     co_return out;
   }
 };
 
 engine::query_task<UnitRef> UnitQ::run(engine::Ctx& cx, FnKey k) {
-  auto [lowered, defined] = co_await cx.par_fetch(engine::q<Lower>{k}, engine::q<TuDefined>{k.tu});
+  auto [lowered, symbols] = co_await cx.par_fetch(engine::q<Lower>{k}, engine::q<TuSymbolAddresses>{k.tu});
   if (!lowered.body) co_return UnitRef{std::nullopt, lowered.error};
   // Which references can be addressed directly, including the function's string literals.
-  OptUnit u{*lowered.body, {}};
-  for (ir::EntityId e : references(u.body.f))
-    if (std::ranges::binary_search(defined, e) || std::ranges::contains(lowered.strings, e, &StringUse::entity))
+  OptUnit u{*lowered.body, {}, {}};
+  for (ir::EntityId e : references(u.body.f)) {
+    if (std::ranges::binary_search(symbols.direct, e) || std::ranges::contains(lowered.strings, e, &StringUse::entity))
       u.local.push_back(e);
-  std::ranges::sort(u.local, {}, [](ir::EntityId e) { return ir::raw(e); });
-  u.local.erase(std::ranges::unique(u.local).begin(), u.local.end());
+    else if (std::ranges::binary_search(symbols.external_data, e))
+      u.external_data.push_back(e);
+  }
+  for (auto* ids : {&u.local, &u.external_data}) {
+    std::ranges::sort(*ids);
+    ids->erase(std::ranges::unique(*ids).begin(), ids->end());
+  }
   co_return UnitRef{universe().units->add(std::move(u)), std::nullopt};
 }
 
@@ -1099,7 +1127,7 @@ engine::query_task<Machine> Optimized::run(engine::Ctx& cx, OptKey k) {
   const OptUnit& u = universe().units->at(k.unit);
   // Level 0: `lower` already ran (it made the unit); selection and stack slots (§O7).
   if (k.target == obj::target::x86_64_linux) {
-    auto m = x86_64::compile_function(u.body.f, u.local);
+    auto m = x86_64::compile_function(u.body.f, u.local, u.external_data);
     if (!m) co_return Machine{std::nullopt, m.error()};
     co_return Machine{std::nullopt, {}, std::move(*m)};
   }
@@ -1194,6 +1222,15 @@ struct LinuxFunction {
   bool weak;
 };
 
+obj::reloc_kind linux_relocation(x86_64::RelocKind kind) {
+  switch (kind) {
+    case x86_64::RelocKind::pc32: return obj::reloc_kind::x86_64_pc32;
+    case x86_64::RelocKind::plt32: return obj::reloc_kind::x86_64_plt32;
+    case x86_64::RelocKind::rex_gotpcrelx: return obj::reloc_kind::x86_64_rex_gotpcrelx;
+  }
+  std::unreachable();
+}
+
 std::expected<obj::object, aarch64::CodegenError> assemble_linux(
     const std::string& name, std::span<const LinuxFunction> functions,
     std::span<const aarch64::DataDef> data, std::span<const aarch64::Symbol> symbols,
@@ -1223,10 +1260,9 @@ std::expected<obj::object, aarch64::CodegenError> assemble_linux(
       for (const auto& r : f.code->relocs) {
         auto target = symbol_of.find(r.target);
         if (target == symbol_of.end()) return missing(r.target);
-        auto kind = r.kind == x86_64::RelocKind::pc32 ? obj::reloc_kind::x86_64_pc32 : obj::reloc_kind::x86_64_plt32;
         if (base + r.offset > std::numeric_limits<std::uint32_t>::max())
           return std::unexpected(aarch64::CodegenError{f.entity, "a text relocation exceeds the object offset limit"});
-        sec.relocate(kind, target->second, r.addend, static_cast<std::uint32_t>(base + r.offset));
+        sec.relocate(linux_relocation(r.kind), target->second, r.addend, static_cast<std::uint32_t>(base + r.offset));
       }
     }
   }
@@ -1339,12 +1375,22 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
   // String literal objects, as `lower` and the variables met them ([lex.string]).
   std::uint32_t n = 0;
   for (auto [object, entity] : strings) {
-    auto units = universe().consts->string_object(object);
-    if (!units) {
+    auto str = universe().consts->string_object(object);
+    if (!str) {
       errors.push_back({std::nullopt, "an address constant whose object is not a string literal"});
       continue;
     }
-    data.push_back({entity, aarch64::DataKind::cstring, std::move(*units), 0, 1, {}});
+    const ast::BuiltinLayout layout = target[str->element];
+    std::vector<std::uint8_t> bytes;
+    bytes.reserve(str->units.size() * layout.size);
+    for (std::uint32_t unit : str->units) {
+      // Both targets store the least-significant byte first.
+      for (std::uint8_t i = 0; i < layout.size; ++i, unit >>= 8)
+        bytes.push_back(std::uint8_t(unit));
+    }
+    // The cstring section is reserved for strings with one-byte code units.
+    auto kind = layout.size == 1 ? aarch64::DataKind::cstring : aarch64::DataKind::rodata;
+    data.push_back({entity, kind, std::move(bytes), 0, layout.align, {}});
     symbols.push_back({entity, std::format("{}.str.{}", linux ? ".L" : "l_", n++), obj::binding::local});
   }
 
@@ -1362,7 +1408,7 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
     used.insert(ir::raw(d.entity));
     for (const aarch64::DataReloc& r : d.relocs) used.insert(ir::raw(r.target));
   }
-  // The functions closure types are local to, by entity (docs/design/closures.md).
+  // The declarations that own closure types, by entity (docs/design/closures.md).
   std::map<std::uint32_t, const Entity*> by_id;
   for (const Entity& e : tu.entities) by_id.emplace(ir::raw(e.id), &e);
   auto spec_of = [](const Entity& e) {
@@ -1383,10 +1429,14 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
       n.closure_head = r.closure_head;
       if (f != by_id.end()) {
         const Entity& fe = *f->second;
-        std::string fname = fe.special == Special::constructor ? "C1" : fe.special == Special::destructor ? "D1" : fe.name;
-        n.local = std::make_shared<const LocalFunction>(LocalFunction{
-            fname, fe.type, fe.scope, fe.special != Special::none,
-            fe.template_type ? std::optional(spec_of(fe)) : std::nullopt});
+        if (fe.is_function) {
+          std::string fname = fe.special == Special::constructor ? "C1" : fe.special == Special::destructor ? "D1" : fe.name;
+          n.local = std::make_shared<const LocalFunction>(LocalFunction{
+              fname, fe.type, fe.scope, fe.special != Special::none,
+              fe.template_type ? std::optional(spec_of(fe)) : std::nullopt});
+        } else {
+          n.closure_variable = fe.id;
+        }
       }
     }
     return n;

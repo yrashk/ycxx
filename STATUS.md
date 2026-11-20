@@ -179,6 +179,16 @@ What is true of the code today. Work in progress and its owners are tracked in
 - Not yet: the extended floating types' values (#351); `long double`'s are binary64's, the
   target's (sema checks the format); the type of an integer literal (sema, #33).
 
+## UTF-16 and UTF-32 string literals (#288, 2026-11-20)
+
+- `u` and `U` string literals are lvalue arrays of `const char16_t` and `const char32_t`,
+  respectively ([lex.string]). Their bounds count the encoded code units and the terminating
+  null. The same units initialize matching character arrays and are available to constant
+  evaluation ([dcl.init.string], [expr.const]).
+- ELF and Mach-O put these literal objects in read-only data at the element type's alignment.
+- Tests in `tests/own/unicode-strings/` cover surrogate pairs, escape and raw forms,
+  concatenation, array initialization, and constant reads and addresses of literal objects.
+
 ## Preprocessor (#85, 2026-11-18)
 
 - `ycxx.pp` (`src/pp/`): phase 4 as query-engine.md §B9's contextual query, with a local stand-in
@@ -585,6 +595,16 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   start inside executable code, and its declared extent must fit in its section. The object
   fingerprint includes this metadata.
   [#428](https://github.com/yrashk/ycxx/issues/428) · [#391](https://github.com/yrashk/ycxx/issues/391)
+- Runtime addresses of default-visible Linux data use `R_X86_64_REX_GOTPCRELX`, including
+  declarations defined in another object. The native static linker checks and relaxes the
+  RIP-relative MOV to LEA after resolving the symbol. System linkers can preserve GOT binding.
+  Static pointer initializers continue to use absolute relocations with their byte addends.
+  `unit.linux_compile` checks address identity, nonzero offsets, writes, archive extraction,
+  BSS, and system-linker preemption. `unit.elf_link` checks malformed instructions, overlapping
+  relocations, weak resolution and displacement range. Native dynamic data addresses and
+  external function addresses follow [#390](https://github.com/yrashk/ycxx/issues/390) and
+  [#407](https://github.com/yrashk/ycxx/issues/407).
+  [Design](docs/design/linux-external-data-addresses.md) · [#414](https://github.com/yrashk/ycxx/issues/414)
 - Simple external inline function definitions use weak ELF symbols. The unit combines inline
   flags from reachable declarations, including `constexpr` functions and ordinary members
   defined in their class. Calls and statically initialized pointers in different units resolve
@@ -977,8 +997,12 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
 - Linkage names of enumerations, nested ones included, match Clang's.
 - Tests: `tests/own/classes/s4-*enum*`, `s4-scoped-enum`, `s4-unscoped-enum` (spec-only, plus two
   from the review): 7 of 7.
-- Not yet: opaque enum declarations (`enum E : int;`), unnamed enumerations, `E{}` and
-  `E(v)` as expressions, enumerations in a block (#117), constexpr enumeration objects (#25).
+- Namespace-scope opaque enum declarations ([dcl.enum], #157) supply a complete enum type with a
+  fixed underlying type before the enumerator list. Omitted scoped bases default to `int`. Unscoped opaque
+  declarations spell their base. Compatible redeclarations and a later definition in the same
+  namespace share the nominal type, and the enumerators become visible at the definition.
+- Not yet: opaque declarations in classes or blocks, unnamed enumerations, `E{}` and `E(v)` as
+  expressions (#157), enumerations in a block (#117), constexpr enumeration objects (#25).
 
 ## Classes, δ step 4b: namespaces (#86, 2026-11-18)
 
@@ -1008,6 +1032,9 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   of 5. Seven more draft examples pass.
 - A linkage-specification with one declaration (`extern "C" int v;`) declares as if `extern`
   were given ([dcl.link]/7); a variable with C language linkage is one in every namespace.
+- A qualified namespace function definition inherits C language linkage from a matching prior
+  member declaration and uses its target namespace for body lookup. Ordinary and argument-dependent
+  calls find the prior declaration and use the same unmangled symbol as C callers (#426).
 - Not yet (#153): `using N::f;` at namespace scope, `N::S{…}` as an expression, some clashes
   with namespace names and using-declarations, remaining standard-library linkage
   abbreviations such as `Sa`.
@@ -1096,6 +1123,11 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   functional casts `T(e)` for keyword types, enumerations and typedef-names, and C-style casts
   `(T)e`, as static_cast does them ([expr.type.conv]/2, [expr.cast]/4). Downcasts and the
   const_cast and reinterpret_cast parts of a C-style cast are not supported yet.
+- `static_cast<T&&>` gives a compatible object lvalue the target type and xvalue category for
+  reference binding, `decltype` and overload resolution. The cast designates the same object or
+  an accessible, unambiguous base subobject. A compatible bit-field is read into a temporary.
+  The tests in `tests/own/casts` cover identity, qualification, overloads and direct reference
+  initialization. [#199](https://github.com/yrashk/ycxx/issues/199)
 - **sizeof, alignof** of fundamental, pointer, enumeration and array types and of an expression,
   from `ast::Target`; a class's since #194, below.
 - **decltype(e)** ([dcl.type.decltype]): an unparenthesized id-expression or member access names
@@ -1188,11 +1220,25 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   checks 3- to 24-byte classes, member functions returning classes, exhausted registers, empty
   classes, and each kind of class for calls (trivially copyable, non-trivial copy or destructor,
   move-only, deleted copy, a move-only member) under both settings, calling both ways.
-- Not yet: braced arguments to overload sets, templates and member calls (#231), class arguments
-  through an ellipsis and calls through pointers returning classes (#196), classes in constant
-  evaluation (#25). (Classes with floating members: #336.)
+- Class arguments through an ellipsis and calls through pointers returning classes remain in
+  #196, and classes in constant evaluation remain in #25. (Classes with floating members: #336.)
 - Tests: `tests/own/abi` (5), `tests/own/classes/s5-byvalue-lifetimes`, `-temporaries`;
   s1-byvalue-params and -return pass.
+
+## Braced arguments in free function overload resolution (#231, 2026-11-20)
+
+- Free non-template candidates can rank a braced argument as a conversion sequence. An empty
+  list has identity rank for an arithmetic parameter and a single expression uses its ordinary
+  sequence. A flat positional arithmetic list for an ordinary aggregate with public arithmetic
+  fields contributes one user-defined sequence, ranked ahead of ellipsis ([over.ics.list],
+  [over.ics.rank]). Typed sibling arguments still participate in ADL.
+- The selected function's arguments use the existing list-initialization path, which checks
+  narrowing and initializes omitted fields. A dependent list defers call analysis. Candidates
+  with unsupported conversions that remain plausible after checking arity and other arguments
+  produce an unsupported diagnostic.
+- Constructors, member overloads, template deduction, class-valued clauses, and general
+  reference, array, aggregate, and `std::initializer_list` cases remain under #231.
+- Tests: `tests/own/braced-overloads/`.
 
 ## Templates, ζ step 1: function templates (#88, 2026-11-18)
 
@@ -1376,6 +1422,8 @@ session's.*
 - Function type-ids accept a qualified return type (`using F = n::R (*)();`). An identifier
   known to name a type can start the parameter list of an abstract declarator, as in
   `struct S { using F = S(S); };` ([dcl.name], [dcl.fct], [dcl.ambig.res], #216).
+- Named function-pointer declarations accept qualified return types, including at block scope
+  ([dcl.ptr], [dcl.fct], [stmt.ambig], #433).
 - Not yet: access, hiding and qualified functional casts of member types (#216); member alias
   templates (`template<…> using __apply = …` in a class), with member
   templates; template template parameters (#208); value-dependent expressions as template
@@ -1795,11 +1843,15 @@ What the process allocates, attributed to the engine's cells, in the trace and t
   template member specialization instantiated where it is named ([temp.inst]/8); its own body
   sees the type once a return deduced it. The back end and the interpreter get the deduced type
   with the body. Mangling keeps a template's declared placeholder as `Da`/`Dc`.
+- **Linux direct calls:** the AMD64 ABI check uses the callee definition's deduced signature
+  when the declaration still needs its result type. The definition is already in the translation
+  unit. Calls can return supported `auto` and `decltype(auto)` results, including references and
+  pointers. [#441](https://github.com/yrashk/ycxx/issues/441)
 - **Calls through pointers to functions:** irgen emits `call_ind` (`Gen::call_pointer`), which
   lowering, AArch64 selection and the interpreter already had; constant evaluation calls through
   them too.
-- Tests: `tests/own/auto/` (49 spec-only, 4 more): 47 pass, 6 are XFAIL: member structured bindings
-  (#285), `static_cast<int&&>` (#199).
+- Tests: `tests/own/auto/` (49 spec-only, 4 more) include 48 passes and 5 expected failures
+  for member structured bindings (#285).
   `p1-impl-mangle` checks the `Da`/`Dc` names against Clang objects.
 - Not yet: constrained `C auto`, `auto x = {…}`, `auto x(e)` at namespace scope, abbreviated
   function templates (#286); member and tuple-like bindings and other declaration contexts
@@ -1833,12 +1885,28 @@ checked against Clang 23 and GCC 16 probes).
   TU-local. Names and capture layout are checked against Clang objects (`p2-impl-mangle`).
 - Tests: `tests/own/lambda/` (56 spec-only, 1 ABI): 55 pass, 2 XFAIL (default arguments #300,
   block-scope statics #291).
-- Not yet: lambdas outside function bodies (#338); generic lambdas, template lambdas, pack
+- Not yet: further lambda declaration contexts ([#338](https://github.com/yrashk/ycxx/issues/338));
+  generic lambdas, template lambdas, pack
   captures and constexpr lambdas (#281); the conversion function's own symbol, conversions in
   contextual and operator contexts, invokers for class or variadic parameters (#339); arrays of
   non-trivially-copyable classes captured by copy (#353); weak definitions of closure members in
   inline functions (#124). A constant named by a lambda with a capture-default is captured, where
   Clang captures it only when it is odr-used (a layout difference for such closures, #355).
+
+## Namespace variable lambdas (#338)
+
+- A named internal-linkage namespace variable with a deduced type can be initialized by a
+  noncapturing, non-generic lambda. The declarator's identity owns the closure before deduction,
+  and its entity record is published with the resolved type. Its body looks up names in the
+  enclosing namespace. Use of the owner during deduction diagnoses an undeduced placeholder.
+- `ItemSema` records the closure members. The front end emits the call operator and scalar
+  invoker through the body closure path. Their local symbols use the variable's Itanium
+  `<closure-prefix>`. The completed empty closure occupies static storage and supports
+  `constinit`.
+- `unit.linux_namespace_lambda` checks runtime namespace lookup, static storage, function pointer
+  conversion, local names across objects, and daemon edits with a cold comparison. Other
+  declaration contexts and namespace init-captures remain under
+  [#338](https://github.com/yrashk/ycxx/issues/338).
 
 ## Floating point, the μ slice (#336, 2026-11-19)
 
@@ -1911,8 +1979,8 @@ values, end to end; results match Clang's bit for bit.
   and closure members are constexpr; the interpreter does not evaluate class objects yet (#262),
   so constexpr lambdas wait on it.
 - Tests: `tests/own/lambda/p3-*` (33 spec-only + 6 own, one an ABI test against Clang objects):
-  all but 12 pass; those are XFAIL (constexpr lambdas #262, default arguments #300,
-  `static_cast<T&&>` and dependent `decltype` #199, a generic lambda's conversion #339, explicit
+  all but 11 pass; those are XFAIL (constexpr lambdas #262, default arguments #300,
+  dependent `decltype` #199, a generic lambda's conversion #339, explicit
   template arguments #347).
 - **Packs:** `auto... xs` invents a template parameter pack and `[]<class... Ts>(Ts... xs)`
   declares one; a specialization's parameters are the pack's elements (`open_generic`), and the

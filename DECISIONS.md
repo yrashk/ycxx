@@ -30,6 +30,9 @@ reasoning; do not leave decisions only in issue threads.
      GNU archive in process. It validates inputs with the ELF object reader, retains the original
      payloads in operand order and indexes named nonlocal definitions, including weak and hidden
      definitions. Astra reviewed the design (#389).
+   - Linux x86-64 [external data addresses](docs/design/linux-external-data-addresses.md) use
+     a GOT relocation in relocatable objects. The native static linker relaxes the validated
+     RIP-relative load to a direct address after symbol resolution (#414).
 4. **Optimization is designed in from the start, and delivered after correctness.** The first
    back end aims for correct, debuggable code of roughly `-O0`/`-O1` quality. The architecture
    (§4.8) is laid out from day one for optimization by search, solvers and measured cost models,
@@ -208,6 +211,9 @@ specified by the accepted [optimization design](docs/design/optimization.md) (#3
      the namespaces associated with argument types at the lexical point. Dependent calls also
      use the existing instantiation context. The search supplies candidates to overload
      resolution and provides the ADL-only fallback for range-based `for` (#165).
+   - [Braced arguments](docs/design/braced-overload-resolution.md) contribute conversion sequences
+     before overload selection. Parameter initialization and narrowing checks apply to the
+     selected function (#231).
    - **Identity without positions.** Items are cut from the preprocessed tokens before parsing.
      Their ids exclude bodies and positions, and locations are `(item, offset)`. Declaration ids
      and structural entity ids are separate. *Reason:* edits elsewhere disturb no keys. (§B1, §B2)
@@ -377,6 +383,8 @@ specified by the accepted [optimization design](docs/design/optimization.md) (#3
      lambda's body is analysed inside the enclosing part, captures resolved through a frame per
      lambda into fields of the closure, and its members emitted with that part (#280,
      [closures.md](docs/design/closures.md), decided by Fable).
+     An internal namespace variable can own a captureless closure. Its declarator anchors the
+     identity before type deduction, and the declaration part carries its members (#338).
 10. **The resident daemon.** Specified by the accepted [daemon design](docs/design/daemon.md)
     (#83); the section references in this item point into it.
     - **One daemon per project root and ycxx binary.** The root is the first `.ycxx` or

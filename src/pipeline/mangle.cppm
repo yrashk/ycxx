@@ -57,6 +57,7 @@ struct ClassName {
   std::uint32_t closure_number = 0;
   std::shared_ptr<const LocalFunction> local{};
   std::optional<std::uint32_t> unnamed_type_ordinal{};
+  ast::EntityId closure_variable = ast::EntityId::none;
 };
 using ClassNames = std::function<ClassName(ast::EntityId)>;
 
@@ -315,6 +316,8 @@ class Mangler {
     if (auto s = find(key)) return *s;
     ClassName n = classes_ ? classes_(e) : ClassName{};
     if (n.closure) {
+      if (n.closure_variable != ast::EntityId::none)
+        return prefix(e).transform([](std::string p) { return "N" + p + "E"; });
       // A closure type as a type: the <local-name> `Z <encoding> E <closure-type-name>` (§5.1.6).
       if (!n.local) return std::unexpected("a closure type whose function is unknown");
       auto l = local_encoding(*n.local);
@@ -353,9 +356,15 @@ class Mangler {
       // <closure-type-name> ::= Ul <lambda-sig> E [<number>] _, its parameter types or `v`; the
       // n-th closure of one signature in its context is numbered n − 2 (§5.1.8). Its context is
       // the <local-name> before the nested-name it begins.
+      std::string r;
+      if (n.closure_variable != ast::EntityId::none) {
+        auto owner = prefix(n.closure_variable);
+        if (!owner) return owner;
+        r = *owner + "M";  // <closure-prefix> ::= <name> M (§5.1.8)
+      }
       auto sig = closure_sig(n);
       if (!sig) return sig;
-      std::string r = "Ul" + *sig + "E" + (n.closure_number ? std::to_string(n.closure_number - 1) : "") + "_";
+      r += "Ul" + *sig + "E" + (n.closure_number ? std::to_string(n.closure_number - 1) : "") + "_";
       candidates_.push_back(key);
       return r;
     }
@@ -415,7 +424,7 @@ class Mangler {
     std::string out = unqualified;
     if (scope != ast::EntityId::none) {
       std::string local;
-      if (sc.closure) {
+      if (sc.closure && sc.closure_variable == ast::EntityId::none) {
         if (!sc.local) return std::unexpected("a closure type whose function is unknown");
         auto l = local_encoding(*sc.local);
         if (!l) return l;

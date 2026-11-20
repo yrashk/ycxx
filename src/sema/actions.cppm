@@ -851,6 +851,8 @@ public:
       diag(name_at, Diag::no_member, n, *s.type);
       return {NodeId::none, begin, end};
     }
+    if (namespace_lambda && namespace_lambda->name == n && namespace_lambda->scope == *s.ns)
+      return undeduced_namespace_lambda(n, name_at, end);
     std::vector<ast::DeclSema> found = q_->namespace_members(*s.ns, n);
     if (found.empty()) {
       diag(name_at, Diag::no_namespace_member, n);
@@ -892,15 +894,17 @@ public:
 
   // [dcl.init.string]/1: the code units, terminating null included, of string literal `e` when it
   // can initialize an array of `elem`: an ordinary literal one of char, signed char or unsigned
-  // char, a UTF-8 literal one of char8_t, char or unsigned char.
-  std::optional<std::string> string_units(QualType elem, Ex e) {
+  // char, a UTF-8 literal one of char8_t, char or unsigned char, and UTF-16 and UTF-32 literals
+  // arrays of their respective element types.
+  std::optional<std::vector<u32>> string_units(QualType elem, Ex e) {
     if (!e.ok() || !types().is_array(e.type())) return std::nullopt;
     auto lit = as<ast::Literal>(e);
     auto src = types().builtin_of(Types::unqualified(types().rec(e.type()).inner));
     auto dst = types().builtin_of(Types::unqualified(elem));
     if (!lit || !src || !dst) return std::nullopt;
-    bool fits = (*src == Builtin::char_ && (*dst == Builtin::char_ || *dst == Builtin::signed_char || *dst == Builtin::unsigned_char)) ||
-                (*src == Builtin::char8_t_ && (*dst == Builtin::char8_t_ || *dst == Builtin::char_ || *dst == Builtin::unsigned_char));
+    using enum Builtin;
+    bool fits = *src == *dst || (*src == char_ && (*dst == signed_char || *dst == unsigned_char)) ||
+                (*src == char8_t_ && (*dst == char_ || *dst == unsigned_char));
     if (!fits) return std::nullopt;
     return w_->values.rec(lit->value).units;
   }
@@ -923,8 +927,8 @@ public:
     Braced b;
     b.begin = e.begin;
     b.end = e.end;
-    for (char u : *units)
-      b.clauses.push_back({literal(elem, w_->values.integer(elem, static_cast<unsigned char>(u)), ValueCategory::prvalue, e.begin, e.end),
+    for (u32 u : *units)
+      b.clauses.push_back({literal(elem, w_->values.integer(elem, u), ValueCategory::prvalue, e.begin, e.end),
                            nullptr, {}, false, e.begin});
     return list_init(t, b);
   }
@@ -1796,6 +1800,11 @@ public:
   bool dependent(const Braced& b) {
     return std::ranges::any_of(b.clauses, [&](const Braced::Clause& c) { return c.list ? dependent(*c.list) : dependent(c.expr); });
   }
+  bool type_dependent(const Braced& b) {
+    return std::ranges::any_of(b.clauses, [&](const Braced::Clause& c) {
+      return c.list ? type_dependent(*c.list) : c.expr.ok() && types().is_dependent(c.expr.type());
+    });
+  }
   // A dependent construct over `ops` in [begin, end): of type `t` when only its value depends on
   // a template parameter, else of the dependent type.
   Ex dependent_node(std::span<const Ex> ops, u32 begin, u32 end, std::optional<QualType> t = std::nullopt,
@@ -2171,6 +2180,16 @@ public:
   bool open_lambda(LambdaSpec spec) {
     // The enclosing entity: the function, or the enclosing lambda's operator().
     EntityId scope = lambdas_.empty() ? current_function : lambdas_.back().call;
+    const bool in_initializer = scope == EntityId::none && namespace_lambda && namespace_lambda->begin == spec.begin;
+    if (in_initializer) {
+      if (spec.default_capture || spec.has_capture || !spec.head.empty()) {
+        diag(spec.begin, spec.default_capture ? Diag::namespace_lambda_capture_default
+                         : spec.has_capture ? Diag::namespace_lambda_init_capture
+                                            : Diag::namespace_lambda_generic);
+        return false;
+      }
+      scope = namespace_lambda->owner;
+    }
     if (scope == EntityId::none) {
       diag(spec.begin, Diag::not_supported, lex::Tk::l_square);  // a lambda outside a function body
       return false;
@@ -2191,7 +2210,7 @@ public:
     u32 ordinal = 0;
     for (const auto& [sc, sg] : completed_closures_)
       if (sc == scope && sg == sig) ++ordinal;
-    ast::Linkage linkage = closure_linkage(scope);
+    ast::Linkage linkage = in_initializer ? ast::Linkage::internal : closure_linkage(scope);
     // Its record's type, which names it (the <lambda-sig>), has a generic lambda's parameters at
     // depth 0, as the innermost template's are mangled.
     EntityRec cr{EntityKind::class_, no_name(), rebased(call_type, spec.head), LangLinkage::cxx, linkage, {}, scope};
@@ -2841,6 +2860,17 @@ public:
   // The function whose body is being analysed, none outside one: a friend of a class may name its
   // private members ([class.friend]/2).
   EntityId current_function = EntityId::none;
+  struct NamespaceLambda {
+    EntityId owner, scope;
+    NameId name;
+    u32 begin;
+  };
+  std::optional<NamespaceLambda> namespace_lambda;
+
+  Ex undeduced_namespace_lambda(NameId name, u32 begin, u32 end) {
+    diag(begin, Diag::auto_used_in_initializer, name);
+    return {NodeId::none, begin, end};
+  }
 
   // [class.access]/1–2: whether a member of class `c` with access `a` can be named here. A public
   // one anywhere; a private or protected one in a member of `c` or of a class nested in it
@@ -3078,7 +3108,13 @@ public:
   std::optional<Ex> find_enumerator(EntityId e, NameId name, u32 begin, u32 end) {
     if (const EnumRec* r = enum_rec(e))
       for (const EnumeratorRec& x : r->enumerators)
-        if (x.name == name) return enumerator(x.entity, types().enum_type(e), begin, end);
+        if (x.name == name) {
+          // A definition may have been analyzed for a later point. Its enumerator is only
+          // visible where the constant is available.
+          Ex value = enumerator(x.entity, types().enum_type(e), begin, end);
+          if (value.ok()) return value;
+          break;
+        }
     return std::nullopt;
   }
 
@@ -3286,6 +3322,8 @@ public:
   // conversion, then a tie-break among exact matches (an added qualification, or a reference
   // to a more cv-qualified type, is worse); `viable` false when there is none.
   struct Ics {
+    static constexpr int user_defined = 3;
+    static constexpr int ellipsis = 4;
     bool viable = false;
     int rank = 0;
     int sub = 0;              // a qualification conversion among exact matches ([over.ics.rank]/3.2.5)
@@ -3330,6 +3368,13 @@ public:
     return types().canonical(Types::unqualified(types().canonical(t)));
   }
 
+  // [dcl.init.ref]/5: a nonvolatile const lvalue reference can also bind directly to an object xvalue.
+  bool direct_reference_category(const Ex& e, const TypeRec& ref) {
+    if (ref.rvalue_ref && !types().is_function(ref.inner)) return e.cat() == ValueCategory::xvalue;
+    return e.cat() == ValueCategory::lvalue ||
+           (!ref.rvalue_ref && object_cv(ref.inner) == Cv::const_ && e.cat() == ValueCategory::xvalue);
+  }
+
   // The type `a` has after the lvalue conversions ([conv.lval], [conv.array], [conv.func]).
   QualType value_type(const Ex& a) {
     QualType t = a.type();
@@ -3355,18 +3400,17 @@ public:
     if (types().is_reference(p)) {
       TypeRec r = types().rec(p);
       QualType t = r.inner;
-      // [dcl.init.ref]: a direct binding to an lvalue (or, for an rvalue reference, an xvalue)
-      // of the type, no less qualified.
-      bool direct_cat = r.rvalue_ref && !types().is_function(t) ? a.cat() == ValueCategory::xvalue : a.cat() == ValueCategory::lvalue;
-      if (direct_cat && same_unqualified(a.type(), t) && cv_within(object_cv(a.type()), object_cv(t))) {
+      const bool direct_cat = direct_reference_category(a, r);
+      if (direct_cat && same_unqualified(a.type(), t)) {
+        if (!cv_within(object_cv(a.type()), object_cv(t))) return {};
         Ics v = binding({true, 0, 0}, r.rvalue_ref, a.cat() != ValueCategory::lvalue,
                         cv_bits(object_cv(t)) - cv_bits(object_cv(a.type())));
         v.function_ref = types().is_function(t);
         return v;
       }
       // [over.ics.ref]/1: binding to a base class subobject is a derived-to-base Conversion.
-      if (int d = base_depth(a.type(), t); d && (direct_cat || (a.glvalue() && (r.rvalue_ref || object_cv(t) == Cv::const_))) &&
-                                             cv_within(object_cv(a.type()), object_cv(t))) {
+      if (int d = base_depth(a.type(), t); d && direct_cat) {
+        if (!cv_within(object_cv(a.type()), object_cv(t))) return {};
         Ics v = binding({true, 2, 0}, r.rvalue_ref, a.cat() != ValueCategory::lvalue, cv_bits(object_cv(t)) - cv_bits(object_cv(a.type())));
         v.base_depth = d;
         return v;
@@ -3391,7 +3435,7 @@ public:
     }
     if (types().is_pointer(to) && is_null_pointer_constant(a)) return {true, 2, 0};
     // A user-defined conversion: a closure's to a pointer to function ([over.best.ics]/2).
-    if (closure_invoker(a.type(), to)) return {true, 3, 0};
+    if (closure_invoker(a.type(), to)) return {true, Ics::user_defined, 0};
     QualType from = value_type(a);
     if (types().is_class(from) || types().is_void(from)) return {};
     if (types().canonical(from) == types().canonical(to)) return {true, 0, 0};
@@ -3435,15 +3479,54 @@ public:
     return {};
   }
 
+  // [over.ics.list]: rank a braced argument before initializing the selected parameter.
+  // A disengaged result is a list conversion this slice does not classify.
+  std::optional<Ics> list_ics(const Braced& list, QualType parameter) {
+    const bool flat = std::ranges::none_of(list.clauses, [](const Braced::Clause& c) { return c.list || c.designated; });
+    if (types().is_scalar(parameter)) {
+      if (!flat || list.clauses.size() > 1) return Ics{};
+      if (!types().is_arithmetic(parameter)) return std::nullopt;
+      if (list.clauses.empty()) return Ics{true};
+      const Ex& expr = list.clauses.front().expr;
+      if (expr.ok() && types().is_class(expr.type())) return std::nullopt;
+      return ics(expr, parameter);
+    }
+    if (!flat || !types().is_class(parameter)) return std::nullopt;
+    EntityId entity = types().class_of(parameter);
+    if (w_->entities.rec(entity).templ != EntityId::none) return std::nullopt;
+    const ClassRec* record = class_rec(entity);
+    if (!record || record->union_ || record->closure || record->user_ctors || !record->bases.empty() ||
+        !std::ranges::all_of(record->fields, [&](const FieldRec& f) {
+          return types().is_arithmetic(f.type) && record->access_of(f.entity) == ast::Access::public_;
+        }))
+      return std::nullopt;
+    // A single class-valued clause can instead use the same-class or base conversion.
+    for (const Braced::Clause& c : list.clauses) {
+      if (!c.expr.ok()) return Ics{};
+      if (!types().is_arithmetic(c.expr.type())) return std::nullopt;
+    }
+    if (list.clauses.size() > record->fields.size()) return Ics{};
+    for (std::size_t i = 0; i < list.clauses.size(); ++i)
+      if (!ics(list.clauses[i].expr, record->fields[i].type).viable) return Ics{};
+    // The field conversions establish viability. Their ranks and narrowing do not rank the list.
+    return Ics{true, Ics::user_defined};
+  }
+
   // The best viable candidate for `args` ([over.match.best]), diagnosed at `at` when there is
   // none or more than one, or when it is deleted. `object_cv` is the implicit object's, for
   // non-static member functions.
   std::optional<std::size_t> resolve(std::span<const Candidate> cands, std::span<const Ex> args, u32 at, NameId name,
-                                     std::optional<Cv> object_cv, std::optional<QualType> ctor_of = std::nullopt) {
+                                     std::optional<Cv> object_cv, std::optional<QualType> ctor_of = std::nullopt,
+                                     std::span<const Braced* const> lists = {}) {
     std::vector<std::pair<std::size_t, std::vector<Ics>>> viable;
+    const Braced* first_list = lists.empty() ? nullptr : *std::ranges::find_if(lists, [](const Braced* list) { return list; });
+    const Braced* unsupported = nullptr;
     for (std::size_t i = 0; i < cands.size(); ++i) {
       TypeRec fr = types().rec(cands[i].type);
-      if (args.size() < cands[i].required(fr.params.size()) || (args.size() > fr.params.size() && !fr.variadic)) continue;
+      const bool template_list = first_list && cands[i].pattern;
+      const bool pack = template_list && !fr.params.empty() && types().kind(fr.params.back()) == TypeKind::pack_expansion;
+      const std::size_t fixed = fr.params.size() - (pack ? 1 : 0);
+      if (args.size() < cands[i].required(fixed) || (args.size() > fixed && !fr.variadic && !pack)) continue;
       std::vector<Ics> seq;
       // The implicit object parameter, first: the object must not be more cv-qualified.
       if (!cands[i].no_object && object_cv) {
@@ -3454,11 +3537,41 @@ public:
       }
       bool ok = true;
       for (std::size_t k = 0; k < args.size() && ok; ++k) {
-        Ics c = k < fr.params.size() ? ics(args[k], fr.params[k]) : Ics{true, 3, 0};  // the ellipsis
+        Ics c{true};
+        if (k >= fixed) {
+          c.rank = Ics::ellipsis;
+        } else if ((!first_list || !lists[k]) && (!template_list || !types().is_dependent(fr.params[k]))) {
+          c = ics(args[k], fr.params[k]);
+        }
         ok = c.viable;
         seq.push_back(c);
       }
-      if (ok) viable.push_back({i, std::move(seq)});
+      if (!ok) continue;
+      // A candidate excluded by any argument cannot affect selection, even when another
+      // argument's list conversion is outside the supported subset.
+      const Braced* unknown = template_list ? first_list : nullptr;
+      if (first_list && !template_list) {
+        for (std::size_t k = 0; k < args.size() && k < fixed && ok; ++k) {
+          if (!lists[k]) continue;
+          auto c = list_ics(*lists[k], fr.params[k]);
+          if (c) {
+            ok = c->viable;
+            seq[k + 1] = *c;
+          } else if (!unknown) {
+            unknown = lists[k];
+          }
+        }
+      }
+      if (!ok) continue;
+      if (unknown) {
+        if (!unsupported || unknown->begin < unsupported->begin) unsupported = unknown;
+      } else {
+        viable.push_back({i, std::move(seq)});
+      }
+    }
+    if (unsupported) {
+      diag(unsupported->begin, Diag::not_supported, lex::Tk::l_brace);
+      return std::nullopt;
     }
     auto report = [&](Diag fn, Diag ctor) {
       if (ctor_of) diag(at, ctor, Types::unqualified(*ctor_of));
@@ -3684,7 +3797,7 @@ public:
       diag(at_, Diag::bit_field_reference);
       return fail;
     }
-    bool direct_cat = rr.rvalue_ref && !types().is_function(t) ? e.cat() == ValueCategory::xvalue : e.cat() == ValueCategory::lvalue;
+    const bool direct_cat = direct_reference_category(e, rr);
     if (direct_cat && same_unqualified(e.type(), t)) {
       if (cv_within(object_cv(e.type()), object_cv(t))) return extend ? extended(e) : e;
       diag(at_, Diag::bind_drops_qualifiers, e.type(), r);
@@ -3717,9 +3830,8 @@ public:
       diag(at_, Diag::bind_to_lvalue, t);
       return fail;
     }
-    if (e.glvalue() && same_unqualified(e.type(), t) && cv_within(object_cv(e.type()), object_cv(t)))
-      return extend ? extended(e) : e;
-    if (!e.glvalue() && types().is_array(t) && same_unqualified(e.type(), t) && cv_within(object_cv(e.type()), object_cv(t)))
+    if (!e.glvalue() && types().is_array(t) && same_unqualified(e.type(), t) &&
+        cv_within(object_cv(e.type()), object_cv(t)))
       return materialize(e, t, extend);  // [dcl.init.ref]/5.3: a reference-compatible array prvalue
     Ex v = convert(e, Types::unqualified(t), at_);
     if (!v.ok() || v.glvalue()) return v;
@@ -3736,8 +3848,9 @@ public:
       Ex inner = extended({p->operand.id, e.begin + p->operand.at, e.end, {}});
       return node(ast::Paren{p->info, at(inner, e.begin)}, e.begin, e.end, p->info);
     }
-    // Through a base class subobject (`const B& b = derived_glvalue_of_a_temporary`).
-    if (auto c = as<ast::ImplicitConversion>(e); c && c->conversion == ast::ConversionKind::derived_to_base) {
+    // Through a base subobject or an identity-preserving glvalue cast ([class.temporary]/6).
+    if (auto c = as<ast::ImplicitConversion>(e); c &&
+        (c->conversion == ast::ConversionKind::derived_to_base || c->conversion == ast::ConversionKind::qualification)) {
       Ex inner = extended({c->operand.id, e.begin + c->operand.at, e.end, {}});
       return node(ast::ImplicitConversion{c->info, c->conversion, c->function, at(inner, e.begin)}, e.begin, e.end, c->info);
     }
@@ -3840,6 +3953,8 @@ public:
           return static_member(current_class, m->entity, m->type, begin, end);
         }
     }
+    if (namespace_lambda && namespace_lambda->name == name)
+      return undeduced_namespace_lambda(name, begin, end);
     std::vector<ast::DeclSema> found;
     for (auto p = own.rbegin(); p != own.rend(); ++p)
       if (p->name == name) found.push_back(p->sema);
@@ -3919,8 +4034,8 @@ public:
         while (auto p = as<ast::Paren>(a)) a = {p->operand.id, a.begin + p->operand.at, a.end};
         auto lit = as<ast::Literal>(a);
         std::optional<u64> payload;
-        if (lit && w_->values.rec(lit->value).kind == ValueKind::string) {
-          std::string_view s = w_->values.rec(lit->value).units;
+        if (auto text = lit ? w_->values.narrow_string(lit->value) : std::nullopt) {
+          std::string_view s = *text;
           if (s.ends_with('\0')) s.remove_suffix(1);
           int base = s.starts_with("0x") || s.starts_with("0X") ? 16 : s.starts_with('0') ? 8 : 10;
           if (base == 16) s.remove_prefix(2);
@@ -4087,31 +4202,35 @@ public:
     return literal(t, ast::float_value(ins(), w_->target, t, ast::Bits128{lit.value, 0}), ValueCategory::prvalue, begin, end);
   }
 
-  // [lex.ccon]: an ordinary character literal has type char; a multicharacter one, int.
-  Ex char_literal(const lex::Literal& l, u32 begin, u32 end) {
+  static constexpr Builtin literal_character_type(lex::Encoding encoding) {
     using enum lex::Encoding;
-    Builtin k = Builtin::char_;
-    if (l.multichar) k = Builtin::int_;
-    else if (l.encoding == utf8) k = Builtin::char8_t_;
-    else if (l.encoding == utf16) k = Builtin::char16_t_;
-    else if (l.encoding == utf32) k = Builtin::char32_t_;
-    else if (l.encoding == wide) k = Builtin::wchar_t_;
-    QualType t = builtin(k);
+    switch (encoding) {
+      case ordinary: return Builtin::char_;
+      case utf8: return Builtin::char8_t_;
+      case utf16: return Builtin::char16_t_;
+      case utf32: return Builtin::char32_t_;
+      case wide: return Builtin::wchar_t_;
+    }
+    std::unreachable();
+  }
+
+  // [lex.ccon]: a character literal has the type given by its encoding; a multicharacter one, int.
+  Ex char_literal(const lex::Literal& l, u32 begin, u32 end) {
+    QualType t = builtin(l.multichar ? Builtin::int_ : literal_character_type(l.encoding));
     return literal(t, w_->values.integer(t, l.value), ValueCategory::prvalue, begin, end);
   }
 
-  // [lex.string]: an lvalue of type array of N const char, N counting the terminating null.
+  // [lex.string]: an lvalue array of const code units, including the terminating null.
   Ex string_literal(const lex::Literal& l, u32 begin, u32 end) {
-    if (l.encoding != lex::Encoding::ordinary && l.encoding != lex::Encoding::utf8) {
+    if (l.encoding == lex::Encoding::wide) {
       diag(begin, Diag::not_supported, lex::Tk::string_lit);
       return {NodeId::none, begin, end};
     }
-    std::string units;
-    for (u32 u : l.units) units.push_back(static_cast<char>(u));
-    units.push_back('\0');
-    Builtin elem = l.encoding == lex::Encoding::utf8 ? Builtin::char8_t_ : Builtin::char_;
+    std::vector<u32> units = l.units;
+    units.push_back(0);
+    Builtin elem = literal_character_type(l.encoding);
     QualType t = types().array(types().add_cv(builtin(elem), Cv::const_), units.size());
-    return literal(t, w_->values.string(t, std::move(units)), ValueCategory::lvalue, begin, end);
+    return literal(t, w_->values.string(t, units), ValueCategory::lvalue, begin, end);
   }
 
   Ex bool_literal(bool v, u32 begin, u32 end) {
@@ -4512,6 +4631,30 @@ public:
     return {NodeId::none, e.begin, e.end};
   }
 
+  // [expr.static.cast]/3: a cast to an rvalue reference can name a reference-compatible
+  // lvalue as an xvalue. Return no conversion when this rule does not apply.
+  std::optional<Ex> cast_lvalue_to_xvalue(Ex e, QualType to, QualType target, u32 at_) {
+    std::optional<EntityId> base;
+    if (!same_unqualified(e.type(), target)) {
+      if (types().is_class(e.type()) && types().is_class(target) && is_complete(e.type())) {
+        int paths = 0;
+        const auto cls = types().class_of(target);
+        if (!base_path(types().class_of(e.type()), cls, paths)) return std::nullopt;
+        base = cls;
+      } else if (!qualification_convertible(types().pointer(e.type()), types().pointer(target))) {
+        return std::nullopt;
+      }
+    }
+    if (!cv_within(object_cv(e.type()), object_cv(target))) {
+      diag(at_, Diag::bind_drops_qualifiers, e.type(), to);
+      return Ex{NodeId::none, e.begin, e.end};
+    }
+    if (base) e = to_base(e, *base, at_);
+    if (!e.ok()) return e;
+    if (e.info.bit_width) return materialize(rvalue(e), target, false);
+    return convert_node(e, ast::ConversionKind::qualification, target, ValueCategory::xvalue);
+  }
+
   // A conversion as `static_cast<to>(e)` performs it ([expr.static.cast]); a cast in functional
   // notation or a cast-expression is one when static_cast applies ([expr.type.conv]/2,
   // [expr.cast]/4). Downcasts and the const_cast and reinterpret_cast parts are not supported yet.
@@ -4522,7 +4665,14 @@ public:
     if (address_set(e)) return convert(e, to, at_);  // [over.over]: a cast supplies a target type
     QualType target = Types::unqualified(to);
     if (types().is_void(target)) return convert_node(e, ast::ConversionKind::to_void, target);  // /6
-    if (types().is_reference(to) || types().is_class(target) || types().is_array(target)) return convert(e, to, at_);
+    if (types().is_reference(to)) {
+      const TypeRec ref = types().rec(to);
+      if (ref.rvalue_ref && e.cat() == ValueCategory::lvalue && types().is_object(ref.inner)) {
+        if (auto cast = cast_lvalue_to_xvalue(e, to, ref.inner, at_)) return *cast;
+      }
+      return convert(e, to, at_);
+    }
+    if (types().is_class(target) || types().is_array(target)) return convert(e, to, at_);
     Ex v = rvalue(e);
     if (!v.ok()) return v;
     QualType from = Types::unqualified(v.type());
@@ -5381,32 +5531,32 @@ public:
       all.insert(all.end(), args.begin(), args.end());
       return dependent_node(all, begin, end);
     }
-    // A braced list as an argument is copy-list-initialization of its parameter
-    // ([dcl.init.list]/1); overload resolution with one ([over.ics.list]) is not supported yet, so
-    // the callee must be one function.
+    // Keep the direct initialization path for a sole known function
+    // ([dcl.init.list]/1).
     auto braced = std::ranges::find_if(args, [&](const Ex& a) { return is_braced(a); });
     if (braced != args.end() && types().is(callee.type(), Builtin::overload_set)) {
       const std::vector<ast::DeclSema>& set = overloads_.at(std::to_underlying(callee.id));
-      if (set.size() != 1 || (set[0].flags & decl_flag::template_)) {
-        diag(braced->begin, Diag::not_supported, lex::Tk::l_brace);
-        return {NodeId::none, begin, end};
+      if (set.size() == 1 && !(set[0].flags & decl_flag::template_)) {
+        auto st = deduced_function(set[0].entity, set[0].type, callee.begin);
+        if (!st) return {NodeId::none, begin, end};
+        defaults = found_defaults(set[0]);
+        if (set[0].flags & decl_flag::consteval_) consteval_.insert(std::to_underlying(set[0].entity));
+        if (set[0].flags & decl_flag::deleted) deleted_.insert(std::to_underlying(set[0].entity));
+        ExprInfo ci{*st, ValueCategory::lvalue, 0};
+        callee = node(ast::DeclRef{ci, set[0].entity}, callee.begin, callee.end, ci);
       }
-      auto st = deduced_function(set[0].entity, set[0].type, callee.begin);
-      if (!st) return {NodeId::none, begin, end};
-      defaults = found_defaults(set[0]);
-      if (set[0].flags & decl_flag::consteval_) consteval_.insert(std::to_underlying(set[0].entity));
-      if (set[0].flags & decl_flag::deleted) deleted_.insert(std::to_underlying(set[0].entity));
-      ExprInfo ci{*st, ValueCategory::lvalue, 0};
-      callee = node(ast::DeclRef{ci, set[0].entity}, callee.begin, callee.end, ci);
     }
     if (types().is(callee.type(), Builtin::overload_set)) {
       const std::vector<ast::DeclSema>& set = overloads_.at(std::to_underlying(callee.id));
       auto ex = explicit_args_.find(std::to_underlying(callee.id));
       std::span<const TemplateArg> explicit_args;
       if (ex != explicit_args_.end()) explicit_args = ex->second;
+      std::vector<const Braced*> lists;
+      if (braced != args.end())
+        for (const Ex& a : args) lists.push_back(braced_list(a));
       std::vector<ArgShape> shapes;
-      for (const Ex& a : args)
-        shapes.push_back(argument_shape(a));
+      if (lists.empty())
+        for (const Ex& a : args) shapes.push_back(argument_shape(a));
       std::vector<Candidate> cands;
       std::vector<const ast::DeclSema*> decls;
       for (const ast::DeclSema& d : set) {
@@ -5415,6 +5565,13 @@ public:
           // Explicit template arguments name only templates ([temp.arg.explicit]).
           if (ex != explicit_args_.end()) continue;
           cands.push_back({d.entity, d.type, true, deleted, nullptr, found_defaults(d)});
+          decls.push_back(&d);
+          continue;
+        }
+        if (!lists.empty()) {
+          // General deduction from a braced list is deferred (#231). Keep a possible
+          // candidate so it cannot disappear before viability is checked.
+          cands.push_back({d.entity, d.type, true, deleted, &d, found_defaults(d)});
           decls.push_back(&d);
           continue;
         }
@@ -5436,7 +5593,7 @@ public:
         cands.push_back({specialization(d, *targs, *st), *st, true, deleted, &d, found_defaults(d)});
         decls.push_back(&d);
       }
-      auto chosen = resolve(cands, args, callee.begin, w_->entities.rec(set.front().entity).name, std::nullopt);
+      auto chosen = resolve(cands, args, callee.begin, w_->entities.rec(set.front().entity).name, std::nullopt, std::nullopt, lists);
       if (!chosen) return {NodeId::none, begin, end};
       const ast::DeclSema& d = *decls[*chosen];
       const Candidate& k = cands[*chosen];
@@ -5618,12 +5775,20 @@ public:
   }
 
   Ex braced_argument(std::unique_ptr<Braced> b) {
-    ExprInfo info{builtin(Builtin::void_), ValueCategory::prvalue, 0};
+    // The placeholder carries the list's dependency for [temp.dep] and [temp.dep.expr].
+    const bool type_dep = type_dependent(*b);
+    ExprInfo info{builtin(type_dep ? Builtin::dependent : Builtin::void_), ValueCategory::prvalue,
+                  type_dep || dependent(*b) ? expr_flag::dependent : u8(0)};
     Ex r = node(ast::ValueInit{info}, b->begin, b->end, info);
     braced_args_[std::to_underlying(r.id)] = std::move(b);
     return r;
   }
-  bool is_braced(const Ex& e) const { return e.ok() && braced_args_.contains(std::to_underlying(e.id)); }
+  const Braced* braced_list(const Ex& e) const {
+    if (!e.ok()) return nullptr;
+    auto it = braced_args_.find(std::to_underlying(e.id));
+    return it == braced_args_.end() ? nullptr : it->second.get();
+  }
+  bool is_braced(const Ex& e) const { return braced_list(e) != nullptr; }
 
   // The arguments of a call to a function of type `fr`, each copy-initializing its parameter.
   // A parameter without an argument takes its default argument ([dcl.fct.default], [expr.call]/5).

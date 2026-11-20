@@ -104,7 +104,7 @@ void redeclarations_and_linkage() {
         "the string decays to const char*");
   auto lit = a.get<ast::Literal>(arg.operand.id);
   const sema::ValueRec& v = a.w.values.rec(lit.value);
-  check(v.kind == sema::ValueKind::string && v.units == std::string("hi\0", 3), "the string's units");
+  check(v.kind == sema::ValueKind::string && v.units == std::vector<std::uint32_t>{'h', 'i', 0}, "the string's units");
   check(lit.info.category == ast::ValueCategory::lvalue && a.spell(lit.info.type) == "const char[3]",
         "a string literal is an lvalue array");
 }
