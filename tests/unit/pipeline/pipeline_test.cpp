@@ -51,12 +51,13 @@ struct TestConstants final : pl::Constants {
     objects[c] = s;
     return c;
   }
-  std::optional<std::vector<std::uint8_t>> string_object(ConstId c) const override {
+  std::optional<StringObject> string_object(ConstId c) const override {
     auto it = objects.find(c);
     if (it == objects.end()) return std::nullopt;
-    std::vector<std::uint8_t> units(it->second.begin(), it->second.end());
+    std::vector<std::uint32_t> units;
+    for (unsigned char u : it->second) units.push_back(u);
     units.push_back(0);
-    return units;
+    return StringObject{ast::Builtin::char_, std::move(units)};
   }
   std::optional<Address> address(ConstId c) const override {
     auto it = addresses.find(c);

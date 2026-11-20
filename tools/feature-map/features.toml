@@ -170,9 +170,8 @@ detect = '''\b(?:u8|u|U)R?(?:""|'{2})|\bchar(?:16|32)_t\b'''
 probe = '''
 int main() { const char16_t* s = u"ab"; char32_t c = U'x'; return (s[1] == u'b' && c == 120) ? 0 : 1; }
 '''
-status = 'partial'
+status = 'done'
 issues = [288]
-note = '`u"…"` and `U"…"` strings'
 
 [[feature]]
 id = 'lex-char8'

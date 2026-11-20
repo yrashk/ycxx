@@ -179,6 +179,16 @@ What is true of the code today. Work in progress and its owners are tracked in
 - Not yet: the extended floating types' values (#351); `long double`'s are binary64's, the
   target's (sema checks the format); the type of an integer literal (sema, #33).
 
+## UTF-16 and UTF-32 string literals (#288, 2026-11-20)
+
+- `u` and `U` string literals are lvalue arrays of `const char16_t` and `const char32_t`,
+  respectively ([lex.string]). Their bounds count the encoded code units and the terminating
+  null. The same units initialize matching character arrays and are available to constant
+  evaluation ([dcl.init.string], [expr.const]).
+- ELF and Mach-O put these literal objects in read-only data at the element type's alignment.
+- Tests in `tests/own/unicode-strings/` cover surrogate pairs, escape and raw forms,
+  concatenation, array initialization, and constant reads and addresses of literal objects.
+
 ## Preprocessor (#85, 2026-11-18)
 
 - `ycxx.pp` (`src/pp/`): phase 4 as query-engine.md §B9's contextual query, with a local stand-in
