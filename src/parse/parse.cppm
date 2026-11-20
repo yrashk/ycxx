@@ -131,6 +131,8 @@ public:
   const Result<ast::ClassDef>& class_def(u32 item);
   // The records of the classes and enumerations this unit has analysed.
   const sema::Classes& classes() const { return classes_; }
+  // Class and enumeration layouts affected by annotations erased from their types.
+  std::set<EntityId> uncertain_object_layouts() const;
   // The defining pattern selected for an instantiated class, including a partial specialization.
   std::optional<u32> class_pattern_item(EntityId c) const {
     auto it = class_patterns_.find(std::to_underlying(c));
@@ -1192,6 +1194,71 @@ private:
   friend class BodyAnalysis;
 };
 
+std::set<EntityId> Program::uncertain_object_layouts() const {
+  const auto& region = this->region();
+  const auto& items = this->items().items;
+  std::set<EntityId> uncertain;
+  std::set<EntityId> annotated_tags;
+  std::set<std::uint32_t> uncertain_definitions;
+  // Sema erases alias types. Remember affected spellings across alias declarations so a
+  // scalar alias that changed layout also makes records using it uncertain.
+  std::set<std::string_view> aliases;
+  auto uncertain_alias = [&](const items::Item& item, u32 end) {
+    if (aliases.empty()) return false;
+    for (std::uint32_t i = item.begin; i < end; ++i) {
+      auto tok = region.tokens[i];
+      if (tok.kind == lex::Tk::identifier && aliases.contains(region.name(tok)) &&
+          !std::ranges::contains(item.names, i - item.begin, &items::DeclName::offset)) return true;
+    }
+    return false;
+  };
+  for (std::uint32_t k = 0; k < items.size(); ++k) {
+    const auto& item = items[k];
+    const auto* analysed = analysed_item(k);
+    const bool definition = item.kind == items::ItemKind::class_def;
+    const bool enum_definition = item.kind == items::ItemKind::enum_def;
+    if (!analysed || (!definition && !enum_definition && item.kind != items::ItemKind::declaration)) continue;
+    const auto& ranges = region.possibly_packed;
+    auto pack = std::ranges::upper_bound(ranges, item.begin, {}, [](const auto& range) { return range.second; });
+    bool packed = definition && pack != ranges.end() && pack->first < item.brace_end;
+    // The attributes immediately after the type's closing brace can still apply to
+    // the type. Those within a following declarator apply to the declared name.
+    bool type_annotated = definition || enum_definition
+        ? items::layout_attribute(region, item.begin, item.brace_begin) ||
+          items::layout_attribute(region, item.brace_end, item.end, true) ||
+          (enum_definition && uncertain_alias(item, item.brace_begin))
+        : items::layout_attribute(region, item.begin, item.end) || uncertain_alias(item, item.end);
+    bool annotated = type_annotated ||
+        ((definition || enum_definition) && items::layout_attribute(region, item.brace_end, item.end));
+    if (!packed && !annotated) continue;
+    if (definition && (packed || type_annotated)) uncertain_definitions.insert(k);
+    for (auto d : w_->ins.seqs.elements(analysed->decls)) {
+      if (d.entity == EntityId::none) continue;
+      if (d.kind == ast::DeclKind::class_ && (packed || type_annotated)) {
+        uncertain.insert(d.entity);
+        if (!definition) annotated_tags.insert(d.entity);
+      }
+      if (type_annotated && d.kind == ast::DeclKind::enum_) uncertain.insert(d.entity);
+      if (annotated && d.kind == ast::DeclKind::data_member) {
+        uncertain.insert(w_->entities.rec(d.entity).scope);
+        if (item.parent != items::none) uncertain_definitions.insert(item.parent);
+      }
+      if (annotated && d.kind == ast::DeclKind::type_alias) {
+        if (w_->types.is_class(d.type)) uncertain.insert(w_->types.class_of(d.type));
+        else aliases.insert(w_->ins.names.spelling(w_->entities.rec(d.entity).name));
+      }
+    }
+  }
+  // Instantiated classes have their own entities. Their packing and field declarations
+  // come from the selected pattern, which may be a partial specialization.
+  for (EntityId c : classes().classes()) {
+    auto pattern = class_pattern_item(c);
+    if (pattern && (uncertain_definitions.contains(*pattern) || annotated_tags.contains(w_->entities.rec(c).templ)))
+      uncertain.insert(c);
+  }
+  return uncertain;
+}
+
 // Sema's questions, asked at an item's prefix (§B1.4).
 class AtItem final : public sema::Questions {
 public:
@@ -1200,6 +1267,29 @@ public:
   const sema::ClassRec& publish_class(EntityId c, sema::ClassRec r) override { return p_->publish_class(c, std::move(r), item_); }
   const sema::EnumRec* defining_enum(EntityId e) override {
     return p_->defining_enum_.first == e ? p_->defining_enum_.second : nullptr;
+  }
+  std::set<EntityId> uncertain_object_layouts() override { return p_->uncertain_object_layouts(); }
+  bool natural_record_layout(EntityId c) override {
+    auto definition = p_->class_items_.find(std::to_underlying(c));
+    auto pattern = definition != p_->class_items_.end() ? std::optional(definition->second) : p_->class_pattern_item(c);
+    if (!pattern) return false;
+    const auto& all = p_->items().items;
+    const items::Item& item = all[*pattern];
+    const pp::Region& region = p_->region();
+    const auto& ranges = region.possibly_packed;
+    auto packing = std::ranges::upper_bound(ranges, item.begin, {}, [](const auto& range) { return range.second; });
+    if (packing != ranges.end() && packing->first < item.brace_end) return false;
+    if (items::layout_attribute(region, item.begin, item.brace_begin) ||
+        items::layout_attribute(region, item.brace_end, item.end, true)) return false;
+    return std::ranges::none_of(item.members, [&](u32 pos) {
+      const items::Item& member = all[pos];
+      if (member.kind != items::ItemKind::declaration || !items::layout_attribute(region, member.begin, member.end))
+        return false;
+      const auto* analysed = p_->analysed_item(pos);
+      return !analysed || std::ranges::any_of(p_->world().ins.seqs.elements(analysed->decls), [](const ast::DeclSema& d) {
+        return d.kind == ast::DeclKind::data_member;
+      });
+    });
   }
   std::vector<DeclId> visible_decls(ast::NameId name, std::span<const EntityId> directives = {}) override {
     std::vector<std::string> paths;
@@ -1327,6 +1417,8 @@ class AtInstantiation final : public sema::Questions {
 public:
   AtInstantiation(Program& p, u32 item) : p_(&p), item_(item), at_(p, item, true) {}
   const sema::Classes& classes() override { return p_->classes(); }
+  bool natural_record_layout(EntityId c) override { return at_.natural_record_layout(c); }
+  std::set<EntityId> uncertain_object_layouts() override { return at_.uncertain_object_layouts(); }
   const sema::ClassRec& publish_class(EntityId c, sema::ClassRec r) override { return p_->publish_class(c, std::move(r), item_); }
   std::vector<DeclId> visible_decls(ast::NameId name, std::span<const EntityId> directives = {}) override {
     return at_.visible_decls(name, directives);
@@ -2903,6 +2995,11 @@ private:
       ps_.expect(Tk::semi);
       return;
     }
+    if (cls != EntityId::none) {
+      s_.diag(ps_.pos(), Diag::nested_enum_declarator_unsupported);
+      ps_.skip_to_semi();
+      return bad();
+    }
     DeclSpec spec;
     spec.begin = at;
     spec.type = t;
@@ -2910,7 +3007,7 @@ private:
     spec.is_typedef = td;
     do {
       parse::Declarator d = ps_.declarator(spec.type, false, spec.is_typedef);
-      if (!d.ok || !d.named || cls != EntityId::none || !declare(spec, d, LangLinkage::cxx, false, false)) {
+      if (!d.ok || !d.named || !declare(spec, d, LangLinkage::cxx, false, false)) {
         bad();
         ps_.skip_to_semi();
         return;

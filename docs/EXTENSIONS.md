@@ -29,7 +29,7 @@ use, in the headers libycxx's C library headers reach (`<cstdio>`, `<cstdlib>`, 
 | `__builtin_huge_val`, `__builtin_huge_valf`, `__builtin_huge_vall`, `__builtin_nanf`, `__builtin_nan`, `__builtin_nanl` | `math.h`'s `HUGE_VAL`, `HUGE_VALF`, `HUGE_VALL`, `NAN` | `__builtin_huge_val*()` is +infinity. `__builtin_nan*("s")` is the quiet NaN whose significand below the quiet bit is `s` read as `strtoull` reads it (decimal, `0` octal, `0x` hexadecimal; empty is 0), as in Clang and GCC; its argument must be a string literal | #336 |
 | `__builtin_alloca` | `alloca.h`'s `alloca` | Not yet: diagnosed as above where a program calls `alloca` | — |
 | `__builtin_constant_p` | `libkern/_OSByteOrder.h`'s `__DARWIN_OSSwapInt16/32/64` (`ntohs`, `htonl`, …) | Not yet: diagnosed as above where a program uses the macros | — |
-| `__builtin_offsetof` | `sys/_types.h`'s `__offsetof`, libycxx's `offsetof` | Not yet: diagnosed as above where a program uses `offsetof`, its arguments (a type first) skipped | — |
+| `__builtin_offsetof` | `sys/_types.h`'s `__offsetof`, libycxx's `offsetof` | `size_t` constant from the target record layout for a direct non-static data member of an ordinary standard-layout class or union. Diagnoses an invalid member or bit-field. | #248 |
 | `__builtin_expect` | the SDK's `assert.h`'s `assert` | Not yet: diagnosed as above where a program uses `assert`, which did not compile before #229 either (its other path calls `abort` undeclared; this one also needs `__func__`, [dcl.fct.def.general], which ycxx does not have yet) | — |
 
 The built-in functions marked "not yet" are listed in one table, `lex::lacking_builtins`

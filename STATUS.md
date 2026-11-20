@@ -1629,8 +1629,8 @@ Fable decided the representation (ast.md §6.6); the Opus session wrote the code
 - What the SDK's `__GNUC__` paths then use, in the headers libycxx's C headers reach, is in
   docs/EXTENSIONS.md. `__builtin_va_list` names the target's va_list type (`char*` on Darwin)
   where lookup finds nothing else (`ast::Target::va_list`, `Sema::builtin_type_name`).
-  The `__builtin_*` functions ycxx lacks (`__builtin_fabsf`, `__builtin_inff`, `__builtin_alloca`,
-  `__builtin_offsetof`, …) are diagnosed as "built-in function '…' is not supported yet", their
+  The `__builtin_*` functions ycxx lacks (such as `__builtin_alloca`) are diagnosed as
+  "built-in function '…' is not supported yet", their
   arguments skipped (`lex::lacking_builtins`, `Sema::unsupported_builtin`). Any other `__builtin_`
   name is an ordinary one, so a requires-expression probing it is unsatisfied.
 - Warnings located in a system header are not reported; errors are, and so is `#warning`, as
@@ -1729,6 +1729,9 @@ Fable decided the representation (ast.md §6.7); the Opus session wrote the code
   the shapes are built. A reference member is laid out as a pointer. Each reader computes a
   class's layout once (`Sema::class_places_`, `QueryLayout::class_layouts_` and `records_`), so
   nested classes cost linear time.
+- `offsetof` ([support.types.layout], #248) uses the same record layout for direct non-static
+  members in ordinary standard-layout classes and unions, producing a target `size_t`
+  constant. `__has_builtin(__builtin_offsetof)` reports availability.
 - Bases, a vptr and empty-base placement extend `record_layout`'s input when inheritance and
   virtual functions arrive.
 - Tests: `tests/own/classes/s7-sizeof-class.accept.cpp` (padding, nesting, arrays, unions,

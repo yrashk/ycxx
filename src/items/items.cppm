@@ -22,6 +22,41 @@ export import ycxx.pp;
 
 export namespace ycxx::items {
 
+// The parser skips attributes whose layout semantics we do not implement. Find those
+// that could change a record or field even though its computed offsets look natural.
+bool layout_attribute(const pp::Region& region, std::uint32_t begin, std::uint32_t end, bool leading_only = false) {
+  using enum lex::Tk;
+  for (std::uint32_t i = begin; i < end; ++i) {
+    auto tok = region.tokens[i];
+    if (tok.kind == kw_alignas) return true;
+    if (i + 1 == end) break;
+    const auto next = region.tokens[i + 1].kind;
+    bool bracket = tok.kind == l_square && next == l_square;
+    bool gnu = tok.kind == identifier && next == l_paren && region.name(tok) == "__attribute__";
+    if (!bracket && !gnu) {
+      if (leading_only) return false;
+      continue;
+    }
+    if (gnu) ++i;
+    const auto open = bracket ? l_square : l_paren;
+    const auto close = bracket ? r_square : r_paren;
+    std::uint32_t depth = 1;
+    while (++i < end && depth) {
+      auto part = region.tokens[i];
+      if (part.kind == open) ++depth;
+      else if (part.kind == close && --depth == 0) break;
+      else if (part.kind == identifier) {
+        auto name = region.name(part);
+        if (name.size() > 4 && name.starts_with("__") && name.ends_with("__"))
+          name = name.substr(2, name.size() - 4);
+        if (name == "packed" || name == "aligned" || name == "mode" || name == "vector_size" ||
+            name == "no_unique_address" || name == "ms_struct" || name == "gcc_struct") return true;
+      }
+    }
+  }
+  return false;
+}
+
 using lex::Tk;
 using lex::Tok;
 using lex::u32;

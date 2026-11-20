@@ -534,106 +534,6 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
   return tu;
 }
 
-namespace {
-
-// The parser skips attributes whose layout semantics we do not implement. Find those
-// that could change a record or field even though its computed offsets look natural.
-bool layout_attribute(const pp::Region& region, std::uint32_t begin, std::uint32_t end, bool leading_only = false) {
-  using enum lex::Tk;
-  for (std::uint32_t i = begin; i < end; ++i) {
-    auto tok = region.tokens[i];
-    if (tok.kind == kw_alignas) return true;
-    if (i + 1 == end) break;
-    const auto next = region.tokens[i + 1].kind;
-    bool bracket = tok.kind == l_square && next == l_square;
-    bool gnu = tok.kind == identifier && next == l_paren && region.name(tok) == "__attribute__";
-    if (!bracket && !gnu) {
-      if (leading_only) return false;
-      continue;
-    }
-    if (gnu) ++i;
-    const auto open = bracket ? l_square : l_paren;
-    const auto close = bracket ? r_square : r_paren;
-    std::uint32_t depth = 1;
-    while (++i < end && depth) {
-      auto part = region.tokens[i];
-      if (part.kind == open) ++depth;
-      else if (part.kind == close && --depth == 0) break;
-      else if (part.kind == identifier) {
-        auto name = region.name(part);
-        if (name.size() > 4 && name.starts_with("__") && name.ends_with("__"))
-          name = name.substr(2, name.size() - 4);
-        if (name == "packed" || name == "aligned" || name == "mode" || name == "vector_size" ||
-            name == "no_unique_address" || name == "ms_struct" || name == "gcc_struct") return true;
-      }
-    }
-  }
-  return false;
-}
-
-std::set<EntityId> uncertain_record_layouts(parse::Program& program, sema::World& world) {
-  const auto& region = program.region();
-  const auto& items = program.items().items;
-  std::set<EntityId> records;
-  std::set<EntityId> annotated_tags;
-  std::set<std::uint32_t> uncertain_definitions;
-  // Sema erases alias types. Remember affected spellings across alias declarations so a
-  // scalar alias that changed layout also makes records using it uncertain.
-  std::set<std::string_view> aliases;
-  auto uncertain_alias = [&](const items::Item& item) {
-    if (aliases.empty()) return false;
-    for (std::uint32_t i = item.begin; i < item.end; ++i) {
-      auto tok = region.tokens[i];
-      if (tok.kind == lex::Tk::identifier && aliases.contains(region.name(tok)) &&
-          !std::ranges::contains(item.names, i - item.begin, &items::DeclName::offset)) return true;
-    }
-    return false;
-  };
-  for (std::uint32_t k = 0; k < items.size(); ++k) {
-    const auto& item = items[k];
-    const auto* analysed = program.analysed_item(k);
-    const bool definition = item.kind == items::ItemKind::class_def;
-    if (!analysed || (!definition && item.kind != items::ItemKind::declaration)) continue;
-    const auto& ranges = region.possibly_packed;
-    auto pack = std::ranges::upper_bound(ranges, item.begin, {}, [](const auto& range) { return range.second; });
-    bool packed = definition && pack != ranges.end() && pack->first < item.brace_end;
-    // The attributes immediately after the type's closing brace can still apply to
-    // the type. Those within a following declarator apply to the declared name.
-    bool record_annotated = definition
-        ? layout_attribute(region, item.begin, item.brace_begin) ||
-          layout_attribute(region, item.brace_end, item.end, true)
-        : layout_attribute(region, item.begin, item.end) || uncertain_alias(item);
-    bool annotated = record_annotated || (definition && layout_attribute(region, item.brace_end, item.end));
-    if (!packed && !annotated) continue;
-    if (definition && (packed || record_annotated)) uncertain_definitions.insert(k);
-    for (auto d : world.ins.seqs.elements(analysed->decls)) {
-      if (d.entity == EntityId::none) continue;
-      if (d.kind == ast::DeclKind::class_ && (packed || record_annotated)) {
-        records.insert(d.entity);
-        if (!definition) annotated_tags.insert(d.entity);
-      }
-      if (annotated && d.kind == ast::DeclKind::data_member) {
-        records.insert(world.entities.rec(d.entity).scope);
-        if (item.parent != items::none) uncertain_definitions.insert(item.parent);
-      }
-      if (annotated && d.kind == ast::DeclKind::type_alias) {
-        if (world.types.is_class(d.type)) records.insert(world.types.class_of(d.type));
-        else aliases.insert(world.ins.names.spelling(world.entities.rec(d.entity).name));
-      }
-    }
-  }
-  // Instantiated classes have their own entities. Their packing and field declarations
-  // come from the selected pattern, which may be a partial specialization.
-  for (EntityId c : program.classes().classes()) {
-    auto pattern = program.class_pattern_item(c);
-    if (pattern && (uncertain_definitions.contains(*pattern) || annotated_tags.contains(world.entities.rec(c).templ)))
-      records.insert(c);
-  }
-  return records;
-}
-
-}  // namespace
-
 engine::query_task<FrontResult> TuFront::run(engine::Ctx& cx, TuId tu) {
   const TuSource& src = cx.fetch<TuSourceIn>(tu);
   contract_assert(src.file.has_value());  // a unit given as definitions has no front end
@@ -711,7 +611,7 @@ engine::query_task<FrontResult> TuFront::run(engine::Ctx& cx, TuId tu) {
   // The unit's own records of its classes and enumerations (#115).
   const sema::Classes& classes = program.classes();
   const auto uncertain = unit_source.config.target->triple == ast::x86_64_linux.triple
-      ? uncertain_record_layouts(program, world)
+      ? program.uncertain_object_layouts()
       : std::set<EntityId>{};
   for (EntityId c : classes.classes()) {
     ClassShape& shape = out.shapes.classes.emplace_back(ClassShape{c, {}, {}});
