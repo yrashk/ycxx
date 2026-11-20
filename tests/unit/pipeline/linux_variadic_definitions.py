@@ -49,7 +49,7 @@ def main():
                                         ('cstdarg-wrapper.cpp', 'cstdarg-host.cpp', ('linkage.o',))):
             run(ycxx, 'cxx', linux, *includes, '-c', callee, '-o', 'callee.o')
             for mode in ('-O0', '-O2'):
-                run(host_cxx, '-std=c++26', mode, driver, 'callee.o', *runtime, '-o', 'mixed')
+                run(host_cxx, '-std=c++26', mode, '-no-pie', driver, 'callee.o', *runtime, '-o', 'mixed')
                 run('./mixed')
 
         rejected = 'nonvariadic-va-start.reject.cpp'
@@ -66,7 +66,7 @@ def main():
             ('void f(void* ap) { va_end(ap); }', 'expected a mutable va_list cursor'),
             ('struct Cursor { unsigned gp, fp; void* overflow; void* save; };\n'
              'void f(Cursor* ap) { va_end(ap); }', 'expected a mutable va_list cursor'),
-            ('void f(std::va_list ap) { va_arg(ap, 3); }', 'expected a type specifier'),
+            ('void f(std::va_list ap) { va_arg(ap, 3); }', 'a declaration needs a type specifier'),
             ('void f(std::va_list ap) { va_arg(ap, short); }', 'outside the supported x86-64 System V'),
             ('void f(std::va_list ap) { va_arg(ap, double); }', 'outside the supported x86-64 System V'),
         )
@@ -85,13 +85,13 @@ def main():
                             '  int result = va_arg(ap, int); va_end(ap); return result;\n'
                             '}\n'
                             f'int main() {{ return first({arguments}, 59) != 59; }}\n')
-            args = (ycxx, 'cxx', linux, *includes, '-nostdlib', edit.name, 'linkage.o', '-o')
-            run(*args, 'fresh')
+            args = (ycxx, 'cxx', linux, *includes, '-c', edit.name, '-o')
+            run(*args, 'fresh.o')
+            run(ycxx, 'cxx', linux, '-nostdlib', 'fresh.o', 'linkage.o', '-o', 'fresh')
             run('./fresh')
             for _ in range(2):
-                run(*args, 'resident', env=daemon)
-                assert (scope / 'resident').read_bytes() == (scope / 'fresh').read_bytes()
-                run('./resident')
+                run(*args, 'resident.o', env=daemon)
+                assert (scope / 'resident.o').read_bytes() == (scope / 'fresh.o').read_bytes()
 
         # Use the same daemon scope to switch targets, then switch back.
         (scope / 'target.cpp').write_text('''
@@ -105,8 +105,8 @@ int target_control() { return 42; }
         run(*args, 'darwin-fresh.o')
         run(*args, 'darwin-resident.o', env=daemon)
         assert (scope / 'darwin-resident.o').read_bytes() == (scope / 'darwin-fresh.o').read_bytes()
-        run(ycxx, 'cxx', linux, *includes, '-nostdlib', edit.name, 'linkage.o', '-o', 'resident', env=daemon)
-        assert (scope / 'resident').read_bytes() == (scope / 'fresh').read_bytes()
+        run(ycxx, 'cxx', linux, *includes, '-c', edit.name, '-o', 'resident.o', env=daemon)
+        assert (scope / 'resident.o').read_bytes() == (scope / 'fresh.o').read_bytes()
 
 
 if __name__ == '__main__':
