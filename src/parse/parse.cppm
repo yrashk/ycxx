@@ -131,6 +131,11 @@ public:
   const Result<ast::ClassDef>& class_def(u32 item);
   // The records of the classes and enumerations this unit has analysed.
   const sema::Classes& classes() const { return classes_; }
+  // The defining pattern selected for an instantiated class, including a partial specialization.
+  std::optional<u32> class_pattern_item(EntityId c) const {
+    auto it = class_patterns_.find(std::to_underlying(c));
+    return it == class_patterns_.end() ? std::nullopt : std::optional(it->second);
+  }
   // This unit's declaration of member `e` in its class, once the class is analysed here.
   std::optional<DeclId> member_decl(EntityId e) const {
     auto it = member_decls_.find(std::to_underlying(e));
@@ -590,6 +595,20 @@ public:
     for (const auto& [k, d] : it->second)
       if (k <= item) r = d;
     return r;
+  }
+  // A previous definition of this entity in this TU ([basic.def.odr]). C language linkage
+  // can make a definition in another namespace correspond without ordinary lookup finding it.
+  bool function_defined_before(EntityId e, u32 item) {
+    if (auto known = definitions_.find(std::to_underlying(e)); known != definitions_.end() && known->second < item)
+      return true;
+    for (auto [j, k] : named(w_->ins.names.spelling(w_->entities.rec(e).name))) {
+      if (j >= item) break;
+      const items::Item& it = items_->items[j];
+      if (!in_global_scope(j) || it.kind != ItemKind::function) continue;
+      DeclId id{ids_[j], ast::make_decl_ord(ast::DeclClass::syntactic, it.names[k].ordinal)};
+      if (auto d = decl_sema(id); d && d->entity == e && (d->flags & sema::decl_flag::definition)) return true;
+    }
+    return false;
   }
   std::optional<ConstId> constant_value(EntityId e, u32 item) {
     variable_instance(e, item);
@@ -1764,14 +1783,15 @@ private:
     ps_.accept(Tk::kw_typename);
     u32 next = 0;
     auto sc = ps_.nested_name(0, next);
-    if (!sc || ps_.kind(next) != Tk::identifier) {
+    if (!sc || !ps_.lookup_id_ahead(next)) {
       s_.diag(ps_.pos(), Diag::not_a_namespace, ps_.is(Tk::identifier) ? ps_.name_of(ps_.tok()) : s_.no_name());
       return false;
     }
     for (u32 j = 0; j < next; ++j) ps_.bump();
-    NameId n = ps_.name_of(ps_.tok());
     u32 at = ps_.pos();
-    ps_.bump();
+    auto name = ps_.lookup_id();
+    if (!name) return false;
+    NameId n = *name;
     if (!sc->ns) {
       // [namespace.udecl]/8: a class member's only as a member-declaration; an enumerator's
       // (/7) is not supported yet.
@@ -1931,7 +1951,7 @@ private:
 
   bool operator_function_ok(const parse::Declarator& d) {
     std::string_view n = p_->world().ins.names.spelling(d.name);
-    if (!n.starts_with("operator") || n.size() == 8) return true;
+    if (!n.starts_with("operator") || n.size() == 8 || n.starts_with(lex::literal_operator_prefix)) return true;
     std::string_view op = n.substr(8);
     sema::Types& types = s_.types();
     if (op == "=" || op == "()" || op == "[]" || op == "->") {
@@ -1953,6 +1973,31 @@ private:
       return false;
     }
     return true;
+  }
+
+  bool literal_operator_named(NameId n) { return p_->world().ins.names.spelling(n).starts_with(lex::literal_operator_prefix); }
+
+  bool literal_operator_ok(const DeclSpec& spec, const parse::Declarator& d, LangLinkage lang, bool templ) {
+    sema::Types& types = s_.types();
+    if (spec.is_typedef || !types.is_function(d.type) || (d.qualified && !d.scope.ns)) {
+      s_.diag(d.name_at, Diag::literal_operator_scope);
+      return false;
+    }
+    if (lang == LangLinkage::c) {
+      s_.diag(d.name_at, Diag::literal_operator_linkage);
+      return false;
+    }
+    if (templ) {
+      auto f = types.rec(d.type);
+      const auto& head = s_.template_scopes.back();
+      bool string_template = head.size() == 1 && head[0].kind == ast::TemplateArgKind::value && !head[0].pack &&
+                             types.is_class(head[0].type);
+      if (!f.variadic && f.params.empty() && (s_.numeric_literal_template(head) || string_template)) return true;
+    } else if (s_.literal_operator_form(d.type) != sema::Sema::LiteralOperatorForm::invalid) {
+      return true;
+    }
+    s_.diag(d.name_at, Diag::literal_operator_parameters);
+    return false;
   }
 
   // A typedef-name or alias-declaration at namespace scope ([dcl.typedef]). In its scope it may
@@ -2895,6 +2940,10 @@ private:
     do {
       parse::Declarator d = ps_.declarator(spec.type, false);
       if (!d.ok || !d.named) return bad();
+      if (literal_operator_named(d.name)) {
+        s_.diag(d.name_at, Diag::literal_operator_scope);
+        return bad();
+      }
       if (!d.asm_label.empty()) {
         s_.diag(d.name_at, Diag::not_supported, Tk::kw_asm);  // a member's asm label
         return bad();
@@ -3068,6 +3117,9 @@ private:
     }
     parse::Declarator d = ps_.declarator(spec.type, false);
     if (!d.ok || !d.named) return bad();
+    if (literal_operator_named(d.name) &&
+        (!defaults_allowed(d.params, types.is_function(d.type), d.name) || !literal_operator_ok(spec, d, LangLinkage::cxx, false)))
+      return bad();
     if (!types.is_function(d.type) || !ps_.is(Tk::semi)) {
       s_.diag(d.name_at, Diag::not_supported, Tk::kw_friend);  // only function declarations
       return bad();
@@ -3109,6 +3161,10 @@ private:
   // A typedef-name or alias-declaration that is a member of class `c` ([class.mem],
   // [dcl.typedef]): a type of the class's scope, `C::name` outside it.
   bool member_alias(const ast::DeclSema& c, NameId name, u32 at, QualType type) {
+    if (literal_operator_named(name)) {
+      s_.diag(at, Diag::literal_operator_scope);
+      return false;
+    }
     if (s_.types().has_placeholder(type)) {  // [dcl.spec.auto.general]/6
       s_.diag(at, Diag::auto_not_allowed);
       return false;
@@ -3786,6 +3842,7 @@ private:
                bool is_function_def) {
     sema::Types& types = s_.types();
     if (!defaults_allowed(d.params, types.is_function(d.type) && !spec.is_typedef, d.name)) return false;
+    if (literal_operator_named(d.name) && !literal_operator_ok(spec, d, lang, template_)) return false;
     if (spec.is_typedef) {
       if (is_function_def) {  // [dcl.typedef]/1: a typedef declares no function definition
         s_.diag(spec.begin, Diag::typedef_definition);
@@ -4165,6 +4222,14 @@ private:
         for (const ast::ParamSema& p : params) own.push_back(p.default_arg);
       }
 
+    }
+    // [dcl.link]/7: a function with C language linkage can have declarations in distinct
+    // namespaces. Apply [basic.def.odr] to their shared entity before publishing the definition.
+    if (fn && definition && sem.linkage == ast::Linkage::external &&
+        (sem.flags & (sema::decl_flag::lang_c | sema::decl_flag::member | sema::decl_flag::template_)) ==
+            sema::decl_flag::lang_c && p_->function_defined_before(sem.entity, k_)) {
+      s_.diag(d.name_at, Diag::redefinition, d.name);
+      return false;
     }
     if (fn && p_->world().ins.names.spelling(d.name) == "main") check_main(spec, sem, d, lang);
 

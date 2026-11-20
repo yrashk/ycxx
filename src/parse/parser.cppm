@@ -11,6 +11,7 @@ import std;
 import ycxx.stack;
 import ycxx.ast;
 import ycxx.engine;
+import ycxx.items;
 import ycxx.pp;
 import ycxx.sema;
 
@@ -133,6 +134,25 @@ public:
     return false;
   }
   NameId name_of(const Tok& t) { return s_->ins().names.intern(r_->name(t)); }
+  bool literal_operator_ahead(u32 ahead = 0) const {
+    return kind(ahead) == Tk::kw_operator && kind(ahead + 1) == Tk::string_lit;
+  }
+  bool lookup_id_ahead(u32 ahead = 0) const { return kind(ahead) == Tk::identifier || literal_operator_ahead(ahead); }
+  std::optional<NameId> lookup_id() {
+    if (is(Tk::identifier)) {
+      NameId n = name_of(tok());
+      bump();
+      return n;
+    }
+    if (auto id = items::literal_operator_id(*r_, i_, end_)) {
+      if (literal_at(1).ud_suffix == lex::no_name) s_->diag(pos(), Diag::deprecated_literal_operator_id);
+      seek(id->end);
+      return s_->ins().names.intern(lex::literal_operator_name(id->suffix));
+    }
+    s_->diag(pos(), Diag::invalid_literal_operator_id);
+    bump();
+    return std::nullopt;
+  }
   // Moves to the region's token `i`, inside the part (past a class's member-specification).
   void seek(u32 i) { i_ = std::min(i, end_); }
   u32 index() const { return i_; }  // the current token's index in the region, for `seek`
@@ -201,9 +221,10 @@ public:
     if (starts_decl_specifier(kind())) return true;
     if (qualified_ahead()) {
       auto q = qualified_type(0);
+      auto context = statement ? PointerLookahead::statement : PointerLookahead::declaration;
       return q && !(statement && s_->types().kind(q->first) == sema::TypeKind::dep_name) &&
              (kind(q->second) != Tk::l_paren || member_pointer_star(q->second + 1) ||
-              function_pointer_declarator_ahead(q->second, statement)) &&
+              function_pointer_declarator_ahead(q->second, context)) &&
              kind(q->second) != Tk::period && kind(q->second) != Tk::l_brace;
     }
     u32 next = 1;  // the token after the type's name: after `X<…>` for a class template
@@ -237,10 +258,14 @@ public:
     return end_ - i_;
   }
 
+  enum class PointerLookahead { declaration, statement, abstract };
+
   // A qualified type followed by `(*name)(parameters)` can start a declaration
   // ([stmt.ambig]). Keep a functional conversion followed by a call and an operator
   // on the expression path.
-  bool function_pointer_declarator_ahead(u32 open, bool statement = false) {
+  bool function_pointer_declarator_ahead(u32 open, PointerLookahead context = PointerLookahead::declaration) {
+    if (kind(open) != Tk::l_paren) return false;
+    bool statement = context == PointerLookahead::statement;
     u32 next = open + 1;
     u32 groups = 1;
     bool pointer = false;
@@ -262,8 +287,20 @@ public:
              kind(next) == Tk::kw___restrict || kind(next) == Tk::kw___restrict__)
         ++next;
     }
-    if (!pointer || kind(next) != Tk::identifier) return false;
-    next = past_attributes(next + 1);
+    if (!pointer) return false;
+    if (context != PointerLookahead::abstract) {
+      if (qualified_ahead(next)) {
+        u32 name = next;
+        // A template argument in the scope can itself read a qualified type name.
+        bool saved_half = qualified_half_;
+        auto scope = nested_name(next, name);
+        qualified_half_ = saved_half;
+        if (!scope) return false;
+        next = name;
+      }
+      if (kind(next) != Tk::identifier) return false;
+      next = past_attributes(next + 1);
+    }
     for (; groups != 0; --groups, ++next)
       if (kind(next) != Tk::r_paren) return false;
 
@@ -282,11 +319,11 @@ public:
   }
 
   // Whether a qualified name starts here: `::`, `N::`, or `X<…>::` ([basic.lookup.qual]).
-  bool qualified_ahead() {
-    if (is(Tk::coloncolon)) return true;
-    if (!is(Tk::identifier)) return false;
-    if (kind(1) == Tk::coloncolon) return true;
-    return kind(1) == Tk::less && kind(past_template_args(1)) == Tk::coloncolon;
+  bool qualified_ahead(u32 start = 0) {
+    if (kind(start) == Tk::coloncolon) return true;
+    if (kind(start) != Tk::identifier) return false;
+    if (kind(start + 1) == Tk::coloncolon) return true;
+    return kind(start + 1) == Tk::less && kind(past_template_args(start + 1)) == Tk::coloncolon;
   }
 
   // A ptr-operator can start with a nested-name-specifier. Find its `*` before doing lookup, so
@@ -544,7 +581,8 @@ public:
             // `N::C`, `::C`, `C::E`, `X<T>::E` ([dcl.type.simple]).
             if (auto q = qualified_type(0, true);
                 q && (in_type_id || kind(q->second) != Tk::l_paren ||
-                      function_pointer_declarator_ahead(q->second))) {
+                      function_pointer_declarator_ahead(q->second) ||
+                      (in_params_ > 0 && function_pointer_declarator_ahead(q->second, PointerLookahead::abstract)))) {
               cls = q->first;
               take_qualified(q->second);
               continue;
@@ -854,7 +892,17 @@ public:
       for (u32 j = 0; j < next; ++j) bump();
       if (qualified_hook) qualified_hook(*sc);
     }
-    if (!abstract && is(Tk::kw_operator)) {
+    if (!abstract && literal_operator_ahead()) {
+      l.name_at = pos();
+      auto n = lookup_id();
+      if (!n) {
+        ok = false;
+        return l;
+      }
+      l.name = *n;
+      l.named = true;
+      skip_attributes();
+    } else if (!abstract && is(Tk::kw_operator)) {
       // An operator-function-id ([over.oper.general]): `operator@`, named as the splitter spells
       // it. Conversion functions, `new`, `delete` and `co_await` are not supported yet.
       l.name_at = pos();
@@ -1120,7 +1168,11 @@ public:
     // In statement lookahead, a type followed by ( or { can instead construct an argument
     // to a call on the result of a functional conversion.
     auto can_start_parameter = [&](u32 after_type) {
-      return !statement || (kind(after_type) != Tk::l_paren && kind(after_type) != Tk::l_brace);
+      if (!statement) return true;
+      if (kind(after_type) == Tk::l_paren)
+        // An unnamed grouped pointer such as `int (*)(int)` cannot be a cast operand.
+        return function_pointer_declarator_ahead(after_type, PointerLookahead::abstract);
+      return kind(after_type) != Tk::l_brace;
     };
     Tk k = kind(first);
     Tk next = kind(first + 1);
@@ -2582,11 +2634,11 @@ public:
     case Tk::int_lit: {
       const lex::Literal& l = literal();
       bump();
-      if (l.ud_suffix != lex::no_name) {
-        s_->diag(begin, Diag::not_supported, Tk::int_lit);
-        return {NodeId::none, begin, pos()};
-      }
       if (l.bad) return {NodeId::none, begin, pos()};
+      if (l.ud_suffix != lex::no_name) {
+        auto n = s_->ins().names.intern(lex::literal_operator_name(r_->names[l.ud_suffix]));
+        return immediate(s_->integer_user_literal(n, l, begin, pos()));
+      }
       return s_->integer_literal(l, begin, pos());
     }
     case Tk::char_lit: {
@@ -2759,6 +2811,16 @@ public:
       }
       return lambda_expression();
     case Tk::kw_operator:
+      if (literal_operator_ahead()) {
+        auto n = lookup_id();
+        if (!n) return {NodeId::none, begin, pos()};
+        if (is(Tk::less) && s_->is_template_name(*n)) {
+          s_->diag(begin, Diag::not_supported, Tk::kw_operator);
+          return {NodeId::none, begin, pos()};
+        }
+        return s_->name_expr(*n, begin, pos(), is(Tk::l_paren));
+      }
+      [[fallthrough]];
     case Tk::tilde:
     case Tk::kw_typeid:
     case Tk::kw_dynamic_cast:
@@ -2895,15 +2957,17 @@ public:
     // `S::template f<args>`: f names a template ([temp.names]/3).
     bool keyword = s && kind(next) == Tk::kw_template && kind(next + 1) == Tk::identifier;
     if (keyword) ++next;
-    if (!s || kind(next) != Tk::identifier) {
+    if (!s || !lookup_id_ahead(next)) {
       s_->diag(begin, Diag::not_a_namespace, is(Tk::identifier) ? name_of(tok()) : s_->no_name());
       while (is(Tk::identifier) || is(Tk::coloncolon)) bump();
       return {NodeId::none, begin, pos()};
     }
     for (u32 j = 0; j < next; ++j) bump();
     u32 name_at = pos();
-    NameId n = name_of(tok());
-    bump();
+    bool literal_operator = literal_operator_ahead();
+    auto name = lookup_id();
+    if (!name) return {NodeId::none, begin, pos()};
+    NameId n = *name;
     auto scope_expr = [&] {
       // [expr.unary.op]: `&C::m` can form a pointer to member. Parentheses or postfix
       // operations make the operand something other than the qualified-id itself.
@@ -2911,6 +2975,13 @@ public:
                           !is(Tk::period) && !is(Tk::arrow) && !is(Tk::plusplus) && !is(Tk::minusminus);
       return s_->scope_expr(*s, n, begin, name_at, pos(), bare_address);
     };
+    if (literal_operator) {
+      if (is(Tk::less) && s_->scope_names_template(*s, n)) {
+        s_->diag(name_at, Diag::not_supported, Tk::kw_operator);
+        return {NodeId::none, begin, pos()};
+      }
+      return scope_expr();
+    }
     // `N::T(args)` or `N::T{…}` ([expr.type.conv]): a qualified type name, unless a function or
     // variable of the name hides it.
     if ((is(Tk::l_paren) || is(Tk::l_brace)) && !s_->scope_names_object(*s, n))
@@ -3271,14 +3342,14 @@ public:
         bump();
         u32 next = 0;
         auto s = nested_name(0, next);
-        if (!s || kind(next) != Tk::identifier) {
+        if (!s || !lookup_id_ahead(next)) {
           s_->diag(pos(), Diag::not_a_namespace, is(Tk::identifier) ? name_of(tok()) : s_->no_name());
           skip_to_semi();
           return {NodeId::none, begin, pos()};
         }
         for (u32 j = 0; j < next; ++j) bump();
-        s_->using_declaration(*s, name_of(tok()), pos());
-        bump();
+        u32 at = pos();
+        if (auto n = lookup_id()) s_->using_declaration(*s, *n, at);
         expect(Tk::semi);
         return s_->node(ast::ExprStmt{}, begin, pos());
       }
@@ -4253,6 +4324,11 @@ public:
           skip_to_semi();
           return {NodeId::none, begin, pos()};
         }
+        if (s_->ins().names.spelling(d.name).starts_with(lex::literal_operator_prefix)) {
+          s_->diag(d.name_at, Diag::literal_operator_scope);
+          skip_to_semi();
+          return {NodeId::none, begin, pos()};
+        }
         if (s_->types().has_placeholder(d.type)) {
           s_->diag(d.name_at, Diag::auto_not_allowed);  // [dcl.spec.auto.general]: not in a typedef
           skip_to_semi();
@@ -4277,6 +4353,11 @@ public:
         // block-scope declaration of one is not supported yet.
         if (is(Tk::l_brace)) s_->diag(d.name_at, Diag::function_definition_in_block);
         else s_->diag(d.name_at, Diag::not_supported, Tk::l_paren);
+        skip_to_semi();
+        return {NodeId::none, begin, pos()};
+      }
+      if (s_->ins().names.spelling(d.name).starts_with(lex::literal_operator_prefix)) {
+        s_->diag(d.name_at, Diag::literal_operator_scope);
         skip_to_semi();
         return {NodeId::none, begin, pos()};
       }

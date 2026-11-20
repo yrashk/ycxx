@@ -40,7 +40,7 @@ tools/build
 build/bin/ycxx cxx hello.cpp -o hello && ./hello
 ```
 
-**Compile for x86-64 Linux.** Select `--target=x86_64-pc-linux-gnu` to compile with the scalar
+**Compile for x86-64 Linux.** Select `--target=x86_64-pc-linux-gnu` to compile with the
 System V AMD64 backend. Use `-c` to write an ELF object, or `-nostdlib` to link C++ sources,
 ycxx-generated `.o` files, or a mixture into a static executable. The startup runs namespace-scope
 initializers, then calls `int main()` or `int main(int, char**)` and passes its return value to Linux
@@ -53,6 +53,10 @@ build/bin/ycxx cxx --target=x86_64-pc-linux-gnu -c example.cpp
 build/bin/ycxx cxx --target=x86_64-pc-linux-gnu -nostdlib example.o -o example
 ./example
 ```
+
+Fixed-prototype direct calls to free functions support passing and returning nonempty flat
+records of integral fields by value. The record can occupy up to 16 bytes and must be trivial
+for calls. [Linux integer aggregate ABI](docs/design/linux-integer-aggregates.md)
 
 For mixed Linux objects, the pinned libycxx `<cstddef>` byte operator uses the same Itanium
 linkage name in ycxx, GCC and Clang. [#64](https://github.com/yrashk/ycxx/issues/64)
@@ -110,6 +114,10 @@ ycxx ELF objects record function types and code sizes. The ELF linker accepts su
 system-assembled objects with function symbols and the GNU-built libycxx static linkage-marker
 object. [#428](https://github.com/yrashk/ycxx/issues/428), [#419](https://github.com/yrashk/ycxx/issues/419)
 
+Both targets support cooked integer user-defined literals through namespace-scope literal
+operators with an `unsigned long long` parameter, including constant evaluation.
+[#289](https://github.com/yrashk/ycxx/issues/289)
+
 **Language on macOS.** Programs can use:
 - the fundamental integer, character and floating types, pointers, arrays, references and
   enumerations, including opaque declarations of named enums in their namespaces; `float`,
@@ -142,7 +150,8 @@ object. [#428](https://github.com/yrashk/ycxx/issues/428), [#419](https://github
 - namespaces, nested (`namespace a::b`) and inline ones, typedefs and aliases, including
   function type and function pointer aliases with qualified return types, `using` declarations
   and directives;
-- named function-pointer declarations with qualified return types;
+- named function-pointer declarations with qualified return types, qualified names in grouped
+  declarators, and unnamed function-pointer parameters;
 - `[[…]]` attributes, the GNU attributes and `asm` labels the macOS SDK's headers use, the
   GNU pointer qualifiers glibc uses, and the type-trait built-ins libycxx's headers use
   (`__is_same`, `__remove_cv`, …)

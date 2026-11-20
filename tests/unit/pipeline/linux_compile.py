@@ -1,4 +1,4 @@
-"""Exchange scalar System V AMD64 calls between ycxx and native ELF objects."""
+"""Exchange System V AMD64 calls between ycxx and native ELF objects."""
 
 import os
 from pathlib import Path
@@ -83,6 +83,19 @@ def external_data_addresses(compile, target, source_dir, scope, cold, cc, readel
     run([cc, '-fPIE', '-pie', '-rdynamic', 'interposer.c', './libinterposable.so', '-Wl,-rpath,$ORIGIN',
          '-o', 'interposer'], scope, cold)
     run(['./interposer'], scope, cold)
+
+
+def integer_aggregate_calls(compile, target, source_dir, scope, cold, cc):
+    sources = source_dir / 'linux_integer_aggregates'
+    for part in ('provider', 'client'):
+        source = sources / f'{part}.cpp'
+        compile(target, '-c', source, '-o', f'aggregate-{part}.o')
+        run([cc, '-std=c++26', '-O2', '-fno-pie', '-c', source, '-o', f'host-{part}.o'], scope, cold)
+    compile(target, '-nostdlib', 'aggregate-provider.o', 'aggregate-client.o', '-o', 'aggregate-native')
+    run(['./aggregate-native'], scope, cold)
+    for inputs in (('aggregate-provider.o', 'host-client.o'), ('host-provider.o', 'aggregate-client.o')):
+        run([cc, '-no-pie', *inputs, '-o', 'aggregate-mixed'], scope, cold)
+        run(['./aggregate-mixed'], scope, cold)
 
 
 def main():
@@ -222,16 +235,78 @@ system_leaf:
             source = source_dir / 'deduced-results' / f'{name}.cpp'
             compile(target, '-nostdlib', source, '-o', name)
             run([f'./{name}'], scope, cold)
+        integer_aggregate_calls(compile, target, source_dir, scope, cold, cc)
+        (scope / 'packing.cpp').write_text(
+            '#pragma pack(push, 1)\n'
+            'struct Capped { char a; int b; };\n'
+            'int read_reference(const Capped& x) { return x.b; }\n'
+            '#pragma pack(pop)\n'
+            'struct Popped { char a; int b; } unrelated __attribute__((aligned(32)));\n'
+            'int read_popped(Popped x) { return x.b; }\n'
+            '#pragma pack(push, label, 1)\n'
+            'struct Uncertain { char a; int b; };\n'
+            '#pragma pack()\n'
+            'struct Reset { char a; int b; };\n'
+            'int read_reset(Reset x) { return x.b; }\n'
+            'template<class T> struct __attribute__((packed)) Chosen { char a; T b; };\n'
+            'template<class T> struct Chosen<T*> { char a; int b; };\n'
+            'int read_selected(Chosen<int*> x) { return x.b; }\n'
+            'int main() { return read_popped({1, 10}) + read_reset({2, 12}) + read_selected({3, 20}) - 42; }\n')
+        compile(target, '-nostdlib', 'packing.cpp', '-o', 'packing')
+        run(['./packing'], scope, cold)
+        assert '#pragma pack' in compile(target, '-E', 'packing.cpp')
+        aggregate_parameter = 'unsupported aggregate parameter layout'
+        aggregate_result = 'unsupported aggregate result layout'
         cases = (
             ('double f(double x) { return x; }', results),
             ('long double f(long double x) { return x; }', results),
             ('auto f() { return 1.0; }', results),
-            ('struct X { int x; }; auto f() { return X{1}; }', results),
-            ('struct X { int x; }; int f(X x) { return x.x; }', parameters),
-            ('struct X { int x; }; int g(X); int f() { return g(X{1}); }',
+            ('struct X { double x; }; auto f() { return X{1.0}; }', aggregate_result),
+            ('struct X { long a, b, c; }; int f(X) { return 1; }', aggregate_parameter),
+            ('struct X {}; int f(X) { return 1; }', aggregate_parameter),
+            ('struct X { double a; int b; }; int f(X x) { return x.b; }', aggregate_parameter),
+            ('struct X { int a[2]; }; int f(X x) { return x.a[0]; }', aggregate_parameter),
+            ('struct M { int a; }; struct X { M m; }; int f(X x) { return x.m.a; }', aggregate_parameter),
+            ('struct B { int a; }; struct X : B { int b; }; int f(X x) { return x.b; }', aggregate_parameter),
+            ('struct X { int a : 3; }; int f(X x) { return x.a; }', aggregate_parameter),
+            ('union X { int a; unsigned b; }; int f(X x) { return x.a; }', aggregate_parameter),
+            ('struct X { int a; ~X(); }; int f(X x) { return x.a; }', aggregate_parameter),
+            ('struct __attribute__((packed)) X { char a; int b; }; int f(X x) { return x.b; }',
+             aggregate_parameter),
+            ('struct X [[gnu::packed]];\nstruct X { char a; int b; }; int f(X x) { return x.b; }',
+             aggregate_parameter),
+            ('#define PACKED [[gnu::packed]]\n'
+             'struct X { char a; int b PACKED; }; int f(X x) { return x.b; }', aggregate_parameter),
+            ('typedef int Low __attribute__((aligned(1))); using Alias = Low;\n'
+             'struct X { char a; Alias b; }; int f(X x) { return x.b; }',
+             aggregate_parameter),
+            ('#pragma pack(push, 1)\nstruct X { char a; int b; };\n#pragma pack(pop)\n'
+             'int f(X x) { return x.b; }', aggregate_parameter),
+            ('#define PACK _Pragma("pack(push, label, 1)")\nPACK\n'
+             'struct X { char a; int b; };\n#pragma pack()\nint f(X x) { return x.b; }',
+             aggregate_parameter),
+            ('struct X { char a;\n#pragma pack(1)\nint b;\n#pragma pack()\n};\n'
+             'int f(X x) { return x.b; }', aggregate_parameter),
+            ('template<class T> struct __attribute__((packed)) X { char a; T b; };\n'
+             'int f(X<int> x) { return x.b; }', aggregate_parameter),
+            ('template<class T> [[gnu::packed]] struct X;\n'
+             'template<class T> struct X { char a; T b; };\n'
+             'int f(X<int> x) { return x.b; }', aggregate_parameter),
+            ('#pragma pack(push, 1)\ntemplate<class T> struct X { char a; T b; };\n'
+             '#pragma pack(pop)\nint f(X<int> x) { return x.b; }', aggregate_parameter),
+            ('template<class T> struct X { char a; T b [[gnu::packed]]; };\n'
+             'int f(X<int> x) { return x.b; }', aggregate_parameter),
+            ('template<class T> struct X { char a; T b; };\n'
+             'template<class T> struct __attribute__((packed)) X<T*> { char a; int b; };\n'
+             'int f(X<int*> x) { return x.b; }', aggregate_parameter),
+            ('struct X { double a; }; int g(X); int f() { return g(X{1.0}); }',
+             f'call: {aggregate_parameter}'),
+            ('struct X { long a, b, c; }; X g(); long f() { X x = g(); return x.a; }',
+             f'call: {aggregate_result}'),
+            ('struct X { int a; }; int f(int (*g)(X)) { return g(X{1}); }', f'call: {parameters}'),
+            ('struct X { int a; }; int f(X (*g)()) { X x = g(); return x.a; }', f'call: {results}'),
+            ('struct X { int a; }; struct B { static int g(X); }; int f() { return B::g(X{1}); }',
              f'call: {parameters}'),
-            ('struct X { int x; }; X g(int); int f() { X x = g(1); return x.x; }',
-             f'call: {results}'),
             ('int f(int, ...) { return 1; }', 'variadic functions'),
             ('int f(int (*g)(int, ...)) { return g(1); }', 'call: variadic functions'),
             ('int f(int (*g)(int, ...)) { return g(1, 2); }', 'call: variadic functions'),

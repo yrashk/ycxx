@@ -25,10 +25,9 @@ export struct MachineCode {
   bool operator==(const MachineCode&) const = default;
 };
 
-// Compile well-formed L2 with a scalar INTEGER ABI signature and scalar INTEGER calls. The
-// producer must check the original signatures and ellipsis argument types. L2 can erase
-// distinctions between scalar and class arguments or results. A variadic definition or
-// indirect call with an empty ellipsis cannot be identified from L2 alone. Pass
+// Compile well-formed L2 with INTEGER ABI operands and results. The producer checks the
+// original signatures and ellipsis types and places arguments in register/stack order.
+// L2 can erase the distinction between scalar and class arguments or results. Pass
 // the entities whose addresses may be resolved directly by a signed RIP-relative displacement
 // (e.g. local definitions in the small code model) in `direct_symbols`. Pass default-visible
 // data symbols in `external_data` so their addresses load through the ELF GOT.
@@ -85,8 +84,8 @@ std::expected<Frame, std::string> layout(const l2::Function& body) {
   // Keep the frame and the saved frame and return addresses within one page. Larger frames
   // need stack probing to avoid skipping a guard page.
   constexpr std::uint64_t max_frame = 4096 - 16;
-  if (body.indirect_result || body.results.size() > 1)
-    return std::unexpected("indirect and multiple results are outside the scalar ABI subset");
+  if (body.indirect_result || body.results.size() > 2)
+    return std::unexpected("only up to two INTEGER result registers are supported");
   for (Type t : body.results)
     if (t == Type::state || l2::is_float(t)) return std::unexpected("unsupported scalar ABI result type");
 
@@ -130,8 +129,8 @@ std::expected<Frame, std::string> layout(const l2::Function& body) {
         if (indirect && body.type(body.operands_of(n)[1]) != Type::ptr)
           return at_node(n, nd.op, "an indirect callee must be a pointer");
         if (indirect && imms[1]) return at_node(n, nd.op, "indirect variadic calls are outside the scalar ABI subset");
-        if (imms[indirect ? 2 : 3] || nd.nres > 2)
-          return at_node(n, nd.op, "indirect and multiple results are outside the scalar ABI subset");
+        if (imms[indirect ? 2 : 3] || nd.nres > (indirect ? 2u : 3u))
+          return at_node(n, nd.op, "unsupported INTEGER ABI result placement");
         std::size_t args = nd.nopnd - (indirect ? 2 : 1);
         if (args > register_args) scratch_words = std::max(scratch_words, std::uint64_t(args - register_args));
       }
@@ -256,6 +255,10 @@ class Emitter {
       relocation(RelocKind::plt32, ir::EntityId(std::uint32_t(imms[0])));
     }
     if (body_.node(n).nres > 1) write(body_.result(n, 1));
+    if (body_.node(n).nres > 2) {
+      e_.move(rax, rdx);
+      write(body_.result(n, 2));
+    }
   }
 
   void edge(const ir::Succ& succ) {
@@ -389,6 +392,7 @@ std::expected<void, std::string> Emitter::node(NodeId n) {
       return {};
     }
     case Op::ret:
+      if (ops.size() > 2) read(ops[2], rdx);
       if (ops.size() > 1) read(ops[1]);
       e_.emit({0xc9, 0xc3});  // leave, ret
       return {};

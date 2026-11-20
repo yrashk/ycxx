@@ -580,12 +580,19 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   A `bool` uses the byte value 0 or 1.
   Direct variadic calls use the same registers and stack slots for promoted 32- and 64-bit integers
   and pointers. The emitter clears EAX immediately before every direct call so a variadic callee
-  receives a zero vector-register count in AL, including with an empty ellipsis. Floating-point
-  and aggregate arguments and results remain outside this ABI subset. Variadic definitions and
-  variadic calls through function pointers remain unsupported.
+  receives a zero vector-register count in AL, including with an empty ellipsis. Variadic
+  definitions and variadic calls through function pointers remain unsupported.
   [#417](https://github.com/yrashk/ycxx/issues/417), [#412](https://github.com/yrashk/ycxx/issues/412),
   [#399](https://github.com/yrashk/ycxx/issues/399),
   [#196](https://github.com/yrashk/ycxx/issues/196)
+- Direct fixed-prototype calls to ordinary free functions support nonempty naturally aligned
+  flat integral records that are trivial for calls, up to 16 bytes and alignment eight. The
+  AMD64 INTEGER eightbytes follow from the laid-out fields. If an entire argument cannot
+  fit in the remaining registers, it goes by value on the stack and later arguments can use
+  the remaining registers. One- and two-eightbyte results use RAX and RDX. The mixed-object
+  tests exercise both directions and check by-value object identity. Source packing and
+  alignment directives with uncertain layout exclude the record from this by-value ABI.
+  [Design](docs/design/linux-integer-aggregates.md) · [#440](https://github.com/yrashk/ycxx/issues/440)
 - `-c` writes deterministic ELF64 relocatable objects through `src/obj/elf.cppm`. The reader
   accepts the supported x86-64 `ET_REL` subset emitted by ycxx. The native ELF linker consumes
   the same in-memory objects, resolves absolute and PC-relative relocations, and writes a static
@@ -1035,6 +1042,9 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
 - A qualified namespace function definition inherits C language linkage from a matching prior
   member declaration and uses its target namespace for body lookup. Ordinary and argument-dependent
   calls find the prior declaration and use the same unmangled symbol as C callers (#426).
+- A second definition of the same ordinary external C-linkage function in a translation unit is
+  diagnosed across namespaces. Compatible declarations share the one definition and address
+  ([dcl.link], [basic.def.odr], #446).
 - Not yet (#153): `using N::f;` at namespace scope, `N::S{…}` as an expression, some clashes
   with namespace names and using-declarations, remaining standard-library linkage
   abbreviations such as `Sa`.
@@ -1196,6 +1206,18 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   unary `*` and `&` call operator functions; a deleted or ambiguous choice is an error, not the
   built-in operator. `N::T(…)` is a cast only when no function or variable hides N::T.
 - Tests: `tests/own/operators` (12, seven from the review), `tests/own/headers` (2).
+
+## Cooked integer user-defined literals (#289, 2026-11-20)
+
+- A literal operator name has its own lookup spelling derived from the suffix identifier
+  ([over.literal]). Compact and deprecated separated spellings name the same function.
+- An integer user-defined literal uses ordinary unqualified lookup at its point of use. When
+  the visible set contains an operator with an `unsigned long long` parameter, the existing
+  integer conversion rules build the argument and ordinary overload resolution builds the
+  call ([lex.ext], [lex.icon]). The call can run or be evaluated as a constant expression.
+- The Itanium mangler emits the `li` operator code followed by the suffix's source-name.
+  Tests in `tests/own/cooked-literals` cover lookup, integer forms, rejection, and a peer object.
+- #289 tracks the remaining literal call forms, including raw and numeric template calls.
 
 ## Object model, step 1: classes by value (#116, 2026-11-18)
 
@@ -1423,7 +1445,8 @@ session's.*
   known to name a type can start the parameter list of an abstract declarator, as in
   `struct S { using F = S(S); };` ([dcl.name], [dcl.fct], [dcl.ambig.res], #216).
 - Named function-pointer declarations accept qualified return types, including at block scope
-  ([dcl.ptr], [dcl.fct], [stmt.ambig], #433).
+  ([dcl.ptr], [dcl.fct], [stmt.ambig], #433). A grouped pointer can name an existing namespace member,
+  and a block declaration can take an unnamed function-pointer parameter (#449).
 - Not yet: access, hiding and qualified functional casts of member types (#216); member alias
   templates (`template<…> using __apply = …` in a class), with member
   templates; template template parameters (#208); value-dependent expressions as template
