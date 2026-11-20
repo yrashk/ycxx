@@ -3322,6 +3322,13 @@ public:
     return types().canonical(Types::unqualified(types().canonical(t)));
   }
 
+  // [dcl.init.ref]/5: a nonvolatile const lvalue reference can also bind directly to an object xvalue.
+  bool direct_reference_category(const Ex& e, const TypeRec& ref) {
+    if (ref.rvalue_ref && !types().is_function(ref.inner)) return e.cat() == ValueCategory::xvalue;
+    return e.cat() == ValueCategory::lvalue ||
+           (!ref.rvalue_ref && object_cv(ref.inner) == Cv::const_ && e.cat() == ValueCategory::xvalue);
+  }
+
   // The type `a` has after the lvalue conversions ([conv.lval], [conv.array], [conv.func]).
   QualType value_type(const Ex& a) {
     QualType t = a.type();
@@ -3347,18 +3354,17 @@ public:
     if (types().is_reference(p)) {
       TypeRec r = types().rec(p);
       QualType t = r.inner;
-      // [dcl.init.ref]: a direct binding to an lvalue (or, for an rvalue reference, an xvalue)
-      // of the type, no less qualified.
-      bool direct_cat = r.rvalue_ref && !types().is_function(t) ? a.cat() == ValueCategory::xvalue : a.cat() == ValueCategory::lvalue;
-      if (direct_cat && same_unqualified(a.type(), t) && cv_within(object_cv(a.type()), object_cv(t))) {
+      const bool direct_cat = direct_reference_category(a, r);
+      if (direct_cat && same_unqualified(a.type(), t)) {
+        if (!cv_within(object_cv(a.type()), object_cv(t))) return {};
         Ics v = binding({true, 0, 0}, r.rvalue_ref, a.cat() != ValueCategory::lvalue,
                         cv_bits(object_cv(t)) - cv_bits(object_cv(a.type())));
         v.function_ref = types().is_function(t);
         return v;
       }
       // [over.ics.ref]/1: binding to a base class subobject is a derived-to-base Conversion.
-      if (int d = base_depth(a.type(), t); d && (direct_cat || (a.glvalue() && (r.rvalue_ref || object_cv(t) == Cv::const_))) &&
-                                             cv_within(object_cv(a.type()), object_cv(t))) {
+      if (int d = base_depth(a.type(), t); d && direct_cat) {
+        if (!cv_within(object_cv(a.type()), object_cv(t))) return {};
         Ics v = binding({true, 2, 0}, r.rvalue_ref, a.cat() != ValueCategory::lvalue, cv_bits(object_cv(t)) - cv_bits(object_cv(a.type())));
         v.base_depth = d;
         return v;
@@ -3676,7 +3682,7 @@ public:
       diag(at_, Diag::bit_field_reference);
       return fail;
     }
-    bool direct_cat = rr.rvalue_ref && !types().is_function(t) ? e.cat() == ValueCategory::xvalue : e.cat() == ValueCategory::lvalue;
+    const bool direct_cat = direct_reference_category(e, rr);
     if (direct_cat && same_unqualified(e.type(), t)) {
       if (cv_within(object_cv(e.type()), object_cv(t))) return extend ? extended(e) : e;
       diag(at_, Diag::bind_drops_qualifiers, e.type(), r);
@@ -3709,8 +3715,6 @@ public:
       diag(at_, Diag::bind_to_lvalue, t);
       return fail;
     }
-    if (e.glvalue() && same_unqualified(e.type(), t) && cv_within(object_cv(e.type()), object_cv(t)))
-      return extend ? extended(e) : e;
     Ex v = convert(e, Types::unqualified(t), at_);
     if (!v.ok() || v.glvalue()) return v;
     return materialize(v, t, extend);
@@ -3726,8 +3730,9 @@ public:
       Ex inner = extended({p->operand.id, e.begin + p->operand.at, e.end, {}});
       return node(ast::Paren{p->info, at(inner, e.begin)}, e.begin, e.end, p->info);
     }
-    // Through a base class subobject (`const B& b = derived_glvalue_of_a_temporary`).
-    if (auto c = as<ast::ImplicitConversion>(e); c && c->conversion == ast::ConversionKind::derived_to_base) {
+    // Through a base subobject or an identity-preserving glvalue cast ([class.temporary]/6).
+    if (auto c = as<ast::ImplicitConversion>(e); c &&
+        (c->conversion == ast::ConversionKind::derived_to_base || c->conversion == ast::ConversionKind::qualification)) {
       Ex inner = extended({c->operand.id, e.begin + c->operand.at, e.end, {}});
       return node(ast::ImplicitConversion{c->info, c->conversion, c->function, at(inner, e.begin)}, e.begin, e.end, c->info);
     }
@@ -4502,6 +4507,30 @@ public:
     return {NodeId::none, e.begin, e.end};
   }
 
+  // [expr.static.cast]/3: a cast to an rvalue reference can name a reference-compatible
+  // lvalue as an xvalue. Return no conversion when this rule does not apply.
+  std::optional<Ex> cast_lvalue_to_xvalue(Ex e, QualType to, QualType target, u32 at_) {
+    std::optional<EntityId> base;
+    if (!same_unqualified(e.type(), target)) {
+      if (types().is_class(e.type()) && types().is_class(target) && is_complete(e.type())) {
+        int paths = 0;
+        const auto cls = types().class_of(target);
+        if (!base_path(types().class_of(e.type()), cls, paths)) return std::nullopt;
+        base = cls;
+      } else if (!qualification_convertible(types().pointer(e.type()), types().pointer(target))) {
+        return std::nullopt;
+      }
+    }
+    if (!cv_within(object_cv(e.type()), object_cv(target))) {
+      diag(at_, Diag::bind_drops_qualifiers, e.type(), to);
+      return Ex{NodeId::none, e.begin, e.end};
+    }
+    if (base) e = to_base(e, *base, at_);
+    if (!e.ok()) return e;
+    if (e.info.bit_width) return materialize(rvalue(e), target, false);
+    return convert_node(e, ast::ConversionKind::qualification, target, ValueCategory::xvalue);
+  }
+
   // A conversion as `static_cast<to>(e)` performs it ([expr.static.cast]); a cast in functional
   // notation or a cast-expression is one when static_cast applies ([expr.type.conv]/2,
   // [expr.cast]/4). Downcasts and the const_cast and reinterpret_cast parts are not supported yet.
@@ -4512,7 +4541,14 @@ public:
     if (address_set(e)) return convert(e, to, at_);  // [over.over]: a cast supplies a target type
     QualType target = Types::unqualified(to);
     if (types().is_void(target)) return convert_node(e, ast::ConversionKind::to_void, target);  // /6
-    if (types().is_reference(to) || types().is_class(target) || types().is_array(target)) return convert(e, to, at_);
+    if (types().is_reference(to)) {
+      const TypeRec ref = types().rec(to);
+      if (ref.rvalue_ref && e.cat() == ValueCategory::lvalue && types().is_object(ref.inner)) {
+        if (auto cast = cast_lvalue_to_xvalue(e, to, ref.inner, at_)) return *cast;
+      }
+      return convert(e, to, at_);
+    }
+    if (types().is_class(target) || types().is_array(target)) return convert(e, to, at_);
     Ex v = rvalue(e);
     if (!v.ok()) return v;
     QualType from = Types::unqualified(v.type());

@@ -143,8 +143,8 @@ object. [#428](https://github.com/yrashk/ycxx/issues/428), [#419](https://github
   `*this`, init-captures, `mutable`, conversion to a pointer to function, generic lambdas (`auto`
   parameters) and template lambdas (`[]<class T>`), and closures passed to and called from
   function templates, with Clang's names for closure types;
-- casts, `sizeof`/`alignof` (classes included), `decltype`, and calls through pointers to
-  functions;
+- casts, including `static_cast<T&&>` from a compatible object lvalue, `sizeof`/`alignof`
+  (classes included), `decltype`, and calls through pointers to functions. [#199](https://github.com/yrashk/ycxx/issues/199)
 - constant evaluation on ycxx's own interpreter: `constexpr`, `consteval`, `constinit`,
   `static_assert` and `if consteval`, with errors that explain why something is not constant;
 - `extern "C"` functions from libSystem, including `printf` with integers, characters,
