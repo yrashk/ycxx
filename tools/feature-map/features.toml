@@ -1189,11 +1189,17 @@ clauses = ['dcl.struct.bind']
 std = 'C++17'
 ftm = '__cpp_structured_bindings'
 detect = '\bauto\s*(?:const\s*)?&{0,2}\s*\['
-status = 'missing'
+status = 'partial'
 issues = [285]
+note = 'Block-scope bindings for arrays with scalar elements. Class and tuple-like bindings remain.'
 probe = '''
-struct P { int x, y; };
-int main() { P p{1, 2}; auto [a, b] = p; int arr[2] = {3, 4}; auto& [c, d] = arr; return a + b + c + d - 10; }
+int main() {
+  int arr[2] = {3, 4};
+  auto [a, b] = arr;
+  auto& [c, d] = arr;
+  d = 5;
+  return a + b + c + d - 15;
+}
 '''
 
 [[feature]]

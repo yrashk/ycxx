@@ -4172,11 +4172,89 @@ public:
     return s_->node(ast::StaticVar{local, sema::Sema::at(init, dbegin), value, dtor}, dbegin, pos());
   }
 
+  // A block-scope array structured binding ([dcl.pre], [dcl.struct.bind]).
+  Ex structured_binding(const DeclSpec& spec, u32 begin) {
+    auto& types = s_->types();
+    QualType declared = spec.type;
+    u32 at = pos();
+    std::vector<std::pair<u32, u32>> names;  // local and token offset
+    auto fail = [&] {
+      for (auto [local, name_at] : names) s_->set_local_type(local, s_->builtin(Builtin::dependent));
+      skip_to_semi();
+      return Ex{NodeId::none, begin, pos()};
+    };
+    if (!spec.ok) return fail();
+    if (types.kind(declared) != sema::TypeKind::placeholder || types.rec(declared).decltype_auto) {
+      s_->diag(at, Diag::binding_requires_auto);
+      return fail();
+    }
+    if (spec.is_static || spec.is_extern || spec.is_inline || spec.is_constexpr || spec.is_constinit ||
+        spec.is_consteval || spec.is_typedef) {
+      s_->diag(at, Diag::not_supported, Tk::l_square);
+      return fail();
+    }
+    if (accept(Tk::amp)) declared = types.lvalue_ref(declared);
+    else if (accept(Tk::ampamp)) declared = types.rvalue_ref(declared);
+    bump();  // '['
+    do {
+      if (!is(Tk::identifier)) {
+        s_->diag(pos(), Diag::expected_unqualified_id);
+        if (is(Tk::r_square)) bump();
+        return fail();
+      }
+      u32 local = s_->declare_local(name_of(tok()), spec.type, ast::local_flag::structured_binding, pos());
+      names.emplace_back(local, pos());
+      bump();
+    } while (accept(Tk::comma));
+    if (!expect(Tk::r_square)) return fail();
+
+    // The names already participate in lookup. Referring to any of them in the
+    // initializer is ill-formed ([dcl.struct.bind]/5).
+    Ex source;
+    if (accept(Tk::equal)) {
+      source = assignment_expression();
+    } else if (is(Tk::l_paren) || is(Tk::l_brace)) {
+      Tk close = is(Tk::l_paren) ? Tk::r_paren : Tk::r_brace;
+      bump();
+      source = assignment_expression();
+      if (!expect(close)) return fail();
+    } else {
+      s_->diag(at, Diag::binding_requires_initializer);
+      return fail();
+    }
+    auto binding = s_->array_binding(declared, source, names.size(), at);
+    if (!binding) return fail();
+    if (!expect(Tk::semi)) return fail();
+
+    const auto& [type, init] = *binding;
+    u32 hidden = s_->declare_local(s_->no_name(), type, 0, at, false);
+    std::vector<ast::Child> vars;
+    auto append = [&](u32 local, const Ex& value, u32 from, u32 end) {
+      Ex var = s_->node(ast::LocalVar{local, sema::Sema::at(value, from), ast::EntityId::none}, from, end);
+      s_->set_local_decl(local, var.id);
+      s_->set_initialized(local);
+      vars.push_back(sema::Sema::at(var, begin));
+    };
+    append(hidden, init, begin, pos());
+    QualType index_type = s_->builtin(s_->world().target.ptrdiff_type);
+    for (u64 i = 0; i < names.size(); ++i) {
+      auto [local, name_at] = names[i];
+      u32 end = name_at + 1;
+      Ex index = s_->literal(index_type, s_->world().values.integer(index_type, i), ast::ValueCategory::prvalue, name_at, end);
+      Ex element = s_->subscript(s_->local_ref(hidden, name_at, end), index, end, name_at);
+      s_->set_local_type(local, types.lvalue_ref(element.type()));
+      append(local, element, name_at, end);
+    }
+    return s_->node(ast::DeclStmt{s_->builder().list(vars)}, begin, pos());
+  }
+
   // A block-scope simple-declaration ([stmt.dcl], [dcl.pre]): each declarator is a local
   // variable, in scope from the end of its declarator ([basic.scope.pdecl]).
   Ex declaration_statement() {
     u32 begin = pos();
     DeclSpec spec = decl_specifiers();
+    if (is(Tk::l_square) || ((is(Tk::amp) || is(Tk::ampamp)) && kind(1) == Tk::l_square))
+      return structured_binding(spec, begin);
     if (spec.is_extern || spec.is_inline) {
       s_->diag(begin, Diag::not_supported, spec.is_extern ? Tk::kw_extern : Tk::kw_inline);
       skip_to_semi();
