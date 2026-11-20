@@ -182,6 +182,10 @@ export enum class Op : std::uint16_t {
   cond_br [[=control({V}, 2)]],  // true, false
   ret [[=control({S, Vs}, 0)]],
   unreachable [[=control({}, 0)]],
+
+  // System V AMD64 variadic cursors. Start uses the enclosing function's entry state.
+  va_start [[=state({S, V}, {S})]],
+  va_arg [[=state({S, V}, {S, V})]],
 };
 
 export constexpr std::size_t op_count = std::meta::enumerators_of(^^Op).size();
@@ -482,6 +486,14 @@ std::expected<void, std::string> verify(const Function& f) {
           break;
         case Op::load: case Op::store:
           if (t(1) != Type::ptr) return at("the address must be a ptr");
+          break;
+        case Op::va_start: case Op::va_arg:
+          if (t(1) != Type::ptr) return at("the variadic cursor must be a ptr");
+          if (nd.op == Op::va_arg) {
+            Type fetched = f.type(f.result(n, 1));
+            if (fetched != Type::i32 && fetched != Type::i64 && fetched != Type::ptr)
+              return at("va_arg must yield an i32, i64 or ptr");
+          }
           break;
         case Op::cond_br:
           if (t(0) != Type::i1) return at("the condition must be i1");

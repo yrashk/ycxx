@@ -1246,6 +1246,7 @@ class Gen {
   int effects(At a) {
     if (a.id == NodeId::none) return 0;
     if (is<ast::Assign>(a)) return 2;
+    if (is<ast::VariadicBuiltin>(a) && get<ast::VariadicBuiltin>(a).op != ast::VaOp::end) return 2;
     if (is<ast::Unary>(a)) {
       auto op = get<ast::Unary>(a).op;
       if (op == ast::UnaryOp::pre_inc || op == ast::UnaryOp::pre_dec || op == ast::UnaryOp::post_inc ||
@@ -1297,6 +1298,7 @@ class Gen {
     }
     if (is<ast::Call>(a)) return call(a);
     if (is<ast::MemberCall>(a)) return member_call(a);
+    if (is<ast::VariadicBuiltin>(a)) return variadic_builtin(a);
     if (is<ast::BuiltinCall>(a)) {  // `__builtin_fabs` (lex::BuiltinFunction::fabs), the one there is
       auto b = get<ast::BuiltinCall>(a);
       return pure(ir::Op::fabs, t, {rvalue(child(a, *ast_.children(b.args).begin()))});
@@ -1308,6 +1310,30 @@ class Gen {
     if (is<ast::Conditional>(a)) return conditional(a, false).value;
     if (is<ast::ValueInit>(a) && cls(t) != TypeClass::record && cls(t) != TypeClass::array) return zero(t);
     unsupported(a);
+  }
+
+  std::optional<ValueId> variadic_builtin(At a) {
+    auto builtin = get<ast::VariadicBuiltin>(a);
+    auto args = ast_.children(builtin.args);
+    ValueId cursor[] = {rvalue(child(a, args[0]))};
+    switch (builtin.op) {
+      case ast::VaOp::start:
+        stateful(ir::Op::va_start, {}, cursor);
+        return std::nullopt;
+      case ast::VaOp::arg: {
+        ir::Ty result[] = {vty(builtin.info.type)};
+        return b_.result(stateful(ir::Op::va_arg, result, cursor), 1);
+      }
+      case ast::VaOp::copy: {
+        ValueId operands[] = {cursor[0], rvalue(child(a, args[1]))};
+        stateful(ir::Op::va_copy, {}, operands);
+        return std::nullopt;
+      }
+      case ast::VaOp::end:
+        stateful(ir::Op::va_end, {}, cursor);
+        return std::nullopt;
+    }
+    std::unreachable();
   }
 
   std::optional<ValueId> conversion(At a) {
@@ -1542,7 +1568,8 @@ class Gen {
     if (!(is<ast::Literal>(a) || is<ast::DeclRef>(a) || is<ast::LocalRef>(a) || is<ast::This>(a) ||
           is<ast::ValueInit>(a) || is<ast::DefaultInit>(a) || is<ast::Paren>(a) || is<ast::Unary>(a) ||
           is<ast::Binary>(a) || is<ast::OrderedBinary>(a) || is<ast::Assign>(a) || is<ast::Conditional>(a) ||
-          is<ast::Subscript>(a) || is<ast::Member>(a) || is<ast::ImplicitConversion>(a) || is<ast::BuiltinCall>(a)))
+          is<ast::Subscript>(a) || is<ast::Member>(a) || is<ast::ImplicitConversion>(a) ||
+          is<ast::BuiltinCall>(a) || is<ast::VariadicBuiltin>(a)))
       return false;
     bool proven = true;
     ast::Red(ast_, a.id).for_each_child([&](const ast::Red& c) {

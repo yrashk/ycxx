@@ -272,6 +272,12 @@ export enum class Op : std::uint16_t {
   resume [[=control({S, X}, {}, 0, true)]],               // keep unwinding
   coro__suspend [[=control({S, C}, {}, 2).imms({u32})]],  // resume, destroy; u32 is `final`
   coro__end [[=control({S}, {}, 0)]],
+
+  // Variadic cursor operations ([cstdarg.syn]). The va_arg result carries the requested type.
+  va_start [[=state({S, V}, {S}).with({nonconstant})]],
+  va_arg [[=state({S, V}, {S, V}).with({nonconstant})]],
+  va_copy [[=state({S, V, V}, {S}).with({nonconstant})]],
+  va_end [[=state({S, V}, {S}).with({nonconstant})]],
 };
 
 export constexpr std::size_t op_count = std::meta::enumerators_of(^^Op).size();

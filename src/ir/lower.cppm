@@ -676,6 +676,35 @@ class Lowering {
         out(n, 0, b_.peek().result(b_.emit(Op2::store, st, ops, im, nd.flags, {}, o)));
         return {};
       }
+      case Op::va_start:
+      case Op::va_arg: {
+        if (!config_.sysv_amd64) return fail("variadic cursors require System V AMD64");
+        auto o = origin();
+        ValueId ops[] = {in(n, 0), in(n, 1)};
+        if (nd.op == Op::va_start) {
+          T result[] = {T::state};
+          out(n, 0, b_.peek().result(b_.emit(Op2::va_start, result, ops, {}, 0, {}, o)));
+        } else {
+          auto fetch = type_of(cxx(f_.result(n, 1)));
+          if (!fetch) return fail(fetch.error());
+          T results[] = {T::state, *fetch};
+          auto m = b_.emit(Op2::va_arg, results, ops, {}, 0, {}, o);
+          out(n, 0, b_.peek().result(m));
+          out(n, 1, b_.peek().result(m, 1));
+        }
+        return {};
+      }
+      case Op::va_copy: {
+        if (!config_.sysv_amd64) return fail("variadic cursors require System V AMD64");
+        QualType cursor = layout(cxx(f_.operands_of(n)[1])).pointee;
+        out(n, 0, copy_bytes(in(n, 0), in(n, 1), in(n, 2), layout(cursor), raw(cursor)));
+        return {};
+      }
+      case Op::va_end:
+        if (!config_.sysv_amd64) return fail("variadic cursors require System V AMD64");
+        // The operand has been evaluated. The ABI requires no cleanup of the cursor.
+        out(n, 0, in(n, 0));
+        return {};
       case Op::bit_field_load:
       case Op::bit_field_store: {
         QualType owner = layout(cxx(f_.operands_of(n)[1])).pointee;

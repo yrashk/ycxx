@@ -381,6 +381,10 @@ struct Ops {
     return call_entity(m, f, n, EntityId(c.ref), 2);
   }
   static Flow builtin(M& m, Frame&, N n) { return m.unsupported(n); }
+  static Flow va_start(M& m, Frame&, N n) { return m.unsupported(n); }
+  static Flow va_arg(M& m, Frame&, N n) { return m.unsupported(n); }
+  static Flow va_copy(M& m, Frame&, N n) { return m.unsupported(n); }
+  static Flow va_end(M& m, Frame&, N n) { return m.unsupported(n); }
   static Flow asm_(M& m, Frame&, N n) { return constant(m) ? m.fail(Reason::asm_) : m.unsupported(n); }
 
   // ---------------------------------------------------------------- constant evaluation
