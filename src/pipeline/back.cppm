@@ -125,6 +125,7 @@ struct Variable {
   ConstId init = ConstId::none;
   std::optional<ast::Loc> at;  // its declarator, for diagnostics
   bool dynamic = false;  // also initialized by code ([basic.start.dynamic]): writable, if const
+  bool weak_elf = false;  // eligible external inline namespace definition (#432)
 };
 
 // The classes and enumerations a unit defines, as `layout` reads them: a class's non-static data
@@ -1195,7 +1196,8 @@ struct LinuxFunction {
 
 std::expected<obj::object, aarch64::CodegenError> assemble_linux(
     const std::string& name, std::span<const LinuxFunction> functions,
-    std::span<const aarch64::DataDef> data, std::span<const aarch64::Symbol> symbols) {
+    std::span<const aarch64::DataDef> data, std::span<const aarch64::Symbol> symbols,
+    const std::set<EntityId>& weak_variables) {
   obj::object o;
   o.name = name;
   o.arch = obj::target::x86_64_linux;
@@ -1241,8 +1243,10 @@ std::expected<obj::object, aarch64::CodegenError> assemble_linux(
       if (sym == symbol_of.end()) return missing(d.entity);
       sec.align(std::countr_zero(std::bit_ceil(d.align)));
       const std::uint64_t base = sec.size();
-      o.symbols[sym->second].section = index;
-      o.symbols[sym->second].offset = base;
+      auto& symbol = o.symbols[sym->second];
+      symbol.section = index;
+      symbol.offset = base;
+      symbol.weak = symbol.bind == obj::binding::global && weak_variables.contains(d.entity);
       if (kind == K::bss) sec.reserve_zerofill(d.size);
       else sec.emit(d.bytes);
       for (const auto& r : d.relocs) {
@@ -1301,6 +1305,7 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
 
   // Variables: their initial bytes, by what they hold ([basic.start.static]).
   std::vector<aarch64::DataDef> data;
+  std::set<EntityId> weak_variables;
   const Shapes& shapes = co_await cx.fetch<UnitShapes>(id);
   for (const Variable& v : tu.variables) {
     QueryLayout layout(cx, shapes, target);
@@ -1313,6 +1318,7 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
     bool is_const = (std::to_underlying(ast::cv_of(in.canonical(v.type))) & 1) != 0;
     bool zero = b->relocs.empty() && std::ranges::all_of(b->bytes, [](std::uint8_t x) { return x == 0; });
     aarch64::DataDef d{v.entity, aarch64::DataKind::data, std::move(b->bytes), 0, layout.type(v.type).align, std::move(b->relocs)};
+    if (v.weak_elf && !v.dynamic && d.relocs.empty()) weak_variables.insert(v.entity);
     if (is_const && !v.dynamic) d.kind = d.relocs.empty() ? aarch64::DataKind::rodata : aarch64::DataKind::data_const;
     else if (zero) {
       d.kind = aarch64::DataKind::bss;
@@ -1440,7 +1446,7 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
       std::vector<LinuxFunction> code;
       for (std::size_t i = 0; i < fns.size(); ++i)
         code.push_back({fns[i].fn, &*ms[i].get().linux_code, tu.functions[i].weak_elf});
-      return assemble_linux(tu.name, code, data, symbols);
+      return assemble_linux(tu.name, code, data, symbols, weak_variables);
     }
     std::vector<aarch64::CompiledFunction> code;
     for (std::size_t i = 0; i < fns.size(); ++i) code.push_back({fns[i].fn, *ms[i].get().code});

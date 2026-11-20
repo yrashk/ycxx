@@ -92,6 +92,10 @@ referents with internal linkage. [#367](https://github.com/yrashk/ycxx/issues/36
 On x86-64 Linux, direct calls and saved pointers across translation units share one address for
 simple external inline functions. [#422](https://github.com/yrashk/ycxx/issues/422)
 
+External inline namespace variables with relocation-free static initializers share one object
+across x86-64 ELF translation units. This lets two freestanding units using libycxx `<cstddef>`
+link with the pinned static library. [#432](https://github.com/yrashk/ycxx/issues/432)
+
 ycxx ELF objects record function types and code sizes. The ELF linker accepts supported
 system-assembled objects with function symbols and the GNU-built libycxx static linkage-marker
 object. [#428](https://github.com/yrashk/ycxx/issues/428), [#419](https://github.com/yrashk/ycxx/issues/419)
