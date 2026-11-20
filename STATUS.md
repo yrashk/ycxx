@@ -1032,6 +1032,9 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   of 5. Seven more draft examples pass.
 - A linkage-specification with one declaration (`extern "C" int v;`) declares as if `extern`
   were given ([dcl.link]/7); a variable with C language linkage is one in every namespace.
+- A second definition of the same ordinary external C-linkage function in a translation unit is
+  diagnosed across namespaces. Compatible declarations share the one definition and address
+  ([dcl.link], [basic.def.odr], #446).
 - Not yet (#153): `using N::f;` at namespace scope, `N::S{…}` as an expression, some clashes
   with namespace names and using-declarations, remaining standard-library linkage
   abbreviations such as `Sa`.
