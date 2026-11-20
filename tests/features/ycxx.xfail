@@ -29,7 +29,6 @@ draft/basic/basic.lookup.unqual-2.reject.cpp errors elsewhere: 'using' not suppo
 draft/basic/basic.scope.namespace-1.accept.cpp 'namespace' not supported yet
 draft/basic/basic.scope.pdecl-4.accept.cpp 'struct' not supported yet
 draft/basic/basic.scope.pdecl-5.accept.cpp 'typedef' not supported yet
-draft/basic/basic.scope.scope-1.accept.cpp 'struct' not supported yet
 draft/basic/basic.scope.scope-2.reject.cpp errors elsewhere: 'typedef' not supported yet
 draft/basic/basic.scope.scope-3.reject.cpp errors elsewhere: '(' not supported yet
 draft/basic/basic.scope.scope-4.accept.cpp 'namespace' not supported yet
@@ -93,7 +92,6 @@ draft/class/class.free-4.accept.cpp preprocessing directives are not supported y
 draft/class/class.friend-2.accept.cpp 'class' not supported yet
 draft/class/class.friend-3.reject.cpp errors elsewhere: 'class' not supported yet
 draft/class/class.friend-4.reject.cpp errors elsewhere: 'class' not supported yet
-draft/class/class.friend-6.accept.cpp 'class' not supported yet
 draft/class/class.friend-8.reject.cpp errors elsewhere: 'template' not supported yet
 draft/class/class.friend-9.reject.cpp errors elsewhere: 'class' not supported yet
 draft/class/class.inhctor.init-1.reject.cpp errors elsewhere: preprocessing directives are not supported yet

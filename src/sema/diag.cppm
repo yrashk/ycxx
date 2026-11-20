@@ -288,6 +288,7 @@ enum class Diag : std::uint32_t {
   va_start_context [[=message{Severity::error, "va_start requires an enclosing variadic function"}]],
   va_list_operand [[=message{Severity::error, "expected a mutable va_list cursor, got '{0:t}'"}]],
   va_arg_type [[=message{Severity::error, "va_arg type '{0:t}' is outside the supported x86-64 System V integer and pointer subset"}]],
+  friend_c_linkage [[=message{Severity::error, "C-linkage friend function definitions are not supported yet"}]],
 };
 
 // A `{N:r}` argument: why an evaluation was not constant. 0 is an expression the front end

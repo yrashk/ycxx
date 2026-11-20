@@ -124,6 +124,8 @@ public:
   // also at the point of instantiation ([temp.dep.candidate]).
   virtual std::vector<ast::DeclSema> adl_functions(EntityId ns, NameId name, bool at_instantiation) = 0;
   virtual const ClassRec* adl_class(EntityId c, bool at_instantiation) = 0;
+  // Earlier friend declarations in a class whose member list is still being read.
+  virtual std::vector<DeclId> earlier_adl_friends(EntityId, NameId) { return {}; }
   // In an instantiation, whether the call at `offset` was dependent in the template definition.
   virtual bool dependent_call(u32 /*offset*/) { return false; }
   // Whether instantiation has given up at its nesting limit, which was diagnosed ([temp.inst]/16):
@@ -6080,13 +6082,25 @@ public:
     return enclosing_namespace(r.entity);
   }
 
-  // [basic.lookup.argdep]/3: the associated namespaces of the argument types. The namespace
-  // query adds each nearest non-inline ancestor and its inline namespace set.
-  std::vector<EntityId> associated_namespaces(std::span<const Ex> args, bool at_instantiation, bool ordinary_call) {
+  struct AdlAssociations {
     std::vector<EntityId> namespaces;
+    std::vector<EntityId> classes;
+  };
+
+  // [basic.lookup.argdep]/3: the namespaces and classes associated with the argument types.
+  // The namespace query adds each nearest non-inline ancestor and its inline namespace set.
+  AdlAssociations adl_associations(std::span<const Ex> args, bool at_instantiation, bool ordinary_call) {
+    AdlAssociations result;
     auto add_namespace = [&](EntityId entity) {
       EntityId ns = enclosing_namespace(entity);
-      if (!std::ranges::contains(namespaces, ns)) namespaces.push_back(ns);
+      if (!std::ranges::contains(result.namespaces, ns)) result.namespaces.push_back(ns);
+    };
+    auto add_class = [&](EntityId cls) {
+      // Friend declarations in class templates are outside this slice. Keep the existing
+      // dependent lookup's limits on when it instantiates associated classes.
+      const EntityRec& entity = w_->entities.rec(cls);
+      if (entity.kind == EntityKind::class_template || entity.templ != EntityId::none) return;
+      if (!std::ranges::contains(result.classes, cls)) result.classes.push_back(cls);
     };
     // [basic.lookup.argdep]/3: bases contribute their entities. Expanding a base's template
     // arguments requires a separate occurrence of its type in the argument walk.
@@ -6098,6 +6112,7 @@ public:
       if (const ClassRec* c = q_->adl_class(cls, at_instantiation)) {
         for (const BaseRec& b : c->bases) {
           add_namespace(b.cls);
+          add_class(b.cls);
           visit(b.cls);
         }
       }
@@ -6111,11 +6126,15 @@ public:
       switch (r.kind) {
       case TypeKind::class_:
       case TypeKind::enum_: {
-        // An enclosing class contributes the same namespace as its class or enum member.
         add_namespace(r.entity);
-        if (r.kind == TypeKind::class_) collect_bases(r.entity);
-        if (!ordinary_call) break;
         const EntityRec& entity = w_->entities.rec(r.entity);
+        if (entity.scope != EntityId::none && w_->entities.rec(entity.scope).kind == EntityKind::class_)
+          add_class(entity.scope);
+        if (r.kind == TypeKind::class_) {
+          add_class(r.entity);
+          collect_bases(r.entity);
+        }
+        if (!ordinary_call) break;
         auto visit_type_arg = [&](const TemplateArg& arg) {
           if (arg.kind == ast::TemplateArgKind::type) visit(arg.type);
         };
@@ -6144,7 +6163,7 @@ public:
       }
     };
     for (const Ex& a : args) collect(a.type());
-    return namespaces;
+    return result;
   }
 
   // Merge the ordinary candidates with ADL before overload resolution ([over.call.func]).
@@ -6155,17 +6174,31 @@ public:
     auto default_count = [&](const ast::DeclSema& d) {
       return std::ranges::count_if(found_defaults(d), [](NodeId n) { return n != NodeId::none; });
     };
+    auto add_candidate = [&](const ast::DeclSema& d) {
+      auto prior = std::ranges::find(set, d.entity, &ast::DeclSema::entity);
+      if (prior == set.end()) {
+        set.push_back(d);
+        changed = true;
+      } else if (d.params != prior->params && default_count(d) > default_count(*prior)) {
+        *prior = d;
+        changed = true;
+      }
+    };
     auto add = [&](bool at_instantiation) {
-      for (EntityId ns : associated_namespaces(args, at_instantiation, !dependent_call)) {
-        for (const ast::DeclSema& d : q_->adl_functions(ns, name, at_instantiation)) {
-          auto prior = std::ranges::find(set, d.entity, &ast::DeclSema::entity);
-          if (prior == set.end()) {
-            set.push_back(d);
-            changed = true;
-          } else if (d.params != prior->params && default_count(d) > default_count(*prior)) {
-            *prior = d;
-            changed = true;
-          }
+      auto associations = adl_associations(args, at_instantiation, !dependent_call);
+      for (EntityId ns : associations.namespaces)
+        for (const ast::DeclSema& d : q_->adl_functions(ns, name, at_instantiation)) add_candidate(d);
+      auto add_friend = [&](DeclId f) {
+        if (auto d = q_->decl_sema(f); d.entity != EntityId::none) add_candidate(d);
+      };
+      // [basic.lookup.argdep]/4: a reachable associated class contributes the friends it
+      // declared, even when their namespace has yet to bind the name for ordinary lookup.
+      for (EntityId cls : associations.classes) {
+        if (const ClassRec* rec = q_->adl_class(cls, at_instantiation)) {
+          for (const ast::MemberRec& f : rec->adl_friends)
+            if (w_->entities.rec(f.entity).name == name) add_friend(f.decl);
+        } else if (!at_instantiation) {
+          for (DeclId f : q_->earlier_adl_friends(cls, name)) add_friend(f);
         }
       }
     };
