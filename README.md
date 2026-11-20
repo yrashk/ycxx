@@ -131,11 +131,12 @@ operators with an `unsigned long long` parameter, including constant evaluation.
   Ranges can be arrays or classes with member `begin` and `end` or free `begin` and `end` found
   by argument-dependent lookup. Unqualified calls can find and rank functions in associated
   namespaces. Functions support default arguments, recursion, operator overloading and calls
-  through pointers. Overloaded free functions can take braced arguments for arithmetic parameters
+  through pointers. Nonmember operators can be called explicitly by name, including with
+  namespace qualification.
+  [#219](https://github.com/yrashk/ycxx/issues/219)
+  Overloaded free functions can take braced arguments for arithmetic parameters
   and ordinary aggregates with arithmetic fields. A pointer or reference target type can select
   a free or static member overload.
-  Nonmember operators can be called explicitly by name, including with namespace qualification.
-  [#219](https://github.com/yrashk/ycxx/issues/219)
   A qualified namespace function definition can inherit C language linkage from its declaration.
   [#426](https://github.com/yrashk/ycxx/issues/426)
 - classes and unions: data and static members, named data members of unnamed union type,
