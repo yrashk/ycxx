@@ -487,6 +487,13 @@ Constant values live in the `values` interner as `ConstId`s:
 - the base of a `VLvalue` is `VEntity{EntityId}` (a declared object or function), a `VString`
   (a string literal object), or a `VEntity` of a lifetime-extended temporary or a template
   parameter object, whose entity records §4.3 defines ([expr.const]);
+- **Named array pointer values** (Astra, #111). The typed result retains the element indices in
+  `VLvalue::path`. The path prefix names the array subobject and the final index may equal its
+  bound. The empty path can name the whole object, whose size gives its singleton one-past
+  offset. Reload checks the path and offset against the object's type and recovers the original
+  arithmetic domain ([basic.compound], [expr.add]). At a shared boundary, the two paths can
+  compare equal by address while retaining distinct domains. The native relocation uses the
+  root symbol and byte addend.
 - the **dependent family** `VDep*`: `VDepParam{depth, index}` (a template parameter),
   `VDepFnParam{depth, index}` (a function parameter named in a trailing return type or
   `noexcept`, positional, as the Itanium ABI mangles it), `VDepOp{op; TemplateArgs operands}` (so
