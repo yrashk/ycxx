@@ -1,4 +1,4 @@
-# Linux x86-64 static archive inputs
+# Linux x86-64 static archives
 
 [#388](https://github.com/yrashk/ycxx/issues/388) starts with explicit `.a` operands in Linux
 x86-64 static executable links. A system archiver can package the ELF relocatable objects
@@ -64,10 +64,44 @@ member objects.
 - Check malformed container and index bounds and the unsupported format diagnostics.
   Verify byte equality between in-process and daemon output and repeat after replacing an
   archive at the same path. Keep ordinary Linux and Darwin executable regressions green.
-- Native archive creation #389 remains independent. Mach-O archive inputs, combined archive
-  and DSO resolution, and additional system-library inputs remain under #388 and #390.
+- Mach-O archive inputs, combined archive and DSO resolution, and additional system-library
+  inputs remain under #388 and #390.
 
 Astra independently reviewed extraction semantics, format bounds, daemon input ordering,
 and the separation from shared-input resolution. The design uses [POSIX `c17` operand order](https://pubs.opengroup.org/onlinepubs/9799919799/utilities/c17.html),
 [ELF gABI symbol binding](https://gabi.xinuos.com/elf/05-symtab.html#symbol-binding) and the
 [SVR4/GNU archive format](https://man.freebsd.org/cgi/man.cgi?query=ar&sektion=5).
+
+## Native archive production
+
+[#389](https://github.com/yrashk/ycxx/issues/389) adds `ycxx archive -o libfoo.a [--] [object ...]`
+as a standalone command. It creates or replaces the entire archive in one invocation. It runs
+in process, without a daemon or an external archiver. Identify the input format from its bytes,
+using the existing x86-64 ELF relocatable-object reader for validation and symbol discovery.
+Copy the original member payloads byte for byte. Changes to the supported external ELF object
+subset are tracked in [#419](https://github.com/yrashk/ycxx/issues/419).
+
+Write a regular GNU archive with a `/` index first, even when it has zero entries. Write a
+big-endian 32-bit entry count, a member-header offset per entry and the NUL-terminated names in
+the same order. Include each named nonlocal definition, including weak and hidden definitions.
+Preserve repeated definitions across members. The order is operand order, then ELF symbol-table
+order within each member. Omit undefined and local symbols from the index. Reject nonlocal ELF
+symbols with empty names so a member has the names needed for static symbol resolution.
+
+Keep ordinary members in operand order with their basenames, including duplicates. Use the GNU
+`//` table for names of 16 or more bytes, names containing whitespace, and names with reserved
+short encodings. Reject names that cannot be represented interoperably, including names containing
+newlines. Write zero timestamps and IDs, mode `0644` for ordinary members and newline alignment
+padding. Check the decimal field widths and the 32-bit symbol count and member-header offsets.
+Validate all inputs and construct the archive before replacing the output with a same-directory
+rename. An empty input list produces an indexed empty archive.
+
+Verify exact container bytes and unchanged payloads, deterministic output across input metadata,
+member and symbol visibility through GNU and LLVM tools, and transitive extraction by ycxx and
+separate GNU and LLVM linker invocations. Check that a bad later object leaves an existing
+archive intact. Mach-O archive production remains in #389. Archive consumption bounds and search
+modes remain in [#388](https://github.com/yrashk/ycxx/issues/388).
+
+Astra reviewed the command, target detection, archive layout, symbol policy and verification
+scope. The format uses the [SVR4/GNU archive specification](https://man.freebsd.org/cgi/man.cgi?query=ar&sektion=5)
+and the [ELF gABI symbol table](https://gabi.xinuos.com/elf/05-symtab.html).

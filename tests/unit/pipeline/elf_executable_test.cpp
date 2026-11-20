@@ -1,4 +1,5 @@
 import std;
+import ycxx.hash;
 import ycxx.pipeline;
 import ycxx.unit;
 
@@ -115,6 +116,14 @@ void diagnostics(const obj::object& main, const obj::object& start) {
 
 int main(int argc, char** argv) {
   const auto main_object = main_with_arguments();
+  auto typed_main = main_object;
+  typed_main.symbols[0].function_size = 0;
+  const auto unknown_size = ycxx::fingerprint(typed_main);
+  check(main_object != typed_main && ycxx::fingerprint(main_object) != unknown_size,
+        "object identity distinguishes an untyped symbol from STT_FUNC with unknown size");
+  typed_main.symbols[0].function_size = typed_main.sections[0].size();
+  check(ycxx::fingerprint(typed_main) != unknown_size, "object fingerprint includes the function size");
+
   const auto start = custom_start();
   auto weak_main = main_in_data();
   weak_main.symbols[0].weak = true;

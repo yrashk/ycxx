@@ -19,11 +19,17 @@ reasoning; do not leave decisions only in issue threads.
    before the next one starts.
    - The first Linux x86-64 [dynamic link](docs/design/linux-dynamic-executable.md) uses
      explicit shared objects, the target interpreter and a fixed-address executable. Native
-     direct function imports use eager GOT relocations. Target CRT and normal hosted process
-     startup follow under #390.
+     direct function imports use eager GOT relocations. Provider discovery uses GNU hash when
+     available and otherwise uses SysV hash. Target CRT, versioned imports, provider dependencies
+     and normal hosted process startup follow under #390.
    - Linux x86-64 [archive inputs](docs/design/linux-static-archives.md) start with explicit
      indexed GNU archives in static executable links. The linker extracts only members needed
      by outstanding symbols and preserves archive operand order (#388).
+   - Linux x86-64 [archive production](docs/design/linux-static-archives.md#native-archive-production)
+     uses the standalone `ycxx archive -o` front to create or replace a deterministic regular
+     GNU archive in process. It validates inputs with the ELF object reader, retains the original
+     payloads in operand order and indexes named nonlocal definitions, including weak and hidden
+     definitions. Astra reviewed the design (#389).
    - Linux x86-64 [external data addresses](docs/design/linux-external-data-addresses.md) use
      a GOT relocation in relocatable objects. The native static linker relaxes the validated
      RIP-relative load to a direct address after symbol resolution (#414).
@@ -201,6 +207,10 @@ specified by the accepted [optimization design](docs/design/optimization.md) (#3
      answers as values: names in one scope at one point, member lookup, ADL, completeness, one
      macro, one include resolution. Overload resolution is keyed by candidate set and argument
      shapes. *Reason:* adding a declaration invalidates only the answers it could change. (§B2–§B9)
+   - [Argument-dependent lookup](docs/design/ordinary-argument-dependent-lookup.md) searches
+     the namespaces associated with argument types at the lexical point. Dependent calls also
+     use the existing instantiation context. The search supplies candidates to overload
+     resolution and provides the ADL-only fallback for range-based `for` (#165).
    - **Identity without positions.** Items are cut from the preprocessed tokens before parsing.
      Their ids exclude bodies and positions, and locations are `(item, offset)`. Declaration ids
      and structural entity ids are separate. *Reason:* edits elsewhere disturb no keys. (§B1, §B2)

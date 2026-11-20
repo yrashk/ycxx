@@ -11,7 +11,8 @@ export namespace ycxx::obj::elf {
 std::expected<std::vector<std::uint8_t>, std::string> write_object(const object& o);
 
 // Read the x86-64 ELF64 relocatable subset emitted by write_object and the GNU forms
-// used by libycxx's static linkage marker. Retained sections and symbols keep file order.
+// used by libycxx's static linkage marker. Preserve defined function types and sizes.
+// Retained sections and symbols keep file order.
 std::expected<object, std::string> read_object(std::span<const std::uint8_t> file, std::string name);
 
 }  // namespace ycxx::obj::elf
@@ -27,7 +28,7 @@ constexpr std::uint32_t sht_progbits = 1, sht_symtab = 2, sht_strtab = 3, sht_re
 constexpr std::uint32_t sht_init_array = 14;
 constexpr std::uint64_t shf_write = 1, shf_alloc = 2, shf_execinstr = 4, shf_info_link = 0x40;
 constexpr std::uint64_t shf_merge = 0x10, shf_strings = 0x20;
-constexpr std::uint8_t stt_notype = 0, stt_object = 1, stt_section = 3, stt_file = 4;
+constexpr std::uint8_t stt_notype = 0, stt_object = 1, stt_func = 2, stt_section = 3, stt_file = 4;
 constexpr std::uint8_t stb_local = 0, stb_global = 1, stb_weak = 2;
 constexpr std::uint8_t stv_default = 0, stv_hidden = 2;
 
@@ -99,6 +100,10 @@ struct section_header {
   std::uint32_t info = 0;
   std::uint64_t align = 0;
   std::uint64_t entsize = 0;
+
+  bool contains_code_at(std::uint64_t at) const {
+    return type == sht_progbits && (flags & shf_execinstr) != 0 && at < size;
+  }
 
   void write(bytes& out) const {
     append(out, name);
@@ -226,15 +231,21 @@ std::expected<bytes, std::string> write_object(const object& o) {
       if (local && (s.weak || !s.defined())) return fail(std::format("invalid local symbol '{}'", s.name));
       if (s.defined() && (*s.section >= o.sections.size() || s.offset > o.sections[*s.section].size()))
         return fail(std::format("symbol '{}' is outside its section", s.name));
+      if (s.function_size) {
+        if (!s.defined() || !sections[*s.section + 1].contains_code_at(s.offset))
+          return fail(std::format("function symbol '{}' is not in executable code", s.name));
+        if (*s.function_size > sections[*s.section + 1].size - s.offset)
+          return fail(std::format("function symbol '{}' is outside its section", s.name));
+      }
 
       symbol_indices[i] = next_symbol++;
       append(symtab, append_name(strtab, s.name));
       const auto bind = local ? stb_local : s.weak ? stb_weak : stb_global;
-      append(symtab, static_cast<std::uint8_t>(bind << 4 | stt_notype));
+      append(symtab, static_cast<std::uint8_t>(bind << 4 | (s.function_size ? stt_func : stt_notype)));
       append(symtab, s.bind == binding::hidden ? stv_hidden : stv_default);
       append(symtab, static_cast<std::uint16_t>(s.defined() ? *s.section + 1 : 0));   // SHN_UNDEF is 0
       append(symtab, s.defined() ? s.offset : std::uint64_t{0});
-      append(symtab, std::uint64_t{0});  // size unknown
+      append(symtab, s.function_size.value_or(0));
     }
     if (local) first_nonlocal = next_symbol;
   }
@@ -401,8 +412,8 @@ std::expected<object, std::string> read_object(std::span<const std::uint8_t> fil
     const auto size = load<std::uint64_t>(record, 16);
     if (name_index >= symbol_names.size()) return fail(std::format("invalid name for ELF symbol {}", i));
     const bool local = bind == stb_local;
-    if ((type != stt_notype && type != stt_object && type != stt_section && type != stt_file) ||
-        (type != stt_object && size != 0) || bind > stb_weak ||
+    if ((type != stt_notype && type != stt_object && type != stt_func && type != stt_section && type != stt_file) ||
+        (type != stt_object && type != stt_func && size != 0) || bind > stb_weak ||
         (visibility != stv_default && (visibility != stv_hidden || local)))
       return fail(std::format("unsupported type, size, binding or visibility for ELF symbol {}", i));
     if ((i < symtab.info) != local) return fail("ELF local symbols must precede nonlocal symbols");
@@ -424,11 +435,18 @@ std::expected<object, std::string> read_object(std::span<const std::uint8_t> fil
     } else if (index >= shnum || !sections[index] || value > headers[index].size || size > headers[index].size - value) {
       return fail(std::format("unsupported section index or out-of-section value or size for ELF symbol {}", i));
     }
+    std::optional<std::uint64_t> function_size;
+    if (type == stt_func && index != 0) {
+      if (!headers[index].contains_code_at(value))
+        return fail(std::format("ELF function symbol {} is not in executable code", i));
+      function_size = size;
+    }
     const auto symbol_name = name_at(symbol_names, name_index);
     if (symbol_name.size() > remaining_name_bytes) return fail("ELF symbol names exceed the string table size");
     remaining_name_bytes -= symbol_name.size();
     const auto model_binding = local ? binding::local : visibility == stv_hidden ? binding::hidden : binding::global;
-    symbols[i].retained = o.add_symbol({std::string(symbol_name), model_binding, sections[index], value, bind == stb_weak});
+    symbols[i].retained = o.add_symbol({std::string(symbol_name), model_binding, sections[index], value, bind == stb_weak,
+                                       function_size});
   }
 
   std::vector<bool> has_relocations(shnum);

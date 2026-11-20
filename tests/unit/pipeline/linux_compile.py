@@ -102,6 +102,43 @@ def main():
         def compile(*args, env=cold, error=None):
             return run([ycxx, 'cxx', *args], scope, env, error)
 
+        def symbol(path, name):
+            table = run([readelf, '-Ws', path], scope, cold)
+            entry, = (line.split() for line in table.splitlines() if line.split()[-1:] == [name])
+            return int(entry[1], 16), int(entry[2]), entry[3:7]
+
+        (scope / 'system-leaf.s').write_text('''\
+.text
+.globl system_leaf
+.type system_leaf, @function
+system_leaf:
+    mov $42, %eax
+    ret
+.size system_leaf, .-system_leaf
+.section .note.GNU-stack,"",@progbits
+''')
+        run([cc, '-c', 'system-leaf.s'], scope, cold)
+        assert symbol('system-leaf.o', 'system_leaf') == (0, 6, ['FUNC', 'GLOBAL', 'DEFAULT', '1'])
+        (scope / 'use-leaf.cpp').write_text('extern "C" int system_leaf();\n'
+                                           'int main() { return system_leaf() != 42; }\n')
+        compile(target, '-nostdlib', 'use-leaf.cpp', 'system-leaf.o', '-o', 'use-leaf')
+        run(['./use-leaf'], scope, cold)
+
+        leaf = 'extern "C" int leaf() { return 42; }\n'
+        (scope / 'leaf.cpp').write_text(leaf)
+        compile(target, '-c', 'leaf.cpp')
+        sections = run([readelf, '-SW', 'leaf.o'], scope, cold)
+        text, = (line.split(']', 1)[1].split() for line in sections.splitlines() if '] .text ' in line)
+        leaf_size = int(text[4], 16)
+        assert leaf_size > 0
+        leaf_symbol = symbol('leaf.o', 'leaf')
+        assert leaf_symbol == (0, leaf_size, ['FUNC', 'GLOBAL', 'DEFAULT', '1'])
+        (scope / 'leaf-with-next.cpp').write_text(leaf + 'extern "C" int next() { return 1; }\n')
+        compile(target, '-c', 'leaf-with-next.cpp')
+        assert symbol('leaf-with-next.o', 'leaf') == leaf_symbol
+        next_offset, next_size, next_info = symbol('leaf-with-next.o', 'next')
+        assert next_offset > leaf_size and next_size > 0 and next_info == ['FUNC', 'GLOBAL', 'DEFAULT', '1']
+
         compile(target, '-c', 'source.cpp')
         output = run([readelf, '-h', '-Ws', '-Wr', 'source.o'], scope, cold)
         for field in ('REL (Relocatable file)', 'X86-64', 'R_X86_64_PLT32', 'R_X86_64_PC32', 'sum7', '_Z5twicel'):

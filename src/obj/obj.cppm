@@ -142,6 +142,8 @@ struct symbol {
   std::optional<std::uint32_t> section;  // index into `object::sections`; none: undefined
   std::uint64_t offset = 0;              // in the section
   bool weak = false;                     // a weak definition, or a weak reference when undefined
+  // Present for an ELF function definition. Zero records an unknown byte extent.
+  std::optional<std::uint64_t> function_size = std::nullopt;
 
   bool defined() const noexcept { return section.has_value(); }
   bool operator==(const symbol&) const = default;

@@ -580,6 +580,11 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   accepts the supported x86-64 `ET_REL` subset emitted by ycxx. The native ELF linker consumes
   the same in-memory objects, resolves absolute and PC-relative relocations, and writes a static
   `ET_EXEC` image with load segments and a non-executable stack.
+- ELF function definitions carry `STT_FUNC` and their emitted code size. The reader retains
+  both for supported system relocatables and accepts zero as an unknown size. A function must
+  start inside executable code, and its declared extent must fit in its section. The object
+  fingerprint includes this metadata.
+  [#428](https://github.com/yrashk/ycxx/issues/428) · [#391](https://github.com/yrashk/ycxx/issues/391)
 - Runtime addresses of default-visible Linux data use `R_X86_64_REX_GOTPCRELX`, including
   declarations defined in another object. The native static linker checks and relaxes the
   RIP-relative MOV to LEA after resolving the symbol. System linkers can preserve GOT binding.
@@ -608,25 +613,34 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   is the entry. Otherwise ycxx's startup calls `int main()` or `int main(int, char**)` and exits
   with the returned value. The link query checks a source function's ABI when an asm label gives it the symbol
   `main`. A `main` supplied in an ELF object must already use one of those signatures.
-- A static link can include explicit `.a` operands created by system `ar`. It follows operand order
-  across sources, objects and archives. Each archive supplies the earliest physical member
+- A static link can include explicit `.a` operands created by `ycxx archive` or system `ar`.
+  It follows operand order across sources, objects and archives. Each archive supplies the earliest physical member
   defining an unresolved nonweak symbol, repeating until no eligible member remains. Each
   repeated operand searches the archive again at its new position. The driver snapshots the
   archive and the link query validates its GNU index and reads only the selected ELF members.
   This path requires a source or ordinary object and supports regular, indexed GNU archives
   and empty archives. Other archive formats and combining archives with shared objects remain
   part of [#388](https://github.com/yrashk/ycxx/issues/388).
+- `ycxx archive -o lib.a [--] [object ...]` creates or replaces a regular GNU archive in process.
+  It validates each member with the existing ELF object reader, copies its bytes, and indexes
+  named nonlocal definitions, including weak and hidden definitions. Member basenames and
+  duplicate definitions follow operand order. The format uses a 32-bit GNU index, deterministic
+  metadata, and an optional long-name table. An empty input list writes a zero-entry index.
+  The command stages replacement beside the output after validating all inputs. Mach-O archive
+  production remains part of [#389](https://github.com/yrashk/ycxx/issues/389). The supported
+  external ELF object subset is tracked in [#419](https://github.com/yrashk/ycxx/issues/419).
 - `-nostdlib --dynamic-linker=/absolute/target/loader` with explicit shared objects writes a
-  fixed-address, sectionless `ET_EXEC`. Libraries need a slash-free `DT_SONAME` and a SysV
-  `DT_HASH`, and cannot have loader dependencies. The linker checks direct calls against their
+  fixed-address, sectionless `ET_EXEC`. Libraries need a slash-free `DT_SONAME`, GNU or SysV hash
+  metadata, and no loader dependencies. Provider discovery uses GNU hash on dual-table libraries
+  and works without input section headers. The linker checks direct calls against their
   default-visible, unversioned global functions. One RX thunk and one eager `R_X86_64_GLOB_DAT`
   relocation in RW storage serve each imported name. The loader finds libraries by SONAME,
   binds imported names, and runs provider initializers. Startup runs the executable's
   initializers, calls `main`, and calls the loader's termination callback before exiting with
   `main`'s result. The interpreter
   path and ordered shared inputs, including provider content fingerprints, enter the `Link`
-  query. Target CRT selection, versioned imports and GNU-hash-only providers remain part of
-  [#390](https://github.com/yrashk/ycxx/issues/390).
+  query. Target CRT selection, versioned imports, provider dependencies and library discovery
+  remain part of [#390](https://github.com/yrashk/ycxx/issues/390).
 - ELF objects record namespace-scope initializer functions in `.init_array`, with 8-byte slots
   and `R_X86_64_64` relocations. The linker places arrays consecutively in input order and checks
   each slot resolves into executable input bytes. Generated startup calls the functions before
@@ -645,6 +659,9 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   runtime rebinding, initialization and finalization, and reproducibility and invalidation in
   the daemon. `unit.linux_archive` tests system `ar` inputs, extraction order, symbol binding,
   malformed archives, and output parity and same-path replacement in the daemon.
+  `unit.linux_archive_output` checks byte layout, deterministic member metadata, atomic
+  replacement, and native and external archive consumption. It runs the system `ar`, `nm` and
+  linker and also exercises `llvm-ar`, `llvm-nm` and `ld.lld` when available.
 
 ## The resident daemon (#96, #97, 2026-11-18)
 
@@ -1026,6 +1043,26 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
 - Not yet (#153): enumerators through `using E::e;` (/7), a function target with the same
   parameter types as a function of the scope (/14), `typename` with dependent names (ζ).
 
+## Argument-dependent lookup for unqualified calls (#165, 2026-11-19)
+
+- [basic.lookup.argdep] finds functions in the namespaces associated with class and enumeration
+  arguments, including complete ordinary classes' bases and the inline namespace set. Pointer,
+  reference, array, function and pointer-to-member types contribute through their component types.
+  Member-pointer values still need #411.
+- Each associated namespace search uses preceding declarations that bind names in the scope.
+  It uses namespace using-declarations' fixed targets and the latest redeclaration found
+  for each function. Using-directives do not contribute to ADL. Sema merges the candidates with
+  ordinary lookup before overload resolution, then deduces the selected function's return type
+  if needed. Class members and nonfunctions suppress ADL. A block using-declaration that names
+  a namespace function permits ADL. Qualified and parenthesized calls use ordinary lookup.
+- A nondependent call in a template uses its lexical lookup point. Dependent calls also use the
+  existing point of instantiation ([temp.dep.candidate]). Per-name incremental scheduling
+  remains under #16.
+- Remaining work in #165 includes declarations of functions in blocks, exact lookup for
+  operators, association through class template arguments and overload-set arguments, and
+  complete unqualified template-id lookup. Hidden friends are tracked in #259.
+- Tests: `tests/own/argument-dependent-lookup/` and `tests/own/range-for/adl*.run.cpp`.
+
 ## `<cstdio>`, step 3: attributes, asm labels, string-initialized arrays (#133, 2026-11-18)
 
 - **Attributes:** `[[…]]` attribute-specifiers on declarations, class heads and statements, and
@@ -1199,8 +1236,8 @@ template's tokens again with the arguments bound.
   template-ids (`N::f<int>`), a non-type parameter's default or a signature's bound that is a
   dependent expression other than a parameter (not supported, pending `VDepOp`), dependent
   qualified names (`typename T::x`, with the `SSubst` sugar of ast.md §6.4), deduction from an
-  overload set argument ([temp.deduct.call]/6), "required from here" notes. Argument-dependent
-  lookup runs for dependent calls in instantiations only (#165). Coalesced (weak) definitions of specializations are #124.
+  overload set argument ([temp.deduct.call]/6), "required from here" notes. Coalesced (weak)
+  definitions of specializations are #124.
 
 ## Templates, ζ step 2: class templates (#88, 2026-11-18)
 
@@ -1996,12 +2033,12 @@ values, end to end; results match Clang's bit for bit.
   kinds: hidden locals `auto&& __range`, `auto __begin`, `auto __end` (`deduce_placeholder`),
   then a `For` over `__begin != __end` and `++__begin` whose body declares the loop variable from
   `*__begin`. An array supplies its begin and one-past-end pointers. A class supplies member calls
-  when member lookup finds both names, including inherited members. The fallback uses ordinary
-  lookup for `begin(__range)` and `end(__range)` until #165 supplies ADL-only lookup. The loop
+  when member lookup finds both names, including inherited members. The fallback finds
+  `begin(__range)` and `end(__range)` through ADL alone (#165). The loop
   variable and init-statement names are in the guarded scope ([basic.scope.block]/2). A dependent
   range is expanded at instantiation.
-- Remaining work covers ADL-only nonmember lookup (#165), C++23 lifetime extension for
-  temporaries inside the range initializer (#376), braced ranges (#329), and sentinels that rely on
+- Remaining work covers C++23 lifetime extension for temporaries inside the range initializer
+  (#376), braced ranges (#329), and sentinels that rely on
   `!=` rewritten from `==` (#295). A constexpr reference requires a constexpr overloaded
   dereference. Full constant evaluation of the class iterator still needs #25.
 - Tests: `tests/own/range-for/` (17 from the independent author and nine review regressions).
