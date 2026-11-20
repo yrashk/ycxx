@@ -60,6 +60,18 @@ def main():
             (scope / 'implicit-leaf.cpp').write_text((dependency % member) + copy)
             compile(linux, '-fsyntax-only', 'implicit-leaf.cpp', status=1, error=expected)
 
+        (scope / 'repeated-leaf.cpp').write_text('''
+struct Leaf { int value; };
+struct Pair { Leaf first, second; };
+struct Quad { Pair first, second; };
+struct Wrapper {
+    Quad first, second;
+    Wrapper(const Wrapper&) = default;
+};
+void copy(const Wrapper& source) { Wrapper destination(source); }
+''')
+        compile(linux, '-fsyntax-only', 'repeated-leaf.cpp')
+
         (scope / 'uncertain-abi.cpp').write_text(
             (dependency % 'volatile int value') + 'int read(Wrapper object) { return object.leaf.value; }\n')
         for target in (linux, darwin):

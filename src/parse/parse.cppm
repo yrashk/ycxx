@@ -5506,6 +5506,7 @@ void Program::defaulted_copy(EntityId cls, sema::ClassRec& rec, std::span<const 
            !std::ranges::contains(leaf.friends, owner) &&
            (ctor == EntityId::none || !std::ranges::contains(leaf.friends, ctor));
   };
+  std::map<EntityId, Subobject> implicit_fields;
   const auto inspect = [&](this const auto& self, QualType type, EntityId owner, EntityId ctor) -> Subobject {
     QualType t = element(type);
     const auto r = types.rec(t);
@@ -5545,9 +5546,16 @@ void Program::defaulted_copy(EntityId cls, sema::ClassRec& rec, std::span<const 
     } else {
       // Legacy implicit-copy records do not prove triviality. Classify the implicit copy in
       // this leaf's context, including its own fields' access, volatile types and references.
-      auto fields = uniform(trivial);
-      for (const auto& field : leaf->fields)
-        combine(fields, self(field.type, r.entity, EntityId::none));
+      // The outcomes within the leaf are independent of who is copying the leaf. Start
+      // unresolved so a malformed recursive record cannot be mistaken for a trivial copy.
+      auto [known, first] = implicit_fields.try_emplace(r.entity, uniform(unsupported));
+      if (first) {
+        auto fields = uniform(trivial);
+        for (const auto& field : leaf->fields)
+          combine(fields, self(field.type, r.entity, EntityId::none));
+        known->second = fields;
+      }
+      const auto& fields = known->second;
       takes_const = fields.takes_const;
       operation = takes_const ? fields.from_const : fields.from_mutable;
       if (leaf->copy_deleted) operation = deleted;
