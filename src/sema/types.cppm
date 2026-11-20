@@ -638,6 +638,8 @@ struct FieldRec {
 // A member function ([class.mfct]) or static data member ([class.static.data]), which a
 // qualified definition outside the class redeclares. Its declaration is an item of each unit that
 // defines the class, so the unit keeps it (`Program::member_decl`), not the shared record (#156).
+enum class CopyAssignment : u8 { none, trivial, memberwise, deleted, const_member, unsupported };
+
 struct MemberDeclRec {
   NameId name{};
   EntityId entity = EntityId::none;
@@ -652,6 +654,7 @@ struct MemberDeclRec {
   // its definition is its lambda's, not an item's.
   std::vector<ast::TemplateParamSema> head{};
   std::vector<ast::NodeId> defaults;  // a function's default arguments by parameter, or empty
+  CopyAssignment implicit_assignment = CopyAssignment::none;
 };
 
 struct NestedType {
@@ -699,6 +702,13 @@ struct ClassRec {
   std::vector<std::pair<EntityId, ast::Access>> access;
   // Its friends ([class.friend]): functions and classes, by entity.
   std::vector<EntityId> friends;
+
+  const MemberDeclRec* implicit_copy_assignment() const {
+    const auto copy = std::ranges::find_if(members, [](const MemberDeclRec& m) {
+      return m.implicit_assignment != CopyAssignment::none;
+    });
+    return copy == members.end() ? nullptr : &*copy;
+  }
 
   ast::Access access_of(EntityId e) const {
     for (const auto& [m, a] : access)

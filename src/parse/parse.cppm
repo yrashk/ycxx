@@ -686,6 +686,8 @@ public:
     return interp::GlobalVar{type, c, c.has_value()};
   }
   bool is_constexpr(EntityId f, u32 item) {
+    if (auto copy = copy_assignments_.find(f); copy != copy_assignments_.end())
+      return copy->second.definition.item <= item;
     // A specialization is as its template is declared, unless explicitly specialized ([temp.expl.spec]/14).
     if (EntityId t = w_->entities.rec(f).templ; t != EntityId::none && !explicitly_specialized(f, item)) f = t;
     auto d = declaration(f, item);
@@ -709,17 +711,19 @@ public:
     return it->second;
   }
 
-  // The implicitly declared special members that are not trivial ([special]): a destructor or
-  // copy constructor whose body `function_ir` needs, synthesized from the class's members.
+  // The implicitly defined special members needed by the unit ([special]).
+  enum class SpecialMember { destructor, copy_constructor, copy_assignment };
   struct Synthesized {
     u32 item;  // the class's
     ast::DeclSema decl;
-    bool copy;  // the copy constructor, else the destructor
+    SpecialMember kind;
   };
   const std::deque<Synthesized>& synthesized() const { return synth_; }
   // Its body, analysed on first use.
   const ast::BodySema& synthesized_body(std::size_t i);
   void special_members(u32 item, EntityId cls, sema::ClassRec& rec);
+  void declare_copy_assignment(u32 item, EntityId cls, sema::ClassRec& rec, bool user_move);
+  sema::CopyAssignment require_copy_assignment(EntityId f);
   Ex copy_from(sema::Sema& sm, Ex src, QualType t);
 
   // The type of `this` in a non-static member function ([expr.prim.this]): a pointer to its class,
@@ -1129,6 +1133,14 @@ private:
   // while the body's record is referred to.
   std::deque<Synthesized> synth_;
   std::map<std::size_t, ast::BodySema> synth_bodies_;
+  struct PendingCopyAssignment {
+    Synthesized definition;
+    sema::CopyAssignment state;
+    std::optional<ast::BodySema> body = std::nullopt;
+    bool checking = false;
+    bool emitted = false;
+  };
+  std::map<EntityId, PendingCopyAssignment> copy_assignments_;
   std::deque<Instance> instances_;               // a deque: instances are referred to as they are added
   std::vector<const Instance*> instance_order_;  // the completed ones, in order of instantiation
   std::map<u32, std::size_t> instance_index_;    // by specialization: its slot in `instances_`
@@ -1158,7 +1170,7 @@ private:
   std::vector<engine::Diagnostic> end_diags_;    // the END phase's own
   std::vector<EntityId> required_;
   std::vector<EntityId> implicit_allocation_functions_;  // in order of first use
-  std::map<u32, std::optional<irgen::FunctionIr>> instance_irs_;  // by specialization
+  std::map<u32, std::optional<irgen::FunctionIr>> instance_irs_;  // instantiated and implicit bodies, by entity
   std::map<u32, std::optional<irgen::FunctionIr>> closure_irs_;  // by closure member
 
 public:
@@ -1197,6 +1209,7 @@ class AtItem final : public sema::Questions {
 public:
   AtItem(Program& p, u32 item, bool self) : from(p.ns_of(item)), p_(&p), item_(item), self_(self) {}
   const sema::Classes& classes() override { return p_->classes(); }
+  sema::CopyAssignment require_copy_assignment(EntityId f) override { return p_->require_copy_assignment(f); }
   const sema::ClassRec& publish_class(EntityId c, sema::ClassRec r) override { return p_->publish_class(c, std::move(r), item_); }
   const sema::EnumRec* defining_enum(EntityId e) override {
     return p_->defining_enum_.first == e ? p_->defining_enum_.second : nullptr;
@@ -1327,6 +1340,7 @@ class AtInstantiation final : public sema::Questions {
 public:
   AtInstantiation(Program& p, u32 item) : p_(&p), item_(item), at_(p, item, true) {}
   const sema::Classes& classes() override { return p_->classes(); }
+  sema::CopyAssignment require_copy_assignment(EntityId f) override { return p_->require_copy_assignment(f); }
   const sema::ClassRec& publish_class(EntityId c, sema::ClassRec r) override { return p_->publish_class(c, std::move(r), item_); }
   std::vector<DeclId> visible_decls(ast::NameId name, std::span<const EntityId> directives = {}) override {
     return at_.visible_decls(name, directives);
@@ -5389,6 +5403,7 @@ void Program::special_members(u32 item, EntityId cls, sema::ClassRec& rec) {
   QualType ct = types.class_type(cls);
   bool user_copy = false;
   bool user_move = false;
+  bool user_move_for_assignment = false;
   EntityId user_dtor = EntityId::none;
   for (const sema::MemberDeclRec& m : rec.members) {
     if (m.is_dtor) user_dtor = m.entity;
@@ -5406,6 +5421,7 @@ void Program::special_members(u32 item, EntityId cls, sema::ClassRec& rec) {
         types.canonical(sema::Types::unqualified(types.referee(fr.params[0]))) == types.canonical(ct)) {
       if (types.rec(fr.params[0]).rvalue_ref) {
         user_move = true;  // a move constructor, user-provided unless deleted (no `= default` yet)
+        user_move_for_assignment |= !m.is_template;
         rec.move_usable = !m.is_deleted;
         rec.move_nontrivial = !m.is_deleted;
         continue;
@@ -5443,7 +5459,7 @@ void Program::special_members(u32 item, EntityId cls, sema::ClassRec& rec) {
     d.entity = w_->entities.entity({copy ? sema::EntityKind::constructor : sema::EntityKind::destructor,
                                     w_->ins.names.intern(copy ? cname : "~" + cname), type, LangLinkage::cxx,
                                     ast::Linkage::external, {}, cls});
-    synth_.push_back({item, b.commit(d), copy});
+    synth_.push_back({item, b.commit(d), copy ? SpecialMember::copy_constructor : SpecialMember::destructor});
     return synth_.back().decl.entity;
   };
   // The types of its subobjects: its direct bases', then its members' ([class.base.init]/13).
@@ -5504,6 +5520,176 @@ void Program::special_members(u32 item, EntityId cls, sema::ClassRec& rec) {
             std::ranges::all_of(rec.fields, [&](const sema::FieldRec& f) { return pod_type(f.type); }) &&
             std::ranges::all_of(rec.bases, [&](const sema::BaseRec& b) { return pod_type(types.class_type(b.cls)); }) &&
             (rec.fields.empty() || !data_in_bases);
+  declare_copy_assignment(item, cls, rec, user_move_for_assignment);
+}
+
+void Program::declare_copy_assignment(u32 item, EntityId cls, sema::ClassRec& rec, bool user_move) {
+  using sema::CopyAssignment;
+  auto& types = w_->types;
+  const QualType ct = types.class_type(cls);
+  if (types.is_dependent(ct)) return;
+  const NameId name = w_->ins.names.intern("operator=");
+  const auto parameter = [&](const sema::MemberDeclRec& m, QualType owner) -> std::optional<QualType> {
+    if (m.name != name || !m.is_function || m.is_static || m.is_template) return std::nullopt;
+    const auto fn = types.rec(m.type);
+    if (fn.params.size() != 1 || fn.variadic) return std::nullopt;
+    const QualType p = fn.params.front();
+    const QualType t = types.is_reference(p) ? types.referee(p) : p;
+    return sema::Types::unqualified(types.canonical(t)) == owner ? std::optional(p) : std::nullopt;
+  };
+  const auto move_parameter = [&](QualType p) { return types.is_reference(p) && types.rec(p).rvalue_ref; };
+  for (const auto& m : rec.members) {
+    if (auto p = parameter(m, ct)) {
+      if (!move_parameter(*p)) return;  // a user-declared copy assignment
+      user_move = true;
+    }
+  }
+
+  bool const_parameter = true;
+  bool trivial = true;
+  bool memberwise = rec.bases.empty() && !rec.union_ && !rec.closure &&
+                    w_->entities.rec(cls).templ == EntityId::none && items_->items[item].template_depth == 0;
+  bool deleted = user_move || (rec.closure && rec.default_deleted);
+  bool const_member = false;
+  const auto inspect = [&](QualType t, bool base) {
+    if (types.is_reference(t)) {
+      deleted = true;
+      return;
+    }
+    if (types.is_array(t)) memberwise = false;
+    while (types.is_array(t)) t = types.add_cv(types.rec(t).inner, sema::Types::cv(t));
+    t = types.canonical(t);
+    if (sema::Types::is_volatile(t)) {
+      trivial = false;
+      memberwise = false;
+    }
+    if (!types.is_class(t)) {
+      const_member |= sema::Types::is_const(t);
+      trivial &= types.is_object(t) && !types.is_member_pointer(t);
+      memberwise &= types.is_object(t) && !types.is_member_pointer(t);
+      return;
+    }
+    const auto* sub = classes_.find(types.class_of(t));
+    if (!sub) {
+      trivial = false;
+      memberwise = false;
+      return;
+    }
+    const QualType owner = sema::Types::unqualified(t);
+    const_parameter &= std::ranges::any_of(sub->members, [&](const sema::MemberDeclRec& m) {
+      auto p = parameter(m, owner);
+      return p && !move_parameter(*p) &&
+             (!types.is_reference(*p) || sema::Types::is_const(types.canonical(types.referee(*p))));
+    });
+    const auto* copy = sub->implicit_copy_assignment();
+    const bool sole = copy && std::ranges::count(sub->members, name, &sema::MemberDeclRec::name) == 1;
+    trivial &= sole && copy->implicit_assignment == CopyAssignment::trivial && !sema::Types::is_const(t);
+    // Preserve a proved deleted base copy. Other nontrivial base operations are deferred.
+    if (base && sole) {
+      const_member |= copy->implicit_assignment == CopyAssignment::const_member;
+      deleted |= copy->implicit_assignment == CopyAssignment::deleted;
+    }
+  };
+  for (const auto& b : rec.bases) inspect(types.class_type(b.cls), true);
+  for (const auto& f : rec.fields) inspect(f.type, false);
+
+  const CopyAssignment state = const_member ? CopyAssignment::const_member
+                               : deleted ? CopyAssignment::deleted
+                               : trivial ? CopyAssignment::trivial
+                               : memberwise ? CopyAssignment::memberwise : CopyAssignment::unsupported;
+  const QualType source = types.lvalue_ref(const_parameter ? types.add_cv(ct, sema::Cv::const_) : ct);
+  const QualType result = types.lvalue_ref(ct);
+  const QualType type = types.function(result, std::span<const QualType>(&source, 1), false, LangLinkage::cxx);
+  const EntityId entity = w_->entities.entity({sema::EntityKind::function, name, type, LangLinkage::cxx,
+                                                ast::Linkage::external, {}, cls});
+  sema::MemberDeclRec candidate{};
+  candidate.name = name;
+  candidate.entity = entity;
+  candidate.type = type;
+  candidate.is_function = true;
+  candidate.implicit_assignment = state;
+  rec.members.push_back(std::move(candidate));
+  if (state != CopyAssignment::trivial && state != CopyAssignment::memberwise) return;
+
+  ast::Builder b(w_->ins, &arena_);
+  ast::DeclSema d = invalid_decl();
+  d.kind = ast::DeclKind::function;
+  d.entity = entity;
+  d.type = type;
+  d.linkage = ast::Linkage::external;
+  d.storage = ast::Storage::none;
+  d.access = ast::Access::public_;
+  d.flags = sema::decl_flag::member | sema::decl_flag::implicit | sema::decl_flag::definition |
+            sema::decl_flag::inline_ | sema::decl_flag::constexpr_;
+  d.attributes = b.seq(std::span<const NodeId>{});
+  ast::ParamSema param{EntityId::none, source, w_->ins.names.intern("other"), NodeId::none, 0};
+  d.params = b.seq(std::span<const ast::ParamSema>(&param, 1));
+  d.template_params = b.seq(std::span<const ast::TemplateParamSema>{});
+  copy_assignments_.try_emplace(entity, PendingCopyAssignment{{item, b.commit(d), SpecialMember::copy_assignment}, state});
+}
+
+sema::CopyAssignment Program::require_copy_assignment(EntityId f) {
+  using sema::CopyAssignment;
+  auto it = copy_assignments_.find(f);
+  if (it == copy_assignments_.end() || it->second.checking) return CopyAssignment::unsupported;
+  auto& copy = it->second;
+  if (copy.body || (copy.state != CopyAssignment::trivial && copy.state != CopyAssignment::memberwise)) return copy.state;
+  copy.checking = true;
+  const Synthesized& s = copy.definition;
+  const EntityId cls = w_->entities.rec(f).scope;
+  ast::Builder b(w_->ins, &arena_);
+  std::vector<engine::Diagnostic> diags;
+  AtItem q(*this, s.item, true);
+  q.own_class_complete = true;
+  sema::Sema sm(*w_, b, q, diags, id(s.item), 0);
+  sm.current_class = cls;
+  sm.current_function = f;
+  sm.this_type = this_type(s.decl);
+  const auto param = w_->ins.seqs.at(s.decl.params, 0);
+  sm.push_scope();
+  sm.declare_local(param.name, param.type, sema::local_flag::parameter, 0, false);
+  const Ex self = sm.this_expr(0, 0);
+  const Ex destination = sm.unary(ast::UnaryOp::deref, self, 0, 0, 0);
+  const Ex source = sm.name_expr(param.name, 0, 0);
+  std::vector<ast::Child> statements;
+  const auto append = [&](Ex expr) {
+    if (!expr.ok()) return false;
+    if (w_->types.is_class(expr.type()) && !expr.glvalue())
+      expr = sm.materialize(expr, sema::Types::unqualified(expr.type()), false);
+    statements.push_back({sm.node(ast::ExprStmt{{expr.id, 0}}, 0, 0).id, 0});
+    return true;
+  };
+
+  bool ok = true;
+  if (copy.state == CopyAssignment::trivial) {
+    const auto info = destination.info;
+    ok = append(sm.node(ast::Assign{info, ast::AssignOp::trivial_class_copy,
+                                   {destination.id, 0}, {source.id, 0}, info.type}, 0, 0, info));
+  } else {
+    for (const auto& field : classes_.rec(cls).fields) {
+      Ex from = sm.member(source, false, field.name, 0, 0, 0);
+      Ex to = sm.member(self, true, field.name, 0, 0, 0);
+      if (!append(sm.assign(sema::Sema::AsgOp::assign, to, from, 0))) {
+        ok = false;
+        break;
+      }
+    }
+  }
+  copy.checking = false;
+  if (!ok || !diags.empty()) {
+    const bool unsupported = diags.empty() || std::ranges::any_of(diags, [](const engine::Diagnostic& d) {
+      return d.id == sema::diag_id(Diag::unsupported_copy_assignment) || d.id == sema::diag_id(Diag::not_supported);
+    });
+    copy.state = unsupported ? CopyAssignment::unsupported : CopyAssignment::deleted;
+    return copy.state;
+  }
+  statements.push_back({sm.node(ast::Return{{destination.id, 0}}, 0, 0).id, 0});
+  const Ex root = sm.node(ast::Compound{b.list(statements)}, 0, 0);
+  copy.body = b.commit(ast::BodySema{root.id, b.seq(sm.locals()), b.seq(std::span<const ast::ExpansionRec>{}),
+                                    b.seq(std::span<const u32>{}), QualType{}, 0,
+                                    b.seq(std::span<const ast::ClosureDef>{})});
+  sm.pop_scope();
+  return copy.state;
 }
 
 // The copy of the object `src` designates as an initializer of type `t` ([class.copy.ctor]/14):
@@ -5525,6 +5711,7 @@ Ex Program::copy_from(sema::Sema& sm, Ex src, QualType t) {
 const ast::BodySema& Program::synthesized_body(std::size_t i) {
   if (auto it = synth_bodies_.find(i); it != synth_bodies_.end()) return it->second;
   const Synthesized& s = synth_[i];
+  if (s.kind == SpecialMember::copy_assignment) return *copy_assignments_.at(s.decl.entity).body;
   ast::Builder b(w_->ins, &arena_);
   std::vector<engine::Diagnostic> diags;  // none: the class was analysed
   AtItem q(*this, s.item, true);
@@ -5535,7 +5722,7 @@ const ast::BodySema& Program::synthesized_body(std::size_t i) {
   sm.this_type = this_type(s.decl);
   const sema::ClassRec& rec = classes_.rec(cls);
   Ex root;
-  if (s.copy) {
+  if (s.kind == SpecialMember::copy_constructor) {
     // [class.copy.ctor]/14: each member copied from the other object's, in declaration order.
     NameId other = w_->ins.names.intern("other");
     sm.push_scope();
@@ -5906,8 +6093,22 @@ void Program::instantiate_all() {
   auto required_members = [&](NodeId root, ItemId at) {
     std::vector<EntityId> refs;
     references(root, refs);
-    for (EntityId e : refs)
+    for (EntityId e : refs) {
+      if (auto assign = copy_assignments_.find(e); assign != copy_assignments_.end() && assign->second.body &&
+          !assign->second.emitted) {
+        assign->second.emitted = true;
+        synth_.push_back(assign->second.definition);
+      }
       if (member_patterns_.contains(std::to_underlying(e))) work.push_back({e, ast::Loc{at, 0}});
+    }
+  };
+  const auto required_part = [&](NodeId root, ast::SeqId<ast::ClosureDef> closures, ItemId at) {
+    required_members(root, at);
+    for (const auto& closure : w_->ins.seqs.elements(closures)) {
+      if (!sema::Sema::closure_has_code(*w_, closure)) continue;
+      required_members(closure.body, at);
+      required_members(closure.invoker_body, at);
+    }
   };
   for (u32 k = 0; k < items_->items.size(); ++k) {
     if (item_cells_[k]) {
@@ -5915,7 +6116,8 @@ void Program::instantiate_all() {
       // A namespace-scope variable's initializer, and its destructor ([basic.start.term]), are code
       // of the unit's initialization function.
       if (!templated_body(k) && !in_class_[k]) {
-        required_members(item_cells_[k]->value.tree, id(k));
+        const auto& part = item_cells_[k]->value;
+        required_part(part.tree, part.closures, id(k));
         for (const ast::DeclSema& d : w_->ins.seqs.elements(item_cells_[k]->value.decls))
           if (d.kind == ast::DeclKind::variable && d.entity != EntityId::none && (d.flags & sema::decl_flag::definition)) {
             QualType t = d.type;
@@ -5929,7 +6131,8 @@ void Program::instantiate_all() {
       work.insert(work.end(), class_cells_[k]->demands.begin(), class_cells_[k]->demands.end());
     if (body_cells_[k]) {
       work.insert(work.end(), body_cells_[k]->demands.begin(), body_cells_[k]->demands.end());
-      if (!templated_body(k)) required_members(body_cells_[k]->value.tree, id(k));
+      const auto& part = body_cells_[k]->value;
+      if (!templated_body(k)) required_part(part.tree, part.closures, id(k));
     }
   }
   // The synthesized special members' bodies, those of classes instantiated as the worklist runs
@@ -5972,7 +6175,7 @@ void Program::instantiate_all() {
       work.push_back(d);
       depth.push_back(depth[i] + 1);
     }
-    required_members(in->body.value.tree, id(in->item));
+    required_part(in->body.value.tree, in->body.value.closures, id(in->item));
     walk_synthesized();
     depth.resize(work.size(), depth[i] + 1);
   }
@@ -5982,6 +6185,25 @@ interp::Callee Program::function_ir(EntityId f, u32 item) {
   if (sema::Sema::closure_member(*w_, f)) return closure_ir(f, item);
   interp::Callee c;
   c.is_constexpr = is_constexpr(f, item);
+  if (auto copy = copy_assignments_.find(f); copy != copy_assignments_.end()) {
+    if (!c.is_constexpr || !copy->second.body) return c;
+    const u32 key = std::to_underlying(f);
+    if (!instance_irs_.contains(key)) {
+      const auto& s = copy->second.definition;
+      irgen::FunctionInput input{f, s.decl, *copy->second.body, id(s.item), 0};
+      input.this_type = this_type(s.decl);
+      AtItem q(*this, s.item, true);
+      q.own_class_complete = true;
+      sema::EvalFacts facts(*w_, q);
+      std::optional<irgen::FunctionIr> ir;
+      if (auto r = irgen::function_ir(w_->ins, input, facts)) ir = std::move(*r);
+      instance_irs_.emplace(key, std::move(ir));
+    }
+    const auto& ir = instance_irs_.at(key);
+    if (!ir) c.unsupported = true;
+    else c.body = &ir->body;
+    return c;
+  }
   // A function template specialization needed for constant evaluation is instantiated where it
   // is needed ([temp.inst]/8).
   if (EntityId templ = w_->entities.rec(f).templ; templ != EntityId::none && !explicitly_specialized(f, item)) {
