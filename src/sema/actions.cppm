@@ -7345,6 +7345,12 @@ public:
     return t;
   }
 
+  QualType integral_common_type(const Ex& a, const Ex& b) {
+    const auto left = sema::promoted(w_->target, *types().builtin_of(a.type()), a.info.bit_width);
+    const auto right = sema::promoted(w_->target, *types().builtin_of(b.type()), b.info.bit_width);
+    return builtin(common_integer(w_->target, left, right));
+  }
+
   // ------------------------------------------------------------ operators ([expr.unary], [expr.compound])
 
   bool is_integral_or_unscoped(QualType t) { return types().is_integral(t); }
@@ -7429,6 +7435,18 @@ public:
       for_each_associated_friend(associations, name, /*at_instantiation=*/false, add);
       for (EntityId ns : associations.namespaces)
         for (const ast::DeclSema& d : q_->adl_functions(ns, name, /*at_instantiation=*/false)) add(d);
+      const bool ordinary_classes = !enum_only && std::ranges::all_of(operands, [&](const Ex& operand) {
+        const QualType type = types().referee(operand.type());
+        if (!types().is_class(type)) return true;
+        const auto& entity = w_->entities.rec(types().class_of(type));
+        return entity.kind == EntityKind::class_ && entity.templ == EntityId::none;
+      });
+      if (ordinary_classes && q_->dependent_call(op_at)) {
+        auto instantiated = adl_associations(operands, /*at_instantiation=*/true, /*ordinary_call=*/false);
+        for_each_associated_friend(instantiated, name, /*at_instantiation=*/true, add);
+        for (EntityId ns : instantiated.namespaces)
+          for (const ast::DeclSema& d : q_->adl_functions(ns, name, /*at_instantiation=*/true)) add(d);
+      }
     } else {
       for (const Ex& o : operands)
         if (auto ns = associated_namespace(o.type())) {
@@ -7440,6 +7458,33 @@ public:
         }
     }
     if (set.empty()) return ref_qualified_member;
+    if (binary && ref_qualified_member && q_->dependent_call(op_at)) {
+      const auto member_call = as<ast::MemberCall>(*ref_qualified_member);
+      if (member_call) {
+        const auto& member = w_->entities.rec(member_call->function);
+        const auto fn = types().rec(member.type);
+        if (member.scope == types().class_of(lt) && fn.params.size() == 1 &&
+            fn.fn_ref == ast::RefQual::lvalue && operands[0].cat() == ValueCategory::lvalue) {
+          const auto receiver = types().lvalue_ref(types().add_cv(types().class_type(member.scope), fn.fn_cv));
+          const auto member_receiver = ics(operands[0], receiver);
+          const auto member_argument = ics(operands[1], fn.params[0]);
+          // Keep the existing joint-ranking diagnostic unless the member dominates
+          // every viable ordinary non-member candidate.
+          if (member_receiver.viable && member_argument.viable &&
+              std::ranges::all_of(set, [&](const ast::DeclSema& candidate) {
+                if (candidate.flags & decl_flag::template_) return false;
+                const auto free_fn = types().rec(candidate.type);
+                if (free_fn.params.size() != 2) return false;
+                const auto free_receiver = ics(operands[0], free_fn.params[0]);
+                const auto free_argument = ics(operands[1], free_fn.params[1]);
+                if (!free_receiver.viable || !free_argument.viable) return true;
+                return !(free_receiver < member_receiver) && !(free_argument < member_argument) &&
+                       (member_receiver < free_receiver || member_argument < free_argument);
+              }))
+            return ref_qualified_member;
+        }
+      }
+    }
     ExprInfo info{builtin(Builtin::overload_set), ValueCategory::lvalue, 0};
     Ex callee = node(ast::DeclRef{info, set.front().entity}, begin, begin, info);
     overloads_[std::to_underlying(callee.id)] = std::move(set);
@@ -7622,7 +7667,21 @@ public:
     using enum BinOp;
     u32 begin = l.begin, end = r.end;
     if (!l.ok() || !r.ok()) return {NodeId::none, begin, end};
-    if (dependent(l) || dependent(r)) return dependent_node({l, r}, begin, end);
+    if (dependent(l) || dependent(r)) {
+      if (has_proven_dependent_type(l) || has_proven_dependent_type(r)) {
+        dependent_calls.push_back(op_at);
+        return dependent_node({l, r}, begin, end, std::nullopt, ValueCategory::prvalue, expr_flag::type_dependent);
+      }
+      if (types().is_integral(l.type()) && types().is_integral(r.type())) {
+        switch (op) {
+        case add: case sub: case mul: case div: case rem:
+        case bit_and: case bit_xor: case bit_or:
+          return dependent_node({l, r}, begin, end, integral_common_type(l, r));
+        default: break;
+        }
+      }
+      return dependent_node({l, r}, begin, end);
+    }
     if (op == dot_star || op == arrow_star) return member_pointer_access(l, r, op == arrow_star, op_at);
     if (auto o = overloaded(binary_spellings[std::to_underlying(op)], {l, r}, begin, end, op_at)) return *o;
     auto bin = [&](ast::BinaryOp k, Ex a, Ex c, QualType t) {
@@ -7921,7 +7980,19 @@ public:
       if (dependent(c) || dependent(t) || dependent(f)) info.flags |= expr_flag::dependent;
       return node(ast::Conditional{info, at(c, begin), at(t, begin), at(f, begin)}, begin, end, info);
     }
-    if (dependent(cond) || dependent(t) || dependent(f)) return dependent_node({cond, t, f}, begin, end);
+    if (dependent(cond) || dependent(t) || dependent(f)) {
+      if (has_proven_dependent_type(cond) || has_proven_dependent_type(t) || has_proven_dependent_type(f))
+        return dependent_node({cond, t, f}, begin, end, std::nullopt, ValueCategory::prvalue, expr_flag::type_dependent);
+      // Concrete prvalue arms can determine the result type even when the value is dependent.
+      if (!types().is_dependent(cond.type()) &&
+          t.cat() == ValueCategory::prvalue && f.cat() == ValueCategory::prvalue) {
+        if (!types().is_dependent(t.type()) && types().canonical(t.type()) == types().canonical(f.type()))
+          return dependent_node({cond, t, f}, begin, end, t.type());
+        if (types().is_integral(t.type()) && types().is_integral(f.type()))
+          return dependent_node({cond, t, f}, begin, end, integral_common_type(t, f));
+      }
+      return dependent_node({cond, t, f}, begin, end);
+    }
     Ex c = to_bool(cond, cond.begin);
     if (!c.ok()) return {NodeId::none, begin, end};
     ExprInfo info;

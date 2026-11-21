@@ -1306,6 +1306,9 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   remains under #16.
 - Supported ordinary free binary operators use the full ADL association set, including base
   namespaces and hidden friends. Namespace using-directives do not contribute candidates.
+  Supported dependent binary operator expressions on ordinary non-template class operands retain
+  definition-time ordinary lookup and add eligible associated nonmember candidates at instantiation.
+  [#357](https://github.com/yrashk/ycxx/issues/357)
 - Remaining work in #165 includes declarations of functions in blocks, exact lookup for
   other operators, member templates as template arguments, dependent-call template argument associations,
   overload-set arguments and complete unqualified template-id lookup.

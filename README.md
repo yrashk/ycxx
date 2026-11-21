@@ -219,6 +219,8 @@ are value-initialized when they have no written default member initializer.
   namespaces, including those of class template type arguments in ordinary calls. Functions
   support default arguments, recursion, operator overloading and calls through pointers.
   Ordinary free binary operators use argument-dependent lookup, including associated base namespaces.
+  Supported dependent binary operators on ordinary non-template classes also find associated
+  nonmember candidates at instantiation.
   Nonmember operators can be called explicitly by name, including with namespace qualification.
   [#219](https://github.com/yrashk/ycxx/issues/219)
   Overloaded free functions can take braced arguments for arithmetic parameters

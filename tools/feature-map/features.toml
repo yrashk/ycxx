@@ -537,7 +537,7 @@ std = 'C++98'
 core = true
 status = 'partial'
 issues = [165, 259]
-note = 'ordinary namespace calls, ordinary non-template hidden friends, inline namespaces, class bases and class template type arguments work. Supported ordinary free binary operators use the full association set. Remaining cases include other hidden friend operators and templates, block function declarations, template template arguments, dependent-call type arguments, overload sets and template-ids'
+note = 'ordinary namespace calls, ordinary non-template hidden friends, inline namespaces, class bases and class template type arguments work. Supported ordinary free binary operators use the full association set. Supported dependent binary operators on ordinary non-template classes add associated nonmember candidates at instantiation. Remaining cases include other hidden friend operators and templates, block function declarations, template template arguments, dependent-call type arguments, overload sets and template-ids'
 probe = '''
 namespace n { struct S {}; int f(S) { return 0; } }
 int main() { n::S s; return f(s); }
