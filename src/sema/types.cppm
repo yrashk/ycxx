@@ -675,6 +675,7 @@ struct MemberDeclRec {
   bool explicit_defaulted_assignment = false;
   bool is_virtual = false;
   bool is_explicit = false;
+  EntityId overridden_virtual = EntityId::none;
 };
 
 struct NestedType {
@@ -690,6 +691,9 @@ struct BaseRec {
   bool dependent_in_pattern = false;
 };
 
+// Layout for access to a peer-owned object. A primary base already supplies the vptr at offset zero.
+enum class PeerVirtualLayout : u8 { none, root, primary_base };
+
 struct ClassRec {
   bool defined = false;
   // Its direct base classes, in declaration order ([class.derived.general]).
@@ -703,7 +707,7 @@ struct ClassRec {
   std::optional<bool> destructor_noexcept;  // the effective specification, when known
   bool destructor_usable = false;          // its declaration and subobject destruction are known to be usable
   bool layout_requires_virtual_support = false;
-  bool peer_virtual_root_layout = false;  // size, alignment and field access on peer-owned objects
+  PeerVirtualLayout peer_virtual_layout = PeerVirtualLayout::none;
   std::vector<FieldRec> fields;        // in declaration order
   std::vector<MemberDeclRec> members;  // member functions and static data members
   // Special members ([special]): whether a constructor is user-declared; the destructor and the

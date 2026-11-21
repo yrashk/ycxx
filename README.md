@@ -307,8 +307,10 @@ addresses, typed nulls and same-class `.*` and `->*`. [#238](https://github.com/
 ordinary root classes. Classes derived through one ordinary polymorphic base also support
 overrides and unqualified base initializers with parentheses or flat braces. On Linux x86-64,
 pointer and reference consumers can call virtual functions with fixed integer signatures on
-peer-owned roots and access their ordinary integral data members. For these root types, `sizeof`
-and `alignof` describe the Itanium layout. [#309](https://github.com/yrashk/ycxx/issues/309)
+peer-owned objects with a declaration-only root, including a derived class with that single public
+base, at most one integral field and at most one override. Consumers can upcast those derived
+views, access ordinary integral members, and query `sizeof` and `alignof` for the Itanium layout.
+[#309](https://github.com/yrashk/ycxx/issues/309)
 
 **Structured bindings.** Local bindings can copy or alias scalar-element arrays, including
 multidimensional arrays. They can also copy or alias ordinary non-template classes without

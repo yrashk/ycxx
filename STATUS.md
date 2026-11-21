@@ -2093,8 +2093,8 @@ What the process allocates, attributed to the engine's cells, in the trace and t
   initializer. Syntax checking uses ordinary constructor overload resolution, defaults, access,
   and list narrowing. The base destructor must be usable and accessible in the derived
   constructor. The initializer's converted arguments remain in its semantic body for deferred
-  expression checks. Evaluated object use, constant evaluation of the objects, and native
-  emission for the derived class still require virtual layout support.
+  expression checks. Evaluated construction, constant evaluation of the objects, and native
+  emission of their constructors still require virtual layout support.
   [[class.base.init]](https://eel.is/c++draft/class.base.init) · [#309](https://github.com/yrashk/ycxx/issues/309)
 - On Linux x86-64, the pinned libycxx `<exception>` syntax check reaches unnamed unscoped
   enumerations in `deps/libycxx/include/ycxx/pal.h`, starting at line 61.
@@ -2105,9 +2105,15 @@ What the process allocates, attributed to the engine's cells, in the trace and t
   receiver's own class name calls the declaration directly.
 - The same Linux consumer can query `sizeof` and `alignof` and read or write directly declared
   builtin integral members up to 64 bits through a pointer or reference. The shared Itanium
-  layout reserves the vptr at offset zero and preserves the declared field indices. Construction,
-  destruction, copying, by-value transfer and derived layouts retain their diagnostics.
+  layout reserves the vptr at offset zero and preserves the declared field indices.
   [Itanium ABI §2.4](https://itanium-cxx-abi.github.io/cxx-abi/abi.html#class-types) · [#309](https://github.com/yrashk/ycxx/issues/309)
+- A derived consumer class can use one public nonvirtual root base, at most one directly
+  declared integral field, and at most one declaration-only override with the same return type.
+  The primary base supplies the vptr at offset zero and the derived field is placed using the
+  base's nonvirtual size and alignment. Pointer upcasts preserve null, references designate
+  the base subobject, and virtual calls through either view use the root's original slot.
+  Construction, destruction, copying, by-value transfer, and virtual table production remain
+  guarded. [Itanium ABI §2.5.2](https://itanium-cxx-abi.github.io/cxx-abi/abi.html#vtable-components) · [#309](https://github.com/yrashk/ycxx/issues/309)
 - Pure virtual functions, `final`, covariant returns and table production remain in
   [#309](https://github.com/yrashk/ycxx/issues/309). Virtual destructor entry points are in
   [#136](https://github.com/yrashk/ycxx/issues/136). RTTI is tracked in
