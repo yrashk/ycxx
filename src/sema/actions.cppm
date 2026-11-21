@@ -6426,6 +6426,47 @@ public:
   }
   bool is_braced(const Ex& e) const { return braced_list(e) != nullptr; }
 
+  // [dcl.init.list]: the compiler forms an array of const elements and initializes the
+  // list from that array. libycxx supplies a private pointer/size constructor for this.
+  std::optional<Ex> initializer_list_argument(QualType t, const Braced& list) {
+    const EntityRec specialization = w_->entities.rec(types().class_of(t));
+    if (specialization.templ == EntityId::none || specialization.args.size() != 1 ||
+        specialization.args[0].kind != ast::TemplateArgKind::type)
+      return std::nullopt;
+    const EntityRec primary = w_->entities.rec(specialization.templ);
+    if (primary.name != ins().names.intern("initializer_list") || primary.scope == EntityId::none)
+      return std::nullopt;
+    const EntityRec ns = w_->entities.rec(primary.scope);
+    if (ns.kind != EntityKind::namespace_ || ns.scope != EntityId::none || ns.name != ins().names.intern("std"))
+      return std::nullopt;
+    const QualType element = types().canonical(specialization.args[0].type);
+    if (element != builtin(Builtin::int_)) return std::nullopt;
+
+    const QualType const_element = types().add_cv(element, Cv::const_);
+    const QualType pointer = types().pointer(const_element);
+    const QualType size_type = builtin(w_->target.size_type);
+    const ClassRec* record = class_rec(types().class_of(t));
+    if (!record) return std::nullopt;
+    for (const MemberDeclRec& member : record->members) {
+      if (!member.is_ctor || member.is_template || member.is_deleted) continue;
+      const TypeRec fn = types().rec(member.type);
+      if (fn.variadic || fn.params.size() != 2 || types().canonical(fn.params[0]) != pointer ||
+          types().canonical(fn.params[1]) != size_type)
+        continue;
+      const EntityId constructor = member.entity;
+      const QualType array = types().array(const_element, list.clauses.size());
+      Ex backing = list_init(array, list);
+      if (!backing.ok()) return backing;
+      Ex first = rvalue(materialize(backing, array, false));
+      Ex size = literal(size_type, w_->values.integer(size_type, list.clauses.size()),
+                        ValueCategory::prvalue, list.begin, list.end);
+      ExprInfo info{Types::unqualified(t), ValueCategory::prvalue, 0};
+      const std::array args{at(first, list.begin), at(size, list.begin)};
+      return node(ast::CtorCall{info, constructor, 0, b_->list(args)}, list.begin, list.end, info);
+    }
+    return std::nullopt;
+  }
+
   // A class reference parameter binds directly to a single reference-related expression.
   // Otherwise the list initializes a prvalue of the referenced class ([dcl.init.list]); the
   // materialized object lives until the end of the call's full-expression ([class.temporary]).
@@ -6442,6 +6483,9 @@ public:
         if (same_unqualified(c.expr.type(), t) || base_path(types().class_of(c.expr.type()), types().class_of(t), paths))
           return bind_reference(c.expr, parameter, c.begin);
       }
+    }
+    if (!list.clauses.empty() && !types().rec(parameter).rvalue_ref && object_cv(t) == Cv::const_) {
+      if (auto init = initializer_list_argument(t, list)) return bind_reference(*init, parameter, list.begin);
     }
     return bind_reference(list_init(Types::unqualified(t), list), parameter, list.begin);
   }
