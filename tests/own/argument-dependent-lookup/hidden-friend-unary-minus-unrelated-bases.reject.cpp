@@ -5,8 +5,10 @@ struct Value : Left, Right {
 };
 int use(Value& value) { return -value; } //! error
 
+namespace different_depth {
 struct Intermediate : Right {};
 struct Deeper : Left, Intermediate {
     friend int operator-(const Right&) { return 3; }
 };
 int use(Deeper& value) { return -value; } //! error
+}

@@ -39,18 +39,6 @@ struct Rvalue {
 };
 }
 
-int main() {
-    numbers::Value value{42};
-    member_competition::MemberWins member;
-    member_competition::FriendWins nonmember;
-    derived::Value derived_value;
-    derived::PrivateBase private_base;
-    int builtin = 7;
-    return -numbers::Value{42} == -42 && -value == 43 &&
-           -member == 11 && -nonmember == 14 && -builtin == -7 &&
-           -derived_value == 21 && -private_base == 24 && -derived::Rvalue{} == 25 ? 0 : 1;
-}
-
 namespace related_bases {
 struct Root {};
 struct Near : Root { int operator-() { return 31; } };
@@ -62,4 +50,19 @@ struct RelatedTarget : Near {
 };
 int same(SameTarget& value) { return -value; }
 int related(RelatedTarget& value) { return -value; }
+}
+
+int main() {
+    numbers::Value value{42};
+    member_competition::MemberWins member;
+    member_competition::FriendWins nonmember;
+    derived::Value derived_value;
+    derived::PrivateBase private_base;
+    related_bases::SameTarget same_target;
+    related_bases::RelatedTarget related_target;
+    int builtin = 7;
+    return -numbers::Value{42} == -42 && -value == 43 &&
+           -member == 11 && -nonmember == 14 && -builtin == -7 &&
+           -derived_value == 21 && -private_base == 24 && -derived::Rvalue{} == 25 &&
+           related_bases::same(same_target) == 31 && related_bases::related(related_target) == 31 ? 0 : 1;
 }
