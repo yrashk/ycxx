@@ -506,6 +506,18 @@ struct Throw {
   [[=sequenced]] Child operand;
 };
 
+// [except.pre], [except.handle]: the protected block and its ordered handlers.
+struct TryBlock {
+  Child body;
+  ChildList handlers;
+};
+
+struct Handler {
+  QualType type;  // empty for catch (...)
+  u32 local;  // no local for an abstract declaration or catch (...)
+  Child body;
+};
+
 using Nodes = closed_list<Literal, DeclRef, Paren, Unary, Binary, OrderedBinary, Assign, Subscript, Call,
                           ImplicitConversion, ExprStmt, Return, Compound, If, LocalVar, Attribute, LocalRef,
                           Conditional, While, Do, For, Break, Continue, DeclStmt, Declarator, DeclGroup,
@@ -513,7 +525,7 @@ using Nodes = closed_list<Literal, DeclRef, Paren, Unary, Binary, OrderedBinary,
                           MemberCall, Materialize, CtorCall, MemberInit, Destructor, DestroyMember, Dependent,
                           DepName, CondDecl, Switch, Case, Default, Label, Goto, BuiltinCall, Lambda, DefaultArg,
                           StaticInit, StaticVar, NewObject, DeleteObject, VariadicBuiltin, AssignmentCall,
-                          NewArray, DeleteArray, DelegatingInit, VirtualMemberCall, Throw>;
+                          NewArray, DeleteArray, DelegatingInit, VirtualMemberCall, Throw, TryBlock, Handler>;
 
 static_assert(Nodes::size < max_node_kinds);
 

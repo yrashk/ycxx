@@ -5619,6 +5619,23 @@ public:
     return converted;
   }
 
+  // [except.handle]: no void, rvalue reference, or incomplete object, with the cv void* exception.
+  void check_handler_type(QualType type, u32 at_) {
+    if (types().has_placeholder(type) || types().is_void(type) ||
+        (types().is_reference(type) && types().rec(type).rvalue_ref)) {
+      diag(at_, Diag::invalid_handler_type, type);
+      return;
+    }
+    QualType object = types().is_reference(type) ? types().referee(type) : type;
+    if (types().is_dependent(object)) return;
+    if (types().is_pointer(type)) {
+      QualType pointee = types().pointee(type);
+      if (!types().is_void(pointee) && !types().is_function(pointee)) require_complete(pointee, at_);
+    } else if (require_complete(object, at_) && types().is_class(object)) {
+      diag(at_, Diag::not_supported, lex::Tk::kw_catch);
+    }
+  }
+
   // [basic.stc.dynamic] makes the ordinary declarations visible even without a header.
   Ex allocation_name_expr(AllocationFunction f, u32 begin, u32 end) {
     const NameId name = ins().names.intern(allocation_name(f));

@@ -548,6 +548,8 @@ class Gen {
       push_scope();
       for (ast::Child c : ast_.children(s.stmts)) stmt(child(a, c));
       pop_scope();
+    } else if (is<ast::TryBlock>(a)) {
+      unsupported(a, "with a retained try block");
     } else if (is<ast::ExprStmt>(a)) {
       full_expression([&] {
         discard(child(a, get<ast::ExprStmt>(a).expr));

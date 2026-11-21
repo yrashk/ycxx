@@ -212,6 +212,9 @@ enum class Diag : std::uint32_t {
   condition_specifier [[=message{Severity::error, "'{0:k}' is not allowed in a condition"}]],
   condition_declarator [[=message{Severity::error, "a condition cannot declare a function or an array"}]],
   // [class], [class.mem], [expr.ref], [dcl.init.aggr], [dcl.init.list]
+  catch_all_not_last [[=message{Severity::error, "catch (...) must be the last handler"}]],
+  invalid_exception_declaration [[=message{Severity::error, "invalid exception declaration"}]],
+  invalid_handler_type [[=message{Severity::error, "invalid exception handler type '{0:t}'"}]],
   throw_class_unsupported [[=message{Severity::error, "constructing a class exception object of type '{0:t}' is not supported yet"}]],
   incomplete_type [[=message{Severity::error, "'{0:t}' is an incomplete type"}]],
   no_member [[=message{Severity::error, "no member named '{0:n}' in '{1:t}'"}]],
