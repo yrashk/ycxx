@@ -43,8 +43,14 @@ static_assert(Same<Staged<Array>, Truth<false>>::value);
 
 template<class T, bool IsReference = __is_reference(T)> struct Choice;
 
-template<class T> struct Choice<T, false> : Truth<false> {};
-template<class T> struct Choice<T, true> : Truth<true> {};
+template<class T> struct Choice<T, false> {
+  static constexpr int value = Truth<false>::value;
+  static int adjust(int input) { return Truth<false>::adjust(input); }
+};
+template<class T> struct Choice<T, true> {
+  static constexpr int value = Truth<true>::value;
+  static int adjust(int input) { return Truth<true>::adjust(input); }
+};
 
 template<class T> using DefaultChoice = Choice<T>;
 
