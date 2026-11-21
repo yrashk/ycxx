@@ -1100,7 +1100,10 @@ public:
     defer_type_access = false;
     EntityId saved = current_function;
     if (declared != EntityId::none) current_function = declared;
-    for (const DeferredAccess& d : deferred_access_) check_access(d.cls, d.member, d.name, d.at);
+    for (const DeferredAccess& d : deferred_access_) {
+      if (d.complete_destruction) check_destructor_access(types().class_type(d.cls), d.at);
+      else check_access(d.cls, d.member, d.name, d.at);
+    }
     deferred_access_.clear();
     for (const auto& check : deferred_injected_access_) check();
     deferred_injected_access_.clear();
@@ -4568,6 +4571,10 @@ public:
     if (record->destructor == EntityId::none) return true;
     const EntityId destructor = record->destructor;
     const NameId name = w_->entities.rec(destructor).name;
+    if (defer_type_access && !accessible(owner, record->access_of(destructor))) {
+      deferred_access_.push_back({owner, destructor, name, at, true});
+      return true;
+    }
     // [class.protected]: these uses destroy a complete object of the
     // declaring class. Access through a derived context needs a derived object.
     if (record->access_of(destructor) == ast::Access::protected_ && !accessible(owner, ast::Access::private_)) {
@@ -7769,6 +7776,7 @@ private:
     EntityId cls, member;
     NameId name;
     u32 at;
+    bool complete_destruction = false;
   };
   std::vector<DeferredAccess> deferred_access_;
   std::vector<std::function<void()>> deferred_injected_access_;
