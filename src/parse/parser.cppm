@@ -608,7 +608,9 @@ public:
           bump();
           break;
         }
-        if (!any_type() && kind(1) == Tk::l_paren && kind(2) == Tk::kw_auto) {  // `decltype(auto` without `)`
+        // An opening delimiter after `auto` starts a functional conversion expression.
+        if (!any_type() && kind(1) == Tk::l_paren && kind(2) == Tk::kw_auto &&
+            kind(3) != Tk::l_paren && kind(3) != Tk::l_brace) {  // `decltype(auto` without `)`
           s_->diag(pos() + 3, Diag::expected_token, Tk::r_paren);
           d.ok = false;
           goto done;
