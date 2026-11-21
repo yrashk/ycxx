@@ -1808,7 +1808,7 @@ public:
     return local.type;
   }
   std::span<const ast::LocalRec> locals() const { return locals_; }
-  // After the scope of a requires-expression ends, its parameters leave no runtime locals.
+  // Names used only for declarator or requires-expression checking leave no runtime locals.
   void discard_local_declarations(std::size_t first) {
     locals_.resize(first);
     local_values_.resize(first);

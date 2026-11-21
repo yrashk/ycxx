@@ -800,8 +800,13 @@ public:
                         bool reject_parameter_defaults = false) {
     Declarator d;
     d.begin = pos();
+    const std::size_t first_local = s_->locals().size();
+    const bool in_body = s_->current_function != ast::EntityId::none;
     Level top = level(abstract, d.ok, conversion);
-    if (conversion && !top.conversion_target) return d;
+    if (conversion && !top.conversion_target) {
+      if (in_body) s_->discard_local_declarations(first_local);
+      return d;
+    }
     const Suffix* fn = nullptr;
     d.type = build(top, top.conversion_target.value_or(base), fn, d, abstract || typedef_, named_exception);
     const bool spelled_unknown_bound = std::exchange(d.unknown_bound, false);
@@ -844,6 +849,12 @@ public:
         d.asm_label = asm_label(d.ok);
         skip_attributes();
       }
+    }
+    // Prototype names support type and constant-expression checking inside this
+    // declarator. They have no storage in the enclosing function's body.
+    if (in_body) {
+      s_->discard_local_declarations(first_local);
+      d.noexcept_condition.reset();
     }
     return d;
   }
@@ -1175,20 +1186,21 @@ public:
         suffix.ref_at = pos();
         if (accept(Tk::amp)) suffix.ref = ast::RefQual::lvalue;
         else if (accept(Tk::ampamp)) suffix.ref = ast::RefQual::rvalue;
-        exception_specifier(suffix, ok);
-        // A trailing return type ([dcl.fct]/2), with the parameters in scope ([basic.scope.param]).
-        if (is(Tk::arrow)) {
-          bump();
+        // Parameter scope includes the exception specification and trailing return type
+        // ([basic.scope.param]). Bind the adjusted types from the parameter list.
+        if (is(Tk::kw_noexcept) || is(Tk::arrow)) {
           s_->push_scope();
-          for (const Param& p : l.suffixes.back().params)
+          for (const Param& p : suffix.params)
             if (p.name != s_->no_name()) s_->declare_local(p.name, p.type, sema::local_flag::parameter, p.at, false);
-          auto t = type_id(true);
+          exception_specifier(suffix, ok);
+          const bool has_trailing = accept(Tk::arrow);
+          if (has_trailing)
+            suffix.trailing = type_id(true);
           s_->pop_scope();
-          if (!t) {
+          if (has_trailing && !suffix.trailing) {
             ok = false;
             return l;
           }
-          l.suffixes.back().trailing = *t;
         }
         // Dynamic exception specifications and repeated qualifiers are unsupported.
         if (is(Tk::amp) || is(Tk::ampamp) || is(Tk::kw_noexcept) || is(Tk::kw_throw) || is(Tk::arrow)) {
@@ -1498,6 +1510,8 @@ public:
         if (s->has_noexcept && (allocation || keep_named_exception || member_pointer_to_suffix(l) ||
                                 (spells_type && !l.inner)))
           nonthrowing = noexcept_value(s->noexcept_condition, d.ok);
+        else if (d.ok && s->noexcept_condition && !s_->templated())
+          noexcept_value(s->noexcept_condition, d.ok);
         t = s_->types().function(t, ps, s->variadic, linkage_, s->cv, s->ref, nonthrowing);
         fn = &*s;
       } else if (!s->unknown_bound && !s->dependent_bound && s->bound == 0) {
