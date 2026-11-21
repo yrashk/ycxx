@@ -139,7 +139,8 @@ constructor as its first declaration and use it for trivial member copies.
 [#157](https://github.com/yrashk/ycxx/issues/157)
 
 In-class conversion functions can name a class type alias as their conversion target,
-including a dependent alias in a class template. [#339](https://github.com/yrashk/ycxx/issues/339)
+including a dependent alias in a class template. A named `static_cast` can call a
+conversion function for an exact non-class value type. [#339](https://github.com/yrashk/ycxx/issues/339)
 
 Both targets accept leading `[[…]]` attributes on ordinary data and function member declarations.
 [#190](https://github.com/yrashk/ycxx/issues/190)
