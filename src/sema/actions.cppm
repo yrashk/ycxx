@@ -934,7 +934,7 @@ public:
     return m->type;
   }
   // `S::n` as an expression ([expr.prim.id.qual]).
-  Ex scope_expr(const Scope& s, NameId n, u32 begin, u32 name_at, u32 end, bool bare_address = false) {
+  Ex scope_expr(const Scope& s, NameId n, u32 begin, u32 name_at, u32 end, std::optional<u32> address_at = {}) {
     if (s.type && types().is_dependent(*s.type)) return dependent_node({}, begin, end, std::nullopt, ValueCategory::lvalue);
     if (s.type) {
       if (types().is_enum(*s.type)) {
@@ -947,7 +947,7 @@ public:
         return {NodeId::none, begin, end};
       }
       if (!require_complete(*s.type, begin)) return {NodeId::none, begin, end};
-      if (auto r = class_member(types().class_of(*s.type), n, begin, end, name_at, bare_address)) return *r;
+      if (auto r = class_member(types().class_of(*s.type), n, begin, end, name_at, address_at)) return *r;
       diag(name_at, Diag::no_member, n, *s.type);
       return {NodeId::none, begin, end};
     }
@@ -1259,6 +1259,7 @@ public:
   Ex value_init(QualType t, u32 begin, u32 end) {
     if (types().is_dependent(t)) return dependent_node({}, begin, end);
     if (!require_supported_virtual_layout(t, begin)) return {NodeId::none, begin, end};
+    if (is_data_member_pointer(t)) return null_member_pointer(t, begin, end);
     if (types().is_member_pointer(t)) {
       diag(begin, Diag::member_pointer_values);
       return {NodeId::none, begin, end};
@@ -3160,8 +3161,8 @@ public:
 
   // The implicit member access `name` inside a member function of `c` ([class.mfct.non.static]),
   // or a qualified name `C::name`: none if `c` has no such member.
-  std::optional<Ex> class_member(EntityId c, NameId name, u32 begin, u32 end, u32 name_at, bool bare_address = false,
-                                 bool unqualified = false) {
+  std::optional<Ex> class_member(EntityId c, NameId name, u32 begin, u32 end, u32 name_at,
+                                 std::optional<u32> address_at = {}, bool unqualified = false) {
     auto f = find_member(c, name, unqualified);
     if (!f) return std::nullopt;
     Ex fail{NodeId::none, begin, end};
@@ -3190,11 +3191,36 @@ public:
     if (!(f->member && f->member->is_function) && !check_access(c, f->field ? f->field->entity : f->member->entity, name, name_at, naming))
       return fail;
     if (f->field) {
-      if (bare_address) {
-        diag(name_at, f->field->bit_width ? Diag::bit_field_address : Diag::member_pointer_values);
-        return fail;
+      const FieldRec& field = *f->field;
+      if (address_at) {
+        if (field.bit_width) {
+          diag(name_at, Diag::bit_field_address);
+          return fail;
+        }
+        if (types().is_reference(field.type)) {
+          diag(name_at, Diag::member_pointer_type, field.type);
+          return fail;
+        }
+        if (naming != c) {
+          diag(name_at, Diag::member_pointer_values);
+          return fail;
+        }
+        if (class_rec(c)->access_of(field.entity) == ast::Access::protected_ && !accessible(c, ast::Access::private_)) {
+          diag(name_at, Diag::member_pointer_protected, name);
+          return fail;
+        }
+        QualType t = types().member_pointer(types().class_type(c), field.type);
+        ConstId value = ins().intern_value(ast::VMemberPtr{types().canonical(t), f->index});
+        return literal(t, value, ValueCategory::prvalue, *address_at, end);
       }
       if (!has_this) {
+        // [expr.prim.id.general]: a non-static data member needs no object in an unevaluated operand.
+        if (unevaluated) {
+          ExprInfo info{types().referee(field.type), ValueCategory::lvalue, 0, field.bit_width};
+          Ex e = node(ast::DeclRef{info, field.entity}, begin, end, info);
+          declared_types_[std::to_underlying(e.id)] = field.type;
+          return e;
+        }
         diag(begin, Diag::member_without_object, name);
         return fail;
       }
@@ -3206,11 +3232,11 @@ public:
       // The object's cv-qualifiers: `this`'s, which in a lambda is the captured one (a `*this`
       // copy is const unless the lambda is mutable, [expr.prim.lambda.closure]/12).
       QualType t = ref ? types().referee(f->field->type) : types().add_cv(f->field->type, Types::cv(types().pointee(self.type())));
-      ExprInfo info{t, ValueCategory::lvalue, 0};
+      ExprInfo info{t, ValueCategory::lvalue, 0, field.bit_width};
       return node(ast::Member{info, f->field->entity, f->index, 1, ref ? 1u : 0u, at(self, begin)}, begin, end, info);
     }
     const MemberDeclRec& m = *f->member;
-    if (bare_address && !m.is_static &&
+    if (address_at && !m.is_static &&
         !std::ranges::any_of(member_functions(c, name), [](const MemberDeclRec* f) { return f->is_static; })) {
       diag(name_at, Diag::member_pointer_values);
       return fail;
@@ -3647,6 +3673,8 @@ public:
       return {};
     }
     if (types().is_pointer(to) && is_null_pointer_constant(a)) return {true, 2, 0};
+    if (is_data_member_pointer(to) && (types().is(a.type(), Builtin::nullptr_t) || is_null_pointer_constant(a)))
+      return {true, 2, 0};
     // A user-defined conversion: a closure's to a pointer to function ([over.best.ics]/2).
     if (closure_invoker(a.type(), to)) return {true, Ics::user_defined, 0};
     QualType from = value_type(a);
@@ -4086,6 +4114,10 @@ public:
       Ex inner = extended({m->object.id, e.begin + m->object.at, e.end, {}});
       return node(ast::Member{m->info, m->member, m->field, 0, 0, at(inner, e.begin)}, e.begin, e.end, m->info);
     }
+    if (auto m = as<ast::OrderedBinary>(e); m && m->op == ast::OrderedOp::dot_star) {
+      Ex inner = extended({m->lhs.id, e.begin + m->lhs.at, e.end, {}});
+      return node(ast::OrderedBinary{m->info, m->op, at(inner, e.begin), m->rhs}, e.begin, e.end, m->info);
+    }
     return e;
   }
 
@@ -4173,7 +4205,7 @@ public:
     }
     // The class's members, in a member function's body ([basic.scope.class]).
     if (current_class != EntityId::none) {
-      if (auto r = class_member(current_class, name, begin, end, begin, false, true)) return *r;
+      if (auto r = class_member(current_class, name, begin, end, begin, std::nullopt, /*unqualified=*/true)) return *r;
       if (!class_rec(current_class)) {
         if (auto m = q_->earlier_member(name)) {
           if (m->kind == ast::DeclKind::enumerator) return enumerator(m->entity, m->type, begin, end);
@@ -4611,6 +4643,11 @@ public:
     return literal(t, w_->values.null_pointer(t), ValueCategory::prvalue, begin, end);
   }
 
+  Ex null_member_pointer(QualType t, u32 begin, u32 end) {
+    t = object_unqualified(t);
+    return literal(t, ins().intern_value(ast::VMemberPtr{t}), ValueCategory::prvalue, begin, end);
+  }
+
   // The value of a static data member of integral type usable in constant expressions.
   std::optional<ConstId> static_constant(const Ex& e) {
     auto d = as<ast::DeclRef>(e);
@@ -4819,6 +4856,16 @@ public:
     // odr-use ([basic.def.odr]), so it needs no definition; through an object (`a.x`, the comma
     // `member` built), the object is still evaluated.
     if (auto v = static_constant(e)) return literal(Types::unqualified(t), *v, ValueCategory::prvalue, e.begin, e.end);
+    if (!unevaluated && is_data_member_pointer(t) && object_cv(t) == Cv::const_) {
+      NodeId id = e.id;
+      while (ast::kind_of(id) == ast::Nodes::index_of<ast::Paren>()) id = b_->get<ast::Paren>(id).operand.id;
+      Ex object{id, e.begin, e.end, e.info};
+      std::optional<ConstId> v;
+      if (auto local = as<ast::LocalRef>(object)) v = local_values_[local->local];
+      if (auto decl = as<ast::DeclRef>(object); decl && !decl->reference) v = q_->constant_value(decl->entity);
+      if (v && ins().values.is<ast::VMemberPtr>(*v))
+        return literal(object_unqualified(t), *v, ValueCategory::prvalue, e.begin, e.end);
+    }
     if (auto c = as<ast::OrderedBinary>(e); c && c->op == ast::OrderedOp::comma && types().is_integral(t)) {
       Ex rhs{c->rhs.id, e.begin + c->rhs.at, e.end, c->info};
       if (auto v = static_constant(rhs)) {
@@ -4887,13 +4934,28 @@ public:
     if (!e.ok() || e.glvalue()) return false;
     if (types().is(e.type(), Builtin::nullptr_t)) return true;
     NodeId n = e.id;
-    while (ast::kind_of(n) == ast::Nodes::index_of<ast::Paren>()) n = b_->get<ast::Paren>(n).operand.id;
-    if (ast::kind_of(n) != ast::Nodes::index_of<ast::Literal>()) return false;
+    u32 width = e.width();
+    while (ast::kind_of(n) == ast::Nodes::index_of<ast::Paren>()) {
+      // An identity cast can keep its operand's AST node with a longer source range.
+      if (b_->width(n) != width) return false;
+      width -= 2;
+      n = b_->get<ast::Paren>(n).operand.id;
+    }
+    if (width != 1 || ast::kind_of(n) != ast::Nodes::index_of<ast::Literal>()) return false;
     // An integer-literal's type is a signed or unsigned integer type of rank int or above
     // ([lex.icon]); a character or bool literal is not an integer-literal.
     auto b = types().builtin_of(e.type());
     if (!b || !ast::is_integral(*b) || *b == Builtin::bool_ || rank_below_int(*b) || is_character(*b)) return false;
     return w_->values.rec(b_->get<ast::Literal>(n).value).bits == 0;
+  }
+  bool is_data_member_pointer(QualType t) {
+    return types().is_member_pointer(t) && !types().is_function(types().rec(t).inner);
+  }
+  Ex null_member_pointer_conversion(Ex e, QualType target) {
+    NodeId id = e.id;
+    while (ast::kind_of(id) == ast::Nodes::index_of<ast::Paren>()) id = b_->get<ast::Paren>(id).operand.id;
+    if (ast::kind_of(id) == ast::Nodes::index_of<ast::Literal>()) return null_member_pointer(target, e.begin, e.end);
+    return convert_node(e, ast::ConversionKind::null_pointer, target);
   }
   static bool is_character(Builtin b) {
     return b == Builtin::char_ || b == Builtin::wchar_t_ || b == Builtin::char8_t_ || b == Builtin::char16_t_ ||
@@ -4949,14 +5011,19 @@ public:
     }
     if (types().is_pointer(target) && is_null_pointer_constant(e))
       return convert_node(e, ast::ConversionKind::null_pointer, target);
-    if (types().is_member_pointer(target) && is_null_pointer_constant(e)) {
+    const bool member_target = types().is_member_pointer(target);
+    const bool data_member_target = member_target && !types().is_function(types().rec(target).inner);
+    if (member_target && is_null_pointer_constant(e)) {
+      if (data_member_target) return null_member_pointer_conversion(e, target);
       diag(at_, Diag::member_pointer_values);
       return {NodeId::none, e.begin, e.end};
     }
     e = rvalue(e);
     if (!e.ok()) return e;
     QualType from = e.type();
-    if ((types().is_member_pointer(target) && types().is(from, Builtin::nullptr_t)) ||
+    if (data_member_target && types().is(from, Builtin::nullptr_t))
+      return null_member_pointer_conversion(e, target);
+    if ((member_target && types().is(from, Builtin::nullptr_t)) ||
         (types().is(target, Builtin::bool_) && types().is_member_pointer(from))) {
       diag(at_, Diag::member_pointer_values);
       return {NodeId::none, e.begin, e.end};
@@ -4976,7 +5043,7 @@ public:
       diag(at_, Diag::void_value);
       return {NodeId::none, e.begin, e.end};
     }
-    if (from == target) return e;
+    if (from == target || (data_member_target && same_unqualified(from, target))) return e;
     if (types().is_arithmetic(from) && types().is_arithmetic(target)) return arithmetic_conversion(e, target);
     if (types().is(target, Builtin::bool_) && (types().is_pointer(from) || types().is(from, Builtin::nullptr_t))) {
       if (types().is_pointer(from)) return convert_node(e, ast::ConversionKind::boolean, target);
@@ -5767,13 +5834,59 @@ public:
 
   enum class BinOp : u8 {
     mul, div, rem, add, sub, shl, shr, lt, gt, le, ge, eq, ne, bit_and, bit_xor, bit_or, logical_and, logical_or, comma,
+    dot_star, arrow_star,
   };
+
+  // The built-in member pointer operators ([expr.mptr.oper]). Access checking takes place when
+  // the address expression names the field ([expr.unary.op]).
+  Ex member_pointer_access(Ex object, Ex pointer, bool arrow, u32 op_at) {
+    u32 begin = object.begin, end = pointer.end;
+    Ex fail{NodeId::none, begin, end};
+    pointer = rvalue(pointer);
+    if (!pointer.ok()) return fail;
+    TypeRec member = types().rec(pointer.type());
+    if (member.kind != TypeKind::member_pointer) {
+      diag(op_at, Diag::member_pointer_operand, arrow ? lex::Tk::arrowstar : lex::Tk::periodstar, pointer.type());
+      return fail;
+    }
+    QualType owner = object.type();
+    if (arrow) {
+      object = rvalue(object);
+      if (!object.ok()) return fail;
+      if (!types().is_pointer(object.type()) || !types().is_class(types().pointee(object.type()))) {
+        diag(op_at, Diag::member_pointer_arrow_object, object.type());
+        return fail;
+      }
+      owner = types().pointee(object.type());
+    } else if (!types().is_class(owner)) {
+      diag(op_at, Diag::member_pointer_object, owner);
+      return fail;
+    }
+    if (!same_unqualified(owner, member.member_owner)) {
+      int paths = 0;
+      if (base_path(types().class_of(owner), types().class_of(member.member_owner), paths))
+        diag(op_at, Diag::member_pointer_values);
+      else
+        diag(op_at, Diag::member_pointer_wrong_class, member.member_owner, owner);
+      return fail;
+    }
+    if (types().is_function(member.inner)) {
+      diag(op_at, Diag::member_pointer_values);
+      return fail;
+    }
+    if (!arrow && !object.glvalue()) object = materialize(object, owner, false);
+    ValueCategory cat = arrow || object.cat() == ValueCategory::lvalue ? ValueCategory::lvalue : ValueCategory::xvalue;
+    ExprInfo info{types().add_cv(member.inner, object_cv(owner)), cat, 0};
+    const auto op = arrow ? ast::OrderedOp::arrow_star : ast::OrderedOp::dot_star;
+    return node(ast::OrderedBinary{info, op, at(object, begin), at(pointer, begin)}, begin, end, info);
+  }
 
   Ex binary(BinOp op, Ex l, Ex r, u32 op_at) {
     using enum BinOp;
     u32 begin = l.begin, end = r.end;
     if (!l.ok() || !r.ok()) return {NodeId::none, begin, end};
     if (dependent(l) || dependent(r)) return dependent_node({l, r}, begin, end);
+    if (op == dot_star || op == arrow_star) return member_pointer_access(l, r, op == arrow_star, op_at);
     static constexpr std::string_view binary_spellings[] = {"*", "/", "%", "+", "-", "<<", ">>", "<", ">", "<=", ">=",
                                                             "==", "!=", "&", "^", "|", "&&", "||", ","};
     if (auto o = overloaded(binary_spellings[std::to_underlying(op)], {l, r}, begin, end, op_at)) return *o;

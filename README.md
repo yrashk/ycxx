@@ -278,7 +278,8 @@ checked with the flags of its last build, or else with its line in the project's
 `compile_commands.json`.
 
 **Pointer-to-member declarations.** Data and function member-pointer types can appear in
-declarations, type traits and requires-expressions. [#238](https://github.com/yrashk/ycxx/issues/238)
+declarations, type traits and requires-expressions. Syntax checking covers ordinary data member
+addresses, typed nulls and same-class `.*` and `->*`. [#238](https://github.com/yrashk/ycxx/issues/238) · [#411](https://github.com/yrashk/ycxx/issues/411)
 
 **Virtual declarations.** Syntax checking accepts initial virtual members in ordinary root classes,
 including inline bodies and virtual destructors. Those classes can appear in pointer and reference
@@ -292,7 +293,7 @@ elements, including whole rows of multidimensional arrays. [#285](https://github
 - The standard library and its headers. On macOS, C headers such as `<stdio.h>` compile without
   warnings and `printf` runs. libycxx's `<cstdio>` is still tracked under [#133](https://github.com/yrashk/ycxx/issues/133).
   `<cmath>` (which `<math.h>` includes) does not compile yet. [#349](https://github.com/yrashk/ycxx/issues/349)
-- Taking member addresses, applying `.*` or `->*`, and code generation for member-pointer values.
+- Native code generation for member-pointer values and general member-pointer expressions.
   [#411](https://github.com/yrashk/ycxx/issues/411)
 - Constexpr lambdas (the interpreter has no class objects yet), further lambda declaration
   contexts ([#338](https://github.com/yrashk/ycxx/issues/338)),
