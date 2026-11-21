@@ -190,18 +190,23 @@ private:
 
 public:
   // An aggregate initializer is constant when each of its elements is constant ([expr.const]).
-  Evaluated evaluate_initializer(Ex e) {
+  Evaluated evaluate_initializer(Ex e, bool zero_default = true) {
     if (auto value = tag_initializer_constant(e)) return {*value, 0, true};
     if (s_->as<ast::InitList>(e)) {
       std::vector<ConstId> elements;
       for (const Ex& element : s_->list_elements(e)) {
-        Evaluated result = evaluate_initializer(element);
+        Evaluated result = evaluate_initializer(element, zero_default);
         if (!result.value) return result;
         elements.push_back(*result.value);
       }
       return {s_->world().values.aggregate(e.type(), elements), 0, true};
     }
-    if (s_->as<ast::ValueInit>(e) || s_->as<ast::DefaultInit>(e)) {
+    if (auto dmi = s_->as<ast::DefaultMemberInit>(e)) {
+      // The isolated evaluator cannot read this aggregate's field paths (#25). Evaluating the
+      // scalar here can succeed if its initializer does not need the destination object.
+      return evaluate_initializer({dmi->init.id, e.begin, e.end, e.info}, zero_default);
+    }
+    if (s_->as<ast::ValueInit>(e) || (zero_default && s_->as<ast::DefaultInit>(e))) {
       if (auto value = zero_constant(e.type())) return {*value, 0, true};
       return {};
     }

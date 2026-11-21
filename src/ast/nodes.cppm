@@ -259,7 +259,7 @@ struct AssignmentCall {
 
 // List-initialization of an aggregate ([dcl.init.aggr]), as analysed: one element per array
 // element or non-static data member, in order, with brace elision and designators resolved and the
-// elements without an initializer value-initialized. Each element is already converted to its
+// elements without a clause initialized from their defaults. Each element is already converted to its
 // element type; a sub-aggregate's element is an `InitList` or a prvalue of its type. The
 // initializer-clauses are sequenced in order ([dcl.init.list]).
 struct InitList {
@@ -285,6 +285,13 @@ struct ValueInit {
 // initialization ([dcl.init.general]/7.3): its value is erroneous, or indeterminate.
 struct DefaultInit {
   ExprInfo info;
+};
+
+// An omitted field initialized from its default member initializer ([class.mem.general]).
+// Its child was analysed at the declaration; `this` is the enclosing InitList's destination.
+struct DefaultMemberInit {
+  ExprInfo info;
+  [[=sequenced]] Child init;
 };
 
 // A type- or value-dependent construct of a template's definition ([temp.dep]), analysed no
@@ -529,7 +536,8 @@ using Nodes = closed_list<Literal, DeclRef, Paren, Unary, Binary, OrderedBinary,
                           MemberCall, Materialize, CtorCall, MemberInit, Destructor, DestroyMember, Dependent,
                           DepName, CondDecl, Switch, Case, Default, Label, Goto, BuiltinCall, Lambda, DefaultArg,
                           StaticInit, StaticVar, NewObject, DeleteObject, VariadicBuiltin, AssignmentCall,
-                          NewArray, DeleteArray, DelegatingInit, VirtualMemberCall, Throw, TryBlock, Handler>;
+                          NewArray, DeleteArray, DelegatingInit, VirtualMemberCall, Throw, TryBlock, Handler,
+                          DefaultMemberInit>;
 
 static_assert(Nodes::size < max_node_kinds);
 

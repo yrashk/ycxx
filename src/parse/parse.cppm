@@ -796,8 +796,8 @@ public:
     return d && (d->flags & (sema::decl_flag::constexpr_ | sema::decl_flag::consteval_));
   }
 
-  // A default member initializer's tokens in the region ([class.mem.general]), analysed again in
-  // each constructor that uses it.
+  // A default member initializer's tokens in the region ([class.mem.general]), retained for the
+  // constructor or aggregate initialization that uses it.
   struct Dmi {
     u32 item = 0;
     u32 begin = 0;
@@ -1156,6 +1156,7 @@ private:
   std::set<u32> classes_instantiated_;  // by specialization: instantiated in this unit
   std::vector<std::pair<u32, u32>> class_member_order_;  // the cells above, in order of analysis
   std::map<u32, Dmi> dmis_;                       // by field entity
+  std::set<EntityId> replaying_default_members_;
   std::map<u32, std::vector<sema::BaseRec>> class_bases_;  // by class entity
   std::map<u32, ClassBasePattern> class_base_patterns_;  // by defining item
   std::set<std::pair<u32, u32>> copyability_occurrences_;  // source item and token offset
@@ -1423,6 +1424,7 @@ public:
   bool is_complete(EntityId c) override {
     return at_point ? p_->is_complete(c, *at_point, true, true) : is_complete_at_item(c);
   }
+  std::optional<NodeId> replay_default_member(sema::Sema& caller, EntityId field) override;
   bool is_complete_at_source(EntityId c) override {
     // The initializer is a complete-class context at its member declaration ([class.mem.general]).
     if (initializer_source) return p_->is_complete(c, initializer_source->item, true);
@@ -1529,6 +1531,66 @@ private:
   u32 item_;
   bool self_;
 };
+
+std::optional<NodeId> AtItem::replay_default_member(sema::Sema& caller, EntityId field) {
+  const auto dmi = p_->dmi(field);
+  if (!dmi) return std::nullopt;
+  const auto& entity = p_->world().entities.rec(field);
+  const u32 offset = dmi->begin - p_->items().items[dmi->item].begin;
+  AtItem source(*p_, dmi->item, false);
+  source.completing_class = entity.scope;
+  source.initializer_source = *dmi;
+  sema::Sema replay(p_->world(), caller.builder(), source, caller.diagnostics(), p_->id(dmi->item), offset);
+  replay.current_class = entity.scope;
+  replay.this_type = replay.types().pointer(replay.types().class_type(entity.scope));
+  replay.unevaluated = caller.unevaluated;
+  replay.push_scope();
+  const sema::Sema::DefaultMemberScope nested(replay, true);
+
+  auto& active = p_->replaying_default_members_;
+  if (!active.insert(field).second) {
+    // [dcl.init.aggr]/13: only a potentially evaluated use can require this initializer again.
+    if (caller.unevaluated) return replay.value_init(entity.type, 0, 0).id;
+    replay.diag(0, Diag::recursive_default_member_initializer, entity.name);
+    return NodeId::none;
+  }
+  struct EndReplay {
+    std::set<EntityId>& active;
+    EntityId field;
+    ~EndReplay() { active.erase(field); }
+  } end_replay{active, field};
+
+  Parser parser(p_->region(), dmi->begin, dmi->end, replay);
+  parser.set_questions(source);
+  const std::size_t diag_begin = replay.diag_count();
+  Ex init = parser.member_initializer(entity.type, dmi->braced, dmi->form);
+  if (replay.has_error_since(diag_begin)) return NodeId::none;
+  if (!init.ok() || !parser.at_end()) {
+    if (parser.at_end()) replay.diag(parser.pos(), Diag::expected_expression);
+    else replay.diag(parser.pos(), Diag::unexpected_token, parser.kind());
+    return NodeId::none;
+  }
+  if (replay.dependent(init) || !replay.closures.empty()) {
+    replay.diag(0, Diag::not_supported, Tk::equal);
+    return NodeId::none;
+  }
+
+  NodeId root = caller.builder().commit(ast::Child{init.id, 0}).id;
+  replay.check_immediate_addresses(root, init.begin);
+  auto check = [&](this const auto& self, const ast::Red& node) -> void {
+    if (node.is<ast::DefaultMemberInit>()) return;  // a nested replay checked this child
+    if (node.is<ast::Throw>()) {
+      replay.diag(node.offset(), Diag::not_supported, Tk::kw_throw);
+    } else if (node.is<ast::Materialize>() && node.get<ast::Materialize>().destructor != EntityId::none) {
+      replay.diag(node.offset(), Diag::default_member_initializer_cleanup);
+    }
+    node.for_each_child(self);
+  };
+  check(ast::Red(replay.ins().ast, root, init.begin));
+  if (replay.has_error_since(diag_begin)) return NodeId::none;
+  caller.demands.insert(caller.demands.end(), replay.demands.begin(), replay.demands.end());
+  return init.id;
+}
 
 
 // Sema's questions in an instantiation of the function template that item `item` defines, at
@@ -3612,7 +3674,7 @@ private:
       sem.entity = s_.world().entities.entity(
           {sema::EntityKind::data_member, d.name, d.type, LangLinkage::cxx, ast::Linkage::none, {}, c.entity});
       // A default member initializer ([class.mem.general]) is a complete-class context: it is
-      // analysed again where it is used (a constructor). Here it is kept as its value when it is
+      // analysed again where it is used. Here it is kept as its value when it is
       // a constant of scalar type, and its tokens are recorded for the rest; what it says is
       // diagnosed where it is used.
       Ex init;
@@ -3622,8 +3684,7 @@ private:
         const auto form = ps_.accept(Tk::equal) ? sema::Construction::copy_list : sema::Construction::direct_list;
         u32 from = ps_.pos();
         std::size_t n = s_.diag_count();
-        if (braced) init = s_.list_init(d.type, *ps_.braced_init_list(), form);
-        else init = s_.convert(ps_.assignment_expression(), d.type, from);
+        init = ps_.member_initializer(d.type, braced, form);
         auto v = init.ok() && types.is_scalar(d.type) ? constant_initializer(init) : std::nullopt;
         s_.truncate_diags(n);
         if (v) value = *v;
@@ -6481,7 +6542,7 @@ private:
     const auto source = std::exchange(at_->initializer_source, d);
     Parser sub(p_->region(), d.begin, d.end, s_);
     sub.set_questions(*q_);
-    Ex init = d.braced ? s_.list_init(f.type, *sub.braced_init_list(), d.form) : s_.convert(sub.assignment_expression(), f.type, 0);
+    Ex init = sub.member_initializer(f.type, d.braced, d.form);
     at_->initializer_source = source;
     s_.constant_of = evaluate;
     s_.put_scopes(std::move(saved));

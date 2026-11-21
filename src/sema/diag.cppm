@@ -350,6 +350,8 @@ enum class Diag : std::uint32_t {
   constructibility_incomplete [[=message{Severity::error, "incomplete type '{0:t}' cannot be queried by '__is_constructible'"}]],
   constructibility_unsupported [[=message{Severity::error, "constructibility of '{0:t}' with these argument types is not supported yet"}]],
   constructibility_pack [[=message{Severity::error, "pack expansions in '__is_constructible' are not supported yet"}]],
+  recursive_default_member_initializer [[=message{Severity::error, "default member initializer for '{0:n}' would use itself"}]],
+  default_member_initializer_cleanup [[=message{Severity::error, "default member initializer requiring cleanup is not supported yet"}]],
 };
 
 // A `{N:r}` argument: why an evaluation was not constant. 0 is an expression the front end

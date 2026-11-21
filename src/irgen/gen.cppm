@@ -819,7 +819,27 @@ class Gen {
           // field's reference type tells initialize to store its address ([dcl.init.ref]).
           if (!array)
             if (auto field = facts_.field_type(owner, index); field && facts_.is_reference(*field)) type = *field;
-          initialize(subobject(p, array ? ir::Step::elem : ir::Step::field, index, type), x, zeroed);
+          Place destination = subobject(p, array ? ir::Step::elem : ir::Step::field, index, type);
+          if (is<ast::DefaultMemberInit>(x)) {
+            Position member_location(*this, x.offset);
+            // Only a replayed default uses the destination's `this`. An explicit clause can
+            // still refer to the enclosing member function's own object.
+            ValueId receiver = p.ptr;
+            if (p.type != ast::without_cv(p.type)) {
+              ast::QualType pointer = facts_.pointer_to(ast::without_cv(p.type));
+              receiver = pure(ir::Op::ptr_cast, pointer, {receiver}, {word(ty(pointer))});
+            }
+            struct RestoreThis {
+              std::optional<ValueId>& current;
+              std::optional<ValueId> saved;
+              ~RestoreThis() { current = saved; }
+            } restore{this_, std::exchange(this_, receiver)};
+            pinned([&] {
+              initialize(initializing_place(destination), child(x, get<ast::DefaultMemberInit>(x).init), false);
+            });
+          } else {
+            initialize(destination, x, zeroed);
+          }
         }
         ++i;
       }
