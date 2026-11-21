@@ -3,14 +3,14 @@
 namespace tags {
 struct Tag {};
 struct Default {};
-enum Code { value };
+constexpr int constant_value = 7;
 }
 
 namespace wrappers {
 template<class T> struct Carrier {};
 template<class T, class U = tags::Default> struct DefaultBox {};
 template<class Lead, class... Rest> struct Pack {};
-template<class T, tags::Code Code> struct ConstantBox {};
+template<class T, int Value> struct ConstantBox {};
 }
 
 namespace calls {
@@ -38,7 +38,7 @@ template<class T> int parenthesized(const wrappers::Carrier<T>& value) {
 
 template<class T> int constant_pick(const T&) { return 6; }
 
-template<class T> int constant(const wrappers::ConstantBox<T, tags::value>& value) {
+template<class T> int constant(const wrappers::ConstantBox<T, tags::constant_value>& value) {
   return constant_pick(value);
 }
 }
@@ -49,7 +49,7 @@ int nested_pick(const wrappers::Carrier<wrappers::Carrier<Tag>>&) { return 2; }
 int default_pick(const wrappers::DefaultBox<int>&) { return 3; }
 int pack_pick(const wrappers::Pack<int, float, Tag>&) { return 4; }
 int paren_pick(const wrappers::Carrier<Tag>&) { return 7; }
-int constant_pick(const wrappers::ConstantBox<int, value>&) { return 8; }
+int constant_pick(const wrappers::ConstantBox<int, constant_value>&) { return 8; }
 }
 
 namespace calls {
@@ -58,14 +58,23 @@ int pick(const wrappers::Carrier<tags::Tag>&) { return 9; }
 }
 
 int main() {
-  wrappers::Carrier<tags::Tag> value;
+  using Direct = wrappers::Carrier<tags::Tag>;
+  using Nested = wrappers::Carrier<Direct>;
+  using Defaulted = wrappers::DefaultBox<int>;
+  using Packed = wrappers::Pack<int, float, tags::Tag>;
+  using Constant = wrappers::ConstantBox<int, tags::constant_value>;
+  Direct value;
+  Nested nested;
+  Defaulted defaulted;
+  Packed packed;
+  Constant constant;
   if (calls::direct(value) != 1) return 1;
   if (pick(value) != 1) return 2;
   if (calls::pick(value) != 9) return 3;
-  if (calls::nested(wrappers::Carrier<wrappers::Carrier<tags::Tag>>{}) != 2) return 4;
-  if (calls::defaulted(wrappers::DefaultBox<int>{}) != 3) return 5;
-  if (calls::packed(wrappers::Pack<int, float, tags::Tag>{}) != 4) return 6;
+  if (calls::nested(nested) != 2) return 4;
+  if (calls::defaulted(defaulted) != 3) return 5;
+  if (calls::packed(packed) != 4) return 6;
   if (calls::parenthesized(value) != 5) return 7;
-  if (calls::constant(wrappers::ConstantBox<int, tags::value>{}) != 6) return 8;
+  if (calls::constant(constant) != 6) return 8;
   return 0;
 }
