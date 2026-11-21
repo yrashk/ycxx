@@ -6843,16 +6843,34 @@ public:
           truncate_diags(n);
         }
       }
+    const bool binary = operands.size() == 2 && std::ranges::contains(binary_spellings, op);
+    const bool enum_only = binary && std::ranges::none_of(operands, [&](const Ex& operand) {
+      return types().is_class(types().referee(operand.type()));
+    });
+    auto matches_enum_operand = [&](const ast::DeclSema& d) {
+      auto unqualified_type = [&](QualType t) {
+        return Types::unqualified(types().canonical(types().referee(t)));
+      };
+      const auto function = types().rec(d.type);
+      for (std::size_t i = 0; i < std::min(operands.size(), function.params.size()); ++i) {
+        const QualType operand = unqualified_type(operands[i].type());
+        if (types().is_enum(operand) && operand == unqualified_type(function.params[i])) return true;
+      }
+      return false;
+    };
     std::vector<ast::DeclSema> set;
     auto add = [&](const ast::DeclSema& d) {
+      // [over.match.oper]: with no class operand, an ordinary nonmember must
+      // have an enum or enum-reference parameter matching an operand at that position.
       if (d.kind == ast::DeclKind::function && d.entity != EntityId::none &&
+          (!enum_only || (d.flags & decl_flag::template_) || matches_enum_operand(d)) &&
           !std::ranges::any_of(set, [&](const ast::DeclSema& x) { return x.entity == d.entity; }))
         set.push_back(d);
     };
     for (const auto& o : own)
       if (o.name == name) add(o.sema);
     for (DeclId d : q_->visible_decls(name, directives())) add(q_->decl_sema(d));
-    if (operands.size() == 2 && std::ranges::contains(binary_spellings, op)) {
+    if (binary) {
       auto associations = adl_associations(operands, /*at_instantiation=*/false, /*ordinary_call=*/true);
       for_each_associated_friend(associations, name, /*at_instantiation=*/false, add);
       for (EntityId ns : associations.namespaces)
