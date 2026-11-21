@@ -842,10 +842,11 @@ private:
       u32 n = key + 1;
       if (kind(key) == Tk::kw_enum) {
         if (kind(n) == Tk::kw_class || kind(n) == Tk::kw_struct) ++n;
-        while ((kind(n) == Tk::l_square && kind(n + 1) == Tk::l_square) ||
-               (is_name(n, "__attribute__") && kind(n + 1) == Tk::l_paren))
-          n = match(kind(n) == Tk::l_square ? n : n + 1);
       }
+      while ((kind(n) == Tk::l_square && kind(n + 1) == Tk::l_square) ||
+             ((is_name(n, "__attribute__") || (is_class_key(kind(key)) && kind(n) == Tk::kw_alignas)) &&
+              kind(n + 1) == Tk::l_paren))
+        n = match(kind(n) == Tk::l_square ? n : n + 1);
       u32 head = none;
       for (; n < limit && (kind(n) == Tk::identifier || kind(n) == Tk::coloncolon); ++n) {
         if (kind(n) == Tk::identifier) head = n;
