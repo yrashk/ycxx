@@ -5330,10 +5330,16 @@ public:
   Ex decay_copy(Ex operand, u32 at_) {
     if (!operand.ok()) return operand;
     if (!dependent(operand)) {
+      if (types().is_array(operand.type()) && !operand.glvalue())
+        operand = materialize(operand, operand.type(), false);
       Ex value = rvalue(operand);
       if (!value.ok()) return value;
       QualType type = Types::unqualified(value.type());
-      if (types().is_scalar(type) && !types().is_member_pointer(type)) return convert(value, type, at_);
+      if (types().is_scalar(type) && !types().is_member_pointer(type)) {
+        if (value.info.bit_width)
+          return convert_node(value, ast::ConversionKind::integral, type);
+        return convert(value, type, at_);
+      }
     }
     diag(at_, Diag::not_supported, lex::Tk::kw_auto);
     return {NodeId::none, operand.begin, operand.end};
