@@ -1308,6 +1308,8 @@ class Gen {
       delete_object(a);
       return std::nullopt;
     }
+    if (is<ast::NewArray>(a)) throw Unsupported{"array allocation"};
+    if (is<ast::DeleteArray>(a)) throw Unsupported{"array deallocation"};
     if (is<ast::Call>(a)) return call(a);
     if (member_call_expression(a)) return member_call(a);
     if (is<ast::VariadicBuiltin>(a)) return variadic_builtin(a);

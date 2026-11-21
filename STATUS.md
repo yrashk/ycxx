@@ -1035,6 +1035,11 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   checked across an out-of-class definition ([dcl.constexpr], #157). These constructors use the
   ordinary runtime construction path. Constant evaluation of class objects is tracked in #25,
   and named exception specifications are tracked in #219.
+- Ordinary constructors can spell bare `explicit` in class, in either order with `constexpr`.
+  A matching out-of-class definition inherits the property. Copy-initialization excludes these
+  constructors. Direct initialization includes them. Copy-list-initialization ranks them and
+  diagnoses an explicit winner, including a default constructor or a temporary for a reference
+  argument ([dcl.fct.spec], [over.match.ctor], [over.match.copy], [over.match.list], #157).
 - A first-declaration in-class `C(C&) = default` or `C(const C&) = default` is a declared copy
   constructor, including with `constexpr` or bare `noexcept`. It participates in overload
   selection, access checking and deletion. For ordinary namespace-scope records without
@@ -1057,8 +1062,8 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   #157, #309, and #25.
 - Tests: `tests/own/classes/s3-*` (spec-only, plus two from the review): 16 of 16 pass. 10 more draft examples pass.
 - Not yet: temporaries with destructors created in a conditional operand, value-initializing a
-  member subobject whose class has an implicit constructor, `explicit`,
-  and other `= default` forms (#157, #244).
+  member subobject whose class has an implicit constructor, conditional
+  `explicit`, explicit constructor templates, and other `= default` forms (#157, #244).
 
 ## Classes, δ step 4a: enumerations (#86, 2026-11-18)
 
@@ -2457,6 +2462,13 @@ values, end to end; results match Clang's bit for bit.
   and other allocation-function declarations.
 - Spec-only tests in `tests/own/scalar-allocation/` cover types, initialization, a typed null, and
   invalid operands. A separate provider checks the address and size passed to deallocation.
+- Syntax checking supports one-dimensional `new T[n]` and `delete[] p` for integral and ordinary
+  pointer elements ([expr.new], [expr.delete]). The bound converts to `size_t`. A potentially
+  evaluated constant bound can be zero and must keep the object size within the positive range
+  of `ptrdiff_t`. The array AST retains default or empty initialization and the typed delete
+  operand. Native lowering and constant evaluation of these operations remain in #293.
+  A file-scope scalar initializer still needs lowered code to qualify for dynamic initialization.
+  Type checking covers function-local expressions and unevaluated operands.
 
 ## Bootstrap workarounds
 
