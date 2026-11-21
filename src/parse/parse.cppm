@@ -5959,13 +5959,12 @@ void Program::declare_copy_assignment(u32 item, EntityId cls, sema::ClassRec& re
   for (const auto& b : rec.bases) inspect(types.class_type(b.cls), true);
   for (const auto& f : rec.fields) inspect(f.type, false);
 
-  ast::Builder b(w_->ins, &arena_);
   const auto record_body = [&](u32 definition_item, ast::DeclSema d, QualType source, CopyAssignment state) {
     if (state != CopyAssignment::trivial && state != CopyAssignment::memberwise) return;
     ast::ParamSema param{EntityId::none, source, w_->ins.names.intern("other"), NodeId::none, 0};
-    d.params = b.seq(std::span<const ast::ParamSema>(&param, 1));
+    d.params = w_->ins.intern_seq(std::span<const ast::ParamSema>(&param, 1));
     copy_assignments_.try_emplace(d.entity,
-        PendingCopyAssignment{{definition_item, b.commit(d), SpecialMember::copy_assignment}, state});
+        PendingCopyAssignment{{definition_item, d, SpecialMember::copy_assignment}, state});
   };
   if (!implicit) {
     for (auto& copy : rec.members) {
@@ -6008,8 +6007,8 @@ void Program::declare_copy_assignment(u32 item, EntityId cls, sema::ClassRec& re
   d.access = ast::Access::public_;
   d.flags = sema::decl_flag::member | sema::decl_flag::implicit | sema::decl_flag::definition |
             sema::decl_flag::inline_ | sema::decl_flag::constexpr_;
-  d.attributes = b.seq(std::span<const NodeId>{});
-  d.template_params = b.seq(std::span<const ast::TemplateParamSema>{});
+  d.attributes = w_->ins.intern_seq(std::span<const NodeId>{});
+  d.template_params = w_->ins.intern_seq(std::span<const ast::TemplateParamSema>{});
   record_body(item, d, source, state);
 }
 
