@@ -4793,6 +4793,7 @@ public:
       if (types.is_pointer(s_->local(bv->first).type)) constant_local(local, d.type, true, init);
       else sema::Evaluator(*s_, questions()).check_constexpr_call(deref);
     }
+    s_->check_destructor_access(d.type, d.name_at);
     ast::EntityId dtor = types.is_reference(d.type) ? ast::EntityId::none : s_->destructor_of(d.type);
     Ex var = s_->node(ast::LocalVar{local, sema::Sema::at(init, dbegin), dtor}, dbegin, d.name_at + 1);
     s_->set_local_decl(local, var.id);

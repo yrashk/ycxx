@@ -4560,7 +4560,12 @@ public:
     if (!types().is_class(type)) return true;
     const EntityId owner = types().class_of(type);
     const ClassRec* record = class_rec(owner);
-    if (!record || record->destructor == EntityId::none) return true;
+    if (!record) return true;
+    if (!record->destructor_usable) {
+      diag(at, Diag::object_unusable_destructor, type);
+      return false;
+    }
+    if (record->destructor == EntityId::none) return true;
     const EntityId destructor = record->destructor;
     const NameId name = w_->entities.rec(destructor).name;
     // [class.protected]: these uses destroy a complete object of the
