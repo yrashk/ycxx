@@ -937,6 +937,11 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   functions (#57) as `VLvalue{VEntity, path, byte offset}`. The pipeline emits data relocations
   with the entity's symbol and byte addend on ELF and Mach-O, including references to symbols
   defined in another translation unit (#101).
+- Scalar enumeration values work in constexpr variables, calls, casts and switch conditions.
+  The interpreter preserves the enumeration's nominal type in L1 and memory. The underlying
+  type supplies its integer representation. Constant evaluation diagnoses an evaluated cast
+  outside a non-fixed enumeration's range. Class-valued allocation remains a separate slice.
+  [Design](docs/design/constexpr-enum-values.md) · [#262](https://github.com/yrashk/ycxx/issues/262)
 - Constant evaluation can read namespace-scope `constexpr` pointers erased to `void`
   ([expr.const], [conv.ptr], #102). The interpreter reconstructs the original scalar or array
   subobject path, including one-past addresses, from the constant's path and byte offset.
@@ -1053,9 +1058,9 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   bool; nothing converts implicitly to an enumeration except its own type; a scoped one
   compares only with its own type; `E e{n}` for a fixed underlying type ([dcl.init.list]/3.8).
   Overload ranking knows enumeration promotions.
-- An enumerator is a `Literal` of its enumeration; converted to an integer it is folded to that
-  integer's constant, so the interpreter, which has no enumeration objects yet (#25), sees only
-  integers. The IR, `lower` and the layout treat an enumeration as its underlying type.
+- An enumerator is a `Literal` of its enumeration with an underlying integer constant. L1
+  preserves the enumeration type. The interpreter, lowering and layout use the underlying
+  integer representation. [#262](https://github.com/yrashk/ycxx/issues/262)
 - Linkage names of enumerations, nested ones included, match Clang's.
 - Tests: `tests/own/classes/s4-*enum*`, `s4-scoped-enum`, `s4-unscoped-enum` (spec-only, plus two
   from the review): 7 of 7.
@@ -1064,7 +1069,7 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   declarations spell their base. Compatible redeclarations and a later definition in the same
   namespace share the nominal type, and the enumerators become visible at the definition.
 - Not yet: opaque declarations in classes or blocks, unnamed enumerations, `E{}` and `E(v)` as
-  expressions (#157), enumerations in a block (#117), constexpr enumeration objects (#25).
+  expressions (#157), enumerations in a block (#117).
 
 ## Classes, δ step 4b: namespaces (#86, 2026-11-18)
 
@@ -1223,8 +1228,8 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   supported yet.
 - `std::nullptr_t` objects are laid out as pointers and convert to pointers; comparing two of
   them, and the other gaps the review found, are #199.
-- A cast of a constant to an enumeration is folded to the enumeration's constant (the
-  interpreter has no enumeration-typed values yet, #25). `decltype` reads declared types from
+- A literal can be folded to a fixed enumeration's constant. The constant evaluator checks
+  casts to non-fixed enumerations against their value range (#262). `decltype` reads declared types from
   the declaration that named the entity; a statement that begins with a functional cast is an
   expression unless it can be a declaration ([stmt.ambig]).
 - Tests: `tests/own/casts` (9, three from the review). One more draft example passes.
@@ -2171,9 +2176,8 @@ values, end to end; results match Clang's bit for bit.
   function-scope binding so fallthrough and jumps share uses and scope cleanup at the label.
   A condition's variable lives one iteration of a loop, through a `for`'s increment. A
   goto's `br` carries `not_constexpr`, so constant evaluation of it fails ([expr.const]).
-- Not yet: a jump past a vacuously initialized class with a nontrivial destructor (#477);
-  `switch` on a class with a conversion function and `explicit operator bool` conditions (#339);
-  constant evaluation of a switch on an enumeration (enumeration values, #25).
+- Not yet: a jump past a vacuously initialized class with a nontrivial destructor (#477),
+  `switch` on a class with a conversion function, and `explicit operator bool` conditions (#339).
 - Tests: `tests/own/stmt/` (written spec-only, 23 run and 15 reject tests, and the split-off XFAILs
   for the above).
 

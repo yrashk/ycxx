@@ -111,8 +111,16 @@ struct Ops {
     const M::Shape* s;
     if (Flow fl = m.int_shape(f, m.result_type(f, n), s); fl != Flow::next) return fl;
     if (a.kind != VKind::integer) return m.fail(Reason::ill_formed);
+    // [expr.static.cast]/8 checks the original value when there is no fixed underlying type.
+    if (s->enum_range && constant(m)) {
+      const M::Shape* from;
+      if (Flow fl = m.int_shape(f, m.type_of(f, f.fn->operands_of(n)[0]), from); fl != Flow::next) return fl;
+      auto [minimum, maximum] = *s->enum_range;
+      if (from->is_signed && i64(a.bits) < 0 ? i64(a.bits) < minimum : a.bits > maximum)
+        return m.fail(Reason::enum_range);
+    }
     // To bool it is the boolean conversion ([conv.integral]/1 defers to [conv.bool]).
-    if (ast::builtin_of(*m.in_, m.result_type(f, n)) == ast::Builtin::bool_) return m.set(f, n, Value::integer(a.bits != 0));
+    if (s->integer_type == ast::Builtin::bool_) return m.set(f, n, Value::integer(a.bits != 0));
     return m.set(f, n, Value::integer(M::norm(a.bits, s->width, s->is_signed)));
   }
   static Flow fconv(M& m, Frame& f, N n) { return m.float_convert(f, n); }

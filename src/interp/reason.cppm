@@ -25,6 +25,7 @@ enum class Reason : std::uint8_t {
   shift_count [[=says{"shift count {0} is negative or not less than the width of the shifted type"}]],
   float_nan [[=says{"floating-point arithmetic produces a NaN"}]],
   float_to_integer [[=says{"a floating value converted to an integer type is out of its range"}]],
+  enum_range [[=says{"the converted value is outside the range of the enumeration type"}]],
   // Objects ([basic.life], [basic.indet], [basic.lval], [dcl.type.cv]).
   read_indeterminate [[=says{"read of an object with an indeterminate value"}]],
   read_erroneous [[=says{"read of an object with an erroneous value"}]],
