@@ -34,6 +34,25 @@ def main():
         compile(darwin, '-c', 'consumer.cpp', '-o', 'darwin.o',
                 error='a call to a virtual member function is not supported yet')
         assert not (scope / 'darwin.o').exists()
+
+        root = 'struct B { virtual int read(int); };\n'
+        (scope / 'type-only.cpp').write_text(root + 'B* identity(B* object) { return object; }\n')
+        compile(linux, '-c', 'type-only.cpp', '-o', 'type-only.o')
+        assert (scope / 'type-only.o').is_file()
+        guards = (
+            (root + 'int B::read(int n) { return n; }',
+             'an out-of-class definition of a virtual member function is not supported yet'),
+            ('struct B { virtual int read(int) = 0; };', "'=' is not supported yet"),
+            (root + 'void consume(B object) {}', 'object layout requiring virtual function support'),
+            (root + 'constexpr auto size = sizeof(B);', 'object layout requiring virtual function support'),
+            (root + 'struct Enclosing { B object; };',
+             'native output for a translation unit with virtual member functions is not supported yet'),
+        )
+        for source, diagnostic in guards:
+            (scope / 'unsupported.cpp').write_text(source + '\n')
+            compile(linux, '-c', 'unsupported.cpp', '-o', 'unsupported.o', error=diagnostic)
+            assert not (scope / 'unsupported.o').exists()
+
         for part in ('host', 'provider'):
             run([host_cxx, '-std=c++26', '-pedantic-errors', '-frtti', '-fno-lto',
                  '-c', f'{part}.cpp', '-o', f'{part}.o'], scope, cold)

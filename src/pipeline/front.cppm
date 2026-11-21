@@ -294,13 +294,16 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
   // Native compilation may consume an opaque Linux root without enabling its layout.
   // Keep the gate for declarations and records that would require further virtual support.
   const auto& classes = program.classes();
-  auto written_member = [&](EntityId f) -> std::optional<ast::DeclSema> {
+  auto declaration_only_member = [&](EntityId f) -> std::optional<ast::DeclSema> {
+    // A key function may be defined outside its class. A written in-class declaration
+    // cannot establish that the translation unit is only a consumer.
+    if (program.function_defined_before(f, program.end())) return std::nullopt;
     const auto d = program.member_decl(f);
     return d ? program.decl_sema(*d) : std::nullopt;
   };
   for (EntityId c : classes.classes()) {
     const auto& record = classes.rec(c);
-    if (!record.layout_requires_virtual_support || sema::native_virtual_consumer(record, world.types, written_member))
+    if (!record.layout_requires_virtual_support || sema::native_virtual_consumer(record, world.types, declaration_only_member))
       continue;
     tu.virtual_emission_blocked = true;
     const auto member = std::ranges::find_if(record.members, &sema::MemberDeclRec::is_virtual);
