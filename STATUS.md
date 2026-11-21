@@ -1789,7 +1789,12 @@ session's.*
   checks polymorphism, non-static data members, and emptiness of the recorded bases. Missing base
   records and skipped layout attributes are diagnosed when they prevent a result. Dependent operands
   in supported class-template bases and variable-template initializers check completeness when
-  instantiated. Concrete operands in those contexts check at the source point.
+  instantiated. Concrete operands in those contexts check at the source point. A surviving use of a
+  potentially constant variable-template specialization in an ordinary namespace-scope item or
+  function body supplies the point for its initializer and nested initializer demands. Unevaluated
+  uses with known types and discarded branches of a templated `if constexpr` leave that point to a
+  later demand. A variable-template partial specialization with a declared type such as
+  `Tag<empty<T>>` remains unsupported.
   `__has_builtin(__is_empty)` continues to answer 1 ([meta.unary.prop], #218).
 - Listed in docs/EXTENSIONS.md. Tests: `tests/own/builtins/`. `<cstdio>`: 53 → 33 errors.
 - Not yet (#211 follow-up): the built-ins that need the object model, such as
