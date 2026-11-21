@@ -157,7 +157,10 @@ public:
   // The type of variable template specialization `v` at the current point when it is not the
   // template's with the arguments substituted: an explicit specialization's, or a partial
   // specialization's that it is instantiated from ([temp.expl.spec], [temp.spec.partial]).
-  virtual std::optional<QualType> specialization_type(EntityId /*v*/) { return std::nullopt; }
+  // A potentially evaluated use can also demand a deferred check of its initializer.
+  virtual std::optional<QualType> specialization_type(EntityId /*v*/, bool /*potentially_evaluated*/) {
+    return std::nullopt;
+  }
   // Whether normal form `c` is satisfied here ([temp.constr.sat]); none while it is dependent.
   virtual std::optional<bool> satisfied(ConstId /*c*/) { return true; }
   // Whether checking normal form `c`'s satisfaction raised a hard error (an atom not of type
@@ -723,7 +726,7 @@ public:
       return {NodeId::none, begin, end};
     }
     EntityId spec = variable_specialization(tmpl.entity, *full);
-    if (auto st = q_->specialization_type(spec)) t = *st;
+    if (auto st = q_->specialization_type(spec, !unevaluated)) t = *st;
     if (!unevaluated) demands.push_back({spec, ast::Loc{item_, loc_base_ + begin}});
     ExprInfo info{types().referee(*t), ValueCategory::lvalue, 0};
     return node(ast::DeclRef{info, spec}, begin, end, info);

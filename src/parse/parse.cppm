@@ -685,7 +685,7 @@ public:
   // The type of variable template specialization `v` at `point` when it is not its template's:
   // its explicit specialization's, or that of the partial specialization it is instantiated
   // from, with that one's arguments.
-  std::optional<QualType> specialization_type(EntityId v, u32 point) {
+  std::optional<QualType> specialization_type(EntityId v, u32 point, bool potentially_evaluated) {
     if (explicitly_specialized(v, point)) {
       auto d = declaration(v, point);
       return d ? std::optional(d->type) : std::nullopt;
@@ -700,15 +700,28 @@ public:
           if (d.entity == v) return d.type;
       return std::nullopt;
     };
+    // A typed variable usually leaves its initializer to the END worklist. A dependent
+    // type trait that checks completeness must see the point that actually demands it.
+    auto check_initializer = [&](u32 item) {
+      if (!potentially_evaluated) return;
+      const u32 source = std::to_underlying(id(item));
+      const auto trait = dependent_type_trait_operands_.lower_bound({source, 0});
+      if (trait == dependent_type_trait_operands_.end() || trait->first != source) return;
+      const auto& args = w_->entities.rec(v).args;
+      if (std::ranges::none_of(args, [&](const ast::TemplateArg& a) { return w_->arg_dependent(a); }))
+        variable_instance(v, point);
+    };
     if (!c) {
-      auto t = var_templates_.find(std::to_underlying(w_->entities.rec(v).templ));
-      if (t != var_templates_.end() && t->second < point && w_->ins.seqs.size(item_sema(t->second).value.decls) > 0 &&
-          w_->types.has_placeholder(w_->ins.seqs.at(item_sema(t->second).value.decls, 0).type))
-        return deduced();
+      const auto def = var_templates_.find(std::to_underlying(w_->entities.rec(v).templ));
+      if (def == var_templates_.end() || def->second >= point) return std::nullopt;
+      const auto decls = item_sema(def->second).value.decls;
+      if (w_->ins.seqs.size(decls) > 0 && w_->types.has_placeholder(w_->ins.seqs.at(decls, 0).type)) return deduced();
+      check_initializer(def->second);
       return std::nullopt;
     }
     auto t = templates().substitute(w_->ins.seqs.at(item_sema(c->item).value.decls, 0).type, c->args);
     if (t && w_->types.has_placeholder(*t)) return deduced();
+    if (t) check_initializer(c->item);
     return t;
   }
   // At the end of the unit, it is said where the demand being instantiated came from.
@@ -1511,7 +1524,9 @@ public:
   }
   std::optional<ConstId> constant_value(EntityId v) override { return p_->constant_value(v, value_point(v)); }
   bool instantiation_gave_up() override { return p_->instantiation_gave_up(); }
-  std::optional<QualType> specialization_type(EntityId v) override { return p_->specialization_type(v, point()); }
+  std::optional<QualType> specialization_type(EntityId v, bool potentially_evaluated) override {
+    return p_->specialization_type(v, point(), potentially_evaluated);
+  }
   const std::vector<sema::Expansion>* pattern_expansions() override { return at_point ? p_->expansions(item_, 0) : nullptr; }
   std::optional<bool> satisfied(ConstId c) override { return p_->satisfied(c, point()); }
   bool satisfaction_failed(ConstId c) override { return p_->satisfaction_failed(c); }
@@ -1702,7 +1717,9 @@ public:
   std::optional<ConstId> constant_value(EntityId v) override { return p_->constant_value(v, p_->end()); }
   std::optional<ast::DeclSema> earlier_member(ast::NameId) override { return std::nullopt; }
   bool instantiation_gave_up() override { return p_->instantiation_gave_up(); }
-  std::optional<QualType> specialization_type(EntityId v) override { return p_->specialization_type(v, p_->end()); }
+  std::optional<QualType> specialization_type(EntityId v, bool potentially_evaluated) override {
+    return p_->specialization_type(v, p_->end(), potentially_evaluated);
+  }
   const std::vector<sema::Expansion>* pattern_expansions() override { return p_->expansions(item_, 1); }
   std::optional<bool> satisfied(ConstId c) override { return p_->satisfied(c, p_->end()); }
   bool satisfaction_failed(ConstId c) override { return p_->satisfaction_failed(c); }
