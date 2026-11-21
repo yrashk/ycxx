@@ -6016,6 +6016,16 @@ public:
     if (atom_.fn_params && ins.seqs.size(is.decls) > 0) s_.push_scope();
     if (atom_.fn_params && ins.seqs.size(is.decls) > 0)
       for (const ast::ParamSema& prm : ins.seqs.elements(ins.seqs.at(is.decls, 0).params)) {
+        if (s_.types().kind(prm.type) == sema::TypeKind::pack_expansion) {
+          const std::array pattern{t.type_arg(prm.type)};
+          auto expanded = t.substitute_args(pattern, s_.template_args);
+          if (expanded && std::ranges::none_of(*expanded, [&](const ast::TemplateArg& arg) { return s_.dependent(arg); })) {
+            s_.declare_param_pack(prm.name);
+            for (const ast::TemplateArg& element : *expanded)
+              s_.declare_pack_element(prm.name, element.type);
+            continue;
+          }
+        }
         auto ty = t.substitute(prm.type, s_.template_args);
         s_.declare_local(prm.name, ty ? *ty : prm.type, sema::local_flag::parameter, 0, false);
       }
