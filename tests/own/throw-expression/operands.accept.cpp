@@ -1,8 +1,8 @@
 // [expr.throw], [except.throw] Scalars and pointers form exception objects.
 enum class Signal { stop };
-struct Abstract { virtual void f() = 0; };
+struct Complete { int value; };
 
-void raise(int& number, const int fixed, const volatile void* erased, Abstract* object) {
+void raise(int& number, const int fixed, const volatile void* erased, Complete* object) {
   throw number = fixed;
   throw Signal::stop;
   throw 0.5;
