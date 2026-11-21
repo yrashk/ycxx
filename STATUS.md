@@ -1776,6 +1776,12 @@ session's.*
   initializer checks completeness at instantiation. A concrete occurrence checks it at its original
   source point. Missing graph information gets a hard diagnostic when it prevents a result.
   `__has_builtin` answers 0 while support is partial ([meta.rel], [class.derived], #218).
+- `__is_empty(T)` gives false for nonclass types and unions. For a complete nonunion class, it
+  checks polymorphism, non-static data members, and emptiness of the recorded bases. Missing base
+  records and skipped layout attributes are diagnosed when they prevent a result. Dependent operands
+  in supported class-template bases and variable-template initializers check completeness when
+  instantiated. Concrete operands in those contexts check at the source point.
+  `__has_builtin(__is_empty)` continues to answer 1 ([meta.unary.prop], #218).
 - Listed in docs/EXTENSIONS.md. Tests: `tests/own/builtins/`. `<cstdio>`: 53 → 33 errors.
 - Not yet (#211 follow-up): the built-ins that need the object model, such as
   class constructibility, assignability and convertibility, remaining `__is_trivially_*` and
