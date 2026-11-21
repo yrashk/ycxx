@@ -1,5 +1,4 @@
 // [basic.stc.dynamic], [new.delete.single], [expr.new], [expr.delete]
-// REQUIRES: linux
 // PEER: aligned-scalar-provider.cpp
 using Count = decltype(sizeof(0));
 namespace std { enum class align_val_t : Count {}; }

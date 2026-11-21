@@ -2080,6 +2080,7 @@ std = 'C++11'
 ftm = '__cpp_alias_templates'
 detect = '\btemplate\s*<[^;{]*>\s*using\s+\w+\s*='
 status = 'done'
+note = 'Terminal namespace-qualified alias specializations stay type arguments when they expand to dependent member types (#630).'
 
 [[feature]]
 id = 'temp-var'
