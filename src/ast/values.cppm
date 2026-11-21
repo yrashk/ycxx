@@ -131,11 +131,11 @@ enum class DepOp : u8 {
   is_same, is_reference, is_const, is_volatile, is_array, is_pointer, is_function,
   is_enum, is_union, is_class,
   is_member_pointer, is_member_object_pointer, is_member_function_pointer,
-  is_object,
+  is_object, logical_not,
 };
 
-// A dependent operation (§5.5) over canonical qualified types. `is_same` has two ordered
-// operands. The other predicates have one.
+// A dependent operation (§5.5). The predicates take canonical qualified type operands, two
+// for `is_same` and one for the rest. `logical_not` takes one bool value operand.
 struct [[=dependent]] VDepOp {
   DepOp op;
   SeqId<TemplateArg> operands;

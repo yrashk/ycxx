@@ -2095,6 +2095,7 @@ public:
     t.member_type = [this](EntityId c, NameId n) { return member_type(c, n); };
     t.template_decl = [this](EntityId tmpl) { return q_->template_decl(tmpl); };
     t.variable_constant = [this](EntityId spec) { return q_->constant_value(spec); };
+    t.variable_global = [this](EntityId spec) { return q_->global(spec); };
     return t;
   }
   bool dependent(const Ex& e) {
@@ -6473,7 +6474,11 @@ public:
   Ex unary(ast::UnaryOp op, Ex e, u32 begin, u32 end, u32 op_at) {
     using enum ast::UnaryOp;
     if (!e.ok()) return {NodeId::none, begin, end};
-    if (dependent(e)) return dependent_node({e}, begin, end);
+    if (dependent(e)) {
+      if (op != not_) return dependent_node({e}, begin, end);
+      ExprInfo info{builtin(Builtin::dependent), ValueCategory::prvalue, expr_flag::dependent};
+      return node(ast::Unary{info, op, at(e, begin)}, begin, end, info);
+    }
     static constexpr std::string_view unary_spellings[] = {"+", "-", "!", "~", "*", "&", "++", "--", "", ""};
     if (std::string_view sp = unary_spellings[std::to_underlying(op)]; !sp.empty())
       if (auto o = overloaded(sp, {e}, begin, end, op_at)) return *o;
