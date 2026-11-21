@@ -1042,8 +1042,9 @@ struct World {
   // ([basic.stc.dynamic.allocation], [basic.stc.dynamic.deallocation]). A reference does not
   // require a definition of the class or union it names.
   bool matches_tagged_allocation_function(std::string_view name, QualType written, bool has_noexcept) {
-    const TypeRec fn = types.rec(written);
     const bool allocating = name == allocation_name(AllocationFunction::allocate);
+    if (!allocating && name != allocation_name(AllocationFunction::deallocate)) return false;
+    const TypeRec fn = types.rec(written);
     if (fn.kind != TypeKind::function || fn.variadic || fn.linkage != LangLinkage::cxx ||
         fn.fn_cv != Cv::none || fn.fn_ref != ast::RefQual::none || !fn.fn_noexcept ||
         (allocating && !has_noexcept) || (fn.params.size() != 2 && fn.params.size() != 3))

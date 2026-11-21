@@ -200,7 +200,9 @@ fixed underlying types and definitions inside `extern "C"` blocks.
   cv-qualified objects. Scalar allocation uses the global Itanium allocation functions.
   Syntax checking also covers one-dimensional scalar `new T[n]` and `delete[] p`.
   The usual aligned scalar allocation and deallocation signatures support explicit calls with
-  `std::align_val_t`. The usual global `operator new[]` and `operator delete[]` signatures
+  `std::align_val_t`. Written nonthrowing global scalar overloads with a final `const Tag&`
+  support explicit calls, including `std::nothrow_t` and user-defined class tags.
+  The usual global `operator new[]` and `operator delete[]` signatures
   support explicit calls and typed address selection.
   [#293](https://github.com/yrashk/ycxx/issues/293)
 - pointers and references to arrays of unknown bound, and template partial specializations
