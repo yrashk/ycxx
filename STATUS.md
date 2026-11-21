@@ -308,10 +308,12 @@ What is true of the code today. Work in progress and its owners are tracked in
   - Weak definitions coalesce: the first in input order is kept, and a strong one beats them.
     The functions and variables the ELF path makes weak (#422, #432) are weak Mach-O definitions
     too, with `N_PEXT` when hidden (#602). An object with a weak definition sets
-    `MH_SUBSECTIONS_VIA_SYMBOLS`, so the system linker also keeps one. `unit.darwin_inline` checks
-    the `unit.linux_inline` fixtures with ycxx's and the system's linker in both object orders,
-    with a Clang peer and an archive member. Templates, closures and static locals of inline
-    functions remain strong (#124).
+    `MH_SUBSECTIONS_VIA_SYMBOLS`, so the system linker also keeps one. A name some object defines
+    with default visibility is exported even when the kept definition is hidden, as the system
+    linker does. `unit.darwin_inline` checks the `unit.linux_inline` fixtures and mixed content
+    (literals, initializers, guarded statics) with ycxx's and the system's linker, dead stripping
+    included, in both object orders, with a host-compiler peer and an archive member. Templates,
+    closures and static locals of inline functions remain strong (#124).
   - Not yet: unwind info (`__compact_unwind` and `__eh_frame` input sections are dropped, so C++
     exceptions cannot cross ycxx-linked frames), thread-local variables, dead stripping, literal
     merging, branch islands beyond ±128 MiB, other dylibs' re-exports, incremental relinking, and

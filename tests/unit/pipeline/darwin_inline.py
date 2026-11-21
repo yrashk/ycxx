@@ -40,12 +40,14 @@ def main():
             return table
 
         def links(*objects, args=()):
-            """Links with ycxx's linker and with the system's, in both orders, and runs each."""
+            """Links with ycxx's linker and with the system's (also dead-stripping), in both
+            orders, and runs each."""
             for order in (objects, objects[::-1]):
                 run(ycxx, 'cxx', *order, '-o', 'program')
                 run('./program', *args)
-                run(host_cxx, *order, '-o', 'host-program')
-                run('./host-program', *args)
+                for strip in ((), ('-Wl,-dead_strip',)):
+                    run(host_cxx, *order, *strip, '-o', 'host-program')
+                    run('./host-program', *args)
 
         weak, strong = ('weak external', True), ('external', True)
         hidden = fixtures / 'inline-hidden'
@@ -84,7 +86,7 @@ def main():
                 assert table[symbol] == weak, (name, symbol, table[symbol])
             assert table[f'__Z17{name}_direct_callsi'] == strong, table
         links('main.o', 'peer.o', args=('one', 'two'))
-        # A second producer: the system compiler's peer, linked by both linkers.
+        # A second producer: the host compiler's peer, linked by both linkers.
         run(host_cxx, '-std=c++20', '-O0', '-c', odr / 'peer.cpp', '-o', 'host-peer.o')
         links('main.o', 'host-peer.o', args=('one', 'two'))
         # An archive member, through the system linker (ycxx's Mach-O archive input is #388).
@@ -119,6 +121,47 @@ def main():
             compile(assignment / f'{name}.cpp', f'assignment-{name}.o')
             assert symbols(f'assignment-{name}.o')['__ZN1HaSERKS_'] == weak, name
         links('assignment-main.o', 'assignment-peer.o')
+
+        # Shared inline definitions beside every other kind of content: the split sections and
+        # dead stripping keep string literals, initializers, guarded statics and pointers intact.
+        mixed = fixtures / 'inline-mixed'
+        for name in ('a', 'b'):
+            compile(mixed / f'{name}.cpp', f'mixed-{name}.o')
+            table = symbols(f'mixed-{name}.o')
+            for symbol in ('__Z9shared_fni', '_table', '_counter', '_zeros', '__Z12shared_twicel'):
+                assert table.get(symbol) == weak, (name, symbol, table.get(symbol))
+        links('mixed-a.o', 'mixed-b.o')
+
+        # One unit's copy is hidden, the other's default: the program exports one weak definition
+        # whichever comes first, as the system linker does.
+        (Path(temp) / 'vis-hidden.cpp').write_text(
+            '[[gnu::visibility("hidden")]] inline int f(int x) { return x + 1; }\n'
+            'int (*pa)(int) = f;\nextern int (*pb)(int);\n'
+            'int main() { return pa == pb && pa(1) == 2 ? 0 : 1; }\n')
+        (Path(temp) / 'vis-default.cpp').write_text('inline int f(int x) { return x + 1; }\nint (*pb)(int) = f;\n')
+        compile('vis-hidden.cpp', 'vis-hidden.o')
+        compile('vis-default.cpp', 'vis-default.o')
+        assert symbols('vis-hidden.o')['__Z1fi'] == weak_hidden
+        assert symbols('vis-default.o')['__Z1fi'] == weak
+        links('vis-hidden.o', 'vis-default.o')
+        for order in (('vis-hidden.o', 'vis-default.o'), ('vis-default.o', 'vis-hidden.o')):
+            run(ycxx, 'cxx', *order, '-o', 'program')
+            assert symbols('program')['__Z1fi'] == weak, (order, symbols('program')['__Z1fi'])
+
+        # Not yet coalesced on Mach-O (#124): they stay strong rather than become wrongly weak.
+        (Path(temp) / 'stays-strong.cpp').write_text('''
+inline int with_static() { static int n = 0; return ++n; }
+inline int with_lambda(int x) { return [x] { return x + 1; }(); }
+template<class T> T twice(T x) { return x + x; }
+template<> long twice<long>(long x) { return x * 2; }
+extern "C" int labelled(int x) __asm("_renamed");
+int labelled(int x) { return x; }
+int use() { return with_static() + with_lambda(1) + twice(2) + int(twice(2L)) + labelled(0); }
+''')
+        compile('stays-strong.cpp', 'stays-strong.o')
+        table = symbols('stays-strong.o')
+        for name in ('__Z11with_staticv', '__Z11with_lambdai', '__Z5twiceIiET_S0_', '__Z5twiceIlET_S0_', '_renamed'):
+            assert table.get(name) == strong, (name, table.get(name))
 
         # Controls: ordinary definitions stay strong and collide; ineligible inline variables
         # (internal, relocated, explicitly specialized without `inline`) are not weak.
