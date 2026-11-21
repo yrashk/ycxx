@@ -212,6 +212,7 @@ namespace expr_flag {
 // a template parameter, so it is analysed when the template is instantiated.
 inline constexpr u8 dependent = 1;
 inline constexpr u8 immediate_address = 2;  // checked after immediate invocations are folded
+inline constexpr u8 unrepresented_value = 4;  // this expression has no usable ConstId for a template argument
 }
 
 // Flags of `LocalRec::flags` and `DeclSema::flags`.
@@ -739,6 +740,11 @@ public:
   Ex trait_expr(lex::TypeTrait t, std::span<const QualType> args, u32 begin, u32 end) {
     using enum lex::TypeTrait;
     QualType b = builtin(Builtin::bool_);
+    if (t == is_same) {
+      if (auto v = templates().is_same_value(args[0], args[1])) return literal(b, *v, ValueCategory::prvalue, begin, end);
+      ExprInfo info{b, ValueCategory::prvalue, expr_flag::dependent | expr_flag::unrepresented_value};
+      return node(ast::Dependent{info, b_->list({})}, begin, end, info);
+    }
     if (std::ranges::any_of(args, [&](QualType a) { return types().is_dependent(a); })) return dependent_node({}, begin, end, b);
     QualType x = args[0], c = types().canonical(x);
     auto cls = [&]() -> const ClassRec* {
@@ -748,7 +754,6 @@ public:
     };
     bool v = false;
     switch (t) {
-    case is_same: v = c == types().canonical(args[1]); break;
     case is_void: v = types().is_void(c); break;
     case is_integral: v = types().is_integral(c); break;
     case is_floating_point: v = types().is_floating(c); break;
@@ -4355,7 +4360,7 @@ public:
   // ------------------------------------------------------------ literals ([lex.literal])
 
   Ex literal(QualType t, ConstId v, ValueCategory cat, u32 begin, u32 end) {
-    ExprInfo info{t, cat, 0};
+    ExprInfo info{t, cat, ins().values.is_dependent(v) ? expr_flag::dependent : u8{0}};
     return node(ast::Literal{info, v}, begin, end, info);
   }
 
