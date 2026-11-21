@@ -1666,10 +1666,20 @@ std::optional<NodeId> AtItem::replay_function_default(sema::Sema& caller, const 
   replay.template_scopes.push_back(params);
   replay.template_args = sema::Bindings::of(params.front().depth, specialization.args);
   replay.push_scope();
-  for (const auto& param : seqs.elements(decl->params))
-    if (param.name != replay.no_name())
-      replay.declare_local(param.name, param.type,
-                           sema::local_flag::parameter | sema::local_flag::default_argument_parameter, 0, false);
+  const auto written_params = seqs.elements(decl->params);
+  const auto default_param = std::ranges::find_if(written_params, [&](const ast::ParamSema& param) {
+    if (param.default_arg == NodeId::none) return false;
+    const auto arg = p_->world().ins.ast.get<ast::DefaultArg>(param.default_arg);
+    return arg.source == value.source && arg.source_begin == value.source_begin && arg.source_end == value.source_end;
+  });
+  if (default_param == written_params.end()) return std::nullopt;
+  for (const auto& param : std::ranges::subrange(written_params.begin(), default_param + 1)) {
+    if (param.name == replay.no_name()) continue;
+    auto type = replay.templates().substitute(param.type, replay.template_args);
+    if (!type) return std::nullopt;
+    replay.declare_local(param.name, *type,
+                         sema::local_flag::parameter | sema::local_flag::default_argument_parameter, 0, false);
+  }
 
   auto& active = p_->replaying_function_defaults_;
   const auto key = std::tuple{function, value.source, value.source_begin};

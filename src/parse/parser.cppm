@@ -1838,7 +1838,7 @@ public:
           scan_member_default(s.params, template_probes);
           s.params.back().default_tokens = {begin, index()};
         } else {
-          s.params.back().default_arg = default_argument(t);
+          s.params.back().default_arg = parameter_default_argument(t, s.params);
           if (s.params.back().default_arg == NodeId::none) ok = false;  // diagnosed
         }
       }
@@ -1949,9 +1949,21 @@ public:
     return std::nullopt;
   }
 
-  // A default argument ([dcl.fct.default]/1, /5): its names are bound and its copy-initialization
-  // of the parameter is checked here. A template's that depends on its parameters is kept as it
-  // is, and rejected where a call would use it.
+  NodeId parameter_default_argument(QualType type, std::span<const Param> params) {
+    s_->push_scope();
+    struct EndScope {
+      sema::Sema& sema;
+      ~EndScope() { sema.pop_scope(); }
+    } scope{*s_};
+    for (const Param& param : params)
+      if (param.name != s_->no_name())
+        s_->declare_local(param.name, param.type,
+                          sema::local_flag::parameter | sema::local_flag::default_argument_parameter, param.at, false);
+    return default_argument(type);
+  }
+
+  // Bind the written names and check copy-initialization ([dcl.fct.default]/1, /5).
+  // Keep the written range for dependent defaults.
   NodeId default_argument(QualType t) {
     const u32 source_begin = pos();
     const auto calls_before = s_->dependent_calls.size();
