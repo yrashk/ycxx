@@ -3055,7 +3055,10 @@ public:
         int saved = angle_;
         std::size_t diags = s_->diag_count();
         auto parenthesized = type_id(/*placeholder_ok=*/true);
-        if (parenthesized && accept(Tk::r_paren) && !starts_type_id()) {
+        // A following parenthesized type can complete `new (Pointer()) (int)`: the first
+        // parentheses cannot name a function type to allocate ([expr.new]).
+        if (parenthesized && accept(Tk::r_paren) && !starts_type_id() &&
+            (!is(Tk::l_paren) || !s_->types().is_function(*parenthesized))) {
           type = parenthesized;
         } else {
           s_->truncate_diags(diags);
