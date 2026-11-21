@@ -3290,7 +3290,7 @@ public:
   }
   QualType with_return(QualType fn, QualType ret) {
     TypeRec r = types().rec(fn);
-    return types().function(ret, r.params, r.variadic, r.linkage, r.fn_cv);
+    return types().function(ret, r.params, r.variadic, r.linkage, r.fn_cv, r.fn_ref, r.fn_noexcept);
   }
   u32 loop_depth = 0;
 
@@ -4075,6 +4075,7 @@ public:
       if (rank != o.rank) return rank < o.rank;
       if (base_depth && o.base_depth && base_depth != o.base_depth) return base_depth < o.base_depth;
       if (ref && o.ref) {
+        if (function_ref && o.function_ref && sub != o.sub) return sub < o.sub;
         if (to_rvalue && o.to_rvalue && rvalue_ref != o.rvalue_ref) return rvalue_ref;  // /3.2.3
         if (function_ref && o.function_ref && rvalue_ref != o.rvalue_ref) return !rvalue_ref;  // /3.2.4
         return ref_cv < o.ref_cv;                                                         // /3.2.6
@@ -4139,9 +4140,10 @@ public:
       TypeRec r = types().rec(p);
       QualType t = r.inner;
       const bool direct_cat = direct_reference_category(a, r);
-      if (direct_cat && same_unqualified(a.type(), t)) {
+      const bool function_conversion = types().function_pointer_conversion(a.type(), t);
+      if (direct_cat && (same_unqualified(a.type(), t) || function_conversion)) {
         if (!cv_within(object_cv(a.type()), object_cv(t))) return {};
-        Ics v = binding({true, 0, 0}, r.rvalue_ref, a.cat() != ValueCategory::lvalue,
+        Ics v = binding({true, 0, function_conversion ? 1 : 0}, r.rvalue_ref, a.cat() != ValueCategory::lvalue,
                         cv_bits(object_cv(t)) - cv_bits(object_cv(a.type())));
         v.function_ref = types().is_function(t);
         return v;
@@ -4200,7 +4202,7 @@ public:
     }
     if (types().is_pointer(from) && types().is_pointer(to))
     {
-      if (qualification_convertible(from, to)) return {true, 0, 1};
+      if (qualification_convertible(from, to) || function_indirection_convertible(from, to)) return {true, 0, 1};
       if (int d = base_depth(types().pointee(from), types().pointee(to));
           d && cv_within(Types::cv(types().pointee(from)), Types::cv(types().pointee(to)))) {
         Ics v{true, 2, 0};
@@ -4712,6 +4714,8 @@ public:
       return fail;
     }
     const bool direct_cat = direct_reference_category(e, rr);
+    if (direct_cat && types().function_pointer_conversion(e.type(), t))
+      return convert_node(e, ast::ConversionKind::qualification, t, e.cat());
     if (direct_cat && same_unqualified(e.type(), t)) {
       if (cv_within(object_cv(e.type()), object_cv(t))) return extend ? extended(e) : e;
       diag(at_, Diag::bind_drops_qualifiers, e.type(), r);
@@ -5478,12 +5482,15 @@ public:
     const bool explicit_id = ex != explicit_args_.end();
     const std::span<const TemplateArg> args = explicit_id ? std::span<const TemplateArg>(ex->second) : std::span<const TemplateArg>();
     const QualType target = types().canonical(fn);
+    auto matches_target = [&](QualType type) {
+      return types().canonical(type) == target || types().function_pointer_conversion(type, target);
+    };
     std::vector<AddressMatch> found;
     for (const ast::DeclSema& d : *set.decls) {
       if (!(d.flags & decl_flag::template_)) {
         if (explicit_id || !constraints_satisfied(d)) continue;
         const auto ft = types().has_placeholder(types().rec(d.type).inner) ? q_->deduced_type(d.entity) : std::optional(d.type);
-        if (ft && types().canonical(*ft) == target) found.push_back({d.entity, *ft, &d});
+        if (ft && matches_target(*ft)) found.push_back({d.entity, *ft, &d});
         continue;
       }
       Templates t = templates();
@@ -5493,7 +5500,7 @@ public:
       if (!ft) continue;
       EntityId f = specialization(d, *deduced, *ft);
       if (types().has_placeholder(types().rec(*ft).inner)) ft = q_->deduced_type(f);
-      if (ft && types().canonical(*ft) == target) found.push_back({f, *ft, &d});
+      if (ft && matches_target(*ft)) found.push_back({f, *ft, &d});
     }
     auto better = [&](const AddressMatch& a, const AddressMatch& b) {
       const bool at = (a.decl->flags & decl_flag::template_) != 0;
@@ -5762,7 +5769,8 @@ public:
     if (types().is(target, Builtin::bool_) && (types().is_pointer(from) || types().is(from, Builtin::nullptr_t))) {
       if (types().is_pointer(from)) return convert_node(e, ast::ConversionKind::boolean, target);
     }
-    if (types().is_pointer(from) && types().is_pointer(target) && qualification_convertible(from, target))
+    if (types().is_pointer(from) && types().is_pointer(target) &&
+        (qualification_convertible(from, target) || function_indirection_convertible(from, target)))
       return convert_node(e, ast::ConversionKind::qualification, target);
     if (types().is_pointer(from) && types().is_pointer(target) && pointer_convertible(from, target))
       return convert_node(e, ast::ConversionKind::pointer, target);
@@ -6004,12 +6012,13 @@ public:
   }
 
   // [basic.stc.dynamic] makes the ordinary declarations visible even without a header.
-  Ex allocation_name_expr(AllocationFunction f, u32 begin, u32 end) {
-    const NameId name = ins().names.intern(allocation_name(f));
+  Ex allocation_name_expr(std::string_view spelling, u32 begin, u32 end) {
+    const NameId name = ins().names.intern(spelling);
+    const bool array = spelling.ends_with("[]");
     std::vector<ast::DeclSema> found;
     for (AllocationFunction candidate : World::allocation_functions) {
-      if (allocates(candidate) != allocates(f)) continue;
-      const auto d = w_->allocation_function(candidate);
+      if (allocation_name(candidate, array) != spelling) continue;
+      const auto d = w_->allocation_function(candidate, array);
       q_->use_allocation_function(d.entity, allocation_has_alignment(candidate));
       found.push_back(d);
     }
@@ -6617,6 +6626,18 @@ public:
     return !types().is_pointer(a) && !types().is_pointer(b) && same_unqualified(a, b);
   }
 
+  bool function_indirection_convertible(QualType from, QualType to) {
+    return types().is_pointer(from) && types().is_pointer(to) &&
+           types().function_pointer_conversion(types().pointee(from), types().pointee(to));
+  }
+
+  // [expr.type]: the composite type of otherwise identical function pointers is the throwing one.
+  std::optional<QualType> composite_function_pointer(QualType a, QualType b) {
+    if (function_indirection_convertible(a, b)) return b;
+    if (function_indirection_convertible(b, a)) return a;
+    return std::nullopt;
+  }
+
   // Contextual conversion to bool ([conv.general], [conv.bool]).
   Ex to_bool(Ex e, u32 at_) {
     e = rvalue(e);
@@ -7016,6 +7037,8 @@ public:
         if (!a.ok() || !c.ok()) return {NodeId::none, begin, end};
         return bin(k, a, c, b);
       }
+      if (auto to = composite_function_pointer(ta, tc))
+        return bin(k, convert(a, *to, op_at), convert(c, *to, op_at), b);
       if (types().is_pointer(ta) && types().is_pointer(tc)) {
         QualType pa = types().pointee(ta), pc = types().pointee(tc);
         // [expr.type]/4.6: a pointer to a derived class converted to one to its base class.
@@ -7222,6 +7245,11 @@ public:
         a = convert_node(a, ast::ConversionKind::null_pointer, tb);
         info = {tb, ValueCategory::prvalue, 0};
       } else if (auto to = composite_void_pointer(ta, tb)) {
+        a = convert(a, *to, q_at);
+        b = convert(b, *to, q_at);
+        if (!a.ok() || !b.ok()) return {NodeId::none, begin, end};
+        info = {*to, ValueCategory::prvalue, 0};
+      } else if (auto to = composite_function_pointer(ta, tb)) {
         a = convert(a, *to, q_at);
         b = convert(b, *to, q_at);
         if (!a.ok() || !b.ok()) return {NodeId::none, begin, end};

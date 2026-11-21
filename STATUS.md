@@ -1121,6 +1121,12 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   preserves the enumeration type. The interpreter, lowering and layout use the underlying
   integer representation. [#262](https://github.com/yrashk/ycxx/issues/262)
 - Linkage names of named enumerations, nested ones included, match Clang's.
+- A class member declaration can define a named nested enum and declare ordinary fields in
+  the same declaration. The fields participate in lookup, initialization, and class layout.
+  Tests in `tests/own/nested-enum-fields/` compare combined and separate declarations and
+  cover scoped enum field initializers. Nested class definitions and `__builtin_offsetof`
+  layout support are tracked separately. [#500](https://github.com/yrashk/ycxx/issues/500) ·
+  [#306](https://github.com/yrashk/ycxx/issues/306) · [#496](https://github.com/yrashk/ycxx/pull/496)
 - Tests: `tests/own/classes/s4-*enum*`, `s4-scoped-enum`, `s4-unscoped-enum` (spec-only, plus two
   from the review): 7 of 7.
 - Namespace-scope opaque enum declarations ([dcl.enum], #157) supply a complete enum type with a
@@ -2571,6 +2577,18 @@ and runtime integration with ycxx's own linker remain under [#89]. See the
   dereference. Full constant evaluation of the class iterator still needs #25.
 - Tests: `tests/own/range-for/` (17 from the independent author and nine review regressions).
 
+## Concrete exception specifications on ordinary function types (#219)
+
+- Ordinary non-template declarations, aliases, and grouped declarators retain concrete
+  exception specifications through pointers, references, and return deduction.
+- Overload-address selection, reference binding, and function-pointer conversions permit
+  a nonthrowing function to match the corresponding potentially throwing type.
+  The reverse direction and conversions through multiple pointer levels are rejected.
+- Composite pointer types preserve the one-way rule in comparisons and conditional
+  expressions. Function reference overload ranking follows [over.ics.ref].
+- The mixed Linux object checks distinguish callback overloads with the Itanium `Do` type
+  encoding. Dependent exception specifications remain tracked in [#219](https://github.com/yrashk/ycxx/issues/219).
+
 ## The address of an overload set, ι (#313, #337, 2026-11-19)
 
 - A pointer or reference target picks a free or static member function by its function type
@@ -2582,7 +2600,7 @@ and runtime integration with ycxx's own linker remain under [#89]. See the
   matching templates by their full function types. A call can also deduce fixed function or
   function-pointer parameters by trying the non-template members of an overload set
   ([temp.deduct.call]/6).
-- Related work covers pointers to non-static members (#238), `noexcept` function types (#219),
+- Related work covers pointers to non-static members (#238), dependent exception specifications (#219),
   a template-id without a target type (#335), and function pointer or reference template
   arguments (#406).
 - An ordinary free immediate function is diagnosed when its name escapes through a runtime
@@ -2662,6 +2680,11 @@ and runtime integration with ycxx's own linker remain under [#89]. See the
   allocation address selection, direct deallocation calls, and a Linux peer providing all three
   symbols. Over-aligned storage and expression dispatch are tracked in
   [#293](https://github.com/yrashk/ycxx/issues/293) and [#303](https://github.com/yrashk/ycxx/issues/303).
+- The six usual global array allocation and deallocation declarations support explicit
+  calls and typed address selection, including the aligned signatures. Written
+  redeclarations share the implicit entities. The Itanium mangler emits `na` and `da`, and
+  Linux object tests call providers built with both GCC and Clang. Expression codegen and
+  further allocation-function declarations remain in [#293](https://github.com/yrashk/ycxx/issues/293).
 - Native lowering supports initializers proven nonthrowing from the analyzed expression tree.
   Initializers that need an exception cleanup edge and constant evaluation of allocation remain
   in #293. Namespace-scope allocation uses the existing dynamic initialization path. The issue

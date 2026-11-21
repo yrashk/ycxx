@@ -30,6 +30,10 @@ freestanding C++ subset for x86-64 Linux. The standard library is out of reach. 
 
 ### What you can do today
 
+Ordinary function pointers and references preserve concrete `noexcept` type identity.
+A nonthrowing function can be used where the corresponding potentially throwing type is expected.
+Dependent exception specifications remain open. [#219](https://github.com/yrashk/ycxx/issues/219)
+
 **Compile and run programs on macOS.** `ycxx cxx a.cpp -o a` (also `-c`, `-fsyntax-only`, `-E`, `-I`,
 `-D`, `-std=c++26`, and `-fclass-call-abi=apple` to pass classes as Apple Clang does) builds an executable with ycxx's own front end, IR, AArch64 code generator
 and Mach-O linker. It also links object files from Clang or GCC. Errors are reported as
@@ -165,6 +169,9 @@ Both targets accept nonempty standalone unnamed enum definitions at namespace sc
 fixed underlying types and definitions inside `extern "C"` blocks.
 [#157](https://github.com/yrashk/ycxx/issues/157)
 
+Both targets support named nested enum definitions followed by ordinary fields in the same
+member declaration, including scoped enum field initializers. [#500](https://github.com/yrashk/ycxx/issues/500)
+
 **Language on macOS.** Programs can use:
 - the fundamental integer, character and floating types, pointers, arrays, references and
   enumerations, including opaque declarations of named enums in their namespaces; `float`,
@@ -196,7 +203,8 @@ fixed underlying types and definitions inside `extern "C"` blocks.
   cv-qualified objects. Scalar allocation uses the global Itanium allocation functions.
   Syntax checking also covers one-dimensional scalar `new T[n]` and `delete[] p`.
   The usual aligned scalar allocation and deallocation signatures support explicit calls with
-  `std::align_val_t`.
+  `std::align_val_t`. The usual global `operator new[]` and `operator delete[]` signatures
+  support explicit calls and typed address selection.
   [#293](https://github.com/yrashk/ycxx/issues/293)
 - pointers and references to arrays of unknown bound, and template partial specializations
   that match unknown-bound array types. [#222](https://github.com/yrashk/ycxx/issues/222)
@@ -243,6 +251,8 @@ fixed underlying types and definitions inside `extern "C"` blocks.
   three member-pointer predicates as `bool` template arguments or defaults, including through
   alias templates
   [#209](https://github.com/yrashk/ycxx/issues/209);
+- direct `__is_constructible` for the supported concrete scalar, reference, function and
+  `void` queries. [Extension guide](docs/EXTENSIONS.md) · [#218](https://github.com/yrashk/ycxx/issues/218)
 - logical negation of a qualified dependent `bool` variable template-id in a `bool` template
   argument or default
   [#209](https://github.com/yrashk/ycxx/issues/209);
