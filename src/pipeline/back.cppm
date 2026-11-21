@@ -991,36 +991,47 @@ bool linux_ellipsis_scalar(ir::TypeLayout l) {
   return l.kind == ir::TypeKind::pointer || (l.kind == ir::TypeKind::integer && (l.size == 4 || l.size == 8));
 }
 
-bool linux_fixed_scalar(ir::TypeLayout l) {
+bool linux_integer_scalar(ir::TypeLayout l) {
   return l.kind == ir::TypeKind::boolean || linux_ellipsis_scalar(l) ||
          (l.kind == ir::TypeKind::integer && (l.size == 1 || l.size == 2));
 }
 
+enum class LinuxSignatureUse { definition, direct_call, indirect_call };
+
 // Check the original signature of each function and call before lowering erases the types.
 std::string_view linux_signature_error(const ast::Interners& in, const QueryLayout& layout, QualType type,
-                                       bool allow_variadic, bool allow_aggregates) {
+                                       LinuxSignatureUse use, bool ordinary) {
+  using enum LinuxSignatureUse;
   QualType canonical = in.types.canon(type);
   if (!in.types.is<ast::TFunction>(canonical)) return "the function type is unavailable";
   auto f = in.types.get<ast::TFunction>(canonical);
-  if (f.variadic && !allow_variadic) return "only ordinary free variadic definitions are supported";
-  allow_aggregates = allow_aggregates && !f.variadic;
-  auto supported = [&](ir::TypeLayout l) {
-    return linux_fixed_scalar(l) || (allow_aggregates && l.sysv_integer_eightbytes);
-  };
-  ir::TypeLayout result = layout.type(f.ret);
-  if (result.copy_abi_unknown) return "defaulted copy ABI classification is unavailable for the result";
-  if (result.kind != ir::TypeKind::void_ && !supported(result)) {
-    if (allow_aggregates && result.kind == ir::TypeKind::record) return "unsupported aggregate result layout";
-    return "only void, bool, 8-, 16-, 32- and 64-bit integer, pointer and reference results are supported";
-  }
-  for (QualType p : in.seqs.elements(f.params)) {
-    ir::TypeLayout parameter = layout.type(p);
-    if (parameter.copy_abi_unknown) return "defaulted copy ABI classification is unavailable for a parameter";
-    if (!supported(parameter)) {
-      if (allow_aggregates && parameter.kind == ir::TypeKind::record) return "unsupported aggregate parameter layout";
-      return "only bool, 8-, 16-, 32- and 64-bit integer, pointer and reference parameters are supported";
+  if (f.variadic && use == definition && !ordinary) return "only ordinary free variadic definitions are supported";
+  const bool fixed_direct = !f.variadic && use != indirect_call;
+  const bool allow_aggregates = fixed_direct && ordinary;
+  auto error_for = [&](QualType value, bool result) -> std::string_view {
+    auto builtin = ast::builtin_of(in, value);
+    if (builtin == ast::Builtin::long_double) return "x87 long double parameters and results are unsupported";
+    if (builtin == ast::Builtin::float_ || builtin == ast::Builtin::double_) {
+      if (f.variadic) return "floating-point parameters and results of variadic functions are unsupported";
+      if (use == indirect_call) return "floating-point parameters and results of indirect calls are unsupported";
+      return {};
     }
-  }
+    auto l = layout.type(value);
+    if (l.copy_abi_unknown)
+      return result ? "defaulted copy ABI classification is unavailable for the result"
+                    : "defaulted copy ABI classification is unavailable for a parameter";
+    if ((result && l.kind == ir::TypeKind::void_) || linux_integer_scalar(l) ||
+        (allow_aggregates && l.sysv_integer_eightbytes)) return {};
+    if (allow_aggregates && l.kind == ir::TypeKind::record)
+      return result ? "unsupported aggregate result layout" : "unsupported aggregate parameter layout";
+    if (fixed_direct)
+      return result ? "unsupported fixed-prototype result type" : "unsupported fixed-prototype parameter type";
+    return result ? "only void, bool, 8-, 16-, 32- and 64-bit integer, pointer and reference results are supported"
+                  : "only bool, 8-, 16-, 32- and 64-bit integer, pointer and reference parameters are supported";
+  };
+  if (auto error = error_for(f.ret, true); !error.empty()) return error;
+  for (QualType p : in.seqs.elements(f.params))
+    if (auto error = error_for(p, false); !error.empty()) return error;
   return {};
 }
 
@@ -1031,9 +1042,12 @@ std::string_view linux_ellipsis_error(const QueryLayout& layout, const ir::Funct
   // The tail values have already undergone the default argument promotions ([expr.call]).
   // The by-value bits distinguish class objects from genuine pointer arguments.
   auto args = body.operands_of(call).subspan(indirect ? 2 : 1);
-  for (std::size_t i = args.size() - ellipsis; i < args.size(); ++i)
-    if (((byval >> i) & 1) || !linux_ellipsis_scalar(layout.type(body.value(args[i]).type.type)))
+  for (std::size_t i = args.size() - ellipsis; i < args.size(); ++i) {
+    auto l = layout.type(body.value(args[i]).type.type);
+    if (l.kind == ir::TypeKind::floating) return "floating-point ellipsis arguments are unsupported";
+    if (((byval >> i) & 1) || !linux_ellipsis_scalar(l))
       return "only 32- and 64-bit integer and pointer ellipsis arguments are supported";
+  }
   return {};
 }
 
@@ -1056,7 +1070,7 @@ engine::query_task<Lowered> Lower::run(engine::Ctx& cx, FnKey k) {
     auto fn = std::ranges::find(tu.entities, k.fn, &Entity::id);
     bool ordinary = !def.this_type && fn != tu.entities.end() && ordinary_free_function(*fn);
     QualType type = def.body.deduced ? def.body.deduced_type : def.decl.type;
-    if (auto error = linux_signature_error(in, layout, type, ordinary, ordinary); !error.empty()) {
+    if (auto error = linux_signature_error(in, layout, type, LinuxSignatureUse::definition, ordinary); !error.empty()) {
       auto message = std::format("x86-64 System V ABI: {}", error);
       auto located = co_await located_error(cx, k.tu, ast::Loc{def.item, def.body_offset}, std::move(message));
       co_return Lowered{std::nullopt, {}, std::move(located)};
@@ -1069,26 +1083,27 @@ engine::query_task<Lowered> Lower::run(engine::Ctx& cx, FnKey k) {
       const bool direct = op == ir::Op::call;
       std::optional<QualType> callee;
       EntityId callee_id = EntityId::none;
-      bool aggregate_callee = false;
+      bool ordinary_callee = false;
       if (direct) {
         callee_id = EntityId(static_cast<std::uint32_t>(body.imms_of(n)[0]));
         auto e = std::ranges::find(tu.entities, callee_id, &Entity::id);
         if (e != tu.entities.end()) {
           callee = e->type;
-          aggregate_callee = ordinary_free_function(*e);
+          ordinary_callee = ordinary_free_function(*e);
         }
       } else if (op == ir::Op::call_ind) {
         QualType ptr = body.value(body.operands_of(n)[1]).type.type;
         callee = ast::pointee_of(in, ptr);
       } else continue;
-      std::string_view error = callee ? linux_signature_error(in, layout, *callee, true, aggregate_callee)
+      const auto use = direct ? LinuxSignatureUse::direct_call : LinuxSignatureUse::indirect_call;
+      std::string_view error = callee ? linux_signature_error(in, layout, *callee, use, ordinary_callee)
                                       : "the function type is unavailable";
       if (direct && callee && !error.empty()) {
         // The declaration can still have a placeholder return type. Read the signature already
         // deduced in this unit without depending on the callee's lowering ([dcl.spec.auto]).
         const auto definition = std::ranges::find(tu.functions, callee_id, &FunctionDef::entity);
         if (definition != tu.functions.end() && definition->body.deduced)
-          error = linux_signature_error(in, layout, definition->body.deduced_type, true, aggregate_callee);
+          error = linux_signature_error(in, layout, definition->body.deduced_type, use, ordinary_callee);
       }
       if (error.empty()) error = linux_ellipsis_error(layout, body, n);
       if (error.empty()) continue;
@@ -1098,7 +1113,6 @@ engine::query_task<Lowered> Lower::run(engine::Ctx& cx, FnKey k) {
       co_return Lowered{std::nullopt, {}, std::move(located)};
     }
     config.sysv_amd64 = true;
-    config.int_arg_registers = 6;
     // Extend outgoing narrow results for interoperability. Lowering truncates incoming results
     // to the declared width, as the System V AMD64 psABI §3.2.3 leaves excess bits unspecified.
     config.min_result_bits = 32;

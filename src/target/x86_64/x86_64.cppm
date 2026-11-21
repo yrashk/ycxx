@@ -6,6 +6,7 @@ import :encode;
 import std;
 import ycxx.ir;
 import ycxx.ir.l2;
+import ycxx.ir.lower;
 
 namespace ycxx::x86_64 {
 
@@ -25,8 +26,8 @@ export struct MachineCode {
   bool operator==(const MachineCode&) const = default;
 };
 
-// Compile well-formed L2 with INTEGER ABI operands and results. The producer checks the
-// original signatures and ellipsis types and places arguments in register/stack order.
+// Compile well-formed L2 with INTEGER ABI values and fixed direct scalar SSE values.
+// The producer checks original signatures and ellipsis types and flattens INTEGER records.
 // L2 can erase the distinction between scalar and class arguments or results. Pass
 // the entities whose addresses may be resolved directly by a signed RIP-relative displacement
 // (e.g. local definitions in the small code model) in `direct_symbols`. Pass default-visible
@@ -39,20 +40,23 @@ namespace {
 
 using l2::Op;
 using l2::Type;
+using ir::Amd64ArgumentKind;
+using ir::Amd64ArgumentPlan;
 using ir::BlockId;
 using ir::NodeId;
 using ir::ValueId;
 using ir::raw;
 using enum Reg;
 
-// AMD64 psABI §3.2.2–3.2.3: scalar INTEGER argument registers, then eightbyte stack slots.
+// AMD64 psABI §3.2.2–3.2.3: INTEGER and SSE register sequences, then eightbyte stack slots.
 constexpr Reg argument_regs[] = {rdi, rsi, rdx, rcx, r8, r9};
 constexpr std::size_t register_args = std::size(argument_regs);
+static_assert(register_args == Amd64ArgumentPlan::integer_registers);
 
 // AMD64 psABI §3.5.7: the va_list fields and the entry register save area.
 constexpr std::int32_t gp_offset_field = 0, fp_offset_field = 4;
 constexpr std::int32_t overflow_arg_area_field = 8, reg_save_area_field = 16;
-constexpr std::int32_t gp_slot = 8, xmm_slot = 16, xmm_register_args = 8;
+constexpr std::int32_t gp_slot = 8, xmm_slot = 16, xmm_register_args = Amd64ArgumentPlan::sse_registers;
 constexpr std::int32_t gp_save_size = register_args * gp_slot;
 constexpr std::int32_t reg_save_size = gp_save_size + xmm_register_args * xmm_slot;
 
@@ -88,14 +92,24 @@ struct Frame {
   std::int32_t variadic_save = 0;  // RBP-relative, present only for an executing va_start
 };
 
+// These operations only move floating encodings. Other uses need numeric instruction selection.
+bool moves_float(Op op) {
+  switch (op) {
+    case Op::const_: case Op::load: case Op::store: case Op::select:
+    case Op::call: case Op::call_ind: case Op::ret: return true;
+    default: return false;
+  }
+}
+
 std::expected<Frame, std::string> layout(const l2::Function& body) {
   // Keep the frame and the saved frame and return addresses within one page. Larger frames
   // need stack probing to avoid skipping a guard page.
   constexpr std::uint64_t max_frame = 4096 - 16;
-  if (body.indirect_result || body.results.size() > 2)
-    return std::unexpected("only up to two INTEGER result registers are supported");
-  for (Type t : body.results)
-    if (t == Type::state || l2::is_float(t)) return std::unexpected("unsupported scalar ABI result type");
+  const bool float_result = std::ranges::any_of(body.results, l2::is_float);
+  if (body.indirect_result || body.results.size() > (float_result ? 1u : 2u))
+    return std::unexpected("only a scalar SSE result or up to two INTEGER result registers are supported");
+  if (std::ranges::contains(body.results, Type::state)) return std::unexpected("unsupported scalar ABI result type");
+  auto is_float = [&](ValueId v) { return l2::is_float(body.type(v)); };
 
   Frame frame;
   frame.slots.resize(body.values.size());
@@ -103,7 +117,6 @@ std::expected<Frame, std::string> layout(const l2::Function& body) {
   for (std::size_t i = 0; i < body.values.size(); ++i) {
     Type t = body.values[i].type;
     if (t == Type::state) continue;
-    if (l2::is_float(t)) return std::unexpected("floating-point values are outside the scalar INTEGER subset");
     frame.size += 8;
     if (frame.size > max_frame) return std::unexpected("x86-64 frame exceeds the single-page limit");
     frame.slots[i] = -std::int32_t(frame.size);
@@ -123,6 +136,11 @@ std::expected<Frame, std::string> layout(const l2::Function& body) {
     for (NodeId n : body.nodes_of(b)) {
       const l2::Node& nd = body.node(n);
       auto imms = body.imms_of(n);
+      auto operands = body.operands_of(n);
+      const bool uses_float_result = std::ranges::any_of(std::views::iota(0u, nd.nres),
+          [&](std::uint32_t i) { return is_float(body.result(n, i)); });
+      if (!moves_float(nd.op) && (uses_float_result || std::ranges::any_of(operands, is_float)))
+        return at_node(n, nd.op, "floating-point arithmetic, comparisons and conversions are unsupported");
       if (nd.op == Op::alloca) {
         auto size = imms[0], align = imms[1];
         if (!std::has_single_bit(align) || align > 16)
@@ -133,20 +151,26 @@ std::expected<Frame, std::string> layout(const l2::Function& body) {
         frame.objects[raw(n)] = -std::int32_t(frame.size);
       }
       if (nd.op == Op::va_start && !frame.variadic_save) {
+        if (float_result || std::ranges::any_of(body.params_of(BlockId(0)), is_float))
+          return at_node(n, nd.op, "floating-point variadic parameters and results are unsupported");
         frame.size = align_up(frame.size + reg_save_size, xmm_slot);
         if (frame.size > max_frame) return at_node(n, nd.op, "x86-64 frame exceeds the single-page limit");
         frame.variadic_save = -std::int32_t(frame.size);
       }
       if (nd.op == Op::call || nd.op == Op::call_ind) {
         bool indirect = nd.op == Op::call_ind;
-        if (indirect && body.type(body.operands_of(n)[1]) != Type::ptr)
+        if (indirect && body.type(operands[1]) != Type::ptr)
           return at_node(n, nd.op, "an indirect callee must be a pointer");
         if (indirect && imms[1] && !(nd.flags & ir::bit(ir::Flag::variadic)))
           return at_node(n, nd.op, "ellipsis arguments on a nonvariadic indirect call");
-        if (imms[indirect ? 2 : 3] || nd.nres > (indirect ? 2u : 3u))
-          return at_node(n, nd.op, "unsupported INTEGER ABI result placement");
-        std::size_t args = nd.nopnd - (indirect ? 2 : 1);
-        if (args > register_args) scratch_words = std::max(scratch_words, std::uint64_t(args - register_args));
+        if (imms[indirect ? 2 : 3] || nd.nres > (indirect || uses_float_result ? 2u : 3u))
+          return at_node(n, nd.op, "unsupported ABI result placement");
+        auto args = operands.subspan(indirect ? 2 : 1);
+        if ((indirect || imms[2]) && (uses_float_result || std::ranges::any_of(args, is_float)))
+          return at_node(n, nd.op, "floating-point indirect and variadic calls are unsupported");
+        Amd64ArgumentPlan plan;
+        for (ValueId arg : args) plan.place(body.type(arg));
+        scratch_words = std::max(scratch_words, std::uint64_t(plan.stack_slots()));
       }
     }
   }
@@ -202,12 +226,22 @@ class Emitter {
   };
   std::vector<Branch> branches_;
 
-  void read(ValueId v, Reg dst = rax) { e_.load(dst, rbp, frame_.slots[raw(v)], 8); }
+  unsigned home_width(ValueId v) const {
+    Type type = body_.type(v);
+    return l2::is_float(type) ? l2::bytes(type) : 8;
+  }
+
+  void read(ValueId v, Reg dst = rax) { e_.load(dst, rbp, frame_.slots[raw(v)], home_width(v)); }
   void write(ValueId v) {
+    Type type = body_.type(v);
+    if (l2::is_float(type)) {
+      e_.store(rbp, frame_.slots[raw(v)], rax, l2::bytes(type));
+      return;
+    }
     // Keep high bits clear for later unsigned operations and narrow ABI values. The psABI
     // leaves bits outside an INTEGER value's memory representation unspecified at the boundary.
     // A valid bool has a low byte of 0 or 1 (§3.2.3), which fits in the internal i1.
-    unsigned bits = l2::bits(body_.type(v));
+    unsigned bits = l2::bits(type);
     if (bits < 32) {
       e_.emit({0x25});  // and eax, imm32
       e_.immediate((1u << bits) - 1, 4);
@@ -281,12 +315,16 @@ class Emitter {
   }
 
   void parameters() {
-    std::size_t i = 0;
+    Amd64ArgumentPlan plan;
     for (ValueId v : body_.params_of(BlockId(0)) | std::views::drop(1)) {
-      if (i < register_args) e_.move(rax, argument_regs[i]);
-      else e_.load(rax, rbp, 16 + 8 * std::int32_t(i - register_args), 8);
-      write(v);
-      ++i;
+      auto [kind, index] = plan.place(body_.type(v));
+      if (kind == Amd64ArgumentKind::sse) {
+        e_.store_scalar_xmm(rbp, frame_.slots[raw(v)], index, home_width(v));
+      } else {
+        if (kind == Amd64ArgumentKind::integer) e_.move(rax, argument_regs[index]);
+        else e_.load(rax, rbp, 16 + 8 * std::int32_t(index), home_width(v));
+        write(v);
+      }
     }
   }
 
@@ -303,15 +341,20 @@ class Emitter {
     auto imms = body_.imms_of(n);
     auto args = ops.subspan(indirect ? 2 : 1);
     auto signed_args = imms[indirect ? 0 : 1];
+    Amd64ArgumentPlan plan;
     for (std::size_t i = 0; i < args.size(); ++i) {
-      if (i < register_args) {
+      ValueId arg = args[i];
+      Type type = body_.type(arg);
+      auto [kind, index] = plan.place(type);
+      if (kind == Amd64ArgumentKind::integer) {
         // The psABI leaves excess bits unspecified, but optimized Clang callees can read
         // 32 bits for narrow register arguments. Extend to that width for interoperability.
-        const auto width = l2::bytes(body_.type(args[i]));
-        e_.load(argument_regs[i], rbp, frame_.slots[raw(args[i])], width, (signed_args >> i) & 1);
+        e_.load(argument_regs[index], rbp, frame_.slots[raw(arg)], l2::bytes(type), i < 64 && ((signed_args >> i) & 1));
+      } else if (kind == Amd64ArgumentKind::sse) {
+        e_.load_scalar_xmm(index, rbp, frame_.slots[raw(arg)], l2::bytes(type));
       } else {
-        read(args[i]);
-        e_.store(rsp, 8 * std::int32_t(i - register_args), rax, 8);
+        read(arg);
+        e_.store(rsp, 8 * std::int32_t(index), rax, home_width(arg));
       }
     }
     if (indirect) {
@@ -329,7 +372,11 @@ class Emitter {
       e_.emit({0xe8});  // call rel32
       relocation(RelocKind::plt32, ir::EntityId(std::uint32_t(imms[0])));
     }
-    if (node.nres > 1) write(body_.result(n, 1));
+    if (node.nres > 1) {
+      ValueId result = body_.result(n, 1);
+      if (l2::is_float(body_.type(result))) e_.store_scalar_xmm(rbp, frame_.slots[raw(result)], 0, home_width(result));
+      else write(result);
+    }
     if (node.nres > 2) {
       e_.move(rax, rdx);
       write(body_.result(n, 2));
@@ -342,11 +389,12 @@ class Emitter {
     // Stage all sources before overwriting any destination, including on loop backedges.
     for (std::size_t i = 1; i < args.size(); ++i) {
       read(args[i]);
-      e_.store(rsp, 8 * std::int32_t(i - 1), rax, 8);
+      e_.store(rsp, 8 * std::int32_t(i - 1), rax, home_width(args[i]));
     }
     for (std::size_t i = 1; i < args.size(); ++i) {
-      e_.load(rax, rsp, 8 * std::int32_t(i - 1), 8);
-      e_.store(rbp, frame_.slots[raw(params[i])], rax, 8);
+      const auto width = home_width(params[i]);
+      e_.load(rax, rsp, 8 * std::int32_t(i - 1), width);
+      e_.store(rbp, frame_.slots[raw(params[i])], rax, width);
     }
     e_.emit({0xe9});  // jmp rel32
     branches_.push_back({e_.displacement(), succ.target});
@@ -366,8 +414,13 @@ std::expected<void, std::string> Emitter::node(NodeId n) {
   };
   switch (op) {
     case Op::const_:
-      e_.emit({0x48, 0xb8});  // mov rax, imm64
-      e_.immediate(imms[0], 8);
+      if (body_.type(body_.result(n)) == Type::f32) {
+        e_.emit({0xb8});  // mov eax, imm32
+        e_.immediate(imms[0], 4);
+      } else {
+        e_.emit({0x48, 0xb8});  // mov rax, imm64
+        e_.immediate(imms[0], 8);
+      }
       break;
     case Op::symbol: {
       auto target = ir::EntityId(std::uint32_t(imms[0]));
@@ -474,7 +527,11 @@ std::expected<void, std::string> Emitter::node(NodeId n) {
     }
     case Op::ret:
       if (ops.size() > 2) read(ops[2], rdx);
-      if (ops.size() > 1) read(ops[1]);
+      if (ops.size() > 1) {
+        ValueId result = ops[1];
+        if (l2::is_float(body_.type(result))) e_.load_scalar_xmm(0, rbp, frame_.slots[raw(result)], home_width(result));
+        else read(result);
+      }
       e_.emit({0xc9, 0xc3});  // leave, ret
       return {};
     case Op::unreachable:

@@ -97,6 +97,43 @@ export struct LowerConfig {
   bool sysv_amd64 = false;
 };
 
+export enum class Amd64ArgumentKind : std::uint8_t { integer, sse, stack };
+
+export struct Amd64ArgumentLocation {
+  Amd64ArgumentKind kind;
+  std::uint32_t index;
+};
+
+// AMD64 psABI §3.2.3. Register classes advance independently. A group of INTEGER
+// eightbytes that does not fit uses consecutive stack slots and leaves the GPRs available.
+export class Amd64ArgumentPlan {
+ public:
+  static constexpr std::uint32_t integer_registers = 6;
+  static constexpr std::uint32_t sse_registers = 8;
+
+  Amd64ArgumentLocation place(l2::Type type, std::uint32_t register_words = 1,
+                              std::uint32_t stack_words = 1) {
+    const bool sse = l2::is_float(type);
+    auto& used = sse ? sse_used_ : integer_used_;
+    const auto limit = sse ? sse_registers : integer_registers;
+    if (used + register_words <= limit) {
+      const auto first = used;
+      used += register_words;
+      return {sse ? Amd64ArgumentKind::sse : Amd64ArgumentKind::integer, first};
+    }
+    const auto first = stack_used_;
+    stack_used_ += stack_words;
+    return {Amd64ArgumentKind::stack, first};
+  }
+
+  std::uint32_t stack_slots() const { return stack_used_; }
+
+ private:
+  std::uint32_t integer_used_ = 0;
+  std::uint32_t sse_used_ = 0;
+  std::uint32_t stack_used_ = 0;
+};
+
 export struct LowerError {
   NodeId node{};
   std::string message;
@@ -110,31 +147,33 @@ std::expected<l2::Function, LowerError> lower(const Function& f, EntityId name, 
 
 namespace ycxx::ir {
 
-// System V AMD64 psABI §3.2.3: reserve all of an argument's INTEGER registers or put
-// the entire argument on the stack. The flat L2 list has a register prefix and a
-// stack suffix, each in argument order. A skipped register has no source index.
-class Amd64Arguments {
+// Encode grouped INTEGER arguments in the flat L2 list. Prefix the spills with the
+// register arguments of each class, filling unused GPR slots to keep spills on the stack.
+// An SSE spill implies all XMM argument registers are already used.
+class Amd64ArgumentOrder {
  public:
-  explicit Amd64Arguments(std::uint32_t limit) : limit_(limit) {}
-
-  bool fits(std::uint32_t words) const { return registers_.size() + words <= limit_; }
-
-  void add(std::uint32_t first, std::uint32_t words, bool in_registers) {
-    auto& locations = in_registers ? registers_ : stack_;
-    for (std::uint32_t w = 0; w < words; ++w) locations.push_back(first + w);
+  Amd64ArgumentLocation add(std::uint32_t first, l2::Type type, std::uint32_t register_words = 1,
+                            std::uint32_t stack_words = 1) {
+    const auto location = plan_.place(type, register_words, stack_words);
+    if (location.kind == Amd64ArgumentKind::stack) {
+      for (std::uint32_t w = 0; w < stack_words; ++w) stack_.push_back(first + w);
+    } else {
+      auto& registers = location.kind == Amd64ArgumentKind::sse ? sse_ : integer_;
+      for (std::uint32_t w = 0; w < register_words; ++w) registers.push_back(first + w);
+    }
+    return location;
   }
 
-  std::uint32_t next_register() const { return std::uint32_t(registers_.size()); }
-
   std::vector<std::uint32_t> order() && {
-    if (!stack_.empty()) registers_.resize(limit_, none);
-    registers_.insert(registers_.end(), stack_.begin(), stack_.end());
-    return std::move(registers_);
+    if (!stack_.empty()) integer_.resize(Amd64ArgumentPlan::integer_registers, none);
+    integer_.insert(integer_.end(), sse_.begin(), sse_.end());
+    integer_.insert(integer_.end(), stack_.begin(), stack_.end());
+    return std::move(integer_);
   }
 
  private:
-  std::uint32_t limit_;
-  std::vector<std::uint32_t> registers_, stack_;
+  Amd64ArgumentPlan plan_;
+  std::vector<std::uint32_t> integer_, sse_, stack_;
 };
 
 template <layout_source L>
@@ -350,7 +389,7 @@ class Lowering {
       ClassPieces pieces;
     };
     std::vector<ClassObject> objects;
-    Amd64Arguments amd64_args(config_.int_arg_registers);
+    Amd64ArgumentOrder amd64_args;
     std::vector<std::int64_t> l2_of;  // per L1 parameter: its L2 parameter, or -1
     std::uint32_t j = 0;              // the value parameter's index
     for (ValueId p : f_.params_of(b)) {
@@ -392,8 +431,7 @@ class Lowering {
       }
       auto t = type_of(cxx(p));
       if (!t) return fail(t.error());
-      if (place_amd64)
-        amd64_args.add(std::uint32_t(params.size()), 1, amd64_args.fits(1));
+      if (place_amd64) amd64_args.add(std::uint32_t(params.size()), *t);
       l2_of.push_back(std::int64_t(params.size()));
       params.push_back(*t);
     }
@@ -722,7 +760,7 @@ class Lowering {
         std::vector<ValueId> ops{in(n, 0)};
         auto l1ops = f_.operands_of(n);
         if (ind) ops.push_back(in(n, 1));
-        Amd64Arguments amd64_args(config_.int_arg_registers);
+        Amd64ArgumentOrder amd64_args;
         std::uint64_t sext = 0;
         std::uint64_t byval = imms[ind ? 1 : 2], result_arg = imms[ind ? 2 : 3];
         bool place_amd64 = config_.sysv_amd64 && byval;
@@ -768,9 +806,9 @@ class Lowering {
           }
           bool signed_arg = b_.peek().type(v) != T::i1 && b_.peek().type(v) != T::ptr && is_signed(l1ops[i]);
           if (place_amd64) {
-            bool in_registers = amd64_args.fits(1);
-            if (in_registers && signed_arg) sext |= std::uint64_t{1} << amd64_args.next_register();
-            amd64_args.add(std::uint32_t(ops.size()), 1, in_registers);
+            auto location = amd64_args.add(std::uint32_t(ops.size()), b_.peek().type(v));
+            if (location.kind == Amd64ArgumentKind::integer && signed_arg)
+              sext |= std::uint64_t{1} << location.index;
           } else if (at < 32 && signed_arg) {
             sext |= std::uint64_t{1} << at;
           }
@@ -890,7 +928,7 @@ class Lowering {
   }
   // An AMD64 record's INTEGER eightbytes, or its full stack representation. On AAPCS64
   // a small record uses integer words or, for an HFA, one floating register per member.
-  ClassPieces class_pieces(QualType c, Amd64Arguments* args = nullptr, std::uint32_t first = 0) const {
+  ClassPieces class_pieces(QualType c, Amd64ArgumentOrder* args = nullptr, std::uint32_t first = 0) const {
     TypeLayout l = layout(c);
     if (l.kind != TypeKind::record || !l.trivial_calls) return {};
     auto words = std::uint32_t((l.size + 7) / 8);
@@ -899,10 +937,9 @@ class Lowering {
       if (!chunks) return {};
       auto registers = std::uint32_t(std::popcount(chunks));
       if (!args) return {registers, T::i64, l.size, chunks};
-      bool in_registers = args->fits(registers);
+      bool in_registers = args->add(first, T::i64, registers, words).kind == Amd64ArgumentKind::integer;
       if (!in_registers) chunks = std::uint8_t((1u << words) - 1);
       std::uint32_t passed_words = in_registers ? registers : words;
-      args->add(first, passed_words, in_registers);
       return {passed_words, T::i64, l.size, chunks};
     }
     if (l.hfa) return {l.hfa, l.hfa_bytes == 4 ? T::f32 : T::f64, l.size};
