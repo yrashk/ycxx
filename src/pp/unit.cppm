@@ -17,6 +17,8 @@ export module ycxx.pp:unit;
 
 import std;
 import ycxx.ast.target;
+import ycxx.ast.typeops;
+import ycxx.ast.types;
 import ycxx.hash;
 import ycxx.lex;
 import :spell;
@@ -1446,8 +1448,7 @@ private:
     if (n == "__has_include") return CondOp::has_include;
     if (n == "__has_include_next") return CondOp::has_include_next;
     if (n == "__has_embed") return CondOp::has_embed;
-    // DECISIONS §1.5: `__has_builtin` answers from ycxx's table of the built-ins it implements
-    // (lex::type_traits); its tables have no attribute or feature yet.
+    // DECISIONS §1.5: `__has_builtin` reports the built-ins ycxx supports on this target.
     if (n == "__has_builtin") return CondOp::has_builtin;
     if (n == "__has_cpp_attribute" || n == "__has_attribute" || n == "__has_c_attribute" ||
         n == "__has_feature" || n == "__has_extension")
@@ -1508,7 +1509,10 @@ private:
       }
       std::string_view name = s_->spellings.name(operand[0].tok.payload);
       const bool variadic = s_->config.target->va_list == ast::VaList::sysv_x86_64 && lex::va_builtin(name);
-      const bool supported = lex::type_trait(name) || lex::builtin_template(name) || lex::builtin_function(name) || variadic;
+      const auto* function = lex::builtin_function(name);
+      const bool ordinary = function && (function->type != 'l' ||
+          ast::computes((*s_->config.target)[ast::Builtin::long_double].format));
+      const bool supported = lex::type_trait(name) || lex::builtin_template(name) || ordinary || variadic;
       return number_token(t, supported ? 1 : 0);
     }
     // [cpp.cond]/? the header, as for #include: a string literal, `<...>`, or tokens that become

@@ -2278,8 +2278,11 @@ values, end to end; results match Clang's bit for bit.
   (loads, stores, CSEL, moves, constants built in x16 and moved by FMOV). The internal
   disassembler names S and D registers.
 - **Built-ins** (docs/EXTENSIONS.md): `__builtin_fabs*` (`ast::BuiltinCall`, FABS),
-  `__builtin_inf*`, `__builtin_huge_val*` and `__builtin_nan*` (constants); `__has_builtin`
-  answers 1.
+  `__builtin_inf*`, `__builtin_huge_val*` and `__builtin_nan*` (constants). `__has_builtin`
+  reports the `long double` forms on targets with a supported value format.
+- On Linux x86-64, a dependent `__builtin_fabsl` call in a template definition keeps its
+  `long double` result type. When instantiation selects the call and the operand is concrete,
+  a well-formed call receives the unsupported x87 value diagnostic ([stmt.if], [temp.inst], #201).
 - `#include <cmath>`: 4,415 errors before, 4,343 after; it still does not compile (#349).
 - Tests: `tests/own/floating` (84 spec-only, and 4 from the review: literals, conversions, constant evaluation, run
   tests printing with `printf`, mixed-object tests with Clang peers for scalars, many arguments,
