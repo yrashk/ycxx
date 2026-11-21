@@ -793,19 +793,21 @@ public:
       ExprInfo info{b, ValueCategory::prvalue, expr_flag::dependent | expr_flag::unrepresented_value};
       return node(ast::Dependent{info, b_->list({})}, begin, end, info);
     };
+    std::optional<ast::DepOp> unary_op;
     switch (t) {
     case is_same: return structural_trait(templates().is_same_value(args[0], args[1]));
     case is_reference: return structural_trait(templates().unary_trait_value(ast::DepOp::is_reference, args[0]));
-    case is_const:
-    case is_volatile: {
-      auto op = t == is_const ? ast::DepOp::is_const : ast::DepOp::is_volatile;
-      if (auto v = templates().unary_trait_value(op, args[0]))
-        return literal(b, *v, ValueCategory::prvalue, begin, end);
-      // The generic dependent node lets a template body re-parse the operand.
-      break;
-    }
+    case is_const: unary_op = ast::DepOp::is_const; break;
+    case is_volatile: unary_op = ast::DepOp::is_volatile; break;
+    case is_array: unary_op = ast::DepOp::is_array; break;
+    case is_pointer: unary_op = ast::DepOp::is_pointer; break;
+    case is_function: unary_op = ast::DepOp::is_function; break;
     default: break;
     }
+    if (unary_op)
+      if (auto v = templates().unary_trait_value(*unary_op, args[0]))
+        return literal(b, *v, ValueCategory::prvalue, begin, end);
+    // The generic dependent node lets a template body re-parse the operand.
     if (std::ranges::any_of(args, [&](QualType a) { return types().is_dependent(a); })) return dependent_node({}, begin, end, b);
     QualType x = args[0], c = types().canonical(x);
     auto cls = [&]() -> const ClassRec* {
@@ -827,7 +829,6 @@ public:
     // The class-key says whether a class is a union, complete or not ([class.pre]).
     case is_class: v = types().is_class(c) && !is_union_type(c); break;
     case is_union: v = is_union_type(c); break;
-    case is_pointer: v = types().is_pointer(c); break;
     case is_member_pointer: v = types().is_member_pointer(c); break;
     case is_member_object_pointer: v = types().is_member_pointer(c) && !types().is_function(types().rec(c).inner); break;
     case is_member_function_pointer: v = types().is_member_pointer(c) && types().is_function(types().rec(c).inner); break;
@@ -843,10 +844,8 @@ public:
     case is_final: v = false; break;
     case is_lvalue_reference: v = types().is_reference(c) && !types().rec(c).rvalue_ref; break;
     case is_rvalue_reference: v = types().is_reference(c) && types().rec(c).rvalue_ref; break;
-    case is_array: v = types().is_array(c); break;
     case is_bounded_array: v = types().is_array(c) && types().rec(c).bound_value != ConstId::none; break;
     case is_unbounded_array: v = types().is_array(c) && types().rec(c).bound_value == ConstId::none; break;
-    case is_function: v = types().is_function(c); break;
     case is_object: v = types().is_object(c); break;
     case is_empty:
       // [meta.unary.prop]: a complete class, not a union, with no non-static data members.

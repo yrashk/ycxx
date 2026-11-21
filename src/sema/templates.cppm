@@ -327,6 +327,9 @@ public:
       result = op == ast::DepOp::is_const ? Types::is_const(element) : Types::is_volatile(element);
       break;
     }
+    case ast::DepOp::is_array: result = types().is_array(type); break;
+    case ast::DepOp::is_pointer: result = types().is_pointer(type); break;
+    case ast::DepOp::is_function: result = types().is_function(type); break;
     case ast::DepOp::is_same: std::unreachable();
     }
     return w_->values.integer(types().builtin(Builtin::bool_), result);
@@ -437,7 +440,10 @@ public:
       }
       case ast::DepOp::is_reference:
       case ast::DepOp::is_const:
-      case ast::DepOp::is_volatile: {
+      case ast::DepOp::is_volatile:
+      case ast::DepOp::is_array:
+      case ast::DepOp::is_pointer:
+      case ast::DepOp::is_function: {
         auto operand = substitute_arg(ins().seqs.at(op.operands, 0), b);
         if (!operand) return std::nullopt;
         return unary_trait_value(op.op, operand->type);
