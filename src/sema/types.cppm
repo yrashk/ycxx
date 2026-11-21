@@ -658,7 +658,8 @@ struct MemberDeclRec {
   // its definition is its lambda's, not an item's.
   std::vector<ast::TemplateParamSema> head{};
   std::vector<ast::NodeId> defaults;  // a function's default arguments by parameter, or empty
-  CopyAssignment implicit_assignment = CopyAssignment::none;
+  CopyAssignment copy_assignment = CopyAssignment::none;
+  bool explicit_defaulted_assignment = false;
 };
 
 struct NestedType {
@@ -719,7 +720,7 @@ struct ClassRec {
 
   const MemberDeclRec* implicit_copy_assignment() const {
     const auto copy = std::ranges::find_if(members, [](const MemberDeclRec& m) {
-      return m.implicit_assignment != CopyAssignment::none;
+      return m.copy_assignment != CopyAssignment::none && !m.explicit_defaulted_assignment;
     });
     return copy == members.end() ? nullptr : &*copy;
   }

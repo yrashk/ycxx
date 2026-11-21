@@ -426,7 +426,7 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
       continue;
     closures_of(is.closures, program.id(k), 0);
     if (it.kind == items::ItemKind::function && it.has_body() && !decls.empty() && decls[0].entity != EntityId::none &&
-        !(decls[0].flags & sema::decl_flag::deleted) && !program.defaulted_copy_definition(k, decls[0])) {
+        !(decls[0].flags & sema::decl_flag::deleted) && !program.defaulted_member_definition(k, decls[0])) {
       // A placeholder return type is the one its body deduced ([dcl.spec.auto]).
       const ast::BodySema& body = program.analyze_body(k).value;
       ast::DeclSema d = decls[0];
