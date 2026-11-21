@@ -53,6 +53,28 @@ The complete-object and native guards still apply, and class templates continue 
 polymorphic bases. [[class.dtor]](https://eel.is/c++draft/class.dtor) ·
 [[class.base.init]](https://eel.is/c++draft/class.base.init)
 
+## Linux x86-64 calls on external objects
+
+An ordinary class with no bases or data members can declare virtual functions for calls on
+objects supplied by an external translation unit. Its declarations have fixed integer
+signatures and it leaves construction, destruction and all virtual definitions to the
+provider. Semantic analysis records the selected virtual declaration's slot in declaration
+order. The caller evaluates the receiver once, loads its virtual table address point and
+the slot, and passes the same receiver pointer as `this` to the indirect call. An explicit
+qualification with the receiver's own class name selects a direct call of that declaration.
+[[expr.call]](https://eel.is/c++draft/expr.call) ·
+[Itanium ABI §3.2.4](https://itanium-cxx-abi.github.io/cxx-abi/abi.html#vcall.caller) ·
+[Astra's review](https://github.com/yrashk/ycxx/issues/309#issuecomment-7057422652)
+
+Native layout stays guarded for polymorphic classes, including classes that contain them by
+value. The native-unit check admits opaque declarations on Linux x86-64. Other virtual
+declarations, layout or materialization operations and native definitions that would require
+virtual table production still have diagnostics. Class descriptors and RTTI are tracked in
+[#294](https://github.com/yrashk/ycxx/issues/294), destructor entry points in
+[#136](https://github.com/yrashk/ycxx/issues/136), group emission in
+[#422](https://github.com/yrashk/ycxx/issues/422), and native class ABI in
+[#489](https://github.com/yrashk/ycxx/issues/489).
+
 Covariant return types, pure virtual functions, `final`, explicit polymorphic base
 initializers, explicit virtual destructor calls and virtual member addresses are tracked in [#309](https://github.com/yrashk/ycxx/issues/309).
 That issue also tracks peer dispatch and native table emission. Virtual destructor variants

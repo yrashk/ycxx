@@ -8,6 +8,7 @@ int main() {
   int a = p.z; //! error
   int b = q.x; //! error
   int c = p->y; //! error
+  bool d = p->y < 3; //! error
   q->w = 3; //! error
-  return a + b + c;
+  return a + b + c + d;
 }

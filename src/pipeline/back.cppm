@@ -171,7 +171,7 @@ struct TranslationUnit {
   std::vector<std::pair<EntityId, EntityId>> init_functions;
   std::optional<ast::Loc> namespace_destruction;  // first variable whose destructor runs at exit
   bool front_failed = false;           // the front end reported errors: nothing to compile
-  bool has_virtual_declaration = false;
+  bool virtual_emission_blocked = false;
   std::optional<ast::Loc> virtual_declaration;
 };
 
@@ -1398,7 +1398,7 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
     errors.push_back({std::nullopt, "the translation unit has errors"});
     co_return out;
   }
-  if (tu.has_virtual_declaration) {
+  if (tu.virtual_emission_blocked) {
     errors.push_back({tu.virtual_declaration, "native output for a translation unit with virtual member functions is not supported yet"});
     co_return co_await locate_errors(cx, id, std::move(out));
   }
