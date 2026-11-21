@@ -7434,9 +7434,11 @@ public:
     u32 begin = l.begin, end = r.end;
     if (!l.ok() || !r.ok()) return {NodeId::none, begin, end};
     if (dependent(l) || dependent(r)) {
-      if (types().is_dependent(l.type()) || types().is_dependent(r.type())) {
+      if (has_proven_dependent_type(l) || has_proven_dependent_type(r)) {
         dependent_calls.push_back(op_at);
-      } else if (types().is_integral(l.type()) && types().is_integral(r.type())) {
+        return dependent_node({l, r}, begin, end, std::nullopt, ValueCategory::prvalue, expr_flag::type_dependent);
+      }
+      if (types().is_integral(l.type()) && types().is_integral(r.type())) {
         switch (op) {
         case add: case sub: case mul: case div: case rem:
         case bit_and: case bit_xor: case bit_or:
@@ -7745,8 +7747,9 @@ public:
       return node(ast::Conditional{info, at(c, begin), at(t, begin), at(f, begin)}, begin, end, info);
     }
     if (dependent(cond) || dependent(t) || dependent(f)) {
-      // With the same concrete prvalue type on both arms, dependency can affect
-      // the conditional's value without affecting its type.
+      if (has_proven_dependent_type(cond) || has_proven_dependent_type(t) || has_proven_dependent_type(f))
+        return dependent_node({cond, t, f}, begin, end, std::nullopt, ValueCategory::prvalue, expr_flag::type_dependent);
+      // Concrete prvalue arms can determine the result type even when the value is dependent.
       if (!types().is_dependent(cond.type()) &&
           t.cat() == ValueCategory::prvalue && f.cat() == ValueCategory::prvalue) {
         if (!types().is_dependent(t.type()) && types().canonical(t.type()) == types().canonical(f.type()))
