@@ -232,8 +232,10 @@ unqualified braced prvalue such as `B{7}`, with an explicit initializer for each
 - ordinary scalar `new` and single-object `delete` for integral and pointer objects, including
   cv-qualified objects. Scalar allocation uses the global Itanium allocation functions.
   Syntax checking also covers one-dimensional scalar `new T[n]` and `delete[] p`.
-  On Linux x86-64, `delete[] p` releases one-dimensional arrays of integral or ordinary pointer
-  elements through the unsized global deallocator, including zero-length arrays.
+  On Linux x86-64, ordinary functions with cleanup-free unwind frames can default-initialize
+  one-dimensional integral and ordinary pointer arrays with a literal bound. The allocation
+  returns the original address. `delete[] p` releases it through the unsized global deallocator,
+  including for zero-length arrays.
   The usual aligned scalar allocation and deallocation signatures support explicit calls with
   `std::align_val_t`. Written nonthrowing global scalar and array overloads with a final
   `const Tag&` support explicit calls, including `std::nothrow_t` and user-defined class tags.

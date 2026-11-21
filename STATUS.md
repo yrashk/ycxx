@@ -2809,7 +2809,7 @@ and runtime integration with ycxx's own linker remain under [#89]. See the
 - The six usual global array allocation and deallocation declarations support explicit
   calls and typed address selection, including the aligned signatures. Written
   redeclarations share the implicit entities. The Itanium mangler emits `na` and `da`, and
-  Linux object tests call providers built with both GCC and Clang. Expression codegen and
+  Linux object tests call providers built with both GCC and Clang. Broader expression codegen and
   further allocation-function declarations remain in [#293](https://github.com/yrashk/ycxx/issues/293).
 - The four C++26 non-allocating placement functions can be declared and defined at global scope
   ([new.delete.placement]). The two allocation functions take `size_t, void*` and return `void*`.
@@ -2835,7 +2835,14 @@ and runtime integration with ycxx's own linker remain under [#89]. See the
   of `ptrdiff_t`. The array AST retains default or empty initialization and the typed delete operand.
   On Linux x86-64, array deletion evaluates that operand once and passes the original address to
   the usual unsized `operator delete[](void*)` when non-null. The call releases the allocation,
-  including zero-length arrays. Native array allocation and broader deletion remain in #293.
+  including zero-length arrays.
+- Linux x86-64 can allocate these default-initialized arrays in ordinary functions certified
+  for cleanup-free unwinding when the bound is a single integer literal. The usual global
+  `operator new[](size_t)` receives the checked byte count, including zero. Lowering preserves
+  the returned address and leaves the element bytes alone. A hosted caller can catch an
+  exception from a replacement allocator across the wrapper. `unit.linux_fixed_array_new`
+  checks call relocations, unwind frame coverage, allocation, and release.
+  Broader allocation and deletion remain in #293.
   Constant-evaluated allocation and deletion are tracked in #321.
   [Cookie-free deletion](docs/design/cookie-free-array-delete.md)
   A file-scope scalar initializer still needs lowered code to qualify for dynamic initialization.

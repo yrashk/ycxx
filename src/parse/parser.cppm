@@ -3063,6 +3063,7 @@ public:
     bump();  // new, after an optional ::
     std::optional<QualType> type;
     std::optional<Ex> bound;
+    bool literal_bound = false;
     std::optional<Ex> placement;
     bool excluded = false;
     if (is(Tk::l_paren)) {
@@ -3125,6 +3126,8 @@ public:
           excluded = true;  // multiple dimensions
           constant_expression();
         } else {
+          literal_bound = is(Tk::int_lit) && kind(1) == Tk::r_square &&
+                          !literal().overflow && literal().ud_suffix == lex::no_name;
           bound = expression();
         }
         angle_ = saved;
@@ -3151,7 +3154,7 @@ public:
       s_->diag(begin, Diag::not_supported, Tk::kw_new);
       return {NodeId::none, begin, pos()};
     }
-    if (bound) return s_->new_array(*type, *bound, args, braces.get(), begin, pos());
+    if (bound) return s_->new_array(*type, *bound, literal_bound, args, braces.get(), begin, pos());
     return s_->new_object(*type, args, braces.get(), begin, pos(), placement);
   }
 

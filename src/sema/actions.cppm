@@ -6621,6 +6621,16 @@ public:
     return false;
   }
 
+  Ex usual_allocation_call(Ex size, u32 begin, bool array = false) {
+    const auto f = w_->allocation_function(AllocationFunction::allocate, array);
+    q_->use_allocation_function(f.entity);
+    ExprInfo fn_info{f.type, ValueCategory::lvalue, 0};
+    Ex callee = node(ast::DeclRef{fn_info, f.entity}, begin, begin, fn_info);
+    ExprInfo call_info{types().rec(f.type).inner, ValueCategory::prvalue, 0};
+    Child sizes[] = {at(size, begin)};
+    return node(ast::Call{call_info, f.entity, at(callee, begin), b_->list(sizes)}, begin, begin, call_info);
+  }
+
   // [expr.new]: initialize the object after the call to the global allocation function.
   Ex new_object(QualType t, const std::optional<std::vector<Ex>>& args, const Braced* braces, u32 begin, u32 end,
                 std::optional<Ex> placement) {
@@ -6698,13 +6708,7 @@ public:
       }
       if (dependent(init)) return dependent_node({allocation, init}, begin, end, pointer);
     } else {
-      ast::DeclSema f = w_->allocation_function(AllocationFunction::allocate);
-      q_->use_allocation_function(f.entity);
-      ExprInfo fn_info{f.type, ValueCategory::lvalue, 0};
-      Ex callee = node(ast::DeclRef{fn_info, f.entity}, begin, begin, fn_info);
-      ExprInfo call_info{types().rec(f.type).inner, ValueCategory::prvalue, 0};
-      Child sizes[] = {at(size, begin)};
-      allocation = node(ast::Call{call_info, f.entity, at(callee, begin), b_->list(sizes)}, begin, begin, call_info);
+      allocation = usual_allocation_call(size, begin);
     }
     ExprInfo info{pointer, ValueCategory::prvalue, 0};
     return node(ast::NewObject{info, at(allocation, begin), at(init, begin), placement.has_value()}, begin, end, info);
@@ -6739,15 +6743,20 @@ public:
     return node(ast::DeleteObject{info, f, at(addr, begin), at(size, begin)}, begin, end, info);
   }
 
-  // [expr.new]: a potentially evaluated constant bound is checked before unsigned conversion.
   // Limit the object size to the largest positive byte distance representable by ptrdiff_t.
+  u64 max_new_array_count(u64 element_size) const {
+    int size_bits = shape(w_->target, w_->target.ptrdiff_type).bits - 1;
+    return ((u64{1} << size_bits) - 1) / element_size;
+  }
+
+  // [expr.new]: a potentially evaluated constant bound is checked before unsigned conversion.
   bool valid_new_bound(Ex bound, u64 element_size) {
     if (unevaluated || !constant_of) return true;
     auto known = constant_of(bound);
     if (!known) return true;
     ValueRec value = w_->values.rec(*known);
     int size_bits = shape(w_->target, w_->target.ptrdiff_type).bits - 1;
-    u64 max_count = ((u64{1} << size_bits) - 1) / element_size;
+    u64 max_count = max_new_array_count(element_size);
     bool negative = false;
     bool oversized = false;
     if (value.kind == ValueKind::integer) {
@@ -6766,7 +6775,8 @@ public:
     return true;
   }
 
-  Ex new_array(QualType t, Ex bound, const std::optional<std::vector<Ex>>& args, const Braced* braces, u32 begin, u32 end) {
+  Ex new_array(QualType t, Ex bound, bool literal_bound, const std::optional<std::vector<Ex>>& args,
+               const Braced* braces, u32 begin, u32 end) {
     Ex fail{NodeId::none, begin, end};
     if (!bound.ok()) return fail;
     if (!types().is_object(t)) {
@@ -6795,8 +6805,22 @@ public:
 
     Ex init = braces ? list_init(t, *braces) : args ? value_init(t, end, end) : default_init(t, end, end);
     if (!init.ok()) return fail;
+    Child allocation;
+    if (!unevaluated && !args && !braces && literal_bound && w_->target.triple == ast::x86_64_linux.triple) {
+      const auto written = as<ast::Literal>(bound);
+      if (written && ins().values.is<ast::VInt>(written->value)) {
+        // Check the full value before multiplying or converting it to size_t.
+        ast::Bits128 n = ast::int_bits(ins(), written->value);
+        if (n.hi == 0 && n.lo <= max_new_array_count(*size)) {
+          QualType size_type = builtin(w_->target.size_type);
+          Ex bytes = literal(size_type, w_->values.integer(size_type, n.lo * *size),
+                             ValueCategory::prvalue, bound.begin, bound.end);
+          allocation = at(usual_allocation_call(bytes, begin, /*array=*/true), begin);
+        }
+      }
+    }
     ExprInfo info{pointer, ValueCategory::prvalue, 0};
-    return node(ast::NewArray{info, at(count, begin), at(init, begin)}, begin, end, info);
+    return node(ast::NewArray{info, at(count, begin), allocation, at(init, begin)}, begin, end, info);
   }
 
   Ex delete_array(Ex operand, u32 begin, u32 end) {
