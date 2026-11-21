@@ -369,6 +369,9 @@ enum class Diag : std::uint32_t {
   assignability_unsupported [[=message{Severity::error, "'{0:n}' for '{1:t}' and '{2:t}' is not supported yet"}]],
   convertibility_dependent [[=message{Severity::error, "dependent operands of '{0:n}' are not supported yet"}]],
   convertibility_unsupported [[=message{Severity::error, "'{0:n}' for '{1:t}' and '{2:t}' is not supported yet"}]],
+  base_of_dependent [[=message{Severity::error, "dependent operands of '__is_base_of' are not supported yet"}]],
+  base_of_incomplete [[=message{Severity::error, "incomplete derived class type '{0:t}' cannot be queried by '__is_base_of'"}]],
+  base_of_unsupported [[=message{Severity::error, "'__is_base_of' for '{0:t}' and '{1:t}' is not supported yet"}]],
 };
 
 // A `{N:r}` argument: why an evaluation was not constant. 0 is an expression the front end
@@ -433,7 +436,8 @@ constexpr bool is_type_trait_failure(engine::DiagId id) {
          id == diag_id(Diag::constructibility_incomplete) || id == diag_id(Diag::constructibility_unsupported) ||
          id == diag_id(Diag::nothrow_constructibility_unsupported) ||
          id == diag_id(Diag::trivial_constructibility_unsupported) || id == diag_id(Diag::assignability_unsupported) ||
-         id == diag_id(Diag::convertibility_unsupported);
+         id == diag_id(Diag::convertibility_unsupported) || id == diag_id(Diag::base_of_incomplete) ||
+         id == diag_id(Diag::base_of_unsupported);
 }
 // Whether a diagnostic stays an error where a substitution failure means "not satisfied": a limit
 // of ycxx's, an atomic constraint that is not a `bool` constant ([temp.constr.atomic]/3), or a
@@ -442,7 +446,7 @@ constexpr bool is_type_trait_failure(engine::DiagId id) {
 constexpr bool survives_substitution(engine::DiagId id) {
   return is_limit(id) || id == diag_id(Diag::constraint_not_bool) || id == diag_id(Diag::constraint_not_constant) ||
          id == diag_id(Diag::not_a_concept) || id == diag_id(Diag::trivial_copyability_incomplete) ||
-         id == diag_id(Diag::constructibility_incomplete);
+         id == diag_id(Diag::constructibility_incomplete) || id == diag_id(Diag::base_of_incomplete);
 }
 
 constexpr std::string_view diag_name(Diag d) {

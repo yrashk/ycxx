@@ -2606,7 +2606,7 @@ clauses = ['meta.unary', 'meta.rel', 'meta.trans']
 std = 'C++11'
 detect = '\bstd::(?:is_\w+|enable_if|conditional|decay|remove_\w+|add_\w+|underlying_type|common_type|invoke_result)\w*\b'
 status = 'partial'
-note = 'assignment traits cover arithmetic operands, and conversion traits cover arithmetic operands and cv void. Class assignment, class conversion, and other object-model traits remain partial'
+note = 'assignment traits cover arithmetic operands, conversion traits cover arithmetic operands and cv void, and is_base_of queries recorded base declarations. Other object-model traits remain partial'
 issues = [218, 211]
 probe = '''
 enum E { e };

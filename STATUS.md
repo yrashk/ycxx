@@ -1778,10 +1778,17 @@ session's.*
   types. Supported class-template bases and variable-template initializers replay dependent
   operands. Other operand types and dependent queries outside those contexts get hard diagnostics.
   `__has_builtin` answers 0 while support is partial ([meta.rel], [dcl.init.ref], #218).
+- `__is_base_of(Base, Derived)` ignores top-level cv. Nonclass and union operands give false.
+  The same nonunion class gives true, including when incomplete. For distinct nonunion classes,
+  `Derived` must be complete. The trait follows the recorded base declarations, including private
+  and ambiguous bases. A dependent occurrence in a supported class-template base or variable-template
+  initializer checks completeness at instantiation. A concrete occurrence checks it at its original
+  source point. Missing graph information gets a hard diagnostic when it prevents a result.
+  `__has_builtin` answers 0 while support is partial ([meta.rel], [class.derived], #218).
 - Listed in docs/EXTENSIONS.md. Tests: `tests/own/builtins/`. `<cstdio>`: 53 → 33 errors.
 - Not yet (#211 follow-up): the built-ins that need the object model, such as
   class constructibility, assignability and convertibility, remaining `__is_trivially_*` and
-  `__is_nothrow_*` predicates, `__is_base_of`, `__is_standard_layout` and
+  `__is_nothrow_*` predicates, `__is_standard_layout` and
   `__reference_binds_to_temporary`. Other dependent predicates, conversions of a dependent
   predicate to a non-`bool` parameter, dependent array bounds and expression mangling remain in
   #209.
