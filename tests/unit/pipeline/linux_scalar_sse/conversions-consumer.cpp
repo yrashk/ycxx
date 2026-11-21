@@ -5,6 +5,7 @@
 #include <climits>
 #include <cstdint>
 #include <cstdio>
+#include <initializer_list>
 #include <xmmintrin.h>
 
 extern "C" {
@@ -62,7 +63,7 @@ void same(const char* what, unsigned long long input, T actual, T expected) {
 
 template <typename From, typename To>
 void to_float(const char* what, To (*f)(From), From x) {
-  same(what, static_cast<unsigned long long>(x), f(x), static_cast<To>(opaque(x)));
+  same(what, static_cast<unsigned long long>(bits(x)), f(x), static_cast<To>(opaque(x)));
 }
 
 template <typename From, typename To>
@@ -137,6 +138,16 @@ int main() {
   for (unsigned mode : modes) {
     _mm_setcsr(mode);
     conversions();
+  }
+  // A valid conversion raises no invalid-operation flag (MXCSR bit 0), on either side of 2^63.
+  for (double x : {5.5, 9223372036854777856.0, 1.8e19}) {
+    _mm_setcsr(0x1f80);
+    (void)fp643_f64_to_u64(opaque(x));
+    (void)fp643_f32_to_u64(static_cast<float>(opaque(x)));
+    if (_mm_getcsr() & 1) {
+      ++failures;
+      std::fprintf(stderr, "to u64 of %a raised the invalid-operation flag\n", x);
+    }
   }
   _mm_setcsr(0x1f80);
   if (failures) std::fprintf(stderr, "%d conversion mismatches\n", failures);

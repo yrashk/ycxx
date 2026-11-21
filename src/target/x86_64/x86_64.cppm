@@ -639,11 +639,10 @@ std::expected<void, std::string> Emitter::node(NodeId n) {
         e_.truncate_float(rax, rbp, source, width, op == Op::fptoui || type == Type::i64);
         break;
       }
-      // At or above 2^63 the signed conversion gives the integer indefinite value 2^63, whose
-      // sign then selects the conversion of x - 2^63, which is exact in that range (Intel SDM
-      // vol. 2, CVTTSD2SI). Below it the sign is clear and the first conversion stands.
+      // Below 2^63 the signed conversion is exact. At or above it, convert x - 2^63, which is
+      // exact there, and set the top bit. Comparing first keeps a valid conversion from raising
+      // the invalid-operation flag (Intel SDM vol. 2, CVTTSD2SI).
       const std::int32_t scratch = frame_.slots[raw(body_.result(n))];
-      e_.truncate_float(rcx, rbp, source, width, true);
       if (width == 4) {
         e_.emit({0xb8});  // mov eax, imm32: 2^63 as binary32
         e_.immediate(0x5f000000, 4);
@@ -653,14 +652,20 @@ std::expected<void, std::string> Emitter::node(NodeId n) {
       }
       e_.store(rbp, scratch, rax, width);
       e_.load_scalar_xmm(0, rbp, source, width);
+      e_.compare_scalar_xmm(0, rbp, scratch, width);
+      e_.emit({0x0f, 0x83});  // jae rel32: x >= 2^63 (unordered is poison and falls through)
+      auto high = e_.displacement();
+      e_.truncate_float(rax, rbp, source, width, true);
+      e_.emit({0xe9});  // jmp rel32
+      auto converted = e_.displacement();
+      if (!e_.patch_relative(high, e_.offset())) return at_node(n, op, "conditional branch displacement out of range");
       e_.scalar_float_arithmetic(0x5c, 0, rbp, scratch, width);  // subtract 2^63
       e_.store_scalar_xmm(rbp, scratch, 0, width);
       e_.truncate_float(rax, rbp, scratch, width, true);
-      e_.move(rdx, rcx);
-      e_.reg({0xc1}, 7, rdx);  // sar rdx, 63
-      e_.emit({63});
-      e_.reg({0x21}, rdx, rax);  // and rax, rdx
-      e_.reg({0x09}, rcx, rax);  // or rax, rcx
+      e_.emit({0x48, 0xb9});  // mov rcx, imm64
+      e_.immediate(std::uint64_t{1} << 63, 8);
+      e_.reg({0x31}, rcx, rax);  // xor rax, rcx
+      if (!e_.patch_relative(converted, e_.offset())) return at_node(n, op, "conditional branch displacement out of range");
       break;
     }
     case Op::shl: case Op::lshr: case Op::ashr:

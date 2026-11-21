@@ -58,7 +58,9 @@ def main():
                 run([*host, 'mixed-comparisons-consumer.cpp', 'comparisons-consumer.o',
                      'comparisons.o', 'mixed-comparisons.o', '-o', 'mixed-comparisons'], scope, cold)
                 run(['./mixed-comparisons'], scope, cold)
-                run([*host, 'conversions-consumer.cpp', 'conversions.o', '-o', 'mixed-conversions'], scope, cold)
+                # The consumer converts under each MXCSR rounding direction.
+                run([*host, '-frounding-math', 'conversions-consumer.cpp', 'conversions.o', '-o', 'mixed-conversions'],
+                    scope, cold)
                 run(['./mixed-conversions'], scope, cold)
 
             for fixture in ('variadic-caller', 'variadic-al-caller'):
