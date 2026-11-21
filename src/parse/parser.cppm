@@ -1400,11 +1400,18 @@ public:
     return l;
   }
 
+  struct TypeQualifier {
+    sema::Sema::Scope scope;
+    NameId name;
+    u32 at;
+  };
+
   // A nested-name-specifier ([expr.prim.id.qual]) at token `start` ahead: `::`, `N::`, `N::C::`,
   // resolved as it is read, without consuming it. `next` is where the name after it is.
   std::optional<sema::Sema::Scope> nested_name(u32 start, u32& next, bool member_pointer = false,
                                                bool checked = false, bool type_components = false,
-                                               bool check_injected_access = false) {
+                                               bool check_injected_access = false,
+                                               std::vector<TypeQualifier>* type_qualifiers = nullptr) {
     u32 j = start;
     std::optional<sema::Sema::Scope> s;
     if (kind(j) == Tk::kw_decltype && kind(j + 1) == Tk::l_paren) {
@@ -1445,6 +1452,7 @@ public:
         auto m = s_->scope_member(*s, n);
         if (!m) return std::nullopt;
         if (member_pointer || checked) check_type_access(*s, n, pos() + j);
+        else if (type_qualifiers && s->type) type_qualifiers->push_back({*s, n, pos() + j});
         s = m;
         j += 2;
       } else if (auto t = template_id_scope(s, j, /*scope=*/true, checked)) {
@@ -3740,7 +3748,9 @@ public:
   Ex qualified_id(u32 begin) {
     u32 next = 0;
     auto address = address_op_ && *address_op_ + 1 == begin ? address_op_ : std::nullopt;
-    auto s = nested_name(0, next, /*member_pointer=*/false, substituting_partial_arguments || address.has_value());
+    std::vector<TypeQualifier> type_qualifiers;
+    auto s = nested_name(0, next, /*member_pointer=*/false, substituting_partial_arguments || address.has_value(),
+                         /*type_components=*/false, /*check_injected_access=*/false, &type_qualifiers);
     // `S::template f<args>`: f names a template ([temp.names]/3).
     bool keyword = s && kind(next) == Tk::kw_template && kind(next + 1) == Tk::identifier;
     if (keyword) ++next;
@@ -3775,6 +3785,8 @@ public:
     // variable of the name hides it.
     if ((is(Tk::l_paren) || is(Tk::l_brace)) && !s_->scope_names_object(*s, n))
       if (auto t = s_->scope_type(*s, n)) {
+        for (const auto& qualifier : type_qualifiers)
+          s_->type_member_access(qualifier.scope, qualifier.name, qualifier.at, /*direct_alias_only=*/true);
         s_->type_member_access(*s, n, name_at, /*direct_alias_only=*/!substituting_partial_arguments);
         return type_conversion(*t, begin);
       }
