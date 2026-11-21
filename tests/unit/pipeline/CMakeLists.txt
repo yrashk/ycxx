@@ -15,7 +15,8 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_
    AND NOT CMAKE_CROSSCOMPILING)
   add_test(NAME unit.linux_compile
     COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/linux_compile.py
-            $<TARGET_FILE:ycxxc> ${CMAKE_C_COMPILER} ${CMAKE_READELF} ${CMAKE_AR})
+            $<TARGET_FILE:ycxxc> ${CMAKE_C_COMPILER} ${CMAKE_READELF} ${CMAKE_AR}
+            ${PROJECT_SOURCE_DIR}/deps/libycxx)
   add_test(NAME unit.linux_variadic_definitions
     COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/linux_variadic_definitions.py
             $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER} ${PROJECT_SOURCE_DIR}/deps/libycxx)

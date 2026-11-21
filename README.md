@@ -58,8 +58,8 @@ build/bin/ycxx cxx --target=x86_64-pc-linux-gnu -nostdlib example.o -o example
 ```
 
 Fixed-prototype direct calls to free functions support passing and returning nonempty flat
-records of integral fields by value. The record can occupy up to 16 bytes and must be trivial
-for calls. [Linux integer aggregate ABI](docs/design/linux-integer-aggregates.md)
+records with integral or ordinary object-pointer fields by value. The record can occupy up to
+16 bytes and must be trivial for calls. [Linux integer aggregate ABI](docs/design/linux-integer-aggregates.md)
 
 For mixed Linux objects, the pinned libycxx `<cstddef>` byte operator uses the same Itanium
 linkage name in ycxx, GCC and Clang. [#64](https://github.com/yrashk/ycxx/issues/64)
