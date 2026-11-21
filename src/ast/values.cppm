@@ -11,6 +11,7 @@ export module ycxx.ast.values;
 
 import std;
 import ycxx.ast.handles;
+import ycxx.ast.records;
 import ycxx.ast.schema;
 
 export namespace ycxx::ast {
@@ -112,6 +113,14 @@ struct [[=dependent]] VDepFnParam {
   u16 index;
 };
 
+enum class DepOp : u8 { is_same };
+
+// A dependent operation (§5.5). `is_same` has two ordered, canonical qualified type operands.
+struct [[=dependent]] VDepOp {
+  DepOp op;
+  SeqId<TemplateArg> operands;
+};
+
 // A non-type pack expansion `pattern...` ([temp.variadic]), an element of a dependent pack argument.
 struct [[=dependent]] VDepExpansion {
   ConstId pattern;
@@ -159,7 +168,7 @@ struct VConstraint {
 };
 
 using ValueKinds = closed_list<VInt, VFloat, VNullptr, VString, VLvalue, VEntity, VAggregate, VDepParam, VDepFnParam, VDepExpansion,
-                               VDepSizeofPack, VType, VAtom, VConstraint>;
+                               VDepSizeofPack, VType, VAtom, VConstraint, VDepOp>;
 
 template <class T>
 constexpr bool is_value_kind = ValueKinds::contains<T>;
