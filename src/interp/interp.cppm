@@ -52,7 +52,7 @@ template <Host H>
 engine::query_task<Outcome> evaluate(H& host, const ast::Interners& in, const ast::Target& target,
                                      const ir::Function& entry, EntityId name, std::vector<Value> args,
                                      Config config = {}) {
-  Machine m(in, target, config);
+  Machine m(in, target, std::move(config));
   m.start(entry, name, args);
   Outcome out;
   for (;;) {
