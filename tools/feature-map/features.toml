@@ -1119,7 +1119,7 @@ clauses = ['dcl.init.aggr', 'dcl.init.general']
 std = 'C++17'
 ftm = '__cpp_aggregate_bases'
 status = 'partial'
-note = 'Automatic flat arithmetic records support parenthesized initialization. Runtime declarations can copy one public direct base from an exact-type lvalue with all elements supplied. Other base forms, arrays, nested and reference fields, and other initialization contexts remain open.'
+note = 'Automatic flat arithmetic records support parenthesized initialization. Runtime declarations can copy one flat public direct base from an exact-type lvalue or a fully written unqualified braced prvalue, with all derived elements supplied. Other base forms, arrays, nested and reference fields, and other initialization contexts remain open.'
 probe = '''
 struct B { int b; }; struct D : B { int d; }; struct P { int x, y; };
 int main() { D d{{1}, 2}; P p(3, 4); return (d.b + d.d + p.x + p.y == 10) ? 0 : 1; }
@@ -2606,7 +2606,7 @@ clauses = ['meta.unary', 'meta.rel', 'meta.trans']
 std = 'C++11'
 detect = '\bstd::(?:is_\w+|enable_if|conditional|decay|remove_\w+|add_\w+|underlying_type|common_type|invoke_result)\w*\b'
 status = 'partial'
-note = 'assignment traits cover arithmetic operands, conversion traits cover arithmetic operands and cv void, and is_base_of and is_empty query recorded base declarations. Other object-model traits remain partial'
+note = 'assignment traits cover arithmetic operands, conversion traits cover arithmetic operands and cv void, is_convertible also covers bounded values and references through a unique public nonvirtual base, and is_base_of and is_empty query recorded base declarations. Other object-model traits remain partial'
 issues = [218, 211]
 probe = '''
 enum E { e };
