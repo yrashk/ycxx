@@ -3283,7 +3283,7 @@ private:
       // [dcl.stc]: mutable is allowed only on a non-static data member with a
       // non-const, non-reference type.
       if (spec.mutable_at && (function || spec.is_static ||
-                             types.is_reference(d.type) || sema::Types::is_const(s_.innermost(types.canonical(d.type))))) {
+                             types.is_reference(d.type) || sema::Types::is_const(types.innermost_array_element(types.canonical(d.type))))) {
         s_.diag(*spec.mutable_at, Diag::mutable_placement);
         return bad();
       }
