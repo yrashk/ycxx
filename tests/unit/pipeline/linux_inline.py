@@ -28,9 +28,45 @@ def main():
         def link(*inputs, status=0, error=''):
             run(ycxx, 'cxx', target, '-nostdlib', *inputs, '-o', 'program', status=status, error=error)
 
-        def symbols(obj):
-            return {row[-1]: row for line in run(readelf, '-Ws', obj).splitlines()
-                    if len(row := line.split()) == 8 and row[0].endswith(':')}
+        def symbols(obj, *options):
+            return {row[-1]: row for line in run(readelf, '-Ws', *options, obj).splitlines()
+                    if len(row := line.split(maxsplit=7)) == 8 and row[0].endswith(':')}
+
+        hidden = fixtures / 'inline-hidden'
+        inline_hidden = {'hidden_step(int)': ('WEAK', 'HIDDEN', True),
+                         'hidden_twice(int)': ('WEAK', 'HIDDEN', True)}
+        for part, expected in {
+            'main': inline_hidden,
+            'peer': inline_hidden,
+            'boundaries': {
+                'hidden_from_decl(int)': ('GLOBAL', 'HIDDEN', True),
+                'hidden_from_def(int)': ('GLOBAL', 'HIDDEN', True),
+                'strong_hidden(int)': ('GLOBAL', 'HIDDEN', True),
+                'inline_default(int)': ('WEAK', 'DEFAULT', True),
+                'static_local(int)': ('LOCAL', 'DEFAULT', True),
+                'overload(int)': ('GLOBAL', 'HIDDEN', True),
+                'overload(long)': ('GLOBAL', 'DEFAULT', True),
+                'unrelated_attr(int)': ('GLOBAL', 'DEFAULT', True),
+            },
+            'boundaries_main': {
+                'hidden_from_decl(int)': ('GLOBAL', 'HIDDEN', False),
+                'hidden_from_def(int)': ('GLOBAL', 'DEFAULT', False),
+            },
+        }.items():
+            obj = f'hidden-{part}.o'
+            compile(hidden / f'{part}.cpp', obj)
+            table = symbols(obj, '--demangle')
+            for name, binding in expected.items():
+                entry = table.get(name)
+                actual = (entry[4], entry[5], entry[6] != 'UND') if entry else None
+                assert actual == binding, (obj, name, binding, entry)
+
+        for objects in (('hidden-main.o', 'hidden-peer.o'), ('hidden-boundaries.o', 'hidden-boundaries_main.o')):
+            for order in (objects, objects[::-1]):
+                link(*order)
+                run('./program')
+                run(host_cxx, '-no-pie', *order, '-o', 'host-program')
+                run('./host-program')
 
         inline_symbols = ('_Z12inline_firsti', '_Z12inline_lateri', '_ZN9Operation6memberEi',
                           '_ZN14DeclaredMember6memberEi', '_Z15implicit_inlinei')
