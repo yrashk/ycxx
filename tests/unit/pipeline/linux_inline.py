@@ -52,6 +52,10 @@ def main():
                 'hidden_from_decl(int)': ('GLOBAL', 'HIDDEN', False),
                 'hidden_from_def(int)': ('GLOBAL', 'DEFAULT', False),
             },
+            'declarator_visibility.accept': {
+                'one(int)': ('GLOBAL', 'HIDDEN', False),
+                'two(int)': ('GLOBAL', 'DEFAULT', False),
+            },
         }.items():
             obj = f'hidden-{part}.o'
             compile(hidden / f'{part}.cpp', obj)
