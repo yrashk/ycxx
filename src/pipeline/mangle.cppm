@@ -416,10 +416,11 @@ class Mangler {
     // `this` counted for a member.
     ClassName sc = scope != ast::EntityId::none && classes_ ? classes_(scope) : ClassName{};
     std::size_t arity = in_.seqs.size(f.params) + (sc.is_class ? 1 : 0);
+    bool conversion = name == lex::conversion_function_name;
     std::string unqualified = std::format("{}{}", name.size(), name);
     if (name.starts_with(lex::literal_operator_prefix)) {
       unqualified = "li" + source_name(name.substr(lex::literal_operator_prefix.size()));
-    } else if (name.starts_with("operator") && name.size() > 8) {
+    } else if (!conversion && name.starts_with("operator") && name.size() > 8) {
       auto code = operator_code(name.substr(8), arity);
       if (!code) return std::unexpected(std::format("the operator function '{}'", name));
       unqualified = *code;
@@ -437,6 +438,11 @@ class Mangler {
       // cv-qualifiers in the order r V K (§5.1.5.3).
       auto p = prefix(scope);
       if (!p) return p;
+      if (conversion) {
+        auto target = this->type(f.ret);
+        if (!target) return target;
+        unqualified = "cv" + *target;
+      }
       std::string cv = std::string(std::to_underlying(f.cv) & 2 ? "V" : "") + (std::to_underlying(f.cv) & 1 ? "K" : "");
       // A <ctor-dtor-name> (`C1`, `D1`) stands as it is; other names are <source-name>s.
       out = local + delimit_name(cv + *p + (special ? std::string(name) : unqualified), scope);

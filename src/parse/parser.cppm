@@ -419,7 +419,8 @@ public:
 
   // decl-specifier-seq ([dcl.spec.general]) with the simple-type-specifiers of [dcl.type.simple],
   // class names and elaborated-type-specifiers ([dcl.type.elab]), and the cv-qualifiers.
-  DeclSpec decl_specifiers(bool in_type_id = false, std::optional<u32>* friend_at = nullptr) {
+  DeclSpec decl_specifiers(bool in_type_id = false, std::optional<u32>* friend_at = nullptr,
+                           bool allow_conversion_id = false) {
     DeclSpec d;
     d.begin = pos();
     int n_char = 0, n_short = 0, n_int = 0, n_long = 0, n_signed = 0, n_unsigned = 0, n_void = 0, n_bool = 0;
@@ -658,6 +659,7 @@ public:
       return d;
     }
     if (total == 0) {
+      if (allow_conversion_id && !c && !v && conversion_id_ahead()) return d;
       if (d.ok) s_->diag(d.begin, Diag::missing_type_specifier);
       d.ok = false;
       d.type = s_->builtin(Builtin::int_);
@@ -728,6 +730,7 @@ public:
     };
     std::vector<PtrOp> pointers;
     std::unique_ptr<Level> inner;
+    std::optional<QualType> conversion_target;
     NameId name{};
     bool named = false;
     u32 name_at = 0;
@@ -743,12 +746,13 @@ public:
   };
 
   // declarator, or abstract-declarator when `abstract` ([dcl.decl.general], [dcl.name]).
-  Declarator declarator(QualType base, bool abstract, bool typedef_ = false) {
+  Declarator declarator(QualType base, bool abstract, bool typedef_ = false, bool conversion = false) {
     Declarator d;
     d.begin = pos();
-    Level top = level(abstract, d.ok);
+    Level top = level(abstract, d.ok, conversion);
+    if (conversion && !top.conversion_target) return d;
     const Suffix* fn = nullptr;
-    d.type = build(top, base, fn, d, abstract || typedef_);
+    d.type = build(top, top.conversion_target.value_or(base), fn, d, abstract || typedef_);
     const bool spelled_unknown_bound = std::exchange(d.unknown_bound, false);
     if (d.ok && !abstract && spelled_unknown_bound && s_->types().is_array(d.type)) {
       const sema::TypeRec array = s_->types().rec(d.type);
@@ -966,11 +970,40 @@ public:
     return kind(ahead) == Tk::kw_operator && (kind(ahead + 1) == Tk::kw_new || kind(ahead + 1) == Tk::kw_delete);
   }
 
+  bool conversion_id_ahead() const {
+    Tk next = kind(1);
+    return is(Tk::kw_operator) && (starts_decl_specifier(next) || next == Tk::identifier || next == Tk::coloncolon);
+  }
+
+  // [class.conv.fct]: a type-specifier-seq followed by its ptr-operators. The
+  // conversion function's own parameter list is outside the conversion-type-id.
+  std::optional<QualType> conversion_type_id() {
+    DeclSpec spec = decl_specifiers(/*in_type_id=*/true);
+    if (!spec.ok) return std::nullopt;
+    if (spec.is_static || spec.is_extern || spec.is_inline || spec.is_constexpr || spec.is_consteval ||
+        spec.is_constinit || spec.is_typedef) {
+      s_->diag(spec.begin, Diag::expected_type_specifier);
+      return std::nullopt;
+    }
+    Level target;
+    Declarator d;
+    d.begin = spec.begin;
+    pointer_operators(target, d.ok);
+    const Suffix* fn = nullptr;
+    QualType type = build(target, spec.type, fn, d, true);
+    if (!d.ok) return std::nullopt;
+    if (s_->types().has_placeholder(type)) {
+      s_->diag(spec.begin, Diag::not_supported, Tk::kw_auto);
+      return std::nullopt;
+    }
+    return type;
+  }
+
   static sema::AllocationFunction allocation_operator(Tk k) {
     return k == Tk::kw_new ? sema::AllocationFunction::allocate : sema::AllocationFunction::deallocate;
   }
 
-  Level level(bool abstract, bool& ok) {
+  Level level(bool abstract, bool& ok, bool conversion = false) {
     Level l;
     pointer_operators(l, ok);
     // A parameter pack's declarator ([dcl.fct]/23, [temp.param]/17): `T... x`, `Ts&&...`.
@@ -996,7 +1029,16 @@ public:
       for (u32 j = 0; j < next; ++j) bump();
       if (qualified_hook) qualified_hook(*sc);
     }
-    if (!abstract && literal_operator_ahead()) {
+    if (conversion) {
+      l.name_at = pos();
+      bump();  // operator
+      l.conversion_target = conversion_type_id();
+      ok = l.conversion_target.has_value() && ok;
+      if (!ok) return l;
+      l.name = s_->ins().names.intern(lex::conversion_function_name);
+      l.named = true;
+      skip_attributes();
+    } else if (!abstract && literal_operator_ahead()) {
       l.name_at = pos();
       auto n = lookup_id();
       if (!n) {

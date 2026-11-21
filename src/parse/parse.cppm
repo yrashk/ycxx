@@ -1978,6 +1978,12 @@ private:
   // operator's arity less the object.
   bool member_operator_ok(const parse::Declarator& d, bool is_static) {
     std::string_view n = p_->world().ins.names.spelling(d.name);
+    if (n == lex::conversion_function_name) {
+      if (is_static) s_.diag(d.name_at, Diag::conversion_static);
+      else if (!d.params.empty() || d.variadic) s_.diag(d.name_at, Diag::conversion_parameters);
+      else return true;
+      return false;
+    }
     if (!n.starts_with("operator") || n.size() == 8) return true;
     std::string_view op = n.substr(8);
     if (op == "()" || op == "[]") return true;
@@ -3060,14 +3066,14 @@ private:
         return bad();
       }
     }
-    if (!Parser::starts_decl_specifier(ps_.kind()) && !ps_.starts_declaration()) {
+    if (!ps_.conversion_id_ahead() && !Parser::starts_decl_specifier(ps_.kind()) && !ps_.starts_declaration()) {
       s_.diag(ps_.pos(), lex::is_keyword(ps_.kind()) || ps_.is(Tk::l_square) || ps_.is(Tk::coloncolon) || ps_.is(Tk::tilde)
                              ? Diag::not_supported
                              : Diag::expected_declaration,
               ps_.kind());
       return bad();
     }
-    DeclSpec spec = ps_.decl_specifiers();
+    DeclSpec spec = ps_.decl_specifiers(/*in_type_id=*/false, nullptr, /*allow_conversion_id=*/true);
     if (spec.is_extern || spec.is_constinit) {
       s_.diag(spec.begin, Diag::not_supported, spec.is_extern ? Tk::kw_extern : Tk::kw_constinit);
       return bad();
@@ -3092,8 +3098,25 @@ private:
   void member_declarators(const DeclSpec& spec, const ast::DeclSema& c) {
     sema::Types& types = s_.types();
     do {
-      parse::Declarator d = ps_.declarator(spec.type, false);
+      bool conversion = ps_.conversion_id_ahead();
+      if (conversion && spec.has_type) {
+        s_.diag(spec.begin, Diag::conversion_decl_type);
+        return bad();
+      }
+      if (!conversion && !spec.has_type) {
+        s_.diag(ps_.pos(), Diag::missing_type_specifier);
+        return bad();
+      }
+      if (conversion && member_template_) {
+        s_.diag(ps_.pos(), Diag::not_supported, Tk::kw_template);
+        return bad();
+      }
+      parse::Declarator d = ps_.declarator(spec.type, /*abstract=*/false, /*typedef_=*/false, conversion);
       if (!d.ok || !d.named) return bad();
+      if (conversion && !d.function) {
+        s_.diag(d.name_at, Diag::conversion_parameters);
+        return bad();
+      }
       if (literal_operator_named(d.name)) {
         s_.diag(d.name_at, Diag::literal_operator_scope);
         return bad();
@@ -3870,7 +3893,10 @@ private:
     if (spec.is_consteval) flags |= sema::decl_flag::consteval_;
     if (spec.is_inline || spec.is_constexpr || spec.is_consteval || is_def) flags |= sema::decl_flag::inline_;
     if (member_declared(d.name, fn ? std::optional(d.type) : std::nullopt)) {
-      s_.diag(d.name_at, Diag::redeclared_member, d.name);
+      if (fn && s_.ins().names.spelling(d.name) == lex::conversion_function_name)
+        s_.diag(d.name_at, Diag::conversion_redeclared, types.rec(d.type).inner);
+      else
+        s_.diag(d.name_at, Diag::redeclared_member, d.name);
       return false;
     }
     Ex init;
