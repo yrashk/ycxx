@@ -294,6 +294,11 @@ public:
     return f.cv != Cv::none || f.ref != ast::RefQual::none;
   }
   bool is_array(QualType q) const { return ast::is_array(*ins_, q); }
+  // Peel every array extent. A non-array type is returned as given.
+  QualType innermost_array_element(QualType q) const {
+    while (is_array(q)) q = canonical(rec(q).inner);
+    return q;
+  }
   bool is_class(QualType q) const { return ins_->types.is<ast::TClass>(ins_->types.canon(q)); }
   bool is_reference(QualType q) const { return ast::is_reference(*ins_, q); }
   bool is_enum(QualType q) const { return ins_->types.is<ast::TEnum>(ins_->types.canon(q)); }
