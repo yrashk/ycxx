@@ -915,6 +915,43 @@ public:
     return fail(Diag::trivial_copyability_unsupported, operand);
   }
 
+  Ex destructibility_expr(QualType operand, u32 begin, u32 end) {
+    const Types& ts = types();
+    QualType element = ts.canonical(operand);
+    const engine::Loc loc = type_trait_loc(begin);
+    const auto fail = [&](Diag d, const auto&... args) -> Ex {
+      diag_at(loc, d, args...);
+      return {NodeId::none, begin, end};
+    };
+    if (ts.is_dependent(element)) {
+      if (q_->in_type_trait_pattern())
+        if (auto value = templates().unary_trait_value(ast::DepOp::is_destructible, element)) {
+          q_->record_dependent_type_trait_operand(loc);
+          return literal(builtin(Builtin::bool_), *value, ValueCategory::prvalue, begin, end);
+        }
+      return fail(Diag::destructibility_dependent);
+    }
+    // References are destructible even when the referent is incomplete. An unknown-bound
+    // array gives false; only a bounded array queries its ultimate element ([meta.unary.prop]).
+    if (ts.is_reference(element)) return bool_literal(true, begin, end);
+    while (ts.is_array(element)) {
+      const TypeRec array = ts.rec(element);
+      if (array.bound_value == ConstId::none) return bool_literal(false, begin, end);
+      element = ts.canonical(array.inner);
+    }
+    if (ts.is_function(element) || ts.is_void(element)) return bool_literal(false, begin, end);
+    if (!ts.is_enum(element) && ts.is_scalar(element)) return bool_literal(true, begin, end);
+    if (ts.is_class(element)) {
+      const EntityId cls = ts.class_of(element);
+      const auto demand = q_->type_trait_at_demand(cls, loc);
+      if (!(demand ? *demand : q_->is_complete_at_source(cls))) {
+        if (q_->type_trait_instantiation_failed(cls)) return {NodeId::none, begin, end};
+        return fail(Diag::destructibility_incomplete, element);
+      }
+    }
+    return fail(Diag::destructibility_unsupported, operand);
+  }
+
   // [meta.unary.prop]: each base must also be empty. A nonempty contributor
   // settles the result even when another part of the hierarchy is unknown.
   std::optional<bool> class_is_empty(EntityId cls) {
@@ -1259,6 +1296,7 @@ public:
   Ex trait_expr(lex::TypeTrait t, NameId name, std::span<const QualType> args, u32 begin, u32 end) {
     using enum lex::TypeTrait;
     if (t == is_trivially_copyable) return trivial_copyability_expr(args[0], begin, end);
+    if (t == is_destructible) return destructibility_expr(args[0], begin, end);
     if (t == is_empty) return empty_expr(args[0], begin, end);
     QualType b = builtin(Builtin::bool_);
     auto structural_trait = [&](std::optional<ConstId> v) {

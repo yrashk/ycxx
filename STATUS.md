@@ -1804,6 +1804,14 @@ session's.*
   later demand. A variable-template partial specialization with a declared type such as
   `Tag<empty<T>>` remains unsupported.
   `__has_builtin(__is_empty)` continues to answer 1 ([meta.unary.prop], #218).
+- `__is_destructible(T)` gives true for references, including references to incomplete types,
+  and for supported non-enum scalars and bounded arrays of them. It gives false for cv `void`,
+  function types, and arrays of unknown bound. Incomplete class operands and bounded arrays of
+  incomplete classes get a distinct diagnostic. Complete class and enum operands remain
+  unsupported. Supported class-template bases and variable-template initializers replay dependent
+  operands. The class completeness check uses the written point for concrete operands and the
+  demand point for dependent operands. `__has_builtin` answers 0 while support is partial
+  ([meta.unary.prop], #218).
 - Listed in docs/EXTENSIONS.md. Tests: `tests/own/builtins/`. `<cstdio>`: 53 → 33 errors.
 - Not yet (#211 follow-up): the built-ins that need the object model, such as
   class constructibility, assignability and general convertibility, remaining `__is_trivially_*` and
