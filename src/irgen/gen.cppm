@@ -229,6 +229,11 @@ class Gen {
     std::uint64_t imms[] = {word(ty(p.type)), 0};
     stateful(ir::Op::store, {}, ops, imms, access_flags(p.type));
   }
+  // A nullptr_t initializer writes storage before the qualified object's lifetime begins.
+  Place initializing_place(Place p) {
+    if (is_nullptr(p.type)) p.type = ast::without_cv(ty(p.type));
+    return p;
+  }
   ValueId address(At a) {
     Place p = lvalue(a);
     if (p.bit_field) unsupported(a, "as an addressable object (a bit-field has no address)");
@@ -430,7 +435,7 @@ class Gen {
       bool automatic_nullptr = rec.entity == ast::EntityId::none && is_nullptr(t);
       Place p = begin_object(t, automatic_nullptr ? ir::Init::erroneous : ir::Init::indeterminate);
       if (i < fn_.local_values.size() && fn_.local_values[i]) {
-        store(p, constant(t, *fn_.local_values[i]));
+        store(initializing_place(p), constant(t, *fn_.local_values[i]));
         start_lifetime(p);
       } else {
         ValueId ops[] = {p.ptr};
@@ -662,10 +667,7 @@ class Gen {
     if (auto b = jump_bindings_.find(v.local); b != jump_bindings_.end()) store(b->second, p.ptr);
     if (has_init)
       full_expression([&] {
-        // A nullptr_t initializer writes storage before the qualified object's lifetime begins.
-        Place target = p;
-        if (is_nullptr(target.type)) target.type = ast::without_cv(ty(target.type));
-        initialize(target, child(a, v.init), zeroed);
+        initialize(initializing_place(p), child(a, v.init), zeroed);
         return 0;
       });
     bool vacuous = v.destructor == ast::EntityId::none && (!has_init || is<ast::DefaultInit>(child(a, v.init)));
