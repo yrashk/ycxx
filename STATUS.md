@@ -971,6 +971,10 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   data members (in-class `static const`/`constexpr` values, out-of-class definitions) are entities
   scoped to their class (`EntityRec::scope`); `class_def` lists them in `ClassRec::members`.
   A qualified declarator `C::m` defines the member C declares with that type.
+- In-class conversion-function declarations ([class.conv.fct], #339) can use a class alias
+  as the target, including a dependent alias in a class template. The canonical target type
+  and the member function's qualifiers distinguish declarations. General conversion
+  selection remains tracked in #339.
 - Bodies of member functions are complete-class contexts: class member lookup comes before
   namespace lookup, and their class is complete there. `This` and implicit member access
   (`Member` on `this`), bound member functions (a `Member` of type `bound_member` that only a call
@@ -1171,6 +1175,10 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   initializes a character-array element of an aggregate. A default member initializer that is
   not a scalar constant, in a class without constructors, is now diagnosed (#118) instead of
   being dropped.
+- Leading standard attributes on ordinary data members and member functions are accepted
+  ([class.mem.general], #190). The parser diagnoses unbalanced arguments in these prefixes
+  ([dcl.attr.grammar]) and attributes before access labels ([class.access.spec]). Other attribute
+  placements still have the balance gap tracked in #190. Attribute effects remain tracked in #305.
 - Tests: `tests/own/decls` (11, three from the review). Five more draft examples pass.
 - Not yet: `sizeof`, `alignof`, `decltype`, `static_cast` and other casts, operator functions,
   unions (the next steps of #133); asm labels on class members and the other gaps of #190.
@@ -1904,7 +1912,18 @@ What the process allocates, attributed to the engine's cells, in the trace and t
     type through multiple base subobjects is accessible when any of its lookup paths is
     accessible. Distinct competing types are ambiguous. Qualified and elaborated forms are
     tracked in #361. See [the lookup design](docs/design/injected-class-names.md).
-  - Implicit copy assignment's calls to subobject `operator=` remain tracked in #360.
+  - Nontrivial copy assignment of base subobjects remains tracked in #360.
+
+## Implicit copy assignment of class members (#360, 2026-11-20)
+
+- Ordinary non-template classes without bases use member overload resolution for assignment.
+  An implicitly declared copy derives its parameter qualifiers from the subobjects' signatures.
+  Its synthesized body assigns scalar and class members in declaration order and returns
+  `*this`. Unusable subobject assignments are diagnosed on use. Operator notation sequences
+  the right operand first, including when it calls an explicit overload.
+- Proven trivial operations still use the existing representation copy. The remaining special
+  member, implicit move, and nontrivial base, array and union cases stay in #244 and #360.
+  [Design](docs/design/implicit-copy-assignment.md)
 
 ## Templates, ζ step 9: member function templates (#88, #314, 2026-11-19)
 

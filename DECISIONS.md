@@ -361,6 +361,9 @@ specified by the accepted [optimization design](docs/design/optimization.md) (#3
      Nodes hold no position; a child edge holds its offset relative to the parent, and a red view on
      the stack computes positions. *Reason:* equal subtrees are one node; the IR needs implicit
      operations explicit. (§3)
+   - **Implicit copy assignment** of ordinary class members uses member overload selection and
+     a synthesized body when required. The AST preserves operand order and carries the proof
+     for trivial class copies. Astra reviewed the [assignment design](docs/design/implicit-copy-assignment.md) (#360).
    - **Identities.** `DeclId = (ItemId, ordinal)` for written, synthesized and injected
      declarations, none inside bodies; structural `EntityId`s that include module attachment and
      trailing requires-clauses, with local entities numbered as the Itanium ABI does. *Reason:*

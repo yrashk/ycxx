@@ -134,6 +134,12 @@ arrays of supported scalar types, including arithmetic on saved pointers just pa
 Both targets support `constexpr` constructors in class definitions and plain out-of-class
 definitions for runtime construction. [#157](https://github.com/yrashk/ycxx/issues/157)
 
+In-class conversion functions can name a class type alias as their conversion target,
+including a dependent alias in a class template. [#339](https://github.com/yrashk/ycxx/issues/339)
+
+Both targets accept leading `[[…]]` attributes on ordinary data and function member declarations.
+[#190](https://github.com/yrashk/ycxx/issues/190)
+
 **Language on macOS.** Programs can use:
 - the fundamental integer, character and floating types, pointers, arrays, references and
   enumerations, including opaque declarations of named enums in their namespaces; `float`,
@@ -166,6 +172,8 @@ definitions for runtime construction. [#157](https://github.com/yrashk/ycxx/issu
   [#293](https://github.com/yrashk/ycxx/issues/293)
 - pointers and references to arrays of unknown bound, and template partial specializations
   that match unknown-bound array types. [#222](https://github.com/yrashk/ycxx/issues/222)
+- implicit lvalue copy assignment for ordinary classes without bases, including class members
+  with their own assignment operators. [#360](https://github.com/yrashk/ycxx/issues/360)
 - classes and unions: data and static members, named data members of unnamed union type,
   member functions, constructors and destructors
   with RAII, aggregate and designated initialization, namespace-scope objects initialized by
