@@ -543,6 +543,9 @@ struct EntityRec {
   std::vector<ast::TemplateParamSema> closure_head{};
   // An unnamed type in a class has a lexical ordinal in that scope (Itanium ABI §5.1.5.5).
   std::optional<u32> unnamed_type_ordinal{};
+  // An unnamed enumeration's first enumerator and canonical underlying `type` denote it for
+  // linkage purposes ([dcl.enum]/12). Neither binds the type's name in source lookup.
+  std::optional<NameId> enum_linkage_name{};
 };
 
 class Entities {
@@ -586,6 +589,10 @@ public:
     if (r.kind == EntityKind::class_) f = ast::mix(f, r.head);
     if (r.unnamed_type_ordinal)
       f = ast::mix(ast::mix(f, ast::seed("ycxx.sema.unnamed-type-in-class")), *r.unnamed_type_ordinal);
+    if (r.enum_linkage_name) {
+      f = ast::mix(f, ins_->names.fp(*r.enum_linkage_name));
+      f = ast::mix(f, types_->fp(r.type));
+    }
     if (r.templ != EntityId::none) {
       f = ast::mix(f, ins_->entities.fp(r.templ));
       for (const ast::TemplateArg& a : r.args) f = mix_arg(f, a);
@@ -911,6 +918,7 @@ struct World {
     types.class_name = [this](EntityId e) {
       const EntityRec& r = entities.rec(e);
       if (r.unnamed_type_ordinal) return std::string("(unnamed union)");
+      if (r.enum_linkage_name) return std::string("(unnamed enum)");
       std::string n(ins.names.spelling(r.name));
       return n.empty() ? std::string("(lambda)") : n;  // a closure type ([expr.prim.lambda.closure])
     };

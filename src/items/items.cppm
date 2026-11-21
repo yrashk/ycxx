@@ -712,10 +712,11 @@ private:
     for (u32 n = key + 1; n < it.brace_begin; ++n) {
       Tk t = kind(n);
       if (t == Tk::l_square || t == Tk::l_paren) n = match(n) - 1;
+      else if (gnu_extension(n)) n = match(n + 1) - 1;
       else if (t == Tk::less) ++angle;
       else if (t == Tk::greater) --angle;
       else if (t == Tk::colon && angle <= 0) break;
-      else if (t == Tk::identifier && angle <= 0 && !is_name(n, "final")) {
+      else if (t == Tk::identifier && angle <= 0 && (is_enum || !is_name(n, "final"))) {
         if (kind(n + 1) == Tk::coloncolon) {
           if (qual == none) qual = n;
         } else {
@@ -732,7 +733,8 @@ private:
       }
       add(k, std::string(name(head)), head,
           name_flag::type | name_flag::definition | (friend_ ? name_flag::friend_ : 0));
-    } else if (!is_enum && it.unnamed_type_ordinal != none) {
+    } else if (is_enum || it.unnamed_type_ordinal != none) {
+      // The type has the first declaration ordinal even when it binds no name.
       add(k, {}, key, name_flag::type | name_flag::definition);
     }
     if (is_enum) {

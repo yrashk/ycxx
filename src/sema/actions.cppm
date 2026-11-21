@@ -1021,6 +1021,10 @@ public:
     }
     if (namespace_lambda && namespace_lambda->name == n && namespace_lambda->scope == *s.ns)
       return undeduced_namespace_lambda(n, name_at, end);
+    if (defining_unnamed_enum_scope == s.ns)
+      for (const OwnDecl& d : own)
+        if (d.name == n && d.enum_initializer != ConstId::none)
+          return literal(d.sema.type, d.enum_initializer, ValueCategory::prvalue, begin, end);
     std::vector<ast::DeclSema> found = q_->namespace_members(*s.ns, n);
     if (found.empty()) {
       diag(name_at, Diag::no_namespace_member, n);
@@ -3065,8 +3069,12 @@ public:
   struct OwnDecl {
     NameId name;
     ast::DeclSema sema;
+    // Within an unnamed enumeration's list, its earlier enumerators already have values, but
+    // their enclosing entity depends on the underlying type chosen at the closing brace.
+    ConstId enum_initializer = ConstId::none;
   };
   std::vector<OwnDecl> own;
+  std::optional<EntityId> defining_unnamed_enum_scope;
 
   // ------------------------------------------------------------ member functions ([class.mfct])
 
@@ -4437,7 +4445,11 @@ public:
       return undeduced_namespace_lambda(name, begin, end);
     std::vector<ast::DeclSema> found;
     for (auto p = own.rbegin(); p != own.rend(); ++p)
-      if (p->name == name) found.push_back(p->sema);
+      if (p->name == name) {
+        if (p->enum_initializer != ConstId::none)
+          return literal(p->sema.type, p->enum_initializer, ValueCategory::prvalue, begin, end);
+        found.push_back(p->sema);
+      }
     // An earlier declarator of the member's own declaration (`static constexpr int a = 1, b = a;`).
     if (found.size() == 1 && current_class != EntityId::none && found[0].kind == ast::DeclKind::variable &&
         found[0].storage == ast::Storage::static_)
@@ -4635,9 +4647,9 @@ public:
   Ex decls_expr(std::vector<ast::DeclSema> found, bool any, NameId name, u32 begin, u32 end, bool callee = false,
                 bool unqualified = false) {
     std::erase_if(found, [](const ast::DeclSema& d) { return d.kind == ast::DeclKind::namespace_; });
-    // A class hidden by a variable or function of the same name ([basic.scope.hiding]/2).
-    if (std::ranges::any_of(found, [](const ast::DeclSema& d) { return d.kind != ast::DeclKind::class_; }))
-      std::erase_if(found, [](const ast::DeclSema& d) { return d.kind == ast::DeclKind::class_; });
+    // Class and enumeration names can be hidden by other declarations ([basic.lookup.general]/4).
+    auto tag = [](const ast::DeclSema& d) { return d.kind == ast::DeclKind::class_ || d.kind == ast::DeclKind::enum_; };
+    if (std::ranges::any_of(found, [&](const ast::DeclSema& d) { return !tag(d); })) std::erase_if(found, tag);
     if (found.empty()) {
       if (!any && callee) {
         ExprInfo info{builtin(Builtin::dependent), ValueCategory::lvalue, 0};
