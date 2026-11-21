@@ -6631,14 +6631,21 @@ public:
     if (std::ranges::none_of(operands, user_type) || any_dependent(operands)) return std::nullopt;
     NameId name = ins().names.intern(std::string("operator") + std::string(op));
     std::size_t n = diag_count();
+    std::optional<Ex> ref_qualified_member;
     QualType lt = types().referee(operands[0].type());
     if (types().is_class(lt))
       if (const ClassRec* c = class_rec(types().class_of(lt));
           c && std::ranges::any_of(c->members, [&](const MemberDeclRec& m) { return m.name == name && m.is_function && !m.is_static; })) {
         Ex m = member(operands[0], false, name, operands[0].end, op_at, op_at);
         Ex r = m.ok() ? call(m, std::vector<Ex>(operands.begin() + 1, operands.end()), end, op_at) : m;
-        if (r.ok()) return Ex{r.id, begin, end, r.info};
-        truncate_diags(n);
+        if (r.ok()) {
+          auto selected = as<ast::MemberCall>(r);
+          if (!selected || types().rec(w_->entities.rec(selected->function).type).fn_ref == ast::RefQual::none)
+            return Ex{r.id, begin, end, r.info};
+          ref_qualified_member = Ex{r.id, begin, end, r.info};
+        } else {
+          truncate_diags(n);
+        }
       }
     std::vector<ast::DeclSema> set;
     auto add = [&](const ast::DeclSema& d) {
@@ -6664,11 +6671,23 @@ public:
       for (const Ex& o : operands)
         if (auto ns = associated_namespace(o.type()))
           for (const ast::DeclSema& d : q_->namespace_members(*ns, name)) add(d);
-    if (set.empty()) return std::nullopt;
+    if (set.empty()) return ref_qualified_member;
     ExprInfo info{builtin(Builtin::overload_set), ValueCategory::lvalue, 0};
     Ex callee = node(ast::DeclRef{info, set.front().entity}, begin, begin, info);
     overloads_[std::to_underlying(callee.id)] = std::move(set);
     Ex r = call(callee, std::move(operands), end, op_at);
+    if (ref_qualified_member) {
+      // Joint ranking is needed when the ref-qualified member competes with
+      // at least one viable nonmember candidate.
+      bool competing = r.ok();
+      for (std::size_t i = n; !competing && i < diags_->size(); ++i)
+        competing = (*diags_)[i].id == diag_id(Diag::deleted_function) ||
+                    (*diags_)[i].id == diag_id(Diag::ambiguous_call);
+      truncate_diags(n);
+      if (!competing) return ref_qualified_member;
+      diag(op_at, Diag::ref_qualified_operator_candidates);
+      return Ex{NodeId::none, begin, end};
+    }
     if (!r.ok()) {
       // A deleted or ambiguous choice makes the expression ill-formed ([over.match.oper]/3,
       // [over.match.best]); only when no candidate is viable does the built-in operator apply.
