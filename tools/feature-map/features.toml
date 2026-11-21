@@ -1602,8 +1602,8 @@ clauses = ['class.copy.ctor', 'class.copy.assign', 'special']
 std = 'C++98'
 detect = '\boperator\s*=\s*\('
 status = 'partial'
-issues = [244]
-note = 'user-declared assignment deleting the implicit copy, suppressing the implicit move'
+issues = [244, 360]
+note = 'memberwise implicit lvalue copy assignment for ordinary non-template classes without bases. Remaining special-member declaration, implicit move, and nontrivial base and array assignment rules'
 probe = '''
 struct S { int v; S(int x) : v(x) {} S(const S& o) : v(o.v + 1) {} S& operator=(const S& o) { v = o.v; return *this; } };
 int main() { S a(1); S b(a); S c(5); c = b; return c.v == 2 ? 0 : 1; }
@@ -1621,8 +1621,9 @@ struct S { int v; S(int x) : v(x) {} explicit operator bool() const { return v !
 int f(S s) { return s.v; }
 int main() { S s = 3; int i = s; return (s && f(2) == 2 && i == 3) ? 0 : 1; }
 '''
-status = 'missing'
-issues = [157, 219]
+status = 'partial'
+issues = [157, 219, 339]
+note = 'In-class conversion-function declarations can use dependent class aliases as targets'
 
 [[feature]]
 id = 'class-explicit-bool'
