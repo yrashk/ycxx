@@ -212,7 +212,7 @@ private:
       }
       return values.aggregate(t, elements);
     }
-    if (types.is_pointer(t)) return values.null_pointer(t);
+    if (types.is_pointer(t) || types.is(t, Builtin::nullptr_t)) return values.null_pointer(t);
     if (types.is_member_pointer(t) && !types.is_function(types.rec(t).inner))
       return s_->ins().intern_value(ast::VMemberPtr{Types::unqualified(types.canonical(t))});
     if (types.is_enum(t)) return values.integer(s_->underlying_of(t), 0);

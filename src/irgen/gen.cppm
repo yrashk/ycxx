@@ -4,11 +4,10 @@
 // The shape follows L1's (§2.2): a CFG of blocks with arguments that threads one `!state` chain.
 // - Every block but the entry takes the state as its first parameter; the entry takes the state,
 //   then the function's parameters.
-// - Every parameter and block-scope variable is an `alloc` with an init kind ([dcl.init.general],
-//   P2795): `erroneous` without an initializer, else `indeterminate`. Its initializing store comes
-//   before `obj.begin`, since a scalar's lifetime begins when its initialization is complete
-//   ([basic.life]). Every scope exit (the end of a block, `return`, `break`, `continue`) emits
-//   `obj.end` and `dealloc` for the scope's objects in reverse order of declaration.
+// - Parameter and block-scope objects use `alloc` with an initialization kind. A scalar's
+//   initializing store comes before `obj.begin`, since its lifetime begins when its initialization
+//   is complete ([basic.life]). Every scope exit (the end of a block, `return`, `break`,
+//   `continue`) emits `obj.end` and `dealloc` in reverse declaration order.
 // - Names are read and written through `load` and `store` with their type and access path.
 //   Values flow between blocks only as block arguments: `&&`, `||` and `?:` join on one.
 // - Signed `+ - *` and negation carry `nsw`, so overflow is UB ([expr.pre]); unsigned arithmetic
@@ -415,7 +414,7 @@ class Gen {
         slots_[i] = Place{pure(ir::Op::global, facts_.pointer_to(rec.type), {}, {word(rec.entity)}), rec.type};
     }
     // A thunk's locals: those with values are const objects; any other is an object whose
-    // lifetime has ended, so evaluating a use of it fails, while naming it unevaluated does not.
+    // lifetime has ended, so reading or modifying it fails.
     for (uint32_t i = 0; fn_.thunk && i < slots_.size(); ++i) {
       if (slots_[i]) continue;
       const ast::LocalRec rec = in_.seqs.at(fn_.body.locals, i);
@@ -426,7 +425,10 @@ class Gen {
       if (cls(t) == TypeClass::record || cls(t) == TypeClass::array || facts_.is_reference(t) ||
           in_.types.is<ast::TMemberPtr>(in_.types.canon(t)))
         continue;
-      Place p = begin_object(t, ir::Init::indeterminate);
+      // An enclosing automatic nullptr_t can be converted without reading its object (CWG 2907).
+      // Give that synthetic object ordinary automatic storage's initial fill ([basic.indet]).
+      bool automatic_nullptr = rec.entity == ast::EntityId::none && is_nullptr(t);
+      Place p = begin_object(t, automatic_nullptr ? ir::Init::erroneous : ir::Init::indeterminate);
       if (i < fn_.local_values.size() && fn_.local_values[i]) {
         store(p, constant(t, *fn_.local_values[i]));
         start_lifetime(p);
@@ -647,10 +649,12 @@ class Gen {
       return;
     }
     bool zeroed = has_init && value_initializes(child(a, v.init));
-    bool partial = has_init && !zeroed && default_initializes(child(a, v.init));
+    // Conversion of nullptr_t during initialization does not access its object ([conv.lval]).
+    // Its storage starts with erroneous bytes ([basic.indet]).
+    bool indeterminate = has_init && !zeroed && !is_nullptr(rec.type) && !default_initializes(child(a, v.init));
     Place p = begin_object(rec.type, zeroed ? ir::Init::zero
-                                     : has_init && !partial ? ir::Init::indeterminate
-                                                            : ir::Init::erroneous);
+                                     : indeterminate ? ir::Init::indeterminate
+                                                     : ir::Init::erroneous);
     debug_.vars.push_back({ir::LocalId(v.local), {last_node()}});
     // The name is in scope in its own initializer ([basic.scope.pdecl]); reading it there reads an
     // object whose lifetime has not begun.
@@ -658,7 +662,10 @@ class Gen {
     if (auto b = jump_bindings_.find(v.local); b != jump_bindings_.end()) store(b->second, p.ptr);
     if (has_init)
       full_expression([&] {
-        initialize(p, child(a, v.init), zeroed);
+        // A nullptr_t initializer writes storage before the qualified object's lifetime begins.
+        Place target = p;
+        if (is_nullptr(target.type)) target.type = ast::without_cv(ty(target.type));
+        initialize(target, child(a, v.init), zeroed);
         return 0;
       });
     bool vacuous = v.destructor == ast::EntityId::none && (!has_init || is<ast::DefaultInit>(child(a, v.init)));
