@@ -97,10 +97,11 @@ virtual table address point. [Itanium ABI §2.4](https://itanium-cxx-abi.github.
 
 The native-unit check admits these consumer declarations and checks the unit for virtual
 definitions. A unit can also define one later virtual member out of class, with a
-directly written integer signature and a matching exception specification. The first
-eligible declaration is the Itanium key function. The peer defines the key and provides
-the virtual table and RTTI. The supported member uses the normal implicit receiver and
-direct field offsets. [Itanium ABI §5.2.3](https://itanium-cxx-abi.github.io/cxx-abi/abi.html#vague-vtable)
+directly written integer signature and a matching exception specification. The declaration
+and definition use an omitted specification, bare `noexcept`, or a `true` or `false` literal
+condition. The first eligible declaration is the Itanium key function. The peer defines
+the key and provides the virtual table and RTTI. The supported member uses the normal
+implicit receiver and direct field offsets. [Itanium ABI §5.2.3](https://itanium-cxx-abi.github.io/cxx-abi/abi.html#vague-vtable)
 
 The layout applies to field accesses on objects the provider has already
 constructed. Whole-object storage, construction, destruction, copying, and by-value transfer

@@ -98,12 +98,28 @@ def main():
         definition = b'int Gauge::measure(int x) const {'
         mismatch = measure_source.replace(definition, b'int Gauge::measure(int x) const noexcept {', 1)
         (scope / 'nonkey' / 'exception-mismatch.cpp').write_bytes(mismatch)
-        (scope / 'nonkey' / 'noexcept.cpp').write_bytes(
-            mismatch.replace(measure_decl, b'    virtual int measure(int) const noexcept;\n', 1))
+        nonthrowing_decl = b'    virtual int measure(int) const noexcept;\n'
+        nonthrowing = mismatch.replace(measure_decl, nonthrowing_decl, 1)
+        (scope / 'nonkey' / 'exception-parameter-definition.cpp').write_bytes(
+            b'char x;\n' + nonthrowing.replace(b'noexcept {', b'noexcept(sizeof(x) == 1) {', 1))
+        conditional_decl = b'    virtual int measure(int x) const noexcept(sizeof(x) == 1);\n'
+        (scope / 'nonkey' / 'exception-parameter-declaration.cpp').write_bytes(
+            b'char x;\n' + nonthrowing.replace(nonthrowing_decl, conditional_decl, 1))
+        head, body = measure_source.split(b'\n\n', 1)
+        inline_friend = b'\n\nstruct Friend { friend inline int Gauge::measure(int) const; };\n'
+        # [dcl.inline]: this nondefining friend needs an earlier inline declaration.
+        (scope / 'nonkey' / 'inline-friend.cpp').write_bytes(head + inline_friend + body)
+        (scope / 'nonkey' / 'prior-inline-friend.cpp').write_bytes(
+            head.replace(b'virtual int measure', b'virtual inline int measure', 1) + inline_friend)
         compile(linux, '-fsyntax-only', 'nonkey/measure.cpp')
         compile(linux, '-fsyntax-only', 'nonkey/controls/in-class.cpp')
-        compile(linux, '-c', 'nonkey/noexcept.cpp', '-o', 'nonkey-noexcept.o')
-        assert (scope / 'nonkey-noexcept.o').is_file()
+        compile(linux, '-fsyntax-only', 'nonkey/prior-inline-friend.cpp')
+        for source in (nonthrowing, nonthrowing.replace(b'noexcept {', b'noexcept(true) {', 1),
+                       mismatch.replace(b'noexcept {', b'noexcept(false) {', 1)):
+            (scope / 'nonkey' / 'noexcept.cpp').write_bytes(source)
+            compile(linux, '-c', 'nonkey/noexcept.cpp', '-o', 'nonkey-noexcept.o')
+            assert (scope / 'nonkey-noexcept.o').is_file()
+            (scope / 'nonkey-noexcept.o').unlink()
         for target, source, diagnostic in (
             (linux, 'nonkey/controls/key-owner.cpp', virtual_definition_error),
             (linux, 'nonkey/controls/inline.cpp', virtual_definition_error),
@@ -112,6 +128,9 @@ def main():
             (linux, 'nonkey/late-key.cpp', virtual_definition_error),
             (linux, 'nonkey/extra.cpp', native_virtual_error),
             (linux, 'nonkey/exception-mismatch.cpp', "conflicting declaration of 'measure'"),
+            (linux, 'nonkey/exception-parameter-definition.cpp', virtual_definition_error),
+            (linux, 'nonkey/exception-parameter-declaration.cpp', virtual_definition_error),
+            (linux, 'nonkey/inline-friend.cpp', "'friend' is not supported yet"),
             (darwin, 'nonkey/measure.cpp', virtual_definition_error),
         ):
             compile(target, '-c', source, '-o', 'nonkey-guard.o', error=diagnostic)
