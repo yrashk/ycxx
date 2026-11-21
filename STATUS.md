@@ -1683,13 +1683,18 @@ session's.*
   [#218](https://github.com/yrashk/ycxx/issues/218).
   [Replay design](docs/design/dependent-trivial-copyability-replay.md)
   `__has_builtin(__is_trivially_copyable)` answers 0 while support is partial ([meta.unary.prop]).
-- A direct `__is_constructible(T, Args...)` checks concrete operand types at the original
-  source point. Its domain includes complete types, cv `void`, and arrays of unknown bound.
-  It folds function and cv `void` targets, scalar and reference targets with no arguments,
-  and arithmetic targets with arithmetic or arithmetic-reference arguments. Incomplete
-  operands, other complete combinations, and dependent operands or pack expansions get
-  hard diagnostics. `__has_builtin(__is_constructible)` answers 0 while support is partial
-  ([meta.unary.prop], #218). [Design](docs/design/direct-constructibility.md)
+- `__is_constructible(T, Args...)` checks concrete operand types at the original source point.
+  Its domain includes complete types, cv `void`, and arrays of unknown bound. It folds function
+  and cv `void` targets, scalar and reference targets with no arguments, and arithmetic targets
+  with arithmetic or arithmetic-reference arguments. Incomplete operands and other complete
+  combinations get hard diagnostics. A dependent target or argument, including a type pack
+  expansion among the arguments, can appear in the supported class-template base and variable
+  template initializer replay paths. Replay checks newly concrete types at the actual demand
+  and retains hard errors at the builtin spelling. The target must be a separately written
+  type-id. General dependent uses remain in [#218](https://github.com/yrashk/ycxx/issues/218).
+  `__has_builtin(__is_constructible)` answers 0 while support is partial ([meta.unary.prop]).
+  [Direct design](docs/design/direct-constructibility.md)
+  · [Replay design](docs/design/constructibility-tail-pack-replay.md)
 - Listed in docs/EXTENSIONS.md. Tests: `tests/own/builtins/`. `<cstdio>`: 53 → 33 errors.
 - Not yet (#211 follow-up): the built-ins that need the object model, such as
   class constructibility, `__is_convertible`, `__is_assignable`, other `__is_trivially_*` and

@@ -350,6 +350,8 @@ enum class Diag : std::uint32_t {
   constructibility_incomplete [[=message{Severity::error, "incomplete type '{0:t}' cannot be queried by '__is_constructible'"}]],
   constructibility_unsupported [[=message{Severity::error, "constructibility of '{0:t}' with these argument types is not supported yet"}]],
   constructibility_pack [[=message{Severity::error, "pack expansions in '__is_constructible' are not supported yet"}]],
+  constructibility_target_pack [[=message{Severity::error, "a pack expansion as the target of '__is_constructible' is not supported yet"}]],
+  constructibility_substitution [[=message{Severity::error, "substitution of the operand type '{0:t}' in '__is_constructible' failed"}]],
 };
 
 // A `{N:r}` argument: why an evaluation was not constant. 0 is an expression the front end
@@ -409,8 +411,9 @@ constexpr bool is_limit(engine::DiagId id) {
   message m = message_of(*d);
   return std::string_view(m.text).contains("not supported");
 }
-constexpr bool is_copyability_failure(engine::DiagId id) {
-  return id == diag_id(Diag::trivial_copyability_incomplete) || id == diag_id(Diag::trivial_copyability_unsupported);
+constexpr bool is_type_trait_failure(engine::DiagId id) {
+  return id == diag_id(Diag::trivial_copyability_incomplete) || id == diag_id(Diag::trivial_copyability_unsupported) ||
+         id == diag_id(Diag::constructibility_incomplete) || id == diag_id(Diag::constructibility_unsupported);
 }
 // Whether a diagnostic stays an error where a substitution failure means "not satisfied": a limit
 // of ycxx's, an atomic constraint that is not a `bool` constant ([temp.constr.atomic]/3), or a
