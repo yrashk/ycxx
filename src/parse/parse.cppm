@@ -1535,12 +1535,12 @@ public:
         q_.from = p_->namespace_path(s_.world().entities.rec(c).scope);
       }
     };
-    ps_.declare_class = [this](NameId n, Tk key) -> std::optional<QualType> {
+    ps_.declare_class = [this](NameId n, Tk key, u32 at) -> std::optional<QualType> {
       if (p_->items().items[k_].parent != items::none &&
           p_->items().items[p_->items().items[k_].parent].kind == ItemKind::class_def)
         return std::nullopt;
       EntityId e = class_entity(n);
-      p_->classes_.record_class_key(e, key == Tk::kw_union);
+      record_class_key(e, key, at);  // an error leaves the earlier type available for recovery
       return s_.types().class_type(e);
     };
   }
@@ -1697,7 +1697,7 @@ private:
         if (!ps_.expect(Tk::semi)) return bad();
         ast::DeclSema sem = class_decl(*spec, false);
         sem.flags |= sema::decl_flag::specialization;
-        class_declared(sem, key);
+        if (!class_declared(sem, key, name_at)) return bad();
         return;
       }
     }
@@ -1728,11 +1728,12 @@ private:
       const Tk key = ps_.kind();
       if (Parser::is_class_key(key) && ps_.kind(1) == Tk::identifier && ps_.kind(2) == Tk::semi) {
         NameId name = ps_.name_of(ps_.tok(1));
+        u32 name_at = ps_.pos() + 1;
         ps_.bump();
         ps_.bump();
         ps_.bump();
         ast::DeclSema sem = class_template_decl(name, false);
-        class_declared(sem, key);
+        if (!class_declared(sem, key, name_at)) return bad();
         return;
       }
       // `template<…> using N = type-id;` declares an alias template ([temp.alias]).
@@ -1760,7 +1761,7 @@ private:
         ast::DeclSema sem = class_decl(*pattern, false);
         sem.flags |= sema::decl_flag::template_ | sema::decl_flag::partial;
         sem.template_params = b_.seq(std::span<const ast::TemplateParamSema>(s_.template_scopes.back()));
-        class_declared(sem, key);
+        if (!class_declared(sem, key, name_at)) return bad();
         return;
       }
       if (ps_.is(Tk::kw_template) || Parser::is_class_key(key) ||
@@ -1890,9 +1891,10 @@ private:
     if (spec.elaborated && ps_.is(Tk::semi)) {
       s_.settle_type_access(EntityId::none);
       // `class-key identifier ;` declares the class ([dcl.type.elab]); it stays incomplete until
-      // its definition.
+      // its definition. A standalone declaration introduces the name in this scope.
       ps_.bump();
-      if (spec.ok) class_declared(class_decl(s_.types().class_of(spec.type), false), spec.class_key);
+      if (spec.ok && !class_declared(class_decl(class_entity(spec.class_name), false), spec.class_key, spec.class_at))
+        return bad();
       if (!spec.ok || sema::Types::cv(spec.type) != sema::Cv::none || spec.is_static || spec.is_extern) bad();
       return;
     }
@@ -2341,7 +2343,7 @@ private:
     ast::DeclSema sem = class_decl(pattern, true);
     sem.flags |= sema::decl_flag::template_ | sema::decl_flag::partial;
     sem.template_params = b_.seq(std::span<const ast::TemplateParamSema>(s_.template_scopes.back()));
-    class_declared(sem, key);
+    if (!class_declared(sem, key, name_at)) return bad();
     p_->current_instantiation(pattern, k_, sem);
     ps_.seek(it_->brace_end);
     q_.own_class_complete = true;
@@ -2409,7 +2411,7 @@ private:
     }
     ast::DeclSema sem = class_decl(*spec, true);
     sem.flags |= sema::decl_flag::specialization;
-    class_declared(sem, key);
+    if (!class_declared(sem, key, name_at)) return bad();
     ps_.seek(it_->brace_end);
     q_.own_class_complete = true;
     if (!ps_.accept(Tk::semi)) {
@@ -2601,10 +2603,22 @@ private:
     return sem;
   }
 
-  void class_declared(const ast::DeclSema& sem, Tk key) {
-    p_->classes_.record_class_key(sem.entity, key == Tk::kw_union);
+  bool record_class_key(EntityId c, Tk key, u32 at) {
+    bool is_union = key == Tk::kw_union;
+    auto previous = sema::Templates(s_.world(), p_->classes_).is_union_class(c);
+    if (previous && *previous != is_union) {
+      s_.diag(at, Diag::conflicting_declaration, s_.world().entities.rec(c).name);
+      return false;
+    }
+    p_->classes_.record_class_key(c, is_union);
+    return true;
+  }
+
+  bool class_declared(const ast::DeclSema& sem, Tk key, u32 at) {
+    if (!record_class_key(sem.entity, key, at)) return false;
     decls_.push_back(sem);
     p_->declared(sem, k_);
+    return true;
   }
 
   // A class definition at namespace scope ([class.pre]): `class-key identifier { … }`, then
@@ -2678,8 +2692,8 @@ private:
     if (!template_ && clashes_with_using(name, name_at, ast::DeclKind::class_, s_.types().class_type(class_entity(name))))
       return bad();
     ast::DeclSema sem = template_ ? class_template_decl(name) : class_decl(class_entity(name), true);
+    if (!class_declared(sem, key, name_at)) return bad();
     s_.own.push_back({name, sem});
-    class_declared(sem, key);
     if (!bases.empty()) p_->set_bases(s_.types().class_of(sem.type), std::move(bases));
     if (base_pattern) p_->class_base_patterns_.emplace(k_, *base_pattern);
     if (template_) p_->current_instantiation(s_.types().class_of(sem.type), k_, sem);
@@ -2728,7 +2742,7 @@ private:
     sema::EntityRec entity{.kind = sema::EntityKind::class_, .name = s_.no_name(), .scope = owner,
                            .unnamed_type_ordinal = it_->unnamed_type_ordinal};
     ast::DeclSema head = class_decl(s_.world().entities.entity(std::move(entity)), true);
-    class_declared(head, key);
+    if (!class_declared(head, key, at)) return bad();
     p_->class_def(k_);
 
     ps_.seek(it_->brace_end);
