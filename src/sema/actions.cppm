@@ -5995,10 +5995,11 @@ public:
     return decls_expr(std::move(found), true, name, begin, end);
   }
 
-  // In a default-aligned scalar new-expression, the sole allocation argument is size_t
+  // In a default-aligned new-expression, the sole allocation argument is size_t
   // ([expr.new]). Every admitted written overload takes that exact first parameter. An
   // overload with additional, all-defaulted parameters ties the ordinary one ([over.match]).
-  bool ambiguous_scalar_allocation(NameId name) {
+  bool ambiguous_allocation(u32 at, bool array) {
+    const NameId name = ins().names.intern(allocation_name(AllocationFunction::allocate, array));
     for (const ast::DeclSema& d : written_allocation_declarations(name)) {
       if (d.kind != ast::DeclKind::function) continue;
       const auto count = types().rec(d.type).params.size();
@@ -6006,7 +6007,10 @@ public:
       auto draft = own_function_defaults.find(d.entity);
       auto defaults = draft != own_function_defaults.end() ? draft->second : defaults_of(d);
       Candidate candidate{d.entity, d.type, true, false, nullptr, std::move(defaults)};
-      if (candidate.required(count) == 1) return true;
+      if (candidate.required(count) == 1) {
+        diag(at, Diag::ambiguous_call, name);
+        return true;
+      }
     }
     return false;
   }
@@ -6054,12 +6058,7 @@ public:
       init = types().is(t, Builtin::bool_) && types().is(value.type(), Builtin::nullptr_t)
           ? to_bool(value, value.begin) : convert(value, t, value.begin);
     }
-    if (!init.ok()) return fail;
-    const NameId name = ins().names.intern(allocation_name(AllocationFunction::allocate));
-    if (ambiguous_scalar_allocation(name)) {
-      diag(begin, Diag::ambiguous_call, name);
-      return fail;
-    }
+    if (!init.ok() || ambiguous_allocation(begin, false)) return fail;
     QualType pointer = types().pointer(t);
     if (dependent(init)) return dependent_node({init}, begin, end, pointer);
 
@@ -6148,7 +6147,7 @@ public:
       return fail;
     }
     Ex count = convert(bound, builtin(w_->target.size_type), bound.begin);
-    if (!count.ok()) return fail;
+    if (!count.ok() || ambiguous_allocation(begin, true)) return fail;
     QualType pointer = types().pointer(t);
     if (dependent(count)) return dependent_node({count}, begin, end, pointer);
     auto size = layout_of(t, false);

@@ -4927,7 +4927,7 @@ private:
     }
     // [over.oper.general]/5 and [basic.stc.dynamic.allocation]/1: a tagged overload can use
     // ordinary default arguments, with the sole restriction on the allocation size parameter.
-    if (name == sema::allocation_name(sema::AllocationFunction::allocate) && !d.params.empty()) {
+    if (sema::is_allocating_name(name) && !d.params.empty()) {
       const auto& first = d.params.front();
       if (first.default_arg != NodeId::none || first.default_tokens) {
         s_.diag(first.at, Diag::default_arg_not_allowed);
