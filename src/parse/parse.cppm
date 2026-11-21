@@ -5182,11 +5182,12 @@ private:
       return false;
     };
     if (!d.function || d.qualified || ns_entity() != EntityId::none || lang != LangLinkage::cxx || template_ ||
-        explicit_ || spec.is_static || spec.is_inline || spec.is_typedef || spec.is_constexpr || spec.is_consteval ||
-        deleted_body() || !d.asm_label.empty())
+        explicit_ || spec.is_static || spec.is_typedef || spec.is_consteval || deleted_body() || !d.asm_label.empty())
       return unsupported();
 
     auto& world = s_.world();
+    if (world.matches_reserved_placement_function(name, d.type)) return defaults_allowed(d.params, true, d.name);
+    if (spec.is_inline || spec.is_constexpr) return unsupported();
     if (!world.matches_tagged_allocation_function(name, d.type, d.has_noexcept)) {
       if (!world.matches_allocation_function(name, d.type)) return unsupported();
       return defaults_allowed(d.params, true, d.name);

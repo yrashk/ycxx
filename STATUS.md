@@ -2753,6 +2753,12 @@ and runtime integration with ycxx's own linker remain under [#89]. See the
   redeclarations share the implicit entities. The Itanium mangler emits `na` and `da`, and
   Linux object tests call providers built with both GCC and Clang. Expression codegen and
   further allocation-function declarations remain in [#293](https://github.com/yrashk/ycxx/issues/293).
+- The four C++26 non-allocating placement functions can be declared and defined at global scope
+  ([new.delete.placement]). The two allocation functions take `size_t, void*` and return `void*`.
+  The two deallocation functions take `void*, void*` and return `void`. These signatures require
+  both arguments and a nonthrowing exception specification. Written `constexpr` definitions can
+  be called explicitly in constant expressions. Placement new-expressions, object lifetime and
+  cleanup remain in [#293](https://github.com/yrashk/ycxx/issues/293).
 - Native lowering supports initializers proven nonthrowing from the analyzed expression tree.
   Initializers that need an exception cleanup edge and constant evaluation of allocation remain
   in #293. Namespace-scope allocation uses the existing dynamic initialization path. The issue
