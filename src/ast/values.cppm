@@ -121,6 +121,12 @@ struct [[=dependent]] VDepFnParam {
   u16 index;
 };
 
+// A namespace variable template found at the point of definition, with dependent arguments.
+struct [[=dependent]] VDepVariable {
+  EntityId templ;
+  SeqId<TemplateArg> args;
+};
+
 enum class DepOp : u8 { is_same };
 
 // A dependent operation (§5.5). `is_same` has two ordered, canonical qualified type operands.
@@ -176,7 +182,7 @@ struct VConstraint {
 };
 
 using ValueKinds = closed_list<VInt, VFloat, VNullptr, VString, VLvalue, VEntity, VAggregate, VDepParam, VDepFnParam, VDepExpansion,
-                               VDepSizeofPack, VType, VAtom, VConstraint, VDepOp, VMemberPtr>;
+                               VDepSizeofPack, VType, VAtom, VConstraint, VDepOp, VMemberPtr, VDepVariable>;
 
 template <class T>
 constexpr bool is_value_kind = ValueKinds::contains<T>;

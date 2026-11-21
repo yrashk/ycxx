@@ -452,6 +452,7 @@ public:
   sema::Templates templates() {
     sema::Templates t(*w_, classes_);
     t.template_decl = [this](EntityId e) { return declaration(e, end()); };
+    t.variable_constant = [this](EntityId spec) { return constant_value(spec, end()); };
     return t;
   }
   void set_constant(EntityId e, ConstId c, u32 item) { constants_[std::to_underlying(e)] = {item, c}; }
