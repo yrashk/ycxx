@@ -30,9 +30,6 @@ freestanding C++ subset for x86-64 Linux. The standard library is out of reach. 
 
 ### What you can do today
 
-Concrete `auto(x)` and `auto{x}` decay-copy expressions support scalar and pointer values,
-including array and function decay. [#286](https://github.com/yrashk/ycxx/issues/286)
-
 **Compile and run programs on macOS.** `ycxx cxx a.cpp -o a` (also `-c`, `-fsyntax-only`, `-E`, `-I`,
 `-D`, `-std=c++26`, and `-fclass-call-abi=apple` to pass classes as Apple Clang does) builds an executable with ycxx's own front end, IR, AArch64 code generator
 and Mach-O linker. It also links object files from Clang or GCC. Errors are reported as
@@ -42,6 +39,9 @@ and Mach-O linker. It also links object files from Clang or GCC. Errors are repo
 tools/build
 build/bin/ycxx cxx hello.cpp -o hello && ./hello
 ```
+
+Concrete `auto(x)` and `auto{x}` decay-copy expressions support scalar and pointer values,
+including array and function decay. [#286](https://github.com/yrashk/ycxx/issues/286)
 
 **Preprocess binary resources.** Both targets support `#embed` and `__has_embed` with the standard
 parameters. [#125](https://github.com/yrashk/ycxx/issues/125)
