@@ -5884,8 +5884,11 @@ void Program::special_members(u32 item, EntityId cls, sema::ClassRec& rec) {
     const sema::ClassRec* m = types.is_class(t) ? classes_.find(types.class_of(t)) : nullptr;
     return !m || m->pod;
   };
-  bool user_assign = std::ranges::any_of(rec.members, [&](const sema::MemberDeclRec& m) {
-    return m.is_function && !m.is_static && w_->ins.names.spelling(m.name) == "operator=";
+  // [dcl.fct.def.default]/5: a first-declaration defaulted or deleted assignment is not
+  // user-provided. Its fields still have to satisfy the layout predicate below.
+  const bool user_provided_assignment = std::ranges::any_of(rec.members, [&](const sema::MemberDeclRec& m) {
+    return m.is_function && !m.is_static && !m.explicit_defaulted_assignment && !m.is_deleted &&
+           w_->ins.names.spelling(m.name) == "operator=";
   });
   bool one_access = std::ranges::adjacent_find(rec.fields, [&](const sema::FieldRec& a, const sema::FieldRec& b) {
                       return rec.access_of(a.entity) != rec.access_of(b.entity);
@@ -5895,7 +5898,7 @@ void Program::special_members(u32 item, EntityId cls, sema::ClassRec& rec) {
     return r && (!r->fields.empty() || !r->pod);
   });
   rec.pod = !rec.user_ctors && user_dtor == EntityId::none && rec.destructor == EntityId::none &&
-            !rec.copy_nontrivial() && !rec.copy_deleted && !user_move && !user_assign &&
+            !rec.copy_nontrivial() && !rec.copy_deleted && !user_move && !user_provided_assignment &&
             std::ranges::none_of(rec.fields, &sema::FieldRec::dmi) && one_access &&
             std::ranges::all_of(rec.fields, [&](const sema::FieldRec& f) { return pod_type(f.type); }) &&
             std::ranges::all_of(rec.bases, [&](const sema::BaseRec& b) { return pod_type(types.class_type(b.cls)); }) &&

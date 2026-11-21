@@ -52,7 +52,9 @@ Keep its written declaration, entity, access and parameter type. The definition
 is implicitly inline and constexpr. Preserve a written exception specification.
 The declaration counts as user-declared when determining implicit special members.
 An ordinary in-class deleted copy assignment also counts and participates in
-overload resolution as a deleted function.
+overload resolution as a deleted function. Both forms are non-user-provided on
+their first declaration, so either retains the base layout of an otherwise
+equivalent class with implicit assignment.
 [[dcl.fct.def.default]](https://eel.is/c++draft/dcl.fct.def.default) ·
 [[class.copy.assign]](https://eel.is/c++draft/class.copy.assign)
 
