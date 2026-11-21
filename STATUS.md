@@ -640,8 +640,8 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   freestanding linker retains these records in the read-only segment. The hosted linker
   supplies unwind discovery for the peer who throws and catches the exception.
   `unit.linux_cleanup_free_unwind` checks mixed hosted execution, omitted frames, and native
-  source, staged, and daemon link parity. Standalone unwind discovery and ycxx generation of
-  native throws, handlers, and exceptional cleanups remain tracked separately.
+  source, staged, and daemon link parity. Standalone unwind discovery, native handlers, and
+  exceptional cleanups remain under #89.
   [#572](https://github.com/yrashk/ycxx/issues/572) · [#89](https://github.com/yrashk/ycxx/issues/89)
   · [#558](https://github.com/yrashk/ycxx/issues/558)
 - Explicit native static links keep the first input ELF COMDAT group for each signature. The reader
@@ -2386,9 +2386,17 @@ values, end to end; results match Clang's bit for bit.
 A throw-expression has type `void`, keeps its operand in the semantic tree, and
 supports rethrow syntax. Scalar and pointer operands are checked after the applicable
 decay conversions. Conditional expressions preserve the other arm's type and value
-category when one arm is a throw-expression. Class exception construction, native
-emission, and evaluation of a reached throw still have explicit diagnostics. Native
-exception objects, handlers, and exceptional cleanups remain under #89.
+category when one arm is a throw-expression. Class exception construction, constant
+evaluation of a reached throw, and native rethrow have explicit diagnostics.
+
+On Linux x86-64, a certified cleanup-free ordinary function can throw an `int` to a
+hosted peer's handler. The operand is evaluated once before allocation. The generated
+object references the peer's Itanium exception allocator, throw entry point, and
+`int` type information. Other exception types, native handlers, exceptional cleanup,
+and runtime integration with ycxx's own linker remain under [#89]. See the
+[design](docs/design/linux-int-throw.md) and [#578](https://github.com/yrashk/ycxx/issues/578).
+
+[#89]: https://github.com/yrashk/ycxx/issues/89
 
 ## Statements, ι step 1: `switch`, labels, `goto`, conditions (#337, 2026-11-19)
 
