@@ -1639,6 +1639,12 @@ session's.*
 - Class and union predicates read the parsed class-key from the current translation unit,
   including for forward declarations. A class template specialization's primary supplies
   its kind without instantiation ([temp.class.general], [meta.unary.cat], #209).
+- The translation unit's class record retains copy and move eligibility, triviality, and the
+  destructor fact for ordinary complete non-template, nonvirtual classes without bases and with
+  scalar fields, arrays of scalars, or reference fields. The calculation includes named scalar-only
+  unions with a proved destructor. Class subobjects, overloaded special-member kinds, and unions
+  needing default-constructor selection give an unknown result. This is an internal prerequisite
+  for `__is_trivially_copyable` ([class.prop], [special], #218).
 - Listed in docs/EXTENSIONS.md. Tests: `tests/own/builtins/`. `<cstdio>`: 53 → 33 errors.
 - Not yet (#211 follow-up): the built-ins that need the object model, such as
   `__is_constructible`, `__is_convertible`, `__is_assignable`, the `__is_trivially_*` and

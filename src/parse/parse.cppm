@@ -1081,7 +1081,9 @@ public:
   }
 
 private:
+  std::optional<QualType> copy_move_constructor_parameter(const sema::MemberDeclRec& member, QualType owner) const;
   std::optional<QualType> assignment_parameter(const sema::MemberDeclRec& member, QualType owner) const;
+  sema::TrivialCopyability class_trivial_copyability(u32 item, EntityId cls, const sema::ClassRec& rec);
 
   enum class State : u8 { empty, running, done };
   template <class V>
@@ -5564,7 +5566,15 @@ const Result<ast::ClassDef>& Program::class_def(u32 item) {
   std::optional<EntityId> cls = class_entity(item);
   // Its head first: the base-clause (`set_bases`).
   if (std::ranges::find(running_, item) == running_.end()) item_sema(item);
-  ClassContent c = class_content(item, [&](u32 m) -> const ast::ItemSema& { return item_sema(m).value; });
+  bool member_declarations_valid = true;
+  ClassContent c = class_content(item, [&](u32 m) -> const ast::ItemSema& {
+    const auto& member = item_sema(m);
+    member_declarations_valid = member_declarations_valid && std::ranges::none_of(member.diags, [](const auto& d) {
+      const auto kind = sema::sema_diag_of(d.id);
+      return !kind || sema::message_of(*kind).severity == lex::Severity::error;
+    });
+    return member.value;
+  });
   std::vector<ast::MemberRec>& members = c.members;
   std::vector<sema::FieldRec>& fields = c.fields;
   std::vector<sema::MemberDeclRec>& statics = c.statics;
@@ -5581,6 +5591,8 @@ const Result<ast::ClassDef>& Program::class_def(u32 item) {
     for (const ast::MemberRec& m : members) rec.access.push_back({m.entity, m.access});
     rec.friends = std::move(c.friends);
     rec.adl_friends = c.adl_friends;
+    // Classify the written declarations before special_members appends implicit assignments.
+    if (member_declarations_valid) rec.trivial_copyability = class_trivial_copyability(item, *cls, rec);
     special_members(item, *cls, rec, &out.diags);
     if (rec.polymorphic && w_->target.triple == ast::x86_64_linux.triple)
       rec.peer_virtual_layout = peer_virtual_layout(item, *cls, rec, members);
@@ -6318,6 +6330,25 @@ void Program::defaulted_copy(EntityId cls, sema::ClassRec& rec, std::span<const 
   finalize(result, const_source);
 }
 
+std::optional<QualType> Program::copy_move_constructor_parameter(const sema::MemberDeclRec& member, QualType owner) const {
+  if (!member.is_ctor || member.is_template) return std::nullopt;
+  const auto& types = w_->types;
+  const sema::TypeRec function = types.rec(member.type);
+  if (function.params.empty()) return std::nullopt;
+  const QualType parameter = function.params.front();
+  if (!types.is_reference(parameter) ||
+      types.canonical(sema::Types::unqualified(types.referee(parameter))) != types.canonical(owner)) return std::nullopt;
+
+  // [class.copy.ctor]/1–3: parameters after the first must have default arguments.
+  std::size_t required = function.params.size();
+  if (auto deferred = member_default_tokens_.find(member.entity); deferred != member_default_tokens_.end()) {
+    while (required > 1 && deferred->second[required - 1]) --required;
+  } else {
+    while (required > 1 && required - 1 < member.defaults.size() && member.defaults[required - 1] != NodeId::none) --required;
+  }
+  return required == 1 ? std::optional(parameter) : std::nullopt;
+}
+
 std::optional<QualType> Program::assignment_parameter(const sema::MemberDeclRec& member, QualType owner) const {
   if (!member.is_function || member.is_static || member.is_template ||
       w_->ins.names.spelling(member.name) != "operator=")
@@ -6329,6 +6360,80 @@ std::optional<QualType> Program::assignment_parameter(const sema::MemberDeclRec&
   const QualType type = types.is_reference(parameter) ? types.referee(parameter) : parameter;
   if (sema::Types::unqualified(types.canonical(type)) != owner) return std::nullopt;
   return parameter;
+}
+
+sema::TrivialCopyability Program::class_trivial_copyability(u32 item, EntityId cls, const sema::ClassRec& rec) {
+  using enum sema::CopyOperation;
+  const auto& head = items_->items[item];
+  if (head.template_depth || head.specialization || head.unnamed_type_ordinal != items::none ||
+      w_->entities.rec(cls).templ != EntityId::none || !rec.bases.empty()) return {};
+
+  const auto& types = w_->types;
+  bool deletes_defaulted_copy_ctor = false;
+  bool deletes_defaulted_assignment = false;
+  for (const auto& field : rec.fields) {
+    QualType type = types.canonical(field.type);
+    if (types.is_dependent(type)) return {};
+    if (types.is_reference(type)) {
+      if (rec.union_) return {};
+      deletes_defaulted_copy_ctor |= types.rec(type).rvalue_ref;  // [class.copy.ctor]/10
+      deletes_defaulted_assignment = true;                       // [class.copy.assign]/7
+      continue;
+    }
+    while (types.is_array(type)) {
+      const auto array = types.rec(type);
+      if (array.bound_value == ConstId::none) return {};
+      type = types.canonical(array.inner);
+    }
+    if (!types.is_scalar(type)) return {};
+    deletes_defaulted_assignment |= sema::Types::is_const(type);
+  }
+
+  sema::TrivialCopyability facts;
+  const auto defaulted = [](bool deleted) { return deleted ? ineligible : eligible_trivial; };
+  const auto written = [&](sema::CopyOperation& operation, const sema::MemberDeclRec& member, bool would_delete) {
+    if (operation != unknown || types.is_dependent(member.type)) return false;
+    const auto decl = member_decl(member.entity);
+    const auto first = decl ? decl_sema(*decl) : std::nullopt;
+    if (!first || first->constraint != NodeId::none || first->constraints != ConstId::none) return false;
+    // [dcl.fct.def.default]/5: defaulting after the in-class declaration is user-provided.
+    if (member.is_deleted) operation = ineligible;
+    else if (defaulted_member_definition(index(decl->item), *first)) operation = defaulted(would_delete);
+    else operation = eligible_nontrivial;
+    return true;
+  };
+
+  const QualType owner = w_->types.class_type(cls);
+  const bool union_dmi = rec.union_ && std::ranges::any_of(rec.fields, &sema::FieldRec::dmi);
+  for (const auto& member : rec.members) {
+    if (member.is_virtual) return {};
+    if (member.is_dtor) {
+      if (!written(facts.destructor, member, union_dmi)) return {};
+    } else if (const auto constructor_parameter = copy_move_constructor_parameter(member, owner)) {
+      const bool move = types.rec(*constructor_parameter).rvalue_ref;
+      if (!written(move ? facts.move_constructor : facts.copy_constructor, member, !move && deletes_defaulted_copy_ctor))
+        return {};
+    } else if (const auto assignment = assignment_parameter(member, owner)) {
+      if (!written(types.rec(*assignment).rvalue_ref ? facts.move_assignment : facts.copy_assignment, member,
+                   deletes_defaulted_assignment)) return {};
+    }
+  }
+
+  // Even deleted declarations affect the implicit declaration rules ([class.copy.ctor],
+  // [class.copy.assign]). Defaulted moves can be trivial with an rvalue-reference field.
+  const bool declares_move = facts.move_constructor != unknown || facts.move_assignment != unknown;
+  const bool implicit_move = !declares_move && facts.copy_constructor == unknown && facts.copy_assignment == unknown &&
+                             facts.destructor == unknown;
+  if (facts.copy_constructor == unknown) facts.copy_constructor = defaulted(declares_move || deletes_defaulted_copy_ctor);
+  if (facts.move_constructor == unknown) facts.move_constructor = defaulted(!implicit_move);
+  if (facts.copy_assignment == unknown) facts.copy_assignment = defaulted(declares_move || deletes_defaulted_assignment);
+  if (facts.move_assignment == unknown) facts.move_assignment = defaulted(!implicit_move || deletes_defaulted_assignment);
+  if (facts.destructor == unknown) facts.destructor = defaulted(union_dmi);
+  // [class.dtor]/7.2: for a union the defaulted destructor also needs a nondeleted trivial
+  // constructor selected by default-initialization. Defer selection among written constructors.
+  if (rec.union_ && facts.destructor == eligible_trivial &&
+      std::ranges::any_of(rec.members, &sema::MemberDeclRec::is_ctor)) return {};
+  return facts;
 }
 
 void Program::special_members(u32 item, EntityId cls, sema::ClassRec& rec,
@@ -6358,18 +6463,8 @@ void Program::special_members(u32 item, EntityId cls, sema::ClassRec& rec,
     }
     if (!m.is_ctor) continue;
     rec.user_ctors = true;
-    if (m.is_template) continue;
-    sema::TypeRec fr = types.rec(m.type);
-    // [class.copy.ctor]/1–3: the first parameter a reference to the class, any others defaulted.
-    std::size_t required = fr.params.size();
-    if (auto deferred = member_default_tokens_.find(m.entity); deferred != member_default_tokens_.end()) {
-      while (required > 1 && deferred->second[required - 1]) --required;
-    } else {
-      while (required > 1 && required - 1 < m.defaults.size() && m.defaults[required - 1] != NodeId::none) --required;
-    }
-    if (!fr.params.empty() && required == 1 && types.is_reference(fr.params[0]) &&
-        types.canonical(sema::Types::unqualified(types.referee(fr.params[0]))) == types.canonical(ct)) {
-      if (types.rec(fr.params[0]).rvalue_ref) {
+    if (const auto parameter = copy_move_constructor_parameter(m, ct)) {
+      if (types.rec(*parameter).rvalue_ref) {
         user_move = true;  // a move constructor, user-provided unless deleted (no `= default` yet)
         rec.move_usable = !m.is_deleted;
         rec.move_nontrivial = !m.is_deleted;

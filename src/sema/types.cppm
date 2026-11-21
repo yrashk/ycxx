@@ -694,6 +694,26 @@ struct BaseRec {
 // Layout for access to a peer-owned object. A primary base already supplies the vptr at offset zero.
 enum class PeerVirtualLayout : u8 { none, root, primary_base };
 
+// Eligibility and triviality for [class.prop] and [special]. An absent or deleted operation is
+// ineligible. Unknown marks a record whose declarations or subobjects do not establish the fact.
+enum class CopyOperation : u8 { unknown, ineligible, eligible_trivial, eligible_nontrivial };
+
+struct TrivialCopyability {
+  CopyOperation copy_constructor = CopyOperation::unknown;
+  CopyOperation move_constructor = CopyOperation::unknown;
+  CopyOperation copy_assignment = CopyOperation::unknown;
+  CopyOperation move_assignment = CopyOperation::unknown;
+  CopyOperation destructor = CopyOperation::unknown;
+
+  std::optional<bool> result() const {
+    using enum CopyOperation;
+    const std::array operations{copy_constructor, move_constructor, copy_assignment, move_assignment};
+    if (destructor == unknown || std::ranges::contains(operations, unknown)) return std::nullopt;
+    return destructor == eligible_trivial && std::ranges::contains(operations, eligible_trivial) &&
+           !std::ranges::contains(operations, eligible_nontrivial);
+  }
+};
+
 struct ClassRec {
   bool defined = false;
   // Its direct base classes, in declaration order ([class.derived.general]).
@@ -731,6 +751,11 @@ struct ClassRec {
   bool copy_nontrivial() const {
     return (!copy_deleted && layout_requires_virtual_support) || copy_ctor != EntityId::none ||
            defaulted_copy == CopyState::nontrivial || defaulted_copy == CopyState::unsupported;
+  }
+
+  TrivialCopyability trivial_copyability;
+  std::optional<bool> trivially_copyable() const {
+    return defined ? trivial_copyability.result() : std::nullopt;
   }
 
   // Nested enumerations and type aliases ([class.mem]): their types by name, with their entities;
