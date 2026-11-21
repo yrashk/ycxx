@@ -4046,7 +4046,7 @@ private:
                           (name_token == Tk::identifier || binary_operator || unary_minus);
     if (!types.is_function(d.type) ||
         (definition ? !ordinary || !d.function || !ps_.at_end() || !it_->has_body() ||
-                        p_->region().tokens[it_->body_begin].kind != Tk::l_brace
+                        (p_->region().tokens[it_->body_begin].kind != Tk::l_brace && !(unary_minus && deleted_body()))
                     : !ps_.is(Tk::semi))) {
       s_.diag(d.name_at, Diag::not_supported, Tk::kw_friend);
       return bad();
