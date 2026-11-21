@@ -256,6 +256,13 @@ system_leaf:
                 aggregates / 'pointer-aggregate-empty-list.cpp', libycxx / 'src/runtime/linkage/static.cpp',
                 '-o', 'aggregate-empty-list')
         run(['./aggregate-empty-list'], scope, cold)
+        initializer_lists = source_dir / 'linux_initializer_list'
+        compile(target, '-isystem', libycxx / 'include', '-nostdlib',
+                initializer_lists / 'direct-reference.cpp', libycxx / 'src/runtime/linkage/static.cpp',
+                '-o', 'initializer-list-reference')
+        run(['./initializer-list-reference'], scope, cold)
+        compile(target, '-isystem', libycxx / 'include', '-fsyntax-only', initializer_lists / 'narrowing.cpp',
+                error="narrowing conversion from 'double' to 'int'")
         (scope / 'packing.cpp').write_text(
             '#pragma pack(push, 1)\n'
             'struct Capped { char a; int b; };\n'
