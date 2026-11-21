@@ -4338,7 +4338,11 @@ private:
           declare_member(ConstId::none, {});
           return false;
         }
-        sema::Evaluated v = sema::Evaluator(s_, q_).evaluate(init);
+        // An aggregate list can be evaluated element by element ([dcl.init.aggr]).
+        // The general evaluator needs class result storage to return a class value (#25).
+        sema::Evaluator evaluator(s_, q_);
+        const bool aggregate = spec.is_constexpr && types.is_class(d.type) && s_.as<ast::InitList>(init);
+        sema::Evaluated v = aggregate ? evaluator.evaluate_initializer(init) : evaluator.evaluate(init);
         if (!v.value) {
           s_.diag(e.begin, usable ? Diag::not_constant : Diag::nonconstant_initializer, v.reason);
           declare_member(ConstId::none, {});
