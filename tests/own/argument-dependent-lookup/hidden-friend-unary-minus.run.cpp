@@ -50,3 +50,16 @@ int main() {
            -member == 11 && -nonmember == 14 && -builtin == -7 &&
            -derived_value == 21 && -private_base == 24 && -derived::Rvalue{} == 25 ? 0 : 1;
 }
+
+namespace related_bases {
+struct Root {};
+struct Near : Root { int operator-() { return 31; } };
+struct SameTarget : Near {
+    friend int operator-(const Near&) { return 32; }
+};
+struct RelatedTarget : Near {
+    friend int operator-(const Root&) { return 33; }
+};
+int same(SameTarget& value) { return -value; }
+int related(RelatedTarget& value) { return -value; }
+}

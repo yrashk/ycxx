@@ -7516,20 +7516,31 @@ public:
           }
           if (rank.viable && (!best_member || rank < *best_member)) best_member = rank;
         }
-        std::optional<Ics> best_free;
+        struct UnaryConversion {
+          Ics rank;
+          QualType target;
+        };
+        auto better = [&](const UnaryConversion& left, const UnaryConversion& right) {
+          if (left.rank.base_depth && right.rank.base_depth &&
+              types().class_of(left.target) != types().class_of(right.target))
+            return base_depth(left.target, right.target) != 0;
+          return left.rank < right.rank;
+        };
+        std::optional<UnaryConversion> best_free;
         for (const auto& candidate : set) {
           auto fn = types().rec(candidate.type);
           if (candidate.flags & decl_flag::template_ || fn.params.size() != 1) continue;
-          Ics rank = ics(object, fn.params.front());
-          if (rank.viable && (!best_free || rank < *best_free)) best_free = rank;
+          UnaryConversion conversion{ics(object, fn.params.front()), types().referee(fn.params.front())};
+          if (conversion.rank.viable && (!best_free || better(conversion, *best_free))) best_free = conversion;
         }
         if (best_member) {
-          if (!best_free || *best_member < *best_free) {
+          const UnaryConversion member_conversion{*best_member, types().class_type(found->owner)};
+          if (!best_free || better(member_conversion, *best_free)) {
             Ex access = member(object, false, name, object.end, op_at, op_at);
             Ex result = access.ok() ? call(access, {}, end, op_at) : access;
             return Ex{result.id, begin, end, result.info};
           }
-          if (!(*best_free < *best_member)) {
+          if (!better(*best_free, member_conversion)) {
             diag(op_at, Diag::ambiguous_call, name);
             return Ex{NodeId::none, begin, end};
           }
