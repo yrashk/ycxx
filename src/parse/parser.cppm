@@ -209,6 +209,54 @@ public:
     return t && t->transforms ? t : nullptr;
   }
 
+  // Recognize a grouped declarator before treating `auto(...)` as a declaration
+  // ([stmt.ambig]). A function or array suffix can follow the name inside the group.
+  bool grouped_auto_declarator_ahead(u32 close, bool statement) {
+    u32 next = 2;
+    u32 groups = 0;
+    while (next < close) {
+      if (kind(next) == Tk::l_paren) {
+        ++groups;
+        ++next;
+        continue;
+      }
+      if (auto star = member_pointer_star(next)) next = *star;
+      if (kind(next) != Tk::star && kind(next) != Tk::amp && kind(next) != Tk::ampamp) break;
+      next = past_attributes(next + 1);
+      while (kind(next) == Tk::kw_const || kind(next) == Tk::kw_volatile ||
+             kind(next) == Tk::kw___restrict || kind(next) == Tk::kw___restrict__)
+        ++next;
+    }
+    if (qualified_ahead(next)) {
+      bool saved_half = qualified_half_;
+      u32 name = next;
+      auto scope = nested_name(next, name);
+      qualified_half_ = saved_half;
+      if (!scope) return false;
+      next = name;
+    }
+    if (kind(next) != Tk::identifier) return false;
+    next = past_attributes(next + 1);
+    while (next < close) {
+      if (kind(next) == Tk::r_paren && groups != 0) {
+        --groups;
+        ++next;
+      } else if (kind(next) == Tk::l_paren && params_ahead(next, statement)) {
+        next = past_parentheses(next);
+      } else if (kind(next) == Tk::l_square) {
+        u32 depth = 1;
+        while (++next < close && depth != 0) {
+          if (kind(next) == Tk::l_square) ++depth;
+          if (kind(next) == Tk::r_square) --depth;
+        }
+        if (depth != 0) return false;
+      } else {
+        return false;
+      }
+    }
+    return next == close && groups == 0;
+  }
+
   // Whether a declaration starts here: a decl-specifier keyword, or a name that denotes a class
   // ([stmt.ambig]: what can be a declaration is one). In a `statement`, a member of a dependent
   // class names a type only after `typename` ([temp.res.general]/4-5); a namespace-scope or member
@@ -227,8 +275,7 @@ public:
         if (kind(j) == Tk::r_paren && --depth == 0) break;
       }
       Tk after = kind(j + 1);
-      // A second parenthesized expression can call the function pointer from auto(f).
-      if (is(Tk::kw_auto) && after == Tk::l_paren && !params_ahead(j + 1, statement)) return false;
+      if (is(Tk::kw_auto) && !grouped_auto_declarator_ahead(j, statement)) return false;
       return after == Tk::semi || after == Tk::equal || after == Tk::comma || after == Tk::l_square ||
              after == Tk::l_paren || after == Tk::l_brace;
     }
