@@ -607,9 +607,13 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
 - Direct variadic calls transport named `float` and `double`, promoted `double` in the ellipsis,
   and scalar floating results. AL counts the XMM registers assigned to arguments, including
   named arguments with an empty ellipsis. The emitter uses SSE2 for binary32-to-binary64 widening
-  in argument promotion and other expressions. Other Linux floating arithmetic and numeric
-  conversions remain [#201](https://github.com/yrashk/ycxx/issues/201).
+  in argument promotion and other expressions.
   [Design](docs/design/linux-floating-variadic-calls.md) · [#399](https://github.com/yrashk/ycxx/issues/399)
+- Runtime addition, subtraction, multiplication and division use scalar SSE at the binary32 or
+  binary64 L2 result width and under the caller's MXCSR controls. Unary negation flips the sign
+  bit without changing the payload or status flags. Comparisons, other numeric conversions and
+  x87 values remain [#201](https://github.com/yrashk/ycxx/issues/201).
+  [Design](docs/design/linux-scalar-floating-point.md#runtime-arithmetic)
 - Direct fixed-prototype calls to ordinary free functions support nonempty naturally aligned
   flat records with integral or ordinary object-pointer fields that are trivial for calls,
   up to 16 bytes and alignment eight. The AMD64 INTEGER eightbytes follow from the laid-out

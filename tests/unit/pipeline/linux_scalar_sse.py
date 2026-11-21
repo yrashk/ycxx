@@ -44,6 +44,14 @@ def main():
                              '-o', 'mixed'], scope, cold)
                         run(['./mixed'], scope, cold)
 
+            compile('-c', 'arithmetic-provider.cpp', '-o', 'arithmetic.o')
+            compile('-c', 'arithmetic-provider.cpp', '-o', 'arithmetic-warm.o', env=daemon)
+            assert (scope / 'arithmetic-warm.o').read_bytes() == (scope / 'arithmetic.o').read_bytes()
+            for opt in ('-O0', '-O2'):
+                run([host_cxx, '-std=c++26', '-pedantic-errors', opt, '-fno-fast-math', '-fno-lto',
+                     'arithmetic-consumer.cpp', 'arithmetic.o', '-o', 'mixed-arithmetic'], scope, cold)
+                run(['./mixed-arithmetic'], scope, cold)
+
             for fixture in ('variadic-caller', 'variadic-al-caller'):
                 compile('-c', f'{fixture}.cpp', '-o', f'{fixture}.o')
                 compile('-c', f'{fixture}.cpp', '-o', f'{fixture}-warm.o', env=daemon)
@@ -74,10 +82,9 @@ def main():
         unresolved_copy = ('struct Leaf { volatile int value; };\n'
                            'struct Wrapper { Leaf leaf; Wrapper(const Wrapper&) = default; };\n')
         cases = (
-            ('float f(float a, float b) { return a + b; }', '`fadd`: floating-point arithmetic'),
-            ('bool f(float a, float b) { return a == b; }', '`fcmp`: floating-point arithmetic'),
-            ('float f(double x) { return x; }', '`fptrunc`: floating-point arithmetic'),
-            ('int f(double x) { return static_cast<int>(x); }', '`fptosi`: floating-point arithmetic'),
+            ('bool f(float a, float b) { return a == b; }', '`fcmp`: floating-point operation is unsupported'),
+            ('float f(double x) { return x; }', '`fptrunc`: floating-point operation is unsupported'),
+            ('int f(double x) { return static_cast<int>(x); }', '`fptosi`: floating-point operation is unsupported'),
             ('float f(float (*g)(float)) { return g(1.0F); }',
              'call: floating-point parameters and results of indirect calls are unsupported'),
             (unresolved_copy + 'double f(Wrapper, double value) { return value; }',
