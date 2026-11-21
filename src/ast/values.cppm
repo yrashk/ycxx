@@ -71,6 +71,14 @@ struct VFloat {
 
 struct VNullptr {};
 
+// A pointer to a data member ([expr.unary.op], [conv.mem]). The field uses declaration order in
+// the owning class. The absent field denotes the null member pointer value.
+struct VMemberPtr {
+  static constexpr u32 null_field = ~u32{0};
+  QualType type;
+  u32 field = null_field;
+};
+
 // A string literal object ([lex.string]): its array type and its code units, the terminating
 // null included. String literals are identified by content, not by an entity (§3.7.9).
 struct VString {
@@ -174,7 +182,7 @@ struct VConstraint {
 };
 
 using ValueKinds = closed_list<VInt, VFloat, VNullptr, VString, VLvalue, VEntity, VAggregate, VDepParam, VDepFnParam, VDepExpansion,
-                               VDepSizeofPack, VType, VAtom, VConstraint, VDepOp, VDepVariable>;
+                               VDepSizeofPack, VType, VAtom, VConstraint, VDepOp, VMemberPtr, VDepVariable>;
 
 template <class T>
 constexpr bool is_value_kind = ValueKinds::contains<T>;

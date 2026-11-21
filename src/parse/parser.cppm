@@ -1215,7 +1215,7 @@ public:
                                                bool checked = false) {
     u32 j = start;
     std::optional<sema::Sema::Scope> s;
-    if (member_pointer && kind(j) == Tk::kw_decltype && kind(j + 1) == Tk::l_paren) {
+    if (kind(j) == Tk::kw_decltype && kind(j + 1) == Tk::l_paren) {
       u32 saved = i_;
       const bool saved_half = half_;
       i_ += j;
@@ -2695,7 +2695,7 @@ public:
     return s_->conditional(cond, t, f, at);
   }
 
-  // The binary operators from `||` (precedence 1) to the multiplicative ones (10).
+  // The binary operators from `||` (precedence 1) to pointer-to-member access (11).
   struct BinInfo {
     int prec;
     sema::Sema::BinOp op;
@@ -2721,16 +2721,18 @@ public:
     case Tk::star: return BinInfo{10, B::mul};
     case Tk::slash: return BinInfo{10, B::div};
     case Tk::percent: return BinInfo{10, B::rem};
+    case Tk::periodstar: return BinInfo{11, B::dot_star};
+    case Tk::arrowstar: return BinInfo{11, B::arrow_star};
     default: return std::nullopt;
     }
   }
 
-  // logical-or-expression down to multiplicative-expression ([expr.mul]–[expr.log.or]), all
+  // logical-or-expression down to pm-expression ([expr.mptr.oper]–[expr.log.or]), all
   // left-associative, by precedence climbing.
   Ex binary_expression(int min_prec) {
     Ex l = cast_expression();
     for (;;) {
-      if (is(Tk::spaceship) || is(Tk::periodstar) || is(Tk::arrowstar)) {
+      if (is(Tk::spaceship)) {
         s_->diag(pos(), Diag::not_supported, kind());
         bump();
         cast_expression();
@@ -2940,10 +2942,11 @@ public:
     }
     bump();
     bool is_incdec = *op == ast::UnaryOp::pre_inc || *op == ast::UnaryOp::pre_dec;
-    auto saved_address = address_operand_;
-    if (*op == ast::UnaryOp::address_of) address_operand_ = pos();
+    auto saved_address = address_op_;
+    if (*op == ast::UnaryOp::address_of) address_op_ = begin;
     Ex e = is_incdec ? unary_expression() : cast_expression();
-    address_operand_ = saved_address;
+    address_op_ = saved_address;
+    if (*op == ast::UnaryOp::address_of && e.begin == begin) return e;  // qualified member address
     return s_->unary(*op, e, begin, e.end > begin ? e.end : pos(), begin);
   }
 
@@ -3216,6 +3219,10 @@ public:
       if (!allocation_operator_ahead(1)) return qualified_id(begin);
       bump();
       return allocation_function_id(begin);
+    case Tk::kw_decltype:
+      if (kind(1) == Tk::l_paren && kind(past_parentheses(1)) == Tk::coloncolon) return qualified_id(begin);
+      s_->diag(begin, Diag::expected_expression);
+      return {NodeId::none, begin, begin};
     case Tk::kw_this: bump(); return s_->this_expr(begin, pos());
     case Tk::kw_requires: return requires_expression();
     case Tk::kw_static_cast: {
@@ -3406,7 +3413,8 @@ public:
   // A qualified-id ([expr.prim.id.qual]): `N::x`, `::x`, `C::m`, `E::e`, `N::C::f`.
   Ex qualified_id(u32 begin) {
     u32 next = 0;
-    auto s = nested_name(0, next, /*member_pointer=*/false, substituting_partial_arguments);
+    auto address = address_op_ && *address_op_ + 1 == begin ? address_op_ : std::nullopt;
+    auto s = nested_name(0, next, /*member_pointer=*/false, substituting_partial_arguments || address.has_value());
     // `S::template f<args>`: f names a template ([temp.names]/3).
     bool keyword = s && kind(next) == Tk::kw_template && kind(next + 1) == Tk::identifier;
     if (keyword) ++next;
@@ -3426,9 +3434,9 @@ public:
     auto scope_expr = [&] {
       // [expr.unary.op]: `&C::m` can form a pointer to member. Parentheses or postfix
       // operations make the operand something other than the qualified-id itself.
-      bool bare_address = address_operand_ == begin && !is(Tk::l_paren) && !is(Tk::l_square) &&
-                          !is(Tk::period) && !is(Tk::arrow) && !is(Tk::plusplus) && !is(Tk::minusminus);
-      return s_->scope_expr(*s, n, begin, name_at, pos(), bare_address);
+      bool postfix = is(Tk::l_paren) || is(Tk::l_square) || is(Tk::period) || is(Tk::arrow) ||
+                     is(Tk::plusplus) || is(Tk::minusminus);
+      return s_->scope_expr(*s, n, begin, name_at, pos(), postfix ? std::nullopt : address);
     };
     if (operator_name) {
       if (is(Tk::less) && s_->scope_names_template(*s, n)) {
@@ -5041,7 +5049,7 @@ public:
   bool body = false;  // the part is a function body, not a declaration part
   bool substituting_partial_arguments = false;
 private:
-  std::optional<u32> address_operand_;  // the token after an explicit unary `&`
+  std::optional<u32> address_op_;  // the token of an explicit unary `&`
 };
 
 }  // namespace ycxx::parse
