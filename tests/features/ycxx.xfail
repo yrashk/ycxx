@@ -338,7 +338,6 @@ draft/stmt/stmt.expand-1.accept.cpp 'auto' is not supported yet
 draft/stmt/stmt.expand-2.accept.cpp preprocessing directives are not supported yet
 draft/stmt/stmt.expand-3.accept.cpp 'struct' not supported yet
 draft/stmt/stmt.ranged-2.accept.cpp preprocessing directives are not supported yet
-draft/stmt/stmt.return-1.reject.cpp errors elsewhere: 'class' not supported yet
 draft/stmt/stmt.return-2.reject.cpp errors elsewhere: 'auto' not supported yet
 draft/temp/temp.alias-3.reject.cpp errors elsewhere: 'template' not supported yet
 draft/temp/temp.alias-4.accept.cpp 'template' not supported yet
