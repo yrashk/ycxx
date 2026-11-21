@@ -331,9 +331,9 @@ public:
   // `elaborated`, non-type declarations are ignored ([basic.lookup.elab]).
   // A typedef-name too, unless `aliases` is false (after a class-key, [dcl.type.elab]/2).
   std::optional<QualType> class_name(NameId name, bool elaborated = false, bool aliases = true,
-                                    std::optional<u32> type_at = std::nullopt) {
+                                    std::optional<u32> type_at = std::nullopt, bool search_locals = true) {
     // Innermost block first: a block-scope typedef-name, or a local that hides the type.
-    for (std::size_t d = scopes_.size(); d-- > 0;) {
+    for (std::size_t d = search_locals ? scopes_.size() : 0; d-- > 0;) {
       for (auto t = block_types_.rbegin(); t != block_types_.rend(); ++t)
         if (t->depth == d && t->name == name) {
           if (aliases) return t->type;
@@ -1338,15 +1338,7 @@ public:
     // are a constructor's arguments, without narrowing.
     if (has_user_ctors(t)) {
       if (b.clauses.empty()) return value_init(t, b.begin, b.end);
-      std::vector<Ex> args;
-      for (const Braced::Clause& c : b.clauses) {
-        if (c.list || c.designated) {
-          diag(c.begin, Diag::not_supported, lex::Tk::l_brace);  // nested lists as constructor arguments
-          return fail;
-        }
-        args.push_back(c.expr);
-      }
-      return construct(t, std::move(args), b.begin, b.end, true);
+      return construct_from_list(t, b);
     }
     // A reference from one element ([dcl.init.list]/3.10).
     if (types().is_reference(t) && b.clauses.size() == 1 && !b.clauses[0].list && !b.clauses[0].designated)
@@ -3886,12 +3878,25 @@ public:
 
   // ------------------------------------------------------------ constructors and references
 
+  Ex construct_from_list(QualType t, const Braced& b, bool delegating = false) {
+    std::vector<Ex> args;
+    for (const Braced::Clause& c : b.clauses) {
+      if (c.list || c.designated) {
+        diag(c.begin, Diag::not_supported, lex::Tk::l_brace);  // nested lists as constructor arguments
+        return {NodeId::none, b.begin, b.end};
+      }
+      args.push_back(c.expr);
+    }
+    return construct(t, std::move(args), b.begin, b.end, /*list=*/true, /*copy_init=*/false,
+                     /*checking_polymorphic_base=*/false, delegating);
+  }
+
   // Initializes a `t` by a constructor from `args` ([over.match.ctor], [dcl.init.general]/17.6):
   // the class's constructors and, where they are implicit, its default and copy constructors.
   // A trivial copy is a copy; `list` forbids narrowing ([over.match.list]); `copy_init` takes only
   // one-argument constructors.
   Ex construct(QualType t, std::vector<Ex> args, u32 begin, u32 end, bool list = false, bool copy_init = false,
-               bool checking_polymorphic_base = false) {
+               bool checking_polymorphic_base = false, bool delegating = false) {
     Ex fail{NodeId::none, begin, end};
     if (std::ranges::any_of(args, [](const Ex& a) { return !a.ok(); })) return fail;
     if (types().is_dependent(t) || any_dependent(args))
@@ -3903,7 +3908,7 @@ public:
     const ClassRec* cr = class_rec(c);
     if (!cr) return fail;
     // [dcl.init.general]/17.6.1: a prvalue of the class itself initializes the object directly.
-    if (!list && args.size() == 1 && !args[0].glvalue() && initializes(ut, args[0])) return args[0];
+    if (!delegating && !list && args.size() == 1 && !args[0].glvalue() && initializes(ut, args[0])) return args[0];
     std::vector<Candidate> cands;
     std::vector<EntityId> ents;
     bool user_copy = false;
@@ -3947,6 +3952,20 @@ public:
     auto chosen = resolve(cands, args, begin, no_name(), std::nullopt, ut);
     if (!chosen) return fail;
     const Candidate& k = cands[*chosen];
+    if (delegating) {
+      if (k.entity == current_function) {
+        diag(begin, Diag::delegating_constructor_cycle);
+        return fail;
+      }
+      if (k.pattern) {
+        diag(begin, Diag::not_supported, lex::Tk::colon);
+        return fail;
+      }
+      if (k.entity == EntityId::none || std::ranges::contains(cr->defaulted_copy_declarations, k.entity)) {
+        diag(begin, Diag::delegating_copy_unsupported);
+        return fail;
+      }
+    }
     if (k.entity != EntityId::none && !check_access(c, k.pattern ? k.pattern->entity : k.entity, w_->entities.rec(c).name, begin)) return fail;
     // A specialization called is one whose definition the program requires ([temp.inst]/8).
     if (k.pattern) demands.push_back({k.entity, ast::Loc{item_, loc_base_ + begin}});
