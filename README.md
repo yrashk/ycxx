@@ -190,6 +190,11 @@ initializer takes precedence. The same rules apply to ordinary non-inline namesp
 whose dynamic initialization runs in definition order.
 [#118](https://github.com/yrashk/ycxx/issues/118)
 
+Automatic declarations such as `Point p(3, 4);` can initialize flat aggregates with public
+arithmetic fields. Supplied expressions initialize the fields in declaration order. Omitted
+fields use their default member initializer when available and otherwise get zero.
+[#301](https://github.com/yrashk/ycxx/issues/301)
+
 **Language on macOS.** Programs can use:
 - the fundamental integer, character and floating types, pointers, arrays, references and
   enumerations, including opaque declarations of named enums in their namespaces; `float`,
