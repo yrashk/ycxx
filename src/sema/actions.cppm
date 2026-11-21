@@ -193,6 +193,7 @@ struct Ex {
 };
 
 enum class Construction { direct, copy, direct_list, copy_list };
+enum class ConstructorDestination { object, delegation, polymorphic_base };
 
 // A braced-init-list as written ([dcl.init.general]): each initializer-clause is an analysed
 // expression or a nested list, with its designator (`.name =`, [dcl.init.aggr]) if it has one.
@@ -3992,7 +3993,8 @@ public:
 
   // ------------------------------------------------------------ constructors and references
 
-  Ex construct_from_list(QualType t, const Braced& b, Construction form, bool delegating = false) {
+  Ex construct_from_list(QualType t, const Braced& b, Construction form,
+                         ConstructorDestination destination = ConstructorDestination::object) {
     std::vector<Ex> args;
     for (const Braced::Clause& c : b.clauses) {
       if (c.list || c.designated) {
@@ -4001,29 +4003,32 @@ public:
       }
       args.push_back(c.expr);
     }
-    return construct(t, std::move(args), b.begin, b.end, form, /*checking_polymorphic_base=*/false, delegating);
+    return construct(t, std::move(args), b.begin, b.end, form, destination);
   }
 
   // Initializes a `t` by a constructor from `args` ([over.match.ctor], [dcl.init.general]/17.6):
   // the class's constructors and, where they are implicit, its default and copy constructors.
   // List-initialization prohibits narrowing and checks the explicit winner for copy-list forms.
-  // Delegation needs a constructor call that can initialize the original object in place.
+  // Delegation and base initialization target subobjects or objects already under construction.
   Ex construct(QualType t, std::vector<Ex> args, u32 begin, u32 end, Construction form = Construction::direct,
-               bool checking_polymorphic_base = false, bool delegating = false) {
+               ConstructorDestination destination = ConstructorDestination::object) {
     Ex fail{NodeId::none, begin, end};
     const bool list = form == Construction::direct_list || form == Construction::copy_list;
     const bool copy_init = form == Construction::copy;
+    const bool polymorphic_base = destination == ConstructorDestination::polymorphic_base;
     if (std::ranges::any_of(args, [](const Ex& a) { return !a.ok(); })) return fail;
     if (types().is_dependent(t) || any_dependent(args))
       return dependent_node(args, begin, end, types().is_dependent(t) ? std::nullopt : std::optional(Types::unqualified(t)));
     if (!require_complete(t, begin) ||
-        (!checking_polymorphic_base && !require_supported_virtual_layout(t, begin))) return fail;
+        (!polymorphic_base && !require_supported_virtual_layout(t, begin))) return fail;
     QualType ut = Types::unqualified(t);
     EntityId c = types().class_of(ut);
     const ClassRec* cr = class_rec(c);
     if (!cr) return fail;
     // [dcl.init.general]/17.6.1: a prvalue of the class itself initializes the object directly.
-    if (!delegating && !list && args.size() == 1 && !args[0].glvalue() && initializes(ut, args[0])) return args[0];
+    // Delegation requires a constructor, and a base is a potentially-overlapping subobject.
+    if (destination == ConstructorDestination::object && !list && args.size() == 1 &&
+        !args[0].glvalue() && initializes(ut, args[0])) return args[0];
     std::vector<Candidate> cands;
     std::vector<EntityId> ents;
     bool user_copy = false;
@@ -4072,10 +4077,25 @@ public:
       }
     }
     if (!cr->user_ctors && !copy_init) cands.push_back({EntityId::none, types().function(void_, {}, false, LangLinkage::cxx), true, false});
+    if (polymorphic_base && list && std::ranges::any_of(cr->members, [&](const MemberDeclRec& member) {
+          if (!member.is_ctor) return false;
+          const auto params = types().rec(member.type).params;
+          return !params.empty() && initializer_list_element(types().referee(params.front())) &&
+                 (params.size() == 1 || (member.defaults.size() > 1 && member.defaults[1] != NodeId::none));
+        })) {
+      // [over.match.list]: an empty list with a default constructor skips the first phase.
+      const bool use_default = args.empty() && std::ranges::any_of(cands, [&](const Candidate& ctor) {
+        return ctor.required(types().rec(ctor.type).params.size()) == 0;
+      });
+      if (!use_default) {
+        diag(begin, Diag::base_initializer_list_constructor);
+        return fail;
+      }
+    }
     auto chosen = resolve(cands, args, begin, no_name(), std::nullopt, ut);
     if (!chosen) return fail;
     const Candidate& k = cands[*chosen];
-    if (delegating) {
+    if (destination == ConstructorDestination::delegation) {
       if (k.entity == current_function) {
         diag(begin, Diag::delegating_constructor_cycle);
         return fail;
@@ -4094,6 +4114,15 @@ public:
       return fail;
     }
     if (k.entity != EntityId::none && !check_access(c, k.pattern ? k.pattern->entity : k.entity, w_->entities.rec(c).name, begin)) return fail;
+    if (polymorphic_base) {
+      // [class.base.init]: the base destructor is potentially invoked by this constructor.
+      if (!cr->destructor_usable) {
+        diag(begin, Diag::base_unusable_destructor, ut);
+        return fail;
+      }
+      if (cr->destructor != EntityId::none &&
+          !check_access(c, cr->destructor, w_->entities.rec(cr->destructor).name, begin)) return fail;
+    }
     // A specialization called is one whose definition the program requires ([temp.inst]/8).
     if (k.pattern) demands.push_back({k.entity, ast::Loc{item_, loc_base_ + begin}});
     TypeRec fr = types().rec(k.type);
@@ -4112,21 +4141,34 @@ public:
     if (k.entity == EntityId::none) {
       // Trivial: a copy of the argument's object, or nothing to construct.
       if (fr.params.empty()) {
-        if (checking_polymorphic_base) return fail;  // the implicit constructor needs no call
+        if (polymorphic_base) {
+          // Keep a semantic initializer without requiring the aggregate's object layout.
+          ExprInfo info{ut, ValueCategory::prvalue, 0};
+          return node(ast::ValueInit{info}, begin, end, info);
+        }
         return value_init_aggregate(ut, begin, end);
+      }
+      if (polymorphic_base) {
+        // An implicit polymorphic copy is nontrivial ([class.copy.ctor]).
+        diag(begin, Diag::virtual_layout, ut);
+        return fail;
       }
       Ex a = args[0];
       return a.glvalue() ? convert_node(a, ast::ConversionKind::lvalue_to_rvalue, ut) : a;
     }
-    for (std::size_t i = args.size(); i < fr.params.size() && i < k.defaults.size(); ++i) {
+    const auto supplied = args.size();
+    for (std::size_t i = supplied; i < fr.params.size() && i < k.defaults.size(); ++i) {
       auto a = default_argument(k.defaults[i], end);
       if (!a) return fail;
       args.push_back(*a);
     }
     std::vector<Child> cs;
     for (std::size_t i = 0; i < args.size(); ++i) {
+      // In a base list, a class glvalue can bind directly to a reference parameter.
+      // Narrowing checks apply to written initializer clauses, not default arguments.
+      const bool narrow = list && (!polymorphic_base || (i < supplied && !types().is_class(args[i].type())));
       Ex a = i >= fr.params.size() ? variadic_argument(args[i])
-           : list                  ? list_element(fr.params[i], args[i])
+           : narrow                ? list_element(fr.params[i], args[i])
                                    : convert(args[i], fr.params[i], args[i].begin);
       if (!a.ok()) return fail;
       // A parameter of class type: a temporary the caller initializes and destroys ([expr.call]/7).
@@ -4140,7 +4182,7 @@ public:
   // In a syntax-only constructor definition, check the implicit default initialization of
   // its direct polymorphic base. There is no complete object or native initializer to build.
   void check_polymorphic_base_default_init(QualType t, u32 at) {
-    construct(t, {}, at, at, Construction::direct, /*checking_polymorphic_base=*/true);
+    construct(t, {}, at, at, Construction::direct, ConstructorDestination::polymorphic_base);
   }
 
   // [class.copy.ctor]/2: a constructor whose first parameter is `C&` or `cv C&` and whose others
@@ -6960,9 +7002,8 @@ public:
   }
   bool is_braced(const Ex& e) const { return braced_list(e) != nullptr; }
 
-  // [dcl.init.list]: the compiler forms an array of const elements and initializes the
-  // list from that array. libycxx supplies a private pointer/size constructor for this.
-  std::optional<Ex> initializer_list_argument(QualType t, const Braced& list) {
+  std::optional<QualType> initializer_list_element(QualType t) {
+    if (!types().is_class(t)) return std::nullopt;
     const EntityRec specialization = w_->entities.rec(types().class_of(t));
     if (specialization.templ == EntityId::none || specialization.args.size() != 1 ||
         specialization.args[0].kind != ast::TemplateArgKind::type)
@@ -6973,10 +7014,16 @@ public:
     const EntityRec ns = w_->entities.rec(primary.scope);
     if (ns.kind != EntityKind::namespace_ || ns.scope != EntityId::none || ns.name != ins().names.intern("std"))
       return std::nullopt;
-    const QualType element = types().canonical(specialization.args[0].type);
+    return types().canonical(specialization.args[0].type);
+  }
+
+  // [dcl.init.list]: the compiler forms an array of const elements and initializes the
+  // list from that array. libycxx supplies a private pointer/size constructor for this.
+  std::optional<Ex> initializer_list_argument(QualType t, const Braced& list) {
+    const auto element = initializer_list_element(t);
     if (element != builtin(Builtin::int_)) return std::nullopt;
 
-    const QualType const_element = types().add_cv(element, Cv::const_);
+    const QualType const_element = types().add_cv(*element, Cv::const_);
     const QualType pointer = types().pointer(const_element);
     const QualType size_type = builtin(w_->target.size_type);
     const ClassRec* record = class_rec(types().class_of(t));
