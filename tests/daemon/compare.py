@@ -156,8 +156,9 @@ def main():
                 if (t.parent / 'inputs').is_dir():
                     shutil.copytree(t.parent / 'inputs', d / 'inputs')
             for action in ([], ['-c'], ['-fsyntax-only'], ['-E']):
+                args = [*action, t.name] if action else ['--target=arm64-apple-darwin', t.name, '-o', 'prog']
                 compare(ycxx, f'{t.parent.name}/{t.name} {" ".join(action) or "link"}',
-                        [*action, t.name, *(['-o', 'prog'] if not action else [])], setup, envs)
+                        args, setup, envs)
 
         same_daemon('the own suites')
 
