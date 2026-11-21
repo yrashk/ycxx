@@ -404,6 +404,8 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
     for (const ast::ClosureDef& c : ins.seqs.elements(closures)) {
       // A template's or a generic lambda's definition is not code; its instances are.
       if (!sema::Sema::closure_has_code(world, c)) continue;
+      // Its typed return is available to lookup, but calls and address formation require the ABI.
+      if (c.flags & sema::closure_flag::polymorphic_result) continue;
       std::vector<ast::LocalRec> locals = ins.seqs.elements(c.locals);
       for (EntityId f : {c.call, c.invoker}) {
         if (f == EntityId::none) continue;

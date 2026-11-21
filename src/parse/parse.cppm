@@ -7585,6 +7585,10 @@ interp::Callee Program::closure_ir(EntityId f, u32 item) {
   }
   for (const ast::ClosureDef& c : w_->ins.seqs.elements(body->closures)) {
     if (c.call != f && c.invoker != f) continue;
+    if (c.flags & sema::closure_flag::polymorphic_result) {
+      r.unsupported = true;
+      return r;
+    }
     const items::Item& it = items_->items[k];
     sema::Sema::ClosureMember m =
         sema::Sema::closure_member_def(*w_, c, f, c.call == f ? c.body : c.invoker_body, w_->ins.seqs.elements(c.locals));

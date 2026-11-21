@@ -2137,6 +2137,17 @@ What the process allocates, attributed to the engine's cells, in the trace and t
   [#489](https://github.com/yrashk/ycxx/issues/489).
   [Design](docs/design/ordinary-virtual-declarations.md)
 
+## Deduced polymorphic lambda results (#569)
+
+- A nongeneric lambda with a deduced value result can directly return a parenthesized
+  polymorphic construction. Semantic analysis checks the selected constructor, converted
+  arguments and potentially invoked destructor. The same-class prvalue initializes the
+  result directly. An unevaluated call exposes the deduced result type.
+- Ordinary `if consteval` checks both arms. A discarded `if constexpr` arm follows the
+  existing instantiation rules. Invoking the lambda or converting it to a callable function
+  pointer still requires native object lifetime and ABI support.
+  [[stmt.return]](https://eel.is/c++draft/stmt.return) · [#569](https://github.com/yrashk/ycxx/issues/569) · [#309](https://github.com/yrashk/ycxx/issues/309)
+
 ## Templates, ζ step 9: member function templates (#88, #314, 2026-11-19)
 
 - **Member function templates** ([temp.mem]) of classes and class templates: their head one level

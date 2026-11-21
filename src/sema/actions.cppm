@@ -192,7 +192,7 @@ struct Ex {
 };
 
 enum class Construction { direct, copy, direct_list, copy_list };
-enum class ConstructorDestination { object, delegation, polymorphic_base };
+enum class ConstructorDestination { object, delegation, polymorphic_base, lambda_result };
 
 // A braced-init-list as written ([dcl.init.general]): each initializer-clause is an analysed
 // expression or a nested list, with its designator (`.name =`, [dcl.init.aggr]) if it has one.
@@ -329,6 +329,7 @@ namespace closure_flag {
 inline constexpr u16 mutable_ = 1;      // its function call operator is not const
 inline constexpr u16 captureless = 2;   // no lambda-capture: it converts to a pointer to function
 inline constexpr u16 pattern = 4;       // in a template's or a generic lambda's definition: not code
+inline constexpr u16 polymorphic_result = 8;  // checked return, without native or interpreter ABI support
 }
 
 // What a cell demands of the program besides its value (query-engine.md §B1.4): a function
@@ -1204,7 +1205,11 @@ public:
   }
 
   bool require_supported_virtual_signature(const TypeRec& f, u32 at) {
-    return require_supported_virtual_layout(f.inner, at) && std::ranges::all_of(f.params, [&](QualType p) {
+    return require_supported_virtual_layout(f.inner, at) && require_supported_virtual_parameters(f, at);
+  }
+
+  bool require_supported_virtual_parameters(const TypeRec& f, u32 at) {
+    return std::ranges::all_of(f.params, [&](QualType p) {
       return require_supported_virtual_layout(p, at);
     });
   }
@@ -2278,6 +2283,8 @@ public:
     QualType declared_return{};
     bool return_deduced = false;
     bool return_seen = false;
+    NodeId pending_result = NodeId::none;  // the checked functional cast at the current return
+    bool polymorphic_result = false;
     u32 no_return_deduction = 0;
     u32 loop_depth = 0;
   };
@@ -2684,7 +2691,9 @@ public:
     loop_depth = fr.loop_depth;
     completed_closures_.push_back({fr.scope, fr.sig});
     closure_calls_[std::to_underlying(fr.call)] = call_type;
-    if (!body.ok() || !require_supported_virtual_signature(types().rec(call_type), fr.begin))
+    const auto signature = types().rec(call_type);
+    if (!body.ok() || !(fr.polymorphic_result ? require_supported_virtual_parameters(signature, fr.begin)
+                                              : require_supported_virtual_signature(signature, fr.begin)))
       return {NodeId::none, fr.begin, end};
     // The closure type ([expr.prim.lambda.closure]): its captures' fields, its function call
     // operator, and for a lambda without a lambda-capture the static invoker its conversion to a
@@ -2713,7 +2722,8 @@ public:
     }
     q_->publish_class(fr.closure, std::move(rec));
     u16 flags = u16((fr.mutable_ ? closure_flag::mutable_ : 0) | (captureless ? closure_flag::captureless : 0) |
-                    (generic || in_pattern() ? closure_flag::pattern : 0));
+                    (generic || in_pattern() ? closure_flag::pattern : 0) |
+                    (fr.polymorphic_result ? closure_flag::polymorphic_result : 0));
     // The enclosing function's constants a generic body names stand as their values when it is
     // instantiated, where that function's locals are gone.
     // The enclosing context's locals visible here, innermost first and one per name: constants
@@ -2943,6 +2953,8 @@ public:
   // is evaluated and discarded (the conversion function returns the address, /8).
   Ex invoker_pointer(Ex e, EntityId invoker) {
     QualType ft = w_->entities.rec(invoker).type;
+    if (unevaluated == 0 && !require_supported_virtual_signature(types().rec(ft), e.begin))
+      return {NodeId::none, e.begin, e.end};
     ExprInfo fi{ft, ValueCategory::lvalue, 0};
     Ex f = node(ast::DeclRef{fi, invoker}, e.begin, e.end, fi);
     Ex p = convert_node(f, ast::ConversionKind::function_to_pointer, types().pointer(ft));
@@ -3024,6 +3036,25 @@ public:
   bool return_seen() const { return return_seen_; }
   // Inside a discarded statement or a dependent `if constexpr`: returns deduce nothing.
   u32 no_return_deduction = 0;
+
+  bool checks_lambda_result_expression() {
+    return !lambdas_.empty() && lambdas_.back().head.empty() &&
+           w_->entities.rec(lambdas_.back().call).templ == EntityId::none &&
+           types().kind(declared_return_) == TypeKind::placeholder && no_return_deduction == 0;
+  }
+
+  Ex init_deduced_return(Ex e, QualType type) {
+    if (e.ok() && !lambdas_.empty()) {
+      LambdaFrame& frame = lambdas_.back();
+      if (std::exchange(frame.pending_result, NodeId::none) == e.id && !e.glvalue() && initializes(type, e)) {
+        // [dcl.init.general]: this same-class prvalue initializes the result directly.
+        frame.polymorphic_result = true;
+        return e;
+      }
+    }
+    return convert(e, type, e.begin);
+  }
+
   // What `return e;` (`e` none for `return;` or the end of the body) deduces: the return type,
   // or none after a diagnosed error. In a template's definition a type-dependent `e` deduces
   // nothing; each instantiation does ([dcl.spec.auto.general]/12).
@@ -3315,8 +3346,13 @@ public:
   std::optional<Found> direct_member(EntityId c, const ClassRec& cr, NameId name) {
     for (u32 i = 0; i < cr.fields.size(); ++i)
       if (cr.fields[i].name == name) return Found{&cr.fields[i], i, nullptr, c};
-    for (const MemberDeclRec& m : cr.members)
-      if (m.name == name && !m.is_ctor && !m.is_dtor) return Found{nullptr, 0, &m, c};
+    for (const MemberDeclRec& m : cr.members) {
+      if (m.name != name || m.is_ctor || m.is_dtor) continue;
+      // The synthetic invoker remains available to the checked lambda conversion.
+      if (cr.closure && m.is_static && m.is_function && ins().names.spelling(name) == "__invoke" &&
+          classes().layout_requires_virtual_support(types().rec(m.type).inner)) continue;
+      return Found{nullptr, 0, &m, c};
+    }
     for (const NestedType& nested : cr.types)
       if (nested.name == name) return Found{.owner = c, .nested_type = nested.entity};
     for (const NestedType& nested : cr.types) {
@@ -3729,6 +3765,9 @@ public:
     }
     if (!dt) return fail;
     TypeRec fr = types().rec(*dt);
+    if (unevaluated == 0 && d->head.empty() && closure_member(*w_, fe) &&
+        !require_supported_virtual_layout(fr.inner, paren_at))
+      return fail;
     auto children = call_args(fr, args, begin, paren_at, cands[*chosen].defaults);
     if (!children) return fail;
     ExprInfo info = result_info(fr.inner);
@@ -4195,17 +4234,19 @@ public:
   // the class's constructors and, where they are implicit, its default and copy constructors.
   // List-initialization prohibits narrowing and checks the explicit winner for copy-list forms.
   // Delegation and base initialization target subobjects or objects already under construction.
+  // A lambda result can be checked before the result ABI is available.
   Ex construct(QualType t, std::vector<Ex> args, u32 begin, u32 end, Construction form = Construction::direct,
                ConstructorDestination destination = ConstructorDestination::object) {
     Ex fail{NodeId::none, begin, end};
     const bool list = form == Construction::direct_list || form == Construction::copy_list;
     const bool copy_init = form == Construction::copy;
     const bool polymorphic_base = destination == ConstructorDestination::polymorphic_base;
+    const bool lambda_result = destination == ConstructorDestination::lambda_result;
     if (std::ranges::any_of(args, [](const Ex& a) { return !a.ok(); })) return fail;
     if (types().is_dependent(t) || any_dependent(args))
       return dependent_node(args, begin, end, types().is_dependent(t) ? std::nullopt : std::optional(Types::unqualified(t)));
     if (!require_complete(t, begin) ||
-        (!polymorphic_base && !require_supported_virtual_layout(t, begin))) return fail;
+        (!polymorphic_base && !lambda_result && !require_supported_virtual_layout(t, begin))) return fail;
     QualType ut = Types::unqualified(t);
     EntityId c = types().class_of(ut);
     const ClassRec* cr = class_rec(c);
@@ -4299,10 +4340,10 @@ public:
       return fail;
     }
     if (k.entity != EntityId::none && !check_access(c, k.pattern ? k.pattern->entity : k.entity, w_->entities.rec(c).name, begin)) return fail;
-    if (polymorphic_base) {
-      // [class.base.init]: the base destructor is potentially invoked by this constructor.
+    if (polymorphic_base || lambda_result) {
+      // [class.base.init], [stmt.return]: the destructor is potentially invoked.
       if (!cr->destructor_usable) {
-        diag(begin, Diag::base_unusable_destructor, ut);
+        diag(begin, polymorphic_base ? Diag::base_unusable_destructor : Diag::return_unusable_destructor, ut);
         return fail;
       }
       if (cr->destructor != EntityId::none &&
@@ -4326,14 +4367,19 @@ public:
     if (k.entity == EntityId::none) {
       // Trivial: a copy of the argument's object, or nothing to construct.
       if (fr.params.empty()) {
-        if (polymorphic_base) {
-          // Keep a semantic initializer without requiring the aggregate's object layout.
+        if (polymorphic_base || (lambda_result && cr->fields.empty() && cr->bases.empty() && !cr->default_deleted)) {
+          // Keep the semantic initializer without laying out the class. For lambda results,
+          // this implicit form is bounded to roots without subobject initialization.
           ExprInfo info{ut, ValueCategory::prvalue, 0};
           return node(ast::ValueInit{info}, begin, end, info);
         }
+        if (lambda_result) {
+          diag(begin, Diag::virtual_layout, ut);
+          return fail;
+        }
         return value_init_aggregate(ut, begin, end);
       }
-      if (polymorphic_base) {
+      if (polymorphic_base || lambda_result) {
         // An implicit polymorphic copy is nontrivial ([class.copy.ctor]).
         diag(begin, Diag::virtual_layout, ut);
         return fail;
@@ -4366,6 +4412,7 @@ public:
       // A parameter of class type: a temporary the caller initializes and destroys ([expr.call]/7).
       if (i < fr.params.size() && types().is_class(fr.params[i]) && !a.glvalue())
         a = materialize(a, Types::unqualified(fr.params[i]), false, true);
+      if (!a.ok()) return fail;
       cs.push_back({a.id, a.begin >= begin ? a.begin - begin : 0});
     }
     ExprInfo info{ut, ValueCategory::prvalue, 0};
@@ -4411,6 +4458,15 @@ public:
       return {NodeId::none, begin, end};
     }
     return construct(t, std::move(args), begin, end);
+  }
+
+  // The parser proved that this functional cast is the whole operand of a deducing lambda return.
+  Ex lambda_result_cast(QualType t, std::vector<Ex> args, u32 begin, u32 end) {
+    const ClassRec* c = types().is_class(t) ? class_rec(types().class_of(t)) : nullptr;
+    if (!c || !c->polymorphic) return functional_cast(t, std::move(args), begin, end);
+    Ex result = construct(t, std::move(args), begin, end, Construction::direct, ConstructorDestination::lambda_result);
+    if (result.ok() && !dependent(result)) lambdas_.back().pending_result = result.id;
+    return result;
   }
 
   // A void prvalue ([expr.type.conv]/2): `(void)0`.

@@ -277,6 +277,8 @@ private:
     for (std::size_t i = 0; i < s_->closures.size(); ++i) {
       const ast::ClosureDef& c = s_->closures[i];
       if (c.call != f && c.invoker != f) continue;
+      if (c.flags & closure_flag::polymorphic_result)
+        return interp::Callee{.is_constexpr = true, .unsupported = true};
       std::vector<ast::LocalRec> locals = s_->closure_locals[i];
       for (ast::LocalRec& l : locals) l.decl = NodeId::none;  // drafts
       ast::Child body = s_->builder().commit(ast::Child{c.call == f ? c.body : c.invoker_body, 0});
