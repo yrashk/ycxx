@@ -1321,6 +1321,10 @@ public:
     if (auto s = p_->decl_sema(d)) return *s;
     return invalid_decl();
   }
+  std::optional<ast::DeclSema> written_member(EntityId f) override {
+    const auto decl = p_->member_decl(f);
+    return decl ? p_->decl_sema(*decl) : std::nullopt;
+  }
   void use_allocation_function(EntityId f) override {
     auto& functions = p_->implicit_allocation_functions_;
     if (!std::ranges::contains(functions, f)) functions.push_back(f);
@@ -1435,6 +1439,7 @@ public:
     return is_complete(c) ? p_->classes().find(c) : nullptr;
   }
   ast::DeclSema decl_sema(DeclId d) override { return at_.decl_sema(d); }
+  std::optional<ast::DeclSema> written_member(EntityId f) override { return at_.written_member(f); }
   void use_allocation_function(EntityId f) override { at_.use_allocation_function(f); }
   interp::Callee function_ir(EntityId f) override { return p_->function_ir(f, p_->end()); }
   std::optional<QualType> deduced_type(EntityId f) override { return p_->deduced_type(f, p_->end()); }

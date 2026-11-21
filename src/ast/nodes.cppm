@@ -218,10 +218,13 @@ struct This {
 // implicit object argument as a pointer prvalue (`&a` for `a.f()`, `p` for `p->f()`, `this` for an
 // implicit call), sequenced before the arguments.
 struct MemberCall {
+  static constexpr std::uint32_t direct = ~std::uint32_t{0};
   ExprInfo info;
   EntityId function;
   [[=sequenced(0)]] Child object;
   [[=indeterminately_sequenced(1)]] ChildList args;
+  std::uint32_t virtual_slot = direct;
+  QualType virtual_callee{};  // function pointer type for the ABI call, including the receiver
 };
 
 // Assignment notation calls a member function with the argument sequenced before its object

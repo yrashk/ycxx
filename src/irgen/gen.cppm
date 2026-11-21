@@ -1673,7 +1673,22 @@ class Gen {
     }
     auto c = get<ast::MemberCall>(a);
     if (class_prvalue(c.info) && !into) unsupported(a, "of class type outside an initialization");
-    std::vector<ValueId> args{rvalue(child(a, c.object))};
+    const bool dispatch = c.virtual_slot != ast::MemberCall::direct;
+    if (dispatch && fn_.thunk) unsupported(a, "in constant evaluation");
+    const ValueId receiver = rvalue(child(a, c.object));
+    std::vector<ValueId> args;
+    if (dispatch) {
+      // Itanium ABI §3.2.4: load the address point at offset zero in this root subobject.
+      // Preserve the same object address for the call's first argument.
+      const auto table_type = facts_.pointer_to(c.virtual_callee);
+      const auto receiver_type = facts_.pointer_to(table_type);
+      const ValueId vptr = pure(ir::Op::ptr_cast, receiver_type, {receiver}, {word(ty(receiver_type))});
+      const ValueId table = load({vptr, table_type});
+      const ValueId index = int_constant(facts_.ptrdiff_type(), c.virtual_slot);
+      const ValueId slot = pure(ir::Op::ptr_add, table_type, {table, index}, {word(ty(c.virtual_callee))});
+      args.push_back(load({slot, c.virtual_callee}));
+    }
+    args.push_back(receiver);
     if (into) args.push_back(*into);
     uint32_t byval = 0;
     for (ast::Child arg : ast_.children(c.args)) {
@@ -1681,6 +1696,7 @@ class Gen {
       if (argument_object(x)) byval |= 1u << args.size();
       args.push_back(argument(x));
     }
+    if (dispatch) return call_pointer(facts_.pointee(c.virtual_callee), result_type(c.info), args, 0, 0);
     return call_fn(c.function, result_type(c.info), args, 1, false, byval, into ? 2 : 0);
   }
   // A call whose result is a class object of its own, which a hidden argument names

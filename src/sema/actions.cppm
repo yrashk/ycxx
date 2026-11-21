@@ -92,6 +92,8 @@ public:
   // names join the lookup where [namespace.udir]/2 puts them.
   virtual std::vector<DeclId> visible_decls(NameId name, std::span<const EntityId> directives = {}) = 0;
   virtual ast::DeclSema decl_sema(DeclId d) = 0;
+  // The written in-class declaration of a member from this unit's class record.
+  virtual std::optional<ast::DeclSema> written_member(EntityId) { return std::nullopt; }
   // A use of a global allocation function that may lack a written declaration in the unit.
   virtual void use_allocation_function(EntityId) {}
   // Check the selected implicitly declared copy assignment against its subobjects.
@@ -174,6 +176,28 @@ public:
   virtual const std::vector<Expansion>* pattern_expansions() { return nullptr; }
   virtual ~Questions() = default;
 };
+
+// An opaque polymorphic root admits calls on peer-owned objects without a native class layout.
+bool native_virtual_consumer(const ClassRec& record, const Types& types, auto&& written_member) {
+  if (types.target().triple != ast::x86_64_linux.triple || !record.polymorphic || record.virtual_destructor ||
+      !record.bases.empty() || !record.fields.empty() || record.user_ctors || record.destructor != EntityId::none)
+    return false;
+  auto integer = [&](QualType type) {
+    const auto builtin = types.builtin_of(type);
+    return builtin && ast::is_integral(*builtin) && types.target()[*builtin].size <= 8;
+  };
+  return std::ranges::all_of(record.members, [&](const MemberDeclRec& member) {
+    // Class completion also records an implicit copy assignment, even for opaque classes.
+    if (!member.is_virtual)
+      return member.copy_assignment != CopyAssignment::none && !member.explicit_defaulted_assignment;
+    const auto declared = written_member(member.entity);
+    if (!declared || (declared->flags & (decl_flag::definition | decl_flag::inline_ | decl_flag::deleted))) return false;
+    const auto type = types.rec(member.type);
+    return !type.variadic && type.fn_ref == ast::RefQual::none &&
+           (type.fn_cv == Cv::none || type.fn_cv == Cv::const_) && type.params.size() < 32 &&
+           integer(type.inner) && std::ranges::all_of(type.params, integer);
+  });
+}
 
 // An analysed expression or statement under construction: a draft node and its token range in
 // the part. `id` is none after an error that has been diagnosed; actions given such an operand
@@ -1096,7 +1120,8 @@ public:
     if (sc.ns) return namespace_template(*sc.ns, name, ast::DeclKind::function).has_value();
     return sc.type && types().is_class(*sc.type) && class_has_member_template(types().class_of(*sc.type), name);
   }
-  Ex member(Ex object, bool arrow, NameId name, u32 end, u32 op_at, u32 name_at) {
+  Ex member(Ex object, bool arrow, NameId name, u32 end, u32 op_at, u32 name_at,
+            std::optional<NameId> qualifier = {}) {
     u32 begin = object.begin;
     Ex fail{NodeId::none, begin, end};
     if (!object.ok()) return fail;
@@ -1120,6 +1145,10 @@ public:
     }
     if (!require_complete(ct, op_at)) return fail;
     EntityId c = types().class_of(ct);
+    if (qualifier && (*qualifier != w_->entities.rec(c).name || !virtual_consumer(c))) {
+      diag(name_at, Diag::not_supported, lex::Tk::coloncolon);
+      return fail;
+    }
     auto found = find_member(c, name);
     if (!found) {
       diag(name_at, Diag::no_member, name, Types::unqualified(ct));
@@ -1152,7 +1181,8 @@ public:
       ct = arrow ? types().pointee(object.type()) : object.type();
       c = found->owner;
     }
-    if (found->member && found->member->is_function) return bound_member(c, name, object, arrow, begin, end, name_at, naming);
+    if (found->member && found->member->is_function)
+      return bound_member(c, name, object, arrow, begin, end, name_at, naming, qualifier.has_value());
     if (!check_access(c, found->member ? found->member->entity : found->field->entity, name, name_at, naming)) return fail;
     if (found->member) {
       // A static data member: the object expression is evaluated, then discarded ([expr.ref]).
@@ -3145,16 +3175,16 @@ public:
   // (none when there is none to bind, as in a static member function). Only a call may follow
   // ([expr.ref]/6.3.2).
   Ex bound_member(EntityId c, NameId name, std::optional<Ex> object, bool arrow, u32 begin, u32 end, u32 name_at,
-                  EntityId naming = EntityId::none) {
-    return bind_members(c, member_functions(c, name), object, arrow, begin, end, name_at, naming);
+                  EntityId naming = EntityId::none, bool qualified = false) {
+    return bind_members(c, member_functions(c, name), object, arrow, begin, end, name_at, naming, qualified);
   }
 
   Ex bind_members(EntityId c, std::vector<const MemberDeclRec*> cands, std::optional<Ex> object, bool arrow,
-                  u32 begin, u32 end, u32 name_at, EntityId naming = EntityId::none) {
+                  u32 begin, u32 end, u32 name_at, EntityId naming = EntityId::none, bool qualified = false) {
     ExprInfo info{builtin(Builtin::bound_member), ValueCategory::prvalue, 0};
     Ex r = node(ast::Member{info, cands.front()->entity, ~u32{0}, arrow ? 1u : 0u, 0, object ? at(*object, begin) : Child{}},
                 begin, end, info);
-    bound_[std::to_underlying(r.id)] = {object, std::move(cands), c, name_at, naming};
+    bound_[std::to_underlying(r.id)] = {object, std::move(cands), c, name_at, naming, qualified};
     return r;
   }
   bool is_bound_member(const Ex& e) { return e.ok() && types().is(e.type(), Builtin::bound_member); }
@@ -3328,6 +3358,12 @@ public:
     return fail;
   }
 
+  const ClassRec* virtual_consumer(EntityId cls) {
+    const auto* record = class_rec(cls);
+    return record && native_virtual_consumer(*record, types(), [&](EntityId f) { return q_->written_member(f); })
+               ? record : nullptr;
+  }
+
   // A call of a member function ([expr.call], [over.match.funcs]): a static one is an ordinary
   // call; a non-static one passes its object, which must be at least as cv-qualified as the
   // function ([class.this]).
@@ -3444,12 +3480,26 @@ public:
     const MemberDeclRec* d = recs[*chosen];
     const Candidate& k = cands[*chosen];
     if (!check_access(bound.cls, d->entity, d->name, bound.name_at, bound.naming)) return fail;
+    u32 virtual_slot = ast::MemberCall::direct;
     if (unevaluated == 0) {
       if (d->is_virtual) {
-        diag(paren_at, Diag::virtual_call);
+        const auto* record = virtual_consumer(bound.cls);
+        if (!record || !object || (!m.arrow && object->cat() != ValueCategory::lvalue) || assignment_notation) {
+          diag(paren_at, Diag::virtual_call);
+          return fail;
+        }
+        if (!bound.qualified) {
+          // [Itanium ABI §2.5.2]: entries for a root's virtuals follow the order of declaration.
+          // The selected declaration is a member of this record.
+          virtual_slot = 0;
+          for (const auto& candidate : record->members) {
+            if (candidate.entity == d->entity) break;
+            if (candidate.is_virtual) ++virtual_slot;
+          }
+        }
+      } else if (!d->is_static && !require_supported_virtual_layout(types().class_type(bound.cls), paren_at)) {
         return fail;
       }
-      if (!d->is_static && !require_supported_virtual_layout(types().class_type(bound.cls), paren_at)) return fail;
     }
     const auto copy_assignment = d->copy_assignment;
     if (copy_assignment != CopyAssignment::none) {
@@ -3508,7 +3558,14 @@ public:
       contract_assert(children->size() == 1);
       return node(ast::AssignmentCall{info, fe, children->front(), at(o, begin)}, begin, end, info);
     }
-    return node(ast::MemberCall{info, fe, at(o, begin), b_->list(*children)}, begin, end, info);
+    ast::MemberCall call{info, fe, at(o, begin), b_->list(*children)};
+    if (virtual_slot != ast::MemberCall::direct) {
+      std::vector<QualType> parameters{o.type()};
+      parameters.insert(parameters.end(), fr.params.begin(), fr.params.end());
+      call.virtual_slot = virtual_slot;
+      call.virtual_callee = types().pointer(types().function(fr.inner, parameters, false, LangLinkage::cxx));
+    }
+    return node(call, begin, end, info);
   }
 
   // ------------------------------------------------------------ overload resolution ([over.match])
@@ -6779,6 +6836,7 @@ private:
     EntityId cls = EntityId::none;  // whose members they are, for access ([class.access]/4)
     u32 name_at = 0;
     EntityId naming = EntityId::none;  // the class they were named in ([class.access.base]/5)
+    bool qualified = false;            // an explicit qualifier suppresses virtual dispatch
   };
   std::map<u32, Bound> bound_;                        // by draft bound-member Member
   std::set<u32> deleted_;                             // deleted functions named so far
