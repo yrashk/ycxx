@@ -1271,6 +1271,10 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   an accessible, unambiguous base subobject. A compatible bit-field is read into a temporary.
   The tests in `tests/own/casts` cover identity, qualification, overloads and direct reference
   initialization. [#199](https://github.com/yrashk/ycxx/issues/199)
+- Named `reinterpret_cast` converts between ordinary object pointers (including cv `void*`)
+  and pointer-width integral types. A too-narrow integer destination is ill-formed, and
+  an evaluated cast is disallowed in a core constant expression. Smaller integer sources
+  and other reinterpret conversions remain in [#199](https://github.com/yrashk/ycxx/issues/199).
 - **sizeof, alignof** of fundamental, pointer, enumeration and array types and of an expression,
   from `ast::Target`; a class's since #194, below.
 - **decltype(e)** ([dcl.type.decltype]): an unparenthesized id-expression or member access names
@@ -1626,11 +1630,12 @@ session's.*
   (`Templates::transform`); of a dependent type it is a `TTransform` that substitution applies and
   deduction treats as a non-deduced context, mangled as Clang does (`u11__remove_cvIT_E`).
 - Dependent `__is_same`, `__is_reference`, `__is_const`, `__is_volatile`, `__is_array`,
-  `__is_pointer`, `__is_function`, `__is_enum`, `__is_union`, and `__is_class` in a `bool`
-  template argument or default are `VDepOp` values with canonical qualified type operands.
-  Substitution retains unresolved operands across aliases and forms valid operand types before
-  evaluating the predicate. The ordinary `VInt` result shares the specialization for literal
-  `true` or `false` ([temp.alias], [temp.type], [temp.deduct.general], #209).
+  `__is_pointer`, `__is_function`, `__is_enum`, `__is_union`, `__is_class`, `__is_member_pointer`,
+  `__is_member_object_pointer`, and `__is_member_function_pointer` in a `bool` template argument or
+  default are `VDepOp` values with canonical qualified type operands. Substitution retains
+  unresolved operands across aliases and forms valid operand types before evaluating the
+  predicate. The ordinary `VInt` result shares the specialization for literal `true` or `false`
+  ([temp.alias], [temp.type], [temp.deduct.general], #209).
 - Class and union predicates read the parsed class-key from the current translation unit,
   including for forward declarations. A class template specialization's primary supplies
   its kind without instantiation ([temp.class.general], [meta.unary.cat], #209).

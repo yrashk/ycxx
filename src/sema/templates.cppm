@@ -338,6 +338,14 @@ public:
     case ast::DepOp::is_pointer: result = types().is_pointer(type); break;
     case ast::DepOp::is_function: result = types().is_function(type); break;
     case ast::DepOp::is_enum: result = types().is_enum(type); break;
+    case ast::DepOp::is_member_pointer: result = types().is_member_pointer(type); break;
+    case ast::DepOp::is_member_object_pointer:
+    case ast::DepOp::is_member_function_pointer:
+      if (types().is_member_pointer(type)) {
+        const bool member_is_function = types().is_function(types().rec(type).inner);
+        result = member_is_function == (op == ast::DepOp::is_member_function_pointer);
+      }
+      break;
     case ast::DepOp::is_union:
     case ast::DepOp::is_class:
       if (types().is_class(type)) {
@@ -462,7 +470,10 @@ public:
       case ast::DepOp::is_function:
       case ast::DepOp::is_enum:
       case ast::DepOp::is_union:
-      case ast::DepOp::is_class: {
+      case ast::DepOp::is_class:
+      case ast::DepOp::is_member_pointer:
+      case ast::DepOp::is_member_object_pointer:
+      case ast::DepOp::is_member_function_pointer: {
         auto operand = substitute_arg(ins().seqs.at(op.operands, 0), b);
         if (!operand) return std::nullopt;
         return unary_trait_value(op.op, operand->type);
