@@ -1532,7 +1532,8 @@ public:
   // A qualified type name at token `start`: its type and the tokens it takes.
   // `checked`: the name is taken here, so its access is checked ([class.access]/4).
   std::optional<std::pair<QualType, u32>> qualified_type(u32 start, bool checked = false, bool type_only = false,
-                                                       bool* failed_qualifier = nullptr) {
+                                                       bool* failed_qualifier = nullptr,
+                                                       bool* terminal_template_id = nullptr) {
     u32 next = 0;
     bool check_qualifier = checked && substituting_partial_arguments;
     const auto diags = s_->diag_count();
@@ -1545,7 +1546,10 @@ public:
     if (kind(next + 1) == Tk::less && s->ns) {
       u32 j = next;
       const auto diags = s_->diag_count();
-      if (auto t = template_id_scope(s, j, /*scope=*/false, checked)) return std::pair{*t->type, j - start};
+      if (auto t = template_id_scope(s, j, /*scope=*/false, checked)) {
+        if (terminal_template_id && kind(j) != Tk::coloncolon) *terminal_template_id = true;
+        return std::pair{*t->type, j - start};
+      }
       if (checked && s_->has_error_since(diags)) return std::nullopt;
     }
     NameId name = name_of(tok(next));
@@ -2378,7 +2382,7 @@ public:
                                (kind(1) == Tk::l_brace || (kind(1) == Tk::l_paren && kind(2) == Tk::int_lit));
         if (template_name_ahead()) {
           args.push_back(*template_name_argument());
-        } else if (!decay_copy && starts_type_id(/*preserve_failed_qualifier=*/true)) {
+        } else if (!decay_copy && starts_type_id(/*template_argument=*/true)) {
           auto t = type_id();
           if (!t) ok = false;
           else args.push_back({ast::TemplateArgKind::type, s_->types().canonical(*t), sema::ConstId::none});
@@ -2425,16 +2429,20 @@ public:
     if (replay_at && deferred != deferred_argument_checks_) *replay_at = begin;
     return args;
   }
-  bool starts_type_id(bool preserve_failed_qualifier = false) {
+  bool starts_type_id(bool template_argument = false) {
     if (transform_trait_ahead()) return true;
     if (starts_decl_specifier(kind())) return !is(Tk::kw_static) && !is(Tk::kw_extern);
     // `X<args>::m` is a type only when m is: the nested name first. A member of a dependent class
     // is a type only after `typename` ([temp.res.general]/4).
     if (qualified_ahead()) {
       bool failed_qualifier = false;
+      bool terminal_template_id = false;
       auto q = qualified_type(0, /*checked=*/false, /*type_only=*/false,
-                              preserve_failed_qualifier ? &failed_qualifier : nullptr);
-      return failed_qualifier || (q && s_->types().kind(q->first) != sema::TypeKind::dep_name);
+                              template_argument ? &failed_qualifier : nullptr,
+                              template_argument ? &terminal_template_id : nullptr);
+      if (failed_qualifier) return true;  // let the committed parse diagnose the qualifier
+      // A terminal namespace type-template-id can expand to a dependent member type.
+      return q && (terminal_template_id || s_->types().kind(q->first) != sema::TypeKind::dep_name);
     }
     if (is(Tk::identifier) && kind(1) == Tk::less && s_->names_type_template(name_of(tok()))) return true;
     return is(Tk::identifier) && kind(1) != Tk::coloncolon && s_->class_name(name_of(tok())).has_value();
