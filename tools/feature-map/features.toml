@@ -657,7 +657,7 @@ clauses = ['expr.new', 'expr.delete', 'basic.stc.dynamic*', 'dcl.fct.def.replace
 std = 'C++98'
 detect = '\bnew\s+[\w:(]|\bdelete\s*(?:\[\s*\])?\s*[\w(*]'
 status = 'partial'
-note = 'ordinary global scalar new and single-object delete for integral and pointer objects; one-dimensional scalar array new and delete syntax; explicit calls to the usual global array signatures, written nonthrowing scalar and array overloads with a final const class-tag reference, and the four written C++26 non-allocating placement functions; runtime scalar placement new with one argument and a visible written reserved allocator; class allocation, native array expressions, constexpr placement expressions, and exception cleanup remain'
+note = 'ordinary global scalar new and delete for integral and pointer objects, one-dimensional scalar array syntax, and native Linux x86-64 cookie-free array deletion. The usual array operators, tagged overloads, and C++26 reserved placement functions support explicit calls. Runtime scalar placement new uses a visible written reserved allocator. Native array allocation, class allocation, constant evaluation, and exception cleanup remain'
 probe = '''
 struct S { int v; S(int x) : v(x) {} };
 int main() { S* p = new S(5); int r = p->v; delete p; int* a = new int[3]; delete[] a; return r == 5 ? 0 : 1; }
@@ -813,7 +813,7 @@ ftm = '__cpp_auto_cast'
 detect = '(?<![\w>])auto\s*[({]\s*[\w*&]'
 status = 'partial'
 issues = [286]
-note = 'Concrete single-expression scalar and pointer decay-copy works in parentheses and braces, including bit-field reads and array and function decay. General class objects, member pointers, dependent expressions and some template-argument contexts remain.'
+note = 'Scalar and pointer decay-copy works in parentheses and braces, including supported dependent operands in replayed function-template bodies. Concrete template arguments can use braces or an integer-literal-led parenthesized operand. General class objects, member pointers, unresolved type dependence, and other dependent contexts remain open.'
 probe = '''
 int main() { int a = 1; auto b = auto(a); return b - 1; }
 '''
@@ -1119,7 +1119,7 @@ clauses = ['dcl.init.aggr', 'dcl.init.general']
 std = 'C++17'
 ftm = '__cpp_aggregate_bases'
 status = 'partial'
-note = 'Automatic flat arithmetic records support parenthesized initialization. Runtime declarations can copy one public direct base from an exact-type lvalue with all elements supplied. Other base forms, arrays, nested and reference fields, and other initialization contexts remain open.'
+note = 'Automatic flat arithmetic records support parenthesized initialization. Runtime declarations can copy one flat public direct base from an exact-type lvalue or a fully written unqualified braced prvalue, with all derived elements supplied. Other base forms, arrays, nested and reference fields, and other initialization contexts remain open.'
 probe = '''
 struct B { int b; }; struct D : B { int d; }; struct P { int x, y; };
 int main() { D d{{1}, 2}; P p(3, 4); return (d.b + d.d + p.x + p.y == 10) ? 0 : 1; }
@@ -2606,7 +2606,7 @@ clauses = ['meta.unary', 'meta.rel', 'meta.trans']
 std = 'C++11'
 detect = '\bstd::(?:is_\w+|enable_if|conditional|decay|remove_\w+|add_\w+|underlying_type|common_type|invoke_result)\w*\b'
 status = 'partial'
-note = 'assignment traits cover arithmetic operands, and conversion traits cover arithmetic operands and cv void. Class assignment, class conversion, and other object-model traits remain partial'
+note = 'assignment traits cover arithmetic operands, conversion traits cover arithmetic operands and cv void, is_convertible also covers bounded values and references through a unique public nonvirtual base, and is_base_of and is_empty query recorded base declarations. Other object-model traits remain partial'
 issues = [218, 211]
 probe = '''
 enum E { e };

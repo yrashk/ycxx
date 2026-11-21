@@ -135,11 +135,13 @@ enum class DepOp : u8 {
   is_constructible, is_nothrow_constructible, is_trivially_constructible,
   is_assignable, is_nothrow_assignable, is_trivially_assignable,
   is_convertible, is_nothrow_convertible,
+  is_base_of,
+  is_empty,
 };
 
 // A dependent operation (§5.5). The predicates take canonical qualified type operands.
 // The constructibility predicates take a target and an argument sequence,
-// `is_same`, assignability and convertibility take two operands. The other predicates take one.
+// `is_same`, `is_base_of`, assignability and convertibility take two operands. The other predicates take one.
 // `logical_not` takes one bool value operand.
 struct [[=dependent]] VDepOp {
   DepOp op;

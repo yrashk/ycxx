@@ -21,6 +21,7 @@ enum class TypeTrait : std::uint8_t {
   is_trivially_copyable, is_constructible, is_nothrow_constructible, is_trivially_constructible,
   is_assignable, is_nothrow_assignable, is_trivially_assignable,
   is_convertible, is_nothrow_convertible,
+  is_base_of,
 };
 
 struct TypeTraitInfo {
@@ -57,7 +58,8 @@ inline constexpr std::array type_traits{
     TypeTraitInfo{"__is_object", TypeTrait::is_object, 1, false},
     TypeTraitInfo{"__is_const", TypeTrait::is_const, 1, false},
     TypeTraitInfo{"__is_volatile", TypeTrait::is_volatile, 1, false},
-    TypeTraitInfo{"__is_empty", TypeTrait::is_empty, 1, false},
+    TypeTraitInfo{.name = "__is_empty", .trait = TypeTrait::is_empty, .arity = 1,
+                  .transforms = false, .replay_dependent = true},
     TypeTraitInfo{"__is_aggregate", TypeTrait::is_aggregate, 1, false},
     TypeTraitInfo{"__is_polymorphic", TypeTrait::is_polymorphic, 1, false},
     TypeTraitInfo{"__is_abstract", TypeTrait::is_abstract, 1, false},
@@ -91,6 +93,8 @@ inline constexpr std::array type_traits{
     TypeTraitInfo{.name = "__is_convertible", .trait = TypeTrait::is_convertible, .arity = 2,
                   .transforms = false, .advertised = false, .replay_dependent = true},
     TypeTraitInfo{.name = "__is_nothrow_convertible", .trait = TypeTrait::is_nothrow_convertible, .arity = 2,
+                  .transforms = false, .advertised = false, .replay_dependent = true},
+    TypeTraitInfo{.name = "__is_base_of", .trait = TypeTrait::is_base_of, .arity = 2,
                   .transforms = false, .advertised = false, .replay_dependent = true},
 };
 

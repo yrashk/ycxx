@@ -45,8 +45,11 @@ tools/build
 build/bin/ycxx cxx hello.cpp -o hello && ./hello
 ```
 
-Concrete `auto(x)` and `auto{x}` decay-copy expressions support scalar and pointer values,
-including array and function decay. [#286](https://github.com/yrashk/ycxx/issues/286)
+Single-expression `auto(x)` and `auto{x}` perform scalar and pointer decay-copy, including
+array and function decay. Function-template bodies can defer supported dependent operands to
+instantiation. Concrete constant template arguments can use braced conversions such as
+`Tag<auto{7}>` and integer-literal-led parenthesized conversions such as `Tag<auto(7)>`.
+[#286](https://github.com/yrashk/ycxx/issues/286)
 
 **Preprocess binary resources.** Both targets support `#embed` and `__has_embed` with the standard
 parameters. [#125](https://github.com/yrashk/ycxx/issues/125)
@@ -194,8 +197,8 @@ whose dynamic initialization runs in definition order.
 Automatic declarations such as `Point p(3, 4);` can initialize flat aggregates with public
 arithmetic fields. Supplied expressions initialize the fields in declaration order. Omitted
 fields use their default member initializer when available and otherwise get zero. A runtime
-declaration can also copy one public direct base from an lvalue, with an explicit initializer
-for each derived field.
+declaration can also initialize one flat public direct base from an exact-type lvalue or an
+unqualified braced prvalue such as `B{7}`, with an explicit initializer for each derived field.
 [#301](https://github.com/yrashk/ycxx/issues/301)
 
 **Language on macOS.** Programs can use:
@@ -229,6 +232,8 @@ for each derived field.
 - ordinary scalar `new` and single-object `delete` for integral and pointer objects, including
   cv-qualified objects. Scalar allocation uses the global Itanium allocation functions.
   Syntax checking also covers one-dimensional scalar `new T[n]` and `delete[] p`.
+  On Linux x86-64, `delete[] p` releases one-dimensional arrays of integral or ordinary pointer
+  elements through the unsized global deallocator, including zero-length arrays.
   The usual aligned scalar allocation and deallocation signatures support explicit calls with
   `std::align_val_t`. Written nonthrowing global scalar and array overloads with a final
   `const Tag&` support explicit calls, including `std::nothrow_t` and user-defined class tags.
@@ -294,6 +299,12 @@ for each derived field.
   initializers. [Extension guide](docs/EXTENSIONS.md) · [#218](https://github.com/yrashk/ycxx/issues/218)
 - `__is_convertible` and `__is_nothrow_convertible` for arithmetic values, arithmetic references
   and cv `void`, including dependent operands in the same template contexts.
+  [Extension guide](docs/EXTENSIONS.md) · [#218](https://github.com/yrashk/ycxx/issues/218)
+- `__is_base_of` for known class hierarchies, including private and ambiguous bases and dependent
+  operands in supported class-template bases and variable-template initializers.
+  [Extension guide](docs/EXTENSIONS.md) · [#218](https://github.com/yrashk/ycxx/issues/218)
+- `__is_empty` accounts for inherited data members and supports dependent operands in class-template
+  bases and variable-template initializers.
   [Extension guide](docs/EXTENSIONS.md) · [#218](https://github.com/yrashk/ycxx/issues/218)
 - logical negation of a qualified dependent `bool` variable template-id in a `bool` template
   argument or default

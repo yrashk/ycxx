@@ -37,7 +37,8 @@ using sema::ConstId;
 enum class LayoutAttributes { affecting_layout, leading_affecting_layout, any };
 
 bool layout_attribute(const pp::Region& region, u32 begin, u32 end, LayoutAttributes mode = LayoutAttributes::affecting_layout,
-                      std::span<const std::pair<u32, u32>> applied = {}) {
+                      std::span<const std::pair<u32, u32>> applied = {},
+                      std::string_view standard_attribute = {}) {
   using enum lex::Tk;
   for (std::uint32_t i = begin; i < end; ++i) {
     while (!applied.empty() && applied.front().second <= i) applied = applied.subspan(1);
@@ -46,7 +47,7 @@ bool layout_attribute(const pp::Region& region, u32 begin, u32 end, LayoutAttrib
       continue;
     }
     auto tok = region.tokens[i];
-    if (tok.kind == kw_alignas) return true;
+    if (tok.kind == kw_alignas && standard_attribute.empty()) return true;
     if (i + 1 == end) break;
     const auto next = region.tokens[i + 1].kind;
     bool bracket = tok.kind == l_square && next == l_square;
@@ -56,16 +57,29 @@ bool layout_attribute(const pp::Region& region, u32 begin, u32 end, LayoutAttrib
       continue;
     }
     if (mode == LayoutAttributes::any) return true;
+    const bool unscoped = !standard_attribute.empty() && bracket && i + 2 < end &&
+                          region.tokens[i + 2].kind != kw_using;
     if (gnu) ++i;
     const auto open = bracket ? l_square : l_paren;
     const auto close = bracket ? r_square : r_paren;
     std::uint32_t depth = 1;
+    std::uint32_t parentheses = 0;
     while (++i < end && depth) {
       auto part = region.tokens[i];
       if (part.kind == open) ++depth;
       else if (part.kind == close && --depth == 0) break;
+      else if (unscoped && part.kind == l_paren) ++parentheses;
+      else if (unscoped && part.kind == r_paren && parentheses) --parentheses;
       else if (part.kind == identifier) {
         auto name = region.name(part);
+        if (!standard_attribute.empty()) {
+          const auto previous = region.tokens[i - 1].kind;
+          const auto following = i + 1 < end ? region.tokens[i + 1].kind : eof;
+          if (unscoped && depth == 2 && parentheses == 0 &&
+              (previous == l_square || previous == comma) &&
+              (following == r_square || following == comma) && name == standard_attribute) return true;
+          continue;
+        }
         if (name.size() > 4 && name.starts_with("__") && name.ends_with("__"))
           name = name.substr(2, name.size() - 4);
         if (name == "packed" || name == "aligned" || name == "mode" || name == "vector_size" ||
@@ -967,7 +981,7 @@ public:
   // its initializer analysed and evaluated with the arguments bound; none if `v` is no such
   // specialization, or its template is not defined before `point`.
   struct VarInstance;
-  const VarInstance* variable_instance(EntityId v, u32 point);
+  const VarInstance* variable_instance(EntityId v, u32 point, std::optional<QualType> potential_constant_type = std::nullopt);
   // The variable template specializations instantiated, in order: their item and record.
   struct VarInstance {
     EntityId spec;
@@ -1023,6 +1037,7 @@ public:
   // The end of the translation unit (§B6.2): every specialization whose definition a cell
   // requires is instantiated, in order of first demand, and so are those its instance requires.
   void instantiate_all();
+  void instantiate_variable_demands(std::span<const sema::Demand> demands, u32 point);
   void references(NodeId n, std::vector<EntityId>& out) const;
   std::span<const Instance* const> instances() const { return instance_order_; }
   // Every specialization whose definition the unit requires, in order of first demand.
@@ -1081,14 +1096,19 @@ public:
     for (u32 k = 0; k < items_->items.size(); ++k) {
       // Members of a class or namespace wait for those (M2); the enclosing item was diagnosed.
       if (!in_global_scope(k)) continue;
-      item_sema(k);
+      const auto& item = item_sema(k);
+      const bool ordinary = !templated_body(k);
+      if (ordinary && item.diags.empty()) instantiate_variable_demands(item.demands, k);
       if (items_->items[k].kind == ItemKind::class_def) {
         class_def(k);
         // The members' function bodies, complete-class contexts.
         for (u32 m : items_->items[k].members)
           if (items_->items[m].kind == ItemKind::function && items_->items[m].has_body()) analyze_body(m);
       }
-      if (items_->items[k].has_body() && items_->items[k].kind == ItemKind::function) analyze_body(k);
+      if (items_->items[k].has_body() && items_->items[k].kind == ItemKind::function) {
+        const auto& body = analyze_body(k);
+        if (ordinary && body.diags.empty()) instantiate_variable_demands(body.demands, k);
+      }
     }
     instantiate_all();
   }
@@ -1492,6 +1512,7 @@ public:
     return {std::to_underlying(p_->id(dmi.item)), dmi.begin - p_->items().items[dmi.item].begin + offset};
   }
   bool in_type_trait_pattern() const override { return retain_type_trait_pattern; }
+  bool in_type_trait_replay() const override { return type_trait_demand.has_value(); }
   void record_dependent_type_trait_operand(engine::Loc loc) override {
     p_->dependent_type_trait_operands_.emplace(loc.item, loc.offset);
   }
@@ -3753,6 +3774,8 @@ private:
 
   void member_declarators(const DeclSpec& spec, const ast::DeclSema& c, bool fields_only = false) {
     sema::Types& types = s_.types();
+    const bool shared_overlap = layout_attribute(p_->region(), it_->begin, ps_.index(),
+                                                 LayoutAttributes::leading_affecting_layout, {}, "no_unique_address");
     do {
       bool conversion = ps_.conversion_id_ahead();
       if (conversion && spec.has_type) {
@@ -3893,6 +3916,12 @@ private:
       sem.is_mutable = spec.mutable_at.has_value();
       sem.linkage = ast::Linkage::none;
       sem.flags = sema::decl_flag::definition;
+      if (shared_overlap || layout_attribute(p_->region(), it_->begin + d.begin, ps_.index(),
+                                             LayoutAttributes::affecting_layout, {}, "no_unique_address")) {
+        const NameId attr_name = s_.ins().names.intern("no_unique_address");
+        const NodeId attr = s_.node(ast::Attribute{s_.no_name(), attr_name, b_.list({})}, d.begin, d.begin).id;
+        sem.attributes = b_.seq({attr});
+      }
       sem.entity = s_.world().entities.entity(
           {sema::EntityKind::data_member, d.name, d.type, LangLinkage::cxx, ast::Linkage::none, {}, c.entity});
       // A default member initializer ([class.mem.general]) is a complete-class context: it is
@@ -6159,8 +6188,11 @@ Program::ClassContent Program::class_content(u32 item, const std::function<const
           out.unapplied_field_layout = layout_attribute(*r_, mi.begin, mi.end);
           inspect_field_layout = false;
         }
+        const bool no_unique_address = std::ranges::any_of(w_->ins.seqs.elements(d.attributes), [&](NodeId attr) {
+          return w_->ins.names.spelling(w_->ins.ast.get<ast::Attribute>(attr).name) == "no_unique_address";
+        });
         fields.push_back({w_->entities.rec(d.entity).name, d.type, d.entity, inits.contains(i) ? inits[i] : ConstId::none,
-                        dmis_.contains(std::to_underlying(d.entity)), d.bit_width, d.is_mutable});
+                        dmis_.contains(std::to_underlying(d.entity)), d.bit_width, d.is_mutable, no_unique_address});
       } else if (d.kind == ast::DeclKind::enum_ || d.kind == ast::DeclKind::type_alias)
         nested.push_back({w_->entities.rec(d.entity).name, d.type, d.entity});
       else if (d.kind == ast::DeclKind::function || d.kind == ast::DeclKind::variable) {
@@ -6676,6 +6708,7 @@ public:
     std::optional<ast::DeclSema> f;
     if (p_->world().ins.seqs.size(is.decls) > 0) f = p_->completed_declaration(p_->world().ins.seqs.at(is.decls, 0));
     std::optional<ast::DeclSema> pattern = f;
+    const bool function_template = pattern && p_->world().ins.seqs.size(pattern->template_params) > 0;
     if (inst_) f = inst_->decl;
     Ex root;
     if (f && f->entity != EntityId::none && f->kind == ast::DeclKind::function &&
@@ -6688,7 +6721,7 @@ public:
       // A template's body is in the scope of its template-head ([basic.scope.temp]); an
       // instantiation's, with the arguments bound.
       for (auto& head : p_->enclosing_heads(k_)) s_.template_scopes.push_back(std::move(head));
-      if (pattern && p_->world().ins.seqs.size(pattern->template_params) > 0)
+      if (function_template)
         s_.template_scopes.push_back(p_->world().ins.seqs.elements(pattern->template_params));
       if (inst_) s_.template_args = inst_->args;
       // A member function's body sees its class's members ([basic.scope.class]) and `this`; a
@@ -6743,7 +6776,9 @@ public:
         // `= default`, `= delete` or a function-try-block.
         s_.diag(ps_.pos(), sema::Diag::not_supported, ps_.kind());
       } else {
+        ps_.dependent_decay_copy_body = function_template && !inst_;
         root = ps_.compound_statement();
+        ps_.dependent_decay_copy_body = false;
         if (!ps_.at_end()) s_.diag(ps_.pos(), sema::Diag::unexpected_token, ps_.kind());
         s_.check_labels();  // labels have function scope ([stmt.label]/2)
         // No return statement deduces the placeholder as `return;` would ([dcl.type.auto.deduct]/2).
@@ -6757,7 +6792,7 @@ public:
     std::vector<ast::LocalRec> locals(s_.locals().begin(), s_.locals().end());
     // A template's definition demands nothing; its instantiations do. What it keeps for them is
     // which calls were dependent ([temp.dep.candidate]) and its pack expansions (ast.md §6.4).
-    bool templated = (pattern && p_->world().ins.seqs.size(pattern->template_params) > 0) || !p_->enclosing_heads(k_).empty();
+    bool templated = function_template || !p_->enclosing_heads(k_).empty();
     std::vector<sema::Expansion> none;
     std::vector<u32> no_calls;
     const bool keeps = templated && !inst_;
@@ -7912,11 +7947,27 @@ std::optional<u32> Program::out_of_class_definition(EntityId spec, MemberOf of) 
   return std::nullopt;
 }
 
-const Program::VarInstance* Program::variable_instance(EntityId v, u32 point) {
+const Program::VarInstance* Program::variable_instance(EntityId v, u32 point,
+                                                       std::optional<QualType> potential_constant_type) {
   const u32 key = std::to_underlying(v);
-  if (auto it = var_index_.find(key); it != var_index_.end())
-    return var_instances_[it->second].item < point ? &var_instances_[it->second] : nullptr;
   const sema::EntityRec& rec = w_->entities.rec(v);
+  if (potential_constant_type &&
+      ((rec.scope != EntityId::none && w_->entities.rec(rec.scope).kind != sema::EntityKind::namespace_) ||
+       std::ranges::any_of(rec.args, [&](const ast::TemplateArg& arg) { return w_->arg_dependent(arg); })))
+    return nullptr;
+  auto qualifies = [&](const ast::DeclSema& pattern) {
+    if (!potential_constant_type || (pattern.flags & sema::decl_flag::constexpr_)) return true;
+    const QualType type = w_->types.canonical(*potential_constant_type);
+    return w_->types.is_reference(type) ||
+           (sema::Types::is_const(type) && !sema::Types::is_volatile(type) &&
+            (w_->types.is_integral(type) || w_->types.is_enum(type)));
+  };
+  if (auto it = var_index_.find(key); it != var_index_.end()) {
+    const VarInstance& cached = var_instances_[it->second];
+    if (cached.item >= point) return nullptr;
+    if (potential_constant_type && !qualifies(w_->ins.seqs.at(item_sema(cached.item).value.decls, 0))) return nullptr;
+    return &cached;
+  }
   if (rec.kind != sema::EntityKind::variable || rec.templ == EntityId::none || var_instantiating_.contains(key) || partial_matching_.contains(key) ||
       explicitly_specialized(v, point))
     return nullptr;
@@ -7929,10 +7980,12 @@ const Program::VarInstance* Program::variable_instance(EntityId v, u32 point) {
   }
   auto t = var_templates_.find(std::to_underlying(rec.templ));
   if (!partial && (t == var_templates_.end() || t->second >= point)) return nullptr;
+  if (potential_constant_type && partial && !partial->defined) return nullptr;
   const u32 k = partial ? partial->item : t->second;
   // [temp.inst]/16: nested instantiations are limited, as functions' are.
   if (too_deep(var_instantiating_.size(), k)) return nullptr;
   ast::DeclSema tmpl = w_->ins.seqs.at(item_sema(k).value.decls, 0);
+  if (!qualifies(tmpl)) return nullptr;
   std::vector<ast::TemplateParamSema> head = w_->ins.seqs.elements(tmpl.template_params);
   sema::Bindings args = partial ? partial->args : sema::Bindings::of(head.empty() ? 0 : head[0].depth, rec.args);
   var_instantiating_.insert(key);
@@ -8098,6 +8151,34 @@ void Program::references(NodeId n, std::vector<EntityId>& out) const {
       }
     });
   });
+}
+
+// A potentially-constant variable named by a surviving expression needs its definition for
+// constant evaluation ([temp.inst]/7, [expr.const]), even when the expression is read at run
+// time. Visit committed ordinary namespace items and bodies before moving to the next source
+// item so a later constant evaluation cannot choose their specialization's context instead.
+void Program::instantiate_variable_demands(std::span<const sema::Demand> demands, u32 point) {
+  struct Pending {
+    sema::Demand demand;
+    u32 depth;
+  };
+  std::vector<Pending> work;
+  auto enqueue = [&](std::span<const sema::Demand> ds, u32 depth) {
+    for (const sema::Demand& d : ds)
+      if (d.variable_type) work.push_back({d, depth});
+  };
+  enqueue(demands, 1);
+  std::set<EntityId> seen;
+  for (std::size_t i = 0; i < work.size(); ++i) {
+    const auto [d, depth] = work[i];
+    // Leave depth-limit diagnostics to the END worklist, with its original demand chain.
+    if (depth > instantiation_limit || !seen.insert(d.spec).second) continue;
+    const auto* inst = variable_instance(d.spec, point, d.variable_type);
+    if (!inst || !inst->cell.diags.empty()) continue;
+    // The initializer's demands inherit the outer point. Their own source locations are kept
+    // for the END worklist and diagnostics in the initializer still refer to its own tokens.
+    enqueue(inst->cell.demands, depth + 1);
+  }
 }
 
 void Program::instantiate_all() {

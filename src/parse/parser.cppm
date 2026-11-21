@@ -610,7 +610,9 @@ public:
           bump();
           break;
         }
-        if (!any_type() && kind(1) == Tk::l_paren && kind(2) == Tk::kw_auto) {  // `decltype(auto` without `)`
+        // An opening delimiter after `auto` starts a functional conversion expression.
+        if (!any_type() && kind(1) == Tk::l_paren && kind(2) == Tk::kw_auto &&
+            kind(3) != Tk::l_paren && kind(3) != Tk::l_brace) {  // `decltype(auto` without `)`
           s_->diag(pos() + 3, Diag::expected_token, Tk::r_paren);
           d.ok = false;
           goto done;
@@ -1726,6 +1728,7 @@ public:
   void exception_specifier(Suffix& suffix, bool& ok) {
     suffix.has_noexcept = accept(Tk::kw_noexcept);
     if (!suffix.has_noexcept || !accept(Tk::l_paren)) return;
+    DisableDependentDecayCopy disable{dependent_decay_copy_body};
     const int saved = std::exchange(angle_, 0);
     Ex e = constant_expression();
     angle_ = saved;
@@ -2324,7 +2327,8 @@ public:
     // Value-dependent: in a body its value is known when the body is instantiated; in a declaration
     // it is part of the template's signature, which needs the expression's `VDep*` form (#88).
     if (s_->dependent(e)) {
-      if (body && !(e.info.flags & sema::expr_flag::unrepresented_value))
+      constexpr u8 unavailable = sema::expr_flag::unrepresented_value | sema::expr_flag::deferred_decay_copy;
+      if (body && !(e.info.flags & unavailable))
         return s_->world().ins.intern_value(ast::VDepParam{sema::dependent_depth, 0});
       s_->diag(e.begin, Diag::not_supported, Tk::kw_template);
       return std::nullopt;
@@ -2368,9 +2372,13 @@ public:
           u32 at;
           ~EndPattern() { s->end_pattern(expanded, at, at, false); }
         } end_pattern{s_, false, arg_at};
+        // A brace or an integer literal in the initializer rules out an abstract declarator.
+        // Other `auto(...)` spellings keep type-id precedence ([temp.arg.general]/2).
+        const bool decay_copy = is(Tk::kw_auto) &&
+                               (kind(1) == Tk::l_brace || (kind(1) == Tk::l_paren && kind(2) == Tk::int_lit));
         if (template_name_ahead()) {
           args.push_back(*template_name_argument());
-        } else if (starts_type_id(/*preserve_failed_qualifier=*/true)) {
+        } else if (!decay_copy && starts_type_id(/*preserve_failed_qualifier=*/true)) {
           auto t = type_id();
           if (!t) ok = false;
           else args.push_back({ast::TemplateArgKind::type, s_->types().canonical(*t), sema::ConstId::none});
@@ -2443,9 +2451,10 @@ public:
   // an instantiation its pattern is read once for each element, with the packs it names bound
   // to that element (ast.md §6.4).
   template <class F>
-  std::vector<Ex> expandable(F read) {
+  std::vector<Ex> expandable(F read, bool* written_expansion = nullptr) {
     u32 begin = pos();
     if (const sema::Expansion* x = s_->expansion_at(begin)) {
+      if (written_expansion) *written_expansion = true;
       sema::Expansion e = *x;
       auto n = s_->expansion_length(e, begin);
       std::vector<Ex> out;
@@ -2471,6 +2480,7 @@ public:
     s_->begin_pattern();
     Ex p = read();
     if (is(Tk::ellipsis)) {
+      if (written_expansion) *written_expansion = true;
       u32 end = pos();
       bump();
       if (s_->end_pattern(true, begin, end).empty()) s_->diag(end, Diag::expansion_without_pack);
@@ -2641,6 +2651,7 @@ public:
   // satisfied, value-dependent while one depends on a template parameter. In a templated entity
   // an invalid requirement makes it false; elsewhere it is ill-formed (/5).
   Ex requires_expression() {
+    DisableDependentDecayCopy disable{dependent_decay_copy_body};
     u32 begin = pos();
     bump();
     s_->push_scope();
@@ -3264,18 +3275,12 @@ public:
   // postfix-expression ([expr.post]).
   Ex postfix_expression() {
     Ex e = primary_expression();
-    // Inside brackets a `>` is an operator again ([temp.names]/4).
-    struct Unangle {
-      int& a;
-      int saved;
-      ~Unangle() { a = saved; }
-    };
     for (;;) {
       u32 at = pos();
       switch (kind()) {
       case Tk::l_paren: {
         bump();
-        Unangle u{angle_, std::exchange(angle_, 0)};
+        Unangle u{angle_};
         std::vector<Ex> args;
         if (!is(Tk::r_paren)) {
           do {
@@ -3292,7 +3297,7 @@ public:
       }
       case Tk::l_square: {
         bump();
-        Unangle u{angle_, std::exchange(angle_, 0)};
+        Unangle u{angle_};
         Ex index = expression();
         if (!expect(Tk::r_square)) return {NodeId::none, e.begin, pos()};
         e = s_->subscript(e, index, pos(), at);
@@ -3599,7 +3604,7 @@ public:
       if (kind(1) == Tk::l_paren || kind(1) == Tk::l_brace) {
         bump();
         Ex operand = single_auto_initializer();
-        Ex result = s_->decay_copy(operand, begin);
+        Ex result = s_->decay_copy(operand, begin, pos(), dependent_decay_copy_body && in_params_ == 0);
         return {result.id, begin, pos(), result.info};
       }
       s_->diag(begin, Diag::expected_expression);
@@ -3684,9 +3689,11 @@ public:
   // `T(args)` or `T{…}` at the `(` or `{` ([expr.type.conv]).
   Ex type_conversion(QualType t, u32 begin) {
     if (is(Tk::l_brace)) {
-      auto b = braced_init_list();
+      bool written_expansion = false;
+      auto b = braced_init_list(&written_expansion);
       if (!s_->unevaluated && !s_->check_destructor_access(t, begin)) return {NodeId::none, begin, pos()};
       Ex r = s_->list_init(t, *b);
+      if (!written_expansion && b->begin == begin + 1) s_->note_explicit_aggregate_prvalue(t, *b, r, begin);
       return {r.id, begin, pos(), r.info};
     }
     if (!expect(Tk::l_paren)) return {NodeId::none, begin, pos()};
@@ -3726,7 +3733,7 @@ public:
 
   // braced-init-list ([dcl.init.general]): `{ initializer-clause, … }`, or with designators
   // `{ .m = e, .n{…} }` ([dcl.init.aggr]).
-  std::unique_ptr<sema::Braced> braced_init_list() {
+  std::unique_ptr<sema::Braced> braced_init_list(bool* written_expansion = nullptr) {
     deep_enough();  // nested braced lists
     auto b = std::make_unique<sema::Braced>();
     b->begin = pos();
@@ -3748,7 +3755,7 @@ public:
         c.list = braced_init_list();
       } else if (!c.designated) {
         // An initializer-clause may be a pack expansion ([dcl.init.general]/1).
-        std::vector<Ex> xs = expandable([&] { return assignment_expression(); });
+        std::vector<Ex> xs = expandable([&] { return assignment_expression(); }, written_expansion);
         for (std::size_t i = 0; i + 1 < xs.size(); ++i) {
           sema::Braced::Clause e;
           e.begin = c.begin;
@@ -3945,6 +3952,7 @@ public:
   // lambda-expression ([expr.prim.lambda]): its introducer and declarator, read in the enclosing
   // context, then its compound-statement as the body of the closure's function call operator.
   Ex lambda_expression() {
+    DisableDependentDecayCopy disable{dependent_decay_copy_body};
     using K = sema::Sema::CaptureSpec::Kind;
     sema::Sema::LambdaSpec spec;
     spec.begin = pos();
@@ -5558,6 +5566,7 @@ public:
 
   // [dcl.type.auto.deduct]: a parenthesized or braced auto initializer has one expression.
   Ex single_auto_initializer() {
+    Unangle unangle{angle_};
     const u32 open = pos();
     std::vector<Ex> args;
     if (is(Tk::l_brace)) {
@@ -5645,8 +5654,20 @@ private:
   bool half_ = false;           // the current `>>` has had its first `>` taken by a template-id
 public:
   bool body = false;  // the part is a function body, not a declaration part
+  bool dependent_decay_copy_body = false;  // a function template's compound statement, before replay
   bool substituting_partial_arguments = false;
 private:
+  // In a delimited operand, a `>` is an operator again ([temp.names]/4).
+  struct Unangle {
+    int& angle;
+    int saved = std::exchange(angle, 0);
+    ~Unangle() { angle = saved; }
+  };
+  struct DisableDependentDecayCopy {
+    bool& enabled;
+    bool saved = std::exchange(enabled, false);
+    ~DisableDependentDecayCopy() { enabled = saved; }
+  };
   std::optional<u32> address_op_;  // the token of an explicit unary `&`
   std::optional<u32> lambda_result_operand_;  // first token of a deducing lambda's return operand
 };
