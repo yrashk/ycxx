@@ -673,6 +673,7 @@ struct NestedType {
 struct BaseRec {
   EntityId cls = EntityId::none;
   ast::Access access = ast::Access::public_;
+  bool dependent_in_pattern = false;
 };
 
 struct ClassRec {
@@ -685,6 +686,8 @@ struct ClassRec {
   bool union_ = false;  // a union ([class.union]): its members share its storage
   bool polymorphic = false;
   bool virtual_destructor = false;
+  std::optional<bool> destructor_noexcept;  // the effective specification, when known
+  bool destructor_usable = false;          // its declaration and subobject destruction are known to be usable
   bool layout_requires_virtual_support = false;
   std::vector<FieldRec> fields;        // in declaration order
   std::vector<MemberDeclRec> members;  // member functions and static data members

@@ -359,7 +359,7 @@ public:
           auto hit = class_body_type(*cr, name, type_at);
           if (hit.found) return hit.type;
         }
-        if (auto r = nested_member(current_class, name)) return r->first.type;
+        if (auto r = nested_member(current_class, name, true)) return r->first.type;
       } else if (auto m = q_->earlier_member(name); m && (m->kind == ast::DeclKind::enum_ || m->kind == ast::DeclKind::type_alias)) {
         return m->type;
       } else {
@@ -841,13 +841,15 @@ public:
   // instantiated, among the members declared so far ([basic.scope.class]).
   // A type nested in complete class `c` or else in its bases ([class.member.lookup]), with the
   // class that declares it.
-  std::optional<std::pair<NestedType, EntityId>> nested_member(EntityId c, NameId n) {
+  std::optional<std::pair<NestedType, EntityId>> nested_member(EntityId c, NameId n, bool unqualified = false) {
     const ClassRec* cr = class_rec(c);
     if (!cr) return std::nullopt;
     for (const NestedType& t : cr->types)
       if (t.name == n) return std::pair{t, c};
-    for (const BaseRec& b : cr->bases)
+    for (const BaseRec& b : cr->bases) {
+      if (unqualified && b.dependent_in_pattern) continue;
       if (auto r = nested_member(b.cls, n)) return r;
+    }
     return std::nullopt;
   }
   std::optional<QualType> member_type(EntityId c, NameId n) {
@@ -899,7 +901,7 @@ public:
     auto r = nested_member(naming, n);
     if (!r) return true;
     auto [t, c] = *r;
-    if (defer_type_access && !accessible(c, class_rec(c)->access_of(t.entity), naming)) {
+    if (defer_type_access && (!accessible(c, class_rec(c)->access_of(t.entity), naming) || !accessible_naming_base(naming, c))) {
       deferred_access_.push_back({c, t.entity, n, at});
       return true;
     }
@@ -3031,9 +3033,29 @@ public:
     const ClassRec* cr = class_rec(c);
     if (!cr) return true;
     ast::Access a = cr->access_of(m);
-    if (accessible(c, a, naming)) return true;
-    diag(at, a == ast::Access::protected_ ? Diag::protected_member : Diag::private_member, name, types().class_type(c));
-    return false;
+    if (!accessible(c, a, naming)) {
+      diag(at, a == ast::Access::protected_ ? Diag::protected_member : Diag::private_member, name, types().class_type(c));
+      return false;
+    }
+    if (!accessible_naming_base(naming, c)) {
+      diag(at, Diag::inaccessible_base, types().class_type(c), types().class_type(naming));
+      return false;
+    }
+    return true;
+  }
+
+  // Member access through a class template's instantiated base graph ([class.access.base]). A
+  // static member can be shared through several subobjects, unlike a base conversion.
+  bool accessible_naming_base(EntityId naming, EntityId owner) {
+    if (naming == owner || naming == EntityId::none || w_->entities.rec(naming).templ == EntityId::none) return true;
+    auto path = [&](this auto&& next, EntityId from) -> bool {
+      if (from == owner) return true;
+      const ClassRec* rec = class_rec(from);
+      return rec && std::ranges::any_of(rec->bases, [&](const BaseRec& base) {
+        return accessible(from, base.access) && next(base.cls);
+      });
+    };
+    return path(naming);
   }
 
   Ex this_expr(u32 begin, u32 end) {
@@ -3080,12 +3102,15 @@ public:
     }
     return std::nullopt;
   }
-  std::optional<Found> find_member(EntityId c, NameId name) {
+  std::optional<Found> find_member(EntityId c, NameId name, bool unqualified = false) {
     const ClassRec* cr = class_rec(c);
     if (!cr) return std::nullopt;
     if (auto member = direct_member(c, *cr, name)) return member;
     std::optional<Found> r;
     for (const BaseRec& b : cr->bases) {
+      // A dependent direct base is outside unqualified lookup in the template, including
+      // during member analysis with concrete bindings ([temp.dep]).
+      if (unqualified && b.dependent_in_pattern) continue;
       auto f = find_member(b.cls, name);
       if (!f) continue;
       if (f->ambiguous) return f;
@@ -3135,8 +3160,9 @@ public:
 
   // The implicit member access `name` inside a member function of `c` ([class.mfct.non.static]),
   // or a qualified name `C::name`: none if `c` has no such member.
-  std::optional<Ex> class_member(EntityId c, NameId name, u32 begin, u32 end, u32 name_at, bool bare_address = false) {
-    auto f = find_member(c, name);
+  std::optional<Ex> class_member(EntityId c, NameId name, u32 begin, u32 end, u32 name_at, bool bare_address = false,
+                                 bool unqualified = false) {
+    auto f = find_member(c, name, unqualified);
     if (!f) return std::nullopt;
     Ex fail{NodeId::none, begin, end};
     if (f->ambiguous) {
@@ -3288,6 +3314,12 @@ public:
     }
     auto m = *as<ast::Member>(callee);
     const Bound& bound = bound_.at(std::to_underlying(callee.id));
+    if (std::ranges::any_of(bound.cands, [&](const MemberDeclRec* candidate) {
+          return candidate->is_virtual && types().rec(candidate->type).fn_ref != ast::RefQual::none;
+        })) {
+      diag(paren_at, Diag::virtual_ref_call);
+      return fail;
+    }
     std::optional<Ex> object = bound.object;
     // The object's cv-qualifiers, which a non-static member function must have ([class.this]).
     std::optional<Cv> object_cv;
@@ -3830,12 +3862,14 @@ public:
   // the class's constructors and, where they are implicit, its default and copy constructors.
   // A trivial copy is a copy; `list` forbids narrowing ([over.match.list]); `copy_init` takes only
   // one-argument constructors.
-  Ex construct(QualType t, std::vector<Ex> args, u32 begin, u32 end, bool list = false, bool copy_init = false) {
+  Ex construct(QualType t, std::vector<Ex> args, u32 begin, u32 end, bool list = false, bool copy_init = false,
+               bool checking_polymorphic_base = false) {
     Ex fail{NodeId::none, begin, end};
     if (std::ranges::any_of(args, [](const Ex& a) { return !a.ok(); })) return fail;
     if (types().is_dependent(t) || any_dependent(args))
       return dependent_node(args, begin, end, types().is_dependent(t) ? std::nullopt : std::optional(Types::unqualified(t)));
-    if (!require_complete(t, begin) || !require_supported_virtual_layout(t, begin)) return fail;
+    if (!require_complete(t, begin) ||
+        (!checking_polymorphic_base && !require_supported_virtual_layout(t, begin))) return fail;
     QualType ut = Types::unqualified(t);
     EntityId c = types().class_of(ut);
     const ClassRec* cr = class_rec(c);
@@ -3903,7 +3937,10 @@ public:
     }
     if (k.entity == EntityId::none) {
       // Trivial: a copy of the argument's object, or nothing to construct.
-      if (fr.params.empty()) return value_init_aggregate(ut, begin, end);
+      if (fr.params.empty()) {
+        if (checking_polymorphic_base) return fail;  // the implicit constructor needs no call
+        return value_init_aggregate(ut, begin, end);
+      }
       Ex a = args[0];
       return a.glvalue() ? convert_node(a, ast::ConversionKind::lvalue_to_rvalue, ut) : a;
     }
@@ -3926,6 +3963,12 @@ public:
     ExprInfo info{ut, ValueCategory::prvalue, 0};
     return node(ast::CtorCall{info, k.entity, 0, b_->list(cs)}, begin, end, info);
   }
+  // In a syntax-only constructor definition, check the implicit default initialization of
+  // its direct polymorphic base. There is no complete object or native initializer to build.
+  void check_polymorphic_base_default_init(QualType t, u32 at) {
+    construct(t, {}, at, at, /*list=*/false, /*copy_init=*/false, /*checking_polymorphic_base=*/true);
+  }
+
   // [class.copy.ctor]/2: a constructor whose first parameter is `C&` or `cv C&` and whose others
   // have default arguments (`required` is how many need arguments).
   bool is_copy_ctor(const TypeRec& fr, QualType c, std::size_t required) {
@@ -4147,8 +4190,8 @@ public:
     }
     // The class's members, in a member function's body ([basic.scope.class]).
     if (current_class != EntityId::none) {
-      if (auto r = class_member(current_class, name, begin, end, begin)) return *r;
-      if (!class_rec(current_class))
+      if (auto r = class_member(current_class, name, begin, end, begin, false, true)) return *r;
+      if (!class_rec(current_class)) {
         if (auto m = q_->earlier_member(name)) {
           if (m->kind == ast::DeclKind::enumerator) return enumerator(m->entity, m->type, begin, end);
           // A static member function needs no object ([class.static.mfct]).
@@ -4160,6 +4203,11 @@ public:
           }
           return static_member(current_class, m->entity, m->type, begin, end);
         }
+        // A nondependent base participates in lookup while a class template is being defined.
+        if (w_->entities.rec(current_class).templ != EntityId::none)
+          for (EntityId base : q_->defining_bases(current_class))
+            if (auto m = class_member(base, name, begin, end, begin)) return *m;
+      }
     }
     if (namespace_lambda && namespace_lambda->name == name)
       return undeduced_namespace_lambda(name, begin, end);
@@ -4215,10 +4263,30 @@ public:
     const lex::BuiltinFunctionInfo* b = lex::builtin_function(ins().names.spelling(name));
     return b && !declared(name) ? b : nullptr;
   }
+  bool builtin_arity(std::size_t want, std::size_t actual, u32 begin) {
+    if (actual == want) return true;
+    diag(begin, actual < want ? Diag::too_few_arguments : Diag::too_many_arguments, u64(want), u64(actual));
+    return false;
+  }
+
+  Ex builtin_addressof(Ex e, u32 begin, u32 end) {
+    if (!e.ok()) return {NodeId::none, begin, end};
+    if (dependent(e)) return dependent_node({e}, begin, end);
+    if (e.cat() != ValueCategory::lvalue) {
+      diag(begin, Diag::not_lvalue_address, e.type());
+      return {NodeId::none, begin, end};
+    }
+    return builtin_address_of(e, begin, end, begin);
+  }
+
   // A call of one (docs/EXTENSIONS.md): `__builtin_inf*` and `__builtin_huge_val*` are +infinity
   // and `__builtin_nan*` a quiet NaN, constants of their type; `__builtin_fabs*` a `BuiltinCall`.
   Ex builtin_call(const lex::BuiltinFunctionInfo& b, std::vector<Ex> args, u32 begin, u32 end) {
     using enum lex::BuiltinFunction;
+    if (b.function == addressof) {
+      if (!builtin_arity(1, args.size(), begin)) return {NodeId::none, begin, end};
+      return builtin_addressof(args.front(), begin, end);
+    }
     Builtin kind = b.type == 'f' ? Builtin::float_ : b.type == 'l' ? Builtin::long_double : Builtin::double_;
     if (!ast::computes(w_->target[kind].format)) {
       diag(begin, Diag::extended_float_not_supported);
@@ -4226,12 +4294,10 @@ public:
     }
     QualType t = builtin(kind);
     std::size_t want = b.function == fabs || b.function == nan ? 1 : 0;
-    if (args.size() != want) {
-      diag(begin, args.size() < want ? Diag::too_few_arguments : Diag::too_many_arguments, u64(want), u64(args.size()));
-      return {NodeId::none, begin, end};
-    }
+    if (!builtin_arity(want, args.size(), begin)) return {NodeId::none, begin, end};
     if (std::ranges::any_of(args, [](const Ex& a) { return !a.ok(); })) return {NodeId::none, begin, end};
     switch (b.function) {
+      case addressof: std::unreachable();  // Handled before floating type selection.
       case inf:
       case huge_val:
         return literal(t, w_->values.floating(t, std::numeric_limits<double>::infinity()), ValueCategory::prvalue, begin, end);
@@ -5511,7 +5577,7 @@ public:
     int paths = 0;
     auto path = base_path(types().class_of(ct), b, paths);
     if (!check_base_path(ct, b, path, paths, at_)) return {NodeId::none, e.begin, e.end};
-    if (!require_supported_virtual_layout(ct, at_)) return {NodeId::none, e.begin, e.end};
+    if (unevaluated == 0 && !require_supported_virtual_layout(ct, at_)) return {NodeId::none, e.begin, e.end};
     for (EntityId step : *path) {
       QualType st = types().add_cv(types().class_type(step), cv);
       ExprInfo info{pointer ? types().pointer(st) : st, pointer ? ValueCategory::prvalue : e.cat(), 0};
@@ -5666,6 +5732,21 @@ public:
     return Ex{r.id, begin, end, r.info};
   }
 
+  Ex builtin_address_of(Ex e, u32 begin, u32 end, u32 op_at) {
+    if (e.glvalue() && e.info.bit_width) {
+      diag(op_at, Diag::bit_field_address);
+      return {NodeId::none, begin, end};
+    }
+    QualType pointee = e.type();
+    if (is_bound_member(e) && address_set(e)) pointee = builtin(Builtin::overload_set);
+    else if (!e.glvalue()) {
+      diag(op_at, Diag::not_lvalue_address, e.type());
+      return {NodeId::none, begin, end};
+    }
+    ExprInfo info{types().pointer(pointee), ValueCategory::prvalue, 0};
+    return node(ast::Unary{info, ast::UnaryOp::address_of, at(e, begin)}, begin, end, info);
+  }
+
   Ex unary(ast::UnaryOp op, Ex e, u32 begin, u32 end, u32 op_at) {
     using enum ast::UnaryOp;
     if (!e.ok()) return {NodeId::none, begin, end};
@@ -5712,17 +5793,7 @@ public:
       return make(o, types().pointee(o.type()), ValueCategory::lvalue);
     }
     case address_of:
-      if (e.glvalue() && e.info.bit_width) {
-        diag(op_at, Diag::bit_field_address);
-        return {NodeId::none, begin, end};
-      }
-      if (is_bound_member(e) && address_set(e))
-        return make(e, types().pointer(builtin(Builtin::overload_set)), ValueCategory::prvalue);
-      if (!e.glvalue()) {
-        diag(op_at, Diag::not_lvalue_address, e.type());
-        return {NodeId::none, begin, end};
-      }
-      return make(e, types().pointer(e.type()), ValueCategory::prvalue);
+      return builtin_address_of(e, begin, end, op_at);
     case pre_inc:
     case pre_dec:
     case post_inc:

@@ -28,8 +28,33 @@ a virtual declaration can be checked with `-fsyntax-only`. A native request repo
 first such declaration before emitting the unit. The back end also declines a cached
 class shape requiring virtual layout.
 
-Derived virtual members, pure virtual functions, explicit virtual destructor calls and
-virtual member addresses are tracked in [#309](https://github.com/yrashk/ycxx/issues/309).
+## One ordinary polymorphic base
+
+A non-template namespace-scope class may derive from one complete ordinary polymorphic
+class through a nonvirtual base specifier. Override matching follows that single base chain
+independently of name lookup and access. For each function, the nearest virtual declaration
+with matching adjusted parameter types, variadic status, cv-qualifiers and ref-qualifier
+supplies the inherited signature. Ordinary lookup still hides base overloads. An overriding
+declaration acquires virtuality even without a virt-specifier. Return types must agree and
+the override must preserve a nonthrowing exception specification. Ref-qualified virtual
+declarations retain their qualifiers. Calls involving those overload sets still require
+ref-qualified overload resolution.
+[[class.virtual]](https://eel.is/c++draft/class.virtual) ·
+[[class.member.lookup]](https://eel.is/c++draft/class.member.lookup) ·
+[[except.spec]](https://eel.is/c++draft/except.spec) ·
+[Astra's review](https://github.com/yrashk/ycxx/issues/309#issuecomment-7056328877)
+
+A derived destructor, including an implicit one, is virtual when the base destructor is
+virtual. At class completion an omitted exception specification depends on the effective
+specifications of base and field destructors. An override requires a specification the
+compiler can establish. Constructor bodies can check the implicit default initialization
+of the direct polymorphic base with the existing constructor overload and access checks.
+The complete-object and native guards still apply, and class templates continue to reject
+polymorphic bases. [[class.dtor]](https://eel.is/c++draft/class.dtor) ·
+[[class.base.init]](https://eel.is/c++draft/class.base.init)
+
+Covariant return types, pure virtual functions, `final`, explicit polymorphic base
+initializers, explicit virtual destructor calls and virtual member addresses are tracked in [#309](https://github.com/yrashk/ycxx/issues/309).
 That issue also tracks peer dispatch and native table emission. Virtual destructor variants
 are tracked in [#136](https://github.com/yrashk/ycxx/issues/136), RTTI operations in
 [#294](https://github.com/yrashk/ycxx/issues/294), virtual bases in

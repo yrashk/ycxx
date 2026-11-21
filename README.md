@@ -93,8 +93,10 @@ Use the host linker to link these objects with libc.
 Fixed-prototype definitions and direct calls on x86-64 Linux also move `float` and `double`
 arguments and results. Direct variadic calls support the same scalar floating values and
 promote an unnamed `float` to `double`. Direct call result types can be deduced from `auto` or
-`decltype(auto)`.
+`decltype(auto)`. Runtime addition, subtraction, multiplication, division and unary negation
+work for `float` and `double` at their evaluation width.
 [Linux scalar floating-point ABI](docs/design/linux-scalar-floating-point.md) ·
+[Linux scalar floating-point arithmetic](docs/design/linux-scalar-floating-point.md#runtime-arithmetic) ·
 [Linux direct variadic floating-point ABI](docs/design/linux-floating-variadic-calls.md) ·
 [#441](https://github.com/yrashk/ycxx/issues/441)
 
@@ -221,6 +223,9 @@ Both targets accept leading `[[…]]` attributes on ordinary data and function m
   `__make_integer_seq`;
 - dependent `__is_same(T, U)` as a `bool` template argument or default, including through alias
   templates [#209](https://github.com/yrashk/ycxx/issues/209);
+- a single nonvirtual, nonpolymorphic base in a primary class template, including an
+  alias-selected dependent base and qualified lookup of its static members.
+  [#308](https://github.com/yrashk/ycxx/issues/308)
 - placeholder types: `auto` and `decltype(auto)` variables (`const auto&`, `auto*`, `auto&&`),
   deduced and trailing return types, in templates too;
 - lambdas in function bodies: captures by copy and by reference, capture-defaults, `this` and
@@ -237,6 +242,8 @@ Both targets accept leading `[[…]]` attributes on ordinary data and function m
   `static_assert` and `if consteval`, with errors that explain why something is not constant.
   Scalar enumeration values work in constexpr variables, calls, casts and switch conditions.
   Namespace-scope `constexpr` pointers to `void` can retain scalar and array element addresses.
+  `__builtin_addressof`, used by libycxx's `std::addressof`, bypasses overloaded `operator&`.
+  It supports runtime addresses and constant expressions such as a scalar global's address.
 - `extern "C"` functions from libSystem, including `printf` with integers, characters,
   floating values, pointers and strings as arguments, and the SDK `<math.h>`'s built-ins
   (`__builtin_fabs`, `__builtin_inf`, `__builtin_huge_val`, `__builtin_nan`).
@@ -278,9 +285,9 @@ checked with the flags of its last build, or else with its line in the project's
 **Pointer-to-member declarations.** Data and function member-pointer types can appear in
 declarations, type traits and requires-expressions. [#238](https://github.com/yrashk/ycxx/issues/238)
 
-**Virtual declarations.** Syntax checking accepts initial virtual members in ordinary root classes,
-including inline bodies and virtual destructors. Those classes can appear in pointer and reference
-interfaces. [#309](https://github.com/yrashk/ycxx/issues/309)
+**Virtual declarations.** Syntax checking accepts virtual members and inline definitions in
+ordinary root classes. Classes derived through one ordinary polymorphic base also support
+overrides. Pointer and reference interfaces can name these classes. [#309](https://github.com/yrashk/ycxx/issues/309)
 
 **Array structured bindings.** Local bindings can copy scalar-element arrays or alias their
 elements, including whole rows of multidimensional arrays. [#285](https://github.com/yrashk/ycxx/issues/285)
@@ -295,7 +302,7 @@ elements, including whole rows of multidimensional arrays. [#285](https://github
 - Constexpr lambdas (the interpreter has no class objects yet), further lambda declaration
   contexts ([#338](https://github.com/yrashk/ycxx/issues/338)),
   member and tuple-like structured bindings, virtual dispatch and table emission, virtual base classes,
-  inheriting constructors, and bases of class templates.
+  inheriting constructors, and base packs or multiple bases in a class template.
 - Member class and alias templates, conversion function templates, and constraints on class
   templates and their members.
 - Exceptions, optimization (`-O`), and the extended floating-point types (`std::float16_t`, …).

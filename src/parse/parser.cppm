@@ -85,6 +85,9 @@ struct Declarator {
   QualType type{};
   std::vector<Param> params;
   bool variadic = false;
+  u32 ref_at = 0;
+  bool has_noexcept = false;
+  std::optional<Ex> noexcept_condition;
   // `T x[] = {…}`: the outermost array bound is left to the initializer ([dcl.array]/8); `type`
   // is then the element type.
   bool unknown_bound = false;
@@ -119,6 +122,7 @@ public:
   const Tok& tok(u32 ahead = 0) const { return r_->tokens[i_ + ahead]; }
   bool is(Tk k) const { return kind() == k; }
   u32 pos() const { return i_ - begin_; }  // the current token's offset in the part
+  u32 deferred_argument_checks() const { return deferred_argument_checks_; }
   void bump() {
     half_ = false;
     if (i_ < end_) ++i_;
@@ -758,11 +762,11 @@ public:
     std::vector<Suffix> suffixes;
   };
 
-  enum class NamedExceptionSpec { ordinary, defaulted_assignment, virtual_member };
+  enum class NamedExceptionSpec { ordinary, defaulted_assignment };
 
   // declarator, or abstract-declarator when `abstract` ([dcl.decl.general], [dcl.name]).
   Declarator declarator(QualType base, bool abstract, bool typedef_ = false, bool conversion = false,
-                        NamedExceptionSpec named_exception = NamedExceptionSpec::ordinary) {
+                        NamedExceptionSpec named_exception = NamedExceptionSpec::ordinary, bool defer_ref_check = false) {
     Declarator d;
     d.begin = pos();
     Level top = level(abstract, d.ok, conversion);
@@ -795,14 +799,14 @@ public:
       // The declaring context also checks defaults in a nested function type.
       d.params = fn->params;
       d.variadic = fn->variadic;
+      d.ref_at = fn->ref_at;
+      d.has_noexcept = fn->has_noexcept;
+      d.noexcept_condition = fn->noexcept_condition;
+    } else {
+      d.ref_at = d.name_at;
     }
-    if (!abstract && !typedef_ && function_type && !conversion) {
-      ast::RefQual ref = s_->types().rec(d.type).fn_ref;
-      if (ref != ast::RefQual::none) {
-        s_->diag(fn ? fn->ref_at : d.name_at, Diag::not_supported, ref == ast::RefQual::lvalue ? Tk::amp : Tk::ampamp);
-        d.ok = false;
-      }
-    }
+    if (!abstract && !typedef_ && function_type && !conversion && !defer_ref_check)
+      d.ok = check_named_ref_qualifier(d) && d.ok;
     if (d.ok) {
       skip_attributes();
       if (!abstract) {
@@ -811,6 +815,13 @@ public:
       }
     }
     return d;
+  }
+
+  bool check_named_ref_qualifier(const Declarator& d) {
+    const ast::RefQual ref = s_->types().rec(d.type).fn_ref;
+    if (ref == ast::RefQual::none) return true;
+    s_->diag(d.ref_at, Diag::not_supported, ref == ast::RefQual::lvalue ? Tk::amp : Tk::ampamp);
+    return false;
   }
 
   // Attribute-specifiers ([dcl.attr.grammar]), and the GNU `__attribute__((…))` the SDK's
@@ -1133,20 +1144,7 @@ public:
         suffix.ref_at = pos();
         if (accept(Tk::amp)) suffix.ref = ast::RefQual::lvalue;
         else if (accept(Tk::ampamp)) suffix.ref = ast::RefQual::rvalue;
-        // Keep [except.spec] on function types spelled in type-ids and member-pointer
-        // declarators. Exception specifications of named functions are tracked by #219.
-        if (is(Tk::kw_noexcept)) {
-          suffix.has_noexcept = true;
-          bump();
-          if (is(Tk::l_paren)) {
-            int saved = std::exchange(angle_, 0);
-            bump();
-            Ex e = constant_expression();
-            angle_ = saved;
-            ok = e.ok() && expect(Tk::r_paren) && ok;
-            suffix.noexcept_condition = e;
-          }
-        }
+        exception_specifier(suffix, ok);
         // A trailing return type ([dcl.fct]/2), with the parameters in scope ([basic.scope.param]).
         if (is(Tk::arrow)) {
           bump();
@@ -1449,28 +1447,10 @@ public:
         // [basic.stc.dynamic.deallocation]: a deallocation function without an explicit
         // exception specification is non-throwing.
         bool nonthrowing = name == sema::allocation_name(sema::AllocationFunction::deallocate) && !s->has_noexcept;
-        const bool keep_named_exception = (named_exception == NamedExceptionSpec::virtual_member && l.named) ||
-                                          (named_exception == NamedExceptionSpec::defaulted_assignment && name == "operator=");
+        const bool keep_named_exception = named_exception == NamedExceptionSpec::defaulted_assignment && name == "operator=";
         if (s->has_noexcept && (allocation || keep_named_exception || member_pointer_to_suffix(l) ||
-                                (spells_type && !l.inner))) {
-          nonthrowing = true;
-          if (s->noexcept_condition) {
-            Ex operand = s_->rvalue(*s->noexcept_condition);
-            Ex e = s_->to_bool(operand, operand.begin);
-            sema::Evaluated result = sema::Evaluator(*s_, questions()).evaluate(e);
-            if (result.value) {
-              nonthrowing = s_->world().values.as_signed(*result.value) != 0;
-              if (s_->narrows(operand, e.type())) {
-                s_->diag(operand.begin, Diag::noexcept_narrowing, operand.type());
-                d.ok = false;
-              }
-            } else {
-              if (result.dependent) s_->diag(e.begin, Diag::not_supported, Tk::kw_noexcept);
-              else if (e.ok()) s_->diag(e.begin, Diag::not_constant, result.reason);
-              d.ok = false;
-            }
-          }
-        }
+                                (spells_type && !l.inner)))
+          nonthrowing = noexcept_value(s->noexcept_condition, d.ok);
         t = s_->types().function(t, ps, s->variadic, linkage_, s->cv, s->ref, nonthrowing);
         fn = &*s;
       } else if (!s->unknown_bound && !s->dependent_bound && s->bound == 0) {
@@ -1502,6 +1482,35 @@ public:
     d.replay_template_args_at = l.replay_template_args_at;
     d.pack = l.pack;
     return t;
+  }
+
+  // An exception specification on a function declarator ([except.spec]).
+  void exception_specifier(Suffix& suffix, bool& ok) {
+    suffix.has_noexcept = accept(Tk::kw_noexcept);
+    if (!suffix.has_noexcept || !accept(Tk::l_paren)) return;
+    const int saved = std::exchange(angle_, 0);
+    Ex e = constant_expression();
+    angle_ = saved;
+    ok = e.ok() && expect(Tk::r_paren) && ok;
+    suffix.noexcept_condition = e;
+  }
+
+  bool noexcept_value(const std::optional<Ex>& condition, bool& ok) {
+    if (!condition) return true;
+    Ex operand = s_->rvalue(*condition);
+    Ex e = s_->to_bool(operand, operand.begin);
+    sema::Evaluated result = sema::Evaluator(*s_, questions()).evaluate(e);
+    if (result.value) {
+      if (s_->narrows(operand, e.type())) {
+        s_->diag(operand.begin, Diag::noexcept_narrowing, operand.type());
+        ok = false;
+      }
+      return s_->world().values.as_signed(*result.value) != 0;
+    }
+    if (result.dependent) s_->diag(e.begin, Diag::not_supported, Tk::kw_noexcept);
+    else if (e.ok()) s_->diag(e.begin, Diag::not_constant, result.reason);
+    ok = false;
+    return false;
   }
 
   // `( parameter-declaration-clause ) cv-qualifier-seq` of a constructor or destructor, whose
@@ -3116,15 +3125,17 @@ public:
       }
       if (kind(1) == Tk::l_paren)
         if (auto op = s_->va_builtin(n)) return va_expression(*op, begin);
-      // A built-in function ycxx implements, `__builtin_fabs(x)` (docs/EXTENSIONS.md).
+      // A builtin with ordinary expression arguments (docs/EXTENSIONS.md).
       if (kind(1) == Tk::l_paren)
         if (const lex::BuiltinFunctionInfo* bf = s_->builtin_function(n)) {
           bump();
           bump();
           std::vector<Ex> args;
+          int saved = std::exchange(angle_, 0);
           if (!is(Tk::r_paren))
             do args.push_back(assignment_expression());
             while (accept(Tk::comma));
+          angle_ = saved;
           if (!expect(Tk::r_paren)) return {NodeId::none, begin, pos()};
           Ex r = s_->builtin_call(*bf, std::move(args), begin, pos());
           return {r.id, begin, pos(), r.info};
