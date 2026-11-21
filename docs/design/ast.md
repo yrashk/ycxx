@@ -520,13 +520,18 @@ equivalence of [temp.over.link], modulo parentheses; functional equivalence is n
 the clause makes ill-formed, no diagnostic required.
 
 **Dependent type predicates (#209, Astra).** A `VDepOp` represents `__is_same(T, U)`,
-`__is_reference(T)`, `__is_const(T)`, `__is_volatile(T)`, `__is_array(T)`, `__is_pointer(T)`
-or `__is_function(T)` in a `bool` template argument or default. Its ordered type arguments
-retain canonical qualification, reference kind and parameter positions. Substitution first
-forms each operand type and propagates failure if a type is invalid
-([temp.deduct.general]). It rebuilds the operation while any operand remains dependent and interns
-the same `VInt` as an ordinary `bool` constant once all types are concrete ([temp.alias], [temp.type]).
+`__is_reference(T)`, `__is_const(T)`, `__is_volatile(T)`, `__is_array(T)`, `__is_pointer(T)`,
+`__is_function(T)`, `__is_enum(T)`, `__is_union(T)`, or `__is_class(T)` in a `bool` template
+argument or default. Its ordered type arguments retain canonical qualification, reference kind
+and parameter positions. Substitution first forms each operand type and propagates failure if a
+type is invalid ([temp.deduct.general]). It rebuilds the operation while any operand remains
+dependent and interns the same `VInt` as an ordinary `bool` constant once all types are concrete
+([temp.alias], [temp.type]).
 The array, pointer and function predicates classify the substituted type ([meta.unary.cat]).
+The class and union predicates use the class-key read from this unit's declaration, including
+an elaborated introduction. A class template specialization uses its primary's kind
+([temp.class.general]). The information is available before class completion. Each front-end
+analysis reconstructs it from its own token input.
 The cv predicates inspect the substituted type's top-level qualification. For an array it is
 the qualification of its innermost element, and a reference is always cv-unqualified
 ([basic.type.qualifier], [dcl.ref]).

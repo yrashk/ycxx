@@ -782,6 +782,16 @@ public:
   explicit Classes(ast::Interners& ins, Types& types) : ins_(&ins), types_(&types) {}
   Classes(const Classes&) = delete;
 
+  // A source declaration's class-key is available before a definition is complete.
+  void record_class_key(EntityId c, bool is_union) {
+    class_keys_.try_emplace(std::to_underlying(c), is_union);
+  }
+  std::optional<bool> is_union_class(EntityId c) const {
+    if (auto it = class_keys_.find(std::to_underlying(c)); it != class_keys_.end()) return it->second;
+    if (const ClassRec* r = find(c)) return r->union_;  // a synthesized class
+    return std::nullopt;
+  }
+
   // `r`, a definition's record, unless one is published already; the published one.
   const ClassRec& publish(EntityId c, ClassRec r, const std::function<void(ClassRec&)>& finish = {}) {
     auto [it, fresh] = recs_.try_emplace(std::to_underlying(c), std::move(r));
@@ -890,6 +900,7 @@ public:
 private:
   ast::Interners* ins_;
   Types* types_;
+  std::map<u32, bool> class_keys_;  // whether the parsed class-key names a union
   std::map<u32, ClassRec> recs_;  // node-based: a published record never moves
   std::map<u32, EnumRec> enums_;
   std::vector<EntityId> class_order_, enum_order_;

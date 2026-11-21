@@ -51,6 +51,7 @@ struct DeclSpec {
   std::optional<u32> mutable_at;
   // An elaborated-type-specifier ([dcl.type.elab]): the class it names, and where its name is.
   bool elaborated = false;
+  Tk class_key = Tk::eof;
   NameId class_name{};
   u32 class_at = 0;
   bool ok = true;
@@ -184,6 +185,8 @@ public:
   }
 
   // ------------------------------------------------------------ [dcl.spec]
+
+  static bool is_class_key(Tk k) { return k == Tk::kw_class || k == Tk::kw_struct || k == Tk::kw_union; }
 
   static bool starts_decl_specifier(Tk k) {
     switch (k) {
@@ -421,7 +424,7 @@ public:
 
   // What an elaborated-type-specifier naming no declared class does: at namespace scope it
   // declares the class ([basic.scope.pdecl]); set by the owner where that applies.
-  std::function<std::optional<QualType>(NameId)> declare_class;
+  std::function<std::optional<QualType>(NameId, Tk)> declare_class;
 
   // decl-specifier-seq ([dcl.spec.general]) with the simple-type-specifiers of [dcl.type.simple],
   // class names and elaborated-type-specifiers ([dcl.type.elab]), and the cv-qualifiers.
@@ -600,7 +603,7 @@ public:
           d.ok = false;
           continue;
         }
-        if (!t && declare_class) t = declare_class(n);
+        if (!t && declare_class) t = declare_class(n, k);
         if (!t) {
           s_->diag(at + 1, Diag::not_a_type, n);
           d.ok = false;
@@ -610,6 +613,7 @@ public:
         } else {
           cls = t;
           d.elaborated = true;
+          d.class_key = k;
           d.class_name = n;
           d.class_at = at + 1;
         }
