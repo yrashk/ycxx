@@ -34,6 +34,9 @@ reasoning; do not leave decisions only in issue threads.
      relocation in relocatable objects for data and ordinary functions. The native static linker
      relaxes the validated RIP-relative load to a direct address after symbol resolution
      (#414, #407).
+   - ELF and Mach-O [bind ordinary C++ function symbols locally](docs/design/tu-local-parameter-symbols.md)
+     when their mangled parameter types identify an unnamed-namespace type. The pipeline retains
+     the source linkage and Itanium spelling. Astra reviewed the scope and ownership rule (#582).
    - Linux x86-64 [COMDAT inputs](docs/design/linux-elf-comdat-input.md) keep the first whole
      ELF group per signature in explicit-input static links. Selection precedes startup, layout
      and relocation. Astra reviewed the ELF validation, symbol handling and link mode boundary
