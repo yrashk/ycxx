@@ -1215,7 +1215,7 @@ public:
                                                bool checked = false) {
     u32 j = start;
     std::optional<sema::Sema::Scope> s;
-    if (member_pointer && kind(j) == Tk::kw_decltype && kind(j + 1) == Tk::l_paren) {
+    if (kind(j) == Tk::kw_decltype && kind(j + 1) == Tk::l_paren) {
       u32 saved = i_;
       const bool saved_half = half_;
       i_ += j;
@@ -1746,10 +1746,11 @@ public:
     if (is(Tk::l_brace)) {
       auto b = braced_init_list();
       if (!b) return NodeId::none;
-      if (ref && b->clauses.size() == 1 && !b->clauses[0].list && !b->clauses[0].designated)
+      if (ref && !s_->types().is_class(s_->types().referee(t)) &&
+          b->clauses.size() == 1 && !b->clauses[0].list && !b->clauses[0].designated)
         e = s_->bind_reference(b->clauses[0].expr, t, b->clauses[0].begin, false);
       else
-        e = s_->list_init(sema::Types::unqualified(t), *b);
+        e = s_->list_init(sema::Types::unqualified(t), *b, sema::Construction::copy_list);
     } else {
       Ex a = assignment_expression();
       if (!a.ok()) return NodeId::none;
@@ -2695,7 +2696,7 @@ public:
     return s_->conditional(cond, t, f, at);
   }
 
-  // The binary operators from `||` (precedence 1) to the multiplicative ones (10).
+  // The binary operators from `||` (precedence 1) to pointer-to-member access (11).
   struct BinInfo {
     int prec;
     sema::Sema::BinOp op;
@@ -2721,16 +2722,18 @@ public:
     case Tk::star: return BinInfo{10, B::mul};
     case Tk::slash: return BinInfo{10, B::div};
     case Tk::percent: return BinInfo{10, B::rem};
+    case Tk::periodstar: return BinInfo{11, B::dot_star};
+    case Tk::arrowstar: return BinInfo{11, B::arrow_star};
     default: return std::nullopt;
     }
   }
 
-  // logical-or-expression down to multiplicative-expression ([expr.mul]–[expr.log.or]), all
+  // logical-or-expression down to pm-expression ([expr.mptr.oper]–[expr.log.or]), all
   // left-associative, by precedence climbing.
   Ex binary_expression(int min_prec) {
     Ex l = cast_expression();
     for (;;) {
-      if (is(Tk::spaceship) || is(Tk::periodstar) || is(Tk::arrowstar)) {
+      if (is(Tk::spaceship)) {
         s_->diag(pos(), Diag::not_supported, kind());
         bump();
         cast_expression();
@@ -2783,6 +2786,7 @@ public:
   Ex new_expression(u32 begin) {
     bump();  // new, after an optional ::
     std::optional<QualType> type;
+    std::optional<Ex> bound;
     bool excluded = false;
     if (is(Tk::l_paren)) {
       u32 past = i_ + past_parentheses(0);
@@ -2815,10 +2819,16 @@ public:
       type = build(l, spec.type, fn, d, true);
       if (!d.ok) return {NodeId::none, begin, pos()};
       while (is(Tk::l_square) && kind(1) != Tk::l_square) {
-        excluded = true;  // array new
         bump();
         int saved = std::exchange(angle_, 0);
-        if (!is(Tk::r_square)) expression();
+        if (is(Tk::r_square)) {
+          excluded = true;  // omitted bound
+        } else if (bound) {
+          excluded = true;  // multiple dimensions
+          constant_expression();
+        } else {
+          bound = expression();
+        }
         angle_ = saved;
         if (!expect(Tk::r_square)) return {NodeId::none, begin, pos()};
         skip_attributes();
@@ -2843,6 +2853,7 @@ public:
       s_->diag(begin, Diag::not_supported, Tk::kw_new);
       return {NodeId::none, begin, pos()};
     }
+    if (bound) return s_->new_array(*type, *bound, args, braces.get(), begin, pos());
     return s_->new_object(*type, args, braces.get(), begin, pos());
   }
 
@@ -2854,11 +2865,7 @@ public:
       bump();
     }
     Ex operand = cast_expression();
-    if (array) {
-      s_->diag(begin, Diag::not_supported, Tk::kw_delete);
-      return {NodeId::none, begin, pos()};
-    }
-    return s_->delete_object(operand, begin, pos());
+    return array ? s_->delete_array(operand, begin, pos()) : s_->delete_object(operand, begin, pos());
   }
 
   // unary-expression ([expr.unary]).
@@ -2940,10 +2947,11 @@ public:
     }
     bump();
     bool is_incdec = *op == ast::UnaryOp::pre_inc || *op == ast::UnaryOp::pre_dec;
-    auto saved_address = address_operand_;
-    if (*op == ast::UnaryOp::address_of) address_operand_ = pos();
+    auto saved_address = address_op_;
+    if (*op == ast::UnaryOp::address_of) address_op_ = begin;
     Ex e = is_incdec ? unary_expression() : cast_expression();
-    address_operand_ = saved_address;
+    address_op_ = saved_address;
+    if (*op == ast::UnaryOp::address_of && e.begin == begin) return e;  // qualified member address
     return s_->unary(*op, e, begin, e.end > begin ? e.end : pos(), begin);
   }
 
@@ -3216,6 +3224,10 @@ public:
       if (!allocation_operator_ahead(1)) return qualified_id(begin);
       bump();
       return allocation_function_id(begin);
+    case Tk::kw_decltype:
+      if (kind(1) == Tk::l_paren && kind(past_parentheses(1)) == Tk::coloncolon) return qualified_id(begin);
+      s_->diag(begin, Diag::expected_expression);
+      return {NodeId::none, begin, begin};
     case Tk::kw_this: bump(); return s_->this_expr(begin, pos());
     case Tk::kw_requires: return requires_expression();
     case Tk::kw_static_cast: {
@@ -3406,7 +3418,8 @@ public:
   // A qualified-id ([expr.prim.id.qual]): `N::x`, `::x`, `C::m`, `E::e`, `N::C::f`.
   Ex qualified_id(u32 begin) {
     u32 next = 0;
-    auto s = nested_name(0, next, /*member_pointer=*/false, substituting_partial_arguments);
+    auto address = address_op_ && *address_op_ + 1 == begin ? address_op_ : std::nullopt;
+    auto s = nested_name(0, next, /*member_pointer=*/false, substituting_partial_arguments || address.has_value());
     // `S::template f<args>`: f names a template ([temp.names]/3).
     bool keyword = s && kind(next) == Tk::kw_template && kind(next + 1) == Tk::identifier;
     if (keyword) ++next;
@@ -3426,9 +3439,9 @@ public:
     auto scope_expr = [&] {
       // [expr.unary.op]: `&C::m` can form a pointer to member. Parentheses or postfix
       // operations make the operand something other than the qualified-id itself.
-      bool bare_address = address_operand_ == begin && !is(Tk::l_paren) && !is(Tk::l_square) &&
-                          !is(Tk::period) && !is(Tk::arrow) && !is(Tk::plusplus) && !is(Tk::minusminus);
-      return s_->scope_expr(*s, n, begin, name_at, pos(), bare_address);
+      bool postfix = is(Tk::l_paren) || is(Tk::l_square) || is(Tk::period) || is(Tk::arrow) ||
+                     is(Tk::plusplus) || is(Tk::minusminus);
+      return s_->scope_expr(*s, n, begin, name_at, pos(), postfix ? std::nullopt : address);
     };
     if (operator_name) {
       if (is(Tk::less) && s_->scope_names_template(*s, n)) {
@@ -4274,12 +4287,13 @@ public:
       init = placeholder_variable(d, local, spec.is_constexpr, replaced);
       if (!init.ok() && s_->types().has_placeholder(d.type)) s_->set_local_type(local, s_->builtin(Builtin::dependent));
     } else if (is(Tk::l_brace) || (is(Tk::equal) && kind(1) == Tk::l_brace)) {
-      accept(Tk::equal);
+      const auto form = accept(Tk::equal) ? sema::Construction::copy_list : sema::Construction::direct_list;
       auto b = braced_init_list();
-      if (s_->types().is_reference(d.type) && b->clauses.size() == 1 && !b->clauses[0].list && !b->clauses[0].designated)
+      if (s_->types().is_reference(d.type) && !s_->types().is_class(s_->types().referee(d.type)) &&
+          b->clauses.size() == 1 && !b->clauses[0].list && !b->clauses[0].designated)
         init = s_->bind_reference(b->clauses[0].expr, d.type, b->clauses[0].begin, true);
       else
-        init = s_->list_init(d.type, *b);
+        init = s_->list_init(d.type, *b, form, /*extend_reference=*/true);
     } else if (accept(Tk::equal)) {
       Ex e = assignment_expression();
       init = s_->types().is_reference(d.type) ? s_->bind_reference(e, d.type, e.begin, true) : s_->convert(e, d.type, e.begin);
@@ -4644,7 +4658,7 @@ public:
         // `return {…};` copy-list-initializes the result ([stmt.return]/2).
         auto b = braced_init_list();
         if (s_->types().is_void(rt)) s_->diag(begin, Diag::return_value_in_void);
-        else value = s_->list_init(rt, *b);
+        else value = s_->list_init(rt, *b, sema::Construction::copy_list);
         if (!expect(Tk::semi)) skip_to_semi();
         return s_->node(ast::Return{sema::Sema::at(value, begin)}, begin, pos());
       }
@@ -4871,7 +4885,7 @@ public:
       }
       if (list) {
         // List-initialization ([dcl.init.list]): `T x{…}` and `T x = {…}`.
-        accept(Tk::equal);
+        const auto form = accept(Tk::equal) ? sema::Construction::copy_list : sema::Construction::direct_list;
         auto b = braced_init_list();
         if (d.unknown_bound) {
           u64 n = s_->deduce_bound(d.type, *b);
@@ -4883,10 +4897,11 @@ public:
           s_->set_local_type(local, d.type);
         }
         // A reference from one element binds as `= e` does, extending a temporary ([class.temporary]/6).
-        if (s_->types().is_reference(d.type) && b->clauses.size() == 1 && !b->clauses[0].list && !b->clauses[0].designated)
+        if (s_->types().is_reference(d.type) && !s_->types().is_class(s_->types().referee(d.type)) &&
+            b->clauses.size() == 1 && !b->clauses[0].list && !b->clauses[0].designated)
           init = s_->bind_reference(b->clauses[0].expr, d.type, b->clauses[0].begin, true);
         else
-          init = s_->list_init(d.type, *b);
+          init = s_->list_init(d.type, *b, form, /*extend_reference=*/true);
         constant_local(local, d.type, spec.is_constexpr, init);
       } else if (accept(Tk::equal)) {
         Ex e = assignment_expression();
@@ -5041,7 +5056,7 @@ public:
   bool body = false;  // the part is a function body, not a declaration part
   bool substituting_partial_arguments = false;
 private:
-  std::optional<u32> address_operand_;  // the token after an explicit unary `&`
+  std::optional<u32> address_op_;  // the token of an explicit unary `&`
 };
 
 }  // namespace ycxx::parse

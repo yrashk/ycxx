@@ -95,9 +95,10 @@ Fixed-prototype definitions and direct calls on x86-64 Linux also move `float` a
 arguments and results. Direct variadic calls support the same scalar floating values and
 promote an unnamed `float` to `double`. Direct call result types can be deduced from `auto` or
 `decltype(auto)`. Runtime addition, subtraction, multiplication, division and unary negation
-work for `float` and `double` at their evaluation width.
+work for `float` and `double` at their evaluation width. Both types support the six comparisons
+and conversion to `bool`.
 [Linux scalar floating-point ABI](docs/design/linux-scalar-floating-point.md) ·
-[Linux scalar floating-point arithmetic](docs/design/linux-scalar-floating-point.md#runtime-arithmetic) ·
+[Linux scalar floating-point operations](docs/design/linux-scalar-floating-point.md#runtime-arithmetic) ·
 [Linux scalar variadic floating-point ABI](docs/design/linux-floating-variadic-calls.md) ·
 [#441](https://github.com/yrashk/ycxx/issues/441)
 
@@ -140,8 +141,9 @@ arrays of supported scalar types, including arithmetic on saved pointers just pa
 [#111](https://github.com/yrashk/ycxx/issues/111)
 
 Both targets support `constexpr` constructors in class definitions and plain out-of-class
-definitions for runtime construction. An ordinary class can explicitly default its copy
-constructor as its first declaration and use it for trivial member copies.
+definitions for runtime construction. Ordinary in-class constructor declarations support
+bare `explicit`. An ordinary class can explicitly default its copy constructor as its first
+declaration and use it for trivial member copies.
 [#157](https://github.com/yrashk/ycxx/issues/157)
 
 In-class conversion functions can name a class type alias as their conversion target,
@@ -179,7 +181,8 @@ Both targets accept leading `[[…]]` attributes on ordinary data and function m
   outside it. [#426](https://github.com/yrashk/ycxx/issues/426),
   [#455](https://github.com/yrashk/ycxx/issues/455)
 - ordinary scalar `new` and single-object `delete` for integral and pointer objects, including
-  cv-qualified objects. Allocating expressions use the global Itanium allocation functions.
+  cv-qualified objects. Scalar allocation uses the global Itanium allocation functions.
+  Syntax checking also covers one-dimensional scalar `new T[n]` and `delete[] p`.
   [#293](https://github.com/yrashk/ycxx/issues/293)
 - pointers and references to arrays of unknown bound, and template partial specializations
   that match unknown-bound array types. [#222](https://github.com/yrashk/ycxx/issues/222)
@@ -283,7 +286,8 @@ checked with the flags of its last build, or else with its line in the project's
 `compile_commands.json`.
 
 **Pointer-to-member declarations.** Data and function member-pointer types can appear in
-declarations, type traits and requires-expressions. [#238](https://github.com/yrashk/ycxx/issues/238)
+declarations, type traits and requires-expressions. Syntax checking covers ordinary data member
+addresses, typed nulls and same-class `.*` and `->*`. [#238](https://github.com/yrashk/ycxx/issues/238) · [#411](https://github.com/yrashk/ycxx/issues/411)
 
 **Virtual declarations.** Syntax checking accepts virtual members and inline definitions in
 ordinary root classes. Classes derived through one ordinary polymorphic base also support
@@ -297,7 +301,7 @@ elements, including whole rows of multidimensional arrays. [#285](https://github
 - The standard library and its headers. On macOS, C headers such as `<stdio.h>` compile without
   warnings and `printf` runs. libycxx's `<cstdio>` is still tracked under [#133](https://github.com/yrashk/ycxx/issues/133).
   `<cmath>` (which `<math.h>` includes) does not compile yet. [#349](https://github.com/yrashk/ycxx/issues/349)
-- Taking member addresses, applying `.*` or `->*`, and code generation for member-pointer values.
+- Native code generation for member-pointer values and general member-pointer expressions.
   [#411](https://github.com/yrashk/ycxx/issues/411)
 - Constexpr lambdas (the interpreter has no class objects yet), further lambda declaration
   contexts ([#338](https://github.com/yrashk/ycxx/issues/338)),

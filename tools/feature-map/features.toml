@@ -448,7 +448,7 @@ std = 'C++98'
 detect = '\b(?:float|double)\b'
 status = 'done'
 issues = [336, 201]
-note = 'Linux x86-64 supports runtime `float` and `double` addition, subtraction, multiplication, division, unary negation and binary32-to-binary64 widening. Other numeric conversions, comparisons and x87 values remain in #201.'
+note = 'Linux x86-64 supports runtime `float` and `double` arithmetic, comparisons, conversion to `bool` and binary32-to-binary64 widening. Other numeric conversions and x87 values remain in #201.'
 probe = '''
 int main() { double d = 1.5; float f = 2.0f; d = d * f + 0.5; return (int)d == 3 ? 0 : 1; }
 '''
@@ -657,7 +657,7 @@ clauses = ['expr.new', 'expr.delete', 'basic.stc.dynamic*', 'dcl.fct.def.replace
 std = 'C++98'
 detect = '\bnew\s+[\w:(]|\bdelete\s*(?:\[\s*\])?\s*[\w(*]'
 status = 'partial'
-note = 'ordinary global scalar new and single-object delete for integral and pointer objects; class and array allocation, placement, and exception cleanup remain'
+note = 'ordinary global scalar new and single-object delete for integral and pointer objects; one-dimensional scalar array new and delete syntax; class allocation, native array allocation, placement, and exception cleanup remain'
 probe = '''
 struct S { int v; S(int x) : v(x) {} };
 int main() { S* p = new S(5); int r = p->v; delete p; int* a = new int[3]; delete[] a; return r == 5 ? 0 : 1; }
@@ -758,12 +758,12 @@ issues = [294]
 id = 'expr-mptr'
 name = 'Pointers to members: types, `.*` and `->*`'
 group = 'expr'
-clauses = ['dcl.mptr', 'expr.mptr.oper', 'conv.mem']
+clauses = ['dcl.mptr', 'expr.unary.op', 'expr.mptr.oper', 'conv.mem']
 std = 'C++98'
 detect = '\w\s*::\s*\*\s*\w|\.\*|->\*'
 status = 'partial'
 issues = [238, 411]
-note = 'Member-pointer types, declarators and traits, including dependent types. Member addresses, application operators, conversions and value ABI remain open.'
+note = 'Member-pointer declarators and traits, including dependent types. Syntax checking covers direct data member addresses, typed nulls, and same-class .* and ->*. Native values, constant-evaluated application, general conversions and function member pointers remain open.'
 probe = '''
 struct S { int a; int f() { return a; } };
 int main() { int S::*pm = &S::a; int (S::*pf)() = &S::f; S s{4}; S* p = &s; return (s.*pm == 4 && (p->*pf)() == 4) ? 0 : 1; }
@@ -1624,7 +1624,7 @@ int main() { S s = 3; int i = s; return (s && f(2) == 2 && i == 3) ? 0 : 1; }
 '''
 status = 'partial'
 issues = [157, 219, 339]
-note = 'In-class conversion functions can use dependent aliases and be selected by named static_cast to an exact non-class value type'
+note = 'Ordinary constructors support bare explicit and direct, copy, and copy-list selection. In-class conversion functions can use dependent aliases and be selected by named static_cast to an exact non-class value type'
 
 [[feature]]
 id = 'class-explicit-bool'

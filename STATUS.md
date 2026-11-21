@@ -612,9 +612,13 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   [Design](docs/design/linux-floating-variadic-calls.md) · [#399](https://github.com/yrashk/ycxx/issues/399)
 - Runtime addition, subtraction, multiplication and division use scalar SSE at the binary32 or
   binary64 L2 result width and under the caller's MXCSR controls. Unary negation flips the sign
-  bit without changing the payload or status flags. Comparisons, other numeric conversions and
-  x87 values remain [#201](https://github.com/yrashk/ycxx/issues/201).
+  bit without changing the payload or status flags.
   [Design](docs/design/linux-scalar-floating-point.md#runtime-arithmetic)
+- Binary32 and binary64 comparisons use the scalar SSE unordered comparison instructions.
+  Equality and the four relational operators are false for unordered operands. Inequality and
+  conversion of NaN to `bool` are true. Both signed zeros convert to false. Strict exception
+  status, other numeric conversions and x87 values remain [#201](https://github.com/yrashk/ycxx/issues/201).
+  [Design](docs/design/linux-scalar-floating-point.md#runtime-comparisons)
 - Direct fixed-prototype calls to ordinary free functions support nonempty naturally aligned
   flat records with integral or ordinary object-pointer fields that are trivial for calls,
   up to 16 bytes and alignment eight. The AMD64 INTEGER eightbytes follow from the laid-out
@@ -1036,6 +1040,11 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   checked across an out-of-class definition ([dcl.constexpr], #157). These constructors use the
   ordinary runtime construction path. Constant evaluation of class objects is tracked in #25,
   and named exception specifications are tracked in #219.
+- Ordinary constructors can spell bare `explicit` in class, in either order with `constexpr`.
+  A matching out-of-class definition inherits the property. Copy-initialization excludes these
+  constructors. Direct initialization includes them. Copy-list-initialization ranks them and
+  diagnoses an explicit winner, including a default constructor or a temporary for a reference
+  argument ([dcl.fct.spec], [over.match.ctor], [over.match.copy], [over.match.list], #157).
 - A first-declaration in-class `C(C&) = default` or `C(const C&) = default` is a declared copy
   constructor, including with `constexpr` or bare `noexcept`. It participates in overload
   selection, access checking and deletion. For ordinary namespace-scope records without
@@ -1051,8 +1060,8 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
 - Linkage names: `C1`/`D1` (#136 for `C2`/`D2`/`D0`), checked against Clang's symbols.
 - Tests: `tests/own/classes/s3-*` (spec-only, plus two from the review): 16 of 16 pass. 10 more draft examples pass.
 - Not yet: temporaries with destructors created in a conditional operand, value-initializing a
-  member subobject whose class has an implicit constructor, delegating constructors, `explicit`,
-  and other `= default` forms (#157, #244).
+  member subobject whose class has an implicit constructor, delegating constructors, conditional
+  `explicit`, explicit constructor templates, and other `= default` forms (#157, #244).
 
 ## Classes, δ step 4a: enumerations (#86, 2026-11-18)
 
@@ -2396,11 +2405,26 @@ values, end to end; results match Clang's bit for bit.
   unevaluated operands ([expr.prim.req.general], [expr.prim.req.simple], [expr.prim.req.compound]).
 - The two libycxx `<cstdio>` requires-expressions using dependent member-pointer declarations
   can be checked. Linux hosted header support still depends on #395, #396 and #398.
-- Object size and alignment follow Itanium C++ ABI §2.3 on the two supported targets. Forming
-  member addresses, `.*` and `->*`, conversions, and code generation for member-pointer values
-  remain open (#411). Dependent exception specifications are tracked in #219.
+- Object size and alignment follow Itanium C++ ABI §2.3 on the two supported targets.
 - Tests in `tests/own/member-pointer/` cover declarations, type identity, dependent requirements
   and invalid pointer-to-member types.
+
+## Ordinary data member-pointer expressions (#411)
+
+- An unparenthesized `&C::field` forms a data member pointer for an accessible, directly declared
+  non-static field of non-reference type. Bit-fields have no address. A null pointer constant
+  converts to the typed null data member pointer; value-initialization also gives that value.
+- Built-in `.*` and `->*` apply a data member pointer to an object of its declaring class. The
+  result incorporates the object's cv-qualifiers. `.*` yields an lvalue when the object is an
+  lvalue and an xvalue otherwise. `->*` yields an lvalue. `.*` participates in temporary lifetime
+  extension ([class.temporary]).
+- Constant expressions can retain a named field or typed null. Applications in constant
+  expressions need interpreter support for class objects alongside ordinary class member access
+  ([#25](https://github.com/yrashk/ycxx/issues/25), [#262](https://github.com/yrashk/ycxx/issues/262)).
+- Tests are in `tests/own/member-pointer/`. Native representation, member-pointer conversions,
+  equality, contextual bool and member function pointers are tracked in
+  [#411](https://github.com/yrashk/ycxx/issues/411). Dependent exception specifications are tracked
+  in [#219](https://github.com/yrashk/ycxx/issues/219).
 
 ## Comparisons of pointers to qualified arrays (#445)
 
@@ -2436,6 +2460,13 @@ values, end to end; results match Clang's bit for bit.
   and other allocation-function declarations.
 - Spec-only tests in `tests/own/scalar-allocation/` cover types, initialization, a typed null, and
   invalid operands. A separate provider checks the address and size passed to deallocation.
+- Syntax checking supports one-dimensional `new T[n]` and `delete[] p` for integral and ordinary
+  pointer elements ([expr.new], [expr.delete]). The bound converts to `size_t`. A potentially
+  evaluated constant bound can be zero and must keep the object size within the positive range
+  of `ptrdiff_t`. The array AST retains default or empty initialization and the typed delete
+  operand. Native lowering and constant evaluation of these operations remain in #293.
+  A file-scope scalar initializer still needs lowered code to qualify for dynamic initialization.
+  Type checking covers function-local expressions and unevaluated operands.
 
 ## Bootstrap workarounds
 
