@@ -306,8 +306,82 @@ void constant_evaluation() {
   check(kinds("bool b = nullptr == nullptr;\nstatic_assert(nullptr == nullptr);").empty(), "nullptr == nullptr");
 }
 
+void class_trivial_copyability() {
+  using enum sema::CopyOperation;
+  using Operations = std::array<sema::CopyOperation, 4>;
+  struct Witness {
+    std::string_view label;
+    std::string_view source;
+    ast::u32 class_item;
+    std::optional<bool> expected;
+    // Copy construction, move construction, copy assignment, move assignment.
+    std::optional<Operations> operations = std::nullopt;
+  };
+  const Witness witnesses[] = {
+      {"plain class", "struct Value { int payload; };", 0, true,
+       Operations{eligible_trivial, eligible_trivial, eligible_trivial, eligible_trivial}},
+      {"user-provided ordinary constructor", "struct Value { Value() {} int payload; };", 0, true},
+      {"default member initializer", "struct Value { int payload = 17; };", 0, true},
+      {"scalar union", "union Value { unsigned bits; int code; };", 0, true},
+      {"member pointer field", "struct Owner; struct Value { int Owner::*payload; };", 1, true},
+      {"lvalue-reference field", "struct Value { int& payload; };", 0, true,
+       Operations{eligible_trivial, eligible_trivial, ineligible, ineligible}},
+      {"rvalue-reference field", "struct Value { int&& payload; };", 0, true,
+       Operations{ineligible, eligible_trivial, ineligible, ineligible}},
+      {"only copy assignment is eligible", "struct Value { Value(const Value&) = delete; int payload; };", 0, true,
+       Operations{ineligible, ineligible, eligible_trivial, ineligible}},
+      {"unrelated assignment", "struct Value { Value& operator=(int); };", 0, true,
+       Operations{eligible_trivial, eligible_trivial, eligible_trivial, eligible_trivial}},
+      // Deleted copies suppress implicit moves. [class.prop]/1 still requires one eligible operation.
+      {"no eligible operation",
+       "struct Value { Value(const Value&) = delete; Value& operator=(const Value&) = delete; };", 0, false,
+       Operations{ineligible, ineligible, ineligible, ineligible}},
+      {"user-provided copy constructor", "struct Value { Value(const Value&) {} };", 0, false,
+       Operations{eligible_nontrivial, ineligible, eligible_trivial, ineligible}},
+      {"user-provided move constructor", "struct Value { Value(Value&&) {} };", 0, false,
+       Operations{ineligible, eligible_nontrivial, ineligible, ineligible}},
+      {"user-provided destructor", "struct Value { ~Value() {} };", 0, false},
+      {"class-valued field", "struct Child { int payload; }; struct Value { Child child; };", 1, std::nullopt},
+      {"base class", "struct Base { int payload; }; struct Value : Base {};", 1, std::nullopt},
+  };
+  for (const Witness& witness : witnesses) {
+    Analysed a(witness.source);
+    const auto label = std::string(witness.label);
+    const bool clean = a.pre.diags.empty() && a.diags().empty();
+    check(clean, label + " has no diagnostics");
+    if (!clean) continue;
+    const auto entity = a.decl(witness.class_item).entity;
+    const bool defined = a.p->classes().find(entity) != nullptr;
+    check(defined, label + " has a class record");
+    if (!defined) continue;
+    const auto& record = a.p->classes().rec(entity);
+    check(record.trivially_copyable() == witness.expected, label + " trivial copyability");
+    if (witness.operations) {
+      const auto& ops = record.trivial_copyability;
+      const Operations actual{ops.copy_constructor, ops.move_constructor, ops.copy_assignment, ops.move_assignment};
+      check(actual == *witness.operations, label + " copy and move operations");
+    }
+  }
+
+  Analysed forward("struct Forward;");
+  const bool clean = forward.pre.diags.empty() && forward.diags().empty();
+  check(clean, "forward class has no diagnostics");
+  if (clean) {
+    check(forward.p->classes().find(forward.decl(0).entity) == nullptr, "forward class has no definition record");
+  }
+
+  Analysed feature(R"cpp(
+#if __has_builtin(__is_trivially_copyable)
+#error __is_trivially_copyable advertised before the evaluator is available
+#endif
+int probe;
+)cpp");
+  check(feature.pre.diags.empty() && feature.diags().empty(), "__has_builtin(__is_trivially_copyable) remains zero");
+}
+
 int main() {
   constant_evaluation();
+  class_trivial_copyability();
   conversions_and_locals();
   redeclarations_and_linkage();
   unsupported_bit_fields();
