@@ -248,29 +248,71 @@ inline constexpr u16 friend_ = 32768;  // a friend declaration ([class.friend]):
 }
 
 // Only this fixed set of declarations can consume a peer-owned virtual table.
-bool native_virtual_root_declarations(const ClassRec& record, const Types& types, auto&& written_member) {
-  if (types.target().triple != ast::x86_64_linux.triple || !record.polymorphic || record.virtual_destructor ||
-      !record.bases.empty() || record.user_ctors || record.destructor != EntityId::none)
-    return false;
+bool native_virtual_declaration(const MemberDeclRec& member, const Types& types, auto&& written_member) {
   auto integer = [&](QualType type) {
     const auto builtin = types.builtin_of(type);
     return builtin && ast::is_integral(*builtin) && types.target()[*builtin].size <= 8;
   };
+  const auto declared = written_member(member.entity);
+  if (!declared || (declared->flags & (decl_flag::definition | decl_flag::inline_ | decl_flag::deleted))) return false;
+  const auto type = types.rec(member.type);
+  return !type.variadic && type.fn_ref == ast::RefQual::none &&
+         (type.fn_cv == Cv::none || type.fn_cv == Cv::const_) && type.params.size() < 32 &&
+         integer(type.inner) && std::ranges::all_of(type.params, integer);
+}
+
+bool native_virtual_class(const ClassRec& record, const Types& types) {
+  return types.target().triple == ast::x86_64_linux.triple && record.polymorphic && !record.virtual_destructor &&
+         !record.user_ctors && record.destructor == EntityId::none;
+}
+
+bool native_virtual_root_declarations(const ClassRec& record, const Types& types, auto&& written_member) {
+  if (!native_virtual_class(record, types) || !record.bases.empty()) return false;
   return std::ranges::all_of(record.members, [&](const MemberDeclRec& member) {
     // Class completion also records an implicit copy assignment, even for opaque classes.
     if (!member.is_virtual)
       return member.copy_assignment != CopyAssignment::none && !member.explicit_defaulted_assignment;
-    const auto declared = written_member(member.entity);
-    if (!declared || (declared->flags & (decl_flag::definition | decl_flag::inline_ | decl_flag::deleted))) return false;
-    const auto type = types.rec(member.type);
-    return !type.variadic && type.fn_ref == ast::RefQual::none &&
-           (type.fn_cv == Cv::none || type.fn_cv == Cv::const_) && type.params.size() < 32 &&
-           integer(type.inner) && std::ranges::all_of(type.params, integer);
+    return native_virtual_declaration(member, types, written_member);
   });
 }
 
-bool native_virtual_consumer(const ClassRec& record, const Types& types, auto&& written_member) {
-  return (record.fields.empty() || record.peer_virtual_root_layout) &&
+// [Itanium ABI §2.5.2]: root virtuals occupy slots in declaration order. A noncovariant
+// override shares its primary base's slot, and refers to the declaration that introduced it.
+std::optional<u32> native_virtual_root_slot(const ClassRec& root, EntityId function) {
+  u32 slot = 0;
+  for (const auto& member : root.members) {
+    if (!member.is_virtual) continue;
+    if (member.entity == function) return slot;
+    ++slot;
+  }
+  return std::nullopt;
+}
+
+bool native_virtual_derived_declarations(const ClassRec& record, const Classes& classes, const Types& types,
+                                        auto&& written_member) {
+  if (!native_virtual_class(record, types) || record.bases.size() != 1 || record.fields.size() > 1) return false;
+  const BaseRec& edge = record.bases.front();
+  if (edge.access != ast::Access::public_ || edge.dependent_in_pattern) return false;
+  const ClassRec* base = classes.find(edge.cls);
+  if (!base || base->peer_virtual_layout != PeerVirtualLayout::root ||
+      !native_virtual_root_declarations(*base, types, written_member)) return false;
+  bool has_override = false;
+  for (const auto& member : record.members) {
+    if (!member.is_virtual && member.copy_assignment != CopyAssignment::none &&
+        !member.explicit_defaulted_assignment && !member.is_deleted) continue;
+    if (!member.is_virtual || has_override || member.overridden_virtual == EntityId::none ||
+        !native_virtual_root_slot(*base, member.overridden_virtual) ||
+        !native_virtual_declaration(member, types, written_member)) return false;
+    has_override = true;
+  }
+  return true;
+}
+
+bool native_virtual_consumer(const ClassRec& record, const Classes& classes, const Types& types,
+                            auto&& written_member) {
+  if (record.peer_virtual_layout == PeerVirtualLayout::primary_base)
+    return native_virtual_derived_declarations(record, classes, types, written_member);
+  return (record.fields.empty() || record.peer_virtual_layout == PeerVirtualLayout::root) &&
          native_virtual_root_declarations(record, types, written_member);
 }
 
@@ -1147,10 +1189,10 @@ public:
     return false;
   }
 
-  bool has_peer_virtual_root_layout(QualType t) {
+  bool has_peer_virtual_layout(QualType t) {
     if (!classes().has_virtual_layouts() || !types().is_class(t)) return false;
     const ClassRec* record = class_rec(types().class_of(t));
-    return record && record->peer_virtual_root_layout;
+    return record && record->peer_virtual_layout != PeerVirtualLayout::none;
   }
 
   bool require_supported_virtual_signature(const TypeRec& f, u32 at) {
@@ -1193,7 +1235,15 @@ public:
   // references to class storage still use the ordinary layout guard.
   bool peer_object_lvalue(Ex object) {
     if (object.cat() != ValueCategory::lvalue) return false;
-    while (auto p = as<ast::Paren>(object)) object.id = p->operand.id;
+    for (;;) {
+      if (auto p = as<ast::Paren>(object)) {
+        object.id = p->operand.id;
+      } else if (auto c = as<ast::ImplicitConversion>(object); c && c->conversion == ast::ConversionKind::derived_to_base) {
+        object.id = c->operand.id;
+      } else {
+        break;
+      }
+    }
     if (auto local = as<ast::LocalRef>(object)) return types().is_reference(local_declared_type(locals_[local->local]));
     if (auto decl = as<ast::DeclRef>(object)) return decl->reference;
     if (auto unary = as<ast::Unary>(object)) return unary->op == ast::UnaryOp::deref;
@@ -1276,7 +1326,7 @@ public:
     u32 index = found->index;
     const FieldRec& f = *found->field;
     if (unevaluated == 0 && !(checking_virtual_body && c == current_class) &&
-        !(has_peer_virtual_root_layout(ct) && (arrow || peer_object_lvalue(object))) &&
+        !(has_peer_virtual_layout(ct) && (arrow || peer_object_lvalue(object))) &&
         !require_supported_virtual_layout(ct, name_at)) return fail;
     // [expr.ref]/7.2: the member's type, with the object's cv-qualifiers added; the result is an
     // lvalue if the object is (or is reached through a pointer), else an xvalue.
@@ -3501,7 +3551,7 @@ public:
 
   const ClassRec* virtual_consumer(EntityId cls) {
     const auto* record = class_rec(cls);
-    return record && native_virtual_consumer(*record, types(), [&](EntityId f) { return q_->written_member(f); })
+    return record && native_virtual_consumer(*record, classes(), types(), [&](EntityId f) { return q_->written_member(f); })
                ? record : nullptr;
   }
 
@@ -3625,19 +3675,20 @@ public:
     if (unevaluated == 0) {
       if (d->is_virtual) {
         const auto* record = virtual_consumer(bound.cls);
-        if (!record || !object || (!m.arrow && object->cat() != ValueCategory::lvalue) || assignment_notation) {
+        if (!record || !object || assignment_notation ||
+            (!m.arrow && (object->cat() != ValueCategory::lvalue ||
+                          (record->peer_virtual_layout == PeerVirtualLayout::primary_base && !peer_object_lvalue(*object))))) {
           diag(paren_at, Diag::virtual_call);
           return fail;
         }
         if (!bound.qualified) {
-          // [Itanium ABI §2.5.2]: entries for a root's virtuals follow the order of declaration.
-          // The selected declaration is a member of this record.
-          u32 slot = 0;
-          for (const auto& candidate : record->members) {
-            if (candidate.entity == d->entity) break;
-            if (candidate.is_virtual) ++slot;
+          const bool derived = record->peer_virtual_layout == PeerVirtualLayout::primary_base;
+          const ClassRec* root = derived ? class_rec(record->bases.front().cls) : record;
+          if (root) virtual_slot = native_virtual_root_slot(*root, derived ? d->overridden_virtual : d->entity);
+          if (!virtual_slot) {
+            diag(paren_at, Diag::virtual_call);
+            return fail;
           }
-          virtual_slot = slot;
         }
       } else if (!d->is_static && !require_supported_virtual_layout(types().class_type(bound.cls), paren_at)) {
         return fail;
@@ -5844,7 +5895,7 @@ public:
     QualType st = builtin(w_->target.size_type);
     if (types().is_dependent(t)) return dependent_node({}, begin, end, st);
     t = types().referee(t);  // [expr.sizeof]/2, [expr.alignof]/3
-    if (!has_peer_virtual_root_layout(t) && !require_supported_virtual_layout(t, begin)) return {NodeId::none, begin, end};
+    if (!has_peer_virtual_layout(t) && !require_supported_virtual_layout(t, begin)) return {NodeId::none, begin, end};
     std::optional<u64> n = layout_of(t, align);
     if (!n) {
       if (types().is_function(t) || !is_complete(t)) diag(begin, Diag::sizeof_incomplete, t);
@@ -5893,7 +5944,8 @@ public:
   std::optional<ast::RecordLayout> class_layout(EntityId ce) {
     if (auto it = class_places_.find(std::to_underlying(ce)); it != class_places_.end()) return it->second;
     const ClassRec* c = is_complete(types().class_type(ce)) ? class_rec(ce) : nullptr;
-    if (!c || (c->layout_requires_virtual_support && !c->peer_virtual_root_layout)) return std::nullopt;
+    if (!c || (c->layout_requires_virtual_support && c->peer_virtual_layout == PeerVirtualLayout::none))
+      return std::nullopt;
     std::vector<ast::Placed> bases, places;
     for (const BaseRec& b : c->bases) {
       auto m = place_of(types().class_type(b.cls));
@@ -5906,7 +5958,7 @@ public:
       m->bit_width = f.bit_width;
       places.push_back(*m);
     }
-    const ast::Target* root = c->peer_virtual_root_layout ? &w_->target : nullptr;
+    const ast::Target* root = c->peer_virtual_layout == PeerVirtualLayout::root ? &w_->target : nullptr;
     return class_places_[std::to_underlying(ce)] = ast::record_layout(bases, places, c->union_, c->pod, std::to_underlying(ce), root);
   }
   std::map<u32, ast::RecordLayout> class_places_;  // complete classes' layouts
@@ -6214,7 +6266,12 @@ public:
     int paths = 0;
     auto path = base_path(types().class_of(ct), b, paths);
     if (!check_base_path(ct, b, path, paths, at_)) return {NodeId::none, e.begin, e.end};
-    if (unevaluated == 0 && !require_supported_virtual_layout(ct, at_)) return {NodeId::none, e.begin, e.end};
+    if (unevaluated == 0) {
+      const auto* from = class_rec(types().class_of(ct));
+      const bool peer_base = from && from->peer_virtual_layout == PeerVirtualLayout::primary_base &&
+                             path->size() == 1 && (pointer || peer_object_lvalue(e));
+      if (!peer_base && !require_supported_virtual_layout(ct, at_)) return {NodeId::none, e.begin, e.end};
+    }
     for (EntityId step : *path) {
       QualType st = types().add_cv(types().class_type(step), cv);
       ExprInfo info{pointer ? types().pointer(st) : st, pointer ? ValueCategory::prvalue : e.cat(), 0};
