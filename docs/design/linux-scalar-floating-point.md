@@ -33,5 +33,5 @@ Mixed-object tests exchange arguments in both producer directions, covering regi
 exhaustion in either order, odd and even spill counts, and an INTEGER rollback followed by
 SSE and a remaining GPR argument. Width witnesses check exact bit patterns, adjacent guards
 and call results retained across a second call. Cold and daemon builds exercise the same CLI.
-The native `<cfloat>` probe also exercises a direct member call and template specializations
-returning scalar floating values.
+The native `<cfloat>` probe also exercises a direct member call and scalar floating returns
+deduced from `auto` in a free function and `decltype(auto)` in template specializations.

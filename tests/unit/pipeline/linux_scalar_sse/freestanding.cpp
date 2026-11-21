@@ -11,7 +11,7 @@ struct ScalarSource {
 };
 
 template<class T>
-T pass(T value) { return value; }
+decltype(auto) pass(T value) { return value; }
 
 int main() {
   const ScalarSource source{single_epsilon()};
