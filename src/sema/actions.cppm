@@ -1048,6 +1048,15 @@ public:
     return class_body_type(naming, cls ? *cls : incomplete, name, at, /*qualified=*/true, type_only);
   }
 
+  // Qualified namespace lookup for an elaborated class name skips non-types and aliases.
+  std::optional<QualType> namespace_elaborated_class(EntityId ns, NameId name) {
+    for (const ast::DeclSema& d : q_->namespace_members(ns, name))
+      if (is_type(d.kind))
+        return d.kind == ast::DeclKind::class_ && !(d.flags & decl_flag::template_)
+                   ? std::optional(d.type) : std::nullopt;
+    return std::nullopt;
+  }
+
   // `S::n` naming a type.
   std::optional<QualType> scope_type(const Scope& s, NameId n) {
     auto m = scope_member(s, n);

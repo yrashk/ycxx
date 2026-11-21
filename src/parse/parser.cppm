@@ -1366,7 +1366,11 @@ public:
     auto injected = s_->qualified_injected_type(*s, name, at, type_only);
     if (injected.found)
       return injected.type ? std::optional{std::pair{*injected.type, next + 1 - start}} : std::nullopt;
-    if (type_only) return std::nullopt;
+    if (type_only) {
+      if (!s->ns) return std::nullopt;
+      auto t = s_->namespace_elaborated_class(*s->ns, name);
+      return t ? std::optional{std::pair{*t, next + 1 - start}} : std::nullopt;
+    }
     auto t = s_->scope_type(*s, name);
     if (!t) return std::nullopt;
     if (checked) check_type_access(*s, name, *at);

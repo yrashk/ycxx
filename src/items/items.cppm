@@ -77,6 +77,7 @@ struct DeclName {
   u32 offset = 0;    // of its token, relative to the item's first token
   u32 ordinal = 0;
   u8 flags = 0;
+  bool member_elaborated_candidate = false;  // a possible namespace binding, confirmed by sema
   bool operator==(const DeclName&) const = default;
 };
 
@@ -857,6 +858,22 @@ private:
     bool in_class = it.parent != none && out_.items[it.parent].kind == ItemKind::class_def;
     f.definition = it.has_body() || !(f.type || (is_extern && !has_init) || (in_class && is_static && !is_inline));
     declarators(k, s, limit, f);
+    // Keep the possible introduction after the declarator ordinals.
+    if (in_class && !f.friend_ && !it.names.empty() && !it.template_depth) {
+      for (u32 j = s; j + 2 < limit; ++j) {
+        Tk d = kind(j);
+        if (is_class_key(d) && kind(j + 1) == Tk::identifier &&
+            kind(j + 2) != Tk::coloncolon && kind(j + 2) != Tk::less) {
+          add(k, std::string(name(j + 1)), j + 1, name_flag::type);
+          it.names.back().member_elaborated_candidate = true;
+          break;
+        }
+        if (d != Tk::kw_const && d != Tk::kw_volatile && d != Tk::kw_typedef &&
+            d != Tk::kw_static && d != Tk::kw_inline && d != Tk::kw_extern &&
+            d != Tk::kw_constexpr && d != Tk::kw_mutable)
+          break;
+      }
+    }
   }
 
   // The declarator-ids of the init-declarators in [s, limit): split at depth-0 commas; template
