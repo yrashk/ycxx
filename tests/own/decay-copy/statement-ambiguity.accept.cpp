@@ -36,3 +36,9 @@ int arrow_assignment(int input) {
     if (auto(lookup)(int(input))->value = 3) return 1;
     return 0;
 }
+
+int& get(int);
+void ordinary_postfix_statements(int input) {
+    auto(lookup)(int(input))->value = 3;
+    auto(get)(input)++;
+}

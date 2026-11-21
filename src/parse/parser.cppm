@@ -257,6 +257,29 @@ public:
     return next == close && groups == 0;
   }
 
+  // A trailing return type can start with a keyword or a name denoting a type.
+  bool trailing_return_type_ahead(u32 next) {
+    return starts_decl_specifier(kind(next)) || qualified_ahead(next) || transform_trait_ahead(next) ||
+           (kind(next) == Tk::identifier && s_->class_name(name_of(tok(next))).has_value());
+  }
+
+  // In a statement a second parenthesized group can be a direct initializer.
+  // Otherwise it must be a parameter clause followed by declarator syntax.
+  bool grouped_auto_statement_suffix(u32 open) {
+    const u32 after = past_parentheses(open);
+    switch (kind(after)) {
+    case Tk::semi: case Tk::comma:
+      return true;
+    case Tk::equal: case Tk::l_brace: case Tk::kw_noexcept: case Tk::kw_const: case Tk::kw_volatile:
+    case Tk::amp: case Tk::ampamp:
+      return params_ahead(open);
+    case Tk::arrow:
+      return params_ahead(open) && trailing_return_type_ahead(after + 1);
+    default:
+      return false;
+    }
+  }
+
   // Whether a declaration starts here: a decl-specifier keyword, or a name that denotes a class
   // ([stmt.ambig]: what can be a declaration is one). In a `statement`, a member of a dependent
   // class names a type only after `typename` ([temp.res.general]/4-5); a namespace-scope or member
@@ -275,7 +298,11 @@ public:
         if (kind(j) == Tk::r_paren && --depth == 0) break;
       }
       Tk after = kind(j + 1);
-      if (is(Tk::kw_auto) && !grouped_auto_declarator_ahead(j, statement)) return false;
+      if (is(Tk::kw_auto)) {
+        if (!grouped_auto_declarator_ahead(j, statement)) return false;
+        if (statement && after == Tk::l_paren && kind(past_parentheses(j + 1)) != Tk::r_paren)
+          return grouped_auto_statement_suffix(j + 1);
+      }
       return after == Tk::semi || after == Tk::equal || after == Tk::comma || after == Tk::l_square ||
              after == Tk::l_paren || after == Tk::l_brace;
     }
@@ -4480,9 +4507,7 @@ public:
       case Tk::l_brace: if (depth == 0) return true; ++depth; break;
       case Tk::arrow:
         if (grouped_auto && depth == 0) {
-          if (!parameter_clause ||
-              (kind(j + 1) == Tk::identifier && !qualified_ahead(j + 1) && !transform_trait_ahead(j + 1) &&
-               !s_->class_name(name_of(tok(j + 1)))))
+          if (!parameter_clause || !trailing_return_type_ahead(j + 1))
             return false;
           trailing_return = true;
         }
