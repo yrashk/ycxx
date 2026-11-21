@@ -798,12 +798,22 @@ class Gen {
     if (is<ast::InitList>(e)) {
       bool array = cls(p.type) == TypeClass::array;
       // A class's elements are its direct bases, then its members ([dcl.init.aggr]/2).
-      std::vector<ast::EntityId> bases = array ? std::vector<ast::EntityId>{} : facts_.bases_of(facts_.class_entity(p.type));
+      ast::EntityId owner = array ? ast::EntityId::none : facts_.class_entity(p.type);
+      std::vector<ast::EntityId> bases = array ? std::vector<ast::EntityId>{} : facts_.bases_of(owner);
       uint32_t i = 0;
       for (ast::Child c : ast_.children(get<ast::InitList>(e).elems)) {
         At x = child(e, c);
-        if (i < bases.size()) initialize(subobject(p, ir::Step::base, std::to_underlying(bases[i]), info(x).type), x, zeroed);
-        else initialize(subobject(p, array ? ir::Step::elem : ir::Step::field, i - uint32_t(bases.size()), info(x).type), x, zeroed);
+        if (i < bases.size()) {
+          initialize(subobject(p, ir::Step::base, std::to_underlying(bases[i]), info(x).type), x, zeroed);
+        } else {
+          uint32_t index = i - uint32_t(bases.size());
+          ast::QualType type = info(x).type;
+          // A reference initializer is a glvalue of the referent's type. The destination
+          // field's reference type tells initialize to store its address ([dcl.init.ref]).
+          if (!array)
+            if (auto field = facts_.field_type(owner, index); field && facts_.is_reference(*field)) type = *field;
+          initialize(subobject(p, array ? ir::Step::elem : ir::Step::field, index, type), x, zeroed);
+        }
         ++i;
       }
       return;

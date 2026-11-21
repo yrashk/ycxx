@@ -6282,7 +6282,10 @@ void Program::special_members(u32 item, EntityId cls, sema::ClassRec& rec,
   if (implicit_copy && rec.defaulted_copy == sema::CopyState::ordinary) {
     bool nontrivial = false;
     for (QualType t : subobjects) {
-      if (types.is_reference(t)) continue;
+      if (types.is_reference(t)) {
+        rec.copy_deleted |= types.rec(t).rvalue_ref;
+        continue;
+      }
       auto [n, del] = classes_.copy_of(t);
       rec.copy_deleted = rec.copy_deleted || del;
       nontrivial = nontrivial || n;

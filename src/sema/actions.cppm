@@ -1637,6 +1637,14 @@ public:
   void static_value(u32 local, std::optional<ConstId> value) { q_->static_local(locals_[local].entity, locals_[local].type, value); }
   // An array of unknown bound gets its bound from its initializer ([dcl.array]/8).
   void set_local_type(u32 local, QualType t) { locals_[local].type = t; }
+  void set_binding_type(u32 local, QualType referenced) {
+    if (types().is_reference(referenced)) {
+      locals_[local].type = referenced;
+      locals_[local].flags |= ast::local_flag::binding_reference_member;
+    } else {
+      locals_[local].type = types().lvalue_ref(referenced);
+    }
+  }
   // A local usable in constant expressions ([expr.const]): constexpr, or const integral with a
   // constant initializer; its value.
   void set_local_value(u32 local, ConstId v) { local_values_[local] = v; }
@@ -1645,7 +1653,9 @@ public:
   const ast::LocalRec& local(u32 i) const { return locals_[i]; }
   // [dcl.type.decltype]/1: a binding gives its referenced type; its reference slot is internal.
   QualType local_declared_type(const ast::LocalRec& local) {
-    return local.flags & ast::local_flag::structured_binding ? types().referee(local.type) : local.type;
+    if ((local.flags & ast::local_flag::structured_binding) && !(local.flags & ast::local_flag::binding_reference_member))
+      return types().referee(local.type);
+    return local.type;
   }
   std::span<const ast::LocalRec> locals() const { return locals_; }
   // After the scope of a requires-expression ends, its parameters leave no runtime locals.
@@ -4052,6 +4062,14 @@ public:
       QualType source = cr->defaulted_copy_const ? types().add_cv(ut, Cv::const_) : ut;
       QualType p = types().lvalue_ref(source);
       cands.push_back({cr->copy_ctor, types().function(void_, std::span(&p, 1), false, LangLinkage::cxx), true, cr->copy_deleted});
+      // [class.copy.ctor]: a class whose implicit copy is deleted can still use a trivial
+      // implicit move and transfer its representation. General implicit move is tracked in #244.
+      if (cr->copy_deleted && cr->move_usable && !cr->move_nontrivial && args.size() == 1 &&
+          args[0].cat() == ValueCategory::xvalue && same_unqualified(args[0].type(), ut) &&
+          object_cv(args[0].type()) == Cv::none) {
+        QualType move = types().rvalue_ref(ut);
+        cands.push_back({EntityId::none, types().function(void_, std::span(&move, 1), false, LangLinkage::cxx), true, false});
+      }
     }
     if (!cr->user_ctors && !copy_init) cands.push_back({EntityId::none, types().function(void_, {}, false, LangLinkage::cxx), true, false});
     auto chosen = resolve(cands, args, begin, no_name(), std::nullopt, ut);
@@ -4080,7 +4098,7 @@ public:
     if (k.pattern) demands.push_back({k.entity, ast::Loc{item_, loc_base_ + begin}});
     TypeRec fr = types().rec(k.type);
     if (cr->defaulted_copy != CopyState::ordinary) {
-      const bool defaulted = k.entity == EntityId::none ? !fr.params.empty() :
+      const bool defaulted = k.entity == EntityId::none ? !fr.params.empty() && !types().rec(fr.params[0]).rvalue_ref :
           std::ranges::contains(cr->defaulted_copy_declarations, k.entity);
       if (defaulted) {
         if (cr->defaulted_copy != CopyState::trivial) {
@@ -4259,9 +4277,15 @@ public:
       Ex inner = extended({m->object.id, e.begin + m->object.at, e.end, {}});
       return node(ast::Member{m->info, m->member, m->field, 0, 0, at(inner, e.begin)}, e.begin, e.end, m->info);
     }
-    if (auto m = as<ast::OrderedBinary>(e); m && m->op == ast::OrderedOp::dot_star) {
-      Ex inner = extended({m->lhs.id, e.begin + m->lhs.at, e.end, {}});
-      return node(ast::OrderedBinary{m->info, m->op, at(inner, e.begin), m->rhs}, e.begin, e.end, m->info);
+    if (auto m = as<ast::OrderedBinary>(e)) {
+      if (m->op == ast::OrderedOp::dot_star) {
+        Ex inner = extended({m->lhs.id, e.begin + m->lhs.at, e.end, {}});
+        return node(ast::OrderedBinary{m->info, m->op, at(inner, e.begin), m->rhs}, e.begin, e.end, m->info);
+      }
+      if (m->op == ast::OrderedOp::comma) {
+        Ex inner = extended({m->rhs.id, e.begin + m->rhs.at, e.end, {}});
+        return node(ast::OrderedBinary{m->info, m->op, m->lhs, at(inner, e.begin)}, e.begin, e.end, m->info);
+      }
     }
     return e;
   }
@@ -5773,6 +5797,112 @@ public:
     QualType type = types().add_cv(object_unqualified(array), Types::cv(declared));
     if (!source.glvalue()) source = materialize(source, array, false);
     return std::pair{type, convert_node(source, ast::ConversionKind::array_copy, type)};
+  }
+
+  // [dcl.struct.bind]/7: a complete std::tuple_size<E> with any member named value takes
+  // precedence, even if its value could not be used to obtain the size.
+  bool reject_tuple_binding(QualType type, u32 at_) {
+    auto std_scope = scope_member(global_scope(), ins().names.intern("std"));
+    if (!std_scope || !std_scope->ns) return false;
+    auto tmpl = namespace_type_template(*std_scope->ns, ins().names.intern("tuple_size"));
+    if (!tmpl) return false;
+    const TemplateArg arg = templates().type_arg(type);
+    auto size = class_template_id(*tmpl, std::span(&arg, 1), at_);
+    if (!size) return true;  // a diagnosed template-id error
+    if (!types().is_class(*size) || !find_member(types().class_of(*size), ins().names.intern("value"))) return false;
+    diag(at_, Diag::binding_tuple_unsupported, type);
+    return true;
+  }
+
+  // [class.dtor]: the destructor of the hidden object or materialized temporary is potentially
+  // invoked. A reference to an existing object does not itself invoke a destructor.
+  bool check_binding_destructor(QualType type, u32 at_) {
+    EntityId entity = types().class_of(type);
+    const ClassRec* record = class_rec(entity);
+    if (!record || record->destructor == EntityId::none) return true;
+    if (!record->destructor_usable) {
+      diag(at_, Diag::binding_unusable_destructor, type);
+      return false;
+    }
+    return check_access(entity, record->destructor, w_->entities.rec(record->destructor).name, at_);
+  }
+
+  // Follow the glvalue designator through the operations in [class.temporary]. A temporary
+  // reached through a conditional branch or array subscript needs additional lowering (#157).
+  bool check_binding_lifetime(Ex e, bool unsupported_path = false) {
+    auto check = [&](Child child, bool unsupported = false) {
+      return check_binding_lifetime({child.id, e.begin + child.at, e.end, {}}, unsupported_path || unsupported);
+    };
+    if (auto m = as<ast::Materialize>(e)) {
+      if (unsupported_path) {
+        diag(e.begin, Diag::binding_temporary_lifetime);
+        return false;
+      }
+      return !types().is_class(m->info.type) || check_binding_destructor(m->info.type, e.begin);
+    }
+    if (auto p = as<ast::Paren>(e)) return check(p->operand);
+    if (auto m = as<ast::Member>(e); m && !m->arrow && !m->reference) return check(m->object);
+    if (auto c = as<ast::ImplicitConversion>(e); c &&
+        (c->conversion == ast::ConversionKind::derived_to_base || c->conversion == ast::ConversionKind::base_to_derived ||
+         c->conversion == ast::ConversionKind::qualification))
+      return check(c->operand);
+    if (auto b = as<ast::OrderedBinary>(e)) {
+      if (b->op == ast::OrderedOp::dot_star) return check(b->lhs);
+      if (b->op == ast::OrderedOp::comma) return check(b->rhs);
+    }
+    if (auto c = as<ast::Conditional>(e)) return check(c->then_, true) && check(c->else_, true);
+    if (auto s = as<ast::Subscript>(e)) {
+      Ex base{s->base.id, e.begin + s->base.at, e.end, {}};
+      if (auto c = as<ast::ImplicitConversion>(base); c && c->conversion == ast::ConversionKind::array_to_pointer)
+        return check_binding_lifetime({c->operand.id, base.begin + c->operand.at, e.end, {}}, true);
+    }
+    return true;
+  }
+
+  // [dcl.struct.bind]/1, /8: initialize one hidden object or reference and project its data
+  // members in declaration order. This slice uses only addressable public fields of a root class.
+  std::optional<std::pair<QualType, const ClassRec*>> class_binding(QualType declared, const Ex& source, u64 names, u32 at_) {
+    if (!source.ok()) return std::nullopt;
+    if (dependent(source)) {
+      diag(at_, Diag::binding_unsupported_type, source.type());
+      return std::nullopt;
+    }
+    auto type = deduce_placeholder(declared, source, source.begin);
+    if (!type) return std::nullopt;
+    QualType object = types().referee(*type);
+    if (reject_tuple_binding(object, at_)) return std::nullopt;
+    if (!require_complete(object, at_) || !require_supported_virtual_layout(object, at_)) return std::nullopt;
+    EntityId entity = types().class_of(object);
+    const ClassRec* record = class_rec(entity);
+    if (!record || record->union_ || record->closure || record->layout_requires_virtual_support || !record->bases.empty() ||
+        w_->entities.rec(entity).templ != EntityId::none) {
+      diag(at_, Diag::binding_unsupported_type, object);
+      return std::nullopt;
+    }
+    if (names != record->fields.size()) {
+      diag(at_, Diag::binding_member_arity, names, object, u64(record->fields.size()));
+      return std::nullopt;
+    }
+    for (const FieldRec& field : record->fields) {
+      if (field.name == no_name()) {
+        diag(at_, Diag::binding_unsupported_type, object);
+        return std::nullopt;
+      }
+      if (record->access_of(field.entity) != ast::Access::public_) {
+        diag(at_, Diag::binding_member_access, field.name);
+        return std::nullopt;
+      }
+      if (field.bit_width) {
+        diag(at_, Diag::binding_bit_field, field.name);
+        return std::nullopt;
+      }
+    }
+    if (!types().is_reference(*type) || !source.glvalue()) {
+      if (!check_binding_destructor(object, at_)) return std::nullopt;
+    } else if (!check_binding_lifetime(source)) {
+      return std::nullopt;
+    }
+    return std::pair{*type, record};
   }
 
   // [dcl.type.decltype]/1: an unparenthesized id-expression or member access names its entity's

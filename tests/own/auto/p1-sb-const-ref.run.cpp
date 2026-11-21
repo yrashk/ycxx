@@ -1,7 +1,6 @@
 // θ step 1 (#279), spec-only: `const auto& [a, b]` binds to the object as const: the names refer to its
 // members and decltype gives the const-qualified member type ([dcl.struct.bind],
 // [dcl.type.decltype]).
-// XFAIL: ycxx structured bindings, #285
 template<class A, class B> struct same { static constexpr bool value = false; };
 template<class A> struct same<A, A> { static constexpr bool value = true; };
 

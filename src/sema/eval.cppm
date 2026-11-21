@@ -37,6 +37,10 @@ public:
       const ClassRec* r = q.classes().find(c);
       return r && field < r->fields.size() ? r->fields[field].bit_width : 0;
     };
+    field_type = [&q](EntityId c, std::uint32_t field) -> std::optional<QualType> {
+      const ClassRec* r = q.classes().find(c);
+      return r && field < r->fields.size() ? std::optional(r->fields[field].type) : std::nullopt;
+    };
   }
   ConstId string_address(ConstId s) { return w_->values.address({}, s, 0); }
   bool is_constexpr(EntityId f) { return Sema::closure_member(*w_, f) || q_->is_constexpr(f); }
