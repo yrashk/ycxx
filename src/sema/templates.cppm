@@ -356,6 +356,8 @@ public:
         result = *is_union == (op == ast::DepOp::is_union);
       }
       break;
+    // The token-owning replay checks completeness and diagnoses a concrete operand.
+    case ast::DepOp::is_trivially_copyable: return std::nullopt;
     case ast::DepOp::is_same:
     case ast::DepOp::logical_not: std::unreachable();
     }
@@ -483,6 +485,7 @@ public:
       case ast::DepOp::is_member_pointer:
       case ast::DepOp::is_member_object_pointer:
       case ast::DepOp::is_member_function_pointer:
+      case ast::DepOp::is_trivially_copyable:
       case ast::DepOp::is_object: {
         auto operand = substitute_arg(ins().seqs.at(op.operands, 0), b);
         if (!operand) return std::nullopt;

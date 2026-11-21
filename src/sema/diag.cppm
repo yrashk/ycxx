@@ -405,10 +405,13 @@ constexpr bool is_limit(engine::DiagId id) {
   message m = message_of(*d);
   return std::string_view(m.text).contains("not supported");
 }
+constexpr bool is_copyability_failure(engine::DiagId id) {
+  return id == diag_id(Diag::trivial_copyability_incomplete) || id == diag_id(Diag::trivial_copyability_unsupported);
+}
 // Whether a diagnostic stays an error where a substitution failure means "not satisfied": a limit
 // of ycxx's, an atomic constraint that is not a `bool` constant ([temp.constr.atomic]/3), or a
 // return-type-requirement that names no concept, ill-formed whatever the arguments. An incomplete
-// class operand of the direct trivial copyability trait is outside the trait's domain.
+// class operand of the trivial copyability trait is outside the trait's domain.
 constexpr bool survives_substitution(engine::DiagId id) {
   return is_limit(id) || id == diag_id(Diag::constraint_not_bool) || id == diag_id(Diag::constraint_not_constant) ||
          id == diag_id(Diag::not_a_concept) || id == diag_id(Diag::trivial_copyability_incomplete);

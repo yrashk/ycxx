@@ -2155,7 +2155,7 @@ public:
     if (!c.ok()) return std::nullopt;
     sema::Evaluated v = sema::Evaluator(*s_, questions()).evaluate(c);
     if (!v.value) {
-      s_->diag(e.begin, Diag::not_constant, v.reason);
+      if (!v.copyability_failure) s_->diag(e.begin, Diag::not_constant, v.reason);
       return std::nullopt;
     }
     return *v.value;
@@ -2451,7 +2451,7 @@ public:
     sema::Evaluated r = sema::Evaluator(*s_, questions()).evaluate(v);
     if (r.dependent) return Truth::dependent;
     if (!r.value) {
-      s_->diag(at, Diag::constraint_not_constant, r.reason);
+      if (!r.copyability_failure) s_->diag(at, Diag::constraint_not_constant, r.reason);
       return Truth::invalid;
     }
     return s_->world().values.as_signed(*r.value) != 0 ? Truth::yes : Truth::no;
@@ -3275,7 +3275,10 @@ public:
           }
           angle_ = saved;
           if (!expect(Tk::r_paren) || !ok) return {NodeId::none, begin, pos()};
-          return s_->trait_expr(tr->trait, args, begin, pos());
+          Ex result = s_->trait_expr(tr->trait, args, begin, pos());
+          if (tr->trait == lex::TypeTrait::is_trivially_copyable && s_->dependent(result))
+            ++deferred_argument_checks_;  // Even an alias that erases the argument must replay it.
+          return result;
         }
       if (qualified_ahead()) return qualified_id(begin);
       // `X<args>(…)` and `X<args>{…}` for a class template X ([expr.type.conv]).
@@ -4371,7 +4374,7 @@ public:
     } else if (v.dependent) {
       s_->diag(e.begin, Diag::not_constant, sema::reason_unsupported);  // nothing outside a template depends
     } else if (!v.value) {
-      s_->diag(e.begin, Diag::not_constant, v.reason);
+      if (!v.copyability_failure) s_->diag(e.begin, Diag::not_constant, v.reason);
     } else if (!s_->in_template_definition() && s_->world().values.rec(*v.value).bits == 0) {
       if (message == sema::ConstId::none) s_->diag(begin, Diag::static_assert_failed);
       else s_->diag(begin, Diag::static_assert_failed_message, message);

@@ -88,6 +88,8 @@ struct Evaluated {
   // The expression is value-dependent ([temp.dep.constexpr]): it is evaluated when the template is
   // instantiated. Also set when instantiation gave up at its limit, which was diagnosed already.
   bool dependent = false;
+  // A demanded specialization diagnosed its copyability at the original trait spelling.
+  bool copyability_failure = false;
 };
 
 class Evaluator {
@@ -160,6 +162,8 @@ private:
     Host host{q_, this};
     interp::Config config{.enum_layout = [&facts](EntityId e) { return facts.constant_enum_layout(e); }};
     interp::Outcome out = interp::evaluate(host, in, s_->world().target, body->body, EntityId::none, {}, std::move(config)).run();
+    if (out.status != interp::Outcome::Status::value && host.copyability_failure)
+      return {std::nullopt, reason_unsupported, false, false, true};
     if (out.status != interp::Outcome::Status::value && q_->instantiation_gave_up())
       return {std::nullopt, reason_unsupported, false, true};
     if (out.status != interp::Outcome::Status::value) {
@@ -239,11 +243,16 @@ private:
   struct Host {
     Questions* q;
     Evaluator* e;
+    bool copyability_failure = false;
     interp::ready<interp::Callee> body(EntityId f) {
       if (auto c = e->closure_callee(f)) return {*c};
       return {q->function_ir(f)};
     }
-    interp::ready<std::optional<interp::GlobalVar>> global(EntityId v) { return {q->global(v)}; }
+    interp::ready<std::optional<interp::GlobalVar>> global(EntityId v) {
+      auto value = q->global(v);
+      copyability_failure |= q->copyability_instantiation_failed(v);
+      return {value};
+    }
     bool stop_requested() const { return false; }  // until the scheduler has stop tokens (#15)
   };
 
