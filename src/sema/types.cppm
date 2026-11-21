@@ -84,7 +84,7 @@ public:
   const ast::Target& target() const { return *target_; }
 
   QualType builtin(Builtin b) { return ast::builtin(*ins_, b); }
-  QualType pointer(QualType pointee) { return ast::pointer_to(*ins_, ordinary_indirection_target(pointee)); }
+  QualType pointer(QualType pointee) { return ast::pointer_to(*ins_, pointee); }
   bool valid_member_owner(QualType owner) const { return is_class(owner) || is_dependent(owner); }
   bool valid_member_type(QualType member) const { return !is_void(member) && !is_reference(member); }
   // [dcl.mptr]: the nested-name-specifier names a possibly incomplete class; no member of that
@@ -116,8 +116,18 @@ public:
   }
   QualType class_type(EntityId c) { return ins_->intern_type(ast::TClass{c}); }
   QualType enum_type(EntityId e) { return ins_->intern_type(ast::TEnum{e}); }
-  QualType lvalue_ref(QualType t) { return ast::lvalue_ref_to(*ins_, ordinary_indirection_target(t)); }
-  QualType rvalue_ref(QualType t) { return ast::rvalue_ref_to(*ins_, ordinary_indirection_target(t)); }
+  QualType lvalue_ref(QualType t) { return ast::lvalue_ref_to(*ins_, t); }
+  QualType rvalue_ref(QualType t) { return ast::rvalue_ref_to(*ins_, t); }
+  // [conv.fctptr]: only a nonthrowing function can lose its exception specification.
+  bool function_pointer_conversion(QualType from, QualType to) {
+    from = canonical(from);
+    to = canonical(to);
+    if (!is_function(from) || !is_function(to) || !rec(from).fn_noexcept || rec(to).fn_noexcept) return false;
+    auto source = ins_->types.get<ast::TFunction>(from);
+    const auto target = ins_->types.get<ast::TFunction>(to);
+    source.noexcept_ = target.noexcept_;
+    return ins_->intern_type(source) == to;
+  }
   QualType template_param(u16 depth, u16 index, bool pack = false) {
     return ins_->intern_type(ast::TTemplateParam{depth, index, u8(pack)});
   }
@@ -336,19 +346,6 @@ public:
   Fp128 fp(QualType q) const { return ins_->fp(q); }
 
 private:
-  // Keep the existing type of ordinary function pointers and references until #219 tracks
-  // exception specifications on the functions they can designate. Member pointers retain
-  // their member function's exception specification, including through a type alias.
-  QualType ordinary_indirection_target(QualType t) {
-    QualType c = ins_->types.canon(t);
-    if (!ins_->types.is<ast::TFunction>(c)) return t;
-    auto f = ins_->types.get<ast::TFunction>(c);
-    if (f.noexcept_ == ConstId::none || !ins_->values.is<ast::VInt>(f.noexcept_) ||
-        ins_->values.get<ast::VInt>(f.noexcept_).bits.lo == 0) return t;
-    f.noexcept_ = ast::bool_value(*ins_, false);
-    return ins_->intern_type(f);
-  }
-
   std::string spell(QualType q, std::string inner) const {
     TypeRec r = rec(q);
     Cv c = cv(ins_->canonical(q));
@@ -942,8 +939,8 @@ private:
   bool has_virtual_layouts_ = false;
 };
 
-// The ordinary single-object allocation functions implicitly declared at global scope
-// ([basic.stc.dynamic]). Their types use the target's size_t, like sizeof.
+// The ordinary implicit allocation signatures at global scope ([basic.stc.dynamic]).
+// The single-object and array operators share these shapes and the target's size_t.
 enum class AllocationFunction : u8 {
   allocate, deallocate, deallocate_sized, allocate_aligned, deallocate_aligned, deallocate_sized_aligned
 };
@@ -952,12 +949,18 @@ constexpr bool allocates(AllocationFunction f) {
   return f == AllocationFunction::allocate || f == AllocationFunction::allocate_aligned;
 }
 
-constexpr std::string_view allocation_name(AllocationFunction f) {
-  return allocates(f) ? "operator new" : "operator delete";
+constexpr std::string_view allocation_name(AllocationFunction f, bool array = false) {
+  if (allocates(f)) return array ? "operator new[]" : "operator new";
+  return array ? "operator delete[]" : "operator delete";
+}
+
+constexpr bool is_deallocation_name(std::string_view n) {
+  return n == allocation_name(AllocationFunction::deallocate) || n == allocation_name(AllocationFunction::deallocate, true);
 }
 
 constexpr bool is_allocation_name(std::string_view n) {
-  return n == allocation_name(AllocationFunction::allocate) || n == allocation_name(AllocationFunction::deallocate);
+  return n == allocation_name(AllocationFunction::allocate) || n == allocation_name(AllocationFunction::allocate, true) ||
+         is_deallocation_name(n);
 }
 
 constexpr bool has_deallocation_size(AllocationFunction f) {
@@ -998,7 +1001,7 @@ struct World {
 
   // The interners give repeated requests and written declarations the same identity. Construct
   // the implicit declaration on demand, so a unit that never names it needs no shared state.
-  ast::DeclSema allocation_function(AllocationFunction f) {
+  ast::DeclSema allocation_function(AllocationFunction f, bool array = false) {
     QualType size = types.builtin(target.size_type);
     QualType void_type = types.builtin(Builtin::void_);
     QualType void_pointer = types.pointer(void_type);
@@ -1010,7 +1013,7 @@ struct World {
     QualType type = types.function(allocating ? void_pointer : void_type, std::span(params).first(count),
                                    false, LangLinkage::cxx, Cv::none, ast::RefQual::none, !allocating);
     ast::DeclSema d{};
-    d.entity = entities.entity({.kind = EntityKind::function, .name = ins.names.intern(allocation_name(f)), .type = type});
+    d.entity = entities.entity({.kind = EntityKind::function, .name = ins.names.intern(allocation_name(f, array)), .type = type});
     d.type = type;
     d.kind = ast::DeclKind::function;
     d.linkage = ast::Linkage::external;
@@ -1029,10 +1032,11 @@ struct World {
   };
 
   bool matches_allocation_function(std::string_view name, QualType written) {
+    const bool array = name.ends_with("[]");
     const auto arity = types.rec(written).params.size();
     return std::ranges::any_of(allocation_functions, [&](AllocationFunction f) {
-      return allocation_name(f) == name && arity == 1u + has_deallocation_size(f) + allocation_has_alignment(f) &&
-             types.canonical(allocation_function(f).type) == types.canonical(written);
+      return allocation_name(f, array) == name && arity == 1u + has_deallocation_size(f) + allocation_has_alignment(f) &&
+             types.canonical(allocation_function(f, array).type) == types.canonical(written);
     });
   }
 

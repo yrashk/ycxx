@@ -1070,8 +1070,16 @@ public:
     return type;
   }
 
-  static sema::AllocationFunction allocation_operator(Tk k) {
-    return k == Tk::kw_new ? sema::AllocationFunction::allocate : sema::AllocationFunction::deallocate;
+  // The allocation operator's keyword and optional empty brackets follow `operator`.
+  std::string_view allocation_operator_name() {
+    const auto f = is(Tk::kw_new) ? sema::AllocationFunction::allocate : sema::AllocationFunction::deallocate;
+    bump();
+    const bool array = is(Tk::l_square) && kind(1) == Tk::r_square;
+    if (array) {
+      bump();
+      bump();
+    }
+    return sema::allocation_name(f, array);
   }
 
   Level level(bool abstract, bool& ok, bool conversion = false) {
@@ -1120,8 +1128,7 @@ public:
       l.named = true;
       skip_attributes();
     } else if (!abstract && is(Tk::kw_operator)) {
-      // An operator-function-id ([over.oper.general]): `operator@`, named as the splitter spells
-      // it. Only the ordinary global single-object forms of the allocation operators are supported.
+      // An operator-function-id ([over.oper.general]): `operator@`, named as the splitter spells it.
       l.name_at = pos();
       bump();
       std::string spelled = "operator";
@@ -1130,13 +1137,7 @@ public:
         bump();
         bump();
       } else if (is(Tk::kw_new) || is(Tk::kw_delete)) {
-        spelled = sema::allocation_name(allocation_operator(kind()));
-        if (kind(1) == Tk::l_square && kind(2) == Tk::r_square) {
-          s_->diag(pos(), Diag::not_supported, kind());  // operator new[] and operator delete[]
-          ok = false;
-          return l;
-        }
-        bump();
+        spelled = allocation_operator_name();
       } else if (lex::is_punctuator(kind()) && overloadable(kind())) {
         spelled += lex::spelling(kind());
         bump();
@@ -1511,13 +1512,13 @@ public:
         bool allocation = sema::is_allocation_name(name);
         // [basic.stc.dynamic.deallocation]: a deallocation function without an explicit
         // exception specification is non-throwing.
-        bool nonthrowing = name == sema::allocation_name(sema::AllocationFunction::deallocate) && !s->has_noexcept;
+        bool nonthrowing = sema::is_deallocation_name(name) && !s->has_noexcept;
         const bool keep_named_exception = named_exception == NamedExceptionSpec::defaulted_assignment && name == "operator=";
         if (s->has_noexcept && (allocation || keep_named_exception || member_pointer_to_suffix(l) ||
                                 (spells_type && !l.inner)))
           nonthrowing = noexcept_value(s->noexcept_condition, d.ok);
-        else if (d.ok && s->noexcept_condition && !s_->templated())
-          noexcept_value(s->noexcept_condition, d.ok);
+        else if (d.ok && s->has_noexcept && !s_->templated())
+          nonthrowing = noexcept_value(s->noexcept_condition, d.ok);
         t = s_->types().function(t, ps, s->variadic, linkage_, s->cv, s->ref, nonthrowing);
         fn = &*s;
       } else if (!s->unknown_bound && !s->dependent_bound && s->bound == 0) {
@@ -3266,15 +3267,27 @@ public:
           bump();
           std::vector<QualType> args;
           bool ok = true;
+          std::optional<u32> pack_at;
           int saved = std::exchange(angle_, 0);
-          for (int i = 0; i < tr->arity; ++i) {
+          // In a variadic trait, `...` applies to the operand, including inside a parameter declarator.
+          const bool saved_packs = std::exchange(packs_in_declarators_, packs_in_declarators_ && !tr->variadic);
+          for (int i = 0; i < tr->arity || (ok && tr->variadic && is(Tk::comma)); ++i) {
             if (i > 0 && !expect(Tk::comma)) ok = false;
             auto t = ok ? type_id() : std::nullopt;
             if (!t) ok = false;
             else args.push_back(*t);
+            if (ok && tr->variadic && is(Tk::ellipsis)) {
+              if (!pack_at) pack_at = pos();
+              bump();
+            }
           }
+          packs_in_declarators_ = saved_packs;
           angle_ = saved;
           if (!expect(Tk::r_paren) || !ok) return {NodeId::none, begin, pos()};
+          if (pack_at) {
+            s_->diag(*pack_at, Diag::constructibility_pack);
+            return {NodeId::none, begin, pos()};
+          }
           Ex result = s_->trait_expr(tr->trait, args, begin, pos());
           if (tr->trait == lex::TypeTrait::is_trivially_copyable && s_->dependent(result))
             ++deferred_argument_checks_;  // Even an alias that erases the argument must replay it.
@@ -3385,15 +3398,8 @@ public:
   }
   Ex allocation_function_id(u32 begin) {
     bump();  // operator
-    Tk k = kind();
-    bump();
-    if (is(Tk::l_square) && kind(1) == Tk::r_square) {
-      bump();
-      bump();
-      s_->diag(begin, Diag::not_supported, k);
-      return {NodeId::none, begin, pos()};
-    }
-    return s_->allocation_name_expr(allocation_operator(k), begin, pos());
+    const auto name = allocation_operator_name();
+    return s_->allocation_name_expr(name, begin, pos());
   }
 
   static bool simple_type_keyword(Tk k) {

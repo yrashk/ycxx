@@ -346,6 +346,10 @@ enum class Diag : std::uint32_t {
   trivial_copyability_dependent [[=message{Severity::error, "dependent operands of '__is_trivially_copyable' are not supported yet"}]],
   trivial_copyability_incomplete [[=message{Severity::error, "incomplete class type '{0:t}' cannot be queried by '__is_trivially_copyable'"}]],
   trivial_copyability_unsupported [[=message{Severity::error, "trivial copyability of '{0:t}' is not supported yet"}]],
+  constructibility_dependent [[=message{Severity::error, "dependent operands of '__is_constructible' are not supported yet"}]],
+  constructibility_incomplete [[=message{Severity::error, "incomplete type '{0:t}' cannot be queried by '__is_constructible'"}]],
+  constructibility_unsupported [[=message{Severity::error, "constructibility of '{0:t}' with these argument types is not supported yet"}]],
+  constructibility_pack [[=message{Severity::error, "pack expansions in '__is_constructible' are not supported yet"}]],
   class_alignment_not_constant [[=message{Severity::error, "a class alignment requires an integral constant expression or a type"}]],
   class_alignment_invalid [[=message{Severity::error, "a class alignment must be zero or a positive power of two"}]],
   class_alignment_unsupported [[=message{Severity::error, "class alignment greater than 16 bytes is not supported yet"}]],
@@ -418,10 +422,11 @@ constexpr bool is_copyability_failure(engine::DiagId id) {
 // Whether a diagnostic stays an error where a substitution failure means "not satisfied": a limit
 // of ycxx's, an atomic constraint that is not a `bool` constant ([temp.constr.atomic]/3), or a
 // return-type-requirement that names no concept, ill-formed whatever the arguments. An incomplete
-// class operand of the trivial copyability trait is outside the trait's domain.
+// operand outside a type trait's domain also stays an error.
 constexpr bool survives_substitution(engine::DiagId id) {
   return is_limit(id) || id == diag_id(Diag::constraint_not_bool) || id == diag_id(Diag::constraint_not_constant) ||
-         id == diag_id(Diag::not_a_concept) || id == diag_id(Diag::trivial_copyability_incomplete);
+         id == diag_id(Diag::not_a_concept) || id == diag_id(Diag::trivial_copyability_incomplete) ||
+         id == diag_id(Diag::constructibility_incomplete);
 }
 
 constexpr std::string_view diag_name(Diag d) {
