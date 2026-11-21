@@ -5282,7 +5282,8 @@ private:
         if (fn && prior_type != current_type) {
           const sema::TypeRec& a = types.rec(prior_type);
           const sema::TypeRec& c = types.rec(current_type);
-          if (a.params == c.params && a.variadic == c.variadic && a.inner == c.inner)
+          if (a.params == c.params && a.variadic == c.variadic && a.inner == c.inner &&
+              a.fn_noexcept == c.fn_noexcept)
             s_.diag(d.name_at, Diag::linkage_conflict, d.name);
           else if (a.params == c.params && a.variadic == c.variadic)
             s_.diag(d.name_at, Diag::conflicting_declaration, d.name);
