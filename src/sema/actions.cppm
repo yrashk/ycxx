@@ -3317,6 +3317,12 @@ public:
     }
     auto m = *as<ast::Member>(callee);
     const Bound& bound = bound_.at(std::to_underlying(callee.id));
+    if (std::ranges::any_of(bound.cands, [&](const MemberDeclRec* candidate) {
+          return candidate->is_virtual && types().rec(candidate->type).fn_ref != ast::RefQual::none;
+        })) {
+      diag(paren_at, Diag::virtual_ref_call);
+      return fail;
+    }
     std::optional<Ex> object = bound.object;
     // The object's cv-qualifiers, which a non-static member function must have ([class.this]).
     std::optional<Cv> object_cv;
@@ -3859,12 +3865,14 @@ public:
   // the class's constructors and, where they are implicit, its default and copy constructors.
   // A trivial copy is a copy; `list` forbids narrowing ([over.match.list]); `copy_init` takes only
   // one-argument constructors.
-  Ex construct(QualType t, std::vector<Ex> args, u32 begin, u32 end, bool list = false, bool copy_init = false) {
+  Ex construct(QualType t, std::vector<Ex> args, u32 begin, u32 end, bool list = false, bool copy_init = false,
+               bool checking_polymorphic_base = false) {
     Ex fail{NodeId::none, begin, end};
     if (std::ranges::any_of(args, [](const Ex& a) { return !a.ok(); })) return fail;
     if (types().is_dependent(t) || any_dependent(args))
       return dependent_node(args, begin, end, types().is_dependent(t) ? std::nullopt : std::optional(Types::unqualified(t)));
-    if (!require_complete(t, begin) || !require_supported_virtual_layout(t, begin)) return fail;
+    if (!require_complete(t, begin) ||
+        (!checking_polymorphic_base && !require_supported_virtual_layout(t, begin))) return fail;
     QualType ut = Types::unqualified(t);
     EntityId c = types().class_of(ut);
     const ClassRec* cr = class_rec(c);
@@ -3932,7 +3940,10 @@ public:
     }
     if (k.entity == EntityId::none) {
       // Trivial: a copy of the argument's object, or nothing to construct.
-      if (fr.params.empty()) return value_init_aggregate(ut, begin, end);
+      if (fr.params.empty()) {
+        if (checking_polymorphic_base) return fail;  // the implicit constructor needs no call
+        return value_init_aggregate(ut, begin, end);
+      }
       Ex a = args[0];
       return a.glvalue() ? convert_node(a, ast::ConversionKind::lvalue_to_rvalue, ut) : a;
     }
@@ -3955,6 +3966,12 @@ public:
     ExprInfo info{ut, ValueCategory::prvalue, 0};
     return node(ast::CtorCall{info, k.entity, 0, b_->list(cs)}, begin, end, info);
   }
+  // In a syntax-only constructor definition, check the implicit default initialization of
+  // its direct polymorphic base. There is no complete object or native initializer to build.
+  void check_polymorphic_base_default_init(QualType t, u32 at) {
+    construct(t, {}, at, at, /*list=*/false, /*copy_init=*/false, /*checking_polymorphic_base=*/true);
+  }
+
   // [class.copy.ctor]/2: a constructor whose first parameter is `C&` or `cv C&` and whose others
   // have default arguments (`required` is how many need arguments).
   bool is_copy_ctor(const TypeRec& fr, QualType c, std::size_t required) {
@@ -5549,7 +5566,7 @@ public:
     int paths = 0;
     auto path = base_path(types().class_of(ct), b, paths);
     if (!check_base_path(ct, b, path, paths, at_)) return {NodeId::none, e.begin, e.end};
-    if (!require_supported_virtual_layout(ct, at_)) return {NodeId::none, e.begin, e.end};
+    if (unevaluated == 0 && !require_supported_virtual_layout(ct, at_)) return {NodeId::none, e.begin, e.end};
     for (EntityId step : *path) {
       QualType st = types().add_cv(types().class_type(step), cv);
       ExprInfo info{pointer ? types().pointer(st) : st, pointer ? ValueCategory::prvalue : e.cat(), 0};

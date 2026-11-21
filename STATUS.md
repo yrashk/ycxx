@@ -2010,7 +2010,11 @@ What the process allocates, attributed to the engine's cells, in the trace and t
   storage, evaluated calls and key-function definitions receive diagnostics where they require
   unsupported virtual semantics or ABI. Native requests for a unit with virtual declarations
   receive a diagnostic before any object is emitted.
-- Derived virtual members, virtual dispatch and tables remain in
+- A non-template derived class can have one complete ordinary polymorphic base. Override matching
+  follows the base chain through private members and hidden names, with checks for matching
+  parameter types, qualifiers, return types and exception specifications. The class traits also
+  recognize inherited polymorphism and implicit virtual destructors.
+- Pure virtual functions, `final`, covariant returns, virtual dispatch and tables remain in
   [#309](https://github.com/yrashk/ycxx/issues/309). Virtual destructor entry points are in
   [#136](https://github.com/yrashk/ycxx/issues/136).
   [Design](docs/design/ordinary-virtual-declarations.md)

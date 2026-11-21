@@ -768,7 +768,8 @@ public:
   const std::deque<Synthesized>& synthesized() const { return synth_; }
   // Its body, analysed on first use.
   const ast::BodySema& synthesized_body(std::size_t i);
-  void special_members(u32 item, EntityId cls, sema::ClassRec& rec);
+  void special_members(u32 item, EntityId cls, sema::ClassRec& rec,
+                       std::vector<engine::Diagnostic>* class_diags = nullptr);
   void declare_copy_assignment(u32 item, EntityId cls, sema::ClassRec& rec, bool implicit, bool user_move);
   sema::CopyAssignment require_copy_assignment(EntityId f);
   Ex copy_from(sema::Sema& sm, Ex src, QualType t);
@@ -1251,6 +1252,11 @@ private:
       return key < items_->items.size() && (key == parent || items_->items[key].parent == parent);
     });
   }
+  struct DestructorDeclaration {
+    u32 at;
+    std::optional<bool> nonthrowing;  // a written exception specification, if present
+  };
+  std::map<EntityId, DestructorDeclaration> destructor_declarations_;
   std::map<EntityId, std::vector<std::optional<std::pair<u32, u32>>>> member_default_tokens_;
   void bind_member_defaults(EntityId cls, sema::ClassRec& rec, Result<ast::ClassDef>& out);
   std::map<u32, std::vector<std::vector<ast::TemplateParamSema>>> outer_heads_;  // by item
@@ -1491,7 +1497,7 @@ std::optional<LangLinkage> linkage_named(const pp::Region& r, u32 tok) {
 }
 
 // A direct base must be a complete non-union class ([class.derived], [class.union.general]).
-std::optional<EntityId> complete_base_class(sema::Sema& s, QualType type, u32 at) {
+std::optional<EntityId> complete_base_class(sema::Sema& s, QualType type, u32 at, bool allow_polymorphic = false) {
   if (!s.types().is_class(type) || s.types().is_dependent(type)) {
     s.diag(at, Diag::base_not_class, type);
     return std::nullopt;
@@ -1503,7 +1509,7 @@ std::optional<EntityId> complete_base_class(sema::Sema& s, QualType type, u32 at
       s.diag(at, Diag::base_not_class, type);
       return std::nullopt;
     }
-    if (r->polymorphic) {
+    if (r->polymorphic && !allow_polymorphic) {
       s.diag(at, Diag::virtual_base_class, type);
       return std::nullopt;
     }
@@ -2243,12 +2249,13 @@ private:
   // Whether an earlier declaration found by lookup is in this item's own scope, the only one a
   // declaration here can redeclare or clash with.
   bool same_scope(const ast::DeclSema& d) { return s_.world().entities.rec(d.entity).scope == ns_entity(); }
-  bool same_function_parameters(QualType a, QualType b) {
+  bool same_function_parameters(QualType a, QualType b, bool compare_ref = true) {
     const auto& types = s_.types();
     const auto& interner = s_.world().ins.types;
     const auto first = interner.get<ast::TFunction>(types.canonical(a));
     const auto second = interner.get<ast::TFunction>(types.canonical(b));
-    return first.params == second.params && first.variadic == second.variadic && first.cv == second.cv;
+    return first.params == second.params && first.variadic == second.variadic && first.cv == second.cv &&
+           (!compare_ref || first.ref == second.ref);
   }
   // The arguments of a partial specialization of `tmpl` ([temp.spec.partial]), given as `args`:
   // completed, and checked against [temp.spec.partial]/9; none, diagnosed, if they break it.
@@ -2786,7 +2793,8 @@ private:
         s_.diag(at, Diag::incomplete_type, spec.type);  // the class itself: incomplete here
         return false;
       }
-      if (!complete_base_class(s_, spec.type, at)) return false;
+      const bool single_ordinary_base = !template_ && bases.empty() && !ps_.is(Tk::comma);
+      if (!complete_base_class(s_, spec.type, at, single_ordinary_base)) return false;
       if (std::ranges::any_of(bases, [&](const sema::BaseRec& r) { return r.cls == b; })) {
         s_.diag(at, Diag::duplicate_base, spec.type);
         return false;
@@ -3185,8 +3193,9 @@ private:
         return bad();
       }
       using enum Parser::NamedExceptionSpec;
-      auto exception = spec.virtual_at ? virtual_member : p_->defaulted_body(k_) ? defaulted_assignment : ordinary;
-      parse::Declarator d = ps_.declarator(spec.type, /*abstract=*/false, /*typedef_=*/false, conversion, exception);
+      auto exception = p_->defaulted_body(k_) ? defaulted_assignment : ordinary;
+      parse::Declarator d = ps_.declarator(spec.type, /*abstract=*/false, /*typedef_=*/false, conversion, exception,
+                                          /*defer_ref_check=*/true);
       if (!d.ok || !d.named) return bad();
       if (conversion && !d.function) {
         s_.diag(d.name_at, Diag::conversion_parameters);
@@ -3212,12 +3221,16 @@ private:
         s_.diag(d.qualifier_at, Diag::not_supported, Tk::coloncolon);
         return bad();
       }
-      if (spec.virtual_at) {
-        if (!types.is_function(d.type) || spec.is_static) {
-          s_.diag(*spec.virtual_at, Diag::virtual_placement);
+      const bool function = types.is_function(d.type);
+      const sema::MemberDeclRec* overridden = function && !member_template_ ? overridden_member(c.entity, d) : nullptr;
+      const bool is_virtual = spec.virtual_at.has_value() || overridden;
+      if (is_virtual) {
+        const u32 at = spec.virtual_at.value_or(d.name_at);
+        if (!function || spec.is_static) {
+          s_.diag(at, Diag::virtual_placement);
           return bad();
         }
-        if (!virtual_member_scope(c.entity, *spec.virtual_at)) return bad();
+        if (!virtual_member_scope(c.entity, at)) return bad();
         if (types.has_placeholder(types.rec(d.type).inner)) {
           s_.diag(d.name_at, Diag::virtual_placeholder_return);
           return bad();
@@ -3230,8 +3243,18 @@ private:
           s_.diag(ps_.pos(), Diag::virtual_constraints);
           return bad();
         }
+        if (d.has_noexcept) {
+          const auto f = types.rec(d.type);
+          const bool nonthrowing = ps_.noexcept_value(d.noexcept_condition, d.ok);
+          if (!d.ok) return bad();
+          d.type = types.function(f.inner, f.params, f.variadic, f.linkage, f.fn_cv, f.fn_ref, nonthrowing);
+        }
+        if (overridden && !validate_override(d, *overridden)) return bad();
       }
-      if (types.is_function(d.type) && !member_virt_specifier(c.entity)) return bad();
+      if (function) {
+        if (!member_virt_specifier(overridden != nullptr)) return bad();
+        if (!is_virtual && !ps_.check_named_ref_qualifier(d)) return bad();
+      }
       // A member whose type became a function type through substitution is a data member of
       // function type, which cannot exist ([temp.inst], [class.mem.general]).
       if (inst_ && types.is_function(d.type) && !d.function) {
@@ -3249,7 +3272,7 @@ private:
           s_.diag(d.name_at, Diag::not_supported, Tk::kw_union);
           return bad();
         }
-        if (!member_function_or_static(spec, d, c)) return bad();
+        if (!member_function_or_static(spec, d, c, is_virtual)) return bad();
         if (it_->kind == ItemKind::function) return;  // its body follows the declaration part
         continue;
       }
@@ -3819,6 +3842,44 @@ private:
     return false;
   }
 
+  const sema::ClassRec* direct_polymorphic_base(EntityId cls) {
+    const auto bases = q_.defining_bases(cls);
+    const auto* base = bases.size() == 1 ? p_->classes_.find(bases.front()) : nullptr;
+    return base && base->polymorphic ? base : nullptr;
+  }
+
+  // [class.virtual]: neither name hiding nor access cuts off overriding. In the supported
+  // single-base chain the closest matching declaration already satisfies any earlier ones.
+  const sema::MemberDeclRec* overridden_member(EntityId cls, const parse::Declarator& d) {
+    const auto& types = s_.types();
+    const bool conversion = s_.ins().names.spelling(d.name) == lex::conversion_function_name;
+    for (const auto* base = direct_polymorphic_base(cls); base;
+         base = base->bases.size() == 1 ? p_->classes_.find(base->bases.front().cls) : nullptr) {
+      auto match = std::ranges::find_if(base->members, [&](const sema::MemberDeclRec& member) {
+        return member.is_virtual && !member.is_dtor && member.name == d.name &&
+               same_function_parameters(member.type, d.type) &&
+               (!conversion || types.canonical(types.rec(member.type).inner) == types.canonical(types.rec(d.type).inner));
+      });
+      if (match != base->members.end()) return &*match;
+    }
+    return nullptr;
+  }
+
+  bool validate_override(const parse::Declarator& d, const sema::MemberDeclRec& overridden) {
+    const auto& types = s_.types();
+    const auto derived = types.rec(d.type);
+    const auto base = types.rec(overridden.type);
+    if (types.canonical(derived.inner) != types.canonical(base.inner)) {
+      s_.diag(d.name_at, Diag::virtual_override_return);
+      return false;
+    }
+    if (base.fn_noexcept && !derived.fn_noexcept) {
+      s_.diag(d.name_at, Diag::virtual_override_noexcept);
+      return false;
+    }
+    return true;
+  }
+
   bool virtual_member_scope(EntityId cls, u32 at) {
     if (member_template_) {
       s_.diag(at, Diag::virtual_member_template);
@@ -3828,7 +3889,8 @@ private:
       s_.diag(at, Diag::virtual_union_member);
       return false;
     }
-    if (!s_.template_scopes.empty() || inst_ || !q_.defining_bases(cls).empty() ||
+    if (!s_.template_scopes.empty() || inst_ ||
+        (!q_.defining_bases(cls).empty() && !direct_polymorphic_base(cls)) ||
         !p_->is_namespace(s_.world().entities.rec(cls).scope) || p_->items().items[it_->parent].specialization) {
       s_.diag(at, Diag::not_supported, Tk::kw_virtual);
       return false;
@@ -3836,14 +3898,25 @@ private:
     return true;
   }
 
-  bool member_virt_specifier(EntityId cls) {
+  bool member_virt_specifier(bool overrides) {
     if (!ps_.is(Tk::identifier)) return true;
-    const auto name = s_.ins().names.spelling(ps_.name_of(ps_.tok()));
-    if (name == "override" && q_.defining_bases(cls).empty() && s_.template_scopes.empty()) {
-      s_.diag(ps_.pos(), Diag::override_without_base);
-      return false;
+    auto spelling = [&] { return s_.ins().names.spelling(ps_.name_of(ps_.tok())); };
+    if (spelling() == "override") {
+      if (!s_.template_scopes.empty() || inst_) {
+        s_.diag(ps_.pos(), Diag::not_supported, Tk::identifier);
+        return false;
+      }
+      if (!overrides) {
+        s_.diag(ps_.pos(), Diag::override_without_base);
+        return false;
+      }
+      ps_.bump();
+      if (ps_.is(Tk::identifier) && spelling() == "override") {
+        s_.diag(ps_.pos(), Diag::duplicate_override);
+        return false;
+      }
     }
-    if (name == "override" || name == "final") {
+    if (ps_.is(Tk::identifier) && spelling() == "final") {
       s_.diag(ps_.pos(), Diag::not_supported, Tk::identifier);
       return false;
     }
@@ -3866,24 +3939,34 @@ private:
       s_.diag(name_at, Diag::qualified_constructor);
       return bad();
     }
+    const auto* base = ctor ? nullptr : direct_polymorphic_base(c.entity);
+    const bool overrides = base && base->virtual_destructor;
+    const bool is_virtual = virtual_at.has_value() || overrides;
     const bool defaulted = p_->defaulted_body(k_);
-    const bool defaulted_copy = defaulted && !virtual_at;
+    const bool defaulted_copy = defaulted && !is_virtual;
     bool written_noexcept = false;
-    if (virtual_at) {
-      if (!virtual_member_scope(c.entity, *virtual_at)) return bad();
-      if (fs.cv != sema::Cv::none || ps_.is(Tk::amp) || ps_.is(Tk::ampamp)) {
+    std::optional<bool> destructor_noexcept;
+    if (!ctor) {
+      if (is_virtual && !virtual_member_scope(c.entity, virtual_at.value_or(name_at))) return bad();
+      if (fs.cv != sema::Cv::none || ps_.is(Tk::amp) || ps_.is(Tk::ampamp) || !fs.params.empty() || fs.variadic) {
         s_.diag(name_at, Diag::not_supported, Tk::tilde);
         return bad();
       }
-      written_noexcept = ps_.accept(Tk::kw_noexcept);
+      ps_.exception_specifier(fs, ok);
+      if (fs.has_noexcept) {
+        destructor_noexcept = ps_.noexcept_value(fs.noexcept_condition, ok);
+        if (!ok) return bad();
+      }
       ps_.skip_attributes();
-      if (!member_virt_specifier(c.entity)) return bad();
-      if (!ps_.at_end() && !ps_.is(Tk::semi)) {
+      if (!member_virt_specifier(overrides)) return bad();
+      if (is_virtual && !ps_.at_end() && !ps_.is(Tk::semi)) {
         s_.diag(ps_.pos(), Diag::not_supported, ps_.kind());
         return bad();
       }
-      if (defaulted) flags |= sema::decl_flag::constexpr_ | sema::decl_flag::inline_;
-    } else if (defaulted_copy) {
+      if (is_virtual && defaulted) flags |= sema::decl_flag::constexpr_ | sema::decl_flag::inline_;
+      written_noexcept = is_virtual && destructor_noexcept.value_or(false);
+    }
+    if (defaulted_copy) {
       // [dcl.fct.def.default]: first declaration of an ordinary copy constructor.
       if (!finish_constructor_declarator(true, &written_noexcept)) return bad();
       auto copy_reference = [&] {
@@ -3903,14 +3986,10 @@ private:
       // A first-declaration defaulted special member is inline and, when constexpr-suitable,
       // implicitly constexpr ([dcl.fct.def.default]).
       flags |= sema::decl_flag::constexpr_ | sema::decl_flag::inline_;
-    } else if ((flags & sema::decl_flag::constexpr_) && it_->has_body() && !finish_constructor_declarator(true)) {
+    } else if (ctor && (flags & sema::decl_flag::constexpr_) && it_->has_body() && !finish_constructor_declarator(true)) {
       return bad();
     }
-    if (!ctor && (!fs.params.empty() || fs.variadic)) {
-      s_.diag(name_at, Diag::not_supported, Tk::tilde);  // [class.dtor]/1: a destructor has no parameters
-      return bad();
-    }
-    if (!virtual_at && !member_virt_specifier(c.entity)) return bad();
+    if (ctor && !member_virt_specifier(false)) return bad();
     std::vector<QualType> ps;
     for (const parse::Param& p : fs.params) ps.push_back(p.type);
     QualType type = types.function(s_.builtin(sema::Builtin::void_), ps, fs.variadic, LangLinkage::cxx, fs.cv,
@@ -3928,7 +4007,7 @@ private:
     sem.type = type;
     sem.linkage = ast::Linkage::external;
     sem.flags = flags;
-    sem.is_virtual = virtual_at.has_value();
+    sem.is_virtual = is_virtual;
     std::vector<ast::ParamSema> params;
     for (const parse::Param& p : fs.params) params.push_back({EntityId::none, p.type, p.name, p.default_arg, p.element ? sema::param_flag::pack_element : u16(0)});
     if (!defaults_trail(params, fs.params, name_at)) return bad();
@@ -3968,6 +4047,7 @@ private:
         }
       }
     }
+    if (!ctor) p_->destructor_declarations_.emplace(sem.entity, Program::DestructorDeclaration{name_at, destructor_noexcept});
     remember_member_defaults(sem.entity, fs.params);
     p_->declared(sem, k_);
     declarators_.push_back(s_.node(ast::Declarator{u32(decls_.size()), {}, ConstId::none}, name_at, ps_.pos()));
@@ -4082,7 +4162,7 @@ private:
 
   // A member function or static data member of class `c` declared in its class ([class.mfct],
   // [class.static]).
-  bool member_function_or_static(const DeclSpec& spec, parse::Declarator& d, ast::DeclSema c) {
+  bool member_function_or_static(const DeclSpec& spec, parse::Declarator& d, ast::DeclSema c, bool is_virtual) {
     sema::Types& types = s_.types();
     bool fn = types.is_function(d.type);
     if (fn && !member_operator_ok(d, spec.is_static)) return false;
@@ -4117,7 +4197,7 @@ private:
     ast::DeclSema sem = class_decl(c.entity, false);
     sem.type = d.type;
     sem.linkage = ast::Linkage::external;
-    sem.is_virtual = spec.virtual_at.has_value();
+    sem.is_virtual = is_virtual;
     u16 flags = sema::decl_flag::member;
     if (spec.is_static) flags |= sema::decl_flag::static_;
     if (spec.is_constexpr || defaulted) flags |= sema::decl_flag::constexpr_;
@@ -4307,8 +4387,12 @@ private:
     // constraints, or both not templates ([temp.over.link]/4-6, [over.load]).
     auto clash = [&](const ast::DeclSema& d) {
       if (!function || d.kind != ast::DeclKind::function) return true;
-      if (s_.types().canonical(d.type) != s_.types().canonical(*function) &&
-          (!(compare_parameters || d.is_virtual) || !same_function_parameters(d.type, *function))) return false;
+      if (s_.types().canonical(d.type) != s_.types().canonical(*function)) {
+        if (!(compare_parameters || d.is_virtual) || !same_function_parameters(d.type, *function, false)) return false;
+        const auto prior_ref = s_.types().rec(d.type).fn_ref;
+        const auto ref = s_.types().rec(*function).fn_ref;
+        if (prior_ref != ref && prior_ref != ast::RefQual::none && ref != ast::RefQual::none) return false;
+      }
       bool templ = (d.flags & sema::decl_flag::template_) != 0;
       if (templ != member_template_) return false;
       if (!templ) return true;
@@ -5263,7 +5347,7 @@ const Result<ast::ClassDef>& Program::class_def(u32 item) {
     for (const ast::MemberRec& m : members) rec.access.push_back({m.entity, m.access});
     rec.friends = std::move(c.friends);
     rec.adl_friends = c.adl_friends;
-    special_members(item, *cls, rec);
+    special_members(item, *cls, rec, &out.diags);
     rec.defined = true;
     // Default arguments are checked with the full member set, before function bodies are read.
     classes_.publish(*cls, std::move(rec), [&](sema::ClassRec& fresh) {
@@ -5727,10 +5811,17 @@ private:
     const sema::ClassRec& rec = p_->classes_.rec(s_.current_class);
     std::vector<ast::Child> stmts;
     for (std::size_t i = 0; i < rec.bases.size(); ++i) {
-      QualType bt = s_.types().class_type(rec.bases[i].cls);
+      const EntityId base = rec.bases[i].cls;
+      const QualType bt = s_.types().class_type(base);
       Ex init;
-      if (auto it = inits.find(u32(rec.fields.size() + i)); it != inits.end()) init = it->second;
-      else init = s_.default_init(bt, 0, 0);
+      if (auto it = inits.find(u32(rec.fields.size() + i)); it != inits.end()) {
+        init = it->second;
+      } else if (const auto* record = p_->classes_.find(base); record && record->polymorphic) {
+        s_.check_polymorphic_base_default_init(bt, 0);
+        continue;
+      } else {
+        init = s_.default_init(bt, 0, 0);
+      }
       if (!init.ok()) continue;
       stmts.push_back({s_.node(ast::MemberInit{~0u, bt, {init.id, 0}}, 0, 0).id, 0});
     }
@@ -5935,7 +6026,8 @@ std::optional<QualType> Program::assignment_parameter(const sema::MemberDeclRec&
   return parameter;
 }
 
-void Program::special_members(u32 item, EntityId cls, sema::ClassRec& rec) {
+void Program::special_members(u32 item, EntityId cls, sema::ClassRec& rec,
+                              std::vector<engine::Diagnostic>* class_diags) {
   sema::Types& types = w_->types;
   QualType ct = types.class_type(cls);
   bool user_copy = false;
@@ -5943,7 +6035,11 @@ void Program::special_members(u32 item, EntityId cls, sema::ClassRec& rec) {
   bool user_copy_assignment = false;
   bool user_move_assignment = false;
   bool defaulted_assignment = false;
-  EntityId user_dtor = EntityId::none;
+  const sema::MemberDeclRec* user_dtor = nullptr;
+  const sema::ClassRec* base = rec.bases.size() == 1 ? classes_.find(rec.bases.front().cls) : nullptr;
+  const bool overrides_destructor = base && base->virtual_destructor;
+  rec.polymorphic = base && base->polymorphic;
+  rec.virtual_destructor = overrides_destructor;
   for (const sema::MemberDeclRec& m : rec.members) {
     defaulted_assignment |= m.explicit_defaulted_assignment;
     if (const auto parameter = assignment_parameter(m, ct)) {
@@ -5952,8 +6048,8 @@ void Program::special_members(u32 item, EntityId cls, sema::ClassRec& rec) {
     }
     if (m.is_virtual) rec.polymorphic = true;
     if (m.is_dtor) {
-      user_dtor = m.entity;
-      rec.virtual_destructor = m.is_virtual;
+      user_dtor = &m;
+      rec.virtual_destructor |= m.is_virtual;
     }
     if (!m.is_ctor) continue;
     rec.user_ctors = true;
@@ -5989,8 +6085,11 @@ void Program::special_members(u32 item, EntityId cls, sema::ClassRec& rec) {
       ps.push_back(types.lvalue_ref(types.add_cv(ct, sema::Cv::const_)));
       params.push_back({EntityId::none, ps[0], w_->ins.names.intern("other"), NodeId::none, 0});
     }
-    QualType type = types.function(void_, ps, false, LangLinkage::cxx);
+    const bool virtual_destructor = !copy && rec.virtual_destructor;
+    QualType type = types.function(void_, ps, false, LangLinkage::cxx, sema::Cv::none, ast::RefQual::none,
+                                   virtual_destructor && rec.destructor_noexcept.value_or(false));
     ast::DeclSema d{};
+    d.is_virtual = virtual_destructor;
     d.kind = ast::DeclKind::function;
     d.type = type;
     d.linkage = ast::Linkage::external;
@@ -6017,12 +6116,58 @@ void Program::special_members(u32 item, EntityId cls, sema::ClassRec& rec) {
   rec.layout_requires_virtual_support = rec.polymorphic || std::ranges::any_of(subobjects, [&](QualType t) {
     return classes_.layout_requires_virtual_support(t);
   });
+  // [except.spec]: the absence of an explicit destructor specification takes the
+  // specification of the destructor that would be implicitly declared.
+  const auto declaration = user_dtor ? destructor_declarations_.find(user_dtor->entity) : destructor_declarations_.end();
+  std::optional<bool> implicit_noexcept = true;
+  rec.destructor_usable = !user_dtor || !user_dtor->is_deleted;
+  for (std::size_t i = 0; i < subobjects.size(); ++i) {
+    sema::TypeRec type = types.rec(subobjects[i]);
+    while (type.kind == sema::TypeKind::array) type = types.rec(type.inner);
+    if (type.kind != sema::TypeKind::class_) {
+      if (type.kind != sema::TypeKind::pointer && type.kind != sema::TypeKind::reference &&
+          type.kind != sema::TypeKind::member_pointer && types.is_dependent(subobjects[i])) {
+        if (implicit_noexcept != false) implicit_noexcept.reset();
+        rec.destructor_usable = false;
+      }
+      continue;
+    }
+    const auto* record = classes_.find(type.entity);
+    if (record && record->destructor_noexcept == false) implicit_noexcept = false;
+    else if ((!record || !record->destructor_noexcept) && implicit_noexcept != false) implicit_noexcept.reset();
+    if (!record || !record->destructor_usable) {
+      rec.destructor_usable = false;
+      continue;
+    }
+    if (record->destructor == EntityId::none) continue;
+    const auto access = record->access_of(record->destructor);
+    const bool accessible = access == ast::Access::public_ ||
+                            (i < rec.bases.size() && access == ast::Access::protected_) ||
+                            std::ranges::contains(record->friends, cls) ||
+                            (user_dtor && std::ranges::contains(record->friends, user_dtor->entity));
+    rec.destructor_usable &= accessible;
+  }
+  rec.destructor_noexcept = declaration != destructor_declarations_.end() && declaration->second.nonthrowing
+                              ? declaration->second.nonthrowing : implicit_noexcept;
+  if (overrides_destructor && class_diags) {
+    const bool unusable = !rec.destructor_usable || !base->destructor_usable;
+    const bool unknown = !base->destructor_noexcept || !rec.destructor_noexcept;
+    if (unusable || unknown || (*base->destructor_noexcept && !*rec.destructor_noexcept)) {
+      auto at = engine::Loc{std::to_underlying(id(item)), 0};
+      if (declaration != destructor_declarations_.end())
+        if (const auto member = member_decl(user_dtor->entity))
+          at = {std::to_underlying(member->item), declaration->second.at};
+      const auto diag = unusable ? Diag::virtual_unusable_destructor
+                      : unknown ? Diag::virtual_destructor_noexcept : Diag::virtual_override_noexcept;
+      class_diags->push_back({at, sema::diag_id(diag), {}});
+    }
+  }
   // [class.copy.ctor]/6: either user-declared move operation deletes the otherwise implicit copy.
   const bool deletes_implicit_copy = user_move || user_move_assignment;
   const bool implicit_copy = !user_copy && !deletes_implicit_copy;
   defaulted_copy(cls, rec, subobjects, implicit_copy);
   // [class.dtor]/8: the implicit destructor is not trivial when a base's or member's is not.
-  if (user_dtor != EntityId::none) rec.destructor = user_dtor;
+  if (user_dtor) rec.destructor = user_dtor->entity;
   else if (std::ranges::any_of(subobjects, [&](QualType t) { return classes_.destructor_of(t) != EntityId::none; }))
     rec.destructor = synthesize(false);
   // [class.copy.ctor]/10–11: the implicit copy constructor is deleted with a member's, and not
@@ -6039,7 +6184,7 @@ void Program::special_members(u32 item, EntityId cls, sema::ClassRec& rec) {
     if (!rec.copy_deleted && nontrivial && !rec.layout_requires_virtual_support) rec.copy_ctor = synthesize(true);
   }
   // [class.copy.ctor]/8, 10–11: implicit move requires no user-declared copy, move or destructor.
-  if (implicit_copy && !user_copy_assignment && user_dtor == EntityId::none) {
+  if (implicit_copy && !user_copy_assignment && !user_dtor) {
     rec.move_usable = !rec.copy_deleted || std::ranges::none_of(subobjects, [&](QualType t) {
                         return !types.is_reference(t) && classes_.unmovable(t);
                       });
@@ -6070,7 +6215,7 @@ void Program::special_members(u32 item, EntityId cls, sema::ClassRec& rec) {
     const sema::ClassRec* r = classes_.find(b.cls);
     return r && (!r->fields.empty() || !r->pod);
   });
-  rec.pod = !rec.layout_requires_virtual_support && !rec.user_ctors && user_dtor == EntityId::none &&
+  rec.pod = !rec.layout_requires_virtual_support && !rec.user_ctors && !user_dtor &&
             rec.destructor == EntityId::none &&
             !rec.copy_nontrivial() && !rec.copy_deleted && !user_move && !user_provided_assignment &&
             std::ranges::none_of(rec.fields, &sema::FieldRec::dmi) && one_access &&
