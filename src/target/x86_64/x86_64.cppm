@@ -92,10 +92,10 @@ struct Frame {
   std::int32_t variadic_save = 0;  // RBP-relative, present only for an executing va_start
 };
 
-// Floating value motion and binary32-to-binary64 widening use these instructions.
 bool supports_float(Op op) {
   switch (op) {
     case Op::const_: case Op::load: case Op::store: case Op::select: case Op::fpext:
+    case Op::fadd: case Op::fsub: case Op::fmul: case Op::fdiv: case Op::fneg:
     case Op::call: case Op::call_ind: case Op::ret: return true;
     default: return false;
   }
@@ -140,7 +140,7 @@ std::expected<Frame, std::string> layout(const l2::Function& body) {
       const bool uses_float_result = std::ranges::any_of(std::views::iota(0u, nd.nres),
           [&](std::uint32_t i) { return is_float(body.result(n, i)); });
       if (!supports_float(nd.op) && (uses_float_result || std::ranges::any_of(operands, is_float)))
-        return at_node(n, nd.op, "floating-point arithmetic, comparisons and conversions are unsupported");
+        return at_node(n, nd.op, "floating-point operation is unsupported");
       if (nd.op == Op::alloca) {
         auto size = imms[0], align = imms[1];
         if (!std::has_single_bit(align) || align > 16)
@@ -422,6 +422,13 @@ std::expected<void, std::string> Emitter::node(NodeId n) {
     read(ops[1], rcx);
     e_.reg(opcode, rcx, rax);
   };
+  auto float_two = [&](std::uint8_t opcode) {
+    ValueId result = body_.result(n);
+    unsigned width = home_width(result);
+    e_.load_scalar_xmm(0, rbp, frame_.slots[raw(ops[0])], width);
+    e_.scalar_float_arithmetic(opcode, 0, rbp, frame_.slots[raw(ops[1])], width);
+    e_.store_scalar_xmm(rbp, frame_.slots[raw(result)], 0, width);
+  };
   switch (op) {
     case Op::const_:
       if (body_.type(body_.result(n)) == Type::f32) {
@@ -469,6 +476,22 @@ std::expected<void, std::string> Emitter::node(NodeId n) {
     case Op::neg:
       read(ops[0]);
       e_.reg({0xf7}, 3, rax);
+      break;
+    case Op::fadd: float_two(0x58); return {};
+    case Op::fsub: float_two(0x5c); return {};
+    case Op::fmul: float_two(0x59); return {};
+    case Op::fdiv: float_two(0x5e); return {};
+    case Op::fneg:
+      // Flip only the IEEE sign bit. Integer XOR preserves the payload and MXCSR status.
+      read(ops[0]);
+      if (body_.type(body_.result(n)) == Type::f32) {
+        e_.emit({0x35});  // xor eax, imm32
+        e_.immediate(std::uint32_t{1} << 31, 4);
+      } else {
+        e_.emit({0x48, 0xb9});  // mov rcx, imm64
+        e_.immediate(std::uint64_t{1} << 63, 8);
+        e_.reg({0x31}, rcx, rax);  // xor rax, rcx
+      }
       break;
     case Op::shl: case Op::lshr: case Op::ashr:
       read(ops[0]);

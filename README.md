@@ -93,8 +93,10 @@ Use the host linker to link these objects with libc.
 Fixed-prototype definitions and direct calls on x86-64 Linux also move `float` and `double`
 arguments and results. Direct variadic calls support the same scalar floating values and
 promote an unnamed `float` to `double`. Direct call result types can be deduced from `auto` or
-`decltype(auto)`.
+`decltype(auto)`. Runtime addition, subtraction, multiplication, division and unary negation
+work for `float` and `double` at their evaluation width.
 [Linux scalar floating-point ABI](docs/design/linux-scalar-floating-point.md) ·
+[Linux scalar floating-point arithmetic](docs/design/linux-scalar-floating-point.md#runtime-arithmetic) ·
 [Linux direct variadic floating-point ABI](docs/design/linux-floating-variadic-calls.md) ·
 [#441](https://github.com/yrashk/ycxx/issues/441)
 
