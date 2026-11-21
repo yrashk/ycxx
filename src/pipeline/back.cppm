@@ -915,6 +915,11 @@ class UnitFacts : public irgen::TypeFacts {
         if (shape.entity == c && field < shape.bit_widths.size()) return shape.bit_widths[field];
       return 0;
     };
+    field_type = [&shapes](EntityId c, std::uint32_t field) -> std::optional<QualType> {
+      for (const ClassShape& shape : shapes.classes)
+        if (shape.entity == c && field < shape.fields.size()) return shape.fields[field];
+      return std::nullopt;
+    };
   }
   ConstId string_address(ConstId c) { return universe().consts->address_of(c); }
   bool is_constexpr(EntityId e) { return std::ranges::binary_search(src_->constexpr_functions, e); }
