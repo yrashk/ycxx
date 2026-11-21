@@ -1037,34 +1037,106 @@ public:
     }
     return bool_literal(ts.is_reference(lhs) && !ts.rec(lhs).rvalue_ref && !Types::is_const(destination), begin, end);
   }
-  // Within this domain, an implicit conversion that can initialize the return type also cannot
-  // throw. Reference binding follows the category of declval<From>() ([meta.rel], [dcl.init.ref]).
+  // The base-clause parser admits only nonvirtual bases. Count paths regardless of access:
+  // a private path can still make a public one ambiguous. Two arrivals at a class suffice
+  // to prove ambiguity for any base reached through it.
+  const ClassRec* unique_public_base(EntityId derived, EntityId base) {
+    struct Path {
+      EntityId cls;
+      bool public_;
+    };
+    std::vector<Path> pending{{derived, true}};
+    std::map<EntityId, unsigned> arrivals;
+    const ClassRec* found = nullptr;
+    while (!pending.empty()) {
+      const auto [cls, public_] = pending.back();
+      pending.pop_back();
+      auto& count = arrivals[cls];
+      if (count == 2) continue;
+      ++count;
+      const ClassRec* record = classes().find(cls);
+      if (!record || !record->defined || record->union_ || record->polymorphic || record->layout_requires_virtual_support)
+        return nullptr;
+      if (cls == base) {
+        if (found || !public_) return nullptr;
+        found = record;
+      }
+      for (const BaseRec& edge : record->bases)
+        pending.push_back({edge.cls, public_ && edge.access == ast::Access::public_});
+    }
+    return found;
+  }
+
+  // The source of the copy or move is the base subobject, not a newly constructed Derived
+  // ([meta.rel], [over.best.ics]). With no written constructors or subobjects in Base, its
+  // implicit special members are public and there are no converting constructors to compare.
+  bool supports_base_value_conversion(const ClassRec& base, QualType from, bool source_lvalue) {
+    using enum CopyOperation;
+    const auto& operations = base.trivial_copyability;
+    if (base.closure || base.user_ctors || !base.bases.empty() || !base.fields.empty() || base.unapplied_layout ||
+        Types::is_volatile(from) || !base.destructor_usable || base.destructor != EntityId::none ||
+        operations.destructor != eligible_trivial)
+      return false;
+    if (!source_lvalue && !Types::is_const(from) && operations.move_constructor != ineligible)
+      return operations.move_constructor == eligible_trivial;
+    return operations.copy_constructor == eligible_trivial && !base.copy_deleted && base.defaulted_copy_const;
+  }
+
+  // Reference binding follows the category of declval<From>() ([meta.rel], [dcl.init.ref]).
   Ex convertibility_expr(ast::DepOp op, NameId name, QualType source, QualType target, u32 begin, u32 end) {
     const Types& ts = types();
     const QualType from = ts.canonical(source), to = ts.canonical(target);
+    const engine::Loc loc = type_trait_loc(begin);
     if (ts.is_dependent(from) || ts.is_dependent(to)) {
-      if (auto pattern = replayed_binary_type_trait(op, from, to, begin, end)) return *pattern;
-      diag_at(type_trait_loc(begin), Diag::convertibility_dependent, name);
+      if (auto pattern = replayed_binary_type_trait(op, from, to, begin, end)) {
+        if (op == ast::DepOp::is_convertible) q_->record_dependent_type_trait_operand(loc);
+        return *pattern;
+      }
+      diag_at(loc, Diag::convertibility_dependent, name);
       return {NodeId::none, begin, end};
     }
+    const auto unsupported = [&]() -> Ex {
+      diag_at(loc, Diag::convertibility_unsupported, name, source, target);
+      return {NodeId::none, begin, end};
+    };
     const bool from_void = ts.is_void(from), to_void = ts.is_void(to);
     const QualType from_object = ts.canonical(ts.referee(from)), to_object = ts.canonical(ts.referee(to));
-    if ((!from_void && !ts.is_arithmetic(from_object)) || (!to_void && !ts.is_arithmetic(to_object))) {
-      diag_at(type_trait_loc(begin), Diag::convertibility_unsupported, name, source, target);
-      return {NodeId::none, begin, end};
-    }
-    if (from_void || to_void) return bool_literal(from_void && to_void, begin, end);
-    if (!ts.is_reference(to)) return bool_literal(true, begin, end);
-
-    const bool rvalue_target = ts.rec(to).rvalue_ref;
+    const bool source_lvalue = ts.is_reference(from) && !ts.rec(from).rvalue_ref;
+    const bool target_reference = ts.is_reference(to);
+    const bool rvalue_target = target_reference && ts.rec(to).rvalue_ref;
     const bool binds_rvalue = rvalue_target || Types::cv(to_object) == Cv::const_;
+    const auto binds_directly = [&] {
+      return cv_within(Types::cv(from_object), Types::cv(to_object)) && (source_lvalue ? !rvalue_target : binds_rvalue);
+    };
+    if (op == ast::DepOp::is_convertible && ts.is_class(from_object) && ts.is_class(to_object)) {
+      const EntityId derived = ts.class_of(from_object), base = ts.class_of(to_object);
+      if (derived == base || is_union_type(from_object) != false || is_union_type(to_object) != false)
+        return unsupported();
+      for (QualType operand : {from_object, to_object}) {
+        const EntityId cls = ts.class_of(operand);
+        const auto demand = q_->type_trait_at_demand(cls, loc);
+        if (demand ? *demand : q_->is_complete_at_source(cls)) continue;
+        if (!q_->type_trait_instantiation_failed(cls)) diag_at(loc, Diag::convertibility_incomplete, operand, name);
+        return {NodeId::none, begin, end};
+      }
+      const ClassRec* base_record = unique_public_base(derived, base);
+      if (!base_record) return unsupported();
+      // The classes are reference-related, so an invalid direct binding cannot fall back to
+      // a user-defined conversion or a converted temporary ([dcl.init.ref]).
+      if (target_reference) return bool_literal(binds_directly(), begin, end);
+      if (supports_base_value_conversion(*base_record, from_object, source_lvalue))
+        return bool_literal(true, begin, end);
+      return unsupported();
+    }
+    if ((!from_void && !ts.is_arithmetic(from_object)) || (!to_void && !ts.is_arithmetic(to_object))) return unsupported();
+    if (from_void || to_void) return bool_literal(from_void && to_void, begin, end);
+    if (!target_reference) return bool_literal(true, begin, end);
+
     // Different arithmetic types require conversion to a temporary of the target type.
     if (Types::unqualified(from_object) != Types::unqualified(to_object))
       return bool_literal(binds_rvalue, begin, end);
 
-    const bool source_lvalue = ts.is_reference(from) && !ts.rec(from).rvalue_ref;
-    const bool compatible_cv = cv_within(Types::cv(from_object), Types::cv(to_object));
-    return bool_literal(compatible_cv && (source_lvalue ? !rvalue_target : binds_rvalue), begin, end);
+    return bool_literal(binds_directly(), begin, end);
   }
   // [meta.rel] uses existence of a base, regardless of access or the number of paths.
   std::optional<bool> reaches_base(EntityId derived, EntityId base) {
