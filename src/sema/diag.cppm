@@ -289,6 +289,7 @@ enum class Diag : std::uint32_t {
   virtual_override_noexcept [[=message{Severity::error, "the overriding function must have a non-throwing exception specification"}]],
   virtual_destructor_noexcept [[=message{Severity::error, "the exception specification of the overriding destructor is not supported yet"}]],
   virtual_unusable_destructor [[=message{Severity::error, "the overriding destructor or a subobject destructor is unusable or unsupported"}]],
+  ref_qualified_operator_candidates [[=message{Severity::error, "ranking a ref-qualified member operator against a nonmember operator is not supported yet"}]],
   virtual_ref_call [[=message{Severity::error, "a call involving a ref-qualified virtual function is not supported yet"}]],
   virtual_layout [[=message{Severity::error, "object layout requiring virtual function support is not supported yet: {0:t}"}]],
   virtual_base_class [[=message{Severity::error, "a base class with virtual member functions is not supported yet: {0:t}"}]],
