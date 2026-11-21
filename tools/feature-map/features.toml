@@ -657,7 +657,7 @@ clauses = ['expr.new', 'expr.delete', 'basic.stc.dynamic*', 'dcl.fct.def.replace
 std = 'C++98'
 detect = '\bnew\s+[\w:(]|\bdelete\s*(?:\[\s*\])?\s*[\w(*]'
 status = 'partial'
-note = 'ordinary global scalar new and single-object delete for integral and pointer objects; one-dimensional scalar array new and delete syntax; class allocation, native array allocation, placement, and exception cleanup remain'
+note = 'ordinary global scalar new and single-object delete for integral and pointer objects; one-dimensional scalar array new and delete syntax and explicit use of the usual global array allocation signatures; class allocation, native array expressions, placement, and exception cleanup remain'
 probe = '''
 struct S { int v; S(int x) : v(x) {} };
 int main() { S* p = new S(5); int r = p->v; delete p; int* a = new int[3]; delete[] a; return r == 5 ? 0 : 1; }

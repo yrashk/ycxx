@@ -2640,6 +2640,11 @@ and runtime integration with ycxx's own linker remain under [#89]. See the
   allocation address selection, direct deallocation calls, and a Linux peer providing all three
   symbols. Over-aligned storage and expression dispatch are tracked in
   [#293](https://github.com/yrashk/ycxx/issues/293) and [#303](https://github.com/yrashk/ycxx/issues/303).
+- The six usual global array allocation and deallocation declarations support explicit
+  calls and typed address selection, including the aligned signatures. Written
+  redeclarations share the implicit entities. The Itanium mangler emits `na` and `da`, and
+  Linux object tests call providers built with both GCC and Clang. Expression codegen and
+  further allocation-function declarations remain in [#293](https://github.com/yrashk/ycxx/issues/293).
 - Native lowering supports initializers proven nonthrowing from the analyzed expression tree.
   Initializers that need an exception cleanup edge and constant evaluation of allocation remain
   in #293. Namespace-scope allocation uses the existing dynamic initialization path. The issue
