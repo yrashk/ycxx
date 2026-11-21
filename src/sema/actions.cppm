@@ -1066,6 +1066,58 @@ public:
     const bool compatible_cv = cv_within(Types::cv(from_object), Types::cv(to_object));
     return bool_literal(compatible_cv && (source_lvalue ? !rvalue_target : binds_rvalue), begin, end);
   }
+  // [meta.rel] uses existence of a base, regardless of access or the number of paths.
+  std::optional<bool> reaches_base(EntityId derived, EntityId base) {
+    const Classes& records = classes();
+    std::vector<EntityId> pending{derived};
+    std::set<EntityId> visited;
+    bool complete_graph = true;
+    while (!pending.empty()) {
+      const EntityId current = pending.back();
+      pending.pop_back();
+      if (current == base) return true;
+      if (!visited.insert(current).second) continue;
+      const ClassRec* record = records.find(current);
+      if (!record || !record->defined) {
+        complete_graph = false;
+        continue;
+      }
+      for (const BaseRec& edge : record->bases) pending.push_back(edge.cls);
+    }
+    return complete_graph ? std::optional(false) : std::nullopt;
+  }
+  Ex base_of_expr(QualType base_type, QualType derived_type, u32 begin, u32 end) {
+    const Types& ts = types();
+    const QualType base = Types::unqualified(ts.canonical(base_type));
+    const QualType derived = Types::unqualified(ts.canonical(derived_type));
+    const engine::Loc loc = type_trait_loc(begin);
+    const auto fail = [&](Diag d, const auto&... args) -> Ex {
+      diag_at(loc, d, args...);
+      return {NodeId::none, begin, end};
+    };
+    if (ts.is_dependent(base) || ts.is_dependent(derived)) {
+      if (auto pattern = replayed_binary_type_trait(ast::DepOp::is_base_of, base, derived, begin, end)) {
+        // Either operand becoming concrete at replay can change whether Derived needs completion.
+        q_->record_dependent_type_trait_operand(loc);
+        return *pattern;
+      }
+      return fail(Diag::base_of_dependent);
+    }
+    if (!ts.is_class(base) || !ts.is_class(derived)) return bool_literal(false, begin, end);
+    const auto base_union = is_union_type(base), derived_union = is_union_type(derived);
+    if (base_union == true || derived_union == true) return bool_literal(false, begin, end);
+    if (!base_union || !derived_union) return fail(Diag::base_of_unsupported, base_type, derived_type);
+    const EntityId b = ts.class_of(base), d = ts.class_of(derived);
+    if (b == d) return bool_literal(true, begin, end);
+
+    const auto complete_at_demand = q_->type_trait_at_demand(d, loc);
+    if (!(complete_at_demand ? *complete_at_demand : q_->is_complete_at_source(d))) {
+      if (q_->type_trait_instantiation_failed(d)) return {NodeId::none, begin, end};
+      return fail(Diag::base_of_incomplete, derived_type);
+    }
+    if (auto result = reaches_base(d, b)) return bool_literal(*result, begin, end);
+    return fail(Diag::base_of_unsupported, base_type, derived_type);
+  }
   // `__trait(T…)` that tests types ([meta.unary], [meta.rel]): a `bool` prvalue, value-dependent
   // while a type is dependent for the traits that support it.
   Ex trait_expr(lex::TypeTrait t, NameId name, std::span<const QualType> args, u32 begin, u32 end) {
@@ -1080,6 +1132,7 @@ public:
     std::optional<ast::DepOp> unary_op;
     switch (t) {
     case is_same: return structural_trait(templates().is_same_value(args[0], args[1]));
+    case is_base_of: return base_of_expr(args[0], args[1], begin, end);
     case is_assignable: return assignability_expr(ast::DepOp::is_assignable, name, args[0], args[1], begin, end);
     case is_nothrow_assignable:
       return assignability_expr(ast::DepOp::is_nothrow_assignable, name, args[0], args[1], begin, end);
