@@ -6778,11 +6778,8 @@ public:
   }
 
   // [expr.new]: a potentially evaluated constant bound is checked before unsigned conversion.
-  bool valid_new_bound(Ex bound, u64 element_size) {
-    if (unevaluated || !constant_of) return true;
-    auto known = constant_of(bound);
-    if (!known) return true;
-    ValueRec value = w_->values.rec(*known);
+  bool valid_new_bound(Ex bound, u64 element_size, ConstId known) {
+    ValueRec value = w_->values.rec(known);
     int size_bits = shape(w_->target, w_->target.ptrdiff_type).bits - 1;
     u64 max_count = max_new_array_count(element_size);
     bool negative = false;
@@ -6803,7 +6800,44 @@ public:
     return true;
   }
 
-  Ex new_array(QualType t, Ex bound, bool literal_bound, const std::optional<std::vector<Ex>>& args,
+  // Prove that replacing the bound with its evaluated value leaves no runtime work.
+  // The interpreter returns at most 64 bits, so the proof also covers intermediate types.
+  bool arithmetic_array_bound(Ex bound) {
+    auto integral = [&](const ExprInfo& info) {
+      const auto type = types().builtin_of(info.type);
+      if (info.category != ValueCategory::prvalue || !type || !ast::is_integral(*type)) return false;
+      const auto width = ast::width_of(w_->target, *type);
+      return width != 0 && width <= 64;
+    };
+    std::vector<NodeId> pending{bound.id};
+    while (!pending.empty()) {
+      const Ex e{pending.back()};
+      pending.pop_back();
+      if (auto lit = as<ast::Literal>(e)) {
+        if (!integral(lit->info) || !ins().values.is<ast::VInt>(lit->value)) return false;
+      } else if (auto paren = as<ast::Paren>(e)) {
+        if (!integral(paren->info)) return false;
+        pending.push_back(paren->operand.id);
+      } else if (auto unary = as<ast::Unary>(e)) {
+        if (!integral(unary->info) || (unary->op != ast::UnaryOp::plus && unary->op != ast::UnaryOp::minus)) return false;
+        pending.push_back(unary->operand.id);
+      } else if (auto binary = as<ast::Binary>(e)) {
+        using enum ast::BinaryOp;
+        if (!integral(binary->info) || (binary->op != add && binary->op != sub && binary->op != mul)) return false;
+        pending.push_back(binary->rhs.id);
+        pending.push_back(binary->lhs.id);
+      } else if (auto conversion = as<ast::ImplicitConversion>(e)) {
+        if (!integral(conversion->info) || conversion->conversion != ast::ConversionKind::integral ||
+            conversion->function != EntityId::none) return false;
+        pending.push_back(conversion->operand.id);
+      } else {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  Ex new_array(QualType t, Ex bound, bool literal_arithmetic_bound, const std::optional<std::vector<Ex>>& args,
                const Braced* braces, u32 begin, u32 end) {
     Ex fail{NodeId::none, begin, end};
     if (!bound.ok()) return fail;
@@ -6829,17 +6863,21 @@ public:
       diag(begin, Diag::not_supported, lex::Tk::kw_new);
       return fail;
     }
-    if (!valid_new_bound(bound, *size)) return fail;
+    const auto known = !unevaluated && constant_of ? constant_of(bound) : std::nullopt;
+    if (known && !valid_new_bound(bound, *size, *known)) return fail;
 
     Ex init = braces ? list_init(t, *braces) : args ? value_init(t, end, end) : default_init(t, end, end);
     if (!init.ok()) return fail;
     Child allocation;
-    if (!unevaluated && !args && !braces && literal_bound && w_->target.triple == ast::x86_64_linux.triple) {
+    if (!unevaluated && !args && !braces && literal_arithmetic_bound &&
+        w_->target.triple == ast::x86_64_linux.triple && arithmetic_array_bound(bound)) {
       const auto written = as<ast::Literal>(bound);
-      if (written && ins().values.is<ast::VInt>(written->value)) {
+      const ConstId value = written ? written->value : known.value_or(ConstId::none);
+      if (value != ConstId::none && ins().values.is<ast::VInt>(value)) {
         // Check the full value before multiplying or converting it to size_t.
-        ast::Bits128 n = ast::int_bits(ins(), written->value);
-        if (n.hi == 0 && n.lo <= max_new_array_count(*size)) {
+        const auto integer = ins().values.get<ast::VInt>(value);
+        const auto n = integer.bits;
+        if (same_unqualified(integer.type, bound.type()) && n.hi == 0 && n.lo <= max_new_array_count(*size)) {
           QualType size_type = builtin(w_->target.size_type);
           Ex bytes = literal(size_type, w_->values.integer(size_type, n.lo * *size),
                              ValueCategory::prvalue, bound.begin, bound.end);

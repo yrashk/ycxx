@@ -2846,12 +2846,14 @@ and runtime integration with ycxx's own linker remain under [#89]. See the
   the usual unsized `operator delete[](void*)` when non-null. The call releases the allocation,
   including zero-length arrays.
 - Linux x86-64 can allocate these default-initialized arrays in ordinary functions certified
-  for cleanup-free unwinding when the bound is a single integer literal. The usual global
-  `operator new[](size_t)` receives the checked byte count, including zero. Lowering preserves
-  the returned address and leaves the element bytes alone. A hosted caller can catch an
-  exception from a replacement allocator across the wrapper. `unit.linux_fixed_array_new`
-  checks call relocations, unwind frame coverage, allocation, and release.
-  Broader allocation and deletion remain in #293.
+  for cleanup-free unwinding. The bound can use integer literals, parentheses, built-in unary
+  `+` and `-`, and built-in binary `+`, `-`, and `*`, with integral types up to 64 bits.
+  The usual global `operator new[](size_t)` receives the checked byte count, including zero.
+  Lowering preserves the returned address and leaves the element bytes alone. A hosted caller
+  can catch an exception from a replacement allocator across the wrapper.
+  `unit.linux_fixed_array_new` checks call relocations, unwind frames, allocation, and release
+  for both single literals and computed bounds. Named constants, dynamic bounds, and broader
+  allocation and deletion remain in #293.
   Constant-evaluated allocation and deletion are tracked in #321.
   [Cookie-free deletion](docs/design/cookie-free-array-delete.md)
   A file-scope scalar initializer still needs lowered code to qualify for dynamic initialization.
