@@ -695,7 +695,8 @@ public:
   // `X<args>` naming a class template specialization ([temp.names], [temp.arg]), or the type an
   // alias template specialization stands for: its type with the arguments substituted
   // ([temp.alias]/2).
-  std::optional<QualType> class_template_id(const ast::DeclSema& tmpl, std::span<const TemplateArg> args, u32 at) {
+  std::optional<QualType> class_template_id(const ast::DeclSema& tmpl, std::span<const TemplateArg> args, u32 at,
+                                           bool directly_named = true) {
     auto full = template_arguments(tmpl, args, at);
     if (!full) return std::nullopt;
     if (tmpl.kind == ast::DeclKind::type_alias) {
@@ -707,7 +708,7 @@ public:
     }
     // [temp.names]/9: naming a non-dependent specialization checks the primary's
     // constraints even when the use does not require a complete class.
-    if (tmpl.kind == ast::DeclKind::class_ && tmpl.constraints != ConstId::none &&
+    if (directly_named && tmpl.kind == ast::DeclKind::class_ && tmpl.constraints != ConstId::none &&
         w_->entities.rec(tmpl.entity).kind == EntityKind::class_template &&
         args.size() == full->size() &&
         std::ranges::all_of(*full, [&](const TemplateArg& arg) {
@@ -2258,7 +2259,7 @@ public:
       if (a->templ != EntityId::none) {
         auto d = q_->template_decl(a->templ);
         if (!d) return std::nullopt;
-        return class_template_id(*d, t.flatten(*full), at);
+        return class_template_id(*d, t.flatten(*full), at, /*directly_named=*/false);
       }
       TypeRec r = types().rec(a->type);
       return types().dep_spec(r.depth, r.index, r.pack, *full);

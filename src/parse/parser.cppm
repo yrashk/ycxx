@@ -736,6 +736,7 @@ public:
           }
           if (qualified_ahead()) {
             // `N::C`, `::C`, `C::E`, `X<T>::E` ([dcl.type.simple]).
+            const auto diags = s_->diag_count();
             if (auto q = qualified_type(0, true);
                 q && (in_type_id || kind(q->second) != Tk::l_paren ||
                       function_pointer_declarator_ahead(q->second) ||
@@ -744,6 +745,7 @@ public:
               take_qualified(q->second);
               continue;
             }
+            if (s_->has_error_since(diags)) d.ok = false;
             goto done;
           }
           if (kind(1) == Tk::less && s_->names_type_template(name_of(tok()))) {
@@ -1489,6 +1491,7 @@ public:
     u32 saved = i_;
     bool saved_half = half_;
     std::size_t diags = s_->diag_count();
+    const u32 name_at = pos() + j;
     i_ += j + 1;
     auto args = template_argument_list();
     u32 after = i_ - saved;
@@ -1496,7 +1499,7 @@ public:
     bool ended_half = half_;  // the list ended in the first half of a `>>`
     std::optional<QualType> t;
     if (args && closed)
-      t = tt ? s_->template_param_id(*tt, *args, 0) : builtin ? s_->builtin_template_id(n, *args, 0) : type_template_id(*tmpl, *args, 0);
+      t = tt ? s_->template_param_id(*tt, *args, 0) : builtin ? s_->builtin_template_id(n, *args, 0) : type_template_id(*tmpl, *args, name_at);
     i_ = saved;
     half_ = saved_half;
     if (!scope) qualified_half_ = ended_half;
@@ -1527,7 +1530,9 @@ public:
     qualified_half_ = false;
     if (kind(next + 1) == Tk::less && s->ns) {
       u32 j = next;
-      if (auto t = template_id_scope(s, j, /*scope=*/false, check_qualifier)) return std::pair{*t->type, j - start};
+      const auto diags = s_->diag_count();
+      if (auto t = template_id_scope(s, j, /*scope=*/false, checked)) return std::pair{*t->type, j - start};
+      if (checked && s_->has_error_since(diags)) return std::nullopt;
     }
     NameId name = name_of(tok(next));
     std::optional<u32> at = checked ? std::optional{pos() + next} : std::nullopt;
