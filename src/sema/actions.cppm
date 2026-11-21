@@ -673,6 +673,7 @@ public:
         diag(*at, Diag::ambiguous_name, name);
         return std::nullopt;
       }
+      if (matching != decls.end()) found = *matching;
     }
     if (!found && !decls.empty()) found = decls.back();
     if (!found || found->kind != kind || !(found->flags & decl_flag::template_)) return std::nullopt;
