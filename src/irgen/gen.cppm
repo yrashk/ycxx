@@ -169,6 +169,7 @@ class Gen {
   TypeClass cls(ast::QualType q) { return facts_.classify(q); }
   bool same_type(ast::QualType a, ast::QualType b) { return facts_.canonical(a) == facts_.canonical(b); }
   bool is_signed(ast::QualType q) { return facts_.integer(q).is_signed; }
+  bool is_nullptr(ast::QualType q) { return ast::builtin_of(in_, q) == ast::Builtin::nullptr_t; }
 
   // ------------------------------------------------------------------ emission
 
@@ -462,11 +463,6 @@ class Gen {
         live_ = false;
       }
     }
-  }
-
-  bool is_literal(At a) {
-    while (is<ast::Paren>(a)) a = child(a, get<ast::Paren>(a).operand);
-    return is<ast::Literal>(a);
   }
 
   ir::NodeId last_node() const { return ir::NodeId(uint32_t(debug_.loc.size() - 1)); }
@@ -871,7 +867,7 @@ class Gen {
   }
   ValueId zero(ast::QualType t) {
     if (in_.types.is<ast::TMemberPtr>(in_.types.canon(t))) throw Unsupported{"value-initializing a pointer to member"};
-    if (cls(t) == TypeClass::pointer) return constant(t, facts_.null_constant(t));
+    if (cls(t) == TypeClass::pointer || is_nullptr(t)) return constant(t, facts_.null_constant(t));
     if (cls(t) == TypeClass::floating) return float_constant(t, 0.0);
     return int_constant(t, 0);
   }
@@ -1264,10 +1260,11 @@ class Gen {
           op == ast::UnaryOp::post_dec)
         return 2;
     }
-    int e = is<ast::ImplicitConversion>(a) &&
-                    get<ast::ImplicitConversion>(a).conversion == ast::ConversionKind::lvalue_to_rvalue
-                ? 1
-                : 0;
+    int e = 0;
+    if (is<ast::ImplicitConversion>(a)) {
+      auto c = get<ast::ImplicitConversion>(a);
+      if (c.conversion == ast::ConversionKind::lvalue_to_rvalue && !is_nullptr(c.info.type)) e = 1;
+    }
     ast::Red(ast_, a.id).for_each_child([&](const ast::Red& c) { e = std::max(e, effects({c.id(), 0})); });
     return e;
   }
@@ -1355,7 +1352,14 @@ class Gen {
     ast::QualType t = c.info.type;
     At from = child(a, c.operand);
     switch (c.conversion) {
-      case ast::ConversionKind::lvalue_to_rvalue: return load(lvalue(from));
+      case ast::ConversionKind::lvalue_to_rvalue: {
+        Place p = lvalue(from);
+        if (!is_nullptr(t)) return load(p);
+        // [conv.lval]: a std::nullptr_t glvalue is evaluated without accessing its object.
+        ir::Ty result[] = {vty(t)};
+        ValueId operands[] = {state_, p.ptr};
+        return b_.result(emit(ir::Op::nullptr_value, result, operands));
+      }
       case ast::ConversionKind::function_to_pointer: return lvalue(from).ptr;
       case ast::ConversionKind::integral:
       case ast::ConversionKind::floating:
@@ -1390,7 +1394,8 @@ class Gen {
         discard(from);
         return std::nullopt;
       case ast::ConversionKind::null_pointer:
-        if (effects(from)) discard(from);  // a null pointer constant has no value to compute ([conv.ptr])
+        // [conv.ptr]: a std::nullptr_t operand is evaluated even though the result is known.
+        if (is_nullptr(info(from).type)) discard(from);
         return constant(t, facts_.null_constant(t));
       default: unsupported(a, "of this conversion kind");
     }
@@ -1499,17 +1504,13 @@ class Gen {
   std::optional<ValueId> binary(At a) {
     auto bn = get<ast::Binary>(a);
     At l = child(a, bn.lhs), r = child(a, bn.rhs);
-    // Two std::nullptr_t values are equal ([expr.eq]/7). Such an operand is a `nullptr` literal
-    // in the α subset, so nothing is evaluated.
-    if (cls(info(l).type) == TypeClass::other && (bn.op == ast::BinaryOp::eq || bn.op == ast::BinaryOp::ne)) {
-      for (At o : {l, r})
-        if (!is_literal(o)) unsupported(o, "of type std::nullptr_t");
-      return int_constant(bn.info.type, bn.op == ast::BinaryOp::eq);
-    }
     ValueId x{}, y{};
     unsequenced(std::array{l, r}, [&](std::size_t i, At o) { (i ? y : x) = rvalue(o); });
     ast::QualType t = bn.info.type, ot = info(l).type;
     using enum ast::BinaryOp;
+    // [expr.eq]: two std::nullptr_t values compare equal after both operands are evaluated.
+    if ((bn.op == eq || bn.op == ne) && is_nullptr(ot) && is_nullptr(info(r).type))
+      return int_constant(t, bn.op == eq);
     switch (bn.op) {
       case lt: case gt: case le: case ge: case eq: case ne: {
         if (cls(ot) == TypeClass::pointer) {

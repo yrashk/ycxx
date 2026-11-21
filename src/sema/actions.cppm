@@ -6235,9 +6235,9 @@ public:
         return bin(k, a, c, b);
       }
       if (equality && types().is(ta, Builtin::nullptr_t) && types().is(tc, Builtin::nullptr_t)) return bin(k, a, c, b);
-      if (equality && types().is_pointer(ta) && is_null_pointer_constant(r))
+      if (equality && types().is_pointer(ta) && (types().is(tc, Builtin::nullptr_t) || is_null_pointer_constant(r)))
         return bin(k, a, convert_node(c, ast::ConversionKind::null_pointer, ta), b);
-      if (equality && types().is_pointer(tc) && is_null_pointer_constant(l))
+      if (equality && types().is_pointer(tc) && (types().is(ta, Builtin::nullptr_t) || is_null_pointer_constant(l)))
         return bin(k, convert_node(a, ast::ConversionKind::null_pointer, tc), c, b);
       return invalid();
     }

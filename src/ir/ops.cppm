@@ -278,6 +278,10 @@ export enum class Op : std::uint16_t {
   va_arg [[=state({S, V}, {S, V}).with({nonconstant})]],
   va_copy [[=state({S, V, V}, {S}).with({nonconstant})]],
   va_end [[=state({S, V}, {S}).with({nonconstant})]],
+
+  // Lvalue-to-rvalue conversion of a std::nullptr_t glvalue evaluates its designator
+  // and yields null without loading the object ([conv.lval]).
+  nullptr_value [[=state({S, V}, {V})]],
 };
 
 export constexpr std::size_t op_count = std::meta::enumerators_of(^^Op).size();
