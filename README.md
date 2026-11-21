@@ -45,8 +45,9 @@ tools/build
 build/bin/ycxx cxx hello.cpp -o hello && ./hello
 ```
 
-Concrete `auto(x)` and `auto{x}` decay-copy expressions support scalar and pointer values,
-including array and function decay. [#286](https://github.com/yrashk/ycxx/issues/286)
+Single-expression `auto(x)` and `auto{x}` perform scalar and pointer decay-copy, including
+array and function decay. Function-template bodies can defer supported dependent operands to
+instantiation. [#286](https://github.com/yrashk/ycxx/issues/286)
 
 **Preprocess binary resources.** Both targets support `#embed` and `__has_embed` with the standard
 parameters. [#125](https://github.com/yrashk/ycxx/issues/125)
