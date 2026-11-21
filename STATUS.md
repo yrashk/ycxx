@@ -1930,6 +1930,9 @@ What the process allocates, attributed to the engine's cells, in the trace and t
 - Proven trivial operations still use the existing representation copy. The remaining special
   member, implicit move, and nontrivial base, array and union cases stay in #244 and #360.
   [Design](docs/design/implicit-copy-assignment.md)
+- A user-declared copy or move assignment suppresses the implicit move constructor. A move
+  assignment also deletes an otherwise implicit copy constructor. The resulting constructor
+  availability determines call triviality. [#244](https://github.com/yrashk/ycxx/issues/244)
 
 ## Templates, ζ step 9: member function templates (#88, #314, 2026-11-19)
 

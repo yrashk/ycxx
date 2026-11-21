@@ -1603,7 +1603,7 @@ std = 'C++98'
 detect = '\boperator\s*=\s*\('
 status = 'partial'
 issues = [244, 360]
-note = 'memberwise implicit lvalue copy assignment for ordinary non-template classes without bases. Remaining special-member declaration, implicit move, and nontrivial base and array assignment rules'
+note = 'memberwise implicit lvalue copy assignment for ordinary non-template classes without bases and user-declared assignment effects on implicit constructors. Remaining special-member declaration, implicit move, and nontrivial base and array assignment rules'
 probe = '''
 struct S { int v; S(int x) : v(x) {} S(const S& o) : v(o.v + 1) {} S& operator=(const S& o) { v = o.v; return *this; } };
 int main() { S a(1); S b(a); S c(5); c = b; return c.v == 2 ? 0 : 1; }
