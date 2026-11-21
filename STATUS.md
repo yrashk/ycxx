@@ -671,6 +671,12 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   to one definition. `unit.linux_inline` checks symbol bindings, address identity, archive
   extraction, and both operand orders with the native and host linkers.
   [Design](docs/design/linux-inline-functions.md) · [#422](https://github.com/yrashk/ycxx/issues/422)
+- Explicit GNU `visibility("hidden")` follows ordinary external namespace-scope functions across
+  redeclarations. On x86-64 ELF, inline definitions combine `STB_WEAK` with `STV_HIDDEN`.
+  Ordinary non-inline definitions and referenced declarations combine `STB_GLOBAL` with
+  `STV_HIDDEN`. `unit.linux_inline` checks both scoped attribute spellings, symbol metadata,
+  and cross-unit address identity with the native and host linkers in both object orders.
+  [#602](https://github.com/yrashk/ycxx/issues/602)
 - Constant-initialized and zero-initialized external inline namespace variables use weak ELF
   definitions when their initial values need no relocations. This includes explicitly inline
   full variable-template specializations with builtin type arguments. Static addresses and
@@ -1278,8 +1284,10 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
 ## `<cstdio>`, step 3: attributes, asm labels, string-initialized arrays (#133, 2026-11-18)
 
 - **Attributes:** `[[…]]` attribute-specifiers on declarations, class heads and statements, and
-  GNU `__attribute__((…))` before and after declarators, are parsed and ignored
-  ([dcl.attr.grammar]/6); none before a linkage-specification ([dcl.link]).
+  GNU `__attribute__((…))` before and after declarators, are parsed. The parser skips
+  unrecognized attributes ([dcl.attr.grammar]/6) and diagnoses a standard attribute before a
+  linkage-specification with a single declaration ([dcl.link]). GNU hidden visibility on ordinary
+  namespace-scope functions is implemented for x86-64 ELF. [#602](https://github.com/yrashk/ycxx/issues/602)
 - **Asm labels:** `__asm("…")` after a declarator gives the entity's symbol exactly as written
   (`Program::asm_label`, `pipeline::Entity::asm_label`), as the SDK's `__DARWIN_ALIAS` needs.
   Both extensions are listed in `docs/EXTENSIONS.md` (DECISIONS §1.2).
@@ -2724,11 +2732,13 @@ and runtime integration with ycxx's own linker remain under [#89]. See the
   allocation address selection, direct deallocation calls, and a Linux peer providing all three
   symbols. Over-aligned storage and expression dispatch are tracked in
   [#293](https://github.com/yrashk/ycxx/issues/293) and [#303](https://github.com/yrashk/ycxx/issues/303).
-- Written nonthrowing global scalar allocation and deallocation overloads can take a final
-  `const Tag&`, with an optional preceding `std::align_val_t`. The tag can be a named incomplete
-  class or union, including `std::nothrow_t`. These declarations enter ordinary overload lookup
-  when written and support explicit calls. Tagged placement expressions remain in
-  [#293](https://github.com/yrashk/ycxx/issues/293).
+- Written nonthrowing global scalar and array allocation and deallocation overloads can take a
+  final `const Tag&`, with an optional preceding `std::align_val_t`. The tag can be a named
+  incomplete class or union, including `std::nothrow_t`. These declarations enter ordinary
+  overload lookup when written and support explicit calls and typed addresses. A default-aligned
+  `new` or `new[]` diagnoses ambiguity when defaults visible at the expression make a written
+  overload and the usual size-only allocation function equally viable. Tagged placement
+  expressions remain in [#293](https://github.com/yrashk/ycxx/issues/293).
 - The six usual global array allocation and deallocation declarations support explicit
   calls and typed address selection, including the aligned signatures. Written
   redeclarations share the implicit entities. The Itanium mangler emits `na` and `da`, and
