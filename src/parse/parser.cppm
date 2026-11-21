@@ -209,6 +209,89 @@ public:
     return t && t->transforms ? t : nullptr;
   }
 
+  // Recognize a grouped declarator before treating `auto(...)` as a declaration
+  // ([stmt.ambig]). A function or array suffix can follow the name inside the group.
+  bool grouped_auto_declarator_ahead(u32 close, bool statement) {
+    u32 next = 2;
+    u32 groups = 0;
+    while (next < close) {
+      if (kind(next) == Tk::l_paren) {
+        ++groups;
+        ++next;
+        continue;
+      }
+      if (auto star = member_pointer_star(next)) next = *star;
+      if (kind(next) != Tk::star && kind(next) != Tk::amp && kind(next) != Tk::ampamp) break;
+      next = past_attributes(next + 1);
+      while (kind(next) == Tk::kw_const || kind(next) == Tk::kw_volatile ||
+             kind(next) == Tk::kw___restrict || kind(next) == Tk::kw___restrict__)
+        ++next;
+    }
+    if (qualified_ahead(next)) {
+      bool saved_half = qualified_half_;
+      u32 name = next;
+      auto scope = nested_name(next, name);
+      qualified_half_ = saved_half;
+      if (!scope) return false;
+      next = name;
+    }
+    if (kind(next) != Tk::identifier) return false;
+    next = past_attributes(next + 1);
+    while (next < close) {
+      if (kind(next) == Tk::r_paren && groups != 0) {
+        --groups;
+        ++next;
+      } else if (kind(next) == Tk::l_paren && params_ahead(next, statement)) {
+        next = past_parentheses(next);
+      } else if (kind(next) == Tk::l_square) {
+        u32 depth = 1;
+        while (++next < close && depth != 0) {
+          if (kind(next) == Tk::l_square) ++depth;
+          if (kind(next) == Tk::r_square) --depth;
+        }
+        if (depth != 0) return false;
+      } else {
+        return false;
+      }
+    }
+    return next == close && groups == 0;
+  }
+
+  // A trailing return type can start with a keyword or a name denoting a type.
+  bool trailing_return_type_ahead(u32 next) {
+    return starts_decl_specifier(kind(next)) || qualified_ahead(next) || transform_trait_ahead(next) ||
+           (kind(next) == Tk::identifier && s_->class_name(name_of(tok(next))).has_value());
+  }
+
+  // In a statement a second parenthesized group can be a direct initializer.
+  // Otherwise it must be a parameter clause followed by declarator syntax.
+  bool grouped_auto_statement_suffix(u32 open) {
+    const u32 after = past_parentheses(open);
+    switch (kind(after)) {
+    case Tk::semi: case Tk::comma:
+      return true;
+    case Tk::equal: case Tk::l_brace: case Tk::kw_noexcept: case Tk::kw_const: case Tk::kw_volatile:
+      return params_ahead(open);
+    case Tk::amp: case Tk::ampamp: {
+      // A ref-qualifier must be followed by more declarator syntax or a
+      // declaration boundary. An operand after it belongs to the expression.
+      const u32 next = past_attributes(after + 1);
+      switch (kind(next)) {
+      case Tk::semi: case Tk::comma: case Tk::equal: case Tk::l_brace: case Tk::kw_noexcept:
+        return params_ahead(open);
+      case Tk::arrow:
+        return params_ahead(open) && trailing_return_type_ahead(next + 1);
+      default:
+        return false;
+      }
+    }
+    case Tk::arrow:
+      return params_ahead(open) && trailing_return_type_ahead(after + 1);
+    default:
+      return false;
+    }
+  }
+
   // Whether a declaration starts here: a decl-specifier keyword, or a name that denotes a class
   // ([stmt.ambig]: what can be a declaration is one). In a `statement`, a member of a dependent
   // class names a type only after `typename` ([temp.res.general]/4-5); a namespace-scope or member
@@ -217,7 +300,8 @@ public:
     if (transform_trait_ahead()) return true;
     // [stmt.ambig]: `int(x) + 1;`, `int(3);` and `void();` are expressions; `int(x);`, `int(x) = 1;`
     // and `int(*f)(int);` declare.
-    if (simple_type_keyword(kind()) && kind(1) == Tk::l_paren) {
+    if (is(Tk::kw_auto) && kind(1) == Tk::l_brace) return false;
+    if ((simple_type_keyword(kind()) || is(Tk::kw_auto)) && kind(1) == Tk::l_paren) {
       Tk inner = kind(2);
       if (inner == Tk::r_paren || lex::is_literal(inner)) return false;
       u32 j = 1, depth = 0;
@@ -226,6 +310,11 @@ public:
         if (kind(j) == Tk::r_paren && --depth == 0) break;
       }
       Tk after = kind(j + 1);
+      if (is(Tk::kw_auto)) {
+        if (!grouped_auto_declarator_ahead(j, statement)) return false;
+        if (statement && after == Tk::l_paren && kind(past_parentheses(j + 1)) != Tk::r_paren)
+          return grouped_auto_statement_suffix(j + 1);
+      }
       return after == Tk::semi || after == Tk::equal || after == Tk::comma || after == Tk::l_square ||
              after == Tk::l_paren || after == Tk::l_brace;
     }
@@ -3334,6 +3423,15 @@ public:
       return {NodeId::none, begin, begin};
     case Tk::kw_this: bump(); return s_->this_expr(begin, pos());
     case Tk::kw_requires: return requires_expression();
+    case Tk::kw_auto:
+      if (kind(1) == Tk::l_paren || kind(1) == Tk::l_brace) {
+        bump();
+        Ex operand = single_auto_initializer();
+        Ex result = s_->decay_copy(operand, begin);
+        return {result.id, begin, pos(), result.info};
+      }
+      s_->diag(begin, Diag::expected_expression);
+      return {NodeId::none, begin, pos()};
     case Tk::kw_static_cast:
     case Tk::kw_reinterpret_cast: {
       const bool reinterpret = is(Tk::kw_reinterpret_cast);
@@ -4499,18 +4597,47 @@ public:
   // the initializer one needs, `=` or `{` outside brackets, so `T(1)` is an expression.
   bool condition_declaration_ahead() {
     if (!starts_declaration(true)) return false;
+    const bool grouped_auto = is(Tk::kw_auto) && kind(1) == Tk::l_paren;
+    bool parameter_clause = false;
+    if (grouped_auto) {
+      const u32 after = past_parentheses(1);
+      // A parenthesized initializer can follow a declaration statement. In a
+      // condition it can be a parameter clause only for a grouped indirection.
+      if (kind(after) == Tk::l_paren) {
+        u32 inner = 2;
+        while (kind(inner) == Tk::l_paren) ++inner;
+        if ((kind(inner) != Tk::star && kind(inner) != Tk::amp && kind(inner) != Tk::ampamp &&
+             !member_pointer_star(inner)) || !params_ahead(after))
+          return false;
+        parameter_clause = true;
+      }
+    }
     int depth = 0;
+    bool trailing_return = false;
     for (u32 j = 0;; ++j) {
       switch (kind(j)) {
       case Tk::eof: case Tk::semi: return false;
       case Tk::equal: if (depth == 0) return true; break;
       case Tk::l_brace: if (depth == 0) return true; ++depth; break;
+      case Tk::arrow:
+        if (grouped_auto && depth == 0) {
+          if (!parameter_clause || !trailing_return_type_ahead(j + 1))
+            return false;
+          trailing_return = true;
+        }
+        break;
       case Tk::l_paren: case Tk::l_square: ++depth; break;
       case Tk::r_paren: case Tk::r_square: case Tk::r_brace:
         // `T x)`: a declaration missing its initializer, which `condition_operand` reports.
         if (depth-- == 0) return j >= 2 && kind(j - 1) == Tk::identifier && kind(j - 2) != Tk::l_paren;
         break;
-      default: break;
+      default:
+        if (grouped_auto && depth == 0 && !trailing_return &&
+            (binary_operator(kind(j)) || assignment_operator(kind(j)) ||
+            kind(j) == Tk::question || kind(j) == Tk::comma || kind(j) == Tk::period ||
+            kind(j) == Tk::plusplus || kind(j) == Tk::minusminus))
+          return false;
+        break;
       }
     }
   }
@@ -5213,6 +5340,33 @@ public:
     return s_->node(ast::DeclStmt{s_->builder().list(cs)}, begin, pos());
   }
 
+  // [dcl.type.auto.deduct]: a parenthesized or braced auto initializer has one expression.
+  Ex single_auto_initializer() {
+    const u32 open = pos();
+    std::vector<Ex> args;
+    if (is(Tk::l_brace)) {
+      auto list = braced_init_list();
+      for (const auto& clause : list->clauses) {
+        if (clause.list || clause.designated) {
+          s_->diag(clause.begin, Diag::auto_list, u64(list->clauses.size()));
+          return {NodeId::none, open, pos()};
+        }
+        args.push_back(clause.expr);
+      }
+    } else {
+      bump();
+      if (!is(Tk::r_paren))
+        do args.push_back(is(Tk::l_brace) ? s_->braced_argument(braced_init_list()) : assignment_expression());
+        while (accept(Tk::comma));
+      if (!expect(Tk::r_paren)) return {NodeId::none, open, pos()};
+    }
+    if (args.size() != 1 || s_->is_braced(args.front())) {
+      s_->diag(open, Diag::auto_list, u64(args.size()));
+      return {NodeId::none, open, pos()};
+    }
+    return args.front();
+  }
+
   // The initializer of block-scope variable `d`, declared as `local` with a placeholder type:
   // `= e`, `(e)` or `{e}` ([dcl.type.auto.deduct]/2), from which its type is deduced, then the
   // variable initialized as one of that type. `replaced` holds what an earlier declarator's
@@ -5227,30 +5381,7 @@ public:
       }
       e = assignment_expression();
     } else if (is(Tk::l_brace) || is(Tk::l_paren)) {
-      bool brace = is(Tk::l_brace);
-      u32 open = pos();
-      std::vector<Ex> args;
-      if (brace) {
-        auto b = braced_init_list();
-        for (auto& c : b->clauses) {
-          if (c.list || c.designated) {
-            s_->diag(c.begin, Diag::auto_list, u64(b->clauses.size()));
-            return {NodeId::none, at, pos()};
-          }
-          args.push_back(c.expr);
-        }
-      } else {
-        bump();
-        if (!is(Tk::r_paren))
-          do args.push_back(assignment_expression());
-          while (accept(Tk::comma));
-        if (!expect(Tk::r_paren)) return {NodeId::none, at, pos()};
-      }
-      if (args.size() != 1) {  // [dcl.type.auto.deduct]/2.1: a single element
-        s_->diag(open, Diag::auto_list, u64(args.size()));
-        return {NodeId::none, at, pos()};
-      }
-      e = args[0];
+      e = single_auto_initializer();
     } else {
       s_->diag(d.name_at, Diag::auto_uninitialized, d.name);
       return {NodeId::none, at, pos()};
