@@ -67,6 +67,15 @@ public:
   TemplateArg type_arg(QualType t) { return {TemplateArgKind::type, types().canonical(t), ConstId::none}; }
   TemplateArg value_arg(QualType t, ConstId v) { return {TemplateArgKind::value, types().canonical(Types::unqualified(t)), v}; }
 
+  // The specialization of variable template `templ` for canonical arguments ([temp.spec.general]).
+  EntityId specialize_variable(EntityId templ, std::span<const TemplateArg> args) {
+    const EntityRec& t = w_->entities.rec(templ);
+    EntityRec spec{EntityKind::variable, t.name, {}, t.lang, t.linkage, t.first, t.scope};
+    spec.templ = templ;
+    spec.args.assign(args.begin(), args.end());
+    return w_->entities.entity(std::move(spec));
+  }
+
   // ------------------------------------------------------------ substitution ([temp.inst])
 
   // `t` with the parameters `b` binds replaced by their arguments. None when that forms a type
@@ -367,6 +376,12 @@ public:
       if (auto st = substitute(t, b)) t = types().canonical(Types::unqualified(*st));
     if ((ins().values.is<ast::VDepOp>(a.value) || ins().values.is<ast::VDepOp>(*v)) && !types().is(t, Builtin::bool_))
       return std::nullopt;
+    if (ins().values.is<ast::VDepVariable>(a.value) && !ins().values.is_dependent(*v)) {
+      QualType source = t;
+      if (ins().values.is<ast::VInt>(*v)) source = ins().values.get<ast::VInt>(*v).type;
+      if (ins().values.is<ast::VFloat>(*v)) source = ins().values.get<ast::VFloat>(*v).type;
+      return converted_value(value_arg(source, *v), t);
+    }
     return TemplateArg{TemplateArgKind::value, t, *v};
   }
   // A value with the parameters `b` binds replaced. Evaluate dependent operations when their
@@ -385,6 +400,17 @@ public:
       if (!a) return v;
       if (a->kind != TemplateArgKind::pack) return std::nullopt;
       return w_->values.integer(types().builtin(Builtin::unsigned_long), ins().seqs.size(a->elems));
+    }
+    if (ins().values.is<ast::VDepVariable>(v)) {
+      auto ref = ins().values.get<ast::VDepVariable>(v);
+      auto args = substitute_args(ins().seqs.elements(ref.args), b);
+      if (!args) return std::nullopt;
+      if (std::ranges::any_of(*args, [&](const TemplateArg& a) { return w_->arg_dependent(a); })) {
+        ref.args = ins().intern_seq(std::span<const TemplateArg>(*args));
+        return ins().intern_value(ref);
+      }
+      if (!variable_constant) return std::nullopt;
+      return variable_constant(specialize_variable(ref.templ, *args));
     }
     if (ins().values.is<ast::VDepOp>(v)) {
       auto op = ins().values.get<ast::VDepOp>(v);
@@ -641,6 +667,8 @@ public:
   void params_in(ConstId v, std::vector<std::pair<u16, u16>>& out, bool nested = true) {
     if (ins().values.is<ast::VDepParam>(v)) out.push_back({ins().values.get<ast::VDepParam>(v).depth, ins().values.get<ast::VDepParam>(v).index});
     else if (nested && ins().values.is<ast::VDepExpansion>(v)) params_in(ins().values.get<ast::VDepExpansion>(v).pattern, out, nested);
+    else if (ins().values.is<ast::VDepVariable>(v))
+      for (const TemplateArg& a : ins().seqs.elements(ins().values.get<ast::VDepVariable>(v).args)) params_in(a, out, nested);
     else if (ins().values.is<ast::VDepOp>(v))
       for (const TemplateArg& a : ins().seqs.elements(ins().values.get<ast::VDepOp>(v).operands)) params_in(a, out, nested);
   }
@@ -913,7 +941,7 @@ public:
     if (is_expansion(x) && is_expansion(y)) return deduce_arg(pattern_of(x), pattern_of(y), depth, out);
     // An expression naming parameters is a non-deduced context ([temp.deduct.type]). The
     // specialized type or substituted partial pattern is checked once the bindings are known.
-    if (ins().values.is<ast::VDepOp>(x.value)) return true;
+    if (ins().values.is<ast::VDepOp>(x.value) || ins().values.is<ast::VDepVariable>(x.value)) return true;
     return x.value == y.value;
   }
   // The packs an expansion's `pattern` names, each from the arguments `a` in turn: every
@@ -1297,7 +1325,7 @@ public:
         auto s = substitute(d.type, bindings(depth, out));
         if (!s) return std::nullopt;
         d.type = types().canonical(*s);
-      } else if (ins().values.is<ast::VDepOp>(d.value)) {
+      } else if (ins().values.is<ast::VDepOp>(d.value) || ins().values.is<ast::VDepVariable>(d.value)) {
         auto s = substitute_arg(d, bindings(depth, out));
         if (!s) return std::nullopt;
         d = *s;
@@ -1582,6 +1610,7 @@ public:
   std::function<std::optional<QualType>(EntityId, NameId)> member_type;
   // The declaration of template `templ` with its head, as lookup at a point finds it.
   std::function<std::optional<ast::DeclSema>(EntityId)> template_decl;
+  std::function<std::optional<ConstId>(EntityId)> variable_constant;
 
 private:
   // The template-head whose parameters a deduction deduces, and its packs whose leading elements

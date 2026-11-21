@@ -3465,7 +3465,7 @@ public:
           auto args = template_argument_list();
           if (!args) return {NodeId::none, begin, pos()};
           if (std::ranges::any_of(*args, [&](const ast::TemplateArg& a) { return s_->dependent(a); }))
-            return s_->dependent_node({}, begin, pos());
+            return s_->dependent_variable_template_id(*v, *args, begin, pos());
           return s_->variable_template_id(*v, *args, begin, pos());
         }
       // `S::f<args>`: a member template of class S or a function template of namespace S, with

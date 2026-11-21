@@ -580,7 +580,8 @@ class Mangler {
         auto i = in_.values.get<ast::VDepParam>(a.value).index;
         return i == 0 ? std::string("XT_E") : std::format("XT{}_E", i - 1);
       }
-      if (in_.values.is<ast::VDepOp>(a.value)) return std::unexpected("a dependent operation as a template argument");
+      if (in_.values.is<ast::VDepOp>(a.value) || in_.values.is<ast::VDepVariable>(a.value))
+        return std::unexpected("a dependent operation as a template argument");
       auto b = ast::builtin_of(in_, a.type);
       auto code = b ? builtin_code(*b) : std::nullopt;
       if (!code || !in_.values.is<ast::VInt>(a.value)) return std::unexpected("a template argument that is not a type or an integer");
