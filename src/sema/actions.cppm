@@ -4246,10 +4246,30 @@ public:
     const lex::BuiltinFunctionInfo* b = lex::builtin_function(ins().names.spelling(name));
     return b && !declared(name) ? b : nullptr;
   }
+  bool builtin_arity(std::size_t want, std::size_t actual, u32 begin) {
+    if (actual == want) return true;
+    diag(begin, actual < want ? Diag::too_few_arguments : Diag::too_many_arguments, u64(want), u64(actual));
+    return false;
+  }
+
+  Ex builtin_addressof(Ex e, u32 begin, u32 end) {
+    if (!e.ok()) return {NodeId::none, begin, end};
+    if (dependent(e)) return dependent_node({e}, begin, end);
+    if (e.cat() != ValueCategory::lvalue) {
+      diag(begin, Diag::not_lvalue_address, e.type());
+      return {NodeId::none, begin, end};
+    }
+    return builtin_address_of(e, begin, end, begin);
+  }
+
   // A call of one (docs/EXTENSIONS.md): `__builtin_inf*` and `__builtin_huge_val*` are +infinity
   // and `__builtin_nan*` a quiet NaN, constants of their type; `__builtin_fabs*` a `BuiltinCall`.
   Ex builtin_call(const lex::BuiltinFunctionInfo& b, std::vector<Ex> args, u32 begin, u32 end) {
     using enum lex::BuiltinFunction;
+    if (b.function == addressof) {
+      if (!builtin_arity(1, args.size(), begin)) return {NodeId::none, begin, end};
+      return builtin_addressof(args.front(), begin, end);
+    }
     Builtin kind = b.type == 'f' ? Builtin::float_ : b.type == 'l' ? Builtin::long_double : Builtin::double_;
     if (!ast::computes(w_->target[kind].format)) {
       diag(begin, Diag::extended_float_not_supported);
@@ -4257,12 +4277,10 @@ public:
     }
     QualType t = builtin(kind);
     std::size_t want = b.function == fabs || b.function == nan ? 1 : 0;
-    if (args.size() != want) {
-      diag(begin, args.size() < want ? Diag::too_few_arguments : Diag::too_many_arguments, u64(want), u64(args.size()));
-      return {NodeId::none, begin, end};
-    }
+    if (!builtin_arity(want, args.size(), begin)) return {NodeId::none, begin, end};
     if (std::ranges::any_of(args, [](const Ex& a) { return !a.ok(); })) return {NodeId::none, begin, end};
     switch (b.function) {
+      case addressof: std::unreachable();  // Handled before floating type selection.
       case inf:
       case huge_val:
         return literal(t, w_->values.floating(t, std::numeric_limits<double>::infinity()), ValueCategory::prvalue, begin, end);
@@ -5683,6 +5701,21 @@ public:
     return Ex{r.id, begin, end, r.info};
   }
 
+  Ex builtin_address_of(Ex e, u32 begin, u32 end, u32 op_at) {
+    if (e.glvalue() && e.info.bit_width) {
+      diag(op_at, Diag::bit_field_address);
+      return {NodeId::none, begin, end};
+    }
+    QualType pointee = e.type();
+    if (is_bound_member(e) && address_set(e)) pointee = builtin(Builtin::overload_set);
+    else if (!e.glvalue()) {
+      diag(op_at, Diag::not_lvalue_address, e.type());
+      return {NodeId::none, begin, end};
+    }
+    ExprInfo info{types().pointer(pointee), ValueCategory::prvalue, 0};
+    return node(ast::Unary{info, ast::UnaryOp::address_of, at(e, begin)}, begin, end, info);
+  }
+
   Ex unary(ast::UnaryOp op, Ex e, u32 begin, u32 end, u32 op_at) {
     using enum ast::UnaryOp;
     if (!e.ok()) return {NodeId::none, begin, end};
@@ -5729,17 +5762,7 @@ public:
       return make(o, types().pointee(o.type()), ValueCategory::lvalue);
     }
     case address_of:
-      if (e.glvalue() && e.info.bit_width) {
-        diag(op_at, Diag::bit_field_address);
-        return {NodeId::none, begin, end};
-      }
-      if (is_bound_member(e) && address_set(e))
-        return make(e, types().pointer(builtin(Builtin::overload_set)), ValueCategory::prvalue);
-      if (!e.glvalue()) {
-        diag(op_at, Diag::not_lvalue_address, e.type());
-        return {NodeId::none, begin, end};
-      }
-      return make(e, types().pointer(e.type()), ValueCategory::prvalue);
+      return builtin_address_of(e, begin, end, op_at);
     case pre_inc:
     case pre_dec:
     case post_inc:

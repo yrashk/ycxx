@@ -3117,15 +3117,17 @@ public:
       }
       if (kind(1) == Tk::l_paren)
         if (auto op = s_->va_builtin(n)) return va_expression(*op, begin);
-      // A built-in function ycxx implements, `__builtin_fabs(x)` (docs/EXTENSIONS.md).
+      // A builtin with ordinary expression arguments (docs/EXTENSIONS.md).
       if (kind(1) == Tk::l_paren)
         if (const lex::BuiltinFunctionInfo* bf = s_->builtin_function(n)) {
           bump();
           bump();
           std::vector<Ex> args;
+          int saved = std::exchange(angle_, 0);
           if (!is(Tk::r_paren))
             do args.push_back(assignment_expression());
             while (accept(Tk::comma));
+          angle_ = saved;
           if (!expect(Tk::r_paren)) return {NodeId::none, begin, pos()};
           Ex r = s_->builtin_call(*bf, std::move(args), begin, pos());
           return {r.id, begin, pos(), r.info};

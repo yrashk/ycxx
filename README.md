@@ -241,6 +241,8 @@ Both targets accept leading `[[…]]` attributes on ordinary data and function m
   `static_assert` and `if consteval`, with errors that explain why something is not constant.
   Scalar enumeration values work in constexpr variables, calls, casts and switch conditions.
   Namespace-scope `constexpr` pointers to `void` can retain scalar and array element addresses.
+  `__builtin_addressof`, used by libycxx's `std::addressof`, bypasses overloaded `operator&`.
+  It supports runtime addresses and constant expressions such as a scalar global's address.
 - `extern "C"` functions from libSystem, including `printf` with integers, characters,
   floating values, pointers and strings as arguments, and the SDK `<math.h>`'s built-ins
   (`__builtin_fabs`, `__builtin_inf`, `__builtin_huge_val`, `__builtin_nan`).
