@@ -60,9 +60,9 @@ phase remain in [#329](https://github.com/yrashk/ycxx/issues/329).
 [[class.base.init]](https://eel.is/c++draft/class.base.init) ·
 [[over.match.list]](https://eel.is/c++draft/over.match.list)
 
-The virtual layout guard applies to evaluated object use and constant evaluation.
-Native emission for the derived class requires virtual layout support. Class templates
-continue to reject polymorphic bases. Implicit polymorphic copy construction remains in
+The virtual layout guard applies to evaluated construction, constant evaluation of
+polymorphic objects, and native emission of their constructors. Class templates continue
+to reject polymorphic bases. Implicit polymorphic copy construction remains in
 [#244](https://github.com/yrashk/ycxx/issues/244). Immediate function references outside the
 supported overload-set checks are tracked in [#102](https://github.com/yrashk/ycxx/issues/102).
 
@@ -86,18 +86,28 @@ for `sizeof` and `alignof`. Native field projections use the same offsets with t
 access and qualification rules. Both also support the fieldless root, whose size and alignment
 come from the vptr. [Itanium ABI §2.4](https://itanium-cxx-abi.github.io/cxx-abi/abi.html#class-types)
 
+An ordinary derived class can expose a single public nonvirtual base that is such a root.
+It can declare one directly written integral field and one noncovariant override with a fixed
+integer signature. The shared layout places the root at offset zero and aligns the derived
+field after the root's nonvirtual data. A pointer upcast preserves the address or null value,
+and a reference upcast designates the base subobject. The override's validated base
+declaration determines the slot, so calls through either view dispatch through the same
+virtual table address point. [Itanium ABI §2.4](https://itanium-cxx-abi.github.io/cxx-abi/abi.html#class-types) ·
+[Itanium ABI §2.5.2](https://itanium-cxx-abi.github.io/cxx-abi/abi.html#vtable-components) ·
+[[conv.ptr]](https://eel.is/c++draft/conv.ptr)
+
 The native-unit check admits these consumer declarations and checks the unit for virtual
 definitions. The layout applies to field accesses on objects the provider has already
 constructed. Whole-object storage, construction, destruction, copying, and by-value transfer
-remain guarded. Packed or annotated layout, derived layout, and virtual table production are
-tracked in [#309](https://github.com/yrashk/ycxx/issues/309) and [#489](https://github.com/yrashk/ycxx/issues/489).
+remain guarded. Packed or annotated layout, further inheritance forms, and virtual table
+production are tracked in [#309](https://github.com/yrashk/ycxx/issues/309) and [#489](https://github.com/yrashk/ycxx/issues/489).
 Class descriptors and RTTI are tracked in [#294](https://github.com/yrashk/ycxx/issues/294),
 destructor entry points in [#136](https://github.com/yrashk/ycxx/issues/136), and group emission
 in [#422](https://github.com/yrashk/ycxx/issues/422).
 
-Covariant return types, pure virtual functions, `final`, explicit virtual destructor calls
-and virtual member addresses are tracked in [#309](https://github.com/yrashk/ycxx/issues/309).
-That issue also tracks peer dispatch and native table emission. Virtual destructor variants
+Covariant return types, pure virtual functions, `final`, explicit virtual destructor calls,
+virtual member addresses, and native table emission are tracked in
+[#309](https://github.com/yrashk/ycxx/issues/309). Virtual destructor variants
 are tracked in [#136](https://github.com/yrashk/ycxx/issues/136), RTTI operations in
 [#294](https://github.com/yrashk/ycxx/issues/294), virtual bases in
 [#310](https://github.com/yrashk/ycxx/issues/310), and further exception specifications in
