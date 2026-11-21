@@ -7004,6 +7004,12 @@ public:
     return t;
   }
 
+  QualType integral_common_type(const Ex& a, const Ex& b) {
+    const auto left = sema::promoted(w_->target, *types().builtin_of(a.type()), a.info.bit_width);
+    const auto right = sema::promoted(w_->target, *types().builtin_of(b.type()), b.info.bit_width);
+    return builtin(common_integer(w_->target, left, right));
+  }
+
   // ------------------------------------------------------------ operators ([expr.unary], [expr.compound])
 
   bool is_integral_or_unscoped(QualType t) { return types().is_integral(t); }
@@ -7313,8 +7319,16 @@ public:
     u32 begin = l.begin, end = r.end;
     if (!l.ok() || !r.ok()) return {NodeId::none, begin, end};
     if (dependent(l) || dependent(r)) {
-      if (types().is_dependent(l.type()) || types().is_dependent(r.type()))
+      if (types().is_dependent(l.type()) || types().is_dependent(r.type())) {
         dependent_calls.push_back(op_at);
+      } else if (types().is_integral(l.type()) && types().is_integral(r.type())) {
+        switch (op) {
+        case add: case sub: case mul: case div: case rem:
+        case bit_and: case bit_xor: case bit_or:
+          return dependent_node({l, r}, begin, end, integral_common_type(l, r));
+        default: break;
+        }
+      }
       return dependent_node({l, r}, begin, end);
     }
     if (op == dot_star || op == arrow_star) return member_pointer_access(l, r, op == arrow_star, op_at);
@@ -7618,9 +7632,13 @@ public:
     if (dependent(cond) || dependent(t) || dependent(f)) {
       // With the same concrete prvalue type on both arms, dependency can affect
       // the conditional's value without affecting its type.
-      if (t.cat() == ValueCategory::prvalue && f.cat() == ValueCategory::prvalue &&
-          !types().is_dependent(t.type()) && types().canonical(t.type()) == types().canonical(f.type()))
-        return dependent_node({cond, t, f}, begin, end, t.type());
+      if (!types().is_dependent(cond.type()) &&
+          t.cat() == ValueCategory::prvalue && f.cat() == ValueCategory::prvalue) {
+        if (!types().is_dependent(t.type()) && types().canonical(t.type()) == types().canonical(f.type()))
+          return dependent_node({cond, t, f}, begin, end, t.type());
+        if (types().is_integral(t.type()) && types().is_integral(f.type()))
+          return dependent_node({cond, t, f}, begin, end, integral_common_type(t, f));
+      }
       return dependent_node({cond, t, f}, begin, end);
     }
     Ex c = to_bool(cond, cond.begin);
