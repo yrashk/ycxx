@@ -2370,7 +2370,7 @@ public:
         } end_pattern{s_, false, arg_at};
         if (template_name_ahead()) {
           args.push_back(*template_name_argument());
-        } else if (starts_type_id()) {
+        } else if (starts_type_id(/*preserve_failed_qualifier=*/true)) {
           auto t = type_id();
           if (!t) ok = false;
           else args.push_back({ast::TemplateArgKind::type, s_->types().canonical(*t), sema::ConstId::none});
@@ -2417,14 +2417,16 @@ public:
     if (replay_at && deferred != deferred_argument_checks_) *replay_at = begin;
     return args;
   }
-  bool starts_type_id() {
+  bool starts_type_id(bool preserve_failed_qualifier = false) {
     if (transform_trait_ahead()) return true;
     if (starts_decl_specifier(kind())) return !is(Tk::kw_static) && !is(Tk::kw_extern);
     // `X<args>::m` is a type only when m is: the nested name first. A member of a dependent class
     // is a type only after `typename` ([temp.res.general]/4).
     if (qualified_ahead()) {
-      auto q = qualified_type(0);
-      return q && s_->types().kind(q->first) != sema::TypeKind::dep_name;
+      bool failed_qualifier = false;
+      auto q = qualified_type(0, /*checked=*/false, /*type_only=*/false,
+                              preserve_failed_qualifier ? &failed_qualifier : nullptr);
+      return failed_qualifier || (q && s_->types().kind(q->first) != sema::TypeKind::dep_name);
     }
     if (is(Tk::identifier) && kind(1) == Tk::less && s_->names_type_template(name_of(tok()))) return true;
     return is(Tk::identifier) && kind(1) != Tk::coloncolon && s_->class_name(name_of(tok())).has_value();
