@@ -1559,12 +1559,17 @@ session's.*
   while a type is dependent. A transformation `__remove_cv(T)` is a type specifier
   (`Templates::transform`); of a dependent type it is a `TTransform` that substitution applies and
   deduction treats as a non-deduced context, mangled as Clang does (`u11__remove_cvIT_E`).
+- A dependent `__is_same(T, U)` in a `bool` template argument or default is a `VDepOp` with two
+  canonical qualified type operands. Substitution retains unresolved operands across aliases and
+  produces the ordinary `VInt` when both types are concrete, so the result shares the
+  specialization for literal `true` or `false` ([temp.alias], [temp.type], #209).
 - Listed in docs/EXTENSIONS.md. Tests: `tests/own/builtins/`. `<cstdio>`: 53 → 33 errors.
 - Not yet (#211 follow-up): the built-ins that need the object model, such as
   `__is_constructible`, `__is_convertible`, `__is_assignable`, the `__is_trivially_*` and
   `__is_nothrow_*` families, `__is_base_of`, `__is_standard_layout` and
-  `__reference_binds_to_temporary`; a value-dependent predicate as a template argument outside a
-  body (#209).
+  `__reference_binds_to_temporary`. Other dependent predicates, conversions of a dependent
+  predicate to a non-`bool` parameter, dependent array bounds and expression mangling remain in
+  #209.
 
 ## Templates, ζ step 6: concepts and `if constexpr` (#88, 2026-11-18)
 

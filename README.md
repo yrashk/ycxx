@@ -214,6 +214,8 @@ Both targets accept leading `[[…]]` attributes on ordinary data and function m
   `if constexpr`, deferred template static assertion failures, and two-phase lookup, with
   Itanium names identical to Clang's; Clang's
   `__make_integer_seq`;
+- dependent `__is_same(T, U)` as a `bool` template argument or default, including through alias
+  templates [#209](https://github.com/yrashk/ycxx/issues/209);
 - placeholder types: `auto` and `decltype(auto)` variables (`const auto&`, `auto*`, `auto&&`),
   deduced and trailing return types, in templates too;
 - lambdas in function bodies: captures by copy and by reference, capture-defaults, `this` and
