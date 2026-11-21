@@ -282,9 +282,9 @@ checked with the flags of its last build, or else with its line in the project's
 **Pointer-to-member declarations.** Data and function member-pointer types can appear in
 declarations, type traits and requires-expressions. [#238](https://github.com/yrashk/ycxx/issues/238)
 
-**Virtual declarations.** Syntax checking accepts initial virtual members in ordinary root classes,
-including inline bodies and virtual destructors. Those classes can appear in pointer and reference
-interfaces. [#309](https://github.com/yrashk/ycxx/issues/309)
+**Virtual declarations.** Syntax checking accepts virtual members and inline definitions in
+ordinary root classes. Classes derived through one ordinary polymorphic base also support
+overrides. Pointer and reference interfaces can name these classes. [#309](https://github.com/yrashk/ycxx/issues/309)
 
 **Array structured bindings.** Local bindings can copy scalar-element arrays or alias their
 elements, including whole rows of multidimensional arrays. [#285](https://github.com/yrashk/ycxx/issues/285)
