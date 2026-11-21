@@ -49,3 +49,17 @@ int use() {
     return call(value);
 }
 }
+
+namespace same_entity {
+namespace first { template<class> inline constexpr bool Flag = false; }
+namespace second { using first::Flag; }
+using namespace first;
+using namespace second;
+template<class T> using Choice = Conditional<Flag<T>, int, long>;
+static_assert(__is_same(Choice<int>, long));
+}
+
+template<class T> inline constexpr bool IsLRef = __is_lvalue_reference(T);
+template<class T> using RefChoice = Conditional<IsLRef<T&&>, int, long>;
+static_assert(__is_same(RefChoice<int&>, int));
+static_assert(__is_same(RefChoice<int>, long));

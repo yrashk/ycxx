@@ -3567,9 +3567,12 @@ public:
         if (!args) return {NodeId::none, begin, pos()};
         // [temp.dep.expr]/3: a template-id with a dependent argument is type-dependent.
         if (std::ranges::any_of(*args, [&](const ast::TemplateArg& a) { return s_->dependent(a); })) {
-          if (in_template_value_argument_)
-            if (auto v = s_->variable_template(n))
+          if (in_template_value_argument_) {
+            const auto diags = s_->diag_count();
+            if (auto v = s_->variable_template(n, begin))
               return s_->dependent_variable_template_id(*v, *args, begin, pos());
+            if (s_->has_error_since(diags)) return {NodeId::none, begin, pos()};
+          }
           // A call of it is a dependent call ([temp.dep.candidate]): its instantiation adds
           // argument-dependent lookup.
           if (is(Tk::l_paren)) s_->dependent_calls.push_back(begin);
