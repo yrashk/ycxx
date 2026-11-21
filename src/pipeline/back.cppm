@@ -148,6 +148,7 @@ struct ClassShape {
   std::vector<std::uint8_t> bit_widths{};  // parallel to fields, empty for ordinary records
   bool layout_uncertain = false;  // source packing or alignment that native layout does not apply
   bool copy_abi_unknown = false;   // no ABI classification for this defaulted copy
+  bool layout_requires_virtual_support = false;
 };
 struct EnumShape {
   EntityId entity = EntityId::none;
@@ -170,6 +171,7 @@ struct TranslationUnit {
   std::vector<std::pair<EntityId, EntityId>> init_functions;
   std::optional<ast::Loc> namespace_destruction;  // first variable whose destructor runs at exit
   bool front_failed = false;           // the front end reported errors: nothing to compile
+  std::optional<ast::Loc> virtual_declaration;
 };
 
 // What failed, at a location in an item when there is one. Every error here is something the α
@@ -750,7 +752,7 @@ std::optional<ClassLayout> QueryLayout::class_layout(QualType c) const {
   auto key = std::to_underlying(in.types.get<ast::TClass>(c).entity);
   if (auto done = class_layouts_.find(key); done != class_layouts_.end()) return done->second;
   auto it = classes_.find(key);
-  if (it == classes_.end()) return std::nullopt;
+  if (it == classes_.end() || it->second->layout_requires_virtual_support) return std::nullopt;
   std::vector<ast::Placed> bases, places;
   for (EntityId b : it->second->bases) bases.push_back(placed(in.intern_type(ast::TClass{b})));
   for (std::size_t i = 0; i < it->second->fields.size(); ++i) {
@@ -1397,6 +1399,11 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
     errors.push_back({std::nullopt, "the translation unit has errors"});
     co_return out;
   }
+  const Shapes& shapes = co_await cx.fetch<UnitShapes>(id);
+  if (std::ranges::any_of(shapes.classes, &ClassShape::layout_requires_virtual_support)) {
+    errors.push_back({tu.virtual_declaration, "native output for a translation unit with virtual member functions is not supported yet"});
+    co_return co_await locate_errors(cx, id, std::move(out));
+  }
   if (linux && tu.namespace_destruction) {
     errors.push_back({tu.namespace_destruction, "namespace-scope destruction is not supported on x86-64 Linux"});
     co_return co_await locate_errors(cx, id, std::move(out));
@@ -1425,7 +1432,6 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
   // Variables: their initial bytes, by what they hold ([basic.start.static]).
   std::vector<aarch64::DataDef> data;
   std::set<EntityId> weak_variables;
-  const Shapes& shapes = co_await cx.fetch<UnitShapes>(id);
   for (const Variable& v : tu.variables) {
     QueryLayout layout(cx, shapes, target);
     auto b = initial_bytes(in, layout, v.type, v.init);

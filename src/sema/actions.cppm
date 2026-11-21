@@ -770,11 +770,16 @@ public:
     case is_member_pointer: v = types().is_member_pointer(c); break;
     case is_member_object_pointer: v = types().is_member_pointer(c) && !types().is_function(types().rec(c).inner); break;
     case is_member_function_pointer: v = types().is_member_pointer(c) && types().is_function(types().rec(c).inner); break;
-    // The current slice has no virtual functions, abstract or final classes.
     case is_polymorphic:
+    case has_virtual_destructor:
+      if (types().is_class(c) && !is_union_type(c)) {
+        const ClassRec* r = cls();
+        if (!r) return {NodeId::none, begin, end};
+        v = t == is_polymorphic ? r->polymorphic : r->virtual_destructor;
+      }
+      break;
     case is_abstract:
-    case is_final:
-    case has_virtual_destructor: v = false; break;
+    case is_final: v = false; break;
     case is_reference: v = types().is_reference(c); break;
     case is_lvalue_reference: v = types().is_reference(c) && !types().rec(c).rvalue_ref; break;
     case is_rvalue_reference: v = types().is_reference(c) && types().rec(c).rvalue_ref; break;
@@ -789,7 +794,7 @@ public:
     case is_empty:
       // [meta.unary.prop]: a complete class, not a union, with no non-static data members.
       if (is_union_type(c)) v = false;
-      else if (const ClassRec* r = cls()) v = r->fields.empty();
+      else if (const ClassRec* r = cls()) v = !r->polymorphic && r->fields.empty();
       else if (types().is_class(c)) return {NodeId::none, begin, end};
       break;
     case is_aggregate:
@@ -1047,6 +1052,18 @@ public:
     return false;
   }
 
+  bool require_supported_virtual_layout(QualType t, u32 at) {
+    if (!classes().layout_requires_virtual_support(t)) return true;
+    diag(at, Diag::virtual_layout, t);
+    return false;
+  }
+
+  bool require_supported_virtual_signature(const TypeRec& f, u32 at) {
+    return require_supported_virtual_layout(f.inner, at) && std::ranges::all_of(f.params, [&](QualType p) {
+      return require_supported_virtual_layout(p, at);
+    });
+  }
+
   // [expr.ref]: `object.name`, or `object->name` with `arrow`.
   // Whether `object.name` names a member function template ([temp.names]/3): the object's class
   // has one of that name.
@@ -1093,6 +1110,7 @@ public:
       return fail;
     } else if (!object.glvalue()) {
       object = materialize(object, ct, false);  // [expr.ref]: a class prvalue is materialized
+      if (!object.ok()) return fail;
     }
     if (!require_complete(ct, op_at)) return fail;
     EntityId c = types().class_of(ct);
@@ -1140,6 +1158,8 @@ public:
     }
     u32 index = found->index;
     const FieldRec& f = *found->field;
+    if (unevaluated == 0 && !(checking_virtual_body && c == current_class) &&
+        !require_supported_virtual_layout(ct, name_at)) return fail;
     // [expr.ref]/7.2: the member's type, with the object's cv-qualifiers added; the result is an
     // lvalue if the object is (or is reached through a pointer), else an xvalue.
     // A reference member gives the object it refers to, an lvalue.
@@ -1156,17 +1176,19 @@ public:
 
   // ------------------------------------------------------------ initialization ([dcl.init])
 
-  // An aggregate ([dcl.init.aggr]): an array, or a class (every class the front end knows so far
-  // is one: no constructors, bases or virtual functions yet).
+  // An aggregate ([dcl.init.aggr]): an array or a class with the required properties.
   bool is_aggregate(QualType t) {
     if (types().is_array(t)) return true;
     if (!types().is_class(t)) return false;
     const ClassRec* c = class_rec(types().class_of(t));
-    // [dcl.init.aggr]/1: no user-declared constructors; a closure type is none
+    // [dcl.init.aggr]/1: no user-declared constructors or virtual functions; a closure type is none
     // ([expr.prim.lambda.closure]/1).
-    return !c || (!c->user_ctors && !c->closure);
+    return !c || (!c->user_ctors && !c->closure && !c->polymorphic);
   }
-  bool has_user_ctors(QualType t) { return types().is_class(t) && !is_aggregate(t); }
+  bool has_user_ctors(QualType t) {
+    const ClassRec* c = types().is_class(t) ? class_rec(types().class_of(t)) : nullptr;
+    return c && (c->user_ctors || c->closure);
+  }
 
   // The destructor that ends an object of type `t`, or none if it is trivial ([class.dtor]); for
   // an array, its elements'.
@@ -1230,6 +1252,7 @@ public:
   // members have default member initializers gets them (the implicit default constructor's).
   Ex value_init(QualType t, u32 begin, u32 end) {
     if (types().is_dependent(t)) return dependent_node({}, begin, end);
+    if (!require_supported_virtual_layout(t, begin)) return {NodeId::none, begin, end};
     if (types().is_member_pointer(t)) {
       diag(begin, Diag::member_pointer_values);
       return {NodeId::none, begin, end};
@@ -1250,6 +1273,7 @@ public:
   }
   Ex default_init(QualType t, u32 begin, u32 end) {
     if (types().is_dependent(t)) return dependent_node({}, begin, end);
+    if (!require_supported_virtual_layout(t, begin)) return {NodeId::none, begin, end};
     if (has_user_ctors(t)) return construct(t, {}, begin, end);
     if (has_member_inits(t)) return member_inits(t, false, begin, end);
     ExprInfo info{Types::unqualified(t), ValueCategory::prvalue, 0};
@@ -1289,7 +1313,7 @@ public:
       return dependent_node(ops, b.begin, b.end, types().is_dependent(t) ? std::nullopt : std::optional(Types::unqualified(t)));
     }
     if (types().is_void(t) && b.clauses.empty()) return void_prvalue(b.begin, b.end);  // [expr.type.conv]/2
-    if (!require_complete(t, b.begin)) return fail;
+    if (!require_complete(t, b.begin) || !require_supported_virtual_layout(t, b.begin)) return fail;
     // [dcl.init.string]/1: a character array from a string literal in braces.
     if (b.clauses.size() == 1 && !b.clauses[0].list && !b.clauses[0].designated)
       if (auto r = string_init(t, b.clauses[0].expr)) return *r;
@@ -2433,6 +2457,7 @@ public:
   bool function_inline = false;
   // Inside an unevaluated operand (`sizeof`, `decltype`, [expr.context]/1).
   u32 unevaluated = 0;
+  bool checking_virtual_body = false;
 
   // Ends the body of the innermost lambda (`body`, from `body_begin`, the lambda's tokens ending
   // at `end`): its return type deduced, its closure's record published, and the lambda-expression,
@@ -2467,7 +2492,8 @@ public:
     loop_depth = fr.loop_depth;
     completed_closures_.push_back({fr.scope, fr.sig});
     closure_calls_[std::to_underlying(fr.call)] = call_type;
-    if (!body.ok()) return {NodeId::none, fr.begin, end};
+    if (!body.ok() || !require_supported_virtual_signature(types().rec(call_type), fr.begin))
+      return {NodeId::none, fr.begin, end};
     // The closure type ([expr.prim.lambda.closure]): its captures' fields, its function call
     // operator, and for a lambda without a lambda-capture the static invoker its conversion to a
     // pointer to function returns (/8–9).
@@ -3142,6 +3168,8 @@ public:
         diag(begin, Diag::member_without_object, name);
         return fail;
       }
+      if (unevaluated == 0 && !(checking_virtual_body && c == current_class) &&
+          !require_supported_virtual_layout(types().class_type(c), name_at)) return fail;
       Ex self = self_of();
       if (!self.ok()) return fail;
       bool ref = types().is_reference(f->field->type);
@@ -3354,6 +3382,13 @@ public:
     const MemberDeclRec* d = recs[*chosen];
     const Candidate& k = cands[*chosen];
     if (!check_access(bound.cls, d->entity, d->name, bound.name_at, bound.naming)) return fail;
+    if (unevaluated == 0) {
+      if (d->is_virtual) {
+        diag(paren_at, Diag::virtual_call);
+        return fail;
+      }
+      if (!d->is_static && !require_supported_virtual_layout(types().class_type(bound.cls), paren_at)) return fail;
+    }
     const auto copy_assignment = d->copy_assignment;
     if (copy_assignment != CopyAssignment::none) {
       QualType ct = types().class_type(bound.cls);
@@ -3796,7 +3831,7 @@ public:
     if (std::ranges::any_of(args, [](const Ex& a) { return !a.ok(); })) return fail;
     if (types().is_dependent(t) || any_dependent(args))
       return dependent_node(args, begin, end, types().is_dependent(t) ? std::nullopt : std::optional(Types::unqualified(t)));
-    if (!require_complete(t, begin)) return fail;
+    if (!require_complete(t, begin) || !require_supported_virtual_layout(t, begin)) return fail;
     QualType ut = Types::unqualified(t);
     EntityId c = types().class_of(ut);
     const ClassRec* cr = class_rec(c);
@@ -3933,6 +3968,7 @@ public:
   // Temporary materialization ([conv.rval]) of the prvalue `v` as an object of type `t`.
   Ex materialize(Ex v, QualType t, bool extended, bool argument = false) {
     if (!v.ok()) return v;
+    if (!require_supported_virtual_layout(t, v.begin)) return {NodeId::none, v.begin, v.end};
     ExprInfo info{t, ValueCategory::xvalue, 0};
     return node(ast::Materialize{info, destructor_of(t), extended ? 1u : argument ? 2u : 0u, at(v, v.begin)}, v.begin, v.end, info);
   }
@@ -4761,6 +4797,7 @@ public:
       return convert_node(e, ast::ConversionKind::array_to_pointer, p);
     }
     if (types().is_function(t)) return convert_node(e, ast::ConversionKind::function_to_pointer, types().pointer(t));
+    if (unevaluated == 0 && !require_supported_virtual_layout(t, e.begin)) return {NodeId::none, e.begin, e.end};
     return convert_node(e, ast::ConversionKind::lvalue_to_rvalue, Types::unqualified(t));
   }
 
@@ -4853,7 +4890,7 @@ public:
     // A class object is copy-initialized from an expression of its own class: a glvalue through
     // the (trivial, implicit) copy constructor, a prvalue directly ([dcl.init.general]/17.6).
     if (types().is_class(target)) {
-      if (!require_complete(target, at_)) return {NodeId::none, e.begin, e.end};
+      if (!require_complete(target, at_) || !require_supported_virtual_layout(target, at_)) return {NodeId::none, e.begin, e.end};
       if (initializes(target, e) && !e.glvalue()) return e;  // the prvalue initializes it directly
       const ClassRec* cr = class_rec(types().class_of(target));
       // A copy through a constructor that is not trivial, or one converting another type
@@ -4966,6 +5003,7 @@ public:
     auto path = base_path(d, b, paths);
     if (!path) return std::nullopt;
     if (!check_base_path(to, b, path, paths, at_)) return Ex{NodeId::none, e.begin, e.end};
+    if (!require_supported_virtual_layout(to, at_)) return Ex{NodeId::none, e.begin, e.end};
     // Build the conversions in evaluation order, starting with B and undoing one edge at a time.
     for (std::size_t i = path->size(); i-- > 0;) {
       QualType result = target;
@@ -5192,6 +5230,7 @@ public:
     QualType st = builtin(w_->target.size_type);
     if (types().is_dependent(t)) return dependent_node({}, begin, end, st);
     t = types().referee(t);  // [expr.sizeof]/2, [expr.alignof]/3
+    if (!require_supported_virtual_layout(t, begin)) return {NodeId::none, begin, end};
     std::optional<u64> n = layout_of(t, align);
     if (!n) {
       if (types().is_function(t) || !is_complete(t)) diag(begin, Diag::sizeof_incomplete, t);
@@ -5240,7 +5279,7 @@ public:
   std::optional<ast::RecordLayout> class_layout(EntityId ce) {
     if (auto it = class_places_.find(std::to_underlying(ce)); it != class_places_.end()) return it->second;
     const ClassRec* c = is_complete(types().class_type(ce)) ? class_rec(ce) : nullptr;
-    if (!c) return std::nullopt;
+    if (!c || c->layout_requires_virtual_support) return std::nullopt;
     std::vector<ast::Placed> bases, places;
     for (const BaseRec& b : c->bases) {
       auto m = place_of(types().class_type(b.cls));
@@ -5447,12 +5486,14 @@ public:
   // ([conv.ptr]/3, [dcl.init.ref]/5, [expr.static.cast]): one derived-to-base conversion per
   // direct base on the way, the cv-qualifiers kept.
   Ex to_base(Ex e, EntityId b, u32 at_) {
+    if (!e.ok()) return e;
     bool pointer = types().is_pointer(e.type());
     QualType ct = pointer ? types().pointee(e.type()) : e.type();
     Cv cv = Types::cv(ct);
     int paths = 0;
     auto path = base_path(types().class_of(ct), b, paths);
     if (!check_base_path(ct, b, path, paths, at_)) return {NodeId::none, e.begin, e.end};
+    if (!require_supported_virtual_layout(ct, at_)) return {NodeId::none, e.begin, e.end};
     for (EntityId step : *path) {
       QualType st = types().add_cv(types().class_type(step), cv);
       ExprInfo info{pointer ? types().pointer(st) : st, pointer ? ValueCategory::prvalue : e.cat(), 0};
@@ -5680,6 +5721,8 @@ public:
         diag(op_at, Diag::invalid_operand, t);
         return {NodeId::none, begin, end};
       }
+      if (types().is_pointer(t) && !require_supported_virtual_layout(types().pointee(t), op_at))
+        return {NodeId::none, begin, end};
       bool pre = op == pre_inc || op == pre_dec;
       return make(e, pre ? t : Types::unqualified(t), pre ? ValueCategory::lvalue : ValueCategory::prvalue);
     }
@@ -5779,11 +5822,19 @@ public:
       if (arith) return arithmetic_bin(k);
       // [expr.add]: a pointer to a complete object type and an integer; or, for `-`, two
       // pointers to the same type, giving std::ptrdiff_t (long).
-      if (is_object_pointer(ta) && types().is_integral(tc)) return bin(k, a, promote(c), ta);
-      if (op == add && types().is_integral(ta) && is_object_pointer(tc)) return bin(k, promote(a), c, tc);
+      if (is_object_pointer(ta) && types().is_integral(tc)) {
+        if (!require_supported_virtual_layout(types().pointee(ta), op_at)) return {NodeId::none, begin, end};
+        return bin(k, a, promote(c), ta);
+      }
+      if (op == add && types().is_integral(ta) && is_object_pointer(tc)) {
+        if (!require_supported_virtual_layout(types().pointee(tc), op_at)) return {NodeId::none, begin, end};
+        return bin(k, promote(a), c, tc);
+      }
       if (op == sub && is_object_pointer(ta) && is_object_pointer(tc) &&
-          Types::unqualified(types().pointee(ta)) == Types::unqualified(types().pointee(tc)))
+          Types::unqualified(types().pointee(ta)) == Types::unqualified(types().pointee(tc))) {
+        if (!require_supported_virtual_layout(types().pointee(ta), op_at)) return {NodeId::none, begin, end};
         return bin(k, a, c, builtin(Builtin::long_));
+      }
       if (types().is_pointer(ta) && types().is_integral(tc)) {
         diag(op_at, Diag::pointer_arithmetic_void, ta);
         return {NodeId::none, begin, end};
@@ -5904,6 +5955,7 @@ public:
           c = convert(rv, computation, r.begin);
         }
       } else if ((op == AsgOp::add || op == AsgOp::sub) && is_object_pointer(tl) && types().is_integral(tr)) {
+        if (!require_supported_virtual_layout(types().pointee(tl), op_at)) return {NodeId::none, begin, end};
         computation = tl;
         c = promote(rv);
       } else {
@@ -5924,7 +5976,8 @@ public:
     if (!l.ok() || !check_modifiable(l, op_at)) return {NodeId::none, begin, end};
     const bool class_copy = types().is_class(l.type());
     if (class_copy) {
-      if (!require_complete(l.type(), op_at)) return {NodeId::none, begin, end};
+      if (!require_complete(l.type(), op_at) || !require_supported_virtual_layout(l.type(), op_at))
+        return {NodeId::none, begin, end};
       const auto* cls = class_rec(types().class_of(l.type()));
       const auto* copy = cls ? cls->implicit_copy_assignment() : nullptr;
       CopyAssignment state = CopyAssignment::unsupported;
@@ -6379,6 +6432,7 @@ public:
   // A parameter without an argument takes its default argument ([dcl.fct.default], [expr.call]/5).
   std::optional<std::vector<Child>> call_args(const TypeRec& fr, std::span<const Ex> given, u32 begin, u32 paren_at,
                                               std::span<const NodeId> defaults = {}) {
+    if (unevaluated == 0 && !require_supported_virtual_signature(fr, paren_at)) return std::nullopt;
     std::vector<QualType> params = fr.params;  // copied: converting may intern new types
     std::vector<Ex> args(given.begin(), given.end());
     for (std::size_t i = args.size(); i < params.size() && i < defaults.size() && defaults[i] != NodeId::none; ++i) {
@@ -6439,6 +6493,7 @@ public:
       diag(at_, Diag::invalid_operands, base.type(), index.type());
       return {NodeId::none, begin, end};
     }
+    if (!require_supported_virtual_layout(types().pointee(a.type()), at_)) return {NodeId::none, begin, end};
     ExprInfo info{types().pointee(a.type()), ValueCategory::lvalue, 0};
     return node(ast::Subscript{info, at(a, begin), at(promote(c), begin)}, begin, end, info);
   }

@@ -47,6 +47,7 @@ struct DeclSpec {
   bool is_consteval = false;
   bool is_constinit = false;
   bool is_typedef = false;  // [dcl.typedef]: the declarators declare typedef-names
+  std::optional<u32> virtual_at;
   // An elaborated-type-specifier ([dcl.type.elab]): the class it names, and where its name is.
   bool elaborated = false;
   NameId class_name{};
@@ -187,7 +188,7 @@ public:
     case Tk::kw_char32_t: case Tk::kw_wchar_t: case Tk::kw_float: case Tk::kw_double: case Tk::kw_auto:
     case Tk::kw_typedef: case Tk::kw_struct: case Tk::kw_class: case Tk::kw_union: case Tk::kw_enum:
     case Tk::kw_thread_local: case Tk::kw_constinit: case Tk::kw_consteval: case Tk::kw_register:
-    case Tk::kw_mutable: case Tk::kw_typename: case Tk::kw_decltype:
+    case Tk::kw_mutable: case Tk::kw_typename: case Tk::kw_decltype: case Tk::kw_virtual:
       return true;
     default: return false;
     }
@@ -420,7 +421,7 @@ public:
   // decl-specifier-seq ([dcl.spec.general]) with the simple-type-specifiers of [dcl.type.simple],
   // class names and elaborated-type-specifiers ([dcl.type.elab]), and the cv-qualifiers.
   DeclSpec decl_specifiers(bool in_type_id = false, std::optional<u32>* friend_at = nullptr,
-                           bool allow_conversion_id = false) {
+                           bool allow_conversion_id = false, bool allow_virtual = false) {
     DeclSpec d;
     d.begin = pos();
     int n_char = 0, n_short = 0, n_int = 0, n_long = 0, n_signed = 0, n_unsigned = 0, n_void = 0, n_bool = 0;
@@ -461,6 +462,17 @@ public:
         once(d.is_extern, k);
         break;
       case Tk::kw_inline: once(d.is_inline, k); break;
+      case Tk::kw_virtual:
+        if (!allow_virtual) {
+          s_->diag(pos(), Diag::virtual_placement);
+          d.ok = false;
+        } else if (d.virtual_at) {
+          s_->diag(pos(), Diag::duplicate_specifier, k);
+          d.ok = false;
+        } else {
+          d.virtual_at = pos();
+        }
+        break;
       case Tk::kw_friend:
         if (!friend_at) goto done;
         if (*friend_at) s_->diag(pos(), Diag::duplicate_specifier, k);
@@ -638,7 +650,8 @@ public:
       d.ok = false;
     }
     // [dcl.typedef]/1: `typedef` is combined only with type-specifiers.
-    if (d.is_typedef && (d.is_static || d.is_extern || d.is_inline || d.is_constexpr || d.is_consteval || d.is_constinit)) {
+    if (d.is_typedef && (d.is_static || d.is_extern || d.is_inline || d.is_constexpr || d.is_consteval || d.is_constinit ||
+                         d.virtual_at)) {
       s_->diag(d.begin, Diag::conflicting_specifiers, Tk::kw_typedef);
       d.ok = false;
     }
@@ -745,15 +758,17 @@ public:
     std::vector<Suffix> suffixes;
   };
 
+  enum class NamedExceptionSpec { ordinary, defaulted_assignment, virtual_member };
+
   // declarator, or abstract-declarator when `abstract` ([dcl.decl.general], [dcl.name]).
   Declarator declarator(QualType base, bool abstract, bool typedef_ = false, bool conversion = false,
-                        bool defaulted_assignment = false) {
+                        NamedExceptionSpec named_exception = NamedExceptionSpec::ordinary) {
     Declarator d;
     d.begin = pos();
     Level top = level(abstract, d.ok, conversion);
     if (conversion && !top.conversion_target) return d;
     const Suffix* fn = nullptr;
-    d.type = build(top, top.conversion_target.value_or(base), fn, d, abstract || typedef_, defaulted_assignment);
+    d.type = build(top, top.conversion_target.value_or(base), fn, d, abstract || typedef_, named_exception);
     const bool spelled_unknown_bound = std::exchange(d.unknown_bound, false);
     if (d.ok && !abstract && spelled_unknown_bound && s_->types().is_array(d.type)) {
       const sema::TypeRec array = s_->types().rec(d.type);
@@ -1372,7 +1387,7 @@ public:
 
   // The type a declarator gives its name, built from the base type outwards ([dcl.meaning]).
   QualType build(const Level& l, QualType t, const Suffix*& fn, Declarator& d, bool spells_type,
-                 bool defaulted_assignment = false) {
+                 NamedExceptionSpec named_exception = NamedExceptionSpec::ordinary) {
     for (const Level::PtrOp& p : l.pointers) {
       if (p.owner) {
         if (p.restrict_at) {
@@ -1434,8 +1449,10 @@ public:
         // [basic.stc.dynamic.deallocation]: a deallocation function without an explicit
         // exception specification is non-throwing.
         bool nonthrowing = name == sema::allocation_name(sema::AllocationFunction::deallocate) && !s->has_noexcept;
-        if (s->has_noexcept && (allocation || (defaulted_assignment && name == "operator=") ||
-                                member_pointer_to_suffix(l) || (spells_type && !l.inner))) {
+        const bool keep_named_exception = (named_exception == NamedExceptionSpec::virtual_member && l.named) ||
+                                          (named_exception == NamedExceptionSpec::defaulted_assignment && name == "operator=");
+        if (s->has_noexcept && (allocation || keep_named_exception || member_pointer_to_suffix(l) ||
+                                (spells_type && !l.inner))) {
           nonthrowing = true;
           if (s->noexcept_condition) {
             Ex operand = s_->rvalue(*s->noexcept_condition);
@@ -1472,7 +1489,7 @@ public:
         t = s_->types().array(t, s->bound);
       }
     }
-    if (l.inner) return build(*l.inner, t, fn, d, spells_type, defaulted_assignment);
+    if (l.inner) return build(*l.inner, t, fn, d, spells_type, named_exception);
     d.name = l.name;
     d.named = l.named;
     d.name_at = l.name_at;
@@ -2973,6 +2990,12 @@ public:
         bump();
         // `E.template f<args>`: the name is a member template's ([temp.names]/3).
         bool keyword = accept(Tk::kw_template);
+        u32 qualifier = 0;
+        while (kind(qualifier) == Tk::identifier && kind(qualifier + 1) == Tk::coloncolon) qualifier += 2;
+        if (qualifier != 0 && kind(qualifier) == Tk::tilde) {
+          s_->diag(pos() + qualifier, Diag::not_supported, Tk::tilde);
+          return {NodeId::none, e.begin, pos()};
+        }
         if (!is(Tk::identifier)) {
           if (is(Tk::tilde) || is(Tk::coloncolon) || is(Tk::kw_operator))
             s_->diag(pos(), Diag::not_supported, kind());
@@ -4793,6 +4816,10 @@ public:
         skip_to_semi();
         return {NodeId::none, begin, pos()};
       }
+      if (!s_->require_supported_virtual_layout(d.type, d.name_at)) {
+        skip_to_semi();
+        return {NodeId::none, begin, pos()};
+      }
       // [dcl.constexpr]: a constexpr variable is const.
       if (spec.is_constexpr) d.type = s_->types().add_cv(d.type, sema::Cv::const_);
       // `char s[] = "…"`: the bound from the literal, null included ([dcl.init.string]/1).
@@ -4808,6 +4835,10 @@ public:
         if (!init.ok()) {
           // Its uses say nothing more ([temp.dep.expr]: as a dependent name would).
           if (s_->types().has_placeholder(s_->local(local).type)) s_->set_local_type(local, s_->builtin(Builtin::dependent));
+          skip_to_semi();
+          return {NodeId::none, begin, pos()};
+        }
+        if (!s_->require_supported_virtual_layout(d.type, d.name_at)) {
           skip_to_semi();
           return {NodeId::none, begin, pos()};
         }

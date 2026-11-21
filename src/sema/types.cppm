@@ -660,6 +660,7 @@ struct MemberDeclRec {
   std::vector<ast::NodeId> defaults;  // a function's default arguments by parameter, or empty
   CopyAssignment copy_assignment = CopyAssignment::none;
   bool explicit_defaulted_assignment = false;
+  bool is_virtual = false;
 };
 
 struct NestedType {
@@ -682,6 +683,9 @@ struct ClassRec {
   // standard-layout ([class.prop]).
   bool pod = true;
   bool union_ = false;  // a union ([class.union]): its members share its storage
+  bool polymorphic = false;
+  bool virtual_destructor = false;
+  bool layout_requires_virtual_support = false;
   std::vector<FieldRec> fields;        // in declaration order
   std::vector<MemberDeclRec> members;  // member functions and static data members
   // Special members ([special]): whether a constructor is user-declared; the destructor and the
@@ -703,8 +707,8 @@ struct ClassRec {
   bool move_usable = false;
   bool move_nontrivial = false;
   bool copy_nontrivial() const {
-    return copy_ctor != EntityId::none || defaulted_copy == CopyState::nontrivial ||
-           defaulted_copy == CopyState::unsupported;
+    return (!copy_deleted && layout_requires_virtual_support) || copy_ctor != EntityId::none ||
+           defaulted_copy == CopyState::nontrivial || defaulted_copy == CopyState::unsupported;
   }
 
   // Nested enumerations and type aliases ([class.mem]): their types by name, with their entities;
@@ -766,6 +770,7 @@ public:
     auto [it, fresh] = recs_.try_emplace(std::to_underlying(c), std::move(r));
     if (fresh) {
       class_order_.push_back(c);
+      has_virtual_layouts_ |= it->second.layout_requires_virtual_support;
       if (finish) finish(it->second);
     }
     return it->second;
@@ -802,6 +807,14 @@ public:
   bool is_defined(EntityId c) const {
     const ClassRec* r = find(c);
     return r && r->defined;
+  }
+
+  bool layout_requires_virtual_support(QualType t) const {
+    if (!has_virtual_layouts_) return false;
+    auto r = types_->rec(t);
+    while (r.kind == TypeKind::array) r = types_->rec(r.inner);
+    const ClassRec* c = r.kind == TypeKind::class_ ? find(r.entity) : nullptr;
+    return c && c->layout_requires_virtual_support;
   }
 
   // The destructor that ends a `t`, none if trivial; for an array, its elements' ([class.dtor]).
@@ -850,7 +863,7 @@ public:
   bool trivial_for_calls(EntityId cls, ast::CallTriviality rule) const {
     const ClassRec* c = find(cls);
     if (!c) return true;
-    if (c->destructor != EntityId::none || c->copy_nontrivial()) return false;
+    if (c->layout_requires_virtual_support || c->destructor != EntityId::none || c->copy_nontrivial()) return false;
     if (rule == ast::CallTriviality::apple) return true;
     if (c->move_usable && c->move_nontrivial) return false;
     return !c->copy_deleted || c->move_usable;
@@ -862,6 +875,7 @@ private:
   std::map<u32, ClassRec> recs_;  // node-based: a published record never moves
   std::map<u32, EnumRec> enums_;
   std::vector<EntityId> class_order_, enum_order_;
+  bool has_virtual_layouts_ = false;
 };
 
 // The ordinary single-object allocation functions implicitly declared at global scope
