@@ -24,7 +24,7 @@ class EvalFacts : public irgen::TypeFacts {
 public:
   EvalFacts(World& w, Questions& q) : TypeFacts(w.ins, w.target), w_(&w), q_(&q) {
     enum_underlying = [&q](EntityId e) {
-      if (const EnumRec* r = q.defining_enum(e); r && r->underlying) return *r->underlying;
+      if (const EnumRec* r = enum_record(q, e); r && r->underlying) return *r->underlying;
       return q.classes().underlying(e);
     };
     bases_of = [&q](EntityId c) {
@@ -43,7 +43,34 @@ public:
   bool is_main(EntityId) { return false; }  // `main` is never evaluated ([basic.start.main])
   std::optional<std::uint32_t> ellipsis_after(EntityId f) { return parameters_before_ellipsis(w_->entities.rec(f).type); }
 
+  std::optional<interp::EnumLayout> constant_enum_layout(EntityId e) const {
+    const EnumRec* r = enum_record(*q_, e);
+    if (!r || !r->underlying) return std::nullopt;
+    if (r->fixed) return interp::EnumLayout{*r->underlying, std::nullopt};
+
+    // [dcl.enum]: the hypothetical integer type with the minimum width that holds the enumerators.
+    i64 low = 0;
+    u64 high = 0;
+    for (const EnumeratorRec& enumerator : r->enumerators) {
+      if (enumerator.value == ConstId::none) return std::nullopt;
+      auto bits = w_->ins.values.get<ast::VInt>(enumerator.value).bits;
+      if (ast::is_negative(bits)) low = std::min(low, i64(bits.lo));
+      else high = std::max(high, bits.lo);
+    }
+    const auto magnitude_bits = low < 0 ? std::max(std::bit_width(~u64(low)), std::bit_width(high))
+                                        : std::max(1, std::bit_width(high));
+    const u64 maximum = magnitude_bits == 64 ? ~u64{0} : (u64{1} << magnitude_bits) - 1;
+    if (low < 0 && !std::in_range<i64>(maximum)) return std::nullopt;
+    const i64 minimum = low < 0 ? -i64(maximum) - 1 : 0;
+    return interp::EnumLayout{*r->underlying, interp::EnumRange{minimum, maximum}};
+  }
+
 private:
+  static const EnumRec* enum_record(Questions& q, EntityId e) {
+    if (const EnumRec* r = q.defining_enum(e)) return r;
+    return q.classes().find_enum(e);
+  }
+
   World* w_;
   Questions* q_;
 };
@@ -117,7 +144,8 @@ private:
     auto body = irgen::function_ir(in, input, facts);
     if (!body) return {};
     Host host{q_, this};
-    interp::Outcome out = interp::evaluate(host, in, s_->world().target, body->body, EntityId::none, {}).run();
+    interp::Config config{.enum_layout = [&facts](EntityId e) { return facts.constant_enum_layout(e); }};
+    interp::Outcome out = interp::evaluate(host, in, s_->world().target, body->body, EntityId::none, {}, std::move(config)).run();
     if (out.status != interp::Outcome::Status::value && q_->instantiation_gave_up())
       return {std::nullopt, reason_unsupported, false, true};
     if (out.status != interp::Outcome::Status::value) {
@@ -177,6 +205,7 @@ private:
       return values.aggregate(t, elements);
     }
     if (types.is_pointer(t)) return values.null_pointer(t);
+    if (types.is_enum(t)) return values.integer(s_->underlying_of(t), 0);
     if (types.is_integral(t)) return values.integer(Types::unqualified(t), 0);
     if (types.is_standard_floating(t) && ast::computes(ast::float_format(s_->ins(), s_->world().target, t)))
       return values.floating(Types::unqualified(t), 0.0);
@@ -200,7 +229,10 @@ private:
     Values& vs = s_->world().values;
     using K = interp::Result::Kind;
     switch (r.kind) {
-    case K::integer: return {vs.integer(r.type, r.bits), 0, true};
+    case K::integer: {
+      QualType t = s_->types().is_enum(r.type) ? s_->underlying_of(r.type) : r.type;
+      return {vs.integer(t, r.bits), 0, true};
+    }
     case K::floating: return {ast::float_value(s_->ins(), s_->world().target, r.type, ast::Bits128{r.bits, 0}), 0, true};
     case K::null: return {vs.null_pointer(r.type), 0, true};
     case K::function: return {vs.address(r.type, vs.entity(r.entity), 0), 0, true};

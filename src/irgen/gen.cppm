@@ -423,9 +423,8 @@ class Gen {
       // A class or array local is never usable in a constant expression: naming it is
       // unsupported, so it needs no object.
       if (cls(t) == TypeClass::record || cls(t) == TypeClass::array || facts_.is_reference(t) ||
-          in_.types.is<ast::TMemberPtr>(in_.types.canon(t)) ||
-          in_.types.is<ast::TEnum>(in_.types.canon(t)))
-        continue;  // (the interpreter has no enumeration objects yet, #25)
+          in_.types.is<ast::TMemberPtr>(in_.types.canon(t)))
+        continue;
       Place p = begin_object(t, ir::Init::indeterminate);
       if (i < fn_.local_values.size() && fn_.local_values[i]) {
         store(p, constant(t, *fn_.local_values[i]));

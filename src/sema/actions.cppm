@@ -1456,8 +1456,7 @@ public:
     if (!from.ok() || dependent(from) || types().is_dependent(to)) return false;
     auto a = types().builtin_of(from.type()), b = types().builtin_of(to);
     if (types().is_pointer(from.type()) && b == Builtin::bool_) return true;
-    // An unscoped enumeration's value is read as its underlying type's: the interpreter has no
-    // enumeration-typed values (#25), and an enumerator converted so is an integer literal.
+    // Check an unscoped enumeration's narrowing against its underlying integer type.
     if (b && ast::is_floating(*b) && is_unscoped_enum(from.type())) {
       QualType u = underlying_of(from.type());
       return narrows_floating(convert_node(from, ast::ConversionKind::integral, u), *types().builtin_of(u), *b);
@@ -4574,9 +4573,8 @@ public:
   // ------------------------------------------------------------ conversions ([conv])
 
   Ex convert_node(Ex e, ast::ConversionKind k, QualType to, ValueCategory cat = ValueCategory::prvalue) {
-    // An enumerator converted to an integer is that integer's constant: enumeration-typed
-    // constants stay out of the IR's arithmetic.
-    if (auto lit = as<ast::Literal>(e); lit && types().is_enum(e.type()) &&
+    // The underlying value of an enum literal can be folded directly to an integer constant.
+    if (auto lit = as<ast::Literal>(e); lit && types().is_enum(e.type()) && types().is_integral(to) &&
                                         (k == ast::ConversionKind::integral || k == ast::ConversionKind::boolean)) {
       u64 bits = w_->values.rec(lit->value).bits;
       if (k == ast::ConversionKind::boolean) bits = bits != 0;
@@ -4778,8 +4776,8 @@ public:
 
   // The conversion of a prvalue of arithmetic or unscoped enumeration type to arithmetic type `to`:
   // boolean to bool ([conv.bool]), else integral ([conv.integral], [conv.prom]), floating
-  // ([conv.double], [conv.fpprom]) or floating-integral ([conv.fpint]). An enumerator goes through
-  // its integer value: enumeration-typed constants stay out of the IR's arithmetic.
+  // ([conv.double], [conv.fpprom]) or floating-integral ([conv.fpint]). A literal enumerator can
+  // use its existing integer constant directly.
   Ex arithmetic_conversion(Ex e, QualType to) {
     using enum ast::ConversionKind;
     bool from_floating = types().is_floating(e.type()), to_floating = types().is_floating(to);
@@ -4999,13 +4997,12 @@ public:
     if (allow_downcast && types().is_pointer(from) && types().is_pointer(target)) {
       if (auto cast = cast_base_to_derived(v, target, /*pointer=*/true, at_)) return *cast;
     }
-    // /10: an integral or enumeration value to an enumeration; /9: a scoped enumeration's to an
-    // integral type.
-    // /10 also: a floating value, through the underlying type. A constant is folded, as an integer
-    // literal is below, when its truncated value fits.
+    // [expr.static.cast]: a conversion to an enumeration without a fixed underlying type
+    // retains the original integral value for the constant evaluator's range check.
+    const EnumRec* target_enum = types().is_enum(target) ? enum_rec(types().enum_of(target)) : nullptr;
     if (types().is_enum(target) && types().is_floating(from)) {
       QualType u = underlying_of(target);
-      auto c = constant_of ? constant_of(v) : std::nullopt;
+      auto c = target_enum && target_enum->fixed && constant_of ? constant_of(v) : std::nullopt;
       if (c && w_->values.rec(*c).kind == ValueKind::floating && types().builtin_of(u)) {
         double x = std::trunc(w_->values.rec(*c).real);
         IntShape sh = shape(w_->target, *types().builtin_of(u));
@@ -5021,9 +5018,7 @@ public:
     }
     if (types().is_enum(target) && (types().is_integral(from) || types().is_enum(from))) {
       if (types().canonical(from) == types().canonical(target)) return v;
-      // A constant (an enumerator, a literal) is folded to the enumeration's constant: the
-      // interpreter has no enumeration-typed values yet (#25).
-      if (auto lit = as<ast::Literal>(v))
+      if (auto lit = as<ast::Literal>(v); lit && target_enum && target_enum->fixed)
         return literal(target, w_->values.integer(underlying_of(target), w_->values.rec(lit->value).bits), ValueCategory::prvalue,
                        v.begin, v.end);
       return convert_node(v, ast::ConversionKind::integral, target);
