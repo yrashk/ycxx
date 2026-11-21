@@ -2856,6 +2856,7 @@ private:
     sem.entity = templ;
     sem.flags |= sema::decl_flag::template_;
     sem.template_params = b_.seq(std::span<const ast::TemplateParamSema>(head));
+    sem.constraints = associated_constraints();
     return sem;
   }
 

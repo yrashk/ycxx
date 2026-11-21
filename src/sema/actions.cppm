@@ -705,6 +705,20 @@ public:
       if (!t && !q_->instantiation_gave_up()) diag(at, Diag::template_args_mismatch, w_->entities.rec(tmpl.entity).name);
       return t;
     }
+    // [temp.names]/9: naming a non-dependent specialization checks the primary's
+    // constraints even when the use does not require a complete class.
+    if (tmpl.kind == ast::DeclKind::class_ && tmpl.constraints != ConstId::none &&
+        w_->entities.rec(tmpl.entity).kind == EntityKind::class_template &&
+        args.size() == full->size() &&
+        std::ranges::all_of(*full, [&](const TemplateArg& arg) {
+          return arg.kind == ast::TemplateArgKind::type && !dependent(arg);
+        })) {
+      const auto before = diag_count();
+      if (!constraints_satisfied(tmpl, *full)) {
+        if (!has_error_since(before)) diag(at, Diag::constraints_not_satisfied, w_->entities.rec(tmpl.entity).name);
+        return std::nullopt;
+      }
+    }
     return types().class_type(class_specialization(tmpl.entity, *full));
   }
 
