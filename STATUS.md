@@ -1035,6 +1035,11 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   checked across an out-of-class definition ([dcl.constexpr], #157). These constructors use the
   ordinary runtime construction path. Constant evaluation of class objects is tracked in #25,
   and named exception specifications are tracked in #219.
+- Ordinary constructors can spell bare `explicit` in class, in either order with `constexpr`.
+  A matching out-of-class definition inherits the property. Copy-initialization excludes these
+  constructors. Direct initialization includes them. Copy-list-initialization ranks them and
+  diagnoses an explicit winner, including a default constructor or a temporary for a reference
+  argument ([dcl.fct.spec], [over.match.ctor], [over.match.copy], [over.match.list], #157).
 - A first-declaration in-class `C(C&) = default` or `C(const C&) = default` is a declared copy
   constructor, including with `constexpr` or bare `noexcept`. It participates in overload
   selection, access checking and deletion. For ordinary namespace-scope records without
@@ -1050,8 +1055,8 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
 - Linkage names: `C1`/`D1` (#136 for `C2`/`D2`/`D0`), checked against Clang's symbols.
 - Tests: `tests/own/classes/s3-*` (spec-only, plus two from the review): 16 of 16 pass. 10 more draft examples pass.
 - Not yet: temporaries with destructors created in a conditional operand, value-initializing a
-  member subobject whose class has an implicit constructor, delegating constructors, `explicit`,
-  and other `= default` forms (#157, #244).
+  member subobject whose class has an implicit constructor, delegating constructors, conditional
+  `explicit`, explicit constructor templates, and other `= default` forms (#157, #244).
 
 ## Classes, δ step 4a: enumerations (#86, 2026-11-18)
 
