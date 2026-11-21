@@ -547,6 +547,12 @@ public:
   }
   // A mapping entry as a template argument, and back.
   TemplateArg mapping_arg(ConstId v) {
+    if (ins().values.is<ast::VConstraintPack>(v)) {
+      std::vector<TemplateArg> elements;
+      for (ConstId e : ins().seqs.elements(ins().values.get<ast::VConstraintPack>(v).elements))
+        elements.push_back(mapping_arg(e));
+      return pack(elements);
+    }
     if (ins().values.is<ast::VType>(v)) {
       auto t = ins().values.get<ast::VType>(v);
       return type_arg(types().add_cv(t.type, Cv(t.cv)));
@@ -555,6 +561,12 @@ public:
     return {TemplateArgKind::value, ins().values.is<ast::VInt>(v) ? ins().values.get<ast::VInt>(v).type : QualType{}, v};
   }
   ConstId mapping_value(const TemplateArg& a) {
+    if (a.kind == TemplateArgKind::pack) {
+      std::vector<ConstId> elements;
+      for (const TemplateArg& e : ins().seqs.elements(a.elems))
+        elements.push_back(mapping_value(e));
+      return ins().intern_value(ast::VConstraintPack{ins().intern_seq(std::span<const ConstId>(elements))});
+    }
     if (a.kind == TemplateArgKind::type) {
       QualType c = types().canonical(a.type);
       return ins().intern_value(ast::VType{Types::unqualified(c), u8(std::to_underlying(Types::cv(c)))});
@@ -583,9 +595,15 @@ public:
         m.push_back(e);
         continue;
       }
-      auto s = ins().values.is<ast::VType>(e)
-                   ? substitute_arg(mapping_arg(e), b).transform([&](const TemplateArg& arg) { return mapping_value(arg); })
-                   : substitute_value(e, b);
+      auto s = [&]() -> std::optional<ConstId> {
+        if (ins().values.is<ast::VConstraintPack>(e)) {
+          const std::array args{mapping_arg(e)};
+          return substitute_args(args, b).transform([&](const auto& mapped) { return mapping_value(mapped.front()); });
+        }
+        if (ins().values.is<ast::VType>(e))
+          return substitute_arg(mapping_arg(e), b).transform([&](const TemplateArg& arg) { return mapping_value(arg); });
+        return substitute_value(e, b);
+      }();
       // An invalid mapping leaves the atom unsatisfied ([temp.constr.atomic]/3): an empty
       // disjunction, false.
       if (!s) return ins().intern_value(ast::VConstraint{1, ins().intern_seq(std::span<const ConstId>{})});

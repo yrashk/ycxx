@@ -163,9 +163,14 @@ struct VType {
   u8 cv;
 };
 
+// A pack occupies one parameter slot in an atomic constraint's mapping.
+struct VConstraintPack {
+  SeqId<ConstId> elements;
+};
+
 // An atomic constraint ([temp.constr.atomic]): the appearance of its expression (the item that
 // contains it, and its tokens [begin, end) in that item's declaration part), and its parameter
-// mapping: one entry per parameter of the head at `depth`, a `VType` or a value for a parameter the
+// mapping: one entry per parameter of the head at `depth`, a type, pack or value for a parameter the
 // expression names and none for the others ([temp.constr.atomic]/1). Two are identical when they
 // are one value ([temp.constr.atomic]/2). `calls` are the offsets, from `begin`, of its unqualified
 // calls that were dependent where it appears: checking it adds argument-dependent lookup at the
@@ -189,7 +194,7 @@ struct VConstraint {
 };
 
 using ValueKinds = closed_list<VInt, VFloat, VNullptr, VString, VLvalue, VEntity, VAggregate, VDepParam, VDepFnParam, VDepExpansion,
-                               VDepSizeofPack, VType, VAtom, VConstraint, VDepOp, VMemberPtr, VDepVariable>;
+                               VDepSizeofPack, VType, VAtom, VConstraint, VDepOp, VMemberPtr, VDepVariable, VConstraintPack>;
 
 template <class T>
 constexpr bool is_value_kind = ValueKinds::contains<T>;

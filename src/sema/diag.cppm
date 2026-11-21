@@ -361,6 +361,8 @@ enum class Diag : std::uint32_t {
   class_alignment_uncertain_layout [[=message{Severity::error, "class alignment depends on attributes or packing whose layout is not supported yet"}]],
   constructibility_target_pack [[=message{Severity::error, "a pack expansion as the target of '__is_constructible' is not supported yet"}]],
   constructibility_substitution [[=message{Severity::error, "substitution of the operand type '{0:t}' in '__is_constructible' failed"}]],
+  recursive_default_member_initializer [[=message{Severity::error, "default member initializer for '{0:n}' would use itself"}]],
+  default_member_initializer_cleanup [[=message{Severity::error, "default member initializer requiring cleanup is not supported yet"}]],
 };
 
 // A `{N:r}` argument: why an evaluation was not constant. 0 is an expression the front end

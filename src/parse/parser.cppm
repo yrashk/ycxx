@@ -1922,6 +1922,13 @@ public:
     return s_->node(ast::DefaultArg{e.info, sema::Sema::at(e, e.begin)}, e.begin, e.end, e.info).id;
   }
 
+  // A default member initializer after its optional `=` ([class.mem.general]).
+  Ex member_initializer(QualType type, bool braced, sema::Construction form) {
+    u32 begin = pos();
+    return braced ? s_->list_init(type, *braced_init_list(), form)
+                  : s_->convert(assignment_expression(), type, begin);
+  }
+
   // Set while a lambda's parameters are read, which check their placeholders themselves.
   bool placeholder_params = false;
   void skip_param() {
@@ -3712,7 +3719,7 @@ public:
     // variable of the name hides it.
     if ((is(Tk::l_paren) || is(Tk::l_brace)) && !s_->scope_names_object(*s, n))
       if (auto t = s_->scope_type(*s, n)) {
-        if (substituting_partial_arguments) s_->type_member_access(*s, n, name_at);
+        s_->type_member_access(*s, n, name_at, /*direct_alias_only=*/!substituting_partial_arguments);
         return type_conversion(*t, begin);
       }
     if (is(Tk::less)) {
@@ -4759,13 +4766,32 @@ public:
 
   // A local usable in constant expressions ([expr.const]): constexpr, or a const integral one
   // with a constant initializer; a constexpr one must have one ([dcl.constexpr]).
-  void constant_local(u32 local, QualType t, bool is_constexpr, Ex init) {
+  void constant_local(u32 local, QualType t, bool is_constexpr, Ex& init, bool replayed_defaults = false) {
     bool usable_kind = sema::Types::is_const(t) && !sema::Types::is_volatile(t) && s_->types().is_integral(t);
     if (!init.ok() || !(is_constexpr || usable_kind)) return;
-    sema::Evaluated v = sema::Evaluator(*s_, questions()).evaluate(init);
-    if (v.value) s_->set_local_value(local, *v.value);
-    else if (v.dependent) s_->set_local_value_dependent(local);
-    else if (is_constexpr) s_->diag(init.begin, Diag::not_constant, v.reason);
+    sema::Evaluator evaluator(*s_, questions());
+    const bool scalar_record = replayed_defaults && s_->as<ast::InitList>(init).has_value();
+    sema::Evaluated v = scalar_record ? evaluator.evaluate_initializer(init, /*zero_default=*/false)
+                                     : evaluator.evaluate(init);
+    if (v.value) {
+      s_->set_local_value(local, *v.value);
+      if (scalar_record) {
+        // The initialization was manifestly constant-evaluated ([expr.const]). Materialize that
+        // result, so code generation cannot call a runtime branch of an initializer again.
+        const auto fields = s_->list_elements(init);
+        const auto values = s_->ins().seqs.elements(s_->ins().values.get<ast::VAggregate>(*v.value).elems);
+        std::vector<Ex> literals;
+        for (std::size_t i = 0; i < fields.size(); ++i) {
+          const Ex& field = fields[i];
+          literals.push_back(s_->literal(field.type(), values[i], ast::ValueCategory::prvalue, field.begin, field.end));
+        }
+        init = s_->list_of(t, std::move(literals), init.begin, init.end);
+      }
+    } else if (v.dependent) {
+      s_->set_local_value_dependent(local);
+    } else if (is_constexpr) {
+      s_->diag(init.begin, Diag::not_constant, v.reason);
+    }
   }
 
   // [stmt.while]
@@ -5281,6 +5307,8 @@ public:
       sema::Sema::ImmediateReferenceScope references(*s_, s_->constant_reference_context || spec.is_constexpr);
       // [dcl.constexpr]: a constexpr variable is const.
       if (spec.is_constexpr) d.type = s_->types().add_cv(d.type, sema::Cv::const_);
+      const bool replay_defaults = !spec.is_static && s_->can_replay_default_members(d.type);
+      const sema::Sema::DefaultMemberScope defaults(*s_, replay_defaults);
       // `char s[] = "…"`: the bound from the literal, null included ([dcl.init.string]/1).
       if (d.unknown_bound && is(Tk::equal) && kind(1) == Tk::string_lit) {
         d.type = s_->types().array(d.type, literal_at(1).units.size() + 1);
@@ -5335,7 +5363,7 @@ public:
           init = s_->bind_reference(b->clauses[0].expr, d.type, b->clauses[0].begin, true);
         else
           init = s_->list_init(d.type, *b, form, /*extend_reference=*/true);
-        constant_local(local, d.type, spec.is_constexpr, init);
+        constant_local(local, d.type, spec.is_constexpr, init, replay_defaults);
       } else if (accept(Tk::equal)) {
         Ex e = assignment_expression();
         if (s_->types().is_array(d.type)) {
@@ -5345,7 +5373,7 @@ public:
           init = s_->bind_reference(e, d.type, e.begin, true);
         } else {
           init = s_->convert(e, d.type, e.begin);
-          constant_local(local, d.type, spec.is_constexpr, init);
+          constant_local(local, d.type, spec.is_constexpr, init, replay_defaults);
         }
       } else if (is(Tk::l_paren)) {
         // Direct-initialization ([dcl.init.general]): `T x(args)`.
@@ -5371,6 +5399,7 @@ public:
         } else {
           init = s_->convert(args[0], d.type, open);
         }
+        if (replay_defaults) constant_local(local, d.type, spec.is_constexpr, init, replay_defaults);
       } else if (s_->types().is_reference(d.type)) {
         s_->diag(d.name_at, Diag::reference_uninitialized);  // [dcl.ref]/5
       } else if (s_->types().is_dependent(d.type)) {
@@ -5381,7 +5410,8 @@ public:
         s_->diag(d.name_at, Diag::deleted_constructor, d.type);
       } else if (s_->has_member_inits(d.type)) {
         init = s_->default_init(d.type, d.name_at, pos());
-        if (s_->as<ast::DefaultInit>(init)) constant_local(local, d.type, spec.is_constexpr, init);
+        if (replay_defaults || s_->as<ast::DefaultInit>(init))
+          constant_local(local, d.type, spec.is_constexpr, init, replay_defaults);
       } else if (spec.is_constexpr) {
         s_->diag(d.name_at, Diag::constexpr_uninitialized, d.name);
       } else if (sema::Types::is_const(d.type)) {

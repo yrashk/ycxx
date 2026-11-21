@@ -735,8 +735,8 @@ clauses = ['expr.static.cast', 'expr.reinterpret.cast', 'expr.const.cast', 'expr
 std = 'C++98'
 detect = '\b(?:static|const|reinterpret)_cast\s*<'
 status = 'partial'
-issues = [199, 59]
-note = 'rvalue-reference, C-style and functional downcasts, `const_cast`, `reinterpret_cast`, and some `void*` and `std::nullptr_t` conversions'
+issues = [199, 59, 216]
+note = 'rvalue-reference, C-style and functional downcasts, `const_cast`, `reinterpret_cast`, and some `void*` and `std::nullptr_t` conversions. Qualified functional casts check access to aliases and typedefs declared directly in ordinary classes.'
 probe = '''
 int main() { long l = 5; int i = static_cast<int>(l); const int* c = &i; int* m = const_cast<int*>(c); char* b = reinterpret_cast<char*>(m); return (i == 5 && (int)l == int(l) && b) ? 0 : 1; }
 '''
@@ -1104,7 +1104,8 @@ clauses = ['dcl.init.aggr']
 std = 'C++98'
 detect = '=\s*\{'
 status = 'partial'
-issues = [111]
+issues = [111, 118]
+note = 'Ordinary automatic records with scalar fields use omitted default member initializers in declaration order. Static storage and destination-dependent constant evaluation remain open.'
 probe = '''
 struct P { int x; int y[2]; };
 int main() { P p = {1, {2, 3}}; int a[] = {4, 5}; int m[2][2] = {{1, 0}, {0, 1}}; return (p.y[1] + a[1] + m[1][1] == 9) ? 0 : 1; }
@@ -2190,7 +2191,7 @@ ftm = '__cpp_concepts'
 detect = '\brequires\b'
 status = 'partial'
 issues = [234, 236]
-note = 'on class templates, partial specializations and members; constraint mangling'
+note = 'Ordinary function overloads support explicit trailing type packs in atomic constraints. Broader template and member constraints and constraint mangling remain.'
 probe = '''
 template<class T> concept Int = sizeof(T) == 4;
 template<Int T> int f(T) { return 1; } template<class T> int f(T) { return 2; }
