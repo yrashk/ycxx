@@ -32,6 +32,50 @@ using ast::ItemId;
 using items::ItemKind;
 using sema::ConstId;
 
+// The parser skips attributes whose layout semantics we do not implement. Find those
+// that could change a record or field even though its computed offsets look natural.
+enum class LayoutAttributes { affecting_layout, leading_affecting_layout, any };
+
+bool layout_attribute(const pp::Region& region, u32 begin, u32 end, LayoutAttributes mode = LayoutAttributes::affecting_layout) {
+  using enum lex::Tk;
+  for (std::uint32_t i = begin; i < end; ++i) {
+    auto tok = region.tokens[i];
+    if (tok.kind == kw_alignas) return true;
+    if (i + 1 == end) break;
+    const auto next = region.tokens[i + 1].kind;
+    bool bracket = tok.kind == l_square && next == l_square;
+    bool gnu = tok.kind == identifier && next == l_paren && region.name(tok) == "__attribute__";
+    if (!bracket && !gnu) {
+      if (mode == LayoutAttributes::leading_affecting_layout) return false;
+      continue;
+    }
+    if (mode == LayoutAttributes::any) return true;
+    if (gnu) ++i;
+    const auto open = bracket ? l_square : l_paren;
+    const auto close = bracket ? r_square : r_paren;
+    std::uint32_t depth = 1;
+    while (++i < end && depth) {
+      auto part = region.tokens[i];
+      if (part.kind == open) ++depth;
+      else if (part.kind == close && --depth == 0) break;
+      else if (part.kind == identifier) {
+        auto name = region.name(part);
+        if (name.size() > 4 && name.starts_with("__") && name.ends_with("__"))
+          name = name.substr(2, name.size() - 4);
+        if (name == "packed" || name == "aligned" || name == "mode" || name == "vector_size" ||
+            name == "no_unique_address" || name == "ms_struct" || name == "gcc_struct") return true;
+      }
+    }
+  }
+  return false;
+}
+
+bool layout_may_be_packed(const pp::Region& region, u32 begin, u32 end) {
+  const auto& ranges = region.possibly_packed;
+  auto pack = std::ranges::upper_bound(ranges, begin, {}, [](const auto& range) { return range.second; });
+  return pack != ranges.end() && pack->first < end;
+}
+
 // The record of a declaration that failed to be declared; its diagnostic says why.
 ast::DeclSema invalid_decl() {
   ast::DeclSema d{};
@@ -909,6 +953,7 @@ public:
     std::vector<ast::MemberRec> adl_friends;
   };
   ClassContent class_content(u32 item, const std::function<const ast::ItemSema&(u32)>& sema_of);
+  bool peer_virtual_root_layout(u32 item, EntityId cls, const sema::ClassRec& rec, std::span<const ast::MemberRec> members);
   // `instantiate_class(spec)` ([temp.inst]/2, §B6.2): the class record of a class template
   // specialization, its member items analysed with the arguments bound, built whole and then
   // published; none when the template has no definition before `item`, or for a dependent one.
@@ -5440,6 +5485,51 @@ Program::ClassContent Program::class_content(u32 item, const std::function<const
   return out;
 }
 
+bool Program::peer_virtual_root_layout(u32 item, EntityId cls, const sema::ClassRec& rec,
+                                       std::span<const ast::MemberRec> members) {
+  const auto& head = items_->items[item];
+  const auto& entity = w_->entities.rec(cls);
+  if (head.template_depth || head.specialization || in_class(item) || unnamed(ns_of(item)) ||
+      entity.templ != EntityId::none || rec.union_ || !rec.types.empty()) return false;
+  if (!sema::native_virtual_root_declarations(rec, w_->types, [&](EntityId f) -> std::optional<ast::DeclSema> {
+        const auto decl = member_decl(f);
+        return decl ? decl_sema(*decl) : std::nullopt;
+      })) return false;
+  const auto has_attributes = [&](u32 begin, u32 end) { return layout_attribute(*r_, begin, end, LayoutAttributes::any); };
+  if (layout_may_be_packed(*r_, head.begin, head.brace_end) || has_attributes(head.begin, head.brace_begin) ||
+      has_attributes(head.brace_end, head.end)) return false;
+  // A forward declaration can carry attributes that the ordinary parser does not apply.
+  const auto declarations = decls_.find(std::to_underlying(cls));
+  if (declarations != decls_.end() && std::ranges::any_of(declarations->second, [&](const auto& decl) {
+        const auto& prior = items_->items[decl.first];
+        return decl.first < item && has_attributes(prior.begin, prior.end);
+      })) return false;
+  auto decl = members.begin();
+  u32 previous = items::none;
+  for (const sema::FieldRec& field : rec.fields) {
+    const auto type = w_->types.builtin_of(field.type);
+    if (field.bit_width || !type || !ast::is_integral(*type) || !w_->target.has(*type) || w_->target[*type].size > 8)
+      return false;
+    decl = std::ranges::find(decl, members.end(), field.entity, &ast::MemberRec::entity);
+    if (decl == members.end()) return false;
+    const u32 source_item = index(decl->decl.item);
+    ++decl;
+    if (source_item == previous) continue;
+    previous = source_item;
+    const auto& source = items_->items[source_item];
+    if (source.names.empty() || has_attributes(source.begin, source.end)) return false;
+    // An alias can carry a GNU alignment or mode attribute that sema erases. Use only builtin
+    // scalar specifiers written directly in the member declaration for the initial layout slice.
+    const auto specifiers = std::span(r_->tokens).subspan(source.begin, source.names.front().offset);
+    if (!std::ranges::all_of(specifiers, [](const lex::Tok& token) {
+      using enum lex::Tk;
+      return Parser::simple_type_keyword(token.kind) || token.kind == kw_const || token.kind == kw_volatile ||
+             token.kind == kw_mutable;
+    })) return false;
+  }
+  return true;
+}
+
 const Result<ast::ClassDef>& Program::class_def(u32 item) {
   if (class_cells_[item]) return *class_cells_[item];
   u32 key = class_def_key(item);  // apart from item_sema(item), which may be running and ask for it
@@ -5469,6 +5559,8 @@ const Result<ast::ClassDef>& Program::class_def(u32 item) {
     rec.friends = std::move(c.friends);
     rec.adl_friends = c.adl_friends;
     special_members(item, *cls, rec, &out.diags);
+    if (rec.polymorphic && w_->target.triple == ast::x86_64_linux.triple)
+      rec.peer_virtual_root_layout = peer_virtual_root_layout(item, *cls, rec, members);
     rec.defined = true;
     // Default arguments are checked with the full member set, before function bodies are read.
     classes_.publish(*cls, std::move(rec), [&](sema::ClassRec& fresh) {
