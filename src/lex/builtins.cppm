@@ -20,6 +20,7 @@ enum class TypeTrait : std::uint8_t {
   // Predicates with bounded support.
   is_trivially_copyable, is_constructible, is_nothrow_constructible, is_trivially_constructible,
   is_assignable, is_nothrow_assignable, is_trivially_assignable,
+  is_convertible, is_nothrow_convertible,
 };
 
 struct TypeTraitInfo {
@@ -86,6 +87,10 @@ inline constexpr std::array type_traits{
     TypeTraitInfo{.name = "__is_nothrow_assignable", .trait = TypeTrait::is_nothrow_assignable, .arity = 2,
                   .transforms = false, .advertised = false, .replay_dependent = true},
     TypeTraitInfo{.name = "__is_trivially_assignable", .trait = TypeTrait::is_trivially_assignable, .arity = 2,
+                  .transforms = false, .advertised = false, .replay_dependent = true},
+    TypeTraitInfo{.name = "__is_convertible", .trait = TypeTrait::is_convertible, .arity = 2,
+                  .transforms = false, .advertised = false, .replay_dependent = true},
+    TypeTraitInfo{.name = "__is_nothrow_convertible", .trait = TypeTrait::is_nothrow_convertible, .arity = 2,
                   .transforms = false, .advertised = false, .replay_dependent = true},
 };
 

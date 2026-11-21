@@ -312,12 +312,13 @@ public:
     return ins().intern_value(ast::VDepOp{ast::DepOp::is_same, ins().intern_seq(std::span<const TemplateArg>(operands))});
   }
 
-  // A concrete constructibility or assignability query is checked by its owning token replay.
+  // The owning token replay checks the concrete constructibility, assignability or convertibility query.
   std::optional<ConstId> replayed_type_trait_pattern(ast::DepOp op, std::span<const TemplateArg> operands)
     pre(op == ast::DepOp::is_constructible || op == ast::DepOp::is_nothrow_constructible ||
         op == ast::DepOp::is_trivially_constructible ||
         (operands.size() == 2 && (op == ast::DepOp::is_assignable || op == ast::DepOp::is_nothrow_assignable ||
-                                  op == ast::DepOp::is_trivially_assignable)))
+                                  op == ast::DepOp::is_trivially_assignable || op == ast::DepOp::is_convertible ||
+                                  op == ast::DepOp::is_nothrow_convertible)))
   {
     if (!std::ranges::any_of(operands, [&](const TemplateArg& a) { return types().is_dependent(a.type); }) ||
         !std::ranges::all_of(operands, [&](const TemplateArg& a) { return structural_operand(a); })) return std::nullopt;
@@ -335,7 +336,8 @@ public:
     pre(op != ast::DepOp::is_same && op != ast::DepOp::logical_not &&
         op != ast::DepOp::is_constructible && op != ast::DepOp::is_nothrow_constructible &&
         op != ast::DepOp::is_trivially_constructible && op != ast::DepOp::is_assignable &&
-        op != ast::DepOp::is_nothrow_assignable && op != ast::DepOp::is_trivially_assignable)
+        op != ast::DepOp::is_nothrow_assignable && op != ast::DepOp::is_trivially_assignable &&
+        op != ast::DepOp::is_convertible && op != ast::DepOp::is_nothrow_convertible)
   {
     if (types().is_dependent(type)) {
       if (!structural_operand(type)) return std::nullopt;
@@ -382,6 +384,8 @@ public:
     case ast::DepOp::is_assignable:
     case ast::DepOp::is_nothrow_assignable:
     case ast::DepOp::is_trivially_assignable:
+    case ast::DepOp::is_convertible:
+    case ast::DepOp::is_nothrow_convertible:
     case ast::DepOp::logical_not: std::unreachable();
     }
     return w_->values.integer(types().builtin(Builtin::bool_), result);
@@ -486,7 +490,9 @@ public:
       case ast::DepOp::is_trivially_constructible:
       case ast::DepOp::is_assignable:
       case ast::DepOp::is_nothrow_assignable:
-      case ast::DepOp::is_trivially_assignable: {
+      case ast::DepOp::is_trivially_assignable:
+      case ast::DepOp::is_convertible:
+      case ast::DepOp::is_nothrow_convertible: {
         auto operands = substitute_args(ins().seqs.elements(op.operands), b);
         return operands ? replayed_type_trait_pattern(op.op, *operands) : std::nullopt;
       }

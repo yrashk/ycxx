@@ -1762,9 +1762,16 @@ session's.*
   replay paths evaluate dependent operands at instantiation. Other operand types and dependent
   queries outside those contexts get hard diagnostics. `__has_builtin` answers 0 for the three
   predicates while support is partial ([meta.unary.prop], [expr.assign], #218).
+- `__is_convertible(From, To)` and `__is_nothrow_convertible(From, To)` share a Boolean result
+  for arithmetic values, references to arithmetic types and cv `void`. Two cv `void` operands
+  give true. A single cv `void` operand gives false. Arithmetic reference binding accounts for
+  value category, the referent's qualifiers and temporary conversion between distinct arithmetic
+  types. Supported class-template bases and variable-template initializers replay dependent
+  operands. Other operand types and dependent queries outside those contexts get hard diagnostics.
+  `__has_builtin` answers 0 while support is partial ([meta.rel], [dcl.init.ref], #218).
 - Listed in docs/EXTENSIONS.md. Tests: `tests/own/builtins/`. `<cstdio>`: 53 → 33 errors.
 - Not yet (#211 follow-up): the built-ins that need the object model, such as
-  class constructibility and assignability, `__is_convertible`, remaining `__is_trivially_*` and
+  class constructibility, assignability and convertibility, remaining `__is_trivially_*` and
   `__is_nothrow_*` predicates, `__is_base_of`, `__is_standard_layout` and
   `__reference_binds_to_temporary`. Other dependent predicates, conversions of a dependent
   predicate to a non-`bool` parameter, dependent array bounds and expression mangling remain in
