@@ -41,6 +41,14 @@ public:
     return make_node(kind_of(global), i);
   }
 
+  // The interned node this draft adopted, or none for a node built in this frame.
+  NodeId adopted_node(NodeId draft) const
+    pre(is_draft_node(draft))
+  {
+    const Entry& e = entry(draft);
+    return e.adopted ? NodeId(e.global) : NodeId::none;
+  }
+
   // Children for a `ChildList`, in this builder's edge pool.
   ChildList list(std::span<const Child> cs) {
     for (const Child& c : cs) check_node(c.id);
