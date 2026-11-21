@@ -4595,6 +4595,7 @@ private:
       }
       return declare_alias(d.name, d.name_at, d.type);
     }
+    sema::Sema::ImmediateReferenceScope references(s_, spec.is_constexpr && !types.is_function(d.type));
     u32 ord = static_cast<u32>(decls_.size());
     // `T a[] = {…}`: the bound from the list ([dcl.array]/8), parsed here and used below.
     std::unique_ptr<sema::Braced> early;
@@ -5157,6 +5158,7 @@ private:
     } else if (!fn && sema::Types::is_const(d.type) && !spec.is_extern) {
       s_.diag(d.name_at, Diag::const_uninitialized, d.name);
     }
+    s_.permit_constant_initializer(d.begin, d.type, value);
     declarators_.push_back(s_.node(ast::Declarator{ord, sema::Sema::at(init, d.begin), value}, d.begin, ps_.pos()));
     decls_.push_back(sem);
     if (!d.asm_label.empty()) {
