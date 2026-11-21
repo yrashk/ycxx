@@ -822,6 +822,10 @@ public:
         TemplateArg a = bound                                     ? *bound
                         : p.kind == ast::TemplateArgKind::type ? t.type_arg(p.type)
                                                                : t.value_arg(p.type, ins().intern_value(ast::VDepParam{p.depth, p.index}));
+        if (!bound && p.pack && p.kind == TemplateArgKind::type) {
+          const std::array expansion{t.type_arg(types().pack_expansion(p.type))};
+          a = t.pack(expansion);
+        }
         mapping.push_back(t.mapping_value(a));
       }
     }

@@ -259,7 +259,8 @@ initializer takes precedence.
   partial specializations with substitution checks for dependent type arguments, static constexpr
   members of class templates, member function and
   constructor templates, parameter packs and fold expressions, alias templates, template
-  template parameters, concepts and requires-expressions in overload resolution,
+  template parameters, concepts and requires-expressions in overload resolution, including
+  explicit trailing type packs in ordinary constrained function overloads,
   `if constexpr`, deferred template static assertion failures, and two-phase lookup, with
   Itanium names identical to Clang's; Clang's
   `__make_integer_seq`;
