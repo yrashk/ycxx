@@ -45,6 +45,12 @@ def main():
         compile('trivial.cpp', '-o', 'darwin-program')
         assert (scope / 'darwin-program').read_bytes().startswith(bytes.fromhex('cffaedfe'))
 
+        tests = Path(__file__).resolve().parents[2]
+        strlen = tests / 'own' / 'builtins' / 'strlen-runtime.run.cpp'
+        compile(target, '-nostdlib', str(strlen), '-o', 'strlen-program', env=dict(cold, PATH=''))
+        for args in ((), ('',), ('q',), ('', 'offset'), ('q', 'offset')):
+            run(['./strlen-program', *args])
+
         source('main.cpp', """int add_bias(int);
 int main(int argc, char* argv[]) {
   if (argc != 3 || argv[0] == nullptr || argv[argc] != nullptr) return 1;
@@ -111,7 +117,6 @@ int main(int argc, char** argv) {
         compile('-c', 'init-first.cpp', '-o', 'darwin-dynamic.o')
         assert b'__mod_init_func' in (scope / 'darwin-dynamic.o').read_bytes()
 
-        tests = Path(__file__).resolve().parents[2]
         reference_fixtures = tests / 'own' / 'dynamic-init'
         for fixture in ('constant', 'ordered', 'constinit', 'constexpr-address', 'extern'):
             path = str(reference_fixtures / f'reference-{fixture}.run.cpp')

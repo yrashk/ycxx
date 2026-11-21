@@ -309,7 +309,8 @@ struct Ops {
   static Flow load(M& m, Frame& f, N n) {
     QualType t = imm_type(f, n);
     M::Place pl;
-    if (Flow fl = m.locate(m.operand(f, n, 1), imm_path(f, n, 1), t, M::Use::read, has(f, n, ir::Flag::volatile_), pl);
+    M::Use use = has(f, n, ir::Flag::call_body) ? M::Use::callee_read : M::Use::read;
+    if (Flow fl = m.locate(m.operand(f, n, 1), imm_path(f, n, 1), t, use, has(f, n, ir::Flag::volatile_), pl);
         fl != Flow::next)
       return fl;
     if (pl.ncells != 1 || m.shape(t).kind == M::Kind::array) return m.unsupported(n);

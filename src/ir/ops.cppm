@@ -67,7 +67,9 @@ export struct PathStep {
 
 // Per-node flags (§2.3: `nsw`/`nuw`/`exact` on arithmetic; `volatile` and non-constexpr callees
 // make an operation non-constant). The enumerator is the bit position.
-export enum class Flag : std::uint8_t { nsw, nuw, exact, volatile_, not_constexpr, variadic };
+// `call_body` marks reads of a lowered builtin body, which are indeterminately sequenced with
+// the caller's other evaluations ([intro.execution]).
+export enum class Flag : std::uint8_t { nsw, nuw, exact, volatile_, not_constexpr, variadic, call_body };
 export using Flags = std::uint8_t;
 export constexpr Flags bit(Flag f) { return Flags(1u << std::to_underlying(f)); }
 
@@ -199,7 +201,7 @@ export enum class Op : std::uint16_t {
   obj__begin [[=state({S, V}, {S}).imms({type})]],
   obj__end [[=state({S, V}, {S})]],
   union__activate [[=state({S, V}, {S}).imms({path})]],
-  load [[=state({S, V}, {V}).imms({type, path}).accepts({volatile_})]],
+  load [[=state({S, V}, {V}).imms({type, path}).accepts({volatile_, call_body})]],
   store [[=state({S, V, V}, {S}).imms({type, path}).accepts({volatile_})]],
   bit_field_load [[=state({S, V}, {V}).imms({u32}).with({nonconstant})]],  // record pointer and field index
   bit_field_store [[=state({S, V, V}, {S}).imms({u32}).with({nonconstant})]],

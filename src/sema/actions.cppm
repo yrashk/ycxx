@@ -4375,13 +4375,25 @@ public:
     return builtin_address_of(e, begin, end, begin);
   }
 
-  // A call of one (docs/EXTENSIONS.md): `__builtin_inf*` and `__builtin_huge_val*` are +infinity
-  // and `__builtin_nan*` a quiet NaN, constants of their type; `__builtin_fabs*` a `BuiltinCall`.
+  Ex builtin_value_call(ast::BuiltinOp op, QualType result, QualType param, Ex arg, u32 begin, u32 end) {
+    if (dependent(arg)) return dependent_node({arg}, begin, end, result);
+    arg = convert(arg, param, arg.begin);
+    if (!arg.ok()) return {NodeId::none, begin, end};
+    ExprInfo info{result, ValueCategory::prvalue, 0};
+    return node(ast::BuiltinCall{info, op, b_->list({at(arg, begin)})}, begin, end, info);
+  }
+
+  // Builtins with ordinary expression arguments (docs/EXTENSIONS.md).
   Ex builtin_call(const lex::BuiltinFunctionInfo& b, std::vector<Ex> args, u32 begin, u32 end) {
     using enum lex::BuiltinFunction;
     if (b.function == addressof) {
       if (!builtin_arity(1, args.size(), begin)) return {NodeId::none, begin, end};
       return builtin_addressof(args.front(), begin, end);
+    }
+    if (b.function == strlen) {
+      if (!builtin_arity(1, args.size(), begin)) return {NodeId::none, begin, end};
+      QualType param = types().pointer(types().add_cv(builtin(Builtin::char_), Cv::const_));
+      return builtin_value_call(ast::BuiltinOp::strlen, builtin(w_->target.size_type), param, args.front(), begin, end);
     }
     Builtin kind = b.type == 'f' ? Builtin::float_ : b.type == 'l' ? Builtin::long_double : Builtin::double_;
     if (!ast::computes(w_->target[kind].format)) {
@@ -4393,7 +4405,8 @@ public:
     if (!builtin_arity(want, args.size(), begin)) return {NodeId::none, begin, end};
     if (std::ranges::any_of(args, [](const Ex& a) { return !a.ok(); })) return {NodeId::none, begin, end};
     switch (b.function) {
-      case addressof: std::unreachable();  // Handled before floating type selection.
+      case addressof:
+      case strlen: std::unreachable();  // Handled before floating type selection.
       case inf:
       case huge_val:
         return literal(t, w_->values.floating(t, std::numeric_limits<double>::infinity()), ValueCategory::prvalue, begin, end);
@@ -4421,14 +4434,7 @@ public:
         u64 bits = single ? 0x7fc00000u | (*payload & 0x3fffffu) : 0x7ff8000000000000u | (*payload & 0x7ffffffffffffu);
         return literal(t, ast::float_value(ins(), w_->target, t, ast::Bits128{bits, 0}), ValueCategory::prvalue, begin, end);
       }
-      case fabs: {
-        if (dependent(args[0])) return dependent_node({args[0]}, begin, end, t);
-        Ex x = convert(args[0], t, args[0].begin);
-        if (!x.ok()) return {NodeId::none, begin, end};
-        ExprInfo info{t, ValueCategory::prvalue, 0};
-        std::vector<ast::Child> children{at(x, begin)};
-        return node(ast::BuiltinCall{info, u8(fabs), b_->list(children)}, begin, end, info);
-      }
+      case fabs: return builtin_value_call(ast::BuiltinOp::fabs, t, t, args[0], begin, end);
     }
     std::unreachable();
   }

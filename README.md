@@ -250,6 +250,8 @@ Both targets accept leading `[[…]]` attributes on ordinary data and function m
   Namespace-scope `constexpr` pointers to `void` can retain scalar and array element addresses.
   `__builtin_addressof`, used by libycxx's `std::addressof`, bypasses overloaded `operator&`.
   It supports runtime addresses and constant expressions such as a scalar global's address.
+  `__builtin_strlen`, used by libycxx's exception headers, scans character storage in constant
+  expressions and native code. [#531](https://github.com/yrashk/ycxx/issues/531)
 - `extern "C"` functions from libSystem, including `printf` with integers, characters,
   floating values, pointers and strings as arguments, and the SDK `<math.h>`'s built-ins
   (`__builtin_fabs`, `__builtin_inf`, `__builtin_huge_val`, `__builtin_nan`).
