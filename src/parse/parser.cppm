@@ -1732,7 +1732,7 @@ public:
   }
 
   std::optional<u32> member_default_template_args(std::span<const Param> params, std::map<u32, bool>& template_probes) {
-    if (is(Tk::kw_static_cast) && kind(1) == Tk::less) return 1;
+    if ((is(Tk::kw_static_cast) || is(Tk::kw_reinterpret_cast)) && kind(1) == Tk::less) return 1;
     if (is(Tk::kw_template) && kind(1) == Tk::identifier && kind(2) == Tk::less) return 2;
     if ((is(Tk::period) || is(Tk::arrow)) && kind(1) == Tk::identifier && kind(2) == Tk::less) {
       // Lookup of a template through an object needs the type of the expression. A balanced
