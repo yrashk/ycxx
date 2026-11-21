@@ -1041,6 +1041,13 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   in the interpreter (#25). Mach-O still needs weak definitions for in-class member functions (#124).
 - Not yet: ref-qualifiers, `= default`.
 
+## Ordinary ref-qualified member functions (#311)
+
+- Ordinary non-template members in namespace-scope classes distinguish lvalue and rvalue
+  receivers, including cv-qualified overloads and out-of-class definitions. Nested Itanium
+  names encode the ref qualifier for mixed-object calls.
+- Ref-qualified virtual calls and broader template cases remain open.
+
 ## Classes, δ step 3: constructors, destructors, references, overloading (#86, 2026-11-18)
 
 - **References** ([dcl.ref], [dcl.init.ref]): `T&` and `T&&` declarators, reference locals,
