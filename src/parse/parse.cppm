@@ -740,6 +740,7 @@ public:
     u32 begin = 0;
     u32 end = 0;
     bool braced = false;
+    sema::Construction form = sema::Construction::direct_list;
   };
   std::map<u32, std::pair<QualType, std::optional<ConstId>>> static_locals_;  // by entity (`global`)
   void set_dmi(EntityId field, Dmi d) { dmis_[std::to_underlying(field)] = d; }
@@ -3138,9 +3139,14 @@ private:
                       ps_.name_of(ps_.tok(ctor_at + 1)) == cname;
     if (ctor || dtor) {
       std::optional<u32> virtual_at;
-      auto flags = constructor_flags(ctor_at, dtor ? &virtual_at : nullptr);
+      std::optional<u32> explicit_at;
+      auto flags = constructor_flags(ctor_at, dtor ? &virtual_at : nullptr, ctor ? &explicit_at : nullptr);
       if (!flags) return bad();
-      return special_member(c, ctor, *flags, virtual_at);
+      if (explicit_at && (!s_.template_scopes.empty() || inst_ || member_template_)) {
+        s_.diag(*explicit_at, Diag::not_supported, Tk::kw_explicit);
+        return bad();
+      }
+      return special_member(c, ctor, *flags, virtual_at, explicit_at.has_value());
     }
     if (ps_.is(Tk::l_square) && ps_.kind(1) == Tk::l_square) {
       u32 attrs_at = ps_.pos();
@@ -3318,17 +3324,16 @@ private:
       ConstId value = ConstId::none;
       if (ps_.is(Tk::equal) || ps_.is(Tk::l_brace)) {
         bool braced = ps_.is(Tk::l_brace) || ps_.kind(1) == Tk::l_brace;
-        if (!braced) ps_.bump();
-        else ps_.accept(Tk::equal);
+        const auto form = ps_.accept(Tk::equal) ? sema::Construction::copy_list : sema::Construction::direct_list;
         u32 from = ps_.pos();
         std::size_t n = s_.diag_count();
-        if (braced) init = s_.list_init(d.type, *ps_.braced_init_list());
+        if (braced) init = s_.list_init(d.type, *ps_.braced_init_list(), form);
         else init = s_.convert(ps_.assignment_expression(), d.type, from);
         auto v = init.ok() && types.is_scalar(d.type) ? constant_initializer(init) : std::nullopt;
         s_.truncate_diags(n);
         if (v) value = *v;
         else init = {};
-        p_->set_dmi(sem.entity, {it_->begin + from, it_->begin + ps_.pos(), braced});
+        p_->set_dmi(sem.entity, {it_->begin + from, it_->begin + ps_.pos(), braced, form});
       }
       s_.own.push_back({d.name, sem});
       declarators_.push_back(s_.node(ast::Declarator{u32(decls_.size()), sema::Sema::at(init, d.begin), value}, d.begin, ps_.pos()));
@@ -3781,7 +3786,8 @@ private:
   u32 constructor_start() {
     u32 next = ps_.past_attributes(0);
     while (ps_.kind(next) == Tk::kw_constexpr || ps_.kind(next) == Tk::kw_inline || ps_.kind(next) == Tk::kw_static ||
-           ps_.kind(next) == Tk::kw_virtual)
+           ps_.kind(next) == Tk::kw_virtual ||
+           (ps_.kind(next) == Tk::kw_explicit && ps_.kind(next + 1) != Tk::l_paren))
       next = ps_.past_attributes(next + 1);
     return next;
   }
@@ -3801,7 +3807,8 @@ private:
     return ps_.kind(next) == Tk::identifier && ps_.kind(next + 1) == Tk::l_paren;
   }
 
-  std::optional<u16> constructor_flags(u32 count, std::optional<u32>* virtual_at = nullptr) {
+  std::optional<u16> constructor_flags(u32 count, std::optional<u32>* virtual_at = nullptr,
+                                       std::optional<u32>* explicit_at = nullptr) {
     using namespace sema::decl_flag;
     u16 flags = 0;
     u32 end = ps_.pos() + count;
@@ -3811,6 +3818,19 @@ private:
       if (kind == Tk::kw_static) {
         s_.diag(ps_.pos(), Diag::static_constructor);
         return std::nullopt;
+      }
+      if (kind == Tk::kw_explicit) {
+        if (!explicit_at) {
+          s_.diag(ps_.pos(), Diag::explicit_constructor_placement);
+          return std::nullopt;
+        }
+        if (*explicit_at) {
+          s_.diag(ps_.pos(), Diag::duplicate_specifier, kind);
+          return std::nullopt;
+        }
+        *explicit_at = ps_.pos();
+        ps_.bump();
+        continue;
       }
       if (kind == Tk::kw_virtual) {
         if (!virtual_at) {
@@ -3929,7 +3949,7 @@ private:
 
   // A constructor or destructor declared in class `c` ([class.ctor], [class.dtor]), possibly
   // deleted ([dcl.fct.def.delete]).
-  void special_member(const ast::DeclSema& c, bool ctor, u16 flags, std::optional<u32> virtual_at) {
+  void special_member(const ast::DeclSema& c, bool ctor, u16 flags, std::optional<u32> virtual_at, bool is_explicit) {
     sema::Types& types = s_.types();
     u32 name_at = ps_.pos();
     if (!ctor) ps_.bump();
@@ -4012,6 +4032,7 @@ private:
     sem.linkage = ast::Linkage::external;
     sem.flags = flags;
     sem.is_virtual = is_virtual;
+    sem.is_explicit = is_explicit;
     std::vector<ast::ParamSema> params;
     for (const parse::Param& p : fs.params) params.push_back({EntityId::none, p.type, p.name, p.default_arg, p.element ? sema::param_flag::pack_element : u16(0)});
     if (!defaults_trail(params, fs.params, name_at)) return bad();
@@ -4944,9 +4965,9 @@ private:
     } else if (!fn && (early || ps_.is(Tk::l_brace) || (ps_.is(Tk::equal) && ps_.kind(1) == Tk::l_brace))) {
       // List-initialization; constant initialization when every element is a constant
       // ([basic.start.static]).
-      ps_.accept(Tk::equal);
+      const auto form = ps_.accept(Tk::equal) ? sema::Construction::copy_list : sema::Construction::direct_list;
       auto b = early ? std::move(early) : ps_.braced_init_list();
-      init = s_.list_init(d.type, *b);
+      init = s_.list_init(d.type, *b, form, /*extend_reference=*/true);
       if (init.ok() && !pattern) {
         if (ordinary_reference) {
           evaluate_reference(b->begin);
@@ -5315,6 +5336,7 @@ Program::ClassContent Program::class_content(u32 item, const std::function<const
                            (d.flags & sema::decl_flag::destructor) != 0, (d.flags & sema::decl_flag::deleted) != 0,
                            (d.flags & sema::decl_flag::template_) != 0, {}, std::move(defaults)});
         statics.back().is_virtual = d.is_virtual;
+        statics.back().is_explicit = d.is_explicit;
         if (w_->ins.names.spelling(statics.back().name) == "operator=" && defaulted_member_definition(m, d))
           statics.back().explicit_defaulted_assignment = true;
       }
@@ -5851,7 +5873,7 @@ private:
     auto evaluate = s_.constant_of;
     Parser sub(p_->region(), d.begin, d.end, s_);
     sub.set_questions(*q_);
-    Ex init = d.braced ? s_.list_init(f.type, *sub.braced_init_list()) : s_.convert(sub.assignment_expression(), f.type, 0);
+    Ex init = d.braced ? s_.list_init(f.type, *sub.braced_init_list(), d.form) : s_.convert(sub.assignment_expression(), f.type, 0);
     s_.constant_of = evaluate;
     s_.put_scopes(std::move(saved));
     return init;
