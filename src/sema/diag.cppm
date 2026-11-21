@@ -367,6 +367,8 @@ enum class Diag : std::uint32_t {
   trivial_constructibility_unsupported [[=message{Severity::error, "'__is_trivially_constructible' for '{0:t}' with these argument types is not supported yet"}]],
   assignability_dependent [[=message{Severity::error, "dependent operands of '{0:n}' are not supported yet"}]],
   assignability_unsupported [[=message{Severity::error, "'{0:n}' for '{1:t}' and '{2:t}' is not supported yet"}]],
+  convertibility_dependent [[=message{Severity::error, "dependent operands of '{0:n}' are not supported yet"}]],
+  convertibility_unsupported [[=message{Severity::error, "'{0:n}' for '{1:t}' and '{2:t}' is not supported yet"}]],
 };
 
 // A `{N:r}` argument: why an evaluation was not constant. 0 is an expression the front end
@@ -430,7 +432,8 @@ constexpr bool is_type_trait_failure(engine::DiagId id) {
   return id == diag_id(Diag::trivial_copyability_incomplete) || id == diag_id(Diag::trivial_copyability_unsupported) ||
          id == diag_id(Diag::constructibility_incomplete) || id == diag_id(Diag::constructibility_unsupported) ||
          id == diag_id(Diag::nothrow_constructibility_unsupported) ||
-         id == diag_id(Diag::trivial_constructibility_unsupported) || id == diag_id(Diag::assignability_unsupported);
+         id == diag_id(Diag::trivial_constructibility_unsupported) || id == diag_id(Diag::assignability_unsupported) ||
+         id == diag_id(Diag::convertibility_unsupported);
 }
 // Whether a diagnostic stays an error where a substitution failure means "not satisfied": a limit
 // of ycxx's, an atomic constraint that is not a `bool` constant ([temp.constr.atomic]/3), or a
