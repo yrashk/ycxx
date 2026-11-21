@@ -5360,6 +5360,89 @@ public:
     return node(ast::DeleteObject{info, f, at(addr, begin), at(size, begin)}, begin, end, info);
   }
 
+  // [expr.new]: a potentially evaluated constant bound is checked before unsigned conversion.
+  // Limit the object size to the largest positive byte distance representable by ptrdiff_t.
+  bool valid_new_bound(Ex bound, u64 element_size) {
+    if (unevaluated || !constant_of) return true;
+    auto known = constant_of(bound);
+    if (!known) return true;
+    ValueRec value = w_->values.rec(*known);
+    int size_bits = shape(w_->target, w_->target.ptrdiff_type).bits - 1;
+    u64 max_count = ((u64{1} << size_bits) - 1) / element_size;
+    bool negative = false;
+    bool oversized = false;
+    if (value.kind == ValueKind::integer) {
+      negative = ast::is_signed(w_->target, *types().builtin_of(value.type)) && i64(value.bits) < 0;
+      oversized = value.bits > max_count;
+    } else if (value.kind == ValueKind::floating) {
+      negative = value.real < 0;
+      // Check representability before truncating to an integer.
+      oversized = !std::isfinite(value.real) || value.real >= std::ldexp(1.0, size_bits) ||
+                  (!negative && u64(value.real) > max_count);
+    }
+    if (negative || oversized) {
+      diag(bound.begin, negative ? Diag::negative_new_bound : Diag::oversized_new_bound);
+      return false;
+    }
+    return true;
+  }
+
+  Ex new_array(QualType t, Ex bound, const std::optional<std::vector<Ex>>& args, const Braced* braces, u32 begin, u32 end) {
+    Ex fail{NodeId::none, begin, end};
+    if (!bound.ok()) return fail;
+    if (!types().is_object(t)) {
+      diag(begin, Diag::new_requires_object, t);
+      return fail;
+    }
+    if (!scalar_allocation_type(t) || types().has_placeholder(t) || types().is_dependent(t) ||
+        (args && !args->empty()) || (braces && !braces->clauses.empty())) {
+      diag(begin, Diag::not_supported, lex::Tk::kw_new);
+      return fail;
+    }
+    if (!args && !braces && Types::is_const(types().canonical(t))) {
+      diag(begin, Diag::new_const_uninitialized, t);
+      return fail;
+    }
+    Ex count = convert(bound, builtin(w_->target.size_type), bound.begin);
+    if (!count.ok()) return fail;
+    QualType pointer = types().pointer(t);
+    if (dependent(count)) return dependent_node({count}, begin, end, pointer);
+    auto size = layout_of(t, false);
+    if (!size) {
+      diag(begin, Diag::not_supported, lex::Tk::kw_new);
+      return fail;
+    }
+    if (!valid_new_bound(bound, *size)) return fail;
+
+    Ex init = braces ? list_init(t, *braces) : args ? value_init(t, end, end) : default_init(t, end, end);
+    if (!init.ok()) return fail;
+    ExprInfo info{pointer, ValueCategory::prvalue, 0};
+    return node(ast::NewArray{info, at(count, begin), at(init, begin)}, begin, end, info);
+  }
+
+  Ex delete_array(Ex operand, u32 begin, u32 end) {
+    Ex fail{NodeId::none, begin, end};
+    if (!operand.ok()) return fail;
+    QualType v = builtin(Builtin::void_);
+    if (dependent(operand)) return dependent_node({operand}, begin, end, v);
+    if (types().is_class(operand.type())) {
+      diag(begin, Diag::not_supported, lex::Tk::kw_delete);  // contextual conversion from a class
+      return fail;
+    }
+    if (!types().is_pointer(operand.type()) || !types().is_object(types().pointee(operand.type()))) {
+      diag(begin, Diag::delete_requires_pointer, operand.type());
+      return fail;
+    }
+    if (!scalar_allocation_type(types().pointee(operand.type()))) {
+      diag(begin, Diag::not_supported, lex::Tk::kw_delete);
+      return fail;
+    }
+    Ex pointer = rvalue(operand);
+    if (!pointer.ok()) return fail;
+    ExprInfo info{v, ValueCategory::prvalue, 0};
+    return node(ast::DeleteArray{info, at(pointer, begin)}, begin, end, info);
+  }
+
   bool scalar_allocation_type(QualType t) {
     return types().is_integral(t) || types().is_pointer(t);
   }
