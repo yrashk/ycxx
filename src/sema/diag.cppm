@@ -256,6 +256,7 @@ enum class Diag : std::uint32_t {
   virtual_member_template [[=message{Severity::error, "a member function template cannot be 'virtual'"}]],
   virtual_union_member [[=message{Severity::error, "a union cannot have a virtual member function"}]],
   virtual_placeholder_return [[=message{Severity::error, "a virtual function cannot have a deduced return type"}]],
+  virtual_constraints [[=message{Severity::error, "a virtual function cannot have a requires clause"}]],
   override_without_base [[=message{Severity::error, "'override' requires a matching virtual function in a base class"}]],
   virtual_layout [[=message{Severity::error, "object layout requiring virtual function support is not supported yet: {0:t}"}]],
   virtual_base_class [[=message{Severity::error, "a base class with virtual member functions is not supported yet: {0:t}"}]],

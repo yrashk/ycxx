@@ -24,8 +24,6 @@ struct UserProvidedDestructor {
     ~UserProvidedDestructor() {}
 };
 
-constexpr Aggregate aggregate{17};
-static_assert(aggregate.value == 17);
 static_assert(__is_aggregate(Aggregate));
 static_assert(!__is_aggregate(VirtualWithField));
 

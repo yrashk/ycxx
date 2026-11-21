@@ -1053,7 +1053,11 @@ public:
   }
 
   bool require_supported_virtual_layout(QualType t, u32 at) {
-    if (!classes().layout_requires_virtual_support(t)) return true;
+    if (!classes().has_virtual_layouts()) return true;
+    const QualType element = innermost(t);
+    // Layout can be the first use that requires a class specialization to be complete.
+    const ClassRec* record = types().is_class(element) ? class_rec(types().class_of(element)) : nullptr;
+    if (!record || !record->layout_requires_virtual_support) return true;
     diag(at, Diag::virtual_layout, t);
     return false;
   }

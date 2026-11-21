@@ -3182,6 +3182,10 @@ private:
           s_.diag(spec.begin, Diag::not_supported, Tk::kw_consteval);
           return bad();
         }
+        if (ps_.is(Tk::kw_requires)) {
+          s_.diag(ps_.pos(), Diag::virtual_constraints);
+          return bad();
+        }
       }
       if (types.is_function(d.type) && !member_virt_specifier(c.entity)) return bad();
       // A member whose type became a function type through substitution is a data member of

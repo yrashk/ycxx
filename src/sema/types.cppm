@@ -809,8 +809,9 @@ public:
     return r && r->defined;
   }
 
+  bool has_virtual_layouts() const { return has_virtual_layouts_; }
   bool layout_requires_virtual_support(QualType t) const {
-    if (!has_virtual_layouts_) return false;
+    if (!has_virtual_layouts()) return false;
     auto r = types_->rec(t);
     while (r.kind == TypeKind::array) r = types_->rec(r.inner);
     const ClassRec* c = r.kind == TypeKind::class_ ? find(r.entity) : nullptr;

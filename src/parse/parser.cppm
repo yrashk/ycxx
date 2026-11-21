@@ -2992,8 +2992,11 @@ public:
         bool keyword = accept(Tk::kw_template);
         u32 qualifier = 0;
         while (kind(qualifier) == Tk::identifier && kind(qualifier + 1) == Tk::coloncolon) qualifier += 2;
-        if (qualifier != 0 && kind(qualifier) == Tk::tilde) {
+        if (kind(qualifier) == Tk::tilde) {
           s_->diag(pos() + qualifier, Diag::not_supported, Tk::tilde);
+          seek(index() + qualifier + 1);
+          if (is(Tk::identifier)) bump();
+          if (is(Tk::l_paren) && kind(1) == Tk::r_paren) seek(index() + 2);
           return {NodeId::none, e.begin, pos()};
         }
         if (!is(Tk::identifier)) {

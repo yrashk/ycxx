@@ -455,6 +455,17 @@ int main() { return 0; }
   const auto key_error = pl::TuFront::errors(warm.get<pl::TuFront>(tu));
   check(key_error.find("an out-of-class definition of a virtual member function") != std::string::npos,
         "an external key definition receives its own semantic diagnostic");
+
+  const std::string lazy = polymorphic + "template<class T> struct Box { T elements[2]; };\nusing Nested = Box<Root>;\n";
+  build(warm, lazy + "const Nested* pass(const Nested* p) { return p; }\n");
+  check(!warm.get<pl::TuFront>(tu).has_errors(), "forming a pointer to a class specialization needs no layout");
+  for (const std::string use : {"Nested stored;\n", "constexpr auto alignment = alignof(Nested);\n",
+                               "constexpr auto size = sizeof(Nested);\n"}) {
+    build(warm, lazy + use);
+    check(pl::TuFront::errors(warm.get<pl::TuFront>(tu)).find("object layout requiring virtual function support") !=
+              std::string::npos,
+          "a layout demand completes a class specialization with a virtual array element");
+  }
 }
 
 void bit_fields() {
