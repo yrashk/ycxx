@@ -2767,7 +2767,8 @@ private:
           return false;
         }
         Tk last = p_->region().tokens[it_->begin + ps_.pos() - 1].kind;
-        if (last == Tk::kw_const || last == Tk::kw_volatile) {
+        if (last == Tk::kw_const || last == Tk::kw_volatile || spec.elaborated || spec.is_static || spec.is_extern ||
+            spec.is_inline || spec.is_constexpr || spec.is_consteval || spec.is_constinit || spec.is_typedef) {
           s_.diag(ps_.pos() - 1, Diag::not_supported, last);
           return false;
         }
