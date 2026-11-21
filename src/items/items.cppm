@@ -527,8 +527,11 @@ void Splitter::general(u32 k, u32& unnamed_types) {
       typedef_ = true;
       ++j;
       continue;
-    case Tk::l_brace:
-      if (initializer) {
+    case Tk::l_brace: {
+      // A direct braced auto argument can appear in a trailing return type or a base clause.
+      const bool braced_auto_argument = prev == Tk::kw_auto && j >= at(k).begin + 2 &&
+                                        (kind(j - 2) == Tk::less || kind(j - 2) == Tk::comma);
+      if (initializer || braced_auto_argument) {
         j = match(j);
         continue;
       }
@@ -571,6 +574,7 @@ void Splitter::general(u32 k, u32& unnamed_types) {
       }
       j = match(j);  // a brace initializer, `int x{1}`
       continue;
+    }
     default:
       ++j;
       continue;
