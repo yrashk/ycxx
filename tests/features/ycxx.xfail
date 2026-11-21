@@ -39,7 +39,6 @@ draft/basic/class.member.lookup-3.reject.cpp errors elsewhere: 'struct' not supp
 draft/basic/class.member.lookup-4.reject.cpp errors elsewhere: 'struct' not supported yet
 draft/basic/class.member.lookup-5.reject.cpp errors elsewhere: 'struct' not supported yet
 draft/basic/class.temporary-5.accept.cpp preprocessing directives are not supported yet
-draft/basic/class.temporary-6.accept.cpp 'struct' not supported yet
 draft/basic/intro.execution-2.accept.cpp 'struct' not supported yet
 draft/basic/intro.execution-3.accept.cpp 'union' not supported yet
 draft/basic/intro.memory-1.accept.cpp 'struct' not supported yet

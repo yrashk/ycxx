@@ -6223,9 +6223,21 @@ public:
     for (const auto& o : own)
       if (o.name == name) add(o.sema);
     for (DeclId d : q_->visible_decls(name, directives())) add(q_->decl_sema(d));
-    for (const Ex& o : operands)
-      if (auto ns = associated_namespace(o.type()))
-        for (const ast::DeclSema& d : q_->namespace_members(*ns, name)) add(d);
+    bool found_hidden_friend = false;
+    if (operands.size() == 2 && std::ranges::contains(binary_spellings, op)) {
+      auto associations = adl_associations(operands, /*at_instantiation=*/false, /*ordinary_call=*/true);
+      std::size_t ordinary = set.size();
+      for_each_associated_friend(associations, name, /*at_instantiation=*/false, add);
+      found_hidden_friend = set.size() != ordinary;
+      // Rank a hidden friend against candidates from the same ADL association set.
+      if (found_hidden_friend)
+        for (EntityId ns : associations.namespaces)
+          for (const ast::DeclSema& d : q_->adl_functions(ns, name, /*at_instantiation=*/false)) add(d);
+    }
+    if (!found_hidden_friend)
+      for (const Ex& o : operands)
+        if (auto ns = associated_namespace(o.type()))
+          for (const ast::DeclSema& d : q_->namespace_members(*ns, name)) add(d);
     if (set.empty()) return std::nullopt;
     ExprInfo info{builtin(Builtin::overload_set), ValueCategory::lvalue, 0};
     Ex callee = node(ast::DeclRef{info, set.front().entity}, begin, begin, info);
@@ -6335,6 +6347,9 @@ public:
     dot_star, arrow_star,
   };
 
+  static constexpr std::string_view binary_spellings[] = {"*", "/", "%", "+", "-", "<<", ">>", "<", ">", "<=", ">=",
+                                                          "==", "!=", "&", "^", "|", "&&", "||", ","};
+
   // The built-in member pointer operators ([expr.mptr.oper]). Access checking takes place when
   // the address expression names the field ([expr.unary.op]).
   Ex member_pointer_access(Ex object, Ex pointer, bool arrow, u32 op_at) {
@@ -6385,8 +6400,6 @@ public:
     if (!l.ok() || !r.ok()) return {NodeId::none, begin, end};
     if (dependent(l) || dependent(r)) return dependent_node({l, r}, begin, end);
     if (op == dot_star || op == arrow_star) return member_pointer_access(l, r, op == arrow_star, op_at);
-    static constexpr std::string_view binary_spellings[] = {"*", "/", "%", "+", "-", "<<", ">>", "<", ">", "<=", ">=",
-                                                            "==", "!=", "&", "^", "|", "&&", "||", ","};
     if (auto o = overloaded(binary_spellings[std::to_underlying(op)], {l, r}, begin, end, op_at)) return *o;
     auto bin = [&](ast::BinaryOp k, Ex a, Ex c, QualType t) {
       ExprInfo info{t, ValueCategory::prvalue, 0};
@@ -6969,6 +6982,23 @@ public:
     return result;
   }
 
+  // [basic.lookup.argdep]/4: a reachable associated class contributes its friends even
+  // when their namespace has yet to bind the name for ordinary lookup.
+  void for_each_associated_friend(const AdlAssociations& associations, NameId name, bool at_instantiation,
+                                  auto&& add) {
+    auto add_friend = [&](DeclId f) {
+      if (auto d = q_->decl_sema(f); d.entity != EntityId::none) add(d);
+    };
+    for (EntityId cls : associations.classes) {
+      if (const ClassRec* rec = q_->adl_class(cls, at_instantiation)) {
+        for (const ast::MemberRec& f : rec->adl_friends)
+          if (w_->entities.rec(f.entity).name == name) add_friend(f.decl);
+      } else if (!at_instantiation) {
+        for (DeclId f : q_->earlier_adl_friends(cls, name)) add_friend(f);
+      }
+    }
+  }
+
   // Merge the ordinary candidates with ADL before overload resolution ([over.call.func]).
   Ex with_adl(Ex callee, NameId name, std::span<const Ex> args, bool dependent_call) {
     std::vector<ast::DeclSema> set;
@@ -6991,19 +7021,7 @@ public:
       auto associations = adl_associations(args, at_instantiation, !dependent_call);
       for (EntityId ns : associations.namespaces)
         for (const ast::DeclSema& d : q_->adl_functions(ns, name, at_instantiation)) add_candidate(d);
-      auto add_friend = [&](DeclId f) {
-        if (auto d = q_->decl_sema(f); d.entity != EntityId::none) add_candidate(d);
-      };
-      // [basic.lookup.argdep]/4: a reachable associated class contributes the friends it
-      // declared, even when their namespace has yet to bind the name for ordinary lookup.
-      for (EntityId cls : associations.classes) {
-        if (const ClassRec* rec = q_->adl_class(cls, at_instantiation)) {
-          for (const ast::MemberRec& f : rec->adl_friends)
-            if (w_->entities.rec(f.entity).name == name) add_friend(f.decl);
-        } else if (!at_instantiation) {
-          for (DeclId f : q_->earlier_adl_friends(cls, name)) add_friend(f);
-        }
-      }
+      for_each_associated_friend(associations, name, at_instantiation, add_candidate);
     };
     add(false);
     if (dependent_call) add(true);

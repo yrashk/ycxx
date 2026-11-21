@@ -1701,6 +1701,9 @@ Fable decided the representation (ast.md §6.6); the Opus session wrote the code
   another class can grant the same entity access. Linux uses the existing weak-ELF path for
   supported external inline functions. [#259](https://github.com/yrashk/ycxx/issues/259) ·
   [#422](https://github.com/yrashk/ycxx/issues/422)
+- Ordinary binary hidden friend operators participate in ADL and compete with nonmember
+  overloads from the associated namespaces. Qualified ordinary lookup still requires a
+  namespace declaration. The existing Linux inline gate checks both object orders.
 - **Checks** (`Sema::accessible`, `check_access`): a private or protected member may be named in
   a member function or default member initializer of its class, in the class's scope (the
   initializer of a static data member defined outside it), or in a friend function or friend
@@ -1708,7 +1711,7 @@ Fable decided the representation (ast.md §6.6); the Opus session wrote the code
   and unqualified names, as a static member, enumerator or nested type, for the member function
   overload resolution chooses ([class.access]/4), and for the constructor an initialization
   chooses. Protected is checked as private until base classes exist.
-- C-linkage friend definitions, hidden friend operators, defaults written on friend declarations,
+- C-linkage friend definitions, other hidden friend operators, defaults on friend declarations,
   friends in templates, destructor access, private member operator wording, and elaborated types
   in member parameters remain under [#259](https://github.com/yrashk/ycxx/issues/259).
   Darwin cross-object inline coalescing is tracked under [#124](https://github.com/yrashk/ycxx/issues/124).
