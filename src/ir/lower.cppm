@@ -89,6 +89,12 @@ export struct IntThrowRuntime {
   EntityId type_info;
 };
 
+export struct CatchAllRuntime {
+  EntityId begin;
+  EntityId end;
+  EntityId resume;
+};
+
 // Target and function facts `lower` reads.
 export struct LowerConfig {
   std::uint32_t min_result_bits = 32;  // narrower integer results are returned extended to this
@@ -106,6 +112,7 @@ export struct LowerConfig {
   // Use the System V AMD64 integer aggregate classification and argument placement.
   bool sysv_amd64 = false;
   std::optional<IntThrowRuntime> int_throw;
+  std::optional<CatchAllRuntime> catch_all{};
 };
 
 export enum class Amd64ArgumentKind : std::uint8_t { integer, sse, stack };
@@ -201,6 +208,7 @@ class Lowering {
       if (block_map_[raw(b)] == none) continue;
       if (auto e = block(b); !e) return std::unexpected(e.error());
     }
+    if (catch_edges_) emit_catch_dispatch();
     l2::Function out = b_.finish(results_.value_or(std::vector<l2::Type>{}));
     out.indirect_result = indirect_result_;
     return out;
@@ -232,6 +240,12 @@ class Lowering {
   l2::Builder b_;
   std::vector<ValueId> map_;  // L1 value → L2 value
   std::vector<std::uint32_t> block_map_;
+  struct CatchEdges {
+    NodeId invoke;
+    BlockId normal, handler;  // L1 blocks
+    BlockId landing, resume;  // additional L2 blocks
+  };
+  std::optional<CatchEdges> catch_edges_;
   std::optional<std::vector<T>> results_;
   NodeId at_{};                   // the L1 node being lowered
   // The class result: returned in registers from this frame object, or passed indirectly.
@@ -411,6 +425,11 @@ class Lowering {
         params.push_back(T::state);
         continue;
       }
+      if (catch_edges_ && b == catch_edges_->handler && f_.value(p).type.kind == TyKind::exn) {
+        l2_of.push_back(std::int64_t(params.size()));
+        params.push_back(T::ptr);
+        continue;
+      }
       if (f_.value(p).type.kind != TyKind::cxx) return fail("exception and coroutine values are not in the α subset");
       bool result = entry && f_.result_param == j + 1, byval = entry && j < 32 && ((f_.byval_params >> j) & 1);
       ++j;
@@ -458,8 +477,17 @@ class Lowering {
       }
       params = std::move(ordered);
     }
+    const bool normal_invoke = catch_edges_ && b == catch_edges_->normal;
+    if (normal_invoke) {
+      if (!params.empty()) return fail("hosted invoke normal block must be parameterless in L1");
+      params = {T::state, T::i32};
+    }
     BlockId nb = b_.begin_block(params);
     auto param = [&](std::uint32_t i) { return b_.param(nb, index.empty() ? i : index[i]); };
+    if (normal_invoke) {
+      out(catch_edges_->invoke, 0, param(0));
+      out(catch_edges_->invoke, 1, param(1));
+    }
     std::uint32_t i = 0;
     for (ValueId p : f_.params_of(b)) {
       if (l2_of[i] >= 0) map_[raw(p)] = param(std::uint32_t(l2_of[i]));
@@ -492,6 +520,30 @@ class Lowering {
   ValueId in(NodeId n, std::size_t i) const { return map_[raw(f_.operands_of(n)[i])]; }
   void out(NodeId n, std::size_t i, ValueId v) { map_[f_.node(n).res0 + i] = v; }
   ValueId l1_result(NodeId n, std::size_t i = 0) const { return ValueId(f_.node(n).res0 + i); }
+
+  // The selector belongs to the machine landing edge. L1 presents only a selected handler
+  // and its exception; neither ABI register becomes an ordinary L1 value.
+  void emit_catch_dispatch() {
+    const auto& edges = *catch_edges_;
+    at_ = edges.invoke;
+    const auto o = origin();
+    const T landing_params[] = {T::state, T::ptr, T::i64};
+    const auto landing = b_.begin_block(landing_params);
+    const auto state = b_.param(landing, 0), header = b_.param(landing, 1), selector = b_.param(landing, 2);
+    const auto matches = emit1(Op2::icmp, T::i1, {selector, constant(T::i64, 1)}, {std::to_underlying(Pred::eq)});
+    const l2::Builder::SuccArgs paths[] = {
+      {BlockId(block_map_[raw(edges.handler)]), {state, header}},
+      {edges.resume, {state, header}},
+    };
+    b_.emit(Op2::cond_br, {}, std::span(&matches, 1), {}, 0, paths, o);
+    const T resume_params[] = {T::state, T::ptr};
+    const auto resume = b_.begin_block(resume_params);
+    const ValueId args[] = {b_.param(resume, 0), b_.param(resume, 1)};
+    const std::uint64_t target[] = {raw(config_.catch_all->resume), 0, 0, 0};
+    const T result[] = {T::state};
+    b_.emit(Op2::call, result, args, target, 0, {}, o);
+    b_.emit(Op2::unreachable, {}, {}, {}, 0, {}, o);
+  }
 
   std::expected<void, LowerError> node(NodeId n) {
     const Node& nd = f_.node(n);
@@ -887,6 +939,39 @@ class Lowering {
         std::vector<ValueId> ops;
         if (nd.op == Op::cond_br) ops.push_back(in(n, 0));
         b_.emit(nd.op == Op::cond_br ? Op2::cond_br : Op2::br, {}, ops, {}, 0, succs, o);
+        return {};
+      }
+      case Op::invoke: {
+        if (!config_.sysv_amd64 || !config_.catch_all || catch_edges_ || nd.nopnd != 2 || nd.nres != 2 ||
+            imms[1] != 0 || b_.peek().type(in(n, 1)) != T::i32)
+          return fail("unsupported hosted invoke");
+        const auto edges = f_.succs_of(n);
+        // The invoke's first result is state. Its second must be the fixed int result.
+        const auto type = type_of(cxx(l1_result(n, 1)));
+        if (!type || *type != T::i32 || edges.size() != 2 || edges[0].nargs || edges[1].nargs)
+          return fail("unsupported hosted invoke result or successor");
+        const auto next = static_cast<std::uint32_t>(std::ranges::count_if(block_map_, [](auto b) { return b != none; }));
+        catch_edges_ = CatchEdges{n, edges[0].target, edges[1].target, BlockId(next), BlockId(next + 1)};
+        const l2::Builder::SuccArgs paths[] = {
+          {BlockId(block_map_[raw(edges[0].target)]), {}}, {catch_edges_->landing, {}},
+        };
+        const ValueId args[] = {in(n, 0), in(n, 1)};
+        const std::uint64_t target[] = {imms[0], 1, 0, 0};
+        b_.emit(Op2::invoke, {}, args, target, 0, paths, origin());
+        return {};
+      }
+      case Op::catch__begin:
+      case Op::catch__end: {
+        if (!catch_edges_ || nd.block != raw(catch_edges_->handler))
+          return fail("unsupported hosted catch operation");
+        const bool begin = nd.op == Op::catch__begin;
+        const T results[] = {T::state, T::ptr};
+        const ValueId args[] = {in(n, 0), in(n, 1)};
+        const std::uint64_t target[] = {raw(begin ? config_.catch_all->begin : config_.catch_all->end), 0, 0, 0};
+        const std::size_t count = begin ? 2 : 1;
+        const auto call = b_.emit(Op2::call, std::span(results).first(count), std::span(args).first(count),
+                                  target, 0, {}, origin());
+        for (std::uint32_t i = 0; i < count; ++i) out(n, i, b_.peek().result(call, i));
         return {};
       }
       case Op::ret: {

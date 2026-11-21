@@ -490,6 +490,7 @@ std::expected<bytes, std::string> link(std::span<const obj::object> objects, std
     if (!o.comdat_groups.empty()) return object_error(o, "select ELF COMDAT groups before layout");
     for (std::size_t si = 0; si < o.sections.size(); ++si) {
       const auto& s = o.sections[si];
+      if (s.is_gcc_except_table()) return section_error(o, s, "native ELF linking of exception handlers is unsupported");
       const auto kind = std::ranges::find_if(section_kinds, [&](const section_kind& k) {
         return s.segment == k.segment && s.name == k.name;
       });
