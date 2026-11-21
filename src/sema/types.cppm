@@ -942,14 +942,29 @@ private:
 
 // The ordinary single-object allocation functions implicitly declared at global scope
 // ([basic.stc.dynamic]). Their types use the target's size_t, like sizeof.
-enum class AllocationFunction : u8 { allocate, deallocate, deallocate_sized };
+enum class AllocationFunction : u8 {
+  allocate, deallocate, deallocate_sized, allocate_aligned, deallocate_aligned, deallocate_sized_aligned
+};
+
+constexpr bool allocates(AllocationFunction f) {
+  return f == AllocationFunction::allocate || f == AllocationFunction::allocate_aligned;
+}
 
 constexpr std::string_view allocation_name(AllocationFunction f) {
-  return f == AllocationFunction::allocate ? "operator new" : "operator delete";
+  return allocates(f) ? "operator new" : "operator delete";
 }
 
 constexpr bool is_allocation_name(std::string_view n) {
   return n == allocation_name(AllocationFunction::allocate) || n == allocation_name(AllocationFunction::deallocate);
+}
+
+constexpr bool has_deallocation_size(AllocationFunction f) {
+  return f == AllocationFunction::deallocate_sized || f == AllocationFunction::deallocate_sized_aligned;
+}
+
+constexpr bool allocation_has_alignment(AllocationFunction f) {
+  return f == AllocationFunction::allocate_aligned || f == AllocationFunction::deallocate_aligned ||
+         f == AllocationFunction::deallocate_sized_aligned;
 }
 
 // What the front end shares process-wide (§9.1): the AST core's interners, and sema's views.
@@ -985,9 +1000,11 @@ struct World {
     QualType size = types.builtin(target.size_type);
     QualType void_type = types.builtin(Builtin::void_);
     QualType void_pointer = types.pointer(void_type);
-    const bool allocating = f == AllocationFunction::allocate;
-    QualType params[] = {allocating ? size : void_pointer, size};
-    auto count = f == AllocationFunction::deallocate_sized ? 2u : 1u;
+    const bool allocating = allocates(f);
+    QualType params[3] = {allocating ? size : void_pointer};
+    unsigned count = 1;
+    if (has_deallocation_size(f)) params[count++] = size;
+    if (allocation_has_alignment(f)) params[count++] = types.enum_type(alignment_enum());
     QualType type = types.function(allocating ? void_pointer : void_type, std::span(params).first(count),
                                    false, LangLinkage::cxx, Cv::none, ast::RefQual::none, !allocating);
     ast::DeclSema d{};
@@ -1004,9 +1021,24 @@ struct World {
     return d;
   }
 
-  auto allocation_functions() {
-    using enum AllocationFunction;
-    return std::array{allocation_function(allocate), allocation_function(deallocate), allocation_function(deallocate_sized)};
+  static constexpr std::array allocation_functions{
+      AllocationFunction::allocate, AllocationFunction::deallocate, AllocationFunction::deallocate_sized,
+      AllocationFunction::allocate_aligned, AllocationFunction::deallocate_aligned, AllocationFunction::deallocate_sized_aligned,
+  };
+
+  bool matches_allocation_function(std::string_view name, QualType written) {
+    const auto arity = types.rec(written).params.size();
+    return std::ranges::any_of(allocation_functions, [&](AllocationFunction f) {
+      return allocation_name(f) == name && arity == 1u + has_deallocation_size(f) + allocation_has_alignment(f) &&
+             types.canonical(allocation_function(f).type) == types.canonical(written);
+    });
+  }
+
+  void install_alignment_enum(Classes& classes) {
+    // This opaque shape supports implicit users of the type. Source lookup still needs a written
+    // declaration, and a written definition supplies its own record.
+    classes.publish_enum(alignment_enum(), {.scoped = true, .fixed = true, .underlying = types.builtin(target.size_type),
+                                           .promotion = std::nullopt, .enumerators = {}});
   }
 
   QualType builtin_va_list() {
@@ -1048,6 +1080,12 @@ struct World {
   }
 
 private:
+  EntityId alignment_enum() {
+    // These are the ordinary named namespace and enum identities, shared with source declarations.
+    const auto ns = entities.entity({.kind = EntityKind::namespace_, .name = ins.names.intern("std")});
+    return entities.entity({.kind = EntityKind::enum_, .name = ins.names.intern("align_val_t"), .scope = ns});
+  }
+
   EntityId sysv_va_list_tag_ = EntityId::none;
 };
 
