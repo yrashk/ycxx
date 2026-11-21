@@ -611,9 +611,13 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   [Design](docs/design/linux-floating-variadic-calls.md) · [#399](https://github.com/yrashk/ycxx/issues/399)
 - Runtime addition, subtraction, multiplication and division use scalar SSE at the binary32 or
   binary64 L2 result width and under the caller's MXCSR controls. Unary negation flips the sign
-  bit without changing the payload or status flags. Comparisons, other numeric conversions and
-  x87 values remain [#201](https://github.com/yrashk/ycxx/issues/201).
+  bit without changing the payload or status flags.
   [Design](docs/design/linux-scalar-floating-point.md#runtime-arithmetic)
+- Binary32 and binary64 comparisons use the scalar SSE unordered comparison instructions.
+  Equality and the four relational operators are false for unordered operands. Inequality and
+  conversion of NaN to `bool` are true. Both signed zeros convert to false. Strict exception
+  status, other numeric conversions and x87 values remain [#201](https://github.com/yrashk/ycxx/issues/201).
+  [Design](docs/design/linux-scalar-floating-point.md#runtime-comparisons)
 - Direct fixed-prototype calls to ordinary free functions support nonempty naturally aligned
   flat records with integral or ordinary object-pointer fields that are trivial for calls,
   up to 16 bytes and alignment eight. The AMD64 INTEGER eightbytes follow from the laid-out

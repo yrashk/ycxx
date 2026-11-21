@@ -95,7 +95,7 @@ struct Frame {
 bool supports_float(Op op) {
   switch (op) {
     case Op::const_: case Op::load: case Op::store: case Op::select: case Op::fpext:
-    case Op::fadd: case Op::fsub: case Op::fmul: case Op::fdiv: case Op::fneg:
+    case Op::fadd: case Op::fsub: case Op::fmul: case Op::fdiv: case Op::fneg: case Op::fcmp:
     case Op::call: case Op::call_ind: case Op::ret: return true;
     default: return false;
   }
@@ -510,6 +510,36 @@ std::expected<void, std::string> Emitter::node(NodeId n) {
       }
       e_.reg({0x39}, rcx, rax);  // cmp, then setcc into AL
       e_.reg({0x0f, *condition(pred)}, 0, rax, false);
+      break;
+    }
+    case Op::fcmp: {
+      using enum ir::Pred;
+      if (imms[0] > std::to_underlying(ge)) return at_node(n, op, "unknown floating predicate");
+      auto pred = ir::Pred(imms[0]);
+      ValueId lhs = ops[0], rhs = ops[1];
+      switch (pred) {
+        case lt: case le:
+          // The operands already have home slots. Reversal lets SETA and SETAE reject unordered.
+          std::swap(lhs, rhs);
+          pred = pred == lt ? gt : ge;
+          break;
+        case eq: case ne: case gt: case ge:
+          break;
+        default:
+          return at_node(n, op, "unknown floating predicate");
+      }
+      unsigned width = home_width(lhs);
+      e_.load_scalar_xmm(0, rbp, frame_.slots[raw(lhs)], width);
+      e_.compare_scalar_xmm(0, rbp, frame_.slots[raw(rhs)], width);
+      e_.reg({0x0f, *condition(pred)}, 0, rax, false);  // setcc al
+      // Unordered sets both ZF and PF. Capture the parity test before changing flags.
+      if (pred == eq) {
+        e_.reg({0x0f, 0x9b}, 0, rdx, false);  // setnp dl
+        e_.reg({0x20}, rdx, rax, false);     // and al, dl
+      } else if (pred == ne) {
+        e_.reg({0x0f, 0x9a}, 0, rdx, false);  // setp dl
+        e_.reg({0x08}, rdx, rax, false);     // or al, dl
+      }
       break;
     }
     case Op::select:
