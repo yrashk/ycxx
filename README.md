@@ -234,6 +234,9 @@ fixed underlying types and definitions inside `extern "C"` blocks.
   three member-pointer predicates as `bool` template arguments or defaults, including through
   alias templates
   [#209](https://github.com/yrashk/ycxx/issues/209);
+- logical negation of a qualified dependent `bool` variable template-id in a `bool` template
+  argument or default
+  [#209](https://github.com/yrashk/ycxx/issues/209);
 - a single nonvirtual, nonpolymorphic base in a primary class template, including an
   alias-selected dependent base and qualified lookup of its static members.
   [#308](https://github.com/yrashk/ycxx/issues/308)

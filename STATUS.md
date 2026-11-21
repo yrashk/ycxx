@@ -1513,6 +1513,10 @@ template's tokens again with the arguments bound.
   evaluation (`global`, `constant_value`) at that point, or at the END worklist for code. A
   specialization is emitted as a variable, mangled `_Z1vIiE`, with external linkage even when
   const ([basic.link]/3).
+- **Dependent logical negation** (#209): a `bool` template argument or default can negate a
+  qualified dependent `bool` variable template-id. Substitution retains the negation across
+  aliases until the selected specialization has concrete arguments and supplies a usable
+  nonvolatile `bool` constant ([expr.unary.op], [expr.const], [temp.arg.nontype]).
 - **Explicit specializations** ([temp.expl.spec]): `template<>` declarations and definitions of
   a class (`template<> struct X<int> {…};`, or only declared, then incomplete), function
   (`template<> R f<args>(…)`, or arguments deduced from the declared type, [temp.deduct.decl],

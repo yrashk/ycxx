@@ -545,6 +545,14 @@ operation in a canonical position.
 Dependent array bounds using these operations, conversions to other template parameter types, and
 mangling the unresolved operations require further support under #209.
 
+A `VDepOp` for logical negation holds one canonical `bool` value operand. In a `bool` template
+argument or default, a chain of `!` over a qualified dependent `bool` variable template-id
+retains the variable template and its arguments. Substitution rebuilds the operation while
+the arguments depend on a template parameter. Once concrete, lookup supplies the selected
+specialization's declared type and initializer. A usable `bool` initializer for a nonvolatile
+`bool` specialization gives the ordinary inverted `VInt` ([expr.unary.op], [expr.const],
+[temp.arg.nontype], #209).
+
 *Reason:* `values` is interned eagerly and is fit for keys. A dependent value is a value with free
 parameters, substitution maps `ConstId` to `ConstId`, and no `NodeId` enters a type or a key.
 

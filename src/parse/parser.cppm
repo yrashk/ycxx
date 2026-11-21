@@ -1966,7 +1966,8 @@ public:
     p.type = t;
     if (!p.pack && accept(Tk::equal)) {
       Ex e = conditional_expression();
-      auto v = template_value(e, t);
+      auto v = s_->types().is(t, Builtin::bool_) ? negated_template_variable(e) : std::nullopt;
+      if (!v) v = template_value(e, t);
       if (!v) {
         ok = false;
         return std::nullopt;
@@ -2088,6 +2089,24 @@ public:
     return d.type;
   }
 
+  // At a bool template argument or default, keep a chain of `!` over a dependent bool variable
+  // template-id. Other expressions follow the ordinary template-value path.
+  std::optional<sema::ConstId> negated_template_variable(Ex e) {
+    if (!s_->dependent(e)) return std::nullopt;
+    std::size_t negations = 0;
+    for (;;) {
+      while (auto paren = s_->as<ast::Paren>(e)) e.id = paren->operand.id;
+      auto u = s_->as<ast::Unary>(e);
+      if (!u || u->op != ast::UnaryOp::not_) break;
+      ++negations;
+      e.id = u->operand.id;
+    }
+    if (negations == 0) return std::nullopt;
+    auto literal = s_->as<ast::Literal>(e);
+    if (!literal || !s_->types().is(literal->info.type, Builtin::bool_)) return std::nullopt;
+    return s_->templates().negated_variable_value(literal->value, negations);
+  }
+
   // The value of a template argument for a non-type parameter of type `t`: a converted constant
   // expression ([temp.arg.nontype]/1). One that names a template parameter is value-dependent and
   // stays a `VDep*` value ([temp.dep.constexpr]).
@@ -2159,9 +2178,11 @@ public:
           Ex e = conditional_expression();
           if (e.ok()) {
             // Converted to its parameter's type when the template is known ([temp.arg.nontype]).
-            auto v = template_value(e, sema::Types::unqualified(s_->rvalue(e).type()));
+            auto v = negated_template_variable(e);
+            QualType t = v ? s_->builtin(Builtin::bool_) : sema::Types::unqualified(s_->rvalue(e).type());
+            if (!v) v = template_value(e, t);
             if (!v) ok = false;
-            else args.push_back({ast::TemplateArgKind::value, s_->types().canonical(sema::Types::unqualified(s_->rvalue(e).type())), *v});
+            else args.push_back({ast::TemplateArgKind::value, s_->types().canonical(t), *v});
           } else {
             ok = false;
           }
