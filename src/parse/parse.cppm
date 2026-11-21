@@ -1189,8 +1189,8 @@ private:
   std::map<u32, Dmi> dmis_;                       // by field entity
   std::map<u32, std::vector<sema::BaseRec>> class_bases_;  // by class entity
   std::map<u32, ClassBasePattern> class_base_patterns_;  // by defining item
-  std::set<std::pair<u32, u32>> copyability_occurrences_;  // source item and token offset
-  std::set<EntityId> failed_copyability_instantiations_;
+  std::set<std::pair<u32, u32>> dependent_type_trait_operands_;  // source item and token offset
+  std::set<EntityId> failed_type_trait_instantiations_;
   std::vector<std::string> ns_of_, eff_ns_;       // by item
   // A namespace definition's components' namespaces, as declared and for lookup, by name
   // (`namespace a::b` declares `a` in the enclosing namespace and `b` in `a`).
@@ -1468,17 +1468,20 @@ public:
     const auto& dmi = *initializer_source;
     return {std::to_underlying(p_->id(dmi.item)), dmi.begin - p_->items().items[dmi.item].begin + offset};
   }
-  bool in_copyability_pattern() const override { return retain_copyability_pattern; }
-  void record_copyability_occurrence(engine::Loc loc) override {
-    p_->copyability_occurrences_.emplace(loc.item, loc.offset);
+  bool in_type_trait_pattern() const override { return retain_type_trait_pattern; }
+  void record_dependent_type_trait_operand(engine::Loc loc) override {
+    p_->dependent_type_trait_operands_.emplace(loc.item, loc.offset);
   }
-  std::optional<bool> copyability_at_demand(EntityId c, engine::Loc loc) override {
-    if (!copyability_demand || !p_->copyability_occurrences_.contains({loc.item, loc.offset})) return std::nullopt;
-    return p_->is_complete(c, *copyability_demand, true, true);
+  bool replaying_type_trait_operand(engine::Loc loc) override {
+    return type_trait_demand && p_->dependent_type_trait_operands_.contains({loc.item, loc.offset});
   }
-  bool copyability_instantiation_failed(EntityId e) override {
-    const bool failed = p_->failed_copyability_instantiations_.contains(e);
-    observed_copyability_failure |= failed;
+  std::optional<bool> type_trait_at_demand(EntityId c, engine::Loc loc) override {
+    if (!replaying_type_trait_operand(loc)) return std::nullopt;
+    return p_->is_complete(c, *type_trait_demand, true, true);
+  }
+  bool type_trait_instantiation_failed(EntityId e) override {
+    const bool failed = p_->failed_type_trait_instantiations_.contains(e);
+    observed_type_trait_failure |= failed;
     return failed;
   }
   std::optional<ConstId> constant_value(EntityId v) override { return p_->constant_value(v, value_point(v)); }
@@ -1529,13 +1532,13 @@ public:
   EntityId completing_class = EntityId::none;
   // The original tokens when a constructor reads a default member initializer again.
   std::optional<Program::Dmi> initializer_source;
-  bool retain_copyability_pattern = false;
-  bool observed_copyability_failure = false;
-  std::optional<u32> copyability_demand;
-  struct RestoreCopyabilityPattern {
+  bool retain_type_trait_pattern = false;
+  bool observed_type_trait_failure = false;
+  std::optional<u32> type_trait_demand;
+  struct RestoreTypeTraitPattern {
     AtItem& q;
-    bool saved = q.retain_copyability_pattern;
-    ~RestoreCopyabilityPattern() { q.retain_copyability_pattern = saved; }
+    bool saved = q.retain_type_trait_pattern;
+    ~RestoreTypeTraitPattern() { q.retain_type_trait_pattern = saved; }
   };
   // In a class template's instantiation (#88): completeness and constant evaluation are answered
   // at its point of instantiation ([temp.point]); lookup stays at the item.
@@ -1610,7 +1613,7 @@ public:
   bool is_complete(EntityId c) override { return p_->is_complete(c, p_->end(), true, true); }
   bool is_complete_at_source(EntityId c) override { return at_.is_complete_at_source(c); }
   engine::Loc source_loc(engine::Loc loc, u32 offset) override { return at_.source_loc(loc, offset); }
-  bool copyability_instantiation_failed(EntityId e) override { return at_.copyability_instantiation_failed(e); }
+  bool type_trait_instantiation_failed(EntityId e) override { return at_.type_trait_instantiation_failed(e); }
   std::optional<ConstId> constant_value(EntityId v) override { return p_->constant_value(v, p_->end()); }
   std::optional<ast::DeclSema> earlier_member(ast::NameId) override { return std::nullopt; }
   bool instantiation_gave_up() override { return p_->instantiation_gave_up(); }
@@ -1729,10 +1732,10 @@ public:
   ItemAnalysis(Program& p, u32 item, Program::VarInstantiation var) : ItemAnalysis(p, item) {
     var_ = std::move(var);
     q_.at_point = var_->point;
-    q_.copyability_demand = var_->point;
+    q_.type_trait_demand = var_->point;
     s_.template_args = var_->args;
   }
-  bool copyability_failure() const { return q_.observed_copyability_failure; }
+  bool type_trait_failure() const { return q_.observed_type_trait_failure; }
 
   Result<ast::ItemSema> run() {
     try {
@@ -3112,8 +3115,8 @@ private:
       u32 deferred = ps_.deferred_argument_checks();
       DeclSpec spec;
       {
-        AtItem::RestoreCopyabilityPattern restore{q_};
-        q_.retain_copyability_pattern = template_;
+        AtItem::RestoreTypeTraitPattern restore{q_};
+        q_.retain_type_trait_pattern = template_;
         spec = ps_.decl_specifiers();
       }
       if (!spec.ok) return false;
@@ -5202,8 +5205,8 @@ private:
     // A variable template retains its initializer's pattern ([temp.res]). The placeholder path
     // reads the initializer before publishing the declaration ([dcl.type.auto.deduct]).
     const bool pattern = template_ && !var_ && !fn;
-    AtItem::RestoreCopyabilityPattern restore{q_};
-    q_.retain_copyability_pattern = pattern;
+    AtItem::RestoreTypeTraitPattern restore{q_};
+    q_.retain_type_trait_pattern = pattern;
     std::optional<Ex> early_expr;
     if (!fn && types.has_placeholder(d.type)) {
       bool deduced = deduce_variable(d, early, early_expr, pattern);
@@ -5595,7 +5598,7 @@ private:
       if (v.value) {
         value = *v.value;
         p_->set_constant(sem.entity, value, k_);  // a reference is potentially constant ([expr.const.init])
-      } else if (!v.dependent && !v.copyability_failure) {
+      } else if (!v.dependent && !v.type_trait_failure) {
         dynamic_ok(at, v.reason);
       }
     };
@@ -5625,7 +5628,7 @@ private:
           if (v.value) {
             value = *v.value;
             if (spec.is_constexpr) p_->set_constant(sem.entity, *v.value, k_);
-          } else if (!v.copyability_failure) {
+          } else if (!v.type_trait_failure) {
             dynamic_ok(b->begin, sema::Evaluator(s_, q_).evaluate(init).reason);
           }
         }
@@ -5647,13 +5650,13 @@ private:
           sema::Evaluator evaluator(s_, q_);
           sema::Evaluated list = s_.as<ast::InitList>(init) ? evaluator.evaluate_initializer(init) : sema::Evaluated{};
           sema::Evaluated v = lit ? sema::Evaluated{lit->value, 0, true}
-                                  : list.value || list.copyability_failure ? list : evaluator.evaluate(init);
+                                  : list.value || list.type_trait_failure ? list : evaluator.evaluate(init);
           if (v.value) {
             value = *v.value;
             if (spec.is_constexpr || (sema::Types::is_const(d.type) && !sema::Types::is_volatile(d.type) &&
                                       types.is_integral(d.type)))
               p_->set_constant(sem.entity, *v.value, k_);
-          } else if (!v.copyability_failure) {
+          } else if (!v.type_trait_failure) {
             dynamic_ok(e.begin, v.reason);
           }
         }
@@ -5681,7 +5684,7 @@ private:
           value = *v.value;
           if (spec.is_constexpr || (sema::Types::is_const(d.type) && !sema::Types::is_volatile(d.type) && types.is_integral(d.type)))
             p_->set_constant(sem.entity, *v.value, k_);
-        } else if (!v.copyability_failure) {
+        } else if (!v.type_trait_failure) {
           dynamic_ok(open, v.reason);
         }
       } else if (init.ok()) {
@@ -6338,7 +6341,7 @@ public:
       if (sema::survives_substitution(d.id)) hard.push_back(d);
       failed = true;
     }
-    if (q_.observed_copyability_failure) return std::nullopt;
+    if (q_.observed_type_trait_failure) return std::nullopt;
     if (failed) return false;
     QualType ty = sema::Types::unqualified(s_.types().canonical(s_.rvalue(e).type()));
     if (!s_.types().is(ty, sema::Builtin::bool_)) {
@@ -6347,7 +6350,7 @@ public:
       return false;
     }
     sema::Evaluated v = sema::Evaluator(s_, q_).evaluate(s_.rvalue(e));
-    if (v.copyability_failure) return std::nullopt;
+    if (v.type_trait_failure) return std::nullopt;
     if (!v.value) {
       s_.diag(0, Diag::constraint_not_constant, v.reason);
       hard.push_back(sink_.back());
@@ -7568,7 +7571,7 @@ std::optional<sema::BaseRec> Program::instantiate_base(EntityId specialization, 
     const items::Item& it = items_->items[item];
     Parser ps(*r_, it.begin, it.begin + pattern.end, s);
     ps.set_questions(q);
-    q.copyability_demand = point;
+    q.type_trait_demand = point;
     ps.seek(it.begin + pattern.begin);
     s.template_scopes.emplace_back(params.begin(), params.end());
     s.template_args = args;
@@ -7581,16 +7584,16 @@ std::optional<sema::BaseRec> Program::instantiate_base(EntityId specialization, 
   } else {
     substituted = s.templates().substitute(type, args);
   }
-  if (!substituted && !s.has_error_since(0) && !q.observed_copyability_failure)
+  if (!substituted && !s.has_error_since(0) && !q.observed_type_trait_failure)
     s.diag(pattern.begin, Diag::base_substitution, type);
   // A nondependent base's completeness was checked at the definition, even if its spelling
   // has dependent arguments whose validity must be checked here.
   std::optional<EntityId> base;
-  if (substituted && !s.has_error_since(0) && !q.observed_copyability_failure)
+  if (substituted && !s.has_error_since(0) && !q.observed_type_trait_failure)
     base = dependent ? complete_base_class(s, *substituted, pattern.begin) : std::optional(w_->types.class_of(type));
-  if (q.observed_copyability_failure) failed_copyability_instantiations_.insert(specialization);
+  if (q.observed_type_trait_failure) failed_type_trait_instantiations_.insert(specialization);
   for (engine::Diagnostic& d : sink) {
-    if (sema::is_copyability_failure(d.id)) failed_copyability_instantiations_.insert(specialization);
+    if (sema::is_type_trait_failure(d.id)) failed_type_trait_instantiations_.insert(specialization);
     if (!std::ranges::contains(end_diags_, d)) end_diags_.push_back(std::move(d));
   }
   if (!base) return std::nullopt;
@@ -7605,7 +7608,7 @@ const sema::ClassRec* Program::instantiate_class(EntityId spec, u32 point) {
   // first needed.
   if (classes_instantiated_.contains(key)) return point > last_member(class_patterns_.at(key)) ? classes_.find(spec) : nullptr;
   const sema::EntityRec rec = w_->entities.rec(spec);
-  if (failed_copyability_instantiations_.contains(spec)) return nullptr;
+  if (failed_type_trait_instantiations_.contains(spec)) return nullptr;
   if (w_->types.is_dependent(w_->types.class_type(spec)) || classes_instantiating_.contains(key) || partial_matching_.contains(key))
     return nullptr;
   // Its pattern: the partial specialization that matches it, else the template's definition.
@@ -7718,9 +7721,9 @@ const Program::VarInstance* Program::variable_instance(EntityId v, u32 point) {
   var_instantiating_.erase(key);
   // What the definition diagnosed it says once, there.
   if (!item_sema(k).diags.empty()) cell.diags.clear();
-  if (analysis.copyability_failure() || std::ranges::any_of(cell.diags, [](const auto& d) {
-        return sema::is_copyability_failure(d.id);
-      })) failed_copyability_instantiations_.insert(v);
+  if (analysis.type_trait_failure() || std::ranges::any_of(cell.diags, [](const auto& d) {
+        return sema::is_type_trait_failure(d.id);
+      })) failed_type_trait_instantiations_.insert(v);
   var_index_.emplace(key, var_instances_.size());
   var_instances_.push_back({v, k, std::move(cell)});
   return &var_instances_.back();
