@@ -1845,7 +1845,7 @@ struct S { int f() & { return 1; } int f() && { return 2; } };
 int main() { S s; return s.f() + S().f() - 3; }
 '''
 issues = [311, 339]
-note = 'ordinary ref-qualified conversion functions and named exact-result casts distinguish lvalue and rvalue objects. General ref-qualified member functions remain open'
+note = 'Ordinary non-template members and conversion functions distinguish lvalue and rvalue receivers. Ref-qualified virtual calls and broader template cases remain open'
 
 [[feature]]
 id = 'class-deducing-this'

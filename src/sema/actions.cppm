@@ -3816,7 +3816,8 @@ public:
         }
       }
     }
-    auto chosen = resolve(cands, args, begin, name, object_cv);
+    const bool object_rvalue = object && !m.arrow && object->cat() != ValueCategory::lvalue;
+    auto chosen = resolve(cands, args, begin, name, object_cv, std::nullopt, {}, object_rvalue);
     if (!chosen) return fail;
     const MemberDeclRec* d = recs[*chosen];
     const Candidate& k = cands[*chosen];
@@ -4202,7 +4203,7 @@ public:
   // non-static member functions.
   std::optional<std::size_t> resolve(std::span<const Candidate> cands, std::span<const Ex> args, u32 at, NameId name,
                                      std::optional<Cv> object_cv, std::optional<QualType> ctor_of = std::nullopt,
-                                     std::span<const Braced* const> lists = {}) {
+                                     std::span<const Braced* const> lists = {}, bool object_rvalue = false) {
     std::vector<std::pair<std::size_t, std::vector<Ics>>> viable;
     const Braced* first_list = lists.empty() ? nullptr : *std::ranges::find_if(lists, [](const Braced* list) { return list; });
     const Braced* unsupported = nullptr;
@@ -4216,7 +4217,13 @@ public:
       // The implicit object parameter, first: the object must not be more cv-qualified.
       if (!cands[i].no_object && object_cv) {
         if (!cv_within(*object_cv, fr.fn_cv)) continue;
-        seq.push_back(binding({true, 0, 0}, false, false, cv_bits(fr.fn_cv) - cv_bits(*object_cv)));
+        const bool rvalue_ref = fr.fn_ref == ast::RefQual::rvalue;
+        if (rvalue_ref && !object_rvalue) continue;
+        if (fr.fn_ref == ast::RefQual::lvalue && object_rvalue && fr.fn_cv != Cv::const_) continue;
+        // Unqualified members retain the special rvalue binding rule and
+        // do not participate in the reference-kind ranking tiebreaker.
+        seq.push_back(binding({true, 0, 0}, rvalue_ref, object_rvalue && fr.fn_ref != ast::RefQual::none,
+                              cv_bits(fr.fn_cv) - cv_bits(*object_cv)));
       } else {
         seq.push_back({true, 0, 0});
       }

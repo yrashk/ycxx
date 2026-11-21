@@ -3542,7 +3542,9 @@ private:
       }
       if (function) {
         if (!member_virt_specifier(overridden != nullptr)) return bad();
-        if (!is_virtual && !conversion && !ps_.check_named_ref_qualifier(d)) return bad();
+        const bool ordinary_member = !spec.is_static && s_.template_scopes.empty() && !inst_ &&
+                                     p_->is_namespace(s_.world().entities.rec(c.entity).scope);
+        if (!is_virtual && !conversion && !ordinary_member && !ps_.check_named_ref_qualifier(d)) return bad();
       }
       // A member whose type became a function type through substitution is a data member of
       // function type, which cannot exist ([temp.inst], [class.mem.general]).
@@ -4841,8 +4843,10 @@ private:
           if (types.canonical(previous.inner) != types.canonical(current.inner) ||
               previous.fn_cv != current.fn_cv)
             return false;
-        } else if (!(compare_parameters || d.is_virtual) || !same_function_parameters(d.type, *function, false)) {
-          return false;
+        } else {
+          const bool ref_qualified = previous.fn_ref != ast::RefQual::none || current.fn_ref != ast::RefQual::none;
+          if (!(compare_parameters || d.is_virtual || ref_qualified) || !same_function_parameters(d.type, *function, false))
+            return false;
         }
         // An unqualified implicit object corresponds to either ref-qualified form.
         if (previous.fn_ref != current.fn_ref && previous.fn_ref != ast::RefQual::none &&
