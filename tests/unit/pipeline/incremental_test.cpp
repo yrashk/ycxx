@@ -408,6 +408,66 @@ void records() {
   }
 }
 
+void virtual_declarations() {
+  const std::string plain = "struct Root { int field; int value() const { return field; } };\n";
+  const std::string polymorphic = "struct Root { int field; virtual int value() const { return field; } };\n";
+  const std::string interfaces = R"cpp(
+struct Outer { Root elements[2]; };
+const Root& pass(const Root* pointer) { return *pointer; }
+Root by_value(Root);
+static_assert(sizeof(Root*) == sizeof(void*));
+int main() { return 0; }
+)cpp";
+  const std::string layout = "constexpr auto alignment = alignof(Outer);\n";
+  const auto blocked_shapes = [](const pl::FrontResult& front) {
+    return std::ranges::count(front.shapes.classes, true, &pl::ClassShape::layout_requires_virtual_support);
+  };
+
+  pl::Session warm;
+  build(warm, plain + interfaces + layout);
+  check(warm.get<pl::Tu>(tu).object.has_value(), "ordinary member and array layouts produce an object");
+
+  build(warm, polymorphic + interfaces + layout);
+  const auto& laid_out = warm.get<pl::TuFront>(tu);
+  const auto layout_error = pl::TuFront::errors(laid_out);
+  check(layout_error.find("object layout requiring virtual function support") != std::string::npos,
+        "alignof of a containing class reaches the virtual array element");
+  check(blocked_shapes(laid_out) == 2, "root and containing class publish the virtual layout requirement");
+  pl::Session scratch;
+  build(scratch, polymorphic + interfaces + layout);
+  check(layout_error == pl::TuFront::errors(scratch.get<pl::TuFront>(tu)), "the warm layout diagnostic matches a cold build");
+
+  build(warm, polymorphic + interfaces);
+  const auto& declarations = warm.get<pl::TuFront>(tu);
+  check(!declarations.has_errors(), pl::TuFront::errors(declarations));
+  check(blocked_shapes(declarations) == 2, "safe interfaces retain the cached layout requirement");
+  const auto& native = warm.get<pl::Tu>(tu);
+  check(!native.object && pl::Tu::errors(native).find("native output for a translation unit with virtual member functions") !=
+                              std::string::npos,
+        "a semantically checked unused virtual body cannot produce native output");
+
+  build(warm, plain + interfaces + layout);
+  const auto& restored = warm.get<pl::TuFront>(tu);
+  check(!restored.has_errors() && blocked_shapes(restored) == 0, "removing virtual restores class layout");
+  check(warm.get<pl::Link>(program).image == cold(plain + interfaces + layout), "restored native output matches a cold build");
+
+  build(warm, "struct Root { virtual int value() const; };\nint Root::value() const { return 1; }\n");
+  const auto key_error = pl::TuFront::errors(warm.get<pl::TuFront>(tu));
+  check(key_error.find("an out-of-class definition of a virtual member function") != std::string::npos,
+        "an external key definition receives its own semantic diagnostic");
+
+  const std::string lazy = polymorphic + "template<class T> struct Box { T elements[2]; };\nusing Nested = Box<Root>;\n";
+  build(warm, lazy + "const Nested* pass(const Nested* p) { return p; }\n");
+  check(!warm.get<pl::TuFront>(tu).has_errors(), "forming a pointer to a class specialization needs no layout");
+  for (const std::string use : {"Nested stored;\n", "constexpr auto alignment = alignof(Nested);\n",
+                               "constexpr auto size = sizeof(Nested);\n"}) {
+    build(warm, lazy + use);
+    check(pl::TuFront::errors(warm.get<pl::TuFront>(tu)).find("object layout requiring virtual function support") !=
+              std::string::npos,
+          "a layout demand completes a class specialization with a virtual array element");
+  }
+}
+
 void bit_fields() {
   std::string text = R"cpp(
 enum Width { second = 5 };
@@ -558,6 +618,7 @@ int main() {
   pooled();
   pooled_units();
   records();
+  virtual_declarations();
   bit_fields();
   unnamed_union_members();
   too_deep();

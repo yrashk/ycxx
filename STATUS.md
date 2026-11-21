@@ -1968,6 +1968,22 @@ What the process allocates, attributed to the engine's cells, in the trace and t
   [Design](docs/design/implicit-copy-assignment.md#first-declaration-defaulted-copy-assignment) ·
   [#244](https://github.com/yrashk/ycxx/issues/244)
 
+## Ordinary virtual declarations (#309, 2026-11-21)
+
+- A non-template root class can declare ordinary virtual member functions and define them
+  inline. A virtual destructor can be defaulted in class or defined there, including with
+  `constexpr`. Sema checks inline bodies in the complete-class context and records virtual
+  functions, polymorphism and virtual destruction. The existing class traits use those facts.
+- Syntax checking accepts pointer and reference interfaces and by-value function declarations.
+  The layout guard covers the class and enclosing records, including array elements. Layout,
+  storage, evaluated calls and key-function definitions receive diagnostics where they require
+  unsupported virtual semantics or ABI. Native requests for a unit with virtual declarations
+  receive a diagnostic before any object is emitted.
+- Derived virtual members, virtual dispatch and tables remain in
+  [#309](https://github.com/yrashk/ycxx/issues/309). Virtual destructor entry points are in
+  [#136](https://github.com/yrashk/ycxx/issues/136).
+  [Design](docs/design/ordinary-virtual-declarations.md)
+
 ## Templates, ζ step 9: member function templates (#88, #314, 2026-11-19)
 
 - **Member function templates** ([temp.mem]) of classes and class templates: their head one level

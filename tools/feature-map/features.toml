@@ -1800,13 +1800,14 @@ group = 'class'
 clauses = ['class.virtual', 'class.abstract', 'class.access.virt']
 std = 'C++98'
 detect = '\bvirtual\b|\boverride\b'
-status = 'missing'
+status = 'partial'
 probe = '''
 struct B { virtual int f() = 0; virtual ~B() {} };
 struct D final : B { int f() override { return 0; } };
 int main() { D d; B& b = d; return b.f(); }
 '''
 issues = [309]
+note = 'ordinary root virtual declarations and inline bodies in syntax checking; layout, dispatch, tables and derived overrides remain open'
 
 [[feature]]
 id = 'class-virtual-base'

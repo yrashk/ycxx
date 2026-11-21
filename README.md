@@ -277,6 +277,10 @@ checked with the flags of its last build, or else with its line in the project's
 **Pointer-to-member declarations.** Data and function member-pointer types can appear in
 declarations, type traits and requires-expressions. [#238](https://github.com/yrashk/ycxx/issues/238)
 
+**Virtual declarations.** Syntax checking accepts initial virtual members in ordinary root classes,
+including inline bodies and virtual destructors. Those classes can appear in pointer and reference
+interfaces. [#309](https://github.com/yrashk/ycxx/issues/309)
+
 **Array structured bindings.** Local bindings can copy scalar-element arrays or alias their
 elements, including whole rows of multidimensional arrays. [#285](https://github.com/yrashk/ycxx/issues/285)
 
@@ -289,7 +293,7 @@ elements, including whole rows of multidimensional arrays. [#285](https://github
   [#411](https://github.com/yrashk/ycxx/issues/411)
 - Constexpr lambdas (the interpreter has no class objects yet), further lambda declaration
   contexts ([#338](https://github.com/yrashk/ycxx/issues/338)),
-  member and tuple-like structured bindings, virtual functions, virtual base classes,
+  member and tuple-like structured bindings, virtual dispatch and table emission, virtual base classes,
   inheriting constructors, and bases of class templates.
 - Member class and alias templates, conversion function templates, and constraints on class
   templates and their members.
