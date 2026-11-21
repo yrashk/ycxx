@@ -4560,15 +4560,15 @@ public:
 
   // [class.dtor]: a potentially invoked destructor must be accessible.
   bool check_destructor_access(QualType type, u32 at) {
-    if (!types().is_class(type)) return true;
+    if (!types().is_class(type) || types().is_dependent(type)) return true;
     const EntityId owner = types().class_of(type);
     const ClassRec* record = class_rec(owner);
-    if (!record) return true;
-    if (!record->destructor_usable) {
+    if (!record || record->destructor == EntityId::none) return true;
+    const auto declaration = std::ranges::find(record->members, record->destructor, &MemberDeclRec::entity);
+    if (declaration != record->members.end() && declaration->is_deleted) {
       diag(at, Diag::object_unusable_destructor, type);
       return false;
     }
-    if (record->destructor == EntityId::none) return true;
     const EntityId destructor = record->destructor;
     const NameId name = w_->entities.rec(destructor).name;
     if (defer_type_access && !accessible(owner, record->access_of(destructor))) {
