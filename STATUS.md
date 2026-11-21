@@ -1670,7 +1670,11 @@ session's.*
   and a block declaration can take an unnamed function-pointer parameter (#449).
 - Parenthesized direct initialization accepts functional conversions with a braced operand or an
   initial literal, including `S b(S(1));` and `S b(S{1});` ([dcl.ambig.res], #290).
-- Not yet: access, hiding and qualified functional casts of member types (#216); member alias
+- Qualified functional conversions check access to aliases and typedefs declared directly in an
+  ordinary non-template record, for both `C::T(args)` and `C::T{args}`. They use the existing
+  member and friend access rules ([expr.type.conv], [class.access.general], #216).
+- Access through intermediate alias qualifiers or inherited aliases, dependent lookup and
+  expression hiding remain tracked in [#216](https://github.com/yrashk/ycxx/issues/216). Member alias
   templates (`template<…> using __apply = …` in a class), with member
   templates; template template parameters (#208); value-dependent expressions as template
   arguments (#209).
