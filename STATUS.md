@@ -2093,6 +2093,11 @@ What the process allocates, attributed to the engine's cells, in the trace and t
   consume a peer-owned object through a pointer or reference. Dispatch loads the selected slot in
   declaration order and passes the original receiver as `this`. Qualifying the call with the
   receiver's own class name calls the declaration directly.
+- The same Linux consumer can query `sizeof` and `alignof` and read or write directly declared
+  builtin integral members up to 64 bits through a pointer or reference. The shared Itanium
+  layout reserves the vptr at offset zero and preserves the declared field indices. Construction,
+  destruction, copying, by-value transfer and derived layouts retain their diagnostics.
+  [Itanium ABI §2.4](https://itanium-cxx-abi.github.io/cxx-abi/abi.html#class-types) · [#309](https://github.com/yrashk/ycxx/issues/309)
 - Pure virtual functions, `final`, covariant returns and table production remain in
   [#309](https://github.com/yrashk/ycxx/issues/309). Virtual destructor entry points are in
   [#136](https://github.com/yrashk/ycxx/issues/136). RTTI is tracked in
