@@ -106,6 +106,9 @@ public:
   // Whether class `c` is complete at the current point ([class.mem.general]): its definition
   // precedes the point and does not enclose it.
   virtual bool is_complete(EntityId c) = 0;
+  // A concrete source query keeps its original position if its tokens are read again.
+  virtual bool is_complete_at_source(EntityId c) { return is_complete(c); }
+  virtual engine::Loc source_loc(engine::Loc loc, u32) { return loc; }
   // Inside the enumerator list of an enumeration this unit is defining: its record so far, which
   // is published only after the list (#156).
   virtual const EnumRec* defining_enum(EntityId) { return nullptr; }
@@ -362,7 +365,11 @@ public:
 
   template <class... A>
   void diag(u32 at, Diag d, const A&... args) {
-    engine::Diagnostic x{engine::Loc{std::to_underlying(item_), loc_base_ + at}, diag_id(d), {arg(args)...}};
+    diag_at({std::to_underlying(item_), loc_base_ + at}, d, args...);
+  }
+  template <class... A>
+  void diag_at(engine::Loc loc, Diag d, const A&... args) {
+    engine::Diagnostic x{loc, diag_id(d), {arg(args)...}};
     // The elements of an expansion say an equal diagnostic once (ast.md §6.4).
     if (!frames_.empty() && std::ranges::contains(*diags_, x)) return;
     diags_->push_back(std::move(x));
@@ -823,7 +830,7 @@ public:
 
   // ------------------------------------------------------------ type-trait built-ins (docs/EXTENSIONS.md)
 
-  // The built-in `name` names, if it is one ycxx implements.
+  // The type-trait built-in recognized for `name`.
   const lex::TypeTraitInfo* type_trait(NameId name) { return lex::type_trait(ins().names.spelling(name)); }
   // Whether a class type is a union, without requiring its definition.
   std::optional<bool> is_union_type(QualType t) {
@@ -836,10 +843,33 @@ public:
     if (!r) diag(at, Diag::trait_not_applicable, arg);
     return r;
   }
+  // The innermost array element must be complete or cv void ([meta.unary.prop]). Only classes
+  // need a copyability fact after peeling extents ([basic.types.general], [class.prop]).
+  Ex trivial_copyability_expr(QualType operand, u32 begin, u32 end) {
+    const Types& ts = types();
+    const QualType canonical = ts.canonical(operand);
+    const auto fail = [&](Diag d, const auto&... args) -> Ex {
+      diag_at(q_->source_loc({std::to_underlying(item_), loc_base_ + begin}, begin), d, args...);
+      return {NodeId::none, begin, end};
+    };
+    if (ts.is_dependent(canonical)) return fail(Diag::trivial_copyability_dependent);
+    const QualType element = ts.innermost_array_element(canonical);
+    if (ts.is_scalar(element)) return bool_literal(true, begin, end);
+    if (ts.is_reference(element) || ts.is_function(element) || ts.is_void(element))
+      return bool_literal(false, begin, end);
+    if (ts.is_class(element)) {
+      const EntityId cls = ts.class_of(element);
+      if (!q_->is_complete_at_source(cls)) return fail(Diag::trivial_copyability_incomplete, element);
+      if (const ClassRec* record = classes().find(cls))
+        if (auto fact = record->trivially_copyable()) return bool_literal(*fact, begin, end);
+    }
+    return fail(Diag::trivial_copyability_unsupported, operand);
+  }
   // `__trait(T…)` that tests types ([meta.unary], [meta.rel]): a `bool` prvalue, value-dependent
-  // while a type is dependent.
+  // while a type is dependent for the traits that support it.
   Ex trait_expr(lex::TypeTrait t, std::span<const QualType> args, u32 begin, u32 end) {
     using enum lex::TypeTrait;
+    if (t == is_trivially_copyable) return trivial_copyability_expr(args[0], begin, end);
     QualType b = builtin(Builtin::bool_);
     auto structural_trait = [&](std::optional<ConstId> v) {
       if (v) return literal(b, *v, ValueCategory::prvalue, begin, end);
