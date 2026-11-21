@@ -18,15 +18,16 @@ enum class TypeTrait : std::uint8_t {
   add_pointer, add_lvalue_reference, add_rvalue_reference, remove_extent, remove_all_extents, decay,
   underlying_type,
   // Predicates with bounded support.
-  is_trivially_copyable,
+  is_trivially_copyable, is_constructible,
 };
 
 struct TypeTraitInfo {
   std::string_view name;
   TypeTrait trait;
-  std::uint8_t arity;  // its type arguments
+  std::uint8_t arity;  // required type arguments
   bool transforms;     // a type, not a `bool`
   bool advertised = true;
+  bool variadic = false;
 };
 
 inline constexpr std::array type_traits{
@@ -74,6 +75,7 @@ inline constexpr std::array type_traits{
     TypeTraitInfo{"__decay", TypeTrait::decay, 1, true},
     TypeTraitInfo{"__underlying_type", TypeTrait::underlying_type, 1, true},
     TypeTraitInfo{"__is_trivially_copyable", TypeTrait::is_trivially_copyable, 1, false, false},
+    TypeTraitInfo{"__is_constructible", TypeTrait::is_constructible, 1, false, false, true},
 };
 
 constexpr const TypeTraitInfo* type_trait(std::string_view name) {
