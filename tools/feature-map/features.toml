@@ -1623,7 +1623,7 @@ int main() { S s = 3; int i = s; return (s && f(2) == 2 && i == 3) ? 0 : 1; }
 '''
 status = 'partial'
 issues = [157, 219, 339]
-note = 'In-class conversion-function declarations can use dependent class aliases as targets'
+note = 'In-class conversion functions can use dependent aliases and be selected by named static_cast to an exact non-class value type'
 
 [[feature]]
 id = 'class-explicit-bool'
@@ -2014,7 +2014,7 @@ clauses = ['temp.res', 'temp.res.general', 'temp.local', 'temp.dep', 'temp.dep.g
 std = 'C++98'
 core = true
 status = 'partial'
-issues = [263, 241]
+issues = [263, 241, 209]
 probe = '''
 template<class T> struct H { using type = int; };
 template<class T> typename H<T>::type g(T) { return 0; }
@@ -2022,7 +2022,7 @@ template<class T> decltype(T().missing(), 1) h(int) { return 1; }
 template<class T> int h(long) { return 0; }
 int main() { return g(1) + h<int>(0); }
 '''
-note = 'Class and variable partial matches check substituted arguments in lexical order. Template static assertion failures are diagnosed at instantiation. Expression SFINAE and dependent operand identity remain.'
+note = 'Class and variable partial matches check substituted arguments in lexical order. Template static assertion failures are diagnosed at instantiation. Dependent __is_same works in bool template arguments and defaults. Other dependent expression identities and expression SFINAE remain open.'
 
 [[feature]]
 id = 'temp-ttp'

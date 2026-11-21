@@ -1174,6 +1174,10 @@ public:
         auto v = ev.value;
         if (ev.dependent) {
           s.dependent_bound = template_value(e, s_->types().canonical(e.type()));
+          if (s.dependent_bound && s_->ins().values.is<ast::VDepOp>(*s.dependent_bound)) {
+            s_->diag(e.begin, Diag::not_supported, Tk::l_square);
+            s.dependent_bound.reset();
+          }
           ok = expect(Tk::r_square) && ok && s.dependent_bound.has_value();
           l.suffixes.push_back(std::move(s));
           continue;
@@ -2016,11 +2020,20 @@ public:
   // stays a `VDep*` value ([temp.dep.constexpr]).
   std::optional<sema::ConstId> template_value(Ex e, QualType t) {
     if (!e.ok()) return std::nullopt;
-    if (auto lit = s_->as<ast::Literal>(e); lit && s_->world().ins.values.is_dependent(lit->value)) return lit->value;
+    Ex operand = e;
+    while (auto p = s_->as<ast::Paren>(operand)) operand.id = p->operand.id;
+    if (auto lit = s_->as<ast::Literal>(operand); lit && s_->ins().values.is_dependent(lit->value)) {
+      if (s_->ins().values.is<ast::VDepOp>(lit->value) && !s_->types().is(t, Builtin::bool_)) {
+        s_->diag(e.begin, Diag::not_supported, Tk::kw_template);
+        return std::nullopt;
+      }
+      return lit->value;
+    }
     // Value-dependent: in a body its value is known when the body is instantiated; in a declaration
     // it is part of the template's signature, which needs the expression's `VDep*` form (#88).
     if (s_->dependent(e)) {
-      if (body) return s_->world().ins.intern_value(ast::VDepParam{sema::dependent_depth, 0});
+      if (body && !(e.info.flags & sema::expr_flag::unrepresented_value))
+        return s_->world().ins.intern_value(ast::VDepParam{sema::dependent_depth, 0});
       s_->diag(e.begin, Diag::not_supported, Tk::kw_template);
       return std::nullopt;
     }
@@ -3181,7 +3194,7 @@ public:
       Ex e = expression();
       angle_ = saved;
       if (!expect(Tk::r_paren)) return {NodeId::none, begin, pos()};
-      Ex r = s_->static_cast_to(e, *t, begin, /*allow_downcast=*/true);
+      Ex r = s_->static_cast_to(e, *t, begin, /*named_static_cast=*/true);
       return {r.id, begin, pos(), r.info};
     }
     case Tk::float_lit: {
