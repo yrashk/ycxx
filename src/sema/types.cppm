@@ -718,6 +718,9 @@ struct ClassRec {
   // (/1); with a lambda-capture, its default constructor and copy assignment are deleted (/13).
   bool closure = false;
   bool default_deleted = false;
+  // Written zero-parameter defaulting, with the completed class's supported no-op proof.
+  EntityId defaulted_default_ctor = EntityId::none;
+  bool trivial_defaulted_default_ctor = false;
   EntityId destructor = EntityId::none;
   EntityId copy_ctor = EntityId::none;
   bool copy_deleted = false;

@@ -191,7 +191,7 @@ struct Ex {
   bool glvalue() const { return info.category != ValueCategory::prvalue; }
 };
 
-enum class Construction { direct, copy, direct_list, copy_list };
+enum class Construction { direct, copy, direct_list, copy_list, default_init };
 enum class ConstructorDestination { object, delegation, polymorphic_base };
 
 // A braced-init-list as written ([dcl.init.general]): each initializer-clause is an analysed
@@ -1458,10 +1458,16 @@ public:
   Ex default_init(QualType t, u32 begin, u32 end) {
     if (types().is_dependent(t)) return dependent_node({}, begin, end);
     if (!require_supported_virtual_layout(t, begin)) return {NodeId::none, begin, end};
-    if (has_user_ctors(t)) return construct(t, {}, begin, end);
+    if (has_user_ctors(t)) return construct(t, {}, begin, end, Construction::default_init);
     if (has_member_inits(t)) return member_inits(t, false, begin, end);
     ExprInfo info{Types::unqualified(t), ValueCategory::prvalue, 0};
     return node(ast::DefaultInit{info}, begin, end, info);
+  }
+  bool is_defaulted_tag_initializer(Ex init) {
+    while (auto paren = as<ast::Paren>(init)) init.id = paren->operand.id;
+    if (!(as<ast::ValueInit>(init) || as<ast::DefaultInit>(init)) || !types().is_class(init.type())) return false;
+    const ClassRec* rec = class_rec(types().class_of(init.type()));
+    return rec && rec->trivial_defaulted_default_ctor;
   }
   // An aggregate's elements each from its default member initializer, else value- or
   // default-initialized.
@@ -4299,6 +4305,17 @@ public:
       return fail;
     }
     if (k.entity != EntityId::none && !check_access(c, k.pattern ? k.pattern->entity : k.entity, w_->entities.rec(c).name, begin)) return fail;
+    if (k.entity != EntityId::none && k.entity == cr->defaulted_default_ctor) {
+      if (!cr->trivial_defaulted_default_ctor) return fail;  // diagnosed at its declaration
+      if (destination == ConstructorDestination::delegation) {
+        diag(begin, Diag::defaulted_default_delegation);
+        return fail;
+      }
+      ExprInfo info{ut, ValueCategory::prvalue, 0};
+      // [dcl.init.general]: value-initialization zero-initializes before the trivial constructor.
+      if (form == Construction::default_init) return node(ast::DefaultInit{info}, begin, end, info);
+      return node(ast::ValueInit{info}, begin, end, info);
+    }
     if (polymorphic_base) {
       // [class.base.init]: the base destructor is potentially invoked by this constructor.
       if (!cr->destructor_usable) {
@@ -5626,7 +5643,11 @@ public:
       return dependent_node({e}, e.begin, e.end, types().is_dependent(to) ? std::nullopt : std::optional(Types::unqualified(to)));
     if (address_set(e)) return convert(e, to, at_);  // [over.over]: a cast supplies a target type
     QualType target = Types::unqualified(to);
-    if (types().is_void(target)) return convert_node(e, ast::ConversionKind::to_void, target);  // /6
+    if (types().is_void(target)) {
+      // A discarded tag prvalue still denotes a temporary object ([expr.context]/2).
+      if (is_defaulted_tag_initializer(e)) e = discarded(e);
+      return convert_node(e, ast::ConversionKind::to_void, target);  // /6
+    }
     if (types().is_reference(to)) {
       const TypeRec ref = types().rec(to);
       if (ref.rvalue_ref && e.cat() == ValueCategory::lvalue && types().is_object(ref.inner)) {

@@ -1056,6 +1056,13 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   constructors. Direct initialization includes them. Copy-list-initialization ranks them and
   diagnoses an explicit winner, including a default constructor or a temporary for a reference
   argument ([dcl.fct.spec], [over.match.ctor], [over.match.copy], [over.match.list], #157).
+- A first-declaration in-class `C() = default` is supported for non-template, nonunion tag
+  classes at namespace scope without fields, bases, virtual functions, or a nontrivial or deleted destructor.
+  The constructor participates in overload selection and access checks, including bare `explicit`.
+  Default-initialization is vacuous and value-initialization zero-initializes without a callable
+  constructor body. An `inline constexpr C tag{}` uses the existing empty record constant
+  representation while the class has a user-declared constructor ([dcl.fct.def.default],
+  [class.default.ctor], [dcl.init.general], #157).
 - A first-declaration in-class `C(C&) = default` or `C(const C&) = default` is a declared copy
   constructor, including with `constexpr` or bare `noexcept`. It participates in overload
   selection, access checking and deletion. For ordinary namespace-scope records without

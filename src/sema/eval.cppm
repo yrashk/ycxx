@@ -114,6 +114,8 @@ private:
   Evaluated evaluate(Ex e, bool reference_initializer) {
     if (!e.ok()) return {};
     if (s_->dependent(e)) return {std::nullopt, reason_unsupported, false, true};
+    if (!reference_initializer)
+      if (auto value = tag_initializer_constant(e)) return {*value, 0, true};
     if (reference_initializer) {
       if (!e.glvalue()) return {};
       // The built-in address of the bound glvalue, without resolving operator& ([dcl.init.ref]).
@@ -185,6 +187,7 @@ private:
 public:
   // An aggregate initializer is constant when each of its elements is constant ([expr.const]).
   Evaluated evaluate_initializer(Ex e) {
+    if (auto value = tag_initializer_constant(e)) return {*value, 0, true};
     if (s_->as<ast::InitList>(e)) {
       std::vector<ConstId> elements;
       for (const Ex& element : s_->list_elements(e)) {
@@ -203,6 +206,13 @@ public:
   }
 
 private:
+  std::optional<ConstId> tag_initializer_constant(Ex e) {
+    if (!s_->is_defaulted_tag_initializer(e)) return std::nullopt;
+    // The empty record value describes storage for the non-aggregate tag. Sema has already
+    // selected its constructor, including the checks for access and explicitness.
+    return s_->world().values.aggregate(e.type(), {});
+  }
+
   // The value of a zero-initialized object of type `t` ([dcl.init.general]).
   std::optional<ConstId> zero_constant(QualType t) {
     Types& types = s_->types();

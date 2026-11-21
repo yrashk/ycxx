@@ -260,6 +260,8 @@ enum class Diag : std::uint32_t {
   base_initializer_list_constructor [[=message{Severity::error, "initializer-list constructor overloads for a polymorphic base are not supported yet"}]],
   defaulted_copy_declaration [[=message{Severity::error, "only an ordinary in-class copy constructor taking C& or const C& can be explicitly defaulted here"}]],
   defaulted_copy_unsupported [[=message{Severity::error, "defaulted copy construction of '{0:t}' is not supported for this class"}]],
+  defaulted_default_constructor [[=message{Severity::error, "an explicitly defaulted default constructor is not supported for this class"}]],
+  defaulted_default_delegation [[=message{Severity::error, "delegation to an explicitly defaulted default constructor is not supported yet"}]],
   reference_uninitialized [[=message{Severity::error, "a reference must be initialized"}]],
   bind_to_lvalue [[=message{Severity::error, "an rvalue reference to '{0:t}' cannot bind to an lvalue"}]],
   bind_to_rvalue [[=message{Severity::error, "a non-const lvalue reference to '{0:t}' cannot bind to a temporary"}]],
