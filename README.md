@@ -285,7 +285,8 @@ unqualified braced prvalue such as `B{7}`, with an explicit initializer for each
   when directly naming a non-dependent primary class specialization with explicit type arguments,
   `if constexpr`, deferred template static assertion failures, and two-phase lookup, with
   Itanium names identical to Clang's; Clang's
-  `__make_integer_seq`;
+  `__make_integer_seq`. Template type arguments can use terminal namespace-qualified alias
+  specializations that expand to dependent member types. [#630](https://github.com/yrashk/ycxx/issues/630)
 - dependent `__is_same`, `__is_reference`, `__is_const`, `__is_volatile`, `__is_array`,
   `__is_pointer`, `__is_function`, `__is_enum`, `__is_union`, `__is_class`, `__is_object`, and the
   three member-pointer predicates as `bool` template arguments or defaults, including through
