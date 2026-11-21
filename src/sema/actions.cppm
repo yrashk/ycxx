@@ -3437,6 +3437,8 @@ public:
     ConstId enum_initializer = ConstId::none;
   };
   std::vector<OwnDecl> own;
+  // Defaults, including inherited ones, of functions already declared in this item.
+  std::map<EntityId, std::vector<NodeId>> own_function_defaults;
   struct MemberIntroduction {
     NameId name;
     ast::DeclSema sema;
@@ -6040,6 +6042,16 @@ public:
     return {NodeId::none, e.begin, e.end};
   }
 
+  std::vector<ast::DeclSema> written_allocation_declarations(NameId name) {
+    auto written = q_->namespace_members(EntityId::none, name);
+    // A preceding declarator in this item is visible before the item is published.
+    for (const OwnDecl& d : own)
+      if (d.name == name && d.sema.kind == ast::DeclKind::function &&
+          w_->entities.rec(d.sema.entity).scope == EntityId::none)
+        written.push_back(d.sema);
+    return written;
+  }
+
   // [basic.stc.dynamic] makes the ordinary declarations visible even without a header.
   Ex allocation_name_expr(std::string_view spelling, u32 begin, u32 end) {
     const NameId name = ins().names.intern(spelling);
@@ -6051,9 +6063,25 @@ public:
       q_->use_allocation_function(d.entity, allocation_has_alignment(candidate));
       found.push_back(d);
     }
-    auto written = q_->namespace_members(EntityId::none, name);
+    auto written = written_allocation_declarations(name);
     found.insert(found.end(), written.begin(), written.end());
     return decls_expr(std::move(found), true, name, begin, end);
+  }
+
+  // In a default-aligned scalar new-expression, the sole allocation argument is size_t
+  // ([expr.new]). Every admitted written overload takes that exact first parameter. An
+  // overload with additional, all-defaulted parameters ties the ordinary one ([over.match]).
+  bool ambiguous_scalar_allocation(NameId name) {
+    for (const ast::DeclSema& d : written_allocation_declarations(name)) {
+      if (d.kind != ast::DeclKind::function) continue;
+      const auto count = types().rec(d.type).params.size();
+      if (count < 2) continue;
+      auto draft = own_function_defaults.find(d.entity);
+      auto defaults = draft != own_function_defaults.end() ? draft->second : defaults_of(d);
+      Candidate candidate{d.entity, d.type, true, false, nullptr, std::move(defaults)};
+      if (candidate.required(count) == 1) return true;
+    }
+    return false;
   }
 
   // [expr.new]: initialize the object after the call to the global allocation function.
@@ -6100,6 +6128,11 @@ public:
           ? to_bool(value, value.begin) : convert(value, t, value.begin);
     }
     if (!init.ok()) return fail;
+    const NameId name = ins().names.intern(allocation_name(AllocationFunction::allocate));
+    if (ambiguous_scalar_allocation(name)) {
+      diag(begin, Diag::ambiguous_call, name);
+      return fail;
+    }
     QualType pointer = types().pointer(t);
     if (dependent(init)) return dependent_node({init}, begin, end, pointer);
 
