@@ -1,0 +1,156 @@
+"""Resolve external inline functions and variables across arm64 Mach-O objects (#124).
+
+The Darwin counterpart of linux_inline.py, over the same fixtures: ycxx emits the eligible
+inline definitions as weak (and private-external when hidden), and both ycxx's linker and the
+system linker keep one definition in either object order.
+"""
+
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+import tempfile
+
+
+def main():
+    ycxx, host_cxx, nm, ar = sys.argv[1:]
+    fixtures = Path(__file__).resolve().parent
+    env = dict(os.environ, LC_ALL='C', YCXX_NO_DAEMON='1', YCXX_THREADS='1')
+    with tempfile.TemporaryDirectory(prefix='ycxx-inline-', dir='.') as temp:
+        def run(*args, status=0, error=''):
+            result = subprocess.run(args, cwd=temp, env=env, capture_output=True, text=True, timeout=60)
+            if result.returncode != status or error not in result.stderr:
+                raise AssertionError(f'{args} exited {result.returncode}, expected {status}'
+                                     f' and stderr containing {error!r}\n{result.stdout}{result.stderr}')
+            return result.stdout
+
+        def compile(source, obj):
+            run(ycxx, 'cxx', '-c', source, '-o', obj)
+
+        def symbols(obj):
+            """{name: (binding, defined)} from `nm -m`: binding is 'weak external', 'weak private
+            external', 'private external', 'external' or 'non-external'."""
+            table = {}
+            for line in run(nm, '-m', obj).splitlines():
+                m = re.match(r'^(?:[0-9a-f]+)?\s*\(([^)]*)\)\s+((?:weak )?(?:private )?(?:non-)?external)'
+                             r'(?: \[[^]]*\])?\s+(\S+)', line)
+                if m:
+                    table[m[3]] = (m[2], m[1] != 'undefined')
+            return table
+
+        def links(*objects, args=()):
+            """Links with ycxx's linker and with the system's, in both orders, and runs each."""
+            for order in (objects, objects[::-1]):
+                run(ycxx, 'cxx', *order, '-o', 'program')
+                run('./program', *args)
+                run(host_cxx, *order, '-o', 'host-program')
+                run('./host-program', *args)
+
+        weak, strong = ('weak external', True), ('external', True)
+        hidden = fixtures / 'inline-hidden'
+        weak_hidden = ('weak private external', True)
+        for part, expected in {
+            'main': {'__Z11hidden_stepi': weak_hidden, '__Z12hidden_twicei': weak_hidden},
+            'peer': {'__Z11hidden_stepi': weak_hidden, '__Z12hidden_twicei': weak_hidden},
+            'boundaries': {
+                '__Z16hidden_from_decli': ('private external', True),
+                '__Z15hidden_from_defi': ('private external', True),
+                '__Z13strong_hiddeni': ('private external', True),
+                '__Z14inline_defaulti': weak,
+                '__Z8overloadi': ('private external', True),
+                '__Z8overloadl': strong,
+                '__Z14unrelated_attri': strong,
+            },
+            'declarator_visibility.accept': {'__Z4calli': strong},
+        }.items():
+            obj = f'hidden-{part}.o'
+            compile(hidden / f'{part}.cpp', obj)
+            table = symbols(obj)
+            for name, binding in expected.items():
+                assert table.get(name) == binding, (obj, name, binding, table.get(name))
+            assert '__Z12static_locali' not in table or table['__Z12static_locali'][0] == 'non-external', table
+        compile(hidden / 'boundaries_main.cpp', 'hidden-boundaries_main.o')
+        links('hidden-main.o', 'hidden-peer.o')
+        links('hidden-boundaries.o', 'hidden-boundaries_main.o')
+
+        odr = fixtures / 'inline-odr'
+        inline_symbols = ('__Z12inline_firsti', '__Z12inline_lateri', '__ZN9Operation6memberEi',
+                          '__ZN14DeclaredMember6memberEi', '__Z15implicit_inlinei')
+        for name in ('main', 'peer'):
+            compile(odr / f'{name}.cpp', f'{name}.o')
+            table = symbols(f'{name}.o')
+            for symbol in inline_symbols:
+                assert table[symbol] == weak, (name, symbol, table[symbol])
+            assert table[f'__Z17{name}_direct_callsi'] == strong, table
+        links('main.o', 'peer.o', args=('one', 'two'))
+        # A second producer: the system compiler's peer, linked by both linkers.
+        run(host_cxx, '-std=c++20', '-O0', '-c', odr / 'peer.cpp', '-o', 'host-peer.o')
+        links('main.o', 'host-peer.o', args=('one', 'two'))
+        # An archive member, through the system linker (ycxx's Mach-O archive input is #388).
+        run(ar, 'crs', 'libinline.a', 'peer.o')
+        run(host_cxx, 'main.o', 'libinline.a', '-o', 'host-program')
+        run('./host-program', 'one', 'two')
+
+        friend = fixtures / 'inline-friend'
+        for name in ('main', 'peer'):
+            compile(friend / f'{name}.cpp', f'friend-{name}.o')
+            table = symbols(f'friend-{name}.o')
+            for symbol in ('__ZN14inline_address4readERKNS_4ItemE', '__ZN14inline_addressplERKNS_4ItemEi'):
+                assert table[symbol] == weak, (name, symbol, table[symbol])
+        links('friend-main.o', 'friend-peer.o')
+
+        data = fixtures / 'inline-data'
+        data_sections = {'__ZN4data11initializedE': '__DATA,__data', '__ZN4data16zero_initializedE': '__DATA,__bss',
+                         '__ZN4data9immutableE': '__TEXT,__const', '__ZN4data10redeclaredE': '__DATA,__data',
+                         '__ZN4data11specializedIiEE': '__DATA,__data'}
+        for name in ('main', 'peer'):
+            obj = f'data-{name}.o'
+            compile(data / f'{name}.cpp', obj)
+            listing = run(nm, '-m', obj)
+            for symbol, section in data_sections.items():
+                assert re.search(rf'\({re.escape(section)}\) weak external {symbol}$', listing, re.M), (obj, symbol)
+        links('data-main.o', 'data-peer.o')
+        run(host_cxx, '-std=c++20', '-O0', '-c', data / 'peer.cpp', '-o', 'host-data-peer.o')
+        links('data-main.o', 'host-data-peer.o')
+
+        assignment = fixtures / 'inline-assignment'
+        for name in ('main', 'peer'):
+            compile(assignment / f'{name}.cpp', f'assignment-{name}.o')
+            assert symbols(f'assignment-{name}.o')['__ZN1HaSERKS_'] == weak, name
+        links('assignment-main.o', 'assignment-peer.o')
+
+        # Controls: ordinary definitions stay strong and collide; ineligible inline variables
+        # (internal, relocated, explicitly specialized without `inline`) are not weak.
+        for name in ('strong1', 'strong2'):
+            text = 'int ordinary(int value) { return value; }\n'
+            if name == 'strong1':
+                text += 'int main() { return ordinary(0); }\n'
+            (Path(temp) / f'{name}.cpp').write_text(text)
+            compile(f'{name}.cpp', f'{name}.o')
+        run(ycxx, 'cxx', 'strong1.o', 'strong2.o', '-o', 'program', status=1, error='duplicate symbol __Z8ordinaryi')
+        (Path(temp) / 'data-controls.cpp').write_text('''
+constexpr int ordinary_constant = 7;
+extern constexpr int external_constant = 9;
+static inline int local_inline = 11;
+int backing = 13;
+inline int* relocated = &backing;
+template<class T> inline int specialized = 17;
+template<> int specialized<int> = 19;
+struct NamedType {};
+template<> inline int specialized<NamedType> = 23;
+''')
+        compile('data-controls.cpp', 'data-controls.o')
+        table = symbols('data-controls.o')
+        for name in ('_ordinary_constant', '_local_inline'):
+            assert table[name] == ('non-external', True), (name, table[name])
+        for name in ('_external_constant', '_backing', '_relocated', '__Z11specializedIiE', '__Z11specializedI9NamedTypeE'):
+            assert table[name] == strong, (name, table[name])
+        # Without a weak definition the object makes no claim about splitting its sections.
+        flags = run('otool', '-hv', 'strong2.o').splitlines()[-1]
+        assert 'SUBSECTIONS_VIA_SYMBOLS' not in flags, flags
+        assert 'SUBSECTIONS_VIA_SYMBOLS' in run('otool', '-hv', 'main.o').splitlines()[-1]
+
+
+if __name__ == '__main__':
+    main()

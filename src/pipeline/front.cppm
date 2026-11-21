@@ -207,7 +207,8 @@ void static_locals(sema::World& world, TranslationUnit& tu, FunctionDef& f, R& r
   ast::Interners& ins = world.ins;
   for (const ast::LocalRec& l : ins.seqs.elements(f.body.locals)) {
     if (l.entity == EntityId::none || l.decl == ast::NodeId::none || !ins.ast.is<ast::StaticVar>(l.decl)) continue;
-    f.weak_elf = false;  // The function and its statics need group selection (#422).
+    // The function and its statics need ELF group selection (#422), or weak Mach-O statics (#124).
+    f.coalesced = false;
     auto s = ins.ast.get<ast::StaticVar>(l.decl);
     bool code = s.destructor != EntityId::none || (s.value == ast::ConstId::none && s.init.id != ast::NodeId::none);
     const sema::EntityRec& r = world.entities.rec(l.entity);
@@ -585,11 +586,10 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
     EntityId e = d.entity;
     if (e == EntityId::none) return;
     // Any reachable declaration can mark the entity inline ([dcl.inline]).
-    if (linux && (d.flags & sema::decl_flag::inline_) &&
-        (d.kind == ast::DeclKind::function || d.kind == ast::DeclKind::variable))
+    if ((d.flags & sema::decl_flag::inline_) && (d.kind == ast::DeclKind::function || d.kind == ast::DeclKind::variable))
       inline_declarations.insert(e);
     if (linux && d.kind == ast::DeclKind::function && d.has_written_noexcept) noexcept_declarations.insert(e);
-    if (linux && d.hidden_visibility) hidden_declarations.insert(e);
+    if (d.hidden_visibility) hidden_declarations.insert(e);
     if (!seen.insert(std::to_underlying(e)).second) return;
     const sema::EntityRec& r = world.entities.rec(e);
     if (r.kind == sema::EntityKind::class_ || r.kind == sema::EntityKind::data_member || r.kind == sema::EntityKind::type_alias ||
@@ -715,10 +715,10 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
       if (body.deduced) d.type = body.deduced_type;
       tu.functions.push_back({d.entity, d, body, program.id(k), it.body_begin - it.begin, program.this_type(d)});
       const auto& entity = world.entities.rec(d.entity);
-      tu.functions.back().weak_elf = inline_declarations.contains(d.entity) && entity.kind == sema::EntityKind::function &&
-                                    entity.linkage == ast::Linkage::external && entity.templ == EntityId::none &&
-                                    tu.main != d.entity && ins.seqs.size(body.closures) == 0 &&
-                                    program.asm_label(d.entity).empty();
+      tu.functions.back().coalesced = inline_declarations.contains(d.entity) && entity.kind == sema::EntityKind::function &&
+                                     entity.linkage == ast::Linkage::external && entity.templ == EntityId::none &&
+                                     tu.main != d.entity && ins.seqs.size(body.closures) == 0 &&
+                                     program.asm_label(d.entity).empty();
       // A written ordinary body starts at '{'. Other starts include a function-try-block and a
       // constructor initializer. Synthetic bodies and instantiations never enter this path.
       if (linux && !member && tu.main != d.entity && !it.specialization &&
@@ -738,7 +738,7 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
           !(d.flags & sema::decl_flag::definition))
         continue;
       tu.variables.push_back({d.entity, d.type, declarators[i]->value, at[i]});
-      tu.variables.back().weak_elf = weak_inline_variable(d);
+      tu.variables.back().coalesced = weak_inline_variable(d);
       // Not constant-initialized: initialized dynamically, in order ([basic.start.dynamic]); a
       // destructor runs at exit ([basic.start.term]).
       ast::NodeId init = declarators[i]->value == ast::ConstId::none ? declarators[i]->init.id : ast::NodeId::none;
@@ -813,13 +813,13 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
     if (world.types.is_dependent(world.types.class_type(cls))) continue;
     declare(s.decl, std::nullopt);
     tu.functions.push_back({s.decl.entity, s.decl, program.synthesized_body(i), program.id(s.item), 0, program.this_type(s.decl)});
-    tu.functions.back().weak_elf = linux && s.kind == parse::Program::SpecialMember::copy_assignment && !internal_class(cls);
+    tu.functions.back().coalesced = s.kind == parse::Program::SpecialMember::copy_assignment && !internal_class(cls);
   }
   for (FunctionDef& f : tu.functions) {
     static_locals(world, tu, f, runtime);
     // Check the complete unit by entity, including later redeclarations and qualified friends.
     if (f.unwind == UnwindEligibility::none) continue;
-    if (noexcept_declarations.contains(f.entity) || inline_declarations.contains(f.entity) || f.weak_elf ||
+    if (noexcept_declarations.contains(f.entity) || inline_declarations.contains(f.entity) || f.coalesced ||
         !f.guards.empty() || !program.asm_label(f.entity).empty()) {
       f.unwind = UnwindEligibility::none;
     } else if (f.unwind == UnwindEligibility::cleanup_free_with_throw && !tu.int_throw) {
@@ -842,9 +842,9 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
     d.type = world.entities.rec(e).type;
     declare(d, std::nullopt);
   }
-  // A declaration anywhere in the unit can supply the visibility of the one ELF symbol.
+  // A declaration anywhere in the unit can supply the visibility of the one object symbol.
   if (!hidden_declarations.empty())
-    for (Entity& e : tu.entities) e.hidden_elf = hidden_declarations.contains(e.id);
+    for (Entity& e : tu.entities) e.hidden = hidden_declarations.contains(e.id);
   return tu;
 }
 
