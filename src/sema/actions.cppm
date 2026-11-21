@@ -1191,7 +1191,10 @@ public:
     defer_type_access = false;
     EntityId saved = current_function;
     if (declared != EntityId::none) current_function = declared;
-    for (const DeferredAccess& d : deferred_access_) check_access(d.cls, d.member, d.name, d.at);
+    for (const DeferredAccess& d : deferred_access_) {
+      if (d.complete_destruction) check_destructor_access(types().class_type(d.cls), d.at);
+      else check_access(d.cls, d.member, d.name, d.at);
+    }
     deferred_access_.clear();
     for (const auto& check : deferred_injected_access_) check();
     deferred_injected_access_.clear();
@@ -4655,6 +4658,32 @@ public:
     return node(ast::ValueInit{info}, begin, end, info);
   }
 
+  // [class.dtor]: a potentially invoked destructor must be accessible.
+  bool check_destructor_access(QualType type, u32 at) {
+    if (!types().is_class(type) || types().is_dependent(type)) return true;
+    const EntityId owner = types().class_of(type);
+    const ClassRec* record = class_rec(owner);
+    if (!record || record->destructor == EntityId::none) return true;
+    const auto declaration = std::ranges::find(record->members, record->destructor, &MemberDeclRec::entity);
+    if (declaration != record->members.end() && declaration->is_deleted) {
+      diag(at, Diag::object_unusable_destructor, type);
+      return false;
+    }
+    const EntityId destructor = record->destructor;
+    const NameId name = w_->entities.rec(destructor).name;
+    if (defer_type_access && !accessible(owner, record->access_of(destructor))) {
+      deferred_access_.push_back({owner, destructor, name, at, true});
+      return true;
+    }
+    // [class.protected]: these uses destroy a complete object of the
+    // declaring class. Access through a derived context needs a derived object.
+    if (record->access_of(destructor) == ast::Access::protected_ && !accessible(owner, ast::Access::private_)) {
+      diag(at, Diag::protected_member, name, types().class_type(owner));
+      return false;
+    }
+    return check_access(owner, destructor, name, at);
+  }
+
   // `T(args)` and `T{…}` for a class T ([expr.type.conv]): a prvalue.
   Ex functional_cast(QualType t, std::vector<Ex> args, u32 begin, u32 end) {
     if (types().is_dependent(t) || any_dependent(args)) return construct(t, std::move(args), begin, end);
@@ -4667,6 +4696,7 @@ public:
       diag(begin, types().is_reference(t) ? Diag::reference_uninitialized : Diag::not_supported, lex::Tk::l_paren);
       return {NodeId::none, begin, end};
     }
+    if (!unevaluated && !check_destructor_access(t, begin)) return {NodeId::none, begin, end};
     if (args.empty()) return value_init(t, begin, end);
     // [expr.type.conv]/2: one argument is the cast-expression `(T)e`, as static_cast does it.
     if (!has_user_ctors(t) && args.size() == 1)
@@ -7945,6 +7975,7 @@ private:
     EntityId cls, member;
     NameId name;
     u32 at;
+    bool complete_destruction = false;
   };
   std::vector<DeferredAccess> deferred_access_;
   std::vector<std::function<void()>> deferred_injected_access_;

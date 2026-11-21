@@ -3573,6 +3573,7 @@ public:
   Ex type_conversion(QualType t, u32 begin) {
     if (is(Tk::l_brace)) {
       auto b = braced_init_list();
+      if (!s_->unevaluated && !s_->check_destructor_access(t, begin)) return {NodeId::none, begin, pos()};
       Ex r = s_->list_init(t, *b);
       return {r.id, begin, pos(), r.info};
     }
@@ -4991,6 +4992,7 @@ public:
       if (types.is_pointer(s_->local(bv->first).type)) constant_local(local, d.type, true, init);
       else sema::Evaluator(*s_, questions()).check_constexpr_call(deref);
     }
+    s_->check_destructor_access(d.type, d.name_at);
     ast::EntityId dtor = types.is_reference(d.type) ? ast::EntityId::none : s_->destructor_of(d.type);
     Ex var = s_->node(ast::LocalVar{local, sema::Sema::at(init, dbegin), dtor}, dbegin, d.name_at + 1);
     s_->set_local_decl(local, var.id);
@@ -5299,6 +5301,7 @@ public:
           skip_to_semi();
           return {NodeId::none, begin, pos()};
         }
+        if (!spec.is_static) s_->check_destructor_access(d.type, d.name_at);
         ast::EntityId dtor = s_->types().is_reference(d.type) ? ast::EntityId::none : s_->destructor_of(d.type);
         Ex var = variable_node(spec, local, init, dtor, dbegin);
         s_->set_local_decl(local, var.id);
@@ -5384,6 +5387,7 @@ public:
       } else if (sema::Types::is_const(d.type)) {
         s_->diag(d.name_at, Diag::const_uninitialized, d.name);
       }
+      if (!spec.is_static) s_->check_destructor_access(d.type, d.name_at);
       // The destructor that ends the variable at scope exit ([stmt.dcl]); a reference has none.
       ast::EntityId dtor = s_->types().is_reference(d.type) ? ast::EntityId::none : s_->destructor_of(d.type);
       Ex var = variable_node(spec, local, init, dtor, dbegin);

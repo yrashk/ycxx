@@ -1107,6 +1107,12 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   member subobject whose class has an implicit constructor, conditional
   `explicit`, explicit constructor templates, and other `= default` forms (#157, #244).
 
+## Ordinary destructor access (#259)
+
+- Automatic class objects and evaluated expressions of the form `T(args)` or `T{args}`
+  check access to the class destructor in the current context. Declaration-only uses
+  can still name the type.
+
 ## Classes, δ step 4a: enumerations (#86, 2026-11-18)
 
 - `TEnum{entity}` in `types`; sema's enumeration table (`Classes::enum_rec`: scoped or not, the
