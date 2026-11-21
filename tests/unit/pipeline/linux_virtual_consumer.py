@@ -141,6 +141,26 @@ def main():
                     run([host_cxx, '-fno-lto', 'primary-peer.o', 'primary-cold.o', '-o', 'mixed-primary'], scope, cold)
                     observed = run(['./mixed-primary'], scope, cold)
                     assert observed == 'primary-base consumer ok\n', observed
+
+            # Editing the base changes the slot while every derived declaration remains the same.
+            marker = b'    virtual int marker(int) const;\n'
+            score = b'    virtual int score(int) const;\n'
+            for part in ('primary', 'primary.peer'):
+                source = scope / f'{part}.cpp'
+                original = source.read_bytes()
+                assert original.count(marker + score) == 1
+                source.write_bytes(original.replace(marker + score, score + marker, 1))
+            compile(linux, '-c', 'primary.cpp', '-o', 'primary-edited-cold.o')
+            compile(linux, '-c', 'primary.cpp', '-o', 'primary-warm.o', env=daemon)
+            edited = (scope / 'primary-warm.o').read_bytes()
+            assert edited == (scope / 'primary-edited-cold.o').read_bytes()
+            assert edited != (scope / 'primary-cold.o').read_bytes()
+            run([host_cxx, '-std=c++20', '-pedantic-errors', '-fno-lto', '-c', 'primary.peer.cpp',
+                 '-o', 'primary-edited-peer.o'], scope, cold)
+            run([host_cxx, '-fno-lto', 'primary-edited-peer.o', 'primary-warm.o',
+                 '-o', 'mixed-primary-edited'], scope, cold)
+            observed = run(['./mixed-primary-edited'], scope, cold)
+            assert observed == 'primary-base consumer ok\n', observed
         finally:
             run([ycxx, 'ctl', 'shutdown'], scope, base)
 
