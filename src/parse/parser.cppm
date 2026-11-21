@@ -2688,6 +2688,7 @@ public:
       s_->drop_failures(param_diags);
       return s_->bool_literal(false, begin, pos());
     }
+    const sema::Sema::RequiresBodyScope requirements{*s_};
     bool satisfied = true;
     bool dependent = false;
     while (!is(Tk::r_brace) && !at_end()) {
