@@ -222,8 +222,8 @@ export enum class Op : std::uint16_t {
   // of class type, which a parameter of class type is ([expr.call]/7); the third is 1 + the
   // index of the argument that is the address of the object a class result initializes
   // ([stmt.return]), 0 if none. `lower` passes both as the target's calling convention does.
-  call [[=state({S, Vs}, {S, Vs}).imms({entity, u32, u32, u32}).accepts({not_constexpr})]],
   // `variadic` records the callee type even when the ellipsis matches zero arguments.
+  call [[=state({S, Vs}, {S, Vs}).imms({entity, u32, u32, u32}).accepts({not_constexpr, variadic})]],
   call_ind [[=state({S, V, Vs}, {S, Vs}).imms({u32, u32, u32}).accepts({not_constexpr, variadic})]],
   builtin [[=state({S, Vs}, {S, Vs}).imms({u32})]],
   asm_ [[=state({S, Vs}, {S, Vs}).imms({constant}).with({nonconstant})]],

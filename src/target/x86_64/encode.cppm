@@ -79,6 +79,12 @@ class Encoder {
     memory({0x0f, 0x11}, xmm, base, disp, false);
   }
 
+  // CVTSS2SD converts a binary32 memory operand to a binary64 scalar in XMM.
+  void widen_float(unsigned xmm, Reg base, std::int32_t disp) {
+    emit({0xf3});
+    memory({0x0f, 0x5a}, xmm, base, disp, false);
+  }
+
   // MOVAPS to a 16-byte-aligned variadic register-save slot.
   void store_xmm(Reg base, std::int32_t disp, unsigned xmm) { memory({0x0f, 0x29}, xmm, base, disp, false); }
 

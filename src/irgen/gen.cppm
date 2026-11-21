@@ -1713,10 +1713,12 @@ class Gen {
     if (has_value) results.push_back(vty(result));
     std::size_t through_ellipsis = 0;
     std::size_t hidden = implicit + (result_arg ? 1 : 0);
-    if (auto named = facts_.ellipsis_after(f); named && args.size() > hidden + *named)
+    const auto named = facts_.ellipsis_after(f);
+    if (named && args.size() > hidden + *named)
       through_ellipsis = args.size() - hidden - *named;
     std::uint64_t imms[] = {word(f), through_ellipsis, byval, result_arg};
     ir::Flags flags = facts_.is_constexpr(f) ? 0 : ir::bit(ir::Flag::not_constexpr);
+    if (named) flags |= ir::bit(ir::Flag::variadic);
     ir::NodeId n = stateful(ir::Op::call, results, args, imms, flags);
     if (has_value) return b_.result(n, 1);
     return std::nullopt;

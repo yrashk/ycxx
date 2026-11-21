@@ -583,7 +583,8 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   Incoming values use their declared width in registers and stack slots (AMD64 psABI §3.2.3).
   A `bool` uses the byte value 0 or 1.
   Direct and function-pointer variadic calls use the same registers and stack slots for promoted
-  32- and 64-bit integers and pointers. Both forms set AL to zero even with an empty ellipsis.
+  32- and 64-bit integers and pointers. INTEGER-only variadic calls set AL to zero even with
+  an empty ellipsis.
   Indirect variadic calls keep their target in R11.
   Ordinary free variadic definitions with scalar INTEGER signatures support `<cstdarg>`.
   `va_start` includes zero fixed parameters and captures the incoming GP and XMM registers in
@@ -592,8 +593,8 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   `long long`, their unsigned counterparts and ordinary pointers from the GP save area or the
   incoming stack. `va_copy` gives each cursor independent positions and `va_end` evaluates its
   operand. `unit.linux_variadic_definitions` exercises native execution, a host peer, and
-  standalone and daemon compilation. SSE call operands remain in #399. Other variadic
-  signatures and retrieval types remain in #196.
+  standalone and daemon compilation. Indirect floating calls, additional definition signatures
+  and floating retrieval remain in #196.
   [#417](https://github.com/yrashk/ycxx/issues/417), [#412](https://github.com/yrashk/ycxx/issues/412),
   [#399](https://github.com/yrashk/ycxx/issues/399),
   [#196](https://github.com/yrashk/ycxx/issues/196)
@@ -601,9 +602,14 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   loads, stores and results. INTEGER registers and XMM registers are assigned independently.
   `unit.linux_scalar_sse` exchanges objects with a native peer, checks exact bits, mixed spills
   and INTEGER-record rollback, and runs the pinned `<cfloat>` probe through the native linker
-  in both cold and daemon builds. Linux floating arithmetic and numeric conversions remain
-  [#201](https://github.com/yrashk/ycxx/issues/201).
+  in both cold and daemon builds.
   [Design](docs/design/linux-scalar-floating-point.md) · [#509](https://github.com/yrashk/ycxx/issues/509)
+- Direct variadic calls transport named `float` and `double`, promoted `double` in the ellipsis,
+  and scalar floating results. AL counts the XMM registers assigned to arguments, including
+  named arguments with an empty ellipsis. The emitter uses SSE2 for binary32-to-binary64 widening
+  in argument promotion and other expressions. Other Linux floating arithmetic and numeric
+  conversions remain [#201](https://github.com/yrashk/ycxx/issues/201).
+  [Design](docs/design/linux-floating-variadic-calls.md) · [#399](https://github.com/yrashk/ycxx/issues/399)
 - Direct fixed-prototype calls to ordinary free functions support nonempty naturally aligned
   flat records with integral or ordinary object-pointer fields that are trivial for calls,
   up to 16 bytes and alignment eight. The AMD64 INTEGER eightbytes follow from the laid-out
