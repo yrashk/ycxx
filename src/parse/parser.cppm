@@ -217,7 +217,8 @@ public:
     if (transform_trait_ahead()) return true;
     // [stmt.ambig]: `int(x) + 1;`, `int(3);` and `void();` are expressions; `int(x);`, `int(x) = 1;`
     // and `int(*f)(int);` declare.
-    if (simple_type_keyword(kind()) && kind(1) == Tk::l_paren) {
+    if (is(Tk::kw_auto) && kind(1) == Tk::l_brace) return false;
+    if ((simple_type_keyword(kind()) || is(Tk::kw_auto)) && kind(1) == Tk::l_paren) {
       Tk inner = kind(2);
       if (inner == Tk::r_paren || lex::is_literal(inner)) return false;
       u32 j = 1, depth = 0;
@@ -226,6 +227,8 @@ public:
         if (kind(j) == Tk::r_paren && --depth == 0) break;
       }
       Tk after = kind(j + 1);
+      // A second parenthesized expression can call the function pointer from auto(f).
+      if (is(Tk::kw_auto) && after == Tk::l_paren && !params_ahead(j + 1, statement)) return false;
       return after == Tk::semi || after == Tk::equal || after == Tk::comma || after == Tk::l_square ||
              after == Tk::l_paren || after == Tk::l_brace;
     }
@@ -3299,6 +3302,15 @@ public:
       return {NodeId::none, begin, begin};
     case Tk::kw_this: bump(); return s_->this_expr(begin, pos());
     case Tk::kw_requires: return requires_expression();
+    case Tk::kw_auto:
+      if (kind(1) == Tk::l_paren || kind(1) == Tk::l_brace) {
+        bump();
+        Ex operand = single_auto_initializer();
+        Ex result = s_->decay_copy(operand, begin);
+        return {result.id, begin, pos(), result.info};
+      }
+      s_->diag(begin, Diag::expected_expression);
+      return {NodeId::none, begin, pos()};
     case Tk::kw_static_cast:
     case Tk::kw_reinterpret_cast: {
       const bool reinterpret = is(Tk::kw_reinterpret_cast);
@@ -5105,6 +5117,33 @@ public:
     return s_->node(ast::DeclStmt{s_->builder().list(cs)}, begin, pos());
   }
 
+  // [dcl.type.auto.deduct]: a parenthesized or braced auto initializer has one expression.
+  Ex single_auto_initializer() {
+    const u32 open = pos();
+    std::vector<Ex> args;
+    if (is(Tk::l_brace)) {
+      auto list = braced_init_list();
+      for (const auto& clause : list->clauses) {
+        if (clause.list || clause.designated) {
+          s_->diag(clause.begin, Diag::auto_list, u64(list->clauses.size()));
+          return {NodeId::none, open, pos()};
+        }
+        args.push_back(clause.expr);
+      }
+    } else {
+      bump();
+      if (!is(Tk::r_paren))
+        do args.push_back(is(Tk::l_brace) ? s_->braced_argument(braced_init_list()) : assignment_expression());
+        while (accept(Tk::comma));
+      if (!expect(Tk::r_paren)) return {NodeId::none, open, pos()};
+    }
+    if (args.size() != 1 || s_->is_braced(args.front())) {
+      s_->diag(open, Diag::auto_list, u64(args.size()));
+      return {NodeId::none, open, pos()};
+    }
+    return args.front();
+  }
+
   // The initializer of block-scope variable `d`, declared as `local` with a placeholder type:
   // `= e`, `(e)` or `{e}` ([dcl.type.auto.deduct]/2), from which its type is deduced, then the
   // variable initialized as one of that type. `replaced` holds what an earlier declarator's
@@ -5119,30 +5158,7 @@ public:
       }
       e = assignment_expression();
     } else if (is(Tk::l_brace) || is(Tk::l_paren)) {
-      bool brace = is(Tk::l_brace);
-      u32 open = pos();
-      std::vector<Ex> args;
-      if (brace) {
-        auto b = braced_init_list();
-        for (auto& c : b->clauses) {
-          if (c.list || c.designated) {
-            s_->diag(c.begin, Diag::auto_list, u64(b->clauses.size()));
-            return {NodeId::none, at, pos()};
-          }
-          args.push_back(c.expr);
-        }
-      } else {
-        bump();
-        if (!is(Tk::r_paren))
-          do args.push_back(assignment_expression());
-          while (accept(Tk::comma));
-        if (!expect(Tk::r_paren)) return {NodeId::none, at, pos()};
-      }
-      if (args.size() != 1) {  // [dcl.type.auto.deduct]/2.1: a single element
-        s_->diag(open, Diag::auto_list, u64(args.size()));
-        return {NodeId::none, at, pos()};
-      }
-      e = args[0];
+      e = single_auto_initializer();
     } else {
       s_->diag(d.name_at, Diag::auto_uninitialized, d.name);
       return {NodeId::none, at, pos()};
