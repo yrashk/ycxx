@@ -1246,7 +1246,8 @@ status = 'done'
 issues = [157]
 probe = '''
 enum Color { red, green = 5, blue };
-int main() { Color c = blue; return c == 6 ? 0 : 1; }
+extern "C" { enum { bias = 1, expected = bias + 5 }; }
+int main() { Color c = blue; return c == +expected ? 0 : 1; }
 '''
 
 [[feature]]

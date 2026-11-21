@@ -154,6 +154,10 @@ conversion function for an exact non-class value type, including ordinary `&`- a
 Both targets accept leading `[[…]]` attributes on ordinary data and function member declarations.
 [#190](https://github.com/yrashk/ycxx/issues/190)
 
+Both targets accept nonempty standalone unnamed enum definitions at namespace scope, including
+fixed underlying types and definitions inside `extern "C"` blocks.
+[#157](https://github.com/yrashk/ycxx/issues/157)
+
 **Language on macOS.** Programs can use:
 - the fundamental integer, character and floating types, pointers, arrays, references and
   enumerations, including opaque declarations of named enums in their namespaces; `float`,
