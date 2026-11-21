@@ -165,6 +165,9 @@ Both targets accept nonempty standalone unnamed enum definitions at namespace sc
 fixed underlying types and definitions inside `extern "C"` blocks.
 [#157](https://github.com/yrashk/ycxx/issues/157)
 
+Both targets support named nested enum definitions followed by ordinary fields in the same
+member declaration, including scoped enum field initializers. [#500](https://github.com/yrashk/ycxx/issues/500)
+
 **Language on macOS.** Programs can use:
 - the fundamental integer, character and floating types, pointers, arrays, references and
   enumerations, including opaque declarations of named enums in their namespaces; `float`,

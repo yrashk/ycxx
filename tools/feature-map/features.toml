@@ -1245,6 +1245,7 @@ std = 'C++98'
 detect = '\benum\b'
 status = 'done'
 issues = [157]
+note = 'Named nested enum definitions support trailing ordinary fields in the same member declaration.'
 probe = '''
 enum Color { red, green = 5, blue };
 extern "C" { enum { bias = 1, expected = bias + 5 }; }
@@ -1268,7 +1269,7 @@ int main() { E e = E::b; return static_cast<int>(e) == 1 ? 0 : 1; }
 '''
 status = 'partial'
 issues = [157]
-note = 'opaque enum declarations in classes and blocks'
+note = 'Named nested scoped enum definitions support trailing ordinary fields and their initializers. Opaque enum declarations in classes and blocks remain open.'
 
 [[feature]]
 id = 'dcl-using-enum'
