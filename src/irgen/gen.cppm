@@ -1331,11 +1331,19 @@ class Gen {
     if (is<ast::VariadicBuiltin>(a)) return variadic_builtin(a);
     if (is<ast::BuiltinCall>(a)) {
       auto b = get<ast::BuiltinCall>(a);
+      if (b.op == ast::BuiltinOp::trap) {
+        emit(ir::Op::unreachable, {}, {}, {}, ir::bit(ir::Flag::explicit_trap));
+        live_ = false;
+        // A parent expression can still emit its remaining operands or join edge.
+        ensure_live();
+        return std::nullopt;
+      }
       At arg = child(a, ast_.children(b.args)[0]);
       ValueId value = rvalue(arg);
       switch (b.op) {
         case ast::BuiltinOp::fabs: return pure(ir::Op::fabs, t, {value});
         case ast::BuiltinOp::strlen: return string_length(t, info(arg).type, value);
+        case ast::BuiltinOp::trap: std::unreachable();
       }
       std::unreachable();
     }

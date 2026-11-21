@@ -82,7 +82,7 @@ constexpr const TypeTraitInfo* type_trait(std::string_view name) {
 // from `<math.h>`, `type` is the type they take and give: 'f' float, 'd' double, 'l' long
 // double. `__builtin_inf*` and `__builtin_huge_val*` are +infinity, `__builtin_nan*(s)` the quiet
 // NaN whose payload `s` spells (as `strtoull` reads it), `__builtin_fabs*(x)` |x|.
-enum class BuiltinFunction : std::uint8_t { fabs, inf, huge_val, nan, addressof, strlen };
+enum class BuiltinFunction : std::uint8_t { fabs, inf, huge_val, nan, addressof, strlen, trap };
 struct BuiltinFunctionInfo {
   std::string_view name;
   BuiltinFunction function;
@@ -103,6 +103,7 @@ inline constexpr std::array builtin_functions{
     BuiltinFunctionInfo{"__builtin_nan", BuiltinFunction::nan, 'd'},
     BuiltinFunctionInfo{"__builtin_nanl", BuiltinFunction::nan, 'l'},
     BuiltinFunctionInfo{"__builtin_strlen", BuiltinFunction::strlen},
+    BuiltinFunctionInfo{"__builtin_trap", BuiltinFunction::trap},
 };
 constexpr const BuiltinFunctionInfo* builtin_function(std::string_view name) {
   for (const BuiltinFunctionInfo& b : builtin_functions)

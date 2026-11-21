@@ -148,8 +148,8 @@ struct DeleteArray {
   [[=sequenced]] Child operand;
 };
 
-// Built-in functions that compute their result during evaluation (docs/EXTENSIONS.md).
-enum class BuiltinOp : u8 { fabs, strlen };
+// Built-in functions handled during evaluation (docs/EXTENSIONS.md).
+enum class BuiltinOp : u8 { fabs, strlen, trap };
 struct BuiltinCall {
   ExprInfo info;
   BuiltinOp op;
