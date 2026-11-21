@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 
+from linux_cleanup_free_unwind import object_frames
 from linux_compile import run
 
 
@@ -31,6 +32,15 @@ def main():
     with tempfile.TemporaryDirectory(prefix='ycxx-array-delete-') as temp:
         scope = Path(temp)
         (scope / '.ycxx').touch()
+
+        def hosted_probe(provider, objects, *arguments):
+            host_object = f'{provider}.o'
+            binary = f'{provider}-probe'
+            run([host_cxx, '-std=c++26', '-pedantic-errors', '-O0', '-fexceptions', '-fno-lto', '-c',
+                 fixtures / f'{provider}.cpp', '-o', host_object], scope, env)
+            run([host_cxx, '-fno-lto', host_object, *objects, '-o', binary], scope, env)
+            print(run([f'./{binary}', *arguments], scope, env), end='')
+
         objects = []
         for name, unsized, observer in (('release_arrays', 2, 0), ('release_observed_array', 1, 1)):
             source = fixtures / f'{name}.cpp'
@@ -47,10 +57,15 @@ def main():
             assert ': error: function_ir: array deallocation is not supported yet' in result.stderr, result.stderr
             assert not (scope / rejected).exists(), (command, result.stderr)
 
-        run([host_cxx, '-std=c++26', '-pedantic-errors', '-O0', '-fno-lto', '-c',
-             fixtures / 'host_provider.cpp', '-o', 'host-provider.o'], scope, env)
-        run([host_cxx, '-fno-lto', 'host-provider.o', *objects, '-o', 'probe'], scope, env)
-        print(run(['./probe', '--require-null-skip'], scope, env), end='')
+        hosted_probe('host_provider', objects, '--require-null-skip')
+
+        throwing = 'release_throwing_operand.o'
+        run([ycxx, 'cxx', linux, '-std=c++26', '-c', fixtures / 'release_throwing_operand.cpp',
+             '-o', throwing], scope, env)
+        _, symbols, covered, _ = object_frames(scope / throwing)
+        binding, start, size = symbols['release_from_peer']
+        assert binding == 1 and covered == [(start, size)], (symbols, covered)
+        hosted_probe('host_throwing_operand', [throwing])
 
 
 if __name__ == '__main__':
