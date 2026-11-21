@@ -148,7 +148,8 @@ declaration and use it for trivial member copies.
 
 In-class conversion functions can name a class type alias as their conversion target,
 including a dependent alias in a class template. A named `static_cast` can call a
-conversion function for an exact non-class value type. [#339](https://github.com/yrashk/ycxx/issues/339)
+conversion function for an exact non-class value type, including ordinary `&`- and
+`&&`-qualified conversion functions. [#339](https://github.com/yrashk/ycxx/issues/339)
 
 Both targets accept leading `[[…]]` attributes on ordinary data and function member declarations.
 [#190](https://github.com/yrashk/ycxx/issues/190)

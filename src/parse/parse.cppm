@@ -3258,7 +3258,7 @@ private:
       }
       if (function) {
         if (!member_virt_specifier(overridden != nullptr)) return bad();
-        if (!is_virtual && !ps_.check_named_ref_qualifier(d)) return bad();
+        if (!is_virtual && !conversion && !ps_.check_named_ref_qualifier(d)) return bad();
       }
       // A member whose type became a function type through substitution is a data member of
       // function type, which cannot exist ([temp.inst], [class.mem.general]).
@@ -4411,11 +4411,23 @@ private:
     // constraints, or both not templates ([temp.over.link]/4-6, [over.load]).
     auto clash = [&](const ast::DeclSema& d) {
       if (!function || d.kind != ast::DeclKind::function) return true;
-      if (s_.types().canonical(d.type) != s_.types().canonical(*function)) {
-        if (!(compare_parameters || d.is_virtual) || !same_function_parameters(d.type, *function, false)) return false;
-        const auto prior_ref = s_.types().rec(d.type).fn_ref;
-        const auto ref = s_.types().rec(*function).fn_ref;
-        if (prior_ref != ref && prior_ref != ast::RefQual::none && ref != ast::RefQual::none) return false;
+      auto& types = s_.types();
+      if (types.canonical(d.type) != types.canonical(*function)) {
+        const auto previous = types.rec(d.type);
+        const auto current = types.rec(*function);
+        if (s_.ins().names.spelling(n) == lex::conversion_function_name) {
+          // The conversion result and implicit object distinguish overloads.
+          // Exception specifications do not distinguish overloads.
+          if (types.canonical(previous.inner) != types.canonical(current.inner) ||
+              previous.fn_cv != current.fn_cv)
+            return false;
+        } else if (!(compare_parameters || d.is_virtual) || !same_function_parameters(d.type, *function, false)) {
+          return false;
+        }
+        // An unqualified implicit object corresponds to either ref-qualified form.
+        if (previous.fn_ref != current.fn_ref && previous.fn_ref != ast::RefQual::none &&
+            current.fn_ref != ast::RefQual::none)
+          return false;
       }
       bool templ = (d.flags & sema::decl_flag::template_) != 0;
       if (templ != member_template_) return false;

@@ -1008,8 +1008,10 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   as the target, including a dependent alias in a class template. The canonical target type
   and the member function's qualifiers distinguish declarations. A named `static_cast`
   can select a directly declared or instantiated conversion function with an exact non-class
-  value result, checking the implicit object's cv qualifiers. General conversion
-  selection remains tracked in #339.
+  value result, checking the implicit object's cv qualifiers and value category. Ordinary
+  in-class conversion functions may declare `&` and `&&` qualifiers. Among viable exact-result
+  candidates with the same cv qualifiers, an rvalue prefers the `&&` candidate.
+  General conversion selection remains tracked in #339.
 - Bodies of member functions are complete-class contexts: class member lookup comes before
   namespace lookup, and their class is complete there. `This` and implicit member access
   (`Member` on `this`), bound member functions (a `Member` of type `bound_member` that only a call

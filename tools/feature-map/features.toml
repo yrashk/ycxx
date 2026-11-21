@@ -1624,7 +1624,7 @@ int main() { S s = 3; int i = s; return (s && f(2) == 2 && i == 3) ? 0 : 1; }
 '''
 status = 'partial'
 issues = [157, 219, 339]
-note = 'Ordinary constructors support bare explicit and direct, copy, and copy-list selection. In-class conversion functions can use dependent aliases and be selected by named static_cast to an exact non-class value type'
+note = 'Ordinary constructors support bare explicit and direct, copy, and copy-list selection. In-class conversion functions can use dependent aliases and be selected by named static_cast to an exact non-class value type, including ordinary ref-qualified overloads'
 
 [[feature]]
 id = 'class-explicit-bool'
@@ -1833,12 +1833,13 @@ clauses = ['dcl.fct', 'over.match.funcs']
 std = 'C++11'
 ftm = '__cpp_ref_qualifiers'
 detect = '\)\s*(?:const\s*)?&{1,2}\s*(?:noexcept\b|override\b|[;{=])'
-status = 'missing'
+status = 'partial'
 probe = '''
 struct S { int f() & { return 1; } int f() && { return 2; } };
 int main() { S s; return s.f() + S().f() - 3; }
 '''
-issues = [311]
+issues = [311, 339]
+note = 'ordinary ref-qualified conversion functions and named exact-result casts distinguish lvalue and rvalue objects. General ref-qualified member functions remain open'
 
 [[feature]]
 id = 'class-deducing-this'

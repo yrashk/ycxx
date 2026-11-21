@@ -805,7 +805,8 @@ public:
     } else {
       d.ref_at = d.name_at;
     }
-    if (!abstract && !typedef_ && function_type && !defer_ref_check) d.ok = check_named_ref_qualifier(d) && d.ok;
+    if (!abstract && !typedef_ && function_type && !conversion && !defer_ref_check)
+      d.ok = check_named_ref_qualifier(d) && d.ok;
     if (d.ok) {
       skip_attributes();
       if (!abstract) {
