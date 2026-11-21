@@ -6315,7 +6315,8 @@ public:
   }
 
   // [expr.new]: initialize the object after the call to the global allocation function.
-  Ex new_object(QualType t, const std::optional<std::vector<Ex>>& args, const Braced* braces, u32 begin, u32 end) {
+  Ex new_object(QualType t, const std::optional<std::vector<Ex>>& args, const Braced* braces, u32 begin, u32 end,
+                std::optional<Ex> placement) {
     Ex fail{NodeId::none, begin, end};
     if (types().has_placeholder(t) || types().is_dependent(t)) {
       diag(begin, Diag::not_supported, lex::Tk::kw_new);
@@ -6329,6 +6330,14 @@ public:
     if (!scalar_allocation_type(t)) {
       diag(begin, Diag::not_supported, lex::Tk::kw_new);
       return fail;
+    }
+    if (placement) {
+      auto alignment = layout_of(t, true);
+      // [expr.new]: this slice supplies no alignment argument for a new-extended alignment.
+      if (!alignment || *alignment > 2u * w_->target.pointer_size) {
+        diag(begin, Diag::not_supported, lex::Tk::kw_new);
+        return fail;
+      }
     }
 
     Ex init;
@@ -6357,20 +6366,41 @@ public:
       init = types().is(t, Builtin::bool_) && types().is(value.type(), Builtin::nullptr_t)
           ? to_bool(value, value.begin) : convert(value, t, value.begin);
     }
-    if (!init.ok() || ambiguous_allocation(begin, false)) return fail;
+    if (!init.ok() || (!placement && ambiguous_allocation(begin, false))) return fail;
     QualType pointer = types().pointer(t);
-    if (dependent(init)) return dependent_node({init}, begin, end, pointer);
+    if (!placement && dependent(init)) return dependent_node({init}, begin, end, pointer);
 
     Ex size = size_of(t, false, begin, begin);
-    ast::DeclSema f = w_->allocation_function(AllocationFunction::allocate);
-    q_->use_allocation_function(f.entity);
-    ExprInfo fn_info{f.type, ValueCategory::lvalue, 0};
-    Ex callee = node(ast::DeclRef{fn_info, f.entity}, begin, begin, fn_info);
-    ExprInfo call_info{types().rec(f.type).inner, ValueCategory::prvalue, 0};
-    Child sizes[] = {at(size, begin)};
-    Ex allocation = node(ast::Call{call_info, f.entity, at(callee, begin), b_->list(sizes)}, begin, begin, call_info);
+    if (!size.ok()) return fail;
+    Ex allocation;
+    if (placement) {
+      const auto name = allocation_name(AllocationFunction::allocate);
+      Ex callee = allocation_name_expr(name, begin, begin);
+      allocation = call(callee, {size, *placement}, placement->end, placement->end);
+      if (!allocation.ok()) return fail;
+      if (dependent(allocation)) return dependent_node({allocation, init}, begin, end, pointer);
+      const auto selected = as<ast::Call>(allocation);
+      if (!selected || selected->function == EntityId::none) {
+        diag(begin, Diag::not_supported, lex::Tk::kw_new);
+        return fail;
+      }
+      const auto& f = w_->entities.rec(selected->function);
+      if (f.scope != EntityId::none || !w_->matches_reserved_placement_function(name, f.type)) {
+        diag(begin, Diag::not_supported, lex::Tk::kw_new);
+        return fail;
+      }
+      if (dependent(init)) return dependent_node({allocation, init}, begin, end, pointer);
+    } else {
+      ast::DeclSema f = w_->allocation_function(AllocationFunction::allocate);
+      q_->use_allocation_function(f.entity);
+      ExprInfo fn_info{f.type, ValueCategory::lvalue, 0};
+      Ex callee = node(ast::DeclRef{fn_info, f.entity}, begin, begin, fn_info);
+      ExprInfo call_info{types().rec(f.type).inner, ValueCategory::prvalue, 0};
+      Child sizes[] = {at(size, begin)};
+      allocation = node(ast::Call{call_info, f.entity, at(callee, begin), b_->list(sizes)}, begin, begin, call_info);
+    }
     ExprInfo info{pointer, ValueCategory::prvalue, 0};
-    return node(ast::NewObject{info, at(allocation, begin), at(init, begin)}, begin, end, info);
+    return node(ast::NewObject{info, at(allocation, begin), at(init, begin), placement.has_value()}, begin, end, info);
   }
 
   // [expr.delete]: cv-qualifiers are ignored when passing the address to the global deallocator.
