@@ -1496,7 +1496,7 @@ public:
   bool is_complete(EntityId c) override {
     return at_point ? p_->is_complete(c, *at_point, true, true) : is_complete_at_item(c);
   }
-  std::optional<NodeId> replay_default_member(sema::Sema& caller, EntityId field) override;
+  std::optional<NodeId> replay_default_member(sema::Sema& caller, EntityId field, EntityId required_base) override;
   bool is_complete_at_source(EntityId c) override {
     // The initializer is a complete-class context at its member declaration ([class.mem.general]).
     if (initializer_source) return p_->is_complete(c, initializer_source->item, true);
@@ -1613,7 +1613,117 @@ private:
   bool self_;
 };
 
-std::optional<NodeId> AtItem::replay_default_member(sema::Sema& caller, EntityId field) {
+// Keep the written form before replay can replace an immediate invocation or sizeof with a literal.
+static bool inherited_default_tokens(sema::Sema& replay, const pp::Region& region,
+                                     const Program::Dmi& dmi, EntityId base) {
+  using enum Tk;
+  auto tokens = std::span(region.tokens).subspan(dmi.begin, dmi.end - dmi.begin);
+  if (dmi.braced) {
+    if (tokens.size() < 2 || tokens.front().kind != l_brace || tokens.back().kind != r_brace) return false;
+    tokens = tokens.subspan(1, tokens.size() - 2);
+    if (!tokens.empty() && tokens.back().kind == comma) tokens = tokens.first(tokens.size() - 1);
+  }
+  Tk previous = eof;
+  for (const auto token : tokens) {
+    switch (token.kind) {
+    case int_lit: case float_lit: {
+      const auto& written = region.literal(token);
+      if (written.bad || written.overflow || written.ud_suffix != lex::no_name) return false;
+      break;
+    }
+    case identifier: {
+      const auto name = replay.ins().names.intern(region.name(token));
+      const auto member = replay.find_member(replay.current_class, name);
+      if (!member || member->ambiguous || !member->field || member->owner != base) return false;
+      break;
+    }
+    case l_paren:
+      if (previous == identifier || previous == r_paren || previous == kw_this || lex::is_literal(previous)) return false;
+      break;
+    case r_paren: case kw_this: case arrow: case plus: case minus: case star: case slash: case percent:
+      break;
+    default:
+      return false;
+    }
+    previous = token.kind;
+  }
+  return true;
+}
+
+static bool inherited_default_arithmetic(sema::Sema& replay, NodeId root, EntityId base,
+                                         const sema::ClassRec& record) {
+  const auto& tree = replay.ins().ast;
+  const auto base_type = replay.types().pointer(replay.types().class_type(base));
+  auto unparenthesized = [&](NodeId id) {
+    while (id != NodeId::none && tree.is<ast::Paren>(id)) id = tree.get<ast::Paren>(id).operand.id;
+    return id;
+  };
+  const auto field_read = [&](NodeId id) {
+    id = unparenthesized(id);
+    if (id == NodeId::none || !tree.is<ast::Member>(id)) return false;
+    const auto member = tree.get<ast::Member>(id);
+    if (!member.arrow || member.reference || member.info.category != ast::ValueCategory::lvalue ||
+        member.field >= record.fields.size() || record.fields[member.field].entity != member.member ||
+        !replay.types().is_arithmetic(member.info.type) ||
+        sema::Types::is_volatile(replay.types().canonical(member.info.type))) return false;
+    const auto object = unparenthesized(member.object.id);
+    if (object == NodeId::none || !tree.is<ast::ImplicitConversion>(object)) return false;
+    const auto adjusted = tree.get<ast::ImplicitConversion>(object);
+    if (adjusted.conversion != ast::ConversionKind::derived_to_base || adjusted.function != base ||
+        adjusted.info.type != base_type) return false;
+    const auto self = unparenthesized(adjusted.operand.id);
+    return self != NodeId::none && tree.is<ast::This>(self) && tree.get<ast::This>(self).info.type == *replay.this_type;
+  };
+  auto arithmetic = [&](const ast::ExprInfo& info) {
+    return info.category == ast::ValueCategory::prvalue && replay.types().is_arithmetic(info.type);
+  };
+  std::vector<NodeId> pending{root};
+  while (!pending.empty()) {
+    NodeId id = pending.back();
+    pending.pop_back();
+    if (id == NodeId::none) return false;
+    if (tree.is<ast::Literal>(id)) {
+      if (!arithmetic(tree.get<ast::Literal>(id).info)) return false;
+    } else if (tree.is<ast::ValueInit>(id)) {
+      if (!arithmetic(tree.get<ast::ValueInit>(id).info)) return false;
+    } else if (tree.is<ast::Paren>(id)) {
+      const auto paren = tree.get<ast::Paren>(id);
+      if (!arithmetic(paren.info)) return false;
+      pending.push_back(paren.operand.id);
+    } else if (tree.is<ast::Unary>(id)) {
+      const auto unary = tree.get<ast::Unary>(id);
+      if (!arithmetic(unary.info) || (unary.op != ast::UnaryOp::plus && unary.op != ast::UnaryOp::minus)) return false;
+      pending.push_back(unary.operand.id);
+    } else if (tree.is<ast::Binary>(id)) {
+      const auto binary = tree.get<ast::Binary>(id);
+      using enum ast::BinaryOp;
+      if (!arithmetic(binary.info) ||
+          (binary.op != add && binary.op != sub && binary.op != mul && binary.op != div && binary.op != rem))
+        return false;
+      pending.push_back(binary.rhs.id);
+      pending.push_back(binary.lhs.id);
+    } else if (tree.is<ast::ImplicitConversion>(id)) {
+      const auto conversion = tree.get<ast::ImplicitConversion>(id);
+      if (!arithmetic(conversion.info) || conversion.function != EntityId::none) return false;
+      using enum ast::ConversionKind;
+      switch (conversion.conversion) {
+      case lvalue_to_rvalue:
+        if (!field_read(conversion.operand.id)) return false;
+        break;
+      case integral: case floating: case floating_integral: case boolean:
+        pending.push_back(conversion.operand.id);
+        break;
+      default:
+        return false;
+      }
+    } else {
+      return false;
+    }
+  }
+  return true;
+}
+
+std::optional<NodeId> AtItem::replay_default_member(sema::Sema& caller, EntityId field, EntityId required_base) {
   const auto dmi = p_->dmi(field);
   if (!dmi) return std::nullopt;
   const auto& entity = p_->world().entities.rec(field);
@@ -1627,6 +1737,15 @@ std::optional<NodeId> AtItem::replay_default_member(sema::Sema& caller, EntityId
   replay.unevaluated = caller.unevaluated;
   replay.push_scope();
   const sema::Sema::DefaultMemberScope nested(replay, true);
+
+  const sema::ClassRec* base = nullptr;
+  if (required_base != EntityId::none) {
+    base = replay.class_rec(required_base);
+    if (!base || !inherited_default_tokens(replay, p_->region(), *dmi, required_base)) {
+      replay.diag(0, Diag::not_supported, Tk::equal);
+      return NodeId::none;
+    }
+  }
 
   auto& active = p_->replaying_default_members_;
   if (!active.insert(field).second) {
@@ -1657,6 +1776,10 @@ std::optional<NodeId> AtItem::replay_default_member(sema::Sema& caller, EntityId
   }
 
   NodeId root = caller.builder().commit(ast::Child{init.id, 0}).id;
+  if (base && !inherited_default_arithmetic(replay, root, required_base, *base)) {
+    replay.diag(init.begin, Diag::not_supported, Tk::equal);
+    return NodeId::none;
+  }
   replay.check_immediate_addresses(root, init.begin);
   auto check = [&](this const auto& self, const ast::Red& node) -> void {
     if (node.is<ast::DefaultMemberInit>()) return;  // a nested replay checked this child
