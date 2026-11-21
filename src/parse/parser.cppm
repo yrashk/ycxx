@@ -1516,8 +1516,8 @@ public:
         if (s->has_noexcept && (allocation || keep_named_exception || member_pointer_to_suffix(l) ||
                                 (spells_type && !l.inner)))
           nonthrowing = noexcept_value(s->noexcept_condition, d.ok);
-        else if (d.ok && s->noexcept_condition && !s_->templated())
-          noexcept_value(s->noexcept_condition, d.ok);
+        else if (d.ok && s->has_noexcept && !s_->templated())
+          nonthrowing = noexcept_value(s->noexcept_condition, d.ok);
         t = s_->types().function(t, ps, s->variadic, linkage_, s->cv, s->ref, nonthrowing);
         fn = &*s;
       } else if (!s->unknown_bound && !s->dependent_bound && s->bound == 0) {

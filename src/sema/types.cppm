@@ -84,7 +84,7 @@ public:
   const ast::Target& target() const { return *target_; }
 
   QualType builtin(Builtin b) { return ast::builtin(*ins_, b); }
-  QualType pointer(QualType pointee) { return ast::pointer_to(*ins_, ordinary_indirection_target(pointee)); }
+  QualType pointer(QualType pointee) { return ast::pointer_to(*ins_, pointee); }
   bool valid_member_owner(QualType owner) const { return is_class(owner) || is_dependent(owner); }
   bool valid_member_type(QualType member) const { return !is_void(member) && !is_reference(member); }
   // [dcl.mptr]: the nested-name-specifier names a possibly incomplete class; no member of that
@@ -116,8 +116,18 @@ public:
   }
   QualType class_type(EntityId c) { return ins_->intern_type(ast::TClass{c}); }
   QualType enum_type(EntityId e) { return ins_->intern_type(ast::TEnum{e}); }
-  QualType lvalue_ref(QualType t) { return ast::lvalue_ref_to(*ins_, ordinary_indirection_target(t)); }
-  QualType rvalue_ref(QualType t) { return ast::rvalue_ref_to(*ins_, ordinary_indirection_target(t)); }
+  QualType lvalue_ref(QualType t) { return ast::lvalue_ref_to(*ins_, t); }
+  QualType rvalue_ref(QualType t) { return ast::rvalue_ref_to(*ins_, t); }
+  // [conv.fctptr]: only a nonthrowing function can lose its exception specification.
+  bool function_pointer_conversion(QualType from, QualType to) {
+    from = canonical(from);
+    to = canonical(to);
+    if (!is_function(from) || !is_function(to) || !rec(from).fn_noexcept || rec(to).fn_noexcept) return false;
+    auto source = ins_->types.get<ast::TFunction>(from);
+    const auto target = ins_->types.get<ast::TFunction>(to);
+    source.noexcept_ = target.noexcept_;
+    return ins_->intern_type(source) == to;
+  }
   QualType template_param(u16 depth, u16 index, bool pack = false) {
     return ins_->intern_type(ast::TTemplateParam{depth, index, u8(pack)});
   }
@@ -336,19 +346,6 @@ public:
   Fp128 fp(QualType q) const { return ins_->fp(q); }
 
 private:
-  // Keep the existing type of ordinary function pointers and references until #219 tracks
-  // exception specifications on the functions they can designate. Member pointers retain
-  // their member function's exception specification, including through a type alias.
-  QualType ordinary_indirection_target(QualType t) {
-    QualType c = ins_->types.canon(t);
-    if (!ins_->types.is<ast::TFunction>(c)) return t;
-    auto f = ins_->types.get<ast::TFunction>(c);
-    if (f.noexcept_ == ConstId::none || !ins_->values.is<ast::VInt>(f.noexcept_) ||
-        ins_->values.get<ast::VInt>(f.noexcept_).bits.lo == 0) return t;
-    f.noexcept_ = ast::bool_value(*ins_, false);
-    return ins_->intern_type(f);
-  }
-
   std::string spell(QualType q, std::string inner) const {
     TypeRec r = rec(q);
     Cv c = cv(ins_->canonical(q));

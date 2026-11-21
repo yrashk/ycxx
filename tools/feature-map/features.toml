@@ -499,7 +499,7 @@ int main() { int (*f)(int) = twice; return f(2) == 4 ? 0 : 1; }
 '''
 status = 'partial'
 issues = [196, 219, 287, 407]
-note = 'variadic calls with floating-point or aggregate types, noexcept conversions, C language linkage and external ELF addresses'
+note = 'Concrete noexcept type identity and one-way conversion to a potentially throwing function type work. Dependent exception specifications, variadic floating-point or aggregate calls, C language linkage and external ELF addresses remain open.'
 
 [[feature]]
 id = 'basic-rvalue-ref'
@@ -2247,6 +2247,7 @@ ftm = '__cpp_noexcept_function_type'
 detect = '\bnoexcept\b'
 status = 'partial'
 issues = [219]
+note = 'Ordinary function pointers and references preserve concrete noexcept type identity and allow conversion to the corresponding potentially throwing type. Dependent exception specifications remain open.'
 probe = '''
 void f() noexcept {} void g() {}
 int main() { void (*p)() noexcept = f; return (noexcept(f()) && !noexcept(g()) && p) ? 0 : 1; }
