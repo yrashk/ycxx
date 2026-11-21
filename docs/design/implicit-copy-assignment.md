@@ -25,3 +25,21 @@ Implicit move and nontrivial base, union and array assignment remain in
 [#360](https://github.com/yrashk/ycxx/issues/360). The surrounding declaration and
 inheritance work is tracked by [#244](https://github.com/yrashk/ycxx/issues/244) and
 [#308](https://github.com/yrashk/ycxx/issues/308).
+
+## Effects of user-declared assignment
+
+Classify a non-template assignment member by its parameter. The class by value or
+by lvalue reference declares copy assignment. The class by rvalue reference declares
+move assignment. Use the canonical parameter type so aliases and its cv-qualifiers
+receive the same classification.
+[`[class.copy.assign]`](https://eel.is/c++draft/class.copy.assign)
+
+A user-declared move assignment deletes an otherwise implicit copy constructor and
+suppresses the implicit move constructor. A user-declared copy assignment also
+suppresses the implicit move constructor while leaving the copy constructor to the
+ordinary declaration rules. Apply the resulting constructor and destructor facts
+before choosing a calling convention.
+Astra reviewed the declaration and call-triviality rules.
+[`[class.copy.ctor]`](https://eel.is/c++draft/class.copy.ctor) ·
+[Itanium C++ ABI](https://itanium-cxx-abi.github.io/cxx-abi/abi.html#non-trivial) ·
+[#244](https://github.com/yrashk/ycxx/issues/244)
