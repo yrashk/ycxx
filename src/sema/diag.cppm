@@ -360,6 +360,7 @@ enum class Diag : std::uint32_t {
   constructibility_target_pack [[=message{Severity::error, "a pack expansion as the target of '{0:n}' is not supported yet"}]],
   constructibility_substitution [[=message{Severity::error, "substitution of the operand type '{0:t}' in '{1:n}' failed"}]],
   nothrow_constructibility_unsupported [[=message{Severity::error, "'__is_nothrow_constructible' for '{0:t}' with these argument types is not supported yet"}]],
+  trivial_constructibility_unsupported [[=message{Severity::error, "'__is_trivially_constructible' for '{0:t}' with these argument types is not supported yet"}]],
 };
 
 // A `{N:r}` argument: why an evaluation was not constant. 0 is an expression the front end
@@ -422,7 +423,8 @@ constexpr bool is_limit(engine::DiagId id) {
 constexpr bool is_type_trait_failure(engine::DiagId id) {
   return id == diag_id(Diag::trivial_copyability_incomplete) || id == diag_id(Diag::trivial_copyability_unsupported) ||
          id == diag_id(Diag::constructibility_incomplete) || id == diag_id(Diag::constructibility_unsupported) ||
-         id == diag_id(Diag::nothrow_constructibility_unsupported);
+         id == diag_id(Diag::nothrow_constructibility_unsupported) ||
+         id == diag_id(Diag::trivial_constructibility_unsupported);
 }
 // Whether a diagnostic stays an error where a substitution failure means "not satisfied": a limit
 // of ycxx's, an atomic constraint that is not a `bool` constant ([temp.constr.atomic]/3), or a

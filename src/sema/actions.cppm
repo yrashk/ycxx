@@ -907,11 +907,22 @@ public:
   // The owning replay supplies packs in written order and the demand point for their elements.
   // Validate every concrete operand's domain before deciding the predicate ([meta.unary.prop]).
   Ex constructibility_expr(lex::TypeTrait trait, NameId name, std::span<const ConstructibilityOperand> written, u32 begin, u32 end)
-    pre(trait == lex::TypeTrait::is_constructible || trait == lex::TypeTrait::is_nothrow_constructible)
+    pre(trait == lex::TypeTrait::is_constructible || trait == lex::TypeTrait::is_nothrow_constructible ||
+        trait == lex::TypeTrait::is_trivially_constructible)
   {
     const Types& ts = types();
     const engine::Loc loc = type_trait_loc(begin);
-    const bool nothrow = trait == lex::TypeTrait::is_nothrow_constructible;
+    const auto [op, unsupported] = [trait] {
+      switch (trait) {
+      case lex::TypeTrait::is_constructible:
+        return std::pair{ast::DepOp::is_constructible, Diag::constructibility_unsupported};
+      case lex::TypeTrait::is_nothrow_constructible:
+        return std::pair{ast::DepOp::is_nothrow_constructible, Diag::nothrow_constructibility_unsupported};
+      case lex::TypeTrait::is_trivially_constructible:
+        return std::pair{ast::DepOp::is_trivially_constructible, Diag::trivial_constructibility_unsupported};
+      default: std::unreachable();
+      }
+    }();
     const auto fail = [&](Diag d, const auto&... args) -> Ex {
       diag_at(loc, d, args...);
       return {NodeId::none, begin, end};
@@ -964,7 +975,6 @@ public:
       if (q_->in_type_trait_pattern()) {
         std::vector<TemplateArg> pattern;
         for (const ConstructibilityOperand& operand : args) pattern.push_back(t.type_arg(operand.type));
-        const auto op = nothrow ? ast::DepOp::is_nothrow_constructible : ast::DepOp::is_constructible;
         if (auto value = t.constructibility_pattern(op, pattern)) {
           for (const ConstructibilityOperand& operand : args)
             if (ts.is_dependent(operand.type)) q_->record_dependent_type_trait_operand(type_trait_loc(operand.at));
@@ -977,7 +987,7 @@ public:
       return fail(pack ? Diag::constructibility_pack : Diag::constructibility_dependent, name);
     }
 
-    // In this bounded domain every viable initialization is intrinsically nonthrowing.
+    // In this bounded domain every viable initialization is trivial and nonthrowing.
     const QualType target = ts.canonical(args.front().type);
     if (ts.is_function(target) || ts.is_void(target)) return bool_literal(false, begin, end);
     if (args.size() == 1) {
@@ -989,7 +999,7 @@ public:
           return ts.is_arithmetic(ts.referee(ts.canonical(arg.type)));
         }))
       return bool_literal(args.size() == 2, begin, end);
-    return fail(nothrow ? Diag::nothrow_constructibility_unsupported : Diag::constructibility_unsupported, args.front().type);
+    return fail(unsupported, args.front().type);
   }
   // `__trait(T…)` that tests types ([meta.unary], [meta.rel]): a `bool` prvalue, value-dependent
   // while a type is dependent for the traits that support it.
