@@ -5162,6 +5162,7 @@ public:
         s_->diag(d.name_at, Diag::deleted_constructor, d.type);
       } else if (s_->has_member_inits(d.type)) {
         init = s_->default_init(d.type, d.name_at, pos());
+        if (s_->as<ast::DefaultInit>(init)) constant_local(local, d.type, spec.is_constexpr, init);
       } else if (spec.is_constexpr) {
         s_->diag(d.name_at, Diag::constexpr_uninitialized, d.name);
       } else if (sema::Types::is_const(d.type)) {
