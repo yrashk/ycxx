@@ -30,6 +30,11 @@ before emitting object records.
 
 ## Execution boundary
 
+The source handler calls a resolved external function with its definition in a
+separate translation unit. That provider supplies unwind coverage for frames
+between the throw and the call site. Same-translation-unit unwind coverage
+continues under [#89].
+
 The L1 exceptional edge carries the exception into the landing path. On System V
 AMD64 the personality installs the unwind header in `%rax` and the selector in
 `%rdx`. Ordinary control flow returns or branches past the pad. The selected

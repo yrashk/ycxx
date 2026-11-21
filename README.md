@@ -136,7 +136,7 @@ On x86-64 Linux, an exception thrown by hosted peer code can unwind through elig
 cleanup-free ycxx functions with fixed scalar signatures and reach a handler in peer code.
 An eligible ycxx function can also throw an `int` to a hosted peer's handler.
 A host-linked ycxx function can use one `catch (...)` to return an integer literal when
-a direct `int(int)` call on its parameter throws.
+a direct call on its parameter to an externally defined `int(int)` function throws.
 [#572](https://github.com/yrashk/ycxx/issues/572) · [#578](https://github.com/yrashk/ycxx/issues/578)
 · [#583](https://github.com/yrashk/ycxx/issues/583)
 

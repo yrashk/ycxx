@@ -2230,7 +2230,7 @@ std = 'C++98'
 detect = '\bthrow\b|\btry\b|\bcatch\s*\('
 status = 'partial'
 issues = [89, 72, 572, 578, 583]
-note = 'throw and block try/catch syntax, with hosted unwinding, int throws from eligible cleanup-free frames and one direct-call catch-all handler on Linux x86-64'
+note = 'throw and block try/catch syntax, with hosted unwinding, int throws from eligible cleanup-free frames and one catch-all around an external call on Linux x86-64'
 probe = '''
 int d = 0; struct G { ~G() { ++d; } };
 int f() { G g; throw 3; }

@@ -2734,14 +2734,16 @@ checks reject entry into the protected block or a handler. A discarded
 `if constexpr` arm skips the full handler sequence.
 
 On Linux x86-64, a host-linked ELF object can contain an eligible namespace
-function with one direct `int(int)` call on its parameter in the protected
-return and one `catch (...)` that returns an integer literal. L1 and L2 carry
-distinct normal and unwind results. The AMD64 emitter records the call range
+function with a protected return that passes its parameter directly to an
+externally defined `int(int)` function. The function has one `catch (...)`
+that returns an integer literal. L1 and L2 carry distinct normal and unwind
+results. The AMD64 emitter records the call range
 and landing address, saves the unwind header and selector, and feeds the ELF
 writer's handler CIE and LSDA. GCC and Clang hosted tests cover the normal and
 caught returns and unwinding through an ordinary frame. The native final
-link diagnoses the hosted runtime requirement. Typed and multiple handlers,
-cleanup scopes, other target backends and freestanding runtime support remain
+link diagnoses the hosted runtime requirement. Same-translation-unit callees,
+typed and multiple handlers, cleanup scopes, other target backends and
+freestanding runtime support remain
 in [#89](https://github.com/yrashk/ycxx/issues/89). [#583](https://github.com/yrashk/ycxx/issues/583)
 
 ## Unevaluated calls to known-return function templates (#565)
