@@ -147,7 +147,9 @@ arrays of supported scalar types, including arithmetic on saved pointers just pa
 Both targets support `constexpr` constructors in class definitions and plain out-of-class
 definitions for runtime construction. Ordinary in-class constructor declarations support
 bare `explicit`. An ordinary class can explicitly default its copy constructor as its first
-declaration and use it for trivial member copies.
+declaration and use it for trivial member copies. A non-template empty tag class at namespace
+scope with no bases and an implicit trivial destructor can first declare `T() = default`
+in class and use it to initialize an `inline constexpr` tag object.
 [#157](https://github.com/yrashk/ycxx/issues/157)
 
 In-class conversion functions can name a class type alias as their conversion target,

@@ -1107,6 +1107,7 @@ private:
   // item of this unit (#156).
   std::map<u32, DeclId> member_decls_;
   sema::Classes classes_{w_->ins, w_->types};  // this unit's class and enumeration records (#115)
+  void classify_defaulted_default_ctor(sema::ClassRec& rec, std::vector<engine::Diagnostic>& diags);
   void defaulted_copy(EntityId cls, sema::ClassRec& rec, std::span<const QualType> subobjects, bool implicit);
   // The enumeration whose enumerator list is being analysed, and its record so far.
   std::pair<EntityId, const sema::EnumRec*> defining_enum_{EntityId::none, nullptr};
@@ -4100,7 +4101,8 @@ private:
     const bool overrides = base && base->virtual_destructor;
     const bool is_virtual = virtual_at.has_value() || overrides;
     const bool defaulted = p_->defaulted_body(k_);
-    const bool defaulted_copy = defaulted && !is_virtual;
+    const bool ordinary_defaulting = defaulted && !is_virtual;
+    const bool defaulted_default = ordinary_defaulting && ctor && fs.params.empty() && !fs.variadic;
     bool written_noexcept = false;
     std::optional<bool> destructor_noexcept;
     if (!ctor) {
@@ -4123,8 +4125,8 @@ private:
       if (is_virtual && defaulted) flags |= sema::decl_flag::constexpr_ | sema::decl_flag::inline_;
       written_noexcept = is_virtual && destructor_noexcept.value_or(false);
     }
-    if (defaulted_copy) {
-      // [dcl.fct.def.default]: first declaration of an ordinary copy constructor.
+    if (ordinary_defaulting) {
+      // [dcl.fct.def.default]: a first in-class defaulted copy or zero-parameter constructor.
       if (!finish_constructor_declarator(true, &written_noexcept)) return bad();
       auto copy_reference = [&] {
         if (fs.params.size() != 1 || fs.variadic) return false;
@@ -4135,9 +4137,10 @@ private:
                !sema::Types::is_volatile(types.canonical(ref.inner)) &&
                sema::Types::unqualified(types.canonical(ref.inner)) == types.canonical(c.type);
       };
-      if (!ctor || member_template_ || !s_.template_scopes.empty() || inst_ ||
-          !p_->is_namespace(p_->world().entities.rec(c.entity).scope) || !copy_reference()) {
-        s_.diag(name_at, Diag::defaulted_copy_declaration);
+      const auto& owner = p_->world().entities.rec(c.entity);
+      if (!ctor || member_template_ || !s_.template_scopes.empty() || inst_ || !p_->is_namespace(owner.scope) ||
+          (defaulted_default ? owner.templ != EntityId::none : !copy_reference())) {
+        s_.diag(name_at, defaulted_default ? Diag::defaulted_default_constructor : Diag::defaulted_copy_declaration);
         return bad();
       }
       // A first-declaration defaulted special member is inline and, when constexpr-suitable,
@@ -4149,8 +4152,11 @@ private:
     if (ctor && !member_virt_specifier(false)) return bad();
     std::vector<QualType> ps;
     for (const parse::Param& p : fs.params) ps.push_back(p.type);
+    // [except.spec]: completing the supported tag class proves there are no potentially throwing
+    // subobject initializations. The written specification stays separate from that inference.
+    const bool nonthrowing = written_noexcept || defaulted_default;
     QualType type = types.function(s_.builtin(sema::Builtin::void_), ps, fs.variadic, LangLinkage::cxx, fs.cv,
-                                   ast::RefQual::none, written_noexcept);
+                                   ast::RefQual::none, nonthrowing);
     flags |= sema::decl_flag::member | (ctor ? sema::decl_flag::constructor : sema::decl_flag::destructor);
     if (it_->kind == ItemKind::function) flags |= sema::decl_flag::definition | sema::decl_flag::inline_;
     if (deleted_body()) {
@@ -4194,13 +4200,13 @@ private:
     for (u32 m : p_->items().items[it_->parent].members) {
       if (m == k_) break;
       for (const ast::DeclSema& o : p_->world().ins.seqs.elements(earlier(m).decls)) {
-        const bool redeclared_copy =
+        const bool redeclared_defaulted_constructor =
             ctor && !member_template_ && (o.flags & sema::decl_flag::constructor) &&
-            !(o.flags & sema::decl_flag::template_) && (defaulted_copy || p_->defaulted_member_definition(m, o)) &&
+            !(o.flags & sema::decl_flag::template_) && (ordinary_defaulting || p_->defaulted_member_definition(m, o)) &&
             same_function_parameters(o.type, sem.type);
         const bool redeclared_virtual_destructor = !ctor && (sem.is_virtual || o.is_virtual) &&
                                                   (o.flags & sema::decl_flag::destructor);
-        if (o.entity == sem.entity || redeclared_copy || redeclared_virtual_destructor) {
+        if (o.entity == sem.entity || redeclared_defaulted_constructor || redeclared_virtual_destructor) {
           s_.diag(name_at, Diag::redeclared_member, name);
           return bad();
         }
@@ -5303,10 +5309,18 @@ private:
     } else if (!fn && definition && !s_.require_complete(d.type, d.name_at)) {
       // A definition needs a complete object type ([basic.def]).
     } else if (!fn && definition && !types.is_dependent(d.type) && s_.has_user_ctors(element_type(d.type))) {
-      // Default-initialization by a constructor, of an object or each element: dynamic
-      // ([basic.start.dynamic]).
+      // Default-initialization by a constructor of an object or each element. A selected trivial
+      // defaulted tag constructor has no dynamic work ([basic.start.static]).
       init = s_.default_init(d.type, d.name_at, ps_.pos());
-      if (init.ok()) dynamic_ok(d.name_at, sema::reason_unsupported);
+      if (init.ok()) {
+        const auto tag = s_.as<ast::DefaultInit>(init) ? constant_initializer(init) : std::nullopt;
+        if (tag) {
+          value = *tag;
+          if (spec.is_constexpr) p_->set_constant(sem.entity, value, k_);
+        } else {
+          dynamic_ok(d.name_at, sema::reason_unsupported);
+        }
+      }
     } else if (!fn && definition && s_.has_member_inits(d.type)) {
       // Zero-initialization, then the default member initializers ([basic.start.static]), or, if
       // they are not constant, dynamic initialization ([basic.start.dynamic]).
@@ -5713,6 +5727,7 @@ const Result<ast::ClassDef>& Program::class_def(u32 item) {
     // Classify the written declarations before special_members appends implicit assignments.
     if (member_declarations_valid) rec.trivial_copyability = class_trivial_copyability(item, *cls, rec);
     special_members(item, *cls, rec, &out.diags);
+    classify_defaulted_default_ctor(rec, out.diags);
     if (rec.polymorphic && w_->target.triple == ast::x86_64_linux.triple)
       rec.peer_virtual_layout = peer_virtual_layout(item, *cls, rec, members);
     rec.defined = true;
@@ -6306,6 +6321,24 @@ private:
 
 // ---------------------------------------------------------------- special members ([special])
 
+void Program::classify_defaulted_default_ctor(sema::ClassRec& rec, std::vector<engine::Diagnostic>& diags) {
+  for (const auto& member : rec.members) {
+    if (!member.is_ctor) continue;
+    const auto declaration = member_decl(member.entity);
+    if (!declaration || !defaulted_body(index(declaration->item)) || !w_->types.rec(member.type).params.empty()) continue;
+    rec.defaulted_default_ctor = member.entity;
+    // Inspect the complete member list, including declarations after the constructor.
+    rec.trivial_defaulted_default_ctor = !rec.union_ && !rec.polymorphic && rec.bases.empty() && rec.fields.empty() &&
+                                         rec.destructor_usable && rec.destructor == EntityId::none;
+    if (!rec.trivial_defaulted_default_ctor) {
+      const auto& source = items_->items[index(declaration->item)];
+      diags.push_back({{std::to_underlying(declaration->item), source.body_begin - source.begin},
+                       sema::diag_id(Diag::defaulted_default_constructor), {}});
+    }
+    return;
+  }
+}
+
 // [class.copy.ctor]: the supported defaulted copy forms initialize each member from the
 // corresponding glvalue. Classify those operations before permitting a trivial representation
 // copy, including when the defaulted copy is selected by another class's implicit constructor.
@@ -6314,7 +6347,7 @@ void Program::defaulted_copy(EntityId cls, sema::ClassRec& rec, std::span<const 
   auto& types = w_->types;
   for (const auto& m : rec.members)
     if (m.is_ctor)
-      if (const auto d = member_decl(m.entity); d && defaulted_body(index(d->item)))
+      if (const auto d = member_decl(m.entity); d && defaulted_body(index(d->item)) && !types.rec(m.type).params.empty())
         rec.defaulted_copy_declarations.push_back(m.entity);
   const bool written = !rec.defaulted_copy_declarations.empty();
   const auto declared = written
