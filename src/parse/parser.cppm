@@ -3053,13 +3053,29 @@ public:
     return unary_expression();
   }
 
+  // Keep the written provenance even when semantic analysis has folded an expression.
+  bool literal_arithmetic_tokens(u32 first, u32 last) const {
+    return std::ranges::all_of(std::span(r_->tokens).subspan(first, last - first), [&](Tok token) {
+      switch (token.kind) {
+      case Tk::int_lit: {
+        const auto& written = r_->literal(token);
+        return !written.bad && !written.overflow && written.ud_suffix == lex::no_name;
+      }
+      case Tk::l_paren: case Tk::r_paren: case Tk::plus: case Tk::minus: case Tk::star:
+        return true;
+      default:
+        return false;
+      }
+    });
+  }
+
   // New-expressions ([expr.new]). A parenthesized type-id uses the abstract declarator;
   // a bare new-type-id greedily takes ptr-operators and cannot have function suffixes.
   Ex new_expression(u32 begin) {
     bump();  // new, after an optional ::
     std::optional<QualType> type;
     std::optional<Ex> bound;
-    bool literal_bound = false;
+    bool literal_arithmetic_bound = false;
     std::optional<Ex> placement;
     bool excluded = false;
     if (is(Tk::l_paren)) {
@@ -3122,9 +3138,9 @@ public:
           excluded = true;  // multiple dimensions
           constant_expression();
         } else {
-          literal_bound = is(Tk::int_lit) && kind(1) == Tk::r_square &&
-                          !literal().overflow && literal().ud_suffix == lex::no_name;
+          const u32 first = i_;
           bound = expression();
+          literal_arithmetic_bound = literal_arithmetic_tokens(first, i_);
         }
         angle_ = saved;
         if (!expect(Tk::r_square)) return {NodeId::none, begin, pos()};
@@ -3150,7 +3166,7 @@ public:
       s_->diag(begin, Diag::not_supported, Tk::kw_new);
       return {NodeId::none, begin, pos()};
     }
-    if (bound) return s_->new_array(*type, *bound, literal_bound, args, braces.get(), begin, pos());
+    if (bound) return s_->new_array(*type, *bound, literal_arithmetic_bound, args, braces.get(), begin, pos());
     return s_->new_object(*type, args, braces.get(), begin, pos(), placement);
   }
 
