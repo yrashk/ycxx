@@ -773,10 +773,12 @@ std::set<EntityId> uncertain_record_layouts(parse::Program& program, sema::World
     bool packed = definition && parse::layout_may_be_packed(region, item.begin, item.brace_end);
     // The attributes immediately after the type's closing brace can still apply to
     // the type. Those within a following declarator apply to the declared name.
+    const auto applied = program.class_alignment_specifiers(k);
+    using enum parse::LayoutAttributes;
     bool record_annotated = definition
-        ? parse::layout_attribute(region, item.begin, item.brace_begin) ||
-          parse::layout_attribute(region, item.brace_end, item.end, parse::LayoutAttributes::leading_affecting_layout)
-        : parse::layout_attribute(region, item.begin, item.end) || uncertain_alias(item);
+        ? parse::layout_attribute(region, item.begin, item.brace_begin, affecting_layout, applied) ||
+          parse::layout_attribute(region, item.brace_end, item.end, leading_affecting_layout)
+        : parse::layout_attribute(region, item.begin, item.end, affecting_layout, applied) || uncertain_alias(item);
     bool annotated = record_annotated || (definition && parse::layout_attribute(region, item.brace_end, item.end));
     if (!packed && !annotated) continue;
     if (definition && (packed || record_annotated)) uncertain_definitions.insert(k);
@@ -899,6 +901,7 @@ engine::query_task<FrontResult> TuFront::run(engine::Ctx& cx, TuId tu) {
       for (const sema::FieldRec& f : fields) shape.bit_widths.push_back(f.bit_width);
     shape.union_ = record.union_;
     shape.pod = record.pod;
+    shape.explicit_alignment = record.explicit_alignment;
     for (const sema::BaseRec& b : record.bases) shape.bases.push_back(b.cls);
     shape.trivial_calls = classes.trivial_for_calls(c, unit_source.config.calls());
     shape.layout_uncertain = uncertain.contains(c);

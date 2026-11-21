@@ -150,6 +150,7 @@ struct ClassShape {
   std::vector<EntityId> bases;  // its direct base classes, in declaration order
   bool union_ = false;  // every member at offset 0 ([class.union]/2)
   bool pod = true;      // POD for layout (`ast::record_layout`)
+  std::uint8_t explicit_alignment = 0;
   // Trivially copyable for calls ([class.temporary]/3): no non-trivial copy constructor or
   // destructor, and the copy not deleted, so the calling convention may pass it in registers.
   bool trivial_calls = true;
@@ -675,7 +676,8 @@ ir::TypeLayout QueryLayout::type(QualType q) const {
     auto a = in.types.get<ast::TArray>(c);
     ir::TypeLayout e = type(a.elem);
     std::uint64_t n = a.bound == ConstId::none ? 0 : in.values.get<ast::VInt>(a.bound).bits.lo;
-    return {.kind = array, .size = e.size * n, .align = e.align, .contains_member_pointer = e.contains_member_pointer};
+    return {.kind = array, .size = e.size * n, .align = e.align, .contains_member_pointer = e.contains_member_pointer,
+            .contains_explicit_alignment = e.contains_explicit_alignment};
   }
   if (in.types.is<ast::TFunction>(c)) return {function, 0, 1, false, {}};
   // A reference member is held as the address of its object ([dcl.ref]).
@@ -695,6 +697,7 @@ ir::TypeLayout QueryLayout::type(QualType q) const {
     l.empty = r->placed.empty;  // no data members, in it or its bases
     l.data = r->placed.nvsize;
     l.copy_abi_unknown = it->second->copy_abi_unknown;
+    l.contains_explicit_alignment = it->second->explicit_alignment != 0;
     if (target.triple == ast::x86_64_linux.triple)
       l.sysv_integer_eightbytes = sysv_integer_eightbytes(*it->second, *r);
     // A homogeneous floating-point aggregate (AAPCS64 §5.9.5): every member, through arrays and
@@ -705,8 +708,11 @@ ir::TypeLayout QueryLayout::type(QualType q) const {
     std::uint8_t bytes = 0;
     // Its non-empty bases' members count as its own (AAPCS64 §5.9.5, as Clang has it).
     std::vector<ir::SubObject> parts;
-    for (const ir::SubObject& b : r->bases)
-      if (!type(b.type).empty) parts.push_back(b);
+    for (const ir::SubObject& b : r->bases) {
+      const auto base = type(b.type);
+      l.contains_explicit_alignment |= base.contains_explicit_alignment;
+      if (!base.empty) parts.push_back(b);
+    }
     parts.insert(parts.end(), r->fields.begin(), r->fields.end());
     bool hfa = !parts.empty();
     for (const ir::SubObject& f : parts) {
@@ -719,6 +725,7 @@ ir::TypeLayout QueryLayout::type(QualType q) const {
       }
       ir::TypeLayout m = type(ft);
       l.contains_member_pointer |= m.contains_member_pointer;
+      l.contains_explicit_alignment |= m.contains_explicit_alignment;
       std::uint8_t mb = m.kind == floating ? std::uint8_t(m.size) : m.hfa_bytes;
       std::uint64_t mn = (m.kind == floating ? 1 : m.hfa) * n;
       if (!mb || mn == 0 || (bytes && mb != bytes)) hfa = false;
@@ -800,7 +807,8 @@ std::optional<ClassLayout> QueryLayout::class_layout(QualType c) const {
     places.push_back(std::move(f));
   }
   const ast::Target* root = it->second->peer_virtual_layout == sema::PeerVirtualLayout::root ? target_ : nullptr;
-  ast::RecordLayout r = ast::record_layout(bases, places, it->second->union_, it->second->pod, key, root);
+  ast::RecordLayout r = ast::record_layout(bases, places, it->second->union_, it->second->pod, key, root,
+                                          it->second->explicit_alignment);
   ClassLayout out{r.size, std::uint32_t(r.align), {}, {}, r.placed};
   for (std::size_t i = 0; i < r.offsets.size(); ++i)
     out.fields.push_back({r.offsets[i], in.canonical(it->second->fields[i]), r.bit_fields[i]});

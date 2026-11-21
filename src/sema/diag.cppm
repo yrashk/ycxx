@@ -346,6 +346,12 @@ enum class Diag : std::uint32_t {
   trivial_copyability_dependent [[=message{Severity::error, "dependent operands of '__is_trivially_copyable' are not supported yet"}]],
   trivial_copyability_incomplete [[=message{Severity::error, "incomplete class type '{0:t}' cannot be queried by '__is_trivially_copyable'"}]],
   trivial_copyability_unsupported [[=message{Severity::error, "trivial copyability of '{0:t}' is not supported yet"}]],
+  class_alignment_not_constant [[=message{Severity::error, "a class alignment requires an integral constant expression or a type"}]],
+  class_alignment_invalid [[=message{Severity::error, "a class alignment must be zero or a positive power of two"}]],
+  class_alignment_unsupported [[=message{Severity::error, "class alignment greater than 16 bytes is not supported yet"}]],
+  class_alignment_weak [[=message{Severity::error, "the requested alignment is weaker than the class's natural alignment"}]],
+  class_alignment_mismatch [[=message{Severity::error, "the class is redeclared with a different alignment requirement"}]],
+  class_alignment_missing [[=message{Severity::error, "the class definition must specify alignment when a declaration specifies it"}]],
 };
 
 // A `{N:r}` argument: why an evaluation was not constant. 0 is an expression the front end

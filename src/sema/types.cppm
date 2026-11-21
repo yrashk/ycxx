@@ -716,6 +716,7 @@ struct TrivialCopyability {
 
 struct ClassRec {
   bool defined = false;
+  u8 explicit_alignment = 0;  // a validated class-head requirement stricter than the natural alignment
   // Its direct base classes, in declaration order ([class.derived.general]).
   std::vector<BaseRec> bases;
   // POD for the purposes of layout, as Clang has it (`ast::record_layout`): trivial and

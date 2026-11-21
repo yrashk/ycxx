@@ -36,9 +36,15 @@ using sema::ConstId;
 // that could change a record or field even though its computed offsets look natural.
 enum class LayoutAttributes { affecting_layout, leading_affecting_layout, any };
 
-bool layout_attribute(const pp::Region& region, u32 begin, u32 end, LayoutAttributes mode = LayoutAttributes::affecting_layout) {
+bool layout_attribute(const pp::Region& region, u32 begin, u32 end, LayoutAttributes mode = LayoutAttributes::affecting_layout,
+                      std::span<const std::pair<u32, u32>> applied = {}) {
   using enum lex::Tk;
   for (std::uint32_t i = begin; i < end; ++i) {
+    while (!applied.empty() && applied.front().second <= i) applied = applied.subspan(1);
+    if (!applied.empty() && applied.front().first <= i) {
+      i = applied.front().second - 1;
+      continue;
+    }
     auto tok = region.tokens[i];
     if (tok.kind == kw_alignas) return true;
     if (i + 1 == end) break;
@@ -1069,6 +1075,11 @@ public:
   // What analysis reached, without analysing more (#170): an item's semantics and its body, if
   // analysed.
   const ast::ItemSema* analysed_item(u32 k) const { return item_cells_[k] ? &item_cells_[k]->value : nullptr; }
+  std::span<const std::pair<u32, u32>> class_alignment_specifiers(u32 item) const {
+    auto found = class_alignments_.find(item);
+    if (found == class_alignments_.end()) return {};
+    return found->second.specifiers;
+  }
   const ast::BodySema* analysed_body(u32 k) const { return body_cells_[k] ? &body_cells_[k]->value : nullptr; }
   std::vector<engine::Diagnostic> diagnostics() const {
     std::vector<engine::Diagnostic> r;
@@ -1116,6 +1127,15 @@ public:
   }
 
 private:
+  struct ClassAlignment {
+    u8 value = 0;  // the strictest written alignment, including a zero-only sequence
+    u32 at = 0;    // in the item, for diagnostics
+    u64 natural = 0;  // once the definition's natural alignment has been computed
+    std::vector<std::pair<u32, u32>> specifiers;  // the applied ranges in the region
+    u64 effective(u64 natural_alignment) const { return value ? value : natural_alignment; }
+  };
+  std::map<u32, ClassAlignment> class_alignments_;
+  void validate_class_alignment(u32 item, EntityId cls, sema::ClassRec& record, std::vector<engine::Diagnostic>& diags);
   std::optional<QualType> copy_move_constructor_parameter(const sema::MemberDeclRec& member, QualType owner) const;
   std::optional<QualType> assignment_parameter(const sema::MemberDeclRec& member, QualType owner) const;
   sema::TrivialCopyability class_trivial_copyability(u32 item, EntityId cls, const sema::ClassRec& rec);
@@ -1724,6 +1744,10 @@ public:
       braces_closed();
       break;
     case ItemKind::declaration:
+      if (member && class_head_alignment_ahead()) {
+        unsupported_class_alignment();
+        break;
+      }
       if (member) member_declaration();
       else declaration();
       break;
@@ -1736,7 +1760,9 @@ public:
       break;
     case ItemKind::namespace_def: namespace_definition(); break;
     case ItemKind::class_def:
-      if (member && it_->unnamed_type_ordinal != items::none) {
+      if (member && class_head_alignment_ahead()) {
+        unsupported_class_alignment();
+      } else if (member && it_->unnamed_type_ordinal != items::none) {
         unnamed_union_member();
       } else if (member) {
         s_.diag(0, Diag::not_supported, p_->region().tokens[it_->begin].kind);  // nested classes
@@ -1823,6 +1849,7 @@ private:
       ps_.template_ids_in_declarators = true;
       // `template<> class-key X<args>;` declares the specialization; it is incomplete until defined.
       const Tk key = ps_.kind();
+      if (class_head_alignment_ahead()) return unsupported_class_alignment();
       if (Parser::is_class_key(key) && ps_.kind(1) == Tk::identifier && ps_.kind(2) != Tk::less) {
         s_.diag(ps_.pos() + 1, Diag::specialization_needs_arguments, ps_.name_of(ps_.tok(1)));
         return bad();
@@ -1866,6 +1893,7 @@ private:
       if (ps_.is(Tk::kw_concept)) return concept_definition();
       // `template<…> struct X;` declares a class template ([temp.class]), defined later.
       const Tk key = ps_.kind();
+      if (class_head_alignment_ahead()) return unsupported_class_alignment();
       if (Parser::is_class_key(key) && ps_.kind(1) == Tk::identifier && ps_.kind(2) == Tk::semi) {
         NameId name = ps_.name_of(ps_.tok(1));
         u32 name_at = ps_.pos() + 1;
@@ -2005,6 +2033,7 @@ private:
         }
       }
     }
+    if (class_head_alignment_ahead()) return aligned_class_declaration();
     if (!ps_.starts_declaration()) {
       if (lex::is_keyword(ps_.kind()) || ps_.is(Tk::l_square) || ps_.is(Tk::coloncolon))
         s_.diag(ps_.pos(), Diag::not_supported, ps_.kind());  // templates, using, static_assert, …
@@ -2761,6 +2790,134 @@ private:
     return true;
   }
 
+  bool class_head_alignment_ahead() const {
+    return Parser::is_class_key(ps_.kind()) && ps_.kind(ps_.past_attributes(1)) == Tk::kw_alignas;
+  }
+
+  void unsupported_class_alignment() {
+    s_.diag(ps_.pos() + ps_.past_attributes(1), Diag::not_supported, Tk::kw_alignas);
+    bad();
+  }
+
+  // [dcl.align]: evaluate every specifier, even when another is stricter.
+  std::optional<Program::ClassAlignment> read_class_alignment() {
+    sema::Sema::ImmediateReferenceScope references(s_, /*allowed=*/true);
+    Program::ClassAlignment alignment;
+    alignment.at = ps_.pos();
+    while (ps_.is(Tk::kw_alignas)) {
+      const u32 at = ps_.pos(), begin = ps_.index();
+      ps_.bump();
+      if (!ps_.expect(Tk::l_paren)) return std::nullopt;
+      const u32 operand = ps_.index();
+      const auto diags = s_.diag_count();
+      std::optional<QualType> type;
+      if (ps_.starts_type_id()) type = ps_.type_id();
+      Ex e;
+      if (type && (ps_.is(Tk::r_paren) || ps_.is(Tk::ellipsis))) {
+        if (ps_.is(Tk::ellipsis) || s_.types().is_dependent(*type)) {
+          s_.diag(at, Diag::not_supported, Tk::kw_alignas);
+          return std::nullopt;
+        }
+        e = s_.size_of(*type, true, at, ps_.pos());
+      } else {
+        s_.truncate_diags(diags);
+        ps_.seek(operand);
+        e = s_.promote(ps_.constant_expression());
+      }
+      if (!e.ok()) return std::nullopt;
+      if (ps_.is(Tk::ellipsis)) {
+        s_.diag(at, Diag::not_supported, Tk::kw_alignas);
+        return std::nullopt;
+      }
+      if (!ps_.expect(Tk::r_paren)) return std::nullopt;
+      const auto value = s_.types().is_integral(e.type()) ? sema::Evaluator(s_, q_).evaluate(e).value : std::nullopt;
+      if (!value || !s_.ins().values.is<ast::VInt>(*value)) {
+        s_.diag(at, Diag::class_alignment_not_constant);
+        return std::nullopt;
+      }
+      const auto bits = s_.ins().values.get<ast::VInt>(*value).bits;
+      if (bits.hi != 0 || (bits.lo != 0 && !std::has_single_bit(bits.lo))) {
+        s_.diag(at, Diag::class_alignment_invalid);
+        return std::nullopt;
+      }
+      // The native frame layouts on both targets support object alignment up to 16 bytes.
+      if (bits.lo > 16) {
+        s_.diag(at, Diag::class_alignment_unsupported);
+        return std::nullopt;
+      }
+      if (bits.lo > alignment.value) {
+        alignment.value = u8(bits.lo);
+        alignment.at = at;
+      }
+      alignment.specifiers.push_back({begin, ps_.index()});
+      ps_.skip_attributes();
+    }
+    return alignment;
+  }
+
+  // [dcl.type.elab]: the attribute sequence is allowed on a standalone class declaration.
+  void aligned_class_declaration() {
+    const Tk key = ps_.kind();
+    if (key == Tk::kw_union || single_linkage_spec_) return unsupported_class_alignment();
+    ps_.bump();
+    ps_.skip_attributes();
+    auto alignment = read_class_alignment();
+    if (!alignment) return bad();
+    if (!ps_.is(Tk::identifier) || (ps_.kind(1) != Tk::semi && ps_.kind(1) != Tk::eof)) {
+      s_.diag(alignment->at, Diag::attributes_not_allowed);
+      return bad();
+    }
+    const NameId name = ps_.name_of(ps_.tok());
+    const u32 at = ps_.pos();
+    ps_.bump();
+    if (!ps_.expect(Tk::semi)) return bad();
+    const auto sem = class_decl(class_entity(name), false);
+    for (DeclId previous : q_.visible_decls(name))
+      if (auto d = p_->decl_sema(previous); d && d->entity != EntityId::none && same_scope(*d) &&
+          (d->kind == ast::DeclKind::enum_ ||
+           (d->kind == ast::DeclKind::type_alias && s_.types().canonical(d->type) != s_.types().canonical(sem.type)) ||
+           (d->kind == ast::DeclKind::class_ && (d->flags & sema::decl_flag::template_)))) {
+        s_.diag(at, Diag::conflicting_declaration, name);
+        return bad();
+      }
+    if (clashes_with_using(name, at, ast::DeclKind::class_, sem.type)) return bad();
+    if (layout_attribute(p_->region(), it_->begin, it_->end, LayoutAttributes::affecting_layout, alignment->specifiers)) {
+      s_.diag(alignment->at, Diag::not_supported, Tk::kw_alignas);
+      return bad();
+    }
+    const auto cls = std::to_underlying(sem.entity);
+    if (const auto definition = p_->class_items_.find(cls); definition != p_->class_items_.end() && definition->second < k_) {
+      const auto written = p_->class_alignments_.find(definition->second);
+      if (written == p_->class_alignments_.end()) {
+        s_.diag(alignment->at, Diag::class_alignment_missing);
+        return bad();
+      }
+      p_->class_def(definition->second);
+      const auto& prior = written->second;
+      if (alignment->value && alignment->value < prior.natural) {
+        s_.diag(alignment->at, Diag::class_alignment_weak);
+        return bad();
+      }
+      if (prior.natural && alignment->effective(prior.natural) != prior.effective(prior.natural)) {
+        s_.diag(alignment->at, Diag::class_alignment_mismatch);
+        return bad();
+      }
+    } else if (const auto previous = p_->decls_.find(cls); previous != p_->decls_.end() && alignment->value) {
+      for (const auto& d : previous->second) {
+        const u32 item = d.first;
+        if (item >= k_) continue;
+        const auto written = p_->class_alignments_.find(item);
+        if (written != p_->class_alignments_.end() && written->second.value &&
+            written->second.value != alignment->value) {
+          s_.diag(alignment->at, Diag::class_alignment_mismatch);
+          return bad();
+        }
+      }
+    }
+    if (!class_declared(sem, key, at)) return bad();
+    p_->class_alignments_.emplace(k_, std::move(*alignment));
+  }
+
   // A class definition at namespace scope ([class.pre]): `class-key identifier { … }`, then
   // its declarators. The member-specification is the members' items (§4.2); `class_def` reads
   // them.
@@ -2791,6 +2948,19 @@ private:
     }
     ps_.bump();
     ps_.skip_attributes();
+    std::optional<Program::ClassAlignment> alignment;
+    if (ps_.is(Tk::kw_alignas)) {
+      if (key == Tk::kw_union || template_ || explicit_) {
+        s_.diag(ps_.pos(), Diag::not_supported, Tk::kw_alignas);
+        return bad();
+      }
+      alignment = read_class_alignment();
+      if (!alignment) return bad();
+      if (!ps_.is(Tk::identifier) || ps_.kind(1) == Tk::coloncolon || ps_.kind(1) == Tk::less) {
+        s_.diag(alignment->at, Diag::not_supported, Tk::kw_alignas);
+        return bad();
+      }
+    }
     auto named = td ? typedef_name_after_braces() : std::nullopt;
     if (!ps_.is(Tk::identifier) && !named) {
       s_.diag(ps_.pos(), Diag::not_supported, ps_.kind());  // unnamed classes, attributes
@@ -2833,6 +3003,7 @@ private:
       return bad();
     ast::DeclSema sem = template_ ? class_template_decl(name) : class_decl(class_entity(name), true);
     if (!class_declared(sem, key, name_at)) return bad();
+    if (alignment) p_->class_alignments_.emplace(k_, std::move(*alignment));
     s_.own.push_back({name, sem});
     if (!bases.empty()) p_->set_bases(s_.types().class_of(sem.type), std::move(bases));
     if (base_pattern) p_->class_base_patterns_.emplace(k_, *base_pattern);
@@ -5859,6 +6030,62 @@ sema::PeerVirtualLayout Program::peer_virtual_layout(u32 item, EntityId cls, con
   return derived ? primary_base : root;
 }
 
+void Program::validate_class_alignment(u32 item, EntityId cls, sema::ClassRec& record,
+                                      std::vector<engine::Diagnostic>& diags) {
+  auto written = class_alignments_.find(item);
+  const auto declared = decls_.find(std::to_underlying(cls));
+  if (declared == decls_.end()) return;
+  const auto& declarations = declared->second;
+  auto prior_alignment = [&](const auto& declaration) {
+    return declaration.first < item && class_alignments_.contains(declaration.first);
+  };
+  const auto& source = items_->items[item];
+  if (written == class_alignments_.end()) {
+    if (std::ranges::any_of(declarations, prior_alignment)) {
+      const u32 at = source.names.empty() ? 0 : source.names.front().offset;
+      diags.push_back({{std::to_underlying(id(item)), at}, sema::diag_id(Diag::class_alignment_missing), {}});
+    }
+    return;
+  }
+
+  auto& alignment = written->second;
+  AtItem q(*this, item, false);
+  ast::Builder b(w_->ins, &arena_);
+  sema::Sema s(*w_, b, q, diags, id(item), 0);
+  if (layout_may_be_packed(*r_, source.begin, source.brace_end) ||
+      layout_attribute(*r_, source.begin, source.brace_begin, LayoutAttributes::affecting_layout, alignment.specifiers) ||
+      layout_attribute(*r_, source.brace_end, source.end, LayoutAttributes::leading_affecting_layout)) {
+    s.diag(alignment.at, Diag::not_supported, Tk::kw_alignas);
+    return;
+  }
+  const auto layout = s.record_layout(record, cls);
+  if (!layout) {
+    s.diag(alignment.at, Diag::not_supported, Tk::kw_alignas);
+    return;
+  }
+  alignment.natural = layout->align;
+  if (alignment.value && alignment.value < alignment.natural) {
+    s.diag(alignment.at, Diag::class_alignment_weak);
+    return;
+  }
+
+  // [dcl.align]: absent on a non-defining declaration is fine. A written zero takes the
+  // completed class's natural alignment, and still requires a written specifier on the definition.
+  for (const auto& declaration : declarations | std::views::filter(prior_alignment)) {
+    const u32 previous = declaration.first;
+    const auto& prior = class_alignments_.at(previous);
+    if (prior.value && prior.value < alignment.natural) {
+      s.diag_at({std::to_underlying(id(previous)), prior.at}, Diag::class_alignment_weak);
+      return;
+    }
+    if (prior.effective(alignment.natural) != alignment.effective(alignment.natural)) {
+      s.diag(alignment.at, Diag::class_alignment_mismatch);
+      return;
+    }
+  }
+  if (alignment.value > alignment.natural) record.explicit_alignment = alignment.value;
+}
+
 const Result<ast::ClassDef>& Program::class_def(u32 item) {
   if (class_cells_[item]) return *class_cells_[item];
   u32 key = class_def_key(item);  // apart from item_sema(item), which may be running and ask for it
@@ -5901,6 +6128,7 @@ const Result<ast::ClassDef>& Program::class_def(u32 item) {
     classify_defaulted_default_ctor(rec, out.diags);
     if (rec.polymorphic && w_->target.triple == ast::x86_64_linux.triple)
       rec.peer_virtual_layout = peer_virtual_layout(item, *cls, rec, members);
+    validate_class_alignment(item, *cls, rec, out.diags);
     rec.defined = true;
     // Default arguments are checked with the full member set, before function bodies are read.
     classes_.publish(*cls, std::move(rec), [&](sema::ClassRec& fresh) {
