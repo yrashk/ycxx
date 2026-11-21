@@ -307,9 +307,11 @@ addresses, typed nulls and same-class `.*` and `->*`. [#238](https://github.com/
 ordinary root classes. Classes derived through one ordinary polymorphic base also support
 overrides and unqualified base initializers with parentheses or flat braces. On Linux x86-64,
 pointer and reference consumers can call virtual functions with fixed integer signatures on
-peer-owned objects with a declaration-only root, including a derived class with that single public
+peer-owned objects with an ordinary root, including a derived class with that single public
 base, at most one integral field and at most one override. Consumers can upcast those derived
 views, access ordinary integral members, and query `sizeof` and `alignof` for the Itanium layout.
+A translation unit can also define one non-key virtual member of an eligible root out of class.
+The peer provides the key function, virtual table, RTTI and object construction.
 [#309](https://github.com/yrashk/ycxx/issues/309)
 
 **Structured bindings.** Local bindings can copy or alias scalar-element arrays, including

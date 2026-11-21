@@ -2114,6 +2114,11 @@ What the process allocates, attributed to the engine's cells, in the trace and t
   the base subobject, and virtual calls through either view use the root's original slot.
   Construction, destruction, copying, by-value transfer, and virtual table production remain
   guarded. [Itanium ABI §2.5.2](https://itanium-cxx-abi.github.io/cxx-abi/abi.html#vtable-components) · [#309](https://github.com/yrashk/ycxx/issues/309)
+- On Linux x86-64, a unit can emit one ordinary out-of-line, non-inline virtual member of
+  a supported root. The member follows the key function in declaration order and takes the
+  existing receiver pointer, with ordinary access to the object's integral fields. The peer
+  defines the key function and supplies the table, RTTI, and object lifetime.
+  [Itanium ABI §5.2.3](https://itanium-cxx-abi.github.io/cxx-abi/abi.html#vague-vtable) · [#309](https://github.com/yrashk/ycxx/issues/309)
 - Pure virtual functions, `final`, covariant returns and table production remain in
   [#309](https://github.com/yrashk/ycxx/issues/309). Virtual destructor entry points are in
   [#136](https://github.com/yrashk/ycxx/issues/136). RTTI is tracked in

@@ -69,9 +69,8 @@ supported overload-set checks are tracked in [#102](https://github.com/yrashk/yc
 ## Linux x86-64 access to external objects
 
 An ordinary root class can declare virtual functions for calls on objects supplied by an
-external translation unit. Its declarations have fixed integer
-signatures and it leaves construction, destruction and all virtual definitions to the
-provider. Semantic analysis records the selected virtual declaration's slot in declaration
+external translation unit. Its declarations have fixed integer signatures. Semantic
+analysis records the selected virtual declaration's slot in declaration
 order. The caller evaluates the receiver once, loads its virtual table address point and
 the slot, and passes the same receiver pointer as `this` to the indirect call. An explicit
 qualification with the receiver's own class name selects a direct call of that declaration.
@@ -97,7 +96,13 @@ virtual table address point. [Itanium ABI §2.4](https://itanium-cxx-abi.github.
 [[conv.ptr]](https://eel.is/c++draft/conv.ptr)
 
 The native-unit check admits these consumer declarations and checks the unit for virtual
-definitions. The layout applies to field accesses on objects the provider has already
+definitions. A unit can also define one later virtual member out of class, with a
+directly written integer signature and a matching exception specification. The first
+eligible declaration is the Itanium key function. The peer defines the key and provides
+the virtual table and RTTI. The supported member uses the normal implicit receiver and
+direct field offsets. [Itanium ABI §5.2.3](https://itanium-cxx-abi.github.io/cxx-abi/abi.html#vague-vtable)
+
+The layout applies to field accesses on objects the provider has already
 constructed. Whole-object storage, construction, destruction, copying, and by-value transfer
 remain guarded. Packed or annotated layout, further inheritance forms, and virtual table
 production are tracked in [#309](https://github.com/yrashk/ycxx/issues/309) and [#489](https://github.com/yrashk/ycxx/issues/489).

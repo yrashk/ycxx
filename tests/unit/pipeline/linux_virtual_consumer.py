@@ -10,7 +10,7 @@ from linux_compile import run
 
 
 def main():
-    ycxx, host_cxx = sys.argv[1:]
+    ycxx, host_cxx, readelf = sys.argv[1:]
     fixtures = Path(__file__).with_suffix('')
     linux = '--target=x86_64-pc-linux-gnu'
     darwin = '--target=arm64-apple-darwin'
@@ -21,6 +21,7 @@ def main():
         for part in ('consumer', 'provider', 'host', 'layout-consumer', 'layout-provider-host',
                      'primary', 'primary.peer', 'produce', 'const-write'):
             shutil.copyfile(fixtures / f'{part}.cpp', scope / f'{part}.cpp')
+        shutil.copytree(fixtures / 'nonkey', scope / 'nonkey')
         base = {k: v for k, v in os.environ.items() if k not in ('YCXX_NO_DAEMON', 'YCXX_DAEMON', 'YCXX_ROOT')}
         base.update(LC_ALL='C', YCXX_RUNTIME_DIR=runtime, YCXX_THREADS='2')
         cold = dict(base, YCXX_NO_DAEMON='1')
@@ -55,9 +56,9 @@ def main():
         assert not (scope / 'inherited-darwin.o').exists()
 
         native_virtual_error = 'native output for a translation unit with virtual member functions is not supported yet'
+        virtual_definition_error = 'an out-of-class definition of a virtual member function is not supported yet'
         guards = (
-            (root + 'int B::read(int n) { return n; }',
-             'an out-of-class definition of a virtual member function is not supported yet'),
+            (root + 'int B::read(int n) { return n; }', virtual_definition_error),
             ('struct B { virtual int read(int) = 0; };', "'=' is not supported yet"),
             (root + 'void consume(B object) {}', layout_error),
             (root + 'struct Enclosing { B object; };', native_virtual_error),
@@ -86,6 +87,36 @@ def main():
         compile(linux, '-fsyntax-only', 'const-write.cpp', error=const_error)
         compile(linux, '-c', 'const-write.cpp', '-o', 'const-write.o', error=const_error)
         assert not (scope / 'const-write.o').exists()
+
+        measure = scope / 'nonkey' / 'measure.cpp'
+        measure_source = measure.read_bytes()
+        late_key = (scope / 'nonkey' / 'controls' / 'key-owner.cpp').read_bytes().split(b'\n\n', 1)[1]
+        (scope / 'nonkey' / 'late-key.cpp').write_bytes(measure_source + b'\n' + late_key)
+        measure_decl = b'    virtual int measure(int) const;\n'
+        extra = measure_source.replace(measure_decl, measure_decl + b'    virtual int extra(int) const;\n', 1)
+        (scope / 'nonkey' / 'extra.cpp').write_bytes(extra + b'\nint Gauge::extra(int x) const { return x; }\n')
+        definition = b'int Gauge::measure(int x) const {'
+        mismatch = measure_source.replace(definition, b'int Gauge::measure(int x) const noexcept {', 1)
+        (scope / 'nonkey' / 'exception-mismatch.cpp').write_bytes(mismatch)
+        (scope / 'nonkey' / 'noexcept.cpp').write_bytes(
+            mismatch.replace(measure_decl, b'    virtual int measure(int) const noexcept;\n', 1))
+        compile(linux, '-fsyntax-only', 'nonkey/measure.cpp')
+        compile(linux, '-fsyntax-only', 'nonkey/controls/in-class.cpp')
+        compile(linux, '-c', 'nonkey/noexcept.cpp', '-o', 'nonkey-noexcept.o')
+        assert (scope / 'nonkey-noexcept.o').is_file()
+        for target, source, diagnostic in (
+            (linux, 'nonkey/controls/key-owner.cpp', virtual_definition_error),
+            (linux, 'nonkey/controls/inline.cpp', virtual_definition_error),
+            (linux, 'nonkey/controls/in-class.cpp', native_virtual_error),
+            (linux, 'nonkey/controls/lifetime.cpp', layout_error),
+            (linux, 'nonkey/late-key.cpp', virtual_definition_error),
+            (linux, 'nonkey/extra.cpp', native_virtual_error),
+            (linux, 'nonkey/exception-mismatch.cpp', "conflicting declaration of 'measure'"),
+            (darwin, 'nonkey/measure.cpp', virtual_definition_error),
+        ):
+            compile(target, '-c', source, '-o', 'nonkey-guard.o', error=diagnostic)
+            assert not (scope / 'nonkey-guard.o').exists()
+        compile(darwin, '-fsyntax-only', 'nonkey/measure.cpp', error=virtual_definition_error)
 
         for part in ('host', 'provider'):
             run([host_cxx, '-std=c++26', '-pedantic-errors', '-frtti', '-fno-lto',
@@ -122,6 +153,29 @@ def main():
             compile(linux, '-c', 'primary.cpp', '-o', 'primary-warm.o', env=daemon)
             assert (scope / 'primary-warm.o').read_bytes() == (scope / 'primary-cold.o').read_bytes()
 
+            compile(linux, '-c', 'nonkey/measure.cpp', '-o', 'nonkey-cold.o')
+            compile(linux, '-c', 'nonkey/measure.cpp', '-o', 'nonkey-warm.o', env=daemon)
+            nonkey_warm = scope / 'nonkey-warm.o'
+            assert nonkey_warm.read_bytes() == (scope / 'nonkey-cold.o').read_bytes()
+            output = run([readelf, '--wide', '--symbols', 'nonkey-cold.o'], scope, cold)
+            symbols = [line.split() for line in output.splitlines()]
+            defined = [fields for fields in symbols if len(fields) == 8 and fields[6].isdigit()]
+            methods = [fields for fields in defined if fields[7] == '_ZNK5Gauge7measureEi']
+            assert len(methods) == 1 and methods[0][3:5] == ['FUNC', 'GLOBAL'] and int(methods[0][2]) > 0, output
+            assert not any(fields[7].startswith(('_ZTV', '_ZTI', '_ZTS')) for fields in defined), output
+
+            # Reordering declarations makes the same definition the key. Restore it in the same session.
+            anchor_decl = b'    virtual int anchor(int) const;\n'
+            assert measure_source.count(anchor_decl + measure_decl) == 1
+            measure.write_bytes(measure_source.replace(anchor_decl + measure_decl, measure_decl + anchor_decl, 1))
+            nonkey_warm.unlink()
+            compile(linux, '-c', 'nonkey/measure.cpp', '-o', 'nonkey-warm.o', env=daemon,
+                    error=virtual_definition_error)
+            assert not nonkey_warm.exists()
+            measure.write_bytes(measure_source)
+            compile(linux, '-c', 'nonkey/measure.cpp', '-o', 'nonkey-warm.o', env=daemon)
+            assert nonkey_warm.read_bytes() == (scope / 'nonkey-cold.o').read_bytes()
+
             providers = [host_cxx]
             clang = shutil.which(cold.get('YCXX_CLANGXX', 'clang++'), path=cold.get('PATH'))
             if clang and clang != host_cxx:
@@ -141,6 +195,13 @@ def main():
                     run([host_cxx, '-fno-lto', 'primary-peer.o', 'primary-cold.o', '-o', 'mixed-primary'], scope, cold)
                     observed = run(['./mixed-primary'], scope, cold)
                     assert observed == 'primary-base consumer ok\n', observed
+
+                    for part in ('peer', 'caller'):
+                        run([provider, '-std=c++20', '-pedantic-errors', '-frtti', '-fno-lto', level,
+                             '-c', f'nonkey/{part}.cpp', '-o', f'nonkey-{part}.o'], scope, cold)
+                    run([provider, '-frtti', '-fno-lto', 'nonkey-peer.o', 'nonkey-caller.o',
+                         'nonkey-cold.o', '-o', 'mixed-nonkey'], scope, cold)
+                    run(['./mixed-nonkey'], scope, cold)
 
             # Editing the base changes the slot while every derived declaration remains the same.
             marker = b'    virtual int marker(int) const;\n'
