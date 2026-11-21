@@ -133,12 +133,14 @@ public:
            r_->tokens[it.body_begin + 1].kind == lex::Tk::kw_default &&
            r_->tokens[it.body_begin + 2].kind == lex::Tk::semi;
   }
-  // The supported in-class defaulted constructor has a definition, but no token body to analyse.
-  bool defaulted_copy_definition(u32 item, const ast::DeclSema& d) const {
+  // An accepted in-class defaulted special member has a definition and no token body to analyse.
+  bool defaulted_member_definition(u32 item, const ast::DeclSema& d) const {
     const auto& it = items_->items[item];
-    return d.entity != EntityId::none && (d.flags & sema::decl_flag::constructor) &&
-           it.parent != items::none && items_->items[it.parent].kind == ItemKind::class_def &&
-           defaulted_body(item);
+    if (d.entity == EntityId::none || !(d.flags & sema::decl_flag::member) ||
+        it.parent == items::none || items_->items[it.parent].kind != ItemKind::class_def || !defaulted_body(item))
+      return false;
+    return (d.flags & sema::decl_flag::constructor) ||
+           (d.kind == ast::DeclKind::function && w_->ins.names.spelling(w_->entities.rec(d.entity).name) == "operator=");
   }
   // `class_def(C)` (ast.md §3.6) of the class item `item`: the records of its members, each its
   // own item, analysed at the class's prefix (§4.2). It also fills this unit's class table
@@ -759,7 +761,7 @@ public:
   // Its body, analysed on first use.
   const ast::BodySema& synthesized_body(std::size_t i);
   void special_members(u32 item, EntityId cls, sema::ClassRec& rec);
-  void declare_copy_assignment(u32 item, EntityId cls, sema::ClassRec& rec, bool user_move);
+  void declare_copy_assignment(u32 item, EntityId cls, sema::ClassRec& rec, bool implicit, bool user_move);
   sema::CopyAssignment require_copy_assignment(EntityId f);
   Ex copy_from(sema::Sema& sm, Ex src, QualType t);
 
@@ -3129,7 +3131,8 @@ private:
         s_.diag(ps_.pos(), Diag::not_supported, Tk::kw_template);
         return bad();
       }
-      parse::Declarator d = ps_.declarator(spec.type, /*abstract=*/false, /*typedef_=*/false, conversion);
+      parse::Declarator d = ps_.declarator(spec.type, /*abstract=*/false, /*typedef_=*/false, conversion,
+                                          p_->defaulted_body(k_));
       if (!d.ok || !d.named) return bad();
       if (conversion && !d.function) {
         s_.diag(d.name_at, Diag::conversion_parameters);
@@ -3814,7 +3817,7 @@ private:
       for (const ast::DeclSema& o : p_->world().ins.seqs.elements(earlier(m).decls)) {
         const bool redeclared_copy =
             ctor && !member_template_ && (o.flags & sema::decl_flag::constructor) &&
-            !(o.flags & sema::decl_flag::template_) && (defaulted_copy || p_->defaulted_copy_definition(m, o)) &&
+            !(o.flags & sema::decl_flag::template_) && (defaulted_copy || p_->defaulted_member_definition(m, o)) &&
             same_function_parameters(o.type, sem.type);
         if (o.entity == sem.entity || redeclared_copy) {
           s_.diag(name_at, Diag::redeclared_member, name);
@@ -3934,15 +3937,42 @@ private:
     if (fn && !member_operator_ok(d, spec.is_static)) return false;
     if (!defaults_allowed(d.params, fn, d.name)) return false;
     bool is_def = it_->kind == ItemKind::function;
+    const bool assignment = fn && s_.ins().names.spelling(d.name) == "operator=";
+    const bool defaulted = assignment && p_->defaulted_body(k_);
+    const bool deleted = assignment && deleted_body() && it_->body_end - it_->body_begin == 3 &&
+                         p_->region().tokens[it_->body_end - 1].kind == Tk::semi;
+    if (defaulted || deleted) {
+      using sema::TypeKind;
+      const auto parameter = p_->assignment_parameter({.name = d.name, .type = d.type, .is_function = true,
+                                                       .is_static = spec.is_static, .is_template = member_template_,
+                                                       .defaults = {}}, c.type);
+      const bool ordinary = s_.template_scopes.empty() && !inst_ &&
+                            p_->is_namespace(s_.world().entities.rec(c.entity).scope);
+      if (!ordinary || !parameter || types.rec(*parameter).rvalue_ref) {
+        s_.diag(d.name_at, Diag::not_supported, defaulted ? Tk::kw_default : Tk::kw_delete);
+        return false;
+      }
+      if (defaulted) {
+        const auto f = types.rec(d.type);
+        const auto source = types.rec(*parameter);
+        if (source.kind != TypeKind::reference || sema::Types::is_volatile(types.canonical(source.inner)) ||
+            f.fn_cv != sema::Cv::none || f.fn_ref != ast::RefQual::none || spec.is_consteval ||
+            types.canonical(f.inner) != types.lvalue_ref(c.type)) {
+          s_.diag(d.name_at, Diag::defaulted_copy_assignment_declaration);
+          return false;
+        }
+      }
+    }
     ast::DeclSema sem = class_decl(c.entity, false);
     sem.type = d.type;
     sem.linkage = ast::Linkage::external;
     u16 flags = sema::decl_flag::member;
     if (spec.is_static) flags |= sema::decl_flag::static_;
-    if (spec.is_constexpr) flags |= sema::decl_flag::constexpr_;
+    if (spec.is_constexpr || defaulted) flags |= sema::decl_flag::constexpr_;
     if (spec.is_consteval) flags |= sema::decl_flag::consteval_;
+    if (deleted) flags |= sema::decl_flag::deleted;
     if (spec.is_inline || spec.is_constexpr || spec.is_consteval || is_def) flags |= sema::decl_flag::inline_;
-    if (member_declared(d.name, fn ? std::optional(d.type) : std::nullopt)) {
+    if (member_declared(d.name, fn ? std::optional(d.type) : std::nullopt, assignment)) {
       if (fn && s_.ins().names.spelling(d.name) == lex::conversion_function_name)
         s_.diag(d.name_at, Diag::conversion_redeclared, types.rec(d.type).inner);
       else
@@ -4117,12 +4147,13 @@ private:
   }
   const ast::ItemSema& earlier_sema(u32 m) { return earlier(m); }
 
-  bool member_declared(NameId n, std::optional<QualType> function = std::nullopt) {
+  bool member_declared(NameId n, std::optional<QualType> function = std::nullopt, bool assignment = false) {
     // Functions clash when they have the same type and are both templates with equivalent heads and
     // constraints, or both not templates ([temp.over.link]/4-6, [over.load]).
     auto clash = [&](const ast::DeclSema& d) {
       if (!function || d.kind != ast::DeclKind::function) return true;
-      if (s_.types().canonical(d.type) != s_.types().canonical(*function)) return false;
+      if (s_.types().canonical(d.type) != s_.types().canonical(*function) &&
+          (!assignment || !same_function_parameters(d.type, *function))) return false;
       bool templ = (d.flags & sema::decl_flag::template_) != 0;
       if (templ != member_template_) return false;
       if (!templ) return true;
@@ -5039,6 +5070,8 @@ Program::ClassContent Program::class_content(u32 item, const std::function<const
                            (d.flags & sema::decl_flag::static_) != 0, (d.flags & sema::decl_flag::constructor) != 0,
                            (d.flags & sema::decl_flag::destructor) != 0, (d.flags & sema::decl_flag::deleted) != 0,
                            (d.flags & sema::decl_flag::template_) != 0, {}, std::move(defaults)});
+        if (w_->ins.names.spelling(statics.back().name) == "operator=" && defaulted_member_definition(m, d))
+          statics.back().explicit_defaulted_assignment = true;
       }
     }
   }
@@ -5305,7 +5338,7 @@ public:
     if (inst_) f = inst_->decl;
     Ex root;
     if (f && f->entity != EntityId::none && f->kind == ast::DeclKind::function &&
-        !(f->flags & sema::decl_flag::deleted) && !p_->defaulted_copy_definition(k_, *f)) {
+        !(f->flags & sema::decl_flag::deleted) && !p_->defaulted_member_definition(k_, *f)) {
       const auto signature = s_.types().rec(f->type);
       s_.set_return_type(signature.inner);
       // A consteval function's body is an immediate function context ([expr.const]).
@@ -5743,8 +5776,10 @@ void Program::special_members(u32 item, EntityId cls, sema::ClassRec& rec) {
   bool user_move = false;
   bool user_copy_assignment = false;
   bool user_move_assignment = false;
+  bool defaulted_assignment = false;
   EntityId user_dtor = EntityId::none;
   for (const sema::MemberDeclRec& m : rec.members) {
+    defaulted_assignment |= m.explicit_defaulted_assignment;
     if (const auto parameter = assignment_parameter(m, ct)) {
       if (types.rec(*parameter).rvalue_ref) user_move_assignment = true;
       else user_copy_assignment = true;
@@ -5865,10 +5900,11 @@ void Program::special_members(u32 item, EntityId cls, sema::ClassRec& rec) {
             std::ranges::all_of(rec.fields, [&](const sema::FieldRec& f) { return pod_type(f.type); }) &&
             std::ranges::all_of(rec.bases, [&](const sema::BaseRec& b) { return pod_type(types.class_type(b.cls)); }) &&
             (rec.fields.empty() || !data_in_bases);
-  if (!user_copy_assignment) declare_copy_assignment(item, cls, rec, deletes_implicit_copy);
+  if (!user_copy_assignment || defaulted_assignment)
+    declare_copy_assignment(item, cls, rec, !user_copy_assignment, deletes_implicit_copy);
 }
 
-void Program::declare_copy_assignment(u32 item, EntityId cls, sema::ClassRec& rec, bool user_move) {
+void Program::declare_copy_assignment(u32 item, EntityId cls, sema::ClassRec& rec, bool implicit, bool user_move) {
   using sema::CopyAssignment;
   auto& types = w_->types;
   const QualType ct = types.class_type(cls);
@@ -5879,7 +5915,7 @@ void Program::declare_copy_assignment(u32 item, EntityId cls, sema::ClassRec& re
   bool trivial = true;
   bool memberwise = rec.bases.empty() && !rec.union_ && !rec.closure &&
                     w_->entities.rec(cls).templ == EntityId::none && items_->items[item].template_depth == 0;
-  bool deleted = user_move || (rec.closure && rec.default_deleted);
+  bool deleted = rec.closure && rec.default_deleted;
   bool const_member = false;
   const auto inspect = [&](QualType t, bool base) {
     if (types.is_reference(t)) {
@@ -5913,18 +5949,40 @@ void Program::declare_copy_assignment(u32 item, EntityId cls, sema::ClassRec& re
     });
     const auto* copy = sub->implicit_copy_assignment();
     const bool sole = copy && std::ranges::count(sub->members, name, &sema::MemberDeclRec::name) == 1;
-    trivial &= sole && copy->implicit_assignment == CopyAssignment::trivial && !sema::Types::is_const(t);
+    trivial &= sole && copy->copy_assignment == CopyAssignment::trivial && !sema::Types::is_const(t);
     // Preserve a proved deleted base copy. Other nontrivial base operations are deferred.
     if (base && sole) {
-      const_member |= copy->implicit_assignment == CopyAssignment::const_member;
-      deleted |= copy->implicit_assignment == CopyAssignment::deleted;
+      const_member |= copy->copy_assignment == CopyAssignment::const_member;
+      deleted |= copy->copy_assignment == CopyAssignment::deleted;
     }
   };
   for (const auto& b : rec.bases) inspect(types.class_type(b.cls), true);
   for (const auto& f : rec.fields) inspect(f.type, false);
 
+  ast::Builder b(w_->ins, &arena_);
+  const auto record_body = [&](u32 definition_item, ast::DeclSema d, QualType source, CopyAssignment state) {
+    if (state != CopyAssignment::trivial && state != CopyAssignment::memberwise) return;
+    ast::ParamSema param{EntityId::none, source, w_->ins.names.intern("other"), NodeId::none, 0};
+    d.params = b.seq(std::span<const ast::ParamSema>(&param, 1));
+    copy_assignments_.try_emplace(d.entity,
+        PendingCopyAssignment{{definition_item, b.commit(d), SpecialMember::copy_assignment}, state});
+  };
+  if (!implicit) {
+    for (auto& copy : rec.members) {
+      if (!copy.explicit_defaulted_assignment) continue;
+      const QualType source = types.rec(copy.type).params.front();
+      const bool const_mismatch = !const_parameter && sema::Types::is_const(types.canonical(types.referee(source)));
+      copy.copy_assignment = const_member ? CopyAssignment::const_member
+                           : deleted || const_mismatch ? CopyAssignment::deleted
+                           : memberwise ? CopyAssignment::memberwise : CopyAssignment::unsupported;
+      const DeclId decl = member_decls_.at(std::to_underlying(copy.entity));
+      record_body(index(decl.item), *decl_sema(decl), source, copy.copy_assignment);
+    }
+    return;
+  }
+
   const CopyAssignment state = const_member ? CopyAssignment::const_member
-                               : deleted ? CopyAssignment::deleted
+                               : deleted || user_move ? CopyAssignment::deleted
                                : trivial ? CopyAssignment::trivial
                                : memberwise ? CopyAssignment::memberwise : CopyAssignment::unsupported;
   const QualType source = types.lvalue_ref(const_parameter ? types.add_cv(ct, sema::Cv::const_) : ct);
@@ -5937,11 +5995,10 @@ void Program::declare_copy_assignment(u32 item, EntityId cls, sema::ClassRec& re
   candidate.entity = entity;
   candidate.type = type;
   candidate.is_function = true;
-  candidate.implicit_assignment = state;
+  candidate.copy_assignment = state;
   rec.members.push_back(std::move(candidate));
   if (state != CopyAssignment::trivial && state != CopyAssignment::memberwise) return;
 
-  ast::Builder b(w_->ins, &arena_);
   ast::DeclSema d = invalid_decl();
   d.kind = ast::DeclKind::function;
   d.entity = entity;
@@ -5952,10 +6009,8 @@ void Program::declare_copy_assignment(u32 item, EntityId cls, sema::ClassRec& re
   d.flags = sema::decl_flag::member | sema::decl_flag::implicit | sema::decl_flag::definition |
             sema::decl_flag::inline_ | sema::decl_flag::constexpr_;
   d.attributes = b.seq(std::span<const NodeId>{});
-  ast::ParamSema param{EntityId::none, source, w_->ins.names.intern("other"), NodeId::none, 0};
-  d.params = b.seq(std::span<const ast::ParamSema>(&param, 1));
   d.template_params = b.seq(std::span<const ast::TemplateParamSema>{});
-  copy_assignments_.try_emplace(entity, PendingCopyAssignment{{item, b.commit(d), SpecialMember::copy_assignment}, state});
+  record_body(item, d, source, state);
 }
 
 sema::CopyAssignment Program::require_copy_assignment(EntityId f) {

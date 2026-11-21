@@ -746,13 +746,14 @@ public:
   };
 
   // declarator, or abstract-declarator when `abstract` ([dcl.decl.general], [dcl.name]).
-  Declarator declarator(QualType base, bool abstract, bool typedef_ = false, bool conversion = false) {
+  Declarator declarator(QualType base, bool abstract, bool typedef_ = false, bool conversion = false,
+                        bool defaulted_assignment = false) {
     Declarator d;
     d.begin = pos();
     Level top = level(abstract, d.ok, conversion);
     if (conversion && !top.conversion_target) return d;
     const Suffix* fn = nullptr;
-    d.type = build(top, top.conversion_target.value_or(base), fn, d, abstract || typedef_);
+    d.type = build(top, top.conversion_target.value_or(base), fn, d, abstract || typedef_, defaulted_assignment);
     const bool spelled_unknown_bound = std::exchange(d.unknown_bound, false);
     if (d.ok && !abstract && spelled_unknown_bound && s_->types().is_array(d.type)) {
       const sema::TypeRec array = s_->types().rec(d.type);
@@ -1366,7 +1367,8 @@ public:
   }
 
   // The type a declarator gives its name, built from the base type outwards ([dcl.meaning]).
-  QualType build(const Level& l, QualType t, const Suffix*& fn, Declarator& d, bool spells_type) {
+  QualType build(const Level& l, QualType t, const Suffix*& fn, Declarator& d, bool spells_type,
+                 bool defaulted_assignment = false) {
     for (const Level::PtrOp& p : l.pointers) {
       if (p.owner) {
         if (p.restrict_at) {
@@ -1428,7 +1430,8 @@ public:
         // [basic.stc.dynamic.deallocation]: a deallocation function without an explicit
         // exception specification is non-throwing.
         bool nonthrowing = name == sema::allocation_name(sema::AllocationFunction::deallocate) && !s->has_noexcept;
-        if (s->has_noexcept && (allocation || member_pointer_to_suffix(l) || (spells_type && !l.inner))) {
+        if (s->has_noexcept && (allocation || (defaulted_assignment && name == "operator=") ||
+                                member_pointer_to_suffix(l) || (spells_type && !l.inner))) {
           nonthrowing = true;
           if (s->noexcept_condition) {
             Ex operand = s_->rvalue(*s->noexcept_condition);
@@ -1465,7 +1468,7 @@ public:
         t = s_->types().array(t, s->bound);
       }
     }
-    if (l.inner) return build(*l.inner, t, fn, d, spells_type);
+    if (l.inner) return build(*l.inner, t, fn, d, spells_type, defaulted_assignment);
     d.name = l.name;
     d.named = l.named;
     d.name_at = l.name_at;
