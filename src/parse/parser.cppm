@@ -3445,8 +3445,8 @@ public:
           }
           angle_ = saved;
           if (!expect(Tk::r_paren) || !ok) return {NodeId::none, begin, pos()};
-          Ex result = s_->trait_expr(tr->trait, args, begin, pos());
-          if (tr->trait == lex::TypeTrait::is_trivially_copyable && s_->dependent(result))
+          Ex result = s_->trait_expr(tr->trait, n, args, begin, pos());
+          if (tr->replay_dependent && s_->dependent(result))
             ++deferred_argument_checks_;  // Even an alias that erases the argument must replay it.
           return result;
         }

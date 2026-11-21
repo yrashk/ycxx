@@ -1730,9 +1730,16 @@ session's.*
   `__has_builtin` answers 0 for all three predicates while support is partial ([meta.unary.prop]).
   [Direct design](docs/design/direct-constructibility.md)
   · [Replay design](docs/design/constructibility-tail-pack-replay.md)
+- `__is_assignable(T, U)`, `__is_nothrow_assignable(T, U)` and `__is_trivially_assignable(T, U)`
+  fold to the same Boolean when both underlying types are supported arithmetic types. A non-const
+  lvalue reference destination is assignable, including a volatile referent. The source may be
+  cv-qualified or a reference. Supported class-template base and variable-template initializer
+  replay paths evaluate dependent operands at instantiation. Other operand types and dependent
+  queries outside those contexts get hard diagnostics. `__has_builtin` answers 0 for the three
+  predicates while support is partial ([meta.unary.prop], [expr.assign], #218).
 - Listed in docs/EXTENSIONS.md. Tests: `tests/own/builtins/`. `<cstdio>`: 53 → 33 errors.
 - Not yet (#211 follow-up): the built-ins that need the object model, such as
-  class constructibility, `__is_convertible`, `__is_assignable`, remaining `__is_trivially_*` and
+  class constructibility and assignability, `__is_convertible`, remaining `__is_trivially_*` and
   `__is_nothrow_*` predicates, `__is_base_of`, `__is_standard_layout` and
   `__reference_binds_to_temporary`. Other dependent predicates, conversions of a dependent
   predicate to a non-`bool` parameter, dependent array bounds and expression mangling remain in

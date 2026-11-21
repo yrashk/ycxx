@@ -985,7 +985,7 @@ public:
       if (q_->in_type_trait_pattern()) {
         std::vector<TemplateArg> pattern;
         for (const ConstructibilityOperand& operand : args) pattern.push_back(t.type_arg(operand.type));
-        if (auto value = t.constructibility_pattern(op, pattern)) {
+        if (auto value = t.replayed_type_trait_pattern(op, pattern)) {
           for (const ConstructibilityOperand& operand : args)
             if (ts.is_dependent(operand.type)) q_->record_dependent_type_trait_operand(type_trait_loc(operand.at));
           return literal(builtin(Builtin::bool_), *value, ValueCategory::prvalue, begin, end);
@@ -1011,9 +1011,32 @@ public:
       return bool_literal(args.size() == 2, begin, end);
     return fail(unsupported, args.front().type);
   }
+  // In the trait's unevaluated expression, declval gives a modifiable arithmetic lvalue only
+  // for a non-const lvalue reference. Built-in arithmetic assignment is trivial and nonthrowing
+  // ([meta.unary.prop], [expr.assign]).
+  Ex assignability_expr(ast::DepOp op, NameId name, QualType left, QualType right, u32 begin, u32 end) {
+    const Types& ts = types();
+    const QualType lhs = ts.canonical(left), rhs = ts.canonical(right);
+    if (ts.is_dependent(lhs) || ts.is_dependent(rhs)) {
+      if (q_->in_type_trait_pattern()) {
+        Templates t = templates();
+        const std::array operands{t.type_arg(lhs), t.type_arg(rhs)};
+        if (auto value = t.replayed_type_trait_pattern(op, operands))
+          return literal(builtin(Builtin::bool_), *value, ValueCategory::prvalue, begin, end);
+      }
+      diag_at(type_trait_loc(begin), Diag::assignability_dependent, name);
+      return {NodeId::none, begin, end};
+    }
+    const QualType destination = ts.canonical(ts.referee(lhs));
+    if (!ts.is_arithmetic(destination) || !ts.is_arithmetic(ts.referee(rhs))) {
+      diag_at(type_trait_loc(begin), Diag::assignability_unsupported, name, left, right);
+      return {NodeId::none, begin, end};
+    }
+    return bool_literal(ts.is_reference(lhs) && !ts.rec(lhs).rvalue_ref && !Types::is_const(destination), begin, end);
+  }
   // `__trait(T…)` that tests types ([meta.unary], [meta.rel]): a `bool` prvalue, value-dependent
   // while a type is dependent for the traits that support it.
-  Ex trait_expr(lex::TypeTrait t, std::span<const QualType> args, u32 begin, u32 end) {
+  Ex trait_expr(lex::TypeTrait t, NameId name, std::span<const QualType> args, u32 begin, u32 end) {
     using enum lex::TypeTrait;
     if (t == is_trivially_copyable) return trivial_copyability_expr(args[0], begin, end);
     QualType b = builtin(Builtin::bool_);
@@ -1025,6 +1048,11 @@ public:
     std::optional<ast::DepOp> unary_op;
     switch (t) {
     case is_same: return structural_trait(templates().is_same_value(args[0], args[1]));
+    case is_assignable: return assignability_expr(ast::DepOp::is_assignable, name, args[0], args[1], begin, end);
+    case is_nothrow_assignable:
+      return assignability_expr(ast::DepOp::is_nothrow_assignable, name, args[0], args[1], begin, end);
+    case is_trivially_assignable:
+      return assignability_expr(ast::DepOp::is_trivially_assignable, name, args[0], args[1], begin, end);
     case is_reference: return structural_trait(templates().unary_trait_value(ast::DepOp::is_reference, args[0]));
     case is_const: unary_op = ast::DepOp::is_const; break;
     case is_volatile: unary_op = ast::DepOp::is_volatile; break;
