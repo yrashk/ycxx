@@ -127,9 +127,10 @@ struct [[=dependent]] VDepVariable {
   SeqId<TemplateArg> args;
 };
 
-enum class DepOp : u8 { is_same };
+enum class DepOp : u8 { is_same, is_reference };
 
-// A dependent operation (§5.5). `is_same` has two ordered, canonical qualified type operands.
+// A dependent operation (§5.5) over canonical qualified types. `is_same` has two ordered
+// operands and `is_reference` has one.
 struct [[=dependent]] VDepOp {
   DepOp op;
   SeqId<TemplateArg> operands;

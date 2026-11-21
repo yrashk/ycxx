@@ -311,6 +311,14 @@ public:
     return ins().intern_value(ast::VDepOp{ast::DepOp::is_same, ins().intern_seq(std::span<const TemplateArg>(operands))});
   }
 
+  std::optional<ConstId> is_reference_value(QualType type) {
+    if (!types().is_dependent(type))
+      return w_->values.integer(types().builtin(Builtin::bool_), types().is_reference(type));
+    if (!structural_operand(type)) return std::nullopt;
+    const std::array operands{type_arg(type)};
+    return ins().intern_value(ast::VDepOp{ast::DepOp::is_reference, ins().intern_seq(std::span<const TemplateArg>(operands))});
+  }
+
   // Template arguments `args` with the parameters `b` binds replaced by their arguments; a pack's
   // expansions expanded in place ([temp.variadic]/8).
   std::optional<std::vector<TemplateArg>> substitute_args(std::span<const TemplateArg> args, const Bindings& b) {
@@ -413,6 +421,11 @@ public:
         auto rhs = substitute_arg(ins().seqs.at(op.operands, 1), b);
         if (!rhs) return std::nullopt;
         return is_same_value(lhs->type, rhs->type);
+      }
+      case ast::DepOp::is_reference: {
+        auto operand = substitute_arg(ins().seqs.at(op.operands, 0), b);
+        if (!operand) return std::nullopt;
+        return is_reference_value(operand->type);
       }
       }
     }
