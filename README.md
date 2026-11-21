@@ -233,6 +233,8 @@ fields use their default member initializer when available and otherwise get zer
   support explicit calls and typed address selection.
   The four written C++26 non-allocating placement functions support explicit calls, including
   in constant expressions.
+  Runtime placement `new` supports integral and ordinary pointer objects with one placement
+  argument and a visible written reserved allocation function.
   [#293](https://github.com/yrashk/ycxx/issues/293)
 - pointers and references to arrays of unknown bound, and template partial specializations
   that match unknown-bound array types. [#222](https://github.com/yrashk/ycxx/issues/222)
