@@ -300,6 +300,7 @@ enum class Diag : std::uint32_t {
   nested_too_deeply [[=message{Severity::error, "nested too deeply to analyse: half of the stack is in use"}]],
   default_not_last [[=message{Severity::error, "a template parameter after one with a default argument needs a default argument too"}]],
   default_redefined [[=message{Severity::error, "a template parameter's default argument is given again"}]],
+  mutable_placement [[=message{Severity::error, "'mutable' requires a non-static data member of non-const, non-reference type"}]],
   member_of_function_type [[=message{Severity::error, "a data member cannot have function type '{0:t}'"}]],
   no_template_matches [[=message{Severity::error, "no template named '{0:n}' has this specialization"}]],
   ambiguous_specialization [[=message{Severity::error, "the specialization of '{0:n}' is ambiguous"}]],

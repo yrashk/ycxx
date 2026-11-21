@@ -149,6 +149,7 @@ struct ClassShape {
   bool layout_uncertain = false;  // source packing or alignment that native layout does not apply
   bool copy_abi_unknown = false;   // no ABI classification for this defaulted copy
   bool layout_requires_virtual_support = false;
+  bool has_mutable_field = false;
 };
 struct EnumShape {
   EntityId entity = EntityId::none;
@@ -381,6 +382,7 @@ class QueryLayout {
   ir::TypeLayout type(QualType q) const;
   ir::SubObject step(QualType q, ir::PathStep s) const;
   bool is_class(EntityId e) const { return classes_.contains(std::to_underlying(e)); }
+  bool contains_mutable_field(QualType type) const;
   ir::ConstValue constant(ConstId c) const {
     ConstLayout v = cx_->fetch<LayoutConstant>(c);
     if (!v.base) return v.bits;
@@ -720,6 +722,25 @@ ir::TypeLayout QueryLayout::type(QualType q) const {
   if (in.types.is<ast::TEnum>(c))
     if (auto it = enums_.find(std::to_underlying(in.types.get<ast::TEnum>(c).entity)); it != enums_.end()) return type(it->second);
   return {};
+}
+
+// A const object still permits writes to its mutable subobjects ([dcl.type.cv]).
+bool QueryLayout::contains_mutable_field(QualType type) const {
+  ast::Interners& in = *universe().in;
+  std::set<EntityId> visited;
+  auto contains = [&](this auto&& visit, QualType t) -> bool {
+    auto kind = in.types.canon(t);
+    while (in.types.is<ast::TArray>(kind)) kind = in.types.canon(in.types.get<ast::TArray>(kind).elem);
+    if (!in.types.is<ast::TClass>(kind)) return false;
+    EntityId entity = in.types.get<ast::TClass>(kind).entity;
+    if (!visited.insert(entity).second) return false;
+    auto found = classes_.find(std::to_underlying(entity));
+    if (found == classes_.end()) return false;
+    const ClassShape& shape = *found->second;
+    return shape.has_mutable_field || std::ranges::any_of(shape.fields, [&](QualType field) { return visit(field); }) ||
+           std::ranges::any_of(shape.bases, [&](EntityId base) { return visit(in.intern_type(ast::TClass{base})); });
+  };
+  return contains(type);
 }
 
 // System V AMD64 psABI §3.2.3. Flat records of integral or ordinary object-pointer members.
@@ -1448,7 +1469,8 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
     bool zero = b->relocs.empty() && std::ranges::all_of(b->bytes, [](std::uint8_t x) { return x == 0; });
     aarch64::DataDef d{v.entity, aarch64::DataKind::data, std::move(b->bytes), 0, layout.type(v.type).align, std::move(b->relocs)};
     if (v.weak_elf && !v.dynamic && d.relocs.empty()) weak_variables.insert(v.entity);
-    if (is_const && !v.dynamic) d.kind = d.relocs.empty() ? aarch64::DataKind::rodata : aarch64::DataKind::data_const;
+    if (is_const && !v.dynamic && !layout.contains_mutable_field(v.type))
+      d.kind = d.relocs.empty() ? aarch64::DataKind::rodata : aarch64::DataKind::data_const;
     else if (zero) {
       d.kind = aarch64::DataKind::bss;
       d.size = d.bytes.size();
