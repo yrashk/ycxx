@@ -193,7 +193,9 @@ whose dynamic initialization runs in definition order.
 
 Automatic declarations such as `Point p(3, 4);` can initialize flat aggregates with public
 arithmetic fields. Supplied expressions initialize the fields in declaration order. Omitted
-fields use their default member initializer when available and otherwise get zero.
+fields use their default member initializer when available and otherwise get zero. A runtime
+declaration can also copy one public direct base from an lvalue, with an explicit initializer
+for each derived field.
 [#301](https://github.com/yrashk/ycxx/issues/301)
 
 **Language on macOS.** Programs can use:
