@@ -2930,6 +2930,10 @@ the body. A non-generic lambda body uses its own evaluation context.
 - Function-template bodies replay decay-copy of supported dependent operands with the
   template arguments bound. A value-dependent operand with known type gives the conversion
   its decayed prvalue type in the template definition, including in `decltype`.
+- Concrete decay-copy works in a non-type template argument with `auto{expr}` or with
+  `auto(expr)` when the initializer starts with an integer literal. The argument must be
+  a converted constant expression. Function and function-pointer type-ids keep precedence.
 - General class objects, member pointers, operands whose type dependence is unresolved, and
-  dependent template arguments, requirements, and exception specifications remain open.
+  other direct parenthesized template argument spellings remain open, as do dependent
+  template arguments, requirements, and exception specifications.
   [#286](https://github.com/yrashk/ycxx/issues/286)
