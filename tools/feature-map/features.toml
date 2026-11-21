@@ -447,7 +447,8 @@ clauses = ['basic.fundamental', 'lex.fcon', 'conv.fpprom', 'conv.double', 'conv.
 std = 'C++98'
 detect = '\b(?:float|double)\b'
 status = 'done'
-issues = [336]
+issues = [336, 201]
+note = 'Linux x86-64 supports runtime `float` and `double` addition, subtraction, multiplication, division, unary negation and binary32-to-binary64 widening. Other numeric conversions, comparisons and x87 values remain in #201.'
 probe = '''
 int main() { double d = 1.5; float f = 2.0f; d = d * f + 0.5; return (int)d == 3 ? 0 : 1; }
 '''
@@ -1791,7 +1792,7 @@ int sum(const B& b) { return b.b; }
 int main() { D d; A* pa = &d; return pa->a + sum(d) + d.d - 6; }
 '''
 issues = [308]
-note = 'bases of class templates; the object-expression rule of `[class.protected]`'
+note = 'One nonvirtual, nonpolymorphic direct base in primary class templates, including dependent aliases and qualified static lookup. Additional class-template base forms and the object-expression rule of [class.protected] remain.'
 
 [[feature]]
 id = 'class-virtual'

@@ -27,14 +27,15 @@ use, in the headers libycxx's C library headers reach (`<cstdio>`, `<cstdlib>`, 
 | GNU attributes `__always_inline__` (`__header_always_inline`), `__format__(__strfmon__, …)` and `__format__(__strftime__, …)` (`__strfmonlike`, `__strftimelike`) | `sys/cdefs.h`, `_types.h`, `math.h` | Parsed and ignored, as the other GNU attributes (above) | #133 |
 | `__builtin_fabsf`, `__builtin_fabs`, `__builtin_fabsl`, `__builtin_inff`, `__builtin_inf`, `__builtin_infl` | `math.h`'s inline `__inline_isfinite*`, `__inline_isinf*`, `__inline_isnormal*` (its `__GNUC__` and `__FINITE_MATH_ONLY__ == 0` path) | `__builtin_fabs*(x)` is \|x\| of its type (`float`, `double`, `long double` by the suffix), x converted to it: the sign bit cleared, a NaN's too (an `ast::BuiltinCall`, L1's `fabs`, AArch64 `FABS`). `__builtin_inf*()` is +infinity, a constant. `__has_builtin` answers 1; a declaration of the same name hides them (`lex::builtin_functions`) | #336 |
 | `__builtin_huge_val`, `__builtin_huge_valf`, `__builtin_huge_vall`, `__builtin_nanf`, `__builtin_nan`, `__builtin_nanl` | `math.h`'s `HUGE_VAL`, `HUGE_VALF`, `HUGE_VALL`, `NAN` | `__builtin_huge_val*()` is +infinity. `__builtin_nan*("s")` is the quiet NaN whose significand below the quiet bit is `s` read as `strtoull` reads it (decimal, `0` octal, `0x` hexadecimal; empty is 0), as in Clang and GCC; its argument must be a string literal | #336 |
+| `__builtin_addressof(x)` | libycxx's `<ycxx/core/move.hpp>` (`std::addressof`, [specialized.addressof]) | Uses ycxx's built-in address operation on an lvalue, preserving the operand type and bypassing `operator&`. Bit-fields and rvalues are ill-formed. Ordinary address-of limitations apply, including static member function names accessed through an object expression. The result can be a constant expression for supported addresses, such as a scalar global. `__has_builtin` answers 1, and a declaration of the same name hides it. | #330 |
 | `__builtin_alloca` | `alloca.h`'s `alloca` | Not yet: diagnosed as above where a program calls `alloca` | — |
 | `__builtin_constant_p` | `libkern/_OSByteOrder.h`'s `__DARWIN_OSSwapInt16/32/64` (`ntohs`, `htonl`, …) | Not yet: diagnosed as above where a program uses the macros | — |
 | `__builtin_offsetof` | `sys/_types.h`'s `__offsetof`, libycxx's `offsetof` | Not yet: diagnosed as above where a program uses `offsetof`, its arguments (a type first) skipped | — |
 | `__builtin_expect` | the SDK's `assert.h`'s `assert` | Not yet: diagnosed as above where a program uses `assert`, which did not compile before #229 either (its other path calls `abort` undeclared; this one also needs `__func__`, [dcl.fct.def.general], which ycxx does not have yet) | — |
 
 The built-in functions marked "not yet" are listed in one table, `lex::lacking_builtins`
-(#248). Only those are diagnosed as not supported: any other `__builtin_` name is an ordinary
-name, undeclared unless declared, so a requires-expression that probes it is unsatisfied, as
+(#248). Those builtins are diagnosed as unsupported. An unrecognized `__builtin_` name follows
+ordinary lookup, so a requires-expression that probes an undeclared name is unsatisfied, as
 libycxx's in-language probes need (`tests/own/builtins/unknown-probe.accept.cpp`).
 
 The other `__GNUC__` tests in those headers select nothing new for ycxx: `sys/cdefs.h`'s

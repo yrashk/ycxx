@@ -607,9 +607,13 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
 - Direct variadic calls transport named `float` and `double`, promoted `double` in the ellipsis,
   and scalar floating results. AL counts the XMM registers assigned to arguments, including
   named arguments with an empty ellipsis. The emitter uses SSE2 for binary32-to-binary64 widening
-  in argument promotion and other expressions. Other Linux floating arithmetic and numeric
-  conversions remain [#201](https://github.com/yrashk/ycxx/issues/201).
+  in argument promotion and other expressions.
   [Design](docs/design/linux-floating-variadic-calls.md) · [#399](https://github.com/yrashk/ycxx/issues/399)
+- Runtime addition, subtraction, multiplication and division use scalar SSE at the binary32 or
+  binary64 L2 result width and under the caller's MXCSR controls. Unary negation flips the sign
+  bit without changing the payload or status flags. Comparisons, other numeric conversions and
+  x87 values remain [#201](https://github.com/yrashk/ycxx/issues/201).
+  [Design](docs/design/linux-scalar-floating-point.md#runtime-arithmetic)
 - Direct fixed-prototype calls to ordinary free functions support nonempty naturally aligned
   flat records with integral or ordinary object-pointer fields that are trivial for calls,
   up to 16 bytes and alignment eight. The AMD64 INTEGER eightbytes follow from the laid-out
@@ -1589,6 +1593,16 @@ session's.*
   predicate to a non-`bool` parameter, dependent array bounds and expression mangling remain in
   #209.
 
+## Address-of builtin (#330)
+
+`__builtin_addressof` implements the operation used by libycxx's `std::addressof`
+([specialized.addressof]). It builds the ordinary address-of expression for a single lvalue
+while bypassing overloaded `operator&`. The existing constant evaluator and code generator
+consume the expression. Static member functions accessed through an object expression still
+hit the ordinary address-of limitation. The tests in `tests/own/builtins/` cover overloaded
+address operators, dependent wrappers, qualified operands, constant evaluation on a scalar
+global, and a rejected rvalue.
+
 ## Templates, ζ step 6: concepts and `if constexpr` (#88, 2026-11-18)
 
 Fable decided the representation (ast.md §6.6); the Opus session wrote the code.
@@ -1903,8 +1917,11 @@ What the process allocates, attributed to the engine's cells, in the trace and t
 - **Base-clauses** (`base_clause` in parse.cppm): each base is a complete class other than the
   class itself, named once, and not a union. Its access defaults to private for `class` and public
   for `struct`. `Program::set_bases` records the bases when the class head is analysed, and
-  `class_def` copies them into `ClassRec::bases`. Not yet: virtual bases (#310) and bases of
-  class templates.
+  `class_def` copies them into `ClassRec::bases`. A primary class template supports one
+  nonvirtual, nonpolymorphic direct base. It checks a nondependent base at definition and
+  substitutes a dependent base at the first completeness demand. Its concrete specialization publishes
+  the resolved base before layout or qualified lookup. [Design](docs/design/class-template-bases.md)
+  Base packs and additional class-template base forms remain in #308. Virtual bases are #310.
 - **Layout** (`ast::record_layout`, Itanium C++ ABI §2.4):
   - bases first, in declaration order; an empty base at offset 0 unless another subobject of its
     type is there;
@@ -1926,6 +1943,10 @@ What the process allocates, attributed to the engine's cells, in the trace and t
 - **Access** ([class.access.base]): a member of a base is reached through the conversion, whose
   every step must be accessible. A protected member may be named in members and friends of
   derived classes (not yet [class.protected]'s rule on the object expression).
+- **Class-template qualification** ([temp.dep], [class.member.lookup]): qualified lookup
+  returns the base specialization's original static member. The derived declarations hide
+  inherited ones, and an accessible inheritance path is required. Unqualified lookup during
+  template replay skips a dependent direct base.
 - **Special members:**
   - Bases are initialized first, from mem-initializers naming them or by default
     (`MemberInit` with field `~0u`), and destroyed after the members (`DestroyMember` with field

@@ -78,17 +78,18 @@ constexpr const TypeTraitInfo* type_trait(std::string_view name) {
     if (t.name == name) return &t;
   return nullptr;
 }
-// The GNU built-in functions ycxx implements (docs/EXTENSIONS.md): the floating ones the SDK's
-// `<math.h>` calls. `type` is the floating type they take and give: 'f' float, 'd' double, 'l' long
+// The GNU built-in functions ycxx implements (docs/EXTENSIONS.md). For the floating builtins
+// from `<math.h>`, `type` is the type they take and give: 'f' float, 'd' double, 'l' long
 // double. `__builtin_inf*` and `__builtin_huge_val*` are +infinity, `__builtin_nan*(s)` the quiet
 // NaN whose payload `s` spells (as `strtoull` reads it), `__builtin_fabs*(x)` |x|.
-enum class BuiltinFunction : std::uint8_t { fabs, inf, huge_val, nan };
+enum class BuiltinFunction : std::uint8_t { fabs, inf, huge_val, nan, addressof };
 struct BuiltinFunctionInfo {
   std::string_view name;
   BuiltinFunction function;
-  char type;
+  char type = 0;
 };
 inline constexpr std::array builtin_functions{
+    BuiltinFunctionInfo{"__builtin_addressof", BuiltinFunction::addressof},
     BuiltinFunctionInfo{"__builtin_fabsf", BuiltinFunction::fabs, 'f'},
     BuiltinFunctionInfo{"__builtin_fabs", BuiltinFunction::fabs, 'd'},
     BuiltinFunctionInfo{"__builtin_fabsl", BuiltinFunction::fabs, 'l'},

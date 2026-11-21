@@ -1,13 +1,11 @@
-# Linux AMD64 scalar floating-point calls (#509)
+# Linux AMD64 scalar floating-point calls and arithmetic
 
 This slice moves binary32 `float` and binary64 `double` values through fixed-prototype direct
 calls and their definitions. It covers typed constants, object loads and stores, selection and
-control-flow copies, call arguments and call results. The subsequent
+control-flow copies, call arguments and call results (#509). The subsequent
 [direct variadic slice](linux-floating-variadic-calls.md) adds binary32-to-binary64 widening.
-Other runtime arithmetic, comparisons and numeric conversions remain
-[#201](https://github.com/yrashk/ycxx/issues/201). The signature check excludes x87 `long double`,
-floating aggregates, and floating operands or results in indirect calls. Wider aggregate classification remains
-[#440](https://github.com/yrashk/ycxx/issues/440).
+The signature check excludes x87 `long double`, floating aggregates, and floating operands or
+results in indirect calls. Wider aggregate classification remains [#440](https://github.com/yrashk/ycxx/issues/440).
 
 Astra checked the design against the [System V AMD64 psABI](https://gitlab.com/x86-psABIs/x86-64-ABI)
 §§3.2.2–3.2.3. One typed argument planner assigns the six INTEGER registers and eight XMM
@@ -35,3 +33,21 @@ SSE and a remaining GPR argument. Width witnesses check exact bit patterns, adja
 and call results retained across a second call. Cold and daemon builds exercise the same CLI.
 The native `<cfloat>` probe also exercises a direct member call and scalar floating returns
 deduced from `auto` in a free function and `decltype(auto)` in template specializations.
+
+## Runtime arithmetic
+
+After the front end applies the usual arithmetic conversions, L2 verifies that each arithmetic
+node has operands and a result of one floating type. The Linux AMD64 emitter loads the left
+operand into XMM0 and uses the right operand's home for scalar ADD, SUB, MUL or DIV. It stores
+each result at the L2 width. Binary32 selects the SS form and binary64 selects the SD form.
+The instructions inherit the caller's MXCSR controls and naturally update the sticky status
+flags. Unary negation XORs the sign bit in an integer scratch register, so signed zero and NaN
+payloads are preserved apart from the sign, and MXCSR is untouched.
+[Usual arithmetic conversions](https://eel.is/c++draft/expr.arith.conv) ·
+[Intel SDM](https://www.intel.com/content/www/us/en/developer/articles/technical/intel-sdm.html)
+
+Astra reviewed these choices against the language clauses, AMD64 psABI and Intel SDM. The
+mixed-object tests pass runtime bit patterns to ycxx-generated definitions and verify operand
+order, width-sensitive rounding, signed zero, subnormals, signaling and quiet NaN negation,
+and the caller's MXCSR controls and flags. Linux runtime floating comparisons, other numeric
+conversions, absolute value and x87 `long double` remain [#201](https://github.com/yrashk/ycxx/issues/201).

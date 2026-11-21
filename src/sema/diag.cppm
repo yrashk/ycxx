@@ -203,6 +203,7 @@ enum class Diag : std::uint32_t {
   no_member [[=message{Severity::error, "no member named '{0:n}' in '{1:t}'"}]],
   // [class.derived], [class.mi]
   base_not_class [[=message{Severity::error, "a base must be a class; '{0:t}' is not one"}]],
+  base_substitution [[=message{Severity::error, "substitution could not form the base type '{0:t}'"}]],
   duplicate_base [[=message{Severity::error, "base class '{0:t}' named more than once"}]],
   union_with_base [[=message{Severity::error, "a union cannot have base classes"}]],
   ambiguous_base [[=message{Severity::error, "'{0:t}' is an ambiguous base of '{1:t}'"}]],
