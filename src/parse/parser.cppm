@@ -4912,7 +4912,7 @@ public:
     sema::Evaluated v = scalar_record ? evaluator.evaluate_initializer(init, /*zero_default=*/false)
                                      : evaluator.evaluate(init);
     if (v.value) {
-      if (is_constexpr && s_->folded_immediate_result != EntityId::none)
+      if (is_constexpr && s_->folded_immediate_result != ast::EntityId::none)
         if (auto entity = s_->immediate_result_entity(*v.value)) {
           s_->diag(init.begin, Diag::immediate_address, s_->world().entities.rec(*entity).name);
           return;
