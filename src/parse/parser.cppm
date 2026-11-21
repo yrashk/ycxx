@@ -605,9 +605,10 @@ public:
           d.ok = false;
           continue;
         }
+        const std::size_t diags = s_->diag_count();
         if (!t && declare_class) t = declare_class(n, k, name_at);
         if (!t) {
-          s_->diag(at + 1, Diag::not_a_type, n);
+          if (s_->diag_count() == diags) s_->diag(at + 1, Diag::not_a_type, n);
           d.ok = false;
         } else if (any_type()) {
           s_->diag(at, Diag::conflicting_specifiers, k);

@@ -37,3 +37,10 @@ nearer::Entry* nearer_type(Transitive value) { return value.value; }
 namespace earlier_member {
 struct Holder { int Entry; struct Entry* source; struct Entry* use; };
 }
+
+namespace method {
+struct Holder { void Entry(); struct Entry* get(struct Entry*); };
+}
+
+namespace elsewhere { namespace Entry {} }
+struct UnrelatedNamespace { struct Entry* value; };

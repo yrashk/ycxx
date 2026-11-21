@@ -437,7 +437,8 @@ public:
       } else {
         if (auto m = q_->earlier_member(name)) {
           if (m->kind == ast::DeclKind::enum_ || m->kind == ast::DeclKind::type_alias) return m->type;
-          if (!elaborated && (m->kind == ast::DeclKind::data_member || m->kind == ast::DeclKind::variable))
+          if (!elaborated && (m->kind == ast::DeclKind::data_member || m->kind == ast::DeclKind::variable ||
+                              (m->kind == ast::DeclKind::function && c.name != name)))
             return std::nullopt;
         }
         // In the class being defined, a type of its (complete) bases.
@@ -453,6 +454,7 @@ public:
         ast::DeclSema s = q_->decl_sema(d);
         if (s.entity == EntityId::none || is_special(s)) continue;
         if (is_type(s.kind) || !elaborated) found = s;
+        if (!elaborated && !is_type(s.kind)) break;
       }
     if (member_introduction && member_introduction->name == name &&
         (!found || elaborated || w_->entities.rec(found->entity).scope !=

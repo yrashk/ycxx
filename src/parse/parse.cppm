@@ -3324,15 +3324,30 @@ private:
     if (candidate && p_->namespace_class_friend(k_) && !member_template_ && !inst_) {
       ps_.declare_class = [&](NameId name, Tk key, u32 at) -> std::optional<QualType> {
         if (at != candidate->offset) return std::nullopt;
+        std::optional<ast::DeclSema> visible_type;
         for (DeclId id : p_->visible_decls(candidate->name, k_, false, p_->ns_of(k_), {}, /*type_only=*/true)) {
           auto d = p_->decl_sema(id);
           if (!d) continue;
-          if (d->kind != ast::DeclKind::class_ || (d->flags & sema::decl_flag::template_)) {
+          if (visible_type && visible_type->entity != d->entity) {
+            s_.diag(at, Diag::ambiguous_name, name);
+            return std::nullopt;
+          }
+          visible_type = *d;
+        }
+        if (visible_type) {
+          if (visible_type->kind != ast::DeclKind::class_ || (visible_type->flags & sema::decl_flag::template_)) {
             s_.diag(at, Diag::conflicting_declaration, name);
             return std::nullopt;
           }
-          if (!record_class_key(d->entity, key, at)) return std::nullopt;
-          return d->type;
+          if (!record_class_key(visible_type->entity, key, at)) return std::nullopt;
+          return visible_type->type;
+        }
+        for (DeclId id : p_->declared_in(candidate->name, p_->ns_of(k_), k_, false, /*inhabit=*/true)) {
+          auto d = p_->decl_sema(id);
+          if (d && d->kind == ast::DeclKind::namespace_) {
+            s_.diag(at, Diag::conflicting_declaration, name);
+            return std::nullopt;
+          }
         }
         EntityId entity = class_entity(name);
         introduced = class_decl(entity, false);
