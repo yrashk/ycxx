@@ -350,6 +350,13 @@ enum class Diag : std::uint32_t {
   constructibility_incomplete [[=message{Severity::error, "incomplete type '{0:t}' cannot be queried by '__is_constructible'"}]],
   constructibility_unsupported [[=message{Severity::error, "constructibility of '{0:t}' with these argument types is not supported yet"}]],
   constructibility_pack [[=message{Severity::error, "pack expansions in '__is_constructible' are not supported yet"}]],
+  class_alignment_not_constant [[=message{Severity::error, "a class alignment requires an integral constant expression or a type"}]],
+  class_alignment_invalid [[=message{Severity::error, "a class alignment must be zero or a positive power of two"}]],
+  class_alignment_unsupported [[=message{Severity::error, "class alignment greater than 16 bytes is not supported yet"}]],
+  class_alignment_weak [[=message{Severity::error, "the requested alignment is weaker than the class's natural alignment"}]],
+  class_alignment_mismatch [[=message{Severity::error, "the class is redeclared with a different alignment requirement"}]],
+  class_alignment_missing [[=message{Severity::error, "the class definition must specify alignment when a declaration specifies it"}]],
+  class_alignment_uncertain_layout [[=message{Severity::error, "class alignment depends on attributes or packing whose layout is not supported yet"}]],
   recursive_default_member_initializer [[=message{Severity::error, "default member initializer for '{0:n}' would use itself"}]],
   default_member_initializer_cleanup [[=message{Severity::error, "default member initializer requiring cleanup is not supported yet"}]],
 };

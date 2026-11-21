@@ -137,7 +137,7 @@ struct RecordLayout {
   Placed placed;                            // what it says of the class as a component
 };
 constexpr RecordLayout record_layout(std::span<const Placed> bases, std::span<const Placed> fields, bool union_, bool pod,
-                                     std::uint32_t self, const Target* polymorphic_root = nullptr) {
+                                     std::uint32_t self, const Target* polymorphic_root = nullptr, u8 explicit_alignment = 0) {
   RecordLayout out;
   std::uint64_t size = polymorphic_root ? polymorphic_root->pointer_size : 0;
   std::uint64_t align = polymorphic_root ? polymorphic_root->pointer_align : 1;
@@ -197,6 +197,7 @@ constexpr RecordLayout record_layout(std::span<const Placed> bases, std::span<co
   }
   bool empty = !polymorphic_root && fields.empty() && std::ranges::all_of(bases, &Placed::empty);
   std::uint64_t nvsize = size;
+  align = std::max(align, std::uint64_t(explicit_alignment));
   out.align = align;
   out.size = size == 0 ? align : (size + align - 1) / align * align;
   out.dsize = pod ? out.size : dsize;
