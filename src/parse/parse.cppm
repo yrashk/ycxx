@@ -3580,6 +3580,7 @@ private:
     }
     sem.kind = ast::DeclKind::function;
     sem.type = d.type;
+    sem.has_written_noexcept = d.has_noexcept;
     if (d.qualified && d.scope.ns) {
       // `friend R ::f(…);`, `friend R N::f(…);`: a function the namespace declared earlier.
       auto f = s_.namespace_function(*d.scope.ns, d.name, d.type);
@@ -4159,6 +4160,7 @@ private:
     ast::DeclSema sem = class_decl(c.entity, false);
     sem.kind = ast::DeclKind::function;
     sem.type = type;
+    sem.has_written_noexcept = fs.has_noexcept;
     sem.linkage = ast::Linkage::external;
     sem.flags = flags;
     sem.is_virtual = is_virtual;
@@ -4457,6 +4459,7 @@ private:
     }
     ast::DeclSema sem = class_decl(c.entity, false);
     sem.type = d.type;
+    sem.has_written_noexcept = fn && d.has_noexcept;
     sem.linkage = ast::Linkage::external;
     sem.is_virtual = is_virtual;
     u16 flags = sema::decl_flag::member;
@@ -4830,6 +4833,7 @@ private:
     ast::DeclSema sem{};
     sem.kind = fn ? ast::DeclKind::function : ast::DeclKind::variable;
     sem.type = d.type;
+    sem.has_written_noexcept = fn && d.has_noexcept;
     sem.storage = spec.is_static ? ast::Storage::static_ : spec.is_extern ? ast::Storage::extern_ : ast::Storage::none;
     sem.linkage = has_internal_linkage() ? ast::Linkage::internal : ast::Linkage::external;
     sem.access = ast::Access::none;

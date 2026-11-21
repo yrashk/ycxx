@@ -26,6 +26,7 @@ constexpr std::uint16_t header_size = 64, section_header_size = 64;
 constexpr std::uint64_t symbol_size = 24, rela_size = 24;
 constexpr std::uint32_t sht_progbits = 1, sht_symtab = 2, sht_strtab = 3, sht_rela = 4, sht_nobits = 8;
 constexpr std::uint32_t sht_init_array = 14, sht_group = 17, grp_comdat = 1;
+constexpr std::uint32_t sht_x86_64_unwind = 0x70000001;
 constexpr std::uint64_t shf_write = 1, shf_alloc = 2, shf_execinstr = 4, shf_info_link = 0x40;
 constexpr std::uint64_t shf_merge = 0x10, shf_strings = 0x20, shf_group = 0x200;
 constexpr std::uint8_t stt_notype = 0, stt_object = 1, stt_func = 2, stt_section = 3, stt_file = 4;
@@ -49,6 +50,7 @@ constexpr std::array standard_sections{
     section_mapping{standard_section::data, "__DATA", "__data", ".data", sht_progbits, shf_alloc | shf_write},
     section_mapping{standard_section::bss, "__DATA", "__bss", ".bss", sht_nobits, shf_alloc | shf_write},
     section_mapping{standard_section::init_array, "__DATA", "__init_array", ".init_array", sht_init_array, shf_alloc | shf_write},
+    section_mapping{standard_section::eh_frame, "__TEXT", "__eh_frame", ".eh_frame", sht_x86_64_unwind, shf_alloc},
 };
 
 struct relocation_mapping {
@@ -134,6 +136,10 @@ bool plain_metadata(const section_header& header) {
           (header.flags == (shf_merge | shf_strings) && header.entsize == 1));
 }
 
+bool valid_unwind_section(std::uint64_t alignment, std::uint64_t size) {
+  return (alignment == 4 || alignment == 8) && size % 4 == 0 && std::in_range<std::uint32_t>(size);
+}
+
 std::string_view string_data(std::span<const std::uint8_t> table) {
   return {reinterpret_cast<const char*>(table.data()), table.size()};
 }
@@ -210,6 +216,9 @@ std::expected<bytes, std::string> write_object(const object& o) {
     const bool init_array = mapping->type == sht_init_array;
     if (init_array && (s.flags != section_flags::regular || s.zerofill_size != 0 || s.align_log2 != 3 || s.size() % 8 != 0))
       return fail("invalid ELF .init_array flags, alignment or size");
+    if (s.is_eh_frame() && (s.flags != section_flags::regular || s.zerofill_size != 0 ||
+                           !valid_unwind_section(std::uint64_t{1} << s.align_log2, s.size())))
+      return fail("invalid ELF .eh_frame flags, alignment or size");
     section_names.push_back(mapping->name);
     add_section(mapping->name, {.type = mapping->type, .flags = mapping->flags, .size = s.size(),
                                 .align = std::uint64_t{1} << s.align_log2, .entsize = init_array ? 8u : 0u}, s.bytes);
@@ -434,14 +443,20 @@ std::expected<object, std::string> read_object(std::span<const std::uint8_t> fil
     const auto canonical_name = section_name == ".data.rel.ro.local" ? ".data.rel.ro" : section_name;
     const auto mapping = std::ranges::find_if(standard_sections, [&](const section_mapping& candidate) {
       return canonical_name == candidate.name ||
-             (owner != 0 && candidate.type != sht_init_array && canonical_name.starts_with(candidate.name) &&
+             (owner != 0 && candidate.type != sht_init_array && candidate.type != sht_x86_64_unwind &&
+              canonical_name.starts_with(candidate.name) &&
               canonical_name.size() > candidate.name.size() + 1 && canonical_name[candidate.name.size()] == '.');
     });
-    if (mapping == standard_sections.end() || h.type != mapping->type || (h.flags & ~shf_group) != mapping->flags ||
+    // Accept the ABI section type and the same ungrouped section spelled SHT_PROGBITS.
+    const bool unwind = mapping != standard_sections.end() && mapping->type == sht_x86_64_unwind;
+    if (mapping == standard_sections.end() || (h.type != mapping->type && !(unwind && h.type == sht_progbits)) ||
+        (h.flags & ~shf_group) != mapping->flags ||
         h.link != 0 || h.info != 0 || (h.entsize != 0 && !(h.type == sht_init_array && h.entsize == 8)))
       return fail(std::format("unsupported ELF section '{}'", section_name));
     if (h.type == sht_init_array && (h.align != 8 || h.size % 8 != 0))
       return fail("invalid ELF .init_array alignment or size");
+    if (unwind && (owner != 0 || !valid_unwind_section(h.align, h.size) || h.offset % h.align != 0))
+      return fail("invalid ELF .eh_frame group, alignment or size");
     auto s = section::standard(mapping->kind);
     s.align_log2 = static_cast<std::uint8_t>(std::countr_zero(h.align == 0 ? std::uint64_t{1} : h.align));
     if (h.type == sht_nobits) s.zerofill_size = h.size;
@@ -547,9 +562,22 @@ std::expected<object, std::string> read_object(std::span<const std::uint8_t> fil
       if (site == previous_offset) return fail("composed ELF relocations are unsupported");
       previous_offset = site;
       if (debug) continue;
-      o.sections[*sections[h.info]].relocs.push_back(
-          {static_cast<std::uint32_t>(site), mapping->kind, *symbols[symbol].retained,
-           std::bit_cast<std::int64_t>(load<std::uint64_t>(record, 16)), std::nullopt});
+      auto& relocated = o.sections[*sections[h.info]];
+      const auto anchor = *symbols[symbol].retained;
+      const auto addend = std::bit_cast<std::int64_t>(load<std::uint64_t>(record, 16));
+      if (relocated.is_eh_frame()) {
+        const auto& s = o.symbols[anchor];
+        if (mapping->kind != reloc_kind::x86_64_pc32 || site % 4 != 0 || s.bind != binding::local || !s.section)
+          return fail("ELF .eh_frame requires aligned PC32 relocations to local code");
+        const auto& code = o.sections[*s.section];
+        const auto delta = static_cast<std::uint64_t>(addend);
+        // Bound S + A in its original code section without unsigned wrap.
+        const bool in_range = addend < 0 ? s.offset >= 0 - delta && s.offset - (0 - delta) < code.size()
+                                        : s.offset < code.size() && delta < code.size() - s.offset;
+        if (code.segment != "__TEXT" || code.name != "__text" || !in_range)
+          return fail("ELF .eh_frame relocation target is outside local code");
+      }
+      relocated.relocs.push_back({static_cast<std::uint32_t>(site), mapping->kind, anchor, addend, std::nullopt});
     }
   }
 

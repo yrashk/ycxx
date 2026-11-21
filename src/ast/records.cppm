@@ -86,6 +86,8 @@ struct DeclSema {
   bool is_virtual = false;  // a virtual member function ([class.virtual])
   bool is_explicit = false;  // a constructor with a bare explicit specifier ([dcl.fct.spec])
   bool is_mutable = false;  // a mutable non-static data member ([dcl.stc])
+  // A named function declarator spelled an exception specifier, even if its type does not retain it.
+  bool has_written_noexcept = false;
   constexpr bool operator==(const DeclSema&) const = default;
 };
 

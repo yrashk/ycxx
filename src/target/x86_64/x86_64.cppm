@@ -20,9 +20,18 @@ export struct Reloc {
   bool operator==(const Reloc&) const = default;
 };
 
+export enum class FrameState : std::uint8_t { entry, saved_rbp, frame_pointer };
+
+export struct FrameRow {
+  std::uint32_t offset;  // state starting at this instruction offset
+  FrameState state;
+  bool operator==(const FrameRow&) const = default;
+};
+
 export struct MachineCode {
   std::vector<std::uint8_t> bytes;
   std::vector<Reloc> relocs;
+  std::vector<FrameRow> frame_rows;
   bool operator==(const MachineCode&) const = default;
 };
 
@@ -35,6 +44,11 @@ export struct MachineCode {
 export std::expected<MachineCode, std::string> compile_function(const l2::Function& body,
                                                                 std::span<const ir::EntityId> direct_symbols = {},
                                                                 std::span<const ir::EntityId> got_symbols = {});
+
+// Append the first CIE if needed and one FDE to the unit's .eh_frame. Return the offset of
+// its initial_location field, where the object will put a PC32 relocation to a local code anchor.
+export std::expected<std::uint32_t, std::string> append_eh_frame(std::vector<std::uint8_t>& section,
+                                                               const MachineCode& code);
 
 namespace {
 
@@ -198,7 +212,9 @@ class Emitter {
 
   std::expected<MachineCode, std::string> run() {
     e_.emit({0x55});  // push rbp
+    frame_row(FrameState::saved_rbp);
     e_.move(rbp, rsp);
+    frame_row(FrameState::frame_pointer);
     if (frame_.size) {
       e_.reg({0x81}, 5, rsp);  // sub rsp, imm32
       e_.immediate(frame_.size, 4);
@@ -207,6 +223,8 @@ class Emitter {
       return std::unexpected("x86-64 register-save branch displacement out of range");
     parameters();
     for (BlockId b : body_.block_ids()) {
+      // CFI follows byte order. Branches into a block after a return still have a live frame.
+      if (out_.frame_rows.back().state == FrameState::entry) frame_row(FrameState::frame_pointer);
       block_offsets_[raw(b)] = e_.offset();
       for (NodeId n : body_.nodes_of(b)) {
         if (auto result = node(n); !result) return std::unexpected(result.error());
@@ -234,6 +252,11 @@ class Emitter {
     BlockId target;
   };
   std::vector<Branch> branches_;
+
+  void frame_row(FrameState state) {
+    // `run` checks the final byte extent before returning any offsets.
+    out_.frame_rows.push_back({static_cast<std::uint32_t>(e_.offset()), state});
+  }
 
   unsigned home_width(ValueId v) const {
     Type type = body_.type(v);
@@ -600,7 +623,9 @@ std::expected<void, std::string> Emitter::node(NodeId n) {
         if (l2::is_float(body_.type(result))) e_.load_scalar_xmm(0, rbp, frame_.slots[raw(result)], home_width(result));
         else read(result);
       }
-      e_.emit({0xc9, 0xc3});  // leave, ret
+      e_.emit({0xc9});  // leave: restore RSP and the caller's RBP
+      frame_row(FrameState::entry);
+      e_.emit({0xc3});  // ret
       return {};
     case Op::unreachable:
       e_.emit({0x0f, 0x0b});  // ud2
@@ -620,6 +645,70 @@ std::expected<MachineCode, std::string> compile_function(const l2::Function& bod
   auto frame = layout(body);
   if (!frame) return std::unexpected(frame.error());
   return Emitter(body, *frame, direct_symbols, got_symbols).run();
+}
+
+std::expected<std::uint32_t, std::string> append_eh_frame(std::vector<std::uint8_t>& section, const MachineCode& code) {
+  // AMD64 psABI §§3.6.2, 4.2.4 and DWARF §6.4. The return address is at CFA-8. RBP
+  // initially has the caller's value. The only augmentation is the FDE pointer encoding.
+  constexpr std::uint8_t dwarf_rbp = 6, dwarf_rsp = 7, dwarf_ra = 16;
+  constexpr std::uint8_t def_cfa = 0x0c, same_value = 0x08, offset = 0x80, restore = 0xc0;
+  constexpr std::array<std::uint8_t, 20> cie{
+      0, 0, 0, 0,                    // CIE ID
+      1, 'z', 'R', 0,                // version and augmentation name
+      1, 0x78, dwarf_ra,             // code alignment 1, SLEB128 data alignment -8, return column
+      1, 0x1b,                       // augmentation size and DW_EH_PE_pcrel | DW_EH_PE_sdata4
+      def_cfa, dwarf_rsp, 8, offset | dwarf_ra, 1, same_value, dwarf_rbp,
+  };
+  if (code.bytes.empty() || !std::in_range<std::int32_t>(code.bytes.size()))
+    return std::unexpected("the unwind range is outside signed 32 bits");
+
+  std::vector<std::uint8_t> instructions;
+  Encoder cfi(instructions);
+  std::uint32_t previous = 0;
+  for (const FrameRow row : code.frame_rows) {
+    if (row.offset <= previous || row.offset >= code.bytes.size())
+      return std::unexpected("an unwind row is outside the function's instruction range");
+    const auto advance = row.offset - previous;
+    if (advance <= 0x3f) {
+      cfi.emit({static_cast<std::uint8_t>(0x40 | advance)});  // DW_CFA_advance_loc
+    } else {
+      const unsigned width = advance <= 0xff ? 1 : advance <= 0xffff ? 2 : 4;
+      cfi.emit({static_cast<std::uint8_t>(0x02 + std::countr_zero(width))});  // advance_loc1/2/4
+      cfi.immediate(advance, width);
+    }
+    switch (row.state) {
+      case FrameState::entry:
+        cfi.emit({def_cfa, dwarf_rsp, 8, restore | dwarf_rbp});
+        break;
+      case FrameState::saved_rbp:
+        cfi.emit({def_cfa, dwarf_rsp, 16, offset | dwarf_rbp, 2});
+        break;
+      case FrameState::frame_pointer:
+        cfi.emit({def_cfa, dwarf_rbp, 16, offset | dwarf_rbp, 2});
+        break;
+    }
+    previous = row.offset;
+  }
+
+  constexpr std::size_t word = sizeof(std::uint32_t), fde_header = 4 * word + 1;
+  const auto fde_start = section.empty() ? word + cie.size() : section.size();
+  const auto fde_size = align_up(fde_header + instructions.size(), 8);
+  if (!std::in_range<std::uint32_t>(fde_start + fde_size))
+    return std::unexpected("the unwind section exceeds the object offset limit");
+  Encoder record(section);
+  if (section.empty()) {
+    record.immediate(cie.size(), word);
+    section.insert(section.end(), cie.begin(), cie.end());
+  }
+  record.immediate(fde_size - word, word);
+  record.immediate(fde_start + word, word);  // the backwards distance from the CIE pointer field
+  const auto initial_location = static_cast<std::uint32_t>(record.offset());
+  record.immediate(0, word);  // S - P at this field, with no instruction-length addend
+  record.immediate(code.bytes.size(), word);
+  record.emit({0});  // FDE augmentation data length
+  section.insert(section.end(), instructions.begin(), instructions.end());
+  section.resize(fde_start + fde_size, 0);  // DW_CFA_nop padding belongs to the FDE
+  return initial_location;
 }
 
 }  // namespace ycxx::x86_64

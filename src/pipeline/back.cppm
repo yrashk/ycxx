@@ -119,6 +119,7 @@ struct FunctionDef {
   std::vector<irgen::FunctionInput::StaticGuard> guards{};
   EntityId guard_acquire = EntityId::none, guard_release = EntityId::none, atexit = EntityId::none, dso = EntityId::none;
   bool weak_elf = false;  // an ordinary external inline definition in the GNU ELF subset (#422)
+  bool cleanup_free_unwind = false;  // certified on the typed definition, before IR drops lifetime information
 };
 
 // A variable definition at namespace scope with its constant initializer, or `ConstId::none` for
@@ -1339,6 +1340,7 @@ struct LinuxFunction {
   EntityId entity;
   const x86_64::MachineCode* code;
   bool weak;
+  bool cleanup_free_unwind;
 };
 
 obj::reloc_kind linux_relocation(x86_64::RelocKind kind) {
@@ -1364,6 +1366,9 @@ std::expected<obj::object, aarch64::CodegenError> assemble_linux(
   };
   if (!functions.empty()) {
     const std::uint32_t text = o.add_section(obj::standard_section::text);
+    std::optional<std::uint32_t> frames;
+    if (std::ranges::any_of(functions, &LinuxFunction::cleanup_free_unwind))
+      frames = o.add_section(obj::standard_section::eh_frame);
     obj::section& sec = o.sections[text];
     for (const LinuxFunction& f : functions) {
       auto sym = symbol_of.find(f.entity);
@@ -1382,6 +1387,14 @@ std::expected<obj::object, aarch64::CodegenError> assemble_linux(
         if (base + r.offset > std::numeric_limits<std::uint32_t>::max())
           return std::unexpected(aarch64::CodegenError{f.entity, "a text relocation exceeds the object offset limit"});
         sec.relocate(linux_relocation(r.kind), target->second, r.addend, static_cast<std::uint32_t>(base + r.offset));
+      }
+      if (f.cleanup_free_unwind) {
+        obj::section& frame = o.sections[*frames];
+        auto location = x86_64::append_eh_frame(frame.bytes, *f.code);
+        if (!location) return std::unexpected(aarch64::CodegenError{f.entity, location.error()});
+        // The host linker may preempt the callable symbol, but this FDE describes these bytes.
+        const auto anchor = o.define({}, obj::binding::local, text, base);
+        frame.relocate(obj::reloc_kind::x86_64_pc32, anchor, 0, *location);
       }
     }
   }
@@ -1619,7 +1632,7 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
     if (linux) {
       std::vector<LinuxFunction> code;
       for (std::size_t i = 0; i < fns.size(); ++i)
-        code.push_back({fns[i].fn, &*ms[i].get().linux_code, tu.functions[i].weak_elf});
+        code.push_back({fns[i].fn, &*ms[i].get().linux_code, tu.functions[i].weak_elf, tu.functions[i].cleanup_free_unwind});
       return assemble_linux(tu.name, code, data, symbols, weak_variables);
     }
     std::vector<aarch64::CompiledFunction> code;

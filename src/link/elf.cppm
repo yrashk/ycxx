@@ -74,6 +74,7 @@ constexpr std::array section_kinds{
     section_kind{"__TEXT", "__text", regular, group::text},
     section_kind{"__TEXT", "__cstring", cstring_literals, group::read_only},
     section_kind{"__TEXT", "__const", regular, group::read_only},
+    section_kind{"__TEXT", "__eh_frame", regular, group::read_only},  // retain CFI bytes without runtime discovery
     section_kind{"__DATA", "__const", regular, group::read_only},  // pointers are fixed at link time
     section_kind{"__DATA", "__data", regular, group::data},
     section_kind{"__DATA", "__init_array", regular, group::init_array},
