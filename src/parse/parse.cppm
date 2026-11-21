@@ -295,7 +295,7 @@ public:
   // Qualified lookup in namespace `ns` ([namespace.qual]/2): its own declarations, or, when it has
   // none, those of the namespaces its using-directives nominate.
   std::vector<DeclId> qualified_decls(std::string_view name, const std::string& ns, u32 item, bool self,
-                                     bool type_only = false) {
+                                     bool type_only = false, bool direct_only = false) {
     auto candidates = [&](const std::string& path) {
       auto declarations = declared_in(name, path, item, self);
       if (type_only)
@@ -306,7 +306,23 @@ public:
       return declarations;
     };
     std::vector<DeclId> r = candidates(ns);
-    if (!r.empty()) return r;
+    if (!r.empty() || direct_only) return r;
+    if (type_only) {
+      std::vector<std::string> visited{ns};
+      auto follow = [&](auto&& self, const std::string& path) -> void {
+        for (const Directive& d : directives_) {
+          if (d.alias || d.item >= item || d.at != path) continue;
+          if (!d.target) item_sema(d.item);
+          if (!d.target || std::ranges::contains(visited, *d.target)) continue;
+          visited.push_back(*d.target);
+          auto more = candidates(*d.target);
+          if (more.empty()) self(self, *d.target);
+          else r.insert(r.end(), more.begin(), more.end());
+        }
+      };
+      follow(follow, ns);
+      return r;
+    }
     for (const std::string& t : closure(ns, item))
       if (t != ns) {
         std::vector<DeclId> more = candidates(t);
@@ -1346,10 +1362,12 @@ public:
       if (auto s = p_->decl_sema(d); s && s->kind == ast::DeclKind::namespace_) return s->entity;
     return std::nullopt;
   }
-  std::vector<ast::DeclSema> namespace_members(EntityId ns, ast::NameId name, bool type_only = false) override {
+  std::vector<ast::DeclSema> namespace_members(EntityId ns, ast::NameId name, bool type_only = false,
+                                               bool direct_only = false) override {
     std::vector<ast::DeclSema> r;
     for (DeclId d : p_->qualified_decls(p_->world().ins.names.spelling(name), p_->namespace_path(ns),
-                                       declaration_lookup_end.value_or(item_), self_ && !declaration_lookup_end, type_only))
+                                       declaration_lookup_end.value_or(item_), self_ && !declaration_lookup_end,
+                                       type_only, direct_only))
       if (auto s = p_->decl_sema(d); s && s->entity != EntityId::none) r.push_back(*s);
     return r;
   }
@@ -1485,8 +1503,9 @@ public:
   std::optional<EntityId> namespace_named(ast::NameId name, std::span<const EntityId> directives = {}) override {
     return at_.namespace_named(name, directives);
   }
-  std::vector<ast::DeclSema> namespace_members(EntityId ns, ast::NameId name, bool type_only = false) override {
-    return at_.namespace_members(ns, name, type_only);
+  std::vector<ast::DeclSema> namespace_members(EntityId ns, ast::NameId name, bool type_only = false,
+                                               bool direct_only = false) override {
+    return at_.namespace_members(ns, name, type_only, direct_only);
   }
   std::vector<ast::DeclSema> adl_functions(EntityId ns, ast::NameId name, bool at_instantiation) override {
     return at_instantiation ? p_->adl_functions(ns, name, p_->end(), false) : at_.adl_functions(ns, name, false);

@@ -123,7 +123,8 @@ public:
   // alias) unqualified lookup finds for `name`, and qualified lookup of `name` in namespace `ns`
   // ([namespace.qual]).
   virtual std::optional<EntityId> namespace_named(NameId name, std::span<const EntityId> directives = {}) = 0;
-  virtual std::vector<ast::DeclSema> namespace_members(EntityId ns, NameId name, bool type_only = false) = 0;
+  virtual std::vector<ast::DeclSema> namespace_members(EntityId ns, NameId name, bool type_only = false,
+                                                      bool direct_only = false) = 0;
   // [basic.lookup.argdep]: functions in one associated namespace's inline namespace set, and
   // a class's record if complete there. Ask at the lexical point, and for a dependent call
   // also at the point of instantiation ([temp.dep.candidate]).
@@ -433,9 +434,12 @@ public:
           if (hit.found) return hit.type;
         }
         if (auto r = nested_member(current_class, name, true)) return r->first.type;
-      } else if (auto m = q_->earlier_member(name); m && (m->kind == ast::DeclKind::enum_ || m->kind == ast::DeclKind::type_alias)) {
-        return m->type;
       } else {
+        if (auto m = q_->earlier_member(name)) {
+          if (m->kind == ast::DeclKind::enum_ || m->kind == ast::DeclKind::type_alias) return m->type;
+          if (!elaborated && (m->kind == ast::DeclKind::data_member || m->kind == ast::DeclKind::variable))
+            return std::nullopt;
+        }
         // In the class being defined, a type of its (complete) bases.
         for (EntityId b : q_->defining_bases(current_class))
           if (auto r = nested_member(b, name)) return r->first.type;
@@ -973,6 +977,14 @@ public:
     return std::nullopt;
   }
 
+  std::optional<QualType> direct_member_introduction(EntityId ns, NameId n) {
+    if (member_introduction && member_introduction->name == n &&
+        w_->entities.rec(member_introduction->sema.entity).scope == ns &&
+        q_->namespace_members(ns, n, /*type_only=*/false, /*direct_only=*/true).empty())
+      return member_introduction->sema.type;
+    return std::nullopt;
+  }
+
   std::optional<Scope> scope_member(const Scope& s, NameId n) {
     // A member of the class whose member-specification this is (the current instantiation in a
     // template) is found where it is declared ([temp.dep.type]/1); a member of another dependent
@@ -981,14 +993,12 @@ public:
       if (auto t = member_type(types().class_of(*s.type), n)) return Scope{std::nullopt, *t};
     if (s.type && types().is_dependent(*s.type)) return Scope{std::nullopt, types().dep_name(*s.type, n)};
     if (s.ns) {
+      if (auto t = direct_member_introduction(*s.ns, n)) return Scope{std::nullopt, t};
       auto members = q_->namespace_members(*s.ns, n);
       for (const ast::DeclSema& d : members) {
         if (d.kind == ast::DeclKind::namespace_) return Scope{d.entity, std::nullopt};
         if (is_type(d.kind)) return Scope{std::nullopt, d.type};
       }
-      if (members.empty() && member_introduction && member_introduction->name == n &&
-          w_->entities.rec(member_introduction->sema.entity).scope == *s.ns)
-        return Scope{std::nullopt, member_introduction->sema.type};
       if (*s.ns == EntityId::none && members.empty())
         if (auto t = builtin_type_name(n)) return Scope{std::nullopt, *t};
     }
@@ -997,10 +1007,12 @@ public:
   // Whether `S::n` names a function or variable, which hides a type of that name in its scope
   // ([basic.scope.hiding]/2): `::stat(path, &buf)` calls the function.
   bool scope_names_object(const Scope& s, NameId n) {
-    if (s.ns)
+    if (s.ns) {
+      if (direct_member_introduction(*s.ns, n)) return false;
       return std::ranges::any_of(q_->namespace_members(*s.ns, n), [](const ast::DeclSema& d) {
         return d.kind == ast::DeclKind::function || d.kind == ast::DeclKind::variable;
       });
+    }
     if (s.type && types().is_class(*s.type))
       if (const ClassRec* c = class_rec(types().class_of(*s.type)))
         return std::ranges::any_of(c->members, [&](const MemberDeclRec& m) { return m.name == n; });
