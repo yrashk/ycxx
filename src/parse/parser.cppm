@@ -4456,6 +4456,13 @@ public:
   // the initializer one needs, `=` or `{` outside brackets, so `T(1)` is an expression.
   bool condition_declaration_ahead() {
     if (!starts_declaration(true)) return false;
+    const bool grouped_auto = is(Tk::kw_auto) && kind(1) == Tk::l_paren;
+    if (grouped_auto) {
+      const u32 after = past_parentheses(1);
+      // A parenthesized initializer can follow a declaration statement. In a
+      // condition it is a call unless it can be part of the declarator.
+      if (kind(after) == Tk::l_paren && !params_ahead(after, /*statement=*/true)) return false;
+    }
     int depth = 0;
     for (u32 j = 0;; ++j) {
       switch (kind(j)) {
@@ -4467,7 +4474,12 @@ public:
         // `T x)`: a declaration missing its initializer, which `condition_operand` reports.
         if (depth-- == 0) return j >= 2 && kind(j - 1) == Tk::identifier && kind(j - 2) != Tk::l_paren;
         break;
-      default: break;
+      default:
+        if (grouped_auto && depth == 0 && (binary_operator(kind(j)) || assignment_operator(kind(j)) ||
+            kind(j) == Tk::question || kind(j) == Tk::comma || kind(j) == Tk::period || kind(j) == Tk::arrow ||
+            kind(j) == Tk::plusplus || kind(j) == Tk::minusminus))
+          return false;
+        break;
       }
     }
   }
