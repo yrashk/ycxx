@@ -1310,6 +1310,9 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   remains under #16.
 - Supported ordinary free binary operators use the full ADL association set, including base
   namespaces and hidden friends. Namespace using-directives do not contribute candidates.
+  Supported dependent binary operator expressions on ordinary non-template class operands retain
+  definition-time ordinary lookup and add eligible associated nonmember candidates at instantiation.
+  [#357](https://github.com/yrashk/ycxx/issues/357)
 - Remaining work in #165 includes declarations of functions in blocks, exact lookup for
   other operators, member templates as template arguments, dependent-call template argument associations,
   overload-set arguments and complete unqualified template-id lookup.
@@ -1811,6 +1814,14 @@ session's.*
   later demand. A variable-template partial specialization with a declared type such as
   `Tag<empty<T>>` remains unsupported.
   `__has_builtin(__is_empty)` continues to answer 1 ([meta.unary.prop], #218).
+- `__is_destructible(T)`, `__is_nothrow_destructible(T)`, and `__is_trivially_destructible(T)`
+  give true for references, including references to incomplete types, supported non-enum scalars,
+  and bounded arrays of those scalars. They give false for cv `void`, function types, and arrays
+  of unknown bound. Incomplete class operands and bounded arrays of incomplete classes get a
+  distinct diagnostic. Supported class-template bases and variable-template initializers replay
+  dependent operands. The class completeness check uses the written point for concrete operands
+  and the demand point for dependent operands. `__has_builtin` answers 0 for all three. Class
+  destructibility, enum operands, and other dependent contexts remain in #218 ([meta.unary.prop]).
 - Listed in docs/EXTENSIONS.md. Tests: `tests/own/builtins/`. `<cstdio>`: 53 → 33 errors.
 - Not yet (#211 follow-up): the built-ins that need the object model, such as
   class constructibility, assignability and general convertibility, remaining `__is_trivially_*` and
@@ -1880,7 +1891,10 @@ Fable decided the representation (ast.md §6.6); the Opus session wrote the code
   pass. `<cstdio>`: 33 → 18 errors.
 - Ordinary function overloads with explicit trailing type packs preserve the pack in atomic
   constraint substitution. Empty packs, order, and reference types are retained (#234).
-- Not yet: constraints on class and variable templates, partial specializations and members,
+- A directly named, non-dependent specialization of a primary class template with explicit type
+  arguments checks its constraints even when the use does not need a complete class (#234).
+- Not yet: class-template constraints outside that case, constraints on variable templates, partial
+  specializations and members,
   broader constrained packs, fold-expanded constraints, `C auto`, `noexcept` in compound requirements
   (#234); re-verification of satisfaction at END (#235); Itanium constraint mangling (#236);
   recorded discarded extents for `if constexpr` (#237); value-dependent mapping arguments (#209).
@@ -2808,7 +2822,7 @@ and runtime integration with ycxx's own linker remain under [#89]. See the
 - The six usual global array allocation and deallocation declarations support explicit
   calls and typed address selection, including the aligned signatures. Written
   redeclarations share the implicit entities. The Itanium mangler emits `na` and `da`, and
-  Linux object tests call providers built with both GCC and Clang. Expression codegen and
+  Linux object tests call providers built with both GCC and Clang. Broader expression codegen and
   further allocation-function declarations remain in [#293](https://github.com/yrashk/ycxx/issues/293).
 - The four C++26 non-allocating placement functions can be declared and defined at global scope
   ([new.delete.placement]). The two allocation functions take `size_t, void*` and return `void*`.
@@ -2834,7 +2848,14 @@ and runtime integration with ycxx's own linker remain under [#89]. See the
   of `ptrdiff_t`. The array AST retains default or empty initialization and the typed delete operand.
   On Linux x86-64, array deletion evaluates that operand once and passes the original address to
   the usual unsized `operator delete[](void*)` when non-null. The call releases the allocation,
-  including zero-length arrays. Native array allocation and broader deletion remain in #293.
+  including zero-length arrays.
+- Linux x86-64 can allocate these default-initialized arrays in ordinary functions certified
+  for cleanup-free unwinding when the bound is a single integer literal. The usual global
+  `operator new[](size_t)` receives the checked byte count, including zero. Lowering preserves
+  the returned address and leaves the element bytes alone. A hosted caller can catch an
+  exception from a replacement allocator across the wrapper. `unit.linux_fixed_array_new`
+  checks call relocations, unwind frame coverage, allocation, and release.
+  Broader allocation and deletion remain in #293.
   Constant-evaluated allocation and deletion are tracked in #321.
   [Cookie-free deletion](docs/design/cookie-free-array-delete.md)
   A file-scope scalar initializer still needs lowered code to qualify for dynamic initialization.
@@ -2937,6 +2958,10 @@ the body. A non-generic lambda body uses its own evaluation context.
 - Function-template bodies replay decay-copy of supported dependent operands with the
   template arguments bound. A value-dependent operand with known type gives the conversion
   its decayed prvalue type in the template definition, including in `decltype`.
+- Concrete decay-copy works in a non-type template argument with `auto{expr}` or with
+  `auto(expr)` when the initializer starts with an integer literal. The argument must be
+  a converted constant expression. Function and function-pointer type-ids keep precedence.
 - General class objects, member pointers, operands whose type dependence is unresolved, and
-  dependent template arguments, requirements, and exception specifications remain open.
+  other direct parenthesized template argument spellings remain open, as do dependent
+  template arguments, requirements, and exception specifications.
   [#286](https://github.com/yrashk/ycxx/issues/286)

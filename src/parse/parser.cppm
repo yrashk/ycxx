@@ -322,7 +322,9 @@ public:
     }
     if (starts_decl_specifier(kind())) return true;
     if (qualified_ahead()) {
-      auto q = qualified_type(0);
+      bool failed_qualifier = false;
+      auto q = qualified_type(0, /*checked=*/false, /*type_only=*/false, &failed_qualifier);
+      if (failed_qualifier) return true;  // let the declaration diagnose the qualifier
       auto context = statement ? PointerLookahead::statement : PointerLookahead::declaration;
       return q && !(statement && s_->types().kind(q->first) == sema::TypeKind::dep_name) &&
              (kind(q->second) != Tk::l_paren || member_pointer_star(q->second + 1) ||
@@ -738,6 +740,7 @@ public:
           }
           if (qualified_ahead()) {
             // `N::C`, `::C`, `C::E`, `X<T>::E` ([dcl.type.simple]).
+            const auto diags = s_->diag_count();
             if (auto q = qualified_type(0, true);
                 q && (in_type_id || kind(q->second) != Tk::l_paren ||
                       function_pointer_declarator_ahead(q->second) ||
@@ -746,6 +749,7 @@ public:
               take_qualified(q->second);
               continue;
             }
+            if (s_->has_error_since(diags)) d.ok = false;
             goto done;
           }
           if (kind(1) == Tk::less && s_->names_type_template(name_of(tok()))) {
@@ -1413,7 +1417,8 @@ public:
   std::optional<sema::Sema::Scope> nested_name(u32 start, u32& next, bool member_pointer = false,
                                                bool checked = false, bool type_components = false,
                                                bool check_injected_access = false,
-                                               std::vector<TypeQualifier>* type_qualifiers = nullptr) {
+                                               std::vector<TypeQualifier>* type_qualifiers = nullptr,
+                                               bool* failed_qualifier = nullptr) {
     u32 j = start;
     std::optional<sema::Sema::Scope> s;
     if (kind(j) == Tk::kw_decltype && kind(j + 1) == Tk::l_paren) {
@@ -1434,7 +1439,7 @@ public:
       s = s_->scope_named(name_of(tok(j)));
       if (!s) return std::nullopt;
       j += 2;
-    } else if (auto t = template_id_scope(std::nullopt, j, /*scope=*/true, checked)) {
+    } else if (auto t = template_id_scope(std::nullopt, j, /*scope=*/true, checked || check_injected_access, failed_qualifier)) {
       s = t;
     } else {
       return std::nullopt;
@@ -1457,7 +1462,7 @@ public:
         else if (type_qualifiers && s->type) type_qualifiers->push_back({*s, n, pos() + j});
         s = m;
         j += 2;
-      } else if (auto t = template_id_scope(s, j, /*scope=*/true, checked)) {
+      } else if (auto t = template_id_scope(s, j, /*scope=*/true, checked || check_injected_access, failed_qualifier)) {
         s = t;
       } else {
         break;
@@ -1480,7 +1485,7 @@ public:
   // unqualified lookup or in namespace `in` ([temp.names]); `j` moves past the `::`. The arguments
   // are parsed ahead of the tokens being taken. A speculative lookup discards its diagnostics.
   std::optional<sema::Sema::Scope> template_id_scope(std::optional<sema::Sema::Scope> in, u32& j, bool scope = true,
-                                                     bool checked = false) {
+                                                     bool checked = false, bool* failed_qualifier = nullptr) {
     if (kind(j) != Tk::identifier || kind(j + 1) != Tk::less) return std::nullopt;
     if (in && !in->ns) return std::nullopt;  // member templates of classes come later (#88)
     NameId n = name_of(tok(j));
@@ -1491,6 +1496,7 @@ public:
     u32 saved = i_;
     bool saved_half = half_;
     std::size_t diags = s_->diag_count();
+    const u32 name_at = pos() + j;
     i_ += j + 1;
     auto args = template_argument_list();
     u32 after = i_ - saved;
@@ -1498,10 +1504,15 @@ public:
     bool ended_half = half_;  // the list ended in the first half of a `>>`
     std::optional<QualType> t;
     if (args && closed)
-      t = tt ? s_->template_param_id(*tt, *args, 0) : builtin ? s_->builtin_template_id(n, *args, 0) : type_template_id(*tmpl, *args, 0);
+      t = tt ? s_->template_param_id(*tt, *args, 0) : builtin ? s_->builtin_template_id(n, *args, 0) : type_template_id(*tmpl, *args, name_at);
     i_ = saved;
     half_ = saved_half;
     if (!scope) qualified_half_ = ended_half;
+    if (!t && args && closed && failed_qualifier) {
+      *failed_qualifier = std::ranges::any_of(std::span(s_->diagnostics()).subspan(diags), [](const auto& d) {
+        return sema::sema_diag_of(d.id) == Diag::constraints_not_satisfied;
+      });
+    }
     if (!checked) s_->truncate_diags(diags);
     if (!t) return std::nullopt;
     j = scope ? after + 1 : after;
@@ -1520,16 +1531,22 @@ public:
 
   // A qualified type name at token `start`: its type and the tokens it takes.
   // `checked`: the name is taken here, so its access is checked ([class.access]/4).
-  std::optional<std::pair<QualType, u32>> qualified_type(u32 start, bool checked = false, bool type_only = false) {
+  std::optional<std::pair<QualType, u32>> qualified_type(u32 start, bool checked = false, bool type_only = false,
+                                                       bool* failed_qualifier = nullptr) {
     u32 next = 0;
     bool check_qualifier = checked && substituting_partial_arguments;
-    auto s = nested_name(start, next, /*member_pointer=*/false, check_qualifier, /*type_components=*/true, checked);
+    const auto diags = s_->diag_count();
+    auto s = nested_name(start, next, /*member_pointer=*/false, check_qualifier, /*type_components=*/true, checked,
+                         nullptr, failed_qualifier);
+    if (checked && s_->has_error_since(diags)) return std::nullopt;
     if (!s || kind(next) != Tk::identifier || kind(next + 1) == Tk::coloncolon) return std::nullopt;
     // `N::X<args>`: a class template specialization named in a namespace ([temp.names]).
     qualified_half_ = false;
     if (kind(next + 1) == Tk::less && s->ns) {
       u32 j = next;
-      if (auto t = template_id_scope(s, j, /*scope=*/false, check_qualifier)) return std::pair{*t->type, j - start};
+      const auto diags = s_->diag_count();
+      if (auto t = template_id_scope(s, j, /*scope=*/false, checked)) return std::pair{*t->type, j - start};
+      if (checked && s_->has_error_since(diags)) return std::nullopt;
     }
     NameId name = name_of(tok(next));
     std::optional<u32> at = checked ? std::optional{pos() + next} : std::nullopt;
@@ -2355,9 +2372,13 @@ public:
           u32 at;
           ~EndPattern() { s->end_pattern(expanded, at, at, false); }
         } end_pattern{s_, false, arg_at};
+        // A brace or an integer literal in the initializer rules out an abstract declarator.
+        // Other `auto(...)` spellings keep type-id precedence ([temp.arg.general]/2).
+        const bool decay_copy = is(Tk::kw_auto) &&
+                               (kind(1) == Tk::l_brace || (kind(1) == Tk::l_paren && kind(2) == Tk::int_lit));
         if (template_name_ahead()) {
           args.push_back(*template_name_argument());
-        } else if (starts_type_id()) {
+        } else if (!decay_copy && starts_type_id(/*preserve_failed_qualifier=*/true)) {
           auto t = type_id();
           if (!t) ok = false;
           else args.push_back({ast::TemplateArgKind::type, s_->types().canonical(*t), sema::ConstId::none});
@@ -2404,14 +2425,16 @@ public:
     if (replay_at && deferred != deferred_argument_checks_) *replay_at = begin;
     return args;
   }
-  bool starts_type_id() {
+  bool starts_type_id(bool preserve_failed_qualifier = false) {
     if (transform_trait_ahead()) return true;
     if (starts_decl_specifier(kind())) return !is(Tk::kw_static) && !is(Tk::kw_extern);
     // `X<args>::m` is a type only when m is: the nested name first. A member of a dependent class
     // is a type only after `typename` ([temp.res.general]/4).
     if (qualified_ahead()) {
-      auto q = qualified_type(0);
-      return q && s_->types().kind(q->first) != sema::TypeKind::dep_name;
+      bool failed_qualifier = false;
+      auto q = qualified_type(0, /*checked=*/false, /*type_only=*/false,
+                              preserve_failed_qualifier ? &failed_qualifier : nullptr);
+      return failed_qualifier || (q && s_->types().kind(q->first) != sema::TypeKind::dep_name);
     }
     if (is(Tk::identifier) && kind(1) == Tk::less && s_->names_type_template(name_of(tok()))) return true;
     return is(Tk::identifier) && kind(1) != Tk::coloncolon && s_->class_name(name_of(tok())).has_value();
@@ -3059,6 +3082,7 @@ public:
     bump();  // new, after an optional ::
     std::optional<QualType> type;
     std::optional<Ex> bound;
+    bool literal_bound = false;
     std::optional<Ex> placement;
     bool excluded = false;
     if (is(Tk::l_paren)) {
@@ -3121,6 +3145,8 @@ public:
           excluded = true;  // multiple dimensions
           constant_expression();
         } else {
+          literal_bound = is(Tk::int_lit) && kind(1) == Tk::r_square &&
+                          !literal().overflow && literal().ud_suffix == lex::no_name;
           bound = expression();
         }
         angle_ = saved;
@@ -3147,7 +3173,7 @@ public:
       s_->diag(begin, Diag::not_supported, Tk::kw_new);
       return {NodeId::none, begin, pos()};
     }
-    if (bound) return s_->new_array(*type, *bound, args, braces.get(), begin, pos());
+    if (bound) return s_->new_array(*type, *bound, literal_bound, args, braces.get(), begin, pos());
     return s_->new_object(*type, args, braces.get(), begin, pos(), placement);
   }
 
@@ -3252,18 +3278,12 @@ public:
   // postfix-expression ([expr.post]).
   Ex postfix_expression() {
     Ex e = primary_expression();
-    // Inside brackets a `>` is an operator again ([temp.names]/4).
-    struct Unangle {
-      int& a;
-      int saved;
-      ~Unangle() { a = saved; }
-    };
     for (;;) {
       u32 at = pos();
       switch (kind()) {
       case Tk::l_paren: {
         bump();
-        Unangle u{angle_, std::exchange(angle_, 0)};
+        Unangle u{angle_};
         std::vector<Ex> args;
         if (!is(Tk::r_paren)) {
           do {
@@ -3280,7 +3300,7 @@ public:
       }
       case Tk::l_square: {
         bump();
-        Unangle u{angle_, std::exchange(angle_, 0)};
+        Unangle u{angle_};
         Ex index = expression();
         if (!expect(Tk::r_square)) return {NodeId::none, e.begin, pos()};
         e = s_->subscript(e, index, pos(), at);
@@ -5547,6 +5567,7 @@ public:
 
   // [dcl.type.auto.deduct]: a parenthesized or braced auto initializer has one expression.
   Ex single_auto_initializer() {
+    Unangle unangle{angle_};
     const u32 open = pos();
     std::vector<Ex> args;
     if (is(Tk::l_brace)) {
@@ -5637,6 +5658,12 @@ public:
   bool dependent_decay_copy_body = false;  // a function template's compound statement, before replay
   bool substituting_partial_arguments = false;
 private:
+  // In a delimited operand, a `>` is an operator again ([temp.names]/4).
+  struct Unangle {
+    int& angle;
+    int saved = std::exchange(angle, 0);
+    ~Unangle() { angle = saved; }
+  };
   struct DisableDependentDecayCopy {
     bool& enabled;
     bool saved = std::exchange(enabled, false);

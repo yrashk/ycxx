@@ -47,7 +47,9 @@ build/bin/ycxx cxx hello.cpp -o hello && ./hello
 
 Single-expression `auto(x)` and `auto{x}` perform scalar and pointer decay-copy, including
 array and function decay. Function-template bodies can defer supported dependent operands to
-instantiation. [#286](https://github.com/yrashk/ycxx/issues/286)
+instantiation. Concrete constant template arguments can use braced conversions such as
+`Tag<auto{7}>` and integer-literal-led parenthesized conversions such as `Tag<auto(7)>`.
+[#286](https://github.com/yrashk/ycxx/issues/286)
 
 **Preprocess binary resources.** Both targets support `#embed` and `__has_embed` with the standard
 parameters. [#125](https://github.com/yrashk/ycxx/issues/125)
@@ -218,6 +220,8 @@ written default member initializer are value-initialized.
   namespaces, including those of class template type arguments in ordinary calls. Functions
   support default arguments, recursion, operator overloading and calls through pointers.
   Ordinary free binary operators use argument-dependent lookup, including associated base namespaces.
+  Supported dependent binary operators on ordinary non-template classes also find associated
+  nonmember candidates at instantiation.
   Nonmember operators can be called explicitly by name, including with namespace qualification.
   [#219](https://github.com/yrashk/ycxx/issues/219)
   Overloaded free functions can take braced arguments for arithmetic parameters
@@ -232,8 +236,10 @@ written default member initializer are value-initialized.
 - ordinary scalar `new` and single-object `delete` for integral and pointer objects, including
   cv-qualified objects. Scalar allocation uses the global Itanium allocation functions.
   Syntax checking also covers one-dimensional scalar `new T[n]` and `delete[] p`.
-  On Linux x86-64, `delete[] p` releases one-dimensional arrays of integral or ordinary pointer
-  elements through the unsized global deallocator, including zero-length arrays.
+  On Linux x86-64, ordinary functions with cleanup-free unwind frames can default-initialize
+  one-dimensional integral and ordinary pointer arrays with a literal bound. The allocation
+  returns the original address. `delete[] p` releases it through the unsized global deallocator,
+  including for zero-length arrays.
   The usual aligned scalar allocation and deallocation signatures support explicit calls with
   `std::align_val_t`. Written nonthrowing global scalar and array overloads with a final
   `const Tag&` support explicit calls, including `std::nothrow_t` and user-defined class tags.
@@ -274,14 +280,17 @@ written default member initializer are value-initialized.
 - parenthesized direct initialization from functional conversions such as `S b(S(1));`;
 - `[[…]]` attributes, the GNU attributes and `asm` labels the macOS SDK's headers use, the
   GNU pointer qualifiers glibc uses, and the type-trait built-ins libycxx's headers use
-  (`__is_same`, `__remove_cv`, …)
-  ([docs/EXTENSIONS.md](docs/EXTENSIONS.md));
+  (`__is_same`, `__remove_cv`, …). `__is_destructible`, `__is_nothrow_destructible`, and
+  `__is_trivially_destructible` give true for references, non-enum scalars, and bounded arrays
+  of those scalars. They give false for cv `void`, function types, and arrays of unknown bound.
+  [docs/EXTENSIONS.md](docs/EXTENSIONS.md)
 - templates: function, class and variable templates, deduction, partial ordering, explicit and
   partial specializations with substitution checks for dependent type arguments, static constexpr
   members of class templates, member function and
   constructor templates, parameter packs and fold expressions, alias templates, template
   template parameters, concepts and requires-expressions in overload resolution, including
-  explicit trailing type packs in ordinary constrained function overloads,
+  explicit trailing type packs in ordinary constrained function overloads and checking constraints
+  when directly naming a non-dependent primary class specialization with explicit type arguments,
   `if constexpr`, deferred template static assertion failures, and two-phase lookup, with
   Itanium names identical to Clang's; Clang's
   `__make_integer_seq`;
@@ -415,7 +424,7 @@ members. [#285](https://github.com/yrashk/ycxx/issues/285)
   virtual dispatch and table emission, virtual base classes,
   inheriting constructors, and base packs or multiple bases in a class template.
 - Member class and alias templates, conversion function templates, and constraints on class
-  templates and their members.
+  templates outside the directly named primary case and constraints on members.
 - Native throwing beyond the Linux `int` slice, typed and multiple handlers, cleanup during
   source-level unwinding, and unwind discovery in ycxx-linked programs.
   [#89](https://github.com/yrashk/ycxx/issues/89) · [#558](https://github.com/yrashk/ycxx/issues/558)

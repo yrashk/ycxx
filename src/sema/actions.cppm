@@ -700,7 +700,8 @@ public:
   // `X<args>` naming a class template specialization ([temp.names], [temp.arg]), or the type an
   // alias template specialization stands for: its type with the arguments substituted
   // ([temp.alias]/2).
-  std::optional<QualType> class_template_id(const ast::DeclSema& tmpl, std::span<const TemplateArg> args, u32 at) {
+  std::optional<QualType> class_template_id(const ast::DeclSema& tmpl, std::span<const TemplateArg> args, u32 at,
+                                           bool directly_named = true) {
     auto full = template_arguments(tmpl, args, at);
     if (!full) return std::nullopt;
     if (tmpl.kind == ast::DeclKind::type_alias) {
@@ -709,6 +710,20 @@ public:
       // Past the nesting limit, which was diagnosed, it says nothing more ([temp.inst]/16).
       if (!t && !q_->instantiation_gave_up()) diag(at, Diag::template_args_mismatch, w_->entities.rec(tmpl.entity).name);
       return t;
+    }
+    // [temp.names]/9: naming a non-dependent specialization checks the primary's
+    // constraints even when the use does not require a complete class.
+    if (directly_named && tmpl.kind == ast::DeclKind::class_ && tmpl.constraints != ConstId::none &&
+        w_->entities.rec(tmpl.entity).kind == EntityKind::class_template &&
+        args.size() == full->size() &&
+        std::ranges::all_of(*full, [&](const TemplateArg& arg) {
+          return arg.kind == ast::TemplateArgKind::type && !dependent(arg);
+        })) {
+      const auto before = diag_count();
+      if (!constraints_satisfied(tmpl, *full)) {
+        if (!has_error_since(before)) diag(at, Diag::constraints_not_satisfied, w_->entities.rec(tmpl.entity).name);
+        return std::nullopt;
+      }
     }
     return types().class_type(class_specialization(tmpl.entity, *full));
   }
@@ -914,6 +929,44 @@ public:
         if (auto fact = record->trivially_copyable()) return bool_literal(*fact, begin, end);
     }
     return fail(Diag::trivial_copyability_unsupported, operand);
+  }
+
+  // In this domain every destructible type has trivial, nonthrowing destruction ([meta.unary.prop]).
+  Ex destructibility_expr(ast::DepOp op, NameId name, QualType operand, u32 begin, u32 end) {
+    const Types& ts = types();
+    QualType element = ts.canonical(operand);
+    const engine::Loc loc = type_trait_loc(begin);
+    const auto fail = [&](Diag d, const auto&... args) -> Ex {
+      diag_at(loc, d, args...);
+      return {NodeId::none, begin, end};
+    };
+    if (ts.is_dependent(element)) {
+      if (q_->in_type_trait_pattern())
+        if (auto value = templates().unary_trait_value(op, element)) {
+          q_->record_dependent_type_trait_operand(loc);
+          return literal(builtin(Builtin::bool_), *value, ValueCategory::prvalue, begin, end);
+        }
+      return fail(Diag::destructibility_dependent, name);
+    }
+    // References are destructible even when the referent is incomplete. An unknown-bound
+    // array gives false; only a bounded array queries its ultimate element ([meta.unary.prop]).
+    if (ts.is_reference(element)) return bool_literal(true, begin, end);
+    while (ts.is_array(element)) {
+      const TypeRec array = ts.rec(element);
+      if (array.bound_value == ConstId::none) return bool_literal(false, begin, end);
+      element = ts.canonical(array.inner);
+    }
+    if (ts.is_function(element) || ts.is_void(element)) return bool_literal(false, begin, end);
+    if (!ts.is_enum(element) && ts.is_scalar(element)) return bool_literal(true, begin, end);
+    if (ts.is_class(element)) {
+      const EntityId cls = ts.class_of(element);
+      const auto demand = q_->type_trait_at_demand(cls, loc);
+      if (!(demand ? *demand : q_->is_complete_at_source(cls))) {
+        if (q_->type_trait_instantiation_failed(cls)) return {NodeId::none, begin, end};
+        return fail(Diag::destructibility_incomplete, element, name);
+      }
+    }
+    return fail(Diag::destructibility_unsupported, name, operand);
   }
 
   // [meta.unary.prop]: each base must also be empty. A nonempty contributor
@@ -1270,6 +1323,11 @@ public:
     std::optional<ast::DepOp> unary_op;
     switch (t) {
     case is_same: return structural_trait(templates().is_same_value(args[0], args[1]));
+    case is_destructible: return destructibility_expr(ast::DepOp::is_destructible, name, args[0], begin, end);
+    case is_nothrow_destructible:
+      return destructibility_expr(ast::DepOp::is_nothrow_destructible, name, args[0], begin, end);
+    case is_trivially_destructible:
+      return destructibility_expr(ast::DepOp::is_trivially_destructible, name, args[0], begin, end);
     case is_base_of: return base_of_expr(args[0], args[1], begin, end);
     case is_assignable: return assignability_expr(ast::DepOp::is_assignable, name, args[0], args[1], begin, end);
     case is_nothrow_assignable:
@@ -2483,7 +2541,7 @@ public:
       if (a->templ != EntityId::none) {
         auto d = q_->template_decl(a->templ);
         if (!d) return std::nullopt;
-        return class_template_id(*d, t.flatten(*full), at);
+        return class_template_id(*d, t.flatten(*full), at, /*directly_named=*/false);
       }
       TypeRec r = types().rec(a->type);
       return types().dep_spec(r.depth, r.index, r.pack, *full);
@@ -6604,6 +6662,16 @@ public:
     return false;
   }
 
+  Ex usual_allocation_call(Ex size, u32 begin, bool array = false) {
+    const auto f = w_->allocation_function(AllocationFunction::allocate, array);
+    q_->use_allocation_function(f.entity);
+    ExprInfo fn_info{f.type, ValueCategory::lvalue, 0};
+    Ex callee = node(ast::DeclRef{fn_info, f.entity}, begin, begin, fn_info);
+    ExprInfo call_info{types().rec(f.type).inner, ValueCategory::prvalue, 0};
+    Child sizes[] = {at(size, begin)};
+    return node(ast::Call{call_info, f.entity, at(callee, begin), b_->list(sizes)}, begin, begin, call_info);
+  }
+
   // [expr.new]: initialize the object after the call to the global allocation function.
   Ex new_object(QualType t, const std::optional<std::vector<Ex>>& args, const Braced* braces, u32 begin, u32 end,
                 std::optional<Ex> placement) {
@@ -6681,13 +6749,7 @@ public:
       }
       if (dependent(init)) return dependent_node({allocation, init}, begin, end, pointer);
     } else {
-      ast::DeclSema f = w_->allocation_function(AllocationFunction::allocate);
-      q_->use_allocation_function(f.entity);
-      ExprInfo fn_info{f.type, ValueCategory::lvalue, 0};
-      Ex callee = node(ast::DeclRef{fn_info, f.entity}, begin, begin, fn_info);
-      ExprInfo call_info{types().rec(f.type).inner, ValueCategory::prvalue, 0};
-      Child sizes[] = {at(size, begin)};
-      allocation = node(ast::Call{call_info, f.entity, at(callee, begin), b_->list(sizes)}, begin, begin, call_info);
+      allocation = usual_allocation_call(size, begin);
     }
     ExprInfo info{pointer, ValueCategory::prvalue, 0};
     return node(ast::NewObject{info, at(allocation, begin), at(init, begin), placement.has_value()}, begin, end, info);
@@ -6722,15 +6784,20 @@ public:
     return node(ast::DeleteObject{info, f, at(addr, begin), at(size, begin)}, begin, end, info);
   }
 
-  // [expr.new]: a potentially evaluated constant bound is checked before unsigned conversion.
   // Limit the object size to the largest positive byte distance representable by ptrdiff_t.
+  u64 max_new_array_count(u64 element_size) const {
+    int size_bits = shape(w_->target, w_->target.ptrdiff_type).bits - 1;
+    return ((u64{1} << size_bits) - 1) / element_size;
+  }
+
+  // [expr.new]: a potentially evaluated constant bound is checked before unsigned conversion.
   bool valid_new_bound(Ex bound, u64 element_size) {
     if (unevaluated || !constant_of) return true;
     auto known = constant_of(bound);
     if (!known) return true;
     ValueRec value = w_->values.rec(*known);
     int size_bits = shape(w_->target, w_->target.ptrdiff_type).bits - 1;
-    u64 max_count = ((u64{1} << size_bits) - 1) / element_size;
+    u64 max_count = max_new_array_count(element_size);
     bool negative = false;
     bool oversized = false;
     if (value.kind == ValueKind::integer) {
@@ -6749,7 +6816,8 @@ public:
     return true;
   }
 
-  Ex new_array(QualType t, Ex bound, const std::optional<std::vector<Ex>>& args, const Braced* braces, u32 begin, u32 end) {
+  Ex new_array(QualType t, Ex bound, bool literal_bound, const std::optional<std::vector<Ex>>& args,
+               const Braced* braces, u32 begin, u32 end) {
     Ex fail{NodeId::none, begin, end};
     if (!bound.ok()) return fail;
     if (!types().is_object(t)) {
@@ -6778,8 +6846,22 @@ public:
 
     Ex init = braces ? list_init(t, *braces) : args ? value_init(t, end, end) : default_init(t, end, end);
     if (!init.ok()) return fail;
+    Child allocation;
+    if (!unevaluated && !args && !braces && literal_bound && w_->target.triple == ast::x86_64_linux.triple) {
+      const auto written = as<ast::Literal>(bound);
+      if (written && ins().values.is<ast::VInt>(written->value)) {
+        // Check the full value before multiplying or converting it to size_t.
+        ast::Bits128 n = ast::int_bits(ins(), written->value);
+        if (n.hi == 0 && n.lo <= max_new_array_count(*size)) {
+          QualType size_type = builtin(w_->target.size_type);
+          Ex bytes = literal(size_type, w_->values.integer(size_type, n.lo * *size),
+                             ValueCategory::prvalue, bound.begin, bound.end);
+          allocation = at(usual_allocation_call(bytes, begin, /*array=*/true), begin);
+        }
+      }
+    }
     ExprInfo info{pointer, ValueCategory::prvalue, 0};
-    return node(ast::NewArray{info, at(count, begin), at(init, begin)}, begin, end, info);
+    return node(ast::NewArray{info, at(count, begin), allocation, at(init, begin)}, begin, end, info);
   }
 
   Ex delete_array(Ex operand, u32 begin, u32 end) {
@@ -7296,6 +7378,12 @@ public:
     return t;
   }
 
+  QualType integral_common_type(const Ex& a, const Ex& b) {
+    const auto left = sema::promoted(w_->target, *types().builtin_of(a.type()), a.info.bit_width);
+    const auto right = sema::promoted(w_->target, *types().builtin_of(b.type()), b.info.bit_width);
+    return builtin(common_integer(w_->target, left, right));
+  }
+
   // ------------------------------------------------------------ operators ([expr.unary], [expr.compound])
 
   bool is_integral_or_unscoped(QualType t) { return types().is_integral(t); }
@@ -7380,6 +7468,18 @@ public:
       for_each_associated_friend(associations, name, /*at_instantiation=*/false, add);
       for (EntityId ns : associations.namespaces)
         for (const ast::DeclSema& d : q_->adl_functions(ns, name, /*at_instantiation=*/false)) add(d);
+      const bool ordinary_classes = !enum_only && std::ranges::all_of(operands, [&](const Ex& operand) {
+        const QualType type = types().referee(operand.type());
+        if (!types().is_class(type)) return true;
+        const auto& entity = w_->entities.rec(types().class_of(type));
+        return entity.kind == EntityKind::class_ && entity.templ == EntityId::none;
+      });
+      if (ordinary_classes && q_->dependent_call(op_at)) {
+        auto instantiated = adl_associations(operands, /*at_instantiation=*/true, /*ordinary_call=*/false);
+        for_each_associated_friend(instantiated, name, /*at_instantiation=*/true, add);
+        for (EntityId ns : instantiated.namespaces)
+          for (const ast::DeclSema& d : q_->adl_functions(ns, name, /*at_instantiation=*/true)) add(d);
+      }
     } else {
       for (const Ex& o : operands)
         if (auto ns = associated_namespace(o.type())) {
@@ -7391,6 +7491,33 @@ public:
         }
     }
     if (set.empty()) return ref_qualified_member;
+    if (binary && ref_qualified_member && q_->dependent_call(op_at)) {
+      const auto member_call = as<ast::MemberCall>(*ref_qualified_member);
+      if (member_call) {
+        const auto& member = w_->entities.rec(member_call->function);
+        const auto fn = types().rec(member.type);
+        if (member.scope == types().class_of(lt) && fn.params.size() == 1 &&
+            fn.fn_ref == ast::RefQual::lvalue && operands[0].cat() == ValueCategory::lvalue) {
+          const auto receiver = types().lvalue_ref(types().add_cv(types().class_type(member.scope), fn.fn_cv));
+          const auto member_receiver = ics(operands[0], receiver);
+          const auto member_argument = ics(operands[1], fn.params[0]);
+          // Keep the existing joint-ranking diagnostic unless the member dominates
+          // every viable ordinary non-member candidate.
+          if (member_receiver.viable && member_argument.viable &&
+              std::ranges::all_of(set, [&](const ast::DeclSema& candidate) {
+                if (candidate.flags & decl_flag::template_) return false;
+                const auto free_fn = types().rec(candidate.type);
+                if (free_fn.params.size() != 2) return false;
+                const auto free_receiver = ics(operands[0], free_fn.params[0]);
+                const auto free_argument = ics(operands[1], free_fn.params[1]);
+                if (!free_receiver.viable || !free_argument.viable) return true;
+                return !(free_receiver < member_receiver) && !(free_argument < member_argument) &&
+                       (member_receiver < free_receiver || member_argument < free_argument);
+              }))
+            return ref_qualified_member;
+        }
+      }
+    }
     ExprInfo info{builtin(Builtin::overload_set), ValueCategory::lvalue, 0};
     Ex callee = node(ast::DeclRef{info, set.front().entity}, begin, begin, info);
     overloads_[std::to_underlying(callee.id)] = std::move(set);
@@ -7573,7 +7700,21 @@ public:
     using enum BinOp;
     u32 begin = l.begin, end = r.end;
     if (!l.ok() || !r.ok()) return {NodeId::none, begin, end};
-    if (dependent(l) || dependent(r)) return dependent_node({l, r}, begin, end);
+    if (dependent(l) || dependent(r)) {
+      if (has_proven_dependent_type(l) || has_proven_dependent_type(r)) {
+        dependent_calls.push_back(op_at);
+        return dependent_node({l, r}, begin, end, std::nullopt, ValueCategory::prvalue, expr_flag::type_dependent);
+      }
+      if (types().is_integral(l.type()) && types().is_integral(r.type())) {
+        switch (op) {
+        case add: case sub: case mul: case div: case rem:
+        case bit_and: case bit_xor: case bit_or:
+          return dependent_node({l, r}, begin, end, integral_common_type(l, r));
+        default: break;
+        }
+      }
+      return dependent_node({l, r}, begin, end);
+    }
     if (op == dot_star || op == arrow_star) return member_pointer_access(l, r, op == arrow_star, op_at);
     if (auto o = overloaded(binary_spellings[std::to_underlying(op)], {l, r}, begin, end, op_at)) return *o;
     auto bin = [&](ast::BinaryOp k, Ex a, Ex c, QualType t) {
@@ -7872,7 +8013,19 @@ public:
       if (dependent(c) || dependent(t) || dependent(f)) info.flags |= expr_flag::dependent;
       return node(ast::Conditional{info, at(c, begin), at(t, begin), at(f, begin)}, begin, end, info);
     }
-    if (dependent(cond) || dependent(t) || dependent(f)) return dependent_node({cond, t, f}, begin, end);
+    if (dependent(cond) || dependent(t) || dependent(f)) {
+      if (has_proven_dependent_type(cond) || has_proven_dependent_type(t) || has_proven_dependent_type(f))
+        return dependent_node({cond, t, f}, begin, end, std::nullopt, ValueCategory::prvalue, expr_flag::type_dependent);
+      // Concrete prvalue arms can determine the result type even when the value is dependent.
+      if (!types().is_dependent(cond.type()) &&
+          t.cat() == ValueCategory::prvalue && f.cat() == ValueCategory::prvalue) {
+        if (!types().is_dependent(t.type()) && types().canonical(t.type()) == types().canonical(f.type()))
+          return dependent_node({cond, t, f}, begin, end, t.type());
+        if (types().is_integral(t.type()) && types().is_integral(f.type()))
+          return dependent_node({cond, t, f}, begin, end, integral_common_type(t, f));
+      }
+      return dependent_node({cond, t, f}, begin, end);
+    }
     Ex c = to_bool(cond, cond.begin);
     if (!c.ok()) return {NodeId::none, begin, end};
     ExprInfo info;
