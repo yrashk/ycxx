@@ -1057,9 +1057,16 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   `continue`) and ends a full-expression's temporaries at its end. Statements carry no cleanup
   lists; the `Cleanup` record is gone.
 - Linkage names: `C1`/`D1` (#136 for `C2`/`D2`/`D0`), checked against Clang's symbols.
+- A non-template constructor can delegate to another ordinary constructor of its class with
+  a sole parenthesized or braced initializer ([class.base.init], #157). The target resolves in
+  the complete class and constructs the same object. The delegating body starts after the
+  target and its initializer temporaries finish. The delegator supplies no member or base
+  initialization. Direct self-delegation is diagnosed. Implicit trivial or defaulted copy targets,
+  virtual layout, exceptional cleanup, and constant evaluation of the object remain in
+  #157, #309, and #25.
 - Tests: `tests/own/classes/s3-*` (spec-only, plus two from the review): 16 of 16 pass. 10 more draft examples pass.
 - Not yet: temporaries with destructors created in a conditional operand, value-initializing a
-  member subobject whose class has an implicit constructor, delegating constructors, conditional
+  member subobject whose class has an implicit constructor, conditional
   `explicit`, explicit constructor templates, and other `= default` forms (#157, #244).
 
 ## Classes, δ step 4a: enumerations (#86, 2026-11-18)

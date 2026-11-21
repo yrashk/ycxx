@@ -5665,7 +5665,7 @@ public:
         else s_.declare_local(prm.name, prm.type, sema::local_flag::parameter, 0, false);
       }
       bool ctor = f->flags & sema::decl_flag::constructor;
-      std::map<u32, Ex> inits;
+      ConstructorInitializers inits;
       if (ctor && ps_.is(lex::Tk::colon)) inits = mem_initializers();
       if (!ps_.is(lex::Tk::l_brace)) {
         // `= default`, `= delete` or a function-try-block.
@@ -5764,40 +5764,89 @@ public:
   }
 
 private:
+  struct ConstructorInitializers {
+    std::map<u32, Ex> subobjects;
+    std::optional<Ex> delegation;  // engaged even when a delegating initializer failed
+  };
+
+  // Skip an initializer after an error, leaving the next comma or body brace.
+  void skip_mem_initializer() {
+    if (ps_.is(Tk::l_paren)) {
+      for (u32 n = ps_.past_parentheses(0); n > 0; --n) ps_.bump();
+    } else if (ps_.is(Tk::l_brace)) {
+      u32 depth = 0;
+      do {
+        if (ps_.is(Tk::l_brace)) ++depth;
+        if (ps_.is(Tk::r_brace)) --depth;
+        ps_.bump();
+      } while (depth && !ps_.at_end());
+    }
+  }
+
   // mem-initializer-list ([class.base.init]): `: m(args), n{…}`, each member's initializer by
-  // its position among the class's members.
-  std::map<u32, Ex> mem_initializers() {
-    std::map<u32, Ex> r;
+  // its position among the class's members, or a sole delegating initializer.
+  ConstructorInitializers mem_initializers() {
+    ConstructorInitializers r;
     const sema::ClassRec& rec = p_->classes_.rec(s_.current_class);
     QualType ct = s_.types().class_type(s_.current_class);
+    bool seen_initializer = false;
+    bool reported_mixed = false;
     ps_.bump();
     do {
       if (!ps_.is(Tk::identifier)) {
         s_.diag(ps_.pos(), Diag::expected_unqualified_id);
+        if (r.delegation) r.delegation.emplace();
         return r;
       }
+      const bool had_initializer = std::exchange(seen_initializer, true);
       u32 at = ps_.pos();
       NameId n = ps_.name_of(ps_.tok());
       ps_.bump();
       u32 field = 0;
       while (field < rec.fields.size() && rec.fields[field].name != n) ++field;
-      // [class.base.init]/2: else a direct base, named by a type-name.
-      if (field == rec.fields.size()) {
-        auto bt = s_.class_name(n, false);
-        auto b = bt && s_.types().is_class(*bt)
-                     ? std::ranges::find(rec.bases, s_.types().class_of(*bt), &sema::BaseRec::cls)
-                     : rec.bases.end();
-        if (b != rec.bases.end()) field = u32(rec.fields.size() + (b - rec.bases.begin()));
+      std::optional<QualType> type;
+      bool delegates = false;
+      if (field < rec.fields.size()) {
+        type = rec.fields[field].type;
+      } else {
+        // [class.base.init]/2: a direct base or the constructor's class, ignoring parameters.
+        auto named = s_.class_name(n, false, true, std::nullopt, /*search_locals=*/false);
+        if (named && s_.types().is_class(*named)) {
+          EntityId cls = s_.types().class_of(*named);
+          delegates = cls == s_.current_class;
+          auto base = std::ranges::find(rec.bases, cls, &sema::BaseRec::cls);
+          if (delegates) type = ct;
+          else if (base != rec.bases.end()) {
+            type = s_.types().class_type(base->cls);
+            field = u32(rec.fields.size() + (base - rec.bases.begin()));
+          }
+        }
       }
-      if (field == rec.fields.size() + rec.bases.size() || (field >= rec.fields.size() && rec.bases.empty())) {
-        s_.diag(at, Diag::no_member, n, ct);  // delegating constructors are not supported yet
-        ps_.skip_param();
+      if (r.delegation || (delegates && had_initializer)) {
+        if (!std::exchange(reported_mixed, true)) s_.diag(at, Diag::delegating_initializer_not_alone);
+        r.delegation.emplace();
+        skip_mem_initializer();
         continue;
       }
-      QualType ft = field < rec.fields.size() ? rec.fields[field].type : s_.types().class_type(rec.bases[field - rec.fields.size()].cls);
+      if (!type) {
+        s_.diag(at, Diag::no_member, n, ct);
+        skip_mem_initializer();
+        continue;
+      }
+      if (delegates) {
+        r.delegation.emplace();
+        if (!s_.template_scopes.empty() || inst_) {
+          s_.diag(at, Diag::not_supported, Tk::colon);
+          skip_mem_initializer();
+          continue;
+        }
+      }
+      QualType ft = *type;
       Ex init;
       if (ps_.is(Tk::l_brace)) {
-        init = s_.list_init(ft, *ps_.braced_init_list());
+        auto list = ps_.braced_init_list();
+        init = delegates ? s_.construct_from_list(ft, *list, sema::Construction::direct_list, /*delegating=*/true)
+                         : s_.list_init(ft, *list);
       } else {
         u32 open = ps_.pos();
         if (!ps_.expect(Tk::l_paren)) return r;
@@ -5805,8 +5854,11 @@ private:
         if (!ps_.is(Tk::r_paren))
           do args.push_back(ps_.assignment_expression());
           while (ps_.accept(Tk::comma));
-        ps_.expect(Tk::r_paren);
-        if (s_.types().is_class(ft)) {
+        if (!ps_.expect(Tk::r_paren)) return r;
+        if (delegates) {
+          init = s_.construct(ft, std::move(args), open, ps_.pos(), sema::Construction::direct,
+                              /*checking_polymorphic_base=*/false, /*delegating=*/true);
+        } else if (s_.types().is_class(ft)) {
           init = s_.has_user_ctors(ft) || args.size() != 1 ? s_.construct(ft, std::move(args), open, ps_.pos())
                                                             : s_.convert(args[0], ft, open);
         } else if (args.empty()) {
@@ -5817,25 +5869,36 @@ private:
           init = s_.convert(args[0], ft, open);  // a reference binds ([dcl.init.ref])
         }
       }
-      if (r.contains(field)) s_.diag(at, Diag::redeclared_member, n);  // [class.base.init]/3: one initializer each
-      r[field] = init;
+      if (delegates) r.delegation = init;
+      else {
+        if (r.subobjects.contains(field)) s_.diag(at, Diag::redeclared_member, n);  // [class.base.init]/3
+        r.subobjects[field] = init;
+      }
     } while (ps_.accept(Tk::comma));
     return r;
   }
 
-  // A constructor's body ([class.base.init]/13): its direct bases initialized in declaration
+  // A delegating initializer precedes the body. Other constructors initialize their direct bases in declaration
   // order, from their mem-initializers (keyed after the members) or default-initialized (a
   // `MemberInit` of field `~0u`); then every member in declaration order, from its
   // mem-initializer, its default member initializer, or default-initialized; then the compound
   // statement.
-  Ex constructor_body(std::map<u32, Ex> inits, Ex body) {
-    const sema::ClassRec& rec = p_->classes_.rec(s_.current_class);
+  Ex constructor_body(ConstructorInitializers inits, Ex body) {
     std::vector<ast::Child> stmts;
+    if (inits.delegation) {
+      const Ex& init = *inits.delegation;
+      if (!init.ok()) return {};
+      Ex delegate = s_.node(ast::DelegatingInit{sema::Sema::at(init, init.begin)}, init.begin, init.end);
+      stmts.push_back(sema::Sema::at(delegate, 0));
+      stmts.push_back(sema::Sema::at(body, 0));
+      return s_.node(ast::Compound{b_.list(stmts)}, 0, body.end);
+    }
+    const sema::ClassRec& rec = p_->classes_.rec(s_.current_class);
     for (std::size_t i = 0; i < rec.bases.size(); ++i) {
       const EntityId base = rec.bases[i].cls;
       const QualType bt = s_.types().class_type(base);
       Ex init;
-      if (auto it = inits.find(u32(rec.fields.size() + i)); it != inits.end()) {
+      if (auto it = inits.subobjects.find(u32(rec.fields.size() + i)); it != inits.subobjects.end()) {
         init = it->second;
       } else if (const auto* record = p_->classes_.find(base); record && record->polymorphic) {
         s_.check_polymorphic_base_default_init(bt, 0);
@@ -5849,7 +5912,7 @@ private:
     for (u32 i = 0; i < rec.fields.size(); ++i) {
       const sema::FieldRec& f = rec.fields[i];
       Ex init;
-      if (auto it = inits.find(i); it != inits.end()) init = it->second;
+      if (auto it = inits.subobjects.find(i); it != inits.subobjects.end()) init = it->second;
       else if (f.init != ConstId::none) init = s_.literal(sema::Types::unqualified(f.type), f.init, ast::ValueCategory::prvalue, 0, 0);
       else if (auto d = p_->dmi(f.entity)) init = member_initializer(f, *d);
       else if (s_.types().is_reference(f.type)) s_.diag(0, Diag::reference_uninitialized);  // [class.base.init]/10

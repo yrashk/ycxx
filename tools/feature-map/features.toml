@@ -1652,7 +1652,8 @@ probe = '''
 struct S { int v; S(int x) : v(x) {} S() : S(4) {} };
 int main() { S s; return s.v - 4; }
 '''
-status = 'missing'
+status = 'partial'
+note = 'Ordinary non-template parenthesized and braced delegation uses the same object. Exceptional cleanup, virtual cases and constant evaluation remain.'
 issues = [157]
 
 [[feature]]

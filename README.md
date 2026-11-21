@@ -193,7 +193,7 @@ Both targets accept leading `[[…]]` attributes on ordinary data and function m
 - user-declared copy and move assignment govern the availability of implicit constructors.
   [#244](https://github.com/yrashk/ycxx/issues/244)
 - classes and unions: data and static members, named data members of unnamed union type,
-  member functions, constructors and destructors
+  member functions, constructors including ordinary delegation, and destructors
   with RAII, aggregate and designated initialization, namespace-scope objects initialized by
   code before `main` and destroyed after it, block-scope `static` variables initialized once, passing and returning them by value with
   Clang's calling convention, so ycxx and Clang objects call each other; access control
