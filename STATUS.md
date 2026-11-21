@@ -1561,6 +1561,16 @@ session's.*
   `__reference_binds_to_temporary`; a value-dependent predicate as a template argument outside a
   body (#209).
 
+## Address-of builtin (#330)
+
+`__builtin_addressof` implements the operation used by libycxx's `std::addressof`
+([specialized.addressof]). It builds the ordinary address-of expression for a single lvalue
+while bypassing overloaded `operator&`. The existing constant evaluator and code generator
+consume the expression. Static member functions accessed through an object expression still
+hit the ordinary address-of limitation. The tests in `tests/own/builtins/` cover overloaded
+address operators, dependent wrappers, qualified operands, constant evaluation on a scalar
+global, and a rejected rvalue.
+
 ## Templates, ζ step 6: concepts and `if constexpr` (#88, 2026-11-18)
 
 Fable decided the representation (ast.md §6.6); the Opus session wrote the code.
