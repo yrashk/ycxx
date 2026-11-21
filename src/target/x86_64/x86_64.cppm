@@ -59,6 +59,7 @@ constexpr std::int32_t overflow_arg_area_field = 8, reg_save_area_field = 16;
 constexpr std::int32_t gp_slot = 8, xmm_slot = 16, xmm_register_args = Amd64ArgumentPlan::sse_registers;
 constexpr std::int32_t gp_save_size = register_args * gp_slot;
 constexpr std::int32_t reg_save_size = gp_save_size + xmm_register_args * xmm_slot;
+constexpr std::int32_t stack_args_base = 16, stack_arg_slot = 8;
 
 constexpr std::uint64_t align_up(std::uint64_t size, std::uint64_t align) {
   return (size + align - 1) & ~(align - 1);
@@ -96,7 +97,7 @@ bool supports_float(Op op) {
   switch (op) {
     case Op::const_: case Op::load: case Op::store: case Op::select: case Op::fpext:
     case Op::fadd: case Op::fsub: case Op::fmul: case Op::fdiv: case Op::fneg: case Op::fcmp:
-    case Op::call: case Op::call_ind: case Op::ret: return true;
+    case Op::call: case Op::call_ind: case Op::ret: case Op::va_arg: return true;
     default: return false;
   }
 }
@@ -151,8 +152,6 @@ std::expected<Frame, std::string> layout(const l2::Function& body) {
         frame.objects[raw(n)] = -std::int32_t(frame.size);
       }
       if (nd.op == Op::va_start && !frame.variadic_save) {
-        if (float_result || std::ranges::any_of(body.params_of(BlockId(0)), is_float))
-          return at_node(n, nd.op, "floating-point variadic parameters and results are unsupported");
         frame.size = align_up(frame.size + reg_save_size, xmm_slot);
         if (frame.size > max_frame) return at_node(n, nd.op, "x86-64 frame exceeds the single-page limit");
         frame.variadic_save = -std::int32_t(frame.size);
@@ -228,6 +227,7 @@ class Emitter {
   MachineCode out_;
   Encoder e_{out_.bytes};
   std::vector<std::size_t> block_offsets_;
+  Amd64ArgumentPlan incoming_;
 
   struct Branch {
     std::size_t at;
@@ -284,54 +284,55 @@ class Emitter {
 
   void va_start(ValueId cursor) {
     read(cursor, rcx);
-    // By this point each named parameter occupies exactly one INTEGER slot. RBP+16
-    // steps over the saved frame pointer and return address to the incoming stack slots.
-    const auto named = std::size_t(body_.params_of(BlockId(0)).size()) - 1;
-    const auto named_in_registers = std::min(named, register_args);
-    e_.store_immediate32(rcx, gp_offset_field, named_in_registers * gp_slot);
-    e_.store_immediate32(rcx, fp_offset_field, gp_save_size);
-    e_.address(rax, rbp, 16 + std::int32_t(named - named_in_registers) * gp_slot);
+    e_.store_immediate32(rcx, gp_offset_field, incoming_.used_integer_registers() * gp_slot);
+    e_.store_immediate32(rcx, fp_offset_field, gp_save_size + incoming_.used_sse_registers() * xmm_slot);
+    // Skip the saved frame pointer, the return address and every named stack slot.
+    e_.address(rax, rbp, stack_args_base + std::int32_t(incoming_.stack_slots()) * stack_arg_slot);
     e_.store(rcx, overflow_arg_area_field, rax, 8);
     e_.address(rax, rbp, frame_.variadic_save);
     e_.store(rcx, reg_save_area_field, rax, 8);
   }
 
   bool va_arg(ValueId cursor, ValueId result) {
+    const Type type = body_.type(result);
+    const bool sse = type == Type::f64;
+    const auto offset_field = sse ? fp_offset_field : gp_offset_field;
+    const auto save_end = sse ? reg_save_size : gp_save_size;
+    const auto reg_slot = sse ? xmm_slot : gp_slot;
     read(cursor, rdx);
-    e_.load(rax, rdx, gp_offset_field, 4);
-    e_.reg({0x83}, 7, rax, false);  // cmp eax, imm8
-    e_.immediate(gp_save_size, 1);
+    e_.load(rax, rdx, offset_field, 4);
+    e_.emit({0x3d});  // cmp eax, imm32. The FP limit of 176 does not fit a signed imm8.
+    e_.immediate(save_end, 4);
     e_.emit({0x0f, 0x83});  // jae rel32
     auto overflow = e_.displacement();
 
     e_.load(rcx, rdx, reg_save_area_field, 8);
     e_.reg({0x01}, rax, rcx);  // add rcx, rax
     e_.reg({0x83}, 0, rax, false);  // add eax, imm8
-    e_.immediate(gp_slot, 1);
-    e_.store(rdx, gp_offset_field, rax, 4);
+    e_.immediate(reg_slot, 1);
+    e_.store(rdx, offset_field, rax, 4);
     e_.emit({0xe9});  // jmp rel32
     auto fetched = e_.displacement();
 
     if (!e_.patch_relative(overflow, e_.offset())) return false;
     e_.load(rcx, rdx, overflow_arg_area_field, 8);
-    e_.address(rax, rcx, gp_slot);
+    e_.address(rax, rcx, stack_arg_slot);
     e_.store(rdx, overflow_arg_area_field, rax, 8);
     if (!e_.patch_relative(fetched, e_.offset())) return false;
 
-    e_.load(rax, rcx, 0, l2::bytes(body_.type(result)));
+    e_.load(rax, rcx, 0, l2::bytes(type));
     write(result);
     return true;
   }
 
   void parameters() {
-    Amd64ArgumentPlan plan;
     for (ValueId v : body_.params_of(BlockId(0)) | std::views::drop(1)) {
-      auto [kind, index] = plan.place(body_.type(v));
+      auto [kind, index] = incoming_.place(body_.type(v));
       if (kind == Amd64ArgumentKind::sse) {
         e_.store_scalar_xmm(rbp, frame_.slots[raw(v)], index, home_width(v));
       } else {
         if (kind == Amd64ArgumentKind::integer) e_.move(rax, argument_regs[index]);
-        else e_.load(rax, rbp, 16 + 8 * std::int32_t(index), home_width(v));
+        else e_.load(rax, rbp, stack_args_base + stack_arg_slot * std::int32_t(index), home_width(v));
         write(v);
       }
     }

@@ -241,6 +241,9 @@ enum class Diag : std::uint32_t {
   ambiguous_call [[=message{Severity::error, "call to '{0:n}' is ambiguous"}]],
   deleted_function [[=message{Severity::error, "'{0:n}' is a deleted function"}]],
   no_viable_constructor [[=message{Severity::error, "no matching constructor for '{0:t}'"}]],
+  delegating_initializer_not_alone [[=message{Severity::error, "a delegating constructor must have a sole initializer"}]],
+  delegating_constructor_cycle [[=message{Severity::error, "a constructor cannot delegate to itself"}]],
+  delegating_copy_unsupported [[=message{Severity::error, "delegation to an implicit or defaulted copy constructor is not supported yet"}]],
   ambiguous_constructor [[=message{Severity::error, "constructing '{0:t}' is ambiguous"}]],
   deleted_constructor [[=message{Severity::error, "constructing '{0:t}' calls a deleted constructor"}]],
   defaulted_copy_declaration [[=message{Severity::error, "only an ordinary in-class copy constructor taking C& or const C& can be explicitly defaulted here"}]],
@@ -322,7 +325,7 @@ enum class Diag : std::uint32_t {
   builtin_nan_string [[=message{Severity::error, "the argument of __builtin_nan must be a string literal spelling an integer"}]],
   va_start_context [[=message{Severity::error, "va_start requires an enclosing variadic function"}]],
   va_list_operand [[=message{Severity::error, "expected a mutable va_list cursor, got '{0:t}'"}]],
-  va_arg_type [[=message{Severity::error, "va_arg type '{0:t}' is outside the supported x86-64 System V integer and pointer subset"}]],
+  va_arg_type [[=message{Severity::error, "va_arg type '{0:t}' is outside the supported x86-64 System V integer, pointer and double subset"}]],
   friend_c_linkage [[=message{Severity::error, "C-linkage friend function definitions are not supported yet"}]],
 };
 

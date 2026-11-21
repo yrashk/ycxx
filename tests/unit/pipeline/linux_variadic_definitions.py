@@ -46,8 +46,13 @@ def main():
             run('./native')
 
         for callee, driver, linkage in (('host-double-callee.cpp', 'host-double-driver.cpp', ()),
-                                        ('cstdarg-wrapper.cpp', 'cstdarg-host.cpp', ('linkage.o',))):
-            run(ycxx, 'cxx', linux, *includes, '-c', callee, '-o', 'callee.o')
+                                        ('cstdarg-wrapper.cpp', 'cstdarg-host.cpp', ('linkage.o',)),
+                                        ('sse-callee.cpp', 'sse-host.cpp', ('linkage.o',)),
+                                        ('sse-scalar-callee.cpp', 'sse-scalar-host.cpp', ('linkage.o',))):
+            args = (ycxx, 'cxx', linux, *includes, '-c', callee, '-o')
+            run(*args, 'callee.o')
+            run(*args, 'resident.o', env=daemon)
+            assert (scope / 'resident.o').read_bytes() == (scope / 'callee.o').read_bytes()
             for mode in ('-O0', '-O2'):
                 run(host_cxx, '-std=c++26', mode, '-no-pie', driver, 'callee.o', *linkage, '-o', 'mixed')
                 run('./mixed')
@@ -68,7 +73,8 @@ def main():
              'void f(Cursor* ap) { va_end(ap); }', 'expected a mutable va_list cursor'),
             ('void f(std::va_list ap) { va_arg(ap, 3); }', 'a declaration needs a type specifier'),
             ('void f(std::va_list ap) { va_arg(ap, short); }', 'outside the supported x86-64 System V'),
-            ('void f(std::va_list ap) { va_arg(ap, double); }', 'outside the supported x86-64 System V'),
+            ('void f(std::va_list ap) { va_arg(ap, float); }', 'outside the supported x86-64 System V'),
+            ('void f(std::va_list ap) { va_arg(ap, long double); }', 'outside the supported x86-64 System V'),
         )
         for source, message in invalid:
             (scope / 'invalid.cpp').write_text('#include <cstdarg>\n' + source + '\n')

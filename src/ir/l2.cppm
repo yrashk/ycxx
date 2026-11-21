@@ -491,8 +491,8 @@ std::expected<void, std::string> verify(const Function& f) {
           if (t(1) != Type::ptr) return at("the variadic cursor must be a ptr");
           if (nd.op == Op::va_arg) {
             Type fetched = f.type(f.result(n, 1));
-            if (fetched != Type::i32 && fetched != Type::i64 && fetched != Type::ptr)
-              return at("va_arg must yield an i32, i64 or ptr");
+            if (fetched != Type::i32 && fetched != Type::i64 && fetched != Type::ptr && fetched != Type::f64)
+              return at("va_arg must yield an i32, i64, ptr or f64");
           }
           break;
         case Op::cond_br:
