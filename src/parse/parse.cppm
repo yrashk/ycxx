@@ -735,6 +735,13 @@ public:
       if (k <= item) r = d;
     return r;
   }
+  bool inline_declared(EntityId entity, u32 item) const {
+    const auto declarations = decls_.find(std::to_underlying(entity));
+    return declarations != decls_.end() && std::ranges::any_of(declarations->second, [&](const auto& entry) {
+      const auto& [point, declaration] = entry;
+      return point <= item && (declaration.flags & sema::decl_flag::inline_);
+    });
+  }
   // A previous definition of this entity in this TU ([basic.def.odr]). C language linkage
   // can make a definition in another namespace correspond without ordinary lookup finding it.
   bool function_defined_before(EntityId e, u32 item) {
@@ -1370,6 +1377,7 @@ private:
   std::map<u32, ConstId> member_inits_;  // by lazily initialized member
   std::map<u32, std::pair<u32, ConstId>> constants_;                // by entity: (item, value)
   std::map<u32, std::vector<std::pair<u32, ast::DeclSema>>> decls_;  // by entity: (item, record)
+  std::map<EntityId, u32> constinit_declarations_;  // earliest declaration requiring static initialization
   std::map<u32, u32> definitions_;               // by function entity: its defining item
   std::map<u32, std::optional<irgen::FunctionIr>> irs_;  // by item: function_ir, none if it failed
   std::pmr::unsynchronized_pool_resource arena_;  // the frames' arena (§9.3)
@@ -5650,12 +5658,23 @@ private:
     p_->declared(sem, k_);
     Ex init;
     sema::ConstId value = sema::ConstId::none;
+    // [dcl.constinit]: a reachable declaration's requirement applies to initialization.
+    if (spec.is_constinit) {
+      auto entry = p_->constinit_declarations_.try_emplace(sem.entity, k_).first;
+      entry->second = std::min(entry->second, k_);
+    }
+    const auto constinit_decl = p_->constinit_declarations_.find(sem.entity);
+    const bool requires_constinit = constinit_decl != p_->constinit_declarations_.end() && constinit_decl->second <= k_;
+    const bool replay_defaults = !fn && definition && !spec.is_inline && !spec.is_constexpr && !requires_constinit &&
+                                 !template_ && !var_ && !explicit_ && !(d.qualified && d.scope.type) &&
+                                 s_.can_replay_default_members(d.type) && !p_->inline_declared(sem.entity, k_);
+    const sema::Sema::DefaultMemberScope defaults(s_, replay_defaults);
     // An initializer that is not a constant expression initializes the variable dynamically
     // ([basic.start.dynamic]), by the unit's initialization function, unless it must be constant
     // ([dcl.constexpr], [dcl.constinit]) or is not supported yet: an inline variable's or a
     // variable template's (#368), and a scalar's the front end has no code for.
     auto dynamic_ok = [&](u32 at, std::uint64_t reason) {
-      if (spec.is_constexpr || spec.is_constinit) {
+      if (spec.is_constexpr || requires_constinit) {
         s_.diag(at, Diag::not_constant, reason);
         return false;
       }
