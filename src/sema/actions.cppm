@@ -807,6 +807,9 @@ public:
     case is_enum: unary_op = ast::DepOp::is_enum; break;
     case is_union: unary_op = ast::DepOp::is_union; break;
     case is_class: unary_op = ast::DepOp::is_class; break;
+    case is_member_pointer: unary_op = ast::DepOp::is_member_pointer; break;
+    case is_member_object_pointer: unary_op = ast::DepOp::is_member_object_pointer; break;
+    case is_member_function_pointer: unary_op = ast::DepOp::is_member_function_pointer; break;
     default: break;
     }
     if (unary_op) {
@@ -835,9 +838,6 @@ public:
       if (types().is_enum(c))
         if (const EnumRec* e = enum_rec(types().enum_of(c))) v = e->scoped;
       break;
-    case is_member_pointer: v = types().is_member_pointer(c); break;
-    case is_member_object_pointer: v = types().is_member_pointer(c) && !types().is_function(types().rec(c).inner); break;
-    case is_member_function_pointer: v = types().is_member_pointer(c) && types().is_function(types().rec(c).inner); break;
     case is_polymorphic:
     case has_virtual_destructor:
       if (types().is_class(c) && is_union_type(c) != true) {

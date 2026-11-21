@@ -130,6 +130,7 @@ struct [[=dependent]] VDepVariable {
 enum class DepOp : u8 {
   is_same, is_reference, is_const, is_volatile, is_array, is_pointer, is_function,
   is_enum, is_union, is_class,
+  is_member_pointer, is_member_object_pointer, is_member_function_pointer,
 };
 
 // A dependent operation (§5.5) over canonical qualified types. `is_same` has two ordered

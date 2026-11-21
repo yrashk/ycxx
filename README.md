@@ -230,8 +230,9 @@ fixed underlying types and definitions inside `extern "C"` blocks.
   Itanium names identical to Clang's; Clang's
   `__make_integer_seq`;
 - dependent `__is_same`, `__is_reference`, `__is_const`, `__is_volatile`, `__is_array`,
-  `__is_pointer`, `__is_function`, `__is_enum`, `__is_union`, and `__is_class` as `bool`
-  template arguments or defaults, including through alias templates
+  `__is_pointer`, `__is_function`, `__is_enum`, `__is_union`, `__is_class`, and the three
+  member-pointer predicates as `bool` template arguments or defaults, including through alias
+  templates
   [#209](https://github.com/yrashk/ycxx/issues/209);
 - a single nonvirtual, nonpolymorphic base in a primary class template, including an
   alias-selected dependent base and qualified lookup of its static members.
