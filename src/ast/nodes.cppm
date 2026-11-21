@@ -136,11 +136,12 @@ struct DeleteObject {
 };
 
 // One-dimensional array new ([expr.new]). The bound is converted to size_t, and the
-// initializer describes each element.
+// initializer describes each element. A validated cookie-free allocation has a call.
 struct NewArray {
   ExprInfo info;
   [[=sequenced(0)]] Child bound;
-  [[=sequenced(1)]] Child element_init;
+  [[=sequenced(1)]] Child allocation;
+  [[=sequenced(2)]] Child element_init;
 };
 
 // Array delete ([expr.delete]) preserves the typed pointer operand and the usual unsized deallocator.
