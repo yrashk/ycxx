@@ -1314,7 +1314,7 @@ public:
     }
     // A reference from one element ([dcl.init.list]/3.10).
     if (types().is_reference(t) && b.clauses.size() == 1 && !b.clauses[0].list && !b.clauses[0].designated)
-      return bind_reference(b.clauses[0].expr, t, b.clauses[0].begin);
+      return list_element(t, b.clauses[0].expr);
     if (is_aggregate(t)) {
       std::size_t next = 0;
       Ex r = aggregate(t, b, next, b.begin, b.end);
@@ -1441,8 +1441,9 @@ public:
     if (!e.ok() || address_set(e)) return convert(e, t, e.begin);
     Ex from = rvalue(e);
     Ex r = convert(e, t, e.begin);
-    if (r.ok() && narrows(from, t)) {
-      diag(e.begin, Diag::narrowing, from.type(), Types::unqualified(t));
+    QualType target = types().is_reference(t) ? types().referee(t) : t;
+    if (r.ok() && narrows(from, target)) {
+      diag(e.begin, Diag::narrowing, from.type(), Types::unqualified(target));
       return {NodeId::none, e.begin, e.end};
     }
     return r;
@@ -6317,6 +6318,26 @@ public:
   }
   bool is_braced(const Ex& e) const { return braced_list(e) != nullptr; }
 
+  // A class reference parameter binds directly to a single reference-related expression.
+  // Otherwise the list initializes a prvalue of the referenced class ([dcl.init.list]); the
+  // materialized object lives until the end of the call's full-expression ([class.temporary]).
+  Ex braced_parameter(QualType parameter, const Braced& list) {
+    parameter = Types::unqualified(parameter);
+    if (!types().is_reference(parameter) || !types().is_class(types().referee(parameter)) ||
+        types().is_dependent(parameter) || dependent(list))
+      return list_init(parameter, list);
+    QualType t = types().referee(parameter);
+    if (list.clauses.size() == 1) {
+      const Braced::Clause& c = list.clauses.front();
+      if (!c.list && !c.designated && c.expr.ok() && types().is_class(c.expr.type())) {
+        int paths = 0;
+        if (same_unqualified(c.expr.type(), t) || base_path(types().class_of(c.expr.type()), types().class_of(t), paths))
+          return bind_reference(c.expr, parameter, c.begin);
+      }
+    }
+    return bind_reference(list_init(Types::unqualified(t), list), parameter, list.begin);
+  }
+
   // The arguments of a call to a function of type `fr`, each copy-initializing its parameter.
   // A parameter without an argument takes its default argument ([dcl.fct.default], [expr.call]/5).
   std::optional<std::vector<Child>> call_args(const TypeRec& fr, std::span<const Ex> given, u32 begin, u32 paren_at,
@@ -6338,11 +6359,12 @@ public:
     }
     std::vector<Child> children;
     for (std::size_t i = 0; i < args.size(); ++i) {
-      if (is_braced(args[i]) && i >= params.size()) {
+      const Braced* list = braced_list(args[i]);
+      if (list && i >= params.size()) {
         diag(args[i].begin, Diag::not_supported, lex::Tk::l_brace);  // [expr.call]/12: no list for an ellipsis
         return std::nullopt;
       }
-      Ex a = is_braced(args[i])      ? list_init(Types::unqualified(params[i]), *braced_args_.at(std::to_underlying(args[i].id)))
+      Ex a = list               ? braced_parameter(params[i], *list)
              : i < params.size() ? convert(args[i], params[i], args[i].begin)
                                  : variadic_argument(args[i]);
       if (!a.ok()) return std::nullopt;

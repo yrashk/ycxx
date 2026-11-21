@@ -1333,6 +1333,9 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   narrowing and initializes omitted fields. A dependent list defers call analysis. Candidates
   with unsupported conversions that remain plausible after checking arity and other arguments
   produce an unsupported diagnostic.
+- A braced argument for a selected class reference parameter binds to a single reference-related
+  expression or list-initializes a temporary of the referenced class. The temporary lives until
+  the end of the full-expression containing the call ([dcl.init.list], [class.temporary], #503).
 - Constructors, member overloads, template deduction, class-valued clauses, and general
   reference, array, aggregate, and `std::initializer_list` cases remain under #231.
 - Tests: `tests/own/braced-overloads/`.

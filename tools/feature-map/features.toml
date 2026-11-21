@@ -777,8 +777,8 @@ std = 'C++11'
 ftm = '__cpp_initializer_lists'
 detect = '[\w>]\{|=\s*\{|\breturn\s*\{|\(\s*\{|,\s*\{'
 status = 'partial'
-issues = [231]
-note = 'free non-template overloads can rank braced arguments for arithmetic and flat ordinary aggregate targets. Further list conversions, templates and member calls remain'
+issues = [231, 503]
+note = 'free non-template overloads rank braced arithmetic and flat aggregate targets. A braced argument to a selected class reference parameter can materialize a temporary. Further list conversions, templates and member overloads remain'
 probe = '''
 struct P { int x, y; };
 int f(P p) { return p.x + p.y; }

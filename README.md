@@ -161,8 +161,9 @@ Both targets accept leading `[[…]]` attributes on ordinary data and function m
   Nonmember operators can be called explicitly by name, including with namespace qualification.
   [#219](https://github.com/yrashk/ycxx/issues/219)
   Overloaded free functions can take braced arguments for arithmetic parameters
-  and ordinary aggregates with arithmetic fields. A pointer or reference target type can select
-  a free or static member overload.
+  and ordinary aggregates with arithmetic fields. A braced argument to a known function can
+  initialize a class temporary for a reference parameter. A pointer or reference target type
+  can select a free or static member overload.
   Ordinary non-template member defaults can refer to members declared later in the class.
   Namespace function definitions can inherit C language linkage from a matching earlier
   declaration, including definitions written inside their namespace and qualified definitions
