@@ -46,13 +46,15 @@ def main(ycxx):
     base = {k: v for k, v in os.environ.items() if k not in ('YCXX_DAEMON', 'YCXX_NO_DAEMON', 'YCXX_ROOT', 'NO_COLOR')}
     base.update(YCXX_RUNTIME_DIR=runtime, YCXX_DAEMON_IDLE_EXIT='300', YCXX_THREADS='4')
     daemon = dict(base, YCXX_DAEMON='require')
+    target = '--target=arm64-apple-darwin'
     watchers = []
     try:
         src = scope / 'a.cpp'
         src.write_text(SOURCE)
 
         def cxx(*args, env=daemon):
-            return subprocess.run([ycxx, 'cxx', *args], cwd=scope, env=env, capture_output=True, text=True, timeout=300)
+            return subprocess.run([ycxx, 'cxx', target, *args], cwd=scope, env=env,
+                                  capture_output=True, text=True, timeout=300)
 
         def ctl(*args):
             return subprocess.run([ycxx, 'ctl', *args], cwd=scope, env=base, capture_output=True, text=True, timeout=60)
@@ -193,7 +195,7 @@ def main(ycxx):
         # --watch: a build, then one per change of a file the build read.
         (scope / 'k.h').write_text('inline int k() { return 1; }\n')
         src.write_text('#include "k.h"\n' + SOURCE.replace('- 9', '- 8 - k()'))
-        wp = subprocess.Popen([ycxx, 'cxx', '--watch', '--trace-engine', 'a.cpp', '-o', 'w'], cwd=scope, env=daemon,
+        wp = subprocess.Popen([ycxx, 'cxx', target, '--watch', '--trace-engine', 'a.cpp', '-o', 'w'], cwd=scope, env=daemon,
                               stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
         watchers.append(wp)
         log = []
