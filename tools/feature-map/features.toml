@@ -810,8 +810,9 @@ clauses = ['expr.type.conv']
 std = 'C++23'
 ftm = '__cpp_auto_cast'
 detect = '(?<![\w>])auto\s*[({]\s*[\w*&]'
-status = 'missing'
+status = 'partial'
 issues = [286]
+note = 'Concrete single-expression scalar and pointer decay-copy works in parentheses and braces, including array and function decay. Class objects, member pointers, dependent expressions and some template-argument contexts remain.'
 probe = '''
 int main() { int a = 1; auto b = auto(a); return b - 1; }
 '''
