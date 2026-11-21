@@ -4164,12 +4164,19 @@ public:
     }
     std::vector<Child> cs;
     for (std::size_t i = 0; i < args.size(); ++i) {
-      // In a base list, a class glvalue can bind directly to a reference parameter.
-      // Narrowing checks apply to written initializer clauses, not default arguments.
-      const bool narrow = list && (!polymorphic_base || (i < supplied && !types().is_class(args[i].type())));
-      Ex a = i >= fr.params.size() ? variadic_argument(args[i])
-           : narrow                ? list_element(fr.params[i], args[i])
-                                   : convert(args[i], fr.params[i], args[i].begin);
+      const Ex& arg = args[i];
+      Ex a;
+      if (i >= fr.params.size()) {
+        a = variadic_argument(arg);
+      } else {
+        const QualType p = fr.params[i];
+        // A base list can bind a class glvalue to a class reference without reading its value.
+        // The default arguments have already been checked at their declarations.
+        const bool class_ref = polymorphic_base && arg.glvalue() && types().is_class(arg.type()) &&
+                               types().is_reference(p) && types().is_class(types().referee(p));
+        const bool narrow = list && (!polymorphic_base || (i < supplied && !class_ref));
+        a = narrow ? list_element(p, arg) : convert(arg, p, arg.begin);
+      }
       if (!a.ok()) return fail;
       // A parameter of class type: a temporary the caller initializes and destroys ([expr.call]/7).
       if (i < fr.params.size() && types().is_class(fr.params[i]) && !a.glvalue())
