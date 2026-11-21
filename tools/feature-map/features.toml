@@ -2026,7 +2026,7 @@ template<class T> decltype(T().missing(), 1) h(int) { return 1; }
 template<class T> int h(long) { return 0; }
 int main() { return g(1) + h<int>(0); }
 '''
-note = 'Class and variable partial matches check substituted arguments in lexical order. Template static assertion failures are diagnosed at instantiation. Dependent __is_same works in bool template arguments and defaults. Other dependent expression identities and expression SFINAE remain open.'
+note = 'Class and variable partial matches check substituted arguments in lexical order. Template static assertion failures are diagnosed at instantiation. Dependent __is_same and __is_reference work in bool template arguments and defaults. Other dependent expression identities and expression SFINAE remain open.'
 
 [[feature]]
 id = 'temp-ttp'

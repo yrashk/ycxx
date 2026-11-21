@@ -742,8 +742,9 @@ public:
   Ex trait_expr(lex::TypeTrait t, std::span<const QualType> args, u32 begin, u32 end) {
     using enum lex::TypeTrait;
     QualType b = builtin(Builtin::bool_);
-    if (t == is_same) {
-      if (auto v = templates().is_same_value(args[0], args[1])) return literal(b, *v, ValueCategory::prvalue, begin, end);
+    if (t == is_same || t == is_reference) {
+      auto v = t == is_same ? templates().is_same_value(args[0], args[1]) : templates().is_reference_value(args[0]);
+      if (v) return literal(b, *v, ValueCategory::prvalue, begin, end);
       ExprInfo info{b, ValueCategory::prvalue, expr_flag::dependent | expr_flag::unrepresented_value};
       return node(ast::Dependent{info, b_->list({})}, begin, end, info);
     }
@@ -782,7 +783,6 @@ public:
       break;
     case is_abstract:
     case is_final: v = false; break;
-    case is_reference: v = types().is_reference(c); break;
     case is_lvalue_reference: v = types().is_reference(c) && !types().rec(c).rvalue_ref; break;
     case is_rvalue_reference: v = types().is_reference(c) && types().rec(c).rvalue_ref; break;
     case is_array: v = types().is_array(c); break;
