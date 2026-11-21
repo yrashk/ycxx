@@ -47,7 +47,9 @@ build/bin/ycxx cxx hello.cpp -o hello && ./hello
 
 Single-expression `auto(x)` and `auto{x}` perform scalar and pointer decay-copy, including
 array and function decay. Function-template bodies can defer supported dependent operands to
-instantiation. [#286](https://github.com/yrashk/ycxx/issues/286)
+instantiation. Concrete constant template arguments can use braced conversions such as
+`Tag<auto{7}>` and integer-literal-led parenthesized conversions such as `Tag<auto(7)>`.
+[#286](https://github.com/yrashk/ycxx/issues/286)
 
 **Preprocess binary resources.** Both targets support `#embed` and `__has_embed` with the standard
 parameters. [#125](https://github.com/yrashk/ycxx/issues/125)
@@ -196,7 +198,8 @@ Automatic declarations such as `Point p(3, 4);` can initialize flat aggregates w
 arithmetic fields. Supplied expressions initialize the fields in declaration order. Omitted
 fields use their default member initializer when available and otherwise get zero. A runtime
 declaration can also initialize one flat public direct base from an exact-type lvalue or an
-unqualified braced prvalue such as `B{7}`, with an explicit initializer for each derived field.
+unqualified braced prvalue such as `B{7}`. Omitted trailing arithmetic fields of that aggregate
+are value-initialized when they have no written default member initializer.
 [#301](https://github.com/yrashk/ycxx/issues/301)
 
 **Language on macOS.** Programs can use:
@@ -216,6 +219,8 @@ unqualified braced prvalue such as `B{7}`, with an explicit initializer for each
   namespaces, including those of class template type arguments in ordinary calls. Functions
   support default arguments, recursion, operator overloading and calls through pointers.
   Ordinary free binary operators use argument-dependent lookup, including associated base namespaces.
+  Supported dependent binary operators on ordinary non-template classes also find associated
+  nonmember candidates at instantiation.
   Nonmember operators can be called explicitly by name, including with namespace qualification.
   [#219](https://github.com/yrashk/ycxx/issues/219)
   Overloaded free functions can take braced arguments for arithmetic parameters
@@ -275,8 +280,9 @@ unqualified braced prvalue such as `B{7}`, with an explicit initializer for each
 - parenthesized direct initialization from functional conversions such as `S b(S(1));`;
 - `[[…]]` attributes, the GNU attributes and `asm` labels the macOS SDK's headers use, the
   GNU pointer qualifiers glibc uses, and the type-trait built-ins libycxx's headers use
-  (`__is_same`, `__remove_cv`, …)
-  ([docs/EXTENSIONS.md](docs/EXTENSIONS.md));
+  (`__is_same`, `__remove_cv`, …). `__is_destructible` handles references, non-enum scalars,
+  and bounded arrays of those scalars. It gives false for cv `void`, function types, and
+  arrays of unknown bound. [docs/EXTENSIONS.md](docs/EXTENSIONS.md)
 - templates: function, class and variable templates, deduction, partial ordering, explicit and
   partial specializations with substitution checks for dependent type arguments, static constexpr
   members of class templates, member function and

@@ -537,7 +537,7 @@ std = 'C++98'
 core = true
 status = 'partial'
 issues = [165, 259]
-note = 'ordinary namespace calls, ordinary non-template hidden friends, inline namespaces, class bases and class template type arguments work. Supported ordinary free binary operators use the full association set. Remaining cases include other hidden friend operators and templates, block function declarations, template template arguments, dependent-call type arguments, overload sets and template-ids'
+note = 'ordinary namespace calls, ordinary non-template hidden friends, inline namespaces, class bases and class template type arguments work. Supported ordinary free binary operators use the full association set. Supported dependent binary operators on ordinary non-template classes add associated nonmember candidates at instantiation. Remaining cases include other hidden friend operators and templates, block function declarations, template template arguments, dependent-call type arguments, overload sets and template-ids'
 probe = '''
 namespace n { struct S {}; int f(S) { return 0; } }
 int main() { n::S s; return f(s); }
@@ -813,7 +813,7 @@ ftm = '__cpp_auto_cast'
 detect = '(?<![\w>])auto\s*[({]\s*[\w*&]'
 status = 'partial'
 issues = [286]
-note = 'Scalar and pointer decay-copy works in parentheses and braces, including supported dependent operands in replayed function-template bodies. General class objects, member pointers, unresolved type dependence, and other dependent contexts remain open.'
+note = 'Scalar and pointer decay-copy works in parentheses and braces, including supported dependent operands in replayed function-template bodies. Concrete template arguments can use braces or an integer-literal-led parenthesized operand. General class objects, member pointers, unresolved type dependence, and other dependent contexts remain open.'
 probe = '''
 int main() { int a = 1; auto b = auto(a); return b - 1; }
 '''
@@ -1119,7 +1119,7 @@ clauses = ['dcl.init.aggr', 'dcl.init.general']
 std = 'C++17'
 ftm = '__cpp_aggregate_bases'
 status = 'partial'
-note = 'Automatic flat arithmetic records support parenthesized initialization. Runtime declarations can copy one flat public direct base from an exact-type lvalue or a fully written unqualified braced prvalue, with all derived elements supplied. Other base forms, arrays, nested and reference fields, and other initialization contexts remain open.'
+note = 'Automatic flat arithmetic records support parenthesized initialization. Runtime declarations can copy one flat public direct base from an exact-type lvalue or a fully written unqualified braced prvalue. An omitted trailing arithmetic field is value-initialized when it has no written default member initializer. Other base forms, arrays, nested and reference fields, and other initialization contexts remain open.'
 probe = '''
 struct B { int b; }; struct D : B { int d; }; struct P { int x, y; };
 int main() { D d{{1}, 2}; P p(3, 4); return (d.b + d.d + p.x + p.y == 10) ? 0 : 1; }

@@ -2355,9 +2355,13 @@ public:
           u32 at;
           ~EndPattern() { s->end_pattern(expanded, at, at, false); }
         } end_pattern{s_, false, arg_at};
+        // A brace or an integer literal in the initializer rules out an abstract declarator.
+        // Other `auto(...)` spellings keep type-id precedence ([temp.arg.general]/2).
+        const bool decay_copy = is(Tk::kw_auto) &&
+                               (kind(1) == Tk::l_brace || (kind(1) == Tk::l_paren && kind(2) == Tk::int_lit));
         if (template_name_ahead()) {
           args.push_back(*template_name_argument());
-        } else if (starts_type_id()) {
+        } else if (!decay_copy && starts_type_id()) {
           auto t = type_id();
           if (!t) ok = false;
           else args.push_back({ast::TemplateArgKind::type, s_->types().canonical(*t), sema::ConstId::none});
@@ -3271,18 +3275,12 @@ public:
   // postfix-expression ([expr.post]).
   Ex postfix_expression() {
     Ex e = primary_expression();
-    // Inside brackets a `>` is an operator again ([temp.names]/4).
-    struct Unangle {
-      int& a;
-      int saved;
-      ~Unangle() { a = saved; }
-    };
     for (;;) {
       u32 at = pos();
       switch (kind()) {
       case Tk::l_paren: {
         bump();
-        Unangle u{angle_, std::exchange(angle_, 0)};
+        Unangle u{angle_};
         std::vector<Ex> args;
         if (!is(Tk::r_paren)) {
           do {
@@ -3299,7 +3297,7 @@ public:
       }
       case Tk::l_square: {
         bump();
-        Unangle u{angle_, std::exchange(angle_, 0)};
+        Unangle u{angle_};
         Ex index = expression();
         if (!expect(Tk::r_square)) return {NodeId::none, e.begin, pos()};
         e = s_->subscript(e, index, pos(), at);
@@ -5512,9 +5510,7 @@ public:
         } else if (s_->types().is_class(d.type)) {
           const bool single = args.size() == 1;
           const bool allow_base_copy = !spec.is_constexpr && !s_->immediate_context;
-          // Keep the existing class expression path, which also adjusts derived-to-base copies.
           const bool aggregate_fallback = !spec.is_static &&
-              (!single || (args[0].ok() && !s_->types().is_class(args[0].type()))) &&
               s_->can_parenthesize_aggregate(d.type, args, allow_base_copy);
           if (aggregate_fallback || s_->has_user_ctors(d.type) || !single) {
             const auto form = aggregate_fallback ? sema::Construction::direct_paren_aggregate
@@ -5568,6 +5564,7 @@ public:
 
   // [dcl.type.auto.deduct]: a parenthesized or braced auto initializer has one expression.
   Ex single_auto_initializer() {
+    Unangle unangle{angle_};
     const u32 open = pos();
     std::vector<Ex> args;
     if (is(Tk::l_brace)) {
@@ -5658,6 +5655,12 @@ public:
   bool dependent_decay_copy_body = false;  // a function template's compound statement, before replay
   bool substituting_partial_arguments = false;
 private:
+  // In a delimited operand, a `>` is an operator again ([temp.names]/4).
+  struct Unangle {
+    int& angle;
+    int saved = std::exchange(angle, 0);
+    ~Unangle() { angle = saved; }
+  };
   struct DisableDependentDecayCopy {
     bool& enabled;
     bool saved = std::exchange(enabled, false);

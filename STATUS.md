@@ -1036,7 +1036,7 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   Constant initialization uses the scalar element evaluator, with destination-dependent
   constant evaluation tracked in [#25](https://github.com/yrashk/ycxx/issues/25).
 - An automatic runtime declaration can also initialize an aggregate with one public nonvirtual
-  direct base and at least one public arithmetic field. Every element has an explicit initializer.
+  direct base and at least one public arithmetic field. The base has an explicit initializer.
   The first expression is a nonvolatile lvalue of the exact base type, which is a flat aggregate
   with nonvolatile arithmetic fields and trivial copy and destruction. The base copy uses the
   existing subobject layout and is sequenced before the remaining initializers.
@@ -1044,11 +1044,14 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   base field has a separately written positional initializer and the base has a usable trivial
   move constructor. The complete temporary is initialized once before its value is copied into
   the base subobject.
+  Omitted trailing arithmetic fields are value-initialized when they have no written default
+  member initializer. With a sole base expression, the base must have no conversion functions.
 - Parenthesized arrays, nested fields, unions, reference members, bit-fields, and nontrivial
   destruction remain in [#301](https://github.com/yrashk/ycxx/issues/301). The issue also tracks
-  multiple bases, other base prvalues, omitted initializers for derived aggregates, constant
-  evaluation of base copies, static storage and functional casts. Linux x86-64 runtime conversions
-  between floating-point and integer types remain in [#201](https://github.com/yrashk/ycxx/issues/201).
+  multiple bases, other base prvalues, omitted default member initializers in derived aggregates,
+  constant evaluation of base copies, static storage and functional casts. Linux x86-64 runtime
+  conversions between floating-point and integer types remain in
+  [#201](https://github.com/yrashk/ycxx/issues/201).
   Spec-only fixtures are in `tests/own/parenthesized-aggregate/`.
 
 - Ordinary mutable data members can be modified through a const object. A member access
@@ -1303,6 +1306,9 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   remains under #16.
 - Supported ordinary free binary operators use the full ADL association set, including base
   namespaces and hidden friends. Namespace using-directives do not contribute candidates.
+  Supported dependent binary operator expressions on ordinary non-template class operands retain
+  definition-time ordinary lookup and add eligible associated nonmember candidates at instantiation.
+  [#357](https://github.com/yrashk/ycxx/issues/357)
 - Remaining work in #165 includes declarations of functions in blocks, exact lookup for
   other operators, member templates as template arguments, dependent-call template argument associations,
   overload-set arguments and complete unqualified template-id lookup.
@@ -1804,6 +1810,14 @@ session's.*
   later demand. A variable-template partial specialization with a declared type such as
   `Tag<empty<T>>` remains unsupported.
   `__has_builtin(__is_empty)` continues to answer 1 ([meta.unary.prop], #218).
+- `__is_destructible(T)` gives true for references, including references to incomplete types,
+  and for supported non-enum scalars and bounded arrays of them. It gives false for cv `void`,
+  function types, and arrays of unknown bound. Incomplete class operands and bounded arrays of
+  incomplete classes get a distinct diagnostic. Complete class and enum operands remain
+  unsupported. Supported class-template bases and variable-template initializers replay dependent
+  operands. The class completeness check uses the written point for concrete operands and the
+  demand point for dependent operands. `__has_builtin` answers 0 while support is partial
+  ([meta.unary.prop], #218).
 - Listed in docs/EXTENSIONS.md. Tests: `tests/own/builtins/`. `<cstdio>`: 53 → 33 errors.
 - Not yet (#211 follow-up): the built-ins that need the object model, such as
   class constructibility, assignability and general convertibility, remaining `__is_trivially_*` and
@@ -2939,6 +2953,10 @@ the body. A non-generic lambda body uses its own evaluation context.
 - Function-template bodies replay decay-copy of supported dependent operands with the
   template arguments bound. A value-dependent operand with known type gives the conversion
   its decayed prvalue type in the template definition, including in `decltype`.
+- Concrete decay-copy works in a non-type template argument with `auto{expr}` or with
+  `auto(expr)` when the initializer starts with an integer literal. The argument must be
+  a converted constant expression. Function and function-pointer type-ids keep precedence.
 - General class objects, member pointers, operands whose type dependence is unresolved, and
-  dependent template arguments, requirements, and exception specifications remain open.
+  other direct parenthesized template argument spellings remain open, as do dependent
+  template arguments, requirements, and exception specifications.
   [#286](https://github.com/yrashk/ycxx/issues/286)
