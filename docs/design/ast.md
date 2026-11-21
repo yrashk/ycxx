@@ -520,11 +520,13 @@ equivalence of [temp.over.link], modulo parentheses; functional equivalence is n
 the clause makes ill-formed, no diagnostic required.
 
 **Dependent type predicates (#209, Astra).** A `VDepOp` represents `__is_same(T, U)`,
-`__is_reference(T)`, `__is_const(T)` or `__is_volatile(T)` in a `bool` template argument or
-default. Its ordered type arguments retain canonical qualification, reference kind and parameter
-positions. Substitution first forms each operand type and propagates failure if a type is invalid
+`__is_reference(T)`, `__is_const(T)`, `__is_volatile(T)`, `__is_array(T)`, `__is_pointer(T)`
+or `__is_function(T)` in a `bool` template argument or default. Its ordered type arguments
+retain canonical qualification, reference kind and parameter positions. Substitution first
+forms each operand type and propagates failure if a type is invalid
 ([temp.deduct.general]). It rebuilds the operation while any operand remains dependent and interns
 the same `VInt` as an ordinary `bool` constant once all types are concrete ([temp.alias], [temp.type]).
+The array, pointer and function predicates classify the substituted type ([meta.unary.cat]).
 The cv predicates inspect the substituted type's top-level qualification. For an array it is
 the qualification of its innermost element, and a reference is always cv-unqualified
 ([basic.type.qualifier], [dcl.ref]).

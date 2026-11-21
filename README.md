@@ -225,8 +225,9 @@ Both targets accept leading `[[…]]` attributes on ordinary data and function m
   `if constexpr`, deferred template static assertion failures, and two-phase lookup, with
   Itanium names identical to Clang's; Clang's
   `__make_integer_seq`;
-- dependent `__is_same(T, U)`, `__is_reference(T)`, `__is_const(T)`, and `__is_volatile(T)`
-  as `bool` template arguments or defaults, including through alias templates
+- dependent `__is_same`, `__is_reference`, `__is_const`, `__is_volatile`, `__is_array`,
+  `__is_pointer`, and `__is_function` as `bool` template arguments or defaults, including through
+  alias templates
   [#209](https://github.com/yrashk/ycxx/issues/209);
 - a single nonvirtual, nonpolymorphic base in a primary class template, including an
   alias-selected dependent base and qualified lookup of its static members.
