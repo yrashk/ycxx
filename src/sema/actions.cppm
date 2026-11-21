@@ -7088,6 +7088,18 @@ public:
       for_each_associated_friend(associations, name, /*at_instantiation=*/false, add);
       for (EntityId ns : associations.namespaces)
         for (const ast::DeclSema& d : q_->adl_functions(ns, name, /*at_instantiation=*/false)) add(d);
+      const bool ordinary_classes = !enum_only && std::ranges::all_of(operands, [&](const Ex& operand) {
+        const QualType type = types().referee(operand.type());
+        if (!types().is_class(type)) return true;
+        const auto& entity = w_->entities.rec(types().class_of(type));
+        return entity.kind == EntityKind::class_ && entity.templ == EntityId::none;
+      });
+      if (ordinary_classes && q_->dependent_call(op_at)) {
+        auto instantiated = adl_associations(operands, /*at_instantiation=*/true, /*ordinary_call=*/false);
+        for_each_associated_friend(instantiated, name, /*at_instantiation=*/true, add);
+        for (EntityId ns : instantiated.namespaces)
+          for (const ast::DeclSema& d : q_->adl_functions(ns, name, /*at_instantiation=*/true)) add(d);
+      }
     } else {
       for (const Ex& o : operands)
         if (auto ns = associated_namespace(o.type())) {
@@ -7274,7 +7286,11 @@ public:
     using enum BinOp;
     u32 begin = l.begin, end = r.end;
     if (!l.ok() || !r.ok()) return {NodeId::none, begin, end};
-    if (dependent(l) || dependent(r)) return dependent_node({l, r}, begin, end);
+    if (dependent(l) || dependent(r)) {
+      if (types().is_dependent(l.type()) || types().is_dependent(r.type()))
+        dependent_calls.push_back(op_at);
+      return dependent_node({l, r}, begin, end);
+    }
     if (op == dot_star || op == arrow_star) return member_pointer_access(l, r, op == arrow_star, op_at);
     if (auto o = overloaded(binary_spellings[std::to_underlying(op)], {l, r}, begin, end, op_at)) return *o;
     auto bin = [&](ast::BinaryOp k, Ex a, Ex c, QualType t) {
