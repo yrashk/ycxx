@@ -14,4 +14,7 @@ void from_const_xvalue(const Value& source) {
   auto [member] = static_cast<const Value&&>(source); //! error
 }
 
+struct Nested { Value inner; }; void nested(Nested& x) { auto [inner] = x; } //! error
+struct Array { Value elements[1]; }; void array(Array& x) { auto [elements] = x; } //! error
+
 struct NoMove { int&& member; ~NoMove() {} }; void move(NoMove& x) { auto [member] = static_cast<NoMove&&>(x); } //! error

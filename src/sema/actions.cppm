@@ -3992,14 +3992,15 @@ public:
     if (!user_copy) {
       QualType source = cr->defaulted_copy_const ? types().add_cv(ut, Cv::const_) : ut;
       QualType p = types().lvalue_ref(source);
-      // [class.copy.ctor]: an rvalue-reference member deletes the implicit copy. A mutable
-      // xvalue can still transfer the representation when its implicit move is trivial (#244).
-      const bool same_class_glvalue = args.size() == 1 && args[0].glvalue() && same_unqualified(args[0].type(), ut);
-      const bool trivial_move = same_class_glvalue && args[0].cat() == ValueCategory::xvalue &&
-                                object_cv(args[0].type()) == Cv::none && cr->move_usable && !cr->move_nontrivial;
-      const bool deleted = cr->copy_deleted || (same_class_glvalue && !trivial_move &&
-          std::ranges::any_of(cr->fields, [&](const FieldRec& f) { return types().rec(f.type).rvalue_ref; }));
-      cands.push_back({cr->copy_ctor, types().function(void_, std::span(&p, 1), false, LangLinkage::cxx), true, deleted});
+      cands.push_back({cr->copy_ctor, types().function(void_, std::span(&p, 1), false, LangLinkage::cxx), true, cr->copy_deleted});
+      // [class.copy.ctor]: a class whose implicit copy is deleted can still use a trivial
+      // implicit move and transfer its representation. General implicit move is tracked in #244.
+      if (cr->copy_deleted && cr->move_usable && !cr->move_nontrivial && args.size() == 1 &&
+          args[0].cat() == ValueCategory::xvalue && same_unqualified(args[0].type(), ut) &&
+          object_cv(args[0].type()) == Cv::none) {
+        QualType move = types().rvalue_ref(ut);
+        cands.push_back({EntityId::none, types().function(void_, std::span(&move, 1), false, LangLinkage::cxx), true, false});
+      }
     }
     if (!cr->user_ctors && !copy_init) cands.push_back({EntityId::none, types().function(void_, {}, false, LangLinkage::cxx), true, false});
     auto chosen = resolve(cands, args, begin, no_name(), std::nullopt, ut);
@@ -4014,7 +4015,7 @@ public:
     if (k.pattern) demands.push_back({k.entity, ast::Loc{item_, loc_base_ + begin}});
     TypeRec fr = types().rec(k.type);
     if (cr->defaulted_copy != CopyState::ordinary) {
-      const bool defaulted = k.entity == EntityId::none ? !fr.params.empty() :
+      const bool defaulted = k.entity == EntityId::none ? !fr.params.empty() && !types().rec(fr.params[0]).rvalue_ref :
           std::ranges::contains(cr->defaulted_copy_declarations, k.entity);
       if (defaulted) {
         if (cr->defaulted_copy != CopyState::trivial) {

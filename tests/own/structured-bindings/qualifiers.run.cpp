@@ -13,6 +13,7 @@ struct Controls {
 };
 
 struct MoveReference { int&& endpoint; };
+struct MoveOuter { MoveReference inner; };
 
 struct CopyReference {
   int&& endpoint;
@@ -54,4 +55,8 @@ int main() {
   CopyReference copying(static_cast<int&&>(linked));
   auto [copied] = copying;
   if (&moved != &end || &copied != &linked) return 3;
+
+  MoveOuter outer{{static_cast<int&&>(end)}};
+  auto [inner] = static_cast<MoveOuter&&>(outer);
+  if (&inner.endpoint != &end) return 4;
 }
