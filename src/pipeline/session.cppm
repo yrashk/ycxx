@@ -17,6 +17,7 @@ import ycxx.pp;
 import ycxx.sema;
 import :back;
 import :front;
+import :affine;
 import :executable;
 import :lines;
 
@@ -51,6 +52,7 @@ struct BuildKey {
   Until until = Until::link;
   ProgramId program{};  // with `link`
   bool want_dependencies = false;
+  bool check_affine = false;
   bool operator==(const BuildKey&) const = default;
 };
 // A request, numbered by the registry (`Session::request`): a key holds no vector.
@@ -272,6 +274,7 @@ class Session {
       else if (k.until == Until::object) name += " -c";
       else if (k.program.n >= registry_base && k.program.n - registry_base < programs_.size())
         name += " → " + programs_[k.program.n - registry_base].identifier;
+      if (k.check_affine) name += " -fcheck-affine";
       name_for_trace(trace_names().requests, it->second, std::move(name));
       requests_.push_back(std::move(k));
     }
@@ -451,6 +454,20 @@ engine::query_task<Built> Build::run(engine::Ctx& cx, RequestId r) {
   if (const auto* checkpoint = Session::worker_checkpoint_; checkpoint && first) {
     (*checkpoint)(first->path, cx.stop_token());
     co_await cx.stop_point();
+  }
+  if (k.check_affine) {
+    std::vector<TuId> checked;
+    for (std::size_t i = 0; i < k.units.size(); ++i)
+      if (out.units[i].readable && !out.units[i].front_failed) checked.push_back(k.units[i]);
+    const auto results = co_await cx.par_map<CheckAffine>(checked);
+    std::size_t j = 0;
+    for (UnitBuilt& u : out.units) {
+      if (!u.readable || u.front_failed) continue;
+      const auto& messages = results[j++].get();
+      u.messages.append_range(messages);
+      u.front_failed = !messages.empty();
+      all = all && !u.front_failed;
+    }
   }
   if (k.until == Until::syntax) co_return out;
   std::vector<TuId> compiled;

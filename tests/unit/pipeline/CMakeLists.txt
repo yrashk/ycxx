@@ -12,6 +12,9 @@ endif()
 ycxxc_unit_test(pipeline_incremental incremental_test.cpp ycxxc_pipeline)
 
 ycxxc_unit_test(pipeline_elf_executable elf_executable_test.cpp ycxxc_pipeline)
+add_test(NAME unit.affine_permit
+  COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/affine_permit.py
+          $<TARGET_FILE:ycxxc> ${PROJECT_SOURCE_DIR}/examples/affine)
 add_test(NAME unit.dependent_fabsl
   COMMAND ${CMAKE_COMMAND} -DYCXX=$<TARGET_FILE:ycxxc>
           -P ${CMAKE_CURRENT_SOURCE_DIR}/dependent_fabsl.cmake)
@@ -63,6 +66,9 @@ endif()
 # can. unit.darwin_virtual runs the virtual tests' fixtures on Mach-O (#650).
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$"
    AND NOT CMAKE_CROSSCOMPILING)
+  add_test(NAME unit.affine_permit_linux
+    COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/affine_permit.py
+            $<TARGET_FILE:ycxxc> ${PROJECT_SOURCE_DIR}/examples/affine --target=x86_64-linux-gnu)
   add_test(NAME unit.linux_compile
     COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/linux_compile.py
             $<TARGET_FILE:ycxxc> ${CMAKE_C_COMPILER} ${CMAKE_READELF} ${CMAKE_AR}

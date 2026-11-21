@@ -200,6 +200,7 @@ struct Options {
   WarningOptions warnings;
   bool nostdlib = false;
   bool nostdlibxx = false;  // `-nostdlib++`: no libycxx runtime in a Darwin link
+  bool check_affine = false;
   std::optional<std::string> output, interpreter;
   bool dependencies = false;  // `-MD`
   std::optional<std::string> dependency_path;  // `-MF`
@@ -252,6 +253,7 @@ std::expected<Options, std::string> parse_options(std::span<const std::string_vi
       if (o.query != Options::Query::machine) o.query = query;
     } else if (a == "-c") o.stop = Options::Stop::object;
     else if (a == "-fsyntax-only") o.stop = Options::Stop::syntax;
+    else if (a == "-fcheck-affine") o.check_affine = true;
     else if (a == "-E") o.stop = Options::Stop::preprocess;
     else if (a == "-MD") o.dependencies = true;
     else if (a.starts_with("-MF") || a.starts_with("-MT")) {
@@ -735,8 +737,9 @@ std::vector<std::string> split_words(std::string_view text) {
 
 namespace {
 
-// A check keeps the preprocessing options, template depth, class call ABI and warning controls.
-// With `std` it also keeps the language standard. Another compiler may name one ycxx does not take.
+// A check keeps preprocessing options, template depth, class call ABI, warning controls and
+// affine policy. With `std` it also keeps the language standard. Another compiler may name one
+// ycxx does not take.
 void checking_options(std::span<const std::string_view> args, bool std, std::vector<std::string>& out) {
   pp::Config scratch;
   scratch.target = pp::native_target;
@@ -765,7 +768,8 @@ void checking_options(std::span<const std::string_view> args, bool std, std::vec
     } else if (args[i] == "-o" || args[i] == "--dynamic-linker") {
       ++i;
     } else if ((std && args[i].starts_with("-std=")) || args[i].starts_with("-ftemplate-depth=") ||
-               args[i].starts_with("-fclass-call-abi=") || warning_option(args[i])) {
+               args[i].starts_with("-fclass-call-abi=") || warning_option(args[i]) ||
+               args[i] == "-fcheck-affine") {
       out.emplace_back(args[i]);
     }
   }
@@ -841,6 +845,7 @@ Done run(const Request& r, pp::Host& host, pipeline::Session& session, const Sto
 
   // The units, named by what they are (#139), and the whole request as one root.
   pipeline::BuildKey key;
+  key.check_affine = opts->check_affine;
   key.until = opts->stop == Options::Stop::syntax ? pipeline::Until::syntax
               : opts->stop == Options::Stop::object ? pipeline::Until::object
                                                     : pipeline::Until::link;

@@ -46,6 +46,7 @@ target_sources(ycxxc_pipeline PUBLIC FILE_SET CXX_MODULES
   mangle.cppm
   back.cppm
   front.cppm
+  affine.cppm
   executable.cppm
   session.cppm
   pipeline.cppm)
