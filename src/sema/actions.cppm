@@ -4717,15 +4717,24 @@ public:
       QualType param = types().pointer(types().add_cv(builtin(Builtin::char_), Cv::const_));
       return builtin_value_call(ast::BuiltinOp::strlen, builtin(w_->target.size_type), param, args.front(), begin, end);
     }
-    Builtin kind = b.type == 'f' ? Builtin::float_ : b.type == 'l' ? Builtin::long_double : Builtin::double_;
-    if (!ast::computes(w_->target[kind].format)) {
-      diag(begin, Diag::extended_float_not_supported);
-      return {NodeId::none, begin, end};
-    }
-    QualType t = builtin(kind);
     std::size_t want = b.function == fabs || b.function == nan ? 1 : 0;
     if (!builtin_arity(want, args.size(), begin)) return {NodeId::none, begin, end};
     if (std::ranges::any_of(args, [](const Ex& a) { return !a.ok(); })) return {NodeId::none, begin, end};
+    Builtin kind = b.type == 'f' ? Builtin::float_ : b.type == 'l' ? Builtin::long_double : Builtin::double_;
+    QualType t = builtin(kind);
+    if (!ast::computes(w_->target[kind].format)) {
+      if (b.function == fabs) {
+        const Ex& arg = args.front();
+        if (!types().is_dependent(arg.type()) && !ics(arg, t).viable) {
+          diag(arg.begin, Diag::no_conversion, arg.type(), t);
+          return {NodeId::none, begin, end};
+        }
+        // Instantiation reparses the selected statement with bound arguments ([stmt.if]).
+        if (dependent(arg)) return dependent_node({arg}, begin, end, t);
+      }
+      diag(begin, Diag::extended_float_not_supported);
+      return {NodeId::none, begin, end};
+    }
     switch (b.function) {
       case addressof:
       case trap:
