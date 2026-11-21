@@ -5827,6 +5827,11 @@ public:
     }
     auto written = q_->namespace_members(EntityId::none, name);
     found.insert(found.end(), written.begin(), written.end());
+    // A preceding declarator in this item is visible before the item is published.
+    for (const OwnDecl& d : own)
+      if (d.name == name && d.sema.kind == ast::DeclKind::function &&
+          w_->entities.rec(d.sema.entity).scope == EntityId::none)
+        found.push_back(d.sema);
     return decls_expr(std::move(found), true, name, begin, end);
   }
 

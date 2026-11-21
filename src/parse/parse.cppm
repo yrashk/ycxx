@@ -2175,7 +2175,7 @@ private:
     std::string_view n = p_->world().ins.names.spelling(d.name);
     if (!n.starts_with("operator") || n.size() == 8 || n.starts_with(lex::literal_operator_prefix)) return true;
     std::string_view op = n.substr(8);
-    if (sema::is_allocation_name(n)) return true;  // checked against the implicit declarations
+    if (sema::is_allocation_name(n)) return true;  // checked by allocation_declaration_ok
     sema::Types& types = s_.types();
     if (op == "=" || op == "()" || op == "[]" || op == "->") {
       s_.diag(d.name_at, Diag::operator_member_only, d.name);
@@ -4753,22 +4753,44 @@ private:
     }
   }
 
-  // One init-declarator at namespace scope.
+  bool allocation_declaration_ok(const DeclSpec& spec, const parse::Declarator& d, LangLinkage lang,
+                                 std::string_view name) {
+    auto unsupported = [&] {
+      s_.diag(d.name_at, Diag::allocation_declaration, d.name);
+      return false;
+    };
+    if (!d.function || d.qualified || ns_entity() != EntityId::none || lang != LangLinkage::cxx || template_ ||
+        explicit_ || spec.is_static || spec.is_inline || spec.is_typedef || spec.is_constexpr || spec.is_consteval ||
+        deleted_body() || !d.asm_label.empty())
+      return unsupported();
+
+    auto& world = s_.world();
+    if (!world.matches_tagged_allocation_function(name, d.type, d.has_noexcept)) {
+      if (!world.matches_allocation_function(name, d.type)) return unsupported();
+      return defaults_allowed(d.params, true, d.name);
+    }
+    // [over.oper.general]/5 and [basic.stc.dynamic.allocation]/1: a tagged overload can use
+    // ordinary default arguments, with the sole restriction on the allocation size parameter.
+    if (name == sema::allocation_name(sema::AllocationFunction::allocate) && !d.params.empty()) {
+      const auto& first = d.params.front();
+      if (first.default_arg != NodeId::none || first.default_tokens) {
+        s_.diag(first.at, Diag::default_arg_not_allowed);
+        return false;
+      }
+    }
+    return true;
+  }
+
   // One init-declarator at namespace scope; false after an error that leaves no record.
   bool declare(const DeclSpec& spec, parse::Declarator d, LangLinkage lang, bool explicit_lang,
                bool is_function_def, bool ordinary_friend = false) {
     sema::Types& types = s_.types();
-    if (!defaults_allowed(d.params, types.is_function(d.type) && !spec.is_typedef, d.name)) return false;
+    const std::string_view name = s_.ins().names.spelling(d.name);
+    const bool allocation = sema::is_allocation_name(name);
+    if (allocation ? !allocation_declaration_ok(spec, d, lang, name)
+                   : !defaults_allowed(d.params, types.is_function(d.type) && !spec.is_typedef, d.name))
+      return false;
     if (literal_operator_named(d.name) && !literal_operator_ok(spec, d, lang, template_)) return false;
-    std::string_view name = s_.ins().names.spelling(d.name);
-    if (sema::is_allocation_name(name)) {
-      if (!d.function || d.qualified || ns_entity() != EntityId::none || lang != LangLinkage::cxx || template_ ||
-          explicit_ || spec.is_static || spec.is_inline || spec.is_typedef || spec.is_constexpr || spec.is_consteval ||
-          deleted_body() || !d.asm_label.empty() || !s_.world().matches_allocation_function(name, d.type)) {
-        s_.diag(d.name_at, Diag::allocation_declaration, d.name);
-        return false;
-      }
-    }
     if (spec.is_typedef) {
       if (is_function_def) {  // [dcl.typedef]/1: a typedef declares no function definition
         s_.diag(spec.begin, Diag::typedef_definition);
@@ -5123,7 +5145,8 @@ private:
           s_.diag(d.name_at, Diag::conflicting_declaration, d.name);
           return false;
         }
-        const bool canonical_match = fn && (ordinary_friend || (p.flags & (sema::decl_flag::friend_ | sema::decl_flag::lang_c)) ||
+        const bool canonical_match = fn && (allocation || ordinary_friend ||
+                                            (p.flags & (sema::decl_flag::friend_ | sema::decl_flag::lang_c)) ||
                                             lang == LangLinkage::c);
         const QualType prior_type = canonical_match ? types.canonical(p.type) : p.type;
         const QualType current_type = canonical_match ? types.canonical(sem.type) : sem.type;
