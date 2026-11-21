@@ -177,28 +177,6 @@ public:
   virtual ~Questions() = default;
 };
 
-// An opaque polymorphic root admits calls on peer-owned objects without a native class layout.
-bool native_virtual_consumer(const ClassRec& record, const Types& types, auto&& written_member) {
-  if (types.target().triple != ast::x86_64_linux.triple || !record.polymorphic || record.virtual_destructor ||
-      !record.bases.empty() || !record.fields.empty() || record.user_ctors || record.destructor != EntityId::none)
-    return false;
-  auto integer = [&](QualType type) {
-    const auto builtin = types.builtin_of(type);
-    return builtin && ast::is_integral(*builtin) && types.target()[*builtin].size <= 8;
-  };
-  return std::ranges::all_of(record.members, [&](const MemberDeclRec& member) {
-    // Class completion also records an implicit copy assignment, even for opaque classes.
-    if (!member.is_virtual)
-      return member.copy_assignment != CopyAssignment::none && !member.explicit_defaulted_assignment;
-    const auto declared = written_member(member.entity);
-    if (!declared || (declared->flags & (decl_flag::definition | decl_flag::inline_ | decl_flag::deleted))) return false;
-    const auto type = types.rec(member.type);
-    return !type.variadic && type.fn_ref == ast::RefQual::none &&
-           (type.fn_cv == Cv::none || type.fn_cv == Cv::const_) && type.params.size() < 32 &&
-           integer(type.inner) && std::ranges::all_of(type.params, integer);
-  });
-}
-
 // An analysed expression or statement under construction: a draft node and its token range in
 // the part. `id` is none after an error that has been diagnosed; actions given such an operand
 // give up silently, so one mistake gives one diagnostic.
@@ -265,6 +243,28 @@ inline constexpr u16 template_ = 4096;  // a template ([temp.pre]); its head is 
 inline constexpr u16 specialization = 8192;  // an explicit specialization ([temp.expl.spec])
 inline constexpr u16 partial = 16384;  // a partial specialization ([temp.spec.partial]), with `template_`
 inline constexpr u16 friend_ = 32768;  // a friend declaration ([class.friend]): `entity` is the friend
+}
+
+// An opaque polymorphic root admits calls on peer-owned objects without a native class layout.
+bool native_virtual_consumer(const ClassRec& record, const Types& types, auto&& written_member) {
+  if (types.target().triple != ast::x86_64_linux.triple || !record.polymorphic || record.virtual_destructor ||
+      !record.bases.empty() || !record.fields.empty() || record.user_ctors || record.destructor != EntityId::none)
+    return false;
+  auto integer = [&](QualType type) {
+    const auto builtin = types.builtin_of(type);
+    return builtin && ast::is_integral(*builtin) && types.target()[*builtin].size <= 8;
+  };
+  return std::ranges::all_of(record.members, [&](const MemberDeclRec& member) {
+    // Class completion also records an implicit copy assignment, even for opaque classes.
+    if (!member.is_virtual)
+      return member.copy_assignment != CopyAssignment::none && !member.explicit_defaulted_assignment;
+    const auto declared = written_member(member.entity);
+    if (!declared || (declared->flags & (decl_flag::definition | decl_flag::inline_ | decl_flag::deleted))) return false;
+    const auto type = types.rec(member.type);
+    return !type.variadic && type.fn_ref == ast::RefQual::none &&
+           (type.fn_cv == Cv::none || type.fn_cv == Cv::const_) && type.params.size() < 32 &&
+           integer(type.inner) && std::ranges::all_of(type.params, integer);
+  });
 }
 
 // Flags of `ClosureDef::flags`.
