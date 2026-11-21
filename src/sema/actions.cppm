@@ -7125,14 +7125,21 @@ public:
           collect_bases(r.entity);
         }
         if (!ordinary_call) break;
-        auto visit_type_arg = [&](const TemplateArg& arg) {
-          if (arg.kind == ast::TemplateArgKind::type) visit(arg.type);
+        auto visit_arg = [&](const TemplateArg& arg) {
+          if (arg.kind == ast::TemplateArgKind::type) {
+            visit(arg.type);
+          } else if (arg.kind == ast::TemplateArgKind::template_ && arg.templ != EntityId::none) {
+            // [basic.lookup.argdep]/3: associate the type template itself, not a specialization.
+            EntityId scope = w_->entities.rec(arg.templ).scope;
+            if (scope == EntityId::none || w_->entities.rec(scope).kind == EntityKind::namespace_)
+              add_namespace(arg.templ);
+          }
         };
         for (const TemplateArg& arg : entity.args) {
           if (arg.kind == ast::TemplateArgKind::pack)
-            std::ranges::for_each(ins().seqs.elements(arg.elems), visit_type_arg);
+            std::ranges::for_each(ins().seqs.elements(arg.elems), visit_arg);
           else
-            visit_type_arg(arg);
+            visit_arg(arg);
         }
         break;
       }
