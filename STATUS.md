@@ -2681,6 +2681,11 @@ and runtime integration with ycxx's own linker remain under [#89]. See the
   allocation address selection, direct deallocation calls, and a Linux peer providing all three
   symbols. Over-aligned storage and expression dispatch are tracked in
   [#293](https://github.com/yrashk/ycxx/issues/293) and [#303](https://github.com/yrashk/ycxx/issues/303).
+- Written nonthrowing global scalar allocation and deallocation overloads can take a final
+  `const Tag&`, with an optional preceding `std::align_val_t`. The tag can be a named incomplete
+  class or union, including `std::nothrow_t`. These declarations enter ordinary overload lookup
+  when written and support explicit calls. Tagged placement expressions remain in
+  [#293](https://github.com/yrashk/ycxx/issues/293).
 - The six usual global array allocation and deallocation declarations support explicit
   calls and typed address selection, including the aligned signatures. Written
   redeclarations share the implicit entities. The Itanium mangler emits `na` and `da`, and
