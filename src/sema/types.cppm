@@ -703,6 +703,7 @@ struct ClassRec {
   std::optional<bool> destructor_noexcept;  // the effective specification, when known
   bool destructor_usable = false;          // its declaration and subobject destruction are known to be usable
   bool layout_requires_virtual_support = false;
+  bool peer_virtual_root_layout = false;  // size, alignment and field access on peer-owned objects
   std::vector<FieldRec> fields;        // in declaration order
   std::vector<MemberDeclRec> members;  // member functions and static data members
   // Special members ([special]): whether a constructor is user-declared; the destructor and the

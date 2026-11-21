@@ -249,10 +249,10 @@ inline constexpr u16 partial = 16384;  // a partial specialization ([temp.spec.p
 inline constexpr u16 friend_ = 32768;  // a friend declaration ([class.friend]): `entity` is the friend
 }
 
-// An opaque polymorphic root admits calls on peer-owned objects without a native class layout.
-bool native_virtual_consumer(const ClassRec& record, const Types& types, auto&& written_member) {
+// Only this fixed set of declarations can consume a peer-owned virtual table.
+bool native_virtual_root_declarations(const ClassRec& record, const Types& types, auto&& written_member) {
   if (types.target().triple != ast::x86_64_linux.triple || !record.polymorphic || record.virtual_destructor ||
-      !record.bases.empty() || !record.fields.empty() || record.user_ctors || record.destructor != EntityId::none)
+      !record.bases.empty() || record.user_ctors || record.destructor != EntityId::none)
     return false;
   auto integer = [&](QualType type) {
     const auto builtin = types.builtin_of(type);
@@ -269,6 +269,11 @@ bool native_virtual_consumer(const ClassRec& record, const Types& types, auto&& 
            (type.fn_cv == Cv::none || type.fn_cv == Cv::const_) && type.params.size() < 32 &&
            integer(type.inner) && std::ranges::all_of(type.params, integer);
   });
+}
+
+bool native_virtual_consumer(const ClassRec& record, const Types& types, auto&& written_member) {
+  return (record.fields.empty() || record.peer_virtual_root_layout) &&
+         native_virtual_root_declarations(record, types, written_member);
 }
 
 // Flags of `ClosureDef::flags`.
@@ -1141,6 +1146,12 @@ public:
     return false;
   }
 
+  bool has_peer_virtual_root_layout(QualType t) {
+    if (!classes().has_virtual_layouts() || !types().is_class(t)) return false;
+    const ClassRec* record = class_rec(types().class_of(t));
+    return record && record->peer_virtual_root_layout;
+  }
+
   bool require_supported_virtual_signature(const TypeRec& f, u32 at) {
     return require_supported_virtual_layout(f.inner, at) && std::ranges::all_of(f.params, [&](QualType p) {
       return require_supported_virtual_layout(p, at);
@@ -1177,6 +1188,18 @@ public:
     if (sc.ns) return namespace_template(*sc.ns, name, ast::DeclKind::function).has_value();
     return sc.type && types().is_class(*sc.type) && class_has_member_template(types().class_of(*sc.type), name);
   }
+  // A class lvalue reached through an existing pointer or reference. Prvalues and direct
+  // references to class storage still use the ordinary layout guard.
+  bool peer_object_lvalue(Ex object) {
+    if (object.cat() != ValueCategory::lvalue) return false;
+    while (auto p = as<ast::Paren>(object)) object.id = p->operand.id;
+    if (auto local = as<ast::LocalRef>(object)) return types().is_reference(local_declared_type(locals_[local->local]));
+    if (auto decl = as<ast::DeclRef>(object)) return decl->reference;
+    if (auto unary = as<ast::Unary>(object)) return unary->op == ast::UnaryOp::deref;
+    if (auto field = as<ast::Member>(object)) return field->reference;
+    return as<ast::Call>(object).has_value() || as<ast::MemberCall>(object).has_value();
+  }
+
   Ex member(Ex object, bool arrow, NameId name, u32 end, u32 op_at, u32 name_at,
             std::optional<NameId> qualifier = {}) {
     u32 begin = object.begin;
@@ -1252,6 +1275,7 @@ public:
     u32 index = found->index;
     const FieldRec& f = *found->field;
     if (unevaluated == 0 && !(checking_virtual_body && c == current_class) &&
+        !(has_peer_virtual_root_layout(ct) && (arrow || peer_object_lvalue(object))) &&
         !require_supported_virtual_layout(ct, name_at)) return fail;
     // [expr.ref]/7.2: the member's type, with the object's cv-qualifiers added; the result is an
     // lvalue if the object is (or is reached through a pointer), else an xvalue.
@@ -5789,7 +5813,7 @@ public:
     QualType st = builtin(w_->target.size_type);
     if (types().is_dependent(t)) return dependent_node({}, begin, end, st);
     t = types().referee(t);  // [expr.sizeof]/2, [expr.alignof]/3
-    if (!require_supported_virtual_layout(t, begin)) return {NodeId::none, begin, end};
+    if (!has_peer_virtual_root_layout(t) && !require_supported_virtual_layout(t, begin)) return {NodeId::none, begin, end};
     std::optional<u64> n = layout_of(t, align);
     if (!n) {
       if (types().is_function(t) || !is_complete(t)) diag(begin, Diag::sizeof_incomplete, t);
@@ -5838,7 +5862,7 @@ public:
   std::optional<ast::RecordLayout> class_layout(EntityId ce) {
     if (auto it = class_places_.find(std::to_underlying(ce)); it != class_places_.end()) return it->second;
     const ClassRec* c = is_complete(types().class_type(ce)) ? class_rec(ce) : nullptr;
-    if (!c || c->layout_requires_virtual_support) return std::nullopt;
+    if (!c || (c->layout_requires_virtual_support && !c->peer_virtual_root_layout)) return std::nullopt;
     std::vector<ast::Placed> bases, places;
     for (const BaseRec& b : c->bases) {
       auto m = place_of(types().class_type(b.cls));
@@ -5851,7 +5875,8 @@ public:
       m->bit_width = f.bit_width;
       places.push_back(*m);
     }
-    return class_places_[std::to_underlying(ce)] = ast::record_layout(bases, places, c->union_, c->pod, std::to_underlying(ce));
+    const ast::Target* root = c->peer_virtual_root_layout ? &w_->target : nullptr;
+    return class_places_[std::to_underlying(ce)] = ast::record_layout(bases, places, c->union_, c->pod, std::to_underlying(ce), root);
   }
   std::map<u32, ast::RecordLayout> class_places_;  // complete classes' layouts
 

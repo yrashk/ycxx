@@ -85,9 +85,10 @@ constexpr BuiltinLayout member_pointer_layout(const Target& t, bool function) {
   return {u8(t.pointer_size + offset.size), std::max(t.pointer_align, offset.align)};
 }
 
-// A class's layout (Itanium C++ ABI §2.4, [class.mem], [class.derived]; no virtual bases or
-// virtual functions yet). The one rule sema (`sizeof`, #194) and the back end (`layout`) both
+// A class's layout (Itanium C++ ABI §2.4, [class.mem], [class.derived]). The one rule sema
+// (`sizeof`, #194) and the back end (`layout`) both
 // read, from what each component's own layout says of it (`Placed`):
+// - the virtual table pointer of a polymorphic root with no primary base, at offset 0;
 // - the non-virtual direct bases, in declaration order, then the non-static data members;
 // - an empty base at offset 0, or else where a non-empty one would go;
 // - a non-empty component at the class's data size so far (`dsize`, which leaves out the tail
@@ -136,9 +137,11 @@ struct RecordLayout {
   Placed placed;                            // what it says of the class as a component
 };
 constexpr RecordLayout record_layout(std::span<const Placed> bases, std::span<const Placed> fields, bool union_, bool pod,
-                                     std::uint32_t self) {
+                                     std::uint32_t self, const Target* polymorphic_root = nullptr) {
   RecordLayout out;
-  std::uint64_t size = 0, align = 1, dsize = 0;
+  std::uint64_t size = polymorphic_root ? polymorphic_root->pointer_size : 0;
+  std::uint64_t align = polymorphic_root ? polymorphic_root->pointer_align : 1;
+  std::uint64_t dsize = size;
   std::vector<std::pair<std::uint32_t, std::uint64_t>> empties;
   auto conflicts = [&](const Placed& d, std::uint64_t at) {
     for (auto [t, x] : d.empties)
@@ -192,7 +195,7 @@ constexpr RecordLayout record_layout(std::span<const Placed> bases, std::span<co
     out.offsets.push_back(place(f, false));
     next_bit = dsize * 8;
   }
-  bool empty = fields.empty() && std::ranges::all_of(bases, &Placed::empty);
+  bool empty = !polymorphic_root && fields.empty() && std::ranges::all_of(bases, &Placed::empty);
   std::uint64_t nvsize = size;
   out.align = align;
   out.size = size == 0 ? align : (size + align - 1) / align * align;

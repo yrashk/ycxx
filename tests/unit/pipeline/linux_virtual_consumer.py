@@ -1,4 +1,4 @@
-"""Consume a separately compiled provider's virtual table on System V AMD64."""
+"""Use separately compiled polymorphic objects on System V AMD64."""
 
 import os
 from pathlib import Path
@@ -18,7 +18,7 @@ def main():
             tempfile.TemporaryDirectory(prefix='yd-') as runtime:
         scope = Path(temp)
         (scope / '.ycxx').touch()
-        for part in ('consumer', 'provider', 'host'):
+        for part in ('consumer', 'provider', 'host', 'layout-consumer', 'layout-provider-host'):
             shutil.copyfile(fixtures / f'{part}.cpp', scope / f'{part}.cpp')
         base = {k: v for k, v in os.environ.items() if k not in ('YCXX_NO_DAEMON', 'YCXX_DAEMON', 'YCXX_ROOT')}
         base.update(LC_ALL='C', YCXX_RUNTIME_DIR=runtime, YCXX_THREADS='2')
@@ -39,13 +39,28 @@ def main():
         (scope / 'type-only.cpp').write_text(root + 'B* identity(B* object) { return object; }\n')
         compile(linux, '-c', 'type-only.cpp', '-o', 'type-only.o')
         assert (scope / 'type-only.o').is_file()
+        layout_error = 'object layout requiring virtual function support'
+        (scope / 'opaque-size.cpp').write_text(root + 'constexpr auto size = sizeof(B);\n')
+        compile(linux, '-fsyntax-only', 'opaque-size.cpp')
+        compile(darwin, '-fsyntax-only', 'opaque-size.cpp', error=layout_error)
+        scalar = 'struct B { virtual int read(int); unsigned int word; };\n'
         guards = (
             (root + 'int B::read(int n) { return n; }',
              'an out-of-class definition of a virtual member function is not supported yet'),
             ('struct B { virtual int read(int) = 0; };', "'=' is not supported yet"),
-            (root + 'void consume(B object) {}', 'object layout requiring virtual function support'),
-            (root + 'constexpr auto size = sizeof(B);', 'object layout requiring virtual function support'),
+            (root + 'void consume(B object) {}', layout_error),
             (root + 'struct Enclosing { B object; };',
+             'native output for a translation unit with virtual member functions is not supported yet'),
+            (scalar + 'B object;', layout_error),
+            (scalar + 'void copy(B& to, const B& from) { to = from; }', layout_error),
+            (scalar + 'void consume(B object) {}', layout_error),
+            (scalar + 'B make(); unsigned int read() { return make().word; }', layout_error),
+            (scalar + 'struct D : B {}; unsigned int read(D* object) { return object->word; }', layout_error),
+            ('#pragma pack(push, 1)\n' + scalar + '#pragma pack(pop)\nunsigned long size() { return sizeof(B); }',
+             layout_error),
+            (scalar.replace('struct B', 'struct __attribute__((packed)) B') +
+             'unsigned int read(B* object) { return object->word; }', layout_error),
+            (scalar.replace('read(int);', 'read(int n) { return n; }'),
              'native output for a translation unit with virtual member functions is not supported yet'),
         )
         for source, diagnostic in guards:
@@ -72,6 +87,27 @@ def main():
             run([host_cxx, '-std=c++26', '-pedantic-errors', '-no-pie', 'first-slot-host.cpp', 'provider.o',
                  'first-slot.o', '-o', 'mixed-first-slot'], scope, cold)
             run(['./mixed-first-slot'], scope, cold)
+
+            compile(linux, '-fsyntax-only', 'layout-consumer.cpp')
+            compile(darwin, '-c', 'layout-consumer.cpp', '-o', 'layout-darwin.o', error=layout_error)
+            assert not (scope / 'layout-darwin.o').exists()
+            compile(linux, '-c', 'layout-consumer.cpp', '-o', 'layout-cold.o')
+            compile(linux, '-c', 'layout-consumer.cpp', '-o', 'layout-warm.o', env=daemon)
+            assert (scope / 'layout-warm.o').read_bytes() == (scope / 'layout-cold.o').read_bytes()
+
+            providers = [host_cxx]
+            clang = shutil.which(cold.get('YCXX_CLANGXX', 'clang++'), path=cold.get('PATH'))
+            if clang and clang != host_cxx:
+                target = run([clang, '-dumpmachine'], scope, cold).strip()
+                if target.startswith('x86_64') and '-linux-' in target:
+                    providers.append(clang)
+            for provider in providers:
+                for level in ('-O0', '-O2'):
+                    run([provider, '-std=c++20', '-pedantic-errors', '-fno-lto', level,
+                         '-c', 'layout-provider-host.cpp', '-o', 'layout-provider.o'], scope, cold)
+                    run([provider, '-fno-lto', 'layout-provider.o', 'layout-cold.o', '-o', 'mixed-layout'], scope, cold)
+                    observed = run(['./mixed-layout'], scope, cold)
+                    assert len(observed.splitlines()) == 19, observed
         finally:
             run([ycxx, 'ctl', 'shutdown'], scope, base)
 
