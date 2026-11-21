@@ -4805,6 +4805,16 @@ public:
     return Ics{true, Ics::user_defined};
   }
 
+  static Ics implicit_object_rank(const TypeRec& function, Cv object_cv, bool object_rvalue) {
+    if (!cv_within(object_cv, function.fn_cv)) return {};
+    const bool rvalue_ref = function.fn_ref == ast::RefQual::rvalue;
+    if (rvalue_ref && !object_rvalue) return {};
+    if (function.fn_ref == ast::RefQual::lvalue && object_rvalue && function.fn_cv != Cv::const_) return {};
+    // An unqualified member can bind an rvalue without competing on reference kind.
+    return binding({true, 0, 0}, rvalue_ref, object_rvalue && function.fn_ref != ast::RefQual::none,
+                   cv_bits(function.fn_cv) - cv_bits(object_cv));
+  }
+
   enum class OverloadFailure { no_viable, diagnosed };
 
   // The best viable candidate for `args` ([over.match.best]). Only the absence of a viable
@@ -4826,14 +4836,9 @@ public:
       std::vector<Ics> seq;
       // The implicit object parameter, first: the object must not be more cv-qualified.
       if (!cands[i].no_object && object_cv) {
-        if (!cv_within(*object_cv, fr.fn_cv)) continue;
-        const bool rvalue_ref = fr.fn_ref == ast::RefQual::rvalue;
-        if (rvalue_ref && !object_rvalue) continue;
-        if (fr.fn_ref == ast::RefQual::lvalue && object_rvalue && fr.fn_cv != Cv::const_) continue;
-        // Unqualified members retain the special rvalue binding rule and
-        // do not participate in the reference-kind ranking tiebreaker.
-        seq.push_back(binding({true, 0, 0}, rvalue_ref, object_rvalue && fr.fn_ref != ast::RefQual::none,
-                              cv_bits(fr.fn_cv) - cv_bits(*object_cv)));
+        const Ics object = implicit_object_rank(fr, *object_cv, object_rvalue);
+        if (!object.viable) continue;
+        seq.push_back(object);
       } else {
         seq.push_back({true, 0, 0});
       }
@@ -7425,9 +7430,10 @@ public:
     QualType lt = types().referee(operands[0].type());
     const bool unary_minus = operands.size() == 1 && op == "-" && types().is_class(lt);
     std::vector<ast::DeclSema> unary_friends;
+    AdlAssociations unary_associations;
     if (unary_minus) {
-      auto associations = adl_associations(operands, /*at_instantiation=*/false, /*ordinary_call=*/true);
-      for_each_associated_friend(associations, name, /*at_instantiation=*/false, [&](const ast::DeclSema& d) {
+      unary_associations = adl_associations(operands, /*at_instantiation=*/false, /*ordinary_call=*/true);
+      for_each_associated_friend(unary_associations, name, /*at_instantiation=*/false, [&](const ast::DeclSema& d) {
         if (types().rec(d.type).params.size() == 1) unary_friends.push_back(d);
       });
     }
@@ -7476,6 +7482,9 @@ public:
         for (EntityId ns : instantiated.namespaces)
           for (const ast::DeclSema& d : q_->adl_functions(ns, name, /*at_instantiation=*/true)) add(d);
       }
+    } else if (!unary_friends.empty()) {
+      for (EntityId ns : unary_associations.namespaces)
+        for (const ast::DeclSema& d : q_->adl_functions(ns, name, /*at_instantiation=*/false)) add(d);
     } else {
       for (const Ex& o : operands)
         if (auto ns = associated_namespace(o.type())) {
@@ -7488,21 +7497,23 @@ public:
     }
     if (!unary_friends.empty()) {
       auto found = find_member(types().class_of(lt), name);
-      if (found && !found->ambiguous && found->member && found->member->is_function) {
+      if (found && found->ambiguous) {
+        diag(op_at, Diag::ambiguous_member, name, Types::unqualified(lt));
+        return Ex{NodeId::none, begin, end};
+      }
+      if (found && found->member && found->member->is_function) {
         Ex object = operands.front();
-        Ex access = member(object, false, name, object.end, op_at, op_at);
-        if (!access.ok()) return Ex{NodeId::none, begin, end};
-        const Bound& bound = bound_.at(std::to_underlying(access.id));
         const bool rvalue = object.cat() != ValueCategory::lvalue;
+        const int depth = base_depth(lt, types().class_type(found->owner));
         std::optional<Ics> best_member;
-        for (const MemberDeclRec* candidate : bound.cands) {
+        for (const MemberDeclRec* candidate : member_functions(found->owner, name)) {
           auto fn = types().rec(candidate->type);
           if (candidate->is_template || candidate->is_static || !fn.params.empty()) continue;
-          if (fn.fn_ref == ast::RefQual::rvalue && !rvalue) continue;
-          if (fn.fn_ref == ast::RefQual::lvalue && rvalue && !(std::to_underlying(fn.fn_cv) & std::to_underlying(Cv::const_))) continue;
-          const auto receiver = types().add_cv(types().class_type(bound.cls), fn.fn_cv);
-          Ics rank = ics(object, rvalue && fn.fn_ref != ast::RefQual::lvalue
-                                     ? types().rvalue_ref(receiver) : types().lvalue_ref(receiver));
+          Ics rank = implicit_object_rank(fn, object_cv(lt), rvalue);
+          if (depth) {
+            rank.rank = 2;  // derived-to-base conversion
+            rank.base_depth = depth;
+          }
           if (rank.viable && (!best_member || rank < *best_member)) best_member = rank;
         }
         std::optional<Ics> best_free;
@@ -7514,7 +7525,8 @@ public:
         }
         if (best_member) {
           if (!best_free || *best_member < *best_free) {
-            Ex result = call(access, {}, end, op_at);
+            Ex access = member(object, false, name, object.end, op_at, op_at);
+            Ex result = access.ok() ? call(access, {}, end, op_at) : access;
             return Ex{result.id, begin, end, result.info};
           }
           if (!(*best_free < *best_member)) {
