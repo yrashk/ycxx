@@ -632,6 +632,10 @@ struct FieldRec {
   u8 bit_width = 0;
 };
 
+// Classification of a defaulted copy affected by an explicit in-class definition. Deletion
+// takes precedence over an unsupported or nontrivial subobject operation.
+enum class CopyState : u8 { ordinary, trivial, nontrivial, unsupported, deleted };
+
 // What `class_def(C)` (ast.md §3.6) says of a class that member lookup and the layout need, kept
 // by class entity. A class is complete once its definition has been analysed
 // ([class.mem.general]); completeness at a point is the parser's question (`Program`).
@@ -690,10 +694,18 @@ struct ClassRec {
   EntityId destructor = EntityId::none;
   EntityId copy_ctor = EntityId::none;
   bool copy_deleted = false;
+  std::vector<EntityId> defaulted_copy_declarations;
+  CopyState defaulted_copy = CopyState::ordinary;
+  bool defaulted_copy_const = true;  // the implicit parameter when it depends on a defaulted copy
   // The move constructor ([class.copy.ctor]/8): whether one is declared and not deleted, and
   // whether it is then not trivial (user-provided, or implicit and a member's move is not).
   bool move_usable = false;
   bool move_nontrivial = false;
+  bool copy_nontrivial() const {
+    return copy_ctor != EntityId::none || defaulted_copy == CopyState::nontrivial ||
+           defaulted_copy == CopyState::unsupported;
+  }
+
   // Nested enumerations and type aliases ([class.mem]): their types by name, with their entities;
   // the unscoped enumerations' enumerators are members of the class.
   std::vector<NestedType> types;
@@ -805,7 +817,13 @@ public:
     if (r.kind == TypeKind::array) return copy_of(r.inner);
     const ClassRec* c = r.kind == TypeKind::class_ ? find(r.entity) : nullptr;
     if (!c) return {false, false};
-    return {c->copy_ctor != EntityId::none, c->copy_deleted};
+    return {c->copy_nontrivial(), c->copy_deleted};
+  }
+  CopyState defaulted_copy_of(QualType t) const {
+    const TypeRec r = types_->rec(t);
+    if (r.kind == TypeKind::array) return defaulted_copy_of(r.inner);
+    const ClassRec* c = r.kind == TypeKind::class_ ? find(r.entity) : nullptr;
+    return c ? c->defaulted_copy : CopyState::ordinary;
   }
   // Whether moving a `t` calls a constructor that is not trivial: its move constructor, or its
   // copy constructor when it has none ([over.match.ctor]).
@@ -814,7 +832,7 @@ public:
     if (r.kind == TypeKind::array) return move_nontrivial(r.inner);
     const ClassRec* c = r.kind == TypeKind::class_ ? find(r.entity) : nullptr;
     if (!c) return false;
-    return c->move_usable ? c->move_nontrivial : c->copy_ctor != EntityId::none;
+    return c->move_usable ? c->move_nontrivial : c->copy_nontrivial();
   }
   // Whether a `t` can be neither copied nor moved: its copy constructor deleted and no move
   // constructor usable; for an array, its elements'.
@@ -831,7 +849,7 @@ public:
   bool trivial_for_calls(EntityId cls, ast::CallTriviality rule) const {
     const ClassRec* c = find(cls);
     if (!c) return true;
-    if (c->destructor != EntityId::none || c->copy_ctor != EntityId::none) return false;
+    if (c->destructor != EntityId::none || c->copy_nontrivial()) return false;
     if (rule == ast::CallTriviality::apple) return true;
     if (c->move_usable && c->move_nontrivial) return false;
     return !c->copy_deleted || c->move_usable;
