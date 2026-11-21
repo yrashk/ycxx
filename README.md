@@ -332,9 +332,15 @@ function body, through the daemon, without unsaved text ever reaching a build. E
 checked with the flags of its last build, or else with its line in the project's
 `compile_commands.json`.
 
+Syntax checking enforces ordinary destructor access for automatic class objects and
+explicit construction expressions. [#259](https://github.com/yrashk/ycxx/issues/259)
+
 **Pointer-to-member declarations.** Data and function member-pointer types can appear in
 declarations, type traits and requires-expressions. Syntax checking covers ordinary data member
 addresses, typed nulls and same-class `.*` and `->*`. [#238](https://github.com/yrashk/ycxx/issues/238) · [#411](https://github.com/yrashk/ycxx/issues/411)
+
+Ordinary non-template member functions in namespace-scope classes can use `&` and `&&`
+to distinguish lvalue and rvalue receivers. [#311](https://github.com/yrashk/ycxx/issues/311)
 
 **Virtual declarations.** Syntax checking accepts virtual members and inline definitions in
 ordinary root classes. Classes derived through one ordinary polymorphic base also support
