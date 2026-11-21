@@ -1015,8 +1015,6 @@ std::string_view linux_signature_error(const ast::Interners& in, const QueryLayo
     auto builtin = ast::builtin_of(in, value);
     if (builtin == ast::Builtin::long_double) return "x87 long double parameters and results are unsupported";
     if (builtin == ast::Builtin::float_ || builtin == ast::Builtin::double_) {
-      if (f.variadic && use != direct_call)
-        return "floating-point parameters and results of variadic functions are unsupported";
       if (use == indirect_call) return "floating-point parameters and results of indirect calls are unsupported";
       return {};
     }
