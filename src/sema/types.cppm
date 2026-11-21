@@ -673,6 +673,7 @@ struct NestedType {
 struct BaseRec {
   EntityId cls = EntityId::none;
   ast::Access access = ast::Access::public_;
+  bool dependent_in_pattern = false;
 };
 
 struct ClassRec {

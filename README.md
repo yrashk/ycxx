@@ -220,6 +220,8 @@ Both targets accept leading `[[…]]` attributes on ordinary data and function m
   `__make_integer_seq`;
 - dependent `__is_same(T, U)` as a `bool` template argument or default, including through alias
   templates [#209](https://github.com/yrashk/ycxx/issues/209);
+- a single nonvirtual base in a primary class template, including an alias-selected dependent
+  base and qualified lookup of its static members. [#308](https://github.com/yrashk/ycxx/issues/308)
 - placeholder types: `auto` and `decltype(auto)` variables (`const auto&`, `auto*`, `auto&&`),
   deduced and trailing return types, in templates too;
 - lambdas in function bodies: captures by copy and by reference, capture-defaults, `this` and
@@ -294,7 +296,7 @@ elements, including whole rows of multidimensional arrays. [#285](https://github
 - Constexpr lambdas (the interpreter has no class objects yet), further lambda declaration
   contexts ([#338](https://github.com/yrashk/ycxx/issues/338)),
   member and tuple-like structured bindings, virtual dispatch and table emission, virtual base classes,
-  inheriting constructors, and bases of class templates.
+  inheriting constructors, and base packs or multiple bases in a class template.
 - Member class and alias templates, conversion function templates, and constraints on class
   templates and their members.
 - Exceptions, optimization (`-O`), and the extended floating-point types (`std::float16_t`, …).

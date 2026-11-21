@@ -119,6 +119,7 @@ public:
   const Tok& tok(u32 ahead = 0) const { return r_->tokens[i_ + ahead]; }
   bool is(Tk k) const { return kind() == k; }
   u32 pos() const { return i_ - begin_; }  // the current token's offset in the part
+  u32 deferred_argument_checks() const { return deferred_argument_checks_; }
   void bump() {
     half_ = false;
     if (i_ < end_) ++i_;

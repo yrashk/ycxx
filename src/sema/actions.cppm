@@ -359,7 +359,7 @@ public:
           auto hit = class_body_type(*cr, name, type_at);
           if (hit.found) return hit.type;
         }
-        if (auto r = nested_member(current_class, name)) return r->first.type;
+        if (auto r = nested_member(current_class, name, true)) return r->first.type;
       } else if (auto m = q_->earlier_member(name); m && (m->kind == ast::DeclKind::enum_ || m->kind == ast::DeclKind::type_alias)) {
         return m->type;
       } else {
@@ -841,13 +841,15 @@ public:
   // instantiated, among the members declared so far ([basic.scope.class]).
   // A type nested in complete class `c` or else in its bases ([class.member.lookup]), with the
   // class that declares it.
-  std::optional<std::pair<NestedType, EntityId>> nested_member(EntityId c, NameId n) {
+  std::optional<std::pair<NestedType, EntityId>> nested_member(EntityId c, NameId n, bool unqualified = false) {
     const ClassRec* cr = class_rec(c);
     if (!cr) return std::nullopt;
     for (const NestedType& t : cr->types)
       if (t.name == n) return std::pair{t, c};
-    for (const BaseRec& b : cr->bases)
+    for (const BaseRec& b : cr->bases) {
+      if (unqualified && b.dependent_in_pattern) continue;
       if (auto r = nested_member(b.cls, n)) return r;
+    }
     return std::nullopt;
   }
   std::optional<QualType> member_type(EntityId c, NameId n) {
@@ -899,7 +901,7 @@ public:
     auto r = nested_member(naming, n);
     if (!r) return true;
     auto [t, c] = *r;
-    if (defer_type_access && !accessible(c, class_rec(c)->access_of(t.entity), naming)) {
+    if (defer_type_access && (!accessible(c, class_rec(c)->access_of(t.entity), naming) || !accessible_naming_base(naming, c))) {
       deferred_access_.push_back({c, t.entity, n, at});
       return true;
     }
@@ -3031,9 +3033,29 @@ public:
     const ClassRec* cr = class_rec(c);
     if (!cr) return true;
     ast::Access a = cr->access_of(m);
-    if (accessible(c, a, naming)) return true;
-    diag(at, a == ast::Access::protected_ ? Diag::protected_member : Diag::private_member, name, types().class_type(c));
-    return false;
+    if (!accessible(c, a, naming)) {
+      diag(at, a == ast::Access::protected_ ? Diag::protected_member : Diag::private_member, name, types().class_type(c));
+      return false;
+    }
+    if (!accessible_naming_base(naming, c)) {
+      diag(at, Diag::inaccessible_base, types().class_type(c), types().class_type(naming));
+      return false;
+    }
+    return true;
+  }
+
+  // Member access through a class template's instantiated base graph ([class.access.base]). A
+  // static member can be shared through several subobjects, unlike a base conversion.
+  bool accessible_naming_base(EntityId naming, EntityId owner) {
+    if (naming == owner || naming == EntityId::none || w_->entities.rec(naming).templ == EntityId::none) return true;
+    auto path = [&](this auto&& next, EntityId from) -> bool {
+      if (from == owner) return true;
+      const ClassRec* rec = class_rec(from);
+      return rec && std::ranges::any_of(rec->bases, [&](const BaseRec& base) {
+        return accessible(from, base.access) && next(base.cls);
+      });
+    };
+    return path(naming);
   }
 
   Ex this_expr(u32 begin, u32 end) {
@@ -3080,12 +3102,15 @@ public:
     }
     return std::nullopt;
   }
-  std::optional<Found> find_member(EntityId c, NameId name) {
+  std::optional<Found> find_member(EntityId c, NameId name, bool unqualified = false) {
     const ClassRec* cr = class_rec(c);
     if (!cr) return std::nullopt;
     if (auto member = direct_member(c, *cr, name)) return member;
     std::optional<Found> r;
     for (const BaseRec& b : cr->bases) {
+      // A dependent direct base is outside unqualified lookup in the template, including
+      // during member analysis with concrete bindings ([temp.dep]).
+      if (unqualified && b.dependent_in_pattern) continue;
       auto f = find_member(b.cls, name);
       if (!f) continue;
       if (f->ambiguous) return f;
@@ -3135,8 +3160,9 @@ public:
 
   // The implicit member access `name` inside a member function of `c` ([class.mfct.non.static]),
   // or a qualified name `C::name`: none if `c` has no such member.
-  std::optional<Ex> class_member(EntityId c, NameId name, u32 begin, u32 end, u32 name_at, bool bare_address = false) {
-    auto f = find_member(c, name);
+  std::optional<Ex> class_member(EntityId c, NameId name, u32 begin, u32 end, u32 name_at, bool bare_address = false,
+                                 bool unqualified = false) {
+    auto f = find_member(c, name, unqualified);
     if (!f) return std::nullopt;
     Ex fail{NodeId::none, begin, end};
     if (f->ambiguous) {
@@ -4147,8 +4173,8 @@ public:
     }
     // The class's members, in a member function's body ([basic.scope.class]).
     if (current_class != EntityId::none) {
-      if (auto r = class_member(current_class, name, begin, end, begin)) return *r;
-      if (!class_rec(current_class))
+      if (auto r = class_member(current_class, name, begin, end, begin, false, true)) return *r;
+      if (!class_rec(current_class)) {
         if (auto m = q_->earlier_member(name)) {
           if (m->kind == ast::DeclKind::enumerator) return enumerator(m->entity, m->type, begin, end);
           // A static member function needs no object ([class.static.mfct]).
@@ -4160,6 +4186,11 @@ public:
           }
           return static_member(current_class, m->entity, m->type, begin, end);
         }
+        // A nondependent base participates in lookup while a class template is being defined.
+        if (w_->entities.rec(current_class).templ != EntityId::none)
+          for (EntityId base : q_->defining_bases(current_class))
+            if (auto m = class_member(base, name, begin, end, begin)) return *m;
+      }
     }
     if (namespace_lambda && namespace_lambda->name == name)
       return undeduced_namespace_lambda(name, begin, end);

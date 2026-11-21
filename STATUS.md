@@ -1903,8 +1903,11 @@ What the process allocates, attributed to the engine's cells, in the trace and t
 - **Base-clauses** (`base_clause` in parse.cppm): each base is a complete class other than the
   class itself, named once, and not a union. Its access defaults to private for `class` and public
   for `struct`. `Program::set_bases` records the bases when the class head is analysed, and
-  `class_def` copies them into `ClassRec::bases`. Not yet: virtual bases (#310) and bases of
-  class templates.
+  `class_def` copies them into `ClassRec::bases`. A primary class template supports one
+  nonvirtual direct base. It checks a nondependent base at definition and substitutes a
+  dependent base at the first completeness demand. Its concrete specialization publishes
+  the resolved base before layout or qualified lookup. [Design](docs/design/class-template-bases.md)
+  Base packs and additional class-template base forms remain in #308. Virtual bases are #310.
 - **Layout** (`ast::record_layout`, Itanium C++ ABI §2.4):
   - bases first, in declaration order; an empty base at offset 0 unless another subobject of its
     type is there;
@@ -1926,6 +1929,10 @@ What the process allocates, attributed to the engine's cells, in the trace and t
 - **Access** ([class.access.base]): a member of a base is reached through the conversion, whose
   every step must be accessible. A protected member may be named in members and friends of
   derived classes (not yet [class.protected]'s rule on the object expression).
+- **Class-template qualification** ([temp.dep], [class.member.lookup]): qualified lookup
+  returns the base specialization's original static member. The derived declarations hide
+  inherited ones, and an accessible inheritance path is required. Unqualified lookup during
+  template replay skips a dependent direct base.
 - **Special members:**
   - Bases are initialized first, from mem-initializers naming them or by default
     (`MemberInit` with field `~0u`), and destroyed after the members (`DestroyMember` with field
