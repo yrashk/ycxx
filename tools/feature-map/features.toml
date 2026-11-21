@@ -2573,13 +2573,14 @@ clauses = ['support.initlist', 'dcl.init.list']
 std = 'C++11'
 ftm = '__cpp_initializer_lists'
 detect = '\binitializer_list\b'
-status = 'missing'
+status = 'partial'
 probe = '''
 #include <initializer_list>
 int sum(std::initializer_list<int> l) { int s = 0; for (const int* p = l.begin(); p != l.end(); ++p) s += *p; return s; }
 int main() { return sum({1, 2, -3}); }
 '''
 issues = [329]
+note = 'Linux x86-64 compiles populated braced arguments to direct const-reference calls with the pinned libycxx list, including backing-array storage and lifetime. Named nonempty lists, braced by-value calls and other element types remain in #329.'
 
 [[feature]]
 id = 'lib-type-traits'
@@ -2619,8 +2620,9 @@ detect = '\bstd::(?:addressof|launder|bit_cast|is_constant_evaluated|unreachable
 probe = '''
 int main() { int i = 1; float f = __builtin_bit_cast(float, i); return (__builtin_addressof(i) == &i && !__builtin_is_constant_evaluated() && __builtin_bit_cast(int, f) == 1) ? 0 : 1; }
 '''
-status = 'missing'
+status = 'partial'
 issues = [330]
+note = 'Expression-form __builtin_addressof accepts lvalues, preserves cv qualification, and bypasses overloaded address-of. The remaining utility builtins are tracked in #330 and the pinned memory-related header prerequisites in #469.'
 
 [[feature]]
 id = 'lib-numeric-builtins'
