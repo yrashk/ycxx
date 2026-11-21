@@ -1104,7 +1104,8 @@ clauses = ['dcl.init.aggr']
 std = 'C++98'
 detect = '=\s*\{'
 status = 'partial'
-issues = [111]
+issues = [111, 118]
+note = 'Ordinary automatic records with scalar fields use omitted default member initializers in declaration order. Static storage and destination-dependent constant evaluation remain open.'
 probe = '''
 struct P { int x; int y[2]; };
 int main() { P p = {1, {2, 3}}; int a[] = {4, 5}; int m[2][2] = {{1, 0}, {0, 1}}; return (p.y[1] + a[1] + m[1][1] == 9) ? 0 : 1; }
