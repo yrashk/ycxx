@@ -2133,8 +2133,17 @@ request it serves.
   one. The wait first lists the files it watches (`watching`: the file table's existing entries).
 - Tests: `unit.trace` (a golden stream of a unit built cold, again and after a whitespace edit;
   the collector under 8 threads; the tree, filters, summary and timeline); `daemon.trace` (traced
-  builds through the daemon, a watcher, a stalled watcher beside 40 builds, shutdown). The
-  browser's key handling is untested.
+  builds through the daemon, a watcher, a stalled watcher beside 40 builds, shutdown).
+- The browser (#635): `:view` is its model, with no terminal: state, keys, mouse, and frames for a
+  given size. `:browse` runs it on `/dev/tty`. It uses SGR mouse modes 1000, 1002 and 1006 with
+  autowrap off, and draws each line at its row. A `SIGWINCH` self-pipe redraws on resize. Fatal
+  signals restore the terminal, then re-raise. The tree has columns (time, worker, alloc and
+  retains, summed over the subtree) whose headers sort it (`Tree::Order::time` added). The
+  summary wraps on narrow screens. The divider drags (or `<`/`>`) and keeps its share of the
+  width. Tests: `unit.trace` (SGR parsing, hit-testing, click, double click, marker, wheel,
+  divider drag, sort, focus, wrap; frames against `browser.golden`); `daemon.trace_tui` (under a
+  pty: modes on and off, a click, a resize, SIGTERM and SIGABRT restoring the terminal),
+  mutation-checked.
 - Not yet: the analysed tree as a value, and stages linked to source (#254); per-resumption
   spans, so a frame's waits are not drawn as work (#255).
 

@@ -60,6 +60,38 @@ One per build, last: `{"summary":{…}}`.
   attached daemon, each request's start, and the end of the watch.
 - `{"note":…}`: a line of text.
 
+## The interactive browser
+
+`--trace-engine=interactive` and `ycxx ctl trace --interactive` open a full-screen browser on the
+terminal (`src/trace/browse.cppm`, whose model is `src/trace/view.cppm`). `?` lists its keys.
+
+- **Size.** It draws for the terminal's size and redraws at once when that changes (`SIGWINCH`).
+  The summary at the top wraps onto more lines on a narrow screen. Autowrap is off while it runs,
+  so a glyph the terminal draws wider than one column is cut at the edge instead of scrolling the
+  screen.
+- **Mouse** (#635). It asks for SGR mouse reports (modes 1000, 1002 and 1006), which modern
+  terminals and tmux support.
+  - Click a row to select it. Click its `▸`/`▾`, or double-click the row, to fold or open it.
+  - Click a column header (`cell`, `time`, `alloc`, `retains`) to sort by it. Click it again to
+    go back to start order. The `alloc` and `retains` columns sum over the cell's subtree.
+  - Click `tree` or `timeline` in the status line to switch views. Click the pane to give it
+    the keys: arrows, `j`/`k`, PgUp/PgDn and `g`/`G` then scroll it, and `h`, `←` or Escape give
+    them back to the tree.
+  - The wheel scrolls whatever is under it: the tree, the pane, or the timeline's cursor (Shift
+    for bigger steps).
+  - Drag the divider (`│`, marked `⇔` in the title row) to resize the pane; `<` and `>` move it
+    from the keyboard. It keeps its share of the width when the terminal is resized.
+  - In the timeline, click a slice to put the cursor there, or double-click it to open its cell
+    in the tree.
+  - While the browser holds the mouse, the terminal's own selection needs a modifier: Shift-drag
+    in most Linux terminals and in tmux, Option-drag in iTerm2 and Terminal.app.
+  - **tmux:** mouse reports reach the browser whether or not tmux's `mouse` option is on.
+    tmux 3.3 and later passes them through unchanged.
+- **Leaving.** `q` gives the terminal back as it was: the main screen, the cursor, autowrap and
+  mouse reports off, cooked mode. So do `SIGTERM`, `SIGHUP`, `SIGINT` and `SIGQUIT`, and a crash
+  (`SIGABRT`, `SIGSEGV`, `SIGBUS`, `SIGFPE`, `SIGILL`); after restoring, the signal takes its
+  course.
+
 ## The daemon's memory
 
 `ycxx ctl status` prints `memory_current`, `memory_peak`, `memory_allocated` and `allocations`

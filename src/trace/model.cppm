@@ -400,8 +400,9 @@ class Tree {
     Rollup incl;  // memory in its subtree, itself included (#274)
   };
   // How siblings are ordered: as they started, or most memory first (#274): bytes allocated in
-  // the subtree, or retained in it.
-  enum class Order : std::uint8_t { start, alloc, retained };
+  // the subtree, or retained in it; or longest first (#635).
+  enum class Order : std::uint8_t { start, alloc, retained, time };
+  static constexpr std::uint8_t order_count = 4;
   struct Row {
     std::int32_t node;
     std::uint32_t depth;
@@ -614,6 +615,7 @@ class Tree {
     std::vector<std::int32_t> out(ids.begin(), ids.end());
     if (order_ == Order::alloc) std::ranges::stable_sort(out, std::greater{}, [&](std::int32_t i) { return nodes_[i].incl.alloc; });
     else if (order_ == Order::retained) std::ranges::stable_sort(out, std::greater{}, [&](std::int32_t i) { return nodes_[i].incl.retained; });
+    else if (order_ == Order::time) std::ranges::stable_sort(out, std::greater{}, [&](std::int32_t i) { return nodes_[i].ev.end_ns - nodes_[i].ev.start_ns; });
     return out;
   }
   void walk(std::int32_t i, std::uint32_t depth, std::vector<Row>& out) const {

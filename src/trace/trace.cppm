@@ -8,6 +8,7 @@ export module ycxx.trace;
 import std;
 import ycxx.engine;
 export import :model;
+export import :view;
 export import :browse;
 
 export namespace ycxx::trace {
