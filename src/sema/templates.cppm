@@ -368,6 +368,7 @@ public:
     // The token-owning replay checks completeness and diagnoses a concrete operand.
     case ast::DepOp::is_trivially_copyable: return std::nullopt;
     case ast::DepOp::is_same:
+    case ast::DepOp::is_constructible:
     case ast::DepOp::logical_not: std::unreachable();
     }
     return w_->values.integer(types().builtin(Builtin::bool_), result);
