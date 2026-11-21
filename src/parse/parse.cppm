@@ -5922,7 +5922,7 @@ private:
     } else if (!fn && sema::Types::is_const(d.type) && !spec.is_extern) {
       s_.diag(d.name_at, Diag::const_uninitialized, d.name);
     }
-    if (spec.is_constexpr && value != ConstId::none)
+    if (spec.is_constexpr && s_.folded_immediate_result && value != ConstId::none)
       if (auto entity = s_.immediate_result_entity(value))
         s_.diag(init.begin, Diag::immediate_address, s_.world().entities.rec(*entity).name);
     s_.permit_constant_initializer(d.begin, d.type, value);
