@@ -813,7 +813,7 @@ ftm = '__cpp_auto_cast'
 detect = '(?<![\w>])auto\s*[({]\s*[\w*&]'
 status = 'partial'
 issues = [286]
-note = 'Scalar and pointer decay-copy works in parentheses and braces, including supported dependent operands in replayed function-template bodies. General class objects, member pointers, unresolved type dependence, and other dependent contexts remain open.'
+note = 'Scalar and pointer decay-copy works in parentheses and braces, including supported dependent operands in replayed function-template bodies. Concrete template arguments can use braces or an integer-literal-led parenthesized operand. General class objects, member pointers, unresolved type dependence, and other dependent contexts remain open.'
 probe = '''
 int main() { int a = 1; auto b = auto(a); return b - 1; }
 '''
