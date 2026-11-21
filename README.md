@@ -230,8 +230,8 @@ fixed underlying types and definitions inside `extern "C"` blocks.
   Itanium names identical to Clang's; Clang's
   `__make_integer_seq`;
 - dependent `__is_same`, `__is_reference`, `__is_const`, `__is_volatile`, `__is_array`,
-  `__is_pointer`, and `__is_function` as `bool` template arguments or defaults, including through
-  alias templates
+  `__is_pointer`, `__is_function`, `__is_enum`, `__is_union`, and `__is_class` as `bool`
+  template arguments or defaults, including through alias templates
   [#209](https://github.com/yrashk/ycxx/issues/209);
 - a single nonvirtual, nonpolymorphic base in a primary class template, including an
   alias-selected dependent base and qualified lookup of its static members.
@@ -306,7 +306,8 @@ addresses, typed nulls and same-class `.*` and `->*`. [#238](https://github.com/
 ordinary root classes. Classes derived through one ordinary polymorphic base also support
 overrides and unqualified base initializers with parentheses or flat braces. On Linux x86-64,
 pointer and reference consumers can call virtual functions with fixed integer signatures on
-external objects through a declaration-only root class. [#309](https://github.com/yrashk/ycxx/issues/309)
+peer-owned roots and access their ordinary integral data members. For these root types, `sizeof`
+and `alignof` describe the Itanium layout. [#309](https://github.com/yrashk/ycxx/issues/309)
 
 **Structured bindings.** Local bindings can copy or alias scalar-element arrays, including
 multidimensional arrays. They can also copy or alias ordinary non-template classes without

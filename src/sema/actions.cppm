@@ -155,8 +155,6 @@ public:
   // A static local declared ([stmt.dcl]/3), for constant evaluation's questions about it
   // (`global`): its type, and its constant if constant-initialized.
   virtual void static_local(EntityId /*v*/, QualType /*type*/, std::optional<ConstId> /*value*/) {}
-  // Whether class `c`, complete or not, was declared with the class-key `union`.
-  virtual bool is_union_class(EntityId /*c*/) { return false; }
   // The function type of `f`, whose declared return type holds a placeholder, with the return
   // type its definition deduced: a definition before the current point, or a function template
   // specialization's instantiated here ([dcl.spec.auto.general]/11, [temp.inst]/8). None if
@@ -249,10 +247,10 @@ inline constexpr u16 partial = 16384;  // a partial specialization ([temp.spec.p
 inline constexpr u16 friend_ = 32768;  // a friend declaration ([class.friend]): `entity` is the friend
 }
 
-// An opaque polymorphic root admits calls on peer-owned objects without a native class layout.
-bool native_virtual_consumer(const ClassRec& record, const Types& types, auto&& written_member) {
+// Only this fixed set of declarations can consume a peer-owned virtual table.
+bool native_virtual_root_declarations(const ClassRec& record, const Types& types, auto&& written_member) {
   if (types.target().triple != ast::x86_64_linux.triple || !record.polymorphic || record.virtual_destructor ||
-      !record.bases.empty() || !record.fields.empty() || record.user_ctors || record.destructor != EntityId::none)
+      !record.bases.empty() || record.user_ctors || record.destructor != EntityId::none)
     return false;
   auto integer = [&](QualType type) {
     const auto builtin = types.builtin_of(type);
@@ -269,6 +267,11 @@ bool native_virtual_consumer(const ClassRec& record, const Types& types, auto&& 
            (type.fn_cv == Cv::none || type.fn_cv == Cv::const_) && type.params.size() < 32 &&
            integer(type.inner) && std::ranges::all_of(type.params, integer);
   });
+}
+
+bool native_virtual_consumer(const ClassRec& record, const Types& types, auto&& written_member) {
+  return (record.fields.empty() || record.peer_virtual_root_layout) &&
+         native_virtual_root_declarations(record, types, written_member);
 }
 
 // Flags of `ClosureDef::flags`.
@@ -771,11 +774,10 @@ public:
 
   // The built-in `name` names, if it is one ycxx implements.
   const lex::TypeTraitInfo* type_trait(NameId name) { return lex::type_trait(ins().names.spelling(name)); }
-  // Whether a class type is a union: by its class-key, which its first declaration's tokens say.
-  bool is_union_type(QualType t) {
+  // Whether a class type is a union, without requiring its definition.
+  std::optional<bool> is_union_type(QualType t) {
     if (!types().is_class(t)) return false;
-    if (const ClassRec* r = class_rec(types().class_of(t))) return r->union_;
-    return q_->is_union_class(types().class_of(t));
+    return Templates(*w_, classes()).is_union_class(types().class_of(t));
   }
   // `__trait(T)` that transforms a type ([meta.trans]): the type it gives.
   std::optional<QualType> trait_type(lex::TypeTrait t, QualType arg, u32 at) {
@@ -802,11 +804,19 @@ public:
     case is_array: unary_op = ast::DepOp::is_array; break;
     case is_pointer: unary_op = ast::DepOp::is_pointer; break;
     case is_function: unary_op = ast::DepOp::is_function; break;
+    case is_enum: unary_op = ast::DepOp::is_enum; break;
+    case is_union: unary_op = ast::DepOp::is_union; break;
+    case is_class: unary_op = ast::DepOp::is_class; break;
     default: break;
     }
-    if (unary_op)
+    if (unary_op) {
       if (auto v = templates().unary_trait_value(*unary_op, args[0]))
         return literal(b, *v, ValueCategory::prvalue, begin, end);
+      if (!types().is_dependent(args[0])) {
+        diag(begin, Diag::trait_not_applicable, args[0]);
+        return {NodeId::none, begin, end};
+      }
+    }
     // The generic dependent node lets a template body re-parse the operand.
     if (std::ranges::any_of(args, [&](QualType a) { return types().is_dependent(a); })) return dependent_node({}, begin, end, b);
     QualType x = args[0], c = types().canonical(x);
@@ -821,20 +831,16 @@ public:
     case is_integral: v = types().is_integral(c); break;
     case is_floating_point: v = types().is_floating(c); break;
     case is_arithmetic: v = types().is_integral(c) || types().is_floating(c); break;
-    case is_enum: v = types().is_enum(c); break;
     case is_scoped_enum:
       if (types().is_enum(c))
         if (const EnumRec* e = enum_rec(types().enum_of(c))) v = e->scoped;
       break;
-    // The class-key says whether a class is a union, complete or not ([class.pre]).
-    case is_class: v = types().is_class(c) && !is_union_type(c); break;
-    case is_union: v = is_union_type(c); break;
     case is_member_pointer: v = types().is_member_pointer(c); break;
     case is_member_object_pointer: v = types().is_member_pointer(c) && !types().is_function(types().rec(c).inner); break;
     case is_member_function_pointer: v = types().is_member_pointer(c) && types().is_function(types().rec(c).inner); break;
     case is_polymorphic:
     case has_virtual_destructor:
-      if (types().is_class(c) && !is_union_type(c)) {
+      if (types().is_class(c) && is_union_type(c) != true) {
         const ClassRec* r = cls();
         if (!r) return {NodeId::none, begin, end};
         v = t == is_polymorphic ? r->polymorphic : r->virtual_destructor;
@@ -849,7 +855,7 @@ public:
     case is_object: v = types().is_object(c); break;
     case is_empty:
       // [meta.unary.prop]: a complete class, not a union, with no non-static data members.
-      if (is_union_type(c)) v = false;
+      if (is_union_type(c) == true) v = false;
       else if (const ClassRec* r = cls()) v = !r->polymorphic && r->fields.empty();
       else if (types().is_class(c)) return {NodeId::none, begin, end};
       break;
@@ -1141,6 +1147,12 @@ public:
     return false;
   }
 
+  bool has_peer_virtual_root_layout(QualType t) {
+    if (!classes().has_virtual_layouts() || !types().is_class(t)) return false;
+    const ClassRec* record = class_rec(types().class_of(t));
+    return record && record->peer_virtual_root_layout;
+  }
+
   bool require_supported_virtual_signature(const TypeRec& f, u32 at) {
     return require_supported_virtual_layout(f.inner, at) && std::ranges::all_of(f.params, [&](QualType p) {
       return require_supported_virtual_layout(p, at);
@@ -1177,6 +1189,18 @@ public:
     if (sc.ns) return namespace_template(*sc.ns, name, ast::DeclKind::function).has_value();
     return sc.type && types().is_class(*sc.type) && class_has_member_template(types().class_of(*sc.type), name);
   }
+  // A class lvalue reached through an existing pointer or reference. Prvalues and direct
+  // references to class storage still use the ordinary layout guard.
+  bool peer_object_lvalue(Ex object) {
+    if (object.cat() != ValueCategory::lvalue) return false;
+    while (auto p = as<ast::Paren>(object)) object.id = p->operand.id;
+    if (auto local = as<ast::LocalRef>(object)) return types().is_reference(local_declared_type(locals_[local->local]));
+    if (auto decl = as<ast::DeclRef>(object)) return decl->reference;
+    if (auto unary = as<ast::Unary>(object)) return unary->op == ast::UnaryOp::deref;
+    if (auto field = as<ast::Member>(object)) return field->reference;
+    return as<ast::Call>(object).has_value() || as<ast::MemberCall>(object).has_value();
+  }
+
   Ex member(Ex object, bool arrow, NameId name, u32 end, u32 op_at, u32 name_at,
             std::optional<NameId> qualifier = {}) {
     u32 begin = object.begin;
@@ -1252,6 +1276,7 @@ public:
     u32 index = found->index;
     const FieldRec& f = *found->field;
     if (unevaluated == 0 && !(checking_virtual_body && c == current_class) &&
+        !(has_peer_virtual_root_layout(ct) && (arrow || peer_object_lvalue(object))) &&
         !require_supported_virtual_layout(ct, name_at)) return fail;
     // [expr.ref]/7.2: the member's type, with the object's cv-qualifiers added; the result is an
     // lvalue if the object is (or is reached through a pointer), else an xvalue.
@@ -5819,7 +5844,7 @@ public:
     QualType st = builtin(w_->target.size_type);
     if (types().is_dependent(t)) return dependent_node({}, begin, end, st);
     t = types().referee(t);  // [expr.sizeof]/2, [expr.alignof]/3
-    if (!require_supported_virtual_layout(t, begin)) return {NodeId::none, begin, end};
+    if (!has_peer_virtual_root_layout(t) && !require_supported_virtual_layout(t, begin)) return {NodeId::none, begin, end};
     std::optional<u64> n = layout_of(t, align);
     if (!n) {
       if (types().is_function(t) || !is_complete(t)) diag(begin, Diag::sizeof_incomplete, t);
@@ -5868,7 +5893,7 @@ public:
   std::optional<ast::RecordLayout> class_layout(EntityId ce) {
     if (auto it = class_places_.find(std::to_underlying(ce)); it != class_places_.end()) return it->second;
     const ClassRec* c = is_complete(types().class_type(ce)) ? class_rec(ce) : nullptr;
-    if (!c || c->layout_requires_virtual_support) return std::nullopt;
+    if (!c || (c->layout_requires_virtual_support && !c->peer_virtual_root_layout)) return std::nullopt;
     std::vector<ast::Placed> bases, places;
     for (const BaseRec& b : c->bases) {
       auto m = place_of(types().class_type(b.cls));
@@ -5881,7 +5906,8 @@ public:
       m->bit_width = f.bit_width;
       places.push_back(*m);
     }
-    return class_places_[std::to_underlying(ce)] = ast::record_layout(bases, places, c->union_, c->pod, std::to_underlying(ce));
+    const ast::Target* root = c->peer_virtual_root_layout ? &w_->target : nullptr;
+    return class_places_[std::to_underlying(ce)] = ast::record_layout(bases, places, c->union_, c->pod, std::to_underlying(ce), root);
   }
   std::map<u32, ast::RecordLayout> class_places_;  // complete classes' layouts
 
@@ -6753,10 +6779,48 @@ public:
                 begin, end, info);
   }
 
+  // [expr.throw], [except.throw]: retain the operand, with array and function decay.
+  Ex throw_expression(std::optional<Ex> operand, u32 begin, u32 end) {
+    ExprInfo info{builtin(Builtin::void_), ValueCategory::prvalue, 0};
+    if (!operand) return node(ast::Throw{info, {}}, begin, end, info);
+    Ex fail{NodeId::none, begin, end};
+    Ex value = *operand;
+    if (!value.ok()) return fail;
+    if (dependent(value)) {
+      info.flags |= expr_flag::dependent;
+    } else {
+      if (types().is_class(value.type())) {
+        if (require_complete(value.type(), value.begin)) diag(value.begin, Diag::throw_class_unsupported, value.type());
+        return fail;
+      }
+      value = rvalue(value);
+      if (!value.ok() || !require_complete(value.type(), value.begin)) return fail;
+      if (types().is_pointer(value.type())) {
+        QualType pointee = types().pointee(value.type());
+        if (!types().is_void(pointee) && !require_complete(pointee, value.begin)) return fail;
+      }
+    }
+    return node(ast::Throw{info, at(value, begin)}, begin, end, info);
+  }
+
   // [expr.cond]
   Ex conditional(Ex cond, Ex t, Ex f, u32 q_at) {
     u32 begin = cond.begin, end = f.end;
     if (!cond.ok() || !t.ok() || !f.ok()) return {NodeId::none, begin, end};
+    auto throws = [&](Ex arm) {
+      while (auto p = as<ast::Paren>(arm)) arm = Ex{p->operand.id};
+      return as<ast::Throw>(arm).has_value();
+    };
+    const bool throws_then = throws(t);
+    const bool throws_else = throws(f);
+    // [expr.cond]/2: a throw arm leaves the other arm's type and value category intact.
+    if (throws_then || throws_else) {
+      Ex c = to_bool(cond, cond.begin);
+      if (!c.ok()) return {NodeId::none, begin, end};
+      ExprInfo info = throws_then ? f.info : t.info;
+      if (dependent(c) || dependent(t) || dependent(f)) info.flags |= expr_flag::dependent;
+      return node(ast::Conditional{info, at(c, begin), at(t, begin), at(f, begin)}, begin, end, info);
+    }
     if (dependent(cond) || dependent(t) || dependent(f)) return dependent_node({cond, t, f}, begin, end);
     Ex c = to_bool(cond, cond.begin);
     if (!c.ok()) return {NodeId::none, begin, end};

@@ -286,6 +286,13 @@ void init_function_def(parse::Program& program, sema::World& world, TranslationU
   tu.functions.push_back({fn, d, body, program.id(item), 0, std::nullopt});
 }
 
+void block_virtual_emission(TranslationUnit& unit, parse::Program& program, const sema::ClassRec& record) {
+  unit.virtual_emission_blocked = true;
+  const auto member = std::ranges::find_if(record.members, &sema::MemberDeclRec::is_virtual);
+  if (member != record.members.end())
+    if (auto d = program.member_decl(member->entity)) unit.virtual_declaration = ast::Loc{d->item, 0};
+}
+
 // The definitions and declarations of the global namespace, in item order.
 TranslationUnit unit_of(parse::Program& program, sema::World& world, const items::Items& items, std::string name) {
   ast::Interners& ins = world.ins;
@@ -305,10 +312,7 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
     const auto& record = classes.rec(c);
     if (!record.layout_requires_virtual_support || sema::native_virtual_consumer(record, world.types, declaration_only_member))
       continue;
-    tu.virtual_emission_blocked = true;
-    const auto member = std::ranges::find_if(record.members, &sema::MemberDeclRec::is_virtual);
-    if (member != record.members.end())
-      if (auto d = program.member_decl(member->entity)) tu.virtual_declaration = ast::Loc{d->item, 0};
+    block_virtual_emission(tu, program, record);
     return tu;
   }
   const bool linux = world.target.triple == ast::x86_64_linux.triple;
@@ -558,41 +562,6 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
 
 namespace {
 
-// The parser skips attributes whose layout semantics we do not implement. Find those
-// that could change a record or field even though its computed offsets look natural.
-bool layout_attribute(const pp::Region& region, std::uint32_t begin, std::uint32_t end, bool leading_only = false) {
-  using enum lex::Tk;
-  for (std::uint32_t i = begin; i < end; ++i) {
-    auto tok = region.tokens[i];
-    if (tok.kind == kw_alignas) return true;
-    if (i + 1 == end) break;
-    const auto next = region.tokens[i + 1].kind;
-    bool bracket = tok.kind == l_square && next == l_square;
-    bool gnu = tok.kind == identifier && next == l_paren && region.name(tok) == "__attribute__";
-    if (!bracket && !gnu) {
-      if (leading_only) return false;
-      continue;
-    }
-    if (gnu) ++i;
-    const auto open = bracket ? l_square : l_paren;
-    const auto close = bracket ? r_square : r_paren;
-    std::uint32_t depth = 1;
-    while (++i < end && depth) {
-      auto part = region.tokens[i];
-      if (part.kind == open) ++depth;
-      else if (part.kind == close && --depth == 0) break;
-      else if (part.kind == identifier) {
-        auto name = region.name(part);
-        if (name.size() > 4 && name.starts_with("__") && name.ends_with("__"))
-          name = name.substr(2, name.size() - 4);
-        if (name == "packed" || name == "aligned" || name == "mode" || name == "vector_size" ||
-            name == "no_unique_address" || name == "ms_struct" || name == "gcc_struct") return true;
-      }
-    }
-  }
-  return false;
-}
-
 std::set<EntityId> uncertain_record_layouts(parse::Program& program, sema::World& world) {
   const auto& region = program.region();
   const auto& items = program.items().items;
@@ -616,16 +585,14 @@ std::set<EntityId> uncertain_record_layouts(parse::Program& program, sema::World
     const auto* analysed = program.analysed_item(k);
     const bool definition = item.kind == items::ItemKind::class_def;
     if (!analysed || (!definition && item.kind != items::ItemKind::declaration)) continue;
-    const auto& ranges = region.possibly_packed;
-    auto pack = std::ranges::upper_bound(ranges, item.begin, {}, [](const auto& range) { return range.second; });
-    bool packed = definition && pack != ranges.end() && pack->first < item.brace_end;
+    bool packed = definition && parse::layout_may_be_packed(region, item.begin, item.brace_end);
     // The attributes immediately after the type's closing brace can still apply to
     // the type. Those within a following declarator apply to the declared name.
     bool record_annotated = definition
-        ? layout_attribute(region, item.begin, item.brace_begin) ||
-          layout_attribute(region, item.brace_end, item.end, true)
-        : layout_attribute(region, item.begin, item.end) || uncertain_alias(item);
-    bool annotated = record_annotated || (definition && layout_attribute(region, item.brace_end, item.end));
+        ? parse::layout_attribute(region, item.begin, item.brace_begin) ||
+          parse::layout_attribute(region, item.brace_end, item.end, parse::LayoutAttributes::leading_affecting_layout)
+        : parse::layout_attribute(region, item.begin, item.end) || uncertain_alias(item);
+    bool annotated = record_annotated || (definition && parse::layout_attribute(region, item.brace_end, item.end));
     if (!packed && !annotated) continue;
     if (definition && (packed || record_annotated)) uncertain_definitions.insert(k);
     for (auto d : world.ins.seqs.elements(analysed->decls)) {
@@ -737,20 +704,24 @@ engine::query_task<FrontResult> TuFront::run(engine::Ctx& cx, TuId tu) {
       : std::set<EntityId>{};
   for (EntityId c : classes.classes()) {
     ClassShape& shape = out.shapes.classes.emplace_back(ClassShape{c, {}, {}});
-    const auto& fields = classes.rec(c).fields;
+    const auto& record = classes.rec(c);
+    const auto& fields = record.fields;
     for (const sema::FieldRec& f : fields) {
       shape.fields.push_back(f.type);
       shape.has_mutable_field |= f.mutable_;
     }
     if (std::ranges::any_of(fields, [](const sema::FieldRec& f) { return f.bit_width != 0; }))
       for (const sema::FieldRec& f : fields) shape.bit_widths.push_back(f.bit_width);
-    shape.union_ = classes.rec(c).union_;
-    shape.pod = classes.rec(c).pod;
-    for (const sema::BaseRec& b : classes.rec(c).bases) shape.bases.push_back(b.cls);
+    shape.union_ = record.union_;
+    shape.pod = record.pod;
+    for (const sema::BaseRec& b : record.bases) shape.bases.push_back(b.cls);
     shape.trivial_calls = classes.trivial_for_calls(c, unit_source.config.calls());
     shape.layout_uncertain = uncertain.contains(c);
-    shape.copy_abi_unknown = classes.rec(c).defaulted_copy == sema::CopyState::unsupported;
-    shape.layout_requires_virtual_support = classes.rec(c).layout_requires_virtual_support;
+    shape.copy_abi_unknown = record.defaulted_copy == sema::CopyState::unsupported;
+    shape.layout_requires_virtual_support = record.layout_requires_virtual_support;
+    shape.peer_virtual_root_layout = record.peer_virtual_root_layout && !shape.layout_uncertain;
+    if (record.peer_virtual_root_layout && shape.layout_uncertain && !out.unit.virtual_emission_blocked)
+      block_virtual_emission(out.unit, program, record);
   }
   for (EntityId e : classes.enums()) out.shapes.enums.push_back({e, classes.underlying(e)});
   co_return out;

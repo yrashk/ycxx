@@ -150,6 +150,7 @@ struct ClassShape {
   bool copy_abi_unknown = false;   // no ABI classification for this defaulted copy
   bool layout_requires_virtual_support = false;
   bool has_mutable_field = false;
+  bool peer_virtual_root_layout = false;
 };
 struct EnumShape {
   EntityId entity = EntityId::none;
@@ -672,8 +673,13 @@ ir::TypeLayout QueryLayout::type(QualType q) const {
   if (in.types.is<ast::TLRef>(c) || in.types.is<ast::TRRef>(c))
     return {pointer, target.pointer_size, target.pointer_align, false,
             in.canonical(in.types.is<ast::TLRef>(c) ? in.types.get<ast::TLRef>(c).referee : in.types.get<ast::TRRef>(c).referee)};
-  if (in.types.is<ast::TClass>(c))
-    if (auto done = records_.find(std::to_underlying(in.types.get<ast::TClass>(c).entity)); done != records_.end()) return done->second;
+  if (in.types.is<ast::TClass>(c)) {
+    const auto key = std::to_underlying(in.types.get<ast::TClass>(c).entity);
+    // A peer object's field offsets are available through step(), with no native complete-object type.
+    if (auto shape = classes_.find(key); shape != classes_.end() && shape->second->layout_requires_virtual_support)
+      return {};
+    if (auto done = records_.find(key); done != records_.end()) return done->second;
+  }
   if (auto r = class_layout(c)) {
     auto it = classes_.find(std::to_underlying(in.types.get<ast::TClass>(c).entity));
     ir::TypeLayout l{record, r->size, r->align, false, {}, it->second->trivial_calls};
@@ -774,7 +780,8 @@ std::optional<ClassLayout> QueryLayout::class_layout(QualType c) const {
   auto key = std::to_underlying(in.types.get<ast::TClass>(c).entity);
   if (auto done = class_layouts_.find(key); done != class_layouts_.end()) return done->second;
   auto it = classes_.find(key);
-  if (it == classes_.end() || it->second->layout_requires_virtual_support) return std::nullopt;
+  if (it == classes_.end() || (it->second->layout_requires_virtual_support && !it->second->peer_virtual_root_layout))
+    return std::nullopt;
   std::vector<ast::Placed> bases, places;
   for (EntityId b : it->second->bases) bases.push_back(placed(in.intern_type(ast::TClass{b})));
   for (std::size_t i = 0; i < it->second->fields.size(); ++i) {
@@ -782,7 +789,8 @@ std::optional<ClassLayout> QueryLayout::class_layout(QualType c) const {
     if (!it->second->bit_widths.empty()) f.bit_width = it->second->bit_widths[i];
     places.push_back(std::move(f));
   }
-  ast::RecordLayout r = ast::record_layout(bases, places, it->second->union_, it->second->pod, key);
+  const ast::Target* root = it->second->peer_virtual_root_layout ? target_ : nullptr;
+  ast::RecordLayout r = ast::record_layout(bases, places, it->second->union_, it->second->pod, key, root);
   ClassLayout out{r.size, std::uint32_t(r.align), {}, {}, r.placed};
   for (std::size_t i = 0; i < r.offsets.size(); ++i)
     out.fields.push_back({r.offsets[i], in.canonical(it->second->fields[i]), r.bit_fields[i]});

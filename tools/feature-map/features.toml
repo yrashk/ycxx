@@ -1814,7 +1814,7 @@ struct D final : B { int f() override { return 0; } };
 int main() { D d; B& b = d; return b.f(); }
 '''
 issues = [309]
-note = 'Ordinary virtual declarations, single-base overrides, and unqualified parenthesized or flat braced initializers of a direct polymorphic base in syntax checking. Linux x86-64 consumes external objects through declaration-only roots with fixed integer signatures. Abstract classes, final, covariance, layout and table emission remain open.'
+note = 'Ordinary virtual declarations, single-base overrides, and unqualified parenthesized or flat braced initializers of a direct polymorphic base in syntax checking. Linux x86-64 supports virtual calls, size and alignment queries, and ordinary integral member access on peer-owned declaration-only roots. Abstract classes, final, covariance, derived layout and table emission remain open.'
 
 [[feature]]
 id = 'class-virtual-base'
@@ -2031,7 +2031,7 @@ template<class T> decltype(T().missing(), 1) h(int) { return 1; }
 template<class T> int h(long) { return 0; }
 int main() { return g(1) + h<int>(0); }
 '''
-note = 'Class and variable partial matches check substituted arguments in lexical order. Template static assertion failures are diagnosed at instantiation. Dependent __is_same, __is_reference, __is_const, __is_volatile, __is_array, __is_pointer, and __is_function work in bool template arguments and defaults. Other dependent expression identities and expression SFINAE remain open.'
+note = 'Class and variable partial matches check substituted arguments in lexical order. Template static assertion failures are diagnosed at instantiation. Dependent __is_same, __is_reference, __is_const, __is_volatile, __is_array, __is_pointer, __is_function, __is_enum, __is_union, and __is_class work in bool template arguments and defaults. Other dependent expression identities and expression SFINAE remain open.'
 
 [[feature]]
 id = 'temp-ttp'

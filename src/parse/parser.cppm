@@ -51,6 +51,7 @@ struct DeclSpec {
   std::optional<u32> mutable_at;
   // An elaborated-type-specifier ([dcl.type.elab]): the class it names, and where its name is.
   bool elaborated = false;
+  Tk class_key = Tk::eof;
   NameId class_name{};
   u32 class_at = 0;
   bool ok = true;
@@ -184,6 +185,8 @@ public:
   }
 
   // ------------------------------------------------------------ [dcl.spec]
+
+  static bool is_class_key(Tk k) { return k == Tk::kw_class || k == Tk::kw_struct || k == Tk::kw_union; }
 
   static bool starts_decl_specifier(Tk k) {
     switch (k) {
@@ -421,7 +424,7 @@ public:
 
   // What an elaborated-type-specifier naming no declared class does: at namespace scope it
   // declares the class ([basic.scope.pdecl]); set by the owner where that applies.
-  std::function<std::optional<QualType>(NameId)> declare_class;
+  std::function<std::optional<QualType>(NameId, Tk, u32)> declare_class;
 
   // decl-specifier-seq ([dcl.spec.general]) with the simple-type-specifiers of [dcl.type.simple],
   // class names and elaborated-type-specifiers ([dcl.type.elab]), and the cv-qualifiers.
@@ -593,6 +596,7 @@ public:
         }
         bump();
         NameId n = name_of(tok());
+        u32 name_at = pos();
         bump();
         auto t = s_->class_name(n, true, false);
         if (!t && s_->class_name(n, true)) {  // [dcl.type.elab]/2
@@ -600,7 +604,7 @@ public:
           d.ok = false;
           continue;
         }
-        if (!t && declare_class) t = declare_class(n);
+        if (!t && declare_class) t = declare_class(n, k, name_at);
         if (!t) {
           s_->diag(at + 1, Diag::not_a_type, n);
           d.ok = false;
@@ -610,8 +614,9 @@ public:
         } else {
           cls = t;
           d.elaborated = true;
+          d.class_key = k;
           d.class_name = n;
-          d.class_at = at + 1;
+          d.class_at = name_at;
         }
         continue;
       }
@@ -2702,6 +2707,7 @@ public:
   // assignment-expression ([expr.assign]): right-associative; its left operand is a
   // logical-or-expression.
   Ex assignment_expression() {
+    if (is(Tk::kw_throw)) return throw_expression();
     Ex l = binary_expression(1);
     if (is(Tk::question)) return conditional_rest(l);
     if (auto op = assignment_operator(kind())) {
@@ -2720,6 +2726,19 @@ public:
       return s_->assign(*op, l, r, at);
     }
     return l;
+  }
+
+  // [expr.throw]: the optional operand is itself an assignment-expression.
+  Ex throw_expression() {
+    u32 begin = pos();
+    bump();
+    std::optional<Ex> operand;
+    if (!at_end() && !is(Tk::semi) && !is(Tk::comma) && !is(Tk::colon) &&
+        !is(Tk::r_paren) && !is(Tk::r_square) && !is(Tk::r_brace) &&
+        !(angle_ && (is(Tk::greater) || is(Tk::greatergreater)))) {
+      operand = assignment_expression();
+    }
+    return s_->throw_expression(operand, begin, pos());
   }
 
   Ex conditional_expression() {
@@ -3329,7 +3348,6 @@ public:
     case Tk::kw_typeid:
     case Tk::kw_dynamic_cast:
     case Tk::kw_const_cast:
-    case Tk::kw_throw:
       s_->diag(begin, Diag::not_supported, kind());
       bump();
       return {NodeId::none, begin, pos()};

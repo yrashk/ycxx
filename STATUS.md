@@ -1624,11 +1624,14 @@ session's.*
   (`Templates::transform`); of a dependent type it is a `TTransform` that substitution applies and
   deduction treats as a non-deduced context, mangled as Clang does (`u11__remove_cvIT_E`).
 - Dependent `__is_same`, `__is_reference`, `__is_const`, `__is_volatile`, `__is_array`,
-  `__is_pointer`, and `__is_function` in a `bool` template argument or default are `VDepOp` values
-  with canonical qualified type operands. Substitution retains unresolved operands across aliases
-  and forms valid operand types before evaluating the predicate. The ordinary `VInt` result
-  shares the specialization for literal `true` or `false`
-  ([temp.alias], [temp.type], [temp.deduct.general], #209).
+  `__is_pointer`, `__is_function`, `__is_enum`, `__is_union`, and `__is_class` in a `bool`
+  template argument or default are `VDepOp` values with canonical qualified type operands.
+  Substitution retains unresolved operands across aliases and forms valid operand types before
+  evaluating the predicate. The ordinary `VInt` result shares the specialization for literal
+  `true` or `false` ([temp.alias], [temp.type], [temp.deduct.general], #209).
+- Class and union predicates read the parsed class-key from the current translation unit,
+  including for forward declarations. A class template specialization's primary supplies
+  its kind without instantiation ([temp.class.general], [meta.unary.cat], #209).
 - Listed in docs/EXTENSIONS.md. Tests: `tests/own/builtins/`. `<cstdio>`: 53 → 33 errors.
 - Not yet (#211 follow-up): the built-ins that need the object model, such as
   `__is_constructible`, `__is_convertible`, `__is_assignable`, the `__is_trivially_*` and
@@ -2093,6 +2096,11 @@ What the process allocates, attributed to the engine's cells, in the trace and t
   consume a peer-owned object through a pointer or reference. Dispatch loads the selected slot in
   declaration order and passes the original receiver as `this`. Qualifying the call with the
   receiver's own class name calls the declaration directly.
+- The same Linux consumer can query `sizeof` and `alignof` and read or write directly declared
+  builtin integral members up to 64 bits through a pointer or reference. The shared Itanium
+  layout reserves the vptr at offset zero and preserves the declared field indices. Construction,
+  destruction, copying, by-value transfer and derived layouts retain their diagnostics.
+  [Itanium ABI §2.4](https://itanium-cxx-abi.github.io/cxx-abi/abi.html#class-types) · [#309](https://github.com/yrashk/ycxx/issues/309)
 - Pure virtual functions, `final`, covariant returns and table production remain in
   [#309](https://github.com/yrashk/ycxx/issues/309). Virtual destructor entry points are in
   [#136](https://github.com/yrashk/ycxx/issues/136). RTTI is tracked in
@@ -2311,6 +2319,15 @@ values, end to end; results match Clang's bit for bit.
   instantiation's function parameter pack, as a capture-default does for the elements used.
 - Not yet: init-capture packs `[...ys = xs]`, requires-clauses, static and consteval lambdas
   (#350).
+
+## Throw expressions (#551)
+
+A throw-expression has type `void`, keeps its operand in the semantic tree, and
+supports rethrow syntax. Scalar and pointer operands are checked after the applicable
+decay conversions. Conditional expressions preserve the other arm's type and value
+category when one arm is a throw-expression. Class exception construction, native
+emission, and evaluation of a reached throw still have explicit diagnostics. Runtime
+exception objects, handlers, and unwinding remain under #89.
 
 ## Statements, ι step 1: `switch`, labels, `goto`, conditions (#337, 2026-11-19)
 

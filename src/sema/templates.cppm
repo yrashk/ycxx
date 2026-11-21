@@ -309,6 +309,13 @@ public:
     return ins().intern_value(ast::VDepOp{ast::DepOp::is_same, ins().intern_seq(std::span<const TemplateArg>(operands))});
   }
 
+  // A class specialization has the class kind of its primary ([temp.class.general]).
+  std::optional<bool> is_union_class(EntityId c) const {
+    if (EntityId primary = w_->entities.rec(c).templ; primary != EntityId::none)
+      if (auto key = classes_->is_union_class(primary)) return key;
+    return classes_->is_union_class(c);
+  }
+
   std::optional<ConstId> unary_trait_value(ast::DepOp op, QualType type)
     pre(op != ast::DepOp::is_same)
   {
@@ -330,6 +337,15 @@ public:
     case ast::DepOp::is_array: result = types().is_array(type); break;
     case ast::DepOp::is_pointer: result = types().is_pointer(type); break;
     case ast::DepOp::is_function: result = types().is_function(type); break;
+    case ast::DepOp::is_enum: result = types().is_enum(type); break;
+    case ast::DepOp::is_union:
+    case ast::DepOp::is_class:
+      if (types().is_class(type)) {
+        auto is_union = is_union_class(types().class_of(type));
+        if (!is_union) return std::nullopt;
+        result = *is_union == (op == ast::DepOp::is_union);
+      }
+      break;
     case ast::DepOp::is_same: std::unreachable();
     }
     return w_->values.integer(types().builtin(Builtin::bool_), result);
@@ -443,7 +459,10 @@ public:
       case ast::DepOp::is_volatile:
       case ast::DepOp::is_array:
       case ast::DepOp::is_pointer:
-      case ast::DepOp::is_function: {
+      case ast::DepOp::is_function:
+      case ast::DepOp::is_enum:
+      case ast::DepOp::is_union:
+      case ast::DepOp::is_class: {
         auto operand = substitute_arg(ins().seqs.at(op.operands, 0), b);
         if (!operand) return std::nullopt;
         return unary_trait_value(op.op, operand->type);

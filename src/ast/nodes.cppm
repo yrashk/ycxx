@@ -501,6 +501,12 @@ struct Attribute {
   ChildList args;
 };
 
+// [expr.throw]: a rethrow has no operand.
+struct Throw {
+  ExprInfo info;
+  [[=sequenced]] Child operand;
+};
+
 using Nodes = closed_list<Literal, DeclRef, Paren, Unary, Binary, OrderedBinary, Assign, Subscript, Call,
                           ImplicitConversion, ExprStmt, Return, Compound, If, LocalVar, Attribute, LocalRef,
                           Conditional, While, Do, For, Break, Continue, DeclStmt, Declarator, DeclGroup,
@@ -508,7 +514,7 @@ using Nodes = closed_list<Literal, DeclRef, Paren, Unary, Binary, OrderedBinary,
                           MemberCall, Materialize, CtorCall, MemberInit, Destructor, DestroyMember, Dependent,
                           DepName, CondDecl, Switch, Case, Default, Label, Goto, BuiltinCall, Lambda, DefaultArg,
                           StaticInit, StaticVar, NewObject, DeleteObject, VariadicBuiltin, AssignmentCall,
-                          NewArray, DeleteArray, DelegatingInit, VirtualMemberCall>;
+                          NewArray, DeleteArray, DelegatingInit, VirtualMemberCall, Throw>;
 
 static_assert(Nodes::size < max_node_kinds);
 
