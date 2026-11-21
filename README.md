@@ -32,6 +32,7 @@ freestanding C++ subset for x86-64 Linux. The standard library is out of reach. 
 
 Ordinary function pointers and references preserve concrete `noexcept` type identity.
 A nonthrowing function can be used where the corresponding potentially throwing type is expected.
+Ordinary constructor declarations and definitions check that their concrete exception specifications agree.
 Dependent exception specifications remain open. [#219](https://github.com/yrashk/ycxx/issues/219)
 
 **Compile and run programs on macOS.** `ycxx cxx a.cpp -o a` (also `-c`, `-fsyntax-only`, `-E`, `-I`,
@@ -233,6 +234,8 @@ fields use their default member initializer when available and otherwise get zer
   support explicit calls and typed address selection.
   The four written C++26 non-allocating placement functions support explicit calls, including
   in constant expressions.
+  Runtime placement `new` supports integral and ordinary pointer objects with one placement
+  argument and a visible written reserved allocation function.
   [#293](https://github.com/yrashk/ycxx/issues/293)
 - pointers and references to arrays of unknown bound, and template partial specializations
   that match unknown-bound array types. [#222](https://github.com/yrashk/ycxx/issues/222)

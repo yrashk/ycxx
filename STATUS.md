@@ -1114,7 +1114,7 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   representation while the class has a user-declared constructor ([dcl.fct.def.default],
   [class.default.ctor], [dcl.init.general], #157).
 - A first-declaration in-class `C(C&) = default` or `C(const C&) = default` is a declared copy
-  constructor, including with `constexpr` or bare `noexcept`. It participates in overload
+  constructor, including with `constexpr` or a concrete `noexcept` specification. It participates in overload
   selection, access checking and deletion. For ordinary namespace-scope records without
   bases, copies proven trivial use the existing representation copy and the usual by-value
   ABI. This includes supported scalar fields, lvalue references, arrays, and class members
@@ -1415,8 +1415,11 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   the non-members unqualified lookup and argument-dependent lookup find; else the built-in
   operator. `a = b` calls a user-declared member `operator=`. Ranking against the built-in
   candidates, postfix `++`/`--`, `()`, `[]`, `->` and conversion functions are #219.
-- `noexcept` and `noexcept(e)` on function declarators are accepted, not yet part of the type
-  (#219); `N::T(…)` and `N::T{…}` are functional casts.
+- Ordinary constructors support concrete `noexcept` and `noexcept(e)` specifications.
+  Out-of-class definitions check the effective specification of the corresponding declaration.
+  Omission agrees with `noexcept(false)` on ordinary potentially throwing constructors, and
+  bare `noexcept` agrees with `noexcept(true)` (#219).
+- `N::T(…)` and `N::T{…}` are functional casts.
 - `T (*p)(args);` with T a typedef-name declares p ([stmt.ambig]), in sema and in the splitter.
 - **`#include <stdio.h>`** (the SDK's) compiles, and `printf`, `puts`, `fputs` and `stdout` run
   (`tests/own/headers/stdio.run.cpp`). `<cstdio>` still waits for static members of class
@@ -2785,8 +2788,13 @@ and runtime integration with ycxx's own linker remain under [#89]. See the
   ([new.delete.placement]). The two allocation functions take `size_t, void*` and return `void*`.
   The two deallocation functions take `void*, void*` and return `void`. These signatures require
   both arguments and a nonthrowing exception specification. Written `constexpr` definitions can
-  be called explicitly in constant expressions. Placement new-expressions, object lifetime and
-  cleanup remain in [#293](https://github.com/yrashk/ycxx/issues/293).
+  be called explicitly in constant expressions.
+- Runtime scalar placement `new` supports integral and ordinary pointer objects with one placement
+  argument. Overload resolution must select a visible written global `operator new(size_t, void*)`
+  with a nonthrowing exception specification. The call precedes scalar initialization in the returned
+  storage. Native lowering requires a supported nonthrowing initializer. Constant evaluation of
+  storage reuse, placement arrays and classes, and more general lifetime and cleanup rules remain in
+  [#293](https://github.com/yrashk/ycxx/issues/293).
 - Native lowering supports initializers proven nonthrowing from the analyzed expression tree.
   Initializers that need an exception cleanup edge and constant evaluation of allocation remain
   in #293. Namespace-scope allocation uses the existing dynamic initialization path. The issue

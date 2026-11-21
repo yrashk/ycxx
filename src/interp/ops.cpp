@@ -304,6 +304,7 @@ struct Ops {
     return Flow::next;
   }
 
+  static Flow obj__reuse(M& m, Frame&, N n) { return m.unsupported(n); }
   static Flow union__activate(M& m, Frame&, N n) { return m.unsupported(n); }
 
   static Flow nullptr_value(M& m, Frame& f, N n) {
