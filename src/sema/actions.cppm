@@ -7190,11 +7190,10 @@ public:
           add_class(r.entity);
           collect_bases(r.entity);
         }
-        if (!ordinary_call) break;
         auto visit_arg = [&](const TemplateArg& arg) {
           if (arg.kind == ast::TemplateArgKind::type) {
             visit(arg.type);
-          } else if (arg.kind == ast::TemplateArgKind::template_ && arg.templ != EntityId::none) {
+          } else if (ordinary_call && arg.kind == ast::TemplateArgKind::template_ && arg.templ != EntityId::none) {
             // [basic.lookup.argdep]/3: associate the type template itself, not a specialization.
             EntityId scope = w_->entities.rec(arg.templ).scope;
             if (scope == EntityId::none || w_->entities.rec(scope).kind == EntityKind::namespace_)

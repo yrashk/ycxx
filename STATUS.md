@@ -1199,8 +1199,8 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
 - [basic.lookup.argdep] finds functions in the namespaces associated with class and enumeration
   arguments, including classes' bases at the lookup point and the inline namespace set. Pointer,
   reference, array, function and pointer-to-member types contribute through their component types.
-  Ordinary calls expand class specializations' canonical template type arguments, including
-  defaults and type packs. Reaching a class as a base or owner contributes its namespace.
+  Ordinary and dependent calls expand class specializations' canonical template type arguments,
+  including defaults and type packs. Reaching a class as a base or owner contributes its namespace.
   A separate occurrence of its type expands its arguments. Member-pointer values still need #411.
 - Ordinary calls also associate the declaring namespace of a namespace-scope type
   template supplied as a template-template argument ([basic.lookup.argdep]).
