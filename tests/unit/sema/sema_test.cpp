@@ -312,7 +312,7 @@ void class_trivial_copyability() {
   struct Witness {
     std::string_view label;
     std::string_view source;
-    ast::u32 class_item;
+    ast::u32 top_level_class;
     std::optional<bool> expected;
     // Copy construction, move construction, copy assignment, move assignment.
     std::optional<Operations> operations = std::nullopt;
@@ -350,7 +350,7 @@ void class_trivial_copyability() {
     const bool clean = a.pre.diags.empty() && a.diags().empty();
     check(clean, label + " has no diagnostics");
     if (!clean) continue;
-    const auto entity = a.decl(witness.class_item).entity;
+    const auto entity = a.decl(a.its.top.at(witness.top_level_class)).entity;
     const bool defined = a.p->classes().find(entity) != nullptr;
     check(defined, label + " has a class record");
     if (!defined) continue;
