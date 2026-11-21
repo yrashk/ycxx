@@ -1763,8 +1763,10 @@ Fable decided the representation (ast.md §6.6); the Opus session wrote the code
   report "not supported" instead of "expected '<'".
 - Tests: `tests/own/templates/c6-*` (18, agreeing with Clang and GCC); 6 more draft examples
   pass. `<cstdio>`: 33 → 18 errors.
+- Ordinary function overloads with explicit trailing type packs preserve the pack in atomic
+  constraint substitution. Empty packs, order, and reference types are retained (#234).
 - Not yet: constraints on class and variable templates, partial specializations and members,
-  constrained packs, fold-expanded constraints, `C auto`, `noexcept` in compound requirements
+  broader constrained packs, fold-expanded constraints, `C auto`, `noexcept` in compound requirements
   (#234); re-verification of satisfaction at END (#235); Itanium constraint mangling (#236);
   recorded discarded extents for `if constexpr` (#237); value-dependent mapping arguments (#209).
 
