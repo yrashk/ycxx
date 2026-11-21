@@ -337,6 +337,7 @@ public:
     case ast::DepOp::is_array: result = types().is_array(type); break;
     case ast::DepOp::is_pointer: result = types().is_pointer(type); break;
     case ast::DepOp::is_function: result = types().is_function(type); break;
+    case ast::DepOp::is_object: result = types().is_object(type); break;
     case ast::DepOp::is_enum: result = types().is_enum(type); break;
     case ast::DepOp::is_member_pointer: result = types().is_member_pointer(type); break;
     case ast::DepOp::is_member_object_pointer:
@@ -473,7 +474,8 @@ public:
       case ast::DepOp::is_class:
       case ast::DepOp::is_member_pointer:
       case ast::DepOp::is_member_object_pointer:
-      case ast::DepOp::is_member_function_pointer: {
+      case ast::DepOp::is_member_function_pointer:
+      case ast::DepOp::is_object: {
         auto operand = substitute_arg(ins().seqs.at(op.operands, 0), b);
         if (!operand) return std::nullopt;
         return unary_trait_value(op.op, operand->type);

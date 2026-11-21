@@ -1631,8 +1631,8 @@ session's.*
   deduction treats as a non-deduced context, mangled as Clang does (`u11__remove_cvIT_E`).
 - Dependent `__is_same`, `__is_reference`, `__is_const`, `__is_volatile`, `__is_array`,
   `__is_pointer`, `__is_function`, `__is_enum`, `__is_union`, `__is_class`, `__is_member_pointer`,
-  `__is_member_object_pointer`, and `__is_member_function_pointer` in a `bool` template argument or
-  default are `VDepOp` values with canonical qualified type operands. Substitution retains
+  `__is_member_object_pointer`, `__is_member_function_pointer`, and `__is_object` in a `bool` template
+  argument or default are `VDepOp` values with canonical qualified type operands. Substitution retains
   unresolved operands across aliases and forms valid operand types before evaluating the
   predicate. The ordinary `VInt` result shares the specialization for literal `true` or `false`
   ([temp.alias], [temp.type], [temp.deduct.general], #209).
