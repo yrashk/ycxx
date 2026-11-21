@@ -743,6 +743,7 @@ class Lowering {
       case Op::dealloc:
       case Op::obj__begin:
       case Op::obj__end:
+      case Op::obj__reuse:
       case Op::union__activate:
       case Op::useq__begin:
       case Op::useq__next:

@@ -3038,22 +3038,44 @@ public:
     return unary_expression();
   }
 
-  // Ordinary new-expressions ([expr.new]). A parenthesized type-id uses the abstract declarator;
+  // New-expressions ([expr.new]). A parenthesized type-id uses the abstract declarator;
   // a bare new-type-id greedily takes ptr-operators and cannot have function suffixes.
   Ex new_expression(u32 begin) {
     bump();  // new, after an optional ::
     std::optional<QualType> type;
     std::optional<Ex> bound;
+    std::optional<Ex> placement;
     bool excluded = false;
     if (is(Tk::l_paren)) {
       u32 past = i_ + past_parentheses(0);
       bump();
       if (starts_type_id()) {
-        type = type_id(/*placeholder_ok=*/true);
-        if (!expect(Tk::r_paren) || !type) return {NodeId::none, begin, pos()};
-      } else {
-        excluded = true;  // placement arguments
-        i_ = past;
+        // A functional conversion in a placement argument can also start with a type name.
+        u32 back = i_;
+        int saved = angle_;
+        std::size_t diags = s_->diag_count();
+        auto parenthesized = type_id(/*placeholder_ok=*/true);
+        if (parenthesized && accept(Tk::r_paren) && !starts_type_id()) {
+          type = parenthesized;
+        } else {
+          s_->truncate_diags(diags);
+          i_ = back;
+          half_ = false;
+          angle_ = saved;
+        }
+      }
+      if (!type) {
+        if (!is(Tk::r_paren)) {
+          int saved = std::exchange(angle_, 0);
+          placement = is(Tk::l_brace) ? s_->braced_argument(braced_init_list()) : assignment_expression();
+          angle_ = saved;
+        }
+        if (!placement || is(Tk::comma)) {
+          excluded = true;  // only one placement argument
+          i_ = past;
+        } else if (!expect(Tk::r_paren) || !placement->ok()) {
+          return {NodeId::none, begin, pos()};
+        }
         if (accept(Tk::l_paren)) {
           type = type_id(/*placeholder_ok=*/true);
           if (!expect(Tk::r_paren) || !type) return {NodeId::none, begin, pos()};
@@ -3106,12 +3128,12 @@ public:
       angle_ = saved;
       if (!expect(Tk::r_paren)) return {NodeId::none, begin, pos()};
     }
-    if (excluded) {
+    if (excluded || (placement && bound)) {
       s_->diag(begin, Diag::not_supported, Tk::kw_new);
       return {NodeId::none, begin, pos()};
     }
     if (bound) return s_->new_array(*type, *bound, args, braces.get(), begin, pos());
-    return s_->new_object(*type, args, braces.get(), begin, pos());
+    return s_->new_object(*type, args, braces.get(), begin, pos(), placement);
   }
 
   Ex delete_expression(u32 begin) {
