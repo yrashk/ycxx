@@ -1158,6 +1158,10 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   ([basic.lookup.unqual]/9).
 - Linkage names: `<nested-name>`s with namespace prefixes as substitution candidates, and
   `_GLOBAL__N_1` for the unnamed namespace, checked against Clang's symbols.
+- Ordinary namespace C++ functions whose adjusted parameter types name an unnamed-namespace type
+  use local ELF and Mach-O symbols, preserving their source linkage and mangled names. Native
+  references need a definition in the same unit. An unused declaration emits no symbol.
+  [Design](docs/design/tu-local-parameter-symbols.md) · [#582](https://github.com/yrashk/ycxx/issues/582)
 - The Itanium ABI abbreviates the global `std` namespace as `St` without assigning it a
   numbered substitution (§5.1.5 and §5.1.10). Direct members use unscoped encodings
   and deeper members keep `N…E`. The Linux mixed-object test links calls through the pinned
@@ -1671,8 +1675,13 @@ session's.*
   scalar types as trivially copyable and evaluates reference, function and cv `void` types to
   `false`. It queries the class record at the use of the trait, including the original member
   position when a constructor re-reads an initializer. It reports incomplete class elements
-  separately from complete classes with unknown facts. Dependent operands and wider class
-  classification remain in [#218](https://github.com/yrashk/ycxx/issues/218).
+  separately from complete classes with unknown facts. A dependent operand can appear in the
+  supported single base of a primary class template, including an alias template-id, or in a
+  namespace-scope variable template initializer. The selected definition replays the written
+  operand at the instantiation demand and retains trait errors at the source spelling. General
+  dependent substitution and wider class classification remain in
+  [#218](https://github.com/yrashk/ycxx/issues/218).
+  [Replay design](docs/design/dependent-trivial-copyability-replay.md)
   `__has_builtin(__is_trivially_copyable)` answers 0 while support is partial ([meta.unary.prop]).
 - Listed in docs/EXTENSIONS.md. Tests: `tests/own/builtins/`. `<cstdio>`: 53 → 33 errors.
 - Not yet (#211 follow-up): the built-ins that need the object model, such as

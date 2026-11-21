@@ -1,0 +1,30 @@
+// ACTION: syntax
+--- main.cpp
+#include "holder.h"
+network::Address* address;
+--- holder.h
+namespace network {
+struct Connection {
+  struct Address* primary;
+};
+}
+=== edit
+--- holder.h
+namespace network {
+struct Connection {
+  struct Endpoint* primary;
+};
+}
+--- main.cpp
+#include "holder.h"
+network::Address* address; //! error
+=== edit
+--- holder.h
+namespace network {
+struct Connection {
+  struct Address* primary;
+};
+}
+--- main.cpp
+#include "holder.h"
+network::Address* address;

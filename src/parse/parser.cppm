@@ -577,10 +577,11 @@ public:
         u32 at = pos();
         if (qualified_ahead(1)) {
           bump();
+          const std::size_t diags = s_->diag_count();
           auto q = qualified_type(0, /*checked=*/true, /*type_only=*/true);
           if (!q || !s_->types().is_class(q->first) || s_->is_union_type(q->first) != (k == Tk::kw_union) ||
               any_type()) {
-            s_->diag(at, Diag::expected_type_specifier);
+            if (s_->diag_count() == diags) s_->diag(at, Diag::expected_type_specifier);
             d.ok = false;
             goto done;
           }
@@ -604,9 +605,10 @@ public:
           d.ok = false;
           continue;
         }
+        const std::size_t diags = s_->diag_count();
         if (!t && declare_class) t = declare_class(n, k, name_at);
         if (!t) {
-          s_->diag(at + 1, Diag::not_a_type, n);
+          if (s_->diag_count() == diags) s_->diag(at + 1, Diag::not_a_type, n);
           d.ok = false;
         } else if (any_type()) {
           s_->diag(at, Diag::conflicting_specifiers, k);
@@ -1379,7 +1381,11 @@ public:
     auto injected = s_->qualified_injected_type(*s, name, at, type_only);
     if (injected.found)
       return injected.type ? std::optional{std::pair{*injected.type, next + 1 - start}} : std::nullopt;
-    if (type_only) return std::nullopt;
+    if (type_only) {
+      if (!s->ns) return std::nullopt;
+      auto t = s_->namespace_elaborated_class(*s->ns, name, at);
+      return t ? std::optional{std::pair{*t, next + 1 - start}} : std::nullopt;
+    }
     auto t = s_->scope_type(*s, name);
     if (!t) return std::nullopt;
     if (checked) check_type_access(*s, name, *at);
@@ -2149,7 +2155,7 @@ public:
     if (!c.ok()) return std::nullopt;
     sema::Evaluated v = sema::Evaluator(*s_, questions()).evaluate(c);
     if (!v.value) {
-      s_->diag(e.begin, Diag::not_constant, v.reason);
+      if (!v.copyability_failure) s_->diag(e.begin, Diag::not_constant, v.reason);
       return std::nullopt;
     }
     return *v.value;
@@ -2445,7 +2451,7 @@ public:
     sema::Evaluated r = sema::Evaluator(*s_, questions()).evaluate(v);
     if (r.dependent) return Truth::dependent;
     if (!r.value) {
-      s_->diag(at, Diag::constraint_not_constant, r.reason);
+      if (!r.copyability_failure) s_->diag(at, Diag::constraint_not_constant, r.reason);
       return Truth::invalid;
     }
     return s_->world().values.as_signed(*r.value) != 0 ? Truth::yes : Truth::no;
@@ -3269,7 +3275,10 @@ public:
           }
           angle_ = saved;
           if (!expect(Tk::r_paren) || !ok) return {NodeId::none, begin, pos()};
-          return s_->trait_expr(tr->trait, args, begin, pos());
+          Ex result = s_->trait_expr(tr->trait, args, begin, pos());
+          if (tr->trait == lex::TypeTrait::is_trivially_copyable && s_->dependent(result))
+            ++deferred_argument_checks_;  // Even an alias that erases the argument must replay it.
+          return result;
         }
       if (qualified_ahead()) return qualified_id(begin);
       // `X<args>(…)` and `X<args>{…}` for a class template X ([expr.type.conv]).
@@ -4365,7 +4374,7 @@ public:
     } else if (v.dependent) {
       s_->diag(e.begin, Diag::not_constant, sema::reason_unsupported);  // nothing outside a template depends
     } else if (!v.value) {
-      s_->diag(e.begin, Diag::not_constant, v.reason);
+      if (!v.copyability_failure) s_->diag(e.begin, Diag::not_constant, v.reason);
     } else if (!s_->in_template_definition() && s_->world().values.rec(*v.value).bits == 0) {
       if (message == sema::ConstId::none) s_->diag(begin, Diag::static_assert_failed);
       else s_->diag(begin, Diag::static_assert_failed_message, message);

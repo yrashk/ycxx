@@ -110,6 +110,11 @@ public:
   // A concrete source query keeps its original position if its tokens are read again.
   virtual bool is_complete_at_source(EntityId c) { return is_complete(c); }
   virtual engine::Loc source_loc(engine::Loc loc, u32) { return loc; }
+  // Only a base or initializer with an owning replay can retain this dependent pattern.
+  virtual bool in_copyability_pattern() const { return false; }
+  virtual void record_copyability_occurrence(engine::Loc) {}
+  virtual std::optional<bool> copyability_at_demand(EntityId, engine::Loc) { return std::nullopt; }
+  virtual bool copyability_instantiation_failed(EntityId) { return false; }
   // Inside the enumerator list of an enumeration this unit is defining: its record so far, which
   // is published only after the list (#156).
   virtual const EnumRec* defining_enum(EntityId) { return nullptr; }
@@ -127,7 +132,8 @@ public:
   // alias) unqualified lookup finds for `name`, and qualified lookup of `name` in namespace `ns`
   // ([namespace.qual]).
   virtual std::optional<EntityId> namespace_named(NameId name, std::span<const EntityId> directives = {}) = 0;
-  virtual std::vector<ast::DeclSema> namespace_members(EntityId ns, NameId name) = 0;
+  virtual std::vector<ast::DeclSema> namespace_members(EntityId ns, NameId name, bool type_only = false,
+                                                      bool direct_only = false) = 0;
   // [basic.lookup.argdep]: functions in one associated namespace's inline namespace set, and
   // a class's record if complete there. Ask at the lexical point, and for a dependent call
   // also at the point of instantiation ([temp.dep.candidate]).
@@ -450,9 +456,13 @@ public:
           if (hit.found) return hit.type;
         }
         if (auto r = nested_member(current_class, name, true)) return r->first.type;
-      } else if (auto m = q_->earlier_member(name); m && (m->kind == ast::DeclKind::enum_ || m->kind == ast::DeclKind::type_alias)) {
-        return m->type;
       } else {
+        if (auto m = q_->earlier_member(name)) {
+          if (m->kind == ast::DeclKind::enum_ || m->kind == ast::DeclKind::type_alias) return m->type;
+          if (!elaborated && (m->kind == ast::DeclKind::data_member || m->kind == ast::DeclKind::variable ||
+                              (m->kind == ast::DeclKind::function && c.name != name)))
+            return std::nullopt;
+        }
         // In the class being defined, a type of its (complete) bases.
         for (EntityId b : q_->defining_bases(current_class))
           if (auto r = nested_member(b, name)) return r->first.type;
@@ -466,7 +476,12 @@ public:
         ast::DeclSema s = q_->decl_sema(d);
         if (s.entity == EntityId::none || is_special(s)) continue;
         if (is_type(s.kind) || !elaborated) found = s;
+        if (!elaborated && !is_type(s.kind)) break;
       }
+    if (member_introduction && member_introduction->name == name &&
+        (!found || elaborated || w_->entities.rec(found->entity).scope !=
+                                    w_->entities.rec(member_introduction->sema.entity).scope))
+      found = member_introduction->sema;
     if (!found && !elaborated && aliases) return builtin_type_name(name);
     if (!found || !is_type(found->kind)) return std::nullopt;
     if (found->kind == ast::DeclKind::type_alias && !aliases) return std::nullopt;
@@ -700,7 +715,7 @@ public:
     }
     EntityId spec = variable_specialization(tmpl.entity, *full);
     if (auto st = q_->specialization_type(spec)) t = *st;
-    demands.push_back({spec, ast::Loc{item_, loc_base_ + begin}});
+    if (!unevaluated) demands.push_back({spec, ast::Loc{item_, loc_base_ + begin}});
     ExprInfo info{types().referee(*t), ValueCategory::lvalue, 0};
     return node(ast::DeclRef{info, spec}, begin, end, info);
   }
@@ -836,6 +851,8 @@ public:
   // Whether a class type is a union, without requiring its definition.
   std::optional<bool> is_union_type(QualType t) {
     if (!types().is_class(t)) return false;
+    if (member_introduction && member_introduction->sema.entity == types().class_of(t))
+      return member_introduction->is_union;
     return Templates(*w_, classes()).is_union_class(types().class_of(t));
   }
   // `__trait(T)` that transforms a type ([meta.trans]): the type it gives.
@@ -849,18 +866,30 @@ public:
   Ex trivial_copyability_expr(QualType operand, u32 begin, u32 end) {
     const Types& ts = types();
     const QualType canonical = ts.canonical(operand);
+    const engine::Loc loc = q_->source_loc({std::to_underlying(item_), loc_base_ + begin}, begin);
     const auto fail = [&](Diag d, const auto&... args) -> Ex {
-      diag_at(q_->source_loc({std::to_underlying(item_), loc_base_ + begin}, begin), d, args...);
+      diag_at(loc, d, args...);
       return {NodeId::none, begin, end};
     };
-    if (ts.is_dependent(canonical)) return fail(Diag::trivial_copyability_dependent);
+    if (ts.is_dependent(canonical)) {
+      if (q_->in_copyability_pattern())
+        if (auto value = templates().unary_trait_value(ast::DepOp::is_trivially_copyable, canonical)) {
+          q_->record_copyability_occurrence(loc);
+          return literal(builtin(Builtin::bool_), *value, ValueCategory::prvalue, begin, end);
+        }
+      return fail(Diag::trivial_copyability_dependent);
+    }
     const QualType element = ts.innermost_array_element(canonical);
     if (ts.is_scalar(element)) return bool_literal(true, begin, end);
     if (ts.is_reference(element) || ts.is_function(element) || ts.is_void(element))
       return bool_literal(false, begin, end);
     if (ts.is_class(element)) {
       const EntityId cls = ts.class_of(element);
-      if (!q_->is_complete_at_source(cls)) return fail(Diag::trivial_copyability_incomplete, element);
+      const auto demand = q_->copyability_at_demand(cls, loc);
+      if (!(demand ? *demand : q_->is_complete_at_source(cls))) {
+        if (q_->copyability_instantiation_failed(cls)) return {NodeId::none, begin, end};
+        return fail(Diag::trivial_copyability_incomplete, element);
+      }
       if (const ClassRec* record = classes().find(cls))
         if (auto fact = record->trivially_copyable()) return bool_literal(*fact, begin, end);
     }
@@ -1007,6 +1036,14 @@ public:
     return std::nullopt;
   }
 
+  std::optional<QualType> direct_member_introduction(EntityId ns, NameId n) {
+    if (member_introduction && member_introduction->name == n &&
+        w_->entities.rec(member_introduction->sema.entity).scope == ns &&
+        q_->namespace_members(ns, n, /*type_only=*/false, /*direct_only=*/true).empty())
+      return member_introduction->sema.type;
+    return std::nullopt;
+  }
+
   std::optional<Scope> scope_member(const Scope& s, NameId n) {
     // A member of the class whose member-specification this is (the current instantiation in a
     // template) is found where it is declared ([temp.dep.type]/1); a member of another dependent
@@ -1015,6 +1052,7 @@ public:
       if (auto t = member_type(types().class_of(*s.type), n)) return Scope{std::nullopt, *t};
     if (s.type && types().is_dependent(*s.type)) return Scope{std::nullopt, types().dep_name(*s.type, n)};
     if (s.ns) {
+      if (auto t = direct_member_introduction(*s.ns, n)) return Scope{std::nullopt, t};
       auto members = q_->namespace_members(*s.ns, n);
       for (const ast::DeclSema& d : members) {
         if (d.kind == ast::DeclKind::namespace_) return Scope{d.entity, std::nullopt};
@@ -1028,10 +1066,12 @@ public:
   // Whether `S::n` names a function or variable, which hides a type of that name in its scope
   // ([basic.scope.hiding]/2): `::stat(path, &buf)` calls the function.
   bool scope_names_object(const Scope& s, NameId n) {
-    if (s.ns)
+    if (s.ns) {
+      if (direct_member_introduction(*s.ns, n)) return false;
       return std::ranges::any_of(q_->namespace_members(*s.ns, n), [](const ast::DeclSema& d) {
         return d.kind == ast::DeclKind::function || d.kind == ast::DeclKind::variable;
       });
+    }
     if (s.type && types().is_class(*s.type))
       if (const ClassRec* c = class_rec(types().class_of(*s.type)))
         return std::ranges::any_of(c->members, [&](const MemberDeclRec& m) { return m.name == n; });
@@ -1086,6 +1126,24 @@ public:
     }
     const ClassRec incomplete;
     return class_body_type(naming, cls ? *cls : incomplete, name, at, /*qualified=*/true, type_only);
+  }
+
+  // Qualified namespace lookup for an elaborated class name skips non-types and aliases.
+  std::optional<QualType> namespace_elaborated_class(EntityId ns, NameId name, std::optional<u32> at) {
+    if (member_introduction && member_introduction->name == name &&
+        w_->entities.rec(member_introduction->sema.entity).scope == ns)
+      return member_introduction->sema.type;
+    std::optional<ast::DeclSema> result;
+    for (const ast::DeclSema& d : q_->namespace_members(ns, name, /*type_only=*/true)) {
+      if (result && result->entity != d.entity) {
+        if (at) diag(*at, Diag::ambiguous_name, name);
+        return std::nullopt;
+      }
+      result = d;
+    }
+    if (!result || result->kind != ast::DeclKind::class_ || (result->flags & decl_flag::template_))
+      return std::nullopt;
+    return result->type;
   }
 
   // `S::n` naming a type.
@@ -1215,8 +1273,12 @@ public:
   // Diagnoses an object of incomplete type, at `at`.
   bool require_complete(QualType t, u32 at) {
     if (is_complete(t)) return true;
-    diag(at, Diag::incomplete_type, t);
+    if (!copyability_failed(t)) diag(at, Diag::incomplete_type, t);
     return false;
+  }
+  bool copyability_failed(QualType t) {
+    const QualType element = types().innermost_array_element(t);
+    return types().is_class(element) && q_->copyability_instantiation_failed(types().class_of(element));
   }
 
   bool require_supported_virtual_layout(QualType t, u32 at) {
@@ -3275,6 +3337,12 @@ public:
     ConstId enum_initializer = ConstId::none;
   };
   std::vector<OwnDecl> own;
+  struct MemberIntroduction {
+    NameId name;
+    ast::DeclSema sema;
+    bool is_union;
+  };
+  std::optional<MemberIntroduction> member_introduction;
   std::optional<EntityId> defining_unnamed_enum_scope;
 
   // ------------------------------------------------------------ member functions ([class.mfct])
@@ -6044,6 +6112,7 @@ public:
     if (!has_peer_virtual_layout(t) && !require_supported_virtual_layout(t, begin)) return {NodeId::none, begin, end};
     std::optional<u64> n = layout_of(t, align);
     if (!n) {
+      if (copyability_failed(t)) return {NodeId::none, begin, end};
       if (types().is_function(t) || !is_complete(t)) diag(begin, Diag::sizeof_incomplete, t);
       else diag(begin, Diag::not_supported, align ? lex::Tk::kw_alignof : lex::Tk::kw_sizeof);
       return {NodeId::none, begin, end};
