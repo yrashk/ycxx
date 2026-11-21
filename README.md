@@ -127,7 +127,9 @@ support those addresses. [#414](https://github.com/yrashk/ycxx/issues/414)
 · [#407](https://github.com/yrashk/ycxx/issues/407)
 
 On x86-64 Linux, direct calls and saved pointers across translation units share one address for
-simple external inline functions. [#422](https://github.com/yrashk/ycxx/issues/422)
+simple external inline functions. Ordinary namespace-scope functions can use GNU hidden visibility,
+including coalesced inline and `constexpr` definitions.
+[#422](https://github.com/yrashk/ycxx/issues/422) · [#602](https://github.com/yrashk/ycxx/issues/602)
 
 External inline namespace variables with relocation-free static initializers share one object
 across x86-64 ELF translation units. This lets two freestanding units using libycxx `<cstddef>`
@@ -181,6 +183,12 @@ fixed underlying types and definitions inside `extern "C"` blocks.
 Both targets support named nested enum definitions followed by ordinary fields in the same
 member declaration, including scoped enum field initializers. [#500](https://github.com/yrashk/ycxx/issues/500)
 
+Automatic declarations of ordinary non-template classes with only scalar fields and no bases
+or unions can use default member initializers in `S s;` and `S s{…};`. A default runs in
+declaration order and can call a function or read an earlier field through `this`. An explicit
+initializer takes precedence.
+[#118](https://github.com/yrashk/ycxx/issues/118)
+
 **Language on macOS.** Programs can use:
 - the fundamental integer, character and floating types, pointers, arrays, references and
   enumerations, including opaque declarations of named enums in their namespaces; `float`,
@@ -213,8 +221,8 @@ member declaration, including scoped enum field initializers. [#500](https://git
   cv-qualified objects. Scalar allocation uses the global Itanium allocation functions.
   Syntax checking also covers one-dimensional scalar `new T[n]` and `delete[] p`.
   The usual aligned scalar allocation and deallocation signatures support explicit calls with
-  `std::align_val_t`. Written nonthrowing global scalar overloads with a final `const Tag&`
-  support explicit calls, including `std::nothrow_t` and user-defined class tags.
+  `std::align_val_t`. Written nonthrowing global scalar and array overloads with a final
+  `const Tag&` support explicit calls, including `std::nothrow_t` and user-defined class tags.
   The usual global `operator new[]` and `operator delete[]` signatures
   support explicit calls and typed address selection.
   [#293](https://github.com/yrashk/ycxx/issues/293)
@@ -254,7 +262,8 @@ member declaration, including scoped enum field initializers. [#500](https://git
   partial specializations with substitution checks for dependent type arguments, static constexpr
   members of class templates, member function and
   constructor templates, parameter packs and fold expressions, alias templates, template
-  template parameters, concepts and requires-expressions in overload resolution,
+  template parameters, concepts and requires-expressions in overload resolution, including
+  explicit trailing type packs in ordinary constrained function overloads,
   `if constexpr`, deferred template static assertion failures, and two-phase lookup, with
   Itanium names identical to Clang's; Clang's
   `__make_integer_seq`;
@@ -263,8 +272,10 @@ member declaration, including scoped enum field initializers. [#500](https://git
   three member-pointer predicates as `bool` template arguments or defaults, including through
   alias templates
   [#209](https://github.com/yrashk/ycxx/issues/209);
-- direct `__is_constructible` for the supported concrete scalar, reference, function and
-  `void` queries. [Extension guide](docs/EXTENSIONS.md) · [#218](https://github.com/yrashk/ycxx/issues/218)
+- `__is_constructible`, `__is_nothrow_constructible` and `__is_trivially_constructible` for
+  supported scalar, reference, function and `void` queries, including argument packs in
+  class-template base and variable-template initializer replay.
+  [Extension guide](docs/EXTENSIONS.md) · [#218](https://github.com/yrashk/ycxx/issues/218)
 - logical negation of a qualified dependent `bool` variable template-id in a `bool` template
   argument or default
   [#209](https://github.com/yrashk/ycxx/issues/209);
@@ -282,7 +293,9 @@ member declaration, including scoped enum field initializers. [#500](https://git
 - casts, including `static_cast<T&&>` from a compatible object lvalue and runtime `static_cast`
   downcasts of object pointers and lvalue references through accessible, unambiguous
   nonvirtual base paths, `sizeof`/`alignof` (classes included), `decltype`, and calls
-  through pointers to functions. [#199](https://github.com/yrashk/ycxx/issues/199)
+  through pointers to functions. Qualified functional casts check access to aliases and typedefs
+  declared directly in an ordinary class. [#199](https://github.com/yrashk/ycxx/issues/199) ·
+  [#216](https://github.com/yrashk/ycxx/issues/216)
 - equality and inequality between `std::nullptr_t` values and between a `std::nullptr_t`
   value and a pointer. [#199](https://github.com/yrashk/ycxx/issues/199)
 - constant evaluation on ycxx's own interpreter: `constexpr`, `consteval`, `constinit`,

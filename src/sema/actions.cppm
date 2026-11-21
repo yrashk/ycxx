@@ -82,6 +82,8 @@ struct GenericResult {
   bool diagnosed = false;
 };
 
+class Sema;
+
 // What sema asks of its context (§B1.4, §B3). In the engine these are `visible_decls(::, name,
 // at item)` and fetches of `decl_sema`.
 class Questions {
@@ -107,6 +109,9 @@ public:
   // Whether class `c` is complete at the current point ([class.mem.general]): its definition
   // precedes the point and does not enclose it.
   virtual bool is_complete(EntityId c) = 0;
+  // An omitted field's initializer, analysed at its declaration into the requesting builder.
+  // `NodeId::none` records a diagnosed error. No answer means this context cannot replay it.
+  virtual std::optional<NodeId> replay_default_member(Sema&, EntityId) { return std::nullopt; }
   // A concrete source query keeps its original position if its tokens are read again.
   virtual bool is_complete_at_source(EntityId c) { return is_complete(c); }
   virtual bool class_layout_uncertain(EntityId /*cls*/) { return false; }
@@ -384,6 +389,7 @@ public:
     diags_->push_back(std::move(x));
   }
   std::size_t diag_count() const { return diags_->size(); }
+  std::vector<engine::Diagnostic>& diagnostics() { return *diags_; }
   bool has_error_since(std::size_t begin) const {
     return std::ranges::any_of(std::span(*diags_).subspan(begin), [](const engine::Diagnostic& d) {
       auto kind = sema_diag_of(d.id);
@@ -816,6 +822,10 @@ public:
         TemplateArg a = bound                                     ? *bound
                         : p.kind == ast::TemplateArgKind::type ? t.type_arg(p.type)
                                                                : t.value_arg(p.type, ins().intern_value(ast::VDepParam{p.depth, p.index}));
+        if (!bound && p.pack && p.kind == TemplateArgKind::type) {
+          const std::array expansion{t.type_arg(types().pack_expansion(p.type))};
+          a = t.pack(expansion);
+        }
         mapping.push_back(t.mapping_value(a));
       }
     }
@@ -906,9 +916,23 @@ public:
   };
   // The owning replay supplies packs in written order and the demand point for their elements.
   // Validate every concrete operand's domain before deciding the predicate ([meta.unary.prop]).
-  Ex constructibility_expr(std::span<const ConstructibilityOperand> written, u32 begin, u32 end) {
+  Ex constructibility_expr(lex::TypeTrait trait, NameId name, std::span<const ConstructibilityOperand> written, u32 begin, u32 end)
+    pre(trait == lex::TypeTrait::is_constructible || trait == lex::TypeTrait::is_nothrow_constructible ||
+        trait == lex::TypeTrait::is_trivially_constructible)
+  {
     const Types& ts = types();
     const engine::Loc loc = type_trait_loc(begin);
+    const auto [op, unsupported] = [trait] {
+      switch (trait) {
+      case lex::TypeTrait::is_constructible:
+        return std::pair{ast::DepOp::is_constructible, Diag::constructibility_unsupported};
+      case lex::TypeTrait::is_nothrow_constructible:
+        return std::pair{ast::DepOp::is_nothrow_constructible, Diag::nothrow_constructibility_unsupported};
+      case lex::TypeTrait::is_trivially_constructible:
+        return std::pair{ast::DepOp::is_trivially_constructible, Diag::trivial_constructibility_unsupported};
+      default: std::unreachable();
+      }
+    }();
     const auto fail = [&](Diag d, const auto&... args) -> Ex {
       diag_at(loc, d, args...);
       return {NodeId::none, begin, end};
@@ -928,7 +952,7 @@ public:
         if (has_error_since(diagnostics)) return {NodeId::none, begin, end};
         TemplateArg pattern = t.pattern_of(expansion);
         if (!t.expansion_length(pattern, template_args)) return fail(Diag::pack_length_mismatch);
-        return fail(Diag::constructibility_substitution, pattern.type);
+        return fail(Diag::constructibility_substitution, pattern.type, name);
       }
       for (const TemplateArg& element : *elements) args.push_back({element.type, operand.at});
     }
@@ -946,14 +970,14 @@ public:
       // An enumeration without a fixed underlying type is incomplete in its own enumerator list.
       if (ts.is_enum(type)) {
         const EnumRec* defining = q_->defining_enum(ts.enum_of(type));
-        if (defining && !defining->fixed) return fail(Diag::constructibility_incomplete, operand.type);
+        if (defining && !defining->fixed) return fail(Diag::constructibility_incomplete, operand.type, name);
       }
       if (ts.is_class(type)) {
         const EntityId cls = ts.class_of(type);
         const auto demand = q_->type_trait_at_demand(cls, type_trait_loc(operand.at));
         if (!(demand ? *demand : q_->is_complete_at_source(cls))) {
           if (q_->type_trait_instantiation_failed(cls)) return {NodeId::none, begin, end};
-          return fail(Diag::constructibility_incomplete, operand.type);
+          return fail(Diag::constructibility_incomplete, operand.type, name);
         }
       }
     }
@@ -961,7 +985,7 @@ public:
       if (q_->in_type_trait_pattern()) {
         std::vector<TemplateArg> pattern;
         for (const ConstructibilityOperand& operand : args) pattern.push_back(t.type_arg(operand.type));
-        if (auto value = t.constructibility_pattern(pattern)) {
+        if (auto value = t.constructibility_pattern(op, pattern)) {
           for (const ConstructibilityOperand& operand : args)
             if (ts.is_dependent(operand.type)) q_->record_dependent_type_trait_operand(type_trait_loc(operand.at));
           return literal(builtin(Builtin::bool_), *value, ValueCategory::prvalue, begin, end);
@@ -970,9 +994,10 @@ public:
       const bool pack = std::ranges::any_of(args, [&](const ConstructibilityOperand& arg) {
         return ts.kind(arg.type) == TypeKind::pack_expansion;
       });
-      return fail(pack ? Diag::constructibility_pack : Diag::constructibility_dependent);
+      return fail(pack ? Diag::constructibility_pack : Diag::constructibility_dependent, name);
     }
 
+    // In this bounded domain every viable initialization is trivial and nonthrowing.
     const QualType target = ts.canonical(args.front().type);
     if (ts.is_function(target) || ts.is_void(target)) return bool_literal(false, begin, end);
     if (args.size() == 1) {
@@ -984,7 +1009,7 @@ public:
           return ts.is_arithmetic(ts.referee(ts.canonical(arg.type)));
         }))
       return bool_literal(args.size() == 2, begin, end);
-    return fail(Diag::constructibility_unsupported, args.front().type);
+    return fail(unsupported, args.front().type);
   }
   // `__trait(T…)` that tests types ([meta.unary], [meta.rel]): a `bool` prvalue, value-dependent
   // while a type is dependent for the traits that support it.
@@ -1169,13 +1194,20 @@ public:
     return false;
   }
   // Whether the type `S::n`, named at `at`, is accessible here: a nested type of a class
-  // ([class.access]/4); diagnosed if not.
-  bool type_member_access(const Scope& s, NameId n, u32 at) {
+  // ([class.access]/4); diagnosed if not. Ordinary functional conversions check directly
+  // declared aliases and typedefs of non-template records.
+  bool type_member_access(const Scope& s, NameId n, u32 at, bool direct_alias_only = false) {
     if (!s.type || !types().is_class(*s.type) || types().is_dependent(*s.type)) return true;
     EntityId naming = types().class_of(*s.type);
+    if (direct_alias_only) {
+      const EntityRec& record = w_->entities.rec(naming);
+      if (record.kind != EntityKind::class_ || record.templ != EntityId::none) return true;
+    }
     auto r = nested_member(naming, n);
     if (!r) return true;
     auto [t, c] = *r;
+    if (direct_alias_only && (c != naming || w_->entities.rec(t.entity).kind != EntityKind::type_alias ||
+                              types().is_dependent(t.type))) return true;
     if (defer_type_access && (!accessible(c, class_rec(c)->access_of(t.entity), naming) || !accessible_naming_base(naming, c))) {
       deferred_access_.push_back({c, t.entity, n, at});
       return true;
@@ -1585,7 +1617,7 @@ public:
     QualType type;
     NameId name;
     ConstId init = ConstId::none;  // a member's default member initializer, if constant
-    bool dmi = false;              // it has one
+    EntityId default_member = EntityId::none;  // the field whose initializer was written
   };
   std::vector<Element> elements(QualType t) {
     std::vector<Element> r;
@@ -1596,7 +1628,7 @@ public:
       // [dcl.init.aggr]/2: the direct bases in declaration order, then the members.
       for (const BaseRec& b : c->bases) r.push_back({types().add_cv(types().class_type(b.cls), Types::cv(t)), no_name()});
       for (const FieldRec& f : c->fields) {
-        r.push_back({types().add_cv(f.type, Types::cv(t)), f.name, f.init, f.dmi});
+        r.push_back({types().add_cv(f.type, Types::cv(t)), f.name, f.init, f.dmi ? f.entity : EntityId::none});
         if (c->union_) break;  // [dcl.init.aggr]/16: a union's list initializes its first member
       }
     }
@@ -1606,6 +1638,29 @@ public:
     const ClassRec* c = types().is_class(t) ? class_rec(types().class_of(t)) : nullptr;
     return c && c->union_;
   }
+
+  // [class.base.init], [dcl.init.aggr]: a destination with only ordinary scalar fields
+  // needs no subobject destruction if an initializer exits by throwing.
+  bool can_replay_default_members(QualType t) {
+    if (templated() || !types().is_class(t)) return false;
+    EntityId c = types().class_of(t);
+    const EntityRec& entity = w_->entities.rec(c);
+    if (entity.kind != EntityKind::class_ || entity.templ != EntityId::none || entity.name == no_name() ||
+        (entity.scope != EntityId::none && w_->entities.rec(entity.scope).kind != EntityKind::namespace_)) return false;
+    const ClassRec* rec = class_rec(c);
+    return rec && !rec->union_ && !rec->closure && !rec->polymorphic && rec->bases.empty() &&
+           rec->destructor_usable && rec->destructor == EntityId::none &&
+           std::ranges::all_of(rec->fields, [&](const FieldRec& f) {
+             return types().is_scalar(f.type) && !types().is_member_pointer(f.type) && f.bit_width == 0;
+           }) && std::ranges::any_of(rec->fields, &FieldRec::dmi);
+  }
+
+  struct DefaultMemberScope {
+    Sema& sema;
+    bool saved;
+    DefaultMemberScope(Sema& s, bool enabled) : sema(s), saved(std::exchange(s.replay_default_members_, enabled)) {}
+    ~DefaultMemberScope() { sema.replay_default_members_ = saved; }
+  };
 
   // Whether initializing a `t` runs a default member initializer.
   // (or a constructor).
@@ -1664,13 +1719,32 @@ public:
   // An aggregate's elements each from its default member initializer, else value- or
   // default-initialized.
   Ex member_inits(QualType t, bool value, u32 begin, u32 end) {
+    const bool replay = replay_default_members_ && can_replay_default_members(t);
+    std::vector<Element> elems = elements(t);
+    if (replay && std::ranges::any_of(class_rec(types().class_of(t))->fields, [&](const FieldRec& f) {
+          return !f.dmi && (Types::is_const(types().canonical(f.type)) ||
+                            (!value && Types::is_const(types().canonical(t))));
+        })) {
+      diag(begin, Diag::deleted_constructor, t);
+      return {NodeId::none, begin, end};
+    }
     std::vector<Ex> out;
-    for (const Element& e : elements(t)) out.push_back(element_default(e, value, begin, end));
+    for (const Element& e : elems) {
+      out.push_back(element_default(e, value, replay, begin, end));
+      if (!out.back().ok()) return {NodeId::none, begin, end};
+    }
     return list_of(t, std::move(out), begin, end);
   }
-  Ex element_default(const Element& e, bool value, u32 begin, u32 end) {
+  Ex element_default(const Element& e, bool value, bool replay, u32 begin, u32 end) {
+    if (replay && e.default_member != EntityId::none) {
+      if (auto init = q_->replay_default_member(*this, e.default_member)) {
+        if (*init == NodeId::none) return {NodeId::none, begin, end};
+        ExprInfo info{e.type, ValueCategory::prvalue, 0};
+        return node(ast::DefaultMemberInit{info, {*init, 0}}, begin, end, info);
+      }
+    }
     if (e.init != ConstId::none) return literal(Types::unqualified(e.type), e.init, ValueCategory::prvalue, begin, end);
-    if (e.dmi) {
+    if (e.default_member != EntityId::none) {
       diag(begin, Diag::not_supported, lex::Tk::equal);  // a non-constant default member initializer in an aggregate (#118)
       return {NodeId::none, begin, end};
     }
@@ -1762,11 +1836,12 @@ public:
     Ex fail{NodeId::none, begin, end};
     std::vector<Element> elems = elements(t);
     std::vector<Ex> out;
+    const bool replay = replay_default_members_ && can_replay_default_members(t);
     bool elided = begin != b.begin || end != b.end;
     for (std::size_t i = 0; i < elems.size(); ++i) {
       if (next == b.clauses.size()) {
-        out.push_back(element_default(elems[i], true, end, end));
-        if (!out.back().ok()) return fail;  // diagnosed (a default member initializer not supported yet)
+        out.push_back(element_default(elems[i], true, replay, end, end));
+        if (!out.back().ok()) return fail;
         continue;
       }
       const Braced::Clause& c = b.clauses[next];
@@ -1783,7 +1858,10 @@ public:
           diag(c.begin, Diag::bad_designator, c.designator, Types::unqualified(t));
           return fail;
         }
-        for (; i < j; ++i) out.push_back(element_default(elems[i], true, c.begin, c.begin));
+        for (; i < j; ++i) {
+          out.push_back(element_default(elems[i], true, replay, c.begin, c.begin));
+          if (!out.back().ok()) return fail;
+        }
       }
       QualType et = elems[i].type;
       if (c.list) {
@@ -3409,6 +3487,7 @@ public:
   void check_immediate_addresses(NodeId root, u32 offset = 0) {
     if (!has_immediate_addresses_ || root == NodeId::none) return;
     auto check = [&](this const auto& self, const ast::Red& node) -> void {
+      if (node.is<ast::DefaultMemberInit>()) return;  // checked where its source was replayed
       if ((node.is<ast::Declarator>() || node.is<ast::LocalVar>() || node.is<ast::StaticVar>()) &&
           constant_immediate_initializers_.contains(node.offset())) return;
       if (node.is<ast::DeclRef>()) {
@@ -4012,6 +4091,8 @@ public:
 
   // ------------------------------------------------------------ overload resolution ([over.match])
 
+  enum class DefaultArgumentOrigin : u8 { interned, current_item };
+
   // A candidate function: its entity (none for an implicit trivial special member), its type,
   // whether it takes no implicit object (a non-member or static function), and whether it is
   // deleted.
@@ -4026,6 +4107,7 @@ public:
     // ([dcl.fct.default]); empty if it has none.
     std::vector<NodeId> defaults{};
     bool is_explicit = false;
+    DefaultArgumentOrigin default_origin = DefaultArgumentOrigin::interned;
     // How many arguments a call must give ([over.match.viable]/2.3).
     std::size_t required(std::size_t params) const {
       std::size_t k = params;
@@ -4043,12 +4125,27 @@ public:
     return r;
   }
   // Those of a declaration lookup found: the latest one found has every earlier one's in its scope
-  // ([dcl.fct.default]/4); declarations in other scopes have their own. This item's own
-  // declarations are drafts and have none yet.
+  // ([dcl.fct.default]/4); declarations in other scopes have their own. The parameter lists
+  // of this item's own declarations are drafts. Allocation calls collect those defaults
+  // from `own_function_defaults` instead.
   std::vector<NodeId> found_defaults(const ast::DeclSema& d) {
     if (std::ranges::any_of(own, [&](const OwnDecl& w) { return w.sema.entity == d.entity && w.sema.params == d.params; })) return {};
     return defaults_of(d);
   }
+
+  Candidate non_template_call_candidate(const ast::DeclSema& d, bool allocation) {
+    Candidate candidate{d.entity, d.type, true, (d.flags & decl_flag::deleted) != 0};
+    if (allocation) {
+      if (auto draft = own_function_defaults.find(d.entity); draft != own_function_defaults.end()) {
+        candidate.defaults = draft->second;
+        candidate.default_origin = DefaultArgumentOrigin::current_item;
+        return candidate;
+      }
+    }
+    candidate.defaults = found_defaults(d);
+    return candidate;
+  }
+
   // Those of a function named by `callee` (a DeclRef, perhaps parenthesized): as its lookup found
   // them, or, for a member, as its class records them.
   std::vector<NodeId> defaults_of(Ex callee, EntityId f) {
@@ -6096,18 +6193,20 @@ public:
     return decls_expr(std::move(found), true, name, begin, end);
   }
 
-  // In a default-aligned scalar new-expression, the sole allocation argument is size_t
+  // In a default-aligned new-expression, the sole allocation argument is size_t
   // ([expr.new]). Every admitted written overload takes that exact first parameter. An
   // overload with additional, all-defaulted parameters ties the ordinary one ([over.match]).
-  bool ambiguous_scalar_allocation(NameId name) {
+  bool ambiguous_allocation(u32 at, bool array) {
+    const NameId name = ins().names.intern(allocation_name(AllocationFunction::allocate, array));
     for (const ast::DeclSema& d : written_allocation_declarations(name)) {
       if (d.kind != ast::DeclKind::function) continue;
       const auto count = types().rec(d.type).params.size();
       if (count < 2) continue;
-      auto draft = own_function_defaults.find(d.entity);
-      auto defaults = draft != own_function_defaults.end() ? draft->second : defaults_of(d);
-      Candidate candidate{d.entity, d.type, true, false, nullptr, std::move(defaults)};
-      if (candidate.required(count) == 1) return true;
+      const Candidate candidate = non_template_call_candidate(d, true);
+      if (candidate.required(count) == 1) {
+        diag(at, Diag::ambiguous_call, name);
+        return true;
+      }
     }
     return false;
   }
@@ -6155,12 +6254,7 @@ public:
       init = types().is(t, Builtin::bool_) && types().is(value.type(), Builtin::nullptr_t)
           ? to_bool(value, value.begin) : convert(value, t, value.begin);
     }
-    if (!init.ok()) return fail;
-    const NameId name = ins().names.intern(allocation_name(AllocationFunction::allocate));
-    if (ambiguous_scalar_allocation(name)) {
-      diag(begin, Diag::ambiguous_call, name);
-      return fail;
-    }
+    if (!init.ok() || ambiguous_allocation(begin, false)) return fail;
     QualType pointer = types().pointer(t);
     if (dependent(init)) return dependent_node({init}, begin, end, pointer);
 
@@ -6249,7 +6343,7 @@ public:
       return fail;
     }
     Ex count = convert(bound, builtin(w_->target.size_type), bound.begin);
-    if (!count.ok()) return fail;
+    if (!count.ok() || ambiguous_allocation(begin, true)) return fail;
     QualType pointer = types().pointer(t);
     if (dependent(count)) return dependent_node({count}, begin, end, pointer);
     auto size = layout_of(t, false);
@@ -7421,6 +7515,7 @@ public:
           bool enum_operator = false) {
     u32 begin = callee.begin;
     std::vector<NodeId> defaults;  // the chosen function's default arguments
+    DefaultArgumentOrigin default_origin = DefaultArgumentOrigin::interned;
     if (!callee.ok() || std::ranges::any_of(args, [](const Ex& a) { return !a.ok(); })) return {NodeId::none, begin, end};
     // A member function called with a dependent argument is resolved when the template is
     // instantiated ([temp.dep.expr]).
@@ -7464,6 +7559,8 @@ public:
     }
     if (types().is(callee.type(), Builtin::overload_set)) {
       const std::vector<ast::DeclSema>& set = overloads_.at(std::to_underlying(callee.id));
+      const NameId name = w_->entities.rec(set.front().entity).name;
+      const bool allocation = is_allocation_name(ins().names.spelling(name));
       auto ex = explicit_args_.find(std::to_underlying(callee.id));
       std::span<const TemplateArg> explicit_args;
       if (ex != explicit_args_.end()) explicit_args = ex->second;
@@ -7494,7 +7591,7 @@ public:
         if (!(d.flags & decl_flag::template_)) {
           // Explicit template arguments name only templates ([temp.arg.explicit]).
           if (ex != explicit_args_.end() || !eligible_operator_type(d.type)) continue;
-          cands.push_back({d.entity, d.type, true, deleted, nullptr, found_defaults(d)});
+          cands.push_back(non_template_call_candidate(d, allocation));
           decls.push_back(&d);
           continue;
         }
@@ -7523,7 +7620,7 @@ public:
         cands.push_back({specialization(d, *targs, *st), *st, true, deleted, &d, found_defaults(d)});
         decls.push_back(&d);
       }
-      auto chosen = resolve(cands, args, callee.begin, w_->entities.rec(set.front().entity).name, std::nullopt, std::nullopt, lists);
+      auto chosen = resolve(cands, args, callee.begin, name, std::nullopt, std::nullopt, lists);
       if (!chosen) return {NodeId::none, begin, end};
       const ast::DeclSema& d = *decls[*chosen];
       const Candidate& k = cands[*chosen];
@@ -7539,6 +7636,7 @@ public:
       ExprInfo ci{*kt, ValueCategory::lvalue, 0};
       callee = node(ast::DeclRef{ci, k.entity}, callee.begin, callee.end, ci);
       defaults = k.defaults;
+      default_origin = k.default_origin;
     } else if (auto d = as<ast::DeclRef>(callee); d && deleted_.contains(std::to_underlying(d->entity))) {
       // One function: still not callable when deleted ([dcl.fct.def.delete]).
       diag(callee.begin, Diag::deleted_function, w_->entities.rec(d->entity).name);
@@ -7572,7 +7670,10 @@ public:
       return expression;
     };
     Ex named = unparenthesized(callee);  // `(f)()` takes f's default arguments too ([expr.call]/1)
-    if (auto d = as<ast::DeclRef>(named); d && types().is_function(ft) && defaults.empty()) defaults = defaults_of(named, d->entity);
+    if (auto d = as<ast::DeclRef>(named); d && types().is_function(ft) && defaults.empty()) {
+      defaults = defaults_of(named, d->entity);
+      default_origin = DefaultArgumentOrigin::interned;
+    }
     if (auto d = as<ast::DeclRef>(named); d && types().is_function(ft) &&
         (named.id == callee.id || is_consteval(d->entity))) {
       function = d->entity;
@@ -7592,7 +7693,7 @@ public:
       return {NodeId::none, begin, end};
     }
     TypeRec fr = types().rec(ft);
-    auto children = call_args(fr, args, begin, paren_at, defaults);
+    auto children = call_args(fr, args, begin, paren_at, defaults, default_origin);
     if (!children) return {NodeId::none, begin, end};
     ExprInfo info = result_info(fr.inner);
     return node(ast::Call{info, function, at(callee, begin), b_->list(*children)}, begin, end, info);
@@ -7775,14 +7876,16 @@ public:
   // The argument a parameter's default argument gives a call, positioned at the call's `)`: its
   // tree, analysed at the declaration ([dcl.fct.default]/5). One of a template that depends on its
   // parameters would be instantiated for the call ([temp.inst]/12), which is not supported yet.
-  std::optional<Ex> default_argument(NodeId d, u32 at_) {
-    NodeId arg = ins().ast.get<ast::DefaultArg>(d).arg.id;
-    if (ast::kind_of(arg) == ast::Nodes::index_of<ast::Dependent>()) {
+  std::optional<Ex> default_argument(NodeId d, u32 at_, DefaultArgumentOrigin origin = DefaultArgumentOrigin::interned) {
+    const bool in_builder = origin == DefaultArgumentOrigin::current_item;
+    // An earlier declarator's inherited defaults are already adopted by this builder.
+    const NodeId interned = in_builder ? b_->adopted_node(d) : d;
+    const auto value = interned == NodeId::none ? b_->get<ast::DefaultArg>(d) : ins().ast.get<ast::DefaultArg>(interned);
+    if (ast::kind_of(value.arg.id) == ast::Nodes::index_of<ast::Dependent>()) {
       diag(at_, Diag::default_arg_dependent);
       return std::nullopt;
     }
-    ExprInfo info = ins().ast.get<ast::DefaultArg>(d).info;
-    return Ex{b_->adopt(d), at_, at_, info};
+    return Ex{in_builder ? d : b_->adopt(d), at_, at_, value.info};
   }
 
   Ex braced_argument(std::unique_ptr<Braced> b) {
@@ -7878,12 +7981,13 @@ public:
   // The arguments of a call to a function of type `fr`, each copy-initializing its parameter.
   // A parameter without an argument takes its default argument ([dcl.fct.default], [expr.call]/5).
   std::optional<std::vector<Child>> call_args(const TypeRec& fr, std::span<const Ex> given, u32 begin, u32 paren_at,
-                                              std::span<const NodeId> defaults = {}) {
+                                              std::span<const NodeId> defaults = {},
+                                              DefaultArgumentOrigin origin = DefaultArgumentOrigin::interned) {
     if (unevaluated == 0 && !require_supported_virtual_signature(fr, paren_at)) return std::nullopt;
     std::vector<QualType> params = fr.params;  // copied: converting may intern new types
     std::vector<Ex> args(given.begin(), given.end());
     for (std::size_t i = args.size(); i < params.size() && i < defaults.size() && defaults[i] != NodeId::none; ++i) {
-      auto a = default_argument(defaults[i], paren_at);
+      auto a = default_argument(defaults[i], paren_at, origin);
       if (!a) return std::nullopt;
       args.push_back(*a);
     }
@@ -7980,6 +8084,7 @@ private:
   };
   std::vector<LabelPoint> labels_, gotos_;
   bool has_immediate_addresses_ = false;
+  bool replay_default_members_ = false;
   std::set<u32> constant_immediate_initializers_;
   std::set<u32> consteval_;                           // consteval functions named so far
   std::map<u32, std::vector<Ex>> list_elems_;         // by draft InitList

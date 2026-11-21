@@ -549,6 +549,7 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
   std::set<std::uint32_t> seen;
   std::set<EntityId> inline_declarations;
   std::set<EntityId> noexcept_declarations;
+  std::set<EntityId> hidden_declarations;
   std::vector<Dynamic> dynamic;
   // The type from the declaration, not the entity's record: a variable's type is not part of its
   // identity, so a record made before an edit may hold the old one (#115).
@@ -577,6 +578,7 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
         (d.kind == ast::DeclKind::function || d.kind == ast::DeclKind::variable))
       inline_declarations.insert(e);
     if (linux && d.kind == ast::DeclKind::function && d.has_written_noexcept) noexcept_declarations.insert(e);
+    if (linux && d.hidden_visibility) hidden_declarations.insert(e);
     if (!seen.insert(std::to_underlying(e)).second) return;
     const sema::EntityRec& r = world.entities.rec(e);
     if (r.kind == sema::EntityKind::class_ || r.kind == sema::EntityKind::data_member || r.kind == sema::EntityKind::type_alias ||
@@ -828,6 +830,9 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
     d.type = world.entities.rec(e).type;
     declare(d, std::nullopt);
   }
+  // A declaration anywhere in the unit can supply the visibility of the one ELF symbol.
+  if (!hidden_declarations.empty())
+    for (Entity& e : tu.entities) e.hidden_elf = hidden_declarations.contains(e.id);
   return tu;
 }
 

@@ -131,12 +131,13 @@ enum class DepOp : u8 {
   is_same, is_reference, is_const, is_volatile, is_array, is_pointer, is_function,
   is_enum, is_union, is_class,
   is_member_pointer, is_member_object_pointer, is_member_function_pointer,
-  is_object, logical_not, is_trivially_copyable, is_constructible,
+  is_object, logical_not, is_trivially_copyable,
+  is_constructible, is_nothrow_constructible, is_trivially_constructible,
 };
 
 // A dependent operation (§5.5). The predicates take canonical qualified type operands.
-// `is_constructible` takes a target and an argument sequence, `is_same` takes two operands,
-// the other predicates take one. `logical_not` takes one bool value operand.
+// The constructibility predicates take a target and an argument sequence,
+// `is_same` takes two operands, and the other predicates take one. `logical_not` takes one bool value operand.
 struct [[=dependent]] VDepOp {
   DepOp op;
   SeqId<TemplateArg> operands;
@@ -163,9 +164,14 @@ struct VType {
   u8 cv;
 };
 
+// A pack occupies one parameter slot in an atomic constraint's mapping.
+struct VConstraintPack {
+  SeqId<ConstId> elements;
+};
+
 // An atomic constraint ([temp.constr.atomic]): the appearance of its expression (the item that
 // contains it, and its tokens [begin, end) in that item's declaration part), and its parameter
-// mapping: one entry per parameter of the head at `depth`, a `VType` or a value for a parameter the
+// mapping: one entry per parameter of the head at `depth`, a type, pack or value for a parameter the
 // expression names and none for the others ([temp.constr.atomic]/1). Two are identical when they
 // are one value ([temp.constr.atomic]/2). `calls` are the offsets, from `begin`, of its unqualified
 // calls that were dependent where it appears: checking it adds argument-dependent lookup at the
@@ -189,7 +195,7 @@ struct VConstraint {
 };
 
 using ValueKinds = closed_list<VInt, VFloat, VNullptr, VString, VLvalue, VEntity, VAggregate, VDepParam, VDepFnParam, VDepExpansion,
-                               VDepSizeofPack, VType, VAtom, VConstraint, VDepOp, VMemberPtr, VDepVariable>;
+                               VDepSizeofPack, VType, VAtom, VConstraint, VDepOp, VMemberPtr, VDepVariable, VConstraintPack>;
 
 template <class T>
 constexpr bool is_value_kind = ValueKinds::contains<T>;

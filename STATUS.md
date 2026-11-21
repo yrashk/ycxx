@@ -671,6 +671,12 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   to one definition. `unit.linux_inline` checks symbol bindings, address identity, archive
   extraction, and both operand orders with the native and host linkers.
   [Design](docs/design/linux-inline-functions.md) · [#422](https://github.com/yrashk/ycxx/issues/422)
+- Explicit GNU `visibility("hidden")` follows ordinary external namespace-scope functions across
+  redeclarations. On x86-64 ELF, inline definitions combine `STB_WEAK` with `STV_HIDDEN`.
+  Ordinary non-inline definitions and referenced declarations combine `STB_GLOBAL` with
+  `STV_HIDDEN`. `unit.linux_inline` checks both scoped attribute spellings, symbol metadata,
+  and cross-unit address identity with the native and host linkers in both object orders.
+  [#602](https://github.com/yrashk/ycxx/issues/602)
 - Constant-initialized and zero-initialized external inline namespace variables use weak ELF
   definitions when their initial values need no relocations. This includes explicitly inline
   full variable-template specializations with builtin type arguments. Static addresses and
@@ -998,17 +1004,27 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   [expr.ref]), list-initialization of aggregates and scalars (`InitList`, `ValueInit`,
   `DefaultInit`: brace elision, designators, narrowing, [dcl.init.list]/3.2), arrays whose bound
   comes from their initializer, class copies as `lvalue_to_rvalue` of a class glvalue, `x = {…}`.
-  Default member initializers are kept as their values, constants of scalar type only (#118).
   Namespace-scope aggregates with constant elements are folded to a `VAggregate`.
 - **IR:** members through `ptr_member` field steps; aggregates initialized element by element,
   in an object allocated `zero` when some element is value-initialized; trivial copies and copy
   assignment as `copy`, which `lower` turns into chunked loads and stores. Class layouts (Itanium
   §2.4) are computed by `QueryLayout` from the unit's shapes (`UnitShapes`, #115); data with
   `VAggregate` initializers; Itanium names for global-namespace class types in parameters.
-- Tests: `tests/own/classes/s1-*` (spec-only, plus seven from the review). 21 of 27 pass; the others wait for classes by value
-  (#116), local classes (#117), non-constant default member initializers (#118) and records in
-  the interpreter (#25).
+- Tests: `tests/own/classes/s1-*` (spec-only, plus seven from the review). Further cases are
+  tracked under classes by value (#116), local classes (#117) and records in the interpreter (#25).
 - Not yet: unions, bit-fields, constructors, bases (access checking came with #119).
+
+- Ordinary named, non-template records with only scalar fields and no bases or unions can use
+  nonconstant default member initializers when an automatic declaration uses implicit default
+  construction or aggregate initialization. Sema reads each omitted field's retained tokens
+  in its complete-class context. IR binds `this` to the destination while evaluating that field
+  in declaration order. An explicit aggregate clause keeps its enclosing context
+  ([class.mem.general], [expr.prim.this], [dcl.init.aggr], #118).
+- Required constant evaluation checks the scalar initializers and retains their values when
+  evaluation succeeds. Constant evaluation of destination member reads remains in #25.
+  Static storage, dependent forms, other member types and exceptional cleanup remain in #118.
+  The fixtures in `tests/own/classes/scalar-default-member-init/` cover both targets in syntax
+  checks and native Linux x86-64 execution.
 
 - Ordinary mutable data members can be modified through a const object. A member access
   preserves volatile and the field's declared qualification. Native const globals with mutable
@@ -1060,8 +1076,8 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   reference-binding tie-breaks), promotion, conversion; ambiguity and deleted functions
   (`= delete`) diagnosed.
 - **Constructors and destructors**: declarations in the class, mem-initializers and default
-  member initializers (analysed again in each constructor, a complete-class context; #118 stays
-  open for aggregates), `CtorCall` for every initialization form (`T x(a)`, `T x{a}`, `T x = a`,
+  member initializers (analysed again in each constructor, a complete-class context),
+  `CtorCall` for every initialization form (`T x(a)`, `T x{a}`, `T x = a`,
   `T(a)`, `T{a}`, value- and default-initialization, copies), `MemberInit` statements in
   declaration order, `Destructor`/`DestroyMember` for members after the body. Implicit copy
   constructors and destructors that are not trivial are synthesized (`Program::synthesized`).
@@ -1270,8 +1286,10 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
 ## `<cstdio>`, step 3: attributes, asm labels, string-initialized arrays (#133, 2026-11-18)
 
 - **Attributes:** `[[…]]` attribute-specifiers on declarations, class heads and statements, and
-  GNU `__attribute__((…))` before and after declarators, are parsed and ignored
-  ([dcl.attr.grammar]/6); none before a linkage-specification ([dcl.link]).
+  GNU `__attribute__((…))` before and after declarators, are parsed. The parser skips
+  unrecognized attributes ([dcl.attr.grammar]/6) and diagnoses a standard attribute before a
+  linkage-specification with a single declaration ([dcl.link]). GNU hidden visibility on ordinary
+  namespace-scope functions is implemented for x86-64 ELF. [#602](https://github.com/yrashk/ycxx/issues/602)
 - **Asm labels:** `__asm("…")` after a declarator gives the entity's symbol exactly as written
   (`Program::asm_label`, `pipeline::Entity::asm_label`), as the SDK's `__DARWIN_ALIAS` needs.
   Both extensions are listed in `docs/EXTENSIONS.md` (DECISIONS §1.2).
@@ -1287,9 +1305,8 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
 - `__FLT_EVAL_METHOD__` is predefined (0), as Clang has it for the target.
 - Attributes are also accepted after a declarator-id, on parameters, alias-declarations and
   statements, and in the GNU form on class heads and after template-heads. A string literal
-  initializes a character-array element of an aggregate. A default member initializer that is
-  not a scalar constant, in a class without constructors, is now diagnosed (#118) instead of
-  being dropped.
+  initializes a character-array element of an aggregate. Uses of default member initializers
+  outside the supported cases are diagnosed (#118).
 - Leading standard attributes on ordinary data members and member functions are accepted
   ([class.mem.general], #190). The parser diagnoses unbalanced arguments in these prefixes
   ([dcl.attr.grammar]) and attributes before access labels ([class.access.spec]). Other attribute
@@ -1663,7 +1680,11 @@ session's.*
   and a block declaration can take an unnamed function-pointer parameter (#449).
 - Parenthesized direct initialization accepts functional conversions with a braced operand or an
   initial literal, including `S b(S(1));` and `S b(S{1});` ([dcl.ambig.res], #290).
-- Not yet: access, hiding and qualified functional casts of member types (#216); member alias
+- Qualified functional conversions check access to aliases and typedefs declared directly in an
+  ordinary non-template record, for both `C::T(args)` and `C::T{args}`. They use the existing
+  member and friend access rules ([expr.type.conv], [class.access.general], #216).
+- Access through intermediate alias qualifiers or inherited aliases, dependent lookup and
+  expression hiding remain tracked in [#216](https://github.com/yrashk/ycxx/issues/216). Member alias
   templates (`template<…> using __apply = …` in a class), with member
   templates; template template parameters (#208); value-dependent expressions as template
   arguments (#209).
@@ -1704,23 +1725,25 @@ session's.*
   [#218](https://github.com/yrashk/ycxx/issues/218).
   [Replay design](docs/design/dependent-trivial-copyability-replay.md)
   `__has_builtin(__is_trivially_copyable)` answers 0 while support is partial ([meta.unary.prop]).
-- `__is_constructible(T, Args...)` checks concrete operand types at the original source point.
-  Its domain includes complete types, cv `void`, and arrays of unknown bound. It folds function
-  and cv `void` targets, scalar and reference targets with no arguments, and arithmetic targets
-  with arithmetic or arithmetic-reference arguments. Incomplete operands and other complete
-  combinations get hard diagnostics. The supported class-template base and variable-template
-  initializer replay paths accept dependent operands. Replay expands packs in place among the
-  arguments, checks newly concrete types at the actual demand and retains hard errors at the
-  builtin spelling. An empty pack contributes zero arguments. The target must be a separately
-  written type-id. General dependent queries, including function-template uses, and class
-  construction remain in [#218](https://github.com/yrashk/ycxx/issues/218).
-  `__has_builtin(__is_constructible)` answers 0 while support is partial ([meta.unary.prop]).
+- `__is_constructible(T, Args...)`, `__is_nothrow_constructible(T, Args...)` and
+  `__is_trivially_constructible(T, Args...)` check concrete operand types at the original source
+  point. Their domain includes complete types, cv `void`, and arrays of unknown bound. They fold
+  function and cv `void` targets, scalar and reference targets with no arguments, and arithmetic
+  targets with arithmetic or arithmetic-reference arguments. Each viable initialization in that
+  scope is trivial and nonthrowing. Incomplete operands and other complete combinations get hard
+  diagnostics. The supported class-template base and variable-template initializer replay paths
+  accept dependent operands. Replay expands packs in place among the arguments, checks newly
+  concrete types at the actual demand and retains hard errors at the builtin spelling. An empty
+  pack contributes zero arguments. The target must be a separately written type-id. General
+  dependent queries, including function-template uses, and class construction remain in
+  [#218](https://github.com/yrashk/ycxx/issues/218).
+  `__has_builtin` answers 0 for all three predicates while support is partial ([meta.unary.prop]).
   [Direct design](docs/design/direct-constructibility.md)
   · [Replay design](docs/design/constructibility-tail-pack-replay.md)
 - Listed in docs/EXTENSIONS.md. Tests: `tests/own/builtins/`. `<cstdio>`: 53 → 33 errors.
 - Not yet (#211 follow-up): the built-ins that need the object model, such as
-  class constructibility, `__is_convertible`, `__is_assignable`, other `__is_trivially_*` and
-  `__is_nothrow_*` families, `__is_base_of`, `__is_standard_layout` and
+  class constructibility, `__is_convertible`, `__is_assignable`, remaining `__is_trivially_*` and
+  `__is_nothrow_*` predicates, `__is_base_of`, `__is_standard_layout` and
   `__reference_binds_to_temporary`. Other dependent predicates, conversions of a dependent
   predicate to a non-`bool` parameter, dependent array bounds and expression mangling remain in
   #209.
@@ -1784,8 +1807,10 @@ Fable decided the representation (ast.md §6.6); the Opus session wrote the code
   report "not supported" instead of "expected '<'".
 - Tests: `tests/own/templates/c6-*` (18, agreeing with Clang and GCC); 6 more draft examples
   pass. `<cstdio>`: 33 → 18 errors.
+- Ordinary function overloads with explicit trailing type packs preserve the pack in atomic
+  constraint substitution. Empty packs, order, and reference types are retained (#234).
 - Not yet: constraints on class and variable templates, partial specializations and members,
-  constrained packs, fold-expanded constraints, `C auto`, `noexcept` in compound requirements
+  broader constrained packs, fold-expanded constraints, `C auto`, `noexcept` in compound requirements
   (#234); re-verification of satisfaction at END (#235); Itanium constraint mangling (#236);
   recorded discarded extents for `if constexpr` (#237); value-dependent mapping arguments (#209).
 
@@ -2702,11 +2727,13 @@ and runtime integration with ycxx's own linker remain under [#89]. See the
   allocation address selection, direct deallocation calls, and a Linux peer providing all three
   symbols. Over-aligned storage and expression dispatch are tracked in
   [#293](https://github.com/yrashk/ycxx/issues/293) and [#303](https://github.com/yrashk/ycxx/issues/303).
-- Written nonthrowing global scalar allocation and deallocation overloads can take a final
-  `const Tag&`, with an optional preceding `std::align_val_t`. The tag can be a named incomplete
-  class or union, including `std::nothrow_t`. These declarations enter ordinary overload lookup
-  when written and support explicit calls. Tagged placement expressions remain in
-  [#293](https://github.com/yrashk/ycxx/issues/293).
+- Written nonthrowing global scalar and array allocation and deallocation overloads can take a
+  final `const Tag&`, with an optional preceding `std::align_val_t`. The tag can be a named
+  incomplete class or union, including `std::nothrow_t`. These declarations enter ordinary
+  overload lookup when written and support explicit calls and typed addresses. A default-aligned
+  `new` or `new[]` diagnoses ambiguity when defaults visible at the expression make a written
+  overload and the usual size-only allocation function equally viable. Tagged placement
+  expressions remain in [#293](https://github.com/yrashk/ycxx/issues/293).
 - The six usual global array allocation and deallocation declarations support explicit
   calls and typed address selection, including the aligned signatures. Written
   redeclarations share the implicit entities. The Itanium mangler emits `na` and `da`, and

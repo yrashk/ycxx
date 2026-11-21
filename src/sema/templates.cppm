@@ -313,10 +313,13 @@ public:
   }
 
   // A concrete query needs the source and completeness contexts supplied by its owning replay.
-  std::optional<ConstId> constructibility_pattern(std::span<const TemplateArg> operands) {
+  std::optional<ConstId> constructibility_pattern(ast::DepOp op, std::span<const TemplateArg> operands)
+    pre(op == ast::DepOp::is_constructible || op == ast::DepOp::is_nothrow_constructible ||
+        op == ast::DepOp::is_trivially_constructible)
+  {
     if (!std::ranges::any_of(operands, [&](const TemplateArg& a) { return types().is_dependent(a.type); }) ||
         !std::ranges::all_of(operands, [&](const TemplateArg& a) { return structural_operand(a); })) return std::nullopt;
-    return ins().intern_value(ast::VDepOp{ast::DepOp::is_constructible, ins().intern_seq(operands)});
+    return ins().intern_value(ast::VDepOp{op, ins().intern_seq(operands)});
   }
 
   // A class specialization has the class kind of its primary ([temp.class.general]).
@@ -327,7 +330,9 @@ public:
   }
 
   std::optional<ConstId> unary_trait_value(ast::DepOp op, QualType type)
-    pre(op != ast::DepOp::is_same && op != ast::DepOp::logical_not && op != ast::DepOp::is_constructible)
+    pre(op != ast::DepOp::is_same && op != ast::DepOp::logical_not &&
+        op != ast::DepOp::is_constructible && op != ast::DepOp::is_nothrow_constructible &&
+        op != ast::DepOp::is_trivially_constructible)
   {
     if (types().is_dependent(type)) {
       if (!structural_operand(type)) return std::nullopt;
@@ -369,6 +374,8 @@ public:
     case ast::DepOp::is_trivially_copyable: return std::nullopt;
     case ast::DepOp::is_same:
     case ast::DepOp::is_constructible:
+    case ast::DepOp::is_nothrow_constructible:
+    case ast::DepOp::is_trivially_constructible:
     case ast::DepOp::logical_not: std::unreachable();
     }
     return w_->values.integer(types().builtin(Builtin::bool_), result);
@@ -468,9 +475,11 @@ public:
     if (ins().values.is<ast::VDepOp>(v)) {
       auto op = ins().values.get<ast::VDepOp>(v);
       switch (op.op) {
-      case ast::DepOp::is_constructible: {
+      case ast::DepOp::is_constructible:
+      case ast::DepOp::is_nothrow_constructible:
+      case ast::DepOp::is_trivially_constructible: {
         auto operands = substitute_args(ins().seqs.elements(op.operands), b);
-        return operands ? constructibility_pattern(*operands) : std::nullopt;
+        return operands ? constructibility_pattern(op.op, *operands) : std::nullopt;
       }
       case ast::DepOp::is_same: {
         auto lhs = substitute_arg(ins().seqs.at(op.operands, 0), b);
@@ -547,6 +556,12 @@ public:
   }
   // A mapping entry as a template argument, and back.
   TemplateArg mapping_arg(ConstId v) {
+    if (ins().values.is<ast::VConstraintPack>(v)) {
+      std::vector<TemplateArg> elements;
+      for (ConstId e : ins().seqs.elements(ins().values.get<ast::VConstraintPack>(v).elements))
+        elements.push_back(mapping_arg(e));
+      return pack(elements);
+    }
     if (ins().values.is<ast::VType>(v)) {
       auto t = ins().values.get<ast::VType>(v);
       return type_arg(types().add_cv(t.type, Cv(t.cv)));
@@ -555,6 +570,12 @@ public:
     return {TemplateArgKind::value, ins().values.is<ast::VInt>(v) ? ins().values.get<ast::VInt>(v).type : QualType{}, v};
   }
   ConstId mapping_value(const TemplateArg& a) {
+    if (a.kind == TemplateArgKind::pack) {
+      std::vector<ConstId> elements;
+      for (const TemplateArg& e : ins().seqs.elements(a.elems))
+        elements.push_back(mapping_value(e));
+      return ins().intern_value(ast::VConstraintPack{ins().intern_seq(std::span<const ConstId>(elements))});
+    }
     if (a.kind == TemplateArgKind::type) {
       QualType c = types().canonical(a.type);
       return ins().intern_value(ast::VType{Types::unqualified(c), u8(std::to_underlying(Types::cv(c)))});
@@ -583,9 +604,15 @@ public:
         m.push_back(e);
         continue;
       }
-      auto s = ins().values.is<ast::VType>(e)
-                   ? substitute_arg(mapping_arg(e), b).transform([&](const TemplateArg& arg) { return mapping_value(arg); })
-                   : substitute_value(e, b);
+      auto s = [&]() -> std::optional<ConstId> {
+        if (ins().values.is<ast::VConstraintPack>(e)) {
+          const std::array args{mapping_arg(e)};
+          return substitute_args(args, b).transform([&](const auto& mapped) { return mapping_value(mapped.front()); });
+        }
+        if (ins().values.is<ast::VType>(e))
+          return substitute_arg(mapping_arg(e), b).transform([&](const TemplateArg& arg) { return mapping_value(arg); });
+        return substitute_value(e, b);
+      }();
       // An invalid mapping leaves the atom unsatisfied ([temp.constr.atomic]/3): an empty
       // disjunction, false.
       if (!s) return ins().intern_value(ast::VConstraint{1, ins().intern_seq(std::span<const ConstId>{})});
