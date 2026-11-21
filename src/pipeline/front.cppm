@@ -738,7 +738,10 @@ engine::query_task<FrontResult> TuFront::run(engine::Ctx& cx, TuId tu) {
   for (EntityId c : classes.classes()) {
     ClassShape& shape = out.shapes.classes.emplace_back(ClassShape{c, {}, {}});
     const auto& fields = classes.rec(c).fields;
-    for (const sema::FieldRec& f : fields) shape.fields.push_back(f.type);
+    for (const sema::FieldRec& f : fields) {
+      shape.fields.push_back(f.type);
+      shape.has_mutable_field |= f.mutable_;
+    }
     if (std::ranges::any_of(fields, [](const sema::FieldRec& f) { return f.bit_width != 0; }))
       for (const sema::FieldRec& f : fields) shape.bit_widths.push_back(f.bit_width);
     shape.union_ = classes.rec(c).union_;

@@ -1253,7 +1253,7 @@ public:
     // lvalue if the object is (or is reached through a pointer), else an xvalue.
     // A reference member gives the object it refers to, an lvalue.
     bool ref = types().is_reference(f.type);
-    QualType t = ref ? types().referee(f.type) : types().add_cv(f.type, Types::cv(ct));
+    QualType t = field_access_type(f, ct);
     if (f.bit_width && Types::is_volatile(t) && unevaluated == 0) {
       diag(name_at, Diag::volatile_bit_field);
       return fail;
@@ -1261,6 +1261,13 @@ public:
     ValueCategory cat = ref || arrow || object.cat() == ValueCategory::lvalue ? ValueCategory::lvalue : ValueCategory::xvalue;
     ExprInfo info{t, cat, 0, f.bit_width};
     return node(ast::Member{info, f.entity, index, arrow ? 1u : 0u, ref ? 1u : 0u, at(object, begin)}, begin, end, info);
+  }
+
+  QualType field_access_type(const FieldRec& field, QualType object) {
+    if (types().is_reference(field.type)) return types().referee(field.type);
+    Cv cv = Types::cv(object);
+    if (field.mutable_) cv = Types::is_volatile(object) ? Cv::volatile_ : Cv::none;
+    return types().add_cv(field.type, cv);
   }
 
   // ------------------------------------------------------------ initialization ([dcl.init])
@@ -3321,7 +3328,11 @@ public:
       bool ref = types().is_reference(f->field->type);
       // The object's cv-qualifiers: `this`'s, which in a lambda is the captured one (a `*this`
       // copy is const unless the lambda is mutable, [expr.prim.lambda.closure]/12).
-      QualType t = ref ? types().referee(f->field->type) : types().add_cv(f->field->type, Types::cv(types().pointee(self.type())));
+      QualType t = field_access_type(field, types().pointee(self.type()));
+      if (field.mutable_ && field.bit_width && Types::is_volatile(t) && unevaluated == 0) {
+        diag(name_at, Diag::volatile_bit_field);
+        return fail;
+      }
       ExprInfo info{t, ValueCategory::lvalue, 0, field.bit_width};
       return node(ast::Member{info, f->field->entity, f->index, 1, ref ? 1u : 0u, at(self, begin)}, begin, end, info);
     }

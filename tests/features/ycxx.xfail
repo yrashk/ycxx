@@ -202,7 +202,6 @@ draft/dcl/dcl.spec.auto.general-5.accept.cpp 'auto' not supported yet
 draft/dcl/dcl.spec.auto.general-7.reject.cpp errors elsewhere: 'auto' not supported yet
 draft/dcl/dcl.spec.auto.general-8.accept.cpp 'template' not supported yet
 draft/dcl/dcl.stc-2.reject.cpp errors elsewhere: 'struct' not supported yet
-draft/dcl/dcl.stc-3.reject.cpp errors elsewhere: 'class' not supported yet
 draft/dcl/dcl.struct.bind-1.reject.cpp errors elsewhere: 'struct' not supported yet
 draft/dcl/dcl.struct.bind-3.accept.cpp 'struct' not supported yet
 draft/dcl/dcl.type.auto.deduct-1.reject.cpp errors elsewhere: preprocessing directives are not supported yet

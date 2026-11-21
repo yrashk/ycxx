@@ -85,6 +85,7 @@ struct DeclSema {
   u8 bit_width = 0;  // a non-static data member declared as a bit-field ([class.bit])
   bool is_virtual = false;  // a virtual member function ([class.virtual])
   bool is_explicit = false;  // a constructor with a bare explicit specifier ([dcl.fct.spec])
+  bool is_mutable = false;  // a mutable non-static data member ([dcl.stc])
   constexpr bool operator==(const DeclSema&) const = default;
 };
 
