@@ -1791,7 +1791,7 @@ int sum(const B& b) { return b.b; }
 int main() { D d; A* pa = &d; return pa->a + sum(d) + d.d - 6; }
 '''
 issues = [308]
-note = 'One nonvirtual direct base in primary class templates, including dependent aliases and qualified static lookup. Additional class-template base forms and the object-expression rule of [class.protected] remain.'
+note = 'One nonvirtual, nonpolymorphic direct base in primary class templates, including dependent aliases and qualified static lookup. Additional class-template base forms and the object-expression rule of [class.protected] remain.'
 
 [[feature]]
 id = 'class-virtual'

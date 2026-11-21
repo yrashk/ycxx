@@ -1,7 +1,7 @@
 # A single nonvirtual base in a class template
 
 Astra reviewed the initial scope on [#308](https://github.com/yrashk/ycxx/issues/308#issuecomment-7054829849).
-A primary class template can have one ordinary nonvirtual direct base. An ordinary base name
+A primary class template can have one nonvirtual, nonpolymorphic direct base. An ordinary base name
 binds at the class definition, where its class must be complete. A base that depends on a
 template argument resolves when a specialization is required to be complete. A pointer to
 the specialization alone leaves its definition uninstantiated. This covers the
@@ -15,6 +15,8 @@ definition, and dependent completeness at the demanding point. An alias may eras
 argument from its result type even when that argument must still be valid. [temp.alias]
 
 Validate the substituted class before analysing its members or synthesizing special members.
+The direct base check also applies the ordinary virtual-declaration guard to the result of
+substitution. [#309](https://github.com/yrashk/ycxx/issues/309)
 The instantiated class publishes its complete record with an ordinary `BaseRec`, which
 supplies layout, access, and conversions to the existing nonvirtual inheritance paths. The
 edge records whether it was dependent in the pattern. Unqualified lookup from that pattern's

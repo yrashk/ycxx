@@ -220,8 +220,9 @@ Both targets accept leading `[[…]]` attributes on ordinary data and function m
   `__make_integer_seq`;
 - dependent `__is_same(T, U)` as a `bool` template argument or default, including through alias
   templates [#209](https://github.com/yrashk/ycxx/issues/209);
-- a single nonvirtual base in a primary class template, including an alias-selected dependent
-  base and qualified lookup of its static members. [#308](https://github.com/yrashk/ycxx/issues/308)
+- a single nonvirtual, nonpolymorphic base in a primary class template, including an
+  alias-selected dependent base and qualified lookup of its static members.
+  [#308](https://github.com/yrashk/ycxx/issues/308)
 - placeholder types: `auto` and `decltype(auto)` variables (`const auto&`, `auto*`, `auto&&`),
   deduced and trailing return types, in templates too;
 - lambdas in function bodies: captures by copy and by reference, capture-defaults, `this` and

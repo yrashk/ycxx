@@ -1904,8 +1904,8 @@ What the process allocates, attributed to the engine's cells, in the trace and t
   class itself, named once, and not a union. Its access defaults to private for `class` and public
   for `struct`. `Program::set_bases` records the bases when the class head is analysed, and
   `class_def` copies them into `ClassRec::bases`. A primary class template supports one
-  nonvirtual direct base. It checks a nondependent base at definition and substitutes a
-  dependent base at the first completeness demand. Its concrete specialization publishes
+  nonvirtual, nonpolymorphic direct base. It checks a nondependent base at definition and
+  substitutes a dependent base at the first completeness demand. Its concrete specialization publishes
   the resolved base before layout or qualified lookup. [Design](docs/design/class-template-bases.md)
   Base packs and additional class-template base forms remain in #308. Virtual bases are #310.
 - **Layout** (`ast::record_layout`, Itanium C++ ABI §2.4):
