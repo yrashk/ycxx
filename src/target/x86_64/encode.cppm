@@ -85,6 +85,12 @@ class Encoder {
     memory({0x0f, opcode}, xmm, base, disp, false);
   }
 
+  // UCOMISS and UCOMISD compare the scalars and set ZF, PF and CF (Intel SDM vol. 2).
+  void compare_scalar_xmm(unsigned xmm, Reg base, std::int32_t disp, unsigned width) {
+    if (width == 8) emit({0x66});
+    memory({0x0f, 0x2e}, xmm, base, disp, false);
+  }
+
   // CVTSS2SD converts a binary32 memory operand to a binary64 scalar in XMM.
   void widen_float(unsigned xmm, Reg base, std::int32_t disp) {
     emit({0xf3});

@@ -611,9 +611,13 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   [Design](docs/design/linux-floating-variadic-calls.md) · [#399](https://github.com/yrashk/ycxx/issues/399)
 - Runtime addition, subtraction, multiplication and division use scalar SSE at the binary32 or
   binary64 L2 result width and under the caller's MXCSR controls. Unary negation flips the sign
-  bit without changing the payload or status flags. Comparisons, other numeric conversions and
-  x87 values remain [#201](https://github.com/yrashk/ycxx/issues/201).
+  bit without changing the payload or status flags.
   [Design](docs/design/linux-scalar-floating-point.md#runtime-arithmetic)
+- Binary32 and binary64 comparisons use the scalar SSE unordered comparison instructions.
+  Equality and the four relational operators are false for unordered operands. Inequality and
+  conversion of NaN to `bool` are true. Both signed zeros convert to false. Strict exception
+  status, other numeric conversions and x87 values remain [#201](https://github.com/yrashk/ycxx/issues/201).
+  [Design](docs/design/linux-scalar-floating-point.md#runtime-comparisons)
 - Direct fixed-prototype calls to ordinary free functions support nonempty naturally aligned
   flat records with integral or ordinary object-pointer fields that are trivial for calls,
   up to 16 bytes and alignment eight. The AMD64 INTEGER eightbytes follow from the laid-out
@@ -1053,9 +1057,16 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   `continue`) and ends a full-expression's temporaries at its end. Statements carry no cleanup
   lists; the `Cleanup` record is gone.
 - Linkage names: `C1`/`D1` (#136 for `C2`/`D2`/`D0`), checked against Clang's symbols.
+- A non-template constructor can delegate to another ordinary constructor of its class with
+  a sole parenthesized or braced initializer ([class.base.init], #157). The target resolves in
+  the complete class and constructs the same object. The delegating body starts after the
+  target and its initializer temporaries finish. The delegator supplies no member or base
+  initialization. Direct self-delegation is diagnosed. Implicit trivial or defaulted copy targets,
+  virtual layout, exceptional cleanup, and constant evaluation of the object remain in
+  #157, #309, and #25.
 - Tests: `tests/own/classes/s3-*` (spec-only, plus two from the review): 16 of 16 pass. 10 more draft examples pass.
 - Not yet: temporaries with destructors created in a conditional operand, value-initializing a
-  member subobject whose class has an implicit constructor, delegating constructors, conditional
+  member subobject whose class has an implicit constructor, conditional
   `explicit`, explicit constructor templates, and other `= default` forms (#157, #244).
 
 ## Classes, δ step 4a: enumerations (#86, 2026-11-18)

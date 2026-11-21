@@ -451,6 +451,11 @@ struct MemberInit {
   Child init;
 };
 
+// A delegating constructor initializes the same complete object before its body ([class.base.init]).
+struct DelegatingInit {
+  Child call;
+};
+
 // A destructor's body ([class.dtor]): `body`, then on every way out of it the destruction of the
 // members (`DestroyMember`s, in reverse declaration order).
 struct Destructor {
@@ -502,7 +507,7 @@ using Nodes = closed_list<Literal, DeclRef, Paren, Unary, Binary, OrderedBinary,
                           MemberCall, Materialize, CtorCall, MemberInit, Destructor, DestroyMember, Dependent,
                           DepName, CondDecl, Switch, Case, Default, Label, Goto, BuiltinCall, Lambda, DefaultArg,
                           StaticInit, StaticVar, NewObject, DeleteObject, VariadicBuiltin, AssignmentCall,
-                          NewArray, DeleteArray, VirtualMemberCall>;
+                          NewArray, DeleteArray, DelegatingInit, VirtualMemberCall>;
 
 static_assert(Nodes::size < max_node_kinds);
 

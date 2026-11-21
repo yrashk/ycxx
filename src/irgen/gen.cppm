@@ -562,6 +562,15 @@ class Gen {
         initialize(p, child(a, m.init), false);
         return 0;
       });
+    } else if (is<ast::DelegatingInit>(a)) {
+      if (!this_) unsupported(a, "outside a constructor");
+      auto d = get<ast::DelegatingInit>(a);
+      full_expression([&] {
+        // [class.base.init]: the target constructs the same object. Constant evaluation of
+        // delegating class objects is tracked in #25.
+        call_constructor(*this_, child(a, d.call), false, ir::bit(ir::Flag::not_constexpr));
+        return 0;
+      });
     } else if (is<ast::Destructor>(a)) {
       auto d = get<ast::Destructor>(a);
       for (ast::Child c : ast_.children(d.members)) epilogue_.push_back(child(a, c));
@@ -746,6 +755,22 @@ class Gen {
     enter(done);
   }
 
+  // [class.ctor]: the constructor initializes the supplied object in place.
+  void call_constructor(ValueId object, At e, bool zeroed, ir::Flags call_flags = 0) {
+    Position here(*this, e.offset);
+    if (!is<ast::CtorCall>(e)) unsupported(e, "as a constructor target");
+    auto c = get<ast::CtorCall>(e);
+    if (c.zero_first && !zeroed) unsupported(e, "value-initializing an object that is not new");
+    std::vector<ValueId> args{object};
+    uint32_t byval = 0;
+    for (ast::Child arg : ast_.children(c.args)) {
+      At x = child(e, arg);
+      if (argument_object(x)) byval |= 1u << args.size();
+      args.push_back(argument(x));
+    }
+    call_fn(c.ctor, facts_.int_type(), args, 1, true, byval, 0, call_flags);
+  }
+
   // Initializes the object at `p` from the prvalue `e` ([dcl.init]). In a `zeroed` object, a
   // value-initialized element is already zero.
   void initialize(const Place& p, At e, bool zeroed) {
@@ -769,20 +794,7 @@ class Gen {
       member_call(e, p.ptr);
       return;
     }
-    if (is<ast::CtorCall>(e)) {
-      // [class.ctor]: the constructor initializes the object in place.
-      auto c = get<ast::CtorCall>(e);
-      if (c.zero_first && !zeroed) unsupported(e, "value-initializing an object that is not new");
-      std::vector<ValueId> args{p.ptr};
-      uint32_t byval = 0;
-      for (ast::Child arg : ast_.children(c.args)) {
-        At x = child(e, arg);
-        if (argument_object(x)) byval |= 1u << args.size();
-        args.push_back(argument(x));
-      }
-      call_fn(c.ctor, facts_.int_type(), args, 1, true, byval);
-      return;
-    }
+    if (is<ast::CtorCall>(e)) return call_constructor(p.ptr, e, zeroed);
     if (is<ast::InitList>(e)) {
       bool array = cls(p.type) == TypeClass::array;
       // A class's elements are its direct bases, then its members ([dcl.init.aggr]/2).
@@ -1725,7 +1737,8 @@ class Gen {
   // `byval` and `result_arg` are the call op's masks (ir/ops.cppm); a class result is written
   // through the argument `result_arg` names and gives no value.
   std::optional<ValueId> call_fn(ast::EntityId f, ast::QualType result, std::span<const ValueId> args,
-                                 std::size_t implicit, bool void_ = false, uint32_t byval = 0, uint32_t result_arg = 0) {
+                                 std::size_t implicit, bool void_ = false, uint32_t byval = 0, uint32_t result_arg = 0,
+                                 ir::Flags flags = 0) {
     std::vector<ir::Ty> results;
     if (args.size() > 32) throw Unsupported{"a call with more than 32 arguments"};
     bool has_value = !void_ && !result_arg && cls(result) != TypeClass::void_;
@@ -1736,7 +1749,7 @@ class Gen {
     if (named && args.size() > hidden + *named)
       through_ellipsis = args.size() - hidden - *named;
     std::uint64_t imms[] = {word(f), through_ellipsis, byval, result_arg};
-    ir::Flags flags = facts_.is_constexpr(f) ? 0 : ir::bit(ir::Flag::not_constexpr);
+    if (!facts_.is_constexpr(f)) flags |= ir::bit(ir::Flag::not_constexpr);
     if (named) flags |= ir::bit(ir::Flag::variadic);
     ir::NodeId n = stateful(ir::Op::call, results, args, imms, flags);
     if (has_value) return b_.result(n, 1);

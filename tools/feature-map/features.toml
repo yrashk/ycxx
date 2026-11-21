@@ -448,7 +448,7 @@ std = 'C++98'
 detect = '\b(?:float|double)\b'
 status = 'done'
 issues = [336, 201]
-note = 'Linux x86-64 supports runtime `float` and `double` addition, subtraction, multiplication, division, unary negation and binary32-to-binary64 widening. Other numeric conversions, comparisons and x87 values remain in #201.'
+note = 'Linux x86-64 supports runtime `float` and `double` arithmetic, comparisons, conversion to `bool` and binary32-to-binary64 widening. Other numeric conversions and x87 values remain in #201.'
 probe = '''
 int main() { double d = 1.5; float f = 2.0f; d = d * f + 0.5; return (int)d == 3 ? 0 : 1; }
 '''
@@ -1652,7 +1652,8 @@ probe = '''
 struct S { int v; S(int x) : v(x) {} S() : S(4) {} };
 int main() { S s; return s.v - 4; }
 '''
-status = 'missing'
+status = 'partial'
+note = 'Ordinary non-template parenthesized and braced delegation uses the same object. Exceptional cleanup, virtual cases and constant evaluation remain.'
 issues = [157]
 
 [[feature]]
@@ -2573,13 +2574,14 @@ clauses = ['support.initlist', 'dcl.init.list']
 std = 'C++11'
 ftm = '__cpp_initializer_lists'
 detect = '\binitializer_list\b'
-status = 'missing'
+status = 'partial'
 probe = '''
 #include <initializer_list>
 int sum(std::initializer_list<int> l) { int s = 0; for (const int* p = l.begin(); p != l.end(); ++p) s += *p; return s; }
 int main() { return sum({1, 2, -3}); }
 '''
 issues = [329]
+note = 'Linux x86-64 compiles populated braced arguments to direct const-reference calls with the pinned libycxx list, including backing-array storage and lifetime. Named nonempty lists, braced by-value calls and other element types remain in #329.'
 
 [[feature]]
 id = 'lib-type-traits'
@@ -2619,8 +2621,9 @@ detect = '\bstd::(?:addressof|launder|bit_cast|is_constant_evaluated|unreachable
 probe = '''
 int main() { int i = 1; float f = __builtin_bit_cast(float, i); return (__builtin_addressof(i) == &i && !__builtin_is_constant_evaluated() && __builtin_bit_cast(int, f) == 1) ? 0 : 1; }
 '''
-status = 'missing'
+status = 'partial'
 issues = [330]
+note = 'Expression-form __builtin_addressof accepts lvalues, preserves cv qualification, and bypasses overloaded address-of. The remaining utility builtins are tracked in #330 and the pinned memory-related header prerequisites in #469.'
 
 [[feature]]
 id = 'lib-numeric-builtins'

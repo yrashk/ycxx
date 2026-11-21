@@ -94,9 +94,10 @@ Fixed-prototype definitions and direct calls on x86-64 Linux also move `float` a
 arguments and results. Direct variadic calls support the same scalar floating values and
 promote an unnamed `float` to `double`. Direct call result types can be deduced from `auto` or
 `decltype(auto)`. Runtime addition, subtraction, multiplication, division and unary negation
-work for `float` and `double` at their evaluation width.
+work for `float` and `double` at their evaluation width. Both types support the six comparisons
+and conversion to `bool`.
 [Linux scalar floating-point ABI](docs/design/linux-scalar-floating-point.md) ·
-[Linux scalar floating-point arithmetic](docs/design/linux-scalar-floating-point.md#runtime-arithmetic) ·
+[Linux scalar floating-point operations](docs/design/linux-scalar-floating-point.md#runtime-arithmetic) ·
 [Linux direct variadic floating-point ABI](docs/design/linux-floating-variadic-calls.md) ·
 [#441](https://github.com/yrashk/ycxx/issues/441)
 
@@ -192,7 +193,7 @@ Both targets accept leading `[[…]]` attributes on ordinary data and function m
 - user-declared copy and move assignment govern the availability of implicit constructors.
   [#244](https://github.com/yrashk/ycxx/issues/244)
 - classes and unions: data and static members, named data members of unnamed union type,
-  member functions, constructors and destructors
+  member functions, constructors including ordinary delegation, and destructors
   with RAII, aggregate and designated initialization, namespace-scope objects initialized by
   code before `main` and destroyed after it, block-scope `static` variables initialized once, passing and returning them by value with
   Clang's calling convention, so ycxx and Clang objects call each other; access control
