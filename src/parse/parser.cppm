@@ -3848,8 +3848,7 @@ public:
         if (c.ok() && s_->narrows(from, sw->type)) {
           s_->diag(e.begin, Diag::narrowing, from.type(), sw->type);
         } else if (c.ok()) {
-          // An enumeration's value is its underlying type's (the interpreter has no enumeration
-          // objects yet, #25), as `function_ir` compares it.
+          // The case immediate uses the enumeration's underlying integer constant.
           if (s_->types().is_enum(sw->type))
             c = s_->convert_node(s_->rvalue(c), ast::ConversionKind::integral, s_->underlying_of(sw->type));
           sema::Evaluated v = sema::Evaluator(*s_, questions()).evaluate(c);

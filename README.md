@@ -228,6 +228,7 @@ Both targets accept leading `[[…]]` attributes on ordinary data and function m
   through pointers to functions. [#199](https://github.com/yrashk/ycxx/issues/199)
 - constant evaluation on ycxx's own interpreter: `constexpr`, `consteval`, `constinit`,
   `static_assert` and `if consteval`, with errors that explain why something is not constant.
+  Scalar enumeration values work in constexpr variables, calls, casts and switch conditions.
   Namespace-scope `constexpr` pointers to `void` can retain scalar and array element addresses.
   `__builtin_addressof`, used by libycxx's `std::addressof`, bypasses overloaded `operator&`.
   It supports runtime addresses and constant expressions such as a scalar global's address.

@@ -4724,7 +4724,7 @@ private:
           // A constexpr or constinit variable must be constant-initialized ([dcl.constexpr],
           // [dcl.constinit]); a constexpr one, and a const integral one that is, are usable in
           // constant expressions ([expr.const]).
-          // An enumerator is its own constant; the interpreter has no enumeration objects (#25).
+          // An enum literal already carries the underlying integer constant.
           auto lit = types.is_enum(d.type) ? s_.as<ast::Literal>(init) : std::nullopt;
           // A character array from a string literal is its elements' list ([dcl.init.string]).
           auto list = s_.as<ast::InitList>(init) ? constant_initializer(init) : std::nullopt;
