@@ -348,10 +348,10 @@ enum class Diag : std::uint32_t {
   trivial_copyability_dependent [[=message{Severity::error, "dependent operands of '__is_trivially_copyable' are not supported yet"}]],
   trivial_copyability_incomplete [[=message{Severity::error, "incomplete class type '{0:t}' cannot be queried by '__is_trivially_copyable'"}]],
   trivial_copyability_unsupported [[=message{Severity::error, "trivial copyability of '{0:t}' is not supported yet"}]],
-  constructibility_dependent [[=message{Severity::error, "dependent operands of '__is_constructible' are not supported yet"}]],
-  constructibility_incomplete [[=message{Severity::error, "incomplete type '{0:t}' cannot be queried by '__is_constructible'"}]],
+  constructibility_dependent [[=message{Severity::error, "dependent operands of '{0:n}' are not supported yet"}]],
+  constructibility_incomplete [[=message{Severity::error, "incomplete type '{0:t}' cannot be queried by '{1:n}'"}]],
   constructibility_unsupported [[=message{Severity::error, "constructibility of '{0:t}' with these argument types is not supported yet"}]],
-  constructibility_pack [[=message{Severity::error, "pack expansions in '__is_constructible' are not supported yet"}]],
+  constructibility_pack [[=message{Severity::error, "pack expansions in '{0:n}' are not supported yet"}]],
   class_alignment_not_constant [[=message{Severity::error, "a class alignment requires an integral constant expression or a type"}]],
   class_alignment_invalid [[=message{Severity::error, "a class alignment must be zero or a positive power of two"}]],
   class_alignment_unsupported [[=message{Severity::error, "class alignment greater than 16 bytes is not supported yet"}]],
@@ -359,10 +359,11 @@ enum class Diag : std::uint32_t {
   class_alignment_mismatch [[=message{Severity::error, "the class is redeclared with a different alignment requirement"}]],
   class_alignment_missing [[=message{Severity::error, "the class definition must specify alignment when a declaration specifies it"}]],
   class_alignment_uncertain_layout [[=message{Severity::error, "class alignment depends on attributes or packing whose layout is not supported yet"}]],
-  constructibility_target_pack [[=message{Severity::error, "a pack expansion as the target of '__is_constructible' is not supported yet"}]],
-  constructibility_substitution [[=message{Severity::error, "substitution of the operand type '{0:t}' in '__is_constructible' failed"}]],
+  constructibility_target_pack [[=message{Severity::error, "a pack expansion as the target of '{0:n}' is not supported yet"}]],
+  constructibility_substitution [[=message{Severity::error, "substitution of the operand type '{0:t}' in '{1:n}' failed"}]],
   recursive_default_member_initializer [[=message{Severity::error, "default member initializer for '{0:n}' would use itself"}]],
   default_member_initializer_cleanup [[=message{Severity::error, "default member initializer requiring cleanup is not supported yet"}]],
+  nothrow_constructibility_unsupported [[=message{Severity::error, "'__is_nothrow_constructible' for '{0:t}' with these argument types is not supported yet"}]],
 };
 
 // A `{N:r}` argument: why an evaluation was not constant. 0 is an expression the front end
@@ -424,7 +425,8 @@ constexpr bool is_limit(engine::DiagId id) {
 }
 constexpr bool is_type_trait_failure(engine::DiagId id) {
   return id == diag_id(Diag::trivial_copyability_incomplete) || id == diag_id(Diag::trivial_copyability_unsupported) ||
-         id == diag_id(Diag::constructibility_incomplete) || id == diag_id(Diag::constructibility_unsupported);
+         id == diag_id(Diag::constructibility_incomplete) || id == diag_id(Diag::constructibility_unsupported) ||
+         id == diag_id(Diag::nothrow_constructibility_unsupported);
 }
 // Whether a diagnostic stays an error where a substitution failure means "not satisfied": a limit
 // of ycxx's, an atomic constraint that is not a `bool` constant ([temp.constr.atomic]/3), or a
