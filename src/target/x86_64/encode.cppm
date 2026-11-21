@@ -68,7 +68,18 @@ class Encoder {
     immediate(value, 4);
   }
 
-  // MOVAPS to a 16-byte-aligned variadic register-save slot. This is the only XMM form used.
+  // MOVSS or MOVSD transfers only a scalar's low 32 or 64 bits at the ABI boundary.
+  void load_scalar_xmm(unsigned xmm, Reg base, std::int32_t disp, unsigned width) {
+    emit({std::uint8_t(width == 4 ? 0xf3 : 0xf2)});
+    memory({0x0f, 0x10}, xmm, base, disp, false);
+  }
+
+  void store_scalar_xmm(Reg base, std::int32_t disp, unsigned xmm, unsigned width) {
+    emit({std::uint8_t(width == 4 ? 0xf3 : 0xf2)});
+    memory({0x0f, 0x11}, xmm, base, disp, false);
+  }
+
+  // MOVAPS to a 16-byte-aligned variadic register-save slot.
   void store_xmm(Reg base, std::int32_t disp, unsigned xmm) { memory({0x0f, 0x29}, xmm, base, disp, false); }
 
   void address(Reg dst, Reg base, std::int32_t disp) { memory({0x8d}, dst, base, disp, true); }

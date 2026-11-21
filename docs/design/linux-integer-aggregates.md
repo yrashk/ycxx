@@ -42,11 +42,8 @@ the original object remain independent of the parameter.
 The entry and call lowering share AMD64 argument placement. Walk logical arguments
 left to right and reserve all of a record's INTEGER registers together. When a
 record cannot fit, pass the complete object in eightbyte stack slots and leave the
-register budget available for later arguments. List the selected register words
-first in L2 and the stack words consecutively in source order. When stack words
-exist and the register list is short, fill the intervening unused slots to match
-the scalar emitter's six-register boundary. All supported stack slots have
-eightbyte alignment. The existing frame keeps the call boundary 16-byte aligned.
+register budget available for later arguments. The [scalar floating-point ABI design](linux-scalar-floating-point.md)
+describes how L2 preserves the result of planning INTEGER and SSE locations together.
 AAPCS64 keeps its own placement and aggregate paths.
 
 Before the change, the native #231 reproducer `sum({20, 22})` reports an unsupported

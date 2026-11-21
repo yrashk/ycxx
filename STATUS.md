@@ -597,6 +597,13 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   [#417](https://github.com/yrashk/ycxx/issues/417), [#412](https://github.com/yrashk/ycxx/issues/412),
   [#399](https://github.com/yrashk/ycxx/issues/399),
   [#196](https://github.com/yrashk/ycxx/issues/196)
+- Fixed-prototype definitions and direct calls also transport `float` and `double` constants,
+  loads, stores and results. INTEGER registers and XMM registers are assigned independently.
+  `unit.linux_scalar_sse` exchanges objects with a native peer, checks exact bits, mixed spills
+  and INTEGER-record rollback, and runs the pinned `<cfloat>` probe through the native linker
+  in both cold and daemon builds. Linux floating arithmetic and numeric conversions remain
+  [#201](https://github.com/yrashk/ycxx/issues/201).
+  [Design](docs/design/linux-scalar-floating-point.md) · [#509](https://github.com/yrashk/ycxx/issues/509)
 - Direct fixed-prototype calls to ordinary free functions support nonempty naturally aligned
   flat records with integral or ordinary object-pointer fields that are trivial for calls,
   up to 16 bytes and alignment eight. The AMD64 INTEGER eightbytes follow from the laid-out

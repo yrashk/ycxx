@@ -269,11 +269,11 @@ void rejection() {
 
   {
     l2::Builder b;
-    const l2::Type params[] = {state, f64};
+    const l2::Type params[] = {state, f64, i64};
     auto entry = b.begin_block(params);
-    ir::ValueId ret[] = {b.param(entry, 0), b.param(entry, 1)};
+    ir::ValueId ret[] = {b.param(entry, 0), b.param(entry, 1), b.param(entry, 2)};
     b.emit(Op::ret, {}, ret);
-    expect_error(b.finish({f64}), "unsupported scalar ABI result type");
+    expect_error(b.finish({f64, i64}), "a scalar SSE result or up to two INTEGER result registers");
   }
   {
     l2::Builder b;
