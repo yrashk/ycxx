@@ -2788,3 +2788,11 @@ An unevaluated call to a non-constexpr free function template can use its
 declared return type after signature substitution and constraint checking.
 Evaluated calls and calls that need placeholder return deduction still demand
 the body. A non-generic lambda body uses its own evaluation context.
+
+## Concrete decay-copy expressions (#286)
+
+- Single-expression `auto(x)` and `auto{x}` perform scalar and pointer decay-copy,
+  including bit-field reads and array and function decay. Grouped declarations
+  still take precedence where the statement can be a declaration.
+- General class objects, member pointers, dependent expressions, and some
+  template-argument contexts remain open. [#286](https://github.com/yrashk/ycxx/issues/286)
