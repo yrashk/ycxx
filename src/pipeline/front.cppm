@@ -337,7 +337,7 @@ using UnwindNodes = ast::closed_list<
     ast::Continue, ast::DeclStmt, ast::LocalVar, ast::CondDecl, ast::Switch, ast::Case, ast::Default,
     ast::Label, ast::Goto, ast::Literal, ast::DeclRef, ast::LocalRef, ast::Paren, ast::Unary,
     ast::Binary, ast::OrderedBinary, ast::Assign, ast::Conditional, ast::Subscript, ast::Call,
-    ast::ImplicitConversion, ast::InitList, ast::ValueInit, ast::DefaultInit, ast::Throw>;
+    ast::DeleteArray, ast::ImplicitConversion, ast::InitList, ast::ValueInit, ast::DefaultInit, ast::Throw>;
 
 bool unwind_body_node(parse::Program& program, ast::NodeId node, bool& has_throw) {
   if (node == ast::NodeId::none) return true;
@@ -363,6 +363,11 @@ bool unwind_body_node(parse::Program& program, ast::NodeId node, bool& has_throw
         const auto& f = world.entities.rec(n.function);
         if (f.kind != sema::EntityKind::function || f.templ != EntityId::none || !program.is_namespace(f.scope) ||
             !unwind_scalar_prototype(world.types, tree.get<ast::DeclRef>(n.callee.id).info.type)) return false;
+      } else if constexpr (std::is_same_v<T, ast::DeleteArray>) {
+        // The typed scalar array has no element cleanup. The operand still has to pass the
+        // recursive proof, and the only call made by deletion is the usual noexcept deallocator.
+        const auto release = world.allocation_function(sema::AllocationFunction::deallocate, /*array=*/true);
+        if (n.operand.id == ast::NodeId::none || n.function != release.entity) return false;
       } else if constexpr (std::is_same_v<T, ast::ImplicitConversion>) {
         if (n.function != EntityId::none || n.conversion == ast::ConversionKind::user_defined) return false;
       } else if constexpr (std::is_same_v<T, ast::Throw>) {
