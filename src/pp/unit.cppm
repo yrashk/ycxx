@@ -1512,7 +1512,8 @@ private:
       const auto* function = lex::builtin_function(name);
       const bool ordinary = function && (function->type != 'l' ||
           ast::computes((*s_->config.target)[ast::Builtin::long_double].format));
-      const bool supported = lex::type_trait(name) || lex::builtin_template(name) || ordinary || variadic;
+      const auto* trait = lex::type_trait(name);
+      const bool supported = (trait && trait->advertised) || lex::builtin_template(name) || ordinary || variadic;
       return number_token(t, supported ? 1 : 0);
     }
     // [cpp.cond]/? the header, as for #include: a string literal, `<...>`, or tokens that become

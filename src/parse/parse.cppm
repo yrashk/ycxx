@@ -766,6 +766,7 @@ public:
   // A default member initializer's tokens in the region ([class.mem.general]), analysed again in
   // each constructor that uses it.
   struct Dmi {
+    u32 item = 0;
     u32 begin = 0;
     u32 end = 0;
     bool braced = false;
@@ -1376,6 +1377,16 @@ public:
   bool is_complete(EntityId c) override {
     return at_point ? p_->is_complete(c, *at_point, true, true) : is_complete_at_item(c);
   }
+  bool is_complete_at_source(EntityId c) override {
+    // The initializer is a complete-class context at its member declaration ([class.mem.general]).
+    if (initializer_source) return p_->is_complete(c, initializer_source->item, true);
+    return is_complete_at_item(c);
+  }
+  engine::Loc source_loc(engine::Loc loc, u32 offset) override {
+    if (!initializer_source) return loc;
+    const auto& dmi = *initializer_source;
+    return {std::to_underlying(p_->id(dmi.item)), dmi.begin - p_->items().items[dmi.item].begin + offset};
+  }
   std::optional<ConstId> constant_value(EntityId v) override { return p_->constant_value(v, value_point(v)); }
   bool instantiation_gave_up() override { return p_->instantiation_gave_up(); }
   std::optional<QualType> specialization_type(EntityId v) override { return p_->specialization_type(v, point()); }
@@ -1421,6 +1432,8 @@ public:
   // Past the closing brace of the class the item defines, that class is complete.
   bool own_class_complete = false;
   EntityId completing_class = EntityId::none;
+  // The original tokens when a constructor reads a default member initializer again.
+  std::optional<Program::Dmi> initializer_source;
   // In a class template's instantiation (#88): completeness and constant evaluation are answered
   // at its point of instantiation ([temp.point]); lookup stays at the item.
   std::optional<u32> at_point;
@@ -1489,6 +1502,8 @@ public:
   std::optional<interp::GlobalVar> global(EntityId v) override { return p_->global(v, p_->end()); }
   bool is_constexpr(EntityId f) override { return p_->is_constexpr(f, p_->end()); }
   bool is_complete(EntityId c) override { return p_->is_complete(c, p_->end(), true, true); }
+  bool is_complete_at_source(EntityId c) override { return at_.is_complete_at_source(c); }
+  engine::Loc source_loc(engine::Loc loc, u32 offset) override { return at_.source_loc(loc, offset); }
   std::optional<ConstId> constant_value(EntityId v) override { return p_->constant_value(v, p_->end()); }
   std::optional<ast::DeclSema> earlier_member(ast::NameId) override { return std::nullopt; }
   bool instantiation_gave_up() override { return p_->instantiation_gave_up(); }
@@ -3453,7 +3468,7 @@ private:
         s_.truncate_diags(n);
         if (v) value = *v;
         else init = {};
-        p_->set_dmi(sem.entity, {it_->begin + from, it_->begin + ps_.pos(), braced, form});
+        p_->set_dmi(sem.entity, {k_, it_->begin + from, it_->begin + ps_.pos(), braced, form});
       }
       s_.own.push_back({d.name, sem});
       declarators_.push_back(s_.node(ast::Declarator{u32(decls_.size()), sema::Sema::at(init, d.begin), value}, d.begin, ps_.pos()));
@@ -6296,9 +6311,11 @@ private:
   Ex member_initializer(const sema::FieldRec& f, const Program::Dmi& d) {
     auto saved = s_.take_scopes();
     auto evaluate = s_.constant_of;
+    const auto source = std::exchange(at_->initializer_source, d);
     Parser sub(p_->region(), d.begin, d.end, s_);
     sub.set_questions(*q_);
     Ex init = d.braced ? s_.list_init(f.type, *sub.braced_init_list(), d.form) : s_.convert(sub.assignment_expression(), f.type, 0);
+    at_->initializer_source = source;
     s_.constant_of = evaluate;
     s_.put_scopes(std::move(saved));
     return init;

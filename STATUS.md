@@ -1645,9 +1645,8 @@ session's.*
 
 ## Type-trait built-ins (#211, 2026-11-18)
 
-- `ycxx.lex:builtins` lists the type-trait built-ins ycxx implements (`lex::type_traits`): 29
-  predicates and 13 transformations, those libycxx probes and uses that ycxx's type system can
-  answer exactly. The preprocessor's `__has_builtin` answers 1 for exactly these, 0 for any other.
+- `ycxx.lex:builtins` lists the type-trait built-ins ycxx recognizes (`lex::type_traits`). The
+  preprocessor's `__has_builtin` advertises the existing 29 predicates and 13 transformations.
 - A predicate `__is_same(T, U)` is a `bool` prvalue constant (`Sema::trait_expr`), value-dependent
   while a type is dependent. A transformation `__remove_cv(T)` is a type specifier
   (`Templates::transform`); of a dependent type it is a `TTransform` that substitution applies and
@@ -1666,11 +1665,18 @@ session's.*
   destructor fact for ordinary complete non-template, nonvirtual classes without bases and with
   scalar fields, arrays of scalars, or reference fields. The calculation includes named scalar-only
   unions with a proved destructor. Class subobjects, overloaded special-member kinds, and unions
-  needing default-constructor selection give an unknown result. This is an internal prerequisite
-  for `__is_trivially_copyable` ([class.prop], [special], #218).
+  needing default-constructor selection give an unknown result ([class.prop], [special], #218).
+- A direct `__is_trivially_copyable(T)` produces a `bool` constant for supported concrete
+  operands. It peels all array extents, including an unknown outer bound. It accepts existing
+  scalar types as trivially copyable and evaluates reference, function and cv `void` types to
+  `false`. It queries the class record at the use of the trait, including the original member
+  position when a constructor re-reads an initializer. It reports incomplete class elements
+  separately from complete classes with unknown facts. Dependent operands and wider class
+  classification remain in [#218](https://github.com/yrashk/ycxx/issues/218).
+  `__has_builtin(__is_trivially_copyable)` answers 0 while support is partial ([meta.unary.prop]).
 - Listed in docs/EXTENSIONS.md. Tests: `tests/own/builtins/`. `<cstdio>`: 53 → 33 errors.
 - Not yet (#211 follow-up): the built-ins that need the object model, such as
-  `__is_constructible`, `__is_convertible`, `__is_assignable`, the `__is_trivially_*` and
+  `__is_constructible`, `__is_convertible`, `__is_assignable`, other `__is_trivially_*` and
   `__is_nothrow_*` families, `__is_base_of`, `__is_standard_layout` and
   `__reference_binds_to_temporary`. Other dependent predicates, conversions of a dependent
   predicate to a non-`bool` parameter, dependent array bounds and expression mangling remain in
