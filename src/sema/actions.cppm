@@ -4562,7 +4562,14 @@ public:
     const ClassRec* record = class_rec(owner);
     if (!record || record->destructor == EntityId::none) return true;
     const EntityId destructor = record->destructor;
-    return check_access(owner, destructor, w_->entities.rec(destructor).name, at);
+    const NameId name = w_->entities.rec(destructor).name;
+    // [class.protected]: these uses destroy a complete object of the
+    // declaring class. Access through a derived context needs a derived object.
+    if (record->access_of(destructor) == ast::Access::protected_ && !accessible(owner, ast::Access::private_)) {
+      diag(at, Diag::protected_member, name, types().class_type(owner));
+      return false;
+    }
+    return check_access(owner, destructor, name, at);
   }
 
   // `T(args)` and `T{…}` for a class T ([expr.type.conv]): a prvalue.
