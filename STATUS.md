@@ -2015,8 +2015,10 @@ What the process allocates, attributed to the engine's cells, in the trace and t
   - For ordinary non-template member bodies, unqualified type lookup finds injected class names
     in the class and its nonvirtual bases before searching the enclosing namespace. The same
     type through multiple base subobjects is accessible when any of its lookup paths is
-    accessible. Distinct competing types are ambiguous. Qualified and elaborated forms are
-    tracked in #361. See [the lookup design](docs/design/injected-class-names.md).
+    accessible. Distinct competing types are ambiguous. Qualified type names also find
+    inherited injected names, including with a class-key or within a type's qualifier.
+    Ordinary terminal `B::B` names the constructor. See
+    [the lookup design](docs/design/injected-class-names.md) (#361).
   - Nontrivial copy assignment of base subobjects remains tracked in #360.
 
 ## Implicit copy assignment of class members (#360, 2026-11-20)

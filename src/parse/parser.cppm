@@ -560,6 +560,19 @@ public:
       case Tk::kw_class:
       case Tk::kw_union: {
         u32 at = pos();
+        if (qualified_ahead(1)) {
+          bump();
+          auto q = qualified_type(0, /*checked=*/true, /*type_only=*/true);
+          if (!q || !s_->types().is_class(q->first) || s_->is_union_type(q->first) != (k == Tk::kw_union) ||
+              any_type()) {
+            s_->diag(at, Diag::expected_type_specifier);
+            d.ok = false;
+            goto done;
+          }
+          cls = q->first;
+          take_qualified(q->second);
+          continue;
+        }
         // A class-specifier where a type is named (a local or unnamed class) is not supported yet.
         if (kind(1) != Tk::identifier || kind(2) == Tk::l_brace || kind(2) == Tk::colon || kind(2) == Tk::coloncolon) {
           s_->diag(at, Diag::not_supported, k);
@@ -1213,7 +1226,8 @@ public:
   // A nested-name-specifier ([expr.prim.id.qual]) at token `start` ahead: `::`, `N::`, `N::C::`,
   // resolved as it is read, without consuming it. `next` is where the name after it is.
   std::optional<sema::Sema::Scope> nested_name(u32 start, u32& next, bool member_pointer = false,
-                                               bool checked = false) {
+                                               bool checked = false, bool type_components = false,
+                                               bool check_injected_access = false) {
     u32 j = start;
     std::optional<sema::Sema::Scope> s;
     if (kind(j) == Tk::kw_decltype && kind(j + 1) == Tk::l_paren) {
@@ -1242,6 +1256,15 @@ public:
     for (;;) {
       if (kind(j) == Tk::identifier && kind(j + 1) == Tk::coloncolon) {
         NameId n = name_of(tok(j));
+        if (type_components) {
+          std::optional<u32> at = check_injected_access ? std::optional{pos() + j} : std::nullopt;
+          auto injected = s_->qualified_injected_type(*s, n, at, /*type_only=*/true);
+          if (injected.type) {
+            s = sema::Sema::Scope{std::nullopt, *injected.type};
+            j += 2;
+            continue;
+          }
+        }
         auto m = s_->scope_member(*s, n);
         if (!m) return std::nullopt;
         if (member_pointer || checked) check_type_access(*s, n, pos() + j);
@@ -1310,10 +1333,10 @@ public:
 
   // A qualified type name at token `start`: its type and the tokens it takes.
   // `checked`: the name is taken here, so its access is checked ([class.access]/4).
-  std::optional<std::pair<QualType, u32>> qualified_type(u32 start, bool checked = false) {
+  std::optional<std::pair<QualType, u32>> qualified_type(u32 start, bool checked = false, bool type_only = false) {
     u32 next = 0;
     bool check_qualifier = checked && substituting_partial_arguments;
-    auto s = nested_name(start, next, /*member_pointer=*/false, check_qualifier);
+    auto s = nested_name(start, next, /*member_pointer=*/false, check_qualifier, /*type_components=*/true, checked);
     if (!s || kind(next) != Tk::identifier || kind(next + 1) == Tk::coloncolon) return std::nullopt;
     // `N::X<args>`: a class template specialization named in a namespace ([temp.names]).
     qualified_half_ = false;
@@ -1321,9 +1344,15 @@ public:
       u32 j = next;
       if (auto t = template_id_scope(s, j, /*scope=*/false, check_qualifier)) return std::pair{*t->type, j - start};
     }
-    auto t = s_->scope_type(*s, name_of(tok(next)));
+    NameId name = name_of(tok(next));
+    std::optional<u32> at = checked ? std::optional{pos() + next} : std::nullopt;
+    auto injected = s_->qualified_injected_type(*s, name, at, type_only);
+    if (injected.found)
+      return injected.type ? std::optional{std::pair{*injected.type, next + 1 - start}} : std::nullopt;
+    if (type_only) return std::nullopt;
+    auto t = s_->scope_type(*s, name);
     if (!t) return std::nullopt;
-    if (checked) check_type_access(*s, name_of(tok(next)), pos() + next);
+    if (checked) check_type_access(*s, name, *at);
     return std::pair{*t, next + 1 - start};
   }
   void check_type_access(const sema::Sema::Scope& scope, NameId name, u32 at) {
