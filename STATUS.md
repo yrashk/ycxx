@@ -1271,6 +1271,10 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   an accessible, unambiguous base subobject. A compatible bit-field is read into a temporary.
   The tests in `tests/own/casts` cover identity, qualification, overloads and direct reference
   initialization. [#199](https://github.com/yrashk/ycxx/issues/199)
+- Named `reinterpret_cast` converts between ordinary object pointers (including cv `void*`)
+  and pointer-width integral types. A too-narrow integer destination is ill-formed, and
+  an evaluated cast is disallowed in a core constant expression. Smaller integer sources
+  and other reinterpret conversions remain in [#199](https://github.com/yrashk/ycxx/issues/199).
 - **sizeof, alignof** of fundamental, pointer, enumeration and array types and of an expression,
   from `ast::Target`; a class's since #194, below.
 - **decltype(e)** ([dcl.type.decltype]): an unparenthesized id-expression or member access names

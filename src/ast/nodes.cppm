@@ -176,6 +176,7 @@ enum class ConversionKind : u8 {
   floating,
   array_copy,  // [dcl.struct.bind]: initialize the hidden array, element by element
   base_to_derived,  // [expr.static.cast]: undo a direct base adjustment
+  pointer_to_integral, integral_to_pointer,  // [expr.reinterpret.cast]
 };
 
 // A conversion node of width zero beyond its operand (§3.3). `function` names a user-defined
