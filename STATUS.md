@@ -1036,7 +1036,7 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   Constant initialization uses the scalar element evaluator, with destination-dependent
   constant evaluation tracked in [#25](https://github.com/yrashk/ycxx/issues/25).
 - An automatic runtime declaration can also initialize an aggregate with one public nonvirtual
-  direct base and at least one public arithmetic field. Every element has an explicit initializer.
+  direct base and at least one public arithmetic field. The base has an explicit initializer.
   The first expression is a nonvolatile lvalue of the exact base type, which is a flat aggregate
   with nonvolatile arithmetic fields and trivial copy and destruction. The base copy uses the
   existing subobject layout and is sequenced before the remaining initializers.
@@ -1044,11 +1044,14 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   base field has a separately written positional initializer and the base has a usable trivial
   move constructor. The complete temporary is initialized once before its value is copied into
   the base subobject.
+  Omitted trailing arithmetic fields are value-initialized when they have no written default
+  member initializer. With a sole base expression, the base must have no conversion functions.
 - Parenthesized arrays, nested fields, unions, reference members, bit-fields, and nontrivial
   destruction remain in [#301](https://github.com/yrashk/ycxx/issues/301). The issue also tracks
-  multiple bases, other base prvalues, omitted initializers for derived aggregates, constant
-  evaluation of base copies, static storage and functional casts. Linux x86-64 runtime conversions
-  between floating-point and integer types remain in [#201](https://github.com/yrashk/ycxx/issues/201).
+  multiple bases, other base prvalues, omitted default member initializers in derived aggregates,
+  constant evaluation of base copies, static storage and functional casts. Linux x86-64 runtime
+  conversions between floating-point and integer types remain in
+  [#201](https://github.com/yrashk/ycxx/issues/201).
   Spec-only fixtures are in `tests/own/parenthesized-aggregate/`.
 
 - Ordinary mutable data members can be modified through a const object. A member access
@@ -1303,6 +1306,9 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   remains under #16.
 - Supported ordinary free binary operators use the full ADL association set, including base
   namespaces and hidden friends. Namespace using-directives do not contribute candidates.
+  Supported dependent binary operator expressions on ordinary non-template class operands retain
+  definition-time ordinary lookup and add eligible associated nonmember candidates at instantiation.
+  [#357](https://github.com/yrashk/ycxx/issues/357)
 - Remaining work in #165 includes declarations of functions in blocks, exact lookup for
   other operators, member templates as template arguments, dependent-call template argument associations,
   overload-set arguments and complete unqualified template-id lookup.
@@ -1806,6 +1812,14 @@ session's.*
   later demand. A variable-template partial specialization with a declared type such as
   `Tag<empty<T>>` remains unsupported.
   `__has_builtin(__is_empty)` continues to answer 1 ([meta.unary.prop], #218).
+- `__is_destructible(T)`, `__is_nothrow_destructible(T)`, and `__is_trivially_destructible(T)`
+  give true for references, including references to incomplete types, supported non-enum scalars,
+  and bounded arrays of those scalars. They give false for cv `void`, function types, and arrays
+  of unknown bound. Incomplete class operands and bounded arrays of incomplete classes get a
+  distinct diagnostic. Supported class-template bases and variable-template initializers replay
+  dependent operands. The class completeness check uses the written point for concrete operands
+  and the demand point for dependent operands. `__has_builtin` answers 0 for all three. Class
+  destructibility, enum operands, and other dependent contexts remain in #218 ([meta.unary.prop]).
 - Listed in docs/EXTENSIONS.md. Tests: `tests/own/builtins/`. `<cstdio>`: 53 → 33 errors.
 - Not yet (#211 follow-up): the built-ins that need the object model, such as
   class constructibility, assignability and general convertibility, remaining `__is_trivially_*` and
@@ -2806,7 +2820,7 @@ and runtime integration with ycxx's own linker remain under [#89]. See the
 - The six usual global array allocation and deallocation declarations support explicit
   calls and typed address selection, including the aligned signatures. Written
   redeclarations share the implicit entities. The Itanium mangler emits `na` and `da`, and
-  Linux object tests call providers built with both GCC and Clang. Expression codegen and
+  Linux object tests call providers built with both GCC and Clang. Broader expression codegen and
   further allocation-function declarations remain in [#293](https://github.com/yrashk/ycxx/issues/293).
 - The four C++26 non-allocating placement functions can be declared and defined at global scope
   ([new.delete.placement]). The two allocation functions take `size_t, void*` and return `void*`.
@@ -2832,7 +2846,14 @@ and runtime integration with ycxx's own linker remain under [#89]. See the
   of `ptrdiff_t`. The array AST retains default or empty initialization and the typed delete operand.
   On Linux x86-64, array deletion evaluates that operand once and passes the original address to
   the usual unsized `operator delete[](void*)` when non-null. The call releases the allocation,
-  including zero-length arrays. Native array allocation and broader deletion remain in #293.
+  including zero-length arrays.
+- Linux x86-64 can allocate these default-initialized arrays in ordinary functions certified
+  for cleanup-free unwinding when the bound is a single integer literal. The usual global
+  `operator new[](size_t)` receives the checked byte count, including zero. Lowering preserves
+  the returned address and leaves the element bytes alone. A hosted caller can catch an
+  exception from a replacement allocator across the wrapper. `unit.linux_fixed_array_new`
+  checks call relocations, unwind frame coverage, allocation, and release.
+  Broader allocation and deletion remain in #293.
   Constant-evaluated allocation and deletion are tracked in #321.
   [Cookie-free deletion](docs/design/cookie-free-array-delete.md)
   A file-scope scalar initializer still needs lowered code to qualify for dynamic initialization.

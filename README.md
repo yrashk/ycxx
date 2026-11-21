@@ -198,7 +198,8 @@ Automatic declarations such as `Point p(3, 4);` can initialize flat aggregates w
 arithmetic fields. Supplied expressions initialize the fields in declaration order. Omitted
 fields use their default member initializer when available and otherwise get zero. A runtime
 declaration can also initialize one flat public direct base from an exact-type lvalue or an
-unqualified braced prvalue such as `B{7}`, with an explicit initializer for each derived field.
+unqualified braced prvalue such as `B{7}`. Omitted trailing arithmetic fields of that aggregate
+are value-initialized when they have no written default member initializer.
 [#301](https://github.com/yrashk/ycxx/issues/301)
 
 **Language on macOS.** Programs can use:
@@ -218,6 +219,8 @@ unqualified braced prvalue such as `B{7}`, with an explicit initializer for each
   namespaces, including those of class template type arguments in ordinary calls. Functions
   support default arguments, recursion, operator overloading and calls through pointers.
   Ordinary free binary operators use argument-dependent lookup, including associated base namespaces.
+  Supported dependent binary operators on ordinary non-template classes also find associated
+  nonmember candidates at instantiation.
   Nonmember operators can be called explicitly by name, including with namespace qualification.
   [#219](https://github.com/yrashk/ycxx/issues/219)
   Overloaded free functions can take braced arguments for arithmetic parameters
@@ -232,8 +235,10 @@ unqualified braced prvalue such as `B{7}`, with an explicit initializer for each
 - ordinary scalar `new` and single-object `delete` for integral and pointer objects, including
   cv-qualified objects. Scalar allocation uses the global Itanium allocation functions.
   Syntax checking also covers one-dimensional scalar `new T[n]` and `delete[] p`.
-  On Linux x86-64, `delete[] p` releases one-dimensional arrays of integral or ordinary pointer
-  elements through the unsized global deallocator, including zero-length arrays.
+  On Linux x86-64, ordinary functions with cleanup-free unwind frames can default-initialize
+  one-dimensional integral and ordinary pointer arrays with a literal bound. The allocation
+  returns the original address. `delete[] p` releases it through the unsized global deallocator,
+  including for zero-length arrays.
   The usual aligned scalar allocation and deallocation signatures support explicit calls with
   `std::align_val_t`. Written nonthrowing global scalar and array overloads with a final
   `const Tag&` support explicit calls, including `std::nothrow_t` and user-defined class tags.
@@ -274,8 +279,10 @@ unqualified braced prvalue such as `B{7}`, with an explicit initializer for each
 - parenthesized direct initialization from functional conversions such as `S b(S(1));`;
 - `[[…]]` attributes, the GNU attributes and `asm` labels the macOS SDK's headers use, the
   GNU pointer qualifiers glibc uses, and the type-trait built-ins libycxx's headers use
-  (`__is_same`, `__remove_cv`, …)
-  ([docs/EXTENSIONS.md](docs/EXTENSIONS.md));
+  (`__is_same`, `__remove_cv`, …). `__is_destructible`, `__is_nothrow_destructible`, and
+  `__is_trivially_destructible` give true for references, non-enum scalars, and bounded arrays
+  of those scalars. They give false for cv `void`, function types, and arrays of unknown bound.
+  [docs/EXTENSIONS.md](docs/EXTENSIONS.md)
 - templates: function, class and variable templates, deduction, partial ordering, explicit and
   partial specializations with substitution checks for dependent type arguments, static constexpr
   members of class templates, member function and
