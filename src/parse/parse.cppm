@@ -1709,6 +1709,12 @@ std::optional<NodeId> AtItem::replay_function_default(sema::Sema& caller, const 
     replay.diag(value.source_begin, Diag::default_arg_dependent);
     return NodeId::none;
   }
+  if (replay.needs_immediate_reference_check()) {
+    const auto arg = caller.builder().get<ast::DefaultArg>(result).arg;
+    const NodeId root = caller.builder().commit(ast::Child{arg.id, 0}).id;
+    replay.check_immediate_addresses(root, value.source_begin);
+    if (replay.has_error_since(previous_diags)) return NodeId::none;
+  }
   caller.demands.insert(caller.demands.end(), replay.demands.begin(), replay.demands.end());
   return result;
 }

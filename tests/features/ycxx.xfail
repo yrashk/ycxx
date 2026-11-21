@@ -160,7 +160,6 @@ draft/dcl/dcl.fct.default-10.reject.cpp errors elsewhere: 'struct' not supported
 draft/dcl/dcl.fct.default-2.reject.cpp errors elsewhere: '=' not supported yet
 draft/dcl/dcl.fct.default-4.reject.cpp errors elsewhere: 'class' not supported yet
 draft/dcl/dcl.fct.default-5.reject.cpp errors elsewhere: 'extern' not supported yet
-draft/dcl/dcl.fct.default-7.reject.cpp errors elsewhere: '=' not supported yet
 draft/dcl/dcl.fct.default-8.reject.cpp errors elsewhere: preprocessing directives are not supported yet
 draft/dcl/dcl.fct.spec-1.reject.cpp errors elsewhere: 'struct' not supported yet
 draft/dcl/dcl.init.aggr-1.accept.cpp 'struct' not supported yet
