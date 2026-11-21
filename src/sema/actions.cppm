@@ -1729,25 +1729,27 @@ public:
     if (!allow_base_copy || c->bases.size() != 1 || c->unapplied_layout || c->layout_requires_virtual_support ||
         args.size() < 2 || args.size() != c->fields.size() + 1) return false;
 
-    // Copy the one direct base from an lvalue of its exact type. The parser admits
-    // only nonvirtual bases, and this slice requires all elements to be supplied.
+    // Copy the one direct base from its exact type. The parser admits only nonvirtual
+    // bases, and this slice requires all elements to be supplied.
     const BaseRec& edge = c->bases.front();
     if (edge.access != ast::Access::public_ || edge.dependent_in_pattern) return false;
     const QualType base_type = types().class_type(edge.cls);
     const Ex& first = args.front();
-    if (!first.ok() || first.cat() != ValueCategory::lvalue || types().is_dependent(base_type) ||
-        !same_unqualified(first.type(), base_type)) return false;
+    if (!first.ok() || types().is_dependent(base_type) || !same_unqualified(first.type(), base_type)) return false;
     const QualType source = types().canonical(first.type());
     if (Types::is_volatile(source)) return false;
     const ClassRec* base = class_rec(edge.cls);
-    return base && base->bases.empty() && !base->unapplied_layout && arithmetic_record(base_type, *base) &&
-           base->trivial_copyability.copy_constructor == CopyOperation::eligible_trivial &&
-           base->trivial_copyability.destructor == CopyOperation::eligible_trivial &&
-           !base->copy_deleted && !base->copy_nontrivial() &&
-           (!Types::is_const(source) || base->defaulted_copy_const) &&
-           std::ranges::none_of(base->fields, [&](const FieldRec& f) {
-             return Types::is_volatile(types().canonical(f.type));
-           });
+    if (!base || !base->bases.empty() || base->unapplied_layout || !arithmetic_record(base_type, *base) ||
+        base->trivial_copyability.copy_constructor != CopyOperation::eligible_trivial ||
+        base->trivial_copyability.destructor != CopyOperation::eligible_trivial ||
+        base->copy_deleted || base->copy_nontrivial() ||
+        std::ranges::any_of(base->fields, [&](const FieldRec& f) {
+          return Types::is_volatile(types().canonical(f.type));
+        })) return false;
+    if (first.cat() == ValueCategory::lvalue) return !Types::is_const(source) || base->defaulted_copy_const;
+    return first.cat() == ValueCategory::prvalue && Types::cv(source) == Cv::none &&
+           explicit_aggregate_prvalue(first) && base->move_usable && !base->move_nontrivial &&
+           base->trivial_copyability.move_constructor == CopyOperation::eligible_trivial;
   }
 
   // The destructor that ends an object of type `t`, or none if it is trivial ([class.dtor]); for
@@ -2050,8 +2052,24 @@ public:
     out.reserve(elems.size());
     const bool replay = replay_default_members_ && can_replay_default_members(t);
     for (std::size_t i = 0; i < elems.size(); ++i) {
-      Ex init = i < args.size() ? convert(args[i], elems[i].type, args[i].begin)
-                                : element_default(elems[i], true, replay, end, end);
+      Ex init;
+      if (i < args.size()) {
+        Ex source = args[i];
+        if (i == 0 && types().is_class(elems[i].type) && source.cat() == ValueCategory::prvalue) {
+          const Ex* list = explicit_aggregate_prvalue(source);
+          if (!list) {
+            diag(begin, Diag::no_viable_constructor, Types::unqualified(t));
+            return {NodeId::none, begin, end};
+          }
+          // The base is a potentially overlapping subobject ([intro.object]). The gate
+          // proved a trivial implicit move. Initialize a complete temporary and copy its
+          // value into the base before evaluating the following field initializer.
+          source = materialize(*list, Types::unqualified(elems[i].type), false);
+        }
+        init = convert(source, elems[i].type, args[i].begin);
+      } else {
+        init = element_default(elems[i], true, replay, end, end);
+      }
       if (!init.ok()) return {NodeId::none, begin, end};
       out.push_back(init);
     }
@@ -2062,6 +2080,22 @@ public:
     auto it = list_elems_.find(std::to_underlying(list.id));
     if (it == list_elems_.end()) return {};
     return it->second;
+  }
+
+  // Keep the written origin and the brace-relative child locations. The normalized list
+  // also contains synthesized initializers, so its elements alone cannot prove this form.
+  void note_explicit_aggregate_prvalue(QualType written, const Braced& braces, const Ex& init, u32 begin) {
+    if (!init.ok() || !types().is_class(written) || Types::cv(types().canonical(written)) != Cv::none ||
+        init.begin != braces.begin || init.end != braces.end || !as<ast::InitList>(init) ||
+        braces.clauses.size() != list_elements(init).size() ||
+        std::ranges::any_of(braces.clauses, [](const Braced::Clause& c) { return c.list || c.designated; })) return;
+    explicit_aggregate_prvalues_.insert_or_assign(begin, init);
+  }
+  const Ex* explicit_aggregate_prvalue(const Ex& e) const {
+    auto found = explicit_aggregate_prvalues_.find(e.begin);
+    if (found == explicit_aggregate_prvalues_.end() || found->second.id != e.id || found->second.end != e.end)
+      return nullptr;
+    return &found->second;
   }
 
   // The bound of an array of `elem` initialized by `b` ([dcl.array]/8): the number of elements
@@ -8299,6 +8333,7 @@ private:
   std::set<u32> constant_immediate_initializers_;
   std::set<u32> consteval_;                           // consteval functions named so far
   std::map<u32, std::vector<Ex>> list_elems_;         // by draft InitList
+  std::map<u32, Ex> explicit_aggregate_prvalues_;     // by the start of the written type conversion
   struct DeferredAccess {
     EntityId cls, member;
     NameId name;
