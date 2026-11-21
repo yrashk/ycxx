@@ -617,8 +617,16 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
 - Binary32 and binary64 comparisons use the scalar SSE unordered comparison instructions.
   Equality and the four relational operators are false for unordered operands. Inequality and
   conversion of NaN to `bool` are true. Both signed zeros convert to false. Strict exception
-  status, other numeric conversions and x87 values remain [#201](https://github.com/yrashk/ycxx/issues/201).
+  status and x87 values remain [#201](https://github.com/yrashk/ycxx/issues/201), [#645](https://github.com/yrashk/ycxx/issues/645).
   [Design](docs/design/linux-scalar-floating-point.md#runtime-comparisons)
+- Conversions between binary32 or binary64 and 32- or 64-bit integers use the SSE2 conversion
+  instructions; narrower integers and `bool` widen to 32 bits first. Integer-to-floating
+  conversions round under the caller's MXCSR. An unsigned 64-bit value with its top bit set is
+  halved with the shifted-out bit kept as a sticky low bit, converted and doubled. A floating
+  value at or above 2^63 converts to unsigned 64 bits through the conversion of x − 2^63.
+  Binary64 to binary32 rounds under MXCSR, and `fabs` clears the sign bit. `unit.linux_scalar_sse`
+  compares exact bits with a host compiler's conversions at `-O0` and `-O2` under all four
+  rounding directions. [#643](https://github.com/yrashk/ycxx/issues/643)
 - Direct fixed-prototype calls to ordinary free functions support nonempty naturally aligned
   flat records with integral or ordinary object-pointer fields that are trivial for calls,
   up to 16 bytes and alignment eight. The AMD64 INTEGER eightbytes follow from the laid-out

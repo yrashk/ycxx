@@ -447,8 +447,8 @@ clauses = ['basic.fundamental', 'lex.fcon', 'conv.fpprom', 'conv.double', 'conv.
 std = 'C++98'
 detect = '\b(?:float|double)\b'
 status = 'done'
-issues = [336, 201]
-note = 'Linux x86-64 supports runtime `float` and `double` arithmetic, comparisons, conversion to `bool` and binary32-to-binary64 widening. Other numeric conversions and x87 values remain in #201.'
+issues = [336, 201, 643, 645]
+note = 'Linux x86-64 supports runtime `float` and `double` arithmetic, comparisons and conversions to and from `bool` and the integer types (#643). x87 `long double` remains in #645, strict exception status in #201.'
 probe = '''
 int main() { double d = 1.5; float f = 2.0f; d = d * f + 0.5; return (int)d == 3 ? 0 : 1; }
 '''

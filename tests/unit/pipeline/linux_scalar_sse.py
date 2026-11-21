@@ -44,7 +44,7 @@ def main():
                              '-o', 'mixed'], scope, cold)
                         run(['./mixed'], scope, cold)
 
-            for fixture in ('arithmetic', 'comparisons', 'mixed-comparisons'):
+            for fixture in ('arithmetic', 'comparisons', 'mixed-comparisons', 'conversions'):
                 source = f'{fixture}-provider.cpp'
                 compile('-c', source, '-o', f'{fixture}.o')
                 compile('-c', source, '-o', f'{fixture}-warm.o', env=daemon)
@@ -58,6 +58,8 @@ def main():
                 run([*host, 'mixed-comparisons-consumer.cpp', 'comparisons-consumer.o',
                      'comparisons.o', 'mixed-comparisons.o', '-o', 'mixed-comparisons'], scope, cold)
                 run(['./mixed-comparisons'], scope, cold)
+                run([*host, 'conversions-consumer.cpp', 'conversions.o', '-o', 'mixed-conversions'], scope, cold)
+                run(['./mixed-conversions'], scope, cold)
 
             for fixture in ('variadic-caller', 'variadic-al-caller'):
                 compile('-c', f'{fixture}.cpp', '-o', f'{fixture}.o')
@@ -89,8 +91,6 @@ def main():
         unresolved_copy = ('struct Leaf { volatile int value; };\n'
                            'struct Wrapper { Leaf leaf; Wrapper(const Wrapper&) = default; };\n')
         cases = (
-            ('float f(double x) { return x; }', '`fptrunc`: floating-point operation is unsupported'),
-            ('int f(double x) { return static_cast<int>(x); }', '`fptosi`: floating-point operation is unsupported'),
             ('float f(float (*g)(float)) { return g(1.0F); }',
              'call: floating-point parameters and results of indirect calls are unsupported'),
             (unresolved_copy + 'double f(Wrapper, double value) { return value; }',
