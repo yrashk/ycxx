@@ -1158,6 +1158,10 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   ([basic.lookup.unqual]/9).
 - Linkage names: `<nested-name>`s with namespace prefixes as substitution candidates, and
   `_GLOBAL__N_1` for the unnamed namespace, checked against Clang's symbols.
+- Ordinary namespace C++ functions whose adjusted parameter types name an unnamed-namespace type
+  use local ELF and Mach-O symbols, preserving their source linkage and mangled names. Native
+  references need a definition in the same unit. An unused declaration emits no symbol.
+  [Design](docs/design/tu-local-parameter-symbols.md) · [#582](https://github.com/yrashk/ycxx/issues/582)
 - The Itanium ABI abbreviates the global `std` namespace as `St` without assigning it a
   numbered substitution (§5.1.5 and §5.1.10). Direct members use unscoped encodings
   and deeper members keep `N…E`. The Linux mixed-object test links calls through the pinned
