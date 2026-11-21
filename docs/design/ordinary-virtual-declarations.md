@@ -49,9 +49,22 @@ virtual. At class completion an omitted exception specification depends on the e
 specifications of base and field destructors. An override requires a specification the
 compiler can establish. Constructor bodies can check the implicit default initialization
 of the direct polymorphic base with the existing constructor overload and access checks.
-The complete-object and native guards still apply, and class templates continue to reject
-polymorphic bases. [[class.dtor]](https://eel.is/c++draft/class.dtor) ·
-[[class.base.init]](https://eel.is/c++draft/class.base.init)
+An unqualified name that resolves to that direct base can also designate it in a
+parenthesized or flat braced initializer. Overload resolution selects the constructor,
+and the derived constructor's context determines access to the selected constructor
+and the potentially invoked base destructor. The semantic initializer retains the
+selected constructor's arguments for deferred expression checks. Braces apply ordinary
+list narrowing. Constructor overload sets that need the initializer-list constructor
+phase remain in [#329](https://github.com/yrashk/ycxx/issues/329).
+[[class.dtor]](https://eel.is/c++draft/class.dtor) ·
+[[class.base.init]](https://eel.is/c++draft/class.base.init) ·
+[[over.match.list]](https://eel.is/c++draft/over.match.list)
+
+The virtual layout guard applies to evaluated object use and constant evaluation.
+Native emission for the derived class requires virtual layout support. Class templates
+continue to reject polymorphic bases. Implicit polymorphic copy construction remains in
+[#244](https://github.com/yrashk/ycxx/issues/244). Immediate function references outside the
+supported overload-set checks are tracked in [#102](https://github.com/yrashk/ycxx/issues/102).
 
 ## Linux x86-64 calls on external objects
 
@@ -75,8 +88,8 @@ virtual table production still have diagnostics. Class descriptors and RTTI are 
 [#422](https://github.com/yrashk/ycxx/issues/422), and native class ABI in
 [#489](https://github.com/yrashk/ycxx/issues/489).
 
-Covariant return types, pure virtual functions, `final`, explicit polymorphic base
-initializers, explicit virtual destructor calls and virtual member addresses are tracked in [#309](https://github.com/yrashk/ycxx/issues/309).
+Covariant return types, pure virtual functions, `final`, explicit virtual destructor calls
+and virtual member addresses are tracked in [#309](https://github.com/yrashk/ycxx/issues/309).
 That issue also tracks peer dispatch and native table emission. Virtual destructor variants
 are tracked in [#136](https://github.com/yrashk/ycxx/issues/136), RTTI operations in
 [#294](https://github.com/yrashk/ycxx/issues/294), virtual bases in

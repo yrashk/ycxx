@@ -1813,7 +1813,7 @@ struct D final : B { int f() override { return 0; } };
 int main() { D d; B& b = d; return b.f(); }
 '''
 issues = [309]
-note = 'Ordinary virtual declarations and single-base overrides in syntax checking. Linux x86-64 consumes external objects through declaration-only roots with fixed integer signatures. Abstract classes, final, covariance, layout and table emission remain open.'
+note = 'Ordinary virtual declarations, single-base overrides, and unqualified parenthesized or flat braced initializers of a direct polymorphic base in syntax checking. Linux x86-64 consumes external objects through declaration-only roots with fixed integer signatures. Abstract classes, final, covariance, layout and table emission remain open.'
 
 [[feature]]
 id = 'class-virtual-base'

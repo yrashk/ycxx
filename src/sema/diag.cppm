@@ -252,6 +252,8 @@ enum class Diag : std::uint32_t {
   delegating_copy_unsupported [[=message{Severity::error, "delegation to an implicit or defaulted copy constructor is not supported yet"}]],
   ambiguous_constructor [[=message{Severity::error, "constructing '{0:t}' is ambiguous"}]],
   deleted_constructor [[=message{Severity::error, "constructing '{0:t}' calls a deleted constructor"}]],
+  base_unusable_destructor [[=message{Severity::error, "initializing base class '{0:t}' requires a usable destructor"}]],
+  base_initializer_list_constructor [[=message{Severity::error, "initializer-list constructor overloads for a polymorphic base are not supported yet"}]],
   defaulted_copy_declaration [[=message{Severity::error, "only an ordinary in-class copy constructor taking C& or const C& can be explicitly defaulted here"}]],
   defaulted_copy_unsupported [[=message{Severity::error, "defaulted copy construction of '{0:t}' is not supported for this class"}]],
   reference_uninitialized [[=message{Severity::error, "a reference must be initialized"}]],

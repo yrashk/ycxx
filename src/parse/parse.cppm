@@ -5809,8 +5809,8 @@ private:
     }
   }
 
-  // mem-initializer-list ([class.base.init]): `: m(args), n{…}`, each member's initializer by
-  // its position among the class's members, or a sole delegating initializer.
+  // mem-initializer-list ([class.base.init]): `: m(args), n{…}`, each subobject's initializer by
+  // its position among the class's members and bases, or a sole delegating initializer.
   ConstructorInitializers mem_initializers() {
     ConstructorInitializers r;
     const sema::ClassRec& rec = p_->classes_.rec(s_.current_class);
@@ -5831,7 +5831,7 @@ private:
       u32 field = 0;
       while (field < rec.fields.size() && rec.fields[field].name != n) ++field;
       std::optional<QualType> type;
-      bool delegates = false;
+      auto destination = sema::ConstructorDestination::object;
       if (field < rec.fields.size()) {
         type = rec.fields[field].type;
       } else {
@@ -5839,15 +5839,20 @@ private:
         auto named = s_.class_name(n, false, true, std::nullopt, /*search_locals=*/false);
         if (named && s_.types().is_class(*named)) {
           EntityId cls = s_.types().class_of(*named);
-          delegates = cls == s_.current_class;
           auto base = std::ranges::find(rec.bases, cls, &sema::BaseRec::cls);
-          if (delegates) type = ct;
-          else if (base != rec.bases.end()) {
+          if (cls == s_.current_class) {
+            type = ct;
+            destination = sema::ConstructorDestination::delegation;
+          } else if (base != rec.bases.end()) {
             type = s_.types().class_type(base->cls);
             field = u32(rec.fields.size() + (base - rec.bases.begin()));
+            if (const auto* record = p_->classes_.find(cls); rec.bases.size() == 1 && record && record->polymorphic &&
+                s_.template_scopes.empty() && !inst_)
+              destination = sema::ConstructorDestination::polymorphic_base;
           }
         }
       }
+      const bool delegates = destination == sema::ConstructorDestination::delegation;
       if (r.delegation || (delegates && had_initializer)) {
         if (!std::exchange(reported_mixed, true)) s_.diag(at, Diag::delegating_initializer_not_alone);
         r.delegation.emplace();
@@ -5871,8 +5876,9 @@ private:
       Ex init;
       if (ps_.is(Tk::l_brace)) {
         auto list = ps_.braced_init_list();
-        init = delegates ? s_.construct_from_list(ft, *list, sema::Construction::direct_list, /*delegating=*/true)
-                         : s_.list_init(ft, *list);
+        init = destination == sema::ConstructorDestination::object
+                   ? s_.list_init(ft, *list)
+                   : s_.construct_from_list(ft, *list, sema::Construction::direct_list, destination);
       } else {
         u32 open = ps_.pos();
         if (!ps_.expect(Tk::l_paren)) return r;
@@ -5881,9 +5887,8 @@ private:
           do args.push_back(ps_.assignment_expression());
           while (ps_.accept(Tk::comma));
         if (!ps_.expect(Tk::r_paren)) return r;
-        if (delegates) {
-          init = s_.construct(ft, std::move(args), open, ps_.pos(), sema::Construction::direct,
-                              /*checking_polymorphic_base=*/false, /*delegating=*/true);
+        if (destination != sema::ConstructorDestination::object) {
+          init = s_.construct(ft, std::move(args), open, ps_.pos(), sema::Construction::direct, destination);
         } else if (s_.types().is_class(ft)) {
           init = s_.has_user_ctors(ft) || args.size() != 1 ? s_.construct(ft, std::move(args), open, ps_.pos())
                                                             : s_.convert(args[0], ft, open);
@@ -5933,7 +5938,8 @@ private:
         init = s_.default_init(bt, 0, 0);
       }
       if (!init.ok()) continue;
-      stmts.push_back({s_.node(ast::MemberInit{~0u, bt, {init.id, 0}}, 0, 0).id, 0});
+      Ex stmt = s_.node(ast::MemberInit{~0u, bt, {init.id, 0}}, init.begin, init.end);
+      stmts.push_back(sema::Sema::at(stmt, 0));
     }
     for (u32 i = 0; i < rec.fields.size(); ++i) {
       const sema::FieldRec& f = rec.fields[i];

@@ -2057,6 +2057,16 @@ What the process allocates, attributed to the engine's cells, in the trace and t
   follows the base chain through private members and hidden names, with checks for matching
   parameter types, qualifiers, return types and exception specifications. The class traits also
   recognize inherited polymorphism and implicit virtual destructors.
+- A derived constructor can name that base in an unqualified parenthesized or flat braced
+  initializer. Syntax checking uses ordinary constructor overload resolution, defaults, access,
+  and list narrowing. The base destructor must be usable and accessible in the derived
+  constructor. The initializer's converted arguments remain in its semantic body for deferred
+  expression checks. Evaluated object use, constant evaluation of the objects, and native
+  emission for the derived class still require virtual layout support.
+  [[class.base.init]](https://eel.is/c++draft/class.base.init) · [#309](https://github.com/yrashk/ycxx/issues/309)
+- On Linux x86-64, the pinned libycxx `<exception>` syntax check reaches unnamed unscoped
+  enumerations in `deps/libycxx/include/ycxx/pal.h`, starting at line 61.
+  [#157](https://github.com/yrashk/ycxx/issues/157)
 - On Linux x86-64, an ordinary declaration-only root with fixed integer virtual signatures can
   consume a peer-owned object through a pointer or reference. Dispatch loads the selected slot in
   declaration order and passes the original receiver as `this`. Qualifying the call with the
