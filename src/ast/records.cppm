@@ -134,7 +134,8 @@ struct ClassDef {
 
 namespace local_flag {
 inline constexpr u16 requires_parameter = 2;  // notation without storage ([expr.prim.req.general])
-inline constexpr u16 structured_binding = 4;  // a local reference slot that names an element ([dcl.struct.bind])
+inline constexpr u16 structured_binding = 4;  // a local reference slot for a structured binding ([dcl.struct.bind])
+inline constexpr u16 binding_reference_member = 32;  // the slot type is also the binding's referenced type
 }
 
 // A block-scope declaration: plain data of the body tree (§4.4). `entity` is set for those that

@@ -1609,6 +1609,14 @@ public:
   void static_value(u32 local, std::optional<ConstId> value) { q_->static_local(locals_[local].entity, locals_[local].type, value); }
   // An array of unknown bound gets its bound from its initializer ([dcl.array]/8).
   void set_local_type(u32 local, QualType t) { locals_[local].type = t; }
+  void set_binding_type(u32 local, QualType referenced) {
+    if (types().is_reference(referenced)) {
+      locals_[local].type = referenced;
+      locals_[local].flags |= ast::local_flag::binding_reference_member;
+    } else {
+      locals_[local].type = types().lvalue_ref(referenced);
+    }
+  }
   // A local usable in constant expressions ([expr.const]): constexpr, or const integral with a
   // constant initializer; its value.
   void set_local_value(u32 local, ConstId v) { local_values_[local] = v; }
@@ -1617,7 +1625,9 @@ public:
   const ast::LocalRec& local(u32 i) const { return locals_[i]; }
   // [dcl.type.decltype]/1: a binding gives its referenced type; its reference slot is internal.
   QualType local_declared_type(const ast::LocalRec& local) {
-    return local.flags & ast::local_flag::structured_binding ? types().referee(local.type) : local.type;
+    if ((local.flags & ast::local_flag::structured_binding) && !(local.flags & ast::local_flag::binding_reference_member))
+      return types().referee(local.type);
+    return local.type;
   }
   std::span<const ast::LocalRec> locals() const { return locals_; }
   // After the scope of a requires-expression ends, its parameters leave no runtime locals.
@@ -5669,6 +5679,62 @@ public:
     QualType type = types().add_cv(object_unqualified(array), Types::cv(declared));
     if (!source.glvalue()) source = materialize(source, array, false);
     return std::pair{type, convert_node(source, ast::ConversionKind::array_copy, type)};
+  }
+
+  // [dcl.struct.bind]/7: a complete std::tuple_size<E> with any member named value takes
+  // precedence, even if its value could not be used to obtain the size.
+  bool reject_tuple_binding(QualType type, u32 at_) {
+    auto std_scope = scope_member(global_scope(), ins().names.intern("std"));
+    if (!std_scope || !std_scope->ns) return false;
+    auto tmpl = namespace_type_template(*std_scope->ns, ins().names.intern("tuple_size"));
+    if (!tmpl) return false;
+    const TemplateArg arg = templates().type_arg(type);
+    auto size = class_template_id(*tmpl, std::span(&arg, 1), at_);
+    if (!size) return true;  // a diagnosed template-id error
+    if (!types().is_class(*size) || !find_member(types().class_of(*size), ins().names.intern("value"))) return false;
+    diag(at_, Diag::binding_tuple_unsupported, type);
+    return true;
+  }
+
+  // [dcl.struct.bind]/1, /8: initialize one hidden object or reference and project its data
+  // members in declaration order. This slice uses only addressable public fields of a root class.
+  std::optional<std::pair<QualType, const ClassRec*>> class_binding(QualType declared, const Ex& source, u64 names, u32 at_) {
+    if (!source.ok()) return std::nullopt;
+    if (dependent(source)) {
+      diag(at_, Diag::binding_unsupported_type, source.type());
+      return std::nullopt;
+    }
+    auto type = deduce_placeholder(declared, source, source.begin);
+    if (!type) return std::nullopt;
+    QualType object = types().referee(*type);
+    if (reject_tuple_binding(object, at_)) return std::nullopt;
+    if (!require_complete(object, at_) || !require_supported_virtual_layout(object, at_)) return std::nullopt;
+    EntityId entity = types().class_of(object);
+    const ClassRec* record = class_rec(entity);
+    if (!record || record->union_ || record->closure || record->layout_requires_virtual_support || !record->bases.empty() ||
+        w_->entities.rec(entity).templ != EntityId::none) {
+      diag(at_, Diag::binding_unsupported_type, object);
+      return std::nullopt;
+    }
+    if (names != record->fields.size()) {
+      diag(at_, Diag::binding_member_arity, names, object, u64(record->fields.size()));
+      return std::nullopt;
+    }
+    for (const FieldRec& field : record->fields) {
+      if (field.name == no_name()) {
+        diag(at_, Diag::binding_unsupported_type, object);
+        return std::nullopt;
+      }
+      if (record->access_of(field.entity) != ast::Access::public_) {
+        diag(at_, Diag::binding_member_access, field.name);
+        return std::nullopt;
+      }
+      if (field.bit_width) {
+        diag(at_, Diag::binding_bit_field, field.name);
+        return std::nullopt;
+      }
+    }
+    return std::pair{*type, record};
   }
 
   // [dcl.type.decltype]/1: an unparenthesized id-expression or member access names its entity's

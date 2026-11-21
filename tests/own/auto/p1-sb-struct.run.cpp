@@ -1,6 +1,5 @@
 // θ step 1 (#279), spec-only: binding to a class with public non-static data members names them in
 // declaration order; `auto` copies the object, `auto&` refers to it ([dcl.struct.bind]).
-// XFAIL: ycxx structured bindings, #285
 template<class A, class B> struct same { static constexpr bool value = false; };
 template<class A> struct same<A, A> { static constexpr bool value = true; };
 

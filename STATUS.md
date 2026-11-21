@@ -2073,6 +2073,14 @@ What the process allocates, attributed to the engine's cells, in the trace and t
   Value bindings copy scalar elements in order and take cv from the declaration (CWG 2506).
   Reference bindings deduce and bind to the initializer with ordinary reference rules.
   `decltype(x)` gives the element type, and `decltype((x))` gives its lvalue reference.
+- **Class-member structured bindings** ([dcl.struct.bind], #285): a block-scope declaration
+  initializes a hidden object or reference once, then binds the names to public non-static data
+  members in declaration order. The class is a non-template, non-union class with no bases,
+  virtual layout, or bit-fields.
+  Array and class members each take one binding. A reference member keeps its declared reference
+  type in `decltype(x)` and aliases its referent, including through a const hidden object.
+  Reference bindings apply ordinary temporary lifetime extension. A complete `std::tuple_size<E>`
+  with a member named `value` selects the tuple-like protocol, which is diagnosed as unsupported.
 - **Deduced return types:** each `return` deduces and the first fixes the type for the rest of
   the body ([dcl.spec.auto.general]/11); no return deduces `void`. `BodySema` carries the deduced
   function type (`deduced`, `deduced_type`). Naming the function (`Sema::deduced_function`) asks
@@ -2087,12 +2095,14 @@ What the process allocates, attributed to the engine's cells, in the trace and t
 - **Calls through pointers to functions:** irgen emits `call_ind` (`Gen::call_pointer`), which
   lowering, AArch64 selection and the interpreter already had; constant evaluation calls through
   them too.
-- Tests: `tests/own/auto/` (49 spec-only, 4 more) include 48 passes and 5 expected failures
-  for member structured bindings (#285).
+- Tests: `tests/own/auto/` covers array and class-member bindings, including hidden-object copies,
+  aliases, cv-qualification, and `decltype` with reference and array members.
   `p1-impl-mangle` checks the `Da`/`Dc` names against Clang objects.
+  `tests/own/structured-bindings/` adds class-member fixtures with Linux native execution.
 - Not yet: constrained `C auto`, `auto x = {…}`, `auto x(e)` at namespace scope, abbreviated
-  function templates (#286); member and tuple-like bindings and other declaration contexts
-  (#285), binding packs (#279).
+  function templates (#286); tuple-like and remaining class-member bindings and other declaration
+  contexts (#285), binding packs (#279), class member constant evaluation (#25), and mutable
+  data members (#373).
 
 ## Lambdas, θ step 2 (#280, 2026-11-19)
 
