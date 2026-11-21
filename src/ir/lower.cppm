@@ -18,7 +18,8 @@
 //
 // This is the α-slice subset (epic #39): what C-like functions need. Any other op is an error
 // naming the node, not a silent miscompile. Aggregates are memory only: `alloc`, access paths and
-// `copy` (δ, #86). Not yet: `switch`, EH, coroutines,
+// `copy` (δ, #86). Native Linux `int` throws use a certified cleanup-free frame (#578).
+// Not yet: `switch`, exception handlers and cleanups, coroutines,
 // vptr loads, poison for indeterminate reads beyond "no store".
 export module ycxx.ir.lower;
 
@@ -79,7 +80,16 @@ concept layout_source = requires(const L& l, QualType t, PathStep s, ConstId c) 
   { l.constant(c) } -> std::convertible_to<ConstValue>;
 };
 
-// Target facts `lower` reads (the `config` query).
+// The Itanium runtime imports for a certified Linux int throw. The type is the normalized
+// exception object type, before L2 replaces C++ types with machine widths.
+export struct IntThrowRuntime {
+  QualType type;
+  EntityId allocate;
+  EntityId throw_;
+  EntityId type_info;
+};
+
+// Target and function facts `lower` reads.
 export struct LowerConfig {
   std::uint32_t min_result_bits = 32;  // narrower integer results are returned extended to this
   // A class trivially copyable for calls of at most this many bytes passes and returns in that
@@ -95,6 +105,7 @@ export struct LowerConfig {
   std::uint32_t float_arg_registers = 8;
   // Use the System V AMD64 integer aggregate classification and argument placement.
   bool sysv_amd64 = false;
+  std::optional<IntThrowRuntime> int_throw;
 };
 
 export enum class Amd64ArgumentKind : std::uint8_t { integer, sse, stack };
@@ -898,6 +909,30 @@ class Lowering {
         results_ = types;
         auto o = origin();
         b_.emit(Op2::ret, {}, ops, {}, 0, {}, o);
+        return {};
+      }
+      case Op::throw_: {
+        if (!config_.sysv_amd64 || !config_.int_throw || nd.nsucc != 0 || imms[0] != raw(config_.int_throw->type) ||
+            b_.peek().type(in(n, 1)) != T::i32)
+          return fail("`throw` is not in the α subset");
+        const auto& abi = *config_.int_throw;
+        const auto o = origin();
+        // The L1 operand has already been evaluated. Its call, if any, can unwind without
+        // leaving an allocated exception object behind (Itanium EH ABI §2.4).
+        const T allocation_results[] = {T::state, T::ptr};
+        const ValueId allocation_args[] = {in(n, 0), constant(T::i64, l2::bytes(T::i32))};
+        const std::uint64_t allocation_call[] = {raw(abi.allocate), 0, 0, 0};
+        const NodeId allocation = b_.emit(Op2::call, allocation_results, allocation_args, allocation_call, 0, {}, o);
+        const ValueId payload = b_.peek().result(allocation, 1);
+        const T state_result[] = {T::state};
+        const ValueId store_args[] = {b_.peek().result(allocation), payload, in(n, 1)};
+        const std::uint64_t alias[] = {imms[0]};
+        const NodeId store = b_.emit(Op2::store, state_result, store_args, alias, 0, {}, o);
+        const ValueId type_info = emit1(Op2::symbol, T::ptr, {}, {raw(abi.type_info)});
+        const ValueId throw_args[] = {b_.peek().result(store), payload, type_info, constant(T::ptr, 0)};
+        const std::uint64_t throw_call[] = {raw(abi.throw_), 0, 0, 0};
+        b_.emit(Op2::call, state_result, throw_args, throw_call, 0, {}, o);
+        b_.emit(Op2::unreachable, {}, {}, {}, 0, {}, o);
         return {};
       }
       case Op::unreachable: {
