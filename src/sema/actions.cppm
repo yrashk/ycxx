@@ -5846,12 +5846,13 @@ public:
   }
 
   // [basic.stc.dynamic] makes the ordinary declarations visible even without a header.
-  Ex allocation_name_expr(AllocationFunction f, u32 begin, u32 end) {
-    const NameId name = ins().names.intern(allocation_name(f));
+  Ex allocation_name_expr(std::string_view spelling, u32 begin, u32 end) {
+    const NameId name = ins().names.intern(spelling);
+    const bool array = spelling.ends_with("[]");
     std::vector<ast::DeclSema> found;
     for (AllocationFunction candidate : World::allocation_functions) {
-      if (allocates(candidate) != allocates(f)) continue;
-      const auto d = w_->allocation_function(candidate);
+      if (allocation_name(candidate, array) != spelling) continue;
+      const auto d = w_->allocation_function(candidate, array);
       q_->use_allocation_function(d.entity, allocation_has_alignment(candidate));
       found.push_back(d);
     }

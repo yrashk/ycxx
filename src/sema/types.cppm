@@ -940,8 +940,8 @@ private:
   bool has_virtual_layouts_ = false;
 };
 
-// The ordinary single-object allocation functions implicitly declared at global scope
-// ([basic.stc.dynamic]). Their types use the target's size_t, like sizeof.
+// The ordinary implicit allocation signatures at global scope ([basic.stc.dynamic]).
+// The single-object and array operators share these shapes and the target's size_t.
 enum class AllocationFunction : u8 {
   allocate, deallocate, deallocate_sized, allocate_aligned, deallocate_aligned, deallocate_sized_aligned
 };
@@ -950,12 +950,18 @@ constexpr bool allocates(AllocationFunction f) {
   return f == AllocationFunction::allocate || f == AllocationFunction::allocate_aligned;
 }
 
-constexpr std::string_view allocation_name(AllocationFunction f) {
-  return allocates(f) ? "operator new" : "operator delete";
+constexpr std::string_view allocation_name(AllocationFunction f, bool array = false) {
+  if (allocates(f)) return array ? "operator new[]" : "operator new";
+  return array ? "operator delete[]" : "operator delete";
+}
+
+constexpr bool is_deallocation_name(std::string_view n) {
+  return n == allocation_name(AllocationFunction::deallocate) || n == allocation_name(AllocationFunction::deallocate, true);
 }
 
 constexpr bool is_allocation_name(std::string_view n) {
-  return n == allocation_name(AllocationFunction::allocate) || n == allocation_name(AllocationFunction::deallocate);
+  return n == allocation_name(AllocationFunction::allocate) || n == allocation_name(AllocationFunction::allocate, true) ||
+         is_deallocation_name(n);
 }
 
 constexpr bool has_deallocation_size(AllocationFunction f) {
@@ -996,7 +1002,7 @@ struct World {
 
   // The interners give repeated requests and written declarations the same identity. Construct
   // the implicit declaration on demand, so a unit that never names it needs no shared state.
-  ast::DeclSema allocation_function(AllocationFunction f) {
+  ast::DeclSema allocation_function(AllocationFunction f, bool array = false) {
     QualType size = types.builtin(target.size_type);
     QualType void_type = types.builtin(Builtin::void_);
     QualType void_pointer = types.pointer(void_type);
@@ -1008,7 +1014,7 @@ struct World {
     QualType type = types.function(allocating ? void_pointer : void_type, std::span(params).first(count),
                                    false, LangLinkage::cxx, Cv::none, ast::RefQual::none, !allocating);
     ast::DeclSema d{};
-    d.entity = entities.entity({.kind = EntityKind::function, .name = ins.names.intern(allocation_name(f)), .type = type});
+    d.entity = entities.entity({.kind = EntityKind::function, .name = ins.names.intern(allocation_name(f, array)), .type = type});
     d.type = type;
     d.kind = ast::DeclKind::function;
     d.linkage = ast::Linkage::external;
@@ -1027,10 +1033,11 @@ struct World {
   };
 
   bool matches_allocation_function(std::string_view name, QualType written) {
+    const bool array = name.ends_with("[]");
     const auto arity = types.rec(written).params.size();
     return std::ranges::any_of(allocation_functions, [&](AllocationFunction f) {
-      return allocation_name(f) == name && arity == 1u + has_deallocation_size(f) + allocation_has_alignment(f) &&
-             types.canonical(allocation_function(f).type) == types.canonical(written);
+      return allocation_name(f, array) == name && arity == 1u + has_deallocation_size(f) + allocation_has_alignment(f) &&
+             types.canonical(allocation_function(f, array).type) == types.canonical(written);
     });
   }
 
