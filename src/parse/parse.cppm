@@ -3435,8 +3435,12 @@ private:
         (!defaults_allowed(d.params, types.is_function(d.type), d.name) || !literal_operator_ok(spec, d, LangLinkage::cxx, false)))
       return bad();
     const bool c_context = enclosing_linkage() == LangLinkage::c;
+    const Tk name_token = p_->region().tokens[it_->begin + d.name_at].kind;
+    const std::string_view name = s_.ins().names.spelling(d.name);
+    const bool binary_operator = name_token == Tk::kw_operator && d.params.size() == 2 && name.starts_with("operator") &&
+                                 std::ranges::contains(sema::Sema::binary_spellings, name.substr(8));
     const bool ordinary = (definition || !c_context) && !d.qualified && !d.template_args && p_->namespace_class_friend(k_) &&
-                          p_->region().tokens[it_->begin + d.name_at].kind == Tk::identifier;
+                          (name_token == Tk::identifier || binary_operator);
     if (!types.is_function(d.type) ||
         (definition ? !ordinary || !d.function || !ps_.at_end() || !it_->has_body() ||
                         p_->region().tokens[it_->body_begin].kind != Tk::l_brace

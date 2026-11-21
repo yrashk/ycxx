@@ -66,8 +66,10 @@ def main():
         for name in ('main', 'peer'):
             obj = f'friend-{name}.o'
             compile(friend / f'{name}.cpp', obj)
-            entry = symbols(obj)['_ZN14inline_address4readERKNS_4ItemE']
-            assert entry[4] == 'WEAK' and entry[6] != 'UND', entry
+            table = symbols(obj)
+            for symbol in ('_ZN14inline_address4readERKNS_4ItemE', '_ZN14inline_addressplERKNS_4ItemEi'):
+                entry = table[symbol]
+                assert entry[4] == 'WEAK' and entry[6] != 'UND', entry
         for objects in (('friend-main.o', 'friend-peer.o'), ('friend-peer.o', 'friend-main.o')):
             link(*objects)
             run('./program')
