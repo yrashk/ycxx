@@ -20,7 +20,7 @@ The final Linux x86-64 self-check uses the freestanding support in [#380](https:
 
 ## Status
 
-**Pre-0.1** (as of 2026-11-20). ycxx compiles a substantial subset of C++ (C-like code, classes,
+**Pre-0.1** (as of 2026-11-21). ycxx compiles a substantial subset of C++ (C-like code, classes,
 templates and constant evaluation) on macOS arm64, from source to a signed, running executable,
 with no external compiler, assembler or linker. It also builds static executables from a
 freestanding C++ subset for x86-64 Linux. The standard library is out of reach. The plan is in
@@ -131,6 +131,10 @@ system-assembled objects with function symbols and the GNU-built libycxx static 
 object. Symbol names can share suffixes in an input string table.
 [#428](https://github.com/yrashk/ycxx/issues/428), [#419](https://github.com/yrashk/ycxx/issues/419),
 [#484](https://github.com/yrashk/ycxx/issues/484)
+
+On x86-64 Linux, an exception thrown by hosted peer code can unwind through eligible
+cleanup-free ycxx functions with fixed scalar signatures and reach a handler in peer code.
+[#572](https://github.com/yrashk/ycxx/issues/572)
 
 Both targets support cooked integer user-defined literals through namespace-scope literal
 operators with an `unsigned long long` parameter, including constant evaluation.
@@ -336,7 +340,9 @@ members. [#285](https://github.com/yrashk/ycxx/issues/285)
   inheriting constructors, and base packs or multiple bases in a class template.
 - Member class and alias templates, conversion function templates, and constraints on class
   templates and their members.
-- Exceptions, optimization (`-O`), and the extended floating-point types (`std::float16_t`, …).
+- Native exception throwing, exception handlers, and unwind discovery in ycxx-linked programs.
+  [#89](https://github.com/yrashk/ycxx/issues/89) · [#558](https://github.com/yrashk/ycxx/issues/558)
+- Optimization (`-O`) and the extended floating-point types (`std::float16_t`, …).
 - Automatic Linux CRT and library selection and general-purpose ELF object interoperability.
   [#390](https://github.com/yrashk/ycxx/issues/390)
 - Namespace-scope destruction for x86-64 Linux. [#400](https://github.com/yrashk/ycxx/issues/400)
