@@ -22,6 +22,7 @@ enum class TypeTrait : std::uint8_t {
   is_assignable, is_nothrow_assignable, is_trivially_assignable,
   is_convertible, is_nothrow_convertible,
   is_base_of,
+  is_destructible,
 };
 
 struct TypeTraitInfo {
@@ -95,6 +96,8 @@ inline constexpr std::array type_traits{
     TypeTraitInfo{.name = "__is_nothrow_convertible", .trait = TypeTrait::is_nothrow_convertible, .arity = 2,
                   .transforms = false, .advertised = false, .replay_dependent = true},
     TypeTraitInfo{.name = "__is_base_of", .trait = TypeTrait::is_base_of, .arity = 2,
+                  .transforms = false, .advertised = false, .replay_dependent = true},
+    TypeTraitInfo{.name = "__is_destructible", .trait = TypeTrait::is_destructible, .arity = 1,
                   .transforms = false, .advertised = false, .replay_dependent = true},
 };
 
