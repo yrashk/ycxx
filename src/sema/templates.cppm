@@ -1638,14 +1638,16 @@ public:
       all12 = all12 && s12;
       all21 = all21 && s21;
     }
-    // [temp.deduct.partial]/11: otherwise equal, a template without a trailing function parameter
-    // pack is more specialized than one with.
+    // [temp.deduct.partial]/11: a trailing function parameter pack breaks a tie only if
+    // the other template has no trailing pack and no declared parameter at that position.
+    // A parameter with an omitted default argument still occupies its declared position.
     if (all12 && all21) {
       auto trailing = [&](const TypeRec& t) {
         return !t.params.empty() && types().kind(t.params.back()) == TypeKind::pack_expansion;
       };
-      if (trailing(t2) && !trailing(t1)) return {true, false};
-      if (trailing(t1) && !trailing(t2)) return {false, true};
+      const bool pack1 = trailing(t1), pack2 = trailing(t2);
+      if (pack2 && !pack1 && t1.params.size() < t2.params.size()) return {true, false};
+      if (pack1 && !pack2 && t2.params.size() < t1.params.size()) return {false, true};
     }
     return {all12, all21};
   }
