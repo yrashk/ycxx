@@ -298,8 +298,8 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
   ast::Interners& ins = world.ins;
   TranslationUnit tu;
   tu.name = std::move(name);
-  // Native compilation may consume an opaque Linux root without enabling its layout.
-  // Keep the gate for declarations and records that would require further virtual support.
+  // Native compilation may consume peer-owned Linux objects with supported virtual
+  // declarations. None of these classes can provide their own virtual table here.
   const auto& classes = program.classes();
   auto declaration_only_member = [&](EntityId f) -> std::optional<ast::DeclSema> {
     // A key function may be defined outside its class. A written in-class declaration
@@ -310,7 +310,8 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
   };
   for (EntityId c : classes.classes()) {
     const auto& record = classes.rec(c);
-    if (!record.layout_requires_virtual_support || sema::native_virtual_consumer(record, world.types, declaration_only_member))
+    if (!record.layout_requires_virtual_support ||
+        sema::native_virtual_consumer(record, classes, world.types, declaration_only_member))
       continue;
     block_virtual_emission(tu, program, record);
     return tu;
@@ -719,9 +720,15 @@ engine::query_task<FrontResult> TuFront::run(engine::Ctx& cx, TuId tu) {
     shape.layout_uncertain = uncertain.contains(c);
     shape.copy_abi_unknown = record.defaulted_copy == sema::CopyState::unsupported;
     shape.layout_requires_virtual_support = record.layout_requires_virtual_support;
-    shape.peer_virtual_root_layout = record.peer_virtual_root_layout && !shape.layout_uncertain;
-    if (record.peer_virtual_root_layout && shape.layout_uncertain && !out.unit.virtual_emission_blocked)
-      block_virtual_emission(out.unit, program, record);
+    if (record.peer_virtual_layout != sema::PeerVirtualLayout::none) {
+      const bool uncertain_base = record.peer_virtual_layout == sema::PeerVirtualLayout::primary_base &&
+                                  uncertain.contains(record.bases.front().cls);
+      if (shape.layout_uncertain || uncertain_base) {
+        if (!out.unit.virtual_emission_blocked) block_virtual_emission(out.unit, program, record);
+      } else {
+        shape.peer_virtual_layout = record.peer_virtual_layout;
+      }
+    }
   }
   for (EntityId e : classes.enums()) out.shapes.enums.push_back({e, classes.underlying(e)});
   co_return out;

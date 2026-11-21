@@ -150,7 +150,7 @@ struct ClassShape {
   bool copy_abi_unknown = false;   // no ABI classification for this defaulted copy
   bool layout_requires_virtual_support = false;
   bool has_mutable_field = false;
-  bool peer_virtual_root_layout = false;
+  sema::PeerVirtualLayout peer_virtual_layout = sema::PeerVirtualLayout::none;
 };
 struct EnumShape {
   EntityId entity = EntityId::none;
@@ -780,7 +780,8 @@ std::optional<ClassLayout> QueryLayout::class_layout(QualType c) const {
   auto key = std::to_underlying(in.types.get<ast::TClass>(c).entity);
   if (auto done = class_layouts_.find(key); done != class_layouts_.end()) return done->second;
   auto it = classes_.find(key);
-  if (it == classes_.end() || (it->second->layout_requires_virtual_support && !it->second->peer_virtual_root_layout))
+  if (it == classes_.end() || (it->second->layout_requires_virtual_support &&
+                               it->second->peer_virtual_layout == sema::PeerVirtualLayout::none))
     return std::nullopt;
   std::vector<ast::Placed> bases, places;
   for (EntityId b : it->second->bases) bases.push_back(placed(in.intern_type(ast::TClass{b})));
@@ -789,7 +790,7 @@ std::optional<ClassLayout> QueryLayout::class_layout(QualType c) const {
     if (!it->second->bit_widths.empty()) f.bit_width = it->second->bit_widths[i];
     places.push_back(std::move(f));
   }
-  const ast::Target* root = it->second->peer_virtual_root_layout ? target_ : nullptr;
+  const ast::Target* root = it->second->peer_virtual_layout == sema::PeerVirtualLayout::root ? target_ : nullptr;
   ast::RecordLayout r = ast::record_layout(bases, places, it->second->union_, it->second->pod, key, root);
   ClassLayout out{r.size, std::uint32_t(r.align), {}, {}, r.placed};
   for (std::size_t i = 0; i < r.offsets.size(); ++i)

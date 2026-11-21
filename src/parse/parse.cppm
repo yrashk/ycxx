@@ -936,7 +936,8 @@ public:
     std::vector<ast::MemberRec> adl_friends;
   };
   ClassContent class_content(u32 item, const std::function<const ast::ItemSema&(u32)>& sema_of);
-  bool peer_virtual_root_layout(u32 item, EntityId cls, const sema::ClassRec& rec, std::span<const ast::MemberRec> members);
+  sema::PeerVirtualLayout peer_virtual_layout(u32 item, EntityId cls, const sema::ClassRec& rec,
+                                             std::span<const ast::MemberRec> members);
   // `instantiate_class(spec)` ([temp.inst]/2, §B6.2): the class record of a class template
   // specialization, its member items analysed with the arguments bound, built whole and then
   // published; none when the template has no definition before `item`, or for a dependent one.
@@ -1287,6 +1288,7 @@ private:
   };
   std::map<EntityId, DestructorDeclaration> destructor_declarations_;
   std::map<EntityId, std::vector<std::optional<std::pair<u32, u32>>>> member_default_tokens_;
+  std::map<EntityId, EntityId> overridden_virtuals_;  // by overriding member's entity
   void bind_member_defaults(EntityId cls, sema::ClassRec& rec, Result<ast::ClassDef>& out);
   std::map<u32, std::vector<std::vector<ast::TemplateParamSema>>> outer_heads_;  // by item
   std::map<std::pair<u32, u32>, u32> static_init_ends_;  // by (member item, ordinal): its initializer's end
@@ -3395,7 +3397,7 @@ private:
           s_.diag(d.name_at, Diag::not_supported, Tk::kw_union);
           return bad();
         }
-        if (!member_function_or_static(spec, d, c, is_virtual)) return bad();
+        if (!member_function_or_static(spec, d, c, is_virtual, overridden)) return bad();
         if (it_->kind == ItemKind::function) return;  // its body follows the declaration part
         continue;
       }
@@ -4305,7 +4307,8 @@ private:
 
   // A member function or static data member of class `c` declared in its class ([class.mfct],
   // [class.static]).
-  bool member_function_or_static(const DeclSpec& spec, parse::Declarator& d, ast::DeclSema c, bool is_virtual) {
+  bool member_function_or_static(const DeclSpec& spec, parse::Declarator& d, ast::DeclSema c, bool is_virtual,
+                                 const sema::MemberDeclRec* overridden) {
     sema::Types& types = s_.types();
     bool fn = types.is_function(d.type);
     if (fn && !member_operator_ok(d, spec.is_static)) return false;
@@ -4387,6 +4390,7 @@ private:
         sem.entity = s_.world().entities.entity(
             {sema::EntityKind::function, d.name, d.type, LangLinkage::cxx, ast::Linkage::external, {}, c.entity});
       }
+      if (overridden) p_->overridden_virtuals_.emplace(sem.entity, overridden->entity);
       remember_member_defaults(sem.entity, d.params);
     } else if (member_template_) {
       s_.diag(d.name_at, Diag::not_supported, Tk::kw_template);  // a static data member template
@@ -5474,6 +5478,8 @@ Program::ClassContent Program::class_content(u32 item, const std::function<const
                            (d.flags & sema::decl_flag::template_) != 0, {}, std::move(defaults)});
         statics.back().is_virtual = d.is_virtual;
         statics.back().is_explicit = d.is_explicit;
+        if (auto overridden = overridden_virtuals_.find(d.entity); overridden != overridden_virtuals_.end())
+          statics.back().overridden_virtual = overridden->second;
         if (w_->ins.names.spelling(statics.back().name) == "operator=" && defaulted_member_definition(m, d))
           statics.back().explicit_defaulted_assignment = true;
       }
@@ -5482,39 +5488,59 @@ Program::ClassContent Program::class_content(u32 item, const std::function<const
   return out;
 }
 
-bool Program::peer_virtual_root_layout(u32 item, EntityId cls, const sema::ClassRec& rec,
-                                       std::span<const ast::MemberRec> members) {
+sema::PeerVirtualLayout Program::peer_virtual_layout(u32 item, EntityId cls, const sema::ClassRec& rec,
+                                                   std::span<const ast::MemberRec> members) {
+  using enum sema::PeerVirtualLayout;
   const auto& head = items_->items[item];
   const auto& entity = w_->entities.rec(cls);
   if (head.template_depth || head.specialization || in_class(item) || unnamed(ns_of(item)) ||
-      entity.templ != EntityId::none || rec.union_ || !rec.types.empty()) return false;
-  if (!sema::native_virtual_root_declarations(rec, w_->types, [&](EntityId f) -> std::optional<ast::DeclSema> {
-        const auto decl = member_decl(f);
-        return decl ? decl_sema(*decl) : std::nullopt;
-      })) return false;
+      entity.templ != EntityId::none || rec.union_ || !rec.types.empty()) return none;
+  const bool derived = !rec.bases.empty();
   const auto has_attributes = [&](u32 begin, u32 end) { return layout_attribute(*r_, begin, end, LayoutAttributes::any); };
   if (layout_may_be_packed(*r_, head.begin, head.brace_end) || has_attributes(head.begin, head.brace_begin) ||
-      has_attributes(head.brace_end, head.end)) return false;
+      has_attributes(head.brace_end, head.end)) return none;
+  const auto written_member = [&](EntityId f) -> std::optional<ast::DeclSema> {
+    const auto decl = member_decl(f);
+    if (!decl) return std::nullopt;
+    const auto& source = items_->items[index(decl->item)];
+    if (derived && has_attributes(source.begin, source.end)) return std::nullopt;
+    return decl_sema(*decl);
+  };
+  if (derived) {
+    const auto key = r_->tokens[head.begin].kind;
+    if ((key != lex::Tk::kw_struct && key != lex::Tk::kw_class) || entity.linkage != ast::Linkage::external ||
+        !rec.friends.empty() || !sema::native_virtual_derived_declarations(rec, classes_, w_->types, written_member))
+      return none;
+    if (std::ranges::any_of(head.members, [&](u32 m) {
+          const auto& source = items_->items[m];
+          return has_attributes(source.begin, source.end) || r_->tokens[source.begin].kind == lex::Tk::kw_using ||
+                 std::ranges::any_of(source.names, [](const items::DeclName& name) {
+                   return (name.flags & items::name_flag::type) != 0;
+                 });
+        })) return none;
+  } else if (!sema::native_virtual_root_declarations(rec, w_->types, written_member)) {
+    return none;
+  }
   // A forward declaration can carry attributes that the ordinary parser does not apply.
   const auto declarations = decls_.find(std::to_underlying(cls));
   if (declarations != decls_.end() && std::ranges::any_of(declarations->second, [&](const auto& decl) {
         const auto& prior = items_->items[decl.first];
         return decl.first < item && has_attributes(prior.begin, prior.end);
-      })) return false;
+      })) return none;
   auto decl = members.begin();
   u32 previous = items::none;
   for (const sema::FieldRec& field : rec.fields) {
     const auto type = w_->types.builtin_of(field.type);
     if (field.bit_width || !type || !ast::is_integral(*type) || !w_->target.has(*type) || w_->target[*type].size > 8)
-      return false;
+      return none;
     decl = std::ranges::find(decl, members.end(), field.entity, &ast::MemberRec::entity);
-    if (decl == members.end()) return false;
+    if (decl == members.end()) return none;
     const u32 source_item = index(decl->decl.item);
     ++decl;
     if (source_item == previous) continue;
     previous = source_item;
     const auto& source = items_->items[source_item];
-    if (source.names.empty() || has_attributes(source.begin, source.end)) return false;
+    if (source.names.empty() || has_attributes(source.begin, source.end)) return none;
     // An alias can carry a GNU alignment or mode attribute that sema erases. Use only builtin
     // scalar specifiers written directly in the member declaration for the initial layout slice.
     const auto specifiers = std::span(r_->tokens).subspan(source.begin, source.names.front().offset);
@@ -5522,9 +5548,9 @@ bool Program::peer_virtual_root_layout(u32 item, EntityId cls, const sema::Class
       using enum lex::Tk;
       return Parser::simple_type_keyword(token.kind) || token.kind == kw_const || token.kind == kw_volatile ||
              token.kind == kw_mutable;
-    })) return false;
+    })) return none;
   }
-  return true;
+  return derived ? primary_base : root;
 }
 
 const Result<ast::ClassDef>& Program::class_def(u32 item) {
@@ -5557,7 +5583,7 @@ const Result<ast::ClassDef>& Program::class_def(u32 item) {
     rec.adl_friends = c.adl_friends;
     special_members(item, *cls, rec, &out.diags);
     if (rec.polymorphic && w_->target.triple == ast::x86_64_linux.triple)
-      rec.peer_virtual_root_layout = peer_virtual_root_layout(item, *cls, rec, members);
+      rec.peer_virtual_layout = peer_virtual_layout(item, *cls, rec, members);
     rec.defined = true;
     // Default arguments are checked with the full member set, before function bodies are read.
     classes_.publish(*cls, std::move(rec), [&](sema::ClassRec& fresh) {
