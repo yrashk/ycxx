@@ -3337,8 +3337,13 @@ public:
   std::optional<Found> direct_member(EntityId c, const ClassRec& cr, NameId name) {
     for (u32 i = 0; i < cr.fields.size(); ++i)
       if (cr.fields[i].name == name) return Found{&cr.fields[i], i, nullptr, c};
-    for (const MemberDeclRec& m : cr.members)
-      if (m.name == name && !m.is_ctor && !m.is_dtor) return Found{nullptr, 0, &m, c};
+    for (const MemberDeclRec& m : cr.members) {
+      if (m.name != name || m.is_ctor || m.is_dtor) continue;
+      // The synthetic invoker remains available to the checked lambda conversion.
+      if (cr.closure && m.is_static && m.is_function && ins().names.spelling(name) == "__invoke" &&
+          classes().layout_requires_virtual_support(types().rec(m.type).inner)) continue;
+      return Found{nullptr, 0, &m, c};
+    }
     for (const NestedType& nested : cr.types)
       if (nested.name == name) return Found{.owner = c, .nested_type = nested.entity};
     for (const NestedType& nested : cr.types) {
