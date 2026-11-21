@@ -5251,6 +5251,9 @@ public:
       if (v.value) value = *v.value;
       else if (spec.is_constinit && !v.dependent) s_->diag(init.begin, Diag::not_constant, v.reason);
     }
+    if (spec.is_constinit && value != ConstId::none)
+      if (auto entity = s_->immediate_result_entity(value))
+        s_->diag(init.begin, Diag::immediate_address, s_->world().entities.rec(*entity).name);
     s_->permit_constant_initializer(dbegin, s_->local(local).type, value);
     s_->static_value(local, value == ast::ConstId::none ? std::nullopt : std::optional(value));
     return s_->node(ast::StaticVar{local, sema::Sema::at(init, dbegin), value, dtor}, dbegin, pos());
@@ -5442,7 +5445,7 @@ public:
         skip_to_semi();
         return {NodeId::none, begin, pos()};
       }
-      sema::Sema::ImmediateReferenceScope references(*s_, s_->constant_reference_context || spec.is_constexpr);
+      sema::Sema::ImmediateReferenceScope references(*s_, s_->constant_reference_context || spec.is_constexpr || spec.is_constinit);
       // [dcl.constexpr]: a constexpr variable is const.
       if (spec.is_constexpr) d.type = s_->types().add_cv(d.type, sema::Cv::const_);
       const bool replay_defaults = !spec.is_static && s_->can_replay_default_members(d.type);

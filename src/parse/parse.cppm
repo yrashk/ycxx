@@ -5424,7 +5424,7 @@ private:
       }
       return declare_alias(d.name, d.name_at, d.type);
     }
-    sema::Sema::ImmediateReferenceScope references(s_, spec.is_constexpr && !types.is_function(d.type));
+    sema::Sema::ImmediateReferenceScope references(s_, (spec.is_constexpr || spec.is_constinit) && !types.is_function(d.type));
     u32 ord = static_cast<u32>(decls_.size());
     // `T a[] = {…}`: the bound from the list ([dcl.array]/8), parsed here and used below.
     std::unique_ptr<sema::Braced> early;
@@ -6017,7 +6017,7 @@ private:
     } else if (!fn && sema::Types::is_const(d.type) && !spec.is_extern) {
       s_.diag(d.name_at, Diag::const_uninitialized, d.name);
     }
-    if (spec.is_constexpr && s_.folded_immediate_result && value != ConstId::none)
+    if (value != ConstId::none && (spec.is_constinit || (spec.is_constexpr && s_.folded_immediate_result)))
       if (auto entity = s_.immediate_result_entity(value))
         s_.diag(init.begin, Diag::immediate_address, s_.world().entities.rec(*entity).name);
     s_.permit_constant_initializer(d.begin, d.type, value);
