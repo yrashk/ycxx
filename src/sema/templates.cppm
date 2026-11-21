@@ -313,10 +313,12 @@ public:
   }
 
   // A concrete query needs the source and completeness contexts supplied by its owning replay.
-  std::optional<ConstId> constructibility_pattern(std::span<const TemplateArg> operands) {
+  std::optional<ConstId> constructibility_pattern(ast::DepOp op, std::span<const TemplateArg> operands)
+    pre(op == ast::DepOp::is_constructible || op == ast::DepOp::is_nothrow_constructible)
+  {
     if (!std::ranges::any_of(operands, [&](const TemplateArg& a) { return types().is_dependent(a.type); }) ||
         !std::ranges::all_of(operands, [&](const TemplateArg& a) { return structural_operand(a); })) return std::nullopt;
-    return ins().intern_value(ast::VDepOp{ast::DepOp::is_constructible, ins().intern_seq(operands)});
+    return ins().intern_value(ast::VDepOp{op, ins().intern_seq(operands)});
   }
 
   // A class specialization has the class kind of its primary ([temp.class.general]).
@@ -327,7 +329,8 @@ public:
   }
 
   std::optional<ConstId> unary_trait_value(ast::DepOp op, QualType type)
-    pre(op != ast::DepOp::is_same && op != ast::DepOp::logical_not && op != ast::DepOp::is_constructible)
+    pre(op != ast::DepOp::is_same && op != ast::DepOp::logical_not &&
+        op != ast::DepOp::is_constructible && op != ast::DepOp::is_nothrow_constructible)
   {
     if (types().is_dependent(type)) {
       if (!structural_operand(type)) return std::nullopt;
@@ -369,6 +372,7 @@ public:
     case ast::DepOp::is_trivially_copyable: return std::nullopt;
     case ast::DepOp::is_same:
     case ast::DepOp::is_constructible:
+    case ast::DepOp::is_nothrow_constructible:
     case ast::DepOp::logical_not: std::unreachable();
     }
     return w_->values.integer(types().builtin(Builtin::bool_), result);
@@ -468,9 +472,10 @@ public:
     if (ins().values.is<ast::VDepOp>(v)) {
       auto op = ins().values.get<ast::VDepOp>(v);
       switch (op.op) {
-      case ast::DepOp::is_constructible: {
+      case ast::DepOp::is_constructible:
+      case ast::DepOp::is_nothrow_constructible: {
         auto operands = substitute_args(ins().seqs.elements(op.operands), b);
-        return operands ? constructibility_pattern(*operands) : std::nullopt;
+        return operands ? constructibility_pattern(op.op, *operands) : std::nullopt;
       }
       case ast::DepOp::is_same: {
         auto lhs = substitute_arg(ins().seqs.at(op.operands, 0), b);
