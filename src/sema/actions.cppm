@@ -4076,6 +4076,8 @@ public:
 
   // ------------------------------------------------------------ overload resolution ([over.match])
 
+  enum class DefaultArgumentOrigin : u8 { interned, current_item };
+
   // A candidate function: its entity (none for an implicit trivial special member), its type,
   // whether it takes no implicit object (a non-member or static function), and whether it is
   // deleted.
@@ -4090,6 +4092,7 @@ public:
     // ([dcl.fct.default]); empty if it has none.
     std::vector<NodeId> defaults{};
     bool is_explicit = false;
+    DefaultArgumentOrigin default_origin = DefaultArgumentOrigin::interned;
     // How many arguments a call must give ([over.match.viable]/2.3).
     std::size_t required(std::size_t params) const {
       std::size_t k = params;
@@ -4107,12 +4110,27 @@ public:
     return r;
   }
   // Those of a declaration lookup found: the latest one found has every earlier one's in its scope
-  // ([dcl.fct.default]/4); declarations in other scopes have their own. This item's own
-  // declarations are drafts and have none yet.
+  // ([dcl.fct.default]/4); declarations in other scopes have their own. The parameter lists
+  // of this item's own declarations are drafts. Allocation calls collect those defaults
+  // from `own_function_defaults` instead.
   std::vector<NodeId> found_defaults(const ast::DeclSema& d) {
     if (std::ranges::any_of(own, [&](const OwnDecl& w) { return w.sema.entity == d.entity && w.sema.params == d.params; })) return {};
     return defaults_of(d);
   }
+
+  Candidate non_template_call_candidate(const ast::DeclSema& d, bool allocation) {
+    Candidate candidate{d.entity, d.type, true, (d.flags & decl_flag::deleted) != 0};
+    if (allocation) {
+      if (auto draft = own_function_defaults.find(d.entity); draft != own_function_defaults.end()) {
+        candidate.defaults = draft->second;
+        candidate.default_origin = DefaultArgumentOrigin::current_item;
+        return candidate;
+      }
+    }
+    candidate.defaults = found_defaults(d);
+    return candidate;
+  }
+
   // Those of a function named by `callee` (a DeclRef, perhaps parenthesized): as its lookup found
   // them, or, for a member, as its class records them.
   std::vector<NodeId> defaults_of(Ex callee, EntityId f) {
@@ -6169,9 +6187,7 @@ public:
       if (d.kind != ast::DeclKind::function) continue;
       const auto count = types().rec(d.type).params.size();
       if (count < 2) continue;
-      auto draft = own_function_defaults.find(d.entity);
-      auto defaults = draft != own_function_defaults.end() ? draft->second : defaults_of(d);
-      Candidate candidate{d.entity, d.type, true, false, nullptr, std::move(defaults)};
+      const Candidate candidate = non_template_call_candidate(d, true);
       if (candidate.required(count) == 1) {
         diag(at, Diag::ambiguous_call, name);
         return true;
@@ -7486,6 +7502,7 @@ public:
   Ex call(Ex callee, std::vector<Ex> args, u32 end, u32 paren_at, std::optional<u32> lookup_at = std::nullopt) {
     u32 begin = callee.begin;
     std::vector<NodeId> defaults;  // the chosen function's default arguments
+    DefaultArgumentOrigin default_origin = DefaultArgumentOrigin::interned;
     if (!callee.ok() || std::ranges::any_of(args, [](const Ex& a) { return !a.ok(); })) return {NodeId::none, begin, end};
     // A member function called with a dependent argument is resolved when the template is
     // instantiated ([temp.dep.expr]).
@@ -7529,6 +7546,8 @@ public:
     }
     if (types().is(callee.type(), Builtin::overload_set)) {
       const std::vector<ast::DeclSema>& set = overloads_.at(std::to_underlying(callee.id));
+      const NameId name = w_->entities.rec(set.front().entity).name;
+      const bool allocation = is_allocation_name(ins().names.spelling(name));
       auto ex = explicit_args_.find(std::to_underlying(callee.id));
       std::span<const TemplateArg> explicit_args;
       if (ex != explicit_args_.end()) explicit_args = ex->second;
@@ -7545,7 +7564,7 @@ public:
         if (!(d.flags & decl_flag::template_)) {
           // Explicit template arguments name only templates ([temp.arg.explicit]).
           if (ex != explicit_args_.end()) continue;
-          cands.push_back({d.entity, d.type, true, deleted, nullptr, found_defaults(d)});
+          cands.push_back(non_template_call_candidate(d, allocation));
           decls.push_back(&d);
           continue;
         }
@@ -7574,7 +7593,7 @@ public:
         cands.push_back({specialization(d, *targs, *st), *st, true, deleted, &d, found_defaults(d)});
         decls.push_back(&d);
       }
-      auto chosen = resolve(cands, args, callee.begin, w_->entities.rec(set.front().entity).name, std::nullopt, std::nullopt, lists);
+      auto chosen = resolve(cands, args, callee.begin, name, std::nullopt, std::nullopt, lists);
       if (!chosen) return {NodeId::none, begin, end};
       const ast::DeclSema& d = *decls[*chosen];
       const Candidate& k = cands[*chosen];
@@ -7590,6 +7609,7 @@ public:
       ExprInfo ci{*kt, ValueCategory::lvalue, 0};
       callee = node(ast::DeclRef{ci, k.entity}, callee.begin, callee.end, ci);
       defaults = k.defaults;
+      default_origin = k.default_origin;
     } else if (auto d = as<ast::DeclRef>(callee); d && deleted_.contains(std::to_underlying(d->entity))) {
       // One function: still not callable when deleted ([dcl.fct.def.delete]).
       diag(callee.begin, Diag::deleted_function, w_->entities.rec(d->entity).name);
@@ -7623,7 +7643,10 @@ public:
       return expression;
     };
     Ex named = unparenthesized(callee);  // `(f)()` takes f's default arguments too ([expr.call]/1)
-    if (auto d = as<ast::DeclRef>(named); d && types().is_function(ft) && defaults.empty()) defaults = defaults_of(named, d->entity);
+    if (auto d = as<ast::DeclRef>(named); d && types().is_function(ft) && defaults.empty()) {
+      defaults = defaults_of(named, d->entity);
+      default_origin = DefaultArgumentOrigin::interned;
+    }
     if (auto d = as<ast::DeclRef>(named); d && types().is_function(ft) &&
         (named.id == callee.id || is_consteval(d->entity))) {
       function = d->entity;
@@ -7643,7 +7666,7 @@ public:
       return {NodeId::none, begin, end};
     }
     TypeRec fr = types().rec(ft);
-    auto children = call_args(fr, args, begin, paren_at, defaults);
+    auto children = call_args(fr, args, begin, paren_at, defaults, default_origin);
     if (!children) return {NodeId::none, begin, end};
     ExprInfo info = result_info(fr.inner);
     return node(ast::Call{info, function, at(callee, begin), b_->list(*children)}, begin, end, info);
@@ -7826,14 +7849,16 @@ public:
   // The argument a parameter's default argument gives a call, positioned at the call's `)`: its
   // tree, analysed at the declaration ([dcl.fct.default]/5). One of a template that depends on its
   // parameters would be instantiated for the call ([temp.inst]/12), which is not supported yet.
-  std::optional<Ex> default_argument(NodeId d, u32 at_) {
-    NodeId arg = ins().ast.get<ast::DefaultArg>(d).arg.id;
-    if (ast::kind_of(arg) == ast::Nodes::index_of<ast::Dependent>()) {
+  std::optional<Ex> default_argument(NodeId d, u32 at_, DefaultArgumentOrigin origin = DefaultArgumentOrigin::interned) {
+    const bool in_builder = origin == DefaultArgumentOrigin::current_item;
+    // An earlier declarator's inherited defaults are already adopted by this builder.
+    const NodeId interned = in_builder ? b_->adopted_node(d) : d;
+    const auto value = interned == NodeId::none ? b_->get<ast::DefaultArg>(d) : ins().ast.get<ast::DefaultArg>(interned);
+    if (ast::kind_of(value.arg.id) == ast::Nodes::index_of<ast::Dependent>()) {
       diag(at_, Diag::default_arg_dependent);
       return std::nullopt;
     }
-    ExprInfo info = ins().ast.get<ast::DefaultArg>(d).info;
-    return Ex{b_->adopt(d), at_, at_, info};
+    return Ex{in_builder ? d : b_->adopt(d), at_, at_, value.info};
   }
 
   Ex braced_argument(std::unique_ptr<Braced> b) {
@@ -7929,12 +7954,13 @@ public:
   // The arguments of a call to a function of type `fr`, each copy-initializing its parameter.
   // A parameter without an argument takes its default argument ([dcl.fct.default], [expr.call]/5).
   std::optional<std::vector<Child>> call_args(const TypeRec& fr, std::span<const Ex> given, u32 begin, u32 paren_at,
-                                              std::span<const NodeId> defaults = {}) {
+                                              std::span<const NodeId> defaults = {},
+                                              DefaultArgumentOrigin origin = DefaultArgumentOrigin::interned) {
     if (unevaluated == 0 && !require_supported_virtual_signature(fr, paren_at)) return std::nullopt;
     std::vector<QualType> params = fr.params;  // copied: converting may intern new types
     std::vector<Ex> args(given.begin(), given.end());
     for (std::size_t i = args.size(); i < params.size() && i < defaults.size() && defaults[i] != NodeId::none; ++i) {
-      auto a = default_argument(defaults[i], paren_at);
+      auto a = default_argument(defaults[i], paren_at, origin);
       if (!a) return std::nullopt;
       args.push_back(*a);
     }
