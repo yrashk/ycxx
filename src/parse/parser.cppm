@@ -2428,9 +2428,10 @@ public:
   // an instantiation its pattern is read once for each element, with the packs it names bound
   // to that element (ast.md §6.4).
   template <class F>
-  std::vector<Ex> expandable(F read) {
+  std::vector<Ex> expandable(F read, bool* written_expansion = nullptr) {
     u32 begin = pos();
     if (const sema::Expansion* x = s_->expansion_at(begin)) {
+      if (written_expansion) *written_expansion = true;
       sema::Expansion e = *x;
       auto n = s_->expansion_length(e, begin);
       std::vector<Ex> out;
@@ -2456,6 +2457,7 @@ public:
     s_->begin_pattern();
     Ex p = read();
     if (is(Tk::ellipsis)) {
+      if (written_expansion) *written_expansion = true;
       u32 end = pos();
       bump();
       if (s_->end_pattern(true, begin, end).empty()) s_->diag(end, Diag::expansion_without_pack);
@@ -3670,9 +3672,11 @@ public:
   // `T(args)` or `T{…}` at the `(` or `{` ([expr.type.conv]).
   Ex type_conversion(QualType t, u32 begin) {
     if (is(Tk::l_brace)) {
-      auto b = braced_init_list();
+      bool written_expansion = false;
+      auto b = braced_init_list(&written_expansion);
       if (!s_->unevaluated && !s_->check_destructor_access(t, begin)) return {NodeId::none, begin, pos()};
       Ex r = s_->list_init(t, *b);
+      if (!written_expansion && b->begin == begin + 1) s_->note_explicit_aggregate_prvalue(t, *b, r, begin);
       return {r.id, begin, pos(), r.info};
     }
     if (!expect(Tk::l_paren)) return {NodeId::none, begin, pos()};
@@ -3712,7 +3716,7 @@ public:
 
   // braced-init-list ([dcl.init.general]): `{ initializer-clause, … }`, or with designators
   // `{ .m = e, .n{…} }` ([dcl.init.aggr]).
-  std::unique_ptr<sema::Braced> braced_init_list() {
+  std::unique_ptr<sema::Braced> braced_init_list(bool* written_expansion = nullptr) {
     deep_enough();  // nested braced lists
     auto b = std::make_unique<sema::Braced>();
     b->begin = pos();
@@ -3734,7 +3738,7 @@ public:
         c.list = braced_init_list();
       } else if (!c.designated) {
         // An initializer-clause may be a pack expansion ([dcl.init.general]/1).
-        std::vector<Ex> xs = expandable([&] { return assignment_expression(); });
+        std::vector<Ex> xs = expandable([&] { return assignment_expression(); }, written_expansion);
         for (std::size_t i = 0; i + 1 < xs.size(); ++i) {
           sema::Braced::Clause e;
           e.begin = c.begin;
