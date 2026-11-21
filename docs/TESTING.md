@@ -120,6 +120,11 @@ or reject test with any warning marker must get warnings exactly at its warning 
 **Directives** (`// KEY: value` lines):
 
 - `REQUIRES: syntax run darwin` — features of the compiler under test, or a platform.
+- `PARITY: #N` or `PARITY: by design: <why>` — required with `REQUIRES: darwin` or `linux`: the
+  issue that makes the test run on the other OS, or the host fact it is about (that host's C
+  library headers, its ABI). `tools/check-os-gates` (in `tools/check-policy`) also requires an
+  issue for host-qualified `ycxx.xfail` entries, host-limited features in `ycxx.txt`, and a
+  `# PARITY:` comment above an `if()` on `APPLE` or `CMAKE_SYSTEM_NAME` that adds CTests (#659).
 - `XFAIL: ycxx,gcc <reason>` (or `*`) — expected to fail with that compiler: reported XFAIL; a
   pass is XPASS, which fails the run, so the mark goes when the cause does.
 - `FLAGS: -O2`, `TIMEOUT: 120` (seconds per command), `TIER: nightly`.

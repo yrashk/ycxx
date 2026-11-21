@@ -72,6 +72,14 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
   took one commit, and every slice test passed on the first run.
   - Learned on #43.
 
+- **Parallel sessions file the same gap within minutes.** The macOS ↔ Linux survey filed #652
+  ("default target is the host") one minute after a Codex session filed and claimed #651. A
+  search for "default target" missed #651, whose title said "host OS and architecture".
+  - Do: right before filing, list the newest issues (`gh issue list --state all --limit 30`)
+    and search two or three phrasings. If a duplicate slips through, close yours, remove your
+    claim, and put what you learned on the surviving issue.
+  - Learned on #659.
+
 - **A stacked PR merges into its base branch, not main.** #198 was stacked on #191's branch. The
   coordinator merged #191, then merged #198 without checking its base, so #198 landed in the
   already-merged branch and never reached main. The β epic was closed and the README described
@@ -115,6 +123,10 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
     template. Do: combine the new construct with each neighbouring one it can nest in or call
     (lambdas in templates and templates in lambdas) before the review.
   - Learned on #279; confirmed on #280 and #281.
+- **`tools/test <paths>` with no stage name runs every stage, `build` included.** Meant to
+  check a few tests in a fresh worktree, it started a full build there.
+  - Do: name the stages, as in `YCXX=<binary> tools/test core own/pp/x`, or `policy` alone.
+  - Learned on #659.
 - **A reviewer running your binary blocks your rebuilds.** On #337 the reviewer probed with the
   worktree's `build/bin/ycxx`, so the next step could not be built for 15 minutes.
   - Do: build the next step into a build directory in the scratchpad

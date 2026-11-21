@@ -1,6 +1,7 @@
 # The pipeline (#43). On arm64 macOS, unit.pipeline also links and runs what it compiles.
 add_executable(unit_pipeline pipeline_test.cpp)
 target_link_libraries(unit_pipeline PRIVATE ycxxc_unit ycxxc_pipeline)
+# PARITY: by design: runs the arm64 Mach-O executables it links, which only macOS can
 if(APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "arm64|aarch64")
   add_test(NAME unit.pipeline COMMAND unit_pipeline --run ${CMAKE_CURRENT_BINARY_DIR}/run)
 else()
@@ -14,11 +15,13 @@ ycxxc_unit_test(pipeline_elf_executable elf_executable_test.cpp ycxxc_pipeline)
 add_test(NAME unit.dependent_fabsl
   COMMAND ${CMAKE_COMMAND} -DYCXX=$<TARGET_FILE:ycxxc>
           -P ${CMAKE_CURRENT_SOURCE_DIR}/dependent_fabsl.cmake)
+# PARITY: by design: runs what it links with the host's linker; the Linux block registers its own
 if(APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm64|aarch64)$" AND NOT CMAKE_CROSSCOMPILING)
   add_test(NAME unit.tu_local_parameter_symbols
     COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/tu_local_parameter_symbols.py
             $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER} darwin)
 endif()
+# PARITY: by design: runs x86-64 ELF executables, which only Linux can
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$"
    AND NOT CMAKE_CROSSCOMPILING)
   add_test(NAME unit.linux_compile

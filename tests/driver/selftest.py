@@ -129,6 +129,32 @@ class Parts(unittest.TestCase):
             self.assertEqual(toolchain.ycxx_features(d, 'linux-x86_64'), {'syntax'})
             self.assertRegex(toolchain.HOST, r'^\w+-\w+$')
 
+    def test_os_gates(self):
+        """tools/check-os-gates (#659): every one-OS gate names its parity issue or design reason."""
+        def check(files):
+            with tempfile.TemporaryDirectory() as d:
+                for name, text in files.items():
+                    (Path(d) / name).parent.mkdir(parents=True, exist_ok=True)
+                    (Path(d) / name).write_text(text)
+                r = subprocess.run([sys.executable, '-I', str(REPO / 'tools' / 'check-os-gates'), '--root', d],
+                                   capture_output=True, text=True)
+                return r.returncode, r.stderr
+        gated = '// REQUIRES: syntax linux\nint x;\n'
+        self.assertEqual(check({'tests/own/a.accept.cpp': gated})[0], 1)
+        self.assertEqual(check({'tests/own/a.accept.cpp': gated.replace('linux', 'darwin')})[0], 1)
+        self.assertEqual(check({'tests/own/a.accept.cpp': gated + '// PARITY: later\n'})[0], 1)
+        self.assertEqual(check({'tests/own/a.accept.cpp': gated + '// PARITY: #12 run it on Darwin\n'})[0], 0)
+        self.assertEqual(check({'tests/own/a.accept.cpp': gated + '// PARITY: by design: glibc only\n'})[0], 0)
+        self.assertEqual(check({'tests/own/a.accept.cpp': '// REQUIRES: syntax\n'})[0], 0)
+        self.assertEqual(check({'tests/features/ycxx.xfail': 'own/a.accept.cpp@linux-x86_64 why\n'})[0], 1)
+        self.assertEqual(check({'tests/features/ycxx.xfail': 'own/a.accept.cpp@linux-x86_64 why (#3)\nown/b.accept.cpp no host\n'})[0], 0)
+        self.assertEqual(check({'tests/features/ycxx.txt': 'syntax\nrun darwin-arm64\n'})[0], 1)
+        self.assertEqual(check({'tests/features/ycxx.txt': '# hosted Linux is #9\nrun darwin-arm64\n'})[0], 0)
+        cmake = 'if(APPLE)\n  add_test(NAME t COMMAND t)\nendif()\n'
+        self.assertEqual(check({'tests/unit/x/CMakeLists.txt': cmake})[0], 1)
+        self.assertEqual(check({'tests/unit/x/CMakeLists.txt': '# PARITY: #5\n' + cmake})[0], 0)
+        self.assertEqual(check({'tests/unit/x/CMakeLists.txt': 'if(APPLE)\n  set(X 1)\nendif()\n'})[0], 0)
+
     def test_xfails_limited_to_hosts(self):
         with tempfile.TemporaryDirectory() as d:
             d = Path(d)

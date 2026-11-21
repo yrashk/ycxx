@@ -1,0 +1,135 @@
+#!/usr/bin/env python3
+"""Every test limited to one host OS says why, with an issue or as a design fact (#659).
+
+macOS and Linux are meant to do the same things (DECISIONS §1.3). A test that runs on one of
+them only hides a gap unless something tracks it. Checked:
+
+- a test under tests/ whose `REQUIRES:` names `darwin` or `linux` needs a `PARITY:` directive:
+  `PARITY: #N ...`, the issue that makes it run on the other OS, or `PARITY: by design: <why>`,
+  when the test is about one host's own facts (its C library's headers, its ABI);
+- a host-qualified expected failure in tests/features/ycxx.xfail (`<test>@<host> <reason>`)
+  names an issue (`#N`) in its reason;
+- a feature limited to hosts in tests/features/ycxx.txt names an issue on its line or in the
+  comment just above it;
+- in tests/**/CMakeLists.txt, an `if(...)` on `APPLE` or `CMAKE_SYSTEM_NAME` that adds tests
+  carries a `# PARITY:` comment on the lines just above it, in the same two forms.
+
+  tools/check-os-gates [--root DIR]
+"""
+import argparse
+import pathlib
+import re
+import sys
+
+ISSUE = re.compile(r'#\d+\b')
+PARITY = re.compile(r'^(?:#\d+\b|by design: \S)')
+DIRECTIVE = re.compile(r'^\s*//\s*(REQUIRES|PARITY):(.*)$')
+OS_WORDS = {'darwin', 'linux'}
+OS_IF = re.compile(r'^\s*(?:else)?if\s*\((?=[^)]*\b(?:APPLE|CMAKE_SYSTEM_NAME)\b)', re.I)
+CMAKE_PARITY = re.compile(r'^\s*#\s*PARITY:\s*(.*)$')
+SUFFIXES = ('.cpp', '.incr')
+
+
+def test_gates(root):
+    problems = []
+    for path in sorted((root / 'tests').rglob('*')):
+        if path.suffix not in SUFFIXES or not path.is_file() or 'driver' in path.relative_to(root / 'tests').parts[:1]:
+            continue
+        requires, parity = [], []
+        for line in path.read_text(encoding='utf-8', errors='replace').splitlines():
+            m = DIRECTIVE.match(line)
+            if m:
+                (requires if m[1] == 'REQUIRES' else parity).append(m[2].strip())
+        words = {w for r in requires for w in r.replace(',', ' ').split()}
+        oses = sorted(words & OS_WORDS)
+        if not oses:
+            continue
+        rel = path.relative_to(root)
+        if not parity:
+            problems.append(f'{rel}: REQUIRES: {" ".join(oses)} without a PARITY: directive '
+                            f'(#N for the issue that runs it on the other OS, or "by design: <why>")')
+        elif not all(PARITY.match(p) for p in parity):
+            problems.append(f'{rel}: PARITY: must start with "#N" or "by design: "')
+    return problems
+
+
+def xfail_gates(root):
+    path = root / 'tests' / 'features' / 'ycxx.xfail'
+    problems = []
+    for n, line in enumerate(path.read_text().splitlines() if path.is_file() else (), 1):
+        entry = line.split('#', 1)[0].strip()
+        if not entry:
+            continue
+        test, _, reason = line.strip().partition(' ')
+        if '@' in test and not ISSUE.search(reason):
+            problems.append(f'{path.relative_to(root)}:{n}: host-qualified expected failure {test} names no issue (#N)')
+    return problems
+
+
+def feature_gates(root):
+    path = root / 'tests' / 'features' / 'ycxx.txt'
+    problems = []
+    lines = path.read_text().splitlines() if path.is_file() else []
+    for n, line in enumerate(lines, 1):
+        words = line.split('#', 1)[0].split()
+        if len(words) < 2:
+            continue
+        above = []
+        for prev in reversed(lines[:n - 1]):
+            if not prev.lstrip().startswith('#'):
+                break
+            above.append(prev)
+        if not ISSUE.search(line) and not any(ISSUE.search(a) for a in above):
+            problems.append(f'{path.relative_to(root)}:{n}: feature "{words[0]}" is limited to {" ".join(words[1:])} '
+                            'and names no issue (#N) on its line or in the comment above it')
+    return problems
+
+
+def cmake_gates(root):
+    problems = []
+    for path in sorted((root / 'tests').rglob('CMakeLists.txt')):
+        lines = path.read_text().splitlines()
+        for n, line in enumerate(lines, 1):
+            if not OS_IF.match(line):
+                continue
+            # The tests this branch adds: up to its matching else/elseif/endif at the same depth.
+            depth, adds = 0, False
+            for body in lines[n:]:
+                if re.match(r'^\s*if\s*\(', body, re.I):
+                    depth += 1
+                elif re.match(r'^\s*endif\s*\(', body, re.I):
+                    if depth == 0:
+                        break
+                    depth -= 1
+                elif depth == 0 and re.match(r'^\s*else(?:if)?\s*\(', body, re.I):
+                    break
+                adds = adds or bool(re.match(r'^\s*(?:add_test|ycxxc_unit_test)\s*\(', body, re.I))
+            if not adds:
+                continue
+            reasons = []
+            for prev in reversed(lines[:n - 1]):
+                if not prev.lstrip().startswith('#'):
+                    break
+                if m := CMAKE_PARITY.match(prev):
+                    reasons.append(m[1])
+            if not reasons:
+                problems.append(f'{path.relative_to(root)}:{n}: tests added only on one OS need a "# PARITY:" comment above the if()')
+            elif not all(PARITY.match(r) for r in reasons):
+                problems.append(f'{path.relative_to(root)}:{n}: "# PARITY:" must start with "#N" or "by design: "')
+    return problems
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
+    ap.add_argument('--root', type=pathlib.Path, default=pathlib.Path(__file__).resolve().parent.parent)
+    root = ap.parse_args().root
+    problems = test_gates(root) + xfail_gates(root) + feature_gates(root) + cmake_gates(root)
+    for p in problems:
+        print(f'check-os-gates: {p}', file=sys.stderr)
+    if problems:
+        print('check-os-gates: a one-OS test hides a parity gap unless an issue tracks it (#659, AGENTS.md)', file=sys.stderr)
+    return 1 if problems else 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())
