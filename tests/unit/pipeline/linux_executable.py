@@ -11,6 +11,7 @@ import tempfile
 def main():
     ycxx, readelf = sys.argv[1:]
     target = '--target=x86_64-pc-linux-gnu'
+    darwin = '--target=arm64-apple-darwin'
     with tempfile.TemporaryDirectory(prefix='ycxx-linux-exec-', dir='.') as temp, \
             tempfile.TemporaryDirectory(prefix='yd-') as runtime:
         scope = Path(temp).resolve()
@@ -43,7 +44,7 @@ def main():
         headers = run([readelf, '-h', '-l', 'a.out'])
         assert 'EXEC (Executable file)' in headers and 'X86-64' in headers
         assert 'INTERP' not in headers and 'DYNAMIC' not in headers
-        compile('trivial.cpp', '-o', 'darwin-program')
+        compile(darwin, 'trivial.cpp', '-o', 'darwin-program')
         assert (scope / 'darwin-program').read_bytes().startswith(bytes.fromhex('cffaedfe'))
 
         tests = Path(__file__).resolve().parents[2]
@@ -59,7 +60,7 @@ def main():
         run(['./trap-program'], status=37)
         run(['./trap-program', 'trigger'], status=-signal.SIGILL)
         (scope / 'darwin-trap').mkdir()
-        compile('--target=arm64-apple-darwin', '-c', 'trap.cpp', '-o', 'darwin-trap/trap.o')
+        compile(darwin, '-c', 'trap.cpp', '-o', 'darwin-trap/trap.o')
         trap_object = (scope / 'darwin-trap/trap.o').read_bytes()
         # Little-endian Mach-O 64, arm64, MH_OBJECT.
         assert trap_object[:8] == bytes.fromhex('cffaedfe 0c000001')
@@ -128,7 +129,7 @@ int main(int argc, char** argv) {
         custom_init = "a custom '_start' with a nonempty ELF .init_array is unsupported"
         reject('start.cpp', 'init-first.cpp', error=custom_init)
         reject('init-first.o', 'start.cpp', error=custom_init)
-        compile('-c', 'init-first.cpp', '-o', 'darwin-dynamic.o')
+        compile(darwin, '-c', 'init-first.cpp', '-o', 'darwin-dynamic.o')
         assert b'__mod_init_func' in (scope / 'darwin-dynamic.o').read_bytes()
 
         reference_fixtures = tests / 'own' / 'dynamic-init'
@@ -213,18 +214,42 @@ int main() { static int base = 20; return base + outer::tick() + outer::tick(); 
         assert ' _ZGVZ8rememberiE5first\n' in symbols
         reject('guarded_static.o', error="undefined symbol '__cxa_guard_acquire'")
 
-        compile('-c', 'trivial.cpp', '-o', 'darwin.o')
-        compile('darwin.o', '-o', 'darwin-object-program')
+        compile(darwin, '-c', 'trivial.cpp', '-o', 'darwin.o')
+        compile(darwin, 'darwin.o', '-o', 'darwin-object-program')
         assert (scope / 'darwin-object-program').read_bytes().startswith(bytes.fromhex('cffaedfe'))
         reject('main.cpp', 'darwin.o', error='darwin.o: expected a little-endian ELF64 object')
-        compile('trivial.cpp', 'main.o', status=1, error='main.o: not a 64-bit Mach-O file')
+        compile(darwin, 'trivial.cpp', 'main.o', status=1, error='main.o: not a 64-bit Mach-O file')
         (scope / 'malformed.o').write_bytes(b'\x7fELF')
         reject('malformed.o', error='malformed.o: truncated ELF header')
         reject('missing.o', error="cannot read 'missing.o'")
         reject('bad_main.cpp', 'malformed.o', error="'main' must return 'int'")
-        compile('-nostdlib', 'trivial.cpp', status=1, error="unsupported option '-nostdlib'")
+        compile(darwin, '-nostdlib', 'trivial.cpp', status=1, error="unsupported option '-nostdlib'")
+
+        source('host-default.cpp', """#if !defined(__linux__) || !defined(__x86_64__) || defined(__APPLE__)
+#error expected the Linux x86-64 host target
+#endif
+int main() { return 27; }""")
+        compile('host-default.cpp', '-o', 'host-hosted', status=1, error='hosted Linux linking is not supported')
+        assert not (scope / 'host-hosted').exists()
+        preprocessed = compile('-E', 'host-default.cpp')
+        assert preprocessed == compile(target, '-E', 'host-default.cpp')
+        compile('-c', 'host-default.cpp', '-o', 'host-default.o')
+        headers = run([readelf, '-h', 'host-default.o'])
+        assert 'REL (Relocatable file)' in headers and 'X86-64' in headers
+        object_image = (scope / 'host-default.o').read_bytes()
+        compile('-nostdlib', 'host-default.o', '-o', 'host-default')
+        run(['./host-default'], status=27)
+        headers = run([readelf, '-h', 'host-default'])
+        assert 'EXEC (Executable file)' in headers and 'X86-64' in headers
+        default_image = (scope / 'host-default').read_bytes()
 
         try:
+            assert compile('-E', 'host-default.cpp', env=daemon) == preprocessed
+            compile('-c', 'host-default.cpp', '-o', 'host-default.o', env=daemon)
+            assert (scope / 'host-default.o').read_bytes() == object_image
+            compile('-nostdlib', 'host-default.o', '-o', 'host-default', env=daemon)
+            assert (scope / 'host-default').read_bytes() == default_image
+            run(['./host-default'], status=27)
             for _ in range(2):
                 compile(target, '-nostdlib', 'main.cpp', 'bias.cpp', '-o', 'program', env=daemon)
                 run(['./program', 'A', '!'], status=105)
