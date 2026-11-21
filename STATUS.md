@@ -1035,9 +1035,15 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   omitted field uses its supported scalar default member initializer or is value-initialized.
   Constant initialization uses the scalar element evaluator, with destination-dependent
   constant evaluation tracked in [#25](https://github.com/yrashk/ycxx/issues/25).
-- Parenthesized arrays, nested and base-bearing aggregates, unions, reference members,
-  bit-fields, nontrivial destruction, static storage and functional casts remain in
-  [#301](https://github.com/yrashk/ycxx/issues/301). Linux x86-64 runtime conversions between
+- An automatic runtime declaration can also initialize an aggregate with one public nonvirtual
+  direct base and at least one public arithmetic field. Every element has an explicit initializer.
+  The first expression is a nonvolatile lvalue of the exact base type, which is a flat aggregate
+  with nonvolatile arithmetic fields and trivial copy and destruction. The base copy uses the
+  existing subobject layout and is sequenced before the remaining initializers.
+- Parenthesized arrays, nested fields, unions, reference members, bit-fields, and nontrivial
+  destruction remain in [#301](https://github.com/yrashk/ycxx/issues/301). The issue also tracks
+  multiple bases, base prvalues, omitted initializers for derived aggregates, constant evaluation
+  of base copies, static storage and functional casts. Linux x86-64 runtime conversions between
   floating-point and integer types remain in [#201](https://github.com/yrashk/ycxx/issues/201).
   Spec-only fixtures are in `tests/own/parenthesized-aggregate/`.
 
@@ -1772,10 +1778,17 @@ session's.*
   types. Supported class-template bases and variable-template initializers replay dependent
   operands. Other operand types and dependent queries outside those contexts get hard diagnostics.
   `__has_builtin` answers 0 while support is partial ([meta.rel], [dcl.init.ref], #218).
+- `__is_base_of(Base, Derived)` ignores top-level cv. Nonclass and union operands give false.
+  The same nonunion class gives true, including when incomplete. For distinct nonunion classes,
+  `Derived` must be complete. The trait follows the recorded base declarations, including private
+  and ambiguous bases. A dependent occurrence in a supported class-template base or variable-template
+  initializer checks completeness at instantiation. A concrete occurrence checks it at its original
+  source point. Missing graph information gets a hard diagnostic when it prevents a result.
+  `__has_builtin` answers 0 while support is partial ([meta.rel], [class.derived], #218).
 - Listed in docs/EXTENSIONS.md. Tests: `tests/own/builtins/`. `<cstdio>`: 53 → 33 errors.
 - Not yet (#211 follow-up): the built-ins that need the object model, such as
   class constructibility, assignability and convertibility, remaining `__is_trivially_*` and
-  `__is_nothrow_*` predicates, `__is_base_of`, `__is_standard_layout` and
+  `__is_nothrow_*` predicates, `__is_standard_layout` and
   `__reference_binds_to_temporary`. Other dependent predicates, conversions of a dependent
   predicate to a non-`bool` parameter, dependent array bounds and expression mangling remain in
   #209.
@@ -2792,8 +2805,12 @@ and runtime integration with ycxx's own linker remain under [#89]. See the
 - Syntax checking supports one-dimensional `new T[n]` and `delete[] p` for integral and ordinary
   pointer elements ([expr.new], [expr.delete]). The bound converts to `size_t`. A potentially
   evaluated constant bound can be zero and must keep the object size within the positive range
-  of `ptrdiff_t`. The array AST retains default or empty initialization and the typed delete
-  operand. Native lowering and constant evaluation of these operations remain in #293.
+  of `ptrdiff_t`. The array AST retains default or empty initialization and the typed delete operand.
+  On Linux x86-64, array deletion evaluates that operand once and passes the original address to
+  the usual unsized `operator delete[](void*)` when non-null. The call releases the allocation,
+  including zero-length arrays. Native array allocation and broader deletion remain in #293.
+  Constant-evaluated allocation and deletion are tracked in #321.
+  [Cookie-free deletion](docs/design/cookie-free-array-delete.md)
   A file-scope scalar initializer still needs lowered code to qualify for dynamic initialization.
   Type checking covers function-local expressions and unevaluated operands.
 
@@ -2886,10 +2903,14 @@ declared return type after signature substitution and constraint checking.
 Evaluated calls and calls that need placeholder return deduction still demand
 the body. A non-generic lambda body uses its own evaluation context.
 
-## Concrete decay-copy expressions (#286)
+## Scalar and pointer decay-copy expressions (#286)
 
 - Single-expression `auto(x)` and `auto{x}` perform scalar and pointer decay-copy,
   including bit-field reads and array and function decay. Grouped declarations
   still take precedence where the statement can be a declaration.
-- General class objects, member pointers, dependent expressions, and some
-  template-argument contexts remain open. [#286](https://github.com/yrashk/ycxx/issues/286)
+- Function-template bodies replay decay-copy of supported dependent operands with the
+  template arguments bound. A value-dependent operand with known type gives the conversion
+  its decayed prvalue type in the template definition, including in `decltype`.
+- General class objects, member pointers, operands whose type dependence is unresolved, and
+  dependent template arguments, requirements, and exception specifications remain open.
+  [#286](https://github.com/yrashk/ycxx/issues/286)

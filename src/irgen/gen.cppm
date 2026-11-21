@@ -80,6 +80,7 @@ struct FunctionInput {
   ast::EntityId guard_acquire = ast::EntityId::none, guard_release = ast::EntityId::none;
   ast::EntityId atexit = ast::EntityId::none, dso = ast::EntityId::none;
   bool hosted_catch_all = false;  // the native frontend has certified this occurrence
+  bool native_array_delete = false;  // the backend's Linux x86-64 cookie-free array deletion
 };
 
 struct FunctionIr {
@@ -1383,7 +1384,10 @@ class Gen {
       return std::nullopt;
     }
     if (is<ast::NewArray>(a)) throw Unsupported{"array allocation"};
-    if (is<ast::DeleteArray>(a)) throw Unsupported{"array deallocation"};
+    if (is<ast::DeleteArray>(a)) {
+      delete_array(a);
+      return std::nullopt;
+    }
     if (is<ast::Call>(a)) return call(a);
     if (member_call_expression(a)) return member_call(a);
     if (is<ast::VariadicBuiltin>(a)) return variadic_builtin(a);
@@ -1743,19 +1747,37 @@ class Gen {
     return object;
   }
 
-  void delete_object(At a) {
-    if (fn_.thunk) unsupported(a, "in constant evaluation");
-    auto d = get<ast::DeleteObject>(a);
-    ValueId addr = rvalue(child(a, d.address));
+  void deallocate_if_nonnull(ValueId addr, auto&& deallocate) {
     ValueId nonnull = pure(ir::Op::tobool, facts_.bool_type(), {addr});
     ir::BlockId release = new_block(), join = new_block();
     cond_br(nonnull, edge(release), edge(join));
     enter(release);
-    stateful(ir::Op::obj__end, {}, std::span(&addr, 1));
-    ValueId args[] = {addr, rvalue(child(a, d.size))};
-    call_fn(d.function, d.info.type, args, 0);
+    deallocate();
     br(join);
     enter(join);
+  }
+
+  void delete_object(At a) {
+    if (fn_.thunk) unsupported(a, "in constant evaluation");
+    auto d = get<ast::DeleteObject>(a);
+    ValueId addr = rvalue(child(a, d.address));
+    deallocate_if_nonnull(addr, [&] {
+      stateful(ir::Op::obj__end, {}, std::span(&addr, 1));
+      ValueId args[] = {addr, rvalue(child(a, d.size))};
+      call_fn(d.function, d.info.type, args, 0);
+    });
+  }
+
+  void delete_array(At a) {
+    if (!fn_.native_array_delete) throw Unsupported{"array deallocation"};
+    auto d = get<ast::DeleteArray>(a);
+    ValueId operand = rvalue(child(a, d.operand));
+    deallocate_if_nonnull(operand, [&] {
+      ast::QualType void_pointer = facts_.pointer_to(d.info.type);
+      ValueId address = pure(ir::Op::ptr_cast, void_pointer, {operand}, {word(ty(void_pointer))});
+      // The call releases the allocation root, including a zero-length array ([basic.life]).
+      call_fn(d.function, d.info.type, std::span(&address, 1), 0);
+    });
   }
 
   // A call to a named function ([expr.call]). The callee is not evaluated: naming a function has
