@@ -735,6 +735,13 @@ public:
       if (k <= item) r = d;
     return r;
   }
+  bool inline_declared(EntityId entity, u32 item) const {
+    const auto declarations = decls_.find(std::to_underlying(entity));
+    return declarations != decls_.end() && std::ranges::any_of(declarations->second, [&](const auto& entry) {
+      const auto& [point, declaration] = entry;
+      return point <= item && (declaration.flags & sema::decl_flag::inline_);
+    });
+  }
   // A previous definition of this entity in this TU ([basic.def.odr]). C language linkage
   // can make a definition in another namespace correspond without ordinary lookup finding it.
   bool function_defined_before(EntityId e, u32 item) {
@@ -5644,6 +5651,10 @@ private:
     p_->declared(sem, k_);
     Ex init;
     sema::ConstId value = sema::ConstId::none;
+    const bool replay_defaults = !fn && definition && !spec.is_inline && !spec.is_constexpr && !spec.is_constinit &&
+                                 !template_ && !var_ && !explicit_ && !(d.qualified && d.scope.type) &&
+                                 s_.can_replay_default_members(d.type) && !p_->inline_declared(sem.entity, k_);
+    const sema::Sema::DefaultMemberScope defaults(s_, replay_defaults);
     // An initializer that is not a constant expression initializes the variable dynamically
     // ([basic.start.dynamic]), by the unit's initialization function, unless it must be constant
     // ([dcl.constexpr], [dcl.constinit]) or is not supported yet: an inline variable's or a
