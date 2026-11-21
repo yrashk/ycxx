@@ -297,6 +297,7 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
   for (EntityId c : classes.classes()) {
     const auto& record = classes.rec(c);
     if (!record.polymorphic) continue;
+    tu.has_virtual_declaration = true;
     const auto member = std::ranges::find_if(record.members, &sema::MemberDeclRec::is_virtual);
     if (member != record.members.end())
       if (auto d = program.member_decl(member->entity)) tu.virtual_declaration = ast::Loc{d->item, 0};

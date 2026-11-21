@@ -171,6 +171,7 @@ struct TranslationUnit {
   std::vector<std::pair<EntityId, EntityId>> init_functions;
   std::optional<ast::Loc> namespace_destruction;  // first variable whose destructor runs at exit
   bool front_failed = false;           // the front end reported errors: nothing to compile
+  bool has_virtual_declaration = false;
   std::optional<ast::Loc> virtual_declaration;
 };
 
@@ -1399,8 +1400,7 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
     errors.push_back({std::nullopt, "the translation unit has errors"});
     co_return out;
   }
-  const Shapes& shapes = co_await cx.fetch<UnitShapes>(id);
-  if (std::ranges::any_of(shapes.classes, &ClassShape::layout_requires_virtual_support)) {
+  if (tu.has_virtual_declaration) {
     errors.push_back({tu.virtual_declaration, "native output for a translation unit with virtual member functions is not supported yet"});
     co_return co_await locate_errors(cx, id, std::move(out));
   }
@@ -1432,6 +1432,7 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
   // Variables: their initial bytes, by what they hold ([basic.start.static]).
   std::vector<aarch64::DataDef> data;
   std::set<EntityId> weak_variables;
+  const Shapes& shapes = co_await cx.fetch<UnitShapes>(id);
   for (const Variable& v : tu.variables) {
     QueryLayout layout(cx, shapes, target);
     auto b = initial_bytes(in, layout, v.type, v.init);
