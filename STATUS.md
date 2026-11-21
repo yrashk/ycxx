@@ -2079,8 +2079,10 @@ What the process allocates, attributed to the engine's cells, in the trace and t
   virtual layout, or bit-fields.
   Array and class members each take one binding. A reference member keeps its declared reference
   type in `decltype(x)` and aliases its referent, including through a const hidden object.
-  Reference bindings apply ordinary temporary lifetime extension. A complete `std::tuple_size<E>`
-  with a member named `value` selects the tuple-like protocol, which is diagnosed as unsupported.
+  Reference bindings extend a temporary's lifetime, including through a comma's right operand.
+  Conditional and array-subscript paths to a temporary need lifetime lowering (#157).
+  A complete `std::tuple_size<E>` with a member named `value` selects the tuple-like protocol,
+  which is diagnosed as unsupported.
 - **Deduced return types:** each `return` deduces and the first fixes the type for the rest of
   the body ([dcl.spec.auto.general]/11); no return deduces `void`. `BodySema` carries the deduced
   function type (`deduced`, `deduced_type`). Naming the function (`Sema::deduced_function`) asks

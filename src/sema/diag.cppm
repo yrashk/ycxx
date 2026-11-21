@@ -93,6 +93,8 @@ enum class Diag : std::uint32_t {
   binding_member_access [[=message{Severity::error, "structured binding of non-public member '{0:n}' is not supported"}]],
   binding_bit_field [[=message{Severity::error, "structured binding of bit-field '{0:n}' is not supported yet"}]],
   binding_tuple_unsupported [[=message{Severity::error, "tuple-like structured binding for type '{0:t}' is not supported yet"}]],
+  binding_unusable_destructor [[=message{Severity::error, "structured binding requires a usable destructor for '{0:t}'"}]],
+  binding_temporary_lifetime [[=message{Severity::error, "this structured binding initializer needs unsupported temporary lifetime extension"}]],
   not_captured [[=message{Severity::error, "'{0:n}' is not captured: the lambda has no capture-default"}]],
   cannot_capture [[=message{Severity::error, "'{0:n}' cannot be captured: it is not a local variable"}]],
   namespace_lambda_capture_default [[=message{Severity::error, "a namespace-scope lambda cannot have a capture-default"}]],

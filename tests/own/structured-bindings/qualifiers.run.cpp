@@ -12,6 +12,14 @@ struct Controls {
   int&& endpoint;
 };
 
+struct MoveReference { int&& endpoint; };
+
+struct CopyReference {
+  int&& endpoint;
+  CopyReference(int&& value) : endpoint(static_cast<int&&>(value)) {}
+  CopyReference(const CopyReference& other) : endpoint(static_cast<int&&>(other.endpoint)) {}
+};
+
 int main() {
   int linked = 7;
   int end = 11;
@@ -40,4 +48,10 @@ int main() {
   value = 31;
   meter = 37;
   if (live.fixed != 31 || live.sensor != 37 || attached != 17 || terminal != 19) return 2;
+
+  MoveReference moving{static_cast<int&&>(end)};
+  auto [moved] = static_cast<MoveReference&&>(moving);
+  CopyReference copying(static_cast<int&&>(linked));
+  auto [copied] = copying;
+  if (&moved != &end || &copied != &linked) return 3;
 }

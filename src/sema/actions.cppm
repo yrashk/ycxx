@@ -3992,7 +3992,14 @@ public:
     if (!user_copy) {
       QualType source = cr->defaulted_copy_const ? types().add_cv(ut, Cv::const_) : ut;
       QualType p = types().lvalue_ref(source);
-      cands.push_back({cr->copy_ctor, types().function(void_, std::span(&p, 1), false, LangLinkage::cxx), true, cr->copy_deleted});
+      // [class.copy.ctor]: an rvalue-reference member deletes the implicit copy. A mutable
+      // xvalue can still transfer the representation when its implicit move is trivial (#244).
+      const bool same_class_glvalue = args.size() == 1 && args[0].glvalue() && same_unqualified(args[0].type(), ut);
+      const bool trivial_move = same_class_glvalue && args[0].cat() == ValueCategory::xvalue &&
+                                object_cv(args[0].type()) == Cv::none && cr->move_usable && !cr->move_nontrivial;
+      const bool deleted = cr->copy_deleted || (same_class_glvalue && !trivial_move &&
+          std::ranges::any_of(cr->fields, [&](const FieldRec& f) { return types().rec(f.type).rvalue_ref; }));
+      cands.push_back({cr->copy_ctor, types().function(void_, std::span(&p, 1), false, LangLinkage::cxx), true, deleted});
     }
     if (!cr->user_ctors && !copy_init) cands.push_back({EntityId::none, types().function(void_, {}, false, LangLinkage::cxx), true, false});
     auto chosen = resolve(cands, args, begin, no_name(), std::nullopt, ut);
@@ -4186,9 +4193,15 @@ public:
       Ex inner = extended({m->object.id, e.begin + m->object.at, e.end, {}});
       return node(ast::Member{m->info, m->member, m->field, 0, 0, at(inner, e.begin)}, e.begin, e.end, m->info);
     }
-    if (auto m = as<ast::OrderedBinary>(e); m && m->op == ast::OrderedOp::dot_star) {
-      Ex inner = extended({m->lhs.id, e.begin + m->lhs.at, e.end, {}});
-      return node(ast::OrderedBinary{m->info, m->op, at(inner, e.begin), m->rhs}, e.begin, e.end, m->info);
+    if (auto m = as<ast::OrderedBinary>(e)) {
+      if (m->op == ast::OrderedOp::dot_star) {
+        Ex inner = extended({m->lhs.id, e.begin + m->lhs.at, e.end, {}});
+        return node(ast::OrderedBinary{m->info, m->op, at(inner, e.begin), m->rhs}, e.begin, e.end, m->info);
+      }
+      if (m->op == ast::OrderedOp::comma) {
+        Ex inner = extended({m->rhs.id, e.begin + m->rhs.at, e.end, {}});
+        return node(ast::OrderedBinary{m->info, m->op, m->lhs, at(inner, e.begin)}, e.begin, e.end, m->info);
+      }
     }
     return e;
   }
@@ -5696,6 +5709,51 @@ public:
     return true;
   }
 
+  // [class.dtor]: the destructor of the hidden object or materialized temporary is potentially
+  // invoked. A reference to an existing object does not itself invoke a destructor.
+  bool check_binding_destructor(QualType type, u32 at_) {
+    EntityId entity = types().class_of(type);
+    const ClassRec* record = class_rec(entity);
+    if (!record || record->destructor == EntityId::none) return true;
+    if (!record->destructor_usable) {
+      diag(at_, Diag::binding_unusable_destructor, type);
+      return false;
+    }
+    return check_access(entity, record->destructor, w_->entities.rec(record->destructor).name, at_);
+  }
+
+  // Follow the glvalue designator through the operations in [class.temporary]. A temporary
+  // reached through a conditional branch or array subscript needs additional lowering (#157).
+  bool check_binding_lifetime(Ex e, bool unsupported_path = false) {
+    auto check = [&](Child child, bool unsupported = false) {
+      return check_binding_lifetime({child.id, e.begin + child.at, e.end, {}}, unsupported_path || unsupported);
+    };
+    if (auto m = as<ast::Materialize>(e)) {
+      if (unsupported_path) {
+        diag(e.begin, Diag::binding_temporary_lifetime);
+        return false;
+      }
+      return !types().is_class(m->info.type) || check_binding_destructor(m->info.type, e.begin);
+    }
+    if (auto p = as<ast::Paren>(e)) return check(p->operand);
+    if (auto m = as<ast::Member>(e); m && !m->arrow && !m->reference) return check(m->object);
+    if (auto c = as<ast::ImplicitConversion>(e); c &&
+        (c->conversion == ast::ConversionKind::derived_to_base || c->conversion == ast::ConversionKind::base_to_derived ||
+         c->conversion == ast::ConversionKind::qualification))
+      return check(c->operand);
+    if (auto b = as<ast::OrderedBinary>(e)) {
+      if (b->op == ast::OrderedOp::dot_star) return check(b->lhs);
+      if (b->op == ast::OrderedOp::comma) return check(b->rhs);
+    }
+    if (auto c = as<ast::Conditional>(e)) return check(c->then_, true) && check(c->else_, true);
+    if (auto s = as<ast::Subscript>(e)) {
+      Ex base{s->base.id, e.begin + s->base.at, e.end, {}};
+      if (auto c = as<ast::ImplicitConversion>(base); c && c->conversion == ast::ConversionKind::array_to_pointer)
+        return check_binding_lifetime({c->operand.id, base.begin + c->operand.at, e.end, {}}, true);
+    }
+    return true;
+  }
+
   // [dcl.struct.bind]/1, /8: initialize one hidden object or reference and project its data
   // members in declaration order. This slice uses only addressable public fields of a root class.
   std::optional<std::pair<QualType, const ClassRec*>> class_binding(QualType declared, const Ex& source, u64 names, u32 at_) {
@@ -5733,6 +5791,11 @@ public:
         diag(at_, Diag::binding_bit_field, field.name);
         return std::nullopt;
       }
+    }
+    if (!types().is_reference(*type) || !source.glvalue()) {
+      if (!check_binding_destructor(object, at_)) return std::nullopt;
+    } else if (!check_binding_lifetime(source)) {
+      return std::nullopt;
     }
     return std::pair{*type, record};
   }

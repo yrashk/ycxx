@@ -3,6 +3,7 @@ int next_calls;
 int constructed;
 int destroyed;
 int last_sum;
+int comma_calls;
 
 struct Trace {
   int first;
@@ -13,6 +14,15 @@ struct Trace {
   ~Trace() {
     ++destroyed;
     last_sum = first + second;
+  }
+};
+
+struct Part { int value; };
+struct Whole {
+  Part part;
+  ~Whole() {
+    ++destroyed;
+    last_sum = part.value;
   }
 };
 
@@ -41,4 +51,21 @@ int main() {
     a = 19;
   }
   if (destroyed != 3 || last_sum != 36) return 6;
+
+  {
+    const auto& [value] = (++comma_calls, Whole{{23}}.part);
+    if (comma_calls != 1 || destroyed != 3 || value != 23) return 7;
+  }
+  if (destroyed != 4 || last_sum != 23) return 8;
+
+  {
+    const Part& part = (++comma_calls, Whole{{29}}.part);
+    if (comma_calls != 2 || destroyed != 4 || part.value != 29) return 9;
+  }
+  if (destroyed != 5 || last_sum != 29) return 10;
+
+  Part left{31}, right{37};
+  bool choose_left = true;
+  auto& [selected] = choose_left ? left : right;
+  if (&selected != &left.value) return 11;
 }

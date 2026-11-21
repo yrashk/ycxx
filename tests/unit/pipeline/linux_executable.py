@@ -134,6 +134,8 @@ int main(int argc, char** argv) {
             run(['./bindings'])
         compile(target, '-fsyntax-only', bindings / 'tuple-selection.reject.cpp', status=1,
                 error="tuple-like structured binding for type 'Crate' is not supported yet")
+        compile(target, '-fsyntax-only', bindings / 'conditional-temporary.accept.cpp', status=1,
+                error='structured binding initializer needs unsupported temporary lifetime extension')
         temporary = str(tests / 'draft' / 'basic' / 'class.temporary-3.accept.cpp')
         compile(target, '-fsyntax-only', temporary)
         compile(target, '-c', temporary, '-o', 'reference-temporary.o', status=1,
