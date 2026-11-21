@@ -28,10 +28,18 @@ export struct FrameRow {
   bool operator==(const FrameRow&) const = default;
 };
 
+export struct UnwindCallSite {
+  std::uint32_t begin;        // first byte of the call
+  std::uint32_t end;          // first byte after the call
+  std::uint32_t landing_pad;  // function-relative, or zero for a call without a pad
+  bool operator==(const UnwindCallSite&) const = default;
+};
+
 export struct MachineCode {
   std::vector<std::uint8_t> bytes;
   std::vector<Reloc> relocs;
   std::vector<FrameRow> frame_rows;
+  std::optional<std::vector<UnwindCallSite>> catch_all{};
   bool operator==(const MachineCode&) const = default;
 };
 
@@ -45,10 +53,22 @@ export std::expected<MachineCode, std::string> compile_function(const l2::Functi
                                                                 std::span<const ir::EntityId> direct_symbols = {},
                                                                 std::span<const ir::EntityId> got_symbols = {});
 
-// Append the first CIE if needed and one FDE to the unit's .eh_frame. Return the offset of
-// its initial_location field, where the object will put a PC32 relocation to a local code anchor.
-export std::expected<std::uint32_t, std::string> append_eh_frame(std::vector<std::uint8_t>& section,
-                                                               const MachineCode& code);
+export struct EhFrameCies {
+  std::optional<std::uint32_t> ordinary, handler;
+};
+
+export struct EhFrameFields {
+  std::uint32_t initial_location;
+  std::optional<std::uint32_t> personality;  // only when this function emits the handler CIE
+  std::optional<std::uint32_t> lsda;
+};
+
+// Append one FDE and its CIE if absent. Offsets identify signed PC-relative relocation fields.
+export std::expected<EhFrameFields, std::string> append_eh_frame(std::vector<std::uint8_t>& section,
+                                                                EhFrameCies& cies, const MachineCode& code);
+
+// Encode the supported catch-all LSDA from the final instruction and landing-pad offsets.
+export std::expected<std::vector<std::uint8_t>, std::string> catch_all_lsda(const MachineCode& code);
 
 namespace {
 
@@ -647,16 +667,14 @@ std::expected<MachineCode, std::string> compile_function(const l2::Function& bod
   return Emitter(body, *frame, direct_symbols, got_symbols).run();
 }
 
-std::expected<std::uint32_t, std::string> append_eh_frame(std::vector<std::uint8_t>& section, const MachineCode& code) {
-  // AMD64 psABI §§3.6.2, 4.2.4 and DWARF §6.4. The return address is at CFA-8. RBP
-  // initially has the caller's value. The only augmentation is the FDE pointer encoding.
+std::expected<EhFrameFields, std::string> append_eh_frame(std::vector<std::uint8_t>& section,
+                                                         EhFrameCies& cies, const MachineCode& code) {
+  // AMD64 psABI §§3.6.2, 4.2.4 and DWARF §6.4. The return address is at CFA-8.
+  // RBP initially has the caller's value.
   constexpr std::uint8_t dwarf_rbp = 6, dwarf_rsp = 7, dwarf_ra = 16;
   constexpr std::uint8_t def_cfa = 0x0c, same_value = 0x08, offset = 0x80, restore = 0xc0;
-  constexpr std::array<std::uint8_t, 20> cie{
-      0, 0, 0, 0,                    // CIE ID
-      1, 'z', 'R', 0,                // version and augmentation name
-      1, 0x78, dwarf_ra,             // code alignment 1, SLEB128 data alignment -8, return column
-      1, 0x1b,                       // augmentation size and DW_EH_PE_pcrel | DW_EH_PE_sdata4
+  constexpr std::uint8_t pcrel_sdata4 = 0x1b, indirect = 0x80;
+  constexpr std::uint8_t initial_cfi[]{
       def_cfa, dwarf_rsp, 8, offset | dwarf_ra, 1, same_value, dwarf_rbp,
   };
   if (code.bytes.empty() || !std::in_range<std::int32_t>(code.bytes.size()))
@@ -690,25 +708,100 @@ std::expected<std::uint32_t, std::string> append_eh_frame(std::vector<std::uint8
     previous = row.offset;
   }
 
-  constexpr std::size_t word = sizeof(std::uint32_t), fde_header = 4 * word + 1;
-  const auto fde_start = section.empty() ? word + cie.size() : section.size();
+  const bool handler = code.catch_all.has_value();
+  auto& cie = handler ? cies.handler : cies.ordinary;
+  constexpr std::size_t word = sizeof(std::uint32_t);
+  const std::size_t cie_size = handler ? 32 : 24;  // length field included
+  const std::size_t fde_header = 4 * word + 1 + (handler ? word : 0);
+  if (section.size() % 8 != 0 || (cie && (*cie > section.size() || cie_size > section.size() - *cie)))
+    return std::unexpected("invalid unwind CIE position");
+  const auto fde_start = section.size() + (cie ? 0 : cie_size);
   const auto fde_size = align_up(fde_header + instructions.size(), 8);
   if (!std::in_range<std::uint32_t>(fde_start + fde_size))
     return std::unexpected("the unwind section exceeds the object offset limit");
+
   Encoder record(section);
-  if (section.empty()) {
-    record.immediate(cie.size(), word);
-    section.insert(section.end(), cie.begin(), cie.end());
+  EhFrameFields fields{};
+  if (!cie) {
+    cie = static_cast<std::uint32_t>(record.offset());
+    record.immediate(cie_size - word, word);
+    record.immediate(0, word);  // CIE ID
+    if (handler) {
+      record.emit({1, 'z', 'P', 'L', 'R', 0, 1, 0x78, dwarf_ra, 7, indirect | pcrel_sdata4});
+      fields.personality = static_cast<std::uint32_t>(record.offset());
+      record.immediate(0, word);
+      record.emit({pcrel_sdata4, pcrel_sdata4});  // LSDA and initial-location encodings
+    } else {
+      record.emit({1, 'z', 'R', 0, 1, 0x78, dwarf_ra, 1, pcrel_sdata4});
+    }
+    section.insert(section.end(), std::begin(initial_cfi), std::end(initial_cfi));
   }
   record.immediate(fde_size - word, word);
-  record.immediate(fde_start + word, word);  // the backwards distance from the CIE pointer field
-  const auto initial_location = static_cast<std::uint32_t>(record.offset());
+  record.immediate(fde_start + word - *cie, word);  // backwards from the CIE pointer field
+  fields.initial_location = static_cast<std::uint32_t>(record.offset());
   record.immediate(0, word);  // S - P at this field, with no instruction-length addend
   record.immediate(code.bytes.size(), word);
-  record.emit({0});  // FDE augmentation data length
+  record.emit({static_cast<std::uint8_t>(handler ? word : 0)});
+  if (handler) {
+    fields.lsda = static_cast<std::uint32_t>(record.offset());
+    record.immediate(0, word);
+  }
   section.insert(section.end(), instructions.begin(), instructions.end());
   section.resize(fde_start + fde_size, 0);  // DW_CFA_nop padding belongs to the FDE
-  return initial_location;
+  return fields;
+}
+
+namespace {
+
+void uleb128(std::vector<std::uint8_t>& bytes, std::size_t value) {
+  do {
+    const auto part = static_cast<std::uint8_t>(value & 0x7f);
+    value >>= 7;
+    bytes.push_back(part | (value ? 0x80 : 0));
+  } while (value != 0);
+}
+
+}  // namespace
+
+std::expected<std::vector<std::uint8_t>, std::string> catch_all_lsda(const MachineCode& code) {
+  if (!code.catch_all || code.bytes.empty() || !std::in_range<std::int32_t>(code.bytes.size()))
+    return std::unexpected("missing or oversized catch-all machine code");
+
+  std::vector<std::uint8_t> sites;
+  std::uint32_t previous_end = 0;
+  bool protected_call = false;
+  for (const UnwindCallSite& site : *code.catch_all) {
+    if (site.begin < previous_end || site.begin >= site.end || site.end > code.bytes.size())
+      return std::unexpected("a catch-all call-site range is outside the function or out of order");
+    previous_end = site.end;
+    if (site.landing_pad != 0) {
+      if (protected_call || site.landing_pad >= code.bytes.size() ||
+          (site.landing_pad >= site.begin && site.landing_pad < site.end))
+        return std::unexpected("invalid catch-all landing pad");
+      if (site.end - site.begin != 5 || code.bytes[site.begin] != 0xe8 ||
+          !std::ranges::any_of(code.relocs, [&](const Reloc& r) {
+            return r.offset == site.begin + 1 && r.addend == -4 &&
+                   (r.kind == RelocKind::plt32 || r.kind == RelocKind::pc32);
+          }))
+        return std::unexpected("the catch-all protected range must be one relocated direct call");
+      protected_call = true;
+    }
+    uleb128(sites, site.begin);
+    uleb128(sites, site.end - site.begin);
+    uleb128(sites, site.landing_pad);
+    uleb128(sites, site.landing_pad != 0 ? 1 : 0);
+  }
+  if (!protected_call) return std::unexpected("missing catch-all protected call");
+
+  std::vector<std::uint8_t> tables{0x01};  // DW_EH_PE_uleb128 call-site encoding
+  uleb128(tables, sites.size());
+  tables.insert(tables.end(), sites.begin(), sites.end());
+  tables.insert(tables.end(), {1, 0});  // SLEB128 filter 1, no next action
+  tables.insert(tables.end(), {0, 0, 0, 0});  // null type, matches any exception
+  std::vector<std::uint8_t> lsda{0xff, 0x1b};  // omit LPStart, PC-relative sdata4 type entries
+  uleb128(lsda, tables.size());  // from the end of the offset to the end of the type table
+  lsda.insert(lsda.end(), tables.begin(), tables.end());
+  return lsda;
 }
 
 }  // namespace ycxx::x86_64

@@ -1369,11 +1369,25 @@ std::expected<obj::object, aarch64::CodegenError> assemble_linux(
   auto missing = [](EntityId e) {
     return std::unexpected(aarch64::CodegenError{e, std::format("@{} has no symbol name", ir::raw(e))});
   };
+  std::optional<std::uint32_t> data_const;
   if (!functions.empty()) {
     const std::uint32_t text = o.add_section(obj::standard_section::text);
-    std::optional<std::uint32_t> frames;
-    if (std::ranges::any_of(functions, &LinuxFunction::cleanup_free_unwind))
+    std::optional<std::uint32_t> frames, exception_tables, personality_cell;
+    const bool has_handlers = std::ranges::any_of(functions, [](const LinuxFunction& f) {
+      return f.code->catch_all.has_value();
+    });
+    if (has_handlers || std::ranges::any_of(functions, &LinuxFunction::cleanup_free_unwind))
       frames = o.add_section(obj::standard_section::eh_frame);
+    if (has_handlers) {
+      exception_tables = o.add_section(obj::standard_section::gcc_except_table);
+      data_const = o.add_section(obj::standard_section::data_const);
+      personality_cell = o.define({}, obj::binding::local, *data_const);
+      auto& pointers = o.sections[*data_const];
+      pointers.emit64(0);
+      pointers.relocate(obj::reloc_kind::abs64, o.reference("__gxx_personality_v0"));
+    }
+
+    x86_64::EhFrameCies cies;
     obj::section& sec = o.sections[text];
     for (const LinuxFunction& f : functions) {
       auto sym = symbol_of.find(f.entity);
@@ -1393,13 +1407,28 @@ std::expected<obj::object, aarch64::CodegenError> assemble_linux(
           return std::unexpected(aarch64::CodegenError{f.entity, "a text relocation exceeds the object offset limit"});
         sec.relocate(linux_relocation(r.kind), target->second, r.addend, static_cast<std::uint32_t>(base + r.offset));
       }
-      if (f.cleanup_free_unwind) {
+      if (f.cleanup_free_unwind || f.code->catch_all) {
+        std::optional<std::uint32_t> lsda_anchor;
+        if (f.code->catch_all) {
+          if (f.weak) return std::unexpected(aarch64::CodegenError{f.entity, "catch-all frames require strong definitions"});
+          auto lsda = x86_64::catch_all_lsda(*f.code);
+          if (!lsda) return std::unexpected(aarch64::CodegenError{f.entity, lsda.error()});
+          auto& tables = o.sections[*exception_tables];
+          if (lsda->size() + tables.size() > std::numeric_limits<std::uint32_t>::max())
+            return std::unexpected(aarch64::CodegenError{f.entity, "the exception tables exceed the object offset limit"});
+          lsda_anchor = o.define({}, obj::binding::local, *exception_tables);
+          tables.emit(*lsda);
+        }
         obj::section& frame = o.sections[*frames];
-        auto location = x86_64::append_eh_frame(frame.bytes, *f.code);
-        if (!location) return std::unexpected(aarch64::CodegenError{f.entity, location.error()});
+        auto fields = x86_64::append_eh_frame(frame.bytes, cies, *f.code);
+        if (!fields) return std::unexpected(aarch64::CodegenError{f.entity, fields.error()});
         // The host linker may preempt the callable symbol, but this FDE describes these bytes.
         const auto anchor = o.define({}, obj::binding::local, text, base);
-        frame.relocate(obj::reloc_kind::x86_64_pc32, anchor, 0, *location);
+        if (fields->personality)
+          frame.relocate(obj::reloc_kind::x86_64_pc32, *personality_cell, 0, *fields->personality);
+        frame.relocate(obj::reloc_kind::x86_64_pc32, anchor, 0, fields->initial_location);
+        if (fields->lsda)
+          frame.relocate(obj::reloc_kind::x86_64_pc32, *lsda_anchor, 0, *fields->lsda);
       }
     }
   }
@@ -1408,7 +1437,7 @@ std::expected<obj::object, aarch64::CodegenError> assemble_linux(
   for (auto [kind, section] : {std::pair{K::cstring, S::cstring}, {K::rodata, S::rodata}, {K::data_const, S::data_const},
                                {K::data, S::data}, {K::bss, S::bss}, {K::init_func, S::init_array}}) {
     if (!std::ranges::contains(data, kind, &aarch64::DataDef::kind)) continue;
-    const std::uint32_t index = o.add_section(section);
+    const std::uint32_t index = kind == K::data_const && data_const ? *data_const : o.add_section(section);
     obj::section& sec = o.sections[index];
     for (const auto& d : data) {
       if (d.kind != kind) continue;
