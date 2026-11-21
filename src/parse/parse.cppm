@@ -7046,21 +7046,26 @@ interp::Callee Program::function_ir(EntityId f, u32 item) {
     else c.body = &ir->body;
     return c;
   }
-  // A function template specialization needed for constant evaluation is instantiated where it
-  // is needed ([temp.inst]/8).
-  if (EntityId templ = w_->entities.rec(f).templ; templ != EntityId::none && !explicitly_specialized(f, item)) {
-    // Its template must be defined before the point, as a function must ([expr.const]).
-    auto def = definitions_.find(std::to_underlying(templ));
-    if (def == definitions_.end() || def->second >= item) return c;
+  // A specialization needed for constant evaluation uses the same instantiated body as
+  // native lowering ([temp.inst]/8).
+  const u32 key = std::to_underlying(f);
+  const EntityId templ = w_->entities.rec(f).templ;
+  const bool class_member = member_patterns_.contains(key);
+  if (class_member || (templ != EntityId::none && !explicitly_specialized(f, item))) {
+    if (!class_member) {
+      auto def = definitions_.find(std::to_underlying(templ));
+      if (def == definitions_.end() || def->second >= item) return c;
+    }
     const Instance* in = instance(f, item);
-    const u32 key = std::to_underlying(f);
-    if (!in || in->failed || !in->body.diags.empty() || in->body.value.tree == NodeId::none) {
-      c.unsupported = in != nullptr;  // erroneous: its body cannot be evaluated
+    if (!in || in->item >= item) return c;
+    if (in->failed || !in->body.diags.empty() || in->body.value.tree == NodeId::none) {
+      c.unsupported = true;
       return c;
     }
     if (!instance_irs_.contains(key)) {
       const items::Item& it = items_->items[in->item];
       irgen::FunctionInput input{f, in->decl, in->body.value, id(in->item), it.body_begin - it.begin};
+      input.this_type = this_type(in->decl);
       AtInstantiation q(*this, in->item);
       sema::EvalFacts facts(*w_, q);
       std::optional<irgen::FunctionIr> ir;
