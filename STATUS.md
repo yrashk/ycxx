@@ -1873,7 +1873,10 @@ Fable decided the representation (ast.md §6.6); the Opus session wrote the code
   pass. `<cstdio>`: 33 → 18 errors.
 - Ordinary function overloads with explicit trailing type packs preserve the pack in atomic
   constraint substitution. Empty packs, order, and reference types are retained (#234).
-- Not yet: constraints on class and variable templates, partial specializations and members,
+- A directly named, non-dependent specialization of a primary class template with explicit type
+  arguments checks its constraints even when the use does not need a complete class (#234).
+- Not yet: class-template constraints outside that case, constraints on variable templates, partial
+  specializations and members,
   broader constrained packs, fold-expanded constraints, `C auto`, `noexcept` in compound requirements
   (#234); re-verification of satisfaction at END (#235); Itanium constraint mangling (#236);
   recorded discarded extents for `if constexpr` (#237); value-dependent mapping arguments (#209).
