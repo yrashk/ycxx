@@ -2535,6 +2535,18 @@ exception objects, handlers, and exceptional cleanups remain under #89.
   dereference. Full constant evaluation of the class iterator still needs #25.
 - Tests: `tests/own/range-for/` (17 from the independent author and nine review regressions).
 
+## Concrete exception specifications on ordinary function types (#219)
+
+- Ordinary non-template declarations, aliases, and grouped declarators retain concrete
+  exception specifications through pointers, references, and return deduction.
+- Overload-address selection, reference binding, and function-pointer conversions permit
+  a nonthrowing function to match the corresponding potentially throwing type.
+  The reverse direction and conversions through multiple pointer levels are rejected.
+- Composite pointer types preserve the one-way rule in comparisons and conditional
+  expressions. Function reference overload ranking follows [over.ics.ref].
+- The mixed Linux object checks distinguish callback overloads with the Itanium `Do` type
+  encoding. Dependent exception specifications remain tracked in [#219](https://github.com/yrashk/ycxx/issues/219).
+
 ## The address of an overload set, ι (#313, #337, 2026-11-19)
 
 - A pointer or reference target picks a free or static member function by its function type
@@ -2546,7 +2558,7 @@ exception objects, handlers, and exceptional cleanups remain under #89.
   matching templates by their full function types. A call can also deduce fixed function or
   function-pointer parameters by trying the non-template members of an overload set
   ([temp.deduct.call]/6).
-- Related work covers pointers to non-static members (#238), `noexcept` function types (#219),
+- Related work covers pointers to non-static members (#238), dependent exception specifications (#219),
   a template-id without a target type (#335), and function pointer or reference template
   arguments (#406).
 - An ordinary free immediate function is diagnosed when its name escapes through a runtime
