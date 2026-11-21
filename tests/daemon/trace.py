@@ -253,7 +253,11 @@ def main(ycxx):
         check(ctl('status').returncode != 0, 'a stalled watcher does not keep the daemon alive')
         drain.join(timeout=20)
         out = ''.join(seen)
-        check('── #' in out and 'cxx a.cpp -o a' in out, f'the watcher shows each request: {out[:400]}')
+        requests = [line for line in out.splitlines() if line.startswith('── #')]
+        for output in ('a', 'w'):
+            command = f'cxx {target} a.cpp -o {output}'
+            check(any(line.endswith(' ' + command) for line in requests),
+                  f'the watcher shows {command}: {requests[:5]}')
         check('Build(a.cpp → a)' in out and 'trace: ' in out, 'the watcher shows the events and each summary')
         check('the daemon has gone' in out, 'the watcher says the daemon went')
     finally:
