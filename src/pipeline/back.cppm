@@ -105,6 +105,9 @@ struct Entity {
   bool guard = false;
 };
 
+// Certified on the typed definition, before IR drops lifetime information.
+enum class UnwindEligibility : std::uint8_t { none, cleanup_free, cleanup_free_with_throw };
+
 // A function definition: what `function_ir(F)` reads (irgen::FunctionInput, without a thunk's
 // locals).
 struct FunctionDef {
@@ -119,7 +122,7 @@ struct FunctionDef {
   std::vector<irgen::FunctionInput::StaticGuard> guards{};
   EntityId guard_acquire = EntityId::none, guard_release = EntityId::none, atexit = EntityId::none, dso = EntityId::none;
   bool weak_elf = false;  // an ordinary external inline definition in the GNU ELF subset (#422)
-  bool cleanup_free_unwind = false;  // certified on the typed definition, before IR drops lifetime information
+  UnwindEligibility unwind = UnwindEligibility::none;
 };
 
 // A variable definition at namespace scope with its constant initializer, or `ConstId::none` for
@@ -176,6 +179,7 @@ struct TranslationUnit {
   bool front_failed = false;           // the front end reported errors: nothing to compile
   bool virtual_emission_blocked = false;
   std::optional<ast::Loc> virtual_declaration;
+  std::optional<ir::IntThrowRuntime> int_throw;
 };
 
 // What failed, at a location in an item when there is one. Every error here is something the α
@@ -1159,6 +1163,7 @@ engine::query_task<Lowered> Lower::run(engine::Ctx& cx, FnKey k) {
       co_return Lowered{std::nullopt, {}, std::move(located)};
     }
     config.sysv_amd64 = true;
+    if (def.unwind == UnwindEligibility::cleanup_free_with_throw) config.int_throw = tu.int_throw;
     // Extend outgoing narrow results for interoperability. Lowering truncates incoming results
     // to the declared width, as the System V AMD64 psABI §3.2.3 leaves excess bits unspecified.
     config.min_result_bits = 32;
@@ -1631,8 +1636,10 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
   auto o = [&] {
     if (linux) {
       std::vector<LinuxFunction> code;
-      for (std::size_t i = 0; i < fns.size(); ++i)
-        code.push_back({fns[i].fn, &*ms[i].get().linux_code, tu.functions[i].weak_elf, tu.functions[i].cleanup_free_unwind});
+      for (std::size_t i = 0; i < fns.size(); ++i) {
+        const auto& def = tu.functions[i];
+        code.push_back({fns[i].fn, &*ms[i].get().linux_code, def.weak_elf, def.unwind != UnwindEligibility::none});
+      }
       return assemble_linux(tu.name, code, data, symbols, weak_variables);
     }
     std::vector<aarch64::CompiledFunction> code;
