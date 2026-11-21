@@ -9,3 +9,8 @@ void local() {
   constexpr auto local_pointer = &immediate;
   static_assert(local_pointer(41) == 42);
 }
+
+using Pointer = int(*)(int);
+template<class P> consteval P stored_default(P p = immediate) { return p; }
+constexpr Pointer default_pointer = stored_default<Pointer>();
+static_assert(default_pointer(41) == 42);

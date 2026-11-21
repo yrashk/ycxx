@@ -3801,18 +3801,12 @@ public:
   // Manifestly constant-evaluated initializers and assertions permit these references.
   // The ordinary immediate-invocation evaluator still performs its existing folding.
   bool constant_reference_context = false;
-  bool folded_immediate_result = false;
   struct ImmediateReferenceScope {
-    Sema& sema;
-    bool saved_context;
-    bool saved_result;
+    bool& context;
+    bool saved;
     ImmediateReferenceScope(Sema& sema, bool allowed)
-        : sema(sema), saved_context(std::exchange(sema.constant_reference_context, allowed)),
-          saved_result(std::exchange(sema.folded_immediate_result, false)) {}
-    ~ImmediateReferenceScope() {
-      sema.constant_reference_context = saved_context;
-      sema.folded_immediate_result = saved_result;
-    }
+        : context(sema.constant_reference_context), saved(std::exchange(context, allowed)) {}
+    ~ImmediateReferenceScope() { context = saved; }
   };
 
   u8 immediate_reference_flags(bool immediate) {
@@ -3835,7 +3829,6 @@ public:
 
   void retain_immediate_functions(const Sema& replay) {
     consteval_.insert(replay.consteval_.begin(), replay.consteval_.end());
-    folded_immediate_result |= replay.folded_immediate_result;
   }
 
   std::optional<EntityId> immediate_result_entity(ConstId value) {
