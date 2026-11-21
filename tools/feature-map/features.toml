@@ -2320,7 +2320,7 @@ static_assert(p.x == 24);
 int main() { return 0; }
 '''
 status = 'partial'
-note = '`constexpr` constructor declarations and runtime calls work. Class-typed constant evaluation is partial.'
+note = '`constexpr` constructor declarations, runtime calls, and scalar enum constant evaluation work. Class-typed constant evaluation is partial.'
 
 [[feature]]
 id = 'const-consteval'

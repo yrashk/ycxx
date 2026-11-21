@@ -1,6 +1,5 @@
 // #337 (ι): a switch on a scoped enumeration in a constexpr function, evaluated during constant
 // evaluation ([dcl.constexpr], [expr.const], [stmt.switch]).
-// XFAIL: ycxx the interpreter has no enumeration-typed values yet (#25)
 // EXIT: 0
 enum class Op { Add, Sub, Mul, Nop };
 
