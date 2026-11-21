@@ -44,6 +44,16 @@ def main():
                 assert (scope / 'warm.o').read_bytes() == (scope / 'cold.o').read_bytes()
                 run([host_cxx, '-no-pie', 'host.o', 'provider.o', 'cold.o', '-o', 'mixed'], scope, cold)
                 run(['./mixed'], scope, cold)
+
+            # Run the spec fixture's first-slot variant at the same pointer call site.
+            consumer = (scope / 'consumer.cpp').read_text()
+            (scope / 'first-slot.cpp').write_text(consumer.replace('object->alpha(argument)', 'object->zeta(argument)', 1))
+            host = (scope / 'host.cpp').read_text()
+            (scope / 'first-slot-host.cpp').write_text(host.replace('!= 207', '!= 107').replace('!= 413', '!= 313'))
+            compile(linux, '-c', 'first-slot.cpp', '-o', 'first-slot.o')
+            run([host_cxx, '-std=c++26', '-pedantic-errors', '-no-pie', 'first-slot-host.cpp', 'provider.o',
+                 'first-slot.o', '-o', 'mixed-first-slot'], scope, cold)
+            run(['./mixed-first-slot'], scope, cold)
         finally:
             run([ycxx, 'ctl', 'shutdown'], scope, base)
 

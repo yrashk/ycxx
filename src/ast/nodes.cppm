@@ -224,7 +224,7 @@ struct MemberCall {
   [[=sequenced(0)]] Child object;
   [[=indeterminately_sequenced(1)]] ChildList args;
   std::uint32_t virtual_slot = direct;
-  QualType virtual_callee{};  // function pointer type for the ABI call, including the receiver
+  QualType virtual_callee = info.type;  // ABI function pointer type when virtual_slot selects an entry
 };
 
 // Assignment notation calls a member function with the argument sequenced before its object
