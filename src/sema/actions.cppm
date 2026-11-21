@@ -5620,20 +5620,22 @@ public:
   }
 
   // [except.handle]: no void, rvalue reference, or incomplete object, with the cv void* exception.
-  void check_handler_type(QualType type, u32 at_) {
+  bool check_handler_type(QualType type, u32 at_) {
     if (types().has_placeholder(type) || types().is_void(type) ||
         (types().is_reference(type) && types().rec(type).rvalue_ref)) {
       diag(at_, Diag::invalid_handler_type, type);
-      return;
+      return false;
     }
     QualType object = types().is_reference(type) ? types().referee(type) : type;
-    if (types().is_dependent(object)) return;
+    if (types().is_dependent(object)) return true;
     if (types().is_pointer(type)) {
       QualType pointee = types().pointee(type);
-      if (!types().is_void(pointee) && !types().is_function(pointee)) require_complete(pointee, at_);
-    } else if (require_complete(object, at_) && types().is_class(object)) {
-      diag(at_, Diag::not_supported, lex::Tk::kw_catch);
+      return types().is_void(pointee) || types().is_function(pointee) || require_complete(pointee, at_);
     }
+    if (!require_complete(object, at_)) return false;
+    if (!types().is_class(object)) return true;
+    diag(at_, Diag::not_supported, lex::Tk::kw_catch);
+    return false;
   }
 
   // [basic.stc.dynamic] makes the ordinary declarations visible even without a header.

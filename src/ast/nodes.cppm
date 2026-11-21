@@ -512,8 +512,11 @@ struct TryBlock {
   ChildList handlers;
 };
 
+enum class HandlerKind : u8 { typed, catch_all, invalid };
+
 struct Handler {
-  QualType type;  // empty for catch (...)
+  HandlerKind kind;
+  QualType type;  // builtin void for a catch-all or invalid declaration
   u32 local;  // no local for an abstract declaration or catch (...)
   Child body;
 };

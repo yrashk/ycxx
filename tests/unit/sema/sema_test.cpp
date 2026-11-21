@@ -306,6 +306,19 @@ void constant_evaluation() {
   check(kinds("bool b = nullptr == nullptr;\nstatic_assert(nullptr == nullptr);").empty(), "nullptr == nullptr");
 }
 
+void handler_kinds() {
+  Analysed a("void f() { try {} catch (int) {} catch (...) {} }");
+  check(a.diags().empty(), "typed and catch-all handlers are valid");
+  auto statements = a.children(a.get<ast::Compound>(a.body(0).tree).stmts);
+  const auto handlers = a.children(a.get<ast::TryBlock>(statements[0].id).handlers);
+  check(handlers.size() == 2 && handlers[0].id != handlers[1].id, "ordered handlers have distinct nodes");
+  auto typed = a.get<ast::Handler>(handlers[0].id);
+  auto catch_all = a.get<ast::Handler>(handlers[1].id);
+  check(typed.kind == ast::HandlerKind::typed && a.w.types.is(typed.type, Builtin::int_), "unnamed typed handler");
+  check(catch_all.kind == ast::HandlerKind::catch_all && a.w.types.is(catch_all.type, Builtin::void_),
+        "catch-all handler with a stable type placeholder");
+}
+
 int main() {
   constant_evaluation();
   conversions_and_locals();
@@ -316,5 +329,6 @@ int main() {
   assignments();
   diagnostics();
   control_flow();
+  handler_kinds();
   return unit::result("unit.sema");
 }

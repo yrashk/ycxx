@@ -6,3 +6,8 @@ int choose() {
   catch (int second) { return second; }
   catch (...) { return 0; }
 }
+
+// Both handlers are unnamed and empty, but only the second matches any type.
+void distinct_handlers() {
+  try {} catch (int) {} catch (...) {}
+}

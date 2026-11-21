@@ -3594,9 +3594,12 @@ public:
       if (!expect(Tk::l_paren)) break;
       s_->push_scope();
       s_->jump_barrier();
-      QualType type{};
+      const QualType placeholder = s_->builtin(Builtin::void_);
+      QualType type = placeholder;
+      auto kind = ast::HandlerKind::invalid;
       u32 local = ~0u;
       if (accept(Tk::ellipsis)) {
+        kind = ast::HandlerKind::catch_all;
         catch_all_at = at;
       } else {
         u32 declaration_at = pos();
@@ -3605,27 +3608,27 @@ public:
         if (spec.ok && d.ok) {
           type = d.type;
           if (s_->types().is_array(type)) type = s_->types().pointer(s_->types().rec(type).inner);
-          else if (s_->types().is_function(type)) {
-            if (s_->types().is_cvref_function(type))
-              s_->diag(declaration_at, Diag::indirection_to_qualified_function, type);
-            else
-              type = s_->types().pointer(type);
-          }
+          if (s_->types().is_function(type) && !s_->types().is_cvref_function(type))
+            type = s_->types().pointer(type);
           if (spec.is_static || spec.is_extern || spec.is_inline || spec.is_typedef ||
-              spec.is_constexpr || spec.is_consteval || spec.is_constinit)
+              spec.is_constexpr || spec.is_consteval || spec.is_constinit) {
             s_->diag(declaration_at, Diag::invalid_exception_declaration);
-          else
-            s_->check_handler_type(type, declaration_at);
+          } else if (s_->types().is_cvref_function(type)) {
+            s_->diag(declaration_at, Diag::indirection_to_qualified_function, type);
+          } else if (s_->check_handler_type(type, declaration_at)) {
+            kind = ast::HandlerKind::typed;
+          }
           if (d.named) {
             local = s_->declare_local(d.name, type, 0, d.name_at);
             s_->set_initialized(local);
           }
         }
       }
-      expect(Tk::r_paren);
+      if (!expect(Tk::r_paren)) kind = ast::HandlerKind::invalid;
       Ex handler_body = compound_in_scope();
       s_->pop_scope();
-      Ex handler = s_->node(ast::Handler{type, local, sema::Sema::at(handler_body, at)}, at, pos());
+      if (kind == ast::HandlerKind::invalid) type = placeholder;
+      Ex handler = s_->node(ast::Handler{kind, type, local, sema::Sema::at(handler_body, at)}, at, pos());
       handlers.push_back(sema::Sema::at(handler, begin));
     } while (accept(Tk::kw_catch));
     return s_->node(ast::TryBlock{sema::Sema::at(body, begin), s_->builder().list(handlers)}, begin, pos());
