@@ -1595,6 +1595,11 @@ public:
   bool dependent_call(sema::u32 offset) override { return std::ranges::contains(instantiation_calls, offset); }
 
 private:
+  static bool inherited_default_tokens(sema::Sema& replay, const pp::Region& region,
+                                       const Program::Dmi& dmi, EntityId base);
+  static bool inherited_default_arithmetic(sema::Sema& replay, NodeId root, EntityId base,
+                                           const sema::ClassRec& record);
+
   bool is_complete_at_item(EntityId c) {
     return (completing_class != EntityId::none && completing_class == c) ||
            p_->is_complete(c, item_, self_, own_class_complete);
@@ -1614,8 +1619,8 @@ private:
 };
 
 // Keep the written form before replay can replace an immediate invocation or sizeof with a literal.
-static bool inherited_default_tokens(sema::Sema& replay, const pp::Region& region,
-                                     const Program::Dmi& dmi, EntityId base) {
+bool AtItem::inherited_default_tokens(sema::Sema& replay, const pp::Region& region,
+                                      const Program::Dmi& dmi, EntityId base) {
   using enum Tk;
   auto tokens = std::span(region.tokens).subspan(dmi.begin, dmi.end - dmi.begin);
   if (dmi.braced) {
@@ -1650,8 +1655,8 @@ static bool inherited_default_tokens(sema::Sema& replay, const pp::Region& regio
   return true;
 }
 
-static bool inherited_default_arithmetic(sema::Sema& replay, NodeId root, EntityId base,
-                                         const sema::ClassRec& record) {
+bool AtItem::inherited_default_arithmetic(sema::Sema& replay, NodeId root, EntityId base,
+                                          const sema::ClassRec& record) {
   const auto& tree = replay.ins().ast;
   const auto base_type = replay.types().pointer(replay.types().class_type(base));
   auto unparenthesized = [&](NodeId id) {
