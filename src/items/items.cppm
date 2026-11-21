@@ -870,7 +870,7 @@ private:
         }
         if (d != Tk::kw_const && d != Tk::kw_volatile && d != Tk::kw_typedef &&
             d != Tk::kw_static && d != Tk::kw_inline && d != Tk::kw_extern &&
-            d != Tk::kw_constexpr && d != Tk::kw_mutable)
+            d != Tk::kw_constexpr && d != Tk::kw_mutable && d != Tk::kw_virtual)
           break;
       }
     }

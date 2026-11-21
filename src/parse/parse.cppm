@@ -294,12 +294,22 @@ public:
   }
   // Qualified lookup in namespace `ns` ([namespace.qual]/2): its own declarations, or, when it has
   // none, those of the namespaces its using-directives nominate.
-  std::vector<DeclId> qualified_decls(std::string_view name, const std::string& ns, u32 item, bool self) {
-    std::vector<DeclId> r = declared_in(name, ns, item, self);
+  std::vector<DeclId> qualified_decls(std::string_view name, const std::string& ns, u32 item, bool self,
+                                     bool type_only = false) {
+    auto candidates = [&](const std::string& path) {
+      auto declarations = declared_in(name, path, item, self);
+      if (type_only)
+        std::erase_if(declarations, [&](DeclId id) {
+          auto d = decl_sema(id);
+          return !d || d->entity == EntityId::none || !sema::Sema::is_type(d->kind);
+        });
+      return declarations;
+    };
+    std::vector<DeclId> r = candidates(ns);
     if (!r.empty()) return r;
     for (const std::string& t : closure(ns, item))
       if (t != ns) {
-        std::vector<DeclId> more = declared_in(name, t, item, self);
+        std::vector<DeclId> more = candidates(t);
         r.insert(r.end(), more.begin(), more.end());
       }
     return r;
@@ -1328,16 +1338,18 @@ public:
   std::vector<DeclId> visible_decls(ast::NameId name, std::span<const EntityId> directives = {}) override {
     std::vector<std::string> paths;
     for (EntityId ns : directives) paths.push_back(p_->namespace_path(ns));
-    return p_->visible_decls(p_->world().ins.names.spelling(name), item_, self_, from, paths);
+    return p_->visible_decls(p_->world().ins.names.spelling(name), declaration_lookup_end.value_or(item_),
+                             self_ && !declaration_lookup_end, from, paths);
   }
   std::optional<EntityId> namespace_named(ast::NameId name, std::span<const EntityId> directives = {}) override {
     for (DeclId d : visible_decls(name, directives))
       if (auto s = p_->decl_sema(d); s && s->kind == ast::DeclKind::namespace_) return s->entity;
     return std::nullopt;
   }
-  std::vector<ast::DeclSema> namespace_members(EntityId ns, ast::NameId name) override {
+  std::vector<ast::DeclSema> namespace_members(EntityId ns, ast::NameId name, bool type_only = false) override {
     std::vector<ast::DeclSema> r;
-    for (DeclId d : p_->qualified_decls(p_->world().ins.names.spelling(name), p_->namespace_path(ns), item_, self_))
+    for (DeclId d : p_->qualified_decls(p_->world().ins.names.spelling(name), p_->namespace_path(ns),
+                                       declaration_lookup_end.value_or(item_), self_ && !declaration_lookup_end, type_only))
       if (auto s = p_->decl_sema(d); s && s->entity != EntityId::none) r.push_back(*s);
     return r;
   }
@@ -1423,6 +1435,7 @@ public:
   }
   // Past the closing brace of the class the item defines, that class is complete.
   bool own_class_complete = false;
+  std::optional<u32> declaration_lookup_end;
   EntityId completing_class = EntityId::none;
   // In a class template's instantiation (#88): completeness and constant evaluation are answered
   // at its point of instantiation ([temp.point]); lookup stays at the item.
@@ -1472,7 +1485,9 @@ public:
   std::optional<EntityId> namespace_named(ast::NameId name, std::span<const EntityId> directives = {}) override {
     return at_.namespace_named(name, directives);
   }
-  std::vector<ast::DeclSema> namespace_members(EntityId ns, ast::NameId name) override { return at_.namespace_members(ns, name); }
+  std::vector<ast::DeclSema> namespace_members(EntityId ns, ast::NameId name, bool type_only = false) override {
+    return at_.namespace_members(ns, name, type_only);
+  }
   std::vector<ast::DeclSema> adl_functions(EntityId ns, ast::NameId name, bool at_instantiation) override {
     return at_instantiation ? p_->adl_functions(ns, name, p_->end(), false) : at_.adl_functions(ns, name, false);
   }
@@ -2759,6 +2774,13 @@ private:
       ps_.expect(Tk::semi);
       return;
     }
+    // Namespace names introduced by members precede the declarators after the closing brace.
+    u32 after_members = k_ + 1;
+    const auto& items = p_->items().items;
+    while (after_members < items.size() && items[after_members].parent != items::none &&
+           items[after_members].parent >= k_)
+      ++after_members;
+    q_.declaration_lookup_end = after_members;
     DeclSpec spec;
     spec.begin = at;
     spec.type = sem.type;
@@ -3294,16 +3316,16 @@ private:
           return d->type;
         }
         EntityId entity = class_entity(name);
-        if (!record_class_key(entity, key, at)) return std::nullopt;
         introduced = class_decl(entity, false);
-        s_.own.push_back({name, *introduced});  // visible to the rest of this declaration
+        s_.member_introduction = sema::Sema::MemberIntroduction{name, *introduced, key == Tk::kw_union};
         return introduced->type;
       };
     }
     DeclSpec spec = ps_.decl_specifiers(/*in_type_id=*/false, nullptr, /*allow_conversion_id=*/true, /*class_member=*/true);
     ps_.declare_class = std::move(declare_class);
     auto commit_introduction = [&] {
-      if (introduced && decls_.size() == candidate->ordinal && out_.diags.empty()) {
+      if (introduced && decls_.size() == candidate->ordinal && out_.diags.empty() &&
+          record_class_key(introduced->entity, spec.class_key, spec.class_at)) {
         decls_.push_back(*introduced);
         p_->declared(*introduced, k_);
       }

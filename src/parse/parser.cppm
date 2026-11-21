@@ -577,10 +577,11 @@ public:
         u32 at = pos();
         if (qualified_ahead(1)) {
           bump();
+          const std::size_t diags = s_->diag_count();
           auto q = qualified_type(0, /*checked=*/true, /*type_only=*/true);
           if (!q || !s_->types().is_class(q->first) || s_->is_union_type(q->first) != (k == Tk::kw_union) ||
               any_type()) {
-            s_->diag(at, Diag::expected_type_specifier);
+            if (s_->diag_count() == diags) s_->diag(at, Diag::expected_type_specifier);
             d.ok = false;
             goto done;
           }
@@ -1368,7 +1369,7 @@ public:
       return injected.type ? std::optional{std::pair{*injected.type, next + 1 - start}} : std::nullopt;
     if (type_only) {
       if (!s->ns) return std::nullopt;
-      auto t = s_->namespace_elaborated_class(*s->ns, name);
+      auto t = s_->namespace_elaborated_class(*s->ns, name, at);
       return t ? std::optional{std::pair{*t, next + 1 - start}} : std::nullopt;
     }
     auto t = s_->scope_type(*s, name);

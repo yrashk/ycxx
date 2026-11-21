@@ -123,7 +123,7 @@ public:
   // alias) unqualified lookup finds for `name`, and qualified lookup of `name` in namespace `ns`
   // ([namespace.qual]).
   virtual std::optional<EntityId> namespace_named(NameId name, std::span<const EntityId> directives = {}) = 0;
-  virtual std::vector<ast::DeclSema> namespace_members(EntityId ns, NameId name) = 0;
+  virtual std::vector<ast::DeclSema> namespace_members(EntityId ns, NameId name, bool type_only = false) = 0;
   // [basic.lookup.argdep]: functions in one associated namespace's inline namespace set, and
   // a class's record if complete there. Ask at the lexical point, and for a dependent call
   // also at the point of instantiation ([temp.dep.candidate]).
@@ -450,6 +450,10 @@ public:
         if (s.entity == EntityId::none || is_special(s)) continue;
         if (is_type(s.kind) || !elaborated) found = s;
       }
+    if (member_introduction && member_introduction->name == name &&
+        (!found || elaborated || w_->entities.rec(found->entity).scope !=
+                                    w_->entities.rec(member_introduction->sema.entity).scope))
+      found = member_introduction->sema;
     if (!found && !elaborated && aliases) return builtin_type_name(name);
     if (!found || !is_type(found->kind)) return std::nullopt;
     if (found->kind == ast::DeclKind::type_alias && !aliases) return std::nullopt;
@@ -819,6 +823,8 @@ public:
   // Whether a class type is a union, without requiring its definition.
   std::optional<bool> is_union_type(QualType t) {
     if (!types().is_class(t)) return false;
+    if (member_introduction && member_introduction->sema.entity == types().class_of(t))
+      return member_introduction->is_union;
     return Templates(*w_, classes()).is_union_class(types().class_of(t));
   }
   // `__trait(T)` that transforms a type ([meta.trans]): the type it gives.
@@ -980,6 +986,9 @@ public:
         if (d.kind == ast::DeclKind::namespace_) return Scope{d.entity, std::nullopt};
         if (is_type(d.kind)) return Scope{std::nullopt, d.type};
       }
+      if (members.empty() && member_introduction && member_introduction->name == n &&
+          w_->entities.rec(member_introduction->sema.entity).scope == *s.ns)
+        return Scope{std::nullopt, member_introduction->sema.type};
       if (*s.ns == EntityId::none && members.empty())
         if (auto t = builtin_type_name(n)) return Scope{std::nullopt, *t};
     }
@@ -1049,12 +1058,21 @@ public:
   }
 
   // Qualified namespace lookup for an elaborated class name skips non-types and aliases.
-  std::optional<QualType> namespace_elaborated_class(EntityId ns, NameId name) {
-    for (const ast::DeclSema& d : q_->namespace_members(ns, name))
-      if (is_type(d.kind))
-        return d.kind == ast::DeclKind::class_ && !(d.flags & decl_flag::template_)
-                   ? std::optional(d.type) : std::nullopt;
-    return std::nullopt;
+  std::optional<QualType> namespace_elaborated_class(EntityId ns, NameId name, std::optional<u32> at) {
+    if (member_introduction && member_introduction->name == name &&
+        w_->entities.rec(member_introduction->sema.entity).scope == ns)
+      return member_introduction->sema.type;
+    std::optional<ast::DeclSema> result;
+    for (const ast::DeclSema& d : q_->namespace_members(ns, name, /*type_only=*/true)) {
+      if (result && result->entity != d.entity) {
+        if (at) diag(*at, Diag::ambiguous_name, name);
+        return std::nullopt;
+      }
+      result = d;
+    }
+    if (!result || result->kind != ast::DeclKind::class_ || (result->flags & decl_flag::template_))
+      return std::nullopt;
+    return result->type;
   }
 
   // `S::n` naming a type.
@@ -3207,6 +3225,12 @@ public:
     ConstId enum_initializer = ConstId::none;
   };
   std::vector<OwnDecl> own;
+  struct MemberIntroduction {
+    NameId name;
+    ast::DeclSema sema;
+    bool is_union;
+  };
+  std::optional<MemberIntroduction> member_introduction;
   std::optional<EntityId> defining_unnamed_enum_scope;
 
   // ------------------------------------------------------------ member functions ([class.mfct])
