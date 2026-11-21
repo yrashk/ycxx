@@ -322,7 +322,9 @@ public:
     }
     if (starts_decl_specifier(kind())) return true;
     if (qualified_ahead()) {
-      auto q = qualified_type(0);
+      bool failed_qualifier = false;
+      auto q = qualified_type(0, /*checked=*/false, /*type_only=*/false, &failed_qualifier);
+      if (failed_qualifier) return true;  // let the declaration diagnose the qualifier
       auto context = statement ? PointerLookahead::statement : PointerLookahead::declaration;
       return q && !(statement && s_->types().kind(q->first) == sema::TypeKind::dep_name) &&
              (kind(q->second) != Tk::l_paren || member_pointer_star(q->second + 1) ||
@@ -1413,7 +1415,8 @@ public:
   std::optional<sema::Sema::Scope> nested_name(u32 start, u32& next, bool member_pointer = false,
                                                bool checked = false, bool type_components = false,
                                                bool check_injected_access = false,
-                                               std::vector<TypeQualifier>* type_qualifiers = nullptr) {
+                                               std::vector<TypeQualifier>* type_qualifiers = nullptr,
+                                               bool* failed_qualifier = nullptr) {
     u32 j = start;
     std::optional<sema::Sema::Scope> s;
     if (kind(j) == Tk::kw_decltype && kind(j + 1) == Tk::l_paren) {
@@ -1434,7 +1437,7 @@ public:
       s = s_->scope_named(name_of(tok(j)));
       if (!s) return std::nullopt;
       j += 2;
-    } else if (auto t = template_id_scope(std::nullopt, j, /*scope=*/true, checked)) {
+    } else if (auto t = template_id_scope(std::nullopt, j, /*scope=*/true, checked || check_injected_access, failed_qualifier)) {
       s = t;
     } else {
       return std::nullopt;
@@ -1457,7 +1460,7 @@ public:
         else if (type_qualifiers && s->type) type_qualifiers->push_back({*s, n, pos() + j});
         s = m;
         j += 2;
-      } else if (auto t = template_id_scope(s, j, /*scope=*/true, checked)) {
+      } else if (auto t = template_id_scope(s, j, /*scope=*/true, checked || check_injected_access, failed_qualifier)) {
         s = t;
       } else {
         break;
@@ -1480,7 +1483,7 @@ public:
   // unqualified lookup or in namespace `in` ([temp.names]); `j` moves past the `::`. The arguments
   // are parsed ahead of the tokens being taken. A speculative lookup discards its diagnostics.
   std::optional<sema::Sema::Scope> template_id_scope(std::optional<sema::Sema::Scope> in, u32& j, bool scope = true,
-                                                     bool checked = false) {
+                                                     bool checked = false, bool* failed_qualifier = nullptr) {
     if (kind(j) != Tk::identifier || kind(j + 1) != Tk::less) return std::nullopt;
     if (in && !in->ns) return std::nullopt;  // member templates of classes come later (#88)
     NameId n = name_of(tok(j));
@@ -1503,6 +1506,11 @@ public:
     i_ = saved;
     half_ = saved_half;
     if (!scope) qualified_half_ = ended_half;
+    if (!t && args && closed && failed_qualifier) {
+      *failed_qualifier = std::ranges::any_of(std::span(s_->diagnostics()).subspan(diags), [](const auto& d) {
+        return sema::sema_diag_of(d.id) == Diag::constraints_not_satisfied;
+      });
+    }
     if (!checked) s_->truncate_diags(diags);
     if (!t) return std::nullopt;
     j = scope ? after + 1 : after;
@@ -1521,10 +1529,14 @@ public:
 
   // A qualified type name at token `start`: its type and the tokens it takes.
   // `checked`: the name is taken here, so its access is checked ([class.access]/4).
-  std::optional<std::pair<QualType, u32>> qualified_type(u32 start, bool checked = false, bool type_only = false) {
+  std::optional<std::pair<QualType, u32>> qualified_type(u32 start, bool checked = false, bool type_only = false,
+                                                       bool* failed_qualifier = nullptr) {
     u32 next = 0;
     bool check_qualifier = checked && substituting_partial_arguments;
-    auto s = nested_name(start, next, /*member_pointer=*/false, check_qualifier, /*type_components=*/true, checked);
+    const auto diags = s_->diag_count();
+    auto s = nested_name(start, next, /*member_pointer=*/false, check_qualifier, /*type_components=*/true, checked,
+                         nullptr, failed_qualifier);
+    if (checked && s_->has_error_since(diags)) return std::nullopt;
     if (!s || kind(next) != Tk::identifier || kind(next + 1) == Tk::coloncolon) return std::nullopt;
     // `N::X<args>`: a class template specialization named in a namespace ([temp.names]).
     qualified_half_ = false;
