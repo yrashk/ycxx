@@ -398,13 +398,21 @@ u32 Splitter::ctor_initializer(u32 j) {
   return j;
 }
 
-// Whether a token can begin a declaration but not continue the declarators after a class or
-// enum body (`struct S { … } const s;` continues; `struct S { … } int main()` does not).
-bool begins_declaration_only(Tk t) {
+bool simple_type_keyword(Tk t) {
   switch (t) {
   case Tk::kw_void: case Tk::kw_bool: case Tk::kw_char: case Tk::kw_char8_t: case Tk::kw_char16_t:
   case Tk::kw_char32_t: case Tk::kw_wchar_t: case Tk::kw_short: case Tk::kw_int: case Tk::kw_long:
   case Tk::kw_signed: case Tk::kw_unsigned: case Tk::kw_float: case Tk::kw_double: case Tk::kw_auto:
+    return true;
+  default: return false;
+  }
+}
+
+// Whether a token can begin a declaration but not continue the declarators after a class or
+// enum body (`struct S { … } const s;` continues; `struct S { … } int main()` does not).
+bool begins_declaration_only(Tk t) {
+  if (simple_type_keyword(t)) return true;
+  switch (t) {
   case Tk::kw_struct: case Tk::kw_class: case Tk::kw_union: case Tk::kw_enum: case Tk::kw_namespace:
   case Tk::kw_template: case Tk::kw_using: case Tk::kw_static_assert: case Tk::kw_export:
     return true;
@@ -910,6 +918,7 @@ private:
     u32 qual_begin = none;
     u32 qual_end = none;
     bool function = false;
+    bool has_type = !first;  // later declarators share the first one's decl-specifiers
     u32 n = from;
     while (n < to) {
       Tk t = kind(n);
@@ -919,6 +928,7 @@ private:
                    t == Tk::kw_sizeof) &&
                   kind(n + 1) == Tk::l_paren) ||
                  gnu_extension(n) || (transform_trait(n) && kind(n + 1) == Tk::l_paren)) {
+        has_type = has_type || t == Tk::kw_decltype || transform_trait(n);
         n = match(n + 1);
       } else if (t == Tk::identifier || t == Tk::coloncolon) {
         if (t == Tk::coloncolon || kind(n + 1) == Tk::coloncolon || (kind(n + 1) == Tk::less && angle_then_scope(n + 1, to))) {
@@ -932,7 +942,16 @@ private:
         qual_end = n;
         qual = none;
         n = kind(n + 1) == Tk::less ? match_angle(n + 1, to) : n + 1;
+        // An earlier type spelling distinguishes `T f [[attr]] (int)` from `T [[attr]] (f)`.
+        if (has_type) {
+          while (n < to) {
+            if (kind(n) == Tk::l_square && kind(n + 1) == Tk::l_square) n = match(n);
+            else if (is_name(n, "__attribute__") && kind(n + 1) == Tk::l_paren) n = match(n + 1);
+            else break;
+          }
+        }
         cand_end = n;
+        has_type = true;
       } else if (t == Tk::tilde && kind(n + 1) == Tk::identifier) {
         cand = n;
         spelled = "~" + std::string(name(n + 1));
@@ -983,6 +1002,7 @@ private:
       } else if (t == Tk::l_square || t == Tk::equal || t == Tk::l_brace || t == Tk::colon || t == Tk::semi) {
         break;
       } else {
+        has_type = has_type || simple_type_keyword(t);
         // The qualifier belongs to `C::*`, not to the name this declarator introduces.
         if (t == Tk::star && n > from && kind(n - 1) == Tk::coloncolon) qual = none;
         if (t == Tk::less) {

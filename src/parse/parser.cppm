@@ -47,6 +47,7 @@ struct DeclSpec {
   bool is_consteval = false;
   bool is_constinit = false;
   bool is_typedef = false;  // [dcl.typedef]: the declarators declare typedef-names
+  bool hidden_visibility = false;
   std::optional<u32> virtual_at;
   std::optional<u32> mutable_at;
   // An elaborated-type-specifier ([dcl.type.elab]): the class it names, and where its name is.
@@ -101,6 +102,7 @@ struct Declarator {
   std::optional<u32> replay_template_args_at;  // written arguments with deferred substitution checks
   // A GNU asm label, `__asm("_fopen")`: the symbol as written (docs/EXTENSIONS.md); empty if none.
   std::string asm_label;
+  bool hidden_visibility = false;
   bool pack = false;  // `T... x`: a declarator-id after an ellipsis ([dcl.fct]/23, [temp.param]/17)
   bool ok = true;
 };
@@ -534,7 +536,8 @@ public:
       flag = true;
     };
     for (;;) {
-      if (skip_attributes()) continue;
+      // A standard attribute after a decl-specifier-seq appertains to its type ([dcl.spec.general]).
+      if (skip_attributes(&d.hidden_visibility, attr_gnu)) continue;
       Tk k = kind();
       switch (k) {
       case Tk::kw_void: ++n_void; break;
@@ -880,6 +883,7 @@ public:
     u32 template_args_at = 0;
     std::optional<u32> replay_template_args_at;
     bool pack = false;
+    bool hidden_visibility = false;
     std::vector<Suffix> suffixes;
   };
 
@@ -936,10 +940,10 @@ public:
         !(d.qualified && d.scope.type && s_->types().is_class(*d.scope.type)))
       d.ok = check_named_ref_qualifier(d) && d.ok;
     if (d.ok) {
-      skip_attributes();
+      skip_attributes(&d.hidden_visibility, attr_gnu);
       if (!abstract) {
         d.asm_label = asm_label(d.ok);
-        skip_attributes();
+        skip_attributes(&d.hidden_visibility, attr_gnu);
       }
     }
     // Prototype names support type and constant-expression checking inside this
@@ -958,19 +962,19 @@ public:
     return false;
   }
 
-  // Attribute-specifiers ([dcl.attr.grammar]), and the GNU `__attribute__((…))` the SDK's
-  // headers use (docs/EXTENSIONS.md): skipped, as no attribute ycxx knows changes what it does
-  // yet ([dcl.attr.grammar]/6 lets an implementation ignore one it does not know). Whether any
-  // was there: `attr_std` for an attribute-specifier, `attr_gnu` for a GNU attribute.
+  // Attribute-specifiers ([dcl.attr.grammar]) and GNU `__attribute__((…))`. Keep an explicit
+  // hidden visibility attribute when requested by the declaring context.
   static constexpr int attr_std = 1, attr_gnu = 2;
-  int skip_attributes() {
+  int skip_attributes(bool* hidden_visibility = nullptr, int visibility_forms = attr_std | attr_gnu) {
     int any = 0;
     for (;;) {
       bool std_attr = is(Tk::l_square) && kind(1) == Tk::l_square;
       bool gnu = is(Tk::identifier) && name_spelling() == "__attribute__" && kind(1) == Tk::l_paren;
       if (!std_attr && !gnu) return any;
-      any |= std_attr ? attr_std : attr_gnu;
+      const int form = std_attr ? attr_std : attr_gnu;
+      any |= form;
       if (gnu) bump();
+      const u32 begin = index();
       Tk open = kind(), close = open == Tk::l_square ? Tk::r_square : Tk::r_paren;
       u32 depth = 0;
       do {
@@ -978,8 +982,61 @@ public:
         else if (is(close)) --depth;
         bump();
       } while (depth > 0 && !at_end());
+      if (hidden_visibility && !*hidden_visibility && (form & visibility_forms) && depth == 0)
+        *hidden_visibility = hidden_visibility_in_attributes(begin, index(), std_attr);
     }
   }
+
+  bool hidden_visibility_in_attributes(u32 begin, u32 end, bool scoped) const {
+    auto token = [&](u32 at) { return r_->tokens[at].kind; };
+    auto named = [&](u32 at, std::string_view plain, std::string_view reserved) {
+      if (token(at) != Tk::identifier) return false;
+      const auto spelling = r_->name(r_->tokens[at]);
+      return spelling == plain || spelling == reserved;
+    };
+    if (end - begin < 4 || token(begin + 1) != token(begin) || token(end - 2) != token(end - 1)) return false;
+    auto matches = [&](u32 first, u32 limit) {
+      if (scoped) {
+        if (limit - first < 2 || !named(first, "gnu", "__gnu__") || token(first + 1) != Tk::coloncolon)
+          return false;
+        first += 2;
+      }
+      if (limit - first < 4 || !named(first, "visibility", "__visibility__") ||
+          token(first + 1) != Tk::l_paren || token(first + 2) != Tk::string_lit || token(limit - 1) != Tk::r_paren)
+        return false;
+      const auto& value = r_->literal(r_->tokens[first + 2]);
+      for (u32 at = first + 3; at < limit - 1; ++at)
+        if (token(at) != Tk::string_lit || !r_->tokens[at].has(lex::tok_flag::continued)) return false;
+      return value.encoding == lex::Encoding::ordinary && value.ud_suffix == lex::no_name && !value.bad &&
+             std::ranges::equal(value.units, std::string_view("hidden"));
+    };
+
+    // Only complete attributes at the list's top level can give the declaration visibility.
+    u32 entry = begin + 2;
+    const u32 limit = end - 2;
+    std::vector<Tk> closing;
+    for (u32 at = entry; at < limit; ++at) {
+      switch (Tk kind = token(at)) {
+      case Tk::l_square: closing.push_back(Tk::r_square); break;
+      case Tk::l_paren: closing.push_back(Tk::r_paren); break;
+      case Tk::l_brace: closing.push_back(Tk::r_brace); break;
+      case Tk::l_splice: closing.push_back(Tk::r_splice); break;
+      case Tk::r_square: case Tk::r_paren: case Tk::r_brace: case Tk::r_splice:
+        if (closing.empty() || closing.back() != kind) return false;
+        closing.pop_back();
+        break;
+      case Tk::comma:
+        if (closing.empty()) {
+          if (matches(entry, at)) return true;
+          entry = at + 1;
+        }
+        break;
+      default: break;
+      }
+    }
+    return closing.empty() && matches(entry, limit);
+  }
+
   // The token index `ahead` moves to past any attributes that start there.
   u32 past_attributes(u32 ahead) const {
     for (;;) {
@@ -1206,7 +1263,6 @@ public:
       if (!ok) return l;
       l.name = s_->ins().names.intern(lex::conversion_function_name);
       l.named = true;
-      skip_attributes();
     } else if (!abstract && literal_operator_ahead()) {
       l.name_at = pos();
       auto n = lookup_id();
@@ -1216,7 +1272,6 @@ public:
       }
       l.name = *n;
       l.named = true;
-      skip_attributes();
     } else if (!abstract && is(Tk::kw_operator)) {
       // An operator-function-id ([over.oper.general]): `operator@`, named as the splitter spells it.
       l.name_at = pos();
@@ -1238,7 +1293,6 @@ public:
       }
       l.name = s_->world().ins.names.intern(spelled);
       l.named = true;
-      skip_attributes();
     } else if (is(Tk::identifier)) {
       l.name = name_of(tok());
       l.named = true;
@@ -1250,7 +1304,6 @@ public:
         l.template_args = template_argument_list(&l.replay_template_args_at);
         if (!l.template_args) ok = false;
       }
-      skip_attributes();  // appertaining to the declarator-id ([dcl.meaning.general]/1)
     } else if (is(Tk::l_paren) &&
                (kind(1) == Tk::star || kind(1) == Tk::amp || kind(1) == Tk::ampamp || kind(1) == Tk::l_paren ||
                 (kind(1) == Tk::identifier && (!abstract || !params_ahead())) || member_pointer_star(1))) {
@@ -1263,6 +1316,7 @@ public:
       s_->diag(pos(), Diag::expected_unqualified_id);
       ok = false;
     }
+    if (l.named) skip_attributes(&l.hidden_visibility);  // appertains to the declarator-id ([dcl.meaning.general]/1)
     for (;;) {
       if (is(Tk::l_paren) && !abstract && in_params_ == 0 && !params_ahead()) break;  // `T x(args)`: an initializer
       if (is(Tk::l_paren)) {
@@ -1639,6 +1693,7 @@ public:
     d.template_args_at = l.template_args_at;
     d.replay_template_args_at = l.replay_template_args_at;
     d.pack = l.pack;
+    d.hidden_visibility = l.hidden_visibility;
     return t;
   }
 
