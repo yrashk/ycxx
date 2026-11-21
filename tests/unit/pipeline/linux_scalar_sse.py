@@ -44,13 +44,20 @@ def main():
                              '-o', 'mixed'], scope, cold)
                         run(['./mixed'], scope, cold)
 
-            compile('-c', 'arithmetic-provider.cpp', '-o', 'arithmetic.o')
-            compile('-c', 'arithmetic-provider.cpp', '-o', 'arithmetic-warm.o', env=daemon)
-            assert (scope / 'arithmetic-warm.o').read_bytes() == (scope / 'arithmetic.o').read_bytes()
+            for fixture in ('arithmetic', 'comparisons', 'mixed-comparisons'):
+                source = f'{fixture}-provider.cpp'
+                compile('-c', source, '-o', f'{fixture}.o')
+                compile('-c', source, '-o', f'{fixture}-warm.o', env=daemon)
+                assert (scope / f'{fixture}-warm.o').read_bytes() == (scope / f'{fixture}.o').read_bytes()
             for opt in ('-O0', '-O2'):
-                run([host_cxx, '-std=c++26', '-pedantic-errors', opt, '-fno-fast-math', '-fno-lto',
-                     'arithmetic-consumer.cpp', 'arithmetic.o', '-o', 'mixed-arithmetic'], scope, cold)
+                host = [host_cxx, '-std=c++26', '-pedantic-errors', opt, '-fno-fast-math', '-fno-lto']
+                run([*host, 'arithmetic-consumer.cpp', 'arithmetic.o', '-o', 'mixed-arithmetic'], scope, cold)
                 run(['./mixed-arithmetic'], scope, cold)
+                run([*host, '-Dmain=fp_same_width_main', '-c', 'comparisons-consumer.cpp',
+                     '-o', 'comparisons-consumer.o'], scope, cold)
+                run([*host, 'mixed-comparisons-consumer.cpp', 'comparisons-consumer.o',
+                     'comparisons.o', 'mixed-comparisons.o', '-o', 'mixed-comparisons'], scope, cold)
+                run(['./mixed-comparisons'], scope, cold)
 
             for fixture in ('variadic-caller', 'variadic-al-caller'):
                 compile('-c', f'{fixture}.cpp', '-o', f'{fixture}.o')
@@ -82,7 +89,6 @@ def main():
         unresolved_copy = ('struct Leaf { volatile int value; };\n'
                            'struct Wrapper { Leaf leaf; Wrapper(const Wrapper&) = default; };\n')
         cases = (
-            ('bool f(float a, float b) { return a == b; }', '`fcmp`: floating-point operation is unsupported'),
             ('float f(double x) { return x; }', '`fptrunc`: floating-point operation is unsupported'),
             ('int f(double x) { return static_cast<int>(x); }', '`fptosi`: floating-point operation is unsupported'),
             ('float f(float (*g)(float)) { return g(1.0F); }',
