@@ -1028,6 +1028,19 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   The fixtures in `tests/own/classes/scalar-default-member-init/` cover both targets in syntax
   checks and native Linux x86-64 execution.
 
+- An automatic declaration such as `Point p(3, 4);` can initialize a flat aggregate with
+  public arithmetic fields and implicit trivial destruction. The fallback applies when
+  constructor resolution finds no viable candidate ([dcl.init.general]). Each expression
+  copy-initializes the corresponding field in declaration order, allowing narrowing. An
+  omitted field uses its supported scalar default member initializer or is value-initialized.
+  Constant initialization uses the scalar element evaluator, with destination-dependent
+  constant evaluation tracked in [#25](https://github.com/yrashk/ycxx/issues/25).
+- Parenthesized arrays, nested and base-bearing aggregates, unions, reference members,
+  bit-fields, nontrivial destruction, static storage and functional casts remain in
+  [#301](https://github.com/yrashk/ycxx/issues/301). Linux x86-64 runtime conversions between
+  floating-point and integer types remain in [#201](https://github.com/yrashk/ycxx/issues/201).
+  Spec-only fixtures are in `tests/own/parenthesized-aggregate/`.
+
 - Ordinary mutable data members can be modified through a const object. A member access
   preserves volatile and the field's declared qualification. Native const globals with mutable
   subobjects are placed in writable storage, including through records and arrays (#373).
@@ -1278,8 +1291,10 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
 - A nondependent call in a template uses its lexical lookup point. Dependent calls also use the
   existing point of instantiation ([temp.dep.candidate]). Per-name incremental scheduling
   remains under #16.
+- Supported ordinary free binary operators use the full ADL association set, including base
+  namespaces and hidden friends. Namespace using-directives do not contribute candidates.
 - Remaining work in #165 includes declarations of functions in blocks, exact lookup for
-  operators, member templates as template arguments, dependent-call template argument associations,
+  other operators, member templates as template arguments, dependent-call template argument associations,
   overload-set arguments and complete unqualified template-id lookup.
 - Tests: `tests/own/argument-dependent-lookup/` and `tests/own/range-for/adl*.run.cpp`.
 

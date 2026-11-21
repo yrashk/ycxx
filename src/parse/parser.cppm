@@ -4822,11 +4822,11 @@ public:
 
   // A local usable in constant expressions ([expr.const]): constexpr, or a const integral one
   // with a constant initializer; a constexpr one must have one ([dcl.constexpr]).
-  void constant_local(u32 local, QualType t, bool is_constexpr, Ex& init, bool replayed_defaults = false) {
+  void constant_local(u32 local, QualType t, bool is_constexpr, Ex& init, bool memberwise = false) {
     bool usable_kind = sema::Types::is_const(t) && !sema::Types::is_volatile(t) && s_->types().is_integral(t);
     if (!init.ok() || !(is_constexpr || usable_kind)) return;
     sema::Evaluator evaluator(*s_, questions());
-    const bool scalar_record = replayed_defaults && s_->as<ast::InitList>(init).has_value();
+    const bool scalar_record = memberwise && s_->as<ast::InitList>(init).has_value();
     sema::Evaluated v = scalar_record ? evaluator.evaluate_initializer(init, /*zero_default=*/false)
                                      : evaluator.evaluate(init);
     if (v.value) {
@@ -5443,11 +5443,23 @@ public:
           skip_to_semi();
           return {NodeId::none, begin, pos()};
         }
+        bool memberwise = replay_defaults;
         if (s_->types().is_dependent(d.type) || s_->any_dependent(args)) {
           init = s_->construct(d.type, std::move(args), open, pos());
         } else if (s_->types().is_class(d.type)) {
-          init = s_->has_user_ctors(d.type) || args.size() != 1 ? s_->construct(d.type, std::move(args), open, pos())
-                                                                 : s_->convert(args[0], d.type, open);
+          const bool single = args.size() == 1;
+          // Keep the existing class expression path, which also adjusts derived-to-base copies.
+          const bool aggregate_fallback = !spec.is_static &&
+              (!single || (args[0].ok() && !s_->types().is_class(args[0].type()))) &&
+              s_->can_parenthesize_aggregate(d.type);
+          if (aggregate_fallback || s_->has_user_ctors(d.type) || !single) {
+            const auto form = aggregate_fallback ? sema::Construction::direct_paren_aggregate
+                                                 : sema::Construction::direct;
+            init = s_->construct(d.type, std::move(args), open, pos(), form);
+            memberwise = memberwise || aggregate_fallback;
+          } else {
+            init = s_->convert(args[0], d.type, open);
+          }
         } else if (args.size() != 1 || s_->types().is_array(d.type)) {
           s_->diag(open, Diag::not_supported, Tk::l_paren);  // a parenthesized list for a scalar or array
         } else if (s_->types().is_reference(d.type)) {
@@ -5455,7 +5467,7 @@ public:
         } else {
           init = s_->convert(args[0], d.type, open);
         }
-        if (replay_defaults) constant_local(local, d.type, spec.is_constexpr, init, replay_defaults);
+        if (memberwise) constant_local(local, d.type, spec.is_constexpr, init, memberwise);
       } else if (s_->types().is_reference(d.type)) {
         s_->diag(d.name_at, Diag::reference_uninitialized);  // [dcl.ref]/5
       } else if (s_->types().is_dependent(d.type)) {

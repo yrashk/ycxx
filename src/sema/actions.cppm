@@ -208,7 +208,7 @@ struct Ex {
   bool glvalue() const { return info.category != ValueCategory::prvalue; }
 };
 
-enum class Construction { direct, copy, direct_list, copy_list, default_init };
+enum class Construction { direct, direct_paren_aggregate, copy, direct_list, copy_list, default_init };
 enum class ConstructorDestination { object, delegation, polymorphic_base, lambda_result };
 
 // A braced-init-list as written ([dcl.init.general]): each initializer-clause is an analysed
@@ -1713,6 +1713,18 @@ public:
     return c && (c->user_ctors || c->closure);
   }
 
+  // The [dcl.init.general] parenthesized form currently supports flat records whose
+  // fields use ordinary arithmetic conversions and need no cleanup during unwinding.
+  bool can_parenthesize_aggregate(QualType t) {
+    const ClassRec* c = class_rec(types().class_of(t));
+    return c && is_aggregate(t) && !c->union_ && c->bases.empty() &&
+           c->destructor_usable && c->destructor == EntityId::none &&
+           std::ranges::all_of(c->fields, [&](const FieldRec& f) {
+             return c->access_of(f.entity) == ast::Access::public_ &&
+                    f.bit_width == 0 && types().is_arithmetic(f.type);
+           });
+  }
+
   // The destructor that ends an object of type `t`, or none if it is trivial ([class.dtor]); for
   // an array, its elements'.
   EntityId destructor_of(QualType t) { return q_->classes().destructor_of(t); }
@@ -1997,6 +2009,26 @@ public:
         out.push_back(list_element(et, c.expr));
       }
       if (!out.back().ok()) return fail;
+    }
+    return list_of(t, std::move(out), begin, end);
+  }
+
+  // [dcl.init.general]: copy-initialize each element from the corresponding expression.
+  // Omitted elements use their default member initializers or are value-initialized.
+  Ex parenthesized_aggregate(QualType t, std::span<const Ex> args, u32 begin, u32 end) {
+    const std::vector<Element> elems = elements(t);
+    if (args.size() > elems.size()) {
+      diag(args[elems.size()].begin, Diag::too_many_initializers, Types::unqualified(t));
+      return {NodeId::none, begin, end};
+    }
+    std::vector<Ex> out;
+    out.reserve(elems.size());
+    const bool replay = replay_default_members_ && can_replay_default_members(t);
+    for (std::size_t i = 0; i < elems.size(); ++i) {
+      Ex init = i < args.size() ? convert(args[i], elems[i].type, args[i].begin)
+                                : element_default(elems[i], true, replay, end, end);
+      if (!init.ok()) return {NodeId::none, begin, end};
+      out.push_back(init);
     }
     return list_of(t, std::move(out), begin, end);
   }
@@ -4507,12 +4539,15 @@ public:
     return Ics{true, Ics::user_defined};
   }
 
-  // The best viable candidate for `args` ([over.match.best]), diagnosed at `at` when there is
-  // none or more than one, or when it is deleted. `object_cv` is the implicit object's, for
-  // non-static member functions.
-  std::optional<std::size_t> resolve(std::span<const Candidate> cands, std::span<const Ex> args, u32 at, NameId name,
-                                     std::optional<Cv> object_cv, std::optional<QualType> ctor_of = std::nullopt,
-                                     std::span<const Braced* const> lists = {}, bool object_rvalue = false) {
+  enum class OverloadFailure { no_viable, diagnosed };
+
+  // The best viable candidate for `args` ([over.match.best]). Only the absence of a viable
+  // candidate can be deferred to another initialization rule. `object_cv` is the implicit
+  // object's, for non-static member functions.
+  std::expected<std::size_t, OverloadFailure> resolve(
+      std::span<const Candidate> cands, std::span<const Ex> args, u32 at, NameId name,
+      std::optional<Cv> object_cv, std::optional<QualType> ctor_of = std::nullopt,
+      std::span<const Braced* const> lists = {}, bool object_rvalue = false, bool defer_no_viable = false) {
     std::vector<std::pair<std::size_t, std::vector<Ics>>> viable;
     const Braced* first_list = lists.empty() ? nullptr : *std::ranges::find_if(lists, [](const Braced* list) { return list; });
     const Braced* unsupported = nullptr;
@@ -4572,15 +4607,16 @@ public:
     }
     if (unsupported) {
       diag(unsupported->begin, Diag::not_supported, lex::Tk::l_brace);
-      return std::nullopt;
+      return std::unexpected(OverloadFailure::diagnosed);
     }
     auto report = [&](Diag fn, Diag ctor) {
       if (ctor_of) diag(at, ctor, Types::unqualified(*ctor_of));
       else diag(at, fn, name);
     };
     if (viable.empty()) {
+      if (defer_no_viable) return std::unexpected(OverloadFailure::no_viable);
       report(Diag::no_viable_function, Diag::no_viable_constructor);
-      return std::nullopt;
+      return std::unexpected(OverloadFailure::diagnosed);
     }
     // F1 is better than F2 if none of its conversions is worse, and one is better, or else F1 is
     // not a template specialization and F2 is, or both are and F1's template is more specialized
@@ -4620,12 +4656,12 @@ public:
     }
     if (!best) {
       report(Diag::ambiguous_call, Diag::ambiguous_constructor);
-      return std::nullopt;
+      return std::unexpected(OverloadFailure::diagnosed);
     }
     std::size_t c = viable[*best].first;
     if (cands[c].deleted) {
       report(Diag::deleted_function, Diag::deleted_constructor);
-      return std::nullopt;
+      return std::unexpected(OverloadFailure::diagnosed);
     }
     return c;
   }
@@ -4741,8 +4777,12 @@ public:
         return fail;
       }
     }
-    auto chosen = resolve(cands, args, begin, no_name(), std::nullopt, ut);
-    if (!chosen) return fail;
+    const bool paren_aggregate = form == Construction::direct_paren_aggregate;
+    auto chosen = resolve(cands, args, begin, no_name(), std::nullopt, ut, {}, false, paren_aggregate);
+    if (!chosen) {
+      if (chosen.error() == OverloadFailure::no_viable) return parenthesized_aggregate(t, args, begin, end);
+      return fail;
+    }
     const Candidate& k = cands[*chosen];
     if (destination == ConstructorDestination::delegation) {
       if (k.entity == current_function) {
@@ -7053,6 +7093,10 @@ public:
           truncate_diags(n);
         }
       }
+    const bool binary = operands.size() == 2 && std::ranges::contains(binary_spellings, op);
+    const bool enum_only = binary && std::ranges::none_of(operands, [&](const Ex& operand) {
+      return types().is_class(types().referee(operand.type()));
+    });
     std::vector<ast::DeclSema> set;
     auto add = [&](const ast::DeclSema& d) {
       if (d.kind == ast::DeclKind::function && d.entity != EntityId::none &&
@@ -7062,33 +7106,26 @@ public:
     for (const auto& o : own)
       if (o.name == name) add(o.sema);
     for (DeclId d : q_->visible_decls(name, directives())) add(q_->decl_sema(d));
-    bool found_hidden_friend = false;
-    if (operands.size() == 2 && std::ranges::contains(binary_spellings, op)) {
+    if (binary) {
       auto associations = adl_associations(operands, /*at_instantiation=*/false, /*ordinary_call=*/true);
-      std::size_t ordinary = set.size();
       for_each_associated_friend(associations, name, /*at_instantiation=*/false, add);
-      found_hidden_friend = set.size() != ordinary;
-      // Rank a hidden friend against candidates from the same ADL association set.
-      if (found_hidden_friend)
-        for (EntityId ns : associations.namespaces)
-          for (const ast::DeclSema& d : q_->adl_functions(ns, name, /*at_instantiation=*/false)) add(d);
-    }
-    if (!found_hidden_friend)
+      for (EntityId ns : associations.namespaces)
+        for (const ast::DeclSema& d : q_->adl_functions(ns, name, /*at_instantiation=*/false)) add(d);
+    } else {
       for (const Ex& o : operands)
         if (auto ns = associated_namespace(o.type())) {
-          // The mixed-candidate check needs ADL, which ignores using-directives
-          // in associated namespaces. Preserve the older lookup for other operators.
           if (ref_qualified_member) {
             for (const ast::DeclSema& d : q_->adl_functions(*ns, name, /*at_instantiation=*/false)) add(d);
           } else {
             for (const ast::DeclSema& d : q_->namespace_members(*ns, name)) add(d);
           }
         }
+    }
     if (set.empty()) return ref_qualified_member;
     ExprInfo info{builtin(Builtin::overload_set), ValueCategory::lvalue, 0};
     Ex callee = node(ast::DeclRef{info, set.front().entity}, begin, begin, info);
     overloads_[std::to_underlying(callee.id)] = std::move(set);
-    Ex r = call(callee, std::move(operands), end, op_at);
+    Ex r = call(callee, std::move(operands), end, op_at, std::nullopt, enum_only);
     if (ref_qualified_member) {
       // Joint ranking is needed when the ref-qualified member competes with
       // at least one viable nonmember candidate.
@@ -7630,7 +7667,8 @@ public:
   // [expr.call]: a call to a named function or through a pointer to function. Each argument
   // copy-initializes its parameter; arguments matching a C-style ellipsis get the default
   // argument promotions.
-  Ex call(Ex callee, std::vector<Ex> args, u32 end, u32 paren_at, std::optional<u32> lookup_at = std::nullopt) {
+  Ex call(Ex callee, std::vector<Ex> args, u32 end, u32 paren_at, std::optional<u32> lookup_at = std::nullopt,
+          bool enum_operator = false) {
     u32 begin = callee.begin;
     std::vector<NodeId> defaults;  // the chosen function's default arguments
     DefaultArgumentOrigin default_origin = DefaultArgumentOrigin::interned;
@@ -7688,13 +7726,27 @@ public:
       std::vector<ArgShape> shapes;
       if (lists.empty())
         for (const Ex& a : args) shapes.push_back(argument_shape(a));
+      // [over.match.oper]: for a binary operator with no class operand, a nonmember
+      // candidate needs an enum or enum-reference parameter matching its operand.
+      auto eligible_operator_type = [&](QualType type) {
+        if (!enum_operator) return true;
+        auto unqualified_type = [&](QualType t) {
+          return Types::unqualified(types().canonical(types().referee(t)));
+        };
+        const auto function = types().rec(type);
+        for (std::size_t i = 0; i < std::min(args.size(), function.params.size()); ++i) {
+          const QualType operand = unqualified_type(args[i].type());
+          if (types().is_enum(operand) && operand == unqualified_type(function.params[i])) return true;
+        }
+        return false;
+      };
       std::vector<Candidate> cands;
       std::vector<const ast::DeclSema*> decls;
       for (const ast::DeclSema& d : set) {
         bool deleted = (d.flags & decl_flag::deleted) != 0;
         if (!(d.flags & decl_flag::template_)) {
           // Explicit template arguments name only templates ([temp.arg.explicit]).
-          if (ex != explicit_args_.end()) continue;
+          if (ex != explicit_args_.end() || !eligible_operator_type(d.type)) continue;
           cands.push_back(non_template_call_candidate(d, allocation));
           decls.push_back(&d);
           continue;
@@ -7720,7 +7772,7 @@ public:
           if (sat && !*sat) continue;
         }
         auto st = t.specialization_type(d, *targs);
-        if (!st) continue;
+        if (!st || !eligible_operator_type(*st)) continue;
         cands.push_back({specialization(d, *targs, *st), *st, true, deleted, &d, found_defaults(d)});
         decls.push_back(&d);
       }
