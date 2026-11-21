@@ -35,6 +35,6 @@ struct AllocationTag {
 
 void* operator new(Size, const AllocationTag& tag) noexcept;
 bool peer_check();
-PlacementAddresses peer_addresses();
+void peer_addresses(PlacementAddresses& addresses);
 
 #endif

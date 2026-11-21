@@ -17,8 +17,11 @@ bool peer_check() {
     return storage == 17;
 }
 
-PlacementAddresses peer_addresses() {
-    return {&::operator new, &::operator new[], &::operator delete, &::operator delete[]};
+void peer_addresses(PlacementAddresses& addresses) {
+    addresses.scalar_new = &::operator new;
+    addresses.array_new = &::operator new[];
+    addresses.scalar_delete = &::operator delete;
+    addresses.array_delete = &::operator delete[];
 }
 
 void* operator new(Size, const AllocationTag& tag) noexcept {

@@ -21,7 +21,8 @@ int main() {
 
     PlacementAddresses local = {&::operator new, &::operator new[],
                                 &::operator delete, &::operator delete[]};
-    PlacementAddresses peer = peer_addresses();
+    PlacementAddresses peer;
+    peer_addresses(peer);
     if (local.scalar_new != peer.scalar_new || local.array_new != peer.array_new)
         return 6;
     if (local.scalar_delete != peer.scalar_delete || local.array_delete != peer.array_delete)
