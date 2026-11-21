@@ -1011,6 +1011,14 @@ public:
       return bool_literal(args.size() == 2, begin, end);
     return fail(unsupported, args.front().type);
   }
+  std::optional<Ex> replayed_binary_type_trait(ast::DepOp op, QualType first, QualType second, u32 begin, u32 end) {
+    if (!q_->in_type_trait_pattern()) return std::nullopt;
+    Templates t = templates();
+    const std::array operands{t.type_arg(first), t.type_arg(second)};
+    if (auto value = t.replayed_type_trait_pattern(op, operands))
+      return literal(builtin(Builtin::bool_), *value, ValueCategory::prvalue, begin, end);
+    return std::nullopt;
+  }
   // In the trait's unevaluated expression, declval gives a modifiable arithmetic lvalue only
   // for a non-const lvalue reference. Built-in arithmetic assignment is trivial and nonthrowing
   // ([meta.unary.prop], [expr.assign]).
@@ -1018,12 +1026,7 @@ public:
     const Types& ts = types();
     const QualType lhs = ts.canonical(left), rhs = ts.canonical(right);
     if (ts.is_dependent(lhs) || ts.is_dependent(rhs)) {
-      if (q_->in_type_trait_pattern()) {
-        Templates t = templates();
-        const std::array operands{t.type_arg(lhs), t.type_arg(rhs)};
-        if (auto value = t.replayed_type_trait_pattern(op, operands))
-          return literal(builtin(Builtin::bool_), *value, ValueCategory::prvalue, begin, end);
-      }
+      if (auto pattern = replayed_binary_type_trait(op, lhs, rhs, begin, end)) return *pattern;
       diag_at(type_trait_loc(begin), Diag::assignability_dependent, name);
       return {NodeId::none, begin, end};
     }
@@ -1033,6 +1036,35 @@ public:
       return {NodeId::none, begin, end};
     }
     return bool_literal(ts.is_reference(lhs) && !ts.rec(lhs).rvalue_ref && !Types::is_const(destination), begin, end);
+  }
+  // Within this domain, an implicit conversion that can initialize the return type also cannot
+  // throw. Reference binding follows the category of declval<From>() ([meta.rel], [dcl.init.ref]).
+  Ex convertibility_expr(ast::DepOp op, NameId name, QualType source, QualType target, u32 begin, u32 end) {
+    const Types& ts = types();
+    const QualType from = ts.canonical(source), to = ts.canonical(target);
+    if (ts.is_dependent(from) || ts.is_dependent(to)) {
+      if (auto pattern = replayed_binary_type_trait(op, from, to, begin, end)) return *pattern;
+      diag_at(type_trait_loc(begin), Diag::convertibility_dependent, name);
+      return {NodeId::none, begin, end};
+    }
+    const bool from_void = ts.is_void(from), to_void = ts.is_void(to);
+    const QualType from_object = ts.canonical(ts.referee(from)), to_object = ts.canonical(ts.referee(to));
+    if ((!from_void && !ts.is_arithmetic(from_object)) || (!to_void && !ts.is_arithmetic(to_object))) {
+      diag_at(type_trait_loc(begin), Diag::convertibility_unsupported, name, source, target);
+      return {NodeId::none, begin, end};
+    }
+    if (from_void || to_void) return bool_literal(from_void && to_void, begin, end);
+    if (!ts.is_reference(to)) return bool_literal(true, begin, end);
+
+    const bool rvalue_target = ts.rec(to).rvalue_ref;
+    const bool binds_rvalue = rvalue_target || Types::cv(to_object) == Cv::const_;
+    // Different arithmetic types require conversion to a temporary of the target type.
+    if (Types::unqualified(from_object) != Types::unqualified(to_object))
+      return bool_literal(binds_rvalue, begin, end);
+
+    const bool source_lvalue = ts.is_reference(from) && !ts.rec(from).rvalue_ref;
+    const bool compatible_cv = cv_within(Types::cv(from_object), Types::cv(to_object));
+    return bool_literal(compatible_cv && (source_lvalue ? !rvalue_target : binds_rvalue), begin, end);
   }
   // `__trait(T…)` that tests types ([meta.unary], [meta.rel]): a `bool` prvalue, value-dependent
   // while a type is dependent for the traits that support it.
@@ -1053,6 +1085,9 @@ public:
       return assignability_expr(ast::DepOp::is_nothrow_assignable, name, args[0], args[1], begin, end);
     case is_trivially_assignable:
       return assignability_expr(ast::DepOp::is_trivially_assignable, name, args[0], args[1], begin, end);
+    case is_convertible: return convertibility_expr(ast::DepOp::is_convertible, name, args[0], args[1], begin, end);
+    case is_nothrow_convertible:
+      return convertibility_expr(ast::DepOp::is_nothrow_convertible, name, args[0], args[1], begin, end);
     case is_reference: return structural_trait(templates().unary_trait_value(ast::DepOp::is_reference, args[0]));
     case is_const: unary_op = ast::DepOp::is_const; break;
     case is_volatile: unary_op = ast::DepOp::is_volatile; break;
