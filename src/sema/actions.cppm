@@ -3090,7 +3090,11 @@ public:
   // ([expr.ref]/6.3.2).
   Ex bound_member(EntityId c, NameId name, std::optional<Ex> object, bool arrow, u32 begin, u32 end, u32 name_at,
                   EntityId naming = EntityId::none) {
-    auto cands = member_functions(c, name);
+    return bind_members(c, member_functions(c, name), object, arrow, begin, end, name_at, naming);
+  }
+
+  Ex bind_members(EntityId c, std::vector<const MemberDeclRec*> cands, std::optional<Ex> object, bool arrow,
+                  u32 begin, u32 end, u32 name_at, EntityId naming = EntityId::none) {
     ExprInfo info{builtin(Builtin::bound_member), ValueCategory::prvalue, 0};
     Ex r = node(ast::Member{info, cands.front()->entity, ~u32{0}, arrow ? 1u : 0u, 0, object ? at(*object, begin) : Child{}},
                 begin, end, info);
@@ -4976,10 +4980,41 @@ public:
     return e;
   }
 
+  // [over.match.conv]: the bounded exact-result case of direct initialization.
+  std::optional<Ex> exact_conversion_cast(Ex object, QualType target, u32 cast_at) {
+    const EntityId cls = types().class_of(object.type());
+    const NameId name = ins().names.intern(lex::conversion_function_name);
+    const ClassRec* record = class_rec(cls);
+    if (!record || !record->bases.empty()) return std::nullopt;
+    auto candidates = member_functions(cls, name);
+    std::erase_if(candidates, [&](const MemberDeclRec* candidate) {
+      const TypeRec fn = types().rec(candidate->type);
+      return !cv_within(Types::cv(object.type()), fn.fn_cv);
+    });
+    const MemberDeclRec* selected = nullptr;
+    for (const MemberDeclRec* candidate : candidates) {
+      const TypeRec fn = types().rec(candidate->type);
+      if (types().is_reference(fn.inner)) return std::nullopt;
+      if (!same_unqualified(fn.inner, target)) continue;
+      if (selected) return std::nullopt;
+      selected = candidate;
+    }
+    if (!selected) return std::nullopt;
+    // An exact result wins a tie on the implicit object. Leave sets with
+    // different viable object parameter types to general conversion ranking.
+    const TypeRec selected_fn = types().rec(selected->type);
+    for (const MemberDeclRec* candidate : candidates) {
+      const TypeRec fn = types().rec(candidate->type);
+      if (fn.fn_cv != selected_fn.fn_cv || fn.fn_ref != selected_fn.fn_ref) return std::nullopt;
+    }
+    Ex callee = bind_members(cls, {selected}, object, false, object.begin, object.end, cast_at);
+    return member_call(callee, {}, object.end, cast_at);
+  }
+
   // A conversion as `static_cast<to>(e)` performs it ([expr.static.cast]); a cast in functional
   // notation or a cast-expression is one when the supported static_cast rules apply
   // ([expr.type.conv]/2, [expr.cast]/4). The downcast slice is for named static_cast expressions.
-  Ex static_cast_to(Ex e, QualType to, u32 at_, bool allow_downcast = false) {
+  Ex static_cast_to(Ex e, QualType to, u32 at_, bool named_static_cast = false) {
     if (!e.ok()) return e;
     if (dependent(e) || types().is_dependent(to))
       return dependent_node({e}, e.begin, e.end, types().is_dependent(to) ? std::nullopt : std::optional(Types::unqualified(to)));
@@ -4990,16 +5025,18 @@ public:
       const TypeRec ref = types().rec(to);
       if (ref.rvalue_ref && e.cat() == ValueCategory::lvalue && types().is_object(ref.inner)) {
         if (auto cast = cast_lvalue_to_xvalue(e, to, ref.inner, at_)) return *cast;
-      } else if (allow_downcast && !ref.rvalue_ref && e.cat() == ValueCategory::lvalue) {
+      } else if (named_static_cast && !ref.rvalue_ref && e.cat() == ValueCategory::lvalue) {
         if (auto cast = cast_base_to_derived(e, ref.inner, /*pointer=*/false, at_)) return *cast;
       }
       return convert(e, to, at_);
     }
     if (types().is_class(target) || types().is_array(target)) return convert(e, to, at_);
+    if (named_static_cast && types().is_class(e.type()))
+      if (auto cast = exact_conversion_cast(e, target, at_)) return *cast;
     Ex v = rvalue(e);
     if (!v.ok()) return v;
     QualType from = Types::unqualified(v.type());
-    if (allow_downcast && types().is_pointer(from) && types().is_pointer(target)) {
+    if (named_static_cast && types().is_pointer(from) && types().is_pointer(target)) {
       if (auto cast = cast_base_to_derived(v, target, /*pointer=*/true, at_)) return *cast;
     }
     // [expr.static.cast]: a conversion to an enumeration without a fixed underlying type
