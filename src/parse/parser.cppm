@@ -2089,10 +2089,11 @@ public:
     return d.type;
   }
 
-  // At a bool template argument or default, keep a chain of `!` over a dependent bool variable
-  // template-id. Other expressions follow the ordinary template-value path.
+  // In a declaration's bool template argument or default, keep a chain of `!` over a dependent
+  // bool variable template-id. Function bodies reparse the expression once its type and destination
+  // are known, including when the destination is an integer parameter.
   std::optional<sema::ConstId> negated_template_variable(Ex e) {
-    if (!s_->dependent(e)) return std::nullopt;
+    if (body || !s_->dependent(e)) return std::nullopt;
     std::size_t negations = 0;
     for (;;) {
       while (auto paren = s_->as<ast::Paren>(e)) e.id = paren->operand.id;
