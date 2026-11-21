@@ -635,6 +635,7 @@ struct FieldRec {
   ConstId init = ConstId::none;
   bool dmi = false;  // it has a default member initializer, constant or not
   u8 bit_width = 0;
+  bool mutable_ = false;
 };
 
 // Classification of a defaulted copy affected by an explicit in-class definition. Deletion

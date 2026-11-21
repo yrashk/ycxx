@@ -48,6 +48,7 @@ struct DeclSpec {
   bool is_constinit = false;
   bool is_typedef = false;  // [dcl.typedef]: the declarators declare typedef-names
   std::optional<u32> virtual_at;
+  std::optional<u32> mutable_at;
   // An elaborated-type-specifier ([dcl.type.elab]): the class it names, and where its name is.
   bool elaborated = false;
   NameId class_name{};
@@ -425,7 +426,7 @@ public:
   // decl-specifier-seq ([dcl.spec.general]) with the simple-type-specifiers of [dcl.type.simple],
   // class names and elaborated-type-specifiers ([dcl.type.elab]), and the cv-qualifiers.
   DeclSpec decl_specifiers(bool in_type_id = false, std::optional<u32>* friend_at = nullptr,
-                           bool allow_conversion_id = false, bool allow_virtual = false) {
+                           bool allow_conversion_id = false, bool class_member = false) {
     DeclSpec d;
     d.begin = pos();
     int n_char = 0, n_short = 0, n_int = 0, n_long = 0, n_signed = 0, n_unsigned = 0, n_void = 0, n_bool = 0;
@@ -466,8 +467,19 @@ public:
         once(d.is_extern, k);
         break;
       case Tk::kw_inline: once(d.is_inline, k); break;
+      case Tk::kw_mutable:
+        if (!class_member) {
+          s_->diag(pos(), Diag::mutable_placement);
+          d.ok = false;
+        } else if (d.mutable_at) {
+          s_->diag(pos(), Diag::duplicate_specifier, k);
+          d.ok = false;
+        } else {
+          d.mutable_at = pos();
+        }
+        break;
       case Tk::kw_virtual:
-        if (!allow_virtual) {
+        if (!class_member) {
           s_->diag(pos(), Diag::virtual_placement);
           d.ok = false;
         } else if (d.virtual_at) {

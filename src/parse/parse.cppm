@@ -3169,7 +3169,7 @@ private:
               ps_.kind());
       return bad();
     }
-    DeclSpec spec = ps_.decl_specifiers(/*in_type_id=*/false, nullptr, /*allow_conversion_id=*/true, /*allow_virtual=*/true);
+    DeclSpec spec = ps_.decl_specifiers(/*in_type_id=*/false, nullptr, /*allow_conversion_id=*/true, /*class_member=*/true);
     if (spec.is_extern || spec.is_constinit) {
       s_.diag(spec.begin, Diag::not_supported, spec.is_extern ? Tk::kw_extern : Tk::kw_constinit);
       return bad();
@@ -3181,6 +3181,10 @@ private:
     }
     // A member typedef ([class.mem], [dcl.typedef]): each declarator a type nested in the class.
     if (spec.is_typedef) {
+      if (spec.mutable_at) {
+        s_.diag(*spec.mutable_at, Diag::mutable_placement);
+        return bad();
+      }
       do {
         parse::Declarator d = ps_.declarator(spec.type, false, true);
         if (!d.ok || !d.named || d.qualified || !member_alias(c, d.name, d.name_at, d.type)) return bad();
@@ -3276,6 +3280,13 @@ private:
         s_.diag(d.name_at, Diag::member_of_function_type, d.type);
         return bad();
       }
+      // [dcl.stc]: mutable is allowed only on a non-static data member with a
+      // non-const, non-reference type.
+      if (spec.mutable_at && (function || spec.is_static ||
+                             types.is_reference(d.type) || sema::Types::is_const(types.innermost_array_element(types.canonical(d.type))))) {
+        s_.diag(*spec.mutable_at, Diag::mutable_placement);
+        return bad();
+      }
       u8 bit_width = 0;
       if (ps_.is(Tk::colon)) {
         auto width = bit_field(spec, d, c.entity);
@@ -3317,6 +3328,7 @@ private:
       sem.kind = ast::DeclKind::data_member;
       sem.type = d.type;
       sem.bit_width = bit_width;
+      sem.is_mutable = spec.mutable_at.has_value();
       sem.linkage = ast::Linkage::none;
       sem.flags = sema::decl_flag::definition;
       sem.entity = s_.world().entities.entity(
@@ -5348,7 +5360,7 @@ Program::ClassContent Program::class_content(u32 item, const std::function<const
       members.push_back({{id(m), ast::make_decl_ord(ast::DeclClass::syntactic, i)}, d.entity, access});
       if (d.kind == ast::DeclKind::data_member)
         fields.push_back({w_->entities.rec(d.entity).name, d.type, d.entity, inits.contains(i) ? inits[i] : ConstId::none,
-                        dmis_.contains(std::to_underlying(d.entity)), d.bit_width});
+                        dmis_.contains(std::to_underlying(d.entity)), d.bit_width, d.is_mutable});
       else if (d.kind == ast::DeclKind::enum_ || d.kind == ast::DeclKind::type_alias)
         nested.push_back({w_->entities.rec(d.entity).name, d.type, d.entity});
       else if (d.kind == ast::DeclKind::function || d.kind == ast::DeclKind::variable) {

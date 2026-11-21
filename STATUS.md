@@ -998,6 +998,10 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   the interpreter (#25).
 - Not yet: unions, bit-fields, constructors, bases (access checking came with #119).
 
+- Ordinary mutable data members can be modified through a const object. A member access
+  preserves volatile and the field's declared qualification. Native const globals with mutable
+  subobjects are placed in writable storage, including through records and arrays (#373).
+
 ## Classes, δ step 2: member functions and `this` (#86, 2026-11-18)
 
 - Member functions (in-class and out-of-class definitions, `const`/`volatile`, static) and static
