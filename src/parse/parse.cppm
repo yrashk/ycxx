@@ -6700,6 +6700,7 @@ public:
     std::optional<ast::DeclSema> f;
     if (p_->world().ins.seqs.size(is.decls) > 0) f = p_->completed_declaration(p_->world().ins.seqs.at(is.decls, 0));
     std::optional<ast::DeclSema> pattern = f;
+    const bool function_template = pattern && p_->world().ins.seqs.size(pattern->template_params) > 0;
     if (inst_) f = inst_->decl;
     Ex root;
     if (f && f->entity != EntityId::none && f->kind == ast::DeclKind::function &&
@@ -6712,7 +6713,7 @@ public:
       // A template's body is in the scope of its template-head ([basic.scope.temp]); an
       // instantiation's, with the arguments bound.
       for (auto& head : p_->enclosing_heads(k_)) s_.template_scopes.push_back(std::move(head));
-      if (pattern && p_->world().ins.seqs.size(pattern->template_params) > 0)
+      if (function_template)
         s_.template_scopes.push_back(p_->world().ins.seqs.elements(pattern->template_params));
       if (inst_) s_.template_args = inst_->args;
       // A member function's body sees its class's members ([basic.scope.class]) and `this`; a
@@ -6767,7 +6768,9 @@ public:
         // `= default`, `= delete` or a function-try-block.
         s_.diag(ps_.pos(), sema::Diag::not_supported, ps_.kind());
       } else {
+        ps_.dependent_decay_copy_body = function_template && !inst_;
         root = ps_.compound_statement();
+        ps_.dependent_decay_copy_body = false;
         if (!ps_.at_end()) s_.diag(ps_.pos(), sema::Diag::unexpected_token, ps_.kind());
         s_.check_labels();  // labels have function scope ([stmt.label]/2)
         // No return statement deduces the placeholder as `return;` would ([dcl.type.auto.deduct]/2).
@@ -6781,7 +6784,7 @@ public:
     std::vector<ast::LocalRec> locals(s_.locals().begin(), s_.locals().end());
     // A template's definition demands nothing; its instantiations do. What it keeps for them is
     // which calls were dependent ([temp.dep.candidate]) and its pack expansions (ast.md §6.4).
-    bool templated = (pattern && p_->world().ins.seqs.size(pattern->template_params) > 0) || !p_->enclosing_heads(k_).empty();
+    bool templated = function_template || !p_->enclosing_heads(k_).empty();
     std::vector<sema::Expansion> none;
     std::vector<u32> no_calls;
     const bool keeps = templated && !inst_;

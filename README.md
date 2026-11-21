@@ -45,8 +45,9 @@ tools/build
 build/bin/ycxx cxx hello.cpp -o hello && ./hello
 ```
 
-Concrete `auto(x)` and `auto{x}` decay-copy expressions support scalar and pointer values,
-including array and function decay. [#286](https://github.com/yrashk/ycxx/issues/286)
+Single-expression `auto(x)` and `auto{x}` perform scalar and pointer decay-copy, including
+array and function decay. Function-template bodies can defer supported dependent operands to
+instantiation. [#286](https://github.com/yrashk/ycxx/issues/286)
 
 **Preprocess binary resources.** Both targets support `#embed` and `__has_embed` with the standard
 parameters. [#125](https://github.com/yrashk/ycxx/issues/125)
@@ -229,6 +230,8 @@ for each derived field.
 - ordinary scalar `new` and single-object `delete` for integral and pointer objects, including
   cv-qualified objects. Scalar allocation uses the global Itanium allocation functions.
   Syntax checking also covers one-dimensional scalar `new T[n]` and `delete[] p`.
+  On Linux x86-64, `delete[] p` releases one-dimensional arrays of integral or ordinary pointer
+  elements through the unsized global deallocator, including zero-length arrays.
   The usual aligned scalar allocation and deallocation signatures support explicit calls with
   `std::align_val_t`. Written nonthrowing global scalar and array overloads with a final
   `const Tag&` support explicit calls, including `std::nothrow_t` and user-defined class tags.

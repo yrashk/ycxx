@@ -143,9 +143,10 @@ struct NewArray {
   [[=sequenced(1)]] Child element_init;
 };
 
-// Array delete ([expr.delete]) preserves the typed pointer operand.
+// Array delete ([expr.delete]) preserves the typed pointer operand and the usual unsized deallocator.
 struct DeleteArray {
   ExprInfo info;
+  EntityId function;
   [[=sequenced]] Child operand;
 };
 
