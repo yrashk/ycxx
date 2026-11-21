@@ -3239,38 +3239,14 @@ public:
       if (kind(1) == Tk::less && s_->names_type_template(n)) {
         auto t = class_template_type();
         if (!t) return {NodeId::none, begin, pos()};
-        if (is(Tk::l_brace)) {
-          auto b = braced_init_list();
-          Ex r = s_->list_init(*t, *b);
-          return {r.id, begin, pos(), r.info};
-        }
-        if (!expect(Tk::l_paren)) return {NodeId::none, begin, pos()};
-        std::vector<Ex> args;
-        if (!is(Tk::r_paren))
-          do args.push_back(assignment_expression());
-          while (accept(Tk::comma));
-        if (!expect(Tk::r_paren)) return {NodeId::none, begin, pos()};
-        Ex r = s_->functional_cast(*t, std::move(args), begin, pos());
-        return {r.id, begin, pos(), r.info};
+        return type_conversion(*t, begin);
       }
       if ((kind(1) == Tk::l_paren || kind(1) == Tk::l_brace))
         if (auto t = s_->class_name(n, false, true, pos())) {
           // `T(args)` or `T{…}` ([expr.type.conv]), T a type name: a class, an enumeration, a
           // typedef-name or a template parameter.
           bump();
-          if (is(Tk::l_brace)) {
-            auto b = braced_init_list();
-            Ex r = s_->list_init(*t, *b);
-            return {r.id, begin, pos(), r.info};
-          }
-          bump();
-          std::vector<Ex> args;
-          if (!is(Tk::r_paren))
-            do args.push_back(assignment_expression());
-            while (accept(Tk::comma));
-          if (!expect(Tk::r_paren)) return {NodeId::none, begin, pos()};
-          Ex r = s_->functional_cast(*t, std::move(args), begin, pos());
-          return {r.id, begin, pos(), r.info};
+          return type_conversion(*t, begin);
         }
       if (kind(1) == Tk::coloncolon) return qualified_id(begin);
       bump();
@@ -3390,7 +3366,7 @@ public:
       Ex r = s_->list_init(t, *b);
       return {r.id, begin, pos(), r.info};
     }
-    bump();
+    if (!expect(Tk::l_paren)) return {NodeId::none, begin, pos()};
     std::vector<Ex> args;
     if (!is(Tk::r_paren))
       do args.push_back(assignment_expression());
