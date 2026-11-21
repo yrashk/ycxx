@@ -118,11 +118,12 @@ struct Call {
   [[=indeterminately_sequenced(1)]] ChildList args;
 };
 
-// An ordinary scalar new-expression ([expr.new]): allocation is sequenced before initialization.
+// A scalar new-expression ([expr.new]): allocation is sequenced before initialization.
 struct NewObject {
   ExprInfo info;
   [[=sequenced(0)]] Child allocation;
   [[=sequenced(1)]] Child init;
+  bool placement = false;
 };
 
 // Single-object delete of a complete scalar ([expr.delete]): the operand has been converted

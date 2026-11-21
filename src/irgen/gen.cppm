@@ -1726,9 +1726,14 @@ class Gen {
       throw Unsupported{"cleanup for a potentially throwing new-initializer"};
     ValueId storage = rvalue(child(a, n.allocation));
     ast::QualType p = n.info.type;
+    if (n.placement) {
+      ValueId objects[] = {storage};
+      std::uint64_t types[] = {word(ty(facts_.pointee(p)))};
+      stateful(ir::Op::obj__reuse, {}, objects, types);
+    }
     ValueId object = pure(ir::Op::ptr_cast, p, {storage}, {word(ty(p))});
-    // Constant evaluation stops at the non-constexpr allocation call. This lets an ordinary
-    // namespace-scope initializer fall back to runtime without evaluating the new-initializer.
+    // Evaluation stops at an ordinary allocator or at storage reuse. A namespace-scope
+    // initializer can then fall back to runtime without evaluating the new-initializer.
     if (fn_.thunk) return object;
     ast::QualType t = facts_.pointee(p);
     initialize({object, t}, init, false);
