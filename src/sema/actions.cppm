@@ -109,6 +109,7 @@ public:
   virtual bool is_complete(EntityId c) = 0;
   // A concrete source query keeps its original position if its tokens are read again.
   virtual bool is_complete_at_source(EntityId c) { return is_complete(c); }
+  virtual bool class_layout_uncertain(EntityId /*cls*/) { return false; }
   virtual engine::Loc source_loc(engine::Loc loc, u32) { return loc; }
   // Only a base or initializer with an owning replay can retain this dependent pattern.
   virtual bool in_copyability_pattern() const { return false; }
@@ -6103,6 +6104,15 @@ public:
     return types().is_integral(t) || types().is_pointer(t);
   }
 
+  bool checking_class_alignment = false;
+  struct ClassAlignmentOperand {
+    bool& checking;
+    bool saved;
+    explicit ClassAlignmentOperand(Sema& s)
+        : checking(s.checking_class_alignment), saved(std::exchange(checking, true)) {}
+    ~ClassAlignmentOperand() { checking = saved; }
+  };
+
   // `sizeof` and `alignof` of a type ([expr.sizeof], [expr.alignof]), a `size_t` prvalue; zero
   // after a diagnostic.
   Ex size_of(QualType t, bool align, u32 begin, u32 end) {
@@ -6116,6 +6126,13 @@ public:
       if (types().is_function(t) || !is_complete(t)) diag(begin, Diag::sizeof_incomplete, t);
       else diag(begin, Diag::not_supported, align ? lex::Tk::kw_alignof : lex::Tk::kw_sizeof);
       return {NodeId::none, begin, end};
+    }
+    if (checking_class_alignment) {
+      const QualType element = types().innermost_array_element(t);
+      if (types().is_class(element) && q_->class_layout_uncertain(types().class_of(element))) {
+        diag(begin, Diag::class_alignment_uncertain_layout);
+        return {NodeId::none, begin, end};
+      }
     }
     return literal(st, w_->values.integer(st, *n), ValueCategory::prvalue, begin, end);
   }

@@ -773,12 +773,8 @@ std::set<EntityId> uncertain_record_layouts(parse::Program& program, sema::World
     bool packed = definition && parse::layout_may_be_packed(region, item.begin, item.brace_end);
     // The attributes immediately after the type's closing brace can still apply to
     // the type. Those within a following declarator apply to the declared name.
-    const auto applied = program.class_alignment_specifiers(k);
-    using enum parse::LayoutAttributes;
-    bool record_annotated = definition
-        ? parse::layout_attribute(region, item.begin, item.brace_begin, affecting_layout, applied) ||
-          parse::layout_attribute(region, item.brace_end, item.end, leading_affecting_layout)
-        : parse::layout_attribute(region, item.begin, item.end, affecting_layout, applied) || uncertain_alias(item);
+    bool record_annotated = parse::record_layout_attribute(region, item, program.class_alignment_specifiers(k)) ||
+                            (!definition && uncertain_alias(item));
     bool annotated = record_annotated || (definition && parse::layout_attribute(region, item.brace_end, item.end));
     if (!packed && !annotated) continue;
     if (definition && (packed || record_annotated)) uncertain_definitions.insert(k);

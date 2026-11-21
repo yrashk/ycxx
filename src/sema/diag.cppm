@@ -352,6 +352,7 @@ enum class Diag : std::uint32_t {
   class_alignment_weak [[=message{Severity::error, "the requested alignment is weaker than the class's natural alignment"}]],
   class_alignment_mismatch [[=message{Severity::error, "the class is redeclared with a different alignment requirement"}]],
   class_alignment_missing [[=message{Severity::error, "the class definition must specify alignment when a declaration specifies it"}]],
+  class_alignment_uncertain_layout [[=message{Severity::error, "class alignment depends on attributes or packing whose layout is not supported yet"}]],
 };
 
 // A `{N:r}` argument: why an evaluation was not constant. 0 is an expression the front end

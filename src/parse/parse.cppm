@@ -82,6 +82,14 @@ bool layout_may_be_packed(const pp::Region& region, u32 begin, u32 end) {
   return pack != ranges.end() && pack->first < end;
 }
 
+bool record_layout_attribute(const pp::Region& region, const items::Item& item, std::span<const std::pair<u32, u32>> applied) {
+  using enum LayoutAttributes;
+  if (item.kind != ItemKind::class_def)
+    return layout_attribute(region, item.begin, item.end, affecting_layout, applied);
+  return layout_attribute(region, item.begin, item.brace_begin, affecting_layout, applied) ||
+         layout_attribute(region, item.brace_end, item.end, leading_affecting_layout);
+}
+
 // The record of a declaration that failed to be declared; its diagnostic says why.
 ast::DeclSema invalid_decl() {
   ast::DeclSema d{};
@@ -975,6 +983,7 @@ public:
     std::vector<sema::NestedType> nested;
     std::vector<EntityId> friends;
     std::vector<ast::MemberRec> adl_friends;
+    bool unapplied_field_layout = false;
   };
   ClassContent class_content(u32 item, const std::function<const ast::ItemSema&(u32)>& sema_of);
   sema::PeerVirtualLayout peer_virtual_layout(u32 item, EntityId cls, const sema::ClassRec& rec,
@@ -1136,6 +1145,8 @@ private:
   };
   std::map<u32, ClassAlignment> class_alignments_;
   void validate_class_alignment(u32 item, EntityId cls, sema::ClassRec& record, std::vector<engine::Diagnostic>& diags);
+  bool has_unapplied_class_layout(u32 item, const ClassContent& content) const;
+  bool class_layout_uncertain(EntityId cls, const sema::ClassRec& record, u32 point) const;
   std::optional<QualType> copy_move_constructor_parameter(const sema::MemberDeclRec& member, QualType owner) const;
   std::optional<QualType> assignment_parameter(const sema::MemberDeclRec& member, QualType owner) const;
   sema::TrivialCopyability class_trivial_copyability(u32 item, EntityId cls, const sema::ClassRec& rec);
@@ -1447,6 +1458,10 @@ public:
     // The initializer is a complete-class context at its member declaration ([class.mem.general]).
     if (initializer_source) return p_->is_complete(c, initializer_source->item, true);
     return is_complete_at_item(c);
+  }
+  bool class_layout_uncertain(EntityId c) override {
+    const auto* record = p_->classes().find(c);
+    return record && p_->class_layout_uncertain(c, *record, point());
   }
   engine::Loc source_loc(engine::Loc loc, u32 offset) override {
     if (!initializer_source) return loc;
@@ -2802,6 +2817,7 @@ private:
   // [dcl.align]: evaluate every specifier, even when another is stricter.
   std::optional<Program::ClassAlignment> read_class_alignment() {
     sema::Sema::ImmediateReferenceScope references(s_, /*allowed=*/true);
+    sema::Sema::ClassAlignmentOperand operand_context(s_);
     Program::ClassAlignment alignment;
     alignment.at = ps_.pos();
     while (ps_.is(Tk::kw_alignas)) {
@@ -2825,6 +2841,10 @@ private:
         e = s_.promote(ps_.constant_expression());
       }
       if (!e.ok()) return std::nullopt;
+      if (layout_attribute(p_->region(), operand, ps_.index())) {
+        s_.diag(at, Diag::class_alignment_uncertain_layout);
+        return std::nullopt;
+      }
       if (ps_.is(Tk::ellipsis)) {
         s_.diag(at, Diag::not_supported, Tk::kw_alignas);
         return std::nullopt;
@@ -2894,6 +2914,10 @@ private:
       }
       p_->class_def(definition->second);
       const auto& prior = written->second;
+      if (!prior.natural && (prior.value || alignment->value)) {
+        s_.diag(alignment->at, Diag::class_alignment_uncertain_layout);
+        return bad();
+      }
       if (alignment->value && alignment->value < prior.natural) {
         s_.diag(alignment->at, Diag::class_alignment_weak);
         return bad();
@@ -2901,17 +2925,6 @@ private:
       if (prior.natural && alignment->effective(prior.natural) != prior.effective(prior.natural)) {
         s_.diag(alignment->at, Diag::class_alignment_mismatch);
         return bad();
-      }
-    } else if (const auto previous = p_->decls_.find(cls); previous != p_->decls_.end() && alignment->value) {
-      for (const auto& d : previous->second) {
-        const u32 item = d.first;
-        if (item >= k_) continue;
-        const auto written = p_->class_alignments_.find(item);
-        if (written != p_->class_alignments_.end() && written->second.value &&
-            written->second.value != alignment->value) {
-          s_.diag(alignment->at, Diag::class_alignment_mismatch);
-          return bad();
-        }
       }
     }
     if (!class_declared(sem, key, at)) return bad();
@@ -5919,6 +5932,7 @@ Program::ClassContent Program::class_content(u32 item, const std::function<const
       continue;
     }
     const ast::ItemSema& ms = sema_of(m);
+    bool inspect_field_layout = !out.unapplied_field_layout;
     // The default member initializers' values, by declaration ordinal.
     std::map<u32, ConstId> inits;
     if (ms.tree != ast::NodeId::none && w_->ins.ast.is<ast::DeclGroup>(ms.tree))
@@ -5939,10 +5953,14 @@ Program::ClassContent Program::class_content(u32 item, const std::function<const
         continue;
       }
       members.push_back({{id(m), ast::make_decl_ord(ast::DeclClass::syntactic, i)}, d.entity, access});
-      if (d.kind == ast::DeclKind::data_member)
+      if (d.kind == ast::DeclKind::data_member) {
+        if (inspect_field_layout) {
+          out.unapplied_field_layout = layout_attribute(*r_, mi.begin, mi.end);
+          inspect_field_layout = false;
+        }
         fields.push_back({w_->entities.rec(d.entity).name, d.type, d.entity, inits.contains(i) ? inits[i] : ConstId::none,
                         dmis_.contains(std::to_underlying(d.entity)), d.bit_width, d.is_mutable});
-      else if (d.kind == ast::DeclKind::enum_ || d.kind == ast::DeclKind::type_alias)
+      } else if (d.kind == ast::DeclKind::enum_ || d.kind == ast::DeclKind::type_alias)
         nested.push_back({w_->entities.rec(d.entity).name, d.type, d.entity});
       else if (d.kind == ast::DeclKind::function || d.kind == ast::DeclKind::variable) {
         member_decls_[std::to_underlying(d.entity)] = {id(m), ast::make_decl_ord(ast::DeclClass::syntactic, i)};
@@ -6030,6 +6048,42 @@ sema::PeerVirtualLayout Program::peer_virtual_layout(u32 item, EntityId cls, con
   return derived ? primary_base : root;
 }
 
+bool Program::has_unapplied_class_layout(u32 item, const ClassContent& content) const {
+  const auto& source = items_->items[item];
+  return content.unapplied_field_layout || layout_may_be_packed(*r_, source.begin, source.brace_end) ||
+         record_layout_attribute(*r_, source, class_alignment_specifiers(item));
+}
+
+bool Program::class_layout_uncertain(EntityId cls, const sema::ClassRec& record, u32 point) const {
+  std::set<EntityId> visited;
+  const auto annotated_declaration = [&](EntityId tag) {
+    const auto found = decls_.find(std::to_underlying(tag));
+    return found != decls_.end() && std::ranges::any_of(found->second, [&](const auto& declared) {
+      const u32 item = declared.first;
+      return item < point && !(declared.second.flags & sema::decl_flag::definition) &&
+             record_layout_attribute(*r_, items_->items[item], class_alignment_specifiers(item));
+    });
+  };
+  auto uncertain = [&](this auto&& visit, EntityId c, const sema::ClassRec& rec) -> bool {
+    if (!visited.insert(c).second) return false;
+    const EntityId pattern = w_->entities.rec(c).templ;
+    if (rec.unapplied_layout || annotated_declaration(c) ||
+        (pattern != EntityId::none && annotated_declaration(pattern))) return true;
+    const auto subobject = [&](EntityId sub) {
+      const auto* layout = classes_.find(sub);
+      return layout && visit(sub, *layout);
+    };
+    // A pointer or reference field uses the target's pointer layout. Only stored objects
+    // contribute their own class layout, including the elements of member arrays.
+    return std::ranges::any_of(rec.bases, [&](const sema::BaseRec& base) { return subobject(base.cls); }) ||
+           std::ranges::any_of(rec.fields, [&](const sema::FieldRec& field) {
+             const QualType type = w_->types.innermost_array_element(field.type);
+             return w_->types.is_class(type) && subobject(w_->types.class_of(type));
+           });
+  };
+  return uncertain(cls, record);
+}
+
 void Program::validate_class_alignment(u32 item, EntityId cls, sema::ClassRec& record,
                                       std::vector<engine::Diagnostic>& diags) {
   auto written = class_alignments_.find(item);
@@ -6049,18 +6103,19 @@ void Program::validate_class_alignment(u32 item, EntityId cls, sema::ClassRec& r
   }
 
   auto& alignment = written->second;
+  const bool needs_proven_layout = alignment.value || std::ranges::any_of(declarations, [&](const auto& declaration) {
+    return prior_alignment(declaration) && class_alignments_.at(declaration.first).value != 0;
+  });
   AtItem q(*this, item, false);
   ast::Builder b(w_->ins, &arena_);
   sema::Sema s(*w_, b, q, diags, id(item), 0);
-  if (layout_may_be_packed(*r_, source.begin, source.brace_end) ||
-      layout_attribute(*r_, source.begin, source.brace_begin, LayoutAttributes::affecting_layout, alignment.specifiers) ||
-      layout_attribute(*r_, source.brace_end, source.end, LayoutAttributes::leading_affecting_layout)) {
-    s.diag(alignment.at, Diag::not_supported, Tk::kw_alignas);
-    return;
-  }
   const auto layout = s.record_layout(record, cls);
   if (!layout) {
-    s.diag(alignment.at, Diag::not_supported, Tk::kw_alignas);
+    if (needs_proven_layout) s.diag(alignment.at, Diag::not_supported, Tk::kw_alignas);
+    return;
+  }
+  if (class_layout_uncertain(cls, record, item)) {
+    if (needs_proven_layout) s.diag(alignment.at, Diag::class_alignment_uncertain_layout);
     return;
   }
   alignment.natural = layout->align;
@@ -6115,6 +6170,7 @@ const Result<ast::ClassDef>& Program::class_def(u32 item) {
     // members its own object needs.
     sema::ClassRec rec;
     rec.union_ = class_rec_is_union(item);
+    rec.unapplied_layout = has_unapplied_class_layout(item, c);
     rec.fields = std::move(fields);
     rec.members = std::move(statics);
     rec.types = std::move(nested);
@@ -7576,6 +7632,7 @@ const sema::ClassRec* Program::instantiate_class(EntityId spec, u32 point) {
   // Built whole, then published once (#156); the first publication wins.
   sema::ClassRec built;
   built.union_ = class_rec_is_union(k);
+  built.unapplied_layout = has_unapplied_class_layout(k, c);
   built.bases = std::move(bases);
   built.fields = std::move(c.fields);
   built.members = std::move(c.statics);
