@@ -222,6 +222,8 @@ initializer takes precedence.
   support explicit calls, including `std::nothrow_t` and user-defined class tags.
   The usual global `operator new[]` and `operator delete[]` signatures
   support explicit calls and typed address selection.
+  The four written C++26 non-allocating placement functions support explicit calls, including
+  in constant expressions.
   [#293](https://github.com/yrashk/ycxx/issues/293)
 - pointers and references to arrays of unknown bound, and template partial specializations
   that match unknown-bound array types. [#222](https://github.com/yrashk/ycxx/issues/222)
