@@ -4590,6 +4590,11 @@ public:
   // Builtins with ordinary expression arguments (docs/EXTENSIONS.md).
   Ex builtin_call(const lex::BuiltinFunctionInfo& b, std::vector<Ex> args, u32 begin, u32 end) {
     using enum lex::BuiltinFunction;
+    if (b.function == trap) {
+      if (!builtin_arity(0, args.size(), begin)) return {NodeId::none, begin, end};
+      ExprInfo info{builtin(Builtin::void_), ValueCategory::prvalue, 0};
+      return node(ast::BuiltinCall{info, ast::BuiltinOp::trap, b_->list({})}, begin, end, info);
+    }
     if (b.function == addressof) {
       if (!builtin_arity(1, args.size(), begin)) return {NodeId::none, begin, end};
       return builtin_addressof(args.front(), begin, end);
@@ -4610,6 +4615,7 @@ public:
     if (std::ranges::any_of(args, [](const Ex& a) { return !a.ok(); })) return {NodeId::none, begin, end};
     switch (b.function) {
       case addressof:
+      case trap:
       case strlen: std::unreachable();  // Handled before floating type selection.
       case inf:
       case huge_val:

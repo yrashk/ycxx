@@ -69,7 +69,7 @@ export struct PathStep {
 // make an operation non-constant). The enumerator is the bit position.
 // `call_body` marks reads of a lowered builtin body, which are indeterminately sequenced with
 // the caller's other evaluations ([intro.execution]).
-export enum class Flag : std::uint8_t { nsw, nuw, exact, volatile_, not_constexpr, variadic, call_body };
+export enum class Flag : std::uint8_t { nsw, nuw, exact, volatile_, not_constexpr, variadic, call_body, explicit_trap };
 export using Flags = std::uint8_t;
 export constexpr Flags bit(Flag f) { return Flags(1u << std::to_underlying(f)); }
 
@@ -264,7 +264,8 @@ export enum class Op : std::uint16_t {
   cond_br [[=control({V}, {}, 2)]],                      // true, false
   switch_ [[=control({V}, {}, 1, true).imms({consts})]],  // default, then one per case value
   ret [[=control({S, Vs}, {}, 0)]],
-  unreachable [[=control({}, {}, 0).accepts({not_constexpr})]],  // not_constexpr: a static's definition ([expr.const])
+  // The flags distinguish an explicit trap and a static definition ([expr.const]) from falling off the end.
+  unreachable [[=control({}, {}, 0).accepts({not_constexpr, explicit_trap})]],
   consteval_br [[=control({}, {}, 2)]],                  // consteval, runtime ([stmt.if])
   // normal, unwind; the u32 as for `call`
   invoke [[=control({S, Vs}, {S, Vs}, 2).imms({entity, u32}).accepts({not_constexpr})]],

@@ -1657,6 +1657,13 @@ and diagnoses reads past the end of an unterminated array in a required constant
 ([expr.const]). Native lowering requires no runtime `strlen` symbol. Fixtures in
 `tests/own/builtins/` cover detection, result type, argument checks, and constant and runtime scans.
 
+## Trap builtin (#548)
+
+`__builtin_trap()` is a zero-argument direct call of type `void`. It ends the
+executing IR block and requires no external runtime symbol. Linux x86-64 emits UD2
+and Darwin arm64 emits BRK. The builtin registry also exposes it through
+`__has_builtin`.
+
 ## Templates, ζ step 6: concepts and `if constexpr` (#88, 2026-11-18)
 
 Fable decided the representation (ast.md §6.6); the Opus session wrote the code.

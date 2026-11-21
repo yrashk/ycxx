@@ -2,6 +2,7 @@
 
 import os
 from pathlib import Path
+import signal
 import subprocess
 import sys
 import tempfile
@@ -50,6 +51,19 @@ def main():
         compile(target, '-nostdlib', str(strlen), '-o', 'strlen-program', env=dict(cold, PATH=''))
         for args in ((), ('',), ('q',), ('', 'offset'), ('q', 'offset')):
             run(['./strlen-program', *args])
+
+        source('trap.cpp', """int main(int argc, char**) {
+  return argc > 1 ? (__builtin_trap(), 91) : 37;
+}""")
+        compile(target, '-nostdlib', 'trap.cpp', '-o', 'trap-program', env=dict(cold, PATH=''))
+        run(['./trap-program'], status=37)
+        run(['./trap-program', 'trigger'], status=-signal.SIGILL)
+        (scope / 'darwin-trap').mkdir()
+        compile('--target=arm64-apple-darwin', '-c', 'trap.cpp', '-o', 'darwin-trap/trap.o')
+        trap_object = (scope / 'darwin-trap/trap.o').read_bytes()
+        # Little-endian Mach-O 64, arm64, MH_OBJECT.
+        assert trap_object[:8] == bytes.fromhex('cffaedfe 0c000001')
+        assert trap_object[12:16] == bytes.fromhex('01000000')
 
         source('main.cpp', """int add_bias(int);
 int main(int argc, char* argv[]) {

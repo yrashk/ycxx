@@ -55,6 +55,7 @@ enum class Reason : std::uint8_t {
   goto_ [[=says{"a goto statement"}]],
   static_definition [[=says{"control passes through the definition of a static variable"}]],
   unreachable [[=says{"control reached the end of a function that must return a value"}]],
+  explicit_trap [[=says{"execution reached __builtin_trap()"}]],
   local_address [[=says{"the result points to an object with automatic storage duration"}]],
   // Not yet: an operation the interpreter does not evaluate, by its op number.
   unsupported [[=says{"the interpreter does not evaluate '{0}' yet"}]],
