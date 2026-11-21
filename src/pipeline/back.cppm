@@ -148,6 +148,7 @@ struct ClassShape {
   std::vector<std::uint8_t> bit_widths{};  // parallel to fields, empty for ordinary records
   bool layout_uncertain = false;  // source packing or alignment that native layout does not apply
   bool copy_abi_unknown = false;   // no ABI classification for this defaulted copy
+  bool layout_requires_virtual_support = false;
 };
 struct EnumShape {
   EntityId entity = EntityId::none;
@@ -170,6 +171,8 @@ struct TranslationUnit {
   std::vector<std::pair<EntityId, EntityId>> init_functions;
   std::optional<ast::Loc> namespace_destruction;  // first variable whose destructor runs at exit
   bool front_failed = false;           // the front end reported errors: nothing to compile
+  bool has_virtual_declaration = false;
+  std::optional<ast::Loc> virtual_declaration;
 };
 
 // What failed, at a location in an item when there is one. Every error here is something the α
@@ -750,7 +753,7 @@ std::optional<ClassLayout> QueryLayout::class_layout(QualType c) const {
   auto key = std::to_underlying(in.types.get<ast::TClass>(c).entity);
   if (auto done = class_layouts_.find(key); done != class_layouts_.end()) return done->second;
   auto it = classes_.find(key);
-  if (it == classes_.end()) return std::nullopt;
+  if (it == classes_.end() || it->second->layout_requires_virtual_support) return std::nullopt;
   std::vector<ast::Placed> bases, places;
   for (EntityId b : it->second->bases) bases.push_back(placed(in.intern_type(ast::TClass{b})));
   for (std::size_t i = 0; i < it->second->fields.size(); ++i) {
@@ -1012,7 +1015,8 @@ std::string_view linux_signature_error(const ast::Interners& in, const QueryLayo
     auto builtin = ast::builtin_of(in, value);
     if (builtin == ast::Builtin::long_double) return "x87 long double parameters and results are unsupported";
     if (builtin == ast::Builtin::float_ || builtin == ast::Builtin::double_) {
-      if (f.variadic) return "floating-point parameters and results of variadic functions are unsupported";
+      if (f.variadic && use != direct_call)
+        return "floating-point parameters and results of variadic functions are unsupported";
       if (use == indirect_call) return "floating-point parameters and results of indirect calls are unsupported";
       return {};
     }
@@ -1026,6 +1030,8 @@ std::string_view linux_signature_error(const ast::Interners& in, const QueryLayo
       return result ? "unsupported aggregate result layout" : "unsupported aggregate parameter layout";
     if (fixed_direct)
       return result ? "unsupported fixed-prototype result type" : "unsupported fixed-prototype parameter type";
+    if (use == direct_call)
+      return result ? "unsupported direct variadic result type" : "unsupported direct variadic parameter type";
     return result ? "only void, bool, 8-, 16-, 32- and 64-bit integer, pointer and reference results are supported"
                   : "only bool, 8-, 16-, 32- and 64-bit integer, pointer and reference parameters are supported";
   };
@@ -1035,7 +1041,8 @@ std::string_view linux_signature_error(const ast::Interners& in, const QueryLayo
   return {};
 }
 
-std::string_view linux_ellipsis_error(const QueryLayout& layout, const ir::Function& body, ir::NodeId call) {
+std::string_view linux_ellipsis_error(const ast::Interners& in, const QueryLayout& layout,
+                                      const ir::Function& body, ir::NodeId call) {
   const bool indirect = body.node(call).op == ir::Op::call_ind;
   auto imms = body.imms_of(call);
   auto ellipsis = imms[indirect ? 0 : 1], byval = imms[indirect ? 1 : 2];
@@ -1043,10 +1050,15 @@ std::string_view linux_ellipsis_error(const QueryLayout& layout, const ir::Funct
   // The by-value bits distinguish class objects from genuine pointer arguments.
   auto args = body.operands_of(call).subspan(indirect ? 2 : 1);
   for (std::size_t i = args.size() - ellipsis; i < args.size(); ++i) {
-    auto l = layout.type(body.value(args[i]).type.type);
-    if (l.kind == ir::TypeKind::floating) return "floating-point ellipsis arguments are unsupported";
-    if (((byval >> i) & 1) || !linux_ellipsis_scalar(l))
-      return "only 32- and 64-bit integer and pointer ellipsis arguments are supported";
+    QualType type = body.value(args[i]).type.type;
+    auto builtin = ast::builtin_of(in, type);
+    if (builtin == ast::Builtin::long_double) return "x87 long double ellipsis arguments are unsupported";
+    auto l = layout.type(type);
+    if (indirect && l.kind == ir::TypeKind::floating) return "floating-point ellipsis arguments are unsupported";
+    if (!((byval >> i) & 1) && (linux_ellipsis_scalar(l) || (!indirect && builtin == ast::Builtin::double_)))
+      continue;
+    return indirect ? "only 32- and 64-bit integer and pointer ellipsis arguments are supported"
+                    : "only double, 32- and 64-bit integer, and pointer ellipsis arguments are supported";
   }
   return {};
 }
@@ -1105,7 +1117,7 @@ engine::query_task<Lowered> Lower::run(engine::Ctx& cx, FnKey k) {
         if (definition != tu.functions.end() && definition->body.deduced)
           error = linux_signature_error(in, layout, definition->body.deduced_type, use, ordinary_callee);
       }
-      if (error.empty()) error = linux_ellipsis_error(layout, body, n);
+      if (error.empty()) error = linux_ellipsis_error(in, layout, body, n);
       if (error.empty()) continue;
       const ir::FunctionDebug& debug = co_await cx.fetch<FunctionDebug>(k);
       auto at = i < debug.loc.size() ? debug.loc[i] : ast::Loc{def.item, def.body_offset};
@@ -1387,6 +1399,10 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
     // Its diagnostics are the front end's (`TuFront`); this only keeps an object out of a link.
     errors.push_back({std::nullopt, "the translation unit has errors"});
     co_return out;
+  }
+  if (tu.has_virtual_declaration) {
+    errors.push_back({tu.virtual_declaration, "native output for a translation unit with virtual member functions is not supported yet"});
+    co_return co_await locate_errors(cx, id, std::move(out));
   }
   if (linux && tu.namespace_destruction) {
     errors.push_back({tu.namespace_destruction, "namespace-scope destruction is not supported on x86-64 Linux"});

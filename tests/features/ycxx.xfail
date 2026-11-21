@@ -108,7 +108,6 @@ draft/class/class.paths-1.accept.cpp 'class' not supported yet
 draft/class/class.pre-1.accept.cpp 'namespace' not supported yet
 draft/class/class.pre-2.accept.cpp 'struct' not supported yet
 draft/class/class.prop-1.accept.cpp 'struct' not supported yet
-draft/class/class.prop-2.accept.cpp 'struct' not supported yet
 draft/class/class.protected-1.reject.cpp errors elsewhere: 'class' not supported yet
 draft/class/class.union.anon-1.accept.cpp 'union' not supported yet
 draft/class/class.union.anon-2.reject.cpp errors elsewhere: 'union' not supported yet

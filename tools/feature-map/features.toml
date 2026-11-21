@@ -1086,7 +1086,7 @@ std = 'C++98'
 detect = ',\s*\.\.\.\s*\)|\bva_(?:start|arg|list)\b'
 status = 'partial'
 issues = [196, 399]
-note = 'Linux x86-64 supports System V `va_list` (#383), direct and indirect scalar INTEGER calls, and scalar INTEGER variadic definitions with `<cstdarg>` (#196). SSE calls (#399), other variadic signatures and additional retrieval types (#196) remain open.'
+note = 'Linux x86-64 supports direct variadic calls with scalar INTEGER and SSE values and promotes unnamed `float` to `double` (#399). Indirect scalar INTEGER calls and scalar INTEGER definitions with System V `va_list` and `<cstdarg>` work (#383, #196). Indirect floating calls, floating definitions and retrieval, and other variadic signatures remain in #196.'
 probe = '''
 #include <cstdarg>
 int sum(int n, ...) { std::va_list ap; va_start(ap); int s = 0; for (int i = 0; i < n; ++i) s += va_arg(ap, int); va_end(ap); return s; }
@@ -1800,13 +1800,14 @@ group = 'class'
 clauses = ['class.virtual', 'class.abstract', 'class.access.virt']
 std = 'C++98'
 detect = '\bvirtual\b|\boverride\b'
-status = 'missing'
+status = 'partial'
 probe = '''
 struct B { virtual int f() = 0; virtual ~B() {} };
 struct D final : B { int f() override { return 0; } };
 int main() { D d; B& b = d; return b.f(); }
 '''
 issues = [309]
+note = 'ordinary root virtual declarations and inline bodies in syntax checking; layout, dispatch, tables and derived overrides remain open'
 
 [[feature]]
 id = 'class-virtual-base'

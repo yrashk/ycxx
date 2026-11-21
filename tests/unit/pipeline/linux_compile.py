@@ -336,14 +336,12 @@ system_leaf:
             ('struct X { int x; }; int f(int (*g)(X, ...)) { return g(X{1}); }', f'call: {parameters}'),
             ('struct X { int x; }; int f(int (*g)(int, ...), X x) { return g(2, x); }',
              'call: only 32- and 64-bit integer and pointer ellipsis arguments'),
-            ('int g(double, ...); int f() { return g(1.0); }', f'call: {floating_varargs}'),
-            ('double g(int, ...); int f() { return g(1); }', f'call: {floating_varargs}'),
-            ('int g(int, ...); int f() { return g(1, 1.0f); }',
-             'call: floating-point ellipsis arguments are unsupported'),
+            ('int g(int, ...); int f(long double& x) { return g(1, x); }',
+             'call: x87 long double ellipsis arguments are unsupported'),
             ('struct X { int x; }; int g(X, ...); int f() { return g(X{1}); }',
-             f'call: {parameters}'),
+             'call: unsupported direct variadic parameter type'),
             ('struct X { int x; }; int g(int, ...); int f() { X x{1}; return g(1, x); }',
-             'call: only 32- and 64-bit integer and pointer ellipsis arguments'),
+             'call: only double, 32- and 64-bit integer, and pointer ellipsis arguments'),
         )
         for source, error in cases:
             (scope / 'unsupported.cpp').write_text(source + '\n')

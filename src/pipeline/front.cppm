@@ -291,6 +291,18 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
   ast::Interners& ins = world.ins;
   TranslationUnit tu;
   tu.name = std::move(name);
+  // A virtual declaration is available for syntax checks and editor queries. Native output
+  // waits for an explicit emission rule, including for eager emission of inline members.
+  const auto& classes = program.classes();
+  for (EntityId c : classes.classes()) {
+    const auto& record = classes.rec(c);
+    if (!record.polymorphic) continue;
+    tu.has_virtual_declaration = true;
+    const auto member = std::ranges::find_if(record.members, &sema::MemberDeclRec::is_virtual);
+    if (member != record.members.end())
+      if (auto d = program.member_decl(member->entity)) tu.virtual_declaration = ast::Loc{d->item, 0};
+    return tu;
+  }
   const bool linux = world.target.triple == ast::x86_64_linux.triple;
   std::set<std::uint32_t> seen;
   std::set<EntityId> inline_declarations;
@@ -727,6 +739,7 @@ engine::query_task<FrontResult> TuFront::run(engine::Ctx& cx, TuId tu) {
     shape.trivial_calls = classes.trivial_for_calls(c, unit_source.config.calls());
     shape.layout_uncertain = uncertain.contains(c);
     shape.copy_abi_unknown = classes.rec(c).defaulted_copy == sema::CopyState::unsupported;
+    shape.layout_requires_virtual_support = classes.rec(c).layout_requires_virtual_support;
   }
   for (EntityId e : classes.enums()) out.shapes.enums.push_back({e, classes.underlying(e)});
   co_return out;

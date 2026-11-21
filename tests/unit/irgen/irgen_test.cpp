@@ -609,11 +609,11 @@ func @main {
   %2: const_char* = ptr_member %1 [char, /e0]
   %3: int = const [#1]
   %4: long = const [#2]
-  %5: !state, %6: int = call not_constexpr %0, %2, %3, %4 [@printf, 2, 0, 0]
+  %5: !state, %6: int = call not_constexpr variadic %0, %2, %3, %4 [@printf, 2, 0, 0]
   %7: const_char* = const [#null]
   %8: int = const [#3]
   %9: int = const [#4]
-  %10: !state, %11: int = call not_constexpr %5, %7, %8, %9 [@m, 1, 0, 0]
+  %10: !state, %11: int = call not_constexpr variadic %5, %7, %8, %9 [@m, 1, 0, 0]
   %12: int = const [#0]
   ret %10, %12
 }

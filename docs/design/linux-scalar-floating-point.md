@@ -2,11 +2,11 @@
 
 This slice moves binary32 `float` and binary64 `double` values through fixed-prototype direct
 calls and their definitions. It covers typed constants, object loads and stores, selection and
-control-flow copies, call arguments and call results. Runtime arithmetic, comparisons and
-numeric conversions remain [#201](https://github.com/yrashk/ycxx/issues/201). The signature check
-keeps x87 `long double`, floating aggregates, and floating operands or results in indirect or
-variadic calls outside this slice. Variadic SSE classification remains
-[#399](https://github.com/yrashk/ycxx/issues/399), and wider aggregate classification remains
+control-flow copies, call arguments and call results. The subsequent
+[direct variadic slice](linux-floating-variadic-calls.md) adds binary32-to-binary64 widening.
+Other runtime arithmetic, comparisons and numeric conversions remain
+[#201](https://github.com/yrashk/ycxx/issues/201). The signature check excludes x87 `long double`,
+floating aggregates, and floating operands or results in indirect calls. Wider aggregate classification remains
 [#440](https://github.com/yrashk/ycxx/issues/440).
 
 Astra checked the design against the [System V AMD64 psABI](https://gitlab.com/x86-psABIs/x86-64-ABI)

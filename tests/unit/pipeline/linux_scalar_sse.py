@@ -1,4 +1,4 @@
-"""Exchange fixed-prototype scalar SSE calls with native System V AMD64 objects."""
+"""Exchange scalar SSE calls with native System V AMD64 objects."""
 
 import os
 from pathlib import Path
@@ -44,6 +44,24 @@ def main():
                              '-o', 'mixed'], scope, cold)
                         run(['./mixed'], scope, cold)
 
+            for fixture in ('variadic-caller', 'variadic-al-caller'):
+                compile('-c', f'{fixture}.cpp', '-o', f'{fixture}.o')
+                compile('-c', f'{fixture}.cpp', '-o', f'{fixture}-warm.o', env=daemon)
+                assert (scope / f'{fixture}.o').read_bytes() == (scope / f'{fixture}-warm.o').read_bytes()
+            for opt in ('-O0', '-O2'):
+                run([host_cxx, '-std=c++26', '-pedantic-errors', opt, '-fno-lto',
+                     'variadic-consumer.cpp', 'variadic-caller.o', '-o', 'mixed-variadic'], scope, cold)
+                run(['./mixed-variadic'], scope, cold)
+            run([host_cxx, 'variadic-al-observer.S', 'variadic-al-caller.o', '-o', 'observe-al'], scope, cold)
+            run(['./observe-al'], scope, cold)
+            run(['./observe-al', 'argument'], scope, cold)
+
+            (scope / 'printf.cpp').write_text('extern "C" int printf(const char*, ...);\n'
+                                              'int main() { float f = 1.5f; printf("%f\\n", f); }\n')
+            compile('-c', 'printf.cpp')
+            run([host_cxx, 'printf.o', '-o', 'printf-float'], scope, cold)
+            assert run(['./printf-float'], scope, cold) == '1.500000\n'
+
             includes = ('-isystem', libycxx / 'include')
             compile(*includes, '-c', libycxx / 'src/runtime/linkage/static.cpp', '-o', 'linkage.o')
             for mode, env in (('cold', cold), ('warm', daemon)):
@@ -58,7 +76,7 @@ def main():
         cases = (
             ('float f(float a, float b) { return a + b; }', '`fadd`: floating-point arithmetic'),
             ('bool f(float a, float b) { return a == b; }', '`fcmp`: floating-point arithmetic'),
-            ('double f(float x) { return x; }', '`fpext`: floating-point arithmetic'),
+            ('float f(double x) { return x; }', '`fptrunc`: floating-point arithmetic'),
             ('int f(double x) { return static_cast<int>(x); }', '`fptosi`: floating-point arithmetic'),
             ('float f(float (*g)(float)) { return g(1.0F); }',
              'call: floating-point parameters and results of indirect calls are unsupported'),
