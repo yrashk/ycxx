@@ -38,7 +38,6 @@ def check_object(readelf, obj, scope, env):
 def main():
     ycxx, host_cxx, readelf = sys.argv[1:]
     fixtures = Path(__file__).resolve().with_suffix('')
-    wrappers = fixtures / 'fixed_array_wrappers.cpp'
     provider = fixtures / 'host_fixed_array_provider.cpp'
     flags = [ycxx, 'cxx', '-std=c++26']
     linux = '--target=x86_64-pc-linux-gnu'
@@ -49,22 +48,27 @@ def main():
     with tempfile.TemporaryDirectory(prefix='ycxx-fixed-array-new-') as temp:
         scope = Path(temp)
         (scope / '.ycxx').touch()
-        obj = 'wrappers.o'
-        run([*flags, linux, '-c', wrappers, '-o', obj], scope, env)
-        check_object(readelf, obj, scope, env)
-
-        run([*flags, darwin, '-fsyntax-only', wrappers], scope, env)
-        rejected = 'wrappers-darwin.o'
-        command = [*flags, darwin, '-c', wrappers, '-o', rejected]
-        result = subprocess.run(command, cwd=scope, env=env, capture_output=True, text=True, timeout=30)
-        assert result.returncode == 1, (command, result.returncode, result.stdout, result.stderr)
-        assert ': error: function_ir: array allocation is not supported yet' in result.stderr, result.stderr
-        assert not (scope / rejected).exists(), (command, result.stderr)
-
         run([host_cxx, '-std=c++26', '-pedantic-errors', '-O0', '-fexceptions', '-fno-lto', '-c',
              provider, '-o', 'provider.o'], scope, env)
-        run([host_cxx, '-fno-lto', 'provider.o', obj, '-o', 'probe'], scope, env)
-        print(run(['./probe'], scope, env), end='')
+
+        for name in ('fixed_array_wrappers', 'computed_literal_array_wrappers'):
+            wrappers = fixtures / f'{name}.cpp'
+            obj = f'{name}.o'
+            run([*flags, linux, '-c', wrappers, '-o', obj], scope, env)
+            check_object(readelf, obj, scope, env)
+
+            run([*flags, darwin, '-fsyntax-only', wrappers], scope, env)
+            rejected = f'{name}-darwin.o'
+            command = [*flags, darwin, '-c', wrappers, '-o', rejected]
+            result = subprocess.run(command, cwd=scope, env=env, capture_output=True, text=True, timeout=30)
+            assert result.returncode == 1, (command, result.returncode, result.stdout, result.stderr)
+            assert ': error: function_ir: array allocation is not supported yet' in result.stderr, result.stderr
+            assert not (scope / rejected).exists(), (command, result.stderr)
+
+            probe = f'{name}-probe'
+            run([host_cxx, '-fno-lto', 'provider.o', obj, '-o', probe], scope, env)
+            print(wrappers.name)
+            print(run([f'./{probe}'], scope, env), end='')
 
 
 if __name__ == '__main__':
