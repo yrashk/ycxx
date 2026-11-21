@@ -3914,7 +3914,8 @@ public:
         }
       }
     }
-    auto chosen = resolve(cands, args, begin, name, object_cv);
+    const bool object_rvalue = object && !m.arrow && object->cat() != ValueCategory::lvalue;
+    auto chosen = resolve(cands, args, begin, name, object_cv, std::nullopt, {}, object_rvalue);
     if (!chosen) return fail;
     const MemberDeclRec* d = recs[*chosen];
     const Candidate& k = cands[*chosen];
@@ -4300,7 +4301,7 @@ public:
   // non-static member functions.
   std::optional<std::size_t> resolve(std::span<const Candidate> cands, std::span<const Ex> args, u32 at, NameId name,
                                      std::optional<Cv> object_cv, std::optional<QualType> ctor_of = std::nullopt,
-                                     std::span<const Braced* const> lists = {}) {
+                                     std::span<const Braced* const> lists = {}, bool object_rvalue = false) {
     std::vector<std::pair<std::size_t, std::vector<Ics>>> viable;
     const Braced* first_list = lists.empty() ? nullptr : *std::ranges::find_if(lists, [](const Braced* list) { return list; });
     const Braced* unsupported = nullptr;
@@ -4314,7 +4315,13 @@ public:
       // The implicit object parameter, first: the object must not be more cv-qualified.
       if (!cands[i].no_object && object_cv) {
         if (!cv_within(*object_cv, fr.fn_cv)) continue;
-        seq.push_back(binding({true, 0, 0}, false, false, cv_bits(fr.fn_cv) - cv_bits(*object_cv)));
+        const bool rvalue_ref = fr.fn_ref == ast::RefQual::rvalue;
+        if (rvalue_ref && !object_rvalue) continue;
+        if (fr.fn_ref == ast::RefQual::lvalue && object_rvalue && fr.fn_cv != Cv::const_) continue;
+        // Unqualified members retain the special rvalue binding rule and
+        // do not participate in the reference-kind ranking tiebreaker.
+        seq.push_back(binding({true, 0, 0}, rvalue_ref, object_rvalue && fr.fn_ref != ast::RefQual::none,
+                              cv_bits(fr.fn_cv) - cv_bits(*object_cv)));
       } else {
         seq.push_back({true, 0, 0});
       }
@@ -6795,14 +6802,21 @@ public:
     if (std::ranges::none_of(operands, user_type) || any_dependent(operands)) return std::nullopt;
     NameId name = ins().names.intern(std::string("operator") + std::string(op));
     std::size_t n = diag_count();
+    std::optional<Ex> ref_qualified_member;
     QualType lt = types().referee(operands[0].type());
     if (types().is_class(lt))
       if (const ClassRec* c = class_rec(types().class_of(lt));
           c && std::ranges::any_of(c->members, [&](const MemberDeclRec& m) { return m.name == name && m.is_function && !m.is_static; })) {
         Ex m = member(operands[0], false, name, operands[0].end, op_at, op_at);
         Ex r = m.ok() ? call(m, std::vector<Ex>(operands.begin() + 1, operands.end()), end, op_at) : m;
-        if (r.ok()) return Ex{r.id, begin, end, r.info};
-        truncate_diags(n);
+        if (r.ok()) {
+          auto selected = as<ast::MemberCall>(r);
+          if (!selected || types().rec(w_->entities.rec(selected->function).type).fn_ref == ast::RefQual::none)
+            return Ex{r.id, begin, end, r.info};
+          ref_qualified_member = Ex{r.id, begin, end, r.info};
+        } else {
+          truncate_diags(n);
+        }
       }
     std::vector<ast::DeclSema> set;
     auto add = [&](const ast::DeclSema& d) {
@@ -6826,13 +6840,32 @@ public:
     }
     if (!found_hidden_friend)
       for (const Ex& o : operands)
-        if (auto ns = associated_namespace(o.type()))
-          for (const ast::DeclSema& d : q_->namespace_members(*ns, name)) add(d);
-    if (set.empty()) return std::nullopt;
+        if (auto ns = associated_namespace(o.type())) {
+          // The mixed-candidate check needs ADL, which ignores using-directives
+          // in associated namespaces. Preserve the older lookup for other operators.
+          if (ref_qualified_member) {
+            for (const ast::DeclSema& d : q_->adl_functions(*ns, name, /*at_instantiation=*/false)) add(d);
+          } else {
+            for (const ast::DeclSema& d : q_->namespace_members(*ns, name)) add(d);
+          }
+        }
+    if (set.empty()) return ref_qualified_member;
     ExprInfo info{builtin(Builtin::overload_set), ValueCategory::lvalue, 0};
     Ex callee = node(ast::DeclRef{info, set.front().entity}, begin, begin, info);
     overloads_[std::to_underlying(callee.id)] = std::move(set);
     Ex r = call(callee, std::move(operands), end, op_at);
+    if (ref_qualified_member) {
+      // Joint ranking is needed when the ref-qualified member competes with
+      // at least one viable nonmember candidate.
+      bool competing = r.ok();
+      for (std::size_t i = n; !competing && i < diags_->size(); ++i)
+        competing = (*diags_)[i].id == diag_id(Diag::deleted_function) ||
+                    (*diags_)[i].id == diag_id(Diag::ambiguous_call);
+      truncate_diags(n);
+      if (!competing) return ref_qualified_member;
+      diag(op_at, Diag::ref_qualified_operator_candidates);
+      return Ex{NodeId::none, begin, end};
+    }
     if (!r.ok()) {
       // A deleted or ambiguous choice makes the expression ill-formed ([over.match.oper]/3,
       // [over.match.best]); only when no candidate is viable does the built-in operator apply.

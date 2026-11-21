@@ -2434,12 +2434,12 @@ private:
     if (d.kind == ast::DeclKind::enumerator) scope = entities.rec(scope).scope;
     return scope == ns_entity();
   }
-  bool same_function_parameters(QualType a, QualType b, bool compare_ref = true) {
+  bool same_function_parameters(QualType a, QualType b, bool compare_ref = true, bool compare_cv = true) {
     const auto& types = s_.types();
     const auto& interner = s_.world().ins.types;
     const auto first = interner.get<ast::TFunction>(types.canonical(a));
     const auto second = interner.get<ast::TFunction>(types.canonical(b));
-    return first.params == second.params && first.variadic == second.variadic && first.cv == second.cv &&
+    return first.params == second.params && first.variadic == second.variadic && (!compare_cv || first.cv == second.cv) &&
            (!compare_ref || first.ref == second.ref);
   }
   // The arguments of a partial specialization of `tmpl` ([temp.spec.partial]), given as `args`:
@@ -3737,7 +3737,9 @@ private:
       }
       if (function) {
         if (!member_virt_specifier(overridden != nullptr)) return bad();
-        if (!is_virtual && !conversion && !ps_.check_named_ref_qualifier(d)) return bad();
+        const bool ordinary_member = !spec.is_static && s_.template_scopes.empty() && !inst_ &&
+                                     p_->is_namespace(s_.world().entities.rec(c.entity).scope);
+        if (!is_virtual && !conversion && !ordinary_member && !ps_.check_named_ref_qualifier(d)) return bad();
       }
       // A member whose type became a function type through substitution is a data member of
       // function type, which cannot exist ([temp.inst], [class.mem.general]).
@@ -4838,7 +4840,7 @@ private:
     if (spec.is_consteval) flags |= sema::decl_flag::consteval_;
     if (deleted) flags |= sema::decl_flag::deleted;
     if (spec.is_inline || spec.is_constexpr || spec.is_consteval || is_def) flags |= sema::decl_flag::inline_;
-    if (member_declared(d.name, fn ? std::optional(d.type) : std::nullopt, assignment || sem.is_virtual)) {
+    if (member_declared(d.name, fn ? std::optional(d.type) : std::nullopt, assignment || sem.is_virtual, spec.is_static)) {
       if (fn && s_.ins().names.spelling(d.name) == lex::conversion_function_name)
         s_.diag(d.name_at, Diag::conversion_redeclared, types.rec(d.type).inner);
       else
@@ -5021,7 +5023,8 @@ private:
   }
   const ast::ItemSema& earlier_sema(u32 m) { return earlier(m); }
 
-  bool member_declared(NameId n, std::optional<QualType> function = std::nullopt, bool compare_parameters = false) {
+  bool member_declared(NameId n, std::optional<QualType> function = std::nullopt, bool compare_parameters = false,
+                       bool is_static = false) {
     // Functions clash when they have the same type and are both templates with equivalent heads and
     // constraints, or both not templates ([temp.over.link]/4-6, [over.load]).
     auto clash = [&](const ast::DeclSema& d) {
@@ -5036,8 +5039,12 @@ private:
           if (types.canonical(previous.inner) != types.canonical(current.inner) ||
               previous.fn_cv != current.fn_cv)
             return false;
-        } else if (!(compare_parameters || d.is_virtual) || !same_function_parameters(d.type, *function, false)) {
-          return false;
+        } else {
+          const bool ref_qualified = previous.fn_ref != ast::RefQual::none || current.fn_ref != ast::RefQual::none;
+          const bool compare_object = !is_static && !(d.flags & sema::decl_flag::static_);
+          if (!(compare_parameters || d.is_virtual || ref_qualified) ||
+              !same_function_parameters(d.type, *function, false, compare_object))
+            return false;
         }
         // An unqualified implicit object corresponds to either ref-qualified form.
         if (previous.fn_ref != current.fn_ref && previous.fn_ref != ast::RefQual::none &&
