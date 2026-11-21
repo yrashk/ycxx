@@ -404,7 +404,6 @@ draft/temp/temp.friend-1.accept.cpp 'template' not supported yet
 draft/temp/temp.friend-2.accept.cpp 'class' not supported yet
 draft/temp/temp.friend-3.accept.cpp 'class' not supported yet
 draft/temp/temp.friend-4.reject.cpp errors elsewhere: 'template' not supported yet
-draft/temp/temp.func.order-4.reject.cpp expected an error
 draft/temp/temp.func.order-6.accept.cpp 'template' not supported yet
 draft/temp/temp.inst-1.accept.cpp 'template' not supported yet
 draft/temp/temp.inst-11.reject.cpp errors elsewhere: 'template' not supported yet
