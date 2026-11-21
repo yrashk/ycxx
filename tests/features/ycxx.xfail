@@ -370,14 +370,12 @@ draft/temp/temp.deduct.general-11.accept.cpp 'template' not supported yet
 draft/temp/temp.deduct.general-12.accept.cpp 'template' not supported yet
 draft/temp/temp.deduct.general-13.accept.cpp 'template' not supported yet
 draft/temp/temp.deduct.general-14.accept.cpp 'template' not supported yet
-draft/temp/temp.deduct.general-4.reject.cpp errors elsewhere: 'template' not supported yet
 draft/temp/temp.deduct.general-5.accept.cpp 'template' not supported yet
 draft/temp/temp.deduct.guide-1.accept.cpp 'template' not supported yet
 draft/temp/temp.deduct.type-10.accept.cpp 'template' not supported yet
 draft/temp/temp.deduct.type-11.accept.cpp 'template' not supported yet
 draft/temp/temp.deduct.type-12.reject.cpp errors elsewhere: 'template' not supported yet
 draft/temp/temp.deduct.type-13.reject.cpp errors elsewhere: 'template' not supported yet
-draft/temp/temp.deduct.type-15.reject.cpp errors elsewhere: 'template' not supported yet
 draft/temp/temp.deduct.type-17.accept.cpp 'template' not supported yet
 draft/temp/temp.deduct.type-4.accept.cpp 'template' not supported yet
 draft/temp/temp.deduct.type-5.accept.cpp 'template' not supported yet
@@ -407,6 +405,7 @@ draft/temp/temp.friend-1.accept.cpp 'template' not supported yet
 draft/temp/temp.friend-2.accept.cpp 'class' not supported yet
 draft/temp/temp.friend-3.accept.cpp 'class' not supported yet
 draft/temp/temp.friend-4.reject.cpp errors elsewhere: 'template' not supported yet
+draft/temp/temp.func.order-4.reject.cpp expected an error
 draft/temp/temp.func.order-6.accept.cpp 'template' not supported yet
 draft/temp/temp.inst-1.accept.cpp 'template' not supported yet
 draft/temp/temp.inst-11.reject.cpp errors elsewhere: 'template' not supported yet

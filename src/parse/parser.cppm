@@ -1953,6 +1953,8 @@ public:
   // of the parameter is checked here. A template's that depends on its parameters is kept as it
   // is, and rejected where a call would use it.
   NodeId default_argument(QualType t) {
+    const u32 source_begin = pos();
+    const auto calls_before = s_->dependent_calls.size();
     // Not in the parameters of a parameter's own function type ([dcl.fct.default]/3).
     if (in_params_ > 1) s_->diag(pos(), Diag::default_arg_not_allowed);
     Ex e;
@@ -1973,8 +1975,17 @@ public:
                                                             : s_->convert(a, t, a.begin);
     }
     if (!e.ok()) return NodeId::none;
-    if (s_->types().is_dependent(t) || s_->dependent(e)) e = s_->dependent_node({e}, e.begin, e.end);
-    return s_->node(ast::DefaultArg{e.info, sema::Sema::at(e, e.begin)}, e.begin, e.end, e.info).id;
+    ast::DefaultArg value{};
+    if (s_->types().is_dependent(t) || s_->dependent(e)) {
+      e = s_->dependent_node({e}, e.begin, e.end);
+      value.source = s_->item();
+      value.source_begin = source_begin;
+      value.source_end = pos();
+      value.dependent_calls = s_->builder().seq(std::span<const u32>(s_->dependent_calls).subspan(calls_before));
+    }
+    value.info = e.info;
+    value.arg = sema::Sema::at(e, e.begin);
+    return s_->node(value, e.begin, e.end, e.info).id;
   }
 
   // A default member initializer after its optional `=` ([class.mem.general]).

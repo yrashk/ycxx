@@ -422,6 +422,11 @@ struct Goto {
 struct DefaultArg {
   ExprInfo info;
   [[=sequenced]] Child arg;
+  // Written token range in the declaration item, present for a dependent default.
+  ItemId source{};
+  u32 source_begin = 0;
+  u32 source_end = 0;
+  SeqId<u32> dependent_calls{};
 };
 
 // ---------------------------------------------------------------- declarations (item trees)

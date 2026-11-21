@@ -112,6 +112,9 @@ public:
   // An omitted field's initializer, analysed at its declaration into the requesting builder.
   // `NodeId::none` records a diagnosed error. No answer means this context cannot replay it.
   virtual std::optional<NodeId> replay_default_member(Sema&, EntityId) { return std::nullopt; }
+  virtual std::optional<NodeId> replay_function_default(Sema&, const ast::DefaultArg&, EntityId, QualType) {
+    return std::nullopt;
+  }
   // A concrete source query keeps its original position if its tokens are read again.
   virtual bool is_complete_at_source(EntityId c) { return is_complete(c); }
   virtual bool class_layout_uncertain(EntityId /*cls*/) { return false; }
@@ -7681,7 +7684,7 @@ public:
       return {NodeId::none, begin, end};
     }
     TypeRec fr = types().rec(ft);
-    auto children = call_args(fr, args, begin, paren_at, defaults, default_origin);
+    auto children = call_args(fr, args, begin, paren_at, defaults, default_origin, function);
     if (!children) return {NodeId::none, begin, end};
     ExprInfo info = result_info(fr.inner);
     return node(ast::Call{info, function, at(callee, begin), b_->list(*children)}, begin, end, info);
@@ -7862,14 +7865,22 @@ public:
   // A braced-init-list as a call's argument: a placeholder, list-initializing its parameter once
   // the callee is known (`call_args`).
   // The argument a parameter's default argument gives a call, positioned at the call's `)`: its
-  // tree, analysed at the declaration ([dcl.fct.default]/5). One of a template that depends on its
-  // parameters would be instantiated for the call ([temp.inst]/12), which is not supported yet.
-  std::optional<Ex> default_argument(NodeId d, u32 at_, DefaultArgumentOrigin origin = DefaultArgumentOrigin::interned) {
+  // tree, analysed at the declaration ([dcl.fct.default]/5). A supported dependent default
+  // is replayed only for the selected specialization and only when omitted ([temp.inst]/12).
+  std::optional<Ex> default_argument(NodeId d, u32 at_, DefaultArgumentOrigin origin = DefaultArgumentOrigin::interned,
+                                     EntityId function = EntityId::none, QualType parameter = {}) {
     const bool in_builder = origin == DefaultArgumentOrigin::current_item;
     // An earlier declarator's inherited defaults are already adopted by this builder.
     const NodeId interned = in_builder ? b_->adopted_node(d) : d;
     const auto value = interned == NodeId::none ? b_->get<ast::DefaultArg>(d) : ins().ast.get<ast::DefaultArg>(interned);
     if (ast::kind_of(value.arg.id) == ast::Nodes::index_of<ast::Dependent>()) {
+      if (function != EntityId::none && value.source_end > value.source_begin) {
+        if (auto replay = q_->replay_function_default(*this, value, function, parameter)) {
+          if (*replay == NodeId::none) return std::nullopt;
+          const auto concrete = b_->get<ast::DefaultArg>(*replay);
+          return Ex{*replay, at_, at_, concrete.info};
+        }
+      }
       diag(at_, Diag::default_arg_dependent);
       return std::nullopt;
     }
@@ -7970,12 +7981,13 @@ public:
   // A parameter without an argument takes its default argument ([dcl.fct.default], [expr.call]/5).
   std::optional<std::vector<Child>> call_args(const TypeRec& fr, std::span<const Ex> given, u32 begin, u32 paren_at,
                                               std::span<const NodeId> defaults = {},
-                                              DefaultArgumentOrigin origin = DefaultArgumentOrigin::interned) {
+                                              DefaultArgumentOrigin origin = DefaultArgumentOrigin::interned,
+                                              EntityId function = EntityId::none) {
     if (unevaluated == 0 && !require_supported_virtual_signature(fr, paren_at)) return std::nullopt;
     std::vector<QualType> params = fr.params;  // copied: converting may intern new types
     std::vector<Ex> args(given.begin(), given.end());
     for (std::size_t i = args.size(); i < params.size() && i < defaults.size() && defaults[i] != NodeId::none; ++i) {
-      auto a = default_argument(defaults[i], paren_at, origin);
+      auto a = default_argument(defaults[i], paren_at, origin, function, params[i]);
       if (!a) return std::nullopt;
       args.push_back(*a);
     }

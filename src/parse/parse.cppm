@@ -1195,6 +1195,7 @@ private:
   std::vector<std::pair<u32, u32>> class_member_order_;  // the cells above, in order of analysis
   std::map<u32, Dmi> dmis_;                       // by field entity
   std::set<EntityId> replaying_default_members_;
+  std::set<std::tuple<EntityId, ItemId, u32>> replaying_function_defaults_;
   std::map<u32, std::vector<sema::BaseRec>> class_bases_;  // by class entity
   std::map<u32, ClassBasePattern> class_base_patterns_;  // by defining item
   std::set<std::pair<u32, u32>> dependent_type_trait_operands_;  // source item and token offset
@@ -1464,6 +1465,9 @@ public:
     return at_point ? p_->is_complete(c, *at_point, true, true) : is_complete_at_item(c);
   }
   std::optional<NodeId> replay_default_member(sema::Sema& caller, EntityId field) override;
+  std::optional<NodeId> replay_function_default(sema::Sema& caller, const ast::DefaultArg& value,
+                                                EntityId function, QualType parameter) override;
+  std::optional<u32> default_instantiation_point;
   bool is_complete_at_source(EntityId c) override {
     // The initializer is a complete-class context at its member declaration ([class.mem.general]).
     if (initializer_source) return p_->is_complete(c, initializer_source->item, true);
@@ -1639,6 +1643,66 @@ std::optional<NodeId> AtItem::replay_default_member(sema::Sema& caller, EntityId
 }
 
 
+std::optional<NodeId> AtItem::replay_function_default(sema::Sema& caller, const ast::DefaultArg& value,
+                                                       EntityId function, QualType parameter) {
+  const auto specialization = p_->world().entities.rec(function);
+  if (specialization.templ == EntityId::none || !p_->is_namespace(specialization.scope) ||
+      !caller.types().is_scalar(parameter)) return std::nullopt;
+  const u32 item = p_->index(value.source);
+  const auto& written = p_->items().items[item];
+  auto& seqs = p_->world().ins.seqs;
+  const auto declarations = seqs.elements(p_->item_sema(item).value.decls);
+  const auto decl = std::ranges::find(declarations, specialization.templ, &ast::DeclSema::entity);
+  if (decl == declarations.end()) return std::nullopt;
+
+  AtItem source(*p_, item, false);
+  source.from = p_->namespace_path(specialization.scope);
+  source.at_point = default_instantiation_point.value_or(point());
+  source.instantiation_calls = seqs.elements(value.dependent_calls);
+  sema::Sema replay(p_->world(), caller.builder(), source, caller.diagnostics(), value.source, 0);
+  replay.unevaluated = caller.unevaluated;
+  const auto params = seqs.elements(decl->template_params);
+  if (params.empty()) return std::nullopt;
+  replay.template_scopes.push_back(params);
+  replay.template_args = sema::Bindings::of(params.front().depth, specialization.args);
+  replay.push_scope();
+  for (const auto& param : seqs.elements(decl->params))
+    if (param.name != replay.no_name())
+      replay.declare_local(param.name, param.type,
+                           sema::local_flag::parameter | sema::local_flag::default_argument_parameter, 0, false);
+
+  auto& active = p_->replaying_function_defaults_;
+  const auto key = std::tuple{function, value.source, value.source_begin};
+  if (!active.insert(key).second) {
+    replay.diag(value.source_begin, Diag::default_arg_dependent);
+    return NodeId::none;
+  }
+  struct EndReplay {
+    decltype(active) set;
+    decltype(key) entry;
+    ~EndReplay() { set.erase(entry); }
+  } end_replay{active, key};
+
+  Parser parser(p_->region(), written.begin, written.begin + value.source_end, replay);
+  parser.set_questions(source);
+  parser.seek(written.begin + value.source_begin);
+  const auto previous_diags = replay.diag_count();
+  NodeId result;
+  try {
+    result = parser.default_argument(parameter);
+  } catch (const TooDeep&) {
+    return NodeId::none;
+  }
+  if (replay.has_error_since(previous_diags)) return NodeId::none;
+  if (result == NodeId::none || !parser.at_end() || !replay.closures.empty() ||
+      caller.builder().get<ast::DefaultArg>(result).source_end != 0) {
+    replay.diag(value.source_begin, Diag::default_arg_dependent);
+    return NodeId::none;
+  }
+  caller.demands.insert(caller.demands.end(), replay.demands.begin(), replay.demands.end());
+  return result;
+}
+
 // Sema's questions in an instantiation of the function template that item `item` defines, at
 // the end of the translation unit (§B6.2). Unqualified names are looked up at the template's own
 // item, as its definition was ([temp.res], [temp.nondep]); argument-dependent lookup for the
@@ -1648,7 +1712,13 @@ std::optional<NodeId> AtItem::replay_default_member(sema::Sema& caller, EntityId
 // ill-formed, no diagnostic required.)
 class AtInstantiation final : public sema::Questions {
 public:
-  AtInstantiation(Program& p, u32 item) : p_(&p), item_(item), at_(p, item, true) {}
+  AtInstantiation(Program& p, u32 item) : p_(&p), item_(item), at_(p, item, true) {
+    at_.default_instantiation_point = p.end();
+  }
+  std::optional<NodeId> replay_function_default(sema::Sema& caller, const ast::DefaultArg& value,
+                                                EntityId function, QualType parameter) override {
+    return at_.replay_function_default(caller, value, function, parameter);
+  }
   const sema::Classes& classes() override { return p_->classes(); }
   sema::CopyAssignment require_copy_assignment(EntityId f) override { return p_->require_copy_assignment(f); }
   const sema::ClassRec& publish_class(EntityId c, sema::ClassRec r) override { return p_->publish_class(c, std::move(r), item_); }

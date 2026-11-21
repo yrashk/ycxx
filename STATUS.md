@@ -2526,7 +2526,9 @@ and runtime integration with ycxx's own linker remain under [#89]. See the
   declarations in different scopes have their own. A copy or move constructor's other parameters
   may have defaults. Defaults are rejected where [dcl.fct.default]/3–4 and [over.oper.general]
   forbid them (`defaults_allowed`, `defaults_trail`).
-- Not yet: defaults that depend on template parameters (#356); defaults added by an out-of-class
+- Omitted scalar defaults on free function templates replay with the selected bindings at the
+  written declaration. Explicit arguments bypass replay.
+- Not yet: other dependent defaults (#356); defaults added by an out-of-class
   or qualified definition (#354); defaults added after a using-declaration (#362, the oracles disagree).
 - Tests: `tests/own/default-args/` (spec-only, with XFAILs for #354, #356, #357 and #102).
 
