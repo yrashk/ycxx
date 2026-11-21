@@ -796,7 +796,8 @@ public:
 
   // declarator, or abstract-declarator when `abstract` ([dcl.decl.general], [dcl.name]).
   Declarator declarator(QualType base, bool abstract, bool typedef_ = false, bool conversion = false,
-                        NamedExceptionSpec named_exception = NamedExceptionSpec::ordinary, bool defer_ref_check = false) {
+                        NamedExceptionSpec named_exception = NamedExceptionSpec::ordinary, bool defer_ref_check = false,
+                        bool reject_parameter_defaults = false) {
     Declarator d;
     d.begin = pos();
     Level top = level(abstract, d.ok, conversion);
@@ -813,12 +814,12 @@ public:
       }
     }
     const bool function_type = s_->types().is_function(d.type);
-    if (member_template_name) {
+    if (member_template_name || reject_parameter_defaults) {
       for (const Level* level = &top; level; level = level->inner.get())
         for (const Suffix& suffix : level->suffixes) {
           if (&suffix == fn && !abstract && !typedef_ && function_type) continue;
           for (const Param& param : suffix.params)
-            if (param.default_tokens) {
+            if (param.default_tokens || (reject_parameter_defaults && param.default_arg != NodeId::none)) {
               s_->diag(param.at, Diag::default_arg_not_allowed);
               d.ok = false;
             }
@@ -3576,10 +3577,16 @@ public:
   // ------------------------------------------------------------ [stmt]
 
   Ex compound_statement(bool barrier = false) {
-    u32 begin = pos();
-    if (!expect(Tk::l_brace)) return {NodeId::none, begin, begin};
     s_->push_scope();
     if (barrier) s_->jump_barrier();
+    Ex body = compound_in_scope();
+    s_->pop_scope();
+    return body;
+  }
+
+  Ex compound_in_scope() {
+    u32 begin = pos();
+    if (!expect(Tk::l_brace)) return {NodeId::none, begin, begin};
     std::vector<Ex> stmts;
     while (!is(Tk::r_brace) && !at_end()) {
       u32 before = i_;
@@ -3587,13 +3594,71 @@ public:
       if (i_ == before) bump();  // no progress: drop the token
     }
     expect(Tk::r_brace);
-    s_->pop_scope();
     std::vector<ast::Child> cs;
     for (const Ex& st : stmts)
       if (st.ok()) cs.push_back(sema::Sema::at(st, begin));
     return s_->node(ast::Compound{s_->builder().list(cs)}, begin, pos());
   }
 
+
+  // [except.pre], [except.handle]: each handler declaration shares its compound's scope.
+  Ex try_statement() {
+    u32 begin = pos();
+    bump();
+    Ex body = compound_statement(/*barrier=*/true);
+    if (!expect(Tk::kw_catch)) return {NodeId::none, begin, pos()};
+    std::vector<ast::Child> handlers;
+    std::optional<u32> catch_all_at;
+    do {
+      u32 at = pos() - 1;
+      if (catch_all_at) {
+        s_->diag(*catch_all_at, Diag::catch_all_not_last);
+        catch_all_at.reset();
+      }
+      if (!expect(Tk::l_paren)) break;
+      s_->push_scope();
+      s_->jump_barrier();
+      const QualType placeholder = s_->builtin(Builtin::void_);
+      QualType type = placeholder;
+      auto kind = ast::HandlerKind::invalid;
+      u32 local = ~0u;
+      if (accept(Tk::ellipsis)) {
+        kind = ast::HandlerKind::catch_all;
+        catch_all_at = at;
+      } else {
+        u32 declaration_at = pos();
+        DeclSpec spec = decl_specifiers(/*in_type_id=*/true);
+        Declarator d = declarator(spec.type, /*abstract=*/true, /*typedef_=*/false, /*conversion=*/false,
+                                  NamedExceptionSpec::ordinary, /*defer_ref_check=*/false,
+                                  /*reject_parameter_defaults=*/true);
+        if (spec.ok && d.ok) {
+          type = d.type;
+          if (s_->types().is_array(type)) type = s_->types().pointer(s_->types().rec(type).inner);
+          if (s_->types().is_function(type) && !s_->types().is_cvref_function(type))
+            type = s_->types().pointer(type);
+          if (spec.is_static || spec.is_extern || spec.is_inline || spec.is_typedef ||
+              spec.is_constexpr || spec.is_consteval || spec.is_constinit) {
+            s_->diag(declaration_at, Diag::invalid_exception_declaration);
+          } else if (s_->types().is_cvref_function(type)) {
+            s_->diag(declaration_at, Diag::indirection_to_qualified_function, type);
+          } else if (s_->check_handler_type(type, declaration_at)) {
+            kind = ast::HandlerKind::typed;
+          }
+          if (d.named) {
+            local = s_->declare_local(d.name, type, 0, d.name_at);
+            s_->set_initialized(local);
+          }
+        }
+      }
+      if (!expect(Tk::r_paren)) kind = ast::HandlerKind::invalid;
+      Ex handler_body = compound_in_scope();
+      s_->pop_scope();
+      if (kind == ast::HandlerKind::invalid) type = placeholder;
+      Ex handler = s_->node(ast::Handler{kind, type, local, sema::Sema::at(handler_body, at)}, at, pos());
+      handlers.push_back(sema::Sema::at(handler, begin));
+    } while (accept(Tk::kw_catch));
+    return s_->node(ast::TryBlock{sema::Sema::at(body, begin), s_->builder().list(handlers)}, begin, pos());
+  }
 
   // lambda-expression ([expr.prim.lambda]): its introducer and declarator, read in the enclosing
   // context, then its compound-statement as the body of the closure's function call operator.
@@ -3941,7 +4006,7 @@ public:
       s_->diag(begin, Diag::not_supported, kind());
       skip_statement();
       return {NodeId::none, begin, pos()};
-    case Tk::kw_try:
+    case Tk::kw_try: return try_statement();
     case Tk::kw_co_return:
     case Tk::kw_asm:
     case Tk::kw_contract_assert:
@@ -4201,6 +4266,14 @@ public:
     }
     switch (kind()) {
     case Tk::l_brace: skip_statement(); return;
+    case Tk::kw_try:
+      bump();
+      if (is(Tk::l_brace)) skip_statement();
+      while (accept(Tk::kw_catch)) {
+        parens();
+        if (is(Tk::l_brace)) skip_statement();
+      }
+      return;
     case Tk::kw_if:
       bump();
       while (is(Tk::kw_constexpr) || is(Tk::exclaim) || is(Tk::kw_consteval)) bump();

@@ -2659,6 +2659,15 @@ miscompiles it (DECISIONS §3.2). Each is removed once ycxx compiles itself.
 | M7 | libycxx under ycxx | libycxx's suite passes, compiled by ycxx |
 | M8 | Self-hosting | Stage 2 equals stage 3; the GCC-built bootstrap anchor is released (DECISIONS §3.5) |
 
+## Ordinary block try and catch (#558)
+
+The front end retains the protected compound and ordered handlers. A named
+exception declaration shares the handler's outer block scope, and control-flow
+checks reject entry into the protected block or a handler. A discarded
+`if constexpr` arm skips the full handler sequence. Retained try blocks
+diagnose unsupported emission. Function-try-blocks, handler matching and
+unwinding remain in [#89](https://github.com/yrashk/ycxx/issues/89).
+
 ## Unevaluated calls to known-return function templates (#565)
 
 An unevaluated call to a non-constexpr free function template can use its
