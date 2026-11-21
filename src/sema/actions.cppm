@@ -6669,8 +6669,15 @@ public:
     }
     if (!found_hidden_friend)
       for (const Ex& o : operands)
-        if (auto ns = associated_namespace(o.type()))
-          for (const ast::DeclSema& d : q_->namespace_members(*ns, name)) add(d);
+        if (auto ns = associated_namespace(o.type())) {
+          // The mixed-candidate check needs ADL, which ignores using-directives
+          // in associated namespaces. Preserve the older lookup for other operators.
+          if (ref_qualified_member) {
+            for (const ast::DeclSema& d : q_->adl_functions(*ns, name, /*at_instantiation=*/false)) add(d);
+          } else {
+            for (const ast::DeclSema& d : q_->namespace_members(*ns, name)) add(d);
+          }
+        }
     if (set.empty()) return ref_qualified_member;
     ExprInfo info{builtin(Builtin::overload_set), ValueCategory::lvalue, 0};
     Ex callee = node(ast::DeclRef{info, set.front().entity}, begin, begin, info);
