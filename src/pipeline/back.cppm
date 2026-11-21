@@ -105,6 +105,7 @@ struct Entity {
   bool guard = false;
   // The mangled parameter types tie this ordinary C++ function to the unit (#582).
   bool local_parameter_binding = false;
+  bool hidden_elf = false;
 
   bool has_local_binding() const { return linkage == ast::Linkage::internal || local_parameter_binding; }
 };
@@ -1413,7 +1414,7 @@ std::expected<obj::object, aarch64::CodegenError> assemble_linux(
       auto& symbol = o.symbols[sym->second];
       symbol.section = text;
       symbol.offset = base;
-      symbol.weak = f.weak && symbol.bind == obj::binding::global;
+      symbol.weak = f.weak && symbol.bind != obj::binding::local;
       symbol.function_size = f.code->bytes.size();
       sec.emit(f.code->bytes);
       for (const auto& r : f.code->relocs) {
@@ -1653,7 +1654,10 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
     }
     mangled.emplace(ir::raw(e.id), *name);  // before an asm label: what its statics' names begin with
     if (!e.asm_label.empty()) name = e.asm_label;
-    symbols.push_back({e.id, std::move(*name), e.has_local_binding() ? obj::binding::local : obj::binding::global});
+    obj::binding binding = obj::binding::global;
+    if (e.has_local_binding()) binding = obj::binding::local;
+    else if (linux && e.hidden_elf) binding = obj::binding::hidden;
+    symbols.push_back({e.id, std::move(*name), binding});
   }
   // A static local and its guard: `_ZZ <encoding> E <name> [_<n>]` and `_ZGV` before it, the
   // function's own <encoding> taken from its symbol (Itanium C++ ABI §5.1.6, §5.1.4.6).

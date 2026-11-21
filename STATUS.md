@@ -671,6 +671,12 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   to one definition. `unit.linux_inline` checks symbol bindings, address identity, archive
   extraction, and both operand orders with the native and host linkers.
   [Design](docs/design/linux-inline-functions.md) · [#422](https://github.com/yrashk/ycxx/issues/422)
+- Explicit GNU `visibility("hidden")` follows ordinary external namespace-scope functions across
+  redeclarations. On x86-64 ELF, inline definitions combine `STB_WEAK` with `STV_HIDDEN`.
+  Ordinary non-inline definitions and referenced declarations combine `STB_GLOBAL` with
+  `STV_HIDDEN`. `unit.linux_inline` checks both scoped attribute spellings, symbol metadata,
+  and cross-unit address identity with the native and host linkers in both object orders.
+  [#602](https://github.com/yrashk/ycxx/issues/602)
 - Constant-initialized and zero-initialized external inline namespace variables use weak ELF
   definitions when their initial values need no relocations. This includes explicitly inline
   full variable-template specializations with builtin type arguments. Static addresses and
@@ -1278,8 +1284,10 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
 ## `<cstdio>`, step 3: attributes, asm labels, string-initialized arrays (#133, 2026-11-18)
 
 - **Attributes:** `[[…]]` attribute-specifiers on declarations, class heads and statements, and
-  GNU `__attribute__((…))` before and after declarators, are parsed and ignored
-  ([dcl.attr.grammar]/6); none before a linkage-specification ([dcl.link]).
+  GNU `__attribute__((…))` before and after declarators, are parsed. The parser skips
+  unrecognized attributes ([dcl.attr.grammar]/6) and diagnoses a standard attribute before a
+  linkage-specification with a single declaration ([dcl.link]). GNU hidden visibility on ordinary
+  namespace-scope functions is implemented for x86-64 ELF. [#602](https://github.com/yrashk/ycxx/issues/602)
 - **Asm labels:** `__asm("…")` after a declarator gives the entity's symbol exactly as written
   (`Program::asm_label`, `pipeline::Entity::asm_label`), as the SDK's `__DARWIN_ALIAS` needs.
   Both extensions are listed in `docs/EXTENSIONS.md` (DECISIONS §1.2).
@@ -1715,18 +1723,19 @@ session's.*
   [#218](https://github.com/yrashk/ycxx/issues/218).
   [Replay design](docs/design/dependent-trivial-copyability-replay.md)
   `__has_builtin(__is_trivially_copyable)` answers 0 while support is partial ([meta.unary.prop]).
-- `__is_constructible(T, Args...)` and `__is_nothrow_constructible(T, Args...)` check concrete
-  operand types at the original source point. Their domain includes complete types, cv `void`,
-  and arrays of unknown bound. They fold function and cv `void` targets, scalar and reference
-  targets with no arguments, and arithmetic targets with arithmetic or arithmetic-reference
-  arguments. Each viable initialization in that scope is nonthrowing. Incomplete operands and
-  other complete combinations get hard diagnostics. The supported class-template base and
-  variable-template initializer replay paths accept dependent operands. Replay expands packs in
-  place among the arguments, checks newly concrete types at the actual demand and retains hard
-  errors at the builtin spelling. An empty pack contributes zero arguments. The target must be a
-  separately written type-id. General dependent queries, including function-template uses, and class
-  construction remain in [#218](https://github.com/yrashk/ycxx/issues/218).
-  `__has_builtin` answers 0 for both predicates while support is partial ([meta.unary.prop]).
+- `__is_constructible(T, Args...)`, `__is_nothrow_constructible(T, Args...)` and
+  `__is_trivially_constructible(T, Args...)` check concrete operand types at the original source
+  point. Their domain includes complete types, cv `void`, and arrays of unknown bound. They fold
+  function and cv `void` targets, scalar and reference targets with no arguments, and arithmetic
+  targets with arithmetic or arithmetic-reference arguments. Each viable initialization in that
+  scope is trivial and nonthrowing. Incomplete operands and other complete combinations get hard
+  diagnostics. The supported class-template base and variable-template initializer replay paths
+  accept dependent operands. Replay expands packs in place among the arguments, checks newly
+  concrete types at the actual demand and retains hard errors at the builtin spelling. An empty
+  pack contributes zero arguments. The target must be a separately written type-id. General
+  dependent queries, including function-template uses, and class construction remain in
+  [#218](https://github.com/yrashk/ycxx/issues/218).
+  `__has_builtin` answers 0 for all three predicates while support is partial ([meta.unary.prop]).
   [Direct design](docs/design/direct-constructibility.md)
   · [Replay design](docs/design/constructibility-tail-pack-replay.md)
 - Listed in docs/EXTENSIONS.md. Tests: `tests/own/builtins/`. `<cstdio>`: 53 → 33 errors.

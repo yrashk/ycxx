@@ -364,6 +364,7 @@ enum class Diag : std::uint32_t {
   recursive_default_member_initializer [[=message{Severity::error, "default member initializer for '{0:n}' would use itself"}]],
   default_member_initializer_cleanup [[=message{Severity::error, "default member initializer requiring cleanup is not supported yet"}]],
   nothrow_constructibility_unsupported [[=message{Severity::error, "'__is_nothrow_constructible' for '{0:t}' with these argument types is not supported yet"}]],
+  trivial_constructibility_unsupported [[=message{Severity::error, "'__is_trivially_constructible' for '{0:t}' with these argument types is not supported yet"}]],
 };
 
 // A `{N:r}` argument: why an evaluation was not constant. 0 is an expression the front end
@@ -426,7 +427,8 @@ constexpr bool is_limit(engine::DiagId id) {
 constexpr bool is_type_trait_failure(engine::DiagId id) {
   return id == diag_id(Diag::trivial_copyability_incomplete) || id == diag_id(Diag::trivial_copyability_unsupported) ||
          id == diag_id(Diag::constructibility_incomplete) || id == diag_id(Diag::constructibility_unsupported) ||
-         id == diag_id(Diag::nothrow_constructibility_unsupported);
+         id == diag_id(Diag::nothrow_constructibility_unsupported) ||
+         id == diag_id(Diag::trivial_constructibility_unsupported);
 }
 // Whether a diagnostic stays an error where a substitution failure means "not satisfied": a limit
 // of ycxx's, an atomic constraint that is not a `bool` constant ([temp.constr.atomic]/3), or a
