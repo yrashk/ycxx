@@ -1,0 +1,8 @@
+// Selected from the configured system for this ycxx binary.
+export module ycxx.compile:host_target;
+
+import ycxx.ast.target;
+
+export namespace ycxx::compile {
+inline constexpr const ast::Target* default_target = @YCXXC_DEFAULT_TARGET@;
+}
