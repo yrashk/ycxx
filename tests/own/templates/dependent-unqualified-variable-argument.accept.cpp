@@ -22,3 +22,30 @@ template<class> inline constexpr bool IsConst = false;
 template<class T> using Choice = Conditional<IsConst<T>, int, long>;
 }
 static_assert(__is_same(local_lookup::Choice<const int>, long));
+
+namespace hides_variable_template {
+template<class T> inline constexpr bool Flag = true;
+template<bool B> int choose() { return B ? 1 : 2; }
+template<class T> int block() {
+    constexpr int Flag = 2;
+    return choose<(Flag < 2)>();
+}
+template<class T> struct Enclosing {
+    static constexpr int Flag = 2;
+    static int evaluate() { return choose<(Flag < 2)>(); }
+};
+int use() { return block<int>() + Enclosing<int>::evaluate(); }
+}
+
+namespace dependent_adl {
+template<class T> int pick(int);
+template<class T> int call(T& value) { return pick<T>(value); }
+namespace associated {
+struct Value {};
+template<class T> int pick(Value&) { return 9; }
+}
+int use() {
+    associated::Value value;
+    return call(value);
+}
+}
