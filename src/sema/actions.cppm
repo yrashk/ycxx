@@ -1101,7 +1101,11 @@ public:
   // has one of that name.
   bool names_member_template(const Ex& object, bool arrow, NameId name) {
     if (!object.ok() || dependent(object)) return false;
-    QualType t = arrow ? types().pointee(object.type()) : object.type();
+    QualType t = object.type();
+    if (arrow) {
+      if (!types().is_pointer(t)) return false;  // The actual member access diagnoses this receiver.
+      t = types().pointee(t);
+    }
     if (!types().is_class(t)) return false;
     const ClassRec* c = class_rec(types().class_of(t));
     return c && std::ranges::any_of(c->members, [&](const MemberDeclRec& m) { return m.name == name && m.is_template; });
