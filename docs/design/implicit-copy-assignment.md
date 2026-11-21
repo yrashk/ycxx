@@ -43,3 +43,35 @@ Astra reviewed the declaration and call-triviality rules.
 [`[class.copy.ctor]`](https://eel.is/c++draft/class.copy.ctor) ·
 [Itanium C++ ABI](https://itanium-cxx-abi.github.io/cxx-abi/abi.html#non-trivial) ·
 [#244](https://github.com/yrashk/ycxx/issues/244)
+
+## First-declaration defaulted copy assignment
+
+An ordinary namespace-scope class can define `C& operator=(C&)` or
+`C& operator=(const C&)` as `= default` on its first member declaration.
+Keep its written declaration, entity, access and parameter type. The definition
+is implicitly inline and constexpr. Preserve a written exception specification.
+The declaration counts as user-declared when determining implicit special members.
+An ordinary in-class deleted copy assignment also counts and participates in
+overload resolution as a deleted function.
+[[dcl.fct.def.default]](https://eel.is/c++draft/dcl.fct.def.default) ·
+[[class.copy.assign]](https://eel.is/c++draft/class.copy.assign)
+
+Share the implicit assignment classifier for subobject signatures. A written
+const source parameter with an otherwise implicit mutable source parameter
+defines the operation as deleted. Reference members and const non-class members
+also cause deletion. For ordinary classes with supported fields, use the same
+on-demand memberwise body and access context as implicit assignment. Check the
+written member's access after selection. The body assigns each field in declaration
+order and returns the destination by reference. Unusable field assignments cause
+deletion, and operations outside the supported lowering receive an unsupported
+diagnostic when selected. Only the implicit assignment path uses its existing
+representation-copy optimization.
+[[class.copy.assign]](https://eel.is/c++draft/class.copy.assign)
+
+Explicit move, defaulting outside the class, and additional base, array and union
+operations remain in [#244](https://github.com/yrashk/ycxx/issues/244) and
+[#360](https://github.com/yrashk/ycxx/issues/360). Related work covers virtual
+members in [#309](https://github.com/yrashk/ycxx/issues/309), defaulting constructors
+and destructors in [#157](https://github.com/yrashk/ycxx/issues/157), inferred
+exception specifications and `noexcept` expressions in [#219](https://github.com/yrashk/ycxx/issues/219),
+and class constant evaluation in [#25](https://github.com/yrashk/ycxx/issues/25).
