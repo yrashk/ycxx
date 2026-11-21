@@ -182,6 +182,12 @@ public:
 
   const Result<ast::ItemSema>& item_sema(u32 item);
   std::optional<ast::DeclSema> decl_sema(DeclId d);
+  ast::DeclSema completed_declaration(ast::DeclSema decl) const {
+    if (auto found = constructor_exception_types_.find(decl.entity);
+        found != constructor_exception_types_.end() && found->second)
+      decl.type = *found->second;
+    return decl;
+  }
   const Result<ast::BodySema>& analyze_body(u32 item);
 
   bool defaulted_body(u32 item) const {
@@ -1361,6 +1367,9 @@ private:
   std::map<EntityId, std::vector<std::optional<std::pair<u32, u32>>>> member_default_tokens_;
   std::map<EntityId, EntityId> overridden_virtuals_;  // by overriding member's entity
   void bind_member_defaults(EntityId cls, sema::ClassRec& rec, Result<ast::ClassDef>& out);
+  std::map<EntityId, std::pair<u32, u32>> constructor_exception_tokens_;
+  std::map<EntityId, std::optional<QualType>> constructor_exception_types_;
+  void bind_constructor_exceptions(EntityId cls, const sema::ClassRec& rec, Result<ast::ClassDef>& out);
   std::map<u32, std::vector<std::vector<ast::TemplateParamSema>>> outer_heads_;  // by item
   std::map<std::pair<u32, u32>, u32> static_init_ends_;  // by (member item, ordinal): its initializer's end
   std::map<u32, LazyMember> lazy_members_;                 // by member entity
@@ -4122,7 +4131,7 @@ private:
     bool ok = true;
     auto fs = ps_.function_suffix(ok);
     if (!ok) return bad();
-    bool nonthrowing = ctor && constructor_exception_specifier(fs, ok);
+    bool nonthrowing = ctor && constructor_exception_specifier(fs, cls, ok);
     if (!ok) return bad();
     std::vector<QualType> ps;
     for (const parse::Param& p : fs.params) ps.push_back(p.type);
@@ -4151,7 +4160,12 @@ private:
       s_.diag(name_at, Diag::constexpr_redeclared, m->name);
       return bad();
     }
-    if (ctor && s_.types().rec(m->type).fn_noexcept != nonthrowing) {
+    const auto resolved = p_->constructor_exception_types_.find(m->entity);
+    if (ctor && ((resolved != p_->constructor_exception_types_.end() && !resolved->second) ||
+                 p_->constructor_exception_tokens_.contains(m->entity)))
+      return bad();  // class completion reports an invalid specification
+    const QualType declared_type = mem->type;
+    if (ctor && s_.types().rec(declared_type).fn_noexcept != nonthrowing) {
       s_.diag(name_at, Diag::conflicting_declaration, m->name);
       return bad();
     }
@@ -4362,13 +4376,15 @@ private:
     return flags;
   }
 
-  bool constructor_exception_specifier(parse::Parser::Suffix& fs, bool& ok) {
+  bool constructor_exception_specifier(parse::Parser::Suffix& fs, QualType cls, bool& ok) {
     if (!ps_.is(Tk::kw_noexcept)) return false;
     s_.push_scope();
     for (const parse::Param& p : fs.params)
       if (p.name != s_.no_name()) s_.declare_local(p.name, p.type, sema::local_flag::parameter, p.at, false);
+    const auto saved_this = std::exchange(s_.this_type, s_.types().pointer(cls));
     ps_.exception_specifier(fs, ok);
     const bool nonthrowing = ok && ps_.noexcept_value(fs.noexcept_condition, ok);
+    s_.this_type = saved_this;
     s_.pop_scope();
     if (ps_.is(Tk::kw_noexcept) || ps_.is(Tk::kw_throw)) {
       s_.diag(ps_.pos(), Diag::not_supported, ps_.kind());
@@ -4488,7 +4504,28 @@ private:
     const bool defaulted = p_->defaulted_body(k_);
     const bool ordinary_defaulting = defaulted && !is_virtual;
     const bool defaulted_default = ordinary_defaulting && ctor && fs.params.empty() && !fs.variadic;
-    bool written_noexcept = ctor && constructor_exception_specifier(fs, ok);
+    std::optional<std::pair<u32, u32>> exception_tokens;
+    bool written_noexcept = false;
+    if (ctor && !member_template_ && s_.template_scopes.empty() && !inst_ &&
+        ps_.is(Tk::kw_noexcept) && ps_.kind(1) == Tk::l_paren) {
+      const u32 begin = ps_.index();
+      ps_.bump();
+      ps_.bump();
+      unsigned depth = 1;
+      while (!ps_.at_end() && depth) {
+        if (ps_.is(Tk::l_paren)) ++depth;
+        if (ps_.is(Tk::r_paren)) --depth;
+        ps_.bump();
+      }
+      if (depth || ps_.is(Tk::kw_noexcept) || ps_.is(Tk::kw_throw)) {
+        s_.diag(ps_.pos(), Diag::unexpected_token, ps_.kind());
+        return bad();
+      }
+      fs.has_noexcept = true;
+      exception_tokens = {begin, ps_.index()};
+    } else if (ctor) {
+      written_noexcept = constructor_exception_specifier(fs, c.type, ok);
+    }
     if (!ok) return bad();
     std::optional<bool> destructor_noexcept;
     if (!ctor) {
@@ -4598,6 +4635,7 @@ private:
         }
       }
     }
+    if (exception_tokens) p_->constructor_exception_tokens_.emplace(sem.entity, *exception_tokens);
     if (!ctor) p_->destructor_declarations_.emplace(sem.entity, Program::DestructorDeclaration{name_at, destructor_noexcept});
     remember_member_defaults(sem.entity, fs.params);
     p_->declared(sem, k_);
@@ -5958,7 +5996,7 @@ std::optional<ast::DeclSema> Program::decl_sema(DeclId d) {
   const ast::ItemSema& s = item_sema(index(d.item)).value;
   u32 n = ast::number_of(d.ord);
   if (n >= w_->ins.seqs.size(s.decls)) return std::nullopt;
-  return w_->ins.seqs.at(s.decls, n);
+  return completed_declaration(w_->ins.seqs.at(s.decls, n));
 }
 
 // ---------------------------------------------------------------- class_def
@@ -6252,6 +6290,7 @@ const Result<ast::ClassDef>& Program::class_def(u32 item) {
     // Default arguments are checked with the full member set, before function bodies are read.
     classes_.publish(*cls, std::move(rec), [&](sema::ClassRec& fresh) {
       bind_member_defaults(*cls, fresh, out);
+      bind_constructor_exceptions(*cls, fresh, out);
     });
   }
   ast::Builder b(w_->ins, &arena_);
@@ -6271,6 +6310,47 @@ const Result<ast::ClassDef>& Program::class_def(u32 item) {
   running_.pop_back();
   class_cells_[item] = std::move(out);
   return *class_cells_[item];
+}
+
+void Program::bind_constructor_exceptions(EntityId cls, const sema::ClassRec& rec, Result<ast::ClassDef>& out) {
+  ast::Builder b(w_->ins, &arena_);
+  for (const sema::MemberDeclRec& member : rec.members) {
+    auto tokens = constructor_exception_tokens_.extract(member.entity);
+    if (tokens.empty()) continue;
+    auto slot = constructor_exception_types_.try_emplace(member.entity, std::nullopt).first;
+    const DeclId decl = member_decls_.at(std::to_underlying(member.entity));
+    const u32 item = index(decl.item);
+    const auto& it = items_->items[item];
+    const auto& cell = item_cells_[item]->value;
+    const auto d = w_->ins.seqs.at(cell.decls, ast::number_of(decl.ord));
+    AtItem q(*this, item, false);
+    q.completing_class = cls;
+    sema::Sema s(*w_, b, q, out.diags, decl.item, 0);
+    s.current_class = cls;
+    s.this_type = w_->types.pointer(w_->types.class_type(cls));
+    s.push_scope();
+    for (const auto& param : w_->ins.seqs.elements(d.params))
+      if (param.name != s.no_name())
+        s.declare_local(param.name, param.type, sema::local_flag::parameter, 0, false);
+    const auto [begin, end] = tokens.mapped();
+    Parser p(*r_, it.begin, end, s);
+    p.set_questions(q);
+    p.seek(begin);
+    Parser::Suffix spec;
+    bool ok = true;
+    bool nonthrowing = false;
+    try {
+      p.exception_specifier(spec, ok);
+      nonthrowing = ok && p.noexcept_value(spec.noexcept_condition, ok);
+    } catch (const TooDeep&) {
+      continue;
+    }
+    if (!ok) continue;
+    const auto signature = w_->types.rec(member.type);
+    slot->second = w_->types.function(signature.inner, signature.params, signature.variadic,
+                                      signature.linkage, signature.fn_cv, signature.fn_ref, nonthrowing);
+    out.demands.insert(out.demands.end(), s.demands.begin(), s.demands.end());
+  }
 }
 
 void Program::bind_member_defaults(EntityId cls, sema::ClassRec& rec, Result<ast::ClassDef>& out) {
@@ -6483,7 +6563,7 @@ public:
   Result<ast::BodySema> analyse() {
     const ast::ItemSema& is = p_->item_sema(k_).value;
     std::optional<ast::DeclSema> f;
-    if (p_->world().ins.seqs.size(is.decls) > 0) f = p_->world().ins.seqs.at(is.decls, 0);
+    if (p_->world().ins.seqs.size(is.decls) > 0) f = p_->completed_declaration(p_->world().ins.seqs.at(is.decls, 0));
     std::optional<ast::DeclSema> pattern = f;
     if (inst_) f = inst_->decl;
     Ex root;
@@ -8090,7 +8170,7 @@ interp::Callee Program::function_ir(EntityId f, u32 item) {
     std::optional<irgen::FunctionIr> ir;
     const ast::ItemSema& is = item_sema(k).value;
     if (body.diags.empty() && body.value.tree != NodeId::none && w_->ins.seqs.size(is.decls) > 0) {
-      ast::DeclSema d = w_->ins.seqs.at(is.decls, 0);
+      ast::DeclSema d = completed_declaration(w_->ins.seqs.at(is.decls, 0));
       if (body.value.deduced) d.type = body.value.deduced_type;
       const items::Item& it = items_->items[k];
       irgen::FunctionInput input{d.entity, d, body.value, id(k), it.body_begin - it.begin};

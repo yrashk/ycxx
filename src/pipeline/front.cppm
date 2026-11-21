@@ -675,6 +675,7 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
       continue;
     const ast::ItemSema& is = program.item_sema(k).value;
     std::vector<ast::DeclSema> decls = ins.seqs.elements(is.decls);
+    for (ast::DeclSema& decl : decls) decl = program.completed_declaration(decl);
     // The declarators, by declaration ordinal: their constants and item-relative locations (the
     // group is at the item's start).
     std::vector<std::optional<ast::Declarator>> declarators(decls.size());
