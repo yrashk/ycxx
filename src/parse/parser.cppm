@@ -4652,6 +4652,10 @@ public:
       Ex zero = s_->literal(i, s_->world().values.integer(i, 0), ast::ValueCategory::prvalue, call.begin, call.end);
       return s_->convert_node(zero, ast::ConversionKind::to_void, s_->builtin(sema::Builtin::void_));
     }
+    if (auto entity = s_->immediate_result_entity(*v.value)) {
+      s_->diag(call.begin, Diag::immediate_address, s_->world().entities.rec(*entity).name);
+      return {NodeId::none, call.begin, call.end};
+    }
     return s_->literal(call.type(), *v.value, ast::ValueCategory::prvalue, call.begin, call.end);
   }
 

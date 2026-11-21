@@ -1669,6 +1669,7 @@ std::optional<NodeId> AtItem::replay_function_default(sema::Sema& caller, const 
   sema::Sema replay(p_->world(), caller.builder(), source, caller.diagnostics(), value.source, 0);
   replay.unevaluated = caller.unevaluated;
   replay.immediate_context = caller.immediate_context || caller.is_consteval(function);
+  replay.constant_reference_context = caller.constant_reference_context;
   const auto params = seqs.elements(decl->template_params);
   if (params.empty()) return std::nullopt;
   replay.template_scopes.push_back(params);
@@ -1723,6 +1724,7 @@ std::optional<NodeId> AtItem::replay_function_default(sema::Sema& caller, const 
     replay.check_immediate_addresses(root, value.source_begin);
     if (replay.has_error_since(previous_diags)) return NodeId::none;
   }
+  caller.retain_immediate_functions(replay);
   caller.demands.insert(caller.demands.end(), replay.demands.begin(), replay.demands.end());
   return result;
 }

@@ -3473,18 +3473,28 @@ public:
   // ([expr.const.const]); a reference variable is not itself such an object.
   void permit_constant_initializer(u32 declaration, QualType target, ConstId value) {
     if (!has_immediate_addresses_ || value == ConstId::none) return;
-    auto immediate_value = [&](this auto&& self, ConstId id) -> bool {
-      if (ins().values.is<ast::VEntity>(id)) return is_consteval(ins().values.get<ast::VEntity>(id).entity);
-      if (ins().values.is<ast::VLvalue>(id)) return self(ins().values.get<ast::VLvalue>(id).base);
-      if (ins().values.is<ast::VAggregate>(id))
-        return std::ranges::any_of(ins().seqs.elements(ins().values.get<ast::VAggregate>(id).elems),
-                                   [&](ConstId element) { return self(element); });
-      return false;
-    };
-    if (types().is_reference(target) || !immediate_value(value)) constant_immediate_initializers_.insert(declaration);
+    if (types().is_reference(target) || !immediate_result_entity(value)) constant_immediate_initializers_.insert(declaration);
   }
 
   bool is_consteval(EntityId f) const { return consteval_.contains(std::to_underlying(f)); }
+
+  void retain_immediate_functions(const Sema& replay) {
+    consteval_.insert(replay.consteval_.begin(), replay.consteval_.end());
+  }
+
+  std::optional<EntityId> immediate_result_entity(ConstId value) {
+    if (ins().values.is<ast::VEntity>(value)) {
+      const auto entity = ins().values.get<ast::VEntity>(value).entity;
+      if (is_consteval(entity)) return entity;
+    } else if (ins().values.is<ast::VLvalue>(value)) {
+      return immediate_result_entity(ins().values.get<ast::VLvalue>(value).base);
+    } else if (ins().values.is<ast::VAggregate>(value)) {
+      for (const auto element : ins().seqs.elements(ins().values.get<ast::VAggregate>(value).elems))
+        if (auto entity = immediate_result_entity(element)) return entity;
+    }
+    return std::nullopt;
+  }
+
   // An immediate function may be named within an immediate invocation ([expr.const]). Wait
   // until the completed tree, where a folded invocation no longer contains the address operand.
   void check_immediate_addresses(NodeId root, u32 offset = 0) {
