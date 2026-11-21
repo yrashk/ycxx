@@ -9,10 +9,15 @@ struct Shelf {
   int level;
 };
 
+struct Parcel {
+  int weight;
+};
+
 namespace std {
 template<class T> struct tuple_size;
 template<> struct tuple_size<Crate> {};
 template<> struct tuple_size<Shelf>;
+template<> struct tuple_size<Parcel> { static constexpr unsigned value = 1; };
 }
 
 int main() {
@@ -32,4 +37,8 @@ int main() {
   Shelf shelf{41};
   auto& [level] = shelf;
   if (&level != &shelf.level || level != 41) return 6;
+
+  Parcel parcel{43};
+  const auto& [weight] = parcel;
+  if (&weight != &parcel.weight || weight != 43) return 7;
 }

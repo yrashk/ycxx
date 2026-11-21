@@ -13,5 +13,5 @@ template<> class tuple_size<Crate> {
 }
 
 void bind(Crate& crate) {
-  auto& [tag, bins, mark] = crate; //! error
+  auto& [tag, bins] = crate; //! error
 }

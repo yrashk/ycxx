@@ -11,6 +11,12 @@ Reading& load(Reading& reading) {
   return reading;
 }
 
+struct ExplicitCopy {
+  int value;
+  explicit ExplicitCopy(int initial) : value(initial) {}
+  explicit ExplicitCopy(const ExplicitCopy& source) : value(source.value + 1) {}
+};
+
 int main() {
   Reading reading{17, 29};
 
@@ -35,4 +41,9 @@ int main() {
   if (loads != 4 || list_low != 31 || list_high != 53) return 7;
   list_high = 59;
   if (reading.high != 53 || list_high != 59 || loads != 4) return 8;
+
+  ExplicitCopy initial(61);
+  auto [direct_value](initial);
+  auto [list_value]{initial};
+  if (direct_value != 62 || list_value != 62 || initial.value != 61) return 9;
 }
