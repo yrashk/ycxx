@@ -299,19 +299,28 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
   TranslationUnit tu;
   tu.name = std::move(name);
   // Native compilation may consume peer-owned Linux objects with supported virtual
-  // declarations. None of these classes can provide their own virtual table here.
+  // declarations, including one non-key definition. The key function and table stay in the peer.
   const auto& classes = program.classes();
-  auto declaration_only_member = [&](EntityId f) -> std::optional<ast::DeclSema> {
-    // A key function may be defined outside its class. A written in-class declaration
-    // cannot establish that the translation unit is only a consumer.
-    if (program.function_defined_before(f, program.end())) return std::nullopt;
+  EntityId defined_nonkey = EntityId::none;
+  auto peer_member_declaration = [&](EntityId f) -> std::optional<ast::DeclSema> {
+    // Inspect all definitions at the end of the unit, including a key written after the
+    // supported definition. A derived consumer may ask about the same root again.
+    if (program.function_defined_before(f, program.end())) {
+      const auto def = program.declaration(f, program.end());
+      const auto* owner = classes.find(world.entities.rec(f).scope);
+      if (!def || !def->is_virtual || !(def->flags & sema::decl_flag::definition) ||
+          (def->flags & (sema::decl_flag::inline_ | sema::decl_flag::deleted)) ||
+          !owner || !sema::native_virtual_nonkey_member(*owner, f) ||
+          (defined_nonkey != EntityId::none && defined_nonkey != f)) return std::nullopt;
+      defined_nonkey = f;
+    }
     const auto d = program.member_decl(f);
     return d ? program.decl_sema(*d) : std::nullopt;
   };
   for (EntityId c : classes.classes()) {
     const auto& record = classes.rec(c);
     if (!record.layout_requires_virtual_support ||
-        sema::native_virtual_consumer(record, classes, world.types, declaration_only_member))
+        sema::native_virtual_consumer(record, classes, world.types, peer_member_declaration))
       continue;
     block_virtual_emission(tu, program, record);
     return tu;
