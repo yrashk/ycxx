@@ -6511,8 +6511,10 @@ public:
     }
     Ex pointer = rvalue(operand);
     if (!pointer.ok()) return fail;
+    const EntityId f = w_->allocation_function(AllocationFunction::deallocate, /*array=*/true).entity;
+    q_->use_allocation_function(f);
     ExprInfo info{v, ValueCategory::prvalue, 0};
-    return node(ast::DeleteArray{info, at(pointer, begin)}, begin, end, info);
+    return node(ast::DeleteArray{info, f, at(pointer, begin)}, begin, end, info);
   }
 
   bool scalar_allocation_type(QualType t) {

@@ -2792,8 +2792,12 @@ and runtime integration with ycxx's own linker remain under [#89]. See the
 - Syntax checking supports one-dimensional `new T[n]` and `delete[] p` for integral and ordinary
   pointer elements ([expr.new], [expr.delete]). The bound converts to `size_t`. A potentially
   evaluated constant bound can be zero and must keep the object size within the positive range
-  of `ptrdiff_t`. The array AST retains default or empty initialization and the typed delete
-  operand. Native lowering and constant evaluation of these operations remain in #293.
+  of `ptrdiff_t`. The array AST retains default or empty initialization and the typed delete operand.
+  On Linux x86-64, array deletion evaluates that operand once and passes the original address to
+  the usual unsized `operator delete[](void*)` when non-null. The call releases the allocation,
+  including zero-length arrays. Native array allocation and broader deletion remain in #293.
+  Constant-evaluated allocation and deletion are tracked in #321.
+  [Cookie-free deletion](docs/design/cookie-free-array-delete.md)
   A file-scope scalar initializer still needs lowered code to qualify for dynamic initialization.
   Type checking covers function-local expressions and unevaluated operands.
 
