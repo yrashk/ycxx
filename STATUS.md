@@ -1705,7 +1705,9 @@ session's.*
   nested-name-specifiers and wherever a class template-id may be) is the type it stands for with
   the arguments substituted, so it has no identity or mangling of its own; packs group as for
   class templates. `Templates::complete_class` completes a class that substituting
-  `typename X<T>::type` needs, instantiating a specialization.
+  `typename X<T>::type` needs, instantiating a specialization. A terminal namespace-qualified
+  alias specialization such as `N::A<T>` stays a type argument when its expansion is a dependent
+  member type ([temp.arg.general], #630).
 - Tests: `tests/own/templates/a5-*`; 2 more draft examples pass. `<cstdio>`: 78 → 53 errors.
 - Also: `C::T` inside the class (being defined or instantiated) and in its out-of-class member
   definitions names its member type, as the current instantiation's ([temp.dep.type]/1).
