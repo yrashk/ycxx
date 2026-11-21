@@ -293,6 +293,85 @@ void block_virtual_emission(TranslationUnit& unit, parse::Program& program, cons
     if (auto d = program.member_decl(member->entity)) unit.virtual_declaration = ast::Loc{d->item, 0};
 }
 
+bool unwind_scalar(const sema::Types& types, QualType type, bool allow_void = false) {
+  const auto t = types.rec(type);
+  if (t.kind == sema::TypeKind::pointer || t.kind == sema::TypeKind::enum_) return true;
+  if (t.kind != sema::TypeKind::builtin) return false;
+  using B = ast::Builtin;
+  return ast::is_integral(t.builtin) || t.builtin == B::float_ || t.builtin == B::double_ ||
+         t.builtin == B::nullptr_t || (allow_void && t.builtin == B::void_);
+}
+
+bool unwind_scalar_prototype(const sema::Types& types, QualType type) {
+  const auto f = types.rec(type);
+  return f.kind == sema::TypeKind::function && !f.variadic && f.fn_cv == sema::Cv::none &&
+         f.fn_ref == ast::RefQual::none && unwind_scalar(types, f.inner, true) &&
+         std::ranges::all_of(f.params, [&](QualType t) { return unwind_scalar(types, t); });
+}
+
+// Prove a subset of the typed tree. Class and temporary lifetimes, static initialization, calls
+// with separately analysed default arguments, and any unfamiliar operation need their own proof.
+using UnwindNodes = ast::closed_list<
+    ast::Compound, ast::Return, ast::ExprStmt, ast::If, ast::While, ast::Do, ast::For, ast::Break,
+    ast::Continue, ast::DeclStmt, ast::LocalVar, ast::CondDecl, ast::Switch, ast::Case, ast::Default,
+    ast::Label, ast::Goto, ast::Literal, ast::DeclRef, ast::LocalRef, ast::Paren, ast::Unary,
+    ast::Binary, ast::OrderedBinary, ast::Assign, ast::Conditional, ast::Subscript, ast::Call,
+    ast::ImplicitConversion, ast::InitList, ast::ValueInit, ast::DefaultInit>;
+
+bool unwind_body_node(parse::Program& program, ast::NodeId node) {
+  if (node == ast::NodeId::none) return true;
+  auto& world = program.world();
+  const auto& tree = world.ins.ast;
+  return ast::dispatch<ast::Nodes>(ast::kind_of(node), [&]<class T>(std::type_identity<T>) {
+    if constexpr (!UnwindNodes::contains<T>) {
+      return false;
+    } else {
+      const T n = tree.get<T>(node);
+      if constexpr (std::is_same_v<T, ast::DeclRef>) {
+        if (n.reference || (!unwind_scalar(world.types, n.info.type) &&
+                            !unwind_scalar_prototype(world.types, n.info.type))) return false;
+      } else if constexpr (requires { n.info; }) {
+        if (!unwind_scalar(world.types, n.info.type, true)) return false;
+      }
+      if constexpr (std::is_same_v<T, ast::LocalVar>) {
+        if (n.destructor != EntityId::none) return false;
+      } else if constexpr (std::is_same_v<T, ast::Call>) {
+        if (n.function == EntityId::none || n.callee.id == ast::NodeId::none ||
+            !tree.is<ast::DeclRef>(n.callee.id) || tree.get<ast::DeclRef>(n.callee.id).entity != n.function)
+          return false;
+        const auto& f = world.entities.rec(n.function);
+        if (f.kind != sema::EntityKind::function || f.templ != EntityId::none || !program.is_namespace(f.scope) ||
+            !unwind_scalar_prototype(world.types, tree.get<ast::DeclRef>(n.callee.id).info.type)) return false;
+      } else if constexpr (std::is_same_v<T, ast::ImplicitConversion>) {
+        if (n.function != EntityId::none || n.conversion == ast::ConversionKind::user_defined) return false;
+      }
+      bool safe = true;
+      ast::for_each_ref(n, [&]<class H>(const H& h) {
+        if constexpr (std::is_same_v<H, ast::NodeId>) safe = safe && unwind_body_node(program, h);
+        else if constexpr (std::is_same_v<H, ast::ChildList>)
+          for (ast::Child c : tree.children(h)) safe = safe && unwind_body_node(program, c.id);
+      });
+      return safe;
+    }
+  });
+}
+
+bool cleanup_free_definition(parse::Program& program, const ast::DeclSema& d, const ast::BodySema& body) {
+  auto& world = program.world();
+  if (!unwind_scalar_prototype(world.types, d.type) || world.types.rec(d.type).fn_noexcept ||
+      d.contracts != ast::NodeId::none || body.tree == ast::NodeId::none || world.ins.seqs.size(body.closures) != 0)
+    return false;
+  const auto& entity = world.entities.rec(d.entity);
+  if (entity.kind != sema::EntityKind::function || entity.templ != EntityId::none || !program.is_namespace(entity.scope) ||
+      (entity.linkage != ast::Linkage::external && entity.linkage != ast::Linkage::internal) ||
+      sema::is_allocation_name(world.ins.names.spelling(entity.name))) return false;
+  if (!std::ranges::all_of(world.ins.seqs.elements(body.locals), [&](const ast::LocalRec& local) {
+        return local.entity == EntityId::none && unwind_scalar(world.types, local.type) &&
+               (local.decl == ast::NodeId::none || world.ins.ast.is<ast::LocalVar>(local.decl));
+      })) return false;
+  return unwind_body_node(program, body.tree);
+}
+
 // The definitions and declarations of the global namespace, in item order.
 TranslationUnit unit_of(parse::Program& program, sema::World& world, const items::Items& items, std::string name) {
   ast::Interners& ins = world.ins;
@@ -328,6 +407,7 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
   const bool linux = world.target.triple == ast::x86_64_linux.triple;
   std::set<std::uint32_t> seen;
   std::set<EntityId> inline_declarations;
+  std::set<EntityId> noexcept_declarations;
   std::vector<Dynamic> dynamic;
   // The type from the declaration, not the entity's record: a variable's type is not part of its
   // identity, so a record made before an edit may hold the old one (#115).
@@ -355,6 +435,7 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
     if (linux && (d.flags & sema::decl_flag::inline_) &&
         (d.kind == ast::DeclKind::function || d.kind == ast::DeclKind::variable))
       inline_declarations.insert(e);
+    if (linux && d.kind == ast::DeclKind::function && d.has_written_noexcept) noexcept_declarations.insert(e);
     if (!seen.insert(std::to_underlying(e)).second) return;
     const sema::EntityRec& r = world.entities.rec(e);
     if (r.kind == sema::EntityKind::class_ || r.kind == sema::EntityKind::data_member || r.kind == sema::EntityKind::type_alias ||
@@ -473,6 +554,11 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
                                     entity.linkage == ast::Linkage::external && entity.templ == EntityId::none &&
                                     tu.main != d.entity && ins.seqs.size(body.closures) == 0 &&
                                     program.asm_label(d.entity).empty();
+      // A written ordinary body starts at '{'. Other starts include a function-try-block and a
+      // constructor initializer. Synthetic bodies and instantiations never enter this path.
+      if (linux && !member && tu.main != d.entity && !it.specialization &&
+          program.region().tokens[it.body_begin].kind == lex::Tk::l_brace)
+        tu.functions.back().cleanup_free_unwind = cleanup_free_definition(program, d, body);
       closures_of(body.closures, program.id(k), it.body_begin - it.begin);
       continue;
     }
@@ -560,7 +646,13 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
     tu.functions.push_back({s.decl.entity, s.decl, program.synthesized_body(i), program.id(s.item), 0, program.this_type(s.decl)});
     tu.functions.back().weak_elf = linux && s.kind == parse::Program::SpecialMember::copy_assignment && !internal_class(cls);
   }
-  for (FunctionDef& f : tu.functions) static_locals(world, tu, f, runtime);
+  for (FunctionDef& f : tu.functions) {
+    static_locals(world, tu, f, runtime);
+    // Check the complete unit by entity, including later redeclarations and qualified friends.
+    if (f.cleanup_free_unwind)
+      f.cleanup_free_unwind = !noexcept_declarations.contains(f.entity) && !inline_declarations.contains(f.entity) &&
+                              !f.weak_elf && f.guards.empty() && program.asm_label(f.entity).empty();
+  }
   // Written declarations have already supplied their locations and definitions. For the
   // remaining implicit declarations, a code reference alone emits an undefined symbol.
   for (EntityId e : program.implicit_allocation_functions()) {

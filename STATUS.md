@@ -632,6 +632,18 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   accepts the supported x86-64 `ET_REL` subset emitted by ycxx. The native ELF linker consumes
   the same in-memory objects, resolves absolute and PC-relative relocations, and writes a static
   `ET_EXEC` image with load segments and a non-executable stack.
+- A hosted peer's exception can unwind through cleanup-free ycxx functions on x86-64 Linux.
+  The compiler certifies ordinary strong definitions with fixed scalar signatures using all
+  resolved declarations and the typed body. It tracks written exception specifications across
+  redeclarations and records the AMD64 frame state at the actual prologue and epilogue offsets.
+  ELF `.eh_frame` records use PC-relative references to local code anchors. The native
+  freestanding linker retains these records in the read-only segment. The hosted linker
+  supplies unwind discovery for the peer who throws and catches the exception.
+  `unit.linux_cleanup_free_unwind` checks mixed hosted execution, omitted frames, and native
+  source, staged, and daemon link parity. Standalone unwind discovery and ycxx generation of
+  native throws, handlers, and exceptional cleanups remain tracked separately.
+  [#572](https://github.com/yrashk/ycxx/issues/572) · [#89](https://github.com/yrashk/ycxx/issues/89)
+  · [#558](https://github.com/yrashk/ycxx/issues/558)
 - Explicit native static links keep the first input ELF COMDAT group for each signature. The reader
   validates group membership, including relocation sections, and selection precedes startup and
   layout. `unit.linux_elf_comdat` checks whole-group selection, retained references, startup and
@@ -2368,8 +2380,8 @@ A throw-expression has type `void`, keeps its operand in the semantic tree, and
 supports rethrow syntax. Scalar and pointer operands are checked after the applicable
 decay conversions. Conditional expressions preserve the other arm's type and value
 category when one arm is a throw-expression. Class exception construction, native
-emission, and evaluation of a reached throw still have explicit diagnostics. Runtime
-exception objects, handlers, and unwinding remain under #89.
+emission, and evaluation of a reached throw still have explicit diagnostics. Native
+exception objects, handlers, and exceptional cleanups remain under #89.
 
 ## Statements, ι step 1: `switch`, labels, `goto`, conditions (#337, 2026-11-19)
 

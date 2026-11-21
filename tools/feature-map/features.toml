@@ -2227,8 +2227,9 @@ group = 'except'
 clauses = ['except', 'except.pre', 'except.throw', 'except.ctor', 'except.handle', 'except.special', 'except.special.general', 'except.terminate', 'expr.throw']
 std = 'C++98'
 detect = '\bthrow\b|\btry\b|\bcatch\s*\('
-status = 'missing'
-issues = [89, 72]
+status = 'partial'
+issues = [89, 72, 572]
+note = 'throw and block try/catch syntax, plus hosted unwinding through eligible cleanup-free Linux x86-64 frames'
 probe = '''
 int d = 0; struct G { ~G() { ++d; } };
 int f() { G g; throw 3; }
