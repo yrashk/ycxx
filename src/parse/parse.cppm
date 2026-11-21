@@ -72,14 +72,16 @@ bool layout_attribute(const pp::Region& region, u32 begin, u32 end, LayoutAttrib
       else if (unscoped && part.kind == r_paren && parentheses) --parentheses;
       else if (part.kind == identifier) {
         auto name = region.name(part);
-        if (name.size() > 4 && name.starts_with("__") && name.ends_with("__"))
-          name = name.substr(2, name.size() - 4);
         if (!standard_attribute.empty()) {
           const auto previous = region.tokens[i - 1].kind;
+          const auto following = i + 1 < end ? region.tokens[i + 1].kind : eof;
           if (unscoped && depth == 2 && parentheses == 0 &&
-              (previous == l_square || previous == comma) && name == standard_attribute) return true;
+              (previous == l_square || previous == comma) &&
+              (following == r_square || following == comma) && name == standard_attribute) return true;
           continue;
         }
+        if (name.size() > 4 && name.starts_with("__") && name.ends_with("__"))
+          name = name.substr(2, name.size() - 4);
         if (name == "packed" || name == "aligned" || name == "mode" || name == "vector_size" ||
             name == "no_unique_address" || name == "ms_struct" || name == "gcc_struct") return true;
       }
