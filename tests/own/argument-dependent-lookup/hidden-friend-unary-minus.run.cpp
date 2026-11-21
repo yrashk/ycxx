@@ -18,11 +18,35 @@ class FriendWins {
 };
 }
 
+namespace base {
+struct A {};
+int operator-(A&) { return 21; }
+
+struct Member {
+    int operator-() const { return 23; }
+};
+}
+namespace derived {
+struct Value : base::A {
+    friend int operator-(const base::A&) { return 22; }
+};
+struct PrivateBase : private base::Member {
+    friend int operator-(PrivateBase&) { return 24; }
+};
+struct Rvalue {
+    int operator-() const && { return 25; }
+    friend int operator-(const Rvalue&) { return 26; }
+};
+}
+
 int main() {
     numbers::Value value{42};
     member_competition::MemberWins member;
     member_competition::FriendWins nonmember;
+    derived::Value derived_value;
+    derived::PrivateBase private_base;
     int builtin = 7;
     return -numbers::Value{42} == -42 && -value == 43 &&
-           -member == 11 && -nonmember == 14 && -builtin == -7 ? 0 : 1;
+           -member == 11 && -nonmember == 14 && -builtin == -7 &&
+           -derived_value == 21 && -private_base == 24 && -derived::Rvalue{} == 25 ? 0 : 1;
 }
