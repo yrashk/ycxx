@@ -1687,6 +1687,7 @@ private:
     return ins().intern_value(ast::VDepOp{ast::DepOp::logical_not, ins().intern_seq(std::span<const TemplateArg>(operands))});
   }
 
+public:
   // Unsupported dependent constructs can still be re-parsed in a template body. Their
   // stand-ins carry no expression identity and must not become operands of an interned value.
   bool structural_operand(QualType t) {
@@ -1712,6 +1713,7 @@ private:
     default: return true;
     }
   }
+private:
   bool structural_operand(const TemplateArg& a) {
     if (a.kind == TemplateArgKind::pack)
       return std::ranges::all_of(elements(a), [&](const TemplateArg& e) { return structural_operand(e); });

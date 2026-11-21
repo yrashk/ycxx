@@ -235,6 +235,7 @@ inline constexpr u8 dependent = 1;
 inline constexpr u8 immediate_address = 2;  // checked after immediate invocations are folded
 inline constexpr u8 unrepresented_value = 4;  // this expression has no usable ConstId for a template argument
 inline constexpr u8 deferred_decay_copy = 8;  // a decay-copy still needs function body replay
+inline constexpr u8 type_dependent = 16;  // the producer proved dependence even without a structural type
 }
 
 // Flags of `LocalRec::flags` and `DeclSema::flags`.
@@ -2472,6 +2473,12 @@ public:
   }
   bool dependent(const Ex& e) {
     return e.ok() && ((e.info.flags & expr_flag::dependent) || types().is_dependent(e.type()));
+  }
+  // `Builtin::dependent` also stands in for types of expressions whose values alone depend on
+  // a template argument. Only a structural type or its expression's producer proves dependence.
+  bool has_proven_dependent_type(const Ex& e) {
+    return (e.info.flags & expr_flag::type_dependent) ||
+           (types().is_dependent(e.type()) && templates().structural_operand(e.type()));
   }
   bool dependent(const TemplateArg& a) {
     return w_->arg_dependent(a);
@@ -5861,10 +5868,11 @@ public:
         // [temp.deduct.call]: decay the operand's type without evaluating or converting it.
         std::optional<QualType> type;
         if (!types().is_dependent(operand.type())) type = ast::adjust_parameter(ins(), types().canonical(operand.type()));
-        if (!type || supported(*type)) {
+        if (type ? supported(*type) : has_proven_dependent_type(operand)) {
           // The tokens will be replayed. This node supplies no canonical template argument value.
-          return dependent_node({operand}, begin, end, type, ValueCategory::prvalue,
-                                expr_flag::unrepresented_value | expr_flag::deferred_decay_copy);
+          u8 flags = expr_flag::unrepresented_value | expr_flag::deferred_decay_copy;
+          if (!type) flags |= expr_flag::type_dependent;
+          return dependent_node({operand}, begin, end, type, ValueCategory::prvalue, flags);
         }
       }
     } else {
@@ -7166,9 +7174,16 @@ public:
     using enum ast::UnaryOp;
     if (!e.ok()) return {NodeId::none, begin, end};
     if (dependent(e)) {
-      if (op != not_) return dependent_node({e}, begin, end);
-      ExprInfo info{builtin(Builtin::dependent), ValueCategory::prvalue, expr_flag::dependent};
-      return node(ast::Unary{info, op, at(e, begin)}, begin, end, info);
+      if (op == not_) {
+        const u8 flags = expr_flag::dependent | (e.info.flags & expr_flag::deferred_decay_copy);
+        ExprInfo info{builtin(Builtin::dependent), ValueCategory::prvalue, flags};
+        return node(ast::Unary{info, op, at(e, begin)}, begin, end, info);
+      }
+      // [temp.dep.expr]: for a genuinely type-dependent operand, even selecting the increment
+      // operator can require replay. The result need not have the operand's type.
+      const bool increment = op == pre_inc || op == pre_dec || op == post_inc || op == post_dec;
+      const u8 flags = increment && has_proven_dependent_type(e) ? expr_flag::type_dependent : 0;
+      return dependent_node({e}, begin, end, std::nullopt, ValueCategory::prvalue, flags);
     }
     static constexpr std::string_view unary_spellings[] = {"+", "-", "!", "~", "*", "&", "++", "--", "", ""};
     if (std::string_view sp = unary_spellings[std::to_underlying(op)]; !sp.empty())
