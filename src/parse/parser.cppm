@@ -3396,7 +3396,9 @@ public:
       do args.push_back(assignment_expression());
       while (accept(Tk::comma));
     if (!expect(Tk::r_paren)) return {NodeId::none, begin, pos()};
-    Ex r = s_->functional_cast(t, std::move(args), begin, pos());
+    const bool lambda_result = lambda_result_operand_ == begin && is(Tk::semi);
+    Ex r = lambda_result ? s_->lambda_result_cast(t, std::move(args), begin, pos())
+                        : s_->functional_cast(t, std::move(args), begin, pos());
     return {r.id, begin, pos(), r.info};
   }
 
@@ -4736,7 +4738,12 @@ public:
         return {NodeId::none, begin, pos()};
       }
       std::optional<Ex> e;
-      if (!is(Tk::semi)) e = expression();
+      if (!is(Tk::semi)) {
+        const auto operand = s_->checks_lambda_result_expression() ? std::optional(pos()) : std::nullopt;
+        auto outer = std::exchange(lambda_result_operand_, operand);
+        e = expression();
+        lambda_result_operand_ = outer;
+      }
       auto t = s_->deduce_return(e ? &*e : nullptr, e ? e->begin : begin);
       if (!t || (e && !e->ok())) {
         skip_to_semi();
@@ -4745,7 +4752,7 @@ public:
       rt = *t;
       if (e && s_->types().is_void(rt)) value = *e;
       else if (e && s_->types().is_reference(rt)) value = s_->bind_reference(*e, rt, e->begin);
-      else if (e) value = s_->convert(*e, rt, e->begin);
+      else if (e) value = s_->init_deduced_return(*e, rt);
       if (!expect(Tk::semi)) skip_to_semi();
       return s_->node(ast::Return{sema::Sema::at(value, begin)}, begin, pos());
     }
@@ -5193,6 +5200,7 @@ public:
   bool substituting_partial_arguments = false;
 private:
   std::optional<u32> address_op_;  // the token of an explicit unary `&`
+  std::optional<u32> lambda_result_operand_;  // first token of a deducing lambda's return operand
 };
 
 }  // namespace ycxx::parse
