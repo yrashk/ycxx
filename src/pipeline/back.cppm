@@ -103,7 +103,14 @@ struct Entity {
   EntityId local_function = EntityId::none;
   std::uint32_t discriminator = 0;
   bool guard = false;
+  // The mangled parameter types tie this ordinary C++ function to the unit (#582).
+  bool local_parameter_binding = false;
+
+  bool has_local_binding() const { return linkage == ast::Linkage::internal || local_parameter_binding; }
 };
+
+// Certified on the typed definition, before IR drops lifetime information.
+enum class UnwindEligibility : std::uint8_t { none, cleanup_free, cleanup_free_with_throw };
 
 // A function definition: what `function_ir(F)` reads (irgen::FunctionInput, without a thunk's
 // locals).
@@ -119,7 +126,7 @@ struct FunctionDef {
   std::vector<irgen::FunctionInput::StaticGuard> guards{};
   EntityId guard_acquire = EntityId::none, guard_release = EntityId::none, atexit = EntityId::none, dso = EntityId::none;
   bool weak_elf = false;  // an ordinary external inline definition in the GNU ELF subset (#422)
-  bool cleanup_free_unwind = false;  // certified on the typed definition, before IR drops lifetime information
+  UnwindEligibility unwind = UnwindEligibility::none;
 };
 
 // A variable definition at namespace scope with its constant initializer, or `ConstId::none` for
@@ -176,6 +183,7 @@ struct TranslationUnit {
   bool front_failed = false;           // the front end reported errors: nothing to compile
   bool virtual_emission_blocked = false;
   std::optional<ast::Loc> virtual_declaration;
+  std::optional<ir::IntThrowRuntime> int_throw;
 };
 
 // What failed, at a location in an item when there is one. Every error here is something the α
@@ -1159,6 +1167,7 @@ engine::query_task<Lowered> Lower::run(engine::Ctx& cx, FnKey k) {
       co_return Lowered{std::nullopt, {}, std::move(located)};
     }
     config.sysv_amd64 = true;
+    if (def.unwind == UnwindEligibility::cleanup_free_with_throw) config.int_throw = tu.int_throw;
     // Extend outgoing narrow results for interoperability. Lowering truncates incoming results
     // to the declared width, as the System V AMD64 psABI §3.2.3 leaves excess bits unspecified.
     config.min_result_bits = 32;
@@ -1196,7 +1205,7 @@ struct SymbolAddresses {
 };
 
 // ELF default-visible symbols can be preempted, so their addresses use the GOT.
-// Internal definitions can use the symbol itself in a direct displacement.
+// Local definitions can use the symbol itself in a direct displacement.
 struct TuSymbolAddresses {
   using Key = TuId;
   using Value = SymbolAddresses;
@@ -1207,7 +1216,7 @@ struct TuSymbolAddresses {
     auto add = [&](EntityId id) {
       if (linux) {
         auto e = std::ranges::find(u.entities, id, &Entity::id);
-        if (e == u.entities.end() || e->linkage != ast::Linkage::internal) return;
+        if (e == u.entities.end() || !e->has_local_binding()) return;
       }
       out.direct.push_back(id);
     };
@@ -1215,7 +1224,7 @@ struct TuSymbolAddresses {
     for (const Variable& v : u.variables) add(v.entity);
     if (linux) {
       for (const Entity& e : u.entities)
-        if (e.linkage == ast::Linkage::external || e.linkage == ast::Linkage::module)
+        if (!e.has_local_binding() && (e.linkage == ast::Linkage::external || e.linkage == ast::Linkage::module))
           out.got.push_back(e.id);
       std::ranges::sort(out.got);
     }
@@ -1596,9 +1605,14 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
       errors.push_back({e.at, std::format("the name of '{}': {} is not supported yet", e.name, name.error())});
       continue;
     }
+    if (e.local_parameter_binding && !std::ranges::contains(tu.functions, e.id, &FunctionDef::entity)) {
+      errors.push_back({e.at, std::format("function '{}' names a translation-unit-local type in a parameter "
+                                         "and must be defined in this translation unit", e.name)});
+      continue;
+    }
     mangled.emplace(ir::raw(e.id), *name);  // before an asm label: what its statics' names begin with
     if (!e.asm_label.empty()) name = e.asm_label;
-    symbols.push_back({e.id, std::move(*name), e.linkage == ast::Linkage::internal ? obj::binding::local : obj::binding::global});
+    symbols.push_back({e.id, std::move(*name), e.has_local_binding() ? obj::binding::local : obj::binding::global});
   }
   // A static local and its guard: `_ZZ <encoding> E <name> [_<n>]` and `_ZGV` before it, the
   // function's own <encoding> taken from its symbol (Itanium C++ ABI §5.1.6, §5.1.4.6).
@@ -1631,8 +1645,10 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
   auto o = [&] {
     if (linux) {
       std::vector<LinuxFunction> code;
-      for (std::size_t i = 0; i < fns.size(); ++i)
-        code.push_back({fns[i].fn, &*ms[i].get().linux_code, tu.functions[i].weak_elf, tu.functions[i].cleanup_free_unwind});
+      for (std::size_t i = 0; i < fns.size(); ++i) {
+        const auto& def = tu.functions[i];
+        code.push_back({fns[i].fn, &*ms[i].get().linux_code, def.weak_elf, def.unwind != UnwindEligibility::none});
+      }
       return assemble_linux(tu.name, code, data, symbols, weak_variables);
     }
     std::vector<aarch64::CompiledFunction> code;

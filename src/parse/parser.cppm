@@ -577,10 +577,11 @@ public:
         u32 at = pos();
         if (qualified_ahead(1)) {
           bump();
+          const std::size_t diags = s_->diag_count();
           auto q = qualified_type(0, /*checked=*/true, /*type_only=*/true);
           if (!q || !s_->types().is_class(q->first) || s_->is_union_type(q->first) != (k == Tk::kw_union) ||
               any_type()) {
-            s_->diag(at, Diag::expected_type_specifier);
+            if (s_->diag_count() == diags) s_->diag(at, Diag::expected_type_specifier);
             d.ok = false;
             goto done;
           }
@@ -604,9 +605,10 @@ public:
           d.ok = false;
           continue;
         }
+        const std::size_t diags = s_->diag_count();
         if (!t && declare_class) t = declare_class(n, k, name_at);
         if (!t) {
-          s_->diag(at + 1, Diag::not_a_type, n);
+          if (s_->diag_count() == diags) s_->diag(at + 1, Diag::not_a_type, n);
           d.ok = false;
         } else if (any_type()) {
           s_->diag(at, Diag::conflicting_specifiers, k);
@@ -800,8 +802,13 @@ public:
                         bool reject_parameter_defaults = false) {
     Declarator d;
     d.begin = pos();
+    const std::size_t first_local = s_->locals().size();
+    const bool in_body = s_->current_function != ast::EntityId::none;
     Level top = level(abstract, d.ok, conversion);
-    if (conversion && !top.conversion_target) return d;
+    if (conversion && !top.conversion_target) {
+      if (in_body) s_->discard_local_declarations(first_local);
+      return d;
+    }
     const Suffix* fn = nullptr;
     d.type = build(top, top.conversion_target.value_or(base), fn, d, abstract || typedef_, named_exception);
     const bool spelled_unknown_bound = std::exchange(d.unknown_bound, false);
@@ -844,6 +851,12 @@ public:
         d.asm_label = asm_label(d.ok);
         skip_attributes();
       }
+    }
+    // Prototype names support type and constant-expression checking inside this
+    // declarator. They have no storage in the enclosing function's body.
+    if (in_body) {
+      s_->discard_local_declarations(first_local);
+      d.noexcept_condition.reset();
     }
     return d;
   }
@@ -1057,8 +1070,16 @@ public:
     return type;
   }
 
-  static sema::AllocationFunction allocation_operator(Tk k) {
-    return k == Tk::kw_new ? sema::AllocationFunction::allocate : sema::AllocationFunction::deallocate;
+  // The allocation operator's keyword and optional empty brackets follow `operator`.
+  std::string_view allocation_operator_name() {
+    const auto f = is(Tk::kw_new) ? sema::AllocationFunction::allocate : sema::AllocationFunction::deallocate;
+    bump();
+    const bool array = is(Tk::l_square) && kind(1) == Tk::r_square;
+    if (array) {
+      bump();
+      bump();
+    }
+    return sema::allocation_name(f, array);
   }
 
   Level level(bool abstract, bool& ok, bool conversion = false) {
@@ -1107,8 +1128,7 @@ public:
       l.named = true;
       skip_attributes();
     } else if (!abstract && is(Tk::kw_operator)) {
-      // An operator-function-id ([over.oper.general]): `operator@`, named as the splitter spells
-      // it. Only the ordinary global single-object forms of the allocation operators are supported.
+      // An operator-function-id ([over.oper.general]): `operator@`, named as the splitter spells it.
       l.name_at = pos();
       bump();
       std::string spelled = "operator";
@@ -1117,13 +1137,7 @@ public:
         bump();
         bump();
       } else if (is(Tk::kw_new) || is(Tk::kw_delete)) {
-        spelled = sema::allocation_name(allocation_operator(kind()));
-        if (kind(1) == Tk::l_square && kind(2) == Tk::r_square) {
-          s_->diag(pos(), Diag::not_supported, kind());  // operator new[] and operator delete[]
-          ok = false;
-          return l;
-        }
-        bump();
+        spelled = allocation_operator_name();
       } else if (lex::is_punctuator(kind()) && overloadable(kind())) {
         spelled += lex::spelling(kind());
         bump();
@@ -1175,20 +1189,21 @@ public:
         suffix.ref_at = pos();
         if (accept(Tk::amp)) suffix.ref = ast::RefQual::lvalue;
         else if (accept(Tk::ampamp)) suffix.ref = ast::RefQual::rvalue;
-        exception_specifier(suffix, ok);
-        // A trailing return type ([dcl.fct]/2), with the parameters in scope ([basic.scope.param]).
-        if (is(Tk::arrow)) {
-          bump();
+        // Parameter scope includes the exception specification and trailing return type
+        // ([basic.scope.param]). Bind the adjusted types from the parameter list.
+        if (is(Tk::kw_noexcept) || is(Tk::arrow)) {
           s_->push_scope();
-          for (const Param& p : l.suffixes.back().params)
+          for (const Param& p : suffix.params)
             if (p.name != s_->no_name()) s_->declare_local(p.name, p.type, sema::local_flag::parameter, p.at, false);
-          auto t = type_id(true);
+          exception_specifier(suffix, ok);
+          const bool has_trailing = accept(Tk::arrow);
+          if (has_trailing)
+            suffix.trailing = type_id(true);
           s_->pop_scope();
-          if (!t) {
+          if (has_trailing && !suffix.trailing) {
             ok = false;
             return l;
           }
-          l.suffixes.back().trailing = *t;
         }
         // Dynamic exception specifications and repeated qualifiers are unsupported.
         if (is(Tk::amp) || is(Tk::ampamp) || is(Tk::kw_noexcept) || is(Tk::kw_throw) || is(Tk::arrow)) {
@@ -1367,7 +1382,11 @@ public:
     auto injected = s_->qualified_injected_type(*s, name, at, type_only);
     if (injected.found)
       return injected.type ? std::optional{std::pair{*injected.type, next + 1 - start}} : std::nullopt;
-    if (type_only) return std::nullopt;
+    if (type_only) {
+      if (!s->ns) return std::nullopt;
+      auto t = s_->namespace_elaborated_class(*s->ns, name, at);
+      return t ? std::optional{std::pair{*t, next + 1 - start}} : std::nullopt;
+    }
     auto t = s_->scope_type(*s, name);
     if (!t) return std::nullopt;
     if (checked) check_type_access(*s, name, *at);
@@ -1493,10 +1512,12 @@ public:
         bool allocation = sema::is_allocation_name(name);
         // [basic.stc.dynamic.deallocation]: a deallocation function without an explicit
         // exception specification is non-throwing.
-        bool nonthrowing = name == sema::allocation_name(sema::AllocationFunction::deallocate) && !s->has_noexcept;
+        bool nonthrowing = sema::is_deallocation_name(name) && !s->has_noexcept;
         const bool keep_named_exception = named_exception == NamedExceptionSpec::defaulted_assignment && name == "operator=";
         if (s->has_noexcept && (allocation || keep_named_exception || member_pointer_to_suffix(l) ||
                                 (spells_type && !l.inner)))
+          nonthrowing = noexcept_value(s->noexcept_condition, d.ok);
+        else if (d.ok && s->has_noexcept && !s_->templated())
           nonthrowing = noexcept_value(s->noexcept_condition, d.ok);
         t = s_->types().function(t, ps, s->variadic, linkage_, s->cv, s->ref, nonthrowing);
         fn = &*s;
@@ -2135,7 +2156,7 @@ public:
     if (!c.ok()) return std::nullopt;
     sema::Evaluated v = sema::Evaluator(*s_, questions()).evaluate(c);
     if (!v.value) {
-      s_->diag(e.begin, Diag::not_constant, v.reason);
+      if (!v.copyability_failure) s_->diag(e.begin, Diag::not_constant, v.reason);
       return std::nullopt;
     }
     return *v.value;
@@ -2431,7 +2452,7 @@ public:
     sema::Evaluated r = sema::Evaluator(*s_, questions()).evaluate(v);
     if (r.dependent) return Truth::dependent;
     if (!r.value) {
-      s_->diag(at, Diag::constraint_not_constant, r.reason);
+      if (!r.copyability_failure) s_->diag(at, Diag::constraint_not_constant, r.reason);
       return Truth::invalid;
     }
     return s_->world().values.as_signed(*r.value) != 0 ? Truth::yes : Truth::no;
@@ -3255,7 +3276,10 @@ public:
           }
           angle_ = saved;
           if (!expect(Tk::r_paren) || !ok) return {NodeId::none, begin, pos()};
-          return s_->trait_expr(tr->trait, args, begin, pos());
+          Ex result = s_->trait_expr(tr->trait, args, begin, pos());
+          if (tr->trait == lex::TypeTrait::is_trivially_copyable && s_->dependent(result))
+            ++deferred_argument_checks_;  // Even an alias that erases the argument must replay it.
+          return result;
         }
       if (qualified_ahead()) return qualified_id(begin);
       // `X<args>(…)` and `X<args>{…}` for a class template X ([expr.type.conv]).
@@ -3362,15 +3386,8 @@ public:
   }
   Ex allocation_function_id(u32 begin) {
     bump();  // operator
-    Tk k = kind();
-    bump();
-    if (is(Tk::l_square) && kind(1) == Tk::r_square) {
-      bump();
-      bump();
-      s_->diag(begin, Diag::not_supported, k);
-      return {NodeId::none, begin, pos()};
-    }
-    return s_->allocation_name_expr(allocation_operator(k), begin, pos());
+    const auto name = allocation_operator_name();
+    return s_->allocation_name_expr(name, begin, pos());
   }
 
   static bool simple_type_keyword(Tk k) {
@@ -4351,7 +4368,7 @@ public:
     } else if (v.dependent) {
       s_->diag(e.begin, Diag::not_constant, sema::reason_unsupported);  // nothing outside a template depends
     } else if (!v.value) {
-      s_->diag(e.begin, Diag::not_constant, v.reason);
+      if (!v.copyability_failure) s_->diag(e.begin, Diag::not_constant, v.reason);
     } else if (!s_->in_template_definition() && s_->world().values.rec(*v.value).bits == 0) {
       if (message == sema::ConstId::none) s_->diag(begin, Diag::static_assert_failed);
       else s_->diag(begin, Diag::static_assert_failed_message, message);

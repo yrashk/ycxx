@@ -34,6 +34,9 @@ reasoning; do not leave decisions only in issue threads.
      relocation in relocatable objects for data and ordinary functions. The native static linker
      relaxes the validated RIP-relative load to a direct address after symbol resolution
      (#414, #407).
+   - ELF and Mach-O [bind ordinary C++ function symbols locally](docs/design/tu-local-parameter-symbols.md)
+     when their mangled parameter types identify an unnamed-namespace type. The pipeline retains
+     the source linkage and Itanium spelling. Astra reviewed the scope and ownership rule (#582).
    - Linux x86-64 [COMDAT inputs](docs/design/linux-elf-comdat-input.md) keep the first whole
      ELF group per signature in explicit-input static links. Selection precedes startup, layout
      and relocation. Astra reviewed the ELF validation, symbol handling and link mode boundary
@@ -41,6 +44,9 @@ reasoning; do not leave decisions only in issue threads.
    - Linux x86-64 [ELF symbol names](docs/design/elf-symbol-names.md) share immutable input
      string-table storage. Astra reviewed valid suffix references, name lifetimes and the
      reader's storage bound (#484).
+   - Linux x86-64 [native `int` throws](docs/design/linux-int-throw.md) use the Itanium runtime
+     in functions certified to have cleanup-free unwind frames. A hosted peer provides the
+     runtime and catches the exception. Astra reviewed the lowering boundary (#578).
 4. **Optimization is designed in from the start, and delivered after correctness.** The first
    back end aims for correct, debuggable code of roughly `-O0`/`-O1` quality. The architecture
    (§4.8) is laid out from day one for optimization by search, solvers and measured cost models,

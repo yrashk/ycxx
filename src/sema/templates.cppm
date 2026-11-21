@@ -52,9 +52,11 @@ struct ArgShape {
 // How far a deduced A may differ from A at the top of a P/A pair ([temp.deduct.call]/4): with
 // `more_cv` it may be more cv-qualified (P was a reference, /4.1); with `qualification` A may be
 // a pointer that converts to the deduced A by a qualification conversion (/4.2).
+// Only call deduction permits dropping a nonthrowing function specification.
 struct Allowance {
   bool more_cv = false;
   bool qualification = false;
+  bool function_conversion = false;
 };
 
 class Templates {
@@ -356,6 +358,8 @@ public:
         result = *is_union == (op == ast::DepOp::is_union);
       }
       break;
+    // The token-owning replay checks completeness and diagnoses a concrete operand.
+    case ast::DepOp::is_trivially_copyable: return std::nullopt;
     case ast::DepOp::is_same:
     case ast::DepOp::logical_not: std::unreachable();
     }
@@ -483,6 +487,7 @@ public:
       case ast::DepOp::is_member_pointer:
       case ast::DepOp::is_member_object_pointer:
       case ast::DepOp::is_member_function_pointer:
+      case ast::DepOp::is_trivially_copyable:
       case ast::DepOp::is_object: {
         auto operand = substitute_arg(ins().seqs.at(op.operands, 0), b);
         if (!operand) return std::nullopt;
@@ -905,7 +910,9 @@ public:
       // Under /4.2 the pointee may be less cv-qualified in A: a qualification conversion adds it,
       // at a deeper level only below a const one ([conv.qual]).
       return deduce(pr.inner, ar.inner, depth, out,
-                    {.more_cv = allow.qualification, .qualification = allow.qualification && Types::is_const(types().canonical(pr.inner))});
+                    {.more_cv = allow.qualification,
+                     .qualification = allow.qualification && Types::is_const(types().canonical(pr.inner)),
+                     .function_conversion = allow.function_conversion && types().is_function(pr.inner)});
     case TypeKind::member_pointer:
       return deduce(pr.member_owner, ar.member_owner, depth, out) && deduce(pr.inner, ar.inner, depth, out);
     case TypeKind::reference: return pr.rvalue_ref == ar.rvalue_ref && deduce(pr.inner, ar.inner, depth, out);
@@ -928,7 +935,8 @@ public:
       return pr.bound == ar.bound && pr.bound_value == ar.bound_value &&
              deduce(pr.inner, ar.inner, depth, out, {.more_cv = allow.more_cv});
     case TypeKind::function: {
-      if (pr.variadic != ar.variadic || pr.fn_cv != ar.fn_cv || pr.fn_ref != ar.fn_ref || pr.fn_noexcept != ar.fn_noexcept)
+      if (pr.variadic != ar.variadic || pr.fn_cv != ar.fn_cv || pr.fn_ref != ar.fn_ref ||
+          (pr.fn_noexcept != ar.fn_noexcept && !(allow.function_conversion && ar.fn_noexcept)))
         return false;
       if (!deduce(pr.inner, ar.inner, depth, out)) return false;
       std::vector<TemplateArg> ps, as;
@@ -1184,12 +1192,14 @@ public:
         a = types().lvalue_ref(a);
       p = pr.inner;
       allow.more_cv = true;
+      allow.function_conversion = types().is_function(p);
     } else {
       if (types().is_array(a)) a = types().pointer(types().rec(a).inner);
       else if (types().is_function(a)) a = types().pointer(a);
       else a = Types::unqualified(types().canonical(a));
       p = Types::unqualified(types().canonical(p));
       allow.qualification = types().is_pointer(p);
+      allow.function_conversion = types().is_pointer(p) && types().is_function(types().pointee(p));
     }
     return {p, a, allow};
   }

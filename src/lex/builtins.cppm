@@ -1,6 +1,5 @@
-// The type-trait built-ins ycxx implements (DECISIONS §1.2, docs/EXTENSIONS.md): the ones
-// libycxx's headers probe with `__has_builtin` and use, each answered from ycxx's own type system.
-// The preprocessor answers `__has_builtin` from this table; sema parses and evaluates them.
+// Type-trait built-ins recognized by the parser (DECISIONS §1.2, docs/EXTENSIONS.md).
+// The preprocessor uses each entry's advertisement flag for libycxx's `__has_builtin` probes.
 export module ycxx.lex:builtins;
 
 import std;
@@ -18,6 +17,8 @@ enum class TypeTrait : std::uint8_t {
   remove_cv, remove_const, remove_volatile, remove_cvref, remove_reference_t, remove_pointer,
   add_pointer, add_lvalue_reference, add_rvalue_reference, remove_extent, remove_all_extents, decay,
   underlying_type,
+  // Predicates with bounded support.
+  is_trivially_copyable,
 };
 
 struct TypeTraitInfo {
@@ -25,6 +26,7 @@ struct TypeTraitInfo {
   TypeTrait trait;
   std::uint8_t arity;  // its type arguments
   bool transforms;     // a type, not a `bool`
+  bool advertised = true;
 };
 
 inline constexpr std::array type_traits{
@@ -71,6 +73,7 @@ inline constexpr std::array type_traits{
     TypeTraitInfo{"__remove_all_extents", TypeTrait::remove_all_extents, 1, true},
     TypeTraitInfo{"__decay", TypeTrait::decay, 1, true},
     TypeTraitInfo{"__underlying_type", TypeTrait::underlying_type, 1, true},
+    TypeTraitInfo{"__is_trivially_copyable", TypeTrait::is_trivially_copyable, 1, false, false},
 };
 
 constexpr const TypeTraitInfo* type_trait(std::string_view name) {

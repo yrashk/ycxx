@@ -640,8 +640,8 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   freestanding linker retains these records in the read-only segment. The hosted linker
   supplies unwind discovery for the peer who throws and catches the exception.
   `unit.linux_cleanup_free_unwind` checks mixed hosted execution, omitted frames, and native
-  source, staged, and daemon link parity. Standalone unwind discovery and ycxx generation of
-  native throws, handlers, and exceptional cleanups remain tracked separately.
+  source, staged, and daemon link parity. Standalone unwind discovery, native handlers, and
+  exceptional cleanups remain under #89.
   [#572](https://github.com/yrashk/ycxx/issues/572) · [#89](https://github.com/yrashk/ycxx/issues/89)
   · [#558](https://github.com/yrashk/ycxx/issues/558)
 - Explicit native static links keep the first input ELF COMDAT group for each signature. The reader
@@ -1158,6 +1158,10 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   ([basic.lookup.unqual]/9).
 - Linkage names: `<nested-name>`s with namespace prefixes as substitution candidates, and
   `_GLOBAL__N_1` for the unnamed namespace, checked against Clang's symbols.
+- Ordinary namespace C++ functions whose adjusted parameter types name an unnamed-namespace type
+  use local ELF and Mach-O symbols, preserving their source linkage and mangled names. Native
+  references need a definition in the same unit. An unused declaration emits no symbol.
+  [Design](docs/design/tu-local-parameter-symbols.md) · [#582](https://github.com/yrashk/ycxx/issues/582)
 - The Itanium ABI abbreviates the global `std` namespace as `St` without assigning it a
   numbered substitution (§5.1.5 and §5.1.10). Direct members use unscoped encodings
   and deeper members keep `N…E`. The Linux mixed-object test links calls through the pinned
@@ -1645,9 +1649,8 @@ session's.*
 
 ## Type-trait built-ins (#211, 2026-11-18)
 
-- `ycxx.lex:builtins` lists the type-trait built-ins ycxx implements (`lex::type_traits`): 29
-  predicates and 13 transformations, those libycxx probes and uses that ycxx's type system can
-  answer exactly. The preprocessor's `__has_builtin` answers 1 for exactly these, 0 for any other.
+- `ycxx.lex:builtins` lists the type-trait built-ins ycxx recognizes (`lex::type_traits`). The
+  preprocessor's `__has_builtin` advertises the existing 29 predicates and 13 transformations.
 - A predicate `__is_same(T, U)` is a `bool` prvalue constant (`Sema::trait_expr`), value-dependent
   while a type is dependent. A transformation `__remove_cv(T)` is a type specifier
   (`Templates::transform`); of a dependent type it is a `TTransform` that substitution applies and
@@ -1666,11 +1669,23 @@ session's.*
   destructor fact for ordinary complete non-template, nonvirtual classes without bases and with
   scalar fields, arrays of scalars, or reference fields. The calculation includes named scalar-only
   unions with a proved destructor. Class subobjects, overloaded special-member kinds, and unions
-  needing default-constructor selection give an unknown result. This is an internal prerequisite
-  for `__is_trivially_copyable` ([class.prop], [special], #218).
+  needing default-constructor selection give an unknown result ([class.prop], [special], #218).
+- A direct `__is_trivially_copyable(T)` produces a `bool` constant for supported concrete
+  operands. It peels all array extents, including an unknown outer bound. It accepts existing
+  scalar types as trivially copyable and evaluates reference, function and cv `void` types to
+  `false`. It queries the class record at the use of the trait, including the original member
+  position when a constructor re-reads an initializer. It reports incomplete class elements
+  separately from complete classes with unknown facts. A dependent operand can appear in the
+  supported single base of a primary class template, including an alias template-id, or in a
+  namespace-scope variable template initializer. The selected definition replays the written
+  operand at the instantiation demand and retains trait errors at the source spelling. General
+  dependent substitution and wider class classification remain in
+  [#218](https://github.com/yrashk/ycxx/issues/218).
+  [Replay design](docs/design/dependent-trivial-copyability-replay.md)
+  `__has_builtin(__is_trivially_copyable)` answers 0 while support is partial ([meta.unary.prop]).
 - Listed in docs/EXTENSIONS.md. Tests: `tests/own/builtins/`. `<cstdio>`: 53 → 33 errors.
 - Not yet (#211 follow-up): the built-ins that need the object model, such as
-  `__is_constructible`, `__is_convertible`, `__is_assignable`, the `__is_trivially_*` and
+  `__is_constructible`, `__is_convertible`, `__is_assignable`, other `__is_trivially_*` and
   `__is_nothrow_*` families, `__is_base_of`, `__is_standard_layout` and
   `__reference_binds_to_temporary`. Other dependent predicates, conversions of a dependent
   predicate to a non-`bool` parameter, dependent array bounds and expression mangling remain in
@@ -2386,9 +2401,17 @@ values, end to end; results match Clang's bit for bit.
 A throw-expression has type `void`, keeps its operand in the semantic tree, and
 supports rethrow syntax. Scalar and pointer operands are checked after the applicable
 decay conversions. Conditional expressions preserve the other arm's type and value
-category when one arm is a throw-expression. Class exception construction, native
-emission, and evaluation of a reached throw still have explicit diagnostics. Native
-exception objects, handlers, and exceptional cleanups remain under #89.
+category when one arm is a throw-expression. Class exception construction, constant
+evaluation of a reached throw, and native rethrow have explicit diagnostics.
+
+On Linux x86-64, a certified cleanup-free ordinary function can throw an `int` to a
+hosted peer's handler. The operand is evaluated once before allocation. The generated
+object references the peer's Itanium exception allocator, throw entry point, and
+`int` type information. Other exception types, native handlers, exceptional cleanup,
+and runtime integration with ycxx's own linker remain under [#89]. See the
+[design](docs/design/linux-int-throw.md) and [#578](https://github.com/yrashk/ycxx/issues/578).
+
+[#89]: https://github.com/yrashk/ycxx/issues/89
 
 ## Statements, ι step 1: `switch`, labels, `goto`, conditions (#337, 2026-11-19)
 
@@ -2535,6 +2558,18 @@ exception objects, handlers, and exceptional cleanups remain under #89.
   dereference. Full constant evaluation of the class iterator still needs #25.
 - Tests: `tests/own/range-for/` (17 from the independent author and nine review regressions).
 
+## Concrete exception specifications on ordinary function types (#219)
+
+- Ordinary non-template declarations, aliases, and grouped declarators retain concrete
+  exception specifications through pointers, references, and return deduction.
+- Overload-address selection, reference binding, and function-pointer conversions permit
+  a nonthrowing function to match the corresponding potentially throwing type.
+  The reverse direction and conversions through multiple pointer levels are rejected.
+- Composite pointer types preserve the one-way rule in comparisons and conditional
+  expressions. Function reference overload ranking follows [over.ics.ref].
+- The mixed Linux object checks distinguish callback overloads with the Itanium `Do` type
+  encoding. Dependent exception specifications remain tracked in [#219](https://github.com/yrashk/ycxx/issues/219).
+
 ## The address of an overload set, ι (#313, #337, 2026-11-19)
 
 - A pointer or reference target picks a free or static member function by its function type
@@ -2546,7 +2581,7 @@ exception objects, handlers, and exceptional cleanups remain under #89.
   matching templates by their full function types. A call can also deduce fixed function or
   function-pointer parameters by trying the non-template members of an overload set
   ([temp.deduct.call]/6).
-- Related work covers pointers to non-static members (#238), `noexcept` function types (#219),
+- Related work covers pointers to non-static members (#238), dependent exception specifications (#219),
   a template-id without a target type (#335), and function pointer or reference template
   arguments (#406).
 - An ordinary free immediate function is diagnosed when its name escapes through a runtime
@@ -2626,6 +2661,11 @@ exception objects, handlers, and exceptional cleanups remain under #89.
   allocation address selection, direct deallocation calls, and a Linux peer providing all three
   symbols. Over-aligned storage and expression dispatch are tracked in
   [#293](https://github.com/yrashk/ycxx/issues/293) and [#303](https://github.com/yrashk/ycxx/issues/303).
+- The six usual global array allocation and deallocation declarations support explicit
+  calls and typed address selection, including the aligned signatures. Written
+  redeclarations share the implicit entities. The Itanium mangler emits `na` and `da`, and
+  Linux object tests call providers built with both GCC and Clang. Expression codegen and
+  further allocation-function declarations remain in [#293](https://github.com/yrashk/ycxx/issues/293).
 - Native lowering supports initializers proven nonthrowing from the analyzed expression tree.
   Initializers that need an exception cleanup edge and constant evaluation of allocation remain
   in #293. Namespace-scope allocation uses the existing dynamic initialization path. The issue

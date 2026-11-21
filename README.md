@@ -30,6 +30,10 @@ freestanding C++ subset for x86-64 Linux. The standard library is out of reach. 
 
 ### What you can do today
 
+Ordinary function pointers and references preserve concrete `noexcept` type identity.
+A nonthrowing function can be used where the corresponding potentially throwing type is expected.
+Dependent exception specifications remain open. [#219](https://github.com/yrashk/ycxx/issues/219)
+
 **Compile and run programs on macOS.** `ycxx cxx a.cpp -o a` (also `-c`, `-fsyntax-only`, `-E`, `-I`,
 `-D`, `-std=c++26`, and `-fclass-call-abi=apple` to pass classes as Apple Clang does) builds an executable with ycxx's own front end, IR, AArch64 code generator
 and Mach-O linker. It also links object files from Clang or GCC. Errors are reported as
@@ -134,7 +138,8 @@ object. Symbol names can share suffixes in an input string table.
 
 On x86-64 Linux, an exception thrown by hosted peer code can unwind through eligible
 cleanup-free ycxx functions with fixed scalar signatures and reach a handler in peer code.
-[#572](https://github.com/yrashk/ycxx/issues/572)
+An eligible ycxx function can also throw an `int` to a hosted peer's handler.
+[#572](https://github.com/yrashk/ycxx/issues/572) · [#578](https://github.com/yrashk/ycxx/issues/578)
 
 Both targets support cooked integer user-defined literals through namespace-scope literal
 operators with an `unsigned long long` parameter, including constant evaluation.
@@ -195,7 +200,8 @@ fixed underlying types and definitions inside `extern "C"` blocks.
   cv-qualified objects. Scalar allocation uses the global Itanium allocation functions.
   Syntax checking also covers one-dimensional scalar `new T[n]` and `delete[] p`.
   The usual aligned scalar allocation and deallocation signatures support explicit calls with
-  `std::align_val_t`.
+  `std::align_val_t`. The usual global `operator new[]` and `operator delete[]` signatures
+  support explicit calls and typed address selection.
   [#293](https://github.com/yrashk/ycxx/issues/293)
 - pointers and references to arrays of unknown bound, and template partial specializations
   that match unknown-bound array types. [#222](https://github.com/yrashk/ycxx/issues/222)
@@ -344,7 +350,8 @@ members. [#285](https://github.com/yrashk/ycxx/issues/285)
   inheriting constructors, and base packs or multiple bases in a class template.
 - Member class and alias templates, conversion function templates, and constraints on class
   templates and their members.
-- Native exception throwing, exception handlers, and unwind discovery in ycxx-linked programs.
+- Native throwing beyond the Linux `int` slice, native exception handlers, and unwind discovery
+  in ycxx-linked programs.
   [#89](https://github.com/yrashk/ycxx/issues/89) · [#558](https://github.com/yrashk/ycxx/issues/558)
 - Optimization (`-O`) and the extended floating-point types (`std::float16_t`, …).
 - Automatic Linux CRT and library selection and general-purpose ELF object interoperability.

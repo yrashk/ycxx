@@ -220,12 +220,10 @@ draft/dcl/namespace.udecl-5.reject.cpp errors elsewhere: 'struct' not supported 
 draft/dcl/namespace.udecl-8.reject.cpp errors elsewhere: 'namespace' not supported yet
 draft/dcl/namespace.udecl-9.reject.cpp errors elsewhere: 'struct' not supported yet
 draft/except/except.pre-3.accept.cpp 'class' not supported yet
-draft/except/except.spec-1.reject.cpp errors elsewhere: 'noexcept' not supported yet
 draft/except/except.spec-2.reject.cpp errors elsewhere: 'struct' not supported yet
 draft/except/except.spec-3.accept.cpp 'struct' not supported yet
 draft/except/except.throw-2.accept.cpp preprocessing directives are not supported yet
 draft/expr/basic.lval-1.accept.cpp 'struct' not supported yet
-draft/expr/conv.fctptr-1.reject.cpp errors elsewhere: 'noexcept' not supported yet
 draft/expr/conv.lval-1.accept.cpp 'struct' not supported yet
 draft/expr/expr.add-1.accept.cpp '{' not supported yet
 draft/expr/expr.await-1.reject.cpp errors elsewhere: preprocessing directives are not supported yet

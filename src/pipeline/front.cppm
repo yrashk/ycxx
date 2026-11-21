@@ -10,6 +10,7 @@ export module ycxx.pipeline:front;
 import std;
 import ycxx.ast;
 import ycxx.engine;
+import ycxx.ir.lower;
 import ycxx.pp;
 import ycxx.items;
 import ycxx.sema;
@@ -129,7 +130,7 @@ struct Dynamic {
   std::uint32_t item;
 };
 
-// The C++ runtime's entry points the unit calls (Itanium C++ ABI §3.3), declared on first use.
+// The C++ runtime symbols the unit references, declared on first use.
 template <class Declare>
 struct Runtime {
   sema::World& world;
@@ -175,6 +176,18 @@ struct Runtime {
                           world.types.function(world.types.builtin(sema::Builtin::void_), std::span(&g, 1), false, ast::LangLinkage::c), true);
     }
     return release_;
+  }
+  ir::IntThrowRuntime int_throw() {
+    // Itanium EH ABI §2.4. The type information object is opaque to this pipeline.
+    const QualType size = world.types.builtin(world.target.size_type);
+    const QualType v = world.types.builtin(sema::Builtin::void_);
+    const QualType p = vp();
+    const auto lang = ast::LangLinkage::c;
+    const QualType destroy = world.types.pointer(world.types.function(v, std::span(&p, 1), false, lang));
+    const QualType params[] = {p, p, destroy};
+    return {int_(), declared("__cxa_allocate_exception", world.types.function(p, std::span(&size, 1), false, lang), true),
+            declared("__cxa_throw", world.types.function(v, params, false, lang), true),
+            declared("_ZTIi", world.types.builtin(sema::Builtin::char_), false)};
   }
 };
 
@@ -316,9 +329,9 @@ using UnwindNodes = ast::closed_list<
     ast::Continue, ast::DeclStmt, ast::LocalVar, ast::CondDecl, ast::Switch, ast::Case, ast::Default,
     ast::Label, ast::Goto, ast::Literal, ast::DeclRef, ast::LocalRef, ast::Paren, ast::Unary,
     ast::Binary, ast::OrderedBinary, ast::Assign, ast::Conditional, ast::Subscript, ast::Call,
-    ast::ImplicitConversion, ast::InitList, ast::ValueInit, ast::DefaultInit>;
+    ast::ImplicitConversion, ast::InitList, ast::ValueInit, ast::DefaultInit, ast::Throw>;
 
-bool unwind_body_node(parse::Program& program, ast::NodeId node) {
+bool unwind_body_node(parse::Program& program, ast::NodeId node, bool& has_throw) {
   if (node == ast::NodeId::none) return true;
   auto& world = program.world();
   const auto& tree = world.ins.ast;
@@ -344,32 +357,86 @@ bool unwind_body_node(parse::Program& program, ast::NodeId node) {
             !unwind_scalar_prototype(world.types, tree.get<ast::DeclRef>(n.callee.id).info.type)) return false;
       } else if constexpr (std::is_same_v<T, ast::ImplicitConversion>) {
         if (n.function != EntityId::none || n.conversion == ast::ConversionKind::user_defined) return false;
+      } else if constexpr (std::is_same_v<T, ast::Throw>) {
+        if (n.operand.id == ast::NodeId::none) return false;
+        has_throw = true;  // the runtime-reachable operation checks the exact exception type
       }
       bool safe = true;
       ast::for_each_ref(n, [&]<class H>(const H& h) {
-        if constexpr (std::is_same_v<H, ast::NodeId>) safe = safe && unwind_body_node(program, h);
+        if constexpr (std::is_same_v<H, ast::NodeId>) safe = safe && unwind_body_node(program, h, has_throw);
         else if constexpr (std::is_same_v<H, ast::ChildList>)
-          for (ast::Child c : tree.children(h)) safe = safe && unwind_body_node(program, c.id);
+          for (ast::Child c : tree.children(h)) safe = safe && unwind_body_node(program, c.id, has_throw);
       });
       return safe;
     }
   });
 }
 
-bool cleanup_free_definition(parse::Program& program, const ast::DeclSema& d, const ast::BodySema& body) {
+UnwindEligibility cleanup_free_definition(parse::Program& program, const ast::DeclSema& d, const ast::BodySema& body) {
+  using enum UnwindEligibility;
   auto& world = program.world();
   if (!unwind_scalar_prototype(world.types, d.type) || world.types.rec(d.type).fn_noexcept ||
       d.contracts != ast::NodeId::none || body.tree == ast::NodeId::none || world.ins.seqs.size(body.closures) != 0)
-    return false;
+    return none;
   const auto& entity = world.entities.rec(d.entity);
   if (entity.kind != sema::EntityKind::function || entity.templ != EntityId::none || !program.is_namespace(entity.scope) ||
       (entity.linkage != ast::Linkage::external && entity.linkage != ast::Linkage::internal) ||
-      sema::is_allocation_name(world.ins.names.spelling(entity.name))) return false;
+      sema::is_allocation_name(world.ins.names.spelling(entity.name))) return none;
   if (!std::ranges::all_of(world.ins.seqs.elements(body.locals), [&](const ast::LocalRec& local) {
         return local.entity == EntityId::none && unwind_scalar(world.types, local.type) &&
                (local.decl == ast::NodeId::none || world.ins.ast.is<ast::LocalVar>(local.decl));
-      })) return false;
-  return unwind_body_node(program, body.tree);
+      })) return none;
+  bool has_throw = false;
+  if (!unwind_body_node(program, body.tree, has_throw)) return none;
+  return has_throw ? cleanup_free_with_throw : cleanup_free;
+}
+
+bool names_unnamed_namespace(parse::Program& program, QualType type);
+bool names_unnamed_namespace(parse::Program& program, EntityId entity);
+
+bool names_unnamed_namespace(parse::Program& program, const ast::TemplateArg& arg) {
+  switch (arg.kind) {
+  case ast::TemplateArgKind::type: return names_unnamed_namespace(program, arg.type);
+  case ast::TemplateArgKind::template_: return names_unnamed_namespace(program, arg.templ);
+  case ast::TemplateArgKind::pack:
+    return std::ranges::any_of(program.world().ins.seqs.elements(arg.elems), [&](const ast::TemplateArg& element) {
+      return names_unnamed_namespace(program, element);
+    });
+  default: return false;
+  }
+}
+
+// Look through nominal owners and encoded template arguments, without inspecting class definitions.
+bool names_unnamed_namespace(parse::Program& program, EntityId entity) {
+  auto& entities = program.world().entities;
+  while (entity != EntityId::none) {
+    if (program.is_namespace(entity)) return parse::Program::unnamed(program.namespace_path(entity));
+    const auto& r = entities.rec(entity);
+    if (r.kind != sema::EntityKind::class_ && r.kind != sema::EntityKind::enum_ &&
+        r.kind != sema::EntityKind::class_template && r.kind != sema::EntityKind::alias_template)
+      return false;
+    if (std::ranges::any_of(r.args, [&](const ast::TemplateArg& arg) { return names_unnamed_namespace(program, arg); }))
+      return true;
+    entity = r.scope;
+  }
+  return false;
+}
+
+bool names_unnamed_namespace(parse::Program& program, QualType type) {
+  const auto r = program.world().types.rec(type);
+  switch (r.kind) {
+  case sema::TypeKind::class_:
+  case sema::TypeKind::enum_: return names_unnamed_namespace(program, r.entity);
+  case sema::TypeKind::pointer:
+  case sema::TypeKind::reference:
+  case sema::TypeKind::array: return names_unnamed_namespace(program, r.inner);
+  case sema::TypeKind::member_pointer:
+    return names_unnamed_namespace(program, r.member_owner) || names_unnamed_namespace(program, r.inner);
+  case sema::TypeKind::function:
+    return names_unnamed_namespace(program, r.inner) ||
+           std::ranges::any_of(r.params, [&](QualType param) { return names_unnamed_namespace(program, param); });
+  default: return false;
+  }
 }
 
 // The definitions and declarations of the global namespace, in item order.
@@ -454,7 +521,17 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
                            r.kind == sema::EntityKind::constructor  ? Special::constructor
                            : r.kind == sema::EntityKind::destructor ? Special::destructor
                                                                     : Special::none});
-    tu.entities.back().asm_label = program.asm_label(e);
+    Entity& emitted = tu.entities.back();
+    emitted.asm_label = program.asm_label(e);
+    if (r.kind == sema::EntityKind::function && r.lang == ast::LangLinkage::cxx &&
+        r.linkage == ast::Linkage::external && r.templ == EntityId::none && program.is_namespace(r.scope) &&
+        emitted.asm_label.empty()) {
+      // An ordinary function's name encodes its adjusted parameters. A nested function type
+      // also encodes its result, which names_unnamed_namespace handles above.
+      const auto type = world.types.rec(d.type);
+      emitted.local_parameter_binding =
+          std::ranges::any_of(type.params, [&](QualType param) { return names_unnamed_namespace(program, param); });
+    }
     if (r.templ != EntityId::none) {
       tu.entities.back().template_type = world.entities.rec(r.templ).type;
       // A generic lambda's operator: its closure's record has the type with the head at depth 0.
@@ -558,7 +635,7 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
       // constructor initializer. Synthetic bodies and instantiations never enter this path.
       if (linux && !member && tu.main != d.entity && !it.specialization &&
           program.region().tokens[it.body_begin].kind == lex::Tk::l_brace)
-        tu.functions.back().cleanup_free_unwind = cleanup_free_definition(program, d, body);
+        tu.functions.back().unwind = cleanup_free_definition(program, d, body);
       closures_of(body.closures, program.id(k), it.body_begin - it.begin);
       continue;
     }
@@ -649,9 +726,13 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
   for (FunctionDef& f : tu.functions) {
     static_locals(world, tu, f, runtime);
     // Check the complete unit by entity, including later redeclarations and qualified friends.
-    if (f.cleanup_free_unwind)
-      f.cleanup_free_unwind = !noexcept_declarations.contains(f.entity) && !inline_declarations.contains(f.entity) &&
-                              !f.weak_elf && f.guards.empty() && program.asm_label(f.entity).empty();
+    if (f.unwind == UnwindEligibility::none) continue;
+    if (noexcept_declarations.contains(f.entity) || inline_declarations.contains(f.entity) || f.weak_elf ||
+        !f.guards.empty() || !program.asm_label(f.entity).empty()) {
+      f.unwind = UnwindEligibility::none;
+    } else if (f.unwind == UnwindEligibility::cleanup_free_with_throw && !tu.int_throw) {
+      tu.int_throw = runtime.int_throw();
+    }
   }
   // Written declarations have already supplied their locations and definitions. For the
   // remaining implicit declarations, a code reference alone emits an undefined symbol.
