@@ -2903,10 +2903,14 @@ declared return type after signature substitution and constraint checking.
 Evaluated calls and calls that need placeholder return deduction still demand
 the body. A non-generic lambda body uses its own evaluation context.
 
-## Concrete decay-copy expressions (#286)
+## Scalar and pointer decay-copy expressions (#286)
 
 - Single-expression `auto(x)` and `auto{x}` perform scalar and pointer decay-copy,
   including bit-field reads and array and function decay. Grouped declarations
   still take precedence where the statement can be a declaration.
-- General class objects, member pointers, dependent expressions, and some
-  template-argument contexts remain open. [#286](https://github.com/yrashk/ycxx/issues/286)
+- Function-template bodies replay decay-copy of supported dependent operands with the
+  template arguments bound. A value-dependent operand with known type gives the conversion
+  its decayed prvalue type in the template definition, including in `decltype`.
+- General class objects, member pointers, operands whose type dependence is unresolved, and
+  dependent template arguments, requirements, and exception specifications remain open.
+  [#286](https://github.com/yrashk/ycxx/issues/286)
