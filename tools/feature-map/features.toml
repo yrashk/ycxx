@@ -2620,8 +2620,9 @@ detect = '\bstd::(?:addressof|launder|bit_cast|is_constant_evaluated|unreachable
 probe = '''
 int main() { int i = 1; float f = __builtin_bit_cast(float, i); return (__builtin_addressof(i) == &i && !__builtin_is_constant_evaluated() && __builtin_bit_cast(int, f) == 1) ? 0 : 1; }
 '''
-status = 'missing'
+status = 'partial'
 issues = [330]
+note = 'Expression-form __builtin_addressof accepts lvalues, preserves cv qualification, and bypasses overloaded address-of. The remaining utility builtins are tracked in #330 and the pinned memory-related header prerequisites in #469.'
 
 [[feature]]
 id = 'lib-numeric-builtins'
