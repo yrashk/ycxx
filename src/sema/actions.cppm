@@ -234,6 +234,7 @@ namespace expr_flag {
 inline constexpr u8 dependent = 1;
 inline constexpr u8 immediate_address = 2;  // checked after immediate invocations are folded
 inline constexpr u8 unrepresented_value = 4;  // this expression has no usable ConstId for a template argument
+inline constexpr u8 deferred_decay_copy = 8;  // a decay-copy still needs function body replay
 }
 
 // Flags of `LocalRec::flags` and `DeclSema::flags`.
@@ -2487,15 +2488,15 @@ public:
     });
   }
   // A dependent construct over `ops` in [begin, end): of type `t` when only its value depends on
-  // a template parameter, else of the dependent type. A wrapper cannot give an unrepresented
-  // operand value a canonical template argument identity.
+  // a template parameter, else of the dependent type. Preserve any decay-copy that still
+  // needs replay before the expression can supply a canonical value.
   Ex dependent_node(std::span<const Ex> ops, u32 begin, u32 end, std::optional<QualType> t = std::nullopt,
                     ValueCategory cat = ValueCategory::prvalue, u8 flags = 0) {
     std::vector<Child> cs;
     for (const Ex& o : ops)
       if (o.ok()) {
         cs.push_back({o.id, o.begin >= begin ? o.begin - begin : 0});
-        flags |= o.info.flags & expr_flag::unrepresented_value;
+        flags |= o.info.flags & expr_flag::deferred_decay_copy;
       }
     ExprInfo info{t ? *t : builtin(Builtin::dependent), cat, u8(expr_flag::dependent | flags)};
     return node(ast::Dependent{info, b_->list(cs)}, begin, end, info);
@@ -5862,7 +5863,8 @@ public:
         if (!types().is_dependent(operand.type())) type = ast::adjust_parameter(ins(), types().canonical(operand.type()));
         if (!type || supported(*type)) {
           // The tokens will be replayed. This node supplies no canonical template argument value.
-          return dependent_node({operand}, begin, end, type, ValueCategory::prvalue, expr_flag::unrepresented_value);
+          return dependent_node({operand}, begin, end, type, ValueCategory::prvalue,
+                                expr_flag::unrepresented_value | expr_flag::deferred_decay_copy);
         }
       }
     } else {

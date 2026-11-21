@@ -2300,7 +2300,8 @@ public:
     // Value-dependent: in a body its value is known when the body is instantiated; in a declaration
     // it is part of the template's signature, which needs the expression's `VDep*` form (#88).
     if (s_->dependent(e)) {
-      if (body && !(e.info.flags & sema::expr_flag::unrepresented_value))
+      constexpr u8 unavailable = sema::expr_flag::unrepresented_value | sema::expr_flag::deferred_decay_copy;
+      if (body && !(e.info.flags & unavailable))
         return s_->world().ins.intern_value(ast::VDepParam{sema::dependent_depth, 0});
       s_->diag(e.begin, Diag::not_supported, Tk::kw_template);
       return std::nullopt;
