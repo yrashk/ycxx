@@ -1361,6 +1361,10 @@ public:
       for (const sema::BaseRec& x : b->second) r.push_back(x.cls);
     return r;
   }
+  std::span<const sema::BaseRec> defining_base_records(EntityId c) override {
+    if (auto b = p_->class_bases_.find(std::to_underlying(c)); b != p_->class_bases_.end()) return b->second;
+    return {};
+  }
   void static_local(EntityId v, QualType t, std::optional<ConstId> value) override {
     p_->static_locals_[std::to_underlying(v)] = {t, value};
   }

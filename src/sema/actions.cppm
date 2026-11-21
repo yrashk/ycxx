@@ -118,6 +118,7 @@ public:
   virtual std::optional<ast::DeclSema> earlier_member(NameId name) = 0;
   // The direct bases of class `c` while it is being defined (its base-clause), none otherwise.
   virtual std::vector<EntityId> defining_bases(EntityId) { return {}; }
+  virtual std::span<const BaseRec> defining_base_records(EntityId) { return {}; }
   // Namespaces ([basic.namespace]), the global one being `EntityId::none`: the namespace (or
   // alias) unqualified lookup finds for `name`, and qualified lookup of `name` in namespace `ns`
   // ([namespace.qual]).
@@ -382,7 +383,7 @@ public:
       if (const ClassRec* cr = class_rec(current_class); cr && cr->defined) {
         if (!elaborated && current_function != EntityId::none && !scopes_.empty() && !templated() &&
             c.kind == EntityKind::class_ && c.templ == EntityId::none && (c.name == name || !cr->bases.empty())) {
-          auto hit = class_body_type(*cr, name, type_at);
+          auto hit = class_body_type(current_class, *cr, name, type_at);
           if (hit.found) return hit.type;
         }
         if (auto r = nested_member(current_class, name, true)) return r->first.type;
@@ -421,7 +422,8 @@ public:
 
   // [class.pre], [class.member.lookup]: an ordinary class's injected name stops the search on
   // that branch. In a nonvirtual graph, distinct base branches cannot dominate one another.
-  ClassBodyType class_body_type(const ClassRec& root, NameId name, std::optional<u32> type_at) {
+  ClassBodyType class_body_type(EntityId naming, const ClassRec& root, NameId name, std::optional<u32> type_at,
+                               bool qualified = false, bool type_only = false) {
     struct Edge {
       EntityId derived;
       ast::Access access;
@@ -443,13 +445,19 @@ public:
       }
       if (auto member = direct_member(cls, cr, name)) {
         auto nested = std::ranges::find(cr.types, name, &NestedType::name);
-        if (member->nested_type != EntityId::none && member->enumerator == EntityId::none && nested != cr.types.end())
+        if (nested != cr.types.end() &&
+            (type_only || (member->nested_type != EntityId::none && member->enumerator == EntityId::none))) {
           hits.push_back({nested->type, cls, cr.access_of(nested->entity), false, path});
-        else
+          return;
+        }
+        if (!type_only) {
           hits.push_back({std::nullopt, cls, ast::Access::public_, false, path});
-        return;
+          return;
+        }
       }
-      for (const BaseRec& b : cr.bases) {
+      std::span<const BaseRec> bases = cr.bases;
+      if (qualified && cls == naming && !cr.defined) bases = q_->defining_base_records(cls);
+      for (const BaseRec& b : bases) {
         if (const ClassRec* base = class_rec(b.cls)) {
           if (type_at) path.push_back({cls, b.access});
           visit(b.cls, *base);
@@ -457,22 +465,37 @@ public:
         }
       }
     };
-    collect(current_class, root);
-    if (hits.empty()) return {};
+    collect(naming, root);
+    const bool injected = std::ranges::any_of(hits, &Hit::injected);
+    if (hits.empty() || (qualified && !injected)) return {};
+    // [class.qual]: in ordinary lookup the naming class's own injected name denotes its constructor.
+    if (qualified && !type_only && hits.front().injected && hits.front().owner == naming)
+      return {true, std::nullopt};
     auto first = std::ranges::find_if(hits, [](const Hit& h) { return h.type.has_value(); });
     if (first == hits.end()) return {true, std::nullopt};
     // Apply the lookup-set and access checks to names with an injected-class-name candidate.
     // Ordinary nested member access is handled by its existing lookup paths.
-    if (type_at && std::ranges::any_of(hits, &Hit::injected)) {
+    if (type_at && injected) {
       QualType selected = types().canonical(*first->type);
       if (std::ranges::any_of(hits, [&](const Hit& h) { return !h.type || types().canonical(*h.type) != selected; })) {
-        diag(*type_at, Diag::ambiguous_member, name, types().class_type(current_class));
-      } else if (!std::ranges::any_of(hits, [&](const Hit& h) {
-                   return accessible(h.owner, h.access, current_class) && std::ranges::all_of(h.path, [&](const Edge& edge) {
-                     return accessible(edge.derived, edge.access);
-                   });
-                 })) {
-        diag(*type_at, Diag::inaccessible_base, *first->type, types().class_type(current_class));
+        diag(*type_at, Diag::ambiguous_member, name, types().class_type(naming));
+      } else {
+        auto allowed = [this, naming](const Hit& h) {
+          return accessible(h.owner, h.access, naming) && std::ranges::all_of(h.path, [&](const Edge& edge) {
+            return accessible(edge.derived, edge.access);
+          });
+        };
+        if (!std::ranges::any_of(hits, allowed)) {
+          QualType type = *first->type;
+          if (qualified && defer_type_access) {
+            deferred_injected_access_.push_back([this, at = *type_at, type, naming, allowed, hits = std::move(hits)] {
+              if (!std::ranges::any_of(hits, allowed))
+                diag(at, Diag::inaccessible_base, type, types().class_type(naming));
+            });
+            return {true, type};
+          }
+          diag(*type_at, Diag::inaccessible_base, type, types().class_type(naming));
+        }
       }
     }
     return {true, first->type};
@@ -945,8 +968,10 @@ public:
     EntityId saved = current_function;
     if (declared != EntityId::none) current_function = declared;
     for (const DeferredAccess& d : deferred_access_) check_access(d.cls, d.member, d.name, d.at);
-    current_function = saved;
     deferred_access_.clear();
+    for (const auto& check : deferred_injected_access_) check();
+    deferred_injected_access_.clear();
+    current_function = saved;
   }
   // The function `N::name` of type `t` declared in namespace `ns`, if any ([namespace.memdef]/3:
   // a qualified friend refers to an earlier declaration).
@@ -955,6 +980,21 @@ public:
       if (d.kind == ast::DeclKind::function && types().canonical(d.type) == types().canonical(t)) return d.entity;
     return std::nullopt;
   }
+  ClassBodyType qualified_injected_type(const Scope& scope, NameId name, std::optional<u32> at, bool type_only) {
+    if (!scope.type || !types().is_class(*scope.type) || types().is_dependent(*scope.type)) return {};
+    EntityId naming = types().class_of(*scope.type);
+    const EntityRec& entity = w_->entities.rec(naming);
+    if (entity.kind != EntityKind::class_ || entity.templ != EntityId::none) return {};
+    const ClassRec* cls = class_rec(naming);
+    if (!cls && naming != current_class) return {};
+    if (naming == current_class && (!cls || !cls->defined)) {
+      if (auto earlier = q_->earlier_member(name); earlier &&
+          (!type_only || is_type(earlier->kind))) return {};
+    }
+    const ClassRec incomplete;
+    return class_body_type(naming, cls ? *cls : incomplete, name, at, /*qualified=*/true, type_only);
+  }
+
   // `S::n` naming a type.
   std::optional<QualType> scope_type(const Scope& s, NameId n) {
     auto m = scope_member(s, n);
@@ -7142,6 +7182,7 @@ private:
     u32 at;
   };
   std::vector<DeferredAccess> deferred_access_;
+  std::vector<std::function<void()>> deferred_injected_access_;
   struct Bound {
     std::optional<Ex> object;
     std::vector<const MemberDeclRec*> cands;
