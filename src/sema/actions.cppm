@@ -7111,6 +7111,32 @@ public:
         }
     }
     if (set.empty()) return ref_qualified_member;
+    if (binary && ref_qualified_member && q_->dependent_call(op_at)) {
+      const auto member_call = as<ast::MemberCall>(*ref_qualified_member);
+      if (member_call) {
+        const auto& member = w_->entities.rec(member_call->function);
+        const auto fn = types().rec(member.type);
+        if (member.scope == types().class_of(lt) && fn.params.size() == 1 &&
+            fn.fn_ref == ast::RefQual::lvalue && operands[0].cat() == ValueCategory::lvalue) {
+          const auto receiver = types().lvalue_ref(types().add_cv(types().class_type(member.scope), fn.fn_cv));
+          const auto member_receiver = ics(operands[0], receiver);
+          const auto member_argument = ics(operands[1], fn.params[0]);
+          // Keep the existing joint-ranking diagnostic unless the member dominates
+          // every viable ordinary non-member candidate.
+          if (member_receiver.viable && member_argument.viable &&
+              std::ranges::all_of(set, [&](const ast::DeclSema& candidate) {
+                if (candidate.flags & decl_flag::template_) return false;
+                const auto free_fn = types().rec(candidate.type);
+                if (free_fn.params.size() != 2) return false;
+                const auto free_receiver = ics(operands[0], free_fn.params[0]);
+                const auto free_argument = ics(operands[1], free_fn.params[1]);
+                return !free_receiver.viable || !free_argument.viable ||
+                       (member_receiver < free_receiver && !(free_argument < member_argument));
+              }))
+            return ref_qualified_member;
+        }
+      }
+    }
     ExprInfo info{builtin(Builtin::overload_set), ValueCategory::lvalue, 0};
     Ex callee = node(ast::DeclRef{info, set.front().entity}, begin, begin, info);
     overloads_[std::to_underlying(callee.id)] = std::move(set);
@@ -7589,7 +7615,14 @@ public:
       if (dependent(c) || dependent(t) || dependent(f)) info.flags |= expr_flag::dependent;
       return node(ast::Conditional{info, at(c, begin), at(t, begin), at(f, begin)}, begin, end, info);
     }
-    if (dependent(cond) || dependent(t) || dependent(f)) return dependent_node({cond, t, f}, begin, end);
+    if (dependent(cond) || dependent(t) || dependent(f)) {
+      // With the same concrete prvalue type on both arms, dependency can affect
+      // the conditional's value without affecting its type.
+      if (t.cat() == ValueCategory::prvalue && f.cat() == ValueCategory::prvalue &&
+          !types().is_dependent(t.type()) && types().canonical(t.type()) == types().canonical(f.type()))
+        return dependent_node({cond, t, f}, begin, end, t.type());
+      return dependent_node({cond, t, f}, begin, end);
+    }
     Ex c = to_bool(cond, cond.begin);
     if (!c.ok()) return {NodeId::none, begin, end};
     ExprInfo info;
