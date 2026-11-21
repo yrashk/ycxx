@@ -127,6 +127,7 @@ export class Amd64ArgumentPlan {
   }
 
   std::uint32_t stack_slots() const { return stack_used_; }
+  std::uint32_t used_integer_registers() const { return integer_used_; }
   std::uint32_t used_sse_registers() const { return sse_used_; }
 
  private:

@@ -284,7 +284,7 @@ system_leaf:
         assert '#pragma pack' in compile(target, '-E', 'packing.cpp')
         aggregate_parameter = 'unsupported aggregate parameter layout'
         aggregate_result = 'unsupported aggregate result layout'
-        floating_varargs = 'floating-point parameters and results of variadic functions are unsupported'
+        indirect_floating = 'floating-point parameters and results of indirect calls are unsupported'
         cases = (
             ('long double f(long double x) { return x; }', 'x87 long double parameters and results are unsupported'),
             ('struct X { double x; }; auto f() { return X{1.0}; }', aggregate_result),
@@ -333,11 +333,10 @@ system_leaf:
             ('struct X { int a; }; int f(X (*g)()) { X x = g(); return x.a; }', f'call: {results}'),
             ('struct X { int a; }; struct B { static int g(X); }; int f() { return B::g(X{1}); }',
              'call: unsupported fixed-prototype parameter type'),
-            ('int f(double, ...) { return 1; }', floating_varargs),
-            ('double f(int, ...) { return 1.0; }', floating_varargs),
+            ('int f(long double, ...) { return 1; }', 'x87 long double parameters and results are unsupported'),
             ('struct X { int x; }; int f(X, ...) { return 1; }', parameters),
-            ('int f(int (*g)(double, ...)) { return g(1.0); }', f'call: {floating_varargs}'),
-            ('int f(double (*g)(int, ...)) { return g(1) > 0.0; }', f'call: {floating_varargs}'),
+            ('int f(int (*g)(double, ...)) { return g(1.0); }', f'call: {indirect_floating}'),
+            ('int f(double (*g)(int, ...)) { return g(1) > 0.0; }', f'call: {indirect_floating}'),
             ('int f(int (*g)(int, ...)) { return g(1, 0.75); }',
              'call: floating-point ellipsis arguments are unsupported'),
             ('struct X { int x; }; int f(int (*g)(X, ...)) { return g(X{1}); }', f'call: {parameters}'),

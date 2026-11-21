@@ -142,13 +142,13 @@ def main(ycxx):
         traced_error('diagnostic.cpp', './diagnostic.h:1:12', 'invalid preprocessing number',
                      ('Build', 'TuFront', 'Pp'), '-fsyntax-only')
         diagnostic.write_text('#include "diagnostic.h"\n')
-        definition = 'double f(double x, ...) {\n  return x;\n}\n'
-        abi_error = 'x86-64 System V ABI: floating-point parameters and results of variadic functions are unsupported'
+        definition = 'long double f(long double x, ...) {\n  return x;\n}\n'
+        abi_error = 'x86-64 System V ABI: x87 long double parameters and results are unsupported'
         header.write_text('/*   */\n' + definition)
-        traced_error('diagnostic.cpp', './diagnostic.h:2:25', abi_error,
+        traced_error('diagnostic.cpp', './diagnostic.h:2:35', abi_error,
                      ('Build', 'Tu', 'Lower'), '--target=x86_64-pc-linux-gnu', '-c')
         header.write_text('/*\n\n */\n' + definition)
-        traced_error('diagnostic.cpp', './diagnostic.h:4:25', abi_error,
+        traced_error('diagnostic.cpp', './diagnostic.h:4:35', abi_error,
                      ('Build', 'Tu', 'Lower'), '--target=x86_64-pc-linux-gnu', '-c')
         absent = cxx('--trace-engine=json', '-fsyntax-only', 'absent.cpp')
         records = [json.loads(l) for l in absent.stderr.splitlines() if l.strip()]

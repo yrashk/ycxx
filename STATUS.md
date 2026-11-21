@@ -586,15 +586,16 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   32- and 64-bit integers and pointers. INTEGER-only variadic calls set AL to zero even with
   an empty ellipsis.
   Indirect variadic calls keep their target in R11.
-  Ordinary free variadic definitions with scalar INTEGER signatures support `<cstdarg>`.
+  Ordinary free variadic definitions with scalar INTEGER and SSE signatures support `<cstdarg>`.
   `va_start` includes zero fixed parameters and captures the incoming GP and XMM registers in
   each activation, before its body can make calls. Its cursor follows AMD64 psABI §3.5.7 and can
   be passed to a separately compiled consumer. Native `va_arg` retrieves `int`, `long`,
-  `long long`, their unsigned counterparts and ordinary pointers from the GP save area or the
-  incoming stack. `va_copy` gives each cursor independent positions and `va_end` evaluates its
-  operand. `unit.linux_variadic_definitions` exercises native execution, a host peer, and
-  standalone and daemon compilation. Indirect floating calls, additional definition signatures
-  and floating retrieval remain in #196.
+  `long long`, their unsigned counterparts, ordinary pointers and `double`. Integer and SSE
+  cursors advance independently in the register save area and share the overflow stack cursor.
+  `va_copy` gives each cursor independent positions and `va_end` evaluates its operand.
+  `unit.linux_variadic_definitions` exercises native execution, host peers, and standalone and
+  daemon compilation. Indirect floating calls and aggregate variadic signatures and retrieval
+  remain in #196.
   [#417](https://github.com/yrashk/ycxx/issues/417), [#412](https://github.com/yrashk/ycxx/issues/412),
   [#399](https://github.com/yrashk/ycxx/issues/399),
   [#196](https://github.com/yrashk/ycxx/issues/196)
