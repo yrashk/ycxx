@@ -833,6 +833,9 @@ public:
       d.ref_at = fn->ref_at;
       d.has_noexcept = fn->has_noexcept;
       d.noexcept_condition = fn->noexcept_condition;
+      if (d.ok && function_type && !abstract && !typedef_ && fn->noexcept_condition &&
+          !s_->templated())
+        noexcept_value(fn->noexcept_condition, d.ok);
     } else {
       d.ref_at = d.name_at;
     }
@@ -1175,20 +1178,21 @@ public:
         suffix.ref_at = pos();
         if (accept(Tk::amp)) suffix.ref = ast::RefQual::lvalue;
         else if (accept(Tk::ampamp)) suffix.ref = ast::RefQual::rvalue;
-        exception_specifier(suffix, ok);
-        // A trailing return type ([dcl.fct]/2), with the parameters in scope ([basic.scope.param]).
-        if (is(Tk::arrow)) {
-          bump();
+        // Parameter scope includes the exception specification and trailing return type
+        // ([basic.scope.param]). Bind the adjusted types from the parameter list.
+        if (is(Tk::kw_noexcept) || is(Tk::arrow)) {
           s_->push_scope();
-          for (const Param& p : l.suffixes.back().params)
+          for (const Param& p : suffix.params)
             if (p.name != s_->no_name()) s_->declare_local(p.name, p.type, sema::local_flag::parameter, p.at, false);
-          auto t = type_id(true);
+          exception_specifier(suffix, ok);
+          const bool has_trailing = accept(Tk::arrow);
+          if (has_trailing)
+            suffix.trailing = type_id(true);
           s_->pop_scope();
-          if (!t) {
+          if (has_trailing && !suffix.trailing) {
             ok = false;
             return l;
           }
-          l.suffixes.back().trailing = *t;
         }
         // Dynamic exception specifications and repeated qualifiers are unsupported.
         if (is(Tk::amp) || is(Tk::ampamp) || is(Tk::kw_noexcept) || is(Tk::kw_throw) || is(Tk::arrow)) {
