@@ -2028,6 +2028,14 @@ Fable decided the representation (ast.md §6.6); the Opus session wrote the code
   limits. Other libc providers keep their normal `<limits.h>`, and the resource can
   supply compiler limits when a sysroot has no provider ([climits.syn]).
 
+## glibc `<stdint.h>` (#657)
+
+- The integer-constant macros (`__INT64_C(c)` and the rest) are predefined as `c ## L`, GCC's and
+  glibc's spelling, so glibc's identical redefinitions in `<stdint.h>` are valid
+  ([cpp.replace.general]/2). The expansions are Clang's. `<inttypes.h>` still clashes with
+  libycxx's limit macros (#664). Tests: `own/pp/predefined-int-c-redefine` (both targets) and
+  `own/headers/glibc-stdint` (Linux).
+
 ## Templates, ζ step 8: template template parameters and `__make_integer_seq` (#88, #208, 2026-11-19)
 
 Fable decided the representation (ast.md §6.7); the Opus session wrote the code.
