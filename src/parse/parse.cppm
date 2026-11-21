@@ -2193,6 +2193,13 @@ private:
       if (!spec.ok || sema::Types::cv(spec.type) != sema::Cv::none || spec.is_static || spec.is_extern) bad();
       return;
     }
+    if (!spec.ok && !spec.has_type && ps_.qualified_ahead()) {
+      // A diagnosed qualified type is still at the current token.
+      s_.settle_type_access(EntityId::none);
+      bad();
+      if (it_->kind != ItemKind::function) ps_.skip_to_semi();
+      return;
+    }
     bool is_function_def = it_->kind == ItemKind::function;
     u32 declarators = 0;
     do {
@@ -2877,6 +2884,7 @@ private:
     sem.entity = templ;
     sem.flags |= sema::decl_flag::template_;
     sem.template_params = b_.seq(std::span<const ast::TemplateParamSema>(head));
+    sem.constraints = associated_constraints();
     return sem;
   }
 

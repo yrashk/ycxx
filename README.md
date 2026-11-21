@@ -288,7 +288,8 @@ are value-initialized when they have no written default member initializer.
   members of class templates, member function and
   constructor templates, parameter packs and fold expressions, alias templates, template
   template parameters, concepts and requires-expressions in overload resolution, including
-  explicit trailing type packs in ordinary constrained function overloads,
+  explicit trailing type packs in ordinary constrained function overloads and checking constraints
+  when directly naming a non-dependent primary class specialization with explicit type arguments,
   `if constexpr`, deferred template static assertion failures, and two-phase lookup, with
   Itanium names identical to Clang's; Clang's
   `__make_integer_seq`;
@@ -422,7 +423,7 @@ members. [#285](https://github.com/yrashk/ycxx/issues/285)
   virtual dispatch and table emission, virtual base classes,
   inheriting constructors, and base packs or multiple bases in a class template.
 - Member class and alias templates, conversion function templates, and constraints on class
-  templates and their members.
+  templates outside the directly named primary case and constraints on members.
 - Native throwing beyond the Linux `int` slice, typed and multiple handlers, cleanup during
   source-level unwinding, and unwind discovery in ycxx-linked programs.
   [#89](https://github.com/yrashk/ycxx/issues/89) · [#558](https://github.com/yrashk/ycxx/issues/558)
