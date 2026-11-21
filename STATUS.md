@@ -1101,15 +1101,23 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
 - An enumerator is a `Literal` of its enumeration with an underlying integer constant. L1
   preserves the enumeration type. The interpreter, lowering and layout use the underlying
   integer representation. [#262](https://github.com/yrashk/ycxx/issues/262)
-- Linkage names of enumerations, nested ones included, match Clang's.
+- Linkage names of named enumerations, nested ones included, match Clang's.
 - Tests: `tests/own/classes/s4-*enum*`, `s4-scoped-enum`, `s4-unscoped-enum` (spec-only, plus two
   from the review): 7 of 7.
 - Namespace-scope opaque enum declarations ([dcl.enum], #157) supply a complete enum type with a
   fixed underlying type before the enumerator list. Omitted scoped bases default to `int`. Unscoped opaque
   declarations spell their base. Compatible redeclarations and a later definition in the same
   namespace share the nominal type, and the enumerators become visible at the definition.
-- Not yet: opaque declarations in classes or blocks, unnamed enumerations, `E{}` and `E(v)` as
-  expressions (#157), enumerations in a block (#117).
+- Nonempty standalone unnamed unscoped enumeration definitions at namespace scope support fixed
+  and inferred underlying types. An `extern "C"` block leaves the enumerators in the enclosing
+  namespace. The enum's linkage identity uses its namespace, canonical underlying type and first
+  enumerator ([dcl.enum]/12). Signatures that require mangling the unnamed type get a diagnostic.
+  Tests cover both targets in `tests/own/namespace-unnamed-enums/` and the draft example in
+  `tests/draft/dcl/dcl.enum-2.accept.cpp`.
+  [#157](https://github.com/yrashk/ycxx/issues/157) · [Itanium C++ ABI #205](https://github.com/itanium-cxx-abi/cxx-abi/issues/205)
+- Further work includes opaque declarations in classes or blocks, unnamed empty definitions,
+  unnamed definitions in classes or followed by declarators, and `E{}` and `E(v)` expressions
+  (#157). Enumerations in a block are tracked in #117.
 
 ## Classes, δ step 4b: namespaces (#86, 2026-11-18)
 

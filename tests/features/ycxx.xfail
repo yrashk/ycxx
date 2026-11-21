@@ -7,7 +7,6 @@ draft/basic/basic.align-1.accept.cpp 'struct' not supported yet
 draft/basic/basic.contract.eval-1.accept.cpp 'struct' not supported yet
 draft/basic/basic.contract.eval-2.accept.cpp 'contract_assert' is not supported yet
 draft/basic/basic.contract.eval-3.accept.cpp 'contract_assert' not supported yet
-draft/basic/basic.def-1.accept.cpp 'struct' not supported yet
 draft/basic/basic.def.odr-2.reject.cpp errors elsewhere: '&' not supported yet
 draft/basic/basic.def.odr-3.reject.cpp errors elsewhere: '[' not supported yet
 draft/basic/basic.def.odr-4.reject.cpp errors elsewhere: 'auto' is not supported yet
@@ -149,7 +148,6 @@ draft/dcl/dcl.contract.res-1.accept.cpp unexpected identifier 'post'
 draft/dcl/dcl.contract.res-2.accept.cpp 'struct' not supported yet
 draft/dcl/dcl.contract.res-3.reject.cpp errors elsewhere: 'auto' not supported yet
 draft/dcl/dcl.enum-1.reject.cpp errors elsewhere: 'struct' not supported yet
-draft/dcl/dcl.enum-2.accept.cpp 'enum' not supported yet
 draft/dcl/dcl.fct-1.reject.cpp errors elsewhere: preprocessing directives are not supported yet
 draft/dcl/dcl.fct-4.reject.cpp errors elsewhere: preprocessing directives are not supported yet
 draft/dcl/dcl.fct-5.reject.cpp errors elsewhere: preprocessing directives are not supported yet

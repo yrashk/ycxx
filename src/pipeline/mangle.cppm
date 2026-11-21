@@ -307,12 +307,13 @@ class Mangler {
   // A global-namespace class's <source-name>, or its substitution once it has been mangled.
   std::expected<std::string, std::string> class_name(ast::QualType cls) {
     ast::QualType c = in_.types.canon(cls);
-    return entity_name(in_.types.is<ast::TEnum>(c) ? in_.types.get<ast::TEnum>(c).entity : in_.types.get<ast::TClass>(c).entity);
+    if (in_.types.is<ast::TEnum>(c)) return entity_name(in_.types.get<ast::TEnum>(c).entity, true);
+    return entity_name(in_.types.get<ast::TClass>(c).entity, false);
   }
   // A class's or enumeration's <name> as a type: its <source-name>, or, inside a class or a
   // namespace, a <nested-name> whose prefixes are candidates first (§5.1.5.3, §5.1.10). Classes
   // and namespaces are keyed by entity.
-  std::expected<std::string, std::string> entity_name(ast::EntityId e) {
+  std::expected<std::string, std::string> entity_name(ast::EntityId e, bool enumeration) {
     std::uint64_t key = (std::uint64_t{1} << 32) | std::to_underlying(e);
     if (auto s = find(key)) return *s;
     ClassName n = classes_ ? classes_(e) : ClassName{};
@@ -329,7 +330,8 @@ class Mangler {
       candidates_.push_back(key);
       return r;
     }
-    if (n.name.empty() && !n.unnamed_type_ordinal) return std::unexpected("a class whose name is unknown");
+    if (n.name.empty() && !n.unnamed_type_ordinal)
+      return std::unexpected(enumeration ? "an unnamed enumeration in a mangled type" : "a class whose name is unknown");
     if (n.templ != ast::EntityId::none) {
       // The template's name and the specialization are candidates (§5.1.5.3, §5.1.10).
       auto r = specialization_prefix(e, n);
