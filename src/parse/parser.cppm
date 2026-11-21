@@ -3280,8 +3280,9 @@ public:
       return {NodeId::none, begin, begin};
     case Tk::kw_this: bump(); return s_->this_expr(begin, pos());
     case Tk::kw_requires: return requires_expression();
-    case Tk::kw_static_cast: {
-      // `static_cast<T>(e)` ([expr.static.cast]).
+    case Tk::kw_static_cast:
+    case Tk::kw_reinterpret_cast: {
+      const bool reinterpret = is(Tk::kw_reinterpret_cast);
       bump();
       if (!expect(Tk::less)) return {NodeId::none, begin, pos()};
       auto t = type_id();
@@ -3290,7 +3291,8 @@ public:
       Ex e = expression();
       angle_ = saved;
       if (!expect(Tk::r_paren)) return {NodeId::none, begin, pos()};
-      Ex r = s_->static_cast_to(e, *t, begin, /*named_static_cast=*/true);
+      Ex r = reinterpret ? s_->reinterpret_cast_to(e, *t, begin)
+                         : s_->static_cast_to(e, *t, begin, /*named_static_cast=*/true);
       return {r.id, begin, pos(), r.info};
     }
     case Tk::float_lit: {
@@ -3327,7 +3329,6 @@ public:
     case Tk::kw_typeid:
     case Tk::kw_dynamic_cast:
     case Tk::kw_const_cast:
-    case Tk::kw_reinterpret_cast:
     case Tk::kw_throw:
       s_->diag(begin, Diag::not_supported, kind());
       bump();

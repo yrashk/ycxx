@@ -5594,6 +5594,36 @@ public:
     return converted;
   }
 
+  // [expr.reinterpret.cast]: the supported object-pointer/integer conversions.
+  Ex reinterpret_cast_to(Ex e, QualType to, u32 at_) {
+    if (!e.ok()) return e;
+    QualType target = Types::unqualified(to);
+    if (dependent(e) || types().is_dependent(to))
+      return dependent_node({e}, e.begin, e.end, types().is_dependent(to) ? std::nullopt : std::optional(target));
+    Ex v = rvalue(e);
+    if (!v.ok()) return v;
+    QualType from = Types::unqualified(v.type());
+    auto object_pointer = [&](QualType t) {
+      if (!types().is_pointer(t)) return false;
+      QualType pointee = types().pointee(t);
+      return types().is_object(pointee) || types().is_void(pointee);
+    };
+    unsigned pointer_bits = w_->target.pointer_size * 8;
+    if (object_pointer(from) && types().is_integral(target)) {
+      unsigned bits = shape(w_->target, *types().builtin_of(target)).bits;
+      if (bits == pointer_bits) return convert_node(v, ast::ConversionKind::pointer_to_integral, target);
+      if (bits < pointer_bits) {
+        diag(at_, Diag::no_conversion, from, to);
+        return {NodeId::none, e.begin, e.end};
+      }
+    }
+    if (types().is_integral(from) && object_pointer(target) &&
+        shape(w_->target, *types().builtin_of(from)).bits == pointer_bits)
+      return convert_node(v, ast::ConversionKind::integral_to_pointer, target);
+    diag(at_, Diag::not_supported, lex::Tk::kw_reinterpret_cast);
+    return {NodeId::none, e.begin, e.end};
+  }
+
   // [basic.stc.dynamic] makes the ordinary declarations visible even without a header.
   Ex allocation_name_expr(AllocationFunction f, u32 begin, u32 end) {
     const NameId name = ins().names.intern(allocation_name(f));
