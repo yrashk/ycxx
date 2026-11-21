@@ -3266,15 +3266,24 @@ public:
           bump();
           std::vector<QualType> args;
           bool ok = true;
+          std::optional<u32> pack_at;
           int saved = std::exchange(angle_, 0);
-          for (int i = 0; i < tr->arity; ++i) {
+          for (int i = 0; i < tr->arity || (ok && tr->variadic && is(Tk::comma)); ++i) {
             if (i > 0 && !expect(Tk::comma)) ok = false;
             auto t = ok ? type_id() : std::nullopt;
             if (!t) ok = false;
             else args.push_back(*t);
+            if (ok && tr->variadic && is(Tk::ellipsis)) {
+              if (!pack_at) pack_at = pos();
+              bump();
+            }
           }
           angle_ = saved;
           if (!expect(Tk::r_paren) || !ok) return {NodeId::none, begin, pos()};
+          if (pack_at) {
+            s_->diag(*pack_at, Diag::constructibility_pack);
+            return {NodeId::none, begin, pos()};
+          }
           Ex result = s_->trait_expr(tr->trait, args, begin, pos());
           if (tr->trait == lex::TypeTrait::is_trivially_copyable && s_->dependent(result))
             ++deferred_argument_checks_;  // Even an alias that erases the argument must replay it.

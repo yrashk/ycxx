@@ -895,11 +895,52 @@ public:
     }
     return fail(Diag::trivial_copyability_unsupported, operand);
   }
+  // Validate every concrete operand's domain before deciding the predicate ([meta.unary.prop]).
+  Ex constructibility_expr(std::span<const QualType> args, u32 begin, u32 end) {
+    const Types& ts = types();
+    const engine::Loc loc = q_->source_loc({std::to_underlying(item_), loc_base_ + begin}, begin);
+    const auto fail = [&](Diag d, const auto&... args) -> Ex {
+      diag_at(loc, d, args...);
+      return {NodeId::none, begin, end};
+    };
+    bool dependent = false;
+    for (QualType operand : args) {
+      QualType type = ts.canonical(operand);
+      if (ts.is_dependent(type)) {
+        dependent = true;
+        continue;
+      }
+      // Unknown-bound arrays are admitted on their own. Known-bound arrays need a complete element.
+      while (ts.is_array(type) && ts.rec(type).bound_value != ConstId::none)
+        type = ts.canonical(ts.rec(type).inner);
+      if (ts.is_class(type)) {
+        const EntityId cls = ts.class_of(type);
+        if (!q_->is_complete_at_source(cls)) {
+          if (q_->copyability_instantiation_failed(cls)) return {NodeId::none, begin, end};
+          return fail(Diag::constructibility_incomplete, operand);
+        }
+      }
+    }
+    if (dependent) return fail(Diag::constructibility_dependent);
+
+    const QualType target = ts.canonical(args.front());
+    if (ts.is_function(target) || ts.is_void(target)) return bool_literal(false, begin, end);
+    if (args.size() == 1) {
+      if (ts.is_scalar(target)) return bool_literal(true, begin, end);
+      if (ts.is_reference(target)) return bool_literal(false, begin, end);
+    }
+    if (ts.is_arithmetic(target) && std::ranges::all_of(args.subspan(1), [&](QualType arg) {
+          return ts.is_arithmetic(ts.referee(ts.canonical(arg)));
+        }))
+      return bool_literal(args.size() == 2, begin, end);
+    return fail(Diag::constructibility_unsupported, args.front());
+  }
   // `__trait(T…)` that tests types ([meta.unary], [meta.rel]): a `bool` prvalue, value-dependent
   // while a type is dependent for the traits that support it.
   Ex trait_expr(lex::TypeTrait t, std::span<const QualType> args, u32 begin, u32 end) {
     using enum lex::TypeTrait;
     if (t == is_trivially_copyable) return trivial_copyability_expr(args[0], begin, end);
+    if (t == is_constructible) return constructibility_expr(args, begin, end);
     QualType b = builtin(Builtin::bool_);
     auto structural_trait = [&](std::optional<ConstId> v) {
       if (v) return literal(b, *v, ValueCategory::prvalue, begin, end);
