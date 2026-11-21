@@ -47,7 +47,9 @@ build/bin/ycxx cxx hello.cpp -o hello && ./hello
 
 Single-expression `auto(x)` and `auto{x}` perform scalar and pointer decay-copy, including
 array and function decay. Function-template bodies can defer supported dependent operands to
-instantiation. [#286](https://github.com/yrashk/ycxx/issues/286)
+instantiation. Concrete constant template arguments can use braced conversions such as
+`Tag<auto{7}>` and integer-literal-led parenthesized conversions such as `Tag<auto(7)>`.
+[#286](https://github.com/yrashk/ycxx/issues/286)
 
 **Preprocess binary resources.** Both targets support `#embed` and `__has_embed` with the standard
 parameters. [#125](https://github.com/yrashk/ycxx/issues/125)
@@ -196,7 +198,8 @@ Automatic declarations such as `Point p(3, 4);` can initialize flat aggregates w
 arithmetic fields. Supplied expressions initialize the fields in declaration order. Omitted
 fields use their default member initializer when available and otherwise get zero. A runtime
 declaration can also initialize one flat public direct base from an exact-type lvalue or an
-unqualified braced prvalue such as `B{7}`, with an explicit initializer for each derived field.
+unqualified braced prvalue such as `B{7}`. Omitted trailing arithmetic fields of that aggregate
+are value-initialized when they have no written default member initializer.
 [#301](https://github.com/yrashk/ycxx/issues/301)
 
 **Language on macOS.** Programs can use:
@@ -230,8 +233,10 @@ unqualified braced prvalue such as `B{7}`, with an explicit initializer for each
 - ordinary scalar `new` and single-object `delete` for integral and pointer objects, including
   cv-qualified objects. Scalar allocation uses the global Itanium allocation functions.
   Syntax checking also covers one-dimensional scalar `new T[n]` and `delete[] p`.
-  On Linux x86-64, `delete[] p` releases one-dimensional arrays of integral or ordinary pointer
-  elements through the unsized global deallocator, including zero-length arrays.
+  On Linux x86-64, ordinary functions with cleanup-free unwind frames can default-initialize
+  one-dimensional integral and ordinary pointer arrays with a literal bound. The allocation
+  returns the original address. `delete[] p` releases it through the unsized global deallocator,
+  including for zero-length arrays.
   The usual aligned scalar allocation and deallocation signatures support explicit calls with
   `std::align_val_t`. Written nonthrowing global scalar and array overloads with a final
   `const Tag&` support explicit calls, including `std::nothrow_t` and user-defined class tags.

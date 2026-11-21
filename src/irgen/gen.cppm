@@ -81,6 +81,7 @@ struct FunctionInput {
   ast::EntityId atexit = ast::EntityId::none, dso = ast::EntityId::none;
   bool hosted_catch_all = false;  // the native frontend has certified this occurrence
   bool native_array_delete = false;  // the backend's Linux x86-64 cookie-free array deletion
+  bool native_array_new = false;  // the backend's Linux x86-64 allocation in a certified frame
 };
 
 struct FunctionIr {
@@ -1383,7 +1384,7 @@ class Gen {
       delete_object(a);
       return std::nullopt;
     }
-    if (is<ast::NewArray>(a)) throw Unsupported{"array allocation"};
+    if (is<ast::NewArray>(a)) return new_array(a);
     if (is<ast::DeleteArray>(a)) {
       delete_array(a);
       return std::nullopt;
@@ -1745,6 +1746,14 @@ class Gen {
     std::uint64_t types[] = {word(ty(t))};
     stateful(ir::Op::obj__begin, {}, objects, types);
     return object;
+  }
+
+  ValueId new_array(At a) {
+    const auto n = get<ast::NewArray>(a);
+    if (!fn_.native_array_new || n.allocation.id == NodeId::none) throw Unsupported{"array allocation"};
+    // Scalar default-initialization leaves the bytes alone. The allocator returned the array address.
+    ValueId storage = rvalue(child(a, n.allocation));
+    return pure(ir::Op::ptr_cast, n.info.type, {storage}, {word(ty(n.info.type))});
   }
 
   void deallocate_if_nonnull(ValueId addr, auto&& deallocate) {
