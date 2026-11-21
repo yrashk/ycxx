@@ -2487,18 +2487,22 @@ public:
     });
   }
   // A dependent construct over `ops` in [begin, end): of type `t` when only its value depends on
-  // a template parameter, else of the dependent type.
+  // a template parameter, else of the dependent type. A wrapper cannot give an unrepresented
+  // operand value a canonical template argument identity.
   Ex dependent_node(std::span<const Ex> ops, u32 begin, u32 end, std::optional<QualType> t = std::nullopt,
-                    ValueCategory cat = ValueCategory::prvalue) {
+                    ValueCategory cat = ValueCategory::prvalue, u8 flags = 0) {
     std::vector<Child> cs;
     for (const Ex& o : ops)
-      if (o.ok()) cs.push_back({o.id, o.begin >= begin ? o.begin - begin : 0});
-    ExprInfo info{t ? *t : builtin(Builtin::dependent), cat, expr_flag::dependent};
+      if (o.ok()) {
+        cs.push_back({o.id, o.begin >= begin ? o.begin - begin : 0});
+        flags |= o.info.flags & expr_flag::unrepresented_value;
+      }
+    ExprInfo info{t ? *t : builtin(Builtin::dependent), cat, u8(expr_flag::dependent | flags)};
     return node(ast::Dependent{info, b_->list(cs)}, begin, end, info);
   }
   Ex dependent_node(std::initializer_list<Ex> ops, u32 begin, u32 end, std::optional<QualType> t = std::nullopt,
-                    ValueCategory cat = ValueCategory::prvalue) {
-    return dependent_node(std::span<const Ex>(ops.begin(), ops.size()), begin, end, t, cat);
+                    ValueCategory cat = ValueCategory::prvalue, u8 flags = 0) {
+    return dependent_node(std::span<const Ex>(ops.begin(), ops.size()), begin, end, t, cat, flags);
   }
   // The offsets of the unqualified calls whose candidates depend on the arguments, in a template's
   // definition ([temp.dep.candidate]); an instantiation adds argument-dependent lookup at its point.
@@ -5844,22 +5848,36 @@ public:
     return convert_node(e, ast::ConversionKind::lvalue_to_rvalue, Types::unqualified(t));
   }
 
-  // [expr.type.conv], [dcl.type.auto.deduct]: concrete scalar decay-copy.
-  Ex decay_copy(Ex operand, u32 at_) {
+  // [expr.type.conv], [dcl.type.auto.deduct]: scalar decay-copy.
+  Ex decay_copy(Ex operand, u32 begin, u32 end, bool replay_body) {
     if (!operand.ok()) return operand;
-    if (!dependent(operand)) {
+    const auto supported = [&](QualType type) {
+      return types().is_scalar(type) && !types().is_member_pointer(type);
+    };
+    if (dependent(operand)) {
+      if (replay_body) {
+        // [temp.dep.expr]: a value-dependent operand can still determine the prvalue type.
+        // [temp.deduct.call]: decay the operand's type without evaluating or converting it.
+        std::optional<QualType> type;
+        if (!types().is_dependent(operand.type())) type = ast::adjust_parameter(ins(), types().canonical(operand.type()));
+        if (!type || supported(*type)) {
+          // The tokens will be replayed. This node supplies no canonical template argument value.
+          return dependent_node({operand}, begin, end, type, ValueCategory::prvalue, expr_flag::unrepresented_value);
+        }
+      }
+    } else {
       if (types().is_array(operand.type()) && !operand.glvalue())
         operand = materialize(operand, operand.type(), false);
       Ex value = rvalue(operand);
       if (!value.ok()) return value;
       QualType type = Types::unqualified(value.type());
-      if (types().is_scalar(type) && !types().is_member_pointer(type)) {
+      if (supported(type)) {
         if (value.info.bit_width)
           return convert_node(value, ast::ConversionKind::integral, type);
-        return convert(value, type, at_);
+        return convert(value, type, begin);
       }
     }
-    diag(at_, Diag::not_supported, lex::Tk::kw_auto);
+    diag(begin, Diag::not_supported, lex::Tk::kw_auto);
     return {NodeId::none, operand.begin, operand.end};
   }
 
