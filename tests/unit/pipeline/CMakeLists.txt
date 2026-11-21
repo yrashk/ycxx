@@ -14,7 +14,10 @@ ycxxc_unit_test(pipeline_incremental incremental_test.cpp ycxxc_pipeline)
 ycxxc_unit_test(pipeline_elf_executable elf_executable_test.cpp ycxxc_pipeline)
 add_test(NAME unit.affine_permit
   COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/affine_permit.py
-          $<TARGET_FILE:ycxxc> ${PROJECT_SOURCE_DIR}/examples/affine)
+          $<TARGET_FILE:ycxxc> ${PROJECT_SOURCE_DIR}/examples/affine --target=arm64-apple-darwin)
+add_test(NAME unit.ownership_policy
+  COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/ownership_policy.py
+          $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER} ${PROJECT_SOURCE_DIR}/include ${PROJECT_SOURCE_DIR}/examples/affine)
 add_test(NAME unit.dependent_fabsl
   COMMAND ${CMAKE_COMMAND} -DYCXX=$<TARGET_FILE:ycxxc>
           -P ${CMAKE_CURRENT_SOURCE_DIR}/dependent_fabsl.cmake)

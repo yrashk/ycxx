@@ -73,9 +73,9 @@ YCXX_BUILD_DIR=build-release tools/build`, [docs/BUILDING.md](docs/BUILDING.md#r
 builds and passes its tests on both hosts, and compiles a 40,000-statement function in 0.4 s
 instead of Debug's 5.3 s on an M-series Mac ([#726](https://github.com/yrashk/ycxx/issues/726)).
 
-**Check affine permits and linear transactions.** Opt in with `-fcheck-affine` in a syntax
-check or a build. The [prototype](docs/design/affine-permit.md) checks uses across branches
-and loops and requires explicit completion for each transaction.
+**Check affine and linear ownership.** Opt in with `-fcheck-affine` in a syntax check or a
+build. The [prototype](docs/design/affine-permit.md) checks registered resource policies
+across branches and loops. Applications can combine reusable C++ policy fragments.
 
 Single-expression `auto(x)` and `auto{x}` perform scalar and pointer decay-copy, including
 array and function decay. Non-type template parameters can have enumeration types

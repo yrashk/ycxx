@@ -38,9 +38,10 @@ the adapter that owns the real payload. Scope the first version to explicit borr
 escape a call. Use type constraints for rights and effect requirements expressed through typed
 interfaces. Keep operations on existing domain types, such as `commit`, `rollback`, and `write`.
 
-Register contracts by canonical type and selected declaration. The initial spelling can be an
-ordinary namespace-scope type alias in an API header included by its consumers. A typed function
-pointer identifies the selected overload. This is proposed syntax using standard C++ templates.
+Register contracts by canonical type and selected declaration. Libraries publish reusable
+`policy<...>` types. An application activates one or more fragments with a namespace-scope
+alias of `use_policy<...>` in a translation unit. A typed function pointer identifies the
+selected overload. The public header is `include/ycxx/ownership.hpp`.
 
 ```cpp
 using transaction_policy = own::policy<
@@ -48,7 +49,16 @@ using transaction_policy = own::policy<
     own::creates<decltype(&db::begin), &db::begin>,
     own::consumes<decltype(&db::commit), &db::commit>,
     own::consumes<decltype(&db::rollback), &db::rollback>>;
+
+using check_transactions = own::use_policy<transaction_policy>;
 ```
+
+Fragments may contain other fragments. Composition is order-independent for compatible entries.
+Equivalent declarations deduplicate. Conflicting kinds or operation contracts report the
+declaration and its previous origin. The registry normalizes an active fragment once and uses
+ordered lookup by canonical type and entity. A fragment can be shared across headers or left
+inactive. Registry and body results are engine queries. A source edit that leaves the normalized
+registry equal can reuse checks for unchanged bodies.
 
 The first contract vocabulary covers creation, observation, transfer, and terminal consumption.
 Extend it with parameter and result positions, receiver effects, borrow lifetimes, and outcomes as
@@ -58,7 +68,9 @@ where the checker can see their bodies and recognize the ownership primitives th
 for an opaque implementation is a trust decision. The metadata for an existing dependency can
 live in an adapter header. Portable dynamic enforcement requires routing the operation through a
 wrapper that tracks the resource. Reflection annotations can provide another spelling for the same
-metadata when available. [YCXX reflection](https://github.com/yrashk/ycxx/issues/324)
+metadata. Class and operation declaration annotations are tracked by
+[#662](https://github.com/yrashk/ycxx/issues/662). The complete reflection surface is tracked by
+[#324](https://github.com/yrashk/ycxx/issues/324).
 
 ## Enforcement by ordinary C++, the runtime, and YCXX
 
@@ -112,7 +124,7 @@ ownership in the captured continuation. Allow only copyable captures in its firs
    declarations. Ship an affine permit, a strict transaction, and a project-local resource as
    conformance cases. Include a separately compiled runtime adapter. Exercise the real destruction
    and move behavior with GCC and Clang. Verify that the same source can pass checked YCXX native
-   builds once its calling convention is supported.
+   builds once its calling convention is supported. [Native indirect results #661](https://github.com/yrashk/ycxx/issues/661)
 2. **Compositional ownership.** Extend the existing typed-body graph and worklist to owned fields,
    arrays, active variants, captures, standard container adapters, move construction and assignment,
    and lifetime and cleanup on unwind. Verify contracts for parameters, receivers, and results.

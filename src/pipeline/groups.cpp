@@ -14,6 +14,7 @@ import ycxx.pp;
 import ycxx.sema;
 import :back;
 import :front;
+import :ownership_policy;
 
 namespace ycxx::pipeline {
 
@@ -31,6 +32,7 @@ struct GroupResult {
   std::vector<GroupMessage> messages;
   std::vector<std::pair<EntityId, ast::Loc>> declared;
   std::vector<BodyAt> bodies;
+  std::vector<OwnershipPolicySite> ownership_policies;
   std::vector<ClassShape> classes;
   std::vector<EnumShape> enums;
   std::set<EntityId> uncertain_layouts;  // includes entities with no shape in this group
@@ -300,9 +302,13 @@ engine::query_task<SemaResult> TuSema::run(engine::Ctx& cx, TuId tu) {
           auto dr = world.ins.ast.get<ast::Declarator>(c.id);
           if (dr.decl < decls.size()) at[dr.decl] = c.at;
         }
-      for (std::size_t i = 0; i < decls.size(); ++i)
+      for (std::size_t i = 0; i < decls.size(); ++i) {
         if (decls[i].entity != EntityId::none && declared_here.insert(decls[i].entity).second)
           r.declared.emplace_back(decls[i].entity, ast::Loc{program.id(k), at[i]});
+        if (decls[i].kind == ast::DeclKind::type_alias && program.in_global_scope(k))
+          if (const auto policy = ownership_policy_alias(world, decls[i].type))
+            r.ownership_policies.push_back({*policy, {program.id(k), at[i]}});
+      }
       if (const ast::BodySema* body = program.analysed_body(k); body && body->tree != ast::NodeId::none && it.has_body())
         r.bodies.push_back({program.id(k), it.decl_length(), body->tree});
     }
@@ -409,6 +415,7 @@ engine::query_task<SemaResult> TuSema::run(engine::Ctx& cx, TuId tu) {
     for (const auto& [e, at] : r.declared)
       if (declared_seen.insert(std::to_underlying(e)).second) out.declared.emplace_back(e, at);
     out.bodies.insert(out.bodies.end(), r.bodies.begin(), r.bodies.end());
+    out.ownership_policies.append_range(r.ownership_policies);
     for (const ClassShape& c : r.classes)
       if (shaped.insert(c.entity).second) out.shapes.classes.push_back(c);
     for (const EnumShape& e : r.enums)

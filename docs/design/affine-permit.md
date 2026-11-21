@@ -4,7 +4,9 @@ See [the portable ownership library proposal](ownership-library.md) for user-def
 runtime enforcement, capabilities, and effects.
 
 `-fcheck-affine` checks the example protocol in `examples/affine/permit.hpp`. The package uses
-ordinary C++. The compiler selects the protocol by resolved declaration and canonical signature.
+ordinary C++. Its header activates a policy defined with `include/ycxx/ownership.hpp`. Projects
+can combine their own fragments in a namespace-scope alias of `use_policy<...>`. The compiler
+selects operations by resolved declaration and canonical signature.
 `issue()` creates a permit, `inspect(const Permit&)` observes one, and `redeem(Permit&&)` consumes
 one. Forming an xvalue leaves the permit live. The package supplies trusted operation bodies for
 this experiment.
@@ -72,3 +74,8 @@ void finish(bool success) {
 
 Removing `rollback` leaves the transaction live on the false branch. The check reports the
 scope exit. A transfer into another local moves the obligation to that local and invalidates `tx`.
+
+`examples/affine/runtime_transaction.hpp` uses the portable runtime guard from
+`include/ycxx/ownership/runtime.hpp`. Ordinary C++ compilers can compile the adapter. Its guard
+reports unfinished linear ownership and repeated consumption on executed paths. With
+`-fcheck-affine`, YCXX also checks callers against the adapter's activated policy.

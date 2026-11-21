@@ -10,15 +10,18 @@ import ycxx.sema;
 import :back;
 import :front;
 import :lines;
+import :ownership_policy;
 
 namespace ycxx::pipeline {
 
 // Body-relative offsets let the engine reuse the finding if the whole function moves.
 struct OwnershipBody {
+  TuId tu;
   EntityId function;
   QualType type;
   ast::NodeId tree;
   ast::SeqId<ast::LocalRec> locals;
+  QualType this_type{};  // a pointer type for nonstatic members
   bool linux_target;
   bool operator==(const OwnershipBody&) const = default;
 };
@@ -30,7 +33,6 @@ struct OwnershipFinding {
   bool previous_was_transfer = false;
 };
 
-enum class Ownership { ordinary, affine, linear };
 enum class OwnershipEvent { branch, initialize, observe, consume, transfer, leave, may_unwind, unsupported };
 
 struct OwnershipFlow {
@@ -64,10 +66,12 @@ namespace {
 using Flow = OwnershipFlow;
 using Point = Flow::Point;
 using Event = OwnershipEvent;
+using Effect = OwnershipEffect;
 
 class OwnershipFlowBuilder {
  public:
-  OwnershipFlowBuilder(const sema::World& world, OwnershipBody body) : world_(world), body_(body) {
+  OwnershipFlowBuilder(const sema::World& world, const OwnershipPolicy& policy, OwnershipBody body)
+      : world_(world), policy_(policy), body_(body) {
     for (const auto& local : world_.ins.seqs.elements(body.locals)) {
       const auto kind = ownership(local.type);
       flow_.locals.push_back({local.name, kind, (local.flags & sema::local_flag::parameter) != 0});
@@ -77,7 +81,7 @@ class OwnershipFlowBuilder {
   }
 
   Flow build() {
-    if (effect(body_.function) != Effect::unknown) return {};
+    if (policy_.effect(body_.function) != Effect::unknown || resource_lifetime_body()) return {};
     const auto signature = world_.types.rec(body_.type);
     if (mentions_owner(signature.inner) || std::ranges::any_of(signature.params, [&](QualType param) {
           return mentions_owner(param) && ownership(param) == Ownership::ordinary;
@@ -98,7 +102,6 @@ class OwnershipFlowBuilder {
   }
 
  private:
-  enum class Effect { unknown, issue, observe, consume, transfer };
   struct Cleanup {
     ast::u32 local;
     bool throwing_destructor;
@@ -118,20 +121,16 @@ class OwnershipFlowBuilder {
     const Loop* loop;
   };
 
-  bool protocol_namespace(EntityId id) const {
-    const auto* ns = world_.entities.find(id);
-    return ns && ns->kind == sema::EntityKind::namespace_ && ns->scope == EntityId::none &&
-           world_.ins.names.spelling(ns->name) == "ycxx_affine";
+  Ownership ownership(QualType type) const {
+    return policy_.ownership(world_.types.canonical(type));
   }
 
-  Ownership ownership(QualType type) const {
-    if (!world_.types.is_class(type)) return Ownership::ordinary;
-    const auto* cls = world_.entities.find(world_.types.class_of(type));
-    if (!cls || !protocol_namespace(cls->scope)) return Ownership::ordinary;
-    const auto name = world_.ins.names.spelling(cls->name);
-    if (name == "Permit") return Ownership::affine;
-    if (name == "Transaction") return Ownership::linear;
-    return Ownership::ordinary;
+  // The registered resource's construction and cleanup implement the adapter's contract.
+  bool resource_lifetime_body() const {
+    if (body_.this_type == QualType{}) return false;
+    const auto* function = world_.entities.find(body_.function);
+    return function && (function->kind == sema::EntityKind::constructor || function->kind == sema::EntityKind::destructor) &&
+           ownership(world_.types.rec(body_.this_type).inner) != Ownership::ordinary;
   }
 
   bool mentions_owner(QualType type) const {
@@ -143,34 +142,6 @@ class OwnershipFlowBuilder {
     if (t.kind == function)
       return mentions_owner(t.inner) || std::ranges::any_of(t.params, [&](QualType p) { return mentions_owner(p); });
     return false;
-  }
-
-  Effect effect(EntityId id) const {
-    const auto* entity = world_.entities.find(id);
-    if (!entity || entity->kind != sema::EntityKind::function || entity->templ != EntityId::none ||
-        !protocol_namespace(entity->scope)) return Effect::unknown;
-    const auto fn = world_.types.rec(entity->type);
-    if (fn.kind != sema::TypeKind::function || !fn.fn_noexcept || fn.variadic) return Effect::unknown;
-    const auto name = world_.ins.names.spelling(entity->name);
-    const auto result = ownership(fn.inner);
-    if (fn.params.empty()) {
-      if ((name == "issue" && result == Ownership::affine) || (name == "begin" && result == Ownership::linear))
-        return Effect::issue;
-      return Effect::unknown;
-    }
-    if (fn.params.size() != 1) return Effect::unknown;
-    const auto arg = world_.types.rec(fn.params.front());
-    if (arg.kind != sema::TypeKind::reference) return Effect::unknown;
-    const auto owner = ownership(arg.inner);
-    const auto cv = ast::cv_of(arg.inner);
-    if (name == "inspect" && owner == Ownership::affine && !arg.rvalue_ref && cv == ast::Cv::const_ &&
-        world_.types.is_void(fn.inner)) return Effect::observe;
-    if (!arg.rvalue_ref || cv != ast::Cv::none) return Effect::unknown;
-    if (name == "transfer" && owner == Ownership::linear && result == Ownership::linear) return Effect::transfer;
-    if (!world_.types.is_void(fn.inner)) return Effect::unknown;
-    if ((name == "redeem" && owner == Ownership::affine) ||
-        ((name == "commit" || name == "rollback") && owner == Ownership::linear)) return Effect::consume;
-    return Effect::unknown;
   }
 
   // The red cursor distinguishes the source occurrences of shared AST nodes.
@@ -222,7 +193,7 @@ class OwnershipFlowBuilder {
     if (call.callee.id == ast::NodeId::none) return Effect::unknown;
     const ast::Red callee = unparenthesized(at(node, call.callee));
     if (!callee.is<ast::DeclRef>() || callee.get<ast::DeclRef>().entity != call.function) return Effect::unknown;
-    return effect(call.function);
+    return policy_.effect(call.function);
   }
 
   std::optional<ast::u32> operation_argument(const ast::Red& node, const ast::Call& call) const {
@@ -374,11 +345,11 @@ class OwnershipFlowBuilder {
             return add({Event::transfer, initializer.offset(), next, Flow::exit, var.local, *source});
       }
     }
-    if (owner == Ownership::linear)
-      return unsupported(node.offset(), "a linear transaction local must be initialized by begin() or transfer() from a named owner");
+    if (owner != Ownership::ordinary)
+      return unsupported(node.offset(), "an owner must be initialized by a registered factory or transfer from a named owner");
     const auto& locals = world_.ins.seqs;
     if (mentions_owner(locals.at(body_.locals, var.local).type))
-      return unsupported(node.offset(), "an affine permit local must be initialized directly by issue() and resource aliases are unsupported");
+      return unsupported(node.offset(), "resource aliases are outside the checked protocol");
     if (throwing_destructor(var.destructor)) next = add({Event::initialize, node.offset(), next, Flow::exit, var.local});
     return lower_child(node, var.init, next, context);
   }
@@ -487,6 +458,7 @@ class OwnershipFlowBuilder {
   }
 
   const sema::World& world_;
+  const OwnershipPolicy& policy_;
   OwnershipBody body_;
   Flow flow_;
   bool has_owner_ = false;
@@ -552,7 +524,7 @@ class OwnershipAnalysis {
   std::string description(ast::u32 local) const {
     const auto& owner = flow_.locals[local];
     const auto name = in_.names.spelling(owner.name);
-    return std::format("{} '{}'", owner.ownership == Ownership::linear ? "linear transaction" : "affine permit",
+    return std::format("{} '{}'", owner.ownership == Ownership::linear ? "linear resource" : "affine resource",
                        name.empty() ? "<unnamed>" : name);
   }
 
@@ -594,7 +566,7 @@ class OwnershipAnalysis {
       break;
     case Event::leave:
       if (flow_.locals[step.local].ownership == Ownership::linear && (slot.possible & live))
-        return OwnershipFinding{step.offset, description(step.local) + " may leave its scope without commit or rollback"};
+        return OwnershipFinding{step.offset, description(step.local) + " may leave its scope without being consumed or transferred"};
       if (step.throwing_destructor && (slot.possible & live))
         if (auto problem = may_unwind(step.offset, state)) return problem;
       slot = {absent};
@@ -610,12 +582,24 @@ class OwnershipAnalysis {
 
 }  // namespace
 
+struct OwnershipRegistryFor {
+  using Key = TuId;
+  using Value = OwnershipRegistry;
+  static engine::query_task<Value> run(engine::Ctx& cx, Key tu) {
+    const auto& front = co_await cx.fetch<TuFront>(tu);
+    if (front.ownership_policies.empty()) co_return Value{};
+    const auto& source = cx.fetch<pp::SourceOf>(pp::FileId{tu.n});
+    co_return read_ownership_policies(*universe().world_for(*source.config.target), front.ownership_policies);
+  }
+};
+
 struct BuildOwnershipFlow {
   using Key = OwnershipBody;
   using Value = OwnershipFlow;
-  static engine::query_task<Value> run(engine::Ctx&, Key body) {
+  static engine::query_task<Value> run(engine::Ctx& cx, Key body) {
+    const auto& registry = co_await cx.fetch<OwnershipRegistryFor>(body.tu);
     const auto& target = body.linux_target ? ast::x86_64_linux : ast::aarch64_darwin;
-    co_return OwnershipFlowBuilder(*universe().world_for(target), body).build();
+    co_return OwnershipFlowBuilder(*universe().world_for(target), registry.policy, body).build();
   }
 };
 
@@ -637,7 +621,9 @@ struct CheckAffine {
 engine::query_task<CheckAffine::Value> CheckAffine::run(engine::Ctx& cx, TuId tu) {
   const FrontResult& front = co_await cx.fetch<TuFront>(tu);
   if (front.has_errors()) co_return Value{};
-  if (front.unit.virtual_emission_blocked)
+  const auto& registry = co_await cx.fetch<OwnershipRegistryFor>(tu);
+  if (registry.policy.resources.empty() && registry.problems.empty()) co_return Value{};
+  if (front.unit.virtual_emission_blocked && registry.problems.empty())
     co_return Value{{std::nullopt, true, "ownership analysis is unavailable for this unit's virtual declarations", {}}};
 
   const pp::FileId file{tu.n};
@@ -645,19 +631,30 @@ engine::query_task<CheckAffine::Value> CheckAffine::run(engine::Ctx& cx, TuId tu
   const bool linux_target = source.config.target->triple == ast::x86_64_linux.triple;
   std::vector<const FunctionDef*> definitions;
   std::vector<OwnershipBody> bodies;
-  for (const auto& def : front.unit.functions) {
-    if (def.body.tree == ast::NodeId::none) continue;
-    definitions.push_back(&def);
-    bodies.push_back({def.entity, def.decl.type, def.body.tree, def.body.locals, linux_target});
-  }
+  if (registry.problems.empty())
+    for (const auto& def : front.unit.functions) {
+      if (def.body.tree == ast::NodeId::none) continue;
+      definitions.push_back(&def);
+      bodies.push_back({tu, def.entity, def.decl.type, def.body.tree, def.body.locals,
+                        def.this_type.value_or(QualType{}), linux_target});
+    }
   const auto findings = co_await cx.par_map<CheckOwnershipBody>(bodies);
-  if (std::ranges::none_of(findings, [](const auto& finding) { return finding.get().has_value(); })) co_return Value{};
+  if (registry.problems.empty() && std::ranges::none_of(findings, [](const auto& finding) { return finding.get().has_value(); }))
+    co_return Value{};
 
   const pp::Region& region = co_await cx.fetch<pp::Pp>(file);
   const items::Items& items = co_await cx.fetch<items::RegionItems>(file);
   SourceLocations locations(cx, source, file, region, items);
   auto& in = *universe().in;
   Value messages;
+  for (const auto& problem : registry.problems) {
+    const auto at = locations.at(in, problem.at);
+    std::string text = problem.message;
+    if (problem.previous)
+      if (const auto previous = locations.at(in, *problem.previous))
+        text += std::format(" (previous declaration at {})", previous->where);
+    messages.push_back({at ? std::optional(at->offset) : std::nullopt, true, std::move(text), at ? at->where : ""});
+  }
   for (std::size_t i = 0; i < findings.size(); ++i) {
     const auto& result = findings[i].get();
     if (!result) continue;

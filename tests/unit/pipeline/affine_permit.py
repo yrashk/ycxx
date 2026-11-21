@@ -74,7 +74,7 @@ with tempfile.TemporaryDirectory() as directory:
         }
     """)
     run(double, "-fsyntax-only")
-    spent = "affine permit 'p' may already have been consumed"
+    spent = "affine resource 'p' may already have been consumed"
     stderr = run(double, "-fcheck-affine", "-fsyntax-only", error=spent)
     assert ":6:" in stderr and f"previous consumption at {double}:5:" in stderr, stderr
     rejected = root / "rejected.o"
@@ -103,7 +103,7 @@ with tempfile.TemporaryDirectory() as directory:
     escaped = source("escape", """\
         void evade() { auto p = issue(); const Permit& alias = p; }
     """)
-    run(escaped, "-fcheck-affine", "-fsyntax-only", error="affine permit local must be initialized directly")
+    run(escaped, "-fcheck-affine", "-fsyntax-only", error="resource aliases are outside the checked protocol")
 
     overload = source("overload", """\
         namespace ycxx_affine { void inspect(Permit&) noexcept; }
@@ -166,7 +166,7 @@ with tempfile.TemporaryDirectory() as directory:
     run(native_transaction, "-fcheck-affine", "-c", "-o", str(linear_obj))
     assert linear_obj.is_file()
 
-    unclosed = "linear transaction '{}' may leave its scope without commit or rollback"
+    unclosed = "linear resource '{}' may leave its scope without being consumed or transferred"
     transaction_errors = (
         ("early_return", """\
             void early_return(bool stop) {
@@ -199,7 +199,7 @@ with tempfile.TemporaryDirectory() as directory:
               auto tx = begin();
               while (true) commit(static_cast<Transaction&&>(tx));
             }
-        """, "linear transaction 'tx' may already have been consumed"),
+        """, "linear resource 'tx' may already have been consumed"),
         ("unrelated_unwind", """\
             int unrelated();
             void safe(int) noexcept;
@@ -208,13 +208,13 @@ with tempfile.TemporaryDirectory() as directory:
               safe(unrelated());
               commit(static_cast<Transaction&&>(tx));
             }
-        """, "operation may unwind while linear transaction 'tx' is live"),
+        """, "operation may unwind while linear resource 'tx' is live"),
         ("explicit_throw", """\
             void explicit_throw() {
               auto tx = begin();
               throw 1;
             }
-        """, "operation may unwind while linear transaction 'tx' is live"),
+        """, "operation may unwind while linear resource 'tx' is live"),
         ("transferred_from", """\
             void transferred_from() {
               auto tx = begin();
@@ -222,7 +222,7 @@ with tempfile.TemporaryDirectory() as directory:
               commit(static_cast<Transaction&&>(tx));
               commit(static_cast<Transaction&&>(other));
             }
-        """, "linear transaction 'tx' may already have transferred its obligation"),
+        """, "linear resource 'tx' may already have transferred its obligation"),
         ("transferred_to", """\
             void transferred_to() {
               auto tx = begin();
