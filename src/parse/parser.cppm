@@ -2252,7 +2252,7 @@ public:
     if (!c.ok()) return std::nullopt;
     sema::Evaluated v = sema::Evaluator(*s_, questions()).evaluate(c);
     if (!v.value) {
-      if (!v.copyability_failure) s_->diag(e.begin, Diag::not_constant, v.reason);
+      if (!v.type_trait_failure) s_->diag(e.begin, Diag::not_constant, v.reason);
       return std::nullopt;
     }
     return *v.value;
@@ -2548,7 +2548,7 @@ public:
     sema::Evaluated r = sema::Evaluator(*s_, questions()).evaluate(v);
     if (r.dependent) return Truth::dependent;
     if (!r.value) {
-      if (!r.copyability_failure) s_->diag(at, Diag::constraint_not_constant, r.reason);
+      if (!r.type_trait_failure) s_->diag(at, Diag::constraint_not_constant, r.reason);
       return Truth::invalid;
     }
     return s_->world().values.as_signed(*r.value) != 0 ? Truth::yes : Truth::no;
@@ -3276,6 +3276,76 @@ public:
     return s_->va_call(op, cursor, source, fetch, begin, pos());
   }
 
+  std::optional<sema::Sema::ConstructibilityOperand> constructibility_operand(bool target) {
+    const u32 at = pos();
+    struct Unframe {
+      sema::Sema* s;
+      decltype(s->hide_frames()) saved;
+      bool on;
+      ~Unframe() {
+        if (on) s->restore_frames(std::move(saved));
+      }
+    } unframe{s_, {}, s_->in_expansion() && argument_expands()};
+    if (unframe.on) unframe.saved = s_->hide_frames();
+
+    s_->begin_pattern();
+    struct EndPattern {
+      sema::Sema* s;
+      bool ended = false;
+      ~EndPattern() {
+        if (!ended) s->end_pattern(false, 0, 0, false);
+      }
+    } guard{s_};
+    auto type = type_id();
+    const u32 ellipsis = pos();
+    const bool expanded = accept(Tk::ellipsis);
+    auto packs = s_->end_pattern(expanded, at, ellipsis, false);
+    guard.ended = true;
+    if (!type) return std::nullopt;
+    auto t = s_->templates();
+    const auto arg = t.type_arg(*type);
+    const bool names_pack = s_->names_pack(arg);
+    if (expanded) {
+      if (target) s_->diag(ellipsis, Diag::constructibility_target_pack);
+      else if (names_pack) return sema::Sema::ConstructibilityOperand{t.expansion_of(arg).type, at};
+      else s_->diag(ellipsis, packs.empty() ? Diag::expansion_without_pack : Diag::constructibility_pack);
+      return std::nullopt;
+    }
+    if (!packs.empty() && (names_pack || !s_->in_expansion())) {
+      s_->diag(at, Diag::unexpanded_pack, s_->pack_name(packs.front()));
+      return std::nullopt;
+    }
+    return sema::Sema::ConstructibilityOperand{*type, at};
+  }
+
+  Ex constructibility_expression(u32 begin) {
+    bump();
+    bump();
+    struct Restore {
+      int& angle;
+      int saved_angle;
+      bool& packs;
+      bool saved_packs;
+      ~Restore() {
+        angle = saved_angle;
+        packs = saved_packs;
+      }
+    } restore{angle_, std::exchange(angle_, 0), packs_in_declarators_, std::exchange(packs_in_declarators_, false)};
+    // The outer ellipsis belongs to the operand. Nested declarators still parse their own packs.
+    std::vector<sema::Sema::ConstructibilityOperand> args;
+    bool ok = true;
+    bool target = true;
+    do {
+      if (auto operand = constructibility_operand(target)) args.push_back(*operand);
+      else ok = false;
+      target = false;
+    } while (accept(Tk::comma));
+    if (!expect(Tk::r_paren) || !ok) return {NodeId::none, begin, pos()};
+    Ex result = s_->constructibility_expr(args, begin, pos());
+    if (s_->dependent(result)) ++deferred_argument_checks_;  // An alias can discard this argument.
+    return result;
+  }
+
   // primary-expression ([expr.prim]).
   Ex primary_expression() {
     u32 begin = pos();
@@ -3359,31 +3429,20 @@ public:
       // A type-testing built-in, `__is_same(T, U)` (docs/EXTENSIONS.md).
       if (kind(1) == Tk::l_paren)
         if (const lex::TypeTraitInfo* tr = s_->type_trait(n); tr && !tr->transforms) {
+          if (tr->variadic) return constructibility_expression(begin);
           bump();
           bump();
           std::vector<QualType> args;
           bool ok = true;
-          std::optional<u32> pack_at;
           int saved = std::exchange(angle_, 0);
-          // In a variadic trait, `...` applies to the operand, including inside a parameter declarator.
-          const bool saved_packs = std::exchange(packs_in_declarators_, packs_in_declarators_ && !tr->variadic);
-          for (int i = 0; i < tr->arity || (ok && tr->variadic && is(Tk::comma)); ++i) {
+          for (int i = 0; i < tr->arity; ++i) {
             if (i > 0 && !expect(Tk::comma)) ok = false;
             auto t = ok ? type_id() : std::nullopt;
             if (!t) ok = false;
             else args.push_back(*t);
-            if (ok && tr->variadic && is(Tk::ellipsis)) {
-              if (!pack_at) pack_at = pos();
-              bump();
-            }
           }
-          packs_in_declarators_ = saved_packs;
           angle_ = saved;
           if (!expect(Tk::r_paren) || !ok) return {NodeId::none, begin, pos()};
-          if (pack_at) {
-            s_->diag(*pack_at, Diag::constructibility_pack);
-            return {NodeId::none, begin, pos()};
-          }
           Ex result = s_->trait_expr(tr->trait, args, begin, pos());
           if (tr->trait == lex::TypeTrait::is_trivially_copyable && s_->dependent(result))
             ++deferred_argument_checks_;  // Even an alias that erases the argument must replay it.
@@ -4485,7 +4544,7 @@ public:
     } else if (v.dependent) {
       s_->diag(e.begin, Diag::not_constant, sema::reason_unsupported);  // nothing outside a template depends
     } else if (!v.value) {
-      if (!v.copyability_failure) s_->diag(e.begin, Diag::not_constant, v.reason);
+      if (!v.type_trait_failure) s_->diag(e.begin, Diag::not_constant, v.reason);
     } else if (!s_->in_template_definition() && s_->world().values.rec(*v.value).bits == 0) {
       if (message == sema::ConstId::none) s_->diag(begin, Diag::static_assert_failed);
       else s_->diag(begin, Diag::static_assert_failed_message, message);

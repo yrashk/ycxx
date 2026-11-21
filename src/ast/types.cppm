@@ -129,8 +129,8 @@ struct TDepName {
   NameId name;
 };
 
-// A pack expansion `pattern...` ([temp.variadic]), only as an element of a function parameter list
-// or of a pack argument while dependent; substitution expands it in place.
+// A pack expansion `pattern...` ([temp.variadic]), stored in a dependent sequence of parameter
+// types, template arguments or type trait operands. Substitution expands it in place.
 struct TPackExpansion {
   QualType pattern;
 };

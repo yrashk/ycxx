@@ -357,6 +357,8 @@ enum class Diag : std::uint32_t {
   class_alignment_mismatch [[=message{Severity::error, "the class is redeclared with a different alignment requirement"}]],
   class_alignment_missing [[=message{Severity::error, "the class definition must specify alignment when a declaration specifies it"}]],
   class_alignment_uncertain_layout [[=message{Severity::error, "class alignment depends on attributes or packing whose layout is not supported yet"}]],
+  constructibility_target_pack [[=message{Severity::error, "a pack expansion as the target of '__is_constructible' is not supported yet"}]],
+  constructibility_substitution [[=message{Severity::error, "substitution of the operand type '{0:t}' in '__is_constructible' failed"}]],
   recursive_default_member_initializer [[=message{Severity::error, "default member initializer for '{0:n}' would use itself"}]],
   default_member_initializer_cleanup [[=message{Severity::error, "default member initializer requiring cleanup is not supported yet"}]],
 };
@@ -418,8 +420,9 @@ constexpr bool is_limit(engine::DiagId id) {
   message m = message_of(*d);
   return std::string_view(m.text).contains("not supported");
 }
-constexpr bool is_copyability_failure(engine::DiagId id) {
-  return id == diag_id(Diag::trivial_copyability_incomplete) || id == diag_id(Diag::trivial_copyability_unsupported);
+constexpr bool is_type_trait_failure(engine::DiagId id) {
+  return id == diag_id(Diag::trivial_copyability_incomplete) || id == diag_id(Diag::trivial_copyability_unsupported) ||
+         id == diag_id(Diag::constructibility_incomplete) || id == diag_id(Diag::constructibility_unsupported);
 }
 // Whether a diagnostic stays an error where a substitution failure means "not satisfied": a limit
 // of ycxx's, an atomic constraint that is not a `bool` constant ([temp.constr.atomic]/3), or a

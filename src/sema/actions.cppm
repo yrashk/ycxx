@@ -117,10 +117,11 @@ public:
   virtual bool class_layout_uncertain(EntityId /*cls*/) { return false; }
   virtual engine::Loc source_loc(engine::Loc loc, u32) { return loc; }
   // Only a base or initializer with an owning replay can retain this dependent pattern.
-  virtual bool in_copyability_pattern() const { return false; }
-  virtual void record_copyability_occurrence(engine::Loc) {}
-  virtual std::optional<bool> copyability_at_demand(EntityId, engine::Loc) { return std::nullopt; }
-  virtual bool copyability_instantiation_failed(EntityId) { return false; }
+  virtual bool in_type_trait_pattern() const { return false; }
+  virtual void record_dependent_type_trait_operand(engine::Loc) {}
+  virtual bool replaying_type_trait_operand(engine::Loc) { return false; }
+  virtual std::optional<bool> type_trait_at_demand(EntityId, engine::Loc) { return std::nullopt; }
+  virtual bool type_trait_instantiation_failed(EntityId) { return false; }
   // Inside the enumerator list of an enumeration this unit is defining: its record so far, which
   // is published only after the list (#156).
   virtual const EnumRec* defining_enum(EntityId) { return nullptr; }
@@ -868,20 +869,23 @@ public:
     if (!r) diag(at, Diag::trait_not_applicable, arg);
     return r;
   }
+  engine::Loc type_trait_loc(u32 at) {
+    return q_->source_loc({std::to_underlying(item_), loc_base_ + at}, at);
+  }
   // The innermost array element must be complete or cv void ([meta.unary.prop]). Only classes
   // need a copyability fact after peeling extents ([basic.types.general], [class.prop]).
   Ex trivial_copyability_expr(QualType operand, u32 begin, u32 end) {
     const Types& ts = types();
     const QualType canonical = ts.canonical(operand);
-    const engine::Loc loc = q_->source_loc({std::to_underlying(item_), loc_base_ + begin}, begin);
+    const engine::Loc loc = type_trait_loc(begin);
     const auto fail = [&](Diag d, const auto&... args) -> Ex {
       diag_at(loc, d, args...);
       return {NodeId::none, begin, end};
     };
     if (ts.is_dependent(canonical)) {
-      if (q_->in_copyability_pattern())
+      if (q_->in_type_trait_pattern())
         if (auto value = templates().unary_trait_value(ast::DepOp::is_trivially_copyable, canonical)) {
-          q_->record_copyability_occurrence(loc);
+          q_->record_dependent_type_trait_operand(loc);
           return literal(builtin(Builtin::bool_), *value, ValueCategory::prvalue, begin, end);
         }
       return fail(Diag::trivial_copyability_dependent);
@@ -892,9 +896,9 @@ public:
       return bool_literal(false, begin, end);
     if (ts.is_class(element)) {
       const EntityId cls = ts.class_of(element);
-      const auto demand = q_->copyability_at_demand(cls, loc);
+      const auto demand = q_->type_trait_at_demand(cls, loc);
       if (!(demand ? *demand : q_->is_complete_at_source(cls))) {
-        if (q_->copyability_instantiation_failed(cls)) return {NodeId::none, begin, end};
+        if (q_->type_trait_instantiation_failed(cls)) return {NodeId::none, begin, end};
         return fail(Diag::trivial_copyability_incomplete, element);
       }
       if (const ClassRec* record = classes().find(cls))
@@ -902,17 +906,42 @@ public:
     }
     return fail(Diag::trivial_copyability_unsupported, operand);
   }
+  struct ConstructibilityOperand {
+    QualType type;
+    u32 at;
+  };
+  // The owning replay supplies packs in written order and the demand point for their elements.
   // Validate every concrete operand's domain before deciding the predicate ([meta.unary.prop]).
-  Ex constructibility_expr(std::span<const QualType> args, u32 begin, u32 end) {
+  Ex constructibility_expr(std::span<const ConstructibilityOperand> written, u32 begin, u32 end) {
     const Types& ts = types();
-    const engine::Loc loc = q_->source_loc({std::to_underlying(item_), loc_base_ + begin}, begin);
+    const engine::Loc loc = type_trait_loc(begin);
     const auto fail = [&](Diag d, const auto&... args) -> Ex {
       diag_at(loc, d, args...);
       return {NodeId::none, begin, end};
     };
+    Templates t = templates();
+    std::vector<ConstructibilityOperand> args;
+    for (const ConstructibilityOperand& operand : written) {
+      if (ts.kind(operand.type) != TypeKind::pack_expansion ||
+          !q_->replaying_type_trait_operand(type_trait_loc(operand.at))) {
+        args.push_back(operand);
+        continue;
+      }
+      TemplateArg expansion = t.type_arg(operand.type);
+      const auto diagnostics = diag_count();
+      auto elements = t.substitute_expansion(expansion, template_args);
+      if (!elements) {
+        if (has_error_since(diagnostics)) return {NodeId::none, begin, end};
+        TemplateArg pattern = t.pattern_of(expansion);
+        if (!t.expansion_length(pattern, template_args)) return fail(Diag::pack_length_mismatch);
+        return fail(Diag::constructibility_substitution, pattern.type);
+      }
+      for (const TemplateArg& element : *elements) args.push_back({element.type, operand.at});
+    }
+
     bool dependent = false;
-    for (QualType operand : args) {
-      QualType type = ts.canonical(operand);
+    for (const ConstructibilityOperand& operand : args) {
+      QualType type = ts.canonical(operand.type);
       if (ts.is_dependent(type)) {
         dependent = true;
         continue;
@@ -923,36 +952,51 @@ public:
       // An enumeration without a fixed underlying type is incomplete in its own enumerator list.
       if (ts.is_enum(type)) {
         const EnumRec* defining = q_->defining_enum(ts.enum_of(type));
-        if (defining && !defining->fixed) return fail(Diag::constructibility_incomplete, operand);
+        if (defining && !defining->fixed) return fail(Diag::constructibility_incomplete, operand.type);
       }
       if (ts.is_class(type)) {
         const EntityId cls = ts.class_of(type);
-        if (!q_->is_complete_at_source(cls)) {
-          if (q_->copyability_instantiation_failed(cls)) return {NodeId::none, begin, end};
-          return fail(Diag::constructibility_incomplete, operand);
+        const auto demand = q_->type_trait_at_demand(cls, type_trait_loc(operand.at));
+        if (!(demand ? *demand : q_->is_complete_at_source(cls))) {
+          if (q_->type_trait_instantiation_failed(cls)) return {NodeId::none, begin, end};
+          return fail(Diag::constructibility_incomplete, operand.type);
         }
       }
     }
-    if (dependent) return fail(Diag::constructibility_dependent);
+    if (dependent) {
+      if (q_->in_type_trait_pattern()) {
+        std::vector<TemplateArg> pattern;
+        for (const ConstructibilityOperand& operand : args) pattern.push_back(t.type_arg(operand.type));
+        if (auto value = t.constructibility_pattern(pattern)) {
+          for (const ConstructibilityOperand& operand : args)
+            if (ts.is_dependent(operand.type)) q_->record_dependent_type_trait_operand(type_trait_loc(operand.at));
+          return literal(builtin(Builtin::bool_), *value, ValueCategory::prvalue, begin, end);
+        }
+      }
+      const bool pack = std::ranges::any_of(args, [&](const ConstructibilityOperand& arg) {
+        return ts.kind(arg.type) == TypeKind::pack_expansion;
+      });
+      return fail(pack ? Diag::constructibility_pack : Diag::constructibility_dependent);
+    }
 
-    const QualType target = ts.canonical(args.front());
+    const QualType target = ts.canonical(args.front().type);
     if (ts.is_function(target) || ts.is_void(target)) return bool_literal(false, begin, end);
     if (args.size() == 1) {
       if (ts.is_scalar(target)) return bool_literal(true, begin, end);
       if (ts.is_reference(target)) return bool_literal(false, begin, end);
     }
-    if (ts.is_arithmetic(target) && std::ranges::all_of(args.subspan(1), [&](QualType arg) {
-          return ts.is_arithmetic(ts.referee(ts.canonical(arg)));
+    const std::span<const ConstructibilityOperand> arguments(args);
+    if (ts.is_arithmetic(target) && std::ranges::all_of(arguments.subspan(1), [&](const ConstructibilityOperand& arg) {
+          return ts.is_arithmetic(ts.referee(ts.canonical(arg.type)));
         }))
       return bool_literal(args.size() == 2, begin, end);
-    return fail(Diag::constructibility_unsupported, args.front());
+    return fail(Diag::constructibility_unsupported, args.front().type);
   }
   // `__trait(T…)` that tests types ([meta.unary], [meta.rel]): a `bool` prvalue, value-dependent
   // while a type is dependent for the traits that support it.
   Ex trait_expr(lex::TypeTrait t, std::span<const QualType> args, u32 begin, u32 end) {
     using enum lex::TypeTrait;
     if (t == is_trivially_copyable) return trivial_copyability_expr(args[0], begin, end);
-    if (t == is_constructible) return constructibility_expr(args, begin, end);
     QualType b = builtin(Builtin::bool_);
     auto structural_trait = [&](std::optional<ConstId> v) {
       if (v) return literal(b, *v, ValueCategory::prvalue, begin, end);
@@ -1326,12 +1370,12 @@ public:
   // Diagnoses an object of incomplete type, at `at`.
   bool require_complete(QualType t, u32 at) {
     if (is_complete(t)) return true;
-    if (!copyability_failed(t)) diag(at, Diag::incomplete_type, t);
+    if (!type_trait_failed(t)) diag(at, Diag::incomplete_type, t);
     return false;
   }
-  bool copyability_failed(QualType t) {
+  bool type_trait_failed(QualType t) {
     const QualType element = types().innermost_array_element(t);
-    return types().is_class(element) && q_->copyability_instantiation_failed(types().class_of(element));
+    return types().is_class(element) && q_->type_trait_instantiation_failed(types().class_of(element));
   }
 
   bool require_supported_virtual_layout(QualType t, u32 at) {
@@ -6282,7 +6326,7 @@ public:
     if (!has_peer_virtual_layout(t) && !require_supported_virtual_layout(t, begin)) return {NodeId::none, begin, end};
     std::optional<u64> n = layout_of(t, align);
     if (!n) {
-      if (copyability_failed(t)) return {NodeId::none, begin, end};
+      if (type_trait_failed(t)) return {NodeId::none, begin, end};
       if (types().is_function(t) || !is_complete(t)) diag(begin, Diag::sizeof_incomplete, t);
       else diag(begin, Diag::not_supported, align ? lex::Tk::kw_alignof : lex::Tk::kw_sizeof);
       return {NodeId::none, begin, end};
