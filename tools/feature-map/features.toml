@@ -673,6 +673,7 @@ std = 'C++17'
 ftm = '__cpp_aligned_new'
 detect = '\balign_val_t\b'
 status = 'missing'
+note = 'The usual aligned scalar signatures support explicit calls. This probe requires alignment-aware new expressions and storage.'
 probe = '''
 struct alignas(64) A { char c; };
 int main() { A* a = new A; bool ok = (reinterpret_cast<unsigned long>(a) % 64) == 0; delete a; return ok ? 0 : 1; }

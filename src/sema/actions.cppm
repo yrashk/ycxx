@@ -95,7 +95,8 @@ public:
   // The written in-class declaration of a member from this unit's class record.
   virtual std::optional<ast::DeclSema> written_member(EntityId) { return std::nullopt; }
   // A use of a global allocation function that may lack a written declaration in the unit.
-  virtual void use_allocation_function(EntityId) {}
+  // An aligned signature also brings its parameter's enum shape into the unit.
+  virtual void use_allocation_function(EntityId, bool = false) {}
   // Check the selected implicitly declared copy assignment against its subobjects.
   virtual CopyAssignment require_copy_assignment(EntityId) { return CopyAssignment::unsupported; }
   // What a constant evaluation fetches (§B7): `function_ir` of a function defined before the
@@ -5848,9 +5849,10 @@ public:
   Ex allocation_name_expr(AllocationFunction f, u32 begin, u32 end) {
     const NameId name = ins().names.intern(allocation_name(f));
     std::vector<ast::DeclSema> found;
-    for (const ast::DeclSema& d : w_->allocation_functions()) {
-      if (w_->entities.rec(d.entity).name != name) continue;
-      q_->use_allocation_function(d.entity);
+    for (AllocationFunction candidate : World::allocation_functions) {
+      if (allocates(candidate) != allocates(f)) continue;
+      const auto d = w_->allocation_function(candidate);
+      q_->use_allocation_function(d.entity, allocation_has_alignment(candidate));
       found.push_back(d);
     }
     auto written = q_->namespace_members(EntityId::none, name);

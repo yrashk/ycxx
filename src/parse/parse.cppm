@@ -1362,9 +1362,16 @@ public:
     const auto decl = p_->member_decl(f);
     return decl ? p_->decl_sema(*decl) : std::nullopt;
   }
-  void use_allocation_function(EntityId f) override {
+  void use_allocation_function(EntityId f, bool aligned) override {
     auto& functions = p_->implicit_allocation_functions_;
-    if (!std::ranges::contains(functions, f)) functions.push_back(f);
+    if (std::ranges::contains(functions, f)) return;
+    if (aligned) {
+      // Record the namespace path for ADL, even if source cannot name it yet. Visible lookup
+      // consults the declarations at its point, independently of this identity map.
+      p_->namespace_entity("std");
+      p_->world().install_alignment_enum(p_->classes_);
+    }
+    functions.push_back(f);
   }
   interp::Callee function_ir(EntityId f) override { return p_->function_ir(f, point()); }
   std::optional<QualType> deduced_type(EntityId f) override { return p_->deduced_type(f, point()); }
@@ -1492,7 +1499,7 @@ public:
   }
   ast::DeclSema decl_sema(DeclId d) override { return at_.decl_sema(d); }
   std::optional<ast::DeclSema> written_member(EntityId f) override { return at_.written_member(f); }
-  void use_allocation_function(EntityId f) override { at_.use_allocation_function(f); }
+  void use_allocation_function(EntityId f, bool aligned) override { at_.use_allocation_function(f, aligned); }
   interp::Callee function_ir(EntityId f) override { return p_->function_ir(f, p_->end()); }
   std::optional<QualType> deduced_type(EntityId f) override { return p_->deduced_type(f, p_->end()); }
   sema::GenericResult generic_instance(EntityId spec, const sema::GenericClosure* known, const sema::GenericBinding&) override {
@@ -2981,6 +2988,18 @@ private:
     };
     if (!unnamed) {
       if (cls == EntityId::none && !enum_redeclaration_ok(name, name_at, scoped, fixed, definition)) return bad();
+      // [support.dynamic]: the implicit prototypes use this scoped enum with a fixed base.
+      // Check its shape on the first written declaration too.
+      if (cls == EntityId::none && p_->ns_of(k_) == "std" && s_.ins().names.spelling(name) == "align_val_t") {
+        if (!scoped) {
+          s_.diag(name_at, Diag::enum_scope_mismatch, name);
+          return bad();
+        }
+        if (!fixed || *fixed != types.builtin(s_.world().target.size_type)) {
+          s_.diag(name_at, Diag::enum_base_mismatch, name);
+          return bad();
+        }
+      }
       e = s_.world().entities.entity({.kind = sema::EntityKind::enum_, .name = name, .scope = scope});
       QualType t = types.enum_type(e);
       if (cls == EntityId::none && alias_clash(name, t)) {
@@ -4758,12 +4777,9 @@ private:
     if (literal_operator_named(d.name) && !literal_operator_ok(spec, d, lang, template_)) return false;
     std::string_view name = s_.ins().names.spelling(d.name);
     if (sema::is_allocation_name(name)) {
-      auto matches = [&](const ast::DeclSema& f) {
-        return s_.world().entities.rec(f.entity).name == d.name && types.canonical(f.type) == types.canonical(d.type);
-      };
       if (!d.function || d.qualified || ns_entity() != EntityId::none || lang != LangLinkage::cxx || template_ ||
           explicit_ || spec.is_static || spec.is_inline || spec.is_typedef || spec.is_constexpr || spec.is_consteval ||
-          deleted_body() || !d.asm_label.empty() || !std::ranges::any_of(s_.world().allocation_functions(), matches)) {
+          deleted_body() || !d.asm_label.empty() || !s_.world().matches_allocation_function(name, d.type)) {
         s_.diag(d.name_at, Diag::allocation_declaration, d.name);
         return false;
       }
