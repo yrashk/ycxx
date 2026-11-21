@@ -2301,7 +2301,9 @@ private:
     u32 declarators = 0;
     do {
       s_.defer_type_access = true;
+      const bool saved_defaults = std::exchange(ps_.consteval_parameter_defaults, spec.is_consteval);
       parse::Declarator d = ps_.declarator(spec.type, false, spec.is_typedef);
+      ps_.consteval_parameter_defaults = saved_defaults;
       // [dcl.spec.auto.general]: a function with a placeholder type is the only declarator.
       if (d.ok && s_.types().has_placeholder(spec.type) && s_.types().is_function(d.type) && (declarators > 0 || ps_.is(Tk::comma))) {
         s_.diag(d.name_at, Diag::auto_not_allowed);

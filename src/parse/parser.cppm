@@ -1557,6 +1557,8 @@ public:
   bool template_ids_in_declarators = false;
   // In a parameter-declaration or a template-parameter, an ellipsis may begin a pack's declarator.
   bool packs_in_declarators_ = false;
+  // An ordinary default of a consteval function is evaluated with that function's call.
+  bool consteval_parameter_defaults = false;
 
   // Whether the `(` here begins a parameter-declaration-clause rather than an initializer
   // ([dcl.ambig.res]: what can be a declaration is one).
@@ -1849,7 +1851,10 @@ public:
           scan_member_default(s.params, template_probes);
           s.params.back().default_tokens = {begin, index()};
         } else {
+          const u32 saved_context = s_->immediate_context;
+          if (consteval_parameter_defaults && in_params_ == 1) ++s_->immediate_context;
           s.params.back().default_arg = parameter_default_argument(t, s.params);
+          s_->immediate_context = saved_context;
           if (s.params.back().default_arg == NodeId::none) ok = false;  // diagnosed
         }
       }
