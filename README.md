@@ -181,6 +181,12 @@ fixed underlying types and definitions inside `extern "C"` blocks.
 Both targets support named nested enum definitions followed by ordinary fields in the same
 member declaration, including scoped enum field initializers. [#500](https://github.com/yrashk/ycxx/issues/500)
 
+Automatic declarations of ordinary non-template classes with only scalar fields and no bases
+or unions can use default member initializers in `S s;` and `S s{…};`. A default runs in
+declaration order and can call a function or read an earlier field through `this`. An explicit
+initializer takes precedence.
+[#118](https://github.com/yrashk/ycxx/issues/118)
+
 **Language on macOS.** Programs can use:
 - the fundamental integer, character and floating types, pointers, arrays, references and
   enumerations, including opaque declarations of named enums in their namespaces; `float`,
@@ -333,6 +339,9 @@ including those in the headers a file includes, and goes to the definition of a 
 function body, through the daemon, without unsaved text ever reaching a build. Each file is
 checked with the flags of its last build, or else with its line in the project's
 `compile_commands.json`.
+
+Syntax checking enforces ordinary destructor access for automatic class objects and
+explicit construction expressions. [#259](https://github.com/yrashk/ycxx/issues/259)
 
 **Pointer-to-member declarations.** Data and function member-pointer types can appear in
 declarations, type traits and requires-expressions. Syntax checking covers ordinary data member

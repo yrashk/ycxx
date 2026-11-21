@@ -93,6 +93,7 @@ enum class Diag : std::uint32_t {
   binding_member_access [[=message{Severity::error, "structured binding of non-public member '{0:n}' is not supported"}]],
   binding_bit_field [[=message{Severity::error, "structured binding of bit-field '{0:n}' is not supported yet"}]],
   binding_tuple_unsupported [[=message{Severity::error, "tuple-like structured binding for type '{0:t}' is not supported yet"}]],
+  object_unusable_destructor [[=message{Severity::error, "object of type '{0:t}' requires a usable destructor"}]],
   binding_unusable_destructor [[=message{Severity::error, "structured binding requires a usable destructor for '{0:t}'"}]],
   binding_temporary_lifetime [[=message{Severity::error, "this structured binding initializer needs unsupported temporary lifetime extension"}]],
   not_captured [[=message{Severity::error, "'{0:n}' is not captured: the lambda has no capture-default"}]],
@@ -360,6 +361,8 @@ enum class Diag : std::uint32_t {
   class_alignment_uncertain_layout [[=message{Severity::error, "class alignment depends on attributes or packing whose layout is not supported yet"}]],
   constructibility_target_pack [[=message{Severity::error, "a pack expansion as the target of '{0:n}' is not supported yet"}]],
   constructibility_substitution [[=message{Severity::error, "substitution of the operand type '{0:t}' in '{1:n}' failed"}]],
+  recursive_default_member_initializer [[=message{Severity::error, "default member initializer for '{0:n}' would use itself"}]],
+  default_member_initializer_cleanup [[=message{Severity::error, "default member initializer requiring cleanup is not supported yet"}]],
   nothrow_constructibility_unsupported [[=message{Severity::error, "'__is_nothrow_constructible' for '{0:t}' with these argument types is not supported yet"}]],
 };
 
