@@ -103,6 +103,10 @@ struct Entity {
   EntityId local_function = EntityId::none;
   std::uint32_t discriminator = 0;
   bool guard = false;
+  // The mangled parameter types tie this ordinary C++ function to the unit (#582).
+  bool local_parameter_binding = false;
+
+  bool has_local_binding() const { return linkage == ast::Linkage::internal || local_parameter_binding; }
 };
 
 // Certified on the typed definition, before IR drops lifetime information.
@@ -1201,7 +1205,7 @@ struct SymbolAddresses {
 };
 
 // ELF default-visible symbols can be preempted, so their addresses use the GOT.
-// Internal definitions can use the symbol itself in a direct displacement.
+// Local definitions can use the symbol itself in a direct displacement.
 struct TuSymbolAddresses {
   using Key = TuId;
   using Value = SymbolAddresses;
@@ -1212,7 +1216,7 @@ struct TuSymbolAddresses {
     auto add = [&](EntityId id) {
       if (linux) {
         auto e = std::ranges::find(u.entities, id, &Entity::id);
-        if (e == u.entities.end() || e->linkage != ast::Linkage::internal) return;
+        if (e == u.entities.end() || !e->has_local_binding()) return;
       }
       out.direct.push_back(id);
     };
@@ -1220,7 +1224,7 @@ struct TuSymbolAddresses {
     for (const Variable& v : u.variables) add(v.entity);
     if (linux) {
       for (const Entity& e : u.entities)
-        if (e.linkage == ast::Linkage::external || e.linkage == ast::Linkage::module)
+        if (!e.has_local_binding() && (e.linkage == ast::Linkage::external || e.linkage == ast::Linkage::module))
           out.got.push_back(e.id);
       std::ranges::sort(out.got);
     }
@@ -1601,9 +1605,14 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
       errors.push_back({e.at, std::format("the name of '{}': {} is not supported yet", e.name, name.error())});
       continue;
     }
+    if (e.local_parameter_binding && !std::ranges::contains(tu.functions, e.id, &FunctionDef::entity)) {
+      errors.push_back({e.at, std::format("function '{}' names a translation-unit-local type in a parameter "
+                                         "and must be defined in this translation unit", e.name)});
+      continue;
+    }
     mangled.emplace(ir::raw(e.id), *name);  // before an asm label: what its statics' names begin with
     if (!e.asm_label.empty()) name = e.asm_label;
-    symbols.push_back({e.id, std::move(*name), e.linkage == ast::Linkage::internal ? obj::binding::local : obj::binding::global});
+    symbols.push_back({e.id, std::move(*name), e.has_local_binding() ? obj::binding::local : obj::binding::global});
   }
   // A static local and its guard: `_ZZ <encoding> E <name> [_<n>]` and `_ZGV` before it, the
   // function's own <encoding> taken from its symbol (Itanium C++ ABI §5.1.6, §5.1.4.6).

@@ -391,6 +391,54 @@ UnwindEligibility cleanup_free_definition(parse::Program& program, const ast::De
   return has_throw ? cleanup_free_with_throw : cleanup_free;
 }
 
+bool names_unnamed_namespace(parse::Program& program, QualType type);
+bool names_unnamed_namespace(parse::Program& program, EntityId entity);
+
+bool names_unnamed_namespace(parse::Program& program, const ast::TemplateArg& arg) {
+  switch (arg.kind) {
+  case ast::TemplateArgKind::type: return names_unnamed_namespace(program, arg.type);
+  case ast::TemplateArgKind::template_: return names_unnamed_namespace(program, arg.templ);
+  case ast::TemplateArgKind::pack:
+    return std::ranges::any_of(program.world().ins.seqs.elements(arg.elems), [&](const ast::TemplateArg& element) {
+      return names_unnamed_namespace(program, element);
+    });
+  default: return false;
+  }
+}
+
+// Look through nominal owners and encoded template arguments, without inspecting class definitions.
+bool names_unnamed_namespace(parse::Program& program, EntityId entity) {
+  auto& entities = program.world().entities;
+  while (entity != EntityId::none) {
+    if (program.is_namespace(entity)) return parse::Program::unnamed(program.namespace_path(entity));
+    const auto& r = entities.rec(entity);
+    if (r.kind != sema::EntityKind::class_ && r.kind != sema::EntityKind::enum_ &&
+        r.kind != sema::EntityKind::class_template && r.kind != sema::EntityKind::alias_template)
+      return false;
+    if (std::ranges::any_of(r.args, [&](const ast::TemplateArg& arg) { return names_unnamed_namespace(program, arg); }))
+      return true;
+    entity = r.scope;
+  }
+  return false;
+}
+
+bool names_unnamed_namespace(parse::Program& program, QualType type) {
+  const auto r = program.world().types.rec(type);
+  switch (r.kind) {
+  case sema::TypeKind::class_:
+  case sema::TypeKind::enum_: return names_unnamed_namespace(program, r.entity);
+  case sema::TypeKind::pointer:
+  case sema::TypeKind::reference:
+  case sema::TypeKind::array: return names_unnamed_namespace(program, r.inner);
+  case sema::TypeKind::member_pointer:
+    return names_unnamed_namespace(program, r.member_owner) || names_unnamed_namespace(program, r.inner);
+  case sema::TypeKind::function:
+    return names_unnamed_namespace(program, r.inner) ||
+           std::ranges::any_of(r.params, [&](QualType param) { return names_unnamed_namespace(program, param); });
+  default: return false;
+  }
+}
+
 // The definitions and declarations of the global namespace, in item order.
 TranslationUnit unit_of(parse::Program& program, sema::World& world, const items::Items& items, std::string name) {
   ast::Interners& ins = world.ins;
@@ -473,7 +521,17 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
                            r.kind == sema::EntityKind::constructor  ? Special::constructor
                            : r.kind == sema::EntityKind::destructor ? Special::destructor
                                                                     : Special::none});
-    tu.entities.back().asm_label = program.asm_label(e);
+    Entity& emitted = tu.entities.back();
+    emitted.asm_label = program.asm_label(e);
+    if (r.kind == sema::EntityKind::function && r.lang == ast::LangLinkage::cxx &&
+        r.linkage == ast::Linkage::external && r.templ == EntityId::none && program.is_namespace(r.scope) &&
+        emitted.asm_label.empty()) {
+      // An ordinary function's name encodes its adjusted parameters. A nested function type
+      // also encodes its result, which names_unnamed_namespace handles above.
+      const auto type = world.types.rec(d.type);
+      emitted.local_parameter_binding =
+          std::ranges::any_of(type.params, [&](QualType param) { return names_unnamed_namespace(program, param); });
+    }
     if (r.templ != EntityId::none) {
       tu.entities.back().template_type = world.entities.rec(r.templ).type;
       // A generic lambda's operator: its closure's record has the type with the head at depth 0.
