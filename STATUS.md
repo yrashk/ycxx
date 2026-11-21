@@ -1689,9 +1689,16 @@ session's.*
   [#218](https://github.com/yrashk/ycxx/issues/218).
   [Replay design](docs/design/dependent-trivial-copyability-replay.md)
   `__has_builtin(__is_trivially_copyable)` answers 0 while support is partial ([meta.unary.prop]).
+- A direct `__is_constructible(T, Args...)` checks concrete operand types at the original
+  source point. Its domain includes complete types, cv `void`, and arrays of unknown bound.
+  It folds function and cv `void` targets, scalar and reference targets with no arguments,
+  and arithmetic targets with arithmetic or arithmetic-reference arguments. Incomplete
+  operands, other complete combinations, and dependent operands or pack expansions get
+  hard diagnostics. `__has_builtin(__is_constructible)` answers 0 while support is partial
+  ([meta.unary.prop], #218). [Design](docs/design/direct-constructibility.md)
 - Listed in docs/EXTENSIONS.md. Tests: `tests/own/builtins/`. `<cstdio>`: 53 → 33 errors.
 - Not yet (#211 follow-up): the built-ins that need the object model, such as
-  `__is_constructible`, `__is_convertible`, `__is_assignable`, other `__is_trivially_*` and
+  class constructibility, `__is_convertible`, `__is_assignable`, other `__is_trivially_*` and
   `__is_nothrow_*` families, `__is_base_of`, `__is_standard_layout` and
   `__reference_binds_to_temporary`. Other dependent predicates, conversions of a dependent
   predicate to a non-`bool` parameter, dependent array bounds and expression mangling remain in
@@ -2759,9 +2766,20 @@ miscompiles it (DECISIONS §3.2). Each is removed once ycxx compiles itself.
 The front end retains the protected compound and ordered handlers. A named
 exception declaration shares the handler's outer block scope, and control-flow
 checks reject entry into the protected block or a handler. A discarded
-`if constexpr` arm skips the full handler sequence. Retained try blocks
-diagnose unsupported emission. Function-try-blocks, handler matching and
-unwinding remain in [#89](https://github.com/yrashk/ycxx/issues/89).
+`if constexpr` arm skips the full handler sequence.
+
+On Linux x86-64, a host-linked ELF object can contain an eligible namespace
+function with a protected return that passes its parameter directly to an
+externally defined `int(int)` function. The function has one `catch (...)`
+that returns an integer literal. L1 and L2 carry distinct normal and unwind
+results. The AMD64 emitter records the call range
+and landing address, saves the unwind header and selector, and feeds the ELF
+writer's handler CIE and LSDA. GCC and Clang hosted tests cover the normal and
+caught returns and unwinding through an ordinary frame. The native final
+link diagnoses the hosted runtime requirement. Same-translation-unit callees,
+typed and multiple handlers, cleanup scopes, other target backends and
+freestanding runtime support remain
+in [#89](https://github.com/yrashk/ycxx/issues/89). [#583](https://github.com/yrashk/ycxx/issues/583)
 
 ## Unevaluated calls to known-return function templates (#565)
 

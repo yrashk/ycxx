@@ -51,6 +51,7 @@ constexpr std::array standard_sections{
     section_mapping{standard_section::bss, "__DATA", "__bss", ".bss", sht_nobits, shf_alloc | shf_write},
     section_mapping{standard_section::init_array, "__DATA", "__init_array", ".init_array", sht_init_array, shf_alloc | shf_write},
     section_mapping{standard_section::eh_frame, "__TEXT", "__eh_frame", ".eh_frame", sht_x86_64_unwind, shf_alloc},
+    section_mapping{standard_section::gcc_except_table, "__TEXT", "__gcc_except", ".gcc_except_table", sht_progbits, shf_alloc},
 };
 
 struct relocation_mapping {
@@ -140,6 +141,103 @@ bool valid_unwind_section(std::uint64_t alignment, std::uint64_t size) {
   return (alignment == 4 || alignment == 8) && size % 4 == 0 && std::in_range<std::uint32_t>(size);
 }
 
+// The first handler profile uses one ungrouped table and one frame section. The ordinary
+// code-only input subset has no LSDA and retains its existing relocation rules.
+std::optional<std::string_view> handler_frame_error(const object& o) {
+  const auto tables = std::ranges::find_if(o.sections, &section::is_gcc_except_table);
+  if (tables == o.sections.end()) return std::nullopt;
+  const auto frames = std::ranges::find_if(o.sections, &section::is_eh_frame);
+  if (frames == o.sections.end() || std::ranges::count_if(o.sections, &section::is_eh_frame) != 1 ||
+      std::ranges::count_if(o.sections, &section::is_gcc_except_table) != 1 ||
+      tables->flags != section_flags::regular || tables->zerofill_size != 0 || tables->size() == 0 ||
+      !std::in_range<std::uint32_t>(tables->size()) || !tables->relocs.empty() ||
+      frames->flags != section_flags::regular || frames->zerofill_size != 0 ||
+      !valid_unwind_section(8, frames->size()) || frames->align_log2 != 3)
+    return "invalid ELF handler table or frame section";
+
+  constexpr std::uint8_t ordinary_cie[]{1, 'z', 'R', 0, 1, 0x78, 16, 1, 0x1b};
+  constexpr std::uint8_t handler_cie[]{1, 'z', 'P', 'L', 'R', 0, 1, 0x78, 16, 7, 0x9b};
+  std::map<std::uint32_t, bool> cies;
+  std::map<std::uint32_t, const reloc*> relocs;
+  for (const auto& r : frames->relocs) {
+    if (r.kind != reloc_kind::x86_64_pc32 || r.addend != 0 || r.minus || r.symbol >= o.symbols.size() ||
+        !relocs.emplace(r.offset, &r).second)
+      return "invalid ELF handler frame relocation";
+  }
+  auto local_anchor = [&](std::uint32_t at) -> const symbol* {
+    const auto r = relocs.find(at);
+    if (r == relocs.end()) return nullptr;
+    const auto& s = o.symbols[r->second->symbol];
+    relocs.erase(r);
+    return s.bind == binding::local && s.section && *s.section < o.sections.size() ? &s : nullptr;
+  };
+  auto personality_cell = [&](std::uint32_t at) {
+    const auto* s = local_anchor(at);
+    if (!s) return false;
+    const auto& data = o.sections[*s->section];
+    if (data.segment != "__DATA" || data.name != "__const" || data.align_log2 < 3 ||
+        data.flags != section_flags::regular || data.zerofill_size != 0 ||
+        s->offset % 8 != 0 || s->offset > data.size() || data.size() - s->offset < 8)
+      return false;
+    const auto ptr = std::ranges::find(data.relocs, s->offset, &reloc::offset);
+    if (ptr == data.relocs.end() || ptr->kind != reloc_kind::abs64 || ptr->addend != 0 || ptr->minus ||
+        ptr->symbol >= o.symbols.size() || o.symbols[ptr->symbol].bind != binding::global ||
+        o.symbols[ptr->symbol].name_view() != "__gxx_personality_v0")
+      return false;
+    return std::ranges::none_of(data.relocs, [&](const reloc& r) {
+      const std::uint64_t width = r.kind == reloc_kind::abs64 ? 8 : 4;
+      return &r != &*ptr && r.offset < s->offset + 8 && r.offset + width > s->offset;
+    });
+  };
+
+  const std::span<const std::uint8_t> bytes = frames->bytes;
+  bool has_handler = false;
+  bool has_ordinary_cie = false, has_handler_cie = false;
+  for (std::uint32_t at = 0; at < bytes.size();) {
+    if (bytes.size() - at < 8) return "truncated ELF handler frame record";
+    const std::uint64_t size = std::uint64_t{load<std::uint32_t>(bytes, at)} + 4;
+    if (size < 24 || size % 8 != 0 || size > bytes.size() - at)
+      return "invalid ELF handler frame record size";
+    const auto record = bytes.subspan(at, size);
+    const auto cie = load<std::uint32_t>(record, 4);
+    if (cie == 0) {
+      if (size == 24 && std::ranges::equal(record.subspan(8, sizeof(ordinary_cie)), ordinary_cie)) {
+        if (std::exchange(has_ordinary_cie, true)) return "duplicate ELF ordinary CIE";
+        cies.emplace(at, false);
+      } else if (size == 32 && std::ranges::equal(record.subspan(8, sizeof(handler_cie)), handler_cie) &&
+                 load<std::uint32_t>(record, 19) == 0 && record[23] == 0x1b && record[24] == 0x1b) {
+        if (std::exchange(has_handler_cie, true)) return "duplicate ELF handler CIE";
+        if (!personality_cell(at + 19)) return "invalid ELF handler personality cell relocation";
+        cies.emplace(at, true);
+      } else {
+        return "unsupported ELF handler CIE";
+      }
+    } else {
+      if (cie > at + 4) return "invalid ELF handler FDE CIE pointer";
+      const auto common = cies.find(at + 4 - cie);
+      if (common == cies.end() || record[16] != (common->second ? 4 : 0))
+        return "invalid ELF handler FDE augmentation";
+      const auto* s = local_anchor(at + 8);
+      if (!s || load<std::uint32_t>(record, 8) != 0) return "missing ELF handler frame code relocation";
+      const auto& code = o.sections[*s->section];
+      const auto range = load<std::uint32_t>(record, 12);
+      if (code.segment != "__TEXT" || code.name != "__text" || s->offset >= code.size() ||
+          range == 0 || !std::in_range<std::int32_t>(range) || range > code.size() - s->offset)
+        return "ELF handler frame range is outside its local code";
+      if (common->second) {
+        const auto* lsda = local_anchor(at + 17);
+        if (!lsda || load<std::uint32_t>(record, 17) != 0 || &o.sections[*lsda->section] != &*tables ||
+            lsda->offset >= tables->size() || tables->bytes[lsda->offset] != 0xff)
+          return "invalid ELF handler LSDA relocation";
+        has_handler = true;
+      }
+    }
+    at += static_cast<std::uint32_t>(size);
+  }
+  if (!has_handler || !relocs.empty()) return "missing or unexpected ELF handler frame relocation";
+  return std::nullopt;
+}
+
 std::string_view string_data(std::span<const std::uint8_t> table) {
   return {reinterpret_cast<const char*>(table.data()), table.size()};
 }
@@ -176,6 +274,7 @@ std::expected<bytes, std::string> write_object(const object& o) {
   };
   if (o.arch != target::x86_64_linux) return fail("expected an x86-64 Linux object");
   if (!o.comdat_groups.empty()) return fail("ELF COMDAT group emission is unsupported");
+  if (auto error = handler_frame_error(o)) return fail(std::string(*error));
 
   // The null section, .note.GNU-stack, .symtab, .strtab and .shstrtab are always present.
   const std::size_t count = 5 + o.sections.size() + std::ranges::count_if(o.sections, [](const section& s) {
@@ -457,6 +556,8 @@ std::expected<object, std::string> read_object(std::span<const std::uint8_t> fil
       return fail("invalid ELF .init_array alignment or size");
     if (unwind && (owner != 0 || !valid_unwind_section(h.align, h.size) || h.offset % h.align != 0))
       return fail("invalid ELF .eh_frame group, alignment or size");
+    if (mapping->kind == standard_section::gcc_except_table && owner != 0)
+      return fail("ELF handler tables cannot be grouped");
     auto s = section::standard(mapping->kind);
     s.align_log2 = static_cast<std::uint8_t>(std::countr_zero(h.align == 0 ? std::uint64_t{1} : h.align));
     if (h.type == sht_nobits) s.zerofill_size = h.size;
@@ -524,6 +625,7 @@ std::expected<object, std::string> read_object(std::span<const std::uint8_t> fil
     if (local) symbols[i].local_group = group_owners[index];
   }
 
+  const bool has_handler_tables = std::ranges::any_of(o.sections, &section::is_gcc_except_table);
   std::vector<bool> has_relocations(shnum);
   for (std::uint32_t i = 1; i < shnum; ++i) {
     const auto& h = headers[i];
@@ -565,7 +667,7 @@ std::expected<object, std::string> read_object(std::span<const std::uint8_t> fil
       auto& relocated = o.sections[*sections[h.info]];
       const auto anchor = *symbols[symbol].retained;
       const auto addend = std::bit_cast<std::int64_t>(load<std::uint64_t>(record, 16));
-      if (relocated.is_eh_frame()) {
+      if (relocated.is_eh_frame() && !has_handler_tables) {
         const auto& s = o.symbols[anchor];
         if (mapping->kind != reloc_kind::x86_64_pc32 || site % 4 != 0 || s.bind != binding::local || !s.section)
           return fail("ELF .eh_frame requires aligned PC32 relocations to local code");
@@ -581,6 +683,7 @@ std::expected<object, std::string> read_object(std::span<const std::uint8_t> fil
     }
   }
 
+  if (auto error = handler_frame_error(o)) return fail(*error);
   o.name = std::move(name);
   return o;
 }

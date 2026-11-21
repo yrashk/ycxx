@@ -40,9 +40,8 @@
 //
 // α slice (#39) and δ's aggregates (#86): scalars, pointers, string literals and aggregates; no
 // cleanups or exceptions, and no class parameters or results yet.
-// Calls are `call`, never `invoke`: with no destructors to run, an exception leaves the function
-// with nothing to do. A call site will choose `invoke` once a scope has destructors (§3.7.3); every
-// call already goes through `call_fn` for that reason.
+// Ordinary calls let exceptions leave the function. A certified hosted catch-all uses
+// an `invoke` with explicit normal and exceptional continuations.
 export module ycxx.irgen:gen;
 
 import std;
@@ -80,6 +79,7 @@ struct FunctionInput {
   std::span<const StaticGuard> guards{};
   ast::EntityId guard_acquire = ast::EntityId::none, guard_release = ast::EntityId::none;
   ast::EntityId atexit = ast::EntityId::none, dso = ast::EntityId::none;
+  bool hosted_catch_all = false;  // the native frontend has certified this occurrence
 };
 
 struct FunctionIr {
@@ -539,6 +539,41 @@ class Gen {
     pop_scope();
   }
 
+  void hosted_catch_all(At a) {
+    const auto trial = get<ast::TryBlock>(a);
+    const At protected_body = child(a, trial.body);
+    const At normal_return = child(protected_body, ast_.children(get<ast::Compound>(protected_body).stmts).front());
+    const At call_at = child(normal_return, get<ast::Return>(normal_return).value);
+    const auto call = get<ast::Call>(call_at);
+    const At handler_at = child(a, ast_.children(trial.handlers).front());
+    const auto handler = get<ast::Handler>(handler_at);
+    const auto normal = b_.add_block({});
+    const ir::Ty caught[] = {ir::Ty::state(), ir::Ty::exn()};
+    const auto exceptional = b_.add_block(caught);
+    const ValueId arg = argument(child(call_at, ast_.children(call.args).front()));
+    const ValueId args[] = {state_, arg};
+    const ir::Ty results[] = {ir::Ty::state(), vty(call.info.type)};
+    const std::uint64_t imms[] = {word(call.function), 0};
+    const ir::SuccRef succs[] = {{normal, {}}, {exceptional, {}}};
+    ir::NodeId invoke;
+    {
+      Position position(*this, call_at.offset);
+      invoke = emit(ir::Op::invoke, results, args, imms, ir::bit(ir::Flag::not_constexpr), succs);
+    }
+
+    // The normal edge has no arguments and carries the invoke's own state and value.
+    block_ = normal;
+    state_ = b_.result(invoke, 0);
+    ret_(b_.result(invoke, 1));
+
+    enter(exceptional);
+    const ValueId exception[] = {b_.param(exceptional, 1)};
+    const ir::Ty object[] = {vty(facts_.pointer_to(handler.type))};
+    stateful(ir::Op::catch__begin, object, exception);
+    stateful(ir::Op::catch__end, {}, exception);
+    stmt(child(handler_at, handler.body));
+  }
+
   void stmt(At a) {
     if (a.id == NodeId::none) return;
     ensure_live();
@@ -549,7 +584,8 @@ class Gen {
       for (ast::Child c : ast_.children(s.stmts)) stmt(child(a, c));
       pop_scope();
     } else if (is<ast::TryBlock>(a)) {
-      unsupported(a, "with a retained try block");
+      if (fn_.hosted_catch_all) hosted_catch_all(a);
+      else unsupported(a, "with a retained try block");
     } else if (is<ast::ExprStmt>(a)) {
       full_expression([&] {
         discard(child(a, get<ast::ExprStmt>(a).expr));
