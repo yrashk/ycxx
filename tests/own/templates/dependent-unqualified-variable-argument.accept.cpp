@@ -6,6 +6,10 @@ template<class T, class U> using CopyConst = Conditional<IsConst<T>, const U, U>
 static_assert(__is_same(CopyConst<const int, long>, const long));
 static_assert(__is_same(CopyConst<int, long>, long));
 
+template<class T> using Parenthesized = Conditional<(IsConst<T>), int, long>;
+static_assert(__is_same(Parenthesized<const int>, int));
+static_assert(__is_same(Parenthesized<int>, long));
+
 namespace qualified {
 template<class T> inline constexpr bool IsConst = __is_const(T);
 }
