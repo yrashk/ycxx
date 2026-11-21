@@ -7,4 +7,4 @@ consteval int target() { return 7; }
 template<class T> consteval Pointer make_pointer() { return target; }
 template<class T> consteval Pointer nested_leak(Pointer p = make_pointer<T>()) { return p; }
 Pointer use_nested() { return nested_leak<int>(); } //! error
-Pointer escaped = nested_leak<int>(); //! error
+constexpr Pointer escaped = make_pointer<int>(); //! error
