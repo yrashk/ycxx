@@ -2750,8 +2750,13 @@ and runtime integration with ycxx's own linker remain under [#89]. See the
   ([new.delete.placement]). The two allocation functions take `size_t, void*` and return `void*`.
   The two deallocation functions take `void*, void*` and return `void`. These signatures require
   both arguments and a nonthrowing exception specification. Written `constexpr` definitions can
-  be called explicitly in constant expressions. Placement new-expressions, object lifetime and
-  cleanup remain in [#293](https://github.com/yrashk/ycxx/issues/293).
+  be called explicitly in constant expressions.
+- Runtime scalar placement `new` supports integral and ordinary pointer objects with one placement
+  argument. Overload resolution must select a visible written global `operator new(size_t, void*)`
+  with a nonthrowing exception specification. The call precedes scalar initialization in the returned
+  storage. Native lowering requires a supported nonthrowing initializer. Constant evaluation of
+  storage reuse, placement arrays and classes, and more general lifetime and cleanup rules remain in
+  [#293](https://github.com/yrashk/ycxx/issues/293).
 - Native lowering supports initializers proven nonthrowing from the analyzed expression tree.
   Initializers that need an exception cleanup edge and constant evaluation of allocation remain
   in #293. Namespace-scope allocation uses the existing dynamic initialization path. The issue
