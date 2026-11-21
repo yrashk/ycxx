@@ -4461,9 +4461,13 @@ public:
     if (grouped_auto) {
       const u32 after = past_parentheses(1);
       // A parenthesized initializer can follow a declaration statement. In a
-      // condition it is a call unless it can be part of the declarator.
+      // condition it can be a parameter clause only for a grouped indirection.
       if (kind(after) == Tk::l_paren) {
-        if (!params_ahead(after)) return false;
+        u32 inner = 2;
+        while (kind(inner) == Tk::l_paren) ++inner;
+        if ((kind(inner) != Tk::star && kind(inner) != Tk::amp && kind(inner) != Tk::ampamp &&
+             !member_pointer_star(inner)) || !params_ahead(after))
+          return false;
         parameter_clause = true;
       }
     }
@@ -4476,7 +4480,10 @@ public:
       case Tk::l_brace: if (depth == 0) return true; ++depth; break;
       case Tk::arrow:
         if (grouped_auto && depth == 0) {
-          if (!parameter_clause) return false;
+          if (!parameter_clause ||
+              (kind(j + 1) == Tk::identifier && !qualified_ahead(j + 1) && !transform_trait_ahead(j + 1) &&
+               !s_->class_name(name_of(tok(j + 1)))))
+            return false;
           trailing_return = true;
         }
         break;

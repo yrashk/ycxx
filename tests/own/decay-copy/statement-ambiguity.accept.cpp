@@ -29,3 +29,10 @@ int function_pointer_conditions() {
     if (auto (*pointer)(int (parameter)) = &source) return pointer(5);
     return 0;
 }
+
+struct Cell { int value; };
+Cell* lookup(int);
+int arrow_assignment(int input) {
+    if (auto(lookup)(int(input))->value = 3) return 1;
+    return 0;
+}
