@@ -60,7 +60,7 @@ def main():
         assert const_symbols.get('triple') == 'LOCAL' and const_symbols.get('other') == 'LOCAL', const_symbols
         assert const_symbols.get('_ZNK6tripleMUliE_clEi') == 'LOCAL', const_symbols
         assert const_symbols.get('_ZN6tripleMUliE_8__invokeEi') == 'LOCAL', const_symbols
-        compile('-c', 'constinit.cpp', '-o', 'darwin.o', flags=())
+        compile('-c', 'constinit.cpp', '-o', 'darwin.o', flags=('--target=arm64-apple-darwin',))
         assert (scope / 'darwin.o').read_bytes().startswith(bytes.fromhex('cffaedfe'))
 
         for name in ('left', 'right', 'driver'):
