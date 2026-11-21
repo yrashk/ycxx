@@ -916,9 +916,12 @@ public:
   };
   // The owning replay supplies packs in written order and the demand point for their elements.
   // Validate every concrete operand's domain before deciding the predicate ([meta.unary.prop]).
-  Ex constructibility_expr(std::span<const ConstructibilityOperand> written, u32 begin, u32 end) {
+  Ex constructibility_expr(lex::TypeTrait trait, NameId name, std::span<const ConstructibilityOperand> written, u32 begin, u32 end)
+    pre(trait == lex::TypeTrait::is_constructible || trait == lex::TypeTrait::is_nothrow_constructible)
+  {
     const Types& ts = types();
     const engine::Loc loc = type_trait_loc(begin);
+    const bool nothrow = trait == lex::TypeTrait::is_nothrow_constructible;
     const auto fail = [&](Diag d, const auto&... args) -> Ex {
       diag_at(loc, d, args...);
       return {NodeId::none, begin, end};
@@ -938,7 +941,7 @@ public:
         if (has_error_since(diagnostics)) return {NodeId::none, begin, end};
         TemplateArg pattern = t.pattern_of(expansion);
         if (!t.expansion_length(pattern, template_args)) return fail(Diag::pack_length_mismatch);
-        return fail(Diag::constructibility_substitution, pattern.type);
+        return fail(Diag::constructibility_substitution, pattern.type, name);
       }
       for (const TemplateArg& element : *elements) args.push_back({element.type, operand.at});
     }
@@ -956,14 +959,14 @@ public:
       // An enumeration without a fixed underlying type is incomplete in its own enumerator list.
       if (ts.is_enum(type)) {
         const EnumRec* defining = q_->defining_enum(ts.enum_of(type));
-        if (defining && !defining->fixed) return fail(Diag::constructibility_incomplete, operand.type);
+        if (defining && !defining->fixed) return fail(Diag::constructibility_incomplete, operand.type, name);
       }
       if (ts.is_class(type)) {
         const EntityId cls = ts.class_of(type);
         const auto demand = q_->type_trait_at_demand(cls, type_trait_loc(operand.at));
         if (!(demand ? *demand : q_->is_complete_at_source(cls))) {
           if (q_->type_trait_instantiation_failed(cls)) return {NodeId::none, begin, end};
-          return fail(Diag::constructibility_incomplete, operand.type);
+          return fail(Diag::constructibility_incomplete, operand.type, name);
         }
       }
     }
@@ -971,7 +974,8 @@ public:
       if (q_->in_type_trait_pattern()) {
         std::vector<TemplateArg> pattern;
         for (const ConstructibilityOperand& operand : args) pattern.push_back(t.type_arg(operand.type));
-        if (auto value = t.constructibility_pattern(pattern)) {
+        const auto op = nothrow ? ast::DepOp::is_nothrow_constructible : ast::DepOp::is_constructible;
+        if (auto value = t.constructibility_pattern(op, pattern)) {
           for (const ConstructibilityOperand& operand : args)
             if (ts.is_dependent(operand.type)) q_->record_dependent_type_trait_operand(type_trait_loc(operand.at));
           return literal(builtin(Builtin::bool_), *value, ValueCategory::prvalue, begin, end);
@@ -980,9 +984,10 @@ public:
       const bool pack = std::ranges::any_of(args, [&](const ConstructibilityOperand& arg) {
         return ts.kind(arg.type) == TypeKind::pack_expansion;
       });
-      return fail(pack ? Diag::constructibility_pack : Diag::constructibility_dependent);
+      return fail(pack ? Diag::constructibility_pack : Diag::constructibility_dependent, name);
     }
 
+    // In this bounded domain every viable initialization is intrinsically nonthrowing.
     const QualType target = ts.canonical(args.front().type);
     if (ts.is_function(target) || ts.is_void(target)) return bool_literal(false, begin, end);
     if (args.size() == 1) {
@@ -994,7 +999,7 @@ public:
           return ts.is_arithmetic(ts.referee(ts.canonical(arg.type)));
         }))
       return bool_literal(args.size() == 2, begin, end);
-    return fail(Diag::constructibility_unsupported, args.front().type);
+    return fail(nothrow ? Diag::nothrow_constructibility_unsupported : Diag::constructibility_unsupported, args.front().type);
   }
   // `__trait(T…)` that tests types ([meta.unary], [meta.rel]): a `bool` prvalue, value-dependent
   // while a type is dependent for the traits that support it.

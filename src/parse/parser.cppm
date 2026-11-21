@@ -3332,7 +3332,7 @@ public:
     return s_->va_call(op, cursor, source, fetch, begin, pos());
   }
 
-  std::optional<sema::Sema::ConstructibilityOperand> constructibility_operand(bool target) {
+  std::optional<sema::Sema::ConstructibilityOperand> constructibility_operand(NameId name, bool target) {
     const u32 at = pos();
     struct Unframe {
       sema::Sema* s;
@@ -3362,9 +3362,10 @@ public:
     const auto arg = t.type_arg(*type);
     const bool names_pack = s_->names_pack(arg);
     if (expanded) {
-      if (target) s_->diag(ellipsis, Diag::constructibility_target_pack);
+      if (target) s_->diag(ellipsis, Diag::constructibility_target_pack, name);
       else if (names_pack) return sema::Sema::ConstructibilityOperand{t.expansion_of(arg).type, at};
-      else s_->diag(ellipsis, packs.empty() ? Diag::expansion_without_pack : Diag::constructibility_pack);
+      else if (packs.empty()) s_->diag(ellipsis, Diag::expansion_without_pack);
+      else s_->diag(ellipsis, Diag::constructibility_pack, name);
       return std::nullopt;
     }
     if (!packs.empty() && (names_pack || !s_->in_expansion())) {
@@ -3374,7 +3375,7 @@ public:
     return sema::Sema::ConstructibilityOperand{*type, at};
   }
 
-  Ex constructibility_expression(u32 begin) {
+  Ex constructibility_expression(lex::TypeTrait trait, NameId name, u32 begin) {
     bump();
     bump();
     struct Restore {
@@ -3392,12 +3393,12 @@ public:
     bool ok = true;
     bool target = true;
     do {
-      if (auto operand = constructibility_operand(target)) args.push_back(*operand);
+      if (auto operand = constructibility_operand(name, target)) args.push_back(*operand);
       else ok = false;
       target = false;
     } while (accept(Tk::comma));
     if (!expect(Tk::r_paren) || !ok) return {NodeId::none, begin, pos()};
-    Ex result = s_->constructibility_expr(args, begin, pos());
+    Ex result = s_->constructibility_expr(trait, name, args, begin, pos());
     if (s_->dependent(result)) ++deferred_argument_checks_;  // An alias can discard this argument.
     return result;
   }
@@ -3485,7 +3486,7 @@ public:
       // A type-testing built-in, `__is_same(T, U)` (docs/EXTENSIONS.md).
       if (kind(1) == Tk::l_paren)
         if (const lex::TypeTraitInfo* tr = s_->type_trait(n); tr && !tr->transforms) {
-          if (tr->variadic) return constructibility_expression(begin);
+          if (tr->variadic) return constructibility_expression(tr->trait, n, begin);
           bump();
           bump();
           std::vector<QualType> args;
