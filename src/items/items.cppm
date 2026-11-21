@@ -444,10 +444,12 @@ void Splitter::general(u32 k, u32& unnamed_types) {
     case Tk::semi:
       at(k).end = i_ = j + 1;
       return;
-    case Tk::l_paren:
+    case Tk::l_paren: {
+      // An integer-literal-led `auto(...)` is an expression, including inside a template-id.
+      const bool decay_copy = prev == Tk::kw_auto && kind(j + 1) == Tk::int_lit;
       if (!initializer && prev != Tk::kw_decltype && prev != Tk::kw_noexcept && prev != Tk::kw_alignas &&
           prev != Tk::kw_sizeof && prev != Tk::kw_alignof && prev != Tk::kw_explicit && prev != Tk::kw_typeid &&
-          prev != Tk::kw_static_assert && prev != Tk::kw_asm && prev != Tk::kw_requires &&
+          prev != Tk::kw_static_assert && prev != Tk::kw_asm && prev != Tk::kw_requires && !decay_copy &&
           !(prev == Tk::kw_operator) &&
           // a GNU attribute or asm label, or a type-transforming built-in (docs/EXTENSIONS.md)
           !(j > at(k).begin && (is_name(j - 1, "__attribute__") || is_name(j - 1, "__asm") || is_name(j - 1, "__asm__") ||
@@ -456,6 +458,7 @@ void Splitter::general(u32 k, u32& unnamed_types) {
       }
       j = match(j);
       continue;
+    }
     case Tk::l_square:
       j = match(j);
       continue;
