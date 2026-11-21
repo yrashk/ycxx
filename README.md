@@ -293,8 +293,10 @@ addresses, typed nulls and same-class `.*` and `->*`. [#238](https://github.com/
 ordinary root classes. Classes derived through one ordinary polymorphic base also support
 overrides. Pointer and reference interfaces can name these classes. [#309](https://github.com/yrashk/ycxx/issues/309)
 
-**Array structured bindings.** Local bindings can copy scalar-element arrays or alias their
-elements, including whole rows of multidimensional arrays. [#285](https://github.com/yrashk/ycxx/issues/285)
+**Structured bindings.** Local bindings can copy or alias scalar-element arrays, including
+multidimensional arrays. They can also copy or alias ordinary non-template classes without
+bases and bind to their public, addressable data members, including array and reference
+members. [#285](https://github.com/yrashk/ycxx/issues/285)
 
 ### Not yet
 
@@ -305,7 +307,8 @@ elements, including whole rows of multidimensional arrays. [#285](https://github
   [#411](https://github.com/yrashk/ycxx/issues/411)
 - Constexpr lambdas (the interpreter has no class objects yet), further lambda declaration
   contexts ([#338](https://github.com/yrashk/ycxx/issues/338)),
-  member and tuple-like structured bindings, virtual dispatch and table emission, virtual base classes,
+  tuple-like structured bindings and structured bindings to bit-fields or inherited members,
+  virtual dispatch and table emission, virtual base classes,
   inheriting constructors, and base packs or multiple bases in a class template.
 - Member class and alias templates, conversion function templates, and constraints on class
   templates and their members.

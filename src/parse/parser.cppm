@@ -4698,15 +4698,15 @@ public:
     return s_->node(ast::StaticVar{local, sema::Sema::at(init, dbegin), value, dtor}, dbegin, pos());
   }
 
-  // A block-scope array structured binding ([dcl.pre], [dcl.struct.bind]).
+  // A block-scope structured binding ([dcl.pre], [dcl.struct.bind]).
   Ex structured_binding(const DeclSpec& spec, u32 begin) {
     auto& types = s_->types();
     QualType declared = spec.type;
     u32 at = pos();
     std::vector<std::pair<u32, u32>> names;  // local and token offset
-    auto fail = [&] {
+    auto fail = [&](bool recover = true) {
       for (auto [local, name_at] : names) s_->set_local_type(local, s_->builtin(Builtin::dependent));
-      skip_to_semi();
+      if (recover) skip_to_semi();
       return Ex{NodeId::none, begin, pos()};
     };
     if (!spec.ok) return fail();
@@ -4736,39 +4736,76 @@ public:
 
     // The names already participate in lookup. Referring to any of them in the
     // initializer is ill-formed ([dcl.struct.bind]/5).
+    u32 init_at = pos();
+    auto form = sema::Construction::copy;
     Ex source;
     if (accept(Tk::equal)) {
       source = assignment_expression();
     } else if (is(Tk::l_paren) || is(Tk::l_brace)) {
-      Tk close = is(Tk::l_paren) ? Tk::r_paren : Tk::r_brace;
+      bool brace = is(Tk::l_brace);
+      form = brace ? sema::Construction::direct_list : sema::Construction::direct;
       bump();
       source = assignment_expression();
-      if (!expect(close)) return fail();
+      if (!expect(brace ? Tk::r_brace : Tk::r_paren)) return fail();
     } else {
       s_->diag(at, Diag::binding_requires_initializer);
       return fail();
     }
-    auto binding = s_->array_binding(declared, source, names.size(), at);
-    if (!binding) return fail();
+    if (!source.ok()) return fail();
+
+    QualType type;
+    Ex init;
+    const sema::ClassRec* record = nullptr;
+    if (types.is_class(source.type())) {
+      auto binding = s_->class_binding(declared, source, names.size(), at);
+      if (!binding) return fail();
+      std::tie(type, record) = *binding;
+      const bool reference = types.is_reference(type);
+      const bool braced = form == sema::Construction::direct_list;
+      if (braced && (reference || !s_->is_aggregate(type))) {
+        sema::Braced list{init_at, pos(), {}};
+        list.clauses.push_back({source, {}, {}, false, source.begin});
+        init = s_->list_init(type, list, form, /*extend_reference=*/true);
+      } else if (reference) {
+        init = s_->bind_reference(source, type, source.begin, /*extend=*/true);
+      } else {
+        // For a same-type aggregate element, [dcl.init.list] uses direct-initialization.
+        init = s_->construct(type, {source}, init_at, pos(), braced ? sema::Construction::direct : form);
+      }
+      if (!init.ok()) return fail();
+    } else {
+      auto binding = s_->array_binding(declared, source, names.size(), at);
+      if (!binding) return fail();
+      std::tie(type, init) = *binding;
+    }
     if (!expect(Tk::semi)) return fail();
 
-    const auto& [type, init] = *binding;
     u32 hidden = s_->declare_local(s_->no_name(), type, 0, at, false);
     std::vector<ast::Child> vars;
-    auto append = [&](u32 local, const Ex& value, u32 from, u32 end) {
-      Ex var = s_->node(ast::LocalVar{local, sema::Sema::at(value, from), ast::EntityId::none}, from, end);
+    auto append = [&](u32 local, const Ex& value, u32 from, u32 end, ast::EntityId dtor = ast::EntityId::none) {
+      Ex var = s_->node(ast::LocalVar{local, sema::Sema::at(value, from), dtor}, from, end);
       s_->set_local_decl(local, var.id);
       s_->set_initialized(local);
       vars.push_back(sema::Sema::at(var, begin));
     };
-    append(hidden, init, begin, pos());
+    ast::EntityId dtor = record && !types.is_reference(type) ? s_->destructor_of(type) : ast::EntityId::none;
+    append(hidden, init, begin, pos(), dtor);
     QualType index_type = s_->builtin(s_->world().target.ptrdiff_type);
     for (u64 i = 0; i < names.size(); ++i) {
       auto [local, name_at] = names[i];
       u32 end = name_at + 1;
-      Ex index = s_->literal(index_type, s_->world().values.integer(index_type, i), ast::ValueCategory::prvalue, name_at, end);
-      Ex element = s_->subscript(s_->local_ref(hidden, name_at, end), index, end, name_at);
-      s_->set_local_type(local, types.lvalue_ref(element.type()));
+      Ex object = s_->local_ref(hidden, name_at, end);
+      Ex element;
+      if (record) {
+        const auto& field = record->fields[i];
+        element = s_->member(object, false, field.name, end, name_at, name_at);
+        if (!element.ok()) return fail(false);
+        s_->set_binding_type(local, types.is_reference(field.type) ? field.type : element.type());
+      } else {
+        Ex index = s_->literal(index_type, s_->world().values.integer(index_type, i), ast::ValueCategory::prvalue, name_at, end);
+        element = s_->subscript(object, index, end, name_at);
+        s_->set_binding_type(local, element.type());
+      }
       append(local, element, name_at, end);
     }
     return s_->node(ast::DeclStmt{s_->builder().list(vars)}, begin, pos());

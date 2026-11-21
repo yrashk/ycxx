@@ -1204,14 +1204,18 @@ ftm = '__cpp_structured_bindings'
 detect = '\bauto\s*(?:const\s*)?&{0,2}\s*\['
 status = 'partial'
 issues = [285]
-note = 'Block-scope bindings for arrays with scalar elements. Class and tuple-like bindings remain.'
+note = 'Block-scope bindings for scalar-element arrays and ordinary classes with public addressable fields and no bases. Tuple-like and other class-member bindings remain.'
 probe = '''
+struct Pair { int first, second; };
 int main() {
   int arr[2] = {3, 4};
   auto [a, b] = arr;
   auto& [c, d] = arr;
   d = 5;
-  return a + b + c + d - 15;
+  Pair pair{6, 7};
+  auto& [first, second] = pair;
+  first = 8;
+  return a + b + c + d + pair.first + second - 30;
 }
 '''
 

@@ -1,6 +1,5 @@
 // θ step 1 (#279), spec-only: decltype of a structured binding is the member's declared type, also for an
 // array member and a reference member ([dcl.struct.bind], [dcl.type.decltype]).
-// XFAIL: ycxx structured bindings, #285
 template<class A, class B> struct same { static constexpr bool value = false; };
 template<class A> struct same<A, A> { static constexpr bool value = true; };
 

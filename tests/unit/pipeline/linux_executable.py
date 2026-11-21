@@ -128,6 +128,14 @@ int main(int argc, char** argv) {
             if fixture == 'ordered':
                 assert "'.rela.init_array'" in relocations
                 assert 'R_X86_64_64' in relocations and '__GLOBAL__sub_I_' in relocations
+        bindings = tests / 'own' / 'structured-bindings'
+        for fixture in ('ordinary', 'qualifiers', 'dispatch', 'lifetime'):
+            compile(target, '-nostdlib', bindings / f'{fixture}.run.cpp', '-o', 'bindings')
+            run(['./bindings'])
+        compile(target, '-fsyntax-only', bindings / 'tuple-selection.reject.cpp', status=1,
+                error="tuple-like structured binding for type 'Crate' is not supported yet")
+        compile(target, '-fsyntax-only', bindings / 'conditional-temporary.accept.cpp', status=1,
+                error='structured binding initializer needs unsupported temporary lifetime extension')
         temporary = str(tests / 'draft' / 'basic' / 'class.temporary-3.accept.cpp')
         compile(target, '-fsyntax-only', temporary)
         compile(target, '-c', temporary, '-o', 'reference-temporary.o', status=1,
