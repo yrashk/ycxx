@@ -451,7 +451,8 @@ EntityId hosted_catch_all_callee(parse::Program& program, const ast::DeclSema& d
   if (value == ast::NodeId::none || !tree.is<ast::Call>(value)) return EntityId::none;
   const auto call = tree.get<ast::Call>(value);
   if (call.function == EntityId::none || call.callee.id == ast::NodeId::none ||
-      !tree.is<ast::DeclRef>(call.callee.id) || !namespace_function(call.function))
+      !tree.is<ast::DeclRef>(call.callee.id) || !namespace_function(call.function) ||
+      world.entities.rec(call.function).linkage != ast::Linkage::external)
     return EntityId::none;
   const auto callee = tree.get<ast::DeclRef>(call.callee.id);
   if (callee.reference || callee.entity != call.function || !prototype(callee.info.type)) return EntityId::none;
@@ -810,9 +811,11 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
     } else if (f.unwind == UnwindEligibility::cleanup_free_with_throw && !tu.int_throw) {
       tu.int_throw = runtime.int_throw();
     } else if (f.unwind == UnwindEligibility::hosted_catch_all) {
-      // The ordinary function type still erases written noexcept. A written specification
-      // on the callee cannot certify a potentially throwing call in this first slice.
-      if (noexcept_declarations.contains(f.catch_all_callee) || !program.asm_label(f.catch_all_callee).empty())
+      // An external provider supplies its own unwind coverage. A definition in this unit can
+      // introduce intervening frames without it. The ordinary function type erases written noexcept.
+      const EntityId callee = f.catch_all_callee;
+      if (program.function_defined_before(callee, program.end()) ||
+          noexcept_declarations.contains(callee) || !program.asm_label(callee).empty())
         f.unwind = UnwindEligibility::none;
       else if (!tu.catch_all) tu.catch_all = runtime.catch_all();
     }

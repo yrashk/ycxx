@@ -540,35 +540,50 @@ std::expected<void, std::string> verify(const Function& f) {
     }
   }
   if (invoke) {
-    for (const auto& destination : f.succs_of(*invoke)) {
-      const auto target = destination.target;
-      if (std::ranges::count(f.succs, target, &ir::Succ::target) != 1)
+    for (const auto& destination : f.succs_of(*invoke))
+      if (std::ranges::count(f.succs, destination.target, &ir::Succ::target) != 1)
         return std::unexpected("an invoke destination must have exactly one incoming edge");
-      // Excluding the defining block finds runtime paths on which its inputs were never written.
-      // Reject uses on those paths, including successor arguments from a bypassing block.
+
+    // A definition dominates a use when every entry path to the use goes through its block.
+    // For this invoke subset, walk the graph once per defining block with uses in other blocks.
+    auto reachable_without = [&](BlockId excluded) {
       std::vector<bool> seen(f.blocks.size());
       std::vector<BlockId> work{BlockId(0)};
       seen[0] = true;
-      auto edge_value = [&](ValueId v) {
-        const auto& value = f.value(v);
-        return value.param && value.def == raw(target);
-      };
       while (!work.empty()) {
         const auto b = work.back();
         work.pop_back();
-        for (const auto n : f.nodes_of(b)) {
-          if (std::ranges::any_of(f.operands_of(n), edge_value))
-            return std::unexpected("an invoke parameter does not dominate its use");
-          for (const auto& edge : f.succs_of(n)) {
-            if (std::ranges::any_of(f.args_of(edge), edge_value))
-              return std::unexpected("an invoke parameter does not dominate its edge use");
-            if (edge.target != target && !seen[raw(edge.target)]) {
-              seen[raw(edge.target)] = true;
-              work.push_back(edge.target);
+        for (const auto n : f.nodes_of(b))
+          for (const auto& e : f.succs_of(n))
+            if (e.target != excluded && !seen[raw(e.target)]) {
+              seen[raw(e.target)] = true;
+              work.push_back(e.target);
             }
-          }
-        }
       }
+      return seen;
+    };
+    const auto reachable = reachable_without(BlockId(none));
+    std::vector<std::vector<BlockId>> use_blocks(f.blocks.size());
+    for (const auto b : f.block_ids()) {
+      if (!reachable[raw(b)]) continue;
+      auto record_uses = [&](std::span<const ValueId> values) {
+        for (const auto v : values) {
+          const auto& value = f.value(v);
+          const auto def = value.param ? value.def : f.node(NodeId(value.def)).block;
+          if (def != 0 && def != raw(b)) use_blocks[def].push_back(b);
+        }
+      };
+      for (const auto n : f.nodes_of(b)) {
+        record_uses(f.operands_of(n));
+        for (const auto& e : f.succs_of(n)) record_uses(f.args_of(e));
+      }
+    }
+    for (const auto b : f.block_ids()) {
+      const auto& users = use_blocks[raw(b)];
+      if (users.empty()) continue;
+      const auto bypass = reachable_without(b);
+      if (std::ranges::any_of(users, [&](BlockId user) { return bypass[raw(user)]; }))
+        return std::unexpected(std::format("a value defined in block {} does not dominate its use", raw(b)));
     }
   }
   return {};
