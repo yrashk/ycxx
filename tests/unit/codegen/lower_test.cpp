@@ -229,6 +229,68 @@ func @7 {
 )");
 }
 
+enum class InvokeGraph { valid, extra_landing_edge, normal_value_on_unwind };
+
+l2::Function invoke_graph(InvokeGraph variant) {
+  using enum l2::Type;
+  using l2::Op;
+  using Edge = l2::Builder::SuccArgs;
+
+  l2::Builder b;
+  constexpr ir::BlockId call_block{1}, normal_block{2}, landing_block{3}, handler_block{4}, ordinary_block{5};
+  const l2::Type inputs[] = {state, i32, i1, ptr, i64};
+  const l2::Type normal_types[] = {state, i32};
+  const l2::Type landing_types[] = {state, ptr, i64};
+  const l2::Type handler_types[] = {state};
+
+  auto entry = b.begin_block(inputs);
+  const ir::ValueId condition[] = {b.param(entry, 2)};
+  const Edge branches[] = {{call_block, {b.param(entry, 0), b.param(entry, 1)}},
+                           {ordinary_block, {b.param(entry, 0), b.param(entry, 3), b.param(entry, 4)}}};
+  b.emit(Op::cond_br, {}, condition, {}, 0, branches);
+
+  auto call = b.begin_block(normal_types);
+  const ir::ValueId operands[] = {b.param(call, 0), b.param(call, 1)};
+  const std::uint64_t imms[] = {7, 1, 0, 0};
+  const Edge exits[] = {{normal_block, {}}, {landing_block, {}}};
+  b.emit(Op::invoke, {}, operands, imms, 0, exits);
+
+  auto normal = b.begin_block(normal_types);
+  auto result = b.param(normal, 1);
+  const ir::ValueId succeeded[] = {b.param(normal, 0), result};
+  b.emit(Op::ret, {}, succeeded);
+
+  auto landing = b.begin_block(landing_types);
+  const Edge handle[] = {{handler_block, {b.param(landing, 0)}}};
+  b.emit(Op::br, {}, {}, {}, 0, handle);
+
+  auto handler = b.begin_block(handler_types);
+  // The normal definition has an earlier block ID, but the unwind path bypasses it.
+  auto fallback = b.value(Op::const_, i32, {}, {47});
+  auto recovered = variant == InvokeGraph::normal_value_on_unwind ? result : fallback;
+  const ir::ValueId handled[] = {b.param(handler, 0), recovered};
+  b.emit(Op::ret, {}, handled);
+
+  auto ordinary = b.begin_block(landing_types);
+  if (variant == InvokeGraph::extra_landing_edge) {
+    const Edge extra[] = {{landing_block, {b.param(ordinary, 0), b.param(ordinary, 1), b.param(ordinary, 2)}}};
+    b.emit(Op::br, {}, {}, {}, 0, extra);
+  } else {
+    const ir::ValueId bypassed[] = {b.param(ordinary, 0), b.value(Op::const_, i32, {}, {59})};
+    b.emit(Op::ret, {}, bypassed);
+  }
+  return b.finish({i32});
+}
+
+void test_invoke_verification() {
+  auto valid = l2::verify(invoke_graph(InvokeGraph::valid));
+  check(valid.has_value(), valid ? "verify invoke with exclusive normal and unwind entries" : valid.error());
+  check(!l2::verify(invoke_graph(InvokeGraph::extra_landing_edge)),
+        "reject a reachable ordinary edge with correctly typed arguments into the landing block");
+  check(!l2::verify(invoke_graph(InvokeGraph::normal_value_on_unwind)),
+        "reject using the normal result in a later block reached only by the unwind edge");
+}
+
 void test_errors() {
   fails("dynamic", "func @1 {\n^0(%s: !state):\n  %s1: !state, %p: T7 = alloc %s [T1, dynamic, zero]\n  ret %s1\n}",
         "dynamic storage is not in the α subset");
@@ -244,6 +306,7 @@ int main() {
   test_scalars();
   test_memory();
   test_control();
+  test_invoke_verification();
   test_errors();
   return ycxx::unit::result("unit.lower");
 }
