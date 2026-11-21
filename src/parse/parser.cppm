@@ -1976,9 +1976,10 @@ public:
     }
     if (!e.ok()) return NodeId::none;
     ast::DefaultArg value{};
+    value.source = s_->item();
+    value.dependent_calls = s_->builder().seq(std::span<const u32>{});
     if (s_->types().is_dependent(t) || s_->dependent(e)) {
       e = s_->dependent_node({e}, e.begin, e.end);
-      value.source = s_->item();
       value.source_begin = source_begin;
       value.source_end = pos();
       value.dependent_calls = s_->builder().seq(std::span<const u32>(s_->dependent_calls).subspan(calls_before));

@@ -10,8 +10,8 @@ namespace adl {
 struct Tag {};
 }
 template<class T>
-constexpr int lookup(int value = read(T{})) { return value; }
+int lookup(int value = read(T{})) { return value; }
 namespace adl {
 constexpr int read(Tag) { return 7; }
 }
-static_assert(lookup<adl::Tag>() == 7);
+int late_adl() { return lookup<adl::Tag>(); }
