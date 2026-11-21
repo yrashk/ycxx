@@ -303,6 +303,9 @@ for each derived field.
 - `__is_base_of` for known class hierarchies, including private and ambiguous bases and dependent
   operands in supported class-template bases and variable-template initializers.
   [Extension guide](docs/EXTENSIONS.md) · [#218](https://github.com/yrashk/ycxx/issues/218)
+- `__is_empty` accounts for inherited data members and supports dependent operands in class-template
+  bases and variable-template initializers.
+  [Extension guide](docs/EXTENSIONS.md) · [#218](https://github.com/yrashk/ycxx/issues/218)
 - logical negation of a qualified dependent `bool` variable template-id in a `bool` template
   argument or default
   [#209](https://github.com/yrashk/ycxx/issues/209);
