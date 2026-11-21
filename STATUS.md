@@ -1040,11 +1040,15 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   The first expression is a nonvolatile lvalue of the exact base type, which is a flat aggregate
   with nonvolatile arithmetic fields and trivial copy and destruction. The base copy uses the
   existing subobject layout and is sequenced before the remaining initializers.
+  An unqualified `B{…}` prvalue of the exact base type can also supply that element when each
+  base field has a separately written positional initializer and the base has a usable trivial
+  move constructor. The complete temporary is initialized once before its value is copied into
+  the base subobject.
 - Parenthesized arrays, nested fields, unions, reference members, bit-fields, and nontrivial
   destruction remain in [#301](https://github.com/yrashk/ycxx/issues/301). The issue also tracks
-  multiple bases, base prvalues, omitted initializers for derived aggregates, constant evaluation
-  of base copies, static storage and functional casts. Linux x86-64 runtime conversions between
-  floating-point and integer types remain in [#201](https://github.com/yrashk/ycxx/issues/201).
+  multiple bases, other base prvalues, omitted initializers for derived aggregates, constant
+  evaluation of base copies, static storage and functional casts. Linux x86-64 runtime conversions
+  between floating-point and integer types remain in [#201](https://github.com/yrashk/ycxx/issues/201).
   Spec-only fixtures are in `tests/own/parenthesized-aggregate/`.
 
 - Ordinary mutable data members can be modified through a const object. A member access
@@ -1775,8 +1779,12 @@ session's.*
   for arithmetic values, references to arithmetic types and cv `void`. Two cv `void` operands
   give true. A single cv `void` operand gives false. Arithmetic reference binding accounts for
   value category, the referent's qualifiers and temporary conversion between distinct arithmetic
-  types. Supported class-template bases and variable-template initializers replay dependent
-  operands. Other operand types and dependent queries outside those contexts get hard diagnostics.
+  types. `__is_convertible` also checks a unique public nonvirtual base path between complete
+  class types. It supports direct reference binding and by-value initialization of a fieldless base
+  with no bases or written constructors of its own, an eligible implicit trivial copy or move
+  constructor, and an eligible implicit trivial destructor. Supported class-template bases and
+  variable-template initializers replay dependent operands and check class completeness at the
+  demand. Other combinations, including class `__is_nothrow_convertible`, get hard diagnostics.
   `__has_builtin` answers 0 while support is partial ([meta.rel], [dcl.init.ref], #218).
 - `__is_base_of(Base, Derived)` ignores top-level cv. Nonclass and union operands give false.
   The same nonunion class gives true, including when incomplete. For distinct nonunion classes,
@@ -1806,7 +1814,7 @@ session's.*
   ([meta.unary.prop], #218).
 - Listed in docs/EXTENSIONS.md. Tests: `tests/own/builtins/`. `<cstdio>`: 53 → 33 errors.
 - Not yet (#211 follow-up): the built-ins that need the object model, such as
-  class constructibility, assignability and convertibility, remaining `__is_trivially_*` and
+  class constructibility, assignability and general convertibility, remaining `__is_trivially_*` and
   `__is_nothrow_*` predicates, `__is_standard_layout` and
   `__reference_binds_to_temporary`. Other dependent predicates, conversions of a dependent
   predicate to a non-`bool` parameter, dependent array bounds and expression mangling remain in
