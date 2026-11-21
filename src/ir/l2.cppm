@@ -186,6 +186,10 @@ export enum class Op : std::uint16_t {
   // System V AMD64 variadic cursors. Start uses the enclosing function's entry state.
   va_start [[=state({S, V}, {S})]],
   va_arg [[=state({S, V}, {S, V})]],
+
+  // The fixed AMD64 hosted call. It feeds the successor parameters directly, with the
+  // normal result on edge 0 and the original unwind header and selector on edge 1.
+  invoke [[=control({S, V}, 2).imms({entity, u32, u32, u32})]],
 };
 
 export constexpr std::size_t op_count = std::meta::enumerators_of(^^Op).size();
@@ -407,6 +411,7 @@ std::optional<std::string> check_sig(const Function& f, List<Arg, 4> sig, R&& va
 
 std::expected<void, std::string> verify(const Function& f) {
   if (f.blocks.empty()) return std::unexpected(std::string("a function needs an entry block"));
+  std::optional<NodeId> invoke;
   for (BlockId b : f.block_ids()) {
     for (NodeId n : f.nodes_of(b)) {
       const Node& nd = f.node(n);
@@ -498,6 +503,12 @@ std::expected<void, std::string> verify(const Function& f) {
         case Op::cond_br:
           if (t(0) != Type::i1) return at("the condition must be i1");
           break;
+        case Op::invoke:
+          if (invoke || t(1) != Type::i32 || f.imms_of(n)[1] > 1 || f.imms_of(n)[2] || f.imms_of(n)[3] ||
+              f.succs_of(n)[0].target == f.succs_of(n)[1].target)
+            return at("expected one fixed i32 invoke with distinct destinations");
+          invoke = n;
+          break;
         case Op::ret: {
           if (ops.size() - 1 != f.results.size()) return at("returns the wrong number of values");
           for (std::size_t i = 1; i < ops.size(); ++i)
@@ -510,12 +521,52 @@ std::expected<void, std::string> verify(const Function& f) {
         const ir::Succ& e = f.succs_of(n)[i];
         if (raw(e.target) == 0 || raw(e.target) >= f.blocks.size()) return at("bad successor");
         auto params = f.params_of(e.target);
+        if (nd.op == Op::invoke) {
+          const Type normal[]{Type::state, Type::i32};
+          const Type landing[]{Type::state, Type::ptr, Type::i64};
+          const auto expected = i == 0 ? std::span<const Type>(normal) : std::span<const Type>(landing);
+          if (e.nargs != 0 || !std::ranges::equal(params, expected, {}, [&](ValueId p) { return f.type(p); }))
+            return at("invoke destination has the wrong implicit parameters");
+          continue;
+        }
         if (params.size() != e.nargs) return at(std::format("successor {} passes the wrong number of arguments", i));
         for (std::uint32_t k = 0; k < e.nargs; ++k) {
           if (f.type(f.args_of(e)[k]) != f.type(params[k]))
             return at(std::format("successor {} argument {} has the wrong type", i, k));
           const Value& d = f.value(f.args_of(e)[k]);
           if (!d.param && d.def > raw(n)) return at("a successor argument is used before it is defined");
+        }
+      }
+    }
+  }
+  if (invoke) {
+    for (const auto& destination : f.succs_of(*invoke)) {
+      const auto target = destination.target;
+      if (std::ranges::count(f.succs, target, &ir::Succ::target) != 1)
+        return std::unexpected("an invoke destination must have exactly one incoming edge");
+      // Excluding the defining block finds runtime paths on which its inputs were never written.
+      // Reject uses on those paths, including successor arguments from a bypassing block.
+      std::vector<bool> seen(f.blocks.size());
+      std::vector<BlockId> work{BlockId(0)};
+      seen[0] = true;
+      auto edge_value = [&](ValueId v) {
+        const auto& value = f.value(v);
+        return value.param && value.def == raw(target);
+      };
+      while (!work.empty()) {
+        const auto b = work.back();
+        work.pop_back();
+        for (const auto n : f.nodes_of(b)) {
+          if (std::ranges::any_of(f.operands_of(n), edge_value))
+            return std::unexpected("an invoke parameter does not dominate its use");
+          for (const auto& edge : f.succs_of(n)) {
+            if (std::ranges::any_of(f.args_of(edge), edge_value))
+              return std::unexpected("an invoke parameter does not dominate its edge use");
+            if (edge.target != target && !seen[raw(edge.target)]) {
+              seen[raw(edge.target)] = true;
+              work.push_back(edge.target);
+            }
+          }
         }
       }
     }

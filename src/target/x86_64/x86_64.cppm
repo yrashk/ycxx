@@ -190,7 +190,7 @@ std::expected<Frame, std::string> layout(const l2::Function& body) {
         if (frame.size > max_frame) return at_node(n, nd.op, "x86-64 frame exceeds the single-page limit");
         frame.variadic_save = -std::int32_t(frame.size);
       }
-      if (nd.op == Op::call || nd.op == Op::call_ind) {
+      if (nd.op == Op::call || nd.op == Op::call_ind || nd.op == Op::invoke) {
         const bool indirect = nd.op == Op::call_ind;
         const bool variadic = nd.flags & ir::bit(ir::Flag::variadic);
         if (indirect && body.type(operands[1]) != Type::ptr)
@@ -231,6 +231,11 @@ class Emitter {
         block_offsets_(body.blocks.size()) {}
 
   std::expected<MachineCode, std::string> run() {
+    for (std::uint32_t n = 0; n < body_.nodes.size(); ++n)
+      if (body_.nodes[n].op == Op::invoke) {
+        landing_ = body_.succs_of(NodeId(n))[1].target;
+        out_.catch_all.emplace();
+      }
     e_.emit({0x55});  // push rbp
     frame_row(FrameState::saved_rbp);
     e_.move(rbp, rsp);
@@ -246,6 +251,13 @@ class Emitter {
       // CFI follows byte order. Branches into a block after a return still have a live frame.
       if (out_.frame_rows.back().state == FrameState::entry) frame_row(FrameState::frame_pointer);
       block_offsets_[raw(b)] = e_.offset();
+      if (landing_ == b) {
+        // The personality arrives at the recorded address with these original machine
+        // registers. Capture both before an instruction uses them as scratch.
+        const auto params = body_.params_of(b);
+        e_.store(rbp, frame_.slots[raw(params[1])], rax, 8);
+        e_.store(rbp, frame_.slots[raw(params[2])], rdx, 8);
+      }
       for (NodeId n : body_.nodes_of(b)) {
         if (auto result = node(n); !result) return std::unexpected(result.error());
       }
@@ -254,6 +266,11 @@ class Emitter {
       if (!e_.patch_relative(branch.at, block_offsets_[raw(branch.target)]))
         return std::unexpected("x86-64 branch displacement exceeds signed 32 bits");
     if (!std::in_range<std::uint32_t>(e_.offset())) return std::unexpected("x86-64 function exceeds 4 GiB");
+    if (landing_) {
+      if (!protected_call_) return std::unexpected("missing protected machine call");
+      (*out_.catch_all)[*protected_call_].landing_pad =
+          static_cast<std::uint32_t>(block_offsets_[raw(*landing_)]);
+    }
     return std::move(out_);
   }
 
@@ -266,6 +283,8 @@ class Emitter {
   Encoder e_{out_.bytes};
   std::vector<std::size_t> block_offsets_;
   Amd64ArgumentPlan incoming_;
+  std::optional<BlockId> landing_;
+  std::optional<std::size_t> protected_call_;
 
   struct Branch {
     std::size_t at;
@@ -411,20 +430,35 @@ class Emitter {
         e_.store(rsp, 8 * std::int32_t(index), rax, home_width(arg));
       }
     }
+    std::size_t call_begin;
     if (indirect) {
       // R11 is caller-saved and holds no argument. Variadic calls reserve AL for the vector
       // register count (AMD64 psABI §3.2.3), so their callee address needs a separate register.
       Reg target = variadic ? r11 : rax;
       read(ops[1], target);
       if (variadic) e_.reg({0x31}, rax, rax, false);  // xor eax, eax
+      call_begin = e_.offset();
       e_.reg({0xff}, 2, target, false);  // call r/m64
     } else {
       // AL counts named and unnamed vector register arguments (AMD64 psABI §3.2.3).
       const auto vector_count = variadic ? plan.used_sse_registers() : 0u;
       if (vector_count) e_.emit({0xb0, std::uint8_t(vector_count)});  // mov al, imm8
       else e_.reg({0x31}, rax, rax, false);  // xor eax, eax
+      call_begin = e_.offset();
       e_.emit({0xe8});  // call rel32
       relocation(RelocKind::plt32, ir::EntityId(std::uint32_t(imms[0])));
+    }
+    const bool invoke = node.op == Op::invoke;
+    if (out_.catch_all) {
+      if (invoke) protected_call_ = out_.catch_all->size();
+      out_.catch_all->push_back({static_cast<std::uint32_t>(call_begin),
+                                static_cast<std::uint32_t>(e_.offset()), 0});
+    }
+    if (invoke) {
+      const auto normal = body_.succs_of(n)[0].target;
+      write(body_.params_of(normal)[1]);
+      jump(normal);
+      return;
     }
     if (node.nres > 1) {
       ValueId result = body_.result(n, 1);
@@ -435,6 +469,11 @@ class Emitter {
       e_.move(rax, rdx);
       write(body_.result(n, 2));
     }
+  }
+
+  void jump(BlockId target) {
+    e_.emit({0xe9});  // jmp rel32
+    branches_.push_back({e_.displacement(), target});
   }
 
   void edge(const ir::Succ& succ) {
@@ -450,8 +489,7 @@ class Emitter {
       e_.load(rax, rsp, 8 * std::int32_t(i - 1), width);
       e_.store(rbp, frame_.slots[raw(params[i])], rax, width);
     }
-    e_.emit({0xe9});  // jmp rel32
-    branches_.push_back({e_.displacement(), succ.target});
+    jump(succ.target);
   }
 
   std::expected<void, std::string> node(NodeId n);
@@ -619,7 +657,7 @@ std::expected<void, std::string> Emitter::node(NodeId n) {
     case Op::va_arg:
       if (!va_arg(ops[1], body_.result(n, 1))) return at_node(n, op, "conditional branch displacement out of range");
       return {};
-    case Op::call: case Op::call_ind:
+    case Op::call: case Op::call_ind: case Op::invoke:
       call(n);
       return {};
     case Op::br:

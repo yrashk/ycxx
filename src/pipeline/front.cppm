@@ -189,6 +189,14 @@ struct Runtime {
             declared("__cxa_throw", world.types.function(v, params, false, lang), true),
             declared("_ZTIi", world.types.builtin(sema::Builtin::char_), false)};
   }
+  ir::CatchAllRuntime catch_all() {
+    // Itanium EH ABI §2.5. The unwind header crosses the runtime boundary as a pointer.
+    const auto lang = ast::LangLinkage::c;
+    const QualType p = vp(), v = world.types.builtin(sema::Builtin::void_);
+    return {declared("__cxa_begin_catch", world.types.function(p, std::span(&p, 1), false, lang), true),
+            declared("__cxa_end_catch", world.types.function(v, {}, false, lang), true),
+            declared("_Unwind_Resume", world.types.function(v, std::span(&p, 1), false, lang), true)};
+  }
 };
 
 // A function's static locals ([stmt.dcl]/3): each a variable of the unit, initialized with its
@@ -391,6 +399,71 @@ UnwindEligibility cleanup_free_definition(parse::Program& program, const ast::De
   return has_throw ? cleanup_free_with_throw : cleanup_free;
 }
 
+// Prove the whole handler occurrence while it still has C++ types and lifetime information.
+// Neither a call-name spelling nor an untyped shape certifies the callee.
+EntityId hosted_catch_all_callee(parse::Program& program, const ast::DeclSema& d, const ast::BodySema& body) {
+  const auto& world = program.world();
+  const auto& tree = world.ins.ast;
+  auto sole_statement = [&](ast::NodeId id) {
+    if (id == ast::NodeId::none || !tree.is<ast::Compound>(id)) return ast::NodeId::none;
+    const auto stmts = tree.children(tree.get<ast::Compound>(id).stmts);
+    return stmts.size() == 1 ? stmts.front().id : ast::NodeId::none;
+  };
+  const auto trial = sole_statement(body.tree);
+  if (trial == ast::NodeId::none || !tree.is<ast::TryBlock>(trial)) return EntityId::none;
+  auto prototype = [&](QualType q) {
+    const auto f = world.types.rec(q);
+    return f.kind == sema::TypeKind::function && !f.variadic && !f.fn_noexcept &&
+           f.fn_cv == sema::Cv::none && f.fn_ref == ast::RefQual::none &&
+           world.types.is(f.inner, sema::Builtin::int_) && f.params.size() == 1 &&
+           world.types.is(f.params.front(), sema::Builtin::int_);
+  };
+  auto namespace_function = [&](EntityId id) {
+    const auto& e = world.entities.rec(id);
+    return e.kind == sema::EntityKind::function && e.templ == EntityId::none && program.is_namespace(e.scope) &&
+           (e.linkage == ast::Linkage::external || e.linkage == ast::Linkage::internal);
+  };
+  if (!namespace_function(d.entity) || !prototype(d.type) ||
+      (d.flags & (sema::decl_flag::constexpr_ | sema::decl_flag::consteval_)) ||
+      d.contracts != ast::NodeId::none || world.ins.seqs.size(body.closures) != 0 ||
+      world.ins.seqs.size(body.locals) != 1)
+    return EntityId::none;
+  const auto local = world.ins.seqs.at(body.locals, 0);
+  if (local.entity != EntityId::none || local.decl != ast::NodeId::none ||
+      sema::Types::is_volatile(world.types.canonical(local.type)))
+    return EntityId::none;
+
+  auto return_value = [&](ast::NodeId id) {
+    const auto statement = sole_statement(id);
+    return statement != ast::NodeId::none && tree.is<ast::Return>(statement)
+        ? tree.get<ast::Return>(statement).value.id : ast::NodeId::none;
+  };
+  const auto block = tree.get<ast::TryBlock>(trial);
+  const auto handlers = tree.children(block.handlers);
+  if (handlers.size() != 1 || !tree.is<ast::Handler>(handlers.front().id)) return EntityId::none;
+  const auto handler = tree.get<ast::Handler>(handlers.front().id);
+  const auto caught_result = return_value(handler.body.id);
+  if (handler.kind != ast::HandlerKind::catch_all || caught_result == ast::NodeId::none ||
+      !tree.is<ast::Literal>(caught_result) || !world.types.is(tree.get<ast::Literal>(caught_result).info.type, sema::Builtin::int_))
+    return EntityId::none;
+
+  const auto value = return_value(block.body.id);
+  if (value == ast::NodeId::none || !tree.is<ast::Call>(value)) return EntityId::none;
+  const auto call = tree.get<ast::Call>(value);
+  if (call.function == EntityId::none || call.callee.id == ast::NodeId::none ||
+      !tree.is<ast::DeclRef>(call.callee.id) || !namespace_function(call.function))
+    return EntityId::none;
+  const auto callee = tree.get<ast::DeclRef>(call.callee.id);
+  if (callee.reference || callee.entity != call.function || !prototype(callee.info.type)) return EntityId::none;
+  const auto args = tree.children(call.args);
+  if (args.size() != 1 || !tree.is<ast::ImplicitConversion>(args.front().id)) return EntityId::none;
+  const auto arg = tree.get<ast::ImplicitConversion>(args.front().id);
+  if (arg.conversion != ast::ConversionKind::lvalue_to_rvalue || arg.operand.id == ast::NodeId::none ||
+      !tree.is<ast::LocalRef>(arg.operand.id) || tree.get<ast::LocalRef>(arg.operand.id).local != 0)
+    return EntityId::none;
+  return call.function;
+}
+
 // The definitions and declarations of the global namespace, in item order.
 TranslationUnit unit_of(parse::Program& program, sema::World& world, const items::Items& items, std::string name) {
   ast::Interners& ins = world.ins;
@@ -576,8 +649,12 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
       // A written ordinary body starts at '{'. Other starts include a function-try-block and a
       // constructor initializer. Synthetic bodies and instantiations never enter this path.
       if (linux && !member && tu.main != d.entity && !it.specialization &&
-          program.region().tokens[it.body_begin].kind == lex::Tk::l_brace)
-        tu.functions.back().unwind = cleanup_free_definition(program, d, body);
+          program.region().tokens[it.body_begin].kind == lex::Tk::l_brace) {
+        auto& f = tu.functions.back();
+        f.catch_all_callee = hosted_catch_all_callee(program, d, body);
+        f.unwind = f.catch_all_callee == EntityId::none ? cleanup_free_definition(program, d, body)
+                                                       : UnwindEligibility::hosted_catch_all;
+      }
       closures_of(body.closures, program.id(k), it.body_begin - it.begin);
       continue;
     }
@@ -674,6 +751,12 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
       f.unwind = UnwindEligibility::none;
     } else if (f.unwind == UnwindEligibility::cleanup_free_with_throw && !tu.int_throw) {
       tu.int_throw = runtime.int_throw();
+    } else if (f.unwind == UnwindEligibility::hosted_catch_all) {
+      // The ordinary function type still erases written noexcept. A written specification
+      // on the callee cannot certify a potentially throwing call in this first slice.
+      if (noexcept_declarations.contains(f.catch_all_callee) || !program.asm_label(f.catch_all_callee).empty())
+        f.unwind = UnwindEligibility::none;
+      else if (!tu.catch_all) tu.catch_all = runtime.catch_all();
     }
   }
   // Written declarations have already supplied their locations and definitions. For the

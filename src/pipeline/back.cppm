@@ -106,7 +106,7 @@ struct Entity {
 };
 
 // Certified on the typed definition, before IR drops lifetime information.
-enum class UnwindEligibility : std::uint8_t { none, cleanup_free, cleanup_free_with_throw };
+enum class UnwindEligibility : std::uint8_t { none, cleanup_free, cleanup_free_with_throw, hosted_catch_all };
 
 // A function definition: what `function_ir(F)` reads (irgen::FunctionInput, without a thunk's
 // locals).
@@ -123,6 +123,7 @@ struct FunctionDef {
   EntityId guard_acquire = EntityId::none, guard_release = EntityId::none, atexit = EntityId::none, dso = EntityId::none;
   bool weak_elf = false;  // an ordinary external inline definition in the GNU ELF subset (#422)
   UnwindEligibility unwind = UnwindEligibility::none;
+  EntityId catch_all_callee = EntityId::none;  // for the complete-unit exception-specification check
 };
 
 // A variable definition at namespace scope with its constant initializer, or `ConstId::none` for
@@ -180,6 +181,7 @@ struct TranslationUnit {
   bool virtual_emission_blocked = false;
   std::optional<ast::Loc> virtual_declaration;
   std::optional<ir::IntThrowRuntime> int_throw;
+  std::optional<ir::CatchAllRuntime> catch_all;
 };
 
 // What failed, at a location in an item when there is one. Every error here is something the α
@@ -982,6 +984,7 @@ engine::query_task<Generated> FunctionGen::run(engine::Ctx& cx, FnKey k) {
   input.guard_release = d.guard_release;
   input.atexit = d.atexit;
   input.dso = d.dso;
+  input.hosted_catch_all = d.unwind == UnwindEligibility::hosted_catch_all;
   auto f = irgen::function_ir(*universe().in, input, facts);
   if (!f) {
     auto error = co_await located_error(cx, k.tu, ast::Loc{d.item, d.body_offset}, std::move(f.error()));
@@ -1130,7 +1133,7 @@ engine::query_task<Lowered> Lower::run(engine::Ctx& cx, FnKey k) {
     for (std::size_t i = 0; i < body.nodes.size(); ++i) {
       const auto n = ir::NodeId(static_cast<std::uint32_t>(i));
       const ir::Op op = body.node(n).op;
-      const bool direct = op == ir::Op::call;
+      const bool direct = op == ir::Op::call || op == ir::Op::invoke;
       std::optional<QualType> callee;
       EntityId callee_id = EntityId::none;
       bool ordinary_callee = false;
@@ -1164,6 +1167,7 @@ engine::query_task<Lowered> Lower::run(engine::Ctx& cx, FnKey k) {
     }
     config.sysv_amd64 = true;
     if (def.unwind == UnwindEligibility::cleanup_free_with_throw) config.int_throw = tu.int_throw;
+    if (def.unwind == UnwindEligibility::hosted_catch_all) config.catch_all = tu.catch_all;
     // Extend outgoing narrow results for interoperability. Lowering truncates incoming results
     // to the declared width, as the System V AMD64 psABI §3.2.3 leaves excess bits unspecified.
     config.min_result_bits = 32;
@@ -1180,7 +1184,7 @@ engine::query_task<Lowered> Lower::run(engine::Ctx& cx, FnKey k) {
   co_return Lowered{L2Body{std::move(*l2)}, {layout.strings().begin(), layout.strings().end()}, std::nullopt};
 }
 
-// The entities a function's code refers to (`symbol` and `call` operands).
+// The entities a function's code refers to (address and direct call operands).
 struct SymbolReference {
   ir::EntityId entity;
   l2::Op op;
@@ -1190,7 +1194,7 @@ std::vector<SymbolReference> references(const l2::Function& body) {
   std::vector<SymbolReference> out;
   for (std::uint32_t n = 0; n < body.nodes.size(); ++n) {
     l2::Op op = body.nodes[n].op;
-    if (op == l2::Op::symbol || op == l2::Op::call)
+    if (op == l2::Op::symbol || op == l2::Op::call || op == l2::Op::invoke)
       out.push_back({ir::EntityId(std::uint32_t(body.imms_of(ir::NodeId(n))[0])), op});
   }
   return out;
