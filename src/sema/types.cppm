@@ -1034,7 +1034,8 @@ struct World {
   void install_alignment_enum(Classes& classes) {
     // This opaque shape supports implicit users of the type. Source lookup still needs a written
     // declaration, and a written definition supplies its own record.
-    classes.publish_enum(alignment_enum(), {.scoped = true, .fixed = true, .underlying = types.builtin(target.size_type)});
+    classes.publish_enum(alignment_enum(), {.scoped = true, .fixed = true, .underlying = types.builtin(target.size_type),
+                                           .promotion = std::nullopt, .enumerators = {}});
   }
 
   QualType builtin_va_list() {
