@@ -251,7 +251,7 @@ public:
   // point, counting the namespaces using-directives nominate where [namespace.udir]/2 puts them.
   // `block` are the namespaces block-scope using-directives at the point nominate.
   std::vector<DeclId> visible_decls(std::string_view name, u32 item, bool self, const std::string& from,
-                                    std::span<const std::string> block = {}) {
+                                    std::span<const std::string> block = {}, bool type_only = false) {
     // Each nominated namespace, and those its own directives nominate ([namespace.udir]/4), with
     // the namespace that encloses both it and the directive: where its names appear.
     std::vector<std::pair<std::string, std::string>> nominated;  // (namespace, level)
@@ -270,6 +270,11 @@ public:
           std::vector<DeclId> more = declared_in(name, t, item, self);
           r.insert(r.end(), more.begin(), more.end());
         }
+      if (type_only)
+        std::erase_if(r, [&](DeclId id) {
+          auto d = decl_sema(id);
+          return !d || d->entity == EntityId::none || !sema::Sema::is_type(d->kind);
+        });
       if (!r.empty() || level.empty()) return r;
     }
   }
@@ -289,12 +294,38 @@ public:
   }
   // Qualified lookup in namespace `ns` ([namespace.qual]/2): its own declarations, or, when it has
   // none, those of the namespaces its using-directives nominate.
-  std::vector<DeclId> qualified_decls(std::string_view name, const std::string& ns, u32 item, bool self) {
-    std::vector<DeclId> r = declared_in(name, ns, item, self);
-    if (!r.empty()) return r;
+  std::vector<DeclId> qualified_decls(std::string_view name, const std::string& ns, u32 item, bool self,
+                                     bool type_only = false, bool direct_only = false) {
+    auto candidates = [&](const std::string& path) {
+      auto declarations = declared_in(name, path, item, self);
+      if (type_only)
+        std::erase_if(declarations, [&](DeclId id) {
+          auto d = decl_sema(id);
+          return !d || d->entity == EntityId::none || !sema::Sema::is_type(d->kind);
+        });
+      return declarations;
+    };
+    std::vector<DeclId> r = candidates(ns);
+    if (!r.empty() || direct_only) return r;
+    if (type_only) {
+      std::vector<std::string> visited{ns};
+      auto follow = [&](auto&& self, const std::string& path) -> void {
+        for (const Directive& d : directives_) {
+          if (d.alias || d.item >= item || d.at != path) continue;
+          if (!d.target) item_sema(d.item);
+          if (!d.target || std::ranges::contains(visited, *d.target)) continue;
+          visited.push_back(*d.target);
+          auto more = candidates(*d.target);
+          if (more.empty()) self(self, *d.target);
+          else r.insert(r.end(), more.begin(), more.end());
+        }
+      };
+      follow(follow, ns);
+      return r;
+    }
     for (const std::string& t : closure(ns, item))
       if (t != ns) {
-        std::vector<DeclId> more = declared_in(name, t, item, self);
+        std::vector<DeclId> more = candidates(t);
         r.insert(r.end(), more.begin(), more.end());
       }
     return r;
@@ -355,7 +386,8 @@ public:
       const items::DeclName& n = it.names[k];
       const bool nested = it.kind == ItemKind::namespace_def;  // only these have per-name scopes
       const std::string& ns = nested ? name_ns(j, k) : ns_of_[j];
-      if (in_class_[j] || (ns != path && (inhabit || (nested ? name_eff_ns(j, k) : eff_ns_[j]) != path))) continue;
+      if ((in_class_[j] && !n.member_elaborated_candidate) ||
+          (ns != path && (inhabit || (nested ? name_eff_ns(j, k) : eff_ns_[j]) != path))) continue;
       if (n.flags & items::name_flag::unknown) {
         if (std::ranges::find(running_, j) != running_.end()) continue;
         item_sema(j);  // resolves its targets
@@ -373,7 +405,8 @@ public:
       // A C-linkage definition qualified into another namespace does not bind a lexical name.
       // Its earlier declaration is indexed in the target namespace.
       const bool qualified = it.qualifier_begin < it.qualifier_end;
-      auto d = bound_functions || qualified ? decl_sema(id) : std::nullopt;
+      auto d = bound_functions || qualified || n.member_elaborated_candidate ? decl_sema(id) : std::nullopt;
+      if (n.member_elaborated_candidate && (!d || d->entity == EntityId::none)) continue;
       if (qualified)
         if (auto target = qualified_c_functions_.find({j, n.ordinal});
             target != qualified_c_functions_.end() && target->second != ns)
@@ -1326,16 +1359,20 @@ public:
   std::vector<DeclId> visible_decls(ast::NameId name, std::span<const EntityId> directives = {}) override {
     std::vector<std::string> paths;
     for (EntityId ns : directives) paths.push_back(p_->namespace_path(ns));
-    return p_->visible_decls(p_->world().ins.names.spelling(name), item_, self_, from, paths);
+    return p_->visible_decls(p_->world().ins.names.spelling(name), declaration_lookup_end.value_or(item_),
+                             self_ && !declaration_lookup_end, from, paths);
   }
   std::optional<EntityId> namespace_named(ast::NameId name, std::span<const EntityId> directives = {}) override {
     for (DeclId d : visible_decls(name, directives))
       if (auto s = p_->decl_sema(d); s && s->kind == ast::DeclKind::namespace_) return s->entity;
     return std::nullopt;
   }
-  std::vector<ast::DeclSema> namespace_members(EntityId ns, ast::NameId name) override {
+  std::vector<ast::DeclSema> namespace_members(EntityId ns, ast::NameId name, bool type_only = false,
+                                               bool direct_only = false) override {
     std::vector<ast::DeclSema> r;
-    for (DeclId d : p_->qualified_decls(p_->world().ins.names.spelling(name), p_->namespace_path(ns), item_, self_))
+    for (DeclId d : p_->qualified_decls(p_->world().ins.names.spelling(name), p_->namespace_path(ns),
+                                       declaration_lookup_end.value_or(item_), self_ && !declaration_lookup_end,
+                                       type_only, direct_only))
       if (auto s = p_->decl_sema(d); s && s->entity != EntityId::none) r.push_back(*s);
     return r;
   }
@@ -1438,6 +1475,7 @@ public:
   }
   // Past the closing brace of the class the item defines, that class is complete.
   bool own_class_complete = false;
+  std::optional<u32> declaration_lookup_end;
   EntityId completing_class = EntityId::none;
   // The original tokens when a constructor reads a default member initializer again.
   std::optional<Program::Dmi> initializer_source;
@@ -1489,7 +1527,10 @@ public:
   std::optional<EntityId> namespace_named(ast::NameId name, std::span<const EntityId> directives = {}) override {
     return at_.namespace_named(name, directives);
   }
-  std::vector<ast::DeclSema> namespace_members(EntityId ns, ast::NameId name) override { return at_.namespace_members(ns, name); }
+  std::vector<ast::DeclSema> namespace_members(EntityId ns, ast::NameId name, bool type_only = false,
+                                               bool direct_only = false) override {
+    return at_.namespace_members(ns, name, type_only, direct_only);
+  }
   std::vector<ast::DeclSema> adl_functions(EntityId ns, ast::NameId name, bool at_instantiation) override {
     return at_instantiation ? p_->adl_functions(ns, name, p_->end(), false) : at_.adl_functions(ns, name, false);
   }
@@ -2778,6 +2819,13 @@ private:
       ps_.expect(Tk::semi);
       return;
     }
+    // Namespace names introduced by members precede the declarators after the closing brace.
+    u32 after_members = k_ + 1;
+    const auto& items = p_->items().items;
+    while (after_members < items.size() && items[after_members].parent != items::none &&
+           items[after_members].parent >= k_)
+      ++after_members;
+    q_.declaration_lookup_end = after_members;
     DeclSpec spec;
     spec.begin = at;
     spec.type = sem.type;
@@ -3267,7 +3315,7 @@ private:
           const auto& member = p_->items().items[item];
           if (member.parent != it_->parent) continue;
           const auto& n = member.names[ordinal];
-          if (n.flags & (items::name_flag::friend_ | items::name_flag::specialization)) continue;
+          if (n.member_elaborated_candidate || (n.flags & (items::name_flag::friend_ | items::name_flag::specialization))) continue;
           if (n.flags & items::name_flag::template_) return true;
           found = true;
         }
@@ -3306,9 +3354,61 @@ private:
               ps_.kind());
       return bad();
     }
+    // The elaborated name can introduce a namespace class only at this decl-specifier.
+    std::optional<ast::DeclSema> introduced;
+    const items::DeclName* candidate = !it_->names.empty() && it_->names.back().member_elaborated_candidate
+                                           ? &it_->names.back() : nullptr;
+    auto declare_class = std::move(ps_.declare_class);
+    if (candidate && p_->namespace_class_friend(k_) && !member_template_ && !inst_) {
+      ps_.declare_class = [&](NameId name, Tk key, u32 at) -> std::optional<QualType> {
+        if (at != candidate->offset) return std::nullopt;
+        std::optional<ast::DeclSema> visible_type;
+        for (DeclId id : p_->visible_decls(candidate->name, k_, false, p_->ns_of(k_), {}, /*type_only=*/true)) {
+          auto d = p_->decl_sema(id);
+          if (!d) continue;
+          if (visible_type && visible_type->entity != d->entity) {
+            s_.diag(at, Diag::ambiguous_name, name);
+            return std::nullopt;
+          }
+          visible_type = *d;
+        }
+        if (visible_type) {
+          if (visible_type->kind != ast::DeclKind::class_ || (visible_type->flags & sema::decl_flag::template_)) {
+            s_.diag(at, Diag::conflicting_declaration, name);
+            return std::nullopt;
+          }
+          if (!record_class_key(visible_type->entity, key, at)) return std::nullopt;
+          return visible_type->type;
+        }
+        for (DeclId id : p_->declared_in(candidate->name, p_->ns_of(k_), k_, false, /*inhabit=*/true)) {
+          auto d = p_->decl_sema(id);
+          if (d && d->kind == ast::DeclKind::namespace_) {
+            s_.diag(at, Diag::conflicting_declaration, name);
+            return std::nullopt;
+          }
+        }
+        EntityId entity = class_entity(name);
+        introduced = class_decl(entity, false);
+        s_.member_introduction = sema::Sema::MemberIntroduction{name, *introduced, key == Tk::kw_union};
+        return introduced->type;
+      };
+    }
     DeclSpec spec = ps_.decl_specifiers(/*in_type_id=*/false, nullptr, /*allow_conversion_id=*/true, /*class_member=*/true);
+    ps_.declare_class = std::move(declare_class);
+    auto commit_introduction = [&] {
+      if (introduced && decls_.size() == candidate->ordinal && out_.diags.empty() &&
+          record_class_key(introduced->entity, spec.class_key, spec.class_at)) {
+        decls_.push_back(*introduced);
+        p_->declared(*introduced, k_);
+      }
+    };
     if (spec.is_extern || spec.is_constinit) {
       s_.diag(spec.begin, Diag::not_supported, spec.is_extern ? Tk::kw_extern : Tk::kw_constinit);
+      return bad();
+    }
+    if (spec.ok && spec.elaborated && !ps_.is(Tk::semi) &&
+        (!s_.types().is_class(spec.type) || s_.is_union_type(spec.type) != (spec.class_key == Tk::kw_union))) {
+      s_.diag(spec.class_at, Diag::conflicting_declaration, spec.class_name);
       return bad();
     }
     if (!spec.ok) return bad();
@@ -3326,10 +3426,12 @@ private:
         parse::Declarator d = ps_.declarator(spec.type, false, true);
         if (!d.ok || !d.named || d.qualified || !member_alias(c, d.name, d.name_at, d.type)) return bad();
       } while (ps_.accept(Tk::comma));
-      if (!ps_.expect(Tk::semi)) bad();
+      if (ps_.expect(Tk::semi)) commit_introduction();
+      else bad();
       return;
     }
     member_declarators(spec, c);
+    commit_introduction();
   }
 
   void member_declarators(const DeclSpec& spec, const ast::DeclSema& c) {
@@ -5618,6 +5720,8 @@ Program::ClassContent Program::class_content(u32 item, const std::function<const
         inits[dr.decl] = dr.value;
       }
     for (u32 i = 0; i < w_->ins.seqs.size(ms.decls); ++i) {
+      const auto& names = items_->items[m].names;
+      if (i < names.size() && names[i].member_elaborated_candidate) continue;
       ast::DeclSema d = w_->ins.seqs.at(ms.decls, i);
       if (d.entity == EntityId::none) continue;
       // A friend declaration names a function or class that is not a member ([class.friend]/1).
