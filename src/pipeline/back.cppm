@@ -147,6 +147,7 @@ struct ClassShape {
   bool trivial_calls = true;
   std::vector<std::uint8_t> bit_widths{};  // parallel to fields, empty for ordinary records
   bool layout_uncertain = false;  // source packing or alignment that native layout does not apply
+  bool copy_abi_unknown = false;   // no ABI classification for this defaulted copy
 };
 struct EnumShape {
   EntityId entity = EntityId::none;
@@ -673,6 +674,7 @@ ir::TypeLayout QueryLayout::type(QualType q) const {
     ir::TypeLayout l{record, r->size, r->align, false, {}, it->second->trivial_calls};
     l.empty = r->placed.empty;  // no data members, in it or its bases
     l.data = r->placed.nvsize;
+    l.copy_abi_unknown = it->second->copy_abi_unknown;
     if (target.triple == ast::x86_64_linux.triple)
       l.sysv_integer_eightbytes = sysv_integer_eightbytes(*it->second, *r);
     // A homogeneous floating-point aggregate (AAPCS64 §5.9.5): every member, through arrays and
@@ -1006,12 +1008,14 @@ std::string_view linux_signature_error(const ast::Interners& in, const QueryLayo
     return linux_fixed_scalar(l) || (allow_aggregates && l.sysv_integer_eightbytes);
   };
   ir::TypeLayout result = layout.type(f.ret);
+  if (result.copy_abi_unknown) return "defaulted copy ABI classification is unavailable for the result";
   if (result.kind != ir::TypeKind::void_ && !supported(result)) {
     if (allow_aggregates && result.kind == ir::TypeKind::record) return "unsupported aggregate result layout";
     return "only void, bool, 8-, 16-, 32- and 64-bit integer, pointer and reference results are supported";
   }
   for (QualType p : in.seqs.elements(f.params)) {
     ir::TypeLayout parameter = layout.type(p);
+    if (parameter.copy_abi_unknown) return "defaulted copy ABI classification is unavailable for a parameter";
     if (!supported(parameter)) {
       if (allow_aggregates && parameter.kind == ir::TypeKind::record) return "unsupported aggregate parameter layout";
       return "only bool, 8-, 16-, 32- and 64-bit integer, pointer and reference parameters are supported";

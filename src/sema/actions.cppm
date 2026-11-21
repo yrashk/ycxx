@@ -2187,9 +2187,10 @@ public:
     // a copy keeps the entity's cv-qualifiers ([expr.prim.lambda.capture]/10).
     QualType ent = source_type(ctx, key);
     QualType t = by_ref ? types().lvalue_ref(ent) : ent;
-    // An array of a class whose copy or destruction is not trivial is copied element by element
-    // with its copy constructor ([expr.prim.lambda.capture]/15): not yet (#353).
-    if (!by_ref && types().is_array(t) && (classes().copy_of(t).first || destructor_of(t) != EntityId::none)) {
+    // Array captures that need element construction or access checks are handled in #353
+    // ([expr.prim.lambda.capture]/15).
+    if (!by_ref && types().is_array(t) && (classes().copy_of(t).first || destructor_of(t) != EntityId::none ||
+                                         classes().defaulted_copy_of(t) != CopyState::ordinary)) {
       diag(src.begin, Diag::not_supported, lex::Tk::l_square);
       return std::nullopt;
     }
@@ -3828,7 +3829,8 @@ public:
       }
     QualType void_ = builtin(Builtin::void_);
     if (!user_copy) {
-      QualType p = types().lvalue_ref(types().add_cv(ut, Cv::const_));
+      QualType source = cr->defaulted_copy_const ? types().add_cv(ut, Cv::const_) : ut;
+      QualType p = types().lvalue_ref(source);
       cands.push_back({cr->copy_ctor, types().function(void_, std::span(&p, 1), false, LangLinkage::cxx), true, cr->copy_deleted});
     }
     if (!cr->user_ctors && !copy_init) cands.push_back({EntityId::none, types().function(void_, {}, false, LangLinkage::cxx), true, false});
@@ -3839,6 +3841,18 @@ public:
     // A specialization called is one whose definition the program requires ([temp.inst]/8).
     if (k.pattern) demands.push_back({k.entity, ast::Loc{item_, loc_base_ + begin}});
     TypeRec fr = types().rec(k.type);
+    if (cr->defaulted_copy != CopyState::ordinary) {
+      const bool defaulted = k.entity == EntityId::none ? !fr.params.empty() :
+          std::ranges::contains(cr->defaulted_copy_declarations, k.entity);
+      if (defaulted) {
+        if (cr->defaulted_copy != CopyState::trivial) {
+          diag(begin, Diag::defaulted_copy_unsupported, ut);
+          return fail;
+        }
+        Ex src = bind_reference(args[0], fr.params[0], args[0].begin);
+        return src.ok() ? convert_node(src, ast::ConversionKind::lvalue_to_rvalue, ut) : fail;
+      }
+    }
     if (k.entity == EntityId::none) {
       // Trivial: a copy of the argument's object, or nothing to construct.
       if (fr.params.empty()) return value_init_aggregate(ut, begin, end);
@@ -4836,7 +4850,8 @@ public:
       const ClassRec* cr = class_rec(types().class_of(target));
       // A copy through a constructor that is not trivial, or one converting another type
       // ([class.conv.ctor]).
-      if (cr && (cr->user_ctors || cr->copy_ctor != EntityId::none || cr->copy_deleted))
+      if (cr && (cr->user_ctors || cr->copy_ctor != EntityId::none || cr->copy_deleted ||
+                 cr->defaulted_copy != CopyState::ordinary))
         return construct(target, {e}, e.begin, e.end, false, true);
       if (!initializes(target, e)) {
         // A base class object copied from a derived class's ([dcl.init.general]/17.6.2): from its
