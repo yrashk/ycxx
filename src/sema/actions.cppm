@@ -5621,13 +5621,13 @@ public:
 
   // [except.handle]: no void, rvalue reference, or incomplete object, with the cv void* exception.
   bool check_handler_type(QualType type, u32 at_) {
+    if (types().is_dependent(type) && !types().has_placeholder(type)) return true;
     if (types().has_placeholder(type) || types().is_void(type) ||
         (types().is_reference(type) && types().rec(type).rvalue_ref)) {
       diag(at_, Diag::invalid_handler_type, type);
       return false;
     }
     QualType object = types().is_reference(type) ? types().referee(type) : type;
-    if (types().is_dependent(object)) return true;
     if (types().is_pointer(type)) {
       QualType pointee = types().pointee(type);
       return types().is_void(pointee) || types().is_function(pointee) || require_complete(pointee, at_);

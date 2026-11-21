@@ -796,7 +796,8 @@ public:
 
   // declarator, or abstract-declarator when `abstract` ([dcl.decl.general], [dcl.name]).
   Declarator declarator(QualType base, bool abstract, bool typedef_ = false, bool conversion = false,
-                        NamedExceptionSpec named_exception = NamedExceptionSpec::ordinary, bool defer_ref_check = false) {
+                        NamedExceptionSpec named_exception = NamedExceptionSpec::ordinary, bool defer_ref_check = false,
+                        bool reject_parameter_defaults = false) {
     Declarator d;
     d.begin = pos();
     Level top = level(abstract, d.ok, conversion);
@@ -813,7 +814,7 @@ public:
       }
     }
     const bool function_type = s_->types().is_function(d.type);
-    if (member_template_name) {
+    if (member_template_name || reject_parameter_defaults) {
       for (const Level* level = &top; level; level = level->inner.get())
         for (const Suffix& suffix : level->suffixes) {
           if (&suffix == fn && !abstract && !typedef_ && function_type) continue;
@@ -3603,8 +3604,10 @@ public:
         catch_all_at = at;
       } else {
         u32 declaration_at = pos();
-        DeclSpec spec = decl_specifiers();
-        Declarator d = declarator(spec.type, true);
+        DeclSpec spec = decl_specifiers(/*in_type_id=*/true);
+        Declarator d = declarator(spec.type, /*abstract=*/true, /*typedef_=*/false, /*conversion=*/false,
+                                  NamedExceptionSpec::ordinary, /*defer_ref_check=*/false,
+                                  /*reject_parameter_defaults=*/true);
         if (spec.ok && d.ok) {
           type = d.type;
           if (s_->types().is_array(type)) type = s_->types().pointer(s_->types().rec(type).inner);
