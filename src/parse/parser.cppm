@@ -838,9 +838,6 @@ public:
       d.ref_at = fn->ref_at;
       d.has_noexcept = fn->has_noexcept;
       d.noexcept_condition = fn->noexcept_condition;
-      if (d.ok && function_type && !abstract && !typedef_ && fn->noexcept_condition &&
-          !s_->templated())
-        noexcept_value(fn->noexcept_condition, d.ok);
     } else {
       d.ref_at = d.name_at;
     }
@@ -1513,6 +1510,8 @@ public:
         if (s->has_noexcept && (allocation || keep_named_exception || member_pointer_to_suffix(l) ||
                                 (spells_type && !l.inner)))
           nonthrowing = noexcept_value(s->noexcept_condition, d.ok);
+        else if (d.ok && s->noexcept_condition && !s_->templated())
+          noexcept_value(s->noexcept_condition, d.ok);
         t = s_->types().function(t, ps, s->variadic, linkage_, s->cv, s->ref, nonthrowing);
         fn = &*s;
       } else if (!s->unknown_bound && !s->dependent_bound && s->bound == 0) {
