@@ -2397,11 +2397,26 @@ values, end to end; results match Clang's bit for bit.
   unevaluated operands ([expr.prim.req.general], [expr.prim.req.simple], [expr.prim.req.compound]).
 - The two libycxx `<cstdio>` requires-expressions using dependent member-pointer declarations
   can be checked. Linux hosted header support still depends on #395, #396 and #398.
-- Object size and alignment follow Itanium C++ ABI §2.3 on the two supported targets. Forming
-  member addresses, `.*` and `->*`, conversions, and code generation for member-pointer values
-  remain open (#411). Dependent exception specifications are tracked in #219.
+- Object size and alignment follow Itanium C++ ABI §2.3 on the two supported targets.
 - Tests in `tests/own/member-pointer/` cover declarations, type identity, dependent requirements
   and invalid pointer-to-member types.
+
+## Ordinary data member-pointer expressions (#411)
+
+- An unparenthesized `&C::field` forms a data member pointer for an accessible, directly declared
+  non-static field of non-reference type. Bit-fields have no address. A null pointer constant
+  converts to the typed null data member pointer; value-initialization also gives that value.
+- Built-in `.*` and `->*` apply a data member pointer to an object of its declaring class. The
+  result incorporates the object's cv-qualifiers. `.*` yields an lvalue when the object is an
+  lvalue and an xvalue otherwise. `->*` yields an lvalue. `.*` participates in temporary lifetime
+  extension ([class.temporary]).
+- Constant expressions can retain a named field or typed null. Applications in constant
+  expressions need interpreter support for class objects alongside ordinary class member access
+  ([#25](https://github.com/yrashk/ycxx/issues/25), [#262](https://github.com/yrashk/ycxx/issues/262)).
+- Tests are in `tests/own/member-pointer/`. Native representation, member-pointer conversions,
+  equality, contextual bool and member function pointers are tracked in
+  [#411](https://github.com/yrashk/ycxx/issues/411). Dependent exception specifications are tracked
+  in [#219](https://github.com/yrashk/ycxx/issues/219).
 
 ## Comparisons of pointers to qualified arrays (#445)
 

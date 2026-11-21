@@ -1283,6 +1283,7 @@ class Gen {
     ast::ExprInfo ei = info(a);
     if (ei.category != ast::ValueCategory::prvalue) unsupported(a, "as a glvalue where a prvalue is expected");
     ast::QualType t = ei.type;
+    if (in_.types.is<ast::TMemberPtr>(in_.types.canon(t))) unsupported(a, "with a pointer-to-member value");
     if (is<ast::Literal>(a)) return constant(t, get<ast::Literal>(a).value);
     if (is<ast::Paren>(a)) return rvalue_or_void(child(a, get<ast::Paren>(a).operand));
     if (is<ast::DefaultArg>(a)) return pinned([&] { return rvalue_or_void(child(a, get<ast::DefaultArg>(a).arg)); });
@@ -1845,10 +1846,14 @@ class Gen {
     }
     if (is<ast::Assign>(a)) return assign(a);
     if (is<ast::Conditional>(a)) return conditional(a, true).place;
-    if (is<ast::OrderedBinary>(a) && get<ast::OrderedBinary>(a).op == ast::OrderedOp::comma) {
+    if (is<ast::OrderedBinary>(a)) {
       auto o = get<ast::OrderedBinary>(a);
-      discard(child(a, o.lhs));
-      return lvalue(child(a, o.rhs));
+      if (o.op == ast::OrderedOp::comma) {
+        discard(child(a, o.lhs));
+        return lvalue(child(a, o.rhs));
+      }
+      if (o.op == ast::OrderedOp::dot_star || o.op == ast::OrderedOp::arrow_star)
+        unsupported(a, "with a pointer-to-member value");
     }
     unsupported(a, "as a glvalue");
   }
