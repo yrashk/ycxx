@@ -1121,6 +1121,12 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   preserves the enumeration type. The interpreter, lowering and layout use the underlying
   integer representation. [#262](https://github.com/yrashk/ycxx/issues/262)
 - Linkage names of named enumerations, nested ones included, match Clang's.
+- A class member declaration can define a named nested enum and declare ordinary fields in
+  the same declaration. The fields participate in lookup, initialization, and class layout.
+  Tests in `tests/own/nested-enum-fields/` compare combined and separate declarations and
+  cover scoped enum field initializers. Nested class definitions and `__builtin_offsetof`
+  layout support are tracked separately. [#500](https://github.com/yrashk/ycxx/issues/500) ·
+  [#306](https://github.com/yrashk/ycxx/issues/306) · [#496](https://github.com/yrashk/ycxx/pull/496)
 - Tests: `tests/own/classes/s4-*enum*`, `s4-scoped-enum`, `s4-unscoped-enum` (spec-only, plus two
   from the review): 7 of 7.
 - Namespace-scope opaque enum declarations ([dcl.enum], #157) supply a complete enum type with a
