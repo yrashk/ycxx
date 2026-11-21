@@ -781,7 +781,7 @@ public:
       d.params = fn->params;
       d.variadic = fn->variadic;
     }
-    if (!abstract && !typedef_ && function_type) {
+    if (!abstract && !typedef_ && function_type && !conversion) {
       ast::RefQual ref = s_->types().rec(d.type).fn_ref;
       if (ref != ast::RefQual::none) {
         s_->diag(fn ? fn->ref_at : d.name_at, Diag::not_supported, ref == ast::RefQual::lvalue ? Tk::amp : Tk::ampamp);

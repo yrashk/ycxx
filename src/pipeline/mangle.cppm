@@ -444,6 +444,8 @@ class Mangler {
         unqualified = "cv" + *target;
       }
       std::string cv = std::string(std::to_underlying(f.cv) & 2 ? "V" : "") + (std::to_underlying(f.cv) & 1 ? "K" : "");
+      // A ref-qualifier follows the cv-qualifiers in a nested function name.
+      if (f.ref != ast::RefQual::none) cv += f.ref == ast::RefQual::lvalue ? "R" : "O";
       // A <ctor-dtor-name> (`C1`, `D1`) stands as it is; other names are <source-name>s.
       out = local + delimit_name(cv + *p + (special ? std::string(name) : unqualified), scope);
     }

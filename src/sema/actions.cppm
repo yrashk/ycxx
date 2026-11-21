@@ -4987,16 +4987,29 @@ public:
     const ClassRec* record = class_rec(cls);
     if (!record || !record->bases.empty()) return std::nullopt;
     auto candidates = member_functions(cls, name);
+    const bool lvalue = object.cat() == ValueCategory::lvalue;
     std::erase_if(candidates, [&](const MemberDeclRec* candidate) {
       const TypeRec fn = types().rec(candidate->type);
-      return !cv_within(Types::cv(object.type()), fn.fn_cv);
+      if (!cv_within(Types::cv(object.type()), fn.fn_cv)) return true;
+      if (fn.fn_ref == ast::RefQual::rvalue) return lvalue;
+      return fn.fn_ref == ast::RefQual::lvalue && !lvalue && fn.fn_cv != Cv::const_;
     });
+    // [over.ics.rank]: for an rvalue, an rvalue reference beats an lvalue
+    // reference to the same cv-qualified type.
+    auto better_object = [&](const TypeRec& first, const TypeRec& second) {
+      return !lvalue && first.fn_cv == second.fn_cv &&
+             first.fn_ref == ast::RefQual::rvalue && second.fn_ref == ast::RefQual::lvalue;
+    };
     const MemberDeclRec* selected = nullptr;
     for (const MemberDeclRec* candidate : candidates) {
       const TypeRec fn = types().rec(candidate->type);
       if (types().is_reference(fn.inner)) return std::nullopt;
       if (!same_unqualified(fn.inner, target)) continue;
-      if (selected) return std::nullopt;
+      if (selected) {
+        const TypeRec previous = types().rec(selected->type);
+        if (better_object(previous, fn)) continue;
+        if (!better_object(fn, previous)) return std::nullopt;
+      }
       selected = candidate;
     }
     if (!selected) return std::nullopt;
@@ -5005,7 +5018,8 @@ public:
     const TypeRec selected_fn = types().rec(selected->type);
     for (const MemberDeclRec* candidate : candidates) {
       const TypeRec fn = types().rec(candidate->type);
-      if (fn.fn_cv != selected_fn.fn_cv || fn.fn_ref != selected_fn.fn_ref) return std::nullopt;
+      if ((fn.fn_cv != selected_fn.fn_cv || fn.fn_ref != selected_fn.fn_ref) &&
+          !better_object(selected_fn, fn)) return std::nullopt;
     }
     Ex callee = bind_members(cls, {selected}, object, false, object.begin, object.end, cast_at);
     return member_call(callee, {}, object.end, cast_at);

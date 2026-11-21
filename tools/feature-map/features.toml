@@ -1623,7 +1623,7 @@ int main() { S s = 3; int i = s; return (s && f(2) == 2 && i == 3) ? 0 : 1; }
 '''
 status = 'partial'
 issues = [157, 219, 339]
-note = 'In-class conversion functions can use dependent aliases and be selected by named static_cast to an exact non-class value type'
+note = 'In-class conversion functions can use dependent aliases and be selected by named static_cast to an exact non-class value type, including ordinary ref-qualified overloads'
 
 [[feature]]
 id = 'class-explicit-bool'

@@ -4152,8 +4152,22 @@ private:
     // constraints, or both not templates ([temp.over.link]/4-6, [over.load]).
     auto clash = [&](const ast::DeclSema& d) {
       if (!function || d.kind != ast::DeclKind::function) return true;
-      if (s_.types().canonical(d.type) != s_.types().canonical(*function) &&
-          (!assignment || !same_function_parameters(d.type, *function))) return false;
+      auto& types = s_.types();
+      if (types.canonical(d.type) != types.canonical(*function) &&
+          (!assignment || !same_function_parameters(d.type, *function))) {
+        if (s_.ins().names.spelling(n) != lex::conversion_function_name) return false;
+        const auto previous = types.rec(d.type);
+        const auto current = types.rec(*function);
+        // The conversion result and implicit object distinguish overloads.
+        // An unqualified implicit object parameter corresponds to either
+        // ref-qualified form at the same cv. Exception specifications do
+        // not distinguish overloads.
+        if (types.canonical(previous.inner) != types.canonical(current.inner) ||
+            previous.fn_cv != current.fn_cv ||
+            (previous.fn_ref != current.fn_ref && previous.fn_ref != ast::RefQual::none &&
+             current.fn_ref != ast::RefQual::none))
+          return false;
+      }
       bool templ = (d.flags & sema::decl_flag::template_) != 0;
       if (templ != member_template_) return false;
       if (!templ) return true;
