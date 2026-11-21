@@ -2199,7 +2199,7 @@ private:
                       const parse::Declarator& d) {
     auto given = [&](std::size_t i) { return i < d.params.size() && d.params[i].default_arg != NodeId::none; };
     // An earlier declarator of this declaration: its drafts ([dcl.fct.default]/4).
-    if (auto o = own_defaults_.find(std::to_underlying(f)); o != own_defaults_.end())
+    if (auto o = s_.own_function_defaults.find(f); o != s_.own_function_defaults.end())
       for (std::size_t i = 0; i < params.size() && i < o->second.size(); ++i) {
         if (o->second[i] == NodeId::none) continue;
         if (given(i)) {
@@ -5365,7 +5365,7 @@ private:
       }
       s_.settle_type_access(sem.entity);
       if (fn) {  // for a later declarator of this declaration (`merge_defaults`)
-        std::vector<NodeId>& own = own_defaults_[std::to_underlying(sem.entity)];
+        std::vector<NodeId>& own = s_.own_function_defaults[sem.entity];
         own.clear();
         for (const ast::ParamSema& p : params) own.push_back(p.default_arg);
       }
@@ -5700,7 +5700,6 @@ private:
   sema::Sema s_;
   Parser ps_;
   std::vector<ast::DeclSema> decls_;
-  std::map<u32, std::vector<NodeId>> own_defaults_;  // by function: its default arguments in this item
   std::vector<Ex> declarators_;
   NodeId tree_ = NodeId::none;  // the root when it is not a DeclGroup (a static_assert)
   std::optional<Program::ClassInstantiation> inst_;
