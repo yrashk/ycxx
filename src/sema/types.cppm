@@ -1070,6 +1070,23 @@ struct World {
     return fn.params.size() == 2 || fn.params[1] == types.enum_type(alignment_enum());
   }
 
+  // [new.delete.placement]: the written non-allocating library signatures. They are separate
+  // from the implicit, replaceable allocation functions.
+  bool matches_reserved_placement_function(std::string_view name, QualType written) {
+    if (!is_allocation_name(name)) return false;
+    const TypeRec fn = types.rec(types.canonical(written));
+    if (fn.kind != TypeKind::function || fn.variadic || fn.linkage != LangLinkage::cxx ||
+        fn.fn_cv != Cv::none || fn.fn_ref != ast::RefQual::none || !fn.fn_noexcept || fn.params.size() != 2)
+      return false;
+
+    const bool allocating = !is_deallocation_name(name);
+    const QualType void_type = types.builtin(Builtin::void_);
+    const QualType void_pointer = types.pointer(void_type);
+    return fn.inner == (allocating ? void_pointer : void_type) &&
+           fn.params.front() == (allocating ? types.builtin(target.size_type) : void_pointer) &&
+           fn.params.back() == void_pointer;
+  }
+
   void install_alignment_enum(Classes& classes) {
     // This opaque shape supports implicit users of the type. Source lookup still needs a written
     // declaration, and a written definition supplies its own record.
