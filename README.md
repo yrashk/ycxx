@@ -135,7 +135,10 @@ object. Symbol names can share suffixes in an input string table.
 On x86-64 Linux, an exception thrown by hosted peer code can unwind through eligible
 cleanup-free ycxx functions with fixed scalar signatures and reach a handler in peer code.
 An eligible ycxx function can also throw an `int` to a hosted peer's handler.
+A host-linked ycxx function can use one `catch (...)` to return an integer literal when
+a direct `int(int)` call on its parameter throws.
 [#572](https://github.com/yrashk/ycxx/issues/572) · [#578](https://github.com/yrashk/ycxx/issues/578)
+· [#583](https://github.com/yrashk/ycxx/issues/583)
 
 Both targets support cooked integer user-defined literals through namespace-scope literal
 operators with an `unsigned long long` parameter, including constant evaluation.
@@ -345,8 +348,8 @@ members. [#285](https://github.com/yrashk/ycxx/issues/285)
   inheriting constructors, and base packs or multiple bases in a class template.
 - Member class and alias templates, conversion function templates, and constraints on class
   templates and their members.
-- Native throwing beyond the Linux `int` slice, native exception handlers, and unwind discovery
-  in ycxx-linked programs.
+- Native throwing beyond the Linux `int` slice, typed and multiple handlers, cleanup during
+  source-level unwinding, and unwind discovery in ycxx-linked programs.
   [#89](https://github.com/yrashk/ycxx/issues/89) · [#558](https://github.com/yrashk/ycxx/issues/558)
 - Optimization (`-O`) and the extended floating-point types (`std::float16_t`, …).
 - Automatic Linux CRT and library selection and general-purpose ELF object interoperability.
