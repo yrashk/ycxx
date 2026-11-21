@@ -84,8 +84,9 @@ build/bin/ycxx cxx --target=x86_64-pc-linux-gnu -nostdlib --dynamic-linker="$tar
 
 Linux objects pass and return `bool`, 8-, 16-, 32- and 64-bit integers and enums, pointers and
 references. Direct and function-pointer variadic calls accept promoted integer and pointer
-arguments. Ordinary free variadic definitions with scalar INTEGER signatures support
-`<cstdarg>` and can forward a System V `va_list` to a separately compiled consumer.
+arguments. Ordinary free variadic definitions with scalar INTEGER and SSE signatures support
+`<cstdarg>`, including `va_arg(ap, double)`. A System V `va_list` can be passed between ycxx
+and separately compiled code.
 Use the host linker to link these objects with libc.
 [#417](https://github.com/yrashk/ycxx/issues/417), [#412](https://github.com/yrashk/ycxx/issues/412),
 [#399](https://github.com/yrashk/ycxx/issues/399), [#196](https://github.com/yrashk/ycxx/issues/196)
@@ -97,7 +98,7 @@ promote an unnamed `float` to `double`. Direct call result types can be deduced 
 work for `float` and `double` at their evaluation width.
 [Linux scalar floating-point ABI](docs/design/linux-scalar-floating-point.md) ·
 [Linux scalar floating-point arithmetic](docs/design/linux-scalar-floating-point.md#runtime-arithmetic) ·
-[Linux direct variadic floating-point ABI](docs/design/linux-floating-variadic-calls.md) ·
+[Linux scalar variadic floating-point ABI](docs/design/linux-floating-variadic-calls.md) ·
 [#441](https://github.com/yrashk/ycxx/issues/441)
 
 ELF and Mach-O objects support static pointer initializers naming variables, array elements,

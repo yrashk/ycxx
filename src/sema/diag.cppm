@@ -313,7 +313,7 @@ enum class Diag : std::uint32_t {
   builtin_nan_string [[=message{Severity::error, "the argument of __builtin_nan must be a string literal spelling an integer"}]],
   va_start_context [[=message{Severity::error, "va_start requires an enclosing variadic function"}]],
   va_list_operand [[=message{Severity::error, "expected a mutable va_list cursor, got '{0:t}'"}]],
-  va_arg_type [[=message{Severity::error, "va_arg type '{0:t}' is outside the supported x86-64 System V integer and pointer subset"}]],
+  va_arg_type [[=message{Severity::error, "va_arg type '{0:t}' is outside the supported x86-64 System V integer, pointer and double subset"}]],
   friend_c_linkage [[=message{Severity::error, "C-linkage friend function definitions are not supported yet"}]],
 };
 

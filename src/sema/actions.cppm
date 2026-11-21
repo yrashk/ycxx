@@ -4361,7 +4361,8 @@ public:
       if (!types().is_dependent(result) && !types().is_pointer(result)) {
         auto b = types().builtin_of(result);
         if (b != Builtin::int_ && b != Builtin::unsigned_int && b != Builtin::long_ &&
-            b != Builtin::unsigned_long && b != Builtin::long_long && b != Builtin::unsigned_long_long) {
+            b != Builtin::unsigned_long && b != Builtin::long_long && b != Builtin::unsigned_long_long &&
+            b != Builtin::double_) {
           diag(begin, Diag::va_arg_type, *fetch);
           return invalid;
         }
