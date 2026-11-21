@@ -118,6 +118,7 @@ public:
   virtual engine::Loc source_loc(engine::Loc loc, u32) { return loc; }
   // Only a base or initializer with an owning replay can retain this dependent pattern.
   virtual bool in_type_trait_pattern() const { return false; }
+  virtual bool in_type_trait_replay() const { return false; }
   virtual void record_dependent_type_trait_operand(engine::Loc) {}
   virtual bool replaying_type_trait_operand(engine::Loc) { return false; }
   virtual std::optional<bool> type_trait_at_demand(EntityId, engine::Loc) { return std::nullopt; }
@@ -351,12 +352,13 @@ inline constexpr u16 pattern = 4;       // in a template's or a generic lambda's
 inline constexpr u16 polymorphic_result = 8;  // checked return, without native or interpreter ABI support
 }
 
-// What a cell demands of the program besides its value (query-engine.md §B1.4): a function
-// template specialization whose definition is required ([temp.inst]/8), instantiated at the end
-// of the translation unit (§B6.2).
+// What a cell demands of the program besides its value (query-engine.md §B1.4): a template
+// specialization whose definition is required ([temp.inst]). A variable name carries its
+// substituted declared type so a potentially-constant variable can be instantiated at its use.
 struct Demand {
   EntityId spec;
   ast::Loc at;
+  std::optional<QualType> variable_type = std::nullopt;
 };
 
 class Sema {
@@ -725,7 +727,7 @@ public:
     }
     EntityId spec = variable_specialization(tmpl.entity, *full);
     if (auto st = q_->specialization_type(spec)) t = *st;
-    if (!unevaluated) demands.push_back({spec, ast::Loc{item_, loc_base_ + begin}});
+    if (!unevaluated) demands.push_back({spec, ast::Loc{item_, loc_base_ + begin}, *t});
     ExprInfo info{types().referee(*t), ValueCategory::lvalue, 0};
     return node(ast::DeclRef{info, spec}, begin, end, info);
   }
@@ -912,6 +914,66 @@ public:
     }
     return fail(Diag::trivial_copyability_unsupported, operand);
   }
+
+  // [meta.unary.prop]: each base must also be empty. A nonempty contributor
+  // settles the result even when another part of the hierarchy is unknown.
+  std::optional<bool> class_is_empty(EntityId cls) {
+    const Classes& records = classes();
+    std::vector<EntityId> pending{cls};
+    std::set<EntityId> visited;
+    bool known = true;
+    while (!pending.empty()) {
+      const EntityId current = pending.back();
+      pending.pop_back();
+      if (!visited.insert(current).second) continue;
+      const ClassRec* record = records.find(current);
+      if (!record || !record->defined) {
+        known = false;
+        continue;
+      }
+      if (record->polymorphic) return false;
+      for (const FieldRec& field : record->fields) {
+        if (!field.no_unique_address || !types().is_class(field.type)) return false;
+        // [intro.object]: a nonzero subobject proves this overlapping member has
+        // nonzero size. An otherwise empty member needs a layout fact.
+        known = false;
+        pending.push_back(types().class_of(field.type));
+      }
+      for (const BaseRec& base : record->bases) pending.push_back(base.cls);
+    }
+    return known ? std::optional(true) : std::nullopt;
+  }
+
+  Ex empty_expr(QualType operand, u32 begin, u32 end) {
+    const Types& ts = types();
+    const QualType type = Types::unqualified(ts.canonical(operand));
+    const engine::Loc loc = type_trait_loc(begin);
+    if (ts.is_dependent(type)) {
+      if (q_->in_type_trait_pattern())
+        if (auto value = templates().unary_trait_value(ast::DepOp::is_empty, type)) {
+          q_->record_dependent_type_trait_operand(loc);
+          return literal(builtin(Builtin::bool_), *value, ValueCategory::prvalue, begin, end);
+        }
+      // A template body outside the trait's replay scopes can still re-parse it.
+      return dependent_node({}, begin, end, builtin(Builtin::bool_));
+    }
+    if (!ts.is_class(type) || is_union_type(type) == true) return bool_literal(false, begin, end);
+    const EntityId cls = ts.class_of(type);
+    // Owning replays check a concrete spelling at its source. A re-parsed
+    // template body keeps the completeness context it used for this trait.
+    bool complete;
+    if (auto demand = q_->type_trait_at_demand(cls, loc)) complete = *demand;
+    else if (q_->in_type_trait_replay()) complete = q_->is_complete_at_source(cls);
+    else complete = q_->is_complete(cls);
+    if (!complete) {
+      if (!q_->type_trait_instantiation_failed(cls)) diag_at(loc, Diag::empty_incomplete, operand);
+      return {NodeId::none, begin, end};
+    }
+    if (auto result = class_is_empty(cls)) return bool_literal(*result, begin, end);
+    diag_at(loc, Diag::empty_unsupported, operand);
+    return {NodeId::none, begin, end};
+  }
+
   struct ConstructibilityOperand {
     QualType type;
     u32 at;
@@ -1125,6 +1187,7 @@ public:
   Ex trait_expr(lex::TypeTrait t, NameId name, std::span<const QualType> args, u32 begin, u32 end) {
     using enum lex::TypeTrait;
     if (t == is_trivially_copyable) return trivial_copyability_expr(args[0], begin, end);
+    if (t == is_empty) return empty_expr(args[0], begin, end);
     QualType b = builtin(Builtin::bool_);
     auto structural_trait = [&](std::optional<ConstId> v) {
       if (v) return literal(b, *v, ValueCategory::prvalue, begin, end);
@@ -1198,12 +1261,6 @@ public:
     case is_rvalue_reference: v = types().is_reference(c) && types().rec(c).rvalue_ref; break;
     case is_bounded_array: v = types().is_array(c) && types().rec(c).bound_value != ConstId::none; break;
     case is_unbounded_array: v = types().is_array(c) && types().rec(c).bound_value == ConstId::none; break;
-    case is_empty:
-      // [meta.unary.prop]: a complete class, not a union, with no non-static data members.
-      if (is_union_type(c) == true) v = false;
-      else if (const ClassRec* r = cls()) v = !r->polymorphic && r->fields.empty();
-      else if (types().is_class(c)) return {NodeId::none, begin, end};
-      break;
     case is_aggregate:
       if (types().is_class(c) && !cls()) return {NodeId::none, begin, end};
       v = this->is_aggregate(c);
