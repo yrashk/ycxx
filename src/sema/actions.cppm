@@ -7049,8 +7049,12 @@ public:
       const ast::DeclSema& d = *decls[*chosen];
       const Candidate& k = cands[*chosen];
       if (d.flags & decl_flag::consteval_) consteval_.insert(std::to_underlying(k.entity));
-      // A specialization called is one whose definition the program requires ([temp.inst]/8).
-      if (k.pattern) demands.push_back({k.entity, ast::Loc{item_, loc_base_ + callee.begin}});
+      // [temp.inst]: a known return type suffices for unevaluated calls to ordinary templates.
+      // Keep the existing body demand for constant-evaluation candidates and placeholder returns.
+      if (k.pattern &&
+          (!unevaluated || (d.flags & (decl_flag::member | decl_flag::constexpr_ | decl_flag::consteval_)) ||
+           types().has_placeholder(types().rec(k.type).inner)))
+        demands.push_back({k.entity, ast::Loc{item_, loc_base_ + callee.begin}});
       auto kt = deduced_function(k.entity, k.type, callee.begin);
       if (!kt) return {NodeId::none, begin, end};
       ExprInfo ci{*kt, ValueCategory::lvalue, 0};

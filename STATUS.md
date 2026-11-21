@@ -2649,3 +2649,10 @@ miscompiles it (DECISIONS §3.2). Each is removed once ycxx compiles itself.
 | M6 | x86-64 ELF | Same on Linux |
 | M7 | libycxx under ycxx | libycxx's suite passes, compiled by ycxx |
 | M8 | Self-hosting | Stage 2 equals stage 3; the GCC-built bootstrap anchor is released (DECISIONS §3.5) |
+
+## Unevaluated calls to known-return function templates (#565)
+
+An unevaluated call to a non-constexpr free function template can use its
+declared return type after signature substitution and constraint checking.
+Evaluated calls and calls that need placeholder return deduction still demand
+the body. A non-generic lambda body uses its own evaluation context.

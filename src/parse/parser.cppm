@@ -3783,7 +3783,11 @@ public:
     Ex body;
     {
       sema::Sema::ImmediateReferenceScope references(*s_, /*allowed=*/false);
+      // A non-generic lambda's body is a separate evaluation context from its captures.
+      const u32 enclosing_unevaluated = s_->unevaluated;
+      if (!head) s_->unevaluated = 0;
       body = compound_statement();
+      s_->unevaluated = enclosing_unevaluated;
     }
     angle_ = saved;
     Ex r = s_->close_lambda(body, body_begin, pos());
