@@ -3600,6 +3600,15 @@ private:
         s_.diag(d.name_at, Diag::no_member_declared, d.name, *d.scope.type);
         return bad();
       }
+      // [dcl.inline]: a friend declaration using inline must define the function or
+      // follow an inline declaration. This path handles nondefining member friends.
+      if (m->is_virtual && spec.is_inline) {
+        const auto earlier = p_->declaration(m->entity, k_);
+        if (!earlier || !(earlier->flags & sema::decl_flag::inline_)) {
+          s_.diag(*friend_at, Diag::not_supported, Tk::kw_friend);
+          return bad();
+        }
+      }
       sem.entity = m->entity;
     } else {
       // The function of the innermost enclosing namespace with this name and type
@@ -4200,6 +4209,94 @@ private:
     if (it_->kind != ItemKind::function && !ps_.expect(Tk::semi)) bad();
   }
 
+  // Require directly spelled scalar types for the first native virtual definitions. Canonical
+  // types erase attributes and mode changes carried by aliases.
+  bool plain_virtual_signature(const items::Item& source, u32 type_end, u32 name_at, bool check_exception) {
+    const auto& region = p_->region();
+    const auto tokens = std::span(region.tokens);
+    const u32 end = source.has_body() ? source.body_begin : source.end;
+    if (type_end <= source.begin || name_at + 1 >= end || tokens[name_at].kind != Tk::identifier ||
+        tokens[name_at + 1].kind != Tk::l_paren ||
+        layout_attribute(region, source.begin, end, LayoutAttributes::any)) return false;
+    const auto scalar_specifier = [](Tk kind) {
+      return Parser::simple_type_keyword(kind) || kind == Tk::kw_const || kind == Tk::kw_volatile;
+    };
+    const auto result = tokens.subspan(source.begin, type_end - source.begin);
+    if (!std::ranges::all_of(result, [&](const lex::Tok& token) {
+          return scalar_specifier(token.kind) || token.kind == Tk::kw_virtual;
+        })) return false;
+    u32 at = name_at + 2;
+    while (at < end && tokens[at].kind != Tk::r_paren) {
+      const u32 first = at;
+      while (at < end && scalar_specifier(tokens[at].kind)) ++at;
+      if (at == first || at == end) return false;
+      if (tokens[at].kind == Tk::identifier) ++at;
+      if (at == end || tokens[at].kind != Tk::comma) break;
+      ++at;
+    }
+    if (at == end || tokens[at].kind != Tk::r_paren) return false;
+    if (!check_exception) return true;
+    ++at;
+    while (at < end && (tokens[at].kind == Tk::kw_const || tokens[at].kind == Tk::kw_volatile)) ++at;
+    // The general exception parser does not introduce parameter names in the condition (#219).
+    // Require a scope-independent spelling on both declarations of the emitted function.
+    if (at + 1 >= end || tokens[at].kind != Tk::kw_noexcept || tokens[at + 1].kind != Tk::l_paren)
+      return true;
+    return at + 3 < end && (tokens[at + 2].kind == Tk::kw_true || tokens[at + 2].kind == Tk::kw_false) &&
+           tokens[at + 3].kind == Tk::r_paren;
+  }
+
+  bool native_nonkey_virtual_definition(EntityId cls, const sema::ClassRec& record, EntityId function,
+                                        const parse::Declarator& d, const ast::DeclSema& sem) {
+    if (!sema::native_virtual_nonkey_member(record, function) || template_ || explicit_ || inst_ ||
+        sem.storage != ast::Storage::none || (sem.flags & (sema::decl_flag::inline_ | sema::decl_flag::deleted |
+                                                          sema::decl_flag::lang_c)) ||
+        it_->kind != ItemKind::function || !it_->has_body() || !d.asm_label.empty()) return false;
+    const auto& region = p_->region();
+    if (region.tokens[it_->body_begin].kind != Tk::l_brace ||
+        !plain_virtual_signature(*it_, it_->begin + d.qualifier_at, it_->begin + d.name_at,
+                                 /*check_exception=*/true)) return false;
+
+    const auto& entity = s_.world().entities.rec(cls);
+    auto defining = p_->class_items_.find(std::to_underlying(cls));
+    if (entity.linkage != ast::Linkage::external || defining == p_->class_items_.end()) return false;
+    const auto& head = p_->items().items[defining->second];
+    const auto key = region.tokens[head.begin].kind;
+    if (key != Tk::kw_struct && key != Tk::kw_class) return false;
+
+    // Compare the written qualifier with the owning namespace and class to exclude aliases.
+    const auto& owner = p_->ns_of(defining->second);
+    const auto& here = p_->ns_of(k_);
+    if (!Program::encloses(here, owner)) return false;
+    std::string full = owner.empty() ? "" : owner + "::";
+    full += s_.ins().names.spelling(entity.name);
+    full += "::";
+    std::string written;
+    for (u32 at = it_->begin + d.qualifier_at; at < it_->begin + d.name_at; ++at) {
+      const auto token = region.tokens[at];
+      if (token.kind == Tk::identifier) written += region.name(token);
+      else if (token.kind == Tk::coloncolon) written += "::";
+      else return false;
+    }
+    const auto relative = std::string_view(full).substr(here.empty() ? 0 : here.size() + 2);
+    if (written != relative && written != full && written != "::" + full) return false;
+    if (std::ranges::any_of(head.members, [&](u32 member) {
+          return region.tokens[p_->items().items[member].begin].kind == Tk::kw_using;
+        })) return false;
+    // A skipped attribute or an alias in an earlier virtual declaration can change the ABI
+    // evidence used to identify the peer's key function.
+    for (const auto& member : record.members) {
+      if (!member.is_virtual) continue;
+      const auto decl = p_->member_decl(member.entity);
+      if (!decl) return false;
+      const auto& source = p_->items().items[p_->index(decl->item)];
+      if (source.kind != ItemKind::declaration || source.names.size() != 1) return false;
+      const u32 name_at = source.begin + source.names.front().offset;
+      if (!plain_virtual_signature(source, name_at, name_at, member.entity == function)) return false;
+    }
+    return true;
+  }
+
   // A qualified declarator `C::m` outside its class: the definition of a member function or a
   // static data member C declares ([class.mfct], [class.static.data]), with its entity and flags.
   bool define_member(const DeclSpec& spec, const parse::Declarator& d, ast::DeclSema& sem, bool fn, bool definition,
@@ -4287,8 +4384,25 @@ private:
       return false;
     }
     if (m->is_virtual) {
-      s_.diag(d.name_at, Diag::virtual_definition);
-      return false;
+      if (!native_nonkey_virtual_definition(cls, *cr, m->entity, d, sem)) {
+        s_.diag(d.name_at, Diag::virtual_definition);
+        return false;
+      }
+      // Ordinary named declarators defer exception checks. This definition must agree with the
+      // in-class virtual declaration, including its already checked exception specification.
+      auto& types = s_.types();
+      if (d.has_noexcept) {
+        bool ok = true;
+        const bool nonthrowing = ps_.noexcept_value(d.noexcept_condition, ok);
+        if (!ok) return false;
+        const auto f = types.rec(sem.type);
+        sem.type = types.function(f.inner, f.params, f.variadic, f.linkage, f.fn_cv, f.fn_ref, nonthrowing);
+      }
+      if (types.canonical(sem.type) != types.canonical(m->type)) {
+        s_.diag(d.name_at, Diag::conflicting_declaration, d.name);
+        return false;
+      }
+      sem.is_virtual = true;
     }
     constexpr u16 kept = sema::decl_flag::member | sema::decl_flag::static_ | sema::decl_flag::constexpr_ |
                          sema::decl_flag::consteval_;

@@ -288,6 +288,14 @@ std::optional<u32> native_virtual_root_slot(const ClassRec& root, EntityId funct
   return std::nullopt;
 }
 
+bool native_virtual_nonkey_member(const ClassRec& root, EntityId function) {
+  if (root.peer_virtual_layout != PeerVirtualLayout::root) return false;
+  // The certified root has only ordinary non-pure, non-inline virtual declarations.
+  // Its first slot is the Itanium key function and carries table ownership.
+  const auto slot = native_virtual_root_slot(root, function);
+  return slot && *slot != 0;
+}
+
 bool native_virtual_derived_declarations(const ClassRec& record, const Classes& classes, const Types& types,
                                         auto&& written_member) {
   if (!native_virtual_class(record, types) || record.bases.size() != 1 || record.fields.size() > 1) return false;
