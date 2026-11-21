@@ -82,6 +82,8 @@ struct GenericResult {
   bool diagnosed = false;
 };
 
+class Sema;
+
 // What sema asks of its context (§B1.4, §B3). In the engine these are `visible_decls(::, name,
 // at item)` and fetches of `decl_sema`.
 class Questions {
@@ -107,6 +109,9 @@ public:
   // Whether class `c` is complete at the current point ([class.mem.general]): its definition
   // precedes the point and does not enclose it.
   virtual bool is_complete(EntityId c) = 0;
+  // An omitted field's initializer, analysed at its declaration into the requesting builder.
+  // `NodeId::none` records a diagnosed error. No answer means this context cannot replay it.
+  virtual std::optional<NodeId> replay_default_member(Sema&, EntityId) { return std::nullopt; }
   // A concrete source query keeps its original position if its tokens are read again.
   virtual bool is_complete_at_source(EntityId c) { return is_complete(c); }
   virtual bool class_layout_uncertain(EntityId /*cls*/) { return false; }
@@ -384,6 +389,7 @@ public:
     diags_->push_back(std::move(x));
   }
   std::size_t diag_count() const { return diags_->size(); }
+  std::vector<engine::Diagnostic>& diagnostics() { return *diags_; }
   bool has_error_since(std::size_t begin) const {
     return std::ranges::any_of(std::span(*diags_).subspan(begin), [](const engine::Diagnostic& d) {
       auto kind = sema_diag_of(d.id);
@@ -816,6 +822,10 @@ public:
         TemplateArg a = bound                                     ? *bound
                         : p.kind == ast::TemplateArgKind::type ? t.type_arg(p.type)
                                                                : t.value_arg(p.type, ins().intern_value(ast::VDepParam{p.depth, p.index}));
+        if (!bound && p.pack && p.kind == TemplateArgKind::type) {
+          const std::array expansion{t.type_arg(types().pack_expansion(p.type))};
+          a = t.pack(expansion);
+        }
         mapping.push_back(t.mapping_value(a));
       }
     }
@@ -1169,13 +1179,20 @@ public:
     return false;
   }
   // Whether the type `S::n`, named at `at`, is accessible here: a nested type of a class
-  // ([class.access]/4); diagnosed if not.
-  bool type_member_access(const Scope& s, NameId n, u32 at) {
+  // ([class.access]/4); diagnosed if not. Ordinary functional conversions check directly
+  // declared aliases and typedefs of non-template records.
+  bool type_member_access(const Scope& s, NameId n, u32 at, bool direct_alias_only = false) {
     if (!s.type || !types().is_class(*s.type) || types().is_dependent(*s.type)) return true;
     EntityId naming = types().class_of(*s.type);
+    if (direct_alias_only) {
+      const EntityRec& record = w_->entities.rec(naming);
+      if (record.kind != EntityKind::class_ || record.templ != EntityId::none) return true;
+    }
     auto r = nested_member(naming, n);
     if (!r) return true;
     auto [t, c] = *r;
+    if (direct_alias_only && (c != naming || w_->entities.rec(t.entity).kind != EntityKind::type_alias ||
+                              types().is_dependent(t.type))) return true;
     if (defer_type_access && (!accessible(c, class_rec(c)->access_of(t.entity), naming) || !accessible_naming_base(naming, c))) {
       deferred_access_.push_back({c, t.entity, n, at});
       return true;
@@ -1585,7 +1602,7 @@ public:
     QualType type;
     NameId name;
     ConstId init = ConstId::none;  // a member's default member initializer, if constant
-    bool dmi = false;              // it has one
+    EntityId default_member = EntityId::none;  // the field whose initializer was written
   };
   std::vector<Element> elements(QualType t) {
     std::vector<Element> r;
@@ -1596,7 +1613,7 @@ public:
       // [dcl.init.aggr]/2: the direct bases in declaration order, then the members.
       for (const BaseRec& b : c->bases) r.push_back({types().add_cv(types().class_type(b.cls), Types::cv(t)), no_name()});
       for (const FieldRec& f : c->fields) {
-        r.push_back({types().add_cv(f.type, Types::cv(t)), f.name, f.init, f.dmi});
+        r.push_back({types().add_cv(f.type, Types::cv(t)), f.name, f.init, f.dmi ? f.entity : EntityId::none});
         if (c->union_) break;  // [dcl.init.aggr]/16: a union's list initializes its first member
       }
     }
@@ -1606,6 +1623,29 @@ public:
     const ClassRec* c = types().is_class(t) ? class_rec(types().class_of(t)) : nullptr;
     return c && c->union_;
   }
+
+  // [class.base.init], [dcl.init.aggr]: a destination with only ordinary scalar fields
+  // needs no subobject destruction if an initializer exits by throwing.
+  bool can_replay_default_members(QualType t) {
+    if (templated() || !types().is_class(t)) return false;
+    EntityId c = types().class_of(t);
+    const EntityRec& entity = w_->entities.rec(c);
+    if (entity.kind != EntityKind::class_ || entity.templ != EntityId::none || entity.name == no_name() ||
+        (entity.scope != EntityId::none && w_->entities.rec(entity.scope).kind != EntityKind::namespace_)) return false;
+    const ClassRec* rec = class_rec(c);
+    return rec && !rec->union_ && !rec->closure && !rec->polymorphic && rec->bases.empty() &&
+           rec->destructor_usable && rec->destructor == EntityId::none &&
+           std::ranges::all_of(rec->fields, [&](const FieldRec& f) {
+             return types().is_scalar(f.type) && !types().is_member_pointer(f.type) && f.bit_width == 0;
+           }) && std::ranges::any_of(rec->fields, &FieldRec::dmi);
+  }
+
+  struct DefaultMemberScope {
+    Sema& sema;
+    bool saved;
+    DefaultMemberScope(Sema& s, bool enabled) : sema(s), saved(std::exchange(s.replay_default_members_, enabled)) {}
+    ~DefaultMemberScope() { sema.replay_default_members_ = saved; }
+  };
 
   // Whether initializing a `t` runs a default member initializer.
   // (or a constructor).
@@ -1664,13 +1704,32 @@ public:
   // An aggregate's elements each from its default member initializer, else value- or
   // default-initialized.
   Ex member_inits(QualType t, bool value, u32 begin, u32 end) {
+    const bool replay = replay_default_members_ && can_replay_default_members(t);
+    std::vector<Element> elems = elements(t);
+    if (replay && std::ranges::any_of(class_rec(types().class_of(t))->fields, [&](const FieldRec& f) {
+          return !f.dmi && (Types::is_const(types().canonical(f.type)) ||
+                            (!value && Types::is_const(types().canonical(t))));
+        })) {
+      diag(begin, Diag::deleted_constructor, t);
+      return {NodeId::none, begin, end};
+    }
     std::vector<Ex> out;
-    for (const Element& e : elements(t)) out.push_back(element_default(e, value, begin, end));
+    for (const Element& e : elems) {
+      out.push_back(element_default(e, value, replay, begin, end));
+      if (!out.back().ok()) return {NodeId::none, begin, end};
+    }
     return list_of(t, std::move(out), begin, end);
   }
-  Ex element_default(const Element& e, bool value, u32 begin, u32 end) {
+  Ex element_default(const Element& e, bool value, bool replay, u32 begin, u32 end) {
+    if (replay && e.default_member != EntityId::none) {
+      if (auto init = q_->replay_default_member(*this, e.default_member)) {
+        if (*init == NodeId::none) return {NodeId::none, begin, end};
+        ExprInfo info{e.type, ValueCategory::prvalue, 0};
+        return node(ast::DefaultMemberInit{info, {*init, 0}}, begin, end, info);
+      }
+    }
     if (e.init != ConstId::none) return literal(Types::unqualified(e.type), e.init, ValueCategory::prvalue, begin, end);
-    if (e.dmi) {
+    if (e.default_member != EntityId::none) {
       diag(begin, Diag::not_supported, lex::Tk::equal);  // a non-constant default member initializer in an aggregate (#118)
       return {NodeId::none, begin, end};
     }
@@ -1762,11 +1821,12 @@ public:
     Ex fail{NodeId::none, begin, end};
     std::vector<Element> elems = elements(t);
     std::vector<Ex> out;
+    const bool replay = replay_default_members_ && can_replay_default_members(t);
     bool elided = begin != b.begin || end != b.end;
     for (std::size_t i = 0; i < elems.size(); ++i) {
       if (next == b.clauses.size()) {
-        out.push_back(element_default(elems[i], true, end, end));
-        if (!out.back().ok()) return fail;  // diagnosed (a default member initializer not supported yet)
+        out.push_back(element_default(elems[i], true, replay, end, end));
+        if (!out.back().ok()) return fail;
         continue;
       }
       const Braced::Clause& c = b.clauses[next];
@@ -1783,7 +1843,10 @@ public:
           diag(c.begin, Diag::bad_designator, c.designator, Types::unqualified(t));
           return fail;
         }
-        for (; i < j; ++i) out.push_back(element_default(elems[i], true, c.begin, c.begin));
+        for (; i < j; ++i) {
+          out.push_back(element_default(elems[i], true, replay, c.begin, c.begin));
+          if (!out.back().ok()) return fail;
+        }
       }
       QualType et = elems[i].type;
       if (c.list) {
@@ -3409,6 +3472,7 @@ public:
   void check_immediate_addresses(NodeId root, u32 offset = 0) {
     if (!has_immediate_addresses_ || root == NodeId::none) return;
     auto check = [&](this const auto& self, const ast::Red& node) -> void {
+      if (node.is<ast::DefaultMemberInit>()) return;  // checked where its source was replayed
       if ((node.is<ast::Declarator>() || node.is<ast::LocalVar>() || node.is<ast::StaticVar>()) &&
           constant_immediate_initializers_.contains(node.offset())) return;
       if (node.is<ast::DeclRef>()) {
@@ -7968,6 +8032,7 @@ private:
   };
   std::vector<LabelPoint> labels_, gotos_;
   bool has_immediate_addresses_ = false;
+  bool replay_default_members_ = false;
   std::set<u32> constant_immediate_initializers_;
   std::set<u32> consteval_;                           // consteval functions named so far
   std::map<u32, std::vector<Ex>> list_elems_;         // by draft InitList

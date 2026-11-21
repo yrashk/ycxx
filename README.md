@@ -183,6 +183,12 @@ fixed underlying types and definitions inside `extern "C"` blocks.
 Both targets support named nested enum definitions followed by ordinary fields in the same
 member declaration, including scoped enum field initializers. [#500](https://github.com/yrashk/ycxx/issues/500)
 
+Automatic declarations of ordinary non-template classes with only scalar fields and no bases
+or unions can use default member initializers in `S s;` and `S s{…};`. A default runs in
+declaration order and can call a function or read an earlier field through `this`. An explicit
+initializer takes precedence.
+[#118](https://github.com/yrashk/ycxx/issues/118)
+
 **Language on macOS.** Programs can use:
 - the fundamental integer, character and floating types, pointers, arrays, references and
   enumerations, including opaque declarations of named enums in their namespaces; `float`,
@@ -255,7 +261,8 @@ member declaration, including scoped enum field initializers. [#500](https://git
   partial specializations with substitution checks for dependent type arguments, static constexpr
   members of class templates, member function and
   constructor templates, parameter packs and fold expressions, alias templates, template
-  template parameters, concepts and requires-expressions in overload resolution,
+  template parameters, concepts and requires-expressions in overload resolution, including
+  explicit trailing type packs in ordinary constrained function overloads,
   `if constexpr`, deferred template static assertion failures, and two-phase lookup, with
   Itanium names identical to Clang's; Clang's
   `__make_integer_seq`;
@@ -283,7 +290,9 @@ member declaration, including scoped enum field initializers. [#500](https://git
 - casts, including `static_cast<T&&>` from a compatible object lvalue and runtime `static_cast`
   downcasts of object pointers and lvalue references through accessible, unambiguous
   nonvirtual base paths, `sizeof`/`alignof` (classes included), `decltype`, and calls
-  through pointers to functions. [#199](https://github.com/yrashk/ycxx/issues/199)
+  through pointers to functions. Qualified functional casts check access to aliases and typedefs
+  declared directly in an ordinary class. [#199](https://github.com/yrashk/ycxx/issues/199) ·
+  [#216](https://github.com/yrashk/ycxx/issues/216)
 - equality and inequality between `std::nullptr_t` values and between a `std::nullptr_t`
   value and a pointer. [#199](https://github.com/yrashk/ycxx/issues/199)
 - constant evaluation on ycxx's own interpreter: `constexpr`, `consteval`, `constinit`,
