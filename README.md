@@ -58,8 +58,8 @@ build/bin/ycxx cxx --target=x86_64-pc-linux-gnu -nostdlib example.o -o example
 ```
 
 Fixed-prototype direct calls to free functions support passing and returning nonempty flat
-records of integral fields by value. The record can occupy up to 16 bytes and must be trivial
-for calls. [Linux integer aggregate ABI](docs/design/linux-integer-aggregates.md)
+records with integral or ordinary object-pointer fields by value. The record can occupy up to
+16 bytes and must be trivial for calls. [Linux integer aggregate ABI](docs/design/linux-integer-aggregates.md)
 
 For mixed Linux objects, the pinned libycxx `<cstddef>` byte operator uses the same Itanium
 linkage name in ycxx, GCC and Clang. [#64](https://github.com/yrashk/ycxx/issues/64)
@@ -132,7 +132,9 @@ arrays of supported scalar types, including arithmetic on saved pointers just pa
 [#111](https://github.com/yrashk/ycxx/issues/111)
 
 Both targets support `constexpr` constructors in class definitions and plain out-of-class
-definitions for runtime construction. [#157](https://github.com/yrashk/ycxx/issues/157)
+definitions for runtime construction. An ordinary class can explicitly default its copy
+constructor as its first declaration and use it for trivial member copies.
+[#157](https://github.com/yrashk/ycxx/issues/157)
 
 In-class conversion functions can name a class type alias as their conversion target,
 including a dependent alias in a class template. [#339](https://github.com/yrashk/ycxx/issues/339)

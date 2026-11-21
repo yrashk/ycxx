@@ -53,6 +53,7 @@ export struct TypeLayout {
   bool contains_member_pointer = false;  // a scalar member pointer or an aggregate containing one
   // Records: the bits of each INTEGER eightbyte in the supported AMD64 slice, zero otherwise.
   std::uint8_t sysv_integer_eightbytes = 0;
+  bool copy_abi_unknown = false;  // records whose defaulted copy has unresolved triviality
 };
 
 export struct SubObject {
@@ -363,6 +364,7 @@ class Lowering {
       ++j;
       if (result || byval) {
         QualType pc = layout(cxx(p)).pointee;
+        if (layout(pc).copy_abi_unknown) return fail("defaulted copy ABI classification is unavailable");
         if (ignored(pc)) {  // passed by nothing: an object of this frame stands for it
           objects.push_back({p, 0, result, {}});
           l2_of.push_back(-1);
@@ -732,10 +734,15 @@ class Lowering {
           ValueId v = map_[raw(l1ops[i])];
           if (k >= 32) return fail("more than 32 arguments are not in the α subset");
           std::size_t at = ops.size() - (ind ? 2 : 1);  // the argument's L2 index
-          // An empty class passes nothing, and returns nothing.
-          if ((((byval >> k) & 1) || k + 1 == result_arg) && ignored(layout(cxx(l1ops[i])).pointee)) continue;
-          if (k + 1 == result_arg) {
-            QualType c = layout(cxx(l1ops[i])).pointee;
+          const bool class_arg = (byval >> k) & 1, class_result = k + 1 == result_arg;
+          QualType c{};
+          if (class_arg || class_result) {
+            c = layout(cxx(l1ops[i])).pointee;
+            if (layout(c).copy_abi_unknown) return fail("defaulted copy ABI classification is unavailable");
+            // An empty class passes nothing, and returns nothing.
+            if (ignored(c)) continue;
+          }
+          if (class_result) {
             result_pieces = class_pieces(c);
             if (result_pieces.words) {
               result_dst = v;
@@ -743,9 +750,9 @@ class Lowering {
             }
             if (config_.sysv_amd64) return fail("unsupported System V AMD64 aggregate result");
             indirect = std::uint32_t(at + 1);
-          } else if ((byval >> k) & 1) {
+          } else if (class_arg) {
             // A class argument represented by pieces of its caller-owned object.
-            ClassPieces pieces = class_pieces(layout(cxx(l1ops[i])).pointee, &amd64_args, std::uint32_t(ops.size()));
+            ClassPieces pieces = class_pieces(c, &amd64_args, std::uint32_t(ops.size()));
             if (pieces.words) {
               if (!config_.sysv_amd64) {
                 const T piece = pieces.type;
