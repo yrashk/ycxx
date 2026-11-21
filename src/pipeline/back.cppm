@@ -998,6 +998,7 @@ engine::query_task<Generated> FunctionGen::run(engine::Ctx& cx, FnKey k) {
   input.atexit = d.atexit;
   input.dso = d.dso;
   input.hosted_catch_all = d.unwind == UnwindEligibility::hosted_catch_all;
+  input.native_array_delete = facts.target().triple == ast::x86_64_linux.triple;
   auto f = irgen::function_ir(*universe().in, input, facts);
   if (!f) {
     auto error = co_await located_error(cx, k.tu, ast::Loc{d.item, d.body_offset}, std::move(f.error()));

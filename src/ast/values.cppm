@@ -136,6 +136,7 @@ enum class DepOp : u8 {
   is_assignable, is_nothrow_assignable, is_trivially_assignable,
   is_convertible, is_nothrow_convertible,
   is_base_of,
+  is_empty,
 };
 
 // A dependent operation (§5.5). The predicates take canonical qualified type operands.

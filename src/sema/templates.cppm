@@ -376,7 +376,8 @@ public:
       }
       break;
     // The token-owning replay checks completeness and diagnoses a concrete operand.
-    case ast::DepOp::is_trivially_copyable: return std::nullopt;
+    case ast::DepOp::is_trivially_copyable:
+    case ast::DepOp::is_empty: return std::nullopt;
     case ast::DepOp::is_same:
     case ast::DepOp::is_constructible:
     case ast::DepOp::is_nothrow_constructible:
@@ -526,6 +527,7 @@ public:
       case ast::DepOp::is_member_object_pointer:
       case ast::DepOp::is_member_function_pointer:
       case ast::DepOp::is_trivially_copyable:
+      case ast::DepOp::is_empty:
       case ast::DepOp::is_object: {
         auto operand = substitute_arg(ins().seqs.at(op.operands, 0), b);
         if (!operand) return std::nullopt;
@@ -1689,6 +1691,7 @@ private:
     return ins().intern_value(ast::VDepOp{ast::DepOp::logical_not, ins().intern_seq(std::span<const TemplateArg>(operands))});
   }
 
+public:
   // Unsupported dependent constructs can still be re-parsed in a template body. Their
   // stand-ins carry no expression identity and must not become operands of an interned value.
   bool structural_operand(QualType t) {
@@ -1714,6 +1717,7 @@ private:
     default: return true;
     }
   }
+private:
   bool structural_operand(const TemplateArg& a) {
     if (a.kind == TemplateArgKind::pack)
       return std::ranges::all_of(elements(a), [&](const TemplateArg& e) { return structural_operand(e); });
