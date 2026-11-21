@@ -998,17 +998,27 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   [expr.ref]), list-initialization of aggregates and scalars (`InitList`, `ValueInit`,
   `DefaultInit`: brace elision, designators, narrowing, [dcl.init.list]/3.2), arrays whose bound
   comes from their initializer, class copies as `lvalue_to_rvalue` of a class glvalue, `x = {…}`.
-  Default member initializers are kept as their values, constants of scalar type only (#118).
   Namespace-scope aggregates with constant elements are folded to a `VAggregate`.
 - **IR:** members through `ptr_member` field steps; aggregates initialized element by element,
   in an object allocated `zero` when some element is value-initialized; trivial copies and copy
   assignment as `copy`, which `lower` turns into chunked loads and stores. Class layouts (Itanium
   §2.4) are computed by `QueryLayout` from the unit's shapes (`UnitShapes`, #115); data with
   `VAggregate` initializers; Itanium names for global-namespace class types in parameters.
-- Tests: `tests/own/classes/s1-*` (spec-only, plus seven from the review). 21 of 27 pass; the others wait for classes by value
-  (#116), local classes (#117), non-constant default member initializers (#118) and records in
-  the interpreter (#25).
+- Tests: `tests/own/classes/s1-*` (spec-only, plus seven from the review). Further cases are
+  tracked under classes by value (#116), local classes (#117) and records in the interpreter (#25).
 - Not yet: unions, bit-fields, constructors, bases (access checking came with #119).
+
+- Ordinary named, non-template records with only scalar fields and no bases or unions can use
+  nonconstant default member initializers when an automatic declaration uses implicit default
+  construction or aggregate initialization. Sema reads each omitted field's retained tokens
+  in its complete-class context. IR binds `this` to the destination while evaluating that field
+  in declaration order. An explicit aggregate clause keeps its enclosing context
+  ([class.mem.general], [expr.prim.this], [dcl.init.aggr], #118).
+- Required constant evaluation checks the scalar initializers and retains their values when
+  evaluation succeeds. Constant evaluation of destination member reads remains in #25.
+  Static storage, dependent forms, other member types and exceptional cleanup remain in #118.
+  The fixtures in `tests/own/classes/scalar-default-member-init/` cover both targets in syntax
+  checks and native Linux x86-64 execution.
 
 - Ordinary mutable data members can be modified through a const object. A member access
   preserves volatile and the field's declared qualification. Native const globals with mutable
@@ -1041,6 +1051,13 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   in the interpreter (#25). Mach-O still needs weak definitions for in-class member functions (#124).
 - Not yet: ref-qualifiers, `= default`.
 
+## Ordinary ref-qualified member functions (#311)
+
+- Ordinary non-template members in namespace-scope classes distinguish lvalue and rvalue
+  receivers, including cv-qualified overloads and out-of-class definitions. Nested Itanium
+  names encode the ref qualifier for mixed-object calls.
+- Ref-qualified virtual calls and broader template cases remain open.
+
 ## Classes, δ step 3: constructors, destructors, references, overloading (#86, 2026-11-18)
 
 - **References** ([dcl.ref], [dcl.init.ref]): `T&` and `T&&` declarators, reference locals,
@@ -1053,8 +1070,8 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   reference-binding tie-breaks), promotion, conversion; ambiguity and deleted functions
   (`= delete`) diagnosed.
 - **Constructors and destructors**: declarations in the class, mem-initializers and default
-  member initializers (analysed again in each constructor, a complete-class context; #118 stays
-  open for aggregates), `CtorCall` for every initialization form (`T x(a)`, `T x{a}`, `T x = a`,
+  member initializers (analysed again in each constructor, a complete-class context),
+  `CtorCall` for every initialization form (`T x(a)`, `T x{a}`, `T x = a`,
   `T(a)`, `T{a}`, value- and default-initialization, copies), `MemberInit` statements in
   declaration order, `Destructor`/`DestroyMember` for members after the body. Implicit copy
   constructors and destructors that are not trivial are synthesized (`Program::synthesized`).
@@ -1099,6 +1116,12 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
 - Not yet: temporaries with destructors created in a conditional operand, value-initializing a
   member subobject whose class has an implicit constructor, conditional
   `explicit`, explicit constructor templates, and other `= default` forms (#157, #244).
+
+## Ordinary destructor access (#259)
+
+- Automatic class objects and evaluated expressions of the form `T(args)` or `T{args}`
+  check access to the class destructor in the current context. Declaration-only uses
+  can still name the type.
 
 ## Classes, δ step 4a: enumerations (#86, 2026-11-18)
 
@@ -1272,9 +1295,8 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
 - `__FLT_EVAL_METHOD__` is predefined (0), as Clang has it for the target.
 - Attributes are also accepted after a declarator-id, on parameters, alias-declarations and
   statements, and in the GNU form on class heads and after template-heads. A string literal
-  initializes a character-array element of an aggregate. A default member initializer that is
-  not a scalar constant, in a class without constructors, is now diagnosed (#118) instead of
-  being dropped.
+  initializes a character-array element of an aggregate. Uses of default member initializers
+  outside the supported cases are diagnosed (#118).
 - Leading standard attributes on ordinary data members and member functions are accepted
   ([class.mem.general], #190). The parser diagnoses unbalanced arguments in these prefixes
   ([dcl.attr.grammar]) and attributes before access labels ([class.access.spec]). Other attribute
@@ -1648,7 +1670,11 @@ session's.*
   and a block declaration can take an unnamed function-pointer parameter (#449).
 - Parenthesized direct initialization accepts functional conversions with a braced operand or an
   initial literal, including `S b(S(1));` and `S b(S{1});` ([dcl.ambig.res], #290).
-- Not yet: access, hiding and qualified functional casts of member types (#216); member alias
+- Qualified functional conversions check access to aliases and typedefs declared directly in an
+  ordinary non-template record, for both `C::T(args)` and `C::T{args}`. They use the existing
+  member and friend access rules ([expr.type.conv], [class.access.general], #216).
+- Access through intermediate alias qualifiers or inherited aliases, dependent lookup and
+  expression hiding remain tracked in [#216](https://github.com/yrashk/ycxx/issues/216). Member alias
   templates (`template<…> using __apply = …` in a class), with member
   templates; template template parameters (#208); value-dependent expressions as template
   arguments (#209).
@@ -1771,8 +1797,10 @@ Fable decided the representation (ast.md §6.6); the Opus session wrote the code
   report "not supported" instead of "expected '<'".
 - Tests: `tests/own/templates/c6-*` (18, agreeing with Clang and GCC); 6 more draft examples
   pass. `<cstdio>`: 33 → 18 errors.
+- Ordinary function overloads with explicit trailing type packs preserve the pack in atomic
+  constraint substitution. Empty packs, order, and reference types are retained (#234).
 - Not yet: constraints on class and variable templates, partial specializations and members,
-  constrained packs, fold-expanded constraints, `C auto`, `noexcept` in compound requirements
+  broader constrained packs, fold-expanded constraints, `C auto`, `noexcept` in compound requirements
   (#234); re-verification of satisfaction at END (#235); Itanium constraint mangling (#236);
   recorded discarded extents for `if constexpr` (#237); value-dependent mapping arguments (#209).
 
