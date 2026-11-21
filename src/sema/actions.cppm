@@ -592,13 +592,15 @@ public:
     ExprInfo info{types().referee(*t), ValueCategory::lvalue, 0};
     return node(ast::DeclRef{info, spec}, begin, end, info);
   }
+  Ex dependent_variable_template_id(const ast::DeclSema& tmpl, std::span<const TemplateArg> args, u32 begin, u32 end) {
+    auto full = template_arguments(tmpl, args, begin);
+    if (!full) return {NodeId::none, begin, end};
+    auto value = ins().intern_value(ast::VDepVariable{tmpl.entity, ins().intern_seq(std::span<const TemplateArg>(*full))});
+    return literal(types().referee(tmpl.type), value, ValueCategory::lvalue, begin, end);
+  }
   // The specialization of variable template `templ` for `args` ([temp.spec.general]).
   EntityId variable_specialization(EntityId templ, std::span<const TemplateArg> args) {
-    const EntityRec& t = w_->entities.rec(templ);
-    EntityRec r{EntityKind::variable, t.name, {}, t.lang, t.linkage, t.first, t.scope};
-    r.templ = templ;
-    r.args.assign(args.begin(), args.end());
-    return w_->entities.entity(std::move(r));
+    return templates().specialize_variable(templ, args);
   }
 
   // The arguments of a template-id for `tmpl` ([temp.arg]): each of its parameter's kind, values
@@ -1910,6 +1912,7 @@ public:
     Templates t(*w_, classes());
     t.member_type = [this](EntityId c, NameId n) { return member_type(c, n); };
     t.template_decl = [this](EntityId tmpl) { return q_->template_decl(tmpl); };
+    t.variable_constant = [this](EntityId spec) { return q_->constant_value(spec); };
     return t;
   }
   bool dependent(const Ex& e) {
