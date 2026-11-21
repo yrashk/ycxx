@@ -229,7 +229,7 @@ func @7 {
 )");
 }
 
-enum class InvokeGraph { valid, extra_landing_edge, normal_value_on_unwind };
+enum class InvokeGraph { valid, extra_landing_edge, normal_parameter_on_unwind, normal_computation_on_unwind };
 
 l2::Function invoke_graph(InvokeGraph variant) {
   using enum l2::Type;
@@ -257,7 +257,9 @@ l2::Function invoke_graph(InvokeGraph variant) {
 
   auto normal = b.begin_block(normal_types);
   auto result = b.param(normal, 1);
-  const ir::ValueId succeeded[] = {b.param(normal, 0), result};
+  auto zero = b.value(Op::const_, i32, {}, {0});
+  auto computed = b.value(Op::add, i32, {result, zero});
+  const ir::ValueId succeeded[] = {b.param(normal, 0), computed};
   b.emit(Op::ret, {}, succeeded);
 
   auto landing = b.begin_block(landing_types);
@@ -265,9 +267,10 @@ l2::Function invoke_graph(InvokeGraph variant) {
   b.emit(Op::br, {}, {}, {}, 0, handle);
 
   auto handler = b.begin_block(handler_types);
-  // The normal definition has an earlier block ID, but the unwind path bypasses it.
-  auto fallback = b.value(Op::const_, i32, {}, {47});
-  auto recovered = variant == InvokeGraph::normal_value_on_unwind ? result : fallback;
+  // Both normal definitions precede this block in the builder, but the unwind path bypasses them.
+  auto recovered = b.value(Op::const_, i32, {}, {47});
+  if (variant == InvokeGraph::normal_parameter_on_unwind) recovered = result;
+  else if (variant == InvokeGraph::normal_computation_on_unwind) recovered = computed;
   const ir::ValueId handled[] = {b.param(handler, 0), recovered};
   b.emit(Op::ret, {}, handled);
 
@@ -287,8 +290,10 @@ void test_invoke_verification() {
   check(valid.has_value(), valid ? "verify invoke with exclusive normal and unwind entries" : valid.error());
   check(!l2::verify(invoke_graph(InvokeGraph::extra_landing_edge)),
         "reject a reachable ordinary edge with correctly typed arguments into the landing block");
-  check(!l2::verify(invoke_graph(InvokeGraph::normal_value_on_unwind)),
-        "reject using the normal result in a later block reached only by the unwind edge");
+  check(!l2::verify(invoke_graph(InvokeGraph::normal_parameter_on_unwind)),
+        "reject using the normal block parameter on the unwind path");
+  check(!l2::verify(invoke_graph(InvokeGraph::normal_computation_on_unwind)),
+        "reject using a value computed in the normal block on the unwind path");
 }
 
 void test_errors() {
