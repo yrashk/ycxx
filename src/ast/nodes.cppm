@@ -218,13 +218,19 @@ struct This {
 // implicit object argument as a pointer prvalue (`&a` for `a.f()`, `p` for `p->f()`, `this` for an
 // implicit call), sequenced before the arguments.
 struct MemberCall {
-  static constexpr std::uint32_t direct = ~std::uint32_t{0};
   ExprInfo info;
   EntityId function;
   [[=sequenced(0)]] Child object;
   [[=indeterminately_sequenced(1)]] ChildList args;
-  std::uint32_t virtual_slot = direct;
-  QualType virtual_callee = info.type;  // ABI function pointer type when virtual_slot selects an entry
+};
+
+// A virtual call on an opaque root. The slot is relative to the table's address point.
+struct VirtualMemberCall {
+  ExprInfo info;
+  QualType callee;  // pointer to the ABI function type, which includes the receiver parameter
+  u32 slot;
+  [[=sequenced(0)]] Child object;
+  [[=indeterminately_sequenced(1)]] ChildList args;
 };
 
 // Assignment notation calls a member function with the argument sequenced before its object
@@ -481,7 +487,7 @@ using Nodes = closed_list<Literal, DeclRef, Paren, Unary, Binary, OrderedBinary,
                           IfConsteval, StaticAssert, Member, InitList, ValueInit, DefaultInit, This,
                           MemberCall, Materialize, CtorCall, MemberInit, Destructor, DestroyMember, Dependent,
                           DepName, CondDecl, Switch, Case, Default, Label, Goto, BuiltinCall, Lambda, DefaultArg,
-                          StaticInit, StaticVar, NewObject, DeleteObject, VariadicBuiltin, AssignmentCall>;
+                          StaticInit, StaticVar, NewObject, DeleteObject, VariadicBuiltin, AssignmentCall, VirtualMemberCall>;
 
 static_assert(Nodes::size < max_node_kinds);
 

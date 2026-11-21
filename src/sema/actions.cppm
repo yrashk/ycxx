@@ -3480,7 +3480,7 @@ public:
     const MemberDeclRec* d = recs[*chosen];
     const Candidate& k = cands[*chosen];
     if (!check_access(bound.cls, d->entity, d->name, bound.name_at, bound.naming)) return fail;
-    u32 virtual_slot = ast::MemberCall::direct;
+    std::optional<u32> virtual_slot;
     if (unevaluated == 0) {
       if (d->is_virtual) {
         const auto* record = virtual_consumer(bound.cls);
@@ -3491,11 +3491,12 @@ public:
         if (!bound.qualified) {
           // [Itanium ABI §2.5.2]: entries for a root's virtuals follow the order of declaration.
           // The selected declaration is a member of this record.
-          virtual_slot = 0;
+          u32 slot = 0;
           for (const auto& candidate : record->members) {
             if (candidate.entity == d->entity) break;
-            if (candidate.is_virtual) ++virtual_slot;
+            if (candidate.is_virtual) ++slot;
           }
+          virtual_slot = slot;
         }
       } else if (!d->is_static && !require_supported_virtual_layout(types().class_type(bound.cls), paren_at)) {
         return fail;
@@ -3558,14 +3559,13 @@ public:
       contract_assert(children->size() == 1);
       return node(ast::AssignmentCall{info, fe, children->front(), at(o, begin)}, begin, end, info);
     }
-    ast::MemberCall call{info, fe, at(o, begin), b_->list(*children)};
-    if (virtual_slot != ast::MemberCall::direct) {
+    if (virtual_slot) {
       std::vector<QualType> parameters{o.type()};
       parameters.insert(parameters.end(), fr.params.begin(), fr.params.end());
-      call.virtual_slot = virtual_slot;
-      call.virtual_callee = types().pointer(types().function(fr.inner, parameters, false, LangLinkage::cxx));
+      const auto pointer = types().pointer(types().function(fr.inner, parameters, false, LangLinkage::cxx));
+      return node(ast::VirtualMemberCall{info, pointer, *virtual_slot, at(o, begin), b_->list(*children)}, begin, end, info);
     }
-    return node(call, begin, end, info);
+    return node(ast::MemberCall{info, fe, at(o, begin), b_->list(*children)}, begin, end, info);
   }
 
   // ------------------------------------------------------------ overload resolution ([over.match])

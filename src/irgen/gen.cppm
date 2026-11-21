@@ -1655,11 +1655,27 @@ class Gen {
     if (has_value) return b_.result(n, 1);
     return std::nullopt;
   }
+  // Itanium ABI §3.2.4: the address point sits at offset zero in this root subobject.
+  std::optional<ValueId> virtual_member_call(At a) {
+    if (fn_.thunk) unsupported(a, "in constant evaluation");
+    const auto c = get<ast::VirtualMemberCall>(a);
+    const ValueId receiver = rvalue(child(a, c.object));
+    const auto table_type = facts_.pointer_to(c.callee);
+    const auto receiver_type = facts_.pointer_to(table_type);
+    const ValueId vptr = pure(ir::Op::ptr_cast, receiver_type, {receiver}, {word(ty(receiver_type))});
+    const ValueId table = load({vptr, table_type});
+    const ValueId index = int_constant(facts_.ptrdiff_type(), c.slot);
+    const ValueId slot = pure(ir::Op::ptr_add, table_type, {table, index}, {word(ty(c.callee))});
+    std::vector<ValueId> args{load({slot, c.callee}), receiver};
+    for (ast::Child arg : ast_.children(c.args)) args.push_back(argument(child(a, arg)));
+    return call_pointer(facts_.pointee(c.callee), result_type(c.info), args, 0, 0);
+  }
   bool member_call_expression(At a) {
-    return is<ast::MemberCall>(a) || is<ast::AssignmentCall>(a);
+    return is<ast::MemberCall>(a) || is<ast::VirtualMemberCall>(a) || is<ast::AssignmentCall>(a);
   }
   // A non-static member function's call: the object's address is the first ABI argument.
   std::optional<ValueId> member_call(At a, std::optional<ValueId> into = std::nullopt) {
+    if (is<ast::VirtualMemberCall>(a)) return virtual_member_call(a);
     if (is<ast::AssignmentCall>(a)) {
       auto c = get<ast::AssignmentCall>(a);
       if (class_prvalue(c.info) && !into) unsupported(a, "of class type outside an initialization");
@@ -1673,22 +1689,7 @@ class Gen {
     }
     auto c = get<ast::MemberCall>(a);
     if (class_prvalue(c.info) && !into) unsupported(a, "of class type outside an initialization");
-    const bool dispatch = c.virtual_slot != ast::MemberCall::direct;
-    if (dispatch && fn_.thunk) unsupported(a, "in constant evaluation");
-    const ValueId receiver = rvalue(child(a, c.object));
-    std::vector<ValueId> args;
-    if (dispatch) {
-      // Itanium ABI §3.2.4: load the address point at offset zero in this root subobject.
-      // Preserve the same object address for the call's first argument.
-      const auto table_type = facts_.pointer_to(c.virtual_callee);
-      const auto receiver_type = facts_.pointer_to(table_type);
-      const ValueId vptr = pure(ir::Op::ptr_cast, receiver_type, {receiver}, {word(ty(receiver_type))});
-      const ValueId table = load({vptr, table_type});
-      const ValueId index = int_constant(facts_.ptrdiff_type(), c.virtual_slot);
-      const ValueId slot = pure(ir::Op::ptr_add, table_type, {table, index}, {word(ty(c.virtual_callee))});
-      args.push_back(load({slot, c.virtual_callee}));
-    }
-    args.push_back(receiver);
+    std::vector<ValueId> args{rvalue(child(a, c.object))};
     if (into) args.push_back(*into);
     uint32_t byval = 0;
     for (ast::Child arg : ast_.children(c.args)) {
@@ -1696,7 +1697,6 @@ class Gen {
       if (argument_object(x)) byval |= 1u << args.size();
       args.push_back(argument(x));
     }
-    if (dispatch) return call_pointer(facts_.pointee(c.virtual_callee), result_type(c.info), args, 0, 0);
     return call_fn(c.function, result_type(c.info), args, 1, false, byval, into ? 2 : 0);
   }
   // A call whose result is a class object of its own, which a hidden argument names

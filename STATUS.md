@@ -2013,7 +2013,7 @@ What the process allocates, attributed to the engine's cells, in the trace and t
   follows the base chain through private members and hidden names, with checks for matching
   parameter types, qualifiers, return types and exception specifications. The class traits also
   recognize inherited polymorphism and implicit virtual destructors.
-- On Linux x86-64, an ordinary declaration-only root with fixed-integer virtual methods can
+- On Linux x86-64, an ordinary declaration-only root with fixed integer virtual signatures can
   consume a peer-owned object through a pointer or reference. Dispatch loads the selected slot in
   declaration order and passes the original receiver as `this`. Qualifying the call with the
   receiver's own class name calls the declaration directly.
