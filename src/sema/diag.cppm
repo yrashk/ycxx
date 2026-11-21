@@ -375,9 +375,9 @@ enum class Diag : std::uint32_t {
   empty_incomplete [[=message{Severity::error, "incomplete class type '{0:t}' cannot be queried by '__is_empty'"}]],
   empty_unsupported [[=message{Severity::error, "'__is_empty' for '{0:t}' is not supported yet"}]],
   convertibility_incomplete [[=message{Severity::error, "incomplete type '{0:t}' cannot be queried by '{1:n}'"}]],
-  destructibility_dependent [[=message{Severity::error, "dependent operands of '__is_destructible' are not supported yet"}]],
-  destructibility_incomplete [[=message{Severity::error, "incomplete class type '{0:t}' cannot be queried by '__is_destructible'"}]],
-  destructibility_unsupported [[=message{Severity::error, "'__is_destructible' for '{0:t}' is not supported yet"}]],
+  destructibility_dependent [[=message{Severity::error, "dependent operands of '{0:n}' are not supported yet"}]],
+  destructibility_incomplete [[=message{Severity::error, "incomplete class type '{0:t}' cannot be queried by '{1:n}'"}]],
+  destructibility_unsupported [[=message{Severity::error, "'{0:n}' for '{1:t}' is not supported yet"}]],
 };
 
 // A `{N:r}` argument: why an evaluation was not constant. 0 is an expression the front end
