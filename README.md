@@ -176,6 +176,9 @@ Both targets accept leading `[[…]]` attributes on ordinary data and function m
   that match unknown-bound array types. [#222](https://github.com/yrashk/ycxx/issues/222)
 - implicit lvalue copy assignment for ordinary classes without bases, including class members
   with their own assignment operators. [#360](https://github.com/yrashk/ycxx/issues/360)
+- first-declaration in-class defaulted copy assignment for ordinary classes without bases.
+  The written operator keeps its access and assigns supported members in declaration order.
+  [#244](https://github.com/yrashk/ycxx/issues/244)
 - user-declared copy and move assignment govern the availability of implicit constructors.
   [#244](https://github.com/yrashk/ycxx/issues/244)
 - classes and unions: data and static members, named data members of unnamed union type,
