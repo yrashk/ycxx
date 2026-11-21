@@ -738,7 +738,7 @@ public:
     if (it == decls_.end()) return std::nullopt;
     std::optional<ast::DeclSema> r;
     for (const auto& [k, d] : it->second)
-      if (k <= item) r = d;
+      if (k <= item) r = completed_declaration(d);
     return r;
   }
   // A previous definition of this entity in this TU ([basic.def.odr]). C language linkage
@@ -1452,7 +1452,11 @@ public:
     }
     functions.push_back(f);
   }
-  interp::Callee function_ir(EntityId f) override { return p_->function_ir(f, point()); }
+  interp::Callee function_ir(EntityId f) override {
+    if (constructor_exception && p_->world().entities.rec(f).scope == completing_class)
+      return {.is_constexpr = p_->is_constexpr(f, point())};
+    return p_->function_ir(f, point());
+  }
   std::optional<QualType> deduced_type(EntityId f) override { return p_->deduced_type(f, point()); }
   sema::GenericResult generic_instance(EntityId spec, const sema::GenericClosure* known, const sema::GenericBinding&) override {
     return p_->generic_instance(spec, known, point());
@@ -1539,6 +1543,7 @@ public:
   bool own_class_complete = false;
   std::optional<u32> declaration_lookup_end;
   EntityId completing_class = EntityId::none;
+  bool constructor_exception = false;
   // The original tokens when a constructor reads a default member initializer again.
   std::optional<Program::Dmi> initializer_source;
   bool retain_type_trait_pattern = false;
@@ -6325,6 +6330,7 @@ void Program::bind_constructor_exceptions(EntityId cls, const sema::ClassRec& re
     const auto d = w_->ins.seqs.at(cell.decls, ast::number_of(decl.ord));
     AtItem q(*this, item, false);
     q.completing_class = cls;
+    q.constructor_exception = true;
     sema::Sema s(*w_, b, q, out.diags, decl.item, 0);
     s.current_class = cls;
     s.this_type = w_->types.pointer(w_->types.class_type(cls));
