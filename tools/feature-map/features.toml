@@ -2546,8 +2546,9 @@ group = 'reflect'
 clauses = ['dcl.attr.annotation']
 std = 'C++26'
 detect = '\[\[\s*='
-status = 'missing'
-issues = [324, 80]
+status = 'partial'
+issues = [662, 324, 80]
+note = 'Typed constants and source occurrences on ordinary class and function declarations.'
 
 [[feature]]
 id = 'stmt-expansion'

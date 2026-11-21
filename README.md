@@ -55,6 +55,10 @@ instantiation. Concrete constant template arguments can use braced conversions s
 Functional conversions can construct namespace-qualified class-template specializations with
 parentheses or braces, including through namespace aliases. [#697](https://github.com/yrashk/ycxx/issues/697)
 
+C++26 reflection annotations on class heads and ordinary function declarations accept
+constant payloads and retain their types for compiler consumers.
+[#662](https://github.com/yrashk/ycxx/issues/662)
+
 **Preprocess binary resources.** Both targets support `#embed` and `__has_embed` with the standard
 parameters. [#125](https://github.com/yrashk/ycxx/issues/125)
 

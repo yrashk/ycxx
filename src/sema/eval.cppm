@@ -214,7 +214,70 @@ public:
     return evaluate(e);
   }
 
+  // [dcl.attr.annotation], [meta.reflection.result]: reflect_constant takes its operand by value
+  // and requires a valid constant template argument of the deduced structural type.
+  std::optional<ConstId> evaluate_annotation(Ex expression, QualType type) {
+    if (s_->dependent(expression)) {
+      s_->diag(expression.begin, Diag::annotation_not_supported);
+      return std::nullopt;
+    }
+    if (!structural_annotation_type(type)) {
+      s_->diag(expression.begin, Diag::annotation_invalid_type);
+      return std::nullopt;
+    }
+    if (s_->types().is_class(type) && !s_->is_aggregate(type)) {
+      s_->diag(expression.begin, Diag::annotation_not_supported);
+      return std::nullopt;
+    }
+    while (auto paren = s_->as<ast::Paren>(expression)) {
+      expression = s_->extended({paren->operand.id, expression.begin + paren->operand.at, expression.end});
+    }
+    const Evaluated result = evaluate_initializer(expression);
+    if (!result.value) {
+      if (!result.type_trait_failure) s_->diag(expression.begin, Diag::not_constant, result.reason);
+      return std::nullopt;
+    }
+    if (!annotation_argument_value(*result.value)) {
+      s_->diag(expression.begin, Diag::annotation_invalid_type);
+      return std::nullopt;
+    }
+    return result.value;
+  }
+
 private:
+  // Check the class properties [temp.param] requires before evaluating supported aggregate
+  // operands. The class expression evaluator supplies the remaining constant-expression checks.
+  bool structural_annotation_type(QualType type) {
+    auto& types = s_->types();
+    if (types.is_scalar(type) || types.is_reference(type)) return true;
+    if (types.is_array(type)) return structural_annotation_type(types.rec(type).inner);
+    if (!types.is_class(type)) return false;
+    const ClassRec* record = s_->class_rec(types.class_of(type));
+    if (!record || record->polymorphic || !record->destructor_usable || record->copy_deleted) return false;
+    return std::ranges::all_of(record->bases, [&](const BaseRec& base) {
+      return base.access == ast::Access::public_ &&
+             structural_annotation_type(types.class_type(base.cls));
+    }) && std::ranges::all_of(record->fields, [&](const FieldRec& field) {
+      return record->access_of(field.entity) == ast::Access::public_ && !field.mutable_ &&
+             structural_annotation_type(field.type);
+    });
+  }
+
+  bool annotation_argument_value(ConstId value) {
+    const auto& values = s_->ins().values;
+    if (values.is<ast::VLvalue>(value)) {
+      const auto address = values.get<ast::VLvalue>(value);
+      // [temp.arg.nontype]: a string literal cannot be the source of a constituent pointer.
+      return !values.is<ast::VString>(address.base);
+    }
+    if (values.is<ast::VAggregate>(value)) {
+      const auto aggregate = values.get<ast::VAggregate>(value);
+      return std::ranges::all_of(s_->ins().seqs.elements(aggregate.elems),
+                                 [this](ConstId element) { return annotation_argument_value(element); });
+    }
+    return true;
+  }
+
   std::optional<ConstId> tag_initializer_constant(Ex e) {
     if (!s_->is_defaulted_tag_initializer(e)) return std::nullopt;
     // The empty record value describes storage for the non-aggregate tag. Sema has already

@@ -378,6 +378,9 @@ enum class Diag : std::uint32_t {
   destructibility_dependent [[=message{Severity::error, "dependent operands of '{0:n}' are not supported yet"}]],
   destructibility_incomplete [[=message{Severity::error, "incomplete class type '{0:t}' cannot be queried by '{1:n}'"}]],
   destructibility_unsupported [[=message{Severity::error, "'{0:n}' for '{1:t}' is not supported yet"}]],
+  annotation_invalid_type [[=message{Severity::error, "an annotation requires a structural constant value"}]],
+  annotation_not_supported [[=message{Severity::error, "this declaration annotation is not supported yet"}]],
+  annotation_mixed_list [[=message{Severity::error, "annotations and ordinary attributes require separate attribute-specifiers"}]],
 };
 
 // A `{N:r}` argument: why an evaluation was not constant. 0 is an expression the front end
