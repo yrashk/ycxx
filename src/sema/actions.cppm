@@ -747,10 +747,6 @@ public:
 
   // The built-in `name` names, if it is one ycxx implements.
   const lex::TypeTraitInfo* type_trait(NameId name) { return lex::type_trait(ins().names.spelling(name)); }
-  QualType innermost(QualType t) {
-    while (types().is_array(t)) t = types().canonical(types().rec(t).inner);
-    return t;
-  }
   // Whether a class type is a union: by its class-key, which its first declaration's tokens say.
   bool is_union_type(QualType t) {
     if (!types().is_class(t)) return false;
@@ -768,11 +764,17 @@ public:
   Ex trait_expr(lex::TypeTrait t, std::span<const QualType> args, u32 begin, u32 end) {
     using enum lex::TypeTrait;
     QualType b = builtin(Builtin::bool_);
-    if (t == is_same || t == is_reference) {
-      auto v = t == is_same ? templates().is_same_value(args[0], args[1]) : templates().is_reference_value(args[0]);
+    auto structural_trait = [&](std::optional<ConstId> v) {
       if (v) return literal(b, *v, ValueCategory::prvalue, begin, end);
       ExprInfo info{b, ValueCategory::prvalue, expr_flag::dependent | expr_flag::unrepresented_value};
       return node(ast::Dependent{info, b_->list({})}, begin, end, info);
+    };
+    switch (t) {
+    case is_same: return structural_trait(templates().is_same_value(args[0], args[1]));
+    case is_reference: return structural_trait(templates().unary_trait_value(ast::DepOp::is_reference, args[0]));
+    case is_const: return structural_trait(templates().unary_trait_value(ast::DepOp::is_const, args[0]));
+    case is_volatile: return structural_trait(templates().unary_trait_value(ast::DepOp::is_volatile, args[0]));
+    default: break;
     }
     if (std::ranges::any_of(args, [&](QualType a) { return types().is_dependent(a); })) return dependent_node({}, begin, end, b);
     QualType x = args[0], c = types().canonical(x);
@@ -816,9 +818,6 @@ public:
     case is_unbounded_array: v = types().is_array(c) && types().rec(c).bound_value == ConstId::none; break;
     case is_function: v = types().is_function(c); break;
     case is_object: v = types().is_object(c); break;
-    // An array's cv-qualifiers are its elements' ([basic.type.qualifier]/3).
-    case is_const: v = Types::is_const(innermost(c)); break;
-    case is_volatile: v = Types::is_volatile(innermost(c)); break;
     case is_empty:
       // [meta.unary.prop]: a complete class, not a union, with no non-static data members.
       if (is_union_type(c)) v = false;
@@ -1084,7 +1083,7 @@ public:
 
   bool require_supported_virtual_layout(QualType t, u32 at) {
     if (!classes().has_virtual_layouts()) return true;
-    const QualType element = innermost(t);
+    const QualType element = types().innermost_array_element(t);
     // Layout can be the first use that requires a class specialization to be complete.
     const ClassRec* record = types().is_class(element) ? class_rec(types().class_of(element)) : nullptr;
     if (!record || !record->layout_requires_virtual_support) return true;

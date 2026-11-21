@@ -284,9 +284,7 @@ public:
     case add_lvalue_reference: return referenceable(c) ? types().lvalue_ref(c) : c;
     case add_rvalue_reference: return referenceable(c) ? types().rvalue_ref(c) : c;
     case remove_extent: return types().is_array(c) ? types().rec(c).inner : c;
-    case remove_all_extents:
-      while (types().is_array(c)) c = types().canonical(types().rec(c).inner);
-      return c;
+    case remove_all_extents: return types().innermost_array_element(c);
     case decay: {
       QualType x = types().canonical(types().referee(c));
       if (types().is_array(x)) return types().pointer(types().rec(x).inner);
@@ -311,12 +309,27 @@ public:
     return ins().intern_value(ast::VDepOp{ast::DepOp::is_same, ins().intern_seq(std::span<const TemplateArg>(operands))});
   }
 
-  std::optional<ConstId> is_reference_value(QualType type) {
-    if (!types().is_dependent(type))
-      return w_->values.integer(types().builtin(Builtin::bool_), types().is_reference(type));
-    if (!structural_operand(type)) return std::nullopt;
-    const std::array operands{type_arg(type)};
-    return ins().intern_value(ast::VDepOp{ast::DepOp::is_reference, ins().intern_seq(std::span<const TemplateArg>(operands))});
+  std::optional<ConstId> unary_trait_value(ast::DepOp op, QualType type)
+    pre(op != ast::DepOp::is_same)
+  {
+    if (types().is_dependent(type)) {
+      if (!structural_operand(type)) return std::nullopt;
+      const std::array operands{type_arg(type)};
+      return ins().intern_value(ast::VDepOp{op, ins().intern_seq(std::span<const TemplateArg>(operands))});
+    }
+    bool result = false;
+    switch (op) {
+    case ast::DepOp::is_reference: result = types().is_reference(type); break;
+    case ast::DepOp::is_const:
+    case ast::DepOp::is_volatile: {
+      // An array has the cv-qualification of its element type ([basic.type.qualifier]).
+      QualType element = types().innermost_array_element(types().canonical(type));
+      result = op == ast::DepOp::is_const ? Types::is_const(element) : Types::is_volatile(element);
+      break;
+    }
+    case ast::DepOp::is_same: std::unreachable();
+    }
+    return w_->values.integer(types().builtin(Builtin::bool_), result);
   }
 
   // Template arguments `args` with the parameters `b` binds replaced by their arguments; a pack's
@@ -422,10 +435,12 @@ public:
         if (!rhs) return std::nullopt;
         return is_same_value(lhs->type, rhs->type);
       }
-      case ast::DepOp::is_reference: {
+      case ast::DepOp::is_reference:
+      case ast::DepOp::is_const:
+      case ast::DepOp::is_volatile: {
         auto operand = substitute_arg(ins().seqs.at(op.operands, 0), b);
         if (!operand) return std::nullopt;
-        return is_reference_value(operand->type);
+        return unary_trait_value(op.op, operand->type);
       }
       }
     }
