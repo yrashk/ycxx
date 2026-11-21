@@ -691,7 +691,7 @@ public:
   // The type of variable template specialization `v` at `point` when it is not its template's:
   // its explicit specialization's, or that of the partial specialization it is instantiated
   // from, with that one's arguments.
-  std::optional<QualType> specialization_type(EntityId v, u32 point, bool potentially_evaluated) {
+  std::optional<QualType> specialization_type(EntityId v, u32 point) {
     if (explicitly_specialized(v, point)) {
       auto d = declaration(v, point);
       return d ? std::optional(d->type) : std::nullopt;
@@ -706,28 +706,15 @@ public:
           if (d.entity == v) return d.type;
       return std::nullopt;
     };
-    // A typed variable usually leaves its initializer to the END worklist. A dependent
-    // type trait that checks completeness must see the point that actually demands it.
-    auto check_initializer = [&](u32 item) {
-      if (!potentially_evaluated) return;
-      const u32 source = std::to_underlying(id(item));
-      const auto trait = dependent_type_trait_operands_.lower_bound({source, 0});
-      if (trait == dependent_type_trait_operands_.end() || trait->first != source) return;
-      const auto& args = w_->entities.rec(v).args;
-      if (std::ranges::none_of(args, [&](const ast::TemplateArg& a) { return w_->arg_dependent(a); }))
-        variable_instance(v, point);
-    };
     if (!c) {
-      const auto def = var_templates_.find(std::to_underlying(w_->entities.rec(v).templ));
-      if (def == var_templates_.end() || def->second >= point) return std::nullopt;
-      const auto decls = item_sema(def->second).value.decls;
-      if (w_->ins.seqs.size(decls) > 0 && w_->types.has_placeholder(w_->ins.seqs.at(decls, 0).type)) return deduced();
-      check_initializer(def->second);
+      auto t = var_templates_.find(std::to_underlying(w_->entities.rec(v).templ));
+      if (t != var_templates_.end() && t->second < point && w_->ins.seqs.size(item_sema(t->second).value.decls) > 0 &&
+          w_->types.has_placeholder(w_->ins.seqs.at(item_sema(t->second).value.decls, 0).type))
+        return deduced();
       return std::nullopt;
     }
     auto t = templates().substitute(w_->ins.seqs.at(item_sema(c->item).value.decls, 0).type, c->args);
     if (t && w_->types.has_placeholder(*t)) return deduced();
-    if (t) check_initializer(c->item);
     return t;
   }
   // At the end of the unit, it is said where the demand being instantiated came from.
@@ -994,7 +981,7 @@ public:
   // its initializer analysed and evaluated with the arguments bound; none if `v` is no such
   // specialization, or its template is not defined before `point`.
   struct VarInstance;
-  const VarInstance* variable_instance(EntityId v, u32 point);
+  const VarInstance* variable_instance(EntityId v, u32 point, std::optional<QualType> potential_constant_type = std::nullopt);
   // The variable template specializations instantiated, in order: their item and record.
   struct VarInstance {
     EntityId spec;
@@ -1050,6 +1037,7 @@ public:
   // The end of the translation unit (§B6.2): every specialization whose definition a cell
   // requires is instantiated, in order of first demand, and so are those its instance requires.
   void instantiate_all();
+  void instantiate_variable_demands(std::span<const sema::Demand> demands, u32 point);
   void references(NodeId n, std::vector<EntityId>& out) const;
   std::span<const Instance* const> instances() const { return instance_order_; }
   // Every specialization whose definition the unit requires, in order of first demand.
@@ -1108,14 +1096,19 @@ public:
     for (u32 k = 0; k < items_->items.size(); ++k) {
       // Members of a class or namespace wait for those (M2); the enclosing item was diagnosed.
       if (!in_global_scope(k)) continue;
-      item_sema(k);
+      const auto& item = item_sema(k);
+      const bool ordinary = !templated_body(k);
+      if (ordinary && item.diags.empty()) instantiate_variable_demands(item.demands, k);
       if (items_->items[k].kind == ItemKind::class_def) {
         class_def(k);
         // The members' function bodies, complete-class contexts.
         for (u32 m : items_->items[k].members)
           if (items_->items[m].kind == ItemKind::function && items_->items[m].has_body()) analyze_body(m);
       }
-      if (items_->items[k].has_body() && items_->items[k].kind == ItemKind::function) analyze_body(k);
+      if (items_->items[k].has_body() && items_->items[k].kind == ItemKind::function) {
+        const auto& body = analyze_body(k);
+        if (ordinary && body.diags.empty()) instantiate_variable_demands(body.demands, k);
+      }
     }
     instantiate_all();
   }
@@ -1537,9 +1530,7 @@ public:
   }
   std::optional<ConstId> constant_value(EntityId v) override { return p_->constant_value(v, value_point(v)); }
   bool instantiation_gave_up() override { return p_->instantiation_gave_up(); }
-  std::optional<QualType> specialization_type(EntityId v, bool potentially_evaluated) override {
-    return p_->specialization_type(v, point(), potentially_evaluated);
-  }
+  std::optional<QualType> specialization_type(EntityId v) override { return p_->specialization_type(v, point()); }
   const std::vector<sema::Expansion>* pattern_expansions() override { return at_point ? p_->expansions(item_, 0) : nullptr; }
   std::optional<bool> satisfied(ConstId c) override { return p_->satisfied(c, point()); }
   bool satisfaction_failed(ConstId c) override { return p_->satisfaction_failed(c); }
@@ -1731,9 +1722,7 @@ public:
   std::optional<ConstId> constant_value(EntityId v) override { return p_->constant_value(v, p_->end()); }
   std::optional<ast::DeclSema> earlier_member(ast::NameId) override { return std::nullopt; }
   bool instantiation_gave_up() override { return p_->instantiation_gave_up(); }
-  std::optional<QualType> specialization_type(EntityId v, bool potentially_evaluated) override {
-    return p_->specialization_type(v, p_->end(), potentially_evaluated);
-  }
+  std::optional<QualType> specialization_type(EntityId v) override { return p_->specialization_type(v, p_->end()); }
   const std::vector<sema::Expansion>* pattern_expansions() override { return p_->expansions(item_, 1); }
   std::optional<bool> satisfied(ConstId c) override { return p_->satisfied(c, p_->end()); }
   bool satisfaction_failed(ConstId c) override { return p_->satisfaction_failed(c); }
@@ -7947,11 +7936,27 @@ std::optional<u32> Program::out_of_class_definition(EntityId spec, MemberOf of) 
   return std::nullopt;
 }
 
-const Program::VarInstance* Program::variable_instance(EntityId v, u32 point) {
+const Program::VarInstance* Program::variable_instance(EntityId v, u32 point,
+                                                       std::optional<QualType> potential_constant_type) {
   const u32 key = std::to_underlying(v);
-  if (auto it = var_index_.find(key); it != var_index_.end())
-    return var_instances_[it->second].item < point ? &var_instances_[it->second] : nullptr;
   const sema::EntityRec& rec = w_->entities.rec(v);
+  if (potential_constant_type &&
+      ((rec.scope != EntityId::none && w_->entities.rec(rec.scope).kind != sema::EntityKind::namespace_) ||
+       std::ranges::any_of(rec.args, [&](const ast::TemplateArg& arg) { return w_->arg_dependent(arg); })))
+    return nullptr;
+  auto qualifies = [&](const ast::DeclSema& pattern) {
+    if (!potential_constant_type || (pattern.flags & sema::decl_flag::constexpr_)) return true;
+    const QualType type = w_->types.canonical(*potential_constant_type);
+    return w_->types.is_reference(type) ||
+           (sema::Types::is_const(type) && !sema::Types::is_volatile(type) &&
+            (w_->types.is_integral(type) || w_->types.is_enum(type)));
+  };
+  if (auto it = var_index_.find(key); it != var_index_.end()) {
+    const VarInstance& cached = var_instances_[it->second];
+    if (cached.item >= point) return nullptr;
+    if (potential_constant_type && !qualifies(w_->ins.seqs.at(item_sema(cached.item).value.decls, 0))) return nullptr;
+    return &cached;
+  }
   if (rec.kind != sema::EntityKind::variable || rec.templ == EntityId::none || var_instantiating_.contains(key) || partial_matching_.contains(key) ||
       explicitly_specialized(v, point))
     return nullptr;
@@ -7964,10 +7969,12 @@ const Program::VarInstance* Program::variable_instance(EntityId v, u32 point) {
   }
   auto t = var_templates_.find(std::to_underlying(rec.templ));
   if (!partial && (t == var_templates_.end() || t->second >= point)) return nullptr;
+  if (potential_constant_type && partial && !partial->defined) return nullptr;
   const u32 k = partial ? partial->item : t->second;
   // [temp.inst]/16: nested instantiations are limited, as functions' are.
   if (too_deep(var_instantiating_.size(), k)) return nullptr;
   ast::DeclSema tmpl = w_->ins.seqs.at(item_sema(k).value.decls, 0);
+  if (!qualifies(tmpl)) return nullptr;
   std::vector<ast::TemplateParamSema> head = w_->ins.seqs.elements(tmpl.template_params);
   sema::Bindings args = partial ? partial->args : sema::Bindings::of(head.empty() ? 0 : head[0].depth, rec.args);
   var_instantiating_.insert(key);
@@ -8133,6 +8140,34 @@ void Program::references(NodeId n, std::vector<EntityId>& out) const {
       }
     });
   });
+}
+
+// A potentially-constant variable named by a surviving expression needs its definition for
+// constant evaluation ([temp.inst]/7, [expr.const]), even when the expression is read at run
+// time. Visit committed ordinary namespace items and bodies before moving to the next source
+// item so a later constant evaluation cannot choose their specialization's context instead.
+void Program::instantiate_variable_demands(std::span<const sema::Demand> demands, u32 point) {
+  struct Pending {
+    sema::Demand demand;
+    u32 depth;
+  };
+  std::vector<Pending> work;
+  auto enqueue = [&](std::span<const sema::Demand> ds, u32 depth) {
+    for (const sema::Demand& d : ds)
+      if (d.variable_type) work.push_back({d, depth});
+  };
+  enqueue(demands, 1);
+  std::set<EntityId> seen;
+  for (std::size_t i = 0; i < work.size(); ++i) {
+    const auto [d, depth] = work[i];
+    // Leave depth-limit diagnostics to the END worklist, with its original demand chain.
+    if (depth > instantiation_limit || !seen.insert(d.spec).second) continue;
+    const auto* inst = variable_instance(d.spec, point, d.variable_type);
+    if (!inst || !inst->cell.diags.empty()) continue;
+    // The initializer's demands inherit the outer point. Their own source locations are kept
+    // for the END worklist and diagnostics in the initializer still refer to its own tokens.
+    enqueue(inst->cell.demands, depth + 1);
+  }
 }
 
 void Program::instantiate_all() {

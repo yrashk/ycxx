@@ -157,10 +157,7 @@ public:
   // The type of variable template specialization `v` at the current point when it is not the
   // template's with the arguments substituted: an explicit specialization's, or a partial
   // specialization's that it is instantiated from ([temp.expl.spec], [temp.spec.partial]).
-  // A potentially evaluated use can also demand a deferred check of its initializer.
-  virtual std::optional<QualType> specialization_type(EntityId /*v*/, bool /*potentially_evaluated*/) {
-    return std::nullopt;
-  }
+  virtual std::optional<QualType> specialization_type(EntityId /*v*/) { return std::nullopt; }
   // Whether normal form `c` is satisfied here ([temp.constr.sat]); none while it is dependent.
   virtual std::optional<bool> satisfied(ConstId /*c*/) { return true; }
   // Whether checking normal form `c`'s satisfaction raised a hard error (an atom not of type
@@ -353,12 +350,13 @@ inline constexpr u16 pattern = 4;       // in a template's or a generic lambda's
 inline constexpr u16 polymorphic_result = 8;  // checked return, without native or interpreter ABI support
 }
 
-// What a cell demands of the program besides its value (query-engine.md §B1.4): a function
-// template specialization whose definition is required ([temp.inst]/8), instantiated at the end
-// of the translation unit (§B6.2).
+// What a cell demands of the program besides its value (query-engine.md §B1.4): a template
+// specialization whose definition is required ([temp.inst]). A variable name carries its
+// substituted declared type so a potentially-constant variable can be instantiated at its use.
 struct Demand {
   EntityId spec;
   ast::Loc at;
+  std::optional<QualType> variable_type = std::nullopt;
 };
 
 class Sema {
@@ -726,8 +724,8 @@ public:
       return {NodeId::none, begin, end};
     }
     EntityId spec = variable_specialization(tmpl.entity, *full);
-    if (auto st = q_->specialization_type(spec, !unevaluated)) t = *st;
-    if (!unevaluated) demands.push_back({spec, ast::Loc{item_, loc_base_ + begin}});
+    if (auto st = q_->specialization_type(spec)) t = *st;
+    if (!unevaluated) demands.push_back({spec, ast::Loc{item_, loc_base_ + begin}, *t});
     ExprInfo info{types().referee(*t), ValueCategory::lvalue, 0};
     return node(ast::DeclRef{info, spec}, begin, end, info);
   }
