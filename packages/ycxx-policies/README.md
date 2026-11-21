@@ -36,6 +36,16 @@ resource and `consume()` when the adapter discharges it. Destruction of a live l
 an operation on a spent state terminates execution. The adapter owns the actual resource and
 implements its cleanup.
 
+```cpp
+#include <ycxx/ownership/runtime.hpp>
+
+int main() {
+  ycxx::ownership::linear_state pending;
+  auto next = static_cast<ycxx::ownership::linear_state&&>(pending);
+  next.consume();
+}
+```
+
 An API can publish metadata in `<ycxx/ownership.hpp>` as reusable `policy<...>` types. Consumers
 activate several fragments with a namespace-scope alias of `use_policy<...>`. The metadata has
 no runtime work. YCXX interprets it when ownership checking is enabled. Use typed template
