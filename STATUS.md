@@ -1943,6 +1943,12 @@ What the process allocates, attributed to the engine's cells, in the trace and t
 - A user-declared copy or move assignment suppresses the implicit move constructor. A move
   assignment also deletes an otherwise implicit copy constructor. The resulting constructor
   availability determines call triviality. [#244](https://github.com/yrashk/ycxx/issues/244)
+- Ordinary namespace-scope non-template classes without bases support copy assignment defaulted
+  on its first in-class declaration. The selected operator preserves its access, source type and
+  any written exception specification. The memberwise body is built on demand, assigns fields
+  in order, and returns `*this`. Deleted copy assignments participate in overload resolution.
+  [Design](docs/design/implicit-copy-assignment.md#first-declaration-defaulted-copy-assignment) ·
+  [#244](https://github.com/yrashk/ycxx/issues/244)
 
 ## Templates, ζ step 9: member function templates (#88, #314, 2026-11-19)
 

@@ -3329,7 +3329,7 @@ public:
     // Prepare that conversion before ranking the reference binding. With competing assignment
     // candidates, their user-defined conversions need to be ranked together.
     if (assignment_notation && lvalue_assignment && args.size() == 1 && recs.size() == 1 &&
-        recs.front()->implicit_assignment == CopyAssignment::trivial) {
+        recs.front()->copy_assignment == CopyAssignment::trivial) {
       const QualType parameter = types().rec(cands.front().type).params.front();
       const QualType target = types().referee(parameter);
       Ex& source = args.front();
@@ -3346,16 +3346,16 @@ public:
     const MemberDeclRec* d = recs[*chosen];
     const Candidate& k = cands[*chosen];
     if (!check_access(bound.cls, d->entity, d->name, bound.name_at, bound.naming)) return fail;
-    const auto implicit = d->implicit_assignment;
-    if (implicit != CopyAssignment::none) {
+    const auto copy_assignment = d->copy_assignment;
+    if (copy_assignment != CopyAssignment::none) {
       QualType ct = types().class_type(bound.cls);
-      if (!usable_copy_assignment(implicit, ct, paren_at)) return fail;
-      if (implicit == CopyAssignment::memberwise &&
+      if (!usable_copy_assignment(copy_assignment, ct, paren_at)) return fail;
+      if (copy_assignment == CopyAssignment::memberwise && !d->explicit_defaulted_assignment &&
           (!lvalue_assignment || args[0].cat() != ValueCategory::lvalue || !same_unqualified(args[0].type(), ct))) {
         diag(paren_at, Diag::unsupported_copy_assignment, ct);
         return fail;
       }
-      if ((implicit != CopyAssignment::trivial || !assignment_notation) &&
+      if ((copy_assignment != CopyAssignment::trivial || !assignment_notation) &&
           !usable_copy_assignment(q_->require_copy_assignment(d->entity), ct, paren_at)) return fail;
     }
     EntityId fe = k.entity;
@@ -3387,7 +3387,7 @@ public:
       return fail;
     }
     Ex o = *object;
-    if (assignment_notation && implicit == CopyAssignment::trivial) {
+    if (assignment_notation && copy_assignment == CopyAssignment::trivial) {
       // The chosen reference argument already designates the source object. Assignment does not
       // initialize a new class value, even when the copy constructor is deleted.
       return node(ast::Assign{info, ast::AssignOp::trivial_class_copy, at(o, begin), children->front(), info.type},
@@ -5892,8 +5892,8 @@ public:
       const auto* copy = cls ? cls->implicit_copy_assignment() : nullptr;
       CopyAssignment state = CopyAssignment::unsupported;
       if (copy && std::ranges::count(cls->members, copy->name, &MemberDeclRec::name) == 1)
-        state = copy->implicit_assignment == CopyAssignment::memberwise ? CopyAssignment::unsupported
-                                                                    : copy->implicit_assignment;
+        state = copy->copy_assignment == CopyAssignment::memberwise ? CopyAssignment::unsupported
+                                                                    : copy->copy_assignment;
       if (!usable_copy_assignment(state, Types::unqualified(l.type()), op_at)) return {NodeId::none, begin, end};
     }
     Ex c = list_init(Types::unqualified(l.type()), b);
