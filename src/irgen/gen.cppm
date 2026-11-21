@@ -1835,7 +1835,9 @@ class Gen {
     ast::QualType jt = glvalue ? facts_.pointer_to(t) : t;
     ValueId cv = rvalue(child(a, c.condition));
     ir::BlockId then_b = new_block(), else_b = new_block();
-    ir::BlockId join = has_value ? new_block({jt}) : new_block();
+    const bool bit_field_result = glvalue && c.info.bit_width != 0;
+    ir::BlockId join = has_value && !bit_field_result ? new_block({jt}) : new_block();
+    Place bit_field{};
     cond_br(cv, edge(then_b), edge(else_b));
     for (auto [blk, arm] : {std::pair{then_b, c.then_}, std::pair{else_b, c.else_}}) {
       enter(blk);
@@ -1849,14 +1851,23 @@ class Gen {
         discard(x);
         emit(ir::Op::unreachable, {}, {});
         live_ = false;
+      } else if (glvalue) {
+        Place place = lvalue(x);
+        if (bit_field_result) {
+          // The only arm that reaches the join owns the enclosing record pointer.
+          bit_field = place;
+          br(join);
+        } else {
+          br(join, {place.ptr});
+        }
       } else {
-        ValueId v = glvalue ? address(x) : rvalue(x);
-        br(join, {v});
+        br(join, {rvalue(x)});
       }
       --branches_;
     }
     enter(join);
     if (!has_value) return {};
+    if (bit_field_result) return {std::nullopt, bit_field};
     ValueId v = b_.param(join, 1);
     return {glvalue ? std::nullopt : std::optional(v), {v, t}};
   }
