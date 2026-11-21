@@ -5183,6 +5183,8 @@ public:
       }
       return convert(e, to, at_);
     }
+    // [expr.static.cast]: a cast to a class can directly initialize it with an explicit constructor.
+    if (types().is_class(target) && has_user_ctors(target)) return construct(target, {e}, e.begin, e.end);
     if (types().is_class(target) || types().is_array(target)) return convert(e, to, at_);
     if (named_static_cast && types().is_class(e.type()))
       if (auto cast = exact_conversion_cast(e, target, at_)) return *cast;
@@ -6569,7 +6571,7 @@ public:
     return std::nullopt;
   }
 
-  // A class reference parameter binds directly to a single reference-related expression.
+  // A class reference binds directly to a single reference-related expression.
   // Otherwise the list initializes a prvalue of the referenced class ([dcl.init.list]); the
   // materialized object lives until the end of the call's full-expression ([class.temporary]).
   Ex class_reference_list_init(QualType parameter, const Braced& list, bool extend,
