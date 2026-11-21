@@ -811,8 +811,9 @@ clauses = ['expr.type.conv']
 std = 'C++23'
 ftm = '__cpp_auto_cast'
 detect = '(?<![\w>])auto\s*[({]\s*[\w*&]'
-status = 'missing'
+status = 'partial'
 issues = [286]
+note = 'Concrete single-expression scalar and pointer decay-copy works in parentheses and braces, including bit-field reads and array and function decay. General class objects, member pointers, dependent expressions and some template-argument contexts remain.'
 probe = '''
 int main() { int a = 1; auto b = auto(a); return b - 1; }
 '''
@@ -1466,7 +1467,8 @@ probe = '''
 struct alignas(16) A { char c; };
 int main() { alignas(8) char b[3]; return (alignof(A) == 16 && sizeof(A) == 16 && sizeof b == 3) ? 0 : 1; }
 '''
-status = 'missing'
+status = 'partial'
+note = 'concrete class-head requests up to 16 bytes on ordinary namespace-scope classes and structs, with their effect on layout and storage. Member and variable alignment remain open.'
 issues = [303]
 
 [[feature]]

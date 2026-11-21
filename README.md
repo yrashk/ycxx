@@ -44,6 +44,9 @@ tools/build
 build/bin/ycxx cxx hello.cpp -o hello && ./hello
 ```
 
+Concrete `auto(x)` and `auto{x}` decay-copy expressions support scalar and pointer values,
+including array and function decay. [#286](https://github.com/yrashk/ycxx/issues/286)
+
 **Preprocess binary resources.** Both targets support `#embed` and `__has_embed` with the standard
 parameters. [#125](https://github.com/yrashk/ycxx/issues/125)
 
@@ -167,6 +170,9 @@ conversion function for an exact non-class value type, including ordinary `&`- a
 
 Both targets accept leading `[[…]]` attributes on ordinary data and function member declarations.
 [#190](https://github.com/yrashk/ycxx/issues/190)
+
+Ordinary named namespace-scope classes and structs support class-head `alignas` requests up to
+16 bytes. The alignment applies to layout and storage on both targets. [#303](https://github.com/yrashk/ycxx/issues/303)
 
 Both targets accept nonempty standalone unnamed enum definitions at namespace scope, including
 fixed underlying types and definitions inside `extern "C"` blocks.
