@@ -7244,8 +7244,9 @@ public:
                 if (free_fn.params.size() != 2) return false;
                 const auto free_receiver = ics(operands[0], free_fn.params[0]);
                 const auto free_argument = ics(operands[1], free_fn.params[1]);
-                return !free_receiver.viable || !free_argument.viable ||
-                       (member_receiver < free_receiver && !(free_argument < member_argument));
+                if (!free_receiver.viable || !free_argument.viable) return true;
+                return !(free_receiver < member_receiver) && !(free_argument < member_argument) &&
+                       (member_receiver < free_receiver || member_argument < free_argument);
               }))
             return ref_qualified_member;
         }
