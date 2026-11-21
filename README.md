@@ -186,7 +186,8 @@ member declaration, including scoped enum field initializers. [#500](https://git
 Automatic declarations of ordinary non-template classes with only scalar fields and no bases
 or unions can use default member initializers in `S s;` and `S s{…};`. A default runs in
 declaration order and can call a function or read an earlier field through `this`. An explicit
-initializer takes precedence.
+initializer takes precedence. The same rules apply to ordinary non-inline namespace objects,
+whose dynamic initialization runs in definition order.
 [#118](https://github.com/yrashk/ycxx/issues/118)
 
 Automatic declarations such as `Point p(3, 4);` can initialize flat aggregates with public

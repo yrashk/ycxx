@@ -1022,7 +1022,9 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   ([class.mem.general], [expr.prim.this], [dcl.init.aggr], #118).
 - Required constant evaluation checks the scalar initializers and retains their values when
   evaluation succeeds. Constant evaluation of destination member reads remains in #25.
-  Static storage, dependent forms, other member types and exceptional cleanup remain in #118.
+  Ordinary non-inline namespace definitions reuse this replay with zero-initialized storage
+  and startup initialization in definition order. Block statics, inline and dependent forms,
+  other member types and exceptional cleanup remain in #118.
   The fixtures in `tests/own/classes/scalar-default-member-init/` cover both targets in syntax
   checks and native Linux x86-64 execution.
 
@@ -2569,7 +2571,7 @@ and runtime integration with ycxx's own linker remain under [#89]. See the
 - Remaining reference cases include function bindings, lifetime extension, guarded statics and
   class or base subobject addresses outside the constant evaluator's model (#25, #367).
 - Not yet: inline variables and variable templates (#368);
-  default member initializers that are not constants (#118); array construction as a loop (#370).
+  remaining nonconstant default member initializer forms (#118); array construction as a loop (#370).
 - Tests: `tests/own/dynamic-init/` (spec-only), including a Clang peer with its own initializers
   in `peer.run.cpp`. The Linux executable test runs the scalar reference fixtures with internal
   linkage and checks their ELF relocations.
