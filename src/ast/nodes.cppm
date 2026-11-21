@@ -148,11 +148,11 @@ struct DeleteArray {
   [[=sequenced]] Child operand;
 };
 
-// A call of a built-in function whose value is computed, not a constant (`lex::BuiltinFunction`:
-// `__builtin_fabs(x)`), its arguments converted to its parameters' types (docs/EXTENSIONS.md).
+// Built-in functions that compute their result during evaluation (docs/EXTENSIONS.md).
+enum class BuiltinOp : u8 { fabs, strlen };
 struct BuiltinCall {
   ExprInfo info;
-  u8 function;  // a lex::BuiltinFunction
+  BuiltinOp op;
   [[=indeterminately_sequenced]] ChildList args;
 };
 

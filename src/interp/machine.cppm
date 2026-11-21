@@ -153,7 +153,7 @@ private:
   // `constant`: a global's initial value, the ConstId in `v.bits`, decoded when first read.
   enum class Fill : u8 { indeterminate, erroneous, value, constant };
   enum class Origin : u8 { automatic, global, literal };
-  enum class Use : u8 { read, write, lifetime };
+  enum class Use : u8 { read, callee_read, write, lifetime };
   enum class Kind : u8 { integer, pointer, array, function, floating, other };
 
   struct Cell {
@@ -512,7 +512,7 @@ Machine::Flow Machine::locate(const Value& p, std::span<const u64> extra, QualTy
   if (use == Use::lifetime) return Flow::next;
   for (u32 c = pl->cell0; c < pl->cell0 + pl->ncells; ++c) {
     Life life = cells_[c].life;
-    if (life == Life::after || (use == Use::read && life == Life::before)) return fail(Reason::outside_lifetime);
+    if (life == Life::after || (use != Use::write && life == Life::before)) return fail(Reason::outside_lifetime);
   }
   if (use == Use::write) {
     if (ob.read_only) return fail(Reason::modify_const);
@@ -523,7 +523,7 @@ Machine::Flow Machine::locate(const Value& p, std::span<const u64> extra, QualTy
   } else if (config_.mode == Mode::constant && !ob.usable) {
     return fail(Reason::not_usable);
   }
-  return note_access(*pl, use == Use::write);
+  return use == Use::callee_read ? Flow::next : note_access(*pl, use == Use::write);
 }
 
 // Records an access in the frame's open unsequenced groups, and reports a conflict with another

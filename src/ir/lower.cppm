@@ -697,7 +697,7 @@ class Lowering {
         if (!vt) return fail(vt.error());
         QualType base = layout(cxx(f_.operands_of(n)[1])).pointee;
         ValueId p = add_offset(in(n, 1), offset(base, path_at(imms, 1)));
-        ValueId v = emit1(Op2::load, memory_type(*vt), {in(n, 0), p}, {imms[0]}, nd.flags);
+        ValueId v = emit1(Op2::load, memory_type(*vt), {in(n, 0), p}, {imms[0]}, nd.flags & bit(Flag::volatile_));
         if (*vt == T::i1) v = emit1(Op2::trunc, T::i1, {v});
         out(n, 0, v);
         return {};

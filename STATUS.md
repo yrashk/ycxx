@@ -1612,6 +1612,16 @@ hit the ordinary address-of limitation. The tests in `tests/own/builtins/` cover
 address operators, dependent wrappers, qualified operands, constant evaluation on a scalar
 global, and a rejected rvalue.
 
+## String length builtin (#531)
+
+`__builtin_strlen` supports unqualified direct calls with one argument implicitly converted to
+`const char*`. The result type matches `sizeof`. The interpreter and native targets share a byte
+scan that evaluates the argument once and stops at the first zero. The interpreter keeps the
+scan's reads indeterminately sequenced with the caller's other evaluations ([intro.execution])
+and diagnoses reads past the end of an unterminated array in a required constant expression
+([expr.const]). Native lowering requires no runtime `strlen` symbol. Fixtures in
+`tests/own/builtins/` cover detection, result type, argument checks, and constant and runtime scans.
+
 ## Templates, ζ step 6: concepts and `if constexpr` (#88, 2026-11-18)
 
 Fable decided the representation (ast.md §6.6); the Opus session wrote the code.

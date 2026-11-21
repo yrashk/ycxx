@@ -209,7 +209,7 @@ class Gen {
     bool v = (std::to_underlying(ast::cv_of(in_.canonical(t))) & 2) != 0;
     return v ? ir::bit(ir::Flag::volatile_) : ir::Flags(0);
   }
-  ValueId load(const Place& p) {
+  ValueId load(const Place& p, ir::Flags flags = 0) {
     ir::Ty r[] = {vty(p.type)};
     ValueId ops[] = {state_, p.ptr};
     if (p.bit_field) {
@@ -217,7 +217,7 @@ class Gen {
       return b_.result(emit(ir::Op::bit_field_load, r, ops, imms));
     }
     std::uint64_t imms[] = {word(ty(p.type)), 0};  // the type, then an empty path
-    return b_.result(emit(ir::Op::load, r, ops, imms, access_flags(p.type)));
+    return b_.result(emit(ir::Op::load, r, ops, imms, access_flags(p.type) | flags));
   }
   void store(const Place& p, ValueId v) {
     ValueId ops[] = {p.ptr, v};
@@ -1301,9 +1301,15 @@ class Gen {
     if (is<ast::Call>(a)) return call(a);
     if (member_call_expression(a)) return member_call(a);
     if (is<ast::VariadicBuiltin>(a)) return variadic_builtin(a);
-    if (is<ast::BuiltinCall>(a)) {  // `__builtin_fabs` (lex::BuiltinFunction::fabs), the one there is
+    if (is<ast::BuiltinCall>(a)) {
       auto b = get<ast::BuiltinCall>(a);
-      return pure(ir::Op::fabs, t, {rvalue(child(a, *ast_.children(b.args).begin()))});
+      At arg = child(a, ast_.children(b.args)[0]);
+      ValueId value = rvalue(arg);
+      switch (b.op) {
+        case ast::BuiltinOp::fabs: return pure(ir::Op::fabs, t, {value});
+        case ast::BuiltinOp::strlen: return string_length(t, info(arg).type, value);
+      }
+      std::unreachable();
     }
     if (is<ast::This>(a)) {
       if (!this_) unsupported(a, "outside a non-static member function");
@@ -1312,6 +1318,23 @@ class Gen {
     if (is<ast::Conditional>(a)) return conditional(a, false).value;
     if (is<ast::ValueInit>(a) && cls(t) != TypeClass::record && cls(t) != TypeClass::array) return zero(t);
     unsupported(a);
+  }
+
+  ValueId string_length(ast::QualType size, ast::QualType pointer, ValueId start) {
+    ast::QualType element = facts_.pointee(pointer);
+    ir::BlockId head = new_block({pointer, size}), advance = new_block(), done = new_block({size});
+    br(head, {start, int_constant(size, 0)});
+    enter(head);
+    ValueId current = b_.param(head, 1), length = b_.param(head, 2);
+    ValueId byte = load({current, element}, ir::bit(ir::Flag::call_body));
+    ValueId zero = pure(ir::Op::icmp, facts_.bool_type(), {byte, int_constant(element, 0)}, {word(ir::Pred::eq)});
+    cond_br(zero, edge(done, {length}), edge(advance));
+    enter(advance);
+    ValueId one = int_constant(size, 1);
+    ValueId next = pure(ir::Op::ptr_add, pointer, {current, one}, {word(ty(element))});
+    br(head, {next, pure(ir::Op::add, size, {length, one})});
+    enter(done);
+    return b_.param(done, 1);
   }
 
   std::optional<ValueId> variadic_builtin(At a) {
