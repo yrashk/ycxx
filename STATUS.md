@@ -1260,8 +1260,10 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
 - A nondependent call in a template uses its lexical lookup point. Dependent calls also use the
   existing point of instantiation ([temp.dep.candidate]). Per-name incremental scheduling
   remains under #16.
+- Supported ordinary free binary operators use the full ADL association set, including base
+  namespaces and hidden friends. Namespace using-directives do not contribute candidates.
 - Remaining work in #165 includes declarations of functions in blocks, exact lookup for
-  operators, member templates as template arguments, dependent-call template argument associations,
+  other operators, member templates as template arguments, dependent-call template argument associations,
   overload-set arguments and complete unqualified template-id lookup.
 - Tests: `tests/own/argument-dependent-lookup/` and `tests/own/range-for/adl*.run.cpp`.
 

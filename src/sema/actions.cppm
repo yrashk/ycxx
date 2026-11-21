@@ -6852,28 +6852,21 @@ public:
     for (const auto& o : own)
       if (o.name == name) add(o.sema);
     for (DeclId d : q_->visible_decls(name, directives())) add(q_->decl_sema(d));
-    bool found_hidden_friend = false;
     if (operands.size() == 2 && std::ranges::contains(binary_spellings, op)) {
       auto associations = adl_associations(operands, /*at_instantiation=*/false, /*ordinary_call=*/true);
-      std::size_t ordinary = set.size();
       for_each_associated_friend(associations, name, /*at_instantiation=*/false, add);
-      found_hidden_friend = set.size() != ordinary;
-      // Rank a hidden friend against candidates from the same ADL association set.
-      if (found_hidden_friend)
-        for (EntityId ns : associations.namespaces)
-          for (const ast::DeclSema& d : q_->adl_functions(ns, name, /*at_instantiation=*/false)) add(d);
-    }
-    if (!found_hidden_friend)
+      for (EntityId ns : associations.namespaces)
+        for (const ast::DeclSema& d : q_->adl_functions(ns, name, /*at_instantiation=*/false)) add(d);
+    } else {
       for (const Ex& o : operands)
         if (auto ns = associated_namespace(o.type())) {
-          // The mixed-candidate check needs ADL, which ignores using-directives
-          // in associated namespaces. Preserve the older lookup for other operators.
           if (ref_qualified_member) {
             for (const ast::DeclSema& d : q_->adl_functions(*ns, name, /*at_instantiation=*/false)) add(d);
           } else {
             for (const ast::DeclSema& d : q_->namespace_members(*ns, name)) add(d);
           }
         }
+    }
     if (set.empty()) return ref_qualified_member;
     ExprInfo info{builtin(Builtin::overload_set), ValueCategory::lvalue, 0};
     Ex callee = node(ast::DeclRef{info, set.front().entity}, begin, begin, info);
