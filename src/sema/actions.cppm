@@ -109,6 +109,7 @@ public:
   virtual bool is_complete(EntityId c) = 0;
   // A concrete source query keeps its original position if its tokens are read again.
   virtual bool is_complete_at_source(EntityId c) { return is_complete(c); }
+  virtual bool class_layout_uncertain(EntityId /*cls*/) { return false; }
   virtual engine::Loc source_loc(engine::Loc loc, u32) { return loc; }
   // Only a base or initializer with an owning replay can retain this dependent pattern.
   virtual bool in_type_trait_pattern() const { return false; }
@@ -6221,6 +6222,15 @@ public:
     return types().is_integral(t) || types().is_pointer(t);
   }
 
+  bool checking_class_alignment = false;
+  struct ClassAlignmentOperand {
+    bool& checking;
+    bool saved;
+    explicit ClassAlignmentOperand(Sema& s)
+        : checking(s.checking_class_alignment), saved(std::exchange(checking, true)) {}
+    ~ClassAlignmentOperand() { checking = saved; }
+  };
+
   // `sizeof` and `alignof` of a type ([expr.sizeof], [expr.alignof]), a `size_t` prvalue; zero
   // after a diagnostic.
   Ex size_of(QualType t, bool align, u32 begin, u32 end) {
@@ -6235,11 +6245,19 @@ public:
       else diag(begin, Diag::not_supported, align ? lex::Tk::kw_alignof : lex::Tk::kw_sizeof);
       return {NodeId::none, begin, end};
     }
+    if (checking_class_alignment) {
+      const QualType element = types().innermost_array_element(t);
+      if (types().is_class(element) && q_->class_layout_uncertain(types().class_of(element))) {
+        diag(begin, Diag::class_alignment_uncertain_layout);
+        return {NodeId::none, begin, end};
+      }
+    }
     return literal(st, w_->values.integer(st, *n), ValueCategory::prvalue, begin, end);
   }
   // A complete object type's size or alignment: from the target, and for a class by
   // `ast::record_layout` over its members' (#194), the rule the back end lays it out by.
   std::optional<u64> layout_of(QualType t, bool align) {
+    if (align) t = types().innermost_array_element(t);  // [expr.alignof]: an array's element alignment
     auto p = place_of(t);
     if (!p) return std::nullopt;
     return align ? p->align : p->size;
@@ -6277,22 +6295,28 @@ public:
   std::optional<ast::RecordLayout> class_layout(EntityId ce) {
     if (auto it = class_places_.find(std::to_underlying(ce)); it != class_places_.end()) return it->second;
     const ClassRec* c = is_complete(types().class_type(ce)) ? class_rec(ce) : nullptr;
-    if (!c || (c->layout_requires_virtual_support && c->peer_virtual_layout == PeerVirtualLayout::none))
-      return std::nullopt;
+    if (!c) return std::nullopt;
+    auto layout = record_layout(*c, ce);
+    if (layout) class_places_.emplace(std::to_underlying(ce), *layout);
+    return layout;
+  }
+  // Also used on a class about to be published, before its own alignment has been applied.
+  std::optional<ast::RecordLayout> record_layout(const ClassRec& c, EntityId ce) {
+    if (c.layout_requires_virtual_support && c.peer_virtual_layout == PeerVirtualLayout::none) return std::nullopt;
     std::vector<ast::Placed> bases, places;
-    for (const BaseRec& b : c->bases) {
+    for (const BaseRec& b : c.bases) {
       auto m = place_of(types().class_type(b.cls));
       if (!m) return std::nullopt;
       bases.push_back(*m);
     }
-    for (const FieldRec& f : c->fields) {
+    for (const FieldRec& f : c.fields) {
       auto m = place_of(f.type);
       if (!m) return std::nullopt;
       m->bit_width = f.bit_width;
       places.push_back(*m);
     }
-    const ast::Target* root = c->peer_virtual_layout == PeerVirtualLayout::root ? &w_->target : nullptr;
-    return class_places_[std::to_underlying(ce)] = ast::record_layout(bases, places, c->union_, c->pod, std::to_underlying(ce), root);
+    const ast::Target* root = c.peer_virtual_layout == PeerVirtualLayout::root ? &w_->target : nullptr;
+    return ast::record_layout(bases, places, c.union_, c.pod, std::to_underlying(ce), root, c.explicit_alignment);
   }
   std::map<u32, ast::RecordLayout> class_places_;  // complete classes' layouts
 

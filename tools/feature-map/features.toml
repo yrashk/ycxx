@@ -1467,7 +1467,8 @@ probe = '''
 struct alignas(16) A { char c; };
 int main() { alignas(8) char b[3]; return (alignof(A) == 16 && sizeof(A) == 16 && sizeof b == 3) ? 0 : 1; }
 '''
-status = 'missing'
+status = 'partial'
+note = 'concrete class-head requests up to 16 bytes on ordinary namespace-scope classes and structs, with their effect on layout and storage. Member and variable alignment remain open.'
 issues = [303]
 
 [[feature]]

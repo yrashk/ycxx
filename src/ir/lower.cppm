@@ -55,6 +55,7 @@ export struct TypeLayout {
   // Records: the bits of each INTEGER eightbyte in the supported AMD64 slice, zero otherwise.
   std::uint8_t sysv_integer_eightbytes = 0;
   bool copy_abi_unknown = false;  // records whose defaulted copy has unresolved triviality
+  bool contains_explicit_alignment = false;  // a class-head requirement raises this object or a subobject's alignment
 };
 
 export struct SubObject {
@@ -435,7 +436,10 @@ class Lowering {
       ++j;
       if (result || byval) {
         QualType pc = layout(cxx(p)).pointee;
-        if (layout(pc).copy_abi_unknown) return fail("defaulted copy ABI classification is unavailable");
+        const TypeLayout object = layout(pc);
+        if (object.copy_abi_unknown) return fail("defaulted copy ABI classification is unavailable");
+        if (!config_.sysv_amd64 && object.contains_explicit_alignment)
+          return fail("AArch64 Darwin ABI: explicitly aligned classes by value are not supported yet");
         if (ignored(pc)) {  // passed by nothing: an object of this frame stands for it
           objects.push_back({p, 0, result, {}});
           l2_of.push_back(-1);
@@ -844,7 +848,10 @@ class Lowering {
           QualType c{};
           if (class_arg || class_result) {
             c = layout(cxx(l1ops[i])).pointee;
-            if (layout(c).copy_abi_unknown) return fail("defaulted copy ABI classification is unavailable");
+            const TypeLayout object = layout(c);
+            if (object.copy_abi_unknown) return fail("defaulted copy ABI classification is unavailable");
+            if (!config_.sysv_amd64 && object.contains_explicit_alignment)
+              return fail("AArch64 Darwin ABI: explicitly aligned classes by value are not supported yet");
             // An empty class passes nothing, and returns nothing.
             if (ignored(c)) continue;
           }

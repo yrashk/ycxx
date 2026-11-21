@@ -1949,6 +1949,13 @@ Fable decided the representation (ast.md §6.7); the Opus session wrote the code
   nested classes cost linear time.
 - Bases, a vptr and empty-base placement extend `record_layout`'s input when inheritance and
   virtual functions arrive.
+- Ordinary named namespace-scope class heads accept concrete `alignas` values and type operands
+  for requests up to 16 bytes ([dcl.align]). Repeated requests use their strictest value. The
+  definition checks annotated forwards, natural member and base alignment, and layout attributes
+  whose effect is unresolved. Both layout consumers apply the validated value to object size,
+  array stride, containing records and storage. Darwin diagnoses by-value use when the class or
+  a contained value has strengthened alignment. Variable and member alignment, wider requests,
+  and further ABI cases remain in [#303](https://github.com/yrashk/ycxx/issues/303).
 - Tests: `tests/own/classes/s7-sizeof-class.accept.cpp` (padding, nesting, arrays, unions,
   references, empty and template classes), `s7-sizeof-incomplete.reject.cpp`,
   `s7-sizeof-deep.run.cpp` (22 levels of nesting), `tests/own/abi/sizeof-class.run.cpp` (agrees

@@ -171,6 +171,9 @@ conversion function for an exact non-class value type, including ordinary `&`- a
 Both targets accept leading `[[…]]` attributes on ordinary data and function member declarations.
 [#190](https://github.com/yrashk/ycxx/issues/190)
 
+Ordinary named namespace-scope classes and structs support class-head `alignas` requests up to
+16 bytes. The alignment applies to layout and storage on both targets. [#303](https://github.com/yrashk/ycxx/issues/303)
+
 Both targets accept nonempty standalone unnamed enum definitions at namespace scope, including
 fixed underlying types and definitions inside `extern "C"` blocks.
 [#157](https://github.com/yrashk/ycxx/issues/157)
