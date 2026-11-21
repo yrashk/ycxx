@@ -1643,6 +1643,13 @@ std::optional<NodeId> AtItem::replay_default_member(sema::Sema& caller, EntityId
 }
 
 
+// [dcl.fct]/5: array and function parameter types can need adjustment after substitution.
+QualType adjusted_parameter_type(sema::Types& types, QualType type) {
+  if (types.is_array(type)) return types.add_cv(types.pointer(types.rec(type).inner), sema::Types::cv(type));
+  if (types.is_function(type)) return types.pointer(type);
+  return type;
+}
+
 std::optional<NodeId> AtItem::replay_function_default(sema::Sema& caller, const ast::DefaultArg& value,
                                                        EntityId function, QualType parameter) {
   const auto specialization = p_->world().entities.rec(function);
@@ -1661,6 +1668,7 @@ std::optional<NodeId> AtItem::replay_function_default(sema::Sema& caller, const 
   source.instantiation_calls = seqs.elements(value.dependent_calls);
   sema::Sema replay(p_->world(), caller.builder(), source, caller.diagnostics(), value.source, 0);
   replay.unevaluated = caller.unevaluated;
+  replay.immediate_context = caller.immediate_context || caller.is_consteval(function);
   const auto params = seqs.elements(decl->template_params);
   if (params.empty()) return std::nullopt;
   replay.template_scopes.push_back(params);
@@ -1675,9 +1683,9 @@ std::optional<NodeId> AtItem::replay_function_default(sema::Sema& caller, const 
   if (default_param == written_params.end()) return std::nullopt;
   for (const auto& param : std::ranges::subrange(written_params.begin(), default_param + 1)) {
     if (param.name == replay.no_name()) continue;
-    auto type = replay.templates().substitute(param.type, replay.template_args);
+    const auto type = replay.templates().substitute(param.type, replay.template_args);
     if (!type) return std::nullopt;
-    replay.declare_local(param.name, *type,
+    replay.declare_local(param.name, adjusted_parameter_type(replay.types(), *type),
                          sema::local_flag::parameter | sema::local_flag::default_argument_parameter, 0, false);
   }
 
@@ -8017,8 +8025,7 @@ const Program::Instance* Program::instance(EntityId spec, u32 point) {
   // parameter for each element ([temp.variadic]/8).
   sema::Types& ty = w_->types;
   auto adjusted = [&](ast::ParamSema p) {
-    if (ty.is_array(p.type)) p.type = ty.add_cv(ty.pointer(ty.rec(p.type).inner), sema::Types::cv(p.type));
-    else if (ty.is_function(p.type)) p.type = ty.pointer(p.type);
+    p.type = adjusted_parameter_type(ty, p.type);
     return p;
   };
   for (ast::ParamSema p : w_->ins.seqs.elements(tmpl.params)) {
