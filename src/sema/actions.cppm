@@ -234,6 +234,8 @@ namespace expr_flag {
 inline constexpr u8 dependent = 1;
 inline constexpr u8 immediate_address = 2;  // checked after immediate invocations are folded
 inline constexpr u8 unrepresented_value = 4;  // this expression has no usable ConstId for a template argument
+inline constexpr u8 deferred_decay_copy = 8;  // a decay-copy still needs function body replay
+inline constexpr u8 type_dependent = 16;  // the producer proved dependence even without a structural type
 }
 
 // Flags of `LocalRec::flags` and `DeclSema::flags`.
@@ -2584,6 +2586,12 @@ public:
   bool dependent(const Ex& e) {
     return e.ok() && ((e.info.flags & expr_flag::dependent) || types().is_dependent(e.type()));
   }
+  // `Builtin::dependent` also stands in for types of expressions whose values alone depend on
+  // a template argument. Only a structural type or its expression's producer proves dependence.
+  bool has_proven_dependent_type(const Ex& e) {
+    return (e.info.flags & expr_flag::type_dependent) ||
+           (types().is_dependent(e.type()) && templates().structural_operand(e.type()));
+  }
   bool dependent(const TemplateArg& a) {
     return w_->arg_dependent(a);
   }
@@ -2599,18 +2607,22 @@ public:
     });
   }
   // A dependent construct over `ops` in [begin, end): of type `t` when only its value depends on
-  // a template parameter, else of the dependent type.
+  // a template parameter, else of the dependent type. Preserve any decay-copy that still
+  // needs replay before the expression can supply a canonical value.
   Ex dependent_node(std::span<const Ex> ops, u32 begin, u32 end, std::optional<QualType> t = std::nullopt,
-                    ValueCategory cat = ValueCategory::prvalue) {
+                    ValueCategory cat = ValueCategory::prvalue, u8 flags = 0) {
     std::vector<Child> cs;
     for (const Ex& o : ops)
-      if (o.ok()) cs.push_back({o.id, o.begin >= begin ? o.begin - begin : 0});
-    ExprInfo info{t ? *t : builtin(Builtin::dependent), cat, expr_flag::dependent};
+      if (o.ok()) {
+        cs.push_back({o.id, o.begin >= begin ? o.begin - begin : 0});
+        flags |= o.info.flags & expr_flag::deferred_decay_copy;
+      }
+    ExprInfo info{t ? *t : builtin(Builtin::dependent), cat, u8(expr_flag::dependent | flags)};
     return node(ast::Dependent{info, b_->list(cs)}, begin, end, info);
   }
   Ex dependent_node(std::initializer_list<Ex> ops, u32 begin, u32 end, std::optional<QualType> t = std::nullopt,
-                    ValueCategory cat = ValueCategory::prvalue) {
-    return dependent_node(std::span<const Ex>(ops.begin(), ops.size()), begin, end, t, cat);
+                    ValueCategory cat = ValueCategory::prvalue, u8 flags = 0) {
+    return dependent_node(std::span<const Ex>(ops.begin(), ops.size()), begin, end, t, cat, flags);
   }
   // The offsets of the unqualified calls whose candidates depend on the arguments, in a template's
   // definition ([temp.dep.candidate]); an instantiation adds argument-dependent lookup at its point.
@@ -5956,22 +5968,38 @@ public:
     return convert_node(e, ast::ConversionKind::lvalue_to_rvalue, Types::unqualified(t));
   }
 
-  // [expr.type.conv], [dcl.type.auto.deduct]: concrete scalar decay-copy.
-  Ex decay_copy(Ex operand, u32 at_) {
+  // [expr.type.conv], [dcl.type.auto.deduct]: scalar decay-copy.
+  Ex decay_copy(Ex operand, u32 begin, u32 end, bool replay_body) {
     if (!operand.ok()) return operand;
-    if (!dependent(operand)) {
+    const auto supported = [&](QualType type) {
+      return types().is_scalar(type) && !types().is_member_pointer(type);
+    };
+    if (dependent(operand)) {
+      if (replay_body) {
+        // [temp.dep.expr]: a value-dependent operand can still determine the prvalue type.
+        // [temp.deduct.call]: decay the operand's type without evaluating or converting it.
+        std::optional<QualType> type;
+        if (!types().is_dependent(operand.type())) type = ast::adjust_parameter(ins(), types().canonical(operand.type()));
+        if (type ? supported(*type) : has_proven_dependent_type(operand)) {
+          // The tokens will be replayed. This node supplies no canonical template argument value.
+          u8 flags = expr_flag::unrepresented_value | expr_flag::deferred_decay_copy;
+          if (!type) flags |= expr_flag::type_dependent;
+          return dependent_node({operand}, begin, end, type, ValueCategory::prvalue, flags);
+        }
+      }
+    } else {
       if (types().is_array(operand.type()) && !operand.glvalue())
         operand = materialize(operand, operand.type(), false);
       Ex value = rvalue(operand);
       if (!value.ok()) return value;
       QualType type = Types::unqualified(value.type());
-      if (types().is_scalar(type) && !types().is_member_pointer(type)) {
+      if (supported(type)) {
         if (value.info.bit_width)
           return convert_node(value, ast::ConversionKind::integral, type);
-        return convert(value, type, at_);
+        return convert(value, type, begin);
       }
     }
-    diag(at_, Diag::not_supported, lex::Tk::kw_auto);
+    diag(begin, Diag::not_supported, lex::Tk::kw_auto);
     return {NodeId::none, operand.begin, operand.end};
   }
 
@@ -6623,8 +6651,10 @@ public:
     }
     Ex pointer = rvalue(operand);
     if (!pointer.ok()) return fail;
+    const EntityId f = w_->allocation_function(AllocationFunction::deallocate, /*array=*/true).entity;
+    q_->use_allocation_function(f);
     ExprInfo info{v, ValueCategory::prvalue, 0};
-    return node(ast::DeleteArray{info, at(pointer, begin)}, begin, end, info);
+    return node(ast::DeleteArray{info, f, at(pointer, begin)}, begin, end, info);
   }
 
   bool scalar_allocation_type(QualType t) {
@@ -7258,9 +7288,16 @@ public:
     using enum ast::UnaryOp;
     if (!e.ok()) return {NodeId::none, begin, end};
     if (dependent(e)) {
-      if (op != not_) return dependent_node({e}, begin, end);
-      ExprInfo info{builtin(Builtin::dependent), ValueCategory::prvalue, expr_flag::dependent};
-      return node(ast::Unary{info, op, at(e, begin)}, begin, end, info);
+      if (op == not_) {
+        const u8 flags = expr_flag::dependent | (e.info.flags & expr_flag::deferred_decay_copy);
+        ExprInfo info{builtin(Builtin::dependent), ValueCategory::prvalue, flags};
+        return node(ast::Unary{info, op, at(e, begin)}, begin, end, info);
+      }
+      // [temp.dep.expr]: for a genuinely type-dependent operand, even selecting the increment
+      // operator can require replay. The result need not have the operand's type.
+      const bool increment = op == pre_inc || op == pre_dec || op == post_inc || op == post_dec;
+      const u8 flags = increment && has_proven_dependent_type(e) ? expr_flag::type_dependent : 0;
+      return dependent_node({e}, begin, end, std::nullopt, ValueCategory::prvalue, flags);
     }
     static constexpr std::string_view unary_spellings[] = {"+", "-", "!", "~", "*", "&", "++", "--", "", ""};
     if (std::string_view sp = unary_spellings[std::to_underlying(op)]; !sp.empty())
