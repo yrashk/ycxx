@@ -253,8 +253,10 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
   x86-64 back-end work waited for CI round trips.
   - Do: build an image once, `FROM gcc:16` with `ninja-build cmake python3 git rsync`, with
     `docker build --platform linux/amd64`. Run it with `--platform linux/amd64`, the worktree
-    mounted read-only and a named volume for the build. In the container, `rsync -a --delete
-    --exclude /build --exclude .git` the tree into the volume, then run `cmake -S . -B
+    mounted read-only and a named volume for the build. In the container, `rsync -rlD --checksum --delete
+    --exclude /build --exclude .git` the tree into the volume (not `-a`: kept modification
+    times older than the build's outputs make Ninja skip changed files when you switch
+    worktrees), then run `cmake -S . -B
     /vol/build -G Ninja` and `cmake --build`, not `tools/build`, whose submodule sync cannot see a
     worktree's `.git`. Run CTest fixtures (`ctest -R unit.linux_…`) there. The first build
     took about 25 minutes under Rosetta, and incremental ones take a few.
