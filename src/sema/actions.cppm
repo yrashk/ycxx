@@ -7423,7 +7423,15 @@ public:
     std::size_t n = diag_count();
     std::optional<Ex> ref_qualified_member;
     QualType lt = types().referee(operands[0].type());
-    if (types().is_class(lt))
+    const bool unary_minus = operands.size() == 1 && op == "-" && types().is_class(lt);
+    std::vector<ast::DeclSema> unary_friends;
+    if (unary_minus) {
+      auto associations = adl_associations(operands, /*at_instantiation=*/false, /*ordinary_call=*/true);
+      for_each_associated_friend(associations, name, /*at_instantiation=*/false, [&](const ast::DeclSema& d) {
+        if (types().rec(d.type).params.size() == 1) unary_friends.push_back(d);
+      });
+    }
+    if (types().is_class(lt) && unary_friends.empty())
       if (const ClassRec* c = class_rec(types().class_of(lt));
           c && std::ranges::any_of(c->members, [&](const MemberDeclRec& m) { return m.name == name && m.is_function && !m.is_static; })) {
         Ex m = member(operands[0], false, name, operands[0].end, op_at, op_at);
@@ -7450,6 +7458,7 @@ public:
     for (const auto& o : own)
       if (o.name == name) add(o.sema);
     for (DeclId d : q_->visible_decls(name, directives())) add(q_->decl_sema(d));
+    for (const ast::DeclSema& d : unary_friends) add(d);
     if (binary) {
       auto associations = adl_associations(operands, /*at_instantiation=*/false, /*ordinary_call=*/true);
       for_each_associated_friend(associations, name, /*at_instantiation=*/false, add);
@@ -7476,6 +7485,44 @@ public:
             for (const ast::DeclSema& d : q_->namespace_members(*ns, name)) add(d);
           }
         }
+    }
+    if (!unary_friends.empty()) {
+      auto found = find_member(types().class_of(lt), name);
+      if (found && !found->ambiguous && found->member && found->member->is_function) {
+        Ex object = operands.front();
+        Ex access = member(object, false, name, object.end, op_at, op_at);
+        if (!access.ok()) return Ex{NodeId::none, begin, end};
+        const Bound& bound = bound_.at(std::to_underlying(access.id));
+        const bool rvalue = object.cat() != ValueCategory::lvalue;
+        std::optional<Ics> best_member;
+        for (const MemberDeclRec* candidate : bound.cands) {
+          auto fn = types().rec(candidate->type);
+          if (candidate->is_template || candidate->is_static || !fn.params.empty()) continue;
+          if (fn.fn_ref == ast::RefQual::rvalue && !rvalue) continue;
+          if (fn.fn_ref == ast::RefQual::lvalue && rvalue && !(std::to_underlying(fn.fn_cv) & std::to_underlying(Cv::const_))) continue;
+          const auto receiver = types().add_cv(types().class_type(bound.cls), fn.fn_cv);
+          Ics rank = ics(object, rvalue && fn.fn_ref != ast::RefQual::lvalue
+                                     ? types().rvalue_ref(receiver) : types().lvalue_ref(receiver));
+          if (rank.viable && (!best_member || rank < *best_member)) best_member = rank;
+        }
+        std::optional<Ics> best_free;
+        for (const auto& candidate : set) {
+          auto fn = types().rec(candidate.type);
+          if (candidate.flags & decl_flag::template_ || fn.params.size() != 1) continue;
+          Ics rank = ics(object, fn.params.front());
+          if (rank.viable && (!best_free || rank < *best_free)) best_free = rank;
+        }
+        if (best_member) {
+          if (!best_free || *best_member < *best_free) {
+            Ex result = call(access, {}, end, op_at);
+            return Ex{result.id, begin, end, result.info};
+          }
+          if (!(*best_free < *best_member)) {
+            diag(op_at, Diag::ambiguous_call, name);
+            return Ex{NodeId::none, begin, end};
+          }
+        }
+      }
     }
     if (set.empty()) return ref_qualified_member;
     if (binary && ref_qualified_member && q_->dependent_call(op_at)) {

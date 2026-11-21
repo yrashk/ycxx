@@ -1774,7 +1774,7 @@ std = 'C++98'
 detect = '\bfriend\b'
 status = 'partial'
 issues = [259]
-note = 'C-linkage friend definitions, hidden friend operators, default arguments in friend declarations, and friends in templates'
+note = 'Ordinary binary hidden friends and unary minus participate in ADL. Other hidden friend operators, C-linkage friend definitions, default arguments in friend declarations, and friends in templates remain open.'
 probe = '''
 class C { int p = 2; friend int peek(const C& c) { return c.p; } };
 int main() { C c; return peek(c) - 2; }
