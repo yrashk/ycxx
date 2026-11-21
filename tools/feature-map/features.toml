@@ -1808,7 +1808,7 @@ struct D final : B { int f() override { return 0; } };
 int main() { D d; B& b = d; return b.f(); }
 '''
 issues = [309]
-note = 'ordinary root virtual declarations and inline bodies in syntax checking; layout, dispatch, tables and derived overrides remain open'
+note = 'ordinary virtual declarations, inline bodies and overrides through a single ordinary polymorphic base in syntax checking; abstract classes, final, covariance, layout, dispatch and tables remain open'
 
 [[feature]]
 id = 'class-virtual-base'
