@@ -134,6 +134,20 @@ struct DeleteObject {
   [[=sequenced(1)]] Child size;
 };
 
+// One-dimensional array new ([expr.new]). The bound is converted to size_t, and the
+// initializer describes each element.
+struct NewArray {
+  ExprInfo info;
+  [[=sequenced(0)]] Child bound;
+  [[=sequenced(1)]] Child element_init;
+};
+
+// Array delete ([expr.delete]) preserves the typed pointer operand.
+struct DeleteArray {
+  ExprInfo info;
+  [[=sequenced]] Child operand;
+};
+
 // A call of a built-in function whose value is computed, not a constant (`lex::BuiltinFunction`:
 // `__builtin_fabs(x)`), its arguments converted to its parameters' types (docs/EXTENSIONS.md).
 struct BuiltinCall {
@@ -487,7 +501,8 @@ using Nodes = closed_list<Literal, DeclRef, Paren, Unary, Binary, OrderedBinary,
                           IfConsteval, StaticAssert, Member, InitList, ValueInit, DefaultInit, This,
                           MemberCall, Materialize, CtorCall, MemberInit, Destructor, DestroyMember, Dependent,
                           DepName, CondDecl, Switch, Case, Default, Label, Goto, BuiltinCall, Lambda, DefaultArg,
-                          StaticInit, StaticVar, NewObject, DeleteObject, VariadicBuiltin, AssignmentCall, VirtualMemberCall>;
+                          StaticInit, StaticVar, NewObject, DeleteObject, VariadicBuiltin, AssignmentCall,
+                          NewArray, DeleteArray, VirtualMemberCall>;
 
 static_assert(Nodes::size < max_node_kinds);
 
