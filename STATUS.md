@@ -1360,6 +1360,16 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   reference, array, aggregate, and `std::initializer_list` cases remain under #231.
 - Tests: `tests/own/braced-overloads/`.
 
+## `std::initializer_list` backing array (#329)
+
+- A direct call with a braced argument and a `const std::initializer_list<int>&` parameter
+  initializes a temporary `const int[N]` in clause order and checks narrowing. The libycxx list
+  views that array until the end of the full-expression containing the call ([dcl.init.list],
+  [class.temporary]). The empty argument uses the list's default constructor.
+- Braced by-value calls, named nonempty lists, other element types and braced ranges remain in
+  #329. General list-conversion ranking remains in #231.
+- Tests: `unit.linux_compile` with the pinned libycxx header.
+
 ## Templates, ζ step 1: function templates (#88, 2026-11-18)
 
 Instantiation follows ast.md §6.4 as amended by #88 (Fable's decision): declarations and
