@@ -1,4 +1,4 @@
-# Linux AMD64 scalar floating-point calls and arithmetic
+# Linux AMD64 scalar floating-point calls and operations
 
 This slice moves binary32 `float` and binary64 `double` values through fixed-prototype direct
 calls and their definitions. It covers typed constants, object loads and stores, selection and
@@ -49,5 +49,22 @@ payloads are preserved apart from the sign, and MXCSR is untouched.
 Astra reviewed these choices against the language clauses, AMD64 psABI and Intel SDM. The
 mixed-object tests pass runtime bit patterns to ycxx-generated definitions and verify operand
 order, width-sensitive rounding, signed zero, subnormals, signaling and quiet NaN negation,
-and the caller's MXCSR controls and flags. Linux runtime floating comparisons, other numeric
-conversions, absolute value and x87 `long double` remain [#201](https://github.com/yrashk/ycxx/issues/201).
+and the caller's MXCSR controls and flags.
+
+## Runtime comparisons
+
+The six plain L2 predicates compare binary32 with UCOMISS and binary64 with UCOMISD.
+An unordered comparison sets ZF, PF and CF. Equality combines SETE with SETNP, and inequality
+combines SETNE with SETP. Both tests read the comparison flags before the combine changes them.
+SETA and SETAE accept only ordered greater and greater-or-equal values. Reversing the already
+evaluated operands gives ordered less and less-or-equal. The existing result store normalizes
+the predicate to `i1`. L2 already represents conversion to `bool` as inequality with a zero of
+the same width, so both zeros are false and NaN is true.
+[Relational operators](https://eel.is/c++draft/expr.rel) ·
+[Equality](https://eel.is/c++draft/expr.eq) · [Boolean conversion](https://eel.is/c++draft/conv.bool) ·
+[Intel SDM](https://www.intel.com/content/www/us/en/developer/articles/technical/intel-sdm.html)
+
+Astra reviewed the ordered and unordered flag outcomes against the Intel SDM. Comparisons run
+under the caller's MXCSR controls. The mixed-object tests check values at the default control
+settings and verify that controls survive the calls. Strict exception-status behavior, other
+numeric conversions, absolute value and x87 `long double` remain [#201](https://github.com/yrashk/ycxx/issues/201).
