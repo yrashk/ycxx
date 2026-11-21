@@ -139,8 +139,9 @@ arrays of supported scalar types, including arithmetic on saved pointers just pa
 [#111](https://github.com/yrashk/ycxx/issues/111)
 
 Both targets support `constexpr` constructors in class definitions and plain out-of-class
-definitions for runtime construction. An ordinary class can explicitly default its copy
-constructor as its first declaration and use it for trivial member copies.
+definitions for runtime construction. Ordinary in-class constructor declarations support
+bare `explicit`. An ordinary class can explicitly default its copy constructor as its first
+declaration and use it for trivial member copies.
 [#157](https://github.com/yrashk/ycxx/issues/157)
 
 In-class conversion functions can name a class type alias as their conversion target,
@@ -179,7 +180,8 @@ Both targets accept leading `[[…]]` attributes on ordinary data and function m
   outside it. [#426](https://github.com/yrashk/ycxx/issues/426),
   [#455](https://github.com/yrashk/ycxx/issues/455)
 - ordinary scalar `new` and single-object `delete` for integral and pointer objects, including
-  cv-qualified objects. Allocating expressions use the global Itanium allocation functions.
+  cv-qualified objects. Scalar allocation uses the global Itanium allocation functions.
+  Syntax checking also covers one-dimensional scalar `new T[n]` and `delete[] p`.
   [#293](https://github.com/yrashk/ycxx/issues/293)
 - pointers and references to arrays of unknown bound, and template partial specializations
   that match unknown-bound array types. [#222](https://github.com/yrashk/ycxx/issues/222)

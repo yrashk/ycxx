@@ -190,6 +190,8 @@ struct Ex {
   bool glvalue() const { return info.category != ValueCategory::prvalue; }
 };
 
+enum class Construction { direct, copy, direct_list, copy_list };
+
 // A braced-init-list as written ([dcl.init.general]): each initializer-clause is an analysed
 // expression or a nested list, with its designator (`.name =`, [dcl.init.aggr]) if it has one.
 // Sema decides what it initializes once it knows the target type.
@@ -1311,7 +1313,8 @@ public:
   }
 
   // List-initialization of an object of type `t` from `b` ([dcl.init.list]/3).
-  Ex list_init(QualType t, const Braced& b) {
+  Ex list_init(QualType t, const Braced& b, Construction form = Construction::direct_list,
+               bool extend_reference = false) {
     Ex fail{NodeId::none, b.begin, b.end};
     if (types().is_dependent(t) || dependent(b)) {
       std::vector<Ex> ops;
@@ -1320,6 +1323,8 @@ public:
       return dependent_node(ops, b.begin, b.end, types().is_dependent(t) ? std::nullopt : std::optional(Types::unqualified(t)));
     }
     if (types().is_void(t) && b.clauses.empty()) return void_prvalue(b.begin, b.end);  // [expr.type.conv]/2
+    if (types().is_reference(t) && types().is_class(types().referee(t)))
+      return class_reference_list_init(t, b, extend_reference);
     if (!require_complete(t, b.begin) || !require_supported_virtual_layout(t, b.begin)) return fail;
     // [dcl.init.string]/1: a character array from a string literal in braces.
     if (b.clauses.size() == 1 && !b.clauses[0].list && !b.clauses[0].designated)
@@ -1330,14 +1335,15 @@ public:
       diag(b.begin, Diag::mixed_designators);
       return fail;
     }
-    // [dcl.init.list]/3.2: a class from one element of its own class.
+    // [dcl.init.list]: an aggregate class from one element of its own class. A same-type
+    // prvalue also initializes its result object directly ([dcl.init.general]).
     if (types().is_class(t) && b.clauses.size() == 1 && !b.clauses[0].list && !b.clauses[0].designated &&
-        initializes(t, b.clauses[0].expr))
+        initializes(t, b.clauses[0].expr) && (is_aggregate(t) || !b.clauses[0].expr.glvalue()))
       return convert(b.clauses[0].expr, t, b.clauses[0].begin);
     // [dcl.init.list]/3.7: a class with constructors: `{}` value-initializes it, else the clauses
     // are a constructor's arguments, without narrowing.
     if (has_user_ctors(t)) {
-      if (b.clauses.empty()) return value_init(t, b.begin, b.end);
+      if (b.clauses.empty() && form == Construction::direct_list) return value_init(t, b.begin, b.end);
       std::vector<Ex> args;
       for (const Braced::Clause& c : b.clauses) {
         if (c.list || c.designated) {
@@ -1346,7 +1352,7 @@ public:
         }
         args.push_back(c.expr);
       }
-      return construct(t, std::move(args), b.begin, b.end, true);
+      return construct(t, std::move(args), b.begin, b.end, form);
     }
     // A reference from one element ([dcl.init.list]/3.10).
     if (types().is_reference(t) && b.clauses.size() == 1 && !b.clauses[0].list && !b.clauses[0].designated)
@@ -1417,7 +1423,7 @@ public:
       QualType et = elems[i].type;
       if (c.list) {
         ++next;
-        out.push_back(list_init(et, *c.list));
+        out.push_back(list_init(et, *c.list, Construction::copy_list));
       } else if (auto str = string_element(et, c.expr)) {
         // [dcl.init.string]: a character array element from a string literal, not elided into.
         ++next;
@@ -3526,6 +3532,7 @@ public:
     // Its parameters' default arguments, by position, none where a parameter has none
     // ([dcl.fct.default]); empty if it has none.
     std::vector<NodeId> defaults{};
+    bool is_explicit = false;
     // How many arguments a call must give ([over.match.viable]/2.3).
     std::size_t required(std::size_t params) const {
       std::size_t k = params;
@@ -3629,7 +3636,7 @@ public:
     return Types::unqualified(t);
   }
 
-  Ics ics(const Ex& a, QualType p) {
+  Ics ics(const Ex& a, QualType p, bool constructor_conversion = false) {
     if (!a.ok()) return {};
     // The target parameter can select a function from an overload set ([over.over]).
     if (auto set = address_set(a)) {
@@ -3640,7 +3647,7 @@ public:
       QualType t = matches.front().type;
       ExprInfo info = set->address ? ExprInfo{types().pointer(t), ValueCategory::prvalue, 0}
                                    : ExprInfo{t, ValueCategory::lvalue, 0};
-      return ics({a.id, a.begin, a.end, info}, p);
+      return ics({a.id, a.begin, a.end, info}, p, constructor_conversion);
     }
     if (types().is_reference(p)) {
       TypeRec r = types().rec(p);
@@ -3663,7 +3670,7 @@ public:
       bool const_ref = object_cv(t) == Cv::const_;
       if (!r.rvalue_ref && !const_ref) return {};
       if (r.rvalue_ref && a.cat() == ValueCategory::lvalue) return {};
-      Ics v = ics(a, Types::unqualified(t));  // to a temporary
+      Ics v = ics(a, Types::unqualified(t), constructor_conversion);  // to a temporary
       if (!v.viable) return v;
       return binding(v, r.rvalue_ref, true, cv_bits(Types::cv(t)));
     }
@@ -3676,6 +3683,8 @@ public:
         v.base_depth = d;
         return v;
       }
+      if (constructor_conversion && !types().is_class(a.type()))
+        return constructor_ics(std::span(&a, 1), to, Construction::copy).value_or(Ics{});
       return {};
     }
     if (types().is_pointer(to) && is_null_pointer_constant(a)) return {true, 2, 0};
@@ -3726,10 +3735,41 @@ public:
     return {};
   }
 
+  // [over.best.ics]: viability uses the parameter conversions of ordinary constructors. Access,
+  // deletion, and the copy-list restriction on an explicit winner are checked after selection.
+  std::optional<Ics> constructor_ics(std::span<const Ex> args, QualType t, Construction form) {
+    const EntityId entity = types().class_of(t);
+    const ClassRec* record = class_rec(entity);
+    if (!record || !record->user_ctors || w_->entities.rec(entity).templ != EntityId::none) return std::nullopt;
+    for (const MemberDeclRec& member : record->members)
+      if (member.is_ctor && member.is_template) return std::nullopt;
+    for (const MemberDeclRec& member : record->members) {
+      if (!member.is_ctor || (form == Construction::copy && member.is_explicit)) continue;
+      const TypeRec fn = types().rec(member.type);
+      const Candidate c{member.entity, member.type, true, member.is_deleted, nullptr, member.defaults};
+      if (args.size() < c.required(fn.params.size()) || (args.size() > fn.params.size() && !fn.variadic)) continue;
+      if (form == Construction::copy && fn.params.empty()) continue;
+      bool viable = true;
+      for (std::size_t i = 0; i < std::min(args.size(), fn.params.size()) && viable; ++i)
+        viable = ics(args[i], fn.params[i]).viable;
+      if (viable) return Ics{true, Ics::user_defined};
+    }
+    return Ics{};
+  }
+
   // [over.ics.list]: rank a braced argument before initializing the selected parameter.
   // A disengaged result is a list conversion this slice does not classify.
   std::optional<Ics> list_ics(const Braced& list, QualType parameter) {
     const bool flat = std::ranges::none_of(list.clauses, [](const Braced::Clause& c) { return c.list || c.designated; });
+    const QualType object = types().referee(parameter);
+    if (flat && types().is_class(object) && has_user_ctors(object) &&
+        std::ranges::all_of(list.clauses, [&](const Braced::Clause& c) { return c.expr.ok() && !types().is_class(c.expr.type()); })) {
+      if (types().is_reference(parameter) && !types().rec(parameter).rvalue_ref && object_cv(object) != Cv::const_)
+        return Ics{};
+      std::vector<Ex> args;
+      for (const Braced::Clause& c : list.clauses) args.push_back(c.expr);
+      return constructor_ics(args, object, Construction::copy_list);
+    }
     if (types().is_scalar(parameter)) {
       if (!flat || list.clauses.size() > 1) return Ics{};
       if (!types().is_arithmetic(parameter)) return std::nullopt;
@@ -3788,7 +3828,7 @@ public:
         if (k >= fixed) {
           c.rank = Ics::ellipsis;
         } else if ((!first_list || !lists[k]) && (!template_list || !types().is_dependent(fr.params[k]))) {
-          c = ics(args[k], fr.params[k]);
+          c = ics(args[k], fr.params[k], !ctor_of);
         }
         ok = c.viable;
         seq.push_back(c);
@@ -3888,11 +3928,12 @@ public:
 
   // Initializes a `t` by a constructor from `args` ([over.match.ctor], [dcl.init.general]/17.6):
   // the class's constructors and, where they are implicit, its default and copy constructors.
-  // A trivial copy is a copy; `list` forbids narrowing ([over.match.list]); `copy_init` takes only
-  // one-argument constructors.
-  Ex construct(QualType t, std::vector<Ex> args, u32 begin, u32 end, bool list = false, bool copy_init = false,
+  // List-initialization prohibits narrowing and checks the explicit winner for copy-list forms.
+  Ex construct(QualType t, std::vector<Ex> args, u32 begin, u32 end, Construction form = Construction::direct,
                bool checking_polymorphic_base = false) {
     Ex fail{NodeId::none, begin, end};
+    const bool list = form == Construction::direct_list || form == Construction::copy_list;
+    const bool copy_init = form == Construction::copy;
     if (std::ranges::any_of(args, [](const Ex& a) { return !a.ok(); })) return fail;
     if (types().is_dependent(t) || any_dependent(args))
       return dependent_node(args, begin, end, types().is_dependent(t) ? std::nullopt : std::optional(Types::unqualified(t)));
@@ -3931,10 +3972,10 @@ public:
         cands.push_back(std::move(k));
       } else if (m.is_ctor) {
         TypeRec fr = types().rec(m.type);
-        Candidate k{m.entity, m.type, true, m.is_deleted, nullptr, m.defaults};
-        // Copy-initialization converts with a constructor that takes one argument ([class.conv.ctor]).
-        if (copy_init && (fr.params.empty() || k.required(fr.params.size()) > 1)) continue;
+        Candidate k{m.entity, m.type, true, m.is_deleted, nullptr, m.defaults, m.is_explicit};
         user_copy = user_copy || is_copy_ctor(fr, ut, k.required(fr.params.size()));
+        // Copy-initialization converts with a constructor that takes one argument ([class.conv.ctor]).
+        if (copy_init && (m.is_explicit || fr.params.empty() || k.required(fr.params.size()) > 1)) continue;
         cands.push_back(std::move(k));
       }
     QualType void_ = builtin(Builtin::void_);
@@ -3947,6 +3988,10 @@ public:
     auto chosen = resolve(cands, args, begin, no_name(), std::nullopt, ut);
     if (!chosen) return fail;
     const Candidate& k = cands[*chosen];
+    if (form == Construction::copy_list && k.is_explicit) {
+      diag(begin, Diag::copy_list_explicit_constructor, ut);
+      return fail;
+    }
     if (k.entity != EntityId::none && !check_access(c, k.pattern ? k.pattern->entity : k.entity, w_->entities.rec(c).name, begin)) return fail;
     // A specialization called is one whose definition the program requires ([temp.inst]/8).
     if (k.pattern) demands.push_back({k.entity, ast::Loc{item_, loc_base_ + begin}});
@@ -3994,7 +4039,7 @@ public:
   // In a syntax-only constructor definition, check the implicit default initialization of
   // its direct polymorphic base. There is no complete object or native initializer to build.
   void check_polymorphic_base_default_init(QualType t, u32 at) {
-    construct(t, {}, at, at, /*list=*/false, /*copy_init=*/false, /*checking_polymorphic_base=*/true);
+    construct(t, {}, at, at, Construction::direct, /*checking_polymorphic_base=*/true);
   }
 
   // [class.copy.ctor]/2: a constructor whose first parameter is `C&` or `cv C&` and whose others
@@ -5029,7 +5074,7 @@ public:
       // ([class.conv.ctor]).
       if (cr && (cr->user_ctors || cr->copy_ctor != EntityId::none || cr->copy_deleted ||
                  cr->defaulted_copy != CopyState::ordinary))
-        return construct(target, {e}, e.begin, e.end, false, true);
+        return construct(target, {e}, e.begin, e.end, Construction::copy);
       if (!initializes(target, e)) {
         // A base class object copied from a derived class's ([dcl.init.general]/17.6.2): from its
         // base class subobject.
@@ -5219,6 +5264,8 @@ public:
       }
       return convert(e, to, at_);
     }
+    // [expr.static.cast]: a cast to a class can directly initialize it with an explicit constructor.
+    if (types().is_class(target) && has_user_ctors(target)) return construct(target, {e}, e.begin, e.end);
     if (types().is_class(target) || types().is_array(target)) return convert(e, to, at_);
     if (named_static_cast && types().is_class(e.type()))
       if (auto cast = exact_conversion_cast(e, target, at_)) return *cast;
@@ -5369,6 +5416,89 @@ public:
     q_->use_allocation_function(f);
     ExprInfo info{v, ValueCategory::prvalue, 0};
     return node(ast::DeleteObject{info, f, at(addr, begin), at(size, begin)}, begin, end, info);
+  }
+
+  // [expr.new]: a potentially evaluated constant bound is checked before unsigned conversion.
+  // Limit the object size to the largest positive byte distance representable by ptrdiff_t.
+  bool valid_new_bound(Ex bound, u64 element_size) {
+    if (unevaluated || !constant_of) return true;
+    auto known = constant_of(bound);
+    if (!known) return true;
+    ValueRec value = w_->values.rec(*known);
+    int size_bits = shape(w_->target, w_->target.ptrdiff_type).bits - 1;
+    u64 max_count = ((u64{1} << size_bits) - 1) / element_size;
+    bool negative = false;
+    bool oversized = false;
+    if (value.kind == ValueKind::integer) {
+      negative = ast::is_signed(w_->target, *types().builtin_of(value.type)) && i64(value.bits) < 0;
+      oversized = value.bits > max_count;
+    } else if (value.kind == ValueKind::floating) {
+      negative = value.real < 0;
+      // Check representability before truncating to an integer.
+      oversized = !std::isfinite(value.real) || value.real >= std::ldexp(1.0, size_bits) ||
+                  (!negative && u64(value.real) > max_count);
+    }
+    if (negative || oversized) {
+      diag(bound.begin, negative ? Diag::negative_new_bound : Diag::oversized_new_bound);
+      return false;
+    }
+    return true;
+  }
+
+  Ex new_array(QualType t, Ex bound, const std::optional<std::vector<Ex>>& args, const Braced* braces, u32 begin, u32 end) {
+    Ex fail{NodeId::none, begin, end};
+    if (!bound.ok()) return fail;
+    if (!types().is_object(t)) {
+      diag(begin, Diag::new_requires_object, t);
+      return fail;
+    }
+    if (!scalar_allocation_type(t) || types().has_placeholder(t) || types().is_dependent(t) ||
+        (args && !args->empty()) || (braces && !braces->clauses.empty())) {
+      diag(begin, Diag::not_supported, lex::Tk::kw_new);
+      return fail;
+    }
+    if (!args && !braces && Types::is_const(types().canonical(t))) {
+      diag(begin, Diag::new_const_uninitialized, t);
+      return fail;
+    }
+    Ex count = convert(bound, builtin(w_->target.size_type), bound.begin);
+    if (!count.ok()) return fail;
+    QualType pointer = types().pointer(t);
+    if (dependent(count)) return dependent_node({count}, begin, end, pointer);
+    auto size = layout_of(t, false);
+    if (!size) {
+      diag(begin, Diag::not_supported, lex::Tk::kw_new);
+      return fail;
+    }
+    if (!valid_new_bound(bound, *size)) return fail;
+
+    Ex init = braces ? list_init(t, *braces) : args ? value_init(t, end, end) : default_init(t, end, end);
+    if (!init.ok()) return fail;
+    ExprInfo info{pointer, ValueCategory::prvalue, 0};
+    return node(ast::NewArray{info, at(count, begin), at(init, begin)}, begin, end, info);
+  }
+
+  Ex delete_array(Ex operand, u32 begin, u32 end) {
+    Ex fail{NodeId::none, begin, end};
+    if (!operand.ok()) return fail;
+    QualType v = builtin(Builtin::void_);
+    if (dependent(operand)) return dependent_node({operand}, begin, end, v);
+    if (types().is_class(operand.type())) {
+      diag(begin, Diag::not_supported, lex::Tk::kw_delete);  // contextual conversion from a class
+      return fail;
+    }
+    if (!types().is_pointer(operand.type()) || !types().is_object(types().pointee(operand.type()))) {
+      diag(begin, Diag::delete_requires_pointer, operand.type());
+      return fail;
+    }
+    if (!scalar_allocation_type(types().pointee(operand.type()))) {
+      diag(begin, Diag::not_supported, lex::Tk::kw_delete);
+      return fail;
+    }
+    Ex pointer = rvalue(operand);
+    if (!pointer.ok()) return fail;
+    ExprInfo info{v, ValueCategory::prvalue, 0};
+    return node(ast::DeleteArray{info, at(pointer, begin)}, begin, end, info);
   }
 
   bool scalar_allocation_type(QualType t) {
@@ -6188,7 +6318,7 @@ public:
                                                                     : copy->copy_assignment;
       if (!usable_copy_assignment(state, Types::unqualified(l.type()), op_at)) return {NodeId::none, begin, end};
     }
-    Ex c = list_init(Types::unqualified(l.type()), b);
+    Ex c = list_init(Types::unqualified(l.type()), b, Construction::copy_list);
     if (!c.ok()) return {NodeId::none, begin, end};
     ExprInfo info{l.type(), ValueCategory::lvalue, 0, l.info.bit_width};
     auto op = class_copy ? ast::AssignOp::trivial_class_copy : ast::AssignOp::assign;
@@ -6651,27 +6781,32 @@ public:
     return std::nullopt;
   }
 
-  // A class reference parameter binds directly to a single reference-related expression.
+  // A class reference binds directly to a single reference-related expression.
   // Otherwise the list initializes a prvalue of the referenced class ([dcl.init.list]); the
   // materialized object lives until the end of the call's full-expression ([class.temporary]).
-  Ex braced_parameter(QualType parameter, const Braced& list) {
-    parameter = Types::unqualified(parameter);
-    if (!types().is_reference(parameter) || !types().is_class(types().referee(parameter)) ||
-        types().is_dependent(parameter) || dependent(list))
-      return list_init(parameter, list);
+  Ex class_reference_list_init(QualType parameter, const Braced& list, bool extend,
+                               bool call_argument = false) {
     QualType t = types().referee(parameter);
     if (list.clauses.size() == 1) {
       const Braced::Clause& c = list.clauses.front();
       if (!c.list && !c.designated && c.expr.ok() && types().is_class(c.expr.type())) {
         int paths = 0;
         if (same_unqualified(c.expr.type(), t) || base_path(types().class_of(c.expr.type()), types().class_of(t), paths))
-          return bind_reference(c.expr, parameter, c.begin);
+          return bind_reference(c.expr, parameter, c.begin, extend);
       }
     }
-    if (!list.clauses.empty() && !types().rec(parameter).rvalue_ref && object_cv(t) == Cv::const_) {
+    if (call_argument && !list.clauses.empty() && !types().rec(parameter).rvalue_ref && object_cv(t) == Cv::const_) {
       if (auto init = initializer_list_argument(t, list)) return bind_reference(*init, parameter, list.begin);
     }
-    return bind_reference(list_init(Types::unqualified(t), list), parameter, list.begin);
+    Ex temporary = list_init(Types::unqualified(t), list, Construction::copy_list);
+    return bind_reference(temporary, parameter, list.begin, extend);
+  }
+
+  Ex braced_parameter(QualType parameter, const Braced& list) {
+    if (types().is_reference(parameter) && types().is_class(types().referee(parameter)) &&
+        !types().is_dependent(parameter) && !dependent(list))
+      return class_reference_list_init(parameter, list, false, /*call_argument=*/true);
+    return list_init(parameter, list, Construction::copy_list);
   }
 
   // The arguments of a call to a function of type `fr`, each copy-initializing its parameter.

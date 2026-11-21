@@ -1747,10 +1747,11 @@ public:
     if (is(Tk::l_brace)) {
       auto b = braced_init_list();
       if (!b) return NodeId::none;
-      if (ref && b->clauses.size() == 1 && !b->clauses[0].list && !b->clauses[0].designated)
+      if (ref && !s_->types().is_class(s_->types().referee(t)) &&
+          b->clauses.size() == 1 && !b->clauses[0].list && !b->clauses[0].designated)
         e = s_->bind_reference(b->clauses[0].expr, t, b->clauses[0].begin, false);
       else
-        e = s_->list_init(sema::Types::unqualified(t), *b);
+        e = s_->list_init(sema::Types::unqualified(t), *b, sema::Construction::copy_list);
     } else {
       Ex a = assignment_expression();
       if (!a.ok()) return NodeId::none;
@@ -2786,6 +2787,7 @@ public:
   Ex new_expression(u32 begin) {
     bump();  // new, after an optional ::
     std::optional<QualType> type;
+    std::optional<Ex> bound;
     bool excluded = false;
     if (is(Tk::l_paren)) {
       u32 past = i_ + past_parentheses(0);
@@ -2818,10 +2820,16 @@ public:
       type = build(l, spec.type, fn, d, true);
       if (!d.ok) return {NodeId::none, begin, pos()};
       while (is(Tk::l_square) && kind(1) != Tk::l_square) {
-        excluded = true;  // array new
         bump();
         int saved = std::exchange(angle_, 0);
-        if (!is(Tk::r_square)) expression();
+        if (is(Tk::r_square)) {
+          excluded = true;  // omitted bound
+        } else if (bound) {
+          excluded = true;  // multiple dimensions
+          constant_expression();
+        } else {
+          bound = expression();
+        }
         angle_ = saved;
         if (!expect(Tk::r_square)) return {NodeId::none, begin, pos()};
         skip_attributes();
@@ -2846,6 +2854,7 @@ public:
       s_->diag(begin, Diag::not_supported, Tk::kw_new);
       return {NodeId::none, begin, pos()};
     }
+    if (bound) return s_->new_array(*type, *bound, args, braces.get(), begin, pos());
     return s_->new_object(*type, args, braces.get(), begin, pos());
   }
 
@@ -2857,11 +2866,7 @@ public:
       bump();
     }
     Ex operand = cast_expression();
-    if (array) {
-      s_->diag(begin, Diag::not_supported, Tk::kw_delete);
-      return {NodeId::none, begin, pos()};
-    }
-    return s_->delete_object(operand, begin, pos());
+    return array ? s_->delete_array(operand, begin, pos()) : s_->delete_object(operand, begin, pos());
   }
 
   // unary-expression ([expr.unary]).
@@ -4283,12 +4288,13 @@ public:
       init = placeholder_variable(d, local, spec.is_constexpr, replaced);
       if (!init.ok() && s_->types().has_placeholder(d.type)) s_->set_local_type(local, s_->builtin(Builtin::dependent));
     } else if (is(Tk::l_brace) || (is(Tk::equal) && kind(1) == Tk::l_brace)) {
-      accept(Tk::equal);
+      const auto form = accept(Tk::equal) ? sema::Construction::copy_list : sema::Construction::direct_list;
       auto b = braced_init_list();
-      if (s_->types().is_reference(d.type) && b->clauses.size() == 1 && !b->clauses[0].list && !b->clauses[0].designated)
+      if (s_->types().is_reference(d.type) && !s_->types().is_class(s_->types().referee(d.type)) &&
+          b->clauses.size() == 1 && !b->clauses[0].list && !b->clauses[0].designated)
         init = s_->bind_reference(b->clauses[0].expr, d.type, b->clauses[0].begin, true);
       else
-        init = s_->list_init(d.type, *b);
+        init = s_->list_init(d.type, *b, form, /*extend_reference=*/true);
     } else if (accept(Tk::equal)) {
       Ex e = assignment_expression();
       init = s_->types().is_reference(d.type) ? s_->bind_reference(e, d.type, e.begin, true) : s_->convert(e, d.type, e.begin);
@@ -4653,7 +4659,7 @@ public:
         // `return {…};` copy-list-initializes the result ([stmt.return]/2).
         auto b = braced_init_list();
         if (s_->types().is_void(rt)) s_->diag(begin, Diag::return_value_in_void);
-        else value = s_->list_init(rt, *b);
+        else value = s_->list_init(rt, *b, sema::Construction::copy_list);
         if (!expect(Tk::semi)) skip_to_semi();
         return s_->node(ast::Return{sema::Sema::at(value, begin)}, begin, pos());
       }
@@ -4880,7 +4886,7 @@ public:
       }
       if (list) {
         // List-initialization ([dcl.init.list]): `T x{…}` and `T x = {…}`.
-        accept(Tk::equal);
+        const auto form = accept(Tk::equal) ? sema::Construction::copy_list : sema::Construction::direct_list;
         auto b = braced_init_list();
         if (d.unknown_bound) {
           u64 n = s_->deduce_bound(d.type, *b);
@@ -4892,10 +4898,11 @@ public:
           s_->set_local_type(local, d.type);
         }
         // A reference from one element binds as `= e` does, extending a temporary ([class.temporary]/6).
-        if (s_->types().is_reference(d.type) && b->clauses.size() == 1 && !b->clauses[0].list && !b->clauses[0].designated)
+        if (s_->types().is_reference(d.type) && !s_->types().is_class(s_->types().referee(d.type)) &&
+            b->clauses.size() == 1 && !b->clauses[0].list && !b->clauses[0].designated)
           init = s_->bind_reference(b->clauses[0].expr, d.type, b->clauses[0].begin, true);
         else
-          init = s_->list_init(d.type, *b);
+          init = s_->list_init(d.type, *b, form, /*extend_reference=*/true);
         constant_local(local, d.type, spec.is_constexpr, init);
       } else if (accept(Tk::equal)) {
         Ex e = assignment_expression();
