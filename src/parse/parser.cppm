@@ -3016,6 +3016,14 @@ public:
           if (is(Tk::l_paren) && kind(1) == Tk::r_paren) seek(index() + 2);
           return {NodeId::none, e.begin, pos()};
         }
+        std::optional<NameId> member_class;
+        // This stage recognizes only a direct qualified invocation on the Linux consumer path.
+        if (qualifier == 2 && !keyword && kind(2) == Tk::identifier && kind(3) == Tk::l_paren &&
+            s_->types().target().triple == ast::x86_64_linux.triple) {
+          member_class = name_of(tok());
+          bump();
+          bump();
+        }
         if (!is(Tk::identifier)) {
           if (is(Tk::tilde) || is(Tk::coloncolon) || is(Tk::kw_operator))
             s_->diag(pos(), Diag::not_supported, kind());
@@ -3034,7 +3042,7 @@ public:
           targs = template_argument_list();
           if (!targs) return {NodeId::none, e.begin, pos()};
         }
-        e = s_->member(e, arrow, n, pos(), at, name_at);
+        e = s_->member(e, arrow, n, pos(), at, name_at, member_class);
         if (targs) s_->explicit_template_args(e, std::move(*targs));
         break;
       }

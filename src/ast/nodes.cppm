@@ -238,6 +238,15 @@ struct MemberCall {
   [[=indeterminately_sequenced(1)]] ChildList args;
 };
 
+// A virtual call on an opaque root. The slot is relative to the table's address point.
+struct VirtualMemberCall {
+  ExprInfo info;
+  QualType callee;  // pointer to the ABI function type, which includes the receiver parameter
+  u32 slot;
+  [[=sequenced(0)]] Child object;
+  [[=indeterminately_sequenced(1)]] ChildList args;
+};
+
 // Assignment notation calls a member function with the argument sequenced before its object
 // ([expr.assign], [over.match.oper]). `object` is the implicit pointer argument.
 struct AssignmentCall {
@@ -498,7 +507,7 @@ using Nodes = closed_list<Literal, DeclRef, Paren, Unary, Binary, OrderedBinary,
                           MemberCall, Materialize, CtorCall, MemberInit, Destructor, DestroyMember, Dependent,
                           DepName, CondDecl, Switch, Case, Default, Label, Goto, BuiltinCall, Lambda, DefaultArg,
                           StaticInit, StaticVar, NewObject, DeleteObject, VariadicBuiltin, AssignmentCall,
-                          NewArray, DeleteArray, DelegatingInit>;
+                          NewArray, DeleteArray, DelegatingInit, VirtualMemberCall>;
 
 static_assert(Nodes::size < max_node_kinds);
 

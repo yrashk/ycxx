@@ -296,7 +296,8 @@ addresses, typed nulls and same-class `.*` and `->*`. [#238](https://github.com/
 
 **Virtual declarations.** Syntax checking accepts virtual members and inline definitions in
 ordinary root classes. Classes derived through one ordinary polymorphic base also support
-overrides. Pointer and reference interfaces can name these classes. [#309](https://github.com/yrashk/ycxx/issues/309)
+overrides. On Linux x86-64, pointer and reference consumers can call virtual functions with fixed
+integer signatures on external objects through a declaration-only root class. [#309](https://github.com/yrashk/ycxx/issues/309)
 
 **Array structured bindings.** Local bindings can copy scalar-element arrays or alias their
 elements, including whole rows of multidimensional arrays. [#285](https://github.com/yrashk/ycxx/issues/285)

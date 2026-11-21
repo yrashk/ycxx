@@ -2041,16 +2041,22 @@ What the process allocates, attributed to the engine's cells, in the trace and t
   functions, polymorphism and virtual destruction. The existing class traits use those facts.
 - Syntax checking accepts pointer and reference interfaces and by-value function declarations.
   The layout guard covers the class and enclosing records, including array elements. Layout,
-  storage, evaluated calls and key-function definitions receive diagnostics where they require
-  unsupported virtual semantics or ABI. Native requests for a unit with virtual declarations
-  receive a diagnostic before any object is emitted.
+  storage and key-function definitions receive diagnostics where they require virtual layout
+  or emission. The native unit check protects those class shapes before producing an object.
 - A non-template derived class can have one complete ordinary polymorphic base. Override matching
   follows the base chain through private members and hidden names, with checks for matching
   parameter types, qualifiers, return types and exception specifications. The class traits also
   recognize inherited polymorphism and implicit virtual destructors.
-- Pure virtual functions, `final`, covariant returns, virtual dispatch and tables remain in
+- On Linux x86-64, an ordinary declaration-only root with fixed integer virtual signatures can
+  consume a peer-owned object through a pointer or reference. Dispatch loads the selected slot in
+  declaration order and passes the original receiver as `this`. Qualifying the call with the
+  receiver's own class name calls the declaration directly.
+- Pure virtual functions, `final`, covariant returns and table production remain in
   [#309](https://github.com/yrashk/ycxx/issues/309). Virtual destructor entry points are in
-  [#136](https://github.com/yrashk/ycxx/issues/136).
+  [#136](https://github.com/yrashk/ycxx/issues/136). RTTI is tracked in
+  [#294](https://github.com/yrashk/ycxx/issues/294), ELF group emission in
+  [#422](https://github.com/yrashk/ycxx/issues/422), and native class ABI in
+  [#489](https://github.com/yrashk/ycxx/issues/489).
   [Design](docs/design/ordinary-virtual-declarations.md)
 
 ## Templates, ζ step 9: member function templates (#88, #314, 2026-11-19)
