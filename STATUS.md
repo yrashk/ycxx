@@ -2435,6 +2435,13 @@ values, end to end; results match Clang's bit for bit.
   and other allocation-function declarations.
 - Spec-only tests in `tests/own/scalar-allocation/` cover types, initialization, a typed null, and
   invalid operands. A separate provider checks the address and size passed to deallocation.
+- Syntax checking supports one-dimensional `new T[n]` and `delete[] p` for integral and ordinary
+  pointer elements ([expr.new], [expr.delete]). The bound converts to `size_t`. A potentially
+  evaluated constant bound can be zero and must keep the object size within the positive range
+  of `ptrdiff_t`. The array AST retains default or empty initialization and the typed delete
+  operand. Native lowering and constant evaluation of these operations remain in #293.
+  A file-scope scalar initializer still needs lowered code to qualify for dynamic initialization.
+  Type checking covers function-local expressions and unevaluated operands.
 
 ## Bootstrap workarounds
 

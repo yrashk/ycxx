@@ -127,6 +127,8 @@ enum class Diag : std::uint32_t {
   new_const_uninitialized [[=message{Severity::error, "new of const type '{0:t}' requires an initializer"}]],
   delete_requires_pointer [[=message{Severity::error, "cannot delete an expression of type '{0:t}'; a pointer to object is required"}]],
   allocation_declaration [[=message{Severity::error, "unsupported declaration of '{0:n}'; expected an ordinary global allocation or deallocation function"}]],
+  negative_new_bound [[=message{Severity::error, "array new bound is negative"}]],
+  oversized_new_bound [[=message{Severity::error, "array new bound exceeds the maximum allocation size"}]],
   const_uninitialized [[=message{Severity::error, "const variable '{0:n}' must be initialized"}]],
   redefinition [[=message{Severity::error, "redefinition of '{0:n}'"}]],
   default_arg_redefined [[=message{Severity::error, "redefinition of a default argument"}]],

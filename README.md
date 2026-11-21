@@ -178,7 +178,8 @@ Both targets accept leading `[[…]]` attributes on ordinary data and function m
   outside it. [#426](https://github.com/yrashk/ycxx/issues/426),
   [#455](https://github.com/yrashk/ycxx/issues/455)
 - ordinary scalar `new` and single-object `delete` for integral and pointer objects, including
-  cv-qualified objects. Allocating expressions use the global Itanium allocation functions.
+  cv-qualified objects. Scalar allocation uses the global Itanium allocation functions.
+  Syntax checking also covers one-dimensional scalar `new T[n]` and `delete[] p`.
   [#293](https://github.com/yrashk/ycxx/issues/293)
 - pointers and references to arrays of unknown bound, and template partial specializations
   that match unknown-bound array types. [#222](https://github.com/yrashk/ycxx/issues/222)

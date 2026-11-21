@@ -2783,6 +2783,7 @@ public:
   Ex new_expression(u32 begin) {
     bump();  // new, after an optional ::
     std::optional<QualType> type;
+    std::optional<Ex> bound;
     bool excluded = false;
     if (is(Tk::l_paren)) {
       u32 past = i_ + past_parentheses(0);
@@ -2815,10 +2816,16 @@ public:
       type = build(l, spec.type, fn, d, true);
       if (!d.ok) return {NodeId::none, begin, pos()};
       while (is(Tk::l_square) && kind(1) != Tk::l_square) {
-        excluded = true;  // array new
         bump();
         int saved = std::exchange(angle_, 0);
-        if (!is(Tk::r_square)) expression();
+        if (is(Tk::r_square)) {
+          excluded = true;  // omitted bound
+        } else if (bound) {
+          excluded = true;  // multiple dimensions
+          constant_expression();
+        } else {
+          bound = expression();
+        }
         angle_ = saved;
         if (!expect(Tk::r_square)) return {NodeId::none, begin, pos()};
         skip_attributes();
@@ -2843,6 +2850,7 @@ public:
       s_->diag(begin, Diag::not_supported, Tk::kw_new);
       return {NodeId::none, begin, pos()};
     }
+    if (bound) return s_->new_array(*type, *bound, args, braces.get(), begin, pos());
     return s_->new_object(*type, args, braces.get(), begin, pos());
   }
 
@@ -2854,11 +2862,7 @@ public:
       bump();
     }
     Ex operand = cast_expression();
-    if (array) {
-      s_->diag(begin, Diag::not_supported, Tk::kw_delete);
-      return {NodeId::none, begin, pos()};
-    }
-    return s_->delete_object(operand, begin, pos());
+    return array ? s_->delete_array(operand, begin, pos()) : s_->delete_object(operand, begin, pos());
   }
 
   // unary-expression ([expr.unary]).
