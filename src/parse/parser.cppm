@@ -2702,6 +2702,7 @@ public:
   // assignment-expression ([expr.assign]): right-associative; its left operand is a
   // logical-or-expression.
   Ex assignment_expression() {
+    if (is(Tk::kw_throw)) return throw_expression();
     Ex l = binary_expression(1);
     if (is(Tk::question)) return conditional_rest(l);
     if (auto op = assignment_operator(kind())) {
@@ -2720,6 +2721,19 @@ public:
       return s_->assign(*op, l, r, at);
     }
     return l;
+  }
+
+  // [expr.throw]: the optional operand is itself an assignment-expression.
+  Ex throw_expression() {
+    u32 begin = pos();
+    bump();
+    std::optional<Ex> operand;
+    if (!at_end() && !is(Tk::semi) && !is(Tk::comma) && !is(Tk::colon) &&
+        !is(Tk::r_paren) && !is(Tk::r_square) && !is(Tk::r_brace) &&
+        !(angle_ && (is(Tk::greater) || is(Tk::greatergreater)))) {
+      operand = assignment_expression();
+    }
+    return s_->throw_expression(operand, begin, pos());
   }
 
   Ex conditional_expression() {
@@ -3328,7 +3342,6 @@ public:
     case Tk::kw_dynamic_cast:
     case Tk::kw_const_cast:
     case Tk::kw_reinterpret_cast:
-    case Tk::kw_throw:
       s_->diag(begin, Diag::not_supported, kind());
       bump();
       return {NodeId::none, begin, pos()};

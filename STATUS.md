@@ -2312,6 +2312,15 @@ values, end to end; results match Clang's bit for bit.
 - Not yet: init-capture packs `[...ys = xs]`, requires-clauses, static and consteval lambdas
   (#350).
 
+## Throw expressions (#551)
+
+A throw-expression has type `void`, keeps its operand in the semantic tree, and
+supports rethrow syntax. Scalar and pointer operands are checked after the applicable
+decay conversions. Conditional expressions preserve the other arm's type and value
+category when one arm is a throw-expression. Class exception construction, native
+emission, and evaluation of a reached throw still have explicit diagnostics. Runtime
+exception objects, handlers, and unwinding remain under #89.
+
 ## Statements, ι step 1: `switch`, labels, `goto`, conditions (#337, 2026-11-19)
 
 - **Parser and sema** (src/parse/parser.cppm): `switch`, `case`, `default`, identifier labels and

@@ -6681,10 +6681,48 @@ public:
                 begin, end, info);
   }
 
+  // [expr.throw], [except.throw]: retain the operand, with array and function decay.
+  Ex throw_expression(std::optional<Ex> operand, u32 begin, u32 end) {
+    ExprInfo info{builtin(Builtin::void_), ValueCategory::prvalue, 0};
+    if (!operand) return node(ast::Throw{info, {}}, begin, end, info);
+    Ex fail{NodeId::none, begin, end};
+    Ex value = *operand;
+    if (!value.ok()) return fail;
+    if (dependent(value)) {
+      info.flags |= expr_flag::dependent;
+    } else {
+      if (types().is_class(value.type())) {
+        if (require_complete(value.type(), value.begin)) diag(value.begin, Diag::throw_class_unsupported, value.type());
+        return fail;
+      }
+      value = rvalue(value);
+      if (!value.ok() || !require_complete(value.type(), value.begin)) return fail;
+      if (types().is_pointer(value.type())) {
+        QualType pointee = types().pointee(value.type());
+        if (!types().is_void(pointee) && !require_complete(pointee, value.begin)) return fail;
+      }
+    }
+    return node(ast::Throw{info, at(value, begin)}, begin, end, info);
+  }
+
   // [expr.cond]
   Ex conditional(Ex cond, Ex t, Ex f, u32 q_at) {
     u32 begin = cond.begin, end = f.end;
     if (!cond.ok() || !t.ok() || !f.ok()) return {NodeId::none, begin, end};
+    auto throws = [&](Ex arm) {
+      while (auto p = as<ast::Paren>(arm)) arm = Ex{p->operand.id};
+      return as<ast::Throw>(arm).has_value();
+    };
+    const bool throws_then = throws(t);
+    const bool throws_else = throws(f);
+    // [expr.cond]/2: a throw arm leaves the other arm's type and value category intact.
+    if (throws_then || throws_else) {
+      Ex c = to_bool(cond, cond.begin);
+      if (!c.ok()) return {NodeId::none, begin, end};
+      ExprInfo info = throws_then ? f.info : t.info;
+      if (dependent(c) || dependent(t) || dependent(f)) info.flags |= expr_flag::dependent;
+      return node(ast::Conditional{info, at(c, begin), at(t, begin), at(f, begin)}, begin, end, info);
+    }
     if (dependent(cond) || dependent(t) || dependent(f)) return dependent_node({cond, t, f}, begin, end);
     Ex c = to_bool(cond, cond.begin);
     if (!c.ok()) return {NodeId::none, begin, end};

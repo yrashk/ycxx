@@ -1329,6 +1329,22 @@ class Gen {
     if (is<ast::Call>(a)) return call(a);
     if (member_call_expression(a)) return member_call(a);
     if (is<ast::VariadicBuiltin>(a)) return variadic_builtin(a);
+    if (is<ast::Throw>(a)) {
+      auto expr = get<ast::Throw>(a);
+      if (expr.operand.id == NodeId::none) {
+        ValueId ops[] = {state_};
+        emit(ir::Op::rethrow, {}, ops);
+      } else {
+        At operand = child(a, expr.operand);
+        ValueId value = rvalue(operand);
+        ValueId ops[] = {state_, value};
+        std::uint64_t type[] = {word(ty(info(operand).type))};
+        emit(ir::Op::throw_, {}, ops, type);
+      }
+      live_ = false;
+      ensure_live();
+      return std::nullopt;
+    }
     if (is<ast::BuiltinCall>(a)) {
       auto b = get<ast::BuiltinCall>(a);
       if (b.op == ast::BuiltinOp::trap) {
@@ -1828,6 +1844,11 @@ class Gen {
       if (!has_value) {
         discard(x);
         br(join);
+      } else if (cls(info(x).type) == TypeClass::void_) {
+        // This arm is a throw-expression and never supplies a value to the join.
+        discard(x);
+        emit(ir::Op::unreachable, {}, {});
+        live_ = false;
       } else {
         ValueId v = glvalue ? address(x) : rvalue(x);
         br(join, {v});
