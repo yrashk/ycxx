@@ -6847,23 +6847,9 @@ public:
     const bool enum_only = binary && std::ranges::none_of(operands, [&](const Ex& operand) {
       return types().is_class(types().referee(operand.type()));
     });
-    auto matches_enum_operand = [&](const ast::DeclSema& d) {
-      auto unqualified_type = [&](QualType t) {
-        return Types::unqualified(types().canonical(types().referee(t)));
-      };
-      const auto function = types().rec(d.type);
-      for (std::size_t i = 0; i < std::min(operands.size(), function.params.size()); ++i) {
-        const QualType operand = unqualified_type(operands[i].type());
-        if (types().is_enum(operand) && operand == unqualified_type(function.params[i])) return true;
-      }
-      return false;
-    };
     std::vector<ast::DeclSema> set;
     auto add = [&](const ast::DeclSema& d) {
-      // [over.match.oper]: with no class operand, an ordinary nonmember must
-      // have an enum or enum-reference parameter matching an operand at that position.
       if (d.kind == ast::DeclKind::function && d.entity != EntityId::none &&
-          (!enum_only || (d.flags & decl_flag::template_) || matches_enum_operand(d)) &&
           !std::ranges::any_of(set, [&](const ast::DeclSema& x) { return x.entity == d.entity; }))
         set.push_back(d);
     };
@@ -6889,7 +6875,7 @@ public:
     ExprInfo info{builtin(Builtin::overload_set), ValueCategory::lvalue, 0};
     Ex callee = node(ast::DeclRef{info, set.front().entity}, begin, begin, info);
     overloads_[std::to_underlying(callee.id)] = std::move(set);
-    Ex r = call(callee, std::move(operands), end, op_at);
+    Ex r = call(callee, std::move(operands), end, op_at, std::nullopt, enum_only);
     if (ref_qualified_member) {
       // Joint ranking is needed when the ref-qualified member competes with
       // at least one viable nonmember candidate.
@@ -7431,7 +7417,8 @@ public:
   // [expr.call]: a call to a named function or through a pointer to function. Each argument
   // copy-initializes its parameter; arguments matching a C-style ellipsis get the default
   // argument promotions.
-  Ex call(Ex callee, std::vector<Ex> args, u32 end, u32 paren_at, std::optional<u32> lookup_at = std::nullopt) {
+  Ex call(Ex callee, std::vector<Ex> args, u32 end, u32 paren_at, std::optional<u32> lookup_at = std::nullopt,
+          bool enum_operator = false) {
     u32 begin = callee.begin;
     std::vector<NodeId> defaults;  // the chosen function's default arguments
     if (!callee.ok() || std::ranges::any_of(args, [](const Ex& a) { return !a.ok(); })) return {NodeId::none, begin, end};
@@ -7486,13 +7473,27 @@ public:
       std::vector<ArgShape> shapes;
       if (lists.empty())
         for (const Ex& a : args) shapes.push_back(argument_shape(a));
+      // [over.match.oper]: for a binary operator with no class operand, a nonmember
+      // candidate needs an enum or enum-reference parameter matching its operand.
+      auto eligible_operator_type = [&](QualType type) {
+        if (!enum_operator) return true;
+        auto unqualified_type = [&](QualType t) {
+          return Types::unqualified(types().canonical(types().referee(t)));
+        };
+        const auto function = types().rec(type);
+        for (std::size_t i = 0; i < std::min(args.size(), function.params.size()); ++i) {
+          const QualType operand = unqualified_type(args[i].type());
+          if (types().is_enum(operand) && operand == unqualified_type(function.params[i])) return true;
+        }
+        return false;
+      };
       std::vector<Candidate> cands;
       std::vector<const ast::DeclSema*> decls;
       for (const ast::DeclSema& d : set) {
         bool deleted = (d.flags & decl_flag::deleted) != 0;
         if (!(d.flags & decl_flag::template_)) {
           // Explicit template arguments name only templates ([temp.arg.explicit]).
-          if (ex != explicit_args_.end()) continue;
+          if (ex != explicit_args_.end() || !eligible_operator_type(d.type)) continue;
           cands.push_back({d.entity, d.type, true, deleted, nullptr, found_defaults(d)});
           decls.push_back(&d);
           continue;
@@ -7518,7 +7519,7 @@ public:
           if (sat && !*sat) continue;
         }
         auto st = t.specialization_type(d, *targs);
-        if (!st) continue;
+        if (!st || !eligible_operator_type(*st)) continue;
         cands.push_back({specialization(d, *targs, *st), *st, true, deleted, &d, found_defaults(d)});
         decls.push_back(&d);
       }
