@@ -819,7 +819,7 @@ public:
         for (const Suffix& suffix : level->suffixes) {
           if (&suffix == fn && !abstract && !typedef_ && function_type) continue;
           for (const Param& param : suffix.params)
-            if (param.default_tokens) {
+            if (param.default_tokens || (reject_parameter_defaults && param.default_arg != NodeId::none)) {
               s_->diag(param.at, Diag::default_arg_not_allowed);
               d.ok = false;
             }
