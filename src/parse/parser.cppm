@@ -4457,26 +4457,38 @@ public:
   bool condition_declaration_ahead() {
     if (!starts_declaration(true)) return false;
     const bool grouped_auto = is(Tk::kw_auto) && kind(1) == Tk::l_paren;
+    bool parameter_clause = false;
     if (grouped_auto) {
       const u32 after = past_parentheses(1);
       // A parenthesized initializer can follow a declaration statement. In a
       // condition it is a call unless it can be part of the declarator.
-      if (kind(after) == Tk::l_paren && !params_ahead(after, /*statement=*/true)) return false;
+      if (kind(after) == Tk::l_paren) {
+        if (!params_ahead(after)) return false;
+        parameter_clause = true;
+      }
     }
     int depth = 0;
+    bool trailing_return = false;
     for (u32 j = 0;; ++j) {
       switch (kind(j)) {
       case Tk::eof: case Tk::semi: return false;
       case Tk::equal: if (depth == 0) return true; break;
       case Tk::l_brace: if (depth == 0) return true; ++depth; break;
+      case Tk::arrow:
+        if (grouped_auto && depth == 0) {
+          if (!parameter_clause) return false;
+          trailing_return = true;
+        }
+        break;
       case Tk::l_paren: case Tk::l_square: ++depth; break;
       case Tk::r_paren: case Tk::r_square: case Tk::r_brace:
         // `T x)`: a declaration missing its initializer, which `condition_operand` reports.
         if (depth-- == 0) return j >= 2 && kind(j - 1) == Tk::identifier && kind(j - 2) != Tk::l_paren;
         break;
       default:
-        if (grouped_auto && depth == 0 && (binary_operator(kind(j)) || assignment_operator(kind(j)) ||
-            kind(j) == Tk::question || kind(j) == Tk::comma || kind(j) == Tk::period || kind(j) == Tk::arrow ||
+        if (grouped_auto && depth == 0 && !trailing_return &&
+            (binary_operator(kind(j)) || assignment_operator(kind(j)) ||
+            kind(j) == Tk::question || kind(j) == Tk::comma || kind(j) == Tk::period ||
             kind(j) == Tk::plusplus || kind(j) == Tk::minusminus))
           return false;
         break;

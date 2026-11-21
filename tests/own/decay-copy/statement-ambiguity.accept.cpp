@@ -22,3 +22,10 @@ int subscripts(int* pointer) {
     if (auto(value) = *pointer) return value;
     return 0;
 }
+
+int no_parameters();
+int function_pointer_conditions() {
+    if (auto (*pointer)() -> int = &no_parameters) return pointer();
+    if (auto (*pointer)(int (parameter)) = &source) return pointer(5);
+    return 0;
+}
