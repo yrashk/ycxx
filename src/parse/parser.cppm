@@ -5494,9 +5494,7 @@ public:
         } else if (s_->types().is_class(d.type)) {
           const bool single = args.size() == 1;
           const bool allow_base_copy = !spec.is_constexpr && !s_->immediate_context;
-          // Keep the existing class expression path, which also adjusts derived-to-base copies.
           const bool aggregate_fallback = !spec.is_static &&
-              (!single || (args[0].ok() && !s_->types().is_class(args[0].type()))) &&
               s_->can_parenthesize_aggregate(d.type, args, allow_base_copy);
           if (aggregate_fallback || s_->has_user_ctors(d.type) || !single) {
             const auto form = aggregate_fallback ? sema::Construction::direct_paren_aggregate

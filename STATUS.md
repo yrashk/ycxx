@@ -1036,7 +1036,7 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   Constant initialization uses the scalar element evaluator, with destination-dependent
   constant evaluation tracked in [#25](https://github.com/yrashk/ycxx/issues/25).
 - An automatic runtime declaration can also initialize an aggregate with one public nonvirtual
-  direct base and at least one public arithmetic field. Every element has an explicit initializer.
+  direct base and at least one public arithmetic field. The base has an explicit initializer.
   The first expression is a nonvolatile lvalue of the exact base type, which is a flat aggregate
   with nonvolatile arithmetic fields and trivial copy and destruction. The base copy uses the
   existing subobject layout and is sequenced before the remaining initializers.
@@ -1044,11 +1044,14 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   base field has a separately written positional initializer and the base has a usable trivial
   move constructor. The complete temporary is initialized once before its value is copied into
   the base subobject.
+  Omitted trailing arithmetic fields are value-initialized when they have no written default
+  member initializer. With a sole base expression, the base must have no conversion functions.
 - Parenthesized arrays, nested fields, unions, reference members, bit-fields, and nontrivial
   destruction remain in [#301](https://github.com/yrashk/ycxx/issues/301). The issue also tracks
-  multiple bases, other base prvalues, omitted initializers for derived aggregates, constant
-  evaluation of base copies, static storage and functional casts. Linux x86-64 runtime conversions
-  between floating-point and integer types remain in [#201](https://github.com/yrashk/ycxx/issues/201).
+  multiple bases, other base prvalues, omitted default member initializers in derived aggregates,
+  constant evaluation of base copies, static storage and functional casts. Linux x86-64 runtime
+  conversions between floating-point and integer types remain in
+  [#201](https://github.com/yrashk/ycxx/issues/201).
   Spec-only fixtures are in `tests/own/parenthesized-aggregate/`.
 
 - Ordinary mutable data members can be modified through a const object. A member access

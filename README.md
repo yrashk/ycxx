@@ -198,7 +198,8 @@ Automatic declarations such as `Point p(3, 4);` can initialize flat aggregates w
 arithmetic fields. Supplied expressions initialize the fields in declaration order. Omitted
 fields use their default member initializer when available and otherwise get zero. A runtime
 declaration can also initialize one flat public direct base from an exact-type lvalue or an
-unqualified braced prvalue such as `B{7}`, with an explicit initializer for each derived field.
+unqualified braced prvalue such as `B{7}`. Omitted trailing arithmetic fields of that aggregate
+are value-initialized when they have no written default member initializer.
 [#301](https://github.com/yrashk/ycxx/issues/301)
 
 **Language on macOS.** Programs can use:
