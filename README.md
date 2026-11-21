@@ -272,9 +272,10 @@ unqualified braced prvalue such as `B{7}`, with an explicit initializer for each
 - parenthesized direct initialization from functional conversions such as `S b(S(1));`;
 - `[[…]]` attributes, the GNU attributes and `asm` labels the macOS SDK's headers use, the
   GNU pointer qualifiers glibc uses, and the type-trait built-ins libycxx's headers use
-  (`__is_same`, `__remove_cv`, …). `__is_destructible` handles references, non-enum scalars,
-  and bounded arrays of those scalars. It gives false for cv `void`, function types, and
-  arrays of unknown bound. [docs/EXTENSIONS.md](docs/EXTENSIONS.md)
+  (`__is_same`, `__remove_cv`, …). `__is_destructible`, `__is_nothrow_destructible`, and
+  `__is_trivially_destructible` give true for references, non-enum scalars, and bounded arrays
+  of those scalars. They give false for cv `void`, function types, and arrays of unknown bound.
+  [docs/EXTENSIONS.md](docs/EXTENSIONS.md)
 - templates: function, class and variable templates, deduction, partial ordering, explicit and
   partial specializations with substitution checks for dependent type arguments, static constexpr
   members of class templates, member function and
