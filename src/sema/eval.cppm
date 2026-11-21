@@ -118,6 +118,14 @@ private:
     } else if (e.glvalue()) e = s_->rvalue(e);
     if (!e.ok()) return {};
     ast::Interners& in = s_->ins();
+    if (s_->types().is_member_pointer(e.type())) {
+      // Read a direct member pointer constant from the expression. Its value retains the field
+      // identity or typed null for later constant evaluation.
+      while (auto p = s_->as<ast::Paren>(e)) e.id = p->operand.id;
+      if (auto lit = s_->as<ast::Literal>(e); lit && in.values.is<ast::VMemberPtr>(lit->value))
+        return {lit->value, 0, true};
+      return {};
+    }
     ast::Child root = s_->builder().commit(ast::Child{e.id, 0});
     if (reference_initializer && irgen::materializes_temporary(in.ast, root.id))
       return {std::nullopt, reason_arg({interp::Reason::local_address, 0, {}})};
@@ -205,6 +213,8 @@ private:
       return values.aggregate(t, elements);
     }
     if (types.is_pointer(t)) return values.null_pointer(t);
+    if (types.is_member_pointer(t) && !types.is_function(types.rec(t).inner))
+      return s_->ins().intern_value(ast::VMemberPtr{Types::unqualified(types.canonical(t))});
     if (types.is_enum(t)) return values.integer(s_->underlying_of(t), 0);
     if (types.is_integral(t)) return values.integer(Types::unqualified(t), 0);
     if (types.is_standard_floating(t) && ast::computes(ast::float_format(s_->ins(), s_->world().target, t)))
