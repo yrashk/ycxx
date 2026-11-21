@@ -3,11 +3,11 @@ struct Incomplete;
 template<class Target, class... Args>
 constexpr bool constructs = __is_constructible(Target, Args...); //! error
 
-template<class Target, class... Args>
-  requires (constructs<Target, Args...>)
-int choose();
+template<class Argument>
+int choose(Argument*);
 
-template<class Target, class... Args>
-int choose();
+template<class Argument>
+  requires (constructs<void, Argument>)
+int choose(Argument*);
 
-int demand() { return choose<void, Incomplete>(); }
+int demand(Incomplete* pointer) { return choose(pointer); }
