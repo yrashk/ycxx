@@ -95,7 +95,8 @@ public:
   // The written in-class declaration of a member from this unit's class record.
   virtual std::optional<ast::DeclSema> written_member(EntityId) { return std::nullopt; }
   // A use of a global allocation function that may lack a written declaration in the unit.
-  virtual void use_allocation_function(EntityId) {}
+  // An aligned signature also brings its parameter's enum shape into the unit.
+  virtual void use_allocation_function(EntityId, bool = false) {}
   // Check the selected implicitly declared copy assignment against its subobjects.
   virtual CopyAssignment require_copy_assignment(EntityId) { return CopyAssignment::unsupported; }
   // What a constant evaluation fetches (§B7): `function_ir` of a function defined before the
@@ -131,7 +132,8 @@ public:
   // alias) unqualified lookup finds for `name`, and qualified lookup of `name` in namespace `ns`
   // ([namespace.qual]).
   virtual std::optional<EntityId> namespace_named(NameId name, std::span<const EntityId> directives = {}) = 0;
-  virtual std::vector<ast::DeclSema> namespace_members(EntityId ns, NameId name) = 0;
+  virtual std::vector<ast::DeclSema> namespace_members(EntityId ns, NameId name, bool type_only = false,
+                                                      bool direct_only = false) = 0;
   // [basic.lookup.argdep]: functions in one associated namespace's inline namespace set, and
   // a class's record if complete there. Ask at the lexical point, and for a dependent call
   // also at the point of instantiation ([temp.dep.candidate]).
@@ -454,9 +456,13 @@ public:
           if (hit.found) return hit.type;
         }
         if (auto r = nested_member(current_class, name, true)) return r->first.type;
-      } else if (auto m = q_->earlier_member(name); m && (m->kind == ast::DeclKind::enum_ || m->kind == ast::DeclKind::type_alias)) {
-        return m->type;
       } else {
+        if (auto m = q_->earlier_member(name)) {
+          if (m->kind == ast::DeclKind::enum_ || m->kind == ast::DeclKind::type_alias) return m->type;
+          if (!elaborated && (m->kind == ast::DeclKind::data_member || m->kind == ast::DeclKind::variable ||
+                              (m->kind == ast::DeclKind::function && c.name != name)))
+            return std::nullopt;
+        }
         // In the class being defined, a type of its (complete) bases.
         for (EntityId b : q_->defining_bases(current_class))
           if (auto r = nested_member(b, name)) return r->first.type;
@@ -470,7 +476,12 @@ public:
         ast::DeclSema s = q_->decl_sema(d);
         if (s.entity == EntityId::none || is_special(s)) continue;
         if (is_type(s.kind) || !elaborated) found = s;
+        if (!elaborated && !is_type(s.kind)) break;
       }
+    if (member_introduction && member_introduction->name == name &&
+        (!found || elaborated || w_->entities.rec(found->entity).scope !=
+                                    w_->entities.rec(member_introduction->sema.entity).scope))
+      found = member_introduction->sema;
     if (!found && !elaborated && aliases) return builtin_type_name(name);
     if (!found || !is_type(found->kind)) return std::nullopt;
     if (found->kind == ast::DeclKind::type_alias && !aliases) return std::nullopt;
@@ -840,6 +851,8 @@ public:
   // Whether a class type is a union, without requiring its definition.
   std::optional<bool> is_union_type(QualType t) {
     if (!types().is_class(t)) return false;
+    if (member_introduction && member_introduction->sema.entity == types().class_of(t))
+      return member_introduction->is_union;
     return Templates(*w_, classes()).is_union_class(types().class_of(t));
   }
   // `__trait(T)` that transforms a type ([meta.trans]): the type it gives.
@@ -1023,6 +1036,14 @@ public:
     return std::nullopt;
   }
 
+  std::optional<QualType> direct_member_introduction(EntityId ns, NameId n) {
+    if (member_introduction && member_introduction->name == n &&
+        w_->entities.rec(member_introduction->sema.entity).scope == ns &&
+        q_->namespace_members(ns, n, /*type_only=*/false, /*direct_only=*/true).empty())
+      return member_introduction->sema.type;
+    return std::nullopt;
+  }
+
   std::optional<Scope> scope_member(const Scope& s, NameId n) {
     // A member of the class whose member-specification this is (the current instantiation in a
     // template) is found where it is declared ([temp.dep.type]/1); a member of another dependent
@@ -1031,6 +1052,7 @@ public:
       if (auto t = member_type(types().class_of(*s.type), n)) return Scope{std::nullopt, *t};
     if (s.type && types().is_dependent(*s.type)) return Scope{std::nullopt, types().dep_name(*s.type, n)};
     if (s.ns) {
+      if (auto t = direct_member_introduction(*s.ns, n)) return Scope{std::nullopt, t};
       auto members = q_->namespace_members(*s.ns, n);
       for (const ast::DeclSema& d : members) {
         if (d.kind == ast::DeclKind::namespace_) return Scope{d.entity, std::nullopt};
@@ -1044,10 +1066,12 @@ public:
   // Whether `S::n` names a function or variable, which hides a type of that name in its scope
   // ([basic.scope.hiding]/2): `::stat(path, &buf)` calls the function.
   bool scope_names_object(const Scope& s, NameId n) {
-    if (s.ns)
+    if (s.ns) {
+      if (direct_member_introduction(*s.ns, n)) return false;
       return std::ranges::any_of(q_->namespace_members(*s.ns, n), [](const ast::DeclSema& d) {
         return d.kind == ast::DeclKind::function || d.kind == ast::DeclKind::variable;
       });
+    }
     if (s.type && types().is_class(*s.type))
       if (const ClassRec* c = class_rec(types().class_of(*s.type)))
         return std::ranges::any_of(c->members, [&](const MemberDeclRec& m) { return m.name == n; });
@@ -1102,6 +1126,24 @@ public:
     }
     const ClassRec incomplete;
     return class_body_type(naming, cls ? *cls : incomplete, name, at, /*qualified=*/true, type_only);
+  }
+
+  // Qualified namespace lookup for an elaborated class name skips non-types and aliases.
+  std::optional<QualType> namespace_elaborated_class(EntityId ns, NameId name, std::optional<u32> at) {
+    if (member_introduction && member_introduction->name == name &&
+        w_->entities.rec(member_introduction->sema.entity).scope == ns)
+      return member_introduction->sema.type;
+    std::optional<ast::DeclSema> result;
+    for (const ast::DeclSema& d : q_->namespace_members(ns, name, /*type_only=*/true)) {
+      if (result && result->entity != d.entity) {
+        if (at) diag(*at, Diag::ambiguous_name, name);
+        return std::nullopt;
+      }
+      result = d;
+    }
+    if (!result || result->kind != ast::DeclKind::class_ || (result->flags & decl_flag::template_))
+      return std::nullopt;
+    return result->type;
   }
 
   // `S::n` naming a type.
@@ -3295,6 +3337,12 @@ public:
     ConstId enum_initializer = ConstId::none;
   };
   std::vector<OwnDecl> own;
+  struct MemberIntroduction {
+    NameId name;
+    ast::DeclSema sema;
+    bool is_union;
+  };
+  std::optional<MemberIntroduction> member_introduction;
   std::optional<EntityId> defining_unnamed_enum_scope;
 
   // ------------------------------------------------------------ member functions ([class.mfct])
@@ -5869,9 +5917,10 @@ public:
   Ex allocation_name_expr(AllocationFunction f, u32 begin, u32 end) {
     const NameId name = ins().names.intern(allocation_name(f));
     std::vector<ast::DeclSema> found;
-    for (const ast::DeclSema& d : w_->allocation_functions()) {
-      if (w_->entities.rec(d.entity).name != name) continue;
-      q_->use_allocation_function(d.entity);
+    for (AllocationFunction candidate : World::allocation_functions) {
+      if (allocates(candidate) != allocates(f)) continue;
+      const auto d = w_->allocation_function(candidate);
+      q_->use_allocation_function(d.entity, allocation_has_alignment(candidate));
       found.push_back(d);
     }
     auto written = q_->namespace_members(EntityId::none, name);

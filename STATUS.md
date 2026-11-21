@@ -640,8 +640,8 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   freestanding linker retains these records in the read-only segment. The hosted linker
   supplies unwind discovery for the peer who throws and catches the exception.
   `unit.linux_cleanup_free_unwind` checks mixed hosted execution, omitted frames, and native
-  source, staged, and daemon link parity. Standalone unwind discovery and ycxx generation of
-  native throws, handlers, and exceptional cleanups remain tracked separately.
+  source, staged, and daemon link parity. Standalone unwind discovery, native handlers, and
+  exceptional cleanups remain under #89.
   [#572](https://github.com/yrashk/ycxx/issues/572) · [#89](https://github.com/yrashk/ycxx/issues/89)
   · [#558](https://github.com/yrashk/ycxx/issues/558)
 - Explicit native static links keep the first input ELF COMDAT group for each signature. The reader
@@ -2397,9 +2397,17 @@ values, end to end; results match Clang's bit for bit.
 A throw-expression has type `void`, keeps its operand in the semantic tree, and
 supports rethrow syntax. Scalar and pointer operands are checked after the applicable
 decay conversions. Conditional expressions preserve the other arm's type and value
-category when one arm is a throw-expression. Class exception construction, native
-emission, and evaluation of a reached throw still have explicit diagnostics. Native
-exception objects, handlers, and exceptional cleanups remain under #89.
+category when one arm is a throw-expression. Class exception construction, constant
+evaluation of a reached throw, and native rethrow have explicit diagnostics.
+
+On Linux x86-64, a certified cleanup-free ordinary function can throw an `int` to a
+hosted peer's handler. The operand is evaluated once before allocation. The generated
+object references the peer's Itanium exception allocator, throw entry point, and
+`int` type information. Other exception types, native handlers, exceptional cleanup,
+and runtime integration with ycxx's own linker remain under [#89]. See the
+[design](docs/design/linux-int-throw.md) and [#578](https://github.com/yrashk/ycxx/issues/578).
+
+[#89]: https://github.com/yrashk/ycxx/issues/89
 
 ## Statements, ι step 1: `switch`, labels, `goto`, conditions (#337, 2026-11-19)
 
@@ -2623,12 +2631,20 @@ exception objects, handlers, and exceptional cleanups remain under #89.
   objects. The result of `new` is a prvalue pointer to the allocated type, with its cv-qualifiers.
   Omitted initialization leaves the bytes alone, empty parentheses or braces give zero or null,
   and explicit initializers use the scalar conversion and list-narrowing rules.
-- The ordinary global declarations of `operator new` and both `operator delete` overloads use the
+- The unaligned global declarations of `operator new` and both `operator delete` overloads use the
   target's `sizeof` result type. Written declarations and definitions of those signatures share
   the same entities as implicit declarations. Allocation passes `sizeof(T)`, and single-object
   delete evaluates its operand once and passes its address and `sizeof(T)` to the sized global
   deallocator when non-null. The scoped spellings use the same functions. Global lookup and
   sized dispatch follow Astra's independent draft and Itanium ABI review on #293.
+- The implicit global aligned scalar signatures are `operator new(size_t, std::align_val_t)`,
+  `operator delete(void*, std::align_val_t) noexcept`, and
+  `operator delete(void*, size_t, std::align_val_t) noexcept` ([basic.stc.dynamic]). Written
+  redeclarations use the same scoped enum with the target's size type as its underlying type.
+  Source lookup of the enum spelling requires a declaration. The aligned fixtures exercise typed
+  allocation address selection, direct deallocation calls, and a Linux peer providing all three
+  symbols. Over-aligned storage and expression dispatch are tracked in
+  [#293](https://github.com/yrashk/ycxx/issues/293) and [#303](https://github.com/yrashk/ycxx/issues/303).
 - Native lowering supports initializers proven nonthrowing from the analyzed expression tree.
   Initializers that need an exception cleanup edge and constant evaluation of allocation remain
   in #293. Namespace-scope allocation uses the existing dynamic initialization path. The issue
