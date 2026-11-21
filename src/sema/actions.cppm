@@ -915,7 +915,8 @@ public:
     return fail(Diag::trivial_copyability_unsupported, operand);
   }
 
-  Ex destructibility_expr(QualType operand, u32 begin, u32 end) {
+  // In this domain every destructible type has trivial, nonthrowing destruction ([meta.unary.prop]).
+  Ex destructibility_expr(ast::DepOp op, NameId name, QualType operand, u32 begin, u32 end) {
     const Types& ts = types();
     QualType element = ts.canonical(operand);
     const engine::Loc loc = type_trait_loc(begin);
@@ -925,11 +926,11 @@ public:
     };
     if (ts.is_dependent(element)) {
       if (q_->in_type_trait_pattern())
-        if (auto value = templates().unary_trait_value(ast::DepOp::is_destructible, element)) {
+        if (auto value = templates().unary_trait_value(op, element)) {
           q_->record_dependent_type_trait_operand(loc);
           return literal(builtin(Builtin::bool_), *value, ValueCategory::prvalue, begin, end);
         }
-      return fail(Diag::destructibility_dependent);
+      return fail(Diag::destructibility_dependent, name);
     }
     // References are destructible even when the referent is incomplete. An unknown-bound
     // array gives false; only a bounded array queries its ultimate element ([meta.unary.prop]).
@@ -946,10 +947,10 @@ public:
       const auto demand = q_->type_trait_at_demand(cls, loc);
       if (!(demand ? *demand : q_->is_complete_at_source(cls))) {
         if (q_->type_trait_instantiation_failed(cls)) return {NodeId::none, begin, end};
-        return fail(Diag::destructibility_incomplete, element);
+        return fail(Diag::destructibility_incomplete, element, name);
       }
     }
-    return fail(Diag::destructibility_unsupported, operand);
+    return fail(Diag::destructibility_unsupported, name, operand);
   }
 
   // [meta.unary.prop]: each base must also be empty. A nonempty contributor
@@ -1296,7 +1297,6 @@ public:
   Ex trait_expr(lex::TypeTrait t, NameId name, std::span<const QualType> args, u32 begin, u32 end) {
     using enum lex::TypeTrait;
     if (t == is_trivially_copyable) return trivial_copyability_expr(args[0], begin, end);
-    if (t == is_destructible) return destructibility_expr(args[0], begin, end);
     if (t == is_empty) return empty_expr(args[0], begin, end);
     QualType b = builtin(Builtin::bool_);
     auto structural_trait = [&](std::optional<ConstId> v) {
@@ -1307,6 +1307,11 @@ public:
     std::optional<ast::DepOp> unary_op;
     switch (t) {
     case is_same: return structural_trait(templates().is_same_value(args[0], args[1]));
+    case is_destructible: return destructibility_expr(ast::DepOp::is_destructible, name, args[0], begin, end);
+    case is_nothrow_destructible:
+      return destructibility_expr(ast::DepOp::is_nothrow_destructible, name, args[0], begin, end);
+    case is_trivially_destructible:
+      return destructibility_expr(ast::DepOp::is_trivially_destructible, name, args[0], begin, end);
     case is_base_of: return base_of_expr(args[0], args[1], begin, end);
     case is_assignable: return assignability_expr(ast::DepOp::is_assignable, name, args[0], args[1], begin, end);
     case is_nothrow_assignable:

@@ -378,6 +378,8 @@ public:
     // The token-owning replay checks completeness and diagnoses a concrete operand.
     case ast::DepOp::is_trivially_copyable:
     case ast::DepOp::is_destructible:
+    case ast::DepOp::is_nothrow_destructible:
+    case ast::DepOp::is_trivially_destructible:
     case ast::DepOp::is_empty: return std::nullopt;
     case ast::DepOp::is_same:
     case ast::DepOp::is_constructible:
@@ -529,6 +531,8 @@ public:
       case ast::DepOp::is_member_function_pointer:
       case ast::DepOp::is_trivially_copyable:
       case ast::DepOp::is_destructible:
+      case ast::DepOp::is_nothrow_destructible:
+      case ast::DepOp::is_trivially_destructible:
       case ast::DepOp::is_empty:
       case ast::DepOp::is_object: {
         auto operand = substitute_arg(ins().seqs.at(op.operands, 0), b);
