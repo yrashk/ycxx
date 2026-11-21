@@ -1083,7 +1083,7 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   representation while the class has a user-declared constructor ([dcl.fct.def.default],
   [class.default.ctor], [dcl.init.general], #157).
 - A first-declaration in-class `C(C&) = default` or `C(const C&) = default` is a declared copy
-  constructor, including with `constexpr` or bare `noexcept`. It participates in overload
+  constructor, including with `constexpr` or a concrete `noexcept` specification. It participates in overload
   selection, access checking and deletion. For ordinary namespace-scope records without
   bases, copies proven trivial use the existing representation copy and the usual by-value
   ABI. This includes supported scalar fields, lvalue references, arrays, and class members
@@ -1375,8 +1375,11 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   the non-members unqualified lookup and argument-dependent lookup find; else the built-in
   operator. `a = b` calls a user-declared member `operator=`. Ranking against the built-in
   candidates, postfix `++`/`--`, `()`, `[]`, `->` and conversion functions are #219.
-- `noexcept` and `noexcept(e)` on function declarators are accepted, not yet part of the type
-  (#219); `N::T(…)` and `N::T{…}` are functional casts.
+- Ordinary constructors support concrete `noexcept` and `noexcept(e)` specifications.
+  Out-of-class definitions check the effective specification of the corresponding declaration.
+  Omission agrees with `noexcept(false)` on ordinary potentially throwing constructors, and
+  bare `noexcept` agrees with `noexcept(true)` (#219).
+- `N::T(…)` and `N::T{…}` are functional casts.
 - `T (*p)(args);` with T a typedef-name declares p ([stmt.ambig]), in sema and in the splitter.
 - **`#include <stdio.h>`** (the SDK's) compiles, and `printf`, `puts`, `fputs` and `stdout` run
   (`tests/own/headers/stdio.run.cpp`). `<cstdio>` still waits for static members of class
