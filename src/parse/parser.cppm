@@ -5256,7 +5256,7 @@ public:
       if (v.value) value = *v.value;
       else if (spec.is_constinit && !v.dependent) s_->diag(init.begin, Diag::not_constant, v.reason);
     }
-    if (spec.is_constinit && value != ConstId::none)
+    if (spec.is_constinit && value != ast::ConstId::none)
       if (auto entity = s_->immediate_result_entity(value))
         s_->diag(init.begin, Diag::immediate_address, s_->world().entities.rec(*entity).name);
     s_->permit_constant_initializer(dbegin, s_->local(local).type, value);
