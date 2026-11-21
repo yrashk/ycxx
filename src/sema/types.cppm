@@ -661,6 +661,7 @@ struct MemberDeclRec {
   CopyAssignment copy_assignment = CopyAssignment::none;
   bool explicit_defaulted_assignment = false;
   bool is_virtual = false;
+  bool is_explicit = false;
 };
 
 struct NestedType {
